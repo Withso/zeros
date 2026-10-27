@@ -3,7 +3,7 @@ import { useOrganizationProjects } from "../state/use-organization-projects";
 // COMPONENT: AppSidebar
 // PURPOSE: The app's single left navigation — window chrome, organization,
 //          Home destinations, Create, and every workspace, grouped by
-//          repository (default) or as one mixed list.
+//          repository (default), lifecycle status or as one mixed list.
 // USED IN: MainShellBody (app-shell.tsx) on every page. Settings takes the
 //          sidebar's place with its own section nav, so the sidebar stays
 //          mounted but hidden and inert there.
@@ -14,8 +14,8 @@ import { useOrganizationProjects } from "../state/use-organization-projects";
 //   │ ▭ Local ⌄                     │  organization switcher
 //   │ Home · Customize · Create     │  destinations (Create is an action)
 //   │ ───────────────────────────── │
-//   │ Workspaces                [⋯] │  Grouped / Ungrouped
-//   │ [W] Zeros          [⚙][⋯] [+] │  repository header (Grouped)
+//   │ Workspaces                [⋯] │  Group / Filter / Sort by
+//   │ [W] Zeros          [⚙][⋯] [+] │  Repository grouping
 //   │     ⎇ atlanta          +12 ✎  │  workspace rows
 //   │ ───────────────────────────── │
 //   │ (A) you@example.com       [⚙] │  profile + Settings
@@ -31,12 +31,11 @@ import React, {
   useLayoutEffect,
   useMemo,
   useRef,
-  useState,
 } from "react";
 import {
   Blocks,
-  Check,
-  Ellipsis,
+  ChevronDown,
+  ChevronRight,
   Folder,
   House,
   Plus,
@@ -48,15 +47,18 @@ import { trackWorkspaceOpened } from "../platform/observability/analytics/agent-
 import { useNativeRuntime } from "../platform/runtime";
 import { useAuth } from "../features/auth";
 import { useAgentSessions } from "../features/agent/sessions-hooks";
+import { ComposerDraftIndicator } from "../features/agent/composer-draft-indicator";
 import {
   prefetchSettingsForRepo,
   usePrefetchSettings,
 } from "../features/settings/use-settings";
 import { filterRowsForOrganization } from "../features/team/organization-capabilities";
 import { OrganizationSwitcher } from "../features/team/organization-switcher";
-import { useActiveOrganization } from "../features/team/team-store";
+import { getActiveOrganizationIdSnapshot, getTeamStoreState, useActiveOrganization } from "../features/team/team-store";
+import { CONTROL_PLANE_URL } from "../features/team/control-plane";
 import { useArchiveWorkspace } from "../state/archive-actions";
 import { draftChatIdsByWorkspace } from "../state/composer-draft-presence";
+import { createComposerDraftOwner, useCreateComposerHasDraft } from "../state/create-composer-drafts";
 import {
   dedupePendingCreates,
   useLiveVisible,
@@ -84,6 +86,11 @@ import {
 import { useFolderWorkspaces } from "../state/use-folder-workspaces";
 import { useActiveWorkspace } from "../state/use-active-workspace";
 import { useOpenWorkspace } from "../state/use-open-workspace";
+import { useOrganizationDestination } from "../state/organization-navigation";
+import {
+  setSidebarRepositoryIds, setSidebarStatusCollapsed, setSidebarWorkspaceSort,
+  sidebarRepositoryFilterOwner, sidebarRepositoryIds, useSidebarListPreferences,
+} from "../state/sidebar-list-preferences";
 import {
   notifyProjectsChanged,
   peekWorkspacesFor,
@@ -99,14 +106,8 @@ import {
 import { cn } from "../shared/ui/cn";
 import { ZerosSpinner } from "../shared/ui/loading";
 import { Button } from "../shared/ui/primitives/button";
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuTrigger,
-} from "../shared/ui/primitives/dropdown-menu";
+import { StatusIcon } from "../shared/ui/primitives/status-icon";
 import { toast } from "../shared/ui/primitives/elements";
-import { Tooltip } from "../shared/ui/primitives/tooltip";
 import { branchDisplayName } from "../shared/lib/branch-name";
 import { useAddProject } from "./add-project-provider";
 import { prepareChatView } from "./conversation/chat-intent";
@@ -127,19 +128,20 @@ import {
 import { SidebarHistoryButtons } from "./sidebar-history-buttons";
 import type { SidebarHistoryScope } from "./sidebar-navigation-history";
 import {
-  SIDEBAR_ROW_ACTION_CLS,
   SidebarRepositoryHeader,
 } from "./sidebar-repository-header";
 import {
   buildSidebarWorkspaceEntries,
-  SIDEBAR_WORKSPACE_LIST_FILTERS,
   sidebarItemSelectionKey,
   sidebarScrollTopToReveal,
   sidebarWorkspaceItems,
   sidebarWorkspaceListFilter,
   visibleRepositoryItems,
   type SidebarWorkspaceItem,
+  type SidebarWorkspaceListFilter,
 } from "./sidebar-workspace-model";
+import { SidebarWorkspaceMenu } from "./sidebar-workspace-menu";
+import { useSidebarWorkspaceActivity } from "./sidebar-workspace-activity";
 import {
   PendingSidebarWorkspaceRow,
   SidebarWorkspaceRow,
@@ -162,7 +164,7 @@ import { Surface } from "@/renderer/shared/ui/layout/surface";
 // One shared destination-row shape, mirroring the Settings rail's entry
 // (settings-page.tsx SIDEBAR_ENTRY_CLS) so both navigations read as the same
 // control: fg2 at rest, fg1 on the lifted --sidebar-bg-hover when selected.
-// Every sidebar row — destinations, repositories and workspaces — is 30px.
+// Destinations are 30px; repository, folder and workspace rows are 32px.
 // Selection is colour-only; rows never shift width. Icons are 14px via the
 // primitive's own `[&_svg]:` selector so twMerge drops its default size.
 const SIDEBAR_ENTRY_CLS =
@@ -260,6 +262,7 @@ export function AppSidebar({ hidden = false }: { hidden?: boolean }) {
   const activeRepoId = useActiveRepoId();
   const createWorkspaceProjectId = useCreateWorkspaceProjectId();
   const activeOrganization = useActiveOrganization();
+  const restoreOrganizationDestination = useOrganizationDestination(activeOrganization);
   const activeFolder = useWorkspaceStore(selectActiveFolder);
   // True while the active folder is a freshly-announced worktree whose create
   // is still landing — the list-validation effect below must not bounce it.
@@ -274,7 +277,17 @@ export function AppSidebar({ hidden = false }: { hidden?: boolean }) {
   const { openDispatcher, pendingProject, openingRoot } = useAddProject();
   const openWorkspace = useOpenWorkspace();
   const archiveWorkspace = useArchiveWorkspace();
-  const { session, email } = useAuth();
+  const { session, email, userId } = useAuth();
+  const filterOwner = sidebarRepositoryFilterOwner(userId ?? getTeamStoreState().me?.user.id, getActiveOrganizationIdSnapshot());
+  const createDraftOwner = createComposerDraftOwner({
+    backend: CONTROL_PLANE_URL,
+    userId: userId ?? getTeamStoreState().me?.user.id,
+    organizationId: getActiveOrganizationIdSnapshot(),
+  });
+  const hasCreateDraft = useCreateComposerHasDraft(createDraftOwner);
+  const showCreateDraft = activePage !== "create" && hasCreateDraft;
+  const preferences = useSidebarListPreferences();
+  const repositoryIds = sidebarRepositoryIds(filterOwner);
 
   usePruneLegacyPhantomProjects();
   useSyncProjectsToEngine();
@@ -293,7 +306,7 @@ export function AppSidebar({ hidden = false }: { hidden?: boolean }) {
 
   // Older builds persisted Active and repository-only presentations. Paint the
   // folded value immediately and persist it once, so the stored filter always
-  // names one of the two presentations this navigation offers.
+  // names one of the presentations this navigation offers.
   const requestedFilter = useWorkspaceListFilter();
   const listFilter = sidebarWorkspaceListFilter(requestedFilter);
   useEffect(() => {
@@ -354,6 +367,7 @@ export function AppSidebar({ hidden = false }: { hidden?: boolean }) {
       ? activeResolution.workspace
       : null;
   const realWorkspaces = useLiveVisible(accessibleWorkspaces);
+  const activeAtByWorkspaceId = useSidebarWorkspaceActivity(filterOwner, realWorkspaces, chats, !hidden);
   useWorkspaceRunActivitySync(realWorkspaces);
 
   // File indexes are the most visible cold-workspace waterfall. Warm a bounded
@@ -383,15 +397,6 @@ export function AppSidebar({ hidden = false }: { hidden?: boolean }) {
     () => dedupePendingCreates(allPendingCreates, accessibleWorkspaces),
     [allPendingCreates, accessibleWorkspaces],
   );
-  // Back/forward reopen only what this sidebar lists right now.
-  const historyScope = useMemo<SidebarHistoryScope>(
-    () => ({
-      projects,
-      workspaces: realWorkspaces,
-      pendingCreates: dedupedPendingCreates,
-    }),
-    [dedupedPendingCreates, projects, realWorkspaces],
-  );
 
   const chatIdsByWorkspace = useMemo(() => {
     const liveChats = chats.filter((chat) => !chat.archived);
@@ -413,13 +418,23 @@ export function AppSidebar({ hidden = false }: { hidden?: boolean }) {
     () =>
       buildSidebarWorkspaceEntries({
         filter: listFilter,
+        sort: preferences.sort,
+        repositoryIds,
+        activity: { activeAtByWorkspaceId },
         projects,
         workspaces: realWorkspaces,
         pending: dedupedPendingCreates,
       }),
-    [dedupedPendingCreates, listFilter, projects, realWorkspaces],
+    [dedupedPendingCreates, listFilter, preferences.sort, repositoryIds, activeAtByWorkspaceId, projects, realWorkspaces],
   );
   const listedItems = useMemo(() => sidebarWorkspaceItems(entries), [entries]);
+  // Repository filtering also bounds Back/Forward destinations; collapse does
+  // not remove a destination from history.
+  const historyScope = useMemo<SidebarHistoryScope>(() => ({
+    projects,
+    workspaces: listedItems.flatMap(item => item.kind === "workspace" ? [item.workspace] : []),
+    pendingCreates: listedItems.flatMap(item => item.kind === "pending" ? [item.pending] : []),
+  }), [listedItems, projects]);
 
   // A cold repository switch is allowed to publish its remembered folder
   // before the workspace list settles. Only a completed exact-key snapshot may
@@ -565,7 +580,7 @@ export function AppSidebar({ hidden = false }: { hidden?: boolean }) {
   }, [activeSelectionKey, hidden, listFilter, listIdentity]);
 
   const handleSelectFilter = useCallback(
-    (filter: "grouped" | "ungrouped") =>
+    (filter: SidebarWorkspaceListFilter) =>
       dispatch({ type: "SET_WORKSPACE_LIST_FILTER", filter }),
     [dispatch],
   );
@@ -623,7 +638,6 @@ export function AppSidebar({ hidden = false }: { hidden?: boolean }) {
     !projects.some((project) => project.id === activeRepoId)
       ? "dashboard"
       : activePage;
-  const [filterMenuOpen, setFilterMenuOpen] = useState(false);
 
   // Persisted, drag-resizable width (module store → survives reloads).
   const railWidth = useHomeSidebarWidth();
@@ -646,6 +660,8 @@ export function AppSidebar({ hidden = false }: { hidden?: boolean }) {
         grouped={grouped}
         active={active}
         surfaceActive={!hidden}
+        previewOwner={filterOwner}
+        activeAt={activeAtByWorkspaceId.get(item.workspace.id)}
         chatIds={
           chatIdsByWorkspace.get(item.workspace.id) ?? EMPTY_WORKSPACE_CHAT_IDS
         }
@@ -729,9 +745,7 @@ export function AppSidebar({ hidden = false }: { hidden?: boolean }) {
 
         <div className="flex shrink-0 flex-col gap-1 px-2">
           <OrganizationSwitcher
-            onOrganizationChanged={() =>
-              dispatch({ type: "SET_ACTIVE_PAGE", page: "dashboard" })
-            }
+            onOrganizationChanged={restoreOrganizationDestination}
             onOpenSettings={() =>
               dispatch({ type: "SET_ACTIVE_PAGE", page: "settings" })
             }
@@ -780,12 +794,16 @@ export function AppSidebar({ hidden = false }: { hidden?: boolean }) {
             <Button
               type="button"
               variant="ghost"
-              className={SIDEBAR_ENTRY_CLS}
+              className={cn(SIDEBAR_ENTRY_CLS, "[&_[data-draft-icon]]:size-3")}
               aria-label="Create workspace"
+              aria-description={showCreateDraft ? "Unsent draft" : undefined}
               onClick={() => openDispatcher(contextProject?.id)}
             >
               <Plus strokeWidth={1.5} />
               <span className="truncate">Create</span>
+              <span className="ml-auto inline-flex size-4 shrink-0 items-center justify-center">
+                {showCreateDraft && <ComposerDraftIndicator />}
+              </span>
             </Button>
           </div>
         </div>
@@ -795,50 +813,30 @@ export function AppSidebar({ hidden = false }: { hidden?: boolean }) {
           aria-hidden="true"
         />
 
-        {/* Section header: the list's presentation lives behind its ⋯. */}
-        {/* Only its ⋯ reacts to hover; the header itself is a quiet label. */}
+        {/* The section label stays quiet; its filter control owns the menu. */}
         <div className="group/section mx-2 mt-2 flex h-8 shrink-0 items-center gap-1 pr-1 pl-2.5">
           <span className={cn(SECTION_LABEL_CLS, "min-w-0 flex-1")}>
             Workspaces
           </span>
-          <DropdownMenu open={filterMenuOpen} onOpenChange={setFilterMenuOpen}>
-            <Tooltip label="Filter workspaces" side="bottom">
-              <DropdownMenuTrigger asChild>
-                <button
-                  type="button"
-                  className={cn(
-                    SIDEBAR_ROW_ACTION_CLS,
-                    !filterMenuOpen &&
-                      "opacity-0 group-hover/section:opacity-100 focus-visible:opacity-100",
-                  )}
-                  aria-label="Filter workspaces"
-                >
-                  <Ellipsis strokeWidth={1.5} />
-                </button>
-              </DropdownMenuTrigger>
-            </Tooltip>
-            <DropdownMenuContent align="start" sideOffset={5} className="w-44">
-              {SIDEBAR_WORKSPACE_LIST_FILTERS.map((filter) => (
-                <DropdownMenuItem
-                  key={filter}
-                  onSelect={() => handleSelectFilter(filter)}
-                  aria-current={listFilter === filter ? "true" : undefined}
-                >
-                  <span>{filter === "grouped" ? "Grouped" : "Ungrouped"}</span>
-                  {listFilter === filter && (
-                    <Check className="text-fg2 ml-auto size-3.5" />
-                  )}
-                </DropdownMenuItem>
-              ))}
-            </DropdownMenuContent>
-          </DropdownMenu>
+          {!hidden && <SidebarWorkspaceMenu
+            key={filterOwner}
+            active={!hidden}
+            projects={projects}
+            grouping={listFilter}
+            sort={preferences.sort}
+            repositoryIds={repositoryIds}
+            onGroupingChange={handleSelectFilter}
+            onSortChange={setSidebarWorkspaceSort}
+            onRepositoryIdsChange={ids => setSidebarRepositoryIds(filterOwner, ids)}
+          />}
         </div>
 
         <div
           ref={listRef}
           className="min-h-0 flex-1 overflow-y-auto px-2 pb-2"
           aria-label={
-            groupedList ? "Workspaces grouped by repository" : "Workspaces"
+            groupedList ? "Workspaces grouped by repository"
+              : listFilter === "status" ? "Workspaces grouped by status" : "Workspaces"
           }
           aria-busy={liveLoading || undefined}
           role="region"
@@ -851,6 +849,32 @@ export function AppSidebar({ hidden = false }: { hidden?: boolean }) {
               if (entry.kind === "row") {
                 return renderItem(entry.item, false);
               }
+              if (entry.kind === "status") {
+                const collapsed = preferences.collapsedStatuses.includes(entry.status.value);
+                const groupId = `sidebar-status-${entry.status.value}`;
+                return (
+                  <React.Fragment key={entry.key}>
+                    <Button type="button" variant="ghost"
+                      className={cn(SIDEBAR_ENTRY_CLS, "group/status h-8 gap-2 px-2 font-medium")}
+                      data-sidebar-status={entry.status.value}
+                      aria-expanded={!collapsed} aria-controls={groupId}
+                      onClick={() => setSidebarStatusCollapsed(entry.status.value, !collapsed)}>
+                      <span className="relative inline-flex size-4 shrink-0 items-center justify-center" aria-hidden="true">
+                        <StatusIcon status={entry.status.value} className="size-3.5 group-hover/status:invisible group-focus-visible/status:invisible" />
+                        <span className="absolute inset-0 hidden items-center justify-center group-hover/status:flex group-focus-visible/status:flex">
+                          {collapsed ? <ChevronRight strokeWidth={1.5} /> : <ChevronDown strokeWidth={1.5} />}
+                        </span>
+                      </span>
+                      <span className="min-w-0 truncate">{entry.status.label}</span>
+                      <span className="text-muted-fg ml-auto text-3xxs tabular-nums">{entry.items.length}</span>
+                    </Button>
+                    <div id={groupId} role="group" aria-label={`${entry.status.label} workspaces`}
+                      className="flex flex-col gap-0.5 empty:hidden">
+                      {visibleRepositoryItems(entry.items, collapsed, activeSelectionKey).map(item => renderItem(item, true))}
+                    </div>
+                  </React.Fragment>
+                );
+              }
               if (entry.kind === "folder") {
                 const selected =
                   effectiveActivePage === "repo" &&
@@ -862,7 +886,7 @@ export function AppSidebar({ hidden = false }: { hidden?: boolean }) {
                     key={entry.key}
                     type="button"
                     variant="ghost"
-                    className={SIDEBAR_ENTRY_CLS}
+                    className={cn(SIDEBAR_ENTRY_CLS, "h-8")}
                     data-sidebar-folder={entry.project.id}
                     data-state={selected ? "active" : "inactive"}
                     aria-current={selected ? "page" : undefined}
@@ -912,12 +936,20 @@ export function AppSidebar({ hidden = false }: { hidden?: boolean }) {
             })}
             {pendingOnly && (
               <div
-                className="text-fg2 flex h-7.5 min-w-0 items-center gap-2 rounded-md px-2 text-xs"
+                className="text-fg2 flex h-8 min-w-0 items-center gap-2 rounded-md px-2 text-xs"
                 role="status"
                 aria-live="polite"
               >
                 <ZerosSpinner size={14} label={`Opening ${pendingOnly.name}`} />
                 <span className="min-w-0 truncate">{pendingOnly.name}</span>
+              </div>
+            )}
+            {repositoryIds.length > 0 && listedItems.length === 0 && !liveLoading && (
+              <div className="flex flex-col items-start gap-1 px-2 py-2 text-xs text-fg3" role="status">
+                <span>No workspaces match this filter</span>
+                <Button variant="ghost" size="compact" onClick={() => setSidebarRepositoryIds(filterOwner, [])}>
+                  Clear filter
+                </Button>
               </div>
             )}
           </div>
@@ -939,21 +971,19 @@ export function AppSidebar({ hidden = false }: { hidden?: boolean }) {
               <span className="text-muted-fg truncate text-xs">{email}</span>
             )}
           </span>
-          <Tooltip label="Settings">
-            <Button
-              type="button"
-              variant="ghost"
-              size="icon-sm"
-              aria-label="Open settings"
-              data-state={activePage === "settings" ? "active" : "inactive"}
-              className="text-fg2 hover:text-fg1 data-[state=active]:text-fg1 shrink-0"
-              onClick={() =>
-                dispatch({ type: "SET_ACTIVE_PAGE", page: "settings" })
-              }
-            >
-              <Settings size={16} strokeWidth={1.5} />
-            </Button>
-          </Tooltip>
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon-sm"
+            aria-label="Open settings"
+            data-state={activePage === "settings" ? "active" : "inactive"}
+            className="text-fg2 hover:text-fg1 data-[state=active]:text-fg1 shrink-0"
+            onClick={() =>
+              dispatch({ type: "SET_ACTIVE_PAGE", page: "settings" })
+            }
+          >
+            <Settings size={16} strokeWidth={1.5} />
+          </Button>
         </div>
       </Surface>
       {/* Right-edge resize seam — a 1px border line with a wider invisible

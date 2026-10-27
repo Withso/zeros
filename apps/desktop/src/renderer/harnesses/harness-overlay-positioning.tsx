@@ -36,6 +36,7 @@ import {
 } from "../shared/ui/primitives/select";
 import { WorkspaceFileTree } from "../shell/workbench/tabs/workspace-file-tree";
 import { primeWorkspaceFiles } from "../shell/workspace-files-cache";
+import { OverlayDismissalFixture } from "./overlay-dismissal-fixture";
 
 const cwd = "/overlay-positioning-fixture";
 primeWorkspaceFiles(
@@ -155,4 +156,8 @@ function Harness() {
   );
 }
 
-createRoot(document.getElementById("root")!).render(<Harness />);
+createRoot(document.getElementById("root")!).render(
+  new URLSearchParams(location.search).has("dismissal")
+    ? <OverlayDismissalFixture />
+    : <Harness />,
+);

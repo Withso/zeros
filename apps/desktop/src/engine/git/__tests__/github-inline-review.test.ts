@@ -122,6 +122,47 @@ function setup() {
 }
 
 describe("GitHub inline review aggregate", () => {
+  it("overlaps a bounded window of independent check annotation reads", async () => {
+    const { service, listForRef, listAnnotations } = setup();
+    listForRef.mockResolvedValue({ data: { total_count: 8, check_runs:
+      Array.from({ length: 8 }, (_, index) => ({ id: index + 1, name: `Check ${index + 1}`, output: { annotations_count: 1 } })),
+    } });
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => { release = resolve; });
+    listAnnotations.mockImplementation(async ({ check_run_id }) => {
+      if (check_run_id === 1) await held;
+      return { data: [{ path: "source.ts", start_line: check_run_id, end_line: check_run_id, annotation_level: "warning", message: "Review this line" }] };
+    });
+    const pending = service.get(target);
+    try {
+      await vi.waitFor(() => expect(listAnnotations).toHaveBeenCalled());
+      expect(listAnnotations.mock.calls.map(([args]) => args.check_run_id)).toEqual([1, 2, 3]);
+    } finally {
+      release();
+      const result = await pending;
+      expect(result.annotations.map((annotation) => annotation.id)).toEqual(
+        Array.from({ length: 8 }, (_, index) => `${index + 1}:0`),
+      );
+      expect(result.annotationsTruncated).toBe(false);
+    }
+  });
+
+  it("keeps findings from independent checks when one check cannot be read", async () => {
+    const { service, listForRef, listAnnotations } = setup();
+    listForRef.mockResolvedValue({ data: { total_count: 2, check_runs: [
+      { id: 1, name: "Unavailable", output: { annotations_count: 1 } },
+      { id: 2, name: "Available", output: { annotations_count: 1 } },
+    ] } });
+    listAnnotations.mockImplementation(async ({ check_run_id }) => {
+      if (check_run_id === 1) throw new Error("Network unavailable");
+      return { data: [{ path: "source.ts", start_line: 1, end_line: 1, annotation_level: "failure", message: "Keep this finding" }] };
+    });
+    const result = await service.get(target);
+    expect(result.threads).toHaveLength(1);
+    expect(result.annotations).toMatchObject([{ id: "2:0", message: "Keep this finding" }]);
+    expect(result.annotationError).toContain("could not be loaded");
+  });
+
   it.each([true, false])("retains local GitHub viewer resolve permissions (%s)", async canResolve => {
     const fixture = setup();
     fixture.graphql.mockResolvedValue(page([{ ...thread(), viewerCanResolve: canResolve, viewerCanUnresolve: !canResolve }]));

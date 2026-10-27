@@ -90,17 +90,15 @@ export function TerminalWorkbenchLayout({
         data-terminal-shell-heading=""
       >
         <span className="text-fg2 text-xs font-medium">Terminals</span>
-        <Tooltip label="New terminal">
-          <Button
-            variant="ghost"
-            size="icon-sm"
-            aria-label="New terminal"
-            onClick={onAdd}
-            className={WORKBENCH_TITLE_ACTION_CLS}
-          >
-            <Plus className="text-fg2 size-3.5" />
-          </Button>
-        </Tooltip>
+        <Button
+          variant="ghost"
+          size="icon-sm"
+          aria-label="New terminal"
+          onClick={onAdd}
+          className={WORKBENCH_TITLE_ACTION_CLS}
+        >
+          <Plus className="text-fg2 size-3.5" />
+        </Button>
       </div>
     </>
   );
@@ -138,7 +136,7 @@ export function TerminalWorkbenchLayout({
           )}
         </div>
         <Inline gap={1} align="center" className="shrink-0">
-          <Tooltip label="Move terminal to bottom panel">
+          <Tooltip label="Dock terminal">
             <Button
               variant="ghost"
               size="icon-sm"
@@ -149,7 +147,7 @@ export function TerminalWorkbenchLayout({
               <PanelBottom className="text-fg2 size-3.5" />
             </Button>
           </Tooltip>
-          <Tooltip label="Repository environment settings">
+          <Tooltip label="Environment">
             <Button
               variant="ghost"
               size="icon-sm"
@@ -164,7 +162,7 @@ export function TerminalWorkbenchLayout({
           </Tooltip>
           <Tooltip
             label={
-              sidebarVisible ? "Hide terminal sidebar" : "Show terminal sidebar"
+              sidebarVisible ? "Hide terminals" : "Show terminals"
             }
           >
             <Button

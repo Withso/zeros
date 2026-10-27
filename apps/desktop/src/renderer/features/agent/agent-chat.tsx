@@ -279,6 +279,7 @@ import {
 import { shareMap, shareMessageBuckets, shareSet } from "./transcript-stability";
 import { useLatestCallback } from "@/renderer/shared/lib/use-latest-callback";
 import { tailTurnInFlight } from "./tail-indicators";
+import { cloudPresentationRunning } from "./cloud-turn-presentation";
 import { pickActiveWorkflow } from "./workflow-activity";
 import { stabilizeTurns } from "./stable-turns";
 import { turnFailureForCard } from "./turn-failure";
@@ -3070,8 +3071,6 @@ function AgentChatBody({
     setScrollEl(node);
   }, []);
 
-  // ⌘K — focus the composer from anywhere in the app; scoped to avoid
-  // clobbering ⌘K inside native inputs.
   // ⌘↑ / ⌘↓ — jump-by-text-message: walks user prompts and final
   // assistant text, skipping tool-call + thinking chunks. Solves the
   // need to find the initiating prompt during long runs.
@@ -3087,8 +3086,8 @@ function AgentChatBody({
 
       // Split panes (2026-07-17): multiple AgentChat instances can be
       // mounted at once. Only the FOCUSED pane's chat (the global
-      // active chat) owns these app-wide bindings — otherwise ⌘K would
-      // focus every composer and ⌘↑/↓ would scroll every pane. Chats
+      // active chat) owns these app-wide bindings — otherwise ⌘↑/↓
+      // would scroll every pane. Chats
       // mounted without a chatId (picker/beta flows) keep them.
       if (chatId) {
         const workspaceState = useWorkspaceStore.getState();
@@ -3098,13 +3097,6 @@ function AgentChatBody({
         ) {
           return;
         }
-      }
-
-      // ⌘K is composer-focus; allowed even when in an input
-      if (!readOnly && e.key.toLowerCase() === "k") {
-        e.preventDefault();
-        composerFocusRef.current();
-        return;
       }
 
       // Skip jump-by-message bindings while typing — preserves
@@ -3148,7 +3140,7 @@ function AgentChatBody({
     };
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
-  }, [chatId, surfaceActive, readOnly, jumpToBottom]);
+  }, [chatId, surfaceActive, jumpToBottom]);
 
   // File picker for the "+" → "Add attachment" menu (routes through the
   // editor's insertFiles, same as drag-drop / paste).
@@ -3376,11 +3368,11 @@ function AgentChatBody({
 
   // During plan review the turn is PAUSED on the user, so the composer reads as
   // idle (Send a follow-up / Approve) rather than streaming (Stop).
-  const composerStreaming = Boolean(isCloudWorkspace(session.cwd) && (session.cloudStop || session.cloudOutbox?.pendingCount && !session.cloudOutbox.waiting)) || !(isCloudWorkspace(session.cwd) && (session.cloudSendWait || session.cloudPromptPending)) && composerShowsStopControl({
+  const composerStreaming = cloudPresentationRunning(session, pendingLocalTurnId) ?? (Boolean(isCloudWorkspace(session.cwd) && (session.cloudStop || session.cloudOutbox?.pendingCount && !session.cloudOutbox.waiting)) || !(isCloudWorkspace(session.cwd) && (session.cloudSendWait || session.cloudPromptPending)) && composerShowsStopControl({
     status: backgroundContinuationActive ? "streaming" : session.status,
     hasPendingLocalTurn: pendingLocalTurnId !== null,
     planReview: Boolean(planReview),
-  });
+  }));
 
   // Mid-turn steering (queued-card "Send now" while running): advertised by
   // the adapter at session creation. Claude, Codex and Cursor support it; an unavailable
@@ -3894,13 +3886,22 @@ function AgentChatBody({
           if (!capabilitiesBridge) throw new Error("The frame context connection is unavailable.");
           return prepareDesignFrameAttachments(capabilitiesBridge, submittedDesignFrame);
         } : undefined });
-      await session.sendPrompt(queued.text, queued.displayText, queued.attachments, queued.bubbleAttachments, queued.segments, undefined, queued.cloudQueue, wakeIntent, extras?.followUpBehavior ?? getFollowUpBehavior());
-      const unchanged = override === undefined && snapshot && isSubmittedComposerDocument(snapshot.json, serializeComposerState()?.json);
-      if (unchanged) {
-        clearComposerEditor(); designFrameContext.consume(submittedDesignFrame);
-      }
-      if (override !== undefined || unchanged)
-        dispatch({ type: "CLEAR_CHAT_DRAFT", chatId });
+      let composerReleased = false;
+      const releaseSubmittedComposer = () => {
+        if (composerReleased) return;
+        composerReleased = true;
+        const unchanged = override === undefined && snapshot && isSubmittedComposerDocument(snapshot.json, serializeComposerState()?.json);
+        if (unchanged) {
+          clearComposerEditor(); designFrameContext.consume(submittedDesignFrame);
+        }
+        if (override !== undefined || unchanged)
+          dispatch({ type: "CLEAR_CHAT_DRAFT", chatId });
+      };
+      await session.sendPrompt(queued.text, queued.displayText, queued.attachments, queued.bubbleAttachments, queued.segments, undefined, queued.cloudQueue, wakeIntent,
+        extras?.followUpBehavior ?? getFollowUpBehavior(), releaseSubmittedComposer);
+      // Legacy cloud senders release on return; durable sends release at their
+      // private commit and must not clear a newer draft when HTTPS settles.
+      releaseSubmittedComposer();
       pendingSendScrollCountRef.current += 1;
       return true;
     }
@@ -5019,11 +5020,14 @@ function AgentChatBody({
                 <TranscriptTurn
                   key={turnKey(turn)}
                   turn={turn}
+                  threadTailKey={turns.length ? turnKey(turns[turns.length - 1]) : null}
                   isVisualTail={isVisualTail}
                   isActiveProviderSegment={receipt.active}
                   isActivityTail={receipt.activityTail}
                   durablePrompt={receipt.durable}
                   receiptState={receipt.state}
+                  presentation={receipt.presentation}
+                  startedAt={receipt.startedAt}
                   ownsProviderFooter={isProviderTurnTail(turns, i)}
                   turnIsPendingLocal={turnIsPendingLocal}
                   turnInFlight={tailTurnInFlight({
@@ -5055,10 +5059,10 @@ function AgentChatBody({
                 />
               );
             })}
-            {!readOnly && isCloudWorkspace(session.cwd) && session.cloudStop?.state === "unconfirmed" && (
+            {!readOnly && isCloudWorkspace(session.cwd) && (session.cloudStop?.state === "unconfirmed" || session.cloudStop?.state === "failed") && (
               <AgentNotice
                 data-cloud-stop-notice
-                message="Stop could not be confirmed. Reconnect to check this turn."
+                message={session.cloudStop.state === "failed" ? "Stop was refused. Try Stop again." : "Stop could not be confirmed. Reconnect to check this turn."}
               >
                 <div className="mt-1">
                   <Button type="button" variant="ghost" size="sm" className={AGENT_NOTICE_ACTION}
@@ -5463,68 +5467,66 @@ function AgentChatBody({
                     filled) when streaming. The form's onSubmit handler
                     above already calls session.cancel() when streaming, so
                     clicking the same button while in flight halts the
-                    agent — no separate destructive button. Title swaps so
+                    agent — no separate destructive button. Its name swaps so
                     the affordance still reads. */}
-                      <Tooltip
-                        label={
+                      <PromptInputSubmit
+                        aria-label={
                           composerStreaming
-                              ? "Stop agent"
-                              : editingQueuedId
-                                ? "Save message"
-                                : "Send"
-                        }
-                        shortcut={
-                          composerStreaming || sendPreparing ? undefined : "↵"
-                        }
-                      >
-                        <PromptInputSubmit
-                          // `submitted` = this send is parked on a cold
-                          // transcript read or a session (re)build with the
-                          // text still in the composer. Without it the button
-                          // looked idle-but-dead for the whole spawn, which is
-                          // what made people press Enter again and again.
-                          status={
-                            isErrorState
-                              ? "error"
-                              : composerStreaming
-                                ? "streaming"
-                                : sendPreparing
-                                  ? "submitted"
-                                  : "ready"
-                          }
-                          disabled={
-                            composerStreaming
-                              ? false
+                            ? "Stop agent"
+                            : editingQueuedId
+                              ? "Save message"
                               : sendPreparing
-                                ? true
-                                : editingQueuedId
-                                  ? !queuedEditHasContent
-                                  : !canSend
-                          }
-                          className="disabled:bg-bg2-hover disabled:text-fg2 aria-disabled:bg-bg2-hover aria-disabled:text-fg2 size-8 disabled:opacity-100"
-                        >
-                          {composerStreaming ? (
-                            <Square className="size-3" />
-                          ) : undefined}
-                        </PromptInputSubmit>
-                      </Tooltip>
+                                ? "Submitting"
+                                : "Send message"
+                        }
+                        aria-keyshortcuts={
+                          composerStreaming || sendPreparing ? undefined : "Enter"
+                        }
+                        // `submitted` = this send is parked on a cold
+                        // transcript read or a session (re)build with the
+                        // text still in the composer. Without it the button
+                        // looked idle-but-dead for the whole spawn, which is
+                        // what made people press Enter again and again.
+                        status={
+                          isErrorState
+                            ? "error"
+                            : composerStreaming
+                              ? "streaming"
+                              : sendPreparing
+                                ? "submitted"
+                                : "ready"
+                        }
+                        disabled={
+                          composerStreaming
+                            ? false
+                            : sendPreparing
+                              ? true
+                              : editingQueuedId
+                                ? !queuedEditHasContent
+                                : !canSend
+                        }
+                        className="disabled:bg-bg2-hover disabled:text-fg2 aria-disabled:bg-bg2-hover aria-disabled:text-fg2 size-8 disabled:opacity-100"
+                      >
+                        {composerStreaming ? (
+                          <Square className="size-3" />
+                        ) : undefined}
+                      </PromptInputSubmit>
                       {/* Queued-edit save tick — sits beside Stop while the
                     agent runs (the screenshot-spec layout), so saving the
                     edit and stopping the turn stay separate, unambiguous
                     targets. When idle the main submit doubles as Save; the
                     tick stays for a consistent affordance. */}
                       {editingQueuedId && (
-                        <Tooltip label="Save message" shortcut="↵">
-                          <Button
-                            type="button"
-                            onClick={() => void saveQueuedEdit()}
-                            disabled={!queuedEditHasContent}
-                            aria-label="Save queued message"
-                            className="disabled:bg-bg2-hover disabled:text-fg2 size-8 shrink-0 rounded-sm p-0 disabled:opacity-100"
-                          >
-                            <Check className="size-4" />
-                          </Button>
-                        </Tooltip>
+                        <Button
+                          type="button"
+                          onClick={() => void saveQueuedEdit()}
+                          disabled={!queuedEditHasContent}
+                          aria-label="Save queued message"
+                          aria-keyshortcuts="Enter"
+                          className="disabled:bg-bg2-hover disabled:text-fg2 size-8 shrink-0 rounded-sm p-0 disabled:opacity-100"
+                        >
+                          <Check className="size-4" />
+                        </Button>
                       )}
                     </div>
                   </PromptInputToolbar>

@@ -14,6 +14,13 @@ export function isImageGenerationTool(tool: AgentToolMessage): boolean {
   );
 }
 
+/** The native Codex mapper keeps these fields even when its image is absent.
+ * Other providers' generated artifacts keep their own fallback wording. */
+export function isCodexImageGenerationTool(tool: AgentToolMessage): boolean {
+  return isImageGenerationTool(tool) &&
+    ("revisedPrompt" in toolRecord(tool.rawInput) || "failure" in toolRecord(tool.rawOutput));
+}
+
 export function generatedImagePath(tool: AgentToolMessage): string | undefined {
   if (!isImageGenerationTool(tool)) return undefined;
   const output = toolRecord(tool.rawOutput);
@@ -42,6 +49,22 @@ export function generatedImagePath(tool: AgentToolMessage): string | undefined {
       typeof value === "string" ? fileRefPath(value, true) : null,
     )
     .find((value): value is string => !!value);
+}
+
+/** Observed edit sources are provenance, never generated targets or counts. */
+export function generatedImageInputPaths(tool: AgentToolMessage): string[] {
+  if (!isImageGenerationTool(tool)) return [];
+  const images = toolRecord(tool.rawOutput).inputImages;
+  if (!Array.isArray(images)) return [];
+  return [...new Set(images.slice(0, 128).flatMap((image) => {
+    const path = toolRecord(image).path;
+    if (typeof path !== "string" || !path || path.length > 4096 || path.startsWith("//") ||
+        /^[a-z][a-z0-9+.-]*:/i.test(path) || path.split("/").includes("..")) return [];
+    // Native filesystem names are literal, unlike resource URIs: preserve
+    // percent escapes and let the shared file-pill boundary enforce the cwd.
+    // eslint-disable-next-line no-control-regex -- native references cannot contain control bytes
+    return /[\x00-\x1f\x7f\\]/.test(path) ? [] : [path];
+  }))];
 }
 
 /** Structured MCP output complements its readable content. Exclude routine
@@ -74,6 +97,7 @@ export function structuredToolOutput(raw: unknown): unknown {
     "fileName",
     "filePath",
     "savedPath",
+    "inputImages",
     "zerosTransport",
     "_meta",
   ]);

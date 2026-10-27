@@ -33,6 +33,12 @@ function tool(
 }
 
 describe("tool file pill interactions", () => {
+  it("names an Edit file without promising a diff destination before Git resolves", () => {
+    const html = renderToStaticMarkup(createElement(EditCard, {
+      message: tool(".context/task/notes.ts", "edit"), ctx,
+    }));
+    expect(html).toContain('aria-label="Open notes.ts"');
+  });
   it("recognizes image formats without treating code or video as images", () => {
     expect(imagePreviewMimeType("logo.SVG", "text/plain")).toBe(
       "image/svg+xml",

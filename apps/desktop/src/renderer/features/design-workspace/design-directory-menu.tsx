@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from "react";
-import { ChevronDown, Check, Folder, Settings } from "lucide-react";
+import { ChevronDown, Check, Folder } from "lucide-react";
 import type { Workspace } from "../../platform/git";
 import { getActiveBridge } from "../../platform/bridge/active-bridge";
 import { bridgeDesignListDirectories } from "../../platform/bridge/design-bridge";
@@ -9,14 +9,11 @@ import {
   designDirectoryListingCache,
   invalidateDesignDirectoryTargetReadCache,
 } from "../../state/read-caches";
-import { useWorkspaceDispatch } from "../../state/store";
-import { useProjectForFolder } from "../../state/use-projects";
-import { Tooltip } from "../../shared/ui/primitives";
+import { Button } from "../../shared/ui/primitives";
 import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
-  DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "../../shared/ui/primitives/dropdown-menu";
 import {
@@ -27,8 +24,7 @@ import { triggerGitRefresh } from "../../shell/use-git-refresh-key";
 import { reportDesignDirectoryFailure } from "./design-directory-failure";
 
 /** Selecting a directory changes only this workspace's personal pointer.
- * Rename/adoption remain explicit repository lifecycle actions in Settings.
- * The trigger lives in the canvas's floating directory pill. */
+ * The trigger lives in Design's secondary workbench toolbar. */
 export function DesignDirectoryMenu({
   workspace,
   active,
@@ -42,8 +38,6 @@ export function DesignDirectoryMenu({
   const [busy, setBusy] = useState(false);
   const mounted = useRef(true);
   useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
-  const project = useProjectForFolder(workspace.path);
-  const dispatch = useWorkspaceDispatch();
   const listing = useCachedRead(
     designDirectoryListingCache,
     workspace.id,
@@ -82,22 +76,22 @@ export function DesignDirectoryMenu({
   };
   return (
     <DropdownMenu open={active && open} onOpenChange={setOpen}>
-      <Tooltip label="Switch Design directory" side="bottom">
-        <DropdownMenuTrigger asChild>
-          <button
-            type="button"
-            disabled={!active || busy}
-            className="zd-design-directory-trigger"
-            aria-label="Choose Design directory"
-          >
-            <Folder aria-hidden="true" />
-            <span data-design-directory-name="" className="min-w-0 truncate">
-              {name}
-            </span>
-            <ChevronDown aria-hidden="true" />
-          </button>
-        </DropdownMenuTrigger>
-      </Tooltip>
+      <DropdownMenuTrigger asChild>
+        <Button
+          type="button"
+          variant="ghost"
+          size="sm"
+          disabled={!active || busy}
+          className="zd-design-directory-trigger"
+          aria-label="Choose Design directory"
+        >
+          <Folder aria-hidden="true" />
+          <span data-design-directory-name="" className="min-w-0 truncate">
+            {name}
+          </span>
+          <ChevronDown aria-hidden="true" />
+        </Button>
+      </DropdownMenuTrigger>
       <DropdownMenuContent align="start" className="max-w-sm" onKeyDown={(event) => {
         // First-focus Escape can precede Radix's document listener setup.
         if (event.key !== "Escape" || event.defaultPrevented) return;
@@ -124,23 +118,6 @@ export function DesignDirectoryMenu({
             {directory === name && <Check className="size-3" />}
           </DropdownMenuItem>
         ))}
-        {project && (
-          <>
-            <DropdownMenuSeparator />
-            <DropdownMenuItem
-              onSelect={() =>
-                dispatch({
-                  type: "OPEN_REPO_PAGE",
-                  projectId: project.id,
-                  view: "design-preferences",
-                })
-              }
-            >
-              <Settings className="size-3" />
-              Manage directories…
-            </DropdownMenuItem>
-          </>
-        )}
       </DropdownMenuContent>
     </DropdownMenu>
   );

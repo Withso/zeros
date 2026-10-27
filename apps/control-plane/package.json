@@ -33,6 +33,7 @@
     "@aws-sdk/client-s3": "3.1136.0",
     "@aws-sdk/s3-request-presigner": "3.1136.0",
     "@hono/node-server": "^2.1.0",
+    "@modelcontextprotocol/sdk": "^1.32.1",
     "@openai/codex": "0.154.0",
     "@opentelemetry/api": "1.9.1",
     "@opentelemetry/exporter-trace-otlp-http": "0.223.0",
@@ -43,7 +44,7 @@
     "jose": "^6.0.0",
     "pg": "^8.16.0",
     "ws": "8.21.2",
-    "zod": "^3.24.0"
+    "zod": "^4.6.7"
   },
   "devDependencies": {
     "@types/node": "^22.15.0",

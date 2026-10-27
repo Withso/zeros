@@ -6,6 +6,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 const auth = vi.hoisted(() => ({
   status: "loading" as "loading" | "authenticated" | "unauthenticated",
   local: false,
+  storedUser: null as { sub: string } | null,
 }));
 
 vi.mock("../../../platform/runtime", () => ({ isLocalDevelopment: () => auth.local }));
@@ -42,6 +43,7 @@ describe("AuthGate startup loader", () => {
   afterEach(() => {
     auth.status = "loading";
     auth.local = false;
+    auth.storedUser = null;
     vi.unstubAllGlobals();
   });
 
@@ -55,6 +57,14 @@ describe("AuthGate startup loader", () => {
   it("keeps ordinary Dev and packaged signed-out users behind login", () => {
     auth.status = "unauthenticated";
     expect(renderToStaticMarkup(createElement(AuthGate, null, createElement("main", null, "app")))).not.toContain("<main>");
+  });
+
+  it.each(["loading", "unauthenticated"] as const)("opens saved same-account presentation while bearer auth is %s", (status) => {
+    auth.status = status;
+    auth.storedUser = { sub: "stored-account" };
+    const markup = renderToStaticMarkup(createElement(AuthGate, null, createElement("main", null, "saved workspace")));
+    expect(markup).toBe("<main>saved workspace</main>");
+    expect(auth.status).toBe(status);
   });
 
   it("keeps the HTML-owned logo instead of mounting a second loader", () => {

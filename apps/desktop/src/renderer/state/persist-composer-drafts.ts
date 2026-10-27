@@ -222,10 +222,10 @@ function withoutAttachments(snapshot: PersistedDrafts): PersistedDrafts {
   return { chats, edits, autoSend: snapshot.autoSend };
 }
 
-function writeNow(snapshot: PersistedDrafts): void {
+function writeNow(snapshot: PersistedDrafts): boolean {
   try {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(snapshot, (key, value) => key === "sourceFile" ? undefined : value));
-    return;
+    return true;
   } catch {
     /* fall through to the degraded write */
   }
@@ -239,6 +239,7 @@ function writeNow(snapshot: PersistedDrafts): void {
   } catch {
     /* private mode / storage disabled entirely — genuinely nothing to do */
   }
+  return false;
 }
 
 // ── Debounced write + beforeunload flush ─────────────────
@@ -286,13 +287,13 @@ export function schedulePersistDrafts(state: WorkspaceState): void {
  *  promised, or resurrects one that was just dispatched and re-sends a message
  *  the engine already has. Both are cheap to avoid — the transition happens
  *  once per queued turn, not once per keystroke. */
-export function persistDraftsNow(state: WorkspaceState): void {
+export function persistDraftsNow(state: WorkspaceState): boolean {
   if (pendingTimer !== null) {
     window.clearTimeout(pendingTimer);
     pendingTimer = null;
   }
   pendingState = null;
-  writeNow(snapshotOf(state));
+  return writeNow(snapshotOf(state));
 }
 
 function snapshotOf(state: WorkspaceState): PersistedDrafts {

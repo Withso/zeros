@@ -37,6 +37,27 @@ const slice = {
   openEnd: 1,
 };
 
+it("round-trips a skill reference within its owner without attachment bytes", () => {
+  const source = { agentId: "claude", path: "/library/review/SKILL.md", name: "review" };
+  const document = { ...slice, content: [{ type: "paragraph", content: [{ type: "skill", attrs: { name: "review", label: "Review", path: "", source } }] }] };
+  const payload = clipboardPayload(document, () => undefined, owner);
+  expect(payload.text).toBe("/review");
+  expect(payload.attachments).toEqual([]);
+  const restored = prepareClipboardPaste(payload, owner)!;
+  expect(restored.slice.content[0].content![0]).toMatchObject({ type: "skill", attrs: { source, name: "review" } });
+  expect(restored.attachments).toEqual([]);
+});
+
+it("pastes a foreign skill as invocation text instead of reusing its source authority", () => {
+  const document = { ...slice, content: [{ type: "paragraph", content: [{ type: "skill", attrs: { name: "review", label: "Review", path: "skills/review/SKILL.md" } }] }] };
+  const payload = clipboardPayload(document, () => undefined, owner);
+  for (const target of [{ ...owner, cwd: "/organization/repo" }, { runtime: "cloud:other", cwd: "/repo" }]) {
+    const pasted = prepareClipboardPaste(payload, target)!;
+    expect(pasted.slice.content[0].content![0]).toEqual({ type: "text", text: "/review" });
+    expect(pasted.attachments).toEqual([]);
+  }
+});
+
 it("reads HTML clipboard metadata as data without a browser DOM", () => {
   const payload = clipboardPayload(slice, () => attachment, owner);
   const encoded = JSON.stringify(payload);

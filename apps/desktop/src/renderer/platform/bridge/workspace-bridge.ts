@@ -116,7 +116,7 @@ const GIT_OP_ANALYTICS: Record<
 };
 
 /** Budget for NETWORK-BOUND git/GitHub writes (push / pull / fetch / rebase,
- *  PR create / mark-ready / merge). The 10s `workspaceOp` default is tuned for
+ *  PR create / mark-ready / merge / discovery). The 10s `workspaceOp` default is tuned for
  *  local DB reads; a slow remote or the GitHub merge API routinely exceeds it,
  *  so "Merge PR" used to reject with "Request timeout" → "Couldn't merge PR"
  *  even though GitHub completed the merge. If the op outlives even this budget
@@ -826,8 +826,10 @@ export async function bridgeMessageWindow(
 
 export type MessageWindowSnapshot = {
   messages: PersistedMessageWire[];
-  source: "local" | "unknown";
-  /** Local engines only: the opening prompt of the turn `messages[0]` belongs
+  source: "local" | "unknown" | "worker" | "control-plane";
+  /** Renderer-derived: an unfiltered tail shorter than the requested window. */
+  complete?: boolean;
+  /** The opening prompt of the turn `messages[0]` belongs
    *  to, when that turn is longer than the contiguous window. */
   turnOpening?: PersistedMessageWire;
 };
@@ -843,11 +845,11 @@ function persistedMessageWire(value: unknown): PersistedMessageWire | undefined 
 }
 
 
-function messageWindowSnapshot(_bridge: RuntimeClient, chatId: string, r: MessageWindowResponse): MessageWindowSnapshot {
+function messageWindowSnapshot(bridge: RuntimeClient, chatId: string, r: MessageWindowResponse): MessageWindowSnapshot {
   const target = parseCloudScopedId(chatId);
-  // Only a Local window may carry a turn opening.
-  const turnOpening = target ? undefined : persistedMessageWire(r?.turnOpening);
-  return { messages: r?.messages ?? [], source: target ? "unknown" : "local", ...(turnOpening ? { turnOpening } : {}) };
+  const turnOpening = persistedMessageWire(r?.turnOpening);
+  const source = target ? r && bridge instanceof WorkspaceRuntimeClient ? bridge.historySource(r) ?? "unknown" : "unknown" : "local";
+  return { messages: r?.messages ?? [], source, ...(turnOpening ? { turnOpening } : {}) };
 }
 
 export async function bridgeMessageWindowSnapshot(
@@ -867,7 +869,10 @@ export async function bridgeMessageWindowSnapshot(
     },
     timeoutMs,
   )) as MessageWindowResponse;
-  return messageWindowSnapshot(bridge, chatId, r);
+  const snapshot = messageWindowSnapshot(bridge, chatId, r);
+  if (snapshot.source === "worker" || snapshot.source === "control-plane")
+    snapshot.complete = before === undefined && !snapshot.turnOpening && Array.isArray(r?.messages) && r.messages.length < Math.min(1000, Math.max(1, limit));
+  return snapshot;
 }
 
 export async function bridgeMessageWindowOlder(
@@ -1113,7 +1118,7 @@ export async function bridgeContextGraphScaffold(
 export async function bridgeGitStatus(
   bridge: RuntimeClient,
   workspaceId: string,
-  options: { paths?: string[]; includeTracking?: boolean } = {},
+  options: { paths?: string[]; includeTracking?: boolean; includeSummary?: boolean } = {},
 ): Promise<StatusResult> {
   return (await workspaceOp(
     bridge,
@@ -1122,6 +1127,7 @@ export async function bridgeGitStatus(
       workspaceId,
       paths: options.paths,
       includeTracking: options.includeTracking,
+      ...(options.includeSummary === undefined ? {} : { includeSummary: options.includeSummary }),
     },
     GIT_READ_TIMEOUT_MS,
   )) as StatusResult;
@@ -1585,7 +1591,12 @@ export async function bridgeGhPrSync(
   bridge: RuntimeClient,
   workspaceId: string,
 ): Promise<PR | null> {
-  return (await workspaceOp(bridge, "gh.prSync", { workspaceId })) as PR | null;
+  return (await workspaceOp(
+    bridge,
+    "gh.prSync",
+    { workspaceId },
+    NETWORK_GIT_TIMEOUT_MS,
+  )) as PR | null;
 }
 
 export async function bridgeGhPrChecks(
@@ -2656,11 +2667,13 @@ export interface McpGatewayStatusWire {
  * Host-local; returns a not-running result when unavailable. */
 export async function bridgeMcpGatewayStatus(
   bridge: RuntimeClient,
+  repoRoot?: string,
 ): Promise<McpGatewayStatusWire> {
   const r = (await workspaceOp(
     bridge,
     "mcp.gateway.status",
-    {},
+    { ...(repoRoot ? { repoRoot } : {}) },
+    120_000,
   )) as Partial<McpGatewayStatusWire>;
   return {
     running: r.running ?? false,
@@ -2674,9 +2687,10 @@ export async function bridgeMcpGatewayStatus(
 export async function bridgeMcpGatewayAuthorize(
   bridge: RuntimeClient,
   server: string,
+  repoRoot?: string,
 ): Promise<GatewayBackendStatusWire> {
   const r = (await workspaceOp(bridge, "mcp.gateway.authorize", {
-    server,
+    server, ...(repoRoot ? { repoRoot } : {}),
   }, 330_000)) as {
     status: GatewayBackendStatusWire;
   };
@@ -2687,15 +2701,16 @@ export async function bridgeMcpGatewayAuthorize(
 export async function bridgeMcpGatewayDisconnect(
   bridge: RuntimeClient,
   server: string,
+  repoRoot?: string,
 ): Promise<void> {
-  await workspaceOp(bridge, "mcp.gateway.disconnect", { server });
+  await workspaceOp(bridge, "mcp.gateway.disconnect", { server, ...(repoRoot ? { repoRoot } : {}) });
 }
 
-export async function bridgeMcpGatewayCancelAuth(bridge: RuntimeClient, server: string): Promise<void> {
-  await workspaceOp(bridge, "mcp.gateway.cancelAuth", { server });
+export async function bridgeMcpGatewayCancelAuth(bridge: RuntimeClient, server: string, repoRoot?: string): Promise<void> {
+  await workspaceOp(bridge, "mcp.gateway.cancelAuth", { server, ...(repoRoot ? { repoRoot } : {}) });
 }
-export async function bridgeMcpGatewayReconnect(bridge: RuntimeClient): Promise<void> {
-  await workspaceOp(bridge, "mcp.gateway.reconnect", {}, 120_000);
+export async function bridgeMcpGatewayReconnect(bridge: RuntimeClient, repoRoot?: string): Promise<void> {
+  await workspaceOp(bridge, "mcp.gateway.reconnect", { ...(repoRoot ? { repoRoot } : {}) }, 120_000);
 }
 export async function bridgeMcpGatewaySetOAuthSecret(bridge: RuntimeClient, url: string, clientId: string, value: string): Promise<void> {
   await workspaceOp(bridge, "mcp.gateway.setOAuthSecret", { url, clientId, value });
@@ -2726,9 +2741,10 @@ export async function bridgeMcpGatewaySetHeaderSecret(
 export async function bridgeMcpGatewayBeginAuth(
   bridge: RuntimeClient,
   server: string,
+  repoRoot?: string,
 ): Promise<string> {
   const r = (await workspaceOp(bridge, "mcp.gateway.beginAuth", {
-    server,
+    server, ...(repoRoot ? { repoRoot } : {}),
   }, 60_000)) as {
     authorizationUrl?: string;
   };
@@ -2742,9 +2758,10 @@ export async function bridgeMcpGatewayCompleteAuth(
   bridge: RuntimeClient,
   server: string,
   code: string,
+  repoRoot?: string,
 ): Promise<GatewayBackendStatusWire> {
   const r = (await workspaceOp(bridge, "mcp.gateway.completeAuth", {
-    server,
+    server, ...(repoRoot ? { repoRoot } : {}),
     code,
   }, 120_000)) as {
     status: GatewayBackendStatusWire;
@@ -2759,15 +2776,11 @@ export async function bridgeSettingsWrite(
   layer: Exclude<SettingsLayer, "managed">,
   patch: SettingsDoc,
   repoRoot?: string,
-  options: { confirmDesignDirectoryChange?: boolean } = {},
 ): Promise<SettingsWriteWire> {
   return (await workspaceOp(bridge, "settings.write", {
     layer,
     patch,
     ...(repoRoot ? { repoRoot } : {}),
-    ...(options.confirmDesignDirectoryChange
-      ? { confirmDesignDirectoryChange: true }
-      : {}),
   })) as SettingsWriteWire;
 }
 

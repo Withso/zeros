@@ -30,6 +30,15 @@ it("pins native cwd, full permissions and a model at create, resume and every se
   expect(f.events.at(-1)).toMatchObject({ kind: "result", turnId: "one", value: { result: { status: "finished" } } }); await f.host.dispose();
 });
 
+it("passes admitted worker MCP servers into Cursor create and resume", async () => {
+  for (const nativeSessionId of [undefined, "native-agent"]) {
+    const f = fixture(), mcpServers = { tools: { type: "http" as const, url: "http://127.0.0.1:3222/mcp/fixture", headers: { Authorization: "Bearer fixture-mcp-secret" } } };
+    await f.host.open({ cwd: "/fixture", model: "composer-2.5", nativeSessionId, mcpServers });
+    expect(f.calls[0]).toMatchObject({ options: { mcpServers } });
+    await f.host.dispose();
+  }
+});
+
 it("records Stop while send is pending and cancels the run as soon as it becomes available", async () => {
   const f = fixture(), pending = deferred<NativeRun>(); f.agent.send = async () => pending.promise;
   await f.host.open({ cwd: "/fixture", model: "composer-2.5" });

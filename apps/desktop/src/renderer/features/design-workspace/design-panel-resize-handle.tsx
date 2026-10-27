@@ -5,7 +5,6 @@ import React, {
   type RefObject,
 } from "react";
 
-import { useResizeHint } from "../../shell/use-resize-hint";
 import { beginContinuousLayoutResize } from "../../shell/terminal/continuous-layout-resize";
 import { cn } from "../../shared/ui/cn";
 import { beginDesignPointerGesture } from "./design-pointer-gesture";
@@ -61,7 +60,6 @@ export function DesignPanelResizeHandle({
   className,
   children,
 }: DesignPanelResizeHandleProps) {
-  const { hintHandlers, hint } = useResizeHint("Drag to resize");
   const handleRef = useRef<HTMLDivElement | null>(null);
   const gestureCancelRef = useRef<(() => void) | null>(null);
   const vertical = edge === "bottom";
@@ -228,41 +226,48 @@ export function DesignPanelResizeHandle({
       event.preventDefault();
       onCommit(clampValue(next, containerSize));
     },
-    [active, clampValue, edge, maximum, measure, minimum, onCommit, value, vertical],
+    [
+      active,
+      clampValue,
+      edge,
+      maximum,
+      measure,
+      minimum,
+      onCommit,
+      value,
+      vertical,
+    ],
   );
 
   return (
-    <>
-      <div
-        ref={handleRef}
-        data-design-panel-resize={edge}
-        role="separator"
-        aria-orientation={vertical ? "horizontal" : "vertical"}
-        aria-label={ariaLabel}
-        aria-controls={controlsId}
-        aria-valuemin={minimum}
-        aria-valuemax={maximum}
-        aria-valuenow={Math.round(value)}
-        tabIndex={0}
-        className={cn(
-          vertical
-            ? "absolute inset-x-0 -bottom-1 z-20 h-2 cursor-ns-resize"
-            : "absolute inset-y-0 z-20 w-1.5 cursor-ew-resize",
-          edge === "right" && "right-0",
-          edge === "left" && "left-0",
-          className,
-        )}
-        onPointerDown={onPointerDown}
-        onKeyDown={onKeyDown}
-        onFocus={syncAria}
-        onDoubleClick={() => {
-          if (active) onCommit(defaultValue);
-        }}
-        {...hintHandlers}
-      >
-        {children}
-      </div>
-      {hint}
-    </>
+    <div
+      ref={handleRef}
+      data-design-panel-resize={edge}
+      role="separator"
+      aria-orientation={vertical ? "horizontal" : "vertical"}
+      aria-label={ariaLabel}
+      aria-controls={controlsId}
+      aria-valuemin={minimum}
+      aria-valuemax={maximum}
+      aria-valuenow={Math.round(value)}
+      tabIndex={0}
+      className={cn(
+        vertical
+          ? "absolute inset-x-0 -bottom-1 z-2 h-2 cursor-ns-resize"
+          : "absolute inset-y-0 z-2 w-1.5 cursor-ew-resize",
+        "focus-visible:outline-highlighted-bright focus-visible:outline-1 focus-visible:-outline-offset-1",
+        edge === "right" && "right-0",
+        edge === "left" && "left-0",
+        className,
+      )}
+      onPointerDown={onPointerDown}
+      onKeyDown={onKeyDown}
+      onFocus={syncAria}
+      onDoubleClick={() => {
+        if (active) onCommit(defaultValue);
+      }}
+    >
+      {children}
+    </div>
   );
 }

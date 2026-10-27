@@ -1,11 +1,28 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  designFrameDisplayName,
   designFrameLayerLabel,
+  designRuntimeLayerDisplayName,
   designRuntimeLayerLabel,
 } from "../design-layer-label";
 
 describe("design layer labels", () => {
+  it("shows authored names without changing the type used by icons and tools", () => {
+    const layer = { tag: "div", name: "Hero content", children: [] };
+    expect(designRuntimeLayerDisplayName(layer)).toBe("Hero content");
+    expect(designRuntimeLayerLabel(layer)).toBe("Frame");
+    expect(designRuntimeLayerDisplayName({ tag: "div", name: "div", layerName: "div" })).toBe("div");
+    expect(designFrameDisplayName({ title: "Checkout", kind: "frame" })).toBe("Checkout");
+    expect(designFrameDisplayName({ title: "Caption", kind: "text" })).toBe("Caption");
+  });
+
+  it("falls back to the layer type for unnamed elements and frames", () => {
+    expect(designRuntimeLayerDisplayName({ tag: "main", name: "main" })).toBe("Frame");
+    expect(designRuntimeLayerDisplayName({ tag: "img", name: " " })).toBe("Image");
+    expect(designFrameDisplayName({ title: " ", kind: "text" })).toBe("Text");
+  });
+
   it("uses the small designer-facing vocabulary instead of HTML names", () => {
     expect(
       designRuntimeLayerLabel({

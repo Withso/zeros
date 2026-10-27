@@ -8,7 +8,7 @@ import { createRoot } from "react-dom/client";
 import { RuntimeClient } from "../platform/bridge/ws-client";
 import { BridgeProvider } from "../platform/bridge/use-bridge";
 import type { BridgeMessage } from "../platform/bridge/messages";
-import type { Workspace } from "../platform/git";
+import type { Workspace, StatusResult, ChangeCounts, PR } from "../platform/git";
 import {
   notifyContextGraphChanged,
   type ContextGraphItemWire,
@@ -19,7 +19,8 @@ import {
   OPEN_OVERLAY_SELECTOR,
   shouldReclaimComposerFocus,
 } from "../features/agent/composer-focus";
-import { upsertProject } from "../state/projects-store";
+import { loadProjects, upsertProject } from "../state/projects-store";
+import { invalidateCreateSourceCaches } from "../state/read-caches";
 import { selectWorkbench, useWorkspaceStore } from "../state/workspace-store";
 import { useChatPanesStore } from "../state/chat-panes-store";
 import { DEFAULT_PANE_LAYOUT, splitLeaf } from "../state/chat-panes";
@@ -30,11 +31,13 @@ import {
   ConversationSummaryIsland,
 } from "../shell/conversation/conversation-summary";
 import { WorkspaceHeader } from "../shell/conversation/workspace-header";
+import { isGithubDotComRemote } from "../shell/pr/github-url";
 
 const repoA = "/summary-fixture/a";
 const repoB = "/summary-fixture/b";
 const folderA = `${repoA}/worktree`;
 const folderB = `${repoB}/worktree`;
+let alternateRemote: string | null = null;
 // This fixture exercises every destination, including GitHub Review. Plain
 // folder and local-only Review absence live in harness-folder-workspace.
 upsertProject({
@@ -51,7 +54,7 @@ upsertProject({
   isGitRepository: true,
   originUrl: "https://github.com/example/summary-b.git",
 });
-const workspaces: Workspace[] = [
+let workspaces: Workspace[] = [
   { id: "ws_summary_a", repoRoot: repoA, repoSlug: "a", path: folderA },
   { id: "ws_summary_b", repoRoot: repoB, repoSlug: "b", path: folderB },
 ].map((workspace) => ({
@@ -72,9 +75,6 @@ const listeners = new Map<string, Set<(message: BridgeMessage) => void>>();
 const messages: Array<Record<string, unknown>> = [];
 const overlayIntents: boolean[] = [];
 listenForNativeSurfaceOverlayIntent((open) => overlayIntents.push(open));
-let failContext = false;
-let delayContext = false;
-let releaseContext: (() => void) | undefined;
 let runCount = 2;
 const runs = new Map<string, Record<string, unknown>>();
 let previewLog = "Local: http://localhost:5173/\n";
@@ -82,6 +82,19 @@ let changeLines = { additions: 54364, deletions: 3 };
 let failLines = false;
 let delayLines = false;
 let releaseLines: (() => void) | undefined;
+let gitStatusA: StatusResult = {
+  staged: [], unstaged: [], untracked: [], conflicted: [], conflictState: null,
+  ahead: 2, behind: 0, upstream: "origin/summary/a",
+  summary: { branch: "summary/a", base: { ref: "origin/main", behind: 4 } },
+};
+let gitCountsA: ChangeCounts = { all: 8, uncommitted: 5, staged: 2, unstaged: 3 };
+let prA: PR | null = null;
+let failGit = false;
+let delayGit = false;
+let releaseGit: (() => void) | undefined;
+let holdMutation = false;
+let releaseMutation: (() => void) | undefined;
+let pullConflicts = false;
 let contextItems = [
   "Earlier notes.md",
   "Design reference.png",
@@ -92,6 +105,11 @@ const emit = (type: string, payload: Record<string, unknown> = {}) => {
   for (const callback of listeners.get(type) ?? [])
     callback({ type, ...payload } as BridgeMessage);
 };
+function setPr(state: Workspace["prState"], mergeableState = state === "draft" ? "draft" : "clean") {
+  prA = state ? { number: 7, state, mergeableState, baseBranch: "main", headBranch: "summary/a", isMergeable: true, mergedAt: null } as PR : null;
+  workspaces = workspaces.map(row => row.id === "ws_summary_a" ? { ...row, prNumber: state ? 7 : null, prState: state } : row);
+  emit("DB_CHANGED", { kinds: ["workspaces"], workspaceIds: ["ws_summary_a"] });
+}
 Object.defineProperty(RuntimeClient.prototype, "status", {
   get: () => "connected",
 });
@@ -115,6 +133,32 @@ RuntimeClient.prototype.request = async function <
     (row) => row.id === params.workspaceId,
   )?.path;
   let result: unknown = {};
+  if (message.op === "git.status") {
+    result = structuredClone(workspaceFolder === folderB
+      ? { ...gitStatusA, ahead: 0, behind: 0, conflicted: [], conflictState: null, summary: { branch: "summary/b", base: null } }
+      : gitStatusA);
+    if (delayGit && workspaceFolder === folderA) {
+      delayGit = false;
+      await new Promise<void>(resolve => { releaseGit = resolve; });
+    }
+    if (failGit) throw new Error("Git fixture failure");
+  }
+  if (message.op === "git.changeCounts") result = workspaceFolder === folderB ? { all: 1, uncommitted: 1, staged: 0, unstaged: 1 } : { ...gitCountsA };
+  if (message.op === "gh.prGet") result = prA;
+  if (message.op === "gh.repoAccess") result = { state: "ok" };
+  if (message.op === "git.push" || message.op === "git.pull" || message.op === "gh.prMarkReady") {
+    if (holdMutation) await new Promise<void>(resolve => { releaseMutation = resolve; });
+    if (message.op === "git.push") {
+      gitStatusA = { ...gitStatusA, ahead: 0 };
+      result = { remoteRef: "origin/summary/a", ahead: 0, behind: gitStatusA.behind };
+    } else if (message.op === "git.pull") {
+      gitStatusA = { ...gitStatusA, behind: 0, conflictState: pullConflicts ? "rebase" : null, conflicted: pullConflicts ? [{ path: "conflict.ts", status: "conflicted" }] : [] };
+      result = { applied: 1, conflicts: pullConflicts ? ["conflict.ts"] : [] };
+    } else {
+      setPr("ready");
+      result = prA;
+    }
+  }
   if (message.op === "workspace.list") {
     result = {
       workspaces:
@@ -141,6 +185,23 @@ RuntimeClient.prototype.request = async function <
       sources: {},
       warnings: [],
     };
+  if (message.op === "git.repoBranchCatalog") {
+    const project = loadProjects().find(project => project.repoRoot === params.repoRoot);
+    const custom = params.repoRoot === repoA ? alternateRemote : null;
+    const url = custom ?? project?.originUrl ?? null;
+    const name = custom ? "upstream" : "origin";
+    result = {
+      remotes: url ? [{ name, url, isGitHub: isGithubDotComRemote(url) }] : [],
+      effectiveRemote: name,
+      remoteExists: !!url,
+      baseExplicit: false,
+      effectiveBase: "main",
+      detectedDefault: url ? "main" : null,
+      listedRemote: url ? name : null,
+      branchSource: url ? "remote" : "local",
+      branches: [{ name: "main", lastCommitDate: 1 }],
+    };
+  }
   if (message.op === "context.graph.list") {
     const names =
       workspaceFolder === folderB ? ["Workspace B notes.md"] : contextItems;
@@ -153,11 +214,6 @@ RuntimeClient.prototype.request = async function <
       bytes: 10,
       mtimeMs: index + 1,
     }));
-    if (delayContext && workspaceFolder === folderA)
-      await new Promise<void>((resolve) => {
-        releaseContext = resolve;
-      });
-    if (failContext) throw new Error("Context fixture failure");
     result = { exists: true, items, truncated: false };
   }
   if (message.op === "file.tree") result = { files: [] };
@@ -222,8 +278,32 @@ useWorkspaceStore.setState({
 Object.assign(window, {
   __summaryHarness: {
     messages,
+    setAlternateRemote: (url: string | null) => {
+      alternateRemote = url;
+      invalidateCreateSourceCaches(false);
+    },
     overlayIntent: () => overlayIntents.at(-1) ?? false,
     state: () => selectWorkbench(useWorkspaceStore.getState()),
+    setGit: (status: Partial<StatusResult>, counts: Partial<ChangeCounts> = {}) => {
+      gitStatusA = { ...gitStatusA, ...status };
+      gitCountsA = { ...gitCountsA, ...counts };
+      triggerGitRefresh(folderA);
+    },
+    setPr,
+    setOrganization: (organizationId: string | null) => {
+      workspaces = workspaces.map(row => row.id === "ws_summary_a" ? { ...row, organizationId } : row);
+      emit("DB_CHANGED", { kinds: ["workspaces"], workspaceIds: ["ws_summary_a"] });
+    },
+    setPlacement: (placement: "local" | "cloud") => {
+      workspaces = workspaces.map(row => row.id === "ws_summary_a" ? { ...row, placement } : row);
+      emit("DB_CHANGED", { kinds: ["workspaces"], workspaceIds: ["ws_summary_a"] });
+    },
+    failGit: (fail: boolean) => { failGit = fail; triggerGitRefresh(folderA); },
+    delayGit: () => { delayGit = true; triggerGitRefresh(folderA); },
+    releaseGit: () => { releaseGit?.(); },
+    holdMutation: () => { holdMutation = true; },
+    releaseMutation: () => { holdMutation = false; releaseMutation?.(); },
+    pullConflicts: (value: boolean) => { pullConflicts = value; },
     setRuns: (count: number) => {
       runCount = count;
       emit("DB_CHANGED", { kinds: ["settings"] });
@@ -263,18 +343,6 @@ Object.assign(window, {
     changeContext: (names: string[]) => {
       contextItems = names;
       notifyContextGraphChanged(folderA);
-    },
-    failContext: (value: boolean) => {
-      failContext = value;
-      notifyContextGraphChanged(folderA);
-    },
-    delayContext: () => {
-      delayContext = true;
-      notifyContextGraphChanged(folderA);
-    },
-    releaseContext: () => {
-      delayContext = false;
-      releaseContext?.();
     },
     switchFolder: (folder: "a" | "b") =>
       useWorkspaceStore.getState().dispatch({

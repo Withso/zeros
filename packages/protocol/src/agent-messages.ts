@@ -15,6 +15,7 @@ import type {
   AgentMessagePhase,
   ModeSwitchUpdate,
   ModelFallbackInfo,
+  WakeupNoticeInfo,
   ModelSettingsSummary,
   SessionNotification,
   ToolCall,
@@ -22,20 +23,27 @@ import type {
   ResourceLinkContent,
 } from "./agent-events";
 
+import type { TurnSummary } from "./turns";
+
 export type AgentMessageRole = "user" | "agent" | "thought" | "system";
 
 export interface AgentTextMessage {
   id: string;
   kind: "text";
   role: AgentMessageRole;
+  /** Worker-recorded changes, mirrored with the opening user prompt. */
+  turnSummary?: TurnSummary;
   text: string;
   /** Payload-free durable tombstone for an explicitly withdrawn native frame. */
   retracted?: true;
   retractedToolCallId?: string;
   modelFallback?: ModelFallbackInfo;
+  /** Optional so older persisted transcripts remain readable. */
+  wakeupNotice?: WakeupNoticeInfo;
   createdAt: number;
-  /** Time of the last changed text chunk. Older stored messages omit it.
-   * Extends a parent reply's footer through native background continuations. */
+  /** Time of the last changed text chunk or worker-recorded turn summary.
+   * Older stored messages omit it. Extends a parent reply's footer through
+   * native background continuations. */
   updatedAt?: number;
   /** A prompt stopped by provider authentication. Its original expanded text
    * survives Settings navigation and reload as context for the next user send;
@@ -550,6 +558,18 @@ export function applyUpdate(
         : message;
       return next;
     }
+    case "wakeup_notice": {
+      if (!upd.noticeId || (upd.source !== "loop_wakeup" && upd.source !== "schedule_wakeup")) return messages;
+      const messageId = `wakeup-${upd.noticeId}`;
+      if (messages.some(message => message.id === messageId || (message.kind === "text" && message.messageId === messageId))) return messages;
+      const info: WakeupNoticeInfo = {
+        source: upd.source,
+        ...(typeof upd.reason === "string" && upd.reason.trim() ? { reason: upd.reason.trim() } : {}),
+        ...(typeof upd.scheduledFor === "number" && Number.isFinite(upd.scheduledFor) && upd.scheduledFor > 0 && upd.scheduledFor <= 8.64e15 ? { scheduledFor: upd.scheduledFor } : {}),
+      };
+      return [...messages, { id: messageId, messageId, kind: "text", role: "agent", phase: "commentary",
+        text: wakeupNoticeText(info), wakeupNotice: info, createdAt: Date.now() }];
+    }
     case "model_fallback": {
       const messageId = `model-fallback-${upd.noticeId}`;
       const { provider, fromModel, toModel, scope, reason, fromSettings, toSettings } = upd;
@@ -822,6 +842,15 @@ export function modelSettingsText(
     settings?.fast ? "Fast" : null,
   ].filter((part): part is string => !!part);
   return parts.length > 0 ? parts.join(" ") : null;
+}
+
+/** Readable fallback for persisted status; only the renderer formats due time. */
+export function wakeupNoticeText(info: WakeupNoticeInfo, formatTime?: (timestamp: number) => string): string {
+  const loop = info.source === "loop_wakeup";
+  if (!info.reason) return loop ? "Woke up on schedule" : "Scheduled task started";
+  // A known task keeps its name even when its next due time is unknown.
+  const label = `${loop ? "Woke up for" : "Scheduled task"} “${info.reason}”`;
+  return formatTime && info.scheduledFor !== undefined ? `${label} · due ${formatTime(info.scheduledFor)}` : label;
 }
 
 /** Plain transcript narration for a fallback. `model` and `fromModel` are

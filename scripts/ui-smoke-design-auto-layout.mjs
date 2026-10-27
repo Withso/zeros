@@ -1,8 +1,10 @@
 import { expect } from "@playwright/test";
+import { runDesignLayeredLayoutSmoke } from "./ui-smoke-design-layered-layout.mjs";
 
 // Real runtime measurements prove resizing behavior; no authored Design files
 // are touched. The document and its mutation/history lane are the app harness.
 export async function runDesignAutoLayoutSmoke({ page, check }) {
+  await runDesignLayeredLayoutSmoke({ page, check });
   const origin = new URL(page.url()).origin;
   await page.setViewportSize({ width: 1280, height: 900 });
   await page.goto(

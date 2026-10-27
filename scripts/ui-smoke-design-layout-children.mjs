@@ -56,9 +56,19 @@ export async function runDesignLayoutChildrenSmoke({ page, waitFor, check }) {
       "Distribute vertically|Distribute horizontally|Resize to fill|Resize to fit",
   );
   await page.keyboard.press("Escape");
+  // Radix restores trigger focus on the task after the menu unmounts, so an
+  // immediate activeElement sample races that handoff.
   check(
     "Escape closes the layout menu and restores its trigger focus",
-    await menu.evaluate((button) => document.activeElement === button),
+    await waitFor(
+      () =>
+        menu.evaluate(
+          (button) =>
+            document.activeElement === button &&
+            button.getAttribute("aria-expanded") === "false",
+        ),
+      "children-menu-escape-focus",
+    ),
   );
   const choose = async (name) => {
     await menu.click();
@@ -294,14 +304,17 @@ export async function runDesignLayoutChildrenSmoke({ page, waitFor, check }) {
   );
   for (const width of [220, 280, 420]) {
     await page
-      .locator("[data-design-workspace-surface]")
+      .locator("[data-design-canvas-area]")
       .evaluate((element, width) => {
         element.style.setProperty("--zeros-design-style-width", `${width}px`);
       }, width);
     check(
       `child controls fit a ${width}px inspector`,
       await layout.evaluate(
-        (element) => element.scrollWidth <= element.clientWidth,
+        (element, expectedWidth) =>
+          element.scrollWidth <= element.clientWidth &&
+          Math.abs(element.closest("[data-design-floating-panel]").getBoundingClientRect().width - expectedWidth) < 1,
+        width,
       ),
     );
   }

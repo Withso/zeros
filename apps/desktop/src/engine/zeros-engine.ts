@@ -1,3 +1,12 @@
+import { LaunchedMcpServers } from "./agents/gateway/launched-servers";
+import { McpVaultConfirmation } from "./agents/gateway/vault-confirmation";
+import { McpHostControl } from "./agents/gateway/host-control";
+import { OrganizationMcpRuntime } from "./agents/gateway/organization-runtime";
+import { runFile } from "./git/git-exec";
+import { McpOAuthCallback } from "./agents/gateway/oauth-callback";
+import { ScopedMcpGateways } from "./agents/gateway/scoped-gateways";
+import { commitMcpCredentials, mcpSaveInputSchema } from "./settings/mcp-configuration";
+import { probeMcpServer } from "./agents/gateway/probe";
 import { claudeOrganizationStartupCode } from "@zeros/protocol/claude-startup-notice";
 import { conversationModePort } from "./design/conversation-mode";
 import { setDesignCaptureConfig } from "./design/capture-client";
@@ -28,7 +37,9 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { randomBytes } from "node:crypto";
 
-import { DESIGN_CATALOG_READ_CAPABILITY, DESIGN_CATALOG_READ_OPERATION } from "@zeros/protocol/design-catalog";
+import { DESIGN_CATALOG_READ_CAPABILITY, DESIGN_CATALOG_READ_OPERATION, DESIGN_LAZY_PREPARATION_CAPABILITY } from "@zeros/protocol/design-catalog";
+import { DESIGN_PREVIEW_JOBS_CAPABILITY } from "@zeros/protocol/design-capture";
+import { DESIGN_SOURCE_SURFACES_CAPABILITY } from "@zeros/protocol/design-surface";
 import {
   personalRepoRoot,
   personalWorkspaceRoot,
@@ -180,7 +191,7 @@ import {
   runActionOneShot,
   runSessionId,
 } from "@zeros/protocol/run-actions";
-import { getAuthStatus, setTokenStore } from "./git/github";
+import { getAuthStatus, setTokenStore, parseGitHubRemote } from "./git/github";
 import { seedProviderCredentials } from "./agents/provider-credentials";
 import {
   closeGitCredentialBroker,
@@ -207,7 +218,7 @@ import { RoutingExecutionBoundary } from "./agents/containment/routing-boundary"
 import { createRepoTaskBoundaryFactory } from "./agents/containment/repo-task-boundary";
 import type { ExecutionBoundary } from "./agents/containment/types";
 import { buildPtyEnv } from "./pty/shell-setup";
-import { resolveMcpServers } from "./agents/mcp-registry";
+import { resolveMcpServers, resolveMcpServersForRepo, type GatewayBackend } from "./agents/mcp-registry";
 import {
   CONFIG_ROOT_ENV_VARS,
   stripEngineAuthorityEnv,
@@ -261,6 +272,8 @@ import {
   type AgentTextMessage,
 } from "@zeros/protocol/agent-messages";
 import { LocalSessionUpdateBatcher } from "./agents/local-session-update-batcher";
+import { CONVERSATION_REPLAY_CAPABILITY, isConversationReplayPreamble, synthesizeReplayPrompt } from "@zeros/protocol/conversation-replay";
+import { acknowledgeConversationContext, getConversationContext } from "./db/conversation-context";
 import {
   PTY_AGENT_AUTH_CWD,
   type AgentPromptBubble,
@@ -278,8 +291,11 @@ import {
   flushStreamingChatMessages,
   queueStreamingChatMessages,
   upsertChatMessagesBulk,
+  windowChatMessages,
+  WINDOW_MAX_ROWS,
 } from "./db/messages";
 import { BootPhaseTimer } from "./boot-phase-timer";
+import { startStartupMaintenance } from "./startup-maintenance";
 import {
   startTurn as startTurnRow,
   finishTurn as finishTurnRow,
@@ -807,6 +823,50 @@ export class ZerosEngine {
   /** The local MCP gateway (auth:"oauth" backends fronted on localhost). Lazily
    *  started when the user-level settings declare a gateway-managed server. */
   private mcpGateway: McpGateway | null = null;
+  private readonly scopedMcpGateways = new ScopedMcpGateways(() => this.ensureMcpVault(), () => this.mcpClientOrigin(), () => this.ensureMcpCallback());
+  private mcpCallback?: McpOAuthCallback;
+  private ensureMcpCallback(): McpOAuthCallback { return this.mcpCallback ??= new McpOAuthCallback(this.port + ENGINE_PORT_SPAN + 1); }
+  private readonly mcpHost = new McpHostControl(line => {
+    const fd = Number(process.env.ZEROS_CONTROL_FD);
+    if (!Number.isInteger(fd) || fd <= 2) throw new Error("MCP host is unavailable.");
+    fs.writeSync(fd, line);
+  });
+  private readonly organizationMcp = new OrganizationMcpRuntime({
+    host: this.mcpHost,
+    workspace: id => {
+      const row = getWorkspaceById(id);
+      return row ? { organizationId: row.organizationId, placement: row.placement, repoRoot: row.repoRoot, path: row.path } : undefined;
+    },
+    repository: async repoRoot => {
+      const { stdout } = await runFile("git", ["-C", repoRoot, "remote", "get-url", "origin"], { maxBufferBytes: 4096 });
+      const { owner, repo } = parseGitHubRemote(stdout.trim());
+      return `${owner}/${repo}`;
+    },
+    gateway: async (key, backends) => {
+      const gateway = await this.scopedMcpGateways.get(key, backends);
+      this.agents.registerGatewayCatalog(gateway.url, () => gateway.catalogRevision);
+      return gateway.url;
+    },
+    removeGateway: key => this.scopedMcpGateways.remove(key),
+  });
+  private readonly vaultConfirmation = new McpVaultConfirmation(line => {
+    const fd = Number(process.env.ZEROS_CONTROL_FD);
+    if (!Number.isInteger(fd) || fd <= 2) throw new Error("Secure storage is unavailable.");
+    fs.writeSync(fd, line);
+  });
+  private vaultTransactionCount = 0;
+  private readonly launchedMcp: LaunchedMcpServers;
+  private readonly mcpProbes = new Map<string, AbortController>();
+  private mcpClientOrigin(): string | undefined {
+    return process.env.ZEROS_CONTROL_PLANE_URL || process.env.VITE_CONTROL_PLANE_URL || process.env.ZEROS_ACCOUNT_JWT_AUD;
+  }
+  private async projectMcpGateway(root: string, backends?: readonly GatewayBackend[]): Promise<McpGateway | null> {
+    const resolved = backends ?? (await resolveMcpServersForRepo(root)).gatewayBackends;
+    if (!resolved.length && !this.scopedMcpGateways.roots().includes(root)) return null;
+    const gateway = await this.scopedMcpGateways.get(root, resolved);
+    this.agents?.registerGatewayCatalog(gateway.url, () => gateway.catalogRevision);
+    return gateway;
+  }
   /** Why the gateway isn't running when it should be (start/reload failure, e.g.
    *  the port is taken) — surfaced via mcp.gateway.status so the UI shows
    *  "Gateway unavailable" instead of an OAuth server silently vanishing.
@@ -1049,6 +1109,7 @@ export class ZerosEngine {
   private actualPort = 0;
   private framework: Framework = "unknown";
   private running = false;
+  private startupMaintenance?: ReturnType<typeof startStartupMaintenance>;
   constructor(options?: EngineOptions) {
     this.root = options?.root
       ? path.resolve(options.root)
@@ -1073,6 +1134,7 @@ export class ZerosEngine {
     const repoTaskBoundaryFactory = createRepoTaskBoundaryFactory(
       this.executionBoundary,
     );
+    this.launchedMcp = new LaunchedMcpServers(repoTaskBoundaryFactory);
     configureLoginShellPathRunner({
       cacheKey: `execution:${this.executionBoundary.backend}:${this.root}`,
       run: async (command, args, { timeoutMs }) => {
@@ -1197,7 +1259,30 @@ export class ZerosEngine {
     this.workspace = new WorkspaceService(this.root);
     this.workspace.setRepoTaskBoundaryFactory(repoTaskBoundaryFactory);
     // Let the mcp.gateway.* ops reach the (lazily-created) gateway instance.
-    this.workspace.setGatewayAccessor(() => this.mcpGateway);
+    this.workspace.setGatewayAccessor(async root => {
+      if (root) return this.projectMcpGateway(root);
+      await this.gatewayReloadChain;
+      return this.mcpGateway;
+    });
+    this.workspace.setMcpCommit(async (server, changes, root, write, previous) => {
+      this.vaultTransactionCount++;
+      if (this.vaultPersistTimer) { clearTimeout(this.vaultPersistTimer); this.vaultPersistTimer = null; }
+      try {
+        const result = await commitMcpCredentials(this.ensureMcpVault(), server, changes, root, write, previous, snapshot => this.vaultConfirmation.persist(snapshot));
+        this.reloadGateway();
+        return result;
+      } finally { this.vaultTransactionCount--; this.scheduleVaultPersist(); }
+    });
+    this.workspace.setMcpProbe(async (server, changes, root, id, cancel) => {
+      if (!id || id.length > 128) throw new Error("Invalid connection check.");
+      this.mcpProbes.get(id)?.abort();
+      if (cancel) { this.mcpProbes.delete(id); return { ok: true }; }
+      if (this.mcpProbes.size >= 4) throw new Error("Wait for the current connection checks to finish.");
+      const secrets = mcpSaveInputSchema.shape.secrets.parse(changes) ?? {};
+      const abort = new AbortController(); this.mcpProbes.set(id, abort);
+      try { return await probeMcpServer(server, secrets, this.ensureMcpVault(), root, abort.signal); }
+      finally { if (this.mcpProbes.get(id) === abort) this.mcpProbes.delete(id); }
+    });
     this.workspace.setSessionToolAccess({
       inventory: (agentId, sessionId, cwd) =>
         this.agents.readSessionToolInventory(agentId, sessionId, cwd),
@@ -1375,6 +1460,8 @@ export class ZerosEngine {
     this.workspace.setWorkspaceProcessReaper(
       async (workspaceId, worktreePath) => {
         await revokeDesignVerification(workspaceId);
+        await this.organizationMcp.remove(workspaceId);
+        await this.launchedMcp.removeWhere(entry => entry.owner === workspaceId);
         const root = path.resolve(worktreePath);
         const isUnderRoot = (candidate: string): boolean => {
           const relative = path.relative(root, path.resolve(candidate));
@@ -1718,11 +1805,16 @@ export class ZerosEngine {
         );
         if (!parsed) return null;
         const { workspaceId, resourcePath } = parsed;
+        const surface = url.searchParams.get("surface");
+        const theme = url.searchParams.get("theme");
+        if ((surface !== null && surface !== "1") ||
+            (theme !== null && (surface !== "1" || !/^[a-z][a-z0-9_-]{0,63}$/.test(theme)))) return null;
         const resource = await this.workspace.readDesignProtocolResource(
           workspaceId,
           {
             path: resourcePath,
             sourceVersion: url.searchParams.get("v"),
+            ...(surface === "1" ? { surface: true, theme } : {}),
           },
         );
         if (!resource) return null;
@@ -1904,6 +1996,9 @@ export class ZerosEngine {
           const executionId =
             notification.executionId ?? notification.sessionId;
           const executionAgentId = this.sessionAgent.get(executionId);
+          // Admission registers the route before provider I/O. Once retired,
+          // late output (including native identity) has no conversation owner.
+          if (!executionAgentId) return;
           if (executionAgentId && executionAgentId !== agentId) {
             console.warn(
               `[agents] ${agentId} emitted an update for ${executionAgentId}'s execution; update dropped`,
@@ -2250,6 +2345,27 @@ export class ZerosEngine {
     };
 
     this.agents = new AgentGateway(backendOpts);
+    this.agents.setMcpLauncher((servers, cwd, env, workspaceId, signal) => {
+      const row = workspaceId ? getWorkspaceById(workspaceId) : undefined;
+      return this.launchedMcp.resolve(servers, cwd, env, workspaceId ?? cwd, row?.repoRoot ?? cwd, Boolean(row?.organizationId), signal);
+    });
+    this.agents.setOrganizationMcpResolver((id, env, signal) => this.organizationMcp.resolve(id, env, signal));
+    this.agents.setScopedMcpGateway(async (root, backends) => {
+      const gateway = await this.projectMcpGateway(root, backends);
+      return gateway?.url ?? null;
+    });
+    this.agents.setMcpSecretResolver((servers, env) => {
+      const vault = this.ensureMcpVault();
+      for (const server of servers) {
+        if (server.transport !== "stdio" || !server.credentialKey) continue;
+        const saved = vault.readEntry(server.credentialKey)?.env;
+        for (const [name, alias] of Object.entries(server.envFromEnv ?? {})) {
+          const value = saved?.[name];
+          if (value === undefined) throw new Error(`The saved variable ${name} for MCP server ${server.name} is unavailable. Edit the server to restore it.`);
+          env[alias] = value;
+        }
+      }
+    });
     this.loadMcpRegistry(); // boot-load; re-run by the settings watcher on edit
 
     const engineStartTime = Date.now();
@@ -2303,7 +2419,9 @@ export class ZerosEngine {
       const gw = new McpGateway({
         port: this.port + ENGINE_PORT_SPAN,
         callbackPort: this.port + ENGINE_PORT_SPAN + 1,
+        callback: this.ensureMcpCallback(),
         vault: this.ensureMcpVault(),
+        clientMetadataOrigin: this.mcpClientOrigin(),
       });
       await gw.start(gatewayBackends);
       this.mcpGateway = gw;
@@ -2354,7 +2472,14 @@ export class ZerosEngine {
         console.warn("[Zeros] MCP gateway reload failed:", this.gatewayError);
       }
     };
-    this.gatewayReloadChain = this.gatewayReloadChain.then(run, run);
+    const refresh = async () => {
+      await run();
+      for (const root of this.scopedMcpGateways.roots().filter(root => !root.startsWith("organization:"))) {
+        try { await this.scopedMcpGateways.get(root, (await resolveMcpServersForRepo(root)).gatewayBackends, true); }
+        catch { /* A scoped failure is reported by that project’s next operation. */ }
+      }
+    };
+    this.gatewayReloadChain = this.gatewayReloadChain.then(refresh, refresh);
   }
 
   /** The engine-level OAuth token vault, created on first use and seeded from the
@@ -2377,7 +2502,7 @@ export class ZerosEngine {
   /** Coalesce a burst of vault writes (e.g. a refresh that rotates several
    *  tokens) into one control-fd message. */
   private scheduleVaultPersist(): void {
-    if (this.vaultPersistTimer) return;
+    if (this.vaultPersistTimer || this.vaultTransactionCount) return;
     this.vaultPersistTimer = setTimeout(() => {
       this.vaultPersistTimer = null;
       this.flushVaultPersist();
@@ -2390,7 +2515,7 @@ export class ZerosEngine {
    *  stdout/main.log AND off the renderer. No-op when there's no control fd (a
    *  standalone / CLI engine has no safeStorage host to persist to). */
   private flushVaultPersist(): void {
-    if (!this.mcpVault) return;
+    if (!this.mcpVault || this.vaultTransactionCount) return;
     const fd = Number(process.env.ZEROS_CONTROL_FD);
     if (!Number.isInteger(fd) || fd <= 2) return;
     try {
@@ -2627,24 +2752,17 @@ export class ZerosEngine {
     }
     bootPhases.mark("seed");
 
-    // Mode/legacy-permission reconcile. First complete any mode transition a crash
-    // interrupted (the durable marker knows the intended direction). Then two
-    // routine invariants, per live stable owner, before any agent can spawn:
-    //
-    //   1. Every checkout sheds the process-independent ACLs installed by
-    //      historical builds. The current boundary is scoped to Zeros actors,
-    //      so external editors and coding platforms retain ordinary access.
-    //   2. The one-time cleanup is durable and idempotent. A cleanup failure is
-    //      logged and retried next boot, but is not an agent-admission gate.
+    // Complete interrupted view transitions before serving workspace rows.
+    // Historical filesystem ACL cleanup is optional maintenance after readiness;
+    // it is neither agent admission nor part of the current process boundary.
     try {
       const { listWorkspaces, getWorkspaceLifecycle } =
         await import("./git/state");
       const { reconcileDesignModeTransition } =
         await import("./git/design-mode");
-      const { cleanupLegacyDesignFilesystemGuards } =
-        await import("./design/workspace-lock");
       for (const workspace of listWorkspaces()) {
         if (
+          workspace.placement === "cloud" ||
           workspace.archivedAt != null ||
           getWorkspaceLifecycle(workspace.id) ||
           !fs.existsSync(workspace.path)
@@ -2658,17 +2776,6 @@ export class ZerosEngine {
             }`,
           );
         });
-        // Re-read: the transition reconcile may have flipped the row.
-        const settled = getWorkspaceById(workspace.id) ?? workspace;
-        await cleanupLegacyDesignFilesystemGuards(settled.path).catch(
-          (error) => {
-            console.warn(
-              `[Zeros] couldn't remove historical Design ACLs for ${workspace.id}; cleanup will retry next boot: ${
-                error instanceof Error ? error.message : String(error)
-              }`,
-            );
-          },
-        );
       }
     } catch {
       /* best-effort — failures are logged per workspace above */
@@ -2736,21 +2843,6 @@ export class ZerosEngine {
       /* best-effort — never block startup on seed migration */
     }
     bootPhases.mark("seed-migration");
-
-    // 1b.3. Repin surviving recovery snapshots without pruning shared archive
-    // refs, then clean up stale branch-ownership proofs. Runs after seedFromDisk
-    // so this instance's workspace rows and lifecycle journals are available.
-    try {
-      const {
-        pruneOrphanArchiveSnapshots,
-        pruneOrphanWorkspaceBranchOwnershipRefs,
-      } = await import("./git/worktree");
-      await pruneOrphanArchiveSnapshots();
-      await pruneOrphanWorkspaceBranchOwnershipRefs();
-    } catch {
-      /* best-effort — never block startup on retention */
-    }
-    bootPhases.mark("archive-refs");
 
     // 1b.5. One-time cleanup of phantom worktree "projects" in the repos table:
     // a stale renderer regex (pre Phase-0 relocation) upserted worktrees under
@@ -2963,6 +3055,40 @@ export class ZerosEngine {
     );
     const slowBootPhases = bootPhases.slowPhases();
     if (slowBootPhases) console.log(`[Zeros] slow boot phases: ${slowBootPhases}`);
+
+    // Recovery above owns readiness. Retention scans scale with every saved
+    // repository and must not hold chat/history/Git reads behind old archives.
+    this.startupMaintenance = startStartupMaintenance([
+      { name: "archive-refs", run: async (signal) => {
+        const { pruneOrphanArchiveSnapshots } = await import("./git/worktree");
+        await pruneOrphanArchiveSnapshots({ signal });
+      } },
+      { name: "branch-refs", run: async (signal) => {
+        const { pruneOrphanWorkspaceBranchOwnershipRefs } = await import("./git/worktree");
+        await pruneOrphanWorkspaceBranchOwnershipRefs({ signal });
+      } },
+      { name: "design-acls", run: async (signal) => {
+        const { cleanupLegacyDesignFilesystemGuards } = await import("./design/workspace-lock");
+        const { withWorkspaceMutation } = await import("./git/mutation-lock");
+        for (const workspace of listWorkspaces()) {
+          if (signal.aborted) break;
+          if (workspace.placement === "cloud" || workspace.archivedAt != null) continue;
+          // Archive/delete/move share this lane. Recheck after admission so a
+          // queued cleanup cannot walk a retired or replacement checkout.
+          await withWorkspaceMutation(workspace.path, async () => {
+            if (signal.aborted) return;
+            const current = getWorkspaceById(workspace.id);
+            if (!current || current.path !== workspace.path || current.placement === "cloud" ||
+                current.archivedAt != null || getWorkspaceLifecycleStatus(current.id).operation != null ||
+                !fs.existsSync(current.path)) return;
+            await cleanupLegacyDesignFilesystemGuards(current.path).catch(() => {
+              console.warn("[Zeros] historical Design ACL cleanup deferred until next launch");
+            });
+          }, { signal });
+          await new Promise<void>((resolve) => setImmediate(resolve));
+        }
+      } },
+    ]);
   }
 
   /** Stop the engine gracefully. */
@@ -2985,6 +3111,10 @@ export class ZerosEngine {
       return;
     }
     this.running = false;
+    const maintenance = this.startupMaintenance;
+    this.startupMaintenance = undefined;
+    // Abort immediately, then join before the engine releases its resources.
+    const maintenanceStopped = maintenance?.stop();
     if (this.localOrchestration) {
       this.localOrchestration.registry.clear();
       await settle(() => this.localOrchestration?.server.stop());
@@ -2993,6 +3123,7 @@ export class ZerosEngine {
     // Revoke product tool authority before slow provider cleanup can yield.
     // The registry aborts every grant synchronously, then drains them.
     const productToolsRetired = settle(() => this.agents.revokeSessionTools());
+    const previewsRetired = settle(() => this.workspace.stopDesignPreviews?.());
     await settle(() => stopDesignVerification());
     configureDesignStyleBuilds(null);
     configureDesignFonts({ onReady: null });
@@ -3011,6 +3142,7 @@ export class ZerosEngine {
       this.parentWatchTimer = null;
     }
     await productToolsRetired;
+    await previewsRetired;
     await settle(() => this.agents.dispose());
     if (this.vaultPersistTimer) {
       // Flush a pending debounced persist so a clean stop never drops a token.
@@ -3018,6 +3150,14 @@ export class ZerosEngine {
       this.vaultPersistTimer = null;
       await settle(() => this.flushVaultPersist());
     }
+    await settle(() => this.scopedMcpGateways.stop());
+    await settle(() => this.mcpCallback?.stop());
+    this.mcpHost.close();
+    this.vaultConfirmation.close();
+    await settle(() => this.launchedMcp.stop());
+    await settle(() => this.organizationMcp.reset());
+    for (const abort of this.mcpProbes.values()) abort.abort();
+    this.mcpProbes.clear();
     const mcpGateway = this.mcpGateway;
     this.mcpGateway = null;
     if (mcpGateway) {
@@ -3047,6 +3187,9 @@ export class ZerosEngine {
     this.designChangePoller = null;
     if (gitWatcher) await settle(() => gitWatcher.stop());
     if (watchHost) await settle(() => watchHost.dispose());
+    // A janitor may be queued behind a tool's workspace mutation. Retire those
+    // owners first; joining the janitor before disposing them can deadlock Stop.
+    if (maintenanceStopped) await settle(() => maintenanceStopped);
     await settle(() => closeGitCredentialBroker());
     for (const transport of this.transports) {
       await settle(() => transport.stop());
@@ -3859,6 +4002,55 @@ export class ZerosEngine {
       const flight = this.conversationCloseFlights.get(conversationId);
       if (!flight) return;
       await flight.catch(() => {});
+    }
+  }
+
+  /** A transcript reset is one exact-chat lifecycle operation. Create/load
+   * waits on the same barrier as close; already-admitted prompts are settled
+   * before the service captures its undo record or truncates history. */
+  private async withConversationMutation<T>(
+    chatId: string,
+    apply: (retire: () => Promise<void>) => Promise<T>,
+  ): Promise<T> {
+    const previous = this.conversationCloseFlights.get(chatId);
+    let release!: () => void;
+    const flight = new Promise<void>((resolve) => { release = resolve; });
+    this.conversationCloseFlights.set(chatId, flight);
+    try {
+      if (previous) await previous.catch(() => {});
+      return await apply(async () => {
+        this.invalidateConversationBind(chatId);
+        const executions = new Map<string, string>();
+        for (const [executionId, owner] of this.sessionChat) {
+          const agentId = this.sessionAgent.get(executionId);
+          if (owner === chatId && agentId) executions.set(executionId, agentId);
+        }
+        // Prompt preparation is live work too, even before promptSessions is
+        // populated or if adapter exit has already removed part of its route.
+        for (const prompt of this.activePromptContexts.values()) {
+          if (prompt.chatId === chatId) executions.set(prompt.sessionId, prompt.agentId);
+        }
+        await this.cancelLiveAgentSessions(executions.keys());
+        for (const executionId of executions.keys()) {
+          const prompt = this.activePromptContexts.get(executionId);
+          if (prompt) {
+            // Its bookkeeping was settled above. A late provider completion
+            // must not rewrite a turn restored by Undo under the same id.
+            prompt.turnRowSettled = true;
+            prompt.terminalPublished = true;
+          }
+          this.activeTurnSnapshots.delete(executionId);
+          this.clearAgentExecutionRoute(executionId);
+        }
+        await Promise.all([...executions].map(([executionId, agentId]) =>
+          this.agents.endSession(agentId, executionId),
+        ));
+      });
+    } finally {
+      release();
+      if (this.conversationCloseFlights.get(chatId) === flight) {
+        this.conversationCloseFlights.delete(chatId);
+      }
     }
   }
 
@@ -4699,6 +4891,13 @@ export class ZerosEngine {
             return;
           }
           const promptChatId = this.sessionChat.get(msg.sessionId);
+          if (promptChatId && this.conversationCloseFlights.has(promptChatId)) {
+            throw new AgentFailureError({
+              kind: "lifecycle-superseded",
+              stage: "prompt",
+              message: "The conversation context is changing. Reconnect before sending.",
+            });
+          }
           if (promptChatId && this.conversationForkSources.has(promptChatId)) {
             client.send(
               createMessage({
@@ -4817,7 +5016,33 @@ export class ZerosEngine {
             }),
           );
           let turnCtx: TurnSnapshotContext | null = null;
+          let replayContext: ReturnType<typeof getConversationContext> = null;
+          const replayAtStart = this.sessionLoadResponses.get(msg.sessionId);
+          const firstBlock = msg.prompt[0];
+          // Legacy renderers put this generated prefix in its own block and
+          // carry the visible user text separately. Never accept stale replay
+          // as the authoritative history of a reset conversation. A legacy
+          // execution without a chat id still depends on the supplied replay.
+          const prompt = activePrompt.chatId && msg.bubble?.displayText !== undefined && msg.prompt.length > 1 &&
+            firstBlock?.type === "text" && isConversationReplayPreamble(firstBlock.text)
+            ? msg.prompt.slice(1) : msg.prompt;
+          let providerPrompt = prompt;
           try {
+            replayContext = activePrompt.chatId ? getConversationContext(activePrompt.chatId) : null;
+            // Local context is reconstructed from SQLite, never a renderer's
+            // possibly stale/scrolled transcript. Read before persisting the
+            // current user message, and send the preamble only to the provider.
+            if (activePrompt.chatId && (replayContext?.replayPending || replayAtStart?.resumedFresh)) {
+              const history = windowChatMessages(activePrompt.chatId, WINDOW_MAX_ROWS).flatMap((row) => {
+                try {
+                  const message = JSON.parse(row.payload) as AgentMessage;
+                  return message?.kind === "text" && typeof message.text === "string" && message.id !== msg.userMessageId
+                    ? [message] : [];
+                } catch { return []; }
+              });
+              const replay = synthesizeReplayPrompt(history);
+              if (replay.text) providerPrompt = [{ type: "text", text: replay.text }, ...prompt];
+            }
             // Persist the user's turn FIRST so the engine transcript is complete
             // (ordered user→agent) for every adapter — see persistUserPrompt.
             // `bubble` carries the composer's inline pills/chips so a reopened
@@ -4934,7 +5159,7 @@ export class ZerosEngine {
                   .prompt(
                     msg.agentId,
                     msg.sessionId,
-                    msg.prompt,
+                    providerPrompt,
                     activePrompt.turnId,
                   )
                   .finally(() => {
@@ -4943,9 +5168,16 @@ export class ZerosEngine {
             const loaded = this.sessionLoadResponses.get(msg.sessionId);
             // A tool read can replace an idle native thread while this older
             // prompt is still settling. Only acknowledge the history it sent.
-            if (activePrompt.adapterSettled && response.stopReason !== "cancelled" &&
-                replayAtDispatch?.resumedFresh && loaded?.resumedFresh &&
-                sameProviderBinding(replayAtDispatch.providerBinding, loaded.providerBinding)) {
+            const contextAccepted = activePrompt.adapterSettled && !activePrompt.cancelledByUser &&
+              response.stopReason !== "cancelled" &&
+              this.sessionAgent.get(msg.sessionId) === msg.agentId &&
+              (!activePrompt.chatId || this.sessionChat.get(msg.sessionId) === activePrompt.chatId) &&
+              // Claude learns its first native id during the first prompt.
+              (!replayAtDispatch?.providerBinding || sameProviderBinding(replayAtDispatch.providerBinding, loaded?.providerBinding));
+            if (contextAccepted && replayContext?.replayPending && activePrompt.chatId) {
+              acknowledgeConversationContext(activePrompt.chatId, replayContext.generation);
+            }
+            if (contextAccepted && replayAtDispatch?.resumedFresh && loaded?.resumedFresh) {
               this.sessionLoadResponses.set(msg.sessionId, {
                 ...loaded,
                 resumedFresh: false,
@@ -7250,6 +7482,12 @@ export class ZerosEngine {
       const pre = isGit
         ? await snapshotWorkingTree(root, snapshotRef(chatId, turnId, "pre"))
         : null;
+      // A reset/close can retire this execution while snapshotting is still in
+      // progress. Do not recreate a running turn after its timeline was cut.
+      if (this.sessionChat.get(sessionId) !== chatId) {
+        if (isGit) await deleteSnapshotRefs(root, chatId, [turnId]);
+        return null;
+      }
       startTurnRow({
         chatId,
         turnId,
@@ -7466,12 +7704,9 @@ export class ZerosEngine {
 
     const finishLoopObservation = this.slowWorkspaceOperations?.beginEventLoopObservation?.();
     try {
-      // A reset that truncates a chat's timeline must not race a turn still
-      // streaming INTO that timeline (its trailing chunks would re-persist as
-      // zombie rows past the cut). The renderer's footer cancels before it
-      // calls turns.reset, but a reset from another device — or any future
-      // caller — arrives here without that guard, so the engine enforces it.
-      if (op === "turns.reset" && typeof params.chatId === "string") {
+      // Files-only keeps its existing cancellation behavior. Transcript reset
+      // and Undo use the exact-chat lifecycle callback after service validation.
+      if (op === "turns.reset" && params.mode === "filesOnly" && typeof params.chatId === "string") {
         await this.cancelLivePromptForChat(params.chatId);
       }
       // Register checkout/ref mutations before yielding. Archive/delete drains
@@ -7502,10 +7737,14 @@ export class ZerosEngine {
         const reviewUserName = reviewUserId && this.clientAccount.get(client.id) === reviewUserId
           ? this.clientAccountNames.get(client.id)
           : client.kind === "local" && reviewUserId === this.ownerAccountSub ? this.ownerAccountName ?? undefined : undefined;
-        const catalogAuthority = op === DESIGN_CATALOG_READ_OPERATION
+        const previewOperation = client.kind === "local" && (op === "design.preview" || op === "design.preview.cancel");
+        const catalogAuthority = op === DESIGN_CATALOG_READ_OPERATION || previewOperation
           ? JSON.stringify([client.kind, client.accountUserId ?? this.clientAccount.get(client.id) ?? (client.kind === "local" ? this.ownerAccountSub : undefined), client.authorityEpoch, client.kind === "local" ? this.localCatalogBindingEpoch ?? 0 : undefined]) : "";
         return this.workspace.handle(op,params,{hostLocalResources:client.kind==="local",remote:hostRelay,
-          ...(op === DESIGN_CATALOG_READ_OPERATION ? { catalogAdmission: {
+          ...(op === "turns.reset" || op === "turns.undoReset"
+            ? { withConversationMutation: this.withConversationMutation.bind(this) }
+            : {}),
+          ...(op === DESIGN_CATALOG_READ_OPERATION || previewOperation ? { [previewOperation ? "previewAdmission" : "catalogAdmission"]: {
             connectionId: client.id,
             authority: catalogAuthority,
             authorized: () => this.router.getClient(client.id) === client && (client.kind === "local" || client.authorized?.() === true) &&
@@ -7846,9 +8085,9 @@ export class ZerosEngine {
         }
       }
       // A transcript mutation (click-to-edit truncate/clear, or a turn
-      // reset/undo) leaves no live stream for the OTHER devices — nudge them to
-      // re-window the affected chat so it reflects everywhere. Excludes the
-      // originator, which already updated its own in-memory transcript. The
+      // reset/undo) leaves no live stream for other devices — nudge them to
+      // re-window the affected chat so it reflects everywhere. Context resets
+      // also invalidate the originator's provider route. The
       // ["workspaces"] kind above only refreshes git/changes state; a chat
       // re-window needs ["messages"] + chatIds (sessions-provider's DB_CHANGED
       // handler returns early otherwise), so turns.reset/undoReset must emit
@@ -7874,15 +8113,17 @@ export class ZerosEngine {
         }
       }
       if (transcriptChat) {
-        this.router.broadcastExcept(
-          client.id,
-          createMessage({
+        const contextReset = (op === "turns.reset" && params.mode !== "filesOnly") || op === "turns.undoReset";
+        const notification = createMessage({
             type: "DB_CHANGED",
             source: "engine",
-            kinds: ["messages"],
+            kinds: contextReset ? ["messages", "chats", "conversationContext"] : ["messages"],
             chatIds: [transcriptChat],
-          }),
-        );
+          });
+        // Every surface, including the caller, must discard its live route and
+        // reread the authoritative transcript after reset or transcript Undo.
+        if (contextReset) this.router.broadcast(notification);
+        else this.router.broadcastExcept(client.id, notification);
       }
     } catch (err) {
       const code = isGitError(err) || err instanceof CodeReviewError ? err.code : "WORKSPACE_OP_FAILED";
@@ -8564,8 +8805,10 @@ export class ZerosEngine {
           `[Zeros] engine owner account changed ${this.ownerAccountSub.slice(0, 8)}… → ${next?.slice(0, 8) ?? "∅"}…`,
         );
       }
-      if (next !== this.ownerAccountSub)
+      if (next !== this.ownerAccountSub) {
         this.localCatalogBindingEpoch = (this.localCatalogBindingEpoch ?? 0) + 1;
+        this.workspace?.retireUnauthorizedDesignPreviews?.();
+      }
       this.ownerAccountSub = next;
       if (sub) this.ownerAccountName = verifiedName ?? null;
       return;
@@ -8669,6 +8912,7 @@ export class ZerosEngine {
    *  mode so a later flip to required-mode starts from a clean slate. */
   private clearOwnerBinding(): void {
     this.localCatalogBindingEpoch = (this.localCatalogBindingEpoch ?? 0) + 1;
+    this.workspace?.retireUnauthorizedDesignPreviews?.();
     this.ownerAccountSub = nextOwnerAccount(this.ownerAccountSub, {
       kind: "signed-out",
     });
@@ -9118,7 +9362,7 @@ export class ZerosEngine {
         port: this.actualPort,
         protocolVersion: PROTOCOL_VERSION,
         minProtocolVersion: MIN_SUPPORTED_PROTOCOL,
-        capabilities: [DESIGN_CATALOG_READ_CAPABILITY],
+        capabilities: [DESIGN_CATALOG_READ_CAPABILITY, CONVERSATION_REPLAY_CAPABILITY, ...(client.kind === "local" ? [DESIGN_PREVIEW_JOBS_CAPABILITY, DESIGN_LAZY_PREPARATION_CAPABILITY, DESIGN_SOURCE_SURFACES_CAPABILITY] : [])],
       }),
     );
   }
@@ -9287,7 +9531,7 @@ export class ZerosEngine {
     stdin.on("data", (chunk: string) => {
       buf += chunk;
       // Defensive cap: control lines are tiny; drop a runaway no-newline blob.
-      if (buf.length > 1_000_000) buf = "";
+      if (buf.length > 2 * 1024 * 1024) buf = "";
       let nl = buf.indexOf("\n");
       while (nl !== -1) {
         const line = buf.slice(0, nl).trim();
@@ -9322,6 +9566,21 @@ export class ZerosEngine {
     });
   }
 
+  private async retireOrganizationMcp(): Promise<void> {
+    const retire = this.organizationMcp.reset();
+    const stopProcesses = this.launchedMcp.removeWhere(entry => entry.organization);
+    const sessions = new Set<string>();
+    for (const [sessionId, workspaceId] of this.sessionWorkspace) {
+      if (getWorkspaceById(workspaceId)?.organizationId) sessions.add(sessionId);
+    }
+    await this.cancelLiveAgentSessions(sessions);
+    await Promise.allSettled([...sessions].map(async sessionId => {
+      const agentId = this.sessionAgent.get(sessionId) ?? this.agents.sessionAgentId(sessionId);
+      if (agentId) await this.agents.endSession(agentId, sessionId, { failClosed: true });
+    }));
+    await Promise.all([retire, stopProcesses]);
+  }
+
   private handleHostControlLine(line: string): void {
     let msg: {
       type?: string;
@@ -9336,6 +9595,12 @@ export class ZerosEngine {
     try {
       msg = JSON.parse(line);
     } catch {
+      return;
+    }
+    if (this.mcpHost.accept(msg) || this.vaultConfirmation.accept(msg)) return;
+    if (msg.type === "host.mcp.accountChanged") {
+      this.mcpHost.reset();
+      void this.retireOrganizationMcp().catch(() => {});
       return;
     }
     if (msg.type === "host.githubToken") {

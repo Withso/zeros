@@ -254,7 +254,7 @@ const ResourceProcessRow = memo(function ResourceProcessRow({
         role="gridcell"
         className="text-fg1 text-right text-xs tabular-nums"
       >
-        {cpuReady ? formatCpuPercent(node.cpuPercent) : "—"}
+        {formatCpuPercent(node.cpuPercent, cpuReady && node.cpuSampled !== false)}
       </span>
       <span
         role="gridcell"
@@ -623,6 +623,7 @@ export const ResourceMonitor = memo(function ResourceMonitor() {
       }
       text ??= copyResourceReport({
         sampledAt: displaySnapshot.sampledAt,
+        cpuReady: displaySnapshot.cpuReady,
         logicalCpuCount: displaySnapshot.logicalCpuCount,
         scanDurationMs: displaySnapshot.scanDurationMs,
         includeTerminal: includesTerminal,
@@ -632,6 +633,16 @@ export const ResourceMonitor = memo(function ResourceMonitor() {
         otherApps: otherAppNodes,
         memorySource: displaySnapshot.memorySource,
       });
+      try {
+        // An explicit diagnostic read only: no Design subscription, renderer
+        // polling or source/workspace identifiers are added to resource logs.
+        const { designRendererResources } = await import("../features/design-workspace/state/design-renderer-resources");
+        text += "\n## Design renderer allocations\n" +
+          "Logical allocation counters and estimates; physical process memory is reported above.\n" +
+          JSON.stringify(designRendererResources(), null, 2) + "\n";
+      } catch {
+        text += "\nDesign renderer allocation counters unavailable.\n";
+      }
       if (!(await copyToClipboardWithFallback(text))) {
         toast.error("Couldn't write to the clipboard — focus the app and retry.");
         return;
@@ -672,7 +683,7 @@ export const ResourceMonitor = memo(function ResourceMonitor() {
   return (
     <div className="flex h-full shrink-0 items-center">
       <Popover open={open} onOpenChange={setOpen}>
-        <Tooltip label={triggerLabel} side="bottom">
+        <Tooltip label={triggerLabel} side="bottom" delayDuration={1500} disabled={open}>
           <PopoverTrigger asChild>
             <Button
               type="button"
@@ -705,7 +716,7 @@ export const ResourceMonitor = memo(function ResourceMonitor() {
                     CPU{" "}
                     <strong className="text-fg1 font-medium tabular-nums">
                       {displaySnapshot?.cpuReady
-                        ? formatCpuPercent(totals.cpuPercent)
+                        ? formatCpuPercent(totals.cpuPercent, view.every((node) => node.cpuSampled !== false))
                         : "Sampling…"}
                     </strong>
                   </span>
@@ -750,11 +761,11 @@ export const ResourceMonitor = memo(function ResourceMonitor() {
                 label={
                   currentTerminalFilterAvailable
                     ? includesTerminal
-                      ? "Exclude terminal processes"
-                      : "Include terminal processes"
+                      ? "Exclude terminals"
+                      : "Include terminals"
                     : includeTerminal
-                      ? "Waiting for the engine's terminal inventory"
-                      : "Include terminal processes; excluded data is retained while refreshing"
+                      ? "Loading terminals"
+                      : "Include terminals"
                 }
                 side="bottom"
               >
@@ -773,8 +784,8 @@ export const ResourceMonitor = memo(function ResourceMonitor() {
               <Tooltip
                 label={
                   stack
-                    ? "Unstack matching processes"
-                    : "Stack matching processes"
+                    ? "Ungroup processes"
+                    : "Group processes"
                 }
                 side="bottom"
               >
@@ -794,7 +805,7 @@ export const ResourceMonitor = memo(function ResourceMonitor() {
                 </Button>
               </Tooltip>
               <Tooltip
-                label={tree ? "Use flat view" : "Use tree view"}
+                label={tree ? "Flat view" : "Tree view"}
                 side="bottom"
               >
                 <Button
@@ -809,7 +820,7 @@ export const ResourceMonitor = memo(function ResourceMonitor() {
                 </Button>
               </Tooltip>
               <Tooltip
-                label="Copy diagnostics: processes, Mac memory and recent app logs"
+                label="Copy diagnostics"
                 side="bottom"
               >
                 <Button

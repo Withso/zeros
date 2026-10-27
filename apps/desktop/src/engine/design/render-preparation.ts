@@ -1,4 +1,6 @@
 import { createHash } from "node:crypto";
+import type { DesignSurfaceCost } from "@zeros/protocol/design-surface";
+import { designSurfaceCost } from "./surface-document";
 import path from "node:path";
 import { parse } from "parse5";
 import postcss from "postcss";
@@ -535,7 +537,7 @@ export async function prepareFrameRenderSource(
   entryFile = "",
   canvas?: CanvasDocument,
   options: FrameRenderOptions = {},
-): Promise<{ sanitized: string; sourceVersion: string }> {
+): Promise<{ sanitized: string; sourceVersion: string; surfaceCost: DesignSurfaceCost | null }> {
   assertRenderByteLimit(
     source,
     MAX_DESIGN_TEXT_BYTES,
@@ -587,7 +589,7 @@ export async function prepareFrameRenderSource(
     if (bytes > MAX_SANITIZED_RENDER_BYTES) {
       throw new DesignRenderBudgetError("Sanitized frame HTML exceeded the 15 MiB per-frame render limit.");
     }
-    return { sanitized: skeleton, sourceVersion };
+    return { sanitized: skeleton, sourceVersion, surfaceCost: designSurfaceCost(skeleton, sheets) };
   }
   const sanitized = spliceStylesheets(skeleton, sheets);
   assertRenderByteLimit(
@@ -595,7 +597,7 @@ export async function prepareFrameRenderSource(
     MAX_SANITIZED_RENDER_BYTES,
     "Sanitized frame HTML exceeded the 15 MiB per-frame render limit.",
   );
-  return { sanitized, sourceVersion };
+  return { sanitized, sourceVersion, surfaceCost: designSurfaceCost(sanitized) };
 }
 
 export async function composeFrameSrcDoc(

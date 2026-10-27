@@ -87,14 +87,17 @@ import {
 import { ActivityScope } from "../shared/ui/loading/activity-scope";
 import { workspaceLabel, workspaceTabDescription } from "./workspace-tabs";
 import { IconButton } from "@/renderer/shared/ui/primitives/icon-button";
+import { Popover, PopoverAnchor, PopoverContent } from "../shared/ui/primitives/popover";
+import { SidebarWorkspaceHoverCard } from "./sidebar-workspace-hover-card";
+import { useSidebarWorkspacePreview } from "./use-sidebar-workspace-preview";
 
 // --- CONSTANTS ---
 
-// Full-width 30px row on the sidebar's hover/selection fill. Selection is
+// Full-width 32px row on the sidebar's hover/selection fill. Selection is
 // colour-only (fg1 on sidebar-bg-hover); rows never shift. `transition-none`
 // keeps a switch from cross-fading the old and new selection.
 const SIDEBAR_WORKSPACE_ROW_CLS =
-  "group/workspace relative flex h-7.5 w-full min-w-0 shrink-0 select-none items-center overflow-hidden rounded-md pr-2 text-left text-xs font-normal text-fg2 transition-none hover:bg-(--surface-hover) focus-within:bg-(--surface-hover) data-[active=true]:bg-(--surface-hover) data-[active=true]:text-fg1";
+  "group/workspace relative flex h-8 w-full min-w-0 shrink-0 select-none items-center overflow-hidden rounded-md pr-2 text-left text-xs font-normal text-fg2 transition-none hover:bg-(--surface-hover) focus-within:bg-(--surface-hover) data-[active=true]:bg-(--surface-hover) data-[active=true]:text-fg1";
 // Grouped rows sit under their repository header: the state glyph centres on
 // the header's name column. Ungrouped rows (repository icon first) and
 // standalone folder rows align with the headers' own icon column instead.
@@ -180,6 +183,9 @@ export interface SidebarWorkspaceRowProps {
   active: boolean;
   /** Whether the retained sidebar is visible and may issue Git reads. */
   surfaceActive?: boolean;
+  /** Retire hover intent when the signed-in owner changes, even for a reused row. */
+  previewOwner?: string;
+  activeAt?: number;
   /** Live coding-chat ids in this worktree, used for agent activity state. */
   chatIds: readonly string[];
   /** Includes closed chats whose unsent drafts are still recoverable. */
@@ -209,6 +215,8 @@ export function SidebarWorkspaceRow({
   workspace,
   active,
   surfaceActive = true,
+  previewOwner,
+  activeAt,
   chatIds,
   draftChatIds = chatIds,
   project,
@@ -239,6 +247,10 @@ export function SidebarWorkspaceRow({
   const hasDraft = useAnyChatHasDraft(draftChatIds);
   const showDraft = hasDraft && !active;
   const archiving = useWorkspaceArchiving(workspace.id);
+  const preview = useSidebarWorkspacePreview(
+    JSON.stringify([previewOwner, workspace.organizationId, workspace.id, workspace.path]),
+    surfaceActive && !archiving && !modeSwitching,
+  );
   const trailingAgentState = mixedRepositories && !archiving && working;
   // Legacy workspace kinds remain a visual hint; every workspace has agents.
   const trailingDesignMark =
@@ -285,6 +297,7 @@ export function SidebarWorkspaceRow({
           label={action.label}
           onClick={(event) => {
             event.stopPropagation();
+            preview.close();
             action.run();
           }}
           onKeyDown={(event) => event.stopPropagation()}
@@ -312,22 +325,39 @@ export function SidebarWorkspaceRow({
       onPointerEnter={() => {
         if (!surfaceActive) return;
         onPrefetch(workspace);
+        preview.scheduleOpen();
       }}
+      onPointerLeave={preview.scheduleClose}
       onFocus={() => {
         if (!surfaceActive) return;
         onPrefetch(workspace);
+        preview.scheduleOpen();
       }}
+      onBlur={(event) => {
+        if (event.currentTarget.contains(event.relatedTarget) || preview.contentRef.current?.contains(event.relatedTarget)) return;
+        preview.scheduleClose();
+      }}
+      onKeyDown={(event) => {
+        if (event.key !== "ArrowRight" || !preview.open) return;
+        event.preventDefault();
+        preview.contentRef.current?.querySelector<HTMLElement>("button:not(:disabled), a[href]")?.focus();
+      }}
+      onContextMenu={preview.close}
       onClick={() => {
         if (!surfaceActive || archiving) return;
+        preview.close();
         onSelect(workspace);
       }}
     >
       <Button
+        ref={preview.triggerRef}
         type="button"
         variant="ghost"
         size="default"
         className={SIDEBAR_WORKSPACE_OPEN_BUTTON_CLS}
         aria-current={active ? "page" : undefined}
+        aria-haspopup="dialog"
+        aria-expanded={preview.open}
         aria-label={workspaceTabDescription({
           label,
           runActionRunning,
@@ -433,15 +463,49 @@ export function SidebarWorkspaceRow({
   );
 
   return (
-    <>
+    <Popover open={preview.open} onOpenChange={(open) => { if (!open) preview.close(); }}>
       <WorkspaceContextMenu
         workspace={workspace}
         onArchive={() => onArchive(workspace)}
         archiveDisabled={archiving || modeSwitching}
       >
-        {row}
+        <PopoverAnchor asChild>{row}</PopoverAnchor>
       </WorkspaceContextMenu>
-    </>
+      {preview.open && (
+        <PopoverContent
+          ref={preview.contentRef}
+          side="right"
+          align="start"
+          sideOffset={10}
+          collisionPadding={8}
+          aria-label={`Workspace details for ${label}`}
+          className="bg-bg1-highlight border-border2 w-[340px] rounded-lg p-3"
+          onOpenAutoFocus={(event) => event.preventDefault()}
+          onCloseAutoFocus={(event) => event.preventDefault()}
+          onEscapeKeyDown={() => {
+            if (preview.contentRef.current?.contains(document.activeElement)) preview.triggerRef.current?.focus();
+            preview.close();
+          }}
+          onPointerEnter={preview.cancel}
+          onPointerLeave={preview.scheduleClose}
+          onFocusCapture={preview.cancel}
+          onBlur={(event) => {
+            if (!event.currentTarget.contains(event.relatedTarget)) preview.scheduleClose();
+          }}
+        >
+          <SidebarWorkspaceHoverCard
+            workspace={workspace}
+            project={project}
+            chatIds={chatIds}
+            changeLines={changeLines}
+            activeAt={activeAt}
+            onSelect={() => { preview.close(); onSelect(workspace); }}
+            onArchive={() => { preview.close(); onArchive(workspace); }}
+            onMenuOpenChange={preview.setMenuOpen}
+          />
+        </PopoverContent>
+      )}
+    </Popover>
   );
 }
 

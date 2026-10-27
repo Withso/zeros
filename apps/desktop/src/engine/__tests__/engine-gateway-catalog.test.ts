@@ -10,6 +10,7 @@ describe("engine MCP catalog lifetime", () => {
     const gateway = { url: "http://127.0.0.1:9000/mcp", catalogRevision: "fixture:1", reload: vi.fn().mockResolvedValue(undefined), stop: vi.fn().mockResolvedValue(undefined) };
     const engine = Object.assign(Object.create(ZerosEngine.prototype), {
       mcpGateway: gateway, gatewayError: null, gatewayReloadChain: Promise.resolve(),
+      scopedMcpGateways: { roots: () => [] },
       agents: { setGatewayServer: vi.fn() }, startGateway: vi.fn(),
     });
     try {

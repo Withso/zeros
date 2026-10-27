@@ -69,17 +69,27 @@ function selectedAuthentication(agentId: string, configured: unknown, source: st
 
 /** Registry probes must inspect the selected method, just like a spawn. A
  * repository cannot select a personal credential or influence this verdict. */
-export function usesProviderApiKey(cwd: string, agentId: string): boolean {
+export function providerAuthMode(
+  cwd: string,
+  agentId: string,
+): "api-key" | "cli" | "subscription" | undefined {
   try {
     const resolved = opSettingsResolve(cwd);
     const source = resolved.sources[`providers.${agentId}.auth`];
     const providers = resolved.effective.providers;
     const configured = isPlainObject(providers) && isPlainObject(providers[agentId])
       ? providers[agentId].auth : undefined;
-    return selectedAuthentication(agentId, configured, source).auth === "api-key";
+    const auth = selectedAuthentication(agentId, configured, source).auth;
+    return auth === "api-key" || auth === "cli" || auth === "subscription"
+      ? auth
+      : undefined;
   } catch {
-    return false;
+    return undefined;
   }
+}
+
+export function usesProviderApiKey(cwd: string, agentId: string): boolean {
+  return providerAuthMode(cwd, agentId) === "api-key";
 }
 
 /** Apply native authentication selection and fill other spawn gaps from the

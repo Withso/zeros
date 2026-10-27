@@ -57,7 +57,6 @@ import {
 } from "lucide-react";
 
 import { cn } from "../../shared/ui/cn";
-import { Tooltip } from "@/renderer/shared/ui/primitives";
 import {
   ContextMenu,
   ContextMenuContent,
@@ -617,18 +616,16 @@ export function ChatTabs({
       {/* Pane menu — fixed at the right end of the strip. */}
       <div className={PANE_MENU_CONTROL_CLS}>
         <DropdownMenu>
-          <Tooltip label="Pane options">
-            <DropdownMenuTrigger asChild>
-              <IconButton
-                size="standard"
-                hover="subtle"
-                className="shrink-0"
-                label="Pane options"
-              >
-                <Ellipsis className="size-3.5" />
-              </IconButton>
-            </DropdownMenuTrigger>
-          </Tooltip>
+          <DropdownMenuTrigger asChild>
+            <IconButton
+              size="standard"
+              hover="subtle"
+              className="shrink-0"
+              label="Pane options"
+            >
+              <Ellipsis className="size-3.5" />
+            </IconButton>
+          </DropdownMenuTrigger>
           <DropdownMenuContent align="end" sideOffset={6} className="w-44">
             <DropdownMenuItem
               disabled={!canSplitDown}
@@ -850,16 +847,14 @@ function TabRow({
         trailingMark ? TAB_DRAFT_ACTION_OVERLAY_CLS : TAB_HOVER_OVERLAY_CLS
       }
     >
-      <Tooltip label="Close chat">
-        <IconButton
-          type="button"
-          className="pointer-events-auto shrink-0"
-          onClick={(e) => onClose(chat, e)}
-          label="Close chat"
-        >
-          <X className="size-3.5" />
-        </IconButton>
-      </Tooltip>
+      <IconButton
+        type="button"
+        className="pointer-events-auto shrink-0"
+        onClick={(e) => onClose(chat, e)}
+        label="Close chat"
+      >
+        <X className="size-3.5" />
+      </IconButton>
     </span>
   );
 

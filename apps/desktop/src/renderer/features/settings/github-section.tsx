@@ -244,6 +244,7 @@ export function GitHubSection({
   const [autoSetupDismissed, setAutoSetupDismissed] = useState(false);
   const [disconnectAppOpen, setDisconnectAppOpen] = useState(false);
   const disconnectCancelRef = useRef<HTMLButtonElement>(null);
+  const disconnectAppTriggerRef = useRef<HTMLButtonElement>(null);
 
   // The fetcher ignores the key it is handed: this read's key is the constant
   // "auth", so the probe's options never vary with it. Passing `ghAuthSnapshot`
@@ -732,6 +733,7 @@ export function GitHubSection({
                     <DropdownMenu>
                       <DropdownMenuTrigger asChild>
                         <Button
+                          ref={method === "github-app" ? disconnectAppTriggerRef : undefined}
                           type="button"
                           variant="ghost"
                           size="icon-sm"
@@ -1129,6 +1131,12 @@ export function GitHubSection({
           onOpenAutoFocus={(event) => {
             event.preventDefault();
             disconnectCancelRef.current?.focus();
+          }}
+          onCloseAutoFocus={(event) => {
+            event.preventDefault();
+            // The selecting menu item has retired. Return to its persistent
+            // trigger, unless Settings was hidden or replaced in the meantime.
+            if (surfaceActive) disconnectAppTriggerRef.current?.focus();
           }}
         >
           <DialogHeader>

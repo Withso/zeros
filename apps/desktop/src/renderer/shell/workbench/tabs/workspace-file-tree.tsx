@@ -35,7 +35,9 @@ import {
   useFileTree,
   useFileTreeSelection,
 } from "@pierre/trees/react";
-import type { ContextMenuOpenContext } from "@pierre/trees";
+import type { ContextMenuOpenContext, FileTreeRowDecorationContext, GitStatusEntry } from "@pierre/trees";
+import type { FileChangeStatus } from "@/renderer/platform/git";
+import { EMPTY_FILE_STATUSES, FILE_STATUS_PRESENTATION } from "./file-status";
 import {
   ContextMenu,
   ContextMenuContent,
@@ -236,21 +238,25 @@ const TREE_SHADOW_CSS = `
   [data-item-git-status='ignored'] > [data-item-section='icon']::after {
     background-color: var(--fg3);
   }
-  /* We pass \`gitStatus\` for ONE reason: to mark ignored entries. Supplying it
-     at all switches on the library's git lane, which (a) reserves
-     --trees-git-lane-width on EVERY row, indenting the whole tree, and (b)
-     paints a "contains changes" dot on every ancestor of every entry — so a
-     package folder holding a nested node_modules/ would sprout a change dot it
-     never had. The lane carries nothing we want (an ignored row has no status
-     letter by design, and Changes is where git state lives in this app).
-     Switching it off recovers the indent and the dot; it does NOT restore the
-     pre-change DOM — passing gitStatus also enables the library's decoration
-     lane, so every row now carries an extra empty \`[data-item-section=
-     'decoration']\` div. That one is harmless (\`flex: 1 1 0; min-width: 0\`
-     against a \`flex: 0 1 auto\` content box) and is left alone. */
+  /* Keep the native Git lane hidden: Files uses trailing status letters,
+     without the library's ancestor dots or extra leading indentation. */
   [data-item-section='git'] {
     display: none;
   }
+  /* Files uses the decoration slot for status letters. Names stay neutral,
+     and ignored rows retain their established dimming. */
+  [data-item-git-status]:not([data-item-git-status='ignored']) > [data-item-section='content'] {
+    color: inherit;
+  }
+  [data-item-section='decoration'] > span {
+    margin-inline-start: auto;
+    padding-inline-start: 8px;
+    font-weight: var(--weight-medium);
+  }
+  [data-item-section='decoration'] > span:is([title='Added'], [title='Untracked']) { color: var(--green-primary); }
+  [data-item-section='decoration'] > span[title='Modified'] { color: var(--yellow-primary); }
+  [data-item-section='decoration'] > span:is([title='Deleted'], [title='Unmerged']) { color: var(--red-primary); }
+  [data-item-section='decoration'] > span[title='Renamed'] { color: var(--blue-primary); }
   /* Filter input (the \`search\` surfaces only) = the tree column's header —
      breathing room so it doesn't sit cramped against the chrome above.
      Inert when the search bar is disabled. */
@@ -387,6 +393,8 @@ interface WorkspaceFileTreeProps {
   deselectAfterOpen?: boolean;
   /** Bump to force a re-list (e.g. the Source panel's Refresh button). */
   reloadKey?: number;
+  /** One shared workspace snapshot, mapped to paths relative to this tree. */
+  fileStatuses?: ReadonlyMap<string, FileChangeStatus>;
   /** Owner-keyed scroll memory for the library's Shadow-DOM virtual scroller.
    * Omit for launcher trees whose short-lived position is not navigation. */
   scrollMemoryKey?: string;
@@ -432,6 +440,7 @@ export const WorkspaceFileTree = React.forwardRef<
     onCopyPath,
     deselectAfterOpen,
     reloadKey,
+    fileStatuses = EMPTY_FILE_STATUSES,
     scrollMemoryKey,
     designFilter,
     paddingTop = TREE_CONTENT_PAD_TOP,
@@ -514,6 +523,12 @@ export const WorkspaceFileTree = React.forwardRef<
   // Captured once, like every other model option: whether this surface shows
   // the built-in filter bar is static per surface (sidebar yes, launcher no).
   const searchRef = useRef(search === true);
+  const fileStatusesRef = useRef(fileStatuses);
+  fileStatusesRef.current = fileStatuses;
+  const gitStatus = useMemo<GitStatusEntry[]>(() => [...fileStatuses].map(([path, status]) => ({
+    path,
+    status: status === "conflicted" ? "modified" : status,
+  })), [fileStatuses]);
   const { model } = useFileTree(
     useMemo(
       () => ({
@@ -536,6 +551,12 @@ export const WorkspaceFileTree = React.forwardRef<
         // library's filled "complete" set — see that module's header.
         icons: FILE_ICON_TREE_CONFIG,
         unsafeCSS: TREE_SHADOW_CSS,
+        renderRowDecoration: ({ item }: FileTreeRowDecorationContext) => {
+          const status = item.kind === "file" ? fileStatusesRef.current.get(item.path) : undefined;
+          if (!status) return null;
+          const { letter, label } = FILE_STATUS_PRESENTATION[status];
+          return { text: letter, title: label };
+        },
         composition: { contextMenu: { enabled: true } },
         ...(initialPathRef.current
           ? { initialSelectedPaths: [initialPathRef.current] }
@@ -572,7 +593,7 @@ export const WorkspaceFileTree = React.forwardRef<
     paths: rawIgnoredPaths,
     expandedDirs,
     resolved: ignoredResolved,
-  } = useIgnoredEntries(cwd, reloadKey, model, active);
+  } = useIgnoredEntries(cwd, reloadKey, model, active, gitStatus);
   const ignoredPaths = useMemo(() => {
     const filter = designFilterRef.current;
     if (!filter || rawIgnoredPaths.length === 0) return rawIgnoredPaths;

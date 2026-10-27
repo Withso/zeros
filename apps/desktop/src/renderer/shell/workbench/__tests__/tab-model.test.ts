@@ -32,6 +32,18 @@ afterEach(() => {
 });
 
 describe("tab factories", () => {
+  it("keeps library sources separate from repository file destinations and the permanent Files home", () => {
+    const skillSource = { agentId: "claude" as const, path: "/home/.claude/skills/review/SKILL.md", name: "review" };
+    const source = { ...createFilesTab(skillSource.path), skillSource };
+    const blank = createEmptyFilesTab();
+    expect(planWorkbenchFileOpen([source, blank], source.id, "src/app.ts"))
+      .toEqual({ kind: "replace", id: blank.id });
+    expect(planWorkbenchFileOpen([source], null, source.filePath!)).toEqual({ kind: "new" });
+    const restored = normalizeWorkbenchTabs([source]);
+    expect(restored.find(tab => tab.id === source.id)?.fixed).not.toBe(true);
+    expect(restored.find(tab => tab.fixed)?.skillSource).toBeUndefined();
+    expect(blankFixedFilesTab(source).skillSource).toBeUndefined();
+  });
   it("retains and validates a historical comparison when a file tab is restored", () => {
     const diffHistory = {
       kind: "turn-range" as const,

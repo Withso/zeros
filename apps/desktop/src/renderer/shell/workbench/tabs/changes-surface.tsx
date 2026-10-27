@@ -56,7 +56,10 @@ import { useOpenFileInWorkbench, type OpenFileOpts } from "../use-open-file";
 import { type WorkbenchTab } from "../tab-model";
 import { useWorkbenchDirtyEditorIds } from "./code-editor/editor-state";
 import { changeOpenIntent } from "./changes-open-intent";
-import { reconcileChangesSelection } from "./changes-selection";
+import {
+  findRequestedChange,
+  reconcileChangesSelection,
+} from "./changes-selection";
 import { filterChangeSections } from "./changes-search";
 import {
   ChangesList,
@@ -278,7 +281,7 @@ function viewFromIntent(
   };
 }
 
-function ChangesSurface({
+export function ChangesSurface({
   tab,
   active,
   scope,
@@ -535,14 +538,34 @@ function ChangesSurface({
   // missing-file pane. Never replace an unsaved draft automatically.
   useLayoutEffect(() => {
     if (!active || model.loading) return;
+    const requested =
+      model.scope.kind === "all" && !model.turnFilter
+        ? tab.changesRequestedFile
+        : undefined;
+    const selectedDisappeared = !!selected && !orderedPaths.includes(selected);
+    if (selectedDisappeared && dirtyEditorIds.has(tab.id)) return;
+    if (
+      selected && requested === selected && selectedDisappeared &&
+      model.hasContent && !model.error
+    ) {
+      const renamed = findRequestedChange(diffFiles, selected);
+      if (renamed) {
+        applySelection(
+          renamed.path,
+          changeOpenIntent(model.scope, model.turnFilter, renamed),
+        );
+        return;
+      }
+      // Retain the explicit diff destination even for an ignored file or a
+      // change that was reverted. The body explains the empty comparison.
+      return;
+    }
     const nextSelected = reconcileChangesSelection(
       previousOrderedPaths.current,
       orderedPaths,
       selected,
-      model.scope.kind === "all" && !model.turnFilter ? tab.changesRequestedFile : undefined,
+      requested,
     );
-    const selectedDisappeared = !!selected && !orderedPaths.includes(selected);
-    if (selectedDisappeared && dirtyEditorIds.has(tab.id)) return;
     previousOrderedPaths.current = orderedPaths;
     if (nextSelected === selected) return;
     if (nextSelected) {
@@ -577,10 +600,13 @@ function ChangesSurface({
   }, [
     active,
     model.loading,
+    model.error,
+    model.hasContent,
     model.effectiveSections,
     model.scope,
     model.turnFilter,
     orderedPaths,
+    diffFiles,
     selected,
     tab.changesRequestedFile,
     dirtyEditorIds,
@@ -588,6 +614,8 @@ function ChangesSurface({
     applySelection,
     dispatch,
     scope,
+    cwd,
+    folder,
   ]);
 
   // A sidebar click navigates THIS tab in place — unless that would destroy
@@ -804,7 +832,7 @@ function ChangesSurface({
   );
 
   const sidebarToggle = (
-    <Tooltip label={sidebarVisible ? "Hide changes list" : "Show changes list"}>
+    <Tooltip label={sidebarVisible ? "Hide changes" : "Show changes"}>
       <Button
         variant="ghost"
         size="icon-sm"

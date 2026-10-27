@@ -180,7 +180,7 @@ export function ReviewChangesSection({
         )}
         <div className="flex-1" />
         <Tooltip
-          label={allCollapsed ? "Expand all files" : "Collapse all files"}
+          label={allCollapsed ? "Expand all" : "Collapse all"}
         >
           <Button
             variant="ghost"

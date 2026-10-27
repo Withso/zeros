@@ -26,7 +26,7 @@ export interface DesignPreviewIndexEntry {
    * level is kept for each. */
   frameKey: string;
   workspaceId: string;
-  level: "overview" | "detail";
+  level: "thumbnail" | "overview" | "detail";
   sourceVersion: string;
   width: number;
   height: number;
@@ -56,7 +56,7 @@ export function isDesignPreviewIndexEntry(value: unknown): value is DesignPrevie
     typeof entry.key === "string" &&
     typeof entry.frameKey === "string" &&
     typeof entry.workspaceId === "string" &&
-    (entry.level === "overview" || entry.level === "detail") &&
+    (entry.level === "thumbnail" || entry.level === "overview" || entry.level === "detail") &&
     typeof entry.sourceVersion === "string" &&
     Number.isSafeInteger(entry.width) && (entry.width ?? 0) > 0 &&
     Number.isSafeInteger(entry.height) && (entry.height ?? 0) > 0 &&

@@ -69,6 +69,7 @@ import {
 import { agentAttachmentWrite } from "./agent-attachments";
 import { registerAttachmentSourceIpc } from "../attachment-source";
 import { designExportPng } from "./design-export";
+import { designCaptureAcquire, designCaptureRelease } from "../../design-capture-admission";
 import {
   processRelaunch,
   updaterCheck,
@@ -228,6 +229,8 @@ export function registerAllCommands(): void {
   // sends use attachment.write so desktop and relay clients share one protocol.
   setCommand("agent_attachment_write", agentAttachmentWrite);
   setCommand("design_export_png", designExportPng);
+  setCommand("design_capture_acquire", designCaptureAcquire);
+  setCommand("design_capture_release", designCaptureRelease);
 
   // Git + GitHub integration workspace lifecycle. Engine logic lives in
   // apps/desktop/src/engine/git/; these handlers

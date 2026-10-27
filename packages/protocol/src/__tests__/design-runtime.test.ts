@@ -430,7 +430,7 @@ describe("design runtime protocol", () => {
             payload: Record<string, unknown>;
           }>((resolve, reject) => {
             document.body.innerHTML =
-              '<section data-oid="hero" style="display:flex;flex-direction:column"><h1 data-oid="heading">Hello</h1></section>';
+              '<section data-oid="hero" data-name="Hero content" aria-label="Accessible hero" style="display:flex;flex-direction:column"><h1 data-oid="heading">Hello</h1></section>';
             document.body.style.cssText =
               "display:grid;grid-auto-columns:37px;outline:2px solid;font-style:italic;text-indent:7px;overflow-wrap:anywhere;perspective-origin:25% 75%";
             let nested = document.querySelector('[data-oid="hero"]')!;
@@ -523,6 +523,16 @@ describe("design runtime protocol", () => {
       );
 
       expect(result.leakedBeforeHandshake).toBe(false);
+      const layerNameMessage = (layerName?: unknown) => {
+        const payload = structuredClone(result.payload);
+        const tree = (payload.snapshot as { tree: Array<Record<string, unknown>> }).tree;
+        tree[0]!.layerName = layerName;
+        return { protocol: DESIGN_RUNTIME_PROTOCOL, version: DESIGN_RUNTIME_VERSION,
+          type: "event", event: "ready", payload };
+      };
+      expect(isDesignRuntimeFrameMessage(layerNameMessage())).toBe(true);
+      expect(isDesignRuntimeFrameMessage(layerNameMessage(42))).toBe(false);
+      expect(isDesignRuntimeFrameMessage(layerNameMessage("x".repeat(81)))).toBe(false);
       expect(
         isDesignRuntimeFrameMessage({
           protocol: DESIGN_RUNTIME_PROTOCOL,
@@ -544,6 +554,8 @@ describe("design runtime protocol", () => {
             {
               oid: "hero",
               tag: "section",
+              name: "Hero content",
+              layerName: "Hero content",
               display: "flex",
               flexDirection: "column",
             },

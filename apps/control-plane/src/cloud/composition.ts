@@ -14,9 +14,11 @@ import { createCloudV2AgentLogins, createCloudV2CodexRefresh, type CloudV2AgentL
 import { BoatCloudV2Compute } from "./boat.js";
 import type { CloudV2ControlFrame } from "./contract.js";
 import { CloudV2ComputerBuilder, CloudV2Computers } from "./computer.js";
-import { createCloudV2GithubTokens, createCloudV2RepositoryTokens } from "./github.js";
+import { createCloudV2GithubTokens, createCloudV2RemoteHeads, createCloudV2RepositoryTokens } from "./github.js";
 import { HISTORY_OPS, readCloudV2History } from "./history.js";
-import { CloudV2Lifecycle } from "./lifecycle.js";
+import { CLOUD_V2_HOME, CloudV2Lifecycle, type CloudV2TimingRecord } from "./lifecycle.js";
+import { cloudV2CheckpointStorage, openCheckpointKey, sealCheckpointKey } from "./checkpoint.js";
+import { runtimeStorageClient } from "./runtime-source.js";
 import { CLOUD_V2_PROXY_PREFIX, type CloudV2ProxyDeps } from "./proxy.js";
 import { CloudV2Relay } from "./relay.js";
 import { cloudV2Runtime } from "./runtime.js";
@@ -27,10 +29,9 @@ import { openPortToken, sealPortToken } from "./worker-port-token.js";
 import type { CloudV2WorkerRouteDeps } from "./worker-routes.js";
 import { cloudV2SandboxName } from "./resource-names.js";
 import { CloudV2PromptSignals } from "./prompt-signals.js";
+import { createMcpServices } from "../mcp/composition.js";
 
 const PROXY_TOKEN_TTL_MS = 24 * 60 * 60_000;
-/** Boat stock image home; repositories live at <home>/<owner>/<name>. */
-export const CLOUD_V2_HOME = "/home/user";
 
 type ConfigFrame = Extract<CloudV2ControlFrame, { t: "config" }>;
 type Login = CloudAgentCredentialMaterial | null | undefined;
@@ -82,16 +83,20 @@ export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boo
   const proxyBase = `${v2.apiUrl}${CLOUD_V2_PROXY_PREFIX}`;
   const computers = new CloudV2Computers(pool);
   const repositoryToken = config.github ? createCloudV2RepositoryTokens(pool, config.github) : null;
+  const mcp = createMcpServices(pool, config);
+  const timing = (record: CloudV2TimingRecord) => console.log(`[cloud-v2] timing ${JSON.stringify(record)}`);
 
   const workerConfig = async (workspace: CloudV2Workspace): Promise<ConfigFrame> => {
     const proxy = async () => {
       const issued = await store.issueToken({ workspaceId: workspace.id, kind: "proxy", userId: null, ttlMs: PROXY_TOKEN_TTL_MS });
       return { token: issued.token, expiresAt: issued.expiresAt.getTime() };
     };
-    const [codex, claude, cursor] = await Promise.all([
+    const [codex, claude, cursor, setup, baseCommit] = await Promise.all([
       logins(workspace.creatorUserId, workspace.organizationId, "codex"),
       logins(workspace.creatorUserId, workspace.organizationId, "claude"),
       logins(workspace.creatorUserId, workspace.organizationId, "cursor"),
+      store.workspaceSetup(workspace.id),
+      store.baseCommit(workspace.id),
     ]);
     const agents = await cloudV2AgentConfig({ codex, claude, cursor }, proxyBase, proxy);
     return {
@@ -101,8 +106,11 @@ export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boo
       workspace: {
         id: workspace.id, organizationId: workspace.organizationId, repository: workspace.repository,
         checkoutPath: `${CLOUD_V2_HOME}/${workspace.repository}`, branch: workspace.branch, baseBranch: workspace.baseBranch,
+        ...(setup !== null ? { setup } : {}),
+        ...(baseCommit ? { baseCommit } : {}),
       },
       agents,
+      ...(mcp ? { mcpServers: await mcp.store.resolve(workspace.organizationId, workspace.creatorUserId, workspace.repository, true) } : {}),
     };
   };
 
@@ -115,7 +123,7 @@ export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boo
   };
   const proxy: CloudV2ProxyDeps = { store, logins, ...(keys ? { refreshCodex: createCloudV2CodexRefresh(pool, keys) } : {}) };
   const connections = roles.relay || roles.lifecycle ? new CloudV2Relay({
-    store, ...(securityEvents ? { securityEvents } : {}),
+    store, timing, ...(securityEvents ? { securityEvents } : {}),
     config: workerConfig,
     workerRoute: async id => {
       const route = await store.workerRoute(id);
@@ -128,7 +136,9 @@ export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boo
   }) : null;
   const relay = roles.relay ? connections : null;
   const promptSignals = new CloudV2PromptSignals();
-  const workers: CloudV2WorkerRouteDeps = { store, config: workerConfig, githubToken, runtimeSha256: v2.runtime.sha256,
+  const workers: CloudV2WorkerRouteDeps = { store, timing, config: workerConfig, githubToken, runtimeSha256: v2.runtime.sha256,
+    ...(mcp ? { mcpAuthorization: (workspace, id, force) =>
+      mcp.oauth.authorizationForRepository(workspace.organizationId, workspace.creatorUserId, workspace.repository, id, force, true) } : {}),
     promptOutbox: v2.promptOutbox === true, waitForPrompts: (id, ms, signal) => promptSignals.wait(id, ms, signal) };
   const promptChanges = v2.promptOutbox ? postgresNotificationSubscription(listenerPool, {
     channels: ["zeros_cloud_v2_prompts"],
@@ -145,24 +155,27 @@ export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boo
     onNotification: notice => {
       try {
         const scope = JSON.parse(notice.payload ?? "");
-        if (typeof scope?.ownerUserId === "string" && (scope.organizationId === null || typeof scope.organizationId === "string"))
-          void relay.refreshLogins({ ownerUserId: scope.ownerUserId, ...(scope.organizationId ? { organizationId: scope.organizationId } : {}) });
+        if ((typeof scope?.ownerUserId === "string" || scope?.ownerUserId === null) && (scope.organizationId === null || typeof scope.organizationId === "string"))
+          void relay.refreshLogins({ ...(typeof scope.ownerUserId === "string" ? { ownerUserId: scope.ownerUserId } : {}), ...(scope.organizationId ? { organizationId: scope.organizationId } : {}) });
       } catch { /* Invalid wake hints carry no authority. */ }
     },
   }) : null;
   void loginChanges?.start().catch(() => {}); // The shared listener retries and re-reads onReady.
   const runtime = cloudV2Runtime(v2.runtime.sha256, v2.runtime.store);
+  const remoteHeads = config.github ? createCloudV2RemoteHeads(pool, config.github) : null;
   const builder = roles.lifecycle ? new CloudV2ComputerBuilder({
     computers, compute, channel: config.deploymentChannel, localOwner, runtime,
     cloneToken: async (organizationId, userId, repository) => {
       if (!repositoryToken) throw new HttpError(409, "github_unavailable", "GitHub is not configured");
       return (await repositoryToken(organizationId, userId, repository)).token;
     },
+    ...(remoteHeads ? { remoteHead: remoteHeads } : {}),
     logger: console,
   }) : null;
   const lifecycle = roles.lifecycle ? new CloudV2Lifecycle({
     ...(builder ? { builds: builder } : {}),
     store,
+    timing,
     compute,
     runtime,
     prompts: store.prompts, stopIdle: (id, before) => store.stopIdle(id, before),
@@ -170,6 +183,15 @@ export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boo
     stopWorker: workspace => connections!.stopWorkspace(workspace),
     bootEnv: workspace => ({ CLOUD_V2_API_URL: v2.apiUrl, CLOUD_V2_RUNTIME_SHA256: v2.runtime.sha256, ZEROS_WORKSPACE_ID: workspace.id }),
     sandboxName: workspace => cloudV2SandboxName(config.deploymentChannel, "ws", workspace.id, localOwner),
+    // Checkpoints share the runtime's bucket, under cloud-v2/checkpoints/.
+    checkpoints: {
+      storage: cloudV2CheckpointStorage(runtimeStorageClient(v2.runtime.store), v2.runtime.store),
+      seal: (key, id, object) => sealCheckpointKey(key, id, object, keys),
+      open: (sealed, id, object) => openCheckpointKey(sealed, id, object, keys),
+    },
+    ...(remoteHeads ? { remoteHead: (workspace: CloudV2Workspace) =>
+      remoteHeads(workspace.organizationId, workspace.creatorUserId, workspace.repository, workspace.baseBranch) } : {}),
+    ...(config.github ? { githubToken } : {}),
     logger: console,
   }) : null;
   return { store, compute, routes, proxy, workers, relay, connections, lifecycle, loginChanges, promptChanges, promptSignals };

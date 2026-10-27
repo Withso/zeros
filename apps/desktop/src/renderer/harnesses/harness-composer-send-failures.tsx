@@ -21,6 +21,8 @@ import type { CloudWorkspaceDocument } from "../platform/cloud-workspaces";
 import { useWorkspaceStore } from "../state/workspace-store";
 import { FollowUpBehaviorSetting } from "../features/settings/follow-up-behavior-setting";
 import { SettingsGroup } from "../features/settings/settings-ui";
+import { CloudPromptRuntime } from "../features/agent/use-cloud-prompt-outbox";
+import { cloudScopedId } from "../platform/bridge/cloud-workspace-key";
 
 const organizationId = "11111111-1111-4111-8111-111111111111";
 const workspaceId = "22222222-2222-4222-8222-222222222222";
@@ -30,6 +32,7 @@ const agents = [{ id: "codex", name: "Codex", installed: true, authenticated: tr
 let sends = 0;
 let reconnects = 0;
 const followUpFixture = new URLSearchParams(location.search).has("follow-up");
+const cloudFeedback = new URLSearchParams(location.search).has("cloud-feedback");
 const followUps: Array<{ chatId: string; behavior: string | undefined }> = [];
 
 window.__ZEROS_NATIVE__ = { on: () => () => {}, async invoke<T>(command: string): Promise<T> {
@@ -54,18 +57,22 @@ let document: CloudWorkspaceDocument = {
   id: workspaceId, organizationId, teamId: organizationId, createdBy: organizationId, name: "Composer fixture",
   placement: "cloud", status: "ready", version: 1, error: null, deletedAt: null,
   createdAt: "2026-10-01T10:00:00Z", updatedAt: "2026-10-01T10:00:00Z",
-  capabilities: { canWrite: true, canManage: true, canStart: true, startUnavailableReason: null },
+  capabilities: { canWrite: true, canManage: true, canStart: true, startUnavailableReason: null, ...(cloudFeedback ? { promptOutbox: 1 as const } : {}) },
   repository: { forge: "github.com", owner: "example", name: "project", revision: "refs/heads/main" },
   generation: { number: 1, architecture: "x86_64", resources: { cpuMillicores: 2000, memoryMiB: 4096, storageMiB: 20480 },
     observedState: "running", lastObservedAt: null },
 };
 acceptCloudWorkspaceDocument(document);
-const chats = placements.map((cwd, index) => ({ id: `composer-chat-${index}`, folder: cwd, agentId: "codex", agentName: "Codex",
+const chats = placements.map((cwd, index) => ({ id: cloudFeedback && index === 0
+  ? cloudScopedId({ organizationId, workspaceId }, `feedback-${crypto.randomUUID()}`) : `composer-chat-${index}`, folder: cwd, agentId: "codex", agentName: "Codex",
   title: "Composer fixture", model: "gpt-6.1-sol", effort: "high" as const, permissionMode: "auto" as const,
   createdAt: 1, updatedAt: 1 }));
 useWorkspaceStore.setState({ chats, activeChatId: chats[0].id, activePage: "workspace" });
 for (const chat of chats) useSessionsStore.getState().setSession(chat.id, { ...BLANK, agentId: "codex", agentName: "Codex",
-  cwd: chat.folder, status: "ready", transcriptState: "resident", sessionId: "fixture-session", executionId: "fixture-session" });
+  cwd: chat.folder, status: "ready", transcriptState: "resident",
+  sessionId: cloudFeedback ? chat.id : "fixture-session", executionId: cloudFeedback ? chat.id : "fixture-session" });
+const cloudRuntime = cloudFeedback ? new CloudPromptRuntime() : null;
+const stopRuntime = cloudRuntime?.start();
 
 const actions = {
   getSession: (chatId: string) => useSessionsStore.getState().sessions[chatId],
@@ -76,9 +83,14 @@ const actions = {
   ensureSession: async () => {},
   updateConfig: () => {},
   holdQueue: () => {}, releaseQueue: () => {},
-  sendPrompt: async (chatId, text, displayText, _attachments, bubbleAttachments, segments, _autoAction, onAccepted, _cloudQueue, _wakeIntent, followUpBehavior) => {
+  cancel: async chatId => { await cloudRuntime?.stop(chatId); },
+  sendPrompt: async (chatId, text, displayText, attachments, bubbleAttachments, segments, autoAction, onAccepted, _cloudQueue, _wakeIntent, followUpBehavior, onCommitted) => {
     sends++;
     followUps.push({ chatId, behavior: followUpBehavior });
+    if (cloudRuntime && chatId === chats[0].id) {
+      await cloudRuntime.send(chatId, { text, displayText, attachments, bubbleAttachments, segments }, { autoAction, accepted: onAccepted, committed: onCommitted });
+      return;
+    }
     const message = { id: crypto.randomUUID(), kind: "text" as const, role: "user" as const, text: displayText ?? text,
       createdAt: Date.now(), attachments: bubbleAttachments, segments };
     const store = useSessionsStore.getState(), slot = store.sessions[chatId];
@@ -93,6 +105,20 @@ Object.assign(window, { composerSendFailureFixture: {
   get followUps() { return followUps; },
   get reconnects() { return reconnects; },
   get document() { return document; },
+  get cloudChatId() { return chats[0].id; },
+  get cloudSession() { return useSessionsStore.getState().sessions[chats[0].id]; },
+  stopRuntime,
+  refreshCloud() { cloudRuntime?.refresh(chats[0].id); },
+  cloudNative(state: "running" | "completed" | "failed" | "cancelled") {
+    const chatId = chats[0].id, store = useSessionsStore.getState(), slot = store.sessions[chatId], turnId = slot.foregroundTurnId;
+    if (!cloudRuntime || !turnId) throw new Error("No cloud fixture turn");
+    const notification = { sessionId: slot.executionId!, update: {
+      sessionUpdate: "turn_state" as const, turnId, state, startedAt: slot.activeTurnStartedAt ?? Date.now(),
+      stopReason: state === "cancelled" ? "cancelled" as const : "end_turn" as const,
+    } };
+    cloudRuntime.observe({ type: "AGENT_SESSION_UPDATE", id: crypto.randomUUID(), source: "engine", timestamp: Date.now(), chatId, agentId: "codex", notification });
+    store.applyBridgeUpdate(notification);
+  },
   publish(patch: Partial<CloudWorkspaceDocument>) {
     document = { ...document, ...patch, version: document.version + 1,
       updatedAt: new Date(Date.UTC(2026, 9, 1, 10) + (document.version + 1) * 1000).toISOString() };

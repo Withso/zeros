@@ -10,27 +10,37 @@ function key(
   return {
     metaKey: true,
     ctrlKey: false,
-    altKey: false,
+    altKey: true,
     code: "Slash",
     ...overrides,
   };
 }
 
 describe("matchesShortcutsHotkey", () => {
-  it("matches Command+/ and Control+/", () => {
+  it("matches Command+Option+/ and Control+Alt+/", () => {
     expect(matchesShortcutsHotkey(key())).toBe(true);
     expect(
       matchesShortcutsHotkey(key({ metaKey: false, ctrlKey: true })),
     ).toBe(true);
   });
 
-  it("rejects Option/Alt so it never collides with ⌥⌘ chords", () => {
-    expect(matchesShortcutsHotkey(key({ altKey: true }))).toBe(false);
+  it("rejects Command+/ and Control+/ without Option/Alt", () => {
+    expect(matchesShortcutsHotkey(key({ altKey: false }))).toBe(false);
+    expect(
+      matchesShortcutsHotkey(
+        key({ metaKey: false, ctrlKey: true, altKey: false }),
+      ),
+    ).toBe(false);
   });
 
-  it("rejects a bare slash and non-slash keys", () => {
+  it("rejects slash without Command/Control and non-slash keys", () => {
     expect(
       matchesShortcutsHotkey(key({ metaKey: false, ctrlKey: false })),
+    ).toBe(false);
+    expect(
+      matchesShortcutsHotkey(
+        key({ metaKey: false, ctrlKey: false, altKey: false }),
+      ),
     ).toBe(false);
     expect(matchesShortcutsHotkey(key({ code: "KeyK" }))).toBe(false);
   });

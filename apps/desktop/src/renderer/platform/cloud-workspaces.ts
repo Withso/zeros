@@ -40,7 +40,7 @@ export async function cloudAccountRequest<T>(
   path: string,
   schema: z.ZodType<T>,
   input?: { body: unknown; idempotencyKey: string; method?: "POST" | "DELETE" | "PUT" | "PATCH" },
-  options?: { promptRecovery?: true },
+  options?: { promptRecovery?: true; signal?: AbortSignal },
 ): Promise<T> {
   if (!isFeatureEnabled("cloud-workspaces"))
     throw new Error("Cloud workspaces are not available in this release channel.");
@@ -57,7 +57,7 @@ export async function cloudAccountRequest<T>(
     method: input?.method ?? (input ? "POST" : "GET"),
     redirect: "error",
     cache: "no-store",
-    signal: AbortSignal.timeout(20_000),
+    signal: options?.signal ? AbortSignal.any([options.signal, AbortSignal.timeout(20_000)]) : AbortSignal.timeout(20_000),
     headers: {
       authorization: `Bearer ${session.access_token}`,
       ...(input
@@ -103,15 +103,29 @@ export interface CloudWorkspaceCatalogSnapshot {
   workspaces: CloudWorkspaceDocument[];
   /** A resume hint, never an event cutoff or a transaction snapshot point. */
   catalogVersion: number | null;
+  /** A capped or dependency-incomplete observation cannot prove omission. */
+  complete?: boolean;
 }
 /** Cloud v2: one read per organization the account can use cloud in. */
 export async function listCloudWorkspaceCatalogSnapshot(organizationId?: string): Promise<CloudWorkspaceCatalogSnapshot> {
+  const me = getTeamStoreState().me;
+  const generation = getOrganizationStoreGeneration();
+  if (organizationId === undefined && !me) throw new Error("Cloud organization memberships have not loaded");
   const organizations = organizationId !== undefined ? [organizationId]
-    : (getTeamStoreState().me?.organizations ?? [])
-      .filter(org => !org.isPersonal && org.workspaceCapabilities.cloud).map(org => org.id).slice(0, 16);
+    : (me?.organizations ?? me?.teams ?? [])
+      .filter(org => !org.isPersonal && org.workspaceCapabilities.cloud).map(org => org.id);
   const workspaces: CloudWorkspaceDocument[] = [];
-  for (const id of organizations) workspaces.push(...(await listCloudV2Workspaces(id)).map(cloudV2Document));
-  return { workspaces, catalogVersion: null };
+  let complete = true;
+  for (const id of organizations) {
+    const page = await listCloudV2Workspaces(id);
+    if (generation !== getOrganizationStoreGeneration() || organizationId === undefined && me !== getTeamStoreState().me)
+      throw new Error("Cloud organization memberships changed while loading");
+    // The existing endpoint caps at 200 and has no continuation contract.
+    // Keep omitted cached rows until a complete observation or exact deletion.
+    if (page.length >= 200) complete = false;
+    workspaces.push(...page.map(cloudV2Document));
+  }
+  return { workspaces, catalogVersion: null, complete };
 }
 
 export async function getCloudWorkspaceDocument(

@@ -24,6 +24,7 @@ export class CursorHost {
     if (this.agent || this.opening || this.disposed) throw new Error("Cursor host has already been opened.");
     this.opening = true;
     const options = { cwd: params.cwd, model: { id: params.model }, apiKey: this.apiKey, mode: "agent" as const,
+      ...(params.mcpServers ? { mcpServers: params.mcpServers } : {}),
       disallowedTools: ["askQuestion"], local: { cwd: params.cwd, autoReview: false, sandboxOptions: { enabled: false },
         enableAgentRetries: false, settingSources: ["project", "user"] as Array<"project" | "user">, subagentInherit: {} } };
     const agent = params.nativeSessionId ? await this.sdk.resume(params.nativeSessionId, options) : await this.sdk.create(options);

@@ -33,13 +33,14 @@ export interface FilesToAttachmentsOpts {
   agentName: string | null | undefined;
   agentSupportsImage: boolean | undefined;
   modelId: string | null | undefined;
+  portableSources?: boolean;
 }
 
 /** Selection creates metadata and starts source recovery without awaiting I/O.
  * Staging copies into the owning workspace; send awaits its confirmed path. */
 export async function filesToAttachments(
   files: FileList | File[] | null | undefined,
-  _opts: FilesToAttachmentsOpts,
+  opts: FilesToAttachmentsOpts,
 ): Promise<ComposerAttachment[]> {
   return Array.from(files ?? []).map((file) => {
     const validation = validateAttachmentFile({
@@ -54,6 +55,7 @@ export async function filesToAttachments(
       mimeType: file.type || "application/octet-stream",
       kind,
       delivery: "reference",
+      ...(opts.portableSources ? { sourcePortable: true } : {}),
       data: "",
       size: file.size,
       validation,

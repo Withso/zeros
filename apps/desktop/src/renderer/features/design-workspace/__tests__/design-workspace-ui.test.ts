@@ -68,7 +68,9 @@ describe("design workspace UI memory", () => {
     expect(clampDesignZoom(0)).toBe(0.01);
     expect(clampDesignZoom(0.005)).toBe(0.01);
     expect(clampDesignZoom(4)).toBe(4);
-    expect(clampDesignZoom(512)).toBe(256);
+    expect(clampDesignZoom(8)).toBe(8);
+    expect(clampDesignZoom(8.01)).toBe(8);
+    expect(clampDesignZoom(512)).toBe(8);
     expect(
       normalizeDesignWorkspaceView({
         selectedFrame: "../outside.html",
@@ -99,6 +101,27 @@ describe("design workspace UI memory", () => {
       updatedAt: 0,
     });
   });
+
+  it("restores old extreme cameras at 800 percent without losing the world origin", () => {
+    const restored = normalizeDesignWorkspaceView({
+      zoom: 256, panX: -64_000, panY: -32_000,
+      directoryId: "design_pages", activePageId: "page_a",
+      byPage: {
+        page_a: { zoom: 256, panX: -64_000, panY: -32_000 },
+        page_b: { zoom: 16, panX: 80, panY: -160 },
+      },
+    });
+    expect(restored).toMatchObject({ zoom: 8, panX: -2000, panY: -1000 });
+    expect(restored.byPage!.page_a).toMatchObject({ zoom: 8, panX: -2000, panY: -1000 });
+    expect(restored.byPage!.page_b).toMatchObject({ zoom: 8, panX: 40, panY: -80 });
+  });
+
+  it.each(["personal-workspace", "organization-local-workspace"])(
+    "bounds direct camera updates at 800 percent in %s", workspaceId => {
+      useDesignWorkspaceUiStore.getState().setViewport(workspaceId, { zoom: 16, panX: -320, panY: 160 });
+      expect(designWorkspaceView(workspaceId)).toMatchObject({ zoom: 8, panX: -160, panY: 80 });
+    },
+  );
 
   it("keeps frame-selected only while the frame is the selection target", () => {
     // A persisted frame-selected flag survives only alongside its frame and

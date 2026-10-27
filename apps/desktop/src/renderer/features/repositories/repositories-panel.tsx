@@ -44,9 +44,7 @@ import {
   KeyRound,
   LaptopMinimal,
   Pencil,
-  PenTool,
   Plus,
-  Settings2,
   Trash2,
   Wand2,
   type LucideIcon,
@@ -164,7 +162,6 @@ import {
 } from "../settings/settings-ui";
 import { RunActionsSection } from "./run-actions-section";
 import { FilesToCopySection } from "./files-to-copy-section";
-import { DesignSection } from "./design-section";
 import { AddEnvVariableDialog } from "./add-env-variable-dialog";
 import { MCP_SECRET_SENTINEL } from "../agent-extensions/mcp-server-model";
 import {
@@ -188,8 +185,6 @@ export type RepoSectionId =
   | "git"
   | "actions"
   | "files"
-  | "design"
-  | "design-preferences"
   | "paths";
 
 export const REPO_SECTIONS: {
@@ -204,10 +199,6 @@ export const REPO_SECTIONS: {
   // which answers "where does it live", and before it, because this is the one
   // people hit on day one when a fresh workspace won't boot without its .env.
   { id: "files", label: "Files", icon: Copy },
-  // Which committed folder is the design directory (mode-model pointer).
-  // The persisted `design` destination is Directory in the Design mode tabs.
-  { id: "design", label: "Directory", icon: PenTool },
-  { id: "design-preferences", label: "Preferences", icon: Settings2 },
   { id: "paths", label: "Paths", icon: Folder },
 ];
 
@@ -422,15 +413,8 @@ export function RepoDetail({
   surfaceActive?: boolean;
 }) {
   switch (section) {
-    case "design-preferences":
-      return null;
     case "paths":
       return <PathsSection project={project} />;
-    case "design":
-      // The committed design-folder pointer + recognition of every design
-      // folder in the checkout. Gated on surfaceActive like Files so a
-      // retained-but-hidden pane never scans the repo.
-      return <DesignSection project={project} surfaceActive={surfaceActive} />;
     case "files":
       // Per-repo by design: saving writes THIS project's
       // `.zeros/settings.local.toml`, never a global list (see the section
@@ -654,40 +638,36 @@ function EnvVarRow({
       {(onEdit || onRemove) && (
         <div className="flex shrink-0 items-center gap-0.5">
           {onEdit && (
-            <Tooltip label="Edit secret">
-              <Button
-                variant="ghost"
-                size="icon-sm"
-                onClick={onEdit}
-                disabled={disabled}
-                aria-label={`Edit ${name}`}
-                className="text-fg2 hover:text-fg1"
-              >
-                <Pencil
-                  className="size-3.5"
-                  strokeWidth={1}
-                  aria-hidden="true"
-                />
-              </Button>
-            </Tooltip>
+            <Button
+              variant="ghost"
+              size="icon-sm"
+              onClick={onEdit}
+              disabled={disabled}
+              aria-label={`Edit ${name}`}
+              className="text-fg2 hover:text-fg1"
+            >
+              <Pencil
+                className="size-3.5"
+                strokeWidth={1}
+                aria-hidden="true"
+              />
+            </Button>
           )}
           {onRemove && (
-            <Tooltip label="Remove secret">
-              <Button
-                variant="ghost"
-                size="icon-sm"
-                onClick={onRemove}
-                disabled={disabled}
-                aria-label={`Remove ${name}`}
-                className="text-fg2 hover:bg-red-primary/10 hover:text-red-primary"
-              >
-                <Trash2
-                  className="size-3.5"
-                  strokeWidth={1}
-                  aria-hidden="true"
-                />
-              </Button>
-            </Tooltip>
+            <Button
+              variant="ghost"
+              size="icon-sm"
+              onClick={onRemove}
+              disabled={disabled}
+              aria-label={`Remove ${name}`}
+              className="text-fg2 hover:bg-red-primary/10 hover:text-red-primary"
+            >
+              <Trash2
+                className="size-3.5"
+                strokeWidth={1}
+                aria-hidden="true"
+              />
+            </Button>
           )}
         </div>
       )}

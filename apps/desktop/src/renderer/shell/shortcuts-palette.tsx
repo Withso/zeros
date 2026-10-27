@@ -1,15 +1,14 @@
 // ──────────────────────────────────────────────────────────
-// ShortcutsPalette — the ⌘/ glass shortcuts menu
+// ShortcutsPalette — the ⌥⌘/ glass shortcuts menu
 // ──────────────────────────────────────────────────────────
 //
-// A frosted command surface: a search box at the top and the shortcut catalog
-// below a shared dialog heading. Opened from anywhere with ⌘/ (see
-// use-shortcuts-hotkey.ts); dismissed by Escape, click-away, or ⌘/ again.
+// A frosted command surface: a full-width search box at the top and the shortcut
+// catalog below it, with an accessibility-only title. Opened with ⌥⌘/ (see
+// use-shortcuts-hotkey.ts); dismissed by Escape, click-away, or ⌥⌘/ again.
 //
 // Two modes:
-//   • Browse (no query) — horizontal category tabs (the same pill chrome as
-//     the chat / terminal / workbench tab strips: no border, bg fill + fg1 when
-//     active); the active tab's shortcuts are listed below (the tab is the
+//   • Browse (no query) — horizontal category pills (no border, bg fill + fg1
+//     when active); the active tab's shortcuts are listed below (the tab is the
 //     category label, so rows carry no tag).
 //   • Search (query typed) — tabs hide; every matching shortcut is listed flat,
 //     each row tagged with its category. cmdk does the filtering + nav.
@@ -18,22 +17,17 @@
 // CommandItem's data-[selected] fill is overridden to transparent) and nothing
 // to activate — the palette is a reference surface.
 //
-// The shared dialog owns its heading, close control and 50% modal scrim.
+// The shared dialog owns focus, dismissal and the 50% modal scrim.
 // The command surface retains its translucent panel and backdrop blur.
 // ──────────────────────────────────────────────────────────
 
 import * as React from "react";
 import {
-  Dialog,
-  DialogContent,
-  DialogBody,
-  DialogHeader,
-  DialogTitle,
-  DialogDescription,
-} from "../shared/ui/primitives/dialog";
+  PaletteDialog,
+  PaletteCommand,
+} from "../shared/ui/primitives/palette-dialog";
 
 import {
-  Command,
   CommandEmpty,
   CommandInput,
   CommandItem,
@@ -84,133 +78,88 @@ export function ShortcutsPalette({
       }));
 
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent
-        dismissable
-        aria-label="Keyboard shortcuts"
-        className={cn(
-          // Dead-center both axes. FIXED height (not max-h): the panel is
-          // the same size on every tab / search state — no height jumps —
-          // and stays responsive to the window through the 72vh term.
-          // 432px = title row 40 + body padding 48 + eight shortcut rows: input 36 (h-9) + tabs 44
-          // (py-2 + h-7) + list padding 8 + 8 × 32px rows; 660px wide keeps
-          // the previous 600×312 proportion. Overflowing content scrolls
-          // in the list (flex-col + min-h-0).
-          "fixed top-1/2 left-1/2 z-modal flex w-[92vw] max-w-[660px] -translate-x-1/2 -translate-y-1/2 flex-col",
-          "h-[min(72vh,432px)] gap-0 p-0",
-          "border-border2/60 overflow-hidden rounded-lg border shadow-[var(--shadow-dropdown)]",
-          // Thick glass (tuned to the user's reference): a --bg2 wash for
-          // warmth + a STRONG smooth blur that melts the app behind into clean
-          // colour — not a thin see-through film, not a milky frost (milk = too
-          // little tint + too much saturate; deep glass = the reverse). Levers:
-          // blur = glass thickness; bg2 alpha = warmth/body; and note --bg2 ≈
-          // the app's own luminance, so it's the SCRIM (not the tint) that
-          // actually darkens the panel — deepen bg-scrim if you want it darker.
-          "bg-bg2/30 backdrop-blur-[28px] backdrop-saturate-[1.2]",
-          // Subtle scale-from-center on open/close (matches dialog.tsx). The
-          // panel is centered with the negative translate-x / translate-y
-          // half utilities, which in Tailwind v4 are the standalone
-          // `translate` property — separate from the `transform`
-          // tw-animate-css animates — so it stays put through the zoom. Do
-          // NOT re-add the slide-in helpers: those double the -50% into the
-          // animated transform and fling the panel to the top-left (see the
-          // long note in dialog.tsx). `origin-center` + zoom keeps it pinned
-          // to the middle.
-          "origin-center duration-200 ease-out data-[state=closed]:duration-150 data-[state=closed]:ease-in",
-          "data-[state=open]:animate-in data-[state=closed]:animate-out",
-          "data-[state=open]:fade-in-0 data-[state=closed]:fade-out-0",
-          "data-[state=open]:zoom-in-97 data-[state=closed]:zoom-out-97",
-        )}
-      >
-        <DialogHeader>
-          <DialogTitle>Keyboard shortcuts</DialogTitle>
-          <DialogDescription className="sr-only">
-            Search and browse every keyboard shortcut.
-          </DialogDescription>
-        </DialogHeader>
+    <PaletteDialog
+      open={open}
+      onOpenChange={onOpenChange}
+      title="Keyboard shortcuts"
+      description="Search and browse every keyboard shortcut."
+    >
+      <PaletteCommand>
+        <CommandInput
+          autoFocus
+          showSearchIcon={false}
+          value={query}
+          onValueChange={setQuery}
+          aria-label="Search shortcuts"
+          placeholder="Search shortcuts…"
+          className="h-12 text-sm"
+        />
 
-        <DialogBody className="flex-1 gap-0">
-          {/* bg-transparent overrides the cmdk root's opaque bg-bg3 so the
-                panel glass shows through the list; min-h-0 lets the root shrink
-                inside the capped panel so CommandList (flex-1) scrolls. */}
-          <Command className="min-h-0 bg-transparent">
-            <CommandInput
-              autoFocus
-              value={query}
-              onValueChange={setQuery}
-              placeholder="Search shortcuts…"
-            />
-
-            {/* Category tabs — hidden while searching (results span every
+        {/* Category tabs — hidden while searching (results span every
                   category and carry their own tag instead). */}
-            {!searching && (
-              <div className="flex shrink-0 flex-wrap items-center gap-1 px-2 py-2">
-                {SHORTCUT_CATEGORIES.map((category) => {
-                  const active = category.id === activeCategoryId;
-                  return (
-                    <button
-                      key={category.id}
-                      type="button"
-                      onClick={() => setActiveCategoryId(category.id)}
-                      // The app-wide tab pill (chat / terminal / workbench
-                      // strips): h-7 rounded-md, no border, fill + fg1 when
-                      // active or hovered — but the fill is the TRANSLUCENT
-                      // --selected-glass semantic token (semantic-tokens.css)
-                      // so the pill stays glassy on the frosted panel.
-                      className={cn(
-                        "flex h-7 shrink-0 cursor-pointer items-center rounded-md px-2.5 text-xs font-medium transition-colors select-none",
-                        active
-                          ? "text-fg1 bg-[var(--selected-glass)]"
-                          : "text-fg2 hover:text-fg1 hover:bg-[var(--selected-glass)]",
-                      )}
-                    >
-                      {category.label}
-                    </button>
-                  );
-                })}
-              </div>
-            )}
-
-            <CommandList className="max-h-none min-h-0 flex-1 p-1">
-              <CommandEmpty className="text-fg2">
-                No shortcuts found.
-              </CommandEmpty>
-              {rows.map(({ shortcut, category }) => (
-                <CommandItem
-                  key={shortcut.id}
-                  value={shortcutSearchValue(shortcut, category)}
-                  // View-only: kill the primitive's hover/selected fill so the
-                  // reference list never looks actionable.
-                  className="data-[selected=true]:bg-transparent"
+        {!searching && (
+          <div className="flex shrink-0 flex-wrap items-center gap-1 px-2 py-2">
+            {SHORTCUT_CATEGORIES.map((category) => {
+              const active = category.id === activeCategoryId;
+              return (
+                <button
+                  key={category.id}
+                  type="button"
+                  onClick={() => setActiveCategoryId(category.id)}
+                  // Rounded category pills: h-7, no border, fill + fg1 when
+                  // active or hovered. The fill is the TRANSLUCENT
+                  // --selected-glass semantic token (semantic-tokens.css)
+                  // so the pill stays glassy on the frosted panel.
+                  className={cn(
+                    "flex h-7 shrink-0 cursor-pointer items-center rounded-full px-2.5 text-xs font-medium transition-colors select-none",
+                    active
+                      ? "text-fg1 bg-[var(--selected-glass)]"
+                      : "text-fg2 hover:text-fg1 hover:bg-[var(--selected-glass)]",
+                  )}
                 >
-                  <span className="text-fg1 min-w-0 flex-1 truncate text-sm">
-                    {shortcut.label}
-                  </span>
-                  {/* Chips share the tabs' translucent --selected-glass wash
+                  {category.label}
+                </button>
+              );
+            })}
+          </div>
+        )}
+
+        <CommandList className="max-h-none min-h-0 flex-1 p-1">
+          <CommandEmpty className="text-fg2">No shortcuts found.</CommandEmpty>
+          {rows.map(({ shortcut, category }) => (
+            <CommandItem
+              key={shortcut.id}
+              value={shortcutSearchValue(shortcut, category)}
+              // View-only: kill the primitive's hover/selected fill so the
+              // reference list never looks actionable.
+              className="data-[selected=true]:bg-transparent"
+            >
+              <span className="text-fg1 min-w-0 flex-1 truncate text-sm">
+                {shortcut.label}
+              </span>
+              {/* Chips share the tabs' translucent --selected-glass wash
                         so they stay glassy on the frosted panel. The Kbd here
                         also drops its border (this palette only — everywhere
                         else Kbd keeps border1): the wash alone is the chip. */}
-                  {searching && (
-                    <span className="text-3xxs text-fg2 shrink-0 rounded-sm bg-[var(--selected-glass)] px-1.5 py-px font-medium">
-                      {category.label}
-                    </span>
-                  )}
-                  <Inline as="span" gap={1} align="center" className="shrink-0">
-                    {shortcut.keys.map((chord) => (
-                      <Kbd
-                        key={chord}
-                        className="border-transparent bg-[var(--selected-glass)]"
-                      >
-                        {chord}
-                      </Kbd>
-                    ))}
-                  </Inline>
-                </CommandItem>
-              ))}
-            </CommandList>
-          </Command>
-        </DialogBody>
-      </DialogContent>
-    </Dialog>
+              {searching && (
+                <span className="text-3xxs text-fg2 shrink-0 rounded-sm bg-[var(--selected-glass)] px-1.5 py-px font-medium">
+                  {category.label}
+                </span>
+              )}
+              <Inline as="span" gap={1} align="center" className="shrink-0">
+                {shortcut.keys.map((chord) => (
+                  <Kbd
+                    key={chord}
+                    className="border-transparent bg-[var(--selected-glass)]"
+                  >
+                    {chord}
+                  </Kbd>
+                ))}
+              </Inline>
+            </CommandItem>
+          ))}
+        </CommandList>
+      </PaletteCommand>
+    </PaletteDialog>
   );
 }

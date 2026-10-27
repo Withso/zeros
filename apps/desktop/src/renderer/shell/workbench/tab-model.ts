@@ -7,6 +7,7 @@ import {
 // ──────────────────────────────────────────────────────────
 
 import type { BrowserTabVariant } from "../../features/browser/variant-types";
+import { validSkillSource, type SkillSource } from "../../platform/skill-source";
 import {
   isBrowserProductId,
   normalizeBrowserAppearance,
@@ -76,6 +77,8 @@ export interface WorkbenchTab {
    *  optional — with none the tab shows its tree + a "select a file" viewer
    *  and is titled "Open file". */
   filePath?: string;
+  /** Provider library source; read through discovery, never as a repo path. */
+  skillSource?: SkillSource;
   /** Files/Changes tab: open the viewer in Diff mode (vs the read-only source
    *  "Edit" view). Set when the file is opened from the Changes list; cleared
    *  when opened from All Files (the default view follows the entry point,
@@ -122,8 +125,8 @@ export interface WorkbenchTab {
   changesView?: ChangesViewMode;
   /** Changes body presentation; omitted on older tabs means all file diffs. */
   changesPresentation?: "all" | "single";
-  /** Explicit tool navigation keeps an absent/clean file selected instead of
-   * silently opening an unrelated change. Not restored by normalization. */
+  /** Explicit tool diff target. An absent/clean file stays in Changes with an
+   * empty comparison. Ephemeral; not restored by normalization. */
   changesRequestedFile?: string;
   /** Explicit Files-tab viewer choice. Changes is a diff-only surface. */
   viewerMode?: ViewerMode;
@@ -333,6 +336,7 @@ export function blankFixedFilesTab(tab: WorkbenchTab): WorkbenchTab {
     ...tab,
     title: "Open file",
     filePath: undefined,
+    skillSource: undefined,
     fileTreeVisible: true,
     diff: false,
     diffScope: undefined,
@@ -354,8 +358,8 @@ export function findBlankFilesTab(
   tabs: WorkbenchTab[],
 ): WorkbenchTab | undefined {
   return (
-    tabs.find((t) => t.type === "files" && !t.filePath && t.fixed === true) ??
-    tabs.find((t) => t.type === "files" && !t.filePath)
+    tabs.find((t) => t.type === "files" && !t.skillSource && !t.filePath && t.fixed === true) ??
+    tabs.find((t) => t.type === "files" && !t.skillSource && !t.filePath)
   );
 }
 
@@ -414,10 +418,10 @@ export function planWorkbenchFileOpen(
   // in a blank (home first; a blank is never the dirty tab, it has no editor)
   // or a new tab — while the draft stays alive in its original tab.
   const active = tabs.find((t) => t.id === activeId);
-  if (active && active.type === "files") {
+  if (active && active.type === "files" && !active.skillSource) {
     if (activeFileDirty && active.filePath !== path) {
       const existing = tabs.find(
-        (t) => t.id !== active.id && t.type === "files" && t.filePath === path,
+        (t) => t.id !== active.id && t.type === "files" && !t.skillSource && t.filePath === path,
       );
       if (existing) return { kind: "focus", id: existing.id };
       const blank = findBlankFilesTab(tabs);
@@ -428,7 +432,7 @@ export function planWorkbenchFileOpen(
   // No active File tab to reuse (active is a Browser/non-File, or workbench empty):
   // focus the file if it's already open, else fill a blank (the fixed Files
   // home first) before allocating a fresh tab.
-  const existing = tabs.find((t) => t.type === "files" && t.filePath === path);
+  const existing = tabs.find((t) => t.type === "files" && !t.skillSource && t.filePath === path);
   if (existing) return { kind: "focus", id: existing.id };
   const empty = findBlankFilesTab(tabs);
   if (empty) return { kind: "replace", id: empty.id };
@@ -788,6 +792,7 @@ export function normalizeWorkbenchTabs(parsed: WorkbenchTab[]): WorkbenchTab[] {
           ...tab,
           pinned: false,
           filePath,
+          skillSource: filePath && validSkillSource(tab.skillSource) && tab.skillSource.path === filePath ? tab.skillSource : undefined,
           reviewSubtab: undefined,
           changesView: undefined,
           browserConversationId: undefined,
@@ -849,7 +854,7 @@ export function normalizeWorkbenchTabs(parsed: WorkbenchTab[]): WorkbenchTab[] {
   // Exactly one fixed Files home: honor the first persisted flag (coerced —
   // persistence is user-editable), promote the first File tab of a pre-flag
   // slice, and seed a blank home when no File tab survived at all.
-  const filesTabs = closable.filter((t) => t.type === "files");
+  const filesTabs = closable.filter((t) => t.type === "files" && !t.skillSource);
   const fixedId = (filesTabs.find((t) => t.fixed === true) ?? filesTabs[0])?.id;
   const withHome: WorkbenchTab[] = closable.map((t) =>
     t.type === "files" ? { ...t, fixed: t.id === fixedId || undefined } : t,

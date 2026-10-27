@@ -20,6 +20,18 @@ connection supplies an email. Credentials without identity metadata use
 API mode never borrows an email from a saved subscription. Cloud connections
 use their own selected credential's name; device identity is never substituted.
 
+For Local agents, API settings use the engine's selected key source as well as
+saved-key presence. An inherited key is labeled with its environment variable
+(for example, **Cursor API key provided by CURSOR_API_KEY**) and can show
+**Connected via API** without a saved key in this app. Remove applies only to a
+key saved in the current secret store; the input never displays an existing key.
+Pending or failed storage reads are not reported as a missing key. This also
+applies to organization-local workspaces. Cloud connections retain their own
+credential selection. Local, hosted Dev, Alpha, Beta and production stores stay
+isolated; checkouts in the same development mode keep their existing shared store.
+Returning to Settings revalidates the engine registry so a credential change in
+another instance cannot remain hidden behind a recently cached connection status.
+
 Selecting CLI reads the existing device authentication without starting a login,
 terminal or model session. Claude uses `auth status --json`; Codex uses native
 `account/read`. CLI detection also recognizes a native saved API credential;
@@ -152,7 +164,7 @@ the engine never substitutes an ambient credential for an expired selected key.
 Renewing an access token does not renew that account key. An expired or revoked
 account key uses the existing sign-in / update-key recovery in Settings.
 
-The pinned `@cursor/sdk` 1.0.31 owns access-token refresh, including during active
+The pinned `@cursor/sdk` 1.0.40 owns access-token refresh, including during active
 local runs. This incorporates the refresh correction documented in the
 [1.0.30 changelog](https://cursor.com/docs/sdk/changelog). Do not add a competing
 Zeros refresh timer or restart a healthy execution just to renew its token.

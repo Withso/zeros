@@ -1,6 +1,7 @@
 import { BrowserWindow, session } from "electron";
 import { randomUUID } from "node:crypto";
 import { rendererProcessOwners } from "./renderer-process-owners";
+import { electronDesignCaptureAdmission } from "./design-capture-admission";
 import { DESIGN_STATIC_RENDER_CSS, DESIGN_STATIC_RENDER_SCRIPT } from "@zeros/protocol/design-capture";
 import { prepareDesignCaptureViewport, captureScaledDesignPng } from "../src/engine/design/capture-viewport";
 import {
@@ -58,6 +59,16 @@ export async function startElectronDesignCapture(): Promise<DesignCaptureService
       },
     });
     rendererProcessOwners.track(window.webContents, "Design capture");
+    // Electron can leave page evaluations pending after their WebContents is
+    // destroyed. Native destruction is positive proof that the page is gone;
+    // join it at every asynchronous step so cancellation can retire the slot.
+    const retired = new Promise<void>((resolve) => {
+      window.webContents.once("destroyed", () => resolve());
+    });
+    const whileAlive = <T>(operation: Promise<T>): Promise<T> => Promise.race([
+      operation,
+      retired.then(() => { throw signal.reason ?? new Error("Design capture document was destroyed."); }),
+    ]);
     const destroy = () => {
       if (!window.isDestroyed()) window.destroy();
     };
@@ -73,16 +84,16 @@ export async function startElectronDesignCapture(): Promise<DesignCaptureService
         sanitizeDesignFrameMarkup(input.html),
         policy,
       );
-      await window.loadURL(
+      await whileAlive(window.loadURL(
         `data:text/html;charset=utf-8;base64,${Buffer.from(html).toString("base64")}`,
-      );
+      ));
       signal.throwIfAborted();
       // Scope media preferences to this disposable page. Setting CSS
       // color-scheme alone does not change authored prefers-* media queries.
       // Navigate first: Electron may defer debugger commands before navigation.
       window.webContents.debugger.attach("1.3");
-      await prepareDesignCaptureViewport(input, params => window.webContents.debugger.sendCommand("Emulation.setDeviceMetricsOverride", params));
-      await window.webContents.debugger.sendCommand(
+      await prepareDesignCaptureViewport(input, params => whileAlive(window.webContents.debugger.sendCommand("Emulation.setDeviceMetricsOverride", params)));
+      await whileAlive(window.webContents.debugger.sendCommand(
         "Emulation.setEmulatedMedia",
         {
           media: "screen",
@@ -91,25 +102,31 @@ export async function startElectronDesignCapture(): Promise<DesignCaptureService
             { name: "prefers-reduced-motion", value: "reduce" },
           ],
         },
-      );
+      ));
+      // The native window's default canvas is opaque. Preserve authored alpha
+      // for text/transparent frames without overriding their CSS backgrounds.
+      await whileAlive(window.webContents.debugger.sendCommand(
+        "Emulation.setDefaultBackgroundColorOverride",
+        { color: { r: 0, g: 0, b: 0, a: 0 } },
+      ));
       signal.throwIfAborted();
       // Evaluation is host-authored; CSP forbids authored scripts. SMIL,
       // marquees and media hold their opening state, as the canvas shows them.
-      await window.webContents.executeJavaScript(DESIGN_STATIC_RENDER_SCRIPT);
+      await whileAlive(window.webContents.executeJavaScript(DESIGN_STATIC_RENDER_SCRIPT));
       // Decode data images/fonts before taking the exact viewport.
-      await window.webContents.executeJavaScript(
+      await whileAlive(window.webContents.executeJavaScript(
         `Promise.all([document.fonts.ready,...Array.from(document.images, image => image.decode().catch(()=>{}))]).then(()=>new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve))))`,
-      );
+      ));
       signal.throwIfAborted();
       if (input.layoutViewport) {
-        const bytes = await captureScaledDesignPng(input, params => window.webContents.debugger.sendCommand("Page.captureScreenshot", params));
+        const bytes = await captureScaledDesignPng(input, params => whileAlive(window.webContents.debugger.sendCommand("Page.captureScreenshot", params)));
         signal.throwIfAborted();
         return { bytes, renderer: `electron-${process.versions.electron}/chromium-${process.versions.chrome}` };
       }
-      const captured = await window.webContents.capturePage(
+      const captured = await whileAlive(window.webContents.capturePage(
         { x: 0, y: 0, width: input.width, height: input.height },
         { stayHidden: true, stayAwake: false },
-      );
+      ));
       signal.throwIfAborted();
       const size = captured.getSize();
       const image =
@@ -127,8 +144,9 @@ export async function startElectronDesignCapture(): Promise<DesignCaptureService
     } finally {
       signal.removeEventListener("abort", destroy);
       destroy();
+      await retired;
       await partition.clearStorageData();
     }
-  });
+  }, electronDesignCaptureAdmission);
   return service;
 }

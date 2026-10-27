@@ -412,17 +412,15 @@ function StructuredQuestionCard({ request, onRespond }: QuestionCardProps) {
               </span>
             </Tooltip>
           ) : null}
-          <Tooltip label="Dismiss">
-            <button
-              type="button"
-              onMouseDown={suppressFocusOnClick}
-              onClick={dismiss}
-              aria-label="Dismiss (agent proceeds with its default)"
-              className="text-fg2 hover:text-fg1 -mt-0.5 -mr-1 shrink-0 rounded-sm p-0.5 transition-colors"
-            >
-              <X className="size-4" />
-            </button>
-          </Tooltip>
+          <button
+            type="button"
+            onMouseDown={suppressFocusOnClick}
+            onClick={dismiss}
+            aria-label="Dismiss (agent proceeds with its default)"
+            className="text-fg2 hover:text-fg1 -mt-0.5 -mr-1 shrink-0 rounded-sm p-0.5 transition-colors"
+          >
+            <X className="size-4" />
+          </button>
         </div>
 
         {/* Option rows */}

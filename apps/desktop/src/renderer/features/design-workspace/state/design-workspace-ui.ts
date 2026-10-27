@@ -12,13 +12,13 @@ import { designPageIdSchema, type DesignPageSummary } from "@zeros/protocol/desi
 import { create } from "zustand";
 import { normalizeDesignCanvasBackground } from "../design-canvas-background";
 import { designSelectionTargetKey, type DesignSelectionTarget } from "../design-selected-targets";
+import { DESIGN_MIN_ZOOM, DESIGN_MAX_ZOOM } from "../design-canvas-limits";
+export { DESIGN_MIN_ZOOM, DESIGN_MAX_ZOOM } from "../design-canvas-limits";
 
 const STORAGE_KEY = "zeros:design-workspace-ui-v1";
 const MAX_WORKSPACES = 32;
 const MAX_PAGE_VIEWS = 32;
 const PERSIST_DEBOUNCE_MS = 150;
-export const DESIGN_MIN_ZOOM = 0.01;
-export const DESIGN_MAX_ZOOM = 256;
 
 export type DesignBottomPanel = "layers" | "assets";
 let nextSelectionEvent = 0;
@@ -174,6 +174,14 @@ export function normalizeDesignWorkspaceView(
     return { ...DEFAULT_DESIGN_WORKSPACE_VIEW };
   }
   const record = value as Record<string, unknown>;
+  const zoom = clampDesignZoom(
+    typeof record.zoom === "number" ? record.zoom : DEFAULT_DESIGN_WORKSPACE_VIEW.zoom,
+  );
+  // Older saved cameras could exceed 800%. Preserve their world origin when
+  // bounding the scale, including each page's remembered camera. Invalid
+  // values keep the existing defaults instead of rebasing an unknown view.
+  const panScale = typeof record.zoom === "number" && Number.isFinite(record.zoom) && record.zoom > DESIGN_MAX_ZOOM
+    ? zoom / record.zoom : 1;
   const selectedFrame =
     isDesignFrameFile(record.selectedFrame)
       ? record.selectedFrame
@@ -215,18 +223,14 @@ export function normalizeDesignWorkspaceView(
         ? record.activeTheme
         : null,
     canvasBackground: normalizeDesignCanvasBackground(record.canvasBackground),
-    zoom: clampDesignZoom(
-      typeof record.zoom === "number"
-        ? record.zoom
-        : DEFAULT_DESIGN_WORKSPACE_VIEW.zoom,
-    ),
+    zoom,
     panX:
       typeof record.panX === "number" && Number.isFinite(record.panX)
-        ? record.panX
+        ? record.panX * panScale
         : DEFAULT_DESIGN_WORKSPACE_VIEW.panX,
     panY:
       typeof record.panY === "number" && Number.isFinite(record.panY)
-        ? record.panY
+        ? record.panY * panScale
         : DEFAULT_DESIGN_WORKSPACE_VIEW.panY,
     updatedAt:
       typeof record.updatedAt === "number" &&
@@ -530,10 +534,7 @@ export const useDesignWorkspaceUiStore = create<DesignWorkspaceUiStore>(
     setViewport(workspaceId, viewport, owner) {
       if (owner && (owner.workspaceId !== workspaceId || !isCurrentDesignPageOwner(owner))) return;
       set((state) => ({
-        byWorkspace: updateWorkspaceView(state.byWorkspace, workspaceId, {
-          ...viewport,
-          zoom: clampDesignZoom(viewport.zoom),
-        }),
+        byWorkspace: updateWorkspaceView(state.byWorkspace, workspaceId, viewport),
       }));
     },
 

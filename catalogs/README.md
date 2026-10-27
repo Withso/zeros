@@ -88,8 +88,8 @@ the model ID and persisted aliases are unchanged.
 
 ## October 2026 qualification
 
-Catalog version 13 ships with Claude Agent SDK 0.3.293 / Claude Code 2.1.293,
-Codex 0.161.0, and Cursor SDK 1.0.37. Existing saved defaults and persisted aliases
+Catalog version 13 ships with Claude Agent SDK 0.3.309 / Claude Code 2.1.309,
+Codex 0.164.0, and Cursor SDK 1.0.40. Existing saved defaults and persisted aliases
 remain unchanged. Version-specific `opus-5.5` and `sonnet-5.5` aliases resolve
 to their own model IDs. The new `haiku-5.5` alias resolves to `claude-haiku-5-5`;
 `haiku` continues to resolve to Haiku 4.5.
@@ -130,14 +130,17 @@ Cursor `models.list`, plus the provider model documentation:
 Discovery proves advertised availability, not permission to run every model
 on every account. Preserve exact-model live restrictions after discovery.
 
-The subsequent Claude SDK 0.3.296 / Claude Code 2.1.296 and Codex 0.162.1
+The subsequent Claude SDK 0.3.309 / Claude Code 2.1.309 and Codex 0.164.0
 runtime update retains catalog version 13 and these defaults. The compared
 Claude model literals and Codex's 11-model bundled catalog add no model IDs.
-The Codex 0.162.1 launch smoke confirms all eight curated IDs via native
+The Codex 0.164.0 launch smoke confirms all eight curated IDs via native
 `model/list`; this credential-free result is not account-specific availability.
-Cursor remains pinned at 1.0.37. Runtime compatibility decisions are recorded in
-[Claude event coverage](../docs/claude-event-coverage.md) and the
-[Codex harness contract](../docs/codex-app-server-compatibility.md).
+Cursor SDK 1.0.40 uses the patched zod 4 peer in both the desktop and standalone
+cloud worker. Its upgrade adds no curated model IDs or effort labels. Runtime
+compatibility decisions are recorded in
+[Claude event coverage](../docs/claude-event-coverage.md), the
+[Codex harness contract](../docs/codex-app-server-compatibility.md), and
+[Cursor SDK compatibility](../docs/agent-tool-presentation.md#cursor-sdk-compatibility).
 
 ### New chat default policy
 

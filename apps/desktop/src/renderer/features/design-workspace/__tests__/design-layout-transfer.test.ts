@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { DesignRuntimeNodeDetails } from "@zeros/protocol/design-runtime";
 import {
   resetDesignWorkspaceUiForTests,
@@ -17,6 +17,9 @@ const mocks = vi.hoisted(() => {
     runtimeFor: vi.fn(),
     runtime: null as unknown,
     confirmedFrames: [] as unknown[],
+    preparation: undefined as import("../../../platform/git").DesignWorkspaceSnapshotWire["preparation"],
+    directoryId: "directory-one",
+    listeners: new Set<() => void>(),
   };
   state.runtime = {
     sourceVersion: "a".repeat(24),
@@ -29,7 +32,11 @@ const mocks = vi.hoisted(() => {
 vi.mock("../state/design-workspace-cache", () => ({
   transferDesignNodeCached: mocks.transfer,
   designWorkspaceSnapshotCache: {
-    peekSnapshot: () => ({ data: { frames: mocks.confirmedFrames } }),
+    peekSnapshot: () => ({ data: { frames: mocks.confirmedFrames, preparation: mocks.preparation, directoryId: mocks.directoryId } }),
+    subscribe: (_workspaceId: string, listener: () => void) => {
+      mocks.listeners.add(listener);
+      return () => mocks.listeners.delete(listener);
+    },
   },
 }));
 vi.mock("../state/design-selection", () => ({
@@ -50,6 +57,8 @@ vi.mock("../design-layout-drag", () => ({
 import {
   transferDesignLayerAtRelease,
   transferDesignLayerOnCanvas,
+  designCanvasFrameAt,
+  designCanvasDropTargetFrame,
 } from "../design-layout-transfer";
 
 const source = {
@@ -90,6 +99,9 @@ beforeEach(() => {
   mocks.targets = [];
   mocks.destinationDetails = undefined;
   mocks.confirmedFrames = [];
+  mocks.preparation = undefined;
+  mocks.directoryId = "directory-one";
+  mocks.listeners.clear();
   mocks.runtimeFor.mockImplementation(() => mocks.runtime);
   mocks.waitForRuntime.mockResolvedValue(null);
   resetDesignWorkspaceUiForTests();
@@ -98,6 +110,7 @@ beforeEach(() => {
     .setSelection(input.workspaceId, source.file, node.oid);
   mocks.transfer.mockResolvedValue(reply);
 });
+afterEach(() => vi.useRealTimers());
 
 describe("canvas transfer presentation", () => {
   it("sends the measured affine appearance instead of the legacy flattening request", async () => {
@@ -268,6 +281,88 @@ describe("design-tool nesting", () => {
     relocationContext: { inheritedStyles: { color: "navy" }, baseStyles: { "font-family": "Georgia" }, unsupported: [] },
   } as DesignRuntimeNodeDetails;
 
+  const prepareDestination = () => {
+    const description = (frame: typeof source) => ({
+      file: frame.file, title: frame.title, x: frame.x, y: frame.y,
+      width: frame.width, height: frame.height, z: frame.z,
+      preparation: "unprepared" as const,
+    });
+    mocks.confirmedFrames = [source];
+    mocks.preparation = { revision: "catalog", epoch: 1,
+      descriptions: [description(source), description(destination)], current: [source.file], errors: {} };
+  };
+
+  it("warms a described drop destination and waits for its prepared generation without detaching", async () => {
+    prepareDestination();
+    const nest = vi.fn();
+    const result = transferDesignLayerAtRelease({ ...input, pointer: { x: 1100, y: 100 }, nest });
+    await Promise.resolve();
+    expect(nest).toHaveBeenCalledWith(destination.file);
+    expect(mocks.transfer).not.toHaveBeenCalled();
+    mocks.confirmedFrames = [source, destination];
+    mocks.preparation = { ...mocks.preparation!, current: [source.file, destination.file] };
+    for (const listener of mocks.listeners) listener();
+    await expect(result).resolves.toBe(true);
+    expect(mocks.transfer.mock.calls[0]?.[1]).toMatchObject({ destinationFrame: destination.file });
+    expect(mocks.listeners.size).toBe(0);
+    expect(nest).toHaveBeenLastCalledWith(null);
+  });
+
+  it("refuses an unprepared destination even when a stale runtime remains registered", async () => {
+    vi.useFakeTimers();
+    prepareDestination();
+    const result = transferDesignLayerAtRelease({ ...input, pointer: { x: 1100, y: 100 } });
+    const assertion = expect(result).rejects.toThrow(/still loading/);
+    await vi.advanceTimersByTimeAsync(2001);
+    await assertion;
+    expect(mocks.transfer).not.toHaveBeenCalled();
+    expect(mocks.listeners.size).toBe(0);
+  });
+
+  it("refuses a prepared destination whose runtime still measures an older source", async () => {
+    mocks.confirmedFrames = [source, confirmed];
+    await expect(transferDesignLayerAtRelease({ ...input, pointer: { x: 1100, y: 100 } })).rejects.toThrow(/still loading/);
+    expect(mocks.transfer).not.toHaveBeenCalled();
+  });
+
+  it("discovers destinations only on the source frame's page", () => {
+    const frames = [
+      { ...source, pageId: "current" },
+      { ...destination, pageId: "current" },
+      { ...destination, file: "other-page.html", pageId: "other", z: 10 },
+    ];
+    expect(designCanvasFrameAt(source.file, frames, { x: 1100, y: 100 })?.file).toBe(destination.file);
+    expect(designCanvasDropTargetFrame(source.file, frames, { x: 1100, y: 100, width: 100, height: 80 })?.file).toBe(destination.file);
+  });
+
+  it("refuses a destination invalidated while its layout measurement is pending", async () => {
+    prepareDestination();
+    mocks.confirmedFrames = [source, destination];
+    mocks.preparation = { ...mocks.preparation!, current: [source.file, destination.file] };
+    const runtime = { ...(mocks.runtime as object), getLayoutTargets: async () => {
+      mocks.preparation = { ...mocks.preparation!, epoch: 2, current: [source.file] };
+      return [];
+    } };
+    mocks.runtimeFor.mockReturnValue(runtime);
+    await expect(transferDesignLayerAtRelease({ ...input, pointer: { x: 1100, y: 100 } })).rejects.toThrow(/still loading/);
+    expect(mocks.transfer).not.toHaveBeenCalled();
+  });
+
+  it.each(["retired", "reprepared", "directory"])("refuses %s destination authority even when its retained bytes match", async (change) => {
+    prepareDestination();
+    mocks.confirmedFrames = [source, destination];
+    mocks.preparation = { ...mocks.preparation!, current: [source.file, destination.file] };
+    const runtime = { ...(mocks.runtime as object), getLayoutTargets: async () => {
+      if (change === "retired") mocks.preparation = undefined;
+      else if (change === "reprepared") mocks.preparation = { ...mocks.preparation!, epoch: 2 };
+      else mocks.directoryId = "directory-two";
+      return [];
+    } };
+    mocks.runtimeFor.mockReturnValue(runtime);
+    await expect(transferDesignLayerAtRelease({ ...input, pointer: { x: 1100, y: 100 } })).rejects.toThrow(/still loading/);
+    expect(mocks.transfer).not.toHaveBeenCalled();
+  });
+
   it("joins the frame under the pointer, not the one the layer's centre covers", async () => {
     const left = { ...destination, file: "left.html", x: 1000, width: 300 };
     const right = { ...destination, file: "right.html", x: 1400, width: 300 };
@@ -355,10 +450,14 @@ describe("design-tool nesting", () => {
 
   it("waits for a destination frame that just went live, and refuses one that never loads", async () => {
     mocks.runtimeFor.mockImplementation((file: string) => (file === destination.file ? null : mocks.runtime));
-    mocks.waitForRuntime.mockResolvedValueOnce(mocks.runtime);
+    mocks.waitForRuntime.mockImplementationOnce(async () => {
+      mocks.runtimeFor.mockImplementation(() => mocks.runtime);
+      return mocks.runtime;
+    });
     await expect(transferDesignLayerOnCanvas({ ...input })).resolves.toBe(true);
     expect(mocks.waitForRuntime).toHaveBeenCalledWith(input.workspaceId, destination.file, expect.any(Number));
     expect(mocks.transfer).toHaveBeenCalledOnce();
+    mocks.runtimeFor.mockImplementation((file: string) => (file === destination.file ? null : mocks.runtime));
     mocks.waitForRuntime.mockResolvedValueOnce(null);
     await expect(transferDesignLayerOnCanvas({ ...input })).rejects.toThrow(/still loading/);
     expect(mocks.transfer).toHaveBeenCalledOnce();

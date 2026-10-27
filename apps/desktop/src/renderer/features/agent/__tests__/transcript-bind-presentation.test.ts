@@ -89,8 +89,9 @@ describe("transcript presentation during session reattachment", () => {
       const cloud = isCloudWorkspace(cwd), chatId = "chat";
       const messages = [{ id: "prior", kind: "text" as const, role: "agent" as const, text: "Prior output", createdAt: 1 }];
       const presentation = cloud ? { source: "cache" as const } : null;
+      const signatures = cloud ? { prior: "100:fixture" } : undefined;
       useSessionsStore.getState().setSession(chatId, { ...BLANK, cwd, agentId, messages, transcriptState: cloud ? "loading" : "resident",
-        transcriptPresentation: presentation });
+        transcriptPresentation: presentation, ...(cloud ? { transcriptSource: "worker" as const, transcriptContentSignatures: signatures } : {}) });
       const generations = new Map<string, number>();
       let release!: (id: string) => void;
       const workspace = new Promise<string>(resolve => { release = resolve; });
@@ -109,6 +110,8 @@ describe("transcript presentation during session reattachment", () => {
       generations.set(chatId, 1); release("workspace"); await loading;
       expect(pending.messages).toBe(messages);
       expect(pending.transcriptPresentation).toBe(presentation);
+      if (cloud) expect(pending.transcriptSource).toBe("worker");
+      if (cloud) expect(pending.transcriptContentSignatures).toBe(signatures);
       expect(pending.transcriptState).toBe(cloud ? "loading" : "resident");
     }
   });

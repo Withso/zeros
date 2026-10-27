@@ -2,9 +2,11 @@ import { randomUUID } from "node:crypto";
 import { cp, mkdtemp, readFile, readdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, expect, it } from "vitest";
+import { afterEach, expect, it, vi } from "vitest";
+import type { SessionUpdate } from "@zeros/protocol/agent-events";
 import { CloudWorker } from "../worker";
-import { SessionStore } from "../sessions/session-store";
+import type { CheckoutRefresh } from "../workspace/checkout";
+import { SessionStore, type SessionData } from "../sessions/session-store";
 import { CLIENT_A, FakeDriver, FakeRelay, WORKSPACE_ID, WORKSPACE_KEY, browserFrame, config } from "./worker-fixtures";
 
 const directories: string[] = [], workers: CloudWorker[] = [];
@@ -13,11 +15,11 @@ const defer = <T = void>() => {
   const promise = new Promise<T>(yes => { resolve = yes; });
   return { promise, resolve };
 };
-const delivery = (id = randomUUID(), chatId = "chat", epoch = "0", sequence = "1") => ({
+const delivery = (id = randomUUID(), chatId = "chat", epoch = "0", sequence = "1", agentId: "codex" | "claude" = "codex") => ({
   receipt: { workspaceId: WORKSPACE_ID, chatId, userMessageId: id, epoch, sequence,
     acceptedAt: new Date(0).toISOString(), workspaceState: "running" as const },
   deliveryId: randomUUID(),
-  payload: { chatId, userMessageId: id, agentId: "codex" as const, model: "gpt-6-luna", effort: "low",
+  payload: { chatId, userMessageId: id, agentId, model: agentId === "claude" ? "claude-opus-4-8" : "gpt-6-luna", effort: "low",
     prompt: [{ type: "text" as const, text: "Reply with exactly: ok" }], startedAt: 1 },
 });
 type Delivery = ReturnType<typeof delivery>;
@@ -53,14 +55,16 @@ class PullRelay extends FakeRelay {
   }
 }
 
-async function setup(options: { relay?: PullRelay; driver?: FakeDriver; createDriver?: () => FakeDriver; directory?: string; enabled?: boolean } = {}) {
+async function setup(options: { relay?: PullRelay; driver?: FakeDriver; createDriver?: () => FakeDriver; directory?: string; enabled?: boolean; agent?: "codex" | "claude"; refresh?: CheckoutRefresh } = {}) {
   const directory = options.directory ?? await mkdtemp(join(tmpdir(), "zeros-outbox-"));
   if (!options.directory) directories.push(directory);
   const relay = options.relay ?? new PullRelay(), driver = options.driver ?? new FakeDriver();
   const worker = new CloudWorker({ directory, transport: relay, workspaceId: WORKSPACE_ID,
-    prepareCheckout: async () => {}, drivers: { codex: options.createDriver ?? (() => driver) } });
+    prepareCheckout: async () => ({ createdBranch: true, refresh: options.refresh }), drivers: { [options.agent ?? "codex"]: options.createDriver ?? (() => driver) } });
   workers.push(worker); worker.start();
-  await relay.receive({ ...config, ...(options.enabled === false ? {} : { promptOutbox: 1 }) });
+  await relay.receive({ ...config,
+    ...(options.agent === "claude" ? { agents: { claude: { apiKey: "fixture-claude-token" } } } : {}),
+    ...(options.enabled === false ? {} : { promptOutbox: 1 }) });
   return { worker, relay, driver, directory };
 }
 async function persisted(directory: string) {
@@ -71,6 +75,22 @@ const until = (read: () => unknown) => expect.poll(read, { timeout: 1500, interv
 afterEach(async () => {
   await Promise.all(workers.splice(0).map(worker => worker.dispose()));
   await Promise.all(directories.splice(0).map(directory => rm(directory, { recursive: true, force: true })));
+});
+
+it("fences outbox delivery before driver startup without treating empty polls as activity", async () => {
+  const gate = defer(), touch = vi.fn(() => gate.promise);
+  const f = await setup({ refresh: { mayFastForward: true, start: async () => {}, touch, dispose: async () => { gate.resolve(); } } });
+  try {
+    await until(() => !!f.relay.waiting).toBe(true);
+    expect(touch).not.toHaveBeenCalled();
+    f.relay.enqueue({ prompts: [delivery()], stops: [] });
+    await until(() => touch.mock.calls.length).toBe(1);
+    expect(f.driver.opened).toBeUndefined();
+    expect(f.driver.prompts).toHaveLength(0);
+    gate.resolve();
+    await until(() => f.driver.prompts.length).toBe(1);
+    f.driver.complete();
+  } finally { gate.resolve(); }
 });
 
 it("pulls without an app socket and fsyncs the VM inbox before ACK or driver startup", async () => {
@@ -228,6 +248,30 @@ it("keeps provider acceptance separate from the inbox ACK and publishes it once"
   await until(() => relay.calls.filter(call => call.op === "outcome" && call.body.state === "completed").length).toBe(1);
 });
 
+it.each<[string, SessionUpdate]>([
+  ["context snapshot", { sessionUpdate: "usage_update", size: 100, used: 20, categories: [] }],
+  ["wake-up notice", { sessionUpdate: "wakeup_notice", noticeId: "wakeup", source: "loop_wakeup" }],
+])("does not treat a delayed Claude %s as acceptance of the next prompt", async (_kind, update) => {
+  const f = await setup({ agent: "claude" });
+  const first = delivery(randomUUID(), "chat", "0", "1", "claude"), second = delivery(randomUUID(), "chat", "0", "2", "claude");
+  f.relay.enqueue({ prompts: [first, second], stops: [] });
+  await until(() => f.driver.prompts.length).toBe(1);
+  f.driver.complete();
+  await until(() => f.driver.prompts.length).toBe(2);
+  const accept = vi.spyOn(SessionStore.prototype, "acceptOutbox");
+  try {
+    f.driver.emit(update);
+    // Driver event admission is synchronous; observing the spy needs no sleep or
+    // race with the async journal writer. This reply belongs to the prior result.
+    expect(accept).not.toHaveBeenCalled();
+    f.driver.emit({ sessionUpdate: "agent_message_chunk", messageId: "answer", content: { type: "text", text: "ok" } });
+    expect(accept).toHaveBeenCalledWith("chat", `outbox:${second.receipt.userMessageId}`);
+    await until(() => f.relay.calls.some(call => call.op === "outcome" && call.body.userMessageId === second.receipt.userMessageId && call.body.state === "accepted")).toBe(true);
+    f.driver.complete();
+    await until(() => f.relay.calls.some(call => call.op === "outcome" && call.body.userMessageId === second.receipt.userMessageId && call.body.state === "completed")).toBe(true);
+  } finally { accept.mockRestore(); }
+});
+
 it("settles a cold-start failure without a dispatch permit and saves a safe failure notice", async () => {
   const relay = new PullRelay(), driver = new FakeDriver();
   driver.open = async () => { throw new Error("private diagnostic must not appear"); };
@@ -235,11 +279,50 @@ it("settles a cold-start failure without a dispatch permit and saves a safe fail
   relay.enqueue({ prompts: [delivery()], stops: [] });
   await until(() => relay.calls.some(call => call.op === "outcome" && call.body.state === "failed")).toBe(true);
   expect(relay.calls.some(call => call.op === "begin")).toBe(false);
+  await until(async () => (await persisted(f.directory))[0].rows.some((row: { kind: string }) => row.kind === "error_notice")).toBe(true);
   const disk = (await persisted(f.directory))[0];
   expect(disk.inbox[0].state).toBe("failed");
   expect(disk.rows.some((row: { payload: string }) => JSON.parse(row.payload).kind === "error_notice")).toBe(true);
   expect(JSON.stringify(disk)).not.toContain("private diagnostic");
   expect(driver.prompts).toHaveLength(0);
+});
+
+it.each(["open", "prompt"] as const)("keeps a failed %s outcome unreported until its notice is durable", async stage => {
+  const relay = new PullRelay(), driver = new FakeDriver(), item = delivery(), write = defer();
+  const storage = SessionStore.prototype as unknown as { save(data: SessionData): Promise<void> };
+  const save = storage.save;
+  let savingNotice = false, reported: SessionData | undefined;
+  vi.spyOn(storage, "save").mockImplementation(async function(this: typeof storage, data) {
+    if (data.rows.some(row => row.kind === "error_notice")) { savingNotice = true; await write.promise; }
+    await save.call(this, data);
+  });
+  if (stage === "open") driver.open = async () => { throw new Error("private diagnostic must not appear"); };
+  const f = await setup({ relay, driver });
+  relay.onOutcome = async body => {
+    if (body.state === "failed") reported = (await persisted(f.directory))[0];
+    return { state: body.state };
+  };
+  try {
+    relay.enqueue({ prompts: [item], stops: [] });
+    if (stage === "prompt") { await until(() => driver.prompts.length).toBe(1); driver.fail(); }
+    await until(() => savingNotice).toBe(true);
+    const pulls = relay.calls.filter(call => call.op === "pull").length;
+    await relay.receive({ t: "prompts" });
+    // Join the reporting loop while the actual notice write is held. An
+    // unrelated hint must not let the failed receipt overtake that write.
+    await until(() => relay.calls.some(call => call.op === "outcome" && call.body.state === "failed") ||
+      relay.calls.filter(call => call.op === "pull").length > pulls).toBe(true);
+    expect(relay.calls.some(call => call.op === "outcome" && call.body.state === "failed")).toBe(false);
+    expect((await persisted(f.directory))[0].inbox[0].state).toBe(stage === "open" ? "queued" : "running");
+    write.resolve();
+    await until(() => reported).toBeDefined();
+    expect(reported!.inbox[0]).toMatchObject({ userMessageId: item.receipt.userMessageId, state: "failed" });
+    expect(reported!.rows.map(row => JSON.parse(row.payload))).toMatchObject([
+      { id: item.receipt.userMessageId, kind: "text", role: "user" },
+      { kind: "error_notice", turnFailure: { turnId: item.receipt.userMessageId } },
+    ]);
+    expect(JSON.stringify(reported)).not.toContain("private diagnostic");
+  } finally { write.resolve(); }
 });
 
 it("keeps the provider's actionable failure instead of replacing it with a generic inbox notice", async () => {
@@ -276,6 +359,9 @@ it("re-adopts the persisted execution after wake and confirms Stop on the origin
   const execution = first.driver.opened!.sessionId;
   first.driver.complete();
   await until(() => first.relay.calls.some(call => call.op === "outcome" && call.body.state === "completed")).toBe(true);
+  // The outcome call precedes its durable report. Finish those writes before
+  // cp enumerates a temporary file that an atomic rename can remove mid-copy.
+  await first.worker.flush();
   const copy = await mkdtemp(join(tmpdir(), "zeros-outbox-wake-")); directories.push(copy);
   await cp(join(first.directory, "sessions"), join(copy, "sessions"), { recursive: true });
   const next = delivery(randomUUID(), "chat", "0", "2"), relay = new PullRelay();

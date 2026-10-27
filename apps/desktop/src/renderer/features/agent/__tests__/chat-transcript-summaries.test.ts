@@ -40,12 +40,12 @@ async function fresh() {
 }
 
 describe("Local chat transcript summaries", () => {
-  it("shares one engine list per Local folder and keeps cloud's exact exclusion", async () => {
+  it("shares one engine list per folder and filters exclusions locally for either placement", async () => {
     const summaries = await fresh();
     expect(summaries.chatTranscriptSummariesKey("/repo", "chat-a"))
       .toBe(summaries.chatTranscriptSummariesKey("/repo", "chat-b"));
     expect(summaries.chatTranscriptSummariesKey("/repo/a", "x")).not.toBe(summaries.chatTranscriptSummariesKey("/repo", "a/x"));
-    expect(summaries.chatTranscriptSummariesKey(CLOUD, "chat-a")).not.toBe(summaries.chatTranscriptSummariesKey(CLOUD, "chat-b"));
+    expect(summaries.chatTranscriptSummariesKey(CLOUD, "chat-a")).toBe(summaries.chatTranscriptSummariesKey(CLOUD, "chat-b"));
 
     engine.rows.set("/repo", [row("chat-a", "/repo"), row("chat-b", "/repo")]);
     summaries.warmChatTranscriptSummaries("/repo", "chat-a");

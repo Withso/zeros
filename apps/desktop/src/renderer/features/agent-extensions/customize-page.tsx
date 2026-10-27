@@ -1,3 +1,5 @@
+import { useActiveOrganization, useTeams, getOrganizationStoreGeneration } from "../team/team-store";
+import { OrganizationMcpPage } from "./mcp-organization-page";
 // ──────────────────────────────────────────────────────────
 // Customize page — agent capabilities, scoped User / per-repo
 // ──────────────────────────────────────────────────────────
@@ -35,6 +37,7 @@ import {
   type CustomizeScope,
 } from "./customize-model";
 import { CustomizeMcpSection } from "./customize-mcp";
+import type { RawServer } from "./mcp-server-model";
 import { McpServerFormPage } from "./mcp-server-form";
 import { CustomizeExtensionsSection } from "./customize-extensions";
 import { prefetchExtensions } from "./extensions-cache";
@@ -55,7 +58,7 @@ const SCOPE_SETTING_KEY = "customize:active-scope";
  *  a draft form must not survive a reload pointing at a stale index. */
 type CustomizeView =
   | { kind: "list" }
-  | { kind: "form"; index: number | null; owner: string };
+  | { kind: "form"; server: RawServer | null; owner: string; connect?: boolean };
 
 /** The validated, render-ready scope: user, or a LIVE project. */
 export type ResolvedCustomizeScope =
@@ -154,7 +157,7 @@ function ScopePicker({
   );
 }
 
-export function CustomizePage({
+function LocalCustomizePage({
   surfaceActive = true,
 }: {
   /** False while the Home deck keeps this page mounted but hidden. */
@@ -241,7 +244,7 @@ export function CustomizePage({
   // Include the form's TARGET so each edited server gets its own instant-view
   // + scroll-memory identity (editing #5 must not restore #0's offset).
   const viewKey = `${owner}:${
-    activeView.kind === "form" ? `form:${activeView.index ?? "new"}` : "list"
+    activeView.kind === "form" ? `form:${activeView.server?.credential_id ?? activeView.server?.name ?? "new"}` : "list"
   }`;
   useInstantViewSwitch(`customize:${viewKey}`, pageSurfaceRef);
   const pageScrollRef = useScrollMemoryRef(`customize:${viewKey}`);
@@ -255,10 +258,17 @@ export function CustomizePage({
         <div className="flex w-full max-w-5xl flex-col pt-10 pr-6 pb-16 pl-[clamp(1.5rem,5vw,6.25rem)]">
           {activeView.kind === "form" ? (
             <McpServerFormPage
-              key={`${owner}:${activeView.index ?? "new"}`}
+              key={viewKey}
               scope={scope}
-              index={activeView.index}
+              server={activeView.server}
+              surfaceActive={surfaceActive}
+              connectOnOpen={activeView.connect}
               onBack={() => setView({ kind: "list" })}
+              onSaved={(repoRoot) => {
+                const project = projects.find(row => row.repoRoot === repoRoot);
+                setScope(project ? { kind: "repo", projectId: project.id } : { kind: "user" });
+                setView({ kind: "list" });
+              }}
             />
           ) : (
             <>
@@ -312,8 +322,8 @@ export function CustomizePage({
                     key={scopeKey}
                     scope={scope}
                     surfaceActive={surfaceActive}
-                    onNew={() => setView({ kind: "form", index: null, owner })}
-                    onEdit={(index) => setView({ kind: "form", index, owner })}
+                    onNew={() => setView({ kind: "form", server: null, owner })}
+                    onEdit={(server, connect) => setView({ kind: "form", server, owner, connect })}
                     onSwitchToUser={() => setScope({ kind: "user" })}
                   />
                 ) : (
@@ -330,4 +340,12 @@ export function CustomizePage({
       </div>
     </div>
   );
+}
+
+export function CustomizePage({ surfaceActive = true }: { surfaceActive?: boolean }) {
+  const organization = useActiveOrganization();
+  const { me } = useTeams();
+  return organization && !organization.isPersonal
+    ? <OrganizationMcpPage key={`${getOrganizationStoreGeneration()}:${me?.user.id}:${organization.id}`} organization={organization} surfaceActive={surfaceActive} />
+    : <LocalCustomizePage surfaceActive={surfaceActive} />;
 }

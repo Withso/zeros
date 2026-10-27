@@ -6,6 +6,7 @@ import { describe, expect, it } from "vitest";
 import { resolveComposerPlaceholder } from "../composer-placeholder";
 import { chatTranscriptSummariesKey } from "../use-chat-transcript-summaries";
 import { resolvePermissionFeedbackPlacement } from "../permission-feedback-placement";
+import { accountPresentationGeneration, getAccountPresentationOwner } from "../../../platform/account-presentation-cache";
 
 function read(relativePath: string): string {
   try {
@@ -75,7 +76,7 @@ describe("chat composer responsive contract", () => {
     expect(pills).toContain('feedbackPlacement === "right"');
     expect(pills).toContain("left-full");
     expect(pills).toContain("bottom-full");
-    expect(pills).toContain("delayDuration={0}");
+    expect(pills).not.toContain("delayDuration={0}");
     expect(pills).toContain("open={labelVisible ? false : tooltipOpen}");
     expect(agentChat).toContain("data-permission-feedback-boundary");
     expect(agentChat).toContain("data-composer-toolbar-actions");
@@ -150,6 +151,7 @@ describe("composer attachment menu interaction path", () => {
   const agentChat = read("../agent-chat.tsx");
   const attachmentMenu = read("../composer-attachment-menu.tsx");
   const summaries = read("../use-chat-transcript-summaries.ts");
+  const summaryCache = read("../chat-transcript-summaries-cache.ts");
 
   it("owns open state in the small menu subtree instead of AgentChat", () => {
     expect(agentChat).not.toContain("const [plusMenuOpen, setPlusMenuOpen]");
@@ -161,10 +163,11 @@ describe("composer attachment menu interaction path", () => {
     expect(attachmentMenu).toContain("onPointerEnter={onIntent}");
     expect(attachmentMenu).toContain("onFocus={onIntent}");
     expect(agentChat).toContain("warmChatTranscriptSummaries");
-    expect(summaries).toContain("KeyedAsyncCache");
+    expect(summaries).toContain("useCachedRead(");
+    expect(summaryCache).toContain("KeyedAsyncCache");
   });
 
-  it("keeps folder and excluded-chat boundaries collision-free", () => {
+  it("shares exclusions while keeping folder and account boundaries collision-free", () => {
     // Local folders share one list per folder; the excluded chat is dropped
     // locally, so the folder alone is the key.
     expect(chatTranscriptSummariesKey("/repo/a", "chat/b")).toBe(
@@ -174,14 +177,17 @@ describe("composer attachment menu interaction path", () => {
       chatTranscriptSummariesKey("/repo/a/chat", "b"),
     );
     expect(JSON.parse(chatTranscriptSummariesKey("/repo", null))).toEqual(["/repo"]);
-    // Cloud folders keep the exact (folder, excluded chat) engine read.
+    // Cloud adds the exact account/backend lifetime and filters exclusions locally.
     const cloud = "cloud://11111111-1111-4111-8111-111111111111/22222222-2222-4222-8222-222222222222";
+    expect(chatTranscriptSummariesKey(cloud, "chat/b")).toBe(chatTranscriptSummariesKey(cloud, "other"));
     expect(chatTranscriptSummariesKey(cloud, "chat/b")).not.toBe(
       chatTranscriptSummariesKey(`${cloud}/chat`, "b"),
     );
     expect(chatTranscriptSummariesKey(`${cloud}\u0000a`, "chat")).not.toBe(
       chatTranscriptSummariesKey(cloud, "a\u0000chat"),
     );
-    expect(JSON.parse(chatTranscriptSummariesKey(cloud, null))).toEqual([cloud, null]);
+    expect(JSON.parse(chatTranscriptSummariesKey(cloud, null))).toEqual([
+      cloud, getAccountPresentationOwner(), accountPresentationGeneration(),
+    ]);
   });
 });

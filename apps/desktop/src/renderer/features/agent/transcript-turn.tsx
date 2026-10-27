@@ -15,6 +15,7 @@
 import React, { memo, useCallback, useMemo } from "react";
 import type { CloudV2PromptState } from "@zeros/protocol/cloud-v2-prompts";
 import { promptTerminal } from "./cloud-prompt-channel";
+import type { CloudTurnEnding } from "./cloud-turn-presentation";
 import type { AgentFailure } from "../../platform/bridge/failure";
 import type { BackgroundTask, WorkflowProgress } from "../../platform/bridge/agent-events";
 import { AuthenticationNotice } from "./authentication-notice";
@@ -92,10 +93,13 @@ export interface TranscriptTurnTail {
 
 export interface TranscriptTurnProps {
   turn: Turn;
+  threadTailKey: string | null;
   isVisualTail: boolean;
   isActivityTail?: boolean;
   durablePrompt?: boolean;
   receiptState?: CloudV2PromptState;
+  presentation?: CloudTurnEnding;
+  startedAt?: number;
   isActiveProviderSegment: boolean;
   ownsProviderFooter: boolean;
   turnIsPendingLocal: boolean;
@@ -114,10 +118,13 @@ export interface TranscriptTurnProps {
 
 export const TranscriptTurn = memo(function TranscriptTurn({
   turn,
+  threadTailKey,
   isVisualTail,
   isActivityTail = isVisualTail,
   durablePrompt = false,
   receiptState,
+  presentation,
+  startedAt,
   isActiveProviderSegment,
   ownsProviderFooter,
   turnIsPendingLocal,
@@ -252,7 +259,7 @@ export const TranscriptTurn = memo(function TranscriptTurn({
               backgroundTasks={tail?.backgroundTasks}
               surfaceActive={shared.surfaceActive}
               activityEvents={turn.providerEvents}
-              activityStartedAt={pickStartedAt(
+              activityStartedAt={startedAt ?? pickStartedAt(
                 turn.providerEvents,
                 turn.recordedStartedAt,
                 tail ? tail.activeTurnStartedAt : null,
@@ -271,23 +278,27 @@ export const TranscriptTurn = memo(function TranscriptTurn({
                 !authState &&
                 turn.recordedTurnId &&
                 shared.chatId &&
-                ownsProviderFooter && (!durablePrompt || promptTerminal(receiptState) || prompt?.recoveryFailure) ? (
+                ownsProviderFooter && (!durablePrompt || presentation || promptTerminal(receiptState) || prompt?.recoveryFailure) ? (
                   <TurnFooter
                     readOnly={shared.readOnly}
                     surfaceActive={shared.surfaceActive}
                     chatId={shared.chatId}
                     turnId={turn.recordedTurnId}
+                    threadTailKey={threadTailKey}
+                    folder={shared.folder}
+                    recordedSummary={turn.recordedSummary}
                     failure={tail?.failure ?? null}
                     recoveryFailure={prompt?.recoveryFailure}
                     durablePrompt={durablePrompt}
                     receiptState={receiptState}
+                    presentation={presentation}
                     onRetryNewChatIntent={retryable && shared.hasChatThread ? warmRetry : undefined}
                     onRetry={retryable && (isVisualTail || durablePrompt) ? retry : undefined}
                     onRetryNewChat={retryable && isVisualTail && !shared.designRole && !durablePrompt ? retryNewChat : undefined}
                     events={turn.providerEvents}
                     startedAt={turn.recordedStartedAt}
                     live={isActivityTail && turnInFlight}
-                    fallbackStopReason={receiptState === "cancelled" ? "cancelled" : tail && !tail.sessionStreaming ? tail.lastStopReason : null}
+                    fallbackStopReason={presentation ? presentation.stopReason ?? null : receiptState === "cancelled" ? "cancelled" : tail && !tail.sessionStreaming ? tail.lastStopReason : null}
                     fallbackStatusLabel={tail && !tail.sessionStreaming ? turnFooterFailureLabel(tail.failure) : null}
                     // "An auto-rebuild is re-running THIS turn": only while
                     // this renderer's own send owns it.

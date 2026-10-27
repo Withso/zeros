@@ -15,6 +15,7 @@ import {
   reviewHunkKey,
 } from "@zeros/protocol/git-review-actions";
 import type { GitReviewActionsClient } from "@/renderer/platform/git-review-actions";
+import { codeReviewAvailable } from "@/renderer/platform/bridge/code-review-availability";
 import { Button, TooltipProvider } from "@/renderer/shared/ui/primitives";
 import {
   ReviewDiffView,
@@ -33,6 +34,11 @@ import { liveReviewHunkSource } from "@/renderer/features/code-review/review-hun
 const PATH = "src/cache.ts";
 const REVISION = "github:fixture-workspace:pr-7:base-1:head-1";
 const STAMP = Date.UTC(2026, 0, 2, 12);
+const params = new URLSearchParams(location.search);
+const cloud = params.has("cloud");
+const commentsAvailable = codeReviewAvailable({ cwd: cloud
+  ? "cloud://11111111-1111-4111-8111-111111111111/22222222-2222-4222-8222-222222222222"
+  : "/review-fixture" });
 const SOURCE = [
   "type CacheKey = readonly [string, string];",
   "",
@@ -272,7 +278,7 @@ function Harness() {
     "preview",
   );
   const [style, setStyle] = useState<"unified" | "split">("unified");
-  const [threads, setThreads] = useState(seedThreads);
+  const [threads, setThreads] = useState(() => cloud || params.has("loading") ? [] : seedThreads());
   const [source, setSource] = useState(SOURCE);
   const [conflictDisk, setConflictDisk] = useState(CONFLICT);
   const [confirmed, setConfirmed] = useState(false);
@@ -463,10 +469,11 @@ function Harness() {
   const review = useMemo<CodeReviewController>(
     () => ({
       ownerKey: "fixture-workspace",
+      commentsAvailable,
       threads,
       drafts,
       external,
-      loading: false,
+      loading: params.has("loading"),
       error: null,
       refresh: () => setExternalError(false),
       partial: !!collectionCursor,

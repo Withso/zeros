@@ -43,6 +43,34 @@ afterEach(async () => {
   await rm(root, { recursive: true, force: true });
 });
 
+it("passes owner cancellation to the native renderer and waits for its cleanup", async () => {
+  const { sourceVersion } = await readDesignFrameRenderIdentity(root, frame);
+  const controller = new AbortController();
+  const entered = deferred<AbortSignal>();
+  const cleanup = deferred<void>();
+  const original = renderer.render.bind(renderer);
+  renderer.render = async (input) => {
+    entered.resolve(input.signal!);
+    await cleanup.promise;
+    input.signal?.throwIfAborted();
+    return original(input);
+  };
+  let settled = false;
+  const preview = previewWorkspaceDesign(root,
+    { workspaceId: "workspace-1", frame, sourceVersion, theme: null, maxDimension: 384 },
+    { renderer, signal: controller.signal },
+  ).catch((error: unknown) => error).finally(() => { settled = true; });
+  try {
+    const nativeSignal = await entered.promise;
+    controller.abort(new Error("owner retired"));
+    expect(nativeSignal.aborted).toBe(true);
+    expect(settled).toBe(false);
+  } finally {
+    cleanup.resolve();
+    await preview;
+  }
+});
+
 it("captures a frame at its canvas size into a preview-sized raster in the requested theme", async () => {
   const { sourceVersion } = await readDesignFrameRenderIdentity(root, frame);
   const preview = await previewWorkspaceDesign(
@@ -197,3 +225,9 @@ it("refuses a theme the directory does not offer and an out-of-range size", asyn
   ).rejects.toThrow();
   expect(renders).toHaveLength(0);
 });
+
+function deferred<T>() {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  const promise = new Promise<T>((done) => { resolve = done; });
+  return { promise, resolve };
+}

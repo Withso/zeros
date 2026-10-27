@@ -61,7 +61,7 @@ export interface DesignInspectorProps {
   workspaceId: string | null;
   pages?: DesignPageSummary[];
   activePageId?: string;
-  pageFrames?: DesignCanvasFrameWire[];
+  pageFrames?: readonly Pick<DesignCanvasFrameWire, "file" | "frameId">[];
   folder: string | null;
   /** Selected frame document, or null for an empty canvas selection. */
   frame: DesignCanvasFrameWire | null;

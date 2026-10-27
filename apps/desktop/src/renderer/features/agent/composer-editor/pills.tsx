@@ -20,7 +20,7 @@ import {
   useSyncExternalStore,
   type ReactNode,
 } from "react";
-import { X } from "lucide-react";
+import { Book, X } from "lucide-react";
 
 import { cn } from "../../../shared/ui/cn";
 import { FileTypeIcon } from "./file-type-icon";
@@ -41,6 +41,9 @@ import {
 } from "./attachment-text-preview";
 import { ImageHoverCard, imagePreviewMimeType } from "../image-hover-card";
 import { filePillPath, openFilePill, warmFilePill } from "@/renderer/shell/workbench/file-pill-navigation";
+import { openSkillPill, warmSkillPill } from "@/renderer/shell/workbench/skill-pill-navigation";
+import { validSkillSource } from "../../../platform/skill-source";
+import { closeHistory } from "@tiptap/pm/history";
 import { attachmentOwner, sameAttachmentOwner } from "../attachment-owner";
 import { useAttachmentPillFile } from "../attachment-pill-file";
 import {
@@ -60,27 +63,33 @@ function PillRemoveButton({
   children: ReactNode;
 }) {
   return (
-    <Tooltip label="Remove">
-      <Button
-        variant="ghost"
-        type="button"
-        // Removing a pill must preserve the editor's current selection.
-        onMouseDown={(event) => event.preventDefault()}
-        disabled={disabled}
-        onClick={onRemove}
-        aria-label={`Remove ${label}`}
-        className="composer-pill-remove text-fg2 hover:bg-bg1-hover hover:text-fg1 focus-visible:ring-highlighted-bright grid size-4 shrink-0 place-items-center rounded-sm border-0 bg-transparent p-0 focus-visible:ring-1 focus-visible:outline-none"
+    <Button
+      variant="ghost"
+      type="button"
+      // Removing a pill must preserve the editor's current selection.
+      onMouseDown={(event) => event.preventDefault()}
+      disabled={disabled}
+      onClick={onRemove}
+      aria-label={`Remove ${label}`}
+      className="composer-pill-remove text-fg2 hover:bg-bg1-hover hover:text-fg1 focus-visible:ring-highlighted-bright grid size-4 shrink-0 place-items-center rounded-sm border-0 bg-transparent p-0 focus-visible:ring-1 focus-visible:outline-none"
+    >
+      <span
+        data-composer-pill-icon=""
+        className="col-start-1 row-start-1 inline-flex"
       >
-        <span
-          data-composer-pill-icon=""
-          className="col-start-1 row-start-1 inline-flex"
-        >
-          {children}
-        </span>
-        <X size={11} className="col-start-1 row-start-1" />
-      </Button>
-    </Tooltip>
+        {children}
+      </span>
+      <X size={11} className="col-start-1 row-start-1" />
+    </Button>
   );
+}
+
+function removePill(props: NodeViewProps): void {
+  if (!props.editor.isEditable) return;
+  // A quick insert → remove is still two user actions. Do not group removal
+  // with the insertion and make Undo erase both instead of restoring the pill.
+  props.editor.view.dispatch(closeHistory(props.editor.state.tr));
+  props.deleteNode();
 }
 
 // ── MentionPill — @-file / folder / selection ──────────────
@@ -92,7 +101,7 @@ export function MentionPill(props: NodeViewProps) {
     path: string;
     kind: "file" | "folder" | "selection";
   };
-  const canOpen = attrs.kind !== "folder" && ctx.attachmentImagesActive && !!filePillPath(ctx.cwd, attrs.path);
+  const canOpen = attrs.kind !== "folder" && ctx.sourceFilesOpen !== false && ctx.attachmentImagesActive && !!filePillPath(ctx.cwd, attrs.path);
   const shell = (
       <NodeViewWrapper
         as="span"
@@ -108,7 +117,7 @@ export function MentionPill(props: NodeViewProps) {
           label={attrs.label}
           disabled={!ctx.editable}
           onRemove={() => {
-            if (props.editor.isEditable) props.deleteNode();
+            removePill(props);
           }}
         >
           <FileTypeIcon
@@ -117,7 +126,7 @@ export function MentionPill(props: NodeViewProps) {
             size={13}
           />
         </PillRemoveButton>
-        <Button variant="ghost" aria-label={`Open ${attrs.label}`} disabled={!canOpen}
+        <Button type="button" variant="ghost" aria-label={`Open ${attrs.label}`} disabled={!canOpen}
           onMouseDown={(event) => event.preventDefault()}
           onPointerEnter={() => { if (canOpen) warmFilePill(ctx.cwd, attrs.path); }}
           onFocus={() => { if (canOpen) warmFilePill(ctx.cwd, attrs.path); }}
@@ -128,8 +137,40 @@ export function MentionPill(props: NodeViewProps) {
       </NodeViewWrapper>
   );
   return attrs.kind !== "folder" && imagePreviewMimeType(attrs.path) ? (
-    <ImageHoverCard name={attrs.path} path={attrs.path} cwd={ctx.cwd} enabled={ctx.attachmentImagesActive}>{shell}</ImageHoverCard>
+    <ImageHoverCard name={attrs.path} path={attrs.path} cwd={ctx.cwd} enabled={canOpen}>{shell}</ImageHoverCard>
   ) : <Tooltip label={attrs.path || attrs.label}>{shell}</Tooltip>;
+}
+
+/** Skills carry an invocation and source identity, never attachment bytes. */
+export function SkillPill(props: NodeViewProps) {
+  const ctx = useComposerEditorContext();
+  const { name, label, path, source, provider } = props.node.attrs;
+  // Session commands can arrive before filesystem discovery. Resolve a still
+  // unknown source when that exact provider's catalog lands, without editing
+  // the document or retargeting an already captured source.
+  const discovered = !path && !source && provider === ctx.agentId
+    ? ctx.skills?.find(skill => skill.id === name || skill.name === name) : undefined;
+  const file = filePillPath(ctx.cwd, typeof path === "string" && path ? path : discovered?.path ?? "");
+  const candidate = source ?? (discovered && !file ? { agentId: provider, path: discovered.path, name: discovered.name } : null);
+  const library = validSkillSource(candidate) ? candidate : null;
+  const canOpen = ctx.sourceFilesOpen !== false && ctx.attachmentImagesActive && !!ctx.cwd && !!(library || file);
+  const title = library?.path || file || `/${name}`;
+  return <Tooltip label={title}>
+    <NodeViewWrapper as="span" data-skill-pill="" contentEditable={false}
+      className={cn(PILL_SHELL, "composer-pill", COMPOSER_PILL_SPACING, props.selected && "ring-highlighted-bright/40 ring-2")}>
+      <PillRemoveButton label={label} disabled={!ctx.editable} onRemove={() => removePill(props)}>
+        <Book className="size-3" />
+      </PillRemoveButton>
+      <Button type="button" variant="ghost" aria-label={`Open ${label}`} disabled={!canOpen}
+        onMouseDown={event => event.preventDefault()}
+        onPointerEnter={() => { if (canOpen) { if (library) warmSkillPill(ctx.cwd, library); else if (file) warmFilePill(ctx.cwd, file); } }}
+        onFocus={() => { if (canOpen) { if (library) warmSkillPill(ctx.cwd, library); else if (file) warmFilePill(ctx.cwd, file); } }}
+        onClick={() => { if (canOpen) { if (library) openSkillPill(ctx.cwd, library); else if (file) openFilePill(ctx.cwd, file); } }}
+        className="m-0 min-w-0 border-0 bg-transparent p-0 text-inherit disabled:opacity-100">
+        <span className="max-w-[18rem] truncate">{label}</span>
+      </Button>
+    </NodeViewWrapper>
+  </Tooltip>;
 }
 
 // ── AttachmentPill — inline image / text-file attachment ───
@@ -168,9 +209,10 @@ export function AttachmentPill(props: NodeViewProps) {
     cwd: ctx.cwd,
     diskPath: storedPath,
     attachmentId: att?.contextAttachmentId,
-    enabled: ctx.attachmentImagesActive && !!att && !att.sourceFile && !att.data && !progress,
+    enabled: ctx.attachmentImagesActive && !ctx.onOpenAttachment && !!att && !att.sourceFile && !att.data && !progress,
   });
   const diskPath = restoredFile.path;
+  const canOpenSource = ctx.attachmentImagesActive && !!ctx.onOpenAttachment && !!att && !att.unavailable;
   const canOpen = ctx.attachmentImagesActive && !restoredFile.resolving && !att?.unavailable &&
     progress?.phase !== "saving" && !!diskPath && !!filePillPath(ctx.cwd, diskPath);
   const invalid =
@@ -221,7 +263,7 @@ export function AttachmentPill(props: NodeViewProps) {
         label={attrs.name}
         disabled={!ctx.editable}
         onRemove={() => {
-          if (props.editor.isEditable) props.deleteNode();
+          removePill(props);
         }}
       >
         <FileTypeIcon
@@ -237,9 +279,10 @@ export function AttachmentPill(props: NodeViewProps) {
         // ProseMirror selection; the saved file opens in the workbench.
         onMouseDown={(e) => e.preventDefault()}
         onClick={() => {
-          if (canOpen && diskPath) openFilePill(ctx.cwd, diskPath);
+          if (canOpenSource && att) ctx.onOpenAttachment?.(att);
+          else if (canOpen && diskPath) openFilePill(ctx.cwd, diskPath);
         }}
-        disabled={!canOpen}
+        disabled={!canOpenSource && !canOpen}
         aria-label={`Open ${attrs.name}`}
         data-file-path={diskPath}
         className="m-0 inline-flex min-w-0 items-center gap-1 border-0 bg-transparent p-0 font-[inherit] text-inherit disabled:cursor-default disabled:opacity-100"

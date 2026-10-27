@@ -2237,10 +2237,13 @@ export async function runGithubSettingsSmoke({
   );
   check(
     "GitHub overflow returns focus",
-    await page.evaluate(
-      () =>
-        document.activeElement?.getAttribute("aria-label") ===
-        "More actions for GitHub App",
+    await waitFor(
+      () => page.evaluate(
+        () =>
+          document.activeElement?.getAttribute("aria-label") ===
+          "More actions for GitHub App",
+      ),
+      "github-menu-focus-return",
     ),
   );
 
@@ -2276,10 +2279,13 @@ export async function runGithubSettingsSmoke({
   );
   check(
     "GitHub dialog returns focus to overflow trigger",
-    await page.evaluate(
-      () =>
-        document.activeElement?.getAttribute("aria-label") ===
-        "More actions for GitHub App",
+    await waitFor(
+      () => page.evaluate(
+        () =>
+          document.activeElement?.getAttribute("aria-label") ===
+          "More actions for GitHub App",
+      ),
+      "github-dialog-focus-return",
     ),
   );
 

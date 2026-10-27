@@ -11,7 +11,8 @@ import { CLOUD_V2_MAX_FRAME_BYTES, CloudV2WorkerFrameSchema, type CloudV2Control
 import type { PostgresSecurityEventBroker } from "../security-events.js";
 import type { CloudV2Store, CloudV2Workspace } from "./store.js";
 import { isCloudV2Token } from "./tokens.js";
-import { dialWorker, type WorkerRoute } from "./worker-connection.js";
+import { dialWorker, workerSupportsCheckout, workerSupportsMcp, workerSupportsSetup, type WorkerRoute } from "./worker-connection.js";
+import { emitCloudV2Timing, type CloudV2TimingRecord } from "./lifecycle.js";
 
 export const CLOUD_V2_BRIDGE_PROTOCOL = "zeros.cloud.v2";
 const BRIDGE_PATH = /^\/v2\/cloud\/workspaces\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\/bridge$/;
@@ -28,6 +29,8 @@ export type CloudV2RelayDeps = {
   wake(workspace: CloudV2Workspace): Promise<void>;
   answerOffline(workspace: CloudV2Workspace, frame: unknown): Promise<unknown | null>;
   logger?: Pick<Console, "warn">;
+  timing?: (record: CloudV2TimingRecord) => void;
+  now?: () => number;
   retryBaseMs?: number; retryMaxMs?: number; idleMs?: number;
 };
 type ConfigFlight = { worker: WebSocket; requested: boolean; force: boolean; promise: Promise<boolean> };
@@ -185,6 +188,7 @@ export class CloudV2Relay {
     room.dialing = this.connect(room).finally(() => { delete room.dialing; });
   }
   private async connect(room: Room): Promise<void> {
+    const started = this.deps.now?.() ?? Date.now();
     const deadline = Date.now() + 60_000;
     for (let attempt = 0; this.wanted(room) && Date.now() < deadline; attempt++) {
       if (!await this.authorized(room)) return;
@@ -208,6 +212,8 @@ export class CloudV2Relay {
           room.worker = ws; room.loginRevision = null; this.attachWorker(room, ws);
           if (await this.refreshConfig(room, ws, true) && room.worker === ws && ws.readyState === WebSocket.OPEN) {
             room.ready = true; room.wakeAllowed = false;
+            emitCloudV2Timing(this.deps.timing, { workspaceId: room.workspace.id.slice(0, 8), phase: "relay_ready",
+              durationMs: Math.max(0, Math.round((this.deps.now?.() ?? Date.now()) - started)) });
             for (const [clientId, client] of room.clients) {
               if (client.ws.readyState !== WebSocket.OPEN) continue;
               send(ws, { t: "open", clientId });
@@ -280,9 +286,9 @@ export class CloudV2Relay {
   }
 
   /** Committed revision polling repairs missed transactional notifications. */
-  async refreshLogins(scope?: { ownerUserId: string; organizationId?: string }): Promise<void> {
+  async refreshLogins(scope?: { ownerUserId?: string; organizationId?: string }): Promise<void> {
     await Promise.all([...this.rooms.values()].map(async room => {
-      if (!room.ready || !room.worker || (scope && (scope.ownerUserId !== room.workspace.creatorUserId ||
+      if (!room.ready || !room.worker || (scope && ((scope.ownerUserId && scope.ownerUserId !== room.workspace.creatorUserId) ||
           (scope.organizationId && scope.organizationId !== room.workspace.organizationId)))) return;
       const ws = room.worker;
       await this.refreshConfig(room, ws, Date.now() - room.configAt >= CONFIG_REFRESH_MS).catch(() => ws.close(1011, "config_unavailable"));
@@ -310,7 +316,12 @@ export class CloudV2Relay {
       if (!await this.authorized(room) || room.worker !== ws) return false;
       if (revision !== await this.deps.store.loginRevision(room.workspace.id)) { flight.requested = true; flight.force = true; continue; }
       if (room.worker !== ws || room.revoked) return false;
-      send(ws, { ...config, loginRevision: revision }); room.loginRevision = revision; room.configAt = Date.now();
+      const { mcpServers, ...legacy } = config;
+      const { setup, baseCommit, ...workspaceConfig } = config.workspace;
+      send(ws, { ...legacy, workspace: { ...workspaceConfig,
+        ...(workerSupportsSetup(ws) && setup !== undefined ? { setup } : {}),
+        ...(workerSupportsCheckout(ws) && baseCommit !== undefined ? { baseCommit } : {}) },
+        ...(workerSupportsMcp(ws) && mcpServers ? { mcpServers } : {}), loginRevision: revision }); room.loginRevision = revision; room.configAt = Date.now();
     } while (flight.requested);
     return true;
   }

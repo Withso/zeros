@@ -11,14 +11,19 @@
 //
 // Stale-while-revalidate: `me` keeps its last value during a reload so
 // the sidebar never flashes between the tabs and the create entry.
-// Cleared on sign-out (InviteDeepLinkHandler in app-shell.tsx) so account
-// A's organizations can never render for account B.
+// Account presentation binds before AuthGate opens; replacement/sign-out clears
+// this store before account A's organizations could render for account B.
 // ──────────────────────────────────────────────────────────
 
 import { useEffect, useSyncExternalStore } from "react";
 import { isLocalDevelopment } from "../../platform/runtime";
 import { getSettingMigrated, setSetting } from "../../platform/settings";
+import { getAccountPresentationOwner } from "../../platform/account-presentation-cache";
+import { loadOrganizationPresentation, persistOrganizationPresentation } from "./organization-presentation-cache";
 import { pruneScopedSettingsSelections } from "../settings/settings-scope";
+import { pruneSidebarOwnerPreferences } from "../../state/sidebar-list-preferences";
+import { pruneOrganizationDestinations } from "../../state/organization-destination-cache";
+import { pruneCreateComposerOwners } from "../../state/create-composer-drafts";
 import {
   CONTROL_PLANE_URL,
   ControlPlaneError,
@@ -46,17 +51,21 @@ import {
   desktopOrganizationChoices,
   PERSONAL_ORGANIZATION,
   PERSONAL_ORGANIZATION_ID,
+  type OrganizationList,
 } from "./personal-organization";
 
 export type TeamStoreStatus = "idle" | "loading" | "ready" | "error";
 
 export type TeamStoreState = {
   me: Me | null;
+  /** Display only. Never use this for staff access, settings, or ownership. */
+  presentation: OrganizationList | null;
   status: TeamStoreStatus;
   error: string | null;
 };
 
-let state: TeamStoreState = { me: null, status: "idle", error: null };
+let state: TeamStoreState = { me: null, presentation: null, status: "idle", error: null };
+let presentationOwner: string | null = null;
 const listeners = new Set<() => void>();
 let inflight: Promise<Me | null> | null = null;
 // Bumped by clearTeamStore (sign-out): an in-flight fetch started under the
@@ -112,8 +121,28 @@ export function getTeamStoreState(): TeamStoreState {
   return state;
 }
 
+function persistPresentation(): void {
+  const snapshot = state.me ?? state.presentation;
+  if (!snapshot || !presentationOwner || presentationOwner !== getAccountPresentationOwner()) return;
+  persistOrganizationPresentation(presentationOwner, snapshot.organizations ?? snapshot.teams, getActiveTeamId());
+}
+subscribeActiveTeam(persistPresentation);
+
+/** Called before opening the shell for main's stored identity. This deliberately
+ * bypasses acceptOrganizationSnapshot and all of its ownership side effects. */
+export function restoreOrganizationPresentation(): void {
+  presentationOwner = getAccountPresentationOwner();
+  const cached = presentationOwner ? loadOrganizationPresentation(presentationOwner) : null;
+  if (!cached) return;
+  const { organizations, activeId } = cached;
+  const selected = organizations.find(org => org.id === activeId);
+  if (activeId === null || activeId === PERSONAL_ORGANIZATION_ID || selected)
+    setActiveOrganizationSelection(activeId, selected?.isPersonal ?? (activeId === null || activeId === PERSONAL_ORGANIZATION_ID));
+  emit({ ...state, presentation: { organizations, teams: organizations } });
+}
+
 function activeOrganization(
-  me: Me | null,
+  me: OrganizationList | null,
   activeId: string | null,
 ): TeamSummary | null {
   if (
@@ -135,7 +164,9 @@ function activeOrganization(
 }
 
 export function getActiveOrganizationSnapshot(): TeamSummary | null {
-  return activeOrganization(state.me, getActiveTeamId());
+  // Selection identity is presentation too. Account authorization and the
+  // settings courier still require state.me or their own fresh response.
+  return activeOrganization(state.me ?? state.presentation, getActiveTeamId());
 }
 
 /** Exact owner for a local create intent. A confirmed membership-history
@@ -165,7 +196,13 @@ export function acceptOrganizationSnapshot(
   );
   // An empty mixed-version response does not prove owner deletion. A hierarchy
   // snapshot containing Personal does, and may prune removed org navigation.
-  if (personal) pruneScopedSettingsSelections(me.user.id, organizations.filter(org => !org.isPersonal).map(org => org.id));
+  if (personal) {
+    const organizationIds = organizations.filter(org => !org.isPersonal).map(org => org.id);
+    pruneScopedSettingsSelections(me.user.id, organizationIds);
+    pruneSidebarOwnerPreferences(me.user.id, organizationIds);
+    pruneOrganizationDestinations((_, id) => id !== PERSONAL_ORGANIZATION_ID && !organizationIds.includes(id));
+    pruneCreateComposerOwners(CONTROL_PLANE_URL, me.user.id, organizationIds);
+  }
   // One-time flat-Team → hierarchy normalization. Legacy SQLite rows are
   // intentionally Personal/null-owned, so retaining a promoted collaborative
   // selection would make the entire existing workspace collection disappear.
@@ -192,7 +229,9 @@ export function acceptOrganizationSnapshot(
     recordOrganizationHierarchySeen(me.user.id);
   }
   setSetting(HAS_TEAMS_KEY, organizations.length > 0);
-  emit({ me, status: "ready", error: null });
+  presentationOwner = getAccountPresentationOwner();
+  emit({ me, presentation: null, status: "ready", error: null });
+  persistPresentation();
   return true;
 }
 
@@ -258,6 +297,7 @@ export function clearTeamStore(
 ): void {
   generation += 1;
   inflight = null;
+  presentationOwner = null;
   const previousId = getActiveTeamId();
   const previousHint = getActiveOrganizationIsPersonalHint();
   if (options.resetSelection) {
@@ -265,7 +305,7 @@ export function clearTeamStore(
   } else {
     clearActiveOrganizationSelectionHint();
   }
-  emit({ me: null, status: "idle", error: null });
+  emit({ me: null, presentation: null, status: "idle", error: null });
   // Clearing can be a no-op for the active-selection publisher. Re-kick the
   // courier explicitly so it captures this generation and clears/refetches.
   const selectionPublished =
@@ -302,7 +342,7 @@ export function useOrganizations() {
   const snapshot = useTeams();
   return {
     ...snapshot,
-    organizations: desktopOrganizationChoices(snapshot.me),
+    organizations: desktopOrganizationChoices(snapshot.me ?? snapshot.presentation),
   };
 }
 
@@ -310,9 +350,9 @@ export function useOrganizations() {
  *  back to Personal/first while a stale id reconciles). Re-renders on both
  *  store and compatibility active-team-key changes. */
 export function useActiveTeam(): TeamSummary | null {
-  const { me } = useTeams();
+  const { me, presentation } = useTeams();
   const activeId = useSyncExternalStore(subscribeActiveTeam, getActiveTeamId);
-  return activeOrganization(me, activeId);
+  return activeOrganization(me ?? presentation, activeId);
 }
 
 export const useActiveOrganization = useActiveTeam;

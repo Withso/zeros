@@ -1,3 +1,4 @@
+import { mcpCredentialKey } from "./gateway/credential-key";
 // ──────────────────────────────────────────────────────────
 // MCP registry helpers — normalize before handing to adapters.
 // ──────────────────────────────────────────────────────────
@@ -35,6 +36,7 @@ import {
   type SettingsLayerName,
 } from "../settings/schema";
 import type { McpServerRegistration } from "./types";
+import { mcpSecretEnvAlias } from "@zeros/protocol/mcp-secrets";
 
 /** De-duplicate the MCP registry, FIRST-WINS (registry order = precedence,
  *  so a Zeros "shared" entry placed ahead of a later dupe wins). Two kinds
@@ -95,9 +97,11 @@ function stripSecretSentinels(
  *  `enabled`/`transport` bookkeeping into the discriminated shape, strip any
  *  Keychain-sentinel secrets (never put a secret in MCP config — see above),
  *  omit empty optionals. */
-function toRegistration(s: McpSettingsServer): McpServerRegistration {
+function toRegistration(s: McpSettingsServer, repoRoot?: string): McpServerRegistration {
   if (s.transport === "stdio") {
     const env = stripSecretSentinels(s.env);
+    const envFromEnv = s.credential_id ? Object.fromEntries(Object.entries(s.env ?? {}).filter(([, value]) => value === MCP_SECRET_SENTINEL)
+      .map(([name]) => [name, mcpSecretEnvAlias(s.credential_id!, name)])) : {};
     return {
       name: s.name,
       transport: "stdio",
@@ -105,6 +109,8 @@ function toRegistration(s: McpSettingsServer): McpServerRegistration {
       ...(s.cwd ? { cwd: s.cwd } : {}),
       ...(s.args ? { args: s.args } : {}),
       ...(env ? { env } : {}),
+      ...(Object.keys(envFromEnv).length ? { envFromEnv, credentialKey: mcpCredentialKey(s.credential_id, undefined, repoRoot) } : {}),
+      ...(s.listen_url ? { listenUrl: s.listen_url } : {}),
     };
   }
   const headers = stripSecretSentinels(s.headers);
@@ -169,6 +175,15 @@ const MCP_LAYER_PRECEDENCE: readonly SettingsLayerName[] = [
  *  fronts the server's tools on localhost. Consumed by the gateway host and
  *  surfaced here so the partition stays stable and testable. */
 export interface GatewayBackend {
+  /** Native organisation broker; tokens remain in the control plane. The
+   * identity fences gateway reuse across account and workspace admissions. */
+  authorizationKey?: string;
+  authorization?: (force: boolean, signal?: AbortSignal) => Promise<Record<string, string>>;
+  credentialKey?: string;
+  headerNames?: string[];
+  variables?: Record<string, string>;
+  sealedHeaders?: string[];
+  clientMode?: "auto" | "metadata" | "dynamic" | "custom";
   name: string;
   /** Omitted by older callers: Streamable HTTP. */
   transport?: "http" | "sse";
@@ -375,6 +390,8 @@ export async function resolveMcpServersForRepo(
       "workspace-local": workspaceLocal,
     },
     warnings,
+    main,
+    checkout,
   );
 }
 
@@ -393,6 +410,8 @@ export async function resolveMcpServersForRepo(
 function composeMcpRegistry(
   rawByLayer: Partial<Record<SettingsLayerName, unknown>>,
   warnings: string[],
+  repoRoot?: string,
+  workspaceRoot?: string,
 ): ResolvedMcpRegistry {
   const servers: McpServerRegistration[] = [];
   const sources: SettingsLayerName[] = [];
@@ -410,6 +429,7 @@ function composeMcpRegistry(
       const parsed = mcpServerSchema.safeParse(entry);
       if (!parsed.success) continue;
       const s = parsed.data;
+      const secretRoot = layer === "repo-local" ? repoRoot : layer === "workspace-local" ? workspaceRoot : undefined;
       // Gateway-managed (auth:"oauth"|"header") servers are NOT injected
       // directly — the global gateway brokers auth + fronts them. Partition
       // them out (same name/url dedup namespace as direct servers, so a name
@@ -418,16 +438,6 @@ function composeMcpRegistry(
         s.transport !== "stdio" &&
         (s.auth === "oauth" || s.auth === "header")
       ) {
-        // The gateway is user-global (boot-loaded with no repo context), so a
-        // repo-local gateway entry would never be mounted — skip it loudly,
-        // WITHOUT reserving its name (a same-named user/managed entry still
-        // resolves).
-        if (layer === "repo-local" || layer === "workspace-local") {
-          warnings.push(
-            `mcp.servers: "${s.name}" uses gateway auth ("${s.auth}") — gateway servers are user-level only; move it to your user MCP servers`,
-          );
-          continue;
-        }
         if (s.enabled === false) {
           seenNames.add(s.name);
           continue;
@@ -438,14 +448,20 @@ function composeMcpRegistry(
         seenTargets.add(target);
         gatewayBackends.push({
           name: s.name,
+          ...(s.credential_id || secretRoot ? { credentialKey: mcpCredentialKey(s.credential_id, s.url, secretRoot) } : {}),
+          ...(s.header_names ? { headerNames: s.header_names } : {}),
+          ...(s.oauth_client_mode ? { clientMode: s.oauth_client_mode } : {}),
           ...(s.transport === "sse" ? { transport: "sse" as const } : {}),
           url: s.url,
           auth: s.auth,
+          ...(s.env ? { variables: s.env } : {}),
+          ...(s.headers ? { sealedHeaders: Object.entries(s.headers).filter(([, value]) => value === MCP_SECRET_SENTINEL).map(([name]) => name) } : {}),
+          ...(s.headers && Object.keys(s.headers).length ? { headers: stripSecretSentinels(s.headers) } : {}),
           ...(s.auth === "header"
             ? {
                 headerName: s.header_name || "Authorization",
                 ...(s.headers && Object.keys(s.headers).length
-                  ? { headers: s.headers }
+                  ? { headers: stripSecretSentinels(s.headers) }
                   : {}),
               }
             : {}),
@@ -465,7 +481,7 @@ function composeMcpRegistry(
         seenNames.add(s.name);
         continue;
       }
-      const reg = toRegistration(s);
+      const reg = toRegistration(s, secretRoot);
       const target =
         reg.transport !== "stdio"
           ? `${reg.transport}:${reg.url}`

@@ -1,6 +1,7 @@
 import {
   DESIGN_CANVAS_INVERSE_ZOOM,
   designCanvasScreenPixels,
+  paintDesignFrameVisibility,
 } from "./design-canvas-camera";
 // ============================================
 // COMPONENT: DesignWorkspaceColumn
@@ -68,7 +69,7 @@ import { useDesignMotionPlayhead } from "./state/design-motion-playhead";
 import { useDesignRuntimeStore } from "./state/design-runtime-store";
 
 export function frameGeometry(
-  frame: DesignCanvasFrameWire,
+  frame: Pick<DesignCanvasFrameWire, "x" | "y" | "width" | "height" | "z">,
 ): DesignFrameGeometryWire {
   return {
     x: frame.x,
@@ -90,6 +91,7 @@ export function paintFrameGeometry(
   element.style.width = `${geometry.w}px`;
   element.style.height = `${geometry.h}px`;
   element.style.zIndex = String(geometry.z);
+  paintDesignFrameVisibility(element);
 }
 
 /** Every gesture paints the one selected overlay directly, so its placement

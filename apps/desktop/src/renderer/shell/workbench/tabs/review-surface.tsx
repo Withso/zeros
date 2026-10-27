@@ -27,6 +27,10 @@ import { parseRemote } from "../../pr/github-url";
 import { resolveReviewProvider } from "../../pr/review-provider";
 import { EmptyState, useSourceTarget } from "./changes-tab";
 import { ReviewView } from "./review-tab";
+import { isWorkspacePrSyncEligible, retryWorkspacePrDiscovery } from "../../pr/use-workspace-pr-sync";
+import { useWorkspacePrDiscoveryState } from "../../pr/workspace-pr-discovery-state";
+import { isCloudWorkspace, parseCloudScopedId } from "../../../platform/bridge/cloud-workspace-key";
+import { WorkbenchEmptyState, useWorkbenchStatusSource } from "../tab-status";
 
 interface TabBodyProps {
   tab: WorkbenchTab;
@@ -56,11 +60,27 @@ export const ReviewSurface = React.memo(function ReviewSurface({
   const refreshKey = useGitRefreshKey(workspace?.path, changesTarget, active);
   // Parks the header's Merge / Mark-as-ready writes while a turn is in flight.
   const agentWorking = useWorkspaceAgentWorking(workspace);
+  const discovery = useWorkspacePrDiscoveryState(workspace?.id ?? null);
+  // Cloud v2 observes PR metadata through its workspace row; it has no gh.*
+  // bridge operations. This source describes Local discovery only.
+  const discovering = isWorkspacePrSyncEligible(workspace) &&
+    !isCloudWorkspace(workspace?.path) && !isCloudWorkspace(workspace?.id) &&
+    !parseCloudScopedId(workspace?.id);
+  useWorkbenchStatusSource({
+    error: discovering ? discovery.error : null,
+    pending: discovering && discovery.pending,
+    primary: true,
+    hasContent: !discovering || discovery.checked,
+    active: active && discovering,
+    retry: discovering && workspace ? () => retryWorkspacePrDiscovery(workspace.id) : undefined,
+  }, `pr-discovery:${workspace?.id ?? "none"}`);
 
   // The trunk ("Local main") never has a PR — main is the base a PR merges
   // INTO — and a workspace without one has nothing to review yet.
   const body =
-    !workspace || isLocalMain || workspace.prNumber == null ? (
+    discovering && !discovery.checked ? (
+      <WorkbenchEmptyState type="review" />
+    ) : !workspace || isLocalMain || workspace.prNumber == null ? (
       <EmptyState
         title="No pull request"
         subtitle="This workspace has no open pull request yet. Pick a target branch and create one above — its status and this review surface light up together."

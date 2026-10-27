@@ -1,4 +1,5 @@
 import { expect } from "@playwright/test";
+import { designFrameElementBox } from "./ui-smoke-design-helpers.mjs";
 import { runDesignSavedEditingRaceSmoke, runDesignSavedEditingRevisionSmoke } from "./ui-smoke-design-saved-editing.mjs";
 
 /* global window, getComputedStyle */
@@ -86,9 +87,21 @@ export async function runDesignFramePlaybackSmoke({ page, check }) {
     true,
   );
 
-  await content().getByLabel("Try this control").check();
-  await expect(content().getByLabel("Try this control")).toBeChecked();
-  await content().getByRole("button", { name: "Hover preview" }).hover();
+  const control = content().getByLabel("Try this control");
+  const controlBox = await designFrameElementBox(content().owner(), control);
+  await page.mouse.click(
+    controlBox.x + controlBox.width / 2,
+    controlBox.y + controlBox.height / 2,
+  );
+  await expect(control).toBeChecked();
+  const hoverBox = await designFrameElementBox(
+    content().owner(),
+    content().getByRole("button", { name: "Hover preview" }),
+  );
+  await page.mouse.move(
+    hoverBox.x + hoverBox.width / 2,
+    hoverBox.y + hoverBox.height / 2,
+  );
   await expect
     .poll(() =>
       content()
@@ -159,7 +172,9 @@ export async function runDesignFramePlaybackSmoke({ page, check }) {
   await play.click();
   await expect.poll(running).toBe(true);
   await page.evaluate(() => window.__zerosHarnessDesignSurface.active(false));
-  await expect(play).toHaveAttribute("aria-pressed", "false");
+  const hiddenPlay = frame.locator("[data-design-frame-play]");
+  await expect(hiddenPlay).toHaveAttribute("aria-pressed", "false");
+  await expect(hiddenPlay).toBeHidden();
   await page.evaluate(() => window.__zerosHarnessDesignSurface.active(true));
   await stopped();
   check(

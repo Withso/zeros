@@ -1,0 +1,342 @@
+[
+  {
+    "id": "00000001-1111-4111-8111-111111111111",
+    "slug": "membership-1",
+    "name": "Membership 01",
+    "logo": null,
+    "role": "member",
+    "isPersonal": false,
+    "defaultTeamId": "00000001-2222-4222-8222-222222222222",
+    "workspaceCapabilities": {
+      "local": false,
+      "cloud": true
+    },
+    "teamCapabilities": {
+      "multiple": false,
+      "canCreate": false
+    }
+  },
+  {
+    "id": "00000002-1111-4111-8111-111111111111",
+    "slug": "membership-2",
+    "name": "Membership 02",
+    "logo": null,
+    "role": "member",
+    "isPersonal": false,
+    "defaultTeamId": "00000002-2222-4222-8222-222222222222",
+    "workspaceCapabilities": {
+      "local": false,
+      "cloud": true
+    },
+    "teamCapabilities": {
+      "multiple": false,
+      "canCreate": false
+    }
+  },
+  {
+    "id": "00000003-1111-4111-8111-111111111111",
+    "slug": "membership-3",
+    "name": "Membership 03",
+    "logo": null,
+    "role": "member",
+    "isPersonal": false,
+    "defaultTeamId": "00000003-2222-4222-8222-222222222222",
+    "workspaceCapabilities": {
+      "local": false,
+      "cloud": false
+    },
+    "teamCapabilities": {
+      "multiple": false,
+      "canCreate": false
+    }
+  },
+  {
+    "id": "00000004-1111-4111-8111-111111111111",
+    "slug": "membership-4",
+    "name": "Membership 04",
+    "logo": null,
+    "role": "member",
+    "isPersonal": false,
+    "defaultTeamId": "00000004-2222-4222-8222-222222222222",
+    "workspaceCapabilities": {
+      "local": false,
+      "cloud": true
+    },
+    "teamCapabilities": {
+      "multiple": false,
+      "canCreate": false
+    }
+  },
+  {
+    "id": "00000005-1111-4111-8111-111111111111",
+    "slug": "membership-5",
+    "name": "Membership 05",
+    "logo": null,
+    "role": "member",
+    "isPersonal": false,
+    "defaultTeamId": "00000005-2222-4222-8222-222222222222",
+    "workspaceCapabilities": {
+      "local": false,
+      "cloud": true
+    },
+    "teamCapabilities": {
+      "multiple": false,
+      "canCreate": false
+    }
+  },
+  {
+    "id": "00000006-1111-4111-8111-111111111111",
+    "slug": "membership-6",
+    "name": "Membership 06",
+    "logo": null,
+    "role": "member",
+    "isPersonal": false,
+    "defaultTeamId": "00000006-2222-4222-8222-222222222222",
+    "workspaceCapabilities": {
+      "local": false,
+      "cloud": true
+    },
+    "teamCapabilities": {
+      "multiple": false,
+      "canCreate": false
+    }
+  },
+  {
+    "id": "00000007-1111-4111-8111-111111111111",
+    "slug": "membership-7",
+    "name": "Membership 07",
+    "logo": null,
+    "role": "member",
+    "isPersonal": false,
+    "defaultTeamId": "00000007-2222-4222-8222-222222222222",
+    "workspaceCapabilities": {
+      "local": false,
+      "cloud": true
+    },
+    "teamCapabilities": {
+      "multiple": false,
+      "canCreate": false
+    }
+  },
+  {
+    "id": "00000008-1111-4111-8111-111111111111",
+    "slug": "membership-8",
+    "name": "Membership 08",
+    "logo": null,
+    "role": "member",
+    "isPersonal": false,
+    "defaultTeamId": "00000008-2222-4222-8222-222222222222",
+    "workspaceCapabilities": {
+      "local": false,
+      "cloud": true
+    },
+    "teamCapabilities": {
+      "multiple": false,
+      "canCreate": false
+    }
+  },
+  {
+    "id": "00000009-1111-4111-8111-111111111111",
+    "slug": "membership-9",
+    "name": "Membership 09",
+    "logo": null,
+    "role": "member",
+    "isPersonal": false,
+    "defaultTeamId": "00000009-2222-4222-8222-222222222222",
+    "workspaceCapabilities": {
+      "local": false,
+      "cloud": true
+    },
+    "teamCapabilities": {
+      "multiple": false,
+      "canCreate": false
+    }
+  },
+  {
+    "id": "00000010-1111-4111-8111-111111111111",
+    "slug": "membership-10",
+    "name": "Membership 10",
+    "logo": null,
+    "role": "member",
+    "isPersonal": false,
+    "defaultTeamId": "00000010-2222-4222-8222-222222222222",
+    "workspaceCapabilities": {
+      "local": false,
+      "cloud": true
+    },
+    "teamCapabilities": {
+      "multiple": false,
+      "canCreate": false
+    }
+  },
+  {
+    "id": "00000011-1111-4111-8111-111111111111",
+    "slug": "membership-11",
+    "name": "Membership 11",
+    "logo": null,
+    "role": "member",
+    "isPersonal": false,
+    "defaultTeamId": "00000011-2222-4222-8222-222222222222",
+    "workspaceCapabilities": {
+      "local": false,
+      "cloud": true
+    },
+    "teamCapabilities": {
+      "multiple": false,
+      "canCreate": false
+    }
+  },
+  {
+    "id": "00000012-1111-4111-8111-111111111111",
+    "slug": "membership-12",
+    "name": "Membership 12",
+    "logo": null,
+    "role": "member",
+    "isPersonal": false,
+    "defaultTeamId": "00000012-2222-4222-8222-222222222222",
+    "workspaceCapabilities": {
+      "local": false,
+      "cloud": true
+    },
+    "teamCapabilities": {
+      "multiple": false,
+      "canCreate": false
+    }
+  },
+  {
+    "id": "00000013-1111-4111-8111-111111111111",
+    "slug": "membership-13",
+    "name": "Membership 13",
+    "logo": null,
+    "role": "member",
+    "isPersonal": false,
+    "defaultTeamId": "00000013-2222-4222-8222-222222222222",
+    "workspaceCapabilities": {
+      "local": false,
+      "cloud": true
+    },
+    "teamCapabilities": {
+      "multiple": false,
+      "canCreate": false
+    }
+  },
+  {
+    "id": "00000014-1111-4111-8111-111111111111",
+    "slug": "membership-14",
+    "name": "Membership 14",
+    "logo": null,
+    "role": "member",
+    "isPersonal": false,
+    "defaultTeamId": "00000014-2222-4222-8222-222222222222",
+    "workspaceCapabilities": {
+      "local": false,
+      "cloud": true
+    },
+    "teamCapabilities": {
+      "multiple": false,
+      "canCreate": false
+    }
+  },
+  {
+    "id": "00000015-1111-4111-8111-111111111111",
+    "slug": "membership-15",
+    "name": "Membership 15",
+    "logo": null,
+    "role": "member",
+    "isPersonal": false,
+    "defaultTeamId": "00000015-2222-4222-8222-222222222222",
+    "workspaceCapabilities": {
+      "local": false,
+      "cloud": true
+    },
+    "teamCapabilities": {
+      "multiple": false,
+      "canCreate": false
+    }
+  },
+  {
+    "id": "00000016-1111-4111-8111-111111111111",
+    "slug": "membership-16",
+    "name": "Membership 16",
+    "logo": null,
+    "role": "member",
+    "isPersonal": false,
+    "defaultTeamId": "00000016-2222-4222-8222-222222222222",
+    "workspaceCapabilities": {
+      "local": false,
+      "cloud": true
+    },
+    "teamCapabilities": {
+      "multiple": false,
+      "canCreate": false
+    }
+  },
+  {
+    "id": "00000017-1111-4111-8111-111111111111",
+    "slug": "membership-17",
+    "name": "Membership 17",
+    "logo": null,
+    "role": "member",
+    "isPersonal": false,
+    "defaultTeamId": "00000017-2222-4222-8222-222222222222",
+    "workspaceCapabilities": {
+      "local": false,
+      "cloud": true
+    },
+    "teamCapabilities": {
+      "multiple": false,
+      "canCreate": false
+    }
+  },
+  {
+    "id": "00000018-1111-4111-8111-111111111111",
+    "slug": "membership-18",
+    "name": "Membership 18",
+    "logo": null,
+    "role": "member",
+    "isPersonal": false,
+    "defaultTeamId": "00000018-2222-4222-8222-222222222222",
+    "workspaceCapabilities": {
+      "local": false,
+      "cloud": true
+    },
+    "teamCapabilities": {
+      "multiple": false,
+      "canCreate": false
+    }
+  },
+  {
+    "id": "00000019-1111-4111-8111-111111111111",
+    "slug": "membership-19",
+    "name": "Membership 19",
+    "logo": null,
+    "role": "member",
+    "isPersonal": false,
+    "defaultTeamId": "00000019-2222-4222-8222-222222222222",
+    "workspaceCapabilities": {
+      "local": false,
+      "cloud": true
+    },
+    "teamCapabilities": {
+      "multiple": false,
+      "canCreate": false
+    }
+  },
+  {
+    "id": "00000020-1111-4111-8111-111111111111",
+    "slug": "membership-20",
+    "name": "Membership 20",
+    "logo": null,
+    "role": "member",
+    "isPersonal": false,
+    "defaultTeamId": "00000020-2222-4222-8222-222222222222",
+    "workspaceCapabilities": {
+      "local": false,
+      "cloud": true
+    },
+    "teamCapabilities": {
+      "multiple": false,
+      "canCreate": false
+    }
+  }
+]

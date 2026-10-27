@@ -480,9 +480,13 @@ async function main() {
   throw new Error("Unknown runtime notification command.");
 }
 
-main().catch(() => {
+main().catch((error) => {
+  // GitHub's numeric status is the only detail printed; messages can carry data.
+  const status = Number.isSafeInteger(error?.status)
+    ? ` (GitHub HTTP ${error.status})`
+    : "";
   console.error(
-    `Agent runtime ${/^[a-z-]+$/.test(command) ? command : "command"} failed. State was not reset; inspect configuration, source availability and run provenance before retrying.`,
+    `Agent runtime ${/^[a-z-]+$/.test(command) ? command : "command"} failed${status}. State was not reset; inspect configuration, source availability and run provenance before retrying.`,
   );
   process.exitCode = 1;
 });

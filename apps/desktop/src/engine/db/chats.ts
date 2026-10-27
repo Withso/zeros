@@ -879,6 +879,7 @@ export function chatTitleSeeds(chatIds: readonly string[]): ChatTitleSeed[] {
                         AND (cm.kind = 'tool'
                              OR (cm.kind = 'text' AND json_extract(cm.payload, '$.role') = 'agent'
                                  AND json_extract(cm.payload, '$.modelFallback') IS NULL
+                                 AND json_extract(cm.payload, '$.wakeupNotice') IS NULL
                                  AND length(trim(coalesce(json_extract(cm.payload, '$.text'), ''))) > 0)))
              OR EXISTS (SELECT 1 FROM turns t WHERE t.chat_id = ? AND t.turn_id = ? AND t.status != 'running')) AS answered`,
   );

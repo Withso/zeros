@@ -309,7 +309,7 @@ describe("scoped navigation memory", () => {
     expect(selectRepoPageView(state, projectB)).toBe("environment");
   });
 
-  it("restores each repository's Code and Design tabs with one mode-switch notification", () => {
+  it("publishes a repository tab change once and retains it across repository switches", () => {
     const { projectA, projectB } = identities();
     const { dispatch } = useWorkspaceStore.getState();
     dispatch({ type: "OPEN_REPO_PAGE", projectId: projectA, view: "git" });
@@ -318,78 +318,28 @@ describe("scoped navigation memory", () => {
       snapshots.push(selectRepoPageView(state, projectA));
     });
     dispatch({
-      type: "SET_REPO_PAGE_MODE",
-      projectId: projectA,
-      mode: "design",
-    });
-    stop();
-    expect(snapshots).toEqual(["design"]);
-
-    dispatch({
       type: "SET_REPO_PAGE_VIEW",
       projectId: projectA,
-      view: "design-preferences",
+      view: "actions",
     });
+    stop();
+    expect(snapshots).toEqual(["actions"]);
     dispatch({ type: "OPEN_REPO_PAGE", projectId: projectB, view: "files" });
-    dispatch({
-      type: "SET_REPO_PAGE_MODE",
-      projectId: projectB,
-      mode: "design",
-    });
     expect(selectRepoPageView(useWorkspaceStore.getState(), projectB)).toBe(
-      "design",
+      "files",
     );
     dispatch({ type: "OPEN_REPO_PAGE", projectId: projectA });
     expect(selectRepoPageView(useWorkspaceStore.getState(), projectA)).toBe(
-      "design-preferences",
-    );
-    dispatch({ type: "SET_REPO_PAGE_MODE", projectId: projectA, mode: "code" });
-    expect(selectRepoPageView(useWorkspaceStore.getState(), projectA)).toBe(
-      "git",
-    );
-    dispatch({
-      type: "SET_REPO_PAGE_MODE",
-      projectId: projectA,
-      mode: "design",
-    });
-    expect(selectRepoPageView(useWorkspaceStore.getState(), projectA)).toBe(
-      "design-preferences",
+      "actions",
     );
 
     const unchanged = useWorkspaceStore.getState();
     dispatch({
-      type: "SET_REPO_PAGE_MODE",
+      type: "SET_REPO_PAGE_VIEW",
       projectId: projectA,
-      mode: "design",
+      view: "actions",
     });
     expect(useWorkspaceStore.getState()).toBe(unchanged);
-  });
-
-  it("keeps an upgraded Design selection and defaults an unvisited Code mode to Workspaces", () => {
-    const { projectA } = identities();
-    const { dispatch } = useWorkspaceStore.getState();
-    useWorkspaceStore.setState((state) => ({
-      repoPageViewByProject: {
-        ...state.repoPageViewByProject,
-        [projectA]: "design",
-      },
-    }));
-    dispatch({ type: "OPEN_REPO_PAGE", projectId: projectA });
-    expect(selectRepoPageView(useWorkspaceStore.getState(), projectA)).toBe(
-      "design",
-    );
-    dispatch({ type: "SET_REPO_PAGE_MODE", projectId: projectA, mode: "code" });
-    expect(selectRepoPageView(useWorkspaceStore.getState(), projectA)).toBe(
-      "workspaces",
-    );
-    dispatch({
-      type: "SET_REPO_PAGE_MODE",
-      projectId: projectA,
-      mode: "design",
-    });
-    expect(selectRepoPageView(useWorkspaceStore.getState(), projectA)).toBe(
-      "design",
-    );
   });
 
   it("returns from a workspace to Home's complete previous destination", () => {
@@ -577,7 +527,6 @@ describe("scoped navigation memory", () => {
     expect(state.activeChatId).toBeNull();
     expect(state.lastHomePage).toBe("dashboard");
     expect(state.repoPageViewByProject[projectA]).toBeUndefined();
-    expect(state.repoPageViewByModeByProject[projectA]).toBeUndefined();
     expect(state.lastWorkspaceByRepoRoot[rootA]).toBeUndefined();
     expect(state.activeChatByFolder[folder]).toBeUndefined();
     expect(state.workspaceActivityByFolder[folder]).toBeUndefined();

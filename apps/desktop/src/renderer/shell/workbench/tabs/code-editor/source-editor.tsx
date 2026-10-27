@@ -2,7 +2,8 @@
 // SourceEditor — editable file source for the Files-tab Edit mode
 // ──────────────────────────────────────────────────────────
 //
-// Wraps <CodeEditor> with file I/O: dirty tracking and ⌘S / button save through
+// Shares one draft between source and Pierre diff editing, with auto save and
+// dirty tracking plus ⌘S / File options save through
 // the engine write path (writeWorkspaceFile). The on-disk file is authoritative:
 // agent, terminal, Git, and other external writes are adopted immediately with
 // no conflict banner, whether this File tab is active or mounted in the
@@ -14,8 +15,7 @@
 // latest `content` down; this component owns the editable draft.
 // ──────────────────────────────────────────────────────────
 
-import { useCallback, useEffect, useRef, useState } from "react";
-import { Save } from "lucide-react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 
 import { CodeEditor } from "./index";
 import { isCloudWorkspace } from "@/renderer/platform/bridge/cloud-workspace-key";
@@ -26,13 +26,16 @@ import {
 import { triggerGitRefresh } from "@/renderer/shell/use-git-refresh-key";
 import { setWorkbenchEditorDirty } from "./editor-state";
 import { resolveDiskContentSync } from "./source-editor-sync";
-import { ZerosSpinner } from "@/renderer/shared/ui/loading";
 import { recordWorkspaceActivity } from "@/renderer/state/workspace-store";
 import type { CodeReviewController } from "@/renderer/features/code-review/use-code-review";
 import { useEditorCodeReview } from "@/renderer/features/code-review/use-editor-code-review";
 import { MergeConflictActions } from "@/renderer/features/code-review/merge-conflict-actions";
 import type { GitReviewActionsClient } from "@/renderer/platform/git-review-actions";
 import { Button } from "@/renderer/shared/ui/primitives";
+import { toast } from "@/renderer/shared/ui/primitives/elements";
+import type { WorkspaceFileDiffQuery } from "../../../workspace-file-data-cache";
+import { EditableDiffEditor } from "./editable-diff-editor";
+import type { FileEditorControls } from "./file-editor-options";
 
 interface SourceEditorProps {
   /** Owning File-tab id. Dirty state is registered per tab so this editor can
@@ -46,6 +49,13 @@ interface SourceEditorProps {
    *  — it stays mounted only to keep its draft, so it skips the synchronous
    *  first-paint highlight it wouldn't be painting anyway. */
   offscreen?: boolean;
+  /** The owning File tab may still save its draft while showing Preview. */
+  active?: boolean;
+  autoSave?: boolean;
+  editableDiffQuery?: WorkspaceFileDiffQuery;
+  refreshKey?: number;
+  isNewFile?: boolean;
+  onControlsChange?: (controls: FileEditorControls | null) => void;
   review: CodeReviewController;
   isGitConflict?: boolean;
   reviewActionClient?: GitReviewActionsClient;
@@ -57,6 +67,12 @@ export function SourceEditor({
   path,
   content,
   offscreen,
+  active = !offscreen,
+  autoSave = false,
+  editableDiffQuery,
+  refreshKey = 0,
+  isNewFile = false,
+  onControlsChange,
   review,
   isGitConflict = false,
   reviewActionClient,
@@ -65,6 +81,13 @@ export function SourceEditor({
   const baselineRef = useRef(content); // last on-disk content we're in sync with
   const lastContentRef = useRef(content); // last `content` prop we processed
   const pendingSaveRef = useRef<string | null>(null);
+  const saveEchoesRef = useRef<string[]>([]);
+  const savingRef = useRef(false);
+  const mountedRef = useRef(true);
+  useLayoutEffect(() => { mountedRef.current = true; return () => { mountedRef.current = false; }; }, []);
+  const activeRef = useRef(active);
+  activeRef.current = active;
+  const [editRevision, setEditRevision] = useState(0);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [resolutionPreview, setResolutionPreview] = useState<string | null>(
@@ -84,12 +107,11 @@ export function SourceEditor({
   const separateDraftDirty =
     resolutionPreview === null && draft !== baselineRef.current;
   const currentDraft = useRef(draft);
-  currentDraft.current = draft;
   const editorReview = useEditorCodeReview({
     review,
     path,
     content: displayed,
-    active: !offscreen,
+    active: !offscreen && !editableDiffQuery,
   });
 
   // Register the dirty transition in the same input event as the draft write.
@@ -100,6 +122,7 @@ export function SourceEditor({
       if (conflictSavingRef.current || currentPreview.current !== null) return;
       currentDraft.current = next;
       setDraft(next);
+      setError(null);
       setWorkbenchEditorDirty(editorId, next !== baselineRef.current);
     },
     [editorId],
@@ -123,14 +146,17 @@ export function SourceEditor({
       baseline: baselineRef.current,
       draft,
       pendingSave: pendingSaveRef.current,
+      saveEchoes: saveEchoesRef.current,
     });
     if (sync.kind === "unchanged") return;
     lastContentRef.current = content;
     baselineRef.current = sync.baseline;
     pendingSaveRef.current = sync.pendingSave;
     if (sync.kind === "adopt-disk") {
+      saveEchoesRef.current = [];
       currentDraft.current = sync.draft;
       setDraft(sync.draft);
+      setEditRevision(version => version + 1);
       setError(null);
       // Clear synchronously so a dirty inactive File can return to lazy mounting
       // as soon as the authoritative external update has been adopted.
@@ -141,14 +167,16 @@ export function SourceEditor({
   const save = useCallback(
     async (text: string) => {
       if (
-        saving ||
-        offscreen ||
-        resolutionPreview !== null ||
+        savingRef.current ||
+        !activeRef.current ||
+        currentPreview.current !== null ||
         conflictSavingRef.current
       )
         return;
+      if (text === baselineRef.current) return;
       const lastSeenAtSaveStart = lastContentRef.current;
       pendingSaveRef.current = text;
+      savingRef.current = true;
       setSaving(true);
       setError(null);
       // A save attempt is a deliberate workspace action at invocation time,
@@ -168,7 +196,7 @@ export function SourceEditor({
           error: err instanceof Error ? err.message : String(err),
         }),
       );
-      setSaving(false);
+      savingRef.current = false;
       if (res && res.kind === "success") {
         // Advance the baseline only — do NOT reset `draft`. The editor stays
         // editable during the await, so resetting it would silently discard any
@@ -184,14 +212,47 @@ export function SourceEditor({
         ) {
           baselineRef.current = text;
         }
+        saveEchoesRef.current = [...saveEchoesRef.current.filter(value => value !== text), text].slice(-4);
+        if (mountedRef.current) setWorkbenchEditorDirty(editorId, currentDraft.current !== baselineRef.current);
         triggerGitRefresh(cwd); // origin-side File / All Files / Changes refresh
       } else {
         if (pendingSaveRef.current === text) pendingSaveRef.current = null;
         setError(res?.error ?? "Couldn't save the file");
+        toast.error("Couldn't save file", { description: res?.error ?? "Try saving again when the workspace is available." });
       }
+      setSaving(false);
     },
-    [cwd, path, saving, offscreen, resolutionPreview],
+    [cwd, path, editorId],
   );
+
+  // One debounce per visible owning tab. A failed write keeps the draft and
+  // stops automatic retries until another edit or an explicit Save file.
+  // Merge conflict resolution keeps its separate deliberate save action.
+  useEffect(() => {
+    if (!autoSave || !active || !dirty || saving || error || isGitConflict || resolutionPreview !== null) return;
+    const timer = setTimeout(() => { void save(currentDraft.current); }, 500);
+    return () => clearTimeout(timer);
+  }, [autoSave, active, dirty, draft, saving, error, isGitConflict, resolutionPreview, save]);
+
+  const discardDraft = useCallback(() => {
+    if (!activeRef.current || savingRef.current || conflictSavingRef.current) return;
+    currentPreview.current = null;
+    setResolutionPreview(null);
+    currentDraft.current = baselineRef.current;
+    setDraft(baselineRef.current);
+    setError(null);
+    setConflictReset(version => version + 1);
+    setEditRevision(version => version + 1);
+    setWorkbenchEditorDirty(editorId, false);
+  }, [editorId]);
+  const controls = useMemo<FileEditorControls>(() => ({
+    dirty, saving: saving || conflictSaving,
+    canSave: active && dirty && !saving && !conflictSaving && resolutionPreview === null,
+    canDiscard: active && dirty && !saving && !conflictSaving,
+    save: () => { void save(currentDraft.current); }, discard: discardDraft,
+  }), [active, dirty, saving, conflictSaving, resolutionPreview, save, discardDraft]);
+  useLayoutEffect(() => { onControlsChange?.(controls); }, [onControlsChange, controls]);
+  useLayoutEffect(() => () => { onControlsChange?.(null); }, [onControlsChange]);
 
   const previewResolution = useCallback(
     (text: string) => {
@@ -259,6 +320,7 @@ export function SourceEditor({
       currentPreview.current = null;
       setResolutionPreview(null);
       setError(null);
+      setEditRevision(version => version + 1);
       setWorkbenchEditorDirty(
         editorId,
         currentDraft.current !== baselineRef.current,
@@ -271,6 +333,9 @@ export function SourceEditor({
   return (
     <div
       className="bg-bg1 relative flex h-full min-h-0 flex-col"
+      onBlur={event => {
+        if (autoSave && !error && !isGitConflict && !event.currentTarget.contains(event.relatedTarget)) void save(currentDraft.current);
+      }}
       {...(offscreen ? { inert: "" } : {})}
     >
       <MergeConflictActions
@@ -317,6 +382,12 @@ export function SourceEditor({
         </div>
       )}
       <div className="min-h-0 flex-1">
+        {editableDiffQuery && resolutionPreview === null && !conflictSaving ? (
+          <EditableDiffEditor query={editableDiffQuery} value={displayed} savedContent={content}
+            revision={editRevision} refreshKey={refreshKey} isNewFile={isNewFile}
+            active={!offscreen} onChange={changeDraft} onSave={save}
+            scrollMemoryKey={JSON.stringify(["editable-diff", cwd, editorId, path])} />
+        ) : <>
         <CodeEditor
           tokenCacheScope={cwd && !isCloudWorkspace(cwd) ? "local" : undefined}
           value={displayed}
@@ -331,30 +402,8 @@ export function SourceEditor({
           scrollMemoryKey={JSON.stringify(["editor", cwd, editorId, path])}
         />
         {editorReview.portals}
+        </>}
       </div>
-      {dirty && resolutionPreview === null && (
-        <div className="absolute right-4 bottom-3 z-10 flex items-center gap-2">
-          {error && (
-            <span className="bg-bg2 text-yellow-primary rounded-sm px-2 py-1 text-xs shadow-sm">
-              {error}
-            </span>
-          )}
-          <button
-            type="button"
-            onClick={() => save(draft)}
-            disabled={saving || conflictSaving || !!offscreen}
-            className="bg-primary-button-bg text-primary-button-fg flex items-center gap-1.5 rounded-sm px-2.5 py-1 text-xs font-medium shadow-sm transition-opacity hover:opacity-90 disabled:opacity-60"
-          >
-            {saving ? (
-              <ZerosSpinner size={14} tone="inverted" />
-            ) : (
-              <Save className="size-3.5" />
-            )}
-            {saving ? "Saving…" : "Save"}
-            <span className="opacity-60">⌘S</span>
-          </button>
-        </div>
-      )}
     </div>
   );
 }

@@ -20,14 +20,15 @@ export const PERSONAL_ORGANIZATION: OrganizationSummary = Object.freeze({
 const personalOnly: readonly OrganizationSummary[] = Object.freeze([
   PERSONAL_ORGANIZATION,
 ]);
-const choicesBySnapshot = new WeakMap<Me, readonly OrganizationSummary[]>();
+export type OrganizationList = Pick<Me, "organizations" | "teams">;
+const choicesBySnapshot = new WeakMap<OrganizationList, readonly OrganizationSummary[]>();
 
 /** One Personal entry, even without authentication or a control-plane reply.
  * Server Personal rows remain a released-client compatibility contract, not
  * the owner of this device's work. Preserve the raw Me snapshot separately for
  * account authorization and migration of old local ownership metadata. */
 export function desktopOrganizationChoices(
-  me: Me | null,
+  me: OrganizationList | null,
 ): readonly OrganizationSummary[] {
   if (!me) return personalOnly;
   const cached = choicesBySnapshot.get(me);

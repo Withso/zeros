@@ -53,6 +53,7 @@ function fakeIndexedDb() {
             getAll: () => request(() => [...store.values()]),
             put: (value: Record<string, unknown>) => request(() => void store.set(String(value[keyPath]), value)),
             delete: (key: string) => request(() => void store.delete(key)),
+            clear: () => request(() => store.clear()),
           };
         },
       };
@@ -131,6 +132,15 @@ it("opens a new connection after the browser closes the old one", async () => {
   idb.connections[0]!.lose();
   expect(await store.read(["a"])).toEqual([{ id: "a", text: "A" }]);
   expect(idb.state.opens).toBe(2);
+});
+
+it("clears records and index rows together before installing the next lifetime", async () => {
+  const idb = fakeIndexedDb();
+  const store = open(idb.factory);
+  await store.commit({ put: [put("old", "retired")] });
+  await store.commit({ clear: true, put: [put("new", "current")] });
+  expect(await store.read(["old", "new"])).toEqual([{ id: "new", text: "current" }]);
+  expect(await store.readIndex()).toEqual([{ id: "new", bytes: 7 }]);
 });
 
 it("opens a new connection when a closed one refuses a transaction before its close event", async () => {

@@ -30,6 +30,21 @@ function turn(
 }
 
 describe("stabilizeTurns", () => {
+  it("updates a steered footer when its opening prompt gains a mirrored cloud summary", () => {
+    const opening = { ...text("opening", "Request"), role: "user" as const };
+    const steer = { ...text("steer", "Follow up"), role: "user" as const, steeredTurnId: opening.id };
+    const answer = text("answer", "Done");
+    const previous = groupMessagesIntoTurns([opening, steer, answer]);
+    const turnSummary: NonNullable<AgentTextMessage["turnSummary"]> = {
+      agentId: "claude", ord: 1, summary: "Request", startedAt: 1, endedAt: 2, status: "completed", stopReason: "end_turn",
+      files: [{ path: "src/a.ts", status: "added", additions: 1, deletions: 0 }],
+    };
+    const nextOpening = { ...opening, turnSummary };
+    const updated = stabilizeTurns(previous, groupMessagesIntoTurns([nextOpening, steer, answer]));
+    expect(updated[1]).not.toBe(previous[1]);
+    expect(updated[1].recordedSummary).toBe(turnSummary);
+    expect(stabilizeTurns(updated, groupMessagesIntoTurns([nextOpening, steer, answer]))).toBe(updated);
+  });
   it("preserves the partial leading turn's key when pagination prepends its older events", () => {
     const retained = text("retained", "Recorded work");
     const previous = groupMessagesIntoTurns([retained]);

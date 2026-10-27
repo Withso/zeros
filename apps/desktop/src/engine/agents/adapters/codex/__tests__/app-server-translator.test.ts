@@ -2068,10 +2068,10 @@ describe("CodexAppServerTranslator", () => {
   });
 
   describe("forward compatibility", () => {
-    it("dispatches account/* notifications without surfacing them as bubbles", () => {
+    it.each(["plus", "sci", "sci_plus"])("dispatches account/* notifications for %s without surfacing them as bubbles", (planType) => {
       env.t.handle("account/updated", {
         authMode: "chatgpt",
-        planType: "plus",
+        planType,
       });
       env.t.handle("account/rateLimits/updated", { snapshots: [] });
       // The translator deliberately swallows account events — the

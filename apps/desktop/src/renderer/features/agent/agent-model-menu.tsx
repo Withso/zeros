@@ -44,7 +44,7 @@ import {
   MENU_ITEM_RADIUS,
   MENU_SURFACE_INSET,
 } from "../../shared/ui/menu-surface";
-import { Button, Switch, Tooltip } from "@/renderer/shared/ui/primitives";
+import { Switch, Tooltip } from "@/renderer/shared/ui/primitives";
 import {
   Popover,
   PopoverContent,
@@ -167,7 +167,7 @@ export function AgentModelMenu({
   onConfigure,
   open,
   onOpenChange,
-  triggerTooltip = "Change model",
+  triggerTooltip = "Model",
   redirectCrossAgent = false,
   selectionTiming,
   footer,
@@ -262,19 +262,6 @@ export function AgentModelMenu({
   // starts in the requested selected-only state.
   const [search, setSearch] = useState("");
   const [catalogOpen, setCatalogOpen] = useState(false);
-  const [availableOnly, setAvailableOnly] = useState(false);
-  const visibleGroups = useMemo(() => availableOnly
-    ? groups.map(group => ({ ...group, models: group.models.filter(model => !rowUnavailable(group.agent, model)) }))
-      .filter(group => group.models.length > 0)
-    : groups, [availableOnly, groups, rowUnavailable]);
-  const hasUnavailable = groups.some(group => group.models.some(model => rowUnavailable(group.agent, model)));
-  const hasAvailable = groups.some(group => group.models.some(model => !rowUnavailable(group.agent, model)));
-  const showAvailableModels = () => {
-    setAvailableOnly(true);
-    setSearch("");
-    setEditingModelKey(null);
-    setCatalogOpen(true);
-  };
   const [editingModelKey, setEditingModelKeyState] = useState<string | null>(
     null,
   );
@@ -287,7 +274,6 @@ export function AgentModelMenu({
     if (!open) return;
     setSearch("");
     setCatalogOpen(false);
-    setAvailableOnly(false);
     setEditingModelKey(null);
   }, [open, setEditingModelKey]);
 
@@ -332,7 +318,7 @@ export function AgentModelMenu({
   const rows = useMemo<Row[]>(() => {
     if (!searching) return [];
     const q = search.trim().toLowerCase();
-    return visibleGroups
+    return groups
       .flatMap((g) =>
         g.models.map((model) => ({
           agent: g.agent,
@@ -347,7 +333,7 @@ export function AgentModelMenu({
           r.model.value.toLowerCase().includes(q) ||
           agentTitle(r.agent, r.family).toLowerCase().includes(q),
       );
-  }, [visibleGroups, search, searching, rowUnavailable]);
+  }, [groups, search, searching, rowUnavailable]);
 
   // The row carrying the ✓: the current agent's current model (null model ⇒
   // its effective favorite, matching what the trigger pill displays).
@@ -484,7 +470,7 @@ export function AgentModelMenu({
         onOpenChange(nextOpen);
       }}
     >
-      <Tooltip label={selectionTiming === "next-message" ? "Model, effort and Fast apply to the next message" : triggerTooltip}>
+      <Tooltip label={triggerTooltip} delayDuration={1500} disabled={open}>
         <PopoverTrigger asChild>{children}</PopoverTrigger>
       </Tooltip>
       <PopoverContent
@@ -602,7 +588,7 @@ export function AgentModelMenu({
                 );
               })}
             </CommandList>
-          ) : visibleGroups.length > 0 ? (
+          ) : groups.length > 0 ? (
             <Popover
               open={catalogOpen}
               onOpenChange={(nextOpen) => {
@@ -675,11 +661,22 @@ export function AgentModelMenu({
                 )}
                 onOpenAutoFocus={(event) => event.preventDefault()}
                 onCloseAutoFocus={(event) => event.preventDefault()}
+                onFocusOutside={(event) => {
+                  // Favoriting after editing restores the parent search caret.
+                  // It belongs to this model browser; that focus handoff must
+                  // not dismiss the catalog. Pointer-outside still dismisses.
+                  if (
+                    event.target ===
+                    contentRef.current?.querySelector("[cmdk-input]")
+                  ) {
+                    event.preventDefault();
+                  }
+                }}
                 onPointerEnter={cancelCatalogClose}
                 onPointerLeave={scheduleCatalogClose}
               >
-                {visibleGroups.length > 0 ? (
-                  visibleGroups.map((group, groupIndex) => (
+                {groups.length > 0 ? (
+                  groups.map((group, groupIndex) => (
                     <section
                       key={group.agent.id}
                       role="group"
@@ -765,11 +762,6 @@ export function AgentModelMenu({
                     No models found.
                   </div>
                 )}
-                {hasUnavailable && hasAvailable && !availableOnly && (
-                  <Button variant="ghost" size="compact" className="mt-1 w-full" onClick={showAvailableModels}>
-                    Show available models
-                  </Button>
-                )}
               </PopoverContent>
             </Popover>
           ) : (
@@ -778,13 +770,6 @@ export function AgentModelMenu({
             </div>
           )}
         </Command>
-        {hasUnavailable && hasAvailable && !availableOnly && (
-          <div className="border-border2 border-t p-1">
-            <Button variant="ghost" size="compact" className="w-full" onClick={showAvailableModels}>
-              Show available models
-            </Button>
-          </div>
-        )}
         {footer}
       </PopoverContent>
     </Popover>

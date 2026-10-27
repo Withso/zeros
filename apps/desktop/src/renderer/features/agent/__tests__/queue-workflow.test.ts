@@ -8,6 +8,7 @@ import * as lifecycle from "../session-reload-lifecycle";
 import { isCloudWorkspace, parseCloudWorkspaceKey } from "../../../platform/bridge/cloud-workspace-key";
 import { hasBackgroundAgentWork } from "../background-task-state";
 import { queuedTranscriptPresentation } from "./helpers/queued-transcript-presentation";
+import { definitiveCloudStopFailure } from "../cloud-turn-presentation";
 
 // Exercise the actual provider callbacks with an in-memory bridge/store. This
 // keeps Stop/Send now races deterministic without mounting unrelated app UI.
@@ -94,6 +95,9 @@ function setup(agentId = "claude", status = "streaming") {
     },
     setPendingLocalTurn: vi.fn(),
     setCancelling: vi.fn(),
+    presentCloudStop: vi.fn(),
+    recordCloudTurnEnd: vi.fn(),
+    rejectCloudStopPresentation: vi.fn(),
   };
   queue.set(
     "chat",
@@ -104,6 +108,7 @@ function setup(agentId = "claude", status = "streaming") {
     cloudPrompts: { available: () => false }, migrateCloudSends: vi.fn(async () => {}),
     ...lifecycle,
     hasBackgroundAgentWork,
+    definitiveCloudStopFailure,
     isCloudWorkspace,
     parseCloudWorkspaceKey,
     cloudComputerV2: false,

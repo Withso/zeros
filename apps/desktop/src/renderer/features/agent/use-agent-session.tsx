@@ -106,13 +106,15 @@ export interface AgentUsage {
 export interface AgentSessionState {
   /** Cloud HTTP receipts, kept outside native reducers until the worker records the user row. */
   cloudOutbox?: import("./cloud-prompt-presentation").CloudPromptView;
+  /** Exact-turn UI endings; cancellation/receipt ownership remains separate. */
+  cloudTurnPresentations?: Record<string, import("./cloud-turn-presentation").CloudTurnPresentation>;
   /** Renderer-owned cloud FIFO readiness; Local sessions never set it. */
   cloudSendWait?: { state: "waiting" | "failed"; phase?: "sending" | "starting-workspace"; message?: string; turnId?: string; startedAt?: number };
   /** Native dispatch is pending; only an exact accepted turn starts its clock. */
   cloudPromptPending?: boolean;
   /** Explicit cloud Stop remains owned until the exact command has a terminal
    * receipt. Transport loss and a paused queue acknowledgement cannot clear it. */
-  cloudStop?: { operationId: string; turnId: string | null; state: "pending" | "unconfirmed" };
+  cloudStop?: { operationId: string; turnId: string | null; state: "pending" | "unconfirmed" | "failed"; requestedAt?: number; preparing?: boolean };
   /** Stop preserves follow-ups until the next explicit send resumes FIFO. */
   queuePaused?: boolean;
   /** The provider resumed into an empty conversation; carry visible context on
@@ -155,10 +157,14 @@ export interface AgentSessionState {
    *  `loading` is an explicit cold-read state so an empty array can never be
    *  mistaken for a genuinely new chat while SQLite is being rehydrated. */
   transcriptState: "resident" | "cold" | "loading";
-  /** A Local cached window may paint while authoritative hydration is
+  /** A cached window may paint while authoritative hydration is
    * pending. It never grants admission, completes a turn or drains a queue.
    * `empty`: a Local chat known to be empty paints its empty state. */
   transcriptPresentation: { source: "cache"; empty?: true } | null;
+  /** Renderer-only provenance for mirror catch-up; never execution authority. */
+  transcriptSource?: "worker" | "control-plane";
+  /** Original content signatures for shortened provisional worker rows. */
+  transcriptContentSignatures?: Record<string, string>;
   /** A durable transcript update arrived while the payload was cold/loading.
    *  Raw streaming deltas are deliberately not folded into an empty array;
    *  reopening performs an exact SQLite window read instead. */
@@ -291,6 +297,8 @@ export interface AgentSessionControls {
     cloudQueue?: import("./sessions-context").CloudQueuedPrompt,
     wakeIntent?: import("../../state/cloud-workspace-wake").CloudWorkspaceWakeIntent,
     followUpBehavior?: import("../settings/follow-up-behavior").FollowUpBehavior,
+    /** Durable cloud journal committed and its bubble published; not HTTPS acceptance. */
+    onCommitted?: () => void,
   ): Promise<void>;
   /** Cancel the in-flight prompt (if any). */
   cancel(): Promise<void>;

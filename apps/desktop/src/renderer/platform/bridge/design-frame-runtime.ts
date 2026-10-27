@@ -39,6 +39,8 @@ import {
   type DesignRuntimeStyleUpdate,
   type DesignRuntimeLayoutPreview,
 } from "@zeros/protocol/design-runtime";
+import { designCaptureScheduler, type DesignCapturePriority } from "./design-capture-scheduler";
+import { withNativeDesignCaptureAdmission } from "./design-native-capture-admission";
 
 const DEFAULT_REQUEST_TIMEOUT_MS = 5_000;
 const SCREENSHOT_REQUEST_TIMEOUT_MS = 12_000;
@@ -54,6 +56,8 @@ interface PendingRequest {
   timeout: number;
   signal?: AbortSignal;
   abort?: () => void;
+  capture?: boolean;
+  cancellation?: Error;
 }
 
 export interface DesignFrameRuntimeCallbacks {
@@ -177,13 +181,17 @@ export interface DesignFrameRuntimeConnection {
     nodeId?: string | null,
     scale?: number,
     signal?: AbortSignal,
+    priority?: DesignCapturePriority,
   ): Promise<DesignRuntimeScreenshot>;
   captureViewportScreenshot(
     crop: DesignRuntimeRect,
     outputSize: { width: number; height: number },
     signal?: AbortSignal,
+    priority?: DesignCapturePriority,
   ): Promise<DesignRuntimeScreenshot>;
-  destroy(): void;
+  cancelCaptures?(): void;
+  /** true only after the iframe document was actually removed/navigated. */
+  destroy(documentDisposed?: boolean): void;
 }
 
 let requestSequence = 0;
@@ -370,6 +378,8 @@ class DesignRuntimeConnectionImpl implements DesignFrameRuntimeConnection {
   private expectedSourceVersion: string;
   private generationTransition: Promise<void> | null = null;
   private methods: ReadonlySet<DesignRuntimeMethod> | null = null;
+  private captureCompletion = false;
+  private captureLifetime = new AbortController();
 
   constructor(
     source: MessageEventSource,
@@ -412,8 +422,8 @@ class DesignRuntimeConnectionImpl implements DesignFrameRuntimeConnection {
   };
 
   receive(message: DesignRuntimeFrameMessage): void {
-    if (this.destroyed) return;
     if (message.type === "event") {
+      if (this.destroyed) return;
       if (message.event === "ready") {
         if (
           message.payload.sourceVersion !== this.expectedSourceVersion ||
@@ -425,6 +435,7 @@ class DesignRuntimeConnectionImpl implements DesignFrameRuntimeConnection {
           return;
         }
         this.methods = new Set(message.payload.capabilities.methods);
+        this.captureCompletion = message.payload.capabilities.captureCompletion === true;
         this.callbacks.onReady?.(message.payload.capabilities);
         this.callbacks.onSnapshot?.(message.payload.snapshot, "ready");
       } else if (message.event === "playbackStopped") {
@@ -446,7 +457,9 @@ class DesignRuntimeConnectionImpl implements DesignFrameRuntimeConnection {
     if (pending.signal && pending.abort) {
       pending.signal.removeEventListener("abort", pending.abort);
     }
-    if (message.ok) {
+    if (pending.cancellation) {
+      pending.reject(pending.cancellation);
+    } else if (message.ok) {
       pending.resolve(message.result);
     } else {
       pending.reject(
@@ -457,6 +470,7 @@ class DesignRuntimeConnectionImpl implements DesignFrameRuntimeConnection {
         ),
       );
     }
+    this.closeRetiredPort();
   }
 
   private cancel(requestId: string): void {
@@ -528,6 +542,13 @@ class DesignRuntimeConnectionImpl implements DesignFrameRuntimeConnection {
         ? () => {
             const pending = this.pending.get(requestId);
             if (!pending) return;
+            if (pending.capture) {
+              pending.cancellation = runtimeError("request cancelled", "CANCELLED", false);
+              // Legacy runtimes suppress cancelled replies. Let their already
+              // bounded capture finish; retain admission until response/disposal.
+              if (this.captureCompletion) this.cancel(requestId);
+              return;
+            }
             this.pending.delete(requestId);
             this.host.clearTimeout(timeout);
             this.cancel(requestId);
@@ -536,6 +557,12 @@ class DesignRuntimeConnectionImpl implements DesignFrameRuntimeConnection {
         : undefined;
       const timeout = this.host.setTimeout(
         () => {
+          const pending = this.pending.get(requestId);
+          if (pending?.capture) {
+            pending.cancellation ??= runtimeError(`${method} timed out`);
+            if (this.captureCompletion) this.cancel(requestId);
+            return;
+          }
           if (!this.pending.delete(requestId)) return;
           if (signal && abort) signal.removeEventListener("abort", abort);
           this.cancel(requestId);
@@ -549,6 +576,7 @@ class DesignRuntimeConnectionImpl implements DesignFrameRuntimeConnection {
         resolve,
         reject,
         timeout,
+        ...(method === "captureScreenshot" ? { capture: true } : {}),
         ...(signal ? { signal } : {}),
         ...(abort ? { abort } : {}),
       });
@@ -942,15 +970,12 @@ class DesignRuntimeConnectionImpl implements DesignFrameRuntimeConnection {
     nodeId: string | null = null,
     scale = 1,
     signal?: AbortSignal,
+    priority: DesignCapturePriority = "explicit",
   ): Promise<DesignRuntimeScreenshot> {
-    const result = await this.request(
-      "captureScreenshot",
-      {
+    const result = await this.capture({
         ...(nodeId ? { nodeId } : {}),
         scale,
-      },
-      signal,
-    );
+      }, signal, priority);
     if (
       !isRuntimeScreenshot(result) ||
       result.sourceVersion !== this.expectedSourceVersion
@@ -964,12 +989,9 @@ class DesignRuntimeConnectionImpl implements DesignFrameRuntimeConnection {
     crop: DesignRuntimeRect,
     outputSize: { width: number; height: number },
     signal?: AbortSignal,
+    priority: DesignCapturePriority = "detail",
   ): Promise<DesignRuntimeScreenshot> {
-    const result = await this.request(
-      "captureScreenshot",
-      { crop, outputSize },
-      signal,
-    );
+    const result = await this.capture({ crop, outputSize }, signal, priority);
     if (
       !isRuntimeScreenshot(result) ||
       result.sourceVersion !== this.expectedSourceVersion
@@ -979,26 +1001,58 @@ class DesignRuntimeConnectionImpl implements DesignFrameRuntimeConnection {
     return result;
   }
 
-  destroy(): void {
-    if (this.destroyed) return;
+  private capture(args: Record<string, unknown>, signal: AbortSignal | undefined, priority: DesignCapturePriority): Promise<unknown> {
+    const sourceVersion = this.expectedSourceVersion;
+    const lifetime = this.captureLifetime.signal;
+    return designCaptureScheduler.schedule(
+      JSON.stringify([this.captureKey, sourceVersion, args]), priority,
+      (admitted) => withNativeDesignCaptureAdmission(admitted, priority === "explicit", async () => {
+        // Adoption can complete while this request waits for capture admission.
+        await this.generationTransition;
+        if (!this.isActive() || this.expectedSourceVersion !== sourceVersion)
+          throw runtimeError("capture owner retired", "CANCELLED");
+        return this.request("captureScreenshot", args, admitted);
+      }), AbortSignal.any([lifetime, ...(signal ? [signal] : [])]),
+    );
+  }
+
+  private readonly captureKey = ++requestSequence;
+
+  cancelCaptures(): void {
+    this.captureLifetime.abort(runtimeError("capture owner retired", "CANCELLED"));
+    this.captureLifetime = new AbortController();
+  }
+
+  private closeRetiredPort(): void {
+    if (!this.destroyed || this.pending.size) return;
+    this.channel.port1.removeEventListener("message", this.handleMessage);
+    this.channel.port1.close();
+  }
+
+  destroy(documentDisposed = false): void {
+    if (this.destroyed && !documentDisposed) return;
+    if (!this.destroyed) this.cancelCaptures();
     const teardown: DesignRuntimeHostTeardown = {
       protocol: DESIGN_RUNTIME_PROTOCOL,
       version: DESIGN_RUNTIME_VERSION,
       type: "teardown",
       sourceVersion: this.expectedSourceVersion,
     };
-    this.channel.port1.postMessage(teardown);
+    if (!this.destroyed) this.channel.port1.postMessage(teardown);
     this.destroyed = true;
-    this.channel.port1.removeEventListener("message", this.handleMessage);
-    this.channel.port1.close();
-    for (const pending of this.pending.values()) {
+    for (const [id, pending] of this.pending) {
       this.host.clearTimeout(pending.timeout);
       if (pending.signal && pending.abort) {
         pending.signal.removeEventListener("abort", pending.abort);
       }
-      pending.reject(runtimeError("disconnected"));
+      if (pending.capture && !documentDisposed) {
+        pending.cancellation ??= runtimeError("disconnected");
+      } else {
+        pending.reject(runtimeError("disconnected"));
+        this.pending.delete(id);
+      }
     }
-    this.pending.clear();
+    this.closeRetiredPort();
   }
 }
 
@@ -1046,14 +1100,14 @@ export function connectDesignFrameRuntime(
   // buffered document available until its replacement has actually connected.
   connectingByFrame.set(key, connection);
   const destroy = connection.destroy.bind(connection);
-  connection.destroy = () => {
+  connection.destroy = (documentDisposed = false) => {
     if (connectionsByFrame.get(key) === connection) {
       connectionsByFrame.delete(key);
     }
     if (connectingByFrame.get(key) === connection) {
       connectingByFrame.delete(key);
     }
-    destroy();
+    destroy(documentDisposed);
   };
   return connection;
 }

@@ -14,6 +14,8 @@ import { lastUserPrompt } from "../auth-prompt-recovery";
 import { classifyRpcError } from "../../../platform/bridge/failure";
 import { cloudPromptHasLegacyActivity } from "../cloud-prompt-presentation";
 import { canSwitchPristineChat } from "../pristine-chat";
+import { agentActivity } from "../agent-activity";
+import { cloudPresentationRunning, definitiveCloudStopFailure } from "../cloud-turn-presentation";
 
 const CHAT = "11111111-1111-4111-8111-111111111111";
 const CLOUD = "cloud://22222222-2222-4222-8222-222222222222/33333333-3333-4333-8333-333333333333";
@@ -58,9 +60,21 @@ function findComposer(node: ts.Node) {
 findComposer(chatAst);
 expect(composerExpression).not.toBe("");
 function showsStop(session: AgentSessionState) {
-  return vm.runInNewContext(composerExpression, { session, isCloudWorkspace,
+  return vm.runInNewContext(composerExpression, { session, isCloudWorkspace, cloudPresentationRunning,
     composerShowsStopControl: lifecycle.composerShowsStopControl,
     backgroundContinuationActive: false, pendingLocalTurnId: null, planReview: null });
+}
+const storeFile = new URL("../sessions-store.ts", import.meta.url);
+const storeAst = ts.createSourceFile(storeFile.pathname, readFileSync(storeFile, "utf8"), ts.ScriptTarget.Latest, true);
+const streamingHook = storeAst.statements.find(node => ts.isFunctionDeclaration(node) && node.name?.text === "useChatStreaming")!;
+const streamingCode = ts.transpileModule(`${streamingHook.getText(storeAst).replace(/^export /, "")}; globalThis.read = useChatStreaming;`, {
+  compilerOptions: { target: ts.ScriptTarget.ES2022 },
+}).outputText;
+function pillStreaming(chatId: string) {
+  const context = vm.createContext({ cloudPresentationRunning,
+    useSessionsStore: (select: (state: ReturnType<typeof useSessionsStore.getState>) => boolean) => select(useSessionsStore.getState()) });
+  vm.runInContext(streamingCode, context);
+  return (context.read as (id: string) => boolean)(chatId);
 }
 
 function deferred() {
@@ -90,7 +104,7 @@ function harness(cwd = CLOUD, chat = CHAT) {
   const account = { value: 1 };
   const context = vm.createContext({
     cloudPrompts: { available: () => false }, migrateCloudSends: vi.fn(async () => {}),
-    ...lifecycle, cloudPromptHasLegacyActivity, isCloudWorkspace, parseCloudScopedId, parseCloudWorkspaceKey, cloudScopedId, hasBackgroundAgentWork, loadedBackgroundTaskState, agentSessionHasActiveWork,
+    ...lifecycle, cloudPromptHasLegacyActivity, definitiveCloudStopFailure, isCloudWorkspace, parseCloudScopedId, parseCloudWorkspaceKey, cloudScopedId, hasBackgroundAgentWork, loadedBackgroundTaskState, agentSessionHasActiveWork,
     WorkspaceRuntimeClient: RecoveryBridge, lastUserPrompt, classifyRpcError, Error,
     reconcileChatMessagesRef: { current: reconcile },
     closeActivityForSession, closeRouteForSession, invalidateTranscriptRequest, canSwitchPristineChat, BLANK,
@@ -128,6 +142,39 @@ function harness(cwd = CLOUD, chat = CHAT) {
 afterEach(() => {
   useSessionsStore.setState({ sessions: {}, executionToChatId: {}, pendingLocalTurns: {}, cancellingChats: new Set() });
   vi.restoreAllMocks();
+});
+
+it("restores the exact durable turn if Stop preparation fails before its request", async () => {
+  const h = harness(), migration = deferred(), stop = vi.fn(async () => true);
+  h.context.cloudPrompts = { available: () => true, stop };
+  h.context.migrateCloudSends = () => migration.promise;
+  const result = h.cancel().then(() => true, () => false);
+  expect(showsStop(h.slot())).toBe(false);
+  migration.reject(new Error("Private message storage is unavailable"));
+  expect(await result).toBe(true);
+  expect(h.slot().cloudStop?.state).toBe("failed");
+  expect(showsStop(h.slot())).toBe(true);
+  expect(stop).not.toHaveBeenCalled();
+});
+
+it("fences a failed Stop preparation across an account change and return", async () => {
+  const h = harness(), migration = deferred();
+  h.context.cloudPrompts = { available: () => true, stop: vi.fn(async () => true) };
+  h.context.migrateCloudSends = () => migration.promise;
+  const result = h.cancel().catch(() => {}), before = h.slot();
+  h.account.value += 2; migration.reject(new Error("Private message storage is unavailable"));
+  await result;
+  expect(h.slot()).toBe(before);
+});
+
+it.each([CLOUD, "/personal/project", "/organization/project"])("stops the %s transcript-pill spinner with the same immediate presentation", async cwd => {
+  const h = harness(cwd);
+  expect(pillStreaming(CHAT)).toBe(true);
+  const stopping = h.cancel();
+  expect(pillStreaming(CHAT)).toBe(false);
+  h.gate.resolve({ type: "WORKSPACE_RESPONSE", result: { conversationId: CHAT,
+    commandId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", state: "cancelled" } });
+  await stopping;
 });
 
 describe("untouched cloud view retirement", () => {
@@ -368,19 +415,33 @@ describe("cloud Stop renderer lifetime", () => {
     expect(h.slot()).toBeDefined(); expect(h.bridge.request).toHaveBeenCalledOnce();
     h.gate.resolve({ type: "AGENT_SESSION_CLOSED", agentId: "codex", chatId: CHAT, executionId: "execution-1", sessionId: "execution-1" }); expect(await closing).toBe(true); expect(h.slot()).toBeUndefined();
   });
-  it("retains the active turn and Stop control until exact retirement is confirmed", async () => {
+  it("stops presentation immediately while retaining the exact retirement and queue fences", async () => {
     const h = harness();
     const pending = h.cancel();
     expect(h.bridge.request).toHaveBeenCalledOnce();
     expect(h.slot().activeTurnStartedAt).toBe(42);
     expect(h.slot().lastStopReason).not.toBe("cancelled");
     expect(agentSessionHasActiveWork(h.slot(), null)).toBe(true);
+    expect(agentActivity(h.slot(), null)).toBeNull();
+    expect(showsStop(h.slot())).toBe(false);
     expect(h.slot().queuePaused).toBe(true);
     expect(h.sendQueueRef.current.get(CHAT)).toEqual([h.followUp]);
     h.gate.resolve({ type: "WORKSPACE_RESPONSE", result: { conversationId: CHAT, commandId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", state: "cancelled" } });
     await pending;
     expect(h.slot().status).toBe("ready");
     expect(h.slot().activeTurnStartedAt).toBeNull();
+  });
+
+  it("returns the durable composer to Send before migration, journal or HTTPS can finish", async () => {
+    const h = harness(), migration = deferred(), stop = vi.fn(() => h.gate.promise);
+    useSessionsStore.getState().patchSession(CHAT, { cloudOutbox: { rows: [], states: { "turn-1": "accepted" }, waiting: false, activeId: "turn-1", pendingCount: 1 } });
+    h.context.cloudPrompts = { available: () => true, stop };
+    h.context.migrateCloudSends = () => migration.promise;
+    const pending = h.cancel();
+    const immediate = { activity: agentActivity(h.slot(), null), stop: showsStop(h.slot()) };
+    expect(stop).not.toHaveBeenCalled();
+    migration.resolve(); h.gate.resolve(true); await pending;
+    expect(immediate).toEqual({ activity: null, stop: false });
   });
 
   it("joins a repeated click to the same pending Stop operation", async () => {
@@ -412,7 +473,7 @@ describe("cloud Stop renderer lifetime", () => {
     else store.applyBridgeUpdate({ sessionId: "execution-1", update: { sessionUpdate: "turn_state", turnId: "turn-1", state: "running", startedAt: 42 } });
     expect(h.slot().cloudStop).toBe(original);
     expect(h.slot().error).toBe(error); expect(h.slot().failure).toBe(failure);
-    expect(showsStop(h.slot())).toBe(true);
+    expect(showsStop(h.slot())).toBe(false);
   });
 
   it("keeps a real turn failure when the Stop observer confirms its terminal receipt", async () => {
@@ -506,7 +567,7 @@ describe("cloud Stop renderer lifetime", () => {
       expect(h.slot().foregroundTurnId).toBe("turn-1");
       expect(h.slot().executionId).toBe("execution-1");
       expect(h.slot().activeTurnStartedAt).toBe(42);
-      expect(showsStop(h.slot())).toBe(true);
+      expect(showsStop(h.slot())).toBe(false);
     } finally {
       h.gate.resolve({ type: "WORKSPACE_RESPONSE", result: { conversationId: CHAT, commandId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", state: "cancelled" } });
       await pending;
@@ -546,27 +607,68 @@ describe("cloud Stop renderer lifetime", () => {
     expect(h.slot().cloudStop).toBeUndefined();
   });
 
-  it("keeps the Stop clock until retirement despite a terminal turn event", async () => {
+  it("retains the retirement clock while the presented Stop clock is already frozen", async () => {
     const h = harness(), pending = h.cancel(), store = useSessionsStore.getState();
+    const endedAt = h.slot().cloudTurnPresentations?.["turn-1"]?.endedAt;
     store.applyBridgeUpdate({ sessionId: "execution-1", update: { sessionUpdate: "turn_state", turnId: "turn-1", state: "cancelled", startedAt: 42 } });
     expect(h.slot().activeTurnStartedAt).toBe(42);
-    expect(showsStop(h.slot())).toBe(true);
+    expect(showsStop(h.slot())).toBe(false);
+    expect(h.slot().cloudTurnPresentations?.["turn-1"]?.endedAt).toBe(endedAt);
     h.gate.resolve({ type: "WORKSPACE_RESPONSE", result: { conversationId: CHAT, commandId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", state: "cancelled" } }); await pending;
     expect(h.slot().activeTurnStartedAt).toBeNull(); expect(h.slot().cloudStop).toBeUndefined();
   });
 
-  it("keeps Stop visible while a reconnect snapshot and a waiting follow-up arrive", async () => {
+  it("retains cancellation authority without reviving Stop while reconnect and a waiting follow-up arrive", async () => {
     const h = harness(), pending = h.cancel();
     useSessionsStore.getState().patchSession(CHAT, { status: "ready", activeTurnStartedAt: null,
       cloudPromptPending: true, cloudSendWait: { state: "waiting", turnId: "follow-up" } });
-    expect(showsStop(h.slot())).toBe(true);
+    expect(showsStop(h.slot())).toBe(false);
     expect(agentSessionHasActiveWork(h.slot(), null)).toBe(true);
     h.gate.resolve({ type: "WORKSPACE_RESPONSE", result: { conversationId: CHAT, commandId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", state: "cancelled" } }); await pending;
   });
 
+  it("restores the same turn's running presentation after a definitive Stop refusal", async () => {
+    const h = harness(), pending = h.cancel();
+    expect(showsStop(h.slot())).toBe(false);
+    h.gate.reject(Object.assign(new Error("synthetic refusal"), { status: 403 })); await pending;
+    expect(showsStop(h.slot())).toBe(true);
+    expect(agentActivity(h.slot())).toBe("running");
+    expect(h.slot().cloudStop?.state).toBe("failed");
+    expect(h.slot().error).toContain("Stop");
+    expect(h.slot().queuePaused).toBe(true);
+  });
+
+  it("keeps old stopped content reconcilable without reviving its clock, then starts a successor normally", async () => {
+    const h = harness(), pending = h.cancel(), store = useSessionsStore.getState();
+    const ending = h.slot().cloudTurnPresentations?.["turn-1"];
+    store.applyBridgeUpdate({ sessionId: "execution-1", update: { sessionUpdate: "turn_state", turnId: "turn-1", state: "running", startedAt: 42 } });
+    store.applyBridgeUpdate({ sessionId: "execution-1", update: { sessionUpdate: "agent_message_chunk", messageId: "late",
+      content: { type: "text", text: "Already received output" } } });
+    expect(h.slot().messages.some(message => message.kind === "text" && message.text === "Already received output")).toBe(true);
+    expect(h.slot().cloudTurnPresentations?.["turn-1"]).toBe(ending);
+    expect(showsStop(h.slot())).toBe(false);
+    store.applyBridgeUpdate({ sessionId: "execution-1", update: { sessionUpdate: "turn_state", turnId: "turn-2", state: "running", startedAt: 84 } });
+    expect(showsStop(h.slot())).toBe(true);
+    h.gate.reject(Object.assign(new Error("old refusal"), { status: 403 })); await pending;
+    expect(h.slot()).toMatchObject({ foregroundTurnId: "turn-2", activeTurnStartedAt: 84, error: null });
+    expect(h.slot().cloudTurnPresentations?.["turn-1"]).toBe(ending);
+  });
+
+  it("fences a deferred Stop refusal across account A to B to A", async () => {
+    const h = harness(), pending = h.cancel();
+    h.account.value += 2;
+    const current = h.slot();
+    h.gate.reject(Object.assign(new Error("stale refusal"), { status: 403 })); await pending;
+    expect(h.slot()).toBe(current);
+    expect(showsStop(h.slot())).toBe(false);
+  });
+
   it.each(["/personal/project", "/organization/project"])("retains Local cancellation for %s", async cwd => {
     const h = harness(cwd);
-    await h.cancel();
+    const cancelled = h.cancel();
+    expect(showsStop(h.slot())).toBe(false);
+    expect(h.slot().cloudTurnPresentations).toBeUndefined();
+    await cancelled;
     expect(h.bridge.send).toHaveBeenCalledOnce();
     expect(h.bridge.request).not.toHaveBeenCalled();
     expect(h.slot().status).toBe("ready");

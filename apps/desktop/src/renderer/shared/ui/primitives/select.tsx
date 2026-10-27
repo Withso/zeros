@@ -5,6 +5,7 @@ import { CheckIcon, ChevronDownIcon, ChevronUpIcon } from "lucide-react"
 import { Select as SelectPrimitive } from "radix-ui"
 
 import { cn } from "@/renderer/shared/ui/cn"
+import { ANCHORED_OVERLAY_MOTION } from "@/renderer/shared/ui/anchored-overlay-motion"
 import {
   MENU_ITEM_RADIUS,
   MENU_SEPARATOR,
@@ -24,6 +25,8 @@ interface SelectAnchorContextValue {
 }
 const SelectAnchorContext =
   React.createContext<SelectAnchorContextValue | null>(null)
+const useClientLayoutEffect =
+  typeof window === "undefined" ? React.useEffect : React.useLayoutEffect
 
 function Select({
   onOpenChange,
@@ -40,6 +43,11 @@ function Select({
   const [openState, setOpenState] = React.useState(defaultOpen ?? false)
   const open = openProp ?? openState
   const anchor = React.useMemo(() => ({ triggerRef, open }), [open])
+  // Navigation/owner changes can close a controlled Select without Radix's
+  // callback. Release its token so the next popup can announce native parking.
+  useClientLayoutEffect(() => {
+    publishOverlay(open)
+  }, [open, publishOverlay])
   return (
     <SelectAnchorContext.Provider value={anchor}>
       <SelectPrimitive.Root
@@ -112,6 +120,28 @@ const splitTriggerClassNames = {
   chevron:
     "inline-flex items-center justify-center border-l border-border3 px-1 text-fg2 outline-none transition-[color,background-color] enabled:hover:bg-bg2-highlight focus-visible:bg-bg2-highlight data-[state=open]:bg-bg2-highlight disabled:cursor-not-allowed disabled:opacity-50 [&_svg]:pointer-events-none [&_svg]:size-3.5 [&_svg]:shrink-0 [&_svg]:opacity-50",
 } as const
+
+/** Primary keeps the split geometry and independent segment hovers. Its
+ * opaque inset focus outline remains visible inside the clipped shell. */
+function splitTriggerClasses(
+  appearance: "secondary" | "primary" = "secondary",
+  size: "default" | "compact" = "default",
+) {
+  const classes = size === "compact"
+    ? {
+        ...splitTriggerClassNames,
+        shell: cn(splitTriggerClassNames.shell, "h-6"),
+        main: cn(splitTriggerClassNames.main, "py-0"),
+      }
+    : splitTriggerClassNames
+  if (appearance === "secondary") return classes
+  const focus = "focus-visible:outline-solid focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-highlighted-bright"
+  return {
+    shell: cn(classes.shell, "border-primary-button-bg bg-primary-button-bg hover:border-primary-button-bg has-[[data-state=open]]:border-primary-button-bg has-[:disabled]:hover:border-primary-button-bg"),
+    main: cn(classes.main, "text-primary-button-fg enabled:hover:bg-primary-button-hover focus-visible:bg-primary-button-hover", focus),
+    chevron: cn(classes.chevron, "text-primary-button-fg enabled:hover:bg-primary-button-hover focus-visible:bg-primary-button-hover data-[state=open]:bg-primary-button-hover", focus),
+  }
+}
 
 const SelectTrigger = React.forwardRef<
   HTMLButtonElement,
@@ -199,7 +229,8 @@ function SelectContent({
           onCloseAutoFocus?.(event)
         }}
         className={cn(
-          "relative z-dropdown max-h-(--radix-select-content-available-height) max-w-(--radix-select-content-available-width) min-w-[min(8rem,var(--radix-select-content-available-width))] origin-(--radix-select-content-transform-origin) overflow-x-hidden overflow-y-auto overscroll-contain border border-border2 bg-bg3 text-fg1 shadow-[var(--shadow-dropdown)] data-[side=bottom]:slide-in-from-top-2 data-[side=left]:slide-in-from-right-2 data-[side=right]:slide-in-from-left-2 data-[side=top]:slide-in-from-bottom-2 data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=closed]:zoom-out-95 data-[state=open]:animate-in data-[state=open]:fade-in-0 data-[state=open]:zoom-in-95",
+          ANCHORED_OVERLAY_MOTION,
+          "relative z-dropdown max-h-(--radix-select-content-available-height) max-w-(--radix-select-content-available-width) min-w-[min(8rem,var(--radix-select-content-available-width))] origin-(--radix-select-content-transform-origin) overflow-x-hidden overflow-y-auto overscroll-contain border border-border2 bg-bg3 text-fg1 shadow-[var(--shadow-dropdown)]",
           MENU_SURFACE_RADIUS,
           position === "popper" &&
             "data-[side=bottom]:translate-y-1 data-[side=left]:-translate-x-1 data-[side=right]:translate-x-1 data-[side=top]:-translate-y-1",
@@ -331,4 +362,5 @@ export {
   SelectValue,
   selectTriggerClassName,
   splitTriggerClassNames,
+  splitTriggerClasses,
 }

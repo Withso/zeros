@@ -15,6 +15,45 @@ import {
 const SOURCE_VERSION = "111111111111111111111111";
 const NEXT_SOURCE_VERSION = "222222222222222222222222";
 
+it("shares capture admission across frame ports and retains it through cancellation cleanup", async () => {
+  const peers = ["one", "two"].map((name) => {
+    const source = { postMessage: vi.fn() };
+    const connection = connectDesignFrameRuntime(`capture-${name}`, "home.html", SOURCE_VERSION,
+      { contentWindow: source } as unknown as HTMLIFrameElement, {},
+      { setTimeout: (work, ms) => setTimeout(work, ms) as unknown as number, clearTimeout: (id) => clearTimeout(id) });
+    const port = source.postMessage.mock.calls[0][1].transfer[0] as MessagePort;
+    const requests: Array<{ type: string; requestId: string; method?: string }> = [];
+    port.onmessage = ({ data }) => requests.push(data);
+    port.start();
+    port.postMessage({ protocol: DESIGN_RUNTIME_PROTOCOL, version: DESIGN_RUNTIME_VERSION, type: "event", event: "ready",
+      payload: { sourceVersion: SOURCE_VERSION, capabilities: { ...capabilities, captureCompletion: true }, snapshot: snapshot(1) } });
+    return { connection, port, requests };
+  });
+  const controller = new AbortController();
+  const [one, two] = peers;
+  let first: Promise<unknown> | undefined;
+  let second: Promise<unknown> | undefined;
+  try {
+    await vi.waitFor(() => expect(peers.every(({ connection }) => connection.supports("captureScreenshot"))).toBe(true));
+    first = one!.connection.captureScreenshot(null, 1, controller.signal).catch((error: unknown) => error);
+    await vi.waitFor(() => expect(one!.requests.some((request) => request.method === "captureScreenshot")).toBe(true));
+    second = two!.connection.captureScreenshot().catch((error: unknown) => error);
+    controller.abort();
+    await vi.waitFor(() => expect(one!.requests.some((request) => request.type === "cancel")).toBe(true));
+    expect(two!.requests.filter((request) => request.method === "captureScreenshot")).toHaveLength(0);
+    const active = one!.requests.find((request) => request.method === "captureScreenshot")!;
+    one!.port.postMessage({ protocol: DESIGN_RUNTIME_PROTOCOL, version: DESIGN_RUNTIME_VERSION, type: "response", requestId: active.requestId,
+      ok: false, error: { code: "CANCELLED", message: "cleanup complete", retryable: false } });
+    await vi.waitFor(() => expect(two!.requests.filter((request) => request.method === "captureScreenshot")).toHaveLength(1));
+    expect(await first).toMatchObject({ code: "CANCELLED" });
+  } finally {
+    peers.forEach(({ connection, port }) => { connection.destroy(true); port.close(); });
+    await first;
+    // The second document is disposed by the test harness, with no real work.
+    void second;
+  }
+});
+
 const capabilities = {
   methods: [
     "getSnapshot",

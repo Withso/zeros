@@ -521,7 +521,7 @@ export function ChangesDiffViewer({
               ))}
             </div>
             <Tooltip
-              label={allCollapsed ? "Expand all diffs" : "Collapse all diffs"}
+              label={allCollapsed ? "Expand all" : "Collapse all"}
             >
               <Button
                 variant="ghost"
@@ -544,8 +544,8 @@ export function ChangesDiffViewer({
             <Tooltip
               label={
                 presentation === "all"
-                  ? "Show one file at a time"
-                  : "Show all file diffs"
+                  ? "Single file"
+                  : "All files"
               }
             >
               <Button
@@ -825,7 +825,7 @@ function ChangesDiffHeader({
           Resolve conflicts
         </Button>
       )}
-      <Tooltip label="Copy file contents">
+      <Tooltip label="Copy file">
         <Button
           size="icon-sm"
           variant="ghost"

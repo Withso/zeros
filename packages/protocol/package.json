@@ -6,6 +6,7 @@
   "description": "Shared Zeros bridge protocol \u2014 wire types, Zod schemas, protocol versioning, crypto seams, and transport-agnostic runtime primitives consumed across desktop renderer, Electron, and engine process boundaries.",
   "type": "module",
   "exports": {
+    "./mcp-secrets": "./src/mcp-secrets.ts",
     "./design-relocation": "./src/design-relocation.ts",
     "./cloud-runtime-connection": "./src/cloud-runtime-connection.ts",
     "./composer-mode": "./src/composer-mode.ts",
@@ -14,6 +15,7 @@
     ".": "./src/index.ts",
     "./messages": "./src/messages.ts",
     "./model-context": "./src/model-context.ts",
+    "./context-usage": "./src/context-usage.ts",
     "./model-rejection": "./src/model-rejection.ts",
     "./agent-extensions": "./src/agent-extensions.ts",
     "./provider-auth": "./src/provider-auth.ts",
@@ -21,8 +23,10 @@
     "./agent-events": "./src/agent-events.ts",
     "./builtin-commands": "./src/builtin-commands.ts",
     "./agent-messages": "./src/agent-messages.ts",
+    "./conversation-replay": "./src/conversation-replay.ts",
     "./claude-startup-notice": "./src/claude-startup-notice.ts",
     "./design-runtime": "./src/design-runtime.ts",
+    "./design-surface": "./src/design-surface.ts",
     "./design-context": "./src/design-context.ts",
     "./design-path": "./src/design-path.ts",
     "./design-pages": "./src/design-pages.ts",
@@ -35,6 +39,8 @@
     "./schemas": "./src/schemas.ts",
     "./github-auth": "./src/github-auth.ts",
     "./github-review": "./src/github-review.ts",
+    "./turns": "./src/turns.ts",
+    "./turn-attribution": "./src/turn-attribution.ts",
     "./changes-history": "./src/changes-history.ts",
     "./code-review": "./src/code-review.ts",
     "./git-review-actions": "./src/git-review-actions.ts",
@@ -67,7 +73,7 @@
     "@noble/ciphers": "^2.2.0",
     "@noble/curves": "^2.2.0",
     "@noble/hashes": "^2.2.0",
-    "zod": "^4.3.6"
+    "zod": "^4.6.7"
   },
   "devDependencies": {
     "jose": "^6.0.0",

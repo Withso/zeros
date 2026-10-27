@@ -4,7 +4,9 @@ import { tmpdir } from "node:os";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { AgentTextMessage } from "@zeros/protocol/agent-messages";
 import type { CloudV2MessageRow } from "@zeros/protocol/cloud-v2-relay";
-import { SessionStore } from "../session-store";
+import { CloudV2HistoryFrameSchema } from "@zeros/protocol/cloud-v2-relay";
+import type { TurnInfo } from "@zeros/protocol/turns";
+import { recordUser, SessionStore } from "../session-store";
 
 const workspace = "cloud://11111111-1111-4111-8111-111111111111/22222222-2222-4222-8222-222222222222";
 const directories: string[] = [];
@@ -26,8 +28,80 @@ const row = (id: string, role: "user" | "agent", extra: Partial<AgentTextMessage
   payload: JSON.stringify({ id, kind: "text", role, text: id, createdAt: 100, ...extra }),
 });
 const prompt = (id: string) => ({ requestId: id, userMessageId: `user-${id}`, prompt: [{ type: "text" as const, text: id }], startedAt: 100 });
+const runningTurn = (): TurnInfo => ({ chatId: "chat", turnId: "user-one", folder: "/workspace",
+  workspaceId: "22222222-2222-4222-8222-222222222222", agentId: "codex", ord: 1, summary: "one",
+  startedAt: 100, endedAt: null, status: "running", stopReason: null, preSnapshot: "before", postSnapshot: null, files: [] });
 
 describe("durable per-chat sessions", () => {
+  it("mirrors wake-up status as a compatible text row and retains it through restart and repeated delivery", async () => {
+    const { store, directory } = await setup();
+    const notification = { sessionId: "exec", update: { sessionUpdate: "wakeup_notice" as const, noticeId: "native-wake", source: "schedule_wakeup" as const, reason: "Check deployment", scheduledFor: 1_800_000_017_000 } };
+    await store.fold("chat", notification);
+    const rows = store.window("chat").messages;
+    expect(rows).toHaveLength(1);
+    expect(CloudV2HistoryFrameSchema.safeParse({ t: "history", messages: { chatId: "chat", rows } }).success).toBe(true);
+    expect(JSON.parse(rows[0].payload)).toMatchObject({ kind: "text", role: "agent", phase: "commentary", wakeupNotice: { source: "schedule_wakeup", scheduledFor: 1_800_000_017_000 } });
+    await store.flush();
+    const reopened = await SessionStore.open(directory, workspace);
+    stores.push(reopened);
+    await reopened.fold("chat", notification);
+    expect(reopened.window("chat").messages).toEqual(rows);
+  });
+
+  it("advances mirrored summary stamps across same-clock completion, background edits and restart", async () => {
+    const clock = vi.spyOn(Date, "now").mockReturnValue(100);
+    const { directory, store } = await setup();
+    await store.enqueue("chat", prompt("one"));
+    await store.claim("chat");
+    const running = await store.saveTurn(runningTurn());
+    expect(running!.updatedAt).toBeGreaterThan(running!.createdAt);
+    const completed: TurnInfo = { ...runningTurn(), status: "completed", endedAt: 100, stopReason: "end_turn",
+      postSnapshot: "after", files: [{ path: "file.ts", status: "modified", additions: 2, deletions: 1 }] };
+    const final = await store.saveTurn(completed);
+    expect(final!.updatedAt).toBeGreaterThan(running!.updatedAt!);
+    expect((await store.saveTurn(completed))!.updatedAt).toBe(final!.updatedAt);
+    await store.finish("chat", "one", { stopReason: "end_turn" });
+    const reopened = await SessionStore.open(directory, workspace);
+    stores.push(reopened);
+    expect(reopened.snapshot("chat")!.messages[0]).toEqual(JSON.parse(JSON.stringify(final)));
+    clock.mockReturnValue(90);
+    const background = await reopened.saveTurn({ ...completed, files: [{ path: "file.ts", status: "modified", additions: 3, deletions: 1 }] });
+    expect(background!.updatedAt).toBeGreaterThan(final!.updatedAt!);
+    expect(JSON.parse(reopened.history("chat")[0].payload)).toMatchObject({ updatedAt: background!.updatedAt,
+      turnSummary: { files: [{ path: "file.ts", status: "modified", additions: 3, deletions: 1 }] } });
+  });
+
+  it("preserves worker summary freshness through repeated prompt recording", async () => {
+    const { store } = await setup();
+    await store.enqueue("chat", prompt("one"));
+    await store.claim("chat");
+    const saved = await store.saveTurn(runningTurn());
+    const draft = store.snapshot("chat")!;
+    // Also covers legacy worker rows without a stamp: replay must not invent one.
+    for (const updatedAt of [saved!.updatedAt, 101, undefined]) {
+      (draft.messages[0] as AgentTextMessage).updatedAt = updatedAt;
+      recordUser(draft, prompt("one"));
+      expect((draft.messages[0] as AgentTextMessage).updatedAt).toBe(updatedAt);
+      expect(JSON.parse(draft.rows[0].payload).updatedAt).toBe(updatedAt);
+      expect(draft.messages[0]).toMatchObject({ turnSummary: saved!.turnSummary });
+    }
+  });
+
+  it("keeps worker-owned summary stamps when older or newer imported prompts replace their content", async () => {
+    const { store } = await setup();
+    await store.enqueue("chat", prompt("one"));
+    await store.claim("chat");
+    const saved = await store.saveTurn(runningTurn());
+    for (const updatedAt of [1, Date.now() + 60_000, undefined]) {
+      await store.importMessages("chat", [row("user-one", "user", { updatedAt, text: "Imported prompt" })]);
+      const opening = store.snapshot("chat")!.messages[0] as AgentTextMessage;
+      expect(opening.updatedAt).toBe(saved!.updatedAt);
+      expect(opening.turnSummary).toEqual(saved!.turnSummary);
+      expect(opening.text).toBe("Imported prompt");
+      expect(JSON.parse(store.history("chat")[0].payload).updatedAt).toBe(saved!.updatedAt);
+    }
+  });
+
   it("retains and refuses corrupt outbox epochs instead of dispatching them after restart", async () => {
     const { directory, store } = await setup();
     await store.enqueue("chat", prompt("one"));

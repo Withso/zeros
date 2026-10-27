@@ -23,11 +23,16 @@ export type CloudRepositorySelection = CloudGithubRepository & {
 };
 const matches = (a: CloudRepositorySelection, b: CloudRepositorySelection) =>
   a.id === b.id;
+/** A repository chosen by its owner/name, which outlives a GitHub selection. */
+export type CloudRepositoryName = { owner: string; name: string };
 export function CloudRepositoryPicker({
   userId,
   organizationId,
-  value,
+  value = [],
   onChange,
+  isSelected,
+  onToggle,
+  label,
   multiple = false,
   disabled = false,
   active = true,
@@ -35,8 +40,13 @@ export function CloudRepositoryPicker({
 }: {
   userId: string;
   organizationId: string;
-  value: readonly CloudRepositorySelection[];
-  onChange(value: CloudRepositorySelection[]): void;
+  value?: readonly CloudRepositorySelection[];
+  onChange?(value: CloudRepositorySelection[]): void;
+  /** Name-based selection for lists stored by owner/name (Cloud Computer). */
+  isSelected?(repository: CloudRepositoryName): boolean;
+  onToggle?(repository: CloudRepositorySelection): void;
+  /** Trigger text; defaults to the selection count or name. */
+  label?: string;
   multiple?: boolean;
   disabled?: boolean;
   active?: boolean;
@@ -58,15 +68,20 @@ export function CloudRepositoryPicker({
     ) ?? [];
   const installation =
     connected.find((row) => row.id === installationId) ?? connected[0];
+  const selected = (repository: CloudRepositorySelection) =>
+    isSelected ? isSelected(repository) : value.some((row) => matches(row, repository));
   const select = (repository: CloudRepositorySelection) => {
-    if (multiple)
-      onChange(
+    if (onToggle) {
+      onToggle(repository);
+      if (!multiple) setOpen(false);
+    } else if (multiple)
+      onChange?.(
         value.some((row) => matches(row, repository))
           ? value.filter((row) => !matches(row, repository))
           : [...value, repository],
       );
     else {
-      onChange([repository]);
+      onChange?.([repository]);
       setOpen(false);
     }
   };
@@ -80,11 +95,12 @@ export function CloudRepositoryPicker({
           aria-label="Choose cloud repositories"
         >
           <span className="truncate">
-            {multiple
-              ? `${value.length} repositories selected`
-              : value[0]
-                ? `${value[0].owner}/${value[0].name}`
-                : "Choose repository"}
+            {label ??
+              (multiple
+                ? `${value.length} repositories selected`
+                : value[0]
+                  ? `${value[0].owner}/${value[0].name}`
+                  : "Choose repository")}
           </span>
           <ChevronDown className="size-3.5 shrink-0" />
         </Button>
@@ -134,7 +150,7 @@ export function CloudRepositoryPicker({
               userId={userId}
               organizationId={organizationId}
               installationId={installation.id}
-              value={value}
+              isSelected={selected}
               onSelect={select}
               active={active && open}
             />
@@ -165,14 +181,14 @@ function RepositoryPage({
   userId,
   organizationId,
   installationId,
-  value,
+  isSelected,
   onSelect,
   active,
 }: {
   userId: string;
   organizationId: string;
   installationId: string;
-  value: readonly CloudRepositorySelection[];
+  isSelected(value: CloudRepositorySelection): boolean;
   onSelect(value: CloudRepositorySelection): void;
   active: boolean;
 }) {
@@ -226,7 +242,7 @@ function RepositoryPage({
       >
         {repositories.map((row) => {
           const candidate = { ...row, installationId },
-            selected = value.some((item) => matches(item, candidate));
+            selected = isSelected(candidate);
           return (
             <Button
               key={row.id}

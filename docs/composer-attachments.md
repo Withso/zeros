@@ -119,6 +119,66 @@ remain compatible.
 
 ## Draft recovery and clipboard
 
+### Create before a workspace exists
+
+Create saves its text, editor document, attachment metadata and linked Local directories in
+`zeros:create-composer-drafts:v1`, separately for each owner, project and
+Local/cloud placement. Local belongs to this device; cloud owners include the
+backend, account and organization. A draft typed before choosing a project has
+an unselected-project scope. Selecting the first project adopts it only when
+that project has no existing draft. Switching projects or owners restores
+their own drafts. Explicit Local project removal and confirmed organization
+removal prune the matching scopes; a cold or failed catalog read does not.
+Model, effort and permission choices stay with the open Create page when
+switching projects and owners.
+Linked workspace pills belong to the scoped draft, survive project switches
+and reload, and count as unsent work even without text. Cloud Create offers
+attachments but not Local directory links, which its runtime cannot use.
+
+When Create is closed, its sidebar row shows the same 12 × 12 draft pencil as
+workspace tabs if the selected owner has any nonempty Create draft. It covers
+all of that owner's projects and placements, including reference-only and
+attachment-only drafts. Whitespace alone does not count. Opening Create hides
+the pencil; clearing the last draft or successfully handing it off removes it.
+Presence restores synchronously from the existing store and only empty/nonempty
+owner transitions notify the sidebar. It adds no persistence key or runtime read.
+
+Create snapshots attachment bytes into the existing device-side IndexedDB
+`zeros:attachment-sources:v1`, including files selected from disk. Its source
+ids keep those copies alive even while Create is unmounted. Neither selecting
+nor previewing an attachment creates `.context`, writes into the selected
+project, uploads to a server, or starts a cloud VM. The saved copy is independent
+of later changes to the original file. Normal quit waits for source preparation;
+force-quitting before that preparation commits can still require reattaching.
+
+On Create, the submitted revision and sources transfer to the new chat. Local
+delivery publishes files under `.context/attachments/<id>/<filename>` in the
+created workspace. Cloud v2's durable prompt outbox uploads portable bytes and
+the worker materializes them at `.context/local/attachments/<id>/<filename>`
+before agent dispatch. Its existing **8 MiB encoded prompt limit** still applies;
+the general 500 MB file-selection policy is not a cloud transport limit.
+The Create draft is consumed only after confirmed creation and complete chat
+draft persistence, and only if its submitted revision is still current. Failed
+creates, newer typing and a handoff that cannot be fully persisted keep their
+source draft. A delayed creation cannot navigate a different owner into its
+workspace.
+
+Draft metadata is bounded to 128 drafts, 1,000 attachments, 128 linked directories and 1 MB per draft,
+and 4 MB overall; these limits do not include file bytes. Exceeding a limit or
+device storage quota reports a save failure instead of evicting another unsent draft. Metadata
+writes debounce while typing and flush on pagehide, normal close and submission.
+
+Clicking an attachment opens a right-hand preview column. Markdown has Preview
+and Code segments that remain visible in both views; text reads are limited to
+the first 1 MB; images, audio and video
+use local Blob URLs and the browser's supported codecs. Binary documents,
+including PDF, offer a download when no safe in-app renderer is available.
+Markdown cannot execute scripts, style the app, or load remote media. Closing,
+removing the attachment, switching scope or hiding Create cancels stale preview
+results and releases its media URL. Removing a pill remains undoable.
+
+### Existing chats and clipboard
+
 Inactive chat tabs show a 12 × 12 pencil when their composer contains unsent
 text or attachments, or a saved message edit exists. Chats displayed in any
 split pane hide their pencils, including panes without focus. Inactive
@@ -172,6 +232,55 @@ Malformed or missing references cannot silently disappear from a send.
 Browser smoke coverage reloads a pending JSONL import through real IndexedDB,
 checks exact bytes, and exercises rich and HTML clipboard round trips and
 cross-workspace text fallbacks.
+
+## File references, skills and suggestions
+
+`@` mentions and skills reference their source files; they are not attachment
+copies. In Create, their open controls are disabled until a workspace exists.
+Removing a reference remains undoable. Reference controls never submit the
+Create form, and a form event without the explicit Create submitter is ignored;
+the editor's Enter shortcut has its own intentional submission path.
+
+Workspace composers open project references in the existing file-tab flow.
+Project skill paths are relative to the workspace, so a reference selected in
+Create follows the created worktree. Provider-library skills open in separate,
+read-only source tabs, deduplicated by workspace, provider and source path.
+Their complete Markdown source, including frontmatter, comes from discovery
+through that workspace's runtime. Cloud sources never fall back to the Mac's
+library. Older workers without skill discovery, virtual skills and unavailable
+sources cannot be opened. Relative links inside library source previews do not
+open unrelated workspace files.
+
+Selecting a skill inserts a pill with a 12px Book icon that retains its provider
+and source identity.
+If selected before discovery completes, an unknown source resolves only from
+that provider's catalog; an already captured source is never retargeted. Sending
+or copying plain text preserves `/skill-name`, without attachment bytes or a new
+prompt segment. Same-owner rich clipboard paste preserves the source reference;
+cross-owner paste keeps only its invocation text.
+
+Discovery checks project provider, shared `.agents/skills` and legacy `skills`
+directories before home libraries, including Codex's `skills/.system`. Local
+and VM scanners read bounded UTF-8 source through checked file descriptors,
+confine sources to their skill libraries, skip Git metadata and reject redirects
+outside the library. Each catalog scans at most 512 entries per root, accepts
+up to 256 skills, limits a source to 256 KiB and limits the serialized response
+to 2 MiB. The renderer shares exact workspace/provider reads, retains confirmed
+data on refresh failure and bounds inactive catalogs by count and byte weight.
+Cloud discovery waits for a running workspace and resumes when its lifecycle
+publishes that state; stopped or transitioning workspaces receive no background
+skill request from the composer.
+
+Slash suggestions work after whitespace anywhere in the draft, including after
+newlines and pills. URLs and slash-containing file paths do not open a command
+menu. In Create, both `@` and `/` menus follow the typed trigger and prefer the
+space beneath it. Workspace chat and message-edit menus open above the whole
+composer at its width. Both placements adjust to the viewport. They preserve editor focus, consume acceptance
+keys and dismiss with their editor when hidden or switched. IME confirmation
+does not accept a suggestion or send a message. Known commands use the warm
+primary text color; skills, arguments, paths and unknown commands stay distinct.
+Markdown attachments opened in workspace file tabs also label their source
+view Code alongside Preview.
 
 ## Native verification
 

@@ -44,6 +44,10 @@ their general method; those subsystems no longer exist.
    an admission-time global revision must not reject unrelated writes. Retain
    writer/actor fences and bound fresh reads after legacy image I/O, checking
    the original snapshot before persisting any rewritten rows.
+   For conversation reset, retire the exact chat's execution and detach its
+   durable native binding with the transcript cut. Test restart, Undo, late
+   provider/load results and stale renderer writes; gate engine-owned replay
+   by capability so older engines keep their existing replay path.
    For canonical history, drive production turn persistence and the original
    pinned redactor through queue settlement. Collide a configured literal and
    a one-character prefix with routing fields; filter content by record kind

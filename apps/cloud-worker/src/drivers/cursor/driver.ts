@@ -3,7 +3,7 @@ import { fileURLToPath } from "node:url";
 import type { SDKUserMessage } from "@cursor/sdk";
 import type { ContentBlock, PromptResponse, SessionNotification, TurnUsage } from "@zeros/protocol/agent-events";
 import type { SteerOutcome } from "@zeros/protocol/messages";
-import type { Driver, DriverOpen } from "../driver";
+import { redactDriverMessage, type Driver, type DriverOpen } from "../driver";
 import { driverTiming } from "../../agent-timings";
 import { agentEnvironment } from "../shared/agent-environment";
 import { normalizeProviderError } from "../shared/provider-error";
@@ -121,7 +121,7 @@ export class CursorDriver implements Driver {
     const opening = (async () => {
       try {
         const result = await host.request<{ nativeSessionId: string; version: string }>("open", {
-          cwd: input.cwd, nativeSessionId: this.nativeSessionId, model: this.model });
+          cwd: input.cwd, nativeSessionId: this.nativeSessionId, model: this.model, ...(input.mcpServers ? { mcpServers: input.mcpServers } : {}) });
         if (this.disposed || this.process !== host || result.version !== CURSOR_VERSION || typeof result.nativeSessionId !== "string" || !result.nativeSessionId ||
             (this.nativeSessionId && result.nativeSessionId !== this.nativeSessionId)) throw new Error("Cursor returned a different or closed native session.");
         this.nativeSessionId = result.nativeSessionId;
@@ -228,7 +228,7 @@ export class CursorDriver implements Driver {
     const native = normalizeProviderError("cursor", error);
     return Object.assign(new Error(this.redact(native.message)), { code: native.category });
   }
-  private redact(message: string): string { return this.input?.apiKey ? message.split(this.input.apiKey).join("[redacted]") : message; }
+  private redact(message: string): string { return redactDriverMessage(message, this.input); }
   private emit(event: SessionNotification): void {
     const clean = JSON.parse(JSON.stringify(event, (_key, value) => typeof value === "string" ? this.redact(value) : value)) as SessionNotification;
     for (const listener of this.listeners) listener(clean);

@@ -24,7 +24,11 @@ type HistoryInput = {
   chats?: readonly { id: string }[] | undefined; chatDeletions?: readonly string[] | undefined;
   messages?: { chatId: string; rows: readonly CloudV2MessageRow[] } | undefined;
 };
-export type CloudV2WorkerSession = CloudV2Workspace & { accessEpoch: string; loginRevision: string };
+export type CloudV2WorkerSession = CloudV2Workspace & {
+  accessEpoch: string; loginRevision: string;
+  /** Present only on the hello that actually changes a booting state to running. */
+  helloTiming?: { state: "creating" | "starting"; durationMs: number };
+};
 export type CloudV2AppGrant = { userId: string; accessEpoch: string; wake: boolean; sessionId: string | null };
 
 export type CloudV2Workspace = {
@@ -45,6 +49,27 @@ export type CloudV2Workspace = {
   updatedAt: string;
 };
 
+/** The last confirmed checkpoint; the key is still sealed. */
+export type CloudV2Checkpoint = { object: string; key: unknown; sha256: string; bytes: number; savedAt: string; stopGeneration: string | null };
+
+/** Internal lifecycle metadata is never included in public workspace documents. */
+export type CloudV2LifecycleWorkspace = CloudV2Workspace & {
+  leaseRenewedAt: string | null;
+  baseCommit: string | null;
+  checkpoint: CloudV2Checkpoint | null;
+  /** boat_sandbox_id is a replacement VM (or, while null, one being created)
+   * that the checkpoint has not been applied to yet. */
+  restorePending: boolean;
+  /** The identity and exact request a pending restore creates its replacement with. */
+  restoreAttempt: string | null;
+  restoreCreate: CloudV2RestoreCreate | null;
+  /** Which entry into stopping this is; a checkpoint belongs to one stop. */
+  stopGeneration: string;
+  /** The latest time an upload whose outcome is unknown could still land. */
+  checkpointUploadUntil: string | null;
+};
+export type CloudV2RestoreCreate = { from: string; name: string; env: Record<string, string>; requestedAt: string };
+
 type Row = {
   id: string; org_id: string; creator_user_id: string; name: string; repository: string; branch: string; base_branch: string;
   state: CloudV2WorkspaceState; boat_sandbox_id: string | null; computer_build_id: string | null;
@@ -53,6 +78,31 @@ type Row = {
 
 const COLUMNS = `id, org_id, creator_user_id, name, repository, branch, base_branch, state, boat_sandbox_id,
   computer_build_id, error_code, active_at, archived_at, created_at, updated_at`;
+
+type LifecycleRow = Row & {
+  lease_renewed_at: Date | null; base_commit: string | null; restore_pending: boolean; restore_attempt: string | null;
+  restore_create: CloudV2RestoreCreate | null; checkpoint_uploads: Record<string, string>;
+  stop_generation: string; checkpoint_stop_generation: string | null;
+  checkpoint_object: string | null; checkpoint_key: unknown; checkpoint_sha256: string | null; checkpoint_bytes: string | null; checkpoint_saved_at: Date | null;
+};
+const LIFECYCLE_COLUMNS = `${COLUMNS}, lease_renewed_at, base_commit, restore_pending, restore_attempt, restore_create, checkpoint_uploads,
+  stop_generation, checkpoint_stop_generation,
+  checkpoint_object, checkpoint_key, checkpoint_sha256, checkpoint_bytes, checkpoint_saved_at`;
+
+function uploadHorizon(uploads: Record<string, string>): string | null {
+  const latest = Math.max(...Object.values(uploads ?? {}).map(value => Date.parse(value)).filter(Number.isFinite));
+  return Number.isFinite(latest) ? new Date(latest).toISOString() : null;
+}
+
+function lifecycleWorkspace(row: LifecycleRow): CloudV2LifecycleWorkspace {
+  const checkpoint = row.checkpoint_object && row.checkpoint_sha256 && row.checkpoint_bytes && row.checkpoint_saved_at
+    ? { object: row.checkpoint_object, key: row.checkpoint_key, sha256: row.checkpoint_sha256, bytes: Number(row.checkpoint_bytes),
+        savedAt: row.checkpoint_saved_at.toISOString(), stopGeneration: row.checkpoint_stop_generation }
+    : null;
+  return { ...workspace(row), leaseRenewedAt: row.lease_renewed_at?.toISOString() ?? null, baseCommit: row.base_commit,
+    checkpoint, restorePending: row.restore_pending, restoreAttempt: row.restore_attempt, restoreCreate: row.restore_create,
+    stopGeneration: row.stop_generation, checkpointUploadUntil: uploadHorizon(row.checkpoint_uploads) };
+}
 
 function workspace(row: Row): CloudV2Workspace {
   return {
@@ -113,6 +163,17 @@ export class CloudV2Store {
       [input.organizationId, input.creatorUserId],
     );
     if (!member.rowCount) throw new HttpError(404, "not_found", "Organization not found");
+    if (input.computerBuildId) {
+      // Activation waits for this lock, so cleanup observes the new workspace
+      // pin before it can retire an inactive source snapshot.
+      const selected = await tx.query(
+        `SELECT 1 FROM cloud_v2_computers c
+         JOIN cloud_v2_computer_builds b ON b.id=c.active_build_id AND b.org_id=c.org_id
+         WHERE c.org_id=$1 AND c.active_build_id=$2 AND c.snapshot_name IS NOT NULL
+           AND b.state='succeeded' AND b.snapshot_id=c.snapshot_name AND b.snapshot_deleted_at IS NULL AND b.cleanup_requested_at IS NULL
+         FOR SHARE OF c,b`, [input.organizationId, input.computerBuildId]);
+      if (!selected.rowCount) throw new HttpError(409, "cloud_computer_changed", "The Cloud Computer changed. Create the workspace again.");
+    }
     const row = (await tx.query<Row>(
       `INSERT INTO cloud_v2_workspaces (id, org_id, creator_user_id, name, repository, branch, base_branch, state, computer_build_id)
        VALUES ($1, $2, $3, $4, $5, $6, $7, 'creating', $8) RETURNING ${COLUMNS}`,
@@ -185,6 +246,7 @@ export class CloudV2Store {
            next_attempt_at = CASE WHEN state <> $2 THEN NULL ELSE next_attempt_at END,
            worker_token_hash = CASE WHEN state <> $2 AND $2 = 'starting' THEN NULL ELSE worker_token_hash END,
            worker_boot_id = CASE WHEN state <> $2 AND $2 = 'starting' THEN NULL ELSE worker_boot_id END,
+           stop_generation = stop_generation + CASE WHEN state <> $2 AND $2 = 'stopping' THEN 1 ELSE 0 END,
            updated_at = clock_timestamp(),
            state = $2
          WHERE id = $1 RETURNING ${COLUMNS}`,
@@ -194,10 +256,14 @@ export class CloudV2Store {
     });
   }
 
-  /** Compare-and-set. Returns null when the workspace was not in `from`. */
+  /** Compare-and-set. Returns null when the workspace was not in `from`, or,
+   * with `stopGeneration`, when another stop has begun since. `revoke` drops
+   * the worker's credentials in the same transaction, only if it moved, so a
+   * late step can never revoke a worker that a newer wake started. */
   async transition(id: string, from: readonly CloudV2WorkspaceState[], to: CloudV2WorkspaceState,
-    patch: { boatSandboxId?: string | null; errorCode?: string | null } = {}): Promise<CloudV2Workspace | null> {
-    const { rows } = await withSystemTx(this.pool, tx => tx.query<Row>(
+    patch: { boatSandboxId?: string | null; errorCode?: string | null; stopGeneration?: string; revoke?: boolean } = {}): Promise<CloudV2Workspace | null> {
+    return withSystemTx(this.pool, async tx => {
+    const { rows } = await tx.query<Row>(
       `UPDATE cloud_v2_workspaces SET state = $3,
          boat_sandbox_id = CASE WHEN $4::boolean THEN $5 ELSE boat_sandbox_id END,
          error_code = CASE WHEN $6::boolean THEN $7 ELSE error_code END,
@@ -205,12 +271,25 @@ export class CloudV2Store {
          worker_boot_id = CASE WHEN $3 IN ('starting','deleted') THEN NULL ELSE worker_boot_id END,
          active_at = CASE WHEN $3 = 'running' THEN clock_timestamp() ELSE active_at END,
          archived_at = CASE WHEN $3 = 'starting' THEN NULL ELSE archived_at END,
+         stop_generation = stop_generation + CASE WHEN $3 = 'stopping' AND state <> 'stopping' THEN 1 ELSE 0 END,
+         checkpoint_object = CASE WHEN $3 = 'deleted' THEN NULL ELSE checkpoint_object END,
+         checkpoint_key = CASE WHEN $3 = 'deleted' THEN NULL ELSE checkpoint_key END,
+         checkpoint_sha256 = CASE WHEN $3 = 'deleted' THEN NULL ELSE checkpoint_sha256 END,
+         checkpoint_bytes = CASE WHEN $3 = 'deleted' THEN NULL ELSE checkpoint_bytes END,
+         checkpoint_saved_at = CASE WHEN $3 = 'deleted' THEN NULL ELSE checkpoint_saved_at END,
+         restore_pending = restore_pending AND $3 <> 'deleted',
          attempts = 0, next_attempt_at = NULL, updated_at = clock_timestamp()
-       WHERE id = $1 AND state = ANY($2::text[]) RETURNING ${COLUMNS}`,
+       WHERE id = $1 AND state = ANY($2::text[]) AND ($8::bigint IS NULL OR stop_generation = $8::bigint) RETURNING ${COLUMNS}`,
       [id, from, to, patch.boatSandboxId !== undefined, patch.boatSandboxId ?? null,
-        patch.errorCode !== undefined, patch.errorCode ?? null],
-    ));
-    return rows[0] ? workspace(rows[0]) : null;
+        patch.errorCode !== undefined, patch.errorCode ?? null, patch.stopGeneration ?? null],
+    );
+    if (!rows[0]) return null;
+    if (patch.revoke) {
+      await tx.query(`UPDATE cloud_v2_workspaces SET worker_token_hash = NULL, worker_boot_id = NULL WHERE id = $1`, [id]);
+      await tx.query(`DELETE FROM cloud_v2_tokens WHERE workspace_id = $1`, [id]);
+    }
+    return workspace(rows[0]);
+    });
   }
 
   /** The worker's identity. A deleted workspace has no token hash. */
@@ -258,17 +337,22 @@ export class CloudV2Store {
   }
 
   async acceptWorkerHello(token: string, bootId: string): Promise<CloudV2WorkerSession | null> {
-    const { rows } = await withSystemTx(this.pool, tx => tx.query<Row & { access_epoch: string; login_revision: string }>(
-      `UPDATE cloud_v2_workspaces w SET
+    const { rows } = await withSystemTx(this.pool, tx => tx.query<Row & { access_epoch: string; login_revision: string; prior_state: "creating" | "starting" | "running"; hello_ms: number }>(
+      `WITH prior AS MATERIALIZED (
+         SELECT id AS prior_id, state AS prior_state, updated_at AS prior_updated_at FROM cloud_v2_workspaces w
+         WHERE worker_token_hash=$1 AND state IN ('creating','starting','running') AND ${LIVE_ACCESS} FOR UPDATE)
+       UPDATE cloud_v2_workspaces w SET
          worker_history_sequence=CASE WHEN worker_boot_id=$2 THEN worker_history_sequence ELSE 0 END,
          worker_history_digest=CASE WHEN worker_boot_id=$2 THEN worker_history_digest ELSE NULL END,
          worker_boot_id=$2, state='running', attempts=0, next_attempt_at=NULL,
          active_at=CASE WHEN state='running' THEN active_at ELSE clock_timestamp() END,
          updated_at=CASE WHEN state='running' THEN updated_at ELSE clock_timestamp() END
-       WHERE worker_token_hash=$1 AND state IN ('creating','starting','running') AND ${LIVE_ACCESS}
-       RETURNING ${COLUMNS}, access_epoch::text, login_revision::text`, [hashCloudV2Token(token), bootId]));
+       FROM prior WHERE w.id=prior.prior_id
+       RETURNING ${COLUMNS.replace(/\b(\w+)\b/g, "w.$1")}, access_epoch::text, login_revision::text, prior.prior_state,
+         greatest(0, extract(epoch FROM (clock_timestamp()-prior.prior_updated_at))*1000)::float8 AS hello_ms`, [hashCloudV2Token(token), bootId]));
     const row = rows[0];
-    return row ? { ...workspace(row), accessEpoch: row.access_epoch, loginRevision: row.login_revision } : null;
+    return row ? { ...workspace(row), accessEpoch: row.access_epoch, loginRevision: row.login_revision,
+      ...(row.prior_state === "running" ? {} : { helloTiming: { state: row.prior_state, durationMs: Math.round(row.hello_ms) } }) } : null;
   }
 
   async workerSession(token: string, bootId: string): Promise<CloudV2WorkerSession | null> {
@@ -320,7 +404,7 @@ export class CloudV2Store {
 
   /** Recheck at the mutation, so a send between idle discovery and Stop wins. */
   async stopIdle(id: string, before: Date): Promise<void> {
-    await withSystemTx(this.pool, tx => tx.query(`UPDATE cloud_v2_workspaces w SET state='stopping',attempts=0,
+    await withSystemTx(this.pool, tx => tx.query(`UPDATE cloud_v2_workspaces w SET state='stopping',attempts=0,stop_generation=stop_generation+1,
       next_attempt_at=NULL,updated_at=clock_timestamp()
       WHERE id=$1 AND state='running' AND coalesce(active_at,updated_at)<$2
         AND NOT EXISTS (SELECT 1 FROM cloud_v2_prompt_outbox p WHERE p.workspace_id=w.id
@@ -378,30 +462,167 @@ export class CloudV2Store {
 
   /** Leases up to `limit` workspaces in a transitional state to one lifecycle
    * worker. A crashed worker's lease simply expires. */
-  async claimPending(limit: number, leaseMs: number): Promise<(CloudV2Workspace & { attempts: number })[]> {
-    const { rows } = await withSystemTx(this.pool, tx => tx.query<Row & { attempts: number }>(
-      `UPDATE cloud_v2_workspaces w SET attempts = w.attempts + 1,
-         next_attempt_at = clock_timestamp() + make_interval(secs => $2::double precision / 1000)
-       WHERE w.id IN (
+  async claimPending(limit: number, leaseMs: number, excludeIds: readonly string[] = [],
+    states: readonly CloudV2WorkspaceState[] = ["creating", "starting", "stopping", "deleting"]): Promise<(CloudV2LifecycleWorkspace & { attempts: number })[]> {
+    const { rows } = await withSystemTx(this.pool, tx => tx.query<LifecycleRow & { attempts: number }>(
+      `WITH claimed AS MATERIALIZED (
          SELECT id FROM cloud_v2_workspaces
-         WHERE state IN ('creating','starting','stopping','deleting')
+         WHERE state IN ('creating','starting','stopping','deleting') AND state = ANY($4::text[])
+           AND NOT (id = ANY($3::uuid[]))
            AND coalesce(next_attempt_at, '-infinity') <= clock_timestamp()
          ORDER BY coalesce(next_attempt_at, updated_at) LIMIT $1 FOR UPDATE SKIP LOCKED)
-       RETURNING ${COLUMNS.replace(/\b(\w+)\b/g, "w.$1")}, w.attempts`,
-      [limit, leaseMs],
+       UPDATE cloud_v2_workspaces w SET attempts = w.attempts + 1,
+         next_attempt_at = clock_timestamp() + make_interval(secs => $2::double precision / 1000)
+       FROM claimed WHERE w.id = claimed.id
+       RETURNING ${LIFECYCLE_COLUMNS.replace(/\b(\w+)\b/g, "w.$1")}, w.attempts`,
+      [limit, leaseMs, excludeIds, states],
     ));
-    return rows.map(row => ({ ...workspace(row), attempts: row.attempts }));
+    return rows.map(row => ({ ...lifecycleWorkspace(row), attempts: row.attempts }));
+  }
+
+  async leasesDue(before: Date, limit = 4): Promise<CloudV2Workspace[]> {
+    const { rows } = await withSystemTx(this.pool, tx => tx.query<Row>(
+      `SELECT ${COLUMNS} FROM cloud_v2_workspaces WHERE state='running' AND boat_sandbox_id IS NOT NULL
+       AND (lease_renewed_at IS NULL OR lease_renewed_at<$1)
+       ORDER BY lease_renewed_at NULLS FIRST LIMIT $2`, [before, limit]));
+    return rows.map(workspace);
+  }
+
+  /** A late renewal cannot advance the lease of a replacement or stopped VM. */
+  async markLeaseRenewed(id: string, sandboxId: string, renewedAt: Date): Promise<boolean> {
+    const result = await withSystemTx(this.pool, tx => tx.query(
+      `UPDATE cloud_v2_workspaces SET lease_renewed_at=greatest(lease_renewed_at,$3::timestamptz)
+       WHERE id=$1 AND boat_sandbox_id=$2 AND state IN ('creating','starting','running')`, [id, sandboxId, renewedAt]));
+    return Boolean(result.rowCount);
+  }
+
+  /** The base branch's GitHub head when the workspace was created. */
+  async setBaseCommit(id: string, commit: string): Promise<void> {
+    if (!/^[0-9a-f]{40}$/.test(commit)) return;
+    await withSystemTx(this.pool, tx => tx.query(
+      `UPDATE cloud_v2_workspaces SET base_commit=$2 WHERE id=$1 AND state='creating' AND base_commit IS NULL`, [id, commit]));
+  }
+
+  /** Offered through the first run, while the worker may still create the
+   * branch. The hello makes the row running before configuration is built.
+   * A restored branch already exists, so a checkpoint ends the offer. */
+  async baseCommit(id: string): Promise<string | null> {
+    const { rows } = await withSystemTx(this.pool, tx => tx.query<{ base_commit: string | null }>(
+      `SELECT base_commit FROM cloud_v2_workspaces WHERE id=$1 AND state IN ('creating','running') AND checkpoint_object IS NULL`, [id]));
+    return rows[0]?.base_commit ?? null;
+  }
+
+  /** Only the stop that is still stopping this VM records what it uploaded.
+   * Returns the checkpoint it replaced, or false when it was fenced out. */
+  async saveCheckpoint(id: string, sandboxId: string, generation: string, checkpoint: Omit<CloudV2Checkpoint, "savedAt" | "stopGeneration">): Promise<{ replaced: string | null } | false> {
+    return withSystemTx(this.pool, async tx => {
+      const { rows } = await tx.query<{ checkpoint_object: string | null }>(
+        `SELECT checkpoint_object FROM cloud_v2_workspaces WHERE id=$1 AND boat_sandbox_id=$2 AND state='stopping' AND NOT restore_pending
+           AND stop_generation=$3::bigint FOR UPDATE`,
+        [id, sandboxId, generation]);
+      if (!rows[0]) return false;
+      await tx.query(
+        `UPDATE cloud_v2_workspaces SET checkpoint_object=$2, checkpoint_key=$3, checkpoint_sha256=$4, checkpoint_bytes=$5,
+           checkpoint_saved_at=clock_timestamp(), checkpoint_stop_generation=stop_generation, checkpoint_error=NULL WHERE id=$1`,
+        [id, checkpoint.object, JSON.stringify(checkpoint.key), checkpoint.sha256, checkpoint.bytes]);
+      return { replaced: rows[0].checkpoint_object };
+    });
+  }
+
+  /** Recorded before an upload URL exists, and only while this stop still
+   * owns the VM: once deletion has begun no new upload is admitted. `until`
+   * bounds when the upload could still land if its outcome is never known. */
+  async checkpointUpload(id: string, sandboxId: string, generation: string, object: string, until: Date): Promise<boolean> {
+    const result = await withSystemTx(this.pool, tx => tx.query(
+      `UPDATE cloud_v2_workspaces SET checkpoint_uploads = coalesce((SELECT jsonb_object_agg(key, value) FROM jsonb_each_text(checkpoint_uploads)
+           WHERE value::timestamptz > clock_timestamp()), '{}'::jsonb) || jsonb_build_object($3::text, $4::timestamptz)
+       WHERE id=$1 AND boat_sandbox_id=$2 AND state='stopping' AND NOT restore_pending AND stop_generation=$5::bigint`,
+      [id, sandboxId, object, until, generation]));
+    return Boolean(result.rowCount);
+  }
+
+  /** Whether this is still the workspace's current stop. */
+  async stopCurrent(id: string, generation: string): Promise<boolean> {
+    const { rows } = await withSystemTx(this.pool, tx => tx.query(
+      `SELECT 1 FROM cloud_v2_workspaces WHERE id=$1 AND state='stopping' AND stop_generation=$2::bigint`, [id, generation]));
+    return rows.length > 0;
+  }
+
+  /** The latest time an upload whose outcome is unknown could still land, read live. */
+  async checkpointUploadHorizon(id: string): Promise<string | null> {
+    const { rows } = await withSystemTx(this.pool, tx => tx.query<{ checkpoint_uploads: Record<string, string> }>(
+      `SELECT checkpoint_uploads FROM cloud_v2_workspaces WHERE id=$1`, [id]));
+    return rows[0] ? uploadHorizon(rows[0].checkpoint_uploads) : null;
+  }
+
+  /** That upload is over, whatever its outcome; other uploads stay. */
+  async checkpointUploadDone(id: string, object: string): Promise<void> {
+    await withSystemTx(this.pool, tx => tx.query(
+      `UPDATE cloud_v2_workspaces SET checkpoint_uploads = checkpoint_uploads - $2::text WHERE id=$1`, [id, object]));
+  }
+
+  async checkpointFailed(id: string, sandboxId: string, generation: string, code: string): Promise<void> {
+    await withSystemTx(this.pool, tx => tx.query(
+      `UPDATE cloud_v2_workspaces SET checkpoint_error=$3 WHERE id=$1 AND boat_sandbox_id=$2 AND state='stopping' AND stop_generation=$4::bigint`,
+      [id, sandboxId, /^[a-z0-9_]{1,64}$/.test(code) ? code : "checkpoint_failed", generation]));
+  }
+
+  /** Boat lost the VM. Pins the organization's active Cloud Computer and
+   * records the restore before any replacement exists, so a stop or deletion
+   * that wins the race still finds the replacement. */
+  async beginRestore(id: string, lostSandboxId: string | null, request: { attempt: string } & Omit<CloudV2RestoreCreate, "from" | "requestedAt">): Promise<{ attempt: string; create: CloudV2RestoreCreate } | "no_computer" | null> {
+    return withSystemTx(this.pool, async tx => {
+      const { rows } = await tx.query<{ org_id: string }>(
+        `SELECT org_id FROM cloud_v2_workspaces WHERE id=$1 AND state='starting' AND boat_sandbox_id IS NOT DISTINCT FROM $2::text
+           AND checkpoint_object IS NOT NULL FOR UPDATE`, [id, lostSandboxId]);
+      if (!rows[0]) return null;
+      // As at creation: activation and cleanup wait for this pin.
+      const active = await tx.query<{ id: string; snapshot_name: string }>(
+        `SELECT b.id, c.snapshot_name FROM cloud_v2_computers c
+         JOIN cloud_v2_computer_builds b ON b.id=c.active_build_id AND b.org_id=c.org_id
+         WHERE c.org_id=$1 AND c.snapshot_name IS NOT NULL AND b.state='succeeded' AND b.snapshot_id=c.snapshot_name
+           AND b.snapshot_deleted_at IS NULL AND b.cleanup_requested_at IS NULL
+         FOR SHARE OF c,b`, [rows[0].org_id]);
+      if (!active.rows[0]) return "no_computer";
+      const recorded = await tx.query<{ restore_attempt: string; restore_create: CloudV2RestoreCreate }>(
+        `UPDATE cloud_v2_workspaces SET restore_pending=true, restore_attempt=$3, boat_sandbox_id=NULL, computer_build_id=$2,
+           restore_create=jsonb_build_object('from',$4::text,'name',$5::text,'env',$6::jsonb,'requestedAt',clock_timestamp()),
+           worker_route_url=NULL, worker_port_token=NULL, worker_token_hash=NULL, worker_boot_id=NULL
+         WHERE id=$1 RETURNING restore_attempt, restore_create`,
+        [id, active.rows[0].id, request.attempt, active.rows[0].snapshot_name, request.name, JSON.stringify(request.env)]);
+      return { attempt: recorded.rows[0]!.restore_attempt, create: recorded.rows[0]!.restore_create };
+    });
+  }
+
+  /** Records this attempt's replacement VM in any live state, so cleanup can
+   * find it. A late reply from an earlier attempt cannot take a later slot. */
+  async replaceSandbox(id: string, attempt: string, sandboxId: string, renewedAt: Date): Promise<CloudV2WorkspaceState | null> {
+    const { rows } = await withSystemTx(this.pool, tx => tx.query<{ state: CloudV2WorkspaceState }>(
+      `UPDATE cloud_v2_workspaces SET boat_sandbox_id=$3, lease_renewed_at=$4
+       WHERE id=$1 AND restore_attempt=$2 AND restore_pending AND boat_sandbox_id IS NULL AND state<>'deleted' RETURNING state`,
+      [id, attempt, sandboxId, renewedAt]));
+    return rows[0]?.state ?? null;
+  }
+
+  /** The checkpoint is on the replacement VM. */
+  async finishRestore(id: string, sandboxId: string): Promise<boolean> {
+    const result = await withSystemTx(this.pool, tx => tx.query(
+      // The worker's boot deadline starts now: the restore used its own.
+      `UPDATE cloud_v2_workspaces SET restore_pending=false, updated_at=clock_timestamp()
+       WHERE id=$1 AND boat_sandbox_id=$2 AND restore_pending AND state='starting'`,
+      [id, sandboxId]));
+    return Boolean(result.rowCount);
   }
 
   /** Schedules the next step. Waiting for an outside event (the worker's
    * hello) clears the failure count; a failure keeps it. `updated_at` stays
    * the time the state was entered. */
-  async defer(id: string, state: CloudV2WorkspaceState, ms: number, patch: { boatSandboxId?: string; failure?: boolean } = {}): Promise<void> {
+  async defer(id: string, state: CloudV2WorkspaceState, ms: number, patch: { boatSandboxId?: string; failure?: boolean; stopGeneration?: string } = {}): Promise<void> {
     await withSystemTx(this.pool, tx => tx.query(
       `UPDATE cloud_v2_workspaces SET next_attempt_at = clock_timestamp() + make_interval(secs => $3::double precision / 1000),
          boat_sandbox_id = coalesce($4, boat_sandbox_id), attempts = CASE WHEN $5::boolean THEN attempts ELSE 0 END
-       WHERE id = $1 AND state = $2`,
-      [id, state, ms, patch.boatSandboxId ?? null, patch.failure === true],
+       WHERE id = $1 AND state = $2 AND ($6::bigint IS NULL OR stop_generation = $6::bigint)`,
+      [id, state, ms, patch.boatSandboxId ?? null, patch.failure === true, patch.stopGeneration ?? null],
     ));
   }
 
@@ -423,28 +644,51 @@ export class CloudV2Store {
     return rows[0]?.revision ?? null;
   }
 
-  async computerSnapshot(organizationId: string): Promise<string | null> {
+  async computerSnapshot(organizationId: string, buildId: string | null = null): Promise<string | null> {
+    if (buildId) {
+      const { rows } = await withSystemTx(this.pool, tx => tx.query<{ snapshot_id: string | null }>(
+        `SELECT snapshot_id FROM cloud_v2_computer_builds WHERE id=$1 AND org_id=$2 AND state='succeeded'
+         AND snapshot_deleted_at IS NULL AND cleanup_requested_at IS NULL`, [buildId, organizationId]));
+      return rows[0]?.snapshot_id ?? null;
+    }
+    // Pre-pin workspaces retain their original active-computer behavior.
     const { rows } = await withSystemTx(this.pool, tx => tx.query<{ snapshot_name: string | null }>(
       `SELECT snapshot_name FROM cloud_v2_computers WHERE org_id = $1`, [organizationId]));
     return rows[0]?.snapshot_name ?? null;
   }
 
-  /** Repositories installed on the organization's active Cloud Computer, or
-   * null when it has none yet. */
-  async installedRepositories(organizationId: string): Promise<CloudV2InstalledRepository[] | null> {
-    const { rows } = await withSystemTx(this.pool, tx => tx.query<{ recipe: { repositories?: { repository?: unknown; ref?: unknown; branch?: unknown }[] } }>(
-      `SELECT build.recipe FROM cloud_v2_computers computer
+  /** One selection supplies the build pin and its installed repositories. */
+  async activeComputer(organizationId: string): Promise<{ buildId: string; repositories: CloudV2InstalledRepository[] } | null> {
+    const { rows } = await withSystemTx(this.pool, tx => tx.query<{ id: string; recipe: { repositories?: { repository?: unknown; branch?: unknown }[] } }>(
+      `SELECT build.id, build.recipe FROM cloud_v2_computers computer
        JOIN cloud_v2_computer_builds build ON build.id = computer.active_build_id AND build.org_id = computer.org_id
        WHERE computer.org_id = $1 AND computer.snapshot_name IS NOT NULL AND build.state = 'succeeded'`,
       [organizationId],
     ));
     if (!rows[0]) return null;
-    return (rows[0].recipe.repositories ?? []).flatMap(entry => typeof entry.repository === "string" ? [{
+    return { buildId: rows[0].id, repositories: (rows[0].recipe.repositories ?? []).flatMap(entry => typeof entry.repository === "string" ? [{
       repository: entry.repository,
       // A recipe ref can be a tag. Only the build's verified branch is a
       // supported source for the worker's origin/<baseBranch> checkout.
       defaultBranch: typeof entry.branch === "string" && entry.branch ? entry.branch : null,
-    }] : []);
+    }] : []) };
+  }
+
+  /** Keep the public repository listing unchanged. */
+  async installedRepositories(organizationId: string): Promise<CloudV2InstalledRepository[] | null> {
+    return (await this.activeComputer(organizationId))?.repositories ?? null;
+  }
+
+  /** Setup follows the build that supplied this workspace's disk, never the
+   * organization's currently configured or newly activated recipe. */
+  async workspaceSetup(id: string): Promise<string | null> {
+    const { rows } = await withSystemTx(this.pool, tx => tx.query<{ repository: string; recipe: { repositories?: { repository?: unknown; setup?: unknown }[] } }>(
+      `SELECT w.repository,b.recipe FROM cloud_v2_workspaces w
+       JOIN cloud_v2_computer_builds b ON b.id=w.computer_build_id AND b.org_id=w.org_id
+       WHERE w.id=$1 AND w.state<>'deleted' AND b.state='succeeded' AND ${LIVE_ACCESS}`, [id]));
+    const row = rows[0];
+    const entry = row?.recipe.repositories?.find(repo => typeof repo.repository === "string" && repo.repository.toLowerCase() === row.repository.toLowerCase());
+    return typeof entry?.setup === "string" && entry.setup.length <= 8000 ? entry.setup : null;
   }
 
   /** Revokes a stopped or deleted workspace's tokens; deletion also drops its history. */

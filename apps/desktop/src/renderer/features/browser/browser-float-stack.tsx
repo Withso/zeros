@@ -419,12 +419,12 @@ function BrowserFloatBox({
           aria-label="Floating preview actions"
           className={cn("shrink-0", FLOAT_ISLAND_HIDDEN, reveal)}
         >
-          <Tooltip label="Open in right panel">
+          <Tooltip label="Dock preview">
             <IconButton size="compact" onClick={openInPanel} label="Open in right panel">
               <PanelRightOpen aria-hidden="true" />
             </IconButton>
           </Tooltip>
-          <Tooltip label={windowUnavailable ?? "Open in preview window"}>
+          <Tooltip label={windowUnavailable ?? "Preview window"}>
             <IconButton
               size="compact"
               disabled={windowUnavailable !== null}
@@ -438,15 +438,13 @@ function BrowserFloatBox({
               <AppWindow aria-hidden="true" />
             </IconButton>
           </Tooltip>
-          <Tooltip label="Close">
-            <IconButton
-              size="compact"
-              onClick={closeFloat}
-              label="Close floating preview"
-            >
-              <X aria-hidden="true" />
-            </IconButton>
-          </Tooltip>
+          <IconButton
+            size="compact"
+            onClick={closeFloat}
+            label="Close floating preview"
+          >
+            <X aria-hidden="true" />
+          </IconButton>
         </Toolbar>
       </div>
       {FLOAT_RESIZE_HANDLES.map(({ handle, cursor, className }) => (

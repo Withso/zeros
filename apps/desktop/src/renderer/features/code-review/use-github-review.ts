@@ -1,21 +1,24 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useSyncExternalStore } from "react";
 import type { CodeReviewAnchor } from "@zeros/protocol/code-review";
+import type { PrInlineReview } from "@zeros/protocol/github-review";
 import {
-  getPrInlineReview,
   postPrLineComment,
   replyPrReviewThread,
   setPrReviewThreadResolved,
 } from "@/renderer/platform/github-review";
-import { onActiveBridgeConnected } from "@/renderer/platform/bridge/active-bridge";
-import { useCachedRead } from "@/renderer/state/use-cached-read";
+import { codeReviewAvailable } from "@/renderer/platform/bridge/code-review-availability";
 import { useDocumentActive } from "@/renderer/state/use-document-active";
-import { isCloudWorkspace, parseCloudScopedId } from "@/renderer/platform/bridge/cloud-workspace-key";
-import { documentIsForeground } from "@/renderer/shared/lib/element-activity";
+import type { AsyncCacheSnapshot } from "@/renderer/shared/lib/keyed-async-cache";
 import {
   githubReviewCache,
   githubReviewKey,
   githubReviewTargetFromKey,
 } from "./github-review-cache";
+import {
+  confirmGithubReviewRevision,
+  observeGithubReview,
+  refreshGithubReview,
+} from "./github-review-observer";
 import {
   githubLineCommentForAnchor,
   githubReviewItems,
@@ -31,14 +34,10 @@ import {
   type ReviewCacheRequest,
 } from "./review-cache-forget";
 
-// Inline review lives on GitHub, not in the worktree: local refresh
-// generations (agent writes, builds) never re-read it. A confirmed head/base
-// change, a write from Zeros, focus/visibility, a reconnect and this interval do.
-const FRESH_MS = 45_000;
-const visible = () =>
-  typeof document === "undefined" || document.visibilityState !== "hidden";
-const readKey = (key: string) =>
-  getPrInlineReview(githubReviewTargetFromKey(key));
+const IDLE: AsyncCacheSnapshot<PrInlineReview> = Object.freeze({
+  data: undefined, loading: false, refreshing: false, error: null,
+  updatedAt: 0, invalidationVersion: 0,
+});
 
 function beginGithubReviewMutation(cwd: string | undefined): ReviewCacheRequest {
   if (!cwd?.trim())
@@ -64,18 +63,17 @@ export function useGithubReview({
   confirmedBaseSha?: string;
   renamedPaths?: ReadonlyMap<string, string>;
 }) {
-  const cloud = isCloudWorkspace(cwd) || isCloudWorkspace(workspaceId) || !!parseCloudScopedId(workspaceId);
+  const available = codeReviewAvailable({ cwd, workspaceId });
   // Cloud v2 can report a PR summary but does not serve inline review. A null
   // key also hides any stale unsupported response cached by an older renderer.
-  const key = !cloud && workspaceId && prNumber ? githubReviewKey(workspaceId, prNumber) : null;
-  const local = !!cwd && !cloud;
-  const foreground = useDocumentActive(local && active, true);
-  const observing = local ? foreground : active;
-  const [documentVisible, setDocumentVisible] = useState(visible);
-  const snapshot = useCachedRead(githubReviewCache, key, readKey, {
-    enabled: observing && (local || documentVisible),
-    maxAgeMs: FRESH_MS,
-  });
+  const key = available && workspaceId && prNumber ? githubReviewKey(workspaceId, prNumber) : null;
+  const foreground = useDocumentActive(!!key && active, true);
+  const subscribe = useCallback((listener: () => void) =>
+    key && foreground ? githubReviewCache.subscribe(key, listener) : () => {},
+  [key, foreground]);
+  const getSnapshot = useCallback(() => key ? githubReviewCache.getSnapshot(key) : IDLE, [key]);
+  const snapshot = useSyncExternalStore(subscribe, getSnapshot, getSnapshot);
+  const consumer = useMemo(() => ({ current: active, key, cwd }), [key, active, cwd]);
   const loadedHeadSha = snapshot.data?.headSha;
   const loadedBaseSha = snapshot.data?.baseSha;
   const threads = useMemo(
@@ -86,51 +84,27 @@ export function useGithubReview({
     [snapshot.data, key],
   );
   useEffect(() => {
-    if (!key || !observing) return;
-    if (!local) setDocumentVisible(visible());
-    const read = (maxAgeMs: number) => {
-      if (local ? documentIsForeground() : visible())
-        void githubReviewCache
-          .load(key, () => readKey(key), { maxAgeMs })
-          .catch(() => {});
-    };
-    const resume = () => {
-      if (!local) setDocumentVisible(visible());
-      read(2_000);
-    };
-    if (local) read(2_000);
-    const timer = setInterval(() => read(FRESH_MS), 30_000);
-    window.addEventListener("focus", resume);
-    document.addEventListener("visibilitychange", resume);
-    const unsubscribe = onActiveBridgeConnected(
-      (_client, info) => read(info.initial ? FRESH_MS : -1),
-      cwd,
-    );
+    consumer.current = active;
+    const stop = key && active ? observeGithubReview(key, cwd) : undefined;
     return () => {
-      clearInterval(timer);
-      window.removeEventListener("focus", resume);
-      document.removeEventListener("visibilitychange", resume);
-      unsubscribe();
+      consumer.current = false;
+      stop?.();
     };
-  }, [key, observing, cwd, local]);
+  }, [key, active, cwd, consumer]);
   useEffect(() => {
     if (
       !key ||
-      !observing ||
-      !(local ? documentIsForeground() : visible()) ||
+      !active ||
       !confirmedHeadSha ||
       !confirmedBaseSha ||
       !loadedHeadSha ||
       (loadedHeadSha === confirmedHeadSha && loadedBaseSha === confirmedBaseSha)
     )
       return;
-    void githubReviewCache
-      .load(key, () => readKey(key), { force: true })
-      .catch(() => {});
+    confirmGithubReviewRevision(key, confirmedHeadSha, confirmedBaseSha);
   }, [
     key,
-    observing,
-    local,
+    active,
     confirmedHeadSha,
     confirmedBaseSha,
     loadedHeadSha,
@@ -139,22 +113,12 @@ export function useGithubReview({
 
   const refreshAfterWrite = useCallback(
     async (request: ReviewCacheRequest) => {
-      if (!key || !request.isCurrent()) return;
-      githubReviewCache.invalidate(key);
+      if (!key || !request.isCurrent() || !consumer.current || !active) return;
       // Posting succeeded even if refreshing fails. Do not keep a successfully
       // sent draft around inviting a duplicate; the read error remains visible.
-      await githubReviewCache
-        .load(
-          key,
-          () => {
-            request.assertCurrent();
-            return readKey(key);
-          },
-          { force: true },
-        )
-        .catch(() => {});
+      await refreshGithubReview(key, cwd, () => request.isCurrent() && consumer.current);
     },
-    [key],
+    [key, cwd, consumer, active],
   );
   const reply = useCallback(
     async (thread: CodeReviewThreadItem, body: string) => {
@@ -279,14 +243,9 @@ export function useGithubReview({
     refresh: useCallback(
       () =>
         key && active
-          ? githubReviewCache
-      .load(key, () => readKey(key), { force: true })
-              .then(
-                () => {},
-                () => {},
-              )
+          ? refreshGithubReview(key, cwd, () => consumer.current)
           : Promise.resolve(),
-      [key, active],
+      [key, active, cwd, consumer],
     ),
     error,
     notice,

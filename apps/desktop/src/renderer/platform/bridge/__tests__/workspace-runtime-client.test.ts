@@ -12,7 +12,7 @@ import {
   type CloudWorkspaceTarget,
 } from "../cloud-workspace-key";
 import type { BridgeMessage } from "../messages";
-import { bridgeGhPrList, bridgeGhRepoAccess } from "../workspace-bridge";
+import { bridgeGhPrList, bridgeGhRepoAccess, bridgeMessageWindowSnapshot } from "../workspace-bridge";
 import {
   bridgePtyCreate,
   bridgePtyTerminals,
@@ -87,6 +87,22 @@ function fakePeer(target: CloudWorkspaceTarget) {
   };
 }
 afterEach(() => vi.restoreAllMocks());
+
+it("identifies the actual history source without waking a worker or trusting a wire source field", async () => {
+  const peer = fakePeer(a), open = vi.fn(async () => peer.peer);
+  const turnOpening = { msgId: "opening", kind: "text", payload: JSON.stringify({ id: "opening", kind: "text", role: "user", text: "Long turn", createdAt: 1 }), createdAt: 1 };
+  const mirror = vi.fn(async (_target: CloudWorkspaceTarget, _op: string) => ({ messages: [], source: "worker", turnOpening }));
+  const client = new WorkspaceRuntimeClient({ open, workspaces: () => [], readHistory: mirror, historyRoot: () => MIRROR_ROOT });
+  const chatId = cloudScopedId(a, "chat");
+  try {
+    expect(await bridgeMessageWindowSnapshot(client, chatId, 200)).toMatchObject({ source: "control-plane", complete: false, turnOpening });
+    expect(open).not.toHaveBeenCalled();
+    await client.warmWorkspace(a);
+    peer.request.mockImplementation(async message => ({ type: "WORKSPACE_RESPONSE", op: message.op, result: { messages: [], source: "control-plane", turnOpening } }));
+    expect(await bridgeMessageWindowSnapshot(client, chatId, 200)).toMatchObject({ source: "worker", complete: false, turnOpening });
+    expect(mirror.mock.calls.filter(([, op]) => op === "messages.window")).toHaveLength(1);
+  } finally { client.dispose(); }
+});
 
 describe("file reference ownership", () => {
   it("uses only admitted native roots and never wakes another owner to resolve a hover", async () => {

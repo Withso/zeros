@@ -1,0 +1,9 @@
+{
+  "id": "anchored-overlay-dismissal",
+  "kind": "scenario",
+  "area": "renderer-shared-ui",
+  "fixedBy": "pr:703",
+  "symptom": "Closing dropdowns painted at the top-left corner while their hidden or replaced triggers reported zero geometry during a retained exit animation.",
+  "rule": "changes/anchored-overlay-dismissal.md: retire anchored popup paint and input on close; sample dismissal frames, nested portals, owner replacement, rapid reopen and reduced motion.",
+  "check": "pnpm test:ui-smoke --shard=3/3"
+}

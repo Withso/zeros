@@ -52,7 +52,6 @@ import {
   type ChatSnapshotWire,
   type MessageWindowSnapshot,
 } from "../../platform/bridge/workspace-bridge";
-import { isCloudWorkspace } from "../../platform/bridge/cloud-workspace-key";
 
 export type { MessageSearchHit, DbPullResult, ChatMessageDelta };
 
@@ -124,7 +123,7 @@ export async function windowMessages(
 
 export type AgentMessageWindow = Omit<MessageWindowSnapshot, "messages" | "turnOpening"> & {
   messages: AgentMessage[];
-  /** Local only: the opening prompt of the turn the window starts inside. */
+  /** The opening prompt of the turn the window starts inside. */
   leadingPrompt?: AgentTextMessage;
 };
 
@@ -152,7 +151,8 @@ export async function windowMessagesSnapshot(
     .map(fromPersistedMessage)
     .filter((m): m is AgentMessage => m !== null);
   const leadingPrompt = leadingPromptFromWire(turnOpening, messages);
-  return { ...rest, messages, ...(leadingPrompt ? { leadingPrompt } : {}) };
+  return { ...rest, messages, ...(rest.complete !== undefined ? { complete: rest.complete && messages.length === page.messages.length } : {}),
+    ...(leadingPrompt ? { leadingPrompt } : {}) };
 }
 
 /** Fetch the next page of older messages relative to the oldest
@@ -365,13 +365,11 @@ export async function listChatSummariesForFolder(args: {
   excludeChatId?: string;
 }): Promise<ChatSummaryWire[]> {
   if (!args.folder) return [];
-  const read = bridgeChatSummaries(
+  return bridgeChatSummaries(
     requireBridge("list chat summaries"),
     args.folder,
     args.excludeChatId,
   );
-  // A stopped cloud workspace is not woken for this optional row.
-  return isCloudWorkspace(args.folder) ? read.catch(() => []) : read;
 }
 
 export type { AttachmentWriteResult } from "@zeros/protocol/attachment-policy";

@@ -110,6 +110,16 @@ describe("persist-composer-drafts", () => {
     setLiveChatDraft("chat-2", null);
   });
 
+  it("reports whether the complete destination draft is durable before a Create handoff can consume its source", () => {
+    const state = stateWith("Keep the source draft if this cannot be saved", "x".repeat(4000));
+    installStorage({ maxBytes: 1500 });
+    expect(persistDraftsNow(state)).toBe(false);
+    expect(loadPersistedDrafts().chats["chat-1"].attachments).toEqual([]);
+    installStorage();
+    expect(persistDraftsNow(state)).toBe(true);
+    expect(loadPersistedDrafts().chats["chat-1"].attachments).toHaveLength(1);
+  });
+
   it.each([
     { workspaceId: "personal", placement: "local" as const, organizationId: null },
     { workspaceId: "organization-local", placement: "local" as const, organizationId: "organization" },

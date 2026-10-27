@@ -53,7 +53,6 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "../shared/ui/primitives/dropdown-menu";
-import { Tooltip } from "../shared/ui/primitives/tooltip";
 import { useAddProject } from "./add-project-provider";
 import { warmCreateSourceProject } from "./dispatcher/create-from-source";
 import { requestCreateFromSource } from "./dispatcher/create-source-request";
@@ -61,16 +60,15 @@ import { RepositoryIconDialog } from "./repository-icon-dialog";
 
 // --- CONSTANTS ---
 
-// Only hover lifts the row; focus shows on the focused control itself, so
-// creating from + or collapsing leaves no header looking selected. The name
-// stays on the default fg2 tier.
+// Hover only reveals the disclosure and actions; the row fills when its
+// repository page is active. Focus stays on the focused control itself.
 const REPOSITORY_HEADER_CLS =
-  "group/repo relative flex h-7.5 w-full min-w-0 shrink-0 select-none items-center gap-1 rounded-md pr-1 text-fg2 transition-none hover:bg-(--surface-hover) data-[active=true]:bg-(--surface-hover)";
+  "group/repo relative flex h-8 w-full min-w-0 shrink-0 select-none items-center gap-1 rounded-md pr-1 text-fg2 transition-none data-[active=true]:bg-(--surface-hover)";
 const REPOSITORY_TOGGLE_CLS =
   "group/toggle flex h-full min-w-0 flex-1 items-center gap-2 rounded-md pl-2 text-left text-xs font-medium text-inherit outline-none focus-visible:ring-2 focus-visible:ring-highlighted-bright/50";
 const REPOSITORY_CHIP_CLS =
   "inline-flex size-4 shrink-0 items-center justify-center rounded-sm bg-bg2-hover text-xxs font-medium text-fg2";
-// Row actions: 24px squares inside the 30px row, on the sidebar's own hover.
+// Row actions: 24px squares inside the 32px row, on the sidebar's own hover.
 export const SIDEBAR_ROW_ACTION_CLS =
   "inline-flex size-6 shrink-0 items-center justify-center rounded-md text-fg2 outline-none transition-[background-color,color] duration-120 ease-out hover:bg-bg2-hover hover:text-fg1 focus-visible:ring-2 focus-visible:ring-highlighted-bright/50 data-[state=open]:bg-bg2-hover data-[state=open]:text-fg1 [&_svg]:size-3.5";
 // A pointer-placed context menu can leave a trailing click on the row it
@@ -200,30 +198,26 @@ export function SidebarRepositoryHeader({
                     : "hidden group-hover/repo:flex group-has-[:focus-visible]/repo:flex",
                 )}
               >
-                <Tooltip label="Repository settings" side="bottom">
-                  <button
-                    type="button"
-                    className={SIDEBAR_ROW_ACTION_CLS}
-                    aria-label={`${project.name} settings`}
-                    onClick={openRepositoryPage}
-                  >
-                    <Settings strokeWidth={1.5} />
-                  </button>
-                </Tooltip>
+                <button
+                  type="button"
+                  className={SIDEBAR_ROW_ACTION_CLS}
+                  aria-label={`${project.name} settings`}
+                  onClick={openRepositoryPage}
+                >
+                  <Settings strokeWidth={1.5} />
+                </button>
                 <DropdownMenu open={menuOpen} onOpenChange={setMenuOpen}>
-                  <Tooltip label="More actions" side="bottom">
-                    <DropdownMenuTrigger asChild>
-                      <button
-                        type="button"
-                        className={SIDEBAR_ROW_ACTION_CLS}
-                        aria-label={`More actions for ${project.name}`}
-                        onPointerEnter={() => warmCreateSourceProject(project)}
-                        onFocus={() => warmCreateSourceProject(project)}
-                      >
-                        <Ellipsis strokeWidth={1.5} />
-                      </button>
-                    </DropdownMenuTrigger>
-                  </Tooltip>
+                  <DropdownMenuTrigger asChild>
+                    <button
+                      type="button"
+                      className={SIDEBAR_ROW_ACTION_CLS}
+                      aria-label={`More actions for ${project.name}`}
+                      onPointerEnter={() => warmCreateSourceProject(project)}
+                      onFocus={() => warmCreateSourceProject(project)}
+                    >
+                      <Ellipsis strokeWidth={1.5} />
+                    </button>
+                  </DropdownMenuTrigger>
                   <DropdownMenuContent
                     align="start"
                     className="w-52"
@@ -280,18 +274,16 @@ export function SidebarRepositoryHeader({
                   </DropdownMenuContent>
                 </DropdownMenu>
               </div>
-              <Tooltip label="Create workspace" side="bottom">
-                <button
-                  type="button"
-                  className={SIDEBAR_ROW_ACTION_CLS}
-                  aria-label={`Create workspace in ${project.name}`}
-                  onPointerEnter={() => warmCreateSourceProject(project)}
-                  onFocus={() => warmCreateSourceProject(project)}
-                  onClick={openCreate}
-                >
-                  <Plus strokeWidth={1.5} />
-                </button>
-              </Tooltip>
+              <button
+                type="button"
+                className={SIDEBAR_ROW_ACTION_CLS}
+                aria-label={`Create workspace in ${project.name}`}
+                onPointerEnter={() => warmCreateSourceProject(project)}
+                onFocus={() => warmCreateSourceProject(project)}
+                onClick={openCreate}
+              >
+                <Plus strokeWidth={1.5} />
+              </button>
             </div>
           </div>
         </ContextMenuTrigger>

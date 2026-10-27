@@ -16,7 +16,7 @@ const api = vi.hoisted(() => ({ detail: vi.fn(), list: vi.fn() }));
 vi.mock("../../platform/cloud-workspaces", () => ({
   CloudWorkspaceDocumentSchema: { parse: (value: unknown) => value },
   CloudWorkspaceRecoveryInputSchema: { parse: (value: unknown) => value },
-  listCloudWorkspaceDocuments: api.list,
+  listCloudWorkspaceCatalogSnapshot: async (...args: unknown[]) => ({ workspaces: await api.list(...args), catalogVersion: null, complete: true }),
   getCloudWorkspaceDocument: api.detail,
   changeCloudWorkspaceLifecycle: vi.fn(),
   recoverCloudWorkspace: vi.fn(),

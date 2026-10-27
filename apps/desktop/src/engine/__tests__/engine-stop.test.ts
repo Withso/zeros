@@ -23,6 +23,8 @@ describe("ZerosEngine.stop", () => {
   it.each(["Local", "organization-local"])("attempts every cleanup stage before reporting containment failure (%s)", async () => {
     const calls: string[] = [];
     const diagnostics = vi.spyOn(console, "error").mockImplementation(() => {});
+    const probe = new AbortController();
+    probe.signal.addEventListener("abort", () => calls.push("mcp-probe"));
     // Keep real lifecycle helpers while injecting only the owned services.
     const engine = Object.setPrototypeOf({
       running: true,
@@ -37,7 +39,20 @@ describe("ZerosEngine.stop", () => {
           throw new Error("agent boundary proof failed");
         },
       },
+      workspace: { stopDesignPreviews: async () => { calls.push("design-previews"); } },
       vaultPersistTimer: null,
+      scopedMcpGateways: {
+        stop: async () => {
+          calls.push("scoped-mcp");
+          throw new Error("scoped mcp stop failed");
+        },
+      },
+      mcpCallback: { stop: async () => calls.push("mcp-callback") },
+      mcpHost: { close: () => calls.push("mcp-host") },
+      vaultConfirmation: { close: () => calls.push("vault-confirmation") },
+      launchedMcp: { stop: async () => calls.push("launched-mcp") },
+      organizationMcp: { reset: async () => calls.push("organization-mcp") },
+      mcpProbes: new Map([["pending", probe]]),
       mcpGateway: {
         stop: async () => {
           calls.push("mcp");
@@ -59,16 +74,25 @@ describe("ZerosEngine.stop", () => {
       .catch((caught: unknown) => caught);
 
     expect(error).toBeInstanceOf(AggregateError);
-    expect((error as AggregateError).errors).toHaveLength(2);
+    expect((error as AggregateError).errors).toHaveLength(3);
     expect((error as AggregateError).errors).toEqual(
       expect.arrayContaining([
         expect.objectContaining({ message: "agent boundary proof failed" }),
+        expect.objectContaining({ message: "scoped mcp stop failed" }),
         expect.objectContaining({ message: "mcp stop failed" }),
       ]),
     );
     expect(calls).toEqual([
       "product-tools",
+      "design-previews",
       "agents",
+      "scoped-mcp",
+      "mcp-callback",
+      "mcp-host",
+      "vault-confirmation",
+      "launched-mcp",
+      "organization-mcp",
+      "mcp-probe",
       "mcp",
       "pty",
       "terminals",
@@ -83,6 +107,8 @@ describe("ZerosEngine.stop", () => {
     expect(engine.mcpGateway).toBeNull();
     expect(engine.settingsWatcher).toBeNull();
     expect(engine.gitWatcher).toBeNull();
+    expect(probe.signal.aborted).toBe(true);
+    expect(engine.mcpProbes.size).toBe(0);
     expect(diagnostics).not.toHaveBeenCalled();
   });
 });

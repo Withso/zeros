@@ -34,6 +34,7 @@ import { turnRowCache, turnRowKey } from "@/renderer/state/read-caches";
 
 import {
   agentActivity,
+  agentExecutionActivity,
   chatAgentActivity,
   chatWorkingActivity,
   combinedAgentActivity,
@@ -56,6 +57,7 @@ import {
   applyUpdate,
   BLANK_USAGE,
   type AgentMessage,
+  type AgentTextMessage,
   type AgentSessionState,
   type AgentUsage,
   type PendingPermission,
@@ -78,6 +80,7 @@ import { sameProviderBinding } from "@zeros/protocol/identities";
 import type { ExecutionBoundaryStatus } from "@zeros/protocol/containment";
 import type { AgentGoal } from "@zeros/protocol/agent-events";
 import { isCloudWorkspace, parseCloudScopedId } from "../../platform/bridge/cloud-workspace-key";
+import { cloudPresentationRunning, cloudTurnEnding, cloudTurnStart, withCloudTurnPresentation, type CloudTurnEnding } from "./cloud-turn-presentation";
 
 const MAX_STDERR_LINES = 200;
 const MAX_BACKGROUND_TASKS_PER_CHAT = 100;
@@ -243,17 +246,17 @@ function capMessages(messages: AgentMessage[]): AgentMessage[] {
   return messages.slice(-MAX_MESSAGES_PER_CHAT);
 }
 
-/** Keep a Local slot's leading prompt consistent with the front of its window
+/** Keep a slot's leading prompt consistent with the front of its window
  *  through every trim, prepend and replacement (transcript-leading-prompt.ts).
  *  `proposed` is an explicit value from a window read; undefined derives it.
- *  Cloud slots never carry one. O(1) unless the window's first row changed. */
+ *  Legacy unscoped cloud slots cannot carry one. O(1) unless the front changed. */
 function settleSlotLeadingPrompt(
   chatId: string,
   previous: AgentSessionState | undefined,
   next: AgentSessionState,
   proposed: AgentSessionState["leadingPrompt"],
 ): AgentSessionState {
-  if (parseCloudScopedId(chatId) || isCloudWorkspace(next.cwd)) {
+  if (!parseCloudScopedId(chatId) && isCloudWorkspace(next.cwd)) {
     return next.leadingPrompt == null ? next : { ...next, leadingPrompt: null };
   }
   const leadingPrompt = settleLeadingPrompt(
@@ -279,6 +282,9 @@ function isLocalSessionSlot(chatId: string, slot: AgentSessionState): boolean {
  * observer clears its exact operation; an authoritative successor drops it. */
 function settleCloudStop(previous: AgentSessionState | undefined, next: AgentSessionState, reattaching = false): AgentSessionState {
   const sameOwner = isCloudWorkspace(next.cwd) && (!previous || previous.cwd === next.cwd && previous.agentId === next.agentId);
+  if (!sameOwner && next.cloudTurnPresentations) next = { ...next, cloudTurnPresentations: undefined };
+  if (reattaching && sameOwner && !next.cloudTurnPresentations && previous?.cloudTurnPresentations)
+    next = { ...next, cloudTurnPresentations: previous.cloudTurnPresentations };
   if (reattaching && !next.cloudStop && previous?.cloudStop && sameOwner &&
       (!next.foregroundTurnId || next.foregroundTurnId === previous.cloudStop.turnId))
     next = { ...next, cloudStop: previous.cloudStop, foregroundTurnId: previous.foregroundTurnId };
@@ -401,7 +407,10 @@ export interface SessionsStoreState {
 
   // ── Pure mutators ───────────────────────────────────────
   setSession: (chatId: string, slot: AgentSessionState) => void;
-  patchSession: (chatId: string, patch: Partial<AgentSessionState>) => void;
+  patchSession: (chatId: string, patch: Partial<AgentSessionState>, pendingTurnId?: string | null) => void;
+  presentCloudStop: (chatId: string) => AgentSessionState["cloudStop"];
+  recordCloudTurnEnd: (chatId: string, turnId: string, ending: Pick<CloudTurnEnding, "status" | "source" | "stopReason">) => void;
+  rejectCloudStopPresentation: (chatId: string, operationId: string) => void;
   /** Apply a goal snapshot only while its exact execution still owns the chat.
    * Used by both bridge pushes and awaited goal mutation replies. */
   applyGoalSnapshot: (
@@ -570,11 +579,38 @@ function reduceTranscriptUpdate(state: SessionsStoreState, chatId: string, notif
       ...slot, transcriptDirty: true, hasTranscript: slot.hasTranscript || producesMessage,
     } } };
   }
+  const recordedId = notification.update.sessionUpdate === "user_message_recorded"
+    ? notification.update.message?.id : undefined;
+  const recordedSignatures = () => {
+    const signatures = slot.transcriptContentSignatures;
+    if (!recordedId || !signatures || !Object.hasOwn(signatures, recordedId)) return signatures;
+    // A cached signature proves only the old row's content. Retire it after
+    // a live summary replacement so a lagging mirror cannot restore that row.
+    const next = { ...signatures };
+    delete next[recordedId];
+    return next;
+  };
+  if (notification.update.sessionUpdate === "user_message_recorded" &&
+      slot.leadingPrompt && slot.leadingPrompt.id === recordedId &&
+      !slot.messages.some(message => message.id === recordedId)) {
+    // A completed cloud turn republishes its opening with the recorded diff.
+    // Long turns keep that opening beside the resident window. Folding it
+    // into the tail would manufacture a new, empty turn after the answer.
+    const [leadingPrompt] = applyUpdate([slot.leadingPrompt], notification);
+    if (leadingPrompt === slot.leadingPrompt) return state;
+    return { ...state, sessions: { ...state.sessions, [chatId]: {
+      ...slot, leadingPrompt: leadingPrompt as AgentTextMessage, transcriptPresentation: null,
+      transcriptContentSignatures: recordedSignatures(),
+      ...(parseCloudScopedId(chatId) ? { transcriptSource: "worker" as const } : {}),
+    } } };
+  }
   const updated = applyUpdate(slot.messages, notification);
   const messages = slot.historyExpanded ? updated : capMessages(updated);
   if (messages === slot.messages) return state;
   return { ...state, sessions: { ...state.sessions, [chatId]: settleSlotLeadingPrompt(chatId, slot, {
     ...slot, messages, transcriptPresentation: null,
+    transcriptContentSignatures: recordedSignatures(),
+    ...(parseCloudScopedId(chatId) ? { transcriptSource: "worker" as const } : {}),
     hasTranscript: slot.hasTranscript || hasDurableMessages(messages),
   }, undefined) } };
 }
@@ -638,6 +674,46 @@ export const useSessionsStore = create<SessionsStoreState>((set, get) => ({
     });
   },
 
+  presentCloudStop: (chatId) => {
+    let stop: AgentSessionState["cloudStop"];
+    set(state => {
+      const slot = state.sessions[chatId];
+      if (!slot || !isCloudWorkspace(slot.cwd)) return state;
+      const turnId = slot.cloudStop?.turnId ?? state.pendingLocalTurns[chatId] ?? slot.cloudOutbox?.pendingId ??
+        (cloudTurnEnding(slot) ? null : slot.foregroundTurnId) ??
+        slot.cloudOutbox?.rows.find(row => !["completed", "failed", "cancelled", "interrupted"].includes(slot.cloudOutbox?.states[row.id] ?? ""))?.id ?? null;
+      if (!turnId && !slot.cloudStop) return state;
+      stop = slot.cloudStop ? slot.cloudStop.state === "failed" || slot.cloudStop.state === "unconfirmed"
+        ? { ...slot.cloudStop, state: "pending", requestedAt: slot.cloudStop.state === "failed" ? Date.now() : slot.cloudStop.requestedAt, preparing: true }
+        : slot.cloudStop : { operationId: crypto.randomUUID(), turnId, state: "pending", requestedAt: Date.now(), preparing: true };
+      const cloudTurnPresentations = turnId ? withCloudTurnPresentation(slot.cloudTurnPresentations, turnId, {
+        startedAt: cloudTurnStart(slot, turnId), endedAt: stop.requestedAt ?? Date.now(), status: "cancelled", source: "stop",
+        stopReason: "cancelled", operationId: stop.operationId,
+      }) : slot.cloudTurnPresentations;
+      return { sessions: { ...state.sessions, [chatId]: { ...slot, cloudStop: stop, cloudTurnPresentations,
+        foregroundTurnId: cloudTurnEnding(slot) ? turnId : slot.foregroundTurnId ?? turnId } },
+        pendingLocalTurns: state.pendingLocalTurns[chatId] === turnId ? withoutPendingLocalTurn(state.pendingLocalTurns, chatId) : state.pendingLocalTurns };
+    });
+    return stop;
+  },
+
+  recordCloudTurnEnd: (chatId, turnId, ending) => {
+    const slot = get().sessions[chatId];
+    if (!slot || !isCloudWorkspace(slot.cwd)) return;
+    const cloudTurnPresentations = withCloudTurnPresentation(slot.cloudTurnPresentations, turnId, {
+      ...ending, startedAt: cloudTurnStart(slot, turnId), endedAt: Date.now(),
+    });
+    if (cloudTurnPresentations !== slot.cloudTurnPresentations) get().patchSession(chatId, { cloudTurnPresentations });
+  },
+
+  rejectCloudStopPresentation: (chatId, operationId) => {
+    const slot = get().sessions[chatId];
+    if (!slot || !isCloudWorkspace(slot.cwd) || slot.cloudStop?.operationId !== operationId) return;
+    const cloudTurnPresentations = Object.fromEntries(Object.entries(slot.cloudTurnPresentations ?? {}).filter(([, value]) =>
+      value.source !== "stop" || value.operationId !== operationId));
+    get().patchSession(chatId, { cloudTurnPresentations });
+  },
+
   // ── Policies (localStorage bootstrap, then device-local SQLite) ──
   addPolicy: (chatId, rule) => {
     set((state) => {
@@ -686,6 +762,12 @@ export const useSessionsStore = create<SessionsStoreState>((set, get) => ({
         normalized = { ...normalized, executionId, sessionId: executionId };
       }
       const previous = state.sessions[chatId];
+      if (normalized.transcriptSource === undefined && previous?.transcriptSource &&
+          previous.cwd === normalized.cwd && previous.messages === normalized.messages)
+        normalized = { ...normalized, transcriptSource: previous.transcriptSource };
+      if (!Object.hasOwn(slot, "transcriptContentSignatures") && previous?.transcriptContentSignatures &&
+          previous.cwd === normalized.cwd && previous.messages === normalized.messages)
+        normalized = { ...normalized, transcriptContentSignatures: previous.transcriptContentSignatures };
       if (!normalized.cloudOutbox && previous?.cloudOutbox && isCloudWorkspace(normalized.cwd) &&
           previous.cwd === normalized.cwd && previous.agentId === normalized.agentId)
         normalized = { ...normalized, cloudOutbox: previous.cloudOutbox };
@@ -728,7 +810,7 @@ export const useSessionsStore = create<SessionsStoreState>((set, get) => ({
     });
   },
 
-  patchSession: (chatId, patch) => {
+  patchSession: (chatId, patch, pendingTurnId) => {
     set((state) => {
       const existing = state.sessions[chatId] ?? BLANK;
       let normalizedPatch = patch;
@@ -790,6 +872,9 @@ export const useSessionsStore = create<SessionsStoreState>((set, get) => ({
       const indexNeedsUpdate = existing.executionId !== updated.executionId;
       return {
         sessions: next,
+        ...(pendingTurnId !== undefined ? { pendingLocalTurns: pendingTurnId === null
+          ? withoutPendingLocalTurn(state.pendingLocalTurns, chatId)
+          : state.pendingLocalTurns[chatId] === pendingTurnId ? state.pendingLocalTurns : { ...state.pendingLocalTurns, [chatId]: pendingTurnId } } : {}),
         ...retiredCloudStop(state, chatId, existing, updated),
         executionToChatId: indexNeedsUpdate
           ? rebuildIndex(next)
@@ -1127,18 +1212,26 @@ export const useSessionsStore = create<SessionsStoreState>((set, get) => ({
     if (upd.sessionUpdate === "turn_state" && upd.state) {
       const slot = get().sessions[chatId];
       const pendingTurn = get().pendingLocalTurns[chatId];
+      if (!slot || (slot.executionId ?? slot.sessionId) !== (notification.executionId ?? notification.sessionId)) return;
       if (
-        !slot ||
-        (slot.executionId ?? slot.sessionId) !==
-          (notification.executionId ?? notification.sessionId) ||
         (pendingTurn && upd.turnId && pendingTurn !== upd.turnId) ||
         (slot.cloudPromptPending && slot.foregroundTurnId !== upd.turnId) ||
         // Adopted turns have no local prompt RPC. An old completion on the
         // same route cannot settle their successor, even after it finishes.
         (upd.state !== "running" && !pendingTurn && slot.foregroundTurnId && slot.foregroundTurnId !== upd.turnId)
-      )
+      ) {
+        // A newly queued prompt owns the next indicator, not the predecessor's
+        // result. Retain that exact ending without changing the active route.
+        if (upd.state !== "running" && upd.turnId && slot.cloudTurnPresentations?.[upd.turnId]) {
+          get().recordCloudTurnEnd(chatId, upd.turnId, { source: "native", status: upd.state,
+            stopReason: upd.state === "cancelled" ? "cancelled" : upd.stopReason });
+        }
         return;
+      }
       if (upd.state === "running") {
+        // Late native running snapshots still reconcile content on this route,
+        // but cannot reopen an exact turn whose UI has ended.
+        if (cloudTurnEnding(slot, upd.turnId)) return;
         const engineStartedAt =
           typeof upd.startedAt === "number" &&
           Number.isFinite(upd.startedAt) &&
@@ -1164,6 +1257,7 @@ export const useSessionsStore = create<SessionsStoreState>((set, get) => ({
                 : Math.min(slot.activeTurnStartedAt, engineStartedAt),
         });
       } else {
+        const terminalState = upd.state;
         set(state => ({
           sessions: {
             ...state.sessions,
@@ -1178,6 +1272,10 @@ export const useSessionsStore = create<SessionsStoreState>((set, get) => ({
               foregroundTurnId: upd.turnId ?? slot.foregroundTurnId,
               ...(slot.cloudPromptPending ? { cloudPromptPending: false } : {}),
               activeTurnStartedAt: slot.cloudStop ? slot.activeTurnStartedAt : null,
+              ...(isCloudWorkspace(slot.cwd) && upd.turnId ? { cloudTurnPresentations: withCloudTurnPresentation(slot.cloudTurnPresentations, upd.turnId, {
+                startedAt: cloudTurnStart(slot, upd.turnId), endedAt: Date.now(), status: terminalState,
+                source: "native", stopReason: upd.state === "cancelled" ? "cancelled" : upd.stopReason,
+              }) } : {}),
             },
           },
           // Cloud process retirement and its durable command receipt can
@@ -1231,7 +1329,14 @@ export const useSessionsStore = create<SessionsStoreState>((set, get) => ({
           nextUsage.categories.every((category, index) =>
             category.name === previousCategories[index].name &&
             category.tokens === previousCategories[index].tokens &&
-            category.kind === previousCategories[index].kind)
+            category.kind === previousCategories[index].kind &&
+            category.id === previousCategories[index].id &&
+            (category.mcpServers === previousCategories[index].mcpServers ||
+              (category.mcpServers && previousCategories[index].mcpServers &&
+                category.mcpServers.length === previousCategories[index].mcpServers.length &&
+                category.mcpServers.every((server, serverIndex) =>
+                  server.serverName === previousCategories[index].mcpServers![serverIndex].serverName &&
+                  server.tokens === previousCategories[index].mcpServers![serverIndex].tokens))))
         ) nextUsage.categories = previousCategories;
         if (
           nextUsage.size === slot.usage.size && nextUsage.used === slot.usage.used &&
@@ -1952,7 +2057,7 @@ export function useAnyChatStreaming(chatIds: readonly string[]): boolean {
   });
 }
 
-/** Exact visual answer to "is an agent doing work?" Session admission alone
+/** Execution-safety answer to "is an agent doing work?" Session admission alone
  * is not work: every newly-opened chat warms an execution before the user has
  * sent anything. A live/rebuilding turn, an owned optimistic turn, an active
  * background task, or a running workflow is real work. */
@@ -1960,7 +2065,7 @@ export function agentSessionHasActiveWork(
   slot: AgentSessionState | undefined,
   pendingLocalTurnId: string | null | undefined,
 ): boolean {
-  return agentActivity(slot, pendingLocalTurnId) !== null;
+  return agentExecutionActivity(slot, pendingLocalTurnId) !== null;
 }
 
 /** Workspace-tab activity indicator. Unlike useAnyChatWorking (a conservative
@@ -1969,10 +2074,10 @@ export function useAnyChatAgentWorking(chatIds: readonly string[]): boolean {
   return useSessionsStore((state) => {
     for (const id of chatIds) {
       if (
-        agentSessionHasActiveWork(
+        agentActivity(
           state.sessions[id],
           state.pendingLocalTurns[id],
-        )
+        ) !== null
       ) {
         return true;
       }
@@ -2006,16 +2111,17 @@ export function useAnyChatWorking(chatIds: readonly string[]): boolean {
   });
 }
 
-/** True if THIS chat currently has an in-flight turn (status ===
- *  "streaming"). Mirror of {@link useAnyChatStreaming} for the
- *  single-chat case. Used by the chat-tab row to swap its
+/** Whether THIS chat presents a running turn. Local keeps its streaming
+ *  status; cloud can finish presentation before command retirement.
+ *  Used by the chat-tab row to swap its
  *  AgentIcon for a ZerosSpinner while the agent is producing
  *  output. Returns a primitive boolean so the subscription is
  *  stable across token-chunk churn. */
 export function useChatStreaming(chatId: string | null | undefined): boolean {
   return useSessionsStore((s) => {
     if (!chatId) return false;
-    return s.sessions[chatId]?.status === "streaming";
+    const slot = s.sessions[chatId];
+    return (slot && cloudPresentationRunning(slot, s.pendingLocalTurns[chatId])) ?? slot?.status === "streaming";
   });
 }
 

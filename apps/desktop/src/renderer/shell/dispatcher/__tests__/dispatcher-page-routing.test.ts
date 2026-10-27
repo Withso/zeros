@@ -19,20 +19,19 @@ describe("Create Workspace page routing", () => {
     expect(dispatcher).not.toContain("DialogContent");
   });
 
-  it("places the Code/Design toggle with context above the composer card", () => {
+  it("keeps project and source above the composer without the retired mode toggle", () => {
     const dispatcher = source(
       "apps/desktop/src/renderer/shell/dispatcher/dispatcher-modal.tsx",
     );
     const context = dispatcher.indexOf('data-dispatcher-context=""');
-    const toggle = dispatcher.indexOf("<WorkspaceModeToggleView");
     const card = dispatcher.indexOf("<section");
-    const composer = dispatcher.indexOf("<DispatcherComposer");
+    const composer = dispatcher.search(/<DispatcherComposer(?:\s|>)/);
 
     expect(context).toBeGreaterThanOrEqual(0);
-    expect(toggle).toBeGreaterThan(context);
-    expect(card).toBeGreaterThan(toggle);
+    expect(dispatcher).not.toContain("<WorkspaceModeToggleView");
+    expect(card).toBeGreaterThan(context);
     expect(composer).toBeGreaterThan(card);
-    expect(dispatcher).toContain('data-dispatcher-mode-switcher=""');
+    expect(dispatcher).not.toContain('data-dispatcher-mode-switcher=""');
   });
 
   it("routes the shared launcher into Create and mounts it beside the app sidebar", () => {

@@ -1,3 +1,4 @@
+import { mcpSaveInputSchema, mcpDeleteInputSchema, opMcpDeleteServer, opMcpSaveServer, type McpSettingsCommit } from "../settings/mcp-configuration";
 import { designDirectoryEntry } from "../design/metadata";
 import { isCodeReviewOperation } from "@zeros/protocol/code-review";
 import { handleCodeReviewRoute } from "../code-review/routes";
@@ -7,6 +8,7 @@ import { isGitReviewOperation } from "@zeros/protocol/git-review-actions";
 import { handleGitReviewOperation } from "../git/review-actions";
 import { assertDesignCheckoutReadable, readDesignCheckoutStatus } from "../design/checkout-status";
 import { DesignCatalogReader, DesignCatalogError, type DesignCatalogAdmission } from "../design/catalog";
+import { DesignPreviewJobs } from "../design/preview-jobs";
 import { inspectDesignCatalog, readDesignCatalogMetadata } from "../design/catalog-storage";
 import type { DesignCatalogRead, DesignCatalogOwner } from "@zeros/protocol/design-catalog";
 import {
@@ -279,6 +281,7 @@ import {
   designDirectoryNameFor,
   DESIGN_CANVAS_FILE,
   readDesignWorkspaceSnapshot,
+  readDesignNavigationSnapshot,
   type DesignWorkspaceSnapshot,
 } from "../design/document";
 import {
@@ -342,6 +345,8 @@ import {
   setChatWorkspaceResolver,
   type ChatRow,
 } from "../db/chats";
+import { openZerosDb } from "../db";
+import { getConversationContext, resetConversationContext } from "../db/conversation-context";
 import { headRev, tombstonesSince } from "../db/sync";
 import {
   WINDOW_MAX_ROWS,
@@ -535,6 +540,8 @@ function assertRemoteRepoRootAllowed(repoRoot: string, remote: boolean): void {
 }
 
 const WRITE_OPS = new Set<string>([
+  "mcp.saveServer",
+  "mcp.deleteServer",
   "git.reviewHunk",
   "git.resolveConflict",
   "codeReview.create",
@@ -1269,6 +1276,17 @@ function preserveProviderIdentity(
   c: ChatRow,
   existing: ChatRow | null = getChat(c.id),
 ): ChatRow {
+  // A reset explicitly detached this chat's native history. A renderer that
+  // has not received the invalidation yet must not attach that old history
+  // again. New bindings for this generation come only from the engine.
+  if (existing?.agentId === c.agentId && getConversationContext(c.id)?.generation) {
+    return {
+      ...c,
+      sessionId: existing.sessionId,
+      providerBinding: existing.providerBinding ?? null,
+      providerMetadata: existing.providerMetadata ?? null,
+    };
+  }
   const incomingProviderBinding =
     c.providerBinding?.providerId === c.agentId ? c.providerBinding : null;
   const existingProviderBinding =
@@ -1338,7 +1356,26 @@ interface DesignTerritoryTransitionTarget {
 
 export class WorkspaceService {
   private readonly catalogReader = new DesignCatalogReader();
+  private readonly previewJobs = new DesignPreviewJobs();
   private readonly designRouteHost: DesignWorkspaceRouteHost = {
+    readDesignNavigation: (workspaceId, remote, hostLocalResources) =>
+      this.withDesignReadWorkspace(workspaceId, remote, async ({ workspace, root, designDirectory }) => {
+        try {
+          const navigation = await readDesignNavigationSnapshot(root);
+          noteDesignSnapshotDirectory(root, designDirectory);
+          return {
+            ...navigation,
+            owner: { workspaceId: workspace.id, directoryId: navigation.directoryId,
+              organizationId: workspace.organizationId ?? null, placement: "local" },
+            snapshot: { ...navigation.snapshot, directoryId: navigation.directoryId, directory: designDirectory,
+              protocolCapability: hostLocalResources ? this.designProtocolCapabilityProvider?.(workspace.id) ?? null : null },
+          };
+        } catch (error) {
+          if (error instanceof DesignCatalogError) return { unavailable: error.reason };
+          throw error;
+        }
+      }),
+    previewJobs: this.previewJobs,
     readDesignCatalog: (input, remote, admission) => this.readDesignCatalog(input, remote, admission),
     resolveDesignWorkspace: (workspaceId, remote) =>
       this.resolveDesignWorkspace(workspaceId, remote),
@@ -1383,7 +1420,11 @@ export class WorkspaceService {
 
   /** Live accessor for the engine's MCP gateway (created lazily after this
    *  service), wired by the engine so the mcp.gateway.* ops can reach it. */
-  private gatewayAccessor: (() => McpGateway | null) | null = null;
+  private gatewayAccessor: ((repoRoot?: string) => McpGateway | null | Promise<McpGateway | null>) | null = null;
+  private mcpCommit?: McpSettingsCommit;
+  setMcpCommit(commit: McpSettingsCommit): void { this.mcpCommit = commit; }
+  private mcpProbe?: (input: unknown, secrets: Record<string, unknown>, repoRoot?: string, requestId?: string, cancel?: boolean) => Promise<unknown>;
+  setMcpProbe(probe: NonNullable<WorkspaceService["mcpProbe"]>): void { this.mcpProbe = probe; }
   private nativeExtensionReader:
     | ((query: ExtensionQuery) => Promise<ExtensionInventory | null>)
     | null = null;
@@ -1415,7 +1456,7 @@ export class WorkspaceService {
   ): void {
     this.sessionToolAccess = access;
   }
-  setGatewayAccessor(fn: () => McpGateway | null): void {
+  setGatewayAccessor(fn: NonNullable<WorkspaceService["gatewayAccessor"]>): void {
     this.gatewayAccessor = fn;
   }
   /** Per-launch capability used only by the local Electron custom protocol.
@@ -1774,11 +1815,10 @@ export class WorkspaceService {
     });
     return true;
   }
-  /** The gateway every gateway op targets — the user-global one. (Per-repo
-   *  gateways were retired with the 2026-07-17 repo-file slimming: MCP is
-   *  user-level only, so there is exactly one gateway instance.) */
-  private gatewayForScope(): McpGateway | null {
-    return this.gatewayAccessor?.() ?? null;
+  private async gatewayForScope(params: Params = {}, remote = false): Promise<McpGateway | null> {
+    const root = optStr(params, "repoRoot");
+    if (root) this.assertSettingsRepoRoot(root, remote);
+    return this.gatewayAccessor?.(root ? personalRepoRoot(root) : undefined) ?? null;
   }
 
   isWriteOp(op: string): boolean {
@@ -2149,7 +2189,7 @@ export class WorkspaceService {
   /** Local custom-protocol entry point after the engine validates its capability. */
   async readDesignProtocolResource(
     workspaceId: string,
-    input: { path: string; sourceVersion: string | null },
+    input: import("../design/protocol-resource").DesignProtocolResourceInput,
   ): Promise<DesignProtocolResource | null> {
     try {
       // Snapshot and frame reads resolve the active directory in a scoped
@@ -2270,7 +2310,11 @@ export class WorkspaceService {
 
   retireDesignCatalog(connectionId: string): void {
     this.catalogReader.retire(connectionId);
+    this.previewJobs.retire(connectionId);
   }
+
+  stopDesignPreviews(): Promise<void> { return this.previewJobs.stop(); }
+  retireUnauthorizedDesignPreviews(): void { this.previewJobs.retireUnauthorized(); }
 
   private readDesignCatalog(input: DesignCatalogRead, remote: boolean, admission: DesignCatalogAdmission) {
     const owner = (workspace: Workspace): DesignCatalogOwner => ({ workspaceId: workspace.id, directoryId: input.directoryId,
@@ -2487,6 +2531,13 @@ export class WorkspaceService {
       gitMutationAdmitted?: boolean;
       designDirectoryResolved?: boolean;
       catalogAdmission?: DesignCatalogAdmission;
+      /** Serialize transcript resets with provider admission/close. The service
+       * decides whether history changes; the engine retires its live context. */
+      withConversationMutation?: <T>(
+        chatId: string,
+        apply: (retire: () => Promise<void>) => Promise<T>,
+      ) => Promise<T>;
+      previewAdmission?: DesignCatalogAdmission;
     } = {},
   ): Promise<unknown> {
     const remote = opts.remote === true;
@@ -2597,6 +2648,7 @@ export class WorkspaceService {
         remote,
         hostLocalResources,
         ...(opts.catalogAdmission ? { catalogAdmission: opts.catalogAdmission } : {}),
+        ...(opts.previewAdmission ? { previewAdmission: opts.previewAdmission } : {}),
       });
     }
     if (isCodeReviewOperation(op)) {
@@ -3732,8 +3784,27 @@ export class WorkspaceService {
           query.toolId,
         );
       }
+      case "mcp.saveServer":
+      case "mcp.deleteServer": {
+        if (remote || !hostLocalResources) throw new Error("Local MCP configuration must be saved on this device.");
+        const input = op === "mcp.deleteServer" ? mcpDeleteInputSchema.parse(params) : mcpSaveInputSchema.parse(params);
+        if (input.layer === "repo-local" && !input.repoRoot) throw new Error("Choose a project before saving.");
+        if (input.repoRoot) {
+          this.assertSettingsRepoRoot(input.repoRoot, false);
+          input.repoRoot = personalRepoRoot(input.repoRoot);
+          this.assertSettingsRepoRoot(input.repoRoot, false);
+        }
+        return "server" in input ? opMcpSaveServer(input, this.mcpCommit) : opMcpDeleteServer(input, this.mcpCommit);
+      }
+      case "mcp.probe":
+      case "mcp.cancelProbe": {
+        if (remote || !hostLocalResources || !this.mcpProbe) throw new Error("Connection checks are unavailable on this device.");
+        const root = optStr(params, "repoRoot");
+        if (root) this.assertSettingsRepoRoot(root, false);
+        return this.mcpProbe(params.server, (params.secrets ?? {}) as Record<string, unknown>, root ? personalRepoRoot(root) : undefined, reqStr(params, "requestId"), op === "mcp.cancelProbe");
+      }
       case "mcp.gateway.status": {
-        const gw = this.gatewayForScope();
+        const gw = await this.gatewayForScope(params, remote);
         return {
           running: gw?.running ?? false,
           error: this.gatewayErrorAccessor?.() ?? null,
@@ -3751,11 +3822,11 @@ export class WorkspaceService {
         return { ok: true };
       }
       case "mcp.gateway.cancelAuth": {
-        await this.gatewayForScope()?.cancelAuthorization(reqStr(params, "server"));
+        await (await this.gatewayForScope(params, remote))?.cancelAuthorization(reqStr(params, "server"));
         return { ok: true };
       }
       case "mcp.gateway.reconnect": {
-        await this.gatewayForScope()?.reconnect();
+        await (await this.gatewayForScope(params, remote))?.reconnect();
         return { ok: true };
       }
       case "mcp.gateway.setOAuthSecret": {
@@ -3765,7 +3836,7 @@ export class WorkspaceService {
         const parsed = new URL(url);
         if (!["http:", "https:"].includes(parsed.protocol) || parsed.username || parsed.password || clientId.length > 4096 || value.length > 16384) throw new Error("Invalid MCP OAuth client configuration.");
         if (!this.gatewayOAuthSecretSetter) throw new Error("OAuth credential storage is unavailable.");
-        await this.gatewayForScope()?.cancelAuthorization();
+        await (await this.gatewayForScope(params, remote))?.cancelAuthorization();
         this.gatewayOAuthSecretSetter(url, clientId, value);
         return { ok: true };
       }
@@ -3776,7 +3847,7 @@ export class WorkspaceService {
             message: "MCP sign-in is desktop-only.",
           });
         }
-        const gw = this.gatewayForScope();
+        const gw = await this.gatewayForScope(params, remote);
         if (!gw) {
           throw new GitError({
             code: "MCP_GATEWAY_DOWN",
@@ -3787,14 +3858,14 @@ export class WorkspaceService {
         return { status: await gw.authorize(reqStr(params, "server")) };
       }
       case "mcp.gateway.disconnect": {
-        const gw = this.gatewayForScope();
+        const gw = await this.gatewayForScope(params, remote);
         if (gw) await gw.disconnect(reqStr(params, "server"));
         return { ok: true };
       }
       case "mcp.gateway.beginAuth": {
         // Headless sign-in step 1 — return the authorization URL (no browser).
         // This is the cloud path: the renderer opens it on the user's device.
-        const gw = this.gatewayForScope();
+        const gw = await this.gatewayForScope(params, remote);
         if (!gw) {
           throw new GitError({
             code: "MCP_GATEWAY_DOWN",
@@ -3805,7 +3876,7 @@ export class WorkspaceService {
       }
       case "mcp.gateway.completeAuth": {
         // Headless sign-in step 2 — finish with the pasted code/URL.
-        const gw = this.gatewayForScope();
+        const gw = await this.gatewayForScope(params, remote);
         if (!gw) {
           throw new GitError({
             code: "MCP_GATEWAY_DOWN",
@@ -4328,6 +4399,7 @@ export class WorkspaceService {
         const result = await status(reqStr(params, "workspaceId"), {
           paths: optStrArr(params, "paths"),
           includeTracking: optBool(params, "includeTracking"),
+          includeSummary: optBool(params, "includeSummary"),
         });
         if (!remote) return result;
         // (#1) Mirror the file.tree/read/diff secret boundary: a remote client
@@ -5364,138 +5436,163 @@ export class WorkspaceService {
           | "filesAndTranscript"
           | "filesOnly"
           | "transcriptOnly";
-        const turn = getTurn(chatId, turnId);
-        if (!turn) {
-          throw new GitError({
-            code: "VALIDATION_FAILED",
-            message: `unknown turn ${turnId}`,
-          });
-        }
-        const folder = turn.folder ?? "";
-        // Authored union across THIS chat's turns from this one onward (confirmed
-        // reset scope: "this turn + all later turns of this chat").
-        const chatTurns = listTurnsForChat(chatId);
-        const span = chatTurns.filter((t) => t.ord >= turn.ord);
-        const authored = [
-          ...new Set(span.flatMap((t) => t.files.map((f) => f.path))),
-        ];
-        // Capture the rows the truncate is about to delete, BEFORE deleting, so
-        // undo can restore the full CONVERSATION (user messages, every tool call
-        // with its inputs/outputs, the final answer) + turn rows — not just the
-        // files. Skipped for filesOnly (no truncation happens).
-        const willTruncate = mode !== "filesOnly";
-        const captured = willTruncate
-          ? getChatMessagesFrom(chatId, turnId)
-          : null;
-        const capturedTurns = willTruncate
-          ? getRawTurnsFrom(chatId, turnId)
-          : [];
+        const apply = async (retire: () => Promise<void>) => {
+          const turn = getTurn(chatId, turnId);
+          if (!turn) {
+            throw new GitError({
+              code: "VALIDATION_FAILED",
+              message: `unknown turn ${turnId}`,
+            });
+          }
+          const willTruncate = mode !== "filesOnly";
+          if (willTruncate) await retire();
+          const folder = turn.folder ?? "";
+          // Authored union across THIS chat's turns from this one onward (confirmed
+          // reset scope: "this turn + all later turns of this chat").
+          const chatTurns = listTurnsForChat(chatId);
+          const span = chatTurns.filter((t) => t.ord >= turn.ord);
+          const authored = [
+            ...new Set(span.flatMap((t) => t.files.map((f) => f.path))),
+          ];
+          // Capture the rows the truncate is about to delete, BEFORE deleting, so
+          // undo can restore the full CONVERSATION (user messages, every tool call
+          // with its inputs/outputs, the final answer) + turn rows — not just the
+          // files. Skipped for filesOnly (no truncation happens).
+          const captured = willTruncate
+            ? getChatMessagesFrom(chatId, turnId)
+            : null;
+          const capturedTurns = willTruncate
+            ? getRawTurnsFrom(chatId, turnId)
+            : [];
 
-        let fileResult: Awaited<ReturnType<typeof applyTurnSpanReset>> = {
-          applied: [],
-          conflicts: [],
-          skipped: [],
-          preResetSnapshot: null,
-          postResetSnapshot: null,
+          let fileResult: Awaited<ReturnType<typeof applyTurnSpanReset>> = {
+            applied: [],
+            conflicts: [],
+            skipped: [],
+            preResetSnapshot: null,
+            postResetSnapshot: null,
+          };
+          if (mode !== "transcriptOnly" && folder) {
+            // Unwind only file-changing turns, newest-first inside the helper.
+            // Each path uses the pre/post pair of the turn that authored it, so a
+            // later conversational turn or another-file edit cannot become a
+            // false merge base and clobber concurrent work.
+            fileResult = await applyTurnSpanReset(
+              folder,
+              chatId,
+              span
+                .filter((item) => item.files.length > 0)
+                .map((item) => ({
+                  paths: item.files.map((file) => file.path),
+                  preSnapshot: item.preSnapshot,
+                  postSnapshot: item.postSnapshot,
+                })),
+            );
+          }
+          // Stash everything undo needs under a fresh id, then cap per chat.
+          const resetId = `reset-${Date.now()}-${Math.random()
+            .toString(36)
+            .slice(2, 8)}`;
+          let truncated = 0;
+          let turnIds: string[] = [];
+          openZerosDb().transaction(() => {
+            if (willTruncate) {
+              truncated = truncateChatMessagesFrom(chatId, turnId);
+              turnIds = deleteTurnsFrom(chatId, turnId).turnIds;
+              resetConversationContext(chatId);
+            }
+            saveResetUndo({
+              resetId,
+              chatId,
+              folder: folder || null,
+              snapshot: fileResult.preResetSnapshot,
+              postSnapshot: fileResult.postResetSnapshot,
+              resetPaths: authored,
+              cutOrd: captured?.cutOrd ?? null,
+              messages: captured?.rows ?? [],
+              turns: capturedTurns,
+              createdAt: Date.now(),
+            });
+            pruneResetUndo(chatId, RESET_UNDO_KEEP);
+          })();
+          if (folder && turnIds.length) await deleteSnapshotRefs(folder, chatId, turnIds);
+          return {
+            applied: fileResult.applied,
+            conflicts: fileResult.conflicts,
+            skipped: fileResult.skipped,
+            preResetSnapshot: fileResult.preResetSnapshot,
+            resetPaths: authored,
+            truncated,
+            resetId,
+          };
         };
-        if (mode !== "transcriptOnly" && folder) {
-          // Unwind only file-changing turns, newest-first inside the helper.
-          // Each path uses the pre/post pair of the turn that authored it, so a
-          // later conversational turn or another-file edit cannot become a
-          // false merge base and clobber concurrent work.
-          fileResult = await applyTurnSpanReset(
-            folder,
-            chatId,
-            span
-              .filter((item) => item.files.length > 0)
-              .map((item) => ({
-                paths: item.files.map((file) => file.path),
-                preSnapshot: item.preSnapshot,
-                postSnapshot: item.postSnapshot,
-              })),
-          );
-        }
-        let truncated = 0;
-        if (willTruncate) {
-          truncated = truncateChatMessagesFrom(chatId, turnId);
-          const { turnIds } = deleteTurnsFrom(chatId, turnId);
-          if (folder) await deleteSnapshotRefs(folder, chatId, turnIds);
-        }
-        // Stash everything undo needs under a fresh id, then cap per chat.
-        const resetId = `reset-${Date.now()}-${Math.random()
-          .toString(36)
-          .slice(2, 8)}`;
-        saveResetUndo({
-          resetId,
-          chatId,
-          folder: folder || null,
-          snapshot: fileResult.preResetSnapshot,
-          postSnapshot: fileResult.postResetSnapshot,
-          resetPaths: authored,
-          cutOrd: captured?.cutOrd ?? null,
-          messages: captured?.rows ?? [],
-          turns: capturedTurns,
-          createdAt: Date.now(),
-        });
-        pruneResetUndo(chatId, RESET_UNDO_KEEP);
-        return {
-          applied: fileResult.applied,
-          conflicts: fileResult.conflicts,
-          skipped: fileResult.skipped,
-          preResetSnapshot: fileResult.preResetSnapshot,
-          resetPaths: authored,
-          truncated,
-          resetId,
-        };
+        return mode !== "filesOnly" && opts.withConversationMutation
+          ? opts.withConversationMutation(chatId, apply)
+          : apply(async () => {});
       }
       case "turns.undoReset": {
         const resetId = reqStr(params, "resetId");
-        const rec = getResetUndo(resetId);
-        if (!rec) {
+        const chatId = getResetUndo(resetId)?.chatId;
+        // Undo carries a reset id, not a caller-supplied chat id. Resolve and
+        // authorize its actual owner before touching either files or context.
+        if (remote && chatId && this.remoteChatRestricted(chatId)) {
+          throw new GitError({ code: "REMOTE_RESTRICTED", message: "This chat is in a workspace restricted from remote access." });
+        }
+        const apply = async (retire: () => Promise<void>) => {
+          const rec = getResetUndo(resetId);
+          if (!rec) {
+            return {
+              restored: [],
+              transcriptRestored: false,
+              messagesRestored: 0,
+            };
+          }
+          // 1) Files — restore the working tree from the pre-reset snapshot.
+          // rec.postSnapshot (the tree the reset left) is the 3-way merge base:
+          // edits made AFTER the reset are merged around, overlaps conflict and
+          // stay put. Legacy records (null) keep the original blind restore.
+          const restored =
+            rec.snapshot && rec.folder
+              ? await undoTurnReset(
+                  rec.folder,
+                  rec.snapshot,
+                  rec.resetPaths,
+                  rec.postSnapshot,
+                )
+              : [];
+          // 2) Transcript — re-insert the stashed messages + turns ONLY when the
+          // chat wasn't continued past the reset (the truncated ord range is still
+          // free), so they land at their exact original positions. Otherwise the
+          // files are undone but the conversation is left as-is (the caller warns).
+          let transcriptRestored = false;
+          let messagesRestored = 0;
+          if (
+            rec.cutOrd != null &&
+            rec.messages.length > 0 &&
+            maxChatMessageOrd(rec.chatId) < rec.cutOrd
+          ) {
+            await retire();
+            openZerosDb().transaction(() => {
+              reinsertChatMessages(rec.chatId, rec.messages);
+              reinsertTurns(rec.turns);
+              resetConversationContext(rec.chatId);
+            })();
+            transcriptRestored = true;
+            messagesRestored = rec.messages.length;
+          }
+          deleteResetUndo(resetId);
+          // `chatId` lets the engine target the cross-device transcript re-window
+          // nudge (params here carry only resetId); the renderer ignores it.
           return {
-            restored: [],
-            transcriptRestored: false,
-            messagesRestored: 0,
+            restored,
+            transcriptRestored,
+            messagesRestored,
+            chatId: rec.chatId,
           };
-        }
-        // 1) Files — restore the working tree from the pre-reset snapshot.
-        // rec.postSnapshot (the tree the reset left) is the 3-way merge base:
-        // edits made AFTER the reset are merged around, overlaps conflict and
-        // stay put. Legacy records (null) keep the original blind restore.
-        const restored =
-          rec.snapshot && rec.folder
-            ? await undoTurnReset(
-                rec.folder,
-                rec.snapshot,
-                rec.resetPaths,
-                rec.postSnapshot,
-              )
-            : [];
-        // 2) Transcript — re-insert the stashed messages + turns ONLY when the
-        // chat wasn't continued past the reset (the truncated ord range is still
-        // free), so they land at their exact original positions. Otherwise the
-        // files are undone but the conversation is left as-is (the caller warns).
-        let transcriptRestored = false;
-        let messagesRestored = 0;
-        if (
-          rec.cutOrd != null &&
-          rec.messages.length > 0 &&
-          maxChatMessageOrd(rec.chatId) < rec.cutOrd
-        ) {
-          reinsertChatMessages(rec.chatId, rec.messages);
-          reinsertTurns(rec.turns);
-          transcriptRestored = true;
-          messagesRestored = rec.messages.length;
-        }
-        deleteResetUndo(resetId);
-        // `chatId` lets the engine target the cross-device transcript re-window
-        // nudge (params here carry only resetId); the renderer ignores it.
-        return {
-          restored,
-          transcriptRestored,
-          messagesRestored,
-          chatId: rec.chatId,
         };
+        return chatId && opts.withConversationMutation
+          ? opts.withConversationMutation(chatId, apply)
+          : apply(async () => {});
       }
 
       default:

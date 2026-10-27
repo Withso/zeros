@@ -13,6 +13,7 @@ import pg from "pg";
 
 import { ensureUser, type AuthedUser } from "./auth.js";
 import { HttpError } from "./authz.js";
+import { mcpRepositoryCatalog } from "./mcp/repositories.js";
 import type { GithubBackendConfig } from "./config.js";
 import {
   cleanupExpiredGithubOauth,
@@ -1074,6 +1075,9 @@ dbDescribe("organization GitHub source authorization", () => {
     expect(await source.json()).toMatchObject({installationId:f.entry.id,repository:{id:"123"}});
     const connection = await withSystemTx(pool, tx => tx.query("SELECT installation_id FROM cloud_github_connections WHERE org_id=$1 AND owner_user_id=$2", [f.org, f.user.id]));
     expect(connection.rows).toEqual([{ installation_id: f.entry.id }]);
+    // The MCP project catalog uses the user's verified installation view,
+    // independently of any Cloud Computer build or installation-wide token.
+    expect(await mcpRepositoryCatalog(pool)(f.org, f.user.id)).toEqual([{ repository: "acme/example", defaultBranch: "main" }]);
     expect(f.calls.some(call=>call.url.includes("/access_tokens"))).toBe(false);
     const before = f.calls.length;
     const denied = await f.request({action:"source",organizationId:randomUUID(),owner:"acme",repository:"example"});
@@ -1081,6 +1085,8 @@ dbDescribe("organization GitHub source authorization", () => {
     expect(f.calls).toHaveLength(before);
     expect((await f.request({action:"disconnect",installationId:f.entry.id,accessToken:undefined})).status).toBe(200);
     expect((await pool.query("SELECT 1 FROM cloud_github_connections WHERE org_id=$1",[f.org])).rowCount).toBe(0);
+    expect(await mcpRepositoryCatalog(pool)(f.org, f.user.id)).toEqual([]);
+    expect((await pool.query("SELECT 1 FROM organization_mcp_repositories WHERE org_id=$1",[f.org])).rowCount).toBe(0);
   });
 
   it("rejects an accessible GitHub installation when the person is not an active organization member", async () => {
@@ -1099,5 +1105,21 @@ dbDescribe("organization GitHub source authorization", () => {
     expect(response.status).toBe(409);
     expect(await response.json()).toMatchObject({error:{code:"github_authorization_changed"}});
     expect((await pool.query("SELECT 1 FROM cloud_github_connections WHERE org_id=$1",[f.org])).rowCount).toBe(0);
+    expect((await pool.query("SELECT 1 FROM organization_mcp_repositories WHERE org_id=$1",[f.org])).rowCount).toBe(0);
+  });
+
+  it("withdraws MCP repository choices after proof expiry, suspension and actor revision changes", async () => {
+    const f = await fixture();
+    const populate = () => f.request({ action: "repositories", installationId: f.entry.id, page: 1 });
+    expect((await populate()).status).toBe(200);
+    await pool.query("UPDATE organization_mcp_repositories SET expires_at=clock_timestamp()-interval '1 second' WHERE org_id=$1", [f.org]);
+    expect(await mcpRepositoryCatalog(pool)(f.org, f.user.id)).toEqual([]);
+    expect((await populate()).status).toBe(200);
+    await pool.query("UPDATE github_installations SET suspended_at=clock_timestamp() WHERE id=$1", [f.entry.id]);
+    expect(await mcpRepositoryCatalog(pool)(f.org, f.user.id)).toEqual([]);
+    await pool.query("UPDATE github_installations SET suspended_at=NULL WHERE id=$1", [f.entry.id]);
+    await pool.query("UPDATE users SET auth_revision=auth_revision+1 WHERE id=$1", [f.user.id]);
+    expect(await mcpRepositoryCatalog(pool)(f.org, f.user.id)).toEqual([]);
+    expect(await mcpRepositoryCatalog(pool)(f.org, randomUUID())).toEqual([]);
   });
 });

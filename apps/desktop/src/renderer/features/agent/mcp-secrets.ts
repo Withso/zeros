@@ -36,8 +36,8 @@ export { MCP_SECRET_SENTINEL };
 /** The scope an MCP secret belongs to: the user-global set, or one repo's
  *  (keyed by its MAIN checkout root — every worktree shares it). */
 export type McpSecretScope =
-  | { kind: "user" }
-  | { kind: "repo"; repoRoot: string };
+  | { kind: "user"; serverId?: string }
+  | { kind: "repo"; repoRoot: string; serverId?: string };
 
 /** Keychain account for an MCP secret env var, under the `mcp::` prefix the
  *  renderer keychain allowlist permits (apps/desktop/electron/keychain-accounts.ts).
@@ -49,9 +49,10 @@ export function mcpSecretAccount(
   envVarName: string,
   scope: McpSecretScope = { kind: "user" },
 ): string {
+  const suffix = scope.serverId ? `server::${scope.serverId}::${envVarName}` : envVarName;
   return scope.kind === "user"
-    ? `mcp::${envVarName}`
-    : `mcp::repo::${normalizeProjectRoot(scope.repoRoot)}::${envVarName}`;
+    ? `mcp::${suffix}`
+    : `mcp::repo::${normalizeProjectRoot(scope.repoRoot)}::${suffix}`;
 }
 
 export const setMcpSecret = (
@@ -116,12 +117,23 @@ async function collectScopeSecrets(
     names.map(async (name) => {
       try {
         const value = await getMcpSecret(name, scope);
-        if (value) out[name] = value;
+        if (value !== null) out[name] = value;
       } catch {
         /* omit this var */
       }
     }),
   );
+}
+
+async function collectServerSecrets(doc: unknown, scope: McpSecretScope, out: Record<string, string>): Promise<void> {
+  const servers = (doc as { mcp?: { servers?: unknown } } | null)?.mcp?.servers;
+  if (!Array.isArray(servers)) return;
+  for (const server of servers) {
+    if (!server || typeof server !== "object" || server.enabled === false) continue;
+    const id = typeof server.credential_id === "string" ? server.credential_id : undefined;
+    const names = secretEnvNamesFromDoc({ mcp: { servers: [server] } });
+    if (!id && server.transport === "stdio") await collectScopeSecrets(names, scope, out);
+  }
 }
 
 /** Resolve the secret MCP env vars from the Keychain into a `{NAME:value}`
@@ -139,8 +151,8 @@ export async function deriveMcpSecretEnv(
   const out: Record<string, string> = {};
   try {
     const read = await bridgeSettingsRead(bridge, "user");
-    await collectScopeSecrets(
-      secretEnvNamesFromDoc(read.doc),
+    await collectServerSecrets(
+      read.doc,
       { kind: "user" },
       out,
     );
@@ -151,8 +163,8 @@ export async function deriveMcpSecretEnv(
     const repoRoot = await vaultRepoRootForCwd(bridge, cwd);
     if (repoRoot) {
       const read = await bridgeSettingsRead(bridge, "repo-local", repoRoot);
-      await collectScopeSecrets(
-        secretEnvNamesFromDoc(read.doc),
+      await collectServerSecrets(
+        read.doc,
         { kind: "repo", repoRoot },
         out,
       );

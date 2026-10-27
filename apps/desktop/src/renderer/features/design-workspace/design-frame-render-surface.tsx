@@ -7,12 +7,13 @@
 // --- IMPORTS ---
 
 import { FileCode2 } from "lucide-react";
-import React, { useEffect, useMemo, useRef, useState } from "react";
+import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 
 import { designFrameRuntime } from "../../platform/bridge/design-frame-runtime";
 import { type DesignCanvasFrameWire } from "../../platform/git";
 import { type DesignHighResolutionViewportTile } from "./design-canvas-math";
 import { DesignFrameRuntimeIframe } from "./design-frame-runtime-iframe";
+import { DesignFrameSourceSurface } from "./design-frame-source-surface";
 import { designBackgroundWork } from "./state/design-background-work";
 import {
   designFrameAutoCapture,
@@ -21,6 +22,9 @@ import {
 } from "./state/design-frame-previews";
 import { useDesignRuntimeStore } from "./state/design-runtime-store";
 import { useDesignFramePreview } from "./state/use-design-frame-previews";
+import { designImageResidency, type DesignImageLease } from "./state/design-image-residency";
+import { retainDesignResource } from "./state/design-resource-counters";
+import { useDesignImageDisplay, useDesignImageState } from "./state/use-design-image-display";
 
 
 
@@ -43,9 +47,53 @@ async function decodeDesignHighResolutionCapture(
   signal: AbortSignal,
 ): Promise<void> {
   const image = new Image();
-  image.src = dataUrl;
-  await image.decode();
-  if (signal.aborted) throw new Error("Resolution capture was superseded.");
+  const cancel = () => { image.src = ""; };
+  signal.addEventListener("abort", cancel, { once: true });
+  try {
+    if (signal.aborted) throw new Error("Resolution capture was superseded.");
+    image.src = dataUrl;
+    await image.decode();
+    if (signal.aborted) throw new Error("Resolution capture was superseded.");
+  } finally {
+    signal.removeEventListener("abort", cancel);
+    image.src = "";
+  }
+}
+
+/** The cache already owns a loaded image. Moving that element into its view
+ * keeps warm remounts and detail upgrades synchronous with the camera. A
+ * second simultaneous view gets its own element; it cannot steal the first. */
+function DesignFramePicture({ image, url, current, screenshot }: {
+  image: HTMLImageElement | null; url: string; current?: boolean; screenshot?: boolean;
+}) {
+  const host = useRef<HTMLDivElement>(null);
+  useLayoutEffect(() => {
+    const container = host.current;
+    if (!container) return;
+    const node = image && !image.isConnected ? image : new Image();
+    node.alt = "";
+    node.decoding = "sync";
+    node.draggable = false;
+    if (current !== undefined) node.dataset.designFramePicture = current ? "current" : "previous";
+    if (screenshot) node.dataset.designFrameScreenshot = "";
+    node.className = "pointer-events-none block size-full object-fill";
+    const ready = () => {
+      if (node.complete && node.naturalWidth > 0) container.dataset.designFramePixelsReady = "";
+    };
+    node.addEventListener("load", ready);
+    if (node !== image) node.src = url;
+    container.appendChild(node);
+    ready();
+    return () => {
+      node.removeEventListener("load", ready);
+      delete container.dataset.designFramePixelsReady;
+      delete node.dataset.designFramePicture;
+      delete node.dataset.designFrameScreenshot;
+      node.remove();
+      if (node !== image) node.src = "";
+    };
+  }, [current, image, screenshot, url]);
+  return <div ref={host} data-design-frame-pixel-cover="" className="pointer-events-none absolute inset-0" />;
 }
 
 // ============================================
@@ -71,6 +119,12 @@ export const DesignFrameRenderSurface = React.memo(function DesignFrameRenderSur
   designDirectory,
   previewOwner,
   previewLevel,
+  sourceSurface = false,
+  sourceReadOnly = false,
+  sourceVisible = true,
+  onSourceReady,
+  onSourceUnavailable,
+  onSourceRetired,
 }: {
   workspaceId: string;
   protocolCapability: string | null;
@@ -91,23 +145,63 @@ export const DesignFrameRenderSurface = React.memo(function DesignFrameRenderSur
   previewOwner?: DesignPreviewOwner | null;
   /** The picture level that stays sharp at the frame's painted size. */
   previewLevel?: DesignPreviewLevel;
+  sourceSurface?: boolean;
+  /** Last-confirmed pixels can paint while source authority revalidates. */
+  sourceReadOnly?: boolean;
+  sourceVisible?: boolean;
+  onSourceReady?(file: string, version: string): void;
+  onSourceUnavailable?(file: string, version: string): void;
+  onSourceRetired?(file: string, version: string): void;
 }) {
-  // Text frames are transparent over the canvas; they keep painting themselves.
+  useLayoutEffect(() => retainDesignResource("frameSurfaces"), []);
+  const sourceOwner = `${workspaceId}\0${folder}\0${previewOwner?.directoryId ?? designDirectory ?? ""}\0${protocolCapability}\0${theme}`;
+  const sourceRequest = `${frame.sourceVersion}\0${frame.width}\0${frame.height}`;
+  const [sourceReady, setSourceReady] = useState<{ owner: string; version: string; key: string } | null>(null);
+  const [sourceFailure, setSourceFailure] = useState<{ owner: string; key: string } | null>(null);
+  const sourceEnabled = active && sourceSurface && !!frame.surfaceCost && !!protocolCapability;
+  // The passive surface keeps its confirmed outgoing document until the next
+  // generation is ready. It already reflows at the frame's current size; an
+  // older PNG must not cover it during that source replacement.
+  const hasSourcePixels = active && sourceReady?.owner === sourceOwner;
+  const sourceFailed = sourceFailure?.owner === sourceOwner && sourceFailure.key === sourceRequest;
+  const readySource = useCallback((file: string, version: string) => {
+    setSourceReady({ owner: sourceOwner, version, key: sourceRequest });
+    setSourceFailure(null);
+    onSourceReady?.(file, version);
+  }, [onSourceReady, sourceOwner, sourceRequest]);
+  const failedSource = useCallback((file: string, version: string) => {
+    setSourceFailure({ owner: sourceOwner, key: sourceRequest });
+    setSourceReady(current => current?.owner === sourceOwner && current.key !== sourceRequest ? current : null);
+    onSourceUnavailable?.(file, version);
+  }, [onSourceUnavailable, sourceOwner, sourceRequest]);
+  const retiredSource = useCallback((file: string, version: string) => {
+    setSourceReady(current => current?.owner === sourceOwner && current.version === version ? null : current);
+    onSourceRetired?.(file, version);
+  }, [onSourceRetired, sourceOwner]);
+  // Saved previews preserve authored alpha, including transparent text frames.
   const picture = useDesignFramePreview(
-    previewOwner && frame.kind !== "text"
+    active && previewOwner && (!hasSourcePixels || sourceFailed || !sourceEnabled)
       ? { owner: previewOwner, file: frame.file, sourceVersion: frame.sourceVersion, theme,
           level: previewLevel ?? "overview" }
       : null,
   );
-  const screenshot = useDesignRuntimeStore(
+  // A rejected generation still requests its normal bounded preview. Keep only
+  // the last confirmed source painted until that exact-generation decode can
+  // replace it; no failed HTML or pending layout work survives the handoff.
+  const sourcePainted = hasSourcePixels && (sourceEnabled || (sourceFailed && !picture?.current));
+  const storedScreenshot = useDesignRuntimeStore(
     (state) =>
       state.byWorkspace[workspaceId]?.frames[frame.file]?.screenshotsByNode[""],
   );
+  // A confirmed exact-generation preview already supplies the cover. Do not
+  // also reserve a full runtime screenshot that this surface will not paint;
+  // those duplicate rasters can evict an entire overview's warm thumbnails.
+  const screenshot = useDesignImageDisplay(storedScreenshot, active && !sourcePainted && !picture?.current);
   const runtimePaintVersion = useDesignRuntimeStore(
     (state) =>
       state.byWorkspace[workspaceId]?.frames[frame.file]?.updatedAt ?? -1,
   );
-  const [highResolutionCapture, setHighResolutionCapture] = useState<{
+  const [highResolutionCapture, setHighResolutionCapture] = useDesignImageState<{
     sourceVersion: string;
     tileKey: string;
     dataUrl: string;
@@ -115,7 +209,15 @@ export const DesignFrameRenderSurface = React.memo(function DesignFrameRenderSur
     width: number;
     height: number;
     scale: number;
-  } | null>(null);
+    lease: DesignImageLease;
+  }>();
+  const highResolutionCaptureRef = useRef(highResolutionCapture);
+  useLayoutEffect(() => { highResolutionCaptureRef.current = highResolutionCapture; }, [highResolutionCapture]);
+  useEffect(() => {
+    if (!active || !live || highResolutionDisabled || !highResolutionTile ||
+      highResolutionCapture?.sourceVersion !== frame.sourceVersion)
+      setHighResolutionCapture(null);
+  }, [active, live, highResolutionDisabled, highResolutionTile, highResolutionCapture?.sourceVersion, frame.sourceVersion, setHighResolutionCapture]);
   const requestedTileKey = highResolutionTile
     ? designHighResolutionTileKey(highResolutionTile)
     : null;
@@ -135,6 +237,7 @@ export const DesignFrameRenderSurface = React.memo(function DesignFrameRenderSur
     const controller = new AbortController();
     const flight = captureFlightRef.current;
     let retryTimer: number | null = null;
+    let stopWaitingForImage: (() => void) | undefined;
     let attempts = 0;
     const tileKey = designHighResolutionTileKey(highResolutionTile);
     const capture = () => {
@@ -152,6 +255,7 @@ export const DesignFrameRenderSurface = React.memo(function DesignFrameRenderSur
         return;
       }
       flight.inFlight = true;
+      const releaseRequest = retainDesignResource("tileRequests");
       void designBackgroundWork
         .schedule(`tile:${workspaceId}\0${frame.file}`, () => {
           if (
@@ -177,26 +281,38 @@ export const DesignFrameRenderSurface = React.memo(function DesignFrameRenderSur
           ) {
             return;
           }
-          await decodeDesignHighResolutionCapture(
-            captured.dataUrl,
-            controller.signal,
-          );
-          if (controller.signal.aborted) return;
-          setHighResolutionCapture({
-            sourceVersion: captured.sourceVersion,
-            tileKey,
-            dataUrl: captured.dataUrl,
-            crop: highResolutionTile.crop,
-            width: captured.width,
-            height: captured.height,
-            scale: captured.scale,
-          });
+          const lease = designImageResidency.acquire(captured.dataUrl, captured.width, captured.height,
+            captured.dataUrl.length * 2, highResolutionCaptureRef.current?.lease);
+          if (!lease) {
+            // Another display can own the single replacement allowance. Drop
+            // this unadmitted payload and retry only when capacity is released.
+            stopWaitingForImage ??= designImageResidency.subscribeAvailable(() => {
+              stopWaitingForImage?.();
+              stopWaitingForImage = undefined;
+              capture();
+            });
+            return;
+          }
+          let transferred = false;
+          try {
+            await decodeDesignHighResolutionCapture(captured.dataUrl, controller.signal);
+            if (controller.signal.aborted) return;
+            transferred = true;
+            setHighResolutionCapture({
+              sourceVersion: captured.sourceVersion, tileKey, dataUrl: captured.dataUrl,
+              crop: highResolutionTile.crop, width: captured.width, height: captured.height,
+              scale: captured.scale, lease,
+            });
+          } finally {
+            if (!transferred) lease.release();
+          }
         })
         .catch(() => {
           // The live iframe remains authoritative while a newer camera or
           // document generation cancels this optional resolution tile.
         })
         .finally(() => {
+          releaseRequest();
           flight.inFlight = false;
           const queued = flight.queued;
           flight.queued = null;
@@ -207,6 +323,7 @@ export const DesignFrameRenderSurface = React.memo(function DesignFrameRenderSur
     return () => {
       if (flight.queued === capture) flight.queued = null;
       if (retryTimer !== null) window.clearTimeout(retryTimer);
+      stopWaitingForImage?.();
       controller.abort();
     };
   }, [
@@ -217,6 +334,7 @@ export const DesignFrameRenderSurface = React.memo(function DesignFrameRenderSur
     highResolutionTile,
     live,
     runtimePaintVersion,
+    setHighResolutionCapture,
     workspaceId,
   ]);
 
@@ -246,6 +364,7 @@ export const DesignFrameRenderSurface = React.memo(function DesignFrameRenderSur
         selected={selected}
         selectedNodeIds={selectedNodeIds}
         autoCapture={!playbackSessionId && designFrameAutoCapture(selected, picture)}
+        underlayReady={sourcePainted || !!still}
         theme={theme}
         transitionCover={
           currentScreenshot ??
@@ -256,24 +375,15 @@ export const DesignFrameRenderSurface = React.memo(function DesignFrameRenderSur
         designDirectory={designDirectory}
       />
     );
-  } else if (still) {
-    surface = (
-      <img
-        src={still}
-        alt=""
-        decoding="async"
-        draggable={false}
-        data-design-frame-picture={picture && still === picture.url ? (picture.current ? "current" : "previous") : undefined}
-        className="pointer-events-none block size-full object-fill"
-      />
-    );
-  } else {
+  } else if (!sourcePainted && !still && !sourceEnabled) {
     surface = (
       <div className="bg-bg2 text-muted-fg pointer-events-none flex size-full items-center justify-center gap-2 text-xs">
         <FileCode2 />
         <span className="max-w-48 truncate">{frame.title}</span>
       </div>
     );
+  } else {
+    surface = null;
   }
 
   const mountedHighResolutionCapture =
@@ -295,7 +405,21 @@ export const DesignFrameRenderSurface = React.memo(function DesignFrameRenderSur
       ? mountedHighResolutionCapture
       : null;
   return (
-    <div className="relative isolate size-full overflow-hidden">
+    <div data-design-frame-render-surface="" className="relative isolate size-full overflow-hidden">
+      {sourceEnabled || sourcePainted ? <DesignFrameSourceSurface key={sourceOwner} workspaceId={workspaceId}
+        folder={folder} directoryId={previewOwner?.directoryId ?? designDirectory ?? ""} width={frame.width} height={frame.height}
+        capability={protocolCapability!} file={frame.file} title={frame.title}
+        sourceVersion={frame.sourceVersion} theme={theme} cost={frame.surfaceCost!}
+        visible={sourceVisible} retainHtml={live} allowLoad={sourceEnabled && !sourceReadOnly} onReady={readySource} onUnavailable={failedSource} onRetired={retiredSource} /> : null}
+      {/* Keep the same decoded image element through editor activation. Moving
+          its URL into the editor's subtree creates a new image whose resource
+          load can miss the next paint, even with a retained decoder. */}
+      {!sourcePainted && still ? <DesignFramePicture
+        image={picture && still === picture.url ? picture.image : null}
+        url={still}
+        current={picture && still === picture.url ? picture.current : undefined}
+        screenshot={still === currentScreenshot?.dataUrl}
+      /> : null}
       {surface}
       {mountedHighResolutionCapture ? (
         <img

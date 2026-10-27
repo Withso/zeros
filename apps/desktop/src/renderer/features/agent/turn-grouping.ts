@@ -31,6 +31,8 @@ export interface Turn {
   /** Start time of the provider turn, retained across steer segments so the
    *  live footer timer does not restart when a steer bubble is promoted. */
   recordedStartedAt: number;
+  /** Cloud summary carried by the provider turn's opening prompt, including steers. */
+  recordedSummary?: AgentTextMessage["turnSummary"];
   /** True when this visual segment begins with a mid-turn steer. */
   isSteer: boolean;
   /** All non-user-prompt messages that belong to this turn,
@@ -77,6 +79,13 @@ function uniqueDurableMessages(messages: AgentMessage[]): AgentMessage[] {
   return unique;
 }
 
+function recordedMetadata(current: Turn | null, prompt: AgentTextMessage): Pick<Turn, "recordedStartedAt" | "recordedSummary"> {
+  const providerTurn = prompt.steeredTurnId && current?.recordedTurnId === prompt.steeredTurnId ? current : null;
+  const summary = providerTurn ? providerTurn.recordedSummary : prompt.turnSummary;
+  return { recordedStartedAt: providerTurn?.recordedStartedAt ?? prompt.createdAt,
+    ...(summary ? { recordedSummary: summary } : {}) };
+}
+
 export function groupMessagesIntoTurns(messages: AgentMessage[]): Turn[] {
   const turns: Turn[] = [];
   let current: Turn | null = null;
@@ -101,16 +110,13 @@ export function groupMessagesIntoTurns(messages: AgentMessage[]): Turn[] {
         current.events.push(m);
         continue;
       }
-      const recordedStartedAt: number =
-        steeredTurnId && current?.recordedTurnId === steeredTurnId
-          ? current.recordedStartedAt
-          : m.createdAt;
+      const metadata = recordedMetadata(current, m);
       if (current && !isSleepOnlySystemTurn(current)) turns.push(current);
       const events: AgentMessage[] = m.localNote ? [m] : [];
       current = {
         userPrompt: m.localNote ? null : m,
         recordedTurnId: steeredTurnId ?? m.id,
-        recordedStartedAt,
+        ...metadata,
         isSteer: steeredTurnId != null,
         events,
         providerEvents: events,

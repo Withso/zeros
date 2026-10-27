@@ -41,7 +41,7 @@ import {
   canPreviewTurnFileDiff,
   isInterruptedTurn,
   settledTurnFailurePresentation,
-  TurnFilePill,
+  TurnFileRow,
   TurnFooter,
   turnFooterFailureLabel,
   turnFooterFiles,
@@ -77,7 +77,15 @@ it("extends the footer through parent background replies, without child bookkeep
   expect(turnFooterDuration(record, events, 1000)).toBe(900000);
 });
 
-describe("TurnFilePill cache ownership", () => {
+it("keeps the settled footer clock unchanged when only a wake-up notice has arrived", () => {
+  const record = { startedAt: 1000, endedAt: 124000 };
+  expect(turnFooterDuration(record, [{
+    id: "wake", kind: "text", role: "agent", phase: "commentary", text: "Woke up on schedule", createdAt: 950000,
+    wakeupNotice: { source: "loop_wakeup" },
+  }], 1000)).toBe(123000);
+});
+
+describe("TurnFileRow cache ownership", () => {
   beforeEach(() => useWorkspaceFileDiffSnapshot.mockClear());
 
   const renderPill = (additions: number, deletions: number) =>
@@ -85,7 +93,7 @@ describe("TurnFilePill cache ownership", () => {
       createElement(
         TooltipProvider,
         null,
-        createElement(TurnFilePill, {
+        createElement(TurnFileRow, {
           file: {
             path: "src/history.ts",
             status: "modified",
@@ -469,16 +477,93 @@ describe("turn footer first paint after a reopen", () => {
           createElement(TurnFooter, {
             chatId: "chat-1",
             turnId: "user-1",
+            threadTailKey: "turn-user-1",
             events: [],
             startedAt: 1_000,
             live: false,
+            isLastTurn: true,
             ...over,
           }),
         ),
       ),
     );
 
-  beforeEach(() => { turnRowCache.clear(); useSessionsStore.setState({ sessions: {} }); });
+  beforeEach(() => { turnRowCache.clear(); useSessionsStore.setState({ sessions: {} }); useWorkspaceFileDiffSnapshot.mockClear(); });
+
+  it.each(["/personal/local", "/organization/local"])("shows four recorded files and a turn review action in %s", (folder) => {
+    const files = Array.from({ length: 6 }, (_, index) => ({
+      path: `src/file-${index}.ts`, status: "modified" as const, additions: index + 1, deletions: index,
+    }));
+    turnRowCache.setData(turnRowKey("chat-1", "user-1"), row({ folder, files }));
+    const html = renderFooter();
+    expect(html).toContain("6 Files Changed");
+    expect(html).toContain("Review");
+    expect(html).toContain("Show 2 more");
+    expect(html).toContain("file-3.ts");
+    expect(html).not.toContain("file-4.ts");
+    expect(html).toContain("Copy output");
+    expect(html).toContain("Turn actions");
+  });
+
+  it("omits the changes card for an empty, live, or read-only turn", () => {
+    turnRowCache.setData(turnRowKey("chat-1", "user-1"), row());
+    expect(renderFooter()).not.toContain("data-turn-changes");
+    turnRowCache.setData(turnRowKey("chat-1", "user-1"), row({ files: [{
+      path: "src/one.ts", status: "added", additions: 1, deletions: 0,
+    }] }));
+    expect(renderFooter({ live: true })).toBe("");
+    expect(renderFooter({ readOnly: true })).not.toContain("data-turn-changes");
+    expect(renderFooter()).toContain("1 File Changed");
+  });
+
+  it.each(["/personal/local", "/organization/local", "cloud"])("collapses historical %s changes into totals for every file", (placement) => {
+    const files = Array.from({ length: 6 }, (_, index) => ({
+      path: `src/file-${index}.ts`, status: "modified" as const, additions: index + 1, deletions: index,
+    }));
+    const summary = row({ files });
+    turnRowCache.setData(turnRowKey("chat-1", "user-1"), summary);
+    const html = renderFooter({ isLastTurn: false, ...(placement === "cloud" ? {
+      chatId: "cloud:11111111-1111-4111-8111-111111111111:22222222-2222-4222-8222-222222222222:chat",
+      recordedSummary: summary,
+    } : { folder: placement }) });
+    expect(html).not.toContain("data-turn-changes=");
+    expect(html).toContain("data-turn-changes-toggle");
+    expect(html).toContain("aria-expanded=\"false\"");
+    expect(html).toContain("+21");
+    expect(html).toContain("−15");
+    expect(html).toContain("text-green-primary");
+    expect(html).toContain("text-red-primary");
+    expect(html).not.toContain("file-0.ts");
+    expect(useWorkspaceFileDiffSnapshot).not.toHaveBeenCalled();
+  });
+
+  it("keeps metadata-only historical changes discoverable and empty turns quiet", () => {
+    turnRowCache.setData(turnRowKey("chat-1", "user-1"), row({ files: [{
+      path: "renamed.ts", oldPath: "before.ts", status: "renamed", additions: 0, deletions: 0,
+    }] }));
+    const html = renderFooter({ isLastTurn: false });
+    expect(html).toContain("data-turn-changes-toggle");
+    expect(html).toContain("+0");
+    expect(html).toContain('class="text-red-primary">−0</span>');
+    expect(html).not.toContain("data-turn-changes=");
+    turnRowCache.setData(turnRowKey("chat-1", "user-1"), row());
+    expect(renderFooter({ isLastTurn: false })).not.toContain("data-turn-changes");
+  });
+
+  it.each(["claude", "codex", "cursor"])("paints mirrored %s cloud changes without native turn reads or reset actions", (agentId) => {
+    const summary = row({ agentId, status: "completed", stopReason: "end_turn", files: [{
+      path: "src/cloud.ts", status: "modified", additions: 4, deletions: 2,
+    }] });
+    const html = renderFooter({
+      chatId: "cloud:11111111-1111-4111-8111-111111111111:22222222-2222-4222-8222-222222222222:chat",
+      recordedSummary: summary,
+    });
+    expect(html).toContain("1 File Changed");
+    expect(html).toContain("cloud.ts");
+    expect(html).toContain("Review");
+    expect(html).not.toContain("Turn actions");
+    expect(useWorkspaceFileDiffSnapshot).not.toHaveBeenCalled();
+  });
 
   it.each(["/personal/local", "/organization/local"])("leaves stopped-turn behavior unchanged in %s", cwd => {
     useSessionsStore.setState({ sessions: { "chat-1": { ...BLANK, cwd, agentId: "codex" } } });

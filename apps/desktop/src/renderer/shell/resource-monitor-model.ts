@@ -26,6 +26,8 @@ export interface ResourceViewNode {
    * Zeros channel app (for example Alpha) running on the same Mac. */
   kind: ProcessResourceKind | "app" | "other-app";
   cpuPercent: number;
+  /** False while any process represented by this row lacks a CPU delta. */
+  cpuSampled?: boolean;
   memoryBytes: number;
   peakCpuPercent: number;
   peakMemoryBytes: number;
@@ -139,6 +141,7 @@ function stackSiblings(nodes: readonly ResourceViewNode[]): ResourceViewNode[] {
       name: group[0].name,
       kind: group[0].kind,
       cpuPercent: group.reduce((sum, node) => sum + node.cpuPercent, 0),
+      cpuSampled: group.every((node) => node.cpuSampled !== false),
       memoryBytes: group.reduce((sum, node) => sum + node.memoryBytes, 0),
       peakCpuPercent: group.reduce((sum, node) => sum + node.peakCpuPercent, 0),
       peakMemoryBytes: group.reduce(
@@ -236,6 +239,7 @@ export function buildResourceView({
       name: "App",
       kind: "app",
       cpuPercent: totals.cpuPercent,
+      cpuSampled: visible.every((node) => node.cpuSampled !== false),
       memoryBytes: totals.memoryBytes,
       peakCpuPercent: totals.peakCpuPercent,
       peakMemoryBytes: totals.peakMemoryBytes,
@@ -289,7 +293,8 @@ export function flattenResourceView(
   return rows;
 }
 
-export function formatCpuPercent(value: number): string {
+export function formatCpuPercent(value: number, sampled = true): string {
+  if (!sampled) return "—";
   const safe = Number.isFinite(value) && value > 0 ? value : 0;
   if (safe > 0 && safe < 0.1) return "<0.1%";
   return `${safe.toFixed(1)}%`;
@@ -424,7 +429,7 @@ export function systemSummaryParts(
   return parts;
 }
 
-function reportRows(nodes: readonly ResourceViewNode[], depth = 0): string[] {
+function reportRows(nodes: readonly ResourceViewNode[], depth = 0, cpuReady = true): string[] {
   const lines: string[] = [];
   for (const node of nodes) {
     const count = node.count > 1 ? ` ×${node.count}` : "";
@@ -435,9 +440,10 @@ function reportRows(nodes: readonly ResourceViewNode[], depth = 0): string[] {
     lines.push(
       `${"  ".repeat(depth)}${node.name}${count}${pids} — CPU ${formatCpuPercent(
         node.cpuPercent,
+        cpuReady && node.cpuSampled !== false,
       )}, memory ${formatResourceMemory(node.memoryBytes)}`,
     );
-    lines.push(...reportRows(node.children, depth + 1));
+    lines.push(...reportRows(node.children, depth + 1, cpuReady));
   }
   return lines;
 }
@@ -452,6 +458,7 @@ export interface CopyResourceReportOptions {
   system?: SystemResourceState | null;
   otherApps?: readonly ResourceViewNode[];
   memorySource?: ProcessMetricsSnapshot["memorySource"];
+  cpuReady?: boolean;
 }
 
 /** Produce a support-ready snapshot without argv/cwd/env data. This is the
@@ -466,6 +473,7 @@ export function copyResourceReport({
   system = null,
   otherApps = [],
   memorySource = "resident",
+  cpuReady = true,
 }: CopyResourceReportOptions): string {
   const mac = systemSummaryParts(system, logicalCpuCount)
     .map((part) => (part.label ? `${part.label} ${part.value}` : part.value))
@@ -474,7 +482,7 @@ export function copyResourceReport({
     "Zeros resource snapshot",
     `Sampled: ${new Date(sampledAt).toISOString()}`,
     `Scope: terminal processes ${includeTerminal ? "included" : "excluded"}`,
-    `CPU: ${formatCpuPercent(totals.cpuPercent)} (peak ${formatCpuPercent(
+    `CPU: ${formatCpuPercent(totals.cpuPercent, cpuReady && view.every((node) => node.cpuSampled !== false))} (peak ${formatCpuPercent(
       totals.peakCpuPercent,
     )})`,
     `Memory: ${formatResourceMemory(totals.memoryBytes)} (peak ${formatResourceMemory(
@@ -487,9 +495,9 @@ export function copyResourceReport({
     `Memory: ${memorySource === "footprint" ? "physical footprint" : "resident size"}`,
     ...(mac ? [`Mac: ${mac}`] : []),
     "",
-    ...reportRows(view),
+    ...reportRows(view, 0, cpuReady),
     ...(otherApps.length > 0
-      ? ["", "Other Zeros apps", ...reportRows(otherApps, 1)]
+      ? ["", "Other Zeros apps", ...reportRows(otherApps, 1, cpuReady)]
       : []),
   ].join("\n");
 }

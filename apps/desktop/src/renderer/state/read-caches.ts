@@ -144,7 +144,7 @@ export const designDirectoryTargetCache = new KeyedAsyncCache<{
   directory: string;
   exists: boolean;
 } | null>(64);
-/** Personal repository Design settings, including stable registry IDs. */
+/** Design workbench directory choices, including stable registration IDs. */
 export const designDirectoryListingCache = new KeyedAsyncCache<
   Awaited<ReturnType<typeof bridgeDesignListDirectories>>
 >(32);
@@ -449,8 +449,8 @@ export function invalidateAllEngineReadCaches(): void {
 export const mcpGatewayStatusCache = new KeyedAsyncCache<import("../platform/bridge/workspace-bridge").McpGatewayStatusWire>(16);
 const mcpBridgeKeys = new WeakMap<object, string>();
 let mcpBridgeSequence = 0;
-export function mcpGatewayStatusKey(bridge: object, execution = "local:sidecar"): string {
+export function mcpGatewayStatusKey(bridge: object, execution = "local:sidecar", repoRoot?: string): string {
   let key = mcpBridgeKeys.get(bridge);
   if (!key) { key = `mcp:${++mcpBridgeSequence}`; mcpBridgeKeys.set(bridge, key); }
-  return `${key}:${execution}`;
+  return repoRoot ? `${key}:${execution}:repo:${repoRoot}` : `${key}:${execution}`;
 }

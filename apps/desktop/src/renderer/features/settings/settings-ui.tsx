@@ -93,15 +93,17 @@ export function SettingsGroup({
   description,
   children,
   className,
+  "aria-label": ariaLabel,
 }: {
   title?: React.ReactNode;
   /** One short muted line under the heading (same 12px). */
   description?: React.ReactNode;
   children: React.ReactNode;
   className?: string;
+  "aria-label"?: string;
 }) {
   return (
-    <section className={cn("flex flex-col gap-2", className)}>
+    <section aria-label={ariaLabel} className={cn("flex flex-col gap-2", className)}>
       {/* 12px: one step below the 13px row text so the heading reads as a
           group label, not another row. */}
       {(title || description) && (
@@ -218,10 +220,11 @@ export function SettingsField({
   children: React.ReactNode;
   className?: string;
 }) {
+  const grouped = React.useContext(SettingsGroupContext);
   return (
     <div className={cn("flex flex-col gap-2 py-3.5", className)}>
       {label && (
-        <label htmlFor={htmlFor} className="text-fg1 text-[14px] font-medium">
+        <label htmlFor={htmlFor} className={cn("text-fg1 font-medium", grouped ? "text-xs" : "text-[14px]")}>
           {label}
         </label>
       )}

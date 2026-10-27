@@ -143,7 +143,7 @@ export const WorkflowProgressPanel = memo(function WorkflowProgressPanel({
         {/* The current Agent SDK exposes per-workflow Stop but no pause
             control. Keep the settled action position visible and honest;
             enable it when the provider adds a scoped pause method. */}
-        <Tooltip label="Pause is not available in the current Agent SDK">
+        <Tooltip label="Pause unavailable">
           <span className="inline-flex">
             <Button type="button" size="sm" variant="ghost" disabled>
               Pause

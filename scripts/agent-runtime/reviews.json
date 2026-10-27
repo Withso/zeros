@@ -1,4 +1,1573 @@
 {
   "schema": 1,
-  "decisions": []
+  "decisions": [
+    {
+      "provider": "claude",
+      "fingerprint": "ad6226f2cdf3cc4329e4a37d79660871ffe1f1d1cdb152602ac1baa165c7b417",
+      "disposition": "intentionally-deferred",
+      "rationale": "BrowserQueryOptionsBase adds supportedDialogKinds?: string[]. This browser transport option does not apply: Local and cloud use the Node SDK query API, whose dialog options are already configured independently.",
+      "evidence": [
+        "apps/desktop/src/engine/agents/adapters/claude-sdk/adapter.ts",
+        "apps/cloud-worker/src/drivers/claude/driver.ts"
+      ]
+    },
+    {
+      "provider": "claude",
+      "fingerprint": "ff47e7586b9aaafd7e955a5c453b23408500d625246735f1938012602856e5b6",
+      "disposition": "intentionally-deferred",
+      "rationale": "resumeSseStream(query): boolean is a new Browser SDK export. Neither the Local adapter nor the standalone cloud worker uses the Browser SDK or its SSE query transport; no resume integration is needed for this Node SDK update.",
+      "evidence": [
+        "apps/desktop/src/engine/agents/adapters/claude-sdk/adapter.ts",
+        "apps/cloud-worker/src/drivers/claude/driver.ts"
+      ]
+    },
+    {
+      "provider": "claude",
+      "fingerprint": "63d7fbfbde715108cbea780b67a8ffbaa47ac03a896a6513732a051e67fade15",
+      "disposition": "intentionally-deferred",
+      "rationale": "suspendSseStream(query): boolean is a new Browser SDK export. Local and cloud queries run through the Node SDK; browser SSE suspension is outside the integration and is not a substitute for Zeros turn cancellation.",
+      "evidence": [
+        "apps/desktop/src/engine/agents/adapters/claude-sdk/adapter.ts",
+        "apps/cloud-worker/src/drivers/claude/driver.ts"
+      ]
+    },
+    {
+      "provider": "claude",
+      "fingerprint": "2fb7fa10ddf922e0a874de054cca08674bcfabaa6d712e597aee68c1e694cf17",
+      "disposition": "implemented",
+      "rationale": "core.d.ts re-exports BUILTIN_TOOL_NAMES and LEGACY_TOOL_NAME_ALIASES from ./sdk.js. The desktop contract imports both runtime entry points and verifies that their inventories agree; desktop and standalone worker tests validate the names Zeros actually handles.",
+      "evidence": [
+        "apps/desktop/src/engine/agents/adapters/claude/__tests__/tool-name-contract.test.ts",
+        "apps/cloud-worker/src/drivers/claude/__tests__/tool-name-contract.test.ts"
+      ]
+    },
+    {
+      "provider": "claude",
+      "fingerprint": "ccfb4ec511f400b224c4f5bf9cb99a6d97e9383b957e12c0dfc74b26183997df",
+      "disposition": "intentionally-deferred",
+      "rationale": "ArtifactOutput adds optional owned flags to five artifact/asset output variants. Zeros keeps the existing bounded tool-content/resource-link handling and does not map this provider flag to Zeros workspace ownership or new artifact UI.",
+      "evidence": [
+        "apps/desktop/src/engine/agents/adapters/claude/translator.ts",
+        "apps/cloud-worker/src/drivers/claude/translator.ts",
+        "docs/agent-tool-presentation.md"
+      ]
+    },
+    {
+      "provider": "claude",
+      "fingerprint": "34bee0cd7bd181759605db1efff576e431e481406c1dd196a2ac44cb72efd6ef",
+      "disposition": "implemented",
+      "rationale": "CronCreateOutput nextFireAt is consumed by both Node translators as the authoritative due time, including the scheduler offset. Local one-shot waiting snapshots and matched lifecycle wake-up notices prefer it to the existing cron estimate; ScheduleWakeup keeps scheduledFor. Root UserPromptSubmit sources distinguish dynamic loops from scheduled tasks. The cloud hook emits status only, without Stop-hook tracking or idle-policy changes.",
+      "evidence": [
+        "apps/desktop/src/engine/agents/adapters/claude/translator.ts",
+        "apps/desktop/src/engine/agents/adapters/claude-sdk/adapter.ts",
+        "apps/cloud-worker/src/drivers/claude/translator.ts",
+        "apps/cloud-worker/src/drivers/claude/driver.ts",
+        "scripts/__tests__/claude-wakeup-contract.ts",
+        "apps/desktop/src/engine/agents/adapters/claude/__tests__/scheduled-wakeups.test.ts",
+        "apps/cloud-worker/src/drivers/claude/__tests__/scheduled-wakeups.test.ts",
+        "apps/cloud-worker/src/drivers/claude/__tests__/wakeup-hook.test.ts",
+        "scripts/ui-smoke-wakeup.mjs",
+        "docs/agent-tool-presentation.md"
+      ]
+    },
+    {
+      "provider": "claude",
+      "fingerprint": "c6d6d68ea0d456818e035a2bb39e4742038f732d0be0532d61b322a357daf413",
+      "disposition": "implemented",
+      "rationale": "CronListOutput.jobs nextFireAt is consumed by both Node translators as the authoritative due time, including the scheduler offset. Local one-shot waiting snapshots and matched lifecycle wake-up notices prefer it to the existing cron estimate; ScheduleWakeup keeps scheduledFor. Root UserPromptSubmit sources distinguish dynamic loops from scheduled tasks. The cloud hook emits status only, without Stop-hook tracking or idle-policy changes.",
+      "evidence": [
+        "apps/desktop/src/engine/agents/adapters/claude/translator.ts",
+        "apps/desktop/src/engine/agents/adapters/claude-sdk/adapter.ts",
+        "apps/cloud-worker/src/drivers/claude/translator.ts",
+        "apps/cloud-worker/src/drivers/claude/driver.ts",
+        "scripts/__tests__/claude-wakeup-contract.ts",
+        "apps/desktop/src/engine/agents/adapters/claude/__tests__/scheduled-wakeups.test.ts",
+        "apps/cloud-worker/src/drivers/claude/__tests__/scheduled-wakeups.test.ts",
+        "apps/cloud-worker/src/drivers/claude/__tests__/wakeup-hook.test.ts",
+        "scripts/ui-smoke-wakeup.mjs",
+        "docs/agent-tool-presentation.md"
+      ]
+    },
+    {
+      "provider": "claude",
+      "fingerprint": "88cdd0faf9ee136f7ce3efa9e3d6a4100a87b95b8e21e1e237f2a307b4b66af0",
+      "disposition": "implemented",
+      "rationale": "BUILTIN_TOOL_NAMES supplies the runtime inventory for contract tests over the actual desktop adapters, renderer title matchers and standalone cloud worker. Every special-cased name must be canonical, an SDK legacy alias or an explicitly documented retired compatibility name. The existing edit-tool set and canonical Agent name also use the tuple type; inventory membership alone never enables a product feature.",
+      "evidence": [
+        "apps/desktop/src/engine/agents/adapters/claude/__tests__/tool-name-contract.test.ts",
+        "apps/desktop/src/renderer/features/agent/__tests__/claude-tool-name-contract.test.ts",
+        "apps/cloud-worker/src/drivers/claude/__tests__/tool-name-contract.test.ts"
+      ]
+    },
+    {
+      "provider": "claude",
+      "fingerprint": "43d354ccaa4b8c469bb60fd45ccec5ebd0245526953ab3eb5d00dc1331e7a170",
+      "disposition": "implemented",
+      "rationale": "LEGACY_TOOL_NAME_ALIASES supplies subagent aliases to both Node translators. Matching remains anchored and case-insensitive; native names, persisted identities and current output stay unchanged. Contract tests require each legacy spelling to have its canonical target covered by the same surface, and an injected SDK alias proves that routing follows the export. Mixed-provider renderer fallbacks retain their existing behavior under source assertions without importing the Node SDK into the renderer.",
+      "evidence": [
+        "apps/desktop/src/engine/agents/adapters/claude/__tests__/tool-name-contract.test.ts",
+        "apps/desktop/src/renderer/features/agent/__tests__/claude-tool-name-contract.test.ts",
+        "apps/cloud-worker/src/drivers/claude/__tests__/tool-name-contract.test.ts"
+      ]
+    },
+    {
+      "provider": "claude",
+      "fingerprint": "9aef836ff824c122a1d8dd0819ca945a1470b17cf62a9c181068b0f214d19ed2",
+      "disposition": "sdk-owned",
+      "rationale": "McpSdkServerConfig adds tools?: McpServerToolPolicy[] for host-registered SDK servers. Policy interpretation remains in the Node SDK/CLI. Zeros adds no per-tool policy override and preserves existing MCP configuration and approval behavior in both placements.",
+      "evidence": [
+        "apps/desktop/src/engine/agents/adapters/claude-sdk/adapter.ts",
+        "apps/cloud-worker/src/drivers/claude/driver.ts"
+      ]
+    },
+    {
+      "provider": "claude",
+      "fingerprint": "ac372de1f95ace6998cc5730be8e1fb032d13776001ad820f74465d37db96b29",
+      "disposition": "intentionally-deferred",
+      "rationale": "Query.reloadPlugins options add addPlugins?: SdkPluginConfig[]. Zeros lists and refreshes Claude plugins but has no flow that enables one, so the additive option has no caller. Existing no-argument reloads remain valid; adoption is deferred until Zeros can enable plugins.",
+      "evidence": [
+        "apps/desktop/src/engine/agents/adapters/claude-sdk/extensions.ts",
+        "docs/claude-event-coverage.md"
+      ]
+    },
+    {
+      "provider": "claude",
+      "fingerprint": "39915a22921acdda1ec65e439f4bb46925817481152268fe41aca532629d7e75",
+      "disposition": "sdk-owned",
+      "rationale": "SDKControlElicitationRequest.property_order is not applicable to host adoption: the SDK does not forward it to onElicitation. Its documented order already follows JavaScript object-key order, including index-like names first, which the existing requestedSchema.properties iteration preserves. Local forms and the cloud cancellation response need no change.",
+      "evidence": [
+        "apps/desktop/src/engine/agents/adapters/shared/mcp-elicitation.ts",
+        "apps/desktop/src/engine/agents/adapters/claude-sdk/adapter.ts",
+        "apps/cloud-worker/src/drivers/claude/driver.ts",
+        "docs/claude-event-coverage.md"
+      ]
+    },
+    {
+      "provider": "claude",
+      "fingerprint": "48173e50639e68649737882f0a9655d4b812d12c45358d37cde9ad37080621f4",
+      "disposition": "implemented",
+      "rationale": "Local and cloud summary refreshes share validation and forward known stable category IDs plus MCP tool/instruction server estimates through optional wire fields. The renderer uses IDs ahead of name fallbacks, joins only unambiguous CLI-normalized server identities, reconciles rounded estimates to the native totals, and exposes the server breakdown with keyboard disclosures. Missing detail keeps legacy rows; Skills remain visible and deferred tools stay outside the window. The credential-free bundled CLI confirms summary mode supplies the data. Optional custom-agent and skill plugin/path metadata is not presented.",
+      "evidence": [
+        "packages/protocol/src/__tests__/context-usage.test.ts",
+        "apps/desktop/src/engine/agents/adapters/claude-sdk/adapter.ts",
+        "apps/desktop/src/engine/agents/adapters/claude-sdk/__tests__/adapter.test.ts",
+        "apps/cloud-worker/src/drivers/claude/driver.ts",
+        "apps/cloud-worker/src/drivers/claude/__tests__/context-usage.test.ts",
+        "apps/desktop/src/renderer/features/agent/__tests__/context-gauge.test.ts",
+        "apps/desktop/src/renderer/features/agent/__tests__/sessions-store-context-usage.test.ts",
+        "scripts/ui-smoke-context-gauge.mjs",
+        "docs/agent-turn-usage.md"
+      ]
+    },
+    {
+      "provider": "claude",
+      "fingerprint": "7f27fa9bd000f367921d20c7fec30540685aa6f6da13e6bc27585464b6476491",
+      "disposition": "intentionally-deferred",
+      "rationale": "SDKControlGetUsageResponse extends both behavior summaries with max_effort, workflow, always_on_context and large_tool_results, plus optional recommendations and fix objects. This usage API is experimental and remains unused; Zeros does not expose or depend on it in Local or cloud.",
+      "evidence": [
+        "apps/desktop/src/engine/agents/adapters/claude-sdk/adapter.ts",
+        "apps/cloud-worker/src/drivers/claude/driver.ts",
+        "docs/claude-event-coverage.md"
+      ]
+    },
+    {
+      "provider": "claude",
+      "fingerprint": "d61bd1e7a366a55d0db6996947dd3897a272490984a92bc4e063e9667617cfd6",
+      "disposition": "sdk-owned",
+      "rationale": "SDKControlInitializeRequest.sdkMcpServerConfigs entries add tools?: McpServerToolPolicy[]. The Node wrapper owns this control-handshake serialization. Zeros uses query() rather than authoring initialize frames and supplies no new SDK-server permission policy.",
+      "evidence": [
+        "apps/desktop/src/engine/agents/adapters/claude-sdk/adapter.ts",
+        "apps/cloud-worker/src/drivers/claude/driver.ts",
+        "scripts/claude-cli-smoke.mjs"
+      ]
+    },
+    {
+      "provider": "claude",
+      "fingerprint": "2d9c7b386c4c523cff8b17969bc2283f8aedd2aea5193b98989fa75305ae3013",
+      "disposition": "intentionally-deferred",
+      "rationale": "SDKControlMcpCallRequest adds result_not_for_model?: boolean, a capability-gated app-only result mode. Zeros does not issue these direct MCP control calls or enable this mode; existing agent tool results and their transcript handling are unchanged.",
+      "evidence": [
+        "apps/desktop/src/engine/agents/adapters/claude-sdk/adapter.ts",
+        "apps/cloud-worker/src/drivers/claude/driver.ts",
+        "apps/desktop/src/engine/agents/adapters/claude/translator.ts"
+      ]
+    },
+    {
+      "provider": "claude",
+      "fingerprint": "4f62fbb99e6fdbd8c7dcc6f366a48e43917d4279ffcf5e0ba2c880fc80a79de2",
+      "disposition": "sdk-owned",
+      "rationale": "SDKControlMcpStatusRequest adds liveReply?: boolean for upstream CCR/Remote Control live event streams. Zeros Local and cloud run the Node SDK with stdio, not that upstream cloud transport; existing mcpServerStatus() calls keep the wrapper's normal response behavior.",
+      "evidence": [
+        "apps/desktop/src/engine/agents/adapters/claude-sdk/session-tools.ts",
+        "apps/desktop/src/engine/agents/adapters/claude-sdk/extensions.ts",
+        "apps/cloud-worker/src/drivers/claude/driver.ts"
+      ]
+    },
+    {
+      "provider": "claude",
+      "fingerprint": "1925eaab6c6baf9a7c1729142f6064d51708ffbc18a3ff309ef2a02d3a307aa5",
+      "disposition": "intentionally-deferred",
+      "rationale": "SDKControlReloadPluginsRequest adds wire field add_plugins?: SdkPluginConfig[], corresponding to Query.reloadPlugins({ addPlugins }). Zeros has no flow that enables a plugin and therefore no caller for additive loading. Adoption is deferred until that flow exists; existing no-argument reloads keep their behavior.",
+      "evidence": [
+        "apps/desktop/src/engine/agents/adapters/claude-sdk/extensions.ts",
+        "docs/claude-event-coverage.md"
+      ]
+    },
+    {
+      "provider": "claude",
+      "fingerprint": "4638a0525584579c0f0e6e4298d93fd2e1d1460db9404722f0070ab32ef52b34",
+      "disposition": "sdk-owned",
+      "rationale": "SandboxSettingsSchema adds optional allowNestedUserNamespaces. The CLI defaults it to false and owns native settings validation. Zeros supplies no override for this setting; existing Local permissions and cloud VM isolation remain unchanged.",
+      "evidence": [
+        "apps/desktop/src/engine/agents/adapters/claude-sdk/adapter.ts",
+        "apps/cloud-worker/src/drivers/claude/driver.ts",
+        "apps/desktop/src/engine/agents/adapters/claude-sdk/__tests__/adapter.test.ts"
+      ]
+    },
+    {
+      "provider": "claude",
+      "fingerprint": "f5ef2d1dcdf7ecc2df1911663969f288b4af390d606ce04caf41a7c1b7dba486",
+      "disposition": "sdk-owned",
+      "rationale": "Settings adds attributionProject, attributionProjectPolicy.default, sshHostCommands and sandbox.allowNestedUserNamespaces. These remain native SDK/CLI settings; Zeros exposes none of these fields as a preference, telemetry mapping, SSH command surface or sandbox override, and retains each placement's existing settings sources.",
+      "evidence": [
+        "apps/desktop/src/engine/agents/adapters/claude-sdk/adapter.ts",
+        "apps/cloud-worker/src/drivers/claude/driver.ts",
+        "docs/claude-event-coverage.md"
+      ]
+    },
+    {
+      "provider": "codex",
+      "fingerprint": "45c8ea4f33ad2729af9cb3265a5324cce45bdb595d146fc4237bd3435a88f911",
+      "disposition": "generated-only",
+      "rationale": "The five new methods (thread/sample, thread/sample/cancel, thread/readState/update, thread/items/read and feedback/save) are typed protocol availability only. Zeros sends none of them; sampling suggestions and diagnostic ZIP export are explicitly deferred.",
+      "evidence": [
+        "apps/desktop/src/engine/agents/adapters/codex/protocol-coverage.json",
+        "apps/desktop/src/engine/agents/adapters/codex/app-server-adapter.ts",
+        "apps/cloud-worker/src/drivers/codex/driver.ts",
+        "docs/codex-app-server-compatibility.md"
+      ]
+    },
+    {
+      "provider": "codex",
+      "fingerprint": "c7204885ee2bb20b2e82a1dbf5c845f37d4ecd9a17d9886f597a883d64247e91",
+      "disposition": "preserved-generically",
+      "rationale": "thread/readState/changed is available through the generic typed native subscription. It has no canonical transcript, unread UI or worker behavior; existing notification handling remains unchanged.",
+      "evidence": [
+        "apps/desktop/src/engine/agents/adapters/codex/protocol-coverage.json",
+        "apps/desktop/src/engine/agents/adapters/codex/app-server.ts",
+        "apps/desktop/src/engine/agents/adapters/codex/app-server-adapter.ts",
+        "apps/cloud-worker/src/drivers/codex/driver.ts"
+      ]
+    },
+    {
+      "provider": "codex",
+      "fingerprint": "c3638bb69699f07b5ffdc3f43a7239af3717f604c0abe356eb8ad0dffe20c4d6",
+      "disposition": "generated-only",
+      "rationale": "The aggregate v2 schema follows the individual reviewed subjects: new client methods stay generated-only, read-state notification subscription stays generic, and image-generation changes are handled by the desktop and standalone worker mappers. This wrapper adds no separate product capability.",
+      "evidence": [
+        "apps/desktop/src/engine/agents/adapters/codex/protocol-coverage.json",
+        "apps/desktop/src/engine/agents/adapters/codex/generated/codex_app_server_protocol.v2.schemas.json",
+        "docs/codex-app-server-compatibility.md"
+      ]
+    },
+    {
+      "provider": "codex",
+      "fingerprint": "ec289aa35857b546a0a831cc4fa303e11720b27331f4d4e0290cd34e93b6ef33",
+      "disposition": "generated-only",
+      "rationale": "Managed storage defaults describe Codex Desktop workspace creation, not filesystem grants. Zeros does not call configRequirements/read or adopt provider project-parent or projectless-workspace roots; Local and cloud workspace ownership remains Zeros-owned.",
+      "evidence": [
+        "apps/desktop/src/engine/agents/adapters/codex/protocol-coverage.json",
+        "apps/desktop/src/engine/agents/adapters/codex/generated/v2/ApplicationStorageRequirements.ts",
+        "docs/codex-app-server-compatibility.md"
+      ]
+    },
+    {
+      "provider": "codex",
+      "fingerprint": "ab8276efc53e59d18e0ff4613768bc0473ea3c08f707ee2232d2c5be2ed8610b",
+      "disposition": "generated-only",
+      "rationale": "Managed storage defaults describe Codex Desktop workspace creation, not filesystem grants. Zeros does not call configRequirements/read or adopt provider project-parent or projectless-workspace roots; Local and cloud workspace ownership remains Zeros-owned.",
+      "evidence": [
+        "apps/desktop/src/engine/agents/adapters/codex/protocol-coverage.json",
+        "apps/desktop/src/engine/agents/adapters/codex/generated/v2/ApplicationStorageRequirements.ts",
+        "docs/codex-app-server-compatibility.md"
+      ]
+    },
+    {
+      "provider": "codex",
+      "fingerprint": "4d7c70fa45b306ee467a370120163122de074e1e350000ec975e35e76dbec340",
+      "disposition": "generated-only",
+      "rationale": "The five new methods (thread/sample, thread/sample/cancel, thread/readState/update, thread/items/read and feedback/save) are typed protocol availability only. Zeros sends none of them; sampling suggestions and diagnostic ZIP export are explicitly deferred.",
+      "evidence": [
+        "apps/desktop/src/engine/agents/adapters/codex/protocol-coverage.json",
+        "apps/desktop/src/engine/agents/adapters/codex/app-server-adapter.ts",
+        "apps/cloud-worker/src/drivers/codex/driver.ts",
+        "docs/codex-app-server-compatibility.md"
+      ]
+    },
+    {
+      "provider": "codex",
+      "fingerprint": "db3eb9ce772bdb3c1b76adca39d712ad182e1e3ffdf0438e0384399d56a89497",
+      "disposition": "sdk-owned",
+      "rationale": "Optional output_text annotations and logprobs belong to native Responses content. Zeros consumes normalized agent-message events and does not promote these raw fields into the canonical transcript.",
+      "evidence": [
+        "apps/desktop/src/engine/agents/adapters/codex/generated/ContentItem.ts",
+        "apps/desktop/src/engine/agents/adapters/codex/app-server-translator.ts",
+        "apps/cloud-worker/src/drivers/codex/event-mapper.ts"
+      ]
+    },
+    {
+      "provider": "codex",
+      "fingerprint": "7946a0428918322630b5216fa4dc48ee1703b5201ac8f019f21f97fe744418d8",
+      "disposition": "generated-only",
+      "rationale": "The optional WebSocket request ID affects the native environment/add connection and reconnect. Zeros does not call that generated-only route or use Codex environments as workspace placement identities.",
+      "evidence": [
+        "apps/desktop/src/engine/agents/adapters/codex/protocol-coverage.json",
+        "apps/desktop/src/engine/agents/adapters/codex/generated/v2/EnvironmentAddParams.ts",
+        "apps/desktop/src/engine/agents/adapters/codex/app-server-adapter.ts",
+        "apps/cloud-worker/src/drivers/codex/driver.ts"
+      ]
+    },
+    {
+      "provider": "codex",
+      "fingerprint": "9e4880c3267014378448115b11bc542d81f79aaf141365185dc7ef08e95b2bc7",
+      "disposition": "intentionally-deferred",
+      "rationale": "Local diagnostics ZIP export through feedback/save is explicitly deferred. No renderer or worker action requests an archive or adopts its host savePath; existing Zeros feedback and redaction boundaries remain in force.",
+      "evidence": [
+        "apps/desktop/src/engine/agents/adapters/codex/protocol-coverage.json",
+        "docs/codex-app-server-compatibility.md",
+        "apps/desktop/src/engine/agents/adapters/codex/generated/v2/FeedbackSaveParams.ts"
+      ]
+    },
+    {
+      "provider": "codex",
+      "fingerprint": "85541c66e78facc5a269cb88eb42d3070e6d13a5a691edd6ae37493c22405d44",
+      "disposition": "intentionally-deferred",
+      "rationale": "Local diagnostics ZIP export through feedback/save is explicitly deferred. No renderer or worker action requests an archive or adopts its host savePath; existing Zeros feedback and redaction boundaries remain in force.",
+      "evidence": [
+        "apps/desktop/src/engine/agents/adapters/codex/protocol-coverage.json",
+        "docs/codex-app-server-compatibility.md",
+        "apps/desktop/src/engine/agents/adapters/codex/generated/v2/FeedbackSaveParams.ts"
+      ]
+    },
+    {
+      "provider": "codex",
+      "fingerprint": "b40b9918cc20a4cba90f71746f5c29cf8a841bc6166d835cca6f8ef1288fa1cb",
+      "disposition": "preserved-generically",
+      "rationale": "preModelRequest and postModelRequest use the existing hook/started and hook/completed lifecycle. Both mappers retain the bounded event-name string and stable hook identity without a new special-case UI or config surface.",
+      "evidence": [
+        "apps/desktop/src/engine/agents/adapters/codex/app-server-translator.ts",
+        "apps/cloud-worker/src/drivers/codex/event-mapper.ts",
+        "apps/desktop/src/engine/agents/adapters/codex/__tests__/app-server-translator.test.ts"
+      ]
+    },
+    {
+      "provider": "codex",
+      "fingerprint": "06e832ef77e935f048b6c17844137e55041cacbefe15e60cff311fe5e9d0e9cc",
+      "disposition": "implemented",
+      "rationale": "Desktop and worker retain optional bounded inputImages path/SHA-256 metadata in tool output. The renderer presents deduplicated literal source paths as Edited from file pills through the chat's existing Local/cloud Files navigation. Sources never change the generated target, title or count; old records omit the row and hidden rows cannot warm or open sources.",
+      "evidence": [
+        "apps/desktop/src/engine/agents/adapters/codex/app-server-translator.ts",
+        "apps/desktop/src/engine/agents/adapters/codex/__tests__/generated-image.test.ts",
+        "apps/cloud-worker/src/drivers/codex/event-mapper.ts",
+        "apps/cloud-worker/src/drivers/codex/__tests__/parity.test.ts",
+        "apps/desktop/src/renderer/features/agent/renderers/tool-artifacts.ts",
+        "apps/desktop/src/renderer/features/agent/renderers/event-meta.ts",
+        "apps/desktop/src/renderer/features/agent/renderers/event-row-renderer.tsx",
+        "apps/desktop/src/renderer/features/agent/__tests__/tool-details.test.ts",
+        "scripts/ui-smoke-generated-images.mjs"
+      ]
+    },
+    {
+      "provider": "codex",
+      "fingerprint": "f2bab50f0509eb8a3b3df515b746d21fd6a0239d8377e586588544dc1d080aa1",
+      "disposition": "sdk-owned",
+      "rationale": "PreModelRequest and PostModelRequest managed hook matchers are executed and enforced by the native runtime. Zeros does not author managed hook requirements; its existing generic hook notifications remain the transcript boundary.",
+      "evidence": [
+        "apps/desktop/src/engine/agents/adapters/codex/generated/v2/ManagedHooksRequirements.ts",
+        "apps/desktop/src/engine/agents/adapters/codex/app-server-translator.ts",
+        "apps/cloud-worker/src/drivers/codex/event-mapper.ts"
+      ]
+    },
+    {
+      "provider": "codex",
+      "fingerprint": "db4102d8491659f3788e0e20436ea2b3c141a18a98d86eaca4a7bab6afe1cef2",
+      "disposition": "generated-only",
+      "rationale": "The added toolListMeta is opaque first-page catalog metadata. Zeros keeps the existing server/tool inventory and OAuth status mapping and does not expose or interpret this new metadata as credentials, tools or product state.",
+      "evidence": [
+        "apps/desktop/src/engine/agents/adapters/codex/generated/v2/McpServerStatus.ts",
+        "apps/desktop/src/engine/agents/adapters/codex/native-mcp.ts",
+        "apps/desktop/src/engine/agents/adapters/codex/__tests__/mcp-oauth.test.ts"
+      ]
+    },
+    {
+      "provider": "codex",
+      "fingerprint": "ae14b155406c6d21e5ab1e8b5a594c5ab9e827d352f5ceffbfca8c1192d371d9",
+      "disposition": "preserved-generically",
+      "rationale": "sci and sci_plus remain opaque account plan strings. The account reader and quota projection already accept strings; no plan-name allowlist controls execution, model selection or cloud organization authorization.",
+      "evidence": [
+        "apps/desktop/src/engine/agents/adapters/codex/app-server-adapter.ts",
+        "apps/desktop/src/engine/agents/adapters/codex/__tests__/app-server-translator.test.ts",
+        "docs/codex-app-server-compatibility.md"
+      ]
+    },
+    {
+      "provider": "codex",
+      "fingerprint": "1c3c162f443b5c91000151fb62db0681633bc7c28735db9daf340d3e5f1b8895",
+      "disposition": "generated-only",
+      "rationale": "New voice names, optional v3 voice inventory and voiceSessionId are available in generated bindings only. Zeros has no native realtime-session UI. The shipped codex-resources/voice runtime is retained in desktop and worker packages; excluding it is a deferred packaging decision.",
+      "evidence": [
+        "apps/desktop/src/engine/agents/adapters/codex/protocol-coverage.json",
+        "scripts/__tests__/stage-codex-cli.test.ts",
+        "apps/cloud-worker/docs/runtime.md",
+        "docs/codex-app-server-compatibility.md"
+      ]
+    },
+    {
+      "provider": "codex",
+      "fingerprint": "f0812259bd994b09a2ee672d8a0f8ed46fc68d551e0eb11813233f29b110cc66",
+      "disposition": "generated-only",
+      "rationale": "New voice names, optional v3 voice inventory and voiceSessionId are available in generated bindings only. Zeros has no native realtime-session UI. The shipped codex-resources/voice runtime is retained in desktop and worker packages; excluding it is a deferred packaging decision.",
+      "evidence": [
+        "apps/desktop/src/engine/agents/adapters/codex/protocol-coverage.json",
+        "scripts/__tests__/stage-codex-cli.test.ts",
+        "apps/cloud-worker/docs/runtime.md",
+        "docs/codex-app-server-compatibility.md"
+      ]
+    },
+    {
+      "provider": "codex",
+      "fingerprint": "7a1e42e394a7c2c76442ba0e0c5624eacababe8c138cdead417b3f2cf149b8ba",
+      "disposition": "sdk-owned",
+      "rationale": "Optional encrypted_content and status fields on raw Responses items stay within Codex persistence and model transport. Zeros uses normalized ThreadItem notifications; it neither decodes the ciphertext nor projects it as transcript text.",
+      "evidence": [
+        "apps/desktop/src/engine/agents/adapters/codex/generated/ResponseItem.ts",
+        "apps/desktop/src/engine/agents/adapters/codex/app-server-translator.ts",
+        "apps/cloud-worker/src/drivers/codex/event-mapper.ts"
+      ]
+    },
+    {
+      "provider": "codex",
+      "fingerprint": "bdf54fba512fab8b5c9ceaa930494f989ff4570779c008a6680c3ef5a691d427",
+      "disposition": "preserved-generically",
+      "rationale": "thread/readState/changed is available through the generic typed native subscription. It has no canonical transcript, unread UI or worker behavior; existing notification handling remains unchanged.",
+      "evidence": [
+        "apps/desktop/src/engine/agents/adapters/codex/protocol-coverage.json",
+        "apps/desktop/src/engine/agents/adapters/codex/app-server.ts",
+        "apps/desktop/src/engine/agents/adapters/codex/app-server-adapter.ts",
+        "apps/cloud-worker/src/drivers/codex/driver.ts"
+      ]
+    },
+    {
+      "provider": "codex",
+      "fingerprint": "ac5a16cef695909d6c488bb88accdf7ae85b6f2cbbcb4d8bfc516f2755dde5d0",
+      "disposition": "generated-only",
+      "rationale": "experimentalPredictionMode and experimentalDisablePredictionMcp are not set by the existing explicit thread/fork path. Cache-preserving prediction forks and sample suggestions are not enabled; normal fork model, workspace and history behavior stays unchanged.",
+      "evidence": [
+        "apps/desktop/src/engine/agents/adapters/codex/app-server-adapter.ts",
+        "apps/desktop/src/engine/agents/adapters/codex/__tests__/app-server-adapter-binding.test.ts",
+        "docs/codex-app-server-compatibility.md"
+      ]
+    },
+    {
+      "provider": "codex",
+      "fingerprint": "bd17fa4aa560b099d45d5c5b51c55c09fbf7a5e4d5a1ef9e11bf505d488d10e2",
+      "disposition": "implemented",
+      "rationale": "Image generation accepts attachment-store fileId or fallback inline result. Desktop and worker preserve usable inline previews; otherwise completion schedules one nonblocking savedPath read of a bounded, stable regular PNG/JPEG/WebP file without symlink traversal. Canonical image bytes survive worker history reload. Missing, unsafe or undecodable previews show Image saved by Codex; optional source pills stay separate. A fileId is never a URL, and late content enrichment cannot change status or cross Stop/turn replacement.",
+      "evidence": [
+        "apps/desktop/src/engine/agents/adapters/codex/app-server-translator.ts",
+        "apps/desktop/src/engine/agents/adapters/codex/generated-image.ts",
+        "apps/desktop/src/engine/agents/adapters/codex/__tests__/generated-image.test.ts",
+        "apps/desktop/src/engine/agents/adapters/codex/__tests__/transcript-fidelity.test.ts",
+        "apps/cloud-worker/src/drivers/codex/event-mapper.ts",
+        "apps/cloud-worker/src/drivers/codex/generated-image.ts",
+        "apps/cloud-worker/src/drivers/codex/__tests__/generated-image.test.ts",
+        "apps/cloud-worker/src/drivers/codex/__tests__/parity.test.ts",
+        "apps/desktop/src/renderer/features/agent/renderers/event-row-renderer.tsx",
+        "apps/desktop/src/renderer/features/agent/__tests__/tool-details.test.ts",
+        "scripts/ui-smoke-generated-images.mjs",
+        "docs/codex-app-server-compatibility.md"
+      ]
+    },
+    {
+      "provider": "codex",
+      "fingerprint": "ba573c2c0634e567183ace4d372d474ff401fea47e5172f906a57ca2ae701e65",
+      "disposition": "generated-only",
+      "rationale": "The experimental bounded persisted-item read route is not called. Zeros continues to load its own durable transcript and existing native history paths; exposing item-by-ID retrieval is not part of this runtime upgrade.",
+      "evidence": [
+        "apps/desktop/src/engine/agents/adapters/codex/protocol-coverage.json",
+        "apps/desktop/src/engine/agents/adapters/codex/history.ts",
+        "apps/cloud-worker/src/drivers/codex/driver.ts",
+        "docs/codex-app-server-compatibility.md"
+      ]
+    },
+    {
+      "provider": "codex",
+      "fingerprint": "95bb83b6f4ee4b300d457b47c05f4e4b4a9ce5cf9461df7af56c59e21f68c53c",
+      "disposition": "generated-only",
+      "rationale": "The experimental bounded persisted-item read route is not called. Zeros continues to load its own durable transcript and existing native history paths; exposing item-by-ID retrieval is not part of this runtime upgrade.",
+      "evidence": [
+        "apps/desktop/src/engine/agents/adapters/codex/protocol-coverage.json",
+        "apps/desktop/src/engine/agents/adapters/codex/history.ts",
+        "apps/cloud-worker/src/drivers/codex/driver.ts",
+        "docs/codex-app-server-compatibility.md"
+      ]
+    },
+    {
+      "provider": "codex",
+      "fingerprint": "61f20b8a895258f5ad1009111bd07f525eceb558acd6532303074f2d15e16eda",
+      "disposition": "generated-only",
+      "rationale": "Optional excludedThreadIds is omitted by the native thread inventory caller. Existing cwd-scoped pagination and binding discovery stay unchanged; no thread exclusion or selection policy is introduced.",
+      "evidence": [
+        "apps/desktop/src/engine/agents/adapters/codex/session-inventory.ts",
+        "apps/desktop/src/engine/agents/adapters/codex/__tests__/session-inventory.test.ts",
+        "docs/codex-app-server-compatibility.md"
+      ]
+    },
+    {
+      "provider": "codex",
+      "fingerprint": "bdaff0e75409cda4843fbf6ab4a7912747e6ff59a30adef934a79cfbbe5ccbd0",
+      "disposition": "generated-only",
+      "rationale": "Native readStates/readState receipts are not consumed. Zeros continues to use its own durable chat state and existing thread inventory/history mappings, without adopting Codex unread markers or revisions.",
+      "evidence": [
+        "apps/desktop/src/engine/agents/adapters/codex/session-inventory.ts",
+        "apps/desktop/src/engine/agents/adapters/codex/history.ts",
+        "apps/desktop/src/engine/agents/adapters/codex/protocol-coverage.json",
+        "docs/codex-app-server-compatibility.md"
+      ]
+    },
+    {
+      "provider": "codex",
+      "fingerprint": "22f5ec8cb551cb9ccc170d125651a12b159623d7e9b8681f7b5093c808f41513",
+      "disposition": "generated-only",
+      "rationale": "Native readStates/readState receipts are not consumed. Zeros continues to use its own durable chat state and existing thread inventory/history mappings, without adopting Codex unread markers or revisions.",
+      "evidence": [
+        "apps/desktop/src/engine/agents/adapters/codex/session-inventory.ts",
+        "apps/desktop/src/engine/agents/adapters/codex/history.ts",
+        "apps/desktop/src/engine/agents/adapters/codex/protocol-coverage.json",
+        "docs/codex-app-server-compatibility.md"
+      ]
+    },
+    {
+      "provider": "codex",
+      "fingerprint": "a906453d70dfe034dc0d934f3305f3f53ec232257c4950561f67b27600430bc8",
+      "disposition": "generated-only",
+      "rationale": "Native read/unread receipts and revision-checked update operations are generated-only. Zeros does not call thread/readState/update or replace its owner-keyed durable chat state with provider read-state revisions.",
+      "evidence": [
+        "apps/desktop/src/engine/agents/adapters/codex/protocol-coverage.json",
+        "apps/desktop/src/engine/agents/adapters/codex/app-server-adapter.ts",
+        "apps/cloud-worker/src/drivers/codex/driver.ts",
+        "docs/codex-app-server-compatibility.md"
+      ]
+    },
+    {
+      "provider": "codex",
+      "fingerprint": "3421795deb3262071934c8375e3dfd3a0f63befeb95b5a705d1f50f3a59682c5",
+      "disposition": "preserved-generically",
+      "rationale": "The new notification can be subscribed to through onNotificationTyped and is classified forwarded. No canonical transcript, worker lifecycle or unread-state product consumer is registered.",
+      "evidence": [
+        "apps/desktop/src/engine/agents/adapters/codex/protocol-coverage.json",
+        "apps/desktop/src/engine/agents/adapters/codex/app-server.ts",
+        "apps/desktop/src/engine/agents/adapters/codex/app-server-adapter.ts",
+        "apps/cloud-worker/src/drivers/codex/driver.ts"
+      ]
+    },
+    {
+      "provider": "codex",
+      "fingerprint": "b7a54fcea396ccfdcfa55e5bb0e457a8ee1778a15ee1e168daa311fc5e8f2cb0",
+      "disposition": "generated-only",
+      "rationale": "Native read/unread receipts and revision-checked update operations are generated-only. Zeros does not call thread/readState/update or replace its owner-keyed durable chat state with provider read-state revisions.",
+      "evidence": [
+        "apps/desktop/src/engine/agents/adapters/codex/protocol-coverage.json",
+        "apps/desktop/src/engine/agents/adapters/codex/app-server-adapter.ts",
+        "apps/cloud-worker/src/drivers/codex/driver.ts",
+        "docs/codex-app-server-compatibility.md"
+      ]
+    },
+    {
+      "provider": "codex",
+      "fingerprint": "6efcdec14f13c14dd2e2f8bba893c2bc1df11c778cd6710796c276d2ff0284d1",
+      "disposition": "generated-only",
+      "rationale": "Native read/unread receipts and revision-checked update operations are generated-only. Zeros does not call thread/readState/update or replace its owner-keyed durable chat state with provider read-state revisions.",
+      "evidence": [
+        "apps/desktop/src/engine/agents/adapters/codex/protocol-coverage.json",
+        "apps/desktop/src/engine/agents/adapters/codex/app-server-adapter.ts",
+        "apps/cloud-worker/src/drivers/codex/driver.ts",
+        "docs/codex-app-server-compatibility.md"
+      ]
+    },
+    {
+      "provider": "codex",
+      "fingerprint": "832a15eecd5687038acc5ce218f5c1c62c15cbcc210a19f488c164d73e495886",
+      "disposition": "generated-only",
+      "rationale": "Native read/unread receipts and revision-checked update operations are generated-only. Zeros does not call thread/readState/update or replace its owner-keyed durable chat state with provider read-state revisions.",
+      "evidence": [
+        "apps/desktop/src/engine/agents/adapters/codex/protocol-coverage.json",
+        "apps/desktop/src/engine/agents/adapters/codex/app-server-adapter.ts",
+        "apps/cloud-worker/src/drivers/codex/driver.ts",
+        "docs/codex-app-server-compatibility.md"
+      ]
+    },
+    {
+      "provider": "codex",
+      "fingerprint": "cfcc6c7cbc8ab9cd8e08e82985b057043fea66457312159fe628880b48e619fc",
+      "disposition": "generated-only",
+      "rationale": "New voice names, optional v3 voice inventory and voiceSessionId are available in generated bindings only. Zeros has no native realtime-session UI. The shipped codex-resources/voice runtime is retained in desktop and worker packages; excluding it is a deferred packaging decision.",
+      "evidence": [
+        "apps/desktop/src/engine/agents/adapters/codex/protocol-coverage.json",
+        "scripts/__tests__/stage-codex-cli.test.ts",
+        "apps/cloud-worker/docs/runtime.md",
+        "docs/codex-app-server-compatibility.md"
+      ]
+    },
+    {
+      "provider": "codex",
+      "fingerprint": "962bb96691ef4c22892016d1a1a921c4aaf483372f41ba535f7c477cefc5b28f",
+      "disposition": "intentionally-deferred",
+      "rationale": "thread/sample and thread/sample/cancel composer suggestions are explicitly deferred. Zeros sends neither route and does not create speculative turns or prediction forks; the types remain available for a separately reviewed feature.",
+      "evidence": [
+        "apps/desktop/src/engine/agents/adapters/codex/protocol-coverage.json",
+        "docs/codex-app-server-compatibility.md",
+        "apps/desktop/src/engine/agents/adapters/codex/generated/v2/ThreadSampleParams.ts"
+      ]
+    },
+    {
+      "provider": "codex",
+      "fingerprint": "def83ab11c0f1e13fa7241667ef0639b7f7c22e8870a14978e4436b77ac289f6",
+      "disposition": "intentionally-deferred",
+      "rationale": "thread/sample and thread/sample/cancel composer suggestions are explicitly deferred. Zeros sends neither route and does not create speculative turns or prediction forks; the types remain available for a separately reviewed feature.",
+      "evidence": [
+        "apps/desktop/src/engine/agents/adapters/codex/protocol-coverage.json",
+        "docs/codex-app-server-compatibility.md",
+        "apps/desktop/src/engine/agents/adapters/codex/generated/v2/ThreadSampleParams.ts"
+      ]
+    },
+    {
+      "provider": "codex",
+      "fingerprint": "19cdcd9046fa2cfd02b1e007af61b9a56672213979863f127662bfbe875a771d",
+      "disposition": "intentionally-deferred",
+      "rationale": "thread/sample and thread/sample/cancel composer suggestions are explicitly deferred. Zeros sends neither route and does not create speculative turns or prediction forks; the types remain available for a separately reviewed feature.",
+      "evidence": [
+        "apps/desktop/src/engine/agents/adapters/codex/protocol-coverage.json",
+        "docs/codex-app-server-compatibility.md",
+        "apps/desktop/src/engine/agents/adapters/codex/generated/v2/ThreadSampleParams.ts"
+      ]
+    },
+    {
+      "provider": "codex",
+      "fingerprint": "ea96796627329d445b28dc5a1ef481c762cb1204f6f97110d5a6e3bc8fab01cb",
+      "disposition": "intentionally-deferred",
+      "rationale": "thread/sample and thread/sample/cancel composer suggestions are explicitly deferred. Zeros sends neither route and does not create speculative turns or prediction forks; the types remain available for a separately reviewed feature.",
+      "evidence": [
+        "apps/desktop/src/engine/agents/adapters/codex/protocol-coverage.json",
+        "docs/codex-app-server-compatibility.md",
+        "apps/desktop/src/engine/agents/adapters/codex/generated/v2/ThreadSampleParams.ts"
+      ]
+    },
+    {
+      "provider": "codex",
+      "fingerprint": "5b72830ea6e41360531d77de7f2d35b79c1a65344cd8247e868e506954bb0091",
+      "disposition": "generated-only",
+      "rationale": "Native read/unread receipts and revision-checked update operations are generated-only. Zeros does not call thread/readState/update or replace its owner-keyed durable chat state with provider read-state revisions.",
+      "evidence": [
+        "apps/desktop/src/engine/agents/adapters/codex/protocol-coverage.json",
+        "apps/desktop/src/engine/agents/adapters/codex/app-server-adapter.ts",
+        "apps/cloud-worker/src/drivers/codex/driver.ts",
+        "docs/codex-app-server-compatibility.md"
+      ]
+    },
+    {
+      "provider": "codex",
+      "fingerprint": "b6e0d1a48311bad62c9cd9abb059c97c455ec34fe87a308f2e8480b3a50c4591",
+      "disposition": "generated-only",
+      "rationale": "Optional responsesapiClientMetadataPatch is not sent by Zeros. Existing native turn/start and turn/steer keep their current input, model, effort, permission and expected-turn identity parameters; metadata merge semantics remain runtime-owned.",
+      "evidence": [
+        "apps/desktop/src/engine/agents/adapters/codex/app-server-adapter.ts",
+        "apps/cloud-worker/src/drivers/codex/driver.ts",
+        "apps/desktop/src/engine/agents/adapters/codex/__tests__/app-server-adapter-steer.test.ts"
+      ]
+    },
+    {
+      "provider": "codex",
+      "fingerprint": "a2dc5506138a38139b0521ec939de56ad0f4ef16ff0a3f094b08f452dd8a894d",
+      "disposition": "generated-only",
+      "rationale": "Optional responsesapiClientMetadataPatch is not sent by Zeros. Existing native turn/start and turn/steer keep their current input, model, effort, permission and expected-turn identity parameters; metadata merge semantics remain runtime-owned.",
+      "evidence": [
+        "apps/desktop/src/engine/agents/adapters/codex/app-server-adapter.ts",
+        "apps/cloud-worker/src/drivers/codex/driver.ts",
+        "apps/desktop/src/engine/agents/adapters/codex/__tests__/app-server-adapter-steer.test.ts"
+      ]
+    },
+    {
+      "provider": "codex",
+      "fingerprint": "4d5aded7f74d7f85fbaf67b882f0bf9b3bac4c5dd65dba21ae0cfa857e9a6ed4",
+      "disposition": "generated-only",
+      "rationale": "The optional retain flag controls native model-history retention of injected tool output. Zeros does not send TurnToolOutput on turn/start and does not infer any new transcript or persistence authority from the flag.",
+      "evidence": [
+        "apps/desktop/src/engine/agents/adapters/codex/generated/v2/TurnToolOutput.ts",
+        "apps/desktop/src/engine/agents/adapters/codex/app-server-adapter.ts",
+        "apps/cloud-worker/src/drivers/codex/driver.ts"
+      ]
+    },
+    {
+      "provider": "cursor",
+      "fingerprint": "62a333636d814a93684b062fe85b85ae76dd94f6f648511e8cc2e87a75dfef05",
+      "disposition": "intentionally-deferred",
+      "rationale": "AgentOperationOptions adds optional Cursor team targeting. A team selector is deferred: the SDK has no team-listing API, and Zeros account connection stores a minted API key and email without a selected team. Local Personal, organization-local and standalone cloud execution retain default account scope; a Zeros organization is not a Cursor team. No teamId is invented or persisted.",
+      "evidence": [
+        "docs/agent-tool-presentation.md",
+        "docs/provider-accounts.md",
+        "apps/desktop/electron/cursor-subscription-controller.ts",
+        "apps/desktop/src/engine/agents/adapters/cursor-sdk/adapter.ts",
+        "apps/cloud-worker/src/drivers/cursor/host.ts"
+      ]
+    },
+    {
+      "provider": "cursor",
+      "fingerprint": "05da464dc74bd65542bf29f716e60e54d2e87e1efe4d2a20f20264d46bf57f33",
+      "disposition": "intentionally-deferred",
+      "rationale": "CursorRequestOptions adds optional Cursor team targeting. A team selector is deferred: the SDK has no team-listing API, and Zeros account connection stores a minted API key and email without a selected team. Local Personal, organization-local and standalone cloud execution retain default account scope; a Zeros organization is not a Cursor team. No teamId is invented or persisted.",
+      "evidence": [
+        "docs/agent-tool-presentation.md",
+        "docs/provider-accounts.md",
+        "apps/desktop/electron/cursor-subscription-controller.ts",
+        "apps/desktop/src/engine/agents/adapters/cursor-sdk/adapter.ts",
+        "apps/cloud-worker/src/drivers/cursor/host.ts"
+      ]
+    },
+    {
+      "provider": "cursor",
+      "fingerprint": "87a99091e649a54fecafb2237ab114479e1de27b9cc8d90d29f0fec969caa209",
+      "disposition": "intentionally-deferred",
+      "rationale": "GetAgentOptions adds optional Cursor team targeting. A team selector is deferred: the SDK has no team-listing API, and Zeros account connection stores a minted API key and email without a selected team. Local Personal, organization-local and standalone cloud execution retain default account scope; a Zeros organization is not a Cursor team. No teamId is invented or persisted.",
+      "evidence": [
+        "docs/agent-tool-presentation.md",
+        "docs/provider-accounts.md",
+        "apps/desktop/electron/cursor-subscription-controller.ts",
+        "apps/desktop/src/engine/agents/adapters/cursor-sdk/adapter.ts",
+        "apps/cloud-worker/src/drivers/cursor/host.ts"
+      ]
+    },
+    {
+      "provider": "cursor",
+      "fingerprint": "ad8e60c430424c7a682dd24e01221780d96b9338fa38d1120f1763baee5a65a4",
+      "disposition": "intentionally-deferred",
+      "rationale": "GetRunOptions adds optional Cursor team targeting. A team selector is deferred: the SDK has no team-listing API, and Zeros account connection stores a minted API key and email without a selected team. Local Personal, organization-local and standalone cloud execution retain default account scope; a Zeros organization is not a Cursor team. No teamId is invented or persisted.",
+      "evidence": [
+        "docs/agent-tool-presentation.md",
+        "docs/provider-accounts.md",
+        "apps/desktop/electron/cursor-subscription-controller.ts",
+        "apps/desktop/src/engine/agents/adapters/cursor-sdk/adapter.ts",
+        "apps/cloud-worker/src/drivers/cursor/host.ts"
+      ]
+    },
+    {
+      "provider": "cursor",
+      "fingerprint": "596d513f491ea7771c09102f6888e366b59d1550e8d474e6968192bff5e56efd",
+      "disposition": "intentionally-deferred",
+      "rationale": "ListAgentsOptions adds optional Cursor team targeting. A team selector is deferred: the SDK has no team-listing API, and Zeros account connection stores a minted API key and email without a selected team. Local Personal, organization-local and standalone cloud execution retain default account scope; a Zeros organization is not a Cursor team. No teamId is invented or persisted.",
+      "evidence": [
+        "docs/agent-tool-presentation.md",
+        "docs/provider-accounts.md",
+        "apps/desktop/electron/cursor-subscription-controller.ts",
+        "apps/desktop/src/engine/agents/adapters/cursor-sdk/adapter.ts",
+        "apps/cloud-worker/src/drivers/cursor/host.ts"
+      ]
+    },
+    {
+      "provider": "cursor",
+      "fingerprint": "9821ab3d91edbb98b2b9e3558bad4bc59016b1773bd7b8e0f7a60f5eb14093df",
+      "disposition": "intentionally-deferred",
+      "rationale": "ListRunsOptions adds optional Cursor team targeting. A team selector is deferred: the SDK has no team-listing API, and Zeros account connection stores a minted API key and email without a selected team. Local Personal, organization-local and standalone cloud execution retain default account scope; a Zeros organization is not a Cursor team. No teamId is invented or persisted.",
+      "evidence": [
+        "docs/agent-tool-presentation.md",
+        "docs/provider-accounts.md",
+        "apps/desktop/electron/cursor-subscription-controller.ts",
+        "apps/desktop/src/engine/agents/adapters/cursor-sdk/adapter.ts",
+        "apps/cloud-worker/src/drivers/cursor/host.ts"
+      ]
+    },
+    {
+      "provider": "cursor",
+      "fingerprint": "2c1e827ec265c6b8da6dccfc0e4af186be1d91bd299483ee5d6ac7862f32f2ba",
+      "disposition": "intentionally-deferred",
+      "rationale": "AgentOptions adds optional Cursor team targeting. A team selector is deferred: the SDK has no team-listing API, and Zeros account connection stores a minted API key and email without a selected team. Local Personal, organization-local and standalone cloud execution retain default account scope; a Zeros organization is not a Cursor team. No teamId is invented or persisted.",
+      "evidence": [
+        "docs/agent-tool-presentation.md",
+        "docs/provider-accounts.md",
+        "apps/desktop/electron/cursor-subscription-controller.ts",
+        "apps/desktop/src/engine/agents/adapters/cursor-sdk/adapter.ts",
+        "apps/cloud-worker/src/drivers/cursor/host.ts"
+      ]
+    },
+    {
+      "provider": "cursor",
+      "fingerprint": "b6f59d25585c8d08d2c34730e3f5f2456efe228c0efa4847c780a39a3fd15d6f",
+      "disposition": "intentionally-deferred",
+      "rationale": "ModelSelection adds optional maxMode. A max-mode label in the effort menu is deferred by product decision. Existing model IDs, native params and saved effort values remain unchanged for Local and cloud. The SDK owns automatic max-mode resolution for variants that require it; Zeros adds no selector or synthetic effort level.",
+      "evidence": [
+        "docs/agent-tool-presentation.md",
+        "catalogs/README.md",
+        "apps/desktop/src/engine/agents/adapters/cursor-sdk/__tests__/model-passing.test.ts",
+        "apps/cloud-worker/src/drivers/cursor/host.ts"
+      ]
+    },
+    {
+      "provider": "cursor",
+      "fingerprint": "902ec17640d442d23af9e84da13629f530a3f73eda5fbd123613344b30cc867f",
+      "disposition": "intentionally-deferred",
+      "rationale": "ModelVariant adds optional isMaxMode. A max-mode label in the effort menu is deferred by product decision. Existing model IDs, native params and saved effort values remain unchanged for Local and cloud. The SDK owns automatic max-mode resolution for variants that require it; Zeros adds no selector or synthetic effort level.",
+      "evidence": [
+        "docs/agent-tool-presentation.md",
+        "catalogs/README.md",
+        "apps/desktop/src/engine/agents/adapters/cursor-sdk/__tests__/model-passing.test.ts",
+        "apps/cloud-worker/src/drivers/cursor/host.ts"
+      ]
+    },
+    {
+      "provider": "cursor",
+      "fingerprint": "e4b56a6d0b2586225c067cc4c5c8669bb68929e78c31021575f60155a84138d0",
+      "disposition": "intentionally-deferred",
+      "rationale": "validateCloudModelAvailability adds optional Cursor team targeting. A team selector is deferred: the SDK has no team-listing API, and Zeros account connection stores a minted API key and email without a selected team. Local Personal, organization-local and standalone cloud execution retain default account scope; a Zeros organization is not a Cursor team. No teamId is invented or persisted.",
+      "evidence": [
+        "docs/agent-tool-presentation.md",
+        "docs/provider-accounts.md",
+        "apps/desktop/electron/cursor-subscription-controller.ts",
+        "apps/desktop/src/engine/agents/adapters/cursor-sdk/adapter.ts",
+        "apps/cloud-worker/src/drivers/cursor/host.ts"
+      ]
+    },
+    {
+      "provider": "cursor",
+      "fingerprint": "4534f9712525bf3400320e803e4981d582ccb0eccf3c5bd88f1caa7170732e34",
+      "disposition": "intentionally-deferred",
+      "rationale": "CloudApiClient adds optional Cursor team targeting. A team selector is deferred: the SDK has no team-listing API, and Zeros account connection stores a minted API key and email without a selected team. Local Personal, organization-local and standalone cloud execution retain default account scope; a Zeros organization is not a Cursor team. No teamId is invented or persisted.",
+      "evidence": [
+        "docs/agent-tool-presentation.md",
+        "docs/provider-accounts.md",
+        "apps/desktop/electron/cursor-subscription-controller.ts",
+        "apps/desktop/src/engine/agents/adapters/cursor-sdk/adapter.ts",
+        "apps/cloud-worker/src/drivers/cursor/host.ts"
+      ]
+    },
+    {
+      "provider": "cursor",
+      "fingerprint": "6c80b082ecddda045e433b2326d805873e50da904297d6b3cd734d06deecf016",
+      "disposition": "intentionally-deferred",
+      "rationale": "buildTransport adds optional Cursor team targeting. A team selector is deferred: the SDK has no team-listing API, and Zeros account connection stores a minted API key and email without a selected team. Local Personal, organization-local and standalone cloud execution retain default account scope; a Zeros organization is not a Cursor team. No teamId is invented or persisted.",
+      "evidence": [
+        "docs/agent-tool-presentation.md",
+        "docs/provider-accounts.md",
+        "apps/desktop/electron/cursor-subscription-controller.ts",
+        "apps/desktop/src/engine/agents/adapters/cursor-sdk/adapter.ts",
+        "apps/cloud-worker/src/drivers/cursor/host.ts"
+      ]
+    },
+    {
+      "provider": "cursor",
+      "fingerprint": "f860cf3d6a9e66a3a4cebf33cc30fc3978bff4fb5235274caab2b13d6a51d903",
+      "disposition": "intentionally-deferred",
+      "rationale": "CreateLocalExecutorOptions adds optional Cursor team targeting. A team selector is deferred: the SDK has no team-listing API, and Zeros account connection stores a minted API key and email without a selected team. Local Personal, organization-local and standalone cloud execution retain default account scope; a Zeros organization is not a Cursor team. No teamId is invented or persisted.",
+      "evidence": [
+        "docs/agent-tool-presentation.md",
+        "docs/provider-accounts.md",
+        "apps/desktop/electron/cursor-subscription-controller.ts",
+        "apps/desktop/src/engine/agents/adapters/cursor-sdk/adapter.ts",
+        "apps/cloud-worker/src/drivers/cursor/host.ts"
+      ]
+    },
+    {
+      "provider": "cursor",
+      "fingerprint": "66e00caaf82c73332847dee5d835d742b8dda72989d5bfea9bb1a9206491ef95",
+      "disposition": "sdk-owned",
+      "rationale": "CatalogResolvedModel is an SDK-owned helper for retaining an already resolved local model selection across sends, including native max-mode variants. Both placements use Agent.create/resume/send rather than importing this helper. Existing exact-model selection and fallback behavior remain covered; it does not expose a new Zeros model or effort control.",
+      "evidence": [
+        "apps/desktop/src/engine/agents/adapters/cursor-sdk/adapter.ts",
+        "apps/desktop/src/engine/agents/adapters/cursor-sdk/__tests__/model-passing.test.ts",
+        "apps/cloud-worker/src/drivers/cursor/host.ts",
+        "apps/cloud-worker/src/drivers/cursor/__tests__/host.test.ts",
+        "docs/agent-tool-presentation.md"
+      ]
+    },
+    {
+      "provider": "cursor",
+      "fingerprint": "f5d1a91ee54268a84b770956e58ac2a405bc5b3153d9e7bd8d83fcc3d08ac158",
+      "disposition": "sdk-owned",
+      "rationale": "catalogResolvedModelFrom is an SDK-owned helper for retaining an already resolved local model selection across sends, including native max-mode variants. Both placements use Agent.create/resume/send rather than importing this helper. Existing exact-model selection and fallback behavior remain covered; it does not expose a new Zeros model or effort control.",
+      "evidence": [
+        "apps/desktop/src/engine/agents/adapters/cursor-sdk/adapter.ts",
+        "apps/desktop/src/engine/agents/adapters/cursor-sdk/__tests__/model-passing.test.ts",
+        "apps/cloud-worker/src/drivers/cursor/host.ts",
+        "apps/cloud-worker/src/drivers/cursor/__tests__/host.test.ts",
+        "docs/agent-tool-presentation.md"
+      ]
+    },
+    {
+      "provider": "cursor",
+      "fingerprint": "88f0503f0ef5e813fd2d9bae2ab3e60ff70d5e92e40c0921acdc4bfc4ac683ea",
+      "disposition": "sdk-owned",
+      "rationale": "reuseResolvedModelSelection is an SDK-owned helper for retaining an already resolved local model selection across sends, including native max-mode variants. Both placements use Agent.create/resume/send rather than importing this helper. Existing exact-model selection and fallback behavior remain covered; it does not expose a new Zeros model or effort control.",
+      "evidence": [
+        "apps/desktop/src/engine/agents/adapters/cursor-sdk/adapter.ts",
+        "apps/desktop/src/engine/agents/adapters/cursor-sdk/__tests__/model-passing.test.ts",
+        "apps/cloud-worker/src/drivers/cursor/host.ts",
+        "apps/cloud-worker/src/drivers/cursor/__tests__/host.test.ts",
+        "docs/agent-tool-presentation.md"
+      ]
+    },
+    {
+      "provider": "cursor",
+      "fingerprint": "6eda62b9e39b4243d67bc5b16b5431af6b39ffcfecfa28ea9f0092c5e9dbc3eb",
+      "disposition": "sdk-owned",
+      "rationale": "RecoveredLocalStoreRun lets the SDK recover streamed text when its local database cannot open. Both adapters already drain the run and consume its final result. The accompanying nonterminal status.message warning is currently lost because both translators only consume terminal statuses; surfacing one bounded, deduplicated inbetween warning is deferred, as documented. No persistence or recovery success is inferred beyond the SDK result.",
+      "evidence": [
+        "docs/agent-tool-presentation.md",
+        "apps/desktop/src/engine/agents/adapters/cursor-sdk/translator.ts",
+        "apps/desktop/src/engine/agents/adapters/cursor-sdk/__tests__/adapter-background-continuations.test.ts",
+        "apps/cloud-worker/src/drivers/cursor/translator.ts",
+        "apps/cloud-worker/src/drivers/cursor/__tests__/driver.test.ts"
+      ]
+    },
+    {
+      "provider": "cursor",
+      "fingerprint": "16340aeba7498b805bfae895b4ff3618b26ef3a946908da6cdac60dcb09796bc",
+      "disposition": "sdk-owned",
+      "rationale": "recoveredResultForLocalStoreOpenFailure lets the SDK recover streamed text when its local database cannot open. Both adapters already drain the run and consume its final result. The accompanying nonterminal status.message warning is currently lost because both translators only consume terminal statuses; surfacing one bounded, deduplicated inbetween warning is deferred, as documented. No persistence or recovery success is inferred beyond the SDK result.",
+      "evidence": [
+        "docs/agent-tool-presentation.md",
+        "apps/desktop/src/engine/agents/adapters/cursor-sdk/translator.ts",
+        "apps/desktop/src/engine/agents/adapters/cursor-sdk/__tests__/adapter-background-continuations.test.ts",
+        "apps/cloud-worker/src/drivers/cursor/translator.ts",
+        "apps/cloud-worker/src/drivers/cursor/__tests__/driver.test.ts"
+      ]
+    },
+    {
+      "provider": "cursor",
+      "fingerprint": "cbc271b72bbd0c91f2227d186b0aec1d6c10fed691b5d227795a6a525869bb98",
+      "disposition": "intentionally-deferred",
+      "rationale": "AgentOptions adds optional Cursor team targeting. A team selector is deferred: the SDK has no team-listing API, and Zeros account connection stores a minted API key and email without a selected team. Local Personal, organization-local and standalone cloud execution retain default account scope; a Zeros organization is not a Cursor team. No teamId is invented or persisted.",
+      "evidence": [
+        "docs/agent-tool-presentation.md",
+        "docs/provider-accounts.md",
+        "apps/desktop/electron/cursor-subscription-controller.ts",
+        "apps/desktop/src/engine/agents/adapters/cursor-sdk/adapter.ts",
+        "apps/cloud-worker/src/drivers/cursor/host.ts"
+      ]
+    },
+    {
+      "provider": "cursor",
+      "fingerprint": "b0df09afa84edd59c061069079d385e7dcde5998110264621f4503f519bd526a",
+      "disposition": "intentionally-deferred",
+      "rationale": "ModelSelection adds optional maxMode. A max-mode label in the effort menu is deferred by product decision. Existing model IDs, native params and saved effort values remain unchanged for Local and cloud. The SDK owns automatic max-mode resolution for variants that require it; Zeros adds no selector or synthetic effort level.",
+      "evidence": [
+        "docs/agent-tool-presentation.md",
+        "catalogs/README.md",
+        "apps/desktop/src/engine/agents/adapters/cursor-sdk/__tests__/model-passing.test.ts",
+        "apps/cloud-worker/src/drivers/cursor/host.ts"
+      ]
+    },
+    {
+      "provider": "cursor",
+      "fingerprint": "e26de82eea99755c0792e3ca10f6f4b7606d3e41e2e818c7e83232b2154295a0",
+      "disposition": "intentionally-deferred",
+      "rationale": "ModelVariant adds optional isMaxMode. A max-mode label in the effort menu is deferred by product decision. Existing model IDs, native params and saved effort values remain unchanged for Local and cloud. The SDK owns automatic max-mode resolution for variants that require it; Zeros adds no selector or synthetic effort level.",
+      "evidence": [
+        "docs/agent-tool-presentation.md",
+        "catalogs/README.md",
+        "apps/desktop/src/engine/agents/adapters/cursor-sdk/__tests__/model-passing.test.ts",
+        "apps/cloud-worker/src/drivers/cursor/host.ts"
+      ]
+    },
+    {
+      "provider": "cursor",
+      "fingerprint": "b667d91acabc41af9d54dd1c0b8a3a4a0d5120cfd3ebc1c6b42a42269d129f16",
+      "disposition": "intentionally-deferred",
+      "rationale": "AgentExecutorCacheOptions adds optional Cursor team targeting. A team selector is deferred: the SDK has no team-listing API, and Zeros account connection stores a minted API key and email without a selected team. Local Personal, organization-local and standalone cloud execution retain default account scope; a Zeros organization is not a Cursor team. No teamId is invented or persisted.",
+      "evidence": [
+        "docs/agent-tool-presentation.md",
+        "docs/provider-accounts.md",
+        "apps/desktop/electron/cursor-subscription-controller.ts",
+        "apps/desktop/src/engine/agents/adapters/cursor-sdk/adapter.ts",
+        "apps/cloud-worker/src/drivers/cursor/host.ts"
+      ]
+    },
+    {
+      "provider": "cursor",
+      "fingerprint": "67a778b05c42a7c67f96bfd53d15ef6a63b76fcc621b7f0d55818eccbcfbe31e",
+      "disposition": "intentionally-deferred",
+      "rationale": "CursorAgentPlatform adds optional Cursor team targeting. A team selector is deferred: the SDK has no team-listing API, and Zeros account connection stores a minted API key and email without a selected team. Local Personal, organization-local and standalone cloud execution retain default account scope; a Zeros organization is not a Cursor team. No teamId is invented or persisted.",
+      "evidence": [
+        "docs/agent-tool-presentation.md",
+        "docs/provider-accounts.md",
+        "apps/desktop/electron/cursor-subscription-controller.ts",
+        "apps/desktop/src/engine/agents/adapters/cursor-sdk/adapter.ts",
+        "apps/cloud-worker/src/drivers/cursor/host.ts"
+      ]
+    },
+    {
+      "provider": "cursor",
+      "fingerprint": "dcdde549bb579cd1af826c3ac2bda3d28acd36025f308a703a5be277143f85e8",
+      "disposition": "intentionally-deferred",
+      "rationale": "SDK_TEAM_ID_HEADER_NAME adds optional Cursor team targeting. A team selector is deferred: the SDK has no team-listing API, and Zeros account connection stores a minted API key and email without a selected team. Local Personal, organization-local and standalone cloud execution retain default account scope; a Zeros organization is not a Cursor team. No teamId is invented or persisted.",
+      "evidence": [
+        "docs/agent-tool-presentation.md",
+        "docs/provider-accounts.md",
+        "apps/desktop/electron/cursor-subscription-controller.ts",
+        "apps/desktop/src/engine/agents/adapters/cursor-sdk/adapter.ts",
+        "apps/cloud-worker/src/drivers/cursor/host.ts"
+      ]
+    },
+    {
+      "provider": "cursor",
+      "fingerprint": "fa21daba0a64631d438783e1b668e3cb301705834ac98cca21b69330dee33a83",
+      "disposition": "intentionally-deferred",
+      "rationale": "parseSdkTeamId adds optional Cursor team targeting. A team selector is deferred: the SDK has no team-listing API, and Zeros account connection stores a minted API key and email without a selected team. Local Personal, organization-local and standalone cloud execution retain default account scope; a Zeros organization is not a Cursor team. No teamId is invented or persisted.",
+      "evidence": [
+        "docs/agent-tool-presentation.md",
+        "docs/provider-accounts.md",
+        "apps/desktop/electron/cursor-subscription-controller.ts",
+        "apps/desktop/src/engine/agents/adapters/cursor-sdk/adapter.ts",
+        "apps/cloud-worker/src/drivers/cursor/host.ts"
+      ]
+    },
+    {
+      "provider": "cursor",
+      "fingerprint": "29367e56f57938faa517b4aa67b6c8ca6cf671456dfeb301d5f2192c2a833db6",
+      "disposition": "sdk-owned",
+      "rationale": "AgentConversationTurnSchema expands the error member from z.ZodTypeAny to z.ZodType<any, z.ZodTypeDef, any>. The SDK imports zod/v3 from the patched zod 4 peer; the normalized declaration has no other change. Discriminators, fields, callback identities and serialized results are preserved. Existing Local and cloud translators keep their current presentation and lifecycle handling.",
+      "evidence": [
+        "scripts/__tests__/audit-exceptions.test.ts",
+        "apps/desktop/src/engine/agents/adapters/cursor-sdk/__tests__/sdk-tool-type-coverage.test.ts",
+        "apps/desktop/src/engine/agents/adapters/cursor-sdk/__tests__/transcript-fidelity.test.ts",
+        "apps/cloud-worker/src/drivers/cursor/__tests__/parity.test.ts"
+      ]
+    },
+    {
+      "provider": "cursor",
+      "fingerprint": "05513917f52cc871fbdb9dd083ad97d3495f42dce64cf3e7dd918b01ebce02a2",
+      "disposition": "sdk-owned",
+      "rationale": "ConversationStepSchema expands the error member from z.ZodTypeAny to z.ZodType<any, z.ZodTypeDef, any>. The SDK imports zod/v3 from the patched zod 4 peer; the normalized declaration has no other change. Discriminators, fields, callback identities and serialized results are preserved. Existing Local and cloud translators keep their current presentation and lifecycle handling.",
+      "evidence": [
+        "scripts/__tests__/audit-exceptions.test.ts",
+        "apps/desktop/src/engine/agents/adapters/cursor-sdk/__tests__/sdk-tool-type-coverage.test.ts",
+        "apps/desktop/src/engine/agents/adapters/cursor-sdk/__tests__/transcript-fidelity.test.ts",
+        "apps/cloud-worker/src/drivers/cursor/__tests__/parity.test.ts"
+      ]
+    },
+    {
+      "provider": "cursor",
+      "fingerprint": "f40f94e5425e0cb2fd48a90353b0f596c0f870303a0a20dc35e658b144b709dc",
+      "disposition": "sdk-owned",
+      "rationale": "ConversationTurnSchema expands the error member from z.ZodTypeAny to z.ZodType<any, z.ZodTypeDef, any>. The SDK imports zod/v3 from the patched zod 4 peer; the normalized declaration has no other change. Discriminators, fields, callback identities and serialized results are preserved. Existing Local and cloud translators keep their current presentation and lifecycle handling.",
+      "evidence": [
+        "scripts/__tests__/audit-exceptions.test.ts",
+        "apps/desktop/src/engine/agents/adapters/cursor-sdk/__tests__/sdk-tool-type-coverage.test.ts",
+        "apps/desktop/src/engine/agents/adapters/cursor-sdk/__tests__/transcript-fidelity.test.ts",
+        "apps/cloud-worker/src/drivers/cursor/__tests__/parity.test.ts"
+      ]
+    },
+    {
+      "provider": "cursor",
+      "fingerprint": "263f3f84891b3ea32aadca2cdc01f678d26e568134807985690692de17702643",
+      "disposition": "sdk-owned",
+      "rationale": "InteractionUpdateSchema expands the error member from z.ZodTypeAny to z.ZodType<any, z.ZodTypeDef, any>. The SDK imports zod/v3 from the patched zod 4 peer; the normalized declaration has no other change. Discriminators, fields, callback identities and serialized results are preserved. Existing Local and cloud translators keep their current presentation and lifecycle handling.",
+      "evidence": [
+        "scripts/__tests__/audit-exceptions.test.ts",
+        "apps/desktop/src/engine/agents/adapters/cursor-sdk/__tests__/sdk-tool-type-coverage.test.ts",
+        "apps/desktop/src/engine/agents/adapters/cursor-sdk/__tests__/transcript-fidelity.test.ts",
+        "apps/cloud-worker/src/drivers/cursor/__tests__/parity.test.ts"
+      ]
+    },
+    {
+      "provider": "cursor",
+      "fingerprint": "c94d93a4d43c0bc45a63f46d8f8859caa63faa8567a0ef4fccfd5e83a65a8611",
+      "disposition": "sdk-owned",
+      "rationale": "NestedTaskUpdateSchema expands the error member from z.ZodTypeAny to z.ZodType<any, z.ZodTypeDef, any>. The SDK imports zod/v3 from the patched zod 4 peer; the normalized declaration has no other change. Discriminators, fields, callback identities and serialized results are preserved. Existing Local and cloud translators keep their current presentation and lifecycle handling.",
+      "evidence": [
+        "scripts/__tests__/audit-exceptions.test.ts",
+        "apps/desktop/src/engine/agents/adapters/cursor-sdk/__tests__/sdk-tool-type-coverage.test.ts",
+        "apps/desktop/src/engine/agents/adapters/cursor-sdk/__tests__/transcript-fidelity.test.ts",
+        "apps/cloud-worker/src/drivers/cursor/__tests__/parity.test.ts"
+      ]
+    },
+    {
+      "provider": "cursor",
+      "fingerprint": "831b565d0a2666aec5ae5c0f84f40a60c57279dd6ae2c88bb905c750b783422f",
+      "disposition": "sdk-owned",
+      "rationale": "PartialToolCallUpdateSchema expands the error member from z.ZodTypeAny to z.ZodType<any, z.ZodTypeDef, any>. The SDK imports zod/v3 from the patched zod 4 peer; the normalized declaration has no other change. Discriminators, fields, callback identities and serialized results are preserved. Existing Local and cloud translators keep their current presentation and lifecycle handling.",
+      "evidence": [
+        "scripts/__tests__/audit-exceptions.test.ts",
+        "apps/desktop/src/engine/agents/adapters/cursor-sdk/__tests__/sdk-tool-type-coverage.test.ts",
+        "apps/desktop/src/engine/agents/adapters/cursor-sdk/__tests__/transcript-fidelity.test.ts",
+        "apps/cloud-worker/src/drivers/cursor/__tests__/parity.test.ts"
+      ]
+    },
+    {
+      "provider": "cursor",
+      "fingerprint": "68aaa9a9483e32e91aae05e28e3909ba90c3b2f4fb24d82449a115f54a8cf7e7",
+      "disposition": "sdk-owned",
+      "rationale": "ToolCallCompletedUpdateSchema expands the error member from z.ZodTypeAny to z.ZodType<any, z.ZodTypeDef, any>. The SDK imports zod/v3 from the patched zod 4 peer; the normalized declaration has no other change. Discriminators, fields, callback identities and serialized results are preserved. Existing Local and cloud translators keep their current presentation and lifecycle handling.",
+      "evidence": [
+        "scripts/__tests__/audit-exceptions.test.ts",
+        "apps/desktop/src/engine/agents/adapters/cursor-sdk/__tests__/sdk-tool-type-coverage.test.ts",
+        "apps/desktop/src/engine/agents/adapters/cursor-sdk/__tests__/transcript-fidelity.test.ts",
+        "apps/cloud-worker/src/drivers/cursor/__tests__/parity.test.ts"
+      ]
+    },
+    {
+      "provider": "cursor",
+      "fingerprint": "d824c5ec04550fefcd43347a18f1de065a93b57c2b13a43e6d71e42b15525e71",
+      "disposition": "sdk-owned",
+      "rationale": "ToolCallDeltaUpdateSchema expands the error member from z.ZodTypeAny to z.ZodType<any, z.ZodTypeDef, any>. The SDK imports zod/v3 from the patched zod 4 peer; the normalized declaration has no other change. Discriminators, fields, callback identities and serialized results are preserved. Existing Local and cloud translators keep their current presentation and lifecycle handling.",
+      "evidence": [
+        "scripts/__tests__/audit-exceptions.test.ts",
+        "apps/desktop/src/engine/agents/adapters/cursor-sdk/__tests__/sdk-tool-type-coverage.test.ts",
+        "apps/desktop/src/engine/agents/adapters/cursor-sdk/__tests__/transcript-fidelity.test.ts",
+        "apps/cloud-worker/src/drivers/cursor/__tests__/parity.test.ts"
+      ]
+    },
+    {
+      "provider": "cursor",
+      "fingerprint": "fb1a86ff7c381d1e6c1f835a23a1b68d56f91978ea5c8cc08d0eeca7dfa14874",
+      "disposition": "sdk-owned",
+      "rationale": "ToolCallStartedUpdateSchema expands the error member from z.ZodTypeAny to z.ZodType<any, z.ZodTypeDef, any>. The SDK imports zod/v3 from the patched zod 4 peer; the normalized declaration has no other change. Discriminators, fields, callback identities and serialized results are preserved. Existing Local and cloud translators keep their current presentation and lifecycle handling.",
+      "evidence": [
+        "scripts/__tests__/audit-exceptions.test.ts",
+        "apps/desktop/src/engine/agents/adapters/cursor-sdk/__tests__/sdk-tool-type-coverage.test.ts",
+        "apps/desktop/src/engine/agents/adapters/cursor-sdk/__tests__/transcript-fidelity.test.ts",
+        "apps/cloud-worker/src/drivers/cursor/__tests__/parity.test.ts"
+      ]
+    },
+    {
+      "provider": "cursor",
+      "fingerprint": "b0c45cd3c6275bff5453587943875b334a59e966c4b1c2213c48fcd7da0c0663",
+      "disposition": "intentionally-deferred",
+      "rationale": "ComputerUseResultSchema only expands the zod error type in this declaration diff. The SDK now emits typed computerUse calls, which retain existing generic tool rows. Readable computer-use action steps are deferred: the native executor requires an X11 driver (XDOTOOL or NATIVE_X11), which neither the Mac app nor the headless cloud VM provides. This does not enable a new computer capability.",
+      "evidence": [
+        "docs/agent-tool-presentation.md",
+        "apps/desktop/src/engine/agents/adapters/cursor-sdk/__tests__/sdk-tool-type-coverage.test.ts",
+        "apps/desktop/src/engine/agents/adapters/cursor-sdk/translator.ts",
+        "apps/cloud-worker/src/drivers/cursor/translator.ts"
+      ]
+    },
+    {
+      "provider": "cursor",
+      "fingerprint": "b2e9f346b89a539035ae8ceea2aa52aba437db2a651904fa9d22c10013e5a173",
+      "disposition": "intentionally-deferred",
+      "rationale": "ComputerUseToolCallSchema only expands the zod error type in this declaration diff. The SDK now emits typed computerUse calls, which retain existing generic tool rows. Readable computer-use action steps are deferred: the native executor requires an X11 driver (XDOTOOL or NATIVE_X11), which neither the Mac app nor the headless cloud VM provides. This does not enable a new computer capability.",
+      "evidence": [
+        "docs/agent-tool-presentation.md",
+        "apps/desktop/src/engine/agents/adapters/cursor-sdk/__tests__/sdk-tool-type-coverage.test.ts",
+        "apps/desktop/src/engine/agents/adapters/cursor-sdk/translator.ts",
+        "apps/cloud-worker/src/drivers/cursor/translator.ts"
+      ]
+    },
+    {
+      "provider": "cursor",
+      "fingerprint": "131019d61beb388daaab7b706e4755510a0223a4ea834ebbbc882f305954d141",
+      "disposition": "sdk-owned",
+      "rationale": "CreatePlanResultSchema expands the error member from z.ZodTypeAny to z.ZodType<any, z.ZodTypeDef, any>. The SDK imports zod/v3 from the patched zod 4 peer; the normalized declaration has no other change. Discriminators, fields, callback identities and serialized results are preserved. Existing Local and cloud translators keep their current presentation and lifecycle handling.",
+      "evidence": [
+        "scripts/__tests__/audit-exceptions.test.ts",
+        "apps/desktop/src/engine/agents/adapters/cursor-sdk/__tests__/sdk-tool-type-coverage.test.ts",
+        "apps/desktop/src/engine/agents/adapters/cursor-sdk/__tests__/transcript-fidelity.test.ts",
+        "apps/cloud-worker/src/drivers/cursor/__tests__/parity.test.ts"
+      ]
+    },
+    {
+      "provider": "cursor",
+      "fingerprint": "a342bf0e3dce87d740cda714ec0a78b0644f514613cc6fb5f4cfc4962c396c71",
+      "disposition": "sdk-owned",
+      "rationale": "CreatePlanToolCallSchema expands the error member from z.ZodTypeAny to z.ZodType<any, z.ZodTypeDef, any>. The SDK imports zod/v3 from the patched zod 4 peer; the normalized declaration has no other change. Discriminators, fields, callback identities and serialized results are preserved. Existing Local and cloud translators keep their current presentation and lifecycle handling.",
+      "evidence": [
+        "scripts/__tests__/audit-exceptions.test.ts",
+        "apps/desktop/src/engine/agents/adapters/cursor-sdk/__tests__/sdk-tool-type-coverage.test.ts",
+        "apps/desktop/src/engine/agents/adapters/cursor-sdk/__tests__/transcript-fidelity.test.ts",
+        "apps/cloud-worker/src/drivers/cursor/__tests__/parity.test.ts"
+      ]
+    },
+    {
+      "provider": "cursor",
+      "fingerprint": "88d1fd3be71823864d0ffae619ac725c10c05f631e7b3bf3e781c9cf8e19d754",
+      "disposition": "sdk-owned",
+      "rationale": "DeleteResultSchema expands the error member from z.ZodTypeAny to z.ZodType<any, z.ZodTypeDef, any>. The SDK imports zod/v3 from the patched zod 4 peer; the normalized declaration has no other change. Discriminators, fields, callback identities and serialized results are preserved. Existing Local and cloud translators keep their current presentation and lifecycle handling.",
+      "evidence": [
+        "scripts/__tests__/audit-exceptions.test.ts",
+        "apps/desktop/src/engine/agents/adapters/cursor-sdk/__tests__/sdk-tool-type-coverage.test.ts",
+        "apps/desktop/src/engine/agents/adapters/cursor-sdk/__tests__/transcript-fidelity.test.ts",
+        "apps/cloud-worker/src/drivers/cursor/__tests__/parity.test.ts"
+      ]
+    },
+    {
+      "provider": "cursor",
+      "fingerprint": "f67b70cc54e297df7364119949dd6276bab02f4ed2031bf61872b6c4d4ed9421",
+      "disposition": "sdk-owned",
+      "rationale": "DeleteToolCallSchema expands the error member from z.ZodTypeAny to z.ZodType<any, z.ZodTypeDef, any>. The SDK imports zod/v3 from the patched zod 4 peer; the normalized declaration has no other change. Discriminators, fields, callback identities and serialized results are preserved. Existing Local and cloud translators keep their current presentation and lifecycle handling.",
+      "evidence": [
+        "scripts/__tests__/audit-exceptions.test.ts",
+        "apps/desktop/src/engine/agents/adapters/cursor-sdk/__tests__/sdk-tool-type-coverage.test.ts",
+        "apps/desktop/src/engine/agents/adapters/cursor-sdk/__tests__/transcript-fidelity.test.ts",
+        "apps/cloud-worker/src/drivers/cursor/__tests__/parity.test.ts"
+      ]
+    },
+    {
+      "provider": "cursor",
+      "fingerprint": "05ce5d09ea17f2f536370e99d56b3f3fa8fdfaba75ea68b41a5da9bb5ec01678",
+      "disposition": "sdk-owned",
+      "rationale": "EditResultSchema expands the error member from z.ZodTypeAny to z.ZodType<any, z.ZodTypeDef, any>. The SDK imports zod/v3 from the patched zod 4 peer; the normalized declaration has no other change. Discriminators, fields, callback identities and serialized results are preserved. Existing Local and cloud translators keep their current presentation and lifecycle handling.",
+      "evidence": [
+        "scripts/__tests__/audit-exceptions.test.ts",
+        "apps/desktop/src/engine/agents/adapters/cursor-sdk/__tests__/sdk-tool-type-coverage.test.ts",
+        "apps/desktop/src/engine/agents/adapters/cursor-sdk/__tests__/transcript-fidelity.test.ts",
+        "apps/cloud-worker/src/drivers/cursor/__tests__/parity.test.ts"
+      ]
+    },
+    {
+      "provider": "cursor",
+      "fingerprint": "e0f908c25fbe28a3a37ec6f4913f54bce54e3c2e64d49709e8c553661cec96d7",
+      "disposition": "sdk-owned",
+      "rationale": "EditToolCallSchema expands the error member from z.ZodTypeAny to z.ZodType<any, z.ZodTypeDef, any>. The SDK imports zod/v3 from the patched zod 4 peer; the normalized declaration has no other change. Discriminators, fields, callback identities and serialized results are preserved. Existing Local and cloud translators keep their current presentation and lifecycle handling.",
+      "evidence": [
+        "scripts/__tests__/audit-exceptions.test.ts",
+        "apps/desktop/src/engine/agents/adapters/cursor-sdk/__tests__/sdk-tool-type-coverage.test.ts",
+        "apps/desktop/src/engine/agents/adapters/cursor-sdk/__tests__/transcript-fidelity.test.ts",
+        "apps/cloud-worker/src/drivers/cursor/__tests__/parity.test.ts"
+      ]
+    },
+    {
+      "provider": "cursor",
+      "fingerprint": "693e4bee875e35e46f1cc96b66c3bca58f376843a4dfd9ff7e98b5685deed8b8",
+      "disposition": "sdk-owned",
+      "rationale": "GenerateImageResultSchema expands the error member from z.ZodTypeAny to z.ZodType<any, z.ZodTypeDef, any>. The SDK imports zod/v3 from the patched zod 4 peer; the normalized declaration has no other change. Discriminators, fields, callback identities and serialized results are preserved. Existing Local and cloud translators keep their current presentation and lifecycle handling.",
+      "evidence": [
+        "scripts/__tests__/audit-exceptions.test.ts",
+        "apps/desktop/src/engine/agents/adapters/cursor-sdk/__tests__/sdk-tool-type-coverage.test.ts",
+        "apps/desktop/src/engine/agents/adapters/cursor-sdk/__tests__/transcript-fidelity.test.ts",
+        "apps/cloud-worker/src/drivers/cursor/__tests__/parity.test.ts"
+      ]
+    },
+    {
+      "provider": "cursor",
+      "fingerprint": "cced65f4dbff44d2b44bf833df6170a60e6b697e332286ef4deac00da8ba5fc7",
+      "disposition": "sdk-owned",
+      "rationale": "GenerateImageToolCallSchema expands the error member from z.ZodTypeAny to z.ZodType<any, z.ZodTypeDef, any>. The SDK imports zod/v3 from the patched zod 4 peer; the normalized declaration has no other change. Discriminators, fields, callback identities and serialized results are preserved. Existing Local and cloud translators keep their current presentation and lifecycle handling.",
+      "evidence": [
+        "scripts/__tests__/audit-exceptions.test.ts",
+        "apps/desktop/src/engine/agents/adapters/cursor-sdk/__tests__/sdk-tool-type-coverage.test.ts",
+        "apps/desktop/src/engine/agents/adapters/cursor-sdk/__tests__/transcript-fidelity.test.ts",
+        "apps/cloud-worker/src/drivers/cursor/__tests__/parity.test.ts"
+      ]
+    },
+    {
+      "provider": "cursor",
+      "fingerprint": "00ffd73ed8f671857b2d6addaebb6cb09f408ee4ce3e3db20790bb6bb7d6a584",
+      "disposition": "sdk-owned",
+      "rationale": "GlobResultSchema expands the error member from z.ZodTypeAny to z.ZodType<any, z.ZodTypeDef, any>. The SDK imports zod/v3 from the patched zod 4 peer; the normalized declaration has no other change. Discriminators, fields, callback identities and serialized results are preserved. Existing Local and cloud translators keep their current presentation and lifecycle handling.",
+      "evidence": [
+        "scripts/__tests__/audit-exceptions.test.ts",
+        "apps/desktop/src/engine/agents/adapters/cursor-sdk/__tests__/sdk-tool-type-coverage.test.ts",
+        "apps/desktop/src/engine/agents/adapters/cursor-sdk/__tests__/transcript-fidelity.test.ts",
+        "apps/cloud-worker/src/drivers/cursor/__tests__/parity.test.ts"
+      ]
+    },
+    {
+      "provider": "cursor",
+      "fingerprint": "2a51af123f93a87e9d7563d96dbf16799e12857e299c03ed5fa5635943d5c5af",
+      "disposition": "sdk-owned",
+      "rationale": "GlobToolCallSchema expands the error member from z.ZodTypeAny to z.ZodType<any, z.ZodTypeDef, any>. The SDK imports zod/v3 from the patched zod 4 peer; the normalized declaration has no other change. Discriminators, fields, callback identities and serialized results are preserved. Existing Local and cloud translators keep their current presentation and lifecycle handling.",
+      "evidence": [
+        "scripts/__tests__/audit-exceptions.test.ts",
+        "apps/desktop/src/engine/agents/adapters/cursor-sdk/__tests__/sdk-tool-type-coverage.test.ts",
+        "apps/desktop/src/engine/agents/adapters/cursor-sdk/__tests__/transcript-fidelity.test.ts",
+        "apps/cloud-worker/src/drivers/cursor/__tests__/parity.test.ts"
+      ]
+    },
+    {
+      "provider": "cursor",
+      "fingerprint": "696db1f021cd8823ae8d5460db80bade44794853b094d6f85c51b22a4beeec9e",
+      "disposition": "sdk-owned",
+      "rationale": "GrepResultSchema expands the error member from z.ZodTypeAny to z.ZodType<any, z.ZodTypeDef, any>. The SDK imports zod/v3 from the patched zod 4 peer; the normalized declaration has no other change. Discriminators, fields, callback identities and serialized results are preserved. Existing Local and cloud translators keep their current presentation and lifecycle handling.",
+      "evidence": [
+        "scripts/__tests__/audit-exceptions.test.ts",
+        "apps/desktop/src/engine/agents/adapters/cursor-sdk/__tests__/sdk-tool-type-coverage.test.ts",
+        "apps/desktop/src/engine/agents/adapters/cursor-sdk/__tests__/transcript-fidelity.test.ts",
+        "apps/cloud-worker/src/drivers/cursor/__tests__/parity.test.ts"
+      ]
+    },
+    {
+      "provider": "cursor",
+      "fingerprint": "82ca7035d75d0bc1ae56bb2ae5c6759e1646d21517ac1554c4d0130227ff7b1d",
+      "disposition": "sdk-owned",
+      "rationale": "GrepToolCallSchema expands the error member from z.ZodTypeAny to z.ZodType<any, z.ZodTypeDef, any>. The SDK imports zod/v3 from the patched zod 4 peer; the normalized declaration has no other change. Discriminators, fields, callback identities and serialized results are preserved. Existing Local and cloud translators keep their current presentation and lifecycle handling.",
+      "evidence": [
+        "scripts/__tests__/audit-exceptions.test.ts",
+        "apps/desktop/src/engine/agents/adapters/cursor-sdk/__tests__/sdk-tool-type-coverage.test.ts",
+        "apps/desktop/src/engine/agents/adapters/cursor-sdk/__tests__/transcript-fidelity.test.ts",
+        "apps/cloud-worker/src/drivers/cursor/__tests__/parity.test.ts"
+      ]
+    },
+    {
+      "provider": "cursor",
+      "fingerprint": "8971793b63a2f362c115d4b7f09c7aeb59241edf038c6eed7ef6854a7791f93a",
+      "disposition": "sdk-owned",
+      "rationale": "LsResultSchema expands the error member from z.ZodTypeAny to z.ZodType<any, z.ZodTypeDef, any>. The SDK imports zod/v3 from the patched zod 4 peer; the normalized declaration has no other change. Discriminators, fields, callback identities and serialized results are preserved. Existing Local and cloud translators keep their current presentation and lifecycle handling.",
+      "evidence": [
+        "scripts/__tests__/audit-exceptions.test.ts",
+        "apps/desktop/src/engine/agents/adapters/cursor-sdk/__tests__/sdk-tool-type-coverage.test.ts",
+        "apps/desktop/src/engine/agents/adapters/cursor-sdk/__tests__/transcript-fidelity.test.ts",
+        "apps/cloud-worker/src/drivers/cursor/__tests__/parity.test.ts"
+      ]
+    },
+    {
+      "provider": "cursor",
+      "fingerprint": "528e4cb083e10cb30a9bfe9b6aac8d070b5460592b9bb7f5d80d5d3b5e4d2e79",
+      "disposition": "sdk-owned",
+      "rationale": "LsToolCallSchema expands the error member from z.ZodTypeAny to z.ZodType<any, z.ZodTypeDef, any>. The SDK imports zod/v3 from the patched zod 4 peer; the normalized declaration has no other change. Discriminators, fields, callback identities and serialized results are preserved. Existing Local and cloud translators keep their current presentation and lifecycle handling.",
+      "evidence": [
+        "scripts/__tests__/audit-exceptions.test.ts",
+        "apps/desktop/src/engine/agents/adapters/cursor-sdk/__tests__/sdk-tool-type-coverage.test.ts",
+        "apps/desktop/src/engine/agents/adapters/cursor-sdk/__tests__/transcript-fidelity.test.ts",
+        "apps/cloud-worker/src/drivers/cursor/__tests__/parity.test.ts"
+      ]
+    },
+    {
+      "provider": "cursor",
+      "fingerprint": "8332fd54a98bddd51ce33d865db9596f3c2863eef950d4baf6f258a503eb9e65",
+      "disposition": "sdk-owned",
+      "rationale": "McpResultSchema expands the error member from z.ZodTypeAny to z.ZodType<any, z.ZodTypeDef, any>. The SDK imports zod/v3 from the patched zod 4 peer; the normalized declaration has no other change. Discriminators, fields, callback identities and serialized results are preserved. Existing Local and cloud translators keep their current presentation and lifecycle handling.",
+      "evidence": [
+        "scripts/__tests__/audit-exceptions.test.ts",
+        "apps/desktop/src/engine/agents/adapters/cursor-sdk/__tests__/sdk-tool-type-coverage.test.ts",
+        "apps/desktop/src/engine/agents/adapters/cursor-sdk/__tests__/transcript-fidelity.test.ts",
+        "apps/cloud-worker/src/drivers/cursor/__tests__/parity.test.ts"
+      ]
+    },
+    {
+      "provider": "cursor",
+      "fingerprint": "56011d3a3e46ee3c1dafc5150436349b0cfd0a71219c18d900fcc6964f85a001",
+      "disposition": "sdk-owned",
+      "rationale": "McpToolCallSchema expands the error member from z.ZodTypeAny to z.ZodType<any, z.ZodTypeDef, any>. The SDK imports zod/v3 from the patched zod 4 peer; the normalized declaration has no other change. Discriminators, fields, callback identities and serialized results are preserved. Existing Local and cloud translators keep their current presentation and lifecycle handling.",
+      "evidence": [
+        "scripts/__tests__/audit-exceptions.test.ts",
+        "apps/desktop/src/engine/agents/adapters/cursor-sdk/__tests__/sdk-tool-type-coverage.test.ts",
+        "apps/desktop/src/engine/agents/adapters/cursor-sdk/__tests__/transcript-fidelity.test.ts",
+        "apps/cloud-worker/src/drivers/cursor/__tests__/parity.test.ts"
+      ]
+    },
+    {
+      "provider": "cursor",
+      "fingerprint": "870031daeac646f4f24a99f94a14edd846c0cdd4203cf499e895443b1da243d7",
+      "disposition": "sdk-owned",
+      "rationale": "ReadLintsResultSchema expands the error member from z.ZodTypeAny to z.ZodType<any, z.ZodTypeDef, any>. The SDK imports zod/v3 from the patched zod 4 peer; the normalized declaration has no other change. Discriminators, fields, callback identities and serialized results are preserved. Existing Local and cloud translators keep their current presentation and lifecycle handling.",
+      "evidence": [
+        "scripts/__tests__/audit-exceptions.test.ts",
+        "apps/desktop/src/engine/agents/adapters/cursor-sdk/__tests__/sdk-tool-type-coverage.test.ts",
+        "apps/desktop/src/engine/agents/adapters/cursor-sdk/__tests__/transcript-fidelity.test.ts",
+        "apps/cloud-worker/src/drivers/cursor/__tests__/parity.test.ts"
+      ]
+    },
+    {
+      "provider": "cursor",
+      "fingerprint": "d1d5394cfe5f5a1a5f1835af2bdcb6a7de60e3e24304b982cb3fdc9c8df2c9fa",
+      "disposition": "sdk-owned",
+      "rationale": "ReadLintsToolCallSchema expands the error member from z.ZodTypeAny to z.ZodType<any, z.ZodTypeDef, any>. The SDK imports zod/v3 from the patched zod 4 peer; the normalized declaration has no other change. Discriminators, fields, callback identities and serialized results are preserved. Existing Local and cloud translators keep their current presentation and lifecycle handling.",
+      "evidence": [
+        "scripts/__tests__/audit-exceptions.test.ts",
+        "apps/desktop/src/engine/agents/adapters/cursor-sdk/__tests__/sdk-tool-type-coverage.test.ts",
+        "apps/desktop/src/engine/agents/adapters/cursor-sdk/__tests__/transcript-fidelity.test.ts",
+        "apps/cloud-worker/src/drivers/cursor/__tests__/parity.test.ts"
+      ]
+    },
+    {
+      "provider": "cursor",
+      "fingerprint": "c77dcea30a9f66cfd5cf36bb648e9f631c4f677989937cf693b94483f526fafa",
+      "disposition": "sdk-owned",
+      "rationale": "ReadResultSchema expands the error member from z.ZodTypeAny to z.ZodType<any, z.ZodTypeDef, any>. The SDK imports zod/v3 from the patched zod 4 peer; the normalized declaration has no other change. Discriminators, fields, callback identities and serialized results are preserved. Existing Local and cloud translators keep their current presentation and lifecycle handling.",
+      "evidence": [
+        "scripts/__tests__/audit-exceptions.test.ts",
+        "apps/desktop/src/engine/agents/adapters/cursor-sdk/__tests__/sdk-tool-type-coverage.test.ts",
+        "apps/desktop/src/engine/agents/adapters/cursor-sdk/__tests__/transcript-fidelity.test.ts",
+        "apps/cloud-worker/src/drivers/cursor/__tests__/parity.test.ts"
+      ]
+    },
+    {
+      "provider": "cursor",
+      "fingerprint": "d471fc57f53c054c817413dd1e136c7b275069c3d1eaa579a163117037250015",
+      "disposition": "sdk-owned",
+      "rationale": "ReadToolCallSchema expands the error member from z.ZodTypeAny to z.ZodType<any, z.ZodTypeDef, any>. The SDK imports zod/v3 from the patched zod 4 peer; the normalized declaration has no other change. Discriminators, fields, callback identities and serialized results are preserved. Existing Local and cloud translators keep their current presentation and lifecycle handling.",
+      "evidence": [
+        "scripts/__tests__/audit-exceptions.test.ts",
+        "apps/desktop/src/engine/agents/adapters/cursor-sdk/__tests__/sdk-tool-type-coverage.test.ts",
+        "apps/desktop/src/engine/agents/adapters/cursor-sdk/__tests__/transcript-fidelity.test.ts",
+        "apps/cloud-worker/src/drivers/cursor/__tests__/parity.test.ts"
+      ]
+    },
+    {
+      "provider": "cursor",
+      "fingerprint": "a18ce203958bfb8d35b42e8db384448fe2069420ae04c64eff6acfc45e470aad",
+      "disposition": "sdk-owned",
+      "rationale": "RecordScreenResultSchema expands the error member from z.ZodTypeAny to z.ZodType<any, z.ZodTypeDef, any>. The SDK imports zod/v3 from the patched zod 4 peer; the normalized declaration has no other change. Discriminators, fields, callback identities and serialized results are preserved. Existing Local and cloud translators keep their current presentation and lifecycle handling.",
+      "evidence": [
+        "scripts/__tests__/audit-exceptions.test.ts",
+        "apps/desktop/src/engine/agents/adapters/cursor-sdk/__tests__/sdk-tool-type-coverage.test.ts",
+        "apps/desktop/src/engine/agents/adapters/cursor-sdk/__tests__/transcript-fidelity.test.ts",
+        "apps/cloud-worker/src/drivers/cursor/__tests__/parity.test.ts"
+      ]
+    },
+    {
+      "provider": "cursor",
+      "fingerprint": "2a01d0bc652cfb73f84949dc18bbb27669f65a213d084fd4bc65c10c6619e1e0",
+      "disposition": "sdk-owned",
+      "rationale": "RecordScreenToolCallSchema expands the error member from z.ZodTypeAny to z.ZodType<any, z.ZodTypeDef, any>. The SDK imports zod/v3 from the patched zod 4 peer; the normalized declaration has no other change. Discriminators, fields, callback identities and serialized results are preserved. Existing Local and cloud translators keep their current presentation and lifecycle handling.",
+      "evidence": [
+        "scripts/__tests__/audit-exceptions.test.ts",
+        "apps/desktop/src/engine/agents/adapters/cursor-sdk/__tests__/sdk-tool-type-coverage.test.ts",
+        "apps/desktop/src/engine/agents/adapters/cursor-sdk/__tests__/transcript-fidelity.test.ts",
+        "apps/cloud-worker/src/drivers/cursor/__tests__/parity.test.ts"
+      ]
+    },
+    {
+      "provider": "cursor",
+      "fingerprint": "f64112b56c3021658aee0a3c687245d890238fb732cec064d96a58718b45d901",
+      "disposition": "sdk-owned",
+      "rationale": "SemSearchResultSchema expands the error member from z.ZodTypeAny to z.ZodType<any, z.ZodTypeDef, any>. The SDK imports zod/v3 from the patched zod 4 peer; the normalized declaration has no other change. Discriminators, fields, callback identities and serialized results are preserved. Existing Local and cloud translators keep their current presentation and lifecycle handling.",
+      "evidence": [
+        "scripts/__tests__/audit-exceptions.test.ts",
+        "apps/desktop/src/engine/agents/adapters/cursor-sdk/__tests__/sdk-tool-type-coverage.test.ts",
+        "apps/desktop/src/engine/agents/adapters/cursor-sdk/__tests__/transcript-fidelity.test.ts",
+        "apps/cloud-worker/src/drivers/cursor/__tests__/parity.test.ts"
+      ]
+    },
+    {
+      "provider": "cursor",
+      "fingerprint": "30ffd10bccde8275549f216ecf09ecdf62d9a0c3886f81389fe1d42de4b9af27",
+      "disposition": "sdk-owned",
+      "rationale": "SemSearchToolCallSchema expands the error member from z.ZodTypeAny to z.ZodType<any, z.ZodTypeDef, any>. The SDK imports zod/v3 from the patched zod 4 peer; the normalized declaration has no other change. Discriminators, fields, callback identities and serialized results are preserved. Existing Local and cloud translators keep their current presentation and lifecycle handling.",
+      "evidence": [
+        "scripts/__tests__/audit-exceptions.test.ts",
+        "apps/desktop/src/engine/agents/adapters/cursor-sdk/__tests__/sdk-tool-type-coverage.test.ts",
+        "apps/desktop/src/engine/agents/adapters/cursor-sdk/__tests__/transcript-fidelity.test.ts",
+        "apps/cloud-worker/src/drivers/cursor/__tests__/parity.test.ts"
+      ]
+    },
+    {
+      "provider": "cursor",
+      "fingerprint": "1446bbc34171b9939ac249ff1dc0cdd8cb7f9f97ec5abad5c1db75651aa2f5b9",
+      "disposition": "sdk-owned",
+      "rationale": "ShellResultSchema expands the error member from z.ZodTypeAny to z.ZodType<any, z.ZodTypeDef, any>. The SDK imports zod/v3 from the patched zod 4 peer; the normalized declaration has no other change. Discriminators, fields, callback identities and serialized results are preserved. Existing Local and cloud translators keep their current presentation and lifecycle handling.",
+      "evidence": [
+        "scripts/__tests__/audit-exceptions.test.ts",
+        "apps/desktop/src/engine/agents/adapters/cursor-sdk/__tests__/sdk-tool-type-coverage.test.ts",
+        "apps/desktop/src/engine/agents/adapters/cursor-sdk/__tests__/transcript-fidelity.test.ts",
+        "apps/cloud-worker/src/drivers/cursor/__tests__/parity.test.ts"
+      ]
+    },
+    {
+      "provider": "cursor",
+      "fingerprint": "0e1b7b61e49109a32344c38c6b7a8bdc628c5d758b1ef46aa4af75323aa547e2",
+      "disposition": "sdk-owned",
+      "rationale": "ShellToolCallSchema expands the error member from z.ZodTypeAny to z.ZodType<any, z.ZodTypeDef, any>. The SDK imports zod/v3 from the patched zod 4 peer; the normalized declaration has no other change. Discriminators, fields, callback identities and serialized results are preserved. Existing Local and cloud translators keep their current presentation and lifecycle handling.",
+      "evidence": [
+        "scripts/__tests__/audit-exceptions.test.ts",
+        "apps/desktop/src/engine/agents/adapters/cursor-sdk/__tests__/sdk-tool-type-coverage.test.ts",
+        "apps/desktop/src/engine/agents/adapters/cursor-sdk/__tests__/transcript-fidelity.test.ts",
+        "apps/cloud-worker/src/drivers/cursor/__tests__/parity.test.ts"
+      ]
+    },
+    {
+      "provider": "cursor",
+      "fingerprint": "06f7950d53e06fc0ff2d7dcba901504dafb9187eca378094d834a7e5a8437153",
+      "disposition": "sdk-owned",
+      "rationale": "TaskResultSchema expands the error member from z.ZodTypeAny to z.ZodType<any, z.ZodTypeDef, any>. The SDK imports zod/v3 from the patched zod 4 peer; the normalized declaration has no other change. Discriminators, fields, callback identities and serialized results are preserved. Existing Local and cloud translators keep their current presentation and lifecycle handling.",
+      "evidence": [
+        "scripts/__tests__/audit-exceptions.test.ts",
+        "apps/desktop/src/engine/agents/adapters/cursor-sdk/__tests__/sdk-tool-type-coverage.test.ts",
+        "apps/desktop/src/engine/agents/adapters/cursor-sdk/__tests__/transcript-fidelity.test.ts",
+        "apps/cloud-worker/src/drivers/cursor/__tests__/parity.test.ts"
+      ]
+    },
+    {
+      "provider": "cursor",
+      "fingerprint": "307656e92d623c9663f040bea3d8897b92f760c023b59b644d94663378a6771d",
+      "disposition": "sdk-owned",
+      "rationale": "TaskToolCallSchema expands the error member from z.ZodTypeAny to z.ZodType<any, z.ZodTypeDef, any>. The SDK imports zod/v3 from the patched zod 4 peer; the normalized declaration has no other change. Discriminators, fields, callback identities and serialized results are preserved. Existing Local and cloud translators keep their current presentation and lifecycle handling.",
+      "evidence": [
+        "scripts/__tests__/audit-exceptions.test.ts",
+        "apps/desktop/src/engine/agents/adapters/cursor-sdk/__tests__/sdk-tool-type-coverage.test.ts",
+        "apps/desktop/src/engine/agents/adapters/cursor-sdk/__tests__/transcript-fidelity.test.ts",
+        "apps/cloud-worker/src/drivers/cursor/__tests__/parity.test.ts"
+      ]
+    },
+    {
+      "provider": "cursor",
+      "fingerprint": "1355e32634ec4e607c138312681103dd0470b9961bf65a53eb18f0f797eb2b17",
+      "disposition": "sdk-owned",
+      "rationale": "ToolCallSchema expands the error member from z.ZodTypeAny to z.ZodType<any, z.ZodTypeDef, any>. The SDK imports zod/v3 from the patched zod 4 peer; the normalized declaration has no other change. Discriminators, fields, callback identities and serialized results are preserved. Existing Local and cloud translators keep their current presentation and lifecycle handling.",
+      "evidence": [
+        "scripts/__tests__/audit-exceptions.test.ts",
+        "apps/desktop/src/engine/agents/adapters/cursor-sdk/__tests__/sdk-tool-type-coverage.test.ts",
+        "apps/desktop/src/engine/agents/adapters/cursor-sdk/__tests__/transcript-fidelity.test.ts",
+        "apps/cloud-worker/src/drivers/cursor/__tests__/parity.test.ts"
+      ]
+    },
+    {
+      "provider": "cursor",
+      "fingerprint": "5d65cb9bced30683c6c9ad0b84b9a74fbf69839fb4ad8154f6ebb000b660eee9",
+      "disposition": "sdk-owned",
+      "rationale": "UpdateTodosResultSchema expands the error member from z.ZodTypeAny to z.ZodType<any, z.ZodTypeDef, any>. The SDK imports zod/v3 from the patched zod 4 peer; the normalized declaration has no other change. Discriminators, fields, callback identities and serialized results are preserved. Existing Local and cloud translators keep their current presentation and lifecycle handling.",
+      "evidence": [
+        "scripts/__tests__/audit-exceptions.test.ts",
+        "apps/desktop/src/engine/agents/adapters/cursor-sdk/__tests__/sdk-tool-type-coverage.test.ts",
+        "apps/desktop/src/engine/agents/adapters/cursor-sdk/__tests__/transcript-fidelity.test.ts",
+        "apps/cloud-worker/src/drivers/cursor/__tests__/parity.test.ts"
+      ]
+    },
+    {
+      "provider": "cursor",
+      "fingerprint": "273e44b147b936f39f45e17d40ef5cb9251e87ebf861218f21c8544de01f2f1c",
+      "disposition": "sdk-owned",
+      "rationale": "UpdateTodosToolCallSchema expands the error member from z.ZodTypeAny to z.ZodType<any, z.ZodTypeDef, any>. The SDK imports zod/v3 from the patched zod 4 peer; the normalized declaration has no other change. Discriminators, fields, callback identities and serialized results are preserved. Existing Local and cloud translators keep their current presentation and lifecycle handling.",
+      "evidence": [
+        "scripts/__tests__/audit-exceptions.test.ts",
+        "apps/desktop/src/engine/agents/adapters/cursor-sdk/__tests__/sdk-tool-type-coverage.test.ts",
+        "apps/desktop/src/engine/agents/adapters/cursor-sdk/__tests__/transcript-fidelity.test.ts",
+        "apps/cloud-worker/src/drivers/cursor/__tests__/parity.test.ts"
+      ]
+    },
+    {
+      "provider": "cursor",
+      "fingerprint": "8ceda5feb3ed738c9f2c64e35c2bc2a98b0b6b65d4c32e62c075819229bc175e",
+      "disposition": "sdk-owned",
+      "rationale": "WriteResultSchema expands the error member from z.ZodTypeAny to z.ZodType<any, z.ZodTypeDef, any>. The SDK imports zod/v3 from the patched zod 4 peer; the normalized declaration has no other change. Discriminators, fields, callback identities and serialized results are preserved. Existing Local and cloud translators keep their current presentation and lifecycle handling.",
+      "evidence": [
+        "scripts/__tests__/audit-exceptions.test.ts",
+        "apps/desktop/src/engine/agents/adapters/cursor-sdk/__tests__/sdk-tool-type-coverage.test.ts",
+        "apps/desktop/src/engine/agents/adapters/cursor-sdk/__tests__/transcript-fidelity.test.ts",
+        "apps/cloud-worker/src/drivers/cursor/__tests__/parity.test.ts"
+      ]
+    },
+    {
+      "provider": "cursor",
+      "fingerprint": "cf4b95094e79b6f39f5a6865ab1a095d8c1d3a8b241f33130c5ffcc4cfc1108c",
+      "disposition": "sdk-owned",
+      "rationale": "WriteToolCallSchema expands the error member from z.ZodTypeAny to z.ZodType<any, z.ZodTypeDef, any>. The SDK imports zod/v3 from the patched zod 4 peer; the normalized declaration has no other change. Discriminators, fields, callback identities and serialized results are preserved. Existing Local and cloud translators keep their current presentation and lifecycle handling.",
+      "evidence": [
+        "scripts/__tests__/audit-exceptions.test.ts",
+        "apps/desktop/src/engine/agents/adapters/cursor-sdk/__tests__/sdk-tool-type-coverage.test.ts",
+        "apps/desktop/src/engine/agents/adapters/cursor-sdk/__tests__/transcript-fidelity.test.ts",
+        "apps/cloud-worker/src/drivers/cursor/__tests__/parity.test.ts"
+      ]
+    },
+    {
+      "provider": "cursor",
+      "fingerprint": "a1078d06bc1b6849037925b0064fa8eb22f2066f2a9085903f65796b2eb7718f",
+      "disposition": "sdk-owned",
+      "rationale": "createResultSchema uses z.ZodType for its generic constraint and error parameter and expands the error member to z.ZodType<any, z.ZodTypeDef, any>. The SDK imports zod/v3 from the patched zod 4 peer; the normalized declaration has no other change. Discriminators, fields, callback identities and serialized results are preserved. Existing Local and cloud translators keep their current presentation and lifecycle handling.",
+      "evidence": [
+        "scripts/__tests__/audit-exceptions.test.ts",
+        "apps/desktop/src/engine/agents/adapters/cursor-sdk/__tests__/sdk-tool-type-coverage.test.ts",
+        "apps/desktop/src/engine/agents/adapters/cursor-sdk/__tests__/transcript-fidelity.test.ts",
+        "apps/cloud-worker/src/drivers/cursor/__tests__/parity.test.ts"
+      ]
+    }
+  ]
 }

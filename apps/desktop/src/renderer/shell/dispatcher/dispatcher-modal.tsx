@@ -1,42 +1,11 @@
 import { useOrganizationProjects } from "../../state/use-organization-projects";
-// ──────────────────────────────────────────────────────────
-// DispatcherPage — one entry point to create a workspace + dispatch
-// ──────────────────────────────────────────────────────────
-//
-// The global "+" destination opens this inside the Home shell. It unifies the
-// new-workspace / open-project / clone flows behind one surface:
-//
-//     project ▾ · source ▾                    ┌ ‹/› ✎ ┐  (context + mode)
-//   ┌──────────────────────────────────────────────────┐
-//   │  What do you want to work on?                     │     (composer)
-//   │  model · fast · effort · plan        📎  Create ↵ │     (toolbar)
-//   └──────────────────────────────────────────────────┘
-//
-// The Code/Design toggle shares the project/source row above the card (the same
-// control every workspace's chat strip carries) and picks the new workspace mode:
-//
-//   Code   → creates a worktree in the selected project
-//            (optionally off a chosen PR/branch base) and lands a fresh chat
-//            bound to the picked agent + model. With a typed prompt it seeds
-//            that chat's composer and one-shot auto-sends the first turn
-//            (REQUEST_AUTO_SEND → AgentChat). Empty composer → just the
-//            workspace + a ready chat (the user's "create with the agent chat
-//            model" rule).
-//   Design → the composer yields to a summary of what Design entry will do to
-//            this repository — open its design folder, or CREATE one named
-//            "<repo> - Design" on first use (engine design/directory.ts) —
-//            and "Create" runs the shared direct-create flow with
-//            kind: "design" (no agent prompt; Design has none).
-//
-// The toggle appears only where the Design surface can run (native desktop),
-// so a web/remote shell keeps exactly the Code-only page it had.
-// ──────────────────────────────────────────────────────────
+// Create owns a draft before either a Local checkout or a cloud VM exists.
+// Project/source select its destination; attachment previews use app storage.
 
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { ChevronDown, FolderOpen, Plus } from "lucide-react";
 
 import { Button, GithubIcon } from "../../shared/ui";
-import { Tooltip } from "@/renderer/shared/ui/primitives";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -64,7 +33,9 @@ import {
   useWorkspaceDispatch,
   useChats,
   useActiveChatId,
+  useWorkspaceStore,
 } from "../../state/store";
+import { persistDraftsNow } from "../../state/persist-composer-drafts";
 import type { ChatThread } from "../../state/store";
 import { createDispatcherChat } from "./dispatcher-chat";
 import { useCloudCreate } from "./cloud-create";
@@ -74,8 +45,8 @@ import { CloudComputerSourcePicker, computerSourceReadKey, warmComputerSources }
 import type { DispatcherBase } from "./dispatcher-source";
 import { CloudComputerV2CreateNotice } from "../../features/settings/cloud-computer-v2-create-gate";
 import { createCloudWorkspaceWithPending } from "../../state/cloud-workspace-create";
-import { cloudProjectForFolder } from "../../state/cloud-workspace-catalog";
-import { cloudWorkspaceKey } from "../../platform/bridge/cloud-workspace-key";
+import { cloudProjectForFolder, cloudWorkspaceDocument } from "../../state/cloud-workspace-catalog";
+import { cloudWorkspaceKey, parseCloudWorkspaceKey } from "../../platform/bridge/cloud-workspace-key";
 import { spawnPreparedDefaultChat } from "../../state/spawn-default-chat";
 import { prepareProjectFolder } from "../project-folder-setup";
 import type { AddProjectOptions } from "../add-project-provider";
@@ -95,6 +66,7 @@ import {
 } from "../../platform/git";
 import {
   DispatcherComposer,
+  type DispatcherComposerConfiguration,
   type DispatcherCreatePayload,
 } from "./dispatcher-composer";
 import {
@@ -118,16 +90,11 @@ import {
 import { canCreateWorkspaceIn, localWorkspaceOwner } from "../../features/team/organization-capabilities";
 import { CloudWorkspacePausedNotice, useOrganizationCloudPaused } from "../../features/team/cloud-workspace-pause";
 import { useNativeRuntime } from "../../platform/runtime";
-import { createWorkspaceForProject } from "../create-workspace";
 import { RepositoryIcon } from "../../features/repositories/repository-icon";
-import {
-  WorkspaceModeToggleView,
-  type WorkspaceMode,
-} from "../../shared/ui/workspace-mode-header";
-import {
-  designDirectoryTargetKeyForRepo,
-  useDesignDirectoryTarget,
-} from "../../state/design-directory-target";
+import { CONTROL_PLANE_URL } from "../../features/team/control-plane";
+import { createComposerDraftKey, createComposerDraftOwner, createComposerDrafts } from "../../state/create-composer-drafts";
+import type { ComposerAttachment } from "../../features/agent/composer-attachments";
+import { CreateAttachmentPreviewPanel } from "./create-attachment-preview-panel";
 
 interface DispatcherPageProps {
   /** Retained Home surfaces stay mounted. Gate effects and selection resets to
@@ -148,6 +115,9 @@ function resolveInitialProjectId(
   chats: ChatThread[],
   activeChatId: string | null,
 ): string | null {
+  const remembered = createComposerDrafts.selectedProject("local", "local");
+  const saved = projects.find(project => project.repoRoot === remembered);
+  if (saved) return saved.id;
   if (activeChatId) {
     const folder = chats.find((c) => c.id === activeChatId)?.folder;
     if (folder) {
@@ -178,27 +148,24 @@ function ActiveDispatcherPage({
   const chats = useChats();
   const activeChatId = useActiveChatId();
   const nativeRuntime = useNativeRuntime();
-  const designWorkspaceCreationAvailable =
-    nativeRuntime.ready || nativeRuntime.expectedElectron;
 
   const [selectedProjectId, setSelectedProjectId] = useState<string | null>(
-    null,
+    () => projects.find(project => project.id === initialProjectId)?.id ?? resolveInitialProjectId(projects, chats, activeChatId),
   );
-  const selectAddedProject = (project: Project) =>
-    setSelectedProjectId(project.id);
+  const selectProject = (projectId: string) => {
+    setSelectedProjectId(projectId);
+    dispatch({ type: "OPEN_CREATE_PAGE", projectId });
+  };
+  const selectAddedProject = (project: Project) => selectProject(project.id);
   const [sourceSelection, setSourceSelection] =
     useState<DispatcherSourceSelection | null>(null);
   const [computerSource, setComputerSource] = useState<{ owner: string; base: DispatcherBase } | null>(null);
   const [computerCreateNotice, setComputerCreateNotice] = useState<{ owner: string; message: string } | null>(null);
   const [projectMenuOpen, setProjectMenuOpen] = useState(false);
+  const [composerConfiguration, setComposerConfiguration] = useState<DispatcherComposerConfiguration>();
   const [busy, setBusy] = useState(false);
-  const [designBusy, setDesignBusy] = useState(false);
   const cloudCreateIntent = useRef<{ fingerprint: string; key: string } | null>(null);
   const createInFlight = useRef(false);
-  // Which mode the NEXT workspace opens in. Renderer-local intent, kept across
-  // project switches (a designer creating several design workspaces should not
-  // re-pick Design each time); it collapses to Code wherever Design cannot run.
-  const [requestedMode, setRequestedMode] = useState<WorkspaceMode>("code");
   const wasActiveRef = useRef(false);
   const lastInitialProjectIdRef = useRef<string | null | undefined>(undefined);
 
@@ -247,17 +214,65 @@ function ActiveDispatcherPage({
   const base = needsGitSetup
     ? null
     : sourceForProject(sourceSelection, selectedProject);
-  const cloud = useCloudCreate(active, computerSource);
-  // Cloud workspaces have no Design for now; only Local creates Design workspaces.
-  const canCreateDesign = designWorkspaceCreationAvailable && !(cloud.organization && !cloud.organization.isPersonal);
-  const mode: WorkspaceMode = canCreateDesign ? requestedMode : "code";
+  const contextProject = projects.find(project => project.id === initialProjectId);
+  // Sidebar Create supplies the repository currently being worked in. Once
+  // the user picks another repository below, clear that route hint so it
+  // cannot override their newer persisted selection after a reload.
+  const contextTarget = parseCloudWorkspaceKey(contextProject?.repoRoot);
+  const contextDocument = contextTarget?.organizationId === getActiveOrganizationIdSnapshot() ? cloudWorkspaceDocument(contextTarget) : undefined;
+  const preferredCloudRepository = contextDocument ? `${contextDocument.repository.owner}/${contextDocument.repository.name}`.toLowerCase() : null;
+  const cloud = useCloudCreate(active, computerSource, preferredCloudRepository, initialProjectId);
   const computerReadKey = cloud.computerOwner && cloud.computerRepository
     ? computerSourceReadKey(cloud.computerOwner, cloud.computerRepository) : null;
   // Ownership selects the backend synchronously; an unavailable cloud backend
   // never falls back to creating an organization workspace on this device.
-  const placement = cloud.organization && !cloud.organization.isPersonal
-    ? "cloud" : "local";
+  const placement = cloud.computerMode ? "cloud" : "local";
   const placementReason = placement === "cloud" ? cloud.reason : null;
+  const computerIdentity = cloud.computerOwner ? JSON.parse(cloud.computerOwner) as [string, string] : null;
+  const draftOwner = placement === "cloud" && !computerIdentity ? null : createComposerDraftOwner({
+    backend: CONTROL_PLANE_URL,
+    userId: computerIdentity?.[0],
+    organizationId: placement === "cloud" ? computerIdentity![1] : null,
+  });
+  const draftProject = placement === "cloud" ? cloud.computerRepository?.id ?? cloud.rememberedRepositoryId : selectedProject?.repoRoot;
+  const draftKey = draftOwner ? createComposerDraftKey({ owner: draftOwner, project: draftProject ?? null, placement }) : null;
+  const currentSurface = useRef({ active, draftKey });
+  currentSurface.current = { active, draftKey };
+  const surfaceMounted = useRef(true);
+  useEffect(() => {
+    surfaceMounted.current = true;
+    return () => { surfaceMounted.current = false; };
+  }, []);
+  const stillShowingCreate = () => surfaceMounted.current && currentSurface.current.active && currentSurface.current.draftKey === draftKey;
+  useEffect(() => {
+    if (active && placement === "local" && selectedProject)
+      createComposerDrafts.selectProject({ owner: "local", placement, project: selectedProject.repoRoot });
+  }, [active, placement, selectedProject]);
+  const [preview, setPreview] = useState<{ draftKey: string; attachment: ComposerAttachment; returnFocus: HTMLElement | null } | null>(null);
+  const previewRef = useRef(preview);
+  previewRef.current = preview;
+  useEffect(() => { setPreview(null); }, [active, draftKey]);
+  const openAttachment = useCallback((attachment: ComposerAttachment) => {
+    if (active && draftKey) setPreview({ draftKey, attachment, returnFocus: document.activeElement instanceof HTMLElement ? document.activeElement : null });
+  }, [active, draftKey]);
+  const attachmentsChanged = useCallback((attachments: ComposerAttachment[]) => {
+    const current = previewRef.current;
+    if (current?.draftKey === draftKey && !attachments.some(attachment => attachment.id === current.attachment.id)) setPreview(null);
+  }, [draftKey]);
+  const closePreview = () => {
+    if (preview?.returnFocus?.isConnected) preview.returnFocus.focus();
+    setPreview(null);
+  };
+  const consumeDraft = (payload: DispatcherCreatePayload) => {
+    if (payload.draft && createComposerDrafts.get(payload.draft.key)?.revision === payload.draft.revision) {
+      if (!persistDraftsNow(useWorkspaceStore.getState())) {
+        toast.error("Couldn't save the chat draft on this device. Your original prompt is still in Create.");
+        return;
+      }
+      createComposerDrafts.delete(payload.draft.key, payload.draft.revision);
+      createComposerDrafts.flush();
+    }
+  };
 
   const handleCreateCloud = async (payload?: DispatcherCreatePayload) => {
     if (!active || !cloud.computerRepository || cloud.reason || !cloud.organization || createInFlight.current) return;
@@ -270,7 +285,7 @@ function ActiveDispatcherPage({
     }
     const request = cloudCreateRequest(cloud);
     if (!request) return;
-    const createMode = mode;
+    const createMode = "code";
     const fingerprint = JSON.stringify([request, createMode]);
     if (cloudCreateIntent.current?.fingerprint !== fingerprint) cloudCreateIntent.current = { fingerprint, key: crypto.randomUUID() };
     const idempotencyKey = cloudCreateIntent.current.key;
@@ -289,14 +304,17 @@ function ActiveDispatcherPage({
       // A late confirmation must not pull Personal (or another organization)
       // into that cloud chat. The original prompt remains in this composer.
       const destination = getActiveOrganizationSnapshot();
-      if (destination?.id !== document.organizationId || destination.isPersonal) {
+      if (destination?.id !== document.organizationId || destination.isPersonal || !stillShowingCreate()) {
         toast.success(`Cloud workspace created in ${currentOrganization.name}`, {
           description: "Open it from that organization to continue. Your prompt is still in Create.",
         });
         return;
       }
       const repoRoot = createdProject?.repoRoot ?? folder;
-      if (payload) createDispatcherChat({ dispatch, repoRoot, folder, payload, validationPending: true });
+      if (payload) {
+        createDispatcherChat({ dispatch, repoRoot, folder, payload, validationPending: true });
+        consumeDraft(payload);
+      }
       else spawnPreparedDefaultChat({ folder, repoRoot, dispatch });
     } catch (error) {
       if (creationGeneration !== getOrganizationStoreGeneration() || !cloud.isCurrentComputerSource(cloud.sourceOwner)) return;
@@ -332,7 +350,7 @@ function ActiveDispatcherPage({
       routedProjectId: initialProjectId,
       selectedProjectId,
       projectIds,
-      sourceAvailable: !cloud.computerMode && !needsGitSetup && !busy && !designBusy,
+      sourceAvailable: !cloud.computerMode && !needsGitSetup && !busy,
     });
     if (decision === "wait") return;
     consumeCreateFromSourceRequest(sourceRequest.id);
@@ -340,7 +358,6 @@ function ActiveDispatcherPage({
   }, [
     active,
     busy,
-    designBusy,
     cloud.computerMode,
     initialProjectId,
     needsGitSetup,
@@ -349,41 +366,10 @@ function ActiveDispatcherPage({
     sourceRequest,
   ]);
 
-  // What Design entry would do to the selected repository's main checkout
-  // (open its design folder, or create "<repo> - Design"). Warmed while the
-  // page is active so flipping the toggle answers from the cache; a hidden
-  // Create page reads nothing.
-  const designTarget = useDesignDirectoryTarget(
-    active && !cloud.computerMode && canCreateDesign && selectedProject
-      ? designDirectoryTargetKeyForRepo(selectedProject.repoRoot)
-      : null,
-  );
-
-  const handleCreateDesign = async () => {
-    if (placement === "cloud") { await handleCreateCloud(); return; }
-    const project = selectedProject;
-    if (!active || !project || busy || designBusy || !canCreateDesign) {
-      return;
-    }
-    setDesignBusy(true);
-    try {
-      await createWorkspaceForProject({
-        project,
-        dispatch,
-        kind: "design",
-        // "Create from…" applies to both modes: a design workspace forked off
-        // a PR reviews that PR's design folder.
-        ...(base?.branch ? { baseBranch: base.branch } : {}),
-      });
-    } finally {
-      setDesignBusy(false);
-    }
-  };
-
   const handleCreate = async (payload: DispatcherCreatePayload) => {
     if (placement === "cloud") { await handleCreateCloud(payload); return; }
     const project = selectedProject;
-    if (!active || !project || busy || designBusy || placementReason) return;
+    if (!active || !project || busy || placementReason) return;
     // Organization selection is part of the create intent. Snapshot it before
     // any asynchronous reservation so a switch during prepare cannot retarget
     // the new workspace.
@@ -444,24 +430,36 @@ function ActiveDispatcherPage({
     markWorkspaceSettling(prepared.path);
     setBusy(false);
 
-    const chatId = createDispatcherChat({
+    const chatId = stillShowingCreate() && getActiveOrganizationIdSnapshot() === null ? createDispatcherChat({
       dispatch,
       repoRoot: project.repoRoot,
       folder: prepared.path,
       payload,
       validationPending: true,
-    });
+    }) : null;
+    let creationConfirmed = false;
+    const confirmCreate = () => {
+      if (creationConfirmed) return;
+      creationConfirmed = true;
+      if (chatId) consumeDraft(payload);
+      else {
+        clearWorkspaceSettling(prepared.path);
+        toast.success("Local workspace created", { description: "Open it from Local to continue. Your prompt is still in Create." });
+      }
+    };
 
     const rollbackOptimisticChat = () => {
       discardQueuedContextGraphWrites(prepared.path);
       clearWorkspaceSettling(prepared.path);
-      dispatch({ type: "CONSUME_AUTO_SEND", chatId });
-      dispatch({ type: "DELETE_CHAT", id: chatId });
-      // ChatsPersistence intentionally does not infer deletes when the live
-      // list becomes empty. Tombstone this exact optimistic row explicitly so
-      // an only-chat failed create cannot return after restart. Engine-side
-      // lifecycle recovery carries the same id as a crash-safe backstop.
-      void dbDeleteChat(chatId).catch(() => {});
+      if (chatId) {
+        dispatch({ type: "CONSUME_AUTO_SEND", chatId });
+        dispatch({ type: "DELETE_CHAT", id: chatId });
+        // ChatsPersistence intentionally does not infer deletes when the live
+        // list becomes empty. Tombstone this exact optimistic row explicitly so
+        // an only-chat failed create cannot return after restart. Engine-side
+        // lifecycle recovery carries the same id as a crash-safe backstop.
+        void dbDeleteChat(chatId).catch(() => {});
+      }
       finishPendingCreate(pendingToken);
     };
     const settleArchivedOptimisticChat = () => {
@@ -469,7 +467,7 @@ function ActiveDispatcherPage({
       // only the first-send intent because its cwd intentionally went away.
       discardQueuedContextGraphWrites(prepared.path);
       clearWorkspaceSettling(prepared.path);
-      dispatch({ type: "CONSUME_AUTO_SEND", chatId });
+      if (chatId) dispatch({ type: "CONSUME_AUTO_SEND", chatId });
       finishPendingCreate(pendingToken);
     };
 
@@ -481,7 +479,7 @@ function ActiveDispatcherPage({
         agentId: payload.selection.agentId,
         preparedId: prepared.workspaceId,
         preparedBranch: prepared.branch,
-        optimisticChatId: chatId,
+        ...(chatId ? { optimisticChatId: chatId } : {}),
         // "Create from…" forks the new worktree off the chosen PR/branch;
         // no selection ⇒ the engine resolves the repo's default branch.
         ...(baseBranch ? { baseBranch } : {}),
@@ -489,6 +487,7 @@ function ActiveDispatcherPage({
           ? { prompt: payload.serialized.displayText }
           : {}),
       });
+      confirmCreate();
       notifyWorkspacesChanged(project.repoSlug);
       // Await an authoritative refresh so the real row is in the single source
       // BEFORE the pending placeholder drops — no momentary no-tab flash on the
@@ -533,7 +532,7 @@ function ActiveDispatcherPage({
         watchTimedOutWorkspaceCreate({
           repoSlug: project.repoSlug,
           workspaceId: prepared.workspaceId,
-          onReady: () => finishPendingCreate(pendingToken),
+          onReady: () => { confirmCreate(); finishPendingCreate(pendingToken); },
           onUnavailable: (reason) => {
             if (reason === "archived") {
               settleArchivedOptimisticChat();
@@ -568,21 +567,21 @@ function ActiveDispatcherPage({
 
   return (
     <main
-      className="bg-bg1 flex min-h-0 min-w-0 flex-1 items-center justify-center overflow-auto p-8"
+      className="bg-bg1 flex min-h-0 min-w-0 flex-1 overflow-hidden"
       aria-labelledby="create-workspace-title"
       aria-describedby="create-workspace-description"
     >
+      <div className="flex min-h-0 min-w-0 flex-1 items-center justify-center overflow-auto p-8">
       <div className="flex w-full max-w-[640px] flex-col gap-2">
         <div className="flex min-w-0 flex-col gap-2">
           <h1 id="create-workspace-title" className="sr-only">
             Create a workspace
           </h1>
           <p id="create-workspace-description" className="sr-only">
-            Pick a repository and describe a task, or create a design workspace.
+            Pick a repository and describe a task.
           </p>
 
-          {/* Keep project, source and mode together above the prompt. Labels
-              truncate in narrow windows while the mode toggle stays visible. */}
+          {/* Project and source belong to the selected owner, even during a cold read. */}
           <div
             data-dispatcher-context=""
             className="flex min-w-0 items-center gap-1 px-1"
@@ -591,11 +590,15 @@ function ActiveDispatcherPage({
             {cloud.computerMode ? <CloudComputerRepositoryPicker
               repositories={cloud.computerRepositories ?? []}
               selected={cloud.computerRepository}
+              rememberedId={cloud.rememberedRepositoryId}
               active={active}
               open={projectMenuOpen}
               onOpenChange={setProjectMenuOpen}
-              disabled={busy || designBusy}
-              onSelect={cloud.selectComputerRepository}
+              disabled={busy}
+              onSelect={id => {
+                cloud.selectComputerRepository(id);
+                dispatch({ type: "OPEN_CREATE_PAGE", projectId: null });
+              }}
               warm={repository => { if (active && cloud.computerOwner)
                 warmComputerSources(computerSourceReadKey(cloud.computerOwner, repository)); }}
             /> : (
@@ -603,22 +606,20 @@ function ActiveDispatcherPage({
               open={active && projectMenuOpen}
               onOpenChange={setProjectMenuOpen}
             >
-              <Tooltip label="Choose project">
-                <DropdownMenuTrigger asChild>
-                  <Button
-                    type="button"
-                    variant="ghost"
-                    aria-label="Choose project"
-                    disabled={busy || designBusy}
-                    className="text-fg2 h-7 min-w-0 gap-1.5 px-2 text-sm font-normal hover:bg-transparent"
-                  >
-                    <span className="max-w-[180px] truncate">
-                      {selectedProject?.name ?? "Add project"}
-                    </span>
-                    <ChevronDown size={12} className="text-fg2 opacity-70" />
-                  </Button>
-                </DropdownMenuTrigger>
-              </Tooltip>
+              <DropdownMenuTrigger asChild>
+                <Button
+                  type="button"
+                  variant="ghost"
+                  aria-label="Choose project"
+                  disabled={busy}
+                  className="text-fg2 h-7 min-w-0 gap-1.5 px-2 text-sm font-normal hover:bg-transparent"
+                >
+                  <span className="max-w-[180px] truncate">
+                    {selectedProject?.name ?? "Choose project"}
+                  </span>
+                  <ChevronDown size={12} className="text-fg2 opacity-70" />
+                </Button>
+              </DropdownMenuTrigger>
               <DropdownMenuContent
                 align="start"
                 sideOffset={4}
@@ -633,7 +634,7 @@ function ActiveDispatcherPage({
                     data-selected={p.id === selectedProjectId || undefined}
                     onPointerEnter={() => warmCreateSourceProject(p)}
                     onFocus={() => warmCreateSourceProject(p)}
-                    onSelect={() => setSelectedProjectId(p.id)}
+                    onSelect={() => selectProject(p.id)}
                   >
                     <span className="bg-bg2-hover inline-flex size-3.5 items-center justify-center rounded-sm text-xs">
                       <RepositoryIcon
@@ -678,7 +679,7 @@ function ActiveDispatcherPage({
               defaultBranch={cloud.defaultBranch}
               value={cloud.computerBase}
               active={active}
-              disabled={busy || designBusy}
+              disabled={busy}
               onChange={next => setComputerSource(next && cloud.sourceOwner ? { owner: cloud.sourceOwner, base: next } : null)}
             /> : !needsGitSetup && (
               <CreateFromSource
@@ -690,7 +691,7 @@ function ActiveDispatcherPage({
                 project={selectedProject}
                 value={base}
                 active={active}
-                disabled={busy || designBusy}
+                disabled={busy}
                 openRequestId={sourcePickerRequestId}
                 onOpenRequestHandled={() => setSourcePickerRequestId(null)}
                 onChange={(next) =>
@@ -703,47 +704,40 @@ function ActiveDispatcherPage({
               />
             )}
 
-            {canCreateDesign && (
-              <div
-                data-dispatcher-mode-switcher=""
-                className="ml-auto flex shrink-0"
-              >
-                <WorkspaceModeToggleView
-                  mode={mode}
-                  disabled={busy || designBusy}
-                  switching={false}
-                  onModeChange={setRequestedMode}
-                />
-              </div>
-            )}
           </div>
 
           {computerCreateNotice?.owner === cloud.computerOwner && cloud.computerOwner && (
             <p className="text-fg3 mb-2 px-2 text-xs" role="status">{computerCreateNotice.message}</p>
           )}
-          {placementReason && (cloud.computerRequired
+          {placementReason && !cloud.checking && (cloud.computerRequired
             ? <CloudComputerV2CreateNotice required canManage={cloud.canManageComputer} warm={cloud.warmComputer} />
             : <p className="text-fg3 mb-2 px-2 text-xs" role="status">{placementReason}</p>)}
           <section aria-label="Workspace prompt" onPointerEnter={cloud.warm} onFocus={cloud.warm}>
             <DispatcherComposer
+              key={draftKey ?? JSON.stringify([draftOwner, placement])}
+              draftKey={draftKey}
+              initialConfiguration={composerConfiguration}
+              onConfigurationChange={setComposerConfiguration}
+              active={active}
+              onOpenAttachment={openAttachment}
+              onAttachmentsChange={attachmentsChanged}
               agents={agents}
               cwd={cloud.computerMode ? null : selectedProject?.repoRoot ?? null}
               originUrl={cloud.computerRepository ? `https://github.com/${cloud.computerRepository.owner}/${cloud.computerRepository.name}.git` : selectedProject?.originUrl ?? null}
               onCreate={handleCreate}
-              busy={busy || designBusy}
+              busy={busy}
               disabled={(!selectedProject && !cloud.computerRepository) || Boolean(placementReason)}
-              mode={mode}
               permissionModes={placement !== "cloud"}
-              design={{
-                projectName: cloud.computerRepository?.name ?? selectedProject?.name ?? null,
-                target: designTarget.data,
-                loading: designTarget.loading,
-                onCreate: () => void handleCreateDesign(),
-              }}
+              allowAdditionalDirectories={placement === "local"}
             />
           </section>
         </div>
       </div>
+      </div>
+      {active && preview?.draftKey === draftKey && (
+        <CreateAttachmentPreviewPanel key={JSON.stringify([draftKey, preview.attachment.id])}
+          attachment={preview.attachment} onClose={closePreview} />
+      )}
     </main>
   );
 }

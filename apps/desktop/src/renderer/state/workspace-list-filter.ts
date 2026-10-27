@@ -4,19 +4,20 @@ import { findProjectForFolder } from "./workspace-resolution";
 
 export const DEFAULT_WORKSPACE_LIST_FILTER = "grouped" as const;
 
-/** App-wide workspace-list presentation. The sidebar offers Grouped and
- * Ungrouped; Active and repository-only values remain parseable because
+/** App-wide workspace-list presentation. The sidebar offers Repository,
+ * Status and None; Active and repository-only values remain parseable because
  * earlier builds persisted them (the sidebar folds them when painted).
  * Repository ids are persisted rather than roots so a renamed/moved checkout
  * keeps the same semantic selection. */
 export type WorkspaceListFilter =
   | "grouped"
   | "ungrouped"
+  | "status"
   | "active"
   | `repo:${string}`;
 
 export interface WorkspaceTabActivity {
-  /** Most recent deliberate action by workspace id. Passive navigation and
+  /** Most recent action or confirmed workspace update by id. Passive navigation and
    * session warm-up never enter this clock. */
   activeAtByWorkspaceId?: ReadonlyMap<string, number>;
 }
@@ -42,7 +43,7 @@ export function workspaceListFilterProjectId(
 }
 
 export function parseWorkspaceListFilter(raw: unknown): WorkspaceListFilter {
-  if (raw === "grouped" || raw === "ungrouped" || raw === "active") return raw;
+  if (raw === "grouped" || raw === "ungrouped" || raw === "active" || raw === "status") return raw;
   if (typeof raw !== "string" || !raw.startsWith("repo:")) {
     return DEFAULT_WORKSPACE_LIST_FILTER;
   }

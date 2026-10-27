@@ -1,5 +1,7 @@
 import { expect } from "@playwright/test";
 import { runToolWaitSmoke } from "./ui-smoke-tool-waits.mjs";
+import { runFilePillNavigationSmoke } from "./ui-smoke-file-pill-navigation.mjs";
+import { runTurnChangesSmoke } from "./ui-smoke-turn-changes.mjs";
 
 export async function runToolPresentationSmoke({ page, check }) {
   await runToolSpacingSmoke({ page, check });
@@ -174,6 +176,8 @@ export async function runToolPresentationSmoke({ page, check }) {
     true,
   );
   await runToolWaitSmoke({ page, check });
+  await runFilePillNavigationSmoke({ page, check });
+  await runTurnChangesSmoke({ page, check });
 }
 
 export async function runToolSpacingSmoke({ page, check }) {

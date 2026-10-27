@@ -1,4 +1,5 @@
 import { expect } from "@playwright/test";
+import { designFrameElementBox } from "./ui-smoke-design-helpers.mjs";
 
 export async function runDesignLayoutGesturesSmoke({ page, check }) {
   const origin = new URL(page.url()).origin;
@@ -49,7 +50,7 @@ export async function runDesignLayoutGesturesSmoke({ page, check }) {
     .toBe("62px");
   check("padding commits whole pixels and Shift scrubbing moves in tens", true);
 
-  const nestedBox = await heading.boundingBox();
+  const nestedBox = await designFrameElementBox(runtime.owner(), heading);
   await page.keyboard.down("ControlOrMeta");
   await page.mouse.click(
     nestedBox.x + nestedBox.width / 2,
@@ -59,7 +60,7 @@ export async function runDesignLayoutGesturesSmoke({ page, check }) {
   await expect(
     page.locator('[data-design-layer-id="home-heading"][aria-selected="true"]'),
   ).toBeVisible();
-  const peerBox = await runtime.locator('[data-oid="home-copy"]').boundingBox();
+  const peerBox = await designFrameElementBox(runtime.owner(), runtime.locator('[data-oid="home-copy"]'));
   await page.mouse.click(
     peerBox.x + peerBox.width / 2,
     peerBox.y + peerBox.height / 2,
@@ -95,7 +96,7 @@ export async function runDesignLayoutGesturesSmoke({ page, check }) {
     await page.mouse.move(target.x, target.y, { steps: 12 });
     await page.mouse.up();
   };
-  const last = await runtime.locator('[data-oid="home-action"]').boundingBox();
+  const last = await designFrameElementBox(runtime.owner(), runtime.locator('[data-oid="home-action"]'));
   await dragTo({ x: last.x + last.width * 0.8, y: last.y + last.height / 2 });
   await expect
     .poll(() =>
@@ -110,7 +111,7 @@ export async function runDesignLayoutGesturesSmoke({ page, check }) {
     true,
   );
 
-  const parent = await hero.boundingBox();
+  const parent = await designFrameElementBox(runtime.owner(), hero);
   await dragTo({
     x: parent.x + parent.width + 70,
     y: parent.y + parent.height / 2,
@@ -141,10 +142,8 @@ export async function runDesignLayoutGesturesSmoke({ page, check }) {
   const topDistance = async () => (await topGuide.boundingBox())?.height ?? 0;
   // The document is the reference while a preceding drag's inspector snapshot
   // catches up. Do not capture a transient guide value as the cancel target.
-  const initialNodeBox = await heading.boundingBox();
-  const initialParentBox = await runtime
-    .locator('[data-oid="home-main"]')
-    .boundingBox();
+  const initialNodeBox = await designFrameElementBox(runtime.owner(), heading);
+  const initialParentBox = await designFrameElementBox(runtime.owner(), runtime.locator('[data-oid="home-main"]'));
   const restingDistance = initialNodeBox.y - initialParentBox.y;
   const freeY = layout.getByLabel("Y", { exact: true });
   await freeY.evaluate((input) => {
@@ -301,6 +300,7 @@ export async function runDesignLayoutGesturesSmoke({ page, check }) {
   await page.evaluate(() => {
     window.__zerosHarnessStyleDelay = 50;
   });
+  await heading.evaluate((el) => { window.__layoutRapidHistoryElement = el; });
   await page.locator("[data-design-canvas-viewport]").focus();
   await page.keyboard.press("Control+z");
   await page.keyboard.press("Control+z");
@@ -312,6 +312,8 @@ export async function runDesignLayoutGesturesSmoke({ page, check }) {
     .toBe("160px");
   check("two quick undo commands paint both inverses before persistence", true);
   await page.waitForTimeout(1100);
+  expect(await heading.evaluate((el) => el === window.__layoutRapidHistoryElement)).toBe(true);
+  check("rapid history confirmation preserves the document's stored generations", true);
   const undoneWidth = await heading.evaluate(
     (el) => getComputedStyle(el).width,
   );
@@ -428,7 +430,7 @@ export async function runDesignLayoutGesturesSmoke({ page, check }) {
   const sourceFrame = await page
     .locator('[data-design-frame="home.html"]')
     .boundingBox();
-  const sourceBox = await heading.boundingBox();
+  const sourceBox = await designFrameElementBox(runtime.owner(), heading);
   const destination = {
     x: sourceFrame.x + sourceFrame.width / 2,
     y: sourceFrame.y + sourceFrame.height + 50,
@@ -526,7 +528,7 @@ export async function runDesignLayoutGesturesSmoke({ page, check }) {
   const failedFrame = await page
     .locator('[data-design-frame="home.html"]')
     .boundingBox();
-  const failedStart = await heading.boundingBox();
+  const failedStart = await designFrameElementBox(runtime.owner(), heading);
   await page.mouse.move(
     failedStart.x + failedStart.width / 2,
     failedStart.y + failedStart.height / 2,

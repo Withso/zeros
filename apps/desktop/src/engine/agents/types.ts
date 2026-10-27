@@ -239,6 +239,11 @@ export type McpServerRegistration =
       cwd?: string;
       args?: string[];
       env?: Record<string, string>;
+      /** Server variable → opaque session environment reference; never a value. */
+      envFromEnv?: Record<string, string>;
+      /** Native vault identity; never serialized into provider configuration. */
+      credentialKey?: string;
+      listenUrl?: string;
       /** Provider startup allowance for heavyweight local MCP runtimes. */
       startupTimeoutSec?: number;
     }

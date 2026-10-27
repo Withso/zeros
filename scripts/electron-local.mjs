@@ -21,6 +21,9 @@ const ENGINE_BASE = 31000,
   STRIDE = 10;
 const VITE_BASE = 6200,
   VITE_SLOTS = 1024;
+// Chromium/Fetch restricted ports within the 6200–7223 renderer range. A free
+// TCP listener on these ports still makes Electron reject the page URL.
+const RESTRICTED_RENDERER_PORTS = new Set([6566, 6665, 6666, 6667, 6668, 6669, 6697]);
 
 export function checkoutIdentity(root) {
   // A synced checkout has a .git directory, just like the primary clone.
@@ -106,7 +109,7 @@ export async function pickLocalPorts(
   let vitePort;
   for (let i = 0; i < VITE_SLOTS; i++) {
     const port = VITE_BASE + ((hash + i) % VITE_SLOTS);
-    if (!excluded.has(port) && (await probe(port))) {
+    if (!RESTRICTED_RENDERER_PORTS.has(port) && !excluded.has(port) && (await probe(port))) {
       vitePort = port;
       break;
     }

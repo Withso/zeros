@@ -2,6 +2,8 @@ import { beforeEach, describe, expect, it } from "vitest";
 
 import {
   getDesignScreenshot,
+  designScreenshotUsage,
+  forgetDesignScreenshots,
   resetDesignScreenshotsForTests,
   setDesignScreenshot,
 } from "../screenshots";
@@ -121,5 +123,49 @@ describe("design screenshot registry", () => {
         "aaaaaaaaaaaaaaaaaaaaaaaa",
       ),
     ).toMatchObject({ sourceVersion: "aaaaaaaaaaaaaaaaaaaaaaaa" });
+  });
+
+  it("bounds aggregate retained data before the entry-count limit is reached", () => {
+    // Each canonical PNG payload retains just over 8 MiB as a UTF-16 string.
+    // Three of these must not fit the 24 MiB registry policy, even though the
+    // per-image and 64-entry validation limits permit all of them.
+    const data = Buffer.concat([
+      Buffer.from(PNG_1X1_BASE64, "base64"),
+      Buffer.alloc(3 * 1024 * 1024),
+    ]).toString("base64");
+    for (const frame of ["a.html", "b.html", "c.html"]) {
+      setDesignScreenshot({ ...screenshot("workspace-a", frame, null), data });
+    }
+    expect(getDesignScreenshot("workspace-a", "a.html", null, "a".repeat(24))).toBeNull();
+    expect(getDesignScreenshot("workspace-a", "b.html", null, "a".repeat(24))).not.toBeNull();
+    expect(getDesignScreenshot("workspace-a", "c.html", null, "a".repeat(24))).not.toBeNull();
+    expect(designScreenshotUsage().retainedBytes).toBeLessThanOrEqual(24 * 1024 * 1024);
+  });
+
+  it("keeps accounting exact through replacement, reads and owner retirement", () => {
+    const a = screenshot("personal-local", "home.html", null);
+    setDesignScreenshot(a);
+    const initial = designScreenshotUsage();
+    setDesignScreenshot({ ...a, capturedAt: 2 });
+    expect(designScreenshotUsage()).toEqual(initial);
+    getDesignScreenshot(a.workspaceId, a.frame, null, a.sourceVersion);
+    expect(designScreenshotUsage()).toEqual(initial);
+    setDesignScreenshot(screenshot("organization-local", "home.html", null));
+    expect(designScreenshotUsage().entries).toBe(2);
+    forgetDesignScreenshots("personal-local");
+    expect(designScreenshotUsage().entries).toBe(1);
+    expect(getDesignScreenshot("organization-local", "home.html", null, a.sourceVersion)).not.toBeNull();
+    forgetDesignScreenshots("organization-local");
+    expect(designScreenshotUsage()).toMatchObject({ entries: 0, retainedBytes: 0 });
+  });
+
+  it("owns immutable screenshot metadata without retaining unbudgeted payloads", () => {
+    const input = { ...screenshot("workspace-a", "home.html", null), extra: new Uint8Array(1000) };
+    setDesignScreenshot(input);
+    input.data = "changed by caller";
+    const held = getDesignScreenshot("workspace-a", "home.html", null, input.sourceVersion)!;
+    expect(held.data).toBe(PNG_1X1_BASE64);
+    expect(held).not.toHaveProperty("extra");
+    expect(Object.isFrozen(held)).toBe(true);
   });
 });

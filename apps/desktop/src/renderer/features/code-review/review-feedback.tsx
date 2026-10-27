@@ -40,12 +40,11 @@ function OwnerFeedback({ review }: { review: CodeReviewController }) {
     review.ownerKey,
   );
   if (
-    !message &&
+    (!message || managed) &&
     !notice &&
-    !loading &&
     !review.partial &&
     !review.nextCursor &&
-    !moreError
+    (!moreError || managed)
   )
     return null;
   return (
@@ -53,11 +52,6 @@ function OwnerFeedback({ review }: { review: CodeReviewController }) {
       data-review-feedback
       className="text-fg3 flex flex-col gap-1 px-3 py-2 font-sans text-xs"
     >
-      {loading && (
-        <p role="status" aria-live="polite">
-          Loading comments…
-        </p>
-      )}
       {message && !managed && (
         <div role="alert" className="flex items-center gap-2">
           <span className="text-red-primary break-words">{message}</span>

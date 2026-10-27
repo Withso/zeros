@@ -129,28 +129,35 @@ readable. `Zeros Design/` is the unconfigured pointer default; the explicit
 Create Design directory action creates `<repo name> -
 Design/` when no Design folder exists. Opening the tab alone does not create
 files. A single discovered folder is reused. The Design directory menu selects
-a workspace-local stable ID; Settings manages repository defaults and rename.
-Source remains materialized and readable from both surfaces.
+a workspace-local stable ID. Repository settings no longer expose Design mode,
+Directory or Preferences tabs. Their former management links are removed;
+directory management UI may be added inside the Design tab in a future change.
+Existing private defaults, registrations and lifecycle operations remain
+compatible. Source remains materialized and readable from both surfaces.
 
 #### Shared workbench navigation
 
 The permanent Design tab sits beside Files, Changes, Review and Context in the
 existing workbench. The same conversation column stays present. Inside Design
-the canvas is full bleed and its chrome floats over it, 8px from its edges
+a full-width secondary toolbar sits above the canvas, and the properties
+panel attaches to its right edge
 (`design-workspace.tsx`, `design-directory-pill.tsx`,
 `design-floating-panel.tsx`):
 
-- **Directory pill** (top left): the Design directory switcher and a toggle
-  that puts the Layers + Inspector panel away and brings it back (also
-  ⌘\ / Ctrl+\ while focus is in the Design surface or nowhere).
+- **Secondary toolbar**: a far-left Layers + Inspector toggle followed by the
+  Design directory switcher. It uses the shared workbench toolbar slot below
+  the main tabs and above status banners. ⌘\ / Ctrl+\ also toggles the panel
+  while focus is in Design, its toolbar, or nowhere.
 - **Tool rail** (left, vertically centred): Move, Frame, Text, Themes and
-  Motion in one vertical toolbar. It centres in the space between the pill
-  and an open Motion timeline, never overlapping either.
-- **Layers + Inspector panel** (right, full height): Layers on top at a
+  Motion in one vertical toolbar. It centres in the canvas above an open
+  Motion timeline, with an 8px edge inset.
+- **Layers + Inspector panel** (right, full content height): attached without
+  outer gaps, corner rounding or shadow. Layers sits on top at a
   draggable height (`Resize Layers panel`: pointer, arrows, Home/End,
   double-click resets), the inspector below. The panel's left edge resizes
-  its width. Its title folds the Layers tree down to its header so the
-  inspector can take the panel.
+  its width. Hovering either border shows the resize cursor without a grip
+  or tooltip; keyboard focus still has an outline. Its title folds the Layers
+  tree down to its header so the inspector can take the panel.
 - **Page picker** (inspector, above Background): with no frame/node selected,
   the File-icon header shows the active page title and a chevron. Its shared
   radio menu lists pages, New page, Rename page… and Delete page…. With a
@@ -160,7 +167,7 @@ the canvas is full bleed and its chrome floats over it, 8px from its edges
 
 The chrome is not canvas. Wheel input over any island scrolls that island (or
 nothing) and never pans or zooms the canvas; pointer input on it never
-marquees or deselects. The pill and panel sit outside the canvas viewport and
+marquees or deselects. The secondary toolbar and panel sit outside the canvas viewport and
 its keyboard scope; the tool rail and timeline stay inside it, so tool
 shortcuts and the Space-drag hand keep working from them. When the canvas is
 too short for both, the tool rail stays above the timeline so every tool is
@@ -198,7 +205,7 @@ A stable directory ID survives rename; replacing it resets the old page views,
 selection/camera and runtime foundations. Switching back to an
 older directory starts a fresh document view; it does not restore a second
 per-directory editor history. The serialized view keeps its field names:
-`inspectorVisible` is the floating panel's visibility and `layersVisible`
+`inspectorVisible` is the properties panel's visibility and `layersVisible`
 whether its Layers tree is unfolded. App-wide sizes stay in their existing
 keys — the panel width is the Style width (`zeros.design.style.width`) and the
 Layers split has its own `zeros.design.layers.height` (96px minimum, leaving
@@ -269,14 +276,14 @@ folder is created without `.gitkeep`; a fresh clone may omit it, and its first
 frame write recreates it. Uncommitted work is local to the checkout. Registration
 and generated rules are managed by Zeros lifecycle operations.
 
-Repository Settings → Design → Directory scans the main checkout, including
-untracked Zeros manifests, without requiring any worktrees. Its folder list
-supports inline rename (double-click or the pencil; Enter/blur saves and Escape
-cancels) and choosing an existing folder. Rename preserves the selected directory
-when another row is renamed.
+Directory discovery scans the checkout, including untracked Zeros manifests.
+The Design workbench still lists and selects registered directories. The former
+repository settings UI for rename, adoption and removal is retired; the engine's
+explicit lifecycle operations remain available for compatibility. Rename
+preserves the selected directory when another row is renamed.
 
-The trash action is **Remove Design registration**, with an explicit confirmation.
-It preserves the directory and all authored source/assets, removes only its
+The registration-removal operation preserves the directory and all authored
+source/assets, removes only its
 `meta/design.toml` registration (or its legacy root manifest), legacy registry
 entry/document metadata, and unmodified generated rules,
 and forgets this checkout's remembered registration. Custom rules are preserved.
@@ -318,7 +325,7 @@ private. The scene example and bounds follow below.
 Discovery validates `format = "zeros-design"`; a file named `design.toml` alone
 does not make a folder Design territory. Working-tree discovery is bounded,
 skips private storage, dependencies and nested repositories, and refreshes on
-Design entry, Settings listing and watcher recognition changes. Exact Git index
+Design entry, directory-menu reads and watcher recognition changes. Exact Git index
 and HEAD manifests also preserve ownership of old paths during moves. A moved
 folder retains its ID. Duplicated IDs, overlapping folders, unsafe paths,
 symlinks, hard links, malformed metadata and competing copies pause writes.
@@ -333,8 +340,8 @@ metadata without changing filenames still updates the split. An unrelated
 `design.toml` never establishes ownership. Older engines that omit the ownership
 field retain the legacy canvas-marker fallback.
 
-Repository Settings → Design → Directory → **Use existing folder** explicitly adopts a source folder
-inside the repository. The preview first uses existing metadata, then looks for
+The retained directory-adoption lifecycle operation explicitly adopts a source
+folder inside the repository. The preview first uses existing metadata, then looks for
 saved metadata in the index and HEAD (including older formats). Without saved
 metadata it creates the v3 layout and rebuilds frame information from source;
 registered frame HTML moves into its page folder with reference rebasing.
@@ -1569,12 +1576,11 @@ original unsnapped geometry writes nothing and preserves authored sizing.
   Layers, keyboard or history) centers it at the current zoom, or fits it when it
   would be unreadable there; a frame with any visible part never moves.
   "In view" and every fit, reveal and menu/keyboard zoom centre use the
-  canvas the floating chrome leaves uncovered (pill, tool rail, panel, open
+  canvas the chrome leaves uncovered (tool rail, panel, open
   timeline), measured when the camera moves on purpose; a covered axis that
   would leave less than 160px uses the whole viewport. Pointer-to-world
   conversion, authored geometry and live-runtime ranking keep the full
-  viewport. A new canvas opens at 25% with its first frame label clear of
-  the pill.
+  viewport. A new canvas opens at 25% below the secondary toolbar.
 - **Creation:** `F`/`A` creates frames and `T` creates text from one inverse
   pan/zoom transform. Click uses the documented default geometry; drag uses the
   exact world-space rectangle. A host-side draft paints synchronously and one
@@ -1593,6 +1599,19 @@ original unsnapped geometry writes nothing and preserves authored sizing.
   names, 14px type glyphs, 16px indent per level). Keyboard, visibility,
   hover, and selection are frame-keyed. Uncached hover reads
   coalesce to active plus latest instead of forming a queue.
+  Frame rows show the authored frame title; element rows show their authored
+  `data-name` or readable runtime name, with a type label as the unnamed
+  fallback. Type icons and editing capabilities remain independent of names.
+  Double-click or F2 renames any row inline. Enter or blur saves once, Escape
+  cancels, and empty names leave the confirmed name intact. Element names are
+  `node.set-attribute` transactions on `data-name` (80 characters, undoable);
+  frame names use the existing title lifecycle (120 characters). Neither
+  changes stable IDs, source paths, text, or accessibility labels. The optional
+  runtime `layerName` distinguishes an explicit name matching an HTML tag from
+  an inferred fallback; older runtime snapshots remain valid.
+  Agents use the same `data-name` source attribute and frame title metadata.
+  Hidden trees, removed rows and workspace/directory/page changes discard
+  unfinished rename drafts; failed writes retain the last confirmed name.
   Only a sole direct child explicitly marked `data-zeros-frame-root` by frame
   creation shares the canvas row. Existing unmarked `main`/`div` roots remain
   real child layers, even when they fill the viewport or have no descendants.
@@ -1768,8 +1787,16 @@ original unsnapped geometry writes nothing and preserves authored sizing.
   growth on the parent's main axis and self-alignment stretch on its cross axis
   or a grid cell. Switching to Fixed releases growth and preserves the measured
   border box. Switching parent flow preserves child resizing intent. Enabling
-  layout brings drawn children into flow; removing it freezes their measured
-  positions and dimensions in the same undoable transaction.
+  layout brings drawn children in a free layout into flow. A CSS composition
+  with existing flow content keeps its absolute overlays and responsive child
+  sizes; fixed layers and backgrounds pinned on all four edges stay outside
+  flow. Removing layout freezes participating children in one undoable
+  transaction, using the existing direct-only `--zeros-layout-origin-flow`
+  marker so re-enabling layout never absorbs original overlays. If preparing
+  a free container would reanchor an overlay positioned by a further ancestor,
+  None restores natural block flow instead. Enabling or switching layout never
+  creates a new positioning anchor. Selecting the current layout writes nothing,
+  and nested selections apply container setup before child placement.
   Paired horizontal/vertical padding can expand to independent sides. Grid
   track counts author equal fractional tracks only on an explicit edit; custom
   authored tracks remain untouched when viewing the inspector.
@@ -1905,13 +1932,144 @@ polling, capture, shortcut, focus, measurement, or hot effect. See
 [UI interaction and performance](ui-interaction-performance.md) for the
 repository-wide server-state and retained-surface rules.
 
-At deep zoom, the authoritative iframe stays mounted while a bounded visible
-crop is rerasterized for device fidelity. Captures are exact-camera-keyed,
+Small supported frames lay out in temporary sandboxed HTML documents, with
+at most eight concurrent source loads across canvases. After fonts and image
+resources settle, the document returns a self-contained SVG containing the
+sanitized HTML/CSS in a `foreignObject`. The parent validates the sending window,
+source generation and theme, decodes the image, then retires the temporary
+browsing context. Camera movement reuses that vector object and URL. It does not
+request a new screenshot or change the document's CSS viewport. Editing and
+resize candidates retain responsive HTML underneath their editing runtime;
+queued loads cancel when their workspace becomes inactive.
+
+The readiness script waits for a nonzero native viewport, settles fonts selected
+by that viewport, disables authored motion and forces layout once. A zero-size
+child requests one layout delivery from its exact parent; the parent measures
+the iframe and replies immediately and after one parent paint. Resize or that
+exact-generation reply completes initial viewport delivery without polling or
+depending on a hidden child's animation callbacks. Unready source
+iframes are transparent rather than visibility-hidden so Chromium can deliver
+that initial layout; they remain inert and frame chrome stays hidden. It never
+waits for a child animation frame: Chromium can suspend those callbacks while
+the parent keeps an incoming document hidden. Image elements load eagerly and
+request synchronous decoding at first paint; hidden cross-process images must
+not wait on asynchronous `image.decode()` completion to become visible. There
+are no passive observers, polling or capture loops. Authored scripts remain
+disabled and are stripped from the vector. The Local engine advertises
+`design.source-surfaces.v1`; only clients requesting surface costs receive them,
+preserving older strict preparation replies. The optional SVG ready field keeps
+older HTML-only sources readable. Cloud v2 advertises no Design capability.
+
+Boot snapshots carry no trusted surface costs. Same-source preparation must
+publish newly confirmed costs and any later cost change or withdrawal; frame
+structural sharing compares those admission fields as well as source identity.
+Unchanged costs retain the frame reference and its mounted surface.
+
+Source surfaces have a shared admission limit of 256 frames, 8 MiB of prepared
+source, 32,768 elements, and 32 MiB of estimated decoded raster assets. Retained
+vector URLs have a separate 16 MiB UTF-8 source budget and a 1 MiB per-image
+limit. These are source estimates, not browser/GPU memory quotas. Unknown image
+costs, animated raster assets, media, oversized or unrepresentable SVG content,
+and failed image decodes use the bounded picture path. Page-background images
+whose positioning area differs from the viewport also keep their native preview;
+a short root's gradient must not be stretched to fill the vector. The snapshot
+preserves authored root sizing and paints a solid page background separately;
+forcing a short root to full height would change percentage heights, grid and
+positioned descendants. Pixel tests cover those layouts, alpha, background
+inheritance, supported gradients, viewport queries and authored SVG container
+rules.
+
+A visited vector remains within its budget during camera movement. Offscreen
+surfaces are hidden without changing their authored geometry. Leaving the
+workspace releases display leases, source reservations, documents and pending
+loads. Completed vectors survive navigation in a shared cache, keyed by Local
+workspace, checkout path, directory, protocol capability, file, source version,
+theme and authored viewport dimensions. The 16 MiB encoded budget includes
+active and warm entries, with at most 2,048 entries; unpinned LRU entries yield
+under pressure and expire lazily after 24 idle hours. Pending or failed decodes
+never become warm cache entries. Confirming a replacement retires older
+generations after their displays detach. Authoritative directory/catalog
+membership prunes only its own directory; switching directories preserves the
+sibling cache. Checkout/capability replacement and workspace removal prune the
+old authority and fence late publication.
+
+Returning displays reuse loaded image elements, not just their URLs: creating a
+new image from a warm URL can still miss the first paint. Warm vector elements
+have a separate 512-element / 32 MiB estimated working-set bound (eight times
+encoded SVG bytes plus the declared raster-asset cost). This estimate is not a
+decoded-pixel or GPU quota. Evicting a warm element preserves its encoded vector;
+foreground picture/capture pressure releases warm elements first. No hidden
+HTML document, duplicate raster, timer or capture job is retained by this cache.
+Background source validation retains last-confirmed vector presentation while
+fencing all live editing and new source loads until preparation confirms it.
+Admission retries once after an owner-switch commit before declaring a frame
+unavailable, so outgoing layout cleanups can return capacity. Full editing
+runtimes remain separately bounded to 12, with selection and open layer trees
+taking priority; unprepared metadata does not reserve a prospective editor.
+
+A single application-wide incoming generation may overlap steady admission;
+both generations' source costs and vector bytes remain charged until removal.
+The outgoing surface stays visible until its replacement image loads; HTML
+readiness alone cannot commit a vector that may fail to decode. A rejected
+replacement retires its pending document and keeps the confirmed outgoing
+vector until its exact-generation fallback picture is decoded. A cached older
+picture cannot cover already-painted source during the handoff. Navigation has
+a bounded 30-second deadline; a loaded passive document has a separate
+five-second readiness deadline. The protocol connection queue does not spend
+its handshake time before the document arrives.
+
+Only one ready representation paints each frame. Responsive HTML takes over
+from its retained vector once ready; an editing document then hides its passive
+sibling. Incoming surfaces stay hidden. Transparent frames inherit no opaque
+app surface, and iframe elements use a normal color scheme so the app theme
+cannot flatten transparent pixels onto white. Compositor tests cover both
+directions of the handoff.
+Ready document visibility inherits its owner; retained hidden decks also have
+zero opacity so a descendant cannot paint through a hidden ancestor at its old
+camera. Leaving a canvas during the wheel debounce settles the displayed camera
+into its still-current page before retirement. A replaced page or checkout
+cannot receive that gesture, and returning clears the gesture-only chrome state.
+
+Canvas zoom is bounded to 800%. Passive and editing HTML retain the ordinary
+display density; camera motion changes only the outer transform. A global
+iframe `zoom: 8` is forbidden: on a Retina display it produces an effective
+DPR of 16 and up to 64 times the backing pixel area, including at overview zoom.
+Stable layout is not evidence of bounded GPU allocation. Vector images preserve
+text/SVG source through camera movement, but Chromium still rasterizes their
+visible paint; native acceptance measures physical GPU footprint during initial
+load, zoom, return and owner switching. Authored bitmap assets remain limited
+by their source resolution. Legacy cameras above the maximum restore at 8x
+with pan rebased to retain the same world origin, including saved pages.
+
+On a cold open, each frame and its chrome become visible together when that
+frame has a ready document or loaded picture. There is no batch reveal, fade,
+or empty placeholder card. Hidden metadata shells retain their bounds for
+Layers navigation and Fit selection; they cannot receive pointer input.
+Warm outgoing content stays visible during revalidation. Runtime load errors
+remain actionable, and preparation errors use the shared workbench status.
+
+For frames using the picture fallback, the authoritative iframe stays mounted
+at deep zoom while a bounded visible crop is rerasterized for device fidelity.
+Captures are exact-camera-keyed,
 decoded before publication, serialized per frame, latest-wins, and memory-only.
 The capture SVG keeps the frame's logical viewport; cropping happens during
 the bounded raster draw so media queries and viewport units do not relayout.
 A prior decoded crop may stay geometrically pinned until its replacement is
 ready; the editor must not flash a blank or stale-position layer.
+One application-wide image replacement may temporarily overlap the steady
+image budget, using the displayed image's exclusive lease. Both cancellation
+and commit return within the same steady limit. A competing crop retries on
+capacity release, and a Retina viewport regression verifies repeated camera
+moves cannot leave the first sharp crop permanently stale.
+Fallback overview pictures are disposable display caches; deep zoom rerenders
+the visible crop at device resolution instead of treating a magnified thumbnail
+as final detail.
+The temporary SVG and foreignObject capture containers lock their own geometry
+against authored SVG selectors, including important cascade layers. The captured
+HTML retains its logical viewport, inherited colors and root styles. Pixel
+checks cover sharp CSS/SVG edges at 200–400× capture scale as well as viewport
+units, media queries and root/body alpha; output dimensions alone are not a
+fidelity check. CSS boxes retain Chromium's normal pixel-snapping semantics.
 
 #### Layout interaction and visual history
 
@@ -2005,11 +2163,11 @@ strings and decoded pixels, while geometry and layer trees remain retained.
 The 12-frame live-runtime ceiling is a maximum: unused slots do not load distant
 documents. Explicit selection and open Layers trees retain priority.
 
-A frame that is not live paints a saved picture of its source
+A frame with neither an admitted passive document nor a live editor paints a saved picture of its source
 (`state/design-frame-previews.ts`). The workspace's capture host renders it
 through `design.preview`, the same renderer as `design capture`, at the frame's
 own canvas size (up to the 16,384 px frame limit; the pixel budget applies to
-the raster) and theme, scaled into an overview (384 px) or detail (1,280 px)
+the raster) and theme, scaled into a thumbnail (128 px), overview (384 px) or detail (1,280 px)
 raster by the frame's painted size times device pixel ratio. A changed frame
 answers `stale` instead of other pixels; a whole-pixel frame is proven by the
 generation the render reports, a fractional one by reading it again. The host
@@ -2020,8 +2178,8 @@ owner scope, workspace, directory, frame, source generation, theme and level.
 They are held as encoded Blobs (WebP where smaller) behind object URLs within
 16 MiB, pinned while shown, and kept in IndexedDB within 48 MiB, one per frame,
 theme and level. A reopened page paints every stored picture before anything
-renders. One picture renders at a time, visible frames first and then the rest
-of the page, after camera and pointer input settle. Each picture renders at
+renders. One picture renders at a time, visible frames first and then bounded
+nearby demand, after camera and pointer input settle. Each picture renders at
 most once per session, so a page larger than a budget cannot loop. A live
 frame's new generation is pictured only after it stops changing for two
 seconds. A frame painted no larger than its overview picture stays a picture
@@ -2029,6 +2187,38 @@ instead of running its document. An older picture holds a changed frame's last
 pixels until its new one is ready, so only the selected frame and frames with
 no picture also capture themselves in their own document. Archive and removal
 forget a workspace's pictures.
+
+An active canvas with only passive HTML still opens the preview metadata index
+once and prunes restart leftovers to the disk budget. Empty picture demand
+does not read image blobs, allocate decoders, or capture previews. Hidden
+canvases do not initiate this maintenance read.
+
+An encoded cache hit is not a displayed cover. A live document retires only
+after an exact-owner, source-generation preview has decoded and its display
+lease has committed; the outgoing lease stays owned through DOM replacement.
+Decoded previews can remain warm after their frame surface is culled, within
+32 MiB of the existing shared 64 MiB display budget. They keep their actual
+loaded image element and backing lease, moving that element into a returning
+surface instead of starting another image load from the same URL. The picture
+stays mounted through editor activation, and a ready editor hides it in the
+same style pass to preserve authored alpha. Encoded availability is never
+treated as readiness. Warm retention favors small covers over optional detail;
+an optional refinement tries cached smaller pixels before evicting peer covers.
+A missing encoded picture is not memory pressure and cannot clear warm peers.
+Warm pixels still yield to foreground image admission. Completed fallback
+previews survive hidden/app and owner navigation within the same 32 MiB pool,
+expiring lazily after 24 idle hours; pending decodes do not warm a departed owner.
+Workspace deletion and account cleanup remain explicit invalidation boundaries.
+A camera residency change commits its new surfaces and
+ready preview leases before the next paint, while membership-stable movement
+continues to transform the world without publishing React state.
+Text frames participate in preview demand and preserve authored transparency.
+The native capture renderer uses a transparent backing canvas while keeping
+authored root/body backgrounds. Preview format 2 invalidates disposable format-1
+pixels that flattened alpha, without changing source, history or registration.
+For frames narrower than 128 screen pixels, inactive frame labels and Play
+controls reveal on hover or keyboard focus so they do not cover an overview.
+The active, selected, renaming or playing frame retains its controls.
 
 A runtime retains up to 64 reversible layout generations, capped at 4 MiB of
 style history. The renderer predicts known layout undo/redo against exact
@@ -2253,7 +2443,23 @@ boundaries, not targets to relax casually:
 - headless rendering: two concurrent pages by default (four maximum), a
   15-second default deadline (60 seconds maximum), 16,777,216 output pixels,
   and 16 MiB artifacts;
-- active canvas: at most 12 live frame runtimes by default;
+- active canvas: visible frame surfaces plus at most 12 nearby surfaces, with
+  240px admission / 480px retention margins; at most 12 live frame runtimes per
+  retained canvas. One incoming document replacement is admitted application-wide;
+- saved pictures: 16 MiB encoded memory / 48 MiB disposable IndexedDB cache;
+  128px thumbnail, 384px overview and 1280px detail levels. Display leases reserve
+  a conservative decoded raster plus compositor copy (8 bytes/pixel) within a
+  shared 64 MiB steady policy, including old/incoming pictures, at most 32 MiB of warm
+  decoded previews, runtime covers and detail tiles. Warm decoders are evictable
+  before foreground admission. Runtime cover/tile data strings have a separate
+  24 MiB steady display guard. One exclusive old/incoming image pair can overlap
+  these limits until DOM replacement or cancellation; both possible outcomes
+  must fit the steady guards. Its separately reported overlap is at most 64 MiB
+  decoded and 24 MiB encoded (total peaks of 128/48 MiB), with no second
+  concurrent overlap. These owned-image estimates are not process-memory quotas;
+- engine screenshots: at most 64 entries, 12 million base64 characters per
+  image, and 24 MiB aggregate estimated retained strings. These images are not
+  decoded in the engine; explicit exports do not depend on cache admission;
 - retained desktop state: source-free aggregate reads, at most 16 hydrated
   documents/64 MiB, 32 MiB Foundation projection cache, and a 32 MiB
   per-workspace desktop Design API budget;
@@ -2266,6 +2472,71 @@ dimensions, pixels, bytes, and execution time. Deterministic headless evidence
 pins browser, fonts, viewport, scale, locale, timezone, color settings, and
 reduced motion; unpinned host pixels are never treated as a stable baseline.
 
+Frame surface discovery uses the spatial index and the currently painted camera
+at most once per animation frame, without waiting for the durable wheel-settle
+timer. Membership-stable camera movement publishes no React state. Selection,
+snapping and multi-frame moves retain metadata for offscreen members; only an
+editor, rename or drop target protects additional residency. In-progress geometry
+overlays the immutable index. Surface stacking stays in scene order.
+
+Picture demand follows admitted surfaces rather than sweeping the whole page.
+Hidden surfaces release display leases and optional high-resolution state;
+encoded pictures remain independently cacheable. Replacement pixels reserve
+capacity before decoding and retain the outgoing lease until the DOM swap.
+Incoming document admission stays occupied until the actual incoming buffer is
+removed or promoted.
+
+Local capture demand uses one renderer queue (32 pending requests) with explicit
+captures ahead of visible pixels, detail refinement and nearby warming. Optional
+work pauses during input and waits for 150 ms of quiet. Electron main shares one
+256 MiB estimated temporary reservation across native exports and in-frame
+captures. Cancellation retains admission until native window cleanup, runtime
+completion or confirmed document disposal. Lost cleanup proof keeps the slot
+reserved until its owning WebContents is destroyed or the app restarts.
+Native host operations also join their capture WebContents' destruction event:
+Electron page-evaluation promises can remain pending after that document is gone,
+so promise settlement alone cannot drive cancellation acknowledgement. Identified
+preview jobs are connection-, authority-, workspace- and directory-bound; cancelled
+jobs remain fenced through their original absolute deadline, even under terminal
+history pressure. Legacy peers keep bounded fallback behavior.
+
+Hidden documents have a 10-second warm grace and a global allowance of 12 optional
+hidden documents. Budget pressure can retire them earlier. An active editor,
+rename, drop or unresolved mutation protects its document; expiry never commits
+or discards a draft. Retirement removes live documents, hydrated source and
+reconstructible projections while retaining semantic state and bounded cover
+pixels. These policies keep the existing active live-frame limit.
+
+Capable Local engines advertise optional `design.preparation.v1` and
+`design.preview.jobs.v1` capabilities. Registered-directory navigation reads the
+catalog without reading every frame's HTML or scanning token usage. Requested
+sources prepare in batches of at most 16; metadata and retained pixels cannot
+authorize editing. Preparation is fenced by directory, connection, epoch, source
+and pending mutations. Layers, selection and drop discovery use metadata, then
+wait for current prepared source and matching runtime geometry before editing.
+Legacy layouts retain aggregate reads. Cloud Design remains unavailable.
+
+The limits above are resource estimates, not a total application RSS/GPU cap.
+On-demand `design-renderer-resources.ts` reads anonymous allocation counters,
+image reservations, preview storage, source caches and runtime screenshot state;
+it adds no polling or product UI. The harness exposes those readings for tests.
+`node scripts/design-baseline.mjs --scaling --output .context/design-scaling.json`
+records 2/32/128/256-frame component fixtures and twenty hide/reveal cycles. Its
+bridge/capture stand-ins and srcDoc lifetime cannot qualify native Electron.
+
+For native work, generate a new disposable checkout with
+`pnpm exec tsx scripts/design-performance-fixture.ts --frames 256 --complex --output /private/tmp/zeros-design-performance-256`
+(the path must not exist), then open it as a Local workspace in the exact build.
+With that isolated Electron instance exposing a loopback debugging endpoint,
+`node scripts/design-baseline.mjs --native-cdp http://127.0.0.1:9222 --scenario fixed-view-256 --output .context/design-native-256.json`
+checks Electron and the authenticated zeros-design protocol before sampling.
+Pass `--engine-pid` to include the fixture's Local engine. Record cold/warm,
+overview, editing/capture, hidden and owner-switch scenarios independently on
+representative Macs. The native sampler records per-process RSS and physical
+footprint where macOS permits; missing footprint is explicit, and RSS is not
+summed as private memory. It is an idle/process sampler, not presented-frame,
+input-to-present or energy qualification.
+
 #### Scoped tools and evidence limits
 
 | Resource               | Bound and behavior                                                                                                                                                            |
@@ -2277,7 +2548,7 @@ reduced motion; unpinned host pixels are never treated as a stable baseline.
 | Retained API documents | 2 documents / 16 MiB estimated retained state per execution. This is not a process-RSS limit.                                                                                 |
 | Request/proposal store | 512 entries / 4 MiB per directory, resolved receipt age up to seven days. Atomic private writes; no background sweeper.                                                       |
 | Source pages           | Default 16,384 / maximum 32,768 UTF-16 units; never split a surrogate pair.                                                                                                   |
-| Capture                | One active capture per host; 20-second deadline, 2048 × 2048 PNG maximum, DPR 1, 16 MiB HTML, 1 MiB PNG. Larger frame layouts scale into that raster. No waiting browser queue; each browser/window is disposed after capture. |
+| Capture                | One active native render per host, sharing Local main's reservation with in-frame captures; 20-second deadline, 2048 × 2048 PNG maximum, DPR 1, 16 MiB HTML, 1 MiB PNG. Larger frame layouts scale into that raster. No waiting browser queue; each browser/window is disposed after capture. |
 | Evidence work          | Two admitted composition/read jobs per engine, including direct capture. Reject saturation before claiming a new mutation receipt or allocating another result.               |
 | Result store           | 16 results / 64 MiB per workspace, 32 MiB maximum bundle, seven-day retention. Atomic private files, bounded index and orphan scan; no idle sweeper.                          |
 | Review reads           | At most 128 rows per page; 512 KiB detail patch; each of the eight Git metadata streams is limited to 1 MiB.                                                                  |
@@ -2510,7 +2781,7 @@ the transcript or its replay.
    streamed edit text (`args_text_delta`, `stream_content`) but drops it when
    converting updates, so Cursor drafts show status only. Preview its content
    once a pinned SDK exposes it, through the same `AgentToolInputEvent` hook.
-2. **Codex streaming.** Codex (0.162.1) reports a patch only once complete
+2. **Codex streaming.** Codex (0.164.0) reports a patch only once complete
    (`item/started`); preview it while the model writes it if the app-server
    ever forwards the patch input's deltas.
 3. **New pages.** A canvas document that adds a page could show that page's
@@ -3419,11 +3690,167 @@ Reproduction tools (outputs stay under gitignored/private test storage):
 | `scripts/design-adapter-prototype.mjs`                     | Inert lifecycle/admission conformance, not a production adapter                            |
 | `scripts/design-host-prototype.mjs`                        | Browser-context and interruptible worker experiments, not OS quotas                        |
 | `scripts/design-native-qualification.ts`                   | Real Electron capture/isolation/teardown; requires macOS                                   |
+| `scripts/design-native-run.mjs`                            | Mac terminal runner for the native host, isolated Personal Local product fixtures and fresh packaged-engine smoke; reports each selected stage |
+| `scripts/design-native-acceptance.mjs`                     | Optimized renderer/compiled-engine presentation traces, paired idle CPU and a 100-cycle memory workload on macOS; budget failures exit nonzero |
 | `scripts/design-verification-native.ts`                    | Exact-source macOS shell capture, HTTP preview and official Browser host-contract checks; not a live model turn |
 | `scripts/ui-smoke-design-mode.mjs`                         | Production menu/tag/tool rows with synthetic transport                                     |
 | `scripts/ui-smoke-design-preview.mjs`                      | Real Inspector preview actions with delayed replies, directory replacement and unmount     |
 | `engine/design/__tests__/native-authoring-browser.test.ts` | Real Chromium layout/refresh and observational source preservation                         |
 | `scripts/smoke-engine.mjs`                                 | macOS packaged health plus workspace create/archive/restore                                |
+
+Run `node scripts/design-native-run.mjs` from the checkout to qualify the native
+host, production development app and packaged engine. Builds, fixture checkouts,
+profiles, source hashes, screenshots and logs belong to a unique run under
+`.context/design-native/`; the runner refuses another active qualification and
+owns cleanup of its child process groups. `--status` reads the latest progress.
+`--stage host`, `--stage product` or `--stage engine` runs only that stage;
+`--source-digest <sha256>` requires the same recorded source inputs before launch.
+After recovering an absent legacy v4 run, `--recover-v4` exclusively fences its
+old launch marker so a delayed command cannot start alongside the replacement.
+
+The product stage uses real `zeros-design:` documents with 2/32/128/256-frame
+fixtures, twenty actual Personal Local workspace switches, shared capture
+admission, native process samples and hidden-document retirement. A successful
+run certifies only its recorded checks. It does not establish organization-owned
+Local compatibility, a before/after speedup, input-to-present latency, OS energy,
+cache-pressure fidelity, or an absolute total-memory envelope. Those remain
+separate acceptance workloads; cloud Design stays unavailable.
+
+`--stage performance` runs the controlled native workloads separately. Add
+`--reference-root <isolated-checkout>` to run the same authored fixtures against
+a preserved reference before the current sources. Verify the reference manifest,
+including root build files and resources, and keep workspace package links bound
+to that reference even when sharing installed third-party dependencies. The
+workload holds the camera, panels and canvas dimensions constant, moves extra
+descriptors beyond overscan, and separates ordinary, complex, transparent-text
+and all-visible fixtures. It records naturally settled switches, per-process
+samples, PNG artifacts, Chromium input traces, and disposable-cache eviction
+across restarts. Synthetic cache and memory pressure run after memory benchmarks.
+The standalone Local engine is identified as a child of the isolated app after
+each launch and restart. Its CPU time and RSS come from OS process accounting;
+Electron processes retain their own accounting source in the report. Missing
+readings remain missing, and process RSS is not summed as private memory.
+Native samples also read macOS physical footprint for every app/engine process,
+including the GPU. The performance driver checks it throughout loading and
+interaction; missing GPU/footprint samples fail qualification. Its 1.5 GiB GPU
+and 3 GiB aggregate shutdown limits protect the test host, not a promise of
+normal memory use or an OS allocation quota. Source/image counters, JavaScript
+heap and RSS alone cannot establish graphics-memory acceptance. Preserve an
+overrun sample and close only the owned isolated app when the guard trips.
+The performance and owner drivers select the installed Electron executable
+explicitly so Playwright does not substitute its mock Keychain or disable native
+background scheduling. Their launch regression checks the actual Electron
+switches; native runs also record and verify these settings.
+Observed capture samples are not guaranteed transient peaks; traces and PNGs
+still need review. This stage's existence or successful static checks do not
+establish native performance acceptance.
+
+`pnpm check:design-performance` runs the fast resource, driver and acceptance
+regressions, also included in the root Vitest CI lane. Recover
+`pnpm design:performance:native --status` before starting
+`pnpm design:performance:native`. This separate command builds optimized assets
+and a compiled engine in a fresh Dev workspace profile, records actual pan/zoom
+presentation endpoints, and runs 100 owner/tab cycles with source edits,
+app hide/show and cache pressure. It compares three paired idle CPU windows
+and checks both a fixed warm memory baseline and absolute app/GPU targets.
+The baseline and each ten-cycle block use matching retirement grace and
+ten-sample observation windows; transient navigation samples still count toward
+peak memory. A process change invalidates an idle CPU delta, is retained in the
+report, and permits one complete replacement observation. A valid high CPU
+result or a changed root process is never retried into a pass.
+Completion and subsequent launch also require observed app/engine helpers to
+retire, including children reparented before shutdown. The status command
+reports unresolved identities; PID reuse is distinguished by process start
+identity. A closed window alone is not proof of resource retirement.
+It records cold/warm readiness and resize/edit observations separately; these
+are not first-pixel or editing input-latency percentiles. The initial targets
+require reference-Mac qualification. The command requires ordinary Dev sign-in
+and confirmed membership to exercise retained organization-Local fixture rows;
+account-free Local mode cannot qualify that case. The unpackaged test host does
+not establish release packaging or cloud behavior. Future features
+that own rendering resources must extend the workload before increasing its
+limits. See the [zstack performance playbook](../agents/zstack/playbooks/performance.md)
+for commands, budgets, build/measurement limits and the required evidence.
+
+The [2026-10-27 measurement record](../agents/zstack/changes/design-performance-measurements.md)
+preserves the last complete 100-cycle result: 2.200435 GiB app/engine peak,
+638.220169 MiB GPU peak, 0.294250% retained growth and 0.133664 percentage
+points worst incremental idle CPU. These met their budgets for that source
+digest. Pan/zoom timing remains incompletely qualified, and later camera
+changes have not repeated the full soak. Correctness and warm-frame retention
+are separate evidence; this is not an overall 100× performance claim. Future
+features retain the open budgets and qualify affected workloads.
+
+Camera painting owns wheel listeners only on the active canvas. Plain browser
+delivery cancels native defaults; the Electron path claims the first pan and
+uses passive continuation, with an immediate first response and coalesced
+continued paints. Direct actions flush a queued camera before hit testing.
+Tool rails and the Motion timeline retain their own input. Cached offscreen
+frames stop inheriting camera variables, with a screen-space allowance for
+nearby chrome and protection for editing, selection and focus. The painter
+uses current inline geometry and remembered viewport dimensions, restoring
+the exact scale before re-entry without layout reads or source replacement.
+Decoded source pixels and already inverse-scaled control children do not
+inherit wheel-by-wheel camera values. Hidden compact controls also isolate
+these values until hover or keyboard focus restores their screen-sized chrome.
+This bounds style work as well as source
+work; it does not establish a universal FPS or memory guarantee.
+Displayed and inactive source-vector images share the loaded-element retention
+pool (512 entries and 32 MiB estimated weight). Confirmation of a new display
+reclaims older inactive elements before a destination can add to a full warm
+pool. Current display leases remain protected even when they alone exceed an
+optional retention limit; encoded source remains independently bounded and
+cached after loaded-element eviction. These estimates are not native-memory
+quotas. Two 256-frame owners retain loaded images when their combined weight
+fits; larger histories use the exact-generation encoded cache.
+Ready-source visibility follows the same camera and direct-geometry writes.
+Crossing a viewport edge does not reconcile the whole canvas when mounted
+frames and source/editor residency stay unchanged. Cold source documents still
+receive layout, protected editors keep their owner, and cached pixels become
+visible before the return frame without replacing their loaded elements.
+
+The Design workspace surface combines selected-tab activity with document
+visibility before admitting optional work. Hiding the native app releases
+display leases and lets idle documents retire under the same bounded policy
+as tab navigation. Completed images keep their warm-cache identity and camera;
+IME and unresolved edits keep their protected document ownership. Showing the
+app cannot activate a retained tab that is still inactive.
+
+Transient text edits retain the runtime that began the edit across queued
+previews and cancellation. A new document under the same frame key cannot
+receive an older edit's glyph suppression; the same runtime may still adopt
+an in-place style generation. Escape cancels a draft before its transaction
+starts; an already saving edit retains its painted text until the committed
+buffer is displayed. Aggregate child geometry read during a gesture
+is provisional and cannot replace the confirmed selection geometry after
+Escape. Browser regressions hold both races across the relevant boundary.
+
+`bun scripts/design-owner-compatibility-fixture.ts --output <new-directory>`
+prepares two disposable Git checkouts with distinct HTML/text Design frames and
+a separate migrated database: Personal Local and a retained organization-owned
+Local row. Existing destinations are refused. The manifest records authored
+source hashes and labels the default organization ID as synthetic; it grants
+no membership. `--organization-id <uuid>` binds the fixture to a previously
+confirmed member organization. Nothing is staged or committed.
+Generate the fixture on the qualification machine: its manifest and database
+contain absolute checkout paths, so a copied fixture is not portable evidence.
+
+`--stage owners` performs the native compatibility run. It creates a fresh
+ordinary Dev instance profile and uses normal shared Dev sign-in plus an
+authenticated membership read. It never copies credentials into the checkout,
+disables authentication, or relaxes the Personal-only Local-development gate.
+After confirming membership, it stops its own app, seeds the retained fixture
+into its own database, and checks twenty settled owner/workspace transitions,
+native captures, hidden retirement and reopening after restart. Captures are
+decoded to verify actual CSS viewport dimensions and authored background pixels
+below short content; correct metadata alone is not pixel-fidelity evidence.
+Runtime capture also has browser-pixel regressions for transparent and translucent
+backgrounds, root precedence, containment and inherited child/pseudo-element
+colors. Authentication
+is checked before waiting for the bridge that the signed-in app mounts. Without usable
+Dev sign-in or organization membership, it records that prerequisite as blocked;
+fixture preparation alone does not establish native owner coverage. Cloud Design
+remains unavailable and this stage creates no cloud VM.
 
 Historical implementation qualification, not a substitute for running checks on
 new changes:

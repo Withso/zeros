@@ -1,8 +1,10 @@
 import { expect } from "@playwright/test";
+import { runSidebarWorkspaceFilters } from "./ui-smoke-sidebar-filters.mjs";
 import { appSidebarRegressionChecks } from "./ui-smoke-app-sidebar-regressions.mjs";
+import { runWorkspaceHoverCards } from "./ui-smoke-workspace-hover-card.mjs";
 
-// App sidebar contract: Grouped by default with every workspace under its
-// repository; Grouped/Ungrouped are the only presentations; repository headers
+// App sidebar contract: Repository grouping by default with every workspace under
+// its repository; Status and None are also available; repository headers
 // swap their icon for a disclosure chevron on hover, keep + visible, and reveal
 // settings and ⋯ (Create workspace / Create from… / Configuration / Remove
 // repository); collapse is persisted per repository and never hides the
@@ -19,7 +21,7 @@ export async function runAppSidebarSmoke({ page, check, harnessBase }) {
     await page
       .getByRole("button", { name: "Filter workspaces", exact: true })
       .click();
-    await page.getByRole("menuitem", { name, exact: true }).click();
+    await page.getByRole("menuitemradio", { name, exact: true }).click();
   };
 
   await page.goto(harness, { waitUntil: "networkidle" });
@@ -58,7 +60,7 @@ export async function runAppSidebarSmoke({ page, check, harnessBase }) {
   ]);
   expect((await state()).filter).toBe("grouped");
   check(
-    "Grouped is the default and lists each workspace under its repository",
+    "Repository is the default grouping and lists each workspace under its repository",
     true,
   );
 
@@ -83,6 +85,7 @@ export async function runAppSidebarSmoke({ page, check, harnessBase }) {
   const chevron = zeros.locator("svg.lucide-chevron-down");
   await expect(chevron).toBeHidden();
   await zeros.hover();
+  await expect(zeros).toHaveCSS("background-color", "rgba(0, 0, 0, 0)");
   await expect(settings).toBeVisible();
   await expect(more).toBeVisible();
   await expect(chevron).toBeVisible();
@@ -141,20 +144,18 @@ export async function runAppSidebarSmoke({ page, check, harnessBase }) {
   await page
     .getByRole("button", { name: "More actions for 0colors", exact: true })
     .click();
-  // A pointer can leave the selected item after the new picker takes focus,
-  // while Radix still retains the closing menu for its exit animation.
+  // The source picker must take focus after the old anchored menu retires.
+  // A late pointer-out from its former item must not reclaim that focus.
   await page.evaluate(() => {
     const item = [...document.querySelectorAll('[role="menuitem"]')].find(
       (element) => element.textContent === "Create from…",
     );
     const menu = item.closest('[data-radix-menu-content]');
-    // Hold the exit phase until the event is delivered, even on a slow host.
-    menu.style.animationPlayState = "paused";
-    window.__sidebarSourceLeaveSent = false;
+    window.__sidebarSourceMenuRetired = null;
     const leaveAfterFocus = (event) => {
       if (event.target.getAttribute?.("aria-label") !== "Search sources") return;
       document.removeEventListener("focusin", leaveAfterFocus, true);
-      if (!item?.isConnected) return;
+      window.__sidebarSourceMenuRetired = !menu.isConnected;
       item.dispatchEvent(
         new PointerEvent("pointerout", {
           bubbles: true,
@@ -162,8 +163,6 @@ export async function runAppSidebarSmoke({ page, check, harnessBase }) {
           relatedTarget: event.target,
         }),
       );
-      menu.style.animationPlayState = "";
-      window.__sidebarSourceLeaveSent = true;
     };
     document.addEventListener("focusin", leaveAfterFocus, true);
   });
@@ -173,14 +172,20 @@ export async function runAppSidebarSmoke({ page, check, harnessBase }) {
   ).toContainText("0colors");
   const source = page.getByRole("dialog", { name: "Create from source" });
   await expect
-    .poll(() => page.evaluate(() => window.__sidebarSourceLeaveSent))
+    .poll(() => page.evaluate(() => window.__sidebarSourceMenuRetired))
     .toBe(true);
   await expect(source).toBeVisible();
   await expect(
     source.getByRole("searchbox", { name: "Search sources" }),
   ).toBeFocused();
-  await page.waitForTimeout(400);
+  await source.evaluate((node) =>
+    Promise.all(node.getAnimations().map((animation) => animation.finished)),
+  );
   await expect(source).toBeVisible();
+  await expect(
+    source.getByRole("searchbox", { name: "Search sources" }),
+  ).toBeFocused();
+  await expect(page.getByRole("menu")).toHaveCount(0);
   await page.keyboard.press("Escape");
   await expect(source).toHaveCount(0);
   check(
@@ -250,11 +255,12 @@ export async function runAppSidebarSmoke({ page, check, harnessBase }) {
   await page
     .getByRole("button", { name: "Filter workspaces", exact: true })
     .click();
-  expect(await page.getByRole("menuitem").allTextContents()).toEqual([
-    "Grouped",
-    "Ungrouped",
+  expect(await page.getByRole("menuitemradio").allTextContents()).toEqual([
+    "Repository",
+    "Status",
+    "None",
   ]);
-  await page.getByRole("menuitem", { name: "Ungrouped", exact: true }).click();
+  await page.getByRole("menuitemradio", { name: "None", exact: true }).click();
   await expect(headers).toHaveCount(0);
   expect(
     await page
@@ -273,10 +279,10 @@ export async function runAppSidebarSmoke({ page, check, harnessBase }) {
   await page.reload({ waitUntil: "networkidle" });
   await expect(row("ws-boston")).toBeVisible();
   await expect(headers).toHaveCount(0);
-  await selectFilter("Grouped");
+  await selectFilter("Repository");
   await expect(headers).toHaveCount(4);
   check(
-    "Grouped and Ungrouped are the only presentations; Ungrouped is one newest-first list",
+    "Repository, Status and None are the groupings; None is one newest-first list",
     true,
   );
 
@@ -337,7 +343,7 @@ export async function runAppSidebarSmoke({ page, check, harnessBase }) {
     true,
   );
 
-  // Geometry: every destination, repository and workspace row is 30px, and
+  // Geometry: repository and workspace rows are 32px; destinations stay 30px. All
   // consecutive repository/workspace rows sit exactly 2px apart.
   await page.evaluate(() => sessionStorage.clear());
   await page.goto(harness, { waitUntil: "networkidle" });
@@ -347,14 +353,9 @@ export async function runAppSidebarSmoke({ page, check, harnessBase }) {
       ...document.querySelectorAll(
         "[data-sidebar-repository], [data-workspace-tab]",
       ),
-      ...["Home", "Customize", "Create"].map((text) =>
-        [...document.querySelectorAll("[data-app-sidebar] button")].find(
-          (button) => button.textContent?.trim() === text,
-        ),
-      ),
     ].map((node) => node?.getBoundingClientRect().height),
   );
-  expect(new Set(heights)).toEqual(new Set([30]));
+  expect(new Set(heights)).toEqual(new Set([32]));
   const gaps = await page.evaluate(() => {
     const rows = [
       ...document.querySelectorAll(
@@ -387,7 +388,7 @@ export async function runAppSidebarSmoke({ page, check, harnessBase }) {
   expect(destinations.gaps).toEqual([2, 2]);
   expect(new Set(destinations.padding)).toEqual(new Set(["4px"]));
   check(
-    "Sidebar rows are 30px tall and 2px apart; the organization pill has 4px padding",
+    "Repository and workspace rows are 32px tall and 2px apart; the organization pill has 4px padding",
     true,
   );
 
@@ -489,6 +490,9 @@ export async function runAppSidebarSmoke({ page, check, harnessBase }) {
   for (const regression of appSidebarRegressionChecks) {
     await regression({ page, check, harnessBase });
   }
+
+  await runSidebarWorkspaceFilters({ page, check, harnessBase });
+  await runWorkspaceHoverCards({ page, check, harnessBase });
 
   expect(errors).toEqual([]);
   check("app sidebar interactions have no browser exceptions", true);

@@ -10,7 +10,7 @@ vi.mock("../../platform/bridge/workspace-runtime-client", () => ({
 vi.mock("../../platform/cloud-workspaces", async importOriginal => ({
   ...(await importOriginal<typeof import("../../platform/cloud-workspaces")>()),
   createCloudWorkspaceDocument: api.create,
-  listCloudWorkspaceDocuments: api.list,
+  listCloudWorkspaceCatalogSnapshot: async (...args: unknown[]) => ({ workspaces: await api.list(...args), catalogVersion: null, complete: true }),
 }));
 vi.mock("../../features/team/team-store", () => ({
   getOrganizationStoreGeneration: () => api.account,

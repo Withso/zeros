@@ -7,7 +7,8 @@ permissions:
   contents: read
   actions: read
   issues: write
-  pull-requests: read
+  # The report is a comment on the App PR; issues: write alone is refused there.
+  pull-requests: write
 concurrency:
   group: agent-runtime-state
   cancel-in-progress: false

@@ -131,6 +131,44 @@ d("organization routes", () => {
     }
   });
 
+  it("returns every membership in stable order, including organizations without cloud", async () => {
+    const previous = actor;
+    const fixtureUser = await signup("Memberships");
+    const multiOrganizationFixture = Array.from({ length: 20 }, (_, index) => {
+      const number = index + 1;
+      const prefix = String(number).padStart(8, "0");
+      return {
+        id: `${prefix}-1111-4111-8111-111111111111`,
+        slug: `membership-${number}`,
+        name: `Membership ${String(number).padStart(2, "0")}`,
+        logo: null,
+        role: "member",
+        isPersonal: false,
+        defaultTeamId: `${prefix}-2222-4222-8222-222222222222`,
+        workspaceCapabilities: { local: false, cloud: index !== 2 },
+        teamCapabilities: { multiple: false, canCreate: false },
+      };
+    });
+    try {
+      await withSystemTx(pool, async tx => {
+        for (const [index, org] of multiOrganizationFixture.entries()) {
+          await tx.query(`INSERT INTO organizations (id, slug, name, created_by, is_personal, cloud_workspaces_allowed, created_at)
+            VALUES ($1, $2, $3, $4, false, $5, $6)`,
+          [org.id, org.slug, org.name, fixtureUser.id, org.workspaceCapabilities.cloud, new Date(Date.UTC(2026, 0, 1, 0, index))]);
+          await tx.query(`INSERT INTO organization_members (org_id, user_id, role) VALUES ($1, $2, $3)`, [org.id, fixtureUser.id, org.role]);
+          await tx.query(`INSERT INTO teams (id, org_id, slug, name, is_default, created_by) VALUES ($1, $2, 'default', 'Default', true, $3)`,
+            [org.defaultTeamId, org.id, fixtureUser.id]);
+        }
+      });
+      actor = fixtureUser;
+      const response = await request("/v1/me");
+      expect(response.status).toBe(200);
+      const body = await response.json() as { organizations: Array<{ isPersonal: boolean }>; teams: unknown[] };
+      expect(body.organizations.filter(org => !org.isPersonal)).toEqual(multiOrganizationFixture);
+      expect(body.teams).toEqual(body.organizations);
+    } finally { actor = previous; }
+  });
+
   it("creates an organization and its one default team atomically", async () => {
     const response = await request("/v1/organizations", {
       method: "POST",

@@ -1,7 +1,7 @@
 # Claude SDK event coverage
 
-Audited against installed `@anthropic-ai/claude-agent-sdk` **0.3.296** and its
-bundled CLI **2.1.296**. The installed `sdk.d.ts` and wrapper are the contract;
+Audited against installed `@anthropic-ai/claude-agent-sdk` **0.3.309** and its
+bundled CLI **2.1.309**. The installed `sdk.d.ts` and wrapper are the contract;
 online documentation can describe a different version.
 
 The public `SDKMessage` union has 39 member aliases and 42 distinct type/subtype
@@ -63,6 +63,59 @@ the table and native fixtures whenever the pinned SDK changes.
 | `system/informational` | handled | Plain bounded content as an inbetween message, tool-scoped where identified. `prevent_continuation` explains runtime behavior but is not itself a terminal result. |
 | `conversation_reset` | handled | Existing idempotent accounting reset at `/clear`. **Limitation:** the SDK's fresh-transcript/title remount is unsupported; this handler does not erase saved chat history or invent a new chat. Native session binding follows init plus confirmed root work/success. |
 
+## 0.3.309 surface review
+
+Local Personal, organization-local and standalone cloud workers pin the same
+0.3.309 Node SDK. The public message inventory remains at 39 aliases and 42
+discriminators. The launch smoke checks the real wrapper and bundled 2.1.309
+process without inference.
+
+The 20 declaration changes from 0.3.296 have fingerprinted dispositions in
+[`scripts/agent-runtime/reviews.json`](../scripts/agent-runtime/reviews.json).
+The Browser SDK dialog/SSE additions do not apply to these Node integrations.
+The experimental usage API remains deferred. Native MCP policy/settings fields
+stay SDK-owned; Zeros does not enable `allowNestedUserNamespaces` or interpret
+Artifact `owned` as workspace authority.
+
+Tool-name contract tests compare the desktop adapters, renderer title matchers
+and standalone cloud worker with the runtime `BUILTIN_TOOL_NAMES` and
+`LEGACY_TOOL_NAME_ALIASES` exports. They read the actual routing expressions,
+with an explicit retired-name compatibility allowlist. A legacy spelling also
+requires coverage of its canonical target, so an SDK alias cannot hide a missed
+rename. Both Node translators
+resolve subagent aliases through the SDK while retaining native names and
+current transcript output. The renderer keeps its mixed-provider title fallbacks
+under source assertions; it does not import the Node SDK at runtime.
+
+Elicitation `property_order` needs no host adoption: the SDK omits it from
+`onElicitation`, and the documented order already matches JavaScript object-key
+order (including index-like names first). The existing Local form mapping
+preserves that order; the cloud worker retains its cancellation response.
+
+Local and cloud context snapshots preserve known stable category IDs and
+per-server MCP shares. The context popover combines tools and instructions into
+an expandable MCP servers row when the reported rows supply usable detail, conserves the
+native category totals, and retains the legacy rows when detail is missing.
+Skills appear when reported; deferred tools stay outside the window. The
+credential-free bundled CLI confirms this data is available in summary mode.
+See [context-window snapshots](agent-turn-usage.md#context-window-snapshots).
+Optional custom-agent and skill plugin/path metadata is not presented.
+
+Both Node integrations consume CronCreate/CronList `nextFireAt` as the native
+due time, ahead of the existing one-shot cron estimate. ScheduleWakeup retains
+its exact `scheduledFor`. The root `UserPromptSubmit` hook emits a typed status
+notice for `loop_wakeup` or `schedule_wakeup`, matching the exact prompt against
+tracked tasks and deduplicating native prompt IDs. Missing or ambiguous matches
+stay generic. Local keeps its existing Stop-hook waiting/idle policy; the cloud
+worker adds only the notice hook. Notices neither accept a queued cloud prompt
+nor prove model progress. The renderer formats due time in the reader's timezone,
+folds the row with its work, and excludes it from counts, titles and copied
+output. See [automatic wake-up presentation](agent-tool-presentation.md).
+
+Plugin additions through
+`reloadPlugins({ addPlugins })` are deferred until Zeros has a flow that enables
+a plugin; current plugin listing and refresh need no additive reload.
+
 ## 0.3.296 field dispositions
 
 The public message inventory remains at 39 aliases and 42 discriminators.
@@ -86,9 +139,9 @@ subagent shutdown, MCP recovery and native token/cost corrections arrive with
 the runtime. Existing permission, restart, replay, subagent, hook-feedback and
 usage suites run against the replacement wrapper. Those native-contract
 simulations do not claim a live account reproduced every upstream fix.
-The launch smoke additionally exercises the real 0.3.296 wrapper and bundled
-2.1.296 process without inference. See the prior-version dispositions below
-for behavior that remains part of the integration.
+The 0.3.296 upgrade added the launch-handshake version check retained by the
+current smoke. See the prior-version dispositions below for behavior that
+remains part of the integration.
 
 ## 0.3.293 field dispositions
 
@@ -152,9 +205,10 @@ order are documented in [the harness capability boundary](agent-harness-capabili
 - `canUseTool`, `onUserDialog` and `onElicitation` already use existing blocking
   approval/question controls and cancellation lifetimes. Elicitation completion
   notifications do not substitute for those callback receipts.
-- Native hooks remain SDK-owned. Zeros registers passive `Stop` and
-  `UserPromptSubmit` callbacks for scheduled wakeups and activity, with query
-  identity guards. Other configured hooks can still run in the CLI; their
+- Native hooks remain SDK-owned. Local registers passive `Stop` and
+  `UserPromptSubmit` callbacks for scheduled wakeups, status and activity; the
+  cloud worker registers only `UserPromptSubmit` for wake-up status. Both guard
+  query identity and ignore child wake hooks. Other configured hooks can still run in the CLI; their
   started/progress/response notifications follow the table. The adapter does
   not register extra hooks merely to claim event coverage.
   The other installed hook names are intentionally unregistered by Zeros:

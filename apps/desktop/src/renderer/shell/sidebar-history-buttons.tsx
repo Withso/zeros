@@ -10,7 +10,6 @@ import { ArrowLeft, ArrowRight, type LucideIcon } from "lucide-react";
 
 import { prefetchSettingsForRepo } from "../features/settings/use-settings";
 import { Button } from "../shared/ui/primitives/button";
-import { Tooltip } from "../shared/ui/primitives/tooltip";
 import { useWorkspaceDispatch } from "../state/store";
 import { useOpenWorkspace } from "../state/use-open-workspace";
 import type { WorkspaceNavigationTarget } from "./prefetch-workspace-surface";
@@ -99,20 +98,18 @@ function HistoryButton({
   onWarm: () => void;
 }) {
   return (
-    <Tooltip label={label} side="bottom">
-      <Button
-        type="button"
-        variant="ghost"
-        size="icon"
-        className={HISTORY_BUTTON_CLS}
-        aria-label={label}
-        aria-disabled={!available || undefined}
-        onPointerEnter={onWarm}
-        onFocus={onWarm}
-        onClick={onStep}
-      >
-        <Icon className="size-3.5" strokeWidth={1.5} aria-hidden="true" />
-      </Button>
-    </Tooltip>
+    <Button
+      type="button"
+      variant="ghost"
+      size="icon"
+      className={HISTORY_BUTTON_CLS}
+      aria-label={label}
+      aria-disabled={!available || undefined}
+      onPointerEnter={onWarm}
+      onFocus={onWarm}
+      onClick={onStep}
+    >
+      <Icon className="size-3.5" strokeWidth={1.5} aria-hidden="true" />
+    </Button>
   );
 }

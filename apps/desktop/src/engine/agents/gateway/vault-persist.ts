@@ -65,8 +65,8 @@ export function parseVaultBlob(
 /** The engine→host control line (newline-terminated) asking main to persist the
  *  current snapshot. Carries plaintext tokens — only ever written to the private
  *  control fd, never stdout/stderr or the bridge. */
-export function vaultControlLine(snapshot: VaultSnapshot): string {
-  return `${JSON.stringify({ type: MCP_VAULT_CONTROL_TYPE, data: snapshot })}\n`;
+export function vaultControlLine(snapshot: VaultSnapshot, requestId?: string): string {
+  return `${JSON.stringify({ type: MCP_VAULT_CONTROL_TYPE, data: snapshot, ...(requestId ? { requestId } : {}) })}\n`;
 }
 
 /** Host side: extract the snapshot from a control-fd line, or null if the line

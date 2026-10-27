@@ -8,6 +8,8 @@ describe("native Design authoring instructions", () => {
     expect(instruction).toContain("<page.folder>/<name>.html");
     expect(instruction).toContain("that page's frames array");
     expect(instruction).not.toContain("pages[0].frames");
+    expect(instruction).toContain("data-name");
+    expect(instruction).toContain("data-oid");
   });
   it("requires an API pageId for multi-page frame creation and duplication", () => {
     const instruction = composerModeInstruction("design", undefined, "api");

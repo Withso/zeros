@@ -1,7 +1,7 @@
 // ============================================
 // COMPONENT: DesignDirectoryPill
-// PURPOSE: Floating top-left canvas pill: Design directory switcher and the
-//          Layers + Inspector panel toggle
+// PURPOSE: Secondary Design toolbar: Layers + Inspector toggle and directory
+//          switcher. The component name and DOM hooks remain compatible.
 // USED IN: DesignWorkspaceColumn
 // ============================================
 
@@ -16,7 +16,8 @@ import {
 } from "../../state/design-directory-target";
 
 import { DesignDirectoryMenu } from "./design-directory-menu";
-import { DesignToolbarButton } from "./design-inspector-kit";
+import { IconButton, PanelHeader, Tooltip } from "../../shared/ui/primitives";
+import { WorkbenchTabToolbar } from "../../shell/workbench/tab-status";
 
 export function DesignDirectoryPill({
   workspace,
@@ -35,36 +36,44 @@ export function DesignDirectoryPill({
     { enabled: active },
   );
   return (
-    <div
-      role="group"
-      aria-label="Design directory"
-      data-design-directory-header=""
-      data-design-controls=""
-      className="zd-design-floating-toolbar zd-design-directory-pill absolute flex items-center"
-    >
-      <DesignDirectoryMenu
-        key={isCloudWorkspace(workspace.id) ? workspace.id : undefined}
-        workspace={workspace}
-        active={active}
-        name={directory.data?.directory ?? "Design"}
-      />
-      <span className="zd-canvas-toolbar-divider" aria-hidden="true" />
-      <DesignToolbarButton
-        label="Toggle Layers and Inspector"
-        tooltip={
-          panelVisible
-            ? "Hide Layers and Inspector"
-            : "Show Layers and Inspector"
-        }
-        shortcut={"⌘\\"}
-        tooltipSide="bottom"
-        pressed={panelVisible}
-        disabled={!active}
-        aria-keyshortcuts={"Meta+\\ Control+\\"}
-        onClick={onTogglePanel}
+    <WorkbenchTabToolbar>
+      <PanelHeader
+        size="window"
+        role="group"
+        aria-label="Design directory"
+        data-design-directory-header=""
+        data-design-directory-workspace={workspace.id}
+        data-design-controls=""
+        className="zd-design-directory-pill min-w-0"
       >
-        <PanelRight />
-      </DesignToolbarButton>
-    </div>
+        <Tooltip
+          label={
+            panelVisible
+              ? "Hide panels · ⌘\\"
+              : "Show panels · ⌘\\"
+          }
+          side="bottom"
+        >
+          <IconButton
+            label="Toggle Layers and Inspector"
+            size="standard"
+            className="hover:bg-bg1-hover"
+            aria-pressed={panelVisible}
+            aria-controls={`design-panel-${workspace.id}`}
+            disabled={!active}
+            aria-keyshortcuts={"Meta+\\ Control+\\"}
+            onClick={onTogglePanel}
+          >
+            <PanelRight />
+          </IconButton>
+        </Tooltip>
+        <DesignDirectoryMenu
+          key={isCloudWorkspace(workspace.id) ? workspace.id : undefined}
+          workspace={workspace}
+          active={active}
+          name={directory.data?.directory ?? "Design"}
+        />
+      </PanelHeader>
+    </WorkbenchTabToolbar>
   );
 }

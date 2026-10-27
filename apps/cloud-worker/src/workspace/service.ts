@@ -7,6 +7,7 @@ import { FileService } from "./files";
 import { GitService } from "./git";
 import { unsupported, WorkspaceError, type WorkerConfig, type WorkspaceScope } from "./scope";
 import { CheckoutWatch } from "./watch";
+import { listWorkspaceSkills } from "./skills";
 
 export interface PrSummary { prNumber: number | null; prState: "draft" | "ready" | "merged" | "closed" | null; prUrl: string | null }
 const EMPTY_PR: PrSummary = { prNumber: null, prState: null, prUrl: null };
@@ -16,6 +17,7 @@ export interface WorkspaceServiceOptions {
   publish?: (frame: BridgeMessage) => void;
   lookupPr?: (branch: string) => Promise<PrSummary>;
   watch?: boolean;
+  historyDiff?: (params: Record<string, unknown>) => Promise<unknown>;
 }
 
 /** Native wire contract from engine/workspace/service.ts and git/types.ts,
@@ -35,7 +37,7 @@ export class WorkspaceService {
 
   private constructor(readonly scope: WorkspaceScope, private readonly directory: string, private readonly options: WorkspaceServiceOptions) {
     this.run = options.run ?? commandRunner(scope.root);
-    this.git = new GitService(scope, { run: this.run, baseBranch: () => this.state.baseBranch,
+    this.git = new GitService(scope, { run: this.run, historyDiff: options.historyDiff, baseBranch: () => this.state.baseBranch,
       setBaseBranch: branch => this.update(state => ({ ...state, baseBranch: branch })), changed: () => this.invalidate(true) });
     this.files = new FileService(scope, this.run, () => this.invalidate(false));
     if (options.watch !== false) this.watcher = new CheckoutWatch(scope, this.run, content => this.poll(content));
@@ -69,6 +71,7 @@ export class WorkspaceService {
     if (op.startsWith("git.")) return this.git.handle(op, params);
     if (op.startsWith("file.") || op.startsWith("fs.")) return this.files.handle(op, params);
     switch (op) {
+      case "skills.list": return listWorkspaceSkills(this.scope, params.agentId);
       case "workspace.list": {
         if (params.archived === true || (params.status !== undefined && params.status !== "in-progress") || (params.repoSlug !== undefined && params.repoSlug !== this.scope.workspace.repository)) return { workspaces: [] };
         return { workspaces: [await this.row(params.withChanges === true)] };

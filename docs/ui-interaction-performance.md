@@ -23,16 +23,23 @@ round trip to restore it. Key it by the smallest semantic owner that can vary:
 | Selection                                                        | Owner key                            |
 | ---------------------------------------------------------------- | ------------------------------------ |
 | Home destination or app-wide presentation preference             | app                                  |
-| Repository hub mode and each mode's selected tab                 | project id                           |
+| Repository hub selected tab                                     | project id                           |
+| Last workspace and chat when switching organizations            | organization id; account/backend for cloud |
 | Selected workspace                                               | repository root                      |
 | Active chat, workbench tabs, Changes/Review choices, terminal tab | workspace folder                    |
 | Open file and explicit viewer mode                                | workbench tab id inside the workspace |
-| Dialog step or unsaved “new item” draft                          | ephemeral; do not persist            |
+| Create composer draft                                          | owner, project and placement        |
+| Dialog step or other transient “new item” UI                    | ephemeral; do not persist            |
 
 Restore durable selections synchronously from the destination's first store
 snapshot. Do not seed a repository/workspace-scoped tab from component-local
 `useState`, one global settings key, or a passive-effect hand-off. An explicit
 deep link publishes route, owner identity, and nested destination together.
+
+Repository settings have one tab strip. Retired `design` and
+`design-preferences` selections restore the same repository's remembered Code
+tab, or Environment when none is valid. The former per-mode map is migration
+input only; old settings deep links also resolve to Environment.
 
 Persisted owner maps are a storage/cache surface: type-guard them, give them a
 hard bound, and prune entries when their repository/workspace is removed. A
@@ -41,13 +48,29 @@ snapshot settles and proves it missing. `undefined`/cold is not an empty list;
 keep the remembered identity while revalidating, then apply an authoritative
 fallback as a new atomic navigation if necessary.
 
-Cloud reload restores the saved workspace/chat identity before authentication
-releases cached content. Only a confirmed chat snapshot for that exact cloud
-workspace can invalidate its saved chat; the Local engine's list cannot. Do not
-persist an early Local-only list over the cloud cache before its authorized
-restore completes. Sign-out, account replacement and authoritative workspace
-deletion prune the destination and its descendants atomically. A cold cloud
-selection must not fall back to an unrelated Local chat.
+Organization switching restores the owner's last known workspace and chat in
+one `OPEN_WORKSPACE` navigation, or Dashboard when no valid destination is
+known. The versioned device map retains at most 128 organizations and 512 KiB;
+cloud entries additionally carry the account/backend fence. Known Local rows
+and registered folders, and readable cloud catalog presentation, can restore
+without a network read or VM wake. Workspace/repository deletion and confirmed
+membership loss prune the corresponding entries; account replacement and
+sign-out retire cloud entries while retaining device-owned Local navigation.
+
+Cloud reload restores the saved organization/workspace/chat identity and panels
+when main confirms the stored account, before waiting for live-token refresh.
+Bounded, versioned membership, catalog and chat metadata snapshots are fenced by
+backend and account; they release presentation only, never bearer authority or
+membership ownership side effects. Cold membership and capped catalog reads
+cannot confirm an empty catalog. Only a complete catalog or exact deletion
+evidence can prune a missing workspace, and only a confirmed chat snapshot for
+that exact workspace can invalidate its saved chat; the Local engine's list
+cannot. Do not persist an early Local-only list over the cloud cache before its
+same-account restore completes. Sign-out, account/backend replacement and
+authoritative workspace deletion prune the destination and its descendants,
+including separately persisted cloud repository selections. Preserve a visible
+Local destination while retiring remembered cloud state. A cold cloud selection
+must not fall back to an unrelated Local chat.
 
 Workspace existence and chat-history readiness are separate facts. Both Local
 and Cloud wait for the selected workspace's first authoritative chat list before
@@ -74,9 +97,11 @@ acknowledgement arrives late. Account replacement and owner deletion still
 prune that snapshot; another workspace and the Local connection stay independent.
 
 Cloud transport and compute lifecycle are separate facts. A ready or busy VM
-does not become Starting when its socket disconnects. Short gaps keep the
-existing quiet grace; longer gaps show Connecting or Reconnecting, and real
-rejections and prolonged failures still use the existing error escalation.
+does not become Starting when its socket disconnects. Workbench tabs keep
+confirmed content without connection/lifecycle banners at any gap duration.
+Cold tabs use the shared availability clock for neutral placeholders; tab-specific
+read failures still have their banner and Retry. Cloud lifecycle is shown in
+workspace details, and connect/open failures retain their existing app toast.
 Only lifecycle documents or an explicit Restart can report a compute transition.
 
 On bridge-based cloud paths, an explicit navigation, interaction or queued-send
@@ -134,13 +159,29 @@ If it shared a read that retired after that cleanup, it retries once after the
 read releases its identity. This recovery must not start an agent, wake a VM,
 poll on ordinary failures, or reactivate a hidden surface.
 
-Cloud v2 workspaces keep no renderer cache of native transcript pages. A running
-workspace's worker and a stopped workspace's control-plane history mirror both
-answer with authoritative pages. The durable prompt retry journal is separate:
-its saved user bubbles project beside those pages until exact message IDs
-reconcile. It never substitutes locally cached provider output for native history.
-The v1 native cloud cache, its immutable-head provenance rules and its paint
-smoke were retired with the v1 runtime.
+Cloud v2 chats keep their last confirmed window in a separate instance of the
+shared transcript presentation cache. Its versioned IndexedDB namespace is keyed
+by backend/account presentation owner, a durable retirement lifetime, and the
+exact organization/workspace/native-chat scoped ID. Identity bootstrap begins
+the selected chat's disk read before token refresh or VM admission. Memory hits
+paint synchronously; disk hits paint as soon as they arrive. Provisional
+`transcriptPresentation` grants no send, queue-drain, edit, retry, fork or
+completion authority, and the composer remains editable. The durable prompt
+retry journal stays separate; unconfirmed/queued prompts never enter this cache.
+
+Revalidation uses existing worker/control-plane history windows, preserving
+unchanged message references and replacing edited rows by stable ID. Only a
+complete window can discard its missing prefix or confirm an empty transcript;
+partial tails retain the known prefix. Router-owned provenance prevents a
+lagging mirror from replacing a known worker tail: it must contain that tail ID
+and match overlapping rows or prove newer native update stamps. Shortened rows
+keep bounded original-content signatures; a displayed prefix alone cannot prove
+catch-up. Without a server revision cursor, a mirror-only deletion of that tail cannot prove
+catch-up; keep the worker presentation until a qualifying read. Account/backend
+replacement and sign-out rotate the durable lifetime before serializing a purge
+after pending writes; async reads/writes are generation-fenced. Confirmed chat
+and workspace deletions prune exact entries. Passive reads never wake a VM,
+hidden views start no reads, and retries use existing connection/data edges.
 
 Local presentation readiness: Local Personal and organization-local chats keep
 their last confirmed window in a bounded Local transcript cache: the exact
@@ -160,14 +201,22 @@ provisionally (`transcriptPresentation.empty`) instead of "Loading
 conversation…" while the engine starts. Any message or history hint removes
 the id synchronously, and the engine read still confirms the paint. Copies are written once
 a turn settles or a window leaves memory, never per streamed chunk; reset,
-delete and the authoritative chat snapshot prune them. Cloud chats never enter
-this cache. A confirmed empty resident window invalidates both cache tiers
+delete and the authoritative chat snapshot prune them. Cloud has its own additive
+allowance: 8 chats / 8 MiB memory and 48 chats / 20 MiB disk. The combined budgets
+are 24 chats / 24 MiB memory and 144 chats / 60 MiB disk. Both use Local's original
+character accounting: estimated characters in memory and serialized character
+length in the disk index's `bytes` field. Each disk window targets 200 rows /
+768 KiB, keeping its leading prompt; cloud additionally checks the final encoded
+character length. Cloud pending captures share its bounded memory entries.
+Local pending writes still survive memory eviction/release, and its lazy index
+load, lenient decoder, database name and record format remain unchanged.
+A confirmed empty resident window invalidates both cache tiers
 immediately, before eviction or app shutdown can bypass a delayed capture.
 An empty cold or loading slot is not confirmation and cannot erase the cache.
 
-A Local window can begin inside one long turn: the engine snaps a tail window
+A history window can begin inside one long turn: the engine snaps a tail window
 back to its opening prompt only within its 1000-row budget. Beyond that, the
-Local engine reports the opening beside the contiguous rows (`turnOpening`),
+Local engine and cloud history sources report the opening beside the contiguous rows (`turnOpening`),
 and the slot keeps it as `leadingPrompt`, outside `messages`, so paging
 cursors, caps and equality keep their meaning. Every front trim, older-page
 prepend and window replacement re-derives it, editing it cuts every resident
@@ -178,7 +227,7 @@ must revalidate it after each await; a newer inline prompt takes precedence.
 
 An empty chat's provenance block (workspace rows, or "Add chat transcripts"
 when another chat in the folder has a prompt) never waits blank on the
-transcript list. Local folders share one list per folder: every empty chat
+transcript list. Both placements share one list per folder: every empty chat
 reads the same snapshot and drops itself locally, so a new or returning tab
 paints a list another tab already confirmed, and only the visible empty chat
 reads. The last list per folder is persisted (24 folders, 32 rows, 120-character
@@ -187,8 +236,21 @@ engine once. A prompt sent from this renderer appears as a pending row at once
 and yields when the engine reports that many prompts or later activity for the
 chat; an unconfirmed row expires after two minutes. With nothing known, the
 workspace rows stand in after a 400 ms grace and the transcript row replaces
-them when the list lands. Cloud folders keep their exact (folder, excluded
-chat) read.
+them when the list lands. Cloud lists additionally belong to the exact
+account/backend lifetime and use the account presentation envelope with the
+same 24-folder, 32-row, 120-character bounds. Sign-out or account/backend
+replacement purges them; confirmed chat/workspace deletion prunes them and
+fences pending reads and disk writes. Same-folder resident or cached user
+prompts seed pills synchronously; an Untitled tab or a title alone is not
+evidence of history. Private cloud prompt commits publish the pending overlay
+before HTTPS acceptance. Known nonempty cloud pills render on the first frame,
+without a grace timer or a dependency on workspace details. Errors retain the
+confirmed list; only confirmed empty or nothing known after grace shows
+workspace rows. Cloud pending overlays have their own 24-folder / 32-row limit
+and retain at most 128 prompt identities per row; Local retention is unchanged.
+Hidden tabs start no reads/timers, including queued invalidation reads after
+the last visible consumer leaves, and passive reads never wake
+a VM.
 
 Sending immediately after Stop may race the cancelled command's durable
 retirement. Resume can retry only when the entire revision advance is accounted
@@ -288,11 +350,11 @@ owner removal. Missing paths, permission/config failures and unavailable Git
 are errors, not evidence that Git or an origin was removed. Both Review entry
 points (summary and tab strip) share the same capability predicate.
 
-Legacy plain folders are standalone sidebar rows in both Grouped and
-Ungrouped: never paint a repository header or group for them, because the
-folder row already names the repository. A folder without workspace history
-opens its settings directly; listing or selecting it never creates a workspace
-or chat. Ungrouped places these unopened folders after workspace rows, in
+Legacy plain folders are standalone sidebar rows in Repository and None, and
+join their lifecycle group in Status. Never paint a repository header for them,
+because the folder row already names the repository. A folder without workspace
+history opens its settings directly; listing or selecting it never creates a workspace
+or chat. None and Status place these unopened folders after workspace rows, in
 registration order. Their settings expose Environment, Actions,
 and Paths; Workspaces, Git, Files-to-copy, worktree lifecycle scripts, workspace
 storage paths, and the archive picker require Git. File browsing remains
@@ -326,20 +388,32 @@ and validation of a remembered workspace once its exact repository list settles.
 - The organization switcher names device Personal "Local" and sizes to its
   label, truncating long names. Destinations are Home (the Dashboard) and
   Customize; Create is an action and, like a repository's +, never paints as
-  selected. The profile row opens Settings. Rows are 30px, labels 13px, with 2px
-  between repository and workspace rows; repository names and workspace glyphs
+  selected. The profile row opens Settings. Repository and workspace rows are
+  32px (destinations remain 30px), labels 13px, with 2px between rows and
+  repository groups; repository names and workspace glyphs
   stay on fg2. Adding a repository lives on Create, the welcome view and the
   menu bar.
 - Collapsing is one persisted app preference. The sidebar stays mounted but
   hidden; the traffic lights and the toggle then float over the content's
   top-left corner at the same position, the first chat strip reserves that
   corner in its leading slot, and Home pages start below it.
-- Workspaces are Grouped by default: every registered Git repository is a
-  header (even with no workspaces), with its in-flight creates and workspaces
-  newest first. Ungrouped is one mixed newest-first list whose rows lead with
-  their repository icon and trail with agent state. These are the only two
-  presentations; a persisted Active or repository-only filter folds into
-  Ungrouped or Grouped when painted and is written back once.
+- Group offers Repository (default), Status and None. Repository retains every
+  registered Git repository header, even without workspaces. Status uses Home's
+  five lifecycle groups, excluding Archive; None is a mixed list. Mixed rows
+  lead with repository identity and trail with agent state. The released
+  `grouped`/`ungrouped` preference values remain readable; legacy Active and
+  repository-only values fold into None and Repository.
+- Filter → Repo searches repository names and remote identities, supports
+  multiple selections and All repositories, and restores selections by Local
+  owner or account/organization. Filters are bounded, validated on read and
+  pruned on repository or owner removal. They never navigate or wake a VM.
+- Sort by offers Updated (default) and Created, newest first within each group.
+  Updated combines confirmed workspace activity, chat metadata and deliberate
+  actions such as prompts, edits and terminal input. Confirmed status, PR,
+  branch and setup changes also advance its persisted clock. Opening a row,
+  warming a session or receiving an unchanged snapshot never advances it.
+  Created remains fixed. Pending creates lead their group. Archive navigation
+  follows this same filtered ordering; Back/Forward skips filtered-out rows.
 - A header's icon becomes its disclosure chevron on hover; + (Create for that
   repository) is always visible; settings and ⋯ (Create workspace, Create from…,
   Configuration, Remove repository) appear on hover or keyboard focus.
@@ -387,13 +461,34 @@ Two rules that pattern enforces:
 
 ### Create workspace source selection
 
-Create's project, source and Code/Design controls share one row above the prompt,
-with mode aligned right and long labels truncated in narrow windows. The project
+Create's project and source controls share one row above its Code prompt,
+with long labels truncated in narrow windows. Design retains its workspace
+entry points; Create has no Code/Design toggle. The project
 picker also owns Open project, Open GitHub project and Start from scratch. These
 actions register and select their project while keeping Create and its draft open.
 Workspace creation waits for submission, as does Git preparation for opened
 folders. Opening a linked worktree here selects its primary repository without
 adopting a workspace.
+Drafts survive reload by owner, project and placement; attachment bytes stay in
+device storage until workspace creation. Picking the first project adopts an
+unselected-project draft only into an empty destination. Later project switches
+restore each project's draft. While Create is inactive, its sidebar pencil
+aggregates nonempty drafts for the selected owner across projects and placements.
+The existing store restores presence synchronously and only publishes owner
+empty/nonempty transitions; typing and attachment progress do not notify sidebar
+subscribers. See [composer-attachments.md](composer-attachments.md).
+
+For cloud Create, organization identity selects the cloud picker even before
+its catalog resolves. The installed repository list is cached for the exact
+backend/account/organization (at most 16 owners and 1 MB) and restored synchronously,
+then refreshed in the background. The recently selected repository remains
+selected; an explicit Create route from a workspace can supply that repository
+as its initial context. A newer picker selection supersedes that route hint,
+including after reload. Revalidation never paints the Local project picker or
+a “Checking Cloud Computer…” row. Confirmed missing builds, empty catalogs and
+actual failures still provide recovery actions; cached rows never authorize a
+creation on their own.
+
 Welcome, sidebar and native-menu opens retain their immediate workspace flow.
 The source picker separates local branches from the configured remote's branches,
 shows the actual default branch, and retains each tab's confirmed rows independently
@@ -449,6 +544,23 @@ and reports that the file no longer exists. Never overwrite an unsaved draft.
 Changing a PR target updates target metadata only. Rebasing or merging the
 working branch is a separate explicit operation; a picker action must never
 implicitly autostash or rewrite history.
+
+Files keeps one draft across source editing, unified editable diff and Markdown
+preview. Diff view is an Edit option; Changes and Review retain their read-only
+comparisons. Pierre receives a stable edit session, a full-context Git baseline,
+and the complete current draft. Native change events update the draft without
+replacing the controlled input on every keystroke. Empty files still provide an
+editable caret, and old/deleted comparison lines never become writable source.
+
+Auto save defaults on and saves after the typing debounce or leaving the editor.
+File options also provides Save file and Discard changes; discard restores the
+last saved source draft. Save failures retain the dirty draft and wait for a new
+edit or explicit save. A pending save cannot clear newer typing, and old save
+echoes cannot undo a newer write. External disk updates keep their established
+authority after acknowledgement. Unsaved tabs show a neutral dot. One keyed Git
+status snapshot supplies status letters for file rows and tabs; tree filenames
+stay neutral, while file tab names use the status color. These decorations do
+not redefine Changes comparisons or counts.
 
 ### 3. Move work before or after the click
 
@@ -590,6 +702,19 @@ sizes must take the minimum of their preferred size and the primitive's availabl
 size. Submenus portal out of the parent menu's scroll container. Select preserves
 its layout-column boundary and dismisses on window resize.
 
+Anchored popups disappear on close through `ANCHORED_OVERLAY_MOTION`; only entry
+animates, and reduced motion disables it. Do not retain an exit animation after
+a trigger or owner can hide, unmount or change: the live positioner can measure
+that retired anchor at the viewport origin. Closed content must neither paint
+nor intercept input, including nested portals and rapid reopen attempts.
+
+Focus can enter a popup before Radix installs its document Escape listener.
+The shared `useOverlayEscape` content fallback handles that first key after
+descendant/consumer handlers, respects cancellation, and leaves child portals
+to their own handlers. Do not call an Escape guard twice for the same native
+event. Controlled closure must also release the root's native-surface overlay
+intent even when Radix did not call `onOpenChange`.
+
 External surfaces such as the file tree retain ownership of selection and
 dismissal, but supply the shared context menu with a live row anchor. Mark a
 portaled file menu with `data-file-tree-context-menu-root="true"` so the tree
@@ -599,7 +724,10 @@ tests when its workspace or active state changes.
 
 `scripts/ui-smoke-overlay-positioning.mjs`, included in `pnpm test:ui-smoke`,
 exercises pane movement, window resizing, constrained menu scrolling, submenus,
-keyboard focus, retained file-tree owners and canvas anchors in Chromium.
+keyboard focus, retained file-tree owners and canvas anchors in Chromium. Its
+dismissal suite samples DOM commits and animation frames, covers the real model
+and repository menus, and checks owner switching, rapid reopen, first-focus
+Escape, native overlay intent cleanup and reduced motion.
 
 ## Zeros implementation map
 
@@ -617,17 +745,28 @@ keyboard focus, retained file-tree owners and canvas anchors in Chromium.
 - File content/diff cache: `apps/desktop/src/renderer/shell/workspace-file-data-cache.ts`.
 - Workspace intent warming: `apps/desktop/src/renderer/shell/prefetch-workspace-surface.ts`.
 - Chat retention: `apps/desktop/src/renderer/shell/conversation/chat-deck.tsx` with store-owned pane hosts.
-- Conversation Summary: `apps/desktop/src/renderer/shell/conversation/conversation-summary.tsx` owns the chat strip's Summary popover and the island beside its top-right pane when Workbench is collapsed. Narrow panes and layouts with side-by-side chat columns keep the popover, bounded inside its owning pane with a 16px right inset; the island reserves body space without remounting chat. Both presentations share Context, run-preview and All Changes data, dismiss on owner changes, and stop active reads when hidden. Starting an Environment action leaves Summary visible; its preview opens the exact URL in the workspace's Browser.
+- Conversation Summary: `apps/desktop/src/renderer/shell/conversation/conversation-summary.tsx` owns the chat strip's Summary popover and the island beside its top-right pane when Workbench is collapsed. The toolbar icon remains available and toggles the complete island; there is no separate collapsed card. Narrow panes and layouts with side-by-side chat columns keep the popover, bounded inside its owning pane with a 16px right inset; the island reserves body space without remounting chat. Both presentations share run-preview and All Changes data and stop active reads when hidden. Summary has no Context section or context-graph reads. Popovers dismiss on owner changes. Starting an Environment action leaves Summary visible; its preview opens the exact URL in the workspace's Browser.
+- Summary Git status is available for managed Local Git workspaces under Personal or organization owners. It shares native status/count generations with Changes through `shell/git-status-reads.ts`, retains exact-owner facts during refresh, and compares the selected base independently of the branch's upstream. The optional Local `git.status` summary fields keep older engines and cloud requests compatible. PR metadata refreshes only while Summary is visible and in the foreground; CI/check verdicts remain in Review. Summary, Create PR and the workbench PR row share workspace mutation claims across remounts. Cloud and plain-folder summaries omit this section.
 - Changes file retention/prefetch: `apps/desktop/src/renderer/shell/workbench/tabs/changes-surface.tsx`.
 - Browser retention: the bounded, cross-workspace iframe deck in `apps/desktop/src/renderer/shell/workbench/workbench-pane.tsx`; retained browser updates carry their original workspace scope.
 - Terminal retention: the bounded folder/session deck in `apps/desktop/src/renderer/shell/workbench/tabs/terminal-tab.tsx`, with stable portal hosts across main-tab and bottom-panel placement (see `docs/terminal-workbench.md`).
 - Settings/repository retention: bounded visited-section decks in `apps/desktop/src/renderer/features/settings/settings-page.tsx` and `apps/desktop/src/renderer/features/repositories/repo-page.tsx`.
 - One-paint transition suppression: `apps/desktop/src/renderer/shared/ui/use-instant-view-switch.ts`.
 - Chat structural sharing: `apps/desktop/src/renderer/features/agent/stable-turns.ts`.
-- Local transcript cache: policy in `apps/desktop/src/renderer/state/local-transcript-cache.ts`, IndexedDB records in `apps/desktop/src/renderer/platform/local-transcript-store.ts`, provisional paint and fresh chats in `apps/desktop/src/renderer/features/agent/local-transcript-presentation.ts`.
+- Local/cloud transcript caches: shared policy in `apps/desktop/src/renderer/state/local-transcript-cache.ts`, separate IndexedDB namespaces in `apps/desktop/src/renderer/platform/local-transcript-store.ts`, provisional paint and Local fresh chats in `apps/desktop/src/renderer/features/agent/local-transcript-presentation.ts`.
 - Empty-chat transcript row: shared Local folder list, persisted paint and pending prompts in `apps/desktop/src/renderer/features/agent/use-chat-transcript-summaries.ts`; the grace in `agent-chat.tsx`.
 - Long-turn opening prompt: `windowChatMessagesPage` in `apps/desktop/src/engine/db/messages.ts` and `apps/desktop/src/renderer/features/agent/transcript-leading-prompt.ts`.
 - Engine start attribution: `apps/desktop/src/engine/boot-phase-timer.ts` names slow phases on the "Engine ready" line.
+- Engine readiness follows mandatory process/lifecycle recovery and history
+  migration. Archive-ref retention and historical Design ACL cleanup run after
+  readiness through `engine/startup-maintenance.ts`, one task at a time. Stop
+  aborts and joins this queue; maintenance rechecks Local workspace ownership
+  after I/O and never treats another instance's missing row as deletion proof.
+  Queued ACL cleanup cancels admission on Stop while preserving the active
+  mutation owner's lock; already admitted cleanup still joins.
+- PR review annotation reads overlap at most three independent first pages,
+  then consume them in check order under the shared count and byte limits.
+  Pagination stays on demand, and a failed check retains the other findings.
 - Local streaming transcript writes: "Streaming write coalescing" in `apps/desktop/src/engine/db/messages.ts` buffers each streamed row for 150 ms (newest version wins); every read, write or delete of that chat's rows drains it first, prompts stay write-through, and cloud workers keep write-through persistence.
 
 ## Review checklist

@@ -1,0 +1,5 @@
+{
+  "file": "packages/protocol/src/context-usage.ts",
+  "before": "const tools = serverTotals(usage.mcpTools, deferred);",
+  "after": "const tools = serverTotals(usage.mcpTools, true);"
+}

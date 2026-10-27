@@ -106,6 +106,15 @@
   the failing timeout in the parent.
 - **Main red:** the CI incident bot opens a `fix(ci): restore …` PR. A green
   rerun at the same head resolves it; still land the deterministic fix.
+- **Audit-only main red:** compare the advisory's published and updated times
+  with the last green main run before blaming a suspected PR. Repair the root
+  and control-plane graphs. Never override a pinned provider runtime across a
+  major without reading its API use. Bound each reviewed exception in
+  `scripts/__tests__/audit-exceptions.test.ts`.
+- **Dependency automation:** before waiting for a bot PR, check the Renovate
+  Dependency Dashboard's last update and the runtime radar mode. Push
+  `pnpm licenses:generate` output to bot PRs, or supersede them. Triage Electron
+  advisories as production, even though the `--prod` audit skips them.
 - **Cleanup blocking a repair release:** scope the readiness projection to the
   artifact being released. Preserve operational alerts and exact artifact
   qualification. Classify combined lifecycle/rotation signals in one consistent

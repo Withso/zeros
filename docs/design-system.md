@@ -54,13 +54,15 @@ The full guide is `docs/design-system.md`; token values are in
    color as the only signal (pair status color with an icon or text). Don't
    build class names at runtime (`text-${tone}`): the checks can't see them —
    map states to complete class strings instead.
-   Persistent workbench content load/availability failures use `WorkbenchTabFrame`'s
+   Persistent workbench content load failures use `WorkbenchTabFrame`'s
    single persistent banner and neutral icon/line empty state. Action outcomes
-   use toasts. Connection failures fall back to their existing app toast only
-   while no affected frame is visible. Report each read with
+   use toasts. Cloud lifecycle and connection messages never enter the banner;
+   cloud connect/open failures keep their existing app toast. Local engine
+   failures use the banner, falling back to a toast when no frame is visible.
+   Report each read with
    `useWorkbenchStatusSource`; one failed read gets a silent retry after 1.5
-   seconds. Local startup/reconnection has no pending banner; cloud connection
-   gaps stay quiet for 10 seconds. Both expose actionable failure at 45 seconds.
+   seconds. Local startup/reconnection has no pending banner; a Local gap
+   lasting 45 seconds exposes actionable failure.
    Retain confirmed exact-key content and never add a second error paragraph or
    Retry button.
 7. **Verify:** run `pnpm check:ui` (compiles every class, enforces the policy
@@ -240,8 +242,11 @@ All, editing, portals and vendor surfaces across owners, placements and themes.
   it and so paints above it. `z-0`…`z-2` are free inside one component.
   Overlays use the shared primitives; never fix stacking with a big number.
 - **Motion** animate only color, background, border, opacity, shadow, and
-  transform: `transition-colors duration-120 ease-out` for hovers; overlays use
-  their primitive's enter/exit animation. Respect reduced motion.
+  transform: `transition-colors duration-120 ease-out` for hovers. Anchored menus,
+  pickers, popovers, tooltips and hover cards use the shared entry motion and
+  disappear immediately on close: their anchor can hide or unmount in that same
+  commit. Dialogs and sheets retain their own viewport-based motion. Respect
+  reduced motion.
 
 ## 7. Controls, radius, spacing
 
@@ -267,21 +272,46 @@ toasts) · `rounded-full` (true circles). Derived surface recipes:
 8 · 10 · 12, plus `px`. Half steps (2/6/10/14px) belong inside controls and dense
 rows; layout gaps prefer `gap-1` `gap-2` `gap-3` `gap-4` `gap-6`.
 
+**Tooltips:** use the shared `Tooltip` only when it adds useful information:
+an unfamiliar icon, a shortcut, a disabled-action reason, or hidden/truncated
+content. Visible labels, repository row actions, Design layers and property
+add/remove buttons, routine plus/close/overflow controls, and standard browser
+navigation stay quiet. Keep accessible names and keyboard shortcuts on controls
+even when removing their hover hint. Inspector icon buttons opt in with
+`tooltip`; a `label` alone supplies their accessible name.
+
+Tooltip text uses `text-3xxs` (12px), `px-2 py-1` (8px horizontal / 4px vertical)
+and `rounded-sm` (4px). Ordinary hints wait 1000ms; retained menu/popover hints
+wait 1500ms and are suppressed while the popup is open. Each hint owns its hover
+delay so moving between neighbors never warms an instant-open group. Keyboard
+focus still exposes help, Escape dismisses it, and pointer-driven focus does
+not open it. Prefer one or two words in sentence case; preserve meaningful
+paths, values and failure explanations rather than shortening away information.
+`scripts/ui-smoke-tooltips.mjs` checks timing, geometry in both themes, focus,
+surface replacement, and Local/organization-local/cloud composer behavior.
+
 **Feedback:** outcomes of user actions (save, discard, merge, fork) use the
 single app-wide toast surface — `toast` / `toast.error` / `toast.success` from
 `shared/ui/primitives/elements`. Persistent state stays with its owner: a form
-error beside its field, or a workbench content load/availability failure in its
+error beside its field, or a workbench content load failure in its
 tab's status banner. Never toast that same load failure while its frame is
-visible. Engine rejection and cloud connect/open failures keep their original
-app-level toast when no affected workbench frame is visible; the passive frame
-visibility registry dismisses it as soon as a frame represents the condition.
+visible. Local engine rejection keeps its original app-level toast when no
+affected workbench frame is visible; the passive frame visibility registry
+dismisses it as soon as a frame represents the condition. Cloud connect/open
+failures keep their existing app-level toast regardless of frame visibility.
 Engine rejection banners preserve the reason-specific update/sign-in headline.
 
 Every workbench body, including retained Design, Setup, terminal tabs and the
 bottom Terminals panel, uses one `WorkbenchTabFrame`. Its persistent full-width
-banner follows all of the tab's own toolbar rows. Workspace availability wins
+banner follows all of the tab's own toolbar rows. Local engine availability wins
 over persistent primary data failure, then secondary reads (comments, history, ignored
 entries). It has no close button or timer and clears after successful recovery.
+Cloud lifecycle and connection conditions never appear in this banner, including
+connection failures returned through a tab's read. Filter those before choosing
+the primary/secondary failure so they cannot hide a separate file, Git or review
+error. Cloud lifecycle remains in workspace details; failed connect/open actions
+use their existing toast. Feature notices such as shallow history and unsupported
+features remain eligible for the banner.
 Confirmed content for the exact workspace/target stays visible during refresh
 and failure. Without confirmed content and with a persistent status, show the tab icon (`size-10`,
 `strokeWidth={1}`, `text-muted-fg`) and one neutral sentence of about eight words
@@ -289,11 +319,13 @@ or fewer (`text-fg2 text-xs`), centred with no buttons or repeated error text.
 Legitimate non-error empty states may retain their creation/configuration action.
 Every tab's adapter defines pending, retryable and unavailable empty copy.
 Pending copy explains that content appears when the workspace is ready; Retry
-copy is reserved for a banner offering Retry. Archived or non-retryable states
+copy is reserved for a banner offering Retry. Cold cloud availability keeps
+the neutral fallback without a banner or an orphan Retry instruction.
+Archived or non-retryable states
 say the content is unavailable. A single-file viewer says “this file”. Terminal
 reconnections after a confirmed connection say “Terminal reconnects automatically.”
 
-**Transient** means a connection gap that recovers before 10 seconds, a read
+**Transient** means a brief connection gap, a read
 that fails once and succeeds on one silent automatic retry after about 1.5
 seconds, or a revalidation failure with confirmed content that recovers on the
 next automatic attempt. These conditions have no banner and no error empty
@@ -301,17 +333,16 @@ state. Keep confirmed exact-key content mounted and visible, including Design's
 canvas or confirmed start surface. No extra indicator is needed: continuity
 keeps normal recovery quiet and avoids layout movement or status flashes.
 
-**Persistent** means a read that still fails after that one silent retry,
-terminal connection rejection, setup failure, or an explicit workspace state
-(setting up, starting/waking, stopping, stopped/sleeping, archived). These show
-the shared banner immediately when confirmed. A cloud transport gap becomes pending
-at 10 seconds (“Reconnecting to the workspace…”), then actionable at 45 seconds
-(“Can't reach the workspace.” with Retry). Local engine startup and reconnection
+**Persistent** tab failures still fail after that one silent retry and show
+the shared banner when confirmed. Local engine startup and reconnection
 never show a pending connection banner;
 keep confirmed content in place while the on-device engine becomes ready.
 A Local gap lasting 45 seconds still exposes “Can't reach the Zeros engine.”
-with Retry, and terminal rejections remain immediate. Cloud cold first
-connection is normal startup for the first 10 seconds, then says “Connecting…”.
+with Retry, and terminal rejections remain immediate. Cloud setting up,
+starting/waking, stopping, sleeping, archived, failed, and connection states
+remain absent from the banner at every duration. The shared cloud availability
+clock still selects quiet cold-content placeholders after 10 seconds and
+unavailable placeholders after 45 seconds; confirmed content stays visible.
 
 Availability has one decision and clock per Local engine or cloud VM; all its
 tabs observe the same thresholds. Silent read retries belong to the exact
@@ -327,8 +358,8 @@ run no status/retry timers; activation uses the original timestamp. Passive
 reads and connection admission never wake a cloud computer.
 
 Failures use `bg-red-bg text-red-fg` and a leading error icon. Self-resolving
-availability (setup, starting, reconnecting) uses `bg-yellow-bg text-yellow-fg`
-and a calm spinner with reduced-motion support. Archived workspaces use a neutral
+Local availability uses `bg-yellow-bg text-yellow-fg`
+and a calm spinner with reduced-motion support. Informational notices use a neutral
 info tone. Visible copy is short, human and sentence case; enum values, stack
 traces, `Error:` prefixes and transport details belong only in sanitised title
 diagnostics. Copy describes the workspace condition or “Couldn't load files” /
@@ -341,9 +372,8 @@ until settled, bounded to 30 seconds even if a source never settles. Keep the
 banner element/live region stable through retry and tone changes; announce
 message changes once without moving focus. Hidden retained tabs
 are inert and do not announce, animate, poll or run status timers.
-For cloud transport, before a successful connection use “Connecting…”; reserve
-“Reconnecting” for a lost confirmed connection. Stopping and stopped have
-distinct pending copy.
+Cloud connection/lifecycle copy must not leak into the banner's live region or
+title, including after retry or an owner/placement switch.
 
 ## 8. Building blocks
 
@@ -360,7 +390,7 @@ state, `aria-*`, `data-*` hooks) at the caller.
 | Window chrome or a panel heading | `PanelHeader` | Required `size="window"` (40px, gap-1, px-2, `bg-bg1`) or `size="panel"` (36px, gap-2, px-3); border1 bottom divider; optional `div` / `section` / `header`. |
 | A compact tool disclosure or hover trigger | `ListRow` | Width-fit button row; the caller owns `aria-expanded`, `aria-controls`, labels, state, and events. |
 | Every workbench tab body | `WorkbenchTabFrame` + `WorkbenchTabToolbar` (`shell/workbench/tab-status.tsx`) | Structural single status slot under portalled toolbar rows; preserves confirmed content. Supplies `WorkbenchEmptyState` only for a persistent condition without confirmed content; raw child fallbacks follow that same decision. The exhaustive `WorkbenchTabType` adapter requires copy/icon for future tabs. |
-| A tab's persistent read status | `useWorkbenchStatusSource` + `describeWorkbenchFailure` | Exact-owner primary/secondary errors get one silent automatic retry before feeding `WorkbenchTabBanner`; shared availability has priority. Action outcomes remain toasts. |
+| A tab's persistent read status | `useWorkbenchStatusSource` + `describeWorkbenchFailure` | Exact-owner primary/secondary errors get one silent automatic retry before feeding `WorkbenchTabBanner`; Local availability has priority and cloud connection/lifecycle errors are excluded. Action outcomes remain toasts. |
 
 - `Inline` / `Stack` accept only the gap steps `0`, `0.5`, `1`, `1.5`, `2`,
   `2.5`, `3`, `4`, `6`, `8`. Their `className` is for outer layout (sizing,

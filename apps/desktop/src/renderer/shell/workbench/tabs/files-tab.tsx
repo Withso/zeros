@@ -26,14 +26,18 @@
 // destroy its draft.
 // ──────────────────────────────────────────────────────────
 
-import React, { useCallback, useRef, useState } from "react";
+import React, { useCallback, useMemo, useRef, useState } from "react";
 import { File, FolderOpen, FolderTree, Search } from "lucide-react";
 
 import { useActiveWorkspace } from "@/renderer/state/use-active-workspace";
 import { useGithubReview } from "@/renderer/features/code-review/use-github-review";
+import { useWorkspaceReviewStatus } from "@/renderer/features/code-review/use-workspace-review-status";
+import { statusForGeneration } from "../../git-status-reads";
+import { fileStatusesForFolder } from "./file-status";
 import { parseRemote } from "../../pr/github-url";
 import { resolveReviewProvider } from "../../pr/review-provider";
 import { isLocalMainWorkspace } from "@/renderer/state/local-main-workspace";
+import { relativeWorkspaceFilePath } from "@/renderer/platform/workspace-file-path";
 import { useWorkspaceDispatch } from "@/renderer/state/store";
 import { Button, Tooltip } from "@/renderer/shared/ui/primitives";
 import { cn } from "@/renderer/shared/ui/cn";
@@ -75,7 +79,7 @@ interface TabBodyProps {
 // FileViewer's read effect is deps-guarded so it won't re-read, but this also
 // skips the wasted render work. (React.memo does NOT block context updates, so
 // the workspace/cwd hooks below still see live changes.)
-export const FilesTab = React.memo(function FilesTab({
+const WorkspaceFilesTab = React.memo(function WorkspaceFilesTab({
   tab,
   active,
   scope,
@@ -89,7 +93,9 @@ export const FilesTab = React.memo(function FilesTab({
   // removed) — so it gets a git workspaceId like any worktree and is never
   // read-only: Discard works on main too.
   const isTrunk = !!workspace && isLocalMainWorkspace(workspace);
-  const workspaceId = workspace
+  // Plain-folder compatibility rows still have an identity, but no Git
+  // comparison. A saved Diff view preference must leave their source editable.
+  const workspaceId = workspace && !(isTrunk && project?.isGitRepository === false)
     ? isTrunk
       ? (workspace.repoRoot ?? null)
       : workspace.id
@@ -104,6 +110,9 @@ export const FilesTab = React.memo(function FilesTab({
   // saves invalidate the cached listing, then bump — so the sidebar picks up
   // created/deleted files without a manual refresh.
   const gitRefresh = useGitRefreshKey(cwd, workspaceId, active);
+  const gitStatus = useWorkspaceReviewStatus({ cwd, workspaceId, active, refreshKey: gitRefresh, read: statusForGeneration });
+  const gitRoot = isTrunk ? workspace?.repoRoot : workspace?.path;
+  const fileStatuses = useMemo(() => fileStatusesForFolder(gitStatus.data, cwd, gitRoot), [gitStatus.data, cwd, gitRoot]);
   const githubReview = useGithubReview({
     workspaceId: resolveReviewProvider(parseRemote(project?.originUrl)?.host ?? "github.com") ? workspaceId : undefined,
     prNumber: workspace?.prNumber, cwd, active: active && !!tab.filePath,
@@ -223,8 +232,8 @@ export const FilesTab = React.memo(function FilesTab({
     <Tooltip
       label={
         sidebarMode === "tree" && layout.hasFile
-          ? "Hide file tree"
-          : "Show file tree"
+          ? "Hide files"
+          : "Show files"
       }
     >
       <Button
@@ -329,6 +338,7 @@ export const FilesTab = React.memo(function FilesTab({
               active={active}
               cwd={cwd}
               reloadKey={gitRefresh}
+              fileStatuses={fileStatuses}
               // Always on: inert (the SAME listing reference) on a workspace
               // with no design document, so the split never has to be switched
               // on after the tree mounted and the filter was captured.
@@ -368,6 +378,7 @@ export const FilesTab = React.memo(function FilesTab({
               active={active}
               cwd={cwd}
               reloadKey={gitRefresh}
+              fileStatuses={fileStatuses}
               initialSelectedPath={tab.filePath}
               selectedPath={treeSelectionMirrorTarget(active, tab.filePath)}
               scrollMemoryKey={JSON.stringify([
@@ -385,6 +396,7 @@ export const FilesTab = React.memo(function FilesTab({
           active={active}
           cwd={cwd}
           reloadKey={gitRefresh}
+          fileStatuses={fileStatuses}
           onOpenFile={handleOpenFile}
           onOpenInNewTab={handleOpenInNewTab}
           onClose={closeSearchSidebar}
@@ -417,12 +429,18 @@ export const FilesTab = React.memo(function FilesTab({
             active={active}
             cwd={cwd}
             path={filePath}
+            gitPath={cwd && workspace ? relativeWorkspaceFilePath(
+              isTrunk ? workspace.repoRoot : workspace.path,
+              `${cwd.replace(/\/+$/, "")}/${filePath}`,
+            ) ?? filePath : filePath}
+            fileEditor
             workspaceId={workspaceId}
             reviewExternal={githubReview.source}
             diff={tab.diff ?? false}
             diffScope={tab.diffScope}
             diffSha={tab.diffSha}
             diffHistory={tab.diffHistory}
+            diffBaseBranch={workspace?.baseBranch}
             turnChatId={tab.turnChatId}
             turnId={tab.turnId}
             discardable={tab.discardable ?? false}
@@ -483,4 +501,18 @@ export const FilesTab = React.memo(function FilesTab({
       )}
     </div>
   );
+});
+
+function SkillFileTab({ tab, active, scope }: TabBodyProps) {
+  const cwd = useChatCwd();
+  const dispatch = useWorkspaceDispatch();
+  return <FileViewer tabId={tab.id} active={active} cwd={cwd}
+    path={tab.skillSource!.path} workspaceId={null} refreshKey={0} readOnly
+    skillSource={tab.skillSource} viewerMode={tab.viewerMode} headerBorder
+    onOpenPath={() => {}}
+    onViewerModeChange={viewerMode => dispatch({ type: "UPDATE_WORKBENCH_TAB", id: tab.id, scope, updates: { viewerMode } })} />;
+}
+
+export const FilesTab = React.memo(function FilesTab(props: TabBodyProps) {
+  return props.tab.skillSource ? <SkillFileTab {...props} /> : <WorkspaceFilesTab {...props} />;
 });

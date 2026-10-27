@@ -164,6 +164,7 @@ function MotionPropertyAction({
       label={
         active ? `Add ${label} keyframe at the playhead` : `Animate ${label}`
       }
+      tooltip={active ? "Add keyframe" : "Animate"}
       className={active ? "zd-design-motion-property-active" : undefined}
       disabled={disabled}
       onClick={() => onRequest(property, value)}
@@ -391,6 +392,7 @@ export function DesignStyleEditor({
           {!textLayer ? (
             <InspectorIconButton
               label="Independent corners"
+              tooltip="Independent corners"
               size="row"
               pressed={independentCorners}
               disabled={disabled}
@@ -672,6 +674,7 @@ export function DesignStyleEditor({
         actions={
           <InspectorIconButton
             label="Open motion timeline"
+            tooltip="Motion"
             shortcut="⇧A"
             pressed={motionTimelineOpen}
             disabled={disabled}

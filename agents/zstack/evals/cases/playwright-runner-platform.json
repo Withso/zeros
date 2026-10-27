@@ -1,0 +1,9 @@
+{
+  "id": "playwright-runner-platform",
+  "kind": "replay",
+  "area": "ci",
+  "fixedBy": "pr:722",
+  "symptom": "The ubuntu-latest runner advanced to Ubuntu 26.04, which the pinned Playwright cannot install on, failing every Linux browser-backed test shard before tests start.",
+  "rule": "Pin browser runners to a platform supported by the installed Playwright and keep CI and Preflight aligned. See agents/zstack/changes/playwright-runner-platform.md.",
+  "check": "pnpm exec vitest run --config vitest.config.ts scripts/__tests__/ci-workflow-parity.test.ts -t 'Playwright-supported'"
+}

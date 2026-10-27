@@ -56,7 +56,7 @@ describe("runtime automation workflow boundaries", () => {
       contents: "read",
       actions: "read",
       issues: "write",
-      "pull-requests": "read",
+      "pull-requests": "write",
     });
     expect(
       publisher.jobs.publish.steps.find((step: any) =>
@@ -66,6 +66,26 @@ describe("runtime automation workflow boundaries", () => {
     expect(JSON.stringify(publisher.jobs.publish.steps)).not.toMatch(
       /pnpm install|npm install|secrets\./,
     );
+  });
+
+  it("lets every PR report publisher comment on App PRs and serializes App writes", () => {
+    // Every job that runs publish() refreshes the PR reports. Commenting on a
+    // pull request with GITHUB_TOKEN failed with issues: write alone.
+    const report = workflow("agent-runtime-report");
+    const models = workflow("agent-runtime-models");
+    for (const permissions of [
+      scanner.jobs.scan.permissions,
+      scanner.jobs.finalize.permissions,
+      report.permissions,
+      models.jobs.publish.permissions,
+    ])
+      expect(permissions).toMatchObject({
+        issues: "write",
+        "pull-requests": "write",
+      });
+    expect(scanner.jobs.prepare.permissions).toEqual({ contents: "read" });
+    // One App installation shares GitHub's content-creation limit.
+    expect(scanner.jobs.write.strategy["max-parallel"]).toBe(1);
   });
 
   it("serializes all state publishers with the controller without cancelling in-flight work", () => {

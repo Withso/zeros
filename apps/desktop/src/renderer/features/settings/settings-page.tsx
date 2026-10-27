@@ -1,3 +1,4 @@
+import { isSettingsSectionAvailable } from "./settings-section-availability";
 import { CloudComputerPanel, prefetchCloudComputer } from "./cloud-computer-panel";
 import { CloudGithubSection } from "./cloud-github-section";
 // ──────────────────────────────────────────────────────────
@@ -85,7 +86,6 @@ import {
 } from "../../state/read-caches";
 import { Button } from "../../shared/ui";
 import { isLocalDevelopment } from "../../platform/runtime";
-import { Tooltip } from "@/renderer/shared/ui/primitives";
 import { toast } from "@/renderer/shared/ui/primitives/elements";
 import { cn } from "@/renderer/shared/ui/cn";
 import { Switch } from "../../shared/ui/primitives/switch";
@@ -415,9 +415,10 @@ function parseSelection(active: string): Selection {
       // Legacy persisted ids still parse as a repo selection so the redirect
       // effect lands them on the repo page: the former Scripts / run-actions
       // views folded into Environment; MCP left the repo sections entirely
-      // (2026-07-17) and also lands on the default Environment view.
+      // (2026-07-17). Retired Design settings also land on Environment.
       const maybeSection =
-        raw === "scripts" || raw === "run-actions" || raw === "mcp"
+        raw === "scripts" || raw === "run-actions" || raw === "mcp" ||
+        raw === "design" || raw === "design-preferences"
           ? "environment"
           : raw;
       if (isRepoPage(maybeSection)) {
@@ -645,18 +646,10 @@ function ScopedSettingsPage({ owner }: { owner: string }) {
   const simulatorsActive = useAgentControlFeatureActive("simulators");
   const availableSections = useMemo(
     () =>
-      SECTIONS.filter(
-        (s) =>
-          // Chrome setup is reachable for every owner. BrowserUsePanel,
-          // ComputerUsePanel and SimulatorsPanel select device controls or
-          // cloud guidance from the workspace placement.
-          (local ? s.id !== "cloud-computer" : ["providers", "integrations", "cloud-computer", "browser-use", "computer-use", "simulators"].includes(s.id)) &&
-          (cloudEnabled || s.id !== "cloud-computer") &&
-          (s.id !== "terminal-agents" || terminalAgentsEnabled) &&
-          (s.id !== "computer-use" || computerUseActive) &&
-          (s.id !== "simulators" || simulatorsActive) &&
-          (s.id !== "internal" || internalUser),
-      ),
+      SECTIONS.filter((section) => isSettingsSectionAvailable(section.id, {
+        local, cloudEnabled, terminalAgentsEnabled, computerUseActive,
+        simulatorsActive, internalUser,
+      })),
     [terminalAgentsEnabled, internalUser, local, cloudEnabled, computerUseActive, simulatorsActive],
   );
   const activeSection: SectionDef | null =
@@ -742,16 +735,14 @@ function ScopedSettingsPage({ owner }: { owner: string }) {
             aria-label="Settings sections"
           >
             <OrganizationSwitcher />
-            <Tooltip label="Back to home">
-              <Button
-                variant="ghost"
-                className={cn(SIDEBAR_ENTRY_CLS, "mb-2")}
-                onClick={handleBack}
-              >
-                <ArrowLeft size={14} strokeWidth={1.5} />
-                <span>Back</span>
-              </Button>
-            </Tooltip>
+            <Button
+              variant="ghost"
+              className={cn(SIDEBAR_ENTRY_CLS, "mb-2")}
+              onClick={handleBack}
+            >
+              <ArrowLeft size={14} strokeWidth={1.5} />
+              <span>Back</span>
+            </Button>
             {SECTION_GROUPS.map((group, groupIndex) => {
               const sections = group.ids.flatMap((id) => {
                 const section = availableSections.find((s) => s.id === id);

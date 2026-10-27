@@ -74,6 +74,8 @@ import { useNewTabHotkeys } from "./shell/use-new-chat-hotkey";
 import { useOpenBrowserHotkey } from "./shell/use-open-browser-hotkey";
 import { useShortcutsHotkey } from "./shell/use-shortcuts-hotkey";
 import { ShortcutsPalette } from "./shell/shortcuts-palette";
+import { CommandPaletteController } from "./shell/command-palette-controller";
+import { useCommandPaletteHotkey } from "./shell/use-command-palette-hotkey";
 import { FeedbackDialog } from "./shell/dialogs/feedback-dialog";
 import { onFeedbackDialogRequest } from "./shell/feedback-controller";
 import {
@@ -129,7 +131,7 @@ import {
   requestTeamResync,
   useTeamEngineSync,
 } from "./features/team/team-sync";
-import { clearTeamStore, refreshTeams } from "./features/team/team-store";
+import { refreshTeams } from "./features/team/team-store";
 import { useAuth } from "./features/auth";
 import { nativeListen } from "./platform/runtime";
 import { rememberProject } from "./platform/recent-projects";
@@ -178,6 +180,8 @@ import {
 
 import { popoverBoundaryProps } from "@/renderer/shared/ui/popover-boundary";
 import { persistWorkspaceChatCache } from "./state/cloud-chat-cache";
+import { accountPresentationGeneration } from "./platform/account-presentation-cache";
+import { installAccountPresentationIdentity } from "./state/account-presentation";
 import { localTranscriptCache } from "./state/local-transcript-cache";
 import { retainTranscriptSummaries } from "./features/agent/use-chat-transcript-summaries";
 import { retainKnownEmptyLocalChats } from "./features/agent/fresh-local-chats";
@@ -484,6 +488,7 @@ function ChatTitleBackfill() {
 }
 
 function ChatsPersistence() {
+  const cacheGeneration = accountPresentationGeneration();
   const chats = useChats();
   const activeChatId = useActiveChatId();
   const dispatch = useWorkspaceDispatch();
@@ -562,6 +567,7 @@ function ChatsPersistence() {
       onLocalReadinessChange: () => { confirmedLocalChatsRef.current = false; },
       onError: error => console.warn("[Zeros] Chat reconciliation failed:", error),
       onSnapshot: snapshot => {
+        if (cacheGeneration !== accountPresentationGeneration()) return;
         const recovered = snapshot.chats.map(rowToThread);
         const before = useWorkspaceStore.getState();
         const reconciled = reconcileChatSnapshot(
@@ -576,8 +582,8 @@ function ChatsPersistence() {
         // clear the recovery copy and record the empty tombstone immediately;
         // otherwise a quit inside the generic 5s transient-empty debounce could
         // resurrect an engine-deleted chat on the next first paint.
-        persistWorkspaceChatCache(CHATS_STORAGE_KEY, reconciled.chats);
-        persistWorkspaceChatCache(CHATS_BACKUP_KEY, reconciled.chats);
+        persistWorkspaceChatCache(CHATS_STORAGE_KEY, reconciled.chats, cacheGeneration, before.activeChatId);
+        persistWorkspaceChatCache(CHATS_BACKUP_KEY, reconciled.chats, cacheGeneration, before.activeChatId);
         setSetting(CHATS_TOMBSTONE_KEY, reconciled.chats.length === 0);
 
         // Publish the authoritative baseline before dispatching. The chats
@@ -629,7 +635,7 @@ function ChatsPersistence() {
         }
       },
     });
-  }, [bridge, dispatch, pushRowsToEngine]);
+  }, [bridge, dispatch, pushRowsToEngine, cacheGeneration]);
 
   // The renderer one-shot import of legacy transcripts was removed:
   // the engine now migrates the legacy zeros-agent-history.db itself, on startup,
@@ -659,7 +665,8 @@ function ChatsPersistence() {
   const prevChatIdsRef = useRef<Set<string> | null>(null);
   const tombstoneTimerRef = useRef<number | null>(null);
   useEffect(() => {
-    persistWorkspaceChatCache(CHATS_STORAGE_KEY, chats);
+    if (cacheGeneration !== accountPresentationGeneration()) return;
+    persistWorkspaceChatCache(CHATS_STORAGE_KEY, chats, cacheGeneration, activeChatId);
     // Propagate DELETIONS to the engine. The bulk write below is a non-destructive
     // MERGE (so one device can't wipe another's chats), so a removed chat must be
     // deleted explicitly or it lingers in the engine and reappears on reload.
@@ -692,7 +699,7 @@ function ChatsPersistence() {
       pushRowsToEngine(rowsToPush);
     }
     if (chats.length > 0) {
-      persistWorkspaceChatCache(CHATS_BACKUP_KEY, chats);
+      persistWorkspaceChatCache(CHATS_BACKUP_KEY, chats, cacheGeneration, activeChatId);
       setSetting(CHATS_TOMBSTONE_KEY, false);
       if (tombstoneTimerRef.current !== null) {
         window.clearTimeout(tombstoneTimerRef.current);
@@ -720,7 +727,7 @@ function ChatsPersistence() {
         tombstoneTimerRef.current = null;
       }, 5000);
     }
-  }, [chats, pushRowsToEngine]);
+  }, [chats, pushRowsToEngine, cacheGeneration, activeChatId]);
 
   useEffect(() => {
     // Mirror the active chat's picker state into the sticky-defaults
@@ -958,7 +965,7 @@ function ShellRouter() {
 
   // ⌥⌘F anywhere opens the feedback dialog. One dialog instance lives HERE;
   // the shortcuts palette and any other surface summon it through the
-  // feedback-controller pub/sub. Like ⌘/ it also fires inside
+  // feedback-controller pub/sub. Like ⌥⌘/ it also fires inside
   // editable surfaces — the chord types nothing, and feedback is most often
   // written right after something went wrong in a composer. Match on
   // `e.code` (Option remaps `e.key` glyphs on macOS — see ⌥⌘T above).
@@ -979,20 +986,25 @@ function ShellRouter() {
     return () => window.removeEventListener("keydown", handler);
   }, []);
 
-  // ⌘/ anywhere toggles the glass shortcuts palette. Unlike the chords above
-  // it fires inside editable surfaces too (⌘/ types nothing, and the palette
+  // ⌥⌘/ anywhere toggles the glass shortcuts palette. Unlike the chords above
+  // it fires inside editable surfaces too (⌥⌘/ types nothing, and the palette
   // must open from — and close over — a focused composer). See
   // apps/desktop/src/renderer/shell/use-shortcuts-hotkey.ts.
-  const [shortcutsOpen, setShortcutsOpen] = React.useState(false);
+  const [palette, setPalette] = React.useState<"commands" | "shortcuts" | null>(null);
   const toggleShortcuts = React.useCallback(
-    () => setShortcutsOpen((prev) => !prev),
+    () => setPalette((prev) => prev === "shortcuts" ? null : "shortcuts"),
     [],
   );
   useShortcutsHotkey(toggleShortcuts);
+  const toggleCommands = React.useCallback(
+    () => setPalette((prev) => prev === "commands" ? null : "commands"),
+    [],
+  );
+  useCommandPaletteHotkey(toggleCommands);
 
   // ⇧⌘L copies recent app logs — an INTERNAL feature; the listener only
   // attaches for allowlisted accounts with the flag on (Settings →
-  // Internal). Deliberately absent from the ⌘/ catalog. See
+  // Internal). Deliberately absent from the ⌥⌘/ catalog. See
   // apps/desktop/src/renderer/shell/use-copy-logs-hotkey.ts.
   useCopyLogsHotkey();
 
@@ -1020,9 +1032,15 @@ function ShellRouter() {
           toggleWorkbench={toggleWorkbench}
           revealWorkbench={revealWorkbench}
         />
+        {palette === "commands" && <CommandPaletteController
+          onDismiss={() => setPalette(current => current === "commands" ? null : current)}
+          onShowShortcuts={() => setPalette("shortcuts")}
+          revealWorkbench={revealWorkbench}
+          toggleWorkbench={toggleWorkbench}
+        />}
       </AddProjectProvider>
-      {/* ⌘/ glass shortcuts palette — floats (portalled) above everything. */}
-      <ShortcutsPalette open={shortcutsOpen} onOpenChange={setShortcutsOpen} />
+      {/* ⌥⌘/ glass shortcuts palette — floats (portalled) above everything. */}
+      <ShortcutsPalette open={palette === "shortcuts"} onOpenChange={open => setPalette(current => open ? "shortcuts" : current === "shortcuts" ? null : current)} />
       {/* ⌥⌘F feedback dialog — the app's single instance (see above). */}
       <FeedbackDialog open={feedbackOpen} onOpenChange={setFeedbackOpen} />
     </div>
@@ -1314,7 +1332,7 @@ export function AppShellBody() {
     // Repository panel's SidebarProvider previously supplied this app-wide provider as
     // a hidden side effect. Keep it at the actual app root now that the
     // sidebar is gone; every shell surface (including Settings) uses Tooltip.
-    <TooltipProvider delayDuration={500} skipDelayDuration={0}>
+    <TooltipProvider>
       <BridgeProvider>
         <AgentSessionsProvider>
           {/* persisted activePage in `zeros:ui-state:v1` restores
@@ -1352,22 +1370,17 @@ function InviteDeepLinkHandler() {
     dispatch({ type: "SET_ACTIVE_PAGE", page: "settings" });
   }, [dispatch]);
   useInviteDeepLink(openTeamForInvite);
-  const prevStatus = React.useRef(status);
   const prevUserId = React.useRef(userId);
   React.useEffect(() => {
-    const signedOut =
-      prevStatus.current === "authenticated" && status === "unauthenticated";
+    const signedOut = prevUserId.current !== null && userId === null && status === "unauthenticated";
     const accountChanged =
       prevUserId.current !== null &&
       userId !== null &&
       prevUserId.current !== userId;
     if (signedOut || accountChanged) {
       clearPendingInviteToken();
-      // Account A's team list must not render for account B (or flash the
-      // Administration tabs for a zero-team next account).
-      clearTeamStore({ resetSelection: true });
+      // Account presentation retires before AuthProvider publishes identity.
     }
-    prevStatus.current = status;
     prevUserId.current = userId;
   }, [status, userId]);
   return null;
@@ -1399,7 +1412,7 @@ function AuthSecurityEventHandler() {
 export function AppShell() {
   return (
     <AppearanceProvider>
-      <AuthProvider>
+      <AuthProvider onStoredIdentity={installAccountPresentationIdentity}>
         {/* 01u (2026-05-20) — SINGLE app-wide toast surface. Anchored
             bottom-right. Mounts once; every transient feedback call
             (toast / toast.error / toast.success / toast.warning /

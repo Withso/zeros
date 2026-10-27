@@ -65,6 +65,9 @@ export interface ComposerAttachment {
   sourceFile?: Blob;
   /** Durable recovery key for an unfinished native/clipboard import. */
   sourceRecoveryId?: string;
+  /** Pre-workspace drafts own an app-storage copy, independent of the original
+   * native file and the runtime that is eventually chosen. */
+  sourcePortable?: boolean;
   /** Source workspace identity; clipboard references never change owners. */
   owner?: { runtime: string; cwd: string };
   /** Confirmed full path for plain-text clipboard fallbacks. */
@@ -107,24 +110,20 @@ interface ChipsProps {
  *  hover. Pulled out as a helper so the geometry stays in one place. */
 function ChipDismissButton({
   onClick,
-  title,
   ariaLabel,
 }: {
   onClick: () => void;
-  title: string;
   ariaLabel: string;
 }) {
   return (
-    <Tooltip label={title}>
-      <button
-        type="button"
-        className="text-fg2 hover:bg-bg2-hover hover:text-fg1 ml-0.5 inline-flex h-4 w-4 cursor-pointer items-center justify-center rounded-sm border-0 bg-transparent p-0"
-        onClick={onClick}
-        aria-label={ariaLabel}
-      >
-        <XIcon size={10} />
-      </button>
-    </Tooltip>
+    <button
+      type="button"
+      className="text-fg2 hover:bg-bg2-hover hover:text-fg1 ml-0.5 inline-flex h-4 w-4 cursor-pointer items-center justify-center rounded-sm border-0 bg-transparent p-0"
+      onClick={onClick}
+      aria-label={ariaLabel}
+    >
+      <XIcon size={10} />
+    </button>
   );
 }
 
@@ -197,7 +196,6 @@ export const ComposerAttachmentChips = memo(function ComposerAttachmentChips({
               </button>
               <ChipDismissButton
                 onClick={() => onRemoveAttachment(a.id)}
-                title="Remove attachment"
                 ariaLabel="Remove attachment"
               />
             </div>

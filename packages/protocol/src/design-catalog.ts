@@ -169,3 +169,39 @@ export type DesignCatalogFrame = z.infer<typeof designCatalogFrameSchema>;
 export type DesignCatalogBatch = z.infer<typeof designCatalogBatchSchema>;
 export type DesignCatalogFailure = z.infer<typeof designCatalogFailureSchema>;
 export type DesignCatalogReply = z.infer<typeof designCatalogReplySchema>;
+/** Local navigation and bounded authoritative preparation; opt in only after
+ * capability negotiation. Catalog revisions never stand in for source hashes. */
+export const DESIGN_LAZY_PREPARATION_CAPABILITY = "design.preparation.v1";
+export const designNavigationReadSchema = z.object({ workspaceId: z.string().min(1).max(4096) }).strict();
+export const designFramesPrepareSchema = z.object({
+  workspaceId: z.string().min(1).max(4096),
+  directoryId: z.string().regex(/^design_[A-Za-z0-9_-]{1,64}$/),
+  catalogRevision: z.string().regex(/^[a-f0-9]{64}$/),
+  files: z.array(designFrameFileSchema).min(1).max(16).refine((files) => new Set(files).size === files.length),
+  /** Only requested after design.source-surfaces.v1 capability negotiation. */
+  surfaceCosts: z.literal(true).optional(),
+}).strict();
+
+export const designPreparedFrameSchema = designCatalogFrameSchema.pick({
+  title: true, x: true, y: true, width: true, height: true, z: true,
+}).extend({
+  file: designFrameFileSchema,
+  frameId: designPageIdSchema,
+  pageId: designPageIdSchema,
+  kind: z.enum(["frame", "text"]),
+  nodeCount: z.number().int().nonnegative(),
+  layerCount: z.number().int().nonnegative().optional(),
+  modifiedAt: z.number().finite().nonnegative(),
+  sourceVersion: z.string().regex(/^[a-f0-9]{24}$/),
+  surfaceCost: z.object({
+    sourceBytes: z.number().int().positive().max(1024 * 1024),
+    nodes: z.number().int().positive(),
+    imageBytes: z.number().int().nonnegative(),
+  }).strict().nullable().optional(),
+}).strict();
+export const designFramesPrepareReplySchema = z.object({
+  directoryId,
+  catalogRevision: revision,
+  frames: z.array(designPreparedFrameSchema).max(16),
+  errors: z.array(z.object({ file: designFrameFileSchema, message: z.string().max(16_384) }).strict()).max(16),
+}).strict();

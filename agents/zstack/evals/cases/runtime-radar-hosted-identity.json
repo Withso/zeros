@@ -1,0 +1,9 @@
+{
+  "id": "runtime-radar-hosted-identity",
+  "kind": "replay",
+  "area": "ci-dependencies",
+  "fixedBy": "pr:716",
+  "symptom": "The first enabled runtime radar run opened App PRs, then finalize and the PR report workflow failed: GitHub records App API commits with a web-flow committer, and GITHUB_TOKEN could not comment on the PRs with pull-requests: read.",
+  "rule": "changes/runtime-radar-hosted-identity.md: identify App commits by author, GitHub signature and web-flow committer; give PR report publishers pull-requests: write; serialize App writers.",
+  "check": "pnpm test:git scripts/__tests__/agent-runtime-controller.test.ts scripts/__tests__/agent-runtime-writer.test.ts scripts/__tests__/agent-runtime-workflows.test.ts"
+}

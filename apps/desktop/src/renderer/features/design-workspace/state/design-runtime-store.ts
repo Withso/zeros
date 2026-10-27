@@ -89,6 +89,7 @@ interface DesignRuntimeStore {
     nodeId: string | null,
   ): void;
   forgetWorkspace(workspaceId: string): void;
+  retireFrame(workspaceId: string, frame: string): void;
 }
 
 function nodeKey(nodeId: string | null): string {
@@ -534,6 +535,24 @@ export const useDesignRuntimeStore = create<DesignRuntimeStore>((set) => ({
           },
         },
       };
+    });
+  },
+
+  retireFrame(workspaceId, file) {
+    set((state) => {
+      const workspace = state.byWorkspace[workspaceId];
+      const frame = workspace?.frames[file];
+      if (!workspace || !frame) return state;
+      const cover = frame.screenshotsByNode[""];
+      const retired: DesignRuntimeFrameState = {
+        ...emptyFrame(frame.updatedAt), sourceVersion: frame.sourceVersion,
+        screenshotsByNode: cover ? { "": cover } : {}, screenshotOrder: cover ? [""] : [],
+      };
+      return { byWorkspace: { ...state.byWorkspace, [workspaceId]: { ...workspace,
+        hoveredFrame: workspace.hoveredFrame === file ? null : workspace.hoveredFrame,
+        hoveredNodeId: workspace.hoveredFrame === file ? null : workspace.hoveredNodeId,
+        frames: { ...workspace.frames, [file]: retired },
+      } } };
     });
   },
 

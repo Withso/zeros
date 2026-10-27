@@ -217,14 +217,18 @@ export function buildDiagnosticsReport(input: DiagnosticsReportInput): string {
   lines.push("");
 
   const totals = snapshot.totals.all;
+  const sampledProcesses = snapshot.processes.filter((process) => process.cpuSampled !== false);
+  const totalCpu = !snapshot.cpuReady ? "unknown"
+    : sampledProcesses.length === snapshot.processes.length ? formatPercent(totals.cpuPercent)
+    : `incomplete (observed ${formatPercent(sampledProcesses.reduce((sum, process) => sum + process.cpuPercent, 0))}; ${sampledProcesses.length}/${snapshot.processes.length} processes sampled)`;
   lines.push("## Zeros processes");
   lines.push(
     `CPU over the last ${
       snapshot.samplingIntervalMs != null ? `${(snapshot.samplingIntervalMs / 1_000).toFixed(1)} s` : "sample"
-    } (100% = one core${snapshot.cpuReady ? "" : "; not ready yet"}) · memory = ${memoryLabel}`,
+    } (100% = one core${snapshot.cpuReady ? "" : "; not ready yet"}) · memory = ${memoryLabel}; per-process resident fallbacks are marked`,
   );
   lines.push(
-    `Totals: CPU ${formatPercent(totals.cpuPercent)} · memory ${formatBytes(totals.memoryBytes)} · ${totals.processCount} ${totals.processCount === 1 ? "process" : "processes"} · peak CPU ${formatPercent(totals.peakCpuPercent)}${
+    `Totals: CPU ${totalCpu} · memory ${formatBytes(totals.memoryBytes)} · ${totals.processCount} ${totals.processCount === 1 ? "process" : "processes"} · peak CPU ${formatPercent(totals.peakCpuPercent)}${
       totals.peakCpuAt != null ? ` at ${new Date(totals.peakCpuAt).toISOString()}` : ""
     } · peak memory ${formatBytes(totals.peakMemoryBytes)}${
       totals.peakMemoryAt != null ? ` at ${new Date(totals.peakMemoryAt).toISOString()}` : ""
@@ -244,7 +248,7 @@ export function buildDiagnosticsReport(input: DiagnosticsReportInput): string {
         : "";
     lines.push(
       `${pad(String(process.pid), 8)}${pad(String(row?.parentPid ?? "-"), 8)}${pad(
-        snapshot.cpuReady ? process.cpuPercent.toFixed(1) : "-",
+        snapshot.cpuReady && process.cpuSampled !== false ? process.cpuPercent.toFixed(1) : "-",
         8,
       )}${pad(formatBytes(process.memoryBytes), 11)}${pad(
         row ? formatBytes(row.rssBytes) : "-",
@@ -252,7 +256,7 @@ export function buildDiagnosticsReport(input: DiagnosticsReportInput): string {
       )}${pad(row ? formatCpuClock(row.cpuTimeSeconds) : "-", 11)}${pad(
         row?.startKey ?? "-",
         26,
-      )}${"  ".repeat(depth)}${process.name}${process.terminal ? " [terminal]" : ""}${
+      )}${"  ".repeat(depth)}${process.name}${process.terminal ? " [terminal]" : ""}${process.memorySource === "resident" && snapshot.memorySource === "footprint" ? " [resident fallback]" : ""}${
         command ? ` — ${command}` : ""
       }`,
     );

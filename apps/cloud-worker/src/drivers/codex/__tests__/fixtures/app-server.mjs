@@ -7,6 +7,7 @@ const reply = (id, result) => output({ id, result });
 const notify = (method, params) => output({ method, params });
 let threadId = "native-chat";
 let threadEffort;
+let threadConfig;
 let turnId;
 let nextTurn = 0;
 let mode;
@@ -36,6 +37,7 @@ input.on("line", async (line) => {
     case "thread/start":
     case "thread/resume":
       threadId = params.threadId ?? threadId;
+      threadConfig = params.config;
       if (params.approvalPolicy !== "never" || params.sandbox !== "danger-full-access") {
         output({ id: frame.id, error: { code: -32602, message: "Expected full VM permissions" } });
         return;
@@ -76,6 +78,10 @@ input.on("line", async (line) => {
         text(JSON.stringify({ worker: "ZEROS_WORKER_TOKEN" in process.env, cursor: "CURSOR_API_KEY" in process.env, claude: "ANTHROPIC_AUTH_TOKEN" in process.env, own: !!process.env.ZEROS_CLOUD_PROXY_TOKEN, tokenInArgs: process.argv.some((arg) => arg.includes(process.env.ZEROS_CLOUD_PROXY_TOKEN)) }));
         complete();
         return;
+      }
+      if (mode === "mcp-configuration") {
+        text(JSON.stringify({ config: threadConfig, secretInArgs: process.argv.some(arg => arg.includes("fixture-mcp-secret")) }));
+        complete(); return;
       }
       if (mode === "cost-configuration") {
         text(JSON.stringify({ model: params.model, effort: params.effort,

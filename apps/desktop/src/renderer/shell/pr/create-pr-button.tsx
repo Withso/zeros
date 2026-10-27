@@ -1,7 +1,7 @@
 // Shared PR controls for every workspace. Direct creation commits pending
 // Code + Design and publishes the branch; the primary action asks the agent.
 
-import { useCallback, useRef } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   ChevronDown,
   ExternalLink,
@@ -12,7 +12,7 @@ import {
 import { cn } from "../../shared/ui/cn";
 import {
   Tooltip,
-  splitTriggerClassNames,
+  splitTriggerClasses,
 } from "@/renderer/shared/ui/primitives";
 import {
   DropdownMenu,
@@ -38,8 +38,9 @@ import {
 } from "../../platform/git";
 import { shellOpenUrl } from "../../platform/app";
 import { buildPrInstructions, prBubbleDisplayText } from "./pr-instructions";
-import { githubCompareUrl, parseRemote } from "./github-url";
+import { githubCompareUrl, isGithubDotComRemote, parseRemote } from "./github-url";
 import { useGitRemote } from "../../features/settings/use-git-remote";
+import { useRepositoryRemote } from "../../features/repositories/use-repository-remote";
 import { useSendToActiveChat } from "./use-send-to-active-chat";
 import {
   AGENT_WORKING_REASON,
@@ -66,22 +67,19 @@ import { requestUserSettingsSection } from "../../features/settings/settings-nav
 import {
   claimPrCreateAction,
   releasePrCreateAction,
-  usePrCreateActionClaimed,
 } from "./pr-create-claim";
+import { useWorkspaceGitActionClaim } from "./workspace-git-action-claims";
 
 // The shared dropdown chrome in its SPLIT form (primitives/select.tsx): same
 // 6px corners, 13px text, 14px glyphs, border3 shell and bg2-highlight hover
 // as the Target-branch dropdown across the row — only the action segment and
 // the ▾ menu segment hover independently. `enabled:` hovers keep a disabled
 // control inert under the cursor while its tooltip explains why.
-const {
-  shell: CONTAINER_CLS,
-  main: MAIN_BTN_CLS,
-  chevron: CHEVRON_BTN_CLS,
-} = splitTriggerClassNames;
-
 interface CreatePrButtonProps {
   workspace: Workspace;
+  /** An explicit chat for a background workspace preview. */
+  chatId?: string | null;
+  onMenuOpenChange?: (open: boolean) => void;
   /** The owning project's origin remote (for the "Create PR manually" URL). */
   originUrl: string | null;
   /** Externally disabled (e.g. the Changes tab's PR row keeps the button
@@ -89,26 +87,44 @@ interface CreatePrButtonProps {
   disabled?: boolean;
   /** Tooltip shown on the main segment while `disabled` explains why. */
   disabledReason?: string;
+  appearance?: "secondary" | "primary";
+  size?: "default" | "compact";
+  /** A retained Summary must close its portalled menu when hidden. */
+  active?: boolean;
 }
 
-export function CreatePrButton({
+export function CreatePrButton(props: CreatePrButtonProps) {
+  const { remoteUrl } = useRepositoryRemote(props.workspace.repoRoot, props.originUrl, props.active);
+  return isGithubDotComRemote(remoteUrl) ? <GithubCreatePrButton {...props} originUrl={remoteUrl} /> : null;
+}
+
+function GithubCreatePrButton({
   workspace,
+  chatId,
+  onMenuOpenChange,
   originUrl,
   disabled,
   disabledReason,
+  appearance = "secondary",
+  size = "default",
+  active = true,
 }: CreatePrButtonProps) {
-  const sendToChat = useSendToActiveChat(workspace.path);
+  const sendToChat = useSendToActiveChat(workspace.path, chatId);
   const dispatch = useWorkspaceDispatch();
-  const busy = usePrCreateActionClaimed(workspace.id);
+  const claimed = useWorkspaceGitActionClaim(workspace.id);
+  const busy = claimed?.kind === "create-pr";
+  const [menuOpen, setMenuOpen] = useState(false);
+  useEffect(() => { if (!active) setMenuOpen(false); }, [active]);
+  const classes = splitTriggerClasses(appearance, size);
   // The repo's configured push/PR remote — the brief must name the same
   // remote the engine's own git ops use.
   const remote = useGitRemote(workspace.repoRoot);
   // Parked while the agent has a turn in flight: the prompt would queue
   // behind the very turn still reshaping the branch, and the PR brief's
   // uncommitted/upstream counts would describe a half-done tree.
-  const workspaceAgentWorking = useWorkspaceAgentWorking(workspace);
+  const workspaceAgentWorking = useWorkspaceAgentWorking(workspace, chatId === undefined);
   const agentWorking = workspaceAgentWorking;
-  const inert = busy || disabled === true || agentWorking;
+  const inert = !!claimed || disabled === true || agentWorking || !active;
   // Guards read LIVE state through a ref, not through a captured render.
   // "Ask agent" is reachable from a toast that outlives the click that raised
   // it, so a closure-captured `agentWorking` would happily queue a PR brief
@@ -116,8 +132,8 @@ export function CreatePrButton({
   // prevent. The exact-workspace claim is shared outside this component so it
   // also closes double-clicks and Changes/Review → File → back remount races.
   const gateRef = useRef({ disabled: false, agentWorking: false });
-  gateRef.current = { disabled: disabled === true, agentWorking };
-  const claim = useCallback(() => {
+  gateRef.current = { disabled: disabled === true || !active, agentWorking };
+  const claim = useCallback((behavior: "prompt" | "create" = "create") => {
     if (gateRef.current.disabled) return null;
     if (gateRef.current.agentWorking) {
       // Only the toast's "Ask agent" button can reach this — both real buttons
@@ -127,7 +143,7 @@ export function CreatePrButton({
       toast.error("Agent is working", { description: AGENT_WORKING_REASON });
       return null;
     }
-    return claimPrCreateAction(workspace.id);
+    return claimPrCreateAction(workspace.id, behavior);
   }, [workspace.id]);
 
   const openGithubSettings = useCallback(() => {
@@ -154,7 +170,7 @@ export function CreatePrButton({
 
   const askAgentToCreate = useCallback(
     async (draft: boolean) => {
-      const owner = claim();
+      const owner = claim("prompt");
       if (!owner) return;
       let releaseOnExit = true;
       try {
@@ -364,7 +380,7 @@ export function CreatePrButton({
   }, [originUrl, workspace.repoRoot, workspace.baseBranch, workspace.branch]);
 
   return (
-    <div className={CONTAINER_CLS}>
+    <div className={classes.shell}>
       <Tooltip
         label={
           agentWorking
@@ -379,14 +395,16 @@ export function CreatePrButton({
         <span className="inline-flex">
           <button
             type="button"
-            className={MAIN_BTN_CLS}
+            className={classes.main}
             disabled={inert}
+            aria-label="Create PR"
+            aria-busy={busy || undefined}
             onClick={() =>
               void askAgentToCreate(false)
             }
           >
             {busy ? (
-              <ZerosSpinner size={14} />
+              <ZerosSpinner size={14} tone="inherit" />
             ) : (
               <GitPullRequestCreate className="size-3.5" />
             )}
@@ -394,19 +412,20 @@ export function CreatePrButton({
           </button>
         </span>
       </Tooltip>
-      <DropdownMenu>
-        <Tooltip label="More PR options">
-          <DropdownMenuTrigger asChild>
-            <button
-              type="button"
-              className={CHEVRON_BTN_CLS}
-              disabled={inert}
-              aria-label="More PR options"
-            >
-              <ChevronDown />
-            </button>
-          </DropdownMenuTrigger>
-        </Tooltip>
+      <DropdownMenu open={active && menuOpen} onOpenChange={(open) => {
+        setMenuOpen(open);
+        onMenuOpenChange?.(open);
+      }}>
+        <DropdownMenuTrigger asChild>
+          <button
+            type="button"
+            className={classes.chevron}
+            disabled={inert}
+            aria-label="More PR options"
+          >
+            <ChevronDown />
+          </button>
+        </DropdownMenuTrigger>
         <DropdownMenuContent
           align="end"
           sideOffset={4}

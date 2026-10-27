@@ -70,7 +70,7 @@ export const JumpToPromptPill = memo(function JumpToPromptPill({
 
   if (!promptAbove) return null;
   return (
-    <Tooltip label="Jump to your prompt">
+    <Tooltip label="Your prompt">
       <button
         type="button"
         className="zeros-agent-jump-pill zeros-agent-jump-pill-top border-border1 bg-bg2 text-fg1 hover:bg-bg2-hover absolute top-3 right-[14px] z-10 inline-flex [animation:ocAgentJumpPillIn_140ms_ease-out] cursor-pointer items-center gap-1.5 rounded-sm border px-3 py-1.5 text-xs leading-none"
@@ -98,7 +98,7 @@ export const JumpToLatestButton = memo(function JumpToLatestButton({
 }: JumpToLatestButtonProps) {
   if (isAtBottom) return null;
   return (
-    <Tooltip label="Jump to latest">
+    <Tooltip label="Latest message">
       <button
         type="button"
         className="zeros-agent-jump-pill zeros-agent-jump-pill-bottom border-border1 bg-bg2 text-fg1 hover:bg-bg2-hover absolute bottom-full left-1/2 z-10 mb-2 inline-flex size-9 -translate-x-1/2 [animation:ocAgentJumpPillIn_140ms_ease-out] cursor-pointer items-center justify-center rounded-sm border transition-colors"

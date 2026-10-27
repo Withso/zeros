@@ -24,7 +24,7 @@
       "!**/*.db-wal"
     ]
   },
-  "codexProtocolVersion": "0.162.1",
+  "codexProtocolVersion": "0.164.0",
   "scripts": {
     "postinstall": "node scripts/fix-node-pty-helper.cjs",
     "codegen:codex": "node scripts/codegen-codex.mjs",
@@ -74,6 +74,8 @@
     "electron:build": "pnpm build:ripgrep && pnpm build:sidecar && pnpm electron:compile && pnpm build:ui && node scripts/electron-builder-run.mjs",
     "check:deps": "node scripts/check-deps-installed.mjs",
     "check:ui": "node scripts/check-ui-consistency.mjs",
+    "check:design-performance": "node scripts/run-explicit-vitest.mjs scripts/__tests__/design-performance-budget.test.ts scripts/__tests__/design-native-production.test.ts scripts/__tests__/design-native-owner-access.test.ts scripts/__tests__/design-native-renderer.test.ts scripts/__tests__/design-native-view.test.ts scripts/__tests__/design-native-input.test.ts scripts/__tests__/design-native-electron.test.ts scripts/__tests__/design-native-memory.test.ts scripts/__tests__/design-native-cpu.test.ts scripts/__tests__/design-native-vite.test.ts apps/desktop/src/renderer/features/design-workspace/__tests__/design-canvas-camera.test.ts apps/desktop/src/renderer/features/design-workspace/__tests__/design-frame-camera-residency.test.ts apps/desktop/src/renderer/features/design-workspace/__tests__/design-source-tiles.test.ts apps/desktop/src/renderer/features/design-workspace/__tests__/design-source-vector-cache.test.ts apps/desktop/src/renderer/features/design-workspace/__tests__/design-image-residency.test.ts apps/desktop/src/renderer/features/design-workspace/__tests__/design-background-work.test.ts",
+    "design:performance:native": "node scripts/design-native-acceptance.mjs",
     "design:docs": "node scripts/design-system/build-design-docs.mjs",
     "tokens:build": "node scripts/design-system/build-tokens.mjs",
     "check:tokens": "node scripts/design-system/build-tokens.mjs --check",
@@ -135,7 +137,7 @@
     "dev:seed": "node scripts/dev-environment/hosted-entry.mjs seed"
   },
   "dependencies": {
-    "@anthropic-ai/claude-agent-sdk": "0.3.296",
+    "@anthropic-ai/claude-agent-sdk": "0.3.309",
     "@codemirror/autocomplete": "^6.20.3",
     "@codemirror/commands": "^6.10.3",
     "@codemirror/language": "^6.12.3",
@@ -143,14 +145,14 @@
     "@codemirror/search": "^6.7.1",
     "@codemirror/state": "^6.6.0",
     "@codemirror/view": "^6.43.1",
-    "@cursor/sdk": "1.0.37",
+    "@cursor/sdk": "1.0.40",
     "@decimalturn/toml-patch": "^2.0.0",
     "@fontsource-variable/geist": "^5.2.8",
     "@fontsource-variable/geist-mono": "^5.2.7",
     "@lezer/highlight": "^1.2.3",
     "@modelcontextprotocol/sdk": "^1.32.0",
     "@octokit/rest": "^22.0.0",
-    "@openai/codex": "0.162.1",
+    "@openai/codex": "0.164.0",
     "@pierre/diffs": "1.4.1",
     "@pierre/trees": "1.0.0-beta.4",
     "@radix-ui/react-avatar": "^1.1.11",
@@ -228,7 +230,7 @@
     "typescript-language-server": "5.1.3",
     "use-stick-to-bottom": "^1.1.4",
     "ws": "^8.21.2",
-    "zod": "^4.3.6",
+    "zod": "^4.6.7",
     "zustand": "^5.0.12"
   },
   "devDependencies": {
@@ -249,7 +251,7 @@
     "ajv": "^8.20.0",
     "ajv-formats": "^3.0.1",
     "concurrently": "^9.2.1",
-    "electron": "^43.7.7",
+    "electron": "^43.8.3",
     "electron-builder": "^26.8.1",
     "electronmon": "^2.0.4",
     "esbuild": "^0.28.1",

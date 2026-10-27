@@ -1,7 +1,9 @@
 import { expect } from "@playwright/test";
+import { designFrameElementBox } from "./ui-smoke-design-helpers.mjs";
 import { runDesignSavedEditingSmoke } from "./ui-smoke-design-saved-editing.mjs";
 import { runDesignNestingSmoke } from "./ui-smoke-design-nesting.mjs";
 import { runDesignPicturesSmoke } from "./ui-smoke-design-pictures.mjs";
+import { runDesignResidencySmoke } from "./ui-smoke-design-residency.mjs";
 
 async function openCanvasFixture(page, query = "layoutGestures") {
   const origin = new URL(page.url()).origin;
@@ -567,7 +569,7 @@ export async function runDesignLayoutAffineCameraSmoke({ page, check }) {
     });
   const original = await local(child);
   const parentOriginal = await local(parent);
-  const screen = await child.boundingBox();
+  const screen = await designFrameElementBox(runtime.owner(), child);
   const start = {
     x: screen.x + screen.width / 2,
     y: screen.y + screen.height / 2,
@@ -589,7 +591,7 @@ export async function runDesignLayoutAffineCameraSmoke({ page, check }) {
   await page.mouse.move(start.x + 41, start.y + 20);
   await expect
     .poll(async () => {
-      const current = await child.boundingBox();
+      const current = await designFrameElementBox(runtime.owner(), child);
       return Math.hypot(current.x - screen.x - 41, current.y - screen.y - 20);
     })
     .toBeLessThan(0.5);
@@ -695,7 +697,7 @@ export async function runDesignFreeRelocationSmoke({ page, check }) {
   const live = originalFrame.frameLocator(
     'iframe[data-design-document-buffer="displayed"][data-design-document-ready]',
   );
-  const original = await live.locator('[data-oid="home-hero"]').boundingBox();
+  const original = await designFrameElementBox(live.owner(), live.locator('[data-oid="home-hero"]'));
   const bounds = await originalFrame.boundingBox();
   const start = {
     x: original.x + original.width / 2,
@@ -713,13 +715,12 @@ export async function runDesignFreeRelocationSmoke({ page, check }) {
   await page.mouse.up();
   const detached = page.locator('[data-design-frame="detached.html"]');
   await expect(detached).toHaveCount(1);
-  const child = detached
-    .frameLocator(
-      'iframe[data-design-document-buffer="displayed"][data-design-document-ready]',
-    )
-    .locator('[data-oid="home-hero"]');
+  const detachedRuntime = detached.frameLocator(
+    'iframe[data-design-document-buffer="displayed"][data-design-document-ready]',
+  );
+  const child = detachedRuntime.locator('[data-oid="home-hero"]');
   await expect(child).toHaveCount(1);
-  const moved = await child.boundingBox();
+  const moved = await designFrameElementBox(detachedRuntime.owner(), child);
   expect(moved.x).toBeCloseTo(original.x + end.x - start.x, 1);
   expect(moved.y).toBeCloseTo(original.y + end.y - start.y, 1);
   expect(moved.width).toBeCloseTo(original.width, 1);
@@ -780,6 +781,7 @@ export async function runDesignCanvasRefinementsSmoke(options) {
   await runDesignPanDirectoryReplacementSmoke(options);
   await runDesignNestingSmoke(options);
   await runDesignPicturesSmoke(options);
+  await runDesignResidencySmoke(options);
 }
 
 export async function runDesignFrameLiveCameraSmoke({ page, check }) {
@@ -1082,9 +1084,7 @@ export async function runDesignFlowPendingSaveSmoke({ page, check }) {
       if (cancel) await page.keyboard.press("Escape");
       await page.mouse.up();
     };
-    const last = await runtime
-      .locator('[data-oid="home-action"]')
-      .boundingBox();
+    const last = await designFrameElementBox(runtime.owner(), runtime.locator('[data-oid="home-action"]'));
     await drag({ x: last.x + last.width * 0.8, y: last.y + last.height / 2 });
     await expect
       .poll(() =>
@@ -1098,7 +1098,7 @@ export async function runDesignFlowPendingSaveSmoke({ page, check }) {
         ),
       )
       .toEqual(["home-copy", "home-action", "home-heading"]);
-    const parent = await hero.boundingBox();
+    const parent = await designFrameElementBox(runtime.owner(), hero);
     try {
       await drag(
         { x: parent.x + parent.width + 70, y: parent.y + parent.height / 2 },
@@ -1162,7 +1162,7 @@ export async function runDesignMixedParentMovementSmoke({ page, check }) {
   );
   const child = (id) => runtime.locator(`[data-oid="${id}"]`);
   const before = await Promise.all(
-    ["home-heading", "home-copy"].map((id) => child(id).boundingBox()),
+    ["home-heading", "home-copy"].map((id) => designFrameElementBox(runtime.owner(), child(id))),
   );
   const start = {
     x: before[1].x + before[1].width / 2,
@@ -1175,12 +1175,12 @@ export async function runDesignMixedParentMovementSmoke({ page, check }) {
   for (const [i, id] of ["home-heading", "home-copy"].entries()) {
     await expect
       .poll(async () =>
-        Math.abs((await child(id).boundingBox()).x - before[i].x - 40),
+        Math.abs((await designFrameElementBox(runtime.owner(), child(id))).x - before[i].x - 40),
       )
       .toBeLessThan(0.5);
     await expect
       .poll(async () =>
-        Math.abs((await child(id).boundingBox()).y - before[i].y - 15),
+        Math.abs((await designFrameElementBox(runtime.owner(), child(id))).y - before[i].y - 15),
       )
       .toBeLessThan(0.5);
   }
@@ -1203,12 +1203,11 @@ export async function runDesignGroupDetachmentRefusalSmoke({ page, check }) {
     .locator('[data-design-layer-id="home-copy"]')
     .click({ modifiers: ["Shift"] });
   const frame = page.locator('[data-design-frame="home.html"]');
-  const child = frame
-    .frameLocator(
-      'iframe[data-design-document-buffer="displayed"][data-design-document-ready]',
-    )
-    .locator('[data-oid="home-copy"]');
-  const before = await child.boundingBox();
+  const runtime = frame.frameLocator(
+    'iframe[data-design-document-buffer="displayed"][data-design-document-ready]',
+  );
+  const child = runtime.locator('[data-oid="home-copy"]');
+  const before = await designFrameElementBox(runtime.owner(), child);
   const bounds = await frame.boundingBox();
   const start = {
     x: before.x + before.width / 2,
@@ -1221,7 +1220,7 @@ export async function runDesignGroupDetachmentRefusalSmoke({ page, check }) {
     page.getByText("Detach one layer at a time", { exact: true }),
   ).toBeVisible();
   await page.mouse.up();
-  await expect.poll(() => child.boundingBox()).toEqual(before);
+  await expect.poll(() => designFrameElementBox(runtime.owner(), child)).toEqual(before);
   expect(await transactionWrites(page)).toBe(0);
   check(
     "a grouped scene exit is explicitly refused and restores every preview without a write",

@@ -100,6 +100,40 @@ describe("diff / status / log", () => {
       ahead: null, behind: null, upstream: null });
   });
 
+  it("optionally compares the selected remote base without a PR or an upstream", async () => {
+    const { getWorkspace } = await import("../worktree");
+    const workspace = getWorkspace(workspaceId);
+    const { stdout: original } = await execFileAsync("git", ["rev-parse", "HEAD"], { cwd: repoRoot });
+    await writeFile(path.join(repoRoot, "base.txt"), "new base commit\n");
+    await execFileAsync("git", ["add", "."], { cwd: repoRoot });
+    await execFileAsync("git", ["commit", "-qm", "advance remote base"], { cwd: repoRoot });
+    await execFileAsync("git", ["update-ref", "refs/remotes/origin/main", "HEAD"], { cwd: repoRoot });
+    // A stale local main must not hide work added to the selected remote base.
+    await execFileAsync("git", ["reset", "--hard", original.trim()], { cwd: repoRoot });
+    expect(await status(workspaceId, { includeSummary: true })).toMatchObject({
+      ahead: null, behind: null, upstream: null,
+      summary: { branch: workspace.branch, base: { ref: "origin/main", behind: 1 } },
+    });
+    expect(await status(workspaceId)).not.toHaveProperty("summary");
+  });
+
+  it("keeps a missing selected base unknown instead of substituting main", async () => {
+    const { updateWorkspace } = await import("../state");
+    updateWorkspace(workspaceId, { baseBranch: "deleted-base" });
+    expect(await status(workspaceId, { includeSummary: true })).toMatchObject({
+      summary: { base: null },
+    });
+  });
+
+  it("reports a detached head and uses a local base when no remote copy exists", async () => {
+    const { getWorkspace } = await import("../worktree");
+    const workspace = getWorkspace(workspaceId);
+    await execFileAsync("git", ["checkout", "--detach", "-q"], { cwd: workspace.path });
+    expect(await status(workspaceId, { includeSummary: true })).toMatchObject({
+      summary: { branch: null, base: { ref: "main", behind: 0 } },
+    });
+  });
+
   it("returns complete file context only when explicitly requested", async () => {
     upsertRepoByRoot({ repoRoot, repoSlug: "test" });
     const before = Array.from({ length: 80 }, (_, i) => `line ${i + 1}`).join("\n") + "\n";

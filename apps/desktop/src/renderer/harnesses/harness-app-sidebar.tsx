@@ -14,6 +14,7 @@ import type { Project } from "../state/projects-store";
 import type { ProcessMetricsSnapshot } from "../platform/process-metrics";
 
 const params = new URLSearchParams(location.search);
+const hoverCards = params.has("hover-cards");
 const legacyMainFolder = params.has("legacy-main")
   ? `/fixture/zeros${params.has("subdirectory") ? "/packages/app" : ""}`
   : null;
@@ -116,10 +117,42 @@ const changeLines: Record<string, { additions: number; deletions: number }> = {
   "ws-paris-mumbai-city-docs": { additions: 87, deletions: 0 },
   "ws-atlanta": { additions: 12, deletions: 3 },
 };
+if (params.has("dashboard")) {
+  const epoch = Number(sessionStorage.getItem("fixture:dashboard-epoch")) || Date.now();
+  sessionStorage.setItem("fixture:dashboard-epoch", String(epoch));
+  const statuses = ["backlog", "in-progress", "in-review", "done", "cancelled"] as const;
+  rows.forEach((row, index) => {
+    rows[index] = { ...row, status: statuses[index % statuses.length], createdAt: epoch - (index + 1) * 86400000,
+      lastActiveAt: epoch - (index + 1) * 3600000, present: true,
+      ...(index === 2 ? { prNumber: 42, prState: "ready", prUrl: "https://github.com/example/ocolors/pull/42" } : {}) };
+  });
+  rows.push({ ...rows[0], id: "ws-archived", branch: "zeros/archived", path: "/fixture-workspaces/zeros/archived",
+    status: "done", createdAt: epoch - 10 * 86400000, archivedAt: epoch - 3 * 86400000, present: false, archiveSnapshot: "a".repeat(40) });
+  rows.push({ ...rows[0], id: "ws-missing", branch: "zeros/missing", path: "/fixture-workspaces/zeros/missing", present: false });
+  if (params.has("large-dashboard")) rows.push(...Array.from({ length: 250 }, (_, index) => ({ ...rows[0],
+    id: `ws-bulk-${index}`, branch: `zeros/task-${String(index).padStart(3, "0")}`, path: `/fixture-workspaces/zeros/bulk-${index}` })));
+}
+if (hoverCards) {
+  const now = Date.now();
+  for (const row of rows) {
+    row.createdAt = now - 3_600_000;
+    row.lastActiveAt = now - 29 * 60_000;
+  }
+  Object.assign(rows.find(row => row.id === "ws-boston")!, {
+    prNumber: 42, prState: "ready", prUrl: "https://github.com/example/zeros/pull/42",
+  });
+  Object.assign(rows.find(row => row.id === "ws-seville")!, {
+    prNumber: 43, prState: "merged", prUrl: "https://github.com/example/ocolors/pull/43",
+  });
+  changeLines["ws-atlanta"] = { additions: 2318, deletions: 388 };
+  changeLines["ws-boston"] = { additions: 3506, deletions: 839 };
+}
 const runningIds = new Set(["ws-boston"]);
 const requests: { op: string; params?: Record<string, unknown> }[] = [];
 let deferChangeLines = false;
 const pendingChangeLines: (() => void)[] = [];
+let deferDashboardArchives = params.has("defer-dashboard-archives");
+const pendingDashboardArchives: { resolve: () => void; reject: (error: Error) => void }[] = [];
 const resourceTotals = params.has("resource-pressure")
   ? {
       cpuPercent: 149.7,
@@ -178,6 +211,12 @@ const resourceSnapshot: ProcessMetricsSnapshot = {
       ]
     : [],
 };
+if (params.has("resource-pending-cpu")) {
+  resourceSnapshot.processes = resourceSnapshot.processes.map((process) =>
+    process.id === "tsc" ? { ...process, cpuPercent: 0, cpuSampled: false } : process);
+  resourceSnapshot.totals.all = { ...resourceTotals, cpuPercent: 51.7 };
+  resourceSnapshot.totals.excludingTerminals = resourceSnapshot.totals.all;
+}
 const agents = [
   {
     id: "claude",
@@ -195,6 +234,64 @@ localStorage.setItem(
 );
 
 Object.assign(window, {
+  appSidebarSeedCloud: async () => {
+    const { acceptOrganizationSnapshot } = await import("../features/team/team-store");
+    const { setActiveOrganizationSelection } = await import("../features/team/active-team");
+    const { controlPlane } = await import("../features/team/control-plane");
+    const { acceptCloudWorkspaceDocument, getCloudProjects, getCloudWorkspaceRows } = await import("../state/cloud-workspace-catalog");
+    const { notifyProjectsChanged, setWorkspaceRowsForTesting } = await import("../state/use-projects");
+    const organizationId = "11111111-1111-4111-8111-111111111111";
+    const otherOrganizationId = "44444444-4444-4444-8444-444444444444";
+    const organizations = [organizationId, otherOrganizationId].map((id, index) => ({
+      id, name: `Organization ${index + 1}`, slug: `organization-${index + 1}`, logo: null, isPersonal: false,
+      role: "owner" as const, defaultTeamId: id, workspaceCapabilities: { local: true, cloud: true },
+      teamCapabilities: { multiple: false as const, canCreate: false as const },
+    }));
+    const membership = { user: { id: "55555555-5555-4555-8555-555555555555", email: "fixture@example.test", displayName: "Fixture", staffRole: null }, organizations, teams: organizations };
+    controlPlane.me = async () => membership;
+    acceptOrganizationSnapshot(membership);
+    const fixtures = [
+      { id: "22222222-2222-4222-8222-222222222222", organizationId, name: "cloud-one" },
+      { id: "33333333-3333-4333-8333-333333333333", organizationId, name: "cloud-two" },
+      { id: "66666666-6666-4666-8666-666666666666", organizationId: otherOrganizationId, name: "cloud-other" },
+    ];
+    for (const fixture of fixtures) acceptCloudWorkspaceDocument({
+      ...fixture, teamId: fixture.organizationId, createdBy: membership.user.id, placement: "cloud", status: "stopped", version: 1,
+      error: null, createdAt: "2026-09-26T00:00:00Z", updatedAt: "2026-09-26T00:00:00Z", deletedAt: null,
+      capabilities: { canWrite: true, canManage: true, canStart: true, startUnavailableReason: null },
+      repository: { forge: "github.com", owner: "example", name: fixture.name, revision: "refs/heads/main" },
+      generation: { number: 1, architecture: "x86_64", resources: { cpuMillicores: 2000, memoryMiB: 4096, storageMiB: 20480 }, observedState: "stopped", lastObservedAt: null },
+    });
+    if (hoverCards) {
+      const cloudChats = fixtures.map(fixture => ({
+        ...chats[0],
+        id: `cloud:${fixture.organizationId}:${fixture.id}:chat`,
+        folder: `cloud://${fixture.organizationId}/${fixture.id}`,
+        title: `${fixture.name} activity`,
+      }));
+      useWorkspaceStore.setState(state => ({ chats: [...state.chats, ...cloudChats] }));
+      for (const chat of cloudChats) useSessionsStore.getState().setSession(chat.id, {
+        ...BLANK, cwd: chat.folder, transcriptState: "resident", messages: [{
+          id: `${chat.id}-reply`, kind: "text", role: "agent",
+          text: `Saved progress for ${chat.title}.`, createdAt: Date.now() - 60_000,
+        }],
+      });
+    }
+    // Mirror the production catalog lifecycle into the shared read cache. The
+    // fixture has no authenticated lifecycle controller or live cloud bridge.
+    for (const project of getCloudProjects()) {
+      setWorkspaceRowsForTesting(project.repoSlug, getCloudWorkspaceRows().filter(row => row.repoSlug === project.repoSlug));
+    }
+    notifyProjectsChanged();
+    setActiveOrganizationSelection(organizationId, false);
+    useWorkspaceStore.getState().dispatch({ type: "SET_ACTIVE_PAGE", page: "dashboard" });
+    Object.assign(window, { appSidebarSelectOwner: (id: string | null) => {
+      setActiveOrganizationSelection(id, id === null);
+      useWorkspaceStore.getState().dispatch({ type: "SET_ACTIVE_PAGE", page: "dashboard" });
+    } });
+    return { organizationId, otherOrganizationId, keys: fixtures.map(fixture => `cloud://${fixture.organizationId}/${fixture.id}`),
+      projectIds: getCloudProjects().map(project => project.id) };
+  },
   appSidebarRequests: requests,
   __ZEROS_NATIVE__: {
     on: () => () => {},
@@ -212,7 +309,7 @@ Object.assign(window, {
 });
 
 const { setActiveBridge } = await import("../platform/bridge/active-bridge");
-setActiveBridge({
+const fixtureBridge = {
   status: "connected",
   onStatusChange: () => () => {},
   onMessage: () => () => {},
@@ -224,13 +321,28 @@ setActiveBridge({
     requests.push(message);
     let result: unknown = {};
     if (message.op === "workspace.list") {
+      if (deferDashboardArchives && message.params?.archived === true)
+        await new Promise<void>((resolve, reject) => pendingDashboardArchives.push({ resolve, reject }));
       const slug = message.params?.repoSlug;
       result = {
         workspaces:
-          message.params?.archived === true
-            ? []
-            : rows.filter((row) => !slug || row.repoSlug === slug),
+          rows.filter((row) => (!slug || row.repoSlug === slug) &&
+            (message.params?.archived === true ? row.archivedAt != null : row.archivedAt == null)),
       };
+    }
+    if (params.has("dashboard") && ["workspace.archive", "workspace.restore", "workspace.setStatus"].includes(message.op)) {
+      const index = rows.findIndex(row => row.id === message.params?.workspaceId);
+      if (index < 0) throw new Error("Unknown fixture workspace");
+      rows[index] = { ...rows[index],
+        ...(message.op === "workspace.archive" ? { archivedAt: Date.now(), present: false } :
+          message.op === "workspace.restore" ? { archivedAt: null, present: true } : { status: message.params?.status as Workspace["status"] }) };
+      result = message.op === "workspace.restore"
+        ? { workspace: rows[index], restoredAt: Date.now(), path: rows[index].path, branch: rows[index].branch, conflicts: [], adaptations: [] }
+        : { workspace: rows[index], archivedAt: rows[index].archivedAt, stashRef: null };
+    }
+    if (params.has("dashboard") && message.op === "git.hasChanges") {
+      const counts = changeLines[String(message.params?.workspaceId)];
+      result = { hasChanges: !!counts && counts.additions + counts.deletions > 0 };
     }
     if (message.op === "git.changeLineCounts") {
       result = changeLines[String(message.params?.workspaceId)] ?? {
@@ -240,6 +352,11 @@ setActiveBridge({
       if (deferChangeLines) {
         await new Promise<void>((resolve) => pendingChangeLines.push(resolve));
       }
+    }
+    if (hoverCards && message.op === "git.hasChanges") result = { hasChanges: true };
+    if (hoverCards && message.op === "workspace.archive") {
+      const row = rows.find(row => row.id === message.params?.workspaceId);
+      result = { archivedAt: Date.now(), stashRef: null, ...(row ? { workspace: { ...row, archivedAt: Date.now() } } : {}) };
     }
     if (message.op === "workspace.runInfo")
       result = {
@@ -275,7 +392,20 @@ setActiveBridge({
       };
     return { type: "WORKSPACE_RESPONSE", result };
   },
-} as unknown as RuntimeClient);
+} as unknown as RuntimeClient;
+setActiveBridge(fixtureBridge);
+// PR buttons read the provider's connection as well as the request singleton.
+// Use the real provider with a synthetic Local transport in this scenario.
+const { BridgeProvider } = await import("../platform/bridge/use-bridge");
+const { Fragment } = await import("react");
+const FixtureBridgeProvider = hoverCards ? BridgeProvider : Fragment;
+if (hoverCards) {
+  const { RuntimeClient: FixtureRuntimeClient } = await import("../platform/bridge/ws-client");
+  FixtureRuntimeClient.prototype.connect = async function () {
+    (this as unknown as { setStatus(status: string): void }).setStatus("connected");
+  };
+  FixtureRuntimeClient.prototype.request = fixtureBridge.request;
+}
 
 const { useWorkspaceStore } = await import("../state/store");
 const { AppSidebar } = await import("../shell/app-sidebar");
@@ -292,7 +422,7 @@ const ConversationPane = params.has("conversation")
 const { DispatcherPage } = await import("../shell/dispatcher/dispatcher-modal");
 const { RepoPage } = await import("../features/repositories/repo-page");
 const { DashboardPage } = await import("../features/dashboard/dashboard-page");
-const { useProjects } = await import("../state/use-projects");
+const { useProjects, notifyWorkspacesChanged } = await import("../state/use-projects");
 const { AddProjectProvider, useAddProject } =
   await import("../shell/add-project-provider");
 const { ActionsCtx } = await import("../features/agent/sessions-context");
@@ -313,9 +443,17 @@ const chats = rows.map(
       agentName: "Claude",
       model: null,
       effort: "high",
-      title: "Chat",
+      title: hoverCards ? (row.id === "ws-atlanta" ? "Workspace overview and sidebar filters" : `Updates in ${String(row.branch).replace("zeros/", "")}`) : params.has("dashboard") ? ({
+        "ws-atlanta": "Refine Home dashboard",
+        "ws-boston": "Improve workspace startup",
+        "ws-seville": "Add keyboard shortcuts",
+        "ws-paris-mumbai-city-docs": "Polish repository icons",
+        "ws-new-york": "Update release notes",
+        "ws-archived": "Review pull request workflow",
+        "ws-missing": "Recover workspace files",
+      }[row.id] ?? row.branch.replace("zeros/", "")) : "Chat",
       createdAt: 1,
-      updatedAt: 1,
+      updatedAt: hoverCards ? Date.now() - 29 * 60_000 : params.has("dashboard") ? row.lastActiveAt ?? row.createdAt : 1,
       archived: false,
       messages: [],
     }) as unknown as ChatThread,
@@ -327,11 +465,22 @@ const saved = useWorkspaceStore.getState();
 if (saved.chats.length === 0) {
   useWorkspaceStore.setState({ chats });
 }
+if (hoverCards) {
+  for (const chat of chats) useSessionsStore.getState().setSession(chat.id, {
+    ...BLANK, cwd: chat.folder, agentId: "claude", sessionId: `execution-${chat.id}`,
+    transcriptState: "resident", messages: [{
+      id: `${chat.id}-reply`, kind: "text", role: "agent",
+      text: "Added filters and verified workspace switching. The latest changes are ready for review.",
+      createdAt: chat.updatedAt,
+    }],
+  });
+}
 
 const sessions = {
   listAgents: async () => agents,
   getSession: (id: string) => useSessionsStore.getState().sessions[id],
   hydrateChat: async (id: string) => {
+    if (hoverCards) requests.push({ op: "fixture.hydrateChat", params: { chatId: id } });
     if (!ConversationPane || useSessionsStore.getState().sessions[id]) return;
     useSessionsStore.getState().setSession(id, {
       ...BLANK,
@@ -358,7 +507,10 @@ const sessions = {
     });
   },
   ensureSession: async () => {},
-  sendPrompt: async () => {},
+  prepareForSend: () => null,
+  sendPrompt: async (chatId: string, text: string) => {
+    if (hoverCards) requests.push({ op: "fixture.sendPrompt", params: { chatId, text } });
+  },
   releaseQueue: () => {},
   setRetainedChatIds: () => {},
   loadIntoChat: async () => true,
@@ -377,7 +529,48 @@ const auth = {
   signOutEverywhere: async () => {},
 } as AuthContextValue;
 
+if (params.has("organizations")) {
+  const { accountPresentationOwner, bindAccountPresentationOwner } = await import("../platform/account-presentation-cache");
+  const { acceptOrganizationSnapshot } = await import("../features/team/team-store");
+  const { controlPlane } = await import("../features/team/control-plane");
+  const { default: fixture } = await import("../../../../../scripts/__tests__/fixtures/organization-list.json");
+  const organizations = fixture as import("../features/team/control-plane").OrganizationSummary[];
+  const user = { sub: "navigation-account", email: "navigation@example.test", name: null, provider: "workos" as const };
+  const me = { user: { id: user.sub, email: user.email, displayName: null, staffRole: null }, organizations, teams: organizations };
+  bindAccountPresentationOwner(accountPresentationOwner("https://api.example.test", user.sub));
+  acceptOrganizationSnapshot(me);
+  controlPlane.me = async () => me;
+  Object.assign(auth, { status: "authenticated", storedUser: user, userId: user.sub, email: user.email });
+}
+
 Object.assign(window, {
+  dashboardReleaseArchives: (fail = false) => {
+    deferDashboardArchives = false;
+    for (const read of pendingDashboardArchives.splice(0))
+      if (fail) read.reject(new Error("Archive list unavailable"));
+      else read.resolve();
+  },
+  dashboardPendingArchiveReads: () => pendingDashboardArchives.length,
+  dashboardAddPending: async () => {
+    const { beginPendingCreate } = await import("../state/pending-workspaces");
+    return beginPendingCreate({ repoRoot: projects[0].repoRoot, repoSlug: projects[0].repoSlug, label: "Prepare integration tests" });
+  },
+  dashboardFinishPending: async (token: string) => {
+    const { finishPendingCreate } = await import("../state/pending-workspaces");
+    finishPendingCreate(token);
+  },
+  appSidebarUpdateWorkspace: (id: string, patch: Partial<Workspace>) => {
+    const index = rows.findIndex(row => row.id === id);
+    if (index < 0) throw new Error("Unknown fixture workspace");
+    rows[index] = { ...rows[index], ...patch };
+    notifyWorkspacesChanged(rows[index].repoSlug);
+  },
+  appSidebarRecordActivity: (id: string, at: number) => {
+    const row = rows.find(row => row.id === id);
+    if (row) useWorkspaceStore.getState().dispatch({ type: "RECORD_WORKSPACE_ACTIVITY", folder: row.path, at });
+  },
+  appSidebarUpdateChat: (workspaceId: string) =>
+    useWorkspaceStore.getState().dispatch({ type: "TOUCH_CHAT", id: `chat-${workspaceId}` }),
   appSidebarSetWidth: setHomeSidebarWidth,
   appSidebarNavigate: (page: "customize" | "settings" | "dashboard") =>
     useWorkspaceStore.getState().dispatch({ type: "SET_ACTIVE_PAGE", page }),
@@ -403,6 +596,7 @@ Object.assign(window, {
       createProjectId: state.createWorkspaceProjectId,
       filter: state.workspaceListFilter,
       folder: state.lastWorkspaceFolder,
+      chatId: state.activeChatId,
       repoView: state.activeRepoId
         ? state.repoPageViewByProject[state.activeRepoId]
         : undefined,
@@ -478,6 +672,7 @@ function Harness() {
 
 createRoot(document.getElementById("root")!).render(
   <AuthContext.Provider value={auth}>
+    <FixtureBridgeProvider>
     <ActionsCtx.Provider value={sessions}>
       <TooltipProvider>
         <AddProjectProvider>
@@ -485,5 +680,6 @@ createRoot(document.getElementById("root")!).render(
         </AddProjectProvider>
       </TooltipProvider>
     </ActionsCtx.Provider>
+    </FixtureBridgeProvider>
   </AuthContext.Provider>,
 );

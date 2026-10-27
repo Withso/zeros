@@ -179,7 +179,7 @@ export function ComposerDesignFrame({ selection, onRemove, onToggleScreenshot }:
           <X size={12} aria-hidden="true" />
         </Button>
       </Tooltip>
-      <Tooltip label="Include a frame image with this message">
+      <Tooltip label="Attach image">
         <Button type="button" variant="ghost" size="icon-sm" aria-label="Include frame image" aria-pressed={first.includeScreenshot === true} onClick={onToggleScreenshot} onMouseDown={event => event.preventDefault()}>
           <Camera size={14} />
         </Button>

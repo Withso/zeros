@@ -36,8 +36,11 @@ import {
   inspectDesignNodeStyleProvenance,
   reconcileDesignRuntimeSnapshot,
   previewDesignNodeStylesTransient,
+  previewDesignNodeTextTransient,
+  clearDesignNodeTextPreviewTransient,
   resetDesignSelectionWorkflowsForTests,
   selectDesignFrame,
+  setDesignSelectionSnapshotReader,
   selectDesignNode,
   selectDesignNodes,
   selectDesignNodesInRect,
@@ -137,6 +140,27 @@ describe("design selection workflows", () => {
     expect(designWorkspaceView("workspace-a").selectedTargets).toEqual([{ frame: "other.html", nodeId: "nested" }, { frame: FRAME.file }]);
     await selectDesignFrame("workspace-a", FRAME, { selected: true, additive: true });
     expect(designWorkspaceView("workspace-a").selectedTargets).toEqual([{ frame: "other.html", nodeId: "nested" }]);
+  });
+
+  it("reveals the remaining cold frame when an additive selection is toggled off", async () => {
+    const description = (file: string) => ({ file, title: file, width: 100, height: 100, x: 0, y: 0, z: 0, preparation: "unprepared" as const });
+    const first = description("first.html");
+    const second = description("second.html");
+    const snapshot = { frames: [], preparation: { revision: "catalog", epoch: 1,
+      descriptions: [first, second], current: [], errors: {} } } as unknown as import("../../../platform/git").DesignWorkspaceSnapshotWire;
+    setDesignSelectionSnapshotReader(() => snapshot);
+    try {
+      await selectDesignFrame("workspace-a", first, { selected: true });
+      await selectDesignFrame("workspace-a", second, { selected: true, additive: true });
+      expect(designWorkspaceView("workspace-a").selectedTargets).toEqual([{ frame: second.file }, { frame: first.file }]);
+      await selectDesignFrame("workspace-a", second, { selected: true, additive: true });
+      expect(designWorkspaceView("workspace-a").selectedTargets).toEqual([{ frame: first.file }]);
+      expect(useDesignLayerDisclosureStore.getState().revealByWorkspace["workspace-a"]?.frame).toBe(first.file);
+      expect(mocks.designFrameRuntime).not.toHaveBeenCalled();
+      expect(mocks.designSetSelection).toHaveBeenLastCalledWith("workspace-a", null, expect.any(Number));
+    } finally {
+      setDesignSelectionSnapshotReader(() => undefined);
+    }
   });
 
   it("selects every intersecting scene frame from an outer marquee", async () => {
@@ -408,6 +432,54 @@ describe("design selection workflows", () => {
       mocks.designFrameRuntime
         .mockReturnValueOnce(runtime)
         .mockReturnValue({ ...runtime });
+      await expect(request()).rejects.toThrow("changed");
+    },
+  );
+
+  it.each(["preview", "cancel"] as const)(
+    "keeps an old text edit's %s away from a replacement runtime",
+    async operation => {
+      const old = { sourceVersion: FRAME.sourceVersion,
+        previewText: vi.fn(async () => details("heading")),
+        clearPreviewText: vi.fn(async () => details("heading")),
+      };
+      const replacement = { sourceVersion: "2".repeat(24),
+        previewText: vi.fn(async () => details("heading", "2".repeat(24))),
+        clearPreviewText: vi.fn(async () => details("heading", "2".repeat(24))),
+      };
+      mocks.designFrameRuntime.mockReturnValue(replacement);
+      const input = { workspaceId: "workspace-a", frame: FRAME.file,
+        sourceVersion: FRAME.sourceVersion, nodeId: "heading", text: "old queued draft",
+        runtime: old as unknown as import("../../../platform/bridge/design-frame-runtime").DesignFrameRuntimeConnection,
+      };
+      const request = () => operation === "preview"
+        ? previewDesignNodeTextTransient(input) : clearDesignNodeTextPreviewTransient(input);
+      await expect(request()).rejects.toThrow("changed");
+      expect(replacement.previewText).not.toHaveBeenCalled();
+      expect(replacement.clearPreviewText).not.toHaveBeenCalled();
+      expect(old.previewText).not.toHaveBeenCalled();
+      expect(old.clearPreviewText).not.toHaveBeenCalled();
+      mocks.designFrameRuntime.mockReturnValue(old);
+      await expect(request()).resolves.toMatchObject({ sourceVersion: FRAME.sourceVersion });
+    },
+  );
+
+  it.each(["preview", "cancel"] as const)(
+    "allows text %s after the same document adopts a style generation, while fencing replacement replies",
+    async operation => {
+      const runtime = { sourceVersion: "2".repeat(24),
+        previewText: vi.fn(async () => details("heading", runtime.sourceVersion)),
+        clearPreviewText: vi.fn(async () => details("heading", runtime.sourceVersion)),
+      };
+      const input = { workspaceId: "workspace-a", frame: FRAME.file,
+        sourceVersion: FRAME.sourceVersion, nodeId: "heading", text: "current draft",
+        runtime: runtime as unknown as import("../../../platform/bridge/design-frame-runtime").DesignFrameRuntimeConnection,
+      };
+      const request = () => operation === "preview"
+        ? previewDesignNodeTextTransient(input) : clearDesignNodeTextPreviewTransient(input);
+      mocks.designFrameRuntime.mockReturnValue(runtime);
+      await expect(request()).resolves.toMatchObject({ sourceVersion: runtime.sourceVersion });
+      mocks.designFrameRuntime.mockReturnValueOnce(runtime).mockReturnValue({ ...runtime });
       await expect(request()).rejects.toThrow("changed");
     },
   );

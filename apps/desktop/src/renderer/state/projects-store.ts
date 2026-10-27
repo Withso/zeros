@@ -24,9 +24,11 @@
 // ──────────────────────────────────────────────────────────
 
 import { forgetRepoHistoryPreference } from "./repo-history-preferences";
+import { forgetSidebarRepositoryFilter } from "./sidebar-list-preferences";
+import { createComposerDrafts } from "./create-composer-drafts";
 import { getSetting, setSetting } from "../platform/settings";
 import { getActiveBridge } from "../platform/bridge/active-bridge";
-import { isWorktreePath } from "./workspace-resolution";
+import { isWorktreePath, findProjectForFolder } from "./workspace-resolution";
 import type { InspectFolderResult } from "../platform/git";
 import { getCloudProjects } from "./cloud-workspace-catalog";
 import { isCloudWorkspace } from "../platform/bridge/cloud-workspace-key";
@@ -394,6 +396,10 @@ export function removeProject(projectId: string): void {
   const target = projects.find((p) => p.id === projectId);
   gitRevisions.delete(projectId);
   forgetRepoHistoryPreference(projectId);
+  forgetSidebarRepositoryFilter(projectId);
+  createComposerDrafts.prune(scope => scope.placement === "local" && scope.project !== null &&
+    findProjectForFolder(scope.project, projects)?.id === projectId);
+  createComposerDrafts.flush();
   const next = projects.filter((p) => p.id !== projectId);
   saveProjects(next);
   // Removing the LAST project must ALSO clear the backup. saveProjects() leaves

@@ -161,7 +161,8 @@ jobs:
   test-shard:
     name: tests-vitest (${{ matrix.part }}/4)
     if: (github.event_name != 'pull_request' || !inputs.pr_selected_vitest)
-    runs-on: ubuntu-latest
+    # Keep the browser host compatible with the lockfile-pinned Playwright.
+    runs-on: ubuntu-24.04
     strategy:
       # Every part reports, so one failure never hides another.
       fail-fast: false
@@ -382,6 +383,10 @@ jobs:
           cache: pnpm
       - name: Setup Bun (for the engine sidecar compile)
         uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          # Bun compiles the shipped engine sidecar. Pinned so a new release is a
+          # reviewed change; the monthly github actions PR bumps it.
+          bun-version: 1.4.4
       - name: Install JS dependencies
         run: pnpm install --frozen-lockfile
 
@@ -436,6 +441,10 @@ jobs:
           cache: pnpm
       - name: Setup Bun
         uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          # Bun compiles the shipped engine sidecar. Pinned so a new release is a
+          # reviewed change; the monthly github actions PR bumps it.
+          bun-version: 1.4.4
       - name: Install JS dependencies
         run: pnpm install --frozen-lockfile
 
@@ -761,7 +770,8 @@ jobs:
   ui-smoke-shard:
     name: tests-ui-smoke (${{ matrix.shard }}/3)
     if: (github.event_name != 'pull_request' || !inputs.pr_selected_ui_smoke)
-    runs-on: ubuntu-latest
+    # Keep the browser host compatible with the lockfile-pinned Playwright.
+    runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
       matrix:

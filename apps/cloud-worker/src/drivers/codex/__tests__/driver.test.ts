@@ -26,6 +26,14 @@ const prose = (events: SessionNotification[]) => events.flatMap(({ update }) =>
   update.sessionUpdate === "agent_message_chunk" && update.content.type === "text" ? [update.content.text] : []).join("");
 
 describe("Codex driver with an offline app-server process", () => {
+  it("sends MCP through native thread configuration and redacts the capability", async () => {
+    const { driver, events } = setup();
+    const mcpServers = { tools: { type: "http" as const, url: "http://127.0.0.1:3222/mcp/fixture", headers: { Authorization: "Bearer fixture-mcp-secret" } } };
+    await driver.open({ ...openInput, mcpServers });
+    await driver.prompt(content("mcp-configuration"));
+    expect(JSON.parse(prose(events))).toEqual({ config: { mcp_servers: { tools: { url: mcpServers.tools.url, http_headers: { Authorization: "[redacted]" } } } }, secretInArgs: false });
+  });
+
   it("classifies a model refusal inside JSON-RPC data before flattening the reply", async () => {
     const { driver, events } = setup();
     await driver.open(openInput);

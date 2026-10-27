@@ -21,7 +21,12 @@ import {
   type WorkbenchTab,
 } from "./tab-model";
 import { setChangesScope } from "./tabs/changes-filter-store";
+import {
+  changesSnapshotKey,
+  readChangesSections,
+} from "./tabs/changes-snapshot-cache";
 import { isWorkbenchEditorDirty } from "./tabs/code-editor/editor-state";
+import { findRequestedChange } from "./tabs/changes-selection";
 import type { Action } from "@/renderer/state/workspace-store";
 
 export type FilePillDestination = "file" | "changes";
@@ -40,27 +45,53 @@ export function filePillPath(
 function changesQuery(
   cwd: string,
   path: string,
-): { workspaceId: string; path: string } {
-  const cloud = parseCloudWorkspaceKey(cwd);
-  if (cloud)
-    return {
-      workspaceId: cloudWorkspaceKey(cloud),
-      path: cloud.relativePath ? `${cloud.relativePath}/${path}` : path,
-    };
+): { workspaceId: string; path: string; baseBranch: string } {
   // The live union spans repositories. A separately registered nested owner
   // wins over its parent, independent of catalog order.
   const workspace = findWorkspaceForFolder(
     cwd,
     [...peekLiveWorkspaceUnion()].sort((a, b) => b.path.length - a.path.length),
   );
-  const root = workspace?.path ?? cwd;
+  const baseBranch = workspace?.baseBranch ?? "main";
+  const cloud = parseCloudWorkspaceKey(cwd);
+  if (cloud)
+    return {
+      workspaceId: cloudWorkspaceKey(cloud),
+      path: cloud.relativePath ? `${cloud.relativePath}/${path}` : path,
+      baseBranch,
+    };
+  const root =
+    workspace && isLocalMainWorkspace(workspace)
+      ? workspace.repoRoot
+      : (workspace?.path ?? cwd);
   return {
     workspaceId:
       workspace && !isLocalMainWorkspace(workspace) ? workspace.id : root,
     path:
       relativeWorkspaceFilePath(root, `${cwd.replace(/\/+$/, "")}/${path}`) ??
       path,
+    baseBranch,
   };
+}
+
+/** A diff pill always owns a Changes destination. A confirmed Branch list can
+ * resolve an old rename path, but an absent row must not change the surface. */
+function filePillChangesQuery(
+  cwd: string,
+  path: string,
+  destination: FilePillDestination,
+) {
+  if (destination !== "changes") return null;
+  const query = changesQuery(cwd, path);
+  const sections = readChangesSections(
+    changesSnapshotKey(query.workspaceId, { kind: "all" }, query.baseBranch),
+  );
+  if (!sections) return query;
+  const file = findRequestedChange(
+    sections.flatMap((section) => section.files),
+    query.path,
+  );
+  return file ? { ...query, path: file.path } : query;
 }
 
 /** Exact saved/tool paths need no filesystem search or read before navigation.
@@ -139,14 +170,25 @@ export function openFilePill(
   const scope = workbenchScopeForFolder(cwd);
   const state = useWorkspaceStore.getState();
   const current = state.workbenchByScope[scope] ?? defaultScopeFor(scope);
-  const query = destination === "changes" ? changesQuery(cwd, path) : null;
+  const candidate = filePillChangesQuery(cwd, path, destination);
+  const changes = current.tabs.find((tab) => tab.type === "changes");
+  // A legacy Changes draft owns its current path and comparison. Open the
+  // other tool's source using the chat-relative path, never the Git-relative
+  // path that a separate Files tab would otherwise append to this cwd again.
+  const query =
+    candidate &&
+    changes &&
+    isWorkbenchEditorDirty(changes.id) &&
+    changes.filePath !== candidate.path
+      ? null
+      : candidate;
   if (query) setChangesScope(query.workspaceId, { kind: "all" });
   state.dispatch(
     buildFilePillOpenAction(
       current.tabs,
       query?.path ?? path,
       scope,
-      destination,
+      query ? "changes" : "file",
       current.activeId,
     ),
   );
@@ -159,7 +201,10 @@ export function warmFilePill(
 ): void {
   const path = filePillPath(cwd, rawPath);
   if (!cwd || !path) return;
-  if (destination === "changes")
-    prefetchWorkspaceFileDiff({ ...changesQuery(cwd, path), diffScope: "all" });
-  else prefetchWorkspaceFileRead(cwd, path);
+  const query = filePillChangesQuery(cwd, path, destination);
+  if (query) {
+    // Passive transcript intent never wakes a sleeping cloud computer.
+    if (!parseCloudWorkspaceKey(cwd))
+      prefetchWorkspaceFileDiff({ ...query, diffScope: "all" });
+  } else prefetchWorkspaceFileRead(cwd, path);
 }

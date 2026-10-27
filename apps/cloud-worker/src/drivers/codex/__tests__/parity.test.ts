@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { fileURLToPath } from "node:url";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { SessionNotification } from "@zeros/protocol/agent-events";
@@ -22,6 +22,42 @@ const localMapperPath = fileURLToPath(new URL("../../../../../desktop/src/engine
 const { CodexAppServerTranslator } = await import(localMapperPath);
 
 describe("Codex native → canonical event parity", () => {
+  it("persists a recovered VM image and edit sources through the real driver and history reload", async () => {
+    const directory = await realpath(await mkdtemp(join(tmpdir(), "zeros-worker-image-parity-")));
+    const savedPath = join(directory, "sunset-poster.png");
+    const bytes = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4P9MFAAR3Ad0FpxN3AAAAAElFTkSuQmCC", "base64");
+    const inputImages = [{ path: join(directory, "beach.jpg"), sha256: "a".repeat(64) }];
+    await writeFile(savedPath, bytes);
+    const frames = [
+      { method: "item/completed", params: { item: { type: "imageGeneration", id: "generated-image", status: "completed", revisedPrompt: null, failure: null, fileId: "opaque-file", savedPath, inputImages } } },
+      { method: "turn/completed", params: { turn: { status: "completed" } } },
+    ];
+    ids.next = 0;
+    const expected: SessionNotification[] = [];
+    const local = new CodexAppServerTranslator({ sessionId: "execution", emit: (event: SessionNotification) => expected.push(event) });
+    local.startTurn();
+    for (const frame of frames) local.handle(frame.method, frame.params);
+    await local.flushImageReads();
+    ids.next = 0;
+    const actual: SessionNotification[] = [];
+    const driver = new CodexDriver({ command: process.execPath, args: [fileURLToPath(new URL("./fixtures/app-server.mjs", import.meta.url))], environment: {} });
+    driver.onEvent((event) => actual.push(event));
+    try {
+      await driver.open({ sessionId: "execution", cwd: directory, proxy: { baseUrl: "http://127.0.0.1:1/v1", token: "offline-placeholder" } });
+      await expect(driver.prompt([{ type: "text", text: `fixture:${JSON.stringify(frames)}` }])).resolves.toMatchObject({ stopReason: "end_turn" });
+      await expect.poll(() => actual).toEqual(JSON.parse(JSON.stringify(expected)));
+      const store = await SessionStore.open(join(directory, "history"), "image-workspace");
+      await store.upsert({ id: "chat", folder: "image-workspace", agentId: "codex" });
+      for (const event of actual) await store.fold("chat", event);
+      await store.flush();
+      const reloaded = await SessionStore.open(join(directory, "history"), "image-workspace");
+      const messages = reloaded.window("chat").messages.map((message) => JSON.parse(message.payload));
+      expect(messages).toEqual([expect.objectContaining({ status: "completed", rawOutput: expect.objectContaining({ savedPath, inputImages }),
+        content: [{ type: "content", content: { type: "image", mimeType: "image/png", data: bytes.toString("base64") } }],
+      })]);
+    } finally { await driver.dispose(); await rm(directory, { recursive: true, force: true }); }
+  });
+
   for (const fixture of streams) {
     it(fixture.name, () => {
       const run = (Mapper: typeof CodexEventMapper): { events: SessionNotification[]; result: unknown } => {

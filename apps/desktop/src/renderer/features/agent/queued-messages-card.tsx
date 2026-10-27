@@ -123,7 +123,7 @@ export const QueuedMessagesCard = memo(function QueuedMessagesCard({
     // follows it in the dock (both are positioned, so DOM order paints the
     // composer on top) — the "attached" look. pb-1.5 keeps the footer clear
     // of the hidden strip.
-    <TooltipProvider delayDuration={500} skipDelayDuration={0}>
+    <TooltipProvider>
       <div data-queued-messages data-turn-failure-card={notSent || undefined} className="border-border1 bg-bg1 relative -mb-2.5 flex flex-col rounded-lg border pb-1.5">
         <div className="flex items-center gap-2 pr-3.5">
         <button

@@ -40,6 +40,17 @@ Real errors, cancellations and unreported completions retain normal treatment.
   Derive saved image links only from result paths or explicit resource links;
   an input `filePath`/`file_path` is only a requested destination, even after
   the operation reaches a terminal status.
+- Codex keeps the image preview beneath its Generate row. Preserve legacy
+  inline results; otherwise the Local adapter or cloud worker reads the native
+  `savedPath` once at completion, asynchronously, and stores verified image
+  bytes in the canonical transcript. The app never reads a VM path directly.
+  Accept only bounded regular PNG, JPEG or WebP files, without following
+  symlinks. If no preview is available, including a failed browser decode, show
+  the plain status “Image saved by Codex” instead of a broken image.
+  Observed `inputImages` appear below the preview as “Edited from” file pills,
+  using the existing workspace-aware Files navigation and active-only warming.
+  Source paths stay literal; they do not change the generated target, title or
+  count. Hidden rows release media and keep source pills inert.
 - Keep supported tool content (text, images, audio, resource links and embedded
   resource text), plus bounded structured results. A text summary must not hide
   a sibling report link or MCP `structuredContent`. Preserve errors and native
@@ -67,6 +78,13 @@ Real errors, cancellations and unreported completions retain normal treatment.
   active. Unknown provider resource schemes stay readable without invoking an
   arbitrary OS handler. Generated HTML is source content in Files, not trusted
   app code. Do not bypass existing image size or binary-preview limits.
+- Diff file pills open Changes at their exact Branch comparison, including a
+  recorded source path that Git now reports as renamed. Ignored and unchanged
+  targets retain that Changes selection with an explicit empty state. Use a
+  cached comparison when available; cold reads never delay navigation or
+  replace the requested file with an unrelated change. Preserve the chat's
+  working folder when translating Git-root-relative paths, keep newer
+  selections and unsaved editors intact, and never wake a cloud VM for hover.
 - Code-agent startup instructions place task files (plans, notes, logs,
   screenshots, handoffs) in `.context/<task>/` and ask agents not to commit
   them unless the user asks. Read relevant existing context, pass exact paths
@@ -166,6 +184,40 @@ For Cursor upgrades, compare the installed SDK types with its
 [TypeScript SDK reference](https://cursor.com/docs/sdk/typescript); the pinned
 types and native-event regression fixtures define the integration's supported
 delivery shapes.
+
+## Cursor SDK compatibility
+
+Desktop Local workspaces (Personal and organization-owned) and the standalone
+cloud worker bundle Cursor SDK 1.0.40 with zod 4.6.7. The SDK now accepts zod
+as a peer and builds its exported schemas through `zod/v3`, which is included
+in zod 4. The expanded `ZodType` declarations preserve existing tool, callback
+and conversation shapes. No vulnerable zod 3 package or audit exception is
+needed. The fingerprinted decisions in `scripts/agent-runtime/reviews.json`
+cover every declaration change from the prior bundled runtime.
+
+The SDK's optional `teamId` remains unused: it offers no team-listing API, and
+Zeros' account connection retains a minted API key and email without a team
+selection. A Zeros organization is not a Cursor team. A max-mode label in the
+effort menu is also deferred; `ModelSelection.maxMode` and
+`ModelVariant.isMaxMode` do not change Zeros' persisted effort controls. Native
+model resolution remains SDK-owned. Typed `computerUse` calls retain generic
+tool rows; readable action steps are deferred because the SDK executor requires
+an X11 driver (`XDOTOOL` or `NATIVE_X11`), which the Mac app and headless cloud
+VM do not provide.
+
+Background subagents keep their original run and row identities after the
+launching call returns; the background-activity contract below still applies.
+The SDK handles nested Claude Code `PreToolUse` denials and retries eligible
+one-shot outages once; it never replays a streamed agent run for that retry.
+Its platform sandbox helper must retain execute permission in the worker
+bundle and desktop ASAR-unpacked resources.
+
+If a local store fails after text has streamed, the SDK can finish with that
+text and continue in memory. Both Zeros translators currently consume terminal
+statuses only, so the accompanying nonterminal `status.message` warning is
+lost. Surfacing it is deferred. A minimal follow-up would preserve one bounded,
+deduplicated inbetween warning for the owning run, without changing its terminal
+state or reopening it on replay.
 
 ## Cursor managed MCP catalog lifetime
 
@@ -269,8 +321,9 @@ and the saved pick and settings are retried after the window. Development
 builds log each refused selection and the account's advertised registry
 schema. `zeros local models` reads the adapter's current catalog, so a refused
 model shows as unavailable there too. Unavailable menu rows retain their saved
-identity, explain the reason, and offer a view of eligible choices without
-changing the selection or favorite.
+identity and explain the reason. Eligible models are directly selectable in
+the same catalog and search, without a separate availability filter. Browsing
+never changes the selection or favorite.
 
 Agent failures stay in the affected chat: terminal initialization failures use an
 inline notice before any prompt exists, prompt failures use their turn notice,
@@ -593,8 +646,31 @@ suites, `features/agent/__tests__/fallback-transcript.test.ts`,
   and usage accounting independently.
 - Keep the request's original elapsed-time anchor during background work. A
   later parent reply extends the footer beyond the first settled send; use its
-  last changed text time, excluding child/tool bookkeeping and identical replay.
+  last changed text time, excluding child/tool bookkeeping, wake-up status and identical replay.
   Older persisted text without `updatedAt` uses its existing creation time.
+- Automatic Claude wake-ups continue the existing user turn without a user
+  message. While pending, keep the settled output/footer followed by the
+  existing **Waiting for N background tasks · elapsed** line. When work resumes,
+  its first working-feed row is an alarm-clock status: **Woke up for “reason” ·
+  due time** for dynamic loops, or **Scheduled task “name” · due time** for
+  CronCreate/routines. Format the epoch due time in the reader's timezone, and
+  omit it when unknown (a recurring job's later runs) while keeping the name.
+  Without a known reason use **Woke up on schedule** or **Scheduled task
+  started**. A new ScheduleWakeup supersedes the pending dynamic wake, as the
+  CLI does. Never show this notice next to the waiting line; if the cloud
+  hook arrives before actual activity, retain it until that work begins.
+  Once settled, fold it into the chip of the work it started, without adding a
+  message or tool count. It is plain status, with no panel or pill. Exclude it
+  from titles, answer copying, concise/fork transcripts, live prose smoothing
+  and evidence of model recovery. Full activity exports label it **Status**;
+  ordinary history/search retain its readable fallback text and optional metadata.
+  Reset/truncation keeps the existing user-turn boundaries.
+  Match hook prompts exactly against tracked task prompts; ambiguous matches
+  stay generic. Deduplicate using the native prompt ID through replay/resume.
+  CronCreate/CronList `nextFireAt` includes the scheduler offset and outranks the
+  one-shot cron estimate; ScheduleWakeup keeps `scheduledFor`. The cloud worker
+  registers only the notice hook, preserving its background/idle policy. A
+  wake-up notice is never evidence that a different cloud outbox prompt was accepted.
 - Claude `system/init` is turn metadata, not process replacement. Only the
   adapter creating a new query resets process-owned tasks, wakeups, lifecycle
   joins and workflow narration. Resume can reuse the native session ID; it
@@ -654,14 +730,37 @@ suites, `features/agent/__tests__/fallback-transcript.test.ts`,
   capability keep their admission queue. With `promptOutbox: 1`, saved prompts
   appear immediately as ordinary bubbles while the VM is running, including
   behind another turn. Queue cards describe unavailable compute only. Future
-  bubbles are separate from native rows; activity and the working footer belong
-  to the actual provider turn, even when it is not the visual tail. A receipt
+  bubbles are separate from native rows. On a running VM the head bubble and
+  existing pending-turn indicator publish together after the journal commit,
+  with the clock starting at renderer Send before any HTTPS/provider response.
+  That private commit releases the submitted composer and saved draft with the
+  existing unchanged-document guard. A failed commit or newer typing keeps the
+  draft; a later HTTPS reply cannot clear it a second time.
+  A follow-up starts its clock when it becomes the head or is dispatched, not
+  while another turn owns activity. Its exact clock survives reload. Activity
+  and the working footer belong to that turn even when it is not the visual
+  tail; an older legacy bridge turn keeps ownership until its native ending.
+  A receipt
   for a refused or interrupted send keeps that bubble and an explicit Retry
   action visible; it never disappears or leaves later sends paused. Worker
   restart settles it once as “The worker restarted before this turn finished”.
   Inbox delivery is not provider acceptance and cannot settle a legacy bridge
   turn without that turn's own confirmation.
   Provider facts (model fallback, usage limits) stay plain inline text.
+- Cloud turn feedback is independent of delivery retirement. An exact native
+  terminal fact mounts its footer immediately, including while the durable
+  receipt remains `accepted`, and freezes the duration. Final text and another
+  turn's terminal event do not prove completion. Stop synchronously returns the
+  composer to Send, shows **STOPPED BY USER** and the footer, and freezes that
+  turn's clock before any journal, migration or HTTPS wait. Late running events,
+  chunks and receipts may reconcile content but cannot restart presentation.
+  Native completion or provider failure replaces the optimistic stopped label
+  without extending the duration. A definitive refusal restores only the same
+  operation's turn; timeout/disconnection retains the stopped view with the
+  unconfirmed notice and Retry Stop. Repeated Stop joins the original operation,
+  while a follow-up keeps its own identity behind the cancellation fence.
+  Local Personal and organization-local retain their existing Send/Stop and
+  background-continuation clock behavior.
 - Authentication failures have one product Sign in notice. In history, show a
   compact **Sign-in required** status until a later turn in that conversation
   produces genuine root model work, then show **Signed in**. A new prompt,
@@ -951,7 +1050,34 @@ Regression coverage must include Stop with multiple follow-ups, selected sends,
 new composer sends, edit holds, duplicate clicks, lost/late acknowledgements,
 query replacement, host disposal, buffered input, and native cancellation receipts.
 
-## Turn usage in the output footer
+## Turn changes and usage in the output footer
+
+Keep duration, copy and the action menu in the settled turn's toolbar. Only
+the actual last turn automatically shows its recorded changes; a last turn
+without changes never promotes an older card. Historical turns show aggregate
+green additions and red deletions beside the menu, including zero-line
+metadata changes. Clicking or pressing Enter/Space toggles that turn's card;
+the control uses `bg1-hover` and exposes its expanded state. A new thread tail
+or a changed chat/workspace identity closes manually opened historical cards.
+
+Recorded changes use one `bg1-highlight` card with a `border2` outline:
+filename/icon on the left and additions/deletions on the right. Show four
+files initially, followed by **Show N more** when needed. Expanded files use
+a ten-row (280px) scroll area; the header and **Review** stay visible. Keyboard
+expansion moves focus to the first newly revealed file. Closing the card or
+changing its owner resets the file-list disclosure.
+
+Review publishes the Changes tab with the explicit selected turn range,
+including for the latest turn, so later work cannot retarget it. Each file row
+opens Changes in single-file presentation with that same explicit turn range
+and the clicked path. Apply this to Claude, Codex
+and Cursor in Personal Local, organization-local and cloud workspaces. Local
+uses keyed turn records; cloud uses the worker's mirrored opening-message
+summary, without waking the VM for passive transcript reads or hover previews.
+No recorded changes means no card; raw tool proposals are never a fallback.
+When that opening sits beside a long resident window, its final summary
+updates the retained opening in place; it must never append another prompt
+after the answer or change the older-page cursor.
 
 The timer is the only usage-card trigger. Show Input, Output, Cache read and
 one Total cost with agent/start/end details. Keep unknown distinct from zero,

@@ -18,6 +18,7 @@ const SHELL = source("apps/desktop/src/renderer/app-shell.tsx");
 const MODEL = source(
   "apps/desktop/src/renderer/shell/sidebar-workspace-model.ts",
 );
+const MENU = source("apps/desktop/src/renderer/shell/sidebar-workspace-menu.tsx");
 
 /** The literal class string assigned to a top-level `const NAME = "…"`. */
 function classConstant(src: string, name: string): string {
@@ -132,18 +133,14 @@ describe("app shell navigation", () => {
 });
 
 describe("sidebar workspace list presentations", () => {
-  it("offers only Grouped and Ungrouped, with no repository-only filters", () => {
+  it("offers Repository, Status and None with independent repository and sort controls", () => {
     expect(MODEL).toMatch(
-      /SIDEBAR_WORKSPACE_LIST_FILTERS[^=]*=\s*\[\s*"grouped",\s*"ungrouped",?\s*\]/,
+      /SIDEBAR_WORKSPACE_LIST_FILTERS[^=]*=\s*\[\s*"grouped",\s*"status",\s*"ungrouped",?\s*\]/,
     );
-    const menu = between(
-      SIDEBAR,
-      'aria-label="Filter workspaces"',
-      "</DropdownMenu>",
-    );
-    expect(menu).toContain("SIDEBAR_WORKSPACE_LIST_FILTERS.map(");
-    expect(menu).not.toContain("repositoryWorkspaceListFilter");
-    expect(menu).not.toContain('"active"');
+    expect(MENU).toContain("SIDEBAR_WORKSPACE_LIST_FILTERS.map(");
+    expect(MENU).toContain('aria-label="Group"');
+    expect(MENU).toContain('aria-label="Search repositories"');
+    expect(MENU).toContain('aria-label="Sort by"');
     expect(SIDEBAR).not.toContain("repositoryWorkspaceListFilter");
   });
 
@@ -195,12 +192,13 @@ describe("sidebar workspace rows", () => {
   it("fill the sidebar width with the shared hover and selection fill", () => {
     const cls = classConstant(ROW, "SIDEBAR_WORKSPACE_ROW_CLS");
     expect(cls).toMatch(/\bw-full\b/);
-    expect(cls).toMatch(/\bh-7\.5\b/);
+    expect(cls).toMatch(/\bh-8\b/);
     expect(cls).toContain("hover:bg-(--surface-hover)");
     expect(cls).toContain("focus-within:bg-(--surface-hover)");
     expect(cls).toContain("data-[active=true]:bg-(--surface-hover)");
     expect(cls).toMatch(/data-\[active=true\]:text-fg1\b/);
     expect(SIDEBAR).toMatch(/<Surface\s+as="nav"\s+kind="sidebar"/);
+    expect(classConstant(HEADER, "REPOSITORY_HEADER_CLS")).toMatch(/\bh-8\b/);
     const surface = source(
       "apps/desktop/src/renderer/shared/ui/layout/surface.tsx",
     );
@@ -328,11 +326,11 @@ describe("sidebar collapse and geometry", () => {
     expect(WORKSPACE_HEADER.match(/data-window-controls-reserve/g)).toHaveLength(1);
   });
 
-  it("uses 30px rows and 2px gaps, with a quiet section header", () => {
+  it("uses 32px repository rows and 2px gaps, with a quiet section header", () => {
     const entry = classConstant(SIDEBAR, "SIDEBAR_ENTRY_CLS");
     expect(entry).toMatch(/\bh-7\.5\b/);
     expect(classConstant(HEADER, "REPOSITORY_HEADER_CLS")).toMatch(
-      /\bh-7\.5\b/,
+      /\bh-8\b/,
     );
     expect(SIDEBAR).toContain('<div className="flex flex-col gap-0.5">');
     expect(SIDEBAR).toContain('className="flex flex-col gap-0.5 empty:hidden"');

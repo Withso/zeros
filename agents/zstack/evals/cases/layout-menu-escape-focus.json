@@ -1,0 +1,9 @@
+{
+  "id": "layout-menu-escape-focus",
+  "kind": "scenario",
+  "area": "renderer-shared-ui",
+  "fixedBy": "pr:709",
+  "symptom": "The Design layout menu smoke failed on main after sampling trigger focus immediately after Escape; the same code passed on the next run.",
+  "rule": "changes/anchored-overlay-dismissal.md: Radix restores trigger focus on the next task, so smoke awaits focus and the closed trigger state instead of sampling once.",
+  "check": "pnpm test:ui-smoke --shard=1/3"
+}

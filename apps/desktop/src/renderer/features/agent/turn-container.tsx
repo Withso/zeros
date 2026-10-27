@@ -827,19 +827,17 @@ function TurnPromptEditor({
               {/* gap-0.5: exactly 2px between the + and the pill block, matching
                   the main composer. */}
               <PromptInputTools className="min-w-0 flex-nowrap gap-0.5">
-                <Tooltip label="Attach file">
-                  <Button
-                    variant="ghost"
-                    size="icon-sm"
-                    type="button"
-                    onClick={() => fileInputRef.current?.click()}
-                    aria-label="Attach file"
-                    disabled={submitting}
-                    className="rounded-sm"
-                  >
-                    <Plus size={14} />
-                  </Button>
-                </Tooltip>
+                <Button
+                  variant="ghost"
+                  size="icon-sm"
+                  type="button"
+                  onClick={() => fileInputRef.current?.click()}
+                  aria-label="Attach file"
+                  disabled={submitting}
+                  className="rounded-sm"
+                >
+                  <Plus size={14} />
+                </Button>
                 <input
                   ref={fileInputRef}
                   type="file"

@@ -24,6 +24,7 @@
 // ──────────────────────────────────────────────────────────
 
 import { create } from "zustand";
+import { buildDirectFileOpenAction } from "../shell/workbench/direct-file-open";
 import { isRunSessionId } from "../platform/workspace-run-identity";
 import {
   openTerminalTab,
@@ -43,7 +44,7 @@ import {
   loadLegacyActiveChatId,
 } from "./chat-boot-cache";
 import { cloudFolderForChatId, resolveBootActiveChatId } from "./boot-active-chat";
-import { isCloudWorkspace } from "../platform/bridge/cloud-workspace-key";
+import { cloudWorkspaceKey, isCloudWorkspace, parseCloudScopedId } from "../platform/bridge/cloud-workspace-key";
 import { setSetting } from "../platform/settings";
 import { ACTIVE_CHAT_KEY } from "./chats-local-cache";
 import {
@@ -73,11 +74,13 @@ import { subscribeToLiveChatDrafts, liveChatDraftEntries } from "../features/age
 import { liveEditDraftEntries, subscribeToLiveEditDrafts, pruneLiveEditDrafts } from "../features/agent/edit-live-drafts";
 import { onNativeBeforeQuit } from "../platform/runtime";
 import { startAttachmentSourceMaintenance } from "../features/agent/attachment-sources";
+import "./create-composer-drafts";
 import { forgetFreshLocalChat, markFreshLocalChat } from "../features/agent/fresh-local-chats";
 import { forgetFreshCloudChat, markFreshCloudChat } from "../features/agent/fresh-cloud-chats";
-import { localTranscriptCache } from "./local-transcript-cache";
+import { localTranscriptCache, cloudTranscriptCache } from "./local-transcript-cache";
+import { retainCloudTranscriptSummaries } from "../features/agent/chat-transcript-summaries-cache";
 import { loadProjects } from "./projects-store";
-import { DEFAULT_REPO_MODE_VIEWS, repoPageModeForView } from "./repo-page-mode";
+import { pruneOrganizationDestinations } from "./organization-destination-cache";
 import {
   findProjectForFolder,
   folderIsOwnedByProject,
@@ -101,7 +104,6 @@ import type {
   PendingChatSubmission,
   PendingComposerAppend,
   ProjectConnection,
-  RepoPageMode,
   RepoPageView,
   WorkspacePage,
   WorkspaceState,
@@ -195,11 +197,6 @@ export type Action =
       type: "SET_REPO_PAGE_VIEW";
       projectId: string;
       view: RepoPageView;
-    }
-  | {
-      type: "SET_REPO_PAGE_MODE";
-      projectId: string;
-      mode: RepoPageMode;
     }
   | {
       type: "REMOVE_REPO_UI_STATE";
@@ -351,6 +348,15 @@ export type Action =
       /** Explicit persisted scope for retained Browser surfaces. Omitted by
        * ordinary active-workspace controls. */
       scope?: string;
+    }
+  | {
+      /** Consume an explicit Changes request and open its source atomically. */
+      type: "OPEN_REQUESTED_CHANGES_FILE";
+      scope: string;
+      id: string;
+      /** Git-root-relative request, and the same file relative to the chat. */
+      path: string;
+      filePath: string;
     }
   | {
       /** Update a nested destination and focus its owning tab atomically. */
@@ -541,8 +547,6 @@ const initialState: WorkspaceState = {
   // page without an id falls back to the Dashboard on read).
   activeRepoId: persistedUiState.activeRepoId ?? null,
   repoPageViewByProject: persistedUiState.repoPageViewByProject ?? {},
-  repoPageViewByModeByProject:
-    persistedUiState.repoPageViewByModeByProject ?? {},
   isLoading: false,
   aiSettings: loadAiSettings(),
   // The validated local snapshot is available before React mounts. SQLite is
@@ -650,30 +654,19 @@ export function selectRepoPageView(
   return s.repoPageViewByProject[projectId] ?? "workspaces";
 }
 
-/** Keep the active destination and both mode memories in the same snapshot.
- * The previous active view seeds mode memory for older persisted snapshots. */
+/** Remember the active destination for this exact repository. */
 function rememberRepoPageView(
   state: WorkspaceState,
   projectId: string,
   view: RepoPageView,
 ): WorkspaceState {
   if (state.repoPageViewByProject[projectId] === view) return state;
-  const previous = selectRepoPageView(state, projectId);
   return {
     ...state,
     repoPageViewByProject: setBoundedRecord(
       state.repoPageViewByProject,
       projectId,
       view,
-    ),
-    repoPageViewByModeByProject: setBoundedRecord(
-      state.repoPageViewByModeByProject,
-      projectId,
-      {
-        ...state.repoPageViewByModeByProject[projectId],
-        [repoPageModeForView(previous)]: previous,
-        [repoPageModeForView(view)]: view,
-      },
     ),
   };
 }
@@ -1100,17 +1093,6 @@ function reducer(state: WorkspaceState, action: Action): WorkspaceState {
     case "SET_REPO_PAGE_VIEW": {
       return rememberRepoPageView(state, action.projectId, action.view);
     }
-    case "SET_REPO_PAGE_MODE": {
-      if (
-        repoPageModeForView(selectRepoPageView(state, action.projectId)) ===
-        action.mode
-      )
-        return state;
-      const view =
-        state.repoPageViewByModeByProject[action.projectId]?.[action.mode] ??
-        DEFAULT_REPO_MODE_VIEWS[action.mode];
-      return rememberRepoPageView(state, action.projectId, view);
-    }
     case "REMOVE_REPO_UI_STATE": {
       const removedFolders = [
         action.repoRoot,
@@ -1124,6 +1106,7 @@ function reducer(state: WorkspaceState, action: Action): WorkspaceState {
           projects,
           removedFolders,
         );
+      pruneOrganizationDestinations(destination => folderWasRemoved(destination.folder));
       const removedActiveRepo = state.activeRepoId === action.projectId;
       const removedWorkspaceFilter =
         workspaceListFilterProjectId(state.workspaceListFilter) ===
@@ -1165,10 +1148,6 @@ function reducer(state: WorkspaceState, action: Action): WorkspaceState {
             ? null
             : state.activeChatId,
         repoPageViewByProject,
-        repoPageViewByModeByProject: removeRecordKey(
-          state.repoPageViewByModeByProject,
-          action.projectId,
-        ),
         lastWorkspaceByRepoRoot,
         lastWorkspaceFolder,
         newAgentFolder:
@@ -1206,6 +1185,7 @@ function reducer(state: WorkspaceState, action: Action): WorkspaceState {
           folderIsOwnedByProject(folder, project.id, projects, [
             action.folder,
           ]));
+      pruneOrganizationDestinations(destination => folderWasRemoved(destination.folder));
       const activeChatRemoved = state.activeChatId
         ? state.chats.some(
             (chat) =>
@@ -1349,8 +1329,8 @@ function reducer(state: WorkspaceState, action: Action): WorkspaceState {
         pendingChatHydrationFolder: next.pendingChatHydrationFolder && removed(next.pendingChatHydrationFolder) ? null : next.pendingChatHydrationFolder,
         lastWorkspaceByRepoRoot: removeRecordKeysMatching(next.lastWorkspaceByRepoRoot, removed),
         ...(activeRemoved ? {
-          activePage: "dashboard",
-          lastHomePage: "dashboard",
+          activePage: state.activePage === "workspace" ? "dashboard" : state.activePage,
+          lastHomePage: state.activePage === "workspace" ? "dashboard" : state.lastHomePage,
           activeChatId: null,
           newAgentFolder: null,
           lastWorkspaceFolder: null,
@@ -1951,6 +1931,50 @@ function reducer(state: WorkspaceState, action: Action): WorkspaceState {
         }),
       };
     }
+    case "OPEN_REQUESTED_CHANGES_FILE": {
+      const cur = state.workbenchByScope[action.scope];
+      const source = cur?.tabs.find((tab) => tab.id === action.id);
+      // A completed read cannot steal focus after a tab, file or owner switch,
+      // nor replay the fallback when the user returns to Changes later.
+      if (
+        workbenchScopeKey(state) !== action.scope ||
+        cur?.activeId !== action.id ||
+        source?.type !== "changes" ||
+        source.filePath !== action.path ||
+        source.changesRequestedFile !== action.path
+      ) return state;
+      const consumed = reducer(state, {
+        type: "UPDATE_WORKBENCH_TAB",
+        scope: action.scope,
+        id: action.id,
+        updates: { changesRequestedFile: undefined },
+      });
+      const opened = reducer(
+        consumed,
+        buildDirectFileOpenAction(cur.tabs, action.filePath, {
+          scope: action.scope,
+          literalPath: true,
+        }),
+      );
+      const id = opened.workbenchByScope[action.scope].activeId;
+      if (!id) return state;
+      return reducer(opened, {
+        type: "UPDATE_WORKBENCH_TAB",
+        scope: action.scope,
+        id,
+        updates: {
+          diff: false,
+          diffScope: "all",
+          diffSha: undefined,
+          diffHistory: undefined,
+          turnChatId: undefined,
+          turnId: undefined,
+          discardable: false,
+          isNewFile: false,
+          viewerMode: undefined,
+        },
+      });
+    }
     case "OPEN_WORKBENCH_TAB": {
       const scope = action.scope ?? workbenchScopeKey(state);
       const cur = state.workbenchByScope[scope] ?? defaultScopeFor(scope);
@@ -1960,7 +1984,7 @@ function reducer(state: WorkspaceState, action: Action): WorkspaceState {
         target?.type === "files" &&
         typeof nextFilePath === "string" &&
         nextFilePath.trim().length > 0 &&
-        nextFilePath.trim() !== target.filePath;
+        nextFilePath !== target.filePath;
       const updated = action.updates
         ? reducer(state, {
             type: "UPDATE_WORKBENCH_TAB",
@@ -2089,6 +2113,9 @@ function reducer(state: WorkspaceState, action: Action): WorkspaceState {
         // updates can neither demote the fixed Files home nor mint a new one.
         fixed: target.fixed,
       };
+      if (target.skillSource && Object.prototype.hasOwnProperty.call(action.updates, "filePath") &&
+        action.updates.filePath !== target.filePath && !Object.prototype.hasOwnProperty.call(action.updates, "skillSource"))
+        updatedTarget.skillSource = undefined;
       if (
         (target.type === "files" || target.type === "changes") &&
         Object.prototype.hasOwnProperty.call(action.updates, "filePath") &&
@@ -2118,7 +2145,9 @@ function reducer(state: WorkspaceState, action: Action): WorkspaceState {
         Object.prototype.hasOwnProperty.call(action.updates, "filePath") &&
         typeof action.updates.filePath === "string"
       ) {
-        const path = action.updates.filePath.trim();
+        // File-tree and command-palette selections are literal filesystem
+        // identities. Typed paths are normalized by their input boundary.
+        const path = action.updates.filePath;
         const suppliedTitle = action.updates.title?.trim();
         updatedTarget = {
           ...updatedTarget,
@@ -2286,6 +2315,17 @@ function noteChatTranscriptLifecycle(state: WorkspaceState, action: Action): voi
     forgetFreshLocalChat(action.id);
     forgetFreshCloudChat(action.id);
     localTranscriptCache.forget(action.id);
+    cloudTranscriptCache.forget(action.id);
+    const cloud = parseCloudScopedId(action.id);
+    if (cloud) retainCloudTranscriptSummaries(chatId => chatId !== action.id, folder => folder === cloudWorkspaceKey(cloud));
+  } else if (action.type === "HYDRATE_CHATS" && action.confirmedCloudWorkspaces?.length) {
+    const confirmed = new Set(action.confirmedCloudWorkspaces);
+    const known = new Set(action.chats.map(chat => chat.id));
+    cloudTranscriptCache.retain((chatId, folder) => !confirmed.has(folder) || known.has(chatId));
+    retainCloudTranscriptSummaries(chatId => known.has(chatId), folder => confirmed.has(folder));
+  } else if (action.type === "PRUNE_CLOUD_WORKSPACES") {
+    cloudTranscriptCache.retain((_chatId, folder) => !action.folders.includes(folder));
+    retainCloudTranscriptSummaries(() => false, folder => action.folders.includes(folder), true);
   }
 }
 
@@ -2318,7 +2358,7 @@ export const useWorkspaceStore = create<WorkspaceStore>((set, get) => ({
   }
 }
 
-/** Record one deliberate action without subscribing the caller to the store.
+/** Record one meaningful action or confirmed workspace metadata update.
  * Selection-only surfaces must never call this helper. */
 export function recordWorkspaceActivity(folder: string): void {
   useWorkspaceStore.getState().dispatch({
@@ -2366,7 +2406,6 @@ useWorkspaceStore.subscribe((s, prev) => {
     s.lastHomePage !== prev.lastHomePage ||
     s.activeRepoId !== prev.activeRepoId ||
     s.repoPageViewByProject !== prev.repoPageViewByProject ||
-    s.repoPageViewByModeByProject !== prev.repoPageViewByModeByProject ||
     s.activeChatId !== prev.activeChatId ||
     s.newAgentFolder !== prev.newAgentFolder ||
     s.lastWorkspaceFolder !== prev.lastWorkspaceFolder ||

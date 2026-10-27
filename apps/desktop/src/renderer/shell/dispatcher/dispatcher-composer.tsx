@@ -17,15 +17,11 @@
 // Empty composer → Create still works: the parent creates the workspace on the
 // chosen agent/model with no first turn. Non-empty → seed + auto-send.
 //
-// Design mode (the page's Code/Design toggle): a design workspace takes no
-// agent prompt, so the editor, pills and attachment menu step aside — hidden
-// and inert, NOT unmounted, so a typed prompt survives a round trip through
-// the toggle — and a summary of what Design entry will do to the repository
-// takes the editor's place. "Create" (button or ↵) then runs the parent's
-// design create instead of the prompt create.
+// The optional Design presentation hides the prompt and runs the parent's
+// Design create callback. The Create page itself uses only the Code composer.
 // ──────────────────────────────────────────────────────────
 
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import {
   CornerDownLeft,
   FolderInput,
@@ -35,7 +31,6 @@ import {
 } from "lucide-react";
 
 import { Button } from "../../shared/ui";
-import { Tooltip } from "@/renderer/shared/ui/primitives";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -81,6 +76,11 @@ import {
   type AgentModelSelection,
 } from "./agent-model-picker";
 import { ZerosSpinner } from "@/renderer/shared/ui/loading";
+import { toast } from "../../shared/ui/primitives/elements";
+import { createComposerDrafts, pendingCreateComposerDraftKey } from "../../state/create-composer-drafts";
+import { prepareAttachmentSource, supplyLegacyAttachmentBytes } from "../../features/agent/attachment-sources";
+import type { ComposerAttachment } from "../../features/agent/composer-attachments";
+import { textToDoc } from "../../features/agent/composer-editor/serialize";
 
 /** What the page knows about creating a DESIGN workspace for the selected
  *  repository — the composer only presents it. */
@@ -130,9 +130,22 @@ export interface DispatcherCreatePayload {
   lastModeId: string | null;
   /** Linked workspaces/dirs (Claude /add-dir) → ChatThread.additionalDirectories. */
   additionalDirectories: string[];
+  /** Only a confirmed creation may consume this exact submitted draft. */
+  draft?: { key: string; revision: number };
 }
 
+export type DispatcherComposerConfiguration = Pick<DispatcherCreatePayload,
+  "selection" | "effort" | "fast" | "permissionMode" | "lastModeId">;
+
 interface DispatcherComposerProps {
+  active?: boolean;
+  allowAdditionalDirectories?: boolean;
+  /** null means the destination has not resolved yet; undefined is ephemeral. */
+  draftKey?: string | null;
+  initialConfiguration?: DispatcherComposerConfiguration;
+  onConfigurationChange?: (configuration: DispatcherComposerConfiguration) => void;
+  onOpenAttachment?: (attachment: ComposerAttachment) => void;
+  onAttachmentsChange?: (attachments: ComposerAttachment[]) => void;
   /** Registry snapshot — null while loading. */
   agents: BridgeRegistryAgent[] | null;
   /** Selected project root — the @-file picker reads files from here, and it's
@@ -155,6 +168,13 @@ interface DispatcherComposerProps {
 }
 
 export function DispatcherComposer({
+  active = true,
+  allowAdditionalDirectories = true,
+  draftKey,
+  initialConfiguration,
+  onConfigurationChange,
+  onOpenAttachment,
+  onAttachmentsChange,
   agents,
   cwd,
   originUrl,
@@ -165,19 +185,49 @@ export function DispatcherComposer({
   design,
   permissionModes = true,
 }: DispatcherComposerProps) {
+  const [initialDraft] = useState(() => {
+    const pendingKey = draftKey ? pendingCreateComposerDraftKey(draftKey) : null;
+    const saved = (draftKey ? createComposerDrafts.get(draftKey)?.draft : undefined) ??
+      (pendingKey ? createComposerDrafts.get(pendingKey)?.draft : undefined);
+    return saved ? structuredClone(saved) : undefined;
+  });
+  useLayoutEffect(() => {
+    if (draftKey) createComposerDrafts.adoptPending(draftKey);
+  }, [draftKey]);
+  const activeRef = useRef(active);
+  activeRef.current = active;
+  const draftChangedRef = useRef(() => {});
+  const draftErrorShown = useRef(false);
+  const savingDraftRef = useRef(false);
+  const draftWriteFailedRef = useRef(false);
+  const reportDraftError = useCallback((message: string) => {
+    if (!activeRef.current || draftErrorShown.current) return;
+    draftErrorShown.current = true;
+    toast.error(message);
+  }, []);
+  const openAttachment = useCallback((attachment: ComposerAttachment) => {
+    if (activeRef.current) onOpenAttachment?.(attachment);
+  }, [onOpenAttachment]);
   const designMode = mode === "design" && design !== undefined;
-  const [selection, setSelection] = useState<AgentModelSelection | null>(null);
-  const [effort, setEffort] = useState<ChatEffort>("high");
-  const [fast, setFast] = useState(false);
+  const [selection, setSelection] = useState<AgentModelSelection | null>(initialConfiguration?.selection ?? null);
+  const [effort, setEffort] = useState<ChatEffort>(initialConfiguration?.effort ?? "high");
+  const [fast, setFast] = useState(initialConfiguration?.fast ?? false);
   const [permissionMode, setPermissionMode] =
-    useState<ChatPermissionMode>("auto");
+    useState<ChatPermissionMode>(initialConfiguration?.permissionMode ?? "auto");
   // The EXACT native mode id chosen (kept alongside the posture so a dispatcher
   // pick round-trips losslessly — see DispatcherCreatePayload.lastModeId). Seeded
   // from the born posture and updated on every Permissions-menu pick.
-  const [modeId, setModeId] = useState<string | null>(null);
-  const [linkedDirs, setLinkedDirs] = useState<string[]>([]);
+  const [modeId, setModeId] = useState<string | null>(initialConfiguration?.lastModeId ?? null);
+  const [linkedDirs, setLinkedDirs] = useState<string[]>(() => allowAdditionalDirectories ? initialDraft?.additionalDirectories ?? [] : []);
+  const linkedDirsRef = useRef(linkedDirs);
   const [workspacePickerOpen, setWorkspacePickerOpen] = useState(false);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+
+  // Model and permission choices belong to the open Create page, so replacing
+  // its scoped document must not silently reset the selected agent or model.
+  useEffect(() => {
+    if (selection) onConfigurationChange?.({ selection, effort, fast, permissionMode, lastModeId: modeId });
+  }, [selection, effort, fast, permissionMode, modeId, onConfigurationChange]);
 
   // Seed the agent/model + pill posture from the default ("starred") agent the
   // first time the registry resolves. newChatBornDefaults is the same source of
@@ -246,6 +296,14 @@ export function DispatcherComposer({
     availableCommands: [],
     placeholder: "What do you want to work on?",
     onSubmit: () => submitRef.current(),
+    onChange: () => draftChangedRef.current(),
+    initialContent: initialDraft ? { json: initialDraft.json ?? textToDoc(initialDraft.text), attachments: initialDraft.attachments } : undefined,
+    attachmentImagesActive: active,
+    portableAttachmentSources: true,
+    discoverSkills: cwd !== null,
+    sourceFilesOpen: false,
+    suggestionPlacement: "caret",
+    onOpenAttachment: onOpenAttachment ? openAttachment : undefined,
     // cwd here is the PRIMARY checkout (the workspace this page creates
     // doesn't exist yet). Attach-time staging would write phantom cards into
     // the trunk's .context; the send-path safety net stages these
@@ -253,6 +311,7 @@ export function DispatcherComposer({
     stageIntoContextGraph: false,
   });
   const {
+    clear,
     serialize,
     insertFiles,
     hasPendingAttachmentReads,
@@ -263,6 +322,53 @@ export function DispatcherComposer({
     dragActive,
     dragHandlers,
   } = composer;
+
+  draftChangedRef.current = () => {
+    const snapshot = serialize();
+    if (!snapshot) return;
+    if (draftKey) {
+      for (const attachment of snapshot.attachments) {
+        if (!attachment.validation.ok || attachment.unavailable) continue;
+        attachment.sourcePortable = true;
+        supplyLegacyAttachmentBytes(attachment);
+        void prepareAttachmentSource(attachment, true).catch(() => {
+          reportDraftError("Couldn't save an attachment on this device. Reattach it before closing Zeros.");
+        });
+      }
+      try {
+        savingDraftRef.current = true;
+        createComposerDrafts.set(draftKey, { text: snapshot.displayText, json: snapshot.json, attachments: snapshot.attachments,
+          additionalDirectories: linkedDirsRef.current });
+        draftWriteFailedRef.current = false;
+      } catch (error) {
+        draftWriteFailedRef.current = true;
+        reportDraftError(error instanceof Error ? error.message : "Couldn't save the Create draft on this device.");
+      } finally {
+        savingDraftRef.current = false;
+      }
+    }
+    onAttachmentsChange?.(snapshot.attachments);
+  };
+  useEffect(() => {
+    composer.editor?.setEditable(active && draftKey !== null);
+    if (!active) setWorkspacePickerOpen(false);
+  }, [active, composer.editor, draftKey]);
+  useEffect(() => {
+    if (!draftKey) return;
+    const unsubscribe = createComposerDrafts.subscribe(key => {
+      if (key === draftKey && !savingDraftRef.current && !draftWriteFailedRef.current && !createComposerDrafts.get(key)) {
+        linkedDirsRef.current = [];
+        setLinkedDirs([]);
+        clear();
+      }
+    });
+    const stopErrors = createComposerDrafts.onError(() => reportDraftError("Couldn't save the Create draft on this device. Keep Zeros open and try again."));
+    return () => {
+      unsubscribe();
+      stopErrors();
+      createComposerDrafts.flush();
+    };
+  }, [draftKey, clear, reportDraftError]);
 
   // Create waits while a dropped video's key frames are still being read, so
   // they seed the first message with the video.
@@ -276,8 +382,18 @@ export function DispatcherComposer({
     };
   }, []);
 
+  const updateLinkedDirs = (update: (previous: string[]) => string[]) => {
+    if (!mountedRef.current || !activeRef.current || !allowAdditionalDirectories) return;
+    const next = update(linkedDirsRef.current);
+    linkedDirsRef.current = next;
+    setLinkedDirs(next);
+    // These pills live outside TipTap. Persist them at the same boundary as
+    // editor changes, before a route switch or a native close can unmount us.
+    draftChangedRef.current();
+  };
+
   submitRef.current = (afterReads = false) => {
-    if (busy || disabled || readingAttachmentsRef.current) return;
+    if (!activeRef.current || draftKey === null || busy || disabled || readingAttachmentsRef.current) return;
     if (designMode) {
       // Switched to Design while the frames were read: that was not a
       // Create of the design workspace.
@@ -297,8 +413,13 @@ export function DispatcherComposer({
       return;
     }
     const snapshot = serialize();
+    if (draftWriteFailedRef.current) {
+      toast.error("The Create draft couldn't be saved. Shorten it or free device storage, then try again.");
+      return;
+    }
     const hasContent = snapshot != null && !snapshot.isEmpty;
-    onCreate({
+    const saved = draftKey ? createComposerDrafts.get(draftKey) : undefined;
+    const payload: DispatcherCreatePayload = {
       serialized: hasContent ? snapshot : null,
       selection,
       effort,
@@ -306,6 +427,23 @@ export function DispatcherComposer({
       permissionMode,
       lastModeId: modeId,
       additionalDirectories: linkedDirs,
+      ...(draftKey && saved ? { draft: { key: draftKey, revision: saved.revision } } : {}),
+    };
+    readingAttachmentsRef.current = true;
+    setReadingAttachments(true);
+    void (async () => {
+      // Capture the submitted document before any I/O. Newer typing remains
+      // in its own revision, even when creation or source preparation is slow.
+      await Promise.all((snapshot?.attachments ?? []).filter(a => a.validation.ok && !a.unavailable)
+        .map(a => prepareAttachmentSource(a, true)));
+      if (!mountedRef.current || !activeRef.current) return;
+      if (draftKey && !createComposerDrafts.flush()) throw new Error("Couldn't save the Create draft on this device. Try again.");
+      await onCreate(payload);
+    })().catch(error => {
+      if (mountedRef.current && activeRef.current) toast.error(error instanceof Error ? error.message : "Couldn't prepare the attachments.");
+    }).finally(() => {
+      readingAttachmentsRef.current = false;
+      if (mountedRef.current) setReadingAttachments(false);
     });
   };
 
@@ -356,6 +494,11 @@ export function DispatcherComposer({
       <PromptInput
         onSubmit={(e) => {
           e.preventDefault();
+          // Only the explicit Create control may submit this form. Editor
+          // keyboard submission has its own handler; a nested pill/menu
+          // button must never accidentally acquire create authority.
+          const submitter = (e.nativeEvent as SubmitEvent).submitter;
+          if (!submitter?.hasAttribute("data-create-submit")) return;
           submitRef.current();
         }}
       >
@@ -392,7 +535,7 @@ export function DispatcherComposer({
                 <AddedDirectories
                   dirs={linkedDirs}
                   onRemove={(dir) =>
-                    setLinkedDirs((prev) => prev.filter((d) => d !== dir))
+                    updateLinkedDirs((prev) => prev.filter((d) => d !== dir))
                   }
                 />
               </div>
@@ -413,20 +556,18 @@ export function DispatcherComposer({
                   Actions deferred past menu-close so the file dialog / modal
                   don't fight Radix's focus-restore. */}
               <DropdownMenu>
-                <Tooltip label="Attach or link">
-                  <DropdownMenuTrigger asChild>
-                    <Button
-                      variant="ghost"
-                      size="icon-sm"
-                      type="button"
-                      aria-label="Add attachment or link a workspace"
-                      disabled={busy}
-                      className="rounded-sm"
-                    >
-                      <Plus size={14} />
-                    </Button>
-                  </DropdownMenuTrigger>
-                </Tooltip>
+                <DropdownMenuTrigger asChild>
+                  <Button
+                    variant="ghost"
+                    size="icon-sm"
+                    type="button"
+                    aria-label={allowAdditionalDirectories ? "Add attachment or link a workspace" : "Add attachment"}
+                    disabled={busy || !active || draftKey === null}
+                    className="rounded-sm"
+                  >
+                    <Plus size={14} />
+                  </Button>
+                </DropdownMenuTrigger>
                 <DropdownMenuContent align="start" side="top">
                   <DropdownMenuItem
                     onSelect={() =>
@@ -436,14 +577,14 @@ export function DispatcherComposer({
                     <Paperclip size={14} />
                     Add attachment
                   </DropdownMenuItem>
-                  <DropdownMenuItem
+                  {allowAdditionalDirectories && <DropdownMenuItem
                     onSelect={() =>
                       window.setTimeout(() => setWorkspacePickerOpen(true), 0)
                     }
                   >
                     <FolderInput size={14} />
                     Link workspaces
-                  </DropdownMenuItem>
+                  </DropdownMenuItem>}
                   {/* Permission modes moved OUT of this menu (2026-07-10):
                   they're cycled by the PermissionToggle in the pill row. */}
                 </DropdownMenuContent>
@@ -481,31 +622,25 @@ export function DispatcherComposer({
                 />
               )}
             </PromptInputTools>
-            <Tooltip
-              label={
-                designMode ? "Create design workspace" : "Create workspace"
+            <Button
+              variant="default"
+              size="sm"
+              type="submit"
+              data-create-submit=""
+              className="h-7 gap-1.5"
+              disabled={
+                busy || readingAttachments || disabled || (!designMode && !selection)
               }
-              shortcut="↵"
             >
-              <Button
-                variant="default"
-                size="sm"
-                type="submit"
-                className="h-7 gap-1.5"
-                disabled={
-                  busy || readingAttachments || disabled || (!designMode && !selection)
-                }
-              >
-                {busy || readingAttachments ? (
-                  <ZerosSpinner size={16} tone="inverted" />
-                ) : (
-                  <>
-                    <span>Create</span>
-                    <CornerDownLeft className="size-3" />
-                  </>
-                )}
-              </Button>
-            </Tooltip>
+              {busy || readingAttachments ? (
+                <ZerosSpinner size={16} tone="inverted" />
+              ) : (
+                <>
+                  <span>Create</span>
+                  <CornerDownLeft className="size-3" />
+                </>
+              )}
+            </Button>
           </PromptInputToolbar>
         </PromptInputBody>
       </PromptInput>
@@ -514,15 +649,15 @@ export function DispatcherComposer({
           the agent extra access; stamped onto the new chat's
           additionalDirectories on Create. */}
       <WorkspaceDirectoryPicker
-        open={workspacePickerOpen}
+        open={active && allowAdditionalDirectories && workspacePickerOpen}
         onOpenChange={setWorkspacePickerOpen}
         linkedDirs={linkedDirs}
         cwd={cwd ?? ""}
         onLink={(dir) =>
-          setLinkedDirs((prev) => (prev.includes(dir) ? prev : [...prev, dir]))
+          updateLinkedDirs((prev) => (prev.includes(dir) ? prev : [...prev, dir]))
         }
         onUnlink={(dir) =>
-          setLinkedDirs((prev) => prev.filter((d) => d !== dir))
+          updateLinkedDirs((prev) => prev.filter((d) => d !== dir))
         }
       />
     </div>

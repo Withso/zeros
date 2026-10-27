@@ -501,7 +501,7 @@ function AnnotationColorMenu({
 }) {
   return (
     <DropdownMenu>
-      <Tooltip label="Color">
+      <Tooltip label="Color" delayDuration={1500}>
         <DropdownMenuTrigger asChild>
           <IconButton
             size="compact"
@@ -620,16 +620,14 @@ export function SimulatorAnnotateToolbar({
         )}
         Add to chat
       </Button>
-      <Tooltip label="Close" shortcut="Esc">
-        <IconButton
-          size="compact"
-          label="Close"
-          disabled={adding}
-          onClick={() => leaveSimulatorAnnotation(tabId)}
-        >
-          <X aria-hidden />
-        </IconButton>
-      </Tooltip>
+      <IconButton
+        size="compact"
+        label="Close"
+        disabled={adding}
+        onClick={() => leaveSimulatorAnnotation(tabId)}
+      >
+        <X aria-hidden />
+      </IconButton>
     </Toolbar>
   );
 }

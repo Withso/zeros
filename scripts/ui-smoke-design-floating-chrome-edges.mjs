@@ -92,13 +92,14 @@ export async function runDesignFloatingChromeEdgesSmoke({
       return {
         panel: rect("[data-design-floating-panel]").left,
         timeline: rect("[data-design-motion-timeline]").right,
-        pill: rect("[data-design-directory-header]").right,
+        toolbarWidth: rect("[data-design-directory-header]").width,
+        surfaceWidth: rect("[data-design-workspace-surface]").width,
       };
     });
     check(
       "while the width seam is held the timeline ends 8px beside the panel",
       Math.abs(held.panel - held.timeline - 8) < 1 &&
-        held.pill + 8 <= held.panel,
+        held.toolbarWidth === held.surfaceWidth,
       JSON.stringify(held),
     );
     await page.mouse.up();

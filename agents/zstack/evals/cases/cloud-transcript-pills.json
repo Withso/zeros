@@ -1,0 +1,9 @@
+{
+  "id": "cloud-transcript-pills",
+  "kind": "replay",
+  "area": "cloud-workspaces",
+  "fixedBy": "pr:706",
+  "symptom": "New cloud chat tabs and restarts flashed workspace rows before their known transcript pills; failed reads replaced known history with emptiness.",
+  "rule": "Share one owner-scoped folder list, seed only real user prompts, persist and prune within the same account lifetime, and render known pills without workspace-detail reads. See agents/zstack/changes/cloud-transcript-pills.md.",
+  "check": "pnpm vitest run apps/desktop/src/renderer/features/agent/__tests__/cloud-transcript-summaries.test.ts apps/desktop/src/renderer/features/agent/__tests__/cloud-summary-history-client.test.ts"
+}

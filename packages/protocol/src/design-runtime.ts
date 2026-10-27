@@ -52,6 +52,9 @@ export interface DesignRuntimeTreeNode {
   oid: string;
   tag: string;
   name: string;
+  /** Explicit authored data-name, distinct from the inferred fallback name.
+   * Optional so trees from older runtimes remain readable. */
+  layerName?: string;
   text: string | null;
   visible: boolean;
   /** Lean computed layout identity used by Layers icons. Optional for runtime
@@ -499,6 +502,8 @@ export interface DesignRuntimeStylesheetPreviewResult {
 export interface DesignRuntimeCapabilities {
   methods: DesignRuntimeMethod[];
   cancellation: true;
+  /** Capture cancellation responds only after decode/encoding cleanup. */
+  captureCompletion?: true;
   typedErrors: true;
   sourcePinned: true;
   maxStyleProperties: number;
@@ -796,6 +801,8 @@ function isRuntimeTree(value: unknown): value is DesignRuntimeTreeNode[] {
       typeof current.value.oid !== "string" ||
       typeof current.value.tag !== "string" ||
       typeof current.value.name !== "string" ||
+      (current.value.layerName !== undefined &&
+        (typeof current.value.layerName !== "string" || current.value.layerName.length > 80)) ||
       (current.value.text !== null && typeof current.value.text !== "string") ||
       typeof current.value.visible !== "boolean" ||
       (current.value.display !== undefined &&
@@ -1057,6 +1064,7 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
   var disposed = false;
   var activeRequests = new Set();
   var cancelledRequests = new Set();
+  var activeCaptures = new Map();
   var trustedParentOrigin = null;
   try {
     trustedParentOrigin = document.referrer
@@ -1165,7 +1173,7 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
   }
 
   function post(message) {
-    if (parentPort && !disposed) parentPort.postMessage(message);
+    if (parentPort && (!disposed || message.type === "response")) parentPort.postMessage(message);
   }
 
   function event(name, payload) {
@@ -1221,6 +1229,7 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
     return {
       methods: METHODS.concat(enabledOptInMethods),
       cancellation: true,
+      captureCompletion: true,
       typedErrors: true,
       sourcePinned: true,
       maxStyleProperties: 64,
@@ -1298,10 +1307,14 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
     };
   }
 
+  function layerNameOf(element) {
+    return (element.getAttribute("data-name") || "").replace(/\s+/g, " ").trim().slice(0, 80) || undefined;
+  }
+
   function nameOf(element) {
     var explicit =
+      layerNameOf(element) ||
       element.getAttribute("aria-label") ||
-      element.getAttribute("data-name") ||
       element.getAttribute("title") ||
       element.id ||
       directText(element);
@@ -2167,6 +2180,7 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
       oid: oid,
       tag: element.tagName.toLowerCase(),
       name: nameOf(element),
+      layerName: layerNameOf(element),
       text: directText(element),
       visible: visibleOf(element, computed),
       display: computed.display || "",
@@ -4057,9 +4071,10 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
   // camera moves request multi-megapixel viewport tiles; the synchronous
   // toDataURL path would stall live previews and animations for the whole
   // encode, so it remains only as the fallback for engines without toBlob.
-  function encodeCanvasPng(canvas, onDataUrl, onError) {
+  function encodeCanvasPng(canvas, onDataUrl, onError, operation) {
     var fallback = function () {
       try {
+        if (operation.cancelled) throw typedError("CANCELLED", "Capture cancelled.", false);
         onDataUrl(canvas.toDataURL("image/png"));
       } catch (error) {
         onError(error);
@@ -4074,11 +4089,17 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
     }
     try {
       canvas.toBlob(function (blob) {
+        if (operation.cancelled) {
+          onError(typedError("CANCELLED", "Capture cancelled.", false));
+          return;
+        }
         if (!blob) {
           fallback();
           return;
         }
         var reader = new FileReader();
+        operation.cancelEncoding = function () { reader.abort(); };
+        reader.onabort = function () { onError(typedError("CANCELLED", "Capture cancelled.", false)); };
         reader.onload = function () {
           var result = reader.result;
           if (typeof result === "string" && result.indexOf("data:") === 0) {
@@ -4095,7 +4116,7 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
     }
   }
 
-  function captureScreenshot(args) {
+  function captureScreenshot(args, requestId) {
     var captureSourceVersion = SOURCE_VERSION;
     var requestedCrop = args && typeof args.crop === "object" ? args.crop : null;
     var requestedOutput = args && typeof args.outputSize === "object"
@@ -4175,39 +4196,130 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
     scale = Math.max(0.01, scale);
     var outputWidth = Math.max(1, Math.round(crop.width * scale));
     var outputHeight = Math.max(1, Math.round(crop.height * scale));
+    // A cropped output still decodes a whole-document SVG. Reserve for that
+    // image, the canvas/encoder and source strings before cloning the DOM.
+    if (viewportWidth * viewportHeight * 8 + outputWidth * outputHeight * 16 + 128 * 1024 * 1024 > 256 * 1024 * 1024) {
+      throw typedError("BAD_REQUEST", "Capture temporary image budget exceeded.", false);
+    }
+    if (disposed || cancelledRequests.has(requestId)) throw typedError("CANCELLED", "Capture cancelled.", false);
     var clone = document.documentElement.cloneNode(true);
     clone.setAttribute("xmlns", "http://www.w3.org/1999/xhtml");
+    // A document propagates a solid BODY background to its transparent root
+    // canvas. Inside foreignObject, BODY instead paints only its own box.
+    // Reproduce that canvas paint without adding it twice for translucent fills.
+    var captureBody = document.body;
+    var clonedCaptureBody = clone.querySelector("body");
+    var captureRootStyle = getComputedStyle(document.documentElement);
+    var captureBodyStyle = captureBody ? getComputedStyle(captureBody) : null;
+    function captureColorIsTransparent(color) {
+      return color === "transparent" || /^rgba\([^)]*,\s*0(?:\.0+)?\s*\)$/.test(color) ||
+        /\/\s*0(?:\.0+)?%?\s*\)$/.test(color);
+    }
+    if (captureBody && clonedCaptureBody && captureBodyStyle &&
+        captureRootStyle.backgroundImage === "none" &&
+        captureColorIsTransparent(captureRootStyle.backgroundColor) &&
+        captureBodyStyle.backgroundImage === "none" &&
+        !captureColorIsTransparent(captureBodyStyle.backgroundColor) &&
+        captureBodyStyle.display !== "none" &&
+        captureRootStyle.contain === "none" && captureBodyStyle.contain === "none" &&
+        captureRootStyle.contentVisibility === "visible" && captureBodyStyle.contentVisibility === "visible") {
+      // Changing the root/BODY paint must not change descendants that
+      // explicitly inherit it. Preserve immediate children and both elements'
+      // pseudo colors; deeper inheritance then follows those values.
+      for (var captureChildIndex = 0; captureChildIndex < captureBody.children.length; captureChildIndex += 1) {
+        var clonedCaptureChild = clonedCaptureBody.children[captureChildIndex];
+        if (clonedCaptureChild && clonedCaptureChild.style) {
+          clonedCaptureChild.style.setProperty("background-color", getComputedStyle(captureBody.children[captureChildIndex]).backgroundColor, "important");
+        }
+      }
+      var capturePseudoCss = "";
+      [document.documentElement, captureBody].forEach(function (element) {
+        ["::before", "::after", "::first-line", "::first-letter"].forEach(function (pseudo) {
+          var pseudoStyle = getComputedStyle(element, pseudo);
+          if (pseudo === "::first-line" || pseudo === "::first-letter" ||
+              (pseudoStyle.content !== "none" && pseudoStyle.content !== "normal")) {
+            capturePseudoCss += element.localName + pseudo + "{background-color:" + pseudoStyle.backgroundColor + "!important}";
+          }
+        });
+      });
+      if (capturePseudoCss) {
+        var capturePseudoStyle = document.createElement("style");
+        // The first important layer outranks authored important rules, even
+        // ID selectors in later layers. An anonymous layer cannot collide
+        // with an authored name. This stylesheet exists only in the clone.
+        capturePseudoStyle.textContent = "@layer{" + capturePseudoCss + "}";
+        var captureStyleParent = clone.querySelector("head") || clone;
+        captureStyleParent.insertBefore(capturePseudoStyle, captureStyleParent.firstChild);
+      }
+      clone.style.setProperty("background-color", captureBodyStyle.backgroundColor, "important");
+      clonedCaptureBody.style.setProperty("background-color", "transparent", "important");
+    }
+
     var scripts = clone.querySelectorAll("script");
     for (var index = scripts.length - 1; index >= 0; index -= 1) {
       scripts[index].remove();
     }
-    clone.style.width = viewportWidth + "px";
-    clone.style.height = viewportHeight + "px";
-    clone.style.overflow = "hidden";
+    scripts = null;
+    clone.style.setProperty("width", viewportWidth + "px", "important");
+    clone.style.setProperty("height", viewportHeight + "px", "important");
+    clone.style.setProperty("overflow", "hidden", "important");
     var serialized = new XMLSerializer().serializeToString(clone);
+    clone = null;
+    if (serialized.length > 16 * 1024 * 1024) throw typedError("BAD_REQUEST", "Capture source budget exceeded.", false);
+    // Authored svg/foreignObject rules must never move or resize the capture's
+    // own containers. Keep inherited font/color and :root rules intact: copying
+    // every computed property would freeze currentColor before descendants can
+    // inherit it. Inline important geometry also outranks authored CSS layers.
+    var captureContainerStyle = "display:block!important;position:static!important;inset:auto!important;x:0!important;y:0!important;" +
+      "margin:0!important;padding:0!important;border:0!important;" +
+      "transform:none!important;translate:none!important;rotate:none!important;scale:none!important;zoom:1!important;" +
+      "min-width:0!important;min-height:0!important;max-width:none!important;max-height:none!important;" +
+      "width:" + viewportWidth + "px!important;height:" + viewportHeight + "px!important;";
     var svg =
       "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"" + viewportWidth +
-      "\" height=\"" + viewportHeight + "\" viewBox=\"0 0 " + viewportWidth +
+      "\" height=\"" + viewportHeight + "\" style=\"" + captureContainerStyle + "\" viewBox=\"0 0 " + viewportWidth +
       " " + viewportHeight + "\"><foreignObject x=\"0\" y=\"0\" width=\"" + viewportWidth +
-      "\" height=\"" + viewportHeight + "\">" + serialized +
+      "\" height=\"" + viewportHeight + "\" style=\"" + captureContainerStyle + "\">" + serialized +
       "</foreignObject></svg>";
     // A blob URL makes Chromium mark a foreignObject canvas as origin-unclean.
     // A self-contained data URL preserves the same pixels without tainting.
     var url = "data:image/svg+xml;charset=utf-8," + encodeURIComponent(svg);
+    serialized = "";
+    svg = "";
     return new Promise(function (resolve, reject) {
       var settled = false;
       var image = new Image();
-      var timer = window.setTimeout(function () {
-        if (settled) return;
-        settled = true;
-        reject(new Error("Frame screenshot timed out."));
-      }, 8000);
-      image.onload = function () {
+      var canvas = null;
+      var encoding = false;
+      var operation = { cancelled: false, cancelEncoding: null, cancel: function () {
+        operation.cancelled = true;
+        if (operation.cancelEncoding) operation.cancelEncoding();
+        else if (!encoding) finish(typedError("CANCELLED", "Capture cancelled.", false));
+        // toBlob cannot be interrupted. Keep ownership until its callback.
+      } };
+      activeCaptures.set(requestId, operation);
+      function finish(error, result) {
         if (settled) return;
         settled = true;
         window.clearTimeout(timer);
+        image.onload = null;
+        image.onerror = null;
+        image.src = "";
+        if (canvas) { canvas.width = 0; canvas.height = 0; canvas = null; }
+        operation.cancelEncoding = null;
+        activeCaptures.delete(requestId);
+        if (operation.cancelled) reject(typedError("CANCELLED", "Capture cancelled.", false));
+        else if (error) reject(error);
+        else resolve(result);
+      }
+      var timer = window.setTimeout(function () {
+        operation.cancel();
+      }, 8000);
+      image.onload = function () {
+        if (settled) return;
         try {
-          var canvas = document.createElement("canvas");
+          if (operation.cancelled) { operation.cancel(); return; }
+          canvas = document.createElement("canvas");
           canvas.width = outputWidth;
           canvas.height = outputHeight;
           var context = canvas.getContext("2d");
@@ -4216,8 +4328,9 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
             image, documentX, documentY, crop.width, crop.height,
             0, 0, outputWidth, outputHeight
           );
+          encoding = true;
           encodeCanvasPng(canvas, function (dataUrl) {
-            resolve({
+            finish(null, {
               sourceVersion: captureSourceVersion,
               dataUrl: dataUrl,
               mimeType: "image/png",
@@ -4226,22 +4339,21 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
               scale: scale,
               nodeId: nodeId
             });
-          }, reject);
+          }, function (error) { finish(error); }, operation);
         } catch (error) {
-          reject(error);
+          finish(error);
         }
       };
       image.onerror = function () {
         if (settled) return;
-        settled = true;
-        window.clearTimeout(timer);
-        reject(new Error("Frame screenshot could not be rendered."));
+        finish(new Error("Frame screenshot could not be rendered."));
       };
       image.src = url;
+      url = "";
     });
   }
 
-  function handle(method, args) {
+  function handle(method, args, requestId) {
     switch (method) {
       case "getSnapshot":
         return snapshot();
@@ -4281,7 +4393,7 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
       case "clearPreviewStyles":
         return clearPreviewStyles(args.nodeId);
       case "captureScreenshot":
-        return captureScreenshot(args);
+        return captureScreenshot(args, requestId);
       case "setPlayback":
         if (enabledOptInMethods.indexOf("setPlayback") < 0) {
           throw new Error("Unknown design runtime method: setPlayback");
@@ -4333,10 +4445,14 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
     previewAnimationsByOid.forEach(function (animation) { animation.cancel(); });
     previewAnimationsByOid.clear();
     visibilityOverridesByOid.clear();
-    activeRequests.clear();
-    cancelledRequests.clear();
+    activeRequests.forEach(function (id) { cancelledRequests.add(id); });
+    activeCaptures.forEach(function (capture) { capture.cancel(); });
     window.removeEventListener("message", receiveHandshake);
-    if (parentPort) {
+    finishTeardown();
+  }
+
+  function finishTeardown() {
+    if (disposed && activeRequests.size === 0 && parentPort) {
       parentPort.onmessage = null;
       parentPort.close();
       parentPort = null;
@@ -4345,6 +4461,16 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
 
   function receivePortMessage(portEvent) {
     var message = portEvent.data;
+    // A style/history commit may advance the generation while an old capture
+    // finishes. Its private-port cancellation still owns the original job.
+    if (message && message.protocol === PROTOCOL && message.version === VERSION && message.type === "cancel") {
+      if (activeRequests.has(message.requestId)) {
+        cancelledRequests.add(message.requestId);
+        var capture = activeCaptures.get(message.requestId);
+        if (capture) capture.cancel();
+      }
+      return;
+    }
     if (
       !message ||
       message.protocol !== PROTOCOL ||
@@ -4368,13 +4494,8 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
       teardown();
       return;
     }
-    if (message.type === "cancel") {
-      if (activeRequests.has(message.requestId)) {
-        cancelledRequests.add(message.requestId);
-      }
-      return;
-    }
     if (
+      disposed ||
       message.type !== "request" ||
       typeof message.requestId !== "string" ||
       typeof message.method !== "string" ||
@@ -4394,15 +4515,17 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
     }
     activeRequests.add(message.requestId);
     Promise.resolve()
-      .then(function () { return handle(message.method, message.args); })
+      .then(function () { return handle(message.method, message.args, message.requestId); })
       .then(
         function (result) {
-          if (!cancelledRequests.has(message.requestId)) {
+          if (message.method === "captureScreenshot" && cancelledRequests.has(message.requestId)) {
+            response(message.requestId, false, typedError("CANCELLED", "Capture cancelled.", false));
+          } else if (!cancelledRequests.has(message.requestId)) {
             response(message.requestId, true, result);
           }
         },
         function (error) {
-          if (!cancelledRequests.has(message.requestId)) {
+          if (message.method === "captureScreenshot" || !cancelledRequests.has(message.requestId)) {
             response(message.requestId, false, error);
           }
         }
@@ -4410,6 +4533,7 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
       .then(function () {
         activeRequests.delete(message.requestId);
         cancelledRequests.delete(message.requestId);
+        finishTeardown();
       });
   }
 
@@ -4546,5 +4670,12 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
     });
     observing = true;
   }
-  startObserving();
+  // The runtime is inserted in the head. Parser-created body nodes are the
+  // initial saved document, not edits that can invalidate a just-started
+  // gesture when the mutation debounce fires after readiness.
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", startObserving, { once: true });
+  } else {
+    startObserving();
+  }
 })();`;

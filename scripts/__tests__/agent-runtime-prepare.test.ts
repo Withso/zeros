@@ -20,9 +20,16 @@ afterEach(() => {
   for (const directory of directories.splice(0))
     rmSync(directory, { recursive: true, force: true });
 });
-const lock = (version: string) =>
-  `lockfileVersion: '9.0'\nimporters:\n  .:\n    dependencies:\n      '@cursor/sdk':\n        specifier: ${version}\n        version: ${version}\npackages: {}\nsnapshots: {}\n`;
-function checkout() {
+const packages = {
+  claude: "@anthropic-ai/claude-agent-sdk",
+  codex: "@openai/codex",
+  cursor: "@cursor/sdk",
+};
+const license = (provider: keyof typeof packages, version: string) =>
+  `fixture license inventory\n${packages[provider]}${provider === "codex" ? `@${version}-darwin-arm64` : `-darwin-arm64@${version}`}\n`;
+const lock = (version: string, name = packages.cursor) =>
+  `lockfileVersion: '9.0'\nimporters:\n  .:\n    dependencies:\n      '${name}':\n        specifier: ${version}\n        version: ${version}\npackages: {}\nsnapshots: {}\n`;
+function checkout(provider: keyof typeof packages = "cursor") {
   const root = mkdtempSync(join(tmpdir(), "zeros-runtime-prepare-"));
   directories.push(root);
   const git = (...args: string[]) =>
@@ -38,15 +45,16 @@ function checkout() {
     join(root, "package.json"),
     JSON.stringify(
       {
-        dependencies: { "@cursor/sdk": "1.0.0" },
+        dependencies: { [packages[provider]]: "1.0.0" },
+        ...(provider === "codex" ? { codexProtocolVersion: "1.0.0" } : {}),
         scripts: { test: "unchanged" },
       },
       null,
       2,
     ) + "\n",
   );
-  writeFileSync(join(root, "pnpm-lock.yaml"), lock("1.0.0"));
-  writeFileSync(join(root, "THIRD-PARTY-LICENSES.txt"), "old licenses\n");
+  writeFileSync(join(root, "pnpm-lock.yaml"), lock("1.0.0", packages[provider]));
+  writeFileSync(join(root, "THIRD-PARTY-LICENSES.txt"), license(provider, "1.0.0"));
   git("add", ".");
   git("commit", "-m", "initial bot baseline");
   const main = git("rev-parse", "HEAD");
@@ -59,13 +67,13 @@ function checkout() {
   const head = git("rev-parse", "HEAD");
   const identity = {
     schema: 1,
-    provider: "cursor",
+    provider,
     from: "1.0.0",
     version: "1.1.0",
     head,
     main,
     automation: main,
-    branch: "automation/agent-runtime/cursor/012345abcdef",
+    branch: `automation/agent-runtime/${provider}/012345abcdef`,
     pr: 42,
     lastBotCommit: main,
     regenerate: false,
@@ -83,7 +91,7 @@ describe("isolated mechanical preparation", () => {
       if (args.includes("--lockfile-only"))
         writeFileSync(join(root, "pnpm-lock.yaml"), lock("1.1.0"));
       if (args[0] === "scripts/generate-third-party-licenses.mjs")
-        writeFileSync(join(root, "THIRD-PARTY-LICENSES.txt"), "new licenses\n");
+        writeFileSync(join(root, "THIRD-PARTY-LICENSES.txt"), license("cursor", "1.1.0"));
     };
     const result = await prepareUpdate(task, {
       root,
@@ -113,6 +121,39 @@ describe("isolated mechanical preparation", () => {
       "--lockfile-only",
       "--ignore-scripts",
     ]);
+  });
+  it.each(["claude", "codex", "cursor"] as const)("requires the candidate's macOS license inventory for %s", async (provider) => {
+    const { root, task } = checkout(provider);
+    const inspect = vi.fn(async () => []);
+    const execute = (_: string, args: string[]) => {
+      if (args.includes("--lockfile-only"))
+        writeFileSync(join(root, "pnpm-lock.yaml"), lock("1.1.0", packages[provider]));
+      if (args[0] === "scripts/generate-third-party-licenses.mjs")
+        writeFileSync(join(root, "THIRD-PARTY-LICENSES.txt"),
+          `${license(provider, "1.0.0")}${packages[provider]}@1.1.0\n`);
+    };
+    await expect(prepareUpdate(task, { root, execute, inspect })).rejects.toThrow(
+      "candidate's macOS release license inventory",
+    );
+    expect(inspect).not.toHaveBeenCalled();
+  });
+  it.each([
+    ["claude", "@anthropic-ai/claude-agent-sdk-darwin-arm64@1.1.0"],
+    ["codex", "@openai/codex@1.1.0-darwin-arm64"],
+    ["cursor", "@cursor/sdk-darwin-arm64@1.1.0"],
+  ] as const)("accepts the exact macOS release package identity for %s", async (provider, packageIdentity) => {
+    const { root, task } = checkout(provider);
+    const inventory = `fixture license inventory\n${packageIdentity}\n`;
+    const execute = (_: string, args: string[]) => {
+      if (args.includes("--lockfile-only"))
+        writeFileSync(join(root, "pnpm-lock.yaml"), lock("1.1.0", packages[provider]));
+      if (args[0] === "scripts/generate-third-party-licenses.mjs")
+        writeFileSync(join(root, "THIRD-PARTY-LICENSES.txt"), inventory);
+    };
+    const result = await prepareUpdate(task, { root, execute, inspect: async () => [] });
+    expect(result.status).toBe("prepared");
+    expect(result.patch.files.find((file: any) => file.path === "THIRD-PARTY-LICENSES.txt")?.after)
+      .toBe(inventory);
   });
   it("refuses a dirty tree before touching the manifest", async () => {
     const { root, task } = checkout();

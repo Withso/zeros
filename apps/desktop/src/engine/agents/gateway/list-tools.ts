@@ -14,6 +14,9 @@ export const TOOL_DISCOVERY_LIMITS = {
   timeoutMs: 15_000,
 } as const;
 
+/** Fixed local diagnostics may reach status UI; upstream error bodies may not. */
+export class ToolDiscoveryError extends Error {}
+
 /** Client.listTools replaces the SDK's output validators/task metadata after
  * each response. Collect pages below that public method, so the SDK commits
  * metadata for the complete catalog once and failed reads preserve it. */
@@ -51,7 +54,7 @@ export class CatalogClient extends Client {
 export async function listAllBackendTools(client: Pick<Client, "listTools">, signal: AbortSignal): Promise<Tool[]> {
   signal.throwIfAborted();
   const deadline = new AbortController();
-  const timeout = setTimeout(() => deadline.abort(new Error("MCP tool discovery timed out")), TOOL_DISCOVERY_LIMITS.timeoutMs);
+  const timeout = setTimeout(() => deadline.abort(new ToolDiscoveryError("MCP tool discovery timed out")), TOOL_DISCOVERY_LIMITS.timeoutMs);
   const readSignal = AbortSignal.any([signal, deadline.signal]);
   const started = Date.now();
   const cursors = new Set<string>();
@@ -63,26 +66,26 @@ export async function listAllBackendTools(client: Pick<Client, "listTools">, sig
     for (let page = 0; page < TOOL_DISCOVERY_LIMITS.pages; page++) {
       readSignal.throwIfAborted();
       const remaining = TOOL_DISCOVERY_LIMITS.timeoutMs - (Date.now() - started);
-      if (remaining <= 0) throw new Error("MCP tool discovery timed out");
+      if (remaining <= 0) throw new ToolDiscoveryError("MCP tool discovery timed out");
       const result = await client.listTools(cursor === undefined ? undefined : { cursor }, {
         signal: readSignal, timeout: remaining, maxTotalTimeout: remaining,
       });
       readSignal.throwIfAborted();
       count += result.tools.length;
-      if (count > TOOL_DISCOVERY_LIMITS.tools) throw new Error("MCP tool discovery exceeded the tool limit");
+      if (count > TOOL_DISCOVERY_LIMITS.tools) throw new ToolDiscoveryError("MCP tool discovery exceeded the tool limit");
       for (const tool of result.tools) {
         bytes += Buffer.byteLength(JSON.stringify(tool), "utf8");
-        if (bytes > TOOL_DISCOVERY_LIMITS.bytes) throw new Error("MCP tool discovery exceeded the size limit");
+        if (bytes > TOOL_DISCOVERY_LIMITS.bytes) throw new ToolDiscoveryError("MCP tool discovery exceeded the size limit");
         const previous = tools.get(tool.name);
-        if (previous && !isDeepStrictEqual(previous, tool)) throw new Error("MCP tool discovery returned conflicting duplicate tools");
+        if (previous && !isDeepStrictEqual(previous, tool)) throw new ToolDiscoveryError("MCP tool discovery returned conflicting duplicate tools");
         if (!previous) tools.set(tool.name, tool);
       }
       if (result.nextCursor === undefined) return [...tools.values()];
       cursor = result.nextCursor;
-      if (Buffer.byteLength(cursor, "utf8") > TOOL_DISCOVERY_LIMITS.cursorBytes) throw new Error("MCP tool discovery exceeded the cursor size limit");
-      if (cursors.has(cursor)) throw new Error("MCP tool discovery repeated a pagination cursor");
+      if (Buffer.byteLength(cursor, "utf8") > TOOL_DISCOVERY_LIMITS.cursorBytes) throw new ToolDiscoveryError("MCP tool discovery exceeded the cursor size limit");
+      if (cursors.has(cursor)) throw new ToolDiscoveryError("MCP tool discovery repeated a pagination cursor");
       cursors.add(cursor);
     }
-    throw new Error("MCP tool discovery exceeded the page limit");
+    throw new ToolDiscoveryError("MCP tool discovery exceeded the page limit");
   } finally { clearTimeout(timeout); }
 }

@@ -78,12 +78,12 @@ const rows: SampledProcessRow[] = [
   row(70617, 1, "/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.WebContent.xpc/Contents/MacOS/com.apple.WebKit.WebContent", { cpuPercent: 19.4, footprintBytes: 3_126 * MB }),
 ];
 
-function report(logs = '{"id":1,"origin":"engine","level":"warn","text":"x"}\n') {
+function report(logs = '{"id":1,"origin":"engine","level":"warn","text":"x"}\n', currentSnapshot = snapshot) {
   return buildDiagnosticsReport({
     generatedAt: Date.UTC(2026, 9, 16, 5, 40),
     app: { name: "Zeros", version: "0.1.25", channel: "prod", electron: "41.0.0", chrome: "146.0", node: "24.1.0", uptimeSeconds: 80_000, enginePid: 300, enginePort: 24193 },
     host: { osName: "macOS", osVersion: "26.3.1", arch: "arm64", cpuModel: "Apple M4", logicalCpus: 10, memoryBytes: 16 * 1024 * MB, uptimeSeconds: 147_600, onBattery: false },
-    snapshot,
+    snapshot: currentSnapshot,
     rows,
     argsFor: (pid) =>
       pid === 330
@@ -105,6 +105,20 @@ function report(logs = '{"id":1,"origin":"engine","level":"warn","text":"x"}\n')
 }
 
 describe("buildDiagnosticsReport", () => {
+  it("labels incomplete CPU coverage instead of presenting an unknown process as idle", () => {
+    const text = report("", {
+      ...snapshot,
+      totals: { ...snapshot.totals, all: { ...snapshot.totals.all, cpuPercent: 26 } },
+      processes: snapshot.processes.map((process) => process.pid === 330
+        ? { ...process, cpuPercent: 0, cpuSampled: false }
+        : process),
+    });
+    expect(text).toContain("Totals: CPU incomplete (observed 26.0%; 2/3 processes sampled)");
+    expect(text).toMatch(/\n330 +300 +- +/);
+    expect(report("", { ...snapshot, cpuReady: false })).toContain("Totals: CPU unknown");
+    expect(report()).toContain("Totals: CPU 151.0%");
+  });
+
   it("captures Mac pressure, the Zeros tree, other Zeros apps, detached helpers and logs", () => {
     const text = report();
     expect(text).toContain("App: Zeros 0.1.25 (prod channel)");

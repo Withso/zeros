@@ -138,6 +138,8 @@ export interface SessionsActions {
     wakeIntent?: CloudWorkspaceWakeIntent,
     /** Explicit composer intent; queued flushes retain Queue semantics. */
     followUpBehavior?: import("../settings/follow-up-behavior").FollowUpBehavior,
+    /** Durable cloud journal committed and its bubble published; not HTTPS acceptance. */
+    onCommitted?: () => void,
   ): Promise<void>;
   cancel(chatId: string): Promise<void>;
   /** Observe the original cloud command before an explicit Retry. False means

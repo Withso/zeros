@@ -61,9 +61,13 @@ async function main() {
   console.log(`Runtime writer: ${task.provider} ${result.status}.`);
 }
 
-main().catch(() => {
+main().catch((error) => {
+  // GitHub's numeric status is the only detail printed; messages can carry data.
+  const status = Number.isSafeInteger(error?.status)
+    ? ` (GitHub HTTP ${error.status})`
+    : "";
   console.error(
-    "Runtime writer stopped. No reset or force push was attempted; inspect trusted run evidence and retry after reconciliation.",
+    `Runtime writer stopped${status}. No reset or force push was attempted; inspect trusted run evidence and retry after reconciliation.`,
   );
   process.exitCode = 1;
 });

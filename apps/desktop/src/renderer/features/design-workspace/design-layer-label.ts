@@ -84,3 +84,23 @@ export function designFrameLayerLabel(
 ): DesignLayerLabel {
   return kind === "text" ? "Text" : "Frame";
 }
+
+/** Names are authored metadata; the type vocabulary above still owns icons
+ * and editing capabilities, regardless of what a person calls the layer. */
+export function designRuntimeLayerDisplayName(
+  layer: DesignRuntimeLayerLabelInput & { name?: string | null; layerName?: string },
+): string {
+  const authored = layer.layerName?.trim();
+  if (authored) return authored;
+  const name = layer.name?.trim();
+  return name && name !== layer.tag
+    ? name
+    : designRuntimeLayerLabel(layer);
+}
+
+export function designFrameDisplayName(frame: {
+  title?: string | null;
+  kind?: "frame" | "text";
+}): string {
+  return frame.title?.trim() || designFrameLayerLabel(frame.kind);
+}

@@ -6,15 +6,16 @@
 // hub read. This module only decides ORDER and GROUPING, so it stays pure and
 // unit-testable:
 //
-//   Grouped   every registered Git repository is a header (even with no
+//   Repository every registered Git repository is a header (even with no
 //             workspaces, so its + remains reachable), followed by its
 //             in-flight creates (newest first) and its workspaces (newest
 //             first). A legacy plain folder has no header: its folder row is
 //             the repository, so painting both would name it twice. Without
 //             workspace history, that row opens the folder's settings.
-//   Ungrouped one mixed list — in-flight creates first, then every workspace
-//             newest first, then unopened folders in registration order.
-//             Each workspace row carries its repository icon instead.
+//   Status    the same five lifecycle groups as Home, without Archive.
+//   None      one mixed list with repository icons on its workspace rows.
+// All modes filter by repository and sort by latest update (default) or creation.
+// Pending creates lead their group; unopened folders retain settings access.
 //
 // A collapsed repository keeps its active row visible, so the selection never
 // disappears from the navigation while the rest of the group is folded away.
@@ -22,26 +23,30 @@
 import type { Workspace } from "../platform/git";
 import type { PendingWorkspaceCreate } from "../state/pending-workspaces";
 import type { Project } from "../state/projects-store";
+import type { SidebarWorkspaceSort } from "../state/sidebar-list-preferences";
+import { selectLiveVisible } from "../state/live-workspace-selectors";
+import { LIFECYCLE_STATUSES, statusMeta, type LifecycleStatusMeta } from "../shared/lib/workspace-status";
 import { findProjectForFolder } from "../state/workspace-resolution";
 import {
   workspaceTabGroups,
   type WorkspaceListFilter,
+  type WorkspaceTabActivity,
 } from "../state/workspace-list-filter";
 
-/** The two presentations the sidebar offers. */
-export type SidebarWorkspaceListFilter = "grouped" | "ungrouped";
+/** Keep released preference values; their labels are Repository and None. */
+export type SidebarWorkspaceListFilter = "grouped" | "status" | "ungrouped";
 
 export const SIDEBAR_WORKSPACE_LIST_FILTERS: readonly SidebarWorkspaceListFilter[] =
-  ["grouped", "ungrouped"];
+  ["grouped", "status", "ungrouped"];
 
-/** Fold older persisted presentations into the two the sidebar offers. Active
+/** Fold older persisted presentations into the ones the sidebar offers. Active
  * was an activity-ordered mixed list, so it stays mixed; a repository-only
  * filter returns to the default grouping, where that repository is still one
  * of the groups. The store keeps parsing every legacy value. */
 export function sidebarWorkspaceListFilter(
   filter: WorkspaceListFilter,
 ): SidebarWorkspaceListFilter {
-  return filter === "ungrouped" || filter === "active"
+  return filter === "status" ? "status" : filter === "ungrouped" || filter === "active"
     ? "ungrouped"
     : "grouped";
 }
@@ -72,6 +77,12 @@ export type SidebarWorkspaceEntry =
       key: string;
       project: Project;
       /** Every row owned by the repository, before collapse is applied. */
+      items: SidebarWorkspaceItem[];
+    }
+  | {
+      kind: "status";
+      key: string;
+      status: LifecycleStatusMeta;
       items: SidebarWorkspaceItem[];
     }
   | {
@@ -121,19 +132,39 @@ function pendingItem(
   };
 }
 
+function finiteTimestamp(value: number | null | undefined): number {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : 0;
+}
+
 /** Project the live workspace union and in-flight creates into sidebar
  * entries. Inputs are never mutated; ordering is deterministic. */
 export function buildSidebarWorkspaceEntries(args: {
   filter: SidebarWorkspaceListFilter;
+  sort?: SidebarWorkspaceSort;
+  repositoryIds?: readonly string[];
+  activity?: WorkspaceTabActivity;
   projects: readonly Project[];
   workspaces: readonly Workspace[];
   pending: readonly PendingWorkspaceCreate[];
 }): SidebarWorkspaceEntry[] {
-  const { filter, projects } = args;
+  const { filter, sort = "updated", activity } = args;
+  const selectedIds = new Set(args.repositoryIds);
+  const projects = selectedIds.size
+    ? args.projects.filter(project => selectedIds.has(project.id))
+    : args.projects;
+  const visibleProjectIds = new Set(projects.map(project => project.id));
+  const orderWorkspaces = (rows: readonly Workspace[]) => [...rows].sort((a, b) => {
+    const timestamp = (workspace: Workspace) => sort === "created"
+      ? finiteTimestamp(workspace.createdAt)
+      : Math.max(finiteTimestamp(workspace.createdAt), finiteTimestamp(workspace.lastActiveAt),
+        finiteTimestamp(activity?.activeAtByWorkspaceId?.get(workspace.id)));
+    return timestamp(b) - timestamp(a);
+  });
   const pendingByProject = new Map<string, PendingWorkspaceCreate[]>();
   const unregisteredCloudCreates: SidebarWorkspaceItem[] = [];
   for (const pending of args.pending) {
-    const project = projectForPending(pending, projects);
+    const project = projectForPending(pending, args.projects);
+    if (selectedIds.size && (!project || !selectedIds.has(project.id))) continue;
     if (!project) {
       // A first cloud create has no confirmed repository yet. Its display
       // identity stays in a non-navigable row, never in the project registry.
@@ -149,29 +180,42 @@ export function buildSidebarWorkspaceEntries(args: {
     else pendingByProject.set(project.id, [pending]);
   }
   for (const rows of pendingByProject.values()) {
-    rows.sort((a, b) => b.startedAt - a.startedAt);
+    rows.sort((a, b) => finiteTimestamp(b.startedAt) - finiteTimestamp(a.startedAt));
   }
 
-  const groups = workspaceTabGroups(filter, projects, args.workspaces);
+  const groups = workspaceTabGroups(
+    filter === "status" ? "ungrouped" : filter,
+    projects,
+    selectLiveVisible(args.workspaces),
+  );
 
-  if (filter === "ungrouped") {
+  if (filter !== "grouped") {
     const pending = [...pendingByProject.entries()]
       .flatMap(([projectId, rows]) => {
         const project = projects.find((row) => row.id === projectId);
         return project ? rows.map((row) => ({ project, row })) : [];
       })
-      .sort((a, b) => b.row.startedAt - a.row.startedAt)
+      .sort((a, b) => finiteTimestamp(b.row.startedAt) - finiteTimestamp(a.row.startedAt))
       .map(({ project, row }) => pendingItem(project, row));
     const workspaces: SidebarWorkspaceItem[] = [];
-    for (const workspace of groups[0]?.workspaces ?? []) {
+    for (const workspace of orderWorkspaces(groups[0]?.workspaces ?? [])) {
       const project = findProjectForFolder(workspace.repoRoot, projects);
-      if (project) workspaces.push(workspaceItem(project, workspace));
+      // Cloud resolution uses the complete catalog. Recheck membership in this
+      // projection so a filtered-out cloud repository cannot enter mixed rows.
+      if (project && visibleProjectIds.has(project.id)) workspaces.push(workspaceItem(project, workspace));
     }
     const items = [...unregisteredCloudCreates, ...pending]
-      .sort((a, b) => (b.kind === "pending" ? b.pending.startedAt : 0) - (a.kind === "pending" ? a.pending.startedAt : 0))
+      .sort((a, b) => (b.kind === "pending" ? finiteTimestamp(b.pending.startedAt) : 0) - (a.kind === "pending" ? finiteTimestamp(a.pending.startedAt) : 0))
       .concat(workspaces);
     const representedProjects = new Set(items.map((item) => item.project.id));
-    const entries: SidebarWorkspaceEntry[] = items.map((item) => ({
+    const entries: SidebarWorkspaceEntry[] = filter === "status"
+      ? LIFECYCLE_STATUSES.map(status => ({
+          kind: "status" as const,
+          key: `status:${status.value}`,
+          status,
+          items: items.filter(item => (item.kind === "pending" ? "in-progress" : statusMeta(item.workspace.status).value) === status.value),
+        }))
+      : items.map((item) => ({
       kind: "row" as const,
       key: item.key,
       item,
@@ -197,7 +241,7 @@ export function buildSidebarWorkspaceEntries(args: {
       ...(pendingByProject.get(project.id) ?? []).map((pending) =>
         pendingItem(project, pending),
       ),
-      ...(workspacesByProject.get(project.id) ?? []).map((workspace) =>
+      ...orderWorkspaces(workspacesByProject.get(project.id) ?? []).map((workspace) =>
         workspaceItem(project, workspace),
       ),
     ];
@@ -229,9 +273,30 @@ export function sidebarWorkspaceItems(
   entries: readonly SidebarWorkspaceEntry[],
 ): SidebarWorkspaceItem[] {
   return entries.flatMap((entry) => {
-    if (entry.kind === "repository") return entry.items;
+    if (entry.kind === "repository" || entry.kind === "status") return entry.items;
     return entry.kind === "row" ? [entry.item] : [];
   });
+}
+
+/** Removal follows the painted ordering and filter. A workspace archived from
+ * Home may already be outside that filter; then use its first available row.
+ * Pathless cloud creates are visible progress, not navigation destinations. */
+export function sidebarNeighborAfterRemoval(
+  entries: readonly SidebarWorkspaceEntry[],
+  leaving: Workspace,
+  busyIds: Readonly<Record<string, number>>,
+): SidebarWorkspaceItem | null {
+  const items = sidebarWorkspaceItems(entries);
+  const index = items.findIndex(item => item.kind === "workspace" && item.workspace.id === leaving.id);
+  const candidates = index < 0 ? items : [...items.slice(0, index).reverse(), ...items.slice(index + 1)];
+  for (const allowBusy of [false, true]) {
+    const next = candidates.find(item => item.kind === "pending"
+      ? !!item.pending.path && item.pending.path !== leaving.path
+      : item.workspace.id !== leaving.id && item.workspace.path !== leaving.path &&
+        (allowBusy || !(item.workspace.id in busyIds)));
+    if (next) return next;
+  }
+  return null;
 }
 
 /** The rows a repository paints under its header. Collapsing keeps only the

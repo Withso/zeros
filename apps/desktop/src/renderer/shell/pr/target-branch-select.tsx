@@ -171,7 +171,7 @@ function TargetBranchPopover({
 
   return (
     <Popover open={open} onOpenChange={onOpenChange}>
-      <Tooltip label={label}>
+      <Tooltip label={label} delayDuration={1500} disabled={open}>
         <PopoverTrigger asChild>{children}</PopoverTrigger>
       </Tooltip>
       <PopoverContent

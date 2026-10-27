@@ -1,0 +1,9 @@
+{
+  "id": "turn-summary-outside-resident-window",
+  "kind": "replay",
+  "area": "renderer",
+  "fixedBy": "pr:719",
+  "symptom": "A completed cloud turn republishes its opening prompt with the recorded file summary. When the opening is outside the resident transcript window, the renderer appends it after the answer and splits the turn.",
+  "rule": "Update a retained leading prompt beside the resident window; preserve native identity, row order, paging cursors and exact turn ownership. See agents/zstack/changes/turn-changes-disclosure.md.",
+  "check": "pnpm exec vitest run --config vitest.config.ts apps/desktop/src/renderer/features/agent/__tests__/transcript-leading-prompt.test.ts -t 'recorded changes beside a long tail'"
+}

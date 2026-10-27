@@ -2,6 +2,7 @@ import * as React from "react";
 import * as TooltipPrimitive from "@radix-ui/react-tooltip";
 
 import { cn } from "@/renderer/shared/ui/cn";
+import { ANCHORED_OVERLAY_MOTION } from "@/renderer/shared/ui/anchored-overlay-motion";
 import { getLastInputModality } from "@/renderer/shared/ui/overlay-focus";
 import { useNativeSurfaceOverlayIntent } from "@/renderer/shared/ui/native-surface-overlay";
 
@@ -18,8 +19,10 @@ import { useNativeSurfaceOverlayIntent } from "@/renderer/shared/ui/native-surfa
 // are banned (they render an unstyled OS chip, ignore the theme,
 // and can't be positioned) — replace them with this component.
 //
-//   <Tooltip label="New terminal">{trigger}</Tooltip>
-//   <Tooltip label="Toggle right sidebar" shortcut="⌘⌥B">{trigger}</Tooltip>
+// Use hints for unfamiliar icons, shortcuts, and otherwise hidden information.
+// Visible labels, routine + / × / ⋯ actions, and layer rows need no tooltip.
+//   <Tooltip label="Split diff">{trigger}</Tooltip>
+//   <Tooltip label="Show panel" shortcut="⌘⌥B">{trigger}</Tooltip>
 //
 // The trigger (children) must accept a ref + DOM props — a native
 // element or any forwardRef component. The raw Radix parts
@@ -28,20 +31,61 @@ import { useNativeSurfaceOverlayIntent } from "@/renderer/shared/ui/native-surfa
 // The single TooltipProvider is mounted once at the app root.
 // ──────────────────────────────────────────────────────────
 
-const TooltipProvider = TooltipPrimitive.Provider;
+const TooltipSettings = React.createContext<
+  Omit<React.ComponentProps<typeof TooltipPrimitive.Provider>, "children">
+>({ delayDuration: 1000, skipDelayDuration: 0 });
+
+function TooltipProvider({
+  children,
+  delayDuration = 1000,
+  skipDelayDuration = 0,
+  disableHoverableContent,
+}: React.ComponentProps<typeof TooltipPrimitive.Provider>) {
+  const settings = React.useMemo(
+    () => ({ delayDuration, skipDelayDuration, disableHoverableContent }),
+    [delayDuration, skipDelayDuration, disableHoverableContent],
+  );
+  return (
+    <TooltipSettings.Provider value={settings}>
+      {children}
+    </TooltipSettings.Provider>
+  );
+}
 function TooltipRoot({
+  open,
+  defaultOpen = false,
+  disabled = false,
   onOpenChange,
   ...props
-}: React.ComponentProps<typeof TooltipPrimitive.Root>) {
+}: React.ComponentProps<typeof TooltipPrimitive.Root> & { disabled?: boolean }) {
+  const settings = React.useContext(TooltipSettings);
+  const [uncontrolledOpen, setUncontrolledOpen] = React.useState(defaultOpen);
+  const visible = !disabled && (open ?? uncontrolledOpen);
   const publishOverlay = useNativeSurfaceOverlayIntent();
+  React.useEffect(() => {
+    // A menu can suppress an already open tooltip without a Radix close event.
+    // Release its native overlay intent too, and require a fresh hover later.
+    if (disabled) setUncontrolledOpen(false);
+    publishOverlay(visible);
+  }, [disabled, visible, publishOverlay]);
   return (
-    <TooltipPrimitive.Root
-      {...props}
-      onOpenChange={(open) => {
-        publishOverlay(open);
-        onOpenChange?.(open);
-      }}
-    />
+    // Radix resets its shared instant-open flag on a timer, even with a zero
+    // skip delay. Keep that state per tooltip so a neighboring control always
+    // waits its own delay, including pointer moves before that timer runs.
+    <TooltipPrimitive.Provider {...settings}>
+      <TooltipPrimitive.Root
+        {...props}
+        open={visible}
+        onOpenChange={(nextOpen) => {
+          if (disabled && nextOpen) return;
+          if (open === undefined) {
+            publishOverlay(nextOpen);
+            setUncontrolledOpen(nextOpen);
+          }
+          onOpenChange?.(nextOpen);
+        }}
+      />
+    </TooltipPrimitive.Provider>
   );
 }
 
@@ -59,17 +103,31 @@ function TooltipRoot({
 const TooltipTrigger = React.forwardRef<
   React.ComponentRef<typeof TooltipPrimitive.Trigger>,
   React.ComponentPropsWithoutRef<typeof TooltipPrimitive.Trigger>
->(({ onFocus, ...props }, ref) => (
+>(({ onFocus, onPointerMove, ...props }, ref) => (
   <TooltipPrimitive.Trigger
     ref={ref}
     onFocus={(event) => {
       onFocus?.(event);
-      if (getLastInputModality() === "pointer") event.preventDefault();
+      if (
+        getLastInputModality() === "pointer" ||
+        popupIsOpen(event.currentTarget)
+      ) event.preventDefault();
+    }}
+    onPointerMove={(event) => {
+      onPointerMove?.(event);
+      if (popupIsOpen(event.currentTarget)) event.preventDefault();
     }}
     {...props}
   />
 ));
 TooltipTrigger.displayName = TooltipPrimitive.Trigger.displayName;
+
+function popupIsOpen(trigger: HTMLElement): boolean {
+  return (
+    trigger.hasAttribute("aria-haspopup") &&
+    trigger.getAttribute("aria-expanded") === "true"
+  );
+}
 
 const TooltipContent = React.forwardRef<
   React.ComponentRef<typeof TooltipPrimitive.Content>,
@@ -81,7 +139,8 @@ const TooltipContent = React.forwardRef<
       sideOffset={sideOffset}
       collisionPadding={collisionPadding}
       className={cn(
-        "z-dropdown w-fit max-w-xs overflow-hidden rounded-md border border-border2/50 bg-bg2/40 px-2.5 py-1.5 text-xs text-fg1 shadow-[var(--shadow-dropdown)] backdrop-blur-[10px] backdrop-saturate-[1.7] animate-in fade-in-0 zoom-in-95 data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=closed]:zoom-out-95 data-[side=bottom]:slide-in-from-top-2 data-[side=left]:slide-in-from-right-2 data-[side=right]:slide-in-from-left-2 data-[side=top]:slide-in-from-bottom-2",
+        ANCHORED_OVERLAY_MOTION,
+        "z-dropdown w-fit max-w-xs overflow-hidden rounded-sm border border-border2/50 bg-bg2/40 px-2 py-1 text-3xxs text-fg1 shadow-[var(--shadow-dropdown)] backdrop-blur-[10px] backdrop-saturate-[1.7]",
         className,
       )}
       {...props}
@@ -103,6 +162,8 @@ export interface TooltipProps {
   className?: string;
   /** Per-tooltip open delay override (defaults to the root provider's). */
   delayDuration?: number;
+  /** Suppress help while the trigger's menu or popover is open. */
+  disabled?: boolean;
   open?: boolean;
   defaultOpen?: boolean;
   onOpenChange?: (open: boolean) => void;
@@ -122,6 +183,7 @@ function Tooltip({
   sideOffset,
   className,
   delayDuration,
+  disabled,
   open,
   defaultOpen,
   onOpenChange,
@@ -130,6 +192,7 @@ function Tooltip({
   return (
     <TooltipRoot
       delayDuration={delayDuration}
+      disabled={disabled}
       open={open}
       defaultOpen={defaultOpen}
       onOpenChange={onOpenChange}
