@@ -121,8 +121,8 @@ describe.skipIf(process.platform === "win32")("owned electron:cloud process tree
 const source = fs.readFileSync(new URL("../dev-environment/launcher.mjs", import.meta.url), "utf8");
 const ast = ts.createSourceFile("launcher.mjs", source, ts.ScriptTarget.Latest, true, ts.ScriptKind.JS);
 const callbacks = ast.statements.filter((node): node is ts.FunctionDeclaration => ts.isFunctionDeclaration(node) &&
-  ["start", "stop", "main"].includes(node.name?.text ?? "")).map(node => node.getText(ast));
-expect(callbacks).toHaveLength(3);
+  ["start", "stop", "main", "pauseStoppedWebhook"].includes(node.name?.text ?? "")).map(node => node.getText(ast));
+expect(callbacks).toHaveLength(4);
 function launcher({ boot = "this-boot" } = {}) {
   const root = directory(), workspace = ensureWorkspace({ repositoryRoot: root, homeDir: root, env: {} });
   workspace.state.launcher = { port: 4242, token: "synthetic-supervisor-token", runId: "prior-run", pid: process.pid, boot };
@@ -130,7 +130,7 @@ function launcher({ boot = "this-boot" } = {}) {
   const fetch = vi.fn(async () => ({ ok: true }));
   const createServer = vi.fn(() => { throw new Error("A second supervisor must not start"); });
   const context = vm.createContext({ fs, path, readPrivateJson, saveWorkspace, acquireWorkspaceLock, DevelopmentProcesses,
-    profileIssues: () => [], systemEnvironment: () => ({}), process, AbortController, globalThis: { AbortSignal },
+    profileIssues: () => [], systemEnvironment: () => ({}), pauseWorkosWebhook: async () => {}, process, AbortController, globalThis: { AbortSignal },
     REBOOT_RECOVERED, currentBoot: () => "this-boot",
     recoverLaunchAfterReboot: (value: typeof workspace) => recoverLaunchAfterReboot(value, { boot: "this-boot" }),
     randomUUID: () => "new-run", createServer, fetch, delay: async () => {}, console: { log: vi.fn(), warn: vi.fn() } });

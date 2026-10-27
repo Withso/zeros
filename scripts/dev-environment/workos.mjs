@@ -9,12 +9,14 @@ export const WORKOS_DEV_EVENTS = ["user.created", "user.updated", "user.deleted"
   "organization_membership.updated", "organization_membership.deleted", "invitation.created", "invitation.accepted",
   "invitation.revoked", "invitation.resent"];
 
-export function workosClient(profile, fetchImpl = fetch) {
+export function workosClient(profile, fetchImpl = fetch, { signal } = {}) {
   return async (route, { method = "GET", body } = {}) => {
     let response;
     try {
+      signal?.throwIfAborted();
       response = await fetchImpl(`https://api.workos.com${route}`, { method, redirect: "error",
-        signal: AbortSignal.timeout(20_000), headers: { authorization: `Bearer ${profile.workos.apiKey}`, "content-type": "application/json" },
+        signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(20_000)]) : AbortSignal.timeout(20_000),
+        headers: { authorization: `Bearer ${profile.workos.apiKey}`, "content-type": "application/json" },
         ...(body ? { body: JSON.stringify(body) } : {}),
       });
     } catch { throw new Error("WorkOS Dev setup is unavailable; the provisioning receipt was preserved"); }
@@ -41,32 +43,87 @@ export async function endpoints(request) {
   throw new Error("WorkOS endpoint inventory could not be completed");
 }
 
-/** A random immutable owner in the exact URL recovers a lost create response.
- * Alpha's webhook is neither moved nor used as this database's signing key. */
-export async function ensureWorkosWebhook(workspace, profile, request = workosClient(profile)) {
+function webhookIdentity(workspace, profile) {
   const p = publicDevProfile(workspace, profile);
   const endpointUrl = `${p.apiOrigin}/auth/workos-webhook?zeros_dev=${workspace.state.instanceId}`;
   const receipt = workspace.state.workosWebhook;
-  if (receipt && (receipt.endpointUrl !== endpointUrl || receipt.webClientId !== p.webClientId)) {
+  if (receipt && (receipt.deleted || receipt.endpointUrl !== endpointUrl || receipt.webClientId !== p.webClientId)) {
     throw new Error("WorkOS Dev webhook ownership changed; existing configuration was preserved");
   }
+  return { endpointUrl, webClientId: p.webClientId };
+}
+
+function verifyWebhook(endpoint, identity, receipt) {
+  if (!/^we_[A-Za-z0-9]+$/.test(endpoint?.id ?? "") || endpoint.endpoint_url !== identity.endpointUrl ||
+      (receipt?.id && receipt.id !== endpoint.id) || typeof endpoint.secret !== "string" || endpoint.secret.length < 16 ||
+      (receipt?.secret && receipt.secret !== endpoint.secret)) throw new Error("WorkOS Dev webhook ownership verification failed");
+}
+
+async function findWebhook(workspace, identity, request) {
+  const receipt = workspace.state.workosWebhook;
+  const matches = (await endpoints(request)).filter(value => value.endpoint_url === identity.endpointUrl || value.id === receipt?.id);
+  if (matches.length > 1) throw new Error("Ambiguous WorkOS Dev webhook; setup stopped");
+  const endpoint = matches[0];
+  if (receipt?.id && !endpoint) throw new Error("The recorded WorkOS Dev webhook is missing or replaced");
+  if (endpoint) verifyWebhook(endpoint, identity, receipt);
+  return endpoint;
+}
+
+async function changeWebhookStatus(workspace, identity, endpoint, status, request) {
+  verifyWebhook(endpoint, identity, workspace.state.workosWebhook);
+  // Save the provider identity before PATCH so a lost response remains
+  // recoverable. Pausing never replaces the endpoint or its signing key.
+  workspace.state.workosWebhook = { ...workspace.state.workosWebhook, ...identity,
+    id: endpoint.id, secret: endpoint.secret, ...(status === "disabled" ? { pausePending: true } : {}) };
+  saveWorkspace(workspace);
+  if (endpoint.status !== status || status === "enabled" && WORKOS_DEV_EVENTS.some(event => !endpoint.events?.includes(event))) {
+    endpoint = await request(`/webhook_endpoints/${endpoint.id}`, { method: "PATCH", body: {
+      status, ...(status === "enabled" ? { events: WORKOS_DEV_EVENTS } : {}),
+    } });
+  }
+  verifyWebhook(endpoint, identity, workspace.state.workosWebhook);
+  if (endpoint.status !== status || status === "enabled" && WORKOS_DEV_EVENTS.some(event => !endpoint.events?.includes(event))) {
+    throw new Error("WorkOS Dev webhook status could not be confirmed");
+  }
+  Object.assign(workspace.state.workosWebhook, { status, pausePending: false });
+  saveWorkspace(workspace);
+}
+
+/** A random immutable owner in the exact URL recovers a lost create response.
+ * WorkOS creates endpoints enabled, so pause immediately until the backend is
+ * publicly ready. Alpha's endpoint and signing key are never reused. */
+export async function ensureWorkosWebhook(workspace, profile, request = workosClient(profile)) {
+  if (workspace.state.status !== "active") throw new Error("WorkOS Dev webhook setup requires an active workspace");
+  const identity = webhookIdentity(workspace, profile), receipt = workspace.state.workosWebhook;
   if (!receipt) {
-    workspace.state.workosWebhook = { endpointUrl, webClientId: p.webClientId };
+    workspace.state.workosWebhook = { ...identity, pausePending: true };
     saveWorkspace(workspace);
   }
-  const matches = (await endpoints(request)).filter(value => value.endpoint_url === endpointUrl);
-  if (matches.length > 1) throw new Error("Ambiguous WorkOS Dev webhook; setup stopped");
-  let endpoint = matches[0];
-  if (receipt?.id && endpoint?.id !== receipt.id) throw new Error("The recorded WorkOS Dev webhook is missing or replaced");
-  if (!endpoint) endpoint = await request("/webhook_endpoints", { method: "POST", body: { endpoint_url: endpointUrl, events: WORKOS_DEV_EVENTS } });
-  if (!/^we_[A-Za-z0-9]+$/.test(endpoint?.id ?? "") || endpoint.endpoint_url !== endpointUrl ||
-      typeof endpoint.secret !== "string" || endpoint.secret.length < 16 ||
-      (receipt?.secret && receipt.secret !== endpoint.secret)) throw new Error("WorkOS Dev webhook verification failed");
-  if (endpoint.status !== "enabled" || WORKOS_DEV_EVENTS.some(event => !endpoint.events.includes(event))) {
-    await request(`/webhook_endpoints/${endpoint.id}`, { method: "PATCH", body: { status: "enabled", events: WORKOS_DEV_EVENTS } });
+  const endpoint = await findWebhook(workspace, identity, request) ?? await request("/webhook_endpoints", {
+    method: "POST", body: { endpoint_url: identity.endpointUrl, events: WORKOS_DEV_EVENTS },
+  });
+  await changeWebhookStatus(workspace, identity, endpoint, "disabled", request);
+}
+
+export async function enableWorkosWebhook(workspace, profile, request = workosClient(profile)) {
+  const receipt = workspace.state.workosWebhook;
+  if (workspace.state.status !== "active" || !receipt?.id || !receipt.secret || receipt.pausePending) {
+    throw new Error("WorkOS Dev webhook must be provisioned before enabling delivery");
   }
-  workspace.state.workosWebhook = { endpointUrl, webClientId: p.webClientId, id: endpoint.id, secret: endpoint.secret };
+  const identity = webhookIdentity(workspace, profile);
+  await changeWebhookStatus(workspace, identity, await findWebhook(workspace, identity, request), "enabled", request);
+}
+
+/** Events API repair resumes from the database cursor on the next run; pausing
+ * transport never clears security events, memberships or session revocations. */
+export async function pauseWorkosWebhook(workspace, profile,
+  request = workosClient(profile, fetch, { signal: AbortSignal.timeout(20_000) })) {
+  const receipt = workspace.state.workosWebhook;
+  if (!receipt || receipt.deleted) return;
+  const identity = webhookIdentity(workspace, profile);
+  receipt.pausePending = true;
   saveWorkspace(workspace);
+  await changeWebhookStatus(workspace, identity, await findWebhook(workspace, identity, request), "disabled", request);
 }
 
 export async function deleteWorkosWebhook(workspace, profile, request = workosClient(profile)) {
