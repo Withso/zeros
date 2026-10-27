@@ -245,11 +245,12 @@ export function DesignWorkspaceColumn({
     [workspaceId, folder],
   );
 
+  // A frame revalidating its source keeps its last confirmed generation in the
+  // inspector instead of dropping to an empty panel; edits stay engine-checked.
   const selectedFrame = useMemo(
     () => {
       const frames = designFrameViews(pageSnapshot);
-      const frame = frames.find((frame) => frame.file === selectedFrameFile) ?? frames[0];
-      return frame && isPreparedDesignFrame(frame) ? frame : null;
+      return designPresentedFrame(frames.find((frame) => frame.file === selectedFrameFile) ?? frames[0]);
     },
     [selectedFrameFile, pageSnapshot],
   );
@@ -492,4 +493,4 @@ export function DesignWorkspaceColumn({
     </DesignSavedEditingContext.Provider>
   );
 }
-import { designFrameViews, isPreparedDesignFrame } from "./state/design-frame-view";
+import { designFrameViews, designPresentedFrame } from "./state/design-frame-view";

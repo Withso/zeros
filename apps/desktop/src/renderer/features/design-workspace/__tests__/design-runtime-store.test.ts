@@ -452,4 +452,85 @@ describe("design runtime store", () => {
     // A stale box must be read again, never presented as new geometry.
     expect(frame?.detailsByNode.copy).toBeUndefined();
   });
+  it("retires a hidden document without discarding its exact-generation tree and selected details", () => {
+    // Retirement used to clear the tree and every readback, so returning to a
+    // frame (or to its workspace) painted "Loading frame…" in Layers and an
+    // empty inspector until a new runtime booted for the same source.
+    const store = useDesignRuntimeStore.getState();
+    const heading = details();
+    const tree = [{ oid: "heading", tag: "h1", name: "Heading", text: "Hello", visible: true, children: [] }];
+    store.publishSnapshot("workspace-a", "/design/a", "home.html", {
+      sourceVersion: SOURCE_VERSION, revision: 1, tree,
+      frame: { ...heading, oid: "root" }, warnings: [],
+      viewport: { width: 100, height: 80, scrollX: 0, scrollY: 0 },
+    }, SOURCE_VERSION);
+    store.publishNodeDetails("workspace-a", "/design/a", "home.html", heading, SOURCE_VERSION);
+    for (const nodeId of [null, "heading"]) {
+      store.publishScreenshot("workspace-a", "/design/a", "home.html", {
+        sourceVersion: SOURCE_VERSION, nodeId, mimeType: "image/png",
+        dataUrl: "data:image/png;base64,AAAA", width: 1, height: 1, scale: 1,
+      }, SOURCE_VERSION);
+    }
+    store.setHoveredNode("workspace-a", "home.html", "heading");
+
+    useDesignRuntimeStore.getState().retireFrame("workspace-a", "home.html");
+
+    const retired = designRuntimeFrameState("workspace-a", "home.html");
+    expect(retired?.sourceVersion).toBe(SOURCE_VERSION);
+    expect(retired?.snapshot?.tree).toBe(tree);
+    expect(retired?.detailsByNode.heading).toBe(heading);
+    expect(Object.keys(retired?.screenshotsByNode ?? {})).toEqual([""]);
+    expect(useDesignRuntimeStore.getState().byWorkspace["workspace-a"]?.hoveredNodeId).toBeNull();
+    expect(retired?.retiredAt).toEqual(expect.any(Number));
+
+    // A runtime that boots again for the same source takes the entry back.
+    store.publishSnapshot("workspace-a", "/design/a", "home.html", {
+      sourceVersion: SOURCE_VERSION, revision: 2, tree: [],
+      frame: { ...heading, oid: "root" }, warnings: [],
+      viewport: { width: 100, height: 80, scrollX: 0, scrollY: 0 },
+    }, SOURCE_VERSION);
+    const live = designRuntimeFrameState("workspace-a", "home.html");
+    expect(live?.retiredAt).toBeUndefined();
+    expect(live?.snapshot?.revision).toBe(2);
+    expect(live?.detailsByNode.heading).toBe(heading);
+  });
+
+  it("bounds retained retired presentation by bytes, evicting the oldest retirement first", () => {
+    const store = useDesignRuntimeStore.getState();
+    const largeTree = (prefix: string) => Array.from({ length: 1_000 }, (_, index) => ({
+      oid: `${prefix}-${index}`, tag: "p", name: "Paragraph", text: "x".repeat(400), visible: true, children: [],
+    }));
+    const live = { workspace: "workspace-live", file: "live.html" };
+    store.publishSnapshot(live.workspace, "/design/live", live.file, {
+      sourceVersion: SOURCE_VERSION, revision: 1, tree: largeTree("live"),
+      frame: { ...details(), oid: "root" }, warnings: [],
+      viewport: { width: 100, height: 80, scrollX: 0, scrollY: 0 },
+    }, SOURCE_VERSION);
+    for (let index = 0; index < 20; index++) {
+      const workspace = `workspace-${index}`;
+      store.publishSnapshot(workspace, `/design/${index}`, "home.html", {
+        sourceVersion: SOURCE_VERSION, revision: 1, tree: largeTree(`w${index}`),
+        frame: { ...details(), oid: "root" }, warnings: [],
+        viewport: { width: 100, height: 80, scrollX: 0, scrollY: 0 },
+      }, SOURCE_VERSION);
+      useDesignRuntimeStore.getState().retireFrame(workspace, "home.html");
+    }
+    const state = useDesignRuntimeStore.getState();
+    const retained = Object.entries(state.byWorkspace)
+      .filter(([workspaceId]) => workspaceId.startsWith("workspace-") && workspaceId !== live.workspace)
+      .filter(([, workspace]) => workspace.frames["home.html"]?.snapshot)
+      .map(([workspaceId]) => Number(workspaceId.slice("workspace-".length)));
+    // ~1 MB of text per tree: only the newest retirements fit the budget.
+    expect(retained.length).toBeGreaterThan(0);
+    expect(retained.length).toBeLessThan(12);
+    expect(Math.min(...retained)).toBe(20 - retained.length);
+    expect(retained).toContain(19);
+    // Bytes never evict a live runtime's tree, and evicted entries keep their
+    // exact generation so a later boot is still fenced by source version.
+    expect(state.byWorkspace[live.workspace]?.frames[live.file]?.snapshot?.tree).toHaveLength(1_000);
+    expect(state.byWorkspace["workspace-0"]?.frames["home.html"]).toMatchObject({
+      sourceVersion: SOURCE_VERSION, snapshot: undefined, detailOrder: [],
+    });
+  });
 });
+

@@ -59,15 +59,19 @@ import { DesignSavedEditingContext } from "./design-saved-editing";
 import { Button, ScrollArea, toast } from "../../shared/ui/primitives";
 import { cn } from "../../shared/ui/cn";
 import {
+  designLayerPanelRows,
+  frameRowKey,
+  layerRowKey,
+  type DesignPanelRow,
+} from "./design-layer-panel-rows";
+import {
   designFrameLayerChildren,
   designLayerBlockEdges,
-  designFrameRowDiscloses,
   designLayerRevealPaths,
   designLayerRevealScrollTop,
   designLayerRovingTabStop,
   designLayerSelectionSubtreeIds,
   designLayerVirtualWindow,
-  flattenDesignLayerTree,
   type DesignLayerBlockEdge,
   type FlatDesignLayer,
 } from "./design-layer-tree";
@@ -85,7 +89,6 @@ import {
 import {
   collapseAllDesignLayers,
   designWorkspaceHasExpandedLayers,
-  EMPTY_DESIGN_FRAME_DISCLOSURE,
   requestDesignLayerReveal,
   settleDesignLayerReveal,
   toggleDesignFrameTreeExpanded,
@@ -134,27 +137,6 @@ interface LayerRename {
   name: string;
 }
 
-/** The panel is one tree: every frame contributes its row, and an open frame
- * contributes the layer rows below it. Keeping them in one fixed-height list is
- * what lets several frames stand open while virtualization, keyboard travel,
- * and the selection block keep working across frame boundaries. */
-type DesignPanelRow =
-  | {
-      kind: "frame";
-      key: string;
-      frame: DesignFrameView;
-      expanded: boolean;
-      discloses: boolean;
-    }
-  | {
-      kind: "layer";
-      key: string;
-      frame: DesignCanvasFrameWire;
-      layer: FlatDesignLayer;
-      expanded: boolean;
-    }
-  | { kind: "pending"; key: string; frame: DesignFrameView };
-
 const EMPTY_LAYER_TREE: readonly DesignRuntimeTreeNode[] = Object.freeze([]);
 const EMPTY_SELECTED_NODE_IDS: readonly string[] = Object.freeze([]);
 const DESIGN_LAYER_ROW_HEIGHT = 28;
@@ -171,16 +153,6 @@ const DESIGN_LAYER_DISCLOSURE_SPACER = "size-3 shrink-0";
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : "The layer action failed.";
-}
-
-/** Row identity is frame-scoped: two frames may legitimately author the same
- * node id, and both can be on screen at once. */
-function frameRowKey(file: string): string {
-  return `frame:${file}`;
-}
-
-function layerRowKey(file: string, nodeId: string): string {
-  return `layer:${file}:${nodeId}`;
 }
 
 function FrameLayoutIcon({ kind }: { kind: DesignFrameLayoutIconKind }) {
@@ -458,37 +430,10 @@ function OwnedDesignWorkspaceSidebarPanels({
     () => designLayerSelectionSubtreeIds(selectedTree, selectedNodeIds),
     [selectedTree, selectedNodeIds],
   );
-  const panelRows = useMemo(() => {
-    const rows: DesignPanelRow[] = [];
-    for (const frame of frames) {
-      const tree = isPreparedDesignFrame(frame) ? treesByFile[frame.file] : undefined;
-      const disclosure =
-        disclosures[frame.file] ?? EMPTY_DESIGN_FRAME_DISCLOSURE;
-      rows.push({
-        kind: "frame",
-        key: frameRowKey(frame.file),
-        frame,
-        expanded: disclosure.treeExpanded,
-        discloses: designFrameRowDiscloses(tree, frame),
-      });
-      if (!disclosure.treeExpanded) continue;
-      if (!tree || !isPreparedDesignFrame(frame)) {
-        rows.push({ kind: "pending", key: `pending:${frame.file}`, frame });
-        continue;
-      }
-      const expandedNodeIds = new Set(disclosure.expandedNodeIds);
-      for (const layer of flattenDesignLayerTree(tree, { expandedNodeIds })) {
-        rows.push({
-          kind: "layer",
-          key: layerRowKey(frame.file, layer.node.oid),
-          frame,
-          layer,
-          expanded: layer.hasChildren && expandedNodeIds.has(layer.node.oid),
-        });
-      }
-    }
-    return rows;
-  }, [disclosures, frames, treesByFile]);
+  const panelRows = useMemo(
+    () => designLayerPanelRows({ frames, treesByFile, disclosures }),
+    [disclosures, frames, treesByFile],
+  );
   // A retained tree must never revive another directory/page's draft, or
   // commit it when hiding/removing the input happens to produce a blur.
   useLayoutEffect(() => {
