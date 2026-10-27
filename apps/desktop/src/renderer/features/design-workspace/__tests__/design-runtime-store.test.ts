@@ -231,6 +231,41 @@ describe("design runtime store", () => {
     );
   });
 
+  it("keeps a cloned snapshot of the same runtime revision without notifying", () => {
+    // Re-applying the active theme returns the runtime's cached snapshot, but
+    // the port structured-clones it: every frame switch republished every live
+    // frame's identical snapshot and re-rendered Layers, canvas and inspector.
+    const snapshot = {
+      sourceVersion: SOURCE_VERSION,
+      revision: 4,
+      tree: [{ oid: "heading", tag: "h1", name: "Heading", text: "Hello", visible: true, children: [] }],
+      frame: { ...details(), oid: "root" },
+      warnings: [],
+      viewport: { width: 100, height: 80, scrollX: 0, scrollY: 0 },
+    };
+    const store = useDesignRuntimeStore.getState();
+    store.publishSnapshot("workspace-a", "/design/a", "home.html", snapshot, SOURCE_VERSION);
+    const first = designRuntimeFrameState("workspace-a", "home.html");
+    let notifications = 0;
+    const unsubscribe = useDesignRuntimeStore.subscribe(() => { notifications += 1; });
+    store.publishSnapshot("workspace-a", "/design/a", "home.html", structuredClone(snapshot), SOURCE_VERSION);
+    expect(notifications).toBe(0);
+    expect(designRuntimeFrameState("workspace-a", "home.html")).toBe(first);
+    // A new revision, a changed root readback or a retired entry still publishes.
+    store.publishSnapshot("workspace-a", "/design/a", "home.html", { ...structuredClone(snapshot), revision: 5 }, SOURCE_VERSION);
+    expect(notifications).toBe(1);
+    const changedRoot = structuredClone({ ...snapshot, revision: 5 });
+    changedRoot.frame.styles = { ...changedRoot.frame.styles, backgroundColor: "rgb(0, 0, 0)" };
+    store.publishSnapshot("workspace-a", "/design/a", "home.html", changedRoot, SOURCE_VERSION);
+    expect(notifications).toBe(2);
+    useDesignRuntimeStore.getState().retireFrame("workspace-a", "home.html");
+    const retiredCount = notifications;
+    store.publishSnapshot("workspace-a", "/design/a", "home.html", structuredClone(changedRoot), SOURCE_VERSION);
+    expect(notifications).toBe(retiredCount + 1);
+    expect(designRuntimeFrameState("workspace-a", "home.html")?.retiredAt).toBeUndefined();
+    unsubscribe();
+  });
+
   it("reuses semantically equal node details without notifying subscribers", () => {
     let notifications = 0;
     const unsubscribe = useDesignRuntimeStore.subscribe(() => {

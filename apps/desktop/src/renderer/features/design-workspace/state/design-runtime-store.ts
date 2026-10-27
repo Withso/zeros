@@ -357,6 +357,27 @@ function sameNodeDetails(
   );
 }
 
+/** The runtime's revision is its semantic generation counter: a cloned
+ * snapshot of the same revision, root readback and viewport is the same
+ * snapshot, even though the port delivered a new object. */
+function sameRuntimeSnapshot(
+  left: DesignRuntimeSnapshot,
+  right: DesignRuntimeSnapshot,
+): boolean {
+  return (
+    left === right ||
+    (left.sourceVersion === right.sourceVersion &&
+      left.revision === right.revision &&
+      left.tree.length === right.tree.length &&
+      left.warnings.length === right.warnings.length &&
+      left.viewport.width === right.viewport.width &&
+      left.viewport.height === right.viewport.height &&
+      left.viewport.scrollX === right.viewport.scrollX &&
+      left.viewport.scrollY === right.viewport.scrollY &&
+      sameNodeDetails(left.frame, right.frame))
+  );
+}
+
 function updateWorkspace(
   state: DesignRuntimeStore,
   workspaceId: string,
@@ -427,7 +448,9 @@ export const useDesignRuntimeStore = create<DesignRuntimeStore>((set) => ({
       if (
         workspace?.folder === folder &&
         current?.sourceVersion === sourceVersion &&
-        current.snapshot === snapshot
+        current.retiredAt === undefined &&
+        current.snapshot &&
+        sameRuntimeSnapshot(current.snapshot, snapshot)
       ) {
         return state;
       }

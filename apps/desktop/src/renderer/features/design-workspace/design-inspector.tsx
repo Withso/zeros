@@ -316,7 +316,14 @@ function InspectorEditField({
     (next: string) => {
       draftRef.current = next;
       setDraft(next);
-      setPresentation(inspectorFieldPresentation(styleProperty, next, whole));
+      // An equal presentation keeps its identity, so a mounted field that
+      // adopts the value it was initialized with schedules no render.
+      const presented = inspectorFieldPresentation(styleProperty, next, whole);
+      setPresentation((current) =>
+        current.text === presented.text && current.unit === presented.unit
+          ? current
+          : presented,
+      );
     },
     [styleProperty, whole],
   );
