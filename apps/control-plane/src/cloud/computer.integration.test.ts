@@ -355,6 +355,23 @@ d("cloud v2 Cloud Computer builds", () => {
     expect((await computers.overview(org)).builds[0]!.id).toBe(overview.builds[0]!.id);
   });
 
+  it("refreshes the runtime of a live snapshot built before builds recorded their runtime", async () => {
+    const boat = compute();
+    await computers.enqueue(org, admin, recipe);
+    await new CloudV2ComputerBuilder({ computers, compute: boat, channel: "alpha", runtime, cloneToken: async () => "ghs_token" }).tick();
+    // Builds from before migration 0204 have no recorded runtime.
+    await pool.query(`UPDATE cloud_v2_computer_builds SET runtime_sha256 = NULL WHERE org_id = $1`, [org]);
+    vi.mocked(boat.execLong).mockClear();
+    const builder = new CloudV2ComputerBuilder({ computers, compute: boat, channel: "alpha", runtime, cloneToken: async () => "ghs_token" });
+    vi.mocked(boat.create).mockResolvedValueOnce({ sandboxId: "bx_build2" });
+    await builder.scheduleRefreshes(); await builder.tick();
+    expect((await computers.overview(org)).builds[0]).toMatchObject({ reason: "runtime", state: "succeeded", runtimeSha256: runtime.sha256,
+      recipe: { repositories: [{ repository: "withso/zeros", commit, branch: "master" }] } });
+    expect(boat.execLong).not.toHaveBeenCalled();
+    // Recorded now, so the same pin is not refreshed again.
+    expect(await computers.refreshCandidates(runtime.sha256)).toEqual([]);
+  });
+
   it("refreshes once a day while the organization uses cloud, only when a branch moved", async () => {
     const boat = compute();
     await computers.enqueue(org, admin, recipe);

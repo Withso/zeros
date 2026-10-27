@@ -91,8 +91,9 @@ starts clean.
 
 The builder also refreshes the snapshot without being asked. A new runtime pin
 refreshes the runtime only, without Git or setup, so creates and wakes stop
-downloading it; failures are retried after six hours, at most three times per
-pin. Once a day, an organization that used cloud workspaces in the last week is
+downloading it. A snapshot whose build recorded no runtime, from before builds
+did, is refreshed the same way. Failures are retried after six hours, at most
+three times per pin. Once a day, an organization that used cloud workspaces in the last week is
 rebuilt at its live build's refs when GitHub reports a moved branch; unbuilt
 edits are left for an admin to build. An organization with no new commits is
 not checked again for a day, one GitHub cannot answer for an hour, and
