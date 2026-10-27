@@ -10,7 +10,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import { ensureWorkspace, acquireWorkspaceLock, systemEnvironment, privateDirectory, writePrivateFile, saveWorkspace, readPrivateJson } from "./state.mjs";
 import { loadProfile, profileIssues, publicDevProfile, desktopEnvironment, backendEnvironment, webEnvironment } from "./profile.mjs";
 import { ensureTunnel, configureTunnel, deleteTunnel } from "./cloudflare.mjs";
-import { ensureWorkosWebhook, deleteWorkosWebhook } from "./workos.mjs";
+import { ensureWorkosWebhook, enableWorkosWebhook, pauseWorkosWebhook, deleteWorkosWebhook } from "./workos.mjs";
 import { startPostgres, pickServicePorts, migratePostgres, databaseCommand } from "./postgres.mjs";
 import { DevelopmentProcesses, run, waitForHttp, waitForDevSignIn } from "./processes.mjs";
 import { ensureDevAuthEnvironment } from "../dev-auth-profile.mjs";
@@ -61,19 +61,33 @@ async function confirmReset(workspace) {
   } finally { prompt.close(); }
 }
 
+async function pauseStoppedWebhook(workspace) {
+  if (!workspace.state.workosWebhook || workspace.state.workosWebhook.deleted) return;
+  // Serialize an idle --stop with a new start. A stale in-memory receipt must
+  // never pause a successor's live endpoint or overwrite its launch receipt.
+  const release = acquireWorkspaceLock(workspace);
+  try {
+    const current = readPrivateJson(workspace.file);
+    if (current.owner !== workspace.state.owner || current.instanceId !== workspace.state.instanceId || current.launcher) {
+      throw new Error("Development webhook pause requires confirmed shutdown of the original instance");
+    }
+    await pauseWorkosWebhook({ ...workspace, state: current }, loadProfile(undefined, { root }));
+  } finally { release(); }
+}
+
 async function stop(workspace) {
   const receipt = workspace.state.launcher;
   if (!receipt) {
     if (fs.existsSync(path.join(workspace.directory, "run.lock")))
       throw new Error("Development shutdown could not be confirmed; the supervisor is still starting. Retry --stop.");
-    return;
+    return pauseStoppedWebhook(workspace);
   }
   try {
     const response = await fetch(`http://127.0.0.1:${receipt.port}/stop`, { method: "POST", redirect: "error",
       headers: { authorization: `Bearer ${receipt.token}` }, signal: globalThis.AbortSignal.timeout(5000) });
     if (!response.ok) throw new Error();
   } catch {
-    if (recoverLaunchAfterReboot(workspace)) { console.log(REBOOT_RECOVERED); return; }
+    if (recoverLaunchAfterReboot(workspace)) { console.log(REBOOT_RECOVERED); await pauseStoppedWebhook(workspace); return; }
     throw new Error("The Dev supervisor is unavailable; existing state was preserved. Inspect pnpm dev:doctor before recovering its processes.");
   }
   const deadline = Date.now() + 45_000;
@@ -86,6 +100,7 @@ async function stop(workspace) {
   const current = readPrivateJson(workspace.file);
   if (current.owner !== workspace.state.owner || current.instanceId !== workspace.state.instanceId || current.launcher)
     throw new Error("Development shutdown could not be confirmed; existing state was preserved. Retry --stop after inspecting the supervisor.");
+  await pauseStoppedWebhook({ ...workspace, state: current });
   console.log("[zeros-dev] Desktop and backend processes stopped for this checkout.");
 }
 
@@ -167,6 +182,8 @@ async function start(workspace, profile) {
     const publicProfile = publicDevProfile(workspace, profile);
     await waitForHttp(`${publicProfile.apiOrigin}/healthz`, { signal, timeout: 120_000, accept: healthy, label: "Control plane through the tunnel" });
     await waitForDevSignIn(publicProfile, { signal, timeout: 120_000 });
+    signal.throwIfAborted();
+    await enableWorkosWebhook(workspace, profile); signal.throwIfAborted();
     // A missing fixture input is guidance, not a reason to tear the stack down:
     // fix it, then run pnpm electron:cloud --seed against this running stack.
     if (cloudSeedNeeded(workspace.state)) await seedCloud(workspace, profile, ports).catch(error =>
@@ -184,12 +201,19 @@ async function start(workspace, profile) {
     if (!signal.aborted) await new Promise(resolve => signal.addEventListener("abort", resolve, { once: true }));
     if (signal.reason?.message !== "Development shutdown requested") throw signal.reason;
   } finally {
+    let pauseFailed = false;
+    try { await pauseWorkosWebhook(workspace, profile); }
+    catch {
+      pauseFailed = true;
+      console.warn("[zeros-dev] WorkOS webhook pause is pending; owned processes will still stop. Retry pnpm electron:cloud --stop.");
+    }
     await processes.stop();
     await desktopSignIn?.close().catch(() => console.warn("[zeros-dev] An unused automatic sign-in session could not be revoked; private handoff files were removed"));
     if (postgres) await postgres.stop();
     if (server) { server.closeAllConnections(); await new Promise(resolve => server.close(resolve)); }
     delete workspace.state.launcher; saveWorkspace(workspace); release();
     for (const sig of ["SIGINT", "SIGTERM"]) process.off(sig, abort);
+    if (pauseFailed) throw new Error("Dev processes stopped, but the WorkOS webhook pause was not confirmed. Retry pnpm electron:cloud --stop.");
   }
 }
 

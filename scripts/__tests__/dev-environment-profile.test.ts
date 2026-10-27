@@ -60,6 +60,7 @@ describe("local Dev integration boundaries", () => {
         const hook = { id: "we_DEV", ...body, secret: "dev-webhook-credential-sentinel", status: "enabled" }; hooks.push(hook);
         if (lose) { lose = false; throw new Error("lost create response"); } return hook;
       }
+      if (method === "PATCH") { const hook = hooks.find(h => route.endsWith(h.id)); Object.assign(hook, body); return hook; }
       if (method === "DELETE") { const i = hooks.findIndex(h => route.endsWith(h.id)); hooks.splice(i, 1); }
     };
     await expect(ensureWorkosWebhook(w, p, request)).rejects.toThrow("lost create response");
