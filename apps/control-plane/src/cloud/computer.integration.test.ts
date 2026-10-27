@@ -372,6 +372,35 @@ d("cloud v2 Cloud Computer builds", () => {
     expect(await computers.refreshCandidates(runtime.sha256)).toEqual([]);
   });
 
+  it("installs the runtime a refresh was queued for, even when a process on another pin runs it", async () => {
+    const boat = compute();
+    await computers.enqueue(org, admin, recipe);
+    await new CloudV2ComputerBuilder({ computers, compute: boat, channel: "alpha", runtime, cloneToken: async () => "ghs_token" }).tick();
+    // A process on the new pin queues the refresh; one still on the old pin, during a redeploy, picks it up.
+    await computers.enqueueAutomatic(org, (await computers.overview(org)).activeBuildId!, "runtime", "c".repeat(64));
+    const url = vi.fn(async (sha256?: string) => `https://r2.example.test/${sha256}.tar.gz?sig=1`);
+    vi.mocked(boat.create).mockResolvedValueOnce({ sandboxId: "bx_build2" });
+    await new CloudV2ComputerBuilder({ computers, compute: boat, channel: "alpha", runtime: { sha256: runtime.sha256, url }, cloneToken: async () => "ghs_token" }).tick();
+    expect((await computers.overview(org)).builds[0]).toMatchObject({ reason: "runtime", state: "succeeded", runtimeSha256: "c".repeat(64) });
+    expect(url).toHaveBeenCalledWith("c".repeat(64));
+    expect(vi.mocked(boat.exec).mock.calls.some(([, command]) => command.includes(`/opt/zeros/runtime/${"c".repeat(64)}`))).toBe(true);
+  });
+
+  it("keeps the worker pool's query slots free while a build and a cleanup each hold their lock", async () => {
+    // Cloud v2 runs on a two-slot worker pool; build locks come from their own pool.
+    const worker = new pg.Pool({ connectionString: process.env.TEST_DATABASE_URL, max: 2, connectionTimeoutMillis: 1_000 });
+    const locks = new pg.Pool({ connectionString: process.env.TEST_DATABASE_URL, max: 2, connectionTimeoutMillis: 1_000 });
+    try {
+      const separate = new CloudV2Computers(worker, locks);
+      await separate.withBuildLock(randomUUID(), async () => {
+        await separate.withBuildLock(randomUUID(), async () => {
+          // The lifecycle and the build's own queries still get a connection.
+          await expect(Promise.all([separate.cleanupCandidates(), separate.cleanupCandidates()])).resolves.toHaveLength(2);
+        });
+      });
+    } finally { await Promise.all([worker.end(), locks.end()]); }
+  });
+
   it("refreshes once a day while the organization uses cloud, only when a branch moved", async () => {
     const boat = compute();
     await computers.enqueue(org, admin, recipe);

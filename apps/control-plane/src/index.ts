@@ -94,10 +94,16 @@ if (workosSync) {
   );
 }
 const runtimeReady = !config.databaseMaintenanceMode && migrationResult.status.state === "current";
+const cloudV2Lifecycle = processRole === "worker" || processRole === "combined";
+// Cloud Computer builds hold an advisory lock for their whole run. Their own
+// two connections, one build and one cleanup, keep those locks out of the
+// worker pool's query slots.
+const computerLockPool = runtimeReady && config.cloudV2 && cloudV2Lifecycle
+  ? createPool(config.databaseUrl, { workload: "advisory-lock", applicationName: "zeros-computer-locks" }) : null;
 const cloudV2 = runtimeReady ? createCloudV2(config, workerPool ?? pool, {
   relay: processRole === "realtime" || processRole === "combined",
-  lifecycle: processRole === "worker" || processRole === "combined",
-}, securityEventBroker, listenerPool) : null;
+  lifecycle: cloudV2Lifecycle,
+}, securityEventBroker, listenerPool, ...(computerLockPool ? [computerLockPool] : [])) : null;
 const stopCloudV2Lifecycle = cloudV2?.lifecycle?.start() ?? (async () => {});
 const app = createApp(config, pool, emailConfig, {
   ...(cloudV2 && servesHttpApi ? { cloudV2: { routes: cloudV2.routes, proxy: cloudV2.proxy, workers: cloudV2.workers } } : {}),
@@ -145,6 +151,7 @@ function shutdown(signal: string): void {
       await shutdownControlPlaneTracing(2_000);
       const pools = new Set([pool, listenerPool]);
       if (workerPool) pools.add(workerPool);
+      if (computerLockPool) pools.add(computerLockPool);
       await Promise.all([...pools].map(value => value.end()));
     }).finally(() => { clearTimeout(deadline); process.exit(0); });
   });

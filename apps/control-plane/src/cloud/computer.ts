@@ -23,9 +23,9 @@ const MAX_LOG_BYTES = 1024 * 1024;
 const HEARTBEAT_MS = 60_000;
 /** A build whose server stopped (a deploy, a crash) is failed after this. */
 const INTERRUPTED_AFTER = "5 minutes";
-/** One build per process: each holds a dedicated advisory-lock connection for
- * its whole run, and the worker pool has only two connections. A second
- * concurrent build would starve the lifecycle and its own queries. */
+/** One build per process. Each holds an advisory-lock connection for its
+ * whole run, taken from the lock pool so it never uses up the worker pool's two
+ * query slots; cleanup takes the lock pool's second connection. */
 const BUILD_CONCURRENCY = 1;
 /** How often the builder looks for snapshots to refresh by themselves. */
 const REFRESH_SCAN_MS = 10 * 60_000;
@@ -115,7 +115,9 @@ function notFound(error: unknown): boolean {
 }
 
 export class CloudV2Computers {
-  constructor(private readonly pool: pg.Pool) {}
+  /** `lockPool` holds the build locks, each for a whole build or cleanup;
+   * queries stay on `pool`. */
+  constructor(private readonly pool: pg.Pool, private readonly lockPool: pg.Pool = pool) {}
 
   private async memberRole(organizationId: string, userId: string): Promise<string> {
     const { rows } = await withSystemTx(this.pool, tx => tx.query<{ role: string }>(
@@ -431,7 +433,7 @@ export class CloudV2Computers {
    * This connection issues advisory SQL only. Every table access during work
    * uses its own withSystemTx connection and RLS context. */
   async withBuildLock(id: string, work: (assertHeld: () => void) => Promise<void>): Promise<void> {
-    const client = await this.pool.connect();
+    const client = await this.lockPool.connect();
     let lost = false, held = false;
     const onLost = () => { lost = true; };
     client.on("error", onLost); client.on("end", onLost);
@@ -761,11 +763,13 @@ export class CloudV2ComputerBuilder {
   private async install(job: CloudV2Build, sandboxId: string, assertHeld: () => void): Promise<void> {
     const { compute, computers } = this.deps;
     const log = (text: string) => computers.append(job.id, text);
-    const { runtime } = this.deps;
-    const installed = await compute.exec(sandboxId, installRuntimeCommand({ sha256: runtime.sha256, url: await runtime.url() }), 300);
+    // A refresh installs the runtime it was queued for, even when a process
+    // still on another pin picks it up during a deploy.
+    const sha256 = job.runtimeSha256 ?? this.deps.runtime.sha256;
+    const installed = await compute.exec(sandboxId, installRuntimeCommand({ sha256, url: await this.deps.runtime.url(sha256) }), 300);
     if (installed.exitCode !== 0 || installed.timedOut) throw Object.assign(new Error("runtime install failed"), { code: "worker_runtime_install_failed" });
-    await computers.setRuntime(job.id, runtime.sha256);
-    await log(`[zeros] runtime ${runtime.sha256.slice(0, 12)} installed\n`);
+    await computers.setRuntime(job.id, sha256);
+    await log(`[zeros] runtime ${sha256.slice(0, 12)} installed\n`);
     let pinned: CloudV2Recipe["repositories"];
     if (job.reason === "runtime" && job.baseSnapshot) {
       // The live computer already has these commits and their setup.

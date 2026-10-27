@@ -6,6 +6,7 @@ const f = vi.hoisted(() => ({
   apiPool: { query: vi.fn(), connect: vi.fn(), end: vi.fn() },
   workerPool: { query: vi.fn(), connect: vi.fn(), end: vi.fn() },
   listenerPool: { query: vi.fn(), connect: vi.fn(), end: vi.fn() },
+  lockPool: { query: vi.fn(), connect: vi.fn(), end: vi.fn() },
   createPool: vi.fn(), serve: vi.fn(), createApp: vi.fn(() => ({ fetch: vi.fn() })),
   startWorkos: vi.fn(), workos: { notify: vi.fn(), stop: vi.fn(async () => {}) },
   notifications: vi.fn(), stopNotifications: vi.fn(async () => {}),
@@ -57,11 +58,12 @@ beforeEach(() => {
   vi.resetModules(); vi.clearAllMocks(); vi.useFakeTimers();
   f.role = "combined"; f.channel = "alpha"; f.cloudEnabled = false; f.promptOutbox = false; f.workosEnabled = true; f.maintenance = false; f.migrationState = "current";
   oldTerm = process.listeners("SIGTERM"); oldInt = process.listeners("SIGINT");
-  for (const pool of [f.apiPool, f.workerPool, f.listenerPool]) {
+  for (const pool of [f.apiPool, f.workerPool, f.listenerPool, f.lockPool]) {
     pool.query.mockImplementation(() => { throw new Error("unexpected database query"); });
     pool.connect.mockImplementation(() => { throw new Error("unexpected database acquisition"); });
   }
-  f.createPool.mockImplementation((_url, options) => options.workload === "worker" ? f.workerPool : options.workload === "listener" ? f.listenerPool : f.apiPool);
+  f.createPool.mockImplementation((_url, options) => options.workload === "worker" ? f.workerPool : options.workload === "listener" ? f.listenerPool
+    : options.workload === "advisory-lock" ? f.lockPool : f.apiPool);
   f.startWorkos.mockReturnValue(f.workos); f.securityStart.mockReturnValue(f.securityStop);
   f.notifications.mockReturnValue(f.stopNotifications); f.lifecycle.start.mockReturnValue(f.lifecycleStop);
   f.cloud.mockImplementation((config, _pool, roles) => config.cloudV2 ? {
@@ -140,7 +142,9 @@ describe("account workers and cloud v2 boot composition", () => {
     f.cloudEnabled = true; f.promptOutbox = true;
     const exit = vi.spyOn(process, "exit").mockImplementation(() => undefined as never);
     await import("./index.js");
-    expect(f.cloud).toHaveBeenCalledExactlyOnceWith(expect.anything(), f.workerPool, { relay: true, lifecycle: true }, f.broker, f.listenerPool);
+    // Cloud Computer build locks get their own pool, only where the lifecycle runs.
+    expect(f.createPool.mock.calls.map(call => call[1].workload).sort()).toEqual(["advisory-lock", "api", "listener", "worker"]);
+    expect(f.cloud).toHaveBeenCalledExactlyOnceWith(expect.anything(), f.workerPool, { relay: true, lifecycle: true }, f.broker, f.listenerPool, f.lockPool);
     expect(f.lifecycle.start).toHaveBeenCalledOnce();
     let releasePromptListener!: () => void;
     f.promptChanges.stop.mockImplementationOnce(() => new Promise<void>(resolve => { releasePromptListener = resolve; }));
@@ -151,9 +155,9 @@ describe("account workers and cloud v2 boot composition", () => {
     expect(f.stopNotifications).toHaveBeenCalledOnce(); expect(f.workos.stop).toHaveBeenCalledOnce(); expect(f.securityStop).toHaveBeenCalledOnce();
     expect(f.promptSignals.wakeAll).toHaveBeenCalledOnce(); expect(f.promptChanges.stop).toHaveBeenCalledOnce();
     expect(f.promptSignals.wakeAll.mock.invocationCallOrder[0]).toBeLessThan(f.server.close.mock.invocationCallOrder[0]!);
-    for (const pool of [f.apiPool, f.workerPool, f.listenerPool]) expect(pool.end).not.toHaveBeenCalled();
+    for (const pool of [f.apiPool, f.workerPool, f.listenerPool, f.lockPool]) expect(pool.end).not.toHaveBeenCalled();
     releasePromptListener(); await vi.advanceTimersByTimeAsync(0);
-    for (const pool of [f.apiPool, f.workerPool, f.listenerPool]) expect(pool.end).toHaveBeenCalledOnce();
+    for (const pool of [f.apiPool, f.workerPool, f.listenerPool, f.lockPool]) expect(pool.end).toHaveBeenCalledOnce();
     expect(exit).toHaveBeenCalledWith(0);
   });
 });

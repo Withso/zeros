@@ -65,7 +65,7 @@ export async function answerCloudV2Offline(store: Pick<CloudV2Store, "listChats"
   }
 }
 
-export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boolean; lifecycle: boolean }, securityEvents?: PostgresSecurityEventBroker, listenerPool: pg.Pool = pool) {
+export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boolean; lifecycle: boolean }, securityEvents?: PostgresSecurityEventBroker, listenerPool: pg.Pool = pool, lockPool: pg.Pool = pool) {
   const v2 = config.cloudV2;
   if (!v2) return null;
   const localOwner = config.development && !("generation" in config.development) ? config.development.owner : undefined;
@@ -81,7 +81,7 @@ export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boo
     throw new HttpError(409, "github_unavailable", "GitHub is not configured");
   };
   const proxyBase = `${v2.apiUrl}${CLOUD_V2_PROXY_PREFIX}`;
-  const computers = new CloudV2Computers(pool);
+  const computers = new CloudV2Computers(pool, lockPool);
   const repositoryToken = config.github ? createCloudV2RepositoryTokens(pool, config.github) : null;
   const mcp = createMcpServices(pool, config);
   const timing = (record: CloudV2TimingRecord) => console.log(`[cloud-v2] timing ${JSON.stringify(record)}`);
