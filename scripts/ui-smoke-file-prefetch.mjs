@@ -1,3 +1,5 @@
+import { runFileMediaSmoke } from "./ui-smoke-file-media.mjs";
+
 export async function runFilePrefetchSmoke({ page, check }) {
   const origin = new URL(page.url()).origin;
   await page.goto(
@@ -97,4 +99,5 @@ export async function runFilePrefetchSmoke({ page, check }) {
     (await count("git.diff")) === beforeRefresh + 1,
   );
   await page.evaluate(() => window.__zerosFilePrefetchHarness.release());
+  await runFileMediaSmoke({ page, check });
 }

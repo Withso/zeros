@@ -1,4 +1,4 @@
-import { chmod, lstat, mkdir, readFile, symlink, writeFile } from "node:fs/promises";
+import { chmod, lstat, mkdir, readFile, symlink, truncate, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { expect, it } from "vitest";
 import { FileService } from "../files";
@@ -52,6 +52,24 @@ it("bounds text, image and binary reads and oversized writes", async () => {
   expect(await files.handle("file.read", { path: "large.txt" })).toEqual({ kind: "too-large", path: "large.txt", bytes: 2_000_001 });
   expect(await files.handle("file.write", { path: "readme.txt", content: "x".repeat(2_000_001) })).toMatchObject({ kind: "too-large" });
   expect(await readFile(join(root, "readme.txt"), "utf8")).toBe("initial\n");
+});
+
+it("opts into video previews with Local's MIME, original bytes and media cap", async () => {
+  const { scope, root } = await repositoryFixture(); const files = new FileService(scope);
+  const bytes = Buffer.from([0, 0, 0, 24, 102, 116, 121, 112]);
+  for (const [extension, mime] of [["MP4", "video/mp4"], ["webm", "video/webm"], ["mov", "video/quicktime"], ["m4v", "video/mp4"], ["ogv", "video/ogg"], ["mkv", "video/x-matroska"]]) {
+    const path = `clip.${extension}`;
+    await writeFile(join(root, path), bytes);
+    expect(await files.handle("file.read", { path })).toMatchObject({ kind: "binary" });
+    expect(await files.handle("file.read", { path, includeVideo: true })).toEqual({
+      kind: "video", path, bytes: bytes.length, dataUrl: `data:${mime};base64,${bytes.toString("base64")}`,
+    });
+  }
+  await writeFile(join(root, "large.mp4"), "");
+  await truncate(join(root, "large.mp4"), 5 * 1024 * 1024 + 1);
+  expect(await files.handle("file.read", { path: "large.mp4", includeVideo: true })).toEqual({
+    kind: "too-large", path: "large.mp4", bytes: 5 * 1024 * 1024 + 1,
+  });
 });
 
 it("lists exact Git paths, including newline names, and lazily expands ignored entries", async () => {

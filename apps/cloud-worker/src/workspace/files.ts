@@ -8,6 +8,7 @@ import { reqString, unsupported, WorkspaceError, type WorkspaceScope } from "./s
 
 const TEXT_LIMIT = 2_000_000, IMAGE_LIMIT = 5 * 1024 * 1024;
 const IMAGE_TYPES: Record<string, string> = { ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".gif": "image/gif", ".webp": "image/webp", ".bmp": "image/bmp", ".ico": "image/x-icon", ".avif": "image/avif", ".svg": "image/svg+xml" };
+const VIDEO_TYPES: Record<string, string> = { ".mp4": "video/mp4", ".m4v": "video/mp4", ".webm": "video/webm", ".mov": "video/quicktime", ".ogv": "video/ogg", ".mkv": "video/x-matroska" };
 const byBytes = (a: string, b: string) => a < b ? -1 : a > b ? 1 : 0;
 
 export class FileService {
@@ -21,7 +22,7 @@ export class FileService {
     this.scope.assertId(params.workspaceId);
     for (const name of ["cwd", "folder", "repoRoot"]) if (params[name] !== undefined) this.scope.folder(params[name]);
     switch (op) {
-      case "file.read": return this.read(typeof params.path === "string" ? params.path : "");
+      case "file.read": return this.read(typeof params.path === "string" ? params.path : "", params.includeVideo === true);
       case "file.write": {
         if (typeof params.content !== "string") throw new WorkspaceError("VALIDATION_FAILED", "File content must be text.");
         return this.write(typeof params.path === "string" ? params.path : "", params.content);
@@ -55,13 +56,15 @@ export class FileService {
 
   private isFilePath(path: string): boolean { try { this.scope.path(path); return true; } catch { return false; } }
 
-  private async read(input: string): Promise<unknown> {
+  private async read(input: string, includeVideo = false): Promise<unknown> {
     let path = input;
     try {
       path = this.scope.relative(input);
       const file = await this.checked.file(input);
       try {
-        const info = await file.stat(), mime = IMAGE_TYPES[extname(path).toLowerCase()];
+        const info = await file.stat(), extension = extname(path).toLowerCase();
+        const videoMime = includeVideo ? VIDEO_TYPES[extension] : undefined;
+        const mime = IMAGE_TYPES[extension] ?? videoMime;
         const limit = mime ? IMAGE_LIMIT : TEXT_LIMIT;
         if (info.size > limit) return { kind: "too-large", path, bytes: info.size };
         const buffer = Buffer.alloc(Math.min(info.size + 1, limit + 1));
@@ -69,7 +72,7 @@ export class FileService {
         await this.checked.assertDescriptor(file);
         if (bytesRead > limit) return { kind: "too-large", path, bytes: bytesRead };
         const data = buffer.subarray(0, bytesRead), bytes = data.length;
-        if (mime) return { kind: "image", path, bytes, dataUrl: `data:${mime};base64,${data.toString("base64")}` };
+        if (mime) return { kind: videoMime ? "video" : "image", path, bytes, dataUrl: `data:${mime};base64,${data.toString("base64")}` };
         if (data.subarray(0, 8000).includes(0)) return { kind: "binary", path, bytes };
         return { kind: "text", path, bytes, content: data.toString("utf8") };
       } finally { await file.close(); }

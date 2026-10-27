@@ -343,7 +343,7 @@ export const readFile: CommandHandler = (args) => {
   // containment checks; the secret denylist stays a REMOTE-only boundary so
   // this stays consistent with Local main and the Files tree (which both show
   // these files). Do NOT pass remote:true here — see the header note.
-  return readWorkspaceFile(cwd, rel, { remote: false });
+  return readWorkspaceFile(cwd, rel, { remote: false, includeVideo: args.includeVideo === true });
 };
 
 /** write_file({ cwd, path, content }) — writes a single file for the Files-tab

@@ -4294,7 +4294,7 @@ export class WorkspaceService {
         }
         // readWorkspaceFile re-checks the RESOLVED + realpath target so a
         // collapsing path ('.env/.') or an innocuously-named symlink can't leak.
-        const read = readWorkspaceFile(cwd, rel, { remote });
+        const read = readWorkspaceFile(cwd, rel, { remote, includeVideo: params.includeVideo === true });
         // Design ownership is presentation here. A malformed local manifest
         // must not block reading the source needed to repair it.
         try {

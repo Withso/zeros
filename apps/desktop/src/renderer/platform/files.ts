@@ -17,7 +17,7 @@ import { resolveBridgeWorkspaceIdForCwd } from "./bridge/workspace-id-resolver";
 import { isKnownProjectRoot } from "../state/projects-store";
 import { isCloudWorkspace } from "./bridge/cloud-workspace-key";
 
-export type ReadFileKind = "text" | "image" | "binary" | "too-large" | "error";
+export type ReadFileKind = "text" | "image" | "video" | "binary" | "too-large" | "error";
 
 export interface ReadFileResult {
   kind: ReadFileKind;
@@ -26,7 +26,7 @@ export interface ReadFileResult {
   bytes: number;
   /** Present when kind === "text". */
   content?: string;
-  /** Present when kind === "image" (base64 data URL). */
+  /** Present for image/video previews (bounded base64 data URL). */
   dataUrl?: string;
   /** Present when kind === "error" — a human-readable reason. */
   error?: string;
@@ -98,38 +98,34 @@ async function resolveBridgeFileTarget(
 export async function readWorkspaceFile(
   cwd: string,
   relPath: string,
+  options?: { includeVideo?: boolean },
 ): Promise<ReadFileResult | null> {
   if (!cwd || !relPath) return null;
+  const fromBridge = async (action: string) => {
+    const { bridge, workspaceId } = await resolveBridgeFileTarget(cwd, action);
+    return options?.includeVideo
+      ? bridgeFileRead(bridge, workspaceId, relPath, true)
+      : bridgeFileRead(bridge, workspaceId, relPath);
+  };
   // Desktop: Local main (a registered project root) has no
   // workspace row and isn't under electron-main's trusted IPC roots, so the
   // electron read_file would refuse it. Read it over the engine bridge instead —
   // the engine resolves the repo root via isKnownRepoRoot. Worktrees stay on the
   // faster electron IPC path below.
   if (isCloudWorkspace(cwd) || isKnownProjectRoot(cwd)) {
-    const { bridge, workspaceId } = await resolveBridgeFileTarget(
-      cwd,
-      "read the repository file",
-    );
-    return bridgeFileRead(bridge, workspaceId, relPath);
+    return fromBridge("read the repository file");
   }
   if (!isNativeRuntime()) {
-    const { bridge, workspaceId } = await resolveBridgeFileTarget(
-      cwd,
-      "read the workspace file",
-    );
-    return bridgeFileRead(bridge, workspaceId, relPath);
+    return fromBridge("read the workspace file");
   }
   try {
     return await nativeInvoke<ReadFileResult>("read_file", {
       cwd,
       path: relPath,
+      ...(options?.includeVideo ? { includeVideo: true } : {}),
     });
   } catch {
-    const { bridge, workspaceId } = await resolveBridgeFileTarget(
-      cwd,
-      "read the workspace file",
-    );
-    return bridgeFileRead(bridge, workspaceId, relPath);
+    return fromBridge("read the workspace file");
   }
 }
 

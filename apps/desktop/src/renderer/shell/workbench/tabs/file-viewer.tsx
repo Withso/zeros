@@ -11,7 +11,7 @@ import {
 // Fetches one file via the `read_file` IPC and renders it:
 //   • text   → shiki-highlighted source with a line-number gutter
 //   • md     → Preview (rendered) / Code (highlighted source) toggle
-//   • image  → inline <img> from the data URL
+//   • image/video → bounded media with zoom, pan, copy and download
 //   • binary / too-large / error → a quiet placeholder
 //
 // Read-only by design for v1 — view + copy only. Highlighting reuses
@@ -102,6 +102,7 @@ import { setDiffStyle, useDiffStyle } from "./diff-style-store";
 import { statusForGeneration } from "./changes-tab";
 import type { SkillSource } from "../../../platform/skill-source";
 import { Inline } from "@/renderer/shared/ui/layout/inline";
+import { FileMediaPreview } from "./file-media-preview";
 
 interface FileViewerProps {
   /** Owning workbench tab. Used to close only this tab if an external delete leaves
@@ -212,7 +213,7 @@ function isBinaryGitPatch(patch: string): boolean {
 /** The open file's repo-relative path as breadcrumbs: the colored file-type
  *  glyph + parent dirs (muted, ellipsised when long) + filename (emphasised,
  *  never clipped). Display-only; the full path shows on hover. */
-function PathBreadcrumbs({ path }: { path: string }) {
+function PathBreadcrumbs({ path, truncateFilename = false }: { path: string; truncateFilename?: boolean }) {
   const file = baseOf(path);
   const dir =
     path.length > file.length ? path.slice(0, -(file.length + 1)) : "";
@@ -227,7 +228,7 @@ function PathBreadcrumbs({ path }: { path: string }) {
               <span className="text-fg2/50 shrink-0">/</span>
             </>
           )}
-          <span className="text-fg1 shrink-0 font-medium">{file}</span>
+          <span className={cn("text-fg1 font-medium", truncateFilename ? "min-w-0 truncate" : "shrink-0")}>{file}</span>
         </div>
       </div>
     </Tooltip>
@@ -267,6 +268,7 @@ export function FileViewer({
   reviewExternal,
 }: FileViewerProps) {
   const viewerRef = useRef<HTMLDivElement | null>(null);
+  const [mediaActionsContainer, setMediaActionsContainer] = useState<HTMLSpanElement | null>(null);
   const editorPreferences = useFileEditorPreferences();
   const [editorControls, setEditorControls] = useState<{ key: string; value: FileEditorControls | null } | null>(null);
   const editorKey = JSON.stringify([cwd, path, contentRevision ?? 0]);
@@ -439,7 +441,7 @@ export function FileViewer({
   // commit scope, where an empty diff means the file isn't part of that commit.
   // Text-only, so a tracked binary's "Binary files … differ" never leaks in.
   const sourceBlocksTextDiff =
-    result?.kind === "binary" || result?.kind === "image";
+    result?.kind === "binary" || result?.kind === "image" || result?.kind === "video";
   const aggregateTextPatchReady =
     typeof rawDiff === "string" &&
     rawDiff.length > 0 &&
@@ -630,6 +632,7 @@ export function FileViewer({
   );
 
   const canCopy = result?.kind === "text" && result.content != null;
+  const isMedia = result?.kind === "image" || result?.kind === "video";
 
   // Local source editing also repairs conflicted Design metadata. In a cloud
   // workspace, agents author Design natively but people's Files edits to
@@ -692,7 +695,8 @@ export function FileViewer({
           data-testid="file-path-actions"
           className="flex min-w-0 items-center gap-1"
         >
-          {path && <PathBreadcrumbs path={path} />}
+          {path && <PathBreadcrumbs path={path} truncateFilename={isMedia} />}
+          {isMedia && <span ref={setMediaActionsContainer} className="flex shrink-0 items-center gap-1" />}
           {canCopy && (
             <CodeBlockCopyButton
               text={result!.content ?? ""}
@@ -839,18 +843,11 @@ export function FileViewer({
             {missingDisposition === "show-missing" && !diffShown && (
               <Placeholder Icon={FileX2} text="file no longer exists on disk" />
             )}
-            {result?.kind === "image" && !diffShown && (
-              <div className="flex h-full items-center justify-center overflow-auto p-4">
-                {result.dataUrl ? (
-                  <img
-                    src={result.dataUrl}
-                    alt={path}
-                    className="max-h-full max-w-full object-contain"
-                  />
-                ) : (
-                  <Placeholder Icon={ImageOff} text="Image unavailable" />
-                )}
-              </div>
+            {(result?.kind === "image" || result?.kind === "video") && !diffShown && (
+              result.dataUrl ? (
+                <FileMediaPreview key={JSON.stringify([tabId, readKey])} kind={result.kind}
+                  source={result.dataUrl} path={path} active={active} actionsContainer={mediaActionsContainer} />
+              ) : <Placeholder Icon={ImageOff} text="Media unavailable" />
             )}
             {diffShown &&
               (notInCommit ? (

@@ -38,6 +38,32 @@ describe("readWorkspaceImageThumbnail", () => {
     mocks.resolveWorkspaceId.mockResolvedValue(null);
   });
 
+  it.each(["/personal/worktree", "/organization/worktree"])("opts into bounded video at the native boundary for %s", async cwd => {
+    mocks.nativeInvoke.mockResolvedValue({ kind: "video", path: "clip.mp4", bytes: 3, dataUrl: "data:video/mp4;base64,AAEC" });
+    await expect(readWorkspaceFile(cwd, "clip.mp4", { includeVideo: true })).resolves.toMatchObject({ kind: "video" });
+    expect(mocks.nativeInvoke).toHaveBeenCalledWith("read_file", { cwd, path: "clip.mp4", includeVideo: true });
+    expect(mocks.bridgeFileRead).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["/registered/main", true],
+    ["cloud://11111111-1111-4111-8111-111111111111/22222222-2222-4222-8222-222222222222", false],
+  ] as const)("keeps video reads on the owning bridge for %s", async (cwd, knownRoot) => {
+    mocks.isKnownProjectRoot.mockReturnValue(knownRoot);
+    mocks.bridgeFileRead.mockResolvedValue({ kind: "video", path: "clip.mp4", bytes: 3, dataUrl: "data:video/mp4;base64,AAEC" });
+    await expect(readWorkspaceFile(cwd, "clip.mp4", { includeVideo: true })).resolves.toMatchObject({ kind: "video" });
+    expect(mocks.bridgeFileRead).toHaveBeenCalledWith(mocks.bridge, cwd, "clip.mp4", true);
+    expect(mocks.nativeInvoke).not.toHaveBeenCalled();
+  });
+
+  it("carries video intent through native fallback and accepts old-runtime binary results", async () => {
+    mocks.nativeInvoke.mockRejectedValue(new Error("reader unavailable"));
+    mocks.resolveWorkspaceId.mockResolvedValue("workspace-local");
+    mocks.bridgeFileRead.mockResolvedValue({ kind: "binary", path: "clip.mp4", bytes: 3 });
+    await expect(readWorkspaceFile("/worktree", "clip.mp4", { includeVideo: true })).resolves.toMatchObject({ kind: "binary" });
+    expect(mocks.bridgeFileRead).toHaveBeenCalledWith(mocks.bridge, "workspace-local", "clip.mp4", true);
+  });
+
   it("never consults the desktop filesystem for cloud files or thumbnails", async () => {
     const cwd = "cloud://11111111-1111-4111-8111-111111111111/22222222-2222-4222-8222-222222222222";
     mocks.resolveWorkspaceId.mockResolvedValue(cwd);
