@@ -53,9 +53,14 @@ function deferred<T>() {
   return { promise, resolve };
 }
 
-const allGates: ReturnType<typeof gate>[] = [];
+interface Gate {
+  entered: Promise<void>;
+  release(error?: Error): void;
+  wait(): Promise<void>;
+}
+const allGates: Gate[] = [];
 const pending: Promise<unknown>[] = [];
-function gate() {
+function gate(): Gate {
   const entered = deferred<void>();
   const released = deferred<Error | undefined>();
   const result = {
