@@ -54,6 +54,119 @@ const node = (
 });
 
 describe("auto layout intent", () => {
+  it.each(["row", "column", "grid"] as const)(
+    "preserves overlays and responsive flow children when enabling %s",
+    (flow) => {
+      const parent = { ...node({ display: "block" }), oid: "parent" };
+      const background = {
+        ...node({ position: "absolute", width: "400px", height: "300px" }, "block"),
+        oid: "background",
+      };
+      const copy = node({ position: "relative", top: "4px", maxWidth: "520px" }, "block");
+      copy.layout!.widthValue = "80%";
+      copy.layout!.heightValue = "auto";
+      const fixed = { ...background, oid: "fixed", styles: { position: "fixed" } };
+      const updates = designAutoLayoutUpdates([parent], [background, copy, fixed], flow);
+      // The full-height background must not consume the first flex/grid slot,
+      // and ordinary flow content must remain responsive to later text/size edits.
+      expect([...updates.keys()]).toEqual(["parent"]);
+    },
+  );
+
+  it("keeps a stretched background and fixed overlays out of a drawn layout", () => {
+    const parent = { ...node({ display: "block" }), oid: "parent" };
+    const background = {
+      ...node({ position: "absolute", left: "0px", right: "0px", top: "0px", bottom: "0px" }, "block"),
+      oid: "background",
+      authoredStyleProperties: ["position", "left", "right", "top", "bottom"],
+    };
+    background.layout!.widthValue = "auto";
+    background.layout!.heightValue = "auto";
+    const child = node({ position: "absolute" }, "block");
+    const fixed = { ...node({ position: "fixed" }, "block"), oid: "fixed" };
+    const updates = designAutoLayoutUpdates([parent], [background, child, fixed], "column");
+    expect(updates.has("background")).toBe(false);
+    expect(updates.has("fixed")).toBe(false);
+    expect(updates.get("child")).toMatchObject({ position: "relative" });
+  });
+
+  it("remembers flow participants across None and re-enable without absorbing overlays", () => {
+    const parent = { ...node({ display: "flex", flexDirection: "column" }), oid: "parent" };
+    const child = node({}, "flex", "column");
+    const overlay = { ...node({ position: "absolute" }), oid: "overlay" };
+    const removed = designAutoLayoutUpdates([parent], [overlay, child], "none");
+    expect(removed.has("overlay")).toBe(false);
+    expect(removed.get("child")).toMatchObject({
+      position: "absolute",
+      "--zeros-layout-origin-flow": "1",
+    });
+    const frozen = {
+      ...child,
+      styles: { ...child.styles, ...removed.get("child") } as Record<string, string>,
+    };
+    const restored = designAutoLayoutUpdates(
+      [{ ...parent, styles: { ...parent.styles, display: "block" } }],
+      [overlay, frozen],
+      "column",
+    );
+    expect(restored.has("overlay")).toBe(false);
+    expect(restored.get("child")).toMatchObject({
+      position: "relative",
+      "--zeros-layout-origin-flow": null,
+    });
+  });
+
+  it("leaves hidden children and descendants alone when converting drawn children", () => {
+    const parent = { ...node({ display: "block" }), oid: "parent" };
+    const child = node({ position: "absolute" }, "block");
+    const hidden = { ...node({ display: "none", position: "absolute" }, "block"), oid: "hidden", visible: false };
+    const contents = { ...node({ display: "contents" }, "block"), oid: "contents" };
+    const nested = { ...node({}, "block"), oid: "nested" };
+    nested.layout!.parentId = "child";
+    const updates = designAutoLayoutUpdates([parent], [child, hidden, contents, nested], "column");
+    expect([...updates.keys()]).toEqual(["parent", "child"]);
+  });
+
+  it("does not rewrite dimensions or positioning when selecting the current layout", () => {
+    const block = { ...node({ display: "flow-root", position: "static" }), oid: "parent" };
+    expect(designAutoLayoutUpdates([block], [node({}, "block")], "none").size).toBe(0);
+    const flex = { ...node({ display: "flex", flexDirection: "column" }), oid: "parent" };
+    expect(designAutoLayoutUpdates([flex], [node()], "column").size).toBe(0);
+  });
+
+  it("does not establish a new containing block when enabling or switching layout", () => {
+    const parent = { ...node({ display: "block", position: "static" }), oid: "parent" };
+    const overlay = { ...node({ position: "absolute" }), oid: "overlay" };
+    overlay.layout!.isContainingBlock = false;
+    const updates = designAutoLayoutUpdates([parent], [node(), overlay], "column");
+    expect(updates.get("parent")).not.toHaveProperty("position");
+    const switched = designAutoLayoutUpdates(
+      [{ ...parent, styles: { ...parent.styles, display: "flex", flexDirection: "column" } }],
+      [node(), overlay], "grid",
+    );
+    expect(switched.get("parent")).not.toHaveProperty("position");
+  });
+
+  it("restores natural block flow when freezing would reanchor an existing overlay", () => {
+    const parent = { ...node({ display: "flex", position: "static" }), oid: "parent" };
+    const overlay = { ...node({ position: "absolute" }), oid: "overlay" };
+    overlay.layout!.isContainingBlock = false;
+    const updates = designAutoLayoutUpdates([parent], [node(), overlay], "none");
+    expect([...updates]).toEqual([["parent", { display: "block" }]]);
+  });
+
+  it("freezes nested selected containers independently of selection order", () => {
+    const parent = { ...node({ display: "flex" }), oid: "parent" };
+    const nested = node({ display: "flex", position: "static" });
+    const leaf = { ...node(), oid: "leaf" };
+    leaf.layout!.parentId = "child";
+    const forward = designAutoLayoutUpdates([parent, nested], [nested, leaf], "none");
+    const reverse = designAutoLayoutUpdates([nested, parent], [nested, leaf], "none");
+    expect(forward.get("child")).toMatchObject({ display: "block", position: "absolute" });
+    expect(forward.get("child")).toEqual(reverse.get("child"));
+    expect(forward.get("leaf")).toEqual(reverse.get("leaf"));
+  });
+
   it("brings drawn children into flow and freezes their positions when removing layout", () => {
     const parent = { ...node({ display: "block" }), oid: "parent" };
     const child = node({ position: "absolute" }, "block");

@@ -9,8 +9,10 @@ import {
   nativeImage,
 } from "electron";
 import { createServer } from "node:http";
+import { randomUUID } from "node:crypto";
 import { writeFile, mkdir } from "node:fs/promises";
 import { startElectronDesignCapture } from "../apps/desktop/electron/design-capture";
+import { electronDesignCaptureAdmission } from "../apps/desktop/electron/design-capture-admission";
 
 app.on("window-all-closed", () => {});
 async function main() {
@@ -127,9 +129,22 @@ async function main() {
     assert(
       concurrent.filter((result) => result.status === 200).length === 1 &&
         concurrent.filter((result) => result.status === 429).length === 2,
-      "Native capture enforces one global render slot",
+      "Native capture enforces one host render slot",
     );
     for (const result of concurrent) await result.body?.cancel();
+    const rendererOwner = {};
+    assert(electronDesignCaptureAdmission.reserve(rendererOwner, "native-qualification"),
+      "Renderer capture reserves the application capture slot");
+    try {
+      const blocked = await request();
+      await blocked.body?.cancel();
+      assert(blocked.status === 429 && BrowserWindow.getAllWindows().length === 0,
+        "Renderer reservation prevents native export window allocation");
+      assert(!electronDesignCaptureAdmission.release({}, "native-qualification"),
+        "A foreign renderer cannot release the application reservation");
+    } finally {
+      electronDesignCaptureAdmission.release(rendererOwner, "native-qualification");
+    }
     const abort = new AbortController();
     const pending = request(abort.signal).catch((error) => error);
     for (
@@ -152,6 +167,34 @@ async function main() {
     );
     await delay(50);
     assert((await request()).ok, "Capture recovers after cancellation");
+    const jobId = randomUUID();
+    const headers = {
+      Authorization: `Bearer ${capture.token}`,
+      "Content-Type": "application/json",
+      "X-Zeros-Design-Job": jobId,
+      "X-Zeros-Design-Deadline": String(Date.now() + 20_000),
+    };
+    const identified = fetch(`${capture.url}/capture`, {
+      method: "POST", headers,
+      body: JSON.stringify({ version: 1, revision: "identified-native-cancel", width: 320, height: 240,
+        html: "<html><body>Cancellation qualification</body></html>" }),
+    });
+    for (let attempt = 0; attempt < 100 && BrowserWindow.getAllWindows().length === 0; attempt++) await delay(2);
+    const cancelled = await fetch(`${capture.url}/capture/${jobId}`, { method: "DELETE", headers });
+    const cancellation = await cancelled.json();
+    assert(cancelled.ok && cancellation.settled === true && BrowserWindow.getAllWindows().length === 0,
+      "Identified cancellation acknowledges native window retirement");
+    await (await identified).arrayBuffer();
+    const lateId = randomUUID();
+    const lateHeaders = { ...headers, "X-Zeros-Design-Job": lateId };
+    const earlyCancel = await fetch(`${capture.url}/capture/${lateId}`, { method: "DELETE", headers: lateHeaders });
+    assert(earlyCancel.ok && (await earlyCancel.json()).settled === true,
+      "Native host acknowledges cancellation before capture arrival");
+    const latePost = await fetch(`${capture.url}/capture`, { method: "POST", headers: lateHeaders,
+      body: JSON.stringify({ version: 1, revision: "cancelled-before-start", width: 320, height: 240, html: "<body>Late</body>" }) });
+    assert(latePost.status === 422 && BrowserWindow.getAllWindows().length === 0,
+      "Delayed cancelled capture cannot allocate a native window");
+    await latePost.arrayBuffer();
   } finally {
     await capture.stop();
   }

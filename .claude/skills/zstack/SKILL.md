@@ -49,6 +49,7 @@ Use this for any change to Zeros, whichever host you run in. `AGENTS.md` and
 | Live Alpha DB, provider, Railway or WorkOS action | `agents/zstack/playbooks/alpha-operator.md` |
 | Pause or resume a multi-agent effort | `agents/zstack/playbooks/pause-resume.md` |
 | UI, styling, tokens or mockups | `agents/zstack/playbooks/ui-design.md` and the `zeros-ui` skill |
+| Performance or a new canvas/runtime backend | `agents/zstack/playbooks/performance.md` and `zstack-verify` |
 | Workspaces, engine, bridge, agents or Git | the `zeros-workspaces` skill (Local and cloud owners and placements) |
 
 Guard the context window. Read the feature area you are changing and the docs

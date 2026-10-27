@@ -304,14 +304,17 @@ export async function runDesignLayoutChildrenSmoke({ page, waitFor, check }) {
   );
   for (const width of [220, 280, 420]) {
     await page
-      .locator("[data-design-workspace-surface]")
+      .locator("[data-design-canvas-area]")
       .evaluate((element, width) => {
         element.style.setProperty("--zeros-design-style-width", `${width}px`);
       }, width);
     check(
       `child controls fit a ${width}px inspector`,
       await layout.evaluate(
-        (element) => element.scrollWidth <= element.clientWidth,
+        (element, expectedWidth) =>
+          element.scrollWidth <= element.clientWidth &&
+          Math.abs(element.closest("[data-design-floating-panel]").getBoundingClientRect().width - expectedWidth) < 1,
+        width,
       ),
     );
   }

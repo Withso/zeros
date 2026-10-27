@@ -218,9 +218,6 @@
         "z-20": 2,
         "z-50": 1
       },
-      "apps/desktop/src/renderer/features/design-workspace/design-panel-resize-handle.tsx": {
-        "z-20": 2
-      },
       "apps/desktop/src/renderer/features/design-workspace/design-workspace-overlays.tsx": {
         "z-20": 1,
         "z-30": 5,
@@ -410,9 +407,6 @@
       "apps/desktop/src/renderer/features/design-workspace/design-color-picker.tsx": {
         "button": 1,
         "input": 4
-      },
-      "apps/desktop/src/renderer/features/design-workspace/design-directory-menu.tsx": {
-        "button": 1
       },
       "apps/desktop/src/renderer/features/design-workspace/design-effect-editor.tsx": {
         "button": 2,

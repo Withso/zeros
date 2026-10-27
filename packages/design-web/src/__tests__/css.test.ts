@@ -283,6 +283,98 @@ describe("CSS provenance and mutation", () => {
     ]);
   });
 
+  it("projects keyframes from HTML style blocks without losing neighboring valid styles", () => {
+    const html = `<!doctype html><html><head>
+      <!-- <style>@keyframes comment { from { opacity: 0 } to { opacity: 1 } }</style> -->
+      <style>.broken {</style>
+      <style media="screen">
+        @keyframes wash {
+          0%, 100% { background-position: 0% 50%; --Accent: warm; }
+          50% { background-position: 100% 50%; --Accent: cool; }
+        }
+      </style>
+    </head><body><main></main><style>
+      @media (prefers-reduced-motion: no-preference) {
+        @keyframes reveal { from { opacity: 0 } to { opacity: 1 } }
+      }
+    </style></body></html>`;
+    expect(readDesignKeyframes({ "page/home.html": html })).toEqual([
+      {
+        file: "page/home.html",
+        name: "wash",
+        keyframes: [
+          { offset: 0, styles: { "background-position": "0% 50%", "--Accent": "warm" } },
+          { offset: 50, styles: { "background-position": "100% 50%", "--Accent": "cool" } },
+          { offset: 100, styles: { "background-position": "0% 50%", "--Accent": "warm" } },
+        ],
+      },
+      {
+        file: "page/home.html",
+        name: "reveal",
+        keyframes: [
+          { offset: 0, styles: { opacity: "0" } },
+          { offset: 100, styles: { opacity: "1" } },
+        ],
+      },
+    ]);
+  });
+
+  it("replaces an inline keyframe block without rewriting its HTML or neighboring CSS", () => {
+    const before = '<!doctype html><html><head><style>body { margin: 0 }</style>\n<style media="screen">/* keep */\n@media (min-width: 1px) {\n';
+    const original = "@keyframes wash { from { opacity: .6 } to { opacity: 1 } }";
+    const after = '\n}\nmain { color: navy }\n</style></head><body><main data-oid="root">Keep &amp; preserve</main></body></html>';
+    const keyframes = [
+      { offset: 0, styles: { "background-image": "url(../assets/start.png)" } },
+      { offset: 100, styles: { "background-image": "url(../assets/end.png)" } },
+    ];
+    const changed = mutateDesignKeyframes(
+      `${before}${original}${after}`,
+      { name: "wash", keyframes },
+      "page/home.html",
+    );
+    expect(changed.startsWith(before)).toBe(true);
+    expect(changed.endsWith(after)).toBe(true);
+    expect(changed.match(/@keyframes wash/g)).toHaveLength(1);
+    expect(readDesignKeyframes({ "page/home.html": changed })).toEqual([
+      { file: "page/home.html", name: "wash", keyframes },
+    ]);
+  });
+
+  it("refuses duplicate inline keyframe names and never appends raw CSS to HTML", () => {
+    const block = "@keyframes wash { from { opacity: 0 } to { opacity: 1 } }";
+    const input = {
+      name: "wash",
+      keyframes: [
+        { offset: 0, styles: { opacity: ".5" } },
+        { offset: 100, styles: { opacity: "1" } },
+      ],
+    };
+    expect(() => mutateDesignKeyframes(
+      `<html><head><style>${block}</style><style>${block}</style></head></html>`,
+      input,
+      "home.html",
+    )).toThrow(/ambiguous/i);
+    expect(() => mutateDesignKeyframes(
+      "<html><head><style>body { margin: 0 }</style></head></html>",
+      input,
+      "home.html",
+    )).toThrow(/not found/i);
+  });
+
+  it("refuses keyframe values that close the containing HTML style block", () => {
+    expect(() => mutateDesignKeyframes(
+      '<html><head><style>@keyframes wash { from { opacity: 0 } to { opacity: 1 } }</style></head></html>',
+      {
+        name: "wash",
+        keyframes: [
+          { offset: 0, styles: { content: '"</style><div>injected</div>"' } },
+          { offset: 100, styles: { content: '"safe"' } },
+        ],
+      },
+      "home.html",
+    )).toThrow(/close.*style/i);
+  });
+
   it("identifies one exact authored rule without calling it computed", () => {
     const provenance = readDesignStyleProvenance(webState(), {
       nodeId: "card",

@@ -8,6 +8,7 @@
 // after the user has already selected B.
 
 import { designBackgroundWork } from "./design-background-work";
+import { designFrameViews, isPreparedDesignFrame, type DesignFrameView } from "./design-frame-view";
 import type {
   DesignRuntimeNodeDetails,
   DesignRuntimeNodeGeometry,
@@ -81,7 +82,7 @@ function selectionPageOwnerIsCurrent(owner: DesignPageOwner): boolean {
  * yet open when the Layers panel receives a tree that does. */
 function revealDesignSelectionPath(
   workspaceId: string,
-  frame: DesignCanvasFrameWire,
+  frame: DesignFrameView,
   nodeIds: readonly string[],
 ): void {
   const snapshot = designRuntimeFrameState(workspaceId, frame.file)?.snapshot;
@@ -198,7 +199,7 @@ interface DesignHoverReadQueue {
 const hoverReadQueueByWorkspace = new Map<string, DesignHoverReadQueue>();
 const runtimeAuditPublicationByFrame = new Map<
   string,
-  { fingerprint: string; result: Promise<boolean> }
+  { fingerprint: string; result: Promise<boolean | NonNullable<Awaited<ReturnType<typeof designSetRuntimeAudit>>>> }
 >();
 const MAX_PERSISTED_KEY_STYLES = 64;
 const PERSISTED_KEY_STYLE_PRIORITY = [
@@ -778,7 +779,7 @@ export async function captureDesignRuntimeScreenshot(
           runtime.sourceVersion !== sourceVersion)
       )
         return null;
-      return runtime.captureScreenshot(nodeId, scale);
+      return runtime.captureScreenshot(nodeId, scale, undefined, nodeId ? "visible" : "nearby");
     },
   );
   if (
@@ -825,7 +826,7 @@ export async function captureDesignRuntimeScreenshot(
  * activated — the Figma-like "nothing selected" resting state. */
 export async function selectDesignFrame(
   workspaceId: string,
-  frame: DesignCanvasFrameWire | null,
+  frame: DesignFrameView | null,
   options?: {
     selected?: boolean;
     additive?: boolean;
@@ -846,7 +847,7 @@ export async function selectDesignFrame(
     const target = { frame: frame.file };
     const selected = current.selectedTargets.some(candidate => designSelectionTargetKey(candidate) === designSelectionTargetKey(target));
     await selectDesignTargets({ workspaceId, folder: useDesignRuntimeStore.getState().byWorkspace[workspaceId]?.folder ?? "", owner,
-      frames: [frame, ...(readSelectionSnapshot(workspaceId)?.frames ?? [])],
+      frames: [frame, ...designFrameViews(readSelectionSnapshot(workspaceId))],
       targets: selected ? current.selectedTargets.filter(candidate => designSelectionTargetKey(candidate) !== designSelectionTargetKey(target)) : [target, ...current.selectedTargets] });
     return;
   }
@@ -880,6 +881,12 @@ export async function selectDesignFrame(
       });
   }
   if (options?.reveal) revealDesignSelectionPath(workspaceId, frame, []);
+  // Metadata selection is immediate. Old pixels/runtime geometry cannot be
+  // promoted to authority while current source is still being prepared.
+  if (!isPreparedDesignFrame(frame)) {
+    await designSetSelection(workspaceId, null, version);
+    return;
+  }
   await publishDurableDesignSelection(
     workspaceId,
     frameSelection(frame),
@@ -1107,7 +1114,7 @@ export async function toggleDesignNodeSelection(input: {
   const wasSelected = existing.some(candidate => designSelectionTargetKey(candidate) === key);
   return selectDesignTargets({ ...input,
     targets: wasSelected ? existing.filter(candidate => designSelectionTargetKey(candidate) !== key) : [target, ...existing],
-    frames: [input.frame, ...(readSelectionSnapshot(input.workspaceId)?.frames ?? [])],
+    frames: [input.frame, ...designFrameViews(readSelectionSnapshot(input.workspaceId))],
     details: input.details ? [input.details] : undefined,
   });
 }
@@ -1116,7 +1123,7 @@ export async function selectDesignTargets(input: {
   workspaceId: string;
   folder: string;
   targets: readonly DesignSelectionTarget[];
-  frames?: readonly DesignCanvasFrameWire[];
+  frames?: readonly DesignFrameView[];
   details?: readonly DesignRuntimeNodeDetails[];
   owner?: DesignPageOwner;
   explicit?: boolean;
@@ -1125,8 +1132,8 @@ export async function selectDesignTargets(input: {
   if (owner.workspaceId !== input.workspaceId || !selectionPageOwnerIsCurrent(owner)) return null;
   const targets = normalizeDesignSelectedTargets(input.targets, input.explicit === false ? undefined : reportDesignSelectionLimit);
   const primary = targets[0];
-  const frame = (input.frames ?? readSelectionSnapshot(input.workspaceId)?.frames)?.find(candidate => candidate.file === primary?.frame);
-  if (primary?.nodeId && frame) return selectDesignNodes({ ...input, targets, frame,
+  const frame = (input.frames ?? designFrameViews(readSelectionSnapshot(input.workspaceId))).find(candidate => candidate.file === primary?.frame);
+  if (primary?.nodeId && frame && isPreparedDesignFrame(frame)) return selectDesignNodes({ ...input, targets, frame,
     nodeIds: targets.filter(target => target.frame === frame.file && target.nodeId).map(target => target.nodeId!),
     primaryNodeId: primary.nodeId, reveal: input.explicit !== false,
   });
@@ -1448,7 +1455,7 @@ export async function selectDesignNodesInRect(input: {
 export async function selectDesignTargetsInRect(input: {
   workspaceId: string;
   folder: string;
-  frames: readonly DesignCanvasFrameWire[];
+  frames: readonly DesignFrameView[];
   rect: DesignRuntimeRect;
   startFrame?: DesignCanvasFrameWire;
   scopeNodeId?: string | null;
@@ -1459,11 +1466,11 @@ export async function selectDesignTargetsInRect(input: {
   if (owner.workspaceId !== input.workspaceId || !selectionPageOwnerIsCurrent(owner)) return null;
   const generation = nextGeneration(selectionGenerationByWorkspace, input.workspaceId);
   const initial = designWorkspaceView(input.workspaceId);
-  const overlaps = (frame: DesignCanvasFrameWire) => frame.x < input.rect.x + input.rect.width && frame.y < input.rect.y + input.rect.height &&
+  const overlaps = (frame: DesignFrameView) => frame.x < input.rect.x + input.rect.width && frame.y < input.rect.y + input.rect.height &&
     frame.x + frame.width > input.rect.x && frame.y + frame.height > input.rect.y;
   const frames = input.frames.filter(frame => (!frame.pageId || !owner.pageId || frame.pageId === owner.pageId) && overlaps(frame));
   const targets: DesignSelectionTarget[] = [];
-  const startFrame = frames.find(frame => frame.file === input.startFrame?.file);
+  const startFrame = frames.filter(isPreparedDesignFrame).find(frame => frame.file === input.startFrame?.file);
   if (input.startFrame && !startFrame) return null;
   const runtime = startFrame ? designFrameRuntime(input.workspaceId, startFrame.file) : null;
   if (startFrame && !runtime) return null;
@@ -1875,12 +1882,16 @@ export async function previewDesignNodeTextTransient(input: {
   sourceVersion: string;
   nodeId: string;
   text: string;
+  runtime: DesignFrameRuntimeConnection | null;
 }): Promise<DesignRuntimeNodeDetails> {
-  const runtime = designFrameRuntime(input.workspaceId, input.frame);
+  const runtime = input.runtime;
   if (!runtime) throw new Error("The design frame is not ready.");
-  const runtimeSourceVersion = runtime.sourceVersion ?? input.sourceVersion;
+  if (designFrameRuntime(input.workspaceId, input.frame) !== runtime) {
+    throw new Error("The design frame changed before text was previewed.");
+  }
   const details = await runtime.previewText(input.nodeId, input.text);
-  if (details.sourceVersion !== runtimeSourceVersion) {
+  if (designFrameRuntime(input.workspaceId, input.frame) !== runtime ||
+      details.sourceVersion !== (runtime.sourceVersion ?? input.sourceVersion)) {
     throw new Error("The design frame changed before text was previewed.");
   }
   return details;
@@ -1891,12 +1902,16 @@ export async function clearDesignNodeTextPreviewTransient(input: {
   frame: string;
   sourceVersion: string;
   nodeId: string;
+  runtime: DesignFrameRuntimeConnection | null;
 }): Promise<DesignRuntimeNodeDetails> {
-  const runtime = designFrameRuntime(input.workspaceId, input.frame);
+  const runtime = input.runtime;
   if (!runtime) throw new Error("The design frame is not ready.");
-  const runtimeSourceVersion = runtime.sourceVersion ?? input.sourceVersion;
+  if (designFrameRuntime(input.workspaceId, input.frame) !== runtime) {
+    throw new Error("The design frame changed before text preview was cleared.");
+  }
   const details = await runtime.clearPreviewText(input.nodeId);
-  if (details.sourceVersion !== runtimeSourceVersion) {
+  if (designFrameRuntime(input.workspaceId, input.frame) !== runtime ||
+      details.sourceVersion !== (runtime.sourceVersion ?? input.sourceVersion)) {
     throw new Error(
       "The design frame changed before text preview was cleared.",
     );
@@ -2043,7 +2058,7 @@ export function reconcileDesignRuntimeSnapshot(input: {
   const survivingTargets = view.selectedTargets.filter(target => !completeTree || target.frame !== frame.file || !target.nodeId ||
     target.nodeId === snapshot.frame.oid || treeContainsOid(snapshot.tree, target.nodeId));
   if (survivingTargets.length !== view.selectedTargets.length) {
-    void selectDesignTargets({ workspaceId, folder, targets: survivingTargets, frames: readSelectionSnapshot(workspaceId)?.frames ?? [frame], explicit: false }).catch(() => {});
+    void selectDesignTargets({ workspaceId, folder, targets: survivingTargets, frames: [frame, ...designFrameViews(readSelectionSnapshot(workspaceId))], explicit: false }).catch(() => {});
     return;
   }
   if (view.selectedFrame !== frame.file) {
@@ -2080,7 +2095,7 @@ export function persistDesignRuntimeAuditSnapshot(input: {
   frame: string;
   sourceVersion: string;
   warnings: DesignRuntimeSnapshot["warnings"];
-}): Promise<boolean> {
+}): Promise<boolean | NonNullable<Awaited<ReturnType<typeof designSetRuntimeAudit>>>> {
   const key = `${input.workspaceId}\u0000${input.frame}`;
   const fingerprint = `${input.sourceVersion}\u0000${JSON.stringify(input.warnings)}`;
   const existing = runtimeAuditPublicationByFrame.get(key);
@@ -2090,7 +2105,7 @@ export function persistDesignRuntimeAuditSnapshot(input: {
     sourceVersion: input.sourceVersion,
     warnings: input.warnings,
   }).then(
-    () => true,
+    (reply) => reply ?? true,
     () => false,
   );
   runtimeAuditPublicationByFrame.delete(key);

@@ -13,6 +13,7 @@ import {
 import * as metadata from "../../design/catalog-storage";
 import {
   designCatalogReplySchema,
+  designFramesPrepareReplySchema,
   DESIGN_CATALOG_READ_OPERATION,
 } from "@zeros/protocol/design-catalog";
 
@@ -101,6 +102,16 @@ describe("Design catalog service authority", () => {
       agentId: null,
       lastActiveAt: null,
     });
+  it.each([null, "organization-local"])("negotiates passive surface metadata without changing legacy Local replies for %s", async organizationId => {
+    insert(root, organizationId);
+    const navigation = await service.handle("design.navigation.read", { workspaceId: params.workspaceId }) as { catalogRevision: string };
+    const input = { workspaceId: params.workspaceId, directoryId: params.directoryId,
+      catalogRevision: navigation.catalogRevision, files: ["page-1/a.html"] };
+    const legacy = designFramesPrepareReplySchema.parse(await service.handle("design.frames.prepare", input));
+    expect(legacy.frames[0]).not.toHaveProperty("surfaceCost");
+    const capable = designFramesPrepareReplySchema.parse(await service.handle("design.frames.prepare", { ...input, surfaceCosts: true }));
+    expect(capable.frames[0]).toHaveProperty("surfaceCost", { sourceBytes: expect.any(Number), nodes: 3, imageBytes: 0 });
+  });
   it.each([null, "organization-local"])(
     "preserves exact Local ownership %s and never returns a full-snapshot envelope",
     async (organizationId) => {

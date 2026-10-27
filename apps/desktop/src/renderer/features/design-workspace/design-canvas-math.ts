@@ -1648,13 +1648,15 @@ export function selectLiveDesignFrameFiles(input: {
    * larger than an overview picture shows that picture instead of a live
    * document, so a zoomed-out canvas runs no frame documents it need not. */
   pictured?: ReadonlySet<string>;
+  sourceSurfaces?: ReadonlySet<string>;
   devicePixelRatio?: number;
 }): ReadonlySet<string> {
   const limit = Math.max(1, Math.floor(input.maxLive));
   const ratio = input.devicePixelRatio && input.devicePixelRatio > 0 ? input.devicePixelRatio : 1;
   const pictureSuffices = (frame: DesignCanvasFrameRect) =>
-    input.pictured?.has(frame.file) === true &&
-    Math.max(frame.width, frame.height) * input.view.zoom * ratio <= DESIGN_PREVIEW_LEVELS.overview;
+    input.sourceSurfaces?.has(frame.file) === true ||
+    (input.pictured?.has(frame.file) === true &&
+    Math.max(frame.width, frame.height) * input.view.zoom * ratio <= DESIGN_PREVIEW_LEVELS.overview);
   const worldLeft = -input.view.panX / input.view.zoom;
   const worldTop = -input.view.panY / input.view.zoom;
   const worldWidth = input.viewport.width / input.view.zoom;

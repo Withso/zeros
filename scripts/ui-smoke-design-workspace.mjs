@@ -1,6 +1,6 @@
 import { runDesignFloatingChromeSmoke } from "./ui-smoke-design-floating-chrome.mjs";
 import { runDesignFloatingChromeEdgesSmoke } from "./ui-smoke-design-floating-chrome-edges.mjs";
-import { designCanvasPoint } from "./ui-smoke-design-helpers.mjs";
+import { designCanvasPoint, designFrameElementBox } from "./ui-smoke-design-helpers.mjs";
 import { shiftClickDesignGroupMember } from "./ui-smoke-design-group-selection.mjs";
 import { expect } from "@playwright/test";
 import { runDesignWorkbenchSmoke } from "./ui-smoke-design-workbench.mjs";
@@ -138,25 +138,27 @@ export async function runDesignWorkspaceCanvasSmoke({ page, waitFor, check }) {
     .boundingBox();
   const directoryHeaderBox = await directoryHeader.boundingBox();
   const designDirectoryNameBox = await designDirectoryName.boundingBox();
+  const initialCanvasBox = await page.locator("[data-design-canvas-area]").boundingBox();
   check(
-    "design Layers occupy the top of the floating panel",
+    "design Layers occupy the top of the attached panel",
     !!initialLayersBox && !!initialPanelBox &&
       Math.abs(initialLayersBox.height - 240) < 1 &&
-      Math.abs(initialLayersBox.y - initialPanelBox.y - 1) < 1 &&
+      Math.abs(initialLayersBox.y - initialPanelBox.y) < 1 &&
       initialPanelBox.height > 800,
   );
   check(
-    "Style and Layers share the default 280px floating panel",
+    "Style and Layers share the default 280px attached panel",
     !!initialStylePanelBox && !!initialLayersBox && !!initialPanelBox &&
       Math.abs(initialPanelBox.width - 280) < 0.5 &&
       Math.abs(initialStylePanelBox.width - initialLayersBox.width) < 0.5 &&
-      Math.abs(initialStylePanelBox.width - (initialPanelBox.width - 2)) < 0.5,
+      Math.abs(initialStylePanelBox.width - (initialPanelBox.width - 1)) < 0.5,
   );
   check(
-    "Design directory name lives in the top-left pill without the old mode switch",
-    !!directoryHeaderBox && !!designDirectoryNameBox && !!initialPanelBox &&
-      directoryHeaderBox.x === 8 && directoryHeaderBox.y === 8 &&
-      directoryHeaderBox.x + directoryHeaderBox.width < initialPanelBox.x &&
+    "Design directory name lives in the full-width toolbar above the canvas",
+    !!directoryHeaderBox && !!designDirectoryNameBox && !!initialCanvasBox &&
+      directoryHeaderBox.x === initialCanvasBox.x && directoryHeaderBox.y === 0 &&
+      directoryHeaderBox.width === initialCanvasBox.width &&
+      directoryHeaderBox.y + directoryHeaderBox.height === initialCanvasBox.y &&
       ((await designDirectoryName.textContent())?.trim().length ?? 0) > 0 &&
       (await directoryHeader.getByRole("button", { name: "Choose Design directory" }).count()) === 1 &&
       (await page.locator("[data-workspace-mode-toggle]").count()) === 0,
@@ -240,11 +242,11 @@ export async function runDesignWorkspaceCanvasSmoke({ page, waitFor, check }) {
     };
   });
   check(
-    "Layers uses only designer-facing names instead of HTML tags or content",
-    layerNames.frame === "Frame" &&
+    "Layers shows frame titles and readable element names without document plumbing",
+    layerNames.frame === "Launch home" &&
       layerNames.body === null &&
       layerNames.main === null &&
-      layerNames.heading === "Text",
+      layerNames.heading === "Make the next move unmistakable.",
     JSON.stringify(layerNames),
   );
   const homeLayoutIcons = await layersPanel.evaluate((panel) => {
@@ -560,14 +562,16 @@ export async function runDesignWorkspaceCanvasSmoke({ page, waitFor, check }) {
   await page.setViewportSize({ width: 700, height: 700 });
   const compactPanelBox = await floatingPanel.boundingBox();
   const compactCanvasBox = await page
-    .getByRole("region", { name: "Design workspace", exact: true })
+    .locator("[data-design-canvas-viewport]")
     .boundingBox();
   check(
-    "compact design keeps a full-bleed canvas and bounded floating panel",
+    "compact Design keeps the canvas below the toolbar and the panel attached",
     !!compactPanelBox && !!compactCanvasBox &&
-      compactCanvasBox.width === 700 && compactCanvasBox.height === 700 &&
-      compactPanelBox.width === 280 && compactPanelBox.x === 412 &&
-      compactPanelBox.y === 8 && compactPanelBox.height === 684,
+      compactCanvasBox.width === 700 && compactCanvasBox.height === 660 &&
+      compactCanvasBox.y === 40 &&
+      compactPanelBox.width === 280 && compactPanelBox.x === 420 &&
+      compactPanelBox.y === 40 && compactPanelBox.height === 660,
+    JSON.stringify({ canvas: compactCanvasBox, panel: compactPanelBox }),
   );
   await page.setViewportSize({ width: 1440, height: 900 });
 
@@ -598,6 +602,10 @@ export async function runDesignWorkspaceCanvasSmoke({ page, waitFor, check }) {
   const homeFrame = page.locator('[data-design-frame="home.html"]');
   await homeFrame.waitFor({ state: "visible", timeout: 10_000 });
   const homeRuntime = homeFrame.locator("iframe").contentFrame();
+  const runtimeElementBox = (element) => designFrameElementBox(
+    homeFrame.locator('iframe[data-design-document-buffer="displayed"][data-design-document-ready]'),
+    element,
+  );
   const canvasViewport = page.getByLabel("Design canvas");
   const zoomCanvasWorld = page.locator("[data-design-canvas-world]");
   const readCanvasTransform = () =>
@@ -655,9 +663,9 @@ export async function runDesignWorkspaceCanvasSmoke({ page, waitFor, check }) {
   const readCameraChrome = () =>
     zoomCanvasWorld.evaluate((world) => {
       const matrix = new DOMMatrix(getComputedStyle(world).transform);
-      const label = world.querySelector(
-        '[data-design-frame="home.html"] [data-design-frame-label]',
-      );
+      const frame = world.querySelector('[data-design-frame="home.html"]');
+      if (!frame) throw new Error("The zoomed frame is missing.");
+      const label = frame.querySelector("[data-design-frame-label]");
       const handle = world.querySelector(
         '[data-design-frame="home.html"] .zd-design-selection-handle',
       );
@@ -669,10 +677,10 @@ export async function runDesignWorkspaceCanvasSmoke({ page, waitFor, check }) {
       return {
         zoom: matrix.a,
         cssZoom: Number(
-          getComputedStyle(world).getPropertyValue("--design-canvas-zoom"),
+          getComputedStyle(frame).getPropertyValue("--design-canvas-zoom"),
         ),
         inverseZoom: Number(
-          getComputedStyle(world).getPropertyValue(
+          getComputedStyle(frame).getPropertyValue(
             "--design-canvas-inverse-zoom",
           ),
         ),
@@ -887,10 +895,7 @@ export async function runDesignWorkspaceCanvasSmoke({ page, waitFor, check }) {
       y: highZoomFrameBounds.y + highZoomFrameBounds.height / 2,
     },
   );
-  await waitFor(async () => {
-    const current = await readCanvasTransform();
-    return current.zoom >= 255;
-  }, "design-extreme-zoom-settle");
+  await expect.poll(async () => (await readCanvasTransform()).zoom).toBe(8);
   const highResolutionTile = homeFrame.locator(
     "[data-design-high-resolution-tile][data-design-tile-current]",
   );
@@ -918,13 +923,14 @@ export async function runDesignWorkspaceCanvasSmoke({ page, waitFor, check }) {
       })
     : null;
   check(
-    "extreme zoom publishes only the decoded current crop with oversampled pixels",
+    "the 800 percent zoom cap publishes only the decoded current crop with oversampled pixels",
     !!highResolutionMetrics &&
       highResolutionMetrics.naturalWidth >=
         Math.floor(highResolutionMetrics.displayWidth * 1.8) &&
       highResolutionMetrics.naturalHeight >=
         Math.floor(highResolutionMetrics.displayHeight * 1.8) &&
-      highResolutionMetrics.scale >= 255 &&
+      // Capture scale includes the 2x backing pixels as well as the camera.
+      highResolutionMetrics.scale === 16 &&
       highResolutionMetrics.sourceVersion ===
         highResolutionMetrics.frameSourceVersion,
     JSON.stringify(highResolutionMetrics),
@@ -1980,6 +1986,7 @@ export async function runDesignWorkspaceCanvasSmoke({ page, waitFor, check }) {
     (await homeFrame.getByText(/^Auto layout(?: ·|$)/).count()) === 0,
   );
   const inlinePaddingBox = await inlinePaddingLeft.boundingBox();
+  const gapBeforePadding = await inlineGapHandle.first().boundingBox();
   if (inlinePaddingBox) {
     await page.mouse.move(
       inlinePaddingBox.x + inlinePaddingBox.width / 2,
@@ -2097,6 +2104,16 @@ export async function runDesignWorkspaceCanvasSmoke({ page, waitFor, check }) {
     );
     check("Escape restores both inline spacing value and line geometry", false);
   }
+  check(
+    "a metadata read during a cancelled spacing drag cannot retain preview child geometry",
+    await waitFor(async () => {
+      const restored = await inlineGapHandle.first().boundingBox();
+      return !!gapBeforePadding && !!restored &&
+        ["x", "y", "width", "height"].every(
+          (key) => Math.abs(restored[key] - gapBeforePadding[key]) < 1,
+        );
+    }, "design-spacing-cancel-child-geometry"),
+  );
   const distributedGapHandle = homeFrame
     .locator("[data-design-inline-gap-region]")
     .first();
@@ -2446,9 +2463,9 @@ export async function runDesignWorkspaceCanvasSmoke({ page, waitFor, check }) {
       const visual = await heroGapHandle
         .locator("[data-design-inline-gap-visual]")
         .boundingBox();
-      const widestChild = await homeRuntime
-        .locator('[data-oid="home-heading"]')
-        .boundingBox();
+      const widestChild = await runtimeElementBox(
+        homeRuntime.locator('[data-oid="home-heading"]'),
+      );
       return (
         !!visual &&
         !!widestChild &&
@@ -3286,7 +3303,10 @@ export async function runDesignWorkspaceCanvasSmoke({ page, waitFor, check }) {
   );
   check(
     "dragging motion height recenters the tool rail immediately through the canvas variable",
-    await motionTimeline.evaluate((element) => {
+    await motionTimeline.evaluate(async (element) => {
+      // Pointer gestures coalesce their last sample into the next frame. Read
+      // that frame's geometry rather than racing the pending paint callback.
+      await new Promise((resolve) => requestAnimationFrame(resolve));
       const root = element.offsetParent;
       const toolbar = root.querySelector('[aria-label="Canvas tools"]');
       const rail = root.querySelector("[data-design-canvas-tools-rail]");
@@ -3327,9 +3347,11 @@ export async function runDesignWorkspaceCanvasSmoke({ page, waitFor, check }) {
   check(
     "motion height is capped at 480px or 60 percent of the canvas",
     await motionTimeline.evaluate(
-      (element) =>
-        element.getBoundingClientRect().height ===
-        Math.min(480, Math.floor(element.offsetParent.clientHeight * 0.6)),
+      async (element) => {
+        await new Promise((resolve) => requestAnimationFrame(resolve));
+        return element.getBoundingClientRect().height ===
+          Math.min(480, Math.floor(element.offsetParent.clientHeight * 0.6));
+      },
     ),
   );
   await page.mouse.move(
@@ -3914,8 +3936,8 @@ export async function runDesignWorkspaceCanvasSmoke({ page, waitFor, check }) {
   );
   const motionPanelWidth = (await floatingPanel.boundingBox()).width;
   for (const width of [560, 720, 800, 900]) {
-    // Panel plus three 8px gaps leave this exact timeline width.
-    await page.setViewportSize({ width: width + motionPanelWidth + 24, height: 900 });
+    // The timeline keeps an 8px left inset and an 8px gap beside the panel.
+    await page.setViewportSize({ width: width + motionPanelWidth + 16, height: 900 });
     check(
       `motion controls fit a ${width}px timeline container`,
       await motionTimeline.evaluate((element, expectedWidth) => {
@@ -4054,7 +4076,7 @@ export async function runDesignWorkspaceCanvasSmoke({ page, waitFor, check }) {
     '[data-design-resize-edge="e"]',
   );
   const headingEastResizeBox = await headingEastResize.boundingBox();
-  const headingRuntimeBeforeResize = await runtimeHeading.boundingBox();
+  const headingRuntimeBeforeResize = await runtimeElementBox(runtimeHeading);
   if (!headingEastResizeBox || !headingRuntimeBeforeResize) {
     throw new Error("Text resize geometry is unavailable");
   }
@@ -4071,7 +4093,7 @@ export async function runDesignWorkspaceCanvasSmoke({ page, waitFor, check }) {
   check(
     "horizontal text resize reflows auto-height without a stale clipping box",
     await waitFor(async () => {
-      const runtime = await runtimeHeading.boundingBox();
+      const runtime = await runtimeElementBox(runtimeHeading);
       const overlay = await inlineHeadingOverlay.boundingBox();
       return (
         !!runtime &&
@@ -4088,7 +4110,7 @@ export async function runDesignWorkspaceCanvasSmoke({ page, waitFor, check }) {
   });
   await page.mouse.up();
   await waitFor(async () => {
-    const restored = await runtimeHeading.boundingBox();
+    const restored = await runtimeElementBox(runtimeHeading);
     return (
       !!restored &&
       Math.abs(restored.width - headingRuntimeBeforeResize.width) < 1 &&
@@ -4126,8 +4148,52 @@ export async function runDesignWorkspaceCanvasSmoke({ page, waitFor, check }) {
     }, "design-inline-text-clean-boundary"),
   );
   const headingBeforeCommit = (await inlineText.textContent()) ?? "";
+  // Hold one preview reply while further keystrokes queue behind it. Release
+  // it when the incoming runtime registers, before its displayed-buffer swap.
+  // The old edit must never suppress glyphs in that replacement document.
+  await page.evaluate(async () => {
+    const { designFrameRuntime } = await import(
+      "/apps/desktop/src/renderer/platform/bridge/design-frame-runtime.ts"
+    );
+    const runtime = designFrameRuntime("ws_design_harness", "home.html");
+    const preview = runtime.previewText.bind(runtime);
+    const state = { waiting: false, released: false, beforeDisplay: false };
+    window.__zerosTextPreviewHandoff = state;
+    let release;
+    let held = false;
+    const pending = new Promise((resolve) => { release = resolve; });
+    runtime.previewText = async (...args) => {
+      const result = await preview(...args);
+      if (!held) {
+        held = true;
+        state.waiting = true;
+        await pending;
+      }
+      return result;
+    };
+    const frame = document.querySelector('[data-design-frame="home.html"]');
+    const observer = new MutationObserver(() => {
+      const next = designFrameRuntime("ws_design_harness", "home.html");
+      if (!next || next === runtime) return;
+      const displayed = frame.querySelector('iframe[data-design-document-buffer="displayed"]');
+      state.beforeDisplay = displayed?.dataset.designDocumentSourceVersion !== next.sourceVersion;
+      state.released = true;
+      // Escape can arrive after the transaction saved but before its incoming
+      // buffer paints. That cannot tear down the committed glyph owner early.
+      const editor = document.querySelector('[data-design-inline-text-editor]');
+      state.escapeDispatched = !!editor;
+      editor?.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+      observer.disconnect();
+      runtime.previewText = preview;
+      release();
+    });
+    observer.observe(frame, { subtree: true, childList: true, attributes: true });
+  });
   const headingSuffix = " edited once";
   await page.keyboard.type(headingSuffix);
+  await expect.poll(() => page.evaluate(() =>
+    window.__zerosTextPreviewHandoff.waiting && !window.__zerosTextPreviewHandoff.released,
+  )).toBe(true);
   const committedHeading = `${headingBeforeCommit}${headingSuffix}`;
   check(
     "double-click editing keeps the host glyph and caret visibly paintable",
@@ -4202,6 +4268,14 @@ export async function runDesignWorkspaceCanvasSmoke({ page, waitFor, check }) {
     "Cmd/Ctrl+Enter hands committed text between buffers without blank or duplicate paint",
     textCommitHandoffPassed,
     JSON.stringify(textCommitHandoff),
+  );
+  check(
+    "queued text preview replies are released before the replacement paints",
+    await page.evaluate(() => window.__zerosTextPreviewHandoff.released && window.__zerosTextPreviewHandoff.beforeDisplay),
+  );
+  check(
+    "Escape during a text save preserves visible glyphs until the replacement paints",
+    textCommitHandoffPassed && await page.evaluate(() => window.__zerosTextPreviewHandoff.escapeDispatched),
   );
   check(
     "committed text has one visible runtime owner and no cloned host line",
@@ -4355,7 +4429,7 @@ export async function runDesignWorkspaceCanvasSmoke({ page, waitFor, check }) {
   );
   await inlineText.waitFor({ state: "visible" });
   const actionEditorBeforeType = await inlineText.boundingBox();
-  const actionRuntimeBeforeType = await runtimeAction.boundingBox();
+  const actionRuntimeBeforeType = await runtimeElementBox(runtimeAction);
   if (!actionEditorBeforeType || !actionRuntimeBeforeType) {
     throw new Error("Action text edit geometry is unavailable");
   }
@@ -4367,7 +4441,7 @@ export async function runDesignWorkspaceCanvasSmoke({ page, waitFor, check }) {
     "intrinsic-width text grows on one line without a cloned wrapped copy",
     await waitFor(async () => {
       const editorBox = await inlineText.boundingBox();
-      const runtimeBox = await runtimeAction.boundingBox();
+      const runtimeBox = await runtimeElementBox(runtimeAction);
       intrinsicTextDiagnostic = {
         editorBox,
         runtimeBox,
@@ -4538,13 +4612,12 @@ export async function runDesignWorkspaceCanvasSmoke({ page, waitFor, check }) {
         .getAttribute("aria-pressed")) === "true",
   );
 
-  const codeToggle = page.getByRole("button", { name: "Toggle frame source" });
-  await codeToggle.click();
   check(
-    "code tool opens authored frame source",
-    await page.getByText("Zeros Design/home.html").isVisible(),
+    "selected frames stay on the canvas without a source toggle or overlay",
+    (await page.getByRole("button", { name: "Toggle frame source" }).count()) === 0 &&
+      (await page.locator("[data-design-source-view]").count()) === 0 &&
+      (await homeFrame.locator("iframe[data-design-document-ready]").isVisible()),
   );
-  await codeToggle.click();
 
   const canvasFocusTarget = page.getByLabel("Design canvas");
   const selectedLayer = (nodeId) =>
@@ -4566,7 +4639,7 @@ export async function runDesignWorkspaceCanvasSmoke({ page, waitFor, check }) {
       "design-select-parent",
     ),
   );
-  const nestedHeadingBox = await selectedHeading.boundingBox();
+  const nestedHeadingBox = await runtimeElementBox(selectedHeading);
   if (!nestedHeadingBox) throw new Error("nested heading has no geometry");
   await page.mouse.dblclick(
     nestedHeadingBox.x + nestedHeadingBox.width / 2,
@@ -4640,7 +4713,7 @@ export async function runDesignWorkspaceCanvasSmoke({ page, waitFor, check }) {
   const runtimeCopyForPeerSelection = homeRuntime.locator(
     '[data-oid="home-copy"]',
   );
-  const nestedCopyBox = await runtimeCopyForPeerSelection.boundingBox();
+  const nestedCopyBox = await runtimeElementBox(runtimeCopyForPeerSelection);
   if (!nestedCopyBox) throw new Error("nested copy has no geometry");
   await page.mouse.click(
     nestedCopyBox.x + nestedCopyBox.width / 2,
@@ -5465,7 +5538,7 @@ export async function runDesignWorkspaceCanvasSmoke({ page, waitFor, check }) {
     .locator('[data-design-element-overlay="home-copy"]')
     .boundingBox();
   if (!copyOverlayBox) throw new Error("copy overlay has no geometry");
-  const restingCopyBox = await runtimeCopyForPeerSelection.boundingBox();
+  const restingCopyBox = await runtimeElementBox(runtimeCopyForPeerSelection);
   await page.mouse.move(
     copyOverlayBox.x + copyOverlayBox.width / 2,
     copyOverlayBox.y + copyOverlayBox.height / 2,
@@ -5485,7 +5558,7 @@ export async function runDesignWorkspaceCanvasSmoke({ page, waitFor, check }) {
   check(
     "a cancelled flow move restores the child's rendered position",
     await waitFor(async () => {
-      const box = await runtimeCopyForPeerSelection.boundingBox();
+      const box = await runtimeElementBox(runtimeCopyForPeerSelection);
       return (
         !!box &&
         !!restingCopyBox &&

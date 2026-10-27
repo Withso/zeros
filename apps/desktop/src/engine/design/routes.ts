@@ -4,12 +4,14 @@ import {
   designMovementGuardSchema,
   designRelocationSchema,
 } from "@zeros/protocol/design-relocation";
-import { designCatalogReadSchema, type DesignCatalogRead, type DesignCatalogReply } from "@zeros/protocol/design-catalog";
+import { designCatalogReadSchema, designNavigationReadSchema, designFramesPrepareSchema, type DesignCatalogRead, type DesignCatalogReply } from "@zeros/protocol/design-catalog";
+import { prepareDesignNavigationFrames } from "./document";
 import type { DesignCatalogAdmission } from "./catalog";
 import { encodeDesignFramePath } from "@zeros/protocol/design-path";
 import { designPageCreateInputSchema, designPageDeleteInputSchema, designPageIdSchema, designPageRenameInputSchema } from "@zeros/protocol/design-pages";
 import { selectDesignPageHint } from "./page-selection";
-import { DESIGN_CAPTURE_TIMEOUT_MS, designPreviewRequestSchema, designWorkspaceCaptureSchema } from "@zeros/protocol/design-capture";
+import { DESIGN_CAPTURE_TIMEOUT_MS, designPreviewCancelSchema, designPreviewRequestSchema, designWorkspaceCaptureSchema } from "@zeros/protocol/design-capture";
+import type { DesignPreviewJobs } from "./preview-jobs";
 import { captureWorkspaceDesign, previewWorkspaceDesign } from "./workspace-capture";
 import { openDesignVerification, designFramePreviewUrl } from "./verification-service";
 import { createDesignContextReference, inspectDesignContext } from "./context";
@@ -183,6 +185,8 @@ export interface DesignReadWorkspace {
   designDirectory: string;
 }
 export interface DesignWorkspaceRouteHost {
+  readDesignNavigation(workspaceId: string, remote: boolean, hostLocalResources: boolean): Promise<unknown>;
+  previewJobs: DesignPreviewJobs;
   readDesignCatalog(input: DesignCatalogRead, remote: boolean, admission: DesignCatalogAdmission): Promise<DesignCatalogReply>;
   resolveDesignWorkspace(workspaceId: string, remote: boolean): Workspace;
   resolveReadCwd(workspaceId: string, remote: boolean): string;
@@ -222,9 +226,12 @@ export interface DesignWorkspaceRouteHost {
   ): Promise<DesignWorkspaceSnapshot & { protocolCapability: string | null }>;
 }
 const DESIGN_WORKSPACE_ROUTES = new Set([
+  "design.navigation.read",
+  "design.frames.prepare",
   "design.catalog.read",
   "design.capture",
   "design.preview",
+  "design.preview.cancel",
   "design.styleBuilds.presence",
   "design.styles.refresh",
   "design.context.create",
@@ -288,11 +295,24 @@ export async function handleDesignWorkspaceRoute(
   host: DesignWorkspaceRouteHost,
   op: string,
   params: Params,
-  options: { remote: boolean; hostLocalResources: boolean; catalogAdmission?: DesignCatalogAdmission },
+  options: { remote: boolean; hostLocalResources: boolean; catalogAdmission?: DesignCatalogAdmission; previewAdmission?: DesignCatalogAdmission },
 ): Promise<unknown> {
   const { remote, hostLocalResources } = options;
   const applyDesktopDesignOperation = applyHumanDesignOperation.bind(null, { kind: "human", id: "desktop" });
   switch (op) {
+    case "design.navigation.read": {
+      if (remote || !hostLocalResources) throw new Error("Design navigation requires a Local workspace.");
+      return host.readDesignNavigation(designNavigationReadSchema.parse(params).workspaceId, remote, hostLocalResources);
+    }
+    case "design.frames.prepare": {
+      if (remote || !hostLocalResources) throw new Error("Design preparation requires a Local workspace.");
+      const input = designFramesPrepareSchema.parse(params);
+      const result = await host.withDesignReadWorkspace(input.workspaceId, remote, ({ root }) =>
+        prepareDesignNavigationFrames(root, input.catalogRevision, input.files, input.directoryId));
+      // Older preparation decoders reject unknown fields. Keep their exact
+      // reply shape; a new renderer opts in after capability negotiation.
+      return input.surfaceCosts ? result : { ...result, frames: result.frames.map(({ surfaceCost: _cost, ...frame }) => frame) };
+    }
     case "design.catalog.read": {
       if (!options.catalogAdmission) throw new GitError({ code: "REMOTE_RESTRICTED", message: "Design catalog requires a live connection." });
       return host.readDesignCatalog(designCatalogReadSchema.parse(params), remote, options.catalogAdmission);
@@ -304,7 +324,16 @@ export async function handleDesignWorkspaceRoute(
     case "design.preview": {
       // A canvas preview of the saved source; it never changes the checkout.
       const input = designPreviewRequestSchema.parse(params);
-      return host.withDesignReadWorkspace(input.workspaceId, remote, ({ root }) => previewWorkspaceDesign(root, input));
+      const run = (signal?: AbortSignal) => host.withDesignReadWorkspace(input.workspaceId, remote, ({ root }) => previewWorkspaceDesign(root, input, { signal }));
+      if (!input.jobId) return run();
+      if (!options.previewAdmission || !input.directoryId || !input.deadline || remote)
+        throw new Error("Design preview cancellation requires a live Local connection and directory.");
+      return host.previewJobs.run({ workspaceId: input.workspaceId, directoryId: input.directoryId, jobId: input.jobId, deadline: input.deadline }, options.previewAdmission, run);
+    }
+    case "design.preview.cancel": {
+      const input = designPreviewCancelSchema.parse(params);
+      if (!options.previewAdmission || remote) throw new Error("Design preview cancellation requires a live Local connection.");
+      return host.previewJobs.cancel(input, options.previewAdmission);
     }
     case "design.styleBuilds.presence": {
       // A Design tab shows this workspace, or stopped showing it. Builds start
@@ -1174,7 +1203,9 @@ export async function handleDesignWorkspaceRoute(
         sourceVersion,
         warnings,
       });
-      return { ok: true };
+      // Optional readback lets lazy canvases settle this exact frame's audit
+      // without composing every offscreen source via an aggregate refresh.
+      return { ok: true, sourceVersion, violations: warnings };
     }
     case "design.page.select": {
       const workspaceId = reqStr(params, "workspaceId");

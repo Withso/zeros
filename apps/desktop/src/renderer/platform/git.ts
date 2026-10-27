@@ -136,6 +136,7 @@ import {
   bridgeDesignStyleBuildPresence,
   bridgeDesignRefreshStyles,
   bridgeDesignSnapshot,
+  bridgeDesignPrepareFrames,
   bridgeDesignPreview,
   bridgeDesignMoveFrames,
   bridgeDesignTokens,
@@ -561,11 +562,19 @@ export async function designSnapshot(
   );
 }
 
+export async function designPrepareFrames(workspaceId: string, directoryId: string, catalogRevision: string, files: readonly string[]) {
+  const bridge = requireBridge("prepare design frames");
+  const result = await bridgeDesignPrepareFrames(bridge, { workspaceId, directoryId, catalogRevision, files });
+  if (getActiveBridge() !== bridge) throw new Error("Design preparation owner was retired.");
+  return result;
+}
+
 export async function designPreview(
   workspaceId: string,
   input: Parameters<typeof bridgeDesignPreview>[2],
+  options?: Parameters<typeof bridgeDesignPreview>[3],
 ): ReturnType<typeof bridgeDesignPreview> {
-  return bridgeDesignPreview(requireBridge("preview a design frame"), workspaceId, input);
+  return bridgeDesignPreview(requireBridge("preview a design frame"), workspaceId, input, options);
 }
 
 export async function designTokens(
@@ -648,7 +657,7 @@ export async function designSetRuntimeAudit(
     sourceVersion: string;
     warnings: DesignRuntimeWarningWire[];
   },
-): Promise<void> {
+) {
   return bridgeDesignSetRuntimeAudit(
     requireBridge("publish design runtime audit"),
     workspaceId,

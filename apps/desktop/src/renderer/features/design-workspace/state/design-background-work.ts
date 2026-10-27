@@ -1,3 +1,5 @@
+import { designCaptureScheduler } from "../../../platform/bridge/design-capture-scheduler";
+
 interface BackgroundTask {
   key: string;
   latest: boolean;
@@ -32,15 +34,18 @@ export class DesignBackgroundWorkQueue {
 
   touch(): void {
     this.quietUntil = Date.now() + this.quietMs;
+    designCaptureScheduler.touch();
   }
 
   pause(): () => void {
     this.active++;
+    const resumeCapture = designCaptureScheduler.pause();
     const generation = this.generation;
     let released = false;
     return () => {
       if (released) return;
       released = true;
+      resumeCapture();
       if (generation !== this.generation) return;
       this.active = Math.max(0, this.active - 1);
       this.touch();

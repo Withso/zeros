@@ -37,7 +37,9 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { randomBytes } from "node:crypto";
 
-import { DESIGN_CATALOG_READ_CAPABILITY, DESIGN_CATALOG_READ_OPERATION } from "@zeros/protocol/design-catalog";
+import { DESIGN_CATALOG_READ_CAPABILITY, DESIGN_CATALOG_READ_OPERATION, DESIGN_LAZY_PREPARATION_CAPABILITY } from "@zeros/protocol/design-catalog";
+import { DESIGN_PREVIEW_JOBS_CAPABILITY } from "@zeros/protocol/design-capture";
+import { DESIGN_SOURCE_SURFACES_CAPABILITY } from "@zeros/protocol/design-surface";
 import {
   personalRepoRoot,
   personalWorkspaceRoot,
@@ -1803,11 +1805,16 @@ export class ZerosEngine {
         );
         if (!parsed) return null;
         const { workspaceId, resourcePath } = parsed;
+        const surface = url.searchParams.get("surface");
+        const theme = url.searchParams.get("theme");
+        if ((surface !== null && surface !== "1") ||
+            (theme !== null && (surface !== "1" || !/^[a-z][a-z0-9_-]{0,63}$/.test(theme)))) return null;
         const resource = await this.workspace.readDesignProtocolResource(
           workspaceId,
           {
             path: resourcePath,
             sourceVersion: url.searchParams.get("v"),
+            ...(surface === "1" ? { surface: true, theme } : {}),
           },
         );
         if (!resource) return null;
@@ -3116,6 +3123,7 @@ export class ZerosEngine {
     // Revoke product tool authority before slow provider cleanup can yield.
     // The registry aborts every grant synchronously, then drains them.
     const productToolsRetired = settle(() => this.agents.revokeSessionTools());
+    const previewsRetired = settle(() => this.workspace.stopDesignPreviews?.());
     await settle(() => stopDesignVerification());
     configureDesignStyleBuilds(null);
     configureDesignFonts({ onReady: null });
@@ -3134,6 +3142,7 @@ export class ZerosEngine {
       this.parentWatchTimer = null;
     }
     await productToolsRetired;
+    await previewsRetired;
     await settle(() => this.agents.dispose());
     if (this.vaultPersistTimer) {
       // Flush a pending debounced persist so a clean stop never drops a token.
@@ -7728,13 +7737,14 @@ export class ZerosEngine {
         const reviewUserName = reviewUserId && this.clientAccount.get(client.id) === reviewUserId
           ? this.clientAccountNames.get(client.id)
           : client.kind === "local" && reviewUserId === this.ownerAccountSub ? this.ownerAccountName ?? undefined : undefined;
-        const catalogAuthority = op === DESIGN_CATALOG_READ_OPERATION
+        const previewOperation = client.kind === "local" && (op === "design.preview" || op === "design.preview.cancel");
+        const catalogAuthority = op === DESIGN_CATALOG_READ_OPERATION || previewOperation
           ? JSON.stringify([client.kind, client.accountUserId ?? this.clientAccount.get(client.id) ?? (client.kind === "local" ? this.ownerAccountSub : undefined), client.authorityEpoch, client.kind === "local" ? this.localCatalogBindingEpoch ?? 0 : undefined]) : "";
         return this.workspace.handle(op,params,{hostLocalResources:client.kind==="local",remote:hostRelay,
           ...(op === "turns.reset" || op === "turns.undoReset"
             ? { withConversationMutation: this.withConversationMutation.bind(this) }
             : {}),
-          ...(op === DESIGN_CATALOG_READ_OPERATION ? { catalogAdmission: {
+          ...(op === DESIGN_CATALOG_READ_OPERATION || previewOperation ? { [previewOperation ? "previewAdmission" : "catalogAdmission"]: {
             connectionId: client.id,
             authority: catalogAuthority,
             authorized: () => this.router.getClient(client.id) === client && (client.kind === "local" || client.authorized?.() === true) &&
@@ -8795,8 +8805,10 @@ export class ZerosEngine {
           `[Zeros] engine owner account changed ${this.ownerAccountSub.slice(0, 8)}… → ${next?.slice(0, 8) ?? "∅"}…`,
         );
       }
-      if (next !== this.ownerAccountSub)
+      if (next !== this.ownerAccountSub) {
         this.localCatalogBindingEpoch = (this.localCatalogBindingEpoch ?? 0) + 1;
+        this.workspace?.retireUnauthorizedDesignPreviews?.();
+      }
       this.ownerAccountSub = next;
       if (sub) this.ownerAccountName = verifiedName ?? null;
       return;
@@ -8900,6 +8912,7 @@ export class ZerosEngine {
    *  mode so a later flip to required-mode starts from a clean slate. */
   private clearOwnerBinding(): void {
     this.localCatalogBindingEpoch = (this.localCatalogBindingEpoch ?? 0) + 1;
+    this.workspace?.retireUnauthorizedDesignPreviews?.();
     this.ownerAccountSub = nextOwnerAccount(this.ownerAccountSub, {
       kind: "signed-out",
     });
@@ -9349,7 +9362,7 @@ export class ZerosEngine {
         port: this.actualPort,
         protocolVersion: PROTOCOL_VERSION,
         minProtocolVersion: MIN_SUPPORTED_PROTOCOL,
-        capabilities: [DESIGN_CATALOG_READ_CAPABILITY, CONVERSATION_REPLAY_CAPABILITY],
+        capabilities: [DESIGN_CATALOG_READ_CAPABILITY, CONVERSATION_REPLAY_CAPABILITY, ...(client.kind === "local" ? [DESIGN_PREVIEW_JOBS_CAPABILITY, DESIGN_LAZY_PREPARATION_CAPABILITY, DESIGN_SOURCE_SURFACES_CAPABILITY] : [])],
       }),
     );
   }

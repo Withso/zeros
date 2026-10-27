@@ -350,7 +350,7 @@ export async function runDesignLayoutSmoke({ page, waitFor, check }) {
   const widths = [];
   for (const width of [220, 280, 420]) {
     await page
-      .locator("[data-design-workspace-surface]")
+      .locator("[data-design-canvas-area]")
       .evaluate((element, value) => {
         element.style.setProperty("--zeros-design-style-width", `${value}px`);
       }, width);
@@ -370,7 +370,7 @@ export async function runDesignLayoutSmoke({ page, waitFor, check }) {
       widths.slice(1).every((row) => Math.abs(row[0] - row[2]) < 1),
     JSON.stringify(widths),
   );
-  await page.locator("[data-design-workspace-surface]").evaluate((element) => {
+  await page.locator("[data-design-canvas-area]").evaluate((element) => {
     element.style.setProperty("--zeros-design-style-width", "220px");
   });
   const rows = await layout

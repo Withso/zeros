@@ -26,6 +26,7 @@
     "./conversation-replay": "./src/conversation-replay.ts",
     "./claude-startup-notice": "./src/claude-startup-notice.ts",
     "./design-runtime": "./src/design-runtime.ts",
+    "./design-surface": "./src/design-surface.ts",
     "./design-context": "./src/design-context.ts",
     "./design-path": "./src/design-path.ts",
     "./design-pages": "./src/design-pages.ts",

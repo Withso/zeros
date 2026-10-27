@@ -423,7 +423,8 @@ export async function readAllProcessArgs(): Promise<ProcessArgsRow[]> {
 }
 
 /** One physical-footprint read. Costs ~0.4 s of CPU on macOS, so callers
- * throttle it to the open inspector and the diagnostics copy. */
+ * throttle inspector reads and use it only for explicit copies or sparse
+ * complete process-history observations. */
 export async function readFootprint(): Promise<FootprintRead | null> {
   if (process.platform !== "darwin") return null;
   const readAt = Date.now();
@@ -451,9 +452,9 @@ export async function readSystemSysctl(): Promise<
   );
 }
 
-/** One bounded, argv-free process-table read for an open inspector or explicit
- * diagnostics copy. Allow a busy host five seconds; concurrent requests share
- * this read rather than starting another process. */
+/** One bounded, argv-free process-table read for resource observations. Allow
+ * a busy host five seconds; inspector callers share their coordinator, while
+ * copies and sparse history keep independent CPU sampling windows. */
 export function readProcessTable(): Promise<ProcessTableRead> {
   const startedAt = performance.now();
   return new Promise((resolve, reject) => {
@@ -738,6 +739,7 @@ export class ProcessMetricsTracker {
     // Rates and identities for every row, then this app's tree in PID order.
     const identities = new Map<number, string>();
     const osCpu = new Map<number, number>();
+    const sampledOsCpu = new Set<number>();
     for (const row of rowsByPid.values()) {
       const previous = this.previous.get(row.pid);
       const sameIdentity =
@@ -754,8 +756,10 @@ export class ProcessMetricsTracker {
       identities.set(row.pid, identity);
       nextFirstSeen.set(identity, this.firstSeenAt.get(identity) ?? input.sampledAt);
       let cpu = 0;
-      if (cpuReady && sameIdentity && previous && intervalMs != null)
+      if (cpuReady && sameIdentity && previous && intervalMs != null) {
         cpu = ((row.cpuTimeSeconds - previous.cpuTimeSeconds) * 100_000) / intervalMs;
+        sampledOsCpu.add(row.pid);
+      }
       osCpu.set(row.pid, roundMetric(Math.min(cpu, maxCpu)));
       nextPrevious.set(row.pid, {
         startKey: row.startKey,
@@ -834,7 +838,10 @@ export class ProcessMetricsTracker {
         name: presentation.name,
         kind: presentation.kind,
         cpuPercent,
+        cpuSampled: cpuReady && (descriptor?.cpuPercent != null ||
+          sampledOsCpu.has(pid)),
         memoryBytes,
+        memorySource: footprintBytes != null ? "footprint" : "resident",
         peakCpuPercent: peak.cpuPercent,
         peakMemoryBytes: peak.memoryBytes,
         terminal: terminal.has(pid),

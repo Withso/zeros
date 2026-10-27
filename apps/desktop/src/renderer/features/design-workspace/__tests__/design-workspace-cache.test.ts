@@ -15,6 +15,7 @@ const platformMocks = vi.hoisted(() => ({
   frame: vi.fn(),
   history: vi.fn(),
   readSnapshot: vi.fn(),
+  readNavigation: vi.fn(),
   setRuntimeAudit: vi.fn(),
   setSelection: vi.fn(),
   updateToken: vi.fn(),
@@ -64,12 +65,18 @@ vi.mock("../../../platform/bridge/design-frame-runtime", () => ({
 }));
 
 vi.mock("../../../platform/bridge/active-bridge", () => ({
+  getActiveBridge: () => null,
   onActiveBridgeConnected: vi.fn(
     (listener: (client: unknown, info: { initial: boolean }) => void) => {
       bridgeMocks.connectedListener = listener;
       return () => {};
     },
   ),
+}));
+
+vi.mock("../state/design-workspace-preparation", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../state/design-workspace-preparation")>()),
+  readDesignNavigation: platformMocks.readNavigation,
 }));
 
 import type {
@@ -83,8 +90,6 @@ import {
   applyDesignEditCached,
   applyDesignTransactionCached,
   prepareDesignMovementFrame,
-  designFrameDocumentCache,
-  designFrameDocumentKey,
   designFoundationCache,
   designFoundationKey,
   designWorkspaceSnapshotCache,
@@ -99,7 +104,6 @@ import {
   updateDesignNodeStylesCached,
   updateDesignTokenCached,
   updateDesignFrameGeometryCached,
-  warmDesignFrameDocument,
   createDesignFrameAndRefresh,
   duplicateDesignFrameCached,
   createDesignPageCached,
@@ -294,6 +298,7 @@ describe("design workspace cache", () => {
     platformMocks.frame.mockReset();
     platformMocks.history.mockReset();
     platformMocks.readSnapshot.mockReset();
+    platformMocks.readNavigation.mockReset().mockResolvedValue(null);
     platformMocks.setRuntimeAudit.mockReset();
     platformMocks.setSelection.mockReset().mockResolvedValue(undefined);
     platformMocks.updateToken.mockReset();
@@ -805,6 +810,11 @@ describe("design workspace cache", () => {
       frames: [{ ...staleFrame, sourceVersion: "a".repeat(24) }],
     };
     designWorkspaceSnapshotCache.setData(workspaceId, stale);
+    // Ordinary navigation can carry the old image as a cover; a rejected
+    // write must still read a fresh, authoritative source generation.
+    platformMocks.readNavigation.mockResolvedValue({ ...stale, preparation: {
+      revision: "c".repeat(64), epoch: 1, descriptions: [], current: [], errors: {},
+    } });
     runtimeMocks.designFrameRuntime.mockReturnValue(null);
     platformMocks.readSnapshot.mockResolvedValue(fresh);
     platformMocks.updateStyles
@@ -1344,6 +1354,51 @@ describe("design workspace cache", () => {
     const stable = stabilizeDesignWorkspaceSnapshot(previous, snapshot());
     expect(stable).toBe(previous);
   });
+
+  it("publishes confirmed surface costs when restoring the same source from a boot snapshot", () => {
+    const confirmed = snapshot([{ file: "home.html" }, { file: "pricing.html" }]);
+    for (const frame of confirmed.frames) frame.pageId = "main";
+    confirmed.frames[0]!.surfaceCost = { sourceBytes: 4096, nodes: 32, imageBytes: 1024 };
+    const restored = safeDesignWorkspaceBootSnapshot(confirmed)!;
+    expect(restored.frames[0]!.sourceVersion).toBe(confirmed.frames[0]!.sourceVersion);
+    expect(restored.frames[0]!.surfaceCost).toBeUndefined();
+    expect({ ...restored.frames[0], surfaceCost: confirmed.frames[0]!.surfaceCost }).toEqual(confirmed.frames[0]);
+
+    const published = stabilizeDesignWorkspaceSnapshot(restored, confirmed);
+
+    expect(published.frames[0]).toBe(confirmed.frames[0]);
+    expect(published.frames[0]!.surfaceCost).toEqual(confirmed.frames[0]!.surfaceCost);
+    expect(published.frames[1]).toBe(restored.frames[1]);
+  });
+
+  it.each([
+    ["source bytes", { sourceBytes: 8192, nodes: 32, imageBytes: 1024 }],
+    ["node count", { sourceBytes: 4096, nodes: 64, imageBytes: 1024 }],
+    ["image bytes", { sourceBytes: 4096, nodes: 32, imageBytes: 2048 }],
+    ["unknown cost", null],
+    ["legacy reply", undefined],
+  ] as const)("publishes a same-source surface-cost change for %s", (_name, cost) => {
+    const previous = snapshot([{ file: "home.html" }, { file: "pricing.html" }]);
+    previous.frames[0]!.surfaceCost = { sourceBytes: 4096, nodes: 32, imageBytes: 1024 };
+    const next = structuredClone(previous);
+    if (cost === undefined) delete next.frames[0]!.surfaceCost;
+    else next.frames[0]!.surfaceCost = cost;
+
+    const published = stabilizeDesignWorkspaceSnapshot(previous, next);
+
+    expect(published.frames[0]).toBe(next.frames[0]);
+    expect(published.frames[0]!.surfaceCost).toEqual(cost);
+    expect(published.frames[1]).toBe(previous.frames[1]);
+    expect(published.tokens).toBe(previous.tokens);
+  });
+
+  it.each([{ sourceBytes: 4096, nodes: 32, imageBytes: 1024 }, null])(
+    "reuses equal surface-cost snapshots without remounting documents (%j)", cost => {
+      const previous = snapshot();
+      previous.frames[0]!.surfaceCost = cost;
+      expect(stabilizeDesignWorkspaceSnapshot(previous, structuredClone(previous))).toBe(previous);
+    },
+  );
 
   it("retains page catalog references and publishes page-only changes", () => {
     const previous = snapshot([{ file: "page-1/home.html" }]);
@@ -2083,12 +2138,12 @@ describe("design workspace cache", () => {
     ).toBe(invalidationBefore + 1);
   });
 
-  it("keeps a structural mutation audit stable until the new document publishes its exact audit", async () => {
+  it.each(["spacing-scale", "audit-limit", "layer-tree-limit"] as const)("keeps a structural mutation's %s warning until the new document publishes its exact audit", async (ruleId) => {
     const workspaceId = "ws_design";
     const previous = snapshot();
     const frame = previous.frames[0]!;
     const warning = {
-      ruleId: "spacing-scale" as const,
+      ruleId,
       severity: "warning" as const,
       message: "Spacing needs review.",
       file: frame.file,
@@ -2138,6 +2193,50 @@ describe("design workspace cache", () => {
       designWorkspaceSnapshotCache.getSnapshot(workspaceId).data?.lint
         .violations,
     ).toEqual([]);
+  });
+
+  it("settles a prepared frame audit without scanning the rest of a lazy catalog", async () => {
+    const workspaceId = "ws_lazy_audit";
+    const current = snapshot();
+    const frame = current.frames[0]!;
+    current.preparation = { epoch: 1, revision: "a".repeat(64), current: [frame.file], errors: {},
+      descriptions: [{ file: frame.file, title: frame.title, x: frame.x, y: frame.y,
+        width: frame.width, height: frame.height, z: frame.z, preparation: "unprepared" }] };
+    designWorkspaceSnapshotCache.setData(workspaceId, current);
+    const violations = [{ ruleId: "spacing-scale", severity: "warning", file: frame.file,
+      message: "Use a spacing token.", line: 2, column: 1, oid: "hero" }];
+    platformMocks.setRuntimeAudit.mockResolvedValue({ sourceVersion: frame.sourceVersion, violations });
+    await reconcileDesignWorkspaceRuntimeAudit({ workspaceId, frame: frame.file, sourceVersion: frame.sourceVersion, warnings: [] });
+    expect(platformMocks.readSnapshot).not.toHaveBeenCalled();
+    const next = designWorkspaceSnapshotCache.peekSnapshot(workspaceId).data!;
+    expect(next.preparation).toBe(current.preparation);
+    expect(next.lint.violations).toEqual(violations);
+  });
+
+  it.each(["audit-limit", "layer-tree-limit"] as const)("replaces and clears a lazy frame's %s warning without changing other lint", async (ruleId) => {
+    const workspaceId = "ws_lazy_audit";
+    const current = snapshot([{ file: "home.html" }, { file: "other.html" }]);
+    const frame = current.frames[0]!;
+    current.preparation = { epoch: 1, revision: "a".repeat(64), current: [frame.file], errors: {},
+      descriptions: current.frames.map(({ file, title, x, y, width, height, z }) => ({ file, title, x, y, width, height, z, preparation: "unprepared" })) };
+    const previous = { ruleId, severity: "warning" as const, file: frame.file, oid: "root",
+      message: "Old inspection limit.", fix: "Simplify this frame.", line: 1, column: 1 };
+    const otherFrame = { ...previous, file: "other.html" };
+    const sourceLint = { ...previous, ruleId: "missing-asset", message: "A referenced asset is missing." };
+    current.lint.violations = [previous, otherFrame, sourceLint];
+    designWorkspaceSnapshotCache.setData(workspaceId, current);
+    const fresh = { ...previous, message: "Updated inspection limit.", line: 3 };
+    platformMocks.setRuntimeAudit
+      .mockResolvedValueOnce({ sourceVersion: frame.sourceVersion, violations: [fresh] })
+      .mockResolvedValueOnce({ sourceVersion: frame.sourceVersion, violations: [] });
+
+    await reconcileDesignWorkspaceRuntimeAudit({ workspaceId, frame: frame.file, sourceVersion: frame.sourceVersion, warnings: [fresh] });
+    expect(designWorkspaceSnapshotCache.peekSnapshot(workspaceId).data?.lint.violations).toEqual([otherFrame, sourceLint, fresh]);
+    await reconcileDesignWorkspaceRuntimeAudit({ workspaceId, frame: frame.file, sourceVersion: frame.sourceVersion, warnings: [] });
+    const next = designWorkspaceSnapshotCache.peekSnapshot(workspaceId).data!;
+    expect(next.lint.violations).toEqual([otherFrame, sourceLint]);
+    expect(next.preparation).toBe(current.preparation);
+    expect(platformMocks.readSnapshot).not.toHaveBeenCalled();
   });
 
   it("never lets a runtime audit's direct read replace a newer agent save", async () => {
@@ -2335,30 +2434,6 @@ describe("design workspace cache", () => {
         ),
       ).toEqual(before.map((version) => version + 1));
     }
-  });
-
-  it("warms one exact frame document and deduplicates intent reads", async () => {
-    const current = snapshot();
-    const frame = current.frames[0]!;
-    const document = {
-      ...frame,
-      source: "<!doctype html><html></html>",
-      srcDoc: "<!doctype html><html></html>",
-      tree: [],
-    };
-    platformMocks.frame.mockResolvedValue(document);
-
-    warmDesignFrameDocument("ws_design", frame.file, frame.sourceVersion);
-    warmDesignFrameDocument("ws_design", frame.file, frame.sourceVersion);
-
-    await vi.waitFor(() =>
-      expect(platformMocks.frame).toHaveBeenCalledTimes(1),
-    );
-    expect(
-      designFrameDocumentCache.getSnapshot(
-        designFrameDocumentKey("ws_design", frame.file, frame.sourceVersion),
-      ).data,
-    ).toBe(document);
   });
 
   it("invalidates retained foundations when external workspace state changes", () => {

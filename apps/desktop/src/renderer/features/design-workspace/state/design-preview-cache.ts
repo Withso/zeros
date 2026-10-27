@@ -1,3 +1,5 @@
+import { DesignImageResidency, designImageDecodedBytes, type DesignImageLease } from "./design-image-residency";
+
 export interface DesignPreviewImage {
   readonly dataUrl: string;
   readonly width: number;
@@ -7,7 +9,8 @@ export interface DesignPreviewImage {
 
 /** An encoded picture held as a Blob behind an object URL, never base64 in
  * the JS heap. The browser decodes it when an <img> paints it and keeps those
- * pixels in its own decode cache, so the pool charges its encoded bytes only. */
+ * pixels in its own decode cache. Encoded retention is independent of display
+ * leases, which reserve a conservative decoded/compositor pixel estimate. */
 export interface DesignPreviewBlobImage {
   readonly blob: Blob;
   readonly url: string;
@@ -45,6 +48,7 @@ interface PreviewEntry<T extends CachedImage> {
   pins: number;
   retired: boolean;
   disposed: boolean;
+  displayLease?: DesignImageLease;
 }
 
 const DEFAULT_LIMITS: DesignPreviewCacheLimits = {
@@ -66,6 +70,7 @@ function imageCosts(key: string, image: CachedImage) {
       Number.isSafeInteger(image.height) && image.height > 0 &&
       typeof image.url === "string" && image.url.length > 0 &&
       Number.isSafeInteger(image.blob.size) && image.blob.size > 0
+      && designImageDecodedBytes(image.width, image.height) !== null
       ? { encodedBytes: image.blob.size, decodedBytes: 0 }
       : null;
   }
@@ -131,6 +136,7 @@ export class DesignPreviewCache<T extends CachedImage = DesignPreviewImage> {
   constructor(
     limits: DesignPreviewCacheLimits = DEFAULT_LIMITS,
     private readonly events: DesignPreviewCacheEvents<T> = {},
+    private readonly displayBudget = new DesignImageResidency(limits.maxDecodedBytes),
   ) {
     if (
       Object.entries(DEFAULT_LIMITS).some(([key, maximum]) => {
@@ -237,9 +243,22 @@ export class DesignPreviewCache<T extends CachedImage = DesignPreviewImage> {
     return true;
   }
 
-  acquire(key: string): DesignPreviewLease<T> | null {
+  acquire(key: string, options?: { preserveWarm?: boolean }): DesignPreviewLease<T> | null {
     const entry = this.entries.get(key);
     if (!entry) return null;
+    if ("blob" in entry.image && entry.pins === 0) {
+      const bytes = designImageDecodedBytes(entry.image.width, entry.image.height)!;
+      if (this.decodedBytes + bytes > this.limits.maxDecodedBytes) return null;
+      if (options?.preserveWarm) {
+        const shared = this.displayBudget.usage();
+        if (shared.decodedBytes + bytes > shared.maxDecodedBytes || shared.encodedBytes > shared.maxEncodedBytes) return null;
+      }
+      const lease = this.displayBudget.acquire(entry.image, entry.image.width, entry.image.height);
+      if (!lease) return null;
+      entry.displayLease = lease;
+      entry.decodedBytes = bytes;
+      this.decodedBytes += bytes;
+    }
     this.entries.delete(key);
     this.entries.set(key, entry);
     entry.pins++;
@@ -250,6 +269,12 @@ export class DesignPreviewCache<T extends CachedImage = DesignPreviewImage> {
         if (released) return;
         released = true;
         entry.pins--;
+        if (entry.pins === 0 && entry.displayLease) {
+          entry.displayLease.release();
+          entry.displayLease = undefined;
+          this.decodedBytes -= entry.decodedBytes;
+          entry.decodedBytes = 0;
+        }
         if (entry.retired && entry.pins === 0) this.dispose(entry);
       },
     };
@@ -266,6 +291,10 @@ export class DesignPreviewCache<T extends CachedImage = DesignPreviewImage> {
 
   clear(): void {
     for (const key of this.entries.keys()) this.invalidate(key);
+  }
+
+  subscribeAvailable(listener: () => void): () => void {
+    return this.displayBudget.subscribeAvailable(listener);
   }
 
   private dispose(entry: PreviewEntry<T>): void {

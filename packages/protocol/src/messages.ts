@@ -67,6 +67,11 @@ export interface AccountDetails {
   email?: string;
 }
 
+/** Presence/source of the Local engine's selected API key, never its value or
+ * storage path. Subscription/CLI methods and older/cloud runtimes omit it.
+ * Presence is independent of the provider's authentication verdict. */
+export type ProviderApiKeySource = "saved" | "environment" | "none";
+
 export interface BridgeRegistryAgent {
   id: string;
   name: string;
@@ -124,6 +129,7 @@ export interface BridgeRegistryAgent {
    *  every send failed with "AGENT RESPONSE FAILURE". Credentials present ≠
    *  agent usable. */
   authenticated?: boolean;
+  apiKeySource?: ProviderApiKeySource;
   /** Present when Zeros could not execute the authentication probe. This is an
    * infrastructure result, not proof that the provider rejected credentials;
    * `authenticated` is intentionally absent in this state. */
@@ -198,6 +204,7 @@ export interface EnrichedRegistryAgent extends RegistryAgent {
     docsUrl?: string;
   };
   authenticated?: boolean;
+  apiKeySource?: ProviderApiKeySource;
   /** See BridgeRegistryAgent.authenticationUnavailableReason. */
   authenticationUnavailableReason?: string;
   /** See BridgeRegistryAgent.runtimeUnavailableReason — set when the agent's own

@@ -71,7 +71,7 @@ export function RetainedDesignDeck({
         data-design-retained-workspace={target.workspace.id}
         {...(!visible ? { inert: "", "data-zeros-resize-freeze": "" } : {})}
         aria-hidden={!visible}
-        className={`absolute inset-0 flex min-h-0 min-w-0 overflow-hidden ${visible ? "pointer-events-auto visible" : "pointer-events-none invisible"}`}
+        className={`absolute inset-0 flex min-h-0 min-w-0 overflow-hidden ${visible ? "pointer-events-auto visible opacity-100" : "pointer-events-none invisible opacity-0"}`}
       >
         <WorkbenchTabFrame
           tab={{ id: "design", type: "design", title: "Design" }}

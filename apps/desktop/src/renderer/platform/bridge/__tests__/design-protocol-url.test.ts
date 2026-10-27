@@ -34,4 +34,11 @@ describe("design protocol frame URLs", () => {
       }),
     ).toBeNull();
   });
+
+  it("keys passive documents by theme and rejects cloud identities", () => {
+    const input = { workspaceId: "ws_a", capability: "c".repeat(64), frame: "home.html", sourceVersion: "a".repeat(24), surface: true as const, theme: "dark" };
+    expect(designProtocolFrameUrl(input)).toContain("&surface=1&theme=dark");
+    expect(designProtocolFrameUrl({ ...input, workspaceId: "cloud://team/workspace" })).toBeNull();
+    expect(designProtocolFrameUrl({ ...input, theme: "bad name" })).toBeNull();
+  });
 });

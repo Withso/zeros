@@ -92,12 +92,28 @@ pnpm --dir apps/control-plane cloud-v2:gate0 --local --runtime <runtime-sha256>
 - Report counts, for example "adjacent 130/130 across 11 suites". Name what you
   did not run and why.
 - A retry never relabels the original failure. Record both results.
+- Native rendering performance requires physical GPU footprint and the whole
+  owned app/engine process set during cold loading, zoom, capture, hidden return
+  and owner switching. RSS, JS heap and source/image budgets miss graphics
+  allocations. Use a conservative sampled shutdown guard; missing readings or
+  an overrun fail the run. A stable iframe or layout is not memory evidence.
+- For Design performance, run `pnpm check:design-performance` and the native
+  workload described in `agents/zstack/playbooks/performance.md`. Keep optimized
+  build identity, actual presentation latency, idle CPU, and sustained memory
+  evidence separate. Event counts, rAF callbacks and old-architecture soaks
+  cannot establish current-source performance acceptance.
+- A remote-command timeout leaves execution unknown. Recover the existing run
+  marker, process status and fresh report before relaunching; a launch
+  acknowledgement alone does not prove qualification passed.
 - Every time in a record, plan or report comes from a clock read, never an
   estimate: write it with `$(date -u +%H:%M)` inside the command that appends it.
 - Don't claim macOS-only checks from Linux.
 
 ## Gotchas already paid for
 
+- Qualify a CLI by running the exact command advertised to agents from a task
+  workspace. Calling its internal handler misses dropped source entries and
+  runtime loaders; cover Node source, Bun source and the compiled executable.
 - A pipe through `sed`/`grep` buffers output. Use `sed -u` or
   `--line-buffered` when a later step needs a line immediately, such as a URL
   the owner must open.
@@ -106,6 +122,12 @@ pnpm --dir apps/control-plane cloud-v2:gate0 --local --runtime <runtime-sha256>
 - Harness input files must be regular files you own, mode 0600 and small.
 - When a check fails, first rule out whether the environment changed under you
   (PATH tools, database encoding, a disk precondition) before blaming the code.
+- Native navigation drivers must resolve a workspace's actual tab ID by type
+  and assert activation. Tab types are not IDs, and adding an existing tab
+  does not activate it; a hidden-surface check must prove it left the surface.
+- Capture dimensions and visible text do not prove pixel fidelity. Decode the
+  PNG and compare against browser pixels outside short content, including
+  transparent/translucent backgrounds and inherited pseudo-element colors.
 - A workspace whose setup ran only `pnpm install` fails `pnpm typecheck` in
   `apps/control-plane` with missing modules. `scripts/dev-environment/hook.sh setup`
   installs all three dependency graphs, as `.conductor/settings.toml` does.

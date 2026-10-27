@@ -32,6 +32,7 @@ import {
   designStage,
   designSetText,
   designSnapshot,
+  designPrepareFrames,
   designUpdateToken,
   designUpdateCanvas,
   designMoveFrames,
@@ -53,6 +54,8 @@ import {
 import type { DesignTransaction } from "@zeros/design-core";
 import type { DesignRuntimeGenerationPatch } from "@zeros/protocol/design-runtime";
 import { KeyedAsyncCache } from "../../../shared/lib/keyed-async-cache";
+import { DesignFramePreparation, readDesignNavigation } from "./design-workspace-preparation";
+import { preparedDesignSnapshot } from "./design-frame-view";
 import { onActiveBridgeConnected } from "../../../platform/bridge/active-bridge";
 import { isCloudWorkspace } from "../../../platform/bridge/cloud-workspace-key";
 import { classifyRpcError } from "../../../platform/bridge/failure";
@@ -60,6 +63,7 @@ import { designFrameRuntime } from "../../../platform/bridge/design-frame-runtim
 import { designStylePropertyAffectsLayout } from "../design-style-values";
 import { DesignHistoryPreview } from "./design-history-preview";
 import { clearCommittedDesignLivePreviewStyles } from "./design-live-preview";
+import { designSourceVectorCache } from "../design-source-vector";
 import {
   designRuntimeFrameState,
   useDesignRuntimeStore,
@@ -88,6 +92,23 @@ const pendingLocalMutationByWorkspace = new Map<
   { depth: number; deferredRefresh: boolean }
 >();
 const localMutationTailByWorkspace = new Map<string, Promise<void>>();
+const editLifetimeListeners = new Map<string, Set<() => void>>();
+export function hasPendingDesignEdits(workspaceId: string): boolean {
+  return pendingLocalMutationByWorkspace.has(workspaceId) || localMutationTailByWorkspace.has(workspaceId);
+}
+export function subscribePendingDesignEdits(workspaceId: string, listener: () => void): () => void {
+  let listeners = editLifetimeListeners.get(workspaceId);
+  if (!listeners) editLifetimeListeners.set(workspaceId, (listeners = new Set()));
+  listeners.add(listener);
+  return () => {
+    listeners!.delete(listener);
+    if (!listeners!.size) editLifetimeListeners.delete(workspaceId);
+  };
+}
+function publishEditLifetime(workspaceId: string): void {
+  for (const listener of editLifetimeListeners.get(workspaceId) ?? []) listener();
+  designFramePreparation.resume();
+}
 const localFrameGenerationByOwner = new Map<
   string,
   { current: string; ancestors: string[] }
@@ -122,6 +143,8 @@ const RUNTIME_AUDIT_RULE_IDS = new Set([
   "contrast",
   "overflow",
   "spacing-scale",
+  "audit-limit",
+  "layer-tree-limit",
 ]);
 
 /** Design reads are idempotent and exact-keyed, so a single transport bounce
@@ -157,6 +180,7 @@ function beginLocalDesignMutation(workspaceId: string): () => void {
   };
   entry.depth += 1;
   pendingLocalMutationByWorkspace.set(workspaceId, entry);
+  publishEditLifetime(workspaceId);
   let finished = false;
   return () => {
     if (finished) return;
@@ -251,6 +275,7 @@ async function runLocalDesignMutation<T>(
     if (localMutationTailByWorkspace.get(workspaceId) === tail) {
       localMutationTailByWorkspace.delete(workspaceId);
     }
+    publishEditLifetime(workspaceId);
   }
 }
 
@@ -311,9 +336,8 @@ function currentFrameSourceVersion(
   workspaceId: string,
   frame: string,
 ): string | undefined {
-  return designWorkspaceSnapshotCache
-    .peekSnapshot(workspaceId)
-    .data?.frames.find((candidate) => candidate.file === frame)?.sourceVersion;
+  return preparedDesignSnapshot(designWorkspaceSnapshotCache
+    .peekSnapshot(workspaceId).data)?.frames.find((candidate) => candidate.file === frame)?.sourceVersion;
 }
 
 function resolveLocalFrameSourceVersion(
@@ -499,7 +523,7 @@ export const designWorkspaceSnapshotCache =
     weightOf: retainedMemory,
   });
 setDesignSelectionSnapshotReader(
-  (workspaceId) => designWorkspaceSnapshotCache.peekSnapshot(workspaceId).data,
+  (workspaceId) => preparedDesignSnapshot(designWorkspaceSnapshotCache.peekSnapshot(workspaceId).data),
 );
 for (const [workspaceId, snapshot] of readDesignWorkspaceBootSnapshots()) {
   designWorkspaceSnapshotCache.setData(workspaceId, snapshot);
@@ -524,6 +548,31 @@ export const designFoundationCache =
     maxWeight: DESIGN_FOUNDATION_CACHE_BYTES,
     weightOf: retainedMemory,
   });
+
+export const designFramePreparation = new DesignFramePreparation({
+  snapshot: (workspaceId) => designWorkspaceSnapshotCache.peekSnapshot(workspaceId).data,
+  publish: (workspaceId, snapshot) => designWorkspaceSnapshotCache.setData(workspaceId,
+    stabilizeDesignWorkspaceSnapshot(designWorkspaceSnapshotCache.peekSnapshot(workspaceId).data, snapshot)),
+  canPrepare: (workspaceId) => {
+    const read = designWorkspaceSnapshotCache.peekSnapshot(workspaceId);
+    return !isCloudWorkspace(workspaceId) && !hasPendingDesignEdits(workspaceId) && !read.loading && !read.refreshing;
+  },
+  prepare: designPrepareFrames,
+});
+
+/** Retirement drops reconstructible source/projections, not semantic state or
+ * bounded full-frame cover pixels. Exact ownership and pending edits win. */
+export function retireHiddenDesignFrames(workspaceId: string, directoryId: string | undefined, files: readonly string[]): void {
+  if (hasPendingDesignEdits(workspaceId) ||
+    designWorkspaceSnapshotCache.peekSnapshot(workspaceId).data?.directoryId !== directoryId) return;
+  for (const frame of files) {
+    if (designFrameRuntime(workspaceId, frame)?.isActive?.()) continue;
+    const prefix = `${workspaceId}\0${frame}\0`;
+    for (const cache of [designFrameDocumentCache, designFoundationCache])
+      for (const key of cache.keys()) if (key.startsWith(prefix)) cache.forget(key);
+    useDesignRuntimeStore.getState().retireFrame(workspaceId, frame);
+  }
+}
 
 /** A request queued while the first socket is connecting has not observed the
  * old engine: RuntimeClient sends it only after that socket becomes usable.
@@ -602,21 +651,6 @@ export async function fetchDesignFrameDocument(
     throw new Error("Design frame changed while its fallback was loading.");
   }
   return document;
-}
-
-/** Warm one exact rendered source on selection or explicit pointer/focus
- * intent. Concurrent iframe/code-view consumers share the same request. */
-export function warmDesignFrameDocument(
-  workspaceId: string,
-  frame: string,
-  sourceVersion: string,
-): void {
-  const key = designFrameDocumentKey(workspaceId, frame, sourceVersion);
-  void designFrameDocumentCache
-    .load(key, () => fetchDesignFrameDocument(key), {
-      maxAgeMs: DESIGN_FRAME_DOCUMENT_MAX_AGE_MS,
-    })
-    .catch(() => {});
 }
 
 export function designFoundationKey(
@@ -755,7 +789,14 @@ function sameFrame(
     left.nodeCount === right.nodeCount &&
     left.layerCount === right.layerCount &&
     left.modifiedAt === right.modifiedAt &&
-    left.sourceVersion === right.sourceVersion
+    left.sourceVersion === right.sourceVersion &&
+    // Boot/legacy frames can gain confirmed costs without a source change.
+    // Cost changes and withdrawals must reach the shared admission budget.
+    (left.surfaceCost === right.surfaceCost ||
+      (left.surfaceCost != null && right.surfaceCost != null &&
+        left.surfaceCost.sourceBytes === right.surfaceCost.sourceBytes &&
+        left.surfaceCost.nodes === right.surfaceCost.nodes &&
+        left.surfaceCost.imageBytes === right.surfaceCost.imageBytes))
   );
 }
 
@@ -775,6 +816,7 @@ function sameToken(
       ([theme, value]) => right.themeValues[theme] === value,
     ) &&
     left.usageCount === right.usageCount &&
+    left.usageCountKnown === right.usageCountKnown &&
     left.line === right.line
   );
 }
@@ -1004,6 +1046,7 @@ export function stabilizeDesignWorkspaceSnapshot(
       ? previous.lint
       : { ...next.lint, violations };
   return frames === previous.frames &&
+    next.preparation === previous.preparation &&
     pages === previous.pages &&
     next.directory === previous.directory &&
     next.protocolCapability === previous.protocolCapability &&
@@ -1016,6 +1059,7 @@ export function stabilizeDesignWorkspaceSnapshot(
     lint === previous.lint
     ? previous
     : {
+        ...(next.preparation ? { preparation: next.preparation } : {}),
         directoryId: next.directoryId,
         directory: next.directory,
         ...(pages ? { pages } : {}),
@@ -1034,6 +1078,9 @@ export function stabilizeDesignWorkspaceSnapshot(
 /** Called after a cache publication, never from an unadmitted fetch result. */
 export function observeDesignDirectory(workspaceId: string, snapshot: DesignWorkspaceSnapshotWire): void {
   notifyDesignSelectionSnapshot(workspaceId);
+  designSourceVectorCache.reconcile({ workspaceId, folder: snapshot.lint.workspacePath,
+    directoryId: snapshot.directoryId ?? "", capability: snapshot.protocolCapability ?? "" },
+    new Set((snapshot.preparation?.descriptions ?? snapshot.frames).map(frame => frame.file)));
   if (!snapshot.directoryId) return;
   const ui = useDesignWorkspaceUiStore.getState();
   const previous = ui.byWorkspace[workspaceId]?.directoryId;
@@ -1060,7 +1107,7 @@ function publishDesignWorkspaceSnapshot(
   const stable = stabilizeDesignWorkspaceSnapshot(previous, retained);
   designWorkspaceSnapshotCache.setData(workspaceId, stable);
   notifyDesignSelectionSnapshot(workspaceId);
-  queueDesignWorkspaceBootSnapshot(workspaceId, stable);
+  if (!stable.preparation) queueDesignWorkspaceBootSnapshot(workspaceId, stable);
   return stable;
 }
 
@@ -1096,6 +1143,18 @@ export function reconcileDesignWorkspaceRuntimeAudit(input: {
     if (current?.sourceVersion !== input.sourceVersion) return;
     const persisted = await persistDesignRuntimeAuditSnapshot(input);
     if (!persisted) return;
+    if (started.data?.preparation) {
+      const latest = designWorkspaceSnapshotCache.peekSnapshot(input.workspaceId);
+      if (typeof persisted !== "object" || latest.invalidationVersion !== started.invalidationVersion ||
+        latest.data?.preparation?.epoch !== started.data.preparation.epoch ||
+        !preparedDesignSnapshot(latest.data)?.frames.some((frame) => frame.file === input.frame && frame.sourceVersion === input.sourceVersion)) return;
+      const current = latest.data;
+      retainedRuntimeAuditByFrame.delete(key);
+      publishDesignWorkspaceSnapshot(input.workspaceId, { ...current, lint: { ...current.lint,
+        violations: [...current.lint.violations.filter((row) => row.file !== input.frame || !RUNTIME_AUDIT_RULE_IDS.has(row.ruleId)), ...persisted.violations],
+      } });
+      return;
+    }
     const authoritative = await designSnapshot(input.workspaceId);
     const latest = designWorkspaceSnapshotCache.peekSnapshot(input.workspaceId);
     if (
@@ -1146,15 +1205,17 @@ export function reconcileDesignWorkspaceRuntimeAudit(input: {
 
 export async function fetchDesignWorkspaceSnapshot(
   workspaceId: string,
+  authoritative = false,
 ): Promise<DesignWorkspaceSnapshotWire> {
   const next = await executeDesignReadWithTransientRetry(() =>
-    designSnapshot(workspaceId),
+    authoritative ? designSnapshot(workspaceId) : readDesignNavigation(workspaceId, designWorkspaceSnapshotCache.peekSnapshot(workspaceId).data)
+      .then((navigation) => navigation ?? designSnapshot(workspaceId)),
   );
   const stable = stabilizeDesignWorkspaceSnapshot(
     designWorkspaceSnapshotCache.peekSnapshot(workspaceId).data,
     applyRetainedRuntimeAuditViolations(workspaceId, next),
   );
-  queueDesignWorkspaceBootSnapshot(workspaceId, stable);
+  if (!stable.preparation) queueDesignWorkspaceBootSnapshot(workspaceId, stable);
   return stable;
 }
 
@@ -1178,7 +1239,9 @@ export async function refreshDesignWorkspaceSnapshot(
 ): Promise<DesignWorkspaceSnapshotWire> {
   return designWorkspaceSnapshotCache.load(
     workspaceId,
-    () => fetchDesignWorkspaceSnapshot(workspaceId),
+    // Explicit recovery and mutation retries need actual source generations.
+    // Navigation/watchers use the lazy fetch through useCachedRead.
+    () => fetchDesignWorkspaceSnapshot(workspaceId, true),
     { force: true },
   );
 }
@@ -2230,6 +2293,7 @@ export async function applyDesignHistoryCached(
 
 /** Test-only reset for exact-key/reference-stability coverage. */
 export function resetDesignWorkspaceCacheForTests(): void {
+  designSourceVectorCache.clear();
   historyPreview.clear();
   for (const cancel of pendingAdoptedSettlementByFrame.values()) cancel();
   pendingAdoptedSettlementByFrame.clear();

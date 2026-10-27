@@ -2,7 +2,7 @@
 // the signed-in cloud account's scope, and the hooks the canvas and its frame
 // surfaces read. Policy lives in design-frame-previews.ts.
 
-import { useCallback, useEffect, useMemo, useRef, useSyncExternalStore } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useSyncExternalStore } from "react";
 
 import { isCloudWorkspace, parseCloudWorkspaceKey } from "../../../platform/bridge/cloud-workspace-key";
 import { createIndexedDbDesignPreviewStore } from "../../../platform/design-preview-store";
@@ -12,6 +12,11 @@ import {
   subscribeCloudWorkspaceRefresh,
 } from "../../../state/cloud-workspace-catalog";
 import { designBackgroundWork } from "./design-background-work";
+import { designImageResidency } from "./design-image-residency";
+import { DesignPreviewDecodes, type DesignDecodedPreviewLease } from "./design-preview-decodes";
+import { useDesignImageState } from "./use-design-image-display";
+import { designCaptureScheduler } from "../../../platform/bridge/design-capture-scheduler";
+import { designSourceVectorCache } from "../design-source-vector";
 import {
   DesignFramePreviews,
   createDesignFramePicturedReader,
@@ -33,20 +38,23 @@ let accountGeneration = 0;
 const scopeListeners = new Set<() => void>();
 
 export const designFramePreviews = new DesignFramePreviews({
+  displayBudget: designImageResidency,
   store: createIndexedDbDesignPreviewStore(),
-  render: (owner, input) =>
+  render: (owner, input, signal) =>
     designPreview(owner.workspaceId, {
       directoryId: owner.directoryId,
       frame: input.file,
       sourceVersion: input.sourceVersion,
       theme: input.theme,
       maxDimension: input.maxDimension,
-    }),
+    }, { signal, admitted: true }),
   // A render waits for a quiet slot in the canvas's background lane and then
   // leaves it: the engine renders out of process, so tiles and audits never
   // queue behind its round trip.
-  schedule: async (work) =>
-    (await designBackgroundWork.schedule("design-preview", async () => true)) ? work() : null,
+  schedule: async (work, capture) =>
+    (await designBackgroundWork.schedule("design-preview", async () => true))
+      ? capture ? designCaptureScheduler.schedule(capture.key, capture.priority, work, capture.signal) : work()
+      : null,
   encode: encodeDesignPreview,
   canProduce: (owner) => {
     if (!isCloudWorkspace(owner.workspaceId)) return true;
@@ -63,8 +71,21 @@ export const designFramePreviews = new DesignFramePreviews({
   visible: () => typeof document === "undefined" || document.visibilityState !== "hidden",
 });
 
+export const designPreviewDecodes = new DesignPreviewDecodes({
+  acquire: (target) => designFramePreviews.acquire(target),
+  hasPicture: (target) => !!designFramePreviews.picture(target),
+  retain: (key) => designFramePreviews.pin(key),
+  decode: decodeDesignPreviewPicture,
+});
+designImageResidency.subscribePressure(() => {
+  designPreviewDecodes.clearWarm();
+  designSourceVectorCache.clearWarmImages();
+});
+
 if (typeof document !== "undefined") {
-  document.addEventListener("visibilitychange", () => designFramePreviews.resume());
+  document.addEventListener("visibilitychange", () => {
+    designFramePreviews.resume();
+  });
 }
 // A VM that starts running lets its canvas render the pictures it is missing.
 subscribeCloudWorkspaceRefresh(() => designFramePreviews.resume());
@@ -81,6 +102,7 @@ export function setDesignFramePreviewAccount(account: string | null): void {
   const install = (scope: string | null) => {
     if (generation !== accountGeneration) return;
     cloudScope = scope;
+    designPreviewDecodes.clearWarm();
     designFramePreviews.retainCloudScope(scope);
     for (const listener of [...scopeListeners]) listener();
   };
@@ -94,6 +116,8 @@ export function setDesignFramePreviewAccount(account: string | null): void {
 
 /** A workspace was removed; its pictures go from memory and disk. */
 export function forgetDesignFramePreviews(workspaceIds: readonly string[]): void {
+  designSourceVectorCache.forgetWorkspaces(workspaceIds);
+  designPreviewDecodes.forgetWorkspaces(workspaceIds);
   designFramePreviews.forgetWorkspaces(workspaceIds);
 }
 
@@ -120,13 +144,39 @@ export function useDesignPreviewOwner(
 export function useDesignFramePreviewDemand(demand: DesignPreviewDemand | null): void {
   const token = useRef({}).current;
   useEffect(() => {
+    designPreviewDecodes.setOwner(token, demand);
     designFramePreviews.setDemand(token, demand);
   }, [demand, token]);
-  useEffect(() => () => designFramePreviews.setDemand(token, null), [token]);
+  useEffect(() => () => {
+    designPreviewDecodes.setOwner(token, null);
+    designFramePreviews.setDemand(token, null);
+  }, [token]);
 }
 
-/** The picture a frame surface paints, pinned while it shows. */
-export function useDesignFramePreview(target: DesignPreviewTarget | null): DesignPreviewPicture | null {
+/** Decode only after reserving its pixels, and release the decoder itself on
+ * cancellation or eviction. A warm cache retains the actual decoded image. */
+export async function decodeDesignPreviewPicture(picture: DesignPreviewPicture, signal: AbortSignal): Promise<{ element: HTMLImageElement; dispose(): void }> {
+  const image = new Image();
+  const cancel = () => { image.src = ""; };
+  signal.addEventListener("abort", cancel, { once: true });
+  try {
+    if (signal.aborted) throw new Error("Preview display was superseded.");
+    image.src = picture.url;
+    await image.decode();
+    if (signal.aborted || image.naturalWidth !== picture.width || image.naturalHeight !== picture.height)
+      throw new Error("Preview display dimensions or owner changed.");
+    return { element: image, dispose: cancel };
+  } catch (error) {
+    cancel();
+    throw error;
+  } finally {
+    signal.removeEventListener("abort", cancel);
+  }
+}
+
+/** The picture a visible/admitted surface paints. Both old and incoming pixels
+ * own leases through decode; the old lease ends after React replaces its DOM. */
+export function useDesignFramePreview(target: DesignPreviewTarget | null): (DesignPreviewPicture & { image: HTMLImageElement | null }) | null {
   const owner = target?.owner;
   const frameKey = owner && target ? designPreviewFrameKey(owner, target.file, target.theme) : null;
   const subscribe = useMemo(
@@ -140,15 +190,69 @@ export function useDesignFramePreview(target: DesignPreviewTarget | null): Desig
   );
   const sourceVersion = target?.sourceVersion;
   const level = target?.level;
-  const picture = useMemo(
-    () => (owner && target ? designFramePreviews.picture(target) : null),
-    // `target` is rebuilt per render; its identity is these fields.
+  const stableTarget = useMemo(
+    () => target,
+    // The target's identity is these fields, not its per-render wrapper.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [frameKey, level, sourceVersion, version],
+    [frameKey, level, sourceVersion],
   );
-  const key = picture?.key;
-  useEffect(() => (key ? designFramePreviews.pin(key) : undefined), [key]);
-  return picture;
+  const [shown, setShown] = useDesignImageState<{ frameKey: string; lease: DesignDecodedPreviewLease }>();
+  const shownRef = useRef(shown);
+  shownRef.current = shown;
+  // Publish cover readiness only after this decoded lease is committed. An
+  // encoded cache hit alone cannot authorize retiring the live document.
+  useLayoutEffect(() => { shown?.lease.confirmDecoded(); }, [shown]);
+  useLayoutEffect(() => {
+    if (!stableTarget || !frameKey) {
+      setShown(null);
+      return;
+    }
+    if (shownRef.current?.frameKey !== frameKey) setShown(null);
+    let cancelled = false;
+    let decoding = false;
+    let stopWaiting: (() => void) | undefined;
+    let releasePending: (() => void) | undefined;
+    const attempt = () => {
+      if (cancelled || decoding) return;
+      const lease = designPreviewDecodes.acquire(stableTarget);
+      if (!lease) {
+        stopWaiting ??= designFramePreviews.subscribeAvailable(attempt);
+        return;
+      }
+      if (lease.picture.key !== designFramePreviews.picture(stableTarget)?.key)
+        stopWaiting ??= designFramePreviews.subscribeAvailable(attempt);
+      if (lease.picture.key === shownRef.current?.lease.picture.key) {
+        lease.release();
+        return;
+      }
+      decoding = true;
+      let transferred = false;
+      releasePending = () => { if (!transferred) lease.release(); };
+      const publish = () => {
+        if (cancelled) return;
+        transferred = true;
+        setShown({ frameKey, lease });
+      };
+      // A culled frame's owned decoder is ready synchronously. A layout
+      // publication lets React install those pixels before the camera paints.
+      if (lease.ready) { publish(); decoding = false; return; }
+      void lease.whenReady.then(publish).catch(() => {
+        // Keep the last confirmed same-frame pixels or its live document.
+      }).finally(() => {
+        decoding = false;
+        if (!transferred) lease.release();
+      });
+    };
+    attempt();
+    return () => {
+      cancelled = true;
+      stopWaiting?.();
+      releasePending?.();
+    };
+  }, [frameKey, stableTarget, version, setShown]);
+  return useMemo(() => shown && shown.frameKey === frameKey ? {
+    ...shown.lease.picture, current: shown.lease.picture.sourceVersion === sourceVersion, image: shown.lease.image,
+  } : null, [frameKey, shown, sourceVersion]);
 }
 
 /** Frames with a picture of their current generation. Pictures arrive in
@@ -160,13 +264,17 @@ export function useDesignFramePictured(
   theme: string | null,
   frames: readonly { file: string; sourceVersion: string }[],
   active: boolean,
+  renderScale = 0,
 ): ReadonlySet<string> {
   const reader = useRef<ReturnType<typeof createDesignFramePicturedReader> | null>(null);
-  reader.current ??= createDesignFramePicturedReader(designFramePreviews);
+  reader.current ??= createDesignFramePicturedReader({
+    changes: () => designFramePreviews.changes(),
+    pictured: (owner, theme, frames, scale) => designFramePreviews.pictured(owner, theme, frames, scale, true),
+  });
   const subscribe = useCallback(
     (listener: () => void) => (active ? designFramePreviews.subscribeChanges(listener) : () => {}),
     [active],
   );
-  const read = () => reader.current!(owner, theme, frames);
+  const read = () => reader.current!(owner, theme, frames, renderScale);
   return useSyncExternalStore(subscribe, read, read);
 }

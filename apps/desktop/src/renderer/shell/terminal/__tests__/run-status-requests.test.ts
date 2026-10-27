@@ -1,7 +1,10 @@
 import { afterEach, expect, it, vi } from "vitest";
 
 const read = vi.hoisted(() => vi.fn());
-vi.mock("../../../platform/git", () => ({ workspaceRunInfo: read }));
+vi.mock("../../../platform/git", async original => ({
+  ...await original<typeof import("../../../platform/git")>(),
+  workspaceRunInfo: read,
+}));
 import { runInfoForRefresh } from "../use-run-status";
 
 const query = { workspaceId: "ws-a", sessionIds: ["run-a"] };

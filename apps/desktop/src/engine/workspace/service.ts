@@ -8,6 +8,7 @@ import { isGitReviewOperation } from "@zeros/protocol/git-review-actions";
 import { handleGitReviewOperation } from "../git/review-actions";
 import { assertDesignCheckoutReadable, readDesignCheckoutStatus } from "../design/checkout-status";
 import { DesignCatalogReader, DesignCatalogError, type DesignCatalogAdmission } from "../design/catalog";
+import { DesignPreviewJobs } from "../design/preview-jobs";
 import { inspectDesignCatalog, readDesignCatalogMetadata } from "../design/catalog-storage";
 import type { DesignCatalogRead, DesignCatalogOwner } from "@zeros/protocol/design-catalog";
 import {
@@ -280,6 +281,7 @@ import {
   designDirectoryNameFor,
   DESIGN_CANVAS_FILE,
   readDesignWorkspaceSnapshot,
+  readDesignNavigationSnapshot,
   type DesignWorkspaceSnapshot,
 } from "../design/document";
 import {
@@ -1354,7 +1356,26 @@ interface DesignTerritoryTransitionTarget {
 
 export class WorkspaceService {
   private readonly catalogReader = new DesignCatalogReader();
+  private readonly previewJobs = new DesignPreviewJobs();
   private readonly designRouteHost: DesignWorkspaceRouteHost = {
+    readDesignNavigation: (workspaceId, remote, hostLocalResources) =>
+      this.withDesignReadWorkspace(workspaceId, remote, async ({ workspace, root, designDirectory }) => {
+        try {
+          const navigation = await readDesignNavigationSnapshot(root);
+          noteDesignSnapshotDirectory(root, designDirectory);
+          return {
+            ...navigation,
+            owner: { workspaceId: workspace.id, directoryId: navigation.directoryId,
+              organizationId: workspace.organizationId ?? null, placement: "local" },
+            snapshot: { ...navigation.snapshot, directoryId: navigation.directoryId, directory: designDirectory,
+              protocolCapability: hostLocalResources ? this.designProtocolCapabilityProvider?.(workspace.id) ?? null : null },
+          };
+        } catch (error) {
+          if (error instanceof DesignCatalogError) return { unavailable: error.reason };
+          throw error;
+        }
+      }),
+    previewJobs: this.previewJobs,
     readDesignCatalog: (input, remote, admission) => this.readDesignCatalog(input, remote, admission),
     resolveDesignWorkspace: (workspaceId, remote) =>
       this.resolveDesignWorkspace(workspaceId, remote),
@@ -2168,7 +2189,7 @@ export class WorkspaceService {
   /** Local custom-protocol entry point after the engine validates its capability. */
   async readDesignProtocolResource(
     workspaceId: string,
-    input: { path: string; sourceVersion: string | null },
+    input: import("../design/protocol-resource").DesignProtocolResourceInput,
   ): Promise<DesignProtocolResource | null> {
     try {
       // Snapshot and frame reads resolve the active directory in a scoped
@@ -2289,7 +2310,11 @@ export class WorkspaceService {
 
   retireDesignCatalog(connectionId: string): void {
     this.catalogReader.retire(connectionId);
+    this.previewJobs.retire(connectionId);
   }
+
+  stopDesignPreviews(): Promise<void> { return this.previewJobs.stop(); }
+  retireUnauthorizedDesignPreviews(): void { this.previewJobs.retireUnauthorized(); }
 
   private readDesignCatalog(input: DesignCatalogRead, remote: boolean, admission: DesignCatalogAdmission) {
     const owner = (workspace: Workspace): DesignCatalogOwner => ({ workspaceId: workspace.id, directoryId: input.directoryId,
@@ -2512,6 +2537,7 @@ export class WorkspaceService {
         chatId: string,
         apply: (retire: () => Promise<void>) => Promise<T>,
       ) => Promise<T>;
+      previewAdmission?: DesignCatalogAdmission;
     } = {},
   ): Promise<unknown> {
     const remote = opts.remote === true;
@@ -2622,6 +2648,7 @@ export class WorkspaceService {
         remote,
         hostLocalResources,
         ...(opts.catalogAdmission ? { catalogAdmission: opts.catalogAdmission } : {}),
+        ...(opts.previewAdmission ? { previewAdmission: opts.previewAdmission } : {}),
       });
     }
     if (isCodeReviewOperation(op)) {

@@ -82,6 +82,16 @@ import {
 } from "../design-canvas-math";
 
 describe("design canvas viewport math", () => {
+  it("caps pointer zoom at 800 percent while preserving its world anchor", () => {
+    const view = { zoom: 7, panX: -20, panY: 10 };
+    const point = { x: 330, y: 220 };
+    const next = zoomDesignViewportAtPoint(view, 20, point);
+    expect(next.zoom).toBe(8);
+    expect((point.x - next.panX) / next.zoom).toBeCloseTo((point.x - view.panX) / view.zoom);
+    expect((point.y - next.panY) / next.zoom).toBeCloseTo((point.y - view.panY) / view.zoom);
+    expect(zoomDesignViewportAtPoint(next, 40, point)).toEqual(next);
+  });
+
   it("rebases extreme zoom into one bounded device-resolution viewport tile", () => {
     const zoom = 256;
     const frame = {
@@ -327,8 +337,8 @@ describe("design canvas viewport math", () => {
       fitDesignRects([{ x: 0, y: 0, width: 10, height: 10 }], {
         width: 1_000,
         height: 700,
-      })?.zoom,
-    ).toBeCloseTo(57.2);
+      }),
+    ).toEqual({ zoom: 8, panX: 460, panY: 310 });
   });
 
   it("keeps a bounded live iframe window around the viewport and selection", () => {

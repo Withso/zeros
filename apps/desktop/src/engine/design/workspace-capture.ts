@@ -54,19 +54,23 @@ export async function captureWorkspaceDesign(root: string, raw: unknown) {
 export async function previewWorkspaceDesign(
   root: string,
   raw: unknown,
-  deps: { renderer?: DesignHeadlessRenderer } = {},
+  deps: { renderer?: DesignHeadlessRenderer; signal?: AbortSignal } = {},
 ): Promise<DesignPreviewReply> {
   const input = designPreviewRequestSchema.parse(raw);
+  const signal = AbortSignal.any([...(deps.signal ? [deps.signal] : []), AbortSignal.timeout(DESIGN_CAPTURE_TIMEOUT_MS + 1000)]);
+  signal.throwIfAborted();
   if (input.directoryId !== undefined &&
     designDirectoryEntry(root, designDirectoryNameFor(root))?.id !== input.directoryId)
     throw new Error("The active Design directory changed. Refresh before previewing.");
   const frame = await readDesignFrameSelectionIdentity(root, input.frame);
+  signal.throwIfAborted();
   if (frame.sourceVersion !== input.sourceVersion)
     return { stale: true, sourceVersion: frame.sourceVersion };
   // Checked once here; the capture renderer is told not to repeat it. A
   // preview is background work: it yields a busy capture slot to explicit
   // captures, and the canvas asks again later.
   if (input.theme !== null) await assertDesignThemeName(root, input.theme);
+  signal.throwIfAborted();
   const renderer = deps.renderer ??
     createDesignCaptureRenderer(root, undefined, undefined, { themeChecked: true, capacityRetry: false });
   if (!renderer) throw new Error("No qualified Design capture host is available.");
@@ -87,8 +91,9 @@ export async function previewWorkspaceDesign(
     viewport: { ...viewport, deviceScaleFactor: 1, reducedMotion: "reduce" },
     ...(input.theme !== null ? { theme: input.theme } : {}),
     ...(scaled ? { rasterSize: { width: raster.width, height: raster.height } } : {}),
-    signal: AbortSignal.timeout(DESIGN_CAPTURE_TIMEOUT_MS + 1000),
+    signal,
   });
+  signal.throwIfAborted();
   // A whole-pixel canvas size makes the artifact's own generation exact, so
   // it alone proves which source rendered. A fractional size changes the
   // generation's size part (and a renderer may report none); then the frame
@@ -99,6 +104,7 @@ export async function previewWorkspaceDesign(
   const settled = typeof rendered === "string"
     ? rendered
     : (await readDesignFrameRenderIdentity(root, frame.file)).sourceVersion;
+  signal.throwIfAborted();
   if (settled !== input.sourceVersion) return { stale: true, sourceVersion: settled };
   if (artifact.mimeType !== "image/png" || artifact.bytes.byteLength > DESIGN_CAPTURE_PNG_BYTES)
     throw new Error("Preview does not match the requested Design frame or byte limit.");

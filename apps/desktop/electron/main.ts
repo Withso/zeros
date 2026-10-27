@@ -880,13 +880,16 @@ function createMainWindow(): BrowserWindow {
       // sandbox-safe), so a renderer XSS can't escalate to Node/RCE.
       sandbox: true,
       // Durable theme-mode handoff to the preload (see persistedMode above).
-      ...(persistedMode
-        ? { additionalArguments: [`--zeros-appearance-mode=${persistedMode}`] }
-        : {}),
+      additionalArguments: ["--zeros-async-canvas-wheel",
+        ...(persistedMode ? [`--zeros-appearance-mode=${persistedMode}`] : [])],
     },
   });
 
   rendererProcessOwners.track(win.webContents, "Main window");
+  // Electron disables visual pinch zoom by default. Keep that host contract
+  // explicit: Design owns its camera and can acknowledge wheel input without
+  // blocking Chromium's input queue. Browser-only canvases still cancel wheel.
+  void win.webContents.setVisualZoomLevelLimits(1, 1);
 
   // Finish the reopen-as-closed restore: the discrete states can't be
   // constructor options. macOS fullscreen (the green button / its own

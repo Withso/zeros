@@ -9,10 +9,26 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { runDesignWorkspaceSmoke } from "./ui-smoke-design-workspace.mjs";
+import { installDesignResidencyFixture } from "./ui-smoke-design-residency.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const output = path.join(root, ".context", "design-renderer-baseline.json");
+const argument = (name) => {
+  const index = process.argv.indexOf(name);
+  if (index === -1) return undefined;
+  const value = process.argv[index + 1];
+  if (!value || value.startsWith("--")) throw new Error(`${name} requires a value.`);
+  return value;
+};
+const output = path.resolve(root, argument("--output") ?? ".context/design-renderer-baseline.json");
+const nativeEndpoint = argument("--native-cdp");
+if (nativeEndpoint) {
+  const { runNativeDesignBaseline } = await import("./design-native-baseline.mjs");
+  await runNativeDesignBaseline({ endpoint: nativeEndpoint, output,
+    scenario: argument("--scenario"), enginePid: argument("--engine-pid") === undefined ? undefined : Number(argument("--engine-pid")) });
+  process.exit(0);
+}
 const measureOnly = process.argv.includes("--measure-only");
+const scaling = process.argv.includes("--scaling");
 const port = await new Promise((resolve, reject) => {
   const socket = net.createServer();
   socket.once("error", reject);
@@ -69,7 +85,7 @@ try {
     console.error(`Timed out: ${label}`);
     return false;
   };
-  if (!measureOnly) {
+  if (!measureOnly && !scaling) {
     await page.goto(
       `${origin}/apps/desktop/src/renderer/harnesses/harness-design-workspace.html`,
       { waitUntil: "networkidle" },
@@ -116,6 +132,45 @@ try {
       nodes: after.Nodes,
     });
   }
+  const workloads = [];
+  if (scaling) {
+    for (const count of [2, 32, 128, 256]) {
+      const fixture = await browser.newPage({ viewport: { width: 1440, height: 900 } });
+      try {
+        fixture.on("pageerror", (error) => failures.push(error.message));
+        await fixture.goto(`${origin}/apps/desktop/src/renderer/harnesses/harness-design-workspace.html?layoutGestures&pictures`, { waitUntil: "networkidle" });
+        await fixture.waitForFunction(() => !!window.__zerosHarnessDesignSurface);
+        await installDesignResidencyFixture(fixture, count);
+        const session = await fixture.context().newCDPSession(fixture);
+        await session.send("Performance.enable");
+        const sample = async (label) => {
+          await session.send("HeapProfiler.collectGarbage");
+          const metrics = Object.fromEntries((await session.send("Performance.getMetrics")).metrics.map(({ name, value }) => [name, value]));
+          const owned = await fixture.evaluate(() => ({
+            mountedSurfaces: document.querySelectorAll("[data-design-frame]").length,
+            mainDocumentElements: document.querySelectorAll("*").length,
+            resources: window.__zerosHarnessDesignSurface.resources(),
+          }));
+          workloads.push({ label, descriptors: count, jsHeapUsedBytes: metrics.JSHeapUsedSize,
+            documents: metrics.Documents, nodes: metrics.Nodes, ...owned });
+        };
+        await fixture.locator('[data-design-frame="home.html"] iframe[data-design-document-ready]').first().waitFor();
+        await sample("fixed-view");
+        for (let visit = 0; visit < 20; visit++) {
+          for (const active of [false, true]) await fixture.evaluate(async (active) => {
+            window.__zerosHarnessDesignSurface.active(active);
+            await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+          }, active);
+        }
+        await sample("20-hide-reveal-cycles");
+        await fixture.evaluate(async () => {
+          window.__zerosHarnessDesignSurface.active(false);
+          await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+        });
+        await sample("hidden");
+      } finally { await fixture.close(); }
+    }
+  }
   const report = {
     recordedAt: new Date().toISOString(),
     platform: process.platform,
@@ -126,13 +181,14 @@ try {
     browser: browser.version(),
     viewport: { width: 1440, height: 900 },
     fixture: "default Design workspace harness",
-    smokeRun: !measureOnly,
+    smokeRun: !measureOnly && !scaling,
     method:
       "Fresh browser context, two-second settle, forced GC, three three-second idle windows. Heap is not RSS.",
     samples,
+    workloads,
     failures,
     qualification:
-      "Linux/Chromium renderer baseline only. Not a native-host, GPU-memory, energy, cloud-worker, or large-document qualification.",
+      "Chromium component fixture with a synthetic bridge/capture host. Extra frames have real fixture source on demand, but no engine file preparation runs. JS heap excludes native/GPU memory. Hide/reveal uses srcDoc fallback, not native retention. Use --native-cdp on macOS for separate authenticated-protocol measurements.",
   };
   await mkdir(path.dirname(output), { recursive: true });
   await writeFile(output, `${JSON.stringify(report, null, 2)}\n`);

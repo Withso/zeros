@@ -16,13 +16,20 @@ import {
   DESIGN_RUNTIME_DOCUMENT_BODY_ID,
 } from "@zeros/protocol/design-runtime";
 import { designFrameGeometryError } from "@zeros/design-core";
+import {
+  mutateDesignKeyframes,
+  readDesignKeyframes,
+  type DesignKeyframeInput,
+} from "@zeros/design-web/css";
 import { designRelocationSchema, designRelocationStyles } from "@zeros/protocol/design-relocation";
 import type {
   DesignFoundationOpenWire,
   DesignWorkspaceSnapshotWire,
 } from "../platform/git";
 import { createDesignPagesHarness } from "./harness-design-pages";
+import { LAYERED_LAYOUT_SOURCE } from "./harness-design-layered-layout";
 
+const lazyPreparationHarness = new URLSearchParams(window.location.search).has("lazyPreparation");
 const HOME_SOURCE_VERSION = "aaaaaaaaaaaaaaaaaaaaaaaa";
 const PRICING_SOURCE_VERSION = "bbbbbbbbbbbbbbbbbbbbbbbb";
 const HARNESS_LAYER_COUNT = new URLSearchParams(window.location.search).has(
@@ -79,6 +86,10 @@ function withDesignRuntime(source: string, sourceVersion: string): string {
 const layoutGestureHarness = new URLSearchParams(window.location.search).has(
   "layoutGestures",
 );
+const frameMotionHarness = new URLSearchParams(window.location.search).has(
+  "frameMotion",
+);
+const framePlaybackHarness = new URLSearchParams(window.location.search).has("framePlayback");
 // `?designTokens`: the home frame is styled by an imported source and the
 // linked tokens.css, as a composed document carries them, so the inspector
 // can name tokens and their sources.
@@ -114,6 +125,8 @@ const DESIGN_TOKENS_HOME_SOURCE = `<!doctype html>
 </html>`;
 const homeSource = designTokensHarness
   ? DESIGN_TOKENS_HOME_SOURCE
+  : new URLSearchParams(window.location.search).has("layeredLayout")
+  ? LAYERED_LAYOUT_SOURCE
   : new URLSearchParams(window.location.search).has("mixedParents")
   ? `<!doctype html><html><head><style>*{box-sizing:border-box}body{margin:0}</style></head><body><main data-oid="home-main" data-zeros-frame-root style="position:relative;display:block;width:100%;height:100vh;background:white"><div data-oid="home-hero" style="position:absolute;left:80px;top:80px;width:200px;height:200px;transform:scale(2,1.5);transform-origin:0 0"><div data-oid="home-heading" style="position:absolute;left:20px;top:20px;width:80px;height:60px;background:red"></div></div><div data-oid="home-panel" style="position:absolute;left:640px;top:80px;width:200px;height:200px;transform:scale(-1,1)"><div data-oid="home-copy" style="position:absolute;left:20px;top:20px;width:80px;height:60px;background:blue"></div></div></main></body></html>`
   : new URLSearchParams(window.location.search).has("freeRelocation")
@@ -149,15 +162,25 @@ const homeSource = designTokensHarness
       p { max-width: 620px; margin: 0; color: dimgray; font-size: 24px; line-height: 1.5; }
       .button { width: fit-content; border-radius: 999px; background: black; color: white; padding: 16px 24px; }
       .harness-layer { display: none; }
+      ${framePlaybackHarness ? `
+      .playback-controls { display: flex; align-items: center; gap: 32px; font-size: 20px; }
+      .playback-hover { padding: 16px 24px; border: 1px solid; border-radius: 0; transition: border-radius .2s; }
+      .playback-hover:hover { border-radius: 24px; }
+      ` : ""}
+      ${frameMotionHarness ? `
+      main { animation: wash 18s linear infinite; }
+      @keyframes wash { from { opacity: 0.6; } to { opacity: 1; } }
+      ` : ""}
     </style>
   </head>
   <body data-oid="home-body">
     <main data-oid="home-main" data-zeros-frame-root>
       <nav data-oid="home-nav"><span data-oid="home-mark" class="mark">NORTH/ONE</span><span data-oid="home-season">Summer 2026</span></nav>
-      <div data-oid="home-hero" class="hero">
-        <h1 data-oid="home-heading">Make the next move unmistakable.</h1>
+      <div data-oid="home-hero" class="hero" ${new URLSearchParams(location.search).has("layerNames") ? 'data-name="Hero content"' : ""}>
+        <h1 data-oid="home-heading" ${new URLSearchParams(location.search).has("layerNames") ? 'data-name="Hero heading" aria-label="Accessible heading" id="hero-title"' : ""}>Make the next move unmistakable.</h1>
         <p data-oid="home-copy">A decisive launch surface for teams building products that deserve attention.</p>
         <span data-oid="home-action" class="button">Explore the system →</span>
+        ${framePlaybackHarness ? `<div class="playback-controls"><label><input type="checkbox">Try this control</label><button class="playback-hover">Hover preview</button></div>` : ""}
         ${Array.from(
           { length: HARNESS_LAYER_COUNT },
           (_, index) =>
@@ -285,6 +308,10 @@ async function main() {
     await import("../features/design-workspace/state/design-workspace-ui");
   const { useDesignRuntimeStore } =
     await import("../features/design-workspace/state/design-runtime-store");
+  const { designRendererResources } =
+    await import("../features/design-workspace/state/design-renderer-resources");
+  const { designFramePreviews } =
+    await import("../features/design-workspace/state/use-design-frame-previews");
   const { setActiveBridge } = await import("../platform/bridge/active-bridge");
   const { setWorkspaceRowsForTesting } = await import("../state/use-projects");
   const { useWorkspaceStore } = await import("../state/store");
@@ -456,7 +483,9 @@ async function main() {
           variants: [],
           components: [],
         },
-        keyframes: [],
+        keyframes: readDesignKeyframes({
+          [file]: file === "home.html" ? homeSource : pricingSource,
+        }),
       },
     } as never);
   }
@@ -631,8 +660,39 @@ async function main() {
     .getState()
     .setSelection(workspaceId, "home.html", "home-heading");
 
+  const performanceSources = new Map<string, string>();
   let currentWorkspaceSnapshot =
     designWorkspaceSnapshotCache.getSnapshot(workspaceId).data!;
+  const lazyRevision = "a".repeat(64);
+  let releasePreparation: (() => void) | null = null;
+  let preparationBarrier: Promise<void> | null = null;
+  const preparationCalls: Array<{ workspaceId: string; files: string[] }> = [];
+  let textCommitBarrier: Promise<void> | null = null;
+  let releaseTextCommit: (() => void) | null = null;
+  let heldTextCommits = 0;
+  const holdTextCommit = () => {
+    if (textCommitBarrier) return;
+    textCommitBarrier = new Promise<void>((resolve) => { releaseTextCommit = () => { textCommitBarrier = null; releaseTextCommit = null; resolve(); }; });
+  };
+  const holdPreparation = () => {
+    if (preparationBarrier) return;
+    preparationBarrier = new Promise<void>((resolve) => { releasePreparation = () => { preparationBarrier = null; releasePreparation = null; resolve(); }; });
+  };
+  if (lazyPreparationHarness) {
+    const near = currentWorkspaceSnapshot.frames.map((frame, index) => ({ ...frame, frameId: `f${index}`, pageId: "main", kind: "frame" as const }));
+    const distant = Array.from({ length: 254 }, (_, index) => ({ ...near[0]!, file: `distant-${index}.html`, frameId: `d${index}`,
+      title: `Distant ${index}`, x: 20_000 + index * 1600, z: 0 }));
+    for (const frame of distant) performanceSources.set(frame.file, homeSource);
+    const frames = [...near, ...distant];
+    currentWorkspaceSnapshot = { ...currentWorkspaceSnapshot, directoryId: "design_harness", directory: "North One - Design", frames,
+      pages: [{ id: "main", title: "Design", folder: "", frameFiles: frames.map((frame) => frame.file), frameIds: frames.map((frame) => frame.frameId) }],
+      lint: { ...currentWorkspaceSnapshot.lint, checkedFiles: [], violations: [] } };
+    designWorkspaceSnapshotCache.forget(workspaceId);
+    designFrameDocumentCache.clear();
+    useDesignRuntimeStore.getState().forgetWorkspace(workspaceId);
+    holdPreparation();
+  }
+  const lazyCatalogOwner = (id: string) => ({ workspaceId: id, directoryId: "design_harness", placement: "local", organizationId: id === workspaceId ? null : "organization-local" });
   const pagesFixture = pagesHarness ? createDesignPagesHarness(currentWorkspaceSnapshot, homeSource) : null;
   if (pagesFixture) {
     currentWorkspaceSnapshot = pagesFixture.snapshot;
@@ -753,12 +813,36 @@ async function main() {
     status: "connected",
     on: () => () => {},
     onStatusChange: () => () => {},
+    supportsEngineCapability: (capability: string) => lazyPreparationHarness && ["design.preparation.v1", "design.catalog.read.v1"].includes(capability),
+    requestConnected: async (message: { op: string; params: { workspaceId: string; intent: number } }) => {
+      if (!lazyPreparationHarness || message.op !== "design.catalog.read") throw new Error("Unexpected connected fixture request.");
+      const frames = currentWorkspaceSnapshot.frames.map((frame, order) => ({ id: frame.frameId!, pageId: frame.pageId!, source: frame.file,
+        title: frame.title, kind: frame.kind === "text" ? "text" : "html", x: frame.x, y: frame.y, width: frame.width, height: frame.height,
+        z: frame.z, order, preparation: "unprepared" }));
+      return { type: "WORKSPACE_RESPONSE", op: message.op, result: { kind: "design-catalog", version: 1, status: "ready", owner: lazyCatalogOwner(message.params.workspaceId),
+        intent: message.params.intent, binding: "b".repeat(64), revision: lazyRevision, pages: [{ id: "main", title: "Design", folder: "", count: frames.length }],
+        total: frames.length, offset: 0, frames, coverage: "complete", nextCursor: null } };
+    },
     request: async (message: {
       type?: string;
       op?: string;
       params?: Record<string, unknown>;
     }) => {
       if (message.op) workbenchOperations.push(message.op);
+      if (lazyPreparationHarness && message.op === "design.navigation.read") {
+        const owner = lazyCatalogOwner(String(message.params?.workspaceId));
+        return { type: "WORKSPACE_RESPONSE", result: { owner, catalogRevision: lazyRevision,
+          snapshot: { ...currentWorkspaceSnapshot, frames: [], lint: { ...currentWorkspaceSnapshot.lint,
+            workspacePath: workspaces.find((row) => row.id === owner.workspaceId)?.path ?? workspacePath } } } };
+      }
+      if (lazyPreparationHarness && message.op === "design.frames.prepare") {
+        const files = message.params?.files as string[];
+        preparationCalls.push({ workspaceId: String(message.params?.workspaceId), files: [...files] });
+        const result = { directoryId: "design_harness", catalogRevision: lazyRevision,
+          frames: currentWorkspaceSnapshot.frames.filter((frame) => files.includes(frame.file)), errors: [] };
+        if (preparationBarrier) await preparationBarrier;
+        return { type: "WORKSPACE_RESPONSE", result };
+      }
       if (pagesFixture) {
         const result = await pagesFixture.request(message.op, message.params);
         if (result !== undefined) {
@@ -793,8 +877,14 @@ async function main() {
         canvas.width = Math.max(1, Math.round(frame.width * scale));
         canvas.height = Math.max(1, Math.round(frame.height * scale));
         const context = canvas.getContext("2d")!;
-        context.fillStyle = "steelblue";
-        context.fillRect(0, 0, canvas.width, canvas.height);
+        if (frame.kind === "text") {
+          context.fillStyle = "white";
+          context.font = "12px sans-serif";
+          context.fillText("Text preview", 4, 16);
+        } else {
+          context.fillStyle = "steelblue";
+          context.fillRect(0, 0, canvas.width, canvas.height);
+        }
         return {
           type: "WORKSPACE_RESPONSE",
           result: {
@@ -1127,9 +1217,14 @@ async function main() {
                 parentId?: string;
                 beforeId?: string | null;
                 text?: string;
+                attribute?: string;
+                value?: string | null;
                 html?: string;
                 mode?: string;
                 styles?: Record<string, string>;
+                file?: string;
+                name?: string;
+                keyframes?: DesignKeyframeInput[];
                 frame?: string;
                 geometry?: {
                   x: number;
@@ -1152,16 +1247,23 @@ async function main() {
         const textOperation = transaction?.operations?.find(
           (operation) => operation.type === "node.set-text",
         );
+        if (textOperation && textCommitBarrier) { heldTextCommits++; await textCommitBarrier; }
         if (
           textOperation ||
           transaction?.operations?.some(
             (operation) =>
               operation.type === "node.set-styles" ||
+              operation.type === "node.set-attribute" ||
               operation.type === "node.set-html" ||
               operation.type === "frame.set-geometry",
           )
         ) {
           const frameFile = String(message.params?.frame ?? "");
+          const renameFailure = window as Window & { __zerosHarnessFailLayerRename?: boolean };
+          if (renameFailure.__zerosHarnessFailLayerRename && transaction?.operations?.some(operation => operation.type === "node.set-attribute")) {
+            renameFailure.__zerosHarnessFailLayerRename = false;
+            throw new Error("The layer source changed before rename.");
+          }
           const currentFrame = currentWorkspaceSnapshot.frames.find(
             (frame) => frame.file === frameFile,
           );
@@ -1183,8 +1285,23 @@ async function main() {
               operation.nodeId ? [operation.nodeId] : [],
             ),
           });
+          let transactionSource = currentHomeSource;
+          for (const operation of transaction?.operations ?? []) {
+            if (
+              operation.type === "keyframes.set" &&
+              operation.file === frameFile &&
+              operation.name &&
+              operation.keyframes
+            ) {
+              transactionSource = mutateDesignKeyframes(
+                transactionSource,
+                { name: operation.name, keyframes: operation.keyframes },
+                operation.file,
+              );
+            }
+          }
           const parsed = new DOMParser().parseFromString(
-            currentHomeSource,
+            transactionSource,
             "text/html",
           );
           if (textOperation?.nodeId) {
@@ -1208,6 +1325,12 @@ async function main() {
               if (operation.mode === "append")
                 target.insertAdjacentHTML("beforeend", operation.html ?? "");
               else target.innerHTML = operation.html ?? "";
+            }
+            if (operation.type === "node.set-attribute" && operation.nodeId && operation.attribute) {
+              const target = parsed.querySelector(`[data-oid="${CSS.escape(operation.nodeId)}"]`);
+              if (!target) throw new Error("The rename target is unavailable.");
+              if (operation.value === null) target.removeAttribute(operation.attribute);
+              else target.setAttribute(operation.attribute, operation.value ?? "");
             }
             if (
               operation.type === "node.move" &&
@@ -1303,6 +1426,9 @@ async function main() {
                 foundation: {
                   ...previousFoundation.foundation,
                   revision: `harness:${nextSourceVersion}`,
+                  ...(frameMotionHarness ? {
+                    keyframes: readDesignKeyframes({ [frameFile]: currentHomeSource }),
+                  } : {}),
                 },
               },
             );
@@ -1506,6 +1632,17 @@ async function main() {
           },
         };
       }
+      if (message.op === "design.frame.rename") {
+        const file = String(message.params?.frame ?? "");
+        const frame = currentWorkspaceSnapshot.frames.find(candidate => candidate.file === file);
+        if (!frame) throw new Error("The frame rename target is unavailable.");
+        const renamed = { ...frame, title: String(message.params?.title ?? "").trim() };
+        currentWorkspaceSnapshot = {
+          ...currentWorkspaceSnapshot,
+          frames: currentWorkspaceSnapshot.frames.map(candidate => candidate.file === file ? renamed : candidate),
+        };
+        return { type: "WORKSPACE_RESPONSE", result: { frame: renamed, snapshot: currentWorkspaceSnapshot } };
+      }
       if (
         message.op === "design.frame.create" &&
         message.params?.kind === "text"
@@ -1698,7 +1835,7 @@ async function main() {
         const frame = currentWorkspaceSnapshot.frames.find((item) => item.file === file);
         if (!frame) throw new Error("The harness frame is unavailable.");
         const retained = designFrameDocumentCache.peekSnapshot(designFrameDocumentKey(workspaceId, file, frame.sourceVersion)).data;
-        const source = file === "home.html" ? currentHomeSource : file === "pricing.html" ? pricingSource : retained?.source;
+        const source = file === "home.html" ? currentHomeSource : file === "pricing.html" ? pricingSource : performanceSources.get(file) ?? retained?.source;
         if (!source) throw new Error("The harness frame source is unavailable.");
         return { type: "WORKSPACE_RESPONSE", result: { frame: { ...frame, source, srcDoc: withDesignRuntime(source, frame.sourceVersion), tree: [] } } };
       }
@@ -1892,7 +2029,8 @@ async function main() {
             },
           };
         }
-        return { type: "WORKSPACE_RESPONSE", result: { ok: true } };
+        return { type: "WORKSPACE_RESPONSE", result: { ok: true,
+          ...(lazyPreparationHarness ? { sourceVersion, violations: warnings } : {}) } };
       }
       return { type: "WORKSPACE_RESPONSE", result: { ok: true } };
     },
@@ -1954,11 +2092,45 @@ async function main() {
     const [surfaceActive, setSurfaceActive] = React.useState(true);
     React.useLayoutEffect(() => {
       const controls = {
+        // Use the stores that seeded this rendered fixture. A direct browser
+        // import after Vite HMR can create a second, unobserved module instance.
+        ui: useDesignWorkspaceUiStore,
+        snapshots: designWorkspaceSnapshotCache,
+        documents: designFrameDocumentCache,
+        documentKey: designFrameDocumentKey,
+        resources: designRendererResources,
+        previews: designFramePreviews,
+        textCommit: { hold: holdTextCommit, release: () => releaseTextCommit?.(), started: () => heldTextCommits },
+        lazy: lazyPreparationHarness ? {
+          calls: preparationCalls,
+          operations: workbenchOperations,
+          hold: holdPreparation,
+          release: () => releasePreparation?.(),
+          refresh: () => designWorkspaceSnapshotCache.invalidate(workspaceId),
+        } : undefined,
+        frames(frames: DesignWorkspaceSnapshotWire["frames"]) {
+          if (frames.length > 256) throw new Error("Performance fixtures keep the supported 256-frame bound.");
+          for (const frame of frames) {
+            if (frame.file !== "home.html" && frame.file !== "pricing.html")
+              performanceSources.set(frame.file, currentHomeSource);
+          }
+          currentWorkspaceSnapshot = { ...currentWorkspaceSnapshot, frames };
+          designWorkspaceSnapshotCache.setData(workspaceId, currentWorkspaceSnapshot);
+        },
+        protocol(capability: string | null) {
+          currentWorkspaceSnapshot = { ...currentWorkspaceSnapshot, protocolCapability: capability };
+          designWorkspaceSnapshotCache.setData(workspaceId, currentWorkspaceSnapshot);
+        },
+        directory(directoryId: string, directory: string) {
+          currentWorkspaceSnapshot = { ...currentWorkspaceSnapshot, directoryId, directory };
+          designWorkspaceSnapshotCache.setData(workspaceId, currentWorkspaceSnapshot);
+        },
         owner(id: string) {
           if (id !== workspaceId) {
             const ownerPath = `${workspacePath}-${id}`;
             if (!workspaces.some((row) => row.id === id)) workspaces.push({ ...workspace, id, path: ownerPath });
-            designWorkspaceSnapshotCache.setData(id, {
+            if (lazyPreparationHarness) designWorkspaceSnapshotCache.forget(id);
+            else designWorkspaceSnapshotCache.setData(id, {
               ...structuredClone(currentWorkspaceSnapshot),
               lint: { ...currentWorkspaceSnapshot.lint, workspacePath: ownerPath },
             });

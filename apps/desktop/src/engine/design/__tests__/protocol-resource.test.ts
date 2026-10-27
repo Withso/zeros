@@ -31,6 +31,22 @@ describe("design protocol resources", () => {
     await rm(root, { recursive: true, force: true });
   });
 
+  it("serves an exact passive surface without the editing runtime or capture work", async () => {
+    const frame = await createDesignFrame(root, { title: "Passive" });
+    const identity = await readDesignFrameRenderIdentity(root, frame.file);
+    const resource = await readDesignProtocolResource(root, {
+      path: frame.file, sourceVersion: identity.sourceVersion, surface: true, theme: null,
+    });
+    expect(resource.status).toBe(200);
+    expect(resource.body.toString()).toContain("zeros-design-surface-ready");
+    expect(resource.body.toString()).not.toContain("data-zeros-design-runtime");
+    expect(resource.body.toString()).not.toContain("MutationObserver");
+    expect(resource.headers["Content-Security-Policy"]).toContain("sandbox allow-scripts");
+    expect((await readDesignProtocolResource(root, {
+      path: frame.file, sourceVersion: "b".repeat(24), surface: true, theme: null,
+    })).status).toBe(409);
+  });
+
   it("serves self-contained runtime HTML so raster capture keeps CSS and images", async () => {
     const frame = await createDesignFrame(root, { title: "Protocol" });
     await writeFile(
