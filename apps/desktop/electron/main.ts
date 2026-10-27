@@ -129,6 +129,7 @@ import {
   type ComputerUsePreferences,
 } from "@zeros/protocol/computer-use-tools";
 import { registerIpcHandlers } from "./ipc/router";
+import { installKeepAwake } from "./keep-awake-runtime";
 import { registerIframeSessionCommands } from "./ipc/iframe-session";
 import { registerIframePickerCommands } from "./ipc/iframe-picker";
 import { registerBrowserFrameDevToolsCommand } from "./browser-frame-devtools";
@@ -1291,6 +1292,8 @@ app.whenReady().then(async () => {
   // finds a registered handler instead of "No handler for 'zeros:invoke'".
   registerIpcHandlers();
   registerAllCommands();
+  const keepAwake = installKeepAwake();
+  app.once("before-quit", () => keepAwake.dispose());
   installDesignProtocol();
 
   const trustedBrowserWindow = (event: IpcMainInvokeEvent): BrowserWindow => {
@@ -1962,6 +1965,7 @@ app.whenReady().then(async () => {
   startEngineCodeWatcher();
 
   const win = createMainWindow();
+  keepAwake.attachWindow(win);
   browserRendererEpoch += 1;
   setMainWindow(win);
   startAuthSecurityMonitor();
@@ -2038,6 +2042,7 @@ app.whenReady().then(async () => {
     const existing = getMainWindow();
     if (existing) return existing;
     const next = createMainWindow();
+    keepAwake.attachWindow(next);
     browserRendererEpoch += 1;
     setMainWindow(next);
     next.on("closed", () => {

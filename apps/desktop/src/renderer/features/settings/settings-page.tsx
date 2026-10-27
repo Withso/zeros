@@ -1,6 +1,7 @@
 import { isSettingsSectionAvailable } from "./settings-section-availability";
 import { CloudComputerPanel, prefetchCloudComputer } from "./cloud-computer-panel";
 import { CloudGithubSection } from "./cloud-github-section";
+import { KeepAwakeSetting } from "./keep-awake-setting";
 // ──────────────────────────────────────────────────────────
 // Settings page — sidebar + per-section panel
 // ──────────────────────────────────────────────────────────
@@ -917,6 +918,7 @@ function GeneralPanel() {
     <div className="flex flex-col gap-6">
       <SettingsGroup>
         <FollowUpBehaviorSetting />
+        <KeepAwakeSetting />
         <SettingsRow
           label="Show hidden workspaces in dashboard"
           hint="Includes hidden workspaces in the Archived list."
