@@ -49,7 +49,7 @@ import { DesignSavedEditingContext, DesignSavedEditingSession } from "./design-s
 import { DesignDirectoryPill } from "./design-directory-pill";
 import { DesignFloatingPanel } from "./design-floating-panel";
 import { DesignInspector } from "./design-inspector";
-import { useDesignInspectorPresentation } from "./design-inspector-presentation";
+import type { DesignRuntimeTreeNode } from "@zeros/protocol/design-runtime";
 import { errorMessage } from "./design-workspace-error";
 import { DesignWorkspaceSidebarPanels } from "./design-workspace-sidebar-panels";
 import {
@@ -264,19 +264,23 @@ export function DesignWorkspaceColumn({
       : (runtimeFrame?.snapshot?.frame ?? null);
   });
 
-  // Selection publishes at once; the inspector keeps its last complete view
-  // (inert, briefly) while the new selection's exact details arrive.
-  const inspectorPresentation = useDesignInspectorPresentation(
-    JSON.stringify([workspaceId, pageSnapshot?.directoryId ?? null, activePageId ?? null, ownerRevision]),
-    {
-      frame: selectedFrame,
-      frameSelected,
-      details: selectedDetails,
-      selectedNodeId,
-      selectedNodeIds,
-    },
+  // Until a new selection's exact details arrive, the inspector names the
+  // selected layer from its frame's tree instead of reading as empty.
+  const selectedFrameTree = useDesignRuntimeStore((state) =>
+    workspaceId && selectedFrame
+      ? state.byWorkspace[workspaceId]?.frames[selectedFrame.file]?.snapshot?.tree
+      : undefined,
   );
-  const inspected = inspectorPresentation.selection;
+  const selectedTreeNode = useMemo(() => {
+    if (!selectedNodeId || !selectedFrameTree) return null;
+    const pending: DesignRuntimeTreeNode[] = [...selectedFrameTree];
+    while (pending.length) {
+      const node = pending.pop()!;
+      if (node.oid === selectedNodeId) return node;
+      for (const child of node.children) pending.push(child);
+    }
+    return null;
+  }, [selectedFrameTree, selectedNodeId]);
 
   // A freshly provisioned design surface is ready when its first exact-key
   // snapshot either resolves or fails open; code-only settling UI must not
@@ -481,22 +485,18 @@ export function DesignWorkspaceColumn({
             />
           }
           inspector={
-            <div
-              data-design-inspector-presentation={inspectorPresentation.held ? "held" : "current"}
-              className="contents"
-              {...(inspectorPresentation.held ? { inert: "", "aria-busy": true } : {})}
-            >
             <DesignInspector
               workspaceId={workspaceId}
               pages={pageSnapshot?.pages}
               activePageId={activePageId}
               pageFrames={designFrameViews(snapshot.data)}
               folder={folder}
-              frame={inspected.frame}
-              frameSelected={inspected.frameSelected}
-              details={inspected.details}
-              selectedNodeId={inspected.selectedNodeId}
-              selectedNodeIds={inspected.selectedNodeIds}
+              frame={selectedFrame}
+              frameSelected={frameSelected}
+              details={selectedDetails}
+              selectedNode={selectedTreeNode}
+              selectedNodeId={selectedNodeId}
+              selectedNodeIds={selectedNodeIds}
               lint={snapshot.data?.lint ?? null}
               active={surfaceActive}
               canvasBackground={canvasBackground}
@@ -506,7 +506,6 @@ export function DesignWorkspaceColumn({
               onOpenMotionTimeline={openMotionTimeline}
               zoomActionsRef={zoomActionsRef}
             />
-            </div>
           }
         />
       </div>

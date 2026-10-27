@@ -8,7 +8,7 @@
 
 import React from "react";
 
-import type { DesignRuntimeNodeDetails } from "@zeros/protocol/design-runtime";
+import type { DesignRuntimeNodeDetails, DesignRuntimeTreeNode } from "@zeros/protocol/design-runtime";
 import type { DesignPageSummary } from "@zeros/protocol/design-pages";
 
 import {
@@ -69,6 +69,8 @@ export interface DesignInspectorProps {
   frameSelected: boolean;
   /** Browser-computed values for the exact selected frame/element key. */
   details: DesignRuntimeNodeDetails | null;
+  /** The selected layer's tree node, which names it before its details arrive. */
+  selectedNode?: DesignRuntimeTreeNode | null;
   /** Stable element identity; null means the frame itself is selected. */
   selectedNodeId: string | null;
   /** Primary-first additive selection for group styling feedback. */

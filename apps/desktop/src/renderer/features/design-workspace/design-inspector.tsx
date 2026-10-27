@@ -965,6 +965,7 @@ export function DesignInspector({
   frame,
   frameSelected,
   details,
+  selectedNode,
   selectedNodeId,
   selectedNodeIds,
   lint,
@@ -2176,7 +2177,9 @@ export function DesignInspector({
         : frameSelected && frame
           ? designFrameLayerLabel(frame.kind)
           : selectedNodeId
-            ? "Nothing selected"
+            ? selectedNode?.oid === selectedNodeId
+              ? designRuntimeLayerLabel(selectedNode)
+              : "Nothing selected"
             : "Page";
   const SelectionGlyph =
     styleNodeIds.length > 1

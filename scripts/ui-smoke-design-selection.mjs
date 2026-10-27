@@ -26,14 +26,13 @@ export async function runDesignDoubleClickSelectionSmoke({ page, check }) {
   );
   const heading = runtime.locator('[data-oid="home-heading"]');
   await page.locator('[data-design-frame-row="home.html"]').click();
-  // A layer whose details were never read selects at once; the inspector
-  // keeps its last complete view until the exact details land, never
-  // flashing "Nothing selected" in between.
-  await page.locator('[data-design-frame-row="home.html"] [data-layer-disclosure]').count();
+  // A layer whose details were never read selects at once and the inspector
+  // names that exact layer at once; it never reads "Nothing selected" or
+  // shows another layer's properties while the readback is pending.
   const coldRow = page.locator("[data-design-sidebar-panel] [data-design-layer-id]").nth(9);
   const coldId = await coldRow.getAttribute("data-design-layer-id");
   await page.evaluate(() => {
-    const probe = { empty: 0, held: 0, done: false };
+    const probe = { headers: [], done: false };
     window.__designColdLayer = probe;
     // A busy runtime: its node readbacks answer 150 ms late.
     const post = MessagePort.prototype.postMessage;
@@ -47,23 +46,28 @@ export async function runDesignDoubleClickSelectionSmoke({ page, check }) {
     };
     const sample = () => {
       const header = document.querySelector("[data-design-inspector-header]")?.textContent?.trim();
-      if (header === "Nothing selected") probe.empty++;
-      if (document.querySelector('[data-design-inspector-presentation="held"]')) probe.held++;
+      if (probe.headers.at(-1) !== header) probe.headers.push(header);
       if (!probe.done) requestAnimationFrame(sample);
     };
     requestAnimationFrame(sample);
   });
   await coldRow.click();
   await expect(page.locator(`[data-design-sidebar-panel] [data-design-layer-id="${coldId}"][aria-selected="true"]`)).toHaveCount(1);
-  await expect(page.locator('[data-design-inspector-presentation="current"] [data-design-inspector]')).toHaveCount(1);
-  await page.waitForTimeout(250);
+  await page.waitForTimeout(300);
   const cold = await page.evaluate(() => {
     const probe = window.__designColdLayer;
     probe.done = true;
     probe.restore();
-    return { empty: probe.empty, held: probe.held };
+    return probe.headers;
   });
-  check("an uncached layer selection never flashes Nothing selected", cold.empty === 0 && cold.held > 0, JSON.stringify(cold));
+  // The frame row was selected before the click ("Frame"); afterwards only the
+  // clicked layer's own label may appear.
+  const afterClick = cold.slice(cold.indexOf("Frame") + 1);
+  check(
+    "an uncached layer selection names that layer at once, never Nothing selected",
+    !cold.includes("Nothing selected") && new Set(afterClick).size <= 1,
+    JSON.stringify(cold),
+  );
   await page.locator('[data-design-frame-row="home.html"]').click();
   const box = await designFrameElementBox(runtime.owner(), heading);
   const doubleClick = () =>
