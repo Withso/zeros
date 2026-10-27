@@ -6820,8 +6820,12 @@ export function DesignCanvas({
               : undefined,
           ).finally(hideCreationDraft);
         } else {
+          // The hand-off belongs to this canvas lifetime: a reply that lands
+          // after the surface hid or changed owner only clears the draft.
+          const canvasLifetime = canvasLifetimeRef.current;
           void createFrame(geometry).then(
-            (created) => created ? hideCreationDraftWhenPainted(created.file) : hideCreationDraft(),
+            (created) => created && canvasLifetimeRef.current === canvasLifetime
+              ? hideCreationDraftWhenPainted(created.file) : hideCreationDraft(),
             hideCreationDraft,
           );
         }
