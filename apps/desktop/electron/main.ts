@@ -1293,7 +1293,6 @@ app.whenReady().then(async () => {
   registerIpcHandlers();
   registerAllCommands();
   const keepAwake = installKeepAwake();
-  app.once("before-quit", () => keepAwake.dispose());
   installDesignProtocol();
 
   const trustedBrowserWindow = (event: IpcMainInvokeEvent): BrowserWindow => {

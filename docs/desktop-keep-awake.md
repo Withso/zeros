@@ -44,6 +44,9 @@ the existing worker lifecycle independently of this device preference.
   every 30 seconds while monitoring; a 90-second lease bounds stale renderer
   activity. Hidden-page renderer timers do not own battery or expiry checks.
   A lost renderer or system suspend revokes its activity immediately.
+- Quit retains the service while main defers exit for recording, attachment and
+  provider cleanup. The final `will-quit` event disposes it; a deferred
+  `before-quit` cannot invalidate IPC in the still-open window.
 - `/usr/bin/pmset -g batt` is a bounded, read-only invocation with a fixed locale,
   no shell, and no user-controlled arguments. Battery reads are single-flight;
   source transitions, disabling, idle and disposal fence late results. There is

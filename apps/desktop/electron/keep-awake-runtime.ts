@@ -1,4 +1,4 @@
-import { powerMonitor, powerSaveBlocker, type BrowserWindow, type IpcMainInvokeEvent } from "electron";
+import { app, powerMonitor, powerSaveBlocker, type BrowserWindow, type IpcMainInvokeEvent } from "electron";
 import { KEEP_AWAKE_ACTIVITY_REQUEST, type KeepAwakePreferences } from "../shared/keep-awake";
 import { getAppSetting, setAppSetting } from "./ipc/commands/app";
 import { emitEvent, getMainWindow } from "./ipc/events";
@@ -62,7 +62,7 @@ export function installKeepAwake() {
     powerMonitor.on("resume", resume);
   }
 
-  return {
+  const runtime = {
     attachWindow(next: BrowserWindow): void {
       detachWindow();
       controller.clearActivity();
@@ -96,6 +96,7 @@ export function installKeepAwake() {
       controller.dispose();
       detachWindow();
       window = null;
+      app.off("will-quit", onQuit);
       if (supported) {
         powerMonitor.off("on-battery", powerChanged);
         powerMonitor.off("on-ac", powerChanged);
@@ -104,4 +105,9 @@ export function installKeepAwake() {
       }
     },
   };
+  const onQuit = () => runtime.dispose();
+  // Main defers before-quit until recording/attachment/provider cleanup ends.
+  // Keep the live window's service until Electron commits to shutting down.
+  app.once("will-quit", onQuit);
+  return runtime;
 }

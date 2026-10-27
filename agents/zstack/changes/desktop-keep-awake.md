@@ -13,3 +13,8 @@
 - Encoded in the keep-awake native controller, battery/IPC suites and renderer
   activity/preference tests; rationale and primary sources are in
   `docs/desktop-keep-awake.md`. This is a new feature, not an escaped-bug replay.
+- Review found that main defers its first `before-quit` for shutdown cleanup;
+  disposing a native service on that event invalidates the still-live window's
+  IPC and releases power protection too early. Keep the service until
+  `will-quit`. The deferred-quit regression failed with the earlier hook and
+  verifies retained IPC/assertion followed by final cleanup.

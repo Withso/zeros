@@ -6,6 +6,7 @@ import type { CommandHandler } from "../ipc/router";
 const native = vi.hoisted(() => ({
   commands: new Map<string, CommandHandler>(),
   powerEvents: new Map<string, () => void>(),
+  appEvents: new Map<string, () => void>(),
   mainWindow: null as BrowserWindow | null,
   saved: "false",
   save: vi.fn(),
@@ -15,6 +16,10 @@ const native = vi.hoisted(() => ({
   stop: vi.fn(),
 }));
 vi.mock("electron", () => ({
+  app: {
+    once: (event: string, listener: () => void) => native.appEvents.set(event, listener),
+    off: (event: string) => native.appEvents.delete(event),
+  },
   powerSaveBlocker: { start: native.start, stop: native.stop },
   powerMonitor: {
     on: (event: string, listener: () => void) => native.powerEvents.set(event, listener),
@@ -51,6 +56,7 @@ beforeEach(() => {
   native.saved = "false";
   native.commands.clear();
   native.powerEvents.clear();
+  native.appEvents.clear();
   native.readPower.mockResolvedValue({ onBattery: false, percent: null });
   native.save.mockImplementation((_key, value) => { native.saved = value; });
   runtime = installKeepAwake();
@@ -174,8 +180,27 @@ describe("native keep awake boundary", () => {
     runtime.dispose();
     expect(native.stop).toHaveBeenCalledOnce();
     expect(native.powerEvents.size).toBe(0);
+    expect(native.appEvents.size).toBe(0);
     expect(contents.eventNames()).toEqual([]);
     expect(() => invoke("keep_awake_activity", { active: true })).toThrow("requires the app window");
+  });
+
+  it("retains sleep prevention and IPC while Quit waits for shutdown cleanup", async () => {
+    const { invoke } = createWindow();
+    invoke("keep_awake_set", { enabled: true });
+    invoke("keep_awake_activity", { active: true });
+    await vi.advanceTimersByTimeAsync(0);
+    // Main prevents the first before-quit while recordings, attachments and
+    // provider cleanup finish. The live window must retain its native service.
+    native.appEvents.get("before-quit")?.();
+    expect(native.stop).not.toHaveBeenCalled();
+    expect(invoke("keep_awake_get")).toEqual({ enabled: true, supported: true });
+    expect(() => invoke("keep_awake_activity", { active: true })).not.toThrow();
+    native.appEvents.get("will-quit")?.();
+    expect(native.stop).toHaveBeenCalledExactlyOnceWith(12);
+    expect(native.appEvents.size).toBe(0);
+    expect(native.powerEvents.size).toBe(0);
+    expect(vi.getTimerCount()).toBe(0);
   });
 
   it("makes the macOS-only feature unavailable on other platforms", () => {
