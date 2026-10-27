@@ -62,7 +62,7 @@ When the desktop regains focus or reconnects, an explicit
 Local repository's Origin and configured `git.remote`. SQLite retains GitHub's
 numeric repository ID and node ID per exact remote URL; later observations use
 the ID so reusing a former owner/name cannot redirect an existing binding to a
-different repository. A manual URL change or explicit removal/re-add retires
+different repository. An unrelated URL change or explicit removal/re-add retires
 that binding. Legacy repositories first acquire their ID through an
 authenticated GitHub lookup; if an old alias was already reused before any ID
 was recorded, the old identity cannot be recovered from that URL alone.
@@ -73,6 +73,12 @@ user-managed. GitHub failures preserve confirmed metadata. A change of the
 selected connection, registration or local config during the lookup cancels
 the repair. The config replacement owns Git's lock and the existing mutation
 lane. Ordinary PR reads never rewrite Git config.
+
+Before replacing Git config, the engine durably records the verified source
+URLs. If the process stops between the file replacement and native metadata
+commit, a retry resolves the saved repository ID and repairs PR links from
+those sources, including intermediate transfers. The pending sources clear in
+the same transaction that commits the saved Origin and PR links.
 
 Only the remote destination, saved Origin and matching PR links change. Project
 names, slugs, folders, workspace IDs, chats and Local/organization ownership

@@ -1645,6 +1645,7 @@ export const MIGRATIONS: Migration[] = [
         github_node_id TEXT NOT NULL,
         owner TEXT NOT NULL,
         name TEXT NOT NULL,
+        pending_urls TEXT NOT NULL DEFAULT '[]' CHECK (json_valid(pending_urls) AND json_type(pending_urls) = 'array'),
         PRIMARY KEY (repo_id, remote_name)
       );
     `,

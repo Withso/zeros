@@ -1,6 +1,6 @@
 import { chmodSync, closeSync, constants, fstatSync, openSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import path from "node:path";
-import { githubRemoteIdentity, projectForRoot, saveGithubRemoteIdentities, type GithubRemoteIdentity } from "../db/projects";
+import { githubRemoteIdentity, prepareGithubRemoteIdentities, projectForRoot, saveGithubRemoteIdentities, type GithubRemoteIdentity } from "../db/projects";
 import { resolveRepoGit } from "../settings/repo-git";
 import { GitError } from "./errors";
 import { assertSafeGitRef, runFile } from "./git-exec";
@@ -83,18 +83,25 @@ export async function reconcileGithubRepository(repoRoot: string) {
   if (!candidates.length) return { project: owner, changed: false };
   const stillSelected = await githubRepositorySelection();
   const identities: GithubRemoteIdentity[] = [];
+  const pendingIdentities: GithubRemoteIdentity[] = [];
   const edits: { key: string; before: string; after: string }[] = [];
   const moves: { from: string; to: string }[] = [];
   for (const candidate of candidates) {
-    const canonical = await canonicalGithubRepository(candidate.target,
-      githubRemoteIdentity(owner.repoRoot, candidate.remote, candidate.url));
+    const previous = githubRemoteIdentity(owner.repoRoot, candidate.remote, candidate.url);
+    const canonical = await canonicalGithubRepository(candidate.target, previous);
     const url = canonicalUrl(candidate.url, canonical);
     if (!url || !Number.isSafeInteger(canonical.id) || canonical.id < 1 || !canonical.nodeId) {
       throw new GitError({ code: "VALIDATION_FAILED", message: "GitHub returned an invalid repository identity." });
     }
-    identities.push({ remote: candidate.remote, url, repositoryId: String(canonical.id), nodeId: canonical.nodeId,
-      owner: canonical.owner, repo: canonical.repo });
-    moves.push({ from: `${candidate.target.owner}/${candidate.target.repo}`, to: `${canonical.owner}/${canonical.repo}` });
+    const identity = { remote: candidate.remote, url, repositoryId: String(canonical.id), nodeId: canonical.nodeId,
+      owner: canonical.owner, repo: canonical.repo };
+    identities.push(identity);
+    const pendingUrls = [...new Set([...(previous?.pendingUrls ?? []), candidate.url])];
+    pendingIdentities.push({ ...identity, pendingUrls });
+    for (const source of pendingUrls) {
+      const from = parseGitHubRemote(source);
+      moves.push({ from: `${from.owner}/${from.repo}`, to: `${canonical.owner}/${canonical.repo}` });
+    }
     if (url !== candidate.url) edits.push({ key: `remote.${candidate.remote}.url`, before: candidate.url, after: url });
     for (const pushUrl of values.get(`remote.${candidate.remote}.pushurl`) ?? []) {
       let pushTarget: { owner: string; repo: string };
@@ -137,10 +144,14 @@ export async function reconcileGithubRepository(repoRoot: string) {
           return { project: projectForRoot(owner.repoRoot), changed: false };
       }
       if (!await stillSelected() || !unchanged()) return { project: projectForRoot(owner.repoRoot), changed: false };
-      // No await between the last fences, atomic rename and native DB commit.
-      if (locked) { renameSync(lock, file); locked = false; }
+      // No await between the last fences, durable move record, atomic rename
+      // and native commit. Retain every source if an earlier attempt failed.
+      if (locked) {
+        if (!prepareGithubRemoteIdentities(owner, pendingIdentities)) return { project: projectForRoot(owner.repoRoot), changed: false };
+        renameSync(lock, file); locked = false;
+      }
       const project = saveGithubRemoteIdentities(owner, identities, originUrl, moves);
-      return { project, changed: edits.length > 0 || originUrl !== owner.originUrl };
+      return { project, changed: edits.length > 0 || originUrl !== owner.originUrl || moves.some(move => move.from !== move.to) };
     } catch {
       throw new GitError({ code: "GIT_COMMAND_FAILED", message: "Could not update the repository remote. It will be checked again on refresh." });
     } finally {

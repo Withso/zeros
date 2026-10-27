@@ -5,6 +5,7 @@ import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { closeZerosDb, setZerosDbPathForTesting } from "../../db";
 import { listProjects, removeRepoByRoot, upsertRepoByRoot } from "../../db/projects";
+import * as projectDb from "../../db/projects";
 import { WorkspaceService } from "../../workspace/service";
 import { engineGithubTokenStore, seedGithubToken } from "../engine-token-store";
 import { resolveGithubWorkspaceRepository, setOctokitFactoryForTesting, setTokenStoreForTesting } from "../github";
@@ -141,6 +142,78 @@ describe("verified GitHub repository reconciliation", () => {
     const before = getWorkspaceById("ws_fixture");
     await reconcile();
     expect(getWorkspaceById("ws_fixture")).toEqual({ ...before, prUrl: "https://github.com/current/renamed/pull/28" });
+  });
+
+  it.each(["retry", "another transfer"])("recovers the saved PR source after a post-rename failure and %s", async scenario => {
+    updateWorkspace("ws_fixture", { prNumber: 28, prUrl: "https://github.com/former/widgets/pull/28" });
+    vi.spyOn(projectDb, "saveGithubRemoteIdentities").mockImplementationOnce(() => { throw new Error("native commit interrupted"); });
+    await expect(reconcile()).rejects.toBeDefined();
+    expect(git("remote", "get-url", "origin")).toBe(newUrl);
+    expect(project().originUrl).toBe(oldUrl);
+    if (scenario === "retry") {
+      // Local inspection may already acknowledge Git's new Origin while the
+      // saved PR link still needs a recovery notification.
+      upsertRepoByRoot({ repoRoot: root, originUrl: newUrl, originRevision: project().originRevision });
+    }
+    closeZerosDb();
+    if (scenario === "another transfer") repository = { ...repository, owner: { login: "third" } };
+    get.mockClear().mockResolvedValue({ data: { id: 456, node_id: "R_other", owner: { login: "current" }, name: "renamed" } });
+    await expect(reconcile()).resolves.toMatchObject({ changed: true });
+    expect(getWorkspaceById("ws_fixture")?.prUrl).toBe(`https://github.com/${repository.owner.login}/renamed/pull/28`);
+    expect(git("remote", "get-url", "origin")).toBe(`git@github.com:${repository.owner.login}/renamed.git`);
+    expect(project().originUrl).toBe(`git@github.com:${repository.owner.login}/renamed.git`);
+    expect(graphql).toHaveBeenCalledWith(expect.any(String), { id: "R_fixture" });
+    expect(get).not.toHaveBeenCalled();
+    expect(projectDb.githubRemoteIdentity(root, "origin", oldUrl)).toBeNull();
+  });
+
+  it("recovers an interrupted prepared move without publishing metadata before Git changes", async () => {
+    updateWorkspace("ws_fixture", { prNumber: 28, prUrl: "https://github.com/former/widgets/pull/28" });
+    const before = project();
+    const prepare = projectDb.prepareGithubRemoteIdentities;
+    vi.spyOn(projectDb, "prepareGithubRemoteIdentities").mockImplementationOnce((...args) => {
+      prepare(...args);
+      throw new Error("interrupted before Git rename");
+    });
+    await expect(reconcile()).rejects.toBeDefined();
+    expect(project()).toEqual(before);
+    expect(git("remote", "get-url", "origin")).toBe(oldUrl);
+    expect(getWorkspaceById("ws_fixture")?.prUrl).toBe("https://github.com/former/widgets/pull/28");
+    closeZerosDb();
+    await reconcile();
+    expect(git("remote", "get-url", "origin")).toBe(newUrl);
+    expect(getWorkspaceById("ws_fixture")?.prUrl).toBe("https://github.com/current/renamed/pull/28");
+    expect(graphql).toHaveBeenCalledWith(expect.any(String), { id: "R_fixture" });
+  });
+
+  it("retains intermediate PR sources across repeated interrupted commits", async () => {
+    updateWorkspace("ws_fixture", { prNumber: 28, prUrl: "https://github.com/former/widgets/pull/28" });
+    const save = vi.spyOn(projectDb, "saveGithubRemoteIdentities");
+    save.mockImplementationOnce(() => { throw new Error("native commit interrupted"); });
+    await expect(reconcile()).rejects.toBeDefined();
+    // PR discovery may confirm the first move before a second transfer.
+    updateWorkspace("ws_fixture", { prUrl: "https://github.com/current/renamed/pull/28" });
+    repository = { ...repository, owner: { login: "third" } };
+    save.mockImplementationOnce(() => { throw new Error("native commit interrupted again"); });
+    await expect(reconcile()).rejects.toBeDefined();
+    expect(git("remote", "get-url", "origin")).toBe("git@github.com:third/renamed.git");
+    closeZerosDb();
+    await reconcile();
+    expect(getWorkspaceById("ws_fixture")?.prUrl).toBe("https://github.com/third/renamed/pull/28");
+  });
+
+  it("retires an interrupted move after a deliberate unrelated remote replacement", async () => {
+    updateWorkspace("ws_fixture", { prNumber: 28, prUrl: "https://github.com/former/widgets/pull/28" });
+    vi.spyOn(projectDb, "saveGithubRemoteIdentities").mockImplementationOnce(() => { throw new Error("native commit interrupted"); });
+    await expect(reconcile()).rejects.toBeDefined();
+    git("remote", "set-url", "origin", "https://github.com/replacement/widgets.git");
+    repository = { id: 789, node_id: "R_replacement", owner: { login: "replacement" }, name: "widgets" };
+    await reconcile();
+    expect(getWorkspaceById("ws_fixture")?.prUrl).toBe("https://github.com/former/widgets/pull/28");
+    expect(project().originUrl).toBe("https://github.com/replacement/widgets.git");
+    expect(get).toHaveBeenLastCalledWith({ owner: "replacement", repo: "widgets" });
+    expect(graphql).not.toHaveBeenCalled();
+    expect(projectDb.githubRemoteIdentity(root, "origin", newUrl)).toBeNull();
   });
 
   it("does not carry a removed checkout's binding into an explicit re-add", async () => {

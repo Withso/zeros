@@ -91,6 +91,11 @@ describe("Zeros DB — migration ladder data safety (forward-only)", () => {
       expect(after).toEqual(before);
       expect(origin_revision).toBe(0);
       expect(db.prepare("SELECT * FROM github_repository_remotes").all()).toEqual([]);
+      db.prepare(`INSERT INTO github_repository_remotes
+        (repo_id, remote_name, remote_url, github_repository_id, github_node_id, owner, name)
+        VALUES (?, ?, ?, ?, ?, ?, ?)`)
+        .run("project", "origin", "git@github.com:former/widgets.git", "123", "R_fixture", "former", "widgets");
+      expect(db.prepare("SELECT pending_urls FROM github_repository_remotes").get()).toEqual({ pending_urls: "[]" });
     } finally { db.close(); }
   });
   it("adds reset context state without detaching existing provider conversations", () => {

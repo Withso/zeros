@@ -46,6 +46,13 @@
   Resetting it to zero makes later native corrections appear stale to the
   renderer. Both single and bulk restore paths have a subsequent-transfer
   regression in `github-repository-reconciliation.test.ts`.
+- A filesystem rename can survive a failed native commit while its original
+  PR-link source disappears from the checkout. Record verified source URLs
+  durably before the rename and retain all intermediate sources until metadata
+  commits. Recovery must use the saved repository ID, preserve unrelated
+  replacements, and notify when only PR links still need repair. Faults before
+  and after the rename, repeated interruptions, alias reuse and deliberate
+  replacement are covered in `github-repository-reconciliation.test.ts`.
 - Placement coverage does not require adding a missing cloud feature to a
   Local fix. Test the explicit cloud exclusion and retain the existing cloud
   regression. Keep broader cloud implementation separate when the user asks

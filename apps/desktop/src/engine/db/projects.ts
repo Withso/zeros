@@ -273,16 +273,43 @@ export interface GithubRemoteIdentity {
   nodeId: string;
   owner: string;
   repo: string;
+  /** Verified pre-rename URLs retained until native metadata commits. */
+  pendingUrls?: string[];
 }
 
-/** A manual change to the remote URL retires its previous identity binding. */
+/** A manual change retires the binding unless it is a verified pending move.
+ * Both sides of that move must resolve by ID if a process exits mid-commit. */
 export function githubRemoteIdentity(repoRoot: string, remote: string, url: string): GithubRemoteIdentity | null {
   const row = openZerosDb().prepare(`SELECT r.remote_name AS remote, r.remote_url AS url,
-    r.github_repository_id AS repositoryId, r.github_node_id AS nodeId, r.owner, r.name AS repo
+    r.github_repository_id AS repositoryId, r.github_node_id AS nodeId, r.owner, r.name AS repo,
+    r.pending_urls AS pendingUrls
     FROM github_repository_remotes r JOIN repos p ON p.id = r.repo_id
-    WHERE p.root_path = ? AND p.hidden = 0 AND r.remote_name = ? AND r.remote_url = ?`)
-    .get(canonicalRepoRoot(repoRoot), remote, url) as GithubRemoteIdentity | undefined;
-  return row ?? null;
+    WHERE p.root_path = ? AND p.hidden = 0 AND r.remote_name = ? AND
+      (r.remote_url = ? OR EXISTS (SELECT 1 FROM json_each(r.pending_urls) WHERE value = ?))`)
+    .get(canonicalRepoRoot(repoRoot), remote, url, url) as (Omit<GithubRemoteIdentity, "pendingUrls"> & { pendingUrls: string }) | undefined;
+  return row ? { ...row, pendingUrls: JSON.parse(row.pendingUrls) as string[] } : null;
+}
+
+function putGithubRemoteIdentities(db: ReturnType<typeof openZerosDb>, repoId: string, identities: GithubRemoteIdentity[]): void {
+  const put = db.prepare(`INSERT INTO github_repository_remotes
+    (repo_id, remote_name, remote_url, github_repository_id, github_node_id, owner, name, pending_urls)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(repo_id, remote_name) DO UPDATE SET
+    remote_url = excluded.remote_url, github_repository_id = excluded.github_repository_id,
+    github_node_id = excluded.github_node_id, owner = excluded.owner, name = excluded.name, pending_urls = excluded.pending_urls`);
+  for (const identity of identities) put.run(repoId, identity.remote, identity.url, identity.repositoryId,
+    identity.nodeId, identity.owner, identity.repo, JSON.stringify(identity.pendingUrls ?? []));
+}
+
+/** Write the verified move sources before renaming Git config. A failed final
+ * commit leaves this record available for a later ID-verified retry. */
+export function prepareGithubRemoteIdentities(owner: EngineProject, identities: GithubRemoteIdentity[]): boolean {
+  const db = openZerosDb();
+  return db.transaction(() => {
+    const current = projectForRoot(owner.repoRoot);
+    if (!current || current.canonicalId !== owner.canonicalId || current.originRevision !== owner.originRevision) return false;
+    putGithubRemoteIdentities(db, owner.id, identities);
+    return true;
+  })();
 }
 
 /** Called at the admitted Git-config commit, with no asynchronous work between
@@ -293,12 +320,7 @@ export function saveGithubRemoteIdentities(owner: EngineProject, identities: Git
   return db.transaction(() => {
     const current = projectForRoot(owner.repoRoot);
     if (!current || current.canonicalId !== owner.canonicalId || current.originRevision !== owner.originRevision) return null;
-    const put = db.prepare(`INSERT INTO github_repository_remotes
-      (repo_id, remote_name, remote_url, github_repository_id, github_node_id, owner, name)
-      VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(repo_id, remote_name) DO UPDATE SET
-      remote_url = excluded.remote_url, github_repository_id = excluded.github_repository_id,
-      github_node_id = excluded.github_node_id, owner = excluded.owner, name = excluded.name`);
-    for (const identity of identities) put.run(owner.id, identity.remote, identity.url, identity.repositoryId, identity.nodeId, identity.owner, identity.repo);
+    putGithubRemoteIdentities(db, owner.id, identities);
     if (current.originUrl !== originUrl) db.prepare(`UPDATE repos SET remote_url = ?, origin_revision = origin_revision + 1,
       updated_at = datetime('now') WHERE id = ?`).run(originUrl, owner.id);
     // PR numbers are repository-scoped. Only rewrite a link that names this
