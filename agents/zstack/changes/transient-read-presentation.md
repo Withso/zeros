@@ -38,3 +38,18 @@ Transient read presentation across desktop surfaces
 - Replay assertions need stable human labels. Formatting a component function
   into a parameterized test name includes its source, so a product fix changes
   the assertion identity and makes an otherwise valid replay unverified.
+- Browser fixtures must provide connection readiness and complete wire replies
+  together. A newly connected Files pane exposed an incomplete preview fixture;
+  use the response type to keep an empty result complete.
+- Simulated browser clocks survive navigation. Keep clock-controlled recovery
+  in a separate context from later pointer/layout tests. The serial run's two
+  Design failures reproduced with the leaked clock and passed with real time.
+  Every isolated page must retain the runner's uncaught-error listener; the
+  smoke runner regression covers both isolation and error collection.
+- Fixtures sharing an origin must establish their own persisted catalogs,
+  including backup keys. Seed an unrelated project before navigation to prove
+  that another fixture cannot change the editor's project choices.
+- Exercise both quiet recovery and persistent failure in browser smoke. Hold a
+  retry to observe intermediate DOM changes, and keep a failing backend down
+  until the explicit Retry instead of assuming an incidental second failure
+  cannot be followed by another legitimate revalidation.

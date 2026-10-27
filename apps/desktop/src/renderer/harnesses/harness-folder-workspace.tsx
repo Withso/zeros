@@ -7,6 +7,7 @@ import { createRoot } from "react-dom/client";
 import { RuntimeClient } from "../platform/bridge/ws-client";
 import { WorkspaceRuntimeClient } from "../platform/bridge/workspace-runtime-client";
 import { BridgeProvider } from "../platform/bridge/use-bridge";
+import type { FilesToCopyPreviewWire } from "../platform/bridge/workspace-bridge";
 import type { StatusResult } from "../platform/git";
 import type { SessionsActions } from "../features/agent/sessions-context";
 import type { AuthContextValue } from "../features/auth/auth-context";
@@ -237,6 +238,12 @@ const fixtureBridge = {
       result = { effective: {}, sources: {}, warnings: [] };
     if (message.op === "settings.read")
       result = { doc: {}, text: "", exists: false };
+    if (message.op === "filesToCopy.preview")
+      result = {
+        source: "default", rootPath: folder, patterns: [], files: [],
+        totalCount: 0, totalBytes: 0, truncated: false, trackedMatches: [],
+        candidates: [], warnings: [], complete: true,
+      } satisfies FilesToCopyPreviewWire;
     if (message.op === "git.status")
       result = {
         staged: [],

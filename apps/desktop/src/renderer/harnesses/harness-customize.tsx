@@ -29,6 +29,10 @@ const connectedServers = new Set<string>();
 
 if (!getSetting("customize:selection", null))
   setSetting("customize:selection", { category: "skills", provider: "zeros" });
+// Serial browser smoke shares an origin across fixtures. Establish this
+// fixture's catalog, including its backup, before adding its two projects.
+setSetting("projects-v1", []);
+setSetting("projects-v1-backup", []);
 upsertProject({ repoRoot: "/fixture/repo-a", name: "Repo A" });
 upsertProject({ repoRoot: "/fixture/repo-b", name: "Repo B" });
 const libraries = new Map<string, ExtensionEntry[]>();

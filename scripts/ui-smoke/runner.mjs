@@ -57,9 +57,9 @@ export async function runSmokeScenarios({
     const page = await newPage({ viewport: fixture.viewport });
     livePages.add(page);
     const consoleLines = [];
+    page.on("pageerror", (err) => pageErrors.push(err.message));
     if (fixture.page === "main") {
       page.on("console", (msg) => consoleLines.push(msg.text()));
-      page.on("pageerror", (err) => pageErrors.push(err.message));
     }
     if (fixture.navigation === "origin") {
       if (shard) await seedOrigin(page, harnessBase);
