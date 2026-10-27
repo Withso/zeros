@@ -102,7 +102,7 @@ images can be opened in Files.
 Files scenario, exercises gestures, clipboard PNGs, original downloads, playback,
 owner changes, stale reads, failure states and both themes. Adjacent clipboard,
 file-reader and bridge tests cover conversion cleanup, caps and compatibility.
-`pnpm smoke:file-media-electron` exercises production Electron/preload/Files
+`node scripts/smoke-file-media-electron.mjs` exercises production Electron/preload/Files
 with a valid sparse 200 MB video: playback, distant seeking, hidden retirement,
 PNG/frame copying and an exact-byte download. It uses the real Local reader and
 the standalone worker through a simulated cloud bridge, and verifies saved-image

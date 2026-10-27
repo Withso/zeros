@@ -46,6 +46,14 @@
   `as never` or a RuntimeClient cast, and supply the real execution identity;
   inherited WorkspaceRuntimeClient fixtures already own it → browser harness
   corrections and the full UI smoke, without weakening production fencing.
+- Native range tests passed on Node 24 but failed on CI's Node 22 → one promise
+  microtask did not establish that ReadableStream had requested the next packet
+  → await the observed request count before inspecting, replying or cancelling
+  → Electron `file-media-stream.test.ts`, reproduced on Node 22.23.3.
+- CodeQL flagged a replacement-file fixture that wrote through a checked path
+  → renaming the old file does not make a later pathname write exclusive →
+  create the replacement exclusively and write through its held descriptor
+  → engine `file-media-stream.test.ts`, preserving the replacement rejection.
 
 The verification skill now requires real native range/seek evidence and
 checkpoint/source-owner tests before recovery reclamation. Linux Electron

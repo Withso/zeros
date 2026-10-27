@@ -57,7 +57,10 @@ it.each([false, true])("reads only the requested bytes and fences replaced media
   expect(readAll).not.toHaveBeenCalled();
   await expect(readWorkspaceMediaRange(root, { ...args, length: 1024 * 1024 + 1 }, remote)).rejects.toThrow();
   await expect(readWorkspaceMediaRange(root, { ...args, offset: 200_000_000 }, remote)).resolves.toEqual({ bytes: 0, base64: "" });
-  fs.renameSync(target, path.join(root, "old.mp4")); fs.writeFileSync(target, "replacement");
+  fs.renameSync(target, path.join(root, "old.mp4"));
+  const replacement = fs.openSync(target, "wx", 0o600);
+  try { fs.writeFileSync(replacement, "replacement"); }
+  finally { fs.closeSync(replacement); }
   await expect(readWorkspaceMediaRange(root, args, remote)).rejects.toThrow(/changed/);
   await expect(readWorkspaceMediaRange(root, { ...args, path: "../outside.mp4" }, remote)).rejects.toThrow();
   fs.mkdirSync(path.join(root, ".ssh")); fs.writeFileSync(path.join(root, ".ssh", "private.mp4"), "secret");

@@ -7,25 +7,31 @@ function fixture(bytes = 200_000_000) {
   const streams = new FileMediaStreams(), send = vi.fn();
   const sourceId = randomUUID();
   const url = streams.register(1, { sourceId, bytes, mimeType: "video/mp4" }, send);
-  return { streams, send, sourceId, url };
+  const requested = async (index: number) => {
+    // ReadableStream pull scheduling differs between supported Node versions.
+    // Observe demand before replying instead of counting promise microtasks.
+    await vi.waitFor(() => expect(send).toHaveBeenCalledTimes(index + 1));
+    return send.mock.calls[index][0];
+  };
+  return { streams, send, sourceId, url, requested };
 }
 it("streams a seek on demand in at most 1 MiB reads, without prefetching the body", async () => {
-  const { streams, send, url } = fixture();
+  const { streams, send, url, requested } = fixture();
   const response = streams.response(new Request(url, { headers: { Range: "bytes=180000000-181048579" } }));
   expect(response.status).toBe(206);
   expect(response.headers.get("content-range")).toBe("bytes 180000000-181048579/200000000");
   expect(send).not.toHaveBeenCalled();
   const reader = response.body!.getReader();
   for (let index = 0; index < 4; index++) {
-    const read = reader.read(); await Promise.resolve();
-    const request = send.mock.calls[index][0];
+    const read = reader.read();
+    const request = await requested(index);
     expect(request).toMatchObject({ offset: 180000000 + index * 256 * 1024, length: 256 * 1024 });
     streams.reply(1, { requestId: request.requestId, base64: Buffer.alloc(256 * 1024, 7).toString("base64") });
     expect((await read).value?.length).toBe(256 * 1024);
     expect(send).toHaveBeenCalledTimes(index + 1);
   }
-  const second = reader.read(); await Promise.resolve();
-  const last = send.mock.calls[4][0];
+  const second = reader.read();
+  const last = await requested(4);
   expect(last).toMatchObject({ offset: 181048576, length: 4 });
   streams.reply(1, { requestId: last.requestId, base64: "AQIDBA==" });
   expect((await second).value).toEqual(Buffer.from([1, 2, 3, 4]));
@@ -51,20 +57,21 @@ it("preserves the full advertised range so Chromium can seek past its buffered b
 });
 it("refuses foreign replies, malformed capabilities and oversized registrations", async () => {
   vi.useFakeTimers();
-  const { streams, url, sourceId, send } = fixture(4);
+  const { streams, url, sourceId, send, requested } = fixture(4);
   expect(() => streams.register(2, { sourceId, bytes: 200_000_001, mimeType: "video/mp4" }, send)).toThrow();
   expect(streams.response(new Request(`${url}?other=1`)).status).toBe(404);
   expect(streams.owns(2, url)).toBe(false);
   const body = streams.response(new Request(url)).body!.getReader();
-  const read = body.read(); await Promise.resolve();
-  streams.reply(2, { requestId: send.mock.calls[0][0].requestId, base64: "AQIDBA==" });
+  const read = body.read();
+  const request = await requested(0);
+  streams.reply(2, { requestId: request.requestId, base64: "AQIDBA==" });
   const rejected = expect(read).rejects.toThrow(/timed out/);
   await vi.advanceTimersByTimeAsync(30_000); await rejected;
 });
 it("closing a source cancels a pending read and retires idle stream capacity", async () => {
-  const { streams, url, sourceId, send } = fixture();
+  const { streams, url, sourceId, send, requested } = fixture();
   const reader = streams.response(new Request(url)).body!.getReader();
-  const read = reader.read(); await Promise.resolve();
+  const read = reader.read(); await requested(0);
   const rejected = expect(read).rejects.toThrow(/cancel/);
   streams.close(1, sourceId); await rejected;
   expect(streams.response(new Request(url)).status).toBe(404);
@@ -75,10 +82,10 @@ it("closing a source cancels a pending read and retires idle stream capacity", a
   }
 });
 it("bounds upstream reads during rapid seek cancellation until their replies drain", async () => {
-  const { streams, url, send } = fixture();
+  const { streams, url, send, requested } = fixture();
   for (let index = 0; index < 3; index++) {
     const reader = streams.response(new Request(url, { headers: { range: `bytes=${index}-` } })).body!.getReader();
-    const read = reader.read(); await Promise.resolve();
+    const read = reader.read(); await requested(index);
     await reader.cancel(); await read;
   }
   expect(send).toHaveBeenCalledTimes(3);
@@ -87,7 +94,7 @@ it("bounds upstream reads during rapid seek cancellation until their replies dra
   const reader = response.body!.getReader(), read = reader.read(); await Promise.resolve();
   expect(send).toHaveBeenCalledTimes(3);
   streams.reply(1, { requestId: send.mock.calls[0][0].requestId, error: true });
-  await vi.waitFor(() => expect(send).toHaveBeenCalledTimes(4));
+  await requested(3);
   await reader.cancel(); await read;
   for (const [request] of send.mock.calls) streams.reply(1, { requestId: request.requestId, error: true });
 });
