@@ -8,6 +8,7 @@ import {
   resetDesignWorkspaceUiForTests,
   useDesignWorkspaceUiStore,
   bindDesignWorkspacePages,
+  designSelectionUnchangedSince,
 } from "../state/design-workspace-ui";
 
 describe("design workspace UI memory", () => {
@@ -21,6 +22,25 @@ describe("design workspace UI memory", () => {
   beforeEach(() => {
     resetDesignWorkspaceUiForTests();
     vi.restoreAllMocks();
+  });
+
+  it("treats any explicit selection made since a snapshot as a newer choice, even back to the same target", () => {
+    // A deferred automatic selection (a newly created frame) must not override
+    // what the person chose meanwhile, including choosing the same layer again.
+    const store = useDesignWorkspaceUiStore.getState();
+    store.setSelection("ws", "home.html", "heading", undefined, {});
+    const before = designWorkspaceView("ws");
+    expect(designSelectionUnchangedSince("ws", before)).toBe(true);
+    store.setSelection("ws", "pricing.html", null, undefined, { frameSelected: true });
+    store.setSelection("ws", "home.html", "heading", undefined, {});
+    expect(designWorkspaceView("ws").selectedNodeId).toBe(before.selectedNodeId);
+    expect(designSelectionUnchangedSince("ws", before)).toBe(false);
+    // Background republication of the same selection is not a new choice.
+    const settled = designWorkspaceView("ws");
+    store.setSelection("ws", "home.html", "heading", undefined, { explicit: false });
+    expect(designSelectionUnchangedSince("ws", settled)).toBe(true);
+    store.setSelectedFrame("ws", null);
+    expect(designSelectionUnchangedSince("ws", settled)).toBe(false);
   });
 
   it("drops retired source-view flags without resetting saved navigation", () => {

@@ -30,6 +30,13 @@ const layersSource = readFileSync(
   ),
   "utf8",
 );
+const layerRowsSource = readFileSync(
+  resolve(
+    process.cwd(),
+    "apps/desktop/src/renderer/features/design-workspace/design-layer-panel-rows.ts",
+  ),
+  "utf8",
+);
 const disclosureSource = readFileSync(
   resolve(
     process.cwd(),
@@ -652,9 +659,11 @@ describe("design workspace interaction wiring", () => {
     expect(layersSource).toContain("const DESIGN_LAYER_INDENT = 16;");
     expect(layersSource).toContain("DESIGN_LAYER_DISCLOSURE_SPACER");
     // Disclosure follows the live tree, else the engine's layer count (which
-    // excludes a seeded frame root); see designFrameRowDiscloses.
-    expect(layersSource).toContain(
-      "discloses: designFrameRowDiscloses(tree, frame)",
+    // excludes a seeded frame root); see designFrameRowDiscloses. A frame
+    // revalidating its source answers from its last confirmed generation.
+    expect(layersSource).toContain("designLayerPanelRows({ frames, treesByFile, disclosures })");
+    expect(layerRowsSource).toContain(
+      "const discloses = designFrameRowDiscloses(tree, presented ?? frame);",
     );
     const layerRulesStart = uiSource.indexOf(".zd-design-layer-row {");
     const layerRulesEnd = uiSource.indexOf(".zd-design-theme-mode-active {");
@@ -699,8 +708,9 @@ describe("design workspace interaction wiring", () => {
     // One row list interleaves frame rows, their layers, and pending frames, so
     // virtualization, keyboard travel, and the roving tab stop keep working
     // across frame boundaries.
-    expect(layersSource).toContain("type DesignPanelRow =");
-    expect(layersSource).toContain('kind: "pending"');
+    expect(layerRowsSource).toContain("export type DesignPanelRow =");
+    expect(layerRowsSource).toContain('kind: "pending"');
+    expect(layersSource).toContain('row.kind === "pending"');
     expect(layersSource).toContain("data-design-panel-row={row.key}");
     expect(layersSource).toContain(
       "panelRows.length * DESIGN_LAYER_ROW_HEIGHT",
@@ -724,6 +734,20 @@ describe("design workspace interaction wiring", () => {
     // An open frame is a live-runtime demand: its tree is the only thing that
     // can fill those rows, so it must not wait behind the viewport ranking.
     expect(source).toContain("requiredFiles: layersOpenFiles");
+  });
+
+  it("warms the editor of the frame the pointer or Layers focus rests on", () => {
+    // The likely next selection boots before the click, so selecting it
+    // paints Layers and the full inspector instead of a fallback view.
+    expect(source).toContain("const intentFile = useDesignFrameIntent(active ? workspaceId : null);");
+    expect(source).toContain("...(intentFile && !currentPlayback ? [intentFile] : []),");
+    expect(source).toContain("onPointerOver={(event) => {");
+    expect(source).toContain(`target?.closest("[data-design-frame-chrome]")`);
+    expect(source).toContain("if (!active && workspaceId) clearDesignFrameIntent(workspaceId);");
+    // A selected frame is never noted again, so hovering its rows cannot
+    // publish and clear intent (and re-render the canvas) on every row.
+    expect(layersSource).toContain("if (workspaceId && !selectedTargets?.some((target: DesignSelectionTarget) => target.frame === file))");
+    expect(layersSource).toContain("onPointerEnter={() => noteFrameIntent(frame.file)}");
   });
 
   it("reads the Option measure modifier outside the canvas focus scope", () => {

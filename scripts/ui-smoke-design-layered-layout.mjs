@@ -106,6 +106,41 @@ export async function runDesignLayeredLayoutSmoke({ page, check }) {
     .poll(() => root.evaluate((element) => getComputedStyle(element).display))
     .toBe("grid");
   await composition();
+
+  // Undo pressed while the latest layout edit is still saving must not paint
+  // a predicted inverse under that edit: the edit would record the predicted
+  // pixels as its baseline and Undo would land on an older layout.
+  await layout.getByRole("button", { name: "Auto layout: None", exact: true }).click();
+  await expect
+    .poll(() => root.evaluate((element) => getComputedStyle(element).display))
+    .toBe("block");
+  await composition();
+  await page.waitForTimeout(800);
+  await page.evaluate(() => { window.__zerosHarnessStyleDelay = 400; });
+  await layout.getByRole("button", { name: "Auto layout: Vertical", exact: true }).click();
+  await expect
+    .poll(() => root.evaluate((element) => getComputedStyle(element).display))
+    .toBe("flex");
+  await frameRow.focus();
+  await page.keyboard.press("ControlOrMeta+z");
+  await expect
+    .poll(() => root.evaluate((element) => getComputedStyle(element).display))
+    .toBe("block");
+  await page.waitForTimeout(600);
+  check(
+    "Undo pressed while a layout edit is still saving restores that edit's own baseline",
+    (await root.evaluate((element) => getComputedStyle(element).display)) === "block",
+  );
+  await page.evaluate(() => { window.__zerosHarnessStyleDelay = 50; });
+  await page.keyboard.press("ControlOrMeta+Shift+z");
+  await expect
+    .poll(() => root.evaluate((element) => getComputedStyle(element).display))
+    .toBe("flex");
+  await layout.getByRole("button", { name: "Auto layout: Grid", exact: true }).click();
+  await expect
+    .poll(() => root.evaluate((element) => getComputedStyle(element).display))
+    .toBe("grid");
+  await composition();
   check(
     "Undo and Redo restore the composition through the real source history lane",
     true,

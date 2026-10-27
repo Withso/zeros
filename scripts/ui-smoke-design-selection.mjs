@@ -26,6 +26,49 @@ export async function runDesignDoubleClickSelectionSmoke({ page, check }) {
   );
   const heading = runtime.locator('[data-oid="home-heading"]');
   await page.locator('[data-design-frame-row="home.html"]').click();
+  // A layer whose details were never read selects at once and the inspector
+  // names that exact layer at once; it never reads "Nothing selected" or
+  // shows another layer's properties while the readback is pending.
+  const coldRow = page.locator("[data-design-sidebar-panel] [data-design-layer-id]").nth(9);
+  const coldId = await coldRow.getAttribute("data-design-layer-id");
+  await page.evaluate(() => {
+    const probe = { headers: [], done: false };
+    window.__designColdLayer = probe;
+    // A busy runtime: its node readbacks answer 150 ms late.
+    const post = MessagePort.prototype.postMessage;
+    probe.restore = () => { MessagePort.prototype.postMessage = post; };
+    MessagePort.prototype.postMessage = function (message, ...rest) {
+      if (message?.type === "request" && message.method === "getNodeDetails") {
+        setTimeout(() => post.call(this, message, ...rest), 150);
+        return;
+      }
+      return post.call(this, message, ...rest);
+    };
+    const sample = () => {
+      const header = document.querySelector("[data-design-inspector-header]")?.textContent?.trim();
+      if (probe.headers.at(-1) !== header) probe.headers.push(header);
+      if (!probe.done) requestAnimationFrame(sample);
+    };
+    requestAnimationFrame(sample);
+  });
+  await coldRow.click();
+  await expect(page.locator(`[data-design-sidebar-panel] [data-design-layer-id="${coldId}"][aria-selected="true"]`)).toHaveCount(1);
+  await page.waitForTimeout(300);
+  const cold = await page.evaluate(() => {
+    const probe = window.__designColdLayer;
+    probe.done = true;
+    probe.restore();
+    return probe.headers;
+  });
+  // The frame row was selected before the click ("Frame"); afterwards only the
+  // clicked layer's own label may appear.
+  const afterClick = cold.slice(cold.indexOf("Frame") + 1);
+  check(
+    "an uncached layer selection names that layer at once, never Nothing selected",
+    !cold.includes("Nothing selected") && new Set(afterClick).size <= 1,
+    JSON.stringify(cold),
+  );
+  await page.locator('[data-design-frame-row="home.html"]').click();
   const box = await designFrameElementBox(runtime.owner(), heading);
   const doubleClick = () =>
     page.mouse.dblclick(box.x + box.width / 2, box.y + box.height / 2);

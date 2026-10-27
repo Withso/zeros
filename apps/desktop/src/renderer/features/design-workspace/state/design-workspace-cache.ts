@@ -52,7 +52,7 @@ import {
   type DesignWorkspaceSnapshotWire,
 } from "../../../platform/git";
 import type { DesignTransaction } from "@zeros/design-core";
-import type { DesignRuntimeGenerationPatch } from "@zeros/protocol/design-runtime";
+import type { DesignRuntimeGenerationPatch, DesignRuntimeNodeInsert } from "@zeros/protocol/design-runtime";
 import { KeyedAsyncCache } from "../../../shared/lib/keyed-async-cache";
 import { DesignFramePreparation, readDesignNavigation } from "./design-workspace-preparation";
 import { preparedDesignSnapshot } from "./design-frame-view";
@@ -248,14 +248,30 @@ export async function prepareDesignMovementFrame(
   return current;
 }
 
+/** Edits (not history steps) queued or running in each workspace's lane. An
+ * edit still saving has not recorded its history prediction yet. */
+const pendingEditCountByWorkspace = new Map<string, number>();
+/** History steps whose prediction waits inside the lane. Later steps wait
+ * behind them, so predictions advance the cursor in submission order. */
+const deferredPredictionCountByWorkspace = new Map<string, number>();
+
+function adjustCount(counts: Map<string, number>, key: string, delta: number): void {
+  const next = (counts.get(key) ?? 0) + delta;
+  if (next > 0) counts.set(key, next);
+  else counts.delete(key);
+}
+
 async function runLocalDesignMutation<T>(
   workspaceId: string,
   mutation: () => Promise<T>,
+  kind: "edit" | "history" = "edit",
+  recover?: () => void,
 ): Promise<T> {
   const directoryId = useDesignWorkspaceUiStore.getState().byWorkspace[workspaceId]?.directoryId;
   const finishMutation = beginLocalDesignMutation(workspaceId);
+  if (kind === "edit") adjustCount(pendingEditCountByWorkspace, workspaceId, 1);
   const previous = localMutationTailByWorkspace.get(workspaceId);
-  const result = (previous ?? Promise.resolve())
+  const attempt = (previous ?? Promise.resolve())
     .catch(() => undefined)
     .then(() => {
       if (directoryId && useDesignWorkspaceUiStore.getState().byWorkspace[workspaceId]?.directoryId !== directoryId) {
@@ -263,6 +279,14 @@ async function runLocalDesignMutation<T>(
       }
       return mutation();
     });
+  // Recovery is part of the failed operation, so the next queued step never
+  // starts from what that operation painted or predicted.
+  const result = recover
+    ? attempt.catch((error: unknown) => {
+        recover();
+        throw error;
+      })
+    : attempt;
   const tail = result.then(
     () => undefined,
     () => undefined,
@@ -271,6 +295,7 @@ async function runLocalDesignMutation<T>(
   try {
     return await result;
   } finally {
+    if (kind === "edit") adjustCount(pendingEditCountByWorkspace, workspaceId, -1);
     finishMutation();
     if (localMutationTailByWorkspace.get(workspaceId) === tail) {
       localMutationTailByWorkspace.delete(workspaceId);
@@ -1207,10 +1232,27 @@ export async function fetchDesignWorkspaceSnapshot(
   workspaceId: string,
   authoritative = false,
 ): Promise<DesignWorkspaceSnapshotWire> {
-  const next = await executeDesignReadWithTransientRetry(() =>
-    authoritative ? designSnapshot(workspaceId) : readDesignNavigation(workspaceId, designWorkspaceSnapshotCache.peekSnapshot(workspaceId).data)
+  const started = designWorkspaceSnapshotCache.peekSnapshot(workspaceId);
+  const previous = started.data;
+  let next = await executeDesignReadWithTransientRetry(() =>
+    authoritative ? designSnapshot(workspaceId) : readDesignNavigation(workspaceId, previous)
       .then((navigation) => navigation ?? designSnapshot(workspaceId)),
   );
+  if (previous?.frames.length && next.preparation && next.directoryId === previous.directoryId &&
+    next.lint.workspacePath === previous.lint.workspacePath) {
+    next = await designFramePreparation.revalidate(workspaceId, next, () => {
+      const latest = designWorkspaceSnapshotCache.peekSnapshot(workspaceId);
+      return latest.data === previous && latest.invalidationVersion === started.invalidationVersion && !hasPendingDesignEdits(workspaceId);
+    });
+  }
+  const mutation = pendingLocalMutationByWorkspace.get(workspaceId);
+  if (!authoritative && mutation && previous) {
+    // A read that straddled an edit cannot demote the prepared surface while
+    // its mutation receipt is still pending. That receipt (or one deferred
+    // revalidation after a failed edit) owns the replacement generation.
+    mutation.deferredRefresh = true;
+    return previous;
+  }
   const stable = stabilizeDesignWorkspaceSnapshot(
     designWorkspaceSnapshotCache.peekSnapshot(workspaceId).data,
     applyRetainedRuntimeAuditViolations(workspaceId, next),
@@ -1853,11 +1895,19 @@ export function applyDesignTransactionCached(
   workspaceId: string,
   frame: string,
   transaction: DesignTransaction,
+  options?: {
+    /** Structured twins of this transaction's `node.set-html` appends. When
+     * every append has one, the live runtime adopts the new generation in
+     * place instead of reloading its document. */
+    runtimeInserts?: readonly DesignRuntimeNodeInsert[];
+  },
 ): Promise<DesignApiMutationReplyWire> {
   return applyPreparedDesignTransactionCached(
     workspaceId,
     frame,
     async () => transaction,
+    undefined,
+    options?.runtimeInserts,
   );
 }
 
@@ -1866,6 +1916,7 @@ async function applyPreparedDesignTransactionCached(
   frame: string,
   prepare: () => Promise<DesignTransaction>,
   measured?: DesignMeasuredMovement,
+  runtimeInserts?: readonly DesignRuntimeNodeInsert[],
 ): Promise<DesignApiMutationReplyWire> {
   return runLocalDesignMutation(workspaceId, async () => {
     const assertCurrent = () => {
@@ -1912,7 +1963,7 @@ async function applyPreparedDesignTransactionCached(
           previousSourceVersion,
           nextSourceVersion,
         );
-        const adoption = transactionRuntimeAdoption(rebasedTransaction);
+        const adoption = transactionRuntimeAdoption(rebasedTransaction, runtimeInserts);
         if (adoption && previousSourceVersion) {
           const adopted = await adoptDesignStyleGeneration(
             workspaceId,
@@ -1982,7 +2033,24 @@ async function applyPreparedDesignTransactionCached(
   });
 }
 
-function transactionRuntimeAdoption(transaction: DesignTransaction): {
+/** An append is adoptable only through the structured insert its author
+ * supplied: the same parent, the end position the engine writes, and the
+ * exact `data-oid` it carries. Markup is never re-parsed here. */
+function adoptableInsert(
+  operation: DesignTransaction["operations"][number],
+  runtimeInserts: readonly DesignRuntimeNodeInsert[] | undefined,
+): DesignRuntimeNodeInsert | null {
+  if (operation.type !== "node.set-html" || operation.mode !== "append") return null;
+  const insert = runtimeInserts?.find((candidate) => candidate.parentId === operation.nodeId &&
+    candidate.beforeId === null &&
+    operation.html === `<div data-oid="${candidate.nodeId}" style="${candidate.style}"></div>`);
+  return insert ?? null;
+}
+
+function transactionRuntimeAdoption(
+  transaction: DesignTransaction,
+  runtimeInserts?: readonly DesignRuntimeNodeInsert[],
+): {
   styleUpdates: Array<{
     nodeId: string;
     styles: Record<string, string | null>;
@@ -1997,16 +2065,23 @@ function transactionRuntimeAdoption(transaction: DesignTransaction): {
         operation.type !== "node.set-styles" &&
         operation.type !== "node.move" &&
         operation.type !== "frame.set-geometry" &&
-        operation.type !== "keyframes.set",
+        operation.type !== "keyframes.set" &&
+        !adoptableInsert(operation, runtimeInserts),
     )
   ) {
     return null;
   }
+  const inserts: DesignRuntimeNodeInsert[] = [];
   const moves: NonNullable<DesignRuntimeGenerationPatch["moves"]> = [];
   const stylesByNode = new Map<string, Record<string, string | null>>();
   const keyframes: NonNullable<DesignRuntimeGenerationPatch["keyframes"]> = [];
   for (const operation of transaction.operations) {
     if (operation.type === "frame.set-geometry") continue;
+    const insert = adoptableInsert(operation, runtimeInserts);
+    if (insert) {
+      inserts.push(insert);
+      continue;
+    }
     if (operation.type === "node.move") {
       moves.push({
         nodeId: operation.nodeId,
@@ -2037,15 +2112,16 @@ function transactionRuntimeAdoption(transaction: DesignTransaction): {
     nodeId,
     styles,
   }));
-  if (styleUpdates.length === 0 && keyframes.length === 0 && moves.length === 0)
+  if (styleUpdates.length === 0 && keyframes.length === 0 && moves.length === 0 && inserts.length === 0)
     return null;
   return {
     styleUpdates,
-    ...(keyframes.length > 0 || moves.length > 0
+    ...(keyframes.length > 0 || moves.length > 0 || inserts.length > 0
       ? {
           patch: {
             ...(keyframes.length ? { keyframes } : {}),
             ...(moves.length ? { moves } : {}),
+            ...(inserts.length ? { inserts } : {}),
           },
         }
       : {}),
@@ -2079,6 +2155,8 @@ async function adoptDesignStyleGeneration(
   }
   const runtime = designFrameRuntime(workspaceId, frame);
   if (!runtime || runtime.sourceVersion !== previousSourceVersion) return false;
+  // An older runtime would ignore inserts it cannot adopt; reload instead.
+  if (patch?.inserts?.length && !runtime.supports("previewInsert")) return false;
   try {
     const adopted = patch
       ? await runtime.commitStyles(updates, nextSourceVersion, patch)
@@ -2158,19 +2236,50 @@ export async function applyDesignHistoryCached(
   frame: string | null,
   direction: "undo" | "redo",
 ): Promise<DesignApiMutationReplyWire> {
-  const prediction = historyPreview.take(
-    workspaceId,
-    historyStateKey(
-      designWorkspaceSnapshotCache.peekSnapshot(workspaceId).data,
-    ),
-    direction,
-  );
-  if (prediction) {
+  const predict = () => {
+    const next = historyPreview.take(
+      workspaceId,
+      historyStateKey(
+        designWorkspaceSnapshotCache.peekSnapshot(workspaceId).data,
+      ),
+      direction,
+    );
+    if (next) {
+      const runtime = designFrameRuntime(workspaceId, next.frame);
+      if (runtime?.supports("restoreGeneration"))
+        void runtime.restoreGeneration(next.target, false).catch(() => {});
+    }
+    return next;
+  };
+  // An edit still saving will adopt its generation on top of whatever is
+  // painted; a predicted inverse painted first would be recorded as that
+  // edit's baseline and undone to the wrong state. Predict once earlier edits
+  // have landed, inside the lane, still ahead of this history round trip.
+  const afterPendingEdits =
+    pendingEditCountByWorkspace.has(workspaceId) ||
+    deferredPredictionCountByWorkspace.has(workspaceId);
+  let awaitingPrediction = afterPendingEdits;
+  if (awaitingPrediction) adjustCount(deferredPredictionCountByWorkspace, workspaceId, 1);
+  const settlePrediction = () => {
+    if (!awaitingPrediction) return;
+    awaitingPrediction = false;
+    adjustCount(deferredPredictionCountByWorkspace, workspaceId, -1);
+  };
+  let prediction = afterPendingEdits ? null : predict();
+  // Port order puts this repaint ahead of any later step's runtime request.
+  const recover = () => {
+    settlePrediction();
+    historyPreview.clear(workspaceId);
+    if (!prediction) return;
     const runtime = designFrameRuntime(workspaceId, prediction.frame);
     if (runtime?.supports("restoreGeneration"))
-      void runtime.restoreGeneration(prediction.target, false).catch(() => {});
-  }
+      void runtime.restoreGeneration(runtime.sourceVersion, false).catch(() => {});
+  };
   return runLocalDesignMutation(workspaceId, async () => {
+    if (awaitingPrediction) {
+      prediction = predict();
+      settlePrediction();
+    }
     const previousSourceVersions = new Map(
       (
         designWorkspaceSnapshotCache.peekSnapshot(workspaceId).data?.frames ??
@@ -2278,17 +2387,7 @@ export async function applyDesignHistoryCached(
     }
     if (!result.snapshot) invalidateWorkspaceDesignFoundations(workspaceId);
     return result;
-  }).catch(async (error) => {
-    historyPreview.clear(workspaceId);
-    if (prediction) {
-      const runtime = designFrameRuntime(workspaceId, prediction.frame);
-      if (runtime?.supports("restoreGeneration"))
-        await runtime
-          .restoreGeneration(runtime.sourceVersion, false)
-          .catch(() => {});
-    }
-    throw error;
-  });
+  }, "history", recover);
 }
 
 /** Test-only reset for exact-key/reference-stability coverage. */
@@ -2298,6 +2397,8 @@ export function resetDesignWorkspaceCacheForTests(): void {
   for (const cancel of pendingAdoptedSettlementByFrame.values()) cancel();
   pendingAdoptedSettlementByFrame.clear();
   pendingLocalMutationByWorkspace.clear();
+  pendingEditCountByWorkspace.clear();
+  deferredPredictionCountByWorkspace.clear();
   localMutationTailByWorkspace.clear();
   localFrameGenerationByOwner.clear();
   localTokenGenerationByWorkspace.clear();

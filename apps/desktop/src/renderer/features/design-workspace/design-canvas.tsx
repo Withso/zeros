@@ -54,7 +54,7 @@ import {
 
 import { useWorkbenchStatusSource } from "../../shell/workbench/tab-status";
 import { retainDesignResource } from "./state/design-resource-counters";
-import { designFrameRuntime } from "../../platform/bridge/design-frame-runtime";
+import { designFrameRuntime, type DesignFrameRuntimeConnection } from "../../platform/bridge/design-frame-runtime";
 import {
   type DesignCanvasFrameWire,
   type DesignFrameGeometryWire,
@@ -130,7 +130,7 @@ import {
 } from "./design-effect-values";
 import {
   canInsertDesignFrame,
-  designFrameInsertionOperations,
+  designFrameInsertion,
 } from "./design-frame-insertion";
 import {
   createDesignGestureLoop,
@@ -207,7 +207,8 @@ import {
   publishDesignLayoutToolsLive,
   releaseDesignLayoutToolsLive,
 } from "./state/design-layout-tools-live";
-import { useDesignRuntimeStore } from "./state/design-runtime-store";
+import { useDesignRuntimeStore, waitForDesignRuntimeFrame } from "./state/design-runtime-store";
+import { clearDesignFrameIntent, noteDesignFrameIntent, primeDesignFrameIntent, useDesignFrameIntent } from "./state/design-frame-intent";
 import { useDesignFrameResidency } from "./state/use-design-frame-residency";
 import { designFrameViews, isPreparedDesignFrame, type DesignFrameView } from "./state/design-frame-view";
 import { useDesignFramePreparation } from "./state/use-design-frame-preparation";
@@ -263,6 +264,7 @@ import {
   captureDesignPageOwner,
   useDesignWorkspaceUiStore,
   useDesignWorkspaceView,
+  designSelectionUnchangedSince,
 } from "./state/design-workspace-ui";
 import { useDesignFoundation } from "./state/use-design-foundation";
 
@@ -568,7 +570,19 @@ export function DesignCanvas({
       });
     }),
   );
-  const selectionRuntimeFrames = useDesignRuntimeStore(state => workspaceId ? state.byWorkspace[workspaceId]?.frames : undefined);
+  // Only the secondary targets' own readbacks: hover reads, screenshots and
+  // other frames' snapshots must not re-render the whole canvas.
+  const secondaryTargetDetails = useDesignRuntimeStore(useShallow((state) => {
+    const frames = workspaceId ? state.byWorkspace[workspaceId]?.frames : undefined;
+    const details: Record<string, DesignRuntimeNodeDetails> = {};
+    if (!frames) return details;
+    for (const target of view.selectedTargets) {
+      if (!target.nodeId) continue;
+      const value = frames[target.frame]?.detailsByNode[target.nodeId];
+      if (value) details[`${target.frame}\u0000${target.nodeId}`] = value;
+    }
+    return details;
+  }));
   const selectedRuntimeTree = useDesignRuntimeStore((state) => {
     if (!workspaceId || !selectedFrame) return EMPTY_DESIGN_TREE;
     return (
@@ -918,8 +932,11 @@ export function DesignCanvas({
       : null;
   const publishMotionDraft = useCallback(
     (draft: DesignMotionTimelineDraft | null) => {
+      // No draft reads the same for every owner; a closed timeline switching
+      // selection must not re-render the canvas to say so again.
       setMotionOverlayState((current) =>
-        current.owner === motionOverlayOwner && current.draft === draft
+        (current.owner === motionOverlayOwner || (draft === null && current.draft === null)) &&
+        current.draft === draft
           ? current
           : {
               owner: motionOverlayOwner,
@@ -1194,6 +1211,19 @@ export function DesignCanvas({
     paintNestTarget(file);
     setNestLiveFile(file);
   }, [paintNestTarget]);
+  // The frame whose title or Layers row the pointer (or focus) rests on is the
+  // likely next selection: boot its editor now so the click paints ready
+  // Layers and inspector data. One latest frame, ranked with explicit demand.
+  const intentFile = useDesignFrameIntent(active ? workspaceId : null);
+  useEffect(() => {
+    if (!active && workspaceId) clearDesignFrameIntent(workspaceId);
+  }, [active, workspaceId]);
+  // Selecting the frame fulfils the intent; selection demand owns it now, and
+  // clearing the selection later must retire an editor nothing else needs.
+  useEffect(() => {
+    if (workspaceId && intentFile && view.selectedTargets.some((target) => target.frame === intentFile))
+      clearDesignFrameIntent(workspaceId);
+  }, [intentFile, view.selectedTargets, workspaceId]);
   const layersOpenFiles = useMemo(
     () => [
       ...(currentPlayback ? [currentPlayback.file] : []),
@@ -1202,8 +1232,9 @@ export function DesignCanvas({
         .map(([file]) => file),
       ...agentDraftFiles,
       ...(nestLiveFile ? [nestLiveFile] : []),
+      ...(intentFile && !currentPlayback ? [intentFile] : []),
     ],
-    [agentDraftFiles, currentPlayback, layerDisclosures, nestLiveFile, view.layersVisible],
+    [agentDraftFiles, currentPlayback, intentFile, layerDisclosures, nestLiveFile, view.layersVisible],
   );
   // Saved pictures of this directory's frames. A frame painted no larger
   // than its picture shows the picture instead of running its document.
@@ -1651,12 +1682,17 @@ export function DesignCanvas({
 
   /** Frame creation returns the aggregate snapshot, avoiding a follow-up read.
    * Drawn geometry is authored in that same mutation, so no default-size frame
-   * can flash before a second resize write. */
+   * can flash before a second resize write. The new frame's editor boots at
+   * once and the frame is selected when it reports (bounded), so the
+   * inspector moves straight to its full properties; the drawn rectangle
+   * covers the canvas until the frame paints. */
   const createFrame = useCallback(
     async (geometry?: DesignFrameGeometryWire) => {
       if (!workspaceId || creatingFrameRef.current) return null;
       creatingFrameRef.current = true;
       setCreatingFrame(true);
+      const selectionBefore = designWorkspaceView(workspaceId);
+      let created: DesignCanvasFrameWire | null = null;
       try {
         const result = await createDesignFrameAndRefresh(
           workspaceId,
@@ -1665,15 +1701,10 @@ export function DesignCanvas({
           undefined,
           canvasPageOwner?.pageId,
         );
-        const created = result.snapshot.frames.find(
+        created = result.snapshot.frames.find(
           (frame) => frame.file === result.frame.file,
-        );
+        ) ?? null;
         if (canvasPageOwner && !isCurrentDesignPageOwner(canvasPageOwner)) return null;
-        if (created) {
-          publishSelection(created, { selected: true, reveal: true });
-          if (!geometry) fitFrames([created]);
-        }
-        return created ?? null;
       } catch (createError) {
         toast.error("Couldn't create a design frame", {
           description: errorMessage(createError),
@@ -1683,6 +1714,18 @@ export function DesignCanvas({
         creatingFrameRef.current = false;
         setCreatingFrame(false);
       }
+      if (!created) return null;
+      const frame = created;
+      if (!geometry) fitFrames([frame]);
+      primeDesignFrameIntent(workspaceId, frame.file);
+      void waitForDesignRuntimeFrame(workspaceId, frame.file, frame.sourceVersion, 1_000).then(() => {
+        if (canvasPageOwner && !isCurrentDesignPageOwner(canvasPageOwner)) return;
+        // Any selection the person made meanwhile wins over the creation's,
+        // including choosing the same target again or clearing it.
+        if (!designSelectionUnchangedSince(workspaceId, selectionBefore)) return;
+        publishSelection(frame, { selected: true, reveal: true });
+      });
+      return frame;
     },
     [fitFrames, publishSelection, workspaceId, canvasPageOwner],
   );
@@ -6451,6 +6494,8 @@ export function DesignCanvas({
     ) => {
       const draft = creationDraftRef.current;
       if (!draft) return;
+      // A new gesture owns the draft; a previous creation's hand-off ends.
+      creationHandoffRef.current += 1;
       draft.dataset.designCreationDraft = kind;
       draft.style.display = "block";
       draft.style.left = `${rect.x}px`;
@@ -6469,13 +6514,41 @@ export function DesignCanvas({
     [],
   );
 
+  const creationHandoffRef = useRef(0);
   const hideCreationDraft = useCallback(() => {
+    creationHandoffRef.current += 1;
     if (creationDraftRef.current) {
       creationDraftRef.current.style.display = "none";
     }
   }, []);
+  /** A created frame paints only once its document or pixels are ready. Keep
+   * the drawn rectangle until then so the canvas never blinks empty; a new
+   * gesture, retirement or a 2 s bound ends the hand-off. */
+  const hideCreationDraftWhenPainted = useCallback((file: string) => {
+    const token = ++creationHandoffRef.current;
+    const started = performance.now();
+    const tick = () => {
+      if (creationHandoffRef.current !== token) return;
+      const article = frameElementsRef.current.get(file);
+      const painted = article?.querySelector(
+        'iframe[data-design-document-buffer="displayed"][data-design-document-ready], [data-design-source-ready], [data-design-frame-pixels-ready]',
+      );
+      if (painted || !article?.isConnected && performance.now() - started > 250 || performance.now() - started > 2_000) {
+        hideCreationDraft();
+        return;
+      }
+      window.requestAnimationFrame(tick);
+    };
+    window.requestAnimationFrame(tick);
+  }, [hideCreationDraft]);
+  useLayoutEffect(() => {
+    if (!active) hideCreationDraft();
+  }, [active, hideCreationDraft]);
 
-  /** A frame drawn inside a document belongs to its nearest frame container. */
+  /** A frame drawn inside a document belongs to its nearest frame container.
+   * A capable runtime paints the child on release and adopts the saved
+   * generation in place, so Layers and the inspector show the new layer at
+   * once and its document never reloads. */
   const createChildFrame = useCallback(
     async (
       owner: DesignCanvasFrameWire,
@@ -6486,6 +6559,7 @@ export function DesignCanvas({
       creatingFrameRef.current = true;
       setCreatingFrame(true);
       const selection = designWorkspaceView(workspaceId);
+      let preview: { runtime: DesignFrameRuntimeConnection; nodeId: string } | null = null;
       try {
         const runtime = designFrameRuntime(workspaceId, owner.file);
         if (!runtime)
@@ -6513,12 +6587,44 @@ export function DesignCanvas({
         if (!parent || !canInsertDesignFrame(parent))
           throw new Error("Select a drawable frame for the new child.");
         const nodeId = `frame-${crypto.randomUUID()}`;
-        const operations = designFrameInsertionOperations(
+        const { operations, insert, parentStyles } = designFrameInsertion(
           parent,
           nodeId,
           start,
           end,
         );
+        if (
+          runtime.supports("previewInsert") &&
+          runtime.sourceVersion === owner.sourceVersion &&
+          parent.sourceVersion === owner.sourceVersion
+        ) {
+          try {
+            const painted = await runtime.previewInsert({
+              inserts: [insert],
+              ...(parentStyles ? { updates: [{ nodeId: parent.oid, styles: parentStyles }] } : {}),
+            });
+            preview = { runtime, nodeId };
+            hideCreationDraft();
+            const store = useDesignRuntimeStore.getState();
+            store.publishSnapshot(workspaceId, folder, owner.file, painted.snapshot, owner.sourceVersion);
+            if (
+              designWorkspaceView(workspaceId).selectedFrame === selection.selectedFrame &&
+              designWorkspaceView(workspaceId).selectedNodeId === selection.selectedNodeId
+            ) {
+              void selectDesignNode({
+                workspaceId,
+                folder,
+                frame: owner,
+                nodeId,
+                details: painted.details[0],
+                owner: canvasPageOwner,
+              }).catch(() => {});
+            }
+          } catch {
+            // The saved document still gains the child; it simply reloads.
+            preview = null;
+          }
+        }
         const key = designFoundationKey(
           workspaceId,
           owner.file,
@@ -6542,6 +6648,7 @@ export function DesignCanvas({
             createdAt: Date.now(),
             operations,
           },
+          { runtimeInserts: [insert] },
         );
         const current = designWorkspaceView(workspaceId);
         const nextFrame = result.snapshot?.frames.find(
@@ -6550,20 +6657,40 @@ export function DesignCanvas({
         if (
           nextFrame &&
           (!canvasPageOwner || isCurrentDesignPageOwner(canvasPageOwner)) &&
-          current.selectedFrame === selection.selectedFrame &&
-          current.selectedNodeId === selection.selectedNodeId
+          ((current.selectedFrame === selection.selectedFrame &&
+            current.selectedNodeId === selection.selectedNodeId) ||
+            (preview && current.selectedFrame === owner.file && current.selectedNodeId === nodeId))
         ) {
-          // Publish identity immediately; the incoming runtime's ready snapshot
-          // completes details for the newly authored node.
+          // Publish identity immediately; the adopted (or incoming) runtime
+          // supplies the new node's exact-generation details.
           void selectDesignNode({
             workspaceId,
             folder,
             frame: nextFrame,
             nodeId,
             owner: canvasPageOwner,
+            reveal: !preview,
           }).catch(() => {});
         }
       } catch (error) {
+        if (preview) {
+          const { runtime, nodeId } = preview;
+          void runtime.clearPreviewInserts([nodeId]).then(({ snapshot }) => {
+            useDesignRuntimeStore.getState().publishSnapshot(workspaceId, folder, owner.file, snapshot, owner.sourceVersion);
+          }).catch(() => {});
+          const current = designWorkspaceView(workspaceId);
+          if (current.selectedFrame === owner.file && current.selectedNodeId === nodeId) {
+            const store = useDesignWorkspaceUiStore.getState();
+            if (selection.selectedFrame === null) store.setSelectedFrame(workspaceId, null, canvasPageOwner);
+            else store.setSelection(
+              workspaceId,
+              selection.selectedFrame,
+              selection.selectedNodeId,
+              selection.selectedNodeIds,
+              { owner: canvasPageOwner, frameSelected: selection.frameSelected },
+            );
+          }
+        }
         toast.error("Couldn't create the child frame", {
           description: errorMessage(error),
         });
@@ -6572,7 +6699,7 @@ export function DesignCanvas({
         setCreatingFrame(false);
       }
     },
-    [folder, workspaceId, canvasPageOwner],
+    [canvasPageOwner, folder, hideCreationDraft, workspaceId],
   );
 
   /** Pointer-down captures one canvas owner and inverse-zoom drag. */
@@ -6684,16 +6811,24 @@ export function DesignCanvas({
         );
         cleanup(false);
         activateTool("select");
-        const creation = owner
-          ? createChildFrame(
-              owner,
-              { x: start.x - owner.x, y: start.y - owner.y },
-              moved
-                ? { x: latest.x - owner.x, y: latest.y - owner.y }
-                : undefined,
-            )
-          : createFrame(geometry);
-        void creation.finally(hideCreationDraft);
+        if (owner) {
+          void createChildFrame(
+            owner,
+            { x: start.x - owner.x, y: start.y - owner.y },
+            moved
+              ? { x: latest.x - owner.x, y: latest.y - owner.y }
+              : undefined,
+          ).finally(hideCreationDraft);
+        } else {
+          // The hand-off belongs to this canvas lifetime: a reply that lands
+          // after the surface hid or changed owner only clears the draft.
+          const canvasLifetime = canvasLifetimeRef.current;
+          void createFrame(geometry).then(
+            (created) => created && canvasLifetimeRef.current === canvasLifetime
+              ? hideCreationDraftWhenPainted(created.file) : hideCreationDraft(),
+            hideCreationDraft,
+          );
+        }
       };
       const cancel = () => cleanup();
 
@@ -6714,6 +6849,7 @@ export function DesignCanvas({
       createFrame,
       createChildFrame,
       hideCreationDraft,
+      hideCreationDraftWhenPainted,
       paintCreationDraft,
       frameViews,
       canvasPageOwner,
@@ -7398,6 +7534,23 @@ export function DesignCanvas({
         // keydown lost to another focus owner (or pressed before the window was
         // focused) still resolves the moment the pointer enters the canvas.
         onPointerMove={(event) => syncMeasureModifier(event.altKey)}
+        // Entering a frame's title (or leaving it for anything else) is the
+        // intent signal; movement within one element never reaches React state.
+        onPointerOver={(event) => {
+          if (!workspaceId || !active) return;
+          const target = event.target instanceof Element ? event.target : null;
+          // Only a frame's own chrome (its title) is selection intent. Passing
+          // over a frame's pixels must not turn a passive frame into an editor.
+          const file = target?.closest("[data-design-frame-chrome]")
+            ? target.closest<HTMLElement>("[data-design-frame]")?.dataset.designFrame ?? null
+            : null;
+          // A selected frame already has its editor.
+          if (file && view.selectedTargets.some((selected) => selected.frame === file)) return;
+          noteDesignFrameIntent(workspaceId, file);
+        }}
+        onPointerLeave={() => {
+          if (workspaceId) clearDesignFrameIntent(workspaceId);
+        }}
         aria-label="Design canvas"
       >
         <div className="pointer-events-none absolute inset-0 isolate">
@@ -7444,7 +7597,7 @@ export function DesignCanvas({
             const frameSelectedOnly =
               view.selectedTargets.some(target => target.frame === frame.file && !target.nodeId);
             const secondaryElements = (prepared ? view.selectedTargets : []).filter(target => target.frame === frame.file && target.nodeId &&
-              !selectedElements.some(details => details.oid === target.nodeId)).map(target => selectionRuntimeFrames?.[frame.file]?.detailsByNode[target.nodeId!])
+              !selectedElements.some(details => details.oid === target.nodeId)).map(target => secondaryTargetDetails[`${frame.file}\u0000${target.nodeId}`])
               .filter((details): details is DesignRuntimeNodeDetails => Boolean(details && details.sourceVersion === frame.sourceVersion));
             // Guides and Option/Alt measurements anchor on the primary
             // selection's parent; a root-level selection measures against the

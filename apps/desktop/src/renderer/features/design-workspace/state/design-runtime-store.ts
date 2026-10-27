@@ -11,6 +11,7 @@ import type {
   DesignRuntimeNodeDetails,
   DesignRuntimeScreenshot,
   DesignRuntimeSnapshot,
+  DesignRuntimeTreeNode,
 } from "@zeros/protocol/design-runtime";
 import { create } from "zustand";
 
@@ -19,6 +20,12 @@ const MAX_FRAMES_PER_WORKSPACE = 24;
 const MAX_DETAILS_PER_FRAME = 32;
 const MAX_SCREENSHOTS_PER_FRAME = 4;
 const MAX_SCREENSHOT_BYTES = 24 * 1024 * 1024;
+/** A retired document keeps its last confirmed tree and a few readbacks so
+ * Layers and the inspector paint immediately when it (or its workspace) is
+ * shown again. Live runtimes are bounded by admission; only retired
+ * presentation is charged here, oldest retirement evicted first. */
+const MAX_RETIRED_DETAILS_PER_FRAME = 8;
+const MAX_RETIRED_PRESENTATION_BYTES = 8 * 1024 * 1024;
 
 export interface DesignRuntimeScreenshotEntry extends DesignRuntimeScreenshot {
   capturedAt: number;
@@ -33,6 +40,9 @@ export interface DesignRuntimeFrameState {
   screenshotsByNode: Record<string, DesignRuntimeScreenshotEntry>;
   screenshotOrder: string[];
   updatedAt: number;
+  /** Set while no runtime owns this entry: its tree and readbacks are the
+   * last confirmed values for `sourceVersion`, retained within a byte budget. */
+  retiredAt?: number;
 }
 
 export interface DesignRuntimeWorkspaceState {
@@ -123,6 +133,80 @@ function emptyFrame(now: number): DesignRuntimeFrameState {
     screenshotOrder: [],
     updatedAt: now,
   };
+}
+
+const treeBytesBySnapshot = new WeakMap<DesignRuntimeSnapshot, number>();
+const detailBytesByValue = new WeakMap<DesignRuntimeNodeDetails, number>();
+
+function snapshotBytes(snapshot: DesignRuntimeSnapshot): number {
+  const cached = treeBytesBySnapshot.get(snapshot);
+  if (cached !== undefined) return cached;
+  let bytes = 256;
+  const pending: DesignRuntimeTreeNode[] = [...snapshot.tree];
+  while (pending.length) {
+    const node = pending.pop()!;
+    bytes += 96 + 2 * (node.oid.length + node.tag.length + node.name.length +
+      (node.layerName?.length ?? 0) + (node.text?.length ?? 0) +
+      (node.display?.length ?? 0) + (node.flexDirection?.length ?? 0));
+    for (const child of node.children) pending.push(child);
+  }
+  bytes += detailsBytes(snapshot.frame);
+  treeBytesBySnapshot.set(snapshot, bytes);
+  return bytes;
+}
+
+function detailsBytes(details: DesignRuntimeNodeDetails): number {
+  const cached = detailBytesByValue.get(details);
+  if (cached !== undefined) return cached;
+  let bytes = 512 + 2 * ((details.text?.length ?? 0) + details.selector.length);
+  for (const [property, value] of Object.entries(details.styles))
+    bytes += 48 + 2 * (property.length + value.length);
+  for (const crumb of details.breadcrumb) bytes += 32 + 2 * crumb.length;
+  detailBytesByValue.set(details, bytes);
+  return bytes;
+}
+
+function retiredPresentationBytes(frame: DesignRuntimeFrameState): number {
+  let bytes = frame.snapshot ? snapshotBytes(frame.snapshot) : 0;
+  for (const details of Object.values(frame.detailsByNode)) bytes += detailsBytes(details);
+  return bytes;
+}
+
+/** Evict the oldest retired trees/readbacks past the budget. The entry keeps
+ * its exact generation and cover pixels; a later runtime boot refills it. */
+function boundRetiredPresentation<
+  T extends Pick<DesignRuntimeStore, "byWorkspace">,
+>(state: T): T {
+  const retired: Array<{ workspaceId: string; file: string; at: number; bytes: number }> = [];
+  let total = 0;
+  for (const [workspaceId, workspace] of Object.entries(state.byWorkspace))
+    for (const [file, frame] of Object.entries(workspace.frames)) {
+      if (frame.retiredAt === undefined || (!frame.snapshot && frame.detailOrder.length === 0)) continue;
+      const bytes = retiredPresentationBytes(frame);
+      retired.push({ workspaceId, file, at: frame.retiredAt, bytes });
+      total += bytes;
+    }
+  if (total <= MAX_RETIRED_PRESENTATION_BYTES) return state;
+  const byWorkspace = { ...state.byWorkspace };
+  for (const entry of retired.sort((left, right) => left.at - right.at)) {
+    if (total <= MAX_RETIRED_PRESENTATION_BYTES) break;
+    const workspace = byWorkspace[entry.workspaceId]!;
+    const frame = workspace.frames[entry.file]!;
+    byWorkspace[entry.workspaceId] = {
+      ...workspace,
+      frames: {
+        ...workspace.frames,
+        [entry.file]: {
+          ...frame,
+          snapshot: undefined,
+          detailsByNode: {},
+          detailOrder: [],
+        },
+      },
+    };
+    total -= entry.bytes;
+  }
+  return { ...state, byWorkspace };
 }
 
 /** Count limits alone permit several gigabytes of base64 across retained
@@ -273,6 +357,51 @@ function sameNodeDetails(
   );
 }
 
+function sameTree(
+  left: readonly DesignRuntimeTreeNode[],
+  right: readonly DesignRuntimeTreeNode[],
+): boolean {
+  if (left === right) return true;
+  if (left.length !== right.length) return false;
+  for (let index = 0; index < left.length; index++) {
+    const a = left[index]!;
+    const b = right[index]!;
+    if (
+      a.oid !== b.oid || a.tag !== b.tag || a.name !== b.name ||
+      a.layerName !== b.layerName || a.text !== b.text || a.visible !== b.visible ||
+      a.display !== b.display || a.flexDirection !== b.flexDirection ||
+      !sameTree(a.children, b.children)
+    ) return false;
+  }
+  return true;
+}
+
+/** The port structured-clones every payload, so an unchanged runtime
+ * snapshot arrives as a new object. Equal generation, tree, warnings, root
+ * readback and viewport is the same snapshot; anything else publishes. */
+function sameRuntimeSnapshot(
+  left: DesignRuntimeSnapshot,
+  right: DesignRuntimeSnapshot,
+): boolean {
+  return (
+    left === right ||
+    (left.sourceVersion === right.sourceVersion &&
+      left.revision === right.revision &&
+      left.viewport.width === right.viewport.width &&
+      left.viewport.height === right.viewport.height &&
+      left.viewport.scrollX === right.viewport.scrollX &&
+      left.viewport.scrollY === right.viewport.scrollY &&
+      left.warnings.length === right.warnings.length &&
+      left.warnings.every((warning, index) => {
+        const other = right.warnings[index]!;
+        return warning.ruleId === other.ruleId && warning.oid === other.oid &&
+          warning.message === other.message && warning.fix === other.fix;
+      }) &&
+      sameNodeDetails(left.frame, right.frame) &&
+      sameTree(left.tree, right.tree))
+  );
+}
+
 function updateWorkspace(
   state: DesignRuntimeStore,
   workspaceId: string,
@@ -343,7 +472,9 @@ export const useDesignRuntimeStore = create<DesignRuntimeStore>((set) => ({
       if (
         workspace?.folder === folder &&
         current?.sourceVersion === sourceVersion &&
-        current.snapshot === snapshot
+        current.retiredAt === undefined &&
+        current.snapshot &&
+        sameRuntimeSnapshot(current.snapshot, snapshot)
       ) {
         return state;
       }
@@ -357,6 +488,7 @@ export const useDesignRuntimeStore = create<DesignRuntimeStore>((set) => ({
           snapshot,
           sourceVersion,
           updatedAt: now,
+          retiredAt: undefined,
         }),
       );
     });
@@ -508,6 +640,7 @@ export const useDesignRuntimeStore = create<DesignRuntimeStore>((set) => ({
             detailsByNode: keepKeys(rebasedDetails, detailOrder),
             detailOrder,
             updatedAt: now,
+            retiredAt: undefined,
           };
         },
       );
@@ -544,15 +677,25 @@ export const useDesignRuntimeStore = create<DesignRuntimeStore>((set) => ({
       const frame = workspace?.frames[file];
       if (!workspace || !frame) return state;
       const cover = frame.screenshotsByNode[""];
+      // Readbacks are exact-generation values: keep the root and the most
+      // recently read nodes (the selection), not every hovered one.
+      const rootId = frame.snapshot?.frame.oid;
+      const detailOrder = frame.detailOrder
+        .filter((nodeId) => nodeId !== rootId)
+        .slice(-MAX_RETIRED_DETAILS_PER_FRAME)
+        .concat(rootId && frame.detailsByNode[rootId] ? [rootId] : []);
       const retired: DesignRuntimeFrameState = {
         ...emptyFrame(frame.updatedAt), sourceVersion: frame.sourceVersion,
+        snapshot: frame.snapshot,
+        detailsByNode: keepKeys(frame.detailsByNode, detailOrder), detailOrder,
         screenshotsByNode: cover ? { "": cover } : {}, screenshotOrder: cover ? [""] : [],
+        retiredAt: Date.now(),
       };
-      return { byWorkspace: { ...state.byWorkspace, [workspaceId]: { ...workspace,
+      return boundRetiredPresentation({ byWorkspace: { ...state.byWorkspace, [workspaceId]: { ...workspace,
         hoveredFrame: workspace.hoveredFrame === file ? null : workspace.hoveredFrame,
         hoveredNodeId: workspace.hoveredFrame === file ? null : workspace.hoveredNodeId,
         frames: { ...workspace.frames, [file]: retired },
-      } } };
+      } } });
     });
   },
 
@@ -579,6 +722,32 @@ export function designRuntimeFrameState(
   return useDesignRuntimeStore.getState().byWorkspace[workspaceId]?.frames[
     frame
   ];
+}
+
+/** Resolve once a runtime has reported this exact frame generation (true), or
+ * after `timeoutMs` (false). Used to select a new frame together with its
+ * inspector data instead of through a fallback view. */
+export function waitForDesignRuntimeFrame(
+  workspaceId: string,
+  file: string,
+  sourceVersion: string,
+  timeoutMs: number,
+): Promise<boolean> {
+  const reported = () =>
+    useDesignRuntimeStore.getState().byWorkspace[workspaceId]?.frames[file]
+      ?.snapshot?.sourceVersion === sourceVersion;
+  if (reported()) return Promise.resolve(true);
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => finish(false), timeoutMs);
+    const unsubscribe = useDesignRuntimeStore.subscribe(() => {
+      if (reported()) finish(true);
+    });
+    function finish(value: boolean) {
+      clearTimeout(timer);
+      unsubscribe();
+      resolve(value);
+    }
+  });
 }
 
 export function forgetDesignRuntimeWorkspace(workspaceId: string): void {

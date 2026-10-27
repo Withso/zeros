@@ -7,6 +7,9 @@ export async function runDesignHiddenDocumentsSmoke({ page, check, label = "fall
   const original = await page.evaluate(() => {
     const controls = window.__zerosHarnessDesignSurface;
     window.__designWarmDocument = document.querySelector('iframe[data-design-document-buffer="displayed"]');
+    window.__designWarmDocumentSource = window.__designWarmDocument.srcdoc;
+    window.__designWarmDocumentLoads = 0;
+    window.__designWarmDocument.addEventListener('load', () => { window.__designWarmDocumentLoads++; });
     const state = controls.ui.getState().byWorkspace.ws_design_harness;
     return { selectedFrame: state.selectedFrame, panX: state.panX, panY: state.panY, zoom: state.zoom };
   });
@@ -43,10 +46,14 @@ export async function runDesignHiddenDocumentsSmoke({ page, check, label = "fall
   await page.evaluate(before => window.__zerosHarnessDesignSurface.ui.getState().setViewport('ws_design_harness', before), original);
   await page.evaluate(() => window.__zerosHarnessDesignSurface.active(false));
   await page.waitForFunction(() => window.__zerosHarnessDesignSurface.resources().documents.warm > 0);
+  check(`${label}: a hidden warm document keeps its exact loaded source`, await page.evaluate(() =>
+    window.__designWarmDocument.srcdoc === window.__designWarmDocumentSource));
   await page.clock.fastForward(5_000);
   await page.evaluate(() => window.__zerosHarnessDesignSurface.active(true));
   await page.locator(selector).first().waitFor();
   check(`${label}: quick return reuses the warm document`, await page.evaluate(() => window.__designWarmDocument.isConnected));
+  check(`${label}: quick return does not navigate the retained document`, await page.evaluate(() =>
+    window.__designWarmDocument.srcdoc === window.__designWarmDocumentSource && window.__designWarmDocumentLoads === 0));
   for (let cycle = 0; cycle < 20; cycle++) {
     await page.evaluate(() => window.__zerosHarnessDesignSurface.active(false));
     await page.clock.fastForward(10_010);

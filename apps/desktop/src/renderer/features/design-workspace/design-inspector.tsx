@@ -129,6 +129,7 @@ import {
   publishDesignLivePreviewStyles,
   useDesignLivePreviewValue,
 } from "./state/design-live-preview";
+import { useShallow } from "zustand/react/shallow";
 import { useDesignRuntimeStore } from "./state/design-runtime-store";
 import {
   captureDesignRuntimeScreenshot,
@@ -315,7 +316,14 @@ function InspectorEditField({
     (next: string) => {
       draftRef.current = next;
       setDraft(next);
-      setPresentation(inspectorFieldPresentation(styleProperty, next, whole));
+      // An equal presentation keeps its identity, so a mounted field that
+      // adopts the value it was initialized with schedules no render.
+      const presented = inspectorFieldPresentation(styleProperty, next, whole);
+      setPresentation((current) =>
+        current.text === presented.text && current.unit === presented.unit
+          ? current
+          : presented,
+      );
     },
     [styleProperty, whole],
   );
@@ -964,6 +972,7 @@ export function DesignInspector({
   frame,
   frameSelected,
   details,
+  selectedNode,
   selectedNodeId,
   selectedNodeIds,
   lint,
@@ -1298,25 +1307,32 @@ export function DesignInspector({
         : [],
     [selectedNodeId, selectedNodeIds, styleTargetNodeId],
   );
-  const layoutRuntimeState = useDesignRuntimeStore((state) =>
-    workspaceId && frame
+  // Exactly the styled nodes' readbacks and the frame root id: hover reads,
+  // screenshots and other nodes' details must not re-render every field.
+  const styleNodeDetails = useDesignRuntimeStore(useShallow((state) => {
+    const frameState = workspaceId && frame
       ? state.byWorkspace[workspaceId]?.frames[frame.file]
+      : undefined;
+    return styleNodeIds.map((nodeId) => frameState?.detailsByNode[nodeId] ?? null);
+  }));
+  const layoutRootId = useDesignRuntimeStore((state) =>
+    workspaceId && frame
+      ? state.byWorkspace[workspaceId]?.frames[frame.file]?.snapshot?.frame.oid
       : undefined,
   );
   const layoutParents = useMemo(
     () =>
-      styleNodeIds.flatMap((nodeId) => {
+      styleNodeIds.flatMap((nodeId, index) => {
         const node =
           nodeId === elementDetails?.oid
             ? elementDetails
-            : layoutRuntimeState?.detailsByNode[nodeId];
+            : styleNodeDetails[index];
         return node && node.sourceVersion === elementDetails?.sourceVersion
           ? [node]
           : [];
       }),
-    [elementDetails, layoutRuntimeState, styleNodeIds],
+    [elementDetails, styleNodeDetails, styleNodeIds],
   );
-  const layoutRootId = layoutRuntimeState?.snapshot?.frame.oid;
   const styleDirectoryKey = workspaceId
     ? designWorkspaceSnapshotCache.peekSnapshot(workspaceId).data?.directoryId ??
       designWorkspaceSnapshotCache.peekSnapshot(workspaceId).data?.directory ?? ""
@@ -2168,7 +2184,9 @@ export function DesignInspector({
         : frameSelected && frame
           ? designFrameLayerLabel(frame.kind)
           : selectedNodeId
-            ? "Nothing selected"
+            ? selectedNode?.oid === selectedNodeId
+              ? designRuntimeLayerLabel(selectedNode)
+              : "Nothing selected"
             : "Page";
   const SelectionGlyph =
     styleNodeIds.length > 1

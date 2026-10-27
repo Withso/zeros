@@ -49,6 +49,7 @@ import { DesignSavedEditingContext, DesignSavedEditingSession } from "./design-s
 import { DesignDirectoryPill } from "./design-directory-pill";
 import { DesignFloatingPanel } from "./design-floating-panel";
 import { DesignInspector } from "./design-inspector";
+import type { DesignRuntimeTreeNode } from "@zeros/protocol/design-runtime";
 import { errorMessage } from "./design-workspace-error";
 import { DesignWorkspaceSidebarPanels } from "./design-workspace-sidebar-panels";
 import {
@@ -245,11 +246,12 @@ export function DesignWorkspaceColumn({
     [workspaceId, folder],
   );
 
+  // A frame revalidating its source keeps its last confirmed generation in the
+  // inspector instead of dropping to an empty panel; edits stay engine-checked.
   const selectedFrame = useMemo(
     () => {
       const frames = designFrameViews(pageSnapshot);
-      const frame = frames.find((frame) => frame.file === selectedFrameFile) ?? frames[0];
-      return frame && isPreparedDesignFrame(frame) ? frame : null;
+      return designPresentedFrame(frames.find((frame) => frame.file === selectedFrameFile) ?? frames[0]);
     },
     [selectedFrameFile, pageSnapshot],
   );
@@ -261,6 +263,24 @@ export function DesignWorkspaceColumn({
       ? (runtimeFrame?.detailsByNode[selectedNodeId] ?? null)
       : (runtimeFrame?.snapshot?.frame ?? null);
   });
+
+  // Until a new selection's exact details arrive, the inspector names the
+  // selected layer from its frame's tree instead of reading as empty.
+  const selectedFrameTree = useDesignRuntimeStore((state) =>
+    workspaceId && selectedFrame
+      ? state.byWorkspace[workspaceId]?.frames[selectedFrame.file]?.snapshot?.tree
+      : undefined,
+  );
+  const selectedTreeNode = useMemo(() => {
+    if (!selectedNodeId || !selectedFrameTree) return null;
+    const pending: DesignRuntimeTreeNode[] = [...selectedFrameTree];
+    while (pending.length) {
+      const node = pending.pop()!;
+      if (node.oid === selectedNodeId) return node;
+      for (const child of node.children) pending.push(child);
+    }
+    return null;
+  }, [selectedFrameTree, selectedNodeId]);
 
   // A freshly provisioned design surface is ready when its first exact-key
   // snapshot either resolves or fails open; code-only settling UI must not
@@ -474,6 +494,7 @@ export function DesignWorkspaceColumn({
               frame={selectedFrame}
               frameSelected={frameSelected}
               details={selectedDetails}
+              selectedNode={selectedTreeNode}
               selectedNodeId={selectedNodeId}
               selectedNodeIds={selectedNodeIds}
               lint={snapshot.data?.lint ?? null}
@@ -492,4 +513,4 @@ export function DesignWorkspaceColumn({
     </DesignSavedEditingContext.Provider>
   );
 }
-import { designFrameViews, isPreparedDesignFrame } from "./state/design-frame-view";
+import { designFrameViews, designPresentedFrame } from "./state/design-frame-view";

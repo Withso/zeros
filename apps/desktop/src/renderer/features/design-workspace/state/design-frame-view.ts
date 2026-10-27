@@ -4,6 +4,13 @@ export type DesignFrameView = DesignCanvasFrameWire | (DesignFrameDescriptionWir
 export function isPreparedDesignFrame(frame: DesignFrameView): frame is DesignCanvasFrameWire {
   return typeof frame.sourceVersion === "string";
 }
+/** What a frame view presents: its prepared generation, or the last confirmed
+ * one while its source revalidates. Presentation never mounts a runtime; writes
+ * made from it carry that generation and remain engine-checked. */
+export function designPresentedFrame(frame: DesignFrameView | null | undefined): DesignCanvasFrameWire | null {
+  if (!frame) return null;
+  return isPreparedDesignFrame(frame) ? frame : frame.previous ?? null;
+}
 const EMPTY: readonly DesignFrameView[] = Object.freeze([]);
 const views = new WeakMap<DesignWorkspaceSnapshotWire, readonly DesignFrameView[]>();
 const authority = new WeakMap<DesignWorkspaceSnapshotWire, DesignWorkspaceSnapshotWire>();
