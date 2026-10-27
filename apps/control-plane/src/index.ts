@@ -103,7 +103,7 @@ const computerLockPool = runtimeReady && config.cloudV2 && cloudV2Lifecycle
 const cloudV2 = runtimeReady ? createCloudV2(config, workerPool ?? pool, {
   relay: processRole === "realtime" || processRole === "combined",
   lifecycle: cloudV2Lifecycle,
-}, securityEventBroker, listenerPool, computerLockPool ?? undefined) : null;
+}, securityEventBroker, listenerPool, ...(computerLockPool ? [computerLockPool] : [])) : null;
 const stopCloudV2Lifecycle = cloudV2?.lifecycle?.start() ?? (async () => {});
 const app = createApp(config, pool, emailConfig, {
   ...(cloudV2 && servesHttpApi ? { cloudV2: { routes: cloudV2.routes, proxy: cloudV2.proxy, workers: cloudV2.workers } } : {}),
