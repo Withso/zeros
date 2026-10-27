@@ -1632,6 +1632,23 @@ export const MIGRATIONS: Migration[] = [
       ALTER TABLE chats ADD COLUMN context_replay_pending INTEGER NOT NULL DEFAULT 0;
     `,
   },
+  {
+    version: 44,
+    name: "verified GitHub repository identities and Origin revisions",
+    up: `
+      ALTER TABLE repos ADD COLUMN origin_revision INTEGER NOT NULL DEFAULT 0;
+      CREATE TABLE github_repository_remotes (
+        repo_id TEXT NOT NULL REFERENCES repos(id) ON DELETE CASCADE,
+        remote_name TEXT NOT NULL,
+        remote_url TEXT NOT NULL,
+        github_repository_id TEXT NOT NULL,
+        github_node_id TEXT NOT NULL,
+        owner TEXT NOT NULL,
+        name TEXT NOT NULL,
+        PRIMARY KEY (repo_id, remote_name)
+      );
+    `,
+  },
 ];
 
 /** Run all pending migrations in order, each in its own transaction. Idempotent

@@ -192,6 +192,7 @@ export const LONG_LIFECYCLE_OPS = new Set([
   // Discovery also persists PR metadata. A late response must still refresh
   // the requesting window after its finite bridge deadline has expired.
   "gh.prSync",
+  "project.reconcileGithubRemote",
 ]);
 
 /** Should the DB_CHANGED broadcast reach the client that CAUSED it?
@@ -245,6 +246,9 @@ export function dbChangedKinds(op: string, result?: unknown): string[] | null {
   if (op === "design.transaction.apply" && result && typeof result === "object" &&
       (result as { result?: { dryRun?: boolean } }).result?.dryRun === true) return null;
   if (CHAT_MUTATIONS.has(op)) return ["chats"];
+  if (op === "project.reconcileGithubRemote")
+    return result && typeof result === "object" && (result as { changed?: boolean }).changed === true
+      ? ["projects", "workspaces"] : null;
   if (op === "project.upsert" || op === "project.bulkUpsert") return ["projects", "workspaces"];
   if (PROJECT_MUTATIONS.has(op)) return ["projects"];
   if (SETTINGS_MUTATIONS.has(op)) return ["settings"];

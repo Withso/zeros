@@ -51,11 +51,18 @@ const BACKUP_KEY = "projects-v1-backup";
 const gitRevisions = new Map<string, number>();
 // A native registry read must not undo a concurrent add/remove in this view.
 let projectMutationRevision = 0;
-let projectSync: {
+const nativeOriginListeners = new Set<() => void>();
+export function subscribeNativeProjectOrigins(listener: () => void): () => void {
+  nativeOriginListeners.add(listener);
+  return () => { nativeOriginListeners.delete(listener); };
+}
+interface ProjectReadFlight {
   bridge: NonNullable<ReturnType<typeof getActiveBridge>>;
   revision: number;
   request: Promise<boolean>;
-} | null = null;
+}
+let projectSync: ProjectReadFlight | null = null;
+let nativeOriginRead: ProjectReadFlight | null = null;
 export function projectGitRevision(id: string): number {
   return gitRevisions.get(id) ?? 0;
 }
@@ -67,6 +74,8 @@ export interface Project {
   repoSlug: string;
   /** GitHub origin URL when we could read it. Used by the PR picker. */
   originUrl: string | null;
+  /** Absent in legacy caches and older engines; native origin writes use CAS. */
+  originRevision?: number;
   /** Last confirmed folder inspection. Absent in older boot caches. */
   isGitRepository?: boolean;
   addedAt: number;
@@ -179,11 +188,17 @@ function pushUpsert(p: Project): void {
   if (isCloudWorkspace(p.repoRoot)) return;
   const bridge = getActiveBridge();
   if (!bridge) return;
+  const revision = projectGitRevision(p.id);
   void bridgeProjectUpsert(bridge, {
     repoRoot: p.repoRoot,
     repoSlug: p.repoSlug,
     name: p.name,
     originUrl: p.originUrl,
+    ...(p.originRevision === undefined ? {} : { originRevision: p.originRevision }),
+  }).then(native => {
+    if (native && getActiveBridge() === bridge && applyNativeProjectOrigin(p, revision, native)) {
+      for (const listener of nativeOriginListeners) listener();
+    }
   }).catch(() => {});
 }
 
@@ -193,9 +208,43 @@ function pushRemove(repoRoot: string): void {
   void bridgeProjectRemove(bridge, repoRoot).catch(() => {});
 }
 
+function applyNativeProjectOrigins(projects: Project[], native: Project[]): boolean {
+  let changed = false;
+  const next = projects.map(project => {
+    const row = native.find(item => normalizeProjectRoot(item.repoRoot) === project.repoRoot);
+    if (!row || row.originRevision === undefined || row.originRevision < (project.originRevision ?? 0) ||
+        row.originUrl === project.originUrl && row.originRevision === project.originRevision) return project;
+    changed = true;
+    if (project.originUrl !== row.originUrl)
+      gitRevisions.set(project.id, projectGitRevision(project.id) + 1);
+    return { ...project, originUrl: row.originUrl, originRevision: row.originRevision };
+  });
+  if (changed) saveProjects(next);
+  return changed;
+}
+
+/** A DB_CHANGED notification is a read, never another bulk write. Keep the
+ * confirmed snapshot and exact registration generation while sharing reads. */
+export function refreshNativeProjectOrigins(): Promise<boolean> {
+  const bridge = getActiveBridge();
+  if (!bridge || bridge.status !== "connected") return Promise.resolve(false);
+  const revision = projectMutationRevision;
+  if (nativeOriginRead?.bridge === bridge && nativeOriginRead.revision === revision) return nativeOriginRead.request;
+  const projects = loadStoredProjects();
+  if (!projects.length) return Promise.resolve(false);
+  const request = requestProjectList(bridge).then(native => {
+    if (getActiveBridge() !== bridge || bridge.status !== "connected" || projectMutationRevision !== revision) return false;
+    return applyNativeProjectOrigins(projects, native);
+  }).catch(() => false).finally(() => {
+    if (nativeOriginRead?.request === request) nativeOriginRead = null;
+  });
+  nativeOriginRead = { bridge, revision, request };
+  return request;
+}
+
 /** Reconcile the Local boot cache with the native registry on connection.
- * Existing curated projects still use the established bulk write-through;
- * an empty renderer cache can recover the native repository identities. */
+ * Curated names/slugs remain local. Native Origin revisions survive a stale
+ * boot cache, a lost mutation reply, and restart on either side of the bridge. */
 export function syncProjectsToEngine(): Promise<boolean> {
   const bridge = getActiveBridge();
   if (!bridge || bridge.status !== "connected") return Promise.resolve(false);
@@ -232,9 +281,14 @@ export function syncProjectsToEngine(): Promise<boolean> {
         repoSlug: p.repoSlug,
         name: p.name,
         originUrl: p.originUrl,
+        ...(p.originRevision === undefined ? {} : { originRevision: p.originRevision }),
       })),
     ).catch(() => {});
-    return false;
+    try {
+      const native = await requestProjectList(bridge);
+      if (getActiveBridge() !== bridge || bridge.status !== "connected" || projectMutationRevision !== revision) return false;
+      return applyNativeProjectOrigins(projects, native);
+    } catch { return false; }
   })().finally(() => {
     if (projectSync?.request === request) projectSync = null;
   });
@@ -388,6 +442,25 @@ export function applyProjectGitInspection(
   gitRevisions.set(project.id, revision + 1);
   saveProjects(projects);
   pushUpsert(project);
+  return true;
+}
+
+/** Update both boot copies without re-upserting the engine's own result.
+ * Engine IDs may differ from legacy renderer IDs; roots join the two, while
+ * the captured renderer ID/revision fence removal, re-add and explicit edits. */
+export function applyNativeProjectOrigin(owner: Project, revision: number, native: Pick<Project, "repoRoot" | "originUrl" | "originRevision">): boolean {
+  const projects = loadStoredProjects();
+  const project = projects.find(row => row.id === owner.id && row.repoRoot === owner.repoRoot);
+  if (!project || normalizeProjectRoot(native.repoRoot) !== owner.repoRoot || projectGitRevision(owner.id) !== revision ||
+      native.originRevision === undefined || native.originRevision < (project.originRevision ?? 0) ||
+      project.originUrl !== owner.originUrl) return false;
+  if (project.originUrl === native.originUrl && project.originRevision === native.originRevision) return false;
+  // A revision-only acknowledgement does not invalidate a concurrent repair
+  // of the same URL. A changed URL still fences every earlier observation.
+  if (project.originUrl !== native.originUrl) gitRevisions.set(project.id, revision + 1);
+  project.originUrl = native.originUrl;
+  project.originRevision = native.originRevision;
+  saveProjects(projects);
   return true;
 }
 

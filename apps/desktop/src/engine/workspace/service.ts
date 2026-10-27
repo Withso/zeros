@@ -305,6 +305,7 @@ import { repoPathOverlapsDesignRoot as sharedRepoPathOverlapsDesignRoot } from "
 import { withDesignWorkspaceMutation } from "../design/document-write-lock";
 import { initializeWorkspaceDesign } from "../git/design-mode";
 import { withWorkspaceGitMutation } from "../git/mutation-lock";
+import { reconcileGithubRepository } from "../git/github-repository";
 import { unfenceDesignDirectory } from "../design/workspace-lock";
 
 import { forgetDesignScreenshots } from "../design/screenshots";
@@ -320,6 +321,7 @@ import type { ComputerUseOwner } from "@zeros/protocol/computer-use-tools";
 import type { McpGateway } from "../agents/gateway/server";
 import {
   listProjects,
+  projectForRoot,
   upsertRepoByRoot,
   removeRepoByRoot,
   renameRepoByRoot,
@@ -589,6 +591,7 @@ const WRITE_OPS = new Set<string>([
   "project.remove",
   "project.rename",
   "project.bulkUpsert",
+  "project.reconcileGithubRemote",
   // Settings TOML writes (user / repo / repo-local layers). Open to paired
   // devices by design: a paired device already holds PTY (= arbitrary file
   // edits), so gating this would be theater. Remote repo targeting is still
@@ -3165,6 +3168,11 @@ export class WorkspaceService {
         return { projects };
       }
       // ── Write: projects (desktop write-through; restriction-gated remote) ──
+      case "project.reconcileGithubRemote": {
+        const repoRoot = reqStr(params, "repoRoot");
+        this.assertSettingsRepoRoot(repoRoot, remote);
+        return reconcileGithubRepository(repoRoot);
+      }
       case "project.upsert": {
         const repoRoot = reqStr(params, "repoRoot");
         assertRemoteRepoRootAllowed(repoRoot, remote);
@@ -3173,9 +3181,11 @@ export class WorkspaceService {
           repoRoot,
           repoSlug: optStr(params, "repoSlug"),
           name: optStr(params, "name"),
-          originUrl: optStr(params, "originUrl") ?? null,
+          originUrl: params.originUrl === null ? null : optStr(params, "originUrl"),
+          originRevision: typeof params.originRevision === "number" && Number.isSafeInteger(params.originRevision) && params.originRevision >= 0
+            ? params.originRevision : 0,
         });
-        return { ok: true };
+        return { ok: true, project: projectForRoot(repoRoot) };
       }
       case "project.remove": {
         removeRepoByRoot(reqStr(params, "repoRoot"));
@@ -3194,7 +3204,9 @@ export class WorkspaceService {
               repoRoot: typeof o.repoRoot === "string" ? o.repoRoot : "",
               repoSlug: typeof o.repoSlug === "string" ? o.repoSlug : undefined,
               name: typeof o.name === "string" ? o.name : undefined,
-              originUrl: typeof o.originUrl === "string" ? o.originUrl : null,
+              originUrl: typeof o.originUrl === "string" || o.originUrl === null ? o.originUrl : undefined,
+              originRevision: typeof o.originRevision === "number" && Number.isSafeInteger(o.originRevision) && o.originRevision >= 0
+                ? o.originRevision : 0,
             };
           })
           .filter((p) => p.repoRoot);

@@ -13,10 +13,10 @@ vi.mock("../../platform/bridge/workspace-bridge", () => ({
 }));
 vi.mock("../cloud-workspace-catalog", () => ({ getCloudProjects: () => [] }));
 
-import { loadProjects, removeProject, syncProjectsToEngine, upsertProject } from "../projects-store";
+import { loadProjects, removeProject, refreshNativeProjectOrigins, syncProjectsToEngine, upsertProject } from "../projects-store";
 
 const local = { id: "saved-repository", repoRoot: "/repo/local", repoSlug: "local",
-  name: "Local repository", originUrl: null, addedAt: 1 };
+  name: "Local repository", originUrl: null as string | null, addedAt: 1 };
 
 beforeEach(() => {
   const storage = new Map<string, string>();
@@ -88,10 +88,60 @@ describe("native project recovery after an empty renderer cache", () => {
 
   it("preserves an existing local catalog and its normal write-through", async () => {
     const project = upsertProject({ repoRoot: "/repo/existing" });
+    mocks.read.mockResolvedValue([]);
     mocks.push.mockClear();
     await syncProjectsToEngine();
     expect(loadProjects()).toEqual([project]);
-    expect(mocks.read).not.toHaveBeenCalled();
+    expect(mocks.read).toHaveBeenCalledOnce();
     expect(mocks.push).toHaveBeenCalledOnce();
+  });
+
+  it("pulls a repaired Origin into both boot caches without replacing local project identity", async () => {
+    const project = upsertProject({ repoRoot: local.repoRoot, name: "My name", repoSlug: "former-widgets",
+      originUrl: "git@github.com:former/widgets.git" });
+    mocks.read.mockResolvedValue([{ ...local, originUrl: "git@github.com:current/renamed.git", originRevision: 3 }]);
+    expect(await syncProjectsToEngine()).toBe(true);
+    expect(loadProjects()).toEqual([{ ...project, originUrl: "git@github.com:current/renamed.git", originRevision: 3 }]);
+    localStorage.removeItem("zeros-projects-v1");
+    expect(loadProjects()[0].originUrl).toBe("git@github.com:current/renamed.git");
+  });
+
+  it("rejects a stale canonical metadata reply after removing and re-adding the same root", async () => {
+    const project = upsertProject({ repoRoot: local.repoRoot });
+    let resolve!: (rows: typeof local[]) => void;
+    mocks.read.mockReturnValue(new Promise(done => { resolve = done; }));
+    const pending = syncProjectsToEngine();
+    await vi.waitFor(() => expect(mocks.read).toHaveBeenCalledOnce());
+    removeProject(project.id);
+    const replacement = upsertProject({ repoRoot: local.repoRoot });
+    resolve([{ ...local, originUrl: "git@github.com:current/renamed.git" }]);
+    await pending;
+    expect(loadProjects()).toEqual([replacement]);
+  });
+
+  it("revalidates native Origin notifications without echoing another write", async () => {
+    const project = upsertProject({ repoRoot: local.repoRoot, originUrl: "git@github.com:former/widgets.git" });
+    mocks.push.mockClear();
+    let resolve!: (rows: (typeof local & { originRevision: number })[]) => void;
+    mocks.read.mockReturnValue(new Promise(done => { resolve = done; }));
+    const one = refreshNativeProjectOrigins(), two = refreshNativeProjectOrigins();
+    expect(mocks.read).toHaveBeenCalledOnce();
+    resolve([{ ...local, originUrl: "git@github.com:current/renamed.git", originRevision: 2 }]);
+    await Promise.all([one, two]);
+    expect(loadProjects()).toEqual([{ ...project, originUrl: "git@github.com:current/renamed.git", originRevision: 2 }]);
+    expect(mocks.push).not.toHaveBeenCalled();
+  });
+
+  it.each(["remove", "replace bridge"])("discards a held Origin notification after %s", async change => {
+    const project = upsertProject({ repoRoot: local.repoRoot });
+    let resolve!: (rows: (typeof local & { originRevision: number })[]) => void;
+    mocks.read.mockReturnValue(new Promise(done => { resolve = done; }));
+    const pending = refreshNativeProjectOrigins();
+    if (change === "remove") removeProject(project.id);
+    else mocks.bridge = { status: "connected" };
+    const current = loadProjects();
+    resolve([{ ...local, originUrl: "git@github.com:current/renamed.git", originRevision: 2 }]);
+    expect(await pending).toBe(false);
+    expect(loadProjects()).toEqual(current);
   });
 });

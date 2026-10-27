@@ -110,6 +110,29 @@ describe("Local GitHub observation sharing", () => {
     expect(oct.pulls.get).toHaveBeenCalledTimes(1);
   });
 
+  it("shares canonical repository resolution without caching a transfer across refreshes", async () => {
+    const gate = deferred();
+    const entered = deferred();
+    oct.repos.get.mockImplementationOnce(async () => {
+      entered.resolve();
+      await gate.promise;
+      return { data: { id: 123, owner: { login: "new-owner" }, name: "renamed" } };
+    });
+    const requests = [resolveGithubWorkspaceRepository("one"), resolveGithubWorkspaceRepository("one")];
+    // A resolver that skips the API must fail an assertion, not hang waiting
+    // for a request it never starts when this regression is replayed.
+    await Promise.race([entered.promise, Promise.all(requests)]);
+    expect(oct.repos.get).toHaveBeenCalledExactlyOnceWith({ owner: "fixture", repo: "repository" });
+    gate.resolve();
+    expect(await Promise.all(requests)).toEqual([
+      { owner: "new-owner", repo: "renamed", remote: "origin" },
+      { owner: "new-owner", repo: "renamed", remote: "origin" },
+    ]);
+    oct.repos.get.mockResolvedValueOnce({ data: { id: 123, owner: { login: "successor" }, name: "renamed-again" } });
+    await expect(resolveGithubWorkspaceRepository("one")).resolves.toEqual({ owner: "successor", repo: "renamed-again", remote: "origin" });
+    expect(oct.repos.get).toHaveBeenCalledTimes(2);
+  });
+
   it("separates repositories, remotes, PRs and credential replacements, and rejects sign-out", async () => {
     const gate = deferred();
     const entered = deferred();
@@ -135,6 +158,7 @@ describe("Local GitHub observation sharing", () => {
     await expect(getPr({ workspaceId: "one", prNumber: 1 })).rejects.toMatchObject({ code: "NOT_AUTHENTICATED" });
     gate.resolve(); await Promise.all([first, otherPr, otherRepository]);
     mocks.runFile.mockClear();
+    token = "fixture-b";
     const originalRemote = resolveGithubWorkspaceRepository("one");
     mocks.remote = "upstream";
     const nextRemote = resolveGithubWorkspaceRepository("one");

@@ -32,6 +32,8 @@ export interface EngineProject {
   repoRoot: string;
   repoSlug: string;
   originUrl: string | null;
+  /** Native revision: a stale renderer cache cannot undo a verified move. */
+  originRevision: number;
   addedAt: number;
 }
 
@@ -76,6 +78,7 @@ interface RepoRow {
   canonical_id: string;
   name: string | null;
   remote_url: string | null;
+  origin_revision: number;
   root_path: string | null;
   repo_slug: string | null;
   added_at: number | null;
@@ -90,6 +93,7 @@ function toProject(r: RepoRow): EngineProject {
     repoRoot,
     repoSlug: r.repo_slug ?? "",
     originUrl: r.remote_url ?? null,
+    originRevision: r.origin_revision,
     addedAt: r.added_at ?? 0,
   };
 }
@@ -133,7 +137,7 @@ export function listProjects(seedWorkspaces: WorkspaceSeed[]): EngineProject[] {
   const db = openZerosDb();
   const rows = db
     .prepare(
-      "SELECT id, canonical_id, name, remote_url, root_path, repo_slug, added_at FROM repos WHERE hidden = 0 ORDER BY added_at ASC, name ASC",
+      "SELECT id, canonical_id, name, remote_url, origin_revision, root_path, repo_slug, added_at FROM repos WHERE hidden = 0 ORDER BY added_at ASC, name ASC",
     )
     .all() as RepoRow[];
   return rows.map(toProject);
@@ -154,6 +158,7 @@ interface ProjectInput {
   repoSlug?: string;
   name?: string | null;
   originUrl?: string | null;
+  originRevision?: number;
 }
 
 /** Insert or update a repo by root. Preserves the existing id + added_at on
@@ -169,7 +174,12 @@ export function upsertRepoByRoot(p: ProjectInput): void {
        ON CONFLICT(root_path) DO UPDATE SET
          name       = excluded.name,
          repo_slug  = COALESCE(NULLIF(excluded.repo_slug, ''), repos.repo_slug),
-         remote_url = COALESCE(excluded.remote_url, repos.remote_url),
+         remote_url = CASE WHEN @origin_provided = 1 AND (repos.hidden = 1 OR repos.origin_revision = @origin_revision)
+           THEN excluded.remote_url ELSE repos.remote_url END,
+         origin_revision = repos.origin_revision + CASE
+           WHEN repos.hidden = 1 OR (repos.origin_revision = @origin_revision
+             AND @origin_provided = 1 AND excluded.remote_url IS NOT repos.remote_url)
+           THEN 1 ELSE 0 END,
          hidden     = 0,
          updated_at = datetime('now')`,
     )
@@ -179,6 +189,8 @@ export function upsertRepoByRoot(p: ProjectInput): void {
       name: p.name || deriveName(root),
       repo_slug: p.repoSlug ?? "",
       remote_url: p.originUrl ?? null,
+      origin_provided: p.originUrl === undefined ? 0 : 1,
+      origin_revision: p.originRevision ?? 0,
       root_path: root,
       added_at: Date.now(),
     });
@@ -192,11 +204,14 @@ export function upsertRepoByRoot(p: ProjectInput): void {
  *  hidden = 0, so the removal sticks. Re-adding the folder un-hides it. */
 export function removeRepoByRoot(repoRoot: string): void {
   if (!repoRoot) return;
-  openZerosDb()
-    .prepare(
-      "UPDATE repos SET hidden = 1, updated_at = datetime('now') WHERE root_path = ?",
-    )
-    .run(canonicalRepoRoot(repoRoot));
+  const db = openZerosDb(), root = canonicalRepoRoot(repoRoot);
+  db.transaction(() => {
+    // Explicit re-adds may point at a replacement checkout at the same path.
+    db.prepare("DELETE FROM github_repository_remotes WHERE repo_id IN (SELECT id FROM repos WHERE root_path = ?)").run(root);
+    db.prepare(
+      "UPDATE repos SET hidden = 1, origin_revision = origin_revision + 1, updated_at = datetime('now') WHERE root_path = ?",
+    ).run(root);
+  })();
 }
 
 /** Explicit re-adds reconcile old workspace history before unhiding the repo. */
@@ -240,6 +255,58 @@ export function isKnownRepoRoot(repoRoot: string): boolean {
       .prepare("SELECT 1 FROM repos WHERE root_path = ? AND hidden = 0")
       .get(root) != null
   );
+}
+
+/** Read without seeding/unhiding a removed project. */
+export function projectForRoot(repoRoot: string): EngineProject | null {
+  const row = openZerosDb().prepare(
+    "SELECT id, canonical_id, name, remote_url, origin_revision, root_path, repo_slug, added_at FROM repos WHERE root_path = ? AND hidden = 0",
+  ).get(canonicalRepoRoot(repoRoot)) as RepoRow | undefined;
+  return row ? toProject(row) : null;
+}
+
+export interface GithubRemoteIdentity {
+  remote: string;
+  url: string;
+  repositoryId: string;
+  nodeId: string;
+  owner: string;
+  repo: string;
+}
+
+/** A manual change to the remote URL retires its previous identity binding. */
+export function githubRemoteIdentity(repoRoot: string, remote: string, url: string): GithubRemoteIdentity | null {
+  const row = openZerosDb().prepare(`SELECT r.remote_name AS remote, r.remote_url AS url,
+    r.github_repository_id AS repositoryId, r.github_node_id AS nodeId, r.owner, r.name AS repo
+    FROM github_repository_remotes r JOIN repos p ON p.id = r.repo_id
+    WHERE p.root_path = ? AND p.hidden = 0 AND r.remote_name = ? AND r.remote_url = ?`)
+    .get(canonicalRepoRoot(repoRoot), remote, url) as GithubRemoteIdentity | undefined;
+  return row ?? null;
+}
+
+/** Called at the admitted Git-config commit, with no asynchronous work between
+ * the final owner check, filesystem rename and this native metadata commit. */
+export function saveGithubRemoteIdentities(owner: EngineProject, identities: GithubRemoteIdentity[], originUrl: string | null,
+  moves: { from: string; to: string }[] = []): EngineProject | null {
+  const db = openZerosDb();
+  return db.transaction(() => {
+    const current = projectForRoot(owner.repoRoot);
+    if (!current || current.canonicalId !== owner.canonicalId || current.originRevision !== owner.originRevision) return null;
+    const put = db.prepare(`INSERT INTO github_repository_remotes
+      (repo_id, remote_name, remote_url, github_repository_id, github_node_id, owner, name)
+      VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(repo_id, remote_name) DO UPDATE SET
+      remote_url = excluded.remote_url, github_repository_id = excluded.github_repository_id,
+      github_node_id = excluded.github_node_id, owner = excluded.owner, name = excluded.name`);
+    for (const identity of identities) put.run(owner.id, identity.remote, identity.url, identity.repositoryId, identity.nodeId, identity.owner, identity.repo);
+    if (current.originUrl !== originUrl) db.prepare(`UPDATE repos SET remote_url = ?, origin_revision = origin_revision + 1,
+      updated_at = datetime('now') WHERE id = ?`).run(originUrl, owner.id);
+    // PR numbers are repository-scoped. Only rewrite a link that names this
+    // verified source; an adopted PR from an unrelated upstream stays intact.
+    for (const move of moves) db.prepare(`UPDATE workspaces SET pr_url = ? || pr_number
+      WHERE repo_root = ? AND pr_number IS NOT NULL AND lower(pr_url) = lower(? || pr_number)`)
+      .run(`https://github.com/${move.to}/pull/`, owner.repoRoot, `https://github.com/${move.from}/pull/`);
+    return projectForRoot(owner.repoRoot);
+  })();
 }
 
 /** The user-visible project name of an open (non-hidden) repo, or null when

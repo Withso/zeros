@@ -32,6 +32,8 @@ import {
   loadProjects,
   normalizeProjectRoot,
   syncProjectsToEngine,
+  refreshNativeProjectOrigins,
+  subscribeNativeProjectOrigins,
   type Project,
 } from "./projects-store";
 import {
@@ -92,6 +94,7 @@ function sameProject(a: Project, b: Project): boolean {
     a.repoRoot === b.repoRoot &&
     a.repoSlug === b.repoSlug &&
     a.originUrl === b.originUrl &&
+    a.originRevision === b.originRevision &&
     a.isGitRepository === b.isGitRepository &&
     a.addedAt === b.addedAt
   );
@@ -167,9 +170,16 @@ export function useSyncProjectsToEngine(): void {
   useEffect(() => {
     let warmed = false;
     let cancelWarm = () => {};
+    let stopChanges = () => {};
     const run = () => {
       const bridge = getActiveBridge();
       if (!bridge || bridge.status !== "connected") return;
+      stopChanges();
+      stopChanges = bridge.on("DB_CHANGED", message => {
+        const { kinds, snapshotPublication } = message as { kinds?: string[]; snapshotPublication?: boolean };
+        if (getActiveBridge() !== bridge || snapshotPublication || !kinds?.includes("projects")) return;
+        void refreshNativeProjectOrigins().then(changed => { if (changed) notifyProjectsChanged(); });
+      });
       void syncProjectsToEngine().then((recovered) => {
         if (recovered) notifyProjectsChanged();
       });
@@ -194,9 +204,12 @@ export function useSyncProjectsToEngine(): void {
       }
     };
     const stop = onActiveBridgeConnected(run);
+    const stopOrigins = subscribeNativeProjectOrigins(notifyProjectsChanged);
     return () => {
       cancelWarm();
       stop();
+      stopChanges();
+      stopOrigins();
     };
   }, []);
 }
