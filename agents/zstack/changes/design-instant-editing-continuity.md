@@ -26,7 +26,9 @@
 - Rule: optimistic predictions must order behind in-flight writes that will
   adopt on top of them. An Undo prediction painted while an edit was still
   saving became that edit's recorded baseline; predict inside the lane after
-  pending edits land, but keep consecutive history predictions immediate.
+  pending edits land, in submission order (a later step waits behind an
+  earlier deferred prediction), but keep consecutive history predictions
+  immediate.
   Speeding up the UI exposed this race (pre-existing on main) in CI first.
 - Rule: attribute React commits to store publications before optimizing
   (production profiling build, scheduled-updater identities); most frame-switch
