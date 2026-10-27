@@ -293,11 +293,12 @@ export class CloudV2Computers {
 
   /** Live snapshots due a refresh by themselves, oldest first. Eligibility is
    * decided before the limit, so computers with nothing due never crowd out
-   * one that is; a deferred computer waits until its next check. */
+   * one that is; a deferred computer waits until its next check. A build from
+   * before builds recorded their runtime counts as having another runtime. */
   async refreshCandidates(runtimeSha256: string, limit = 25): Promise<CloudV2RefreshCandidate[]> {
     const { rows } = await withSystemTx(this.pool, tx => tx.query<{ org_id: string; active_build_id: string; created_by: string; recipe: CloudV2Recipe; runtime_stale: boolean; refresh_due: boolean }>(
       `SELECT * FROM (SELECT c.org_id, c.active_build_id, b.created_by, b.recipe, b.finished_at, c.refresh_next_at,
-         (b.runtime_sha256 IS NOT NULL AND b.runtime_sha256 <> $1
+         (b.runtime_sha256 IS DISTINCT FROM $1
            AND NOT EXISTS (SELECT 1 FROM cloud_v2_computer_builds f WHERE f.org_id = c.org_id AND f.reason = 'runtime'
              AND f.runtime_sha256 = $1 AND f.state IN ('failed','cancelled') AND f.created_at > clock_timestamp() - interval '6 hours')
            AND (SELECT count(*) FROM cloud_v2_computer_builds f WHERE f.org_id = c.org_id AND f.reason = 'runtime'
