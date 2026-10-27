@@ -132,6 +132,10 @@ import {
 import { useInternalFeature, useIsInternalUser } from "./internal-features";
 import { FollowUpBehaviorSetting } from "./follow-up-behavior-setting";
 import {
+  setRestartAutomaticallyOnUpdate,
+  useRestartAutomaticallyOnUpdate,
+} from "./update-settings";
+import {
   AGENT_CONTROL_FEATURE_ROWS,
   agentControlFeaturesAt,
   useAgentControlFeatureActive,
@@ -913,6 +917,7 @@ function SectionNavButton({
 
 function GeneralPanel() {
   const showHidden = useShowHiddenWorkspaces();
+  const restartAutomatically = useRestartAutomaticallyOnUpdate();
   // Grouped-card layout (SettingsGroup) — same recipe as Appearance.
   return (
     <div className="flex flex-col gap-6">
@@ -927,6 +932,17 @@ function GeneralPanel() {
             checked={showHidden}
             onCheckedChange={setShowHiddenWorkspaces}
             aria-label="Show hidden workspaces in dashboard"
+          />
+        </SettingsRow>
+        <SettingsRow
+          label="Restart automatically on update"
+          hint="Automatically restart Zeros when idle to install downloaded updates."
+          htmlFor="restart-automatically-on-update"
+        >
+          <Switch
+            id="restart-automatically-on-update"
+            checked={restartAutomatically}
+            onCheckedChange={setRestartAutomaticallyOnUpdate}
           />
         </SettingsRow>
       </SettingsGroup>

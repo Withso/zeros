@@ -39,6 +39,31 @@ describe("personal app preference ownership", () => {
       }),
     ).toEqual({ appearance: { mode: "dark", codeThemes: {} } });
   });
+  it("persists automatic update restarts only as a personal app preference", () => {
+    expect(syncPersonalPreferences({})).toEqual({});
+    expect(
+      syncPersonalPreferences({}, { restart_automatically_on_update: true }),
+    ).toEqual({ restart_automatically_on_update: true });
+    expect(syncPersonalPreferences({})).toEqual({
+      restart_automatically_on_update: true,
+    });
+    expect(readFileSync(path.join(root, "settings.toml"), "utf8")).toContain(
+      "restart_automatically_on_update = true",
+    );
+    expect(() =>
+      syncPersonalPreferences({}, { restart_automatically_on_update: "true" }),
+    ).toThrow();
+    for (const layer of ["repo", "repo-local", "workspace-local", "team"] as const)
+      expect(
+        sanitizeLayer(
+          { preferences: { restart_automatically_on_update: true } },
+          layer,
+        ).doc,
+      ).toEqual({});
+    expect(
+      syncPersonalPreferences({}, { restart_automatically_on_update: false }),
+    ).toEqual({ restart_automatically_on_update: false });
+  });
   it("replaces one preference object without losing another window's unrelated preference", () => {
     syncPersonalPreferences({
       appearance: { mode: "dark", codeThemes: { dark: "old" } },

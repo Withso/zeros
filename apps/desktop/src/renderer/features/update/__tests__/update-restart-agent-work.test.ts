@@ -25,6 +25,7 @@ const working = () => anyAgentHasActiveWork(store());
 
 describe.each([
   ["Local", LOCAL_CWD],
+  ["organization-local", "/workspaces/organization/project"],
   ["cloud", CLOUD_CWD],
 ])("update restart agent-work gate (%s workspace)", (_placement, cwd) => {
   beforeEach(() => store().clearAll());
