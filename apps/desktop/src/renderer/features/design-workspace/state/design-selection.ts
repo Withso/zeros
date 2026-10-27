@@ -1779,6 +1779,50 @@ export async function hoverDesignNode(input: {
     );
 }
 
+interface DesignNodeWarmRead {
+  workspaceId: string;
+  folder: string;
+  frame: string;
+  sourceVersion: string;
+  nodeId: string;
+}
+const warmReadByWorkspace = new Map<string, { active: boolean; pending: DesignNodeWarmRead | null }>();
+
+/** Keyboard focus is intent too: read a focused row's exact details into the
+ * runtime cache so selecting it paints the inspector at once. Latest-only per
+ * workspace; no hover state, no selection, nothing for a missing runtime. */
+export function warmDesignNodeDetails(input: DesignNodeWarmRead): void {
+  const cached = designRuntimeFrameState(input.workspaceId, input.frame)?.detailsByNode[input.nodeId];
+  if (cached?.sourceVersion === input.sourceVersion) return;
+  const queue = warmReadByWorkspace.get(input.workspaceId) ?? { active: false, pending: null };
+  warmReadByWorkspace.set(input.workspaceId, queue);
+  queue.pending = input;
+  if (queue.active) return;
+  queue.active = true;
+  void (async () => {
+    while (queue.pending) {
+      const request: DesignNodeWarmRead = queue.pending;
+      queue.pending = null;
+      const runtime = designFrameRuntime(request.workspaceId, request.frame);
+      if (!runtime || runtime.isActive?.() === false ||
+        (runtime.sourceVersion !== undefined && runtime.sourceVersion !== request.sourceVersion)) continue;
+      try {
+        const details = await runtime.getNodeDetails(request.nodeId);
+        if (details.sourceVersion === request.sourceVersion &&
+          designFrameRuntime(request.workspaceId, request.frame) === runtime)
+          useDesignRuntimeStore.getState().publishNodeDetails(
+            request.workspaceId, request.folder, request.frame, details, request.sourceVersion);
+      } catch {
+        // Speculative: the row may disappear before its readback.
+      }
+    }
+  })().finally(() => {
+    queue.active = false;
+    if (!queue.pending && warmReadByWorkspace.get(input.workspaceId) === queue)
+      warmReadByWorkspace.delete(input.workspaceId);
+  });
+}
+
 export async function setDesignNodeVisibility(input: {
   workspaceId: string;
   folder: string;
@@ -2131,6 +2175,7 @@ export function resetDesignSelectionWorkflowsForTests(): void {
     queue.pending?.resolve();
   }
   hoverReadQueueByWorkspace.clear();
+  warmReadByWorkspace.clear();
   runtimeAuditPublicationByFrame.clear();
   selectionVersion = 0;
 }

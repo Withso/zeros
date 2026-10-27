@@ -49,6 +49,7 @@ import { DesignSavedEditingContext, DesignSavedEditingSession } from "./design-s
 import { DesignDirectoryPill } from "./design-directory-pill";
 import { DesignFloatingPanel } from "./design-floating-panel";
 import { DesignInspector } from "./design-inspector";
+import { useDesignInspectorPresentation } from "./design-inspector-presentation";
 import { errorMessage } from "./design-workspace-error";
 import { DesignWorkspaceSidebarPanels } from "./design-workspace-sidebar-panels";
 import {
@@ -263,6 +264,20 @@ export function DesignWorkspaceColumn({
       : (runtimeFrame?.snapshot?.frame ?? null);
   });
 
+  // Selection publishes at once; the inspector keeps its last complete view
+  // (inert, briefly) while the new selection's exact details arrive.
+  const inspectorPresentation = useDesignInspectorPresentation(
+    JSON.stringify([workspaceId, pageSnapshot?.directoryId ?? null, activePageId ?? null, ownerRevision]),
+    {
+      frame: selectedFrame,
+      frameSelected,
+      details: selectedDetails,
+      selectedNodeId,
+      selectedNodeIds,
+    },
+  );
+  const inspected = inspectorPresentation.selection;
+
   // A freshly provisioned design surface is ready when its first exact-key
   // snapshot either resolves or fails open; code-only settling UI must not
   // remain latched for this folder.
@@ -466,17 +481,22 @@ export function DesignWorkspaceColumn({
             />
           }
           inspector={
+            <div
+              data-design-inspector-presentation={inspectorPresentation.held ? "held" : "current"}
+              className="contents"
+              {...(inspectorPresentation.held ? { inert: "", "aria-busy": true } : {})}
+            >
             <DesignInspector
               workspaceId={workspaceId}
               pages={pageSnapshot?.pages}
               activePageId={activePageId}
               pageFrames={designFrameViews(snapshot.data)}
               folder={folder}
-              frame={selectedFrame}
-              frameSelected={frameSelected}
-              details={selectedDetails}
-              selectedNodeId={selectedNodeId}
-              selectedNodeIds={selectedNodeIds}
+              frame={inspected.frame}
+              frameSelected={inspected.frameSelected}
+              details={inspected.details}
+              selectedNodeId={inspected.selectedNodeId}
+              selectedNodeIds={inspected.selectedNodeIds}
               lint={snapshot.data?.lint ?? null}
               active={surfaceActive}
               canvasBackground={canvasBackground}
@@ -486,6 +506,7 @@ export function DesignWorkspaceColumn({
               onOpenMotionTimeline={openMotionTimeline}
               zoomActionsRef={zoomActionsRef}
             />
+            </div>
           }
         />
       </div>

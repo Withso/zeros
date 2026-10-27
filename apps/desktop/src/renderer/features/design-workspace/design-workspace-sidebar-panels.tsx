@@ -41,6 +41,7 @@ import {
   selectDesignNode,
   setDesignNodeVisibility,
   toggleDesignNodeSelection,
+  warmDesignNodeDetails,
 } from "./state/design-selection";
 import { useDesignRuntimeStore } from "./state/design-runtime-store";
 import { noteDesignFrameIntent } from "./state/design-frame-intent";
@@ -1323,6 +1324,17 @@ function OwnedDesignWorkspaceSidebarPanels({
                         layer.hasChildren ? row.expanded : undefined
                       }
                       aria-keyshortcuts="F2 Shift+H Meta+C Control+C Meta+D Control+D Delete Backspace"
+                      onFocus={() => {
+                        if (!workspaceId || !folder) return;
+                        noteDesignFrameIntent(workspaceId, frame.file);
+                        warmDesignNodeDetails({
+                          workspaceId,
+                          folder,
+                          frame: frame.file,
+                          sourceVersion: frame.sourceVersion,
+                          nodeId: layer.node.oid,
+                        });
+                      }}
                       onDoubleClick={(event) => handleRowDoubleClick(event, row)}
                       onClick={(event) => {
                         if (
