@@ -93,6 +93,7 @@ import { ComputerUseController } from "./features/agent-control/computer-use-con
 import { SimulatorController } from "./features/simulators/simulator-controller";
 import { SimulatorAgentController } from "./features/simulators/simulator-agent-controller";
 import { BrowserSessionController } from "./features/browser/browser-session-controller";
+import { KeepAwakeController } from "./features/settings/keep-awake-controller";
 import { BrowserAgentPictureInPicture } from "./features/browser/browser-agent-picture-in-picture";
 import { AppSidebar } from "./shell/app-sidebar";
 import { useSidebarCollapsed } from "./shell/sidebar-collapsed";
@@ -1429,6 +1430,7 @@ export function AppShell() {
             renderer; useAnyAgentRunning reads a global Zustand store, so no
             provider below the gate is required. */}
         <UpdateNotifications />
+        <KeepAwakeController />
         <InviteDeepLinkHandler />
         <AuthSecurityEventHandler />
         <AuthGate>
