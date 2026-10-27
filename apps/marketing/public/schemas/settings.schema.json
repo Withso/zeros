@@ -274,6 +274,9 @@
             "steer"
           ]
         },
+        "restart_automatically_on_update": {
+          "type": "boolean"
+        },
         "internal": {
           "type": "object",
           "propertyNames": {

@@ -388,7 +388,7 @@ function LocalComputerUsePanel({ surfaceActive }: { surfaceActive: boolean }) {
     }
   }, [blockedApps, updateBlockedApps]);
 
-  const settingsUnavailable = !resolved.resolved || Boolean(resolved.error);
+  const settingsUnavailable = !resolved.resolved || Boolean(resolved.readError);
   const switchDisabled = (key: ComputerUseBooleanSetting) =>
     settingsUnavailable || managed(key) || pending[key]?.settled === false;
   const blockedAppsDisabled =

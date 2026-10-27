@@ -1,6 +1,6 @@
 import { useEffect, useSyncExternalStore } from "react";
 import { KeyedAsyncCache } from "../../shared/lib/keyed-async-cache";
-import { useCachedRead } from "../../state/use-cached-read";
+import { useRecoveringRead } from "../../state/use-recovering-read";
 import { useWorkspaceDispatch } from "../../state/store";
 import { Button } from "../../shared/ui";
 import { useActiveOrganization, useTeams } from "../team/team-store";
@@ -69,7 +69,7 @@ export function useCloudComputerV2CreateGate(active: boolean) {
     isFeatureEnabled("cloud-workspaces") && Boolean(organization && !organization.isPersonal && me);
   const shown = useSyncExternalStore(active ? subscribeVisibility : () => () => {}, visible, () => true);
   const key = enabled ? cloudComputerRepositoriesKey(me!.user.id, organization!.id) : null;
-  const read = useCachedRead(cloudComputerRepositoriesCache, key, readInstalled,
+  const read = useRecoveringRead(cloudComputerRepositoriesCache, key, readInstalled,
     { enabled: enabled && active && shown, maxAgeMs: MAX_AGE_MS });
   const reason = enabled ? cloudComputerV2CreateReason(read.data, read.error) : null;
   useEffect(() => {

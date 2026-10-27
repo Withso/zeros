@@ -10,7 +10,7 @@ import { ChevronDown, ChevronUp, CircleCheck, CircleMinus, CircleX, LoaderCircle
 import { Button, GithubIcon, Input } from "../../shared/ui";
 import { Badge, CodeTextarea } from "../../shared/ui/primitives";
 import { KeyedAsyncCache } from "../../shared/lib/keyed-async-cache";
-import { useCachedRead } from "../../state/use-cached-read";
+import { useRecoveringRead } from "../../state/use-recovering-read";
 import { useActiveOrganization, useTeams } from "../team/team-store";
 import { ControlPlaneError } from "../team/control-plane";
 import { SettingsGroup, SettingsSection } from "./settings-ui";
@@ -97,7 +97,7 @@ function CloudComputerScope({ userId, organizationId, canManage, active }: {
   userId: string; organizationId: string; canManage: boolean; active: boolean;
 }) {
   const key = computerKey(userId, organizationId);
-  const computer = useCachedRead(computers, canManage ? key : null, () => getCloudV2Computer(organizationId),
+  const computer = useRecoveringRead(computers, canManage ? key : null, () => getCloudV2Computer(organizationId),
     { enabled: active, maxAgeMs: 30_000 });
   const data = computer.data;
   const builds = data?.builds ?? [];

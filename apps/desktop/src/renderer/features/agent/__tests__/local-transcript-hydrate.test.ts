@@ -100,6 +100,40 @@ afterEach(() => {
   vi.useRealTimers();
 });
 
+it.each(["/personal/repo", "/organization/repo"])("records an actual history failure and clears it on recovery in %s", async cwd => {
+  useSessionsStore.getState().setSession("chat-1", { ...BLANK, cwd, transcriptState: "cold", hasTranscript: true });
+  const h = harness();
+  h.read.mockRejectedValueOnce(new Error("temporary history failure"));
+  await h.hydrate("chat-1");
+  expect(slot("chat-1")).toMatchObject({ transcriptState: "loading", transcriptReadError: "Couldn't load chat history." });
+  const retry = h.hydrate("chat-1");
+  expect(slot("chat-1")?.transcriptReadError).toBeNull();
+  h.resolve({ messages: [user("restored")], source: "local" });
+  await retry;
+  expect(slot("chat-1")).toMatchObject({ transcriptState: "resident", transcriptReadError: null });
+});
+
+it.each([
+  "/personal/repo", "/organization/repo",
+  "cloud://11111111-1111-4111-8111-111111111111/22222222-2222-4222-8222-222222222222",
+].flatMap(cwd => ["removed", "resident"].map(state => ({ cwd, state }))))("ignores a rejected history read after its session is $state in $cwd", async ({ cwd, state }) => {
+  const chatId = isCloudWorkspace(cwd)
+    ? cloudScopedId({ organizationId: "11111111-1111-4111-8111-111111111111", workspaceId: "22222222-2222-4222-8222-222222222222" }, "chat-1")
+    : "chat-1";
+  useSessionsStore.getState().setSession(chatId, { ...BLANK, cwd, transcriptState: "cold", hasTranscript: true });
+  const h = harness();
+  let reject!: (error: Error) => void;
+  h.read.mockImplementationOnce(() => new Promise<Page>((_, fail) => { reject = fail; }));
+  const flight = h.hydrate(chatId);
+  if (state === "removed") useSessionsStore.getState().detachSession(chatId);
+  else useSessionsStore.getState().patchSession(chatId, { transcriptState: "resident" });
+  reject(new Error("retired history failure"));
+  await flight;
+  if (state === "removed") expect(slot(chatId)).toBeUndefined();
+  else expect(slot(chatId)?.transcriptReadError).toBeNull();
+  expect(h.pendingHydrates.has(chatId)).toBe(false);
+});
+
 describe("conversation context reset", () => {
   it.each(["/repo", "/organization/repo"])("retires only the reset chat and waits for canonical history before sending in %s", async (folder) => {
     const before = [user("kept"), agent("kept-answer"), user("removed"), agent("removed-answer")];

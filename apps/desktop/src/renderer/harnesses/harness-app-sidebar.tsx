@@ -152,6 +152,7 @@ const requests: { op: string; params?: Record<string, unknown> }[] = [];
 let deferChangeLines = false;
 const pendingChangeLines: (() => void)[] = [];
 let deferDashboardArchives = params.has("defer-dashboard-archives");
+let failDashboardArchives = false;
 const pendingDashboardArchives: { resolve: () => void; reject: (error: Error) => void }[] = [];
 const resourceTotals = params.has("resource-pressure")
   ? {
@@ -323,6 +324,8 @@ const fixtureBridge = {
     if (message.op === "workspace.list") {
       if (deferDashboardArchives && message.params?.archived === true)
         await new Promise<void>((resolve, reject) => pendingDashboardArchives.push({ resolve, reject }));
+      if (failDashboardArchives && message.params?.archived === true)
+        throw new Error("Archive list unavailable");
       const slug = message.params?.repoSlug;
       result = {
         workspaces:
@@ -394,12 +397,13 @@ const fixtureBridge = {
   },
 } as unknown as RuntimeClient;
 setActiveBridge(fixtureBridge);
-// PR buttons read the provider's connection as well as the request singleton.
-// Use the real provider with a synthetic Local transport in this scenario.
+// PR buttons and Dashboard recovery observe the provider's connection as well
+// as the request singleton. Give those scenarios the connected Local transport.
 const { BridgeProvider } = await import("../platform/bridge/use-bridge");
 const { Fragment } = await import("react");
-const FixtureBridgeProvider = hoverCards ? BridgeProvider : Fragment;
-if (hoverCards) {
+const withBridge = hoverCards || params.has("dashboard");
+const FixtureBridgeProvider = withBridge ? BridgeProvider : Fragment;
+if (withBridge) {
   const { RuntimeClient: FixtureRuntimeClient } = await import("../platform/bridge/ws-client");
   FixtureRuntimeClient.prototype.connect = async function () {
     (this as unknown as { setStatus(status: string): void }).setStatus("connected");
@@ -544,13 +548,14 @@ if (params.has("organizations")) {
 }
 
 Object.assign(window, {
-  dashboardReleaseArchives: (fail = false) => {
-    deferDashboardArchives = false;
+  dashboardReleaseArchives: (fail = false, keepDeferred = false) => {
+    deferDashboardArchives = keepDeferred;
     for (const read of pendingDashboardArchives.splice(0))
       if (fail) read.reject(new Error("Archive list unavailable"));
       else read.resolve();
   },
   dashboardPendingArchiveReads: () => pendingDashboardArchives.length,
+  dashboardFailArchives: (fail: boolean) => { failDashboardArchives = fail; },
   dashboardAddPending: async () => {
     const { beginPendingCreate } = await import("../state/pending-workspaces");
     return beginPendingCreate({ repoRoot: projects[0].repoRoot, repoSlug: projects[0].repoSlug, label: "Prepare integration tests" });

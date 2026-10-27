@@ -342,6 +342,22 @@ describe("UI smoke independent execution", () => {
     for (const page of fixture.pages) expect(page.close).toHaveBeenCalledOnce();
   });
 
+  it("isolates recovery clocks while retaining page-error reporting", async () => {
+    const fixture = fakeRun();
+    await fixture.run();
+    const recovery = fixture.calls.find(
+      (call) => call.id === "design-frame-recovery",
+    )!;
+    const interactions = fixture.calls.filter((call) =>
+      ["design-inline-tools", "design-workspace-canvas", "customize"].includes(call.id),
+    );
+    for (const interaction of interactions)
+      expect(interaction.page).not.toBe(recovery.page);
+    expect(recovery.page.close).toHaveBeenCalledOnce();
+    recovery.page.emit("pageerror", new Error("recovery page error"));
+    expect(fixture.pageErrors).toEqual(["recovery page error"]);
+  });
+
   it.each([1, 2, 3])(
     "isolates shard %i units while preserving core's phase context and fixtures",
     async (shard) => {

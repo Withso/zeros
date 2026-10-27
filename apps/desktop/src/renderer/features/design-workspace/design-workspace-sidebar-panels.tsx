@@ -44,6 +44,9 @@ import {
 } from "./state/design-selection";
 import { useDesignRuntimeStore } from "./state/design-runtime-store";
 import { useActiveWorkspace } from "../../state/use-active-workspace";
+import { useReadRecovery } from "../../state/use-read-recovery";
+import { useDocumentActive } from "../../state/use-document-active";
+import { useBridgeStatus } from "../../platform/bridge/use-bridge";
 import { useDesignWorkspaceSnapshot } from "./state/use-design-workspace";
 import { useDesignPageSnapshot } from "./state/design-page-projection";
 import { useDesignWorkspaceUiStore } from "./state/design-workspace-ui";
@@ -312,11 +315,18 @@ function OwnedDesignWorkspaceSidebarPanels({
 }: OwnedDesignWorkspaceSidebarPanelsProps) {
   const savedEditing = useContext(DesignSavedEditingContext);
   const workspaceId = workspace?.id ?? null;
+  const connected = useBridgeStatus(folder) === "connected";
+  const active = useDocumentActive(surfaceActive && isDesign);
   const snapshot = useDesignWorkspaceSnapshot(
     workspaceId,
     folder,
-    surfaceActive && isDesign,
+    active && connected,
   );
+  const recovery = useReadRecovery(`design-layers:${JSON.stringify([workspaceId, folder])}`, {
+    error: snapshot.error, pending: snapshot.loading || snapshot.refreshing,
+    hasContent: snapshot.data !== undefined, retry: snapshot.refresh,
+    connected, active, folder: folder ?? "",
+  });
   const selectedFrameFile = useDesignWorkspaceUiStore((state) =>
     workspaceId
       ? (state.byWorkspace[workspaceId]?.selectedFrame ?? null)
@@ -1425,10 +1435,10 @@ function OwnedDesignWorkspaceSidebarPanels({
               })}
             </div>
           </div>
-          {!snapshot.data && snapshot.loading ? (
+          {!snapshot.data && !recovery.error ? (
             <span className="text-muted-fg px-2 py-2">Loading layers…</span>
           ) : null}
-          {!snapshot.data && snapshot.error ? (
+          {!snapshot.data && recovery.error ? (
             <div className="flex flex-col items-start gap-2 px-2 py-2">
               <span className="text-muted-fg">Couldn’t load layers</span>
               <Button

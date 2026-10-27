@@ -1,7 +1,8 @@
-import { useLayoutEffect, useRef, useState } from "react";
+import { useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useDocumentActive } from "../../state/use-document-active";
+import { useReadRecovery } from "../../state/use-read-recovery";
 
-type HistoryStatus = "none" | "loading" | "unavailable";
+type HistoryStatus = "none" | "loading" | "waiting" | "unavailable";
 
 /** A bounded presentation of a cold read, never a transcript/transport deadline.
  * UNKNOWN is not ongoing work. Readable rows revalidate silently; a new chat
@@ -12,15 +13,30 @@ export function useTranscriptHistoryStatus({
   hasMessages,
   hasTranscript,
   resident,
+  error,
+  connected = true,
+  retry,
 }: {
   identity: string;
   active: boolean;
   hasMessages: boolean;
   hasTranscript: boolean;
   resident: boolean;
+  error?: string | null;
+  connected?: boolean;
+  retry?: () => Promise<void>;
 }): HistoryStatus {
   const visible = useDocumentActive(active);
   const pending = !resident && !hasMessages && hasTranscript;
+  const readError = useMemo(() => error ? new Error(error) : null, [error]);
+  const recovery = useReadRecovery(`transcript:${identity}`, {
+    error: resident ? null : readError,
+    pending: !resident && !error,
+    hasContent: hasMessages,
+    active: visible && !resident && !hasMessages,
+    connected,
+    retry: () => retry?.(),
+  });
   const coldRead = useRef<{ identity: string; startedAt: number } | null>(null);
   const [presentation, setPresentation] = useState({ identity, status: "none" as HistoryStatus });
 
@@ -43,7 +59,9 @@ export function useTranscriptHistoryStatus({
     const update = () => {
       if (retired) return;
       const elapsed = performance.now() - startedAt;
-      const status = elapsed < 180 ? "none" : elapsed < 2_500 ? "loading" : "unavailable";
+      // Stop the animation on a slow read without inventing a failure. Only
+      // a rejected read that fails recovery can offer an unavailable state.
+      const status = elapsed < 180 ? "none" : elapsed < 2_500 ? "loading" : "waiting";
       publish(status);
       const next = elapsed < 180 ? 180 : 2_500;
       if (elapsed < next) timer = setTimeout(update, next - elapsed);
@@ -55,6 +73,7 @@ export function useTranscriptHistoryStatus({
     };
   }, [identity, visible, pending]);
 
-  if (!visible || hasMessages) return "none";
+  if (!visible || hasMessages || resident) return "none";
+  if (recovery.error) return "unavailable";
   return pending && presentation.identity === identity ? presentation.status : "none";
 }

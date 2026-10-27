@@ -5,6 +5,8 @@ import {
   type AsyncCacheSnapshot,
 } from "../../shared/lib/keyed-async-cache";
 import { useDocumentActive } from "../../state/use-document-active";
+import { useBridgeStatus } from "../../platform/bridge/use-bridge";
+import { useReadRecovery } from "../../state/use-read-recovery";
 import {
   changeCountsForGeneration,
   statusForGeneration,
@@ -136,7 +138,8 @@ function useSnapshot<T>(
 /** Git does not wait on GitHub. Each lane retains the last exact-owner result;
  * only the selected, expanded, foreground Summary starts reads or timers. */
 export function useSummaryGitStatus(workspace: Workspace, active: boolean) {
-  const observing = useDocumentActive(active, true);
+  const connected = useBridgeStatus(workspace.path) === "connected";
+  const observing = useDocumentActive(active && connected, true);
   const key = summaryGitKey(workspace);
   const generation = useGitRefreshKey(workspace.path, workspace.id, observing);
   const git = useSnapshot(gitCache, key);
@@ -177,7 +180,16 @@ export function useSummaryGitStatus(workspace: Workspace, active: boolean) {
     () => invalidateSummaryGit(workspace),
     [workspace],
   );
-  return { git, pr, refresh };
+  const recovery = useReadRecovery(`summary-git:${key}`, {
+    error: git.error,
+    pending: git.loading || git.refreshing,
+    hasContent: git.data !== undefined,
+    retry: () => loadSummaryGit(workspace, generation),
+    connected,
+    active: observing,
+    folder: workspace.path,
+  });
+  return { git, pr, refresh, connected, error: recovery.error, readError: recovery.readError };
 }
 
 registerPrWorkspaceCacheForget((workspaceId) => {

@@ -37,6 +37,8 @@ import {
   KeyedAsyncCache,
   type AsyncCacheSnapshot,
 } from "../../shared/lib/keyed-async-cache";
+import { useReadRecovery } from "../../state/use-read-recovery";
+import { useDocumentActive } from "../../state/use-document-active";
 
 // Settings documents are shared server state, not component state. A bounded
 // renderer cache makes repo/section switches read an already-complete immutable
@@ -170,6 +172,8 @@ export interface UseResolvedSettings {
   resolved: ResolvedSettingsWire | null;
   loading: boolean;
   error: string | null;
+  /** Raw failure for write safety; presentation may still be recovering. */
+  readError: string | null;
   refresh: () => void;
 }
 
@@ -181,7 +185,8 @@ export function useResolvedSettings(
   mainRepoRoot?: string,
 ): UseResolvedSettings {
   const bridge = useBridge();
-  const bridgeStatus = useBridgeStatus();
+  const bridgeStatus = useBridgeStatus(repoRoot);
+  const active = useDocumentActive(true);
   const key = resolvedSettingsKey(repoRoot, mainRepoRoot);
   const snapshot = useSettingsSnapshot(resolvedSettingsCache, key);
 
@@ -189,7 +194,7 @@ export function useResolvedSettings(
   // resolved document while the engine builds its replacement.
   const refresh = useCallback(() => {
     if (!bridge || bridgeStatus !== "connected") return;
-    void resolvedSettingsCache
+    return resolvedSettingsCache
       .load(key, () => bridgeSettingsResolve(bridge, repoRoot, mainRepoRoot), {
         force: true,
       })
@@ -215,6 +220,7 @@ export function useResolvedSettings(
   }, [bridge, bridgeStatus, key, repoRoot, mainRepoRoot]);
 
   useEffect(() => {
+    if (!active) return;
     return onActiveBridgeConnected((client, { initial }) => {
       void resolvedSettingsCache
         .load(
@@ -228,24 +234,24 @@ export function useResolvedSettings(
           },
         )
         .catch(() => {});
-    });
-  }, [key, repoRoot, mainRepoRoot]);
+    }, repoRoot);
+  }, [active, key, repoRoot, mainRepoRoot]);
   useSettingsChanged(refreshFromBroadcast);
+  const recovery = useReadRecovery(`settings-resolved:${key}`, {
+    error: snapshot.error,
+    pending: snapshot.loading || snapshot.refreshing,
+    hasContent: snapshot.data !== undefined,
+    retry: refresh,
+    connected: bridgeStatus === "connected",
+    active,
+    folder: repoRoot,
+  });
 
   return {
     resolved: snapshot.data ?? null,
-    loading:
-      bridgeStatus === "connecting" && snapshot.data === undefined
-        ? true
-        : bridgeStatus === "connected"
-          ? snapshot.loading
-          : false,
-    error:
-      snapshot.error?.message ??
-      ((!bridge || bridgeStatus === "disconnected") &&
-      snapshot.data === undefined
-        ? "Not connected to the engine."
-        : null),
+    loading: snapshot.data === undefined && (bridgeStatus !== "connected" || recovery.pending),
+    error: recovery.error?.message ?? null,
+    readError: recovery.readError?.message ?? null,
     refresh,
   };
 }
@@ -254,6 +260,8 @@ export interface UseSettingsLayer {
   layer: SettingsReadWire | null;
   loading: boolean;
   error: string | null;
+  /** Raw failure for write safety; presentation may still be recovering. */
+  readError: string | null;
   refresh: () => void;
   /** Patch this layer (`null` leaf deletes a key). Resolves once persisted; the
    *  refreshed LAYER document is applied here, and the refreshed RESOLVED tree
@@ -274,7 +282,8 @@ export function useSettingsLayer(
   repoRoot?: string,
 ): UseSettingsLayer {
   const bridge = useBridge();
-  const bridgeStatus = useBridgeStatus();
+  const bridgeStatus = useBridgeStatus(repoRoot);
+  const active = useDocumentActive(true);
   const key = settingsLayerKey(layerName, repoRoot);
   const snapshot = useSettingsSnapshot(settingsLayerCache, key);
 
@@ -282,7 +291,7 @@ export function useSettingsLayer(
   // document and duplicate DB_CHANGED listeners coalesce onto one request.
   const refresh = useCallback(() => {
     if (!bridge || bridgeStatus !== "connected") return;
-    void settingsLayerCache
+    return settingsLayerCache
       .load(key, () => bridgeSettingsRead(bridge, layerName, repoRoot), {
         force: true,
       })
@@ -302,6 +311,7 @@ export function useSettingsLayer(
   }, [bridge, bridgeStatus, key, layerName, repoRoot]);
 
   useEffect(() => {
+    if (!active) return;
     return onActiveBridgeConnected((client, { initial }) => {
       void settingsLayerCache
         .load(key, () => bridgeSettingsRead(client, layerName, repoRoot), {
@@ -311,8 +321,8 @@ export function useSettingsLayer(
           ),
         })
         .catch(() => {});
-    });
-  }, [key, layerName, repoRoot]);
+    }, repoRoot);
+  }, [active, key, layerName, repoRoot]);
   useSettingsChanged(refreshFromBroadcast);
 
   const write = useCallback(
@@ -361,21 +371,21 @@ export function useSettingsLayer(
     },
     [bridge, bridgeStatus, key, layerName, repoRoot],
   );
+  const recovery = useReadRecovery(`settings-layer:${key}`, {
+    error: snapshot.error,
+    pending: snapshot.loading || snapshot.refreshing,
+    hasContent: snapshot.data !== undefined,
+    retry: refresh,
+    connected: bridgeStatus === "connected",
+    active,
+    folder: repoRoot,
+  });
 
   return {
     layer: snapshot.data ?? null,
-    loading:
-      bridgeStatus === "connecting" && snapshot.data === undefined
-        ? true
-        : bridgeStatus === "connected"
-          ? snapshot.loading
-          : false,
-    error:
-      snapshot.error?.message ??
-      ((!bridge || bridgeStatus === "disconnected") &&
-      snapshot.data === undefined
-        ? "Not connected to the engine."
-        : null),
+    loading: snapshot.data === undefined && (bridgeStatus !== "connected" || recovery.pending),
+    error: recovery.error?.message ?? null,
+    readError: recovery.readError?.message ?? null,
     refresh,
     write,
     writeRaw,

@@ -4,7 +4,8 @@ import type { Workspace } from "../../platform/git";
 import { getActiveBridge } from "../../platform/bridge/active-bridge";
 import { bridgeDesignListDirectories } from "../../platform/bridge/design-bridge";
 import { workspaceOp } from "../../platform/bridge/workspace-bridge";
-import { useCachedRead } from "../../state/use-cached-read";
+import { useRecoveringRead } from "../../state/use-recovering-read";
+import { useBridgeStatus } from "../../platform/bridge/use-bridge";
 import {
   designDirectoryListingCache,
   invalidateDesignDirectoryTargetReadCache,
@@ -38,7 +39,8 @@ export function DesignDirectoryMenu({
   const [busy, setBusy] = useState(false);
   const mounted = useRef(true);
   useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
-  const listing = useCachedRead(
+  const connected = useBridgeStatus(workspace.path) === "connected";
+  const listing = useRecoveringRead(
     designDirectoryListingCache,
     workspace.id,
     async (id) => {
@@ -46,10 +48,10 @@ export function DesignDirectoryMenu({
       if (!bridge) throw new Error("Not connected to the Zeros engine yet.");
       return bridgeDesignListDirectories(bridge, id);
     },
-    { enabled: active && open, maxAgeMs: 10_000 },
+    { enabled: active && open, maxAgeMs: 10_000, connected, folder: workspace.path },
   );
   const choose = async (directory: string, directoryId?: string) => {
-    if (!active || busy || directory === name || !listing.data || listing.error) return;
+    if (!active || !connected || busy || directory === name || !listing.data || listing.readError) return;
     const bridge = getActiveBridge();
     if (!bridge) return;
     setBusy(true);
@@ -109,7 +111,7 @@ export function DesignDirectoryMenu({
         {listing.data?.directories.map((directory) => (
           <DropdownMenuItem
             key={directory}
-            disabled={busy || !!listing.error}
+            disabled={busy || !connected || !!listing.readError}
             onSelect={() =>
               void choose(directory, listing.data?.directoryIds?.[directory])
             }

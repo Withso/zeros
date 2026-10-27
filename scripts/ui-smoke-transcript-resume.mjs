@@ -4,6 +4,7 @@ import { expect } from "@playwright/test";
  * empty unknown transcript recoverable without claiming it is empty. */
 export async function checkTranscriptResumePresentation({ page, check, screenshotDir }) {
   const unavailable = page.getByRole("status", { name: "Chat history unavailable", exact: true });
+  const waiting = page.getByRole("status", { name: "Waiting for conversation", exact: true });
   const loading = page.getByLabel("Loading conversation", { exact: true });
   const editor = page.locator('[data-slot="prompt-input"]:visible [contenteditable="true"]');
   await page.getByRole("button", { name: "Cloud", exact: true }).click();
@@ -49,8 +50,8 @@ export async function checkTranscriptResumePresentation({ page, check, screensho
   await expect(page.getByText("No chat history.", { exact: true })).toHaveCount(0);
   check("An empty new chat does not announce loading or infer confirmed-empty from a held read", true);
 
-  // Known old history gets a short loading phase, then an honest static
-  // recovery state. No transport or authority deadline is changed.
+  // Known old history gets a short loading animation, then quiet static
+  // loading text. Time alone cannot manufacture an unavailable notice.
   await page.evaluate(async () => {
     const { useSessionsStore } = await import("/apps/desktop/src/renderer/features/agent/sessions-store.ts");
     useSessionsStore.getState().patchSession("composer-chat-0", { hasTranscript: true });
@@ -59,9 +60,8 @@ export async function checkTranscriptResumePresentation({ page, check, screensho
   await expect(loading).toBeVisible();
   await page.clock.runFor(3_000);
   await expect(loading).toHaveCount(0);
-  await expect(unavailable).toBeVisible();
-  await unavailable.getByRole("button", { name: "Retry", exact: true }).click();
-  await expect(unavailable).toBeVisible();
+  await expect(unavailable).toHaveCount(0);
+  await expect(waiting).toBeVisible();
   for (const label of ["Local", "Organization local"]) {
     await page.getByRole("button", { name: label, exact: true }).click();
     await page.clock.runFor(3_000);
@@ -70,7 +70,8 @@ export async function checkTranscriptResumePresentation({ page, check, screensho
   }
   await page.getByRole("button", { name: "Cloud", exact: true }).click();
   await expect(loading).toHaveCount(0);
-  await expect(unavailable).toBeVisible();
+  await expect(waiting).toBeVisible();
+  await expect(unavailable).toHaveCount(0);
   const stillUnknown = await page.evaluate(async () => {
     const { useSessionsStore } = await import("/apps/desktop/src/renderer/features/agent/sessions-store.ts");
     const state = useSessionsStore.getState();
@@ -79,7 +80,21 @@ export async function checkTranscriptResumePresentation({ page, check, screensho
       sends: window.composerSendFailureFixture.sends };
   });
   expect(stillUnknown).toEqual({ residency: "loading", rows: 0, sends: 0 });
-  check("A held history read settles to a quiet retry state, stays quiet on reveal, and never changes transcript or send authority", true);
+  check("A held history read stays pending without a false error on reveal and never changes transcript or send authority", true);
+
+  await page.evaluate(async () => {
+    const { useSessionsStore } = await import("/apps/desktop/src/renderer/features/agent/sessions-store.ts");
+    useSessionsStore.getState().patchSession("composer-chat-0", { transcriptReadError: "Could not read history" });
+  });
+  await expect(unavailable).toHaveCount(0);
+  await page.clock.runFor(1_500);
+  await expect(unavailable).toBeVisible();
+  await page.evaluate(async () => {
+    const { useSessionsStore } = await import("/apps/desktop/src/renderer/features/agent/sessions-store.ts");
+    useSessionsStore.getState().patchSession("composer-chat-0", { transcriptReadError: null, transcriptState: "resident" });
+  });
+  await expect(unavailable).toHaveCount(0);
+  check("An actual persistent history failure remains retryable and clears on confirmed recovery", true);
 
   // The shared UI follows the same new/known distinction for both Local
   // owners. Retire the visible timer while hidden, then catch up immediately
@@ -112,7 +127,8 @@ export async function checkTranscriptResumePresentation({ page, check, screensho
       document.dispatchEvent(new Event("visibilitychange"));
     });
     await expect(loading).toHaveCount(0);
-    await expect(unavailable).toBeVisible();
+    await expect(waiting).toBeVisible();
+    await expect(unavailable).toHaveCount(0);
     await page.evaluate(async id => {
       const { useSessionsStore } = await import("/apps/desktop/src/renderer/features/agent/sessions-store.ts");
       useSessionsStore.getState().patchSession(id, { transcriptState: "resident" });

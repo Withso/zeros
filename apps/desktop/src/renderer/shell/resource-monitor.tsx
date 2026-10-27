@@ -421,6 +421,7 @@ export const ResourceMonitor = memo(function ResourceMonitor() {
     let disposed = false;
     let active = false;
     let timer: number | null = null;
+    let failedSamples = 0;
     const canSample = () => !disposed && active && documentIsForeground();
 
     const clearTimer = (): void => {
@@ -455,10 +456,15 @@ export const ResourceMonitor = memo(function ResourceMonitor() {
           lastTerminalSnapshot.current = next;
         }
         setSnapshot(next);
+        failedSamples = 0;
         setSampleError(null);
       } catch (error) {
         if (!canSample() || generation !== requestGeneration.current) return;
-        setSampleError(error instanceof Error ? error.message : String(error));
+        // The next scheduled sample is already a bounded automatic retry.
+        // Keep the confirmed sample quiet through one missed observation.
+        failedSamples += 1;
+        if (failedSamples > 1)
+          setSampleError(error instanceof Error ? error.message : String(error));
       } finally {
         sampling.current = false;
         afterSample.current?.(generation !== requestGeneration.current);

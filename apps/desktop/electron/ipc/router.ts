@@ -59,6 +59,9 @@ const commandTable: Record<string, CommandHandler> = {
   app_setting_get: notImpl("app_setting_get", 1),
   app_setting_set: notImpl("app_setting_set", 1),
   engine_restart: notImpl("engine_restart", 1),
+  keep_awake_get: notImpl("keep_awake_get", 1),
+  keep_awake_set: notImpl("keep_awake_set", 1),
+  keep_awake_activity: notImpl("keep_awake_activity", 1),
 
   // ── Sidecar / engine lifecycle ────────────────────────────
   get_engine_port: notImpl("get_engine_port", 2),

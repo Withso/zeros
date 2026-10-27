@@ -1,6 +1,7 @@
 import { isSettingsSectionAvailable } from "./settings-section-availability";
 import { CloudComputerPanel, prefetchCloudComputer } from "./cloud-computer-panel";
 import { CloudGithubSection } from "./cloud-github-section";
+import { KeepAwakeSetting } from "./keep-awake-setting";
 // ──────────────────────────────────────────────────────────
 // Settings page — sidebar + per-section panel
 // ──────────────────────────────────────────────────────────
@@ -79,7 +80,7 @@ import {
   useWorkspaceStore,
   selectActiveFolder,
 } from "../../state/store";
-import { useCachedRead } from "../../state/use-cached-read";
+import { useRecoveringRead } from "../../state/use-recovering-read";
 import {
   providerMemorySettingsCache,
   PROVIDER_DIAGNOSTIC_MAX_AGE_MS,
@@ -131,6 +132,10 @@ import {
 import { useInternalFeature, useIsInternalUser } from "./internal-features";
 import { FollowUpBehaviorSetting } from "./follow-up-behavior-setting";
 import { FullDiskAccessRow } from "./full-disk-access-row";
+import {
+  setRestartAutomaticallyOnUpdate,
+  useRestartAutomaticallyOnUpdate,
+} from "./update-settings";
 import {
   AGENT_CONTROL_FEATURE_ROWS,
   agentControlFeaturesAt,
@@ -913,11 +918,13 @@ function SectionNavButton({
 
 function GeneralPanel({ surfaceActive = true }: { surfaceActive?: boolean }) {
   const showHidden = useShowHiddenWorkspaces();
+  const restartAutomatically = useRestartAutomaticallyOnUpdate();
   // Grouped-card layout (SettingsGroup) — same recipe as Appearance.
   return (
     <div className="flex flex-col gap-6">
       <SettingsGroup>
         <FollowUpBehaviorSetting />
+        <KeepAwakeSetting />
         <SettingsRow
           label="Show hidden workspaces in dashboard"
           hint="Includes hidden workspaces in the Archived list."
@@ -926,6 +933,17 @@ function GeneralPanel({ surfaceActive = true }: { surfaceActive?: boolean }) {
             checked={showHidden}
             onCheckedChange={setShowHiddenWorkspaces}
             aria-label="Show hidden workspaces in dashboard"
+          />
+        </SettingsRow>
+        <SettingsRow
+          label="Restart automatically on update"
+          hint="Automatically restart Zeros when idle to install downloaded updates."
+          htmlFor="restart-automatically-on-update"
+        >
+          <Switch
+            id="restart-automatically-on-update"
+            checked={restartAutomatically}
+            onCheckedChange={setRestartAutomaticallyOnUpdate}
           />
         </SettingsRow>
       </SettingsGroup>
@@ -1203,20 +1221,13 @@ function ModelsPanel({ surfaceActive = false }: { surfaceActive?: boolean }) {
     surfaceActive &&
     providerSettingsTab === "codex" &&
     bridgeStatus === "connected";
-  const memoryRead = useCachedRead(
+  const memoryRead = useRecoveringRead(
     providerMemorySettingsCache,
     codexDiagnosticsActive ? "codex" : null,
     (agentId) => sessions.readMemorySettings(agentId),
-    { maxAgeMs: PROVIDER_DIAGNOSTIC_MAX_AGE_MS },
+    { maxAgeMs: PROVIDER_DIAGNOSTIC_MAX_AGE_MS, connected: bridgeStatus === "connected" },
   );
   const codexMemory = memoryRead.data ?? null;
-
-  useEffect(() => {
-    if (!codexDiagnosticsActive || !memoryRead.error) return;
-    toast.error("Couldn't read Codex memory settings", {
-      description: memoryRead.error.message,
-    });
-  }, [codexDiagnosticsActive, memoryRead.error]);
 
   // Resolve against the same exact-workspace snapshot as New Chat. Keep a
   // saved disconnected default visible, while only connected choices can pick.
@@ -1403,6 +1414,13 @@ function ModelsPanel({ surfaceActive = false }: { surfaceActive?: boolean }) {
               own storage.
             </p>
             <SettingsList className={MODELS_SECTION_CLS}>
+              {memoryRead.error && (
+                <SettingsRow label="Couldn't read memory settings">
+                  <Button variant="ghost" size="sm" onClick={memoryRead.refresh}>
+                    Retry
+                  </Button>
+                </SettingsRow>
+              )}
               <SettingsRow
                 label="Local memories"
                 hint="Let Codex learn reusable project context on this device"

@@ -16,7 +16,10 @@
 //   • last owner can't be demoted/removed (server 409 → toast)
 // ──────────────────────────────────────────────────────────
 
-import React, { useCallback, useEffect, useState } from "react";
+import React, { useCallback, useMemo, useState } from "react";
+import { useTeamReadRecovery } from "./use-team-read-recovery";
+import { useRecoveringRead } from "../../state/use-recovering-read";
+import { KeyedAsyncCache } from "../../shared/lib/keyed-async-cache";
 import { Plus, Trash2, X } from "lucide-react";
 import { Button, Input } from "../../shared/ui";
 import { Tooltip } from "@/renderer/shared/ui/primitives";
@@ -37,6 +40,7 @@ import {
 } from "../settings/settings-ui";
 import {
   CONTROL_PLANE_URL,
+  ControlPlaneError,
   controlPlane,
   type TeamInvitation,
   type TeamMember,
@@ -46,12 +50,12 @@ import {
 import { parseInviteToken } from "./invite-link";
 import { requestTeamResync } from "./team-sync";
 import { setActiveOrganizationSelection } from "./active-team";
-import { refreshTeams, useActiveTeam, useTeams } from "./team-store";
+import { getOrganizationStoreGeneration, refreshTeams, useActiveTeam } from "./team-store";
 import { MAX_INVITES_PER_BATCH, parseInviteEmails } from "./invite-emails";
 import { ROLE_LABELS, errorMessage } from "./team-panel";
 
-export function MembersPanel() {
-  const { me, error, reload } = useTeams();
+export function MembersPanel({ surfaceActive = true }: { surfaceActive?: boolean }) {
+  const { me, error, reload } = useTeamReadRecovery(surfaceActive);
   const activeTeam = useActiveTeam();
 
   if (!CONTROL_PLANE_URL) {
@@ -88,8 +92,9 @@ export function MembersPanel() {
   return (
     <div className="flex flex-col gap-8">
       <MembersBody
-        key={activeTeam.id}
+        key={JSON.stringify([me.user.id, activeTeam.id])}
         team={activeTeam}
+        surfaceActive={surfaceActive}
         myUserId={me.user.id}
         refreshMe={async () => {
           await reload();
@@ -104,6 +109,7 @@ function MembersBody({
   team,
   myUserId,
   refreshMe,
+  surfaceActive = true,
 }: {
   team: TeamSummary;
   myUserId: string;
@@ -111,44 +117,40 @@ function MembersBody({
    *  affects the current user (self-demote/leave) — otherwise the panel
    *  keeps offering admin controls the server will now reject. */
   refreshMe: () => Promise<void>;
+  surfaceActive?: boolean;
 }) {
-  const [members, setMembers] = useState<TeamMember[] | null>(null);
-  const [invitations, setInvitations] = useState<TeamInvitation[]>([]);
-
   const iAmAdmin = team.role === "admin" || team.role === "owner";
   const iAmOwner = team.role === "owner";
-
+  const memberCache = useMemo(() => new KeyedAsyncCache<TeamMember[]>(2), []);
+  const invitationCache = useMemo(() => new KeyedAsyncCache<TeamInvitation[]>(2), []);
+  const readKey = JSON.stringify([getOrganizationStoreGeneration(), team.id]);
+  const readMembers = useCallback(async (key: string) => {
+    const [, teamId] = JSON.parse(key) as [number, string];
+    return (await controlPlane.listMembers(teamId)).members;
+  }, []);
+  const readInvitations = useCallback(async (key: string) => {
+    const [, teamId] = JSON.parse(key) as [number, string];
+    return (await controlPlane.listInvitations(teamId)).invitations;
+  }, []);
+  const memberRead = useRecoveringRead(memberCache, readKey, readMembers, { enabled: surfaceActive });
+  const invitationRead = useRecoveringRead(invitationCache, iAmAdmin ? readKey : null, readInvitations, { enabled: surfaceActive });
+  const accessDenied = (error: Error | null) => error instanceof ControlPlaneError && [401, 403, 404].includes(error.status);
+  // Confirmed access loss removes old rows immediately. An ordinary refresh
+  // failure keeps the same organization's last confirmed list.
+  const members = accessDenied(memberRead.readError) ? null : memberRead.data ?? null;
+  const invitations = accessDenied(invitationRead.readError) ? [] : invitationRead.data ?? [];
   const reload = useCallback(async () => {
-    // Members are the core view — loaded independently of invitations so an
-    // invitations 403 (role revoked out from under us) can't strand the
-    // panel on "Loading members…".
-    try {
-      const m = await controlPlane.listMembers(team.id);
-      setMembers(m.members);
-    } catch (err) {
-      toast.error(errorMessage(err));
-    }
-    if (iAmAdmin) {
-      try {
-        const inv = await controlPlane.listInvitations(team.id);
-        setInvitations(inv.invitations);
-      } catch {
-        setInvitations([]); // lost admin, or a blip — just hide the section
-      }
-    } else {
-      setInvitations([]);
-    }
-  }, [team.id, iAmAdmin]);
+    await Promise.allSettled([
+      memberCache.load(readKey, () => readMembers(readKey), { force: true }),
+      ...(iAmAdmin ? [invitationCache.load(readKey, () => readInvitations(readKey), { force: true })] : []),
+    ]);
+  }, [memberCache, invitationCache, readKey, readMembers, readInvitations, iAmAdmin]);
 
   // A change to my OWN membership must refresh my role, then reload the lists.
   const reloadAfterSelfChange = useCallback(async () => {
     await refreshMe();
     await reload();
   }, [refreshMe, reload]);
-
-  useEffect(() => {
-    void reload();
-  }, [reload]);
 
   return (
     <>
@@ -157,6 +159,12 @@ function MembersBody({
         description="Invited teammates get an email with a join link. A single invite's link is also copied for you to share directly."
       >
         {iAmAdmin && <InviteComposer teamId={team.id} onInvited={reload} />}
+        {(memberRead.error || invitationRead.error) && (
+          <div className="flex items-center gap-2 text-xs text-fg2" role="status">
+            <span>{memberRead.error ? "Couldn't load members." : "Couldn't load invitations."}</span>
+            <Button variant="secondary" size="sm" onClick={() => void reload()}>Retry</Button>
+          </div>
+        )}
         {members === null ? (
           <div className="min-h-16" aria-busy="true" />
         ) : (
