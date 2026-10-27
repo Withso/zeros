@@ -15,7 +15,8 @@ const RUNTIMES = "/opt/zeros/runtime";
 const CURRENT = "/opt/zeros/worker";
 
 export type CloudV2RuntimeStore = { endpoint: string; bucket: string; accessKeyId: string; secretAccessKey: string };
-export type CloudV2Runtime = { sha256: string; url(): Promise<string> };
+/** The pinned runtime. `url` presigns it, or another published runtime by its sha256. */
+export type CloudV2Runtime = { sha256: string; url(sha256?: string): Promise<string> };
 
 export const cloudV2RuntimeKey = (sha256: string) => `cloud-v2/runtime/${sha256}.tar.gz`;
 
@@ -27,7 +28,10 @@ export function cloudV2Runtime(sha256: string, store: CloudV2RuntimeStore): Clou
   });
   return {
     sha256,
-    url: () => getSignedUrl(client, new GetObjectCommand({ Bucket: store.bucket, Key: cloudV2RuntimeKey(sha256) }), { expiresIn: URL_TTL_SECONDS }),
+    url: async (target = sha256) => {
+      if (!SHA256.test(target)) throw new Error("Invalid runtime sha256");
+      return getSignedUrl(client, new GetObjectCommand({ Bucket: store.bucket, Key: cloudV2RuntimeKey(target) }), { expiresIn: URL_TTL_SECONDS });
+    },
   };
 }
 

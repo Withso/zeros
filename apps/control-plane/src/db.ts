@@ -119,7 +119,7 @@ function observeOwnedConnection(client: Tx) {
 export function createPool(
   databaseUrl: string,
   options: { maxConnections?: number; applicationName?: string; keepAlive?: boolean;
-    workload?: "api" | "worker" | "listener" | "retirement-lock" } = {},
+    workload?: "api" | "worker" | "listener" | "retirement-lock" | "advisory-lock" } = {},
 ): pg.Pool {
   const interactive = options.workload === "api";
   const Pool = interactive ? DeadlinePool : pg.Pool;
