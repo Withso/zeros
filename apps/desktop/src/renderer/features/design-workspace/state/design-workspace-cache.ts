@@ -265,12 +265,13 @@ async function runLocalDesignMutation<T>(
   workspaceId: string,
   mutation: () => Promise<T>,
   kind: "edit" | "history" = "edit",
+  recover?: () => void,
 ): Promise<T> {
   const directoryId = useDesignWorkspaceUiStore.getState().byWorkspace[workspaceId]?.directoryId;
   const finishMutation = beginLocalDesignMutation(workspaceId);
   if (kind === "edit") adjustCount(pendingEditCountByWorkspace, workspaceId, 1);
   const previous = localMutationTailByWorkspace.get(workspaceId);
-  const result = (previous ?? Promise.resolve())
+  const attempt = (previous ?? Promise.resolve())
     .catch(() => undefined)
     .then(() => {
       if (directoryId && useDesignWorkspaceUiStore.getState().byWorkspace[workspaceId]?.directoryId !== directoryId) {
@@ -278,6 +279,14 @@ async function runLocalDesignMutation<T>(
       }
       return mutation();
     });
+  // Recovery is part of the failed operation, so the next queued step never
+  // starts from what that operation painted or predicted.
+  const result = recover
+    ? attempt.catch((error: unknown) => {
+        recover();
+        throw error;
+      })
+    : attempt;
   const tail = result.then(
     () => undefined,
     () => undefined,
@@ -2257,6 +2266,15 @@ export async function applyDesignHistoryCached(
     adjustCount(deferredPredictionCountByWorkspace, workspaceId, -1);
   };
   let prediction = afterPendingEdits ? null : predict();
+  // Port order puts this repaint ahead of any later step's runtime request.
+  const recover = () => {
+    settlePrediction();
+    historyPreview.clear(workspaceId);
+    if (!prediction) return;
+    const runtime = designFrameRuntime(workspaceId, prediction.frame);
+    if (runtime?.supports("restoreGeneration"))
+      void runtime.restoreGeneration(runtime.sourceVersion, false).catch(() => {});
+  };
   return runLocalDesignMutation(workspaceId, async () => {
     if (awaitingPrediction) {
       prediction = predict();
@@ -2369,17 +2387,7 @@ export async function applyDesignHistoryCached(
     }
     if (!result.snapshot) invalidateWorkspaceDesignFoundations(workspaceId);
     return result;
-  }, "history").finally(settlePrediction).catch(async (error) => {
-    historyPreview.clear(workspaceId);
-    if (prediction) {
-      const runtime = designFrameRuntime(workspaceId, prediction.frame);
-      if (runtime?.supports("restoreGeneration"))
-        await runtime
-          .restoreGeneration(runtime.sourceVersion, false)
-          .catch(() => {});
-    }
-    throw error;
-  });
+  }, "history", recover);
 }
 
 /** Test-only reset for exact-key/reference-stability coverage. */

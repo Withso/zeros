@@ -28,7 +28,9 @@
   saving became that edit's recorded baseline; predict inside the lane after
   pending edits land, in submission order (a later step waits behind an
   earlier deferred prediction), but keep consecutive history predictions
-  immediate.
+  immediate. A refused step's recovery (clear the cursor, repaint authority)
+  belongs inside that lane operation: a `.finally`/`.catch` chained after the
+  lane runs after the next queued step has already predicted from it.
   Speeding up the UI exposed this race (pre-existing on main) in CI first.
 - Rule: attribute React commits to store publications before optimizing
   (production profiling build, scheduled-updater identities); most frame-switch

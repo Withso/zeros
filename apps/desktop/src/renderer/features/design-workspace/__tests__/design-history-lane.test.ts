@@ -338,6 +338,75 @@ describe("a432388d independent cache/lane review", () => {
     expect(f.cached).toBe(3); expect(f.painted).toBe(3);
   });
 
+  it("invalidates a rejected deferred history step before the next queued step predicts", async () => {
+    const f = fixture(); await f.seed(3);
+    const editGate = gate(); const firstGate = gate(); const secondGate = gate();
+    f.holdHistory(firstGate); f.holdHistory(secondGate);
+    const edit = f.edit(4, editGate); await editGate.entered;
+    const first = f.history("undo"); const second = f.history("undo");
+    editGate.release(); await edit; await firstGate.entered;
+    expect(f.painted).toBe(3);
+    firstGate.release(new Error("first Undo refused"));
+    await expect(first).rejects.toThrow("first Undo refused");
+    await secondGate.entered;
+    const beforeConfirmation = f.events.filter((event) => event.kind === "restore");
+    secondGate.release(); await second;
+    expect(f.cached).toBe(3); expect(f.painted).toBe(3);
+    // The first Undo never committed. The second may wait for authority or
+    // correctly predict 3, but it must not use the failed cursor to paint 2.
+    expect(beforeConfirmation.some((event) => event.generation === 2), JSON.stringify(beforeConfirmation)).toBe(false);
+  });
+
+  it("drains history rejection before a queued edit and the following Undo", async () => {
+    const f = fixture(); await f.seed(3);
+    const firstGate = gate(); const editGate = gate(); const lastGate = gate();
+    f.holdHistory(firstGate); f.holdHistory(lastGate);
+    const first = f.history("undo"); await firstGate.entered;
+    const edit = f.edit(4, editGate); const last = f.history("undo");
+    firstGate.release(new Error("first Undo refused"));
+    await expect(first).rejects.toThrow("first Undo refused");
+    await editGate.entered; expect(f.painted).toBe(3);
+    editGate.release(); await edit; await lastGate.entered;
+    expect(f.painted).toBe(3);
+    lastGate.release(); await last;
+    expect(f.cached).toBe(3); expect(f.painted).toBe(3);
+    const redoGate = gate(); f.holdHistory(redoGate);
+    const redo = f.history("redo"); expect(f.painted).toBe(4);
+    redoGate.release(); await redo;
+  });
+
+  it("counts a second queued edit until it finishes, then restores eager history", async () => {
+    const f = fixture(); await f.seed(3);
+    const firstEditGate = gate(); const secondEditGate = gate(); const historyGate = gate();
+    f.holdHistory(historyGate);
+    const firstEdit = f.edit(4, firstEditGate); await firstEditGate.entered;
+    const secondEdit = f.edit(5, secondEditGate);
+    firstEditGate.release(); await firstEdit; await secondEditGate.entered;
+    const undo = f.history("undo");
+    expect(f.runtime.restoreGeneration).not.toHaveBeenCalled();
+    secondEditGate.release(); await secondEdit; await historyGate.entered;
+    expect(f.painted).toBe(4);
+    historyGate.release(); await undo;
+    const nextGate = gate(); f.holdHistory(nextGate);
+    const next = f.history("undo"); expect(f.painted).toBe(3);
+    nextGate.release(); await next;
+    expect(f.cached).toBe(3); expect(f.painted).toBe(3);
+  });
+
+  it("falls back to authority if speculative runtime restore rejects", async () => {
+    const f = fixture(); await f.seed(3);
+    const editGate = gate(); const historyGate = gate(); f.holdHistory(historyGate);
+    const edit = f.edit(4, editGate); await editGate.entered;
+    const undo = f.history("undo");
+    f.runtime.restoreGeneration.mockRejectedValueOnce(new Error("unknown runtime generation"));
+    editGate.release(); await edit; await historyGate.entered;
+    expect(f.painted).toBe(4);
+    historyGate.release(); await undo;
+    expect(f.cached).toBe(3); expect(f.painted).toBe(3);
+    await f.edit(5); await f.history("undo");
+    expect(f.cached).toBe(3); expect(f.painted).toBe(3);
+  });
+
   it("keeps Personal and organization lanes independent across A to B to A", async () => {
     const a = fixture(PERSONAL); const b = fixture(ORG);
     await a.seed(3); await b.seed(3);
@@ -370,6 +439,47 @@ describe("a432388d independent cache/lane review", () => {
     expect(useDesignWorkspaceUiStore.getState().byWorkspace[PERSONAL]?.directoryId).toBe("design-b");
     // Empty lane must settle even though both callbacks were refused.
     await waitForPendingDesignEdits(PERSONAL);
+  });
+
+  it("rejects the old queued history after directory change during an earlier RPC", async () => {
+    const f = fixture(); await f.seed(3);
+    const editGate = gate();
+    const edit = f.edit(4, editGate); await editGate.entered;
+    const first = f.history("undo"); const second = f.history("redo");
+    const replacement = workspaceSnapshot(PERSONAL, 30, "design-b");
+    designWorkspaceSnapshotCache.setData(PERSONAL, replacement);
+    observeDesignDirectory(PERSONAL, replacement);
+    // Model a rejected owner-pinned write, leaving the replacement authoritative.
+    editGate.release(new Error("old directory write refused"));
+    await expect(edit).rejects.toThrow("old directory write refused");
+    await expect(first).rejects.toThrow("Design directory changed");
+    await expect(second).rejects.toThrow("Design directory changed");
+    expect(mocks.history).not.toHaveBeenCalled();
+    expect(f.runtime.restoreGeneration).not.toHaveBeenCalled();
+    expect(f.cached).toBe(30);
+    // Re-enter a fresh owner and prove both edit and deferred-history counters
+    // have drained by observing an immediate prediction for its first Undo.
+    const fresh = fixture(PERSONAL); await fresh.seed(3);
+    const nextGate = gate(); fresh.holdHistory(nextGate);
+    const next = fresh.history("undo"); expect(fresh.painted).toBe(2);
+    nextGate.release(); await next;
+  });
+
+
+  it("rolls back eager predictions refused by a directory replacement in lane order", async () => {
+    const f = fixture(); await f.seed(3);
+    const firstGate = gate(); f.holdHistory(firstGate);
+    const first = f.history("undo"); await firstGate.entered;
+    const second = f.history("undo"); expect(f.painted).toBe(1);
+    const replacement = workspaceSnapshot(PERSONAL, 3, "design-b");
+    designWorkspaceSnapshotCache.setData(PERSONAL, replacement);
+    observeDesignDirectory(PERSONAL, replacement);
+    firstGate.release(new Error("old directory history refused"));
+    await expect(first).rejects.toThrow("old directory history refused");
+    await expect(second).rejects.toThrow("Design directory changed");
+    expect(mocks.history).toHaveBeenCalledTimes(1);
+    expect(f.painted).toBe(3);
+    expect(f.events.filter((event) => event.kind === "restore").map((event) => event.generation)).toEqual([2, 1, 3, 3]);
   });
 
   it("reads cloud history preconditions inside the lane after the edit lands", async () => {
