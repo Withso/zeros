@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { RuntimeClient, type RuntimeClientEnvironment, type RuntimeTransportSocket } from "../runtime-client";
+import { classifyRpcError } from "../failure";
 
 class Socket implements RuntimeTransportSocket {
   readyState = 0;
@@ -81,4 +82,33 @@ it.each(["Personal", "organization-local"])("keeps the existing Local reconnect 
   expect(h.sockets).toHaveLength(1);
   await vi.advanceTimersByTimeAsync(1); expect(h.sockets).toHaveLength(2);
   expect(h.refresh).not.toHaveBeenCalled();
+});
+
+it.each([true, false])("waits for the owning runtime handshake (local: %s)", async local => {
+  const h = fixture(local);
+  const settled = vi.fn();
+  const waiting = h.client.waitUntilReady().then(settled);
+  await vi.advanceTimersByTimeAsync(1000);
+  expect(settled).not.toHaveBeenCalled();
+  expect(h.sockets).toHaveLength(0);
+  await h.client.connect();
+  await h.ready(h.sockets[0]);
+  await waiting;
+  expect(settled).toHaveBeenCalledOnce();
+});
+
+it.each([true, false])("keeps readiness failures scoped to the runtime (local: %s)", async local => {
+  const h = fixture(local);
+  let failure: unknown;
+  const waiting = h.client.waitUntilReady({ timeoutMs: 1000 }).catch(error => { failure = error; });
+  await vi.advanceTimersByTimeAsync(1000);
+  await waiting;
+  if (local) {
+    expect(classifyRpcError(failure)).toMatchObject({
+      kind: "transport-closed",
+      message: expect.stringMatching(/local engine.*reconnecting/i),
+    });
+  } else {
+    expect(failure).toMatchObject({ code: "cloud_actor_runtime_unavailable", status: 503 });
+  }
 });

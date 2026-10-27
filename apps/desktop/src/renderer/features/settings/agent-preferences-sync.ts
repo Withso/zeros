@@ -20,6 +20,7 @@ import {
 /** Serialized, acknowledged user-file sync. Reconnects reject stale responses;
  * file deletion clears caches; pending leaf edits overlay external refreshes. */
 export function startAgentPreferencesSync(bridge: RuntimeClient): () => void {
+  const lifetime = new AbortController();
   let disposed = false,
     requested = false,
     initialized = false,
@@ -31,11 +32,11 @@ export function startAgentPreferencesSync(bridge: RuntimeClient): () => void {
     models: legacyModelPreferences(),
     providers: legacyProviderPreferences(),
   };
-  const local = () =>
+  const ownsLocal = () =>
     !disposed &&
     isNativeRuntime() &&
-    bridge.status === "connected" &&
     bridge.executionIdentity.kind === "local";
+  const local = () => ownsLocal() && bridge.status === "connected";
   const refresh = (): Promise<void> => {
     requested = true;
     if (running) return running;
@@ -126,12 +127,24 @@ export function startAgentPreferencesSync(bridge: RuntimeClient): () => void {
   const offFlush =
     bridge.executionIdentity.kind === "local"
       ? registerAgentPreferencesFlush(async () => {
-          if (!local())
-            throw new Error(
-              "Connect to the local engine to save agent settings.",
-            );
-          await refresh();
-          if (!local() || pendingAgentPreferences().size)
+          // Restoring a chat can reach provider setup before the Local engine
+          // connects. Wait for readiness, then require the usual settings ACK.
+          // Match the workbench's Local startup grace and retire with this sync.
+          const deadline = Date.now() + 45_000;
+          do {
+            if (!ownsLocal())
+              throw new Error(
+                "Connect to the local engine to save agent settings.",
+              );
+            await bridge.waitUntilReady({
+              signal: lifetime.signal,
+              timeoutMs: Math.max(0, deadline - Date.now()),
+            });
+            await refresh();
+            // A disconnect can retire readiness or the settings response before
+            // this continuation runs. Rejoin within the original startup bound.
+          } while (!local());
+          if (pendingAgentPreferences().size)
             throw new Error("Agent settings are still waiting to be saved.");
         })
       : () => {};
@@ -139,6 +152,7 @@ export function startAgentPreferencesSync(bridge: RuntimeClient): () => void {
   trigger();
   return () => {
     disposed = true;
+    lifetime.abort();
     if (retry) clearTimeout(retry);
     offPending();
     offStatus();
