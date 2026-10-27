@@ -2,7 +2,7 @@
   "id": "design-revalidation-unprepared-layers",
   "kind": "replay",
   "area": "desktop-design-state",
-  "fixedBy": "pending",
+  "fixedBy": "pr:744",
   "symptom": "Every watcher echo after a Design save, style build or tab return published all frames unprepared, so Layers showed \"Loading frame\u2026\" and the inspector dropped its frame until preparation finished.",
   "rule": "agents/zstack/changes/design-instant-editing-continuity.md: a revalidating frame presents its last confirmed generation; warm revalidation prepares demanded frames before publishing.",
   "check": "pnpm exec vitest run --config vitest.config.ts apps/desktop/src/renderer/features/design-workspace/__tests__/design-layer-panel-rows.test.ts apps/desktop/src/renderer/features/design-workspace/__tests__/design-workspace-revalidation.test.ts"
