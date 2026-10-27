@@ -83,7 +83,7 @@ export interface QueuedEditPayload {
 export interface CloudQueuedPrompt {
   draft: CloudQueuedDraft;
   prepare(supportsImage: boolean): Promise<QueuedEditPayload>;
-  /** Portable bytes for capability-gated HTTPS delivery, independent of VM readiness. */
+  /** Wait for any new file transfers, then journal only confirmed references. */
   prepareDurable?(): Promise<QueuedEditPayload>;
 }
 export type CloudQueuedDraft = import("./composer-editor").ComposerInitialContent & {

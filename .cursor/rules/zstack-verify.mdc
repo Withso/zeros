@@ -99,6 +99,11 @@ pnpm --dir apps/control-plane cloud-v2:gate0 --local --runtime <runtime-sha256>
   and owner switching. RSS, JS heap and source/image budgets miss graphics
   allocations. Use a conservative sampled shutdown guard; missing readings or
   an overrun fail the run. A stable iframe or layout is not memory evidence.
+- For streamed media, exercise the production Electron protocol with a valid,
+  indexed large file and a distant seek; packet size alone does not prove
+  playback buffering or EOF behavior. Before reclaiming attachment recovery
+  bytes, test concurrent source owners and the cloud checkpoint/restore path
+  with the actual ignored attachment layout at its supported size.
 - For Design performance, run `pnpm check:design-performance` and the native
   workload described in `agents/zstack/playbooks/performance.md`. Keep optimized
   build identity, actual presentation latency, idle CPU, and sustained memory

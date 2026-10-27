@@ -1016,10 +1016,16 @@ export async function bridgeFileRead(
   bridge: RuntimeClient,
   workspaceId: string,
   path: string,
+  includeVideo = false,
+  streamMedia = false,
 ): Promise<ReadFileResult> {
   return (await workspaceOp(bridge, "file.read", {
     workspaceId,
     path,
+    // Optional: older runtimes ignore it and return their binary/size fallback;
+    // older clients never receive a new result kind from updated runtimes.
+    ...(includeVideo ? { includeVideo: true } : {}),
+    ...(streamMedia ? { streamMedia: true } : {}),
   })) as ReadFileResult;
 }
 

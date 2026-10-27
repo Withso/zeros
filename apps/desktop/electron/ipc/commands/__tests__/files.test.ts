@@ -103,6 +103,17 @@ function rotatedJpegFixture(width: number, height: number): Buffer {
 }
 
 describe("read_file", () => {
+  it("opts into video through the existing trusted workspace boundary", () => {
+    const root = realTempDir("zeros-video-ipc-");
+    try {
+      sidecarMock.root = root;
+      writeFileSync(path.join(root, "clip.mp4"), Buffer.from([0, 1, 2]));
+      expect(call({ cwd: root, path: "clip.mp4" })).toMatchObject({ kind: "binary" });
+      expect(call({ cwd: root, path: "clip.mp4", includeVideo: true })).toMatchObject({ kind: "video", dataUrl: "data:video/mp4;base64,AAEC" });
+      sidecarMock.root = null;
+      expect(call({ cwd: root, path: "clip.mp4", includeVideo: true })).toMatchObject({ kind: "error" });
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  });
   let dir = "";
   beforeEach(() => {
     dir = realTempDir("zeros-files-");

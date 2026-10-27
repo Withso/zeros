@@ -1,4 +1,4 @@
-import { chmod, lstat, mkdir, readFile, symlink, writeFile } from "node:fs/promises";
+import { chmod, lstat, mkdir, readFile, symlink, truncate, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { expect, it } from "vitest";
 import { FileService } from "../files";
@@ -54,6 +54,24 @@ it("bounds text, image and binary reads and oversized writes", async () => {
   expect(await readFile(join(root, "readme.txt"), "utf8")).toBe("initial\n");
 });
 
+it("opts into video previews with Local's MIME, original bytes and media cap", async () => {
+  const { scope, root } = await repositoryFixture(); const files = new FileService(scope);
+  const bytes = Buffer.from([0, 0, 0, 24, 102, 116, 121, 112]);
+  for (const [extension, mime] of [["MP4", "video/mp4"], ["webm", "video/webm"], ["mov", "video/quicktime"], ["m4v", "video/mp4"], ["ogv", "video/ogg"], ["mkv", "video/x-matroska"]]) {
+    const path = `clip.${extension}`;
+    await writeFile(join(root, path), bytes);
+    expect(await files.handle("file.read", { path })).toMatchObject({ kind: "binary" });
+    expect(await files.handle("file.read", { path, includeVideo: true })).toEqual({
+      kind: "video", path, bytes: bytes.length, dataUrl: `data:${mime};base64,${bytes.toString("base64")}`,
+    });
+  }
+  await writeFile(join(root, "large.mp4"), "");
+  await truncate(join(root, "large.mp4"), 5 * 1024 * 1024 + 1);
+  expect(await files.handle("file.read", { path: "large.mp4", includeVideo: true })).toEqual({
+    kind: "too-large", path: "large.mp4", bytes: 5 * 1024 * 1024 + 1,
+  });
+});
+
 it("lists exact Git paths, including newline names, and lazily expands ignored entries", async () => {
   const { scope, root } = await repositoryFixture(); const files = new FileService(scope);
   await writeFile(join(root, "line\nbreak.txt"), "new\n");
@@ -63,4 +81,21 @@ it("lists exact Git paths, including newline names, and lazily expands ignored e
   expect(await files.handle("file.ignored", {})).toEqual({ entries: ["ignored/"] });
   expect(await files.handle("file.ignored", { dir: "ignored" })).toEqual({ entries: ["ignored/file.txt"] });
   expect(await files.handle("file.tree", { includeIgnored: true, query: "file.txt", limit: 1 })).toEqual({ files: ["ignored/file.txt"] });
+});
+
+it("returns metadata for 200 MB media and reads only the requested revision's range", async () => {
+  const { scope, root } = await repositoryFixture(); const files = new FileService(scope);
+  await writeFile(join(root, "large.mp4"), Buffer.from([0, 1, 2, 3]));
+  await truncate(join(root, "large.mp4"), 200_000_000);
+  const result = await files.handle("file.read", { path: "large.mp4", includeVideo: true, streamMedia: true }) as any;
+  expect(result).toMatchObject({ kind: "video", bytes: 200_000_000, media: { mimeType: "video/mp4", version: expect.any(String) } });
+  expect(result.dataUrl).toBeUndefined();
+  expect(await files.handle("file.readRange", { path: "large.mp4", version: result.media.version, offset: 1, length: 2 }))
+    .toEqual({ base64: "AQI=", bytes: 2 });
+  expect(await files.handle("file.readRange", { path: "large.mp4", version: result.media.version, offset: 199_999_999, length: 8 }))
+    .toEqual({ base64: "AA==", bytes: 1 });
+  await expect(files.handle("file.readRange", { path: "large.mp4", version: result.media.version, offset: 0, length: 1024 * 1024 + 1 })).rejects.toThrow();
+  await truncate(join(root, "large.mp4"), 200_000_001);
+  await expect(files.handle("file.readRange", { path: "large.mp4", version: result.media.version, offset: 0, length: 4 })).rejects.toThrow();
+  expect(await files.handle("file.read", { path: "large.mp4", includeVideo: true, streamMedia: true })).toMatchObject({ kind: "too-large" });
 });

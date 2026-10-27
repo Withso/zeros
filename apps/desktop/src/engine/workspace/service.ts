@@ -245,6 +245,7 @@ import {
   reconcileReaddedRepoWorkspaces,
 } from "../git/worktree";
 import { readWorkspaceFile, isSensitiveRepoPath } from "../files/read-file";
+import { readWorkspaceMediaRange } from "../files/file-media";
 import { writeWorkspaceFile } from "../files/write-file";
 import { transferContextAttachment } from "../files/attachment-transfer";
 import {
@@ -1167,6 +1168,7 @@ const REMOTE_READABLE = new Set<string>([
   // Files. `file.ignored` is deliberately NOT here — see its handler.
   "file.tree",
   "file.read",
+  "file.readRange",
   // Host folder picker (browse to open a project remotely)
   "fs.listDir",
   // Git reads
@@ -4294,7 +4296,7 @@ export class WorkspaceService {
         }
         // readWorkspaceFile re-checks the RESOLVED + realpath target so a
         // collapsing path ('.env/.') or an innocuously-named symlink can't leak.
-        const read = readWorkspaceFile(cwd, rel, { remote });
+        const read = readWorkspaceFile(cwd, rel, { remote, includeVideo: params.includeVideo === true, streamMedia: params.streamMedia === true });
         // Design ownership is presentation here. A malformed local manifest
         // must not block reading the source needed to repair it.
         try {
@@ -4308,6 +4310,10 @@ export class WorkspaceService {
           return normalized && roots.some(root => normalized.startsWith(`${root}/`))
             ? { ...read, designPath: true } : read;
         }
+      }
+      case "file.readRange": {
+        const cwd = this.resolveReadCwd(reqStr(params, "workspaceId"), remote);
+        return readWorkspaceMediaRange(cwd, params, remote);
       }
       case "file.write": {
         const targetWorkspaceId = reqStr(params, "workspaceId");

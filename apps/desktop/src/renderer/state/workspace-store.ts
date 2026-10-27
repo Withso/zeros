@@ -73,7 +73,7 @@ import {
 import { subscribeToLiveChatDrafts, liveChatDraftEntries } from "../features/agent/composer-live-drafts";
 import { liveEditDraftEntries, subscribeToLiveEditDrafts, pruneLiveEditDrafts } from "../features/agent/edit-live-drafts";
 import { onNativeBeforeQuit } from "../platform/runtime";
-import { startAttachmentSourceMaintenance } from "../features/agent/attachment-sources";
+import { onAttachmentSourceConfirmed, startAttachmentSourceMaintenance } from "../features/agent/attachment-sources";
 import "./create-composer-drafts";
 import { forgetFreshLocalChat, markFreshLocalChat } from "../features/agent/fresh-local-chats";
 import { forgetFreshCloudChat, markFreshCloudChat } from "../features/agent/fresh-cloud-chats";
@@ -2384,6 +2384,10 @@ const stopAttachmentSourceMaintenance = startAttachmentSourceMaintenance(() => [
   loadPersistedDrafts(),
 ]);
 if (import.meta.hot) import.meta.hot.dispose(stopAttachmentSourceMaintenance);
+const stopConfirmedAttachmentPersistence = onAttachmentSourceConfirmed(() => {
+  if (!persistDraftsNow(useWorkspaceStore.getState())) throw new Error("Attachment draft storage is unavailable");
+});
+if (import.meta.hot) import.meta.hot.dispose(stopConfirmedAttachmentPersistence);
 
 subscribeToLiveChatDrafts(() => {
   schedulePersistDrafts(useWorkspaceStore.getState());

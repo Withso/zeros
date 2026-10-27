@@ -4,6 +4,7 @@
 // - the workspace repository's Git state: branches, local commits, stashes,
 //   the index and every tracked or untracked file that is not ignored, plus
 //   small ignored files outside ignored directories (such as `.env.local`);
+// - completed composer attachments, including inside ignored context roots;
 // - the worker's state and the agents' session files.
 // Ignored directories (dependencies, build outputs) come back from the Cloud
 // Computer and the setup script instead. The VM builds and uploads the object
@@ -30,6 +31,23 @@ const SESSION_PATHS = [CLOUD_V2_WORKER_STATE, ".claude/projects", ".codex/sessio
 /** Written after a restore; the worker then runs the setup once more. */
 export const CLOUD_V2_RESTORED_MARKER = `${CLOUD_V2_WORKER_STATE}/restored-from-checkpoint`;
 const IGNORED_FILE_BYTES = 1024 * 1024, IGNORED_TOTAL_BYTES = 32 * 1024 * 1024;
+
+// Mirrored from protocol/attachment-policy: this deploys independently of the
+// desktop/worker package graph. checkpoint-attachment-contract.test.ts checks parity.
+export const CLOUD_V2_ATTACHMENT_MAX_BYTES = 500_000_000;
+export const CLOUD_V2_ATTACHMENT_DIRS = [".context/attachments", ".context/local/attachments", ".context/shared/attachments",
+  ".context-graph/local/attachments", ".context-graph/shared/attachments"] as const;
+export const CLOUD_V2_ATTACHMENT_PATH = String.raw`^(\.context/attachments|\.context(-graph)?/(local|shared)/attachments)/[a-zA-Z0-9_-]{1,128}/[a-zA-Z0-9._-]+$`;
+const ATTACHMENT_HELPERS = [
+  `attachment_path() { [[ "$1" =~ ${CLOUD_V2_ATTACHMENT_PATH} ]] && [ "\${1##*/}" != . ] && [ "\${1##*/}" != .. ]; }`,
+  "attachment_parents() {",
+  "  local parent=$1",
+  "  while [[ \"$parent\" == */* ]]; do",
+  "    parent=${parent%/*}",
+  "    [ ! -L \"$parent\" ] && { [ ! -e \"$parent\" ] || [ -d \"$parent\" ]; } || return 1",
+  "  done",
+  "}",
+];
 
 export const CLOUD_V2_CHECKPOINT_ERRORS = ["checkpoint_failed", "checkpoint_too_large", "checkpoint_upload_failed", "checkpoint_download_failed",
   "checkpoint_corrupt", "checkpoint_repository_missing", "checkpoint_prerequisites_missing", "checkpoint_restore_failed"] as const;
@@ -306,9 +324,28 @@ export function checkpointArchiveSteps(input: CheckpointPaths & { baseBranch: st
     "  step=bundle",
     "  negative=(); if git rev-parse -q --verify \"refs/remotes/origin/$base^{commit}\"; then negative=(--not \"refs/remotes/origin/$base\"); fi",
     "  git bundle create \"$c/repo.bundle\" --branches --tags --glob=refs/zeros-checkpoint ${negative[@]+\"${negative[@]}\"}",
+    // Ignore rules often hide the whole .context directory. Enumerate only
+    // registered layouts, at their fixed depth, without following any links.
+    // Tracked/nonignored attachments are already in the Git snapshot; ignored
+    // ones use tar to avoid hashing large media into Git's object store.
+    ...ATTACHMENT_HELPERS,
+    "  step=attachments; : > \"$work/attachment-candidates\"",
+    `  for dir in ${CLOUD_V2_ATTACHMENT_DIRS.map(quote).join(" ")}; do`,
+    "    if [ -d \"$dir\" ] && attachment_parents \"$dir/file\"; then find -P \"$dir\" -mindepth 2 -maxdepth 2 -type f -print0 >> \"$work/attachment-candidates\"; fi",
+    "  done",
+    "  git check-ignore -z --stdin < \"$work/attachment-candidates\" > \"$work/attachment-ignored\" || [ $? -eq 1 ]",
+    "  while IFS= read -r -d '' path; do",
+    "    attachment_path \"$path\" || continue",
+    "    skip=''; for rel in ${mine[@]+\"${mine[@]}\"}; do case \"$path\" in \"$rel\" | \"$rel\"/*) skip=1 ;; esac; done; [ -z \"$skip\" ] || continue",
+    "    attachment_parents \"$path\" && [ -f \"$path\" ] && [ ! -L \"$path\" ] || fail checkpoint_failed",
+    `    [ "$(stat -c %s -- "$path")" -le ${CLOUD_V2_ATTACHMENT_MAX_BYTES} ] || fail checkpoint_too_large`,
+    "    printf '%s\\0' \"$path\" >> \"$work/attachments\"",
+    "  done < \"$work/attachment-ignored\"",
+    "  if [ -s \"$work/attachments\" ]; then tar --sparse --null --verbatim-files-from --no-recursion --hard-dereference -T \"$work/attachments\" -cf \"$c/attachments.tar\"; fi",
     "  step=ignored; total=0",
     "  while IFS= read -r -d '' path; do",
     "    case \"$path\" in */) continue ;; esac",
+    "    if attachment_path \"$path\"; then continue; fi",
     "    if [ -f \"$path\" ] && [ ! -L \"$path\" ]; then",
     "      size=$(stat -c %s -- \"$path\")",
     `      if [ "$size" -le ${IGNORED_FILE_BYTES} ] && [ $((total + size)) -le ${IGNORED_TOTAL_BYTES} ]; then total=$((total + size)); printf '%s\\0' "$path" >> "$work/ignored"; fi`,
@@ -320,7 +357,7 @@ export function checkpointArchiveSteps(input: CheckpointPaths & { baseBranch: st
     "cd \"$home\"; set --",
     `for p in ${SESSION_PATHS.map(quote).join(" ")}; do if [ -e "$p" ] && [ ! -L "$p" ]; then set -- "$@" "$p"; fi; done`,
     "if [ $# -gt 0 ]; then",
-    "  tar -cf \"$c/home.tar\" --exclude=\"$state/workspace-setup\" --exclude=\"$state/github.sock\" --exclude=\"$state/restored-from-checkpoint\" \\",
+    "  tar -cf \"$c/home.tar\" --exclude=\"$state/workspace-setup\" --exclude=\"$state/attachment-uploads\" --exclude=\"$state/github.sock\" --exclude=\"$state/restored-from-checkpoint\" \\",
     "    --exclude='.credentials.json' --exclude='auth.json' --warning=no-file-changed --warning=no-file-removed --ignore-failed-read \"$@\" || [ $? -eq 1 ]",
     "fi",
     "step=pack",
@@ -428,6 +465,20 @@ export function checkpointRestoreSteps(input: RestoreInput, fetch: readonly stri
     "  else git read-tree --empty; fi",
     "  git update-index -q --refresh || true",
     "  if [ -f \"$c/ignored.tar\" ]; then tar -xf \"$c/ignored.tar\" -C \"$repo\" --no-same-owner; fi",
+    ...ATTACHMENT_HELPERS,
+    "  step=attachments",
+    "  if [ -f \"$c/attachments.tar\" ]; then",
+    // Names contain no whitespace. Validate every entry and every existing
+    // parent before extracting, including links supplied by the new recipe.
+    // Only regular files are accepted; capture dereferences hardlinks only.
+    "    tar -tf \"$c/attachments.tar\" > \"$work/attachment-paths\" || fail checkpoint_corrupt",
+    "    tar -tvf \"$c/attachments.tar\" | awk 'substr($0, 1, 1) != \"-\" { exit 1 }' || fail checkpoint_corrupt",
+    "    while IFS= read -r path; do",
+    "      attachment_path \"$path\" || fail checkpoint_corrupt",
+    "      attachment_parents \"$path\" && [ ! -L \"$path\" ] && { [ ! -e \"$path\" ] || [ -f \"$path\" ]; } || fail checkpoint_restore_failed",
+    "    done < \"$work/attachment-paths\"",
+    "    tar -xf \"$c/attachments.tar\" -C \"$repo\" --no-same-owner --no-overwrite-dir",
+    "  fi",
     // A retried restore stores the same stashes again, never twice.
     "  step=stash; git update-ref -d refs/stash || true",
     "  while read -r _ sha message; do",

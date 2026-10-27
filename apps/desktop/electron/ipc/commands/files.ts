@@ -28,6 +28,7 @@
 // ──────────────────────────────────────────────────────────
 
 import fs from "node:fs";
+import { readWorkspaceMediaRange } from "../../../src/engine/files/file-media";
 import path from "node:path";
 import { nativeImage } from "electron";
 import {
@@ -343,7 +344,13 @@ export const readFile: CommandHandler = (args) => {
   // containment checks; the secret denylist stays a REMOTE-only boundary so
   // this stays consistent with Local main and the Files tree (which both show
   // these files). Do NOT pass remote:true here — see the header note.
-  return readWorkspaceFile(cwd, rel, { remote: false });
+  return readWorkspaceFile(cwd, rel, { remote: false, includeVideo: args.includeVideo === true, streamMedia: args.streamMedia === true });
+};
+
+export const readFileRange: CommandHandler = (args) => {
+  const cwd = typeof args.cwd === "string" ? args.cwd : "";
+  if (!cwd || !cwdIsTrusted(cwd)) throw new Error("Refusing to read outside the workspace");
+  return readWorkspaceMediaRange(cwd, args, false);
 };
 
 /** write_file({ cwd, path, content }) — writes a single file for the Files-tab

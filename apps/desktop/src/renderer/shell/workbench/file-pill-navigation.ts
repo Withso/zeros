@@ -1,4 +1,5 @@
 import { getActiveBridge } from "@/renderer/platform/bridge/active-bridge";
+import { hasPendingFilePreview } from "@/renderer/platform/pending-file-preview";
 import { WorkspaceRuntimeClient } from "@/renderer/platform/bridge/workspace-runtime-client";
 import {
   cloudWorkspaceKey,
@@ -206,5 +207,5 @@ export function warmFilePill(
     // Passive transcript intent never wakes a sleeping cloud computer.
     if (!parseCloudWorkspaceKey(cwd))
       prefetchWorkspaceFileDiff({ ...query, diffScope: "all" });
-  } else prefetchWorkspaceFileRead(cwd, path);
+  } else if (!hasPendingFilePreview(cwd, path)) prefetchWorkspaceFileRead(cwd, path);
 }

@@ -14,9 +14,17 @@
 
 import fs from "node:fs";
 import path from "node:path";
+import type { FileMediaDescriptor } from "@zeros/protocol/file-media";
+import { readWorkspaceMediaMetadata } from "./file-media";
 
 const MAX_TEXT_BYTES = 2_000_000; // 2 MB
 const MAX_IMAGE_BYTES = 5 * 1024 * 1024; // same boundary as composer images
+// Videos opt in to the existing media budget; never send a movie-sized payload
+// over the 16 MiB bridge or retain it in the file snapshot cache.
+const VIDEO_MIME: Record<string, string> = {
+  ".mp4": "video/mp4", ".m4v": "video/mp4", ".webm": "video/webm",
+  ".mov": "video/quicktime", ".ogv": "video/ogg", ".mkv": "video/x-matroska",
+};
 
 const IMAGE_MIME: Record<string, string> = {
   ".png": "image/png",
@@ -30,7 +38,7 @@ const IMAGE_MIME: Record<string, string> = {
   ".svg": "image/svg+xml",
 };
 
-export type ReadFileKind = "text" | "image" | "binary" | "too-large" | "error";
+export type ReadFileKind = "text" | "image" | "video" | "binary" | "too-large" | "error";
 
 export interface ReadFileResult {
   kind: ReadFileKind;
@@ -38,6 +46,7 @@ export interface ReadFileResult {
   bytes: number;
   content?: string;
   dataUrl?: string;
+  media?: FileMediaDescriptor;
   error?: string;
   /** True when this path is Design territory, so the viewer must not offer an
    *  Edit affordance that `file.write` is going to refuse. Advisory only: the
@@ -153,7 +162,7 @@ export function isInside(target: string, root: string): boolean {
 export function readWorkspaceFile(
   cwd: string,
   relPath: string,
-  opts?: { remote?: boolean },
+  opts?: { remote?: boolean; includeVideo?: boolean; streamMedia?: boolean },
 ): ReadFileResult {
   const remote = opts?.remote === true;
   const rel = relPath;
@@ -215,8 +224,34 @@ export function readWorkspaceFile(
 
   const ext = path.extname(target).toLowerCase();
   const imageMime = IMAGE_MIME[ext];
+  const videoMime = opts?.includeVideo === true ? VIDEO_MIME[ext] : undefined;
 
   try {
+    if (opts?.streamMedia && (imageMime || videoMime)) {
+      return readWorkspaceMediaMetadata(cwd, rel, remote);
+    }
+    if (videoMime) {
+      // Resolve within the same trust boundary, then inspect and read one held
+      // descriptor. A file growing during the read cannot bypass the byte cap.
+      const realRoot = fs.realpathSync(root), realTarget = fs.realpathSync(target);
+      if (!isInside(realTarget, realRoot)) return fail(rel, "refusing to read outside the workspace");
+      if (remote && isSensitiveRepoPath(path.relative(realRoot, realTarget))) return fail(rel, SECRET_REFUSAL);
+      const fd = fs.openSync(realTarget, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK);
+      try {
+        const info = fs.fstatSync(fd);
+        if (!info.isFile()) return fail(rel, "not a regular file");
+        if (info.size > MAX_IMAGE_BYTES) return { kind: "too-large", path: rel, bytes: info.size };
+        const buffer = Buffer.alloc(info.size + 1);
+        let offset = 0;
+        while (offset < buffer.length) {
+          const count = fs.readSync(fd, buffer, offset, buffer.length - offset, offset);
+          if (!count) break;
+          offset += count;
+        }
+        if (offset !== info.size) return fail(rel, "file changed while reading; try again");
+        return { kind: "video", path: rel, bytes: offset, dataUrl: `data:${videoMime};base64,${buffer.subarray(0, offset).toString("base64")}` };
+      } finally { fs.closeSync(fd); }
+    }
     if (imageMime) {
       if (size > MAX_IMAGE_BYTES)
         return { kind: "too-large", path: rel, bytes: size };

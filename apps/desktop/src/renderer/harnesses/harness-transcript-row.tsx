@@ -79,6 +79,7 @@ window.__ZEROS_NATIVE__ = { on: () => () => {}, async invoke<T>(): Promise<T> { 
 const { setActiveBridge } = await import("../platform/bridge/active-bridge");
 const agents = [{ id: "codex", name: "Codex", installed: true, authenticated: true, version: "1.0.0", description: "", distribution: {} }];
 setActiveBridge({
+  executionIdentity: { kind: "local", sidecar: "active" },
   status: "connected", onStatusChange: () => () => {}, forceReconnect: async () => {},
   on: (type: string, listener: (message: unknown) => void) => {
     const listeners = fixture.listeners.get(type) ?? new Set();

@@ -1,6 +1,6 @@
 import { execFileSync, spawnSync } from "node:child_process";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
-import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, renameSync, rmSync, symlinkSync, truncateSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -71,6 +71,62 @@ const sha = (path: string) => execFileSync("sha256sum", [path], { encoding: "utf
 const sorted = (text: string) => text.split("\n").filter(Boolean).sort();
 
 describe("cloud v2 checkpoints", () => {
+  it("keeps completed 500 MB attachments through replacement even when .context is ignored", () => {
+    const w = workspaces(), file = ".context/attachments/upload/clip.mp4";
+    w.write(join(w.oldRepo, ".gitignore"), ".context/\n.context-graph/\nnode_modules/\n");
+    w.write(join(w.oldRepo, file), "original-prefix"); truncateSync(join(w.oldRepo, file), 500_000_000);
+    w.write(join(w.oldRepo, ".context/local/attachments/legacy/notes.txt"), "legacy");
+    w.write(join(w.oldRepo, ".context/cache/not-an-attachment.bin"), "do not keep");
+    w.write(join(w.oldRepo, ".context/attachments/bad/nested/unregistered.txt"), "do not keep");
+    const outside = join(w.oldHome, "outside"); w.write(outside, "outside");
+    symlinkSync(outside, join(w.oldRepo, ".context/attachments/upload/link.mp4"));
+    const key = randomBytes(32), archive = join(w.root, "checkpoint.zck");
+    const saved = checkpoint({ home: w.oldHome, repo: w.oldRepo, key, out: archive }, w.env);
+    expect(saved.parsed.ok).toBe(true);
+    w.git(w.root, "clone", "-q", w.origin, w.newRepo);
+    expect(restore({ home: w.newHome, repo: w.newRepo, key, sha256: sha(archive), from: archive }, w.env).parsed).toEqual({ ok: true });
+    expect(existsSync(join(w.newRepo, file))).toBe(true);
+    expect(lstatSync(join(w.newRepo, file)).size).toBe(500_000_000);
+    expect(sha(join(w.newRepo, file))).toBe(sha(join(w.oldRepo, file)));
+    expect(readFileSync(join(w.newRepo, ".context/local/attachments/legacy/notes.txt"), "utf8")).toBe("legacy");
+    for (const path of [".context/cache/not-an-attachment.bin", ".context/attachments/bad/nested/unregistered.txt", ".context/attachments/upload/link.mp4"])
+      expect(existsSync(join(w.newRepo, path))).toBe(false);
+    expect(w.git(w.newRepo, "ls-files", ".context")).toBe("");
+  }, 90_000);
+
+  it.each([".context", ".context/attachments", ".context/attachments/upload"])("refuses an attachment restore through a replacement checkout's %s symlink", parent => {
+    const w = workspaces(), file = ".context/attachments/upload/clip.mp4";
+    w.write(join(w.oldRepo, ".gitignore"), ".context/\n");
+    w.write(join(w.oldRepo, file), "original");
+    const key = randomBytes(32), archive = join(w.root, "checkpoint.zck");
+    expect(checkpoint({ home: w.oldHome, repo: w.oldRepo, key, out: archive }, w.env).parsed.ok).toBe(true);
+    w.git(w.root, "clone", "-q", w.origin, w.newRepo);
+    const outside = join(w.newHome, "outside"); mkdirSync(outside);
+    mkdirSync(dirname(join(w.newRepo, parent)), { recursive: true });
+    symlinkSync(outside, join(w.newRepo, parent));
+    expect(restore({ home: w.newHome, repo: w.newRepo, key, sha256: sha(archive), from: archive }, w.env).parsed)
+      .toEqual({ ok: false, code: "checkpoint_restore_failed" });
+    expect(execFileSync("ls", ["-A", outside], { encoding: "utf8" })).toBe("");
+  });
+
+  it("reports an oversized ignored attachment instead of acknowledging a checkpoint without it", () => {
+    const w = workspaces(), file = ".context/attachments/upload/clip.mp4";
+    w.write(join(w.oldRepo, ".gitignore"), ".context/\n");
+    w.write(join(w.oldRepo, file), "original"); truncateSync(join(w.oldRepo, file), 500_000_001);
+    expect(checkpoint({ home: w.oldHome, repo: w.oldRepo, key: randomBytes(32), out: join(w.root, "checkpoint.zck") }, w.env).parsed)
+      .toEqual({ ok: false, code: "checkpoint_too_large", step: "attachments" });
+    expect(lstatSync(join(w.oldRepo, file)).size).toBe(500_000_001);
+    expect(w.git(w.oldRepo, "for-each-ref", "refs/zeros-checkpoint")).toBe("");
+  });
+
+  it("applies the existing combined checkpoint limit to ignored attachments", () => {
+    const w = workspaces();
+    w.write(join(w.oldRepo, ".gitignore"), ".context/\n");
+    w.write(join(w.oldRepo, ".context/attachments/upload/clip.mp4"), randomBytes(256 * 1024));
+    expect(checkpoint({ home: w.oldHome, repo: w.oldRepo, key: randomBytes(32), out: join(w.root, "checkpoint.zck"), maxBytes: 64 * 1024 }, w.env).parsed)
+      .toEqual({ ok: false, code: "checkpoint_too_large", step: "pack" });
+  });
+
   it("brings back branches, commits, the index, every change, stashes and sessions on a new Cloud Computer checkout", () => {
     const w = workspaces();
     const { git, write } = w;
@@ -96,6 +152,7 @@ describe("cloud v2 checkpoints", () => {
     write(join(state, "sessions", "chats.db"), "chat rows\n");
     write(join(state, "workspace-setup", "w.json"), "{\"state\":\"succeeded\"}\n");
     write(join(state, "github.sock"), "");
+    write(join(state, "attachment-uploads", "upload-interrupted.part"), "incomplete attachment\n");
     write(join(w.oldHome, ".claude/projects/-home-user-acme-app/session.jsonl"), "{\"type\":\"user\"}\n");
     write(join(w.oldHome, ".claude/.credentials.json"), "secret\n");
     write(join(w.oldHome, ".codex/sessions/2026/10/24/rollout.jsonl"), "{}\n");
@@ -153,6 +210,7 @@ describe("cloud v2 checkpoints", () => {
     expect(existsSync(join(w.newHome, ".codex/sessions/2026/10/24/rollout.jsonl"))).toBe(true);
     // Setup runs again on the new VM; credentials are delivered again, never restored.
     expect(existsSync(join(newState, "workspace-setup"))).toBe(false);
+    expect(existsSync(join(newState, "attachment-uploads"))).toBe(false);
     expect(existsSync(join(newState, "restored-from-checkpoint"))).toBe(true);
     for (const secret of [join(newState, "github.sock"), join(w.newHome, ".claude/.credentials.json"), join(w.newHome, ".codex/auth.json"), join(w.newHome, ".config/zeros/worker-token")])
       expect(existsSync(secret)).toBe(false);

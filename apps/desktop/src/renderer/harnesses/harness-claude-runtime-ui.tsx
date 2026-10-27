@@ -44,6 +44,7 @@ const updates: Array<{ chatId: string; env: Record<string, string> }> = [];
 const calls: Array<{ op: string }> = [];
 Object.assign(window, { __ZEROS_NATIVE__: { invoke: async () => null, on: () => () => {} } });
 setActiveBridge({
+  executionIdentity: { kind: "local", sidecar: "active" },
   status: "connected", onStatusChange: () => () => {}, onMessage: () => () => {}, on: () => () => {},
   request: async ({ op, args }: { op: string; args?: { archived?: boolean } }) => {
     calls.push({ op });

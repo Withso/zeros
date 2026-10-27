@@ -327,6 +327,12 @@ describe("WorkspaceService", () => {
       expect(r.kind).toBe("text");
       expect(r.content).toContain("trunk content");
 
+      fs.writeFileSync(path.join(repoB, "clip.mp4"), Buffer.from([0, 1, 2]));
+      await expect(svc.handle("file.read", { workspaceId: repoB, path: "clip.mp4", includeVideo: true }, { remote: false }))
+        .resolves.toMatchObject({ kind: "video", path: "clip.mp4", dataUrl: "data:video/mp4;base64,AAEC" });
+      await expect(svc.handle("file.read", { workspaceId: repoB, path: "clip.mp4" }, { remote: false }))
+        .resolves.toMatchObject({ kind: "binary" });
+
       const t = (await svc.handle(
         "file.tree",
         { workspaceId: repoB },
@@ -5149,6 +5155,7 @@ describe("WorkspaceService", () => {
       "messages.search",
       "file.tree",
       "file.read",
+      "file.readRange",
       "git.status",
       "git.changeCounts",
       "git.changeLineCounts",

@@ -17,10 +17,13 @@ import type { RuntimeClient } from "../platform/bridge/ws-client";
 import { useWorkspaceStore } from "../state/store";
 import { parseCloudWorkspaceKey } from "../platform/bridge/cloud-workspace-key";
 import { acceptCloudWorkspaceDocument } from "../state/cloud-workspace-catalog";
+import { fileMediaType } from "@zeros/protocol/file-media";
 
 const query = new URLSearchParams(location.search);
 const cwd = query.get("workspace") ?? "/composer-editor-harness";
 const suggestionsFixture = query.has("suggestions");
+const mediaFixture = query.has("media-preview");
+const mediaReads: string[] = [];
 let releaseSkills = () => {};
 const skillsReady = query.has("late-skills") ? new Promise<void>(resolve => { releaseSkills = resolve; }) : Promise.resolve();
 window.__releaseComposerSkills = () => releaseSkills();
@@ -83,6 +86,8 @@ const pendingWrites: Array<{
 }> = [];
 
 window.__composerAttachmentTransport = {
+  read: readFixtureFile,
+  reads: () => mediaReads,
   pending: () => pendingWrites.map(({ filename }) => filename),
   releaseNext: (filename, error) => {
     const index = pendingWrites.findIndex((write) => write.filename === filename);
@@ -93,10 +98,11 @@ window.__composerAttachmentTransport = {
 
 function readFixtureFile(path: string) {
   const record = [...records.values()].find(value => value.relativePath === path);
+  const media = fileMediaType(path);
   return record ? {
     path, bytes: record.bytes.length,
-    ...(record.mimeType.startsWith("image/")
-      ? { kind: "image", dataUrl: `data:${record.mimeType};base64,${btoa(Array.from(record.bytes, byte => String.fromCharCode(byte)).join(""))}` }
+    ...(media
+      ? { kind: media.kind, dataUrl: `data:${media.mimeType};base64,${btoa(Array.from(record.bytes, byte => String.fromCharCode(byte)).join(""))}` }
       : { kind: "text", content: new TextDecoder().decode(record.bytes) }),
   } : path === "skills/review-agent/SKILL.md"
     ? { kind: "text", path, bytes: sourceContent.length, content: sourceContent }
@@ -176,7 +182,7 @@ setActiveBridge({
         skipped: p.resolve === true,
       };
     }
-    if (message.op === "file.read") result = readFixtureFile(String(p.path));
+    if (message.op === "file.read") { mediaReads.push(String(p.path)); result = readFixtureFile(String(p.path)); }
     return { type: "WORKSPACE_RESPONSE", result };
   },
   onStatusChange: () => () => {},
@@ -192,6 +198,8 @@ declare global {
     __composerActionCalls: string[];
     __releaseComposerSkills: () => void;
     __composerAttachmentTransport: {
+      read: typeof readFixtureFile;
+      reads: () => string[];
       pending: () => string[];
       releaseNext: (filename: string, error?: string) => void;
     };
@@ -281,7 +289,7 @@ function Harness() {
         {composer.suggestionPopup}
       </div>
       {composer.imagePreviewOverlay}
-      {suggestionsFixture && tab?.filePath && <Suspense fallback={null}>
+      {(suggestionsFixture || mediaFixture) && tab?.filePath && <Suspense fallback={null}>
         <div data-testid="composer-source-viewer" className="border-border1 mt-4 h-96 overflow-hidden rounded-md border">
           <SourceViewer tabId={tab.id} cwd={cwd} path={tab.filePath} active={active}
             workspaceId={null} refreshKey={0} skillSource={tab.skillSource} readOnly={!!tab.skillSource}

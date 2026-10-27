@@ -164,6 +164,41 @@ export async function releaseAttachmentSource(
   // source. Maintenance releases bytes only after checking all owners.
 }
 
+const confirmedListeners = new Set<() => void>();
+export function onAttachmentSourceConfirmed(listener: () => void): () => void {
+  confirmedListeners.add(listener);
+  return () => { confirmedListeners.delete(listener); };
+}
+
+/** Replace this owner's recovery handle only after the destination confirms
+ * complete bytes. Other drafts, uploads, clipboard and open Blob leases keep
+ * independent ownership; never delete the user's selected native file. */
+export async function completeAttachmentSource(attachment: ComposerAttachment): Promise<void> {
+  const id = attachment.sourceRecoveryId;
+  if (!id || !attachment.diskPath || !attachment.owner) return;
+  const path = attachment.diskPath, owner = attachment.owner;
+  // An initial attach-time snapshot can still be finishing alongside a native
+  // copy. Join it before deletion so it cannot recreate the cache afterward.
+  await Promise.allSettled([pending.get(id), pending.get(`${id}:portable`)].filter(Boolean));
+  if (attachment.sourceRecoveryId !== id || attachment.diskPath !== path || attachment.owner !== owner) return;
+  delete attachment.sourceRecoveryId;
+  delete attachment.sourceFile;
+  delete attachment.sourcePortable;
+  await releaseAttachmentSource(id);
+  // Draft persistence must publish the confirmed reference before its recovery
+  // bytes are reclaimed. If a writer fails, retain the bytes for recovery.
+  for (const listener of confirmedListeners) listener();
+  const retained = retainedAttachmentSourceIds();
+  if (!retained) return;
+  const clipboard = (await maintainNativeAttachmentSources(retained)) ?? rememberedAttachmentClipboardSources();
+  const current = retainedAttachmentSourceIds(clipboard.map(sourceRecoveryId => ({ sourceRecoveryId })));
+  if (!current || current.includes(id) || sourceIsPreparing(id)) return;
+  await sourceStore(store => {
+    const latest = retainedAttachmentSourceIds(clipboard.map(sourceRecoveryId => ({ sourceRecoveryId })));
+    return !latest || latest.includes(id) || sourceIsPreparing(id) ? store.get(id) : store.delete(id);
+  });
+}
+
 let maintenance: Promise<void> | undefined;
 let lastCleanupKey: IDBValidKey | undefined;
 

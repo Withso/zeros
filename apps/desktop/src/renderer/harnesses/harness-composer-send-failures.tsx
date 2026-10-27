@@ -42,7 +42,7 @@ window.__ZEROS_NATIVE__ = { on: () => () => {}, async invoke<T>(command: string)
   } as T;
   return null as T;
 } };
-setActiveBridge({ status: "connected", on: () => () => {}, onStatusChange: () => () => {},
+setActiveBridge({ executionIdentity: { kind: "local", sidecar: "active" }, status: "connected", on: () => () => {}, onStatusChange: () => () => {},
   forceReconnect: async () => { reconnects++; },
   request: async (request: { type: string; op: string }) => request.type === "AGENT_LIST_AGENTS"
     ? { type: "AGENT_AGENTS_LIST", agents }

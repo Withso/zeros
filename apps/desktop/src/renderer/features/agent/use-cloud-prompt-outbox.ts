@@ -113,7 +113,7 @@ export class CloudPromptRuntime {
         prompt: [{ type: "text", text: prepared.text }, ...(prepared.attachments ?? [])],
         bubble: { retryText: prepared.text, displayText: prepared.displayText ?? prepared.text, attachments: prepared.bubbleAttachments,
           segments: prepared.segments, ...(options.autoAction ? { autoAction: options.autoAction } : {}) } });
-    });
+    }, { cancelOnStop: !!input.cloudQueue });
     if (this.coordinator.owns(channel)) {
       const saved = channel.snapshot.entries.find(entry => entry.payload.userMessageId === id)?.payload;
       if (saved && getAccountPresentationOwner() === accountPresentationOwner(owner.backend, owner.accountId))

@@ -47,6 +47,21 @@ function fixture(journal = new Journal(), key = owner) {
 }
 
 describe("durable cloud prompt channel", () => {
+  it("Stop releases a large-file preparation without waiting for its upload or journaling a late result", async () => {
+    const f = fixture(), upload = defer<CloudV2Prompt>();
+    await f.channel.enqueue(async () => prompt("running")); await f.channel.flush();
+    f.rows.get("running")!.state = "accepted"; await f.channel.refresh();
+    const started = vi.fn(() => upload.promise);
+    const send = f.channel.enqueue(started, { cancelOnStop: true });
+    const refused = expect(send).rejects.toThrow(/cancel/i);
+    await vi.waitFor(() => expect(started).toHaveBeenCalledOnce());
+    await f.channel.stop(); await refused; await f.channel.flush();
+    expect(f.api.stop).toHaveBeenCalledWith("0");
+    await f.channel.enqueue(async () => prompt("future")); await f.channel.flush();
+    upload.resolve(prompt("cancelled-file")); await Promise.resolve();
+    expect(f.channel.snapshot.entries.map(entry => entry.payload.userMessageId)).toEqual(["running", "future"]);
+    expect(f.order).toEqual(["running", "future"]);
+  });
   it("commits privately before accepting Send, then submits over HTTPS without any live bridge", async () => {
     const f = fixture(); await f.channel.enqueue(async () => prompt("one"));
     expect((await f.journal.read(owner)).entries[0]?.payload).toEqual(prompt("one"));
