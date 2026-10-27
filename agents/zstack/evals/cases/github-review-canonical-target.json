@@ -2,7 +2,7 @@
   "id": "github-review-canonical-target",
   "kind": "replay",
   "area": "git",
-  "fixedBy": "b694aff5d64f4af7ee5da4cd55ee4a947a22632e",
+  "fixedBy": "pr:737",
   "symptom": "PR discovery succeeds after a repository transfer or rename, but Review rejects the canonical PR URL against the old remote spelling and fails with FORGE_CONTRACT_INVALID.",
   "rule": "Resolve canonical repository identity at the shared hosted-operation boundary and exercise discovery through the real Review handler. Keep reads free of Git mutations; explicit Local repair follows the saved repository ID and preserves auth, config and cache generations. See agents/zstack/changes/github-review-canonical-target.md.",
   "check": "pnpm exec vitest run --config vitest.config.ts apps/desktop/src/engine/git/__tests__/sync-workspace-pr.test.ts apps/desktop/src/engine/git/__tests__/github-read-coalescing.test.ts apps/desktop/src/engine/git/__tests__/forge.test.ts apps/desktop/src/engine/git/__tests__/github-repository-reconciliation.test.ts apps/desktop/src/renderer/state/__tests__/project-repository-reconciliation.test.ts apps/desktop/src/renderer/state/__tests__/projects-engine-recovery.test.ts"
