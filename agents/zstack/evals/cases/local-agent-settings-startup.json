@@ -2,7 +2,7 @@
   "id": "local-agent-settings-startup",
   "kind": "replay",
   "area": "desktop-renderer",
-  "fixedBy": "5c6e76af9513b3c8a6a2a52e785c628b2531d3b6",
+  "fixedBy": "pr:738",
   "symptom": "Restoring a Local conversation during Mac app startup displays Connect to the local engine to save agent settings before the engine is connected.",
   "rule": "Wait for the owning Local engine and acknowledged settings within a cancellable readiness deadline; recheck disconnects after awaits, preserve actual settings errors, and keep cloud readiness independent. See agents/zstack/changes/local-agent-settings-startup.md.",
   "check": "pnpm exec vitest run --config vitest.config.ts apps/desktop/src/renderer/features/settings/__tests__/agent-preferences-sync.test.ts apps/desktop/src/renderer/platform/bridge/__tests__/ws-client-cloud-reconnect.test.ts"
