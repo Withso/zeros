@@ -143,6 +143,8 @@ const commandTable: Record<string, CommandHandler> = {
   // from the app (files leave it only via the user deleting them on disk).
   agent_attachment_write: notImpl("agent_attachment_write", 8),
   design_export_png: notImpl("design_export_png", 8),
+  design_capture_acquire: notImpl("design_capture_acquire", 8),
+  design_capture_release: notImpl("design_capture_release", 8),
 
   // Agent transcript and chat-list channels were removed — that storage
   // moved to the engine's Zeros DB (reached over the bridge).

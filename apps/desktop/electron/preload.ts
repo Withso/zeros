@@ -56,6 +56,8 @@ const ALLOWED_COMMANDS = new Set<string>([
   "native_app_names",
   "tool_artwork_images",
   "design_export_png",
+  "design_capture_acquire",
+  "design_capture_release",
   "dialog_pick_folder",
   "engine_reset_to_default",
   "get_engine_port",
@@ -219,6 +221,8 @@ const bridge = {
   // A synchronous metadata snapshot is available before page scripts run.
   // Main is authoritative; argv and renderer/Vite flags cannot opt in.
   localDevelopment: ipcRenderer.sendSync("zeros:local-development") === true,
+  // Only the main window declares its fixed visual-zoom/scrolling contract.
+  asyncCanvasWheel: process.argv.includes("--zeros-async-canvas-wheel"),
   maintainAttachmentSources(retainedIds: string[]): Promise<string[]> {
     return ipcRenderer.invoke("zeros:attachment-source-maintenance", retainedIds);
   },

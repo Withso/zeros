@@ -13,6 +13,7 @@ import { designPagesMigrationGeneration } from "./pages-migration";
 
 const MAX_SCREENSHOTS = 64;
 const MAX_BASE64_LENGTH = 12_000_000;
+export const DESIGN_SCREENSHOT_RETAINED_BYTES = 24 * 1024 * 1024;
 const ALLOWED_MIME_TYPES = new Set(["image/png", "image/jpeg", "image/webp"]);
 const PNG_SIGNATURE = Buffer.from([
   0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a,
@@ -34,9 +35,24 @@ export interface DesignScreenshot {
 
 interface DesignScreenshotEntry {
   screenshot: DesignScreenshot;
+  retainedBytes: number;
   owner?: { workspacePath: string; directory: string; migrationGeneration: string | null };
 }
 const screenshots = new Map<string, DesignScreenshotEntry>();
+let retainedBytes = 0;
+
+function removeScreenshot(key: string): void {
+  const entry = screenshots.get(key);
+  if (!entry) return;
+  screenshots.delete(key);
+  retainedBytes -= entry.retainedBytes;
+}
+
+/** Conservative UTF-16 retained-data estimate; the engine does not decode
+ * these images. Renderer/GPU allocations are measured separately. */
+export function designScreenshotUsage() {
+  return { entries: screenshots.size, retainedBytes, maxRetainedBytes: DESIGN_SCREENSHOT_RETAINED_BYTES };
+}
 
 function screenshotKey(
   workspaceId: string,
@@ -127,7 +143,12 @@ export function normalizeDesignScreenshot(
   }
   assertImageSignature(input.mimeType, input.data);
   const next: DesignScreenshot = {
-    ...input,
+    workspaceId: input.workspaceId,
+    frame: input.frame,
+    nodeId: input.nodeId,
+    mimeType: input.mimeType,
+    data: input.data,
+    sourceVersion: input.sourceVersion,
     width: Math.round(finitePositive(input.width, "width")),
     height: Math.round(finitePositive(input.height, "height")),
     scale: finitePositive(input.scale, "scale"),
@@ -145,12 +166,19 @@ export function setDesignScreenshot(input: DesignScreenshot, workspacePath?: str
     directory,
     migrationGeneration: designPagesMigrationGeneration(workspacePath, directory),
   } : undefined;
-  screenshots.delete(key);
-  screenshots.set(key, { screenshot: next, owner });
-  while (screenshots.size > MAX_SCREENSHOTS) {
+  const bytes = 2 * (key.length + next.workspaceId.length + next.frame.length +
+    (next.nodeId?.length ?? 0) + next.mimeType.length + next.sourceVersion.length + next.data.length +
+    (owner ? owner.workspacePath.length + owner.directory.length + (owner.migrationGeneration?.length ?? 0) : 0));
+  // A valid explicit export must not fail merely because the optional cache
+  // is full. Oversized retained data stays with its caller, outside this cache.
+  if (bytes > DESIGN_SCREENSHOT_RETAINED_BYTES) return;
+  removeScreenshot(key);
+  screenshots.set(key, { screenshot: Object.freeze(next), owner, retainedBytes: bytes });
+  retainedBytes += bytes;
+  while (screenshots.size > MAX_SCREENSHOTS || retainedBytes > DESIGN_SCREENSHOT_RETAINED_BYTES) {
     const oldest = screenshots.keys().next().value as string | undefined;
     if (!oldest) break;
-    screenshots.delete(oldest);
+    removeScreenshot(oldest);
   }
 }
 
@@ -165,7 +193,7 @@ export function getDesignScreenshot(
   if (!entry) return null;
   if (entry.owner && entry.owner.migrationGeneration !==
       designPagesMigrationGeneration(entry.owner.workspacePath, entry.owner.directory)) {
-    screenshots.delete(key);
+    removeScreenshot(key);
     return null;
   }
   const screenshot = entry.screenshot;
@@ -178,10 +206,11 @@ export function getDesignScreenshot(
 export function forgetDesignScreenshots(workspaceId: string): void {
   const prefix = `${workspaceId}\u0000`;
   for (const key of screenshots.keys()) {
-    if (key.startsWith(prefix)) screenshots.delete(key);
+    if (key.startsWith(prefix)) removeScreenshot(key);
   }
 }
 
 export function resetDesignScreenshotsForTests(): void {
   screenshots.clear();
+  retainedBytes = 0;
 }

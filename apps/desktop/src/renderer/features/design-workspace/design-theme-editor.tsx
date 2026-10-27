@@ -1391,7 +1391,7 @@ export const DesignThemeEditor = React.memo(function DesignThemeEditor({
                                 label={
                                   readOnly
                                     ? `${token.name} · ${selectedSource!.path}`
-                                    : `${token.name} · ${token.usageCount} ${token.usageCount === 1 ? "use" : "uses"}${overrides ? ` · overrides ${overrides.join(", ")}` : ""}`
+                                    : `${token.name}${token.usageCountKnown === false ? "" : ` · ${token.usageCount} ${token.usageCount === 1 ? "use" : "uses"}`}${overrides ? ` · overrides ${overrides.join(", ")}` : ""}`
                                 }
                               >
                                 <span

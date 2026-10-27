@@ -433,11 +433,27 @@ export async function checkSidebarResourceDiagnostics({
     )
     .toBe(true);
   await expect(page.getByText(/Diagnostics copied — \d+ KB with recent app logs/)).toBeVisible();
+  const copied = await page.evaluate(() => navigator.clipboard.readText());
+  expect(copied).toContain("# Zeros diagnostics report");
+  expect(copied).toContain("## Design renderer allocations");
+  expect(copied).toContain("Logical allocation counters and estimates; physical process memory is reported above.");
+  const allocations = JSON.parse(copied.split("## Design renderer allocations\n")[1].split("\n").slice(1).join("\n"));
+  expect(allocations.sourceTiles).toMatchObject({ bytes: 0, outputBytes: 0, activeScenes: 0 });
+  expect(allocations.captures).toMatchObject({ running: 0, queued: 0 });
+  expect(allocations.source).toMatchObject({ documents: 0 });
   await page.keyboard.press("Escape");
   check(
     "Resources lists the engine, agents and their tools, Mac pressure and other Zeros apps; Copy builds the native diagnostics report",
     true,
   );
+  await resetHarness(page, harnessBase, "?resource-pressure&resource-pending-cpu");
+  await page.getByRole("button", { name: "App resources", exact: true }).click();
+  await expect(details.getByRole("row", { name: /^tsc\./ }).getByRole("gridcell").nth(1)).toHaveText("—");
+  await expect(details.getByRole("row", { name: /^App\./ }).getByRole("gridcell").nth(1)).toHaveText("—");
+  await expect(details.getByRole("row", { name: /^Engine\./ }).getByRole("gridcell").nth(1)).toHaveText("18.0%");
+  await expect(details).toContainText(/CPU —\s*Memory/);
+  await page.keyboard.press("Escape");
+  check("Resources keeps new-process CPU unknown in its row and app total while retaining measured processes", true);
 }
 
 /** Retained from the retired cloud restart smoke: a Local workspace menu takes

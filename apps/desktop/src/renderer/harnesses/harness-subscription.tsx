@@ -30,7 +30,7 @@ import {
   latestAuthenticationRecoveryTurn,
 } from "../features/agent/auth-prompt-recovery";
 import { groupMessagesIntoTurns } from "../features/agent/turn-grouping";
-import { loadAgents, refreshAgents } from "../features/agent/agents-cache";
+import { invalidateAgentsCache, loadAgents, refreshAgents } from "../features/agent/agents-cache";
 import { registerAgentPreferencesFlush } from "../platform/agent-preferences";
 import { BridgeProvider } from "../platform/bridge/use-bridge";
 import { RuntimeClient } from "../platform/bridge/ws-client";
@@ -47,6 +47,9 @@ import { useWorkspaceStore } from "../state/workspace-store";
 
 const ids = ["claude", "codex", "cursor"] as const;
 const params = new URLSearchParams(location.search);
+// Each navigation supplies a new fake engine; revalidate any registry snapshot
+// persisted by the preceding fixture rather than reusing its credentials.
+invalidateAgentsCache();
 const queueFixture = ids.find((id) => id === params.get("queue"));
 const queueTurns = new Map<string, (reason: "cancelled" | "end_turn") => void>();
 const queueSteers = new Map<string, (outcome: string) => void>();
@@ -55,6 +58,33 @@ const queueReplayRequests: boolean[] = [];
 if (queueFixture) Object.assign(window, { __queueReplayRequests: queueReplayRequests });
 const queueBridgeListeners = new Map<string, Set<(message: BridgeMessage) => void>>();
 const usageFixture = ids.find((id) => id === params.get("usage"));
+const apiKeyFixture = ids.find((id) => id === params.get("apiKey"));
+let keyPresenceRead = params.get("keyRead");
+const pendingKeyReads = new Set<() => void>();
+if (apiKeyFixture) {
+  setProviderPrefs(apiKeyFixture, { authMethod: "apiKey" });
+  rememberConnectionMethod(apiKeyFixture, "apiKey");
+  Object.assign(window, {
+    __keyPresence: {
+      reads: () => counts.keyReads,
+      pending: () => pendingKeyReads.size,
+      setMode(mode: "hold" | "error" | null) {
+        keyPresenceRead = mode;
+        providerAuthChanged();
+      },
+      release() {
+        for (const resolve of pendingKeyReads) resolve();
+        pendingKeyReads.clear();
+      },
+      resume() {
+        keyPresenceRead = null;
+        for (const resolve of pendingKeyReads) resolve();
+        pendingKeyReads.clear();
+        providerAuthChanged();
+      },
+    },
+  });
+}
 const identityFixture = params.has("identity");
 const cliIdentities = new Map<string, { state: "connected" | "disconnected"; email?: string }>(
   ids.map(id => [id, { state: "connected", email: "cli@example.test" }]),
@@ -112,6 +142,8 @@ const secrets = new Map<string, string>();
 const rows = new Map<string, AgentTextMessage[]>();
 const counts = {
   browser: 0,
+  keyReads: 0,
+  registryReads: 0,
   reads: 0,
   usageReads: 0,
   code: 0,
@@ -175,17 +207,36 @@ const registry = (): BridgeRegistryAgent[] =>
     distribution: {},
     installed: true,
     authBinary: id,
+    ...(apiKeyFixture === id && getProviderPrefs(id).authMethod === "apiKey"
+      ? {
+          apiKeySource: secrets.has(accounts[id])
+            ? "saved" as const
+            : params.get("keySource") === "none"
+              ? "none" as const
+              : "environment" as const,
+        }
+      : {}),
     authenticated:
       staleCredentialHint ||
       (getProviderPrefs(id).authMethod === "apiKey"
-        ? secrets.has(accounts[id])
+        ? secrets.has(accounts[id]) ||
+          (apiKeyFixture === id && params.get("keySource") !== "none")
         : statuses.get(id)?.state === "connected"),
   }));
 window.__ZEROS_NATIVE__ = {
   async invoke<T>(command: string, args?: Record<string, unknown>): Promise<T> {
     if (command === "keychain_get")
       return (secrets.get(args?.account as string) ?? null) as T;
-    if (command === "keychain_has") return secrets.has(args?.account as string) as T;
+    if (command === "keychain_has") {
+      counts.keyReads++;
+      showCounts();
+      const present = secrets.has(args?.account as string);
+      if (keyPresenceRead === "error")
+        throw new Error("Fixture storage unavailable");
+      if (keyPresenceRead === "hold")
+        await new Promise<void>(resolve => pendingKeyReads.add(resolve));
+      return present as T;
+    }
     if (command === "keychain_set") {
       secrets.set(args?.account as string, args?.value as string);
       return undefined as T;
@@ -360,6 +411,7 @@ if (usageFixture && usageObservation) {
     __providerUsageObservation: {
       reads: () => counts.usageReads,
       statusReads: () => counts.reads,
+      registryReads: () => counts.registryReads,
       hold: () => { holdUsage = true; },
       release: (slot: "a" | "b") => {
         for (const release of pendingUsage)
@@ -438,8 +490,11 @@ RuntimeClient.prototype.request = async function <
       });
     });
   }
-  if (request.type === "AGENT_LIST_AGENTS")
+  if (request.type === "AGENT_LIST_AGENTS") {
+    counts.registryReads++;
+    showCounts();
     return { type: "AGENT_AGENTS_LIST", agents: registry() } as unknown as T;
+  }
   if (request.type === "AGENT_INIT_AGENT")
     return { type: "AGENT_AGENT_INITIALIZED", agentId: request.agentId,
       initialize: { protocolVersion: 1, agentCapabilities: { steering: true } } } as unknown as T;
@@ -613,8 +668,8 @@ RuntimeClient.prototype.request = async function <
 
 function Harness() {
   const [provider, setProvider] =
-    useState<BrowserSubscriptionProvider>(usageFixture ?? "claude");
-  const [settings, setSettings] = useState(Boolean(usageFixture));
+    useState<BrowserSubscriptionProvider>(apiKeyFixture ?? usageFixture ?? "claude");
+  const [settings, setSettings] = useState(Boolean(apiKeyFixture ?? usageFixture));
   const [active, setActive] = useState(true);
   const [readOnly, setReadOnly] = useState(false);
   const [draft, setDraft] = useState("Original message");
@@ -625,7 +680,10 @@ function Harness() {
   const turns = groupMessagesIntoTurns(session.messages);
   const recoveredAt = latestAuthenticationRecoveryTurn(turns);
   useEffect(() => subscribeProviderSettingsTab(() => setSettings(true)), []);
-  useEffect(() => { if (usageFixture) requestProviderSettings(usageFixture); }, []);
+  useEffect(() => {
+    const provider = apiKeyFixture ?? usageFixture;
+    if (provider) requestProviderSettings(provider);
+  }, []);
   useEffect(() => {
     if (!useSessionsStore.getState().sessions[chatId])
       useSessionsStore.getState().setSession(chatId, {

@@ -11,7 +11,7 @@ import {
 } from "@zeros/protocol/design-catalog";
 import { portableDesignName } from "@zeros/protocol/design-path";
 import { bridgeDesignCatalog } from "../../../platform/bridge/design-catalog-bridge";
-import type { WorkspaceRuntimeClient } from "../../../platform/bridge/workspace-runtime-client";
+import type { RuntimeClient } from "../../../platform/bridge/ws-client";
 
 export interface DesignCatalogReadAuthority {
   readonly owner: Readonly<DesignCatalogOwner>;
@@ -115,7 +115,7 @@ export class DesignCatalogReadAdapter {
   private readonly work = new Set<ReadTask>();
 
   constructor(
-    private readonly bridge: WorkspaceRuntimeClient,
+    private readonly bridge: RuntimeClient,
     limits: Partial<DesignCatalogReadLimits> = {},
   ) {
     const configured = { ...LIMITS };

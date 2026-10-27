@@ -39,6 +39,7 @@ describe("ZerosEngine.stop", () => {
           throw new Error("agent boundary proof failed");
         },
       },
+      workspace: { stopDesignPreviews: async () => { calls.push("design-previews"); } },
       vaultPersistTimer: null,
       scopedMcpGateways: {
         stop: async () => {
@@ -83,6 +84,7 @@ describe("ZerosEngine.stop", () => {
     );
     expect(calls).toEqual([
       "product-tools",
+      "design-previews",
       "agents",
       "scoped-mcp",
       "mcp-callback",

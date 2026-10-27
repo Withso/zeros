@@ -60,6 +60,7 @@ function fixture() {
     launchedMcp: { stop: vi.fn() }, organizationMcp: { reset: vi.fn() },
     mcpProbes: new Map<string, AbortController>(),
     agents: { revokeSessionTools: vi.fn(), dispose: vi.fn() },
+    workspace: { stopDesignPreviews: vi.fn() },
     pty: { killAll: vi.fn() }, terminals: { clear: vi.fn() }, watcher: { stop: vi.fn() },
     removePortFile: vi.fn(), clearBusy: vi.fn(),
   });
@@ -283,5 +284,6 @@ describe("engine startup readiness", () => {
     expect(engine.launchedMcp.stop).toHaveBeenCalledOnce();
     expect(engine.organizationMcp.reset).toHaveBeenCalledOnce();
     expect(engine.running).toBe(false);
+    expect(engine.workspace.stopDesignPreviews).toHaveBeenCalledOnce();
   });
 });

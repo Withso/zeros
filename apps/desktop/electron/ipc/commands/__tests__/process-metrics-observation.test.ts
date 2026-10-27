@@ -54,6 +54,29 @@ const argReads = () => native.exec.mock.calls.filter(([, args]) => args[0] === "
 const request = { detail: true, terminalPids: [400], terminalRootsKnown: true };
 
 describe("on-demand main-process resource observations", () => {
+  it("records CPU and memory for the engine and all owned children without an open inspector", async () => {
+    const metrics = await import("../process-metrics");
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    const stop = metrics.startProcessMetricsLogging();
+    try {
+      await vi.advanceTimersByTimeAsync(10 * 60_000 + 1_000);
+      const entries = log.mock.calls.map(([line]) => String(line))
+        .filter(line => line.startsWith("[Zeros resources] "))
+        .map(line => JSON.parse(line.slice("[Zeros resources] ".length)));
+      const summary = entries.find(entry => entry.type === "summary");
+      const processes = entries.filter(entry => entry.type === "processes").flatMap(entry => entry.processes);
+      expect(summary?.scope).toBe("app-and-descendants");
+      expect(summary?.samplingIntervalMs).toBe(1_000);
+      expect(summary?.processCount).toBe(4);
+      expect(processes.map(row => row.pid).sort((a, b) => a - b)).toEqual([process.pid, 200, 300, 400].sort((a, b) => a - b));
+      expect(processes.find(row => row.pid === 300)).toMatchObject({ name: "Engine", cpuPercent: 0, memoryBytes: 300 * 1024, memorySource: "footprint" });
+      expect(processes.find(row => row.pid === 400)).toMatchObject({ parentPid: 300, cpuPercent: 0, memoryBytes: 400 * 1024 });
+      expect(processes.some(row => row.pid === 500 || row.pid === 999)).toBe(false);
+      expect(JSON.stringify(entries)).not.toContain("zeros-git-auth-fixture");
+      expect(scans()).toHaveLength(2);
+    } finally { stop(); log.mockRestore(); }
+  });
+
   it("uses zero child processes for four lightweight reads in a synthetic idle minute", async () => {
     const { processMetricsSnapshot } = await import("../process-metrics");
     let summary;
@@ -125,6 +148,25 @@ describe("on-demand main-process resource observations", () => {
     expect(report.text).toContain("CPU over the last 1.0 s");
   });
 
+  it("keeps the diagnostics CPU window and terminal ownership independent of an open inspector", async () => {
+    const { processDiagnosticsReport, processMetricsSnapshot } = await import("../process-metrics");
+    await processMetricsSnapshot(request);
+    await vi.advanceTimersByTimeAsync(1_000);
+    const pending = processDiagnosticsReport(request);
+    await vi.advanceTimersByTimeAsync(750);
+    const inspectorRequest = { detail: true, terminalPids: [], terminalRootsKnown: true };
+    const during = await processMetricsSnapshot(inspectorRequest);
+    await vi.advanceTimersByTimeAsync(250);
+    const report = await pending;
+    expect(report.text).toContain("CPU over the last 1.0 s");
+    expect(report.text).toContain("zsh [terminal]");
+    expect(during.samplingIntervalMs).toBe(1_750);
+    await vi.advanceTimersByTimeAsync(750);
+    const after = await processMetricsSnapshot(inspectorRequest);
+    expect(after.samplingIntervalMs).toBe(1_000);
+    expect(after.processes.find(row => row.pid === 400)?.terminal).toBe(false);
+  });
+
   it("carries native owner labels into the renderer snapshot and explicit diagnostics", async () => {
     const { processMetricsSnapshot, processDiagnosticsReport } = await import("../process-metrics");
     const { rendererProcessOwners } = await import("../../../renderer-process-owners");
@@ -148,7 +190,7 @@ describe("on-demand main-process resource observations", () => {
     expect(vi.getTimerCount()).toBe(0);
   });
 
-  it("retains a ten-minute memory history with only built-in metrics and cancels on disposal", async () => {
+  it("keeps full-tree history sparse and cancels future sampling on disposal", async () => {
     const metrics = await import("../process-metrics");
     native.metrics.mockReturnValue([
       { pid: process.pid, type: "Browser", memory: { workingSetSize: 100 * 1024 } },
@@ -160,19 +202,21 @@ describe("on-demand main-process resource observations", () => {
       const stop = metrics.startProcessMetricsLogging();
       expect(vi.getTimerCount()).toBe(1);
       expect(native.metrics).not.toHaveBeenCalled();
-      await vi.advanceTimersByTimeAsync(60 * 60_000);
-      expect(native.metrics).toHaveBeenCalledTimes(6);
-      expect(log.mock.calls).toEqual(Array.from({ length: 6 }, () => ["[Zeros procmem] total=350MB Tab=1/200MB Browser=1/100MB GPU=1/50MB"]));
-      expect(native.exec.mock.calls.length).toBe(0);
+      await vi.advanceTimersByTimeAsync(10 * 60_000 + 1_000);
+      expect(native.metrics).toHaveBeenCalledTimes(2);
+      expect(log.mock.calls.filter(([line]) => String(line).includes('"type":"summary"'))).toHaveLength(1);
+      expect(scans()).toHaveLength(2);
+      expect(native.exec.mock.calls.filter(([file]) => file.endsWith("top"))).toHaveLength(1);
       expect(vi.getTimerCount()).toBe(1);
       stop();
       expect(vi.getTimerCount()).toBe(0);
       await vi.advanceTimersByTimeAsync(60 * 60_000);
-      expect(native.metrics).toHaveBeenCalledTimes(6);
+      expect(native.metrics).toHaveBeenCalledTimes(2);
+      expect(scans()).toHaveLength(2);
     } finally { log.mockRestore(); }
   });
 
-  it("coalesces periodic history with requested observations without duplicate samples or log lines", async () => {
+  it("keeps lightweight requests from postponing the complete history or advancing its CPU window", async () => {
     const metrics = await import("../process-metrics");
     const log = vi.spyOn(console, "log").mockImplementation(() => {});
     try {
@@ -181,16 +225,14 @@ describe("on-demand main-process resource observations", () => {
       await metrics.processMetricsSnapshot({ detail: false });
       expect(log).toHaveBeenCalledTimes(1);
       await vi.advanceTimersByTimeAsync(5 * 60_000);
-      expect(native.metrics).toHaveBeenCalledTimes(1);
-      await vi.advanceTimersByTimeAsync(5 * 60_000);
       expect(native.metrics).toHaveBeenCalledTimes(2);
-      expect(log).toHaveBeenCalledTimes(2);
       await metrics.processMetricsSnapshot({ detail: false });
-      expect(log).toHaveBeenCalledTimes(2);
-      await vi.advanceTimersByTimeAsync(10 * 60_000);
+      await vi.advanceTimersByTimeAsync(1_000);
       expect(native.metrics).toHaveBeenCalledTimes(4);
-      expect(log).toHaveBeenCalledTimes(3);
-      expect(native.exec.mock.calls.length).toBe(0);
+      const summaries = log.mock.calls.map(([line]) => String(line)).filter(line => line.includes('"type":"summary"'));
+      expect(summaries).toHaveLength(1);
+      expect(summaries[0]).toContain('"samplingIntervalMs":1000');
+      expect(scans()).toHaveLength(2);
       stop();
       expect(vi.getTimerCount()).toBe(0);
     } finally { log.mockRestore(); }
@@ -205,14 +247,29 @@ describe("on-demand main-process resource observations", () => {
       native.metrics.mockImplementationOnce(() => { throw new Error("metrics unavailable"); });
       expect(vi.getTimerCount()).toBe(1);
       await vi.advanceTimersByTimeAsync(10 * 60_000);
-      expect(log).not.toHaveBeenCalled();
+      expect(log).toHaveBeenCalledExactlyOnceWith("[Zeros resources] observation unavailable");
       expect(native.metrics).toHaveBeenCalledTimes(1);
       expect(vi.getTimerCount()).toBe(1);
-      await vi.advanceTimersByTimeAsync(10 * 60_000);
-      expect(native.metrics).toHaveBeenCalledTimes(2);
-      expect(log).toHaveBeenCalledTimes(1);
-      expect(native.exec.mock.calls.length).toBe(0);
+      await vi.advanceTimersByTimeAsync(10 * 60_000 + 1_000);
+      expect(native.metrics).toHaveBeenCalledTimes(3);
+      expect(log.mock.calls.filter(([line]) => String(line).includes('"type":"summary"'))).toHaveLength(1);
+      expect(scans()).toHaveLength(3);
       stop();
+      expect(vi.getTimerCount()).toBe(0);
+    } finally { log.mockRestore(); }
+  });
+
+  it("cancels a pending CPU window without a late log or second process scan", async () => {
+    const metrics = await import("../process-metrics");
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    try {
+      const stop = metrics.startProcessMetricsLogging();
+      await vi.advanceTimersByTimeAsync(10 * 60_000 + 200);
+      expect(scans()).toHaveLength(1);
+      stop();
+      await vi.advanceTimersByTimeAsync(60 * 60_000);
+      expect(scans()).toHaveLength(1);
+      expect(log).not.toHaveBeenCalled();
       expect(vi.getTimerCount()).toBe(0);
     } finally { log.mockRestore(); }
   });

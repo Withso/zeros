@@ -1,4 +1,5 @@
 import { expect } from "@playwright/test";
+import { designFrameElementBox } from "./ui-smoke-design-helpers.mjs";
 
 export async function runDesignDoubleClickSelectionSmoke({ page, check }) {
   const origin = new URL(page.url()).origin;
@@ -20,13 +21,12 @@ export async function runDesignDoubleClickSelectionSmoke({ page, check }) {
       `[data-design-sidebar-panel] [data-design-layer-id="${id}"][aria-selected="true"]`,
     );
   const editor = page.locator("[data-design-inline-text-editor]");
-  const heading = page
-    .frameLocator(
-      '[data-design-frame="home.html"] iframe[data-design-document-buffer="displayed"]',
-    )
-    .locator('[data-oid="home-heading"]');
+  const runtime = page.frameLocator(
+    '[data-design-frame="home.html"] iframe[data-design-document-buffer="displayed"]',
+  );
+  const heading = runtime.locator('[data-oid="home-heading"]');
   await page.locator('[data-design-frame-row="home.html"]').click();
-  const box = await heading.boundingBox();
+  const box = await designFrameElementBox(runtime.owner(), heading);
   const doubleClick = () =>
     page.mouse.dblclick(box.x + box.width / 2, box.y + box.height / 2);
   await doubleClick();
@@ -50,7 +50,7 @@ export async function runDesignDoubleClickSelectionSmoke({ page, check }) {
       '[data-design-sidebar-panel] [data-design-layer-id="home-heading"]',
     )
     .click();
-  const empty = await heading.boundingBox();
+  const empty = await designFrameElementBox(runtime.owner(), heading);
   await page.mouse.dblclick(
     empty.x + empty.width / 2,
     empty.y + empty.height / 2,
@@ -252,7 +252,7 @@ export async function runDesignSelectionSmoke({ page, waitFor, check }) {
   );
   const mark = runtime.locator('[data-oid="home-mark"]');
   const clickMark = async (double = false) => {
-    const box = await mark.boundingBox();
+    const box = await designFrameElementBox(runtime.owner(), mark);
     await page.mouse[double ? "dblclick" : "click"](
       box.x + box.width / 2,
       box.y + box.height / 2,
@@ -300,7 +300,7 @@ export async function runDesignSelectionSmoke({ page, waitFor, check }) {
   // Use non-text container padding to check that one double-click descends
   // once even when pointer-up and dblclick arrive before the runtime answers.
   const nav = runtime.locator('[data-oid="home-nav"]');
-  const navBox = await nav.boundingBox();
+  const navBox = await designFrameElementBox(runtime.owner(), nav);
   await page.mouse.dblclick(
     navBox.x + navBox.width / 2,
     navBox.y + navBox.height / 2,
@@ -340,9 +340,7 @@ export async function runDesignSelectionSmoke({ page, waitFor, check }) {
       }
     };
   });
-  const headingBox = await runtime
-    .locator('[data-oid="home-heading"]')
-    .boundingBox();
+  const headingBox = await designFrameElementBox(runtime.owner(), runtime.locator('[data-oid="home-heading"]'));
   for (const child of ["home-hero", "home-heading"]) {
     await page.mouse.dblclick(
       headingBox.x + headingBox.width / 2,
@@ -425,9 +423,7 @@ export async function runDesignSelectionSmoke({ page, waitFor, check }) {
       forceRuntimeRead: true,
     });
   });
-  const underPadding = await runtime
-    .locator('[data-oid="home-heading"]')
-    .boundingBox();
+  const underPadding = await designFrameElementBox(runtime.owner(), runtime.locator('[data-oid="home-heading"]'));
   const paddingPoint = {
     x: underPadding.x + underPadding.width / 2,
     y: underPadding.y + underPadding.height / 2,

@@ -1,5 +1,6 @@
 import { createServer, type Server } from "node:http";
-import { randomBytes, timingSafeEqual } from "node:crypto";
+import { randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
+import { DesignCaptureAdmission } from "./capture-admission";
 import {
   DESIGN_CAPTURE_HTML_BYTES,
   DESIGN_CAPTURE_PNG_BYTES,
@@ -45,11 +46,16 @@ export function assertDesignCapturePng(
  * immediately instead of retaining queued HTML or allocating more browsers. */
 export async function startDesignCaptureService(
   render: DesignCaptureHost,
+  admission = new DesignCaptureAdmission(),
 ): Promise<DesignCaptureService> {
+  const nativeOwner = {};
   const token = randomBytes(32).toString("hex");
   const expected = Buffer.from(`Bearer ${token}`);
   let stopped = false;
   let active: AbortController | null = null;
+  let activeJob: string | null = null;
+  const cancelledJobs = new Map<string, number>();
+  const completedJobs = new Set<string>();
   let flight: Promise<void> | null = null;
   let serviceUrl = "";
   const server: Server = createServer(
@@ -73,11 +79,35 @@ export async function startDesignCaptureService(
         fail(401, "Unauthorized capture request.");
         return;
       }
+      const cancellation = request.method === "DELETE" && /^\/capture\/([a-f0-9-]{36})$/.exec(request.url ?? "");
+      // Identified requests carry an absolute deadline. Expiring a tombstone
+      // cannot resurrect a delayed POST: that POST's deadline has also expired.
+      const deadlineHeader = request.headers["x-zeros-design-deadline"];
+      const deadline = typeof deadlineHeader === "string" ? Number(deadlineHeader) : NaN;
+      for (const [id, expires] of cancelledJobs) if (expires < Date.now()) cancelledJobs.delete(id);
+      if (cancellation) {
+        const id = cancellation[1]!;
+        if (activeJob !== id && !completedJobs.has(id)) {
+          if (!Number.isSafeInteger(deadline) || deadline > Date.now() + DESIGN_CAPTURE_TIMEOUT_MS + 1_000) { fail(422, "Invalid capture deadline."); return; }
+          if (deadline >= Date.now()) {
+            if (cancelledJobs.size >= 128 && !cancelledJobs.has(id)) { fail(429, "Capture cancellation capacity reached."); return; }
+            cancelledJobs.set(id, deadline);
+          }
+        }
+        const current = activeJob === id ? flight : null;
+        if (activeJob === id) active?.abort(new Error("Design capture cancelled."));
+        void Promise.resolve(current).then(() => {
+          if (response.destroyed) return;
+          response.writeHead(200, { "Content-Type": "application/json", "Cache-Control": "no-store" });
+          response.end(JSON.stringify({ settled: true }));
+        });
+        return;
+      }
       if (request.method !== "POST" || request.url !== "/capture") {
         fail(404, "Unknown capture operation.");
         return;
       }
-      if (stopped || active) {
+      if (stopped) {
         fail(
           429,
           "Design capture capacity reached. Wait for the active capture.",
@@ -85,10 +115,24 @@ export async function startDesignCaptureService(
         return;
       }
       const controller = new AbortController();
+      const job = request.headers["x-zeros-design-job"];
+      if (job !== undefined && (typeof job !== "string" || !/^[a-f0-9-]{36}$/.test(job))) { fail(422, "Invalid capture job."); return; }
+      if (job !== undefined && (!Number.isSafeInteger(deadline) || deadline < Date.now() || deadline > Date.now() + DESIGN_CAPTURE_TIMEOUT_MS + 1_000)) { fail(422, "Invalid capture deadline."); return; }
+      if (typeof job === "string" && (cancelledJobs.has(job) || completedJobs.has(job))) {
+        fail(422, "Design capture job already retired.");
+        return;
+      }
+      if (cancelledJobs.size >= 128) { fail(429, "Capture cancellation capacity reached."); return; }
+      const reservationId = typeof job === "string" ? job : randomUUID();
+      if (!admission.reserve(nativeOwner, reservationId, request.headers["x-zeros-design-priority"] !== "optional")) {
+        fail(429, "Design capture capacity reached. Wait for the active capture.");
+        return;
+      }
       active = controller;
+      activeJob = typeof job === "string" ? job : null;
       const timeout = setTimeout(
         () => controller.abort(new Error("Design capture timed out.")),
-        DESIGN_CAPTURE_TIMEOUT_MS,
+        job === undefined ? DESIGN_CAPTURE_TIMEOUT_MS : Math.max(1, deadline - Date.now()),
       );
       const disconnect = () => {
         if (!response.writableEnded)
@@ -96,8 +140,13 @@ export async function startDesignCaptureService(
       };
       response.once("close", disconnect);
       const abort = () => {
-        request.destroy();
-        response.destroy();
+        // Preserve cancellation even after its original POST settles. At most
+        // one active job can join the 128 bounded cancel-before-start records.
+        if (activeJob && deadline >= Date.now()) cancelledJobs.set(activeJob, deadline);
+        if (!activeJob) {
+          request.destroy();
+          response.destroy();
+        } else if (!request.complete) request.destroy();
       };
       controller.signal.addEventListener("abort", abort, { once: true });
       flight = (async () => {
@@ -115,6 +164,7 @@ export async function startDesignCaptureService(
             chunks.push(Buffer.from(chunk));
           }
           controller.signal.throwIfAborted();
+          if (activeJob && cancelledJobs.has(activeJob)) throw new Error("Design capture cancelled before admission.");
           const input = designCaptureRequestSchema.parse(
             JSON.parse(Buffer.concat(chunks).toString("utf8")),
           );
@@ -146,7 +196,13 @@ export async function startDesignCaptureService(
           response.removeListener("close", disconnect);
           controller.signal.removeEventListener("abort", abort);
           active = null;
+          if (activeJob) {
+            completedJobs.add(activeJob);
+            while (completedJobs.size > 128) completedJobs.delete(completedJobs.values().next().value!);
+          }
+          activeJob = null;
           flight = null;
+          admission.release(nativeOwner, reservationId);
         }
       })();
     },
@@ -173,11 +229,13 @@ export async function startDesignCaptureService(
       if (stopped) return;
       stopped = true;
       active?.abort(new Error("Design capture host stopped."));
-      server.closeAllConnections();
-      await new Promise<void>((resolve) => server.close(() => resolve()));
       // A trusted renderer must stop on AbortSignal. Do not release capacity
       // for another render while cleanup is still owned by the prior request.
       await flight;
+      server.closeAllConnections();
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+      cancelledJobs.clear();
+      completedJobs.clear();
     },
   };
 }

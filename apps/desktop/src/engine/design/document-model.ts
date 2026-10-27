@@ -108,6 +108,8 @@ export interface DesignFrameSummary {
 export interface DesignCanvasFrame extends DesignFrameSummary {
   /** Hash of the rendered HTML, linked CSS/assets, and viewport dimensions. */
   sourceVersion: string;
+  /** Passive HTML admission. Unknown/legacy costs retain bounded previews. */
+  surfaceCost?: import("@zeros/protocol/design-surface").DesignSurfaceCost | null;
 }
 
 export interface DesignFrameTreeNode {
@@ -168,6 +170,8 @@ export interface DesignTokenSummary {
   value: string;
   themeValues: Record<string, string>;
   usageCount: number;
+  /** Navigation omits the full-directory usage scan. */
+  usageCountKnown?: boolean;
   line: number;
 }
 

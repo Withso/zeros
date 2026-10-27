@@ -107,4 +107,14 @@ describe("zeros-design protocol", () => {
     );
     expect(mocks.fetch.mock.calls[0]?.[0]).not.toContain("host-secret");
   });
+
+  it("proxies only validated passive surface and theme parameters", async () => {
+    const root = `zeros-design://workspace/ws_abc123/${capability}/home.html?v=${"a".repeat(24)}`;
+    expect(parseDesignProtocolUrl(`${root}&surface=1&theme=dark`)).toMatchObject({ surface: true, theme: "dark" });
+    for (const suffix of ["&surface=2", "&surface=1&theme=%3Cscript%3E", "&theme=dark"])
+      expect(parseDesignProtocolUrl(root + suffix)).toBeNull();
+    installDesignProtocol();
+    await mocks.handle.mock.calls[0]![1]({ method: "GET", url: `${root}&surface=1&theme=dark` });
+    expect(mocks.fetch.mock.calls[0]![0]).toContain("&surface=1&theme=dark");
+  });
 });

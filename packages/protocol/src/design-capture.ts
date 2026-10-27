@@ -3,6 +3,21 @@ export const DESIGN_CAPTURE_HTML_BYTES = 16 * 1024 * 1024;
 export const DESIGN_CAPTURE_PNG_BYTES = 1024 * 1024;
 export const DESIGN_CAPTURE_TIMEOUT_MS = 20_000;
 export const DESIGN_CAPTURE_MAX_DIMENSION = 2048;
+/** Conservative reservation for clone, serialization, decoder, canvas and output. */
+export const DESIGN_CAPTURE_TEMP_BYTES = 256 * 1024 * 1024;
+export const DESIGN_PREVIEW_JOBS_CAPABILITY = "design.preview.jobs.v1";
+export const DESIGN_PREVIEW_JOB_TIMEOUT_MS = 30_000;
+/** A failed transport is not proof that its renderer released its resources. */
+export class DesignCaptureCleanupUnconfirmedError extends Error {
+  constructor() { super("Design capture cleanup is unconfirmed. Restart the app before capturing again."); }
+}
+const previewJobId = z.string().uuid();
+export const designPreviewCancelSchema = z.object({
+  workspaceId: z.string().min(1).max(128),
+  directoryId: z.string().min(1).max(128),
+  jobId: previewJobId,
+  deadline: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
+}).strict();
 
 /** Smallest raster a canvas preview may request. */
 export const DESIGN_CAPTURE_MIN_DIMENSION = 16;
@@ -73,7 +88,10 @@ export const designPreviewRequestSchema = z.object({
   sourceVersion: z.string().regex(/^[a-f0-9]{24}$/),
   theme: z.string().regex(/^[a-z][a-z0-9_-]{0,63}$/).nullable(),
   maxDimension: z.number().int().min(DESIGN_CAPTURE_MIN_DIMENSION).max(DESIGN_CAPTURE_MAX_DIMENSION),
-}).strict();
+  /** Sent only when the engine advertises design.preview.jobs.v1. */
+  jobId: previewJobId.optional(),
+  deadline: z.number().int().positive().max(Number.MAX_SAFE_INTEGER).optional(),
+}).strict().refine((input) => (input.jobId === undefined) === (input.deadline === undefined), "Preview job and deadline must be supplied together.");
 export type DesignPreviewRequest = z.infer<typeof designPreviewRequestSchema>;
 export const designPreviewReplySchema = z.union([
   z.object({ stale: z.literal(true), sourceVersion: z.string().min(1).max(128) }).strict(),

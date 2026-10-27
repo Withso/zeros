@@ -9,6 +9,8 @@ export interface ParsedDesignProtocolUrl {
   capability: string;
   path: string;
   sourceVersion: string | null;
+  surface?: true;
+  theme?: string | null;
 }
 
 export function parseDesignProtocolUrl(
@@ -60,11 +62,16 @@ export function parseDesignProtocolUrl(
   }
   const rawVersion = url.searchParams.get("v");
   if (rawVersion !== null && !/^[a-f0-9]{24}$/.test(rawVersion)) return null;
+  const surface = url.searchParams.get("surface");
+  const theme = url.searchParams.get("theme");
+  if ((surface !== null && surface !== "1") ||
+      (theme !== null && (surface !== "1" || !/^[a-z][a-z0-9_-]{0,63}$/.test(theme)))) return null;
   return {
     workspaceId,
     capability,
     path: segments.join("/"),
     sourceVersion: rawVersion,
+    ...(surface === "1" ? { surface: true as const, theme } : {}),
   };
 }
 
@@ -99,7 +106,11 @@ export function installDesignProtocol(): void {
         .split("/")
         .map((segment) => encodeURIComponent(segment))
         .join("/");
-      const version = parsed.sourceVersion ? `?v=${parsed.sourceVersion}` : "";
+      const params = new URLSearchParams();
+      if (parsed.sourceVersion) params.set("v", parsed.sourceVersion);
+      if (parsed.surface) params.set("surface", "1");
+      if (parsed.surface && parsed.theme) params.set("theme", parsed.theme);
+      const version = params.size ? `?${params}` : "";
       const target =
         `http://127.0.0.1:${port}/design/` +
         `${encodeURIComponent(parsed.workspaceId)}/${parsed.capability}/${encodedPath}${version}`;

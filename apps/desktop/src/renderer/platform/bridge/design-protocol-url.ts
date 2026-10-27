@@ -14,18 +14,22 @@ export function designProtocolFrameUrl(input: {
   capability: string | null;
   frame: string;
   sourceVersion: string;
+  surface?: boolean;
+  theme?: string | null;
 }): string | null {
   if (
     !WORKSPACE_ID_PATTERN.test(input.workspaceId) ||
     !isDesignFrameFile(input.frame) ||
     !input.capability ||
     !CAPABILITY_PATTERN.test(input.capability) ||
-    !SOURCE_VERSION_PATTERN.test(input.sourceVersion)
+    !SOURCE_VERSION_PATTERN.test(input.sourceVersion) ||
+    (input.theme != null && (!input.surface || !/^[a-z][a-z0-9_-]{0,63}$/.test(input.theme)))
   ) {
     return null;
   }
   return (
     `zeros-design://workspace/${encodeURIComponent(input.workspaceId)}/` +
-    `${input.capability}/${encodeDesignFramePath(input.frame)}?v=${input.sourceVersion}`
+    `${input.capability}/${encodeDesignFramePath(input.frame)}?v=${input.sourceVersion}` +
+    (input.surface ? `&surface=1${input.theme ? `&theme=${input.theme}` : ""}` : "")
   );
 }

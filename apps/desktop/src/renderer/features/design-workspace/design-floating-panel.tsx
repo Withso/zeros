@@ -1,6 +1,6 @@
 // ============================================
 // COMPONENT: DesignFloatingPanel
-// PURPOSE: The floating right panel of the Design canvas: Layers above the
+// PURPOSE: The attached right panel of the Design canvas: Layers above the
 //          inspector, with a draggable width and a draggable Layers height
 // USED IN: DesignWorkspaceColumn
 // ============================================
@@ -70,7 +70,7 @@ export const DesignFloatingPanel = React.forwardRef<
   );
 
   // The width is published on the Design surface itself, so the chrome that
-  // ends beside the panel (the directory pill, the Motion timeline) resolves
+  // ends beside the panel (the Motion timeline and activity chip) resolves
   // the same clamped width from one variable.
   useLayoutEffect(() => {
     panelRef.current?.parentElement?.style.setProperty(

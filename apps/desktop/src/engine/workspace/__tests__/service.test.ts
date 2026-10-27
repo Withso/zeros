@@ -4946,7 +4946,18 @@ describe("WorkspaceService", () => {
           },
         ],
       }),
-    ).resolves.toEqual({ ok: true });
+    ).resolves.toMatchObject({
+      ok: true,
+      sourceVersion: response.mutation.frame.sourceVersion,
+      violations: [{
+        file: frame.file,
+        oid: main!.oid!,
+        severity: "warning",
+        ruleId: "overflow",
+        message: "Visible overflow.",
+        fix: "Constrain the element.",
+      }],
+    });
     expect(
       getDesignRuntimeAudit(
         workspace.path,

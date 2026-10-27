@@ -1,3 +1,36 @@
+export async function designFrameElementBox(iframe, element) {
+  // Playwright's cross-frame boundingBox applies iframe CSS zoom twice. Map
+  // the authored viewport into the actual outer rectangle, including the
+  // canvas transform and the document's inverse density transform.
+  const local = await element.evaluate((node) => {
+    const rect = node.getBoundingClientRect();
+    return {
+      x: rect.x,
+      y: rect.y,
+      width: rect.width,
+      height: rect.height,
+      viewportWidth: innerWidth,
+      viewportHeight: innerHeight,
+    };
+  });
+  const outer = await iframe.evaluate((node) =>
+    node.getBoundingClientRect().toJSON(),
+  );
+  if (
+    !local.viewportWidth ||
+    !local.viewportHeight ||
+    !outer.width ||
+    !outer.height
+  )
+    throw new Error("The Design document has no painted viewport.");
+  return {
+    x: outer.x + local.x * outer.width / local.viewportWidth,
+    y: outer.y + local.y * outer.height / local.viewportHeight,
+    width: local.width * outer.width / local.viewportWidth,
+    height: local.height * outer.height / local.viewportHeight,
+  };
+}
+
 // Canvas coordinates must exclude floating chrome even though it shares the
 // viewport's rectangle. Never fall back to a point that hits a control.
 export async function designCanvasPoint(

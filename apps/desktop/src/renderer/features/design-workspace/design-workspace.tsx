@@ -1,7 +1,7 @@
 // ============================================
 // COMPONENT: DesignWorkspaceColumn
-// PURPOSE: Full-bleed live HTML/CSS canvas with its floating chrome: the
-//          directory pill, the tool rail, and the Layers + Inspector panel
+// PURPOSE: Live HTML/CSS canvas with a secondary directory toolbar, floating
+//          tool rail, and attached Layers + Inspector panel
 // USED IN: DesignWorkbenchSurface (the workbench's Design tab)
 // ============================================
 
@@ -25,6 +25,7 @@ import { designSelectPage, type DesignCanvasFrameWire } from "../../platform/git
 import { useThemeId } from "../../shared/theme/use-theme-variant";
 import { toast } from "../../shared/ui/primitives";
 import { clearWorkspaceSettling } from "../../state/pending-workspaces";
+import { useDocumentActive } from "../../state/use-document-active";
 import { resolveDesignCanvasDefaultBackground } from "./design-canvas-background";
 import { type DesignMotionPropertyRequest } from "./design-motion-timeline";
 import { useDesignRuntimeStore } from "./state/design-runtime-store";
@@ -59,13 +60,13 @@ import {
 // --- CONSTANTS ---
 
 const DESIGN_COLUMN_CLS =
-  "relative flex min-h-0 min-w-0 flex-1 overflow-hidden bg-bg1";
+  "relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden bg-bg1";
 
 function isDesignTreeSelection(target: EventTarget | null): boolean {
   return target instanceof Element && !!target.closest("[data-design-frame-row], [data-design-layer-id]");
 }
 
-/** ⌘\ / Ctrl+\ puts the floating panel away and brings it back. */
+/** ⌘\ / Ctrl+\ puts the properties panel away and brings it back. */
 function isDesignPanelToggleShortcut(event: KeyboardEvent): boolean {
   return (
     event.key === "\\" &&
@@ -88,8 +89,12 @@ function isDesignPanelToggleShortcut(event: KeyboardEvent): boolean {
 export function DesignWorkspaceColumn({
   workspace,
   folder,
-  surfaceActive,
+  surfaceActive: tabActive,
 }: DesignWorkspaceColumnProps) {
+  // A selected tab can outlive its visible native window. Suspend optional
+  // work at the shared boundary while caches and protected edits retain their
+  // existing ownership; showing the app must not activate a hidden tab.
+  const surfaceActive = useDocumentActive(tabActive);
   const [motionTimelineOpen, setMotionTimelineOpen] = useState(false);
   const [motionPropertyRequest, setMotionPropertyRequest] =
     useState<DesignMotionPropertyRequest | null>(null);
@@ -241,11 +246,12 @@ export function DesignWorkspaceColumn({
   );
 
   const selectedFrame = useMemo(
-    () =>
-      pageSnapshot?.frames.find((frame) => frame.file === selectedFrameFile) ??
-      pageSnapshot?.frames[0] ??
-      null,
-    [selectedFrameFile, pageSnapshot?.frames],
+    () => {
+      const frames = designFrameViews(pageSnapshot);
+      const frame = frames.find((frame) => frame.file === selectedFrameFile) ?? frames[0];
+      return frame && isPreparedDesignFrame(frame) ? frame : null;
+    },
+    [selectedFrameFile, pageSnapshot],
   );
   const selectedDetails = useDesignRuntimeStore((state) => {
     if (!workspaceId || !selectedFrame) return null;
@@ -324,7 +330,8 @@ export function DesignWorkspaceColumn({
       if (
         focused &&
         focused !== document.body &&
-        !sectionRef.current?.contains(focused)
+        !sectionRef.current?.contains(focused) &&
+        focused.closest<HTMLElement>("[data-design-directory-workspace]")?.dataset.designDirectoryWorkspace !== workspaceId
       ) {
         return;
       }
@@ -404,27 +411,6 @@ export function DesignWorkspaceColumn({
         toast.info("Saved source is still restoring. Try the edit again when the preview has cleared.");
       }}
     >
-      <DesignCanvas
-        workspaceId={workspaceId}
-        folder={folder}
-        snapshot={pageSnapshot}
-        loading={snapshot.loading}
-        error={snapshot.error}
-        refresh={snapshot.refresh}
-        active={surfaceActive}
-        canvasBackground={canvasBackground}
-        motionTimelineOpen={motionTimelineOpen}
-        motionPropertyRequest={motionPropertyRequest}
-        onMotionTimelineOpenChange={setMotionTimelineOpen}
-        onMotionPropertyRequestHandled={(id) =>
-          setMotionPropertyRequest((current) =>
-            current?.id === id ? null : current,
-          )
-        }
-        onMotionPropertiesChange={publishMotionProperties}
-        onDeleteFrame={deleteFrame}
-        zoomActionsRef={zoomActionsRef}
-      />
       {workspace ? (
         <DesignDirectoryPill
           workspace={workspace}
@@ -433,50 +419,77 @@ export function DesignWorkspaceColumn({
           onTogglePanel={togglePanel}
         />
       ) : null}
-      <DesignFloatingPanel
-        ref={panelRef}
-        workspaceId={workspaceId}
-        active={surfaceActive}
-        visible={panelVisible}
-        layersExpanded={layersExpanded}
-        layers={
-          <DesignWorkspaceSidebarPanels
-            surfaceActive={surfaceActive && panelVisible}
-            workspace={workspace}
-            folder={folder}
-            panelId={
-              workspaceId
-                ? `design-layers-panel-${workspaceId}`
-                : "design-layers-panel"
-            }
-            expanded={layersExpanded}
-            onExpandedChange={setLayersExpanded}
-          />
-        }
-        inspector={
-          <DesignInspector
-            workspaceId={workspaceId}
-            pages={pageSnapshot?.pages}
-            activePageId={activePageId}
-            pageFrames={snapshot.data?.frames}
-            folder={folder}
-            frame={selectedFrame}
-            frameSelected={frameSelected}
-            details={selectedDetails}
-            selectedNodeId={selectedNodeId}
-            selectedNodeIds={selectedNodeIds}
-            lint={snapshot.data?.lint ?? null}
-            active={surfaceActive}
-            canvasBackground={canvasBackground}
-            onCanvasBackgroundChange={commitCanvasBackground}
-            motionTimelineOpen={motionTimelineOpen}
-            motionProperties={motionProperties}
-            onOpenMotionTimeline={openMotionTimeline}
-            zoomActionsRef={zoomActionsRef}
-          />
-        }
-      />
+      <div
+        data-design-canvas-area=""
+        className="relative flex min-h-0 min-w-0 flex-1 overflow-hidden"
+      >
+        <DesignCanvas
+          workspaceId={workspaceId}
+          folder={folder}
+          snapshot={pageSnapshot}
+          loading={snapshot.loading}
+          error={snapshot.error}
+          refresh={snapshot.refresh}
+          active={surfaceActive}
+          canvasBackground={canvasBackground}
+          motionTimelineOpen={motionTimelineOpen}
+          motionPropertyRequest={motionPropertyRequest}
+          onMotionTimelineOpenChange={setMotionTimelineOpen}
+          onMotionPropertyRequestHandled={(id) =>
+            setMotionPropertyRequest((current) =>
+              current?.id === id ? null : current,
+            )
+          }
+          onMotionPropertiesChange={publishMotionProperties}
+          onDeleteFrame={deleteFrame}
+          zoomActionsRef={zoomActionsRef}
+        />
+        <DesignFloatingPanel
+          ref={panelRef}
+          workspaceId={workspaceId}
+          active={surfaceActive}
+          visible={panelVisible}
+          layersExpanded={layersExpanded}
+          layers={
+            <DesignWorkspaceSidebarPanels
+              surfaceActive={surfaceActive && panelVisible}
+              workspace={workspace}
+              folder={folder}
+              panelId={
+                workspaceId
+                  ? `design-layers-panel-${workspaceId}`
+                  : "design-layers-panel"
+              }
+              expanded={layersExpanded}
+              onExpandedChange={setLayersExpanded}
+            />
+          }
+          inspector={
+            <DesignInspector
+              workspaceId={workspaceId}
+              pages={pageSnapshot?.pages}
+              activePageId={activePageId}
+              pageFrames={designFrameViews(snapshot.data)}
+              folder={folder}
+              frame={selectedFrame}
+              frameSelected={frameSelected}
+              details={selectedDetails}
+              selectedNodeId={selectedNodeId}
+              selectedNodeIds={selectedNodeIds}
+              lint={snapshot.data?.lint ?? null}
+              active={surfaceActive}
+              canvasBackground={canvasBackground}
+              onCanvasBackgroundChange={commitCanvasBackground}
+              motionTimelineOpen={motionTimelineOpen}
+              motionProperties={motionProperties}
+              onOpenMotionTimeline={openMotionTimeline}
+              zoomActionsRef={zoomActionsRef}
+            />
+          }
+        />
+      </div>
     </section>
     </DesignSavedEditingContext.Provider>
   );
 }
+import { designFrameViews, isPreparedDesignFrame } from "./state/design-frame-view";

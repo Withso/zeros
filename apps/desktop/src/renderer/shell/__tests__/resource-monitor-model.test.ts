@@ -141,6 +141,43 @@ function snapshot(
 }
 
 describe("resource monitor view model", () => {
+  it("preserves unknown CPU coverage through stacks and the exact visible scope", () => {
+    const pending = processes.map((process) => ({
+      ...process,
+      cpuSampled: process.id !== "node-b" && process.id !== "terminal",
+    }));
+    const options = {
+      processes: pending,
+      totals: allTotals,
+      tree: true,
+      stack: true,
+      includeTerminal: true,
+      sortKey: "memory" as const,
+      sortDirection: "desc" as const,
+    };
+    const view = buildResourceView(options);
+    const rows = flattenResourceView(view, new Set());
+    expect(view[0]).toMatchObject({ cpuSampled: false });
+    expect(rows.find(({ node }) => node.name === "node")?.node).toMatchObject({
+      cpuSampled: false,
+      count: 2,
+    });
+    expect(rows.find(({ node }) => node.id === "renderer")?.node).toMatchObject({
+      cpuSampled: true,
+    });
+
+    // A new terminal cannot make the terminal-excluded scope incomplete.
+    const terminalOnly = pending.map((process) => ({
+      ...process,
+      cpuSampled: process.id !== "terminal",
+    }));
+    expect(buildResourceView({ ...options, processes: terminalOnly, includeTerminal: false })[0])
+      .toMatchObject({ cpuSampled: true });
+    // Older native snapshots omitted the field; keep their measured values.
+    expect(buildResourceView({ ...options, processes })[0])
+      .toMatchObject({ cpuSampled: true });
+  });
+
   it("builds the logical app tree, hoists missing parents, and removes exact terminal subtrees", () => {
     const view = buildResourceView({
       processes,
@@ -311,12 +348,37 @@ describe("resource monitor presentation", () => {
   });
 
   it("formats CPU and memory at compact, stable precision", () => {
+    expect(formatCpuPercent(0, false)).toBe("—");
+    expect(formatCpuPercent(2, false)).toBe("—");
     expect(formatCpuPercent(0)).toBe("0.0%");
     expect(formatCpuPercent(0.04)).toBe("<0.1%");
     expect(formatCpuPercent(125.49)).toBe("125.5%");
     expect(formatResourceMemory(512)).toBe("512 B");
     expect(formatResourceMemory(10 * 1024)).toBe("10.0 KB");
     expect(formatResourceMemory(1.24 * 1024 ** 3)).toBe("1.24 GB");
+  });
+
+  it("does not copy an incomplete CPU total as a measured zero", () => {
+    const view = buildResourceView({
+      processes: [metric({ id: "new", pid: 610, name: "New helper", kind: "helper", cpuSampled: false })],
+      totals: { ...allTotals, cpuPercent: 0, processCount: 1 },
+      tree: true,
+      stack: true,
+      includeTerminal: true,
+      sortKey: "memory",
+      sortDirection: "desc",
+    });
+    const text = copyResourceReport({
+      sampledAt: 2_000,
+      logicalCpuCount: 8,
+      scanDurationMs: 9,
+      includeTerminal: true,
+      totals: { ...allTotals, cpuPercent: 0, processCount: 1 },
+      view,
+    });
+    expect(text).toContain("CPU: —");
+    expect(text).toContain("New helper [PID 610] — CPU —");
+    expect(text).not.toContain("CPU 0.0%");
   });
 
   it("creates a copyable, scope-labelled tree report without command lines", () => {

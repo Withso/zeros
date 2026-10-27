@@ -90,7 +90,7 @@ describe("design workspace interaction wiring", () => {
     // An empty-canvas click keeps the frame active for the Layers panel but
     // deselects — activation, not frame selection.
     expect(source).toContain(
-      "if (event.target === event.currentTarget) publishSelection(selectedFrame);",
+      "if (event.target === event.currentTarget) publishSelection(selectedDescription ?? null);",
     );
     expect(source).not.toContain(
       "if (event.target === event.currentTarget) publishSelection(null);",
@@ -104,7 +104,7 @@ describe("design workspace interaction wiring", () => {
       "publishSelection(frame, { selected: true, reveal: true });",
     );
     expect(source).toContain(
-      "publishSelection(selectedFrame, { selected: view.frameSelected, explicit: false });",
+      "publishSelection(selectedDescription ?? null, { selected: view.frameSelected, explicit: false });",
     );
     expect(source).toContain(
       "view.selectedTargets.some(target => target.frame === frame.file && !target.nodeId)",
@@ -117,7 +117,7 @@ describe("design workspace interaction wiring", () => {
     );
     // Escape steps node → frame → nothing.
     expect(source).toContain(
-      'if (event.key === "Escape" && view.frameSelected && selectedFrame)',
+      'if (event.key === "Escape" && view.frameSelected && selectedDescription)',
     );
   });
 
@@ -194,8 +194,9 @@ describe("design workspace interaction wiring", () => {
     expect(layersSource).not.toContain('mutateLayer("delete"');
   });
 
-  it("presents frame, text, image, and vector names without leaking HTML labels", () => {
-    expect(layersSource).toContain("designFrameLayerLabel(frame.kind)");
+  it("presents authored names while retaining the type-based layer icons", () => {
+    expect(layersSource).toContain("designFrameDisplayName(frame)");
+    expect(layersSource).toContain("designRuntimeLayerDisplayName(layer.node)");
     expect(layersSource).toContain("designRuntimeLayerLabel(layer.node)");
     expect(layersSource).not.toContain("frame.title}");
     expect(layersSource).not.toContain("layer.node.name.trim()");
@@ -349,7 +350,7 @@ describe("design workspace interaction wiring", () => {
     expect(deck).toContain("data-design-retained-workspace");
     expect(deck).toContain("active={visible}");
     expect(deck).toContain('inert: ""');
-    expect(deck).toContain('"pointer-events-none invisible"');
+    expect(deck).toContain('"pointer-events-none invisible opacity-0"');
     expect(appShellSource).toContain("surfaceActive={!isHome && !workbenchCollapsed}");
   });
 
@@ -571,18 +572,6 @@ describe("design workspace interaction wiring", () => {
     expect(source).toContain('"animation-duration": null');
   });
 
-  it("warms frame source on code-view intent without a loading waterfall", () => {
-    expect(source).toContain("onPointerEnter={warmSelectedFrameDocument}");
-    expect(source).toContain("onFocus={warmSelectedFrameDocument}");
-    expect(source).not.toContain("Loading frame source…");
-    expect(source).toContain(
-      "active && Boolean(workspaceId && selectedFrame),",
-    );
-    expect(source).not.toContain(
-      "active && Boolean(workspaceId && selectedFrame && view.codeView),",
-    );
-  });
-
   it("keeps the theme editor non-modal, draggable, and isolated from canvas wheel input", () => {
     expect(themeSource).toContain("modal={false}");
     expect(themeSource).toContain('data-design-theme-drag-handle=""');
@@ -726,7 +715,7 @@ describe("design workspace interaction wiring", () => {
     // Structural shortcuts are declared by every row but execute through the
     // canvas's one semantic selection owner.
     expect(layersSource).toContain(
-      'aria-keyshortcuts="Meta+C Control+C Meta+D Control+D Delete Backspace"',
+      'aria-keyshortcuts="F2 Meta+C Control+C Meta+D Control+D Delete Backspace"',
     );
     expect(layersSource).not.toContain("readFrameFoundation");
     expect(layersSource).toContain(

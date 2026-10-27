@@ -1,3 +1,5 @@
+import { designFrameElementBox } from "./ui-smoke-design-helpers.mjs";
+
 // An empty authored frame exercises the real creation path, unlike the seeded
 // landing page. All source edits go through the harness's in-memory Design API.
 export async function runDesignFrameChildrenSmoke({ page, waitFor, check }) {
@@ -178,7 +180,7 @@ export async function runDesignFrameChildrenSmoke({ page, waitFor, check }) {
   );
   // Draw inside the existing child at its current painted position; its Grid
   // layout accepts the new frame in flow while that frame starts with None.
-  const childBounds = await child.boundingBox();
+  const childBounds = await designFrameElementBox(runtime().owner(), child);
   await page.getByRole("button", { name: "Frame tool", exact: true }).click();
   await page.mouse.move(childBounds.x + 8, childBounds.y + 8);
   await page.mouse.down();

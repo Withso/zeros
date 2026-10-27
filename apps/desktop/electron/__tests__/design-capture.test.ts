@@ -3,7 +3,8 @@ import type { DesignCaptureHost } from "../../src/engine/design/capture-service"
 import { DESIGN_STATIC_RENDER_SCRIPT, designCaptureRequestSchema } from "@zeros/protocol/design-capture";
 import { startElectronDesignCapture } from "../design-capture";
 
-const mocks = vi.hoisted(() => {
+const mocks = await vi.hoisted(async () => {
+  const { EventEmitter } = await import("node:events");
   const bytes = Buffer.alloc(24);
   Buffer.from("89504e470d0a1a0a", "hex").copy(bytes);
   bytes.write("IHDR", 12);
@@ -16,13 +17,12 @@ const mocks = vi.hoisted(() => {
     webRequest: { onBeforeRequest: vi.fn() },
     clearStorageData: vi.fn(),
   };
-  const contents = {
+  const contents = Object.assign(new EventEmitter(), {
     setWindowOpenHandler: vi.fn(),
-    on: vi.fn(),
     executeJavaScript: vi.fn(),
     capturePage: vi.fn(),
     debugger: { attach: vi.fn(), sendCommand: vi.fn() },
-  };
+  });
   return {
     bytes,
     partition,
@@ -41,7 +41,10 @@ vi.mock("electron", () => ({
     }
     loadURL = vi.fn();
     isDestroyed = () => mocks.destroy.mock.calls.length > 0;
-    destroy = mocks.destroy;
+    destroy = () => {
+      mocks.destroy();
+      this.webContents.emit("destroyed");
+    };
   },
 }));
 vi.mock("../../src/engine/design/capture-service", async (original) => ({
@@ -56,6 +59,7 @@ vi.mock("../../src/engine/design/capture-service", async (original) => ({
 
 beforeEach(() => {
   vi.clearAllMocks();
+  mocks.contents.removeAllListeners();
   mocks.contents.debugger.sendCommand
     .mockReset()
     .mockResolvedValue({ data: mocks.bytes.toString("base64") });

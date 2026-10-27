@@ -520,8 +520,8 @@ function applyOperation(
     return withFiles(state, operation, files, []);
   }
   if (operation.type === "keyframes.set") {
-    if (!operation.file.toLowerCase().endsWith(".css")) {
-      throw new Error(`Design keyframe file is not CSS: ${operation.file}`);
+    if (!/\.(?:css|html)$/i.test(operation.file)) {
+      throw new Error(`Design keyframe file is not CSS or HTML: ${operation.file}`);
     }
     const source = state.files[operation.file];
     if (source === undefined) {

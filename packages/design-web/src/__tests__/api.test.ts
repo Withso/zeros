@@ -11,6 +11,7 @@ import {
   type DesignHeadlessRenderer,
 } from "../api";
 import { designWebTransactionAdapter } from "../adapter";
+import { createDesignWebDocumentState } from "../revision";
 import { FRAME_CSS, FRAME_HTML, webState, webTransaction } from "./fixtures";
 
 function repository() {
@@ -52,6 +53,70 @@ function styleTransaction() {
 }
 
 describe("headless Design API", () => {
+  it("reads, saves and undoes inline frame motion without crossing document owners", async () => {
+    const html = (opacity: string) => `<!doctype html><html><head>
+<style>/* surrounding styles */
+main { animation: wash 18s ease-in-out infinite; }
+@keyframes wash { from { opacity: ${opacity} } to { opacity: 1 } }
+</style></head><body><main data-oid="root">Keep this frame</main></body></html>`;
+    const first = createDesignWebDocumentState({
+      documentId: "motion-a",
+      entryFile: "page/home.html",
+      files: { "page/home.html": html(".6") },
+    });
+    const second = createDesignWebDocumentState({
+      documentId: "motion-b",
+      entryFile: "page/home.html",
+      files: { "page/home.html": html(".2") },
+    });
+    const storage = new InMemoryDesignDocumentRepository([first, second]);
+    const api = trustedApi(storage);
+    const keyframes = (opacity: string) => [
+      { offset: 0, styles: { opacity } },
+      { offset: 100, styles: { opacity: "1" } },
+    ];
+    const read = (documentId: string) => api.readFoundation({ documentId });
+    expect((await read(first.documentId)).keyframes).toEqual([
+      { file: first.entryFile, name: "wash", keyframes: keyframes(".6") },
+    ]);
+    expect((await read(second.documentId)).keyframes).toEqual([
+      { file: second.entryFile, name: "wash", keyframes: keyframes(".2") },
+    ]);
+    const result = await api.apply(webTransaction(first, "save-inline-motion", [
+      {
+        operationId: "keyframes",
+        type: "keyframes.set",
+        file: first.entryFile,
+        name: "wash",
+        keyframes: keyframes(".4"),
+      },
+      {
+        operationId: "timing",
+        type: "node.set-styles",
+        nodeId: "root",
+        styles: { "animation-duration": "12s" },
+        scope: "inline",
+        responsiveContext: "base",
+        stateContext: "default",
+      },
+    ]));
+    expect(result.receipt.status).toBe("applied");
+    expect(result.receipt.affectedFiles).toEqual([first.entryFile]);
+    const saved = (await storage.read(first.documentId)).files;
+    expect(saved[first.entryFile]).toContain('style="animation-duration:12s;"');
+    expect(saved[first.entryFile]).toContain("/* surrounding styles */");
+    expect((await read(first.documentId)).keyframes).toEqual([
+      { file: first.entryFile, name: "wash", keyframes: keyframes(".4") },
+    ]);
+    expect((await storage.read(second.documentId)).files).toEqual(second.files);
+    await api.undo(first.documentId);
+    expect((await storage.read(first.documentId)).files).toEqual(first.files);
+    expect((await read(first.documentId)).keyframes[0]?.keyframes).toEqual(keyframes(".6"));
+    await api.redo(first.documentId);
+    expect((await storage.read(first.documentId)).files).toEqual(saved);
+    expect((await read(second.documentId)).keyframes[0]?.keyframes).toEqual(keyframes(".2"));
+  });
+
   it("forgets only the selected local sessions and does not retain an in-flight read", async () => {
     const storage = repository();
     const api = trustedApi(storage);

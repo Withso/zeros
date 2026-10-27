@@ -265,10 +265,10 @@ export function resolveDesignFrameBodyTarget(input: {
  * authored node count. */
 export function designFrameRowDiscloses(
   tree: readonly DesignRuntimeTreeNode[] | undefined,
-  frame: { nodeCount: number; layerCount?: number },
+  frame: { nodeCount?: number; layerCount?: number },
 ): boolean {
   if (tree) return tree.length > 0;
-  return (frame.layerCount ?? frame.nodeCount) > 0;
+  return (frame.layerCount ?? frame.nodeCount ?? 1) > 0;
 }
 
 export function flattenDesignLayerTree(

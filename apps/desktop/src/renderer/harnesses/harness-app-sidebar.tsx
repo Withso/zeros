@@ -211,6 +211,12 @@ const resourceSnapshot: ProcessMetricsSnapshot = {
       ]
     : [],
 };
+if (params.has("resource-pending-cpu")) {
+  resourceSnapshot.processes = resourceSnapshot.processes.map((process) =>
+    process.id === "tsc" ? { ...process, cpuPercent: 0, cpuSampled: false } : process);
+  resourceSnapshot.totals.all = { ...resourceTotals, cpuPercent: 51.7 };
+  resourceSnapshot.totals.excludingTerminals = resourceSnapshot.totals.all;
+}
 const agents = [
   {
     id: "claude",

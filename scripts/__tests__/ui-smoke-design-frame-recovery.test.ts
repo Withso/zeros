@@ -30,7 +30,9 @@ function immediateNativeFailure(failObservation = false) {
       count: async () => 0,
     }),
     evaluate: async () => {
-      if (evaluations++ > 0) return true;
+      const observation = evaluations++;
+      if (observation === 1) return { recorded: Number(nativeFrame), native: Number(nativeFrame), fallback: 0 };
+      if (observation > 1) return true;
       nativeFrame = true;
       response = routes.get("**/__design-native/**")!({
         request: () => ({
@@ -81,6 +83,7 @@ describe("Design frame recovery smoke synchronization", () => {
 
     expect(fixture.checks).toEqual([
       "a changed engine capability resets frame readiness",
+      "native document accounting includes mounted buffers before their handshake",
       "a frame without a handshake cannot receive inspection requests",
     ]);
     expect(fixture.responseFinished()).toBe(true);

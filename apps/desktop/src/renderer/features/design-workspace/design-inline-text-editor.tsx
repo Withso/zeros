@@ -1,5 +1,6 @@
 import React, { useEffect, useLayoutEffect, useRef } from "react";
 import type { DesignRuntimeNodeDetails } from "@zeros/protocol/design-runtime";
+import type { DesignFrameRuntimeConnection } from "../../platform/bridge/design-frame-runtime";
 import {
   designSelectionBox,
   designSelectionOverlayFrame,
@@ -17,6 +18,8 @@ export interface ExistingInlineTextEdit extends InlineTextEditBase {
   kind: "existing";
   frame: string;
   sourceVersion: string;
+  /** Preview ownership stays with this mounted document through a save. */
+  runtime: DesignFrameRuntimeConnection | null;
   whiteSpace: string;
   /** Runtime details captured when editing began. The editor mounts from
    * these in the same commit that starts the edit, so glyph ownership can

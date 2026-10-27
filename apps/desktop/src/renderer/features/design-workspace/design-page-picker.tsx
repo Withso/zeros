@@ -50,7 +50,7 @@ export function DesignPagePicker({
   directoryId?: string;
   pages: readonly DesignPageSummary[];
   activePageId?: string;
-  frames: readonly DesignCanvasFrameWire[];
+  frames: readonly Pick<DesignCanvasFrameWire, "file" | "frameId">[];
   active: boolean;
 }) {
   const page = pages.find((page) => page.id === activePageId) ?? pages[0];

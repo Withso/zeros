@@ -1,3 +1,5 @@
+import { runDesignHiddenDocumentsSmoke, runDesignHiddenEditorSmoke } from "./ui-smoke-design-hidden-documents.mjs";
+import { runDesignLazyPreparationSmoke } from "./ui-smoke-design-lazy-preparation.mjs";
 import { runDesignAgentDraftsSmoke } from "./ui-smoke-design-agent-drafts.mjs";
 
 // Chromium exercises the real opaque iframe/MessagePort lifecycle. Only the
@@ -6,10 +8,24 @@ export async function runDesignFrameRecoverySmoke({ page, check }) {
   await runDesignFrameReloadRecoverySmoke({ page, check });
   // Agent edits reach the same frame documents while they are still streaming.
   await runDesignAgentDraftsSmoke({ page, check });
+  await page.goto(`${new URL(page.url()).origin}/apps/desktop/src/renderer/harnesses/harness-design-workspace.html`, { waitUntil: "networkidle" });
+  await runDesignHiddenDocumentsSmoke({ page, check });
+  await runDesignHiddenEditorSmoke({ page, check });
+  await runDesignHiddenEditorSmoke({ page, check, documentHidden: true });
+  const previousUrl = page.url();
+  const previousDirectory = await page.evaluate(() => window.__zerosHarnessDesignSurface.ui.getState().byWorkspace.ws_design_harness?.directoryId);
+  await runDesignLazyPreparationSmoke({ page, check });
+  check("the lazy catalog fixture cannot replace the shared page's source owner", page.url() === previousUrl &&
+    await page.evaluate(() => window.__zerosHarnessDesignSurface.ui.getState().byWorkspace.ws_design_harness?.directoryId) === previousDirectory);
 }
 
 async function runDesignFrameReloadRecoverySmoke({ page, check }) {
   const origin = new URL(page.url()).origin;
+  const documentAccounting = () => page.evaluate(() => ({
+    recorded: window.__zerosHarnessDesignSurface.resources().counters.nativeDocumentBuffers.current,
+    native: document.querySelectorAll('iframe[data-design-document-buffer][src*="/__design-native/"]').length,
+    fallback: document.querySelectorAll('iframe[data-design-document-buffer][srcdoc]').length,
+  }));
   const nativePattern = "**/platform/runtime.ts*";
   const protocolPattern = "**/platform/bridge/design-protocol-url.ts*";
   const resourcePattern = "**/__design-native/**";
@@ -148,6 +164,11 @@ async function runDesignFrameReloadRecoverySmoke({ page, check }) {
           .locator(`${frameSelector}[data-design-document-ready]`)
           .count()) === 0,
     );
+    const pendingAccounting = await documentAccounting();
+    check(
+      "native document accounting includes mounted buffers before their handshake",
+      pendingAccounting.native > 0 && pendingAccounting.recorded === pendingAccounting.native,
+    );
     check(
       "a frame without a handshake cannot receive inspection requests",
       await page.evaluate(async () => {
@@ -179,6 +200,11 @@ async function runDesignFrameReloadRecoverySmoke({ page, check }) {
       requests.length === 2 &&
         (await page.locator(frameSelector).getAttribute("sandbox")) ===
           "allow-scripts",
+    );
+    const fallbackAccounting = await documentAccounting();
+    check(
+      "native document accounting releases buffers recovered through srcDoc",
+      fallbackAccounting.fallback > 0 && fallbackAccounting.recorded === fallbackAccounting.native,
     );
     const layers = page.locator("[data-design-sidebar-panel]");
     const row = layers.locator('[data-design-layer-row="home-heading"]');
@@ -313,6 +339,12 @@ async function runDesignFrameReloadRecoverySmoke({ page, check }) {
             (element) => getComputedStyle(element).color === "rgb(255, 0, 0)",
           )),
     );
+    const restoredAccounting = await documentAccounting();
+    check(
+      "native document accounting tracks the restored native session",
+      restoredAccounting.native > 0 && restoredAccounting.recorded === restoredAccounting.native,
+    );
+    await runDesignHiddenDocumentsSmoke({ page, check, label: "protocol fixture" });
   } finally {
     releaseUnavailable();
     releaseReload();

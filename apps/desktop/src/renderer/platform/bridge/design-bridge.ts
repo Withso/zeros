@@ -20,13 +20,20 @@ import type {
 import type { DesignRuntimeMatchedDeclaration } from "@zeros/protocol/design-runtime";
 import {
   DESIGN_CAPTURE_TIMEOUT_MS,
+  DESIGN_PREVIEW_JOBS_CAPABILITY,
+  DESIGN_PREVIEW_JOB_TIMEOUT_MS,
+  DesignCaptureCleanupUnconfirmedError,
   designPreviewReplySchema,
   type DesignPreviewReply,
 } from "@zeros/protocol/design-capture";
 import { designPageCatalogSchema, normalizeDesignPagesSnapshot, type DesignPageSummary } from "@zeros/protocol/design-pages";
+import { DESIGN_LAZY_PREPARATION_CAPABILITY, designFramesPrepareSchema, designFramesPrepareReplySchema } from "@zeros/protocol/design-catalog";
+import { DESIGN_SOURCE_SURFACES_CAPABILITY } from "@zeros/protocol/design-surface";
+import { isCloudWorkspace } from "./cloud-workspace-key";
 
 import type { RuntimeClient } from "./ws-client";
 import { workspaceOp as rawWorkspaceOp } from "./workspace-bridge";
+import { designCaptureScheduler, type DesignCapturePriority } from "./design-capture-scheduler";
 
 const directoryIds = new Map<string, string>();
 export function rememberDesignDirectoryIdentity(workspaceId: string, directoryId: string): void {
@@ -74,12 +81,46 @@ export interface DesignFrameTreeNodeWire {
 
 export interface DesignCanvasFrameWire extends DesignFrameSummaryWire {
   sourceVersion: string;
+  surfaceCost?: import("@zeros/protocol/design-surface").DesignSurfaceCost | null;
+}
+
+/** Navigation metadata cannot authorize rendering or editing. */
+export interface DesignFrameDescriptionWire extends Omit<DesignFrameSummaryWire, "nodeCount" | "layerCount" | "modifiedAt"> {
+  preparation: "unprepared";
+  sourceVersion?: never;
+  nodeCount?: never;
+  layerCount?: never;
+  modifiedAt?: never;
 }
 
 export interface DesignFrameDocumentWire extends DesignCanvasFrameWire {
   source: string;
   srcDoc: string;
   tree: DesignFrameTreeNodeWire[];
+}
+
+export async function bridgeDesignPrepareFrames(bridge: RuntimeClient, input: {
+  workspaceId: string; directoryId: string; catalogRevision: string; files: readonly string[];
+}) {
+  const params = designFramesPrepareSchema.parse({ ...input,
+    ...(bridge.supportsEngineCapability?.(DESIGN_SOURCE_SURFACES_CAPABILITY, input.workspaceId) ? { surfaceCosts: true } : {}),
+  });
+  if (isCloudWorkspace(params.workspaceId) || !bridge.supportsEngineCapability?.(DESIGN_LAZY_PREPARATION_CAPABILITY, params.workspaceId))
+    throw new Error("Design preparation requires a capable Local engine.");
+  let retired = false;
+  const off = bridge.onStatusChange?.((status) => { if (status !== "connected") retired = true; });
+  try {
+    // Preserve the directory that produced the descriptions, even when a new
+    // selection has already updated the bridge's remembered directory.
+    const raw = await rawWorkspaceOp(bridge, "design.frames.prepare", params, 20_000);
+    if (retired) throw new Error("Design preparation connection was retired.");
+    const result = designFramesPrepareReplySchema.parse(raw);
+    const files = [...result.frames, ...result.errors].map((frame) => frame.file);
+    if (result.directoryId !== params.directoryId || result.catalogRevision !== params.catalogRevision ||
+      files.length !== params.files.length || new Set(files).size !== files.length || files.some((file) => !params.files.includes(file)))
+      throw new Error("Invalid Design preparation coverage or owner.");
+    return result;
+  } finally { off?.(); }
 }
 
 export interface DesignLintViolationWire {
@@ -108,6 +149,7 @@ export interface DesignTokenWire {
   value: string;
   themeValues: Record<string, string>;
   usageCount: number;
+  usageCountKnown?: boolean;
   line: number;
 }
 
@@ -170,6 +212,14 @@ export interface DesignAssetWire {
 }
 
 export interface DesignWorkspaceSnapshotWire {
+  /** Renderer-owned projection, never an authored or persisted source version. */
+  preparation?: {
+    revision: string;
+    epoch: number;
+    descriptions: DesignFrameDescriptionWire[];
+    current: string[];
+    errors: Record<string, string>;
+  };
   /** Absent only on older engines and pre-migration boot snapshots. */
   directoryId?: string;
   directory?: string;
@@ -569,13 +619,62 @@ export async function bridgeDesignPreview(
     theme: string | null;
     maxDimension: number;
   },
+  options: { signal?: AbortSignal; priority?: DesignCapturePriority; /** Producer retains admission through PNG re-encoding. */ admitted?: boolean } = {},
 ): Promise<DesignPreviewReply> {
-  // Cover the render deadline and the engine's transport budget.
-  const result = await workspaceOp(bridge, "design.preview", { workspaceId, ...input },
-    DESIGN_CAPTURE_TIMEOUT_MS + 5_000);
-  const reply = designPreviewReplySchema.safeParse(result);
-  if (!reply.success) throw new Error("design.preview: malformed engine response");
-  return reply.data;
+  const work = async (signal: AbortSignal) => {
+    const cancellable = bridge.supportsEngineCapability?.(DESIGN_PREVIEW_JOBS_CAPABILITY, workspaceId) === true;
+    const jobId = cancellable ? crypto.randomUUID() : undefined;
+    const deadline = Date.now() + DESIGN_PREVIEW_JOB_TIMEOUT_MS;
+    let terminal = false;
+    let lostConnection = false;
+    const offStatus = bridge.onStatusChange?.((status) => {
+      if (status !== "connected") lostConnection = true;
+    });
+    let cancellation: Promise<void> | undefined;
+    const cancel = () => {
+      if (cancellation) return;
+      // A cancellation on another socket could acknowledge an empty job while
+      // the original connection is still draining. Never use it as proof.
+      cancellation = !jobId || lostConnection
+        ? Promise.reject(new DesignCaptureCleanupUnconfirmedError())
+        : rawWorkspaceOp(bridge, "design.preview.cancel", {
+        workspaceId, directoryId: input.directoryId, jobId, deadline,
+      }, DESIGN_CAPTURE_TIMEOUT_MS + 15_000).then((result) => {
+        if (lostConnection || (result as { settled?: unknown })?.settled !== true) throw new DesignCaptureCleanupUnconfirmedError();
+      });
+      // Attach immediately; the original job is still awaited below.
+      void cancellation.catch(() => {});
+    };
+    signal.addEventListener("abort", cancel, { once: true });
+    let outcome: { reply: DesignPreviewReply } | { error: unknown };
+    try {
+      signal.throwIfAborted();
+      const result = await rawWorkspaceOp(bridge, "design.preview", { workspaceId, ...input, ...(jobId ? { jobId, deadline } : {}) },
+        DESIGN_CAPTURE_TIMEOUT_MS + 15_000);
+      terminal = true;
+      signal.throwIfAborted();
+      const reply = designPreviewReplySchema.safeParse(result);
+      if (!reply.success) throw new Error("design.preview: malformed engine response");
+      outcome = { reply: reply.data };
+    } catch (error) {
+      cancel();
+      outcome = { error };
+    } finally {
+      signal.removeEventListener("abort", cancel);
+    }
+    try { await cancellation; }
+    catch {
+      if (!terminal) {
+        designCaptureScheduler.quarantine();
+        throw new DesignCaptureCleanupUnconfirmedError();
+      }
+    } finally { offStatus?.(); }
+    if ("error" in outcome) throw outcome.error;
+    return outcome.reply;
+  };
+  return options.admitted
+    ? work(options.signal ?? new AbortController().signal)
+    : designCaptureScheduler.schedule(JSON.stringify(["native", workspaceId, input]), options.priority ?? "visible", work, options.signal);
 }
 
 export async function bridgeDesignTokens(
@@ -701,11 +800,19 @@ export async function bridgeDesignSetRuntimeAudit(
     sourceVersion: string;
     warnings: DesignRuntimeWarningWire[];
   },
-): Promise<void> {
-  await workspaceOp(bridge, "design.runtime.audit", {
+): Promise<{ sourceVersion: string; violations: DesignLintViolationWire[] } | undefined> {
+  const result = await workspaceOp(bridge, "design.runtime.audit", {
     workspaceId,
     ...input,
-  });
+  }) as { sourceVersion?: unknown; violations?: DesignLintViolationWire[] };
+  if (result?.sourceVersion === undefined && result?.violations === undefined) return;
+  if (result.sourceVersion !== input.sourceVersion || !Array.isArray(result.violations) || result.violations.length > 128 ||
+    result.violations.some((row) => !row || row.file !== input.frame || row.severity !== "warning" ||
+      !["contrast", "overflow", "spacing-scale", "audit-limit", "layer-tree-limit"].includes(row.ruleId) || typeof row.message !== "string" ||
+      !Number.isSafeInteger(row.line) || row.line < 1 || !Number.isSafeInteger(row.column) || row.column < 1 ||
+      (row.oid !== undefined && typeof row.oid !== "string") || (row.fix !== undefined && typeof row.fix !== "string")))
+    throw new Error("design.runtime.audit: malformed engine response");
+  return { sourceVersion: input.sourceVersion, violations: result.violations };
 }
 
 export interface DesignPageMutationReplyWire {

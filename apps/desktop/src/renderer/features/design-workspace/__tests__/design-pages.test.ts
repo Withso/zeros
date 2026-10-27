@@ -42,7 +42,7 @@ describe("Design page view memory", () => {
     vi.unstubAllGlobals();
   });
 
-  it("switches A to B to A in one notification and restores camera, selection, source and background", () => {
+  it("switches A to B to A in one notification and restores camera, selection and background", () => {
     bind();
     const store = useDesignWorkspaceUiStore.getState();
     store.setSelection(workspaceId, "alpha/home.html", "heading", [
@@ -50,7 +50,6 @@ describe("Design page view memory", () => {
       "copy",
     ]);
     store.setViewport(workspaceId, { zoom: 0.8, panX: 120, panY: 240 });
-    store.setCodeView(workspaceId, true);
     store.setCanvasBackground(workspaceId, "#336699"); // check:ui ignore-line -- authored page-color fixture.
     const notifications: string[] = [];
     const unsubscribe = useDesignWorkspaceUiStore.subscribe((state) => {
@@ -62,7 +61,6 @@ describe("Design page view memory", () => {
       activePageId: "page_b",
       zoom: 0.25,
       canvasBackground: null,
-      codeView: false,
       selectedNodeId: null,
     });
     store.setSelection(workspaceId, "beta/home.html", null, undefined, {
@@ -79,7 +77,6 @@ describe("Design page view memory", () => {
       selectedFrame: "alpha/home.html",
       selectedNodeId: "heading",
       selectedNodeIds: ["heading", "copy"],
-      codeView: true,
       canvasBackground: "#336699", // check:ui ignore-line -- authored page-color fixture.
     });
     store.setActivePage(workspaceId, "page_b", directoryId);
@@ -186,7 +183,6 @@ describe("Design page view memory", () => {
     bind();
     const store = useDesignWorkspaceUiStore.getState();
     store.setSelection(workspaceId, "alpha/home.html", "title");
-    store.setCodeView(workspaceId, true);
     store.setActivePage(workspaceId, "page_b", directoryId);
     bind([{ ...pages[0], frameFiles: [] }, pages[1]]);
     store.setActivePage(workspaceId, "page_a", directoryId);
@@ -194,7 +190,6 @@ describe("Design page view memory", () => {
       selectedFrame: null,
       selectedNodeId: null,
       selectedNodeIds: [],
-      codeView: false,
     });
   });
 
