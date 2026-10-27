@@ -248,12 +248,19 @@ export async function prepareDesignMovementFrame(
   return current;
 }
 
+/** Edits (not history steps) queued or running in each workspace's lane. An
+ * edit still saving has not recorded its history prediction yet. */
+const pendingEditCountByWorkspace = new Map<string, number>();
+
 async function runLocalDesignMutation<T>(
   workspaceId: string,
   mutation: () => Promise<T>,
+  kind: "edit" | "history" = "edit",
 ): Promise<T> {
   const directoryId = useDesignWorkspaceUiStore.getState().byWorkspace[workspaceId]?.directoryId;
   const finishMutation = beginLocalDesignMutation(workspaceId);
+  if (kind === "edit")
+    pendingEditCountByWorkspace.set(workspaceId, (pendingEditCountByWorkspace.get(workspaceId) ?? 0) + 1);
   const previous = localMutationTailByWorkspace.get(workspaceId);
   const result = (previous ?? Promise.resolve())
     .catch(() => undefined)
@@ -271,6 +278,11 @@ async function runLocalDesignMutation<T>(
   try {
     return await result;
   } finally {
+    if (kind === "edit") {
+      const remaining = (pendingEditCountByWorkspace.get(workspaceId) ?? 1) - 1;
+      if (remaining > 0) pendingEditCountByWorkspace.set(workspaceId, remaining);
+      else pendingEditCountByWorkspace.delete(workspaceId);
+    }
     finishMutation();
     if (localMutationTailByWorkspace.get(workspaceId) === tail) {
       localMutationTailByWorkspace.delete(workspaceId);
@@ -2211,19 +2223,29 @@ export async function applyDesignHistoryCached(
   frame: string | null,
   direction: "undo" | "redo",
 ): Promise<DesignApiMutationReplyWire> {
-  const prediction = historyPreview.take(
-    workspaceId,
-    historyStateKey(
-      designWorkspaceSnapshotCache.peekSnapshot(workspaceId).data,
-    ),
-    direction,
-  );
-  if (prediction) {
-    const runtime = designFrameRuntime(workspaceId, prediction.frame);
-    if (runtime?.supports("restoreGeneration"))
-      void runtime.restoreGeneration(prediction.target, false).catch(() => {});
-  }
+  const predict = () => {
+    const next = historyPreview.take(
+      workspaceId,
+      historyStateKey(
+        designWorkspaceSnapshotCache.peekSnapshot(workspaceId).data,
+      ),
+      direction,
+    );
+    if (next) {
+      const runtime = designFrameRuntime(workspaceId, next.frame);
+      if (runtime?.supports("restoreGeneration"))
+        void runtime.restoreGeneration(next.target, false).catch(() => {});
+    }
+    return next;
+  };
+  // An edit still saving will adopt its generation on top of whatever is
+  // painted; a predicted inverse painted first would be recorded as that
+  // edit's baseline and undone to the wrong state. Predict once earlier edits
+  // have landed, inside the lane, still ahead of this history round trip.
+  const afterPendingEdits = pendingEditCountByWorkspace.has(workspaceId);
+  let prediction = afterPendingEdits ? null : predict();
   return runLocalDesignMutation(workspaceId, async () => {
+    if (afterPendingEdits) prediction = predict();
     const previousSourceVersions = new Map(
       (
         designWorkspaceSnapshotCache.peekSnapshot(workspaceId).data?.frames ??
@@ -2331,7 +2353,7 @@ export async function applyDesignHistoryCached(
     }
     if (!result.snapshot) invalidateWorkspaceDesignFoundations(workspaceId);
     return result;
-  }).catch(async (error) => {
+  }, "history").catch(async (error) => {
     historyPreview.clear(workspaceId);
     if (prediction) {
       const runtime = designFrameRuntime(workspaceId, prediction.frame);
@@ -2351,6 +2373,7 @@ export function resetDesignWorkspaceCacheForTests(): void {
   for (const cancel of pendingAdoptedSettlementByFrame.values()) cancel();
   pendingAdoptedSettlementByFrame.clear();
   pendingLocalMutationByWorkspace.clear();
+  pendingEditCountByWorkspace.clear();
   localMutationTailByWorkspace.clear();
   localFrameGenerationByOwner.clear();
   localTokenGenerationByWorkspace.clear();
