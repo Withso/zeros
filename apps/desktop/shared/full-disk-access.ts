@@ -7,7 +7,4 @@ export type FullDiskAccessStatus =
 
 export interface FullDiskAccessSnapshot {
   status: FullDiskAccessStatus;
-  /** The running bundle's name, including its release channel/dev identity. */
-  appName: string;
-  canRevealApp: boolean;
 }

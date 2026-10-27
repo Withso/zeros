@@ -4,10 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import {
-  applicationBundlePath,
-  probeFullDiskAccess,
-} from "../full-disk-access";
+import { probeFullDiskAccess } from "../full-disk-access";
 
 const homes: string[] = [];
 
@@ -152,30 +149,4 @@ describe("Full Disk Access effective-access probe", () => {
       expect(open).not.toHaveBeenCalled();
     },
   );
-});
-
-describe("running app identity", () => {
-  it("resolves the actual packaged or checkout-specific bundle, not a guessed installation", () => {
-    expect(
-      applicationBundlePath(
-        "/Applications/Zeros Alpha.app/Contents/MacOS/Zeros Alpha",
-      ),
-    ).toBe("/Applications/Zeros Alpha.app");
-    expect(
-      applicationBundlePath(
-        "/Users/test/.zeros-local/instances/abc/bundle/Zeros Local — project.app/Contents/MacOS/Zeros",
-      ),
-    ).toBe(
-      "/Users/test/.zeros-local/instances/abc/bundle/Zeros Local — project.app",
-    );
-  });
-
-  it.each([
-    "/usr/bin/node",
-    "/tmp/Fake.app/node",
-    "/tmp/Fake/Contents/MacOS/node",
-    "relative.app/Contents/MacOS/node",
-  ])("refuses a non-bundle executable: %s", (executable) => {
-    expect(applicationBundlePath(executable)).toBeNull();
-  });
 });

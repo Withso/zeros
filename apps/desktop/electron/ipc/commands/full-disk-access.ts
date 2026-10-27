@@ -1,11 +1,7 @@
-import path from "node:path";
 import { app, shell, type IpcMainInvokeEvent } from "electron";
 
 import type { FullDiskAccessSnapshot } from "../../../shared/full-disk-access";
-import {
-  applicationBundlePath,
-  probeFullDiskAccess,
-} from "../../full-disk-access";
+import { probeFullDiskAccess } from "../../full-disk-access";
 import { getMainWindow } from "../events";
 import type { CommandHandler } from "../router";
 
@@ -42,17 +38,11 @@ export const fullDiskAccessStatus: CommandHandler = async (args, event) => {
   requireAppWindow(args, event);
   if (!pending) {
     pending = (async () => {
-      const bundle =
-        process.platform === "darwin"
-          ? applicationBundlePath(process.execPath)
-          : null;
       return {
         status: await probeFullDiskAccess({
           platform: process.platform,
           home: app.getPath("home"),
         }),
-        appName: bundle ? path.basename(bundle, ".app") : app.getName(),
-        canRevealApp: bundle !== null,
       };
     })().finally(() => {
       pending = undefined;
@@ -71,6 +61,12 @@ export const fullDiskAccessOpenSettings: CommandHandler = async (
   requireAppWindow(args, event);
   if (process.platform !== "darwin")
     throw new Error("Full Disk Access requires macOS.");
+  // A protected-file request gives macOS a chance to register the responsible
+  // app as an unchecked entry. The OS controls attribution and offers no
+  // add/highlight guarantee; the user still grants access in System Settings.
+  // Probe here, without targeting a guessed installation or a separate helper.
+  await fullDiskAccessStatus(args, event);
+  requireAppWindow(args, event);
   try {
     await shell.openExternal(SETTINGS_URL);
   } catch {
@@ -78,14 +74,4 @@ export const fullDiskAccessOpenSettings: CommandHandler = async (
       "Could not open System Settings. Open Privacy & Security > Full Disk Access manually.",
     );
   }
-};
-
-export const fullDiskAccessRevealApp: CommandHandler = (args, event) => {
-  requireAppWindow(args, event);
-  const bundle =
-    process.platform === "darwin"
-      ? applicationBundlePath(process.execPath)
-      : null;
-  if (!bundle) throw new Error("The running app bundle could not be located.");
-  shell.showItemInFolder(bundle);
 };

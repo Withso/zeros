@@ -115,7 +115,7 @@ import {
 import { appInfo, appSettingGet, appSettingSet, engineRestart, localNavigationReady } from "./app";
 import { logSubmit, logsExportOpen, logsRecent } from "./logs";
 import { cloudWorkspaceCapability } from "./cloud-capability";
-import { fullDiskAccessOpenSettings, fullDiskAccessRevealApp, fullDiskAccessStatus } from "./full-disk-access";
+import { fullDiskAccessOpenSettings, fullDiskAccessStatus } from "./full-disk-access";
 export function registerAllCommands(): void {
   registerAttachmentSourceIpc();
   // App info (runtime mode / version / platform) — consumed by the
@@ -124,7 +124,6 @@ export function registerAllCommands(): void {
   setCommand("app_info", appInfo);
   setCommand("full_disk_access_status", fullDiskAccessStatus);
   setCommand("full_disk_access_open_settings", fullDiskAccessOpenSettings);
-  setCommand("full_disk_access_reveal_app", fullDiskAccessRevealApp);
   setCommand("local_navigation_ready", localNavigationReady);
   setCommand("cursor_subscription", cursorSubscription);
   setCommand("provider_subscription", providerSubscription);

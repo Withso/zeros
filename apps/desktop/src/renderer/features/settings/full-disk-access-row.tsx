@@ -13,10 +13,10 @@ import {
 import { SettingsRow } from "./settings-ui";
 
 const STATUS_LABELS = {
-  available: "Available",
-  denied: "Not enabled",
+  available: "Granted",
+  denied: "",
   unknown: "Could not verify",
-  unsupported: "Unavailable",
+  unsupported: "",
 } as const;
 
 export function FullDiskAccessRow({
@@ -42,12 +42,11 @@ export function FullDiskAccessRow({
   );
 
   if (!native || snapshot.data?.status === "unsupported") return null;
-  const appName = snapshot.data?.appName ?? "Zeros";
   const statusLabel = snapshot.error
     ? "Could not verify"
     : snapshot.data
       ? STATUS_LABELS[snapshot.data.status]
-      : "Checking…";
+      : "";
 
   const openSettings = async () => {
     if (!active || opening) return;
@@ -62,41 +61,15 @@ export function FullDiskAccessRow({
       setOpening(false);
     }
   };
-  const revealApp = async () => {
-    if (!active) return;
-    try {
-      await nativeInvoke("full_disk_access_reveal_app");
-    } catch {
-      toast.error("Could not show the running app in Finder.");
-    }
-  };
-
   return (
     <SettingsRow
       label="Full Disk Access"
-      align="start"
-      hint={
-        <span className="flex max-w-lg flex-col gap-2">
-          <span>
-            Let local agents and terminals access protected files on this Mac
-            without repeated macOS folder prompts. This includes private data
-            such as Mail and Messages.
-          </span>
-          <span>
-            Enable {appName} in System Settings, then quit and reopen it. If it
-            is missing, use the + button to add the app shown in Finder.
-          </span>
-          <span>
-            Agent approval settings still apply. Cloud workspaces do not gain
-            access to this Mac.
-          </span>
-        </span>
-      }
+      hint="Let local agents work without repeated macOS folder prompts."
     >
-      <div className="flex flex-col items-end gap-2">
+      <div className="flex items-center gap-3">
         <span
           role="status"
-          className="text-fg3 text-xs"
+          className="text-fg3 text-xs whitespace-nowrap"
           aria-label="Full Disk Access status"
         >
           {statusLabel}
@@ -107,24 +80,6 @@ export function FullDiskAccessRow({
           disabled={!active || opening}
         >
           Open System Settings
-        </Button>
-        {snapshot.data?.canRevealApp && (
-          <Button
-            variant="ghost"
-            size="compact"
-            onClick={() => void revealApp()}
-            disabled={!active}
-          >
-            Show App in Finder
-          </Button>
-        )}
-        <Button
-          variant="ghost"
-          size="compact"
-          onClick={snapshot.refresh}
-          disabled={!active || snapshot.loading || snapshot.refreshing}
-        >
-          Check again
         </Button>
       </div>
     </SettingsRow>

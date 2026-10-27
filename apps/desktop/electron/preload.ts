@@ -38,7 +38,6 @@ const ALLOWED_COMMANDS = new Set<string>([
   "app_info",
   "full_disk_access_status",
   "full_disk_access_open_settings",
-  "full_disk_access_reveal_app",
   "local_navigation_ready",
   "cursor_subscription",
   "provider_subscription",

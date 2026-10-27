@@ -20,3 +20,13 @@ Review also reproduced a rejected native read publishing an error after the
 window became hidden but before its visibility event. The same final visibility
 fence now covers successful, malformed and failed replies; the retained
 regression holds and rejects the real cache fetch across that transition.
+
+An OS permission pane link selects a category, not an application row. A
+protected-file request can register a disabled entry, but registration and
+responsible-process attribution remain OS-controlled. Keep setup to the normal
+probe and fixed pane URL, document the manual + fallback, and never promise
+highlighting or implement it through private APIs or permission automation.
+The UI's Granted label describes effective access. Native tests hold setup
+preflight across window retirement and assert that only the current app frame
+can open Settings after the wait. Clear queued mock implementations between
+tests so a deliberately failing preflight assertion cannot hang later cases.

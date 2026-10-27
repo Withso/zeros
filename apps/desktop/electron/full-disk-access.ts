@@ -39,17 +39,3 @@ export async function probeFullDiskAccess(options: {
     return code === "EPERM" || code === "EACCES" ? "denied" : "unknown";
   }
 }
-
-/** Select the running bundle, including checkout-specific development builds.
- * Guessing /Applications/Zeros.app can grant a different channel access. */
-export function applicationBundlePath(executable: string): string | null {
-  if (!path.isAbsolute(executable)) return null;
-  const macos = path.dirname(executable);
-  const contents = path.dirname(macos);
-  const bundle = path.dirname(contents);
-  return path.basename(macos) === "MacOS" &&
-    path.basename(contents) === "Contents" &&
-    bundle.endsWith(".app")
-    ? bundle
-    : null;
-}

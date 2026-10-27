@@ -13,17 +13,21 @@ export async function runFullDiskAccessSmoke({ page, harnessBase, check }) {
           .length,
     );
   await page.goto(url);
+  await expect(page.getByRole("button")).toHaveCount(1);
   const status = page.getByRole("status", { name: "Full Disk Access status" });
-  await expect(status).toHaveText("Not enabled");
+  await expect(status).toHaveText("");
+  await expect.poll(reads).toBe(1);
   expect(await reads()).toBe(1);
   await expect(
-    page.getByText(/Enable Zeros Local — example in System Settings/),
+    page.getByText(
+      "Let local agents work without repeated macOS folder prompts.",
+    ),
   ).toBeVisible();
-  await expect(
-    page.getByText(/Agent approval settings still apply/),
-  ).toBeVisible();
-  await page.getByRole("button", { name: "Open System Settings" }).click();
-  await page.getByRole("button", { name: "Show App in Finder" }).click();
+  const openSettings = page.getByRole("button", {
+    name: "Open System Settings",
+  });
+  await openSettings.focus();
+  await openSettings.press("Enter");
   const actions = await page.evaluate(() =>
     window.__fullDiskAccessFixture
       .calls()
@@ -31,10 +35,9 @@ export async function runFullDiskAccessSmoke({ page, harnessBase, check }) {
   );
   expect(actions).toEqual([
     { command: "full_disk_access_open_settings", args: undefined },
-    { command: "full_disk_access_reveal_app", args: undefined },
   ]);
   check(
-    "Full Disk Access uses fixed native actions and identifies the running app",
+    "Full Disk Access has one description and one keyboard-accessible fixed native action",
     true,
   );
 
@@ -42,24 +45,43 @@ export async function runFullDiskAccessSmoke({ page, harnessBase, check }) {
     const f = window.__fullDiskAccessFixture;
     f.status("available");
     f.hold();
+    window.dispatchEvent(new Event("focus"));
   });
-  await page.getByRole("button", { name: "Check again" }).click();
   await expect
     .poll(() => page.evaluate(() => window.__fullDiskAccessFixture.pending()))
     .toBe(true);
-  await expect(status).toHaveText("Not enabled");
-  await expect(
-    page.getByRole("button", { name: "Check again" }),
-  ).toBeDisabled();
+  await expect(status).toHaveText("");
   await page.evaluate(() => window.__fullDiskAccessFixture.release());
-  await expect(status).toHaveText("Available");
+  await expect(status).toHaveText("Granted");
+  await page.evaluate(() => {
+    window.__fullDiskAccessFixture.status("denied");
+    window.__fullDiskAccessFixture.hold();
+    window.dispatchEvent(new Event("focus"));
+  });
+  await expect
+    .poll(() => page.evaluate(() => window.__fullDiskAccessFixture.pending()))
+    .toBe(true);
+  await expect(status).toHaveText("Granted");
+  await page.evaluate(() => window.__fullDiskAccessFixture.release());
+  await expect(status).toHaveText("");
+  check(
+    "Full Disk Access retains confirmed state and refreshes grant/revocation on focus",
+    true,
+  );
+
+  await page.evaluate(() => {
+    window.__fullDiskAccessFixture.status("unknown");
+    window.dispatchEvent(new Event("focus"));
+  });
+  await expect(status).toHaveText("Could not verify");
+  await expect(page.getByRole("button")).toHaveCount(1);
   await page.evaluate(() => {
     window.__fullDiskAccessFixture.status("denied");
     window.dispatchEvent(new Event("focus"));
   });
-  await expect(status).toHaveText("Not enabled");
+  await expect(status).toHaveText("");
   check(
-    "Full Disk Access retains confirmed state and refreshes grant/revocation on focus",
+    "inconclusive access never reports Granted and recovers on focus",
     true,
   );
 
@@ -83,7 +105,7 @@ export async function runFullDiskAccessSmoke({ page, harnessBase, check }) {
   // Reveal must schedule a new check; a held response from the old panel is stale.
   await page.evaluate(() => window.__fullDiskAccessFixture.active(true));
   await expect.poll(reads).toBe(beforeHide + 1);
-  await expect(status).toHaveText("Not enabled");
+  await expect(status).toHaveText("");
   check(
     "retained Settings panels fence old permission replies across owner/navigation switches",
     true,

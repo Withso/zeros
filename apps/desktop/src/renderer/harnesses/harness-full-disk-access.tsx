@@ -51,11 +51,7 @@ if (!params.has("browser")) {
     ): Promise<T> {
       calls.push({ command, args });
       if (command !== "full_disk_access_status") return undefined as T;
-      const snapshot = {
-        status,
-        appName: "Zeros Local — example",
-        canRevealApp: status !== "unsupported",
-      };
+      const snapshot = { status };
       if (holdNext) {
         holdNext = false;
         await new Promise<void>((done) => {

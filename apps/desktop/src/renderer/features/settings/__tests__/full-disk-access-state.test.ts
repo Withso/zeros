@@ -13,8 +13,6 @@ import {
 
 const available: FullDiskAccessSnapshot = {
   status: "available",
-  appName: "Zeros",
-  canRevealApp: true,
 };
 const denied: FullDiskAccessSnapshot = { ...available, status: "denied" };
 let page: EventTarget & { visibilityState: string };
@@ -187,8 +185,9 @@ describe("device Full Disk Access observation", () => {
     null,
     {},
     { ...available, status: "granted" },
-    { ...available, canRevealApp: "true" },
-    { ...available, appName: "" },
+    { status: null },
+    { status: true },
+    ["available"],
   ])("rejects malformed native answers", (value) => {
     expect(() => parseFullDiskAccessSnapshot(value)).toThrow(
       "Could not verify",

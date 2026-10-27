@@ -19,20 +19,15 @@ export function parseFullDiskAccessSnapshot(
   if (
     !snapshot ||
     typeof snapshot !== "object" ||
+    Array.isArray(snapshot) ||
     !["available", "denied", "unknown", "unsupported"].includes(
       snapshot.status ?? "",
-    ) ||
-    typeof snapshot.appName !== "string" ||
-    !snapshot.appName.trim() ||
-    snapshot.appName.length > 256 ||
-    typeof snapshot.canRevealApp !== "boolean"
+    )
   ) {
     throw new Error("Could not verify Full Disk Access.");
   }
   return {
     status: snapshot.status!,
-    appName: snapshot.appName,
-    canRevealApp: snapshot.canRevealApp,
   };
 }
 
