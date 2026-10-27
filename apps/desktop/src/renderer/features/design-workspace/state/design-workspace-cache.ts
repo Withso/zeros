@@ -1207,10 +1207,27 @@ export async function fetchDesignWorkspaceSnapshot(
   workspaceId: string,
   authoritative = false,
 ): Promise<DesignWorkspaceSnapshotWire> {
-  const next = await executeDesignReadWithTransientRetry(() =>
-    authoritative ? designSnapshot(workspaceId) : readDesignNavigation(workspaceId, designWorkspaceSnapshotCache.peekSnapshot(workspaceId).data)
+  const started = designWorkspaceSnapshotCache.peekSnapshot(workspaceId);
+  const previous = started.data;
+  let next = await executeDesignReadWithTransientRetry(() =>
+    authoritative ? designSnapshot(workspaceId) : readDesignNavigation(workspaceId, previous)
       .then((navigation) => navigation ?? designSnapshot(workspaceId)),
   );
+  if (previous?.frames.length && next.preparation && next.directoryId === previous.directoryId &&
+    next.lint.workspacePath === previous.lint.workspacePath) {
+    next = await designFramePreparation.revalidate(workspaceId, next, () => {
+      const latest = designWorkspaceSnapshotCache.peekSnapshot(workspaceId);
+      return latest.data === previous && latest.invalidationVersion === started.invalidationVersion && !hasPendingDesignEdits(workspaceId);
+    });
+  }
+  const mutation = pendingLocalMutationByWorkspace.get(workspaceId);
+  if (!authoritative && mutation && previous) {
+    // A read that straddled an edit cannot demote the prepared surface while
+    // its mutation receipt is still pending. That receipt (or one deferred
+    // revalidation after a failed edit) owns the replacement generation.
+    mutation.deferredRefresh = true;
+    return previous;
+  }
   const stable = stabilizeDesignWorkspaceSnapshot(
     designWorkspaceSnapshotCache.peekSnapshot(workspaceId).data,
     applyRetainedRuntimeAuditViolations(workspaceId, next),
