@@ -1,4 +1,4 @@
-import type { DesignRuntimeNodeDetails } from "@zeros/protocol/design-runtime";
+import type { DesignRuntimeNodeDetails, DesignRuntimeNodeInsert } from "@zeros/protocol/design-runtime";
 import type { DesignOperation } from "@zeros/design-core";
 import { designRuntimeLayerLabel } from "./design-layer-label";
 
@@ -53,6 +53,22 @@ export function designFrameInsertionOperations(
   start: Point,
   end?: Point,
 ): DesignOperation[] {
+  return designFrameInsertion(parent, nodeId, start, end).operations;
+}
+
+/** The transaction plus its structured twin: the live runtime paints and later
+ * adopts exactly the element this source edit appends, so a drawn child never
+ * waits for a document reload. */
+export function designFrameInsertion(
+  parent: DesignRuntimeNodeDetails,
+  nodeId: string,
+  start: Point,
+  end?: Point,
+): {
+  operations: DesignOperation[];
+  insert: DesignRuntimeNodeInsert;
+  parentStyles: Record<string, string> | null;
+} {
   const matrix = parent.childCoordinateSpace;
   if (!matrix)
     throw new Error("The frame's editable coordinates are unavailable.");
@@ -78,33 +94,36 @@ export function designFrameInsertionOperations(
     parent.styles.display ?? "",
   );
   const operations: DesignOperation[] = [];
-  if (
-    !flow &&
-    (!parent.styles.position || parent.styles.position === "static")
-  ) {
+  const parentStyles =
+    !flow && (!parent.styles.position || parent.styles.position === "static")
+      ? { position: "relative" }
+      : null;
+  if (parentStyles) {
     operations.push({
       operationId: `container:${nodeId}`,
       type: "node.set-styles",
       nodeId: parent.oid,
-      styles: { position: "relative" },
+      styles: parentStyles,
       scope: "auto",
       responsiveContext: "base",
       stateContext: "default",
     });
   }
   // IDs originate in the editor, but keep the fragment boundary safe for callers.
-  const escapedId = nodeId
-    .replace(/&/g, "&amp;")
-    .replace(/"/g, "&quot;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;");
+  if (!/^[A-Za-z0-9_-]{1,128}$/.test(nodeId))
+    throw new Error("The new frame needs a stable layer id.");
+  // check:ui ignore-next -- authored canvas frame color, independent of the editor theme.
+  const style = `display:block;position:${flow ? "relative" : "absolute"};${flow ? "" : `left:${x}px;top:${y}px;`}width:${width}px;height:${height}px;box-sizing:border-box;flex-shrink:0;background-color:#ffffff;opacity:1;`;
   operations.push({
     operationId: `insert:${nodeId}`,
     type: "node.set-html",
     nodeId: parent.oid,
     mode: "append",
-    // check:ui ignore-next -- authored canvas frame color, independent of the editor theme.
-    html: `<div data-oid="${escapedId}" style="display:block;position:${flow ? "relative" : "absolute"};${flow ? "" : `left:${x}px;top:${y}px;`}width:${width}px;height:${height}px;box-sizing:border-box;flex-shrink:0;background-color:#ffffff;opacity:1;"></div>`,
+    html: `<div data-oid="${nodeId}" style="${style}"></div>`,
   });
-  return operations;
+  return {
+    operations,
+    insert: { nodeId, parentId: parent.oid, beforeId: null, tag: "div", style },
+    parentStyles,
+  };
 }

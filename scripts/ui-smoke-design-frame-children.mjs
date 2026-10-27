@@ -61,6 +61,25 @@ export async function runDesignFrameChildrenSmoke({ page, waitFor, check }) {
     );
     await page.mouse.up();
   };
+  // Sample every painted state from release until the child is confirmed: a
+  // drawn child paints in its live document at once, and neither Layers nor
+  // the inspector may fall back to a loading or empty view meanwhile.
+  await page.evaluate(() => {
+    const probe = { states: [], buffers: new Set(), done: false };
+    window.__designChildCreation = probe;
+    const sample = () => {
+      const layers = document.querySelector("[data-design-sidebar-panel]");
+      const header = document.querySelector("[data-design-inspector-header]")?.textContent?.trim() ?? "";
+      probe.states.push({
+        pending: [...(layers?.querySelectorAll("span") ?? [])].some((span) => /^Loading/.test(span.textContent ?? "")),
+        empty: header === "Nothing selected" || header === "Page",
+      });
+      for (const iframe of document.querySelectorAll('[data-design-frame="home.html"] iframe[data-design-document-buffer]'))
+        probe.buffers.add(iframe);
+      if (!probe.done) requestAnimationFrame(sample);
+    };
+    requestAnimationFrame(sample);
+  });
   await draw();
   await waitFor(
     () => runtime().locator('[data-oid="home-main"] > [data-oid]').count(),
@@ -72,6 +91,25 @@ export async function runDesignFrameChildrenSmoke({ page, waitFor, check }) {
   check(
     "drawing inside a frame creates one real child, not another canvas document",
     (await page.locator("[data-design-frame]").count()) === frameCount,
+  );
+  await waitFor(
+    () => layers.locator(`[data-design-layer-id="${childId}"][aria-selected="true"]`).count(),
+    "drawn-child-layer-selected",
+  );
+  await page.waitForTimeout(300);
+  const creation = await page.evaluate(() => {
+    const probe = window.__designChildCreation;
+    probe.done = true;
+    return {
+      pending: probe.states.some((state) => state.pending),
+      empty: probe.states.some((state) => state.empty),
+      buffers: probe.buffers.size,
+    };
+  });
+  check(
+    "a drawn child paints in place: no document reload, loading row or empty inspector",
+    creation.buffers === 1 && !creation.pending && !creation.empty,
+    JSON.stringify(creation),
   );
   const childRow = layers.locator(`[data-design-layer-id="${childId}"]`);
   await childRow.click();

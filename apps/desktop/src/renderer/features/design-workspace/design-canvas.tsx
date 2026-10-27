@@ -54,7 +54,7 @@ import {
 
 import { useWorkbenchStatusSource } from "../../shell/workbench/tab-status";
 import { retainDesignResource } from "./state/design-resource-counters";
-import { designFrameRuntime } from "../../platform/bridge/design-frame-runtime";
+import { designFrameRuntime, type DesignFrameRuntimeConnection } from "../../platform/bridge/design-frame-runtime";
 import {
   type DesignCanvasFrameWire,
   type DesignFrameGeometryWire,
@@ -130,7 +130,7 @@ import {
 } from "./design-effect-values";
 import {
   canInsertDesignFrame,
-  designFrameInsertionOperations,
+  designFrameInsertion,
 } from "./design-frame-insertion";
 import {
   createDesignGestureLoop,
@@ -6475,7 +6475,10 @@ export function DesignCanvas({
     }
   }, []);
 
-  /** A frame drawn inside a document belongs to its nearest frame container. */
+  /** A frame drawn inside a document belongs to its nearest frame container.
+   * A capable runtime paints the child on release and adopts the saved
+   * generation in place, so Layers and the inspector show the new layer at
+   * once and its document never reloads. */
   const createChildFrame = useCallback(
     async (
       owner: DesignCanvasFrameWire,
@@ -6486,6 +6489,7 @@ export function DesignCanvas({
       creatingFrameRef.current = true;
       setCreatingFrame(true);
       const selection = designWorkspaceView(workspaceId);
+      let preview: { runtime: DesignFrameRuntimeConnection; nodeId: string } | null = null;
       try {
         const runtime = designFrameRuntime(workspaceId, owner.file);
         if (!runtime)
@@ -6513,12 +6517,44 @@ export function DesignCanvas({
         if (!parent || !canInsertDesignFrame(parent))
           throw new Error("Select a drawable frame for the new child.");
         const nodeId = `frame-${crypto.randomUUID()}`;
-        const operations = designFrameInsertionOperations(
+        const { operations, insert, parentStyles } = designFrameInsertion(
           parent,
           nodeId,
           start,
           end,
         );
+        if (
+          runtime.supports("previewInsert") &&
+          runtime.sourceVersion === owner.sourceVersion &&
+          parent.sourceVersion === owner.sourceVersion
+        ) {
+          try {
+            const painted = await runtime.previewInsert({
+              inserts: [insert],
+              ...(parentStyles ? { updates: [{ nodeId: parent.oid, styles: parentStyles }] } : {}),
+            });
+            preview = { runtime, nodeId };
+            hideCreationDraft();
+            const store = useDesignRuntimeStore.getState();
+            store.publishSnapshot(workspaceId, folder, owner.file, painted.snapshot, owner.sourceVersion);
+            if (
+              designWorkspaceView(workspaceId).selectedFrame === selection.selectedFrame &&
+              designWorkspaceView(workspaceId).selectedNodeId === selection.selectedNodeId
+            ) {
+              void selectDesignNode({
+                workspaceId,
+                folder,
+                frame: owner,
+                nodeId,
+                details: painted.details[0],
+                owner: canvasPageOwner,
+              }).catch(() => {});
+            }
+          } catch {
+            // The saved document still gains the child; it simply reloads.
+            preview = null;
+          }
+        }
         const key = designFoundationKey(
           workspaceId,
           owner.file,
@@ -6542,6 +6578,7 @@ export function DesignCanvas({
             createdAt: Date.now(),
             operations,
           },
+          { runtimeInserts: [insert] },
         );
         const current = designWorkspaceView(workspaceId);
         const nextFrame = result.snapshot?.frames.find(
@@ -6550,20 +6587,40 @@ export function DesignCanvas({
         if (
           nextFrame &&
           (!canvasPageOwner || isCurrentDesignPageOwner(canvasPageOwner)) &&
-          current.selectedFrame === selection.selectedFrame &&
-          current.selectedNodeId === selection.selectedNodeId
+          ((current.selectedFrame === selection.selectedFrame &&
+            current.selectedNodeId === selection.selectedNodeId) ||
+            (preview && current.selectedFrame === owner.file && current.selectedNodeId === nodeId))
         ) {
-          // Publish identity immediately; the incoming runtime's ready snapshot
-          // completes details for the newly authored node.
+          // Publish identity immediately; the adopted (or incoming) runtime
+          // supplies the new node's exact-generation details.
           void selectDesignNode({
             workspaceId,
             folder,
             frame: nextFrame,
             nodeId,
             owner: canvasPageOwner,
+            reveal: !preview,
           }).catch(() => {});
         }
       } catch (error) {
+        if (preview) {
+          const { runtime, nodeId } = preview;
+          void runtime.clearPreviewInserts().then(({ snapshot }) => {
+            useDesignRuntimeStore.getState().publishSnapshot(workspaceId, folder, owner.file, snapshot, owner.sourceVersion);
+          }).catch(() => {});
+          const current = designWorkspaceView(workspaceId);
+          if (current.selectedFrame === owner.file && current.selectedNodeId === nodeId) {
+            const store = useDesignWorkspaceUiStore.getState();
+            if (selection.selectedFrame === null) store.setSelectedFrame(workspaceId, null, canvasPageOwner);
+            else store.setSelection(
+              workspaceId,
+              selection.selectedFrame,
+              selection.selectedNodeId,
+              selection.selectedNodeIds,
+              { owner: canvasPageOwner, frameSelected: selection.frameSelected },
+            );
+          }
+        }
         toast.error("Couldn't create the child frame", {
           description: errorMessage(error),
         });
@@ -6572,7 +6629,7 @@ export function DesignCanvas({
         setCreatingFrame(false);
       }
     },
-    [folder, workspaceId, canvasPageOwner],
+    [canvasPageOwner, folder, hideCreationDraft, workspaceId],
   );
 
   /** Pointer-down captures one canvas owner and inverse-zoom drag. */

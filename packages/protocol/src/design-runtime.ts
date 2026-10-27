@@ -439,10 +439,37 @@ export interface DesignRuntimeLayoutPreview {
   cancelMoves?: boolean;
 }
 
+/** A host-authored layer the engine appends to an existing parent (a frame
+ * drawn inside a frame). The runtime builds the element from these fields
+ * only; it never parses markup. */
+export interface DesignRuntimeNodeInsert {
+  nodeId: string;
+  parentId: string;
+  /** Null appends at the parent's end, exactly where the source edit lands. */
+  beforeId: string | null;
+  tag: "div";
+  /** The element's complete inline style attribute, as authored. */
+  style: string;
+}
+
+export interface DesignRuntimeInsertPreview {
+  inserts: DesignRuntimeNodeInsert[];
+  /** Parent styles the same transaction writes (a static parent becomes
+   * `position: relative`). */
+  updates?: DesignRuntimeStyleUpdate[];
+}
+
+export interface DesignRuntimeInsertPreviewResult {
+  snapshot: DesignRuntimeSnapshot;
+  details: DesignRuntimeNodeDetails[];
+}
+
 export interface DesignRuntimeGenerationPatch {
   moves?: DesignRuntimeNodeMove[];
   keyframes?: DesignRuntimeKeyframesUpdate[];
   tokens?: DesignRuntimeTokenUpdate[];
+  /** Opt-in (`previewInsert`): structural appends adopted in place. */
+  inserts?: DesignRuntimeNodeInsert[];
 }
 
 /** Result of adopting an engine-confirmed visual generation in-place. */
@@ -475,12 +502,14 @@ export type DesignRuntimeMethod =
   | "captureScreenshot"
   /** Opt-in: advertised only to a host whose handshake requests it. */
   | "previewStylesheet"
-  | "setPlayback";
+  | "setPlayback"
+  | "previewInsert"
+  | "clearPreviewInserts";
 
 /** Methods a runtime advertises only when the host's handshake lists them
  * in `features`, so a host that predates them still accepts the runtime's
  * capabilities. */
-export const DESIGN_RUNTIME_OPT_IN_METHODS = ["previewStylesheet", "setPlayback"] as const;
+export const DESIGN_RUNTIME_OPT_IN_METHODS = ["previewStylesheet", "setPlayback", "previewInsert", "clearPreviewInserts"] as const;
 
 export interface DesignRuntimePlaybackStopped {
   sourceVersion: string;
@@ -547,6 +576,8 @@ const DESIGN_RUNTIME_METHODS = new Set<DesignRuntimeMethod>([
   "captureScreenshot",
   "previewStylesheet",
   "setPlayback",
+  "previewInsert",
+  "clearPreviewInserts",
 ]);
 
 export interface DesignRuntimeHostRequest {
@@ -1015,7 +1046,7 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
   ];
   // Advertised only to a host whose handshake asks for them, so a host that
   // predates a method still accepts these capabilities.
-  var OPT_IN_METHODS = ["previewStylesheet", "setPlayback"];
+  var OPT_IN_METHODS = ["previewStylesheet", "setPlayback", "previewInsert", "clearPreviewInserts"];
   var enabledOptInMethods = [];
   var MAX_PREVIEW_STYLESHEET_CHARS = 4194304;
   // Everything one frame of direct manipulation paints from. Deliberately tiny:
@@ -3482,8 +3513,118 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
    * leave a partially adopted canvas.
    */
   var previewMovesByOid = new Map();
+  var previewInsertsByOid = new Map();
   var generationHistory = [];
   var paintedSourceVersion = SOURCE_VERSION;
+  var INSERT_PARENT_REJECTED = /^(AREA|BASE|BR|COL|COLGROUP|EMBED|HR|IMG|INPUT|LINK|META|PARAM|SOURCE|TRACK|WBR|SELECT|OPTION|OPTGROUP|TABLE|THEAD|TBODY|TFOOT|TR|UL|OL|DL|SCRIPT|STYLE|TEMPLATE|TEXTAREA|IFRAME|SVG)$/i;
+
+  /** Validate every insert before the first write. A previewed element is the
+   * same node a later commit confirms; any other existing id is a conflict. */
+  function prepareInserts(inserts) {
+    if (inserts === undefined) return [];
+    if (enabledOptInMethods.indexOf("previewInsert") < 0) throw new Error("Layer inserts require previewInsert.");
+    if (!Array.isArray(inserts) || inserts.length < 1 || inserts.length > 8) throw new Error("Invalid layer inserts.");
+    var seen = new Set();
+    return inserts.map(function (insert) {
+      if (!insert || typeof insert !== "object" || Array.isArray(insert) ||
+          typeof insert.nodeId !== "string" || !/^[A-Za-z0-9_-]{1,128}$/.test(insert.nodeId) ||
+          typeof insert.parentId !== "string" || insert.tag !== "div" ||
+          typeof insert.style !== "string" || insert.style.length > 4096 ||
+          (insert.beforeId !== null && typeof insert.beforeId !== "string")) {
+        throw new Error("Invalid layer insert.");
+      }
+      if (seen.has(insert.nodeId)) throw new Error("Duplicate layer insert.");
+      seen.add(insert.nodeId);
+      var parent = elementForOid(insert.parentId);
+      if (parent === document.documentElement || INSERT_PARENT_REJECTED.test(parent.tagName)) {
+        throw new Error("This layer cannot contain a frame.");
+      }
+      var before = insert.beforeId ? elementForOid(insert.beforeId) : null;
+      if (before && before.parentElement !== parent) throw new Error("Invalid layer insert position.");
+      var previewed = previewInsertsByOid.get(insert.nodeId) || null;
+      ensureElementMap();
+      var existing = elementsByOid.get(insert.nodeId);
+      if (existing && (!previewed || existing !== previewed.element)) {
+        throw new Error("Layer already exists: " + insert.nodeId);
+      }
+      return { oid: insert.nodeId, parent: parent, before: before, style: insert.style, previewed: previewed };
+    });
+  }
+
+  function insertedElement(plan) {
+    var element = document.createElement("div");
+    element.setAttribute("data-oid", plan.oid);
+    element.setAttribute("style", plan.style);
+    return element;
+  }
+
+  /** Restore only the parent properties an insert preview wrote; other
+   * previews on the same parent keep their own baseline. */
+  function restoreInsertParentStyles(parentStyles) {
+    parentStyles.forEach(function (entry) {
+      var element = elementsByOid.get(entry.oid);
+      var priorByProperty = previewStyleOverridesByOid.get(entry.oid);
+      if (!element || !priorByProperty) return;
+      entry.properties.forEach(function (property) {
+        var prior = priorByProperty.get(property);
+        if (!prior) return;
+        restorePreviewStyle(element, prior);
+        priorByProperty.delete(property);
+      });
+      if (priorByProperty.size === 0) previewStyleOverridesByOid.delete(entry.oid);
+    });
+  }
+
+  function clearInsertPreviews(keep) {
+    if (!previewInsertsByOid.size) return false;
+    var removed = false;
+    withoutObservedMutations(function () {
+      Array.from(previewInsertsByOid.entries()).reverse().forEach(function (entry) {
+        if (keep && keep.has(entry[0])) return;
+        var preview = entry[1];
+        if (preview.element.parentNode) preview.element.parentNode.removeChild(preview.element);
+        restoreInsertParentStyles(preview.parentStyles);
+        previewInsertsByOid.delete(entry[0]);
+        removed = true;
+      });
+    });
+    if (removed) refreshElementMap();
+    return removed;
+  }
+
+  /** Paint a drawn layer before the engine confirms it. Latest preview wins;
+   * a commit with the same inserts adopts these exact elements. */
+  function previewInsert(args) {
+    if (!args || typeof args !== "object" || Array.isArray(args)) throw new Error("Invalid insert preview.");
+    var updates = args.updates === undefined ? [] : args.updates;
+    if (!Array.isArray(updates) || updates.length > 8) throw new Error("Invalid insert parent styles.");
+    clearInsertPreviews(null);
+    var plans = prepareInserts(args.inserts);
+    var parentStyles = updates.map(function (update) {
+      if (!update || typeof update !== "object" || typeof update.nodeId !== "string" ||
+          !update.styles || typeof update.styles !== "object" || Array.isArray(update.styles)) {
+        throw new Error("Invalid insert parent style.");
+      }
+      return { oid: update.nodeId, element: elementForOid(update.nodeId), styles: update.styles, properties: Object.keys(update.styles) };
+    });
+    var inserted = [];
+    withoutObservedMutations(function () {
+      parentStyles.forEach(function (entry) { applyPreviewStyles(entry.element, entry.oid, entry.styles); });
+      plans.forEach(function (plan, index) {
+        var element = insertedElement(plan);
+        plan.parent.insertBefore(element, plan.before);
+        previewInsertsByOid.set(plan.oid, { element: element, parentStyles: index === 0 ? parentStyles : [] });
+        inserted.push(element);
+      });
+    });
+    var nextSnapshot = snapshot();
+    return { snapshot: nextSnapshot, details: inserted.map(function (element) { return detailsOf(element); }) };
+  }
+
+  function clearPreviewInserts() {
+    clearInsertPreviews(null);
+    return { snapshot: snapshot() };
+  }
   var dragPaintStyle = null;
 
   function suppressDragPaint(oid) {
@@ -3625,14 +3766,19 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
       var entry = generationHistory[index];
       if (!entry) continue;
       entry.nodeIds.forEach(function (oid) { touched.add(oid); });
-      if (entry.moves.length || entry.changes.some(function (change) { return /^(display|visibility|flex-direction|flex-flow|all)$/.test(change.property); })) treeUnchanged = false;
+      if (entry.moves.length || (entry.inserts && entry.inserts.length) || entry.changes.some(function (change) { return /^(display|visibility|flex-direction|flex-flow|all)$/.test(change.property); })) treeUnchanged = false;
     }
     withoutObservedMutations(function () {
       cancelMovePreviews();
       Array.from(previewStyleOverridesByOid.keys()).forEach(clearPreviewStyles);
+      clearInsertPreviews(null);
       var apply = function (entry, forward) {
-        if (entry.moves.length || entry.changes.some(function (change) { return /^(display|visibility|flex-direction|flex-flow|all)$/.test(change.property); })) treeUnchanged = false;
+        var inserts = entry.inserts || [];
+        if (entry.moves.length || inserts.length || entry.changes.some(function (change) { return /^(display|visibility|flex-direction|flex-flow|all)$/.test(change.property); })) treeUnchanged = false;
         entry.nodeIds.forEach(function (oid) { touched.add(oid); });
+        if (forward) inserts.forEach(function (insert) {
+          insert.parent.insertBefore(insert.element, insert.before && insert.before.parentNode === insert.parent ? insert.before : null);
+        });
         var moves = forward ? entry.moves : entry.moves.slice().reverse();
         moves.forEach(function (move) {
           var parent = forward ? move.parent : move.oldParent;
@@ -3645,6 +3791,9 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
           if (value) change.target.setProperty(change.property, value, priority);
           else change.target.removeProperty(change.property);
         });
+        if (!forward) inserts.slice().reverse().forEach(function (insert) {
+          if (insert.element.parentNode) insert.element.parentNode.removeChild(insert.element);
+        });
       };
       while (from > to) { from -= 1; apply(generationHistory[from], false); }
       while (from < to) { apply(generationHistory[from], true); from += 1; }
@@ -3656,7 +3805,12 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
     }
     revision += 1;
     var nextSnapshot = treeUnchanged ? styleOnlySnapshot() : snapshot();
-    var details = Array.from(touched).slice(0, 256).map(function (oid) { return detailsOf(elementForOid(oid)); });
+    // An undone insert is no longer in the document; report only live nodes.
+    var details = Array.from(touched).slice(0, 256).flatMap(function (oid) {
+      ensureElementMap();
+      var element = elementsByOid.get(oid);
+      return element && element.isConnected ? [detailsOf(element)] : [];
+    });
     // History can move boxes it never touched (the selection among them). The
     // host names those it shows so they are measured in this same round trip;
     // a box the restored generation no longer contains is simply omitted.
@@ -3681,11 +3835,12 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
       throw new Error("nextSourceVersion must be a valid source generation.");
     }
     var moves = prepareMoves(patch && patch.moves);
+    var inserts = prepareInserts(patch ? patch.inserts : undefined);
     var generationPatch = prepareGenerationPatch(patch && { keyframes: patch.keyframes, tokens: patch.tokens });
     if (
       !Array.isArray(updates) ||
       updates.length > ${DESIGN_LAYOUT_CHILD_LIMIT + 1} ||
-      (updates.length < 1 && !generationPatch.changed && moves.length === 0)
+      (updates.length < 1 && !generationPatch.changed && moves.length === 0 && inserts.length === 0)
     ) {
       throw new Error("A commit must contain styles or a generation patch.");
     }
@@ -3752,6 +3907,7 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
       return { oid: oid, element: element, preview: preview, plans: plans };
     });
     var changes = [];
+    var historyInserts = [];
     var historyMoves = moves.map(function (move) {
       var prior = previewMovesByOid.get(move.oid);
       return Object.assign({}, move, { oldParent: prior ? prior.parent : move.element.parentElement, oldBefore: prior ? prior.before : move.element.nextSibling });
@@ -3814,14 +3970,26 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
           currentParent.insertBefore(move.element, currentBefore);
         }
       });
+      inserts.forEach(function (plan) {
+        var element = plan.previewed ? plan.previewed.element : insertedElement(plan);
+        if (plan.previewed) previewInsertsByOid.delete(plan.oid);
+        if (element.parentElement !== plan.parent || (plan.before && element.nextElementSibling !== plan.before)) {
+          plan.parent.insertBefore(element, plan.before);
+        }
+        historyInserts.push({ oid: plan.oid, element: element, parent: plan.parent, before: plan.before });
+      });
       if (generationPatch.changed) applyCommittedGenerationPatch(generationPatch);
     });
+    // The confirmed generation is exactly what the engine saved; a preview
+    // this commit did not adopt belonged to an abandoned attempt.
+    clearInsertPreviews(null);
+    if (historyInserts.length) refreshElementMap();
     if (generationPatch.changed) generationHistory = [];
     else {
       var branch = generationHistory.findIndex(function (entry) { return entry.from === SOURCE_VERSION; });
       if (branch >= 0) generationHistory.splice(branch);
-      generationHistory.push({ from: SOURCE_VERSION, to: nextSourceVersion, changes: changes, moves: historyMoves, nodeIds: prepared.map(function (update) { return update.oid; }).concat(moves.map(function (move) { return move.oid; })) });
-      var bytes = function (entry) { return entry.changes.reduce(function (total, change) { return total + (change.before.length + change.after.length + change.property.length) * 2 + 128; }, 0) + entry.moves.length * 256; };
+      generationHistory.push({ from: SOURCE_VERSION, to: nextSourceVersion, changes: changes, moves: historyMoves, inserts: historyInserts, nodeIds: prepared.map(function (update) { return update.oid; }).concat(moves.map(function (move) { return move.oid; })).concat(historyInserts.map(function (insert) { return insert.oid; })) });
+      var bytes = function (entry) { return entry.changes.reduce(function (total, change) { return total + (change.before.length + change.after.length + change.property.length) * 2 + 128; }, 0) + entry.moves.length * 256 + (entry.inserts ? entry.inserts.length : 0) * 256; };
       var historyBytes = generationHistory.reduce(function (total, entry) { return total + bytes(entry); }, 0);
       while (generationHistory.length > 64 || historyBytes > 4 * 1024 * 1024) historyBytes -= bytes(generationHistory.shift());
     }
@@ -3830,7 +3998,7 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
     revision += 1;
     SOURCE_VERSION = nextSourceVersion;
     window.__zerosDesignSourceVersion = SOURCE_VERSION;
-    var treeUnchanged = historyMoves.length === 0 && prepared.every(function (update) {
+    var treeUnchanged = historyMoves.length === 0 && historyInserts.length === 0 && prepared.every(function (update) {
       return update.plans.every(function (plan) {
         return plan.property !== "display" &&
           plan.property !== "visibility" &&
@@ -3848,7 +4016,7 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
         : nextSnapshot,
       details: prepared.map(function (update) {
         return detailsOf(elementForOid(update.oid));
-      })
+      }).concat(historyInserts.map(function (insert) { return detailsOf(insert.element); }))
     };
   }
 
@@ -4404,6 +4572,16 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
           throw new Error("Unknown design runtime method: previewStylesheet");
         }
         return previewStylesheet(args.file, args.css === null ? null : args.css);
+      case "previewInsert":
+        if (enabledOptInMethods.indexOf("previewInsert") < 0) {
+          throw new Error("Unknown design runtime method: previewInsert");
+        }
+        return previewInsert(args);
+      case "clearPreviewInserts":
+        if (enabledOptInMethods.indexOf("clearPreviewInserts") < 0) {
+          throw new Error("Unknown design runtime method: clearPreviewInserts");
+        }
+        return clearPreviewInserts();
       default:
         throw new Error("Unknown design runtime method: " + method);
     }

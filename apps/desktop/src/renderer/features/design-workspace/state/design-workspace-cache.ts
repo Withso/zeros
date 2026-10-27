@@ -52,7 +52,7 @@ import {
   type DesignWorkspaceSnapshotWire,
 } from "../../../platform/git";
 import type { DesignTransaction } from "@zeros/design-core";
-import type { DesignRuntimeGenerationPatch } from "@zeros/protocol/design-runtime";
+import type { DesignRuntimeGenerationPatch, DesignRuntimeNodeInsert } from "@zeros/protocol/design-runtime";
 import { KeyedAsyncCache } from "../../../shared/lib/keyed-async-cache";
 import { DesignFramePreparation, readDesignNavigation } from "./design-workspace-preparation";
 import { preparedDesignSnapshot } from "./design-frame-view";
@@ -1870,11 +1870,19 @@ export function applyDesignTransactionCached(
   workspaceId: string,
   frame: string,
   transaction: DesignTransaction,
+  options?: {
+    /** Structured twins of this transaction's `node.set-html` appends. When
+     * every append has one, the live runtime adopts the new generation in
+     * place instead of reloading its document. */
+    runtimeInserts?: readonly DesignRuntimeNodeInsert[];
+  },
 ): Promise<DesignApiMutationReplyWire> {
   return applyPreparedDesignTransactionCached(
     workspaceId,
     frame,
     async () => transaction,
+    undefined,
+    options?.runtimeInserts,
   );
 }
 
@@ -1883,6 +1891,7 @@ async function applyPreparedDesignTransactionCached(
   frame: string,
   prepare: () => Promise<DesignTransaction>,
   measured?: DesignMeasuredMovement,
+  runtimeInserts?: readonly DesignRuntimeNodeInsert[],
 ): Promise<DesignApiMutationReplyWire> {
   return runLocalDesignMutation(workspaceId, async () => {
     const assertCurrent = () => {
@@ -1929,7 +1938,7 @@ async function applyPreparedDesignTransactionCached(
           previousSourceVersion,
           nextSourceVersion,
         );
-        const adoption = transactionRuntimeAdoption(rebasedTransaction);
+        const adoption = transactionRuntimeAdoption(rebasedTransaction, runtimeInserts);
         if (adoption && previousSourceVersion) {
           const adopted = await adoptDesignStyleGeneration(
             workspaceId,
@@ -1999,7 +2008,24 @@ async function applyPreparedDesignTransactionCached(
   });
 }
 
-function transactionRuntimeAdoption(transaction: DesignTransaction): {
+/** An append is adoptable only through the structured insert its author
+ * supplied: the same parent, the end position the engine writes, and the
+ * exact `data-oid` it carries. Markup is never re-parsed here. */
+function adoptableInsert(
+  operation: DesignTransaction["operations"][number],
+  runtimeInserts: readonly DesignRuntimeNodeInsert[] | undefined,
+): DesignRuntimeNodeInsert | null {
+  if (operation.type !== "node.set-html" || operation.mode !== "append") return null;
+  const insert = runtimeInserts?.find((candidate) => candidate.parentId === operation.nodeId &&
+    candidate.beforeId === null &&
+    operation.html === `<div data-oid="${candidate.nodeId}" style="${candidate.style}"></div>`);
+  return insert ?? null;
+}
+
+function transactionRuntimeAdoption(
+  transaction: DesignTransaction,
+  runtimeInserts?: readonly DesignRuntimeNodeInsert[],
+): {
   styleUpdates: Array<{
     nodeId: string;
     styles: Record<string, string | null>;
@@ -2014,16 +2040,23 @@ function transactionRuntimeAdoption(transaction: DesignTransaction): {
         operation.type !== "node.set-styles" &&
         operation.type !== "node.move" &&
         operation.type !== "frame.set-geometry" &&
-        operation.type !== "keyframes.set",
+        operation.type !== "keyframes.set" &&
+        !adoptableInsert(operation, runtimeInserts),
     )
   ) {
     return null;
   }
+  const inserts: DesignRuntimeNodeInsert[] = [];
   const moves: NonNullable<DesignRuntimeGenerationPatch["moves"]> = [];
   const stylesByNode = new Map<string, Record<string, string | null>>();
   const keyframes: NonNullable<DesignRuntimeGenerationPatch["keyframes"]> = [];
   for (const operation of transaction.operations) {
     if (operation.type === "frame.set-geometry") continue;
+    const insert = adoptableInsert(operation, runtimeInserts);
+    if (insert) {
+      inserts.push(insert);
+      continue;
+    }
     if (operation.type === "node.move") {
       moves.push({
         nodeId: operation.nodeId,
@@ -2054,15 +2087,16 @@ function transactionRuntimeAdoption(transaction: DesignTransaction): {
     nodeId,
     styles,
   }));
-  if (styleUpdates.length === 0 && keyframes.length === 0 && moves.length === 0)
+  if (styleUpdates.length === 0 && keyframes.length === 0 && moves.length === 0 && inserts.length === 0)
     return null;
   return {
     styleUpdates,
-    ...(keyframes.length > 0 || moves.length > 0
+    ...(keyframes.length > 0 || moves.length > 0 || inserts.length > 0
       ? {
           patch: {
             ...(keyframes.length ? { keyframes } : {}),
             ...(moves.length ? { moves } : {}),
+            ...(inserts.length ? { inserts } : {}),
           },
         }
       : {}),
@@ -2096,6 +2130,8 @@ async function adoptDesignStyleGeneration(
   }
   const runtime = designFrameRuntime(workspaceId, frame);
   if (!runtime || runtime.sourceVersion !== previousSourceVersion) return false;
+  // An older runtime would ignore inserts it cannot adopt; reload instead.
+  if (patch?.inserts?.length && !runtime.supports("previewInsert")) return false;
   try {
     const adopted = patch
       ? await runtime.commitStyles(updates, nextSourceVersion, patch)

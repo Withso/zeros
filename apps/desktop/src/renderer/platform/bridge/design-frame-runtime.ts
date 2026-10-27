@@ -28,6 +28,8 @@ import {
   type DesignRuntimeMethod,
   type DesignRuntimeHitMode,
   type DesignRuntimeGenerationPatch,
+  type DesignRuntimeInsertPreview,
+  type DesignRuntimeInsertPreviewResult,
   type DesignRuntimeMotionPreview,
   type DesignRuntimePlaybackStopped,
   type DesignRuntimeNodeDetails,
@@ -125,6 +127,13 @@ export interface DesignFrameRuntimeConnection {
   /** Whole-frame browser playback. The session fences a late Stop from a
    * retired playback attempt; older engines do not advertise this method. */
   setPlayback(sessionId: string, playing: boolean, signal?: AbortSignal): Promise<void>;
+  /** Paint a drawn child before its source write confirms. Opt-in: check
+   * `supports("previewInsert")`; a commit carrying the same inserts adopts it. */
+  previewInsert(
+    input: DesignRuntimeInsertPreview,
+    signal?: AbortSignal,
+  ): Promise<DesignRuntimeInsertPreviewResult>;
+  clearPreviewInserts(signal?: AbortSignal): Promise<{ snapshot: DesignRuntimeSnapshot }>;
   previewStyles(
     nodeId: string,
     styles: Record<string, string | null>,
@@ -749,6 +758,48 @@ class DesignRuntimeConnectionImpl implements DesignFrameRuntimeConnection {
       throw runtimeError("previewStylesheet returned malformed data");
     }
     return result as { applied: number; snapshot: DesignRuntimeSnapshot };
+  }
+
+  async previewInsert(
+    input: DesignRuntimeInsertPreview,
+    signal?: AbortSignal,
+  ): Promise<DesignRuntimeInsertPreviewResult> {
+    if (!this.supports("previewInsert"))
+      throw runtimeError("previewInsert is not supported", "METHOD_NOT_SUPPORTED");
+    const result = await this.request("previewInsert", { ...input }, signal) as
+      { snapshot?: unknown; details?: unknown } | null;
+    if (
+      !result ||
+      typeof result !== "object" ||
+      !isRuntimeSnapshot(result.snapshot) ||
+      result.snapshot.sourceVersion !== this.expectedSourceVersion ||
+      !Array.isArray(result.details) ||
+      result.details.length !== input.inserts.length ||
+      result.details.some((details, index) =>
+        !isNodeDetails(details) ||
+        details.sourceVersion !== this.expectedSourceVersion ||
+        details.oid !== input.inserts[index]?.nodeId)
+    ) {
+      throw runtimeError("previewInsert returned malformed data");
+    }
+    return result as DesignRuntimeInsertPreviewResult;
+  }
+
+  async clearPreviewInserts(
+    signal?: AbortSignal,
+  ): Promise<{ snapshot: DesignRuntimeSnapshot }> {
+    if (!this.supports("clearPreviewInserts"))
+      throw runtimeError("clearPreviewInserts is not supported", "METHOD_NOT_SUPPORTED");
+    const result = await this.request("clearPreviewInserts", {}, signal) as
+      { snapshot?: unknown } | null;
+    if (
+      !result ||
+      !isRuntimeSnapshot(result.snapshot) ||
+      result.snapshot.sourceVersion !== this.expectedSourceVersion
+    ) {
+      throw runtimeError("clearPreviewInserts returned malformed data");
+    }
+    return result as { snapshot: DesignRuntimeSnapshot };
   }
 
   async setPlayback(sessionId: string, playing: boolean, signal?: AbortSignal): Promise<void> {
