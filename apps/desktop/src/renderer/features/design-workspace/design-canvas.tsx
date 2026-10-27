@@ -1210,9 +1210,9 @@ export function DesignCanvas({
     paintNestTarget(file);
     setNestLiveFile(file);
   }, [paintNestTarget]);
-  // The frame the pointer (or Layers focus) rests on is the likely next
-  // selection: boot its editor now so the click paints ready Layers and
-  // inspector data. One latest frame, ranked after explicit demand.
+  // The frame whose title or Layers row the pointer (or focus) rests on is the
+  // likely next selection: boot its editor now so the click paints ready
+  // Layers and inspector data. One latest frame, ranked with explicit demand.
   const intentFile = useDesignFrameIntent(active ? workspaceId : null);
   useEffect(() => {
     if (!active && workspaceId) clearDesignFrameIntent(workspaceId);
@@ -7530,8 +7530,8 @@ export function DesignCanvas({
         // keydown lost to another focus owner (or pressed before the window was
         // focused) still resolves the moment the pointer enters the canvas.
         onPointerMove={(event) => syncMeasureModifier(event.altKey)}
-        // Crossing into a frame (or out to empty canvas) is the intent
-        // signal; movement within one element never reaches React state.
+        // Entering a frame's title (or leaving it for anything else) is the
+        // intent signal; movement within one element never reaches React state.
         onPointerOver={(event) => {
           if (!workspaceId || !active) return;
           const target = event.target instanceof Element ? event.target : null;
