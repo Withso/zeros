@@ -23,10 +23,19 @@
   runtime path that changes the tree without an observed mutation (insert
   previews and their cancellation) must advance the revision; a root-only
   comparison dropped a child drawn inside a nested container.
+- Rule: optimistic predictions must order behind in-flight writes that will
+  adopt on top of them. An Undo prediction painted while an edit was still
+  saving became that edit's recorded baseline; predict inside the lane after
+  pending edits land, but keep consecutive history predictions immediate.
+  Speeding up the UI exposed this race (pre-existing on main) in CI first.
 - Rule: attribute React commits to store publications before optimizing
   (production profiling build, scheduled-updater identities); most frame-switch
   commits were equal state re-set by effects, closed panels and loading flags.
-- Verification gotchas: ad-hoc smoke servers must run `vite --mode ui-smoke`
+- Verification gotchas: a second Vite server started from a worktree whose
+  `node_modules` is symlinked to the main checkout shares `node_modules/.vite`
+  and can re-optimize dependencies under a running smoke (React "null
+  useState"); never run two dev servers over one dependency cache. Ad-hoc
+  smoke servers must run `vite --mode ui-smoke`
   (dependency pre-scan includes harness entries) or a smoke's dynamic
   `import()` of a store hits a second module instance; fixtures that
   string-patch runtime source must match structurally, not one exact list;
