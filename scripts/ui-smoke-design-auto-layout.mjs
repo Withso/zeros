@@ -353,4 +353,78 @@ export async function runDesignAutoLayoutSmoke({ page, check }) {
     "wrapped vertical flow keeps main and cross-axis gaps independent",
     true,
   );
+  await runDesignNestedOffsetsSmoke({ page, check });
+}
+
+/** Frames nested by an older build were placed by a translate beside a box
+ * at 0, 0. The canvas must stay true to their CSS: X and Y read where they
+ * are drawn, and vertical auto layout stacks them from the parent's top-left
+ * edge instead of keeping the old offset (the owner's 2026-10-28 report). */
+export async function runDesignNestedOffsetsSmoke({ page, check }) {
+  const origin = new URL(page.url()).origin;
+  await page.setViewportSize({ width: 1280, height: 900 });
+  await page.goto(
+    `${origin}/apps/desktop/src/renderer/harnesses/harness-design-workspace.html?nestedOffsets=1`,
+    { waitUntil: "networkidle" },
+  );
+  const layers = page.locator("[data-design-sidebar-panel]");
+  const layout = page.locator("[data-design-layout-section]");
+  const editor = page.locator("[data-design-style-editor]");
+  const runtime = page.frameLocator(
+    '[data-design-frame="home.html"] iframe[data-design-document-buffer="displayed"][data-design-document-ready]',
+  );
+  const hero = runtime.locator('[data-oid="home-hero"]');
+  const select = async (id) => {
+    await layers.locator(`[data-design-layer-id="${id}"]`).click();
+    await expect(editor).toBeVisible();
+  };
+  await select("home-heading");
+  await expect(layout.getByLabel("X", { exact: true })).toHaveValue("66");
+  await expect(layout.getByLabel("Y", { exact: true })).toHaveValue("223");
+  check("a layer an older nesting placed by a translate reads the X and Y it is drawn at", true);
+
+  await select("home-hero");
+  await layout
+    .getByRole("button", { name: "Auto layout: Vertical", exact: true })
+    .click();
+  await expect
+    .poll(() => hero.evaluate((element) => getComputedStyle(element).display))
+    .toBe("flex");
+  const geometry = () =>
+    hero.evaluate((parent) => {
+      const box = (element) => {
+        const rect = element.getBoundingClientRect();
+        return { x: rect.x, y: rect.y, height: rect.height, transform: getComputedStyle(element).transform };
+      };
+      const [first, second] = [...parent.children];
+      return { parent: box(parent), first: box(first), second: box(second), gap: Number.parseFloat(getComputedStyle(parent).rowGap) || 0 };
+    });
+  await expect
+    .poll(async () => {
+      const { parent, first, second, gap } = await geometry();
+      return (
+        Math.abs(first.x - parent.x) < 0.5 &&
+        Math.abs(first.y - parent.y) < 0.5 &&
+        Math.abs(second.x - parent.x) < 0.5 &&
+        Math.abs(second.y - (first.y + first.height + gap)) < 0.5 &&
+        first.transform === "none" &&
+        second.transform === "none"
+      );
+    })
+    .toBe(true);
+  await select("home-heading");
+  await expect(layout.getByLabel("X", { exact: true })).toHaveValue("0");
+  await expect(layout.getByLabel("Y", { exact: true })).toHaveValue("0");
+  check("vertical auto layout stacks nested frames from the parent's top-left, without their old offsets", true);
+
+  // The frame itself is a document: nothing past its edges is drawn on the
+  // canvas. Its Clip content stays its own overflow and says so.
+  await page.locator('[data-design-frame="home.html"] [data-design-frame-label]').click();
+  const clip = layout.getByRole("checkbox", { name: "Clip content", exact: true });
+  await expect(clip).toBeEnabled();
+  await expect(layout.locator('label[title^="The canvas always clips a frame"]')).toHaveCount(1);
+  // A layer inside it has no such note.
+  await select("home-hero");
+  await expect(layout.locator('label[title^="The canvas always clips a frame"]')).toHaveCount(0);
+  check("a frame's Clip content explains that the canvas always clips a frame at its edges", true);
 }

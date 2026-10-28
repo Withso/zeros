@@ -1,7 +1,9 @@
 import { describe, expect, it } from "vitest";
 import {
   DESIGN_RELOCATION_MAX_INHERITED_STYLES,
+  designRelocationFlowStyles,
   designRelocationInheritedStyles,
+  designRelocationStyles,
   type DesignRuntimeRelocationContext,
 } from "../design-relocation";
 
@@ -67,5 +69,34 @@ describe("relocation inherited styles", () => {
     const carried = designRelocationInheritedStyles(crowded, null);
     expect(Object.keys(carried)).toHaveLength(DESIGN_RELOCATION_MAX_INHERITED_STYLES);
     expect(carried).not.toHaveProperty("color");
+  });
+});
+
+describe("relocation placement", () => {
+  it("places a layer by left and top, so its saved position is the X and Y a person reads", () => {
+    // A translate in transform paints at the same place but reads as X 0, Y 0
+    // and survives into auto layout as a stray offset.
+    expect(designRelocationStyles({ width: 100, height: 80, matrix: [1, 0, 0, 1, 65.5, 223.25], inheritedStyles: {} })).toMatchObject({
+      position: "absolute", left: "65.5px", top: "223.25px", width: "100px", height: "80px", transform: "none",
+    });
+  });
+
+  it("keeps rotation, scale and reflection in the transform, about the layer's corner", () => {
+    expect(designRelocationStyles({ width: 100, height: 80, matrix: [0, 2, -3, 0, 240, 0], inheritedStyles: { color: "navy" } })).toMatchObject({
+      left: "240px", top: "0px", transform: "matrix(0,2,-3,0,0,0)", "transform-origin": "0 0", color: "navy",
+    });
+  });
+
+  it("joins a flow slot with its appearance, size and rotation but no free-layout offset", () => {
+    const styles = designRelocationFlowStyles(
+      { width: 100, height: 80, matrix: [0, 1, -1, 0, 40, 60], inheritedStyles: { color: "navy" } },
+      { position: "relative", left: "auto", top: "auto", right: "auto", bottom: "auto", order: "2", "flex-grow": "0" },
+    );
+    expect(styles).toMatchObject({
+      color: "navy", position: "relative", inset: "auto", width: "100px", height: "80px",
+      margin: "0", transform: "matrix(0,1,-1,0,0,0)", translate: "none", order: "2", "flex-grow": "0",
+    });
+    expect(Object.keys(styles).length).toBeLessThanOrEqual(64);
+    expect(() => designRelocationFlowStyles({ width: 1, height: 1, matrix: [1, 0, 0, 1, 0, 0], inheritedStyles: {} }, { position: "absolute" })).toThrow(/flow/);
   });
 });

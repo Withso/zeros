@@ -43,6 +43,19 @@ describe("design workspace UI memory", () => {
     expect(designSelectionUnchangedSince("ws", settled)).toBe(false);
   });
 
+  it("never reports a frame chosen for a selection that left its page as the person's own choice", () => {
+    // A frame nested into another (or deleted elsewhere) leaves the catalog.
+    // The canvas only reveals explicit selections, so the page's fallback
+    // frame must not look like one or the camera would jump to it.
+    const store = useDesignWorkspaceUiStore.getState();
+    const page = { id: "page", title: "Page", folder: "page", frameFiles: ["page/first.html", "page/moved.html", "page/target.html"] };
+    bindDesignWorkspacePages("ws", "directory", [page]);
+    store.setSelection("ws", "page/moved.html", null, undefined, { frameSelected: true });
+    const chosen = designWorkspaceView("ws").selectionEvent;
+    bindDesignWorkspacePages("ws", "directory", [{ ...page, frameFiles: ["page/first.html", "page/target.html"] }]);
+    expect(designWorkspaceView("ws")).toMatchObject({ selectedFrame: "page/first.html", frameSelected: false, selectedTargets: [], selectionEvent: chosen });
+  });
+
   it("drops retired source-view flags without resetting saved navigation", () => {
     const savedView = {
       selectedFrame: "alpha/home.html",

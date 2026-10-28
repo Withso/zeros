@@ -138,4 +138,54 @@ export async function runDesignNestingSmoke({ page, check }) {
     await page.getByLabel("Design canvas", { exact: true }).focus();
     check(`${cancel === "Escape" ? "Escape" : "Leaving the window"} restores a multi-frame nudge without saving it`, true);
   }
+  await runDesignFrameNestingDropSmoke({ page, check });
+}
+
+const harnessView = (page) =>
+  page.evaluate(async () => {
+    const { designWorkspaceView } = await import("/apps/desktop/src/renderer/features/design-workspace/state/design-workspace-ui.ts");
+    const view = designWorkspaceView("ws_design_harness");
+    return { selectedFrame: view.selectedFrame, selectedNodeId: view.selectedNodeId, frameSelected: view.frameSelected,
+      zoom: view.zoom, panX: view.panX, panY: view.panY };
+  });
+
+/** Releasing a frame over another nests it there as one layer, as in a design
+ * tool: the nested layer stays selected and the camera does not move, even
+ * though the dragged frame's own file leaves the canvas while it saves. */
+export async function runDesignFrameNestingDropSmoke({ page, check }) {
+  await openTwoFrames(page);
+  const home = page.locator('[data-design-frame="home.html"]');
+  const pricing = page.locator('[data-design-frame="pricing.html"]');
+  await expect(
+    page.locator('[data-design-frame="pricing.html"] iframe[data-design-document-buffer="displayed"][data-design-document-ready]'),
+  ).toHaveCount(1);
+  const grab = center(await home.locator("[data-design-frame-label]").boundingBox());
+  const target = await pricing.boundingBox();
+  await page.mouse.move(grab.x, grab.y);
+  await page.mouse.down();
+  await page.mouse.move(target.x + target.width / 2, target.y + target.height / 3, { steps: 8 });
+  await expect(page.locator('[data-design-frame="pricing.html"][data-design-nest-target]')).toHaveCount(1);
+  const before = await harnessView(page);
+  const samples = [];
+  const sampling = page.evaluate(async () => {
+    const { designWorkspaceView } = await import("/apps/desktop/src/renderer/features/design-workspace/state/design-workspace-ui.ts");
+    const seen = [];
+    const until = performance.now() + 2_500;
+    while (performance.now() < until) {
+      const view = designWorkspaceView("ws_design_harness");
+      seen.push(`${view.selectedFrame}|${view.selectedNodeId}|${view.panX},${view.panY},${view.zoom}`);
+      await new Promise((resolve) => requestAnimationFrame(resolve));
+    }
+    return [...new Set(seen)];
+  });
+  await page.mouse.up();
+  await expect(home).toHaveCount(0);
+  await expect.poll(async () => (await harnessView(page)).selectedNodeId ?? "").not.toBe("");
+  samples.push(...(await sampling));
+  const after = await harnessView(page);
+  expect(after).toMatchObject({ selectedFrame: "pricing.html", zoom: before.zoom, panX: before.panX, panY: before.panY });
+  // Never another frame, never a moved camera, at any sampled frame.
+  expect(samples.every((sample) => /^(home|pricing)\.html\|/.test(sample) && sample.endsWith(`|${before.panX},${before.panY},${before.zoom}`)), samples.join("\n")).toBe(true);
+  await expect(page.locator(`[data-design-frame="pricing.html"] iframe[data-design-document-buffer="displayed"]`)).toHaveCount(1);
+  check("a frame released over another nests there, its layer stays selected and the camera never moves", true);
 }

@@ -63,7 +63,12 @@ import {
   Tooltip,
   toast,
 } from "../../shared/ui/primitives";
-import { isEditableHotkeyTarget } from "../../shell/editable-target";
+import {
+  dispatchFocusedDesignHistory,
+  isDesignHistoryFocusOwner,
+  isNativeHistoryTarget,
+  registerDesignHistoryCommand,
+} from "./state/design-history-commands";
 import {
   designAutoLayoutUpdates,
   designFrameRootFixedStyles,
@@ -302,9 +307,13 @@ function InspectorEditField({
     moved: boolean;
   } | null>(null);
   const previewFrameRef = useRef<number | null>(null);
+  /** The newest value asked for while this frame's preview already left. */
+  const pendingPreviewRef = useRef<string | null>(null);
   const previewDirtyRef = useRef(false);
   const cancelPreviewRef = useRef(onCancelPreview);
   cancelPreviewRef.current = onCancelPreview;
+  const onPreviewRef = useRef(onPreview);
+  onPreviewRef.current = onPreview;
   const [draft, setDraft] = useState(String(value));
   const draftRef = useRef(draft);
   draftRef.current = draft;
@@ -377,6 +386,7 @@ function InspectorEditField({
       window.cancelAnimationFrame(previewFrameRef.current);
       previewFrameRef.current = null;
     }
+    pendingPreviewRef.current = null;
     if (!previewDirtyRef.current) return;
     previewDirtyRef.current = false;
     void Promise.resolve(cancelPreviewRef.current?.()).catch(() => {});
@@ -387,21 +397,32 @@ function InspectorEditField({
       window.cancelAnimationFrame(previewFrameRef.current);
       previewFrameRef.current = null;
     }
+    pendingPreviewRef.current = null;
     // Preserve the last exact live scalar until the authoritative source
     // generation arrives. Clearing here causes a visible value snap-back.
     previewDirtyRef.current = false;
   };
 
+  /** The first value of a scrub or drag previews at once; later ones within
+   * the same frame coalesce into the newest, sent on the next frame. Waiting a
+   * frame before the first one added a frame of lag to every scrub. */
   const preview = (next: string) => {
     if (!onPreview) return;
     previewDirtyRef.current = true;
     if (previewFrameRef.current !== null) {
-      window.cancelAnimationFrame(previewFrameRef.current);
+      pendingPreviewRef.current = next;
+      return;
     }
-    previewFrameRef.current = window.requestAnimationFrame(() => {
+    void Promise.resolve(onPreview(next)).catch(() => {});
+    const trailing = () => {
       previewFrameRef.current = null;
-      void Promise.resolve(onPreview(next)).catch(() => {});
-    });
+      const pending = pendingPreviewRef.current;
+      if (pending === null) return;
+      pendingPreviewRef.current = null;
+      void Promise.resolve(onPreviewRef.current?.(pending)).catch(() => {});
+      previewFrameRef.current = window.requestAnimationFrame(trailing);
+    };
+    previewFrameRef.current = window.requestAnimationFrame(trailing);
   };
 
   /** A value published while this field was focused but untouched is held
@@ -1231,8 +1252,22 @@ export function DesignInspector({
   }, [workspaceId, queueInspectorAction]);
 
 
+  const historyActionRef = useRef(runHistory);
+  const historyDirectoryRevision = useDesignWorkspaceUiStore(state => workspaceId ? state.byWorkspace[workspaceId]?.directoryRevision : undefined);
+  useLayoutEffect(() => { historyActionRef.current = runHistory; }, [runHistory]);
+  useLayoutEffect(() => {
+    if (!active || !workspaceId) return;
+    const root = inspectorRef.current?.closest("[data-design-workspace-surface]");
+    if (!root) return;
+    return registerDesignHistoryCommand({
+      workspaceId, root,
+      isCurrent: () => useDesignWorkspaceUiStore.getState().byWorkspace[workspaceId]?.directoryRevision === historyDirectoryRevision,
+      run: (direction) => historyActionRef.current(direction),
+    });
+  }, [active, workspaceId, historyDirectoryRevision]);
+
   useEffect(() => {
-    if (!active) return;
+    if (!active || !workspaceId) return;
     const onKeyDown = (event: KeyboardEvent) => {
       // Review owns its keyboard, including portaled filter options. This
       // capture listener runs before a dialog's React handlers can intercept
@@ -1241,7 +1276,8 @@ export function DesignInspector({
         (event.metaKey || event.ctrlKey) &&
         document.querySelector('[data-design-review][data-state="open"]')
       ) return;
-      const editableTarget = isEditableHotkeyTarget(event.target);
+      if (event.defaultPrevented || !isDesignHistoryFocusOwner(workspaceId, true)) return;
+      const editableTarget = isNativeHistoryTarget(event.target);
       dispatchDesignWorkspaceShortcut(event, editableTarget, {
         save: () => {
           // Inspector and inline-text fields publish drafts on blur. React
@@ -1252,14 +1288,14 @@ export function DesignInspector({
           }
           saveDesignChanges();
         },
-        undo: () => runHistory("undo"),
-        redo: () => runHistory("redo"),
+        undo: () => { dispatchFocusedDesignHistory("undo"); },
+        redo: () => { dispatchFocusedDesignHistory("redo"); },
       });
     };
     window.addEventListener("keydown", onKeyDown, { capture: true });
     return () =>
       window.removeEventListener("keydown", onKeyDown, { capture: true });
-  }, [active, runHistory, saveDesignChanges]);
+  }, [active, workspaceId, saveDesignChanges]);
 
   const exportPng = async () => {
     if (!workspaceId || !folder || !frame || frameAction) return;
@@ -2297,7 +2333,7 @@ export function DesignInspector({
                 {zoomPercentage}%
               </Button>
             </DropdownMenuTrigger>
-            <DropdownMenuContent align="end" className="w-48">
+            <DropdownMenuContent data-design-history-owner={workspaceId ?? undefined} align="end" className="w-48">
               <DropdownMenuItem
                 disabled={zoom >= DESIGN_MAX_ZOOM}
                 aria-label="Zoom in"

@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { normalizeDesignPagesSnapshot } from "@zeros/protocol/design-pages";
 
 // The cache, mutation lane, preview cursor and runtime store are real; only the
 // engine RPCs and the iframe connection are doubles. Undo/Redo predictions must
@@ -23,6 +24,7 @@ vi.mock("../../../platform/bridge/active-bridge", () => ({
 
 import {
   applyDesignHistoryCached,
+  designHistoryTransientStatsForTests,
   designWorkspaceSnapshotCache,
   observeDesignDirectory,
   resetDesignWorkspaceCacheForTests,
@@ -33,7 +35,8 @@ import {
   resetDesignRuntimeStoreForTests,
   useDesignRuntimeStore,
 } from "../state/design-runtime-store";
-import { resetDesignLivePreviewForTests } from "../state/design-live-preview";
+import { designLivePreviewValue, publishDesignLivePreviewStyles, resetDesignLivePreviewForTests } from "../state/design-live-preview";
+import { designHistoryPresentation } from "../state/design-history-presentation";
 import {
   resetDesignWorkspaceUiForTests,
   useDesignWorkspaceUiStore,
@@ -122,7 +125,7 @@ function fixture(workspace = PERSONAL) {
   const currentEngine = () => engineHistory[engineCursor]!;
   const runtime = {
     sourceVersion: version(0),
-    supports: (method: string) => method === "restoreGeneration",
+    supports: (method: string): boolean => method === "restoreGeneration",
     isActive: () => true,
     commitStyles: vi.fn(async (_updates: unknown, sourceVersion: string) => {
       runtime.sourceVersion = sourceVersion;
@@ -424,6 +427,24 @@ describe("a432388d independent cache/lane review", () => {
     expect(a.cached).toBe(4); expect(b.cached).toBe(2);
   });
 
+  it("does not predict another directory's history when its frame catalog is identical", async () => {
+    const f = fixture(); await f.seed(3);
+    const replacement = workspaceSnapshot(PERSONAL, 3, "design-b");
+    designWorkspaceSnapshotCache.setData(PERSONAL, replacement);
+    observeDesignDirectory(PERSONAL, replacement);
+    const replacementRuntime = {
+      sourceVersion: version(3), supports: () => true,
+      restoreGeneration: vi.fn().mockRejectedValue(new Error("No history in the replacement runtime")),
+    };
+    mocks.runtime.mockReturnValue(replacementRuntime);
+    mocks.history.mockResolvedValue({ result: null, snapshot: replacement });
+    const undo = f.history("undo");
+    const speculativeCalls = replacementRuntime.restoreGeneration.mock.calls.slice();
+    await undo;
+    expect(speculativeCalls).toEqual([]);
+    expect(f.cached).toBe(3);
+  });
+
   it("rejects queued history and edit after a directory replacement and drains their counts", async () => {
     const f = fixture(); await f.seed(3);
     const edit = f.edit(4);
@@ -466,7 +487,7 @@ describe("a432388d independent cache/lane review", () => {
   });
 
 
-  it("rolls back eager predictions refused by a directory replacement in lane order", async () => {
+  it("does not repaint the replacement directory while draining refused eager predictions", async () => {
     const f = fixture(); await f.seed(3);
     const firstGate = gate(); f.holdHistory(firstGate);
     const first = f.history("undo"); await firstGate.entered;
@@ -474,12 +495,17 @@ describe("a432388d independent cache/lane review", () => {
     const replacement = workspaceSnapshot(PERSONAL, 3, "design-b");
     designWorkspaceSnapshotCache.setData(PERSONAL, replacement);
     observeDesignDirectory(PERSONAL, replacement);
+    const replacementRestore = vi.fn();
+    mocks.runtime.mockReturnValue({ ...f.runtime, restoreGeneration: replacementRestore });
     firstGate.release(new Error("old directory history refused"));
     await expect(first).rejects.toThrow("old directory history refused");
     await expect(second).rejects.toThrow("Design directory changed");
     expect(mocks.history).toHaveBeenCalledTimes(1);
-    expect(f.painted).toBe(3);
-    expect(f.events.filter((event) => event.kind === "restore").map((event) => event.generation)).toEqual([2, 1, 3, 3]);
+    // The abandoned runtime is no longer this owner's presentation. Recovery
+    // must neither paint its generation into B nor clear B's fresh journal.
+    expect(replacementRestore).not.toHaveBeenCalled();
+    expect(designWorkspaceSnapshotCache.peekSnapshot(PERSONAL).data).toBe(replacement);
+    expect(f.events.filter((event) => event.kind === "restore").map((event) => event.generation)).toEqual([2, 1]);
   });
 
   it("reads cloud history preconditions inside the lane after the edit lands", async () => {
@@ -499,5 +525,239 @@ describe("a432388d independent cache/lane review", () => {
     editGate.release(); await edit; await historyGate.entered;
     expect(mocks.history).toHaveBeenCalledWith(CLOUD, "home.html", "undo", { "home.html": version(4), "pricing.html": version(99) });
     historyGate.release(); await undo;
+  });
+});
+
+describe("Design history exact-owner presentation", () => {
+  it("predicts across legacy page normalization from a later navigation read", async () => {
+    const f = fixture(); await f.seed(3);
+    const snapshot = designWorkspaceSnapshotCache.peekSnapshot(PERSONAL).data!;
+    // Legacy mutation replies omit pages; bridge navigation reads add the
+    // synthetic main page. The same authored state must keep its inverse.
+    designWorkspaceSnapshotCache.setData(PERSONAL, normalizeDesignPagesSnapshot(snapshot));
+    const held = gate(); f.holdHistory(held);
+    const undo = f.history("undo"); await held.entered;
+    expect(f.painted).toBe(2);
+    expect(f.cached).toBe(3);
+    held.release(); await undo;
+    expect(f.cached).toBe(2);
+  });
+
+  it("projects the predicted inspector values before the held authority reply without adopting them", async () => {
+    const f = fixture(); await f.seed(3);
+    const held = gate(); f.holdHistory(held);
+    const undo = f.history("undo"); await held.entered;
+    expect(designHistoryPresentation(PERSONAL)?.runtime.get("home.html")?.details.get("hero")?.styles.width).toBe("102px");
+    expect(useDesignRuntimeStore.getState().byWorkspace[PERSONAL]?.frames["home.html"]?.detailsByNode.hero?.styles.width).toBe("103px");
+    expect(f.cached).toBe(3);
+    held.release(); await undo;
+    expect(designHistoryPresentation(PERSONAL)).toBeNull();
+  });
+  it("does not let a completed old-directory edit overwrite the replacement before Undo", async () => {
+    const f = fixture(); await f.seed(3);
+    const replyGate = gate();
+    const original = f.engineEdit;
+    f.engineEdit = async (input) => { const result = await original(input); await replyGate.wait(); return result; };
+    const edit = f.edit(4); await replyGate.entered;
+    const replacement = workspaceSnapshot(PERSONAL, 30, "design-b");
+    designWorkspaceSnapshotCache.setData(PERSONAL, replacement); observeDesignDirectory(PERSONAL, replacement);
+    replyGate.release();
+    await expect(edit).rejects.toThrow("Design directory changed");
+    expect(designWorkspaceSnapshotCache.peekSnapshot(PERSONAL).data).toBe(replacement);
+  });
+
+  it("keeps workspace history valid when only the selected page changes", async () => {
+    const f = fixture(); await f.seed(3);
+    useDesignWorkspaceUiStore.getState().setActivePage(PERSONAL, "page-one", "design-a");
+    const undo = f.history("undo");
+    useDesignWorkspaceUiStore.getState().setActivePage(PERSONAL, "page-two", "design-a");
+    await undo;
+    expect(f.cached).toBe(2); expect(f.painted).toBe(2);
+  });
+
+  it("ignores a completed old-directory reply delivered after directory replacement", async () => {
+    const f = fixture(); await f.seed(3);
+    const replyGate = gate();
+    mocks.history.mockImplementationOnce(async (_workspace: string, _frame: string, direction: Direction) => {
+      const reply = await f.engineHistory(direction);
+      // The old directory's write has already succeeded. Only its transport
+      // response is delayed while the renderer adopts the replacement owner.
+      await replyGate.wait();
+      return reply;
+    });
+    const undo = f.history("undo"); await replyGate.entered;
+    const replacement = workspaceSnapshot(PERSONAL, 30, "design-b");
+    designWorkspaceSnapshotCache.setData(PERSONAL, replacement);
+    observeDesignDirectory(PERSONAL, replacement);
+    const replacementRuntime = {
+      sourceVersion: version(30), supports: () => true, isActive: () => true,
+      restoreGeneration: vi.fn().mockRejectedValue(new Error("Foreign generation")),
+    };
+    mocks.runtime.mockReturnValue(replacementRuntime);
+    replyGate.release();
+    await undo.catch(() => undefined);
+    expect(replacementRuntime.restoreGeneration).not.toHaveBeenCalled();
+    expect(designWorkspaceSnapshotCache.peekSnapshot(PERSONAL).data).toBe(replacement);
+    expect(useDesignWorkspaceUiStore.getState().byWorkspace[PERSONAL]?.directoryId).toBe("design-b");
+  });
+
+  it("rejects a queued history intent after directory A to B to A", async () => {
+    const f = fixture(); await f.seed(3);
+    const undo = f.history("undo");
+    const away = workspaceSnapshot(PERSONAL, 3, "design-b");
+    designWorkspaceSnapshotCache.setData(PERSONAL, away);
+    observeDesignDirectory(PERSONAL, away);
+    const returned = workspaceSnapshot(PERSONAL, 3, "design-a");
+    designWorkspaceSnapshotCache.setData(PERSONAL, returned);
+    observeDesignDirectory(PERSONAL, returned);
+    await expect(undo).rejects.toThrow("Design directory changed");
+    expect(mocks.history).not.toHaveBeenCalled();
+    expect(designWorkspaceSnapshotCache.peekSnapshot(PERSONAL).data).toBe(returned);
+  });
+
+  it("retains confirmed history data without painting a runtime hidden during the request", async () => {
+    const f = fixture(); await f.seed(3);
+    const historyGate = gate(); f.holdHistory(historyGate);
+    const undo = f.history("undo"); await historyGate.entered;
+    f.runtime.isActive = () => false;
+    f.runtime.restoreGeneration.mockClear();
+    historyGate.release(); await undo;
+    expect(f.cached).toBe(2);
+    expect(f.runtime.restoreGeneration).not.toHaveBeenCalled();
+  });
+
+  it("uses structural historyFrame metadata even when there is no document transaction receipt", async () => {
+    const f = fixture(); await f.seed(3);
+    const untrackedGeometry = workspaceSnapshot(PERSONAL, 3);
+    untrackedGeometry.frames[0]!.x = 10;
+    designWorkspaceSnapshotCache.setData(PERSONAL, untrackedGeometry);
+    mocks.history.mockResolvedValueOnce({
+      result: null, historyFrame: "home.html", snapshot: workspaceSnapshot(PERSONAL, 2),
+    });
+    await f.history("undo");
+    expect(f.cached).toBe(2);
+    expect(f.runtime.restoreGeneration).toHaveBeenCalledWith(version(2), true, undefined, []);
+    expect(f.painted).toBe(2);
+  });
+});
+
+function enablePendingHistoryPresentation(f: ReturnType<typeof fixture>) {
+  let target: string | null = null;
+  const commit = f.runtime.commitStyles.getMockImplementation()!;
+  const restore = f.runtime.restoreGeneration.getMockImplementation()!;
+  f.runtime.supports = method => method === "restoreGeneration" || method === "previewHistory";
+  f.runtime.commitStyles.mockImplementation(async (...args) => {
+    const result = await commit(...args);
+    if (target) await restore(target, false);
+    return result;
+  });
+  f.runtime.restoreGeneration.mockImplementation(async (source, confirmed) => {
+    const result = await restore(source, confirmed);
+    if (confirmed && target) await restore(target, false);
+    return result;
+  });
+  const previewHistory = vi.fn(async (source: string | null) => {
+    target = source;
+    return restore(source ?? f.runtime.sourceVersion, false);
+  });
+  Object.assign(f.runtime, { previewHistory });
+  return previewHistory;
+}
+
+describe("pending history with isolated runtime presentation", () => {
+  it("bounds in-flight visual intent metadata across workspace owners", async () => {
+    for (let index = 0; index < 17; index++) {
+      const f = fixture(`/review/owner-${index}/project`);
+      await f.seed(1); enablePendingHistoryPresentation(f);
+      const held = gate(); f.holdHistory(held);
+      f.history("undo"); await held.entered;
+    }
+    expect(designHistoryTransientStatsForTests().intentOwners).toBeLessThanOrEqual(16);
+    expect(designHistoryTransientStatsForTests().intentBytes).toBeLessThanOrEqual(1024 * 1024);
+  });
+  it("keeps rapid Undo/Redo authority ordered with an isolated inverse", async () => {
+    const f = fixture(); await f.seed(3); enablePendingHistoryPresentation(f);
+    const held = gate(); f.holdHistory(held);
+    const undo = f.history("undo"); await held.entered; expect(f.painted).toBe(2);
+    const redo = f.history("redo"); expect(f.painted).toBe(3);
+    held.release(); await Promise.all([undo, redo]);
+    expect(f.cached).toBe(3); expect(f.painted).toBe(3);
+    expect(designHistoryPresentation(PERSONAL)).toBeNull();
+  });
+  it("clears a refused inverse on the same retained port after it becomes hidden", async () => {
+    const f = fixture(); await f.seed(3); const preview = enablePendingHistoryPresentation(f);
+    const held = gate(); f.holdHistory(held);
+    const undo = f.history("undo"); await held.entered; expect(f.painted).toBe(2);
+    f.runtime.isActive = () => false;
+    held.release(new Error("history refused")); await expect(undo).rejects.toThrow("history refused");
+    expect(preview).toHaveBeenLastCalledWith(null);
+    expect(f.runtime.getNodeDetails).not.toHaveBeenCalled();
+    expect(f.painted).toBe(3); expect(f.cached).toBe(3);
+  });
+
+  it.each([PERSONAL, ORG])("presents the inverse over a pending edit's live inspector scalar in %s", async workspace => {
+    const f = fixture(workspace); await f.seed(3); const preview = enablePendingHistoryPresentation(f);
+    const heldEdit = gate(), heldHistory = gate(); f.holdHistory(heldHistory);
+    publishDesignLivePreviewStyles(workspace, "home.html", "hero", { width: "104px" });
+    const edit = f.edit(4, heldEdit); await heldEdit.entered;
+    await f.runtime.restoreGeneration(version(4), false); // gesture preview
+    const undo = f.history("undo");
+    expect(preview).toHaveBeenCalledWith(version(3), []);
+    expect(f.painted).toBe(3); expect(f.currentEngine()).toBe(3);
+    await vi.waitFor(() => expect(designHistoryPresentation(workspace)?.runtime.get("home.html")?.details.get("hero")?.styles.width).toBe("103px"));
+    // Inspector fields prefer a live scalar to their supplied details. An
+    // older pending edit must yield to the successfully presented inverse.
+    expect(designLivePreviewValue(workspace, "home.html", "hero", "width")).toBeUndefined();
+    heldEdit.release(); await edit; await heldHistory.entered;
+    expect(f.cached).toBe(4); expect(f.painted).toBe(3);
+    expect(useDesignRuntimeStore.getState().byWorkspace[workspace]?.frames["home.html"]?.detailsByNode.hero?.styles.width).toBe("104px");
+    heldHistory.release(); await undo; expect(f.cached).toBe(3); expect(f.painted).toBe(3);
+  });
+
+  it.each(["104px", "105px"])("keeps later input %s when the pending Undo's runtime report arrives", async width => {
+    const f = fixture(); await f.seed(3); const preview = enablePendingHistoryPresentation(f);
+    const heldEdit = gate(), heldReport = gate();
+    publishDesignLivePreviewStyles(PERSONAL, "home.html", "hero", { width: "104px" });
+    f.edit(4, heldEdit); await heldEdit.entered;
+    const report = preview.getMockImplementation()!;
+    preview.mockImplementationOnce(async source => {
+      const result = await report(source);
+      await heldReport.wait();
+      return result;
+    });
+    f.history("undo"); await heldReport.entered;
+    publishDesignLivePreviewStyles(PERSONAL, "home.html", "hero", { width });
+    heldReport.release();
+    await vi.waitFor(() => expect(designHistoryPresentation(PERSONAL)?.runtime.get("home.html")?.details.get("hero")?.styles.width).toBe("103px"));
+    expect(designLivePreviewValue(PERSONAL, "home.html", "hero", "width")).toBe(width);
+  });
+
+  it("keeps the second pending Undo painted as the edit and first Undo confirm", async () => {
+    const f = fixture(); await f.seed(3); enablePendingHistoryPresentation(f);
+    const heldEdit = gate(), heldFirst = gate(), heldSecond = gate(); f.holdHistory(heldFirst); f.holdHistory(heldSecond);
+    const edit = f.edit(4, heldEdit); await heldEdit.entered;
+    const first = f.history("undo"); expect(f.painted).toBe(3);
+    const second = f.history("undo"); expect(f.painted).toBe(2);
+    heldEdit.release(); await edit; await heldFirst.entered; expect(f.painted).toBe(2);
+    heldFirst.release(); await first; await heldSecond.entered; expect(f.painted).toBe(2); expect(f.cached).toBe(3);
+    heldSecond.release(); await second; expect(f.cached).toBe(2); expect(f.painted).toBe(2);
+  });
+
+  it("preserves a mixed pending edit, Undo, edit, Undo chain", async () => {
+    const f = fixture(); await f.seed(3); enablePendingHistoryPresentation(f);
+    const held = gate(); const firstEdit = f.edit(4, held); await held.entered;
+    const firstUndo = f.history("undo"); const secondEdit = f.edit(5); const secondUndo = f.history("undo");
+    expect(f.painted).toBe(3);
+    held.release(); await Promise.all([firstEdit, firstUndo, secondEdit, secondUndo]);
+    expect(f.cached).toBe(3); expect(f.painted).toBe(3);
+    expect(designHistoryPresentation(PERSONAL)).toBeNull();
+  });
+
+  it("corrects an early inverse if its pending edit is refused", async () => {
+    const f = fixture(); await f.seed(3); enablePendingHistoryPresentation(f);
+    const held = gate(); const edit = f.edit(4, held); await held.entered;
+    const undo = f.history("undo"); expect(f.painted).toBe(3);
+    held.release(new Error("edit refused")); await expect(edit).rejects.toThrow("edit refused"); await undo;
+    expect(f.cached).toBe(2); expect(f.painted).toBe(2);
   });
 });

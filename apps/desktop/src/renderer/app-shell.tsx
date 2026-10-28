@@ -102,6 +102,7 @@ import { ConversationPane } from "./shell/conversation/conversation-pane";
 import { WorkbenchPane } from "./shell/workbench/workbench-pane";
 import { useWorkspacePrSync } from "./shell/pr/use-workspace-pr-sync";
 import { useProjectCapabilitiesRefresh } from "./shell/use-project-capabilities-refresh";
+import { useEditHistoryMenu } from "./shell/use-edit-history-menu";
 import { workspaceIsReadOnly } from "./state/workspace-history";
 import {
   AddProjectProvider,
@@ -1329,6 +1330,7 @@ function MainShellBody({
 /** Everything below the auth/appearance gate: the native bridge and the app.
  *  <AppShell> owns the providers and AuthGate above this boundary. */
 export function AppShellBody() {
+  useEditHistoryMenu();
   return (
     // Repository panel's SidebarProvider previously supplied this app-wide provider as
     // a hidden side effect. Keep it at the actual app root now that the

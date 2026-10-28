@@ -4,6 +4,15 @@ import { bridgeDesignHistory, bridgeDesignSnapshot, isDesignWorkspaceSnapshotWir
 import type { RuntimeClient } from "../ws-client";
 
 describe("Design bridge read budgets", () => {
+  it.each([undefined, "page_123"])("accepts optional history page metadata from old/new engines: %s", async historyPageId => {
+    const result = { result: null, snapshot: { protocolCapability: null, frames: [] }, ...(historyPageId ? { historyPageId } : {}) };
+    const bridge = { request: vi.fn(async () => ({ type: "WORKSPACE_RESPONSE", result })) } as unknown as RuntimeClient;
+    expect(await bridgeDesignHistory(bridge, "ws_local_design", null, "undo")).toEqual(result);
+  });
+  it.each([null, 3, "../page", ""])("rejects malformed history page metadata: %j", async historyPageId => {
+    const bridge = { request: vi.fn(async () => ({ type: "WORKSPACE_RESPONSE", result: { result: null, historyPageId, snapshot: { protocolCapability: null, frames: [] } } })) } as unknown as RuntimeClient;
+    await expect(bridgeDesignHistory(bridge, "ws_local_design", null, "undo")).rejects.toThrow("malformed");
+  });
   it.each(["undo", "redo"] as const)("preserves the local %s wire contract without cloud source versions", async direction => {
     const request = vi.fn(async () => ({ type: "WORKSPACE_RESPONSE", result: { result: null, snapshot: { protocolCapability: null, frames: [] } } }));
     const bridge = { request } as unknown as RuntimeClient;
