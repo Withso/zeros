@@ -1,0 +1,9 @@
+{
+  "id": "design-nesting-outgoing-runtime",
+  "kind": "replay",
+  "area": "desktop-design-state",
+  "fixedBy": "pr:761",
+  "symptom": "Nesting into a frame whose replacement document was preparing immediately reported that the frame was still loading because the outgoing runtime was treated as current authority.",
+  "rule": "agents/zstack/playbooks/performance.md: resolve semantic input order and wait for the exact source generation rather than accepting an outgoing runtime.",
+  "check": "pnpm exec vitest run --config vitest.config.ts apps/desktop/src/renderer/features/design-workspace/__tests__/design-layout-transfer.test.ts -t \"waits for the exact replacement\""
+}
