@@ -44,3 +44,8 @@
   → both durable prompt schemas are strict and lacked the optional metadata
   → test the real send validator and independently deployed mirror, including
   legacy payloads and field bounds → cloud channel and contract-parity tests.
+- Explicit extraction failed in the older composer smoke after upload completed
+  → its saved-file fixture decoded every format as text, while automatic
+  extraction had only used the selected Blob → model saved media responses as
+  media and exercise extraction after publication → composer attachment smoke
+  verifies the saved JPEG scene colors and timeline in one group.

@@ -12,6 +12,7 @@ import { TooltipProvider } from "../shared/ui/primitives/tooltip";
 import { setActiveBridge } from "../platform/bridge/active-bridge";
 import type { RuntimeClient } from "../platform/bridge/ws-client";
 import { useWorkspaceStore } from "../state/workspace-store";
+import { fileMediaType } from "@zeros/protocol/file-media";
 
 // A local development build, where a video's key frames (part of the
 // simulators rollout) are on. Native commands fail as they do in a browser.
@@ -130,12 +131,19 @@ setActiveBridge({
       const record = [...records.values()].find(
         (r) => r.relativePath === p.path,
       );
+      const media = fileMediaType(String(p.path));
       result = record
         ? {
-            kind: "text",
             path: p.path,
             bytes: record.bytes.length,
-            content: new TextDecoder().decode(record.bytes),
+            // Explicit frame extraction can run after upload has retired the
+            // selected Blob. Return the saved fixture's actual media bytes.
+            ...(media && media.kind !== "document"
+              ? {
+                  kind: media.kind,
+                  dataUrl: `data:${media.mimeType};base64,${btoa(Array.from(record.bytes, byte => String.fromCharCode(byte)).join(""))}`,
+                }
+              : { kind: "text", content: new TextDecoder().decode(record.bytes) }),
           }
         : {
             kind: "error",
