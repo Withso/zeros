@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import { deflateRawSync } from "node:zlib";
 import { FILE_MEDIA_CHUNK_BYTES } from "@zeros/protocol/file-media";
 import {
+  DocumentPreviewError,
   readDocumentBytes,
   validateDocxArchive,
 } from "../document-preview-source";
@@ -49,6 +50,20 @@ function wordArchive(
 }
 
 describe("document preview sources", () => {
+  it("distinguishes readable source failures from internal reader errors", async () => {
+    await expect(
+      readDocumentBytes({ path: "empty.docx", bytes: 0 }, new AbortController().signal),
+    ).rejects.toBeInstanceOf(DocumentPreviewError);
+    await expect(validateDocxArchive(new Uint8Array())).rejects.toBeInstanceOf(DocumentPreviewError);
+    const internal = new Error("The document reader returned an internal fixture error");
+    read.mockReset().mockRejectedValue(internal);
+    await expect(readDocumentBytes({
+      cwd: "/repo", path: "report.docx", bytes: 1,
+      media: { version: "1", mimeType: "application/vnd.openxmlformats-officedocument.wordprocessingml.document" },
+    }, new AbortController().signal)).rejects.toBe(internal);
+    expect(internal).not.toBeInstanceOf(DocumentPreviewError);
+  });
+
   it.each(["/personal", "/organization", "cloud://organization/workspace"])(
     "reads exact bounded ranges for %s",
     async (cwd) => {

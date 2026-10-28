@@ -6,6 +6,9 @@ import { createWorkspaceMediaReader } from "@/renderer/platform/files";
 
 export const MAX_WORD_PREVIEW_BYTES = 50_000_000;
 
+/** Only messages authored by the viewer may be shown verbatim. */
+export class DocumentPreviewError extends Error {}
+
 export async function readDocumentBytes(
   source: {
     cwd?: string;
@@ -20,19 +23,19 @@ export async function readDocumentBytes(
     source.bytes > MAX_WORD_PREVIEW_BYTES ||
     (source.blob?.size ?? 0) > MAX_WORD_PREVIEW_BYTES
   )
-    throw new Error("This Word document is too large to preview.");
+    throw new DocumentPreviewError("This Word document is too large to preview.");
   if (!Number.isSafeInteger(source.bytes) || source.bytes < 1)
-    throw new Error("The document source is unavailable.");
+    throw new DocumentPreviewError("The document source is unavailable.");
   signal.throwIfAborted();
   if (source.blob) {
     const data = new Uint8Array(await source.blob.arrayBuffer());
     signal.throwIfAborted();
     if (data.length !== source.bytes)
-      throw new Error("The document changed while reading.");
+      throw new DocumentPreviewError("The document changed while reading.");
     return data;
   }
   if (!source.cwd || !source.media)
-    throw new Error("The document source is unavailable.");
+    throw new DocumentPreviewError("The document source is unavailable.");
   const read = createWorkspaceMediaReader(source.cwd),
     data = new Uint8Array(source.bytes);
   for (let offset = 0; offset < data.length; offset += FILE_MEDIA_CHUNK_BYTES) {
@@ -47,7 +50,7 @@ export async function readDocumentBytes(
     signal.throwIfAborted();
     const decoded = atob(result.base64);
     if (decoded.length !== length || result.bytes !== length)
-      throw new Error("The document changed while reading.");
+      throw new DocumentPreviewError("The document changed while reading.");
     for (let index = 0; index < decoded.length; index++)
       data[offset + index] = decoded.charCodeAt(index);
   }
@@ -62,7 +65,7 @@ export async function validateDocxArchive(
   signal?: AbortSignal,
 ): Promise<void> {
   const fail = () => {
-    throw new Error("This Word document can't be previewed.");
+    throw new DocumentPreviewError("This Word document can't be previewed.");
   };
   signal?.throwIfAborted();
   if (bytes.length < 22 || bytes.length > MAX_WORD_PREVIEW_BYTES) return fail();

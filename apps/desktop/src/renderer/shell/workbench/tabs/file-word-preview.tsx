@@ -9,6 +9,7 @@ import { openWorkspaceMedia } from "@/renderer/platform/file-media";
 import { WorkbenchEmptyState } from "../tab-status";
 import { WORKBENCH_TITLE_ACTION_CLS } from "../tab-chrome";
 import {
+  DocumentPreviewError,
   readDocumentBytes,
   validateDocxArchive,
 } from "./document-preview-source";
@@ -147,7 +148,7 @@ export function FileWordPreview({
         body.querySelectorAll<HTMLElement>("section.docx"),
       );
       if (!sections.length || sections.length > 1000)
-        throw new Error("This Word document can't be previewed.");
+        throw new DocumentPreviewError("This Word document can't be previewed.");
       const result = sections.map((section) => {
         const content = purify.sanitize(section.outerHTML, {
           ADD_ATTR: ["style"],
@@ -177,7 +178,7 @@ export function FileWordPreview({
     })().catch((value) => {
       if (!controller.signal.aborted)
         setError(
-          value instanceof Error
+          value instanceof DocumentPreviewError
             ? value.message
             : "This Word document couldn't be loaded.",
         );

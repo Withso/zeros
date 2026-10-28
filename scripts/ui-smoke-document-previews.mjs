@@ -232,6 +232,18 @@ export async function runDocumentPreviewsSmoke({ page, check, screenshots }) {
     "Malformed documents have a readable fallback and never render source bytes",
     true,
   );
+  await page.evaluate(bytes => {
+    window.__zerosFileMediaHarness.document("invalid-xml.docx", bytes);
+  }, [...previewDocx({ documentXml: "<document><body></document>" })]);
+  for (const owner of ["personal", "organization", "cloud"]) {
+    await open(owner, "invalid-xml.docx");
+    await expect(
+      page.getByText("This Word document couldn't be loaded.", { exact: true }),
+    ).toBeVisible();
+    await expect(island).toHaveCount(0);
+    await expect(page.locator('[data-file-document-preview="docx"] iframe')).toHaveCount(0);
+    check(`${owner}: malformed Word XML shows a readable fallback without parser diagnostics`, true);
+  }
   check(
     "Document previews never request external document resources",
     external.length === 0,

@@ -76,6 +76,16 @@ function fixture() {
 }
 
 describe("attachment groups are presentation over independent files", () => {
+  it("keeps the filename when a named group contains only its timeline", () => {
+    const [node] = attachmentNodeContent([files[1]], "clip.webm frames");
+    expect(node.attrs).toMatchObject({
+      attachmentId: files[1].id,
+      name: "timeline.txt",
+    });
+    expect(node.attrs).not.toHaveProperty("attachmentIds");
+    expect(node.attrs).not.toHaveProperty("groupId");
+  });
+
   it("bounds restored membership, including a separate primary id", () => {
     expect(
       attachmentNodeIds({
@@ -99,10 +109,14 @@ describe("attachment groups are presentation over independent files", () => {
           mimeType: "text/plain",
         }) as ComposerAttachment,
     );
-    const nodes = attachmentNodeContent(files).filter(
+    const nodes = attachmentNodeContent(files, "Selected files").filter(
       (node) => node.type === "attachment",
     );
     expect(nodes).toHaveLength(2);
+    expect(nodes.map((node) => node.attrs!.name)).toEqual([
+      "Selected files",
+      "file-1000.txt",
+    ]);
     expect(nodes.flatMap((node) => attachmentNodeIds(node.attrs!))).toEqual(
       files.map((file) => file.id),
     );

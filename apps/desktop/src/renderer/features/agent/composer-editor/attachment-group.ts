@@ -39,7 +39,7 @@ export function attachmentNodeContent(
         type: "attachment",
         attrs: {
           attachmentId: first.id,
-          name: groupName || first.name,
+          name: batch.length > 1 && groupName ? groupName : first.name,
           mimeType: first.mimeType,
           kind: first.kind,
           ...(batch.length > 1

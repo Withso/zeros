@@ -104,6 +104,8 @@ try {
   await fs.mkdir(workspace); await fs.mkdir(profile);
   await fs.writeFile(path.join(workspace, "report.pdf"), previewPdf());
   await fs.writeFile(path.join(workspace, "report.docx"), previewDocx());
+  const malformedWord = previewDocx({ documentXml: "<document><body></document>" });
+  await fs.writeFile(path.join(workspace, "invalid-xml.docx"), malformedWord);
   const fixture = await fs.readFile(path.join(repo, "apps/desktop/src/renderer/harnesses/harness-file-media-fixtures.ts"), "utf8");
   const video = Buffer.from(fixture.match(/base64,([A-Za-z0-9+/=]+)/)[1], "base64");
   await sparseVideo(path.join(workspace, "clip.webm"), video);
@@ -265,9 +267,16 @@ try {
     await app.evaluate(({ dialog }, filePath) => { dialog.showSaveDialog = async () => ({ canceled: false, filePath }); }, word);
     await page.getByRole("button", { name: "Download document", exact: true }).click();
     await expect.poll(() => fs.readFile(word).then(bytes => bytes.equals(previewDocx()), () => false)).toBe(true);
+    await page.evaluate(owner => window.__zerosFileMediaHarness.render(owner, "invalid-xml.docx"), owner);
+    await expect(page.getByText("This Word document couldn't be loaded.", { exact: true })).toBeVisible();
+    await expect(page.locator("[data-document-controls]")).toHaveCount(0);
+    const invalidWord = path.join(root, `${owner}-invalid.docx`);
+    await app.evaluate(({ dialog }, filePath) => { dialog.showSaveDialog = async () => ({ canceled: false, filePath }); }, invalidWord);
+    await page.getByRole("button", { name: "Download document", exact: true }).click();
+    await expect.poll(() => fs.readFile(invalidWord).then(bytes => bytes.equals(malformedWord), () => false)).toBe(true);
   }
   assert.deepEqual(errors, []);
-  const report = { platform: process.platform, packagedRenderer: packaged, simulatedCloudBridge: true, cloudFileReader, nativeSaveDialogAutomated: true, reports, streamedDownloadBytes: 200_000_000, exactDownload: true, imageCopy: true, savedImageHover: true, oversizedHoverMetadataOnly: true, pdfAndWordPages: true, exactDocumentDownloads: true };
+  const report = { platform: process.platform, packagedRenderer: packaged, simulatedCloudBridge: true, cloudFileReader, nativeSaveDialogAutomated: true, reports, streamedDownloadBytes: 200_000_000, exactDownload: true, imageCopy: true, savedImageHover: true, oversizedHoverMetadataOnly: true, pdfAndWordPages: true, exactDocumentDownloads: true, malformedWordFallback: true };
   await fs.mkdir(path.join(repo, ".context"), { recursive: true });
   await fs.writeFile(path.join(repo, ".context/media-stream-native-report.json"), JSON.stringify(report, null, 2) + "\n");
   console.log(JSON.stringify(report));
