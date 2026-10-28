@@ -44,6 +44,23 @@ beforeEach(() => {
   }]));
 });
 describe("workspace column header", () => {
+  it.each([null, "/local/personal", "/organizations/example/local", first, second])(
+    "gives %s native titlebar behavior on its first render",
+    folder => {
+      for (const readOnly of [false, true]) {
+        const html = render({ folder, readOnly, windowControlsInset: true });
+        const header = html.match(/<div[^>]*data-workspace-header=""[^>]*>/)?.[0];
+        expect(header).toContain('data-tauri-drag-region=""');
+        expect(html).toContain("data-window-controls-reserve");
+        expect(html.includes('aria-label="Summary"')).toBe(!readOnly);
+      }
+    },
+  );
+  it("retains native chrome through Local, organization-local and cloud owner switches", () => {
+    for (const folder of ["/local/personal", first, "/organizations/example/local", second, "/local/personal"]) {
+      expect(render({ folder })).toContain('data-tauri-drag-region=""');
+    }
+  });
   it.each(["/local/personal", "/organizations/example/local"])("keeps %s independent of cloud metadata and controls", folder => {
     const html = render({ folder, name: "Local feature", branch: true });
     expect(html).toContain("Local feature"); expect(html).toContain("lucide-git-branch");

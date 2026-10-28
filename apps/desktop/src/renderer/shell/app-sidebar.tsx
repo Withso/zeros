@@ -152,7 +152,6 @@ import {
   TRAFFIC_LIGHT_RESERVE_CLS,
 } from "./sidebar-toggle";
 import { useWorkspaceRunActivitySync } from "./terminal/run-activity-store";
-import { useCustomWindowDrag } from "./use-custom-window-drag";
 import { useHomeSidebarResizeDrag } from "./use-home-sidebar-drag";
 import { useResizeHint } from "./use-resize-hint";
 import { warmWorkspaceFiles } from "./workspace-files-cache";
@@ -298,11 +297,6 @@ export function AppSidebar({ hidden = false }: { hidden?: boolean }) {
     () => findProjectForFolder(activeFolder, projects),
     [activeFolder, projects],
   );
-
-  // The title band is the window's drag handle; its interactive descendants
-  // are excluded automatically by useCustomWindowDrag.
-  const titleBandRef = useRef<HTMLDivElement | null>(null);
-  useCustomWindowDrag(titleBandRef);
 
   // Older builds persisted Active and repository-only presentations. Paint the
   // folded value immediately and persist it once, so the stored filter always
@@ -727,7 +721,7 @@ export function AppSidebar({ hidden = false }: { hidden?: boolean }) {
             app-level controls at its end: resources, then back and forward.
             These four 28px controls set the sidebar's 220px floor. */}
         <div
-          ref={titleBandRef}
+          data-tauri-drag-region
           className="flex h-10 shrink-0 items-center gap-1 pr-2"
         >
           <div className={TRAFFIC_LIGHT_RESERVE_CLS} aria-hidden="true" />

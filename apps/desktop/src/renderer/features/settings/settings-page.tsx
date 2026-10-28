@@ -52,7 +52,6 @@ import "./settings-page.css";
 import { useRetainedViewKeys } from "../../shell/use-retained-view-keys";
 import { useScrollMemoryRef } from "../../shell/scroll-memory";
 import { useInstantViewSwitch } from "../../shared/ui/use-instant-view-switch";
-import { useCustomWindowDrag } from "../../shell/use-custom-window-drag";
 import {
   Palette,
   Settings,
@@ -536,10 +535,6 @@ function ScopedSettingsPage({ owner }: { owner: string }) {
   const organization = useActiveOrganization();
   const { me } = useTeams();
   const pageSurfaceRef = useRef<HTMLDivElement | null>(null);
-  // Settings takes the app sidebar's place, so its nav owns the macOS
-  // traffic-light band, which drags the window like the sidebar's.
-  const titleBandRef = useRef<HTMLDivElement | null>(null);
-  useCustomWindowDrag(titleBandRef);
   const dispatch = useWorkspaceDispatch();
   const pageActive = useActivePage() === "settings";
   const { projects } = useOrganizationProjects();
@@ -731,7 +726,7 @@ function ScopedSettingsPage({ owner }: { owner: string }) {
               labelled SECTION_GROUPS. Repo settings live on each repo's page. */}
         <div className="flex min-h-0 shrink-0 basis-[256px] flex-col">
           <div
-            ref={titleBandRef}
+            data-tauri-drag-region
             className="h-10 shrink-0"
             aria-hidden="true"
           />

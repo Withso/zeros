@@ -20,13 +20,11 @@
 // reserves it in its leading slot (conversation-pane.tsx) and Home pages start
 // below the band (app-shell.tsx).
 
-import { useRef } from "react";
 import { PanelLeft } from "lucide-react";
 
 import { Button } from "../shared/ui/primitives/button";
 import { Tooltip } from "../shared/ui/primitives/tooltip";
 import { toggleSidebarCollapsed } from "./sidebar-collapsed";
-import { useCustomWindowDrag } from "./use-custom-window-drag";
 
 /** The sidebar root's id, so both toggles can name what they control. */
 export const APP_SIDEBAR_ID = "app-sidebar";
@@ -61,11 +59,9 @@ export function SidebarToggleButton({ collapsed }: { collapsed: boolean }) {
  * so it stays above the first chat strip, and its empty area around the
  * traffic lights still drags the window. */
 export function CollapsedSidebarControls() {
-  const bandRef = useRef<HTMLDivElement | null>(null);
-  useCustomWindowDrag(bandRef);
   return (
     <div
-      ref={bandRef}
+      data-tauri-drag-region
       className="absolute top-0 left-0 z-(--z-chrome) flex h-10 items-center gap-1 pr-1"
       data-collapsed-sidebar-controls=""
     >
