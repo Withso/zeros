@@ -8,7 +8,10 @@
 - A FIFO test failed before reading its fixture because Node 22 could not
   import a CommonJS TypeScript module's named ESM export. Use the matching
   `tsx/cjs` loader, preserve the child deadline and expose bounded diagnostics.
-  Linux-specific device fixtures must explicitly select Linux on native hosts.
+  Linux-specific device fixtures must explicitly select Linux and supply
+  descriptor-bound mount metadata on native hosts; selecting the platform alone
+  does not supply `/proc` on macOS. The separate default-host case retains real
+  kernel reads on Linux.
 - The packaged worker fixture compared an in-flight request against a mutable
   token expectation after reading its body. Record the header's generation,
   atomically replace the token file, and require the specifically induced new
