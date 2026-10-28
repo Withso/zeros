@@ -25,3 +25,7 @@
   and streamed growth without any user checkpoints in Local and cloud.
 - Runner lesson: trace scenario callers as well as the registry before adding
   an entry; a scenario can already run inside another scenario.
+  Concurrent root tests also start Vite servers (`development-serving.test.ts`)
+  and can invalidate a smoke server's optimized dependencies. Give concurrent
+  browser runs a separate checkout and dependency cache; stale-import 504s are
+  failed runs, not product assertions or passing shortcut evidence.
