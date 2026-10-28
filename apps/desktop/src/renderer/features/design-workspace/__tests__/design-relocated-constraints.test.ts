@@ -41,4 +41,18 @@ describe("relocated stretched constraints", () => {
     expect(left).toBe(50);
     expect(details.layout!.parentWidth - left - right).toBe(details.rect.width);
   });
+
+  it("keeps the size of the axis it moves when a stretched layer gets a typed position", () => {
+    // Typing X ends the left/right stretch; the layer keeps the width it had
+    // instead of shrinking to its content (an empty frame would vanish).
+    const stretched = stretchedNode();
+    stretched.styles.transform = "none";
+    stretched.styles.transformOrigin = "50px 30px";
+    expect(designLayoutActionStyles(stretched, { type: "position", axis: "x", value: 80 })).toMatchObject({
+      left: "80px", right: "auto", width: "100px", "--zeros-layout-x": "start",
+    });
+    expect(designLayoutActionStyles(stretched, { type: "position", axis: "y", value: 12 })).toMatchObject({
+      top: "12px", bottom: "auto", height: "60px", "--zeros-layout-y": "start",
+    });
+  });
 });

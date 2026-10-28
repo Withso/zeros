@@ -576,6 +576,11 @@ export function designLayoutActionStyles(
       [keys.start]: px(offset),
       [keys.end]: "auto",
       [`--zeros-layout-${axis}`]: "start",
+      // A stretch ends here; the layer keeps the size it had rather than
+      // shrinking to its content once its far pin is released.
+      ...(designLayoutConstraint(details, axis) === "stretch"
+        ? { [keys.size]: cssSize(details, axis, borderSize(details, axis)) }
+        : {}),
     };
   }
   if (!layout?.parentId) throw new Error("Select a layer inside a frame.");
