@@ -196,13 +196,26 @@ function AttachmentGroupPill(props: NodeViewProps) {
   const ctx = useComposerEditorContext();
   const ids = useMemo(() => attachmentNodeIds(props.node.attrs), [props.node.attrs]);
   const files = ids.map(id => ctx.getAttachment(id));
-  const progress = useSyncExternalStore(useCallback(listener => {
+  const previewAfterMenu = useRef<string | null>(null);
+  useEffect(() => { previewAfterMenu.current = null; }, [ctx.cwd, ctx.attachmentImagesActive]);
+  useSyncExternalStore(useCallback(listener => {
     if (!ctx.cwd || !ctx.attachmentImagesActive) return () => {};
     const stops = ids.map(id => subscribeFileAttachmentProgress(ctx.cwd!, ctx.getAttachment(id)?.contextAttachmentId ?? id, listener));
     return () => stops.forEach(stop => stop());
-  }, [ctx, ids]), () => ids.map(id =>
-    ctx.cwd ? getFileAttachmentProgress(ctx.cwd, ctx.getAttachment(id)?.contextAttachmentId ?? id)?.phase ?? "" : "").join(","), () => "");
-  const invalid = files.some(file => !file || !file.validation.ok || file.unavailable) || progress.includes("error");
+  }, [ctx, ids]), () => JSON.stringify(ids.map(id => {
+    const state = ctx.cwd ? getFileAttachmentProgress(ctx.cwd, ctx.getAttachment(id)?.contextAttachmentId ?? id) : undefined;
+    return [state?.phase, state?.error];
+  })), () => "");
+  const transfers = files.map((file, index) => ctx.cwd ? getFileAttachmentProgress(ctx.cwd, file?.contextAttachmentId ?? ids[index]) : undefined);
+  const saving = transfers.some(state => state?.phase === "saving");
+  const issues = files.flatMap((file, index) => {
+    if (!file) return [`File ${index + 1} is unavailable`];
+    if (!file.validation.ok) return [`${file.name} — ${file.validation.reason}`];
+    if (file.unavailable) return [`${file.name} — File is unavailable`];
+    const transfer = transfers[index];
+    return transfer?.phase === "error" ? [`${file.name} — ${transfer.error || "Couldn't save this attachment"}`] : [];
+  });
+  const invalid = issues.length > 0;
   const name = String(props.node.attrs.name), id = String(props.node.attrs.groupId);
   const available = files.filter((file): file is NonNullable<typeof file> => !!file);
   const open = () => {
@@ -210,14 +223,25 @@ function AttachmentGroupPill(props: NodeViewProps) {
     openComposerAttachmentGroup(ctx.cwd, id, name, available);
   };
   const label = <><span className="max-w-[16rem] truncate">{name}</span><span className="text-muted-fg shrink-0 text-xxs">+{ids.length - 1}</span></>;
-  return <Tooltip label={`${name} · ${ids.length} files${invalid ? " · Some files are unavailable" : progress.includes("saving") ? " · Saving attachments" : ""}`}>
-    <NodeViewWrapper as="span" contentEditable={false} data-attachment-pill="" data-attachment-group="" aria-busy={progress.includes("saving") || undefined}
+  return <Tooltip label={`${name} · ${ids.length} files${invalid ? ` · ${issues[0]}${issues.length > 1 ? ` (+${issues.length - 1} more)` : ""}` : saving ? " · Saving attachments" : ""}`}>
+    <NodeViewWrapper as="span" contentEditable={false} data-attachment-pill="" data-attachment-group="" aria-busy={saving || undefined}
       className={cn(PILL_SHELL, "composer-pill", COMPOSER_PILL_SPACING, props.selected && "ring-highlighted-bright/40 ring-2", invalid && "border-yellow-icon/40")}>
       <PillRemoveButton label={name} disabled={!ctx.editable} onRemove={() => removePill(props)}><Files size={13} /></PillRemoveButton>
       {ctx.onOpenAttachment ? <DropdownMenu>
         <DropdownMenuTrigger asChild><Button variant="ghost" aria-label={`Open ${name}, ${ids.length} files`} disabled={!ctx.attachmentImagesActive}
           onMouseDown={event => event.preventDefault()} className="m-0 flex min-w-0 gap-2 border-0 bg-transparent p-0 text-inherit">{label}</Button></DropdownMenuTrigger>
-        <DropdownMenuContent>{available.map(file => <DropdownMenuItem key={file.id} onSelect={() => ctx.onOpenAttachment?.(file)}>{file.name}</DropdownMenuItem>)}</DropdownMenuContent>
+        <DropdownMenuContent onCloseAutoFocus={event => {
+          const fileId = previewAfterMenu.current;
+          previewAfterMenu.current = null;
+          if (!fileId) return;
+          event.preventDefault();
+          const file = ctx.getAttachment(fileId);
+          if (!file || !ctx.attachmentImagesActive || props.editor.isDestroyed) return;
+          // The preview records its return target. Wait for the menu's focus
+          // trap to close so it records the editor, not a removed menu item.
+          props.editor.view.focus();
+          ctx.onOpenAttachment?.(file);
+        }}>{available.map(file => <DropdownMenuItem key={file.id} onSelect={() => { previewAfterMenu.current = file.id; }}>{file.name}</DropdownMenuItem>)}</DropdownMenuContent>
       </DropdownMenu> : <Button variant="ghost" aria-label={`Open ${name}, ${ids.length} files`} disabled={!ctx.attachmentImagesActive || !ctx.cwd || !available.length}
         onMouseDown={event => event.preventDefault()} onClick={open} className="m-0 flex min-w-0 gap-2 border-0 bg-transparent p-0 text-inherit">{label}</Button>}
     </NodeViewWrapper>

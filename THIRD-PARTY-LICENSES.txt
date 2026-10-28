@@ -32,7 +32,7 @@ TERMS-GOVERNED COMPONENTS — RELEASE REVIEW REQUIRED
 - @anthropic-ai/claude-agent-sdk@0.3.309: Proprietary/terms-governed; redistribution and authentication flows require an explicit vendor/legal review.
 - @cursor/sdk@1.0.40: Proprietary/terms-governed; redistribution and authentication flows require an explicit vendor/legal review.
 
-PACKAGE INVENTORY (694 resolved package/version records)
+PACKAGE INVENTORY (693 resolved package/version records)
 -----------------
 
 @anthropic-ai/claude-agent-sdk-darwin-arm64@0.3.309
@@ -631,15 +631,9 @@ PACKAGE INVENTORY (694 resolved package/version records)
   Source: https://github.com/modelcontextprotocol/typescript-sdk
   License documents: 5e13dbbc1d12
 
-@napi-rs/canvas-linux-x64-gnu@1.0.13
+@napi-rs/canvas-darwin-arm64@1.0.13
   License: MIT
-  Surfaces: root pnpm workspace
-  Source: https://github.com/Brooooooklyn/canvas
-  License documents: 0b8e3b4f0042
-
-@napi-rs/canvas-linux-x64-musl@1.0.13
-  License: MIT
-  Surfaces: root pnpm workspace
+  Surfaces: desktop packaged runtime (macOS arm64)
   Source: https://github.com/Brooooooklyn/canvas
   License documents: 0b8e3b4f0042
 
@@ -5737,8 +5731,8 @@ SOFTWARE.
 ================================================================================
 DOCUMENT 0b8e3b4f0042
 SHA-256: 0b8e3b4f0042f33677406344854c1dcce3a2878eb3a3f6baee58c6f5752655ce
-Applies to: @napi-rs/canvas-linux-x64-gnu@1.0.13, @napi-rs/canvas-linux-x64-musl@1.0.13, @napi-rs/canvas@1.0.13
-Source labels: @napi-rs/canvas-linux-x64-gnu@1.0.13 — repository-level copy from @napi-rs/canvas@1.0.13 — LICENSE; @napi-rs/canvas-linux-x64-musl@1.0.13 — repository-level copy from @napi-rs/canvas@1.0.13 — LICENSE; @napi-rs/canvas@1.0.13 — LICENSE
+Applies to: @napi-rs/canvas-darwin-arm64@1.0.13, @napi-rs/canvas@1.0.13
+Source labels: @napi-rs/canvas-darwin-arm64@1.0.13 — terms supplied by @napi-rs/canvas@1.0.13 — LICENSE; @napi-rs/canvas@1.0.13 — LICENSE
 ================================================================================
 
 MIT License

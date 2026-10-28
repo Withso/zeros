@@ -244,8 +244,18 @@ export async function runCreateDraftsSmoke({ page, check, harnessBase }) {
     const input = card.locator('input[type="file"]');
     const picker = page.getByRole("button", { name: "Choose project", exact: true });
     const panel = page.getByRole("complementary", { name: "Attachment preview" });
+    const selectAttachment = async name => {
+      const single = card.getByRole("button", { name: `Open ${name}`, exact: true });
+      const group = card.locator("[data-attachment-group]").getByRole("button", { name: /^Open / });
+      await expect(single.or(group).first()).toBeVisible();
+      if (await single.isVisible()) await single.click();
+      else {
+        await group.click();
+        await page.getByRole("menuitem", { name, exact: true }).click();
+      }
+    };
     const open = async name => {
-      await card.getByRole("button", { name: `Open ${name}`, exact: true }).click();
+      await selectAttachment(name);
       await expect(panel).toBeVisible();
       await expect(panel.locator('[aria-busy="true"]')).toHaveCount(0);
     };
@@ -281,6 +291,8 @@ export async function runCreateDraftsSmoke({ page, check, harnessBase }) {
       { name: "recording.webm", mimeType: "video/webm", buffer: Buffer.from(recording) },
       { name: "data.bin", mimeType: "application/octet-stream", buffer: Buffer.from([0, 255, 1, 2]) },
     ]);
+    await expect(card.locator("[data-attachment-pill]")).toHaveCount(1);
+    await expect(card.locator("[data-attachment-group]")).toContainText("+4");
     await open("notes.md");
     await expect(panel.getByRole("heading", { name: "Attachment review" })).toBeVisible();
     await panel.getByRole("tab", { name: "Code", exact: true }).click();
@@ -308,7 +320,7 @@ export async function runCreateDraftsSmoke({ page, check, harnessBase }) {
     // real IndexedDB bytes can supply these previews afterwards.
     await page.reload();
     await expect(editor).toContainText(localPrompt);
-    await expect(card.getByRole("button", { name: "Open notes.md", exact: true })).toBeVisible();
+    await expect(card.getByRole("button", { name: "Open notes.md, 5 files", exact: true })).toBeVisible();
     await page.evaluate(size => {
       const read = Blob.prototype.arrayBuffer;
       const gate = new Promise(resolve => { window.releasePreviewRead = resolve; });
@@ -319,7 +331,7 @@ export async function runCreateDraftsSmoke({ page, check, harnessBase }) {
         return gate.then(() => read.call(this));
       };
     }, markdown.buffer.length);
-    await card.getByRole("button", { name: "Open notes.md", exact: true }).click();
+    await selectAttachment("notes.md");
     await expect.poll(() => page.evaluate(() => window.previewReadHeld)).toBe(true);
     await open("example.txt");
     await page.evaluate(async () => {
@@ -345,7 +357,7 @@ export async function runCreateDraftsSmoke({ page, check, harnessBase }) {
     await expect(panel.getByRole("link", { name: "Download attachment" })).toHaveAttribute("download", "data.bin");
     await close();
     expect(await page.evaluate(() => window.folderWorkspaceRequests.filter(({ op }) => /attachmentUpload|contextGraph\.(put|create)/.test(op)))).toEqual([]);
-    check("Create recovers text/image/video bytes after reload without a workspace, revokes media URLs on close and offers binary downloads", true);
+    check("Create restores a single group after reload, opens every text/image/video/binary member and revokes media URLs on close", true);
 
     await open("notes.md");
     await card.getByRole("button", { name: "Remove notes.md", exact: true }).click();
@@ -353,9 +365,10 @@ export async function runCreateDraftsSmoke({ page, check, harnessBase }) {
     await editor.focus();
     await page.keyboard.press("ControlOrMeta+z");
     await open("notes.md");
+    await expect(card.getByRole("button", { name: "Open notes.md, 5 files", exact: true })).toBeVisible();
     await expect(panel.getByRole("heading", { name: "Attachment review" })).toBeVisible();
     await close();
-    check("Removing an open attachment closes its preview and Undo restores the readable source", true);
+    check("Removing an open attachment group closes its preview and Undo restores its members and readable source", true);
 
     const unsolicitedReads = [];
     await page.route("https://attachment-preview.example.test/**", route => { unsolicitedReads.push(route.request().url()); return route.abort(); });

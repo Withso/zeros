@@ -47,6 +47,23 @@ function fixture(journal = new Journal(), key = owner) {
 }
 
 describe("durable cloud prompt channel", () => {
+  it("sends and restores every member of an attachment group through the durable prompt validator", async () => {
+    const f = fixture();
+    const group = { id: "group-frames", name: "Video frames" };
+    const segments = ["frame.jpg", "timeline.txt"].map((name, index) => ({
+      type: "attachment" as const, name, mimeType: index ? "text/plain" : "image/jpeg",
+      kind: index ? "text" as const : "image" as const, delivery: "reference" as const,
+      diskPath: `.context/local/attachments/att-${index}/${name}`, attachmentId: `att-${index}`, group,
+    }));
+    const payload = { ...prompt("grouped"), bubble: { displayText: "Review this video", segments } };
+    await expect(f.channel.enqueue(async () => payload)).resolves.toBe("grouped");
+    await f.channel.flush();
+    expect(f.api.enqueue).toHaveBeenCalledWith(payload);
+    const restored = f.make();
+    await restored.refresh(true);
+    expect(restored.snapshot.entries[0]?.payload.bubble?.segments).toEqual(segments);
+  });
+
   it("Stop releases a large-file preparation without waiting for its upload or journaling a late result", async () => {
     const f = fixture(), upload = defer<CloudV2Prompt>();
     await f.channel.enqueue(async () => prompt("running")); await f.channel.flush();

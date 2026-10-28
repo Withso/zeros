@@ -30,3 +30,17 @@
 - A screenshot captured an empty Word frame during navigation → a mounted iframe
   did not prove document paint → wait for readable frame content before capture
   → document and group browser screenshot assertions.
+- Grouping hid the failing member's filename and upload error → the pill reduced
+  per-file status to a boolean → preserve the first precise error and count
+  additional failures without changing pill geometry → grouped upload smoke.
+- Escape from Create's grouped preview lost composer focus → the preview saved
+  a temporary menu item as its return target → open after the menu focus trap
+  closes and restore the editor first → Create draft/reload browser smoke.
+- PDF's optional native canvas made release licenses depend on the build host
+  → the platform normalizer did not know the new dependency family → normalize
+  to the shipped macOS target and test Linux/macOS/absent variants →
+  `license-platforms.test.ts` and the generated inventory contract.
+- Composer and history grouping worked while cloud Send rejected the message
+  → both durable prompt schemas are strict and lacked the optional metadata
+  → test the real send validator and independently deployed mirror, including
+  legacy payloads and field bounds → cloud channel and contract-parity tests.

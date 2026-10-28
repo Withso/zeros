@@ -40,6 +40,7 @@ function fixture() {
     ["@openai/codex", "@openai/codex-darwin-arm64", "npm:@openai/codex@1.2.3-darwin-arm64"],
     ["@vscode/ripgrep", "@vscode/ripgrep-darwin-arm64", "1.2.3"],
     ["@parcel/watcher", "@parcel/watcher-darwin-arm64", "2.5.6"],
+    ["@napi-rs/canvas", "@napi-rs/canvas-darwin-arm64", "1.2.3"],
   ]) {
     const packagePath = mkdtempSync(join(tmpdir(), "zeros-license-platform-"));
     directories.push(packagePath);
@@ -109,5 +110,31 @@ describe("release license platform normalization", () => {
     expect(() => normalize(records, {
       macosOnly: [], lockfile: lockfile.replace("@parcel/watcher-darwin-arm64@2.5.6", "@parcel/watcher-darwin-arm64@2.5.5"),
     })).toThrow(/@parcel\/watcher-darwin-arm64@2\.5\.6.*missing from pnpm-lock/);
+  });
+
+  it("records the shipped PDF canvas binary identically on Linux, macOS and hosts without optional binaries", () => {
+    const { records, lockfile } = fixture();
+    const canvas = records.find(record => record.name === "@napi-rs/canvas")!;
+    const inventory = (variants: string[]) => normalize([
+      ...records, ...variants.map(platform => ({ ...canvas, name: `@napi-rs/canvas-${platform}` })),
+    ], { macosOnly: [], lockfile });
+    const linux = inventory(["linux-x64-gnu", "linux-x64-musl"]);
+    expect(linux).toEqual(inventory(["darwin-arm64"]));
+    expect(linux).toEqual(inventory([]));
+    expect(linux.filter(record => record.name.startsWith("@napi-rs/canvas-"))).toEqual([
+      expect.objectContaining({
+        name: "@napi-rs/canvas-darwin-arm64", version: "1.2.3", license: "MIT", packagePath: canvas.packagePath,
+        documentSourceLabel: "@napi-rs/canvas-darwin-arm64@1.2.3 — terms supplied by @napi-rs/canvas@1.2.3",
+      }),
+    ]);
+    expect([...linux.find(record => record.name === "@napi-rs/canvas-darwin-arm64")!.surfaces])
+      .toEqual(["desktop packaged runtime (macOS arm64)"]);
+  });
+
+  it("rejects a PDF canvas release target absent from the lockfile", () => {
+    const { records, lockfile } = fixture();
+    expect(() => normalize(records, {
+      macosOnly: [], lockfile: lockfile.replace("@napi-rs/canvas-darwin-arm64@1.2.3", "@napi-rs/canvas-darwin-arm64@1.2.2"),
+    })).toThrow(/@napi-rs\/canvas-darwin-arm64@1\.2\.3.*missing from pnpm-lock/);
   });
 });

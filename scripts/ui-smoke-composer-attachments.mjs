@@ -224,26 +224,37 @@ async function runVideoContextCheck({ page, url, check }) {
       }),
     );
   });
-  const timelinePill = page.getByRole("button", {
-    name: "Remove Sign-in-flow-timeline.txt",
+  const videoPill = page.getByRole("button", {
+    name: "Remove Sign in flow.webm",
     exact: true,
   });
-  await expect(timelinePill).toBeVisible({ timeout: 20_000 });
-  const names = await composer.evaluate((element) => {
+  await expect(videoPill).toBeVisible();
+  await expect(page.locator("[data-attachment-pill]")).toHaveCount(1);
+  await expect.poll(() => page.evaluate(() =>
+    !!window.composerAttachmentsHarness.recordBytes("Sign in flow.webm"),
+  )).toBe(true);
+  await expect(page.locator("[data-attachment-group]")).toHaveCount(0);
+  check("pasting a video stages only the original until frames are explicitly requested", true);
+  await page.getByRole("button", { name: "Actions for Sign in flow.webm", exact: true }).click();
+  await page.getByRole("menuitem", { name: "Attach as frames", exact: true }).click();
+  const group = page.locator("[data-attachment-group]");
+  await expect(group).toHaveCount(1, { timeout: 20_000 });
+  const nodes = await composer.evaluate((element) => {
     const found = [];
     element.editor.state.doc.descendants((node) => {
-      if (node.type.name === "attachment") found.push(node.attrs.name);
+      if (node.type.name === "attachment") found.push(node.attrs);
     });
     return found;
   });
-  const frames = names.slice(1, -1);
+  const frames = Array.from({ length: nodes[1].attachmentIds.length - 1 },
+    (_, index) => `Sign-in-flow-frame-${index + 1}.jpg`);
+  const names = ["Sign in flow.webm", ...frames, "Sign-in-flow-timeline.txt"];
   check(
-    "a pasted video stages its key frames, then its timeline, right after it",
-    names[0] === "Sign in flow.webm" &&
-      names.at(-1) === "Sign-in-flow-timeline.txt" &&
-      frames.length >= 2 &&
-      frames.every((name, index) => name === `Sign-in-flow-frame-${index + 1}.jpg`),
+    "Attach as frames adds one group of JPEGs and timeline text after the original video",
+    nodes.length === 2 && nodes[0].name === "Sign in flow.webm" &&
+      nodes[1].name === "Sign in flow.webm frames" && frames.length >= 2,
   );
+  await expect(group).toContainText(`+${frames.length}`);
   await expect
     .poll(() =>
       page.evaluate(

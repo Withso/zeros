@@ -10,7 +10,7 @@
 //     (editor is created once, yet always sees current files/commands/PRs)
 //   • the attachment side store (bytes by id; nodes reference by id)
 //   • drag-drop / paste / file-pick → inline attachment pills at the caret,
-//     with a video's key frames and timeline text joining it once read
+//     with optional video frames and timeline text added on request
 //   • the image-preview lightbox
 //   • serialize() → { displayText, segments, attachments, json } for submit,
 //     drafts, and the inline sent-bubble
@@ -201,12 +201,12 @@ export interface ComposerEditorApi {
     files: FileList | File[] | null | undefined,
     options?: { focus?: boolean; atEnd?: boolean; groupName?: string },
   ) => Promise<void>;
-  /** True while a video in the document is still having its key frames
-   *  read. A send waits for them (waitForAttachmentReads) so they go with
+  /** True while requested video frames are still being extracted.
+   *  A send waits for them (waitForAttachmentReads) so they go with
    *  the video instead of landing in the next message. */
   hasPendingAttachmentReads: () => boolean;
-  /** Resolves once every video still in the document has its key frames
-   *  and timeline beside it, or turned out to have none. */
+  /** Resolves once every requested extraction still in the document has its
+   *  frames and timeline beside it, or turned out to have none. */
   waitForAttachmentReads: () => Promise<void>;
   /** Stage a SYNTHESIZED text attachment (a chat transcript) under a
    *  caller-owned key, replacing anything already staged under that key — so

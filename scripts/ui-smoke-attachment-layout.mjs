@@ -68,24 +68,26 @@ export async function runAttachmentLayoutSmoke({ page, check }) {
     }
   }, names);
   const pills = page.locator("[data-attachment-pill]");
-  await expect(pills).toHaveCount(4);
-  await expect(pills.locator('[aria-label^="Remove "]')).toHaveCount(4);
+  await expect(pills).toHaveCount(1);
+  await expect(pills.locator('[aria-label^="Remove "]')).toHaveCount(1);
   await expect(
     page.locator('[data-attachment-pill][aria-busy="true"]'),
-  ).toHaveCount(4);
+  ).toHaveCount(1);
+  const groupLabels = [`${names[0]}+3`];
   check(
-    "a multi-file drop inserts the complete batch with filename-only pills",
-    JSON.stringify(await pills.allTextContents()) === JSON.stringify(names),
+    "a multi-file drop inserts one group pill while retaining every source file",
+    JSON.stringify(await pills.allTextContents()) === JSON.stringify(groupLabels) &&
+      JSON.stringify(await page.evaluate(() => window.__composerHarness.serialize().attachments.map(file => file.name))) === JSON.stringify(names),
     JSON.stringify(await pills.allTextContents()),
   );
   await pills.first().hover();
-  await expect(page.locator("[data-image-hover-preview]")).toContainText("Saving attachment");
-  await expect(page.locator("[data-image-hover-preview]")).not.toContainText("0%");
+  await expect(page.getByRole("tooltip")).toContainText("Saving attachments");
+  await expect(page.getByRole("tooltip")).not.toContainText("0%");
   await page.keyboard.press("Escape");
   await page.mouse.move(850, 500);
   await expect(page.getByRole("tooltip")).toHaveCount(0);
   check(
-    "pending status stays in the image card without displaying a zero percentage",
+    "group progress stays in its tooltip without displaying a zero percentage",
     true,
   );
 
@@ -147,15 +149,16 @@ export async function runAttachmentLayoutSmoke({ page, check }) {
   check(
     "no Saving percentage flashes in a painted pill and typed text survives the drop",
     measured.labels.length === 1 &&
-      measured.labels[0] === JSON.stringify(names) &&
-      measured.text === "Review these files:     ",
+      measured.labels[0] === JSON.stringify(groupLabels) &&
+      measured.text === "Review these files:  ",
   );
-  const failed = pills.nth(3);
+  const failed = pills.first();
   // Hit the shell padding so the nested remove tooltip cannot take over.
   const failedBox = await failed.boundingBox();
   await failed.hover({ position: { x: failedBox.width - 3, y: 10 } });
+  await expect(page.getByRole("tooltip")).toContainText("notes.txt");
   await expect(page.getByRole("tooltip")).toContainText("Disk is full");
-  check("failed imports retain their visible pill and error explanation", true);
+  check("a failed group member leaves the group visible with the filename and upload error", true);
 
   // Enter and leave child elements of an existing pill, then drop onto its
   // label. It must attach exactly once and preserve the existing batch.
@@ -165,7 +168,7 @@ export async function runAttachmentLayoutSmoke({ page, check }) {
       new File(["{}\n"], "more.jsonl", { type: "application/jsonl" }),
     );
     const pill = document.querySelector("[data-attachment-pill]");
-    const label = pill.querySelector("button[data-file-path] span");
+    const label = pill.querySelector('button[aria-label^="Open "] span');
     for (const [target, type] of [
       [pill, "dragenter"],
       [label, "dragenter"],
@@ -181,14 +184,14 @@ export async function runAttachmentLayoutSmoke({ page, check }) {
         }),
       );
   });
-  await expect(pills).toHaveCount(5);
+  await expect(pills).toHaveCount(2);
   await release("more.jsonl");
   await release("more.jsonl");
-  await expect(pills).toHaveCount(5);
+  await expect(pills).toHaveCount(2);
   check(
     "dropping onto an existing pill adds one attachment without replacing earlier files",
     JSON.stringify(await pills.allTextContents()) ===
-      JSON.stringify([...names, "more.jsonl"]),
+      JSON.stringify([...groupLabels, "more.jsonl"]),
   );
 
   await page.getByTestId("composer-host").evaluate((host) => {
@@ -213,4 +216,24 @@ export async function runAttachmentLayoutSmoke({ page, check }) {
         (pill) => pill.width <= narrow.width && pill.removeWidth >= 16,
       ),
   );
+
+  // A separate image selection still has its own preview and detailed status.
+  await page.keyboard.press("Escape");
+  await page.mouse.move(850, 500);
+  await expect(page.getByRole("tooltip")).toHaveCount(0);
+  await page.evaluate(async () => {
+    const canvas = document.createElement("canvas");
+    canvas.width = canvas.height = 1;
+    const png = await new Promise(resolve => canvas.toBlob(resolve));
+    await window.__composerHarness.insertFiles([new File([png], "pending.png", { type: "image/png" })]);
+  });
+  const image = pills.last();
+  await expect(pills).toHaveCount(3);
+  await image.hover();
+  await expect(page.locator("[data-image-hover-preview]")).toContainText("Saving attachment");
+  await expect(page.locator("[data-image-hover-preview]")).not.toContainText("0%");
+  await release("pending.png");
+  await release("pending.png", "Disk is full");
+  await expect(page.locator("[data-image-hover-preview]")).toContainText("Disk is full");
+  check("individual images keep their pending hover preview and precise upload error", true);
 }

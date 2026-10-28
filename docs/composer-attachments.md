@@ -87,6 +87,9 @@ the member IDs; persisted message segments remain individual attachments with
 an optional group ID/name. Older clients still see all files. Copy/paste remaps
 editor IDs, while draft reload, undo and edit/resend retain every saved reference.
 Groups are bounded to 1,000 members; larger selections split into complete groups.
+The existing per-prompt cloud attachment and payload limits still apply. Cloud
+rollout must update the control-plane and worker prompt validators before the
+desktop sends grouped metadata; both validators accept older ungrouped messages.
 
 Attaching a video adds only the original video. Its composer overflow menu offers
 Download and Attach as frames. Explicit extraction adds independent JPEG key
