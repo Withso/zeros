@@ -299,6 +299,35 @@ export async function runDesignFreeDragSyncSmoke({ page, check }) {
   check("a free layer's selection box follows the pointer on every sample and settles on the layer", true);
 }
 
+/** Pressing a layer measures its drop targets during the activation travel,
+ * so the first move past it can preview the layer at once; a plain click
+ * only discards that read. */
+export async function runDesignDragPrepareOnPressSmoke({ page, check }) {
+  await openCanvasFixture(page, "autoLayout=1");
+  await page.locator('[data-design-layer-id="home-heading"]').click();
+  const overlay = page.locator('[data-design-element-overlay="home-heading"]');
+  await expect(overlay).toBeVisible();
+  await page.evaluate(async () => {
+    const { designFrameRuntime } = await import("/apps/desktop/src/renderer/platform/bridge/design-frame-runtime.ts");
+    const runtime = designFrameRuntime("ws_design_harness", "home.html");
+    const read = runtime.getLayoutTargets.bind(runtime);
+    window.__layoutTargetReads = 0;
+    runtime.getLayoutTargets = (...args) => {
+      window.__layoutTargetReads += 1;
+      return read(...args);
+    };
+  });
+  const box = await overlay.boundingBox();
+  const start = { x: box.x + box.width / 2, y: box.y + box.height / 2 };
+  await page.mouse.move(start.x, start.y);
+  await page.mouse.down();
+  await expect.poll(() => page.evaluate(() => window.__layoutTargetReads)).toBeGreaterThan(0);
+  await page.mouse.up();
+  await expect(page.locator("[data-sonner-toast]")).toHaveCount(0);
+  await expect(overlay).toBeVisible();
+  check("pressing a layer measures its drop targets before it moves, and a click discards them quietly", true);
+}
+
 /** A layer dragged out of its frame can only be shown by its pixels: the
  * frame's document clips it. With none cached for this generation, the drag
  * captures them, so the layer follows the pointer instead of an empty box. */
@@ -856,6 +885,7 @@ export async function runDesignCanvasRefinementsSmoke(options) {
   await runDesignGroupResizePointerOwnershipSmoke(options);
   await runDesignLayoutDragPointerOwnershipSmoke(options);
   await runDesignFreeDragSyncSmoke(options);
+  await runDesignDragPrepareOnPressSmoke(options);
   await runDesignDragOutPixelsSmoke(options);
   await runDesignGestureReleasePositionSmoke(options);
   await runDesignCompletedCanvasGesturesSmoke(options);

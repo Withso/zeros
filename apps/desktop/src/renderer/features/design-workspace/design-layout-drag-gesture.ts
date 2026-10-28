@@ -153,6 +153,7 @@ export function startDesignLayoutDrag(input: {
   let presentation: ReturnType<typeof createDesignDragPresentation> = null;
   let suppressed = false;
   let capturing = false;
+  let preparationFailure: { error: unknown } | null = null;
   let latest: DesignLayoutDrop | null = null;
   let moved = false;
   let stopped = false;
@@ -390,6 +391,15 @@ export function startDesignLayoutDrag(input: {
       return;
     moved = true;
     sample++;
+    if (preparationFailure) {
+      const { error } = preparationFailure;
+      preparationFailure = null;
+      if (!released && !stopped) {
+        cancelPointerGesture();
+        input.failed(error);
+      }
+      return;
+    }
     if (!ready)
       void prepare().catch((error) => {
         if (!released && !stopped) {
@@ -640,6 +650,13 @@ export function startDesignLayoutDrag(input: {
     onMove: move,
     onFinish: finish,
     onCancel: cancel,
+  });
+  // Pressing a layer is a drag's first signal. Measure its drop targets during
+  // the activation travel, so the first move past it previews the layer at
+  // once instead of waiting for that read. A click only discards the result;
+  // a failure is reported by the first move, as it was when measured there.
+  void prepare().catch((error: unknown) => {
+    preparationFailure = { error };
   });
   return cancelPointerGesture;
 }
