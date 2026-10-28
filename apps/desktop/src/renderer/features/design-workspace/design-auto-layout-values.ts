@@ -1,6 +1,7 @@
 import { DESIGN_FRAME_MAX_SIZE } from "@zeros/design-core";
 import type { DesignRuntimeNodeDetails } from "@zeros/protocol/design-runtime";
 import {
+  designFlowTransformStyles,
   borderSize,
   cssSize,
   designLayoutConstraint,
@@ -311,6 +312,8 @@ export function designAutoLayoutUpdates(
           "--zeros-layout-x": null,
           "--zeros-layout-y": null,
           "--zeros-layout-origin-flow": flow === "none" ? "1" : null,
+          // Joining a flow drops the offset it was drawn at; it keeps its pose.
+          ...(flow === "none" ? {} : designFlowTransformStyles(child)),
         });
       } else if (oldMode !== "none" && flow !== "none" && !positioned) {
         const next = {

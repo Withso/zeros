@@ -198,6 +198,91 @@ export function designLayoutTransform(details: DesignRuntimeNodeDetails) {
   );
 }
 
+const poseNumber = (value: number) =>
+  String(Math.round(value * 100_000_000) / 100_000_000 || 0);
+
+/** The offset an older relocation saved in a layer's transform, beside its
+ * box (`matrix(1,0,0,1,x,y)` about the corner), so it read as X 0, Y 0 and
+ * carried into a flow as a stray shift. Only a relocation's own pose counts:
+ * an authored transform (`translate(...)`, other origins) stays the layer's
+ * Transform. Null when there is no such offset. */
+function relocationOffset(
+  details: DesignRuntimeNodeDetails,
+): { x: number; y: number; pose: string } | null {
+  if (!/^0(?:px)?\s+0(?:px)?(?:\s+0(?:px)?)?$/.test(style(details, "transform-origin").trim()))
+    return null;
+  const authored = details.authoredStyles?.transform?.value.trim();
+  if (authored && !/^matrix\(/i.test(authored)) return null;
+  const match = /^matrix\(([^)]+)\)$/i.exec(style(details, "transform").trim());
+  if (!match) return null;
+  const values = match[1]!.split(",").map((value) => Number(value.trim()));
+  if (values.length !== 6 || !values.every(Number.isFinite)) return null;
+  const [a, b, c, d, x, y] = values as [number, number, number, number, number, number];
+  if (Math.abs(x) < 1e-9 && Math.abs(y) < 1e-9) return null;
+  const near = (value: number, target: number) => Math.abs(value - target) < 1e-9;
+  return {
+    x,
+    y,
+    pose:
+      near(a, 1) && near(b, 0) && near(c, 0) && near(d, 1)
+        ? "none"
+        : `matrix(${[a, b, c, d, 0, 0].map(poseNumber).join(",")})`,
+  };
+}
+
+/** A layer joining a flex or grid flow keeps its rotation, scale and skew but
+ * not the offset it was drawn at in a free layout: the flow places it now. */
+export function designFlowTransformStyles(
+  details: DesignRuntimeNodeDetails,
+): Record<string, string> {
+  const styles: Record<string, string> = {};
+  const offset = relocationOffset(details);
+  if (offset) styles.transform = offset.pose;
+  const translate = style(details, "translate").trim();
+  if (translate && translate !== "none" && !/^0(?:px)?(?:\s+0(?:px)?){0,2}$/.test(translate))
+    styles.translate = "none";
+  return styles;
+}
+
+/** A free layer drawn at an offset, rewritten so its box is where it is
+ * drawn: the offset moves into its insets and the transform keeps the pose.
+ * Position, alignment and pins then work from what a person sees. */
+function foldTransformOffset(details: DesignRuntimeNodeDetails): {
+  details: DesignRuntimeNodeDetails;
+  styles: Record<string, string>;
+} | null {
+  if (!["absolute", "fixed"].includes(style(details, "position"))) return null;
+  const offset = relocationOffset(details);
+  if (!offset) return null;
+  const styles: Record<string, string> = { transform: offset.pose };
+  for (const axis of ["x", "y"] as const) {
+    const { start, end, marginStart } = AXES[axis];
+    const startSet = designInsetIsSet(details, start);
+    const endSet = designInsetIsSet(details, end);
+    // Both pins move together, so a layer stretched between them keeps its
+    // size; either alone moves as the only pin; neither, from where it is.
+    if (startSet) styles[start] = px(numeric(details, start) + offset[axis]);
+    if (endSet) styles[end] = px(numeric(details, end) - offset[axis]);
+    if (!startSet && !endSet)
+      styles[start] = px((details.layout?.[axis] ?? 0) - numeric(details, marginStart) + offset[axis]);
+  }
+  const camel = (property: string) =>
+    property.replace(/-([a-z])/g, (_, letter: string) => letter.toUpperCase());
+  return {
+    details: {
+      ...details,
+      layout: details.layout
+        ? { ...details.layout, x: details.layout.x + offset.x, y: details.layout.y + offset.y }
+        : undefined,
+      styles: {
+        ...details.styles,
+        ...Object.fromEntries(Object.entries(styles).map(([property, value]) => [camel(property), value])),
+      } as DesignRuntimeNodeDetails["styles"],
+    },
+    styles,
+  };
+}
+
 /** Translate a gesture's offsets back to its active responsive pins. */
 export function preserveDesignLayoutPins(
   details: DesignRuntimeNodeDetails,
@@ -285,7 +370,10 @@ export function designLayoutFieldValue(
 ): string {
   if (property === "left" || property === "top") {
     const axis = property === "left" ? "x" : "y";
-    return px(details.layout?.[axis] ?? numeric(details, property));
+    return px(
+      (details.layout?.[axis] ?? numeric(details, property)) +
+        (relocationOffset(details)?.[axis] ?? 0),
+    );
   }
   if (property === "width" || property === "height") {
     return px(borderSize(details, property === "width" ? "x" : "y"));
@@ -307,17 +395,22 @@ export function designLayoutConstraint(
   const { start, end } = AXES[axis];
   if (!["absolute", "fixed"].includes(style(details, "position")))
     return "start";
-  const has = (key: string) => {
-    const value = style(details, key);
-    return (
-      value !== "" &&
-      value !== "auto" &&
-      (!details.authoredStyleProperties ||
-        details.authoredStyleProperties.includes(key))
-    );
-  };
+  const has = (key: string) => designInsetIsSet(details, key);
   if (has(start) && has(end)) return "stretch";
   return has(end) ? "end" : "start";
+}
+
+/** Whether an inset pins the layer. Computed insets of a positioned layer
+ * are its used pixels even when authored `auto`; the runtime's authored
+ * property list says which sides were actually set. */
+function designInsetIsSet(details: DesignRuntimeNodeDetails, key: string): boolean {
+  const value = style(details, key);
+  return (
+    value !== "" &&
+    value !== "auto" &&
+    (!details.authoredStyleProperties ||
+      details.authoredStyleProperties.includes(key))
+  );
 }
 
 export function designLayoutActionStyles(
@@ -331,6 +424,17 @@ export function designLayoutActionStyles(
     action.type === "sizing"
   )
     throw new Error("This action needs the frame's children.");
+  if (
+    action.type === "position" ||
+    action.type === "align" ||
+    action.type === "constraint" ||
+    action.type === "center" ||
+    action.type === "resize-fill"
+  ) {
+    const folded = foldTransformOffset(details);
+    if (folded)
+      return { ...folded.styles, ...designLayoutActionStyles(folded.details, action) };
+  }
   if (action.type === "resize-fill") {
     if (!details.layout?.parentId)
       throw new Error("Select a frame inside another frame to fill.");

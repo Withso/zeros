@@ -180,21 +180,34 @@ describe("canvas layout drop intent", () => {
     );
   });
 
-  it("retains free positioning when entering a flex container", () => {
+  it("joins the flow of another auto layout it is dragged into, as in a design tool, even a static one", () => {
+    // A free layer keeps its free position only within its own parent.
+    // Dragged into an auto layout it takes a slot there; the static flex
+    // container needs no positioning to hold it.
     const outer = node("outer", null, 0, 0, 900, 700);
     const child = {
       ...a,
       layout: { ...a.layout!, parentId: "outer" },
       styles: { ...a.styles, position: "absolute" },
+      relocationContext: { inheritedStyles: {}, unsupported: [] },
     };
     const resolve = createDesignLayoutDropResolver(
       child,
       [outer, root, child],
       { zoom: () => 1, preserveFreePosition: true },
     );
-    expect(
-      resolve({ x: 400, y: 200 }, { x: 400, y: 200 })?.styles.position,
-    ).toBe("absolute");
+    expect(resolve({ x: 300, y: 200 }, { x: 250, y: 160 })).toMatchObject({
+      parentId: "root",
+      styles: { position: "relative", left: "auto", top: "auto" },
+    });
+    expect(resolve({ x: 300, y: 200 }, { x: 250, y: 160 })?.relocation).toBeUndefined();
+    // Within its own parent it stays where it is put.
+    const inside = createDesignLayoutDropResolver(
+      { ...child, layout: { ...child.layout!, parentId: "root" } },
+      [outer, root, child],
+      { zoom: () => 1, preserveFreePosition: true },
+    );
+    expect(inside({ x: 300, y: 200 }, { x: 250, y: 160 })?.styles.position).toBe("absolute");
   });
   it("reorders in a flow instead of adding offsets or nesting into a sibling", () => {
     const drop = designLayoutDrop(
@@ -248,6 +261,20 @@ describe("canvas layout drop intent", () => {
         ?.beforeId,
     ).toBe("b");
   });
+  it("drops a free layer into a flow slot without the offset it was drawn at", () => {
+    const outer = node("outer", null, 0, 0, 900, 700);
+    const parent = { ...root, layout: { ...root.layout!, parentId: "outer" } };
+    const free = {
+      ...a,
+      layout: { ...a.layout!, parentId: "outer" },
+      styles: { ...a.styles, position: "absolute", transform: "matrix(1, 0, 0, 1, 66, 223)", transformOrigin: "0px 0px" },
+    };
+    expect(designLayoutDrop(free, [outer, parent, free, b], { x: 400, y: 300 }, { x: 350, y: 260 })).toMatchObject({
+      parentId: "root",
+      styles: { position: "relative", left: "auto", top: "auto", transform: "none" },
+    });
+  });
+
   it("leaves an inner parent, excludes descendants, and enters an auto-layout parent", () => {
     const outer = node("outer", null, 0, 0, 900, 700);
     const parent = { ...root, layout: { ...root.layout!, parentId: "outer" } };

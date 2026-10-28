@@ -73,6 +73,17 @@ describe("auto layout intent", () => {
     },
   );
 
+  it("brings free children into a new auto layout at their flow place, not the offset they were drawn at", () => {
+    // A nested frame was placed with a translate; vertical auto layout must
+    // stack it at the top-left, as in a design tool.
+    const parent = { ...node({ display: "block" }, "block"), oid: "parent" };
+    const moved = { ...node({ position: "absolute", left: "0px", top: "0px", transform: "matrix(1, 0, 0, 1, 66, 223)", transformOrigin: "0px 0px" }, "block"), oid: "moved" };
+    const turned = { ...node({ position: "absolute", left: "10px", top: "20px", transform: "matrix(0, 1, -1, 0, 5, 6)", transformOrigin: "0px 0px" }, "block"), oid: "turned" };
+    const updates = designAutoLayoutUpdates([parent], [moved, turned], "column");
+    expect(updates.get("moved")).toMatchObject({ position: "relative", left: "auto", top: "auto", transform: "none" });
+    expect(updates.get("turned")).toMatchObject({ position: "relative", transform: "matrix(0,1,-1,0,0,0)" });
+  });
+
   it("keeps a stretched background and fixed overlays out of a drawn layout", () => {
     const parent = { ...node({ display: "block" }), oid: "parent" };
     const background = {
