@@ -28,7 +28,7 @@ export interface DesignHistoryPresentation {
   // budget. A collected catalog simply falls back to confirmed presentation.
   catalog: WeakRef<DesignWorkspaceSnapshotWire> | null;
   selection: { owner: SelectionOwner; value: DesignHistorySelectionPreview } | null;
-  runtime: ReadonlyMap<string, { sourceVersion: string; frame: DesignRuntimeNodeDetails; details: ReadonlyMap<string, DesignRuntimeNodeDetails>; tree?: readonly DesignRuntimeTreeNode[] }>;
+  runtime: ReadonlyMap<string, { sourceVersion: string; livePreviewSequence: number; frame: DesignRuntimeNodeDetails; details: ReadonlyMap<string, DesignRuntimeNodeDetails>; tree?: readonly DesignRuntimeTreeNode[] }>;
 }
 const store = create<{ byWorkspace: ReadonlyMap<string, DesignHistoryPresentation> }>(() => ({ byWorkspace: new Map() }));
 const MAX_PRESENTATION_BYTES = 1024 * 1024;
@@ -99,13 +99,15 @@ export function presentDesignHistoryRuntime(workspaceId: string, token: object, 
   snapshot: { frame: DesignRuntimeNodeDetails; tree?: readonly DesignRuntimeTreeNode[] };
   details: readonly DesignRuntimeNodeDetails[];
   treeUnchanged?: boolean;
-}): void {
+}, livePreviewSequence = 0): void {
   const previous = designHistoryPresentation(workspaceId);
   if (!previous || previous.token !== token) return;
   const runtime = new Map(previous.runtime);
   const tree = value.treeUnchanged === true ? runtime.get(frame)?.tree : value.snapshot.tree;
   runtime.delete(frame);
-  const projected = { sourceVersion: value.sourceVersion, frame: value.snapshot.frame,
+  // A successful inverse owns older live scalars only for nodes measured by
+  // this report. Keep them in their store so rejection can restore them.
+  const projected = { sourceVersion: value.sourceVersion, livePreviewSequence, frame: value.snapshot.frame,
     details: new Map(value.details.slice(0, 32).map(detail => [detail.oid, detail])), ...(tree ? { tree } : {}) };
   if (retainedBytes(projected) <= MAX_PRESENTATION_BYTES) runtime.set(frame, projected);
   while (runtime.size > 8) runtime.delete(runtime.keys().next().value!);

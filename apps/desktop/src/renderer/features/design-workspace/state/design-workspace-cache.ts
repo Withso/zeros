@@ -69,7 +69,7 @@ import {
   presentDesignHistoryRuntime,
   setDesignHistoryPresentationOwnerReader,
 } from "./design-history-presentation";
-import { clearCommittedDesignLivePreviewStyles } from "./design-live-preview";
+import { clearCommittedDesignLivePreviewStyles, designLivePreviewSequence } from "./design-live-preview";
 import { designSourceVectorCache } from "../design-source-vector";
 import {
   designRuntimeFrameState,
@@ -2493,6 +2493,7 @@ export async function applyDesignHistoryCached(
   direction: "undo" | "redo",
 ): Promise<DesignApiMutationReplyWire> {
   const owner = designMutationOwner(workspaceId);
+  const livePreviewSequence = designLivePreviewSequence();
   const view = useDesignWorkspaceUiStore.getState().byWorkspace[workspaceId];
   const selectionOwner = { ownerRevision: view?.ownerRevision, selectionEvent: view?.selectionEvent };
   const currentOwner = () => designMutationOwner(workspaceId) === owner;
@@ -2532,7 +2533,7 @@ export async function applyDesignHistoryCached(
       void request.then(restored => {
         const prediction = target.deref();
         if (restored && prediction?.kind === "generation" && activeRuntime(prediction.frame) === runtime && visualIntent.target === prediction)
-          presentDesignHistoryRuntime(workspaceId, visualIntent, prediction.frame, restored);
+          presentDesignHistoryRuntime(workspaceId, visualIntent, prediction.frame, restored, livePreviewSequence);
       }).catch(() => { clearDesignHistoryPresentation(workspaceId, visualIntent); });
     }
     return true;

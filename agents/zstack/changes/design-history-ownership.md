@@ -24,3 +24,12 @@
   element and inspector latency reported separately. A fresh dev server avoids
   duplicate module instances after shared-tree HMR. Neither proves native macOS
   menu behavior or compositor latency; those need platform qualification.
+- Pending edits also publish inspector scalars. Inverse details alone do not
+  update a field whose older scalar still wins. Capture the live-publication
+  sequence at history input and suppress older values only for exact nodes in
+  a successful inverse report. Retain raw values for rejection recovery, let
+  later publications win (even the same value), and keep unchanged snapshots
+  stable. The held-write inspector smoke checks the real Radius field and
+  pixels before releasing persistence; lane/preview tests cover both Local
+  owners, delayed reports and recovery. `design-history-pending-inspector.json`
+  retains that regression.

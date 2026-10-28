@@ -35,7 +35,7 @@ import {
   resetDesignRuntimeStoreForTests,
   useDesignRuntimeStore,
 } from "../state/design-runtime-store";
-import { resetDesignLivePreviewForTests } from "../state/design-live-preview";
+import { designLivePreviewValue, publishDesignLivePreviewStyles, resetDesignLivePreviewForTests } from "../state/design-live-preview";
 import { designHistoryPresentation } from "../state/design-history-presentation";
 import {
   resetDesignWorkspaceUiForTests,
@@ -695,18 +695,41 @@ describe("pending history with isolated runtime presentation", () => {
     expect(f.painted).toBe(3); expect(f.cached).toBe(3);
   });
 
-  it("paints Undo while a style write is held and keeps confirmed inspector data authoritative", async () => {
-    const f = fixture(); await f.seed(3); const preview = enablePendingHistoryPresentation(f);
+  it.each([PERSONAL, ORG])("presents the inverse over a pending edit's live inspector scalar in %s", async workspace => {
+    const f = fixture(workspace); await f.seed(3); const preview = enablePendingHistoryPresentation(f);
     const heldEdit = gate(), heldHistory = gate(); f.holdHistory(heldHistory);
+    publishDesignLivePreviewStyles(workspace, "home.html", "hero", { width: "104px" });
     const edit = f.edit(4, heldEdit); await heldEdit.entered;
     await f.runtime.restoreGeneration(version(4), false); // gesture preview
     const undo = f.history("undo");
     expect(preview).toHaveBeenCalledWith(version(3), []);
     expect(f.painted).toBe(3); expect(f.currentEngine()).toBe(3);
+    await vi.waitFor(() => expect(designHistoryPresentation(workspace)?.runtime.get("home.html")?.details.get("hero")?.styles.width).toBe("103px"));
+    // Inspector fields prefer a live scalar to their supplied details. An
+    // older pending edit must yield to the successfully presented inverse.
+    expect(designLivePreviewValue(workspace, "home.html", "hero", "width")).toBeUndefined();
     heldEdit.release(); await edit; await heldHistory.entered;
     expect(f.cached).toBe(4); expect(f.painted).toBe(3);
-    expect(useDesignRuntimeStore.getState().byWorkspace[PERSONAL]?.frames["home.html"]?.detailsByNode.hero?.styles.width).toBe("104px");
+    expect(useDesignRuntimeStore.getState().byWorkspace[workspace]?.frames["home.html"]?.detailsByNode.hero?.styles.width).toBe("104px");
     heldHistory.release(); await undo; expect(f.cached).toBe(3); expect(f.painted).toBe(3);
+  });
+
+  it.each(["104px", "105px"])("keeps later input %s when the pending Undo's runtime report arrives", async width => {
+    const f = fixture(); await f.seed(3); const preview = enablePendingHistoryPresentation(f);
+    const heldEdit = gate(), heldReport = gate();
+    publishDesignLivePreviewStyles(PERSONAL, "home.html", "hero", { width: "104px" });
+    f.edit(4, heldEdit); await heldEdit.entered;
+    const report = preview.getMockImplementation()!;
+    preview.mockImplementationOnce(async source => {
+      const result = await report(source);
+      await heldReport.wait();
+      return result;
+    });
+    f.history("undo"); await heldReport.entered;
+    publishDesignLivePreviewStyles(PERSONAL, "home.html", "hero", { width });
+    heldReport.release();
+    await vi.waitFor(() => expect(designHistoryPresentation(PERSONAL)?.runtime.get("home.html")?.details.get("hero")?.styles.width).toBe("103px"));
+    expect(designLivePreviewValue(PERSONAL, "home.html", "hero", "width")).toBe(width);
   });
 
   it("keeps the second pending Undo painted as the edit and first Undo confirm", async () => {
