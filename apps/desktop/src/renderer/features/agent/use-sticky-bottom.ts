@@ -42,8 +42,8 @@ export interface StickyBottomState {
   /** True when the scroll position is within `threshold` of the
    *  bottom. Drives the visibility of the "Jump to latest" pill. */
   isAtBottom: boolean;
-  /** Programmatic scroll-to-bottom. Used by the jump pill,
-   *  Cmd+End keybind, and any "fresh chat opened" auto-snap. */
+  /** Programmatic scroll-to-bottom. Used by the jump pill
+   *  and any "fresh chat opened" auto-snap. */
   jumpToBottom: (smooth?: boolean) => void;
 }
 

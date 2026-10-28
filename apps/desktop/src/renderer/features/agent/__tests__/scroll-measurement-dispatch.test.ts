@@ -19,6 +19,7 @@ vi.mock("react", async original => ({
 }));
 
 import { CheckpointRail } from "../checkpoint-rail";
+import { scrollChatToBoundary } from "../chat-scroll-navigation";
 import { useStickyBottom } from "../use-sticky-bottom";
 
 const cleanups: Array<() => void> = [];
@@ -85,6 +86,29 @@ function findJump(node: unknown, label: string): (() => void) | undefined {
 }
 
 describe("scroll measurements with an idle React parent", () => {
+  it.each([
+    ["Personal Local", true], ["organization-local", true], ["cloud", undefined],
+  ] as const)("%s panel boundaries cancel latest motion and control following without user checkpoints", (_placement, scope) => {
+    hooks.scope = scope;
+    window.matchMedia = () => ({ matches: false }) as MediaQueryList;
+    const el = scroller(900);
+    const { jumpToBottom } = useStickyBottom(el as unknown as HTMLElement, []);
+    commit();
+    jumpToBottom();
+    scrollChatToBoundary(el as unknown as HTMLElement, "top");
+    el.dispatchEvent(new Event("scrollend"));
+    el.dispatchEvent(new Event("scroll"));
+    grow(el, 3);
+    expect(el.scrollTop).toBe(0);
+
+    scrollChatToBoundary(el as unknown as HTMLElement, "bottom");
+    expect(el.scrollTop).toBe(el.scrollHeight - el.clientHeight);
+    // No scroll event is guaranteed when the reader requests bottom twice.
+    scrollChatToBoundary(el as unknown as HTMLElement, "bottom");
+    grow(el, 3);
+    expect(el.scrollTop).toBe(el.scrollHeight - el.clientHeight);
+  });
+
   it.each([true, undefined])("keyboard navigation follows user checkpoints and their pinned selection (local=%s)", local => {
     hooks.scope = local;
     const el = scroller(1800);

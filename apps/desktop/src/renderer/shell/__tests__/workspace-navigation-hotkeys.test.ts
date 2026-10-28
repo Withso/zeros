@@ -132,11 +132,25 @@ describe("arrow shortcut ownership", () => {
     ["ArrowLeft", true, "side-tab", -1], ["ArrowRight", true, "side-tab", 1],
     ["ArrowUp", true, "workspace", -1], ["ArrowDown", true, "workspace", 1],
     ["ArrowUp", false, "message", "previous"], ["ArrowDown", false, "message", "next"],
-    ["Home", false, "message", "first"], ["End", false, "message", "last"],
   ])("assigns Command%s+%s to one surface", (code, altKey, kind, direction) => {
     const event = { key: code, code, altKey, metaKey: true, ctrlKey: false, shiftKey: false, isComposing: false };
     expect(resolveNavigationShortcut(event)).toEqual({ kind, direction });
-    expect(resolveNavigationShortcut({ ...event, shiftKey: true })).toBeNull();
+    if (kind !== "message") expect(resolveNavigationShortcut({ ...event, shiftKey: true })).toBeNull();
     expect(resolveNavigationShortcut({ ...event, isComposing: true })).toBeNull();
+  });
+
+  it.each([["ArrowUp", "top"], ["ArrowDown", "bottom"]])("scrolls the agent panel with Shift+Command+%s", (key, direction) => {
+    const event = { key, code: key, altKey: false, metaKey: true, ctrlKey: false, shiftKey: true, isComposing: false };
+    expect(resolveNavigationShortcut(event)).toEqual({ kind: "agent-panel-scroll", direction });
+    expect(resolveNavigationShortcut({ ...event, altKey: true })).toBeNull();
+    expect(resolveNavigationShortcut({ ...event, ctrlKey: true })).toBeNull();
+    expect(resolveNavigationShortcut({ ...event, metaKey: false, ctrlKey: true })).toBeNull();
+    expect(resolveNavigationShortcut({ ...event, isComposing: true })).toBeNull();
+  });
+
+  it.each(["Home", "End"])("retires the %s message shortcut for Command and Control", key => {
+    const event = { key, code: key, altKey: false, metaKey: true, ctrlKey: false, shiftKey: false, isComposing: false };
+    expect(resolveNavigationShortcut(event)).toBeNull();
+    expect(resolveNavigationShortcut({ ...event, metaKey: false, ctrlKey: true })).toBeNull();
   });
 });

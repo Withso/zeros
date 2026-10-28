@@ -219,7 +219,7 @@ function spyAnchorPx(viewportH: number): number {
  *  exactly ON TOP of the strip (left edges flush). */
 const RAIL_WIDTH_PX = 28;
 
-import { beginChatScrollNavigation, CHAT_SCROLL_NAVIGATION_EVENT } from "./chat-scroll-navigation";
+import { beginChatScrollNavigation, CHAT_SCROLL_NAVIGATION_EVENT, type ChatScrollNavigation } from "./chat-scroll-navigation";
 
 interface CheckpointRailProps {
   /** False while this chat remains mounted in an off-screen retained layer. */
@@ -453,6 +453,17 @@ export const CheckpointRail = memo(function CheckpointRail({
       pinnedIdRef.current = null;
       schedule();
     };
+    const onNavigation = (event: Event) => {
+      if (!(event as CustomEvent<ChatScrollNavigation>).detail?.boundary) return;
+      cancelSettleRef.current();
+      pinnedIdRef.current = null;
+      spacerForIdRef.current = null;
+      navigatingRef.current = false;
+      // The boundary caller measures scrollHeight as soon as this returns.
+      if (bottomSpacerRef.current > 0) flushSync(() => onBottomSpacerChange(0));
+      schedule();
+    };
+    scrollEl.addEventListener(CHAT_SCROLL_NAVIGATION_EVENT, onNavigation);
     scrollEl.addEventListener("scroll", schedule, { passive: true });
     scrollEl.addEventListener("wheel", onUserScrollInput, { passive: true });
     scrollEl.addEventListener("touchmove", onUserScrollInput, {
@@ -468,6 +479,7 @@ export const CheckpointRail = memo(function CheckpointRail({
     }
     recompute();
     return () => {
+      scrollEl.removeEventListener(CHAT_SCROLL_NAVIGATION_EVENT, onNavigation);
       scrollEl.removeEventListener("scroll", schedule);
       scrollEl.removeEventListener("wheel", onUserScrollInput);
       scrollEl.removeEventListener("touchmove", onUserScrollInput);
@@ -475,7 +487,7 @@ export const CheckpointRail = memo(function CheckpointRail({
       ro?.disconnect();
       if (raf) cancelAnimationFrame(raf);
     };
-  }, [active, scrollEl, recompute]);
+  }, [active, scrollEl, recompute, onBottomSpacerChange]);
 
   // The checkpoint list changed under the spy — new prompt sent, older
   // history paged in, transcript truncated, or the latest prompt

@@ -14,7 +14,7 @@
 //
 // Chord glyphs use the macOS convention (⌃⌥⇧⌘ ordering, then the key):
 //   ⌘ Command · ⇧ Shift · ⌥ Option · ⌃ Control · ↵ Return
-//   ← → ↑ ↓ arrows · Home / End use names, with Fn+arrow alternatives
+//   ← → ↑ ↓ arrows
 // ──────────────────────────────────────────────────────────
 
 export interface ShortcutDef {
@@ -179,16 +179,16 @@ export const SHORTCUT_CATEGORIES: ShortcutCategory[] = [
         keywords: ["jump", "scroll", "down"],
       },
       {
-        id: "first-message",
-        label: "First user message",
-        keys: ["⌘Home", "Fn⌘←"],
-        keywords: ["top", "home", "start", "function"],
+        id: "scroll-agent-panel-top",
+        label: "Scroll agent panel to top",
+        keys: ["⇧⌘↑"],
+        keywords: ["chat", "conversation", "start", "up"],
       },
       {
-        id: "last-message",
-        label: "Last user message",
-        keys: ["⌘End", "Fn⌘→"],
-        keywords: ["bottom", "end", "latest", "function"],
+        id: "scroll-agent-panel-bottom",
+        label: "Scroll agent panel to bottom",
+        keys: ["⇧⌘↓"],
+        keywords: ["chat", "conversation", "end", "latest", "down"],
       },
       {
         id: "send-message",

@@ -5,6 +5,7 @@ export type NavigationShortcut =
   | { kind: "workspace-number"; index: number }
   | { kind: "workspace" | "chat-tab" | "side-tab"; direction: NavigationDirection }
   | { kind: "create-workspace" }
+  | { kind: "agent-panel-scroll"; direction: "top" | "bottom" }
   | { kind: "message"; direction: MessageNavigation };
 
 type NavigationKey = Pick<KeyboardEvent,
@@ -14,10 +15,16 @@ type NavigationKey = Pick<KeyboardEvent,
  * their text. Control remains available to terminal applications; only the
  * existing message-navigation bindings retain their Control alias. */
 export function resolveNavigationShortcut(event: NavigationKey): NavigationShortcut | null {
-  if (event.isComposing || event.shiftKey || (event.metaKey && event.ctrlKey)) return null;
+  if (event.isComposing || (event.metaKey && event.ctrlKey)) return null;
+  if (event.shiftKey) {
+    if (event.metaKey && !event.altKey && (event.key === "ArrowUp" || event.key === "ArrowDown")) {
+      return { kind: "agent-panel-scroll", direction: event.key === "ArrowUp" ? "top" : "bottom" };
+    }
+    return null;
+  }
   if (!event.altKey && (event.metaKey || event.ctrlKey)) {
     const messages: Record<string, MessageNavigation> = {
-      ArrowUp: "previous", ArrowDown: "next", Home: "first", End: "last",
+      ArrowUp: "previous", ArrowDown: "next",
     };
     const direction = messages[event.key];
     if (direction) return { kind: "message", direction };
