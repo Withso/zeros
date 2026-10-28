@@ -22,3 +22,11 @@ it("keeps prompt delivery opt-in and refuses ambiguous rollout configuration", (
   expect(loadConfig({ ...base, CLOUD_V2_PROMPT_OUTBOX_ENABLED: "true" }).cloudV2?.promptOutbox).toBe(true);
   expect(() => loadConfig({ ...base, CLOUD_V2_PROMPT_OUTBOX_ENABLED: "enabled" })).toThrow("CLOUD_V2_PROMPT_OUTBOX_ENABLED");
 });
+it("keeps checkpoint retries off until a deployment enables them, and refuses ambiguous values", () => {
+  const key = generateKeyPairSync("ed25519").privateKey.export({ format: "der", type: "pkcs8" }).toString("base64");
+  const base = { ...env, CLOUD_V2_WORKER_SIGNING_KEY: key };
+  expect(loadConfig(base).cloudV2?.checkpointRetry).toBe(false);
+  expect(loadConfig({ ...base, CLOUD_V2_CHECKPOINT_RETRY_ENABLED: "true" }).cloudV2?.checkpointRetry).toBe(true);
+  expect(loadConfig({ ...base, CLOUD_V2_CHECKPOINT_RETRY_ENABLED: " FALSE " }).cloudV2?.checkpointRetry).toBe(false);
+  expect(() => loadConfig({ ...base, CLOUD_V2_CHECKPOINT_RETRY_ENABLED: "1" })).toThrow("CLOUD_V2_CHECKPOINT_RETRY_ENABLED");
+});

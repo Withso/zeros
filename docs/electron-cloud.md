@@ -39,6 +39,11 @@ an enabled outbox: publish/select this branch's worker or disable the flag for
 that compatibility check. Refresh existing VMs after their turns settle so they
 receive the new runtime and configuration.
 
+[Checkpoint retries](cloud-workspaces.md#lifecycle) stay off here too. Use
+`CLOUD_V2_CHECKPOINT_RETRY_ENABLED=true pnpm electron:cloud` to qualify forking a
+stopped VM on this Boat account: stop a workspace whose checkpoint upload fails,
+then confirm that a fork saves it and is deleted afterwards.
+
 ## Prerequisites
 
 - macOS: `brew install postgresql@18 cloudflared`, plus Docker (Docker Desktop or
