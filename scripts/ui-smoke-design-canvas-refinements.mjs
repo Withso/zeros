@@ -250,6 +250,55 @@ export async function runDesignLayoutDragPointerOwnershipSmoke({
   );
 }
 
+/** A free layer's selection box follows the pointer on every sample, as in a
+ * design tool. The runtime's measurement of each preview arrives a round trip
+ * later; slowing it shows whether the box waits for it (the owner's
+ * "the bounding box is somewhere and the mouse cursor is somewhere"). */
+export async function runDesignFreeDragSyncSmoke({ page, check }) {
+  await openCanvasFixture(page, "autoLayout=1");
+  await page.locator('[data-design-layer-id="home-heading"]').click();
+  const overlay = page.locator('[data-design-element-overlay="home-heading"]');
+  await expect(overlay).toBeVisible();
+  const runtime = page.frameLocator(
+    '[data-design-frame="home.html"] iframe[data-design-document-buffer="displayed"][data-design-document-ready]',
+  );
+  const heading = runtime.locator('[data-oid="home-heading"]');
+  await page.evaluate(async () => {
+    const { designFrameRuntime } = await import("/apps/desktop/src/renderer/platform/bridge/design-frame-runtime.ts");
+    const live = designFrameRuntime("ws_design_harness", "home.html");
+    const preview = live.previewLayout.bind(live);
+    live.previewLayout = (...args) =>
+      preview(...args).then((result) => new Promise((resolve) => setTimeout(() => resolve(result), 120)));
+  });
+  const before = await overlay.boundingBox();
+  const start = { x: before.x + before.width / 2, y: before.y + before.height / 2 };
+  const leftBefore = await heading.evaluate((element) => element.style.left);
+  await page.mouse.move(start.x, start.y);
+  await page.mouse.down();
+  await page.mouse.move(start.x + 6, start.y + 6);
+  // The drag has measured its targets once the layer itself starts moving.
+  await expect.poll(() => heading.evaluate((element) => element.style.left)).not.toBe(leftBefore);
+  const lags = [];
+  for (let step = 1; step <= 8; step++) {
+    const travel = 6 + step * 9;
+    await page.mouse.move(start.x + travel, start.y + travel);
+    const box = await overlay.boundingBox();
+    lags.push(Math.hypot(box.x - (before.x + travel), box.y - (before.y + travel)));
+  }
+  await page.mouse.up();
+  expect(Math.max(...lags), lags.map((lag) => lag.toFixed(1)).join(",")).toBeLessThan(1.5);
+  await expect
+    .poll(async () => {
+      const box = await overlay.boundingBox();
+      const element = await heading.evaluate((node) => node.getBoundingClientRect());
+      const frame = await page.locator('[data-design-frame="home.html"] iframe[data-design-document-buffer="displayed"]').boundingBox();
+      const zoom = frame.width / (await runtime.locator("html").evaluate((node) => node.clientWidth));
+      return Math.hypot(box.x - (frame.x + element.x * zoom), box.y - (frame.y + element.y * zoom));
+    })
+    .toBeLessThan(1.5);
+  check("a free layer's selection box follows the pointer on every sample and settles on the layer", true);
+}
+
 export async function runDesignGestureReleasePositionSmoke({ page, check }) {
   await openCanvasFixture(page);
   await page.locator('[data-design-layer-id="home-hero"]').click();
@@ -772,6 +821,7 @@ export async function runDesignCanvasRefinementsSmoke(options) {
   await runDesignNodeResizeCaptureSmoke(options);
   await runDesignGroupResizePointerOwnershipSmoke(options);
   await runDesignLayoutDragPointerOwnershipSmoke(options);
+  await runDesignFreeDragSyncSmoke(options);
   await runDesignGestureReleasePositionSmoke(options);
   await runDesignCompletedCanvasGesturesSmoke(options);
   await runDesignNoopCanvasResizeSmoke(options);

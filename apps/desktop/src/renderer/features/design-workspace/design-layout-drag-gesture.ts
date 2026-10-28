@@ -282,7 +282,10 @@ export function startDesignLayoutDrag(input: {
       animation = null;
       void flush()
         .then(() => {
-          if (dirty) schedule();
+          // Once measured, the next preview leaves as soon as the runtime is
+          // free: another frame's wait would add a frame of lag to the layer.
+          // Until then a flush sends nothing, so it waits for a frame.
+          if (dirty) schedule(targets !== null);
         })
         .catch((error) => {
           if (!released && !stopped) {
@@ -383,7 +386,17 @@ export function startDesignLayoutDrag(input: {
       x: (pointer.clientX - currentBounds.left) / input.zoom(),
       y: (pointer.clientY - currentBounds.top) / input.zoom(),
     };
-    if (!targets) input.paint({ rect: { ...details.rect, ...origin() } });
+    // A free layer goes exactly where the pointer puts it, so its box is
+    // painted there on every sample, as in a design tool. Waiting for the
+    // runtime's measurement left it behind during continuous motion: each
+    // reply describes a sample the pointer has already left. A flow slot is
+    // only known once layout answers, so it keeps the measured paint.
+    const predicted = resolveDrop?.(point, origin());
+    if (!targets || predicted === null || predicted?.styles.position === "absolute")
+      input.paint(
+        { rect: { ...details.rect, ...origin() } },
+        predicted ? targets?.find((target) => target.oid === predicted.parentId) : undefined,
+      );
     // The external visual follows every pointer, even while the source port
     // finishes its previous request. Late responses cannot move it backwards.
     if (suppressed) presentation?.paint(origin());
