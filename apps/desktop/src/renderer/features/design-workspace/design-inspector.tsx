@@ -302,9 +302,13 @@ function InspectorEditField({
     moved: boolean;
   } | null>(null);
   const previewFrameRef = useRef<number | null>(null);
+  /** The newest value asked for while this frame's preview already left. */
+  const pendingPreviewRef = useRef<string | null>(null);
   const previewDirtyRef = useRef(false);
   const cancelPreviewRef = useRef(onCancelPreview);
   cancelPreviewRef.current = onCancelPreview;
+  const onPreviewRef = useRef(onPreview);
+  onPreviewRef.current = onPreview;
   const [draft, setDraft] = useState(String(value));
   const draftRef = useRef(draft);
   draftRef.current = draft;
@@ -377,6 +381,7 @@ function InspectorEditField({
       window.cancelAnimationFrame(previewFrameRef.current);
       previewFrameRef.current = null;
     }
+    pendingPreviewRef.current = null;
     if (!previewDirtyRef.current) return;
     previewDirtyRef.current = false;
     void Promise.resolve(cancelPreviewRef.current?.()).catch(() => {});
@@ -387,21 +392,32 @@ function InspectorEditField({
       window.cancelAnimationFrame(previewFrameRef.current);
       previewFrameRef.current = null;
     }
+    pendingPreviewRef.current = null;
     // Preserve the last exact live scalar until the authoritative source
     // generation arrives. Clearing here causes a visible value snap-back.
     previewDirtyRef.current = false;
   };
 
+  /** The first value of a scrub or drag previews at once; later ones within
+   * the same frame coalesce into the newest, sent on the next frame. Waiting a
+   * frame before the first one added a frame of lag to every scrub. */
   const preview = (next: string) => {
     if (!onPreview) return;
     previewDirtyRef.current = true;
     if (previewFrameRef.current !== null) {
-      window.cancelAnimationFrame(previewFrameRef.current);
+      pendingPreviewRef.current = next;
+      return;
     }
-    previewFrameRef.current = window.requestAnimationFrame(() => {
+    void Promise.resolve(onPreview(next)).catch(() => {});
+    const trailing = () => {
       previewFrameRef.current = null;
-      void Promise.resolve(onPreview(next)).catch(() => {});
-    });
+      const pending = pendingPreviewRef.current;
+      if (pending === null) return;
+      pendingPreviewRef.current = null;
+      void Promise.resolve(onPreviewRef.current?.(pending)).catch(() => {});
+      previewFrameRef.current = window.requestAnimationFrame(trailing);
+    };
+    previewFrameRef.current = window.requestAnimationFrame(trailing);
   };
 
   /** A value published while this field was focused but untouched is held
