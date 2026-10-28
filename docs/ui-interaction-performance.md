@@ -425,6 +425,20 @@ and validation of a remembered workspace once its exact repository list settles.
 - Create from… publishes the Create route and project atomically; the "open
   the source picker" intent is ephemeral and is consumed or dropped as soon as
   Create shows (or cannot show) that repository.
+- Command+1–9 opens that position among the filtered, sorted workspace rows;
+  headers and pending creates do not count. Command+Option+Up/Down walks the
+  same list beyond the first nine and stops at either end. Collapsed groups
+  retain their destinations, and selecting one reveals its row. Command+N
+  opens Create with the same repository context as the sidebar action.
+  These app-wide shortcuts work from the composer and with a hidden sidebar.
+- Command+Left/Right cycles the focused conversation pane's chat tabs;
+  Command+Option+Left/Right cycles the visible side column's tabs. Keyboard
+  capture follows the native DOM through portaled composers, and overlays
+  keep priority. Retained hidden panes must not handle these keys.
+- Chat Command+Up/Down/Home/End navigates user-message checkpoints through
+  the rail's existing pin, bottom spacer and layout corrections. Keyboard
+  and pointer navigation share one selection; neither measures sticky prompt
+  bubbles or includes assistant/tool rows as message destinations.
 
 ### 2. Treat reads as exact-key server state
 

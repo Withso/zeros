@@ -87,6 +87,7 @@ import {
 } from "../../shared/ui/primitives";
 import { cn } from "../../shared/ui";
 import { ActivityScope } from "../../shared/ui/loading/activity-scope";
+import type { MessageNavigation } from "../../shared/lib/navigation-shortcuts";
 
 export interface Checkpoint {
   /** The user-prompt message id — matches the `data-checkpoint-id`
@@ -245,6 +246,8 @@ interface CheckpointRailProps {
    *  before the parent's restore layout effect runs) rather than a prop so
    *  the memo isn't churned. */
   recomputeRef?: React.MutableRefObject<(() => void) | null>;
+  /** Keyboard jumps share the rail's user-message identity, pin and spacer. */
+  navigateRef?: React.MutableRefObject<((direction: MessageNavigation) => boolean) | null>;
 }
 
 export const CheckpointRail = memo(function CheckpointRail({
@@ -254,6 +257,7 @@ export const CheckpointRail = memo(function CheckpointRail({
   bottomSpacerPx,
   onBottomSpacerChange,
   recomputeRef,
+  navigateRef,
 }: CheckpointRailProps) {
   const [activeIndex, setActiveIndex] = useState(0);
   const local = useContext(ActivityScope) !== undefined;
@@ -635,6 +639,22 @@ export const CheckpointRail = memo(function CheckpointRail({
       recomputeRef.current = null;
     };
   }, [active, recomputeRef, recompute]);
+
+  useLayoutEffect(() => {
+    if (!navigateRef) return;
+    navigateRef.current = active && scrollEl ? direction => {
+      const rows = checkpointsRef.current;
+      if (rows.length === 0) return false;
+      // Scroll input and repeated keypresses can precede React's next render.
+      // The spy's published index includes the current explicit rail pin.
+      recompute();
+      const index = direction === "first" ? 0 : direction === "last" ? rows.length - 1
+        : Math.max(0, Math.min(rows.length - 1, publishedIndexRef.current + (direction === "previous" ? -1 : 1)));
+      scrollToCheckpoint(rows[index].id);
+      return true;
+    } : null;
+    return () => { navigateRef.current = null; };
+  }, [active, navigateRef, recompute, scrollEl, scrollToCheckpoint]);
 
   // Keep the active row visible inside the (scrollable) popup — fires
   // when the popup mounts and again whenever the active row moves.
