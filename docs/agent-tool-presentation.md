@@ -715,7 +715,16 @@ suites, `features/agent/__tests__/fallback-transcript.test.ts`,
   routine transport/wait records and synthetic feedback cannot prove recovery.
   A terminal tool result without an observed invocation also cannot prove
   recovery; retain its outcome without clearing the failure or Retry action.
-- Chat banners are for what the user can act on now. The failure card, with
+- Chat banners are for failures that block startup or the current turn, plus
+  authentication and unconfirmed Stop actions. An explicit provider review gate
+  remains a banner even when its paused turn is marked recoverable.
+  Across Claude, Codex and Cursor,
+  recoverable warnings, optional integration setup and child notices use plain
+  status text without a tinted banner; keep their details and relevant Settings
+  action readable. This applies to Local, organization-local and cloud chats.
+  MCP startup diagnostics stay in the integration status surface; a genuine
+  configuration conflict that prevents safe startup remains a blocking failure.
+  The failure card, with
   its recovery actions, belongs to the latest turn only; once the agent works
   on a newer turn it retires to the footer's one-line status (for example
   **CONNECTION LOST**), so history stays honest without stacking banners.

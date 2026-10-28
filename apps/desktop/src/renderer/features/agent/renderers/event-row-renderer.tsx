@@ -60,7 +60,7 @@ import { nativeAgentWait, toolRecord } from "./native-tool-presentation";
 import { pendingChecksMessage } from "./tool-pending-checks";
 import { toolPresentationReady } from "./tool-readiness";
 import { isTransientConnectionNotice } from "../transcript-notices";
-import { AgentNotice, AgentNoticeText, AGENT_NOTICE_ACTION } from "../agent-notice";
+import { AgentNotice, AgentNoticeText } from "../agent-notice";
 import { getLang } from "./syntax";
 import type { Renderer, RendererContext } from "./types";
 
@@ -136,17 +136,23 @@ export const EventRowRenderer: Renderer<AgentMessage> = memo(
       );
     }
     if (message.kind === "error_notice" && !isTransientConnectionNotice(message)) {
-      if (message.code?.startsWith("claude-rate-limit:"))
-        return <div role="status" className="text-fg2 py-1 text-sm" data-provider-usage-notice="">
+      const usage = message.code?.startsWith("claude-rate-limit:");
+      const chromeSetup = message.code === "claude-chrome-setup";
+      // A provider can pause a recoverable turn for an explicit review.
+      // Keep that gate and terminal root failures prominent; optional setup,
+      // automatic recovery and child notices remain plain status everywhere.
+      const blocksChat = !message.parentToolId && (
+        (message.severity === "error" && !message.recoverable) || message.code === "strict_safety_review"
+      );
+      if (!blocksChat || usage)
+        return <div role="status" className="text-fg2 py-1 text-sm" data-provider-notice=""
+          data-provider-usage-notice={usage ? "" : undefined}
+          data-chrome-setup-notice={chromeSetup ? "" : undefined}>
           <AgentNoticeText message={message.message} />
-        </div>;
-      if (message.code === "claude-chrome-setup") return (
-        <AgentNotice message={message.message} data-chrome-setup-notice="">
-          {ctx.openBrowserSettings ? <Button type="button" variant="ghost" size="sm" className={cn(AGENT_NOTICE_ACTION, "mt-1")} onClick={ctx.openBrowserSettings}>
+          {chromeSetup && ctx.openBrowserSettings ? <Button type="button" variant="ghost" size="sm" className="-mx-1.5 mt-1" onClick={ctx.openBrowserSettings}>
             <Settings className="size-3.5" aria-hidden="true" /> Open Settings
           </Button> : null}
-        </AgentNotice>
-      );
+        </div>;
       return <AgentNotice message={message.message} />;
     }
     if (message.kind === "tool") {

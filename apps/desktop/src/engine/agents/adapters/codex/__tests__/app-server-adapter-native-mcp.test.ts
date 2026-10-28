@@ -163,6 +163,34 @@ const configOfThreadStart = (index = 0): Record<string, unknown> =>
 describe("CodexAppServerAdapter native extension loading", () => {
   afterEach(() => vi.unstubAllEnvs());
 
+  it.each(["/tmp/personal/project", "/tmp/organization/project"])(
+    "starts a chat in %s with the verified Browser environment intact",
+    async (cwd) => {
+      const adapter = makeAdapter();
+      rt.mcpServers = {
+        node_repl: {
+          command: "/opt/verified/node_repl", args: [], enabled: true,
+          environment_id: "local", startup_timeout_sec: 120, tool_timeout_sec: null,
+          env: { NODE_REPL_NODE_PATH: "/opt/verified/node" },
+        },
+      };
+      try {
+        await adapter.newSession({
+          cwd,
+          mcpServers: [{
+            name: "node_repl", transport: "stdio", command: "/opt/verified/node_repl",
+            startupTimeoutSec: 120, env: { NODE_REPL_NODE_PATH: "/opt/verified/node" },
+          }],
+        });
+        expect(rt.methodOrder.indexOf("config/read")).toBeLessThan(rt.methodOrder.indexOf("thread/start"));
+        expect(rt.startThreadParams).toHaveLength(1);
+        expect(configOfThreadStart().mcp_servers ?? {}).not.toHaveProperty("node_repl");
+      } finally {
+        await adapter.dispose();
+      }
+    },
+  );
+
   it.each(["account", "local", "imported"] as const)(
     "carries admitted %s bridge provenance into the session inventory",
     async (source) => {

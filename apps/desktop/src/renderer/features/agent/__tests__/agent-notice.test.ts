@@ -40,7 +40,7 @@ function classList(tag: string | undefined): string[] {
 }
 
 const renderedNotices = () => [
-  renderToStaticMarkup(createElement(EventRowRenderer, { message: notice(), ctx })),
+  renderToStaticMarkup(createElement(EventRowRenderer, { message: notice({ severity: "error", recoverable: false }), ctx })),
   renderToStaticMarkup(
     createElement(TurnFailureCard, {
       failure: { kind: "protocol-error", message: "Cloud command failed.", newChatAllowed: true },
@@ -55,6 +55,55 @@ const surfaceOf = (html: string) =>
   classList(html.match(/<div[^>]*\sdata-agent-notice\b[^>]*>/)?.[0]);
 
 describe("chat notices", () => {
+  describe.each(["Claude", "Codex", "Cursor"])("%s banner policy", (provider) => {
+    it.each(["/local/personal", "/local/organization", "cloud://organization/workspace"])(
+      "keeps nonblocking notices out of banners in %s",
+      (attachmentCwd) => {
+        for (const severity of ["warning", "error"] as const) {
+          const message = `${provider}: An optional integration is unavailable; chat can continue.`;
+          const html = renderToStaticMarkup(createElement(EventRowRenderer, {
+            message: notice({ severity, recoverable: true, message }),
+            ctx: { ...ctx, attachmentCwd },
+          }));
+          expect(html).toContain(message);
+          expect(html).toContain('role="status"');
+          expect(html).not.toContain("data-agent-notice");
+          expect(html).not.toContain("bg-brown-bg");
+          expect(html).not.toContain("Retry");
+        }
+      },
+    );
+
+    it("keeps blocking failures visible", () => {
+      const message = `${provider}: The agent could not start.`;
+      const html = renderToStaticMarkup(createElement(EventRowRenderer, {
+        message: notice({ severity: "error", recoverable: false, message }), ctx,
+      }));
+      expect(html).toContain("data-agent-notice");
+      expect(html).toContain(message);
+    });
+  });
+
+  it("keeps warnings and child errors readable without promoting them to chat blockers", () => {
+    for (const message of [
+      notice({ severity: "warning", recoverable: false }),
+      notice({ severity: "error", recoverable: false, parentToolId: "child-agent" }),
+    ]) {
+      const html = renderToStaticMarkup(createElement(EventRowRenderer, { message, ctx }));
+      expect(html).toContain("The provider is temporarily unavailable.");
+      expect(html).not.toContain("data-agent-notice");
+    }
+  });
+
+  it("keeps an explicit provider review gate visible even while its turn is recoverable", () => {
+    const message = "Codex requires an explicit safety review before continuing.";
+    const html = renderToStaticMarkup(createElement(EventRowRenderer, {
+      message: notice({ code: "strict_safety_review", severity: "warning", recoverable: true, message }), ctx,
+    }));
+    expect(html).toContain(message);
+    expect(html).toContain("data-agent-notice");
+  });
+
   it("offers Browser use settings only for Claude's Chrome setup notice", () => {
     const html = renderToStaticMarkup(createElement(EventRowRenderer, {
       message: notice({ code: "claude-chrome-setup", message: "Set up Claude in Chrome in Settings to let Claude use your browser." }),
@@ -63,6 +112,8 @@ describe("chat notices", () => {
     expect(html).toContain("Open Settings");
     expect(html).toContain("lucide-settings");
     expect(html).not.toContain("Retry");
+    expect(html).not.toContain("data-agent-notice");
+    expect(html).not.toContain("bg-brown-bg");
     expect(renderToStaticMarkup(createElement(EventRowRenderer, { message: notice(), ctx }))).not.toContain("Open Settings");
   });
   it("share the sent message's sans text, 12px corners and 8px/12px padding", () => {

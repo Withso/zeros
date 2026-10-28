@@ -1,0 +1,9 @@
+{
+  "id": "codex-mcp-json-tables",
+  "kind": "replay",
+  "area": "agent-adapters",
+  "fixedBy": "pr:758",
+  "symptom": "Codex chat startup rejects matching native Browser environment and MCP header maps because TOML tables and decoded JSON objects have different JavaScript prototypes.",
+  "rule": "Compare complete MCP wire values across serialization formats and test matching nonempty maps alongside inherited-field refusals. See changes/mcp-json-config-and-chat-notices.md.",
+  "check": "pnpm test:git apps/desktop/src/engine/agents/adapters/codex/__tests__/mcp-overrides.test.ts apps/desktop/src/engine/agents/adapters/codex/__tests__/app-server-adapter-native-mcp.test.ts"
+}

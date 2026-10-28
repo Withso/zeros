@@ -166,6 +166,69 @@ describe("buildMcpServerOverrides — Codex -c MCP config", () => {
 });
 
 describe("native MCP scoping — the Zeros registry is the whole set", () => {
+  it.each([
+    {
+      name: "node_repl",
+      server: {
+        name: "node_repl", transport: "stdio", command: "/opt/verified/node_repl",
+        args: [], startupTimeoutSec: 120,
+        env: { NODE_REPL_NODE_PATH: "/opt/verified/node", BROWSER_USE_AVAILABLE_BACKENDS: "iab" },
+      },
+      configured: {
+        command: "/opt/verified/node_repl", args: [], startup_timeout_sec: 120,
+        env: { BROWSER_USE_AVAILABLE_BACKENDS: "iab", NODE_REPL_NODE_PATH: "/opt/verified/node" },
+      },
+    },
+    {
+      name: "organization_tools",
+      server: {
+        name: "organization_tools", transport: "http", url: "https://tools.example.test/mcp",
+        headers: { "X-Workspace": "fixture" },
+      },
+      configured: { url: "https://tools.example.test/mcp", http_headers: { "X-Workspace": "fixture" } },
+    },
+    {
+      name: "zeros_browser",
+      server: {
+        name: "zeros_browser", transport: "http", url: "http://127.0.0.1:43124/mcp",
+        headersFromEnv: { Authorization: "ZEROS_BROWSER_TOOLS_CAPABILITY" }, toolTimeoutSec: 600,
+      },
+      configured: {
+        url: "http://127.0.0.1:43124/mcp",
+        env_http_headers: { Authorization: "ZEROS_BROWSER_TOOLS_CAPABILITY" }, tool_timeout_sec: 600,
+      },
+    },
+  ] satisfies Array<{ name: string; server: McpServerRegistration; configured: Record<string, unknown> }>)(
+    "admits matching $name settings returned over the native JSON wire",
+    async ({ name, server, configured }) => {
+      // Captured config/read shape from the pinned CLI. JSON tables have a
+      // different JS prototype from smol-toml tables despite identical values.
+      const wire = JSON.parse(JSON.stringify({
+        [name]: { environment_id: "local", enabled: true, tool_timeout_sec: null, ...configured },
+      }));
+      const surface = await readNativeMcpSurface(runtime(wire), "/tmp/project", {
+        ...noPlugins, requireConfig: true, registeredServers: [server],
+      });
+      expect(surface.registeredServerNames).toEqual([name]);
+      expect(scopeNativeMcpSurface(surface, { serverNames: surface.registeredServerNames }).serverNames).not.toContain(name);
+    },
+  );
+
+  it.each([
+    { NODE_REPL_NODE_PATH: "/opt/unapproved/node" },
+    { NODE_REPL_NODE_PATH: "/opt/verified/node", NODE_OPTIONS: "--require=./unapproved" },
+  ])("refuses changed or inherited environment values after native JSON decoding", async (env) => {
+    await expect(readNativeMcpSurface(runtime({
+      node_repl: { command: "/opt/verified/node_repl", env },
+    }), "/tmp/project", {
+      ...noPlugins,
+      registeredServers: [{
+        name: "node_repl", transport: "stdio", command: "/opt/verified/node_repl",
+        env: { NODE_REPL_NODE_PATH: "/opt/verified/node" },
+      }],
+    })).rejects.toThrow(/MCP configuration conflict for node_repl/);
+  });
+
   it("refuses inherited native execution fields on a registered name", async () => {
     const server = { name: "owned", transport: "stdio" as const, command: "approved" };
     for (const extra of [{ args: ["unapproved"] }, { env: { NODE_OPTIONS: "--require=./unapproved" } }, { cwd: "/unapproved" }, { default_tools_approval_mode: "approve" }]) {
