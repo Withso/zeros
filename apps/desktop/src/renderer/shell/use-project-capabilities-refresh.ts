@@ -8,6 +8,7 @@ import {
   useWorkspaceStore,
 } from "../state/workspace-store";
 import { triggerGitRefresh } from "./use-git-refresh-key";
+import { onActiveBridgeConnected } from "../platform/bridge/active-bridge";
 
 /** One shell-level observer, independent of the visible pane. Coalesce focus
  * and visibility notifications; bound native reads rather than probing rows. */
@@ -36,7 +37,7 @@ export function useProjectCapabilitiesRefresh(): void {
           document.visibilityState === "visible" &&
           next < projects.length
         ) {
-          const changed = await refreshProjectCapabilities(projects[next++]);
+          const changed = await refreshProjectCapabilities(projects[next++], () => !disposed && document.visibilityState === "visible");
           if (changed) notifyProjectsChanged();
         }
       };
@@ -60,10 +61,12 @@ export function useProjectCapabilitiesRefresh(): void {
       }, 50);
     };
     schedule();
+    const stopConnected = onActiveBridgeConnected(schedule);
     window.addEventListener("focus", schedule);
     document.addEventListener("visibilitychange", schedule);
     return () => {
       disposed = true;
+      stopConnected();
       if (scheduled !== undefined) clearTimeout(scheduled);
       window.removeEventListener("focus", schedule);
       document.removeEventListener("visibilitychange", schedule);

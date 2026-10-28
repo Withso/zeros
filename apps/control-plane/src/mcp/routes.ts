@@ -44,7 +44,11 @@ export function createMcpRoutes(store: McpStore, oauth: McpOAuth): Hono {
     const org = c.req.param("organization"), user = c.get("user").id, id = c.req.param("id");
     return c.json(await oauth.authorizationForRepository(org, user, input.repository, id, input.force));
   });
-  app.put(`${base}/:id`, async c => c.json({ extension: await store.put(c.req.param("organization"), c.get("user").id, c.req.param("id"), await c.req.json().catch(() => null)) }));
+  app.put(`${base}/:id`, async c => {
+    const placement = z.enum(["local", "cloud"]).default("local").safeParse(c.req.query("githubPlacement"));
+    if (!placement.success) throw new HttpError(422, "invalid_mcp_request", "Choose a GitHub connection.");
+    return c.json({ extension: await store.put(c.req.param("organization"), c.get("user").id, c.req.param("id"), await c.req.json().catch(() => null), placement.data) });
+  });
   app.delete(`${base}/:id`, async c => {
     const input = await body(c, z.object({ expectedRevision: z.number().int().positive().safe() }).strict());
     await store.remove(c.req.param("organization"), c.get("user").id, c.req.param("id"), input.expectedRevision);

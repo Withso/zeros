@@ -51,6 +51,11 @@ export function signalGroup(pid, signal) {
   try {
     process.kill(-pid, signal);
   } catch (error) {
-    if (error.code !== "ESRCH") throw error;
+    if (error.code === "ESRCH") return;
+    // macOS can retain an unsignalable exiting group after its tasks retire.
+    // A denied signal is harmless only when an independent process-table
+    // probe confirms that no live member remains. Failed probes stay live.
+    if (error.code === "EPERM" && !groupAlive(pid)) return;
+    throw error;
   }
 }

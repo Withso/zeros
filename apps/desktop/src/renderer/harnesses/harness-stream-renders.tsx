@@ -59,6 +59,7 @@ const chats = ["A", "B"].map((name) => ({
 }));
 window.__ZEROS_NATIVE__ = { on: () => noop, invoke: async <T,>() => null as T };
 setActiveBridge({
+  executionIdentity: { kind: "local", sidecar: "active" },
   status: "connected",
   on: () => noop,
   onStatusChange: () => noop,

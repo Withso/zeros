@@ -1,0 +1,9 @@
+{
+  "id": "unpublished-workspace-github-actions",
+  "kind": "replay",
+  "area": "renderer",
+  "fixedBy": "pr:730",
+  "symptom": "Unpublished Git workspaces used the branch icon and offered PR creation from the workbench, Summary, sidebar preview and dashboard despite having no GitHub remote.",
+  "rule": "Require a GitHub destination for PR creation, show a Local badge for unpublished repositories, and preserve configured remotes without an origin through shared exact-repository metadata. See agents/zstack/changes/unpublished-workspace-github-actions.md.",
+  "check": "pnpm exec vitest run --config vitest.config.ts apps/desktop/src/renderer/shell/__tests__/workspace-header.test.ts apps/desktop/src/renderer/shell/pr/__tests__/pr-status-row-local.test.ts apps/desktop/src/renderer/shell/pr/__tests__/create-pr-button.test.ts apps/desktop/src/renderer/shell/conversation/__tests__/summary-git-status.test.ts apps/desktop/src/renderer/shared/lib/__tests__/workspace-card-action.test.ts"
+}

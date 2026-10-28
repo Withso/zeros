@@ -32,7 +32,7 @@ export class InboundBridge {
   private failureWindow = 0;
 
   constructor(private readonly options: Options) {
-    this.websockets.on("headers", headers => { headers.push("X-Zeros-Worker-Features: mcp-v1"); });
+    this.websockets.on("headers", headers => { headers.push("X-Zeros-Worker-Features: mcp-v1,workspace-setup-v1,checkout-v2"); });
   }
 
   async start(receive: (frame: CloudV2ControlFrame) => Promise<void>): Promise<AddressInfo> {

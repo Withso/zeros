@@ -54,7 +54,11 @@ export function createDesignPageProjection() {
     if (recentFrames.size > 64)
       recentFrames.delete(recentFrames.keys().next().value!);
     const result =
-      frames === normalized.frames ? normalized : { ...normalized, frames };
+      frames === normalized.frames && !normalized.preparation ? normalized : { ...normalized, frames,
+        ...(normalized.preparation ? { preparation: { ...normalized.preparation,
+          descriptions: normalized.preparation.descriptions.filter((frame) => frame.pageId === page.id),
+        } } : {}),
+      };
     const byPage =
       projections.get(snapshot) ??
       new Map<string, DesignWorkspaceSnapshotWire>();

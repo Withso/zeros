@@ -59,6 +59,7 @@ export class CloudPromptChannel {
   private flushing?: Promise<void>;
   private refreshing?: Promise<void>;
   private stopsPreparing = 0;
+  private readonly cancellablePreparations = new Set<AbortController>();
   constructor(readonly owner: CloudPromptOwner, private readonly journal: CloudPromptJournal, private readonly api: CloudPromptApi,
     private readonly current: () => boolean, private readonly changed: (record: PromptJournalRecord) => void) {
     this.snapshot = emptyPromptJournal(owner);
@@ -79,12 +80,22 @@ export class CloudPromptChannel {
     const next = this.preparing.then(work);
     this.preparing = next.catch(() => {}); return next;
   }
-  enqueue(prepare: () => Promise<CloudV2Prompt>): Promise<string> {
+  enqueue(prepare: () => Promise<CloudV2Prompt>, options?: { cancelOnStop?: boolean }): Promise<string> {
     // Reserve order before attachment reads can yield. The composer releases
     // its draft only after this transaction commits, never on a cache write.
+    const controller = new AbortController();
+    if (options?.cancelOnStop) this.cancellablePreparations.add(controller);
     return this.ordered(async () => {
+      controller.signal.throwIfAborted();
       await this.load(); this.assertOwner();
-      const payload = CloudV2PromptSchema.parse(await prepare()); this.assertOwner();
+      controller.signal.throwIfAborted();
+      const prepared = await new Promise<CloudV2Prompt>((resolve, reject) => {
+        const abort = () => reject(controller.signal.reason);
+        controller.signal.addEventListener("abort", abort, { once: true });
+        void Promise.resolve().then(prepare).then(resolve, reject).finally(() => controller.signal.removeEventListener("abort", abort));
+      });
+      controller.signal.throwIfAborted();
+      const payload = CloudV2PromptSchema.parse(prepared); this.assertOwner();
       if (payload.chatId !== this.owner.chatId) throw new Error("This message belongs to another conversation.");
       if (new TextEncoder().encode(JSON.stringify(payload)).length > CLOUD_V2_MAX_PROMPT_BYTES) throw new Error("This message is too large. Send fewer attachments.");
       await this.edit(record => {
@@ -94,9 +105,13 @@ export class CloudPromptChannel {
           { payload, order: record.nextOrder, phase: "pending", updatedAt: Date.now() }] };
       });
       return payload.userMessageId;
-    });
+    }).finally(() => this.cancellablePreparations.delete(controller));
   }
   stop(intent?: { id: string; turnId: string | null; requestedAt: number; startedAt: number }): Promise<void> {
+    const oldStop = intent && this.snapshot.entries.some(entry => entry.cancelRequested && entry.payload.userMessageId === intent.turnId);
+    if (!this.stopsPreparing && !this.snapshot.stop && !oldStop) {
+      for (const controller of this.cancellablePreparations) controller.abort(new Error("Sending was cancelled. The attachment remains in your composer."));
+    }
     this.stopsPreparing++;
     return this.ordered(async () => {
       await this.load();

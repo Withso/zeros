@@ -6,6 +6,7 @@ export async function runSubscriptionSmoke({ page, check }) {
   const base = new URL(page.url()).origin;
   await runProviderIdentitySmoke({ page, check });
   await runProviderKeyRefreshSmoke({ page, check });
+  await runProviderApiKeySourceSmoke({ page, check });
   await runQueueSmoke({ page, check });
   await page.goto(
     `${base}/apps/desktop/src/renderer/harnesses/harness-model-menu.html?disconnected=claude`,
@@ -491,6 +492,81 @@ export async function runProviderKeyRefreshSmoke({ page, check }) {
   await updateKey(false);
   await expect(configured).toHaveCount(0);
   check("Provider key presence follows shared credential updates without populating the secret input", true);
+}
+
+export async function runProviderApiKeySourceSmoke({ page, check }) {
+  const base = new URL(page.url()).origin;
+  const fixture = `${base}/apps/desktop/src/renderer/harnesses/harness-subscription.html`;
+  for (const [provider, vendor, variable] of [
+    ["claude", "Anthropic", "ANTHROPIC_API_KEY"],
+    ["codex", "OpenAI", "OPENAI_API_KEY"],
+    ["cursor", "Cursor", "CURSOR_API_KEY"],
+  ]) {
+    await page.goto(`${fixture}?apiKey=${provider}`);
+    const connection = page.getByRole("button", {
+      name: new RegExp(`^(Configure ${provider === "claude" ? "Claude" : provider === "codex" ? "Codex" : "Cursor"}|Connected via API)$`),
+    });
+    await connection.click();
+    const dialog = page.getByRole("dialog");
+    await expect(dialog.getByLabel(`${vendor} API key`, { exact: true })).toBeEnabled();
+    expect(await dialog.innerText()).toContain(`${vendor} API key provided by ${variable}`);
+    await expect(page.getByRole("button", { name: "Connected via API", exact: true, includeHidden: true })).toHaveCount(1);
+    await expect(dialog.getByText(`No ${vendor} API key configured`, { exact: true })).toHaveCount(0);
+    await expect(dialog.getByLabel(`${vendor} API key`, { exact: true })).toHaveValue("");
+    await expect(dialog.getByRole("button", { name: "Remove", exact: true })).toHaveCount(0);
+    await dialog.getByLabel(`${vendor} API key`, { exact: true }).fill("fixture-saved-key");
+    await dialog.getByRole("button", { name: "Save", exact: true }).click();
+    await expect(dialog.getByText(`${vendor} API key configured`, { exact: true })).toBeVisible();
+    await expect(dialog.getByLabel(`${vendor} API key`, { exact: true })).toHaveValue("");
+    await dialog.getByRole("button", { name: "Remove", exact: true }).click();
+    await expect(dialog.getByText(`${vendor} API key provided by ${variable}`, { exact: true })).toBeVisible();
+    await expect(dialog.getByRole("button", { name: "Remove", exact: true })).toHaveCount(0);
+    check(`${provider}: Settings reports an inherited API key and manages only the saved key`, true);
+  }
+
+  for (const read of ["hold", "error"]) {
+    await page.goto(`${fixture}?apiKey=cursor&keySource=none&keyRead=${read}`);
+    await page.getByRole("button", { name: "Configure Cursor", exact: true }).click();
+    const dialog = page.getByRole("dialog");
+    await expect(dialog.getByText(read === "hold" ? "Checking Cursor API key…" : "Could not check the saved Cursor API key", { exact: true })).toBeVisible();
+    await expect(dialog.getByText("No Cursor API key configured", { exact: true })).toHaveCount(0);
+    await page.evaluate(() => window.__keyPresence.resume());
+    await expect(dialog.getByText("No Cursor API key configured", { exact: true })).toBeVisible();
+    check(`Cursor: ${read} credential read is not reported as a missing key and recovers`, true);
+  }
+
+  await page.goto(`${fixture}?apiKey=cursor&keySource=none&keyRead=hold`);
+  await page.getByRole("button", { name: "Configure Cursor", exact: true }).click();
+  const dialog = page.getByRole("dialog");
+  await expect(dialog.getByText("Checking Cursor API key…", { exact: true })).toBeVisible();
+  await expect.poll(() => page.evaluate(() => window.__keyPresence.pending())).toBeGreaterThan(0);
+  await page.keyboard.press("Escape");
+  await page.getByRole("button", { name: "Toggle retained surface", exact: true }).click();
+  const hiddenReads = await page.evaluate(() => window.__keyPresence.reads());
+  await page.evaluate(async () => {
+    await window.__ZEROS_NATIVE__.invoke("keychain_set", { account: "cursor-api-key", value: "fixture-shared-key" });
+    window.__keyPresence.setMode(null);
+    window.dispatchEvent(new Event("focus"));
+  });
+  expect(await page.evaluate(() => window.__keyPresence.reads())).toBe(hiddenReads);
+  await page.getByRole("button", { name: "Toggle retained surface", exact: true }).click();
+  await page.getByRole("button", { name: /^(Configure Cursor|Connected via API)$/ }).click();
+  const remove = dialog.getByRole("button", { name: "Remove", exact: true });
+  await expect(remove).toBeVisible();
+  expect(await page.getByRole("button", { name: "Connected via API", exact: true, includeHidden: true }).count()).toBe(1);
+  // Settle the original missing-key read only after the new saved key is shown.
+  await page.evaluate(async () => {
+    window.__keyPresence.release();
+    await new Promise(requestAnimationFrame);
+  });
+  await expect(remove).toBeVisible();
+  const confirmedReads = await page.evaluate(() => window.__keyPresence.reads());
+  await page.evaluate(() => window.__keyPresence.setMode("error"));
+  await expect.poll(() => page.evaluate(() => window.__keyPresence.reads())).toBeGreaterThan(confirmedReads);
+  await expect(remove).toBeVisible();
+  await expect(dialog.getByText("Cursor API key configured", { exact: true })).toBeVisible();
+  await expect(dialog.getByLabel("Cursor API key", { exact: true })).toHaveValue("");
+  check("Cursor: hidden Settings pauses presence reads and retains the new saved key through stale replies and refresh failures", true);
 }
 
 export async function runQueueSmoke({ page, check }) {

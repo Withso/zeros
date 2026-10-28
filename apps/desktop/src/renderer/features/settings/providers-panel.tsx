@@ -82,6 +82,10 @@ import { useSubscriptionStatus, warmSubscriptionStatus } from "./use-subscriptio
 import { nativeInvoke, useNativeRuntime } from "../../platform/runtime";
 import { getSetting, setSetting } from "../../platform/settings";
 import {
+  documentIsVisible,
+  useDocumentActive,
+} from "../../state/use-document-active";
+import {
   deleteSecret,
   hasSecret,
   setSecret,
@@ -286,6 +290,7 @@ export function ProvidersPanel({
 function LocalProvidersPanel({ surfaceActive }: { surfaceActive: boolean }) {
   const bridge = useBridge();
   const agents = useAgentsSnapshot();
+  const visible = useDocumentActive(surfaceActive);
   // Persisted across reloads — Cmd+R on the Codex tab lands you on
   // Codex, not Claude. Type-guarded on read so a stale id from a
   // removed provider can never break the panel.
@@ -318,36 +323,36 @@ function LocalProvidersPanel({ surfaceActive }: { surfaceActive: boolean }) {
     listAgentsRef.current = listAgents;
   }, [listAgents]);
 
-  // Initial load — fires once on mount. The agents-cache already
-  // de-dupes concurrent in-flight calls via its module-level
-  // `inFlight` promise, so HMR storms / rapid remounts coalesce on
-  // their own; no debounce needed here. (An earlier debounce kept
-  // getting cancelled by listAgents identity churn before the timer
-  // could fire, leaving the panel stuck on "Loading providers".)
+  // A sibling app can change shared credentials while Settings is hidden or
+  // another owner is selected. Revalidate on reveal, retaining the confirmed
+  // snapshot while the shared refresh waits for any older in-flight read.
   useEffect(() => {
-    if (!surfaceActive) return;
-    void loadAgents(listAgentsRef.current).catch(() => {
+    if (!visible) return;
+    void refreshAgents(listAgentsRef.current).catch(() => {
       /* surfaced by the cache via toast */
     });
-  }, [surfaceActive]);
+  }, [visible]);
 
   useEffect(() => {
-    if (!surfaceActive) return;
+    if (!visible) return;
     return subscribeProviderAuth(() => {
+      if (!documentIsVisible()) return;
       void refreshAgents(listAgentsRef.current).catch(() => {});
     });
-  }, [surfaceActive]);
+  }, [visible]);
 
   // Window-focus refresh — so coming back from a Terminal sign-in
   // flips the dot without a manual click. Debounced 300 ms so rapid
   // focus/blur (alt-tab churn) doesn't fan out probes. Empty deps so
   // the listener attaches once; we read the latest callback via ref.
   useEffect(() => {
-    if (!surfaceActive) return;
+    if (!visible) return;
     let t: number | null = null;
     const onFocus = () => {
+      if (!documentIsVisible()) return;
       if (t !== null) window.clearTimeout(t);
       t = window.setTimeout(() => {
+        if (!documentIsVisible()) return;
         invalidateAgentsCache();
         void loadAgents(listAgentsRef.current).catch(() => {});
       }, 300);
@@ -357,7 +362,7 @@ function LocalProvidersPanel({ surfaceActive }: { surfaceActive: boolean }) {
       if (t !== null) window.clearTimeout(t);
       window.removeEventListener("focus", onFocus);
     };
-  }, [surfaceActive]);
+  }, [visible]);
 
   // Bridge-reconnect refresh. The mount-effect above fires once, and
   // if the bridge isn't connected yet (engine still booting / mid-
@@ -372,12 +377,12 @@ function LocalProvidersPanel({ surfaceActive }: { surfaceActive: boolean }) {
   useEffect(() => {
     const prev = lastBridgeStatusRef.current;
     lastBridgeStatusRef.current = bridgeStatus;
-    if (!surfaceActive) return;
+    if (!visible) return;
     if (prev !== "connected" && bridgeStatus === "connected") {
       invalidateAgentsCache();
       void loadAgents(listAgentsRef.current).catch(() => {});
     }
-  }, [bridgeStatus, surfaceActive]);
+  }, [bridgeStatus, visible]);
 
   // ENGINE_READY refresh. The bridge-reconnect effect above fires on the
   // *socket*-connected transition, which after an engine respawn (HMR /
@@ -393,11 +398,12 @@ function LocalProvidersPanel({ surfaceActive }: { surfaceActive: boolean }) {
   // is a no-op; if it failed (lastLoadedAt stayed 0) this re-fetches
   // against the now-ready engine and self-heals without user action.
   useEffect(() => {
-    if (!surfaceActive || !bridge) return;
+    if (!visible || !bridge) return;
     return bridge.on("ENGINE_READY", () => {
+      if (!documentIsVisible()) return;
       void loadAgents(listAgentsRef.current).catch(() => {});
     });
-  }, [bridge, surfaceActive]);
+  }, [bridge, visible]);
 
   const ordered = useMemo(() => {
     if (!agents) return [];
@@ -563,11 +569,25 @@ function ProviderCard({
   const [apiKey, setApiKey] = useState("");
   const [apiKeyLoaded, setApiKeyLoaded] = useState(false);
   const [savingApiKey, setSavingApiKey] = useState(false);
-  // Whether a key is actually SAVED in the keychain (drives the "configured"
-  // status). Tracked separately from `apiKey` because that holds the input's
-  // live value, which diverges from the saved secret while editing.
-  const [keyConfigured, setKeyConfigured] = useState(false);
+  // Saved presence owns the Remove action; the engine also knows about keys
+  // inherited from its environment. Unknown storage is not a confirmed miss.
+  const [keyConfigured, setKeyConfigured] = useState<boolean>();
   const native = useNativeRuntime().ready;
+  const keySurfaceActive = useDocumentActive(surfaceActive);
+  const keyAvailable =
+    agent.apiKeySource === undefined
+      ? keyConfigured === true
+      : agent.apiKeySource !== "none";
+  const apiKeyStatus =
+    agent.apiKeySource === "environment"
+      ? `${vendor?.vendor} API key provided by ${vendor?.envVar}`
+      : keyConfigured === true || agent.apiKeySource === "saved"
+        ? `${vendor?.vendor} API key configured`
+        : keyConfigured === false
+          ? `No ${vendor?.vendor} API key configured`
+          : apiKeyLoaded
+            ? `Could not check the saved ${vendor?.vendor} API key`
+            : `Checking ${vendor?.vendor} API key…`;
   const subscription = useSubscriptionStatus(agent.id, surfaceActive);
   useEffect(() => {
     const confirmedMethod = subscription.data?.method;
@@ -600,7 +620,7 @@ function ProviderCard({
   const connected =
     !changingMethod &&
     (method === "apiKey"
-      ? agent.authenticated === true && keyConfigured
+      ? agent.authenticated === true && keyAvailable
       : (!subscription.data?.method || subscription.data.method === method) &&
         subscription.data?.state === "connected" &&
         agent.authenticated === true);
@@ -632,7 +652,7 @@ function ProviderCard({
   // (readable via DevTools / a shoulder-surf of the password reveal) for no
   // benefit. The input is replace-only: blank until the user types a new key.
   useEffect(() => {
-    if (!surfaceActive) return;
+    if (!keySurfaceActive) return;
     if (!supportsApiKey || !vendor) {
       setApiKeyLoaded(true);
       return;
@@ -640,6 +660,7 @@ function ProviderCard({
     let cancelled = false;
     let revision = 0;
     const refresh = async () => {
+      if (cancelled || !documentIsVisible()) return;
       const requested = ++revision;
       try {
         const configured = await hasSecret(vendor.secretAccount);
@@ -651,12 +672,15 @@ function ProviderCard({
       }
     };
     void refresh();
-    const unsubscribe = subscribeProviderAuth(() => void refresh());
+    const revalidate = () => void refresh();
+    const unsubscribe = subscribeProviderAuth(revalidate);
+    window.addEventListener("focus", revalidate);
     return () => {
       cancelled = true;
       unsubscribe();
+      window.removeEventListener("focus", revalidate);
     };
-  }, [native, supportsApiKey, vendor, surfaceActive]);
+  }, [native, supportsApiKey, vendor, keySurfaceActive]);
 
   // ── persistence helpers ────────────────────────────────
 
@@ -975,9 +999,7 @@ function ProviderCard({
                     </Button>
                   </div>
                   <span className="text-fg2 text-xs">
-                    {keyConfigured
-                      ? `${vendor.vendor} API key configured`
-                      : `No ${vendor.vendor} API key configured`}
+                    {apiKeyStatus}
                   </span>
                 </div>
                 <div className="flex flex-row gap-2">
@@ -991,7 +1013,9 @@ function ProviderCard({
                         ? "Paste API key"
                         : keyConfigured
                           ? "•••• stored — paste a new key to replace"
-                          : "sk-..."
+                          : keyAvailable
+                            ? "Paste a new key to replace"
+                            : "sk-..."
                     }
                     value={apiKey}
                     disabled={!apiKeyLoaded}

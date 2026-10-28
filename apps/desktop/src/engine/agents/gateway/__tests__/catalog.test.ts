@@ -63,7 +63,7 @@ async function fixture() {
     client.setNotificationHandler(ToolListChangedNotificationSchema, async () => {
       snapshots.push((await client.listTools()).tools.map((t) => t.name));
     });
-    await client.connect(new StreamableHTTPClientTransport(new URL(gateway.url)));
+    await client.connect(new StreamableHTTPClientTransport(new URL(gateway.url), { requestInit: { headers: { Authorization: gateway.authorization } } }));
     cleanups.push(() => client.close());
     return { client, snapshots };
   };

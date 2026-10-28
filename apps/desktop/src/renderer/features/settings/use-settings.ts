@@ -37,6 +37,8 @@ import {
   KeyedAsyncCache,
   type AsyncCacheSnapshot,
 } from "../../shared/lib/keyed-async-cache";
+import { useReadRecovery } from "../../state/use-read-recovery";
+import { useDocumentActive } from "../../state/use-document-active";
 
 // Settings documents are shared server state, not component state. A bounded
 // renderer cache makes repo/section switches read an already-complete immutable
@@ -45,20 +47,23 @@ const resolvedSettingsCache = new KeyedAsyncCache<ResolvedSettingsWire>(48);
 const settingsLayerCache = new KeyedAsyncCache<SettingsReadWire>(48);
 const SETTINGS_CACHE_MAX_AGE_MS = 30_000;
 const MAX_BOOT_PREFETCH_REPOS = 8;
-const scheduledSettingsRefreshes = new Map<string, () => void>();
+const scheduledSettingsRefreshes = new Map<string, { refresh: () => void }>();
 
 /** Coalesce the synchronous fan-out from retained settings panels. Every
  * subscriber first marks its exact key stale; one microtask then performs the
  * read. A second DB event during that read is still observed by
  * KeyedAsyncCache and becomes one queued generation. */
 function scheduleSettingsRefresh(id: string, refresh: () => void): void {
-  const alreadyScheduled = scheduledSettingsRefreshes.has(id);
-  scheduledSettingsRefreshes.set(id, refresh);
-  if (alreadyScheduled) return;
+  const queued = scheduledSettingsRefreshes.get(id);
+  if (queued) {
+    queued.refresh = refresh;
+    return;
+  }
+  const pending = { refresh };
+  scheduledSettingsRefreshes.set(id, pending);
   queueMicrotask(() => {
-    const scheduled = scheduledSettingsRefreshes.get(id);
     scheduledSettingsRefreshes.delete(id);
-    scheduled?.();
+    pending.refresh();
   });
 }
 
@@ -170,6 +175,8 @@ export interface UseResolvedSettings {
   resolved: ResolvedSettingsWire | null;
   loading: boolean;
   error: string | null;
+  /** Raw failure for write safety; presentation may still be recovering. */
+  readError: string | null;
   refresh: () => void;
 }
 
@@ -179,29 +186,31 @@ export interface UseResolvedSettings {
 export function useResolvedSettings(
   repoRoot?: string,
   mainRepoRoot?: string,
+  enabled = true,
 ): UseResolvedSettings {
   const bridge = useBridge();
-  const bridgeStatus = useBridgeStatus();
+  const bridgeStatus = useBridgeStatus(repoRoot);
+  const active = useDocumentActive(enabled);
   const key = resolvedSettingsKey(repoRoot, mainRepoRoot);
   const snapshot = useSettingsSnapshot(resolvedSettingsCache, key);
 
   // A manual or DB-triggered refresh bypasses freshness but never clears a
   // resolved document while the engine builds its replacement.
   const refresh = useCallback(() => {
-    if (!bridge || bridgeStatus !== "connected") return;
-    void resolvedSettingsCache
+    if (!enabled || !bridge || bridgeStatus !== "connected") return;
+    return resolvedSettingsCache
       .load(key, () => bridgeSettingsResolve(bridge, repoRoot, mainRepoRoot), {
         force: true,
       })
       .catch(() => {
         // Error lives in the shared snapshot; confirmed data remains visible.
       });
-  }, [bridge, bridgeStatus, key, repoRoot, mainRepoRoot]);
+  }, [enabled, bridge, bridgeStatus, key, repoRoot, mainRepoRoot]);
 
   // All retained panels for this exact key hear the same broadcast. Mark the
   // key stale synchronously, then coalesce their reads into one microtask.
   const refreshFromBroadcast = useCallback(() => {
-    if (!bridge || bridgeStatus !== "connected") return;
+    if (!enabled || !bridge || bridgeStatus !== "connected") return;
     resolvedSettingsCache.invalidate(key);
     scheduleSettingsRefresh(`resolved:${key}`, () => {
       void resolvedSettingsCache
@@ -212,9 +221,10 @@ export function useResolvedSettings(
         )
         .catch(() => {});
     });
-  }, [bridge, bridgeStatus, key, repoRoot, mainRepoRoot]);
+  }, [enabled, bridge, bridgeStatus, key, repoRoot, mainRepoRoot]);
 
   useEffect(() => {
+    if (!active) return;
     return onActiveBridgeConnected((client, { initial }) => {
       void resolvedSettingsCache
         .load(
@@ -228,24 +238,24 @@ export function useResolvedSettings(
           },
         )
         .catch(() => {});
-    });
-  }, [key, repoRoot, mainRepoRoot]);
+    }, repoRoot);
+  }, [active, key, repoRoot, mainRepoRoot]);
   useSettingsChanged(refreshFromBroadcast);
+  const recovery = useReadRecovery(`settings-resolved:${key}`, {
+    error: snapshot.error,
+    pending: snapshot.loading || snapshot.refreshing,
+    hasContent: snapshot.data !== undefined,
+    retry: refresh,
+    connected: bridgeStatus === "connected",
+    active,
+    folder: repoRoot,
+  });
 
   return {
     resolved: snapshot.data ?? null,
-    loading:
-      bridgeStatus === "connecting" && snapshot.data === undefined
-        ? true
-        : bridgeStatus === "connected"
-          ? snapshot.loading
-          : false,
-    error:
-      snapshot.error?.message ??
-      ((!bridge || bridgeStatus === "disconnected") &&
-      snapshot.data === undefined
-        ? "Not connected to the engine."
-        : null),
+    loading: snapshot.data === undefined && (bridgeStatus !== "connected" || recovery.pending),
+    error: recovery.error?.message ?? null,
+    readError: recovery.readError?.message ?? null,
     refresh,
   };
 }
@@ -254,6 +264,8 @@ export interface UseSettingsLayer {
   layer: SettingsReadWire | null;
   loading: boolean;
   error: string | null;
+  /** Raw failure for write safety; presentation may still be recovering. */
+  readError: string | null;
   refresh: () => void;
   /** Patch this layer (`null` leaf deletes a key). Resolves once persisted; the
    *  refreshed LAYER document is applied here, and the refreshed RESOLVED tree
@@ -274,7 +286,8 @@ export function useSettingsLayer(
   repoRoot?: string,
 ): UseSettingsLayer {
   const bridge = useBridge();
-  const bridgeStatus = useBridgeStatus();
+  const bridgeStatus = useBridgeStatus(repoRoot);
+  const active = useDocumentActive(true);
   const key = settingsLayerKey(layerName, repoRoot);
   const snapshot = useSettingsSnapshot(settingsLayerCache, key);
 
@@ -282,7 +295,7 @@ export function useSettingsLayer(
   // document and duplicate DB_CHANGED listeners coalesce onto one request.
   const refresh = useCallback(() => {
     if (!bridge || bridgeStatus !== "connected") return;
-    void settingsLayerCache
+    return settingsLayerCache
       .load(key, () => bridgeSettingsRead(bridge, layerName, repoRoot), {
         force: true,
       })
@@ -302,6 +315,7 @@ export function useSettingsLayer(
   }, [bridge, bridgeStatus, key, layerName, repoRoot]);
 
   useEffect(() => {
+    if (!active) return;
     return onActiveBridgeConnected((client, { initial }) => {
       void settingsLayerCache
         .load(key, () => bridgeSettingsRead(client, layerName, repoRoot), {
@@ -311,8 +325,8 @@ export function useSettingsLayer(
           ),
         })
         .catch(() => {});
-    });
-  }, [key, layerName, repoRoot]);
+    }, repoRoot);
+  }, [active, key, layerName, repoRoot]);
   useSettingsChanged(refreshFromBroadcast);
 
   const write = useCallback(
@@ -361,21 +375,21 @@ export function useSettingsLayer(
     },
     [bridge, bridgeStatus, key, layerName, repoRoot],
   );
+  const recovery = useReadRecovery(`settings-layer:${key}`, {
+    error: snapshot.error,
+    pending: snapshot.loading || snapshot.refreshing,
+    hasContent: snapshot.data !== undefined,
+    retry: refresh,
+    connected: bridgeStatus === "connected",
+    active,
+    folder: repoRoot,
+  });
 
   return {
     layer: snapshot.data ?? null,
-    loading:
-      bridgeStatus === "connecting" && snapshot.data === undefined
-        ? true
-        : bridgeStatus === "connected"
-          ? snapshot.loading
-          : false,
-    error:
-      snapshot.error?.message ??
-      ((!bridge || bridgeStatus === "disconnected") &&
-      snapshot.data === undefined
-        ? "Not connected to the engine."
-        : null),
+    loading: snapshot.data === undefined && (bridgeStatus !== "connected" || recovery.pending),
+    error: recovery.error?.message ?? null,
+    readError: recovery.readError?.message ?? null,
     refresh,
     write,
     writeRaw,

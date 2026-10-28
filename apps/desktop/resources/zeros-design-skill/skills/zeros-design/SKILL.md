@@ -2,7 +2,7 @@
 name: zeros-design
 description: Author, verify and implement from Zeros Design directories — the registered folders of HTML/CSS frames that the Zeros Design tab renders on its canvas. Use for any task that creates or edits Design frames, pages, tokens, themes, style sources, components or assets, verifies a frame, or implements application code from a frame.
 license: MIT
-compatibility: Zeros desktop on macOS (Local workspaces) and Linux cloud workspaces. Local and cloud agents author with their normal file tools.
+compatibility: Zeros desktop on macOS, in Local Personal and organization-owned local workspaces. Cloud v2 does not expose Design.
 ---
 
 # Zeros Design
@@ -19,9 +19,20 @@ Zeros injects the facts for the current conversation. Read them before acting:
 - **Active Design directory** (path relative to the workspace) and its registration ID.
 - **Pages** (`id`, `title`, `folder`) and the page the user is viewing. Add new frames to that page unless the user says otherwise.
 - **Native verification command** and a URL for `design list|styles|validate|capture|preview` (see Verify).
-- **Authoring method.** Local and cloud workspaces both use the normal Read/Write/Edit/patch/shell tools. A cloud workspace runs in its own VM; the context says so.
+- **Authoring method.** Local Personal and organization-owned local workspaces use the normal Read/Write/Edit/patch/shell tools. Cloud v2 has no Design authoring, preview or capture; do not route a cloud request to a Local workspace.
 
 Provider permissions and Plan mode still apply. Saving never stages or commits; Git is a separate, explicit action.
+
+## Recreating a reference or editing a frame
+
+For a simple visual request, produce an editable HTML/CSS draft early, then refine what the rendered frame shows. The format and verification rules below support that work; style syncing, reusable components and application builds are separate tasks unless the request needs them.
+
+1. **Read the reference and current source.** Inspect the supplied image with the provider's image tool, the selected frame, its canvas record and `rules.md`. Re-read files before editing. Match the composition, text, color relationships and typography with ordinary HTML/CSS.
+2. **Resolve the viewport once.** Preserve the selected frame's ID, position and dimensions by default, including when it is blank. If a reference has different proportions, adapt its layout or fit the composition inside that viewport. An explicit request to resize or match the reference's viewport takes precedence; update only that frame's geometry. A proportion mismatch alone does not authorize resizing.
+3. **Write the first draft before optional precision work.** Use a close available font when the reference does not name one. Pixel sampling, font identification, image-processing dependencies and geometric fitting are useful when a visible mismatch or the requested precision calls for them; they are not prerequisites for drawing text and simple shapes. If a measurement is inconclusive, use a reasonable approximation and inspect the render.
+4. **Save, validate and look.** Use the supplied verification command, capture the result and inspect the PNG. Correct visible differences in a focused pass. Continue when a concrete mismatch remains; do not keep revisiting an already resolved choice without new evidence. Report any remaining approximation that matters to the request.
+
+Use already-declared styles and tokens when they fit. A standalone reference can use frame-local CSS; it does not require scanning the application or setting up style syncing. Keep content in normal flow where practical. Decorative circles, overlapping artwork and edge-clipped shapes may use absolute positioning inside a relative container; separate elements also remain selectable on the canvas.
 
 ## Directory layout
 
@@ -82,7 +93,7 @@ To create a frame:
 - **Geometry.** `width`/`height` (1–16,384) are the frame's viewport; `x`/`y` stay within ±1,000,000; optional `z` is 0–256 within its page.
 - **`data-oid`** is optional: the canvas derives selection identities for plain HTML, and visual edits save the IDs they need. Keep existing values when you edit; add stable, unique ones when selection must survive a large restructure. Document plumbing (`html`, `head`, `body`, `meta`, `link`, `title`, `style`, `script`, `template`) never takes one.
 - **References** resolve relative to the file that contains them, so frames in page folders link `../tokens.css` and `../assets/…`.
-- **Layout.** Use normal flow, flex and grid with `gap` and padding. Avoid absolute positioning inside a frame.
+- **Layout.** Prefer normal flow, flex and grid with `gap` and padding for content. Use absolute positioning for intentional overlays and decorative shapes inside a relative container.
 - Keep unrelated metadata, unknown fields and other agents' changes. Re-read a file before editing it.
 
 `kind: "text"` frames are canvas text blocks created from the Design tab; author `html` frames.
@@ -98,7 +109,7 @@ To create a frame:
 
 A frame can use any combination of the application's imported style sources, the directory's manual tokens, and its own `<style>`. The theme editor in the Design tab shows each source with its status.
 
-Prefer the application's own styles: sync them (below) rather than recreating tokens. Imported sources are read live from the checkout, so saved changes to the application's stylesheets, including uncommitted ones on this branch, update frames.
+When the request calls for the application's design system, prefer its own styles: sync them (below) rather than recreating tokens. Imported sources are read live from the checkout, so saved changes to the application's stylesheets, including uncommitted ones on this branch, update frames.
 
 ### Themes (`meta/canvas.json` `themes`)
 
@@ -145,7 +156,7 @@ Style sources import a stylesheet from elsewhere in the repository, so frames us
 - **Each frame receives only what it uses.** A frame gets the rules whose selectors its classes, ids and elements can match, plus every custom property block, theme rule and other statement; font faces only for families its kept CSS names and only for the characters it shows; and keyframes only when named. A rule a frame needs must therefore match the frame's own HTML: classes that application JavaScript would add do not exist in a frame.
 - **Which frames.** Every frame receives every declared source, in declaration order. A frame record may list `"styles": ["app"]` to choose its own sources, or `[]` for none.
 - **Precedence.** Imported styles come first in the frame, so the frame's own `<link>` and `<style>` rules override them.
-- `kind: "build"` imports the CSS file a build command writes, for stylesheets Zeros cannot compile itself (Less, PostCSS plugins, Tailwind v3 or Tailwind with other `@plugin`s or `@config`, CSS-in-JS extraction, token pipelines such as Style Dictionary). Write the output to `.zeros/design-styles/<id>.css`, which Zeros keeps out of Git in every worktree. The declaration carries the command (`"command"`, plus `"watch": true` or `"inputs"`), so every worktree, cloud workspace and teammate builds it automatically while the Design tab is open; builds stop 5 minutes after it is left, wait for a new worktree's setup to finish, and frames always show the last output meanwhile. A person can override the command for themselves, or turn repository builds off, in their own settings. The theme editor shows each build's state (live, building, waiting for setup, paused, or failed with its error) and whether its command came from `meta/canvas.json` or the person's settings.
+- `kind: "build"` imports the CSS file a build command writes, for stylesheets Zeros cannot compile itself (Less, PostCSS plugins, Tailwind v3 or Tailwind with other `@plugin`s or `@config`, CSS-in-JS extraction, token pipelines such as Style Dictionary). Write the output to `.zeros/design-styles/<id>.css`, which Zeros keeps out of Git in every worktree. The declaration carries the command (`"command"`, plus `"watch": true` or `"inputs"`), so each local worktree builds it automatically while the Design tab is open; builds stop 5 minutes after it is left, wait for a new worktree's setup to finish, and frames always show the last output meanwhile. A person can override the command for themselves, or turn repository builds off, in their own settings. The theme editor shows each build's state (live, building, waiting for setup, paused, or failed with its error) and whether its command came from `meta/canvas.json` or the person's settings.
 - **Trust.** Opening Design runs the command a repository declares, as running its dev scripts would, including commands other people commit. Keep a declared command to the project's own build tool (`pnpm exec sass …`, `npx tailwindcss …`, a `package.json` script): no downloads, network calls, `curl | sh`, or writes outside the checkout. When a change you make, review or pull alters a declared command, tell the person.
 
 ### App fonts (`meta/canvas.json` `fonts`)
@@ -160,7 +171,7 @@ Fonts the application loads in code, such as `next/font/google` or `next/font/lo
 ]
 ```
 
-- `provider: "google"` takes `weights` (`"400;700"` or a variable range `"100..900"`), `italic`, `subsets` (default `latin`) and `fallback`. Zeros downloads it once from `fonts.googleapis.com` and `fonts.gstatic.com` only, into one cache shared by every workspace on this machine (each cloud VM keeps its own), and embeds it. Frames show the fallback font until it arrives; Update retries a failed download.
+- `provider: "google"` takes `weights` (`"400;700"` or a variable range `"100..900"`), `italic`, `subsets` (default `latin`) and `fallback`. Zeros downloads it once from `fonts.googleapis.com` and `fonts.gstatic.com` only, into one cache shared by every local workspace on this machine, and embeds it. Frames show the fallback font until it arrives; Update retries a failed download.
 - `provider: "local"` names a `.woff2`, `.woff`, `.ttf` or `.otf` file inside the repository, with optional `weight` and `style`.
 - `variable` sets the same custom property the application sets (next/font's `variable` option), so its Tailwind theme or CSS resolves unchanged. When the application applies a font with next/font's `className` instead, frames have no such class: give the font a `variable` and add `body { font-family: var(--font-…); }` to `tokens.css`. Frames carry a font only when their CSS names it.
 - The theme editor lists them, with Google Fonts imported by sources, as **App fonts**. At most 32 fonts.
@@ -238,8 +249,9 @@ Use the exact command and URL from your context:
 - Without `--theme`, capture and preview show the default theme. `--theme <id>` shows a theme the canvas Themes menu offers — one the `themes` list names, tokens.css declares or an imported style source maps — by setting `data-zd-theme` on the frame's `<html>`, as the canvas does. Capture every theme the design supports. An unknown id fails and lists the available themes. The revision stays the same: a theme is a view of the same source.
 - `preview` returns an HTTP URL for a browser your provider actually offers. Never use `file://`.
 - Add `--revision <rev>` to require the exact revision you validated. URLs expire 30 minutes after the context was issued; ask for fresh context when one expires.
+- If the supplied command cannot start (for example, `Script not found "design"`), check that exact command with `--help`. Use an available Design API or HTTP preview for verification if the context exposes one, and report the failing command or unverified step. Keep the authored draft; a frame-editing task does not require searching or repairing the Zeros installation. Do that only when the user requests troubleshooting.
 
-The optional Design API (`design_capabilities`, `design_document_open`, `design_lint`, `design_render`, `design_capture`, `design_transaction_apply`, …) inspects and edits the same files; native authoring, Local or cloud, does not need it, and it does not depend on the 30-minute verification URL. `design_capture` takes an optional `theme` (like `--theme`) and defaults `width`/`height` to the frame's canvas size, scaling a frame larger than 2048 × 2048 into one raster as the native capture does.
+The optional Design API (`design_capabilities`, `design_document_open`, `design_lint`, `design_render`, `design_capture`, `design_transaction_apply`, …) inspects and edits the same local files; native authoring does not need it, and it does not depend on the 30-minute verification URL. `design_capture` takes an optional `theme` (like `--theme`) and defaults `width`/`height` to the frame's canvas size, scaling a frame larger than 2048 × 2048 into one raster as the native capture does.
 
 ## Implementing application code from a frame
 
@@ -271,5 +283,5 @@ A frame is a reference, not code to copy. Implement it with the application's ow
 - **One rule or font missing:** the frame's HTML does not use the class, id or element the rule's selector needs, or no kept rule names the font family; frames receive only what they use.
 - **Fallback font instead of a Google font:** the download is pending or failed; the theme editor says which, and Update retries.
 - **Theme has no effect:** the token is missing from that `[data-zd-theme]` block, or the style source's `themes` selector does not match its CSS.
-- **A declared build never runs:** the Design tab must be open; the theme editor says whether it is waiting for setup, failed, or turned off by `repository_style_builds = false`. In cloud workspaces only developers and above start builds.
+- **A declared build never runs:** the Design tab must be open; the theme editor says whether it is waiting for setup, failed, or turned off by `repository_style_builds = false`.
 - **Pages unavailable:** `meta/canvas.json` is unreadable or conflicted. Repair it with normal tools and keep its IDs; do not recreate registration.

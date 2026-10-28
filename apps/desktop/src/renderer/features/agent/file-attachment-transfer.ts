@@ -1,5 +1,7 @@
 import {
   ATTACHMENT_CHUNK_BYTES,
+  contextAttachmentPath,
+  safeAttachmentFilename,
   validateAttachmentFile,
   type AttachmentWriteResult,
 } from "@zeros/protocol/attachment-policy";
@@ -7,11 +9,13 @@ import { createContextAttachmentWriter } from "./agent-history-client";
 import { attachmentReferenceBlock } from "./attachment-reference";
 import {
   prepareAttachmentSource,
-  releaseAttachmentSource,
+  completeAttachmentSource,
 } from "./attachment-sources";
 import { attachmentOwner } from "./attachment-owner";
 import { registerAttachmentSourceOwner } from "./attachment-source-retention";
 import type { ComposerAttachment } from "./composer-attachments";
+import { offerPendingFilePreview } from "../../platform/pending-file-preview";
+import { workspaceFileAccessKey } from "../../platform/workspace-file-scope";
 
 export type FileAttachmentProgress = {
   phase: "saving" | "ready" | "error";
@@ -30,6 +34,7 @@ function keyFor(cwd: string, id: string): string {
     attachmentOwner(cwd).runtime,
     cwd.replace(/\/$/, ""),
     id,
+    workspaceFileAccessKey(cwd),
   ]);
 }
 export function getFileAttachmentProgress(
@@ -84,6 +89,7 @@ export function publishSavedAttachment(cwd: string, attachment: ComposerAttachme
 }
 
 async function withUploadSlot<T>(task: () => Promise<T>): Promise<T> {
+  if (waiting.length >= 32) throw new Error("Too many files are waiting to upload. Wait for a file to finish, then retry.");
   if (active >= 2) await new Promise<void>((resolve) => waiting.push(resolve));
   else active += 1;
   try {
@@ -149,8 +155,16 @@ export async function ensureFileAttachment(
       mimeType: attachment.mimeType,
       diskPath: attachment.diskPath,
     };
+    const previous = states.get(key);
+    // A queued transfer owns its immutable source independently of the caller's
+    // mutable draft. Another destination may finish and retire that draft's
+    // recovery fields before this queue slot is admitted.
+    if (attachment.sourceFile) attachment.sourceRecoveryId ??= crypto.randomUUID();
+    const transferSource = { ...attachment };
+    const finishPreview = attachment.sourceFile
+      ? offerPendingFilePreview(cwd, attachment.diskPath ?? contextAttachmentPath(id, safeAttachmentFilename(attachment.name)), attachment.sourceFile) : undefined;
     publish(key, { phase: "saving", percent: 0 });
-    const releaseOwner = registerAttachmentSourceOwner(() => attachment);
+    const releaseOwner = registerAttachmentSourceOwner(() => [transferSource, attachment]);
     flight = withUploadSlot(async () => {
       if (!canUpload) {
         return writeContextAttachment({ ...args, base64: "", resolve: true });
@@ -158,7 +172,7 @@ export async function ensureFileAttachment(
       // A dispatcher can reuse the same Blob in several workspaces. Resolve
       // against THIS workspace instead of trusting another owner's snapshot
       // or uploading the same 500 MB again on every send/undo.
-      if (attachment.diskPath || !attachment.sourceFile) {
+      if (attachment.diskPath || !attachment.sourceFile || previous) {
         try {
           return await writeContextAttachment({
             ...args,
@@ -173,7 +187,7 @@ export async function ensureFileAttachment(
             throw error;
         }
       }
-      const prepared = await prepareAttachmentSource(attachment, cwd.startsWith("cloud://"));
+      const prepared = await prepareAttachmentSource(transferSource, cwd.startsWith("cloud://"));
       if (prepared.nativeSourceId) {
         const result = await writeContextAttachment({
           ...args,
@@ -257,7 +271,10 @@ export async function ensureFileAttachment(
       attachment.absolutePath = result.absolutePath;
       attachment.owner = attachmentOwner(cwd);
       attachment.contextAttachmentId = id;
-      void releaseAttachmentSource(attachment.sourceRecoveryId).catch(() => {});
+      attachment.delivery = "reference";
+      finishPreview?.();
+      releaseOwner();
+      void completeAttachmentSource(attachment).catch(() => {});
       return result;
     }).finally(releaseOwner);
     flights.set(flightKey, flight);
@@ -287,6 +304,8 @@ export async function ensureFileAttachment(
   attachment.absolutePath = result.absolutePath;
   attachment.owner = attachmentOwner(cwd);
   attachment.contextAttachmentId = id;
+  attachment.delivery = "reference";
+  void completeAttachmentSource(attachment).catch(() => {});
   return result;
 }
 

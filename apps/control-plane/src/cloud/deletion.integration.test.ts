@@ -37,10 +37,10 @@ suite("v2 account and organization deletion", () => {
   const request = (path: string, method: string, confirmation: string) => app.request(path,{method,headers:{"content-type":"application/json"},body:JSON.stringify({confirmation})});
   const state = async (id: string) => (await pool.query("SELECT state FROM cloud_v2_workspaces WHERE id=$1",[id])).rows[0]?.state;
   function computer() {
-    const computers = new CloudV2Computers(pool);
+    const computers = new CloudV2Computers(pool, pool, async (_org, _user, target) => ({ repository: target.repository, repositoryId: "42" }));
     const compute: CloudV2Compute = {
       create: vi.fn(async () => ({ sandboxId: "bx_builder1" })),
-      resume: vi.fn(), stop: vi.fn(), delete: vi.fn(async () => {}), deleteSnapshot: vi.fn(async () => {}),
+      resume: vi.fn(), extendLease: vi.fn(async () => {}), stop: vi.fn(), delete: vi.fn(async () => {}), deleteSnapshot: vi.fn(async () => {}),
       exec: vi.fn(async () => ({ exitCode: 0, stdout: "", timedOut: false })),
       execLong: vi.fn(async () => ({ exitCode: 0, stdout: `zeros-build-branch=main\n${"a".repeat(40)}\n`, timedOut: false })),
       saveSnapshot: vi.fn(async () => {}),

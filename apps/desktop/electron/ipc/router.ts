@@ -48,6 +48,9 @@ function notImpl(cmd: string, _order: number): CommandHandler {
 const commandTable: Record<string, CommandHandler> = {
   // ── App info (runtime mode / version) — for analytics routing ──
   app_info: notImpl("app_info", 1),
+  edit_history: notImpl("edit_history", 0),
+  full_disk_access_status: notImpl("full_disk_access_status", 1),
+  full_disk_access_open_settings: notImpl("full_disk_access_open_settings", 1),
   local_navigation_ready: notImpl("local_navigation_ready", 1),
   cursor_subscription: notImpl("cursor_subscription", 1),
   provider_subscription: notImpl("provider_subscription", 1),
@@ -57,6 +60,9 @@ const commandTable: Record<string, CommandHandler> = {
   app_setting_get: notImpl("app_setting_get", 1),
   app_setting_set: notImpl("app_setting_set", 1),
   engine_restart: notImpl("engine_restart", 1),
+  keep_awake_get: notImpl("keep_awake_get", 1),
+  keep_awake_set: notImpl("keep_awake_set", 1),
+  keep_awake_activity: notImpl("keep_awake_activity", 1),
 
   // ── Sidecar / engine lifecycle ────────────────────────────
   get_engine_port: notImpl("get_engine_port", 2),
@@ -115,6 +121,11 @@ const commandTable: Record<string, CommandHandler> = {
   read_css_file: notImpl("read_css_file", 5),
   write_css_file: notImpl("write_css_file", 5),
   read_file: notImpl("read_file", 5),
+  read_file_range: notImpl("read_file_range", 5),
+  file_media_open: notImpl("file_media_open", 5),
+  file_media_close: notImpl("file_media_close", 5),
+  file_media_reply: notImpl("file_media_reply", 5),
+  file_media_download: notImpl("file_media_download", 5),
   read_image_thumbnail: notImpl("read_image_thumbnail", 5),
   write_file: notImpl("write_file", 5),
   skills_list: notImpl("skills_list", 5),
@@ -143,6 +154,8 @@ const commandTable: Record<string, CommandHandler> = {
   // from the app (files leave it only via the user deleting them on disk).
   agent_attachment_write: notImpl("agent_attachment_write", 8),
   design_export_png: notImpl("design_export_png", 8),
+  design_capture_acquire: notImpl("design_capture_acquire", 8),
+  design_capture_release: notImpl("design_capture_release", 8),
 
   // Agent transcript and chat-list channels were removed — that storage
   // moved to the engine's Zeros DB (reached over the bridge).

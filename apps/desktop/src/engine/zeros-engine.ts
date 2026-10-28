@@ -36,8 +36,11 @@ import { isCuratedModel } from "./agents/adapters/shared/curated-models";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { randomBytes } from "node:crypto";
+import { openBoundedDirectorySync } from "./files/bounded-read-sync";
 
-import { DESIGN_CATALOG_READ_CAPABILITY, DESIGN_CATALOG_READ_OPERATION } from "@zeros/protocol/design-catalog";
+import { DESIGN_CATALOG_READ_CAPABILITY, DESIGN_CATALOG_READ_OPERATION, DESIGN_LAZY_PREPARATION_CAPABILITY } from "@zeros/protocol/design-catalog";
+import { DESIGN_PREVIEW_JOBS_CAPABILITY } from "@zeros/protocol/design-capture";
+import { DESIGN_SOURCE_SURFACES_CAPABILITY } from "@zeros/protocol/design-surface";
 import {
   personalRepoRoot,
   personalWorkspaceRoot,
@@ -293,6 +296,7 @@ import {
   WINDOW_MAX_ROWS,
 } from "./db/messages";
 import { BootPhaseTimer } from "./boot-phase-timer";
+import { startStartupMaintenance } from "./startup-maintenance";
 import {
   startTurn as startTurnRow,
   finishTurn as finishTurnRow,
@@ -842,7 +846,7 @@ export class ZerosEngine {
     gateway: async (key, backends) => {
       const gateway = await this.scopedMcpGateways.get(key, backends);
       this.agents.registerGatewayCatalog(gateway.url, () => gateway.catalogRevision);
-      return gateway.url;
+      return { url: gateway.url, authorization: gateway.authorization };
     },
     removeGateway: key => this.scopedMcpGateways.remove(key),
   });
@@ -1106,6 +1110,7 @@ export class ZerosEngine {
   private actualPort = 0;
   private framework: Framework = "unknown";
   private running = false;
+  private startupMaintenance?: ReturnType<typeof startStartupMaintenance>;
   constructor(options?: EngineOptions) {
     this.root = options?.root
       ? path.resolve(options.root)
@@ -1801,11 +1806,16 @@ export class ZerosEngine {
         );
         if (!parsed) return null;
         const { workspaceId, resourcePath } = parsed;
+        const surface = url.searchParams.get("surface");
+        const theme = url.searchParams.get("theme");
+        if ((surface !== null && surface !== "1") ||
+            (theme !== null && (surface !== "1" || !/^[a-z][a-z0-9_-]{0,63}$/.test(theme)))) return null;
         const resource = await this.workspace.readDesignProtocolResource(
           workspaceId,
           {
             path: resourcePath,
             sourceVersion: url.searchParams.get("v"),
+            ...(surface === "1" ? { surface: true, theme } : {}),
           },
         );
         if (!resource) return null;
@@ -2343,7 +2353,7 @@ export class ZerosEngine {
     this.agents.setOrganizationMcpResolver((id, env, signal) => this.organizationMcp.resolve(id, env, signal));
     this.agents.setScopedMcpGateway(async (root, backends) => {
       const gateway = await this.projectMcpGateway(root, backends);
-      return gateway?.url ?? null;
+      return gateway ? { url: gateway.url, authorization: gateway.authorization } : null;
     });
     this.agents.setMcpSecretResolver((servers, env) => {
       const vault = this.ensureMcpVault();
@@ -2417,7 +2427,7 @@ export class ZerosEngine {
       await gw.start(gatewayBackends);
       this.mcpGateway = gw;
       this.gatewayError = null;
-      this.agents.setGatewayServer(gw.url, () => gw.catalogRevision);
+      this.agents.setGatewayServer({ url: gw.url, authorization: gw.authorization }, () => gw.catalogRevision);
       console.log(
         `[Zeros] MCP gateway on ${gw.url} fronting ${gatewayBackends.length} backend(s): ` +
           gw
@@ -2455,7 +2465,7 @@ export class ZerosEngine {
         } else {
           await this.mcpGateway.reload(gatewayBackends);
           const gw = this.mcpGateway;
-          this.agents.setGatewayServer(gw.url, () => gw.catalogRevision);
+          this.agents.setGatewayServer({ url: gw.url, authorization: gw.authorization }, () => gw.catalogRevision);
           this.gatewayError = null;
         }
       } catch (err) {
@@ -2743,24 +2753,17 @@ export class ZerosEngine {
     }
     bootPhases.mark("seed");
 
-    // Mode/legacy-permission reconcile. First complete any mode transition a crash
-    // interrupted (the durable marker knows the intended direction). Then two
-    // routine invariants, per live stable owner, before any agent can spawn:
-    //
-    //   1. Every checkout sheds the process-independent ACLs installed by
-    //      historical builds. The current boundary is scoped to Zeros actors,
-    //      so external editors and coding platforms retain ordinary access.
-    //   2. The one-time cleanup is durable and idempotent. A cleanup failure is
-    //      logged and retried next boot, but is not an agent-admission gate.
+    // Complete interrupted view transitions before serving workspace rows.
+    // Historical filesystem ACL cleanup is optional maintenance after readiness;
+    // it is neither agent admission nor part of the current process boundary.
     try {
       const { listWorkspaces, getWorkspaceLifecycle } =
         await import("./git/state");
       const { reconcileDesignModeTransition } =
         await import("./git/design-mode");
-      const { cleanupLegacyDesignFilesystemGuards } =
-        await import("./design/workspace-lock");
       for (const workspace of listWorkspaces()) {
         if (
+          workspace.placement === "cloud" ||
           workspace.archivedAt != null ||
           getWorkspaceLifecycle(workspace.id) ||
           !fs.existsSync(workspace.path)
@@ -2774,17 +2777,6 @@ export class ZerosEngine {
             }`,
           );
         });
-        // Re-read: the transition reconcile may have flipped the row.
-        const settled = getWorkspaceById(workspace.id) ?? workspace;
-        await cleanupLegacyDesignFilesystemGuards(settled.path).catch(
-          (error) => {
-            console.warn(
-              `[Zeros] couldn't remove historical Design ACLs for ${workspace.id}; cleanup will retry next boot: ${
-                error instanceof Error ? error.message : String(error)
-              }`,
-            );
-          },
-        );
       }
     } catch {
       /* best-effort — failures are logged per workspace above */
@@ -2852,21 +2844,6 @@ export class ZerosEngine {
       /* best-effort — never block startup on seed migration */
     }
     bootPhases.mark("seed-migration");
-
-    // 1b.3. Repin surviving recovery snapshots without pruning shared archive
-    // refs, then clean up stale branch-ownership proofs. Runs after seedFromDisk
-    // so this instance's workspace rows and lifecycle journals are available.
-    try {
-      const {
-        pruneOrphanArchiveSnapshots,
-        pruneOrphanWorkspaceBranchOwnershipRefs,
-      } = await import("./git/worktree");
-      await pruneOrphanArchiveSnapshots();
-      await pruneOrphanWorkspaceBranchOwnershipRefs();
-    } catch {
-      /* best-effort — never block startup on retention */
-    }
-    bootPhases.mark("archive-refs");
 
     // 1b.5. One-time cleanup of phantom worktree "projects" in the repos table:
     // a stale renderer regex (pre Phase-0 relocation) upserted worktrees under
@@ -3079,6 +3056,40 @@ export class ZerosEngine {
     );
     const slowBootPhases = bootPhases.slowPhases();
     if (slowBootPhases) console.log(`[Zeros] slow boot phases: ${slowBootPhases}`);
+
+    // Recovery above owns readiness. Retention scans scale with every saved
+    // repository and must not hold chat/history/Git reads behind old archives.
+    this.startupMaintenance = startStartupMaintenance([
+      { name: "archive-refs", run: async (signal) => {
+        const { pruneOrphanArchiveSnapshots } = await import("./git/worktree");
+        await pruneOrphanArchiveSnapshots({ signal });
+      } },
+      { name: "branch-refs", run: async (signal) => {
+        const { pruneOrphanWorkspaceBranchOwnershipRefs } = await import("./git/worktree");
+        await pruneOrphanWorkspaceBranchOwnershipRefs({ signal });
+      } },
+      { name: "design-acls", run: async (signal) => {
+        const { cleanupLegacyDesignFilesystemGuards } = await import("./design/workspace-lock");
+        const { withWorkspaceMutation } = await import("./git/mutation-lock");
+        for (const workspace of listWorkspaces()) {
+          if (signal.aborted) break;
+          if (workspace.placement === "cloud" || workspace.archivedAt != null) continue;
+          // Archive/delete/move share this lane. Recheck after admission so a
+          // queued cleanup cannot walk a retired or replacement checkout.
+          await withWorkspaceMutation(workspace.path, async () => {
+            if (signal.aborted) return;
+            const current = getWorkspaceById(workspace.id);
+            if (!current || current.path !== workspace.path || current.placement === "cloud" ||
+                current.archivedAt != null || getWorkspaceLifecycleStatus(current.id).operation != null ||
+                !fs.existsSync(current.path)) return;
+            await cleanupLegacyDesignFilesystemGuards(current.path).catch(() => {
+              console.warn("[Zeros] historical Design ACL cleanup deferred until next launch");
+            });
+          }, { signal });
+          await new Promise<void>((resolve) => setImmediate(resolve));
+        }
+      } },
+    ]);
   }
 
   /** Stop the engine gracefully. */
@@ -3101,6 +3112,10 @@ export class ZerosEngine {
       return;
     }
     this.running = false;
+    const maintenance = this.startupMaintenance;
+    this.startupMaintenance = undefined;
+    // Abort immediately, then join before the engine releases its resources.
+    const maintenanceStopped = maintenance?.stop();
     if (this.localOrchestration) {
       this.localOrchestration.registry.clear();
       await settle(() => this.localOrchestration?.server.stop());
@@ -3109,6 +3124,7 @@ export class ZerosEngine {
     // Revoke product tool authority before slow provider cleanup can yield.
     // The registry aborts every grant synchronously, then drains them.
     const productToolsRetired = settle(() => this.agents.revokeSessionTools());
+    const previewsRetired = settle(() => this.workspace.stopDesignPreviews?.());
     await settle(() => stopDesignVerification());
     configureDesignStyleBuilds(null);
     configureDesignFonts({ onReady: null });
@@ -3127,6 +3143,7 @@ export class ZerosEngine {
       this.parentWatchTimer = null;
     }
     await productToolsRetired;
+    await previewsRetired;
     await settle(() => this.agents.dispose());
     if (this.vaultPersistTimer) {
       // Flush a pending debounced persist so a clean stop never drops a token.
@@ -3171,6 +3188,9 @@ export class ZerosEngine {
     this.designChangePoller = null;
     if (gitWatcher) await settle(() => gitWatcher.stop());
     if (watchHost) await settle(() => watchHost.dispose());
+    // A janitor may be queued behind a tool's workspace mutation. Retire those
+    // owners first; joining the janitor before disposing them can deadlock Stop.
+    if (maintenanceStopped) await settle(() => maintenanceStopped);
     await settle(() => closeGitCredentialBroker());
     for (const transport of this.transports) {
       await settle(() => transport.stop());
@@ -7718,13 +7738,14 @@ export class ZerosEngine {
         const reviewUserName = reviewUserId && this.clientAccount.get(client.id) === reviewUserId
           ? this.clientAccountNames.get(client.id)
           : client.kind === "local" && reviewUserId === this.ownerAccountSub ? this.ownerAccountName ?? undefined : undefined;
-        const catalogAuthority = op === DESIGN_CATALOG_READ_OPERATION
+        const previewOperation = client.kind === "local" && (op === "design.preview" || op === "design.preview.cancel");
+        const catalogAuthority = op === DESIGN_CATALOG_READ_OPERATION || previewOperation
           ? JSON.stringify([client.kind, client.accountUserId ?? this.clientAccount.get(client.id) ?? (client.kind === "local" ? this.ownerAccountSub : undefined), client.authorityEpoch, client.kind === "local" ? this.localCatalogBindingEpoch ?? 0 : undefined]) : "";
         return this.workspace.handle(op,params,{hostLocalResources:client.kind==="local",remote:hostRelay,
           ...(op === "turns.reset" || op === "turns.undoReset"
             ? { withConversationMutation: this.withConversationMutation.bind(this) }
             : {}),
-          ...(op === DESIGN_CATALOG_READ_OPERATION ? { catalogAdmission: {
+          ...(op === DESIGN_CATALOG_READ_OPERATION || previewOperation ? { [previewOperation ? "previewAdmission" : "catalogAdmission"]: {
             connectionId: client.id,
             authority: catalogAuthority,
             authorized: () => this.router.getClient(client.id) === client && (client.kind === "local" || client.authorized?.() === true) &&
@@ -8785,8 +8806,10 @@ export class ZerosEngine {
           `[Zeros] engine owner account changed ${this.ownerAccountSub.slice(0, 8)}… → ${next?.slice(0, 8) ?? "∅"}…`,
         );
       }
-      if (next !== this.ownerAccountSub)
+      if (next !== this.ownerAccountSub) {
         this.localCatalogBindingEpoch = (this.localCatalogBindingEpoch ?? 0) + 1;
+        this.workspace?.retireUnauthorizedDesignPreviews?.();
+      }
       this.ownerAccountSub = next;
       if (sub) this.ownerAccountName = verifiedName ?? null;
       return;
@@ -8890,6 +8913,7 @@ export class ZerosEngine {
    *  mode so a later flip to required-mode starts from a clean slate. */
   private clearOwnerBinding(): void {
     this.localCatalogBindingEpoch = (this.localCatalogBindingEpoch ?? 0) + 1;
+    this.workspace?.retireUnauthorizedDesignPreviews?.();
     this.ownerAccountSub = nextOwnerAccount(this.ownerAccountSub, {
       kind: "signed-out",
     });
@@ -9339,7 +9363,7 @@ export class ZerosEngine {
         port: this.actualPort,
         protocolVersion: PROTOCOL_VERSION,
         minProtocolVersion: MIN_SUPPORTED_PROTOCOL,
-        capabilities: [DESIGN_CATALOG_READ_CAPABILITY, CONVERSATION_REPLAY_CAPABILITY],
+        capabilities: [DESIGN_CATALOG_READ_CAPABILITY, CONVERSATION_REPLAY_CAPABILITY, ...(client.kind === "local" ? [DESIGN_PREVIEW_JOBS_CAPABILITY, DESIGN_LAZY_PREPARATION_CAPABILITY, DESIGN_SOURCE_SURFACES_CAPABILITY] : [])],
       }),
     );
   }
@@ -9688,20 +9712,20 @@ export class ZerosEngine {
    *  user-committed `setup.sh`. Best-effort; no-ops once the repo is clean. */
   private sweepLegacyDotZeros(): void {
     try {
-      const legacy = path.join(this.root, ".zeros");
-      if (!fs.existsSync(legacy)) return;
-      for (const f of [".port", ".token", ".busy"]) {
-        try {
-          fs.unlinkSync(path.join(legacy, f));
-        } catch {
-          /* not present — fine */
-        }
-      }
+      const root = fs.realpathSync(this.root);
+      const parent = openBoundedDirectorySync(root);
       try {
-        fs.rmdirSync(legacy); // succeeds only if now empty
-      } catch {
-        /* non-empty (attachments / setup.sh) or already gone — leave it */
-      }
+        const legacy = openBoundedDirectorySync(path.join(root, ".zeros"));
+        try {
+          for (const f of [".port", ".token", ".busy"]) {
+            try { fs.unlinkSync(path.join(legacy.path, f)); }
+            catch { /* Missing or changed entries remain untouched. */ }
+          }
+        } finally { legacy.close(); }
+        // rmdir never follows the final symlink and the parent stays pinned.
+        try { fs.rmdirSync(path.join(parent.path, ".zeros")); }
+        catch { /* Preserve non-empty directories, replacements and links. */ }
+      } finally { parent.close(); }
     } catch {
       /* best-effort */
     }

@@ -51,6 +51,8 @@ describe("database connection resilience", () => {
     expect(pools.options.at(-1)).toMatchObject({ max: 2, connectionTimeoutMillis: 10_000, statement_timeout: 30_000 });
     createPool("postgres://operator@database.test/zeros", { workload: "retirement-lock" });
     expect(pools.options.at(-1)).toMatchObject({ max: 1, connectionTimeoutMillis: 10_000, statement_timeout: 30_000 });
+    createPool("postgres://operator@database.test/zeros", { workload: "advisory-lock" });
+    expect(pools.options.at(-1)).toMatchObject({ max: 2, connectionTimeoutMillis: 10_000, statement_timeout: 30_000 });
     createPool("postgres://operator@database.test/zeros", { workload: "listener" });
     expect(pools.options.at(-1)).toMatchObject({ max: 2 });
     createMigrationPool("postgres://operator@database.test/zeros");

@@ -65,4 +65,20 @@ describe("resolveDiskContentSync", () => {
       }).kind,
     ).toBe("adopt-disk");
   });
+
+  it("does not regress the draft or baseline for an older autosave echo", () => {
+    expect(resolveDiskContentSync({
+      incoming: "first save", lastSeen: "original", baseline: "second save",
+      draft: "typed after second save", pendingSave: "second save",
+      saveEchoes: ["first save", "second save"],
+    })).toEqual({ kind: "acknowledge-save", baseline: "second save",
+      draft: "typed after second save", pendingSave: "second save" });
+  });
+
+  it("adopts an external revert to a previous save once the latest save was acknowledged", () => {
+    expect(resolveDiskContentSync({
+      incoming: "first save", lastSeen: "second save", baseline: "second save",
+      draft: "new draft", pendingSave: null, saveEchoes: ["first save", "second save"],
+    })).toEqual({ kind: "adopt-disk", baseline: "first save", draft: "first save", pendingSave: null });
+  });
 });

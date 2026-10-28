@@ -28,7 +28,10 @@ import {
   type DesignRuntimeMethod,
   type DesignRuntimeHitMode,
   type DesignRuntimeGenerationPatch,
+  type DesignRuntimeInsertPreview,
+  type DesignRuntimeInsertPreviewResult,
   type DesignRuntimeMotionPreview,
+  type DesignRuntimePlaybackStopped,
   type DesignRuntimeNodeDetails,
   type DesignRuntimeNodeGeometry,
   type DesignRuntimeRect,
@@ -38,6 +41,8 @@ import {
   type DesignRuntimeStyleUpdate,
   type DesignRuntimeLayoutPreview,
 } from "@zeros/protocol/design-runtime";
+import { designCaptureScheduler, type DesignCapturePriority } from "./design-capture-scheduler";
+import { withNativeDesignCaptureAdmission } from "./design-native-capture-admission";
 
 const DEFAULT_REQUEST_TIMEOUT_MS = 5_000;
 const SCREENSHOT_REQUEST_TIMEOUT_MS = 12_000;
@@ -53,6 +58,8 @@ interface PendingRequest {
   timeout: number;
   signal?: AbortSignal;
   abort?: () => void;
+  capture?: boolean;
+  cancellation?: Error;
 }
 
 export interface DesignFrameRuntimeCallbacks {
@@ -63,6 +70,7 @@ export interface DesignFrameRuntimeCallbacks {
     event: "ready" | "mutation",
   ) => void;
   onReady?: (capabilities: DesignRuntimeCapabilities) => void;
+  onPlaybackStopped?: (event: DesignRuntimePlaybackStopped) => void;
 }
 
 export interface DesignFrameRuntimeConnection {
@@ -116,6 +124,17 @@ export interface DesignFrameRuntimeConnection {
     css: string | null,
     signal?: AbortSignal,
   ): Promise<{ applied: number; snapshot: DesignRuntimeSnapshot }>;
+  /** Whole-frame browser playback. The session fences a late Stop from a
+   * retired playback attempt; older engines do not advertise this method. */
+  setPlayback(sessionId: string, playing: boolean, signal?: AbortSignal): Promise<void>;
+  /** Paint a drawn child before its source write confirms. Opt-in: check
+   * `supports("previewInsert")`; a commit carrying the same inserts adopts it. */
+  previewInsert(
+    input: DesignRuntimeInsertPreview,
+    signal?: AbortSignal,
+  ): Promise<DesignRuntimeInsertPreviewResult>;
+  /** Remove the named previews (all when omitted). */
+  clearPreviewInserts(nodeIds?: readonly string[], signal?: AbortSignal): Promise<{ snapshot: DesignRuntimeSnapshot }>;
   previewStyles(
     nodeId: string,
     styles: Record<string, string | null>,
@@ -144,6 +163,12 @@ export interface DesignFrameRuntimeConnection {
     /** Extra boxes to measure at the restored generation (the selection). */
     measure?: readonly string[],
   ): Promise<DesignRuntimeStyleCommit>;
+  /** Opt-in pending history presentation, isolated from commit baselines. */
+  previewHistory?(
+    targetSourceVersion: string | null,
+    measure?: readonly string[],
+    signal?: AbortSignal,
+  ): Promise<DesignRuntimeStyleCommit | null>;
   previewText(
     nodeId: string,
     text: string,
@@ -172,13 +197,17 @@ export interface DesignFrameRuntimeConnection {
     nodeId?: string | null,
     scale?: number,
     signal?: AbortSignal,
+    priority?: DesignCapturePriority,
   ): Promise<DesignRuntimeScreenshot>;
   captureViewportScreenshot(
     crop: DesignRuntimeRect,
     outputSize: { width: number; height: number },
     signal?: AbortSignal,
+    priority?: DesignCapturePriority,
   ): Promise<DesignRuntimeScreenshot>;
-  destroy(): void;
+  cancelCaptures?(): void;
+  /** true only after the iframe document was actually removed/navigated. */
+  destroy(documentDisposed?: boolean): void;
 }
 
 let requestSequence = 0;
@@ -365,6 +394,8 @@ class DesignRuntimeConnectionImpl implements DesignFrameRuntimeConnection {
   private expectedSourceVersion: string;
   private generationTransition: Promise<void> | null = null;
   private methods: ReadonlySet<DesignRuntimeMethod> | null = null;
+  private captureCompletion = false;
+  private captureLifetime = new AbortController();
 
   constructor(
     source: MessageEventSource,
@@ -407,8 +438,8 @@ class DesignRuntimeConnectionImpl implements DesignFrameRuntimeConnection {
   };
 
   receive(message: DesignRuntimeFrameMessage): void {
-    if (this.destroyed) return;
     if (message.type === "event") {
+      if (this.destroyed) return;
       if (message.event === "ready") {
         if (
           message.payload.sourceVersion !== this.expectedSourceVersion ||
@@ -420,8 +451,13 @@ class DesignRuntimeConnectionImpl implements DesignFrameRuntimeConnection {
           return;
         }
         this.methods = new Set(message.payload.capabilities.methods);
+        this.captureCompletion = message.payload.capabilities.captureCompletion === true;
         this.callbacks.onReady?.(message.payload.capabilities);
         this.callbacks.onSnapshot?.(message.payload.snapshot, "ready");
+      } else if (message.event === "playbackStopped") {
+        if (this.supports("setPlayback") && message.payload.sourceVersion === this.expectedSourceVersion) {
+          this.callbacks.onPlaybackStopped?.(message.payload);
+        }
       } else if (
         isRuntimeSnapshot(message.payload) &&
         message.payload.sourceVersion === this.expectedSourceVersion
@@ -437,7 +473,9 @@ class DesignRuntimeConnectionImpl implements DesignFrameRuntimeConnection {
     if (pending.signal && pending.abort) {
       pending.signal.removeEventListener("abort", pending.abort);
     }
-    if (message.ok) {
+    if (pending.cancellation) {
+      pending.reject(pending.cancellation);
+    } else if (message.ok) {
       pending.resolve(message.result);
     } else {
       pending.reject(
@@ -448,6 +486,7 @@ class DesignRuntimeConnectionImpl implements DesignFrameRuntimeConnection {
         ),
       );
     }
+    this.closeRetiredPort();
   }
 
   private cancel(requestId: string): void {
@@ -519,6 +558,13 @@ class DesignRuntimeConnectionImpl implements DesignFrameRuntimeConnection {
         ? () => {
             const pending = this.pending.get(requestId);
             if (!pending) return;
+            if (pending.capture) {
+              pending.cancellation = runtimeError("request cancelled", "CANCELLED", false);
+              // Legacy runtimes suppress cancelled replies. Let their already
+              // bounded capture finish; retain admission until response/disposal.
+              if (this.captureCompletion) this.cancel(requestId);
+              return;
+            }
             this.pending.delete(requestId);
             this.host.clearTimeout(timeout);
             this.cancel(requestId);
@@ -527,6 +573,12 @@ class DesignRuntimeConnectionImpl implements DesignFrameRuntimeConnection {
         : undefined;
       const timeout = this.host.setTimeout(
         () => {
+          const pending = this.pending.get(requestId);
+          if (pending?.capture) {
+            pending.cancellation ??= runtimeError(`${method} timed out`);
+            if (this.captureCompletion) this.cancel(requestId);
+            return;
+          }
           if (!this.pending.delete(requestId)) return;
           if (signal && abort) signal.removeEventListener("abort", abort);
           this.cancel(requestId);
@@ -540,6 +592,7 @@ class DesignRuntimeConnectionImpl implements DesignFrameRuntimeConnection {
         resolve,
         reject,
         timeout,
+        ...(method === "captureScreenshot" ? { capture: true } : {}),
         ...(signal ? { signal } : {}),
         ...(abort ? { abort } : {}),
       });
@@ -714,6 +767,62 @@ class DesignRuntimeConnectionImpl implements DesignFrameRuntimeConnection {
     return result as { applied: number; snapshot: DesignRuntimeSnapshot };
   }
 
+  async previewInsert(
+    input: DesignRuntimeInsertPreview,
+    signal?: AbortSignal,
+  ): Promise<DesignRuntimeInsertPreviewResult> {
+    if (!this.supports("previewInsert"))
+      throw runtimeError("previewInsert is not supported", "METHOD_NOT_SUPPORTED");
+    const result = await this.request("previewInsert", { ...input }, signal) as
+      { snapshot?: unknown; details?: unknown } | null;
+    if (
+      !result ||
+      typeof result !== "object" ||
+      !isRuntimeSnapshot(result.snapshot) ||
+      result.snapshot.sourceVersion !== this.expectedSourceVersion ||
+      !Array.isArray(result.details) ||
+      result.details.length !== input.inserts.length ||
+      result.details.some((details, index) =>
+        !isNodeDetails(details) ||
+        details.sourceVersion !== this.expectedSourceVersion ||
+        details.oid !== input.inserts[index]?.nodeId)
+    ) {
+      throw runtimeError("previewInsert returned malformed data");
+    }
+    return result as DesignRuntimeInsertPreviewResult;
+  }
+
+  async clearPreviewInserts(
+    nodeIds?: readonly string[],
+    signal?: AbortSignal,
+  ): Promise<{ snapshot: DesignRuntimeSnapshot }> {
+    if (!this.supports("clearPreviewInserts"))
+      throw runtimeError("clearPreviewInserts is not supported", "METHOD_NOT_SUPPORTED");
+    const result = await this.request("clearPreviewInserts", nodeIds ? { nodeIds: [...nodeIds] } : {}, signal) as
+      { snapshot?: unknown } | null;
+    if (
+      !result ||
+      !isRuntimeSnapshot(result.snapshot) ||
+      result.snapshot.sourceVersion !== this.expectedSourceVersion
+    ) {
+      throw runtimeError("clearPreviewInserts returned malformed data");
+    }
+    return result as { snapshot: DesignRuntimeSnapshot };
+  }
+
+  async setPlayback(sessionId: string, playing: boolean, signal?: AbortSignal): Promise<void> {
+    if (!this.supports("setPlayback")) {
+      throw runtimeError("Frame playback needs an updated Design runtime. Restart Zeros to load it.", "METHOD_NOT_SUPPORTED");
+    }
+    const result = await this.request("setPlayback", { sessionId, playing }, signal) as
+      { playing?: unknown; sessionId?: unknown } | null;
+    if (!result || typeof result.playing !== "boolean" ||
+        (result.playing ? typeof result.sessionId !== "string" || !result.sessionId.length || result.sessionId.length > 128 : result.sessionId !== null) ||
+        (playing && (!result.playing || result.sessionId !== sessionId))) {
+      throw runtimeError("setPlayback returned malformed data");
+    }
+  }
+
   async previewStyles(
     nodeId: string,
     styles: Record<string, string | null>,
@@ -824,6 +933,23 @@ class DesignRuntimeConnectionImpl implements DesignFrameRuntimeConnection {
     return commit ? this.changeGeneration(restore) : restore();
   }
 
+  async previewHistory(
+    targetSourceVersion: string | null,
+    measure?: readonly string[],
+    signal?: AbortSignal,
+  ): Promise<DesignRuntimeStyleCommit | null> {
+    if (!this.supports("previewHistory"))
+      throw runtimeError("previewHistory is not supported", "METHOD_NOT_SUPPORTED");
+    const result = await this.request("previewHistory", { targetSourceVersion,
+      ...(measure?.length ? { measure: [...measure] } : {}) }, signal);
+    if (targetSourceVersion === null && result === null) return null;
+    if (!isStyleCommit(result) || result.sourceVersion !== this.expectedSourceVersion ||
+      result.snapshot.sourceVersion !== this.expectedSourceVersion ||
+      result.details.some(detail => detail.sourceVersion !== this.expectedSourceVersion))
+      throw runtimeError("previewHistory returned malformed data");
+    return result;
+  }
+
   async commitStyles(
     updates: DesignRuntimeStyleUpdate[],
     nextSourceVersion: string,
@@ -920,15 +1046,12 @@ class DesignRuntimeConnectionImpl implements DesignFrameRuntimeConnection {
     nodeId: string | null = null,
     scale = 1,
     signal?: AbortSignal,
+    priority: DesignCapturePriority = "explicit",
   ): Promise<DesignRuntimeScreenshot> {
-    const result = await this.request(
-      "captureScreenshot",
-      {
+    const result = await this.capture({
         ...(nodeId ? { nodeId } : {}),
         scale,
-      },
-      signal,
-    );
+      }, signal, priority);
     if (
       !isRuntimeScreenshot(result) ||
       result.sourceVersion !== this.expectedSourceVersion
@@ -942,12 +1065,9 @@ class DesignRuntimeConnectionImpl implements DesignFrameRuntimeConnection {
     crop: DesignRuntimeRect,
     outputSize: { width: number; height: number },
     signal?: AbortSignal,
+    priority: DesignCapturePriority = "detail",
   ): Promise<DesignRuntimeScreenshot> {
-    const result = await this.request(
-      "captureScreenshot",
-      { crop, outputSize },
-      signal,
-    );
+    const result = await this.capture({ crop, outputSize }, signal, priority);
     if (
       !isRuntimeScreenshot(result) ||
       result.sourceVersion !== this.expectedSourceVersion
@@ -957,26 +1077,58 @@ class DesignRuntimeConnectionImpl implements DesignFrameRuntimeConnection {
     return result;
   }
 
-  destroy(): void {
-    if (this.destroyed) return;
+  private capture(args: Record<string, unknown>, signal: AbortSignal | undefined, priority: DesignCapturePriority): Promise<unknown> {
+    const sourceVersion = this.expectedSourceVersion;
+    const lifetime = this.captureLifetime.signal;
+    return designCaptureScheduler.schedule(
+      JSON.stringify([this.captureKey, sourceVersion, args]), priority,
+      (admitted) => withNativeDesignCaptureAdmission(admitted, priority === "explicit", async () => {
+        // Adoption can complete while this request waits for capture admission.
+        await this.generationTransition;
+        if (!this.isActive() || this.expectedSourceVersion !== sourceVersion)
+          throw runtimeError("capture owner retired", "CANCELLED");
+        return this.request("captureScreenshot", args, admitted);
+      }), AbortSignal.any([lifetime, ...(signal ? [signal] : [])]),
+    );
+  }
+
+  private readonly captureKey = ++requestSequence;
+
+  cancelCaptures(): void {
+    this.captureLifetime.abort(runtimeError("capture owner retired", "CANCELLED"));
+    this.captureLifetime = new AbortController();
+  }
+
+  private closeRetiredPort(): void {
+    if (!this.destroyed || this.pending.size) return;
+    this.channel.port1.removeEventListener("message", this.handleMessage);
+    this.channel.port1.close();
+  }
+
+  destroy(documentDisposed = false): void {
+    if (this.destroyed && !documentDisposed) return;
+    if (!this.destroyed) this.cancelCaptures();
     const teardown: DesignRuntimeHostTeardown = {
       protocol: DESIGN_RUNTIME_PROTOCOL,
       version: DESIGN_RUNTIME_VERSION,
       type: "teardown",
       sourceVersion: this.expectedSourceVersion,
     };
-    this.channel.port1.postMessage(teardown);
+    if (!this.destroyed) this.channel.port1.postMessage(teardown);
     this.destroyed = true;
-    this.channel.port1.removeEventListener("message", this.handleMessage);
-    this.channel.port1.close();
-    for (const pending of this.pending.values()) {
+    for (const [id, pending] of this.pending) {
       this.host.clearTimeout(pending.timeout);
       if (pending.signal && pending.abort) {
         pending.signal.removeEventListener("abort", pending.abort);
       }
-      pending.reject(runtimeError("disconnected"));
+      if (pending.capture && !documentDisposed) {
+        pending.cancellation ??= runtimeError("disconnected");
+      } else {
+        pending.reject(runtimeError("disconnected"));
+        this.pending.delete(id);
+      }
     }
-    this.pending.clear();
+    this.closeRetiredPort();
   }
 }
 
@@ -1024,14 +1176,14 @@ export function connectDesignFrameRuntime(
   // buffered document available until its replacement has actually connected.
   connectingByFrame.set(key, connection);
   const destroy = connection.destroy.bind(connection);
-  connection.destroy = () => {
+  connection.destroy = (documentDisposed = false) => {
     if (connectionsByFrame.get(key) === connection) {
       connectionsByFrame.delete(key);
     }
     if (connectingByFrame.get(key) === connection) {
       connectingByFrame.delete(key);
     }
-    destroy();
+    destroy(documentDisposed);
   };
   return connection;
 }

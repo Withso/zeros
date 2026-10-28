@@ -126,6 +126,17 @@ describe("WorkOS desktop safe-storage session lifecycle", () => {
     vi.unstubAllEnvs();
   });
 
+  it("revokes a managed Auth0 device handle on local sign-out and retains a newer login", async () => {
+    persistSession({ accessToken: "current", refreshToken: `z0d_${"A".repeat(43)}`, sub: "auth0|old", email: "old@example.test", name: null });
+    mocks.network.mockImplementation(async (_url: string, init: RequestInit) => {
+      expect(JSON.parse(init.body as string)).toMatchObject({ scope: "current", refresh_token: `z0d_${"A".repeat(43)}` });
+      persistSession({ accessToken: "new-login", refreshToken: `z0d_${"B".repeat(43)}`, sub: "auth0|new", email: "new@example.test", name: null });
+      return Response.json({ ok: true });
+    });
+    await authClearSession({}, {} as never);
+    expect(parseStoredTokenSnapshot(mocks.raw)?.tokens.sub).toBe("auth0|new");
+  });
+
   it("uses a hosted workspace's isolated WorkOS contract during session migration", () => {
     const owner = "a".repeat(24);
     mocks.appOrigin = `https://app-dev-${owner}.example.test`;
@@ -348,7 +359,7 @@ describe("WorkOS desktop safe-storage session lifecycle", () => {
     expect(mocks.raw).toBeNull();
 
     install();
-    await expect(authSignOutEverywhere({}, {} as never)).resolves.toBe(true);
+    await expect(authSignOutEverywhere({}, {} as never)).rejects.toThrow(/other devices/);
     expect(mocks.revoke).toHaveBeenLastCalledWith("all", "access-current", expect.any(Function));
     expect(mocks.raw).toBeNull();
   });

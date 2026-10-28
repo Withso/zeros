@@ -60,7 +60,7 @@ vi.mock("../settings-scope", async original => ({
   ...await original<typeof import("../settings-scope")>(),
   readScopedSettingsSelection: () => f.provider,
 }));
-vi.mock("../../../state/use-cached-read", () => ({ useCachedRead: () => f.snapshot }));
+vi.mock("../../../state/use-recovering-read", () => ({ useRecoveringRead: () => f.snapshot }));
 vi.mock("../use-cloud-credential-removal", () => ({ useCloudCredentialRemoval: () => {
   const epoch = f.epoch;
   return { pending: f.pending, busy: false, current: () => f.current && epoch === f.epoch,

@@ -63,7 +63,12 @@ import {
   Tooltip,
   toast,
 } from "../../shared/ui/primitives";
-import { isEditableHotkeyTarget } from "../../shell/editable-target";
+import {
+  dispatchFocusedDesignHistory,
+  isDesignHistoryFocusOwner,
+  isNativeHistoryTarget,
+  registerDesignHistoryCommand,
+} from "./state/design-history-commands";
 import {
   designAutoLayoutUpdates,
   designFrameRootFixedStyles,
@@ -129,6 +134,7 @@ import {
   publishDesignLivePreviewStyles,
   useDesignLivePreviewValue,
 } from "./state/design-live-preview";
+import { useShallow } from "zustand/react/shallow";
 import { useDesignRuntimeStore } from "./state/design-runtime-store";
 import {
   captureDesignRuntimeScreenshot,
@@ -301,9 +307,13 @@ function InspectorEditField({
     moved: boolean;
   } | null>(null);
   const previewFrameRef = useRef<number | null>(null);
+  /** The newest value asked for while this frame's preview already left. */
+  const pendingPreviewRef = useRef<string | null>(null);
   const previewDirtyRef = useRef(false);
   const cancelPreviewRef = useRef(onCancelPreview);
   cancelPreviewRef.current = onCancelPreview;
+  const onPreviewRef = useRef(onPreview);
+  onPreviewRef.current = onPreview;
   const [draft, setDraft] = useState(String(value));
   const draftRef = useRef(draft);
   draftRef.current = draft;
@@ -315,7 +325,14 @@ function InspectorEditField({
     (next: string) => {
       draftRef.current = next;
       setDraft(next);
-      setPresentation(inspectorFieldPresentation(styleProperty, next, whole));
+      // An equal presentation keeps its identity, so a mounted field that
+      // adopts the value it was initialized with schedules no render.
+      const presented = inspectorFieldPresentation(styleProperty, next, whole);
+      setPresentation((current) =>
+        current.text === presented.text && current.unit === presented.unit
+          ? current
+          : presented,
+      );
     },
     [styleProperty, whole],
   );
@@ -369,6 +386,7 @@ function InspectorEditField({
       window.cancelAnimationFrame(previewFrameRef.current);
       previewFrameRef.current = null;
     }
+    pendingPreviewRef.current = null;
     if (!previewDirtyRef.current) return;
     previewDirtyRef.current = false;
     void Promise.resolve(cancelPreviewRef.current?.()).catch(() => {});
@@ -379,21 +397,32 @@ function InspectorEditField({
       window.cancelAnimationFrame(previewFrameRef.current);
       previewFrameRef.current = null;
     }
+    pendingPreviewRef.current = null;
     // Preserve the last exact live scalar until the authoritative source
     // generation arrives. Clearing here causes a visible value snap-back.
     previewDirtyRef.current = false;
   };
 
+  /** The first value of a scrub or drag previews at once; later ones within
+   * the same frame coalesce into the newest, sent on the next frame. Waiting a
+   * frame before the first one added a frame of lag to every scrub. */
   const preview = (next: string) => {
     if (!onPreview) return;
     previewDirtyRef.current = true;
     if (previewFrameRef.current !== null) {
-      window.cancelAnimationFrame(previewFrameRef.current);
+      pendingPreviewRef.current = next;
+      return;
     }
-    previewFrameRef.current = window.requestAnimationFrame(() => {
+    void Promise.resolve(onPreview(next)).catch(() => {});
+    const trailing = () => {
       previewFrameRef.current = null;
-      void Promise.resolve(onPreview(next)).catch(() => {});
-    });
+      const pending = pendingPreviewRef.current;
+      if (pending === null) return;
+      pendingPreviewRef.current = null;
+      void Promise.resolve(onPreviewRef.current?.(pending)).catch(() => {});
+      previewFrameRef.current = window.requestAnimationFrame(trailing);
+    };
+    previewFrameRef.current = window.requestAnimationFrame(trailing);
   };
 
   /** A value published while this field was focused but untouched is held
@@ -964,6 +993,7 @@ export function DesignInspector({
   frame,
   frameSelected,
   details,
+  selectedNode,
   selectedNodeId,
   selectedNodeIds,
   lint,
@@ -1222,8 +1252,22 @@ export function DesignInspector({
   }, [workspaceId, queueInspectorAction]);
 
 
+  const historyActionRef = useRef(runHistory);
+  const historyDirectoryRevision = useDesignWorkspaceUiStore(state => workspaceId ? state.byWorkspace[workspaceId]?.directoryRevision : undefined);
+  useLayoutEffect(() => { historyActionRef.current = runHistory; }, [runHistory]);
+  useLayoutEffect(() => {
+    if (!active || !workspaceId) return;
+    const root = inspectorRef.current?.closest("[data-design-workspace-surface]");
+    if (!root) return;
+    return registerDesignHistoryCommand({
+      workspaceId, root,
+      isCurrent: () => useDesignWorkspaceUiStore.getState().byWorkspace[workspaceId]?.directoryRevision === historyDirectoryRevision,
+      run: (direction) => historyActionRef.current(direction),
+    });
+  }, [active, workspaceId, historyDirectoryRevision]);
+
   useEffect(() => {
-    if (!active) return;
+    if (!active || !workspaceId) return;
     const onKeyDown = (event: KeyboardEvent) => {
       // Review owns its keyboard, including portaled filter options. This
       // capture listener runs before a dialog's React handlers can intercept
@@ -1232,7 +1276,8 @@ export function DesignInspector({
         (event.metaKey || event.ctrlKey) &&
         document.querySelector('[data-design-review][data-state="open"]')
       ) return;
-      const editableTarget = isEditableHotkeyTarget(event.target);
+      if (event.defaultPrevented || !isDesignHistoryFocusOwner(workspaceId, true)) return;
+      const editableTarget = isNativeHistoryTarget(event.target);
       dispatchDesignWorkspaceShortcut(event, editableTarget, {
         save: () => {
           // Inspector and inline-text fields publish drafts on blur. React
@@ -1243,14 +1288,14 @@ export function DesignInspector({
           }
           saveDesignChanges();
         },
-        undo: () => runHistory("undo"),
-        redo: () => runHistory("redo"),
+        undo: () => { dispatchFocusedDesignHistory("undo"); },
+        redo: () => { dispatchFocusedDesignHistory("redo"); },
       });
     };
     window.addEventListener("keydown", onKeyDown, { capture: true });
     return () =>
       window.removeEventListener("keydown", onKeyDown, { capture: true });
-  }, [active, runHistory, saveDesignChanges]);
+  }, [active, workspaceId, saveDesignChanges]);
 
   const exportPng = async () => {
     if (!workspaceId || !folder || !frame || frameAction) return;
@@ -1298,25 +1343,32 @@ export function DesignInspector({
         : [],
     [selectedNodeId, selectedNodeIds, styleTargetNodeId],
   );
-  const layoutRuntimeState = useDesignRuntimeStore((state) =>
-    workspaceId && frame
+  // Exactly the styled nodes' readbacks and the frame root id: hover reads,
+  // screenshots and other nodes' details must not re-render every field.
+  const styleNodeDetails = useDesignRuntimeStore(useShallow((state) => {
+    const frameState = workspaceId && frame
       ? state.byWorkspace[workspaceId]?.frames[frame.file]
+      : undefined;
+    return styleNodeIds.map((nodeId) => frameState?.detailsByNode[nodeId] ?? null);
+  }));
+  const layoutRootId = useDesignRuntimeStore((state) =>
+    workspaceId && frame
+      ? state.byWorkspace[workspaceId]?.frames[frame.file]?.snapshot?.frame.oid
       : undefined,
   );
   const layoutParents = useMemo(
     () =>
-      styleNodeIds.flatMap((nodeId) => {
+      styleNodeIds.flatMap((nodeId, index) => {
         const node =
           nodeId === elementDetails?.oid
             ? elementDetails
-            : layoutRuntimeState?.detailsByNode[nodeId];
+            : styleNodeDetails[index];
         return node && node.sourceVersion === elementDetails?.sourceVersion
           ? [node]
           : [];
       }),
-    [elementDetails, layoutRuntimeState, styleNodeIds],
+    [elementDetails, styleNodeDetails, styleNodeIds],
   );
-  const layoutRootId = layoutRuntimeState?.snapshot?.frame.oid;
   const styleDirectoryKey = workspaceId
     ? designWorkspaceSnapshotCache.peekSnapshot(workspaceId).data?.directoryId ??
       designWorkspaceSnapshotCache.peekSnapshot(workspaceId).data?.directory ?? ""
@@ -2168,7 +2220,9 @@ export function DesignInspector({
         : frameSelected && frame
           ? designFrameLayerLabel(frame.kind)
           : selectedNodeId
-            ? "Nothing selected"
+            ? selectedNode?.oid === selectedNodeId
+              ? designRuntimeLayerLabel(selectedNode)
+              : "Nothing selected"
             : "Page";
   const SelectionGlyph =
     styleNodeIds.length > 1
@@ -2279,7 +2333,7 @@ export function DesignInspector({
                 {zoomPercentage}%
               </Button>
             </DropdownMenuTrigger>
-            <DropdownMenuContent align="end" className="w-48">
+            <DropdownMenuContent data-design-history-owner={workspaceId ?? undefined} align="end" className="w-48">
               <DropdownMenuItem
                 disabled={zoom >= DESIGN_MAX_ZOOM}
                 aria-label="Zoom in"

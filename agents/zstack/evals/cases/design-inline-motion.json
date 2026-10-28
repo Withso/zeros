@@ -1,0 +1,9 @@
+{
+  "id": "design-inline-motion",
+  "kind": "replay",
+  "area": "engine-design",
+  "fixedBy": "pr:695",
+  "symptom": "A parent frame's authored animation appears in the inspector but its timeline has zero tracks because inline HTML keyframes are omitted; the CSS-only transaction adapter also rejects saving them.",
+  "rule": "changes/design-inline-motion.md: exercise raw HTML/CSS through production keyframe projection and mutation, preserve surrounding source and exact undo, and reject ambiguous or unsafe inline writes.",
+  "check": "pnpm test:git packages/design-web/src/__tests__/css.test.ts packages/design-web/src/__tests__/api.test.ts"
+}

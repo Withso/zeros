@@ -13,6 +13,7 @@
 // ──────────────────────────────────────────────────────────
 
 import { defineConfig } from "tsup";
+import { readFileSync } from "node:fs";
 import { cloudWorkspaceChannelEnabled } from "../shared/cloud-workspace-channel";
 
 export default defineConfig({
@@ -111,6 +112,7 @@ export default defineConfig({
     // runtime call against the app's node_modules instead of trying to inline
     // the native module.
     "node-pty",
+    "sass",
   ],
   // @decimalturn/toml-patch is ESM-only ("type":"module"). tsup externalizes
   // package.json deps by default, which would leave a runtime `require()` of an
@@ -134,8 +136,6 @@ export default defineConfig({
   // modules (node-pty) throws on load in packaged builds.
   // No effect in dev.
   banner: {
-    js: `try{require('fs').appendFileSync('/tmp/zeros-boot.log','[banner] main.cjs entered '+new Date().toISOString()+'\\n');}catch(e){}
-process.on('uncaughtException',function(err){try{require('fs').appendFileSync('/tmp/zeros-boot.log','[uncaught] '+(err&&err.stack||err)+'\\n');}catch(e){}});
-`,
+    js: readFileSync(new URL("./boot-trace.cjs", import.meta.url), "utf8"),
   },
 });

@@ -1,7 +1,8 @@
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { afterEach, beforeEach, expect, it } from "vitest";
+import { afterEach, beforeEach, expect, it, vi } from "vitest";
+import { DesignCaptureCleanupUnconfirmedError } from "@zeros/protocol/design-capture";
 import { createDesignCaptureRenderer } from "../capture-client";
 import { startDesignCaptureService, type DesignCaptureService } from "../capture-service";
 import { createDesignFrame, initializeDesignDocument, readDesignWebDocumentState } from "../document";
@@ -79,4 +80,60 @@ it("stops waiting for the slot when the capture is cancelled", async () => {
   release();
   await first;
   expect(hosted).toBe(1);
+});
+
+it.each([500, 200])("does not claim cleanup after a failed cancellation acknowledgement (%i)", async (status) => {
+  const state = await readDesignWebDocumentState(root, frame);
+  const requests: Array<{ method?: string; url: string }> = [];
+  const transport = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
+    requests.push({ method: init?.method, url: String(url) });
+    if (init?.method === "POST") throw new Error("capture connection closed");
+    return new Response(JSON.stringify({ settled: false }), { status });
+  });
+  const capture = createDesignCaptureRenderer(root, { url: service!.url, token: service!.token }, transport as typeof fetch)!;
+  await expect(capture.renderComposed!({ state, viewport, html: "<body>Fixture</body>", sourceVersion: "a".repeat(24) }))
+    .rejects.toBeInstanceOf(DesignCaptureCleanupUnconfirmedError);
+  expect(requests.map((request) => request.method)).toEqual(["POST", "DELETE"]);
+  expect(requests[1]!.url).toMatch(/\/capture\/[a-f0-9-]+$/);
+});
+
+it.each([true, false])("finishes cancellation even when the POST response stalls (cleanup confirmed: %s)", async (confirmed) => {
+  const state = await readDesignWebDocumentState(root, frame);
+  const controller = new AbortController();
+  const reason = new Error("Capture cancelled by its owner.");
+  let releasePost!: () => void;
+  let confirmCleanup!: () => void;
+  let deleted = false, finished = false;
+  const transport = vi.fn((_url: string | URL | Request, init?: RequestInit) => {
+    if (init?.method === "POST") return new Promise<Response>((_resolve, reject) => {
+      const signal = init.signal;
+      const abort = () => { signal?.removeEventListener("abort", abort); reject(signal?.reason ?? new Error("POST closed")); };
+      releasePost = abort;
+      if (signal?.aborted) abort(); else signal?.addEventListener("abort", abort, { once: true });
+    });
+    deleted = true;
+    return new Promise<Response>(resolve => {
+      confirmCleanup = () => resolve(new Response(JSON.stringify({ settled: confirmed })));
+    });
+  });
+  const capture = createDesignCaptureRenderer(root, { url: service!.url, token: service!.token }, transport as typeof fetch)!;
+  const result = capture.renderComposed!({ state, viewport, signal: controller.signal,
+    html: "<body>Fixture</body>", sourceVersion: "a".repeat(24) })
+    .then(value => ({ value, error: undefined }), error => ({ value: undefined, error }))
+    .finally(() => { finished = true; });
+  try {
+    expect(transport).toHaveBeenCalledTimes(1);
+    controller.abort(reason);
+    expect(deleted).toBe(true);
+    await new Promise<void>(resolve => setImmediate(resolve));
+    expect(finished).toBe(false); // Native retirement, not caller abort, releases admission.
+    confirmCleanup();
+    await new Promise<void>(resolve => setImmediate(resolve));
+    expect(finished).toBe(true);
+    const outcome = await result;
+    if (confirmed) expect(outcome.error).toBe(reason);
+    else expect(outcome.error).toBeInstanceOf(DesignCaptureCleanupUnconfirmedError);
+  } finally {
+    confirmCleanup?.(); releasePost?.(); await result;
+  }
 });

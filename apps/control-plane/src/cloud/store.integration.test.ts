@@ -1,10 +1,12 @@
 import { randomUUID } from "node:crypto";
 import pg from "pg";
 import { Hono } from "hono";
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { resetMigratedTestDatabase } from "../test-database.js";
 import { CloudV2Store } from "./store.js";
 import { createCloudV2Routes, type CloudV2RouteDeps } from "./routes.js";
+import { createCloudV2WorkerRoutes } from "./worker-routes.js";
+import { HttpError } from "../authz.js";
 
 const d = process.env.TEST_DATABASE_URL ? describe : describe.skip;
 
@@ -37,6 +39,279 @@ d("cloud v2 store", () => {
   const create = () => store.createWorkspace({
     id: randomUUID(), organizationId: org, creatorUserId: creator, name: "zeros", repository: "withso/zeros", branch: "zeros/w", baseBranch: "main",
     computerBuildId: null,
+  });
+
+  it.each([false, true])("records real worker activity through a GitHub outage before an idle-stop race (outbox=%s)", async promptOutbox => {
+    const w = await create(), token = await store.rotateWorkerToken(w.id), boot = randomUUID();
+    await store.acceptWorkerHello(token, boot);
+    await pool.query("UPDATE cloud_v2_workspaces SET active_at=clock_timestamp()-interval '11 minutes' WHERE id=$1", [w.id]);
+    const cutoff = new Date(Date.now() - 10 * 60_000);
+    expect((await store.idleSince(cutoff)).map(row => row.id)).toContain(w.id);
+    const authorizeSource = vi.fn(async () => { throw new HttpError(503, "github_unavailable", "unavailable"); });
+    const app = createCloudV2WorkerRoutes({ store, authorizeSource, continueSource: async () => { throw new HttpError(503, "github_unavailable", "unavailable"); },
+      runtimeSha256: "a".repeat(64), promptOutbox, config: async () => { throw new Error("unused"); }, githubToken: async () => { throw new Error("unused"); } });
+    const response = await app.request("/v2/cloud/worker/activity", { method: "POST", headers: {
+      authorization: `Bearer ${token}`, "x-zeros-worker-boot": boot, "content-type": "application/json",
+    }, body: JSON.stringify({ idle: false }) });
+    expect(response.status).toBe(200);
+    await store.stopIdle(w.id, cutoff);
+    expect((await store.get(w.id, creator)).state).toBe("running");
+    expect((await store.idleSince(cutoff)).map(row => row.id)).not.toContain(w.id);
+    expect(authorizeSource).not.toHaveBeenCalled();
+  });
+
+  it("excludes in-flight workspaces before applying the claim limit even when their lease has expired", async () => {
+    const first = await create(), second = await create();
+    expect((await store.claimPending(1, 0, [first.id])).map(row => row.id)).toEqual([second.id]);
+    expect((await store.claimPending(4, 0, [first.id, second.id]))).toEqual([]);
+    expect((await store.claimPending(1, 0)).map(row => row.id)).toEqual([first.id]);
+  });
+
+  it("returns hello latency from the state entry exactly once, retaining the first boot deadline", async () => {
+    const w = await create(), token = await store.rotateWorkerToken(w.id), bootId = randomUUID();
+    await pool.query("UPDATE cloud_v2_workspaces SET updated_at=clock_timestamp()-interval '5 seconds' WHERE id=$1", [w.id]);
+    const hello = await store.acceptWorkerHello(token, bootId);
+    expect(hello?.helloTiming?.state).toBe("creating");
+    expect(hello?.helloTiming?.durationMs).toBeGreaterThanOrEqual(5000);
+    expect(hello?.helloTiming?.durationMs).toBeLessThan(10_000);
+    expect((await store.acceptWorkerHello(token, bootId))?.helloTiming).toBeUndefined();
+  });
+
+  it("renews only due running leases and fences the result by sandbox and lifecycle state", async () => {
+    const a = await create(), b = await create();
+    await store.transition(a.id, ["creating"], "running", { boatSandboxId: "bx_first" });
+    await store.transition(b.id, ["creating"], "running", { boatSandboxId: "bx_other" });
+    const due = new Date(Date.now() - 13 * 60 * 60_000), recent = new Date();
+    expect(await store.markLeaseRenewed(a.id, "bx_first", due)).toBe(true);
+    expect(await store.markLeaseRenewed(b.id, "bx_other", recent)).toBe(true);
+    expect((await store.leasesDue(new Date(Date.now() - 12 * 60 * 60_000), 4)).map(w => w.id)).toEqual([a.id]);
+    expect(await store.markLeaseRenewed(a.id, "bx_replaced", recent)).toBe(false);
+    await store.transition(a.id, ["running"], "stopping");
+    expect(await store.markLeaseRenewed(a.id, "bx_first", recent)).toBe(false);
+    expect(await store.leasesDue(recent, 4)).toEqual([]);
+    expect(await store.get(a.id, creator)).not.toHaveProperty("leaseRenewedAt");
+  });
+
+  const attemptRequest = () => { const attempt = randomUUID(); return { attempt, name: `zeros-alpha-ws-r${attempt.slice(0, 8)}`, env: { CLOUD_V2_RUNTIME_SHA256: "0".repeat(64) } }; };
+  let request = attemptRequest();
+  const checkpoint = (workspaceId: string, bytes = 4096) =>
+    ({ object: `cloud-v2/checkpoints/${workspaceId}/${randomUUID()}.zck`, key: { version: 1, sealed: true }, sha256: "a".repeat(64), bytes });
+
+  const generation = async (id: string) => (await pool.query<{ g: string }>("SELECT stop_generation::text AS g FROM cloud_v2_workspaces WHERE id=$1", [id])).rows[0]!.g;
+  const save = async (id: string, sandboxId: string, value: ReturnType<typeof checkpoint>) => store.saveCheckpoint(id, sandboxId, await generation(id), value);
+
+  async function stopping(sandboxId: string) {
+    const w = await create();
+    await store.transition(w.id, ["creating"], "running", { boatSandboxId: sandboxId });
+    await store.transition(w.id, ["running"], "stopping");
+    return w;
+  }
+
+  async function activeComputer(snapshot = `zeros-alpha-${org.replace(/-/g, "").slice(0, 12)}-v1`) {
+    const buildId = randomUUID();
+    await pool.query(`INSERT INTO cloud_v2_computer_builds(id,org_id,version,recipe,state,builder_sandbox_id,snapshot_id,created_by,source_policy_version)
+      VALUES($1,$2,1,'{}','succeeded','bx_33333333',$3,$4,2)`, [buildId, org, snapshot, creator]);
+    await pool.query("INSERT INTO cloud_v2_computers(org_id,active_build_id,snapshot_name) VALUES($1,$2,$3)", [org, buildId, snapshot]);
+    return { buildId, snapshot };
+  }
+
+  it("records a checkpoint only for the stop still stopping that VM, and returns the one it replaced", async () => {
+    const w = await stopping("bx_first"), first = checkpoint(w.id), second = checkpoint(w.id, 8192);
+    expect(await save(w.id, "bx_other", first)).toBe(false);
+    expect(await save(w.id, "bx_first", first)).toEqual({ replaced: null });
+    expect(await save(w.id, "bx_first", second)).toEqual({ replaced: first.object });
+    await store.checkpointFailed(w.id, "bx_first", await generation(w.id), "checkpoint_too_large");
+    const claimed = (await store.claimPending(4, 0)).find(row => row.id === w.id)!;
+    expect(claimed.checkpoint).toEqual({ ...second, savedAt: expect.any(String), stopGeneration: claimed.stopGeneration });
+    expect((await pool.query("SELECT checkpoint_error FROM cloud_v2_workspaces WHERE id=$1", [w.id])).rows[0].checkpoint_error).toBe("checkpoint_too_large");
+    // Internal metadata never reaches the public document.
+    const document = await store.get(w.id, creator);
+    for (const field of ["checkpoint", "restorePending", "baseCommit"]) expect(document).not.toHaveProperty(field);
+    await store.transition(w.id, ["stopping"], "stopped");
+    expect(await save(w.id, "bx_first", checkpoint(w.id))).toBe(false);
+    // A stored key and digest only ever describe a complete checkpoint.
+    await expect(pool.query("UPDATE cloud_v2_workspaces SET checkpoint_key=NULL WHERE id=$1", [w.id])).rejects.toThrow(/cloud_v2_checkpoint_complete/);
+    await expect(pool.query("UPDATE cloud_v2_workspaces SET checkpoint_object='cloud-v2/checkpoints/../x.zck' WHERE id=$1", [w.id])).rejects.toThrow();
+  });
+
+  it("refuses a legacy shared image for both workspace creation and checkpoint restore", async () => {
+    const image = await activeComputer();
+    await pool.query("UPDATE cloud_v2_computer_builds SET source_policy_version=1 WHERE id=$1", [image.buildId]);
+    expect(await store.activeComputer(org)).toBeNull();
+    await expect(store.createWorkspace({ id: randomUUID(), organizationId: org, creatorUserId: creator,
+      name: "Blocked", repository: "withso/zeros", branch: "work", baseBranch: "main", computerBuildId: image.buildId }))
+      .rejects.toMatchObject({ code: "cloud_computer_changed" });
+    const w = await stopping("bx_legacy");
+    const saved = checkpoint(w.id);
+    await save(w.id, "bx_legacy", saved);
+    await store.transition(w.id, ["stopping"], "stopped");
+    await store.transition(w.id, ["stopped"], "starting");
+    expect(await store.beginRestore(w.id, "bx_legacy", attemptRequest())).toBe("no_computer");
+    expect((await pool.query("SELECT checkpoint_object,source_repositories FROM cloud_v2_workspaces WHERE id=$1", [w.id])).rows[0])
+      .toEqual({ checkpoint_object: saved.object, source_repositories: ["withso/zeros"] });
+  });
+
+  it("refuses a late save from an earlier stop, so it can never replace a newer checkpoint", async () => {
+    const w = await stopping("bx_gen"), first = await generation(w.id);
+    // Stop 1's save is held; its retry completes the stop without it.
+    await store.transition(w.id, ["stopping"], "stopped");
+    await store.transition(w.id, ["stopped"], "starting");
+    await store.transition(w.id, ["starting"], "running");
+    // Stop 2, through the idle path, saves B.
+    await pool.query("UPDATE cloud_v2_workspaces SET active_at=clock_timestamp()-interval '1 hour' WHERE id=$1", [w.id]);
+    await store.stopIdle(w.id, new Date());
+    const second = await generation(w.id);
+    expect(BigInt(second)).toBe(BigInt(first) + 1n);
+    const b = checkpoint(w.id);
+    expect(await store.saveCheckpoint(w.id, "bx_gen", second, b)).toEqual({ replaced: null });
+    // Stop 1's held save arrives while stop 2 is still stopping.
+    expect(await store.saveCheckpoint(w.id, "bx_gen", first, checkpoint(w.id))).toBe(false);
+    expect(await store.checkpointUpload(w.id, "bx_gen", first, checkpoint(w.id).object, new Date(Date.now() + 60_000))).toBe(false);
+    expect((await store.claimPending(4, 0)).find(row => row.id === w.id)?.checkpoint?.object).toBe(b.object);
+    // An archive during the stop changes the document's time, not the stop.
+    await store.requestLifecycle(w.id, creator, "archive");
+    expect(await generation(w.id)).toBe(second);
+    // The earlier stop can neither keep the VM's stop nor complete this one.
+    expect(await store.stopCurrent(w.id, first)).toBe(false);
+    expect(await store.stopCurrent(w.id, second)).toBe(true);
+    expect(await store.transition(w.id, ["stopping"], "stopped", { stopGeneration: first })).toBeNull();
+    expect(await store.transition(w.id, ["stopping"], "stopped", { stopGeneration: second })).toMatchObject({ state: "stopped" });
+  });
+
+  it("revokes a worker only when its own stop completes, never a worker a newer wake started", async () => {
+    const w = await stopping("bx_revoke"), stop = await generation(w.id);
+    // The stop's retry completes it; the workspace wakes and its new worker connects.
+    await store.transition(w.id, ["stopping"], "stopped", { stopGeneration: stop, revoke: true });
+    await store.transition(w.id, ["stopped"], "starting");
+    const fresh = await store.rotateWorkerToken(w.id), boot = randomUUID();
+    expect(await store.acceptWorkerHello(fresh, boot)).toMatchObject({ state: "running" });
+    // The original stop's held reply finally completes: it moves nothing and revokes nothing.
+    expect(await store.transition(w.id, ["stopping"], "stopped", { stopGeneration: stop, revoke: true })).toBeNull();
+    expect(await store.workerSession(fresh, boot)).not.toBeNull();
+    // A backoff from that stop cannot reschedule a newer one either.
+    await store.transition(w.id, ["running"], "stopping");
+    await store.defer(w.id, "stopping", 60_000, { failure: true, stopGeneration: stop });
+    expect((await pool.query("SELECT next_attempt_at FROM cloud_v2_workspaces WHERE id=$1", [w.id])).rows[0].next_attempt_at).toBeNull();
+  });
+
+  it("restores only a starting workspace with a checkpoint, pinning the active Cloud Computer against cleanup", async () => {
+    const w = await stopping("bx_lost");
+    await save(w.id, "bx_lost", checkpoint(w.id));
+    await store.transition(w.id, ["stopping"], "stopped");
+    expect(await store.beginRestore(w.id, "bx_lost", request = attemptRequest())).toBeNull();
+    await store.transition(w.id, ["stopped"], "starting");
+    expect(await store.beginRestore(w.id, "bx_lost", request = attemptRequest())).toBe("no_computer");
+    const computer = await activeComputer();
+    expect(await store.beginRestore(w.id, "bx_other", request = attemptRequest())).toBeNull();
+    const begun = await store.beginRestore(w.id, "bx_lost", request = attemptRequest());
+    const { attempt: _attempt, ...requested } = request;
+    expect(begun).toEqual({ attempt: request.attempt, create: { from: computer.snapshot, ...requested, requestedAt: expect.any(String) } });
+    const pending = (await store.claimPending(4, 0)).find(row => row.id === w.id)!;
+    expect(pending).toMatchObject({ restorePending: true, boatSandboxId: null, computerBuildId: computer.buildId,
+      restoreAttempt: request.attempt, restoreCreate: { from: computer.snapshot, name: request.name, env: request.env } });
+    // Cleanup sees the pin until the replacement exists.
+    const { CloudV2Computers } = await import("./computer.js");
+    const computers = new CloudV2Computers(pool);
+    await pool.query("UPDATE cloud_v2_computers SET active_build_id=NULL WHERE org_id=$1", [org]);
+    expect((await computers.resources(computer.buildId))?.pinned).toBe(true);
+    // A late reply from another attempt cannot take this attempt's slot.
+    expect(await store.replaceSandbox(w.id, randomUUID(), "bx_late", new Date())).toBeNull();
+    expect(await store.replaceSandbox(w.id, request.attempt, "bx_new1", new Date())).toBe("starting");
+    expect((await computers.resources(computer.buildId))?.pinned).toBe(false);
+    expect(await store.replaceSandbox(w.id, request.attempt, "bx_new2", new Date())).toBeNull();
+    expect(await store.finishRestore(w.id, "bx_other")).toBe(false);
+    expect(await store.finishRestore(w.id, "bx_new1")).toBe(true);
+    expect((await store.claimPending(4, 0)).find(row => row.id === w.id)).toMatchObject({ restorePending: false, boatSandboxId: "bx_new1" });
+  });
+
+  it("keeps a replacement findable when a stop or deletion wins the race, and forgets the checkpoint once deleted", async () => {
+    await activeComputer();
+    const w = await stopping("bx_lost");
+    await save(w.id, "bx_lost", checkpoint(w.id));
+    await store.transition(w.id, ["stopping"], "stopped");
+    await store.transition(w.id, ["stopped"], "starting");
+    expect(await store.beginRestore(w.id, "bx_lost", request = attemptRequest())).toMatchObject({ attempt: request.attempt, create: { from: expect.any(String) } });
+    await store.transition(w.id, ["starting"], "deleting");
+    expect(await store.replaceSandbox(w.id, request.attempt, "bx_new1", new Date())).toBe("deleting");
+    expect((await store.claimPending(4, 0)).find(row => row.id === w.id)).toMatchObject({ state: "deleting", boatSandboxId: "bx_new1", restorePending: true });
+    // A replacement that never received the checkpoint can never replace it.
+    expect(await save(w.id, "bx_new1", checkpoint(w.id))).toBe(false);
+    await store.transition(w.id, ["deleting"], "deleted");
+    const row = (await pool.query("SELECT checkpoint_object, checkpoint_key, restore_pending FROM cloud_v2_workspaces WHERE id=$1", [w.id])).rows[0];
+    expect(row).toEqual({ checkpoint_object: null, checkpoint_key: null, restore_pending: false });
+  });
+
+  it("records the base commit once while creating and serves it to the first worker's configuration", async () => {
+    const w = await create(), head = "c".repeat(40);
+    await store.setBaseCommit(w.id, "not-a-commit");
+    expect(await store.baseCommit(w.id)).toBeNull();
+    await store.setBaseCommit(w.id, head);
+    await store.setBaseCommit(w.id, "d".repeat(40));
+    expect(await store.baseCommit(w.id)).toBe(head);
+    expect((await store.claimPending(4, 0)).find(row => row.id === w.id)?.baseCommit).toBe(head);
+    // The worker's hello makes it running before its configuration is built.
+    await store.defer(w.id, "creating", 0, { boatSandboxId: "bx_base" });
+    expect(await store.acceptWorkerHello(await store.rotateWorkerToken(w.id), randomUUID())).toMatchObject({ state: "running" });
+    expect(await store.baseCommit(w.id)).toBe(head);
+    await store.setBaseCommit(w.id, "e".repeat(40));
+    expect(await store.baseCommit(w.id)).toBe(head);
+    // A restored workspace's branch already exists; the creation-time pin is never offered again.
+    await store.transition(w.id, ["running"], "stopping");
+    await save(w.id, "bx_base", checkpoint(w.id));
+    await store.transition(w.id, ["stopping"], "stopped");
+    await store.transition(w.id, ["stopped"], "starting");
+    await store.transition(w.id, ["starting"], "running");
+    expect(await store.baseCommit(w.id)).toBeNull();
+  });
+
+  it("restores with a new attempt identity each time, and keeps its recorded request through build cleanup", async () => {
+    const computer = await activeComputer();
+    const w = await stopping("bx_lost");
+    await save(w.id, "bx_lost", checkpoint(w.id));
+    await store.transition(w.id, ["stopping"], "stopped");
+    await store.transition(w.id, ["stopped"], "starting");
+    const first = await store.beginRestore(w.id, "bx_lost", request = attemptRequest());
+    if (!first || first === "no_computer") throw new Error("restore did not begin");
+    expect(first.attempt).toBe(request.attempt);
+    expect((await store.claimPending(4, 0)).find(row => row.id === w.id)?.restoreAttempt).toBe(first.attempt);
+    expect(await store.replaceSandbox(w.id, first.attempt, "bx_first", new Date())).toBe("starting");
+    // The replacement is lost as well: a second restore never reuses the first's identity.
+    const second = await store.beginRestore(w.id, "bx_first", request = attemptRequest());
+    if (!second || second === "no_computer") throw new Error("second restore did not begin");
+    expect(second.attempt).not.toBe(first.attempt);
+    // Organization deletion asks for cleanup: the recorded request still names the
+    // pinned snapshot, which cleanup keeps while the replacement is unknown.
+    await pool.query("UPDATE cloud_v2_computer_builds SET cleanup_requested_at=clock_timestamp() WHERE id=$1", [computer.buildId]);
+    const pending = (await store.claimPending(4, 0)).find(row => row.id === w.id)!;
+    expect(pending).toMatchObject({ restorePending: true, boatSandboxId: null, restoreAttempt: second.attempt, restoreCreate: { from: computer.snapshot, name: request.name } });
+    const { CloudV2Computers } = await import("./computer.js");
+    expect((await new CloudV2Computers(pool).resources(computer.buildId))?.pinned).toBe(true);
+    // The replacement has its own boot deadline once the checkpoint is on it.
+    await pool.query("UPDATE cloud_v2_workspaces SET updated_at=clock_timestamp()-interval '20 minutes' WHERE id=$1", [w.id]);
+    expect(await store.replaceSandbox(w.id, second.attempt, "bx_second", new Date())).toBe("starting");
+    expect(await store.finishRestore(w.id, "bx_second")).toBe(true);
+    const restarted = (await store.claimPending(4, 0)).find(row => row.id === w.id)!;
+    expect(Date.now() - Date.parse(restarted.updatedAt)).toBeLessThan(60_000);
+  });
+
+  it("admits an upload only while its stop owns the VM, and settling one keeps another's horizon", async () => {
+    const w = await stopping("bx_upload"), a = checkpoint(w.id).object, b = checkpoint(w.id).object;
+    const early = new Date(Date.now() + 25 * 60_000), later = new Date(early.getTime() + 60_000);
+    expect(await store.checkpointUpload(w.id, "bx_other", await generation(w.id), a, early)).toBe(false);
+    expect(await store.checkpointUpload(w.id, "bx_upload", await generation(w.id), a, early)).toBe(true);
+    expect(await store.checkpointUpload(w.id, "bx_upload", await generation(w.id), b, later)).toBe(true);
+    // B settles first: A's outcome is still unknown, so its horizon stays.
+    await store.checkpointUploadDone(w.id, b);
+    expect((await store.claimPending(4, 0)).find(row => row.id === w.id)?.checkpointUploadUntil).toBe(early.toISOString());
+    expect(await store.checkpointUploadHorizon(w.id)).toBe(early.toISOString());
+    await store.checkpointUploadDone(w.id, a);
+    expect((await store.claimPending(4, 0)).find(row => row.id === w.id)?.checkpointUploadUntil).toBeNull();
+    // An expired entry is dropped when the next is recorded; deletion never admits one.
+    await pool.query(`UPDATE cloud_v2_workspaces SET checkpoint_uploads=jsonb_build_object('gone', clock_timestamp()-interval '1 minute') WHERE id=$1`, [w.id]);
+    expect(await store.checkpointUpload(w.id, "bx_upload", await generation(w.id), a, early)).toBe(true);
+    expect((await pool.query("SELECT checkpoint_uploads FROM cloud_v2_workspaces WHERE id=$1", [w.id])).rows[0].checkpoint_uploads).not.toHaveProperty("gone");
+    await store.transition(w.id, ["stopping"], "deleting");
+    expect(await store.checkpointUpload(w.id, "bx_upload", await generation(w.id), b, later)).toBe(false);
   });
 
   it.each(["creator", "relay"] as const)("fences the suspended process before a %s wake can race runtime installation", async source => {
@@ -341,5 +616,168 @@ d("cloud v2 store", () => {
       blocker.release();
       await result;
     }
+  });
+
+  const fingerprint = "f".repeat(64), base = "b".repeat(40);
+  const reuseOf = async (id: string) => (await pool.query("SELECT checkpoint_reuse FROM cloud_v2_workspaces WHERE id=$1", [id])).rows[0].checkpoint_reuse;
+  const lifecycleRow = async (id: string) => (await store.claimPending(10, 0, [], ["stopping", "creating", "starting", "deleting"])).find(row => row.id === id);
+
+  /** A workspace whose latest stop finished, on VM `sandboxId`. */
+  async function stopped(sandboxId: string, saved?: ReturnType<typeof checkpoint> & { reuse?: { fingerprint: string; base: string | null } }) {
+    const w = await stopping(sandboxId);
+    if (saved) await save(w.id, sandboxId, saved);
+    await store.transition(w.id, ["stopping"], "stopped");
+    return w;
+  }
+  const retryInput = { leaseMs: 60_000, firstDelayMs: 0, windowMs: 12 * 86_400_000 };
+
+  it("compares with a checkpoint only by what was recorded for that exact object", async () => {
+    const w = await stopping("bx_first"), first = { ...checkpoint(w.id), reuse: { fingerprint, base } };
+    expect(await save(w.id, "bx_first", first)).toEqual({ replaced: null });
+    expect(await reuseOf(w.id)).toEqual({ object: first.object, fingerprint, base });
+    expect((await lifecycleRow(w.id))?.checkpoint?.reuse).toEqual({ fingerprint, base });
+    // A release that knows nothing of fingerprints saves another object: the old one no longer applies.
+    const legacy = checkpoint(w.id);
+    await pool.query(`UPDATE cloud_v2_workspaces SET checkpoint_object=$2, checkpoint_sha256=$3, checkpoint_bytes=$4, checkpoint_key=$5,
+      checkpoint_saved_at=clock_timestamp(), checkpoint_stop_generation=stop_generation WHERE id=$1`,
+      [w.id, legacy.object, legacy.sha256, legacy.bytes, JSON.stringify(legacy.key)]);
+    const row = await lifecycleRow(w.id);
+    expect(row?.checkpoint?.object).toBe(legacy.object);
+    expect(row?.checkpoint).not.toHaveProperty("reuse");
+    expect(await store.checkpointUnchanged(w.id, "bx_first", await generation(w.id), legacy.object)).toBe(false);
+    // A save without a fingerprint clears it; a malformed record is never trusted.
+    await save(w.id, "bx_first", { ...checkpoint(w.id), reuse: { fingerprint, base: null } });
+    expect((await lifecycleRow(w.id))?.checkpoint?.reuse).toEqual({ fingerprint, base: null });
+    await save(w.id, "bx_first", checkpoint(w.id));
+    expect(await reuseOf(w.id)).toBeNull();
+    const current = (await lifecycleRow(w.id))!.checkpoint!.object;
+    await pool.query("UPDATE cloud_v2_workspaces SET checkpoint_reuse=$2 WHERE id=$1", [w.id, JSON.stringify({ object: current, fingerprint: "x", base })]);
+    expect((await lifecycleRow(w.id))?.checkpoint).not.toHaveProperty("reuse");
+  });
+
+  it("lets an unchanged stop keep the checkpoint only while that stop still owns the VM and the checkpoint is the one compared", async () => {
+    const w = await stopping("bx_first"), kept = { ...checkpoint(w.id), reuse: { fingerprint, base } };
+    await save(w.id, "bx_first", kept);
+    await store.transition(w.id, ["stopping"], "stopped");
+    await store.transition(w.id, ["stopped"], "starting"); await store.transition(w.id, ["starting"], "running");
+    await store.transition(w.id, ["running"], "stopping");
+    const g = await generation(w.id);
+    await store.checkpointFailed(w.id, "bx_first", g, "checkpoint_upload_failed");
+    expect(await store.checkpointUnchanged(w.id, "bx_other", g, kept.object)).toBe(false);
+    expect(await store.checkpointUnchanged(w.id, "bx_first", String(BigInt(g) - 1n), kept.object)).toBe(false);
+    expect(await store.checkpointUnchanged(w.id, "bx_first", g, checkpoint(w.id).object)).toBe(false);
+    expect(await store.checkpointUnchanged(w.id, "bx_first", g, kept.object)).toBe(true);
+    const row = (await pool.query("SELECT checkpoint_stop_generation::text AS c, checkpoint_error, checkpoint_object FROM cloud_v2_workspaces WHERE id=$1", [w.id])).rows[0];
+    expect(row).toEqual({ c: g, checkpoint_error: null, checkpoint_object: kept.object });
+    await store.transition(w.id, ["stopping"], "stopped");
+    expect(await store.checkpointUnchanged(w.id, "bx_first", g, kept.object)).toBe(false);
+  });
+
+  it("records when each stop finished and forgets fingerprints on deletion", async () => {
+    const w = await stopping("bx_first");
+    await save(w.id, "bx_first", { ...checkpoint(w.id), reuse: { fingerprint, base } });
+    const before = Date.now();
+    await store.transition(w.id, ["stopping"], "stopped");
+    const at = (await pool.query("SELECT stopped_at FROM cloud_v2_workspaces WHERE id=$1", [w.id])).rows[0].stopped_at as Date;
+    expect(at.getTime()).toBeGreaterThanOrEqual(before - 1000);
+    await store.transition(w.id, ["stopped"], "deleting");
+    await store.transition(w.id, ["deleting"], "deleted");
+    expect(await reuseOf(w.id)).toBeNull();
+  });
+
+  it("retries only a stopped workspace whose latest stop has no checkpoint, after the first delay and within the window", async () => {
+    await stopped("bx_covered", checkpoint(randomUUID()));
+    const failed = await stopped("bx_failed");
+    const old = await stopped("bx_old");
+    await pool.query("UPDATE cloud_v2_workspaces SET stopped_at=clock_timestamp()-interval '13 days' WHERE id=$1", [old.id]);
+    const waiting = await stopped("bx_waiting");
+    await pool.query("UPDATE cloud_v2_workspaces SET stopped_at=clock_timestamp()+interval '1 hour' WHERE id=$1", [waiting.id]);
+    const claimed = await store.claimCheckpointRetry(retryInput);
+    expect(claimed?.id).toBe(failed.id);
+    expect(claimed?.retry).toEqual({ generation: await generation(failed.id), attempts: 0, stoppedAt: expect.any(String), exhaustedAt: null });
+    // The lease keeps another replica from taking it meanwhile; nothing else is due.
+    expect(await store.claimCheckpointRetry(retryInput)).toBeNull();
+    expect(await store.claimCheckpointRetry({ ...retryInput, leaseMs: 0, excludeIds: [failed.id] })).toBeNull();
+  });
+
+  it("records a retry's fork before asking for it, fenced to the stop it retries", async () => {
+    const w = await stopped("bx_stopped", checkpoint(randomUUID()));
+    // Stop 1 had a checkpoint; stop 2 does not.
+    await store.transition(w.id, ["stopped"], "starting"); await store.transition(w.id, ["starting"], "running");
+    await store.transition(w.id, ["running"], "stopping");
+    await store.transition(w.id, ["stopping"], "stopped");
+    const claimed = (await store.claimCheckpointRetry(retryInput))!, g = claimed.retry.generation, attempt = randomUUID();
+    const fork = { attempt, name: `zeros-alpha-ws-c${attempt.slice(0, 8)}`, source: "bx_stopped" };
+    expect(await store.beginCheckpointFork(w.id, g, { ...fork, source: "bx_other" })).toBeNull();
+    expect(await store.beginCheckpointFork(w.id, String(BigInt(g) - 1n), fork)).toBeNull();
+    expect(await store.beginCheckpointFork(w.id, g, fork)).toEqual({ ...fork, requestedAt: expect.any(String), sandboxId: null });
+    // Only one fork at a time.
+    expect(await store.beginCheckpointFork(w.id, g, { ...fork, attempt: randomUUID() })).toBeNull();
+    expect(await store.checkpointForkCreated(w.id, randomUUID(), "bx_fork1")).toBe(false);
+    expect(await store.checkpointForkCreated(w.id, attempt, "bx_fork1")).toBe(true);
+    // Deletion and cleanup find it with the workspace.
+    await store.transition(w.id, ["stopped"], "deleting");
+    expect((await lifecycleRow(w.id))?.checkpointRetryFork).toEqual({ ...fork, requestedAt: expect.any(String), sandboxId: "bx_fork1" });
+    await store.checkpointForkGone(w.id, attempt);
+    expect((await lifecycleRow(w.id))?.checkpointRetryFork).toBeNull();
+  });
+
+  it("saves a retry's checkpoint while the stop it retries is the latest, even if the VM was woken, and never after a newer stop", async () => {
+    const w = await stopped("bx_vm"), g = await generation(w.id), upload = checkpoint(w.id);
+    expect(await store.checkpointUpload(w.id, "bx_vm", g, upload.object, new Date(Date.now() + 60_000), "retry")).toBe(true);
+    // A stop's own scope no longer applies to a stopped VM.
+    expect(await store.saveCheckpoint(w.id, "bx_vm", g, upload)).toBe(false);
+    await store.transition(w.id, ["stopped"], "starting");
+    expect(await store.saveCheckpoint(w.id, "bx_other", g, upload, "retry")).toBe(false);
+    expect(await store.saveCheckpoint(w.id, "bx_vm", g, upload, "retry")).toEqual({ replaced: null });
+    // Once this stop has a checkpoint, a second retry write is refused.
+    expect(await store.saveCheckpoint(w.id, "bx_vm", g, checkpoint(w.id), "retry")).toBe(false);
+    await store.transition(w.id, ["starting"], "running");
+    await store.transition(w.id, ["running"], "stopping");
+    const newer = await generation(w.id);
+    await store.transition(w.id, ["stopping"], "stopped");
+    for (const scope of ["retry", "stop"] as const) expect(await store.saveCheckpoint(w.id, "bx_vm", g, checkpoint(w.id), scope)).toBe(false);
+    expect(await store.checkpointUpload(w.id, "bx_vm", g, checkpoint(w.id).object, new Date(Date.now() + 60_000), "retry")).toBe(false);
+    expect(await store.saveCheckpoint(w.id, "bx_vm", newer, checkpoint(w.id), "retry")).toMatchObject({ replaced: upload.object });
+    // Deletion fences every retry write.
+    const gone = await stopped("bx_gone"), gg = await generation(gone.id);
+    await store.transition(gone.id, ["stopped"], "deleting");
+    expect(await store.checkpointUpload(gone.id, "bx_gone", gg, checkpoint(gone.id).object, new Date(Date.now() + 60_000), "retry")).toBe(false);
+    expect(await store.saveCheckpoint(gone.id, "bx_gone", gg, checkpoint(gone.id), "retry")).toBe(false);
+  });
+
+  it("schedules, ends and exhausts only the stop it belongs to, and starts over for a newer stop", async () => {
+    const w = await stopped("bx_sched");
+    let claimed = (await store.claimCheckpointRetry(retryInput))!;
+    const g = claimed.retry.generation, attempt = randomUUID();
+    await store.beginCheckpointFork(w.id, g, { attempt, name: "zeros-alpha-ws-c1", source: "bx_sched" });
+    await store.checkpointForkGone(w.id, attempt);
+    await store.checkpointRetryNext(w.id, g, { at: new Date(Date.now() - 1000) });
+    claimed = (await store.claimCheckpointRetry(retryInput))!;
+    expect(claimed.retry).toMatchObject({ generation: g, attempts: 1, exhaustedAt: null });
+    await store.checkpointRetryNext(w.id, g, { exhausted: true });
+    expect(await store.claimCheckpointRetry({ ...retryInput, leaseMs: 0 })).toBeNull();
+    // An older stop's late outcome changes nothing.
+    await store.checkpointRetryNext(w.id, String(BigInt(g) - 1n), { at: new Date(Date.now() - 1000) });
+    expect(await store.claimCheckpointRetry({ ...retryInput, leaseMs: 0 })).toBeNull();
+    // A newer stop is retried from the start.
+    await store.transition(w.id, ["stopped"], "starting"); await store.transition(w.id, ["starting"], "running");
+    await store.transition(w.id, ["running"], "stopping"); await store.transition(w.id, ["stopping"], "stopped");
+    const next = (await store.claimCheckpointRetry(retryInput))!;
+    expect(next.retry).toMatchObject({ generation: await generation(w.id), attempts: 0, exhaustedAt: null });
+    expect(next.retry.generation).not.toBe(g);
+  });
+
+  it("claims a fork an earlier attempt left in any live state, once its lease has passed", async () => {
+    const w = await stopped("bx_left");
+    const g = (await store.claimCheckpointRetry(retryInput))!.retry.generation, attempt = randomUUID();
+    await store.beginCheckpointFork(w.id, g, { attempt, name: "zeros-alpha-ws-c2", source: "bx_left" });
+    await store.checkpointForkCreated(w.id, attempt, "bx_fork2");
+    // The user woke the workspace meanwhile.
+    await store.transition(w.id, ["stopped"], "starting"); await store.transition(w.id, ["starting"], "running");
+    expect(await store.claimCheckpointRetry(retryInput)).toBeNull();
+    await pool.query("UPDATE cloud_v2_workspaces SET checkpoint_retry_at=clock_timestamp()-interval '1 second' WHERE id=$1", [w.id]);
+    const claimed = await store.claimCheckpointRetry(retryInput);
+    expect(claimed).toMatchObject({ id: w.id, state: "running", checkpointRetryFork: { attempt, sandboxId: "bx_fork2" } });
   });
 });

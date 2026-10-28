@@ -64,6 +64,14 @@ export async function runProviderUsageObservationSmoke({ page, check }) {
         probe.evaluate(() => window.__providerUsageObservation.reads());
       const statusReads = () =>
         probe.evaluate(() => window.__providerUsageObservation.statusReads());
+      const registryReads = () =>
+        probe.evaluate(() => window.__providerUsageObservation.registryReads());
+      const cachedIdentity = () => probe.evaluate(async (provider) => {
+        const { subscriptionCache } = await import(
+          "/apps/desktop/src/renderer/features/settings/subscription-connection.ts"
+        );
+        return subscriptionCache.getSnapshot(provider).data?.email;
+      }, provider);
       const timers = () => probe.evaluate(() => window.__usageTimers.count());
       const pending = (slot) =>
         probe.evaluate(
@@ -152,11 +160,16 @@ export async function runProviderUsageObservationSmoke({ page, check }) {
       await expect.poll(() => pending("a")).toBe(1);
       await probe.evaluate(() => window.__usageTimers.visibility("hidden"));
       const beforeSwitch = await reads();
+      const beforeSwitchRegistry = await registryReads();
       await probe.evaluate(() => window.__providerUsageObservation.select("b"));
-      await expect(info).toContainText("second@example.test");
+      // Hidden surfaces need not repaint. The native event must update the
+      // cache without triggering a registry/usage read; reveal renders B.
+      await expect.poll(cachedIdentity).toBe("second@example.test");
       expect(await reads()).toBe(beforeSwitch);
+      expect(await registryReads()).toBe(beforeSwitchRegistry);
       await probe.evaluate(() => window.__usageTimers.visibility("visible"));
       await expect.poll(() => pending("b")).toBe(1);
+      await expect(info).toContainText("second@example.test");
       expect(await reads()).toBe(beforeSwitch + 1);
       await release("a");
       await expect.poll(() => pending("a")).toBe(0);
@@ -170,11 +183,14 @@ export async function runProviderUsageObservationSmoke({ page, check }) {
       await expect(refresh).toHaveAttribute("aria-busy", "false");
       await probe.evaluate(() => window.__usageTimers.visibility("hidden"));
       const beforeReturn = await reads();
+      const beforeReturnRegistry = await registryReads();
       await probe.evaluate(() => window.__providerUsageObservation.select("a"));
-      await expect(info).toContainText("user@example.test");
+      await expect.poll(cachedIdentity).toBe("user@example.test");
       expect(await reads()).toBe(beforeReturn);
+      expect(await registryReads()).toBe(beforeReturnRegistry);
       await probe.evaluate(() => window.__usageTimers.visibility("visible"));
       await expect.poll(() => pending("a")).toBe(1);
+      await expect(info).toContainText("user@example.test");
       expect(await reads()).toBe(beforeReturn + 1);
       await expect(info.getByRole("progressbar").first()).toHaveAttribute(
         "aria-valuenow",

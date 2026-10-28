@@ -1,6 +1,7 @@
 import { createElement, Fragment, type ReactNode } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { Kbd } from "../../shared/ui/primitives/kbd";
 
 const fixture = vi.hoisted(() => ({
   defaultId: "vscode",
@@ -67,7 +68,9 @@ afterEach(() => vi.unstubAllGlobals());
 describe("Local workspace and replica Open in targets", () => {
   it.each(["/Users/fixture/personal", "/Users/fixture/organization-local"])("keeps default-app and copy hints/actions for %s", path => {
     const html = renderToStaticMarkup(createElement(OpenInSubmenu, { path }));
-    expect(html).toContain("⌘O"); expect(html).toContain("⌘C");
+    for (const keys of ["⌘O", "⌘C"]) {
+      expect(html).toContain(renderToStaticMarkup(createElement(Kbd, { className: "ml-auto" }, keys)));
+    }
     for (const label of ["Finder", "Visual Studio Code", "Terminal", "Copy path"]) expect(html).toContain(label);
     fixture.selections[2]();
     expect(fixture.setDefault).toHaveBeenCalledWith("terminal");
@@ -81,7 +84,7 @@ describe("Local workspace and replica Open in targets", () => {
     const path = "/Users/fixture/downloaded-cloud";
     const html = renderToStaticMarkup(createElement(OpenInPathButton, { path }));
     expect(html).toContain(path);
-    expect(html).not.toContain("⌘O"); expect(html).not.toContain("⌘C");
+    expect(html).not.toContain('data-slot="kbd"');
     fixture.buttons.get("Open sync directory in Visual Studio Code")!();
     expect(fixture.open).toHaveBeenCalledWith("vscode", path);
     expect(fixture.setDefault).not.toHaveBeenCalled();

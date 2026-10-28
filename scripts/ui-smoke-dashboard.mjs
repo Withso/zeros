@@ -278,12 +278,44 @@ export async function runDashboardSmoke({ page: originPage, check }) {
     await page.reload({ waitUntil: "networkidle" });
     await goHome();
     await expect.poll(() => page.evaluate(() => window.dashboardPendingArchiveReads())).toBeGreaterThan(0);
-    await page.evaluate(() => window.dashboardReleaseArchives(true));
+    await root().evaluate(node => {
+      window.archiveReadFailures = [];
+      window.archiveReadObserver = new MutationObserver(records => {
+        for (const record of records) {
+          const texts = record.type === "characterData"
+            ? [record.target.textContent]
+            : [...record.addedNodes].map(added => added.textContent);
+          for (const text of texts) if (/Couldn't load archived workspaces|No archived workspaces/.test(text ?? ""))
+            window.archiveReadFailures.push(text);
+        }
+      });
+      window.archiveReadObserver.observe(node, { childList: true, subtree: true, characterData: true });
+    });
+    await page.evaluate(() => window.dashboardReleaseArchives(true, true));
+    await expect.poll(() => page.evaluate(() => window.dashboardPendingArchiveReads())).toBeGreaterThan(0);
+    await expect(root().getByText("Loading workspaces…", { exact: true })).toBeVisible();
+    await page.evaluate(() => window.dashboardReleaseArchives());
+    await count(1);
+    await expect(row("ws-archived")).toBeVisible();
+    expect(await page.evaluate(() => {
+      window.archiveReadObserver.disconnect();
+      return window.archiveReadFailures;
+    })).toEqual([]);
+    check("A transient archive read recovers without flashing an error or an empty result", true);
+
+    await page.reload({ waitUntil: "networkidle" });
+    await goHome();
+    await expect.poll(() => page.evaluate(() => window.dashboardPendingArchiveReads())).toBeGreaterThan(0);
+    await page.evaluate(() => {
+      window.dashboardFailArchives(true);
+      window.dashboardReleaseArchives(true);
+    });
     await expect(root().getByText("Couldn't load archived workspaces", { exact: true })).toBeVisible();
+    await page.evaluate(() => window.dashboardFailArchives(false));
     await root().getByRole("button", { name: "Retry loading archived workspaces", exact: true }).click();
     await count(1);
     await expect(row("ws-archived")).toBeVisible();
-    check("Cold and failed archive reads have truthful loading/retry states instead of false empty results", true);
+    check("Cold archive reads remain pending and persistent failures offer an actionable retry", true);
 
     await page.goto(`${origin}/apps/desktop/src/renderer/harnesses/harness-workspace-archives.html`, { waitUntil: "networkidle" });
     await page.getByRole("button", { name: "Display", exact: true }).click();

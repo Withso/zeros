@@ -55,6 +55,7 @@ const coreInline = {
 // its shared pages and inherited viewport changes. A shard gives each unit a
 // separate context seeded at this viewport and, where needed, a valid origin.
 export const scenarioRegistry = [
+  fresh("full-disk-access", "full-disk-access", "runFullDiskAccessSmoke", 1080, 680),
   fresh("local-links", "local-links", "runLocalLinksSmoke", 1080, 1000),
   fresh("text-selection", "text-selection", "runTextSelectionSmoke", 1440, 1100),
   fresh(
@@ -65,6 +66,8 @@ export const scenarioRegistry = [
     780,
   ),
   fresh("code-review", "code-review", "runCodeReviewSmoke", 1180, 900),
+  fresh("cloud-github", "cloud-github", "runCloudGithubSmoke", 1180, 1000),
+  fresh("cloud-github-pr", "cloud-github-pr", "runCloudGithubPrSmoke", 1180, 1000),
   fresh(
     "code-review-retention",
     "review-retention",
@@ -218,13 +221,22 @@ export const scenarioRegistry = [
     1440,
     960,
   ),
-  shared(
-    "design-frame-recovery",
-    "design-frame-recovery",
-    "runDesignFrameRecoverySmoke",
-    1440,
-    960,
-  ),
+  {
+    ...shared(
+      "design-frame-recovery",
+      "design-frame-recovery",
+      "runDesignFrameRecoverySmoke",
+      1440,
+      960,
+    ),
+    // Its visibility/retirement checks install a context-wide simulated clock.
+    // Later pointer and layout scenarios need their ordinary browser clock.
+    fixture: {
+      page: "design-frame-recovery",
+      viewport: { width: 1440, height: 960 },
+      navigation: "origin",
+    },
+  },
   shared(
     "design-inline-tools",
     "design-inline-tools",

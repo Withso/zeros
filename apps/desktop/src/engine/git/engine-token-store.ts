@@ -23,6 +23,7 @@ export interface GithubCredentialChange {
 let credential: GithubCredential | null = null;
 let selectedMethod: GithubAuthMethod | null = null;
 let selectedGitHost: string | null = null;
+let selectionGeneration = 0;
 let onChange: ((change: GithubCredentialChange) => void) | null = null;
 const REFRESH_HANDOFF_TIMEOUT_MS = 20_000;
 
@@ -49,6 +50,9 @@ export function seedGithubCredential(
   method?: GithubAuthMethod | null,
 ): void {
   const parsed = sanitizeGithubCredential(value);
+  const methodIdentity = parsed?.method ?? (isGithubAuthMethod(method) ? method : null);
+  if ((parsed?.accessToken ?? null) !== (credential?.accessToken ?? null) || methodIdentity !== selectedMethod)
+    selectionGeneration += 1;
   // A different access token means a possibly different (or no) account, so
   // the remembered login stops being evidence of anything. This is the
   // desktop's PRIMARY sign-in/sign-out route, and without the drop a sign-out
@@ -126,6 +130,7 @@ export function getSeededGithubCredential(): GithubCredential | null {
 }
 
 export const engineGithubTokenStore: TokenStore = {
+  generation: () => selectionGeneration,
   async get() {
     return credential?.accessToken ?? null;
   },
@@ -147,6 +152,7 @@ export const engineGithubTokenStore: TokenStore = {
 
     const method = credential.method;
     credential = null;
+    selectionGeneration += 1;
     let resolvePending!: (value: string | null) => void;
     const promise = new Promise<string | null>((resolve) => {
       resolvePending = resolve;
@@ -172,6 +178,7 @@ export const engineGithubTokenStore: TokenStore = {
     }
     const method = credential.method;
     credential = null;
+    selectionGeneration += 1;
     if (pendingRefresh) {
       const pending = pendingRefresh;
       pendingRefresh = null;
@@ -182,6 +189,7 @@ export const engineGithubTokenStore: TokenStore = {
     return true;
   },
   async set(token: string) {
+    if (token !== credential?.accessToken) selectionGeneration += 1;
     if (!credential) {
       credential = token
         ? {
@@ -198,6 +206,7 @@ export const engineGithubTokenStore: TokenStore = {
   async clear() {
     const method = credential?.method;
     credential = null;
+    selectionGeneration += 1;
     if (pendingRefresh) {
       const pending = pendingRefresh;
       pendingRefresh = null;

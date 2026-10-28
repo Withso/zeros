@@ -32,7 +32,7 @@ export async function runConversationSummarySmoke({
       ).toBeVisible();
       await expect(
         island.getByRole("button", {
-          name: "Implementation plan.md",
+          name: "Files",
           exact: true,
         }),
       ).toBeVisible();
@@ -57,10 +57,114 @@ export async function runConversationSummarySmoke({
     );
   };
 
+  await verify("unpublished Git shows Local and hides PR creation through owner switches and publication", async () => {
+    const header = page.getByLabel("Workspace header", { exact: true });
+    const createPr = () => island.getByRole("button", { name: "Create PR", exact: true });
+    const setOrigin = (originUrl) => page.evaluate(async originUrl => {
+      const { loadProjects, applyProjectGitInspection, projectGitRevision } = await import("/apps/desktop/src/renderer/state/projects-store.ts");
+      const { notifyProjectsChanged } = await import("/apps/desktop/src/renderer/state/use-projects.ts");
+      const project = loadProjects().find(project => project.repoRoot === "/summary-fixture/a");
+      applyProjectGitInspection(project, projectGitRevision(project.id), { isRepo: true, originUrl });
+      notifyProjectsChanged();
+    }, originUrl);
+    for (const organizationId of [null, "summary-org"]) {
+      await page.evaluate(id => window.__summaryHarness.setOrganization(id), organizationId);
+      await setOrigin(null);
+      await expect(header.getByText("Local", { exact: true })).toBeVisible();
+      await expect(header.locator(".lucide-hard-drive")).toBeVisible();
+      await expect(header.locator(".lucide-git-branch")).toHaveCount(0);
+      await expect(createPr()).toHaveCount(0);
+      await page.evaluate(() => window.__summaryHarness.switchFolder("b"));
+      await expect(header.locator(".lucide-git-branch")).toBeVisible();
+      await expect(header.getByText("Local", { exact: true })).toHaveCount(0);
+      await expect(createPr()).toBeVisible();
+      await page.evaluate(() => window.__summaryHarness.switchFolder("a"));
+      await expect(header.getByText("Local", { exact: true })).toBeVisible();
+      await expect(createPr()).toHaveCount(0);
+      await setOrigin("git@github.com:example/summary-a.git");
+      await expect(header.locator(".lucide-git-branch")).toBeVisible();
+      await expect(header.getByText("Local", { exact: true })).toHaveCount(0);
+      await expect(createPr()).toBeVisible();
+    }
+    await setOrigin(null);
+    await expect(header.getByText("Local", { exact: true })).toBeVisible();
+    await expect(createPr()).toHaveCount(0);
+    const catalogReads = () => page.evaluate(() => window.__summaryHarness.messages.filter(message => message.op === "git.repoBranchCatalog"));
+    const before = (await catalogReads()).length;
+    await page.evaluate(() => window.__summaryHarness.setAlternateRemote("git@github.com:example/summary-a.git"));
+    await expect(header.locator(".lucide-git-branch")).toBeVisible();
+    await expect(header.getByText("Local", { exact: true })).toHaveCount(0);
+    await expect(createPr()).toBeVisible();
+    expect((await catalogReads()).length - before).toBe(1);
+    expect((await catalogReads()).every(message => message.params.fetch === false)).toBe(true);
+    await page.evaluate(() => window.__summaryHarness.setAlternateRemote("https://gitlab.com/example/summary-a.git"));
+    await expect(createPr()).toHaveCount(0);
+    await expect(header.getByText("Local", { exact: true })).toHaveCount(0);
+    await page.evaluate(() => window.__summaryHarness.setAlternateRemote(null));
+    await expect(header.getByText("Local", { exact: true })).toBeVisible();
+    await expect(createPr()).toHaveCount(0);
+  });
+
+  await verify("catalog GitHub flags use the remote host", async () => {
+    for (const [url, isGitHub] of [
+      ["https://github.com.example.test/example/summary-a.git", false],
+      ["https://example.test/github.com/summary-a.git", false],
+      ["https://github.com@example.test/example/summary-a.git", false],
+      ["git@github.com.example.test:example/summary-a.git", false],
+      ["https://github.com/example/summary-a.git", true],
+      ["git@github.com:example/summary-a.git", true],
+      ["ssh://git@ssh.github.com:443/example/summary-a.git", true],
+    ]) {
+      const remote = await page.evaluate(async url => {
+        window.__summaryHarness.setAlternateRemote(url);
+        const { gitRepoBranchCatalog } = await import("/apps/desktop/src/renderer/platform/git.ts");
+        const catalog = await gitRepoBranchCatalog({ repoRoot: "/summary-fixture/a", fetch: false });
+        return catalog.remotes[0];
+      }, url);
+      expect(remote).toEqual({ name: "upstream", url, isGitHub });
+    }
+  });
+
+  await verify("omits Context and never reads its graph", async () => {
+    const contextReads = () => page.evaluate(() =>
+      window.__summaryHarness.messages.filter(message => message.op === "context.graph.list").length,
+    );
+    const noContext = async (surface) => {
+      await expect(surface.getByRole("region", { name: "Recent context" })).toHaveCount(0);
+      await expect(surface.getByText("Context", { exact: true })).toHaveCount(0);
+      await expect(surface.getByText("No context added yet", { exact: true })).toHaveCount(0);
+      expect(await contextReads()).toBe(0);
+    };
+    for (const [organizationId, placement] of [[null, "local"], ["summary-org", "local"], ["summary-org", "cloud"]]) {
+      await page.evaluate(({ organizationId, placement }) => {
+        window.__summaryHarness.setOrganization(organizationId);
+        window.__summaryHarness.setPlacement(placement);
+        window.__summaryHarness.changeContext(["New context.png"]);
+      }, { organizationId, placement });
+      await noContext(island);
+      await trigger.click();
+      await trigger.focus();
+      await trigger.hover();
+      await trigger.click();
+      await noContext(island);
+      await toggle.click();
+      await trigger.hover();
+      await trigger.focus();
+      await trigger.click();
+      await expect(popup).toBeVisible();
+      await noContext(popup);
+      await page.evaluate(() => window.__summaryHarness.changeContext([]));
+      await noContext(popup);
+      await toggle.dispatchEvent("click");
+      await expect(island).toBeVisible();
+    }
+  });
+
   await verify(
-    "island reserves chat space, uses the requested surface, and shows three recent items",
+    "island reserves chat space and uses the requested surface",
     async () => {
-      await expect(trigger).toHaveCount(0);
+      await expect(trigger).toBeVisible();
+      await expect(trigger).toHaveAttribute("aria-expanded", "true");
       const appearance = await island.evaluate((node) => {
         const style = getComputedStyle(node);
         const probe = document.createElement("div");
@@ -88,15 +192,6 @@ export async function runConversationSummarySmoke({
       expect(
         column.x + column.width - cardBox.x - cardBox.width,
       ).toBeGreaterThanOrEqual(16);
-      const names = await island
-        .getByRole("region", { name: "Recent context" })
-        .getByRole("button")
-        .allTextContents();
-      expect(names).toEqual([
-        "Implementation plan.md",
-        "Latest screenshot with a very long name that should truncate.png",
-        "Design reference.png",
-      ]);
       await expect(
         island.getByRole("button", { name: "Files", exact: true }),
       ).toBeVisible();
@@ -127,67 +222,81 @@ export async function runConversationSummarySmoke({
   );
 
   await verify(
-    "Environment and Context use the requested type; the retired canvas has no entry point",
+    "Environment uses the requested type and workspace tools have one separator",
     async () => {
-      for (const name of ["Environment", "Context"]) {
-        const label = island.getByText(name, { exact: true });
-        expect(
-          await label.evaluate((node) => {
-            const style = getComputedStyle(node);
-            const probe = document.createElement("span");
-            probe.style.color = "var(--fg3)";
-            node.append(probe);
-            const color = getComputedStyle(probe).color;
-            probe.remove();
-            return [style.fontSize, style.fontWeight, style.color === color];
-          }),
-        ).toEqual(["12px", "450", true]);
-      }
-      expect(
-        await island
-          .getByRole("navigation", { name: "Workspace tools" })
-          .evaluate((node) => getComputedStyle(node).borderTopWidth),
-      ).toBe("1px");
-      await page.evaluate(() => window.__summaryHarness.changeContext([]));
-      await expect(
-        island.getByText("No context added yet", { exact: true }),
-      ).toBeVisible();
-      await expect(island.getByText("Context", { exact: true })).toHaveCount(0);
-      await expect(
-        island.getByRole("button", { name: "Show all" }),
-      ).toHaveCount(0);
-      await page.evaluate(() =>
-        window.__summaryHarness.changeContext(["One note.md"]),
-      );
-      await expect(island.getByText("Context", { exact: true })).toBeVisible();
-      await expect(
-        island.getByRole("button", { name: "Show all" }),
-      ).toHaveCount(0);
+      const label = island.getByText("Environment", { exact: true });
+      expect(await label.evaluate(node => {
+        const style = getComputedStyle(node);
+        const probe = document.createElement("span");
+        probe.style.color = "var(--fg3)";
+        node.append(probe);
+        const color = getComputedStyle(probe).color;
+        probe.remove();
+        return [style.fontSize, style.fontWeight, style.color === color];
+      })).toEqual(["12px", "450", true]);
+      expect(await island.getByRole("navigation", { name: "Workspace tools" })
+        .evaluate(node => getComputedStyle(node).borderTopWidth)).toBe("1px");
     },
   );
 
   await verify(
-    "collapse animates and makes hidden controls inert; reduced motion is respected",
+    "the toolbar icon hides and shows the whole island without remounting the chat",
     async () => {
-      const before = await island.boundingBox();
-      await island.getByRole("button", { name: "Collapse summary" }).click();
-      const contents = island.locator(".conversation-summary-expansion");
-      await expect(contents).toHaveAttribute("inert", "");
-      await expect(contents).toHaveAttribute("aria-hidden", "true");
-      await settle(island);
-      expect((await island.boundingBox()).height).toBeLessThan(
-        before.height / 2,
-      );
+      await expect(trigger).toBeVisible();
+      await expect(trigger.locator("svg")).toHaveAttribute("stroke-width", "1");
+      await expect(island.getByRole("button", { name: /Collapse summary|Expand summary/ })).toHaveCount(0);
+      await expect(trigger).toHaveAttribute("aria-controls", await island.getAttribute("id"));
+      const composer = page.getByRole("textbox", { name: "Message" });
+      await composer.fill("Keep this draft while toggling Summary");
+      await composer.evaluate(node => { window.__summaryComposerNode = node; });
+      const before = await page.getByTestId("chat-body").boundingBox();
+      await trigger.focus();
+      await page.keyboard.press("Enter");
+      await expect(island).toHaveCount(0);
+      await expect(popup).toHaveCount(0);
+      await expect(trigger).toHaveAttribute("aria-expanded", "false");
+      await expect(trigger).toBeFocused();
+      expect((await page.getByTestId("chat-body").boundingBox()).width).toBeGreaterThan(before.width);
       await page.emulateMedia({ reducedMotion: "reduce" });
-      await island.getByRole("button", { name: "Expand summary" }).click();
-      await expect(
-        island.getByRole("button", { name: "Implementation plan.md" }),
-      ).toBeVisible();
-      expect(
-        await contents.evaluate(
-          (node) => getComputedStyle(node).transitionDuration,
-        ),
-      ).toBe("0s");
+      await page.keyboard.press("Space");
+      await expect(island).toBeVisible();
+      await expect(trigger).toHaveAttribute("aria-expanded", "true");
+      await expect(island.getByRole("button", { name: "Files", exact: true })).toBeVisible();
+      await expect(composer).toHaveValue("Keep this draft while toggling Summary");
+      expect(await composer.evaluate(node => node === window.__summaryComposerNode)).toBe(true);
+      expect(await island.evaluate(node => getComputedStyle(node).animationName)).toBe("none");
+    },
+  );
+
+  await verify(
+    "the toolbar toggle works for Local and organization workspaces across placement and owner changes",
+    async () => {
+      for (const [organizationId, placement] of [[null, "local"], ["summary-org", "local"], ["summary-org", "cloud"]]) {
+        await page.evaluate(({ organizationId, placement }) => {
+          window.__summaryHarness.setOrganization(organizationId);
+          window.__summaryHarness.setPlacement(placement);
+        }, { organizationId, placement });
+        await expect(island).toBeVisible();
+        await expect(island.getByRole("region", { name: "Git status", exact: true })).toHaveCount(placement === "local" ? 1 : 0);
+        await trigger.click();
+        await expect(island).toHaveCount(0);
+        await expect(trigger).toHaveAttribute("aria-expanded", "false");
+        await page.evaluate(() => window.__summaryHarness.switchFolder("b"));
+        await expect(island.getByText("summary/b", { exact: true })).toBeVisible();
+        await expect(island.getByText("summary/a", { exact: true })).toHaveCount(0);
+        await page.evaluate(() => window.__summaryHarness.switchFolder("a"));
+        await expect(island).toHaveCount(0);
+        await trigger.click();
+        await expect(island.getByRole("button", { name: "Files", exact: true })).toBeVisible();
+        await expect(island.getByText("summary/b", { exact: true })).toHaveCount(0);
+        await toggle.click();
+        await expect(island).toHaveCount(0);
+        await trigger.click();
+        await expect(popup).toBeVisible();
+        await toggle.dispatchEvent("click");
+        await expect(popup).toHaveCount(0);
+        await expect(island).toBeVisible();
+      }
     },
   );
 
@@ -240,28 +349,6 @@ export async function runConversationSummarySmoke({
         await toggle.click();
         await expect(island).toBeVisible();
       }
-    },
-  );
-
-  await verify(
-    "context attachments open their exact file and reuse it without recreating the retired tab",
-    async () => {
-      const name = "Implementation plan.md";
-      await island.getByRole("button", { name, exact: true }).click();
-      await expect(page.getByTestId("workbench")).toBeVisible();
-      await expect(page.getByTestId("destination")).toHaveText("files");
-      const first = await page.evaluate(() => window.__summaryHarness.state());
-      expect(first.tabs.find((tab) => tab.id === first.activeId)).toMatchObject({
-        type: "files",
-        filePath: ".context/attachments/3/Implementation plan.md",
-      });
-      expect(first.tabs.some((tab) => tab.type === "context")).toBe(false);
-      await trigger.click();
-      await popup.getByRole("button", { name, exact: true }).click();
-      await expect(popup).toHaveCount(0);
-      const reopened = await page.evaluate(() => window.__summaryHarness.state());
-      expect(reopened.activeId).toBe(first.activeId);
-      expect(reopened.tabs).toHaveLength(first.tabs.length);
     },
   );
 
@@ -373,7 +460,7 @@ export async function runConversationSummarySmoke({
   );
 
   await verify(
-    "running without a preview keeps Stop available; collapsed Summary stops active reads",
+    "running without a preview keeps Stop available; hidden Summary stops active reads",
     async () => {
       await page.evaluate(() =>
         window.__summaryHarness.setPreviewLog("Still building…\n"),
@@ -387,7 +474,7 @@ export async function runConversationSummarySmoke({
       await expect(
         island.getByRole("button", { name: "Stop Dev server", exact: true }),
       ).toBeEnabled();
-      await island.getByRole("button", { name: "Collapse summary" }).click();
+      await trigger.click();
       const reads = () =>
         page.evaluate(
           () =>
@@ -403,7 +490,7 @@ export async function runConversationSummarySmoke({
       const before = await reads();
       await page.evaluate(() => window.__summaryHarness.changeLines(12, 2));
       expect(await reads()).toBe(before);
-      await island.getByRole("button", { name: "Expand summary" }).click();
+      await trigger.click();
       await expect(
         island.locator("[data-summary-change-counts]"),
       ).toContainText("+12");
@@ -463,7 +550,7 @@ export async function runConversationSummarySmoke({
       await expect.poll(fitsColumn).toBe(true);
       await page.setViewportSize({ width: 420, height: 320 });
       await expect.poll(fitsColumn).toBe(true);
-      await popup.getByRole("button", { name: "Implementation plan.md" }).click();
+      await popup.getByRole("button", { name: "Files", exact: true }).click();
       await expect(page.getByTestId("destination")).toHaveText("files");
     },
   );
@@ -474,13 +561,13 @@ export async function runConversationSummarySmoke({
       await page.setViewportSize({ width: 1280, height: 360 });
       const card = await island.boundingBox();
       expect(card.y + card.height).toBeLessThanOrEqual(360);
-      await island.getByRole("button", { name: "Implementation plan.md" }).click();
+      await island.getByRole("button", { name: "Files", exact: true }).click();
       await expect(page.getByTestId("destination")).toHaveText("files");
     },
   );
 
   await verify(
-    "switching workspace closes an open popup and never exposes another workspace's context",
+    "switching workspace closes an open popup and shows the current workspace",
     async () => {
       await toggle.click();
       await trigger.click();
@@ -488,74 +575,18 @@ export async function runConversationSummarySmoke({
       await page.evaluate(() => window.__summaryHarness.switchFolder("b"));
       await expect(popup).toHaveCount(0);
       await trigger.click();
-      await expect(
-        popup.getByRole("button", {
-          name: "Workspace B notes.md",
-          exact: true,
-        }),
-      ).toBeVisible();
-      await expect(
-        popup.getByRole("button", {
-          name: "Implementation plan.md",
-          exact: true,
-        }),
-      ).toHaveCount(0);
+      await expect(popup.getByText("summary/b", { exact: true })).toBeVisible();
+      await expect(popup.getByText("summary/a", { exact: true })).toHaveCount(0);
       await page.evaluate(() => window.__summaryHarness.switchFolder("a"));
       await expect(popup).toHaveCount(0);
       await trigger.click();
-      await expect(
-        popup.getByRole("button", {
-          name: "Implementation plan.md",
-          exact: true,
-        }),
-      ).toBeVisible();
+      await expect(popup.getByText("summary/a", { exact: true })).toBeVisible();
+      await expect(popup.getByText("summary/b", { exact: true })).toHaveCount(0);
     },
   );
 
   await verify(
-    "refresh and transient failures retain confirmed context; late A reads cannot replace B",
-    async () => {
-      await page.evaluate(() => window.__summaryHarness.delayContext());
-      await expect(
-        island.getByRole("button", {
-          name: "Implementation plan.md",
-          exact: true,
-        }),
-      ).toBeVisible();
-      await page.evaluate(() => window.__summaryHarness.switchFolder("b"));
-      await expect(
-        island.getByRole("button", {
-          name: "Workspace B notes.md",
-          exact: true,
-        }),
-      ).toBeVisible();
-      await page.evaluate(() => window.__summaryHarness.releaseContext());
-      await expect(
-        island.getByRole("button", {
-          name: "Implementation plan.md",
-          exact: true,
-        }),
-      ).toHaveCount(0);
-      await page.evaluate(() => window.__summaryHarness.switchFolder("a"));
-      await page.evaluate(() => window.__summaryHarness.failContext(true));
-      await expect(
-        island.getByRole("button", {
-          name: "Implementation plan.md",
-          exact: true,
-        }),
-      ).toBeVisible();
-      await page.evaluate(() => {
-        window.__summaryHarness.failContext(false);
-        window.__summaryHarness.changeContext(["New attachment.png"]);
-      });
-      await expect(
-        island.getByRole("button", { name: "New attachment.png", exact: true }),
-      ).toBeVisible();
-    },
-  );
-
-  await verify(
-    "empty and large action lists remain usable, and hidden owners stop context reads",
+    "empty and large action lists remain usable, and hidden owners stop active reads",
     async () => {
       await page.evaluate(() => window.__summaryHarness.setRuns(0));
       await expect(
@@ -569,7 +600,7 @@ export async function runConversationSummarySmoke({
         .getByRole("button", { name: "Run Test suite 39", exact: true })
         .scrollIntoViewIfNeeded();
       await expect(
-        island.getByRole("button", { name: "Implementation plan.md" }),
+        island.getByRole("button", { name: "Files", exact: true }),
       ).toBeVisible();
       await page.evaluate(() => window.__summaryHarness.hide());
       await expect(island).toHaveCount(0);
@@ -577,23 +608,23 @@ export async function runConversationSummarySmoke({
       const reads = await page.evaluate(
         () =>
           window.__summaryHarness.messages.filter(
-            (message) => message.op === "context.graph.list",
+            (message) => ["workspace.runInfo", "git.status", "git.changeLineCounts"].includes(message.op),
           ).length,
       );
       await page.evaluate(() =>
-        window.__summaryHarness.changeContext(["Hidden update.md"]),
+        window.__summaryHarness.setGit({ ahead: 9 }),
       );
       expect(
         await page.evaluate(
           () =>
             window.__summaryHarness.messages.filter(
-              (message) => message.op === "context.graph.list",
+              (message) => ["workspace.runInfo", "git.status", "git.changeLineCounts"].includes(message.op),
             ).length,
         ),
       ).toBe(reads);
       await page.evaluate(() => window.__summaryHarness.show());
       await expect(
-        island.getByRole("button", { name: "Hidden update.md", exact: true }),
+        island.getByText("9 commits ahead of remote", { exact: true }),
       ).toBeVisible();
     },
   );
@@ -633,9 +664,73 @@ export async function runConversationSummarySmoke({
     }
     await more.click();
     // A modal menu hides its siblings from the accessibility tree. Exercise
-    // a programmatic panel collapse while that portal still owns focus.
-    await island.locator('button[aria-label="Collapse summary"]').dispatchEvent("click");
+    // a programmatic island hide while that portal still owns focus.
+    await page.locator('button[aria-label="Summary"]').dispatchEvent("click");
     await expect(page.getByRole("menu")).toHaveCount(0);
+  });
+
+  await verify("Git controls are 24px and status labels truncate to one fg1 line with layered hovers", async () => {
+    const git = island.getByRole("region", { name: "Git status", exact: true });
+    const create = git.getByRole("button", { name: "Create PR", exact: true });
+    const more = git.getByRole("button", { name: "More PR options" });
+    await page.evaluate(() => window.__summaryHarness.setGit({
+      behind: 1,
+      summary: { branch: "summary/a", base: { ref: "origin/a-very-long-selected-base-branch-name", behind: 4 } },
+    }, { uncommitted: 21 }));
+    await expect(git.getByText("21 uncommitted changes", { exact: true })).toBeVisible();
+    for (const theme of ["dark", "light"]) {
+      await page.evaluate(theme => { document.documentElement.dataset.theme = theme; }, theme);
+      for (const control of [create, more]) {
+        expect((await control.boundingBox()).height).toBe(22);
+        expect(await control.evaluate(node => node.closest("div").getBoundingClientRect().height)).toBe(24);
+      }
+      const rows = git.locator("[data-git-status-row]");
+      for (const row of await rows.all()) {
+        const label = row.locator(":scope > span").first();
+        const details = await label.evaluate(node => {
+          const style = getComputedStyle(node);
+          const probe = document.createElement("span");
+          probe.style.color = "var(--fg1)";
+          node.append(probe);
+          const color = getComputedStyle(probe).color;
+          probe.remove();
+          return {
+            foreground: style.color === color,
+            whiteSpace: style.whiteSpace,
+            overflow: style.overflow,
+            ellipsis: style.textOverflow,
+            height: node.getBoundingClientRect().height,
+            lineHeight: parseFloat(style.lineHeight),
+          };
+        });
+        expect(details).toMatchObject({ foreground: true, whiteSpace: "nowrap", overflow: "hidden", ellipsis: "ellipsis" });
+        expect(details.height).toBeCloseTo(details.lineHeight, 1);
+        expect((await row.boundingBox()).height).toBe(28);
+      }
+      const uncommitted = git.locator('[data-git-status-row="uncommitted"] > span').first();
+      expect(await uncommitted.evaluate(node => node.scrollWidth > node.clientWidth)).toBe(true);
+      const row = git.locator('[data-git-status-row="behind-base"]');
+      const label = row.locator(":scope > span").first();
+      const action = row.getByRole("button", { name: "Pull", exact: true });
+      await expect(action).toBeEnabled();
+      await page.mouse.move(0, 0);
+      const resting = await row.evaluate(node => getComputedStyle(node).backgroundColor);
+      await label.hover();
+      await expect.poll(() => row.evaluate(node => getComputedStyle(node).backgroundColor)).not.toBe(resting);
+      const rowHover = await row.evaluate(node => getComputedStyle(node).backgroundColor);
+      const actionHover = await action.evaluate(node => {
+        const probe = document.createElement("span");
+        probe.style.backgroundColor = "var(--bg2-highlight)";
+        node.append(probe);
+        const background = getComputedStyle(probe).backgroundColor;
+        probe.remove();
+        return background;
+      });
+      await action.hover();
+      await expect.poll(() => action.evaluate(node => getComputedStyle(node).backgroundColor)).toBe(actionHover);
+      expect(actionHover).not.toBe(rowHover);
+      await expect(action).toBeVisible();
+    }
   });
 
   await verify("Git facts coexist, exclude CI failures, and mark a draft ready directly", async () => {
@@ -661,7 +756,7 @@ export async function runConversationSummarySmoke({
     expect(await page.evaluate(() => window.__summaryHarness.messages.filter(m => m.op === "gh.prChecks").length)).toBe(0);
   });
 
-  await verify("Git mutations stay single-flight across collapse and Pull exposes conflicts", async () => {
+  await verify("Git mutations stay single-flight across hide/show and Pull exposes conflicts", async () => {
     const git = island.getByRole("region", { name: "Git status", exact: true });
     const push = git.getByRole("button", { name: "Push", exact: true });
     await expect(push).toBeEnabled();
@@ -669,8 +764,8 @@ export async function runConversationSummarySmoke({
     await push.click();
     await expect(push).toBeDisabled();
     await expect(git.getByRole("button", { name: "Create PR", exact: true })).toBeDisabled();
-    await island.getByRole("button", { name: "Collapse summary" }).click();
-    await island.getByRole("button", { name: "Expand summary" }).click();
+    await trigger.click();
+    await trigger.click();
     await expect(push).toBeDisabled();
     expect(await page.evaluate(() => window.__summaryHarness.messages.filter(m => m.op === "git.push").length)).toBe(1);
     await page.evaluate(() => window.__summaryHarness.releaseMutation());
@@ -718,23 +813,23 @@ export async function runConversationSummarySmoke({
     await page.evaluate(() => window.__summaryHarness.setGit({ ahead: 9 }));
     await expect(git.getByText("9 commits ahead of remote", { exact: true })).toBeVisible();
     expect(await page.evaluate(() => window.__summaryHarness.messages.filter(m => m.op === "gh.prGet").length)).toBe(reads);
-    await island.getByRole("button", { name: "Collapse summary" }).click();
-    await island.getByRole("button", { name: "Expand summary" }).click();
+    await trigger.click();
+    await trigger.click();
     await expect.poll(() => page.evaluate(() => window.__summaryHarness.messages.filter(m => m.op === "gh.prGet").length)).toBeGreaterThan(reads);
   });
 
-  await verify("collapsed Summary stops Git/PR reads and cloud placement removes the section", async () => {
+  await verify("hidden Summary stops Git/PR reads and cloud placement removes the section", async () => {
     await page.clock.install();
     await page.evaluate(() => window.__summaryHarness.setPr("draft"));
     const git = island.getByRole("region", { name: "Git status", exact: true });
     await expect(git.getByText("PR is in draft", { exact: true })).toBeVisible();
     await expect.poll(() => page.evaluate(() => window.__summaryHarness.messages.filter(m => m.op === "gh.prGet").length)).toBeGreaterThan(0);
-    await island.getByRole("button", { name: "Collapse summary" }).click();
+    await trigger.click();
     const reads = await page.evaluate(() => window.__summaryHarness.messages.filter(m => ["git.status", "git.changeCounts", "gh.prGet"].includes(m.op)).length);
     await page.evaluate(() => window.__summaryHarness.setGit({ ahead: 9 }));
     await page.clock.fastForward(120_000);
     expect(await page.evaluate(() => window.__summaryHarness.messages.filter(m => ["git.status", "git.changeCounts", "gh.prGet"].includes(m.op)).length)).toBe(reads);
-    await island.getByRole("button", { name: "Expand summary" }).click();
+    await trigger.click();
     await expect(git.getByText("9 commits ahead of remote", { exact: true })).toBeVisible();
     await page.evaluate(() => window.__summaryHarness.setPlacement("cloud"));
     await expect(git).toHaveCount(0);

@@ -1,4 +1,5 @@
 import { expect } from "@playwright/test";
+import { runFileEditorSmoke } from "./ui-smoke-file-editor.mjs";
 
 export async function runFilePillNavigationSmoke({ page, check }) {
   const fixture = await page
@@ -24,23 +25,21 @@ export async function runFilePillNavigationSmoke({ page, check }) {
         .poll(() => fixture.evaluate(() => window.__filePillFixture.pending()))
         .toBeGreaterThan(0);
       await fixture.evaluate(() => window.__filePillFixture.release());
-      await expect(opened).toHaveAttribute("data-open-type", "files");
+      await expect(opened).toHaveAttribute("data-open-type", "changes");
       await expect(opened).toHaveText(".context/task/notes.ts");
-      await expect(source).toContainText(
-        "Saved source for .context/task/notes.ts",
-      );
+      await expect(fixture.getByText("No current changes for .context/task/notes.ts", { exact: true })).toBeVisible();
       await fixture
         .getByRole("button", { name: "Changes", exact: true })
         .click();
       await expect(opened).toHaveAttribute("data-open-type", "changes");
-      await expect(opened).toHaveText("src/changed.ts");
+      await expect(opened).toHaveText(".context/task/notes.ts");
       await pill("edit", "src/before.ts").click();
       await expect(opened).toHaveAttribute("data-open-type", "changes");
       await expect(opened).toHaveText("src/renamed.ts");
       await pill("edit", "src/unchanged.ts").focus();
       await fixture.keyboard.press("Enter");
-      await expect(opened).toHaveAttribute("data-open-type", "files");
-      await expect(source).toContainText("Saved source for src/unchanged.ts");
+      await expect(opened).toHaveAttribute("data-open-type", "changes");
+      await expect(fixture.getByText("No current changes for src/unchanged.ts", { exact: true })).toBeVisible();
       await pill("edit", "src/changed.ts").click();
       await expect(opened).toHaveAttribute("data-open-type", "changes");
       await expect(opened).toHaveText("src/changed.ts");
@@ -62,7 +61,7 @@ export async function runFilePillNavigationSmoke({ page, check }) {
         ),
       ).toHaveLength(1);
       check(
-        `${owner}: ignored and unchanged tool files open in Files; changed edits keep Changes`,
+        `${owner}: all diff pills open Changes; read-only tool references open Files`,
         true,
       );
     }
@@ -77,12 +76,11 @@ export async function runFilePillNavigationSmoke({ page, check }) {
         .poll(() => fixture.evaluate(() => window.__filePillFixture.pending()))
         .toBeGreaterThan(0);
       await fixture.evaluate(() => window.__filePillFixture.release());
-      await expect(opened).toHaveText(".context/task/notes.ts");
-      await expect(source).toContainText(
-        "Saved source for .context/task/notes.ts",
-      );
+      await expect(opened).toHaveAttribute("data-open-type", "changes");
+      await expect(opened).toHaveText("packages/app/.context/task/notes.ts");
+      await expect(fixture.getByText("No current changes for packages/app/.context/task/notes.ts", { exact: true })).toBeVisible();
       check(
-        `${owner}: cold fallback translates the Git path back to the nested chat folder`,
+        `${owner}: cold Changes navigation keeps the Git-relative path for a nested chat folder`,
         true,
       );
     }
@@ -123,13 +121,12 @@ export async function runFilePillNavigationSmoke({ page, check }) {
     }
     await fixture.goto(`${url}?owner=personal&plain`);
     await pill("edit", ".context/task/notes.ts").click();
-    await expect(opened).toHaveAttribute("data-open-type", "files");
-    await expect(source).toContainText(
-      "Saved source for .context/task/notes.ts",
-    );
-    check("A folder without a Git target opens tool sources in Files", true);
+    await expect(opened).toHaveAttribute("data-open-type", "changes");
+    await expect(opened).toHaveText(".context/task/notes.ts");
+    check("Diff pills keep the Changes destination even without a Git target", true);
     expect(errors).toEqual([]);
   } finally {
     await fixture.close();
   }
+  await runFileEditorSmoke({ page, check });
 }

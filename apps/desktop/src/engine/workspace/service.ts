@@ -8,6 +8,7 @@ import { isGitReviewOperation } from "@zeros/protocol/git-review-actions";
 import { handleGitReviewOperation } from "../git/review-actions";
 import { assertDesignCheckoutReadable, readDesignCheckoutStatus } from "../design/checkout-status";
 import { DesignCatalogReader, DesignCatalogError, type DesignCatalogAdmission } from "../design/catalog";
+import { DesignPreviewJobs } from "../design/preview-jobs";
 import { inspectDesignCatalog, readDesignCatalogMetadata } from "../design/catalog-storage";
 import type { DesignCatalogRead, DesignCatalogOwner } from "@zeros/protocol/design-catalog";
 import {
@@ -244,6 +245,7 @@ import {
   reconcileReaddedRepoWorkspaces,
 } from "../git/worktree";
 import { readWorkspaceFile, isSensitiveRepoPath } from "../files/read-file";
+import { readWorkspaceMediaRange } from "../files/file-media";
 import { writeWorkspaceFile } from "../files/write-file";
 import { transferContextAttachment } from "../files/attachment-transfer";
 import {
@@ -280,6 +282,7 @@ import {
   designDirectoryNameFor,
   DESIGN_CANVAS_FILE,
   readDesignWorkspaceSnapshot,
+  readDesignNavigationSnapshot,
   type DesignWorkspaceSnapshot,
 } from "../design/document";
 import {
@@ -303,6 +306,7 @@ import { repoPathOverlapsDesignRoot as sharedRepoPathOverlapsDesignRoot } from "
 import { withDesignWorkspaceMutation } from "../design/document-write-lock";
 import { initializeWorkspaceDesign } from "../git/design-mode";
 import { withWorkspaceGitMutation } from "../git/mutation-lock";
+import { reconcileGithubRepository } from "../git/github-repository";
 import { unfenceDesignDirectory } from "../design/workspace-lock";
 
 import { forgetDesignScreenshots } from "../design/screenshots";
@@ -318,6 +322,7 @@ import type { ComputerUseOwner } from "@zeros/protocol/computer-use-tools";
 import type { McpGateway } from "../agents/gateway/server";
 import {
   listProjects,
+  projectForRoot,
   upsertRepoByRoot,
   removeRepoByRoot,
   renameRepoByRoot,
@@ -587,6 +592,7 @@ const WRITE_OPS = new Set<string>([
   "project.remove",
   "project.rename",
   "project.bulkUpsert",
+  "project.reconcileGithubRemote",
   // Settings TOML writes (user / repo / repo-local layers). Open to paired
   // devices by design: a paired device already holds PTY (= arbitrary file
   // edits), so gating this would be theater. Remote repo targeting is still
@@ -1162,6 +1168,7 @@ const REMOTE_READABLE = new Set<string>([
   // Files. `file.ignored` is deliberately NOT here — see its handler.
   "file.tree",
   "file.read",
+  "file.readRange",
   // Host folder picker (browse to open a project remotely)
   "fs.listDir",
   // Git reads
@@ -1354,7 +1361,26 @@ interface DesignTerritoryTransitionTarget {
 
 export class WorkspaceService {
   private readonly catalogReader = new DesignCatalogReader();
+  private readonly previewJobs = new DesignPreviewJobs();
   private readonly designRouteHost: DesignWorkspaceRouteHost = {
+    readDesignNavigation: (workspaceId, remote, hostLocalResources) =>
+      this.withDesignReadWorkspace(workspaceId, remote, async ({ workspace, root, designDirectory }) => {
+        try {
+          const navigation = await readDesignNavigationSnapshot(root);
+          noteDesignSnapshotDirectory(root, designDirectory);
+          return {
+            ...navigation,
+            owner: { workspaceId: workspace.id, directoryId: navigation.directoryId,
+              organizationId: workspace.organizationId ?? null, placement: "local" },
+            snapshot: { ...navigation.snapshot, directoryId: navigation.directoryId, directory: designDirectory,
+              protocolCapability: hostLocalResources ? this.designProtocolCapabilityProvider?.(workspace.id) ?? null : null },
+          };
+        } catch (error) {
+          if (error instanceof DesignCatalogError) return { unavailable: error.reason };
+          throw error;
+        }
+      }),
+    previewJobs: this.previewJobs,
     readDesignCatalog: (input, remote, admission) => this.readDesignCatalog(input, remote, admission),
     resolveDesignWorkspace: (workspaceId, remote) =>
       this.resolveDesignWorkspace(workspaceId, remote),
@@ -2168,7 +2194,7 @@ export class WorkspaceService {
   /** Local custom-protocol entry point after the engine validates its capability. */
   async readDesignProtocolResource(
     workspaceId: string,
-    input: { path: string; sourceVersion: string | null },
+    input: import("../design/protocol-resource").DesignProtocolResourceInput,
   ): Promise<DesignProtocolResource | null> {
     try {
       // Snapshot and frame reads resolve the active directory in a scoped
@@ -2289,7 +2315,11 @@ export class WorkspaceService {
 
   retireDesignCatalog(connectionId: string): void {
     this.catalogReader.retire(connectionId);
+    this.previewJobs.retire(connectionId);
   }
+
+  stopDesignPreviews(): Promise<void> { return this.previewJobs.stop(); }
+  retireUnauthorizedDesignPreviews(): void { this.previewJobs.retireUnauthorized(); }
 
   private readDesignCatalog(input: DesignCatalogRead, remote: boolean, admission: DesignCatalogAdmission) {
     const owner = (workspace: Workspace): DesignCatalogOwner => ({ workspaceId: workspace.id, directoryId: input.directoryId,
@@ -2512,6 +2542,7 @@ export class WorkspaceService {
         chatId: string,
         apply: (retire: () => Promise<void>) => Promise<T>,
       ) => Promise<T>;
+      previewAdmission?: DesignCatalogAdmission;
     } = {},
   ): Promise<unknown> {
     const remote = opts.remote === true;
@@ -2622,6 +2653,7 @@ export class WorkspaceService {
         remote,
         hostLocalResources,
         ...(opts.catalogAdmission ? { catalogAdmission: opts.catalogAdmission } : {}),
+        ...(opts.previewAdmission ? { previewAdmission: opts.previewAdmission } : {}),
       });
     }
     if (isCodeReviewOperation(op)) {
@@ -3138,6 +3170,11 @@ export class WorkspaceService {
         return { projects };
       }
       // ── Write: projects (desktop write-through; restriction-gated remote) ──
+      case "project.reconcileGithubRemote": {
+        const repoRoot = reqStr(params, "repoRoot");
+        this.assertSettingsRepoRoot(repoRoot, remote);
+        return reconcileGithubRepository(repoRoot);
+      }
       case "project.upsert": {
         const repoRoot = reqStr(params, "repoRoot");
         assertRemoteRepoRootAllowed(repoRoot, remote);
@@ -3146,9 +3183,11 @@ export class WorkspaceService {
           repoRoot,
           repoSlug: optStr(params, "repoSlug"),
           name: optStr(params, "name"),
-          originUrl: optStr(params, "originUrl") ?? null,
+          originUrl: params.originUrl === null ? null : optStr(params, "originUrl"),
+          originRevision: typeof params.originRevision === "number" && Number.isSafeInteger(params.originRevision) && params.originRevision >= 0
+            ? params.originRevision : 0,
         });
-        return { ok: true };
+        return { ok: true, project: projectForRoot(repoRoot) };
       }
       case "project.remove": {
         removeRepoByRoot(reqStr(params, "repoRoot"));
@@ -3167,7 +3206,9 @@ export class WorkspaceService {
               repoRoot: typeof o.repoRoot === "string" ? o.repoRoot : "",
               repoSlug: typeof o.repoSlug === "string" ? o.repoSlug : undefined,
               name: typeof o.name === "string" ? o.name : undefined,
-              originUrl: typeof o.originUrl === "string" ? o.originUrl : null,
+              originUrl: typeof o.originUrl === "string" || o.originUrl === null ? o.originUrl : undefined,
+              originRevision: typeof o.originRevision === "number" && Number.isSafeInteger(o.originRevision) && o.originRevision >= 0
+                ? o.originRevision : 0,
             };
           })
           .filter((p) => p.repoRoot);
@@ -4255,7 +4296,7 @@ export class WorkspaceService {
         }
         // readWorkspaceFile re-checks the RESOLVED + realpath target so a
         // collapsing path ('.env/.') or an innocuously-named symlink can't leak.
-        const read = readWorkspaceFile(cwd, rel, { remote });
+        const read = readWorkspaceFile(cwd, rel, { remote, includeVideo: params.includeVideo === true, streamMedia: params.streamMedia === true });
         // Design ownership is presentation here. A malformed local manifest
         // must not block reading the source needed to repair it.
         try {
@@ -4269,6 +4310,10 @@ export class WorkspaceService {
           return normalized && roots.some(root => normalized.startsWith(`${root}/`))
             ? { ...read, designPath: true } : read;
         }
+      }
+      case "file.readRange": {
+        const cwd = this.resolveReadCwd(reqStr(params, "workspaceId"), remote);
+        return readWorkspaceMediaRange(cwd, params, remote);
       }
       case "file.write": {
         const targetWorkspaceId = reqStr(params, "workspaceId");

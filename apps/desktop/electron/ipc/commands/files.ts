@@ -28,6 +28,7 @@
 // ──────────────────────────────────────────────────────────
 
 import fs from "node:fs";
+import { readWorkspaceMediaRange } from "../../../src/engine/files/file-media";
 import path from "node:path";
 import { nativeImage } from "electron";
 import {
@@ -45,7 +46,8 @@ import {
   containedThumbnailSize,
   probeImageDimensions,
 } from "./image-dimensions";
-import { cwdIsTrusted } from "./workspace-root-trust";
+import { stageThumbnailSource } from "./thumbnail-source";
+import { trustedWorkspaceRoot } from "./workspace-root-trust";
 
 export type { ReadFileKind, ReadFileResult, WriteFileResult };
 
@@ -113,7 +115,8 @@ function thumbnailFailure(
 export const readImageThumbnail: CommandHandler = async (args) => {
   const cwd = String(args.cwd ?? "");
   const rel = String(args.path ?? "");
-  if (!cwd || !cwdIsTrusted(cwd)) {
+  const approvedRoot = cwd ? trustedWorkspaceRoot(cwd) : null;
+  if (!approvedRoot) {
     return thumbnailFailure(rel, "refusing to read outside the workspace");
   }
   if (!rel) return thumbnailFailure(rel, "missing path");
@@ -125,8 +128,8 @@ export const readImageThumbnail: CommandHandler = async (args) => {
     return thumbnailFailure(rel, "unsupported thumbnail size");
   }
 
-  const root = path.resolve(cwd);
-  const target = path.resolve(cwd, rel);
+  const root = approvedRoot;
+  const target = path.resolve(root, rel);
   if (!isInside(target, root)) {
     return thumbnailFailure(rel, "refusing to read outside the workspace");
   }
@@ -137,8 +140,9 @@ export const readImageThumbnail: CommandHandler = async (args) => {
   let realRoot: string;
   let realTarget: string;
   let bytes: number;
+  let staged: Awaited<ReturnType<typeof stageThumbnailSource>>;
   try {
-    realRoot = fs.realpathSync(root);
+    realRoot = root;
     realTarget = fs.realpathSync(target);
     if (!isInside(realTarget, realRoot)) {
       return thumbnailFailure(
@@ -146,11 +150,12 @@ export const readImageThumbnail: CommandHandler = async (args) => {
         "refusing to follow a symlink outside the workspace",
       );
     }
-    const stat = fs.statSync(realTarget);
-    if (!stat.isFile()) return thumbnailFailure(rel, "not a regular file");
-    bytes = stat.size;
+    staged = await stageThumbnailSource(realTarget, MAX_THUMBNAIL_SOURCE_BYTES, path.extname(target));
+    realTarget = staged.path;
+    bytes = staged.bytes;
   } catch (err) {
     const code = (err as NodeJS.ErrnoException).code;
+    if (code === "EFBIG") return { kind: "too-large", path: rel, bytes: (err as { bytes: number }).bytes, error: "image is too large to thumbnail safely" };
     return thumbnailFailure(
       rel,
       code === "ENOENT"
@@ -159,6 +164,7 @@ export const readImageThumbnail: CommandHandler = async (args) => {
     );
   }
 
+  try {
   if (bytes > MAX_THUMBNAIL_SOURCE_BYTES) {
     return {
       kind: "too-large",
@@ -325,12 +331,14 @@ export const readImageThumbnail: CommandHandler = async (args) => {
       bytes,
     );
   }
+  } finally { await staged.dispose(); }
 };
 
 export const readFile: CommandHandler = (args) => {
   const cwd = String(args.cwd ?? "");
   const rel = String(args.path ?? "");
-  if (!cwd || !cwdIsTrusted(cwd)) {
+  const approvedRoot = cwd ? trustedWorkspaceRoot(cwd) : null;
+  if (!approvedRoot) {
     return {
       kind: "error",
       path: rel,
@@ -343,7 +351,14 @@ export const readFile: CommandHandler = (args) => {
   // containment checks; the secret denylist stays a REMOTE-only boundary so
   // this stays consistent with Local main and the Files tree (which both show
   // these files). Do NOT pass remote:true here — see the header note.
-  return readWorkspaceFile(cwd, rel, { remote: false });
+  return readWorkspaceFile(approvedRoot, rel, { remote: false, canonicalRoot: approvedRoot, includeVideo: args.includeVideo === true, streamMedia: args.streamMedia === true });
+};
+
+export const readFileRange: CommandHandler = (args) => {
+  const cwd = typeof args.cwd === "string" ? args.cwd : "";
+  const approvedRoot = cwd ? trustedWorkspaceRoot(cwd) : null;
+  if (!approvedRoot) throw new Error("Refusing to read outside the workspace");
+  return readWorkspaceMediaRange(approvedRoot, args, false, approvedRoot);
 };
 
 /** write_file({ cwd, path, content }) — writes a single file for the Files-tab
@@ -355,7 +370,8 @@ export const writeFile: CommandHandler = (args) => {
   const cwd = String(args.cwd ?? "");
   const rel = String(args.path ?? "");
   const content = typeof args.content === "string" ? args.content : null;
-  if (!cwd || !cwdIsTrusted(cwd)) {
+  const approvedRoot = cwd ? trustedWorkspaceRoot(cwd) : null;
+  if (!approvedRoot) {
     return {
       kind: "error",
       path: rel,
@@ -371,5 +387,5 @@ export const writeFile: CommandHandler = (args) => {
       error: "missing content",
     } satisfies WriteFileResult;
   }
-  return writeWorkspaceFile(cwd, rel, content, { remote: false });
+  return writeWorkspaceFile(approvedRoot, rel, content, { remote: false, canonicalRoot: approvedRoot });
 };

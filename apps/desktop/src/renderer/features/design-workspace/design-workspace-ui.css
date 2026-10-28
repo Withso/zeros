@@ -41,7 +41,7 @@
 }
 
 .zd-field:focus-within,
-.zd-field:focus-visible,
+.zd-field:focus-visible:where(:not([data-zeros-focus-visible="false"])),
 .zd-field[data-state="open"] {
   background-color: var(--bg2);
   box-shadow: inset 0 0 0 1px var(--highlighted-bright);
@@ -156,7 +156,7 @@
   color: var(--fg1);
 }
 
-.zd-segment:focus-visible {
+.zd-segment:focus-visible:where(:not([data-zeros-focus-visible="false"])) {
   outline: 1px solid var(--highlighted-bright);
   outline-offset: -1px;
 }
@@ -200,7 +200,7 @@
   color: var(--fg1);
 }
 
-.zd-icon-button:focus-visible {
+.zd-icon-button:focus-visible:where(:not([data-zeros-focus-visible="false"])) {
   outline: 1px solid var(--highlighted-bright);
   outline-offset: -1px;
 }
@@ -307,7 +307,7 @@
   color: var(--fg1);
 }
 
-.zd-panel-tab:focus-visible {
+.zd-panel-tab:focus-visible:where(:not([data-zeros-focus-visible="false"])) {
   outline: 1px solid var(--highlighted-bright);
   outline-offset: -1px;
 }
@@ -352,7 +352,7 @@
   color: var(--fg1);
 }
 
-.zd-size-trigger:focus-visible {
+.zd-size-trigger:focus-visible:where(:not([data-zeros-focus-visible="false"])) {
   outline: 1px solid var(--highlighted-bright);
   outline-offset: -1px;
 }
@@ -372,7 +372,7 @@
 }
 
 .zd-limit-field:hover .zd-limit-remove,
-.zd-limit-remove:focus-visible {
+.zd-limit-remove:focus-visible:where(:not([data-zeros-focus-visible="false"])) {
   opacity: 1;
 }
 
@@ -406,7 +406,7 @@
   background-color: var(--bg2-hover);
 }
 
-.zd-alignment-point:focus-visible {
+.zd-alignment-point:focus-visible:where(:not([data-zeros-focus-visible="false"])) {
   outline: 1px solid var(--highlighted-bright);
   outline-offset: -1px;
 }
@@ -444,7 +444,7 @@
   color: var(--design-selection-stroke);
 }
 
-.zd-constraint-pin:focus-visible {
+.zd-constraint-pin:focus-visible:where(:not([data-zeros-focus-visible="false"])) {
   outline: 1px solid var(--highlighted-bright);
   outline-offset: -1px;
 }
@@ -573,7 +573,7 @@
   color: var(--design-selection-stroke);
 }
 
-.zd-field-keyframe:focus-visible {
+.zd-field-keyframe:focus-visible:where(:not([data-zeros-focus-visible="false"])) {
   outline: 1px solid var(--highlighted-bright);
   outline-offset: -1px;
 }
@@ -583,16 +583,14 @@
   color: var(--fg1);
 }
 
-/* ── Floating canvas chrome ─────────────────────────────────────────────
- * The canvas is full bleed. Three raised islands float over it, 8px from its
- * edges: the directory pill (top left), the tool rail (left, centred), and
- * the Layers + Inspector panel (right, full height). The Motion timeline
- * floats along the bottom, ending beside the panel. */
+/* ── Canvas chrome ──────────────────────────────────────────────────────
+ * The secondary toolbar sits above the canvas. The properties panel attaches
+ * to the right edge; tools and Motion float 8px inside the remaining space. */
 
 /* The panel's resolved width, and the distance from the surface's right edge
  * to the panel's left edge, shared with the chrome that must end beside it.
  * Percentages resolve against the full-bleed Design surface. */
-[data-design-workspace-surface] {
+[data-design-canvas-area] {
   --zd-design-panel-width: clamp(
     min(220px, 45%),
     var(--zeros-design-style-width, 280px),
@@ -601,21 +599,8 @@
   --zd-design-panel-inset: 0px;
 }
 
-[data-design-workspace-surface][data-design-panel="open"] {
-  --zd-design-panel-inset: calc(var(--zd-design-panel-width) + 8px);
-}
-
-/* Source covers the canvas, but its scroll viewport clears the floating
- * chrome. Keep the wrapper full width so the shared percentage cap resolves
- * against the same surface as the panel, including during a width drag. */
-.zd-design-source-view {
-  /* A 40px pill/rail, with an 8px gutter on each side. */
-  padding: calc(40px + 16px) calc(var(--zd-design-panel-inset) + 8px) 8px
-    calc(40px + 16px);
-}
-
-.zd-design-source-view[data-motion-open] {
-  padding-bottom: calc(var(--zeros-design-motion-height, 240px) + 16px);
+[data-design-workspace-surface][data-design-panel="open"] > [data-design-canvas-area] {
+  --zd-design-panel-inset: var(--zd-design-panel-width);
 }
 
 /* The canvas tools: a 40px floating bar of 32px tools. The active modal
@@ -653,9 +638,7 @@
   margin-inline: 0;
 }
 
-/* The rail spans the canvas height minus the directory pill and an open
- * Motion timeline. Its two flexible spacers centre the tools; the upper one
- * never shrinks below the pill, so a short canvas cannot stack them. */
+/* The rail spans the canvas height above an open Motion timeline. */
 .zd-design-tools-rail {
   top: 8px;
   bottom: 8px;
@@ -669,35 +652,24 @@
   content: "";
 }
 
-.zd-design-tools-rail::before {
-  min-height: 48px;
-}
-
 .zd-design-tools-rail[data-motion-open] {
   bottom: calc(var(--zeros-design-motion-height, 240px) + 16px);
 }
 
-/* The directory pill: the Design directory switcher and the panel toggle. It
- * never reaches under the floating panel; a long name truncates instead. */
+/* The former pill is now the full-width secondary workbench toolbar. */
 .zd-design-directory-pill {
-  top: 8px;
-  left: 8px;
-  max-width: calc(100% - var(--zd-design-panel-inset) - 24px);
-  height: 40px;
-  gap: 2px;
-  padding: 4px;
-  border-radius: 12px;
+  width: 100%;
 }
 
 .zd-design-directory-trigger {
   display: inline-flex;
   min-width: 0;
-  height: 32px;
+  height: 28px;
   align-items: center;
   gap: 6px;
   padding-inline: 8px;
   border: 0;
-  border-radius: var(--radius-lg);
+  border-radius: var(--radius-md);
   background: transparent;
   color: var(--fg1);
   font-size: 13px;
@@ -708,8 +680,8 @@
 }
 
 .zd-design-directory-trigger > svg {
-  width: 16px;
-  height: 16px;
+  width: 14px;
+  height: 14px;
   flex-shrink: 0;
   color: var(--fg2);
 }
@@ -723,10 +695,10 @@
  * trigger's aria-expanded. */
 .zd-design-directory-trigger:hover:not(:disabled),
 .zd-design-directory-trigger[aria-expanded="true"] {
-  background-color: var(--bg2-hover);
+  background-color: var(--bg1-hover);
 }
 
-.zd-design-directory-trigger:focus-visible {
+.zd-design-directory-trigger:focus-visible:where(:not([data-zeros-focus-visible="false"])) {
   outline: 1px solid var(--highlighted-bright);
   outline-offset: -1px;
 }
@@ -773,15 +745,13 @@
   color: var(--fg3);
 }
 
-/* The Layers + Inspector panel: one raised column at the right edge. */
+/* The Layers + Inspector panel meets the right, top and bottom content edges. */
 .zd-design-floating-panel {
-  top: 8px;
-  right: 8px;
-  bottom: 8px;
+  top: 0;
+  right: 0;
+  bottom: 0;
   width: var(--zd-design-panel-width);
-  border: 1px solid var(--border2);
-  border-radius: 12px;
-  box-shadow: var(--shadow-dropdown);
+  border-left: 1px solid var(--border1);
 }
 
 /* Layers owns the top of the panel at a height the user drags, bounded so
@@ -798,41 +768,10 @@
   height: auto;
 }
 
-/* The Layers/Inspector seam: a hairline with a grab bar that brightens on
- * intent, like the split it moves. */
-.zd-design-layers-split {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  outline: 0;
-}
-
-.zd-design-layers-split::before {
-  width: 32px;
-  height: 4px;
-  /* Half the bar's height or more rounds it into a pill. */
-  border-radius: var(--radius-sm);
-  background-color: var(--border2);
-  content: "";
-  transition: background-color 120ms ease-out;
-}
-
-.zd-design-layers-split:hover::before,
-.zd-design-layers-split:focus-visible::before,
-.zd-design-layers-split[data-dragging]::before {
-  background-color: var(--border4);
-}
-
-.zd-design-layers-split:focus-visible::before {
-  outline: 1px solid var(--highlighted-bright);
-  outline-offset: 1px;
-}
-
 @media (prefers-reduced-motion: reduce) {
   .zd-design-tools-rail,
   .zd-design-agent-activity,
-  .zd-design-directory-trigger,
-  .zd-design-layers-split::before {
+  .zd-design-directory-trigger {
     transition: none;
   }
 }
@@ -875,13 +814,63 @@
   color: var(--design-selection-label-fg);
 }
 
-.zd-canvas-tool:focus-visible {
+.zd-canvas-tool:focus-visible:where(:not([data-zeros-focus-visible="false"])) {
   outline: 1px solid var(--highlighted-bright);
   outline-offset: -1px;
 }
 
 .zd-canvas-tool:disabled {
   opacity: 0.4;
+}
+
+/* Frame chrome stays 28 screen pixels at every canvas zoom. */
+.zd-canvas-tool.zd-frame-play {
+  width: 28px;
+  height: 28px;
+  background-color: var(--bg2-hover);
+}
+
+/* Camera variables belong to world geometry and inverse-scaled chrome roots.
+ * Pixels and the already screen-sized children do not consume them. Far-away
+ * frame trees also stop inheriting each wheel update; the camera painter
+ * restores their current scale before they re-enter, preserving cached DOM. */
+[data-design-source-vector-host],
+[data-design-frame-chrome] > *,
+[data-design-frame-chrome-outside]:not([data-design-frame-chrome-protected]):not([data-design-nest-target]):not(:focus-within) {
+  --design-canvas-zoom: 1;
+  --design-canvas-inverse-zoom: 1;
+}
+
+/* Cached source paint follows the imperative camera without reconciling all
+ * frame components. Only ready source buffers yield paint; cold HTML must
+ * still receive real layout, and protected editing documents stay alive. */
+[data-design-frame-source-outside] [data-design-source-ready] {
+  visibility: hidden !important;
+}
+
+/* Keep inverse-scaled labels and controls on their own small backing. When
+ * they share an artboard layer, Chromium can raster the full authored frame
+ * just to paint its tiny screen-sized controls above the viewport GPU plane.
+ * Withdraw promotion when the controls leave the view or become compact. */
+[data-design-frame-chrome] {
+  will-change: transform;
+}
+[data-design-frame-chrome-outside] > [data-design-frame-chrome] {
+  will-change: auto;
+}
+
+/* A 28px control must not cover every tiny frame in an overview. Keep its
+ * keyboard target and reveal it together with the label on hover or focus. */
+[data-design-frame-compact-controls]:not(:hover):not(:focus-within):not([data-design-frame-pointer]) > [data-design-frame-chrome] {
+  --design-canvas-zoom: 1;
+  --design-canvas-inverse-zoom: 1;
+  /* An empty clip preserves keyboard targets without creating hundreds of
+     transparent transformed layers. Focus restores the screen-sized chrome
+     in the same style pass, before its first visible paint. */
+  clip: rect(0px, 0px, 0px, 0px);
+  transform: none !important;
+  will-change: auto;
+  pointer-events: none;
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -939,7 +928,7 @@
 }
 
 [data-design-origin-handle]:hover .zd-design-origin-marker,
-[data-design-origin-handle]:focus-visible .zd-design-origin-marker,
+[data-design-origin-handle]:focus-visible:where(:not([data-zeros-focus-visible="false"])) .zd-design-origin-marker,
 [data-design-origin-dragging] .zd-design-origin-marker {
   opacity: 1;
 }
@@ -1162,8 +1151,8 @@
   visibility: hidden;
 }
 
-.zd-design-inline-spacing-handle:focus-visible > .zd-design-inline-spacing-line,
-.zd-design-inline-gap-handle:focus-visible .zd-design-inline-spacing-line {
+.zd-design-inline-spacing-handle:focus-visible:where(:not([data-zeros-focus-visible="false"])) > .zd-design-inline-spacing-line,
+.zd-design-inline-gap-handle:focus-visible:where(:not([data-zeros-focus-visible="false"])) .zd-design-inline-spacing-line {
   outline: 1px solid var(--design-spacing-line-border);
 }
 
@@ -1253,7 +1242,7 @@
   color: var(--fg1);
 }
 
-.zd-design-layer-row:focus-visible {
+.zd-design-layer-row:focus-visible:where(:not([data-zeros-focus-visible="false"])) {
   border-color: transparent;
   outline: 1px solid var(--highlighted-bright);
   outline-offset: -1px;
@@ -1329,7 +1318,7 @@
   background-color: var(--bg1-hover);
 }
 
-.zd-design-layers-fold:focus-visible {
+.zd-design-layers-fold:focus-visible:where(:not([data-zeros-focus-visible="false"])) {
   outline: 1px solid var(--highlighted-bright);
   outline-offset: -1px;
 }
@@ -1410,4 +1399,82 @@
 .zd-design-drag-preview img {
   position: absolute;
   max-width: none;
+}
+/* Keep the authored viewport and ordinary display density stable. Increasing
+   iframe CSS zoom also increases the child devicePixelRatio: preallocating
+   800% density for an overview multiplies backing pixels by 64 on the GPU.
+   The camera owns visual scale; document layout never follows its zoom. */
+.zd-design-document {
+  /* Match the document's default scheme. Inheriting the app's dark scheme
+     makes Chromium flatten a transparent, default-light child onto white. */
+  color-scheme: normal;
+  width: 100%;
+  height: 100%;
+}
+/* Until responsive HTML is ready, resizing clips the old authored viewport
+   rather than squeezing its text and shapes to the pending frame bounds. */
+.zd-design-document[data-design-source-vector] {
+  object-fit: none;
+  object-position: left top;
+}
+
+/* A viewport-sized GPU plane stays outside the transformed world.
+   Decoded sources stay loaded and can return atomically to their DOM anchors. */
+.zd-design-source-plane {
+  position: absolute;
+  top: 0;
+  left: 0;
+  pointer-events: none;
+  transform-origin: 0 0;
+  max-width: none;
+  color-scheme: normal;
+  --design-canvas-zoom: 1;
+  --design-canvas-inverse-zoom: 1;
+}
+[data-design-canvas-viewport] {
+  overscroll-behavior: none;
+}
+[data-design-frame-tiled] {
+  background-color: transparent;
+  outline-color: transparent;
+  /* The GPU owns the screen-pixel outline; a transparent CSS outline still
+     consumes inverse zoom and invalidates every artboard on each wheel. */
+  outline-width: 0 !important;
+}
+[data-design-frame-tiled][data-design-frame-compact-controls]:not(:hover):not(:focus-within):not([data-design-frame-pointer]) {
+  --design-canvas-zoom: 1;
+  --design-canvas-inverse-zoom: 1;
+}
+/* The GPU already owns these passive pixels. Keep controls mounted and
+   keyboard-focusable while only the current pointer target, focused frame or
+   editor needs a full DOM hit box. Cold/live HTML always keeps real layout. */
+[data-design-frame-hit-testing] > [data-design-frame-tiled][data-design-frame-compact-controls]:not(:hover):not(:focus-within):not([data-design-frame-pointer]):not([data-design-frame-chrome-protected]):not([data-design-frame-stack-protected]):not([data-design-nest-target]):not(:has(iframe)) {
+  width: 0 !important;
+  height: 0 !important;
+  overflow: hidden;
+  clip: rect(0px, 0px, 0px, 0px);
+}
+[data-design-source-tiled] {
+  /* The anchor preserves readiness while the loaded SVG is disconnected from
+     the visible document's lifecycle. The GPU owns its confirmed pixels. */
+  display: none !important;
+  visibility: hidden !important;
+}
+/* Reveal each cold frame, including its chrome, with its first ready content.
+   Visibility preserves loading/layout; a display gate would deadlock hidden
+   documents. Warm outgoing documents stay painted during replacement, and
+   an actual load failure remains actionable. */
+.zd-design-frame:not(:has(
+  [data-design-source-buffer="displayed"][data-design-source-ready],
+  iframe[data-design-document-buffer="displayed"][data-design-document-ready],
+  [data-design-frame-pixels-ready],
+  [data-design-frame-load-error]
+)) {
+  visibility: hidden;
+  pointer-events: none;
+}
+/* Retained HTML and pictures cover editor startup. Painting them beneath a ready editor
+   would composite authored alpha twice. Switch both surfaces in one style pass. */
+[data-design-frame-render-surface]:has(iframe[data-design-document-buffer="displayed"][data-design-document-ready]) > :is([data-design-source-surface][data-design-source-ready], [data-design-source-vector-host], [data-design-frame-pixel-cover]) {
+  visibility: hidden !important;
 }

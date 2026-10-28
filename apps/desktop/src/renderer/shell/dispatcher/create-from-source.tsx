@@ -39,7 +39,8 @@ import {
   GITHUB_READ_MAX_AGE_MS,
   openPrsCache,
 } from "../../state/read-caches";
-import { useCachedRead } from "../../state/use-cached-read";
+import { useRecoveringRead } from "../../state/use-recovering-read";
+import { useBridgeStatus } from "../../platform/bridge/use-bridge";
 import { RepositoryIcon } from "../../features/repositories/repository-icon";
 import {
   branchBase,
@@ -117,29 +118,30 @@ export function CreateFromSource({
   const [tab, setTab] = useState<Tab | null>(null);
   const [query, setQuery] = useState("");
   const repoRoot = project?.repoRoot ?? null;
+  const connected = useBridgeStatus(repoRoot) === "connected";
   const catalogKey = project
     ? JSON.stringify([project.repoRoot, project.originUrl])
     : null;
   const localKey = project
     ? JSON.stringify([project.repoRoot, project.repoSlug])
     : null;
-  const catalogRead = useCachedRead(
+  const catalogRead = useRecoveringRead(
     createBranchCatalogCache,
     catalogKey,
     readCatalog,
-    { enabled: active, maxAgeMs: GIT_READ_MAX_AGE_MS },
+    { enabled: active, maxAgeMs: GIT_READ_MAX_AGE_MS, connected },
   );
-  const remoteRead = useCachedRead(
+  const remoteRead = useRecoveringRead(
     createRemoteCatalogCache,
     catalogKey,
     (key) => readCatalog(key, true),
-    { enabled: active, maxAgeMs: GITHUB_READ_MAX_AGE_MS },
+    { enabled: active, maxAgeMs: GITHUB_READ_MAX_AGE_MS, connected },
   );
-  const branchesRead = useCachedRead(
+  const branchesRead = useRecoveringRead(
     createLocalBranchesCache,
     localKey,
     readLocalBranches,
-    { enabled: active, maxAgeMs: GIT_READ_MAX_AGE_MS },
+    { enabled: active, maxAgeMs: GIT_READ_MAX_AGE_MS, connected },
   );
   // Network refresh never hides the fast local-ref snapshot. A later settings
   // or Git invalidation may publish a newer fast snapshot, which wins in turn.
@@ -171,7 +173,7 @@ export function CreateFromSource({
     (requestedTab === "prs" && !originUrl)
       ? "local"
       : requestedTab;
-  const prsRead = useCachedRead(
+  const prsRead = useRecoveringRead(
     openPrsCache,
     originUrl,
     (key) =>
@@ -181,6 +183,7 @@ export function CreateFromSource({
     {
       enabled: active && open && activeTab === "prs",
       maxAgeMs: GITHUB_READ_MAX_AGE_MS,
+      connected,
     },
   );
 
@@ -189,7 +192,7 @@ export function CreateFromSource({
   }, [active, disabled]);
 
   const warm = () => {
-    if (!active || disabled || !catalogKey || !localKey) return;
+    if (!active || !connected || disabled || !catalogKey || !localKey) return;
     void createBranchCatalogCache
       .load(catalogKey, () => readCatalog(catalogKey), {
         maxAgeMs: GIT_READ_MAX_AGE_MS,

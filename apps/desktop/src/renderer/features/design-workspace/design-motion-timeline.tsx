@@ -1011,13 +1011,15 @@ export const DesignMotionTimeline = React.memo(function DesignMotionTimeline({
     onPropertiesChange?.(properties);
   }, [onPropertiesChange, properties]);
 
+  // Motion paths and the playhead exist only in Motion mode. A closed
+  // timeline (remounted per selection) publishes nothing for the canvas.
   useEffect(() => {
-    onDraftChange?.(draft && validMotionDraft(draft) ? draft : null);
-  }, [draft, onDraftChange]);
+    onDraftChange?.(open && draft && validMotionDraft(draft) ? draft : null);
+  }, [draft, onDraftChange, open]);
 
   useEffect(() => {
-    onPlayheadChange?.(playhead);
-  }, [onPlayheadChange, playhead]);
+    if (open) onPlayheadChange?.(playhead);
+  }, [onPlayheadChange, open, playhead]);
 
   useEffect(() => {
     const sameSession = initializedSessionRef.current === sessionOwnerKey;

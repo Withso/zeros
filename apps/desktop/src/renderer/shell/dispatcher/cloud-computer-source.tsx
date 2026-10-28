@@ -25,7 +25,7 @@ import {
   computerPrsCache,
   GITHUB_READ_MAX_AGE_MS,
 } from "../../state/read-caches";
-import { useCachedRead } from "../../state/use-cached-read";
+import { useRecoveringRead } from "../../state/use-recovering-read";
 import { BaseList, ReadState, SourceIcon } from "./create-from-source";
 import type { DispatcherBase } from "./dispatcher-source";
 
@@ -132,13 +132,13 @@ export function CloudComputerSourcePicker({
   const [open, setOpen] = useState(false);
   const [tab, setTab] = useState("branches");
   const [query, setQuery] = useState("");
-  const branches = useCachedRead(
+  const branches = useRecoveringRead(
     computerBranchesCache,
     readKey,
     readComputerBranches,
     { enabled: active, maxAgeMs: GITHUB_READ_MAX_AGE_MS },
   );
-  const prs = useCachedRead(computerPrsCache, readKey, readComputerPrs, {
+  const prs = useRecoveringRead(computerPrsCache, readKey, readComputerPrs, {
     enabled: active && open && tab === "prs",
     maxAgeMs: GITHUB_READ_MAX_AGE_MS,
   });

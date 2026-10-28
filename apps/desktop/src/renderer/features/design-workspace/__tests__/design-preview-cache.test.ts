@@ -277,9 +277,8 @@ describe("design preview cache", () => {
       { evicted: (key) => evicted.push(key), disposed: (picture) => disposed.push(picture.url) },
     );
     const picture = (url: string, bytes = 100): DesignPreviewBlobImage =>
-      ({ blob: new Blob([new Uint8Array(bytes)], { type: "image/webp" }), url, width: 1280, height: 800 });
-    // The browser decodes a picture when an <img> paints it, outside this
-    // pool, so a large raster costs only its encoded bytes here.
+      ({ blob: new Blob([new Uint8Array(bytes)], { type: "image/webp" }), url, width: 4, height: 4 });
+    // Encoded retention alone does not reserve decoded display pixels.
     expect(cache.put("a", picture("blob:a"))).toBe(true);
     expect(cache.getUsage()).toEqual({ entries: 1, encodedBytes: 100, decodedBytes: 0 });
     const shown = cache.acquire("a")!;
@@ -299,5 +298,38 @@ describe("design preview cache", () => {
     expect(cache.put("d", picture("blob:d", 300))).toBe(false);
     expect(cache.has("c")).toBe(true);
     expect(cache.put("e", { ...picture("blob:e"), width: 0 })).toBe(false);
+  });
+
+  it("refuses a compressed Blob's display when its decoded pixels exceed the budget", () => {
+    const cache = new DesignPreviewCache<DesignPreviewBlobImage>({
+      maxEntries: 10, maxEncodedBytes: 1000, maxDecodedBytes: 256,
+    });
+    expect(cache.put("large", {
+      blob: new Blob(["small encoded image"]), url: "blob:large", width: 4096, height: 4096,
+    })).toBe(true);
+    // Encoded residency and display residency are separate; storing a small
+    // compressed picture never authorizes allocating an unbounded raster.
+    expect(cache.acquire("large")).toBeNull();
+    expect(cache.getUsage().decodedBytes).toBe(0);
+  });
+
+  it("counts Blob display overlap and releases pixels at the final lease", () => {
+    const cache = new DesignPreviewCache<DesignPreviewBlobImage>(smallLimits);
+    const picture = (url: string) => ({ blob: new Blob([url]), url, width: 4, height: 4 });
+    cache.put("a", picture("blob:a"));
+    const first = cache.acquire("a")!;
+    const second = cache.acquire("a")!;
+    expect(cache.getUsage().decodedBytes).toBe(128);
+    cache.put("a", picture("blob:replacement"));
+    const replacement = cache.acquire("a")!;
+    expect(cache.getUsage().decodedBytes).toBe(256);
+    first.release();
+    expect(cache.getUsage().decodedBytes).toBe(256);
+    second.release();
+    second.release();
+    expect(cache.getUsage().decodedBytes).toBe(128);
+    replacement.release();
+    expect(cache.getUsage().decodedBytes).toBe(0);
+    expect(cache.has("a")).toBe(true);
   });
 });

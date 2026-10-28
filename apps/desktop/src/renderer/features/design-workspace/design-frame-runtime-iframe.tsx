@@ -42,6 +42,9 @@ import { useDesignFrameDocument } from "./state/use-design-frame-document";
 import { useDesignSavedEditing } from "./design-saved-editing";
 import { designWorkspaceView } from "./state/design-workspace-ui";
 import { useDesignRuntimeStore } from "./state/design-runtime-store";
+import { retainDesignResource } from "./state/design-resource-counters";
+import type { DesignDocumentReplacement } from "./state/design-document-replacements";
+import { useDesignDocumentReplacement } from "./state/use-design-document-replacement";
 
 // --- TYPES ---
 
@@ -56,6 +59,8 @@ interface DesignFrameRuntimeIframeProps {
   frame: DesignCanvasFrameWire;
   /** Hidden retained canvases must not capture or revalidate active readback. */
   active: boolean;
+  playbackSessionId?: string | null;
+  onPlaybackStopped?: (sessionId: string, error?: Error) => void;
   /** Selected frames receive priority screenshot refreshes. */
   selected: boolean;
   /** Semantic selection retained while a new document generation readies. */
@@ -66,6 +71,8 @@ interface DesignFrameRuntimeIframeProps {
   theme: string | null;
   /** Last confirmed pixels cover unavoidable structural document navigation. */
   transitionCover: { sourceVersion: string; dataUrl: string } | null;
+  /** A retained HTML document or decoded picture already supplies pixels. */
+  underlayReady?: boolean;
   /** The Design directory the canvas shows; an agent's in-flight edits of
    * its linked stylesheets apply to this frame live. */
   designDirectory?: string;
@@ -101,8 +108,11 @@ interface DesignFrameDocumentBufferProps {
   frame: DesignCanvasFrameWire;
   documentSourceVersion: string;
   buffer: DesignDocumentBuffer;
+  replacement: DesignDocumentReplacement | null;
   ready: boolean;
   runtimeActive: boolean;
+  playbackSessionId: string | null;
+  onPlaybackStopped?: (sessionId: string, error?: Error) => void;
   selected: boolean;
   selectedNodeIds: readonly string[];
   autoCapture: boolean;
@@ -133,8 +143,11 @@ function DesignFrameDocumentBuffer({
   frame,
   documentSourceVersion,
   buffer,
+  replacement,
   ready,
   runtimeActive,
+  playbackSessionId,
+  onPlaybackStopped,
   selected,
   selectedNodeIds,
   autoCapture,
@@ -149,7 +162,11 @@ function DesignFrameDocumentBuffer({
   const { session: savedEditingSession, state: savedEditingState } = useDesignSavedEditing();
   const connectionRef = useRef<DesignFrameRuntimeConnection | null>(null);
   const [connectedRuntime, setConnectedRuntime] = useState<DesignFrameRuntimeConnection | null>(null);
+  const [playingSessionId, setPlayingSessionId] = useState<string | null>(null);
   const iframeRef = useRef<HTMLIFrameElement | null>(null);
+  useLayoutEffect(() => retainDesignResource("documentBuffers"), []);
+  useLayoutEffect(() => buffer === "incoming" ? retainDesignResource("incomingDocumentBuffers") : undefined, [buffer]);
+  useLayoutEffect(() => buffer === "incoming" ? replacement?.attach() : undefined, [buffer, replacement]);
   const loadedKeyRef = useRef<string | null>(null);
   const handshakeTimerRef = useRef<number | null>(null);
   const [failedProtocolSource, setFailedProtocolSource] = useState<
@@ -159,6 +176,8 @@ function DesignFrameDocumentBuffer({
     folder,
     frame,
     runtimeActive,
+    playbackSessionId,
+    onPlaybackStopped,
     selected,
     selectedNodeIds,
     autoCapture,
@@ -170,6 +189,8 @@ function DesignFrameDocumentBuffer({
     folder,
     frame,
     runtimeActive,
+    playbackSessionId,
+    onPlaybackStopped,
     selected,
     selectedNodeIds,
     autoCapture,
@@ -302,22 +323,28 @@ function DesignFrameDocumentBuffer({
         await syncStylesheetPreviews(connection);
         assertCurrent();
         if (appliedSheetsRef.current.sheets.size) throw new Error("The advisory stylesheet could not be restored.");
-        const snapshot = await connection.getSnapshot();
-        assertCurrent();
-        onSnapshot(snapshot);
-        await settleDesignSelectionDetails(workspaceId, frame.file, sourceVersion);
-        assertCurrent();
         const selectedIds = () => designWorkspaceView(workspaceId).selectedTargets
           .filter((target) => target.frame === frame.file && target.nodeId)
           .map((target) => target.nodeId!);
-        const nodeIds = selectedIds();
-        const details = await Promise.all(nodeIds.map((nodeId) => connection.getNodeDetails(nodeId)));
-        const confirmed = await connection.getSnapshot();
-        assertCurrent();
-        if (confirmed.revision !== snapshot.revision || JSON.stringify(selectedIds()) !== JSON.stringify(nodeIds))
-          throw new Error("The selected geometry changed while restoring saved pixels.");
-        for (const detail of details)
-          useDesignRuntimeStore.getState().publishNodeDetails(workspaceId, latestRef.current.folder, frame.file, detail, sourceVersion);
+        // A late theme/stylesheet acknowledgement can advance the same
+        // document while geometry is being read. Revalidate that generation
+        // instead of permanently refusing editing; never publish mixed reads.
+        for (let attempt = 0; attempt < 3; attempt += 1) {
+          const snapshot = await connection.getSnapshot();
+          assertCurrent();
+          onSnapshot(snapshot);
+          await settleDesignSelectionDetails(workspaceId, frame.file, sourceVersion);
+          assertCurrent();
+          const nodeIds = selectedIds();
+          const details = await Promise.all(nodeIds.map((nodeId) => connection.getNodeDetails(nodeId)));
+          const confirmed = await connection.getSnapshot();
+          assertCurrent();
+          if (confirmed.revision !== snapshot.revision || JSON.stringify(selectedIds()) !== JSON.stringify(nodeIds)) continue;
+          for (const detail of details)
+            useDesignRuntimeStore.getState().publishNodeDetails(workspaceId, latestRef.current.folder, frame.file, detail, sourceVersion);
+          return;
+        }
+        throw new Error("The selected geometry changed while restoring saved pixels.");
       })();
       const preparation = { connection, sourceVersion, theme: preparedTheme, session: savedEditingSession, promise };
       savedPreparationRef.current = preparation;
@@ -338,6 +365,7 @@ function DesignFrameDocumentBuffer({
     : null;
   const useProtocol =
     protocolSource !== null && failedProtocolSource !== protocolSource;
+  useLayoutEffect(() => useProtocol ? retainDesignResource("nativeDocumentBuffers") : undefined, [useProtocol]);
   const loadKey = `${workspaceId}\u0000${frame.file}\u0000${documentSourceVersion}\u0000${useProtocol ? protocolSource : "srcdoc"}`;
   const clearHandshakeTimer = useCallback(() => {
     if (handshakeTimerRef.current === null) return;
@@ -396,7 +424,12 @@ function DesignFrameDocumentBuffer({
     (node: HTMLIFrameElement | null) => {
       if (node === iframeRef.current) return;
       clearHandshakeTimer();
-      connectionRef.current?.destroy();
+      const priorNode = iframeRef.current;
+      const priorConnection = connectionRef.current;
+      priorConnection?.destroy();
+      if (priorNode && priorConnection) queueMicrotask(() => {
+        if (!priorNode.isConnected) priorConnection.destroy(true);
+      });
       connectionRef.current = null;
       onConnection(documentSourceVersion, null);
       iframeRef.current = node;
@@ -416,8 +449,9 @@ function DesignFrameDocumentBuffer({
       documentSourceVersion,
       node,
       {
-        isActive: () => latestRef.current.runtimeActive,
+        isActive: () => latestRef.current.runtimeActive && !latestRef.current.playbackSessionId,
         onReady: clearHandshakeTimer,
+        onPlaybackStopped: ({ sessionId }) => latestRef.current.onPlaybackStopped?.(sessionId),
         onSnapshot: (snapshot, event) => {
           if (event !== "ready") {
             onSnapshot(snapshot);
@@ -443,11 +477,13 @@ function DesignFrameDocumentBuffer({
               // An agent's in-flight stylesheet shows before this generation
               // is revealed, so a reload never flashes the saved styles.
               await syncStylesheetPreviews(connection);
-              await settleDesignSelectionDetails(
-                workspaceId,
-                frame.file,
-                themedSnapshot.sourceVersion,
-              );
+              if (!latestRef.current.playbackSessionId) {
+                await settleDesignSelectionDetails(
+                  workspaceId,
+                  frame.file,
+                  themedSnapshot.sourceVersion,
+                );
+              }
               finishReady();
             })
             .catch(() => {
@@ -500,7 +536,7 @@ function DesignFrameDocumentBuffer({
   }, [clearHandshakeTimer, runtimeActive, watchHandshake]);
 
   useEffect(() => {
-    if (!runtimeActive || (!selected && !autoCapture)) return;
+    if (!runtimeActive || playbackSessionId || (!selected && !autoCapture)) return;
     const connection = connectionRef.current;
     if (!connection) return;
     void connection
@@ -509,9 +545,28 @@ function DesignFrameDocumentBuffer({
       .catch(() => {
         // A replacement buffer publishes its own exact ready snapshot.
       });
-  }, [autoCapture, onSnapshot, runtimeActive, selected]);
+  }, [autoCapture, onSnapshot, playbackSessionId, runtimeActive, selected]);
 
   useEffect(() => {
+    if (!ready || !runtimeActive || buffer !== "displayed" || !playbackSessionId || !connectedRuntime) return;
+    const controller = new AbortController();
+    void connectedRuntime.setPlayback(playbackSessionId, true, controller.signal).then(() => {
+      if (!controller.signal.aborted) setPlayingSessionId(playbackSessionId);
+    }).catch((error: unknown) => {
+      if (!controller.signal.aborted) latestRef.current.onPlaybackStopped?.(
+        playbackSessionId, error instanceof Error ? error : new Error("Couldn't play this frame."),
+      );
+    });
+    return () => {
+      controller.abort();
+      if (connectedRuntime.supports("setPlayback")) {
+        void connectedRuntime.setPlayback(playbackSessionId, false).catch(() => {});
+      }
+    };
+  }, [buffer, connectedRuntime, playbackSessionId, ready, runtimeActive]);
+
+  useEffect(() => {
+    if (!runtimeActive) connectionRef.current?.cancelCaptures?.();
     if (!runtimeActive) return;
     const connection = connectionRef.current;
     if (!connection) return;
@@ -551,6 +606,8 @@ function DesignFrameDocumentBuffer({
   const fallbackSrcDoc =
     fallback.data?.srcDoc ??
     '<!doctype html><html><body style="margin:0"></body></html>';
+  const interactive = ready && runtimeActive && buffer === "displayed" &&
+    playbackSessionId !== null && playingSessionId === playbackSessionId;
 
   return (
     <iframe
@@ -561,16 +618,23 @@ function DesignFrameDocumentBuffer({
       data-design-source-version={frame.sourceVersion}
       data-design-document-buffer={buffer}
       data-design-document-ready={ready ? "" : undefined}
-      tabIndex={-1}
+      data-design-frame-live={interactive ? "" : undefined}
+      tabIndex={interactive ? 0 : -1}
+      {...(!interactive ? { inert: "" } : {})}
       className={
         buffer === "displayed"
-          ? "bg-bg1 pointer-events-none relative z-[1] block size-full border-0"
-          : "bg-bg1 pointer-events-none absolute inset-0 z-0 block size-full border-0"
+          ? interactive
+            ? "zd-design-document pointer-events-auto relative z-[1] block border-0"
+            : "zd-design-document pointer-events-none relative z-[1] block border-0"
+          : "zd-design-document pointer-events-none absolute inset-0 z-0 block border-0"
       }
+      style={{ visibility: buffer === "incoming" || !ready ? "hidden" : "inherit" }}
       aria-label={`${frame.title} design frame`}
-      aria-hidden={buffer === "incoming" ? true : undefined}
+      aria-hidden={buffer === "incoming" || !runtimeActive ? true : undefined}
       onLoad={() => {
         if (!useProtocol && !fallback.data) return;
+        connectionRef.current?.destroy(true);
+        connectionRef.current = null;
         loadedKeyRef.current = loadKey;
         connectCurrentIframe();
       }}
@@ -582,9 +646,13 @@ export function DesignFrameRuntimeIframe(props: DesignFrameRuntimeIframeProps) {
   // A new engine capability is a new document session even when the authored
   // generation is unchanged. An adopted live buffer may still have an older
   // immutable URL; reload the current generation and negotiate readiness anew.
+  // A fresh document on each side of Play discards native form, details,
+  // scroll and contenteditable state without ever writing authored source.
+  // A changed workspace folder also retires pending saved-pixel preparation;
+  // even identical frame bytes belong to a new document owner.
   return (
     <DesignFrameRuntimeSession
-      key={`${props.workspaceId}\u0000${props.frame.file}\u0000${props.protocolCapability ?? "bridge"}`}
+      key={`${props.workspaceId}\u0000${props.folder}\u0000${props.frame.file}\u0000${props.protocolCapability ?? "bridge"}\u0000${props.playbackSessionId ?? "editing"}`}
       {...props}
     />
   );
@@ -596,11 +664,14 @@ function DesignFrameRuntimeSession({
   folder,
   frame,
   active,
+  playbackSessionId = null,
+  onPlaybackStopped,
   selected,
   selectedNodeIds,
   autoCapture,
   theme,
   transitionCover,
+  underlayReady,
   designDirectory,
 }: DesignFrameRuntimeIframeProps) {
   const stylesheetPreviews = useDesignAgentStylesheetPreviews(
@@ -616,13 +687,25 @@ function DesignFrameRuntimeSession({
   const [incomingSourceVersion, setIncomingSourceVersion] = useState<
     string | null
   >(null);
+  const [replacementSourceVersion, setReplacementSourceVersion] = useState<string | null>(null);
   const [readySourceVersions, setReadySourceVersions] = useState<string[]>([]);
   const [failedSourceVersion, setFailedSourceVersion] = useState<string | null>(
     null,
   );
   const [retryAttempt, setRetryAttempt] = useState(0);
+  const handleLoadFailure = useCallback((sourceVersion: string) => {
+    setFailedSourceVersion(sourceVersion);
+    if (playbackSessionId) onPlaybackStopped?.(playbackSessionId, new Error("Couldn't load this frame for playback."));
+  }, [onPlaybackStopped, playbackSessionId]);
   const connectionsByDocumentRef = useRef(
     new Map<string, DesignFrameRuntimeConnection>(),
+  );
+  const replacement = useDesignDocumentReplacement(
+    active && displayedSourceVersion !== frame.sourceVersion &&
+      replacementSourceVersion === frame.sourceVersion && failedSourceVersion !== frame.sourceVersion
+      ? JSON.stringify([workspaceId, folder, designDirectory, frame.file, frame.sourceVersion, retryAttempt])
+      : null,
+    selected,
   );
   const captureKeyRef = useRef<string | null>(null);
   const cancelCaptureRef = useRef<(() => void) | null>(null);
@@ -632,6 +715,7 @@ function DesignFrameRuntimeSession({
     folder,
     frame,
     active,
+    playbackSessionId,
     selected,
     selectedNodeIds,
     autoCapture,
@@ -644,6 +728,7 @@ function DesignFrameRuntimeSession({
     folder,
     frame,
     active,
+    playbackSessionId,
     selected,
     selectedNodeIds,
     autoCapture,
@@ -666,7 +751,7 @@ function DesignFrameRuntimeSession({
       folder: ownerFolder,
       frame: currentFrame,
     } = latest;
-    if (!latest.active) return;
+    if (!latest.active || latest.playbackSessionId) return;
     if (snapshot.sourceVersion !== currentFrame.sourceVersion) return;
     reconcileDesignRuntimeSnapshot({
       workspaceId: ownerId,
@@ -745,8 +830,8 @@ function DesignFrameRuntimeSession({
         return;
       }
       cancelSwap();
-      // Two presentation frames let Chromium raster the already-laid-out child
-      // compositor surface before the outgoing live text buffer is removed.
+      // Keep the outgoing document through the layout/readiness commit. Only
+      // the promoted buffer paints: two translucent documents must not blend.
       swapFrameRef.current = window.requestAnimationFrame(() => {
         swapFrameRef.current = window.requestAnimationFrame(() => {
           swapFrameRef.current = null;
@@ -771,11 +856,12 @@ function DesignFrameRuntimeSession({
   );
 
   useLayoutEffect(() => {
+    // Decide on authoritative generation changes. History/style adoption can
+    // advance the connection before publishing its snapshot; an unrelated
+    // render during that gap must not reload the last saved generation and
+    // discard the document's retained history.
     if (displayedSourceVersion === frame.sourceVersion) {
-      if (incomingSourceVersion !== null) {
-        cancelSwap();
-        setIncomingSourceVersion(null);
-      }
+      setReplacementSourceVersion(null);
       return;
     }
     const displayedConnection = connectionsByDocumentRef.current.get(
@@ -786,6 +872,14 @@ function DesignFrameRuntimeSession({
       designFrameRuntime(workspaceId, frame.file) === displayedConnection &&
       displayedConnection.sourceVersion === frame.sourceVersion
     ) {
+      setReplacementSourceVersion(null);
+      return;
+    }
+    setReplacementSourceVersion(frame.sourceVersion);
+  }, [displayedSourceVersion, frame.file, frame.sourceVersion, workspaceId]);
+
+  useLayoutEffect(() => {
+    if (!replacement || replacementSourceVersion !== frame.sourceVersion) {
       if (incomingSourceVersion !== null) {
         cancelSwap();
         setIncomingSourceVersion(null);
@@ -800,11 +894,10 @@ function DesignFrameRuntimeSession({
     setIncomingSourceVersion(frame.sourceVersion);
   }, [
     cancelSwap,
-    displayedSourceVersion,
-    frame.file,
     frame.sourceVersion,
     incomingSourceVersion,
-    workspaceId,
+    replacement,
+    replacementSourceVersion,
   ]);
 
   useEffect(
@@ -827,7 +920,7 @@ function DesignFrameRuntimeSession({
     buffer: DesignDocumentBuffer;
   }> = [
     { sourceVersion: displayedSourceVersion, buffer: "displayed" },
-    ...(active &&
+    ...(active && replacement &&
     incomingSourceVersion &&
     incomingSourceVersion !== displayedSourceVersion
       ? ([
@@ -847,11 +940,14 @@ function DesignFrameRuntimeSession({
           frame={frame}
           documentSourceVersion={entry.sourceVersion}
           buffer={entry.buffer}
+          replacement={entry.buffer === "incoming" ? replacement : null}
           ready={readySourceVersions.includes(entry.sourceVersion)}
           runtimeActive={
             active &&
             (entry.buffer === "incoming" || incomingSourceVersion === null)
           }
+          playbackSessionId={playbackSessionId}
+          onPlaybackStopped={onPlaybackStopped}
           selected={selected}
           selectedNodeIds={selectedNodeIds}
           autoCapture={autoCapture}
@@ -860,22 +956,22 @@ function DesignFrameRuntimeSession({
           onSnapshot={handleSnapshot}
           onConnection={handleConnection}
           onReady={handleDocumentReady}
-          onLoadFailure={setFailedSourceVersion}
+          onLoadFailure={handleLoadFailure}
         />
       ))}
-      {!documentReady ? (
+      {!documentReady && !underlayReady ? (
         transitionCoverUrl ? (
           <img
             data-design-frame-transition-cover=""
             src={transitionCoverUrl}
             alt=""
             draggable={false}
-            className="bg-bg1 pointer-events-none absolute inset-0 z-[2] block size-full object-fill"
+            className="pointer-events-none absolute inset-0 z-[2] block size-full object-fill"
           />
         ) : (
           <div
             data-design-frame-transition-cover=""
-            className="bg-bg1 pointer-events-none absolute inset-0 z-[2]"
+            className="pointer-events-none absolute inset-0 z-[2]"
           />
         )
       ) : null}

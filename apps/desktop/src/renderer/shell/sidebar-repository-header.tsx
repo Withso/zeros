@@ -60,11 +60,10 @@ import { RepositoryIconDialog } from "./repository-icon-dialog";
 
 // --- CONSTANTS ---
 
-// Only hover lifts the row; focus shows on the focused control itself, so
-// creating from + or collapsing leaves no header looking selected. The name
-// stays on the default fg2 tier.
+// Hover only reveals the disclosure and actions; the row fills when its
+// repository page is active. Focus stays on the focused control itself.
 const REPOSITORY_HEADER_CLS =
-  "group/repo relative flex h-8 w-full min-w-0 shrink-0 select-none items-center gap-1 rounded-md pr-1 text-fg2 transition-none hover:bg-(--surface-hover) data-[active=true]:bg-(--surface-hover)";
+  "group/repo relative flex h-8 w-full min-w-0 shrink-0 select-none items-center gap-1 rounded-md pr-1 text-fg2 transition-none data-[active=true]:bg-(--surface-hover)";
 const REPOSITORY_TOGGLE_CLS =
   "group/toggle flex h-full min-w-0 flex-1 items-center gap-2 rounded-md pl-2 text-left text-xs font-medium text-inherit outline-none focus-visible:ring-2 focus-visible:ring-highlighted-bright/50";
 const REPOSITORY_CHIP_CLS =
@@ -196,7 +195,7 @@ export function SidebarRepositoryHeader({
                   "items-center gap-0.5",
                   menuOpen
                     ? "flex"
-                    : "hidden group-hover/repo:flex group-has-[:focus-visible]/repo:flex",
+                    : "hidden group-hover/repo:flex group-has-focus-visible/repo:flex",
                 )}
               >
                 <button

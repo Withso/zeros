@@ -36,24 +36,26 @@ export function createDesignDragPresentation(
     )
       z = Math.max(z, Number(sibling.style.zIndex) || 0);
   element.style.zIndex = String(z + 1);
-  if (screenshot) {
+  const showPixels = (dataUrl: string, wholeFrame: boolean) => {
     const image = document.createElement("img");
-    image.src = screenshot.dataUrl;
+    image.src = dataUrl;
     image.draggable = false;
     image.alt = "";
     Object.assign(
       image.style,
-      exactNode
-        ? { width: "100%", height: "100%" }
-        : {
+      wholeFrame
+        ? {
             width: `${frame.width}px`,
             height: `${frame.height}px`,
             left: `${-details.rect.x}px`,
             top: `${-details.rect.y}px`,
-          },
+          }
+        : { width: "100%", height: "100%" },
     );
-    element.appendChild(image);
-  }
+    element.replaceChildren(image);
+  };
+  let hasPixels = screenshot !== null;
+  if (screenshot) showPixels(screenshot.dataUrl, !exactNode);
   world.appendChild(element);
   let disposeWatch: (() => void) | null = null;
   const remove = () => {
@@ -62,7 +64,16 @@ export function createDesignDragPresentation(
     element.remove();
   };
   return {
-    hasPixels: screenshot !== null,
+    get hasPixels() {
+      return hasPixels;
+    },
+    /** Pixels captured for this drag once the layer left its frame, when
+     * none were cached for this exact generation. */
+    adopt(captured: { sourceVersion: string; dataUrl: string; nodeId: string | null }) {
+      if (hasPixels || captured.sourceVersion !== frame.sourceVersion || captured.nodeId !== details.oid) return;
+      hasPixels = true;
+      showPixels(captured.dataUrl, false);
+    },
     paint(origin: { x: number; y: number }) {
       element.style.transform = `translate3d(${frame.x + origin.x}px, ${frame.y + origin.y}px, 0)`;
       element.hidden = false;

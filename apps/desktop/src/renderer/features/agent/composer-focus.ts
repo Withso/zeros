@@ -69,10 +69,11 @@ export function isFocusEngaged(el: Element | null | undefined): boolean {
   const tag = (el as { tagName?: string }).tagName;
   // <body> or a detached/unknown node → nothing is really holding focus.
   if (!tag || tag === "BODY") return false;
-  if (tag === "INPUT" || tag === "TEXTAREA") return true;
+  if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return true;
   if ((el as { isContentEditable?: boolean }).isContentEditable) return true;
+  if (el.getAttribute?.("data-zeros-focus-visible") === "true") return true;
   return typeof el.closest === "function"
-    ? el.closest("[role=menu],[role=dialog]") !== null
+    ? el.closest("[role=menu],[role=dialog],[role=alertdialog],[role=listbox],[role=combobox],[role=tree],[role=grid]") !== null
     : false;
 }
 
@@ -172,8 +173,7 @@ export function shouldReclaimComposerFocus(params: {
  *  content. Deliberately role-scoped rather than matching Radix's popper
  *  wrapper so a lingering hover TOOLTIP (also popper-positioned) can't stop
  *  the guardian from doing its job. */
-export const OPEN_OVERLAY_SELECTOR =
-  '[role="dialog"][data-state="open"], [role="menu"][data-state="open"], [role="listbox"][data-state="open"]';
+export { OPEN_OVERLAY_SELECTOR } from "../../shared/ui/deferred-focus";
 
 /** What the focus effect should do this run, given the current ownership
  *  signal and two bits of latched state. Extracting the transition keeps the

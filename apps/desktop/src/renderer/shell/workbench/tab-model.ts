@@ -125,8 +125,8 @@ export interface WorkbenchTab {
   changesView?: ChangesViewMode;
   /** Changes body presentation; omitted on older tabs means all file diffs. */
   changesPresentation?: "all" | "single";
-  /** Explicit tool target while Changes resolves: an absent/clean file opens
-   * in Files. Consumed on fallback; not restored by normalization. */
+  /** Explicit tool diff target. An absent/clean file stays in Changes with an
+   * empty comparison. Ephemeral; not restored by normalization. */
   changesRequestedFile?: string;
   /** Explicit Files-tab viewer choice. Changes is a diff-only surface. */
   viewerMode?: ViewerMode;

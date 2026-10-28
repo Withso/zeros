@@ -6,6 +6,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { parseNameStatus } from "./ci/scope.mjs";
 
 const REPOSITORY = "Withso/zeros";
 const OWNER_REVIEW =
@@ -424,6 +425,30 @@ async function loadCiDefinition() {
   }
 }
 
+/** Complete path policy from immutable Git objects, never the mutable PR files
+ * endpoint. Missing objects/history and truncated command output fail closed. */
+export function readImmutableMergeFiles(base, head, run) {
+  if (![base, head].every(sha => typeof sha === "string" && /^[a-f\d]{40}$/i.test(sha)))
+    throw new Error("Invalid comparison identity");
+  const git = args => run(["--no-replace-objects", ...args]);
+  for (const sha of [base, head]) {
+    try { git(["cat-file", "-e", `${sha}^{commit}`]); }
+    catch {
+      git(["-c", "fetch.fsckObjects=true", "fetch", "--no-tags", "--no-write-fetch-head", `https://github.com/${REPOSITORY}.git`, sha]);
+      git(["cat-file", "-e", `${sha}^{commit}`]);
+    }
+  }
+  if (git(["rev-parse", "--is-shallow-repository"]).trim() !== "false")
+    throw new Error("Complete Git history required");
+  const mergeBase = git(["merge-base", "--all", base, head]).trim();
+  if (!/^[a-f\d]{40}$/i.test(mergeBase)) throw new Error("Unambiguous merge base required");
+  const output = git(["diff", "--no-ext-diff", "--no-textconv", "--name-status", "--find-renames", "-z", mergeBase, head, "--"]);
+  return parseNameStatus(Buffer.from(output, "utf8")).map(change => ({
+    filename: change.path, status: change.status,
+    ...(change.oldPath ? { previous_filename: change.oldPath } : {}),
+  }));
+}
+
 /** gh is injected for tests; production always uses the normal workspace gh. */
 export async function runAgentMerge(
   argv = process.argv.slice(2),
@@ -547,19 +572,9 @@ export async function runAgentMerge(
           "--repo",
           REPOSITORY,
           "--json",
-          "number,title,body,state,isDraft,isCrossRepository,headRefOid,changedFiles,labels",
+          "number,title,body,state,isDraft,isCrossRepository,headRefOid,baseRefOid,baseRefName,changedFiles,labels",
         ]);
-    const filePages = json([
-      "api",
-      `repos/${REPOSITORY}/pulls/${prNumber}/files?per_page=100`,
-      "--paginate",
-      "--slurp",
-    ]);
-    if (
-      !Array.isArray(filePages) ||
-      filePages.some((page) => !Array.isArray(page))
-    )
-      throw new Error("Incomplete file pages");
+    const files = readImmutableMergeFiles(pr.baseRefOid, pr.headRefOid, args => execute(args, [0], "git").stdout);
     const requiredChecks = json(
       [
         "pr",
@@ -634,12 +649,15 @@ export async function runAgentMerge(
           `repos/${REPOSITORY}/issues/comments/${commentId(options.reason, options.number)}`,
         ])
       : null;
-    const freshPr = options.immediate ? readImmediatePr() : pr;
+    const freshPr = options.immediate ? readImmediatePr() : json([
+      "pr", "view", prNumber, "--repo", REPOSITORY, "--json",
+      "number,title,body,state,isDraft,isCrossRepository,headRefOid,baseRefOid,baseRefName,changedFiles,labels",
+    ]);
     if (!samePr(pr, freshPr)) throw new Error("PR changed during preflight");
     return {
       viewer,
       pr: freshPr,
-      files: filePages.flat(),
+      files,
       requiredChecks,
       checks,
       mergeQueue,

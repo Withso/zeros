@@ -1,6 +1,6 @@
 // ============================================
 // COMPONENT: DesignWorkspaceSidebarPanels
-// PURPOSE: Collapsible Layers tree at the top of the floating Design panel
+// PURPOSE: Collapsible Layers tree at the top of the attached Design panel
 // USED IN: DesignWorkspaceColumn (through DesignFloatingPanel)
 // ============================================
 
@@ -8,6 +8,8 @@
 
 import React, {
   useCallback,
+  useContext,
+  useEffect,
   useLayoutEffect,
   useMemo,
   useRef,
@@ -31,6 +33,7 @@ import { useShallow } from "zustand/react/shallow";
 import type { DesignRuntimeTreeNode } from "@zeros/protocol/design-runtime";
 import type { Workspace } from "../../platform/git";
 import type { DesignCanvasFrameWire } from "../../platform/bridge/design-bridge";
+import { designFrameViews, isPreparedDesignFrame, type DesignFrameView } from "./state/design-frame-view";
 import type { DesignSelectionTarget } from "./design-selected-targets";
 
 import {
@@ -39,29 +42,48 @@ import {
   selectDesignNode,
   setDesignNodeVisibility,
   toggleDesignNodeSelection,
+  warmDesignNodeDetails,
+  warmDesignNodeDetailsWindow,
 } from "./state/design-selection";
 import { useDesignRuntimeStore } from "./state/design-runtime-store";
+import { useDesignHistoryPresentation, useDesignHistorySelection } from "./state/design-history-presentation";
+import { noteDesignFrameIntent } from "./state/design-frame-intent";
 import { useActiveWorkspace } from "../../state/use-active-workspace";
+import { useReadRecovery } from "../../state/use-read-recovery";
+import { useDocumentActive } from "../../state/use-document-active";
+import { useBridgeStatus } from "../../platform/bridge/use-bridge";
 import { useDesignWorkspaceSnapshot } from "./state/use-design-workspace";
 import { useDesignPageSnapshot } from "./state/design-page-projection";
 import { useDesignWorkspaceUiStore } from "./state/design-workspace-ui";
+import {
+  applyDesignEditCached,
+  renameDesignFrameAndRefresh,
+} from "./state/design-workspace-cache";
+import { DesignLayerNameInput } from "./design-layer-name-input";
+import { DesignSavedEditingContext } from "./design-saved-editing";
 import { Button, ScrollArea, toast } from "../../shared/ui/primitives";
 import { cn } from "../../shared/ui/cn";
 import {
+  designLayerPanelRows,
+  frameRowKey,
+  layerRowKey,
+  type DesignPanelRow,
+} from "./design-layer-panel-rows";
+import {
   designFrameLayerChildren,
   designLayerBlockEdges,
-  designFrameRowDiscloses,
   designLayerRevealPaths,
   designLayerRevealScrollTop,
   designLayerRovingTabStop,
   designLayerSelectionSubtreeIds,
   designLayerVirtualWindow,
-  flattenDesignLayerTree,
   type DesignLayerBlockEdge,
   type FlatDesignLayer,
 } from "./design-layer-tree";
 import {
+  designFrameDisplayName,
   designFrameLayerLabel,
+  designRuntimeLayerDisplayName,
   designRuntimeLayerLabel,
   type DesignLayerLabel,
 } from "./design-layer-label";
@@ -72,7 +94,6 @@ import {
 import {
   collapseAllDesignLayers,
   designWorkspaceHasExpandedLayers,
-  EMPTY_DESIGN_FRAME_DISCLOSURE,
   requestDesignLayerReveal,
   settleDesignLayerReveal,
   toggleDesignFrameTreeExpanded,
@@ -113,30 +134,16 @@ interface LayerWindowState {
   end: number;
 }
 
-/** The panel is one tree: every frame contributes its row, and an open frame
- * contributes the layer rows below it. Keeping them in one fixed-height list is
- * what lets several frames stand open while virtualization, keyboard travel,
- * and the selection block keep working across frame boundaries. */
-type DesignPanelRow =
-  | {
-      kind: "frame";
-      key: string;
-      frame: DesignCanvasFrameWire;
-      expanded: boolean;
-      discloses: boolean;
-    }
-  | {
-      kind: "layer";
-      key: string;
-      frame: DesignCanvasFrameWire;
-      layer: FlatDesignLayer;
-      expanded: boolean;
-    }
-  | { kind: "pending"; key: string; frame: DesignCanvasFrameWire };
+interface LayerRename {
+  key: string;
+  ownerKey: string;
+  frame: DesignCanvasFrameWire;
+  nodeId?: string;
+  name: string;
+}
 
 const EMPTY_LAYER_TREE: readonly DesignRuntimeTreeNode[] = Object.freeze([]);
 const EMPTY_SELECTED_NODE_IDS: readonly string[] = Object.freeze([]);
-const EMPTY_FRAMES: readonly DesignCanvasFrameWire[] = Object.freeze([]);
 const DESIGN_LAYER_ROW_HEIGHT = 28;
 /** One level is the chevron plus its gap, so a child's chevron sits exactly
  * under its parent's type icon. */
@@ -151,16 +158,6 @@ const DESIGN_LAYER_DISCLOSURE_SPACER = "size-3 shrink-0";
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : "The layer action failed.";
-}
-
-/** Row identity is frame-scoped: two frames may legitimately author the same
- * node id, and both can be on screen at once. */
-function frameRowKey(file: string): string {
-  return `frame:${file}`;
-}
-
-function layerRowKey(file: string, nodeId: string): string {
-  return `layer:${file}:${nodeId}`;
 }
 
 function FrameLayoutIcon({ kind }: { kind: DesignFrameLayoutIconKind }) {
@@ -226,6 +223,211 @@ function layerRowPadding(depth: number): number {
 const DISCLOSURE_ICON = "size-3 text-muted-fg";
 
 // --- RENDER ---
+
+/** Stable row handlers. The panel refreshes their targets every render, so a
+ * memoized row rerenders only when its own row, state or rename changes, not
+ * for every hover or selection elsewhere in the tree. */
+interface DesignLayerRowActions {
+  chooseFrame(frame: DesignFrameView, additive: boolean): void;
+  toggleFrameTree(frame: DesignFrameView): void;
+  chooseLayer(frame: DesignCanvasFrameWire, layer: FlatDesignLayer, additive: boolean): void;
+  toggleExpanded(row: DesignPanelRow): void;
+  toggleVisibility(frame: DesignCanvasFrameWire, layer: FlatDesignLayer): void;
+  rowKeyDown(event: React.KeyboardEvent<HTMLElement>, rowIndex: number): void;
+  rowDoubleClick(event: React.MouseEvent, row: DesignPanelRow): void;
+  frameIntent(file: string): void;
+  hoverLayer(frame: DesignCanvasFrameWire, nodeId: string | null): void;
+  focusLayer(frame: DesignCanvasFrameWire, nodeId: string): void;
+  finishRename(rename: LayerRename, value: string | null): void;
+}
+
+function DesignLayerRowName({ rename, name, actions }: {
+  rename: LayerRename | null;
+  name: string;
+  actions: DesignLayerRowActions;
+}) {
+  return rename ? (
+    <DesignLayerNameInput
+      key={rename.ownerKey + rename.key}
+      name={rename.name}
+      maxLength={rename.nodeId ? 80 : 120}
+      onFinish={(value) => actions.finishRename(rename, value)}
+    />
+  ) : (
+    <span data-design-layer-name="" className="min-w-0 flex-1 truncate text-left">
+      {name}
+    </span>
+  );
+}
+
+function DesignLayerDisclosure({ open }: { open: boolean }) {
+  return (
+    <span data-layer-disclosure="" className="zd-layer-disclosure">
+      {open ? (
+        <ChevronDown aria-hidden="true" className={DISCLOSURE_ICON} />
+      ) : (
+        <ChevronRight aria-hidden="true" className={DISCLOSURE_ICON} />
+      )}
+    </span>
+  );
+}
+
+const DesignLayerFrameRow = React.memo(function DesignLayerFrameRow({
+  row, rowIndex, blockRadius, selected, tabbable, layoutKind, rename, actions,
+}: {
+  row: Extract<DesignPanelRow, { kind: "frame" }>;
+  rowIndex: number;
+  blockRadius: string;
+  selected: boolean;
+  tabbable: boolean;
+  layoutKind: DesignFrameLayoutIconKind;
+  rename: LayerRename | null;
+  actions: DesignLayerRowActions;
+}) {
+  const { frame } = row;
+  return (
+    <Button
+      asChild
+      role="treeitem"
+      variant="ghost"
+      size="sm"
+      data-design-frame-row={frame.file}
+      data-design-panel-row={row.key}
+      className={cn(
+        "zd-design-layer-row h-7 w-full min-w-0 shrink-0 justify-start gap-1 px-2 text-xs font-normal [&>svg]:size-3.5",
+        blockRadius,
+        selected && "zd-design-layer-selected",
+      )}
+      tabIndex={tabbable ? 0 : -1}
+      aria-level={1}
+      aria-selected={selected}
+      aria-expanded={row.discloses ? row.expanded : undefined}
+      aria-keyshortcuts="F2 Meta+C Control+C Meta+D Control+D Delete Backspace"
+      onDoubleClick={(event) => actions.rowDoubleClick(event, row)}
+      onPointerEnter={() => actions.frameIntent(frame.file)}
+      onFocus={() => actions.frameIntent(frame.file)}
+      onClick={(event) => {
+        if (row.discloses && (event.target as HTMLElement).closest("[data-layer-disclosure]")) {
+          actions.toggleFrameTree(frame);
+          return;
+        }
+        actions.chooseFrame(frame, event.shiftKey);
+      }}
+      onKeyDown={(event) => actions.rowKeyDown(event, rowIndex)}
+    >
+      <div>
+        {row.discloses ? (
+          <DesignLayerDisclosure open={row.expanded} />
+        ) : (
+          <span className={DESIGN_LAYER_DISCLOSURE_SPACER} />
+        )}
+        {frame.kind === "text" ? <Type /> : <FrameLayoutIcon kind={layoutKind} />}
+        <DesignLayerRowName rename={rename} name={designFrameDisplayName(frame)} actions={actions} />
+      </div>
+    </Button>
+  );
+});
+
+const DesignLayerNodeRow = React.memo(function DesignLayerNodeRow({
+  row, rowIndex, blockRadius, selected, inSelectionSubtree, hovered, tabbable, rename, actions,
+}: {
+  row: Extract<DesignPanelRow, { kind: "layer" }>;
+  rowIndex: number;
+  blockRadius: string;
+  selected: boolean;
+  inSelectionSubtree: boolean;
+  hovered: boolean;
+  tabbable: boolean;
+  rename: LayerRename | null;
+  actions: DesignLayerRowActions;
+}) {
+  const { frame, layer } = row;
+  const displayName = designRuntimeLayerDisplayName(layer.node);
+  const dimmed = !layer.node.visible || layer.hiddenByAncestor;
+  return (
+    <div
+      role="none"
+      data-design-layer-row={layer.node.oid}
+      className="group relative flex h-7 min-w-0 shrink-0 items-center"
+      onPointerEnter={() => {
+        actions.frameIntent(frame.file);
+        actions.hoverLayer(frame, layer.node.oid);
+      }}
+      onPointerLeave={() => actions.hoverLayer(frame, null)}
+    >
+      <Button
+        asChild
+        data-design-layer-select=""
+        data-design-layer-id={layer.node.oid}
+        data-design-panel-row={row.key}
+        role="treeitem"
+        variant="ghost"
+        size="sm"
+        className={cn(
+          "zd-design-layer-row relative z-[1] h-7 min-w-0 flex-1 justify-start gap-1 px-2 pr-7 text-xs font-normal [&>svg]:size-3.5",
+          blockRadius,
+          selected && "zd-design-layer-selected",
+          inSelectionSubtree && "zd-design-layer-in-selection",
+          hovered && !selected && "zd-design-layer-hovered",
+          dimmed && "zd-design-layer-dimmed",
+        )}
+        style={{
+          // The fill spans the panel; only the row's own content steps in,
+          // so a selection and everything it owns share one block edge.
+          paddingLeft: layerRowPadding(layer.depth),
+        }}
+        tabIndex={tabbable ? 0 : -1}
+        aria-level={layer.depth + 2}
+        aria-selected={selected}
+        aria-expanded={layer.hasChildren ? row.expanded : undefined}
+        aria-keyshortcuts="F2 Shift+H Meta+C Control+C Meta+D Control+D Delete Backspace"
+        onFocus={() => {
+          actions.frameIntent(frame.file);
+          actions.focusLayer(frame, layer.node.oid);
+        }}
+        onDoubleClick={(event) => actions.rowDoubleClick(event, row)}
+        onClick={(event) => {
+          if (layer.hasChildren && (event.target as HTMLElement).closest("[data-layer-disclosure]")) {
+            actions.toggleExpanded(row);
+            return;
+          }
+          actions.chooseLayer(frame, layer, event.shiftKey);
+        }}
+        onKeyDown={(event) => actions.rowKeyDown(event, rowIndex)}
+      >
+        <div>
+          {layer.hasChildren ? (
+            <DesignLayerDisclosure open={row.expanded} />
+          ) : (
+            <span className={DESIGN_LAYER_DISCLOSURE_SPACER} />
+          )}
+          <LayerTypeIcon
+            label={designRuntimeLayerLabel(layer.node)}
+            display={layer.node.display}
+            flexDirection={layer.node.flexDirection}
+          />
+          <DesignLayerRowName rename={rename} name={displayName} actions={actions} />
+        </div>
+      </Button>
+      <Button
+        type="button"
+        variant="ghost"
+        size="icon-sm"
+        className={cn(
+          "absolute top-1/2 right-1 z-[2] size-6 -translate-y-1/2 [&_svg]:size-3.5",
+          layer.node.visible
+            ? "opacity-0 group-focus-within:opacity-100 group-hover:opacity-100 focus-visible:opacity-100"
+            : "text-muted-fg",
+        )}
+        tabIndex={-1}
+        aria-label={`${layer.node.visible ? "Hide" : "Show"} ${displayName}`}
+        onClick={() => actions.toggleVisibility(frame, layer)}
+      >
+        {layer.node.visible ? <Eye /> : <EyeClosed />}
+      </Button>
+    </div>
+  );
+});
 
 export function DesignWorkspaceSidebarPanels({
   surfaceActive,
@@ -293,39 +495,69 @@ function OwnedDesignWorkspaceSidebarPanels({
   expanded,
   onExpandedChange,
 }: OwnedDesignWorkspaceSidebarPanelsProps) {
+  const savedEditing = useContext(DesignSavedEditingContext);
   const workspaceId = workspace?.id ?? null;
+  const connected = useBridgeStatus(folder) === "connected";
+  const active = useDocumentActive(surfaceActive && isDesign);
   const snapshot = useDesignWorkspaceSnapshot(
     workspaceId,
     folder,
-    surfaceActive && isDesign,
+    active && connected,
   );
-  const selectedFrameFile = useDesignWorkspaceUiStore((state) =>
+  const recovery = useReadRecovery(`design-layers:${JSON.stringify([workspaceId, folder])}`, {
+    error: snapshot.error, pending: snapshot.loading || snapshot.refreshing,
+    hasContent: snapshot.data !== undefined, retry: snapshot.refresh,
+    connected, active, folder: folder ?? "",
+  });
+  // Undo and Redo show their frame catalog, selection and trees at once; the
+  // tree paints them while row actions and owner keys stay confirmed.
+  const historyPresentation = useDesignHistoryPresentation(active ? workspaceId : null);
+  const historySelection = useDesignHistorySelection(active ? workspaceId : null);
+  const confirmedSelectedFrameFile = useDesignWorkspaceUiStore((state) =>
     workspaceId
       ? (state.byWorkspace[workspaceId]?.selectedFrame ?? null)
       : null,
   );
-  const selectedNodeId = useDesignWorkspaceUiStore((state) =>
+  const confirmedSelectedNodeId = useDesignWorkspaceUiStore((state) =>
     workspaceId
       ? (state.byWorkspace[workspaceId]?.selectedNodeId ?? null)
       : null,
   );
-  const selectedNodeIds = useDesignWorkspaceUiStore((state) =>
+  const confirmedSelectedNodeIds = useDesignWorkspaceUiStore((state) =>
     workspaceId
       ? (state.byWorkspace[workspaceId]?.selectedNodeIds ??
         EMPTY_SELECTED_NODE_IDS)
       : EMPTY_SELECTED_NODE_IDS,
   );
-  const selectedTargets = useDesignWorkspaceUiStore(state => workspaceId ? state.byWorkspace[workspaceId]?.selectedTargets : undefined);
+  const confirmedSelectedTargets = useDesignWorkspaceUiStore(state => workspaceId ? state.byWorkspace[workspaceId]?.selectedTargets : undefined);
+  const selectedFrameFile = historySelection ? historySelection.selectedFrame : confirmedSelectedFrameFile;
+  const selectedNodeId = historySelection ? historySelection.selectedNodeId : confirmedSelectedNodeId;
+  const selectedNodeIds = historySelection ? historySelection.selectedNodeIds : confirmedSelectedNodeIds;
+  const selectedTargets = historySelection ? historySelection.selectedTargets : confirmedSelectedTargets;
   const targetSelected = (frame: string, nodeId?: string) => selectedTargets?.some((target: DesignSelectionTarget) => target.frame === frame && target.nodeId === nodeId) ?? false;
-  const frameSelected = useDesignWorkspaceUiStore((state) =>
+  /** A selected frame already has its editor; noting it as intent would only
+   * publish and clear again on every hovered or focused row. */
+  const noteFrameIntent = (file: string) => {
+    if (workspaceId && !selectedTargets?.some((target: DesignSelectionTarget) => target.frame === file))
+      noteDesignFrameIntent(workspaceId, file);
+  };
+  const confirmedFrameSelected = useDesignWorkspaceUiStore((state) =>
     workspaceId
       ? (state.byWorkspace[workspaceId]?.frameSelected ?? false)
       : false,
   );
+  const frameSelected = historySelection ? historySelection.frameSelected : confirmedFrameSelected;
   const activePageId = useDesignWorkspaceUiStore(state => workspaceId ? state.byWorkspace[workspaceId]?.activePageId : undefined);
-  const pageSnapshot = useDesignPageSnapshot(snapshot.data, activePageId);
-  const layerOwnerKey = workspaceId ? workspaceId + "\0" + (activePageId ?? "") : null;
-  const frames = pageSnapshot?.frames ?? EMPTY_FRAMES;
+  const ownerRevision = useDesignWorkspaceUiStore(state => workspaceId ? state.byWorkspace[workspaceId]?.ownerRevision : undefined);
+  const pageSnapshot = useDesignPageSnapshot(
+    historyPresentation?.catalog?.deref() ?? snapshot.data,
+    historySelection?.activePageId ?? activePageId,
+  );
+  const layerOwnerKey = workspaceId
+    ? JSON.stringify([workspaceId, pageSnapshot?.directoryId, activePageId, ownerRevision])
+    : null;
+  const [rename, setRename] = useState<LayerRename | null>(null);
+  const frames = designFrameViews(pageSnapshot);
   const selectedFrame =
     frames.find((frame) => frame.file === selectedFrameFile) ??
     frames[0] ??
@@ -361,9 +593,12 @@ function OwnedDesignWorkspaceSidebarPanels({
       return roots;
     }),
   );
+  const historyRuntime = historyPresentation?.runtime;
   const treesByFile = useMemo(() => {
     const trees: Record<string, readonly DesignRuntimeTreeNode[]> = {};
-    for (const [file, tree] of Object.entries(rawTreesByFile)) {
+    const presented = { ...rawTreesByFile };
+    for (const [file, inverse] of historyRuntime ?? []) if (inverse.tree) presented[file] = inverse.tree;
+    for (const [file, tree] of Object.entries(presented)) {
       trees[file] = designFrameLayerChildren(
         tree,
         frames.find((frame) => frame.file === file)?.kind === "text"
@@ -372,7 +607,7 @@ function OwnedDesignWorkspaceSidebarPanels({
       );
     }
     return trees;
-  }, [frames, rawTreesByFile, rootIdsByFile]);
+  }, [frames, historyRuntime, rawTreesByFile, rootIdsByFile]);
   const rootSelected = Boolean(
     selectedFrame &&
     selectedNodeId &&
@@ -418,43 +653,27 @@ function OwnedDesignWorkspaceSidebarPanels({
     : EMPTY_LAYER_TREE;
   // Only a live, open tree measures, scrolls, or consumes a reveal.
   const treeActive = surfaceActive && expanded;
+  const renameOwnerRef = useRef({ key: layerOwnerKey, active: treeActive });
+  renameOwnerRef.current = { key: layerOwnerKey, active: treeActive };
   // Figma semantics: selecting a container selects everything it owns, so its
   // descendant rows carry a softer tint. A selected frame owns every row.
   const selectionSubtreeIds = useMemo(
     () => designLayerSelectionSubtreeIds(selectedTree, selectedNodeIds),
     [selectedTree, selectedNodeIds],
   );
-  const panelRows = useMemo(() => {
-    const rows: DesignPanelRow[] = [];
-    for (const frame of frames) {
-      const tree = treesByFile[frame.file];
-      const disclosure =
-        disclosures[frame.file] ?? EMPTY_DESIGN_FRAME_DISCLOSURE;
-      rows.push({
-        kind: "frame",
-        key: frameRowKey(frame.file),
-        frame,
-        expanded: disclosure.treeExpanded,
-        discloses: designFrameRowDiscloses(tree, frame),
-      });
-      if (!disclosure.treeExpanded) continue;
-      if (!tree) {
-        rows.push({ kind: "pending", key: `pending:${frame.file}`, frame });
-        continue;
-      }
-      const expandedNodeIds = new Set(disclosure.expandedNodeIds);
-      for (const layer of flattenDesignLayerTree(tree, { expandedNodeIds })) {
-        rows.push({
-          kind: "layer",
-          key: layerRowKey(frame.file, layer.node.oid),
-          frame,
-          layer,
-          expanded: layer.hasChildren && expandedNodeIds.has(layer.node.oid),
-        });
-      }
-    }
-    return rows;
-  }, [disclosures, frames, treesByFile]);
+  const panelRows = useMemo(
+    () => designLayerPanelRows({ frames, treesByFile, disclosures }),
+    [disclosures, frames, treesByFile],
+  );
+  // A retained tree must never revive another directory/page's draft, or
+  // commit it when hiding/removing the input happens to produce a blur.
+  useLayoutEffect(() => {
+    if (
+      rename &&
+      (!treeActive || rename.ownerKey !== layerOwnerKey ||
+        !panelRows.some((row) => row.key === rename.key))
+    ) setRename(null);
+  }, [layerOwnerKey, panelRows, rename, treeActive]);
   /** Consecutive rows the selection owns paint as one rounded block. Only the
    * selected frame can own rows, so every other frame's run stays closed. */
   const blockEdges = useMemo(() => {
@@ -811,6 +1030,42 @@ function OwnedDesignWorkspaceSidebarPanels({
     workspaceId,
   ]);
 
+  // A layer never read yet would make its first click wait for the runtime.
+  // While the tree is open, warm the selection's neighbours (or the top of the
+  // list) in the background, bounded; arrowing or clicking there is instant.
+  const warmWindow = useMemo(() => {
+    const anchor = Math.max(0, panelRows.findIndex((row) => row.key === selectionRowKey));
+    const targets: { frame: string; sourceVersion: string; nodeId: string }[] = [];
+    for (let step = 0; targets.length < 12 && step < 32; step++) {
+      const index = anchor + (step % 2 === 0 ? step / 2 : -(step + 1) / 2);
+      const row = panelRows[index];
+      if (row?.kind === "layer" && isPreparedDesignFrame(row.frame))
+        targets.push({ frame: row.frame.file, sourceVersion: row.frame.sourceVersion, nodeId: row.layer.node.oid });
+    }
+    return { key: JSON.stringify(targets.map((target) => [target.frame, target.sourceVersion, target.nodeId])), targets };
+  }, [panelRows, selectionRowKey]);
+  const warmTargetsRef = useRef(warmWindow.targets);
+  warmTargetsRef.current = warmWindow.targets;
+  useEffect(() => {
+    if (!treeActive || !workspaceId || !folder) return;
+    return warmDesignNodeDetailsWindow({ workspaceId, folder, targets: warmTargetsRef.current });
+  }, [folder, treeActive, warmWindow.key, workspaceId]);
+
+  const rowActionsRef = useRef<DesignLayerRowActions | null>(null);
+  const rowActions = useMemo<DesignLayerRowActions>(() => ({
+    chooseFrame: (frame, additive) => rowActionsRef.current?.chooseFrame(frame, additive),
+    toggleFrameTree: (frame) => rowActionsRef.current?.toggleFrameTree(frame),
+    chooseLayer: (frame, layer, additive) => rowActionsRef.current?.chooseLayer(frame, layer, additive),
+    toggleExpanded: (row) => rowActionsRef.current?.toggleExpanded(row),
+    toggleVisibility: (frame, layer) => rowActionsRef.current?.toggleVisibility(frame, layer),
+    rowKeyDown: (event, rowIndex) => rowActionsRef.current?.rowKeyDown(event, rowIndex),
+    rowDoubleClick: (event, row) => rowActionsRef.current?.rowDoubleClick(event, row),
+    frameIntent: (file) => rowActionsRef.current?.frameIntent(file),
+    hoverLayer: (frame, nodeId) => rowActionsRef.current?.hoverLayer(frame, nodeId),
+    focusLayer: (frame, nodeId) => rowActionsRef.current?.focusLayer(frame, nodeId),
+    finishRename: (edit, value) => rowActionsRef.current?.finishRename(edit, value),
+  }), []);
+
   if (!isDesign) return null;
 
   const toggleExpanded = (row: DesignPanelRow) => {
@@ -821,13 +1076,13 @@ function OwnedDesignWorkspaceSidebarPanels({
   /** The chevron owns the fold, and nothing else touches it: a frame the user
    * opened stays open while they work in another frame, and one they closed
    * stays closed when the canvas selects that frame. */
-  const toggleFrameTree = (frame: DesignCanvasFrameWire) => {
+  const toggleFrameTree = (frame: DesignFrameView) => {
     if (!workspaceId) return;
     toggleDesignFrameTreeExpanded(workspaceId, frame.file);
   };
 
   /** Selection publication is immediate locally; engine/runtime reads finish off-path. */
-  const chooseFrame = (frame: DesignCanvasFrameWire, additive = false) => {
+  const chooseFrame = (frame: DesignFrameView, additive = false) => {
     if (!workspaceId) return;
     void selectDesignFrame(workspaceId, frame, { selected: true, additive, reveal: true }).catch(
       (error) => {
@@ -885,6 +1140,64 @@ function OwnedDesignWorkspaceSidebarPanels({
     });
   };
 
+  const beginRename = (row: DesignPanelRow) => {
+    if (!treeActive || !layerOwnerKey || row.kind === "pending") return;
+    if (!isPreparedDesignFrame(row.frame)) { chooseFrame(row.frame); return; }
+    if (savedEditing && !savedEditing.enter()) {
+      toast.info("Saved source is still restoring. Try the edit again when the preview has cleared.");
+      return;
+    }
+    setRename({
+      key: row.key,
+      ownerKey: layerOwnerKey,
+      frame: row.frame,
+      ...(row.kind === "layer" ? { nodeId: row.layer.node.oid } : {}),
+      name:
+        row.kind === "frame"
+          ? designFrameDisplayName(row.frame)
+          : designRuntimeLayerDisplayName(row.layer.node),
+    });
+  };
+
+  const finishRename = (edit: LayerRename, value: string | null) => {
+    setRename((current) => (current === edit ? null : current));
+    const name = value?.trim().replace(/\s+/g, " ");
+    if (
+      !workspaceId || !name || name === edit.name ||
+      !renameOwnerRef.current.active || renameOwnerRef.current.key !== edit.ownerKey
+    ) return;
+    const mutation = edit.nodeId
+      ? applyDesignEditCached(workspaceId, edit.frame, {
+          schemaVersion: 1,
+          transactionId: `desktop:${crypto.randomUUID()}`,
+          actor: { kind: "human", id: "desktop" },
+          intent: "Rename layer",
+          createdAt: Date.now(),
+          operations: [
+            {
+              operationId: `rename:${crypto.randomUUID()}`,
+              type: "node.set-attribute",
+              nodeId: edit.nodeId,
+              attribute: "data-name",
+              value: name,
+            },
+          ],
+        })
+      : renameDesignFrameAndRefresh(workspaceId, edit.frame.file, name);
+    savedEditing?.retain(mutation);
+    void mutation.catch((error) => {
+      toast.error("Couldn't rename the design layer", {
+        description: errorMessage(error),
+      });
+    });
+  };
+
+  const handleRowDoubleClick = (event: React.MouseEvent, row: DesignPanelRow) => {
+    if ((event.target as HTMLElement).closest("[data-layer-disclosure]")) return;
+    event.preventDefault();
+    beginRename(row);
+  };
+
   /** The row above a layer at depth 0 is its frame row, so ArrowLeft climbs out
    * of a frame's contents the same way it climbs out of a container. */
   const parentRowIndex = (index: number): number => {
@@ -901,11 +1214,16 @@ function OwnedDesignWorkspaceSidebarPanels({
 
   /** Desktop tree conventions: arrows navigate; Tab exits the composite. */
   const handleRowKeyDown = (
-    event: React.KeyboardEvent<HTMLButtonElement>,
+    event: React.KeyboardEvent<HTMLElement>,
     index: number,
   ) => {
     const row = panelRows[index];
     if (!row) return;
+    if (event.key === "F2") {
+      event.preventDefault();
+      beginRename(row);
+      return;
+    }
     const focusRow = (nextIndex: number) => {
       if (nextIndex < 0 || nextIndex >= panelRows.length) return;
       event.preventDefault();
@@ -978,6 +1296,25 @@ function OwnedDesignWorkspaceSidebarPanels({
         : layerRowKey(selectedFrame.file, selectedNodeId!)
       : null,
   );
+  rowActionsRef.current = {
+    chooseFrame,
+    toggleFrameTree,
+    chooseLayer,
+    toggleExpanded,
+    toggleVisibility,
+    rowKeyDown: handleRowKeyDown,
+    rowDoubleClick: handleRowDoubleClick,
+    frameIntent: noteFrameIntent,
+    hoverLayer: (frame, nodeId) => {
+      if (!workspaceId || !folder) return;
+      void hoverDesignNode({ workspaceId, folder, frame: frame.file, sourceVersion: frame.sourceVersion, nodeId });
+    },
+    focusLayer: (frame, nodeId) => {
+      if (!workspaceId || !folder) return;
+      warmDesignNodeDetails({ workspaceId, folder, frame: frame.file, sourceVersion: frame.sourceVersion, nodeId });
+    },
+    finishRename,
+  };
   const headingId = `${panelId}-heading`;
   const treeScrollId = `${panelId}-tree`;
 
@@ -1083,6 +1420,8 @@ function OwnedDesignWorkspaceSidebarPanels({
                 const blockRadius = designLayerBlockRadius(
                   blockEdges[rowIndex] ?? null,
                 );
+                const rowRename =
+                  rename?.key === row.key && rename.ownerKey === layerOwnerKey && treeActive ? rename : null;
                 if (row.kind === "pending") {
                   const frameLabel = designFrameLayerLabel(row.frame.kind);
                   return (
@@ -1099,85 +1438,27 @@ function OwnedDesignWorkspaceSidebarPanels({
                   );
                 }
                 if (row.kind === "frame") {
-                  const { frame } = row;
-                  const frameLabel = designFrameLayerLabel(frame.kind);
-                  const activeFrame = selectedFrame?.file === frame.file;
+                  const activeFrame = selectedFrame?.file === row.frame.file;
                   // The frame row is "selected" only when the frame itself is
                   // the canvas selection target — merely showing its tree is
                   // not selection, mirroring Figma's frame rows.
-                  const frameRowSelected =
-                    targetSelected(frame.file) || (activeFrame && rootSelected);
                   return (
-                    <Button
+                    <DesignLayerFrameRow
                       key={row.key}
-                      type="button"
-                      role="treeitem"
-                      variant="ghost"
-                      size="sm"
-                      data-design-frame-row={frame.file}
-                      data-design-panel-row={row.key}
-                      className={cn(
-                        "zd-design-layer-row h-7 w-full min-w-0 shrink-0 justify-start gap-1 px-2 text-xs font-normal [&>svg]:size-3.5",
-                        blockRadius,
-                        frameRowSelected && "zd-design-layer-selected",
-                      )}
-                      tabIndex={rovingRowKey === row.key ? 0 : -1}
-                      aria-level={1}
-                      aria-selected={frameRowSelected}
-                      aria-expanded={row.discloses ? row.expanded : undefined}
-                      aria-keyshortcuts="Meta+C Control+C Meta+D Control+D Delete Backspace"
-                      onClick={(event) => {
-                        if (
-                          row.discloses &&
-                          (event.target as HTMLElement).closest(
-                            "[data-layer-disclosure]",
-                          )
-                        ) {
-                          toggleFrameTree(frame);
-                          return;
-                        }
-                        chooseFrame(frame, event.shiftKey);
-                      }}
-                      onKeyDown={(event) => handleRowKeyDown(event, rowIndex)}
-                    >
-                      {row.discloses ? (
-                        <span
-                          data-layer-disclosure=""
-                          className="zd-layer-disclosure"
-                        >
-                          {row.expanded ? (
-                            <ChevronDown
-                              aria-hidden="true"
-                              className={DISCLOSURE_ICON}
-                            />
-                          ) : (
-                            <ChevronRight
-                              aria-hidden="true"
-                              className={DISCLOSURE_ICON}
-                            />
-                          )}
-                        </span>
-                      ) : (
-                        <span className={DESIGN_LAYER_DISCLOSURE_SPACER} />
-                      )}
-                      {frame.kind === "text" ? (
-                        <Type />
-                      ) : (
-                        <FrameLayoutIcon
-                          kind={frameLayoutIconsByFile[frame.file] ?? "frame"}
-                        />
-                      )}
-                      <span className="min-w-0 flex-1 truncate text-left">
-                        {frameLabel}
-                      </span>
-                    </Button>
+                      row={row}
+                      rowIndex={rowIndex}
+                      blockRadius={blockRadius}
+                      selected={targetSelected(row.frame.file) || (activeFrame && rootSelected)}
+                      tabbable={rovingRowKey === row.key}
+                      layoutKind={frameLayoutIconsByFile[row.frame.file] ?? "frame"}
+                      rename={rowRename}
+                      actions={rowActions}
+                    />
                   );
                 }
-
                 const { frame, layer } = row;
                 const activeFrame = selectedFrame?.file === frame.file;
-                const selectedLayer =
-                  targetSelected(frame.file, layer.node.oid);
+                const selectedLayer = targetSelected(frame.file, layer.node.oid);
                 // Descendants of the selection carry a softer tint; a selected
                 // frame owns its whole tree. Ancestors stay untouched —
                 // selection never bleeds upward.
@@ -1187,137 +1468,27 @@ function OwnedDesignWorkspaceSidebarPanels({
                   (frameSelected ||
                     rootSelected ||
                     selectionSubtreeIds.has(layer.node.oid));
-                const hoveredLayer =
-                  hoveredFrameFile === frame.file &&
-                  hoveredNodeId === layer.node.oid;
-                const displayName = designRuntimeLayerLabel(layer.node);
-                const dimmed = !layer.node.visible || layer.hiddenByAncestor;
                 return (
-                  <div
+                  <DesignLayerNodeRow
                     key={row.key}
-                    role="none"
-                    data-design-layer-row={layer.node.oid}
-                    className="group relative flex h-7 min-w-0 shrink-0 items-center"
-                    onPointerEnter={() => {
-                      if (!workspaceId || !folder) return;
-                      void hoverDesignNode({
-                        workspaceId,
-                        folder,
-                        frame: frame.file,
-                        sourceVersion: frame.sourceVersion,
-                        nodeId: layer.node.oid,
-                      });
-                    }}
-                    onPointerLeave={() => {
-                      if (!workspaceId || !folder) return;
-                      void hoverDesignNode({
-                        workspaceId,
-                        folder,
-                        frame: frame.file,
-                        sourceVersion: frame.sourceVersion,
-                        nodeId: null,
-                      });
-                    }}
-                  >
-                    <Button
-                      data-design-layer-select=""
-                      data-design-layer-id={layer.node.oid}
-                      data-design-panel-row={row.key}
-                      type="button"
-                      role="treeitem"
-                      variant="ghost"
-                      size="sm"
-                      className={cn(
-                        "zd-design-layer-row relative z-[1] h-7 min-w-0 flex-1 justify-start gap-1 px-2 pr-7 text-xs font-normal [&>svg]:size-3.5",
-                        blockRadius,
-                        selectedLayer && "zd-design-layer-selected",
-                        inSelectionSubtree && "zd-design-layer-in-selection",
-                        hoveredLayer &&
-                          !selectedLayer &&
-                          "zd-design-layer-hovered",
-                        dimmed && "zd-design-layer-dimmed",
-                      )}
-                      style={{
-                        // The fill spans the panel; only the row's own
-                        // content steps in, so a selection and everything it
-                        // owns share one block edge.
-                        paddingLeft: layerRowPadding(layer.depth),
-                      }}
-                      tabIndex={rovingRowKey === row.key ? 0 : -1}
-                      aria-level={layer.depth + 2}
-                      aria-selected={selectedLayer}
-                      aria-expanded={
-                        layer.hasChildren ? row.expanded : undefined
-                      }
-                      aria-keyshortcuts="Shift+H Meta+C Control+C Meta+D Control+D Delete Backspace"
-                      onClick={(event) => {
-                        if (
-                          layer.hasChildren &&
-                          (event.target as HTMLElement).closest(
-                            "[data-layer-disclosure]",
-                          )
-                        ) {
-                          toggleExpanded(row);
-                          return;
-                        }
-                        chooseLayer(frame, layer, event.shiftKey);
-                      }}
-                      onKeyDown={(event) => handleRowKeyDown(event, rowIndex)}
-                    >
-                      {layer.hasChildren ? (
-                        <span
-                          data-layer-disclosure=""
-                          className="zd-layer-disclosure"
-                        >
-                          {row.expanded ? (
-                            <ChevronDown
-                              aria-hidden="true"
-                              className={DISCLOSURE_ICON}
-                            />
-                          ) : (
-                            <ChevronRight
-                              aria-hidden="true"
-                              className={DISCLOSURE_ICON}
-                            />
-                          )}
-                        </span>
-                      ) : (
-                        <span className={DESIGN_LAYER_DISCLOSURE_SPACER} />
-                      )}
-                      <LayerTypeIcon
-                        label={displayName}
-                        display={layer.node.display}
-                        flexDirection={layer.node.flexDirection}
-                      />
-                      <span className="min-w-0 flex-1 truncate text-left">
-                        {displayName}
-                      </span>
-                    </Button>
-                    <Button
-                      type="button"
-                      variant="ghost"
-                      size="icon-sm"
-                      className={cn(
-                        "absolute top-1/2 right-1 z-[2] size-6 -translate-y-1/2 [&_svg]:size-3.5",
-                        layer.node.visible
-                          ? "opacity-0 group-focus-within:opacity-100 group-hover:opacity-100 focus-visible:opacity-100"
-                          : "text-muted-fg",
-                      )}
-                      tabIndex={-1}
-                      aria-label={`${layer.node.visible ? "Hide" : "Show"} ${displayName}`}
-                      onClick={() => toggleVisibility(frame, layer)}
-                    >
-                      {layer.node.visible ? <Eye /> : <EyeClosed />}
-                    </Button>
-                  </div>
+                    row={row}
+                    rowIndex={rowIndex}
+                    blockRadius={blockRadius}
+                    selected={selectedLayer}
+                    inSelectionSubtree={inSelectionSubtree}
+                    hovered={hoveredFrameFile === frame.file && hoveredNodeId === layer.node.oid}
+                    tabbable={rovingRowKey === row.key}
+                    rename={rowRename}
+                    actions={rowActions}
+                  />
                 );
               })}
             </div>
           </div>
-          {!snapshot.data && snapshot.loading ? (
+          {!snapshot.data && !recovery.error ? (
             <span className="text-muted-fg px-2 py-2">Loading layers…</span>
           ) : null}
-          {!snapshot.data && snapshot.error ? (
+          {!snapshot.data && recovery.error ? (
             <div className="flex flex-col items-start gap-2 px-2 py-2">
               <span className="text-muted-fg">Couldn’t load layers</span>
               <Button
@@ -1330,7 +1501,7 @@ function OwnedDesignWorkspaceSidebarPanels({
               </Button>
             </div>
           ) : null}
-          {snapshot.data?.frames.length === 0 ? (
+          {snapshot.data && frames.length === 0 ? (
             <span className="text-muted-fg px-2 py-2">No layers</span>
           ) : null}
         </div>

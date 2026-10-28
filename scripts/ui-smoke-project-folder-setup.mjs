@@ -1,5 +1,6 @@
 import { expect } from "@playwright/test";
 import { runCommandPaletteSmoke } from "./ui-smoke-command-palette.mjs";
+import { runKeyboardFocusSmoke } from "./ui-smoke-focus.mjs";
 
 async function expectDialogChrome(dialog, page, { footer = true } = {}) {
   await expect(dialog.locator('[data-slot="dialog-header"]')).toHaveCSS(
@@ -159,4 +160,5 @@ export async function runDialogChromeSmoke({ page, check }) {
     true,
   );
   await runCommandPaletteSmoke({ page, check });
+  await runKeyboardFocusSmoke({ page, check });
 }

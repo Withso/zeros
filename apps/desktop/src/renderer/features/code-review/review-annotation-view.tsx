@@ -30,6 +30,7 @@ export function ReviewAnnotationView({
   postComment?: (target: ReviewSelectionTarget, body: string) => Promise<void>;
 }) {
   const commentsAvailable = review.commentsAvailable !== false;
+  const workspaceCommentsAvailable = review.workspaceCommentsAvailable !== false;
   const selection = commentsAvailable ? payload.selection : undefined;
   if (!commentsAvailable && !payload.hunks?.length) return null;
   return (
@@ -86,12 +87,13 @@ export function ReviewAnnotationView({
                       "The PR diff changed. Refresh it before posting to PR.",
                     );
                   await postComment(selection, body);
-                } else
+                } else if (workspaceCommentsAvailable)
                   await review.operations.create(
                     selection.anchor,
                     body,
                     requestId,
                   );
+                else throw new Error("Private workspace comments are unavailable here. Use Post to PR on its published diff.");
               }}
               onCancel={() => onCancel(selection)}
               onSubmitted={() => onCancel(selection)}
@@ -104,14 +106,14 @@ export function ReviewAnnotationView({
               )}
               {postComment || selection.postToPr ? (
                 <div className="text-fg2 flex items-center gap-1">
-                  <Button
+                  {workspaceCommentsAvailable && <Button
                     type="button"
                     variant={selection.postToPr ? "ghost" : "secondary-on"}
                     aria-pressed={!selection.postToPr}
                     onClick={() => onSelect({ ...selection, postToPr: false })}
                   >
                     Workspace
-                  </Button>
+                  </Button>}
                   <Button
                     type="button"
                     variant={selection.postToPr ? "secondary-on" : "ghost"}

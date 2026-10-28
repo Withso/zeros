@@ -39,6 +39,12 @@ describe("dbChangedKinds", () => {
     expect(dbChangedIncludesOriginator(op)).toBe(true);
   });
 
+  it("publishes a verified remote repair to all project and PR consumers, including a caller that timed out", () => {
+    expect(dbChangedKinds("project.reconcileGithubRemote", { changed: true })).toEqual(["projects", "workspaces"]);
+    expect(dbChangedIncludesOriginator("project.reconcileGithubRemote")).toBe(true);
+    expect(dbChangedKinds("project.reconcileGithubRemote", { changed: false })).toBeNull();
+  });
+
   it.each(["settings.write", "settings.writeRaw", "settings.migrateLegacy"])(
     "classifies %s as settings server state",
     (op) => {
@@ -101,6 +107,12 @@ describe("dbChangedKinds", () => {
     expect(dbChangedKinds("gh.prSync", { number: 191 })).toEqual([
       "workspaces",
     ]);
+  });
+
+  it("notifies the discovery caller even when its request expired before the PR was persisted", () => {
+    expect(dbChangedKinds("gh.prSync", { number: 191 })).toEqual(["workspaces"]);
+    expect(dbChangedIncludesOriginator("gh.prSync")).toBe(true);
+    expect(dbChangedKinds("gh.prSync", null)).toBeNull();
   });
 
   it("publishes ownership repair only when local rows moved, including to the originator", () => {
@@ -171,7 +183,9 @@ describe("dbChangedKinds", () => {
 
   it("keeps LONG_LIFECYCLE_OPS a strict subset of workspace mutations", () => {
     for (const op of LONG_LIFECYCLE_OPS) {
-      expect(dbChangedKinds(op)).toContain("workspaces");
+      // Discovery and remote repair publish only after changing metadata.
+      const result = op === "gh.prSync" ? { number: 191 } : op === "project.reconcileGithubRemote" ? { changed: true } : undefined;
+      expect(dbChangedKinds(op, result)).toContain("workspaces");
     }
   });
 });

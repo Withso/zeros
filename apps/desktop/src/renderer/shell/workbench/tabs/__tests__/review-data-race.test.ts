@@ -8,6 +8,8 @@ import type {
   PrTimelineItem,
 } from "../../../../platform/git";
 import type { ReviewProvider } from "../../../pr/review-provider";
+import { invalidateCloudGithubPrScope } from "../../../../platform/cloud-github-pr-scope";
+import { forgetPrCachesForWorkspace } from "../../../pr/pr-cache-forget";
 import {
   peekReviewLiveData,
   prefetchReviewLiveData,
@@ -64,6 +66,49 @@ async function settleCalls(expected: () => boolean): Promise<void> {
 }
 
 describe("Review live-data races", () => {
+  const cloudWorkspace = "cloud://11111111-1111-4111-8111-111111111111/22222222-2222-4222-8222-222222222222";
+  const cloudProvider = (cacheKey: string, getPr: ReviewProvider["getPr"]): ReviewProvider => ({
+    family: "github", hostOrigin: "github.com", cacheKey, hostLabel: "GitHub",
+    capabilities: { reviewNoun: "pull request", mergeMethods: [] },
+    authStatus: async () => ({ authenticated: true, login: "octocat" }),
+    getPr, getChecks: async () => emptyChecks, getCommits: async () => [], getTimeline: async () => [],
+    addComment: async () => ({ id: 1, url: "" }), merge: async () => ({ sha: "abc" }), markReady: async () => pr("ready"),
+  });
+
+  it("retires cloud review content on connection changes while retaining Local content", async () => {
+    const provider = cloudProvider("github:connection-lifetime", async () => pr("confirmed"));
+    await prefetchReviewLiveData(provider, cloudWorkspace, 42);
+    await prefetchReviewLiveData(provider, "local-workspace", 42);
+    invalidateCloudGithubPrScope("11111111-1111-4111-8111-111111111111");
+    expect(peekReviewLiveData(provider, cloudWorkspace, 42)).toMatchObject({ pr: null, login: null, authed: null });
+    expect(peekReviewLiveData(provider, "local-workspace", 42).pr?.title).toBe("confirmed");
+  });
+
+  it("does not resurrect an explicitly retired review from its in-flight read", async () => {
+    const pending = deferred<PR>(), getPr = vi.fn(() => pending.promise);
+    const provider = cloudProvider("github:retired-flight", getPr);
+    const loading = prefetchReviewLiveData(provider, cloudWorkspace, 42);
+    await settleCalls(() => getPr.mock.calls.length === 1);
+    forgetPrCachesForWorkspace(cloudWorkspace);
+    pending.resolve(pr("retired"));
+    await loading;
+    expect(peekReviewLiveData(provider, cloudWorkspace, 42).pr).toBeNull();
+    expect(getPr).toHaveBeenCalledOnce();
+  });
+
+  it("keeps the replacement connection's review when its predecessor resolves late", async () => {
+    const pending = deferred<PR>(), getPr = vi.fn().mockReturnValueOnce(pending.promise).mockResolvedValue(pr("current"));
+    const provider = cloudProvider("github:replaced-flight", getPr);
+    const loading = prefetchReviewLiveData(provider, cloudWorkspace, 42);
+    await settleCalls(() => getPr.mock.calls.length === 1);
+    invalidateCloudGithubPrScope("11111111-1111-4111-8111-111111111111");
+    await prefetchReviewLiveData(provider, cloudWorkspace, 42);
+    pending.resolve(pr("retired"));
+    await loading;
+    expect(peekReviewLiveData(provider, cloudWorkspace, 42).pr?.title).toBe("current");
+    expect(getPr).toHaveBeenCalledTimes(2);
+  });
+
   it("retains the confirmed PR alongside a failed refresh and clears the failure on recovery", async () => {
     const getPr = vi.fn(async () => pr("confirmed"));
     const provider: ReviewProvider = {

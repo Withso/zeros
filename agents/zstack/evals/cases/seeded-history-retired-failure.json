@@ -1,0 +1,9 @@
+{
+  "id": "seeded-history-retired-failure",
+  "kind": "seeded",
+  "area": "desktop-renderer",
+  "fixedBy": "pr:738",
+  "symptom": "A late rejected history read recreates a detached session or adds an error after resident history has replaced the pending slot.",
+  "rule": "Before publishing either a history result or failure, verify that the loading slot still exists and owns the read. See agents/zstack/changes/transient-read-presentation.md.",
+  "check": "pnpm exec vitest run --config vitest.config.ts apps/desktop/src/renderer/features/agent/__tests__/local-transcript-hydrate.test.ts -t 'ignores a rejected history read'"
+}

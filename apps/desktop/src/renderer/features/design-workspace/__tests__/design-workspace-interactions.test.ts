@@ -30,6 +30,13 @@ const layersSource = readFileSync(
   ),
   "utf8",
 );
+const layerRowsSource = readFileSync(
+  resolve(
+    process.cwd(),
+    "apps/desktop/src/renderer/features/design-workspace/design-layer-panel-rows.ts",
+  ),
+  "utf8",
+);
 const disclosureSource = readFileSync(
   resolve(
     process.cwd(),
@@ -90,7 +97,7 @@ describe("design workspace interaction wiring", () => {
     // An empty-canvas click keeps the frame active for the Layers panel but
     // deselects — activation, not frame selection.
     expect(source).toContain(
-      "if (event.target === event.currentTarget) publishSelection(selectedFrame);",
+      "if (event.target === event.currentTarget) publishSelection(selectedDescription ?? null);",
     );
     expect(source).not.toContain(
       "if (event.target === event.currentTarget) publishSelection(null);",
@@ -104,10 +111,14 @@ describe("design workspace interaction wiring", () => {
       "publishSelection(frame, { selected: true, reveal: true });",
     );
     expect(source).toContain(
-      "publishSelection(selectedFrame, { selected: view.frameSelected, explicit: false });",
+      "publishSelection(selectedDescription ?? null, { selected: view.frameSelected, explicit: false });",
     );
     expect(source).toContain(
-      "view.selectedTargets.some(target => target.frame === frame.file && !target.nodeId)",
+      "paintedSelectedTargets.some(target => target.frame === frame.file && !target.nodeId)",
+    );
+    // History may paint the frame it selects first; gestures keep the view.
+    expect(source).toContain(
+      "const paintedSelectedTargets = historySelection?.selectedTargets ?? view.selectedTargets;",
     );
     // Body hit tests use the same stale-response guard as other selections.
     expect(source).toContain("selectDesignFrameBodyAtLocation({");
@@ -117,7 +128,7 @@ describe("design workspace interaction wiring", () => {
     );
     // Escape steps node → frame → nothing.
     expect(source).toContain(
-      'if (event.key === "Escape" && view.frameSelected && selectedFrame)',
+      'if (event.key === "Escape" && view.frameSelected && selectedDescription)',
     );
   });
 
@@ -194,8 +205,9 @@ describe("design workspace interaction wiring", () => {
     expect(layersSource).not.toContain('mutateLayer("delete"');
   });
 
-  it("presents frame, text, image, and vector names without leaking HTML labels", () => {
-    expect(layersSource).toContain("designFrameLayerLabel(frame.kind)");
+  it("presents authored names while retaining the type-based layer icons", () => {
+    expect(layersSource).toContain("designFrameDisplayName(frame)");
+    expect(layersSource).toContain("designRuntimeLayerDisplayName(layer.node)");
     expect(layersSource).toContain("designRuntimeLayerLabel(layer.node)");
     expect(layersSource).not.toContain("frame.title}");
     expect(layersSource).not.toContain("layer.node.name.trim()");
@@ -349,7 +361,7 @@ describe("design workspace interaction wiring", () => {
     expect(deck).toContain("data-design-retained-workspace");
     expect(deck).toContain("active={visible}");
     expect(deck).toContain('inert: ""');
-    expect(deck).toContain('"pointer-events-none invisible"');
+    expect(deck).toContain('"pointer-events-none invisible opacity-0"');
     expect(appShellSource).toContain("surfaceActive={!isHome && !workbenchCollapsed}");
   });
 
@@ -571,18 +583,6 @@ describe("design workspace interaction wiring", () => {
     expect(source).toContain('"animation-duration": null');
   });
 
-  it("warms frame source on code-view intent without a loading waterfall", () => {
-    expect(source).toContain("onPointerEnter={warmSelectedFrameDocument}");
-    expect(source).toContain("onFocus={warmSelectedFrameDocument}");
-    expect(source).not.toContain("Loading frame source…");
-    expect(source).toContain(
-      "active && Boolean(workspaceId && selectedFrame),",
-    );
-    expect(source).not.toContain(
-      "active && Boolean(workspaceId && selectedFrame && view.codeView),",
-    );
-  });
-
   it("keeps the theme editor non-modal, draggable, and isolated from canvas wheel input", () => {
     expect(themeSource).toContain("modal={false}");
     expect(themeSource).toContain('data-design-theme-drag-handle=""');
@@ -663,9 +663,11 @@ describe("design workspace interaction wiring", () => {
     expect(layersSource).toContain("const DESIGN_LAYER_INDENT = 16;");
     expect(layersSource).toContain("DESIGN_LAYER_DISCLOSURE_SPACER");
     // Disclosure follows the live tree, else the engine's layer count (which
-    // excludes a seeded frame root); see designFrameRowDiscloses.
-    expect(layersSource).toContain(
-      "discloses: designFrameRowDiscloses(tree, frame)",
+    // excludes a seeded frame root); see designFrameRowDiscloses. A frame
+    // revalidating its source answers from its last confirmed generation.
+    expect(layersSource).toContain("designLayerPanelRows({ frames, treesByFile, disclosures })");
+    expect(layerRowsSource).toContain(
+      "const discloses = designFrameRowDiscloses(tree, presented ?? frame);",
     );
     const layerRulesStart = uiSource.indexOf(".zd-design-layer-row {");
     const layerRulesEnd = uiSource.indexOf(".zd-design-theme-mode-active {");
@@ -710,8 +712,9 @@ describe("design workspace interaction wiring", () => {
     // One row list interleaves frame rows, their layers, and pending frames, so
     // virtualization, keyboard travel, and the roving tab stop keep working
     // across frame boundaries.
-    expect(layersSource).toContain("type DesignPanelRow =");
-    expect(layersSource).toContain('kind: "pending"');
+    expect(layerRowsSource).toContain("export type DesignPanelRow =");
+    expect(layerRowsSource).toContain('kind: "pending"');
+    expect(layersSource).toContain('row.kind === "pending"');
     expect(layersSource).toContain("data-design-panel-row={row.key}");
     expect(layersSource).toContain(
       "panelRows.length * DESIGN_LAYER_ROW_HEIGHT",
@@ -726,7 +729,7 @@ describe("design workspace interaction wiring", () => {
     // Structural shortcuts are declared by every row but execute through the
     // canvas's one semantic selection owner.
     expect(layersSource).toContain(
-      'aria-keyshortcuts="Meta+C Control+C Meta+D Control+D Delete Backspace"',
+      'aria-keyshortcuts="F2 Meta+C Control+C Meta+D Control+D Delete Backspace"',
     );
     expect(layersSource).not.toContain("readFrameFoundation");
     expect(layersSource).toContain(
@@ -735,6 +738,21 @@ describe("design workspace interaction wiring", () => {
     // An open frame is a live-runtime demand: its tree is the only thing that
     // can fill those rows, so it must not wait behind the viewport ranking.
     expect(source).toContain("requiredFiles: layersOpenFiles");
+  });
+
+  it("warms the editor of the frame the pointer or Layers focus rests on", () => {
+    // The likely next selection boots before the click, so selecting it
+    // paints Layers and the full inspector instead of a fallback view.
+    expect(source).toContain("const intentFile = useDesignFrameIntent(active ? workspaceId : null);");
+    expect(source).toContain("...(intentFile && !currentPlayback ? [intentFile] : []),");
+    expect(source).toContain("onPointerOver={(event) => {");
+    expect(source).toContain(`target?.closest("[data-design-frame-chrome]")`);
+    expect(source).toContain("if (!active && workspaceId) clearDesignFrameIntent(workspaceId);");
+    // A selected frame is never noted again, so hovering its rows cannot
+    // publish and clear intent (and re-render the canvas) on every row.
+    expect(layersSource).toContain("if (workspaceId && !selectedTargets?.some((target: DesignSelectionTarget) => target.frame === file))");
+    expect(layersSource).toContain("onPointerEnter={() => actions.frameIntent(frame.file)}");
+    expect(layersSource).toContain("frameIntent: noteFrameIntent,");
   });
 
   it("reads the Option measure modifier outside the canvas focus scope", () => {

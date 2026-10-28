@@ -7,8 +7,8 @@ import type { AgentTextMessageAttachment, MessageContentSegment } from "./use-ag
 import type { ContentBlock } from "../../platform/bridge/agent-events";
 import { CloudSendWaitError } from "./cloud-send-wait";
 
-/** Capture rich cloud content before waking. File resolution runs only after
- * readiness, while the FIFO still owns an editable/removable draft. */
+/** Capture rich cloud content before any network yield. Attachment preparation
+ * shares attach-time transfers and wakes only their exact destination. */
 export function cloudQueuedPrompt(input: {
   cwd: string; chatId: string; agentId?: string | null;
   text: string; displayText: string; snapshot: ComposerSerialized | null;

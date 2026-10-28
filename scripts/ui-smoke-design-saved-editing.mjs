@@ -252,9 +252,57 @@ export async function runDesignSavedEditingTileSmoke({ page, check }) {
   }
 }
 
-export async function runDesignSavedEditingRaceSmoke({ page, check }) {
+export async function runDesignSavedEditingRevisionSmoke({ page, check }) {
   const origin = new URL(page.url()).origin;
-  for (const change of ["held-revision", "source", "runtime", "directory-ABA", "page-ABA", "root-ABA", "owner-ABA", "visibility-ABA"]) {
+  await page.mouse.move(-10, -10);
+  await page.goto(`${origin}/apps/desktop/src/renderer/harnesses/harness-design-workspace.html?designTokens`, { waitUntil: "networkidle" });
+  const frame = page.locator('[data-design-frame="home.html"]');
+  await frame.locator('iframe[data-design-document-buffer="displayed"][data-design-document-ready]').waitFor();
+  const x = () => page.frameLocator('[data-design-frame="home.html"] iframe[data-design-document-buffer="displayed"][data-design-document-ready]')
+    .locator('[data-oid="home-heading"]').evaluate((node) => node.getBoundingClientRect().x);
+  const savedX = await x();
+  await page.evaluate(async () => {
+    const { receiveDesignAgentDraft } = await import("/apps/desktop/src/renderer/features/design-workspace/state/design-agent-drafts.ts");
+    const harness = window.__zerosHarnessAgentDrafts;
+    harness.useDirectory();
+    receiveDesignAgentDraft(harness.workspaceId, {
+      id: "revisionDuringRestore", chatId: "saved-editing", directory: harness.directory,
+      file: "tokens.css", operation: "write", phase: "writing", revision: 1,
+      stylesheet: { css: ".title{transform:translateX(240px)}" },
+    });
+  });
+  await expect.poll(x).toBe(savedX + 240);
+  await page.evaluate(async () => {
+    const { designFrameRuntime } = await import("/apps/desktop/src/renderer/platform/bridge/design-frame-runtime.ts");
+    const runtime = designFrameRuntime(window.__zerosHarnessAgentDrafts.workspaceId, "home.html");
+    const getSnapshot = runtime.getSnapshot.bind(runtime);
+    window.__savedEditingRevisionChanged = false;
+    runtime.getSnapshot = async (...args) => {
+      const snapshot = await getSnapshot(...args);
+      if (!window.__savedEditingRevisionChanged && document.querySelector('[data-design-workspace-surface]')?.dataset.designSavedEditing === "preparing") {
+        window.__savedEditingRevisionChanged = true;
+        // A late acknowledgement for the current theme advances the runtime
+        // revision without changing the source, selection or intended pixels.
+        await runtime.setTheme(document.documentElement.dataset.theme === "light" ? "light" : "dark");
+      }
+      return snapshot;
+    };
+  });
+  await page.getByLabel("Design canvas", { exact: true }).focus();
+  await expect.poll(() => page.evaluate(() => window.__savedEditingRevisionChanged)).toBe(true);
+  await expect(page.locator('[data-design-workspace-surface]')).toHaveAttribute("data-design-saved-editing", "ready");
+  await expect.poll(x).toBe(savedX);
+  expect(await page.evaluate(() => window.__zerosHarnessFoundation.transactions.length)).toBe(0);
+  check("saved editing revalidates a revision that changes while confirming restored geometry", true);
+}
+
+export async function runDesignSavedEditingRaceSmoke({
+  page,
+  check,
+  changes = ["held-revision", "source", "runtime", "directory-ABA", "page-ABA", "root-ABA", "owner-ABA", "visibility-ABA"],
+}) {
+  const origin = new URL(page.url()).origin;
+  for (const change of changes) {
     await page.mouse.move(-10, -10);
     await page.goto(`${origin}/apps/desktop/src/renderer/harnesses/harness-design-workspace.html?designTokens`, { waitUntil: "networkidle" });
     const frame = page.locator('[data-design-frame="home.html"]');

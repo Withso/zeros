@@ -1,12 +1,14 @@
 // The only compute provider cloud v2 uses. Every call is a direct Boat API
 // request; there is no provider registry or adapter layer between them.
 import { z } from "zod";
+import { randomUUID } from "node:crypto";
 import type { BoatApiClient } from "../cloud/boat-client.js";
+import { CloudProviderError } from "./provider-error.js";
 
 const SANDBOX_ID = /^bx_[a-z0-9]{4,32}$/;
 const SNAPSHOT_NAME = /^[a-z0-9][a-z0-9-]{0,61}[a-z0-9]$/;
 /** Our own idle stop decides when to stop; Boat's lease is only a backstop. */
-const LEASE_SECONDS = 24 * 60 * 60;
+export const CLOUD_V2_LEASE_SECONDS = 24 * 60 * 60;
 
 export type CloudV2CommandResult = { exitCode: number; stdout: string; timedOut: boolean };
 
@@ -19,20 +21,39 @@ export interface CloudV2Compute {
   /** Idempotent per key: a retry after a lost reply returns the same sandbox. */
   /** From a named snapshot, or Boat's stock image without `from`. */
   create(input: { key: string; from?: string; name: string; env: Record<string, string> }): Promise<{ sandboxId: string }>;
+  /** A new VM from another VM's disk, here an archived (stopped) one; the
+   * source is not resumed. Idempotent per key, like create. Boat names every
+   * fork "<source name> fork", whatever name is requested. */
+  fork(sourceId: string, input: { key: string; name?: string; ttlSeconds: number }): Promise<{ sandboxId: string }>;
+  /** A sandbox's name and state, e.g. "archiving" until a stop completes, then "archived". */
+  inspect(sandboxId: string): Promise<{ name: string | null; state: string }>;
   resume(sandboxId: string): Promise<void>;
+  /** Boat sets the deadline to now + ttl, without restarting the sandbox. */
+  extendLease(sandboxId: string, ttlSeconds: number): Promise<void>;
   stop(sandboxId: string): Promise<void>;
   /** Succeeds when the sandbox is already gone. */
   delete(sandboxId: string): Promise<void>;
   exec(sandboxId: string, command: string, timeoutSeconds: number): Promise<CloudV2CommandResult>;
   /** Runs past the per-command limit: starts a detached job, then polls it. */
-  execLong(sandboxId: string, command: string, timeoutSeconds: number): Promise<CloudV2CommandResult>;
+  execLong(sandboxId: string, command: string, timeoutSeconds: number, input?: string): Promise<CloudV2CommandResult>;
   /** Saves the sandbox's disk under a name and returns once it can deploy. */
   saveSnapshot(sandboxId: string, name: string): Promise<void>;
   deleteSnapshot(name: string): Promise<void>;
   hostPort(sandboxId: string, input: { port: number; localhost: true; title: string }): Promise<{ url: string; token: string }>;
+  /** A sandbox with exactly this name created at or after `since`, newest first. */
+  findSandbox(name: string, since: Date): Promise<string | null>;
 }
 
 const Created = z.object({ sandbox: z.object({ id: z.string().regex(SANDBOX_ID) }).passthrough() }).passthrough();
+const Forked = z.object({ sandbox: z.object({ id: z.string().regex(SANDBOX_ID) }).passthrough().optional(),
+  sandboxId: z.string().regex(SANDBOX_ID).optional() }).passthrough();
+const Inspected = z.object({ sandbox: z.object({ name: z.string().max(256).nullable().optional(), state: z.string().min(1).max(64) }).passthrough() }).passthrough();
+const Listed = z.object({
+  sandboxes: z.array(z.object({ id: z.string(), name: z.string().nullable().optional(), createdAt: z.string() }).passthrough()),
+  pageInfo: z.object({ nextCursor: z.string().nullable().optional(), hasMore: z.boolean() }).passthrough(),
+}).passthrough();
+/** Pages of 200 newest first; a lookup reads at most this many. */
+const FIND_PAGES = 50;
 const Command = z.object({
   exitCode: z.number().int().nullable().optional(),
   stdout: z.string().optional(),
@@ -60,7 +81,7 @@ export class BoatCloudV2Compute implements CloudV2Compute {
         type: this.machineType,
         ...(input.from ? { from: input.from } : {}),
         name: input.name,
-        ttlSeconds: LEASE_SECONDS,
+        ttlSeconds: CLOUD_V2_LEASE_SECONDS,
         env: input.env,
         // Boat's process tracer would keep prompts and logins written to pipes.
         monitoring: false,
@@ -69,8 +90,34 @@ export class BoatCloudV2Compute implements CloudV2Compute {
     return { sandboxId: Created.parse(reply).sandbox.id };
   }
 
+  async fork(sourceId: string, input: { key: string; name?: string; ttlSeconds: number }): Promise<{ sandboxId: string }> {
+    const source = this.id(sourceId);
+    if (!Number.isSafeInteger(input.ttlSeconds) || input.ttlSeconds <= 0 || input.ttlSeconds > CLOUD_V2_LEASE_SECONDS) throw new Error("Invalid Boat lease");
+    const reply = await this.client.request(`/sandboxes/${source}/fork`, {
+      method: "POST",
+      idempotencyKey: input.key,
+      // The fork inherits nothing it does not need; the tracer stays off, as on every VM.
+      body: { type: this.machineType, ...(input.name ? { name: input.name } : {}), ttlSeconds: input.ttlSeconds, env: {}, monitoring: false },
+    });
+    // A fork is an action receipt that names the new VM, not a ready VM.
+    const forked = Forked.parse(reply), child = forked.sandbox?.id ?? forked.sandboxId;
+    if (!child || child === source || (forked.sandbox && forked.sandboxId !== undefined && forked.sandboxId !== forked.sandbox.id))
+      throw new CloudProviderError("provider_response_invalid", "Boat returned an invalid response", false);
+    return { sandboxId: child };
+  }
+
+  async inspect(sandboxId: string): Promise<{ name: string | null; state: string }> {
+    const { sandbox } = Inspected.parse(await this.client.request(`/sandboxes/${this.id(sandboxId)}`, { method: "GET" }));
+    return { name: sandbox.name ?? null, state: sandbox.state };
+  }
+
   async resume(sandboxId: string): Promise<void> {
-    await this.client.request(`/sandboxes/${this.id(sandboxId)}/resume`, { method: "POST", body: { ttlSeconds: LEASE_SECONDS } });
+    await this.client.request(`/sandboxes/${this.id(sandboxId)}/resume`, { method: "POST", body: { ttlSeconds: CLOUD_V2_LEASE_SECONDS } });
+  }
+
+  async extendLease(sandboxId: string, ttlSeconds: number): Promise<void> {
+    if (!Number.isSafeInteger(ttlSeconds) || ttlSeconds <= 0 || ttlSeconds > CLOUD_V2_LEASE_SECONDS) throw new Error("Invalid Boat lease");
+    await this.client.request(`/sandboxes/${this.id(sandboxId)}`, { method: "PATCH", body: { ttlSeconds } });
   }
 
   async hostPort(sandboxId: string, input: { port: number; localhost: true; title: string }): Promise<{ url: string; token: string }> {
@@ -111,7 +158,25 @@ export class BoatCloudV2Compute implements CloudV2Compute {
     return { exitCode: reply.exitCode ?? -1, stdout: reply.stdout ?? "", timedOut: reply.timedOut === true };
   }
 
-  async execLong(sandboxId: string, command: string, timeoutSeconds: number): Promise<CloudV2CommandResult> {
+  async execLong(sandboxId: string, command: string, timeoutSeconds: number, input?: string): Promise<CloudV2CommandResult> {
+    if (input !== undefined) {
+      if (Buffer.byteLength(input) > 64 * 1024) throw new Error("Command input is too large");
+      // Boat's command API has no stdin field. Its authenticated file endpoint
+      // keeps input out of shell argv (including base64-encoded argv). The VM
+      // is one trust domain; the private file is unlinked before code executes.
+      const directory = `/tmp/zeros-command-input-${randomUUID()}`, file = `${directory}/stdin`;
+      const prepared = await this.exec(sandboxId, `umask 077; mkdir -m 700 -- '${directory}'`, 30);
+      if (prepared.exitCode !== 0 || prepared.timedOut) throw new Error("Command input could not be prepared");
+      try {
+        const written = await this.client.request(`/sandboxes/${this.id(sandboxId)}/files`, {
+          method: "PUT", body: { path: file, content: input, encoding: "utf8" },
+        });
+        if (!z.object({ success: z.literal(true) }).safeParse(written).success) throw new Error("Command input could not be delivered");
+        return await this.execLong(sandboxId, `set -e; exec 3<'${file}'; rm -f -- '${file}'; ${command} <&3 3<&-`, timeoutSeconds);
+      } finally {
+        await this.exec(sandboxId, `rm -f -- '${file}'; rmdir -- '${directory}'`, 30).catch(() => {});
+      }
+    }
     if (timeoutSeconds <= BOAT_MAX_COMMAND_SECONDS - 30) return this.exec(sandboxId, command, timeoutSeconds);
     const job = `/tmp/zeros-job-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
     // The detached script records its own exit status, so it survives the
@@ -157,6 +222,20 @@ export class BoatCloudV2Compute implements CloudV2Compute {
     } catch (error) {
       if (!notFound(error)) throw error;
     }
+  }
+
+  async findSandbox(name: string, since: Date): Promise<string | null> {
+    let cursor: string | null | undefined;
+    for (let page = 0; page < FIND_PAGES; page++) {
+      const listed = Listed.parse(await this.client.request(`/sandboxes?limit=200&sort=desc${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`, { method: "GET" }));
+      for (const sandbox of listed.sandboxes) {
+        if (Date.parse(sandbox.createdAt) < since.getTime()) return null;
+        if (sandbox.name === name && SANDBOX_ID.test(sandbox.id)) return sandbox.id;
+      }
+      if (!listed.pageInfo.hasMore || !listed.pageInfo.nextCursor) return null;
+      cursor = listed.pageInfo.nextCursor;
+    }
+    throw Object.assign(new Error("sandbox lookup too long"), { code: "provider_request_failed" });
   }
 
   private id(sandboxId: string): string {

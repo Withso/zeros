@@ -93,6 +93,7 @@ import { ComputerUseController } from "./features/agent-control/computer-use-con
 import { SimulatorController } from "./features/simulators/simulator-controller";
 import { SimulatorAgentController } from "./features/simulators/simulator-agent-controller";
 import { BrowserSessionController } from "./features/browser/browser-session-controller";
+import { KeepAwakeController } from "./features/settings/keep-awake-controller";
 import { BrowserAgentPictureInPicture } from "./features/browser/browser-agent-picture-in-picture";
 import { AppSidebar } from "./shell/app-sidebar";
 import { useSidebarCollapsed } from "./shell/sidebar-collapsed";
@@ -101,6 +102,7 @@ import { ConversationPane } from "./shell/conversation/conversation-pane";
 import { WorkbenchPane } from "./shell/workbench/workbench-pane";
 import { useWorkspacePrSync } from "./shell/pr/use-workspace-pr-sync";
 import { useProjectCapabilitiesRefresh } from "./shell/use-project-capabilities-refresh";
+import { useEditHistoryMenu } from "./shell/use-edit-history-menu";
 import { workspaceIsReadOnly } from "./state/workspace-history";
 import {
   AddProjectProvider,
@@ -1328,6 +1330,7 @@ function MainShellBody({
 /** Everything below the auth/appearance gate: the native bridge and the app.
  *  <AppShell> owns the providers and AuthGate above this boundary. */
 export function AppShellBody() {
+  useEditHistoryMenu();
   return (
     // Repository panel's SidebarProvider previously supplied this app-wide provider as
     // a hidden side effect. Keep it at the actual app root now that the
@@ -1429,6 +1432,7 @@ export function AppShell() {
             renderer; useAnyAgentRunning reads a global Zustand store, so no
             provider below the gate is required. */}
         <UpdateNotifications />
+        <KeepAwakeController />
         <InviteDeepLinkHandler />
         <AuthSecurityEventHandler />
         <AuthGate>

@@ -65,7 +65,8 @@ import {
   ghAuthStatusCache,
   GITHUB_READ_MAX_AGE_MS,
 } from "../../state/read-caches";
-import { useCachedRead } from "../../state/use-cached-read";
+import { useRecoveringRead } from "../../state/use-recovering-read";
+import { useNativeRuntime } from "../../platform/runtime";
 import { InlineLoginTerminal } from "./inline-login-terminal";
 import {
   githubAppConnectOptions,
@@ -249,11 +250,12 @@ export function GitHubSection({
   // The fetcher ignores the key it is handed: this read's key is the constant
   // "auth", so the probe's options never vary with it. Passing `ghAuthSnapshot`
   // bare would hand the key straight to its `options` parameter.
-  const connection = useCachedRead(
+  const connected = useNativeRuntime().ready;
+  const connection = useRecoveringRead(
     ghAuthStatusCache,
     surfaceActive ? "auth" : null,
     () => ghAuthSnapshot(),
-    { maxAgeMs: GITHUB_READ_MAX_AGE_MS },
+    { maxAgeMs: GITHUB_READ_MAX_AGE_MS, connected },
   );
   const hasConfirmedSnapshot = connection.data !== undefined;
   const snapshot = connection.data ?? EMPTY_SNAPSHOT;
@@ -1108,10 +1110,8 @@ export function GitHubSection({
               aria-hidden="true"
             />
             Couldn’t load GitHub authentication settings.
-            {/* Without a snapshot every control above is disabled and the cached
-                read deliberately does not retry on error, so this is the only
-                way back — Settings stays mounted, so leaving and returning does
-                not re-probe either. */}
+            {/* A persistent cold failure keeps controls disabled until retry
+                confirms the current authentication methods. */}
             <Button
               type="button"
               variant="ghost"

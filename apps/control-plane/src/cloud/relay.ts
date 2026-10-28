@@ -11,31 +11,42 @@ import { CLOUD_V2_MAX_FRAME_BYTES, CloudV2WorkerFrameSchema, type CloudV2Control
 import type { PostgresSecurityEventBroker } from "../security-events.js";
 import type { CloudV2Store, CloudV2Workspace } from "./store.js";
 import { isCloudV2Token } from "./tokens.js";
-import { dialWorker, workerSupportsMcp, type WorkerRoute } from "./worker-connection.js";
+import { dialWorker, workerSupportsCheckout, workerSupportsMcp, workerSupportsSetup, workerSupportsGithub, type WorkerRoute } from "./worker-connection.js";
+import { emitCloudV2Timing, type CloudV2TimingRecord } from "./lifecycle.js";
+import { isGithubAccessRevoked } from "../github-availability.js";
+import { CLOUD_SOURCE_REFRESH_MS, type CloudSourceContinuation, type CloudSourceProof } from "./source-authority.js";
 
 export const CLOUD_V2_BRIDGE_PROTOCOL = "zeros.cloud.v2";
 const BRIDGE_PATH = /^\/v2\/cloud\/workspaces\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\/bridge$/;
 const CONFIG_REFRESH_MS = 12 * 60 * 60_000;
 const MAX_QUEUED_FRAMES = 64;
+const MAX_QUEUED_OUTPUT_FRAMES = 1024;
+const MAX_QUEUED_OUTPUT_BYTES = 4 * 1024 * 1024;
 type ConfigFrame = Extract<CloudV2ControlFrame, { t: "config" }>;
 
 export type CloudV2RelayDeps = {
   store: Pick<CloudV2Store, "consumeConnectTicket" | "get" | "accessEpoch" | "appAccessSnapshot" | "loginRevision">;
   securityEvents?: Pick<PostgresSecurityEventBroker, "start" | "subscribe">;
-  config(workspace: CloudV2Workspace): Promise<ConfigFrame>;
+  config(workspace: CloudV2Workspace, mode?: "admission" | "continuation"): Promise<ConfigFrame>;
+  authorizeSource?(workspace: CloudV2Workspace): Promise<void>;
+  continueSource?(workspace: CloudV2Workspace, proof?: CloudSourceProof): Promise<CloudSourceContinuation>;
   workerRoute(workspaceId: string): Promise<WorkerRoute | null>;
   mintWorkerToken(workspaceId: string, bootId: string): string;
   wake(workspace: CloudV2Workspace): Promise<void>;
   answerOffline(workspace: CloudV2Workspace, frame: unknown): Promise<unknown | null>;
   logger?: Pick<Console, "warn">;
+  timing?: (record: CloudV2TimingRecord) => void;
+  now?: () => number;
   retryBaseMs?: number; retryMaxMs?: number; idleMs?: number;
 };
 type ConfigFlight = { worker: WebSocket; requested: boolean; force: boolean; promise: Promise<boolean> };
 type DeliveredPrompt = { worker: WebSocket; agentId?: string };
+type Authority = "allowed" | "revoked" | "unavailable";
 type Room = {
   workspace: CloudV2Workspace; accessEpoch: string; revoked: boolean;
   worker: WebSocket | null; ready: boolean; loginRevision: string | null; configAt: number;
   configFlight?: ConfigFlight; dialing?: Promise<void>; idleTimer?: NodeJS.Timeout;
+  authorityFlight?: Promise<Authority>; sourceCheckAt: number;
   clients: Map<string, { ws: WebSocket; sessionId: string | null }>; queued: Map<string, unknown[]>;
   delivered: Map<string, Map<string, DeliveredPrompt>>;
   stops: Map<string, (ok: boolean) => void>; abort: AbortController; wakeRequested: boolean; wakeAllowed: boolean;
@@ -119,30 +130,44 @@ export class CloudV2Relay {
       this.revoke(room); room = undefined;
     }
     if (!room) {
-      room = { workspace, accessEpoch, revoked: false, worker: null, ready: false, loginRevision: null, configAt: 0,
+      room = { workspace, accessEpoch, revoked: false, worker: null, ready: false, loginRevision: null, configAt: 0, sourceCheckAt: 0,
         clients: new Map(), queued: new Map(), delivered: new Map(), stops: new Map(), abort: new AbortController(), wakeRequested: false, wakeAllowed: false };
       this.rooms.set(workspace.id, room);
     }
     return room;
   }
 
-  private revoke(room: Room): void {
+  private revoke(room: Room, code = 4001, reason = "access_revoked"): void {
     room.revoked = true; room.ready = false; room.abort.abort(); room.queued.clear(); room.delivered.clear(); clearTimeout(room.idleTimer);
-    room.worker?.close(4001, "access_revoked"); room.worker = null;
+    room.worker?.close(code, reason); room.worker = null;
     for (const finish of room.stops.values()) finish(false);
-    for (const { ws } of room.clients.values()) ws.close(4001, "access_revoked");
+    for (const { ws } of room.clients.values()) ws.close(code, reason);
     if (this.rooms.get(room.workspace.id) === room) this.rooms.delete(room.workspace.id);
   }
 
-  private async authorized(room: Room, admittingSessionId: string | null = null): Promise<boolean> {
-    if (room.revoked || this.closed) return false;
+  private authorized(room: Room, admittingSessionId: string | null = null, admission = false): Promise<Authority> {
+    if (!admission && room.authorityFlight) return room.authorityFlight;
+    const flight = this.authorize(room, admittingSessionId, admission).finally(() => {
+      if (room.authorityFlight === flight) delete room.authorityFlight;
+    });
+    if (!admission) room.authorityFlight = flight;
+    return flight;
+  }
+
+  private async authorize(room: Room, admittingSessionId: string | null, admission: boolean): Promise<Authority> {
+    if (room.revoked || this.closed) return "revoked";
     const revision = this.securityRevision;
     const sessions = new Set([...room.clients.values()].flatMap(client => client.sessionId ? [client.sessionId] : []));
     if (admittingSessionId) sessions.add(admittingSessionId);
-    const snapshot = await this.deps.store.appAccessSnapshot(room.workspace.id, [...sessions]).catch(() => null);
-    if (room.revoked) return false;
-    if (revision !== this.securityRevision) return this.authorized(room, admittingSessionId);
-    if (!snapshot || snapshot.accessEpoch !== room.accessEpoch) { this.revoke(room); return false; }
+    let snapshot;
+    try { snapshot = await this.deps.store.appAccessSnapshot(room.workspace.id, [...sessions]); }
+    catch {
+      if (!admission) this.revoke(room, 1013, "workspace_verification_unavailable");
+      return "unavailable";
+    }
+    if (room.revoked) return "revoked";
+    if (revision !== this.securityRevision) return this.authorize(room, admittingSessionId, admission);
+    if (!snapshot || snapshot.accessEpoch !== room.accessEpoch) { this.revoke(room); return "revoked"; }
     const live = new Set(snapshot.activeSessionIds);
     for (const [id, client] of room.clients) {
       // A new admission may have joined while this read was in flight. Its
@@ -152,12 +177,52 @@ export class CloudV2Relay {
         client.ws.close(4001, "access_revoked");
       }
     }
-    return !admittingSessionId || live.has(admittingSessionId);
+    if (admittingSessionId && !live.has(admittingSessionId)) return "revoked";
+    try {
+      const controlOnly = !room.clients.size && room.stops.size > 0 && !admission;
+      if (!controlOnly) {
+        if (!admission && this.deps.continueSource) {
+          const lease = await this.deps.continueSource(room.workspace, snapshot.loginRevision !== undefined
+            ? { accessEpoch: snapshot.accessEpoch, loginRevision: snapshot.loginRevision } : undefined);
+          room.sourceCheckAt = lease.recheckAt;
+        } else {
+          await this.deps.authorizeSource?.(room.workspace);
+          room.sourceCheckAt = (this.deps.now?.() ?? Date.now()) + CLOUD_SOURCE_REFRESH_MS;
+        }
+      }
+    } catch (error) {
+      if (revision !== this.securityRevision) return this.authorize(room, admittingSessionId, admission);
+      if (isGithubAccessRevoked(error)) { this.revoke(room); return "revoked"; }
+      // A failed new admission must not disconnect an already authorized room.
+      if (!admission) this.revoke(room, 1013, "github_unavailable");
+      return "unavailable";
+    }
+    if (room.revoked) return "revoked";
+    if (revision !== this.securityRevision) return this.authorize(room, admittingSessionId, admission);
+    if (snapshot.validUntil !== undefined) {
+      if (snapshot.validUntil <= (this.deps.now?.() ?? Date.now())) return this.authorize(room, admittingSessionId, admission);
+      room.sourceCheckAt = Math.min(room.sourceCheckAt, snapshot.validUntil);
+    }
+    // Repair a missed configuration notification only when the workspace is
+    // actually used. The activity carrier repairs the worker independently.
+    if (!admission && room.ready && room.worker && !room.configFlight &&
+      ((snapshot.loginRevision !== undefined && snapshot.loginRevision !== room.loginRevision) || Date.now() - room.configAt >= CONFIG_REFRESH_MS)) {
+      const ws = room.worker;
+      void this.refreshConfig(room, ws, Date.now() - room.configAt >= CONFIG_REFRESH_MS).catch(() => ws.close(1011, "config_unavailable"));
+    }
+    return "allowed";
   }
   private revalidate(): void { for (const room of this.rooms.values()) void this.authorized(room); }
+  readonly revalidateSources = AsyncResource.bind((scope: { organizationId?: string; ownerUserId?: string }): void => {
+    this.securityRevision++;
+    for (const room of this.rooms.values()) if ((!scope.organizationId || room.workspace.organizationId === scope.organizationId) &&
+      (!scope.ownerUserId || room.workspace.creatorUserId === scope.ownerUserId)) void this.authorized(room);
+  }, "cloud-v2-source-wake");
   private watch(socket: WebSocket): void { this.alive.add(socket); socket.on("pong", () => this.alive.add(socket)); }
   private heartbeat(): void {
-    this.revalidate(); void this.refreshLogins(); void this.deps.securityEvents?.start().catch(() => {});
+    // Transport liveness is not a permission poll. Security/login notifications
+    // and actual workspace traffic own their bounded authority refreshes.
+    void this.deps.securityEvents?.start().catch(() => {});
     for (const room of this.rooms.values()) for (const socket of [room.worker, ...[...room.clients.values()].map(client => client.ws)]) {
       if (!socket || socket.readyState !== WebSocket.OPEN) continue;
       if (!this.alive.has(socket)) { socket.terminate(); continue; }
@@ -185,9 +250,10 @@ export class CloudV2Relay {
     room.dialing = this.connect(room).finally(() => { delete room.dialing; });
   }
   private async connect(room: Room): Promise<void> {
+    const started = this.deps.now?.() ?? Date.now();
     const deadline = Date.now() + 60_000;
     for (let attempt = 0; this.wanted(room) && Date.now() < deadline; attempt++) {
-      if (!await this.authorized(room)) return;
+      if (await this.authorized(room) !== "allowed") return;
       let ws: WebSocket | undefined;
       try {
         const route = await this.deps.workerRoute(room.workspace.id);
@@ -204,10 +270,13 @@ export class CloudV2Relay {
         // stores the new boot id and marks running before an app can dial.
         if (route.url && route.token && route.bootId && (route.workspace.state === "running" || (route.workspace.state === "stopping" && room.stops.size))) {
           ws = await dialWorker(route, this.deps.mintWorkerToken(room.workspace.id, route.bootId));
-          if (!this.wanted(room) || !await this.authorized(room)) { ws.terminate(); return; }
+          if (!this.wanted(room) || await this.authorized(room) !== "allowed") { ws.terminate(); return; }
           room.worker = ws; room.loginRevision = null; this.attachWorker(room, ws);
-          if (await this.refreshConfig(room, ws, true) && room.worker === ws && ws.readyState === WebSocket.OPEN) {
+          const controlOnly = !room.clients.size && room.stops.size > 0;
+          if ((controlOnly || await this.refreshConfig(room, ws, true)) && room.worker === ws && ws.readyState === WebSocket.OPEN) {
             room.ready = true; room.wakeAllowed = false;
+            emitCloudV2Timing(this.deps.timing, { workspaceId: room.workspace.id.slice(0, 8), phase: "relay_ready",
+              durationMs: Math.max(0, Math.round((this.deps.now?.() ?? Date.now()) - started)) });
             for (const [clientId, client] of room.clients) {
               if (client.ws.readyState !== WebSocket.OPEN) continue;
               send(ws, { t: "open", clientId });
@@ -230,16 +299,34 @@ export class CloudV2Relay {
   }
   private attachWorker(room: Room, ws: WebSocket): void {
     this.watch(ws);
-    ws.on("message", (data, binary) => {
+    type Output = Extract<ReturnType<typeof CloudV2WorkerFrameSchema.parse>, { t: "frame" }>;
+    let pending: Output[] | undefined, queuedBytes = 0;
+    const forward = (frame: Output) => {
       if (room.worker !== ws || room.revoked) return;
+      const requestId = (frame.frame as { requestId?: unknown } | null)?.requestId;
+      if (typeof requestId === "string") room.delivered.get(frame.clientId)?.delete(requestId);
+      if (frame.clientId === "*") for (const { ws: client } of room.clients.values()) send(client, frame.frame);
+      else send(room.clients.get(frame.clientId)?.ws ?? null, frame.frame);
+    };
+    ws.on("message", (data, binary) => {
+      if (room.worker !== ws || room.revoked || ws.readyState !== WebSocket.OPEN) return;
       try {
         const frame = CloudV2WorkerFrameSchema.parse(binary ? null : parse(data));
         if (frame.t === "stop-ack") { room.stops.get(frame.id)?.(true); return; }
         if (frame.t !== "frame") { ws.close(4003, "invalid_carrier"); return; }
-        const requestId = (frame.frame as { requestId?: unknown } | null)?.requestId;
-        if (typeof requestId === "string") room.delivered.get(frame.clientId)?.delete(requestId);
-        if (frame.clientId === "*") for (const { ws: client } of room.clients.values()) send(client, frame.frame);
-        else send(room.clients.get(frame.clientId)?.ws ?? null, frame.frame);
+        // Keep normal streaming synchronous. Only buffer while a due authority
+        // read is in flight, with both frame and byte bounds against a stalled DB.
+        if (!pending && (this.deps.now?.() ?? Date.now()) < room.sourceCheckAt) { forward(frame); return; }
+        const bytes = Array.isArray(data) ? data.reduce((sum, chunk) => sum + chunk.byteLength, 0) : data.byteLength;
+        if ((pending?.length ?? 0) >= MAX_QUEUED_OUTPUT_FRAMES || queuedBytes + bytes > MAX_QUEUED_OUTPUT_BYTES) {
+          pending = []; queuedBytes = 0; ws.close(1013, "relay_backpressure"); return;
+        }
+        queuedBytes += bytes;
+        if (pending) { pending.push(frame); return; }
+        pending = [frame];
+        void this.authorized(room).then(allowed => {
+          if (allowed === "allowed") for (const output of pending ?? []) forward(output);
+        }).catch(() => ws.close(1013, "workspace_verification_unavailable")).finally(() => { pending = undefined; queuedBytes = 0; });
       } catch { ws.close(4003, "invalid_frame"); }
     });
     ws.on("close", () => {
@@ -279,15 +366,16 @@ export class CloudV2Relay {
     }
   }
 
-  /** Committed revision polling repairs missed transactional notifications. */
-  async refreshLogins(scope?: { ownerUserId?: string; organizationId?: string }): Promise<void> {
+  /** Transactional notifications push committed credential changes. Actual
+   * traffic also repairs a missed notification through its access snapshot. */
+  readonly refreshLogins = AsyncResource.bind(async (scope?: { ownerUserId?: string; organizationId?: string }): Promise<void> => {
     await Promise.all([...this.rooms.values()].map(async room => {
       if (!room.ready || !room.worker || (scope && ((scope.ownerUserId && scope.ownerUserId !== room.workspace.creatorUserId) ||
           (scope.organizationId && scope.organizationId !== room.workspace.organizationId)))) return;
       const ws = room.worker;
       await this.refreshConfig(room, ws, Date.now() - room.configAt >= CONFIG_REFRESH_MS).catch(() => ws.close(1011, "config_unavailable"));
     }));
-  }
+  }, "cloud-v2-login-wake");
   private refreshConfig(room: Room, ws: WebSocket, force: boolean): Promise<boolean> {
     const active = room.configFlight;
     if (active?.worker === ws) { active.requested = true; active.force ||= force; return active.promise; }
@@ -305,13 +393,19 @@ export class CloudV2Relay {
       const revision = await this.deps.store.loginRevision(room.workspace.id);
       if (revision === null) { this.revoke(room); return false; }
       if (!force && revision === room.loginRevision) continue;
-      if (!await this.authorized(room) || room.worker !== ws) return false;
-      const config = await this.deps.config(room.workspace);
-      if (!await this.authorized(room) || room.worker !== ws) return false;
+      if (await this.authorized(room) !== "allowed" || room.worker !== ws) return false;
+      const config = await this.deps.config(room.workspace, "continuation");
+      if (await this.authorized(room) !== "allowed" || room.worker !== ws) return false;
       if (revision !== await this.deps.store.loginRevision(room.workspace.id)) { flight.requested = true; flight.force = true; continue; }
       if (room.worker !== ws || room.revoked) return false;
-      const { mcpServers, ...legacy } = config;
-      send(ws, { ...legacy, ...(workerSupportsMcp(ws) && mcpServers ? { mcpServers } : {}), loginRevision: revision }); room.loginRevision = revision; room.configAt = Date.now();
+      const { mcpServers, githubPullRequests, ...legacy } = config;
+      const { setup, baseCommit, github, ...workspaceConfig } = config.workspace;
+      send(ws, { ...legacy, workspace: { ...workspaceConfig,
+        ...(workerSupportsGithub(ws) && github ? { github } : {}),
+        ...(workerSupportsSetup(ws) && setup !== undefined ? { setup } : {}),
+        ...(workerSupportsCheckout(ws) && baseCommit !== undefined ? { baseCommit } : {}) },
+        ...(workerSupportsMcp(ws) && mcpServers ? { mcpServers } : {}),
+        ...(workerSupportsGithub(ws) && githubPullRequests === 1 ? { githubPullRequests } : {}), loginRevision: revision }); room.loginRevision = revision; room.configAt = Date.now();
     } while (flight.requested);
     return true;
   }
@@ -335,8 +429,10 @@ export class CloudV2Relay {
     const room = this.room(workspace, epoch);
     if (!room) { ws.close(4001, "access_revoked"); return; }
     const clientId = randomUUID(); this.watch(ws);
-    let inbound = this.authorized(room, sessionId).then(allowed => {
-      if (!allowed || ws.readyState !== WebSocket.OPEN) { ws.close(4001, "access_revoked"); return; }
+    let inbound = this.authorized(room, sessionId, true).then(allowed => {
+      if (allowed !== "allowed" || ws.readyState !== WebSocket.OPEN) {
+        ws.close(allowed === "unavailable" ? 1013 : 4001, allowed === "unavailable" ? "github_unavailable" : "access_revoked"); return;
+      }
       clearTimeout(room.idleTimer); delete room.idleTimer;
       if (room.worker && workspace.state !== "running") { room.worker.terminate(); room.worker = null; room.ready = false; }
       if (!room.worker) room.workspace = workspace;
@@ -360,16 +456,19 @@ export class CloudV2Relay {
     this.idle(room);
   }
   private async fromApp(room: Room, clientId: string, ws: WebSocket, data: RawData): Promise<void> {
-    if (!await this.authorized(room) || !room.clients.has(clientId)) return;
     let frame: unknown;
     try { frame = parse(data); } catch { ws.close(4003, "invalid_frame"); return; }
+    // The worker ignores this empty transport frame too. It cannot release
+    // data, wake a VM or turn socket keepalive into a database permission poll.
+    if ((frame as { type?: unknown } | null)?.type === "HEARTBEAT") return;
+    if (await this.authorized(room) !== "allowed" || !room.clients.has(clientId)) return;
     if (room.ready && room.worker) { this.forward(room, room.worker, clientId, frame); return; }
     // Connection housekeeping is not explicit workspace activity. Bridge
     // payload validation still belongs to the worker when it is online.
     const type = (frame as { type?: unknown } | null)?.type;
     if (type === "HEARTBEAT" || type === "CONNECTED") return;
     const answer = await this.deps.answerOffline(room.workspace, frame).catch(() => null);
-    if (!await this.authorized(room) || !room.clients.has(clientId)) return;
+    if (await this.authorized(room) !== "allowed" || !room.clients.has(clientId)) return;
     if (answer) { send(ws, answer); return; }
     if (room.ready && room.worker) { this.forward(room, room.worker, clientId, frame); return; }
     const queue = room.queued.get(clientId) ?? [];

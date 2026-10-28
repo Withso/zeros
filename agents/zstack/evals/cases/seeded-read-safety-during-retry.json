@@ -1,0 +1,9 @@
+{
+  "id": "seeded-read-safety-during-retry",
+  "kind": "seeded",
+  "area": "desktop-renderer",
+  "fixedBy": "pr:738",
+  "symptom": "Starting a quiet retry clears the raw cache error and prematurely enables writes or shows rows hidden after access loss.",
+  "rule": "Preserve an observed failure for safety guards until the replacement read succeeds, independently of error presentation. See agents/zstack/changes/transient-read-presentation.md.",
+  "check": "pnpm exec vitest run --config vitest.config.ts apps/desktop/src/renderer/state/__tests__/read-recovery.test.ts -t 'keeps a failed read unsafe'"
+}

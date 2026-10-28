@@ -1,6 +1,7 @@
 import { isSettingsSectionAvailable } from "./settings-section-availability";
 import { CloudComputerPanel, prefetchCloudComputer } from "./cloud-computer-panel";
 import { CloudGithubSection } from "./cloud-github-section";
+import { KeepAwakeSetting } from "./keep-awake-setting";
 // ──────────────────────────────────────────────────────────
 // Settings page — sidebar + per-section panel
 // ──────────────────────────────────────────────────────────
@@ -51,7 +52,6 @@ import "./settings-page.css";
 import { useRetainedViewKeys } from "../../shell/use-retained-view-keys";
 import { useScrollMemoryRef } from "../../shell/scroll-memory";
 import { useInstantViewSwitch } from "../../shared/ui/use-instant-view-switch";
-import { useCustomWindowDrag } from "../../shell/use-custom-window-drag";
 import {
   Palette,
   Settings,
@@ -79,7 +79,7 @@ import {
   useWorkspaceStore,
   selectActiveFolder,
 } from "../../state/store";
-import { useCachedRead } from "../../state/use-cached-read";
+import { useRecoveringRead } from "../../state/use-recovering-read";
 import {
   providerMemorySettingsCache,
   PROVIDER_DIAGNOSTIC_MAX_AGE_MS,
@@ -130,6 +130,11 @@ import {
 } from "./dashboard-settings";
 import { useInternalFeature, useIsInternalUser } from "./internal-features";
 import { FollowUpBehaviorSetting } from "./follow-up-behavior-setting";
+import { FullDiskAccessRow } from "./full-disk-access-row";
+import {
+  setRestartAutomaticallyOnUpdate,
+  useRestartAutomaticallyOnUpdate,
+} from "./update-settings";
 import {
   AGENT_CONTROL_FEATURE_ROWS,
   agentControlFeaturesAt,
@@ -530,10 +535,6 @@ function ScopedSettingsPage({ owner }: { owner: string }) {
   const organization = useActiveOrganization();
   const { me } = useTeams();
   const pageSurfaceRef = useRef<HTMLDivElement | null>(null);
-  // Settings takes the app sidebar's place, so its nav owns the macOS
-  // traffic-light band, which drags the window like the sidebar's.
-  const titleBandRef = useRef<HTMLDivElement | null>(null);
-  useCustomWindowDrag(titleBandRef);
   const dispatch = useWorkspaceDispatch();
   const pageActive = useActivePage() === "settings";
   const { projects } = useOrganizationProjects();
@@ -725,7 +726,7 @@ function ScopedSettingsPage({ owner }: { owner: string }) {
               labelled SECTION_GROUPS. Repo settings live on each repo's page. */}
         <div className="flex min-h-0 shrink-0 basis-[256px] flex-col">
           <div
-            ref={titleBandRef}
+            data-tauri-drag-region
             className="h-10 shrink-0"
             aria-hidden="true"
           />
@@ -910,13 +911,15 @@ function SectionNavButton({
 
 // ── General ─────────────────────────────────────────────
 
-function GeneralPanel() {
+function GeneralPanel({ surfaceActive = true }: { surfaceActive?: boolean }) {
   const showHidden = useShowHiddenWorkspaces();
+  const restartAutomatically = useRestartAutomaticallyOnUpdate();
   // Grouped-card layout (SettingsGroup) — same recipe as Appearance.
   return (
     <div className="flex flex-col gap-6">
       <SettingsGroup>
         <FollowUpBehaviorSetting />
+        <KeepAwakeSetting />
         <SettingsRow
           label="Show hidden workspaces in dashboard"
           hint="Includes hidden workspaces in the Archived list."
@@ -927,8 +930,19 @@ function GeneralPanel() {
             aria-label="Show hidden workspaces in dashboard"
           />
         </SettingsRow>
+        <SettingsRow
+          label="Restart automatically on update"
+          hint="Automatically restart Zeros when idle to install downloaded updates."
+          htmlFor="restart-automatically-on-update"
+        >
+          <Switch
+            id="restart-automatically-on-update"
+            checked={restartAutomatically}
+            onCheckedChange={setRestartAutomaticallyOnUpdate}
+          />
+        </SettingsRow>
       </SettingsGroup>
-      <PrivacyGroup />
+      <PrivacyGroup surfaceActive={surfaceActive} />
     </div>
   );
 }
@@ -1094,15 +1108,12 @@ function AccountPanel() {
   );
 }
 
-// ── Privacy — anonymous usage analytics (opt-out) ──
+// ── Privacy — native file access and anonymous usage analytics ──
 //
-// Single consent control for metadata-only product analytics. Opt-out model:
-// on by default, anonymous, and never sends user content. Rendered as the
-// "Privacy" group on the General tab (2026-09-14; it previously sat under
-// Account). Device-level consent, not account-level, so it never depends on
-// sign-in state.
+// Both controls belong to this device, independently of sign-in. Analytics
+// remains opt-out and metadata-only; macOS owns the Full Disk Access grant.
 
-function PrivacyGroup() {
+function PrivacyGroup({ surfaceActive }: { surfaceActive: boolean }) {
   const [optedOut, setOptedOut] = useState<boolean>(() =>
     isAnalyticsOptedOut(),
   );
@@ -1113,6 +1124,7 @@ function PrivacyGroup() {
 
   return (
     <SettingsGroup title="Privacy">
+      <FullDiskAccessRow surfaceActive={surfaceActive} />
       <SettingsRow
         label="Share anonymous usage data"
         hint="Anonymous feature and performance metadata. Never your code, prompts, or keys."
@@ -1204,20 +1216,13 @@ function ModelsPanel({ surfaceActive = false }: { surfaceActive?: boolean }) {
     surfaceActive &&
     providerSettingsTab === "codex" &&
     bridgeStatus === "connected";
-  const memoryRead = useCachedRead(
+  const memoryRead = useRecoveringRead(
     providerMemorySettingsCache,
     codexDiagnosticsActive ? "codex" : null,
     (agentId) => sessions.readMemorySettings(agentId),
-    { maxAgeMs: PROVIDER_DIAGNOSTIC_MAX_AGE_MS },
+    { maxAgeMs: PROVIDER_DIAGNOSTIC_MAX_AGE_MS, connected: bridgeStatus === "connected" },
   );
   const codexMemory = memoryRead.data ?? null;
-
-  useEffect(() => {
-    if (!codexDiagnosticsActive || !memoryRead.error) return;
-    toast.error("Couldn't read Codex memory settings", {
-      description: memoryRead.error.message,
-    });
-  }, [codexDiagnosticsActive, memoryRead.error]);
 
   // Resolve against the same exact-workspace snapshot as New Chat. Keep a
   // saved disconnected default visible, while only connected choices can pick.
@@ -1404,6 +1409,13 @@ function ModelsPanel({ surfaceActive = false }: { surfaceActive?: boolean }) {
               own storage.
             </p>
             <SettingsList className={MODELS_SECTION_CLS}>
+              {memoryRead.error && (
+                <SettingsRow label="Couldn't read memory settings">
+                  <Button variant="ghost" size="sm" onClick={memoryRead.refresh}>
+                    Retry
+                  </Button>
+                </SettingsRow>
+              )}
               <SettingsRow
                 label="Local memories"
                 hint="Let Codex learn reusable project context on this device"

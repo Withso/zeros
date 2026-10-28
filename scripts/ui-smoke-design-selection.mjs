@@ -1,4 +1,5 @@
 import { expect } from "@playwright/test";
+import { designFrameElementBox } from "./ui-smoke-design-helpers.mjs";
 
 export async function runDesignDoubleClickSelectionSmoke({ page, check }) {
   const origin = new URL(page.url()).origin;
@@ -20,13 +21,55 @@ export async function runDesignDoubleClickSelectionSmoke({ page, check }) {
       `[data-design-sidebar-panel] [data-design-layer-id="${id}"][aria-selected="true"]`,
     );
   const editor = page.locator("[data-design-inline-text-editor]");
-  const heading = page
-    .frameLocator(
-      '[data-design-frame="home.html"] iframe[data-design-document-buffer="displayed"]',
-    )
-    .locator('[data-oid="home-heading"]');
+  const runtime = page.frameLocator(
+    '[data-design-frame="home.html"] iframe[data-design-document-buffer="displayed"]',
+  );
+  const heading = runtime.locator('[data-oid="home-heading"]');
   await page.locator('[data-design-frame-row="home.html"]').click();
-  const box = await heading.boundingBox();
+  // A layer whose details were never read selects at once and the inspector
+  // names that exact layer at once; it never reads "Nothing selected" or
+  // shows another layer's properties while the readback is pending.
+  const coldRow = page.locator("[data-design-sidebar-panel] [data-design-layer-id]").nth(9);
+  const coldId = await coldRow.getAttribute("data-design-layer-id");
+  await page.evaluate(() => {
+    const probe = { headers: [], done: false };
+    window.__designColdLayer = probe;
+    // A busy runtime: its node readbacks answer 150 ms late.
+    const post = MessagePort.prototype.postMessage;
+    probe.restore = () => { MessagePort.prototype.postMessage = post; };
+    MessagePort.prototype.postMessage = function (message, ...rest) {
+      if (message?.type === "request" && message.method === "getNodeDetails") {
+        setTimeout(() => post.call(this, message, ...rest), 150);
+        return;
+      }
+      return post.call(this, message, ...rest);
+    };
+    const sample = () => {
+      const header = document.querySelector("[data-design-inspector-header]")?.textContent?.trim();
+      if (probe.headers.at(-1) !== header) probe.headers.push(header);
+      if (!probe.done) requestAnimationFrame(sample);
+    };
+    requestAnimationFrame(sample);
+  });
+  await coldRow.click();
+  await expect(page.locator(`[data-design-sidebar-panel] [data-design-layer-id="${coldId}"][aria-selected="true"]`)).toHaveCount(1);
+  await page.waitForTimeout(300);
+  const cold = await page.evaluate(() => {
+    const probe = window.__designColdLayer;
+    probe.done = true;
+    probe.restore();
+    return probe.headers;
+  });
+  // The frame row was selected before the click ("Frame"); afterwards only the
+  // clicked layer's own label may appear.
+  const afterClick = cold.slice(cold.indexOf("Frame") + 1);
+  check(
+    "an uncached layer selection names that layer at once, never Nothing selected",
+    !cold.includes("Nothing selected") && new Set(afterClick).size <= 1,
+    JSON.stringify(cold),
+  );
+  await page.locator('[data-design-frame-row="home.html"]').click();
+  const box = await designFrameElementBox(runtime.owner(), heading);
   const doubleClick = () =>
     page.mouse.dblclick(box.x + box.width / 2, box.y + box.height / 2);
   await doubleClick();
@@ -50,7 +93,7 @@ export async function runDesignDoubleClickSelectionSmoke({ page, check }) {
       '[data-design-sidebar-panel] [data-design-layer-id="home-heading"]',
     )
     .click();
-  const empty = await heading.boundingBox();
+  const empty = await designFrameElementBox(runtime.owner(), heading);
   await page.mouse.dblclick(
     empty.x + empty.width / 2,
     empty.y + empty.height / 2,
@@ -252,7 +295,7 @@ export async function runDesignSelectionSmoke({ page, waitFor, check }) {
   );
   const mark = runtime.locator('[data-oid="home-mark"]');
   const clickMark = async (double = false) => {
-    const box = await mark.boundingBox();
+    const box = await designFrameElementBox(runtime.owner(), mark);
     await page.mouse[double ? "dblclick" : "click"](
       box.x + box.width / 2,
       box.y + box.height / 2,
@@ -300,7 +343,7 @@ export async function runDesignSelectionSmoke({ page, waitFor, check }) {
   // Use non-text container padding to check that one double-click descends
   // once even when pointer-up and dblclick arrive before the runtime answers.
   const nav = runtime.locator('[data-oid="home-nav"]');
-  const navBox = await nav.boundingBox();
+  const navBox = await designFrameElementBox(runtime.owner(), nav);
   await page.mouse.dblclick(
     navBox.x + navBox.width / 2,
     navBox.y + navBox.height / 2,
@@ -340,9 +383,7 @@ export async function runDesignSelectionSmoke({ page, waitFor, check }) {
       }
     };
   });
-  const headingBox = await runtime
-    .locator('[data-oid="home-heading"]')
-    .boundingBox();
+  const headingBox = await designFrameElementBox(runtime.owner(), runtime.locator('[data-oid="home-heading"]'));
   for (const child of ["home-hero", "home-heading"]) {
     await page.mouse.dblclick(
       headingBox.x + headingBox.width / 2,
@@ -425,9 +466,7 @@ export async function runDesignSelectionSmoke({ page, waitFor, check }) {
       forceRuntimeRead: true,
     });
   });
-  const underPadding = await runtime
-    .locator('[data-oid="home-heading"]')
-    .boundingBox();
+  const underPadding = await designFrameElementBox(runtime.owner(), runtime.locator('[data-oid="home-heading"]'));
   const paddingPoint = {
     x: underPadding.x + underPadding.width / 2,
     y: underPadding.y + underPadding.height / 2,

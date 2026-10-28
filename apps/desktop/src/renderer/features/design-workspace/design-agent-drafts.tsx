@@ -446,7 +446,7 @@ export const DesignAgentDraftGhosts = React.memo(function DesignAgentDraftGhosts
   directory: string | undefined;
   pages: readonly DesignPageSummary[] | undefined;
   activePageId: string | null | undefined;
-  frames: readonly DesignCanvasFrameWire[];
+  frames: readonly Pick<DesignCanvasFrameWire, "file" | "title" | "x" | "y" | "width" | "height">[];
   active: boolean;
   theme: string | null;
 }) {
@@ -603,7 +603,7 @@ export const DesignAgentActivityChip = React.memo(function DesignAgentActivityCh
   directory: string | undefined;
   pages: readonly DesignPageSummary[] | undefined;
   activePageId: string | null | undefined;
-  frames: readonly DesignCanvasFrameWire[];
+  frames: readonly Pick<DesignCanvasFrameWire, "file" | "title" | "x" | "y" | "width" | "height">[];
   /** Hidden retained canvases show, follow and retire nothing. */
   active: boolean;
   motionOpen: boolean;

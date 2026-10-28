@@ -43,8 +43,6 @@ import React, {
 import { FileDiff, Folders, Search } from "lucide-react";
 
 import { useWorkspaceDispatch } from "@/renderer/state/store";
-import { workbenchScopeForFolder } from "@/renderer/state/workspace-store";
-import { relativeWorkspaceFilePath } from "@/renderer/platform/workspace-file-path";
 import { useActiveWorkspace } from "@/renderer/state/use-active-workspace";
 import { useGithubReview } from "@/renderer/features/code-review/use-github-review";
 import type { CodeReviewExternalSource } from "@/renderer/features/code-review/review-thread-model";
@@ -56,10 +54,7 @@ import { useChatCwd } from "../../use-chat-cwd";
 import { triggerGitRefresh, useGitRefreshKey } from "../../use-git-refresh-key";
 import { useOpenFileInWorkbench, type OpenFileOpts } from "../use-open-file";
 import { type WorkbenchTab } from "../tab-model";
-import {
-  isWorkbenchEditorDirty,
-  useWorkbenchDirtyEditorIds,
-} from "./code-editor/editor-state";
+import { useWorkbenchDirtyEditorIds } from "./code-editor/editor-state";
 import { changeOpenIntent } from "./changes-open-intent";
 import {
   findRequestedChange,
@@ -112,8 +107,7 @@ export const ChangesWorkbenchSurface = React.memo(
   function ChangesWorkbenchSurface({ tab, active, scope }: TabBodyProps) {
     const cwd = useChatCwd();
     const { workspace, isLocalMain, changesTarget } = useSourceTarget();
-    const { project, loading: workspaceLoading } = useActiveWorkspace();
-    const dispatch = useWorkspaceDispatch();
+    const { project } = useActiveWorkspace();
     // The same live refresh bus as the File tabs: agent turn-end / git
     // writes / editor saves re-pull the list, the PR row, and the open diff.
     const gitRefresh = useGitRefreshKey(cwd, changesTarget, active);
@@ -125,36 +119,6 @@ export const ChangesWorkbenchSurface = React.memo(
     // Publish instead of a raw git error.
     const trunkRoot = isLocalMain ? workspace?.repoRoot || null : null;
     const { nonGit, checked } = useTrunkGitState(trunkRoot, gitRefresh, active);
-
-    // Plain folders and unborn repositories have no Changes model to resolve
-    // a tool request. Their exact source file still belongs in Files.
-    useLayoutEffect(() => {
-      if (
-        !active ||
-        !cwd ||
-        !tab.filePath ||
-        tab.changesRequestedFile !== tab.filePath ||
-        isWorkbenchEditorDirty(tab.id) ||
-        (!nonGit && (workspaceLoading || changesTarget))
-      ) return;
-      const root = (isLocalMain ? workspace?.repoRoot : workspace?.path) ?? cwd;
-      const filePath = relativeWorkspaceFilePath(
-        cwd,
-        `${root.replace(/\/+$/, "")}/${tab.filePath}`,
-      );
-      if (filePath) {
-        dispatch({
-          type: "OPEN_REQUESTED_CHANGES_FILE",
-          scope: scope ?? workbenchScopeForFolder(cwd),
-          id: tab.id,
-          path: tab.filePath,
-          filePath,
-        });
-      }
-    }, [
-      active, cwd, tab, scope, nonGit, workspaceLoading, changesTarget,
-      isLocalMain, workspace, dispatch,
-    ]);
 
     // Writes that bypass the engine bridge (discard, git init) nudge the exact
     // cwd's refresh consumers — including this tab's own gitRefresh key.
@@ -592,23 +556,8 @@ export function ChangesSurface({
         );
         return;
       }
-      // Only the exact successful comparison can prove this request absent.
-      // Consume it together with the Files open, so returning to Changes does
-      // not repeat the redirect. Files paths are relative to the chat's cwd,
-      // while Changes paths are relative to the owning Git root.
-      const filePath = relativeWorkspaceFilePath(
-        cwd,
-        `${folder.replace(/\/+$/, "")}/${selected}`,
-      );
-      if (filePath && cwd) {
-        dispatch({
-          type: "OPEN_REQUESTED_CHANGES_FILE",
-          scope: scope ?? workbenchScopeForFolder(cwd),
-          id: tab.id,
-          path: selected,
-          filePath,
-        });
-      }
+      // Retain the explicit diff destination even for an ignored file or a
+      // change that was reverted. The body explains the empty comparison.
       return;
     }
     const nextSelected = reconcileChangesSelection(

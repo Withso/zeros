@@ -46,6 +46,7 @@ import { parseNativeErrorMessage } from "@zeros/protocol/native-error";
 
 interface ZerosNativeBridge {
   readonly localDevelopment?: boolean;
+  readonly asyncCanvasWheel?: boolean;
   maintainAttachmentSources?(retainedIds: string[]): Promise<string[]>;
   beforeQuit?(prepare: () => Promise<void>): () => void;
   prepareAttachmentFile?(file: File, id: string): Promise<string | null>;
@@ -78,6 +79,13 @@ declare global {
  *  preload bridge becomes available. */
 export function isElectron(): boolean {
   return typeof window !== "undefined" && !!window.__ZEROS_NATIVE__;
+}
+
+/** The native main window disables browser visual pinch zoom. Its Design
+ * viewport can therefore own a camera without blocking wheel acknowledgments.
+ * An older host or a browser keeps the ordinary cancelable input path. */
+export function hasAsyncCanvasWheel(): boolean {
+  return typeof window !== "undefined" && window.__ZEROS_NATIVE__?.asyncCanvasWheel === true;
 }
 
 /** Synchronous, native-main-owned mode, available before the first app render. */

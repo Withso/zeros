@@ -301,12 +301,14 @@ function githubFetch(calls: FetchCall[]): typeof fetch {
         {
           token: "ghs_cloud-installation-working-copy",
           expires_at: new Date(Date.now() + 60 * 60_000).toISOString(),
-          permissions: { contents: "write", metadata: "read" },
+          permissions: JSON.parse(String(init?.body)).permissions,
           repository_selection: "selected",
         },
         { status: 201 },
       );
     }
+    if (url.includes("/collaborators/")) return Response.json({ permission: "write", user: { id: 1234, login: "octocat" } });
+    if (url.endsWith("/installation/token") && init?.method === "DELETE") return new Response(null, { status: 204 });
     if (
       url.includes("/applications/") &&
       url.endsWith("/token") &&
@@ -712,15 +714,42 @@ dbDescribe("GitHub App OAuth handoff", () => {
     );
     expect(JSON.parse(String(mint?.init?.body))).toEqual({
       repositories: ["zeros"],
+      permissions: { metadata: "read" },
+    });
+    expect(calls.slice(before).filter(call => call.url.endsWith("/access_tokens")).map(call => JSON.parse(String(call.init?.body)))).toContainEqual({
+      repositories: ["zeros"], permissions: { metadata: "read", contents: "read", pull_requests: "read" },
     });
 
     const foreignCalls = calls.length;
     const foreign = await appB.request(
       "/v1/github/installations/987654/token",
-      { method: "POST" },
+      { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ repositories: ["zeros"] }) },
     );
     expect(foreign.status).toBe(404);
     expect(calls).toHaveLength(foreignCalls);
+  });
+
+  it("never mints installation-wide authority from an omitted repository list", async () => {
+    const before = calls.length;
+    const response = await appA.request("/v1/github/installations/987654/token", {
+      method: "POST", headers: { "content-type": "application/json" }, body: "{}",
+    });
+    expect(response.status).toBe(422);
+    expect(calls).toHaveLength(before);
+  });
+
+  it("checks the connected human before releasing installation authority", async () => {
+    await connectCredential(appA, "permission".repeat(5));
+    const original = githubFetch(calls);
+    const app = testApp(pool, userA, { fetch: async (input, init) => {
+      if (String(input).includes("/collaborators/")) return Response.json({ permission: "none", user: { id: 1234, login: "octocat" } });
+      return original(input, init);
+    } });
+    const response = await app.request("/v1/github/installations/987654/token", {
+      method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ repositories: ["zeros"] }),
+    });
+    expect(response.status).toBe(403);
+    expect(JSON.stringify(await response.json())).not.toContain("ghs_");
   });
 
   // Enumerating installations costs up to 60 outbound GitHub calls. Doing that
@@ -838,6 +867,51 @@ dbDescribe("GitHub App OAuth handoff", () => {
   // backed-up (refreshToken, refreshBinding) pair would keep minting fresh
   // access tokens for months after the user clicked Disconnect — GitHub's
   // /applications/{id}/token revocation only kills the one access token.
+  it("does not revive an old refresh or disconnect binding after reconnect", async () => {
+    const old = await connectCredential(appA, "old".repeat(15));
+    const current = await connectCredential(appA, "new".repeat(15));
+    const before = calls.length;
+    const refresh = await appA.request("/v1/github/oauth/refresh", {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ refreshToken: old.refreshToken, refreshBinding: old.refreshBinding }),
+    });
+    expect(refresh.status).toBe(401);
+    const disconnect = await appA.request("/v1/github/oauth/revoke", {
+      method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(old),
+    });
+    expect(disconnect.status).toBe(200);
+    expect(calls).toHaveLength(before);
+    const live = await appA.request("/v1/github/oauth/refresh", {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ refreshToken: current.refreshToken, refreshBinding: current.refreshBinding }),
+    });
+    expect(live.status).toBe(200);
+  });
+
+  it("does not let a disconnect delayed by GitHub erase a reconnect", async () => {
+    const old = await connectCredential(appA, "delay".repeat(9));
+    let entered!: () => void, release!: () => void;
+    const waiting = new Promise<void>(resolve => { entered = resolve; });
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const original = githubFetch(calls);
+    const app = testApp(pool, userA, { fetch: async (input, init) => {
+      if (String(input).endsWith("/token") && init?.method === "DELETE") { entered(); await gate; }
+      return original(input, init);
+    } });
+    const pending = app.request("/v1/github/oauth/revoke", {
+      method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(old),
+    });
+    await waiting;
+    const current = await connectCredential(appA, "later".repeat(9));
+    release();
+    expect((await pending).status).toBe(200);
+    const live = await appA.request("/v1/github/oauth/refresh", {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ refreshToken: current.refreshToken, refreshBinding: current.refreshBinding }),
+    });
+    expect(live.status).toBe(200);
+  });
+
   it("stops minting tokens for a refresh pair whose authorization was revoked", async () => {
     const current = await connectCredential(appA, "1".repeat(43));
     const revoked = await appA.request("/v1/github/oauth/revoke", {
@@ -1066,6 +1140,17 @@ dbDescribe("organization GitHub source authorization", () => {
     return {user,org,request,entry,calls};
   }
 
+  it("withdraws immutable MCP admission when an older writer renews only its mutable name", async () => {
+    const f = await fixture();
+    expect((await f.request({ action: "connect", installationId: f.entry.id })).status).toBe(200);
+    expect((await f.request({ action: "repositories", installationId: f.entry.id, page: 1 })).status).toBe(200);
+    expect(await mcpRepositoryCatalog(pool)(f.org, f.user.id)).toMatchObject([{ repositoryId: "123" }]);
+    // The preceding API version renews the name's expiry without supplying a
+    // repository ID. Its new observation must not renew an earlier ID proof.
+    await pool.query("UPDATE organization_mcp_repositories SET expires_at=expires_at+interval '1 second' WHERE org_id=$1 AND owner_user_id=$2", [f.org, f.user.id]);
+    expect(await mcpRepositoryCatalog(pool)(f.org, f.user.id)).toEqual([{ repository: "acme/example", defaultBranch: "main", repositoryId: null }]);
+  });
+
   it("connects only the acting member and returns repositories after checking current authority", async () => {
     const f = await fixture();
     expect((await f.request({action:"connect",installationId:f.entry.id})).status).toBe(200);
@@ -1077,7 +1162,7 @@ dbDescribe("organization GitHub source authorization", () => {
     expect(connection.rows).toEqual([{ installation_id: f.entry.id }]);
     // The MCP project catalog uses the user's verified installation view,
     // independently of any Cloud Computer build or installation-wide token.
-    expect(await mcpRepositoryCatalog(pool)(f.org, f.user.id)).toEqual([{ repository: "acme/example", defaultBranch: "main" }]);
+    expect(await mcpRepositoryCatalog(pool)(f.org, f.user.id)).toEqual([{ repository: "acme/example", defaultBranch: "main", repositoryId: "123" }]);
     expect(f.calls.some(call=>call.url.includes("/access_tokens"))).toBe(false);
     const before = f.calls.length;
     const denied = await f.request({action:"source",organizationId:randomUUID(),owner:"acme",repository:"example"});

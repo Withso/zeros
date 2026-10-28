@@ -140,7 +140,7 @@ describe("Surface markup equivalence", () => {
       constant: "REPOSITORY_HEADER_CLS",
       tag: "div",
       original:
-        "group/repo relative flex h-8 w-full min-w-0 shrink-0 select-none items-center gap-1 rounded-md pr-1 text-fg2 transition-none hover:bg-sidebar-bg-hover data-[active=true]:bg-sidebar-bg-hover",
+        "group/repo relative flex h-8 w-full min-w-0 shrink-0 select-none items-center gap-1 rounded-md pr-1 text-fg2 transition-none data-[active=true]:bg-sidebar-bg-hover",
       icon: false,
     },
   ];
@@ -148,7 +148,8 @@ describe("Surface markup equivalence", () => {
     "preserves $site under the sidebar binding",
     ({ file, constant, tag, original, icon }) => {
       const current = currentRecipe(file, constant);
-      expect(current).toContain("hover:bg-(--surface-hover)");
+      // Repository headers use the surface fill only for their active page.
+      expect(current).toContain("bg-(--surface-hover)");
       const previous = renderToStaticMarkup(
         tag === "button"
           ? createElement(

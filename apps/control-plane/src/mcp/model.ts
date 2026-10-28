@@ -13,6 +13,8 @@ const env = z.record(envName, text).refine(value => Object.keys(value).length <=
 const headers = z.record(headerName, text.refine(value => !/[\r\n]/.test(value))).refine(value => Object.keys(value).length <= 128);
 export const McpRepositorySchema = z.string().max(255).regex(/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/)
   .refine(value => !value.split("/").some(part => part === "." || part === "..")).transform(value => value.toLowerCase());
+export const McpRepositoryIdSchema = z.string().regex(/^[1-9][0-9]{0,15}$/)
+  .refine(value => Number.isSafeInteger(Number(value)));
 export function isLoopbackMcpUrl(value: string): boolean {
   try {
     const url = new URL(value);

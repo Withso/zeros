@@ -78,6 +78,8 @@ import {
   type PendingWorkspaceCreate,
 } from "../../state/pending-workspaces";
 import { useWorkspaceHasChanges } from "../../shell/pr/use-workspace-has-changes";
+import { isGithubDotComRemote } from "../../shell/pr/github-url";
+import { useRepositoryRemote } from "../repositories/use-repository-remote";
 import { useOpenWorkspace } from "../../state/use-open-workspace";
 import {
   saveDashboardRepoFilter,
@@ -1006,6 +1008,7 @@ function DashboardCard({
   // shows NO button rather than a possibly-wrong destructive Merge.
   const localFolder = isLocalMainWorkspace(w);
   const cloud = isCloudWorkspace(w.path);
+  const { remoteUrl } = useRepositoryRemote(w.repoRoot, row.project?.originUrl ?? null, active && view === "board" && !localFolder && !cloud);
   const probedChanges = useWorkspaceHasChanges(
     localFolder || cloud ? null : w,
     active && view === "board" && !localFolder && !cloud,
@@ -1054,7 +1057,7 @@ function DashboardCard({
     busyKey: "archive" | "merge" | null;
   };
   let action: CardAction | null;
-  switch (resolveCardActionKind(w, hasChanges)) {
+  switch (resolveCardActionKind(w, hasChanges, isGithubDotComRemote(remoteUrl))) {
     case "recover":
       action = {
         label: "Recover",

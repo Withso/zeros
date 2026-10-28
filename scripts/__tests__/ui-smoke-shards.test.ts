@@ -15,10 +15,13 @@ import { checkPageErrors, runSmokeScenarios } from "../ui-smoke/runner.mjs";
 // Frozen from the serial runner, including the design-workspace dispatcher's
 // children. Core's later phases stay after file-prefetch in the execution plan.
 const originalOrder = [
+  "full-disk-access",
   "local-links",
   "text-selection",
   "git-review-actions",
   "code-review",
+  "cloud-github",
+  "cloud-github-pr",
   "code-review-retention",
   "create-composer",
   "create-source-immediate-escape",
@@ -339,6 +342,22 @@ describe("UI smoke independent execution", () => {
     });
     expect(pageFor("composer-editor").route).not.toHaveBeenCalled();
     for (const page of fixture.pages) expect(page.close).toHaveBeenCalledOnce();
+  });
+
+  it("isolates recovery clocks while retaining page-error reporting", async () => {
+    const fixture = fakeRun();
+    await fixture.run();
+    const recovery = fixture.calls.find(
+      (call) => call.id === "design-frame-recovery",
+    )!;
+    const interactions = fixture.calls.filter((call) =>
+      ["design-inline-tools", "design-workspace-canvas", "customize"].includes(call.id),
+    );
+    for (const interaction of interactions)
+      expect(interaction.page).not.toBe(recovery.page);
+    expect(recovery.page.close).toHaveBeenCalledOnce();
+    recovery.page.emit("pageerror", new Error("recovery page error"));
+    expect(fixture.pageErrors).toEqual(["recovery page error"]);
   });
 
   it.each([1, 2, 3])(

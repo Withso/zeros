@@ -1,5 +1,6 @@
 import { createHash, randomBytes } from "node:crypto";
 import { createServer } from "node:http";
+import { engineCliInvocation } from "../cli-invocation";
 import type {
   DesignContextReference,
   DesignVerificationAccess,
@@ -40,13 +41,12 @@ export interface DesignVerificationOwner {
 }
 interface Lease extends DesignVerificationOwner { expiresAt: number; }
 
-/** This command uses the same entrypoint in the Node dev engine and compiled
- * sidecar. Neither capture-host credentials nor a general engine token leave
+/** This command uses the same entrypoint in Node/Bun source engines and the
+ * compiled sidecar. Neither capture-host credentials nor a general engine token leave
  * the engine. The URL grants only bounded, read-only access to one directory. */
 function commandPrefix(): string {
-  const args = process.versions.bun
-    ? [process.execPath, "design"]
-    : [process.execPath, process.argv[1]!, "design"];
+  const invocation = engineCliInvocation("design");
+  const args = [invocation.executable, ...invocation.args];
   return args.map((arg) => `'${arg.replace(/'/g, "'\\''")}'`).join(" ");
 }
 

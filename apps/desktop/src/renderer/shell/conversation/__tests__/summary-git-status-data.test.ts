@@ -19,7 +19,10 @@ vi.mock("../../git-status-reads", () => ({
   statusForGeneration: reads.status,
   changeCountsForGeneration: reads.counts,
 }));
-vi.mock("../../../platform/git", () => ({ ghPrGet: reads.pr }));
+vi.mock("../../../platform/git", async (importOriginal) => ({
+  ...await importOriginal<typeof import("../../../platform/git")>(),
+  ghPrGet: reads.pr,
+}));
 const workspace = {
   id: "ws_a",
   path: "/a",

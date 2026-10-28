@@ -50,12 +50,25 @@ failed. Transfer status belongs in the tooltip and `aria-busy`, never an inline
 percentage that widens the pill and rewraps adjacent files. Failed copies retain
 their warning styling and error tooltip.
 
-Generated clipboard files and remote workspaces use bounded 1 MiB chunks, with
-at most two concurrent renderer transfers. Browser FileReader performs Base64
+Generated clipboard files and cloud workspaces use bounded 1 MiB chunks, with
+at most two concurrent renderer transfers and 32 queued transfers. Browser FileReader performs Base64
 encoding for the existing JSON transport. Encoding affects transport only,
 never the stored file format. A transfer captures its runtime and resolves its
 workspace once; switching runtimes rejects subsequent writes. Native source
-capabilities are refused over remote or non-host-local transports.
+capabilities are refused over remote or non-host-local transports. Cloud uploads
+start on selection in an existing workspace, explicitly waking that destination
+if needed. Each chunk is fenced against account, Stop and execution changes;
+the expected wake generation is allowed. The standalone worker accepts four
+uploads per VM and reports them as activity so an idle stop cannot interrupt
+an active transfer. Explicit Stop aborts partial uploads before its acknowledgement.
+Retries first resolve a completed record, including after a lost final reply,
+then restart incomplete uploads from the retained source.
+
+Clicking a selected image/video while it uploads opens Files immediately from
+its local Blob, without waiting for the VM. A visible preview keeps its lease
+through completion; closing or hiding releases it. Files previews support
+200 MB, independently of the 500 MB attachment limit. See
+[Files media previews](file-media-preview.md) for streaming and resource limits.
 
 The engine validates size, format, upload identity and offsets. Incomplete
 uploads and final copies live in owner-only temporary directories outside the
@@ -71,7 +84,7 @@ Only a completed file is published into
 `.context/attachments/<attachmentId>/<filename>`. A record an earlier build
 wrote under `local/` or `shared/` retains its folder and identity. Aborted,
 failed and idle uploads are cleaned up.
-Successful publication removes its temporary directory as well. Private
+Local successful publication removes its temporary directory as well. Private
 `attachment-temporaries/` ownership records identify the directory, inode and
 creating process. Maintenance reclaims recorded copies older than 24 hours
 only after that process exits and the directory identity still matches. It
@@ -81,7 +94,16 @@ are never the durable draft store. An app-data override inside the workspace
 is rejected so recovery metadata cannot add files to the repository. Imports no longer create
 `.context/.attachment-staging/` or its extra ignore file. Explicit context writes
 remove an old empty staging scaffold or its exact generated ignore file;
-unknown files, edited ignore rules and links remain untouched.
+unknown files, edited ignore rules and links remain untouched. The cloud worker
+uses a private sibling `attachment-uploads/` directory in its state store,
+publishes complete files with an atomic no-overwrite hardlink, and removes the
+partial immediately. Failed, aborted, stopped or five-minute-idle transfers
+release partial files; startup also reclaims stale owned partials in bounded
+batches. Completed cloud attachments are included in workspace checkpoints
+even when their `.context` directory is ignored. Attachment records require
+ordinary directory paths; redirected symlink layouts are refused before
+completion because the checkpoint cannot retain them. Private partial uploads
+are excluded from checkpoints.
 
 Workspace creation and read-only context listings do not create
 `.context/`. An attachment or explicit context write prepares storage on demand.
@@ -105,7 +127,7 @@ copies the selection while submission is pending, but leaves the draft intact.
 
 Attachment support means the file is available to the agent's tools. It does
 not promise native playback, document conversion, or model understanding of
-every format. Existing image previews retain their bounded read behavior.
+every format. Image/video Files previews stream within their separate 200 MB cap.
 
 Legacy drafts and transcripts remain readable. On send, legacy inline text or
 image bytes are saved once and delivered as file references to every agent,
@@ -153,10 +175,12 @@ force-quitting before that preparation commits can still require reattaching.
 
 On Create, the submitted revision and sources transfer to the new chat. Local
 delivery publishes files under `.context/attachments/<id>/<filename>` in the
-created workspace. Cloud v2's durable prompt outbox uploads portable bytes and
-the worker materializes them at `.context/local/attachments/<id>/<filename>`
-before agent dispatch. Its existing **8 MiB encoded prompt limit** still applies;
-the general 500 MB file-selection policy is not a cloud transport limit.
+created workspace. Cloud v2 starts the same background chunked upload after
+creation and publishes to `.context/attachments/<id>/<filename>`, up to
+**500 MB per file**, matching Local. Attach and Send share the upload. The
+durable prompt outbox receives only complete file references; its existing
+**8 MiB encoded message limit** does not include attachment file bytes.
+The worker still accepts older clients' inline attachment messages.
 The Create draft is consumed only after confirmed creation and complete chat
 draft persistence, and only if its submitted revision is still current. Failed
 creates, newer typing and a handoff that cannot be fully persisted keep their
@@ -203,9 +227,12 @@ remote upload Blobs live in IndexedDB `zeros:attachment-sources:v1`. Restart
 first resolves a completed context record, then retries from the retained
 source if necessary. Recovery-source cleanup considers persisted and live
 drafts, editor undo side stores, active uploads and the current clipboard.
-Completing one upload releases that transfer's reference; it cannot remove
-bytes another owner still needs. Unreferenced native capability records and
-IndexedDB Blobs have a 24-hour grace period. Legacy raw-Blob records migrate
+Completing an upload joins any pending recovery snapshot, persists the confirmed
+destination reference, then immediately deletes its unneeded recovery Blob.
+It cannot remove bytes another owner still needs, or the selected original file.
+If draft persistence or ownership inspection fails, recovery bytes stay.
+Other unreferenced native capability records and IndexedDB Blobs have a 24-hour
+grace period. Legacy raw-Blob records migrate
 with a fresh grace period. Referenced drafts have no age-based expiry.
 
 Cleanup runs in bounded batches while the app is visible, including after

@@ -36,6 +36,12 @@
   tests, including Local and cloud logging behavior.
 - **PR CI:** rerunning only the failed jobs is fine for a flake or infra
   failure. Record that it was a rerun.
+- **HTML/SVG pixel comparisons:** reproduce the runner's font rasterization
+  settings before changing a pixel tolerance. Linux fontconfig can enable LCD
+  text for an opaque HTML paint while an SVG image uses grayscale antialiasing.
+  Use the same grayscale mode for both test references (`--disable-lcd-text`),
+  retain the strict pixel assertion, and leave application rendering unchanged.
+  A matching browser/font version alone does not prove matching rasterization.
 - **Read-only corruption fixtures:** temporarily permit fixture writes, restore
   the original mode in `finally`, and keep the byte length unchanged when testing
   a digest mismatch. Assert the closed failure code. On Linux, a nonzero UID can

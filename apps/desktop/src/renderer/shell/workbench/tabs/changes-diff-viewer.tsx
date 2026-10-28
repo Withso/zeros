@@ -782,12 +782,12 @@ function ChangesDiffHeader({
           aria-expanded={!collapsed}
           onClick={onToggle}
         >
-          <span className="flex items-center justify-center group-hover/diff-header:opacity-0 group-has-[:focus-visible]/diff-header:opacity-0">
+          <span className="flex items-center justify-center group-hover/diff-header:opacity-0 group-has-focus-visible/diff-header:opacity-0">
             <FileTypeIcon name={file.path} size={14} />
           </span>
           <ChevronDown
             className={cn(
-              "absolute opacity-0 group-hover/diff-header:opacity-100 group-has-[:focus-visible]/diff-header:opacity-100",
+              "absolute opacity-0 group-hover/diff-header:opacity-100 group-has-focus-visible/diff-header:opacity-100",
               collapsed && "-rotate-90",
             )}
           />
@@ -829,7 +829,7 @@ function ChangesDiffHeader({
         <Button
           size="icon-sm"
           variant="ghost"
-          className="pointer-events-none shrink-0 opacity-0 group-hover/diff-header:pointer-events-auto group-hover/diff-header:opacity-100 group-has-[:focus-visible]/diff-header:pointer-events-auto group-has-[:focus-visible]/diff-header:opacity-100 hover:bg-transparent [&_svg]:size-3"
+          className="pointer-events-none shrink-0 opacity-0 group-hover/diff-header:pointer-events-auto group-hover/diff-header:opacity-100 group-has-focus-visible/diff-header:pointer-events-auto group-has-focus-visible/diff-header:opacity-100 hover:bg-transparent [&_svg]:size-3"
           aria-label={`Copy ${file.path}`}
           disabled={file.binary}
           onClick={() => {

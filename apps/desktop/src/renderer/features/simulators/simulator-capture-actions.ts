@@ -4,6 +4,7 @@ import type { SimulatorDevice } from "@zeros/protocol/simulators";
 
 import { deliverFilesToChat } from "../agent/composer-file-attachment-delivery";
 import { toast } from "../../shared/ui/primitives/elements";
+import { getFocusInteractionVersion } from "../../shared/ui/focus-navigation";
 import {
   dragSimulatorCapture,
   loadSimulatorCaptureFile,
@@ -84,6 +85,7 @@ export async function addSimulatorCaptureToChat(
     toast.error("No chat to add this to.", { description: "Open or create a chat first." });
     return false;
   }
+  const focusVersion = getFocusInteractionVersion();
   let file: File;
   try {
     const loaded = await loadSimulatorCaptureFile(capture.id);
@@ -106,7 +108,9 @@ export async function addSimulatorCaptureToChat(
     });
     return false;
   }
-  deliverFilesToChat(chatId, { id: `simulator-capture:${capture.id}`, files: [file] });
+  deliverFilesToChat(chatId, { id: `simulator-capture:${capture.id}`, files: [file] }, {
+    focus: focusVersion === getFocusInteractionVersion(),
+  });
   captureThumbnails.dismiss(capture.id);
   return true;
 }

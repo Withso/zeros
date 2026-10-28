@@ -454,27 +454,32 @@ function mutateInlineStyles(
 }
 
 function lineAndColumn(
-  source: string,
+  lineStarts: readonly number[],
   offset: number,
 ): { line: number; column: number } {
-  let line = 1;
-  let column = 1;
-  for (let index = 0; index < offset; index += 1) {
-    if (source[index] === "\n") {
-      line += 1;
-      column = 1;
-    } else column += 1;
+  let low = 0, high = lineStarts.length;
+  while (low + 1 < high) {
+    const middle = (low + high) >>> 1;
+    if (lineStarts[middle]! <= offset) low = middle;
+    else high = middle;
   }
-  return { line, column };
+  return { line: low + 1, column: offset - lineStarts[low]! + 1 };
+}
+
+function sourceLineStarts(source: string): number[] {
+  const starts = [0];
+  for (let index = 0; index < source.length; index++) if (source[index] === "\n") starts.push(index + 1);
+  return starts;
 }
 
 function sourceSpan(
   source: string,
   startOffset: number,
   endOffset: number,
+  lineStarts = sourceLineStarts(source),
 ): DesignSourceSpan {
-  const start = lineAndColumn(source, startOffset);
-  const end = lineAndColumn(source, endOffset);
+  const start = lineAndColumn(lineStarts, startOffset);
+  const end = lineAndColumn(lineStarts, endOffset);
   return {
     startOffset,
     endOffset,
@@ -610,10 +615,10 @@ function conditionsFor(node: Declaration): string[] {
 }
 
 function authoredStylesheets(
-  state: DesignWebDocumentState,
+  files: Readonly<Record<string, string>>,
 ): AuthoredStylesheet[] {
   const stylesheets: AuthoredStylesheet[] = [];
-  for (const [file, source] of Object.entries(state.files)) {
+  for (const [file, source] of Object.entries(files)) {
     if (file.toLowerCase().endsWith(".css")) {
       stylesheets.push({ file, source, offsetBase: 0 });
       continue;
@@ -664,7 +669,9 @@ function stylesheetCandidates(
   runtimeSelectors: ReadonlySet<string> = new Set(),
 ): StylesheetCandidate[] {
   const candidates: StylesheetCandidate[] = [];
-  for (const stylesheet of authoredStylesheets(state)) {
+  const linesByFile = new Map<string, number[]>();
+  let remainingRules = 50_000;
+  for (const stylesheet of authoredStylesheets(state.files)) {
     const { file, source, offsetBase } = stylesheet;
     let root: postcss.Root;
     try {
@@ -673,6 +680,7 @@ function stylesheetCandidates(
       continue;
     }
     root.walkRules((rule) => {
+      if (--remainingRules < 0) throw new Error("Stylesheet inspection exceeded its rule limit.");
       if (
         !selectorTargetsNode(rule.selector, nodeId) &&
         !runtimeSelectors.has(rule.selector.trim())
@@ -682,6 +690,9 @@ function stylesheetCandidates(
       for (const declaration of directRuleDeclarations(rule, property)) {
         const offsets = declarationOffsets(source, declaration);
         if (!offsets) continue;
+        if (candidates.length >= 10_000) throw new Error("Stylesheet inspection exceeded its declaration limit.");
+        let lines = linesByFile.get(file);
+        if (!lines) { lines = sourceLineStarts(state.files[file]!); linesByFile.set(file, lines); }
         candidates.push({
           node: declaration,
           source,
@@ -702,6 +713,7 @@ function stylesheetCandidates(
               state.files[file]!,
               offsetBase + offsets.start,
               offsetBase + offsets.end,
+              lines,
             ),
             writable: true,
           },
@@ -930,6 +942,14 @@ export function mutateDesignNodeStyles(
     const validateFor = (file: string) =>
       value === null ? null : validateDesignCssValue(property, value, file);
     const inline = inlineAuthoredDeclarations(state, input.nodeId, property);
+    // An explicit or existing inline declaration owns the mutation; enumerating
+    // unrelated stylesheets cannot alter that decision.
+    if (scope === "inline" || inline.length > 0) {
+      inlineMutations.set(property, validateFor(state.entryFile));
+      decisions.push({ property, requestedScope: scope, appliedScope: "inline", file: state.entryFile, selector: null,
+        reason: inline.length > 0 ? "existing-inline" : "explicit-inline" });
+      continue;
+    }
     const allRules = stylesheetCandidates(state, input.nodeId, property);
     const rules =
       scope === "rule"
@@ -947,21 +967,11 @@ export function mutateDesignNodeStyles(
                 input.nodeId,
               ),
           );
-    if (scope === "inline" || inline.length > 0) {
-      inlineMutations.set(property, validateFor(state.entryFile));
-      decisions.push({
-        property,
-        requestedScope: scope,
-        appliedScope: "inline",
-        file: state.entryFile,
-        selector: null,
-        reason: inline.length > 0 ? "existing-inline" : "explicit-inline",
-      });
-      continue;
-    }
     if (rules.length === 1) {
       const rule = rules[0]!;
       const validated = validateFor(rule.declaration.file);
+      if (validated !== null && rule.declaration.file.toLowerCase().endsWith(".html") && /<\/style[\t\n\f\r />]/i.test(validated))
+        throw new Error("A CSS value cannot close its containing HTML style element.");
       const offsets = declarationOffsets(rule.source, rule.node);
       if (!offsets)
         throw new Error(`CSS declaration has no source span: ${property}`);
@@ -1181,17 +1191,23 @@ function designKeyframeOffset(value: string): number | null {
     : null;
 }
 
-/** Read authored CSS motion into deterministic, bounded timeline data. Complex
- * or malformed selectors are ignored without hiding the rest of the file. */
+/** Read CSS files and HTML style blocks into bounded timeline data. Complex
+ * or malformed selectors are ignored without hiding the remaining styles. */
 export function readDesignKeyframes(
   files: Readonly<Record<string, string>>,
 ): DesignAuthoredKeyframes[] {
   const definitions: DesignAuthoredKeyframes[] = [];
-  for (const file of Object.keys(files).sort()) {
-    if (!file.toLowerCase().endsWith(".css")) continue;
+  const stylesheets = authoredStylesheets(files).sort((left, right) =>
+    left.file < right.file
+      ? -1
+      : left.file > right.file
+        ? 1
+        : left.offsetBase - right.offsetBase,
+  );
+  for (const { file, source } of stylesheets) {
     let root: postcss.Root;
     try {
-      root = postcss.parse(files[file]!, { from: file });
+      root = postcss.parse(source, { from: file });
     } catch {
       continue;
     }
@@ -1241,8 +1257,8 @@ export function readDesignKeyframes(
   return definitions;
 }
 
-/** Create or surgically replace one named keyframe block. Neighboring CSS is
- * byte-preserved; transaction inverses restore the previous block exactly. */
+/** Create or surgically replace one named keyframe block. HTML edits require
+ * an existing block; neighboring HTML/CSS and transaction inverses stay exact. */
 export function mutateDesignKeyframes(
   source: string,
   input: { name: string; keyframes: readonly DesignKeyframeInput[] },
@@ -1285,31 +1301,45 @@ export function mutateDesignKeyframes(
   const block = `@keyframes ${input.name} {\n${keyframes
     .map((keyframe) => `  ${keyframe.offset}% { ${keyframe.styles.join(" ")} }`)
     .join("\n")}\n}`;
-  const root = postcss.parse(source);
-  const matches: AtRule[] = [];
-  root.walkAtRules((rule) => {
-    if (
-      rule.name.toLowerCase() === "keyframes" &&
-      rule.params.trim() === input.name
-    ) {
-      matches.push(rule);
-    }
-  });
+  const html = sourceFile.toLowerCase().endsWith(".html");
+  if (html && /<\/style(?:\s|\/|>)/i.test(block)) {
+    throw new Error("Design keyframe values cannot close an HTML style block.");
+  }
+  const stylesheets = html
+    ? authoredStylesheets({ [sourceFile]: source })
+    : [{ file: sourceFile, source, offsetBase: 0 }];
+  const matches: Array<{ rule: AtRule; offsetBase: number }> = [];
+  for (const stylesheet of stylesheets) {
+    const root = postcss.parse(stylesheet.source, { from: sourceFile });
+    root.walkAtRules((rule) => {
+      if (
+        rule.name.toLowerCase() === "keyframes" &&
+        rule.params.trim() === input.name
+      ) {
+        matches.push({ rule, offsetBase: stylesheet.offsetBase });
+      }
+    });
+  }
   if (matches.length > 1) {
     throw new Error(`Design keyframes are ambiguous: ${input.name}`);
   }
   const match = matches[0];
   if (!match) {
+    // New motions use a CSS file. Never guess an HTML insertion point or
+    // append CSS outside a style element when the authored target disappeared.
+    if (html) {
+      throw new Error(`Design keyframes not found in HTML: ${input.name}`);
+    }
     const separator =
       source.length === 0 ? "" : source.endsWith("\n") ? "\n" : "\n\n";
     return `${source}${separator}${block}\n`;
   }
-  const start = match.source?.start?.offset;
-  const end = match.source?.end?.offset;
+  const start = match.rule.source?.start?.offset;
+  const end = match.rule.source?.end?.offset;
   if (start === undefined || end === undefined) {
     throw new Error(`Design keyframes have no authored span: ${input.name}`);
   }
-  return `${source.slice(0, start)}${block}${source.slice(end)}`;
+  return `${source.slice(0, match.offsetBase + start)}${block}${source.slice(match.offsetBase + end)}`;
 }
 
 export function readDesignCssDiagnostics(

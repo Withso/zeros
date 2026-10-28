@@ -1,7 +1,7 @@
 // ============================================
 // COMPONENT: DesignWorkspaceColumn
-// PURPOSE: Full-bleed live HTML/CSS canvas with its floating chrome: the
-//          directory pill, the tool rail, and the Layers + Inspector panel
+// PURPOSE: Live HTML/CSS canvas with a secondary directory toolbar, floating
+//          tool rail, and attached Layers + Inspector panel
 // USED IN: DesignWorkbenchSurface (the workbench's Design tab)
 // ============================================
 
@@ -25,9 +25,12 @@ import { designSelectPage, type DesignCanvasFrameWire } from "../../platform/git
 import { useThemeId } from "../../shared/theme/use-theme-variant";
 import { toast } from "../../shared/ui/primitives";
 import { clearWorkspaceSettling } from "../../state/pending-workspaces";
+import { useDocumentActive } from "../../state/use-document-active";
 import { resolveDesignCanvasDefaultBackground } from "./design-canvas-background";
 import { type DesignMotionPropertyRequest } from "./design-motion-timeline";
 import { useDesignRuntimeStore } from "./state/design-runtime-store";
+import { markDesignHistoryPortal } from "./state/design-history-commands";
+import { clearDesignHistoryPresentation, useDesignHistoryPresentation, useDesignHistorySelection } from "./state/design-history-presentation";
 import { selectDesignFrame, selectDesignTargets } from "./state/design-selection";
 import { deleteDesignFrameCached, waitForPendingDesignEdits } from "./state/design-workspace-cache";
 import {
@@ -48,6 +51,7 @@ import { DesignSavedEditingContext, DesignSavedEditingSession } from "./design-s
 import { DesignDirectoryPill } from "./design-directory-pill";
 import { DesignFloatingPanel } from "./design-floating-panel";
 import { DesignInspector } from "./design-inspector";
+import type { DesignRuntimeTreeNode } from "@zeros/protocol/design-runtime";
 import { errorMessage } from "./design-workspace-error";
 import { DesignWorkspaceSidebarPanels } from "./design-workspace-sidebar-panels";
 import {
@@ -59,13 +63,13 @@ import {
 // --- CONSTANTS ---
 
 const DESIGN_COLUMN_CLS =
-  "relative flex min-h-0 min-w-0 flex-1 overflow-hidden bg-bg1";
+  "relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden bg-bg1";
 
 function isDesignTreeSelection(target: EventTarget | null): boolean {
   return target instanceof Element && !!target.closest("[data-design-frame-row], [data-design-layer-id]");
 }
 
-/** ⌘\ / Ctrl+\ puts the floating panel away and brings it back. */
+/** ⌘\ / Ctrl+\ puts the properties panel away and brings it back. */
 function isDesignPanelToggleShortcut(event: KeyboardEvent): boolean {
   return (
     event.key === "\\" &&
@@ -88,8 +92,12 @@ function isDesignPanelToggleShortcut(event: KeyboardEvent): boolean {
 export function DesignWorkspaceColumn({
   workspace,
   folder,
-  surfaceActive,
+  surfaceActive: tabActive,
 }: DesignWorkspaceColumnProps) {
+  // A selected tab can outlive its visible native window. Suspend optional
+  // work at the shared boundary while caches and protected edits retain their
+  // existing ownership; showing the app must not activate a hidden tab.
+  const surfaceActive = useDocumentActive(tabActive);
   const [motionTimelineOpen, setMotionTimelineOpen] = useState(false);
   const [motionPropertyRequest, setMotionPropertyRequest] =
     useState<DesignMotionPropertyRequest | null>(null);
@@ -139,13 +147,23 @@ export function DesignWorkspaceColumn({
     !!snapshot.data,
     snapshot.loading || snapshot.refreshing,
   );
-  const activePageId = useDesignWorkspaceUiStore(state =>
+  const confirmedActivePageId = useDesignWorkspaceUiStore(state =>
     workspaceId ? state.byWorkspace[workspaceId]?.activePageId : undefined,
   );
-  const pageSnapshot = useDesignPageSnapshot(snapshot.data, activePageId);
+  const historyPresentation = useDesignHistoryPresentation(workspaceId);
+  const historySelection = useDesignHistorySelection(workspaceId);
+  const presentedHistory = surfaceActive ? historyPresentation : null;
+  const presentedSelection = surfaceActive ? historySelection : null;
+  const activePageId = presentedSelection?.activePageId ?? confirmedActivePageId;
+  const confirmedPageSnapshot = useDesignPageSnapshot(snapshot.data, confirmedActivePageId);
+  const pageSnapshot = useDesignPageSnapshot(presentedHistory?.catalog?.deref() ?? snapshot.data, activePageId);
+  useEffect(() => {
+    if (!surfaceActive && workspaceId) clearDesignHistoryPresentation(workspaceId);
+    return () => { if (workspaceId) clearDesignHistoryPresentation(workspaceId); };
+  }, [surfaceActive, workspaceId]);
   const ownerRevision = useDesignWorkspaceUiStore(state => workspaceId ? state.byWorkspace[workspaceId]?.ownerRevision ?? 0 : 0);
-  const pageOwner = useMemo(() => workspaceId ? { workspaceId, directoryId: pageSnapshot?.directoryId, pageId: activePageId, revision: ownerRevision } : undefined,
-    [workspaceId, activePageId, pageSnapshot?.directoryId, ownerRevision]);
+  const pageOwner = useMemo(() => workspaceId ? { workspaceId, directoryId: confirmedPageSnapshot?.directoryId, pageId: confirmedActivePageId, revision: ownerRevision } : undefined,
+    [workspaceId, confirmedActivePageId, confirmedPageSnapshot?.directoryId, ownerRevision]);
   const savedEditingFolderRef = useRef(folder);
   savedEditingFolderRef.current = folder;
   const savedEditing = useMemo(() => {
@@ -161,34 +179,38 @@ export function DesignWorkspaceColumn({
     ? savedEditing.registerDrain(() => waitForPendingDesignEdits(workspaceId))
     : undefined, [savedEditing, workspaceId]);
   useLayoutEffect(() => {
-    if (!surfaceActive || !workspaceId || !pageSnapshot || snapshot.loading || snapshot.refreshing || snapshot.error) return;
-    bindDesignWorkspacePages(workspaceId, pageSnapshot.directoryId, pageSnapshot.pages!);
-  }, [surfaceActive, workspaceId, pageSnapshot, snapshot.loading, snapshot.refreshing, snapshot.error]);
+    if (!surfaceActive || !workspaceId || !confirmedPageSnapshot || snapshot.loading || snapshot.refreshing || snapshot.error) return;
+    bindDesignWorkspacePages(workspaceId, confirmedPageSnapshot.directoryId, confirmedPageSnapshot.pages!);
+  }, [surfaceActive, workspaceId, confirmedPageSnapshot, snapshot.loading, snapshot.refreshing, snapshot.error]);
   useEffect(() => {
-    if (!surfaceActive || !workspaceId || !activePageId || !pageSnapshot?.directoryId ||
-      !pageSnapshot.pages?.some(page => page.id === activePageId)) return;
-    void designSelectPage(workspaceId, pageSnapshot.directoryId, activePageId).catch(() => {});
-  }, [surfaceActive, workspaceId, pageSnapshot?.directoryId, pageSnapshot?.pages, activePageId]);
-  const selectedFrameFile = useDesignWorkspaceUiStore((state) =>
+    if (!surfaceActive || !workspaceId || !confirmedActivePageId || !confirmedPageSnapshot?.directoryId ||
+      !confirmedPageSnapshot.pages?.some(page => page.id === confirmedActivePageId)) return;
+    void designSelectPage(workspaceId, confirmedPageSnapshot.directoryId, confirmedActivePageId).catch(() => {});
+  }, [surfaceActive, workspaceId, confirmedPageSnapshot?.directoryId, confirmedPageSnapshot?.pages, confirmedActivePageId]);
+  const confirmedSelectedFrameFile = useDesignWorkspaceUiStore((state) =>
     workspaceId
       ? (state.byWorkspace[workspaceId]?.selectedFrame ?? null)
       : null,
   );
-  const selectedNodeId = useDesignWorkspaceUiStore((state) =>
+  const confirmedSelectedNodeId = useDesignWorkspaceUiStore((state) =>
     workspaceId
       ? (state.byWorkspace[workspaceId]?.selectedNodeId ?? null)
       : null,
   );
-  const selectedNodeIds = useDesignWorkspaceUiStore((state) =>
+  const confirmedSelectedNodeIds = useDesignWorkspaceUiStore((state) =>
     workspaceId
       ? (state.byWorkspace[workspaceId]?.selectedNodeIds ?? EMPTY_NODE_IDS)
       : EMPTY_NODE_IDS,
   );
-  const frameSelected = useDesignWorkspaceUiStore((state) =>
+  const confirmedFrameSelected = useDesignWorkspaceUiStore((state) =>
     workspaceId
       ? (state.byWorkspace[workspaceId]?.frameSelected ?? false)
       : false,
   );
+  const selectedFrameFile = presentedSelection ? presentedSelection.selectedFrame : confirmedSelectedFrameFile;
+  const selectedNodeId = presentedSelection ? presentedSelection.selectedNodeId : confirmedSelectedNodeId;
+  const selectedNodeIds = presentedSelection ? presentedSelection.selectedNodeIds : confirmedSelectedNodeIds;
+  const frameSelected = presentedSelection ? presentedSelection.frameSelected : confirmedFrameSelected;
   const storedCanvasBackground = useDesignWorkspaceUiStore((state) =>
     workspaceId
       ? (state.byWorkspace[workspaceId]?.canvasBackground ?? null)
@@ -240,12 +262,16 @@ export function DesignWorkspaceColumn({
     [workspaceId, folder],
   );
 
+  // A frame revalidating its source keeps its last confirmed generation in the
+  // inspector instead of dropping to an empty panel; edits stay engine-checked.
   const selectedFrame = useMemo(
-    () =>
-      pageSnapshot?.frames.find((frame) => frame.file === selectedFrameFile) ??
-      pageSnapshot?.frames[0] ??
-      null,
-    [selectedFrameFile, pageSnapshot?.frames],
+    () => {
+      const frames = designFrameViews(pageSnapshot);
+      const frame = designPresentedFrame(frames.find((frame) => frame.file === selectedFrameFile) ?? frames[0]);
+      const geometry = frame && presentedHistory?.geometry?.frames.get(frame.file);
+      return frame && geometry ? { ...frame, x: geometry.x, y: geometry.y, width: geometry.w, height: geometry.h, z: geometry.z } : frame;
+    },
+    [selectedFrameFile, pageSnapshot, presentedHistory?.geometry],
   );
   const selectedDetails = useDesignRuntimeStore((state) => {
     if (!workspaceId || !selectedFrame) return null;
@@ -255,6 +281,29 @@ export function DesignWorkspaceColumn({
       ? (runtimeFrame?.detailsByNode[selectedNodeId] ?? null)
       : (runtimeFrame?.snapshot?.frame ?? null);
   });
+  const historyDetails = selectedFrame && presentedHistory?.runtime.get(selectedFrame.file);
+  const presentedDetails = historyDetails
+    ? (selectedNodeId ? historyDetails.details.get(selectedNodeId) ?? selectedDetails : historyDetails.frame)
+    : selectedDetails;
+
+  // Until a new selection's exact details arrive, the inspector names the
+  // selected layer from its frame's tree instead of reading as empty.
+  const confirmedFrameTree = useDesignRuntimeStore((state) =>
+    workspaceId && selectedFrame
+      ? state.byWorkspace[workspaceId]?.frames[selectedFrame.file]?.snapshot?.tree
+      : undefined,
+  );
+  const selectedFrameTree = historyDetails?.tree ?? confirmedFrameTree;
+  const selectedTreeNode = useMemo(() => {
+    if (!selectedNodeId || !selectedFrameTree) return null;
+    const pending: DesignRuntimeTreeNode[] = [...selectedFrameTree];
+    while (pending.length) {
+      const node = pending.pop()!;
+      if (node.oid === selectedNodeId) return node;
+      for (const child of node.children) pending.push(child);
+    }
+    return null;
+  }, [selectedFrameTree, selectedNodeId]);
 
   // A freshly provisioned design surface is ready when its first exact-key
   // snapshot either resolves or fails open; code-only settling UI must not
@@ -324,7 +373,8 @@ export function DesignWorkspaceColumn({
       if (
         focused &&
         focused !== document.body &&
-        !sectionRef.current?.contains(focused)
+        !sectionRef.current?.contains(focused) &&
+        focused.closest<HTMLElement>("[data-design-directory-workspace]")?.dataset.designDirectoryWorkspace !== workspaceId
       ) {
         return;
       }
@@ -371,6 +421,7 @@ export function DesignWorkspaceColumn({
         if (!sectionRef.current?.contains(document.activeElement)) savedEditing.leave();
       }}
       onFocusCapture={(event) => {
+        if (surfaceActive && workspaceId) markDesignHistoryPortal(workspaceId, event.currentTarget, event.target);
         if (isDesignTreeSelection(event.target)) return;
         if (!(event.target instanceof Element) || !event.target.closest("[data-design-agent-activity]")) savedEditing.enter();
       }}
@@ -378,6 +429,7 @@ export function DesignWorkspaceColumn({
         if (!pointerInsideRef.current && !event.currentTarget.contains(event.relatedTarget)) savedEditing.leave();
       }}
       onPointerDownCapture={(event) => {
+        if (surfaceActive && workspaceId) markDesignHistoryPortal(workspaceId, event.currentTarget, event.target);
         if (event.button === 1 || isDesignTreeSelection(event.target)) return;
         if (event.target instanceof Element && event.target.closest("[data-design-agent-activity]")) {
           savedEditing.leave();
@@ -404,27 +456,6 @@ export function DesignWorkspaceColumn({
         toast.info("Saved source is still restoring. Try the edit again when the preview has cleared.");
       }}
     >
-      <DesignCanvas
-        workspaceId={workspaceId}
-        folder={folder}
-        snapshot={pageSnapshot}
-        loading={snapshot.loading}
-        error={snapshot.error}
-        refresh={snapshot.refresh}
-        active={surfaceActive}
-        canvasBackground={canvasBackground}
-        motionTimelineOpen={motionTimelineOpen}
-        motionPropertyRequest={motionPropertyRequest}
-        onMotionTimelineOpenChange={setMotionTimelineOpen}
-        onMotionPropertyRequestHandled={(id) =>
-          setMotionPropertyRequest((current) =>
-            current?.id === id ? null : current,
-          )
-        }
-        onMotionPropertiesChange={publishMotionProperties}
-        onDeleteFrame={deleteFrame}
-        zoomActionsRef={zoomActionsRef}
-      />
       {workspace ? (
         <DesignDirectoryPill
           workspace={workspace}
@@ -433,50 +464,78 @@ export function DesignWorkspaceColumn({
           onTogglePanel={togglePanel}
         />
       ) : null}
-      <DesignFloatingPanel
-        ref={panelRef}
-        workspaceId={workspaceId}
-        active={surfaceActive}
-        visible={panelVisible}
-        layersExpanded={layersExpanded}
-        layers={
-          <DesignWorkspaceSidebarPanels
-            surfaceActive={surfaceActive && panelVisible}
-            workspace={workspace}
-            folder={folder}
-            panelId={
-              workspaceId
-                ? `design-layers-panel-${workspaceId}`
-                : "design-layers-panel"
-            }
-            expanded={layersExpanded}
-            onExpandedChange={setLayersExpanded}
-          />
-        }
-        inspector={
-          <DesignInspector
-            workspaceId={workspaceId}
-            pages={pageSnapshot?.pages}
-            activePageId={activePageId}
-            pageFrames={snapshot.data?.frames}
-            folder={folder}
-            frame={selectedFrame}
-            frameSelected={frameSelected}
-            details={selectedDetails}
-            selectedNodeId={selectedNodeId}
-            selectedNodeIds={selectedNodeIds}
-            lint={snapshot.data?.lint ?? null}
-            active={surfaceActive}
-            canvasBackground={canvasBackground}
-            onCanvasBackgroundChange={commitCanvasBackground}
-            motionTimelineOpen={motionTimelineOpen}
-            motionProperties={motionProperties}
-            onOpenMotionTimeline={openMotionTimeline}
-            zoomActionsRef={zoomActionsRef}
-          />
-        }
-      />
+      <div
+        data-design-canvas-area=""
+        className="relative flex min-h-0 min-w-0 flex-1 overflow-hidden"
+      >
+        <DesignCanvas
+          workspaceId={workspaceId}
+          folder={folder}
+          snapshot={pageSnapshot}
+          loading={snapshot.loading}
+          error={snapshot.error}
+          refresh={snapshot.refresh}
+          active={surfaceActive}
+          canvasBackground={canvasBackground}
+          motionTimelineOpen={motionTimelineOpen}
+          motionPropertyRequest={motionPropertyRequest}
+          onMotionTimelineOpenChange={setMotionTimelineOpen}
+          onMotionPropertyRequestHandled={(id) =>
+            setMotionPropertyRequest((current) =>
+              current?.id === id ? null : current,
+            )
+          }
+          onMotionPropertiesChange={publishMotionProperties}
+          onDeleteFrame={deleteFrame}
+          zoomActionsRef={zoomActionsRef}
+        />
+        <DesignFloatingPanel
+          ref={panelRef}
+          workspaceId={workspaceId}
+          active={surfaceActive}
+          visible={panelVisible}
+          layersExpanded={layersExpanded}
+          layers={
+            <DesignWorkspaceSidebarPanels
+              surfaceActive={surfaceActive && panelVisible}
+              workspace={workspace}
+              folder={folder}
+              panelId={
+                workspaceId
+                  ? `design-layers-panel-${workspaceId}`
+                  : "design-layers-panel"
+              }
+              expanded={layersExpanded}
+              onExpandedChange={setLayersExpanded}
+            />
+          }
+          inspector={
+            <DesignInspector
+              workspaceId={workspaceId}
+              pages={pageSnapshot?.pages}
+              activePageId={activePageId}
+              pageFrames={designFrameViews(snapshot.data)}
+              folder={folder}
+              frame={selectedFrame}
+              frameSelected={frameSelected}
+              details={presentedDetails}
+              selectedNode={selectedTreeNode}
+              selectedNodeId={selectedNodeId}
+              selectedNodeIds={selectedNodeIds}
+              lint={snapshot.data?.lint ?? null}
+              active={surfaceActive}
+              canvasBackground={canvasBackground}
+              onCanvasBackgroundChange={commitCanvasBackground}
+              motionTimelineOpen={motionTimelineOpen}
+              motionProperties={motionProperties}
+              onOpenMotionTimeline={openMotionTimeline}
+              zoomActionsRef={zoomActionsRef}
+            />
+          }
+        />
+      </div>
     </section>
     </DesignSavedEditingContext.Provider>
   );
 }
+import { designFrameViews, designPresentedFrame } from "./state/design-frame-view";

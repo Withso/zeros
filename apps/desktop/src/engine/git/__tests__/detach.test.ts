@@ -99,6 +99,18 @@ describe("detach mode", () => {
     expect(rootSrc).toBe("workspace content\n");
   });
 
+  it.each([false, true])("refuses to overwrite an untracked collision (ignored: %s)", async ignored => {
+    const { getWorkspace } = await import("..");
+    const ws = getWorkspace(workspaceId);
+    await writeFile(path.join(ws.path, "collision.txt"), "workspace");
+    await execFileAsync("git", ["add", "collision.txt"], { cwd: ws.path });
+    await execFileAsync("git", ["commit", "-qm", "tracked collision fixture"], { cwd: ws.path });
+    if (ignored) await writeFile(path.join(repoRoot, ".git/info/exclude"), "collision.txt\n");
+    await writeFile(path.join(repoRoot, "collision.txt"), "keep my work");
+    await expect(detachStart({ workspaceId })).rejects.toThrow(/untracked|collision/i);
+    expect(await readFile(path.join(repoRoot, "collision.txt"), "utf8")).toBe("keep my work");
+  });
+
   it("mirrors tracked Code without committing the branch, touching the index, or projecting the live Design draft", async () => {
     const { getWorkspace } = await import("..");
     const ws = getWorkspace(workspaceId);

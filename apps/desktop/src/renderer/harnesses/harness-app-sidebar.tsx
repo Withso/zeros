@@ -15,6 +15,7 @@ import type { ProcessMetricsSnapshot } from "../platform/process-metrics";
 
 const params = new URLSearchParams(location.search);
 const hoverCards = params.has("hover-cards");
+const shortcutHarness = params.has("shortcuts");
 const legacyMainFolder = params.has("legacy-main")
   ? `/fixture/zeros${params.has("subdirectory") ? "/packages/app" : ""}`
   : null;
@@ -152,6 +153,7 @@ const requests: { op: string; params?: Record<string, unknown> }[] = [];
 let deferChangeLines = false;
 const pendingChangeLines: (() => void)[] = [];
 let deferDashboardArchives = params.has("defer-dashboard-archives");
+let failDashboardArchives = false;
 const pendingDashboardArchives: { resolve: () => void; reject: (error: Error) => void }[] = [];
 const resourceTotals = params.has("resource-pressure")
   ? {
@@ -211,6 +213,12 @@ const resourceSnapshot: ProcessMetricsSnapshot = {
       ]
     : [],
 };
+if (params.has("resource-pending-cpu")) {
+  resourceSnapshot.processes = resourceSnapshot.processes.map((process) =>
+    process.id === "tsc" ? { ...process, cpuPercent: 0, cpuSampled: false } : process);
+  resourceSnapshot.totals.all = { ...resourceTotals, cpuPercent: 51.7 };
+  resourceSnapshot.totals.excludingTerminals = resourceSnapshot.totals.all;
+}
 const agents = [
   {
     id: "claude",
@@ -256,13 +264,19 @@ Object.assign(window, {
       repository: { forge: "github.com", owner: "example", name: fixture.name, revision: "refs/heads/main" },
       generation: { number: 1, architecture: "x86_64", resources: { cpuMillicores: 2000, memoryMiB: 4096, storageMiB: 20480 }, observedState: "stopped", lastObservedAt: null },
     });
-    if (hoverCards) {
+    if (hoverCards || shortcutHarness) {
       const cloudChats = fixtures.map(fixture => ({
         ...chats[0],
         id: `cloud:${fixture.organizationId}:${fixture.id}:chat`,
         folder: `cloud://${fixture.organizationId}/${fixture.id}`,
         title: `${fixture.name} activity`,
       }));
+      if (shortcutHarness) {
+        for (const chat of [...cloudChats]) {
+          cloudChats.push({ ...chat, id: `${chat.id}-second`, title: "Second chat" },
+            { ...chat, id: `${chat.id}-third`, title: "Third chat" });
+        }
+      }
       useWorkspaceStore.setState(state => ({ chats: [...state.chats, ...cloudChats] }));
       for (const chat of cloudChats) useSessionsStore.getState().setSession(chat.id, {
         ...BLANK, cwd: chat.folder, transcriptState: "resident", messages: [{
@@ -270,6 +284,12 @@ Object.assign(window, {
           text: `Saved progress for ${chat.title}.`, createdAt: Date.now() - 60_000,
         }],
       });
+      if (shortcutHarness) {
+        for (const chat of cloudChats) {
+          useSessionsStore.getState().setSession(chat.id, { ...BLANK, cwd: chat.folder,
+            transcriptState: "resident", messages: shortcutMessages(chat.id) });
+        }
+      }
     }
     // Mirror the production catalog lifecycle into the shared read cache. The
     // fixture has no authenticated lifecycle controller or live cloud bridge.
@@ -304,6 +324,7 @@ Object.assign(window, {
 
 const { setActiveBridge } = await import("../platform/bridge/active-bridge");
 const fixtureBridge = {
+  executionIdentity: { kind: "local", sidecar: "active" },
   status: "connected",
   onStatusChange: () => () => {},
   onMessage: () => () => {},
@@ -314,9 +335,23 @@ const fixtureBridge = {
   }) => {
     requests.push(message);
     let result: unknown = {};
+    if (shortcutHarness && message.op === "git.status") {
+      result = { staged: [], unstaged: [], untracked: [], conflicted: [], conflictState: null };
+    }
+    if (shortcutHarness && message.op === "file.tree") result = { files: [] };
+    if (shortcutHarness && message.op === "git.diff") result = { diff: "" };
+    if (shortcutHarness && message.op === "git.log") result = { commits: [] };
+    if (shortcutHarness && message.op === "design.listDirectories") {
+      result = { directories: [], target: { directory: "design", exists: false } };
+    }
+    if (shortcutHarness && message.op === "design.status") {
+      result = { conflicts: [], paused: false, operation: null };
+    }
     if (message.op === "workspace.list") {
       if (deferDashboardArchives && message.params?.archived === true)
         await new Promise<void>((resolve, reject) => pendingDashboardArchives.push({ resolve, reject }));
+      if (failDashboardArchives && message.params?.archived === true)
+        throw new Error("Archive list unavailable");
       const slug = message.params?.repoSlug;
       result = {
         workspaces:
@@ -388,12 +423,13 @@ const fixtureBridge = {
   },
 } as unknown as RuntimeClient;
 setActiveBridge(fixtureBridge);
-// PR buttons read the provider's connection as well as the request singleton.
-// Use the real provider with a synthetic Local transport in this scenario.
+// PR buttons and Dashboard recovery observe the provider's connection as well
+// as the request singleton. Give those scenarios the connected Local transport.
 const { BridgeProvider } = await import("../platform/bridge/use-bridge");
-const { Fragment } = await import("react");
-const FixtureBridgeProvider = hoverCards ? BridgeProvider : Fragment;
-if (hoverCards) {
+const { Fragment, useCallback, useState } = await import("react");
+const withBridge = hoverCards || params.has("dashboard");
+const FixtureBridgeProvider = withBridge ? BridgeProvider : Fragment;
+if (withBridge) {
   const { RuntimeClient: FixtureRuntimeClient } = await import("../platform/bridge/ws-client");
   FixtureRuntimeClient.prototype.connect = async function () {
     (this as unknown as { setStatus(status: string): void }).setStatus("connected");
@@ -410,9 +446,14 @@ const { useSessionsStore, BLANK } =
   await import("../features/agent/sessions-store");
 // The real conversation column is opt-in (?conversation): it mounts the full
 // transcript + composer tree, which the navigation checks do not need.
-const ConversationPane = params.has("conversation")
+const ConversationPane = params.has("conversation") || shortcutHarness
   ? (await import("../shell/conversation/conversation-pane")).ConversationPane
   : null;
+const WorkbenchPane = shortcutHarness
+  ? (await import("../shell/workbench/workbench-pane")).WorkbenchPane : null;
+const { selectWorkbench } = await import("../state/workspace-store");
+const { ShortcutsPalette } = await import("../shell/shortcuts-palette");
+const { useShortcutsHotkey } = await import("../shell/use-shortcuts-hotkey");
 const { DispatcherPage } = await import("../shell/dispatcher/dispatcher-modal");
 const { RepoPage } = await import("../features/repositories/repo-page");
 const { DashboardPage } = await import("../features/dashboard/dashboard-page");
@@ -452,6 +493,13 @@ const chats = rows.map(
       messages: [],
     }) as unknown as ChatThread,
 );
+if (shortcutHarness) {
+  for (const chat of [...chats]) {
+    chat.title = "First chat";
+    chats.push({ ...chat, id: `${chat.id}-second`, title: "Second chat" },
+      { ...chat, id: `${chat.id}-third`, title: "Third chat" });
+  }
+}
 if (legacyMainFolder) {
   chats.push({ ...chats[0], id: "chat-legacy-main", folder: legacyMainFolder });
 }
@@ -479,7 +527,7 @@ const sessions = {
     useSessionsStore.getState().setSession(id, {
       ...BLANK,
       transcriptState: "resident",
-      messages: [
+      messages: shortcutHarness ? shortcutMessages(id) : [
         {
           id: `${id}-prompt`,
           kind: "text",
@@ -538,13 +586,14 @@ if (params.has("organizations")) {
 }
 
 Object.assign(window, {
-  dashboardReleaseArchives: (fail = false) => {
-    deferDashboardArchives = false;
+  dashboardReleaseArchives: (fail = false, keepDeferred = false) => {
+    deferDashboardArchives = keepDeferred;
     for (const read of pendingDashboardArchives.splice(0))
       if (fail) read.reject(new Error("Archive list unavailable"));
       else read.resolve();
   },
   dashboardPendingArchiveReads: () => pendingDashboardArchives.length,
+  dashboardFailArchives: (fail: boolean) => { failDashboardArchives = fail; },
   dashboardAddPending: async () => {
     const { beginPendingCreate } = await import("../state/pending-workspaces");
     return beginPendingCreate({ repoRoot: projects[0].repoRoot, repoSlug: projects[0].repoSlug, label: "Prepare integration tests" });
@@ -595,11 +644,32 @@ Object.assign(window, {
         ? state.repoPageViewByProject[state.activeRepoId]
         : undefined,
       chats: state.chats.map((chat) => ({ id: chat.id, folder: chat.folder })),
+      workbench: selectWorkbench(state),
     };
   },
 });
 
+function shortcutMessages(id: string) {
+  return Array.from({ length: 4 }, (_, index) => [
+    { id: `${id}-prompt-${index}`, kind: "text" as const, role: "user" as const,
+      text: `User message ${index + 1}`, createdAt: index * 2 + 1 },
+    { id: `${id}-reply-${index}`, kind: "text" as const, role: "agent" as const,
+      text: index === 3 ? "Done." : Array.from({ length: 12 }, () =>
+        "This assistant response keeps the next user message outside the viewport so keyboard navigation has a real scroll destination.").join("\n\n"),
+      createdAt: index * 2 + 2 },
+  ]).flat();
+}
+
+function ShortcutReference() {
+  const [open, setOpen] = useState(false);
+  const toggle = useCallback(() => setOpen(value => !value), []);
+  useShortcutsHotkey(toggle);
+  return <ShortcutsPalette open={open} onOpenChange={setOpen} />;
+}
+
 function Harness() {
+  const [workbenchCollapsed, setWorkbenchCollapsed] = useState(false);
+  const toggleWorkbench = useCallback(() => setWorkbenchCollapsed(value => !value), []);
   const { openProject, openGithubProject, quickStart } = useAddProject();
   const { projects: registered } = useProjects();
   const page = useWorkspaceStore((state) => state.activePage);
@@ -617,6 +687,7 @@ function Harness() {
   return (
     <div className="bg-bg1 text-fg1 fixed inset-0 flex overflow-hidden font-sans text-sm">
       <Toaster />
+      {shortcutHarness && <ShortcutReference />}
       <AppSidebar hidden={page === "settings" || collapsed} />
       <main
         className={[
@@ -644,9 +715,11 @@ function Harness() {
           <div className="flex min-h-0 min-w-0 flex-1">
             <ConversationPane
               workspace={activeWorkspace}
-              workbenchCollapsed
+              workbenchCollapsed={!WorkbenchPane || workbenchCollapsed}
+              onToggleWorkbench={toggleWorkbench}
               windowControlsInset={collapsed}
             />
+            {WorkbenchPane && <WorkbenchPane collapsed={workbenchCollapsed} onToggleWorkbench={toggleWorkbench} />}
           </div>
         ) : page === "workspace" ? (
           <>

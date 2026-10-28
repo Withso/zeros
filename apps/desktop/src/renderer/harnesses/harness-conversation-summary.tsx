@@ -19,7 +19,8 @@ import {
   OPEN_OVERLAY_SELECTOR,
   shouldReclaimComposerFocus,
 } from "../features/agent/composer-focus";
-import { upsertProject } from "../state/projects-store";
+import { loadProjects, upsertProject } from "../state/projects-store";
+import { invalidateCreateSourceCaches } from "../state/read-caches";
 import { selectWorkbench, useWorkspaceStore } from "../state/workspace-store";
 import { useChatPanesStore } from "../state/chat-panes-store";
 import { DEFAULT_PANE_LAYOUT, splitLeaf } from "../state/chat-panes";
@@ -30,11 +31,13 @@ import {
   ConversationSummaryIsland,
 } from "../shell/conversation/conversation-summary";
 import { WorkspaceHeader } from "../shell/conversation/workspace-header";
+import { isGithubDotComRemote } from "../shell/pr/github-url";
 
 const repoA = "/summary-fixture/a";
 const repoB = "/summary-fixture/b";
 const folderA = `${repoA}/worktree`;
 const folderB = `${repoB}/worktree`;
+let alternateRemote: string | null = null;
 // This fixture exercises every destination, including GitHub Review. Plain
 // folder and local-only Review absence live in harness-folder-workspace.
 upsertProject({
@@ -72,9 +75,6 @@ const listeners = new Map<string, Set<(message: BridgeMessage) => void>>();
 const messages: Array<Record<string, unknown>> = [];
 const overlayIntents: boolean[] = [];
 listenForNativeSurfaceOverlayIntent((open) => overlayIntents.push(open));
-let failContext = false;
-let delayContext = false;
-let releaseContext: (() => void) | undefined;
 let runCount = 2;
 const runs = new Map<string, Record<string, unknown>>();
 let previewLog = "Local: http://localhost:5173/\n";
@@ -185,6 +185,23 @@ RuntimeClient.prototype.request = async function <
       sources: {},
       warnings: [],
     };
+  if (message.op === "git.repoBranchCatalog") {
+    const project = loadProjects().find(project => project.repoRoot === params.repoRoot);
+    const custom = params.repoRoot === repoA ? alternateRemote : null;
+    const url = custom ?? project?.originUrl ?? null;
+    const name = custom ? "upstream" : "origin";
+    result = {
+      remotes: url ? [{ name, url, isGitHub: isGithubDotComRemote(url) }] : [],
+      effectiveRemote: name,
+      remoteExists: !!url,
+      baseExplicit: false,
+      effectiveBase: "main",
+      detectedDefault: url ? "main" : null,
+      listedRemote: url ? name : null,
+      branchSource: url ? "remote" : "local",
+      branches: [{ name: "main", lastCommitDate: 1 }],
+    };
+  }
   if (message.op === "context.graph.list") {
     const names =
       workspaceFolder === folderB ? ["Workspace B notes.md"] : contextItems;
@@ -197,11 +214,6 @@ RuntimeClient.prototype.request = async function <
       bytes: 10,
       mtimeMs: index + 1,
     }));
-    if (delayContext && workspaceFolder === folderA)
-      await new Promise<void>((resolve) => {
-        releaseContext = resolve;
-      });
-    if (failContext) throw new Error("Context fixture failure");
     result = { exists: true, items, truncated: false };
   }
   if (message.op === "file.tree") result = { files: [] };
@@ -266,6 +278,10 @@ useWorkspaceStore.setState({
 Object.assign(window, {
   __summaryHarness: {
     messages,
+    setAlternateRemote: (url: string | null) => {
+      alternateRemote = url;
+      invalidateCreateSourceCaches(false);
+    },
     overlayIntent: () => overlayIntents.at(-1) ?? false,
     state: () => selectWorkbench(useWorkspaceStore.getState()),
     setGit: (status: Partial<StatusResult>, counts: Partial<ChangeCounts> = {}) => {
@@ -274,6 +290,10 @@ Object.assign(window, {
       triggerGitRefresh(folderA);
     },
     setPr,
+    setOrganization: (organizationId: string | null) => {
+      workspaces = workspaces.map(row => row.id === "ws_summary_a" ? { ...row, organizationId } : row);
+      emit("DB_CHANGED", { kinds: ["workspaces"], workspaceIds: ["ws_summary_a"] });
+    },
     setPlacement: (placement: "local" | "cloud") => {
       workspaces = workspaces.map(row => row.id === "ws_summary_a" ? { ...row, placement } : row);
       emit("DB_CHANGED", { kinds: ["workspaces"], workspaceIds: ["ws_summary_a"] });
@@ -323,18 +343,6 @@ Object.assign(window, {
     changeContext: (names: string[]) => {
       contextItems = names;
       notifyContextGraphChanged(folderA);
-    },
-    failContext: (value: boolean) => {
-      failContext = value;
-      notifyContextGraphChanged(folderA);
-    },
-    delayContext: () => {
-      delayContext = true;
-      notifyContextGraphChanged(folderA);
-    },
-    releaseContext: () => {
-      delayContext = false;
-      releaseContext?.();
     },
     switchFolder: (folder: "a" | "b") =>
       useWorkspaceStore.getState().dispatch({

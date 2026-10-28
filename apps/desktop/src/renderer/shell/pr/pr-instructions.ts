@@ -24,8 +24,8 @@ export interface PrInstructionInputs {
    *  `git.remote` ("Remote origin" in the repo's Git settings). Defaults to
    *  "origin" when the caller doesn't know better. */
   remote?: string;
-  /** GitHub owner/repository resolved from the configured remote. Pinning the
-   *  CLI target prevents `gh` choosing origin in a multi-remote/fork setup. */
+  /** GitHub owner/repository resolved from the configured Local remote or the
+   *  cloud server's verified identity. Pins the CLI to the same PR target. */
   repository?: string;
   /** Total uncommitted paths = staged + unstaged + untracked + conflicted. */
   uncommittedCount: number | null;
@@ -42,6 +42,8 @@ export interface PrInstructionInputs {
   hasUpstream: boolean | null;
   /** Draft vs ready PR. Only changes wording + adds `--draft`. */
   draft: boolean;
+  /** Cloud sessions may retain unrelated edits from earlier turns. */
+  placement?: "local" | "cloud";
 }
 
 /** The short text shown in the chat bubble (the agent still receives the full
@@ -95,9 +97,11 @@ function shellQuote(value: string): string {
  *  Design work is committed first. `.context/` holds workspace notes and
  *  attachments that the repository may not ignore; it stays out unless the
  *  user asked for it. Blockers above this step stop a conflicted commit. */
-function commitStep(uncommittedCount: number | null): string {
+function commitStep(uncommittedCount: number | null, placement?: "local" | "cloud"): string {
   const scope =
-    "Code and Design changes together, leaving `.context/` out unless the user asked to include it (for example `git add -A -- . ':!.context'`). Follow any instructions the user gave you about writing commit messages.";
+    placement === "cloud"
+      ? "Code and Design changes for this PR together. Inspect the index and stage only the intended paths. Preserve unrelated staged and unstaged changes, and leave `.context/` out unless the user asked to include it. Follow any instructions the user gave you about writing commit messages."
+      : "Code and Design changes together, leaving `.context/` out unless the user asked to include it (for example `git add -A -- . ':!.context'`). Follow any instructions the user gave you about writing commit messages.";
   if (uncommittedCount == null)
     return `- If the inspection finds uncommitted changes, commit them: ${scope}`;
   if (uncommittedCount === 0)
@@ -110,11 +114,18 @@ function commitStep(uncommittedCount: number | null): string {
 export function buildPrInstructions(input: PrInstructionInputs): string {
   const { branch, baseBranch, uncommittedCount, hasUpstream, draft } = input;
   const remote = input.remote?.trim() || "origin";
+  const cloudRepository =
+    input.placement === "cloud" ? input.repository : undefined;
+  const destination = cloudRepository
+    ? `https://github.com/${cloudRepository}.git`
+    : remote;
   const upstreamLine =
     hasUpstream == null
       ? "The upstream branch could not be determined."
       : hasUpstream
-        ? `The branch already has an upstream on ${remote}.`
+        ? cloudRepository
+          ? "The branch already has an upstream."
+          : `The branch already has an upstream on ${remote}.`
         : "There is no upstream branch yet.";
   const requestLine = draft
     ? "The user requested a draft PR."
@@ -134,7 +145,10 @@ export function buildPrInstructions(input: PrInstructionInputs): string {
     "",
     uncommittedSentence(uncommittedCount),
     `The current branch is ${branch}.`,
-    `The target branch is ${remote}/${baseBranch}.`,
+    `The target branch is ${cloudRepository ?? remote}/${baseBranch}.`,
+    ...(cloudRepository
+      ? [`The pull request repository is ${cloudRepository}. Keep existing remote and push URL configuration unchanged.`]
+      : []),
     "",
     upstreamLine,
     requestLine,
@@ -144,11 +158,11 @@ export function buildPrInstructions(input: PrInstructionInputs): string {
     "",
     "- If you have any skills related to creating PRs, invoke them now. Instructions there should take precedence over these instructions.",
     "- Inspect `git status` and run `git diff` to review uncommitted changes.",
-    commitStep(uncommittedCount),
-    `- Push with \`git push -u ${shellQuote(remote)} HEAD:${shellQuote(branch)}\`.`,
+    commitStep(uncommittedCount, input.placement),
+    `- Push with \`git push -u ${shellQuote(destination)} HEAD:${shellQuote(branch)}\`.`,
     "- Review the full PR diff (target branch to HEAD, after committing) before writing the description.",
     "- Before creating anything, check whether this branch already has an open PR. If it does, report its URL and do not create a duplicate.",
-    `- Use \`${createCmd}\` with non-interactive \`--title\` and \`--body\` arguments to create a PR onto the target branch. Keep the title under 80 characters. Keep the description under five sentences, unless the user instructed you otherwise. Describe not just changes made in this session but ALL committed changes in the branch diff.`,
+    `- Use \`${createCmd}\` with non-interactive \`--title\` and \`${input.placement === "cloud" ? "--body-file" : "--body"}\` arguments to create a PR onto the target branch. Keep the title under 80 characters. Keep the description under five sentences, unless the user instructed you otherwise. Describe not just changes made in this session but ALL committed changes in the branch diff.`,
     "",
     "If any of these steps fail, ask the user for help.",
   ].join("\n");

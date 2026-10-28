@@ -1,5 +1,7 @@
 import { cloudProjectForFolder, isCloudWorkspaceCatalogOnlyRow } from "./cloud-workspace-catalog";
 import { WorkspaceRuntimeClient } from "../platform/bridge/workspace-runtime-client";
+import { useBridgeStatus } from "../platform/bridge/use-bridge";
+import { useReadRecovery } from "./use-read-recovery";
 import { isCloudRepositorySlug, isCloudWorkspace } from "../platform/bridge/cloud-workspace-key";
 // ──────────────────────────────────────────────────────────
 // React bindings for projects + per-project workspaces
@@ -32,6 +34,8 @@ import {
   loadProjects,
   normalizeProjectRoot,
   syncProjectsToEngine,
+  refreshNativeProjectOrigins,
+  subscribeNativeProjectOrigins,
   type Project,
 } from "./projects-store";
 import {
@@ -92,6 +96,7 @@ function sameProject(a: Project, b: Project): boolean {
     a.repoRoot === b.repoRoot &&
     a.repoSlug === b.repoSlug &&
     a.originUrl === b.originUrl &&
+    a.originRevision === b.originRevision &&
     a.isGitRepository === b.isGitRepository &&
     a.addedAt === b.addedAt
   );
@@ -167,9 +172,16 @@ export function useSyncProjectsToEngine(): void {
   useEffect(() => {
     let warmed = false;
     let cancelWarm = () => {};
+    let stopChanges = () => {};
     const run = () => {
       const bridge = getActiveBridge();
       if (!bridge || bridge.status !== "connected") return;
+      stopChanges();
+      stopChanges = bridge.on("DB_CHANGED", message => {
+        const { kinds, snapshotPublication } = message as { kinds?: string[]; snapshotPublication?: boolean };
+        if (getActiveBridge() !== bridge || snapshotPublication || !kinds?.includes("projects")) return;
+        void refreshNativeProjectOrigins({ invalidated: true }).then(changed => { if (changed) notifyProjectsChanged(); });
+      });
       void syncProjectsToEngine().then((recovered) => {
         if (recovered) notifyProjectsChanged();
       });
@@ -194,9 +206,12 @@ export function useSyncProjectsToEngine(): void {
       }
     };
     const stop = onActiveBridgeConnected(run);
+    const stopOrigins = subscribeNativeProjectOrigins(notifyProjectsChanged);
     return () => {
       cancelWarm();
       stop();
+      stopChanges();
+      stopOrigins();
     };
   }, []);
 }
@@ -1261,11 +1276,16 @@ export function useArchivedWorkspaces(repoSlug?: string): {
     );
   }, [revalidate]);
 
+  const connected = useBridgeStatus() === "connected";
+  const recovery = useReadRecovery(`workspace-archives:${key}`, {
+    error: snapshot.error, pending: snapshot.loading || snapshot.refreshing,
+    hasContent: snapshot.data !== undefined, retry: refresh, connected,
+  });
   return {
     workspaces: snapshot.data ?? EMPTY_WORKSPACES,
     resolved: snapshot.data !== undefined,
-    loading: snapshot.loading,
-    error: snapshot.error,
+    loading: snapshot.data === undefined && recovery.pending,
+    error: recovery.error,
     refresh,
   };
 }

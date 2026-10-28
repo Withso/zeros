@@ -30,6 +30,8 @@ export async function runOrganizationMcpSmoke({ page: parent, check }) {
   const authInputs = [];
   let lastWrite;
   const errors = [];
+  const cloudReads = [];
+  const cloudGeneration = "c".repeat(64);
   page.on("pageerror", error => errors.push(error.message));
   await page.addInitScript(({ userA }) => {
     window.organizationMcpFixture = { account: userA, opened: [], native: [] };
@@ -56,6 +58,14 @@ export async function runOrganizationMcpSmoke({ page: parent, check }) {
     const url = new URL(request.url());
     const json = data => route.fulfill({ contentType: "application/json", body: JSON.stringify(data) });
     if (url.pathname === "/v1/me") return json(me(request.headers().authorization?.endsWith(userB) ? userB : userA));
+    if (url.pathname === "/v1/cloud-v2/github/connection") return json({
+      generation: cloudGeneration, selectedMethod: "pat", appAvailable: true, installUrl: null,
+      methods: { "github-app": { configured: false, health: "not-connected" }, pat: { configured: true, health: "connected", login: "cloud-user" } },
+    });
+    if (url.pathname === "/v1/cloud-v2/github/repositories") {
+      cloudReads.push(url.searchParams.get("organizationId"));
+      return json({ generation: cloudGeneration, repositories: [{ id: "42", owner: "cloud-only", name: "project", defaultBranch: "main", private: true, canPush: true }], nextPage: null, complete: true });
+    }
     const org = url.pathname.split("/")[3];
     if (url.pathname.endsWith("/mcp/repositories")) return json({ repositories: [{ repository: org === orgA ? "team-a/project" : "team-b/project" }] });
     if (url.pathname.endsWith("/mcp/probe")) {
@@ -108,6 +118,17 @@ export async function runOrganizationMcpSmoke({ page: parent, check }) {
   try {
     await page.goto(new URL("/apps/desktop/src/renderer/harnesses/harness-customize.html", parent.url()).href);
     await selectOwner(orgA);
+    await expect(button("On this Mac")).toHaveAttribute("aria-pressed", "true");
+    await button("Cloud").click();
+    await expect(button("Cloud")).toHaveAttribute("aria-pressed", "true");
+    await button("Add server").click();
+    await page.getByRole("combobox", { name: "Project" }).click();
+    await expect(page.getByRole("option")).toHaveText(["All projects", "cloud-only/project"]);
+    await page.getByRole("option", { name: "All projects", exact: true }).click();
+    expect(cloudReads).toEqual([orgA]);
+    await button("MCP").click();
+    await button("On this Mac").click();
+    check("MCP repository selection preserves the Mac connection by default and explicitly switches to cloud credentials", true);
     await button("Add server").click();
     await page.getByRole("combobox", { name: "Owner" }).click();
     await expect(page.getByRole("option")).toHaveText(["Organisation", "You"]);

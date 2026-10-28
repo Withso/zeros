@@ -50,6 +50,7 @@ import { useOpenPrUrlInReviewTab } from "@/renderer/shell/pr/use-open-review-tab
 import { warmWorkspaceFiles } from "@/renderer/shell/workspace-files-cache";
 import { nativeInvoke, useNativeRuntime } from "@/renderer/platform/runtime";
 import { ZerosSpinner } from "@/renderer/shared/ui/loading";
+import { captureDeferredFocus } from "@/renderer/shared/ui/deferred-focus";
 import {
   useWorkspaceStore,
   useWorkspaceDispatch,
@@ -194,7 +195,7 @@ import {
   sessionToolsResource,
   warmPreparedSessionTools,
 } from "./session-tools-cache";
-import { useBridge } from "../../platform/bridge/use-bridge";
+import { useBridge, useBridgeStatus } from "../../platform/bridge/use-bridge";
 import { BoundaryPortsPill } from "./boundary-ports";
 import { useCloudWorkspaceCanEdit } from "../../state/use-cloud-workspace-can-edit";
 import type { ExecutionBoundaryPortStatus } from "@zeros/protocol/containment";
@@ -262,7 +263,9 @@ import { requestProviderSettings, requestUserSettingsSection } from "../settings
 import { isSubscriptionProvider } from "../settings/subscription-connection";
 import { latestAuthenticationRecoveryTurn } from "./auth-prompt-recovery";
 import { useAgentSessions } from "./sessions-hooks";
-import { useStickyBottom, nextTextMessageTarget } from "./use-sticky-bottom";
+import { useStickyBottom } from "./use-sticky-bottom";
+import { navigationShortcutBlocked, resolveNavigationShortcut, type MessageNavigation } from "../../shared/lib/navigation-shortcuts";
+import { hasShortcutPriorityClaim } from "./shortcut-priority";
 import {
   groupMessagesIntoTurns,
   isProviderTurnTail,
@@ -630,6 +633,7 @@ function AgentChatBody({
   // correct tick before the first paint, instead of flashing the 1st
   // tick until the rail's own post-paint effect corrects it.
   const checkpointRecomputeRef = useRef<(() => void) | null>(null);
+  const checkpointNavigateRef = useRef<((direction: MessageNavigation) => boolean) | null>(null);
   // Send-jump count (2026-07-17, replaces the 2026-07-16 send-follow) —
   // armed by the send paths below, consumed by the
   // last-checkpoint-changed effect further down (see its comment for
@@ -1949,13 +1953,12 @@ function AgentChatBody({
   }, [composerEditor, readOnly]);
 
   // A fork publishes its new tab before the transcript read settles. Register
-  // only while THIS retained surface is active: insertTextAttachment focuses
-  // the editor, so a hidden destination must queue the chip instead of stealing
-  // focus from whichever chat the user moved to meanwhile.
+  // only while THIS retained surface is active. Delivery is background work:
+  // keep the current focus, and let a hidden destination queue the chip.
   useEffect(() => {
     if (!chatId || !interactive || !composerEditor) return;
     return registerLiveChatTextAttachmentStager(chatId, (input) => {
-      const staged = stageTextAttachment(input);
+      const staged = stageTextAttachment(input, { focus: false });
       if (staged && !staged.ok) {
         toast.warning(
           `Attached "${input.name}", but it won't be sent — ${staged.reason ?? "it exceeds this model's attachment budget"}.`,
@@ -1971,14 +1974,15 @@ function AgentChatBody({
   // read-only composer leaves the delivery queued for this exact chat.
   useEffect(() => {
     if (!chatId || !interactive || readOnly || !composerEditor) return;
-    return registerLiveChatFileStager(chatId, ({ files }) => {
+    return registerLiveChatFileStager(chatId, ({ files }, { focus }) => {
       if (composerEditor.isDestroyed) return false;
-      // Append after the typed text rather than splitting it at a stale caret.
-      composerEditor.commands.focus("end");
-      void addFiles(files);
+      // A queued delivery may drain after the user has moved to another input.
+      // Append without moving its focus or the parked composer's caret.
+      if (focus) focusComposer();
+      void addFiles(files, { focus, atEnd: true });
       return true;
     });
-  }, [addFiles, chatId, composerEditor, interactive, readOnly]);
+  }, [addFiles, chatId, composerEditor, focusComposer, interactive, readOnly]);
 
   // ── attach another chat's transcript ──
   //
@@ -1994,12 +1998,18 @@ function AgentChatBody({
     session.messages.length === 0 &&
     !session.error &&
     !!chatThread?.folder;
+  const historyFolder = chatThread?.folder ?? session.cwd;
+  const historyConnection = useBridgeStatus(historyFolder);
   const transcriptHistoryStatus = useTranscriptHistoryStatus({
     identity: JSON.stringify([chatThread?.folder ?? session.cwd, chatId]),
     active: surfaceActive,
     hasMessages: session.messages.length > 0,
     hasTranscript: session.hasTranscript,
     resident: session.transcriptState === "resident",
+    error: session.transcriptReadError,
+    // Cloud history reads the control-plane mirror even while its VM sleeps.
+    connected: isCloudWorkspace(historyFolder) || historyConnection === "connected",
+    retry: session.hydrateChat,
   });
   const transcriptLoadingVisible = transcriptHistoryStatus === "loading";
   const { summaries: transcriptSummaries, loaded: transcriptsLoaded } =
@@ -2070,6 +2080,7 @@ function AgentChatBody({
 
   const attachTranscript = useCallback(
     (summary: ChatSummaryWire, mode: TranscriptMode) => {
+      const mayFocus = captureDeferredFocus(composerEditor?.view.dom ?? null);
       const label = transcriptPillLabel(summary);
       const sourceId = summary.chatId;
       // A fresh attach clears any standing cancel for this chat, so
@@ -2136,7 +2147,7 @@ function AgentChatBody({
               userMessageCount: summary.userMessageCount,
               lastMessageAt: summary.lastMessageAt,
             },
-          });
+          }, { focus: surfaceActiveRef.current && mayFocus() });
           // An over-budget attachment is EXCLUDED at send (encode-attachments)
           // — so if it isn't said here it is never said at all. The pill would
           // otherwise show a green check for a file the agent never receives,
@@ -2168,7 +2179,7 @@ function AgentChatBody({
       transcriptAttachesRef.current.add(run);
       void run.finally(() => transcriptAttachesRef.current.delete(run));
     },
-    [stageTextAttachment],
+    [composerEditor, stageTextAttachment],
   );
 
   const removeTranscript = useCallback(
@@ -3071,24 +3082,15 @@ function AgentChatBody({
     setScrollEl(node);
   }, []);
 
-  // ⌘↑ / ⌘↓ — jump-by-text-message: walks user prompts and final
-  // assistant text, skipping tool-call + thinking chunks. Solves the
-  // need to find the initiating prompt during long runs.
-  // ⌘Home / ⌘End — first/last message. All gated on the textarea
-  // not being focused so plain typing keeps native behavior.
+  // Message shortcuts navigate the same user prompts as the checkpoint rail.
+  // Capture reaches the rich composer; DOM ownership keeps retained chats and
+  // other columns from reacting to the focused pane's keypress.
   useEffect(() => {
+    if (!surfaceActive) return;
     const handler = (e: KeyboardEvent) => {
-      if (!surfaceActive) return;
-      if (!(e.metaKey || e.ctrlKey)) return;
-
-      // Remaining bindings need plain ⌘ (no shift/alt).
-      if (e.shiftKey || e.altKey) return;
-
-      // Split panes (2026-07-17): multiple AgentChat instances can be
-      // mounted at once. Only the FOCUSED pane's chat (the global
-      // active chat) owns these app-wide bindings — otherwise ⌘↑/↓
-      // would scroll every pane. Chats
-      // mounted without a chatId (picker/beta flows) keep them.
+      if (hasShortcutPriorityClaim() || navigationShortcutBlocked(e)) return;
+      const shortcut = resolveNavigationShortcut(e);
+      if (shortcut?.kind !== "message") return;
       if (chatId) {
         const workspaceState = useWorkspaceStore.getState();
         if (
@@ -3098,49 +3100,18 @@ function AgentChatBody({
           return;
         }
       }
-
-      // Skip jump-by-message bindings while typing — preserves
-      // native cursor/selection behavior in the textarea.
-      const target = e.target as HTMLElement | null;
-      const tag = target?.tagName;
-      if (tag === "TEXTAREA" || tag === "INPUT") return;
-
       const el = scrollRef.current;
       if (!el) return;
-
-      if (e.key === "ArrowUp") {
-        const top = nextTextMessageTarget(el, { direction: "up" });
-        if (top !== null) {
-          e.preventDefault();
-          beginChatScrollNavigation(el, { target: top });
-          el.scrollTo({ top, behavior: "smooth" });
-        }
-        return;
-      }
-      if (e.key === "ArrowDown") {
-        const top = nextTextMessageTarget(el, { direction: "down" });
-        if (top !== null) {
-          e.preventDefault();
-          beginChatScrollNavigation(el, { target: top });
-          el.scrollTo({ top, behavior: "smooth" });
-        }
-        return;
-      }
-      if (e.key === "Home") {
+      const owner = el.closest("[data-pane-root]") ?? el.closest(".zeros-agent-surface");
+      if (!(e.target instanceof Node) || !owner?.contains(e.target)) return;
+      if (checkpointNavigateRef.current?.(shortcut.direction)) {
         e.preventDefault();
-        beginChatScrollNavigation(el, { target: 0 });
-        el.scrollTo({ top: 0, behavior: "smooth" });
-        return;
-      }
-      if (e.key === "End") {
-        e.preventDefault();
-        jumpToBottom(true);
-        return;
+        e.stopPropagation();
       }
     };
-    window.addEventListener("keydown", handler);
-    return () => window.removeEventListener("keydown", handler);
-  }, [chatId, surfaceActive, jumpToBottom]);
+    window.addEventListener("keydown", handler, true);
+    return () => window.removeEventListener("keydown", handler, true);
+  }, [chatId, surfaceActive]);
 
   // File picker for the "+" → "Add attachment" menu (routes through the
   // editor's insertFiles, same as drag-drop / paste).
@@ -3523,13 +3494,20 @@ function AgentChatBody({
     }
     if (action !== "focus") return;
     acquiredComposerFocusRef.current = true;
+    const mayFocus = captureDeferredFocus(composerEditor?.view.dom ?? null);
+    let cancelled = false;
     // Defer one microtask: a just-revealed retained layer clears its `inert`
     // this commit, and a pane/tab click blurs the previous composer as its
     // default action — both must settle before we read document.activeElement
     // and move focus.
     queueMicrotask(() => {
       // A fast re-switch may have moved on since the effect ran.
-      if (chatId && useWorkspaceStore.getState().activeChatId !== chatId)
+      if (cancelled || !mayFocus() || !composerOwnsFocus({
+        chatId,
+        activeChatId: useWorkspaceStore.getState().activeChatId,
+        composerConcealed: composerConcealedRef.current,
+        cardHoldsKeyboard: cardHoldsKeyboardRef.current,
+      }))
         return;
       const paneRoot =
         composerEditor?.view.dom.closest("[data-pane-root]") ?? null;
@@ -3542,6 +3520,7 @@ function AgentChatBody({
         return;
       composerFocusRef.current();
     });
+    return () => { cancelled = true; };
   }, [chatId, activeChatId, composerConcealed, cardHoldsKeyboard, composerEditor]);
 
   // ── "Composer always focused in the chat column" guardian ────────────────
@@ -3584,8 +3563,9 @@ function AgentChatBody({
       // Cheap early-out before scheduling: a click outside this window is never
       // ours (workbench, another pane, the top bar).
       if (!interactionInsidePane) return;
+      const mayFocus = captureDeferredFocus(composerDom);
       setTimeout(() => {
-        if (!surfaceActiveRef.current) return;
+        if (!surfaceActiveRef.current || !mayFocus()) return;
         const selection = window.getSelection();
         if (
           shouldReclaimComposerFocus({
@@ -4951,6 +4931,11 @@ function AgentChatBody({
                 <span aria-hidden="true">Loading conversation…</span>
               </div>
             )}
+            {transcriptHistoryStatus === "waiting" && (
+              <div role="status" aria-label="Waiting for conversation" className="text-fg3 py-2 text-xs">
+                Loading conversation…
+              </div>
+            )}
             {transcriptHistoryStatus === "unavailable" && (
               <div role="status" aria-label="Chat history unavailable" className="text-fg3 flex items-center gap-2 py-2 text-xs">
                 <span>Chat history isn’t available yet.</span>
@@ -5121,6 +5106,7 @@ function AgentChatBody({
           bottomSpacerPx={checkpointSpacerPx}
           onBottomSpacerChange={setCheckpointSpacerPx}
           recomputeRef={checkpointRecomputeRef}
+          navigateRef={checkpointNavigateRef}
         />
       </div>
 

@@ -43,7 +43,6 @@ import {
 } from "@/renderer/shared/ui/primitives";
 import { toast } from "@/renderer/shared/ui/primitives/elements";
 import { openTurnChanges, warmTurnChanges } from "@/renderer/shell/workbench/open-turn-changes";
-import { useOpenFileInWorkbench } from "@/renderer/shell/workbench/use-open-file";
 import {
   turnGet,
   turnReset,
@@ -481,7 +480,6 @@ export const TurnFooter = memo(function TurnFooter({
   onFork,
   onForkIntent,
 }: TurnFooterProps) {
-  const openInWorkbench = useOpenFileInWorkbench();
   // Stable actions context — identity doesn't change on store mutations, so
   // reading it here doesn't defeat this component's memo. Used to cancel an
   // in-flight turn before a reset spans it.
@@ -551,14 +549,8 @@ export const TurnFooter = memo(function TurnFooter({
   // A click publishes the complete turn-scoped viewer identity immediately;
   // pointer/focus warming is owned by TurnFileRow and never awaited here.
   const onOpenTurnFile = useCallback(
-    (path: string) =>
-      openInWorkbench(path, {
-        diff: true,
-        diffScope: "turn",
-        turnChatId: chatId,
-        turnId,
-      }),
-    [openInWorkbench, chatId, turnId],
+    (path: string) => { if (turn && surfaceActive) openTurnChanges(turn, path); },
+    [turn, surfaceActive],
   );
 
   // Undo a reset by its id: restores the files AND re-inserts the truncated
@@ -827,7 +819,7 @@ export const TurnFooter = memo(function TurnFooter({
             className="hover:bg-bg1-hover focus-visible:ring-highlighted-bright h-5 shrink-0 rounded-sm px-1 py-0 font-normal tabular-nums focus-visible:ring-2"
           >
             <span className="text-green-primary">+{additions}</span>
-            <span className="text-blue-primary">−{deletions}</span>
+            <span className="text-red-primary">−{deletions}</span>
           </Button>
         )}
       </div>

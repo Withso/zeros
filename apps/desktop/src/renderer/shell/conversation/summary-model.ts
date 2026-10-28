@@ -1,9 +1,8 @@
 import { isRunSessionId } from "@zeros/protocol/run-actions";
-import type { ContextGraphItemWire } from "../../platform/context-graph";
 import type { WorkbenchTab, WorkbenchTabType } from "../workbench/tab-model";
 import type { PaneNode } from "../../state/chat-panes";
 
-/** A side-by-side split anywhere in the tree gives Summary back its tab icon. */
+/** A side-by-side split keeps Summary in its popover presentation. */
 export function summaryHasSplitColumns(node: PaneNode): boolean {
   return (
     node.type === "split" &&
@@ -11,15 +10,6 @@ export function summaryHasSplitColumns(node: PaneNode): boolean {
       summaryHasSplitColumns(node.first) ||
       summaryHasSplitColumns(node.second))
   );
-}
-
-/** Sort a copy so the shared context snapshot keeps its original ordering. */
-export function recentSummaryContext(
-  items: readonly ContextGraphItemWire[],
-): ContextGraphItemWire[] {
-  return [...items]
-    .sort((a, b) => b.mtimeMs - a.mtimeMs || a.relPath.localeCompare(b.relPath))
-    .slice(0, 3);
 }
 
 /** Reuse the workspace's destinations without changing their nested selection. */

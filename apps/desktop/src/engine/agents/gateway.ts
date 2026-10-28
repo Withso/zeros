@@ -1,3 +1,4 @@
+import { gatewayRegistration, type McpGatewayEndpoint } from "./gateway/capability";
 import { McpWorkingDirectoryError, validateMcpWorkingDirectory } from "./mcp-working-directory";
 import {
   sessionToolsSnapshotSchema,
@@ -59,6 +60,7 @@ import { resolveWorkspaceTargetRef } from "../git/target-branch";
 import { mergeSpawnEnv } from "../settings/spawn-env";
 import {
   applyUserProviderConfig,
+  providerAuthMode,
   usesProviderApiKey,
 } from "../settings/provider-env";
 import {
@@ -4034,9 +4036,9 @@ export class AgentGateway {
    *  is running), or null when it's down. When set, every session is injected
    *  one extra http server pointing at the gateway, which fronts the auth:"oauth"
    *  backends (they're held out of direct injection by resolveMcpServers). */
-  private gatewayServerUrl: string | null = null;
+  private gatewayServer: McpGatewayEndpoint | null = null;
   private readonly gatewayCatalogs = new Map<string, () => string>();
-  private scopedMcpGateway?: (root: string, backends: import("./mcp-registry").GatewayBackend[]) => Promise<string | null>;
+  private scopedMcpGateway?: (root: string, backends: import("./mcp-registry").GatewayBackend[]) => Promise<McpGatewayEndpoint | null>;
   setScopedMcpGateway(resolve: NonNullable<AgentGateway["scopedMcpGateway"]>): void { this.scopedMcpGateway = resolve; }
   private organizationMcpResolver?: (workspaceId: string, env: Record<string, string>, signal?: AbortSignal) => Promise<McpServerRegistration[]>;
   setOrganizationMcpResolver(resolve: NonNullable<AgentGateway["organizationMcpResolver"]>): void { this.organizationMcpResolver = resolve; }
@@ -4045,8 +4047,9 @@ export class AgentGateway {
   private mcpSecretResolver?: (servers: McpServerRegistration[], env: Record<string, string>) => void;
   setMcpSecretResolver(resolve: NonNullable<AgentGateway["mcpSecretResolver"]>): void { this.mcpSecretResolver = resolve; }
   registerGatewayCatalog(url: string, revision: () => string): void { this.gatewayCatalogs.set(url, revision); }
-  setGatewayServer(url: string | null, revision?: () => string): void {
-    this.gatewayServerUrl = url;
+  setGatewayServer(endpoint: McpGatewayEndpoint | null, revision?: () => string): void {
+    this.gatewayServer = endpoint;
+    const url = endpoint?.url;
     // Keep the source when new sessions omit an empty gateway: older sessions
     // still need to withdraw its former tools on their next send.
     if (url && revision) this.registerGatewayCatalog(url, revision);
@@ -4132,20 +4135,17 @@ export class AgentGateway {
       for (const w of warnings) console.warn(`[agents] ${agentId} MCP: ${w}`);
       const injected: McpServerRegistration[] = [];
       // The gateway endpoint fronting the auth:"oauth"/"header" backends.
-      const gatewayUrl = this.scopedMcpGateway
+      const gateway = this.scopedMcpGateway
         ? await this.scopedMcpGateway(mainRepoRoot ?? cwd, gatewayBackends)
-        : this.gatewayServerUrl;
+        : this.gatewayServer;
       // A retained project listener can have an empty catalog. The legacy
       // setter itself controls whether its explicitly supplied URL is active.
-      if (gatewayUrl && (!this.scopedMcpGateway || gatewayBackends.length > 0)) {
-        injected.push({
-          name: "zeros-gateway",
-          transport: "http",
-          url: gatewayUrl,
-        });
+      if (gateway && (!this.scopedMcpGateway || gatewayBackends.length > 0)) {
+        if (!env) throw new Error("MCP gateway credential environment is unavailable.");
+        injected.push(gatewayRegistration(gateway, env));
       }
       // Surface gateway backends that exist but have NO endpoint up yet.
-      if (gatewayBackends.length > 0 && !gatewayUrl) {
+      if (gatewayBackends.length > 0 && !gateway) {
         console.warn(
           `[agents] ${agentId} MCP: gateway-managed server(s) ` +
             `[${gatewayBackends.map((b) => b.name).join(", ")}] pending the MCP gateway (not yet available).`,
@@ -4317,6 +4317,10 @@ export class AgentGateway {
   }
 
   private async listAgentsImpl(): Promise<EnrichedRegistryAgent[]> {
+    const apiKeySources = new Map<
+      string,
+      NonNullable<EnrichedRegistryAgent["apiKeySource"]>
+    >();
     const runtimeOverrides = this.resolveRuntimeOverrides();
     const selectedBinaries = AGENT_MANIFEST.map(
       (agent) => runtimeOverrides.get(agent.id) ?? agent.cliBinary,
@@ -4339,9 +4343,12 @@ export class AgentGateway {
             // unless the credential file has been touched since the
             // failure, in which case the user has re-signed in via
             // Terminal.app and the probe result is fresh again.
-            if (await this.isAuthRuntimeInvalidated(m.id, m.authProbe)) {
+            const invalidated = await this.isAuthRuntimeInvalidated(
+              m.id,
+              m.authProbe,
+            );
+            if (invalidated) {
               this.lastConfirmedAuthentication.set(m.id, false);
-              return;
             }
             try {
               const keyVar =
@@ -4350,17 +4357,39 @@ export class AgentGateway {
                   : m.id === "codex"
                     ? "OPENAI_API_KEY"
                     : "CURSOR_API_KEY";
-              const profile = !usesProviderApiKey(this.projectRoot, m.id) ? providerAccountProfile(m.id) : null;
-              const confirmed = profile
-                ? profile.state === "connected"
-                : m.id === "cursor" ||
-                usesProviderApiKey(this.projectRoot, m.id)
-                  ? Boolean(
-                      applyUserProviderConfig(this.projectRoot, m.id, {
-                        env: {},
-                      }).env?.[keyVar] ?? process.env[keyVar],
-                    )
-                  : await evaluateAuthProbe(
+              const apiKeyMode = usesProviderApiKey(this.projectRoot, m.id);
+              const profile = !apiKeyMode
+                ? providerAccountProfile(m.id)
+                : null;
+              const usesKey = m.id === "cursor" || apiKeyMode;
+              let effectiveKey: string | undefined;
+              if (!profile && usesKey) {
+                const configuredKey = applyUserProviderConfig(
+                  this.projectRoot,
+                  m.id,
+                  { env: {} },
+                ).env?.[keyVar];
+                effectiveKey = configuredKey ?? process.env[keyVar];
+                // Resolve presence from the same selection as the auth probe.
+                // Cursor subscription credentials also use CURSOR_API_KEY,
+                // but must never appear as a saved/pasted API connection.
+                if (
+                  m.id !== "cursor" ||
+                  providerAuthMode(this.projectRoot, m.id) !== "subscription"
+                ) {
+                  apiKeySources.set(
+                    m.id,
+                    !effectiveKey ? "none" : configuredKey ? "saved" : "environment",
+                  );
+                }
+              }
+              const confirmed =
+                !invalidated &&
+                (profile
+                  ? profile.state === "connected"
+                  : usesKey
+                    ? Boolean(effectiveKey)
+                    : await evaluateAuthProbe(
                       // The CLI owns its current login, including API keys and
                       // custom config roots. Legacy files/keychain entries are
                       // change hints, not proof of a usable device connection.
@@ -4368,7 +4397,7 @@ export class AgentGateway {
                         ? { kind: "command", binary: m.cliBinary, args: ["auth", "status", "--json"] }
                         : m.authProbe,
                       this.providerProbeRunner(m.id),
-                    );
+                      ));
               this.lastConfirmedAuthentication.set(m.id, confirmed);
               if (confirmed) {
                 authenticated.add(m.id);
@@ -4447,7 +4476,10 @@ export class AgentGateway {
       runtimeOverrides,
       AGENT_MANIFEST,
       authenticationUnavailable,
-    );
+    ).map((agent) => {
+      const apiKeySource = apiKeySources.get(agent.id);
+      return apiKeySource ? { ...agent, apiKeySource } : agent;
+    });
   }
 
   private providerProbeRunner(providerId: string): ProbeCommandRunner {

@@ -11,7 +11,7 @@ import {
 // Fetches one file via the `read_file` IPC and renders it:
 //   • text   → shiki-highlighted source with a line-number gutter
 //   • md     → Preview (rendered) / Code (highlighted source) toggle
-//   • image  → inline <img> from the data URL
+//   • image/video → bounded media with zoom, pan, copy and download
 //   • binary / too-large / error → a quiet placeholder
 //
 // Read-only by design for v1 — view + copy only. Highlighting reuses
@@ -56,6 +56,8 @@ import {
 import { useWorkspaceReviewStatus } from "@/renderer/features/code-review/use-workspace-review-status";
 import { MergeConflictActions } from "@/renderer/features/code-review/merge-conflict-actions";
 import { SourceEditor } from "./code-editor/source-editor";
+import { FileEditorOptions, type FileEditorControls } from "./code-editor/file-editor-options";
+import { useFileEditorPreferences } from "./code-editor/editor-preferences";
 import { parseContextAttachmentPath } from "@zeros/protocol/attachment-policy";
 import { useScrollMemory, useScrollMemoryRef } from "../../scroll-memory";
 import { Button, Tooltip } from "@/renderer/shared/ui/primitives";
@@ -100,6 +102,9 @@ import { setDiffStyle, useDiffStyle } from "./diff-style-store";
 import { statusForGeneration } from "./changes-tab";
 import type { SkillSource } from "../../../platform/skill-source";
 import { Inline } from "@/renderer/shared/ui/layout/inline";
+import { FileMediaPreview } from "./file-media-preview";
+import { usePendingFilePreview } from "@/renderer/platform/pending-file-preview";
+import { useDocumentActive } from "@/renderer/state/use-document-active";
 
 interface FileViewerProps {
   /** Owning workbench tab. Used to close only this tab if an external delete leaves
@@ -111,6 +116,10 @@ interface FileViewerProps {
   cwd: string | undefined;
   /** Repo-relative path to display. File tabs never exist without one. */
   path: string;
+  /** Git-root-relative identity when the chat's cwd is a subdirectory. */
+  gitPath?: string;
+  /** Files alone enables current-source editing and its options menu. */
+  fileEditor?: boolean;
   /** Git target for the Diff view (worktree id, or the trunk's repoRoot). Null
    *  → no diff is fetched (no Diff toggle). */
   workspaceId?: string | null;
@@ -206,7 +215,7 @@ function isBinaryGitPatch(patch: string): boolean {
 /** The open file's repo-relative path as breadcrumbs: the colored file-type
  *  glyph + parent dirs (muted, ellipsised when long) + filename (emphasised,
  *  never clipped). Display-only; the full path shows on hover. */
-function PathBreadcrumbs({ path }: { path: string }) {
+function PathBreadcrumbs({ path, truncateFilename = false }: { path: string; truncateFilename?: boolean }) {
   const file = baseOf(path);
   const dir =
     path.length > file.length ? path.slice(0, -(file.length + 1)) : "";
@@ -221,7 +230,7 @@ function PathBreadcrumbs({ path }: { path: string }) {
               <span className="text-fg2/50 shrink-0">/</span>
             </>
           )}
-          <span className="text-fg1 shrink-0 font-medium">{file}</span>
+          <span className={cn("text-fg1 font-medium", truncateFilename ? "min-w-0 truncate" : "shrink-0")}>{file}</span>
         </div>
       </div>
     </Tooltip>
@@ -233,6 +242,8 @@ export function FileViewer({
   active,
   cwd,
   path,
+  gitPath = path,
+  fileEditor = false,
   workspaceId,
   diff,
   diffScope,
@@ -259,6 +270,11 @@ export function FileViewer({
   reviewExternal,
 }: FileViewerProps) {
   const viewerRef = useRef<HTMLDivElement | null>(null);
+  const [mediaActionsContainer, setMediaActionsContainer] = useState<HTMLSpanElement | null>(null);
+  const editorPreferences = useFileEditorPreferences();
+  const [editorControls, setEditorControls] = useState<{ key: string; value: FileEditorControls | null } | null>(null);
+  const editorKey = JSON.stringify([cwd, path, contentRevision ?? 0]);
+  const onEditorControls = useCallback((value: FileEditorControls | null) => setEditorControls({ key: editorKey, value }), [editorKey]);
   const review = useCodeReview({
     cwd,
     workspaceId,
@@ -274,7 +290,12 @@ export function FileViewer({
     read: statusForGeneration,
   });
   const isGitConflict =
-    gitStatus.data?.conflicted.some((file) => file.path === path) ?? false;
+    gitStatus.data?.conflicted.some((file) => file.path === gitPath) ?? false;
+  // Only untracked files need an absent baseline when Git returns no patch.
+  // Staged adds already have a patch, or may match the All comparison's base.
+  const liveNewFile = gitStatus.data?.untracked.includes(gitPath) ?? false;
+  const oldPath = [...(gitStatus.data?.staged ?? []), ...(gitStatus.data?.unstaged ?? [])]
+    .find(file => file.path === gitPath && file.oldPath)?.oldPath;
 
   // Keyed scroll memory for this file's read-only surfaces — diff, source,
   // and markdown preview each keep their own offset (see shell/scroll-memory).
@@ -308,17 +329,16 @@ export function FileViewer({
   const diffQuery = useMemo<WorkspaceFileDiffQuery>(
     () => ({
       workspaceId: workspaceId ?? "",
-      path,
-      diffScope,
-      diffSha,
-      diffHistory,
+      path: gitPath,
+      ...(fileEditor ? { oldPath, diffScope: "all" as const, fullContext: editorPreferences.diffView } : { diffScope, diffSha, diffHistory, turnChatId, turnId }),
       ...(diffBaseBranch !== undefined ? { baseBranch: diffBaseBranch } : {}),
-      turnChatId,
-      turnId,
     }),
     [
       workspaceId,
-      path,
+      gitPath,
+      oldPath,
+      fileEditor,
+      editorPreferences.diffView,
       diffScope,
       diffSha,
       diffHistory,
@@ -330,6 +350,9 @@ export function FileViewer({
   // useSyncExternalStore gives the destination its exact cached snapshot in
   // the selection render. There is no component-local "loading reset" paint.
   const readSnapshot = useWorkspaceFileReadSnapshot(readQuery);
+  const visible = useDocumentActive(active);
+  const pendingPreview = usePendingFilePreview(cwd, path, active);
+  const hasPendingPreview = pendingPreview !== null;
   const diffSnapshot = useWorkspaceFileDiffSnapshot(diffQuery);
   const readKey = workspaceFileReadKey(readQuery);
   useInstantViewSwitch(
@@ -358,12 +381,12 @@ export function FileViewer({
   // Hover/workspace-intent prefetch usually makes this a background refresh;
   // concurrent callers share the same keyed request.
   useEffect(() => {
-    if (!active || !cwd) return;
+    if (!visible || !cwd) return;
     // Explicit pointer/workspace intent owns prefetch. Hidden viewers only
     // observe those results, including on a cold mount; fetching here would
     // bypass the speculative request bound while moving across Changes rows.
-    void loadWorkspaceFileRead(readQuery, { maxAgeMs: 15_000 }).catch(() => {});
-  }, [active, cwd, readQuery, readKey, refreshKey]);
+    if (!hasPendingPreview) void loadWorkspaceFileRead(readQuery, { maxAgeMs: 15_000 }).catch(() => {});
+  }, [visible, cwd, readQuery, readKey, refreshKey, hasPendingPreview]);
 
   // Fetch the file's diff for the filter it was opened from: "all" = worktree vs
   // base (committed + uncommitted), "uncommitted" = worktree vs HEAD, "commit" =
@@ -382,10 +405,11 @@ export function FileViewer({
   const diskResult =
     readSnapshot.data?.path === path ? readSnapshot.data : null;
   const fileMissing =
+    !pendingPreview &&
     diskResult?.path === path &&
     diskResult?.kind === "error" &&
     diskResult.error === "file no longer exists on disk";
-  const result = diskResult;
+  const result = pendingPreview ?? diskResult;
   const isText = result?.kind === "text";
   const readLoading = !result && readSnapshot.loading;
   const readFailed = !result && !readSnapshot.loading && !!readSnapshot.error;
@@ -396,8 +420,8 @@ export function FileViewer({
     {
       active,
       error:
-        readSnapshot.error ?? (result?.kind === "error" ? result.error : null),
-      pending: readSnapshot.loading || readSnapshot.refreshing,
+        hasPendingPreview ? null : readSnapshot.error ?? (result?.kind === "error" ? result.error : null),
+      pending: !hasPendingPreview && (readSnapshot.loading || readSnapshot.refreshing),
       primary: true,
       hasContent: !!result && result.kind !== "error",
       retry: () => loadWorkspaceFileRead(readQuery, { force: true }),
@@ -423,7 +447,7 @@ export function FileViewer({
   // commit scope, where an empty diff means the file isn't part of that commit.
   // Text-only, so a tracked binary's "Binary files … differ" never leaks in.
   const sourceBlocksTextDiff =
-    result?.kind === "binary" || result?.kind === "image";
+    result?.kind === "binary" || result?.kind === "image" || result?.kind === "video";
   const aggregateTextPatchReady =
     typeof rawDiff === "string" &&
     rawDiff.length > 0 &&
@@ -480,7 +504,7 @@ export function FileViewer({
   const diffAvailable = hasDiff || notInCommit;
   const missingDisposition = resolveMissingFileDisposition({
     fileMissing,
-    diffIntent: diff === true,
+    diffIntent: diff === true || (fileEditor && editorPreferences.diffView),
     diffPendingOrAvailable: diffLoading || diffAvailable,
   });
 
@@ -491,7 +515,7 @@ export function FileViewer({
   // Markdown (whose ordinary All Files default is Preview), exactly matching
   // the post-discard workflow. A later explicit file-open clears the revision
   // marker and restores the entry point's normal default.
-  const autoMode: ViewerMode = diff
+  const autoMode: ViewerMode = diff && !fileEditor
     ? "diff"
     : contentRevision
       ? "edit"
@@ -501,7 +525,7 @@ export function FileViewer({
   // If the source disappeared but Git has a deletion patch, Diff is the only
   // meaningful surface — switch there even if Edit had been explicitly chosen.
   let mode: ViewerMode =
-    missingDisposition === "review-diff" ? "diff" : (viewerMode ?? autoMode);
+    missingDisposition === "review-diff" ? "diff" : (fileEditor && viewerMode === "diff" ? "edit" : viewerMode ?? autoMode);
   if (mode === "diff" && !diffAvailable) mode = isMarkdown ? "preview" : "edit";
 
   const diffShown =
@@ -614,6 +638,7 @@ export function FileViewer({
   );
 
   const canCopy = result?.kind === "text" && result.content != null;
+  const isMedia = result?.kind === "image" || result?.kind === "video";
 
   // Local source editing also repairs conflicted Design metadata. In a cloud
   // workspace, agents author Design natively but people's Files edits to
@@ -649,7 +674,9 @@ export function FileViewer({
   // Mode toggle: markdown → Preview/Edit (+ Diff when a diff is available); other
   // text → Edit (+ Diff). "Diff" stays available for notInCommit so the user can
   // see the "not part of this commit" explanation. A lone option renders no toggle.
-  const modeOptions: ViewerMode[] = isMarkdown
+  const modeOptions: ViewerMode[] = fileEditor
+    ? isMarkdown ? ["preview", "edit"] : ["edit"]
+    : isMarkdown
     ? diffAvailable
       ? ["diff", "preview", "edit"]
       : ["preview", "edit"]
@@ -674,7 +701,8 @@ export function FileViewer({
           data-testid="file-path-actions"
           className="flex min-w-0 items-center gap-1"
         >
-          {path && <PathBreadcrumbs path={path} />}
+          {path && <PathBreadcrumbs path={path} truncateFilename={isMedia} />}
+          {isMedia && <span ref={setMediaActionsContainer} className="flex shrink-0 items-center gap-1" />}
           {canCopy && (
             <CodeBlockCopyButton
               text={result!.content ?? ""}
@@ -728,7 +756,7 @@ export function FileViewer({
           </Tooltip>
         )}
         {/* Unified ⇄ split — only in Diff mode. */}
-        {diffShown && (
+        {diffShown && !fileEditor && (
           <div className="bg-bg2 flex items-center rounded-md p-0.5">
             {(
               [
@@ -775,6 +803,12 @@ export function FileViewer({
             ))}
           </div>
         )}
+        {fileEditor && isText && !sourceReadOnly && (
+          <FileEditorOptions key={editorKey} active={active}
+            controls={editorControls?.key === editorKey ? editorControls.value : null}
+            canDiff={!!workspaceId}
+            onDiffViewChange={() => onViewerModeChange?.("edit")} />
+        )}
         {headerTrailing}
       </Inline>
     </div>
@@ -815,18 +849,13 @@ export function FileViewer({
             {missingDisposition === "show-missing" && !diffShown && (
               <Placeholder Icon={FileX2} text="file no longer exists on disk" />
             )}
-            {result?.kind === "image" && !diffShown && (
-              <div className="flex h-full items-center justify-center overflow-auto p-4">
-                {result.dataUrl ? (
-                  <img
-                    src={result.dataUrl}
-                    alt={path}
-                    className="max-h-full max-w-full object-contain"
-                  />
-                ) : (
-                  <Placeholder Icon={ImageOff} text="Image unavailable" />
-                )}
-              </div>
+            {(result?.kind === "image" || result?.kind === "video") && !diffShown && (
+              result.dataUrl || result.media || hasPendingPreview ? (
+                <FileMediaPreview key={JSON.stringify([tabId, readKey])} kind={result.kind}
+                  sourceIdentity={hasPendingPreview ? readKey : undefined}
+                  source={result.dataUrl} mediaSource={result.media && cwd ? { cwd, bytes: result.bytes, media: result.media } : undefined}
+                  path={path} active={active} actionsContainer={mediaActionsContainer} />
+              ) : <Placeholder Icon={ImageOff} text="Media unavailable" />
             )}
             {diffShown &&
               (notInCommit ? (
@@ -842,7 +871,7 @@ export function FileViewer({
                 <DiffView
                   path={path}
                   patch={diffPatch}
-                  diffStyle={diffStyle}
+                  diffStyle={fileEditor ? "unified" : diffStyle}
                   scrollKey={diffScrollKey}
                   review={review}
                   active={active}
@@ -905,6 +934,12 @@ export function FileViewer({
                   path={path}
                   content={result?.content ?? ""}
                   offscreen={!sourceShown || !active}
+                  active={active}
+                  autoSave={fileEditor && editorPreferences.autoSave}
+                  editableDiffQuery={fileEditor && editorPreferences.diffView && workspaceId ? diffQuery : undefined}
+                  isNewFile={liveNewFile}
+                  refreshKey={refreshKey}
+                  onControlsChange={fileEditor ? onEditorControls : undefined}
                   review={review}
                   isGitConflict={isGitConflict}
                 />

@@ -52,6 +52,7 @@ window.mentionHarness = {
   pending: () => pending,
 };
 setActiveBridge({
+  executionIdentity: { kind: "local", sidecar: "active" },
   request: async (message: { op: string; params: Record<string, unknown> }) => {
     const params = message.params;
     if (message.op === "workspace.list")

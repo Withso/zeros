@@ -339,7 +339,7 @@
 [data-Zeros-root] .zeros-agent-md a[data-local-preview]::after {
   display: none;
 }
-[data-Zeros-root] .zeros-agent-md .zeros-md-filepath:focus-visible {
+[data-Zeros-root] .zeros-agent-md .zeros-md-filepath:focus-visible:where(:not([data-zeros-focus-visible="false"])) {
   outline: 1px solid var(--brown-primary);
   outline-offset: 2px;
 }

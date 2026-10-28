@@ -20,6 +20,7 @@ import {
 import { toast } from "../../shared/ui/primitives/elements";
 import { isCloudWorkspace } from "../../platform/bridge/cloud-workspace-key";
 import { useActiveWorkspace } from "../../state/use-active-workspace";
+import { useReadRecovery } from "../../state/use-read-recovery";
 import { getActiveOrganizationIdSnapshot, useActiveOrganization } from "../team/team-store";
 import { checkSimulatorsAgain, runSimulatorSetupAction } from "../simulators/simulator-actions";
 import {
@@ -65,16 +66,16 @@ const OPENS_OUTSIDE_ZEROS: ReadonlySet<SimulatorSetupAction["kind"]> = new Set([
   "open-android-studio",
 ]);
 
-export function SimulatorsPanel() {
+export function SimulatorsPanel({ surfaceActive = true }: { surfaceActive?: boolean }) {
   const organization = useActiveOrganization();
   if (!organization && getActiveOrganizationIdSnapshot())
     return <p className="text-fg2 text-xs">Loading organization settings…</p>;
   if (organization && !organization.isPersonal)
-    return <OrganizationSimulatorsPanel organizationId={organization.id} />;
-  return <LocalSimulatorsPanel />;
+    return <OrganizationSimulatorsPanel organizationId={organization.id} surfaceActive={surfaceActive} />;
+  return <LocalSimulatorsPanel surfaceActive={surfaceActive} />;
 }
 
-function OrganizationSimulatorsPanel({ organizationId }: { organizationId: string }) {
+function OrganizationSimulatorsPanel({ organizationId, surfaceActive }: { organizationId: string; surfaceActive: boolean }) {
   const { workspace } = useActiveWorkspace();
   // Ownership alone does not determine placement. Only the selected owner's
   // confirmed local workspace may expose this Mac's simulators.
@@ -83,7 +84,7 @@ function OrganizationSimulatorsPanel({ organizationId }: { organizationId: strin
     workspace.placement !== "cloud" &&
     !isCloudWorkspace(workspace.path)
   )
-    return <LocalSimulatorsPanel />;
+    return <LocalSimulatorsPanel surfaceActive={surfaceActive} />;
   return (
     <SettingsGroup title="Simulators">
       <SettingsRow
@@ -94,10 +95,15 @@ function OrganizationSimulatorsPanel({ organizationId }: { organizationId: strin
   );
 }
 
-function LocalSimulatorsPanel() {
+function LocalSimulatorsPanel({ surfaceActive }: { surfaceActive: boolean }) {
   const resolved = useResolvedSettings();
   const layer = useSettingsLayer("user");
   const hub = useSimulatorHub();
+  const hubError = useMemo(() => hub.error ? new Error(hub.error) : null, [hub.error]);
+  const recovery = useReadRecovery("simulator-settings-hub", {
+    error: hubError, pending: hub.loading, hasContent: hub.snapshot !== null,
+    retry: loadSimulatorHub, connected: true, active: surfaceActive,
+  });
   const [pending, setPending] = useState<PendingSimulatorSettings>({});
   const sequenceRef = useRef(0);
   const writeTailRef = useRef<Promise<void>>(Promise.resolve());
@@ -180,7 +186,7 @@ function LocalSimulatorsPanel() {
     [layer, resolved],
   );
 
-  const settingsUnavailable = !resolved.resolved || Boolean(resolved.error);
+  const settingsUnavailable = !resolved.resolved || Boolean(resolved.readError);
   const rowDisabled = (key: SimulatorSettingKey) =>
     settingsUnavailable || managed(key) || pending[key]?.settled === false;
   const switchRow = (key: SimulatorBooleanSetting, options: { inactive?: boolean } = {}) => {
@@ -214,7 +220,7 @@ function LocalSimulatorsPanel() {
             key={platform}
             platform={platform}
             snapshot={hub.snapshot}
-            error={hub.error}
+            error={recovery.error?.message ?? null}
           />
         ))}
       </SettingsGroup>

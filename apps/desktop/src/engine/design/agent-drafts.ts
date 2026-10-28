@@ -122,6 +122,8 @@ const SAVING_KINDS = new Set(["edit", "delete", "move"]);
 const READ_ONLY_KINDS = new Set(["read", "search", "think", "fetch", "switch_mode"]);
 /** Frame sources are limited to 2 MiB; JSON escaping can roughly double it. */
 const MAX_DRAFT_INPUT_CHARS = 4 * 1024 * 1024;
+const MAX_PREVIEW_BYTES = 2 * 1024 * 1024;
+const MAX_EDIT_WORK_CHARS = 32 * 1024 * 1024;
 const MAX_ACTIVE_DRAFTS = 8;
 const MAX_REMEMBERED_TOOLS = 512;
 const MAX_STRUCTURED_EDITS = 32;
@@ -324,6 +326,8 @@ export function designAgentEditPreview(
   input: Record<string, unknown>,
   complete: ReadonlySet<string>,
 ): string | null {
+  if (base.length > MAX_PREVIEW_BYTES || Buffer.byteLength(base) > MAX_PREVIEW_BYTES ||
+      (Array.isArray(input.edits) && input.edits.length > MAX_STRUCTURED_EDITS)) return null;
   const edits: Array<{ path: string; value: Record<string, unknown> }> = Array.isArray(input.edits)
     ? input.edits.flatMap((value, index) =>
         value && typeof value === "object"
@@ -333,14 +337,29 @@ export function designAgentEditPreview(
     : [{ path: "", value: input }];
   let source = base;
   let applied = false;
+  let remainingWork = MAX_EDIT_WORK_CHARS;
   for (const edit of edits) {
     const search = edit.value.old_string;
     const replacement = edit.value.new_string;
     if (typeof search !== "string" || !complete.has(`${edit.path}old_string`) || !search)
       break;
     if (typeof replacement !== "string") break;
+    remainingWork -= source.length + search.length + replacement.length;
+    if (remainingWork < 0 || replacement.length > MAX_PREVIEW_BYTES) return null;
     const at = source.indexOf(search);
     if (at < 0) return applied ? source : null;
+    let matches = 1;
+    if (edit.value.replace_all === true) {
+      let cursor = at + search.length;
+      for (;;) {
+        const next = source.indexOf(search, cursor);
+        if (next < 0) break;
+        matches++;
+        cursor = next + search.length;
+      }
+    }
+    const projected = Buffer.byteLength(source) + matches * (Buffer.byteLength(replacement) - Buffer.byteLength(search));
+    if (!Number.isSafeInteger(projected) || projected > MAX_PREVIEW_BYTES) return null;
     source =
       edit.value.replace_all === true
         ? source.split(search).join(replacement)

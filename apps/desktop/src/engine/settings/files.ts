@@ -24,7 +24,6 @@ import {
   copyFileSync,
   existsSync,
   mkdirSync,
-  readFileSync,
   renameSync,
   rmSync,
   writeFileSync,
@@ -35,6 +34,7 @@ import { parse as parseToml, stringify as stringifyToml } from "smol-toml";
 import { patch as tomlPatch } from "@decimalturn/toml-patch";
 import { legacySharedStateRoot, zerosDotDirName, zerosStateRoot } from "../db/paths";
 import { isLocalDevelopmentRuntime } from "../runtime";
+import { readBoundedUtf8FileSync } from "../files/bounded-read-sync";
 import {
   SCHEMA_URL_REPO,
   SCHEMA_URL_USER,
@@ -163,7 +163,7 @@ export interface ReadSettingsResult {
 export function readSettingsFile(filePath: string): ReadSettingsResult {
   let text: string;
   try {
-    text = readFileSync(filePath, "utf8");
+    text = readBoundedUtf8FileSync(filePath, 4 * 1024 * 1024, { noFollow: true });
   } catch (err) {
     const code = (err as NodeJS.ErrnoException).code;
     // Missing, or a path component that isn't a dir → treat as absent (a write

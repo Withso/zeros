@@ -234,6 +234,14 @@ All, editing, portals and vendor surfaces across owners, placements and themes.
   border cannot override it); the `ring-highlighted-bright/50` halo is
   decoration on top, never the only cue. `highlighted-bright` is reserved for
   focus, never hover.
+  Desktop chrome shows this cue for deliberate Tab/Shift-Tab or a composite
+  widget's navigation keys. Ordinary typing, modifiers, shortcuts and pointer
+  focus do not promote a button into keyboard-navigation styling. Text inputs
+  retain their editing cues. Use the shared `focus-visible:` variant (including
+  `group-has-focus-visible`); raw and shadow-root selectors must respect
+  `data-zeros-focus-visible="false"`. The renderer's
+  `apps/desktop/src/renderer/shared/ui/focus-navigation.ts` observes intent
+  without blurring controls or intercepting their keys.
 - **Elevation** `shadow-[var(--shadow-dropdown)]` for floating surfaces
   (re-themes for Light).
 - **Layers** `z-panel` < `z-chrome` < `z-modal` = `z-dropdown` < `z-toast`

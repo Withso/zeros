@@ -49,6 +49,43 @@ placement capability as workspace comments and exposes no cloud comment
 controls. Imported authors are display metadata, never authority to act as that
 author; Local writes use the authenticated viewer's GitHub identity.
 
+## Repository transfers and renames
+
+Local PR discovery and Review resolve the same canonical GitHub repository
+before validating returned PR URLs. The selected GitHub connection supplies
+the credential. GitHub App access still requires both the connected user's
+access and the App's repository grant. A successful discovery must be followed
+through `gh.prGet` in regression tests; finding a PR does not prove Review opens.
+
+When the desktop regains focus or reconnects, an explicit
+`project.reconcileGithubRemote` maintenance operation can repair a registered
+Local repository's Origin and configured `git.remote`. SQLite retains GitHub's
+numeric repository ID and node ID per exact remote URL; later observations use
+the ID so reusing a former owner/name cannot redirect an existing binding to a
+different repository. An unrelated URL change or explicit removal/re-add retires
+that binding. Legacy repositories first acquire their ID through an
+authenticated GitHub lookup; if an old alias was already reused before any ID
+was recorded, the old identity cannot be recovered from that URL alone.
+
+The repair preserves transport, remote names, refspecs and unrelated fork push
+URLs. Multi-fetch URLs, inherited URL rewrites and unsupported URL forms remain
+user-managed. GitHub failures preserve confirmed metadata. A change of the
+selected connection, registration or local config during the lookup cancels
+the repair. The config replacement owns Git's lock and the existing mutation
+lane. Ordinary PR reads never rewrite Git config.
+
+Before replacing Git config, the engine durably records the verified source
+URLs. If the process stops between the file replacement and native metadata
+commit, a retry resolves the saved repository ID and repairs PR links from
+those sources, including intermediate transfers. The pending sources clear in
+the same transaction that commits the saved Origin and PR links.
+
+Only the remote destination, saved Origin and matching PR links change. Project
+names, slugs, folders, workspace IDs, chats and Local/organization ownership
+remain stable. Native Origin revisions prevent old renderer caches from
+undoing a repair; notifications refresh live views without writing the result
+back to the engine. Cloud keys are excluded from this Local maintenance path.
+
 ## Reads, limits and verification
 
 The renderer deduplicates exact-key reads, structurally shares unchanged rows,

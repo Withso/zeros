@@ -29,7 +29,7 @@
 // env_files stay strict (all three classes dropped).
 // ──────────────────────────────────────────────────────────
 
-import { readFileSync, statSync } from "node:fs";
+import { readBoundedUtf8FileSync } from "../files/bounded-read-sync";
 import path from "node:path";
 import { withoutLocalDevelopment } from "../env/local-development";
 import { zerosSkillInstructions } from "../agents/zeros-skills";
@@ -266,25 +266,9 @@ export function resolveSpawnEnv(
         warnings.push(`env_file rejected (escapes the repo): ${f}`);
         continue;
       }
-      try {
-        const st = statSync(abs);
-        if (!st.isFile()) {
-          warnings.push(`env_file is not a regular file: ${f}`);
-          continue;
-        }
-        if (st.size > ENV_FILE_MAX_BYTES) {
-          warnings.push(
-            `env_file too large (> ${ENV_FILE_MAX_BYTES} bytes), skipped: ${f}`,
-          );
-          continue;
-        }
-      } catch {
-        warnings.push(`env_file not found or unreadable: ${f}`);
-        continue;
-      }
       let text: string;
       try {
-        text = readFileSync(abs, "utf8");
+        text = readBoundedUtf8FileSync(abs, ENV_FILE_MAX_BYTES, { noFollow: true, root: cwdAbs });
       } catch {
         warnings.push(`env_file not found or unreadable: ${f}`);
         continue;

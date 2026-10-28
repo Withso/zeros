@@ -31,15 +31,18 @@ import type {
   DesignPreviewStore,
 } from "../../../platform/design-preview-store";
 import { DesignPreviewCache, type DesignPreviewBlobImage } from "./design-preview-cache";
+import { DESIGN_IMAGE_DECODED_BYTES, type DesignImageResidency } from "./design-image-residency";
 
 /** Longest side, in device pixels, of each picture level. */
-export const DESIGN_PREVIEW_LEVELS = { overview: 384, detail: 1280 } as const;
+export const DESIGN_PREVIEW_LEVELS = { thumbnail: 128, overview: 384, detail: 1280 } as const;
 export type DesignPreviewLevel = keyof typeof DESIGN_PREVIEW_LEVELS;
 export const DESIGN_PREVIEW_MEMORY_BYTES = 16 * 1024 * 1024;
 export const DESIGN_PREVIEW_DISK_BYTES = 48 * 1024 * 1024;
 /** The capture host's PNG bound; an encoded picture is never larger. */
 const MAX_PICTURE_BYTES = 1024 * 1024;
-const FORMAT_VERSION = 1;
+// Version 1 captures flattened transparent documents onto the native window's
+// opaque backing color. These are disposable pixels, never authored source.
+const FORMAT_VERSION = 2;
 /** A live frame paints its own document. Its new generation is pictured once
  * it has stopped changing, so typing in a frame renders no pictures. */
 export const DESIGN_PREVIEW_LIVE_SETTLE_MS = 2_000;
@@ -79,6 +82,13 @@ export interface DesignPreviewPicture {
   readonly current: boolean;
 }
 
+export interface DesignPreviewPictureLease {
+  readonly picture: DesignPreviewPicture;
+  /** A decoded, still-owned cover can take over from a live document. */
+  confirmDecoded(): void;
+  release(): void;
+}
+
 export interface DesignPreviewDemandItem {
   readonly file: string;
   readonly sourceVersion: string;
@@ -96,6 +106,18 @@ export interface DesignPreviewDemand {
   readonly items: readonly DesignPreviewDemandItem[];
 }
 
+export function activeDesignPreviewDemand(
+  active: boolean,
+  owner: DesignPreviewOwner | null,
+  theme: string | null,
+  items: readonly DesignPreviewDemandItem[],
+): DesignPreviewDemand | null {
+  // An HTML-only canvas still opens the small metadata index once so stale
+  // disk pictures are pruned. Empty items never read blobs or start captures;
+  // a hidden canvas remains inert.
+  return active && owner ? { owner, theme, items } : null;
+}
+
 export interface DesignFramePreviewDependencies {
   readonly store: DesignPreviewStore | null;
   render(
@@ -106,9 +128,10 @@ export interface DesignFramePreviewDependencies {
       theme: string | null;
       maxDimension: number;
     },
+    signal?: AbortSignal,
   ): Promise<DesignPreviewReply>;
   /** The canvas background lane: one task at a time, after input settles. */
-  schedule<T>(work: () => Promise<T>): Promise<T | null>;
+  schedule<T>(work: () => Promise<T>, capture?: { key: string; signal: AbortSignal; priority: "visible" | "detail" | "nearby" }): Promise<T | null>;
   /** Re-encode a PNG picture smaller where the platform can. */
   encode(png: Blob, level: DesignPreviewLevel): Promise<Blob>;
   /** Cloud pictures render only while the VM runs; Local always may. */
@@ -128,6 +151,8 @@ export interface DesignFramePreviewDependencies {
   visible(): boolean;
   memoryBytes?: number;
   diskBytes?: number;
+  decodedBytes?: number;
+  displayBudget?: DesignImageResidency;
 }
 
 /** A picture in memory; its Blob, URL, bytes and leases live in the pool. */
@@ -141,10 +166,8 @@ interface Picture {
   readonly views: { current: DesignPreviewPicture; stale: DesignPreviewPicture };
 }
 
-/** The pool's other bounds stay at their maximum; pictures are bounded by
- * their encoded bytes (DesignPreviewBlobImage). */
+/** Encoded pictures remain cacheable independently of visible pixel leases. */
 const POOL_MAX_ENTRIES = 10_000;
-const POOL_MAX_DECODED_BYTES = 128 * 1024 * 1024;
 
 interface Attempt {
   failures: number;
@@ -152,7 +175,12 @@ interface Attempt {
   retryAt: number;
 }
 
-const LEVELS: readonly DesignPreviewLevel[] = ["overview", "detail"];
+const LEVELS: readonly DesignPreviewLevel[] = ["thumbnail", "overview", "detail"];
+
+function pictureLevels(level: DesignPreviewLevel): DesignPreviewLevel[] {
+  const index = LEVELS.indexOf(level);
+  return [level, ...LEVELS.slice(index + 1), ...LEVELS.slice(0, index).reverse()];
+}
 
 export function designPreviewFrameKey(
   owner: DesignPreviewOwner,
@@ -168,10 +196,21 @@ export function designPreviewKey(target: DesignPreviewTarget): string {
     target.file, target.theme ?? "", target.level, target.sourceVersion]);
 }
 
+function isCurrentPreviewFormat(row: DesignPreviewIndexEntry): boolean {
+  try {
+    const key: unknown = JSON.parse(row.key);
+    return Array.isArray(key) && key.length === 8 && key[0] === FORMAT_VERSION &&
+      key.slice(1).every(value => typeof value === "string") &&
+      key[2] === row.workspaceId && key[6] === row.level && key[7] === row.sourceVersion &&
+      JSON.stringify(key.slice(1, 6)) === row.frameKey;
+  } catch { return false; }
+}
+
 /** The level that stays sharp for a frame painted `devicePixels` on its
  * longest side. Above the detail level the canvas makes the frame live. */
 export function designPreviewLevelFor(devicePixels: number): DesignPreviewLevel {
-  return devicePixels <= DESIGN_PREVIEW_LEVELS.overview ? "overview" : "detail";
+  return devicePixels <= DESIGN_PREVIEW_LEVELS.thumbnail ? "thumbnail" :
+    devicePixels <= DESIGN_PREVIEW_LEVELS.overview ? "overview" : "detail";
 }
 
 interface DemandFrame {
@@ -189,7 +228,7 @@ interface DemandFrame {
  * covers a reload), frames within one viewport, then the rest of the page,
  * marked not `near`. Visible frames get the level their painted size needs;
  * a frame shown in detail also gets an overview for when the canvas zooms
- * out. Text frames are transparent and keep painting themselves. */
+ * out. Text frames use the same path with their authored transparency. */
 export function designPreviewDemandItems(input: {
   frames: readonly DemandFrame[];
   view: { zoom: number; panX: number; panY: number };
@@ -212,7 +251,6 @@ export function designPreviewDemandItems(input: {
     frame.y <= top + height + margin * height;
   const ranked: Array<{ item: DesignPreviewDemandItem; tier: number; distance: number }> = [];
   for (const frame of input.frames) {
-    if (frame.kind === "text") continue;
     const live = input.live.has(frame.file);
     const visible = width > 0 && height > 0 && intersects(frame, 0);
     const near = !visible && width > 0 && height > 0 && intersects(frame, 1);
@@ -272,6 +310,8 @@ export class DesignFramePreviews {
   private readonly memory: DesignPreviewCache<DesignPreviewBlobImage>;
   /** The pictures in the pool, by key. */
   private readonly pictures = new Map<string, Picture>();
+  /** Decoded display leases, independent of encoded cache availability. */
+  private readonly decodedDisplays = new Map<string, number>();
   /** frameKey → level → newest picture key in memory. */
   private readonly newest = new Map<string, Map<DesignPreviewLevel, string>>();
   private index: Map<string, DesignPreviewIndexEntry> | null = null;
@@ -290,7 +330,11 @@ export class DesignFramePreviews {
   private changeTimer: unknown = null;
   private demandToken: object | null = null;
   private demand: DesignPreviewDemand | null = null;
+  /** Retiring or replacing the owning canvas invalidates pending work even
+   * if it returns to the same owner and generation before that work ends. */
+  private productionEpoch = 0;
   private producing = false;
+  private production: { controller: AbortController; demand: DesignPreviewDemand; item: DesignPreviewDemandItem; epoch: number } | null = null;
   private pumpTimer: unknown = null;
   private readonly attempts = new Map<string, Attempt>();
   /** Keys whose engine answer was stale; a refreshed snapshot supersedes them. */
@@ -312,7 +356,7 @@ export class DesignFramePreviews {
       {
         maxEntries: POOL_MAX_ENTRIES,
         maxEncodedBytes: deps.memoryBytes ?? DESIGN_PREVIEW_MEMORY_BYTES,
-        maxDecodedBytes: POOL_MAX_DECODED_BYTES,
+        maxDecodedBytes: deps.decodedBytes ?? DESIGN_IMAGE_DECODED_BYTES,
       },
       {
         evicted: (key) => {
@@ -321,6 +365,7 @@ export class DesignFramePreviews {
         },
         disposed: (image) => this.deps.revokeUrl(image.url),
       },
+      deps.displayBudget,
     );
   }
 
@@ -330,32 +375,83 @@ export class DesignFramePreviews {
    * at the other level, else the newest older picture of the frame (marked
    * not current) so a changed frame never flashes blank while it re-renders. */
   picture(target: DesignPreviewTarget): DesignPreviewPicture | null {
+    return this.candidates(target)[0] ?? null;
+  }
+
+  private candidates(target: DesignPreviewTarget): DesignPreviewPicture[] {
     const frameKey = designPreviewFrameKey(target.owner, target.file, target.theme);
-    const levels = target.level === "overview" ? LEVELS : [...LEVELS].reverse();
+    const levels = pictureLevels(target.level);
+    const result: DesignPreviewPicture[] = [];
     for (const level of levels) {
       const picture = this.pictures.get(designPreviewKey({ ...target, level }));
-      if (picture) return picture.views.current;
+      if (picture) result.push(picture.views.current);
     }
     const newest = this.newest.get(frameKey);
     for (const level of levels) {
       const key = newest?.get(level);
       const picture = key ? this.pictures.get(key) : undefined;
-      if (picture) return picture.sourceVersion === target.sourceVersion ? picture.views.current : picture.views.stale;
+      if (picture && !result.some((candidate) => candidate.key === picture.key))
+        result.push(picture.sourceVersion === target.sourceVersion ? picture.views.current : picture.views.stale);
+    }
+    return result;
+  }
+
+  /** Admission reserves pixels before any <img> or decoder receives the URL.
+   * Try a cached smaller picture if detail would exceed the display budget. */
+  acquire(target: DesignPreviewTarget): DesignPreviewPictureLease | null {
+    const candidates = this.candidates(target);
+    // Optional refinement must try an already cached smaller cover before
+    // reclaiming another frame's warm pixels. A genuinely cold display may
+    // still request pressure after every non-evicting candidate failed.
+    for (const preserveWarm of [true, false]) for (const picture of candidates) {
+      const lease = this.memory.acquire(picture.key, { preserveWarm });
+      if (!lease) continue;
+      const frameKey = designPreviewFrameKey(target.owner, target.file, target.theme);
+      let released = false, decoded = false;
+      return {
+        picture,
+        confirmDecoded: () => {
+          if (released || decoded) return;
+          decoded = true;
+          this.decodedDisplays.set(picture.key, (this.decodedDisplays.get(picture.key) ?? 0) + 1);
+          this.changed(frameKey);
+        },
+        release: () => {
+          if (released) return;
+          released = true;
+          if (decoded) {
+            const remaining = (this.decodedDisplays.get(picture.key) ?? 1) - 1;
+            if (remaining) this.decodedDisplays.set(picture.key, remaining);
+            else this.decodedDisplays.delete(picture.key);
+            this.changed(frameKey);
+          }
+          lease.release();
+        },
+      };
     }
     return null;
+  }
+
+  subscribeAvailable(listener: () => void): () => void {
+    return this.memory.subscribeAvailable(listener);
   }
 
   /** Frames among `frames` that have a picture of their current generation. */
   pictured(
     owner: DesignPreviewOwner,
     theme: string | null,
-    frames: readonly { file: string; sourceVersion: string }[],
+    frames: readonly { file: string; sourceVersion: string; width?: number; height?: number }[],
+    renderScale = 0,
+    requireDecodedDisplay = false,
   ): Set<string> {
     const result = new Set<string>();
     for (const frame of frames) {
-      if (LEVELS.some((level) => this.pictures.has(designPreviewKey({
-        owner, file: frame.file, sourceVersion: frame.sourceVersion, theme, level,
-      })))) result.add(frame.file);
+      const minimum = Math.min(DESIGN_PREVIEW_LEVELS.overview, Math.max(frame.width ?? 0, frame.height ?? 0) * renderScale);
+      if (LEVELS.some((level) => {
+        const picture = this.pictures.get(designPreviewKey({ owner, file: frame.file, sourceVersion: frame.sourceVersion, theme, level }));
+        return picture && (!requireDecodedDisplay || this.decodedDisplays.has(picture.key)) &&
+          Math.max(picture.views.current.width, picture.views.current.height) >= minimum;
+      })) result.add(frame.file);
     }
     return result;
   }
@@ -391,8 +487,11 @@ export class DesignFramePreviews {
   }
 
   usage() {
-    return { memoryBytes: this.memory.getUsage().encodedBytes, pictures: this.pictures.size, diskBytes: this.diskBytes,
-      diskPictures: this.index?.size ?? 0 };
+    const memory = this.memory.getUsage();
+    return { memoryBytes: memory.encodedBytes, decodedBytes: memory.decodedBytes,
+      retainedPictures: memory.entries, pictures: this.pictures.size, diskBytes: this.diskBytes,
+      diskPictures: this.index?.size ?? 0, reading: this.reading.size, producing: this.producing ? 1 : 0,
+      demanded: this.demand?.items.length ?? 0 };
   }
 
   // ── Demand ─────────────────────────────────────────────
@@ -402,11 +501,13 @@ export class DesignFramePreviews {
   setDemand(token: object, demand: DesignPreviewDemand | null): void {
     if (!demand) {
       if (this.demandToken !== token) return;
-      this.demandToken = null;
-      this.demand = null;
+      this.clearDemand();
       return;
     }
     const changed = this.demandToken !== token || !sameDemand(this.demand, demand);
+    if (this.demandToken !== token || !this.demand ||
+      !sameOwner(this.demand.owner, demand.owner) || this.demand.theme !== demand.theme)
+      this.productionEpoch++;
     this.demandToken = token;
     if (!changed) return;
     const now = this.deps.now();
@@ -416,6 +517,7 @@ export class DesignFramePreviews {
     }
     while (this.firstSeen.size > 4096) this.firstSeen.delete(this.firstSeen.keys().next().value!);
     this.demand = demand;
+    this.cancelObsoleteProduction();
     this.wanted.clear();
     for (const item of demand.items)
       this.wanted.set(designPreviewFrameKey(demand.owner, item.file, demand.theme), item.sourceVersion);
@@ -423,9 +525,26 @@ export class DesignFramePreviews {
     this.pump();
   }
 
+  private clearDemand(): void {
+    this.productionEpoch++;
+    this.demandToken = null;
+    this.demand = null;
+    this.cancelObsoleteProduction();
+    this.wanted.clear();
+    if (this.pumpTimer !== null) this.deps.clearTimer(this.pumpTimer);
+    this.pumpTimer = null;
+  }
+
   /** The window became visible, a VM started, or a retry came due. */
   resume(): void {
+    this.cancelObsoleteProduction();
     this.pump();
+  }
+
+  private cancelObsoleteProduction(): void {
+    const production = this.production;
+    if (production && !this.canAccept(production.demand, production.item, production.epoch))
+      production.controller.abort(new Error("Design preview owner or generation retired."));
   }
 
   // ── Owners ─────────────────────────────────────────────
@@ -433,12 +552,10 @@ export class DesignFramePreviews {
   /** Drop memory pictures of other cloud accounts (disk keeps them, keyed to
    * their own account). Shown pictures go once they stop showing. */
   retainCloudScope(scope: string | null): void {
+    if (this.demand && this.demand.owner.scope.startsWith("cloud:") && this.demand.owner.scope !== scope)
+      this.clearDemand();
     for (const picture of [...this.pictures.values()]) {
       if (picture.scope.startsWith("cloud:") && picture.scope !== scope) this.drop(picture);
-    }
-    if (this.demand && this.demand.owner.scope.startsWith("cloud:") && this.demand.owner.scope !== scope) {
-      this.demand = null;
-      this.demandToken = null;
     }
   }
 
@@ -446,6 +563,7 @@ export class DesignFramePreviews {
   forgetWorkspaces(workspaceIds: readonly string[]): void {
     if (!workspaceIds.length) return;
     const removed = new Set(workspaceIds);
+    if (this.demand && removed.has(this.demand.owner.workspaceId)) this.clearDemand();
     for (const picture of [...this.pictures.values()]) if (removed.has(picture.workspaceId)) this.drop(picture);
     void this.loadIndex().then(() => {
       const remove = [...this.index!.values()].filter((entry) => removed.has(entry.workspaceId))
@@ -469,7 +587,7 @@ export class DesignFramePreviews {
         const leftovers: string[] = [];
         for (const row of [...rows].sort((a, b) => b.savedAt - a.savedAt)) {
           const levels = this.diskNewest.get(row.frameKey);
-          if (levels?.has(row.level) || row.bytes > MAX_PICTURE_BYTES) {
+          if (!isCurrentPreviewFormat(row) || levels?.has(row.level) || row.bytes > MAX_PICTURE_BYTES) {
             leftovers.push(row.key);
             continue;
           }
@@ -533,7 +651,7 @@ export class DesignFramePreviews {
         if (this.pictures.has(designPreviewKey(target))) continue;
         const frameKey = designPreviewFrameKey(demand.owner, item.file, demand.theme);
         const levels = this.diskNewest.get(frameKey);
-        const other: DesignPreviewLevel = item.level === "overview" ? "detail" : "overview";
+        const alternatives = pictureLevels(item.level).filter((level) => level !== item.level);
         const stored = (level: DesignPreviewLevel) => {
           const key = levels?.get(level);
           return key !== undefined && this.index!.get(key)?.sourceVersion === item.sourceVersion ? key : undefined;
@@ -543,8 +661,8 @@ export class DesignFramePreviews {
         const shown = this.picture(target);
         const key =
           stored(item.level) ??
-          (shown?.current ? undefined : stored(other)) ??
-          (shown ? undefined : levels?.get(item.level) ?? levels?.get(other));
+          (shown?.current ? undefined : alternatives.map(stored).find((key) => key !== undefined)) ??
+          (shown ? undefined : pictureLevels(item.level).map((level) => levels?.get(level)).find((key) => key !== undefined));
         if (key && !this.pictures.has(key) && !this.reading.has(key) && !keys.includes(key)) keys.push(key);
       }
       for (let start = 0; start < keys.length; start += READ_BATCH) this.read(keys.slice(start, start + READ_BATCH));
@@ -721,36 +839,51 @@ export class DesignFramePreviews {
     }
     this.producing = true;
     const { item, key } = next;
-    void this.deps.schedule(() => this.produce(demand, item, key))
+    const epoch = this.productionEpoch;
+    const production = { controller: new AbortController(), demand, item, epoch };
+    this.production = production;
+    void this.deps.schedule(() => this.produce(demand, item, key, epoch, production.controller.signal), {
+      key, signal: production.controller.signal,
+      priority: item.near === false ? "nearby" : item.level === "detail" ? "detail" : "visible",
+    })
       .catch(() => {})
       .finally(() => {
         this.producing = false;
+        if (this.production === production) this.production = null;
         this.pump();
       });
   }
 
-  private async produce(demand: DesignPreviewDemand, item: DesignPreviewDemandItem, key: string): Promise<void> {
+  private canAccept(demand: DesignPreviewDemand, item: DesignPreviewDemandItem, epoch: number, exactLevel = false): boolean {
+    const current = this.demand;
+    return epoch === this.productionEpoch && current !== null &&
+      sameOwner(current.owner, demand.owner) && current.theme === demand.theme &&
+      this.deps.visible() && this.deps.canProduce(demand.owner) &&
+      current.items.some((candidate) => candidate.file === item.file &&
+        candidate.sourceVersion === item.sourceVersion && (!exactLevel || candidate.level === item.level) &&
+        (candidate.near !== false || (this.deps.rendersFar?.(demand.owner) ?? true)));
+  }
+
+  private async produce(demand: DesignPreviewDemand, item: DesignPreviewDemandItem, key: string, epoch: number, signal: AbortSignal): Promise<void> {
     // The lane may run this after input settled for a while; re-check that
     // the picture is still wanted and allowed.
-    const current = this.demand;
-    if (!current || !sameOwner(current.owner, demand.owner) || current.theme !== demand.theme ||
-      !current.items.some((candidate) => candidate.file === item.file &&
-        candidate.sourceVersion === item.sourceVersion && candidate.level === item.level) ||
-      this.pictures.has(key) || !this.deps.canProduce(demand.owner)) return;
+    if (signal.aborted || !this.canAccept(demand, item, epoch, true) || this.pictures.has(key)) return;
     let reply: DesignPreviewReply;
     try {
       reply = await this.deps.render(demand.owner, {
         file: item.file, sourceVersion: item.sourceVersion, theme: demand.theme,
         maxDimension: DESIGN_PREVIEW_LEVELS[item.level],
-      });
+      }, signal);
     } catch (error) {
-      this.failed(demand.owner, key, errorText(error));
+      if (this.canAccept(demand, item, epoch)) this.failed(demand.owner, key, errorText(error));
       return;
     } finally {
       this.renderedAt.set(demand.owner.workspaceId, this.deps.now());
       if (this.renderedAt.size > 256) this.renderedAt.delete(this.renderedAt.keys().next().value!);
     }
-    this.attempts.delete(key);
+    // A current generation can still use this resolution after zoom changes.
+    // Another generation, owner or hidden canvas cannot adopt its result.
+    if (!this.canAccept(demand, item, epoch)) return;
     if ("stale" in reply) {
       // The snapshot is behind the saved source; its refresh asks again.
       this.stale.add(key);
@@ -758,12 +891,17 @@ export class DesignFramePreviews {
       return;
     }
     if (reply.sourceVersion !== item.sourceVersion || reply.theme !== demand.theme) return;
-    this.made.add(key);
-    if (this.made.size > 8192) this.made.delete(this.made.values().next().value!);
     const png = new Blob([decodeBase64(reply.data)], { type: "image/png" });
     const encoded = await this.deps.encode(png, item.level).catch(() => png);
+    if (!this.canAccept(demand, item, epoch)) return;
     const blob = encoded.size > 0 && encoded.size <= png.size ? encoded : png;
-    if (blob.size > MAX_PICTURE_BYTES) return;
+    if (blob.size > MAX_PICTURE_BYTES) {
+      this.failed(demand.owner, key, "Design preview exceeded its encoded image limit.");
+      return;
+    }
+    this.attempts.delete(key);
+    this.made.add(key);
+    if (this.made.size > 8192) this.made.delete(this.made.values().next().value!);
     const frameKey = designPreviewFrameKey(demand.owner, item.file, demand.theme);
     this.insert("render", frameKey, demand.owner.workspaceId, key, item.level, item.sourceVersion,
       reply.width, reply.height, blob);
@@ -771,7 +909,7 @@ export class DesignFramePreviews {
       key, frameKey, workspaceId: demand.owner.workspaceId, level: item.level,
       sourceVersion: item.sourceVersion, width: reply.width, height: reply.height,
       bytes: blob.size, savedAt: this.deps.now(), readAt: this.deps.now(),
-    }, blob);
+    }, blob, () => this.canAccept(demand, item, epoch));
   }
 
   private failed(owner: DesignPreviewOwner, key: string, message: string): void {
@@ -796,9 +934,10 @@ export class DesignFramePreviews {
     if (this.attempts.size > 4096) this.attempts.delete(this.attempts.keys().next().value!);
   }
 
-  private persist(row: DesignPreviewIndexEntry, blob: Blob): void {
+  private persist(row: DesignPreviewIndexEntry, blob: Blob, canAccept: () => boolean): void {
     if (!this.deps.store) return;
     void this.loadIndex().then(() => {
+      if (!canAccept()) return;
       const levels = this.diskNewest.get(row.frameKey);
       const replaced = levels?.get(row.level);
       const remove = replaced && replaced !== row.key ? [replaced] : [];
@@ -840,24 +979,26 @@ export function createDesignFramePicturedReader(
   owner: DesignPreviewOwner | null,
   theme: string | null,
   frames: readonly { file: string; sourceVersion: string }[],
+  renderScale?: number,
 ) => ReadonlySet<string> {
   let last: {
     changes: number;
     owner: DesignPreviewOwner | null;
     theme: string | null;
     frames: readonly { file: string; sourceVersion: string }[];
+    renderScale: number;
     value: ReadonlySet<string>;
   } | null = null;
-  return (owner, theme, frames) => {
+  return (owner, theme, frames, renderScale = 0) => {
     const changes = previews.changes();
-    if (last && last.changes === changes && last.owner === owner && last.theme === theme && last.frames === frames)
+    if (last && last.changes === changes && last.owner === owner && last.theme === theme && last.frames === frames && last.renderScale === renderScale)
       return last.value;
-    const next = owner ? previews.pictured(owner, theme, frames) : NO_PICTURED;
+    const next = owner ? previews.pictured(owner, theme, frames, renderScale) : NO_PICTURED;
     const previous = last?.value;
     const value = previous && previous.size === next.size && [...next].every((file) => previous.has(file))
       ? previous
       : next;
-    last = { changes, owner, theme, frames, value };
+    last = { changes, owner, theme, frames, renderScale, value };
     return value;
   };
 }

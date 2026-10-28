@@ -6,11 +6,13 @@ import {
   type WorkspaceFileTreeHandle,
 } from "./workspace-file-tree";
 import { PanelHeader } from "@/renderer/shared/ui/primitives/panel-header";
+import type { FileChangeStatus } from "@/renderer/platform/git";
 
 interface FilesSearchSidebarProps {
   active?: boolean;
   cwd: string | undefined;
   reloadKey: number;
+  fileStatuses?: ReadonlyMap<string, FileChangeStatus>;
   onOpenFile: (path: string) => void;
   onOpenInNewTab: (path: string) => void;
   onClose: () => void;
@@ -23,6 +25,7 @@ export function FilesSearchSidebar({
   active = true,
   cwd,
   reloadKey,
+  fileStatuses,
   onOpenFile,
   onOpenInNewTab,
   onClose,
@@ -84,6 +87,7 @@ export function FilesSearchSidebar({
             active={active}
             cwd={cwd}
             reloadKey={reloadKey}
+            fileStatuses={fileStatuses}
             deselectAfterOpen
             onOpenFile={onOpenFile}
             onOpenInNewTab={onOpenInNewTab}

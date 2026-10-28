@@ -267,18 +267,22 @@ export function InspectorCheckboxRow({
   label,
   checked,
   disabled,
+  title,
   onChange,
 }: {
   label: string;
   checked: boolean;
   disabled?: boolean;
+  /** Explains the setting on hover, including on a disabled row. */
+  title?: string;
   onChange: () => void;
 }) {
   return (
     <label
+      title={title}
       className={cn(
         "text-fg2 hover:text-fg1 flex h-7 w-fit cursor-pointer items-center gap-2 text-xs select-none",
-        disabled && "pointer-events-none opacity-50",
+        disabled && (title ? "cursor-default opacity-50 hover:text-fg2" : "pointer-events-none opacity-50"),
       )}
     >
       <input
@@ -449,7 +453,7 @@ interface DesignToolbarButtonProps extends React.ButtonHTMLAttributes<HTMLButton
   shortcut?: React.ReactNode;
   pressed?: boolean;
   /** A modal canvas tool paints its active state in the design accent;
-   * panel toggles (source, themes, motion) stay neutral. */
+   * panel toggles (themes, motion) stay neutral. */
   tool?: boolean;
   /** The vertical tool rail opens its tooltips beside it, not over a tool. */
   tooltipSide?: "top" | "right" | "bottom" | "left";

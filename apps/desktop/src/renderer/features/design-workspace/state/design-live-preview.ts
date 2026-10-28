@@ -1,9 +1,20 @@
 import { designBackgroundWork } from "./design-background-work";
 import { create } from "zustand";
+import { useMemo } from "react";
+import {
+  designHistoryPresentation,
+  useDesignHistoryPresentation,
+  type DesignHistoryPresentation,
+} from "./design-history-presentation";
 
 const MAX_LIVE_NODES = 96;
 let publicationSequence = 0;
 const latestPublicationByProperty = new Map<string, number>();
+
+/** Capture at history input, before either the mutation lane or runtime reply. */
+export function designLivePreviewSequence(): number {
+  return publicationSequence;
+}
 
 export type DesignLivePreviewPublication = Readonly<Record<string, number>>;
 
@@ -25,6 +36,22 @@ function ownerKey(workspaceId: string, frame: string, nodeId: string): string {
 
 function propertyKey(owner: string, property: string): string {
   return `${owner}\u0000${property}`;
+}
+
+function historyCutoff(
+  history: DesignHistoryPresentation | null,
+  frame: string,
+  nodeId: string,
+): number | undefined {
+  const inverse = history?.runtime.get(frame);
+  return inverse && (inverse.frame.oid === nodeId || inverse.details.has(nodeId))
+    ? inverse.livePreviewSequence
+    : undefined;
+}
+
+function supersededByHistory(key: string, property: string, cutoff: number | undefined): boolean {
+  return cutoff !== undefined &&
+    (latestPublicationByProperty.get(propertyKey(key, property)) ?? Infinity) <= cutoff;
 }
 
 function sameStyles(
@@ -52,6 +79,10 @@ export function publishDesignLivePreviewStyles(
 ): DesignLivePreviewPublication {
   const key = ownerKey(workspaceId, frame, nodeId);
   discardPendingGesture(key, styles);
+  const cutoff = historyCutoff(designHistoryPresentation(workspaceId), frame, nodeId);
+  // Re-entering the same value after Undo is new input even though its raw
+  // scalar is unchanged. Notify once when it becomes visible over the inverse.
+  const supersedesHistory = Object.keys(styles).some(property => supersededByHistory(key, property, cutoff));
   const publication = Object.fromEntries(
     Object.keys(styles).map((property) => {
       const sequence = ++publicationSequence;
@@ -64,7 +95,7 @@ export function publishDesignLivePreviewStyles(
     const nextStyles = current
       ? { ...current.styles, ...styles }
       : { ...styles };
-    if (current && sameStyles(current.styles, nextStyles)) return state;
+    if (current && !supersedesHistory && sameStyles(current.styles, nextStyles)) return state;
     const ownerOrder = [
       ...state.ownerOrder.filter((candidate) => candidate !== key),
       key,
@@ -289,9 +320,11 @@ export function designLivePreviewValue(
   nodeId: string,
   property: string,
 ): string | null | undefined {
-  return useDesignLivePreviewStore.getState().byOwner[
-    ownerKey(workspaceId, frame, nodeId)
-  ]?.styles[property];
+  const key = ownerKey(workspaceId, frame, nodeId);
+  const cutoff = historyCutoff(designHistoryPresentation(workspaceId), frame, nodeId);
+  return supersededByHistory(key, property, cutoff)
+    ? undefined
+    : useDesignLivePreviewStore.getState().byOwner[key]?.styles[property];
 }
 
 export function useDesignLivePreviewStyles(
@@ -300,7 +333,16 @@ export function useDesignLivePreviewStyles(
   nodeId: string,
 ) {
   const key = ownerKey(workspaceId, frame, nodeId);
-  return useDesignLivePreviewStore((state) => state.byOwner[key]?.styles);
+  const entry = useDesignLivePreviewStore((state) => state.byOwner[key]);
+  const history = useDesignHistoryPresentation(workspaceId);
+  const cutoff = historyCutoff(history, frame, nodeId);
+  return useMemo(() => {
+    if (!entry || cutoff === undefined) return entry?.styles;
+    const styles = Object.entries(entry.styles);
+    const visible = styles.filter(([property]) => !supersededByHistory(key, property, cutoff));
+    if (visible.length === styles.length) return entry.styles;
+    return visible.length ? Object.fromEntries(visible) : undefined;
+  }, [entry, key, cutoff]);
 }
 
 export function useDesignLivePreviewValue(
@@ -310,8 +352,10 @@ export function useDesignLivePreviewValue(
   property: string,
 ): string | null | undefined {
   const key = ownerKey(workspaceId, frame, nodeId);
+  const history = useDesignHistoryPresentation(workspaceId);
+  const cutoff = historyCutoff(history, frame, nodeId);
   return useDesignLivePreviewStore(
-    (state) => state.byOwner[key]?.styles[property],
+    (state) => supersededByHistory(key, property, cutoff) ? undefined : state.byOwner[key]?.styles[property],
   );
 }
 

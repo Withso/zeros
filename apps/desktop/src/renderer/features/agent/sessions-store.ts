@@ -915,6 +915,7 @@ export const useSessionsStore = create<SessionsStoreState>((set, get) => ({
         slot.stderrLog.length === 0 &&
         slot.historyExpanded !== true &&
         slot.hasTranscript === hasTranscript &&
+        !slot.transcriptReadError &&
         !slot.transcriptDirty
       ) {
         return state;
@@ -925,6 +926,7 @@ export const useSessionsStore = create<SessionsStoreState>((set, get) => ({
           [chatId]: {
             ...slot,
             transcriptState: "cold",
+            transcriptReadError: null,
             transcriptPresentation: null,
             transcriptDirty: false,
             hasTranscript,

@@ -1,3 +1,5 @@
+import { designFrameElementBox } from "./ui-smoke-design-helpers.mjs";
+
 // An empty authored frame exercises the real creation path, unlike the seeded
 // landing page. All source edits go through the harness's in-memory Design API.
 export async function runDesignFrameChildrenSmoke({ page, waitFor, check }) {
@@ -59,6 +61,25 @@ export async function runDesignFrameChildrenSmoke({ page, waitFor, check }) {
     );
     await page.mouse.up();
   };
+  // Sample every painted state from release until the child is confirmed: a
+  // drawn child paints in its live document at once, and neither Layers nor
+  // the inspector may fall back to a loading or empty view meanwhile.
+  await page.evaluate(() => {
+    const probe = { states: [], buffers: new Set(), done: false };
+    window.__designChildCreation = probe;
+    const sample = () => {
+      const layers = document.querySelector("[data-design-sidebar-panel]");
+      const header = document.querySelector("[data-design-inspector-header]")?.textContent?.trim() ?? "";
+      probe.states.push({
+        pending: [...(layers?.querySelectorAll("span") ?? [])].some((span) => /^Loading/.test(span.textContent ?? "")),
+        empty: header === "Nothing selected" || header === "Page",
+      });
+      for (const iframe of document.querySelectorAll('[data-design-frame="home.html"] iframe[data-design-document-buffer]'))
+        probe.buffers.add(iframe);
+      if (!probe.done) requestAnimationFrame(sample);
+    };
+    requestAnimationFrame(sample);
+  });
   await draw();
   await waitFor(
     () => runtime().locator('[data-oid="home-main"] > [data-oid]').count(),
@@ -70,6 +91,25 @@ export async function runDesignFrameChildrenSmoke({ page, waitFor, check }) {
   check(
     "drawing inside a frame creates one real child, not another canvas document",
     (await page.locator("[data-design-frame]").count()) === frameCount,
+  );
+  await waitFor(
+    () => layers.locator(`[data-design-layer-id="${childId}"][aria-selected="true"]`).count(),
+    "drawn-child-layer-selected",
+  );
+  await page.waitForTimeout(300);
+  const creation = await page.evaluate(() => {
+    const probe = window.__designChildCreation;
+    probe.done = true;
+    return {
+      pending: probe.states.some((state) => state.pending),
+      empty: probe.states.some((state) => state.empty),
+      buffers: probe.buffers.size,
+    };
+  });
+  check(
+    "a drawn child paints in place: no document reload, loading row or empty inspector",
+    creation.buffers === 1 && !creation.pending && !creation.empty,
+    JSON.stringify(creation),
   );
   const childRow = layers.locator(`[data-design-layer-id="${childId}"]`);
   await childRow.click();
@@ -178,7 +218,7 @@ export async function runDesignFrameChildrenSmoke({ page, waitFor, check }) {
   );
   // Draw inside the existing child at its current painted position; its Grid
   // layout accepts the new frame in flow while that frame starts with None.
-  const childBounds = await child.boundingBox();
+  const childBounds = await designFrameElementBox(runtime().owner(), child);
   await page.getByRole("button", { name: "Frame tool", exact: true }).click();
   await page.mouse.move(childBounds.x + 8, childBounds.y + 8);
   await page.mouse.down();
@@ -203,5 +243,62 @@ export async function runDesignFrameChildrenSmoke({ page, waitFor, check }) {
     (await layout
       .getByRole("group", { name: "Align children", exact: true })
       .count()) === 1,
+  );
+
+  // A new top-level frame keeps its drawn rectangle until its document or
+  // pixels paint, and is selected together with its full inspector.
+  const empty = await page.evaluate(() => {
+    const canvas = document.querySelector("[data-design-canvas-viewport]").getBoundingClientRect();
+    const clear = (x, y) => {
+      const hit = document.elementFromPoint(x, y);
+      return hit && !hit.closest("[data-design-frame], [data-design-controls], [data-design-floating-panel], button");
+    };
+    for (let y = canvas.top + 120; y < canvas.bottom - 200; y += 40)
+      for (let x = canvas.left + 80; x < canvas.right - 520; x += 40)
+        if (clear(x, y) && clear(x + 160, y + 140) && clear(x + 80, y + 70)) return { x, y };
+    return null;
+  });
+  check("the canvas has room to draw a top-level frame", Boolean(empty));
+  if (!empty) return;
+  const before = new Set(await page.locator("[data-design-frame]").evaluateAll(
+    (frames) => frames.map((frame) => frame.getAttribute("data-design-frame")),
+  ));
+  await page.evaluate((known) => {
+    const probe = { blank: 0, fallback: 0, created: null, done: false };
+    window.__designFrameCreation = probe;
+    const sample = () => {
+      const article = [...document.querySelectorAll("[data-design-frame]")]
+        .find((frame) => !known.includes(frame.getAttribute("data-design-frame")));
+      const draft = document.querySelector("[data-design-creation-draft]");
+      const painted = article?.querySelector('iframe[data-design-document-buffer="displayed"][data-design-document-ready], [data-design-source-ready], [data-design-frame-pixels-ready]');
+      if (article) probe.created = article.getAttribute("data-design-frame");
+      if (article && !painted && (!draft || getComputedStyle(draft).display === "none")) probe.blank++;
+      const inspector = document.querySelector("[data-design-inspector]");
+      if (inspector?.querySelector("[data-design-inspector-header]")?.textContent?.trim() === "Frame" &&
+          !inspector.querySelector("[data-design-layout-section]")) probe.fallback++;
+      if (!probe.done) requestAnimationFrame(sample);
+    };
+    requestAnimationFrame(sample);
+  }, [...before]);
+  await page.getByRole("button", { name: "Frame tool", exact: true }).click();
+  await page.mouse.move(empty.x, empty.y);
+  await page.mouse.down();
+  await page.mouse.move(empty.x + 160, empty.y + 140, { steps: 6 });
+  await page.mouse.up();
+  await waitFor(async () => {
+    const created = await page.evaluate(() => window.__designFrameCreation.created);
+    return created && (await page.locator(`[data-design-frame-row="${created}"][aria-selected="true"]`).count()) === 1 &&
+      (await layout.count()) === 1;
+  }, "top-level-frame-selected");
+  await page.waitForTimeout(300);
+  const topLevel = await page.evaluate(() => {
+    const probe = window.__designFrameCreation;
+    probe.done = true;
+    return probe;
+  });
+  check(
+    "a new top-level frame never blinks empty or shows the fallback inspector",
+    Boolean(topLevel.created) && topLevel.blank === 0 && topLevel.fallback === 0,
+    JSON.stringify(topLevel),
   );
 }

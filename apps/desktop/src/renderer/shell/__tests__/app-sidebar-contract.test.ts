@@ -48,18 +48,18 @@ describe("app shell navigation", () => {
     expect(electronMain).toContain('titleBarStyle: "hiddenInset"');
     expect(electronMain).toContain("trafficLightPosition: { x: 19, y: 12 }");
     expect(SIDEBAR).toMatch(
-      /ref=\{titleBandRef\}\s*className="flex h-10 shrink-0/,
+      /data-tauri-drag-region\s*className="flex h-10 shrink-0/,
     );
     expect(SIDEBAR).toMatch(
       /<div className=\{TRAFFIC_LIGHT_RESERVE_CLS\} aria-hidden="true" \/>\s*<SidebarToggleButton collapsed=\{false\} \/>/,
     );
-    expect(SIDEBAR).toContain("useCustomWindowDrag(titleBandRef)");
+    expect(SIDEBAR).not.toContain("useCustomWindowDrag");
     const settings = source(
       "apps/desktop/src/renderer/features/settings/settings-page.tsx",
     );
-    expect(settings).toContain("useCustomWindowDrag(titleBandRef)");
+    expect(settings).not.toContain("useCustomWindowDrag");
     expect(settings).toMatch(
-      /ref=\{titleBandRef\}\s*className="h-10 shrink-0"/,
+      /data-tauri-drag-region\s*className="h-10 shrink-0"/,
     );
   });
 
@@ -80,7 +80,8 @@ describe("app shell navigation", () => {
     const createButton = nav.slice(nav.lastIndexOf("<Button", create), create);
     expect(createButton).not.toContain("data-state");
     expect(createButton).not.toContain("aria-current");
-    expect(nav).toContain("openDispatcher(contextProject?.id)");
+    expect(nav).toContain("onClick={handleCreateWorkspace}");
+    expect(SIDEBAR).toContain("() => openDispatcher(contextProject?.id)");
     // Adding a repository lives on Create, the welcome view and the menu bar.
     expect(SIDEBAR).not.toContain("Add repository");
   });
@@ -104,7 +105,7 @@ describe("app shell navigation", () => {
   it("follows resources with Go back and Go forward in the title band", () => {
     const band = between(
       SIDEBAR,
-      "ref={titleBandRef}",
+      "data-tauri-drag-region",
       "<OrganizationSwitcher",
     );
     const resources = band.indexOf("{!hidden && <ResourceMonitor />}");
@@ -294,7 +295,7 @@ describe("sidebar collapse and geometry", () => {
       /className="absolute top-0 left-0 z-\(--z-chrome\) flex h-10 items-center gap-1 pr-1"/,
     );
     expect(SIDEBAR).toMatch(
-      /ref=\{titleBandRef\}\s*className="flex h-10 shrink-0 items-center gap-1/,
+      /data-tauri-drag-region\s*className="flex h-10 shrink-0 items-center gap-1/,
     );
     expect(TOGGLE).toContain("aria-controls={APP_SIDEBAR_ID}");
     expect(SIDEBAR).toContain("id={APP_SIDEBAR_ID}");
@@ -403,7 +404,7 @@ describe("sidebar repository headers", () => {
 
   it("keep + visible and reveal settings and ⋯ on hover or while the menu is open", () => {
     expect(HEADER).toMatch(
-      /menuOpen\s*\?\s*"flex"\s*:\s*"hidden group-hover\/repo:flex group-has-\[:focus-visible\]\/repo:flex"/,
+      /menuOpen\s*\?\s*"flex"\s*:\s*"hidden group-hover\/repo:flex group-has-focus-visible\/repo:flex"/,
     );
     const actions = HEADER.slice(HEADER.indexOf('"items-center gap-0.5"'));
     const plus = actions.indexOf(

@@ -4,11 +4,13 @@ import type { Workspace } from "../../platform/git";
 import { getActiveBridge } from "../../platform/bridge/active-bridge";
 import { bridgeDesignListDirectories } from "../../platform/bridge/design-bridge";
 import { workspaceOp } from "../../platform/bridge/workspace-bridge";
-import { useCachedRead } from "../../state/use-cached-read";
+import { useRecoveringRead } from "../../state/use-recovering-read";
+import { useBridgeStatus } from "../../platform/bridge/use-bridge";
 import {
   designDirectoryListingCache,
   invalidateDesignDirectoryTargetReadCache,
 } from "../../state/read-caches";
+import { Button } from "../../shared/ui/primitives";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -23,7 +25,7 @@ import { triggerGitRefresh } from "../../shell/use-git-refresh-key";
 import { reportDesignDirectoryFailure } from "./design-directory-failure";
 
 /** Selecting a directory changes only this workspace's personal pointer.
- * The trigger lives in the canvas's floating directory pill. */
+ * The trigger lives in Design's secondary workbench toolbar. */
 export function DesignDirectoryMenu({
   workspace,
   active,
@@ -37,7 +39,8 @@ export function DesignDirectoryMenu({
   const [busy, setBusy] = useState(false);
   const mounted = useRef(true);
   useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
-  const listing = useCachedRead(
+  const connected = useBridgeStatus(workspace.path) === "connected";
+  const listing = useRecoveringRead(
     designDirectoryListingCache,
     workspace.id,
     async (id) => {
@@ -45,10 +48,10 @@ export function DesignDirectoryMenu({
       if (!bridge) throw new Error("Not connected to the Zeros engine yet.");
       return bridgeDesignListDirectories(bridge, id);
     },
-    { enabled: active && open, maxAgeMs: 10_000 },
+    { enabled: active && open, maxAgeMs: 10_000, connected, folder: workspace.path },
   );
   const choose = async (directory: string, directoryId?: string) => {
-    if (!active || busy || directory === name || !listing.data || listing.error) return;
+    if (!active || !connected || busy || directory === name || !listing.data || listing.readError) return;
     const bridge = getActiveBridge();
     if (!bridge) return;
     setBusy(true);
@@ -76,8 +79,10 @@ export function DesignDirectoryMenu({
   return (
     <DropdownMenu open={active && open} onOpenChange={setOpen}>
       <DropdownMenuTrigger asChild>
-        <button
+        <Button
           type="button"
+          variant="ghost"
+          size="sm"
           disabled={!active || busy}
           className="zd-design-directory-trigger"
           aria-label="Choose Design directory"
@@ -87,7 +92,7 @@ export function DesignDirectoryMenu({
             {name}
           </span>
           <ChevronDown aria-hidden="true" />
-        </button>
+        </Button>
       </DropdownMenuTrigger>
       <DropdownMenuContent align="start" className="max-w-sm" onKeyDown={(event) => {
         // First-focus Escape can precede Radix's document listener setup.
@@ -106,7 +111,7 @@ export function DesignDirectoryMenu({
         {listing.data?.directories.map((directory) => (
           <DropdownMenuItem
             key={directory}
-            disabled={busy || !!listing.error}
+            disabled={busy || !connected || !!listing.readError}
             onSelect={() =>
               void choose(directory, listing.data?.directoryIds?.[directory])
             }

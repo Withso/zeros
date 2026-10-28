@@ -11,6 +11,7 @@
 //     idle] · Restart) only after the platform installer confirms staging.
 //     "Restart when idle" appears ONLY while an agent is running and defers the
 //     restart until every agent goes idle, so we never kill a live turn.
+//     The General preference can arm this automatically for staged updates.
 //   • Dismissing (×) suppresses the toast and re-surfaces it after
 //     RESHOW_INTERVAL_MS. The update also auto-applies on the next quit, so this
 //     is a gentle "get it now" nudge, not a hard gate.
@@ -31,7 +32,15 @@ import {
   nativeListen,
 } from "@/renderer/platform/runtime";
 import { useUpdater } from "@/renderer/platform/updater";
-import { useAnyAgentRunning } from "@/renderer/features/agent/sessions-store";
+import {
+  anyAgentHasActiveWork,
+  useAnyAgentRunning,
+  useSessionsStore,
+} from "@/renderer/features/agent/sessions-store";
+import {
+  getRestartAutomaticallyOnUpdate,
+  useRestartAutomaticallyOnUpdate,
+} from "../settings/update-settings";
 import {
   dismissUpdateToast,
   showUpdateToast,
@@ -64,6 +73,7 @@ function openChangelog(): void {
 export function UpdateNotifications(): ReactElement | null {
   const { status, install } = useUpdater();
   const anyAgentRunning = useAnyAgentRunning();
+  const restartAutomatically = useRestartAutomaticallyOnUpdate();
   const storedRequired = useRequiredUpdateStore((state) => state.required);
   const required = status.required ? mergeClientUpgradeRequired(storedRequired, status.required) : storedRequired;
 
@@ -74,6 +84,9 @@ export function UpdateNotifications(): ReactElement | null {
   // 0 = not suppressed. Otherwise the epoch-ms until which the toast is hidden.
   const [suppressedUntil, setSuppressedUntil] = useState(0);
   const [restartWhenIdle, setRestartWhenIdle] = useState(false);
+  // Keep explicit one-time intent independent: disabling the preference only
+  // cancels automatic restarts, not a restart the user separately requested.
+  const shouldRestartWhenIdle = restartWhenIdle || restartAutomatically;
   // Last error-status message already toasted. Main publishes `error` only for
   // failures worth acting on (a user-initiated install that failed, or staging
   // aborted because the disk is full — which recurs on every retry until space
@@ -106,9 +119,15 @@ export function UpdateNotifications(): ReactElement | null {
             // it via `status` below — but if the user previously dismissed it
             // (4h suppression) or armed "Restart when idle", it's hidden and a
             // manual check would show NOTHING. An explicit menu click means
-            // "show me the state now": lift both so the toast re-appears.
+            // "show me the state now": lift both so the toast re-appears, or
+            // acknowledge the automatic restart while keeping it armed.
             setSuppressedUntil(0);
             setRestartWhenIdle(false);
+            if (getRestartAutomaticallyOnUpdate()) {
+              toast.info(
+                "Zeros will restart when the update is ready and your agents are idle.",
+              );
+            }
           }
         } catch {
           // updater_check rejects when the CHECK itself failed (offline, feed
@@ -141,7 +160,7 @@ export function UpdateNotifications(): ReactElement | null {
   // ── Show / update / hide the persistent toast ──
   useEffect(() => {
     const suppressed = Date.now() < suppressedUntil;
-    if (required || !ready || suppressed || restartWhenIdle) {
+    if (required || !ready || suppressed || shouldRestartWhenIdle) {
       dismissUpdateToast();
       return;
     }
@@ -161,7 +180,7 @@ export function UpdateNotifications(): ReactElement | null {
     version,
     anyAgentRunning,
     suppressedUntil,
-    restartWhenIdle,
+    shouldRestartWhenIdle,
     handleRestart,
     handleRestartWhenIdle,
     handleDismiss,
@@ -187,12 +206,17 @@ export function UpdateNotifications(): ReactElement | null {
 
   // ── Deferred "Restart when idle": fire once agents stay idle past the grace ──
   useEffect(() => {
-    if (required || !restartWhenIdle || anyAgentRunning || !ready) return;
+    if (required || !shouldRestartWhenIdle || anyAgentRunning || !ready) return;
     const id = window.setTimeout(() => {
-      void install();
+      // Work or opt-out can arrive before React runs this effect's cleanup.
+      if (anyAgentHasActiveWork(useSessionsStore.getState())) return;
+      if (!restartWhenIdle && !getRestartAutomaticallyOnUpdate()) return;
+      if (useRequiredUpdateStore.getState().required) return;
+      // A stale ready snapshot must never arm main's install-on-download latch.
+      void install({ requireReady: true });
     }, IDLE_GRACE_MS);
     return () => window.clearTimeout(id);
-  }, [required, restartWhenIdle, anyAgentRunning, ready, install]);
+  }, [required, shouldRestartWhenIdle, restartWhenIdle, anyAgentRunning, ready, version, install]);
 
   return required ? <RequiredUpdateScreen required={required} status={status} install={install} /> : null;
 }

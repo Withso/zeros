@@ -47,6 +47,7 @@ import {
 } from "../../pr/pr-status-refresh";
 import { registerPrWorkspaceCacheForget } from "../../pr/pr-cache-forget";
 import { isCloudWorkspace, parseCloudScopedId } from "../../../platform/bridge/cloud-workspace-key";
+import { cloudGithubPrScope, useCloudGithubPrScope } from "../../../platform/cloud-github-pr-scope";
 import { documentIsForeground, observeForeground, pollWhileForeground } from "../../../shared/lib/element-activity";
 import {
   CHECKS_POLL_ACTIVE_MS,
@@ -130,16 +131,15 @@ export const REVIEW_REFRESH_KEY_MIN_INTERVAL_MS = 15_000;
 
 // Deletion purge (pr-cache-forget): snapshot keys are
 // `provider.cacheKey#workspaceId#reviewRef`, so the delimited infix match is exact.
-// An entry with a live subscriber or an in-flight read is skipped — deletion
-// repoints/unmounts the Review surface first, and deleting mid-flight would
-// only be undone by the settling patch() recreating the key; the bounded LRU
-// in entryFor reclaims those stragglers.
+// Disconnect also retires mounted content. Async tails check entry identity
+// before publication, so they cannot recreate a retired snapshot.
 registerPrWorkspaceCacheForget((workspaceId) => {
   for (const [key, entry] of cache) {
     if (!key.includes(`#${workspaceId}#`)) continue;
-    if (entry.listeners.size > 0 || entry.inflightFull || entry.inflightChecks)
-      continue;
     cache.delete(key);
+    entry.generation++;
+    entry.snap = EMPTY_SNAPSHOT;
+    for (const listener of entry.listeners) listener();
   }
 });
 
@@ -200,8 +200,13 @@ function reviewCacheKey(
   provider: ReviewProvider,
   workspaceId: string,
   prNumber: number,
+  scope = cloudGithubPrScope(workspaceId),
 ): string {
-  return `${provider.cacheKey}#${workspaceId}#${prNumber}`;
+  return `${provider.cacheKey}#${workspaceId}#${prNumber}${isLocalReviewWorkspace(workspaceId) ? "" : `@${scope}`}`;
+}
+
+function currentReviewEntry(provider: ReviewProvider, target: ReviewTarget, key: string, entry: Entry): boolean {
+  return cache.get(key) === entry && key === reviewCacheKey(provider, target.workspaceId, Number(target.reviewRef));
 }
 
 function targetForReview(
@@ -274,6 +279,7 @@ async function refreshFull(
   target: ReviewTarget,
   key: string,
 ): Promise<void> {
+  if (key !== reviewCacheKey(provider, target.workspaceId, Number(target.reviewRef))) return;
   const e = entryFor(key);
   if (e.inflightFull) return e.inflightFull;
   const generation = e.generation;
@@ -288,6 +294,7 @@ async function refreshFull(
       // NOT_AUTHENTICATED read below re-arms this by flipping authed to false.
       if (e.snap.authed !== true) {
         const status = await provider.authStatus(target.workspaceId);
+        if (!currentReviewEntry(provider, target, key, e)) return;
         if (e.generation !== generation) {
           superseded = true;
         } else {
@@ -305,6 +312,7 @@ async function refreshFull(
           provider.getCommits(target),
           provider.getTimeline(target),
         ]);
+        if (!currentReviewEntry(provider, target, key, e)) return;
         if (e.generation !== generation) {
           superseded = true;
         } else {
@@ -352,19 +360,20 @@ async function refreshFull(
     } catch (err) {
       // authStatus threw (network / engine down): retain prior exact-key data
       // and expose the persistent failure to the tab's banner.
+      if (!currentReviewEntry(provider, target, key, e)) return;
       if (e.generation !== generation) superseded = true;
       else patch(key, { error: humanGitError(err) });
     } finally {
       e.inflightFull = null;
-      patch(key, { refreshing: false });
+      if (currentReviewEntry(provider, target, key, e)) patch(key, { refreshing: false });
     }
     // An event or mutation that landed during this request invalidated its
     // response. Run exactly one successor after releasing the in-flight slot.
-    if (superseded) {
-      // A hidden Local refresh signal must not turn the completed request
+    if (superseded && currentReviewEntry(provider, target, key, e)) {
+      // A hidden refresh signal must not turn the completed request
       // into another native read. Keep the confirmed snapshot and let the
       // next foreground observer (or explicit request) settle its staleness.
-      if (isLocalReviewWorkspace(target.workspaceId) && !documentIsForeground()) patch(key, { stale: true });
+      if (!documentIsForeground()) patch(key, { stale: true });
       else await refreshFull(provider, target, key);
     }
   })();
@@ -376,13 +385,14 @@ async function refreshChecksOnly(
   target: ReviewTarget,
   key: string,
 ): Promise<void> {
+  if (key !== reviewCacheKey(provider, target.workspaceId, Number(target.reviewRef))) return;
   const e = entryFor(key);
   if (e.inflightChecks || e.inflightFull) return;
   const generation = e.generation;
   e.inflightChecks = (async () => {
     try {
       const checks = await provider.getChecks(target);
-      if (e.generation === generation) patch(key, { checks });
+      if (currentReviewEntry(provider, target, key, e) && e.generation === generation) patch(key, { checks });
     } catch {
       // Fast-lane miss — the slow lane / event bus will repair.
     } finally {
@@ -401,7 +411,8 @@ async function refreshTimelineOnly(
   key: string,
   confirmed?: { id: number; entry: ReviewTimelineEntry },
 ): Promise<void> {
-  const generation = entryFor(key).generation;
+  const entry = entryFor(key), generation = entry.generation;
+  if (!currentReviewEntry(provider, target, key, entry)) return;
   try {
     const fetched: ReviewTimelineEntry[] = await provider.getTimeline(target);
     const timeline =
@@ -411,7 +422,7 @@ async function refreshTimelineOnly(
             { ...confirmed.entry, id: confirmed.id, optimistic: false },
           ]
         : fetched;
-    if (entryFor(key).generation === generation) {
+    if (currentReviewEntry(provider, target, key, entry) && entry.generation === generation) {
       patchAuthoritative(key, { timeline });
     }
   } catch {
@@ -478,9 +489,9 @@ export function useReviewLiveData(args: {
   active: boolean;
 }): ReviewLiveData {
   const { provider, workspaceId, prNumber, refreshKey, active } = args;
-  const local = isLocalReviewWorkspace(workspaceId);
-  const initialActive = local ? active : true;
-  const key = reviewCacheKey(provider, workspaceId, prNumber);
+  const initialActive = active;
+  const scope = useCloudGithubPrScope(workspaceId);
+  const key = reviewCacheKey(provider, workspaceId, prNumber, scope);
   const target = targetForReview(provider, workspaceId, prNumber);
 
   const snap = useSyncExternalStore(
@@ -506,10 +517,10 @@ export function useReviewLiveData(args: {
 
   // Initial load — once per (workspace, PR) unless nothing arrived yet.
   useEffect(() => {
-    if (!initialActive || (local && !documentIsForeground())) return;
+    if (!initialActive || !documentIsForeground()) return;
     const e = entryFor(key);
     if (e.snap.loadedAt === 0 && !e.inflightFull) void refresh();
-  }, [key, refresh, initialActive, local]);
+  }, [key, refresh, initialActive]);
 
   // Event bus: engine git/gh writes + agent turn-end. Active → refresh, at
   // most once per REVIEW_REFRESH_KEY_MIN_INTERVAL_MS with a trailing read;
@@ -531,7 +542,7 @@ export function useReviewLiveData(args: {
     ) {
       return;
     }
-    if (!active || (local && !documentIsForeground())) {
+    if (!active || !documentIsForeground()) {
       invalidate(key);
       return;
     }
@@ -543,10 +554,10 @@ export function useReviewLiveData(args: {
     if (trailingRefresh.current != null) return;
     trailingRefresh.current = window.setTimeout(() => {
       trailingRefresh.current = null;
-      if (document.visibilityState === "hidden" || (local && !documentIsForeground())) invalidate(key);
+      if (!documentIsForeground()) invalidate(key);
       else void refresh();
     }, delay);
-  }, [refreshKey, active, key, refresh, local]);
+  }, [refreshKey, active, key, refresh]);
   // A pending trailing read belongs to this key's visible surface. Leaving
   // keeps its signal as staleness for the activation effect instead.
   useEffect(() => {
@@ -556,29 +567,29 @@ export function useReviewLiveData(args: {
       trailingRefresh.current = null;
       invalidate(key);
     };
-    const unwatch = local && active ? observeForeground(() => {
+    const unwatch = active ? observeForeground(() => {
       if (!documentIsForeground()) cancel();
     }) : undefined;
     return () => { unwatch?.(); cancel(); };
-  }, [active, key, local]);
+  }, [active, key]);
 
   // Activation: settle staleness (bus bump while hidden, or simply old data).
   // Deliberately NOT terminal-gated: this bounded once-per-activation read is
   // the cheap re-check that lets a PR reopened on github.com recover after
   // the recurring lanes below muted themselves.
   useEffect(() => {
-    if (!active || (local && !documentIsForeground())) return;
+    if (!active || !documentIsForeground()) return;
     const e = entryFor(key);
     const old = Date.now() - e.snap.loadedAt > FULL_POLL_MS;
     if (e.snap.loadedAt > 0 && (e.snap.stale || old)) void refresh();
-  }, [active, key, refresh, local]);
+  }, [active, key, refresh]);
 
   // Slow lane: the full snapshot, catching github.com-side activity. Terminal
   // PR rows are stable, but their timeline and post-merge checks are not, so
   // this bounded active-only lane remains live for every state.
   useEffect(() => {
     if (!active) return;
-    if (local) return pollWhileForeground(() => {
+    return pollWhileForeground(() => {
       const entry = entryFor(key);
       // A visibility/focus pair observes the same boundary. It must not
       // invalidate the first read and force an unnecessary successor.
@@ -587,20 +598,7 @@ export function useReviewLiveData(args: {
       if (shouldRefreshReviewSnapshot(effectivePrPollState(snapshot.pr), "resume") &&
           shouldRefreshReviewOnResume(snapshot)) void refresh();
     }, FULL_POLL_MS);
-    const t = window.setInterval(() => {
-      if (document.visibilityState === "hidden") return;
-      if (
-        !shouldRefreshReviewSnapshot(
-          effectivePrPollState(entryFor(key).snap.pr),
-          "interval",
-        )
-      ) {
-        return;
-      }
-      void refresh();
-    }, FULL_POLL_MS);
-    return () => window.clearInterval(t);
-  }, [active, key, refresh, local]);
+  }, [active, key, refresh]);
 
   // Fast lane: checks only, while CI is in flight. A merge can land before the
   // head's checks/deployments settle; `pending` naturally disarms the lane as
@@ -614,48 +612,19 @@ export function useReviewLiveData(args: {
   });
   useEffect(() => {
     if (!pollChecks) return;
-    if (local) return pollWhileForeground(() => {
+    return pollWhileForeground(() => {
       // A fresh full read already contains checks. Return events share the
       // full lane above, so they cannot start a redundant checks request.
       if (Date.now() - entryFor(key).snap.loadedAt >= CHECKS_POLL_ACTIVE_MS)
         void refreshChecksOnly(provider, target, key);
     }, CHECKS_POLL_ACTIVE_MS);
-    const t = window.setInterval(() => {
-      if (document.visibilityState === "hidden") return;
-      void refreshChecksOnly(provider, target, key);
-    }, CHECKS_POLL_ACTIVE_MS);
-    return () => window.clearInterval(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps -- target is derived from key
-  }, [pollChecks, provider, key, local]);
-
-  // Returning from another app/tab is an external-change boundary. Refresh
-  // promptly (with a small focus-thrash floor) instead of waiting up to 60s for
-  // GitHub comments, reviews, base changes, or force-pushes to appear. This is
-  // bounded by shouldRefreshReviewOnResume's age floor and remains live for
-  // terminal timelines and post-merge checks.
-  useEffect(() => {
-    if (!active || local) return;
-    const onResume = () => {
-      if (document.visibilityState !== "visible") return;
-      const e = entryFor(key);
-      if (
-        !shouldRefreshReviewSnapshot(effectivePrPollState(e.snap.pr), "resume")
-      ) {
-        return;
-      }
-      if (shouldRefreshReviewOnResume(e.snap)) void refresh();
-    };
-    document.addEventListener("visibilitychange", onResume);
-    window.addEventListener("focus", onResume);
-    return () => {
-      document.removeEventListener("visibilitychange", onResume);
-      window.removeEventListener("focus", onResume);
-    };
-  }, [active, key, refresh, local]);
+  }, [pollChecks, provider, key]);
 
   const postComment = useCallback(
     async (body: string) => {
       const e = entryFor(key);
+      if (!currentReviewEntry(provider, target, key, e)) throw new Error("Your GitHub connection changed. Refresh before posting.");
       const optimistic: ReviewTimelineEntry = {
         kind: "comment",
         id: -Date.now(),
@@ -672,13 +641,14 @@ export function useReviewLiveData(args: {
       });
       try {
         const posted = await provider.addComment(target, body);
+        if (!currentReviewEntry(provider, target, key, e)) return;
         await refreshTimelineOnly(provider, target, key, {
           id: posted.id,
           entry: optimistic,
         });
       } catch (err) {
         // Roll back the optimistic entry so a failed post never lingers.
-        patchAuthoritative(key, {
+        if (currentReviewEntry(provider, target, key, e)) patchAuthoritative(key, {
           timeline: (entryFor(key).snap.timeline ?? []).filter(
             (t) => t.id !== optimistic.id,
           ),
@@ -692,8 +662,10 @@ export function useReviewLiveData(args: {
 
   const merge = useCallback(
     async (method: ReviewMergeMethod) => {
+      const entry = entryFor(key);
+      if (!currentReviewEntry(provider, target, key, entry)) throw new Error("Your GitHub connection changed. Refresh before merging.");
       await provider.merge(target, method);
-      await refresh();
+      if (currentReviewEntry(provider, target, key, entry)) await refresh();
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps -- target is derived from key
     [provider, key, refresh],
@@ -701,7 +673,10 @@ export function useReviewLiveData(args: {
 
   const markReady = useCallback(
     async () => {
+      const entry = entryFor(key);
+      if (!currentReviewEntry(provider, target, key, entry)) throw new Error("Your GitHub connection changed. Refresh before continuing.");
       const pr = await provider.markReady(target);
+      if (!currentReviewEntry(provider, target, key, entry)) return;
       if (livePr(pr)) patchAuthoritative(key, { pr });
       void refresh();
     },

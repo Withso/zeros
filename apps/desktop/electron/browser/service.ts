@@ -144,6 +144,14 @@ const PAGE_FRAME_TIMEOUT_MS = 1_000;
 // Electron runs context isolation in world 999 and reserves 1 << 20 upward
 // for extensions.
 const AGENT_PAGE_WORLD_ID = 1_000;
+
+/** Policy must observe native DOM behavior even when the page replaces its
+ * own DOM getters, query methods or globals. The shared DOM is still live;
+ * the isolated world protects the inspection code, not the page's content. */
+function executeBrowserDomScript(webContents: WebContents, code: string): Promise<unknown> {
+  return webContents.executeJavaScriptInIsolatedWorld(AGENT_PAGE_WORLD_ID, [{ code }], true);
+}
+
 const BROWSER_TITLE_SETTLE_MS = 300;
 const MAX_FAVICON_BYTES = 192 * 1024;
 const MAX_DOWNLOAD_BYTES = 100 * 1024 * 1024;
@@ -356,12 +364,52 @@ export interface ZerosBrowserServiceHandle {
   stop(): Promise<void>;
 }
 
+// Shared by snapshot, click inspection and the last check before native input.
+// DOM properties provide effective HTML behavior, including invalid/default
+// button types and controls whose form owner is outside their ancestors.
+const BROWSER_DOM_POLICY = String.raw`
+  const clean = value => String(value || "").trim().replace(/\s+/g, " ").slice(0, 300);
+  const sensitive = element => {
+    const type = String(element.type || "").toLowerCase();
+    const autocomplete = String(element.autocomplete || element.getAttribute("autocomplete") || "").toLowerCase().split(/\s+/);
+    return type === "password" || type === "file" || autocomplete.some(v => v === "one-time-code" || v.includes("password") || v.startsWith("cc-")) ||
+      /password|passcode|one.?time|\botp\b|card.?number|cvv|cvc|security.?code/i.test(String(element.name || "") + " " + String(element.id || ""));
+  };
+  const interactive = element => element.closest("button,input,select,textarea,a[href],summary") || element.closest('[role="button"],[role="link"]') || element;
+  const labelOf = element => {
+    const label = clean(element.getAttribute("aria-label") || element.innerText || element.title || element.name);
+    if (sensitive(element)) {
+      const value = String(element.value || "");
+      return value ? label.split(value).join("[redacted]") : label;
+    }
+    return label || (["submit", "button", "reset"].includes(String(element.type)) ? clean(element.value) : "");
+  };
+  const actionOf = element => {
+    const inputType = String(element.type || "").toLowerCase();
+    const tagName = element.tagName;
+    const form = element.form || null;
+    const submitsForm = Boolean(form && ((tagName === "BUTTON" && inputType === "submit") || (tagName === "INPUT" && ["submit", "image"].includes(inputType))));
+    const formAction = form ? {
+      id: form.id,
+      action: submitsForm && element.hasAttribute("formaction") ? element.formAction : form.action,
+      method: submitsForm && element.hasAttribute("formmethod") ? element.formMethod : form.method,
+      target: submitsForm && element.hasAttribute("formtarget") ? element.formTarget : form.target,
+      enctype: submitsForm && element.hasAttribute("formenctype") ? element.formEnctype : form.enctype,
+      noValidate: Boolean(form.noValidate || (submitsForm && element.formNoValidate))
+    } : null;
+    const label = labelOf(element);
+    const href = tagName === "A" ? element.href : null;
+    return { tagName, inputType, submitsForm, label, safeLabel: label, href,
+      actionKey: JSON.stringify({ tagName, inputType, submitsForm, label, href, target: element.target || "", form: formAction }) };
+  };`;
+
 function snapshotScript(
   refAttribute: string,
   refScope: string,
   previousRefAttribute: string,
 ): string {
   return String.raw`(() => {
+  ${BROWSER_DOM_POLICY}
   const refAttribute = ${JSON.stringify(refAttribute)};
   const refScope = ${JSON.stringify(refScope)};
   const previousRefAttribute = ${JSON.stringify(previousRefAttribute)};
@@ -403,12 +451,14 @@ function snapshotScript(
     counter += 1;
     const ref = "b" + counter + "_" + refScope;
     element.setAttribute(refAttribute, ref);
-    const type = element.getAttribute("type") || undefined;
-    const value = type === "password" || type === "file" ? undefined : ("value" in element ? String(element.value).slice(0, 300) : undefined);
+    const type = element.type || undefined;
+    const value = sensitive(element) ? undefined : ("value" in element ? String(element.value).slice(0, 300) : undefined);
+    const secret = sensitive(element) ? String(element.value || "") : "";
+    const name = nameOf(element);
     elements.push({
       ref,
       role: roleOf(element),
-      name: nameOf(element).replace(/\s+/g, " ").slice(0, 300),
+      name: (secret ? name.split(secret).join("[redacted]") : name).replace(/\s+/g, " ").slice(0, 300),
       type,
       value,
       disabled: Boolean(element.disabled || element.getAttribute("aria-disabled") === "true"),
@@ -2165,9 +2215,9 @@ async function executeTool(
       const ref = requireRef(args.ref);
       const inspectedUserInputGeneration = lease.userInputGeneration;
       const inspected = asRecord(
-        await lease.view.webContents.executeJavaScript(
+        await executeBrowserDomScript(
+          lease.view.webContents,
           inspectClickScript(lease.refAttribute, ref),
-          true,
         ),
       );
       if (inspected.ok !== true) {
@@ -2243,9 +2293,9 @@ async function executeTool(
           await delay(120);
         }
         const prepared = asRecord(
-          await lease.view.webContents.executeJavaScript(
-            prepareClickScript(lease.refAttribute, ref, inspectedHref),
-            true,
+          await executeBrowserDomScript(
+            lease.view.webContents,
+            prepareClickScript(lease.refAttribute, ref, String(inspected.actionKey)),
           ),
         );
         if (prepared.ok !== true)
@@ -2259,7 +2309,7 @@ async function executeTool(
         await dispatchAgentClick(lease, clickX, clickY, {
           refAttribute: lease.refAttribute,
           ref,
-          inspectedHref,
+          actionKey: String(inspected.actionKey),
         });
         await settleAfterAction(lease.view.webContents);
         assertBrowserActionNotInterrupted(context);
@@ -2282,9 +2332,9 @@ async function executeTool(
         return failure("Text exceeds 20,000 characters.");
       const inspectedUserInputGeneration = lease.userInputGeneration;
       const inspected = asRecord(
-        await lease.view.webContents.executeJavaScript(
+        await executeBrowserDomScript(
+          lease.view.webContents,
           inspectInputScript(lease.refAttribute, ref),
-          true,
         ),
       );
       if (inspected.ok !== true) {
@@ -2337,9 +2387,9 @@ async function executeTool(
       }
       assertBrowserActionNotInterrupted(context);
       const currentInput = asRecord(
-        await lease.view.webContents.executeJavaScript(
+        await executeBrowserDomScript(
+          lease.view.webContents,
           inspectInputScript(lease.refAttribute, ref),
-          true,
         ),
       );
       if (
@@ -2355,7 +2405,8 @@ async function executeTool(
       }
       lease.actor = context.actor;
       const typed = asRecord(
-        await lease.view.webContents.executeJavaScript(
+        await executeBrowserDomScript(
+          lease.view.webContents,
           typeScript(
             lease.refAttribute,
             ref,
@@ -2363,7 +2414,6 @@ async function executeTool(
             args.clear !== false,
             category === "authentication",
           ),
-          true,
         ),
       );
       if (typed.ok !== true)
@@ -2385,9 +2435,9 @@ async function executeTool(
       const ref = args.ref === undefined ? null : requireRef(args.ref);
       const inspectedUserInputGeneration = lease.userInputGeneration;
       const focused = asRecord(
-        await lease.view.webContents.executeJavaScript(
+        await executeBrowserDomScript(
+          lease.view.webContents,
           focusForKeyScript(lease.refAttribute, ref),
-          true,
         ),
       );
       if (focused.ok !== true) {
@@ -2435,12 +2485,12 @@ async function executeTool(
           "The user took control of the browser; take a new snapshot before retrying.",
         );
       }
-      if (risk) {
+      {
         assertBrowserActionNotInterrupted(context);
         const current = asRecord(
-          await lease.view.webContents.executeJavaScript(
+          await executeBrowserDomScript(
+            lease.view.webContents,
             focusForKeyScript(lease.refAttribute, ref),
-            true,
           ),
         );
         if (
@@ -2498,9 +2548,9 @@ async function executeTool(
         return failure("Choose an option by value or label.");
       }
       const selected = asRecord(
-        await lease.view.webContents.executeJavaScript(
+        await executeBrowserDomScript(
+          lease.view.webContents,
           selectOptionScript(lease.refAttribute, ref, value, label),
-          true,
         ),
       );
       if (selected.ok !== true) {
@@ -2594,9 +2644,9 @@ async function executeTool(
       const ref = requireRef(args.ref);
       const inspectedUserInputGeneration = lease.userInputGeneration;
       const inspected = asRecord(
-        await lease.view.webContents.executeJavaScript(
+        await executeBrowserDomScript(
+          lease.view.webContents,
           inspectInputScript(lease.refAttribute, ref),
-          true,
         ),
       );
       if (inspected.ok !== true || inspected.inputType !== "file") {
@@ -2665,9 +2715,9 @@ async function executeTool(
       }
       assertBrowserActionNotInterrupted(context);
       const currentInput = asRecord(
-        await lease.view.webContents.executeJavaScript(
+        await executeBrowserDomScript(
+          lease.view.webContents,
           inspectInputScript(lease.refAttribute, ref),
-          true,
         ),
       );
       if (
@@ -3749,9 +3799,9 @@ async function snapshotResult(lease: BrowserLease): Promise<BrowserToolResult> {
   const previousRefAttribute = lease.refAttribute;
   const markers = browserDomMarkers(randomBytes(12).toString("hex"));
   lease.refAttribute = markers.refAttribute;
-  const snapshot = await lease.view.webContents.executeJavaScript(
+  const snapshot = await executeBrowserDomScript(
+    lease.view.webContents,
     snapshotScript(lease.refAttribute, markers.refScope, previousRefAttribute),
-    true,
   );
   return success({
     ...asRecord(snapshot),
@@ -3859,49 +3909,35 @@ const SCROLL_INTO_VIEW_OPTIONS = `{ block: "center", inline: "center", behavior:
 function inspectClickScript(refAttribute: string, ref: string): string {
   const selector = `[${refAttribute}="${ref}"]`;
   return `(() => {
-    const element = document.querySelector(${JSON.stringify(selector)});
-    if (!element) return { ok: false, error: "Unknown or stale browser ref; take a new snapshot." };
-    if (element.disabled || element.getAttribute("aria-disabled") === "true") return { ok: false, error: "The selected element is disabled." };
+    ${BROWSER_DOM_POLICY}
+    const referenced = document.querySelector(${JSON.stringify(selector)});
+    if (!referenced) return { ok: false, error: "Unknown or stale browser ref; take a new snapshot." };
+    const element = interactive(referenced);
+    if (element.matches(":disabled") || element.getAttribute("aria-disabled") === "true") return { ok: false, error: "The selected element is disabled." };
     element.scrollIntoView(${SCROLL_INTO_VIEW_OPTIONS});
+    if (element.tagName === "A") element.removeAttribute("target");
+    const action = actionOf(element);
+    if (action.actionKey.length > 32768) return { ok: false, error: "The browser action is too large to verify." };
     const rect = element.getBoundingClientRect();
-    const form = element.closest("form");
-    const inputType = String(element.getAttribute("type") || "").toLowerCase();
-    const tagName = element.tagName;
-    const submitsForm = Boolean(form && ((tagName === "BUTTON" && (!inputType || inputType === "submit")) || (tagName === "INPUT" && (inputType === "submit" || inputType === "image"))));
-    const safeLabel = (element.getAttribute("aria-label") || element.innerText || element.title || element.name || "").trim().replace(/\\s+/g, " ").slice(0, 300);
-    const label = safeLabel || String(element.value || "").trim().replace(/\\s+/g, " ").slice(0, 300);
-    return {
-      ok: true,
-      label,
-      safeLabel,
-      tagName,
-      inputType,
-      submitsForm,
-      href: element.tagName === "A" ? element.href : undefined,
+    return { ok: true, ...action,
       x: Math.max(0, Math.min(innerWidth - 1, rect.left + rect.width / 2)),
       y: Math.max(0, Math.min(innerHeight - 1, rect.top + rect.height / 2))
     };
   })()`;
 }
 
-function prepareClickScript(
-  refAttribute: string,
-  ref: string,
-  inspectedHref: string | null,
-): string {
+function prepareClickScript(refAttribute: string, ref: string, actionKey: string): string {
   const selector = `[${refAttribute}="${ref}"]`;
   return `(() => {
-    const element = document.querySelector(${JSON.stringify(selector)});
-    if (!element) return { ok: false, error: "Unknown or stale browser ref; take a new snapshot." };
-    const inspectedHref = ${JSON.stringify(inspectedHref)};
-    const currentHref = element.tagName === "A" ? element.href : null;
-    if (currentHref !== inspectedHref) return { ok: false, error: "The link target changed; take a new snapshot before retrying." };
-    if (element.disabled || element.getAttribute("aria-disabled") === "true") return { ok: false, error: "The selected element is disabled." };
+    ${BROWSER_DOM_POLICY}
+    const referenced = document.querySelector(${JSON.stringify(selector)});
+    if (!referenced) return { ok: false, error: "Unknown or stale browser ref; take a new snapshot." };
+    const element = interactive(referenced);
+    if (actionOf(element).actionKey !== ${JSON.stringify(actionKey)}) return { ok: false, error: "The browser action changed; take a new snapshot before retrying." };
+    if (element.matches(":disabled") || element.getAttribute("aria-disabled") === "true") return { ok: false, error: "The selected element is disabled." };
     element.scrollIntoView(${SCROLL_INTO_VIEW_OPTIONS});
-    if (element.tagName === "A" && element.hasAttribute("target")) element.removeAttribute("target");
     const rect = element.getBoundingClientRect();
-    return {
-      ok: true,
+    return { ok: true,
       x: Math.max(0, Math.min(innerWidth - 1, rect.left + rect.width / 2)),
       y: Math.max(0, Math.min(innerHeight - 1, rect.top + rect.height / 2))
     };
@@ -3983,7 +4019,7 @@ async function dispatchAgentClick(
   target: {
     refAttribute: string;
     ref: string;
-    inspectedHref: string | null;
+    actionKey: string;
   },
 ): Promise<void> {
   const bounds = lease.view.getBounds();
@@ -4008,15 +4044,15 @@ async function dispatchAgentClick(
     // mouse-down/up pair. This is also where the user sees the pointer arrive.
     await delay(40);
     const revalidated = asRecord(
-      await lease.view.webContents.executeJavaScript(
+      await executeBrowserDomScript(
+        lease.view.webContents,
         validateClickTargetScript(
           target.refAttribute,
           target.ref,
-          target.inspectedHref,
+          target.actionKey,
           x,
           y,
         ),
-        true,
       ),
     );
     if (revalidated.ok !== true) {
@@ -4149,17 +4185,18 @@ async function dispatchAgentPointerMove(
 function validateClickTargetScript(
   refAttribute: string,
   ref: string,
-  inspectedHref: string | null,
+  actionKey: string,
   expectedX: number,
   expectedY: number,
 ): string {
   const selector = `[${refAttribute}="${ref}"]`;
   return `(() => {
-    const element = document.querySelector(${JSON.stringify(selector)});
+    ${BROWSER_DOM_POLICY}
+    const referenced = document.querySelector(${JSON.stringify(selector)});
+    const element = referenced ? interactive(referenced) : null;
     if (!element) return { ok: false, error: "The click target disappeared; take a new snapshot." };
-    const currentHref = element.tagName === "A" ? element.href : null;
-    if (currentHref !== ${JSON.stringify(inspectedHref)}) return { ok: false, error: "The link target changed; take a new snapshot before retrying." };
-    if (element.disabled || element.getAttribute("aria-disabled") === "true") return { ok: false, error: "The selected element is disabled." };
+    if (actionOf(element).actionKey !== ${JSON.stringify(actionKey)}) return { ok: false, error: "The browser action changed; take a new snapshot before retrying." };
+    if (element.matches(":disabled") || element.getAttribute("aria-disabled") === "true") return { ok: false, error: "The selected element is disabled." };
     const rect = element.getBoundingClientRect();
     if (rect.width <= 0 || rect.height <= 0) return { ok: false, error: "The click target is no longer visible." };
     const x = Math.max(0, Math.min(innerWidth - 1, rect.left + rect.width / 2));
@@ -4226,6 +4263,7 @@ function typeScript(
 function focusForKeyScript(refAttribute: string, ref: string | null): string {
   const selector = ref ? `[${refAttribute}="${ref}"]` : null;
   return `(() => {
+    ${BROWSER_DOM_POLICY}
     const selector = ${JSON.stringify(selector)};
     let element = null;
     if (selector) {
@@ -4235,8 +4273,6 @@ function focusForKeyScript(refAttribute: string, ref: string | null): string {
       element.scrollIntoView(${SCROLL_INTO_VIEW_OPTIONS});
       if (typeof element.focus === "function") element.focus();
     }
-    const clean = (value) => String(value || "").trim().replace(/\\s+/g, " ").slice(0, 300);
-    const labelOf = (node) => clean(node.getAttribute("aria-label") || node.innerText || node.title || node.name) || clean(node.value);
     let target = document.activeElement;
     let opaque = false;
     for (let depth = 0; target && depth < 16; depth += 1) {
@@ -4251,13 +4287,13 @@ function focusForKeyScript(refAttribute: string, ref: string | null): string {
     }
     if (target && !opaque && (target === target.ownerDocument.body || target === target.ownerDocument.documentElement)) target = null;
     const tagName = target ? target.tagName : "";
-    const inputType = target ? String(target.getAttribute("type") || "").toLowerCase() : "";
+    const inputType = target ? String(target.type || "").toLowerCase() : "";
     const field = tagName === "SELECT" || (tagName === "INPUT" && !["submit", "image", "button", "reset", "file"].includes(inputType));
     const typing = Boolean(target) && !opaque && (Boolean(target.isContentEditable) || tagName === "TEXTAREA" || (field && inputType !== "checkbox" && inputType !== "radio"));
-    const owner = target && !opaque ? (target.form || (target.closest ? target.closest("form") : null)) : null;
+    const owner = target && !opaque ? target.form : null;
     const submitsForm = Boolean(owner && ((tagName === "BUTTON" && (!inputType || inputType === "submit")) || (tagName === "INPUT" && (inputType === "submit" || inputType === "image"))));
     const form = field ? owner : null;
-    const submit = form ? form.querySelector('button[type=submit],input[type=submit],input[type=image],button:not([type])') : null;
+    const submit = form ? Array.from(form.elements).slice(0, 2000).find(node => node.form === form && ["submit", "image"].includes(node.type) && !node.matches(":disabled")) : null;
     const anchor = element || (document.activeElement && document.activeElement !== document.body ? document.activeElement : null);
     const rect = anchor ? anchor.getBoundingClientRect() : { left: innerWidth / 2, top: innerHeight / 2, width: 0, height: 0 };
     return {
@@ -4271,6 +4307,7 @@ function focusForKeyScript(refAttribute: string, ref: string | null): string {
       submitsForm,
       typing,
       implicitSubmit: Boolean(form),
+      actionKey: target && !opaque ? actionOf(target).actionKey + (submit ? actionOf(submit).actionKey : "") : "opaque",
       submitLabel: submit ? labelOf(submit) || clean(submit.alt) : "",
       x: Math.max(0, Math.min(innerWidth - 1, rect.left + rect.width / 2)),
       y: Math.max(0, Math.min(innerHeight - 1, rect.top + rect.height / 2))
@@ -4291,6 +4328,7 @@ function browserKeyTarget(
     implicitSubmit: value.implicitSubmit === true,
     submitLabel: String(value.submitLabel ?? ""),
     opaque: value.opaque === true,
+    actionKey: String(value.actionKey ?? ""),
   };
 }
 

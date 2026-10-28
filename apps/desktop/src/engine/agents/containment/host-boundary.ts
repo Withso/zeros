@@ -25,6 +25,7 @@ import { createServer } from "node:net";
 import { homedir } from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
+import { fileURLToPath } from "node:url";
 
 import { EXECUTION_BOUNDARY_STATUS_VERSION } from "@zeros/protocol/containment";
 
@@ -120,8 +121,7 @@ interface HostLaunchRecord {
 }
 
 export interface HostExecutionBoundaryOptions {
-  /** Repository root used to find the development supervisor source. Packaged
-   * launches receive an explicit resource path from the Electron sidecar. */
+  /** Compatibility input only. Workspace paths never select executable assets. */
   readonly projectRoot?: string;
   readonly supervisorScript?: string;
   readonly supervisorRuntime?: string;
@@ -753,7 +753,6 @@ const EMPTY_RECOVERY: ExecutionBoundaryRecoveryResult = {
 export class HostExecutionBoundary implements ExecutionBoundary {
   readonly backend = "none" as const;
 
-  private readonly projectRoot: string;
   private readonly supervisorScript: string;
   private readonly supervisorRuntime: string;
   private readonly ownerProcessId: number;
@@ -765,13 +764,12 @@ export class HostExecutionBoundary implements ExecutionBoundary {
   private readonly failedPreparationProofs = new Map<string, Promise<void>>();
 
   constructor(options: HostExecutionBoundaryOptions = {}) {
-    this.projectRoot = path.resolve(options.projectRoot ?? process.cwd());
     this.supervisorScript =
       options.supervisorScript ??
       process.env.ZEROS_HOST_SUPERVISOR_SCRIPT ??
       path.join(
-        this.projectRoot,
-        "apps/desktop/src/engine/agents/containment/host-process-supervisor.mjs",
+        typeof __dirname === "string" ? __dirname : path.dirname(fileURLToPath(import.meta.url)),
+        "host-process-supervisor.mjs",
       );
     this.supervisorRuntime =
       options.supervisorRuntime ??

@@ -32,6 +32,12 @@ const territory: AgentFilesystemTerritory = {
 };
 
 describe("host execution boundary", () => {
+  it("resolves its helper from the installed module, never the opened project", async () => {
+    const boundary = new HostExecutionBoundary({ projectRoot: "/untrusted/project" });
+    const { script } = await (boundary as unknown as { resolvedSupervisor(): Promise<{ script: string }> }).resolvedSupervisor();
+    expect(script).not.toContain("/untrusted/project");
+    expect(script).toMatch(/host-process-supervisor\.mjs$/);
+  });
   it("proves only a known rejected no-process preparation and refuses unknown or active execution", async () => {
     const boundary = new HostExecutionBoundary() as HostExecutionBoundary & {
       proveFailedPreparationStopped(executionId: string): Promise<void>;

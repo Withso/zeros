@@ -1,0 +1,5 @@
+{
+  "file": "apps/desktop/src/renderer/features/agent/sessions-provider.tsx",
+  "before": "if (getStore().sessions[chatId]?.transcriptState !== \"loading\") return;",
+  "after": "/* Deliberately omit the retired-slot guard. */"
+}

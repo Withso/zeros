@@ -9,6 +9,23 @@ import { createDesignWebDocumentState } from "../revision";
 import { FRAME_CSS, FRAME_HTML, webState, webTransaction } from "./fixtures";
 
 describe("web transaction adapter", () => {
+  it("renames layers without changing content or identity and undoes to exact source", () => {
+    const source = '<!doctype html><html><body><h1 id="headline" data-oid="heading" aria-label="Accessible headline">Hello</h1></body></html>';
+    const initial = createDesignWebDocumentState({
+      documentId: "layer-name", entryFile: "home.html", files: { "home.html": source },
+    });
+    const outcome = applyDesignTransaction(initial, webTransaction(initial, "rename", [{
+      operationId: "name", type: "node.set-attribute", nodeId: "heading",
+      attribute: "data-name", value: 'Product "headline" & intro',
+    }]), designWebTransactionAdapter);
+    expect(outcome.receipt.status).toBe("applied");
+    expect(outcome.state.files[initial.entryFile]).toContain('id="headline" data-oid="heading" aria-label="Accessible headline"');
+    expect(outcome.state.files[initial.entryFile]).toContain('data-name="Product &quot;headline&quot; &amp; intro"');
+    expect(outcome.state.files[initial.entryFile]).toContain(">Hello</h1>");
+    const restored = applyDesignTransaction(outcome.state, webTransaction(outcome.state, "undo-name", outcome.inverseOperations), designWebTransactionAdapter);
+    expect(restored.state.files[initial.entryFile]).toBe(source);
+  });
+
   it("threads the page origin into attribute and component-slot mutations", () => {
     const initial = createDesignWebDocumentState({
       documentId: "page-attributes",

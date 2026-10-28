@@ -11,6 +11,7 @@ import { ghCloud } from "./cloud-github";
 // ──────────────────────────────────────────────────────────
 
 import { setCommand } from "../router";
+import { editHistory } from "./edit-history";
 import { cursorSubscription } from "./cursor-subscription";
 import { providerSubscription } from "./provider-subscription";
 import { cloudProviderAuth } from "./cloud-provider-auth";
@@ -58,7 +59,8 @@ import { authCancelSignIn, authStartSignIn } from "./workos-auth";
 import { agentContextFiles } from "./agent-context";
 import { agentMemoryFiles } from "./agent-memory";
 import { pickCssFile, readCssFile, writeCssFile } from "./css-files";
-import { readFile, readImageThumbnail, writeFile } from "./files";
+import { readFile, readFileRange, readImageThumbnail, writeFile } from "./files";
+import { openFileMediaSource, closeFileMediaSource, replyFileMediaRange, downloadFileMediaSource } from "../../file-media-protocol";
 import { skillsList } from "./skills";
 import { discoverLocalhostServices } from "./localhost";
 import { notifySend } from "./notifications";
@@ -69,6 +71,7 @@ import {
 import { agentAttachmentWrite } from "./agent-attachments";
 import { registerAttachmentSourceIpc } from "../attachment-source";
 import { designExportPng } from "./design-export";
+import { designCaptureAcquire, designCaptureRelease } from "../../design-capture-admission";
 import {
   processRelaunch,
   updaterCheck,
@@ -114,12 +117,16 @@ import {
 import { appInfo, appSettingGet, appSettingSet, engineRestart, localNavigationReady } from "./app";
 import { logSubmit, logsExportOpen, logsRecent } from "./logs";
 import { cloudWorkspaceCapability } from "./cloud-capability";
+import { fullDiskAccessOpenSettings, fullDiskAccessStatus } from "./full-disk-access";
 export function registerAllCommands(): void {
   registerAttachmentSourceIpc();
   // App info (runtime mode / version / platform) — consumed by the
   // renderer analytics layer to route events to the right PostHog
   // project (Zeros Dev vs Zeros). Metadata only.
   setCommand("app_info", appInfo);
+  setCommand("edit_history", editHistory);
+  setCommand("full_disk_access_status", fullDiskAccessStatus);
+  setCommand("full_disk_access_open_settings", fullDiskAccessOpenSettings);
   setCommand("local_navigation_ready", localNavigationReady);
   setCommand("cursor_subscription", cursorSubscription);
   setCommand("provider_subscription", providerSubscription);
@@ -205,6 +212,11 @@ export function registerAllCommands(): void {
   setCommand("read_css_file", readCssFile);
   setCommand("write_css_file", writeCssFile);
   setCommand("read_file", readFile);
+  setCommand("read_file_range", readFileRange);
+  setCommand("file_media_open", openFileMediaSource);
+  setCommand("file_media_close", closeFileMediaSource);
+  setCommand("file_media_reply", replyFileMediaRange);
+  setCommand("file_media_download", downloadFileMediaSource);
   setCommand("read_image_thumbnail", readImageThumbnail);
   setCommand("write_file", writeFile);
   setCommand("skills_list", skillsList);
@@ -228,6 +240,8 @@ export function registerAllCommands(): void {
   // sends use attachment.write so desktop and relay clients share one protocol.
   setCommand("agent_attachment_write", agentAttachmentWrite);
   setCommand("design_export_png", designExportPng);
+  setCommand("design_capture_acquire", designCaptureAcquire);
+  setCommand("design_capture_release", designCaptureRelease);
 
   // Git + GitHub integration workspace lifecycle. Engine logic lives in
   // apps/desktop/src/engine/git/; these handlers

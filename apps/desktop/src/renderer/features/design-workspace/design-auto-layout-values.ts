@@ -1,8 +1,13 @@
 import { DESIGN_FRAME_MAX_SIZE } from "@zeros/design-core";
-import type { DesignRuntimeNodeDetails } from "@zeros/protocol/design-runtime";
 import {
+  DESIGN_RUNTIME_DOCUMENT_BODY_ID,
+  type DesignRuntimeNodeDetails,
+} from "@zeros/protocol/design-runtime";
+import {
+  designFlowTransformStyles,
   borderSize,
   cssSize,
+  designLayoutConstraint,
   designLayoutMode,
   type DesignLayoutAxis,
 } from "./design-layout-values";
@@ -233,28 +238,64 @@ export function designAutoLayoutUpdates(
   flow: DesignAutoLayoutFlow,
 ): Map<string, Styles> {
   const result = new Map<string, Styles>();
+  const childUpdates = new Map<string, Styles>();
   for (const parent of parents) {
+    if (designAutoLayoutFlow(parent) === flow) continue;
     const oldMode = designLayoutMode(style(parent, "display"));
+    const group = children.filter(
+      (entry) =>
+        entry.layout?.parentId === parent.oid &&
+        entry.visible &&
+        !["none", "contents"].includes(style(entry, "display")),
+    );
+    // Flex/grid needs no new positioning anchor. When removing layout, keep
+    // native block flow if preparing a free canvas would reanchor an authored
+    // overlay that belongs to a further ancestor.
+    const freezesFlow =
+      flow === "none" &&
+      oldMode !== "none" &&
+      !group.some(
+        (child) =>
+          style(child, "position") === "absolute" &&
+          !child.layout!.isContainingBlock,
+      );
     const styles = designAutoLayoutFlowStyles(parent, flow);
-    if (!style(parent, "position") || style(parent, "position") === "static")
-      styles.position = "relative";
-    if (flow === "none" && oldMode !== "none") {
+    if (freezesFlow) {
+      if (!style(parent, "position") || style(parent, "position") === "static")
+        styles.position = "relative";
       styles.width = cssSize(parent, "x", borderSize(parent, "x"));
       styles.height = cssSize(parent, "y", borderSize(parent, "y"));
     }
     result.set(parent.oid, { ...result.get(parent.oid), ...styles });
-    for (const child of children.filter(
-      (entry) => entry.layout?.parentId === parent.oid,
-    )) {
+    // A CSS composition can mix normal flow with absolute decoration. Only
+    // a free layout without flow participants brings all drawn boxes into
+    // flow. The existing direct-only marker remembers participants after
+    // removing layout, so repeated toggles never absorb original overlays.
+    const hasFlow = group.some(
+      (child) =>
+        !["absolute", "fixed"].includes(style(child, "position")) ||
+        style(child, "--zeros-layout-origin-flow") === "1",
+    );
+    for (const child of group) {
       const positioned = ["absolute", "fixed"].includes(
         style(child, "position"),
       );
+      const joinsFlow =
+        style(child, "position") === "absolute" &&
+        (style(child, "--zeros-layout-origin-flow") === "1" ||
+          (!hasFlow &&
+            // An all-edges-pinned background remains an overlay even in an
+            // otherwise free layout. Fixed layers never join container flow.
+            !(
+              designLayoutConstraint(child, "x") === "stretch" &&
+              designLayoutConstraint(child, "y") === "stretch"
+            )));
       if (
-        (oldMode === "none" && flow !== "none") ||
-        (oldMode !== "none" && flow === "none" && !positioned)
+        (oldMode === "none" && flow !== "none" && joinsFlow) ||
+        (freezesFlow && !positioned)
       ) {
-        result.set(child.oid, {
-          ...result.get(child.oid),
+        childUpdates.set(child.oid, {
+          ...childUpdates.get(child.oid),
           position: flow === "none" ? "absolute" : "relative",
           left:
             flow === "none"
@@ -273,6 +314,9 @@ export function designAutoLayoutUpdates(
           "flex-basis": "auto",
           "--zeros-layout-x": null,
           "--zeros-layout-y": null,
+          "--zeros-layout-origin-flow": flow === "none" ? "1" : null,
+          // Joining a flow drops the offset it was drawn at; it keeps its pose.
+          ...(flow === "none" ? {} : designFlowTransformStyles(child)),
         });
       } else if (oldMode !== "none" && flow !== "none" && !positioned) {
         const next = {
@@ -295,10 +339,14 @@ export function designAutoLayoutUpdates(
           if (intent !== "custom")
             Object.assign(sizing, designSizingStyles(next, axis, intent));
         }
-        result.set(child.oid, { ...result.get(child.oid), ...sizing });
+        childUpdates.set(child.oid, { ...childUpdates.get(child.oid), ...sizing });
       }
     }
   }
+  // A nested selection is both a container and a child. Parent preparation
+  // must not overwrite its placement as a child when selection order changes.
+  for (const [oid, styles] of childUpdates)
+    result.set(oid, { ...result.get(oid), ...styles });
   return result;
 }
 
@@ -378,5 +426,27 @@ export function designGridTrackCount(value: string): number {
       value.replace(/\[[^\]]*\]/g, "").match(/(?:[^\s()]+\([^)]*\)|[^\s]+)/g) ??
       []
     ).length,
+  );
+}
+
+/** Whether a selected frame's own layer is clipped at the frame's edges on
+ * the canvas whatever its overflow says. A canvas frame is its own document,
+ * so nothing it holds is drawn outside it: its body, or a root layer filling
+ * the whole frame, always clips there. "Clip content" stays the layer's own
+ * overflow (it matters outside the canvas) and says so. */
+export function designFrameAlwaysClips(
+  details: DesignRuntimeNodeDetails,
+  frameSelected: boolean | undefined,
+): boolean {
+  if (!frameSelected) return false;
+  if (details.oid === DESIGN_RUNTIME_DOCUMENT_BODY_ID || details.tag === "body") return true;
+  const layout = details.layout;
+  if (!layout) return false;
+  const near = (left: number, right: number) => Math.abs(left - right) < 0.5;
+  return (
+    near(details.rect.x, 0) &&
+    near(details.rect.y, 0) &&
+    near(details.rect.width, layout.parentWidth) &&
+    near(details.rect.height, layout.parentHeight)
   );
 }

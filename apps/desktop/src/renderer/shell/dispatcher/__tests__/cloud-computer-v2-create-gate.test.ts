@@ -4,6 +4,8 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { CloudComputerRepository } from "../../../features/settings/cloud-computer-v2-create-gate";
 import { computerOrg, computerRepository, computerUser } from "./cloud-computer-fixtures";
 
+vi.mock("react", async original => ({ ...await original<typeof import("react")>(), useLayoutEffect: () => {} }));
+
 const state = vi.hoisted(() => ({
   cloudChannel: true,
   organizationRole: "admin",
@@ -104,11 +106,11 @@ describe("cloud create admission", () => {
     expect(gate.reason).toBeNull();
     expect(gate.repositories).toEqual([computerRepository("example", "project")]);
   });
-  it("fails closed while the exact organization is cold or its first read fails", () => {
+  it("keeps creation pending while the exact organization is cold or its first read fails", () => {
     state.repositories = undefined;
     expect(readGate().reason).toBe("Checking Cloud Computer…");
     state.error = new Error("offline");
-    expect(readGate().reason).toContain("could not be checked");
+    expect(readGate().reason).toBe("Checking Cloud Computer…");
   });
   it("keeps a confirmed list when revalidation fails", () => {
     state.repositories = [computerRepository("example", "project")];

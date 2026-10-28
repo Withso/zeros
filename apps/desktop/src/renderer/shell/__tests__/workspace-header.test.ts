@@ -2,9 +2,13 @@ import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { CloudWorkspaceDocument } from "../../platform/cloud-workspaces";
+import type { Project } from "../../state/projects-store";
+import type { RepoBranchCatalog } from "../../platform/git";
+import { createBranchCatalogCache } from "../../state/read-caches";
 
 const state = vi.hoisted(() => ({
   documents: {} as Record<string, CloudWorkspaceDocument>, reads: [] as string[], activePage: "workspace",
+  projects: {} as Record<string, Project>,
 }));
 vi.mock("../../features/team/team-store", () => ({ getOrganizationStoreGeneration: () => 1 }));
 vi.mock("../../state/cloud-workspace-catalog", () => ({
@@ -15,6 +19,7 @@ vi.mock("../../state/cloud-workspace-catalog", () => ({
   },
 }));
 vi.mock("../../state/use-active-workspace", () => ({ useActiveWorkspace: () => ({ workspace: null, folder: null }) }));
+vi.mock("../../state/use-projects", () => ({ useProjectForFolder: (folder: string) => state.projects[folder] ?? null }));
 vi.mock("../../state/workspace-store", () => ({ useWorkspaceStore: (select: (value: typeof state) => unknown) => select(state) }));
 vi.mock("../workspace-tabs", () => ({ workspaceLabel: () => "Local branch" }));
 vi.mock("../conversation/cloud-workspace-details", () => ({ CloudWorkspaceDetails: ({ folder }: { folder: string }) => createElement("button", { "aria-label": "Cloud workspace details", "data-folder": folder }) }));
@@ -29,17 +34,88 @@ const render = (props: Partial<Parameters<typeof WorkspaceHeader>[0]> = {}) => r
   children: createElement(WorkspaceHeader, { folder: first, name: "Engine branch", trailing: createElement("button", { "aria-label": "Summary" }), ...props }),
 }));
 beforeEach(() => {
+  createBranchCatalogCache.clear();
   state.documents = { [first]: { name: "Cloud feature" } as CloudWorkspaceDocument,
     [second]: { name: "Other organization" } as CloudWorkspaceDocument };
   state.reads = []; state.activePage = "workspace";
+  state.projects = Object.fromEntries(["/local/personal", "/organizations/example/local"].map(folder => [folder, {
+    id: folder, repoRoot: folder, name: "Repository", repoSlug: "example/repo",
+    originUrl: "https://github.com/example/repo.git", isGitRepository: true, addedAt: 0,
+  }]));
 });
 describe("workspace column header", () => {
+  it.each([null, "/local/personal", "/organizations/example/local", first, second])(
+    "gives %s native titlebar behavior on its first render",
+    folder => {
+      for (const readOnly of [false, true]) {
+        const html = render({ folder, readOnly, windowControlsInset: true });
+        const header = html.match(/<div[^>]*data-workspace-header=""[^>]*>/)?.[0];
+        expect(header).toContain('data-tauri-drag-region=""');
+        expect(html).toContain("data-window-controls-reserve");
+        expect(html.includes('aria-label="Summary"')).toBe(!readOnly);
+      }
+    },
+  );
+  it("retains native chrome through Local, organization-local and cloud owner switches", () => {
+    for (const folder of ["/local/personal", first, "/organizations/example/local", second, "/local/personal"]) {
+      expect(render({ folder })).toContain('data-tauri-drag-region=""');
+    }
+  });
   it.each(["/local/personal", "/organizations/example/local"])("keeps %s independent of cloud metadata and controls", folder => {
     const html = render({ folder, name: "Local feature", branch: true });
     expect(html).toContain("Local feature"); expect(html).toContain("lucide-git-branch");
     expect(html).toContain('aria-label="Summary"');
     expect(html).not.toContain("Cloud workspace details"); expect(html).not.toContain("Share workspace");
     expect(html).not.toContain("Port forwarding"); expect(state.reads).toEqual([]);
+  });
+  it.each(["/local/personal", "/organizations/example/local"])("labels unpublished Git in %s as Local before the workspace name", folder => {
+    state.projects[folder].originUrl = null;
+    const html = render({ folder, name: "Unpublished feature", branch: true });
+    expect(html).toContain("lucide-hard-drive");
+    expect(html).toContain(">Local<");
+    expect(html.indexOf(">Local<")).toBeLessThan(html.indexOf("Unpublished feature"));
+    expect(html).not.toContain("lucide-git-branch");
+    expect(html).toContain('aria-label="Summary"');
+    expect(state.reads).toEqual([]);
+  });
+  it("keeps plain folders and repositories on other hosts distinct from unpublished Git", () => {
+    const folder = "/local/personal";
+    state.projects[folder].originUrl = null;
+    state.projects[folder].isGitRepository = false;
+    expect(render({ folder })).toContain("lucide-folder");
+    expect(render({ folder })).not.toContain(">Local<");
+    state.projects[folder].isGitRepository = true;
+    state.projects[folder].originUrl = "https://gitlab.com/example/repo.git";
+    expect(render({ folder, branch: true })).toContain("lucide-git-branch");
+    expect(render({ folder, branch: true })).not.toContain(">Local<");
+  });
+  it("uses exact project metadata through publication and Local/cloud/Local switches", () => {
+    const folder = "/local/personal";
+    state.projects[folder].originUrl = null;
+    expect(render({ folder, branch: true })).toContain(">Local<");
+    expect(render({ folder: "/organizations/example/local", branch: true })).not.toContain(">Local<");
+    expect(render()).toContain("Cloud workspace details");
+    expect(render()).not.toContain(">Local<");
+    expect(render({ folder, branch: true })).toContain(">Local<");
+    state.projects[folder].originUrl = "git@github.com:example/repo.git";
+    expect(render({ folder, branch: true })).toContain("lucide-git-branch");
+    expect(render({ folder, branch: true })).not.toContain(">Local<");
+  });
+  it("does not label a configured GitHub remote as Local just because it is not named origin", () => {
+    const folder = "/local/personal";
+    state.projects[folder].originUrl = null;
+    createBranchCatalogCache.setData(JSON.stringify([folder, null]), {
+      effectiveRemote: "upstream",
+      remotes: [{ name: "upstream", url: "git@github.com:example/repo.git", isGitHub: true }],
+    } as RepoBranchCatalog);
+    const html = render({ folder, branch: true });
+    expect(html).toContain("lucide-git-branch");
+    expect(html).not.toContain(">Local<");
+    createBranchCatalogCache.invalidate(JSON.stringify([folder, null]));
+    createBranchCatalogCache.setError(JSON.stringify([folder, null]), new Error("Engine disconnected"));
+    expect(render({ folder, branch: true })).toContain("lucide-git-branch");
+    state.projects["/organizations/example/local"].originUrl = null;
+    expect(render({ folder: "/organizations/example/local", branch: true })).toContain(">Local<");
   });
   it("uses cloud metadata and renders the column actions once", () => {
     const html = render();

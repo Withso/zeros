@@ -676,6 +676,7 @@ window.__ZEROS_NATIVE__ = {
   },
 };
 setActiveBridge({
+  executionIdentity: { kind: "local", sidecar: "active" },
   status: "connected",
   on: listenToBridge,
   onStatusChange: () => () => {},

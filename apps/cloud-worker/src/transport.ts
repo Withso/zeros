@@ -1,5 +1,6 @@
-import type { CloudV2WorkerFrame } from "@zeros/protocol/cloud-v2-relay";
+import type { CloudV2WorkerFrame, CloudV2WorkerTiming } from "@zeros/protocol/cloud-v2-relay";
 import type { McpAuthorizationRequest } from "./mcp/gateway";
+import type { ReportGithubCheckout } from "./workspace/github-checkout";
 
 export type PromptOperation = "pull" | "ack" | "begin" | "outcome" | "stop-ack" | "stop";
 export type PromptRequest = (operation: PromptOperation, body: unknown, signal?: AbortSignal) => Promise<unknown>;
@@ -19,4 +20,7 @@ export interface Transport {
   /** Durable explicit work has its own typed/idempotent HTTPS channel. */
   promptRequest?: PromptRequest;
   mcpAuthorization?: McpAuthorizationRequest;
+  reportGithubCheckout?: ReportGithubCheckout;
+  /** Best-effort diagnostics, independent of strict authority/history frames. */
+  reportTiming?: (record: CloudV2WorkerTiming) => void;
 }

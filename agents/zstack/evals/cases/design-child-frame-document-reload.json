@@ -1,0 +1,9 @@
+{
+  "id": "design-child-frame-document-reload",
+  "kind": "replay",
+  "area": "desktop-design-runtime",
+  "fixedBy": "pr:744",
+  "symptom": "Drawing a frame inside a frame reloaded the whole document generation: the drawn rectangle vanished and the inspector read \"Nothing selected\" until the incoming runtime was ready; a queued earlier style commit later erased the pending child preview.",
+  "rule": "agents/zstack/changes/design-instant-editing-continuity.md: structural appends are painted and adopted in place through a structured, validated insert; a preview retires only through its own commit, a scoped cancel or a same-id replacement.",
+  "check": "pnpm exec vitest run --config vitest.config.ts packages/protocol/src/__tests__/design-runtime-insert.test.ts"
+}

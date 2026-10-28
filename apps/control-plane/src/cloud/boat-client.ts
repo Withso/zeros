@@ -139,6 +139,14 @@ export class BoatSnapshotExpiredError extends CloudProviderError {
   }
 }
 
+/** Boat refused a fork outright, for instance while its source is still being
+ * archived by a stop. Nothing was created; a later attempt can succeed. */
+export class BoatForkRefusedError extends CloudProviderError {
+  constructor() {
+    super("provider_request_failed", "Boat API request did not succeed", true, { httpStatus: 409 });
+  }
+}
+
 const MAX_RETRY_AFTER_MS = 300_000;
 // A retry cannot clear an hour or day start window; the longest wait paces it.
 const START_WINDOW_MS: Readonly<Record<string, number>> = {
@@ -346,6 +354,8 @@ export class BoatApiClient {
         if (response.status === 409 && ["boat_restoring", "boat_starting", "sandbox_starting"].includes(String(value?.code)))
           throw new BoatBootPendingError(retryOptions);
         if (response.status === 409 && value?.code === "snapshot_data_expired") throw new BoatSnapshotExpiredError();
+        if (response.status === 409 && value?.code === "fork_failed" && input.method === "POST" && /^\/sandboxes\/[A-Za-z0-9_-]+\/fork$/.test(path))
+          throw new BoatForkRefusedError();
         const createRefusal = (path === "/sandboxes" || /^\/sandboxes\/[A-Za-z0-9_-]+\/fork$/.test(path)) &&
           input.method === "POST" && Boolean(input.idempotencyKey) && response.status === 429;
         const assessment = createRefusal ? assessCreateRefusal(value) : null;

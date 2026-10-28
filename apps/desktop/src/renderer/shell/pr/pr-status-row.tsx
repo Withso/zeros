@@ -30,6 +30,22 @@ import { useWorkspaceHasChanges } from "./use-workspace-has-changes";
 import { isGithubDotComRemote } from "./github-url";
 import { isCloudWorkspace } from "../../platform/bridge/cloud-workspace-key";
 import { PanelHeader } from "@/renderer/shared/ui/primitives/panel-header";
+import { useRepositoryRemote } from "../../features/repositories/use-repository-remote";
+import { useCloudGithubPrDocument } from "../../platform/use-cloud-github-pr";
+import type { CloudGithubUnavailableReason } from "@zeros/protocol/cloud-github-connection";
+
+const cloudUnavailableCopy: Record<CloudGithubUnavailableReason, string> = {
+  "connection-required": "Connect GitHub in Settings → Integrations to use pull requests.",
+  "connection-expired": "Reconnect GitHub in Settings → Integrations to use pull requests.",
+  "connection-changed": "Your cloud GitHub connection changed. Refresh this workspace.",
+  "installation-required": "Grant the Zeros GitHub App access to this repository in GitHub.",
+  "installation-suspended": "Ask your GitHub organization owner to restore the Zeros GitHub App.",
+  "access-denied": "Your selected GitHub connection cannot access this repository. Check Settings → Integrations.",
+  "sso-required": "Authorize your selected GitHub connection for this organization's SSO.",
+  "source-review-required": "This workspace needs its original source access verified. Its files have been retained.",
+  "rate-limited": "GitHub rate limit reached. Try again shortly.",
+  "unavailable": "Couldn't verify GitHub access. Try again shortly.",
+};
 
 export function PrStatusRow({
   workspace,
@@ -47,17 +63,22 @@ export function PrStatusRow({
   // this row is the stable home for PR creation, so the button stays put).
   // Tri-state hook; this row wants the plain boolean (unknown → treated as
   // "nothing to PR yet", preserving the prior disabled-button behavior).
-  const hasChanges = useWorkspaceHasChanges(prWorkspace, active) ?? false;
-  // Cloud v2 serves no GitHub PR operations yet; the target branch still works.
   const cloud = isCloudWorkspace(prWorkspace?.path) || isCloudWorkspace(prWorkspace?.id);
+  const document = useCloudGithubPrDocument(prWorkspace?.id);
+  const cloudReady = document?.status === "ready" || document?.status === "busy";
+  const supported = document?.capabilities.githubPullRequests === 1;
+  const hasChanges = useWorkspaceHasChanges(prWorkspace, active && (!cloud || cloudReady)) ?? false;
+  const { remoteUrl } = useRepositoryRemote(prWorkspace?.repoRoot, originUrl, active && !cloud);
 
-  if (prWorkspace && cloud) {
+  if (prWorkspace && cloud && !supported) {
+    const message = document?.githubUnavailableReason ? cloudUnavailableCopy[document.githubUnavailableReason]
+      : "Pull requests aren't available for this cloud workspace.";
     return (
       <PanelHeader size="window" className="gap-2">
-        <TargetBranchButton workspace={prWorkspace} disabled={!nativeReady} />
+        <TargetBranchButton workspace={prWorkspace} disabled={!cloudReady} />
         <div className="flex-1" />
-        <span className="text-fg3 min-w-0 truncate text-xs">
-          Pull requests aren't available in cloud workspaces yet.
+        <span className="text-fg3 min-w-0 truncate text-xs" title={message}>
+          {message}
         </span>
       </PanelHeader>
     );
@@ -79,19 +100,17 @@ export function PrStatusRow({
       {prWorkspace ? (
         <>
           {/* Left: pick the base branch (remote-only). Right: Create PR. */}
-          <TargetBranchButton workspace={prWorkspace} disabled={!nativeReady} />
+          <TargetBranchButton workspace={prWorkspace} disabled={cloud ? !cloudReady : !nativeReady} />
           <div className="flex-1" />
-          {/* `originUrl` is only the project row's boot cache and is legitimately
-              blank for folders registered without one (bind-folder, quick start,
-              pre-backfill rows). Hide the button only when we positively know the
-              remote is a non-GitHub host; the engine re-resolves the real remote
-              per op, so a blank cache must not remove PR creation. */}
-          {nativeReady && (!originUrl || isGithubDotComRemote(originUrl)) && (
+          {/* Project capability refresh discovers added/removed remotes. A
+              missing remote must not advertise a GitHub-only action. */}
+          {(cloud ? supported : nativeReady) && isGithubDotComRemote(cloud ? originUrl : remoteUrl) && (
             <CreatePrButton
               workspace={prWorkspace}
-              originUrl={originUrl}
-              disabled={!hasChanges}
-              disabledReason="Nothing to PR yet — this branch has no changes"
+              originUrl={cloud ? originUrl : remoteUrl}
+              active={active}
+              disabled={!hasChanges || cloud && !cloudReady}
+              disabledReason={cloud && !cloudReady ? "Start this workspace to publish its branch" : "Nothing to PR yet — this branch has no changes"}
             />
           )}
         </>

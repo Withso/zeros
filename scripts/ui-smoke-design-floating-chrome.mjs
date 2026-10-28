@@ -1,4 +1,5 @@
-import { designCanvasPoint } from "./ui-smoke-design-helpers.mjs";
+import { designCanvasPoint, designFrameElementBox } from "./ui-smoke-design-helpers.mjs";
+import { runDesignLayerRenameSmoke } from "./ui-smoke-design-layer-rename.mjs";
 
 // Floating chrome uses real pointer and wheel events. Selection setup may use
 // the production selection workflow when the target is outside a virtual slice.
@@ -55,6 +56,7 @@ export async function runDesignFloatingChromeSmoke({ page, waitFor, check }) {
         };
         return {
           surface: rect("[data-design-workspace-surface]"),
+          area: rect("[data-design-canvas-area]"),
           canvas: rect("[data-design-canvas-viewport]"),
           pill: rect("[data-design-directory-header]"),
           panel: rect("[data-design-floating-panel]"),
@@ -70,21 +72,22 @@ export async function runDesignFloatingChromeSmoke({ page, waitFor, check }) {
     const checkGeometry = async (label, motion = false) => {
       const g = await geometry();
       check(
-        `${label}: canvas fills the Design surface under floating chrome`,
-        ["x", "y", "width", "height"].every((key) =>
-          near(g.canvas[key], g.surface[key]),
+        `${label}: canvas fills the content area below the secondary toolbar`,
+        g.area && ["x", "y", "width", "height"].every((key) =>
+          near(g.canvas[key], g.area[key]),
         ) && !g.overflow,
         JSON.stringify(g),
       );
       check(
-        `${label}: directory pill and stacked panel keep 8px edge insets`,
-        near(g.pill.x, g.canvas.x + 8) &&
-          near(g.pill.y, g.canvas.y + 8) &&
+        `${label}: full-width toolbar and panel attach to the workbench edges`,
+        near(g.pill.x, g.surface.x) &&
+          near(g.pill.y, g.surface.y) &&
+          near(g.pill.width, g.surface.width) &&
           near(g.pill.height, 40) &&
-          near(g.panel.right, g.canvas.right - 8) &&
-          near(g.panel.y, g.canvas.y + 8) &&
-          near(g.panel.bottom, g.canvas.bottom - 8) &&
-          g.pill.right + 8 <= g.panel.left &&
+          near(g.canvas.y, g.pill.bottom) &&
+          near(g.panel.right, g.canvas.right) &&
+          near(g.panel.y, g.canvas.y) &&
+          near(g.panel.bottom, g.canvas.bottom) &&
           near(g.layers.width, g.inspector.width) &&
           near(g.layers.bottom + 1, g.inspector.top),
       );
@@ -118,6 +121,30 @@ export async function runDesignFloatingChromeSmoke({ page, waitFor, check }) {
         );
     };
     await checkGeometry("1440x900");
+    check(
+      "attached properties panel has no rounded corners or floating shadow",
+      await panel.evaluate((element) => {
+        const style = getComputedStyle(element);
+        return style.borderRadius === "0px" && style.boxShadow === "none";
+      }),
+    );
+    check(
+      "panel toggle is at the left of the directory picker",
+      (await toggle.boundingBox()).x + (await toggle.boundingBox()).width <=
+        (await page.getByRole("button", { name: "Choose Design directory" }).boundingBox()).x,
+    );
+    for (const [separator, cursor] of [[split, "ns-resize"], [seam, "ew-resize"]]) {
+      await separator.hover();
+      await page.waitForTimeout(600);
+      check(
+        "Design separator hover shows only its resize cursor: " + cursor,
+        await separator.evaluate((element, expected) => {
+          const style = getComputedStyle(element);
+          const grip = getComputedStyle(element, "::before");
+          return style.cursor === expected && ["none", "normal"].includes(grip.content);
+        }, cursor) && !(await page.getByText("Drag to resize", { exact: true }).count()),
+      );
+    }
     check(
       "new canvases start at 25 percent with pan (64, 96)",
       await world.evaluate((element) => {
@@ -224,13 +251,13 @@ export async function runDesignFloatingChromeSmoke({ page, waitFor, check }) {
     );
     await page.mouse.up();
     check(
-      "width seam publishes its variable on the Design surface",
+      "width seam publishes its variable on the Design canvas area",
       near(await width(), 352) &&
         (await page.evaluate(
           () =>
             localStorage.getItem("zeros.design.style.width") === "352" &&
             document
-              .querySelector("[data-design-workspace-surface]")
+              .querySelector("[data-design-canvas-area]")
               .style.getPropertyValue("--zeros-design-style-width") ===
               "352px" &&
             document
@@ -415,7 +442,9 @@ export async function runDesignFloatingChromeSmoke({ page, waitFor, check }) {
       .locator(`[data-oid="${deepId}"]`);
     await deepElement.waitFor();
     const clickDeep = async () => {
-      const box = await deepElement.boundingBox();
+      const box = await designFrameElementBox(page.locator(
+        '[data-design-frame="pricing.html"] iframe[data-design-document-buffer="displayed"]',
+      ), deepElement);
       const point = { x: box.x + box.width / 2, y: box.y + box.height / 2 };
       const obstruction = await page.evaluate(({ x, y }) => {
         const target = document.elementFromPoint(x, y);
@@ -693,6 +722,7 @@ export async function runDesignFloatingChromeSmoke({ page, waitFor, check }) {
     );
     const empty = await designCanvasPoint(page, { empty: true });
     await page.mouse.click(empty.x, empty.y);
+    await runDesignLayerRenameSmoke({ page, waitFor, check });
   } finally {
     // Navigate away before restoring storage so debounced UI writes cannot
     // leak this fixture's preferences into later suites.

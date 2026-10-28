@@ -12,6 +12,7 @@ import {
   transferDesignNodeCached,
 } from "./state/design-workspace-cache";
 import { selectDesignFrame, selectDesignNode } from "./state/design-selection";
+import { designFrameViews, isPreparedDesignFrame, type DesignFrameView } from "./state/design-frame-view";
 import { designLayoutDrop } from "./design-layout-drag";
 import {
   designFrameRelocation,
@@ -24,16 +25,20 @@ import {
   useDesignWorkspaceUiStore,
 } from "./state/design-workspace-ui";
 
-export function designCanvasDropTargetFrame(
+type CanvasFrameGeometry = Pick<DesignCanvasFrameWire, "file" | "pageId" | "kind" | "x" | "y" | "width" | "height" | "z">;
+
+export function designCanvasDropTargetFrame<T extends CanvasFrameGeometry>(
   source: string,
-  frames: readonly DesignCanvasFrameWire[],
+  frames: readonly T[],
   rect: { x: number; y: number; width: number; height: number },
-): DesignCanvasFrameWire | undefined {
+): T | undefined {
   const center = { x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 };
+  const pageId = frames.find((frame) => frame.file === source)?.pageId;
   return frames
     .filter(
       (candidate) =>
         candidate.file !== source &&
+        (!pageId || candidate.pageId === pageId) &&
         center.x >= candidate.x &&
         center.y >= candidate.y &&
         center.x <= candidate.x + candidate.width &&
@@ -41,22 +46,24 @@ export function designCanvasDropTargetFrame(
         candidate.width * candidate.height > rect.width * rect.height,
     )
     .reduce<
-      DesignCanvasFrameWire | undefined
+      T | undefined
     >((top, candidate) => (!top || candidate.z >= top.z ? candidate : top), undefined);
 }
 
 /** The frame under a canvas point that a dragged frame or layer would join,
  * as in a design tool: the topmost one, never the dragged frame itself, and
  * never a text frame, which holds no layers. */
-export function designCanvasFrameAt(
+export function designCanvasFrameAt<T extends CanvasFrameGeometry>(
   source: string,
-  frames: readonly DesignCanvasFrameWire[],
+  frames: readonly T[],
   point: { x: number; y: number },
-): DesignCanvasFrameWire | undefined {
+): T | undefined {
+  const pageId = frames.find((frame) => frame.file === source)?.pageId;
   return frames
     .filter(
       (candidate) =>
         candidate.file !== source &&
+        (!pageId || candidate.pageId === pageId) &&
         candidate.kind !== "text" &&
         point.x >= candidate.x &&
         point.y >= candidate.y &&
@@ -64,12 +71,41 @@ export function designCanvasFrameAt(
         point.y <= candidate.y + candidate.height,
     )
     .reduce<
-      DesignCanvasFrameWire | undefined
+      T | undefined
     >((top, candidate) => (!top || candidate.z >= top.z ? candidate : top), undefined);
 }
 
 /** How long a release waits for a destination frame that just went live. */
 const DESTINATION_READY_MS = 2_000;
+
+/** Metadata reserves the drop target while its source prepares. A retained
+ * runtime or cover alone can never turn that target into editable authority. */
+async function preparedDropDestination(workspaceId: string, frame: DesignFrameView, isCurrent: () => boolean): Promise<DesignCanvasFrameWire | null> {
+  const initial = designWorkspaceSnapshotCache.peekSnapshot(workspaceId).data;
+  if (!initial?.preparation) return isPreparedDesignFrame(frame) ? frame : null;
+  const read = () => {
+    const snapshot = designWorkspaceSnapshotCache.peekSnapshot(workspaceId).data;
+    if (!isCurrent() || !snapshot || snapshot.directoryId !== initial.directoryId ||
+      snapshot.preparation?.epoch !== initial.preparation!.epoch) return null;
+    const current = designFrameViews(snapshot).find((candidate) => candidate.file === frame.file);
+    if (!current || snapshot.preparation.errors[frame.file]) return null;
+    return isPreparedDesignFrame(current) ? current : undefined;
+  };
+  const ready = read();
+  if (ready !== undefined) return ready;
+  return new Promise((resolve) => {
+    const finish = (value: DesignCanvasFrameWire | null) => {
+      clearTimeout(timer);
+      unsubscribe();
+      resolve(value);
+    };
+    const unsubscribe = designWorkspaceSnapshotCache.subscribe(workspaceId, () => {
+      const current = read();
+      if (current !== undefined) finish(current);
+    });
+    const timer = setTimeout(() => finish(null), DESTINATION_READY_MS);
+  });
+}
 
 /** One layer released outside its frame, as in a design tool: over another
  * frame it joins that frame at the pointer; over empty canvas it becomes a
@@ -83,7 +119,7 @@ export async function transferDesignLayerAtRelease(
   },
 ): Promise<boolean> {
   const { nest, ...transfer } = input;
-  const frames = designWorkspaceSnapshotCache.peekSnapshot(input.workspaceId).data?.frames ?? [];
+  const frames = designFrameViews(designWorkspaceSnapshotCache.peekSnapshot(input.workspaceId).data);
   const destination = designCanvasFrameAt(input.frame.file, frames, input.pointer);
   if (destination) nest?.(destination.file);
   try {
@@ -102,7 +138,7 @@ export async function transferDesignLayerOnCanvas(input: {
   workspaceId: string;
   folder: string;
   frame: DesignCanvasFrameWire;
-  frames: readonly DesignCanvasFrameWire[];
+  frames: readonly DesignFrameView[];
   details: DesignRuntimeNodeDetails;
   origin: { x: number; y: number };
   detach: boolean;
@@ -114,7 +150,7 @@ export async function transferDesignLayerOnCanvas(input: {
    * frame under it and the drop slot is resolved at it, as in a design tool. */
   pointer?: { x: number; y: number };
   /** The destination the gesture already highlighted, kept at release. */
-  destination?: DesignCanvasFrameWire;
+  destination?: DesignFrameView;
 }): Promise<boolean> {
   const { workspaceId, folder, frame, details, origin } = input;
   const owner = captureDesignPageOwner(workspaceId);
@@ -128,7 +164,7 @@ export async function transferDesignLayerOnCanvas(input: {
     x: origin.x + details.rect.width / 2,
     y: origin.y + details.rect.height / 2,
   };
-  const destination =
+  const describedDestination =
     input.destination ??
     (input.pointer
       ? designCanvasFrameAt(frame.file, input.frames, input.pointer)
@@ -137,19 +173,42 @@ export async function transferDesignLayerOnCanvas(input: {
           width: details.rect.width,
           height: details.rect.height,
         }));
-  if (!destination && !input.detach) return false;
+  if (!describedDestination && !input.detach) return false;
+  const destination = describedDestination
+    ? await preparedDropDestination(workspaceId, describedDestination, hasIntent)
+    : null;
+  if (!hasIntent() || input.canWrite?.() === false) return false;
+  const stillLoading = () => new Error(`${describedDestination!.title} is still loading. Try the move again in a moment.`);
+  if (describedDestination && !destination) throw stillLoading();
+  const destinationScope = designWorkspaceSnapshotCache.peekSnapshot(workspaceId).data;
+  const destinationEpoch = destinationScope?.preparation?.epoch;
+  const destinationDirectoryId = destinationScope?.directoryId;
   // A small frame paints a picture until the gesture asks for it; give its
   // document a moment to become ready before resolving the drop inside it.
   const targetRuntime = destination
     ? (designFrameRuntime(workspaceId, destination.file) ??
       (await waitForDesignFrameRuntime(workspaceId, destination.file, DESTINATION_READY_MS)))
     : null;
-  if (destination && !targetRuntime)
-    throw new Error(`${destination.title} is still loading. Try the move again in a moment.`);
+  if (destination && (!targetRuntime || targetRuntime.sourceVersion !== destination.sourceVersion))
+    throw stillLoading();
+  const destinationIsCurrent = () => {
+    if (!destination) return true;
+    if (designFrameRuntime(workspaceId, destination.file) !== targetRuntime) return false;
+    const snapshot = designWorkspaceSnapshotCache.peekSnapshot(workspaceId).data;
+    if (destinationEpoch !== undefined && (!snapshot || snapshot.directoryId !== destinationDirectoryId ||
+      snapshot.preparation?.epoch !== destinationEpoch)) return false;
+    if (!snapshot?.preparation) return true;
+    const current = designFrameViews(snapshot).find((candidate) => candidate.file === destination.file);
+    return !!current && isPreparedDesignFrame(current) &&
+      current.sourceVersion === destination.sourceVersion && current.frameId === destination.frameId &&
+      current.x === destination.x && current.y === destination.y &&
+      current.width === destination.width && current.height === destination.height && current.z === destination.z;
+  };
   const targets = targetRuntime?.supports("getLayoutTargets")
     ? await targetRuntime.getLayoutTargets()
     : [];
   if (!hasIntent() || input.canWrite?.() === false) return false;
+  if (!destinationIsCurrent()) throw stillLoading();
   // The moving layer is not in the destination's tree; its id must not
   // match one there (every frame's body shares the body id).
   const drop = destination
@@ -181,6 +240,7 @@ export async function transferDesignLayerOnCanvas(input: {
         ? null
         : undefined;
   if (!hasIntent() || input.canWrite?.() === false) return false;
+  if (!destinationIsCurrent()) throw stillLoading();
   // A body-rooted frame moves whole: its content keeps the frame's size.
   const wholeFrame = details.oid === DESIGN_RUNTIME_DOCUMENT_BODY_ID;
   if (wholeFrame && !destination) return false;
@@ -220,99 +280,108 @@ export async function transferDesignLayerOnCanvas(input: {
       : undefined;
   if (relocation && sourceRuntime?.sourceVersion !== details.sourceVersion)
     throw new Error("The source frame changed before the layer move.");
+  const transfer: Parameters<typeof transferDesignNodeCached>[1] = {
+    frame: frame.file,
+    pageId: owner.pageId,
+    sourceVersion: relocation
+      ? details.sourceVersion
+      : (sourceRuntime?.sourceVersion ?? frame.sourceVersion),
+    ...(relocation
+      ? {
+          relocation,
+          movementGuard: {
+            sourceVersion: details.sourceVersion,
+            geometry: {
+              x: frame.x,
+              y: frame.y,
+              w: frame.width,
+              h: frame.height,
+              z: frame.z,
+            },
+          },
+        }
+      : {}),
+    nodeId: details.oid,
+    ...(destination && drop
+      ? {
+          destinationFrame: destination.file,
+          destinationSourceVersion:
+            targetRuntime?.sourceVersion ?? destination.sourceVersion,
+          parentId: drop.parentId,
+          beforeId: drop.beforeId,
+          styles: drop.styles,
+          ...(parentStyles ? { parentStyles } : {}),
+          ...(frameBackground ? { frameBackground } : {}),
+          ...(relocation
+            ? {
+                destinationMovementGuard: {
+                  sourceVersion:
+                    targetRuntime?.sourceVersion ?? destination.sourceVersion,
+                  geometry: {
+                    x: destination.x,
+                    y: destination.y,
+                    w: destination.width,
+                    h: destination.height,
+                    z: destination.z,
+                  },
+                },
+              }
+            : {}),
+        }
+      : {}),
+    x: relocation ? origin.x : Math.round(origin.x),
+    y: relocation ? origin.y : Math.round(origin.y),
+    w: Math.max(
+      1,
+      relocation ? details.rect.width : Math.round(details.rect.width),
+    ),
+    h: Math.max(
+      1,
+      relocation ? details.rect.height : Math.round(details.rect.height),
+    ),
+    z: Math.max(0, ...input.frames.map((candidate) => candidate.z + 1)),
+  };
+  // The selection follows the move in the same render that publishes it. A
+  // whole frame leaves its page there; were the selection published after,
+  // page binding would first see it missing and the canvas reveal another.
+  let followedEvent: number | undefined;
+  const followTransfer = (reply: { frame: string; nodeId: string }) => {
+    const current = designWorkspaceView(workspaceId);
+    if (
+      !isCurrentDesignPageOwner(owner) ||
+      current.selectionEvent !== initialSelection.selectionEvent ||
+      input.isCurrent?.() === false ||
+      current.selectedFrame !== initialSelection.selectedFrame ||
+      current.selectedNodeId !== initialSelection.selectedNodeId ||
+      current.frameSelected !== initialSelection.frameSelected
+    )
+      return;
+    useDesignWorkspaceUiStore
+      .getState()
+      .setSelection(
+        workspaceId,
+        reply.frame,
+        destination ? reply.nodeId : null,
+        undefined,
+        { frameSelected: !destination, owner },
+      );
+    followedEvent = designWorkspaceView(workspaceId).selectionEvent;
+  };
   const result = await transferDesignNodeCached(
     workspaceId,
-    {
-      frame: frame.file,
-      pageId: owner.pageId,
-      sourceVersion: relocation
-        ? details.sourceVersion
-        : (sourceRuntime?.sourceVersion ?? frame.sourceVersion),
-      ...(relocation
-        ? {
-            relocation,
-            movementGuard: {
-              sourceVersion: details.sourceVersion,
-              geometry: {
-                x: frame.x,
-                y: frame.y,
-                w: frame.width,
-                h: frame.height,
-                z: frame.z,
-              },
-            },
-          }
-        : {}),
-      nodeId: details.oid,
-      ...(destination && drop
-        ? {
-            destinationFrame: destination.file,
-            destinationSourceVersion:
-              targetRuntime?.sourceVersion ?? destination.sourceVersion,
-            parentId: drop.parentId,
-            beforeId: drop.beforeId,
-            styles: drop.styles,
-            ...(parentStyles ? { parentStyles } : {}),
-            ...(frameBackground ? { frameBackground } : {}),
-            ...(relocation
-              ? {
-                  destinationMovementGuard: {
-                    sourceVersion:
-                      targetRuntime?.sourceVersion ?? destination.sourceVersion,
-                    geometry: {
-                      x: destination.x,
-                      y: destination.y,
-                      w: destination.width,
-                      h: destination.height,
-                      z: destination.z,
-                    },
-                  },
-                }
-              : {}),
-          }
-        : {}),
-      x: relocation ? origin.x : Math.round(origin.x),
-      y: relocation ? origin.y : Math.round(origin.y),
-      w: Math.max(
-        1,
-        relocation ? details.rect.width : Math.round(details.rect.width),
-      ),
-      h: Math.max(
-        1,
-        relocation ? details.rect.height : Math.round(details.rect.height),
-      ),
-      z: Math.max(0, ...input.frames.map((candidate) => candidate.z + 1)),
-    },
-    ...(relocation
-      ? ([() => hasIntent() && input.canWrite?.() !== false] as const)
-      : []),
+    transfer,
+    relocation || destinationEpoch !== undefined
+      ? () => hasIntent() && input.canWrite?.() !== false && destinationIsCurrent()
+      : undefined,
+    followTransfer,
   );
   const nextFrame = result.snapshot.frames.find(
     (candidate) => candidate.file === result.frame,
   );
   if (nextFrame) {
-    const current = designWorkspaceView(workspaceId);
-    const followsTransfer =
-      isCurrentDesignPageOwner(owner) &&
-      current.selectionEvent === initialSelection.selectionEvent &&
-      input.isCurrent?.() !== false &&
-      current.selectedFrame === initialSelection.selectedFrame &&
-      current.selectedNodeId === initialSelection.selectedNodeId &&
-      current.frameSelected === initialSelection.frameSelected;
-    if (followsTransfer)
-      useDesignWorkspaceUiStore
-        .getState()
-        .setSelection(
-          workspaceId,
-          nextFrame.file,
-          destination ? result.nodeId : null,
-          undefined,
-          { frameSelected: !destination, owner },
-        );
     // Selecting the destination makes it a live-frame priority. Its old
     // document cannot inspect the newly transferred node; wait for presentation.
-    if (!followsTransfer) return true;
-    const followedEvent = designWorkspaceView(workspaceId).selectionEvent;
+    if (followedEvent === undefined) return true;
     await input.presented?.(nextFrame);
     const selected = designWorkspaceView(workspaceId);
     if (

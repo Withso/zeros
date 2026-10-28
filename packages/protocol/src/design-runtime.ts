@@ -52,6 +52,9 @@ export interface DesignRuntimeTreeNode {
   oid: string;
   tag: string;
   name: string;
+  /** Explicit authored data-name, distinct from the inferred fallback name.
+   * Optional so trees from older runtimes remain readable. */
+  layerName?: string;
   text: string | null;
   visible: boolean;
   /** Lean computed layout identity used by Layers icons. Optional for runtime
@@ -436,10 +439,37 @@ export interface DesignRuntimeLayoutPreview {
   cancelMoves?: boolean;
 }
 
+/** A host-authored layer the engine appends to an existing parent (a frame
+ * drawn inside a frame). The runtime builds the element from these fields
+ * only; it never parses markup. */
+export interface DesignRuntimeNodeInsert {
+  nodeId: string;
+  parentId: string;
+  /** Null appends at the parent's end, exactly where the source edit lands. */
+  beforeId: string | null;
+  tag: "div";
+  /** The element's complete inline style attribute, as authored. */
+  style: string;
+}
+
+export interface DesignRuntimeInsertPreview {
+  inserts: DesignRuntimeNodeInsert[];
+  /** Parent styles the same transaction writes (a static parent becomes
+   * `position: relative`). */
+  updates?: DesignRuntimeStyleUpdate[];
+}
+
+export interface DesignRuntimeInsertPreviewResult {
+  snapshot: DesignRuntimeSnapshot;
+  details: DesignRuntimeNodeDetails[];
+}
+
 export interface DesignRuntimeGenerationPatch {
   moves?: DesignRuntimeNodeMove[];
   keyframes?: DesignRuntimeKeyframesUpdate[];
   tokens?: DesignRuntimeTokenUpdate[];
+  /** Opt-in (`previewInsert`): structural appends adopted in place. */
+  inserts?: DesignRuntimeNodeInsert[];
 }
 
 /** Result of adopting an engine-confirmed visual generation in-place. */
@@ -463,6 +493,7 @@ export type DesignRuntimeMethod =
   | "getLayoutTargets"
   | "previewLayout"
   | "restoreGeneration"
+  | "previewHistory"
   | "previewGeometry"
   | "commitStyles"
   | "previewText"
@@ -471,12 +502,21 @@ export type DesignRuntimeMethod =
   | "clearPreviewStyles"
   | "captureScreenshot"
   /** Opt-in: advertised only to a host whose handshake requests it. */
-  | "previewStylesheet";
+  | "previewStylesheet"
+  | "setPlayback"
+  | "previewInsert"
+  | "clearPreviewInserts";
 
 /** Methods a runtime advertises only when the host's handshake lists them
  * in `features`, so a host that predates them still accepts the runtime's
  * capabilities. */
-export const DESIGN_RUNTIME_OPT_IN_METHODS = ["previewStylesheet"] as const;
+export const DESIGN_RUNTIME_OPT_IN_METHODS = ["previewStylesheet", "setPlayback", "previewInsert", "clearPreviewInserts", "previewHistory"] as const;
+
+export interface DesignRuntimePlaybackStopped {
+  sourceVersion: string;
+  sessionId: string;
+  reason: "escape" | "hidden";
+}
 
 /** Largest in-flight stylesheet text `previewStylesheet` applies. */
 export const MAX_DESIGN_RUNTIME_PREVIEW_STYLESHEET_CHARS = 4 * 1024 * 1024;
@@ -492,6 +532,8 @@ export interface DesignRuntimeStylesheetPreviewResult {
 export interface DesignRuntimeCapabilities {
   methods: DesignRuntimeMethod[];
   cancellation: true;
+  /** Capture cancellation responds only after decode/encoding cleanup. */
+  captureCompletion?: true;
   typedErrors: true;
   sourcePinned: true;
   maxStyleProperties: number;
@@ -526,6 +568,7 @@ const DESIGN_RUNTIME_METHODS = new Set<DesignRuntimeMethod>([
   "getLayoutTargets",
   "previewLayout",
   "restoreGeneration",
+  "previewHistory",
   "previewGeometry",
   "commitStyles",
   "previewText",
@@ -534,6 +577,9 @@ const DESIGN_RUNTIME_METHODS = new Set<DesignRuntimeMethod>([
   "clearPreviewStyles",
   "captureScreenshot",
   "previewStylesheet",
+  "setPlayback",
+  "previewInsert",
+  "clearPreviewInserts",
 ]);
 
 export interface DesignRuntimeHostRequest {
@@ -605,6 +651,14 @@ export type DesignRuntimeFrameMessage =
       type: "event";
       event: "mutation";
       payload: DesignRuntimeSnapshot;
+    }
+  | {
+      protocol: typeof DESIGN_RUNTIME_PROTOCOL;
+      version: typeof DESIGN_RUNTIME_VERSION;
+      type: "event";
+      /** Sent only after an opted-in host starts a playback session. */
+      event: "playbackStopped";
+      payload: DesignRuntimePlaybackStopped;
     };
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -780,6 +834,8 @@ function isRuntimeTree(value: unknown): value is DesignRuntimeTreeNode[] {
       typeof current.value.oid !== "string" ||
       typeof current.value.tag !== "string" ||
       typeof current.value.name !== "string" ||
+      (current.value.layerName !== undefined &&
+        (typeof current.value.layerName !== "string" || current.value.layerName.length > 80)) ||
       (current.value.text !== null && typeof current.value.text !== "string") ||
       typeof current.value.visible !== "boolean" ||
       (current.value.display !== undefined &&
@@ -896,13 +952,18 @@ export function isDesignRuntimeFrameMessage(
   }
   if (
     message.type !== "event" ||
-    (message.event !== "ready" && message.event !== "mutation") ||
+    (message.event !== "ready" && message.event !== "mutation" && message.event !== "playbackStopped") ||
     !isRecord(message.payload)
   ) {
     return false;
   }
   if (message.event === "mutation") return isRuntimeSnapshot(message.payload);
   const payload = message.payload;
+  if (message.event === "playbackStopped") {
+    return isSourceVersion(payload.sourceVersion) &&
+      typeof payload.sessionId === "string" && payload.sessionId.length > 0 && payload.sessionId.length <= 128 &&
+      (payload.reason === "escape" || payload.reason === "hidden");
+  }
   return (
     isSourceVersion(payload.sourceVersion) &&
     isRuntimeCapabilities(payload.capabilities) &&
@@ -987,7 +1048,7 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
   ];
   // Advertised only to a host whose handshake asks for them, so a host that
   // predates a method still accepts these capabilities.
-  var OPT_IN_METHODS = ["previewStylesheet"];
+  var OPT_IN_METHODS = ["previewStylesheet", "setPlayback", "previewInsert", "clearPreviewInserts", "previewHistory"];
   var enabledOptInMethods = [];
   var MAX_PREVIEW_STYLESHEET_CHARS = 4194304;
   // Everything one frame of direct manipulation paints from. Deliberately tiny:
@@ -1014,6 +1075,7 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
   var previewStyleOverridesByOid = new Map();
   var previewTextOverridesByOid = new Map();
   var previewAnimationsByOid = new Map();
+  var playbackSessionId = null;
   var committedKeyframesByName = new Map();
   var committedTokensByKey = new Map();
   var committedGenerationStyle = null;
@@ -1035,6 +1097,7 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
   var disposed = false;
   var activeRequests = new Set();
   var cancelledRequests = new Set();
+  var activeCaptures = new Map();
   var trustedParentOrigin = null;
   try {
     trustedParentOrigin = document.referrer
@@ -1044,11 +1107,10 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
     trustedParentOrigin = null;
   }
 
-  /** The design surface is an editor, not a prototype player. Authored CSS
-   * animations and transitions must not continuously repaint or flash during
-   * selection/style commits; the explicit previewMotion path owns the only
-   * animations allowed to run in Motion mode. */
+  /** Passive frames stay still. Whole-frame Play and the Motion editor's
+   * explicit preview are the only owners allowed to run authored motion. */
   function suspendAuthoredMotion() {
+    if (playbackSessionId !== null) return;
     stillAuthoredTimelines();
     if (typeof document.getAnimations !== "function") return;
     var previews = new Set();
@@ -1070,6 +1132,7 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
    * first write has cleared the document there is no reason to re-walk it sixty
    * times a second. */
   function suspendElementMotion(element) {
+    if (playbackSessionId !== null) return;
     if (typeof element.getAnimations !== "function") {
       suspendAuthoredMotion();
       return;
@@ -1084,8 +1147,66 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
     });
   }
 
+  function stopPlayback(reason) {
+    var sessionId = playbackSessionId;
+    playbackSessionId = null;
+    suspendAuthoredMotion();
+    if (sessionId !== null && reason) {
+      event("playbackStopped", { sourceVersion: SOURCE_VERSION, sessionId: sessionId, reason: reason });
+    }
+  }
+
+  function setPlayback(sessionId, playing) {
+    if (typeof sessionId !== "string" || !sessionId.length || sessionId.length > 128 || typeof playing !== "boolean") {
+      throw typedError("BAD_REQUEST", "Invalid frame playback session.", false);
+    }
+    if (playing && document.hidden) throw typedError("BAD_REQUEST", "A hidden frame cannot play.", false);
+    if (playing && playbackSessionId !== sessionId) {
+      playbackSessionId = sessionId;
+      previewAnimationsByOid.forEach(function (animation) { animation.cancel(); });
+      previewAnimationsByOid.clear();
+      // Cancelling CSSAnimation objects for editing does not make them start
+      // again on its own. A synchronous display reset creates fresh authored
+      // timelines, including pseudo-elements and inline !important rules,
+      // without changing the source, timing, cascade or any painted frame.
+      withoutObservedMutations(function () {
+        var root = document.documentElement;
+        var style = root.getAttribute("style");
+        try {
+          // A discrete display transition must not postpone this reset.
+          root.style.setProperty("transition-property", "none", "important");
+          root.style.setProperty("display", "none", "important");
+          root.getBoundingClientRect();
+          // Flush Chromium's lazy CSSOM attribute before restoring absence;
+          // otherwise removeAttribute can leave an empty style attribute.
+          root.getAttribute("style");
+        } finally {
+          if (style === null) root.removeAttribute("style");
+          else root.setAttribute("style", style);
+        }
+        root.getBoundingClientRect();
+      });
+      document.querySelectorAll("svg").forEach(function (svg) {
+        if (svg.ownerSVGElement || typeof svg.unpauseAnimations !== "function") return;
+        try { svg.setCurrentTime(0); svg.unpauseAnimations(); } catch (_error) {}
+      });
+      document.querySelectorAll("marquee").forEach(function (marquee) {
+        try { if (typeof marquee.start === "function") marquee.start(); } catch (_error) {}
+      });
+      document.querySelectorAll("video[autoplay], audio[autoplay]").forEach(function (media) {
+        try {
+          var started = media.play();
+          if (started && typeof started.catch === "function") started.catch(function () {});
+        } catch (_error) {}
+      });
+    } else if (!playing && playbackSessionId === sessionId) {
+      stopPlayback();
+    }
+    return { playing: playbackSessionId !== null, sessionId: playbackSessionId };
+  }
+
   function post(message) {
-    if (parentPort && !disposed) parentPort.postMessage(message);
+    if (parentPort && (!disposed || message.type === "response")) parentPort.postMessage(message);
   }
 
   function event(name, payload) {
@@ -1141,6 +1262,7 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
     return {
       methods: METHODS.concat(enabledOptInMethods),
       cancellation: true,
+      captureCompletion: true,
       typedErrors: true,
       sourcePinned: true,
       maxStyleProperties: 64,
@@ -1218,10 +1340,14 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
     };
   }
 
+  function layerNameOf(element) {
+    return (element.getAttribute("data-name") || "").replace(/\s+/g, " ").trim().slice(0, 80) || undefined;
+  }
+
   function nameOf(element) {
     var explicit =
+      layerNameOf(element) ||
       element.getAttribute("aria-label") ||
-      element.getAttribute("data-name") ||
       element.getAttribute("title") ||
       element.id ||
       directText(element);
@@ -2087,6 +2213,7 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
       oid: oid,
       tag: element.tagName.toLowerCase(),
       name: nameOf(element),
+      layerName: layerNameOf(element),
       text: directText(element),
       visible: visibleOf(element, computed),
       display: computed.display || "",
@@ -3388,8 +3515,144 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
    * leave a partially adopted canvas.
    */
   var previewMovesByOid = new Map();
+  var previewInsertsByOid = new Map();
   var generationHistory = [];
   var paintedSourceVersion = SOURCE_VERSION;
+  var historyPresentationTarget = null;
+  var historyPresentationMeasure = [];
+  var INSERT_PARENT_REJECTED = /^(AREA|BASE|BR|COL|COLGROUP|EMBED|HR|IMG|INPUT|LINK|META|PARAM|SOURCE|TRACK|WBR|SELECT|OPTION|OPTGROUP|TABLE|THEAD|TBODY|TFOOT|TR|UL|OL|DL|SCRIPT|STYLE|TEMPLATE|TEXTAREA|IFRAME|SVG)$/i;
+
+  /** Validate every insert before the first write. A previewed element is the
+   * same node a later commit confirms; any other existing id is a conflict. */
+  function prepareInserts(inserts) {
+    if (inserts === undefined) return [];
+    if (enabledOptInMethods.indexOf("previewInsert") < 0) throw new Error("Layer inserts require previewInsert.");
+    if (!Array.isArray(inserts) || inserts.length < 1 || inserts.length > 8) throw new Error("Invalid layer inserts.");
+    var seen = new Set();
+    return inserts.map(function (insert) {
+      if (!insert || typeof insert !== "object" || Array.isArray(insert) ||
+          typeof insert.nodeId !== "string" || !/^[A-Za-z0-9_-]{1,128}$/.test(insert.nodeId) ||
+          typeof insert.parentId !== "string" || insert.tag !== "div" ||
+          typeof insert.style !== "string" || insert.style.length > 4096 ||
+          (insert.beforeId !== null && typeof insert.beforeId !== "string")) {
+        throw new Error("Invalid layer insert.");
+      }
+      if (seen.has(insert.nodeId)) throw new Error("Duplicate layer insert.");
+      seen.add(insert.nodeId);
+      var parent = elementForOid(insert.parentId);
+      if (parent === document.documentElement || INSERT_PARENT_REJECTED.test(parent.tagName)) {
+        throw new Error("This layer cannot contain a frame.");
+      }
+      var before = insert.beforeId ? elementForOid(insert.beforeId) : null;
+      if (before && before.parentElement !== parent) throw new Error("Invalid layer insert position.");
+      var previewed = previewInsertsByOid.get(insert.nodeId) || null;
+      ensureElementMap();
+      var existing = elementsByOid.get(insert.nodeId);
+      if (existing && (!previewed || existing !== previewed.element)) {
+        throw new Error("Layer already exists: " + insert.nodeId);
+      }
+      return { oid: insert.nodeId, parent: parent, before: before, style: insert.style, previewed: previewed };
+    });
+  }
+
+  function insertedElement(plan) {
+    var element = document.createElement("div");
+    element.setAttribute("data-oid", plan.oid);
+    element.setAttribute("style", plan.style);
+    return element;
+  }
+
+  /** Restore only the parent properties an insert preview wrote and no other
+   * live insert preview still claims; other previews keep their baseline. */
+  function restoreInsertParentStyles(parentStyles) {
+    parentStyles.forEach(function (entry) {
+      var element = elementsByOid.get(entry.oid);
+      var priorByProperty = previewStyleOverridesByOid.get(entry.oid);
+      if (!element || !priorByProperty) return;
+      var claimed = new Set();
+      previewInsertsByOid.forEach(function (preview) {
+        preview.parentStyles.forEach(function (other) {
+          if (other.oid === entry.oid) other.properties.forEach(function (property) { claimed.add(property); });
+        });
+      });
+      entry.properties.forEach(function (property) {
+        var prior = priorByProperty.get(property);
+        if (!prior || claimed.has(property)) return;
+        restorePreviewStyle(element, prior);
+        priorByProperty.delete(property);
+      });
+      if (priorByProperty.size === 0) previewStyleOverridesByOid.delete(entry.oid);
+    });
+  }
+
+  /** Remove previewed inserts: the named ones, or all of them. A preview lives
+   * until its own commit adopts it, its author cancels it, or a preview with
+   * the same id replaces it; another generation's commit never retires it. */
+  function clearInsertPreviews(only) {
+    if (!previewInsertsByOid.size) return false;
+    var removed = false;
+    withoutObservedMutations(function () {
+      Array.from(previewInsertsByOid.entries()).reverse().forEach(function (entry) {
+        if (only && !only.has(entry[0])) return;
+        var preview = entry[1];
+        if (preview.element.parentNode) preview.element.parentNode.removeChild(preview.element);
+        previewInsertsByOid.delete(entry[0]);
+        restoreInsertParentStyles(preview.parentStyles);
+        removed = true;
+      });
+    });
+    // The tree changed without an observed mutation: advance the semantic
+    // generation so hosts never mistake this snapshot for the previous one.
+    if (removed) {
+      refreshElementMap();
+      revision += 1;
+    }
+    return removed;
+  }
+
+  /** Paint a drawn layer before the engine confirms it. Latest preview wins;
+   * a commit with the same inserts adopts these exact elements. */
+  function previewInsert(args) {
+    if (!args || typeof args !== "object" || Array.isArray(args)) throw new Error("Invalid insert preview.");
+    var updates = args.updates === undefined ? [] : args.updates;
+    if (!Array.isArray(updates) || updates.length > 8) throw new Error("Invalid insert parent styles.");
+    if (Array.isArray(args.inserts)) {
+      clearInsertPreviews(new Set(args.inserts.map(function (insert) { return insert && insert.nodeId; })));
+    }
+    var plans = prepareInserts(args.inserts);
+    if (previewInsertsByOid.size + plans.length > 8) throw new Error("Too many pending layer inserts.");
+    var parentStyles = updates.map(function (update) {
+      if (!update || typeof update !== "object" || typeof update.nodeId !== "string" ||
+          !update.styles || typeof update.styles !== "object" || Array.isArray(update.styles)) {
+        throw new Error("Invalid insert parent style.");
+      }
+      return { oid: update.nodeId, element: elementForOid(update.nodeId), styles: update.styles, properties: Object.keys(update.styles) };
+    });
+    var inserted = [];
+    withoutObservedMutations(function () {
+      parentStyles.forEach(function (entry) { applyPreviewStyles(entry.element, entry.oid, entry.styles); });
+      plans.forEach(function (plan) {
+        var element = insertedElement(plan);
+        plan.parent.insertBefore(element, plan.before);
+        // Every insert of the batch claims the parent styles it needs, so
+        // cancelling one keeps them while a sibling preview remains.
+        previewInsertsByOid.set(plan.oid, { element: element, parentStyles: parentStyles });
+        inserted.push(element);
+      });
+    });
+    revision += 1;
+    var nextSnapshot = snapshot();
+    return { snapshot: nextSnapshot, details: inserted.map(function (element) { return detailsOf(element); }) };
+  }
+
+  function clearPreviewInserts(nodeIds) {
+    if (nodeIds !== undefined && (!Array.isArray(nodeIds) || nodeIds.length > 8 ||
+        nodeIds.some(function (oid) { return typeof oid !== "string"; }))) {
+      throw new Error("Invalid insert preview ids.");
+    }
+    clearInsertPreviews(nodeIds === undefined ? null : new Set(nodeIds));
+    return { snapshot: snapshot() };
+  }
   var dragPaintStyle = null;
 
   function suppressDragPaint(oid) {
@@ -3516,7 +3779,7 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
     return measured.map(function (element) { return geometryOf(element, args.children !== false); });
   }
 
-  function restoreGeneration(target, commit, measure) {
+  function restoreGeneration(target, commit, measure, readback) {
     if (!/^[a-f0-9]{24}$/.test(target)) throw new Error("Invalid history generation.");
     var versions = generationHistory.length ? [generationHistory[0].from].concat(generationHistory.map(function (entry) { return entry.to; })) : [SOURCE_VERSION];
     var touched = new Set();
@@ -3531,14 +3794,19 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
       var entry = generationHistory[index];
       if (!entry) continue;
       entry.nodeIds.forEach(function (oid) { touched.add(oid); });
-      if (entry.moves.length || entry.changes.some(function (change) { return /^(display|visibility|flex-direction|flex-flow|all)$/.test(change.property); })) treeUnchanged = false;
+      if (entry.moves.length || (entry.inserts && entry.inserts.length) || entry.changes.some(function (change) { return /^(display|visibility|flex-direction|flex-flow|all)$/.test(change.property); })) treeUnchanged = false;
     }
     withoutObservedMutations(function () {
       cancelMovePreviews();
+      if (clearInsertPreviews()) treeUnchanged = false;
       Array.from(previewStyleOverridesByOid.keys()).forEach(clearPreviewStyles);
       var apply = function (entry, forward) {
-        if (entry.moves.length || entry.changes.some(function (change) { return /^(display|visibility|flex-direction|flex-flow|all)$/.test(change.property); })) treeUnchanged = false;
+        var inserts = entry.inserts || [];
+        if (entry.moves.length || inserts.length || entry.changes.some(function (change) { return /^(display|visibility|flex-direction|flex-flow|all)$/.test(change.property); })) treeUnchanged = false;
         entry.nodeIds.forEach(function (oid) { touched.add(oid); });
+        if (forward) inserts.forEach(function (insert) {
+          insert.parent.insertBefore(insert.element, insert.before && insert.before.parentNode === insert.parent ? insert.before : null);
+        });
         var moves = forward ? entry.moves : entry.moves.slice().reverse();
         moves.forEach(function (move) {
           var parent = forward ? move.parent : move.oldParent;
@@ -3551,6 +3819,9 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
           if (value) change.target.setProperty(change.property, value, priority);
           else change.target.removeProperty(change.property);
         });
+        if (!forward) inserts.slice().reverse().forEach(function (insert) {
+          if (insert.element.parentNode) insert.element.parentNode.removeChild(insert.element);
+        });
       };
       while (from > to) { from -= 1; apply(generationHistory[from], false); }
       while (from < to) { apply(generationHistory[from], true); from += 1; }
@@ -3561,8 +3832,14 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
       window.__zerosDesignSourceVersion = SOURCE_VERSION;
     }
     revision += 1;
+    if (readback === false) return null;
     var nextSnapshot = treeUnchanged ? styleOnlySnapshot() : snapshot();
-    var details = Array.from(touched).slice(0, 256).map(function (oid) { return detailsOf(elementForOid(oid)); });
+    // An undone insert is no longer in the document; report only live nodes.
+    var details = Array.from(touched).slice(0, 256).flatMap(function (oid) {
+      ensureElementMap();
+      var element = elementsByOid.get(oid);
+      return element && element.isConnected ? [detailsOf(element)] : [];
+    });
     // History can move boxes it never touched (the selection among them). The
     // host names those it shows so they are measured in this same round trip;
     // a box the restored generation no longer contains is simply omitted.
@@ -3582,16 +3859,53 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
       details: details };
   }
 
+  // A pending Undo is presentation, never the next save's baseline. Authority
+  // is applied and measured on its own source, then the latest inverse is
+  // repainted in this same task, before the browser can display the save.
+  function withHistoryPresentation(commit) {
+    var target = historyPresentationTarget;
+    if (target !== null) restoreGeneration(SOURCE_VERSION, false, undefined, false);
+    try {
+      var result = commit();
+      if (target !== null) {
+        var measured = new Set(result.details.map(function (detail) { return detail.oid; }));
+        historyPresentationMeasure.forEach(function (oid) {
+          if (measured.has(oid)) return;
+          try { result.details.push(detailsOf(elementForOid(oid))); } catch (_missingSelection) {}
+        });
+      }
+      return result;
+    } finally {
+      if (target !== null) {
+        try { restoreGeneration(target, false, undefined, false); }
+        catch (_expiredHistory) { historyPresentationTarget = null; historyPresentationMeasure = []; }
+      }
+    }
+  }
+
+  function previewHistory(args) {
+    if (args.targetSourceVersion !== null &&
+        (typeof args.targetSourceVersion !== "string" || !/^[a-f0-9]{24}$/.test(args.targetSourceVersion)))
+      throw new Error("Invalid history presentation generation.");
+    var target = args.targetSourceVersion;
+    var measure = Array.isArray(args.measure) ? args.measure.filter(function (oid) { return typeof oid === "string"; }).slice(0, 64) : [];
+    var result = restoreGeneration(target === null ? SOURCE_VERSION : target, false, measure, target !== null);
+    historyPresentationTarget = target;
+    historyPresentationMeasure = target === null ? [] : measure;
+    return result;
+  }
+
   function commitStyles(updates, nextSourceVersion, patch) {
     if (!/^[a-f0-9]{24}$/.test(nextSourceVersion)) {
       throw new Error("nextSourceVersion must be a valid source generation.");
     }
     var moves = prepareMoves(patch && patch.moves);
+    var inserts = prepareInserts(patch ? patch.inserts : undefined);
     var generationPatch = prepareGenerationPatch(patch && { keyframes: patch.keyframes, tokens: patch.tokens });
     if (
       !Array.isArray(updates) ||
       updates.length > ${DESIGN_LAYOUT_CHILD_LIMIT + 1} ||
-      (updates.length < 1 && !generationPatch.changed && moves.length === 0)
+      (updates.length < 1 && !generationPatch.changed && moves.length === 0 && inserts.length === 0)
     ) {
       throw new Error("A commit must contain styles or a generation patch.");
     }
@@ -3658,6 +3972,7 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
       return { oid: oid, element: element, preview: preview, plans: plans };
     });
     var changes = [];
+    var historyInserts = [];
     var historyMoves = moves.map(function (move) {
       var prior = previewMovesByOid.get(move.oid);
       return Object.assign({}, move, { oldParent: prior ? prior.parent : move.element.parentElement, oldBefore: prior ? prior.before : move.element.nextSibling });
@@ -3720,14 +4035,23 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
           currentParent.insertBefore(move.element, currentBefore);
         }
       });
+      inserts.forEach(function (plan) {
+        var element = plan.previewed ? plan.previewed.element : insertedElement(plan);
+        if (plan.previewed) previewInsertsByOid.delete(plan.oid);
+        if (element.parentElement !== plan.parent || (plan.before && element.nextElementSibling !== plan.before)) {
+          plan.parent.insertBefore(element, plan.before);
+        }
+        historyInserts.push({ oid: plan.oid, element: element, parent: plan.parent, before: plan.before });
+      });
       if (generationPatch.changed) applyCommittedGenerationPatch(generationPatch);
     });
+    if (historyInserts.length) refreshElementMap();
     if (generationPatch.changed) generationHistory = [];
     else {
       var branch = generationHistory.findIndex(function (entry) { return entry.from === SOURCE_VERSION; });
       if (branch >= 0) generationHistory.splice(branch);
-      generationHistory.push({ from: SOURCE_VERSION, to: nextSourceVersion, changes: changes, moves: historyMoves, nodeIds: prepared.map(function (update) { return update.oid; }).concat(moves.map(function (move) { return move.oid; })) });
-      var bytes = function (entry) { return entry.changes.reduce(function (total, change) { return total + (change.before.length + change.after.length + change.property.length) * 2 + 128; }, 0) + entry.moves.length * 256; };
+      generationHistory.push({ from: SOURCE_VERSION, to: nextSourceVersion, changes: changes, moves: historyMoves, inserts: historyInserts, nodeIds: prepared.map(function (update) { return update.oid; }).concat(moves.map(function (move) { return move.oid; })).concat(historyInserts.map(function (insert) { return insert.oid; })) });
+      var bytes = function (entry) { return entry.changes.reduce(function (total, change) { return total + (change.before.length + change.after.length + change.property.length) * 2 + 128; }, 0) + entry.moves.length * 256 + (entry.inserts ? entry.inserts.length : 0) * 256; };
       var historyBytes = generationHistory.reduce(function (total, entry) { return total + bytes(entry); }, 0);
       while (generationHistory.length > 64 || historyBytes > 4 * 1024 * 1024) historyBytes -= bytes(generationHistory.shift());
     }
@@ -3736,7 +4060,7 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
     revision += 1;
     SOURCE_VERSION = nextSourceVersion;
     window.__zerosDesignSourceVersion = SOURCE_VERSION;
-    var treeUnchanged = historyMoves.length === 0 && prepared.every(function (update) {
+    var treeUnchanged = historyMoves.length === 0 && historyInserts.length === 0 && prepared.every(function (update) {
       return update.plans.every(function (plan) {
         return plan.property !== "display" &&
           plan.property !== "visibility" &&
@@ -3754,7 +4078,7 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
         : nextSnapshot,
       details: prepared.map(function (update) {
         return detailsOf(elementForOid(update.oid));
-      })
+      }).concat(historyInserts.map(function (insert) { return detailsOf(insert.element); }))
     };
   }
 
@@ -3977,9 +4301,10 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
   // camera moves request multi-megapixel viewport tiles; the synchronous
   // toDataURL path would stall live previews and animations for the whole
   // encode, so it remains only as the fallback for engines without toBlob.
-  function encodeCanvasPng(canvas, onDataUrl, onError) {
+  function encodeCanvasPng(canvas, onDataUrl, onError, operation) {
     var fallback = function () {
       try {
+        if (operation.cancelled) throw typedError("CANCELLED", "Capture cancelled.", false);
         onDataUrl(canvas.toDataURL("image/png"));
       } catch (error) {
         onError(error);
@@ -3994,11 +4319,17 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
     }
     try {
       canvas.toBlob(function (blob) {
+        if (operation.cancelled) {
+          onError(typedError("CANCELLED", "Capture cancelled.", false));
+          return;
+        }
         if (!blob) {
           fallback();
           return;
         }
         var reader = new FileReader();
+        operation.cancelEncoding = function () { reader.abort(); };
+        reader.onabort = function () { onError(typedError("CANCELLED", "Capture cancelled.", false)); };
         reader.onload = function () {
           var result = reader.result;
           if (typeof result === "string" && result.indexOf("data:") === 0) {
@@ -4015,7 +4346,7 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
     }
   }
 
-  function captureScreenshot(args) {
+  function captureScreenshot(args, requestId) {
     var captureSourceVersion = SOURCE_VERSION;
     var requestedCrop = args && typeof args.crop === "object" ? args.crop : null;
     var requestedOutput = args && typeof args.outputSize === "object"
@@ -4095,39 +4426,130 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
     scale = Math.max(0.01, scale);
     var outputWidth = Math.max(1, Math.round(crop.width * scale));
     var outputHeight = Math.max(1, Math.round(crop.height * scale));
+    // A cropped output still decodes a whole-document SVG. Reserve for that
+    // image, the canvas/encoder and source strings before cloning the DOM.
+    if (viewportWidth * viewportHeight * 8 + outputWidth * outputHeight * 16 + 128 * 1024 * 1024 > 256 * 1024 * 1024) {
+      throw typedError("BAD_REQUEST", "Capture temporary image budget exceeded.", false);
+    }
+    if (disposed || cancelledRequests.has(requestId)) throw typedError("CANCELLED", "Capture cancelled.", false);
     var clone = document.documentElement.cloneNode(true);
     clone.setAttribute("xmlns", "http://www.w3.org/1999/xhtml");
+    // A document propagates a solid BODY background to its transparent root
+    // canvas. Inside foreignObject, BODY instead paints only its own box.
+    // Reproduce that canvas paint without adding it twice for translucent fills.
+    var captureBody = document.body;
+    var clonedCaptureBody = clone.querySelector("body");
+    var captureRootStyle = getComputedStyle(document.documentElement);
+    var captureBodyStyle = captureBody ? getComputedStyle(captureBody) : null;
+    function captureColorIsTransparent(color) {
+      return color === "transparent" || /^rgba\([^)]*,\s*0(?:\.0+)?\s*\)$/.test(color) ||
+        /\/\s*0(?:\.0+)?%?\s*\)$/.test(color);
+    }
+    if (captureBody && clonedCaptureBody && captureBodyStyle &&
+        captureRootStyle.backgroundImage === "none" &&
+        captureColorIsTransparent(captureRootStyle.backgroundColor) &&
+        captureBodyStyle.backgroundImage === "none" &&
+        !captureColorIsTransparent(captureBodyStyle.backgroundColor) &&
+        captureBodyStyle.display !== "none" &&
+        captureRootStyle.contain === "none" && captureBodyStyle.contain === "none" &&
+        captureRootStyle.contentVisibility === "visible" && captureBodyStyle.contentVisibility === "visible") {
+      // Changing the root/BODY paint must not change descendants that
+      // explicitly inherit it. Preserve immediate children and both elements'
+      // pseudo colors; deeper inheritance then follows those values.
+      for (var captureChildIndex = 0; captureChildIndex < captureBody.children.length; captureChildIndex += 1) {
+        var clonedCaptureChild = clonedCaptureBody.children[captureChildIndex];
+        if (clonedCaptureChild && clonedCaptureChild.style) {
+          clonedCaptureChild.style.setProperty("background-color", getComputedStyle(captureBody.children[captureChildIndex]).backgroundColor, "important");
+        }
+      }
+      var capturePseudoCss = "";
+      [document.documentElement, captureBody].forEach(function (element) {
+        ["::before", "::after", "::first-line", "::first-letter"].forEach(function (pseudo) {
+          var pseudoStyle = getComputedStyle(element, pseudo);
+          if (pseudo === "::first-line" || pseudo === "::first-letter" ||
+              (pseudoStyle.content !== "none" && pseudoStyle.content !== "normal")) {
+            capturePseudoCss += element.localName + pseudo + "{background-color:" + pseudoStyle.backgroundColor + "!important}";
+          }
+        });
+      });
+      if (capturePseudoCss) {
+        var capturePseudoStyle = document.createElement("style");
+        // The first important layer outranks authored important rules, even
+        // ID selectors in later layers. An anonymous layer cannot collide
+        // with an authored name. This stylesheet exists only in the clone.
+        capturePseudoStyle.textContent = "@layer{" + capturePseudoCss + "}";
+        var captureStyleParent = clone.querySelector("head") || clone;
+        captureStyleParent.insertBefore(capturePseudoStyle, captureStyleParent.firstChild);
+      }
+      clone.style.setProperty("background-color", captureBodyStyle.backgroundColor, "important");
+      clonedCaptureBody.style.setProperty("background-color", "transparent", "important");
+    }
+
     var scripts = clone.querySelectorAll("script");
     for (var index = scripts.length - 1; index >= 0; index -= 1) {
       scripts[index].remove();
     }
-    clone.style.width = viewportWidth + "px";
-    clone.style.height = viewportHeight + "px";
-    clone.style.overflow = "hidden";
+    scripts = null;
+    clone.style.setProperty("width", viewportWidth + "px", "important");
+    clone.style.setProperty("height", viewportHeight + "px", "important");
+    clone.style.setProperty("overflow", "hidden", "important");
     var serialized = new XMLSerializer().serializeToString(clone);
+    clone = null;
+    if (serialized.length > 16 * 1024 * 1024) throw typedError("BAD_REQUEST", "Capture source budget exceeded.", false);
+    // Authored svg/foreignObject rules must never move or resize the capture's
+    // own containers. Keep inherited font/color and :root rules intact: copying
+    // every computed property would freeze currentColor before descendants can
+    // inherit it. Inline important geometry also outranks authored CSS layers.
+    var captureContainerStyle = "display:block!important;position:static!important;inset:auto!important;x:0!important;y:0!important;" +
+      "margin:0!important;padding:0!important;border:0!important;" +
+      "transform:none!important;translate:none!important;rotate:none!important;scale:none!important;zoom:1!important;" +
+      "min-width:0!important;min-height:0!important;max-width:none!important;max-height:none!important;" +
+      "width:" + viewportWidth + "px!important;height:" + viewportHeight + "px!important;";
     var svg =
       "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"" + viewportWidth +
-      "\" height=\"" + viewportHeight + "\" viewBox=\"0 0 " + viewportWidth +
+      "\" height=\"" + viewportHeight + "\" style=\"" + captureContainerStyle + "\" viewBox=\"0 0 " + viewportWidth +
       " " + viewportHeight + "\"><foreignObject x=\"0\" y=\"0\" width=\"" + viewportWidth +
-      "\" height=\"" + viewportHeight + "\">" + serialized +
+      "\" height=\"" + viewportHeight + "\" style=\"" + captureContainerStyle + "\">" + serialized +
       "</foreignObject></svg>";
     // A blob URL makes Chromium mark a foreignObject canvas as origin-unclean.
     // A self-contained data URL preserves the same pixels without tainting.
     var url = "data:image/svg+xml;charset=utf-8," + encodeURIComponent(svg);
+    serialized = "";
+    svg = "";
     return new Promise(function (resolve, reject) {
       var settled = false;
       var image = new Image();
-      var timer = window.setTimeout(function () {
-        if (settled) return;
-        settled = true;
-        reject(new Error("Frame screenshot timed out."));
-      }, 8000);
-      image.onload = function () {
+      var canvas = null;
+      var encoding = false;
+      var operation = { cancelled: false, cancelEncoding: null, cancel: function () {
+        operation.cancelled = true;
+        if (operation.cancelEncoding) operation.cancelEncoding();
+        else if (!encoding) finish(typedError("CANCELLED", "Capture cancelled.", false));
+        // toBlob cannot be interrupted. Keep ownership until its callback.
+      } };
+      activeCaptures.set(requestId, operation);
+      function finish(error, result) {
         if (settled) return;
         settled = true;
         window.clearTimeout(timer);
+        image.onload = null;
+        image.onerror = null;
+        image.src = "";
+        if (canvas) { canvas.width = 0; canvas.height = 0; canvas = null; }
+        operation.cancelEncoding = null;
+        activeCaptures.delete(requestId);
+        if (operation.cancelled) reject(typedError("CANCELLED", "Capture cancelled.", false));
+        else if (error) reject(error);
+        else resolve(result);
+      }
+      var timer = window.setTimeout(function () {
+        operation.cancel();
+      }, 8000);
+      image.onload = function () {
+        if (settled) return;
         try {
-          var canvas = document.createElement("canvas");
+          if (operation.cancelled) { operation.cancel(); return; }
+          canvas = document.createElement("canvas");
           canvas.width = outputWidth;
           canvas.height = outputHeight;
           var context = canvas.getContext("2d");
@@ -4136,8 +4558,9 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
             image, documentX, documentY, crop.width, crop.height,
             0, 0, outputWidth, outputHeight
           );
+          encoding = true;
           encodeCanvasPng(canvas, function (dataUrl) {
-            resolve({
+            finish(null, {
               sourceVersion: captureSourceVersion,
               dataUrl: dataUrl,
               mimeType: "image/png",
@@ -4146,22 +4569,21 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
               scale: scale,
               nodeId: nodeId
             });
-          }, reject);
+          }, function (error) { finish(error); }, operation);
         } catch (error) {
-          reject(error);
+          finish(error);
         }
       };
       image.onerror = function () {
         if (settled) return;
-        settled = true;
-        window.clearTimeout(timer);
-        reject(new Error("Frame screenshot could not be rendered."));
+        finish(new Error("Frame screenshot could not be rendered."));
       };
       image.src = url;
+      url = "";
     });
   }
 
-  function handle(method, args) {
+  function handle(method, args, requestId) {
     switch (method) {
       case "getSnapshot":
         return snapshot();
@@ -4187,11 +4609,16 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
       case "previewLayout":
         return previewLayout(args);
       case "restoreGeneration":
-        return restoreGeneration(args.targetSourceVersion, args.commit === true, args.measure);
+        return args.commit === true
+          ? withHistoryPresentation(function () { return restoreGeneration(args.targetSourceVersion, true, args.measure); })
+          : restoreGeneration(args.targetSourceVersion, false, args.measure);
+      case "previewHistory":
+        if (enabledOptInMethods.indexOf("previewHistory") < 0) throw new Error("Unknown design runtime method: previewHistory");
+        return previewHistory(args);
       case "previewGeometry":
         return previewGeometry(args.nodeId, args.styles, args.children);
       case "commitStyles":
-        return commitStyles(args.updates, args.nextSourceVersion, args.patch);
+        return withHistoryPresentation(function () { return commitStyles(args.updates, args.nextSourceVersion, args.patch); });
       case "previewText":
         return previewText(args.nodeId, args.text);
       case "clearPreviewText":
@@ -4201,12 +4628,27 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
       case "clearPreviewStyles":
         return clearPreviewStyles(args.nodeId);
       case "captureScreenshot":
-        return captureScreenshot(args);
+        return captureScreenshot(args, requestId);
+      case "setPlayback":
+        if (enabledOptInMethods.indexOf("setPlayback") < 0) {
+          throw new Error("Unknown design runtime method: setPlayback");
+        }
+        return setPlayback(args.sessionId, args.playing);
       case "previewStylesheet":
         if (enabledOptInMethods.indexOf("previewStylesheet") < 0) {
           throw new Error("Unknown design runtime method: previewStylesheet");
         }
         return previewStylesheet(args.file, args.css === null ? null : args.css);
+      case "previewInsert":
+        if (enabledOptInMethods.indexOf("previewInsert") < 0) {
+          throw new Error("Unknown design runtime method: previewInsert");
+        }
+        return previewInsert(args);
+      case "clearPreviewInserts":
+        if (enabledOptInMethods.indexOf("clearPreviewInserts") < 0) {
+          throw new Error("Unknown design runtime method: clearPreviewInserts");
+        }
+        return clearPreviewInserts(args.nodeIds);
       default:
         throw new Error("Unknown design runtime method: " + method);
     }
@@ -4214,6 +4656,7 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
 
   function teardown() {
     if (disposed) return;
+    stopPlayback();
     disposed = true;
     if (mutationTimer !== null) {
       window.clearTimeout(mutationTimer);
@@ -4247,10 +4690,14 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
     previewAnimationsByOid.forEach(function (animation) { animation.cancel(); });
     previewAnimationsByOid.clear();
     visibilityOverridesByOid.clear();
-    activeRequests.clear();
-    cancelledRequests.clear();
+    activeRequests.forEach(function (id) { cancelledRequests.add(id); });
+    activeCaptures.forEach(function (capture) { capture.cancel(); });
     window.removeEventListener("message", receiveHandshake);
-    if (parentPort) {
+    finishTeardown();
+  }
+
+  function finishTeardown() {
+    if (disposed && activeRequests.size === 0 && parentPort) {
       parentPort.onmessage = null;
       parentPort.close();
       parentPort = null;
@@ -4259,6 +4706,16 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
 
   function receivePortMessage(portEvent) {
     var message = portEvent.data;
+    // A style/history commit may advance the generation while an old capture
+    // finishes. Its private-port cancellation still owns the original job.
+    if (message && message.protocol === PROTOCOL && message.version === VERSION && message.type === "cancel") {
+      if (activeRequests.has(message.requestId)) {
+        cancelledRequests.add(message.requestId);
+        var capture = activeCaptures.get(message.requestId);
+        if (capture) capture.cancel();
+      }
+      return;
+    }
     if (
       !message ||
       message.protocol !== PROTOCOL ||
@@ -4282,13 +4739,8 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
       teardown();
       return;
     }
-    if (message.type === "cancel") {
-      if (activeRequests.has(message.requestId)) {
-        cancelledRequests.add(message.requestId);
-      }
-      return;
-    }
     if (
+      disposed ||
       message.type !== "request" ||
       typeof message.requestId !== "string" ||
       typeof message.method !== "string" ||
@@ -4308,15 +4760,17 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
     }
     activeRequests.add(message.requestId);
     Promise.resolve()
-      .then(function () { return handle(message.method, message.args); })
+      .then(function () { return handle(message.method, message.args, message.requestId); })
       .then(
         function (result) {
-          if (!cancelledRequests.has(message.requestId)) {
+          if (message.method === "captureScreenshot" && cancelledRequests.has(message.requestId)) {
+            response(message.requestId, false, typedError("CANCELLED", "Capture cancelled.", false));
+          } else if (!cancelledRequests.has(message.requestId)) {
             response(message.requestId, true, result);
           }
         },
         function (error) {
-          if (!cancelledRequests.has(message.requestId)) {
+          if (message.method === "captureScreenshot" || !cancelledRequests.has(message.requestId)) {
             response(message.requestId, false, error);
           }
         }
@@ -4324,6 +4778,7 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
       .then(function () {
         activeRequests.delete(message.requestId);
         cancelledRequests.delete(message.requestId);
+        finishTeardown();
       });
   }
 
@@ -4381,9 +4836,44 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
   }, true);
   document.addEventListener("play", function (playEvent) {
     var target = playEvent.target;
-    if (disposed || !target || typeof target.pause !== "function") return;
+    if (playbackSessionId !== null || !target || typeof target.pause !== "function") return;
     try { target.pause(); } catch (_error) {}
   }, true);
+  document.addEventListener("transitionrun", function (startEvent) {
+    var target = startEvent.target;
+    if (target && typeof target.getAnimations === "function") suspendElementMotion(target);
+  }, true);
+  document.addEventListener("keydown", function (keyEvent) {
+    if (playbackSessionId === null || keyEvent.key !== "Escape") return;
+    keyEvent.preventDefault();
+    stopPlayback("escape");
+  }, true);
+  document.addEventListener("visibilitychange", function () {
+    if (document.hidden) stopPlayback("hidden");
+  });
+  // Native controls and same-document anchors work in Play. The sandbox's
+  // navigation/network policy remains intact even for an iframe's own URL.
+  function containNavigation(clickEvent) {
+    var target = clickEvent.target;
+    var link = target && typeof target.closest === "function" ? target.closest("a, area") : null;
+    if (!link) return;
+    clickEvent.preventDefault();
+    if (playbackSessionId === null || clickEvent.type !== "click") return;
+    var href = link.getAttribute("href") || "";
+    if (href.charAt(0) !== "#") return;
+    try {
+      var destination = document.getElementById(decodeURIComponent(href.slice(1)));
+      if (destination) destination.scrollIntoView();
+    } catch (_error) {}
+  }
+  document.addEventListener("click", containNavigation, true);
+  document.addEventListener("auxclick", containNavigation, true);
+  document.addEventListener("contextmenu", containNavigation, true);
+  document.addEventListener("submit", function (submitEvent) { submitEvent.preventDefault(); }, true);
+  // Dropping a file or URL onto a browsing document can navigate that iframe
+  // without clicking a link. Playback never turns it into a navigation target.
+  document.addEventListener("dragover", function (dragEvent) { dragEvent.preventDefault(); }, true);
+  document.addEventListener("drop", function (dropEvent) { dropEvent.preventDefault(); }, true);
 
   function publishMutation() {
     mutationTimer = null;
@@ -4409,6 +4899,9 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
         break;
       }
     }
+    // Native controls in a playback document are ephemeral; the host restores
+    // the saved editing document on exit instead of publishing these changes.
+    if (playbackSessionId !== null) return;
     if (mutationTimer !== null) window.clearTimeout(mutationTimer);
     mutationTimer = window.setTimeout(publishMutation, MUTATION_DEBOUNCE_MS);
   });
@@ -4422,5 +4915,12 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
     });
     observing = true;
   }
-  startObserving();
+  // The runtime is inserted in the head. Parser-created body nodes are the
+  // initial saved document, not edits that can invalidate a just-started
+  // gesture when the mutation debounce fires after readiness.
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", startObserving, { once: true });
+  } else {
+    startObserving();
+  }
 })();`;

@@ -4,7 +4,8 @@ import type { Workspace } from "../../platform/git";
 
 const gitChangeLineCounts = vi.fn();
 
-vi.mock("../../platform/git", () => ({
+vi.mock("../../platform/git", async original => ({
+  ...await original<typeof import("../../platform/git")>(),
   gitChangeLineCounts: (workspaceId: string) =>
     gitChangeLineCounts(workspaceId),
 }));

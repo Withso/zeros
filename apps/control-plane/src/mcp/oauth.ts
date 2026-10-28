@@ -234,7 +234,8 @@ export class McpOAuth {
     this.refreshes.set(key, { force, promise: flight });
     return flight;
   }
-  async authorizationForRepository(org: string, user: string, repository: string, id: string, force = false, admittedWorkspace = false): Promise<McpAuthorization> {
+  async authorizationForRepository(org: string, user: string, repository: string, id: string, force = false,
+    admittedWorkspace?: Parameters<McpStore["resolve"]>[3]): Promise<McpAuthorization> {
     id = uuid(id);
     const selected = async () => {
       if (!(await this.store.resolve(org, user, repository, admittedWorkspace)).some(server => server.id === id)) throw mcpNotFound();

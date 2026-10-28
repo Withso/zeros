@@ -5803,12 +5803,14 @@ export function AgentSessionsProvider({
         if (slot) {
           getStore().patchSession(chatId, {
             transcriptState: "loading",
+            transcriptReadError: null,
             transcriptDirty: false,
           });
         } else {
           getStore().setSession(chatId, {
             ...BLANK,
             transcriptState: "loading",
+            transcriptReadError: null,
           });
         }
         // Paint the last confirmed window (memory now, disk shortly)
@@ -5893,6 +5895,7 @@ export function AgentSessionsProvider({
             messages: confirmed,
             leadingPrompt: confirmed[0]?.id === deduped[0]?.id ? page.leadingPrompt ?? null : fresh.leadingPrompt,
             transcriptState: "resident",
+            transcriptReadError: null,
             transcriptDirty: false,
             transcriptPresentation: null,
             transcriptContentSignatures: undefined,
@@ -5918,8 +5921,14 @@ export function AgentSessionsProvider({
           ) {
             return;
           }
+          // Detach or a live update may have retired this loading slot before
+          // the provider's request map is pruned. Never recreate it on failure.
+          if (getStore().sessions[chatId]?.transcriptState !== "loading") return;
           // Rejected read (timeout / engine swap mid-request) — same rule as the
           // disconnected case above: retry on the next connected edge.
+          // Retain an actual read failure for the visible chat's bounded
+          // recovery policy; elapsed time alone is never a failure signal.
+          getStore().patchSession(chatId, { transcriptReadError: "Couldn't load chat history." });
           pendingHydratesRef.current.add(chatId);
           console.warn("[Zeros agent-history] hydrate failed:", err);
         }

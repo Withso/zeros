@@ -1,4 +1,5 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
+import postcss from "postcss";
 
 import {
   DesignStyleAmbiguityError,
@@ -15,6 +16,24 @@ import { createDesignWebDocumentState } from "../revision";
 import { FRAME_CSS, FRAME_HTML, webState } from "./fixtures";
 
 describe("CSS provenance and mutation", () => {
+  it.each(["</style>", "</StYlE >", "</STYLE\t>"])("refuses HTML raw-text termination in embedded CSS: %s", delimiter => {
+    const html = '<html><head><style>[data-oid="card"] { --label:"safe"; }</style></head><body><div data-oid="card"></div></body></html>';
+    const state = createDesignWebDocumentState({ documentId: "css-boundary", entryFile: "index.html", files: { "index.html": html } });
+    expect(() => mutateDesignNodeStyles(state, { nodeId: "card", scope: "rule", styles: { "--label": `"${delimiter}<div>injected</div>"` } })).toThrow(/style|HTML/i);
+    expect(state.files["index.html"]).toBe(html);
+  });
+
+  it("takes the explicit inline path without enumerating unrelated stylesheet rules", () => {
+    const state = createDesignWebDocumentState({
+      documentId: "inline-fast-path", entryFile: "index.html",
+      files: { "index.html": FRAME_HTML, "styles.css": FRAME_CSS, "unrelated.css": "/* unrelated-sheet-marker */ .other { color: red; }" },
+    });
+    const parse = vi.spyOn(postcss, "parse");
+    try {
+      expect(mutateDesignNodeStyles(state, { nodeId: "card", scope: "inline", styles: { color: "blue" } }).decisions[0]?.appliedScope).toBe("inline");
+      expect(parse.mock.calls.some(([source]) => String(source).includes("unrelated-sheet-marker"))).toBe(false);
+    } finally { parse.mockRestore(); }
+  });
   it.each(["inline", "auto", "rule"] as const)(
     "validates %s styles against the containing page frame",
     (scope) => {
@@ -281,6 +300,98 @@ describe("CSS provenance and mutation", () => {
         ],
       },
     ]);
+  });
+
+  it("projects keyframes from HTML style blocks without losing neighboring valid styles", () => {
+    const html = `<!doctype html><html><head>
+      <!-- <style>@keyframes comment { from { opacity: 0 } to { opacity: 1 } }</style> -->
+      <style>.broken {</style>
+      <style media="screen">
+        @keyframes wash {
+          0%, 100% { background-position: 0% 50%; --Accent: warm; }
+          50% { background-position: 100% 50%; --Accent: cool; }
+        }
+      </style>
+    </head><body><main></main><style>
+      @media (prefers-reduced-motion: no-preference) {
+        @keyframes reveal { from { opacity: 0 } to { opacity: 1 } }
+      }
+    </style></body></html>`;
+    expect(readDesignKeyframes({ "page/home.html": html })).toEqual([
+      {
+        file: "page/home.html",
+        name: "wash",
+        keyframes: [
+          { offset: 0, styles: { "background-position": "0% 50%", "--Accent": "warm" } },
+          { offset: 50, styles: { "background-position": "100% 50%", "--Accent": "cool" } },
+          { offset: 100, styles: { "background-position": "0% 50%", "--Accent": "warm" } },
+        ],
+      },
+      {
+        file: "page/home.html",
+        name: "reveal",
+        keyframes: [
+          { offset: 0, styles: { opacity: "0" } },
+          { offset: 100, styles: { opacity: "1" } },
+        ],
+      },
+    ]);
+  });
+
+  it("replaces an inline keyframe block without rewriting its HTML or neighboring CSS", () => {
+    const before = '<!doctype html><html><head><style>body { margin: 0 }</style>\n<style media="screen">/* keep */\n@media (min-width: 1px) {\n';
+    const original = "@keyframes wash { from { opacity: .6 } to { opacity: 1 } }";
+    const after = '\n}\nmain { color: navy }\n</style></head><body><main data-oid="root">Keep &amp; preserve</main></body></html>';
+    const keyframes = [
+      { offset: 0, styles: { "background-image": "url(../assets/start.png)" } },
+      { offset: 100, styles: { "background-image": "url(../assets/end.png)" } },
+    ];
+    const changed = mutateDesignKeyframes(
+      `${before}${original}${after}`,
+      { name: "wash", keyframes },
+      "page/home.html",
+    );
+    expect(changed.startsWith(before)).toBe(true);
+    expect(changed.endsWith(after)).toBe(true);
+    expect(changed.match(/@keyframes wash/g)).toHaveLength(1);
+    expect(readDesignKeyframes({ "page/home.html": changed })).toEqual([
+      { file: "page/home.html", name: "wash", keyframes },
+    ]);
+  });
+
+  it("refuses duplicate inline keyframe names and never appends raw CSS to HTML", () => {
+    const block = "@keyframes wash { from { opacity: 0 } to { opacity: 1 } }";
+    const input = {
+      name: "wash",
+      keyframes: [
+        { offset: 0, styles: { opacity: ".5" } },
+        { offset: 100, styles: { opacity: "1" } },
+      ],
+    };
+    expect(() => mutateDesignKeyframes(
+      `<html><head><style>${block}</style><style>${block}</style></head></html>`,
+      input,
+      "home.html",
+    )).toThrow(/ambiguous/i);
+    expect(() => mutateDesignKeyframes(
+      "<html><head><style>body { margin: 0 }</style></head></html>",
+      input,
+      "home.html",
+    )).toThrow(/not found/i);
+  });
+
+  it("refuses keyframe values that close the containing HTML style block", () => {
+    expect(() => mutateDesignKeyframes(
+      '<html><head><style>@keyframes wash { from { opacity: 0 } to { opacity: 1 } }</style></head></html>',
+      {
+        name: "wash",
+        keyframes: [
+          { offset: 0, styles: { content: '"</style><div>injected</div>"' } },
+          { offset: 100, styles: { content: '"safe"' } },
+        ],
+      },
+      "home.html",
+    )).toThrow(/close.*style/i);
   });
 
   it("identifies one exact authored rule without calling it computed", () => {

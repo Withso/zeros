@@ -327,6 +327,12 @@ describe("WorkspaceService", () => {
       expect(r.kind).toBe("text");
       expect(r.content).toContain("trunk content");
 
+      fs.writeFileSync(path.join(repoB, "clip.mp4"), Buffer.from([0, 1, 2]));
+      await expect(svc.handle("file.read", { workspaceId: repoB, path: "clip.mp4", includeVideo: true }, { remote: false }))
+        .resolves.toMatchObject({ kind: "video", path: "clip.mp4", dataUrl: "data:video/mp4;base64,AAEC" });
+      await expect(svc.handle("file.read", { workspaceId: repoB, path: "clip.mp4" }, { remote: false }))
+        .resolves.toMatchObject({ kind: "binary" });
+
       const t = (await svc.handle(
         "file.tree",
         { workspaceId: repoB },
@@ -1579,6 +1585,12 @@ describe("WorkspaceService", () => {
             api as unknown as { sessions: Map<string, unknown> }
           ).sessions;
           expect(sessions.has(`frame:${second.frame.file}`)).toBe(false);
+          const restoredPage = await svc.handle("design.history.undo", target);
+          expect(restoredPage).toMatchObject({ historyPageId: page.page.id });
+          if (deletion === "empty page")
+            expect(await svc.handle("design.history.undo", target)).toMatchObject({ historyFrame: second.frame.file });
+          await svc.handle("design.history.undo", target); // Frame B creation.
+          await svc.handle("design.history.undo", target); // Page B creation.
         } else {
           await svc.handle("design.history.undo", target);
           await deleteDesignPage(design.path, page.page.id, []);
@@ -1591,6 +1603,9 @@ describe("WorkspaceService", () => {
             }
           ).designHistoryState(design.path);
           expect(history.redo).toEqual([]);
+          // Native removal also invalidates the older page-create target.
+          // It must not block all preceding document history indefinitely.
+          await expect(svc.handle("design.history.undo", target)).rejects.toThrow(/page.*not found|page.*missing/i);
         }
         const undone = (await svc.handle("design.history.undo", target)) as {
           historyFrame: string;
@@ -4946,7 +4961,18 @@ describe("WorkspaceService", () => {
           },
         ],
       }),
-    ).resolves.toEqual({ ok: true });
+    ).resolves.toMatchObject({
+      ok: true,
+      sourceVersion: response.mutation.frame.sourceVersion,
+      violations: [{
+        file: frame.file,
+        oid: main!.oid!,
+        severity: "warning",
+        ruleId: "overflow",
+        message: "Visible overflow.",
+        fix: "Constrain the element.",
+      }],
+    });
     expect(
       getDesignRuntimeAudit(
         workspace.path,
@@ -5138,6 +5164,7 @@ describe("WorkspaceService", () => {
       "messages.search",
       "file.tree",
       "file.read",
+      "file.readRange",
       "git.status",
       "git.changeCounts",
       "git.changeLineCounts",

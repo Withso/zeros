@@ -1,9 +1,10 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import type { DesignHeadlessRenderer } from "@zeros/design-web";
 import {
   DESIGN_CAPTURE_MAX_DIMENSION,
   DESIGN_CAPTURE_PNG_BYTES,
   DESIGN_CAPTURE_TIMEOUT_MS,
+  DesignCaptureCleanupUnconfirmedError,
   designCaptureReplySchema,
 } from "@zeros/protocol/design-capture";
 import { assertDesignCapturePng } from "./capture-service";
@@ -115,19 +116,63 @@ export function createDesignCaptureRenderer(
           } : {}),
       colorScheme: viewport.colorScheme,
     });
-    const post = () => fetchImpl(`${config.url}/capture`, {
+    const post = async () => {
+      signal?.throwIfAborted();
+      const jobId = randomUUID();
+      const deadline = String(Date.now() + DESIGN_CAPTURE_TIMEOUT_MS);
+      let settled = false;
+      let cancellation: Promise<void> | null = null;
+      const transport = new AbortController();
+      const cancel = () => {
+        cancellation ??= fetchImpl(`${config.url}/capture/${jobId}`, {
+          method: "DELETE", headers: { Authorization: `Bearer ${config.token}`, "X-Zeros-Design-Deadline": deadline }, redirect: "error",
+          signal: AbortSignal.timeout(DESIGN_CAPTURE_TIMEOUT_MS + 5_000),
+        }).then(async (response) => {
+          if (!response.ok) { await response.body?.cancel(); throw new DesignCaptureCleanupUnconfirmedError(); }
+          if ((await response.json() as { settled?: unknown }).settled !== true) throw new DesignCaptureCleanupUnconfirmedError();
+        }).finally(() => {
+          // Cleanup acknowledgement owns cancellation. Once it has settled,
+          // a missing POST reply must not keep the caller or its socket alive.
+          // An unconfirmed retirement still poisons admission below.
+          transport.abort(signal?.reason);
+        });
+        void cancellation.catch(() => {});
+      };
+      signal?.addEventListener("abort", cancel, { once: true });
+      let outcome: { response: Response } | { error: unknown };
+      try {
+        const response = await fetchImpl(`${config.url}/capture`, {
       method: "POST",
       headers: {
         Authorization: `Bearer ${config.token}`,
         "Content-Type": "application/json",
+        "X-Zeros-Design-Job": jobId,
+        "X-Zeros-Design-Deadline": deadline,
+        "X-Zeros-Design-Priority": options.capacityRetry === false ? "optional" : "explicit",
       },
       redirect: "error",
-      signal: AbortSignal.any([
-        ...(signal ? [signal] : []),
-        AbortSignal.timeout(DESIGN_CAPTURE_TIMEOUT_MS + 1_000),
-      ]),
+      // Caller abort joins native retirement before aborting this transport.
+      // A missing host reply also needs a finite deadline; transport failure
+      // still joins cancellation and never establishes retirement by itself.
+      signal: AbortSignal.any([transport.signal, AbortSignal.timeout(DESIGN_CAPTURE_TIMEOUT_MS + 5_000)]),
       body,
-    });
+        });
+        settled = true; // The host sends headers only after render/cleanup.
+        if (signal?.aborted) { await response.body?.cancel(); signal.throwIfAborted(); }
+        outcome = { response };
+      } catch (error) {
+        // A broken response is not evidence that the host disposed its window.
+        // Ask the authenticated job endpoint to cancel and join cleanup.
+        cancel();
+        outcome = { error };
+      } finally {
+        signal?.removeEventListener("abort", cancel);
+      }
+      try { await cancellation; }
+      catch { if (!settled) throw new DesignCaptureCleanupUnconfirmedError(); }
+      if ("error" in outcome) throw outcome.error;
+      return outcome.response;
+    };
     let response = await post();
     // The host renders one capture at a time and refuses the rest. A canvas
     // preview may hold the slot for one render, so an explicit capture waits
@@ -210,8 +255,10 @@ export function createDesignCaptureRenderer(
       // theme and imported styles from one canvas snapshot; renderComposed
       // callers have already chosen their theme (an explicit CLI preview).
       const canvas = await readCanvas(workspacePath).catch(() => undefined);
+      input.signal?.throwIfAborted();
       if (input.theme !== undefined && !options.themeChecked)
         await assertDesignThemeName(workspacePath, input.theme);
+      input.signal?.throwIfAborted();
       const theme = input.theme ?? (canvas ? readDesignThemeCatalog(canvas).baseId : null);
       const composed = await prepareFrameRenderSource(
         workspacePath,
@@ -222,6 +269,7 @@ export function createDesignCaptureRenderer(
         input.state.entryFile,
         canvas,
       );
+      input.signal?.throwIfAborted();
       return renderComposed({
         ...input,
         html: theme === null ? composed.sanitized : withDesignTheme(composed.sanitized, theme),

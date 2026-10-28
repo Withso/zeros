@@ -9,7 +9,7 @@ vi.mock("../git-exec", async (original) => ({
 vi.mock("../worktree", async (original) => ({
   ...await original<typeof import("../worktree")>(),
   getWorkspace: (id: string) => ({
-    id, repoRoot: `/fixtures/${id}`, branch: "topic", prNumber: 1,
+    id, repoRoot: `/fixtures/${id}`, branch: "topic", prNumber: null,
     prState: "ready", prUrl: "https://github.com/fixture/repository/pull/1",
   }),
 }));
@@ -33,7 +33,7 @@ function pr(number = 1) {
   return {
     number, html_url: `https://github.com/fixture/repository/pull/${number}`,
     state: "open", title: "Fixture", body: "", user: { login: "fixture" },
-    base: { ref: "main" }, head: { ref: "topic", sha: "a".repeat(40) },
+    base: { ref: "main" }, head: { ref: "topic", sha: "a".repeat(40), repo: { id: 123 } },
     created_at: "2026-01-01T00:00:00Z", updated_at: "2026-01-01T00:00:00Z",
   };
 }
@@ -45,7 +45,10 @@ function client() {
       listReviews: vi.fn(async () => ({ data: [] })),
     },
     checks: { listForRef: vi.fn(async () => ({ data: { check_runs: [] } })) },
-    repos: { listCommitStatusesForRef: vi.fn(async () => ({ data: [] })) },
+    repos: {
+      get: vi.fn(async () => ({ data: { id: 123, name: "repository", owner: { login: "fixture" } } })),
+      listCommitStatusesForRef: vi.fn(async () => ({ data: [] })),
+    },
     issues: { listComments: vi.fn(async () => ({ data: [] })) },
   };
 }
@@ -79,15 +82,17 @@ describe("Local GitHub observation sharing", () => {
     await vi.runAllTimersAsync();
     await Promise.all(requests);
     const apiCounts = [oct.pulls.get, oct.pulls.list, oct.pulls.listReviews,
-      oct.checks.listForRef, oct.repos.listCommitStatusesForRef, oct.issues.listComments]
+      oct.checks.listForRef, oct.repos.listCommitStatusesForRef, oct.issues.listComments, oct.repos.get]
       .map((method) => method.mock.calls.length);
     console.info("Local PR synthetic refresh", JSON.stringify({ remoteCalls, apiCalls: apiCounts.reduce((a, b) => a + b, 0) }));
     expect(remoteCalls).toBe(1);
-    expect(apiCounts).toEqual([1, 1, 1, 1, 1, 1]);
+    expect(apiCounts).toEqual([1, 1, 1, 1, 1, 1, 1]);
+    // Discovery coalesces a second remote read before publishing its result.
+    expect(mocks.runFile).toHaveBeenCalledTimes(2);
     const fresh = getPrChecks({ workspaceId: "one", prNumber: 1 });
     await vi.runAllTimersAsync();
     await fresh;
-    expect(mocks.runFile).toHaveBeenCalledTimes(2);
+    expect(mocks.runFile).toHaveBeenCalledTimes(3);
     expect(oct.pulls.get).toHaveBeenCalledTimes(2);
     expect(oct.checks.listForRef).toHaveBeenCalledTimes(2);
   });
@@ -103,6 +108,29 @@ describe("Local GitHub observation sharing", () => {
     await Promise.all(requests);
     expect(factory).toHaveBeenCalledTimes(1);
     expect(oct.pulls.get).toHaveBeenCalledTimes(1);
+  });
+
+  it("shares canonical repository resolution without caching a transfer across refreshes", async () => {
+    const gate = deferred();
+    const entered = deferred();
+    oct.repos.get.mockImplementationOnce(async () => {
+      entered.resolve();
+      await gate.promise;
+      return { data: { id: 123, owner: { login: "new-owner" }, name: "renamed" } };
+    });
+    const requests = [resolveGithubWorkspaceRepository("one"), resolveGithubWorkspaceRepository("one")];
+    // A resolver that skips the API must fail an assertion, not hang waiting
+    // for a request it never starts when this regression is replayed.
+    await Promise.race([entered.promise, Promise.all(requests)]);
+    expect(oct.repos.get).toHaveBeenCalledExactlyOnceWith({ owner: "fixture", repo: "repository" });
+    gate.resolve();
+    expect(await Promise.all(requests)).toEqual([
+      { owner: "new-owner", repo: "renamed", remote: "origin" },
+      { owner: "new-owner", repo: "renamed", remote: "origin" },
+    ]);
+    oct.repos.get.mockResolvedValueOnce({ data: { id: 123, owner: { login: "successor" }, name: "renamed-again" } });
+    await expect(resolveGithubWorkspaceRepository("one")).resolves.toEqual({ owner: "successor", repo: "renamed-again", remote: "origin" });
+    expect(oct.repos.get).toHaveBeenCalledTimes(2);
   });
 
   it("separates repositories, remotes, PRs and credential replacements, and rejects sign-out", async () => {
@@ -130,6 +158,7 @@ describe("Local GitHub observation sharing", () => {
     await expect(getPr({ workspaceId: "one", prNumber: 1 })).rejects.toMatchObject({ code: "NOT_AUTHENTICATED" });
     gate.resolve(); await Promise.all([first, otherPr, otherRepository]);
     mocks.runFile.mockClear();
+    token = "fixture-b";
     const originalRemote = resolveGithubWorkspaceRepository("one");
     mocks.remote = "upstream";
     const nextRemote = resolveGithubWorkspaceRepository("one");

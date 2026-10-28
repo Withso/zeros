@@ -28,9 +28,14 @@ export interface ProcessResourceMetric {
   kind: ProcessResourceKind;
   /** 100 means one fully occupied logical core; an app total may exceed 100. */
   cpuPercent: number;
+  /** False for a new identity without a complete CPU observation window. */
+  cpuSampled?: boolean;
   /** Physical footprint (Activity Monitor's Memory) when the snapshot's
    * footprint read covers this process, otherwise resident/working-set bytes. */
   memoryBytes: number;
+  /** Per-process provenance: a newly started child can lack a footprint even
+   * when the app's earlier processes have one. */
+  memorySource?: "footprint" | "resident";
   /** Highest value observed for this live process identity during sampling. */
   peakCpuPercent: number;
   /** Highest memory value observed for this live identity. */

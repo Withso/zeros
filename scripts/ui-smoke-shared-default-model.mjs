@@ -65,17 +65,27 @@ export async function runUnavailableModelSmoke({ page, harnessBase, check }) {
       await page.getByRole("button", { name: /^Model:/ }).click();
       await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
       await expect(page.getByRole("radio")).toHaveCount(0);
+      const availabilityFilter = page.getByRole("button", { name: "Show available models", exact: true });
+      await expect(availabilityFilter).toHaveCount(0);
       await page.getByTestId("selected-model-browser").hover();
       const catalog = page.getByTestId("model-catalog-sidecar");
       const row = catalog.locator('[data-model-catalog-item][data-model-value="grok-4.7"]');
       await expect(row).toHaveAttribute("aria-disabled", "true");
       await expect(row.getByRole("button", { name: /^Select/ })).toBeDisabled();
       await expect(row.getByText("Unavailable for this account.", { exact: true })).toBeVisible();
-      await catalog.getByRole("button", { name: "Show available models", exact: true }).click();
-      await expect(catalog.locator("[data-model-unavailable]")).toHaveCount(0);
-      await catalog.locator('[data-model-catalog-item][data-model-value="composer-2.5"]').getByRole("button", { name: /^Select/ }).click({ position: { x: 12, y: 12 } });
+      await expect(availabilityFilter).toHaveCount(0);
+      const availableModel = catalog.locator('[data-model-catalog-item][data-model-value="composer-2.5"]').getByRole("button", { name: /^Select/ });
+      await expect(availableModel).toBeEnabled();
+      await availableModel.click({ position: { x: 12, y: 12 } });
       await expect(page.locator("[data-model-pill-name]")).toHaveText("Composer 2.5");
-      check(`${scope}/${theme} rejected model explains unavailability and offers an eligible choice`, true);
+      await page.getByRole("button", { name: /^Model:/ }).click();
+      await page.getByTestId("selected-model-browser").hover();
+      await expect(row.getByRole("button", { name: /^Select/ })).toBeDisabled();
+      await expect(availabilityFilter).toHaveCount(0);
+      await page.getByPlaceholder("Search models…").fill("grok");
+      await expect(page.getByRole("option", { name: /Grok 4\.7/ })).toHaveAttribute("aria-disabled", "true");
+      await expect(availabilityFilter).toHaveCount(0);
+      check(`${scope}/${theme} unavailable models stay explained and eligible models are selectable without a filter`, true);
     }
   }
 }

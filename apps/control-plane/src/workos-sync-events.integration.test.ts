@@ -40,6 +40,22 @@ d("WorkOS normalized event synchronization", () => {
 
   afterAll(async () => pool.end());
 
+  it.each([false, true])("applies the same admission rule to a projection before first login (directory=%s)", async directoryManaged => {
+    const suffix = randomUUID(), org = randomUUID(), subject = `user_future_${suffix}`;
+    const owner = await ensureUser(pool, { provider: "workos", providerSubject: `owner_${suffix}`, email: `owner-${suffix}@example.test`, displayName: "Owner" });
+    await pool.query("INSERT INTO organizations(id,slug,name,created_by) VALUES($1,$2,'Projection',$3)", [org, `org-${suffix}`, owner.id]);
+    await pool.query("INSERT INTO organization_members(org_id,user_id,role) VALUES($1,$2,'owner')", [org, owner.id]);
+    await pool.query("INSERT INTO teams(org_id,slug,name,is_default,created_by) VALUES($1,'default','Default',true,$2)", [org, owner.id]);
+    await pool.query("INSERT INTO workos_organization_links(organization_id,workos_organization_id,external_id,state) VALUES($1::uuid,$2,$1::text,'active')", [org, `org_${suffix}`]);
+    const at = new Date().toISOString();
+    await ingestWorkOSManagementEvent(pool, managementEvent("organization_membership.created", {
+      id: `om_${suffix}`, organizationId: `org_${suffix}`, userId: subject, status: "active", directoryManaged, role: { slug: "admin" }, updatedAt: at,
+    }, at), "webhook");
+    const member = await ensureUser(pool, { provider: "workos", providerSubject: subject, email: `member-${suffix}@example.test`, displayName: "Member" });
+    const result = await pool.query("SELECT role FROM organization_members WHERE org_id=$1 AND user_id=$2", [org, member.id]);
+    expect(result.rows).toEqual(directoryManaged ? [{ role: "admin" }] : []);
+  });
+
   it("projects locally-authorized membership changes, rejects unsolicited access and stale resurrection", async () => {
     const suffix = randomUUID().replaceAll("-", "");
     const owner = await ensureUser(pool, {

@@ -19,7 +19,7 @@ vi.mock("../cloud-credential-removal-controller", () => ({ createCloudCredential
   start: f.start, decide: f.decide, snapshot: () => f.snapshot, subscribe: () => () => {}, attach: vi.fn(), detach: vi.fn(async () => {}),
 }) }));
 vi.mock("../../../platform/cloud-workspaces", () => ({ cloudAccountRequest: f.request }));
-vi.mock("../../../state/use-cached-read", () => ({ useCachedRead: () => ({ data: {
+vi.mock("../../../state/use-recovering-read", () => ({ useRecoveringRead: () => ({ data: {
   credentials: [{ id: f.activeId, kind: "claude-api-key", displayName: "Current", revision: 7, revoked: false },
     { id: f.savedId, kind: "claude-api-key", displayName: "Saved", revision: 9, revoked: false }],
   connections: [{ provider: "claude", revision: 12, credentialId: f.activeId, models: ["test"], connected: true }],

@@ -7,6 +7,7 @@ const commands = vi.hoisted(
 vi.mock("electron", () => ({
   webFrameMain: { fromId: vi.fn(() => null) },
   nativeImage: { createFromBuffer: vi.fn() },
+  screen: { getAllDisplays: vi.fn(() => [{ scaleFactor: 1 }]) },
 }));
 vi.mock("../ipc/router", () => ({
   setCommand: (name: string, handler: (args: Record<string, unknown>, event: unknown) => unknown) => {
@@ -25,6 +26,7 @@ import {
   reinjectBrowserPicker,
 } from "../ipc/iframe-picker";
 import { PICKER_SCRIPT } from "../iframe-picker-script";
+import { screen } from "electron";
 
 interface FakeFrame {
   name: string;
@@ -86,6 +88,7 @@ function injectedFrames(frames: FakeFrame[]): string[] {
 beforeEach(() => {
   commands.clear();
   nextFrameId = 1;
+  vi.mocked(screen.getAllDisplays).mockReturnValue([{ scaleFactor: 1 }] as never);
 });
 
 describe("Design Mode picker injection (Gate A)", () => {
@@ -204,6 +207,30 @@ describe("iframe-picker:capture-region (main-side clamp)", () => {
       ownedEvent,
     );
     expect(result).toMatchObject({ ok: false });
+    expect(capturePage).not.toHaveBeenCalled();
+  });
+
+  it("bounds outstanding native work across a burst of capture requests", async () => {
+    const { handler, ownedEvent, capturePage } = setup({ left: 0, top: 0, right: 1280, bottom: 800 });
+    let release!: (value: { toDataURL(): "data:image/png;base64,AAAA" }) => void;
+    capturePage.mockImplementationOnce(() => new Promise(resolve => { release = resolve; }));
+    const args = { frameName: "zeros-browser-a", x: 0, y: 0, width: 100, height: 100 };
+    const first = handler(args, ownedEvent);
+    await vi.waitFor(() => expect(capturePage).toHaveBeenCalledTimes(1));
+    try {
+      const burst = await Promise.all(Array.from({ length: 20 }, () => handler(args, ownedEvent)));
+      expect(capturePage).toHaveBeenCalledTimes(1);
+      expect(burst.every(result => (result as { ok: boolean }).ok === false)).toBe(true);
+    } finally {
+      release({ toDataURL: () => "data:image/png;base64,AAAA" });
+      await first;
+    }
+  });
+
+  it("charges physical pixels before starting a high-density capture", async () => {
+    vi.mocked(screen.getAllDisplays).mockReturnValue([{ scaleFactor: 3 }] as never);
+    const { handler, ownedEvent, capturePage } = setup({ left: 0, top: 0, right: 1280, bottom: 800 });
+    expect(await handler({ frameName: "zeros-browser-a", x: 0, y: 0, width: 1000, height: 800 }, ownedEvent)).toMatchObject({ ok: false });
     expect(capturePage).not.toHaveBeenCalled();
   });
 

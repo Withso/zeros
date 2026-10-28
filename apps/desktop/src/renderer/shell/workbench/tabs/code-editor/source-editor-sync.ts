@@ -17,6 +17,8 @@ export function resolveDiskContentSync(args: {
   baseline: string;
   draft: string;
   pendingSave: string | null;
+  /** Completed writes whose refresh echoes may still be in flight. */
+  saveEchoes?: readonly string[];
 }): DiskContentSyncResult {
   if (args.incoming === args.lastSeen) {
     return {
@@ -25,6 +27,11 @@ export function resolveDiskContentSync(args: {
       draft: args.draft,
       pendingSave: args.pendingSave,
     };
+  }
+
+  if (args.pendingSave !== null && args.saveEchoes?.includes(args.incoming) && args.incoming !== args.pendingSave) {
+    return { kind: "acknowledge-save", baseline: args.baseline,
+      draft: args.draft, pendingSave: args.pendingSave };
   }
 
   if (

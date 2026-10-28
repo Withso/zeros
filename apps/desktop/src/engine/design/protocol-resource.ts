@@ -11,6 +11,7 @@ import {
 import { readSafeRegularFile } from "./safe-files";
 import { isDesignFrameFile } from "@zeros/protocol/design-path";
 import { discoverFrameFiles } from "./document-storage";
+import { prepareDesignSurfaceDocument } from "./surface-document";
 
 const MAX_TEXT_RESOURCE_BYTES = 2 * 1024 * 1024;
 const MAX_BINARY_RESOURCE_BYTES = 10 * 1024 * 1024;
@@ -33,9 +34,11 @@ export interface DesignProtocolResource {
   body: Buffer;
 }
 
-interface DesignProtocolResourceInput {
+export interface DesignProtocolResourceInput {
   path: string;
   sourceVersion: string | null;
+  surface?: boolean;
+  theme?: string | null;
 }
 
 function response(
@@ -159,6 +162,8 @@ export async function readDesignProtocolResource(
   workspacePath: string,
   input: DesignProtocolResourceInput,
 ): Promise<DesignProtocolResource> {
+  if (input.surface && (!input.sourceVersion || !/^[a-f0-9]{24}$/.test(input.sourceVersion) ||
+      (input.theme != null && !/^[a-z][a-z0-9_-]{0,63}$/.test(input.theme)))) return response(404, "Not found.");
   const relativePath = safeRelativePath(input.path);
   if (!relativePath) return response(404, "Not found.");
   const sourceVersion =
@@ -211,10 +216,9 @@ export async function readDesignProtocolResource(
         "Cache-Control": "private, no-store",
       });
     }
-    const rendered = injectRuntime(
-      renderSource.html,
-      renderSource.sourceVersion,
-    );
+    const rendered = input.surface
+      ? prepareDesignSurfaceDocument(renderSource.html, renderSource.sourceVersion, input.theme ?? null)
+      : injectRuntime(renderSource.html, renderSource.sourceVersion);
     if (Buffer.byteLength(rendered.html, "utf8") > MAX_COMPOSED_FRAME_BYTES) {
       return response(
         413,

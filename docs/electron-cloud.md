@@ -39,6 +39,11 @@ an enabled outbox: publish/select this branch's worker or disable the flag for
 that compatibility check. Refresh existing VMs after their turns settle so they
 receive the new runtime and configuration.
 
+[Checkpoint retries](cloud-workspaces.md#lifecycle) stay off here too. Use
+`CLOUD_V2_CHECKPOINT_RETRY_ENABLED=true pnpm electron:cloud` to qualify forking a
+stopped VM on this Boat account: stop a workspace whose checkpoint upload fails,
+then confirm that a fork saves it and is deleted afterwards.
+
 ## Prerequisites
 
 - macOS: `brew install postgresql@18 cloudflared`, plus Docker (Docker Desktop or
@@ -81,6 +86,11 @@ Or package and publish an archive separately:
 node apps/cloud-worker/scripts/package-runtime.mjs --out /tmp/worker-runtime.tar.gz
 pnpm --dir apps/control-plane cloud-v2:publish-runtime --local --artifact /tmp/worker-runtime.tar.gz
 ```
+
+Publishing with `--local` also removes the Dev store's older runtimes. It
+keeps the two newest and anything from the last day; `--no-prune` skips this.
+A stack whose runtime was removed publishes it again on its next start, which
+on a Mac needs Docker. Startup's own automatic publish never removes anything.
 
 The packager builds natively on Linux x64 with Node 24. Elsewhere it builds in
 Docker (`node:24-bookworm`, `linux/amd64`) from a filtered copy of the source,
@@ -160,6 +170,21 @@ backend services to exit. Shutdown gives each owned process group time to exit
 gracefully, then escalates within a bounded deadline and confirms it is gone.
 Other checkouts and their apps stay running. A second start refuses an earlier
 run whose shutdown is unconfirmed; its private receipt and data are kept.
+
+The checkout's WorkOS webhook is paused while Dev is offline. Startup provisions
+the endpoint and immediately pauses it, then enables delivery only after public
+API and sign-in readiness. Shutdown and failed startup pause it before stopping
+the services. Restart reuses the same endpoint and signing key. The control
+plane's existing Events API repair loop resumes from its saved database cursor,
+so events missed during downtime are reconciled within WorkOS's retention window.
+Pausing delivery never clears account, membership or session security state.
+
+If WorkOS cannot confirm the pause, local processes still stop and the private
+receipt keeps cleanup pending. Retry `pnpm electron:cloud --stop` once WorkOS is
+available; it also pauses endpoints retained by older launcher versions. A hard
+crash or machine shutdown cannot run provider cleanup, so use `--stop` after
+reboot recovery or `--reset` when retiring the checkout. Other Dev and hosted
+Alpha endpoints are never paused by this launcher.
 
 `--reset` asks for the owner ID (or `--yes`) and confirms the same app/backend
 shutdown before cleanup. It then runs this checkout's migrator,

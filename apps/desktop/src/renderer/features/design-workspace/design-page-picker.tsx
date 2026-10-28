@@ -25,6 +25,7 @@ import {
   toast,
 } from "../../shared/ui/primitives";
 import { errorMessage } from "./design-workspace-error";
+import { captureDeferredFocus } from "../../shared/ui/deferred-focus";
 import {
   createDesignPageCached,
   deleteDesignPageCached,
@@ -50,7 +51,7 @@ export function DesignPagePicker({
   directoryId?: string;
   pages: readonly DesignPageSummary[];
   activePageId?: string;
-  frames: readonly DesignCanvasFrameWire[];
+  frames: readonly Pick<DesignCanvasFrameWire, "file" | "frameId">[];
   active: boolean;
 }) {
   const page = pages.find((page) => page.id === activePageId) ?? pages[0];
@@ -68,6 +69,7 @@ export function DesignPagePicker({
   const renameCancelled = useRef(false);
   const inputRef = useRef<HTMLInputElement | null>(null);
   const triggerRef = useRef<HTMLButtonElement | null>(null);
+  const restoreFocusRef = useRef<(() => void) | null>(null);
   const owner = captureDesignPageOwner(workspaceId);
   const ownerKey = `${workspaceId}\0${directoryId ?? ""}\0${page.id}`;
   useLayoutEffect(() => {
@@ -75,6 +77,12 @@ export function DesignPagePicker({
     setRename(null);
     setDeletion(null);
   }, [ownerKey, active]);
+  useLayoutEffect(() => {
+    if (rename || pending || !active) return;
+    const restore = restoreFocusRef.current;
+    restoreFocusRef.current = null;
+    restore?.();
+  }, [rename, pending, active]);
 
   const switchPage = (id: string) => {
     // A focused inspector field commits to its original target before the
@@ -111,10 +119,16 @@ export function DesignPagePicker({
       setPending(false);
     }
   };
-  const focusTrigger = () =>
-    requestAnimationFrame(() => {
-      if (isCurrentDesignPageOwner(owner)) triggerRef.current?.focus();
-    });
+  const captureRenameFocus = () => captureDeferredFocus(
+    inputRef.current?.closest<HTMLElement>("[data-design-inspector-header]") ?? null,
+  );
+  const finishRename = (mayRestoreFocus?: () => boolean) => {
+    // The trigger replaces the input; its mounting commit owns restoration.
+    restoreFocusRef.current = mayRestoreFocus ? () => {
+      if (isCurrentDesignPageOwner(owner) && mayRestoreFocus()) triggerRef.current?.focus();
+    } : null;
+    setRename(null);
+  };
   const submitRename = async (returnFocus = false) => {
     if (!rename || submitting.current || renameCancelled.current || !active)
       return;
@@ -125,9 +139,9 @@ export function DesignPagePicker({
       });
       return;
     }
+    const mayRestoreFocus = returnFocus ? captureRenameFocus() : undefined;
     if (parsed.data === rename.page.title) {
-      setRename(null);
-      if (returnFocus) focusTrigger();
+      finishRename(mayRestoreFocus);
       return;
     }
     submitting.current = true;
@@ -135,8 +149,7 @@ export function DesignPagePicker({
     try {
       await renameDesignPageCached(workspaceId, rename.page.id, parsed.data);
       if (isCurrentDesignPageOwner(owner)) {
-        setRename(null);
-        if (returnFocus) focusTrigger();
+        finishRename(mayRestoreFocus);
       }
     } catch (error) {
       toast.error("Couldn't rename the Design page", {
@@ -225,8 +238,7 @@ export function DesignPagePicker({
               if (event.key === "Escape") {
                 event.preventDefault();
                 renameCancelled.current = true;
-                setRename(null);
-                focusTrigger();
+                finishRename(captureRenameFocus());
               }
             }}
           />

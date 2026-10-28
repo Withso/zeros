@@ -31,6 +31,7 @@ import {
   type ProcessArgsRow,
 } from "../../process-metrics";
 import { buildDiagnosticsReport } from "../../process-diagnostics";
+import { processResourceHistory } from "../../process-resource-history";
 import { rendererProcessOwners } from "../../renderer-process-owners";
 import { scrubbedRecentTail } from "./logs";
 
@@ -40,8 +41,8 @@ interface MetricsRequest {
   detail: boolean;
 }
 
-/** `top -l 1` costs ~0.4 s of CPU, so the footprint refreshes at most this
- * often, and only while the inspector is open. */
+/** `top -l 1` costs ~0.4 s of CPU, so an open inspector refreshes its footprint
+ * at most this often. Copy and sparse history own separate explicit reads. */
 const FOOTPRINT_REFRESH_MS = 10_000;
 const SYSTEM_REFRESH_MS = 5_000;
 /** CPU in the diagnostics report is measured over this window. */
@@ -55,6 +56,8 @@ const electronTracker = new ProcessMetricsTracker();
 let lastMetricsLogAt: number | null = null;
 let metricsLogTimer: ReturnType<typeof setTimeout> | null = null;
 let metricsLogging = false;
+let metricsLoggingGeneration = 0;
+let cancelHistoryWait: (() => void) | null = null;
 let footprint: FootprintRead | null = null;
 let footprintRead: Promise<void> | null = null;
 let system: SystemResourceState | null = null;
@@ -67,10 +70,10 @@ function parseRequest(args: Record<string, unknown>): MetricsRequest {
   };
 }
 
-function electronDescriptors(): ElectronProcessDescriptor[] {
+function electronDescriptors(log = true): ElectronProcessDescriptor[] {
   const owners = rendererProcessOwners.ownersByPid();
   const metrics = app.getAppMetrics();
-  logElectronMetrics(metrics);
+  if (log) logElectronMetrics(metrics);
   return metrics.map((metric) => {
     const workingSetKb = metric.memory?.workingSetSize;
     return {
@@ -112,7 +115,6 @@ function logElectronMetrics(metrics: ReturnType<typeof app.getAppMetrics>): void
     } catch {
       // A closed log sink cannot turn a usable observation into an IPC error.
     }
-    scheduleMetricsLog();
   }
 }
 
@@ -121,32 +123,65 @@ function scheduleMetricsLog(delay = METRICS_LOG_INTERVAL_MS): void {
   if (metricsLogTimer) clearTimeout(metricsLogTimer);
   metricsLogTimer = setTimeout(() => {
     metricsLogTimer = null;
-    try {
-      // History does not need a process tree, OS context or renderer owners.
-      logElectronMetrics(app.getAppMetrics());
-    } catch {
-      // Sampling cannot interrupt the app, and failures wait a full interval.
-    } finally {
-      if (!metricsLogTimer) scheduleMetricsLog();
-    }
+    const generation = metricsLoggingGeneration;
+    void recordResourceHistory(generation).catch(() => {
+      // Error objects from native commands can carry argv/output. Record only
+      // a closed failure label, and retry at the ordinary sparse interval.
+      if (metricsLogging && generation === metricsLoggingGeneration) {
+        try { console.log("[Zeros resources] observation unavailable"); } catch { /* Closed log sink. */ }
+      }
+    }).finally(() => {
+      if (metricsLogging && generation === metricsLoggingGeneration) scheduleMetricsLog();
+    });
   }, delay);
   metricsLogTimer.unref?.();
 }
 
-/** Start after app ready; keep a sparse memory timeline for leak diagnostics
- * even when no inspector is open. No child process is involved. */
+/** Start after app ready. One bounded full-tree observation every ten minutes
+ * covers the engine, providers and PTY children even with the inspector closed.
+ * Ordinary summary reads still launch no processes. */
 export function startProcessMetricsLogging(): () => void {
   if (!metricsLogging) {
     metricsLogging = true;
-    const delay = lastMetricsLogAt == null ? METRICS_LOG_INTERVAL_MS :
-      Math.max(0, Math.min(METRICS_LOG_INTERVAL_MS, lastMetricsLogAt + METRICS_LOG_INTERVAL_MS - Date.now()));
-    scheduleMetricsLog(delay);
+    metricsLoggingGeneration++;
+    scheduleMetricsLog();
   }
   return () => {
     metricsLogging = false;
+    metricsLoggingGeneration++;
     if (metricsLogTimer) clearTimeout(metricsLogTimer);
     metricsLogTimer = null;
+    cancelHistoryWait?.();
   };
+}
+
+function logResourceHistory(snapshot: ProcessMetricsSnapshot, source: ProcessMetricsTracker, reason: "periodic" | "copy"): void {
+  try {
+    for (const line of processResourceHistory(snapshot, source.sampledRows(), reason)) console.log(line);
+  } catch {
+    // Diagnostics cannot interrupt the app when its output sink closes.
+  }
+}
+
+async function recordResourceHistory(generation: number): Promise<void> {
+  const current = () => metricsLogging && generation === metricsLoggingGeneration;
+  // This short CPU window must not advance an open inspector's baseline or
+  // overwrite its terminal ownership. Use cumulative OS CPU clocks so other
+  // getAppMetrics readers cannot change this window's denominator.
+  const history = new ProcessMetricsTracker();
+  const request = () => ({ detail: false, terminalPids: [], terminalRootsKnown: false });
+  await sample(request, history, true);
+  if (!current()) return;
+  await Promise.all([refreshFootprint(), refreshSystem()]);
+  if (!current()) return;
+  const elapsed = await new Promise<boolean>(resolve => {
+    const timer = setTimeout(() => { cancelHistoryWait = null; resolve(true); }, REPORT_CPU_WINDOW_MS);
+    timer.unref?.();
+    cancelHistoryWait = () => { clearTimeout(timer); cancelHistoryWait = null; resolve(false); };
+  });
+  if (!elapsed || !current()) return;
+  const snapshot = await sample(request, history, true);
+  if (current()) logResourceHistory(snapshot, history, "periodic");
 }
 
 function thermalState(): SystemThermalState | null {
@@ -231,11 +266,14 @@ function sampleElectron(): ProcessMetricsSnapshot {
 
 async function sample(
   latestRequest: () => MetricsRequest,
+  sampleTracker = tracker,
+  ownsCpuWindow = false,
 ): Promise<ProcessMetricsSnapshot> {
   const table = await readProcessTable();
   const sampledAt = Date.now();
   const request = latestRequest();
-  const electronProcesses = electronDescriptors();
+  const electronProcesses = electronDescriptors(!ownsCpuWindow).map(descriptor => ownsCpuWindow
+    ? { ...descriptor, cpuPercent: undefined } : descriptor);
   const base = {
     rows: table.rows,
     appPid: process.pid,
@@ -244,7 +282,7 @@ async function sample(
   };
   // argv is read only for Zeros-tree identities that have none yet, so a
   // steady tree costs no extra process after the first sample.
-  const missing = tracker.missingArgPids(base);
+  const missing = sampleTracker.missingArgPids(base);
   if (missing.length > 0) {
     let read: ProcessArgsRow[] = [];
     try {
@@ -266,19 +304,19 @@ async function sample(
           !returned.has(`${row.pid}\u0000${row.startKey}`),
       )
       .map((row) => ({ pid: row.pid, startKey: row.startKey, args: "" }));
-    tracker.recordArgs([...read, ...placeholders]);
+    sampleTracker.recordArgs([...read, ...placeholders]);
   }
-  if (!system || sampledAt - system.sampledAt >= SYSTEM_REFRESH_MS) {
+  if (!ownsCpuWindow && (!system || sampledAt - system.sampledAt >= SYSTEM_REFRESH_MS)) {
     if (system) void refreshSystem();
     else await refreshSystem();
   }
   if (
-    request.detail &&
+    !ownsCpuWindow && request.detail &&
     (!footprint || sampledAt - footprint.readAt >= FOOTPRINT_REFRESH_MS)
   )
     void refreshFootprint();
 
-  return tracker.capture({
+  return sampleTracker.capture({
     sampledAt,
     scanDurationMs: table.durationMs,
     appPid: process.pid,
@@ -318,15 +356,18 @@ export async function processDiagnosticsReport(
 ): Promise<ProcessDiagnosticsReport> {
   const request = { ...parseRequest(args), detail: true };
   // Measure CPU over a full report window rather than whatever gap remains
-  // since the popover's last sample (under 250 ms reports no CPU at all). The
-  // footprint and Mac reads overlap the baseline.
+  // since the popover's last sample. Its next poll must not shorten this
+  // window or borrow the copy's ownership, and the copy must not advance the
+  // inspector's baseline. Use cumulative OS clocks for every owned process.
+  const reportTracker = new ProcessMetricsTracker();
   await Promise.all([
     refreshFootprint(),
     refreshSystem(),
-    coordinator.request(request),
+    sample(() => request, reportTracker, true),
   ]);
   await new Promise((resolve) => setTimeout(resolve, REPORT_CPU_WINDOW_MS));
-  const snapshot = await coordinator.request(request);
+  const snapshot = await sample(() => request, reportTracker, true);
+  logResourceHistory(snapshot, reportTracker, "copy");
   let allArgs: ProcessArgsRow[] = [];
   try {
     allArgs = await readAllProcessArgs();
@@ -374,8 +415,8 @@ export async function processDiagnosticsReport(
       onBattery,
     },
     snapshot,
-    rows: tracker.sampledRows(),
-    argsFor: (pid, startKey) => tracker.argsFor(pid, startKey),
+    rows: reportTracker.sampledRows(),
+    argsFor: (pid, startKey) => reportTracker.argsFor(pid, startKey),
     allArgs,
     physMem: footprint?.physMem ?? null,
     cpuUsage: footprint?.cpuUsage ?? null,

@@ -111,6 +111,15 @@ describe("Local checkout identity and environment", () => {
     }
     expect(await pickLocalPorts(id.slug)).toEqual(first);
   });
+
+  it("refuses renderer ports Chromium blocks even when their TCP listeners are free", async () => {
+    const browserBlocked = new Set([6566, 6665, 6666, 6667, 6668, 6669, 6697]);
+    await expect(pickLocalPorts("browser-port-regression", 0, {
+      portFree: async (port: number) => browserBlocked.has(port) || port >= 31000,
+    })).rejects.toThrow("No free Zeros Local port block");
+    const allowed = await pickLocalPorts("browser-port-regression", 0, { portFree: async () => true });
+    expect(browserBlocked.has(allowed.vitePort)).toBe(false);
+  });
 });
 
 describe("Local launch ownership", () => {

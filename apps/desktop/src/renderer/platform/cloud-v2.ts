@@ -1,6 +1,7 @@
 // Cloud workspace v2 API. Responses map into the existing CloudWorkspaceDocument
 // so the shared workspace UI renders v2 workspaces without its own copy.
 import { z } from "zod";
+import { CloudGithubUnavailableReasonSchema } from "@zeros/protocol/cloud-github-connection";
 import { prepareCloudPromptErasure } from "./cloud-prompt-erasure";
 import { cloudAccountRequest } from "./cloud-workspaces";
 import type { CloudWorkspaceDocument } from "./cloud-workspace-contract";
@@ -12,6 +13,7 @@ export const CloudV2CapabilitiesSchema = z.object({
   terminal: z.boolean(), files: z.boolean(), git: z.boolean(),
   agents: z.array(z.enum(["codex", "claude", "cursor"])),
   promptOutbox: z.literal(1).optional(),
+  githubPullRequests: z.literal(1).optional(),
 });
 export type CloudV2Capabilities = z.infer<typeof CloudV2CapabilitiesSchema>;
 
@@ -31,6 +33,10 @@ export const CloudV2WorkspaceSchema = z.object({
   updatedAt: z.string(),
   version: z.literal(2),
   capabilities: CloudV2CapabilitiesSchema,
+  githubUnavailableReason: CloudGithubUnavailableReasonSchema.optional(),
+  github: z.object({ repositoryId: z.string().regex(/^[1-9][0-9]*$/), branch: z.string().nullable(), baseBranch: z.string(), headSha: z.string().nullable(),
+    prNumber: z.number().int().positive().nullable(), prState: z.enum(["draft", "ready", "merged", "closed"]).nullable(), prUrl: z.string().url().nullable() }).optional(),
+  checkoutPath: z.string().optional(),
 }).passthrough();
 export type CloudV2Workspace = z.infer<typeof CloudV2WorkspaceSchema>;
 
@@ -42,9 +48,17 @@ const STATUS: Record<CloudV2Workspace["state"], string> = {
 
 const ERRORS: Record<string, string> = {
   cloud_computer_build_required: "Build this organization's Cloud Computer first.",
+  cloud_computer_changed: "The Cloud Computer was just rebuilt. Create the workspace again.",
   worker_boot_timeout: "The workspace computer did not start in time. Delete it and create a new one.",
   sandbox_missing: "This workspace's computer no longer exists. Delete it and create a new one.",
+  checkpoint_restore_failed: "This workspace could not be restored from its last checkpoint. Start it to try again.",
+  checkpoint_download_failed: "This workspace's last checkpoint could not be downloaded. Start it to try again.",
+  checkpoint_prerequisites_missing: "This workspace's last checkpoint needs commits that GitHub could not provide. Start it to try again.",
+  checkpoint_repository_missing: "This workspace's repository could not be cloned for its restore. Start it to try again.",
+  checkpoint_corrupt: "This workspace's last checkpoint is damaged and cannot be restored.",
 };
+/** A failed restore keeps its checkpoint; Start tries it again. */
+const RETRYABLE = new Set(["checkpoint_restore_failed", "checkpoint_download_failed", "checkpoint_prerequisites_missing", "checkpoint_repository_missing"]);
 
 export function cloudV2Document(workspace: CloudV2Workspace): CloudWorkspaceDocument {
   const [owner, name] = workspace.repository.split("/") as [string, string];
@@ -62,11 +76,15 @@ export function cloudV2Document(workspace: CloudV2Workspace): CloudWorkspaceDocu
     status: workspace.archivedAt && (workspace.state === "stopped" || workspace.state === "failed") ? "archived" : STATUS[workspace.state],
     capabilities: {
       ...(workspace.capabilities.promptOutbox === 1 ? { promptOutbox: 1 as const } : {}),
+      ...(workspace.capabilities.githubPullRequests === 1 ? { githubPullRequests: 1 as const } : {}),
       canWrite: true, canEdit: true, canManage: true,
-      canStart: workspace.state === "stopped",
-      startUnavailableReason: workspace.state === "failed" ? "This workspace failed. Create a new one." : null,
+      canStart: workspace.state === "stopped" || (workspace.state === "failed" && RETRYABLE.has(workspace.errorCode ?? "")),
+      startUnavailableReason: workspace.state === "failed" && !RETRYABLE.has(workspace.errorCode ?? "") ? "This workspace failed. Create a new one." : null,
     },
     repository: { forge: "github.com", owner, name, revision: workspace.baseBranch },
+    ...(workspace.github ? { github: workspace.github } : {}),
+    ...(workspace.githubUnavailableReason ? { githubUnavailableReason: workspace.githubUnavailableReason } : {}),
+    ...(workspace.checkoutPath ? { checkoutPath: workspace.checkoutPath } : {}),
     generation: {
       number: 1,
       architecture: "linux/amd64",
@@ -85,8 +103,8 @@ export function cloudV2Document(workspace: CloudV2Workspace): CloudWorkspaceDocu
 
 /** The worker's native checkout, as the control plane configures it
  * (`CLOUD_V2_HOME/<repository>`). Mirror rows carry this path. */
-export function cloudV2CheckoutPath(document: Pick<CloudWorkspaceDocument, "repository">): string {
-  return `/home/user/${document.repository.owner}/${document.repository.name}`;
+export function cloudV2CheckoutPath(document: Pick<CloudWorkspaceDocument, "repository" | "checkoutPath">): string {
+  return document.checkoutPath ?? `/home/user/${document.repository.owner}/${document.repository.name}`;
 }
 
 const one = z.object({ workspace: CloudV2WorkspaceSchema });
@@ -162,17 +180,32 @@ export const CloudV2RepositorySchema = z.object({
   repository: z.string().regex(/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/),
   ref: z.string().optional(),
   commit: z.string().optional(),
+  branch: z.string().optional(),
   setup: z.string().max(8000).optional(),
 });
+/** What an admin edits: a repository, its branch or tag, and its setup. */
+export const CloudV2RepositoryDraftSchema = CloudV2RepositorySchema.pick({ repository: true, ref: true, setup: true });
+export type CloudV2RepositoryDraft = z.infer<typeof CloudV2RepositoryDraftSchema>;
 export const CloudV2BuildSchema = z.object({
   id: uuid, organizationId: uuid, version: z.number().int().positive(),
   recipe: z.object({ repositories: z.array(CloudV2RepositorySchema), rebuiltFrom: z.number().int().optional() }),
   state: z.enum(["queued", "building", "succeeded", "failed", "cancelled"]),
   snapshotId: z.string().nullable(), errorCode: z.string().nullable(),
   createdAt: z.string(), startedAt: z.string().nullable(), finishedAt: z.string().nullable(),
+  /** Absent from older control planes; they only run manual builds. */
+  reason: z.enum(["manual", "reactivate", "runtime", "refresh"]).optional(),
 }).passthrough();
 export type CloudV2Build = z.infer<typeof CloudV2BuildSchema>;
-const ComputerSchema = z.object({ activeBuildId: uuid.nullable(), snapshotName: z.string().nullable(), builds: z.array(CloudV2BuildSchema) });
+const RecipeSchema = z.object({ repositories: z.array(CloudV2RepositoryDraftSchema) });
+const ComputerSchema = z.object({
+  activeBuildId: uuid.nullable(), snapshotName: z.string().nullable(), builds: z.array(CloudV2BuildSchema),
+  /** The configured repositories and their revision; older control planes
+   * have neither, and the app then edits locally and sends the selection. */
+  recipe: RecipeSchema.optional(),
+  recipeRevision: z.number().int().nonnegative().optional(),
+});
+export type CloudV2Computer = z.infer<typeof ComputerSchema>;
+const SavedRecipeSchema = z.object({ recipe: RecipeSchema, recipeRevision: z.number().int().nonnegative() });
 
 /** A repository on the organization's live Cloud Computer. `id` is the
  * lowercase owner/name, which stays the same across builds. */
@@ -198,9 +231,28 @@ export async function getCloudV2Computer(organizationId: string) {
   return cloudAccountRequest(`/v1/cloud-v2/organizations/${uuid.parse(organizationId)}/computer`, ComputerSchema);
 }
 
+/** Older control planes: build exactly these repositories. */
 export async function buildCloudV2Computer(organizationId: string, repositories: z.infer<typeof CloudV2RepositorySchema>[]) {
   return (await cloudAccountRequest(`/v1/cloud-v2/organizations/${uuid.parse(organizationId)}/computer/builds`,
     z.object({ build: CloudV2BuildSchema }), { body: { repositories }, idempotencyKey: key() })).build;
+}
+
+/** Builds the configured repositories as the editor showed them at `revision`. */
+export async function buildConfiguredCloudV2Computer(organizationId: string, revision: number) {
+  return (await cloudAccountRequest(`/v1/cloud-v2/organizations/${uuid.parse(organizationId)}/computer/builds`,
+    z.object({ build: CloudV2BuildSchema }), { body: { revision }, idempotencyKey: key() })).build;
+}
+
+/** Saves the configured repositories; a build makes them live. */
+export async function saveCloudV2ComputerRecipe(organizationId: string, repositories: CloudV2RepositoryDraft[], revision: number) {
+  return cloudAccountRequest(`/v1/cloud-v2/organizations/${uuid.parse(organizationId)}/computer/recipe`,
+    SavedRecipeSchema, { body: { repositories, revision }, idempotencyKey: key(), method: "PUT" });
+}
+
+/** Discards unbuilt changes: the configured repositories return to the live build's. */
+export async function discardCloudV2ComputerRecipe(organizationId: string, revision: number) {
+  return cloudAccountRequest(`/v1/cloud-v2/organizations/${uuid.parse(organizationId)}/computer/recipe/discard`,
+    SavedRecipeSchema, { body: { revision }, idempotencyKey: key() });
 }
 
 export async function activateCloudV2Build(organizationId: string, buildId: string) {

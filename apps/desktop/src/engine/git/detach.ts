@@ -219,12 +219,37 @@ async function syncWorkspaceToRoot(
   const ws = getWorkspace(workspaceId);
   await withWorkspaceGitMutation(ws.path, async () => {
     const checkpointSha = await createDetachCheckpoint(workspaceId);
-    await runGit(rootPath, ["read-tree", "--reset", "-u", checkpointSha]);
+    await replaceDetachTree(rootPath, checkpointSha);
     const current = getDetachState();
     if (current?.workspaceId === workspaceId) {
       setDetachState({ ...current, checkpointSha });
     }
   });
+}
+
+/** Ignore rules never grant permission to destroy user data. Preflight both
+ * ignored and ordinary untracked paths, including file/directory collisions,
+ * on every sync and restore. Git's merge mode also refuses tracked edits. */
+async function replaceDetachTree(root: string, tree: string): Promise<void> {
+  const [untracked, tracked] = await Promise.all([
+    runGit(root, ["ls-files", "--others", "--directory", "--no-empty-directory", "-z"]),
+    runGit(root, ["ls-tree", "-r", "--name-only", "-z", tree]),
+  ]);
+  const paths = tracked.stdout.split("\0").filter(Boolean).sort();
+  const trackedPaths = new Set(paths);
+  for (const raw of untracked.stdout.split("\0").filter(Boolean)) {
+    const file = raw.endsWith("/") ? raw.slice(0, -1) : raw;
+    // Binary search avoids a quadratic scan of large worktrees.
+    const prefix = `${file}/`;
+    let lo = 0, hi = paths.length;
+    while (lo < hi) { const mid = (lo + hi) >>> 1; if (paths[mid]! < prefix) lo = mid + 1; else hi = mid; }
+    let ancestorCollision = trackedPaths.has(file);
+    for (let slash = file.indexOf("/"); slash >= 0; slash = file.indexOf("/", slash + 1))
+      ancestorCollision ||= trackedPaths.has(file.slice(0, slash));
+    if (ancestorCollision || paths[lo]?.startsWith(prefix))
+      throw new GitError({ code: "VALIDATION_FAILED", message: "An untracked or ignored path collides with the detach tree. Move it before retrying; your files have been retained." });
+  }
+  await runGit(root, ["read-tree", "-m", "-u", tree]);
 }
 
 // ── Public API ───────────────────────────────────────────
@@ -314,7 +339,7 @@ export async function detachStart(
   let checkpointSha = "";
   await withWorkspaceGitMutation(ws.path, async () => {
     checkpointSha = await createDetachCheckpoint(opts.workspaceId);
-    await runGit(rootPath, ["read-tree", "--reset", "-u", checkpointSha]);
+    await replaceDetachTree(rootPath, checkpointSha);
   });
 
   // 4. Start the watcher. chokidar (v4, pure-JS — no native bindings) so the
@@ -405,12 +430,7 @@ export async function detachStop(): Promise<DetachStopResult> {
   // Restore the root's working tree to what it was before detach.
   try {
     await withWorkspaceGitMutation(ws.path, async () => {
-      await runGit(ws.repoRoot, [
-        "read-tree",
-        "--reset",
-        "-u",
-        state.preRootHead,
-      ]);
+      await replaceDetachTree(ws.repoRoot, state.preRootHead);
       await runGit(ws.path, [
         "update-ref",
         "-d",

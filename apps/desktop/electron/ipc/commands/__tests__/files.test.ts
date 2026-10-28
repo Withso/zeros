@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import {
+import fs, {
   mkdtempSync,
   mkdirSync,
   realpathSync,
@@ -7,9 +7,14 @@ import {
   rmSync,
   symlinkSync,
   truncateSync,
+  readFileSync,
+  existsSync,
+  renameSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { syncBuiltinESMExports } from "node:module";
+import { fileMediaVersion } from "@zeros/protocol/file-media";
 
 // macOS's tmpdir() is itself a symlink (/var/folders/… → /private/var/folders/…),
 // so an un-resolved mkdtemp path never equals what read_image_thumbnail hands to
@@ -50,6 +55,7 @@ vi.mock("electron", () => ({
 
 import {
   readFile,
+  readFileRange,
   readImageThumbnail,
   type ReadFileResult,
   type ReadImageThumbnailResult,
@@ -103,6 +109,17 @@ function rotatedJpegFixture(width: number, height: number): Buffer {
 }
 
 describe("read_file", () => {
+  it("opts into video through the existing trusted workspace boundary", () => {
+    const root = realTempDir("zeros-video-ipc-");
+    try {
+      sidecarMock.root = root;
+      writeFileSync(path.join(root, "clip.mp4"), Buffer.from([0, 1, 2]));
+      expect(call({ cwd: root, path: "clip.mp4" })).toMatchObject({ kind: "binary" });
+      expect(call({ cwd: root, path: "clip.mp4", includeVideo: true })).toMatchObject({ kind: "video", dataUrl: "data:video/mp4;base64,AAEC" });
+      sidecarMock.root = null;
+      expect(call({ cwd: root, path: "clip.mp4", includeVideo: true })).toMatchObject({ kind: "error" });
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  });
   let dir = "";
   beforeEach(() => {
     dir = realTempDir("zeros-files-");
@@ -135,6 +152,36 @@ describe("read_file", () => {
     expect(res.kind).toBe("text");
     expect(res.content).toContain("const a = 1;");
     expect(res.bytes).toBeGreaterThan(0);
+  });
+
+  it("pins the approved workspace root through a streamed range read", async () => {
+    const workspace = path.join(dir, "workspace"), saved = path.join(dir, "saved");
+    const outside = realTempDir("zeros-media-outside-");
+    mkdirSync(workspace);
+    writeFileSync(path.join(workspace, "clip.mp4"), "allowed");
+    writeFileSync(path.join(outside, "clip.mp4"), "outside-canary");
+    const args = { cwd: workspace, path: "clip.mp4", offset: 0, length: 7,
+      version: fileMediaVersion(fs.statSync(path.join(workspace, "clip.mp4"))) };
+    const range = (params: Record<string, unknown>) =>
+      (readFileRange as unknown as (a: Record<string, unknown>) => Promise<unknown>)(params);
+    try {
+      await expect(range(args)).resolves.toEqual({ base64: Buffer.from("allowed").toString("base64"), bytes: 7 });
+      args.version = fileMediaVersion(fs.statSync(path.join(outside, "clip.mp4")));
+      let swapped = false;
+      const realpath = fs.realpathSync;
+      const lookup = vi.spyOn(fs, "realpathSync").mockImplementation(((name: fs.PathLike, options?: unknown) => {
+        const result = realpath(name, options as never);
+        if (String(name) === workspace && !swapped) {
+          swapped = true; renameSync(workspace, saved); symlinkSync(outside, workspace);
+        }
+        return result;
+      }) as typeof fs.realpathSync);
+      syncBuiltinESMExports();
+      try {
+        await expect(Promise.resolve().then(() => range(args))).rejects.toThrow();
+        expect(swapped).toBe(true);
+      } finally { lookup.mockRestore(); syncBuiltinESMExports(); }
+    } finally { rmSync(outside, { recursive: true, force: true }); }
   });
 
   it("reads a secret-NAMED file that lives inside the workspace (local = full access)", () => {
@@ -240,7 +287,7 @@ describe("read_file", () => {
       dataUrl: "data:image/png;base64,THUMBNAIL",
     });
     expect(nativeImageMock.createThumbnailFromPath).toHaveBeenCalledWith(
-      imagePath,
+      expect.stringMatching(/\/zeros-thumbnail-[^/]+\/source\.png$/),
       { width: 256, height: 144 },
     );
   });
@@ -252,7 +299,7 @@ describe("read_file", () => {
     await callThumbnail({ cwd: dir, path: "portrait.png" });
 
     expect(nativeImageMock.createThumbnailFromPath).toHaveBeenCalledWith(
-      imagePath,
+      expect.stringMatching(/\/zeros-thumbnail-[^/]+\/source\.png$/),
       { width: 144, height: 256 },
     );
     expect(nativeImageMock.thumbnail.resize).toHaveBeenCalledWith({
@@ -273,7 +320,7 @@ describe("read_file", () => {
     });
 
     expect(nativeImageMock.createThumbnailFromPath).toHaveBeenCalledWith(
-      imagePath,
+      expect.stringMatching(/\/zeros-thumbnail-[^/]+\/source\.png$/),
       { width: 1_024, height: 576 },
     );
   });
@@ -293,7 +340,7 @@ describe("read_file", () => {
     });
 
     expect(nativeImageMock.createThumbnailFromPath).toHaveBeenCalledWith(
-      imagePath,
+      expect.stringMatching(/\/zeros-thumbnail-[^/]+\/source\.png$/),
       { width: 64, height: 36 },
     );
     expect(res).toMatchObject({ kind: "image", width: 64, height: 36 });
@@ -332,7 +379,7 @@ describe("read_file", () => {
     });
 
     expect(nativeImageMock.createThumbnailFromPath).toHaveBeenCalledWith(
-      imagePath,
+      expect.stringMatching(/\/zeros-thumbnail-[^/]+\/source\.png$/),
       { width: 1_536, height: 864 },
     );
   });
@@ -369,7 +416,9 @@ describe("read_file", () => {
       maxDimension: 1_536,
     });
 
-    expect(nativeImageMock.createFromPath).toHaveBeenCalledWith(imagePath);
+    expect(nativeImageMock.createFromPath).toHaveBeenCalledWith(
+      expect.stringMatching(/\/zeros-thumbnail-[^/]+\/source\.png$/),
+    );
     expect(sourceImage.resize).toHaveBeenCalledWith({
       width: 1_536,
       height: 864,
@@ -490,7 +539,7 @@ describe("read_file", () => {
       sourceHeight: 360,
     });
     expect(nativeImageMock.createThumbnailFromPath).toHaveBeenCalledWith(
-      sourcePath,
+      expect.stringMatching(/\/zeros-thumbnail-[^/]+\/source\.png$/),
       { width: 256, height: 144 },
     );
   });
@@ -501,6 +550,29 @@ describe("read_file", () => {
     expect(res.kind).toBe("error");
     expect("error" in res ? res.error : "").toMatch(/outside the workspace/);
     expect(nativeImageMock.createThumbnailFromPath).not.toHaveBeenCalled();
+  });
+
+  it("decodes the approved private copy after the workspace source is replaced", async () => {
+    const directory = path.join(dir, "nested");
+    const outside = realTempDir("zeros-thumbnail-canary-");
+    mkdirSync(directory);
+    const approved = pngFixture(32, 640, 360);
+    writeFileSync(path.join(directory, "source.png"), approved);
+    writeFileSync(path.join(outside, "source.png"), "outside-canary");
+    let decodedPath = "";
+    nativeImageMock.createThumbnailFromPath.mockImplementationOnce(async (...args: unknown[]) => {
+      decodedPath = String(args[0]);
+      renameSync(directory, `${directory}-saved`);
+      symlinkSync(outside, directory);
+      expect(readFileSync(decodedPath)).toEqual(approved);
+      return nativeImageMock.thumbnail;
+    });
+    try {
+      expect((await callThumbnail({ cwd: dir, path: "nested/source.png" })).kind).toBe("image");
+      expect(decodedPath).not.toContain(dir);
+      expect(existsSync(decodedPath)).toBe(false);
+      expect(readFileSync(path.join(outside, "source.png"), "utf8")).toBe("outside-canary");
+    } finally { rmSync(outside, { recursive: true, force: true }); }
   });
 
   it("refuses a thumbnail symlink that resolves outside the workspace", async () => {
@@ -592,7 +664,7 @@ describe("read_file", () => {
     const res = await callThumbnail({ cwd: dir, path: "fallback.png" });
 
     expect(nativeImageMock.createFromPath).toHaveBeenCalledWith(
-      path.join(dir, "fallback.png"),
+      expect.stringMatching(/\/zeros-thumbnail-[^/]+\/source\.png$/),
     );
     expect(res.kind).toBe("image");
   });

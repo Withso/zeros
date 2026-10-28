@@ -36,6 +36,12 @@ const ALLOWED_COMMANDS = new Set<string>([
   "appearance_set_mode",
   "agent_context_files",
   "app_info",
+  "edit_history",
+  "full_disk_access_status",
+  "full_disk_access_open_settings",
+  "keep_awake_get",
+  "keep_awake_set",
+  "keep_awake_activity",
   "local_navigation_ready",
   "cursor_subscription",
   "provider_subscription",
@@ -56,6 +62,8 @@ const ALLOWED_COMMANDS = new Set<string>([
   "native_app_names",
   "tool_artwork_images",
   "design_export_png",
+  "design_capture_acquire",
+  "design_capture_release",
   "dialog_pick_folder",
   "engine_reset_to_default",
   "get_engine_port",
@@ -87,6 +95,11 @@ const ALLOWED_COMMANDS = new Set<string>([
   "process_diagnostics_report",
   "process_metrics_snapshot",
   "read_file",
+  "read_file_range",
+  "file_media_open",
+  "file_media_close",
+  "file_media_reply",
+  "file_media_download",
   "read_image_thumbnail",
   "write_file",
   "reveal_in_finder",
@@ -219,6 +232,8 @@ const bridge = {
   // A synchronous metadata snapshot is available before page scripts run.
   // Main is authoritative; argv and renderer/Vite flags cannot opt in.
   localDevelopment: ipcRenderer.sendSync("zeros:local-development") === true,
+  // Only the main window declares its fixed visual-zoom/scrolling contract.
+  asyncCanvasWheel: process.argv.includes("--zeros-async-canvas-wheel"),
   maintainAttachmentSources(retainedIds: string[]): Promise<string[]> {
     return ipcRenderer.invoke("zeros:attachment-source-maintenance", retainedIds);
   },

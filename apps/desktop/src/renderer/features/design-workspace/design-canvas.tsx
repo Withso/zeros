@@ -3,6 +3,7 @@ import {
   designCanvasCameraStyle,
   designCanvasScreenPixels,
   paintDesignCanvasCamera,
+  observeDesignCanvasChrome,
 } from "./design-canvas-camera";
 import {
   DESIGN_CANVAS_DEFAULT_TEXT_COLOR,
@@ -19,12 +20,12 @@ import {
 // --- IMPORTS ---
 
 import {
-  Code2,
   Diamond,
   Frame,
   Image as ImageIcon,
   MousePointer2,
   Palette,
+  Play,
   Type,
 } from "lucide-react";
 import React, {
@@ -34,6 +35,7 @@ import React, {
   useMemo,
   useRef,
   useState,
+  useSyncExternalStore,
 } from "react";
 import { useShallow } from "zustand/react/shallow";
 
@@ -50,7 +52,9 @@ import {
   type DesignRuntimeTreeNode,
 } from "@zeros/protocol/design-runtime";
 
-import { designFrameRuntime } from "../../platform/bridge/design-frame-runtime";
+import { useWorkbenchStatusSource } from "../../shell/workbench/tab-status";
+import { retainDesignResource } from "./state/design-resource-counters";
+import { designFrameRuntime, type DesignFrameRuntimeConnection } from "../../platform/bridge/design-frame-runtime";
 import {
   type DesignCanvasFrameWire,
   type DesignFrameGeometryWire,
@@ -65,9 +69,7 @@ import {
   ContextMenuSeparator,
 } from "../../shared/ui/primitives/context-menu";
 import {
-  CodeBlock,
   Input,
-  ScrollArea,
   Toolbar,
   toast,
 } from "../../shared/ui/primitives";
@@ -112,8 +114,6 @@ import {
   fitDesignRects,
   resizeDesignRect,
   resizeDesignRectWithinBounds,
-  retainLiveDesignFrameFiles,
-  selectLiveDesignFrameFiles,
   snapDesignRect,
   snapDesignResizeRect,
   zoomDesignViewportAtPoint,
@@ -130,7 +130,7 @@ import {
 } from "./design-effect-values";
 import {
   canInsertDesignFrame,
-  designFrameInsertionOperations,
+  designFrameInsertion,
 } from "./design-frame-insertion";
 import {
   createDesignGestureLoop,
@@ -191,6 +191,7 @@ import {
   createDesignTextNodeId,
 } from "./design-text-editing";
 import { DesignThemeEditor } from "./design-theme-editor";
+import { captureDeferredFocus } from "../../shared/ui/deferred-focus";
 import { designThemeView, effectiveDesignTheme } from "./design-themes";
 import { DesignToolbarButton } from "./design-inspector-kit";
 import { designRuntimeLayerLabel } from "./design-layer-label";
@@ -207,9 +208,14 @@ import {
   publishDesignLayoutToolsLive,
   releaseDesignLayoutToolsLive,
 } from "./state/design-layout-tools-live";
-import { useDesignRuntimeStore } from "./state/design-runtime-store";
+import { useDesignRuntimeStore, waitForDesignRuntimeFrame } from "./state/design-runtime-store";
+import { clearDesignFrameIntent, noteDesignFrameIntent, primeDesignFrameIntent, useDesignFrameIntent } from "./state/design-frame-intent";
+import { useDesignFrameResidency } from "./state/use-design-frame-residency";
+import { designFrameViews, designFramesAtPresentedGeometry, isPreparedDesignFrame, type DesignFrameView } from "./state/design-frame-view";
+import { useDesignHistoryGeometryPreview, useDesignHistorySelection } from "./state/design-history-presentation";
+import { useDesignFramePreparation } from "./state/use-design-frame-preparation";
 import { designBackgroundWork } from "./state/design-background-work";
-import { designPreviewDemandItems, type DesignPreviewLevel } from "./state/design-frame-previews";
+import { activeDesignPreviewDemand, designPreviewDemandItems, type DesignPreviewLevel } from "./state/design-frame-previews";
 import {
   useDesignFramePictured,
   useDesignFramePreviewDemand,
@@ -250,7 +256,9 @@ import {
   updateDesignFrameGeometryCached,
   moveDesignFramesCached,
   updateDesignNodeStylesCached,
-  warmDesignFrameDocument,
+  hasPendingDesignEdits,
+  subscribePendingDesignEdits,
+  retireHiddenDesignFrames,
 } from "./state/design-workspace-cache";
 import {
   designWorkspaceView,
@@ -258,11 +266,12 @@ import {
   captureDesignPageOwner,
   useDesignWorkspaceUiStore,
   useDesignWorkspaceView,
+  designSelectionUnchangedSince,
 } from "./state/design-workspace-ui";
 import { useDesignFoundation } from "./state/use-design-foundation";
-import { useDesignFrameDocument } from "./state/use-design-frame-document";
 
 import { DesignFrameRenderSurface } from "./design-frame-render-surface";
+import { hasAsyncCanvasWheel } from "../../platform/runtime";
 import { useDesignSavedEditing } from "./design-saved-editing";
 import {
   DesignAgentActivityChip,
@@ -321,7 +330,6 @@ interface CanvasHitStackMenu {
 const MIN_FRAME_WIDTH = 1;
 const MIN_FRAME_HEIGHT = 1;
 const COLD_BUSY_DELAY_MS = 180;
-const MAX_LIVE_DESIGN_FRAMES = 12;
 /** How long a dragged frame rests over another before that one goes live. */
 const DESIGN_NEST_DWELL_MS = 300;
 /** Chromium stops re-rasterizing magnified iframe textures at device fidelity
@@ -338,7 +346,6 @@ const EMPTY_NODE_DETAILS: readonly DesignRuntimeNodeDetails[] = Object.freeze(
   [],
 );
 export const EMPTY_NODE_IDS: readonly string[] = Object.freeze([]);
-const EMPTY_CANVAS_FRAMES: readonly DesignCanvasFrameWire[] = Object.freeze([]);
 /** The origin marker keeps a constant screen size, so on a selection only a few
  * marker-widths across it stops reading as a pivot and starts covering the
  * element. Below six times its own hit box — roughly 108 screen pixels, or a
@@ -455,15 +462,21 @@ function useDelayedColdBusy(loading: boolean): boolean {
 
 // ============================================
 // COMPONENT: DesignCanvas
-// PURPOSE: Pan, zoom, select, create, move, resize, rename, and inspect source
+// PURPOSE: Pan, zoom, select, create, move, resize, and rename
 // USED IN: DesignWorkspaceColumn
 // ============================================
+
+const DesignPreparingFrame = React.forwardRef<HTMLElement, React.ComponentPropsWithoutRef<"article">>(function DesignPreparingFrame(props, ref) {
+  useLayoutEffect(() => retainDesignResource("frameSurfaces"), []);
+  return <article {...props} ref={ref} />;
+});
 
 export function DesignCanvas({
   workspaceId,
   folder,
   snapshot,
   loading,
+  refresh,
   active,
   canvasBackground,
   motionTimelineOpen,
@@ -481,7 +494,8 @@ export function DesignCanvas({
   const canvasDocumentOwner = `${workspaceId ?? ""}\0${canvasDirectoryId ?? ""}\0${view.activePageId ?? ""}`;
   const canvasDocumentOwnerRef = useRef(canvasDocumentOwner);
   canvasDocumentOwnerRef.current = canvasDocumentOwner;
-  const setCodeView = useDesignWorkspaceUiStore((state) => state.setCodeView);
+  const canvasFolderRef = useRef(folder);
+  canvasFolderRef.current = folder;
   const setActiveTheme = useDesignWorkspaceUiStore(
     (state) => state.setActiveTheme,
   );
@@ -493,30 +507,33 @@ export function DesignCanvas({
     [snapshot?.themes],
   );
   const frameTheme = effectiveDesignTheme(view.activeTheme, baseThemeId);
-  const selectedFrame =
-    snapshot?.frames.find((frame) => frame.file === view.selectedFrame) ??
-    snapshot?.frames[0] ??
-    null;
+  // Undo and Redo show a frame's earlier place at once, before the engine
+  // confirms it. Painting and hit testing read that presentation; every
+  // write still checks the confirmed catalog.
+  const historyGeometry = useDesignHistoryGeometryPreview(workspaceId ?? "");
+  // Undo of a frame change also shows the frame it selects at once; this
+  // paints frame chrome only. Gestures and writes keep the confirmed view.
+  const historySelection = useDesignHistorySelection(active ? workspaceId : null);
+  const paintedSelectedTargets = historySelection?.selectedTargets ?? view.selectedTargets;
+  const confirmedFrameViews = designFrameViews(snapshot);
+  const frameViews = useMemo(
+    () => designFramesAtPresentedGeometry(confirmedFrameViews, active ? historyGeometry?.frames : null),
+    [active, confirmedFrameViews, historyGeometry],
+  );
+  const preparedFrames = useMemo(() => frameViews.filter(isPreparedDesignFrame), [frameViews]);
+  const preparationError = useMemo(() => {
+    const message = Object.values(snapshot?.preparation?.errors ?? {})[0];
+    return message ? new Error(message) : null;
+  }, [snapshot?.preparation?.errors]);
+  useWorkbenchStatusSource({ error: preparationError, pending: false, hasContent: !!snapshot, active, retry: refresh }, workspaceId ?? undefined);
+  const selectedDescription = frameViews.find((frame) => frame.file === view.selectedFrame) ?? frameViews[0];
+  const selectedFrame = selectedDescription && isPreparedDesignFrame(selectedDescription) ? selectedDescription : null;
   const canvasFoundation = useDesignFoundation(
     workspaceId,
     selectedFrame?.file,
     selectedFrame?.sourceVersion,
     active && Boolean(selectedFrame),
   );
-  const selectedFrameDocument = useDesignFrameDocument(
-    workspaceId ?? "",
-    selectedFrame?.file ?? "",
-    selectedFrame?.sourceVersion ?? "",
-    active && Boolean(workspaceId && selectedFrame),
-  );
-  const warmSelectedFrameDocument = useCallback(() => {
-    if (!active || !workspaceId || !selectedFrame) return;
-    warmDesignFrameDocument(
-      workspaceId,
-      selectedFrame.file,
-      selectedFrame.sourceVersion,
-    );
-  }, [active, selectedFrame, workspaceId]);
   const selectedNodeDetails = useDesignRuntimeStore((state) => {
     if (!workspaceId || !selectedFrame || !view.selectedNodeId) return null;
     return (
@@ -538,6 +555,10 @@ export function DesignCanvas({
     view.frameSelected && !view.selectedNodeId
       ? selectedFrameRootDetails
       : null;
+  // Motion uses the inspector's style target, including the outer frame root.
+  // Selection, rather than runtime readback readiness, keeps the timeline open.
+  const motionNodeDetails = selectedNodeDetails ?? frameLayoutOwnerDetails;
+  const motionTargetSelected = view.frameSelected || Boolean(view.selectedNodeId);
   /** The one auto-layout owner whose padding and gaps the canvas edits: a
    * single selected layer, or the selected frame's root. A multi-selection
    * has none — editing its primary alone would surprise. */
@@ -546,6 +567,8 @@ export function DesignCanvas({
       ? null
       : (selectedNodeDetails ?? frameLayoutOwnerDetails);
   const layoutOwnerId = layoutOwnerDetails?.oid ?? null;
+  // Cancels whichever direct-DOM pointer gesture owns global listeners.
+  const gestureCancelRef = useRef<(() => void) | null>(null);
   const selectedNodeDetailsList = useDesignRuntimeStore(
     useShallow((state) => {
       if (!workspaceId || !selectedFrame || view.selectedNodeIds.length === 0) {
@@ -561,7 +584,19 @@ export function DesignCanvas({
       });
     }),
   );
-  const selectionRuntimeFrames = useDesignRuntimeStore(state => workspaceId ? state.byWorkspace[workspaceId]?.frames : undefined);
+  // Only the secondary targets' own readbacks: hover reads, screenshots and
+  // other frames' snapshots must not re-render the whole canvas.
+  const secondaryTargetDetails = useDesignRuntimeStore(useShallow((state) => {
+    const frames = workspaceId ? state.byWorkspace[workspaceId]?.frames : undefined;
+    const details: Record<string, DesignRuntimeNodeDetails> = {};
+    if (!frames) return details;
+    for (const target of view.selectedTargets) {
+      if (!target.nodeId) continue;
+      const value = frames[target.frame]?.detailsByNode[target.nodeId];
+      if (value) details[`${target.frame}\u0000${target.nodeId}`] = value;
+    }
+    return details;
+  }));
   const selectedRuntimeTree = useDesignRuntimeStore((state) => {
     if (!workspaceId || !selectedFrame) return EMPTY_DESIGN_TREE;
     return (
@@ -702,6 +737,10 @@ export function DesignCanvas({
     }
     let cancelled = false;
     const owner = childGeometryOwner;
+    // A metadata refresh can read the runtime while a gesture is previewing.
+    // Its child boxes are provisional even if the reply arrives after Escape.
+    // Keep the confirmed baseline; the gesture owns its own live measurement.
+    const provisional = gestureCancelRef.current !== null;
     void previewDesignNodeGeometry({
       workspaceId,
       frame: selectedFrame,
@@ -709,7 +748,7 @@ export function DesignCanvas({
       children: true,
     })
       .then((geometry) => {
-        if (cancelled) return;
+        if (cancelled || provisional || gestureCancelRef.current) return;
         setChildGeometryState({
           owner,
           selectionOwner: childGeometrySelectionOwner,
@@ -717,7 +756,7 @@ export function DesignCanvas({
         });
       })
       .catch(() => {
-        if (!cancelled) {
+        if (!cancelled && !provisional && !gestureCancelRef.current) {
           setChildGeometryState({
             owner,
             selectionOwner: childGeometrySelectionOwner,
@@ -823,16 +862,17 @@ export function DesignCanvas({
   ]);
 
   useEffect(() => {
-    if (motionTimelineOpen && !view.selectedNodeId) {
+    if (motionTimelineOpen && !motionTargetSelected) {
       onMotionTimelineOpenChange(false);
     }
-  }, [motionTimelineOpen, onMotionTimelineOpenChange, view.selectedNodeId]);
+  }, [motionTimelineOpen, motionTargetSelected, onMotionTimelineOpenChange]);
 
   // DOM owner for viewport bounds, focus scoping, and pointer-relative zoom.
   const viewportRef = useRef<HTMLDivElement | null>(null);
   // Direct transform target keeps panning gesture paints out of React.
   const worldRef = useRef<HTMLDivElement | null>(null);
   const frameGeometryPreviewsRef = useRef(new Map<string, FrameGeometryPreview>());
+  const frameElementsRef = useRef(new Map<string, HTMLElement>());
   const marqueeRef = useRef<HTMLDivElement | null>(null);
   const creationDraftRef = useRef<HTMLDivElement | null>(null);
   const verticalGuideRef = useRef<HTMLDivElement | null>(null);
@@ -866,18 +906,28 @@ export function DesignCanvas({
   const [renamingFrame, setRenamingFrame] = useState<string | null>(null);
   // Keeps the draft isolated from the authoritative frame title.
   const [renameDraft, setRenameDraft] = useState("");
+  // One explicit playback session; it never survives an owner, source or
+  // editing-intent change. A token also fences late iframe stop/error replies.
+  const [playbackSession, setPlaybackSession] = useState<{
+    id: string;
+    owner: string;
+    file: string;
+    sourceVersion: string;
+    selectionEvent: number | undefined;
+  } | null>(null);
   // Tool choice is interaction-local; only semantic frame/node selection is durable.
   const [activeTool, setActiveTool] = useState<DesignCanvasTool>("select");
   const activeToolRef = useRef<DesignCanvasTool>("select");
   activeToolRef.current = activeTool;
   const activateTool = useCallback((tool: DesignCanvasTool) => {
+    setPlaybackSession(null);
     activeToolRef.current = tool;
     setActiveTool(tool);
   }, []);
   // The theme matrix is a persistent non-modal tool window launched from the
   // canvas toolbar, so it may coexist with canvas and inspector work.
   const [themeEditorOpen, setThemeEditorOpen] = useState(false);
-  const motionOverlayOwner = `${workspaceId ?? ""}\u0000${snapshot?.directoryId ?? view.directoryId ?? ""}\u0000${selectedFrame?.file ?? ""}\u0000${selectedNodeDetails?.oid ?? ""}`;
+  const motionOverlayOwner = `${workspaceId ?? ""}\u0000${snapshot?.directoryId ?? view.directoryId ?? ""}\u0000${selectedFrame?.file ?? ""}\u0000${motionNodeDetails?.oid ?? ""}`;
   const [motionOverlayState, setMotionOverlayState] =
     useState<DesignMotionOverlayState>({
       owner: "",
@@ -896,8 +946,11 @@ export function DesignCanvas({
       : null;
   const publishMotionDraft = useCallback(
     (draft: DesignMotionTimelineDraft | null) => {
+      // No draft reads the same for every owner; a closed timeline switching
+      // selection must not re-render the canvas to say so again.
       setMotionOverlayState((current) =>
-        current.owner === motionOverlayOwner && current.draft === draft
+        (current.owner === motionOverlayOwner || (draft === null && current.draft === null)) &&
+        current.draft === draft
           ? current
           : {
               owner: motionOverlayOwner,
@@ -926,25 +979,21 @@ export function DesignCanvas({
     );
   }, []);
   const themeEditorTriggerRef = useRef<HTMLButtonElement | null>(null);
-  const focusThemeEditorTrigger = useCallback(() => {
-    // Radix Slot may own the outer Tooltip ref. The scoped data hook keeps
-    // controlled-dialog restoration deterministic without a global selector.
-    const trigger =
-      themeEditorTriggerRef.current ??
-      viewportRef.current?.querySelector<HTMLButtonElement>(
-        "[data-design-theme-trigger]",
-      );
-    trigger?.focus();
-  }, []);
   const setThemeEditorOpenWithFocus = useCallback(
     (open: boolean) => {
+      // Radix Slot may own the outer Tooltip ref; use the scoped hook too.
+      const trigger = themeEditorTriggerRef.current ??
+        viewportRef.current?.querySelector<HTMLButtonElement>("[data-design-theme-trigger]") ?? null;
+      const mayRestoreFocus = captureDeferredFocus(trigger);
       setThemeEditorOpen(open);
       if (open) return;
       // Controlled dialogs have no Radix DialogTrigger to restore. Wait until
       // FocusScope has unmounted, then return keyboard users to the canvas tool.
-      window.requestAnimationFrame(focusThemeEditorTrigger);
+      window.requestAnimationFrame(() => {
+        if (mayRestoreFocus()) trigger?.focus();
+      });
     },
-    [focusThemeEditorTrigger],
+    [],
   );
   const changeActiveTheme = useCallback(
     (theme: string | null) => {
@@ -992,7 +1041,7 @@ export function DesignCanvas({
           file: string;
           key: string;
           start: DesignFrameGeometryWire;
-          element: HTMLElement;
+          element: HTMLElement | null;
           preview: FrameGeometryPreview;
         }>;
         dx: number;
@@ -1056,8 +1105,6 @@ export function DesignCanvas({
   const textCommitGuardRef = useRef(
     createInlineTextCommitGuard<InlineTextEdit>(),
   );
-  // Cancels whichever direct-DOM pointer gesture owns global listeners.
-  const gestureCancelRef = useRef<(() => void) | null>(null);
   const canvasHoverFrameRef = useRef<number | null>(null);
   // One full computed-style hit test runs at a time; pointer motion replaces
   // the queued sample instead of creating an unbounded runtime waterfall.
@@ -1075,9 +1122,13 @@ export function DesignCanvas({
     y: number;
   } | null>(null);
   const wheelViewportRef = useRef<DesignViewport | null>(null);
+  const wheelPaintFrameRef = useRef<number | null>(null);
   const wheelSettleTimerRef = useRef<number | null>(null);
-  /** The zoom the camera is actually painted at. A wheel or pinch keeps the
-   * store 80ms behind while it paints the world directly, so a gesture that
+  const wheelBoundsRef = useRef<DOMRect | null>(null);
+  const armWheelStartRef = useRef<(() => void) | null>(null);
+  /** The transient camera zoom. Continued native input paints at the display
+   * callback; direct actions flush it first. A wheel or pinch keeps the store
+   * 80ms behind, so a gesture that
    * divided pointer travel by the store's number would track the pointer at the
    * wrong rate for the rest of the drag. */
   const liveDesignZoom = useCallback(
@@ -1085,12 +1136,18 @@ export function DesignCanvas({
     [view.zoom],
   );
   const cancelPendingWheelGesture = useCallback(() => {
+    if (wheelPaintFrameRef.current !== null) {
+      window.cancelAnimationFrame(wheelPaintFrameRef.current);
+      wheelPaintFrameRef.current = null;
+    }
     if (wheelSettleTimerRef.current !== null) {
       window.clearTimeout(wheelSettleTimerRef.current);
       wheelSettleTimerRef.current = null;
     }
     wheelViewportRef.current = null;
+    wheelBoundsRef.current = null;
     worldRef.current?.removeAttribute("data-design-camera-gesture");
+    armWheelStartRef.current?.();
   }, []);
   // A retained canvas may change workspace owner before an 80ms trackpad
   // settle fires. Never let that old gesture publish into a hidden owner.
@@ -1098,20 +1155,44 @@ export function DesignCanvas({
     () => () => cancelPendingWheelGesture(),
     [cancelPendingWheelGesture, workspaceId],
   );
+  const playbackOwner = `${canvasDocumentOwner}\0${folder ?? ""}\0${view.ownerRevision ?? 0}\0${snapshot?.protocolCapability ?? "bridge"}`;
+  const playbackFrame = playbackSession && preparedFrames.find((frame) =>
+    frame.file === playbackSession.file && frame.sourceVersion === playbackSession.sourceVersion);
+  const currentPlayback =
+    active && playbackSession?.owner === playbackOwner && playbackFrame &&
+    activeTool === "select" && !inlineTextEdit && !renamingFrame && !motionTimelineOpen &&
+    view.selectionEvent === playbackSession.selectionEvent && view.selectedTargets.length === 0 &&
+    designViewportShowsAnyRect(view, viewportSize, [playbackFrame])
+      ? playbackSession
+      : null;
+  const currentPlaybackRef = useRef(currentPlayback);
+  currentPlaybackRef.current = currentPlayback;
   useLayoutEffect(() => {
-    if (wheelViewportRef.current) return;
-    paintDesignCanvasCamera(
-      worldRef.current,
-      { zoom: view.zoom, panX: view.panX, panY: view.panY },
-      false,
-    );
-  }, [view.panX, view.panY, view.zoom]);
-  const liveFrameFilesRef = useRef<{
-    owner: string;
-    files: ReadonlySet<string>;
-  }>({ owner: "", files: new Set() });
-  const mountOwner = `${workspaceId ?? ""}\0${folder ?? ""}`;
-  const liveFrameOwner = `${mountOwner}\0${view.activePageId ?? ""}`;
+    if (playbackSession && !currentPlayback) setPlaybackSession(null);
+  }, [currentPlayback, playbackSession]);
+  const stopFramePlayback = useCallback((sessionId: string, error?: Error) => {
+    const current = currentPlaybackRef.current;
+    if (current?.id !== sessionId) return;
+    currentPlaybackRef.current = null;
+    setPlaybackSession(null);
+    if (!document.hidden) viewportRef.current?.querySelector<HTMLButtonElement>(
+      `[data-design-frame-play="${CSS.escape(current.file)}"]`,
+    )?.focus({ preventScroll: true });
+    if (error) toast.error("Couldn't play this frame", { description: errorMessage(error) });
+  }, []);
+  useEffect(() => {
+    if (!currentPlayback) return;
+    const hide = () => {
+      if (document.hidden) stopFramePlayback(currentPlayback.id);
+    };
+    document.addEventListener("visibilitychange", hide);
+    return () => document.removeEventListener("visibilitychange", hide);
+  }, [currentPlayback, stopFramePlayback]);
+  const liveFrameOwner = `${canvasDocumentOwner}\0${folder ?? ""}`;
+  const subscribeEdits = useCallback((listener: () => void) => workspaceId
+    ? subscribePendingDesignEdits(workspaceId, listener) : () => {}, [workspaceId]);
+  const readPendingEdits = useCallback(() => !!workspaceId && hasPendingDesignEdits(workspaceId), [workspaceId]);
+  const pendingEdits = useSyncExternalStore(subscribeEdits, readPendingEdits, readPendingEdits);
   // Layers reads each open frame's runtime tree, so an open frame is a demand
   // for a live runtime exactly like the selection is.
   const layerDisclosures = useDesignWorkspaceDisclosure(workspaceId);
@@ -1140,85 +1221,125 @@ export function DesignCanvas({
     paintNestTarget(file);
     setNestLiveFile(file);
   }, [paintNestTarget]);
+  // The frame whose title or Layers row the pointer (or focus) rests on is the
+  // likely next selection: boot its editor now so the click paints ready
+  // Layers and inspector data. One latest frame, ranked with explicit demand.
+  const intentFile = useDesignFrameIntent(active ? workspaceId : null);
+  useEffect(() => {
+    if (!active && workspaceId) clearDesignFrameIntent(workspaceId);
+  }, [active, workspaceId]);
+  // Selecting the frame fulfils the intent; selection demand owns it now, and
+  // clearing the selection later must retire an editor nothing else needs.
+  useEffect(() => {
+    if (workspaceId && intentFile && view.selectedTargets.some((target) => target.frame === intentFile))
+      clearDesignFrameIntent(workspaceId);
+  }, [intentFile, view.selectedTargets, workspaceId]);
   const layersOpenFiles = useMemo(
     () => [
-      ...Object.entries(layerDisclosures)
+      ...(currentPlayback ? [currentPlayback.file] : []),
+      ...Object.entries(view.layersVisible ? layerDisclosures : {})
         .filter(([, disclosure]) => disclosure.treeExpanded)
         .map(([file]) => file),
       ...agentDraftFiles,
       ...(nestLiveFile ? [nestLiveFile] : []),
+      ...(intentFile && !currentPlayback ? [intentFile] : []),
     ],
-    [agentDraftFiles, layerDisclosures, nestLiveFile],
+    [agentDraftFiles, currentPlayback, intentFile, layerDisclosures, nestLiveFile, view.layersVisible],
   );
   // Saved pictures of this directory's frames. A frame painted no larger
   // than its picture shows the picture instead of running its document.
   const previewOwner = useDesignPreviewOwner(workspaceId, snapshot?.directoryId);
+  const devicePixelRatio =
+    typeof window === "undefined" ? 1 : window.devicePixelRatio || 1;
   const pictured = useDesignFramePictured(
     previewOwner,
     frameTheme,
-    snapshot?.frames ?? EMPTY_CANVAS_FRAMES,
+    preparedFrames,
     active,
+    (wheelViewportRef.current?.zoom ?? view.zoom) * devicePixelRatio,
   );
-  const devicePixelRatio =
-    typeof window === "undefined" ? 1 : window.devicePixelRatio || 1;
-  const liveFrameFiles = useMemo(() => {
-    const previous =
-      liveFrameFilesRef.current.owner === liveFrameOwner
-        ? liveFrameFilesRef.current.files
-        : new Set<string>();
-    const frames = snapshot?.frames ?? [];
-    const next =
-      active && snapshot
-        ? selectLiveDesignFrameFiles({
-            frames,
-            viewport: viewportSize,
-            view,
-            selectedFrame: selectedFrame?.file ?? null,
-            maxLive: MAX_LIVE_DESIGN_FRAMES,
-            requiredFiles: layersOpenFiles,
-            pictured,
-            devicePixelRatio,
-          })
-        : new Set<string>();
-    const files = retainLiveDesignFrameFiles({
-      previous,
-      available: frames.map((frame) => frame.file),
-      active,
-      maxLive: MAX_LIVE_DESIGN_FRAMES,
-      next,
-    });
-    return files;
-  }, [
-    active,
-    devicePixelRatio,
-    layersOpenFiles,
-    liveFrameOwner,
-    pictured,
-    selectedFrame?.file,
-    snapshot,
-    view,
-    viewportSize,
-  ]);
+  // A lower-resolution decoded cover is enough to hand off a live slot while
+  // finer pixels arrive. Without any cover, keep the visible document painted.
+  const covered = useDesignFramePictured(previewOwner, frameTheme, preparedFrames, active);
+  const sourceSurfaceState = useMemo(() => ({ owner: `${liveFrameOwner}\0${snapshot?.protocolCapability}\0${frameTheme}`,
+    ready: new Map<string, string>(), unavailable: new Map<string, string>() }),
+    [liveFrameOwner, snapshot?.protocolCapability, frameTheme]);
+  const { frames: mountedFrames, live: liveFrameFiles, sources: sourceFrameFiles, refresh: refreshFrameResidency } = useDesignFrameResidency({
+    owner: liveFrameOwner,
+    frames: frameViews,
+    active, view, viewport: viewportSize, camera: wheelViewportRef,
+    // The active frame also serves metadata APIs and remembered navigation.
+    // It needs an editor only when something consumes its live document.
+    // A cached overview with closed panels must not keep a hidden editor busy.
+    selectedFrame: view.frameSelected || view.selectedNodeIds.length > 0 || view.layersVisible ||
+      view.inspectorVisible || activeTool === "text" || motionTimelineOpen || pendingEdits
+      ? selectedDescription?.file ?? null : null,
+    requiredFiles: layersOpenFiles, pictured, covered, devicePixelRatio,
+    sourceSurfacesEnabled: !!snapshot?.protocolCapability,
+    sourceReady: sourceSurfaceState.ready,
+    sourceUnavailable: sourceSurfaceState.unavailable,
+    protectedFiles: [inlineTextEdit?.frame, renamingFrame, nestLiveFile].filter((file): file is string => !!file),
+    retainHidden: pendingEdits,
+    retireHidden: (files) => {
+      if (workspaceId) retireHiddenDesignFrames(workspaceId, snapshot?.directoryId, files);
+    },
+    geometry: () => new Map([...frameGeometryPreviewsRef.current]
+      .filter(([key]) => key.startsWith(`${canvasDocumentOwner}\0`))
+      .map(([key, preview]) => [key.slice(canvasDocumentOwner.length + 1), {
+        x: preview.geometry.x, y: preview.geometry.y, width: preview.geometry.w, height: preview.geometry.h,
+      }])),
+  });
+  const paintPendingWheelGesture = useCallback(() => {
+    if (wheelPaintFrameRef.current !== null) {
+      window.cancelAnimationFrame(wheelPaintFrameRef.current);
+      wheelPaintFrameRef.current = null;
+    }
+    const latest = wheelViewportRef.current;
+    if (!latest) return;
+    paintDesignCanvasCamera(worldRef.current, latest, true);
+    refreshFrameResidency("camera");
+  }, [refreshFrameResidency]);
   useLayoutEffect(() => {
-    liveFrameFilesRef.current = {
-      owner: liveFrameOwner,
-      files: liveFrameFiles,
-    };
-  }, [liveFrameFiles, liveFrameOwner]);
-  // The pictures this canvas wants, visible ones first; the rest of the page
-  // follows in idle time so zooming out finds them ready.
+    const pending = wheelViewportRef.current;
+    paintDesignCanvasCamera(
+      worldRef.current,
+      pending ?? { zoom: view.zoom, panX: view.panX, panY: view.panY },
+      Boolean(pending),
+      viewportSize,
+    );
+  }, [active, canvasDocumentOwner, folder, mountedFrames, view.panX, view.panY, view.zoom, viewportSize]);
+  useLayoutEffect(() => active && worldRef.current ? observeDesignCanvasChrome(worldRef.current) : undefined,
+    [active, canvasDocumentOwner]);
+  const sourceSurfaceReady = useCallback((file: string, version: string) => {
+    sourceSurfaceState.ready.set(file, version);
+    refreshFrameResidency();
+  }, [refreshFrameResidency, sourceSurfaceState]);
+  const sourceSurfaceUnavailable = useCallback((file: string, version: string) => {
+    sourceSurfaceState.ready.delete(file);
+    sourceSurfaceState.unavailable.set(file, version);
+    refreshFrameResidency();
+  }, [refreshFrameResidency, sourceSurfaceState]);
+  const sourceSurfaceRetired = useCallback((file: string, version: string) => {
+    if (sourceSurfaceState.ready.get(file) === version) sourceSurfaceState.ready.delete(file);
+  }, [sourceSurfaceState]);
+  useDesignFramePreparation(workspaceId,
+    [...(selectedDescription ? [selectedDescription.file] : []), ...liveFrameFiles, ...mountedFrames.map((frame) => frame.file)],
+    active, snapshot?.preparation?.epoch);
+  const admissionView = wheelViewportRef.current ?? view;
+  // Only admitted/nearby surfaces demand pictures. Distant metadata stays
+  // cheap until navigation makes its content useful.
   const previewItems = useMemo(
     () =>
       snapshot && viewportSize.width > 0 && viewportSize.height > 0
         ? designPreviewDemandItems({
-            frames: snapshot.frames,
-            view: { zoom: view.zoom, panX: view.panX, panY: view.panY },
+            frames: mountedFrames.filter(isPreparedDesignFrame).filter(frame => !sourceFrameFiles.has(frame.file)),
+            view: { zoom: admissionView.zoom, panX: admissionView.panX, panY: admissionView.panY },
             viewport: viewportSize,
             devicePixelRatio,
             live: liveFrameFiles,
           })
         : [],
-    [devicePixelRatio, liveFrameFiles, snapshot, view.panX, view.panY, view.zoom, viewportSize],
+    [admissionView.panX, admissionView.panY, admissionView.zoom, devicePixelRatio, liveFrameFiles, mountedFrames, sourceFrameFiles, snapshot, viewportSize],
   );
   const previewLevels = useMemo(() => {
     const levels = new Map<string, DesignPreviewLevel>();
@@ -1226,18 +1347,14 @@ export function DesignCanvas({
     return levels;
   }, [previewItems]);
   const previewDemand = useMemo(
-    () =>
-      active && previewOwner && !view.codeView && previewItems.length
-        ? { owner: previewOwner, theme: frameTheme, items: previewItems }
-        : null,
-    [active, frameTheme, previewItems, previewOwner, view.codeView],
+    () => activeDesignPreviewDemand(active, previewOwner, frameTheme, previewItems),
+    [active, frameTheme, previewItems, previewOwner],
   );
   useDesignFramePreviewDemand(previewDemand);
   const highResolutionTiles = useMemo(() => {
     const result = new Map<string, DesignHighResolutionViewportTile>();
     if (
       !active ||
-      view.codeView ||
       view.zoom < HIGH_RESOLUTION_ZOOM_THRESHOLD ||
       viewportSize.width <= 0 ||
       viewportSize.height <= 0
@@ -1246,7 +1363,7 @@ export function DesignCanvas({
     }
     const devicePixelRatio =
       typeof window === "undefined" ? 1 : window.devicePixelRatio;
-    const candidates = (snapshot?.frames ?? [])
+    const candidates = preparedFrames
       .map((frame) => ({
         frame,
         tile: designHighResolutionViewportTile({
@@ -1284,8 +1401,7 @@ export function DesignCanvas({
   }, [
     active,
     selectedFrame?.file,
-    snapshot?.frames,
-    view.codeView,
+    preparedFrames,
     view.panX,
     view.panY,
     view.zoom,
@@ -1297,7 +1413,7 @@ export function DesignCanvas({
    * chrome. Everything else is activation, the "nothing selected" state. */
   const publishSelection = useCallback(
     (
-      frame: DesignCanvasFrameWire | null,
+      frame: DesignFrameView | null,
       options?: { selected?: boolean; reveal?: boolean; explicit?: boolean; additive?: boolean },
     ) => {
       if (!workspaceId) return;
@@ -1318,11 +1434,11 @@ export function DesignCanvas({
   useEffect(() => {
     if (!active || !snapshot) return;
     if (view.selectedNodeId) return;
-    publishSelection(selectedFrame, { selected: view.frameSelected, explicit: false });
+    publishSelection(selectedDescription ?? null, { selected: view.frameSelected, explicit: false });
   }, [
     active,
     publishSelection,
-    selectedFrame,
+    selectedDescription,
     snapshot,
     view.frameSelected,
     view.selectedNodeId,
@@ -1334,6 +1450,7 @@ export function DesignCanvas({
     if (!viewport) return;
     const publish = () => {
       const bounds = viewport.getBoundingClientRect();
+      wheelBoundsRef.current = bounds;
       const next = {
         width: Math.max(0, Math.round(bounds.width)),
         height: Math.max(0, Math.round(bounds.height)),
@@ -1347,12 +1464,23 @@ export function DesignCanvas({
     publish();
     const observer = new ResizeObserver(publish);
     observer.observe(viewport);
-    return () => observer.disconnect();
+    // Pane resize updates geometry outside the input path. Ancestor scrolling
+    // and window movement invalidate it; the next input measures once before
+    // any camera write. Settling also drops it, so a new gesture starts fresh.
+    const invalidate = () => { wheelBoundsRef.current = null; };
+    window.addEventListener("scroll", invalidate, true);
+    window.addEventListener("resize", invalidate);
+    return () => {
+      observer.disconnect();
+      window.removeEventListener("scroll", invalidate, true);
+      window.removeEventListener("resize", invalidate);
+      wheelBoundsRef.current = null;
+    };
   }, [active]);
 
   /** Fit a stable frame set from current DOM bounds without awaiting data. */
   const fitFrames = useCallback(
-    (frames: readonly DesignCanvasFrameWire[]) => {
+    (frames: readonly DesignFrameView[]) => {
       if (!workspaceId || frames.length === 0) return;
       if (canvasPageOwner && !isCurrentDesignPageOwner(canvasPageOwner)) return;
       const bounds = viewportRef.current?.getBoundingClientRect();
@@ -1430,7 +1558,7 @@ export function DesignCanvas({
       Object.hasOwn(rememberedPagesRef.current.views ?? {}, view.activePageId)
     )
       return;
-    const rects = snapshot.frames.map((frame) => ({
+    const rects = frameViews.map((frame) => ({
       x: frame.x,
       y: frame.y,
       width: frame.width,
@@ -1444,10 +1572,11 @@ export function DesignCanvas({
         measureDesignCanvasInsets(viewportRef.current),
       )
     )
-      fitFrames(snapshot.frames);
+      fitFrames(frameViews);
   }, [
     active,
     fitFrames,
+    frameViews,
     canvasDocumentOwner,
     canvasDirectoryId,
     snapshot,
@@ -1461,24 +1590,28 @@ export function DesignCanvas({
   const revealedFrameRef = useRef<{
     owner: string;
     file: string | null;
+    event: number | undefined;
   } | null>(null);
   useLayoutEffect(() => {
-    const file = selectedFrame?.file ?? null;
+    const file = selectedDescription?.file ?? null;
+    const event = view.selectionEvent;
     const previous = revealedFrameRef.current;
-    revealedFrameRef.current = { owner: liveFrameOwner, file };
+    revealedFrameRef.current = { owner: liveFrameOwner, file, event };
     // The selection an owner opens with restores a session; it does not ask
     // the camera to move.
     if (!previous || previous.owner !== liveFrameOwner) return;
-    if (!active || !workspaceId || !selectedFrame || previous.file === file)
+    // Only a person's own choice moves the camera. A frame chosen for them
+    // when theirs left the page (nested into another, deleted) stays put.
+    if (!active || !workspaceId || !selectedDescription || previous.file === file || previous.event === event)
       return;
     const next = designRevealRectViewport(
       view,
       viewportSize,
       {
-        x: selectedFrame.x,
-        y: selectedFrame.y,
-        width: selectedFrame.width,
-        height: selectedFrame.height,
+        x: selectedDescription.x,
+        y: selectedDescription.y,
+        width: selectedDescription.width,
+        height: selectedDescription.height,
       },
       undefined,
       measureDesignCanvasInsets(viewportRef.current),
@@ -1489,7 +1622,7 @@ export function DesignCanvas({
     setViewport(workspaceId, next, canvasPageOwner);
     // Only a change of frame reveals; the camera and size are read at it.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [active, liveFrameOwner, selectedFrame?.file, workspaceId]);
+  }, [active, liveFrameOwner, selectedDescription?.file, view.selectionEvent, workspaceId]);
 
   /** Show what an agent is writing without selecting it: one frame comes
    * into view like a Layers selection, several are fitted, and a frame on
@@ -1517,12 +1650,12 @@ export function DesignCanvas({
   );
   const agentRevealRects = useCallback(
     (target: DesignAgentRevealTarget) => [
-      ...(snapshot?.frames ?? [])
+      ...frameViews
         .filter((frame) => target.files.includes(frame.file))
         .map((frame) => ({ x: frame.x, y: frame.y, width: frame.width, height: frame.height })),
       ...target.rects,
     ],
-    [snapshot?.frames],
+    [frameViews],
   );
   const revealAgentTarget = useCallback(
     (target: DesignAgentRevealTarget) => {
@@ -1563,12 +1696,17 @@ export function DesignCanvas({
 
   /** Frame creation returns the aggregate snapshot, avoiding a follow-up read.
    * Drawn geometry is authored in that same mutation, so no default-size frame
-   * can flash before a second resize write. */
+   * can flash before a second resize write. The new frame's editor boots at
+   * once and the frame is selected when it reports (bounded), so the
+   * inspector moves straight to its full properties; the drawn rectangle
+   * covers the canvas until the frame paints. */
   const createFrame = useCallback(
     async (geometry?: DesignFrameGeometryWire) => {
       if (!workspaceId || creatingFrameRef.current) return null;
       creatingFrameRef.current = true;
       setCreatingFrame(true);
+      const selectionBefore = designWorkspaceView(workspaceId);
+      let created: DesignCanvasFrameWire | null = null;
       try {
         const result = await createDesignFrameAndRefresh(
           workspaceId,
@@ -1577,15 +1715,10 @@ export function DesignCanvas({
           undefined,
           canvasPageOwner?.pageId,
         );
-        const created = result.snapshot.frames.find(
+        created = result.snapshot.frames.find(
           (frame) => frame.file === result.frame.file,
-        );
+        ) ?? null;
         if (canvasPageOwner && !isCurrentDesignPageOwner(canvasPageOwner)) return null;
-        if (created) {
-          publishSelection(created, { selected: true, reveal: true });
-          if (!geometry) fitFrames([created]);
-        }
-        return created ?? null;
       } catch (createError) {
         toast.error("Couldn't create a design frame", {
           description: errorMessage(createError),
@@ -1595,6 +1728,18 @@ export function DesignCanvas({
         creatingFrameRef.current = false;
         setCreatingFrame(false);
       }
+      if (!created) return null;
+      const frame = created;
+      if (!geometry) fitFrames([frame]);
+      primeDesignFrameIntent(workspaceId, frame.file);
+      void waitForDesignRuntimeFrame(workspaceId, frame.file, frame.sourceVersion, 1_000).then(() => {
+        if (canvasPageOwner && !isCurrentDesignPageOwner(canvasPageOwner)) return;
+        // Any selection the person made meanwhile wins over the creation's,
+        // including choosing the same target again or clearing it.
+        if (!designSelectionUnchangedSince(workspaceId, selectionBefore)) return;
+        publishSelection(frame, { selected: true, reveal: true });
+      });
+      return frame;
     },
     [fitFrames, publishSelection, workspaceId, canvasPageOwner],
   );
@@ -1656,6 +1801,7 @@ export function DesignCanvas({
           workspaceId,
           frame: edit.frame,
           sourceVersion: edit.sourceVersion,
+          runtime: edit.runtime,
           nodeId: edit.nodeId,
         }).catch(() => {});
         setInlineTextEdit(null);
@@ -1760,7 +1906,7 @@ export function DesignCanvas({
                   256,
                   Math.max(
                     0,
-                    ...(snapshot?.frames.map((frame) => frame.z + 1) ?? [0]),
+                    ...frameViews.map((frame) => frame.z + 1),
                   ),
                 ),
               },
@@ -1848,6 +1994,7 @@ export function DesignCanvas({
             workspaceId,
             frame: edit.frame,
             sourceVersion: edit.sourceVersion,
+            runtime: edit.runtime,
             nodeId: edit.nodeId,
           }).catch(() => {});
         }
@@ -1861,7 +2008,7 @@ export function DesignCanvas({
         finishInlineTextCommit(textCommitGuardRef.current, key);
       }
     },
-    [snapshot?.frames, workspaceId, canvasPageOwner],
+    [frameViews, workspaceId, canvasPageOwner],
   );
 
   /** Text targeting is one-shot. Once an editable leaf is found, return to
@@ -1874,6 +2021,7 @@ export function DesignCanvas({
       setInlineTextEdit({
         id: crypto.randomUUID(),
         kind: "existing",
+        runtime: workspaceId ? designFrameRuntime(workspaceId, frame.file) : null,
         frame: frame.file,
         nodeId: details.oid,
         sourceVersion: frame.sourceVersion,
@@ -1883,7 +2031,7 @@ export function DesignCanvas({
         initialDetails: details,
       });
     },
-    [activateTool],
+    [activateTool, workspaceId],
   );
 
   /** Runtime glyph paint is suppressed only after the host editor has
@@ -1898,6 +2046,7 @@ export function DesignCanvas({
         workspaceId,
         frame: edit.frame,
         sourceVersion: edit.sourceVersion,
+        runtime: edit.runtime,
         nodeId: edit.nodeId,
         text: inlineTextDraftRef.current || edit.initialText,
       }).catch(() => {
@@ -1931,6 +2080,7 @@ export function DesignCanvas({
             workspaceId,
             frame: pending.edit.frame,
             sourceVersion: pending.edit.sourceVersion,
+            runtime: pending.edit.runtime,
             nodeId: pending.edit.nodeId,
             text: pending.text,
           }).catch(() => {
@@ -1948,6 +2098,11 @@ export function DesignCanvas({
 
   const cancelInlineTextEditing = useCallback(
     (edit: InlineTextEdit) => {
+      // Escape cancels a draft, not a transaction that already started. Keep
+      // its glyph owner through the displayed-buffer handoff. The guard also
+      // covers Escape arriving before React publishes the committing state.
+      const key = `${edit.frame ?? "canvas"}\u0000${edit.nodeId}\u0000${edit.sourceVersion ?? "draft"}`;
+      if (edit.status !== "editing" || textCommitGuardRef.current.activeKey === key) return;
       cancelInlineTextCommit(textCommitGuardRef.current, edit);
       if (inlineTextPreviewRef.current.pending?.edit.id === edit.id) {
         inlineTextPreviewRef.current.pending = null;
@@ -1957,6 +2112,7 @@ export function DesignCanvas({
           workspaceId,
           frame: edit.frame,
           sourceVersion: edit.sourceVersion,
+          runtime: edit.runtime,
           nodeId: edit.nodeId,
         }).catch(() => {});
       }
@@ -2319,7 +2475,7 @@ export function DesignCanvas({
         !motionTimelineOpen ||
         !workspaceId ||
         !selectedFrame ||
-        !selectedNodeDetails
+        !motionNodeDetails
       ) {
         return;
       }
@@ -2327,22 +2483,22 @@ export function DesignCanvas({
         workspaceId,
         frame: selectedFrame.file,
         sourceVersion: selectedFrame.sourceVersion,
-        nodeId: selectedNodeDetails.oid,
+        nodeId: motionNodeDetails.oid,
         motion: designMotionPreviewInput(draft, currentTime, playing),
       });
     },
-    [motionTimelineOpen, selectedFrame, selectedNodeDetails, workspaceId],
+    [motionTimelineOpen, selectedFrame, motionNodeDetails, workspaceId],
   );
 
   const clearMotionPreview = useCallback(async () => {
-    if (!workspaceId || !selectedFrame || !selectedNodeDetails) return;
+    if (!workspaceId || !selectedFrame || !motionNodeDetails) return;
     await clearDesignNodeStylePreviewTransient({
       workspaceId,
       frame: selectedFrame.file,
       sourceVersion: selectedFrame.sourceVersion,
-      nodeId: selectedNodeDetails.oid,
+      nodeId: motionNodeDetails.oid,
     });
-  }, [selectedFrame, selectedNodeDetails, workspaceId]);
+  }, [selectedFrame, motionNodeDetails, workspaceId]);
 
   const saveMotion = useCallback(
     async (draft: DesignMotionTimelineDraft) => {
@@ -2350,7 +2506,7 @@ export function DesignCanvas({
       if (
         !workspaceId ||
         !selectedFrame ||
-        !selectedNodeDetails ||
+        !motionNodeDetails ||
         !foundation
       ) {
         throw new Error(
@@ -2379,7 +2535,7 @@ export function DesignCanvas({
           {
             operationId: `animation:${crypto.randomUUID()}`,
             type: "node.set-styles",
-            nodeId: selectedNodeDetails.oid,
+            nodeId: motionNodeDetails.oid,
             styles: {
               "animation-name": draft.name,
               "animation-duration": draft.duration,
@@ -2396,12 +2552,12 @@ export function DesignCanvas({
         ],
       });
     },
-    [canvasFoundation.data, selectedFrame, selectedNodeDetails, workspaceId],
+    [canvasFoundation.data, selectedFrame, motionNodeDetails, workspaceId],
   );
 
   const deleteMotion = useCallback(async () => {
     const foundation = canvasFoundation.data;
-    if (!workspaceId || !selectedFrame || !selectedNodeDetails || !foundation) {
+    if (!workspaceId || !selectedFrame || !motionNodeDetails || !foundation) {
       throw new Error("The selected element is not ready for motion editing.");
     }
     await applyDesignTransactionCached(workspaceId, selectedFrame.file, {
@@ -2410,13 +2566,13 @@ export function DesignCanvas({
       documentId: foundation.summary.documentId,
       baseRevision: foundation.summary.revision,
       actor: { kind: "human", id: "desktop" },
-      intent: `Remove motion from ${selectedNodeDetails.name}`,
+      intent: `Remove motion from ${motionNodeDetails.name}`,
       createdAt: Date.now(),
       operations: [
         {
           operationId: `animation:${crypto.randomUUID()}`,
           type: "node.set-styles",
-          nodeId: selectedNodeDetails.oid,
+          nodeId: motionNodeDetails.oid,
           styles: {
             animation: null,
             "animation-name": "none",
@@ -2434,7 +2590,7 @@ export function DesignCanvas({
         },
       ],
     });
-  }, [canvasFoundation.data, selectedFrame, selectedNodeDetails, workspaceId]);
+  }, [canvasFoundation.data, selectedFrame, motionNodeDetails, workspaceId]);
 
   // Arrow keys on several selected frames move them together, in the nudge
   // lifecycle of one frame: presses while the key is held land as one canvas
@@ -2454,20 +2610,17 @@ export function DesignCanvas({
       }
       let gesture = previous?.mode === "frames" ? previous : null;
       if (!gesture) {
-        const confirmed =
-          designWorkspaceSnapshotCache.peekSnapshot(workspaceId).data?.frames ?? [];
+        const confirmed = designFrameViews(designWorkspaceSnapshotCache.peekSnapshot(workspaceId).data);
         const members = files.flatMap((file) => {
           const frame = confirmed.find((candidate) => candidate.file === file);
-          const element = viewport.querySelector<HTMLElement>(
-            `[data-design-frame="${CSS.escape(file)}"]`,
-          );
+          const element = frameElementsRef.current.get(file) ?? null;
           const key = `${canvasDocumentOwner}\0${file}`;
-          return frame && element && !frameGeometryPreviewsRef.current.has(key)
+          return frame && !frameGeometryPreviewsRef.current.has(key)
             ? [{ file, key, start: frameGeometry(frame), element, preview: { geometry: frameGeometry(frame), settled: false } }]
             : [];
         });
-        // A frame not on the canvas, or whose last move is still saving,
-        // keeps the whole selection where it is.
+        // A deleted frame or pending move keeps the whole selection in place.
+        // Offscreen members move from metadata without needing DOM residency.
         if (members.length !== files.length) return true;
         gesture = {
           mode: "frames", frame: selectedFrame, selectionKey, members, dx: 0, dy: 0,
@@ -2486,12 +2639,14 @@ export function DesignCanvas({
           y: Math.max(-DESIGN_FRAME_COORDINATE_LIMIT, Math.min(DESIGN_FRAME_COORDINATE_LIMIT, member.start.y + current.dy)),
         };
         frameGeometryPreviewsRef.current.set(member.key, member.preview);
-        paintFrameGeometry(member.element, member.preview.geometry);
+        member.element = frameElementsRef.current.get(member.file) ?? null;
+        if (member.element) paintFrameGeometry(member.element, member.preview.geometry);
       }
       nudgeGestureRef.current = current;
+      refreshFrameResidency();
       return true;
     },
-    [canvasDocumentOwner, selectedFrame, workspaceId],
+    [canvasDocumentOwner, selectedFrame, workspaceId, refreshFrameResidency],
   );
 
   const nudgeSelectedNode = useCallback(
@@ -2716,14 +2871,16 @@ export function DesignCanvas({
     const frameKey = `${canvasDocumentOwner}\0${gesture.frame.file}`;
     const restore = async () => {
       if (gesture.mode === "frames") {
-        const confirmed = designWorkspaceSnapshotCache.peekSnapshot(workspaceId).data?.frames;
+        const confirmed = designFrameViews(designWorkspaceSnapshotCache.peekSnapshot(workspaceId).data);
         for (const member of gesture.members) {
           if (frameGeometryPreviewsRef.current.get(member.key) !== member.preview) continue;
           frameGeometryPreviewsRef.current.delete(member.key);
           const frame = confirmed?.find((candidate) => candidate.file === member.file);
-          if (member.element.isConnected && isCurrentDesignPageOwner(gesture.owner))
+          member.element = frameElementsRef.current.get(member.file) ?? null;
+          if (member.element?.isConnected && isCurrentDesignPageOwner(gesture.owner))
             paintFrameGeometry(member.element, frame ? frameGeometry(frame) : member.start);
         }
+        refreshFrameResidency();
       } else if (gesture.mode === "frame") {
         if (frameGeometryPreviewsRef.current.get(frameKey) !== gesture.preview) return;
         frameGeometryPreviewsRef.current.delete(frameKey);
@@ -2778,7 +2935,7 @@ export function DesignCanvas({
     });
     nudgeCommitRef.current = pending;
     savedEditingSession?.retain(pending);
-  }, [workspaceId, canvasDocumentOwner, savedEditingSession]);
+  }, [workspaceId, canvasDocumentOwner, savedEditingSession, refreshFrameResidency]);
 
   useEffect(() => {
     const queued = queuedNudgeRef.current;
@@ -2805,10 +2962,7 @@ export function DesignCanvas({
     (event: React.PointerEvent<HTMLElement>, files: readonly string[]) => {
       const viewport = viewportRef.current;
       if (!workspaceId || !viewport) return;
-      const confirmed =
-        designWorkspaceSnapshotCache.peekSnapshot(workspaceId).data?.frames ??
-        snapshot?.frames ??
-        [];
+      const confirmed = designFrameViews(designWorkspaceSnapshotCache.peekSnapshot(workspaceId).data ?? snapshot);
       const wanted = new Set(files);
       const members = confirmed
         .filter((frame) => wanted.has(frame.file))
@@ -2816,11 +2970,9 @@ export function DesignCanvas({
           frame,
           key: `${canvasDocumentOwner}\0${frame.file}`,
           start: frameGeometry(frame),
-          element: viewport.querySelector<HTMLElement>(
-            `[data-design-frame="${CSS.escape(frame.file)}"]`,
-          ),
+          element: frameElementsRef.current.get(frame.file) ?? null,
         }));
-      if (members.length < 2 || members.some((member) => !member.element)) return;
+      if (members.length < 2 || members.length !== wanted.size) return;
       // A previous move of one of these frames is still being saved; its
       // confirmed geometry is what this move must start from.
       if (members.some((member) => frameGeometryPreviewsRef.current.has(member.key))) {
@@ -2873,12 +3025,17 @@ export function DesignCanvas({
         }
       };
       const paint = (shift: { x: number; y: number }) => {
-        for (const member of members)
-          paintFrameGeometry(member.element!, {
+        for (const member of members) {
+          const geometry = {
             ...member.start,
             x: member.start.x + shift.x,
             y: member.start.y + shift.y,
-          });
+          };
+          frameGeometryPreviewsRef.current.set(member.key, { geometry, settled: false });
+          member.element = frameElementsRef.current.get(member.frame.file) ?? null;
+          if (member.element) paintFrameGeometry(member.element, geometry);
+        }
+        refreshFrameResidency();
       };
       const move = (pointerEvent: PointerEvent) => {
         if (!ownerIsCurrent()) return;
@@ -2906,9 +3063,11 @@ export function DesignCanvas({
       const restore = () => {
         for (const member of members) {
           frameGeometryPreviewsRef.current.delete(member.key);
-          if (ownerIsCurrent() && member.element!.isConnected)
-            paintFrameGeometry(member.element!, member.start);
+          member.element = frameElementsRef.current.get(member.frame.file) ?? null;
+          if (ownerIsCurrent() && member.element?.isConnected)
+            paintFrameGeometry(member.element, member.start);
         }
+        refreshFrameResidency();
       };
       const cancel = () => {
         paintGuides({});
@@ -2940,9 +3099,11 @@ export function DesignCanvas({
             for (const member of members) {
               frameGeometryPreviewsRef.current.delete(member.key);
               const saved = next.frames.find((frame) => frame.file === member.frame.file);
-              if (saved && ownerIsCurrent() && member.element!.isConnected)
-                paintFrameGeometry(member.element!, frameGeometry(saved));
+              member.element = frameElementsRef.current.get(member.frame.file) ?? null;
+              if (saved && ownerIsCurrent() && member.element?.isConnected)
+                paintFrameGeometry(member.element, frameGeometry(saved));
             }
+            refreshFrameResidency();
           })
           .catch((moveError) => {
             restore();
@@ -2965,8 +3126,9 @@ export function DesignCanvas({
       canvasDocumentOwner,
       liveDesignZoom,
       savedEditingSession,
-      snapshot?.frames,
+      snapshot,
       workspaceId,
+      refreshFrameResidency,
     ],
   );
 
@@ -3109,7 +3271,7 @@ export function DesignCanvas({
         if (rootPreviewKeys) queueRootPreview(null);
       };
       const peers =
-        snapshot?.frames
+        frameViews
           .filter((candidate) => candidate.file !== frame.file)
           .map((candidate) => ({
             x: candidate.x,
@@ -3138,7 +3300,7 @@ export function DesignCanvas({
       // nests on release; it is outlined while it is. Cmd/Ctrl moves the
       // frame over others without nesting.
       const nestable = mode === "move" && frame.kind !== "text" && Boolean(folder);
-      let nestTarget: DesignCanvasFrameWire | undefined;
+      let nestTarget: DesignFrameView | undefined;
       let nestPointer: { x: number; y: number } | null = null;
       let nestDwell: number | null = null;
       const trackNestTarget = (pointerEvent: PointerEvent) => {
@@ -3154,7 +3316,7 @@ export function DesignCanvas({
             ? undefined
             : designCanvasFrameAt(
                 frame.file,
-                designWorkspaceSnapshotCache.peekSnapshot(workspaceId).data?.frames ?? [],
+                designFrameViews(designWorkspaceSnapshotCache.peekSnapshot(workspaceId).data),
                 nestPointer,
               );
         if (target?.file === nestTarget?.file) return;
@@ -3304,7 +3466,7 @@ export function DesignCanvas({
             useDesignRuntimeStore.getState().byWorkspace[workspaceId]?.frames[
               frame.file
             ]?.snapshot?.frame;
-          const currentFrames = designWorkspaceSnapshotCache.peekSnapshot(workspaceId).data?.frames ?? snapshot?.frames ?? [];
+          const currentFrames = designFrameViews(designWorkspaceSnapshotCache.peekSnapshot(workspaceId).data ?? snapshot);
           const nestInto =
             releasedNestTarget &&
             currentFrames.find((candidate) => candidate.file === releasedNestTarget.file);
@@ -3499,7 +3661,8 @@ export function DesignCanvas({
       publishSelection,
       savedEditingSession,
       showNestTarget,
-      snapshot?.frames,
+      snapshot,
+      frameViews,
       startFrameGroupMove,
       workspaceId,
     ],
@@ -5675,6 +5838,7 @@ export function DesignCanvas({
       gestureCancelRef.current?.();
       const startX = event.clientX;
       const startY = event.clientY;
+      if (wheelPaintFrameRef.current !== null) paintPendingWheelGesture();
       // The wheel camera may be a paint ahead of persisted state. Transfer that
       // exact camera to the hand and retire its timer before starting the drag.
       const camera = wheelViewportRef.current ?? view;
@@ -5700,6 +5864,7 @@ export function DesignCanvas({
         };
         wheelViewportRef.current = latest;
         paintDesignCanvasCamera(worldRef.current, latest, true);
+        refreshFrameResidency("camera");
         designBackgroundWork.touch();
       };
 
@@ -5726,10 +5891,12 @@ export function DesignCanvas({
     [
       active,
       cancelPendingWheelGesture,
+      paintPendingWheelGesture,
       canvasDirectoryId,
       canvasDocumentOwner,
       canvasPageOwner,
       setViewport,
+      refreshFrameResidency,
       view,
       workspaceId,
     ],
@@ -5769,6 +5936,14 @@ export function DesignCanvas({
             "[data-design-motion-timeline], [data-design-motion-settings]",
           ))
       ) return;
+      if (event.key === "Escape" && currentPlaybackRef.current) {
+        event.preventDefault();
+        stopFramePlayback(currentPlaybackRef.current.id);
+        return;
+      }
+      // The toggle owns native Space/Enter activation, even though it sits
+      // inside the canvas that normally uses Space to pan.
+      if (event.target instanceof Element && event.target.closest("[data-design-frame-play]")) return;
       const editableTarget = isEditableHotkeyTarget(event.target);
       // Option measures; it never types, moves, or deletes anything. Reading it
       // outside the canvas's own focus scope is what makes the overlay appear
@@ -5885,9 +6060,9 @@ export function DesignCanvas({
         }
         return;
       }
-      if (event.key === "Escape" && view.frameSelected && selectedFrame) {
+      if (event.key === "Escape" && view.frameSelected && selectedDescription) {
         event.preventDefault();
-        void selectDesignFrame(workspaceId!, selectedFrame);
+        void selectDesignFrame(workspaceId!, selectedDescription);
         return;
       }
       if (
@@ -5999,7 +6174,7 @@ export function DesignCanvas({
         !event.ctrlKey &&
         !event.altKey &&
         event.key.toLowerCase() === "a" &&
-        view.selectedNodeId
+        motionTargetSelected
       ) {
         event.preventDefault();
         onMotionTimelineOpenChange(!motionTimelineOpen);
@@ -6008,10 +6183,10 @@ export function DesignCanvas({
       if (!event.shiftKey) return;
       if (event.code === "Digit1") {
         event.preventDefault();
-        fitFrames(snapshot?.frames ?? []);
-      } else if (event.code === "Digit2" && selectedFrame) {
+        fitFrames(frameViews);
+      } else if (event.code === "Digit2" && selectedDescription) {
         event.preventDefault();
-        fitFrames([selectedFrame]);
+        fitFrames([selectedDescription]);
       } else if (event.code === "Digit0") {
         event.preventDefault();
         zoomAt(1);
@@ -6066,17 +6241,20 @@ export function DesignCanvas({
     finishNodeNudge,
     fitFrames,
     hitStackMenu,
+    stopFramePlayback,
     nudgeSelectedNode,
     motionTimelineOpen,
+    motionTargetSelected,
     navigateToNode,
     onMotionTimelineOpenChange,
     onDeleteFrame,
     resizeSelectedNode,
+    selectedDescription,
     selectedFrame,
     selectedNodeDetails,
     selectedNavigationTree,
     selectedRuntimeTree,
-    snapshot?.frames,
+    frameViews,
     syncMeasureModifier,
     view.frameSelected,
     view.selectedFrame,
@@ -6107,37 +6285,47 @@ export function DesignCanvas({
           nodeId: null,
         });
       }
-      if (wheelSettleTimerRef.current !== null) {
-        window.clearTimeout(wheelSettleTimerRef.current);
-        wheelSettleTimerRef.current = null;
-      }
-      wheelViewportRef.current = null;
-      const edit = inlineTextEditRef.current;
-      if (edit) {
-        cancelInlineTextCommit(textCommitGuardRef.current, edit);
-        if (edit.kind === "existing" && workspaceId) {
-          void clearDesignNodeTextPreviewTransient({
-            workspaceId, frame: edit.frame, sourceVersion: edit.sourceVersion, nodeId: edit.nodeId,
-          }).catch(() => {});
-        }
-      }
-      inlineTextEditRef.current = null;
-      inlineTextPreviewRef.current.pending = null;
-      renameSettledRef.current = true;
+      // A hidden return must restore the camera the user actually saw. Merely
+      // dropping the debounce leaves the DOM at the gesture scale and the
+      // saved view at its previous scale. A replaced page/checkout cannot
+      // receive this outgoing gesture's last position.
+      const settled = wheelViewportRef.current;
+      cancelPendingWheelGesture();
+      if (settled && workspaceId && canvasFolderRef.current === folder &&
+          canvasDocumentOwnerRef.current === canvasDocumentOwner)
+        setViewport(workspaceId, settled, canvasPageOwner);
       hitStackGenerationRef.current += 1;
       canvasLifetimeRef.current += 1;
       nudgeLifetimeRef.current += 1;
       finishNodeNudge(true);
-      setInlineTextEdit(null);
-      setRenamingFrame(null);
       setHitStackMenu(null);
       setSelectionOverlaySuppressed(false);
       setMotionOverlayState({ owner: "", draft: null });
       setMotionSeekState({ owner: "", request: null });
       activateTool("select");
     },
-    [active, canvasDocumentOwner, folder, view.directoryId, workspaceId, activateTool, finishNodeNudge],
+    [active, canvasDocumentOwner, canvasPageOwner, folder, view.directoryId, workspaceId, activateTool, finishNodeNudge, cancelPendingWheelGesture, setViewport],
   );
+
+  // Hiding keeps the host-owned draft (including IME) mounted. Only a real
+  // source owner change/unmount cancels it; memory grace is never edit authority.
+  useLayoutEffect(() => () => {
+      const edit = inlineTextEditRef.current;
+      if (edit) {
+        cancelInlineTextCommit(textCommitGuardRef.current, edit);
+        if (edit.kind === "existing" && workspaceId) {
+          void clearDesignNodeTextPreviewTransient({
+            workspaceId, frame: edit.frame, sourceVersion: edit.sourceVersion, nodeId: edit.nodeId,
+            runtime: edit.runtime,
+          }).catch(() => {});
+        }
+      }
+      inlineTextEditRef.current = null;
+      inlineTextPreviewRef.current.pending = null;
+      renameSettledRef.current = true;
+      setInlineTextEdit(null);
+      setRenamingFrame(null);
+  }, [canvasDocumentOwner, folder, workspaceId]);
 
   // --- EVENT HANDLERS ---
 
@@ -6320,6 +6508,8 @@ export function DesignCanvas({
     ) => {
       const draft = creationDraftRef.current;
       if (!draft) return;
+      // A new gesture owns the draft; a previous creation's hand-off ends.
+      creationHandoffRef.current += 1;
       draft.dataset.designCreationDraft = kind;
       draft.style.display = "block";
       draft.style.left = `${rect.x}px`;
@@ -6338,13 +6528,41 @@ export function DesignCanvas({
     [],
   );
 
+  const creationHandoffRef = useRef(0);
   const hideCreationDraft = useCallback(() => {
+    creationHandoffRef.current += 1;
     if (creationDraftRef.current) {
       creationDraftRef.current.style.display = "none";
     }
   }, []);
+  /** A created frame paints only once its document or pixels are ready. Keep
+   * the drawn rectangle until then so the canvas never blinks empty; a new
+   * gesture, retirement or a 2 s bound ends the hand-off. */
+  const hideCreationDraftWhenPainted = useCallback((file: string) => {
+    const token = ++creationHandoffRef.current;
+    const started = performance.now();
+    const tick = () => {
+      if (creationHandoffRef.current !== token) return;
+      const article = frameElementsRef.current.get(file);
+      const painted = article?.querySelector(
+        'iframe[data-design-document-buffer="displayed"][data-design-document-ready], [data-design-source-ready], [data-design-frame-pixels-ready]',
+      );
+      if (painted || !article?.isConnected && performance.now() - started > 250 || performance.now() - started > 2_000) {
+        hideCreationDraft();
+        return;
+      }
+      window.requestAnimationFrame(tick);
+    };
+    window.requestAnimationFrame(tick);
+  }, [hideCreationDraft]);
+  useLayoutEffect(() => {
+    if (!active) hideCreationDraft();
+  }, [active, hideCreationDraft]);
 
-  /** A frame drawn inside a document belongs to its nearest frame container. */
+  /** A frame drawn inside a document belongs to its nearest frame container.
+   * A capable runtime paints the child on release and adopts the saved
+   * generation in place, so Layers and the inspector show the new layer at
+   * once and its document never reloads. */
   const createChildFrame = useCallback(
     async (
       owner: DesignCanvasFrameWire,
@@ -6355,6 +6573,7 @@ export function DesignCanvas({
       creatingFrameRef.current = true;
       setCreatingFrame(true);
       const selection = designWorkspaceView(workspaceId);
+      let preview: { runtime: DesignFrameRuntimeConnection; nodeId: string } | null = null;
       try {
         const runtime = designFrameRuntime(workspaceId, owner.file);
         if (!runtime)
@@ -6382,12 +6601,44 @@ export function DesignCanvas({
         if (!parent || !canInsertDesignFrame(parent))
           throw new Error("Select a drawable frame for the new child.");
         const nodeId = `frame-${crypto.randomUUID()}`;
-        const operations = designFrameInsertionOperations(
+        const { operations, insert, parentStyles } = designFrameInsertion(
           parent,
           nodeId,
           start,
           end,
         );
+        if (
+          runtime.supports("previewInsert") &&
+          runtime.sourceVersion === owner.sourceVersion &&
+          parent.sourceVersion === owner.sourceVersion
+        ) {
+          try {
+            const painted = await runtime.previewInsert({
+              inserts: [insert],
+              ...(parentStyles ? { updates: [{ nodeId: parent.oid, styles: parentStyles }] } : {}),
+            });
+            preview = { runtime, nodeId };
+            hideCreationDraft();
+            const store = useDesignRuntimeStore.getState();
+            store.publishSnapshot(workspaceId, folder, owner.file, painted.snapshot, owner.sourceVersion);
+            if (
+              designWorkspaceView(workspaceId).selectedFrame === selection.selectedFrame &&
+              designWorkspaceView(workspaceId).selectedNodeId === selection.selectedNodeId
+            ) {
+              void selectDesignNode({
+                workspaceId,
+                folder,
+                frame: owner,
+                nodeId,
+                details: painted.details[0],
+                owner: canvasPageOwner,
+              }).catch(() => {});
+            }
+          } catch {
+            // The saved document still gains the child; it simply reloads.
+            preview = null;
+          }
+        }
         const key = designFoundationKey(
           workspaceId,
           owner.file,
@@ -6411,6 +6662,7 @@ export function DesignCanvas({
             createdAt: Date.now(),
             operations,
           },
+          { runtimeInserts: [insert] },
         );
         const current = designWorkspaceView(workspaceId);
         const nextFrame = result.snapshot?.frames.find(
@@ -6419,20 +6671,40 @@ export function DesignCanvas({
         if (
           nextFrame &&
           (!canvasPageOwner || isCurrentDesignPageOwner(canvasPageOwner)) &&
-          current.selectedFrame === selection.selectedFrame &&
-          current.selectedNodeId === selection.selectedNodeId
+          ((current.selectedFrame === selection.selectedFrame &&
+            current.selectedNodeId === selection.selectedNodeId) ||
+            (preview && current.selectedFrame === owner.file && current.selectedNodeId === nodeId))
         ) {
-          // Publish identity immediately; the incoming runtime's ready snapshot
-          // completes details for the newly authored node.
+          // Publish identity immediately; the adopted (or incoming) runtime
+          // supplies the new node's exact-generation details.
           void selectDesignNode({
             workspaceId,
             folder,
             frame: nextFrame,
             nodeId,
             owner: canvasPageOwner,
+            reveal: !preview,
           }).catch(() => {});
         }
       } catch (error) {
+        if (preview) {
+          const { runtime, nodeId } = preview;
+          void runtime.clearPreviewInserts([nodeId]).then(({ snapshot }) => {
+            useDesignRuntimeStore.getState().publishSnapshot(workspaceId, folder, owner.file, snapshot, owner.sourceVersion);
+          }).catch(() => {});
+          const current = designWorkspaceView(workspaceId);
+          if (current.selectedFrame === owner.file && current.selectedNodeId === nodeId) {
+            const store = useDesignWorkspaceUiStore.getState();
+            if (selection.selectedFrame === null) store.setSelectedFrame(workspaceId, null, canvasPageOwner);
+            else store.setSelection(
+              workspaceId,
+              selection.selectedFrame,
+              selection.selectedNodeId,
+              selection.selectedNodeIds,
+              { owner: canvasPageOwner, frameSelected: selection.frameSelected },
+            );
+          }
+        }
         toast.error("Couldn't create the child frame", {
           description: errorMessage(error),
         });
@@ -6441,7 +6713,7 @@ export function DesignCanvas({
         setCreatingFrame(false);
       }
     },
-    [folder, workspaceId, canvasPageOwner],
+    [canvasPageOwner, folder, hideCreationDraft, workspaceId],
   );
 
   /** Pointer-down captures one canvas owner and inverse-zoom drag. */
@@ -6470,9 +6742,15 @@ export function DesignCanvas({
       const pointerOwner = event.currentTarget;
       const ownerFile = pointerOwner.closest<HTMLElement>("[data-design-frame]")
         ?.dataset.designFrame;
-      const owner = snapshot?.frames.find(
-        (frame) => frame.file === ownerFile && frame.kind !== "text",
-      );
+      const ownerDescription = frameViews.find((frame) => frame.file === ownerFile && frame.kind !== "text");
+      // A still-preparing parent must never turn a child creation into a new
+      // top-level frame. Selecting it schedules preparation first.
+      if (ownerDescription && !isPreparedDesignFrame(ownerDescription)) {
+        event.preventDefault(); event.stopPropagation();
+        void selectDesignFrame(workspaceId, ownerDescription, { selected: true, owner: canvasPageOwner }).catch(() => {});
+        return true;
+      }
+      const owner = ownerDescription;
       // A top-level frame stops at the storable size; a child frame is a
       // layer and has no such limit.
       const frameSizeLimit = owner ? undefined : DESIGN_FRAME_MAX_SIZE;
@@ -6531,7 +6809,7 @@ export function DesignCanvas({
             256,
             Math.max(
               0,
-              ...(snapshot?.frames.map((frame) => frame.z + 1) ?? [0]),
+              ...frameViews.map((frame) => frame.z + 1),
             ),
           ),
         };
@@ -6547,16 +6825,24 @@ export function DesignCanvas({
         );
         cleanup(false);
         activateTool("select");
-        const creation = owner
-          ? createChildFrame(
-              owner,
-              { x: start.x - owner.x, y: start.y - owner.y },
-              moved
-                ? { x: latest.x - owner.x, y: latest.y - owner.y }
-                : undefined,
-            )
-          : createFrame(geometry);
-        void creation.finally(hideCreationDraft);
+        if (owner) {
+          void createChildFrame(
+            owner,
+            { x: start.x - owner.x, y: start.y - owner.y },
+            moved
+              ? { x: latest.x - owner.x, y: latest.y - owner.y }
+              : undefined,
+          ).finally(hideCreationDraft);
+        } else {
+          // The hand-off belongs to this canvas lifetime: a reply that lands
+          // after the surface hid or changed owner only clears the draft.
+          const canvasLifetime = canvasLifetimeRef.current;
+          void createFrame(geometry).then(
+            (created) => created && canvasLifetimeRef.current === canvasLifetime
+              ? hideCreationDraftWhenPainted(created.file) : hideCreationDraft(),
+            hideCreationDraft,
+          );
+        }
       };
       const cancel = () => cleanup();
 
@@ -6577,8 +6863,10 @@ export function DesignCanvas({
       createFrame,
       createChildFrame,
       hideCreationDraft,
+      hideCreationDraftWhenPainted,
       paintCreationDraft,
-      snapshot?.frames,
+      frameViews,
+      canvasPageOwner,
       view,
       workspaceId,
     ],
@@ -7018,7 +7306,7 @@ export function DesignCanvas({
         if (!isCurrentDesignPageOwner(owner)) return;
         if (!moved) {
           if (options?.onClick) options.onClick();
-          else if (!additive) publishSelection(selectedFrame);
+          else if (!additive) publishSelection(selectedDescription ?? null);
           return;
         }
         const screenRect = {
@@ -7041,7 +7329,7 @@ export function DesignCanvas({
         void selectDesignTargetsInRect({
           workspaceId,
           folder,
-          frames: snapshot?.frames ?? [],
+          frames: frameViews,
           startFrame: options?.frame,
           additive,
           owner,
@@ -7070,9 +7358,10 @@ export function DesignCanvas({
       activeTool,
       folder,
       publishSelection,
+      selectedDescription,
       selectedFrame,
       selectedRuntimeTree,
-      snapshot?.frames,
+      frameViews,
       view.selectedNodeId,
       workspaceId,
     ],
@@ -7100,11 +7389,11 @@ export function DesignCanvas({
         return;
       }
       if (event.target === event.currentTarget && startMarquee(event)) return;
-      if (event.target === event.currentTarget) publishSelection(selectedFrame);
+      if (event.target === event.currentTarget) publishSelection(selectedDescription ?? null);
     },
     [
       publishSelection,
-      selectedFrame,
+      selectedDescription,
       startFrameCreation,
       startCanvasTextInsertion,
       startMarquee,
@@ -7113,24 +7402,27 @@ export function DesignCanvas({
   );
 
   const handleWheel = useCallback(
-    (event: React.WheelEvent<HTMLDivElement>) => {
-      if (!active || !workspaceId) return;
+    (event: WheelEvent) => {
+      const viewport = viewportRef.current;
+      if (!active || !workspaceId || !viewport) return;
       // Chrome inside the viewport owns its wheel: the tool rail never pans
-      // the canvas, and the Motion timeline and source view scroll themselves.
+      // the canvas, and the Motion timeline scrolls itself.
       if (
         event.target instanceof Element &&
         event.target.closest(
-          "[data-design-canvas-tools-rail], [data-design-motion-timeline], [data-design-source-view]",
+          "[data-design-canvas-tools-rail], [data-design-motion-timeline]",
         )
       ) {
         return;
       }
-      event.preventDefault();
+      if (!hasAsyncCanvasWheel()) event.preventDefault();
       if (spacingGestureRef.current || panGestureRef.current) return;
-      const bounds = event.currentTarget.getBoundingClientRect();
+      const bounds = wheelBoundsRef.current ??= viewport.getBoundingClientRect();
+      const firstWheel = wheelViewportRef.current === null;
+      const zooming = event.metaKey || event.ctrlKey;
       const current = wheelViewportRef.current ?? view;
       let latest: DesignViewport;
-      if (event.metaKey || event.ctrlKey) {
+      if (zooming) {
         const factor = designWheelZoomFactor({
           deltaY: event.deltaY,
           deltaMode: event.deltaMode,
@@ -7158,7 +7450,15 @@ export function DesignCanvas({
         };
       }
       wheelViewportRef.current = latest;
-      paintDesignCanvasCamera(worldRef.current, latest, true);
+      // Paint the first native response immediately. Deferring its commit can
+      // keep the main frame one refresh behind the compositor for the gesture.
+      // Continued input shares a display paint. Zoom can arrive before the
+      // browser's post-input hit testing and text selection update; publishing
+      // its geometry there forces layout before the ordinary frame lifecycle.
+      // The display callback commits density, camera and chrome together.
+      // Integrate every delta before batching so clamps and anchors stay ordered.
+      if (!hasAsyncCanvasWheel() || firstWheel) paintPendingWheelGesture();
+      else wheelPaintFrameRef.current ??= window.requestAnimationFrame(paintPendingWheelGesture);
       // Optional captures and pictures wait until the camera rests.
       designBackgroundWork.touch();
       if (wheelSettleTimerRef.current !== null) {
@@ -7167,12 +7467,57 @@ export function DesignCanvas({
       wheelSettleTimerRef.current = window.setTimeout(() => {
         wheelSettleTimerRef.current = null;
         const settled = wheelViewportRef.current;
-        wheelViewportRef.current = null;
-        if (settled) setViewport(workspaceId, settled, canvasPageOwner);
+        cancelPendingWheelGesture();
+        if (settled) {
+          paintDesignCanvasCamera(worldRef.current, settled, false);
+          setViewport(workspaceId, settled, canvasPageOwner);
+        }
       }, 80);
     },
-    [active, setViewport, view, workspaceId, canvasPageOwner],
+    [active, setViewport, view, workspaceId, canvasPageOwner, paintPendingWheelGesture, cancelPendingWheelGesture],
   );
+  useLayoutEffect(() => {
+    const viewport = viewportRef.current;
+    if (!active || !viewport) return;
+    // Native visual zoom is disabled by the host and this viewport cannot
+    // scroll. Passive delivery avoids serial wheel ACKs adding a whole frame.
+    // Plain browsers still require cancellation; nested controls own input in
+    // both cases, and retained inactive canvases have no wheel subscription.
+    viewport.addEventListener("wheel", handleWheel, { passive: hasAsyncCanvasWheel() });
+    // Claim the first native pan so Chromium does not start a parallel scroll
+    // sequence. Remove this blocking listener immediately: continued input
+    // keeps passive delivery instead of waiting for an ACK on every wheel.
+    // Zoom has no native default in this host and keeps passive ownership.
+    const claimStart = (event: WheelEvent) => {
+      if (event.target instanceof Element && event.target.closest(
+        "[data-design-canvas-tools-rail], [data-design-motion-timeline]",
+      )) return;
+      if (spacingGestureRef.current || panGestureRef.current) return;
+      if (!event.metaKey && !event.ctrlKey) event.preventDefault();
+      viewport.removeEventListener("wheel", claimStart, true);
+    };
+    const armStart = () => {
+      // An unrelated React render replaces this effect during a gesture.
+      // Only settlement/cancellation may claim the start of another one.
+      if (wheelViewportRef.current === null)
+        viewport.addEventListener("wheel", claimStart, { capture: true, passive: false });
+    };
+    if (hasAsyncCanvasWheel()) {
+      armWheelStartRef.current = armStart;
+      armStart();
+    }
+    // Hit-test direct actions against the camera implied by preceding input,
+    // including pan that has not reached its shared display callback yet.
+    const flush = () => { if (wheelPaintFrameRef.current !== null) paintPendingWheelGesture(); };
+    const directEvents = ["pointerdown", "keydown", "contextmenu", "dragover", "drop"] as const;
+    for (const name of directEvents) viewport.addEventListener(name, flush, true);
+    return () => {
+      viewport.removeEventListener("wheel", handleWheel);
+      viewport.removeEventListener("wheel", claimStart, true);
+      if (armWheelStartRef.current === armStart) armWheelStartRef.current = null;
+      for (const name of directEvents) viewport.removeEventListener(name, flush, true);
+    };
+  }, [active, handleWheel, paintPendingWheelGesture]);
 
   // --- RENDER ---
 
@@ -7187,7 +7532,7 @@ export function DesignCanvas({
         data-design-active-tool={activeTool}
         tabIndex={0}
         className={cn(
-          "bg-bg2 relative size-full overflow-hidden outline-none",
+          "bg-bg2 relative size-full overflow-clip outline-none",
           spacePressed
             ? "cursor-grab"
             : activeTool === "frame" || activeTool === "text"
@@ -7203,16 +7548,48 @@ export function DesignCanvas({
         // keydown lost to another focus owner (or pressed before the window was
         // focused) still resolves the moment the pointer enters the canvas.
         onPointerMove={(event) => syncMeasureModifier(event.altKey)}
-        onWheel={handleWheel}
+        // Entering a frame's title (or leaving it for anything else) is the
+        // intent signal; movement within one element never reaches React state.
+        onPointerOver={(event) => {
+          if (!workspaceId || !active) return;
+          const target = event.target instanceof Element ? event.target : null;
+          // Only a frame's own chrome (its title) is selection intent. Passing
+          // over a frame's pixels must not turn a passive frame into an editor.
+          const file = target?.closest("[data-design-frame-chrome]")
+            ? target.closest<HTMLElement>("[data-design-frame]")?.dataset.designFrame ?? null
+            : null;
+          // A selected frame already has its editor.
+          if (file && view.selectedTargets.some((selected) => selected.frame === file)) return;
+          noteDesignFrameIntent(workspaceId, file);
+        }}
+        onPointerLeave={() => {
+          if (workspaceId) clearDesignFrameIntent(workspaceId);
+        }}
         aria-label="Design canvas"
       >
+        <div className="pointer-events-none absolute inset-0 isolate">
         <div
           ref={worldRef}
           data-design-canvas-world=""
           className="pointer-events-none absolute inset-0 origin-top-left"
           style={designCanvasCameraStyle(view)}
         >
-          {snapshot?.frames.map((frame) => {
+          {snapshot && mountedFrames.map((description) => {
+            const prepared = isPreparedDesignFrame(description);
+            const frame = prepared ? description : description.previous;
+            if (!frame) return (
+              <DesignPreparingFrame key={`${workspaceId ?? "pending"}:${description.file}`}
+                ref={(element) => {
+                  if (element) frameElementsRef.current.set(description.file, element);
+                  else frameElementsRef.current.delete(description.file);
+                }}
+                data-design-frame={description.file} data-design-preparing=""
+                className="invisible pointer-events-none absolute"
+                style={{ left: description.x, top: description.y, width: description.width, height: description.height,
+                  zIndex: description.z }}
+              />
+            );
+            const framePlaying = currentPlayback?.file === frame.file;
             const paintedFrame = frameGeometryPreviewsRef.current.get(
               `${canvasDocumentOwner}\0${frame.file}`,
             )?.geometry;
@@ -7232,9 +7609,9 @@ export function DesignCanvas({
             // Frame chrome follows the semantic selection shared by body,
             // label, Layers, and keyboard navigation.
             const frameSelectedOnly =
-              view.selectedTargets.some(target => target.frame === frame.file && !target.nodeId);
-            const secondaryElements = view.selectedTargets.filter(target => target.frame === frame.file && target.nodeId &&
-              !selectedElements.some(details => details.oid === target.nodeId)).map(target => selectionRuntimeFrames?.[frame.file]?.detailsByNode[target.nodeId!])
+              paintedSelectedTargets.some(target => target.frame === frame.file && !target.nodeId);
+            const secondaryElements = (prepared ? view.selectedTargets : []).filter(target => target.frame === frame.file && target.nodeId &&
+              !selectedElements.some(details => details.oid === target.nodeId)).map(target => secondaryTargetDetails[`${frame.file}\u0000${target.nodeId}`])
               .filter((details): details is DesignRuntimeNodeDetails => Boolean(details && details.sourceVersion === frame.sourceVersion));
             // Guides and Option/Alt measurements anchor on the primary
             // selection's parent; a root-level selection measures against the
@@ -7281,10 +7658,34 @@ export function DesignCanvas({
             return (
               <article
                 key={`${workspaceId ?? "pending"}:${frame.file}`}
+                ref={(element) => {
+                  if (element) frameElementsRef.current.set(frame.file, element);
+                  else frameElementsRef.current.delete(frame.file);
+                }}
                 data-design-frame={frame.file}
+                data-design-preparing={!prepared ? "" : undefined}
+                onPointerDownCapture={(event) => {
+                  if (prepared || !active || !workspaceId) return;
+                  event.stopPropagation();
+                  void selectDesignFrame(workspaceId, description, { selected: true, additive: event.shiftKey, owner: canvasPageOwner }).catch(() => {});
+                }}
+                onClickCapture={(event) => { if (!prepared) event.stopPropagation(); }}
+                onDoubleClickCapture={(event) => { if (!prepared) event.stopPropagation(); }}
+                onContextMenuCapture={(event) => { if (!prepared) { event.preventDefault(); event.stopPropagation(); } }}
+                onPointerMoveCapture={(event) => { if (!prepared) event.stopPropagation(); }}
+                onDropCapture={(event) => { if (!prepared) { event.preventDefault(); event.stopPropagation(); } }}
                 data-design-frame-kind={frame.kind ?? "frame"}
+                data-design-frame-playing={framePlaying ? "" : undefined}
+                data-design-frame-chrome-protected={selected || frameSelectedOnly || framePlaying ||
+                  renamingFrame === frame.file || secondaryElements.length > 0 ? "" : undefined}
+                data-design-frame-stack-protected={framePlaying || renamingFrame === frame.file ||
+                  inlineTextEdit?.frame === frame.file || view.selectedTargets.some(target => target.frame === frame.file) ? "" : undefined}
+                // The camera resolves automatic controls against current geometry,
+                // including gestures between React renders. Editing stays expanded.
+                data-design-frame-controls={selected || frameSelectedOnly || framePlaying || renamingFrame === frame.file
+                  ? "expanded" : "automatic"}
                 className={cn(
-                  "pointer-events-auto absolute outline",
+                  "zd-design-frame pointer-events-auto absolute outline",
                   frame.kind === "text" ? "bg-transparent" : "bg-bg1",
                   frameSelectedOnly
                     ? "zd-design-selection-outline"
@@ -7293,11 +7694,11 @@ export function DesignCanvas({
                       : "outline-border2",
                 )}
                 style={{
-                  left: paintedFrame?.x ?? frame.x,
-                  top: paintedFrame?.y ?? frame.y,
-                  width: paintedFrame?.w ?? frame.width,
-                  height: paintedFrame?.h ?? frame.height,
-                  zIndex: paintedFrame?.z ?? frame.z,
+                  left: paintedFrame?.x ?? description.x,
+                  top: paintedFrame?.y ?? description.y,
+                  width: paintedFrame?.w ?? description.width,
+                  height: paintedFrame?.h ?? description.height,
+                  zIndex: paintedFrame?.z ?? description.z,
                   outlineWidth: frameSelectedOnly
                     ? designCanvasScreenPixels(2)
                     : frame.kind === "text"
@@ -7307,6 +7708,7 @@ export function DesignCanvas({
                 onPointerDown={(event) => {
                   if (
                     !active ||
+                    framePlaying ||
                     !event.isPrimary ||
                     event.button !== 0 ||
                     spacePressedRef.current
@@ -7393,6 +7795,7 @@ export function DesignCanvas({
                 }}
                 onDoubleClick={(event) => {
                   if (
+                    framePlaying ||
                     event.shiftKey ||
                     event.metaKey ||
                     event.ctrlKey ||
@@ -7408,9 +7811,9 @@ export function DesignCanvas({
                     event.clientY,
                   );
                 }}
-                onPointerMove={(event) => scheduleCanvasHover(event, frame)}
+                onPointerMove={(event) => { if (!framePlaying) scheduleCanvasHover(event, frame); }}
                 onPointerLeave={() => clearCanvasHover(frame)}
-                onContextMenu={(event) => openHitStack(event, frame)}
+                onContextMenu={(event) => { if (!framePlaying) openHitStack(event, frame); }}
                 onDragOver={(event) => {
                   if (!hasDesignAssetDrag(event.dataTransfer)) return;
                   event.preventDefault();
@@ -7433,67 +7836,112 @@ export function DesignCanvas({
                 }}
               >
                 {frame.kind !== "text" ? (
-                  <div
-                    data-design-controls
-                    className="absolute bottom-full left-0 flex origin-bottom-left items-center"
-                    style={
-                      {
-                        "--design-frame-label-max-width": `calc(${frame.width}px * var(--design-canvas-zoom))`,
-                        maxWidth: "var(--design-frame-label-max-width)",
-                        transform: `translateY(${designCanvasScreenPixels(-8)}) scale(${DESIGN_CANVAS_INVERSE_ZOOM})`,
-                      } as React.CSSProperties
-                    }
-                  >
-                    {renamingFrame === frame.file ? (
-                      <Input
-                        autoFocus
-                        value={renameDraft}
-                        className="h-6 w-48"
-                        aria-label={`Rename ${frame.title}`}
-                        onChange={(event) => setRenameDraft(event.target.value)}
-                        onPointerDown={(event) => event.stopPropagation()}
-                        onBlur={() => void commitRename(frame)}
-                        onKeyDown={(event) => {
-                          if (event.key === "Enter") {
-                            event.preventDefault();
-                            void commitRename(frame);
-                          } else if (event.key === "Escape") {
-                            event.preventDefault();
-                            renameSettledRef.current = true;
-                            setRenamingFrame(null);
+                  <>
+                    <div
+                      data-design-controls
+                      data-design-frame-chrome=""
+                      className="absolute bottom-full left-0 flex h-7 origin-bottom-left items-center"
+                      style={
+                        {
+                          // Reserve the 28px Play control and its 12px gap in screen space.
+                          "--design-frame-label-max-width": `max(0px, calc(${frame.width}px * var(--design-canvas-zoom) - 40px))`,
+                          maxWidth: "var(--design-frame-label-max-width)",
+                          transform: `translateY(${designCanvasScreenPixels(-8)}) scale(${DESIGN_CANVAS_INVERSE_ZOOM})`,
+                        } as React.CSSProperties
+                      }
+                    >
+                      {renamingFrame === frame.file ? (
+                        <Input
+                          autoFocus
+                          value={renameDraft}
+                          className="h-6 w-48 min-w-0 max-w-full"
+                          aria-label={`Rename ${frame.title}`}
+                          onChange={(event) => setRenameDraft(event.target.value)}
+                          onPointerDown={(event) => event.stopPropagation()}
+                          onBlur={() => void commitRename(frame)}
+                          onKeyDown={(event) => {
+                            if (event.key === "Enter") {
+                              event.preventDefault();
+                              void commitRename(frame);
+                            } else if (event.key === "Escape") {
+                              event.preventDefault();
+                              renameSettledRef.current = true;
+                              setRenamingFrame(null);
+                            }
+                          }}
+                        />
+                      ) : (
+                        <button
+                          type="button"
+                          data-design-frame-label=""
+                          title={frame.title}
+                          className={cn(
+                            "text-2xxs block max-w-full min-w-0 cursor-default overflow-hidden border-0 bg-transparent p-0 text-left leading-4 font-medium whitespace-nowrap outline-none",
+                            frameSelectedOnly
+                              ? "text-[var(--design-selection-stroke)]"
+                              : "text-muted-fg hover:text-fg2",
+                          )}
+                          onPointerDown={(event) =>
+                            startFrameGesture(event, frame, "move")
                           }
-                        }}
-                      />
-                    ) : (
-                      <button
-                        type="button"
-                        data-design-frame-label=""
-                        title={frame.title}
-                        className={cn(
-                          "text-2xxs block max-w-full min-w-0 cursor-default overflow-hidden border-0 bg-transparent p-0 text-left leading-4 font-medium whitespace-nowrap outline-none",
-                          frameSelectedOnly
-                            ? "text-[var(--design-selection-stroke)]"
-                            : "text-muted-fg hover:text-fg2",
-                        )}
-                        onPointerDown={(event) =>
-                          startFrameGesture(event, frame, "move")
-                        }
-                        onDoubleClick={(event) => {
+                          onDoubleClick={(event) => {
+                            event.stopPropagation();
+                            renameSettledRef.current = false;
+                            setRenameDraft(frame.title);
+                            setRenamingFrame(frame.file);
+                          }}
+                        >
+                          <span
+                            data-design-frame-name=""
+                            className="block max-w-full overflow-hidden text-ellipsis"
+                          >
+                            {frame.title}
+                          </span>
+                        </button>
+                      )}
+                    </div>
+                    <div
+                      data-design-controls
+                      data-design-frame-chrome=""
+                      className="absolute right-0 bottom-full origin-bottom-right"
+                      style={{ transform: `translateY(${designCanvasScreenPixels(-8)}) scale(${DESIGN_CANVAS_INVERSE_ZOOM})` }}
+                    >
+                      <DesignToolbarButton
+                        data-design-frame-play={frame.file}
+                        label={`Play ${frame.title}`}
+                        tooltip={framePlaying ? "Stop playback (Esc)" : "Play frame"}
+                        className="zd-frame-play"
+                        tool
+                        pressed={framePlaying}
+                        disabled={!active || !workspaceId || !folder || Boolean(inlineTextEdit || renamingFrame)}
+                        onPointerDown={(event) => event.stopPropagation()}
+                        onDoubleClick={(event) => event.stopPropagation()}
+                        onClick={(event) => {
                           event.stopPropagation();
-                          renameSettledRef.current = false;
-                          setRenameDraft(frame.title);
-                          setRenamingFrame(frame.file);
+                          if (currentPlayback?.file === frame.file) {
+                            stopFramePlayback(currentPlayback.id);
+                            return;
+                          }
+                          if (!workspaceId || !canvasPageOwner) return;
+                          gestureCancelRef.current?.();
+                          activateTool("select");
+                          onMotionTimelineOpenChange(false);
+                          setHitStackMenu(null);
+                          clearCanvasHover(frame);
+                          // Selection is published synchronously before its
+                          // durable bridge write; Play never waits on that I/O.
+                          void selectDesignFrame(workspaceId, frame, { selected: false, owner: canvasPageOwner }).catch(() => {});
+                          const session = { id: crypto.randomUUID(), owner: playbackOwner,
+                            file: frame.file, sourceVersion: frame.sourceVersion,
+                            selectionEvent: designWorkspaceView(workspaceId).selectionEvent };
+                          currentPlaybackRef.current = session;
+                          setPlaybackSession(session);
                         }}
                       >
-                        <span
-                          data-design-frame-name=""
-                          className="block max-w-full overflow-hidden text-ellipsis"
-                        >
-                          {frame.title}
-                        </span>
-                      </button>
-                    )}
-                  </div>
+                        <Play />
+                      </DesignToolbarButton>
+                    </div>
+                  </>
                 ) : null}
 
                 {workspaceId && folder ? (
@@ -7503,17 +7951,24 @@ export function DesignCanvas({
                     folder={folder}
                     frame={frame}
                     active={active}
-                    selected={selected}
+                    playbackSessionId={framePlaying ? currentPlayback.id : null}
+                    onPlaybackStopped={stopFramePlayback}
+                    selected={selected && !framePlaying}
                     selectedNodeIds={
                       selected ? view.selectedNodeIds : EMPTY_NODE_IDS
                     }
-                    live={liveFrameFiles.has(frame.file)}
+                    live={prepared && liveFrameFiles.has(frame.file)}
+                    sourceSurface={sourceFrameFiles.has(frame.file)}
+                    sourceReadOnly={!prepared}
+                    onSourceReady={sourceSurfaceReady}
+                    onSourceUnavailable={sourceSurfaceUnavailable}
+                    onSourceRetired={sourceSurfaceRetired}
                     theme={frameTheme}
                     highResolutionTile={
                       highResolutionTiles.get(frame.file) ?? null
                     }
                     highResolutionDisabled={
-                      inlineTextEdit?.frame === frame.file || savedEditingState > 0 && nativePixels
+                      sourceFrameFiles.has(frame.file) || framePlaying || inlineTextEdit?.frame === frame.file || savedEditingState > 0 && nativePixels
                     }
                     designDirectory={snapshot.directory}
                     previewOwner={previewOwner}
@@ -7525,12 +7980,12 @@ export function DesignCanvas({
                   </div>
                 )}
 
-                {workspaceId && frame.kind !== "text" ? (
+                {workspaceId && !framePlaying && frame.kind !== "text" ? (
                   <DesignAgentDraftFrameOverlay
                     workspaceId={workspaceId}
                     directory={snapshot.directory}
                     frame={frame}
-                    live={liveFrameFiles.has(frame.file)}
+                    live={prepared && liveFrameFiles.has(frame.file)}
                     active={active}
                     theme={frameTheme}
                   />
@@ -7588,7 +8043,7 @@ export function DesignCanvas({
                   </div>
                 ) : null}
 
-                {workspaceId ? (
+                {workspaceId && !framePlaying ? (
                   <DesignLayerHoverOverlay
                     workspaceId={workspaceId}
                     frame={frame.file}
@@ -8006,7 +8461,7 @@ export function DesignCanvas({
               directory={snapshot.directory}
               pages={snapshot.pages}
               activePageId={view.activePageId}
-              frames={snapshot.frames}
+              frames={frameViews}
               active={active}
               theme={frameTheme}
             />
@@ -8057,6 +8512,7 @@ export function DesignCanvas({
             aria-hidden="true"
           />
         </div>
+        </div>
 
         <div
           ref={marqueeRef}
@@ -8064,29 +8520,6 @@ export function DesignCanvas({
           className="zd-design-selection-border zd-design-selection-fill pointer-events-none absolute z-40 hidden border"
           aria-hidden="true"
         />
-
-        {view.codeView &&
-        selectedFrame &&
-        (selectedFrameDocument.data || selectedFrameDocument.error) ? (
-          <div
-            data-design-controls
-            data-design-source-view=""
-            data-motion-open={motionTimelineOpen ? "" : undefined}
-            className="zd-design-source-view bg-bg1 absolute inset-0 overflow-hidden"
-          >
-            <ScrollArea className="h-full">
-              <CodeBlock
-                language="html"
-                filename={`Zeros Design/${selectedFrame.file}`}
-              >
-                <pre>
-                  {selectedFrameDocument.data?.source ??
-                    "The frame source could not be loaded."}
-                </pre>
-              </CodeBlock>
-            </ScrollArea>
-          </div>
-        ) : null}
 
         {!snapshot && showColdBusy ? (
           <div className="text-muted-fg pointer-events-none absolute inset-0 flex items-center justify-center text-sm">
@@ -8191,7 +8624,7 @@ export function DesignCanvas({
           open={motionTimelineOpen}
           ownerKey={selectedFrame?.file ?? "frame"}
           sessionOwnerKey={motionOverlayOwner}
-          details={selectedNodeDetails}
+          details={motionNodeDetails}
           definitions={
             canvasFoundation.data?.foundation.keyframes ??
             EMPTY_DESIGN_KEYFRAME_DEFINITIONS
@@ -8269,20 +8702,6 @@ export function DesignCanvas({
             </DesignToolbarButton>
             <span className="zd-canvas-toolbar-divider" aria-hidden="true" />
             <DesignToolbarButton
-              label="Toggle frame source"
-              tooltip="Source"
-              tooltipSide="right"
-              pressed={view.codeView}
-              disabled={!workspaceId || !selectedFrame}
-              onPointerEnter={warmSelectedFrameDocument}
-              onFocus={warmSelectedFrameDocument}
-              onClick={() => {
-                if (workspaceId) setCodeView(workspaceId, !view.codeView);
-              }}
-            >
-              <Code2 />
-            </DesignToolbarButton>
-            <DesignToolbarButton
               ref={themeEditorTriggerRef}
               data-design-theme-trigger
               label="Open theme editor"
@@ -8303,7 +8722,7 @@ export function DesignCanvas({
               shortcut="⇧A"
               tooltipSide="right"
               pressed={motionTimelineOpen}
-              disabled={!workspaceId || !selectedFrame || !view.selectedNodeId}
+              disabled={!workspaceId || !selectedFrame || !motionTargetSelected}
               aria-keyshortcuts="Shift+A"
               onClick={() => onMotionTimelineOpenChange(!motionTimelineOpen)}
             >
@@ -8318,7 +8737,7 @@ export function DesignCanvas({
             directory={snapshot.directory}
             pages={snapshot.pages}
             activePageId={view.activePageId}
-            frames={snapshot.frames}
+            frames={frameViews}
             active={active}
             motionOpen={motionTimelineOpen}
             onReveal={revealAgentTarget}
@@ -8338,8 +8757,6 @@ export function DesignCanvas({
           activeTheme={view.activeTheme === baseThemeId ? null : view.activeTheme}
           active={active}
           open={themeEditorOpen}
-          returnFocusRef={themeEditorTriggerRef}
-          onReturnFocus={focusThemeEditorTrigger}
           onOpenChange={setThemeEditorOpenWithFocus}
           onActiveThemeChange={changeActiveTheme}
         />

@@ -1,5 +1,66 @@
-import { describe, it, expect } from "vitest";
-import { isSensitiveRepoPath } from "../read-file";
+import { afterEach, describe, it, expect, vi } from "vitest";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { isSensitiveRepoPath, readWorkspaceFile } from "../read-file";
+
+describe("opt-in Files video previews", () => {
+  const roots: string[] = [];
+  const fixture = () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "zeros-file-media-"));
+    roots.push(root);
+    return root;
+  };
+  afterEach(() => {
+    vi.restoreAllMocks();
+    for (const root of roots.splice(0)) fs.rmSync(root, { recursive: true, force: true });
+  });
+
+  it.each([false, true])("reads original video bytes for remote=%s without changing legacy reads", remote => {
+    const root = fixture();
+    const bytes = Buffer.from([0, 0, 0, 24, 102, 116, 121, 112]);
+    fs.writeFileSync(path.join(root, "clip.MP4"), bytes);
+    expect(readWorkspaceFile(root, "clip.MP4", { remote })).toMatchObject({ kind: "binary" });
+    expect(readWorkspaceFile(root, "clip.MP4", { remote, includeVideo: true })).toEqual({
+      kind: "video", path: "clip.MP4", bytes: bytes.length,
+      dataUrl: `data:video/mp4;base64,${bytes.toString("base64")}`,
+    });
+  });
+
+  it.each([
+    ["webm", "video/webm"], ["mov", "video/quicktime"], ["m4v", "video/mp4"],
+    ["ogv", "video/ogg"], ["mkv", "video/x-matroska"],
+  ])("keeps %s source bytes and MIME for download even if the codec is unsupported", (extension, mime) => {
+    const root = fixture();
+    fs.writeFileSync(path.join(root, `clip.${extension}`), Buffer.from([0, 1, 2]));
+    expect(readWorkspaceFile(root, `clip.${extension}`, { includeVideo: true })).toMatchObject({
+      kind: "video", dataUrl: `data:${mime};base64,AAEC`,
+    });
+  });
+
+  it("refuses oversized media before allocating or reading its payload", () => {
+    const root = fixture();
+    const file = path.join(root, "large.mp4");
+    fs.writeFileSync(file, "");
+    fs.truncateSync(file, 5 * 1024 * 1024 + 1);
+    const read = vi.spyOn(fs, "readSync");
+    expect(readWorkspaceFile(root, "large.mp4", { includeVideo: true })).toEqual({
+      kind: "too-large", path: "large.mp4", bytes: 5 * 1024 * 1024 + 1,
+    });
+    expect(read).not.toHaveBeenCalled();
+  });
+
+  it("keeps path and remote-secret authorization for videos", () => {
+    const root = fixture(), outside = fixture();
+    fs.writeFileSync(path.join(outside, "clip.mp4"), Buffer.from([0, 1, 2]));
+    fs.writeFileSync(path.join(root, ".env"), "fixture only");
+    fs.symlinkSync(path.join(outside, "clip.mp4"), path.join(root, "outside.mp4"));
+    fs.symlinkSync(".env", path.join(root, "secret.mp4"));
+    for (const target of ["outside.mp4", "secret.mp4", path.join(outside, "clip.mp4")]) {
+      expect(readWorkspaceFile(root, target, { remote: true, includeVideo: true })).toMatchObject({ kind: "error" });
+    }
+  });
+});
 
 describe("isSensitiveRepoPath (remote-boundary secret denylist)", () => {
   it("denies portable Dev infrastructure credentials and allows their example", () => {

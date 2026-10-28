@@ -254,7 +254,7 @@ const ResourceProcessRow = memo(function ResourceProcessRow({
         role="gridcell"
         className="text-fg1 text-right text-xs tabular-nums"
       >
-        {cpuReady ? formatCpuPercent(node.cpuPercent) : "—"}
+        {formatCpuPercent(node.cpuPercent, cpuReady && node.cpuSampled !== false)}
       </span>
       <span
         role="gridcell"
@@ -421,6 +421,7 @@ export const ResourceMonitor = memo(function ResourceMonitor() {
     let disposed = false;
     let active = false;
     let timer: number | null = null;
+    let failedSamples = 0;
     const canSample = () => !disposed && active && documentIsForeground();
 
     const clearTimer = (): void => {
@@ -455,10 +456,15 @@ export const ResourceMonitor = memo(function ResourceMonitor() {
           lastTerminalSnapshot.current = next;
         }
         setSnapshot(next);
+        failedSamples = 0;
         setSampleError(null);
       } catch (error) {
         if (!canSample() || generation !== requestGeneration.current) return;
-        setSampleError(error instanceof Error ? error.message : String(error));
+        // The next scheduled sample is already a bounded automatic retry.
+        // Keep the confirmed sample quiet through one missed observation.
+        failedSamples += 1;
+        if (failedSamples > 1)
+          setSampleError(error instanceof Error ? error.message : String(error));
       } finally {
         sampling.current = false;
         afterSample.current?.(generation !== requestGeneration.current);
@@ -623,6 +629,7 @@ export const ResourceMonitor = memo(function ResourceMonitor() {
       }
       text ??= copyResourceReport({
         sampledAt: displaySnapshot.sampledAt,
+        cpuReady: displaySnapshot.cpuReady,
         logicalCpuCount: displaySnapshot.logicalCpuCount,
         scanDurationMs: displaySnapshot.scanDurationMs,
         includeTerminal: includesTerminal,
@@ -632,6 +639,16 @@ export const ResourceMonitor = memo(function ResourceMonitor() {
         otherApps: otherAppNodes,
         memorySource: displaySnapshot.memorySource,
       });
+      try {
+        // An explicit diagnostic read only: no Design subscription, renderer
+        // polling or source/workspace identifiers are added to resource logs.
+        const { designRendererResources } = await import("../features/design-workspace/state/design-renderer-resources");
+        text += "\n## Design renderer allocations\n" +
+          "Logical allocation counters and estimates; physical process memory is reported above.\n" +
+          JSON.stringify(designRendererResources(), null, 2) + "\n";
+      } catch {
+        text += "\nDesign renderer allocation counters unavailable.\n";
+      }
       if (!(await copyToClipboardWithFallback(text))) {
         toast.error("Couldn't write to the clipboard — focus the app and retry.");
         return;
@@ -705,7 +722,7 @@ export const ResourceMonitor = memo(function ResourceMonitor() {
                     CPU{" "}
                     <strong className="text-fg1 font-medium tabular-nums">
                       {displaySnapshot?.cpuReady
-                        ? formatCpuPercent(totals.cpuPercent)
+                        ? formatCpuPercent(totals.cpuPercent, view.every((node) => node.cpuSampled !== false))
                         : "Sampling…"}
                     </strong>
                   </span>

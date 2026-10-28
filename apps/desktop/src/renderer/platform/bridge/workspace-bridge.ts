@@ -19,7 +19,9 @@ import type {
 // ──────────────────────────────────────────────────────────
 
 import type { RuntimeClient } from "./ws-client";
-import { cloudWorkspaceKey, parseCloudScopedId } from "./cloud-workspace-key";
+import { cloudTargetForValue, cloudWorkspaceKey, parseCloudScopedId } from "./cloud-workspace-key";
+import { CLOUD_GITHUB_PR_OPERATIONS } from "@zeros/protocol/cloud-github-pr";
+import { requestCloudGithubPr, cloudGithubPrAuthority } from "../cloud-github-pr";
 import { prepareCloudPromptErasure } from "../cloud-prompt-erasure";
 import { WorkspaceRuntimeClient, type ChatSnapshotRefresh } from "./workspace-runtime-client";
 import type { BridgeMessage } from "./messages";
@@ -116,7 +118,7 @@ const GIT_OP_ANALYTICS: Record<
 };
 
 /** Budget for NETWORK-BOUND git/GitHub writes (push / pull / fetch / rebase,
- *  PR create / mark-ready / merge). The 10s `workspaceOp` default is tuned for
+ *  PR create / mark-ready / merge / discovery). The 10s `workspaceOp` default is tuned for
  *  local DB reads; a slow remote or the GitHub merge API routinely exceeds it,
  *  so "Merge PR" used to reject with "Request timeout" → "Couldn't merge PR"
  *  even though GitHub completed the merge. If the op outlives even this budget
@@ -152,6 +154,23 @@ export async function workspaceOp(
   params: Record<string, unknown> = {},
   timeoutMs = 10_000,
 ): Promise<unknown> {
+  if (CLOUD_GITHUB_PR_OPERATIONS.has(op)) {
+    const target = cloudTargetForValue(params.workspaceId);
+    if (target) {
+      if (op === "gh.prCreate") {
+        await requestCloudGithubPr(target, "gh.repoAccess", {});
+        const before = cloudGithubPrAuthority(target);
+        if (!before) throw new Error("Refresh this workspace's GitHub connection before publishing.");
+        await workspaceOp(bridge, "workspace.prepareGithub", { workspaceId: params.workspaceId, branch: before.branch, baseBranch: before.baseBranch }, 150_000);
+        await requestCloudGithubPr(target, "gh.repoAccess", {});
+        const after = cloudGithubPrAuthority(target);
+        if (!after || before.connectionGeneration !== after.connectionGeneration || before.repositoryId !== after.repositoryId ||
+          before.repository !== after.repository || before.branch !== after.branch || before.baseBranch !== after.baseBranch)
+          throw new Error("Your GitHub connection or branch changed after publishing. Refresh before creating the pull request.");
+      }
+      return requestCloudGithubPr(target, op, params);
+    }
+  }
   const tracked = GIT_OP_ANALYTICS[op];
   const resp = (await bridge.request(
     { type: "WORKSPACE_REQUEST", op, params } as Partial<BridgeMessage> & {
@@ -321,13 +340,20 @@ interface ProjectPush {
   repoSlug?: string;
   name?: string;
   originUrl?: string | null;
+  originRevision?: number;
 }
 
 export async function bridgeProjectUpsert(
   bridge: RuntimeClient,
   p: ProjectPush,
-): Promise<void> {
-  await workspaceOp(bridge, "project.upsert", { ...p });
+): Promise<Project | null> {
+  const result = await workspaceOp(bridge, "project.upsert", { ...p }) as { project?: Project } | undefined;
+  return result?.project ?? null;
+}
+
+/** Explicit background maintenance; ordinary PR/catalog reads never mutate Git. */
+export async function bridgeReconcileGithubRemote(bridge: RuntimeClient, repoRoot: string): Promise<{ project: Project | null; changed: boolean }> {
+  return await workspaceOp(bridge, "project.reconcileGithubRemote", { repoRoot }, NETWORK_GIT_TIMEOUT_MS) as { project: Project | null; changed: boolean };
 }
 
 export async function bridgeProjectRemove(
@@ -1009,10 +1035,16 @@ export async function bridgeFileRead(
   bridge: RuntimeClient,
   workspaceId: string,
   path: string,
+  includeVideo = false,
+  streamMedia = false,
 ): Promise<ReadFileResult> {
   return (await workspaceOp(bridge, "file.read", {
     workspaceId,
     path,
+    // Optional: older runtimes ignore it and return their binary/size fallback;
+    // older clients never receive a new result kind from updated runtimes.
+    ...(includeVideo ? { includeVideo: true } : {}),
+    ...(streamMedia ? { streamMedia: true } : {}),
   })) as ReadFileResult;
 }
 
@@ -1591,7 +1623,12 @@ export async function bridgeGhPrSync(
   bridge: RuntimeClient,
   workspaceId: string,
 ): Promise<PR | null> {
-  return (await workspaceOp(bridge, "gh.prSync", { workspaceId })) as PR | null;
+  return (await workspaceOp(
+    bridge,
+    "gh.prSync",
+    { workspaceId },
+    NETWORK_GIT_TIMEOUT_MS,
+  )) as PR | null;
 }
 
 export async function bridgeGhPrChecks(

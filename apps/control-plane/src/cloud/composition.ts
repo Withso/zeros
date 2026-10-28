@@ -14,9 +14,12 @@ import { createCloudV2AgentLogins, createCloudV2CodexRefresh, type CloudV2AgentL
 import { BoatCloudV2Compute } from "./boat.js";
 import type { CloudV2ControlFrame } from "./contract.js";
 import { CloudV2ComputerBuilder, CloudV2Computers } from "./computer.js";
-import { createCloudV2GithubTokens, createCloudV2RepositoryTokens } from "./github.js";
+import { createCloudGithubServices } from "./github-composition.js";
+import { hydrateCloudRepository, type CloudSourceTarget } from "./source-authority.js";
 import { HISTORY_OPS, readCloudV2History } from "./history.js";
-import { CloudV2Lifecycle } from "./lifecycle.js";
+import { CLOUD_V2_HOME, CloudV2Lifecycle, type CloudV2TimingRecord } from "./lifecycle.js";
+import { cloudV2CheckpointStorage, openCheckpointKey, sealCheckpointKey } from "./checkpoint.js";
+import { runtimeStorageClient } from "./runtime-source.js";
 import { CLOUD_V2_PROXY_PREFIX, type CloudV2ProxyDeps } from "./proxy.js";
 import { CloudV2Relay } from "./relay.js";
 import { cloudV2Runtime } from "./runtime.js";
@@ -30,8 +33,6 @@ import { CloudV2PromptSignals } from "./prompt-signals.js";
 import { createMcpServices } from "../mcp/composition.js";
 
 const PROXY_TOKEN_TTL_MS = 24 * 60 * 60_000;
-/** Boat stock image home; repositories live at <home>/<owner>/<name>. */
-export const CLOUD_V2_HOME = "/home/user";
 
 type ConfigFrame = Extract<CloudV2ControlFrame, { t: "config" }>;
 type Login = CloudAgentCredentialMaterial | null | undefined;
@@ -65,7 +66,7 @@ export async function answerCloudV2Offline(store: Pick<CloudV2Store, "listChats"
   }
 }
 
-export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boolean; lifecycle: boolean }, securityEvents?: PostgresSecurityEventBroker, listenerPool: pg.Pool = pool) {
+export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boolean; lifecycle: boolean }, securityEvents?: PostgresSecurityEventBroker, listenerPool: pg.Pool = pool, lockPool: pg.Pool = pool) {
   const v2 = config.cloudV2;
   if (!v2) return null;
   const localOwner = config.development && !("generation" in config.development) ? config.development.owner : undefined;
@@ -77,35 +78,62 @@ export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boo
   if (!keys) throw new Error("Cloud v2 requires the credential encryption keyring");
   const signer = new CloudV2WorkerSigner(v2.workerSigningKey, v2.workerSigningKeyPrevious);
   const logins: CloudV2AgentLogins = keys ? createCloudV2AgentLogins(pool, keys) : async () => null;
-  const githubToken = config.github ? createCloudV2GithubTokens(pool, config.github) : async () => {
-    throw new HttpError(409, "github_unavailable", "GitHub is not configured");
-  };
+  const github = createCloudGithubServices(pool, config.github, keys, store);
+  const githubToken = (workspace: CloudV2Workspace, purpose: "git" | "gh" = "git") => github.workspaceToken(workspace, "user", purpose);
   const proxyBase = `${v2.apiUrl}${CLOUD_V2_PROXY_PREFIX}`;
-  const computers = new CloudV2Computers(pool);
-  const repositoryToken = config.github ? createCloudV2RepositoryTokens(pool, config.github) : null;
-  const mcp = createMcpServices(pool, config);
+  const computers = new CloudV2Computers(pool, lockPool, github.resolveRepository);
+  const source = github.source;
+  const authorizeRepository = async (org: string, user: string, repository: string) => {
+    await source.repository(org, user, repository);
+  };
+  const authorizeRepositories = async (org: string, user: string, repositories: readonly string[]) => {
+    await source.repositories(org, user, repositories);
+  };
+  const authorizeSourceTargets = async (org: string, user: string, targets: readonly CloudSourceTarget[]) => {
+    await source.targets(org, user, targets);
+  };
+  const authorizeBuildRepository = async (org: string, user: string, buildId: string, repository: string) => {
+    const target = await computers.resolveBuildRepository(org, user, buildId, repository);
+    await authorizeSourceTargets(org, user, [target]);
+    return target;
+  };
+  const authorizeSource = github.authorizeSource;
+  const continueSource = github.continueSource;
+  const mcp = createMcpServices(pool, config, github.connections.authorizeRepositoryConfiguration.bind(github.connections));
+  const timing = (record: CloudV2TimingRecord) => console.log(`[cloud-v2] timing ${JSON.stringify(record)}`);
 
-  const workerConfig = async (workspace: CloudV2Workspace): Promise<ConfigFrame> => {
+  const workerConfig = async (workspace: CloudV2Workspace, mode: "admission" | "continuation" = "admission"): Promise<ConfigFrame> => {
+    const authorize = () => mode === "continuation" ? continueSource(workspace) : authorizeSource(workspace);
+    await authorize();
     const proxy = async () => {
       const issued = await store.issueToken({ workspaceId: workspace.id, kind: "proxy", userId: null, ttlMs: PROXY_TOKEN_TTL_MS });
       return { token: issued.token, expiresAt: issued.expiresAt.getTime() };
     };
-    const [codex, claude, cursor] = await Promise.all([
+    const [codex, claude, cursor, setup, baseCommit, repositoryBinding] = await Promise.all([
       logins(workspace.creatorUserId, workspace.organizationId, "codex"),
       logins(workspace.creatorUserId, workspace.organizationId, "claude"),
       logins(workspace.creatorUserId, workspace.organizationId, "cursor"),
+      github.workspaceSetup(workspace, computers),
+      store.baseCommit(workspace.id),
+      github.binding(workspace, mode),
     ]);
     const agents = await cloudV2AgentConfig({ codex, claude, cursor }, proxyBase, proxy);
+    const mcpServers = mcp ? await mcp.store.resolve(workspace.organizationId, workspace.creatorUserId, workspace.repository, repositoryBinding) : undefined;
+    await authorize();
     return {
       t: "config",
+      githubPullRequests: 1,
       ...(v2.promptOutbox ? { promptOutbox: 1 as const } : {}),
       loginRevision: await store.loginRevision(workspace.id) ?? "0",
       workspace: {
         id: workspace.id, organizationId: workspace.organizationId, repository: workspace.repository,
         checkoutPath: `${CLOUD_V2_HOME}/${workspace.repository}`, branch: workspace.branch, baseBranch: workspace.baseBranch,
+        github: repositoryBinding,
+        ...(setup !== null ? { setup } : {}),
+        ...(baseCommit ? { baseCommit } : {}),
       },
       agents,
-      ...(mcp ? { mcpServers: await mcp.store.resolve(workspace.organizationId, workspace.creatorUserId, workspace.repository, true) } : {}),
+      ...(mcpServers ? { mcpServers } : {}),
     };
   };
 
@@ -113,12 +141,15 @@ export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boo
     store,
     computers,
     installedRepositories: organizationId => store.installedRepositories(organizationId),
+    authorizeRepository, authorizeRepositories, authorizeSourceTargets, authorizeBuildRepository, authorizeSource, continueSource,
+    github: { service: github.service, documents: github.documents },
+    githubConnections: github.connections,
     bridgeBaseUrl: v2.realtimeUrl,
     promptOutbox: v2.promptOutbox === true,
   };
-  const proxy: CloudV2ProxyDeps = { store, logins, ...(keys ? { refreshCodex: createCloudV2CodexRefresh(pool, keys) } : {}) };
+  const proxy: CloudV2ProxyDeps = { store, logins, authorizeSource, continueSource, ...(keys ? { refreshCodex: createCloudV2CodexRefresh(pool, keys) } : {}) };
   const connections = roles.relay || roles.lifecycle ? new CloudV2Relay({
-    store, ...(securityEvents ? { securityEvents } : {}),
+    store, timing, authorizeSource, continueSource, ...(securityEvents ? { securityEvents } : {}),
     config: workerConfig,
     workerRoute: async id => {
       const route = await store.workerRoute(id);
@@ -131,9 +162,11 @@ export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boo
   }) : null;
   const relay = roles.relay ? connections : null;
   const promptSignals = new CloudV2PromptSignals();
-  const workers: CloudV2WorkerRouteDeps = { store, config: workerConfig, githubToken, runtimeSha256: v2.runtime.sha256,
-    ...(mcp ? { mcpAuthorization: (workspace, id, force) =>
-      mcp.oauth.authorizationForRepository(workspace.organizationId, workspace.creatorUserId, workspace.repository, id, force, true) } : {}),
+  const workers: CloudV2WorkerRouteDeps = { store, timing, authorizeSource, continueSource, config: workerConfig, githubToken, runtimeSha256: v2.runtime.sha256,
+    githubCheckout: (token,bootId,value) => github.metadata.checkout(token,bootId,value),
+    ...(mcp ? { mcpAuthorization: async (workspace, id, force) =>
+      mcp.oauth.authorizationForRepository(workspace.organizationId, workspace.creatorUserId, workspace.repository, id, force,
+        await github.identities.primary(workspace)) } : {}),
     promptOutbox: v2.promptOutbox === true, waitForPrompts: (id, ms, signal) => promptSignals.wait(id, ms, signal) };
   const promptChanges = v2.promptOutbox ? postgresNotificationSubscription(listenerPool, {
     channels: ["zeros_cloud_v2_prompts"],
@@ -144,37 +177,66 @@ export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boo
     },
   }) : null;
   void promptChanges?.start().catch(() => {});
-  const loginChanges = relay ? postgresNotificationSubscription(listenerPool, {
-    channels: ["zeros_cloud_v2_logins"],
-    onReady: () => { void relay.refreshLogins(); },
+  const loginChanges = postgresNotificationSubscription(listenerPool, {
+    // The existing shared LISTEN connection carries both hints. No connection
+    // or polling loop is added for permission-cache invalidation.
+    channels: ["zeros_cloud_v2_logins", "zeros_cloud_github_access"],
+    onReady: () => { source.invalidate(); relay?.revalidateSources({}); void relay?.refreshLogins(); },
     onNotification: notice => {
       try {
         const scope = JSON.parse(notice.payload ?? "");
-        if ((typeof scope?.ownerUserId === "string" || scope?.ownerUserId === null) && (scope.organizationId === null || typeof scope.organizationId === "string"))
-          void relay.refreshLogins({ ...(typeof scope.ownerUserId === "string" ? { ownerUserId: scope.ownerUserId } : {}), ...(scope.organizationId ? { organizationId: scope.organizationId } : {}) });
+        if ((typeof scope?.ownerUserId === "string" || scope?.ownerUserId === null) && (scope.organizationId === null || typeof scope.organizationId === "string")) {
+          const identity = { ...(typeof scope.ownerUserId === "string" ? { ownerUserId: scope.ownerUserId } : {}), ...(scope.organizationId ? { organizationId: scope.organizationId } : {}) };
+          source.invalidate({ ...(identity.ownerUserId ? { userId: identity.ownerUserId } : {}), ...(identity.organizationId ? { organizationId: identity.organizationId } : {}) });
+          relay?.revalidateSources(identity);
+          if (notice.channel === "zeros_cloud_v2_logins") void relay?.refreshLogins(identity);
+        }
       } catch { /* Invalid wake hints carry no authority. */ }
     },
-  }) : null;
+  });
   void loginChanges?.start().catch(() => {}); // The shared listener retries and re-reads onReady.
   const runtime = cloudV2Runtime(v2.runtime.sha256, v2.runtime.store);
+  const remoteHeads = github.remoteHead;
   const builder = roles.lifecycle ? new CloudV2ComputerBuilder({
     computers, compute, channel: config.deploymentChannel, localOwner, runtime,
-    cloneToken: async (organizationId, userId, repository) => {
-      if (!repositoryToken) throw new HttpError(409, "github_unavailable", "GitHub is not configured");
-      return (await repositoryToken(organizationId, userId, repository)).token;
+    cloneToken: async (organizationId, userId, target) => {
+      return (await github.token({ organizationId, userId }, target, "read", "git",
+        () => authorizeSourceTargets(organizationId, userId, [target]))).token;
     },
+    ...(remoteHeads ? { remoteHead: (org: string, user: string, target: CloudSourceTarget, branch: string) =>
+      remoteHeads(org, user, target.repository, branch, target.repositoryId) } : {}),
     logger: console,
   }) : null;
   const lifecycle = roles.lifecycle ? new CloudV2Lifecycle({
     ...(builder ? { builds: builder } : {}),
     store,
+    timing,
     compute,
     runtime,
+    authorizeSource,
+    prepareRepository: async (workspace, sandboxId) => {
+      const credential = await github.workspaceToken(workspace);
+      const repositoryBinding = await github.binding(workspace);
+      const input = `Authorization: Basic ${Buffer.from(`x-access-token:${credential.token}`).toString("base64")}\n`;
+      const result = await compute.execLong(sandboxId, hydrateCloudRepository(workspace, repositoryBinding.repository), 900, input);
+      if (result.exitCode !== 0) throw new HttpError(409, "cloud_source_checkout_failed", "The repository checkout could not be prepared. Existing files were retained.");
+      await authorizeSource(workspace);
+    },
     prompts: store.prompts, stopIdle: (id, before) => store.stopIdle(id, before),
+    checkpointRetry: v2.checkpointRetry === true,
     publicKeys: signer.publicKeys, sealPortToken: (token, id) => sealPortToken(token, id, keys),
     stopWorker: workspace => connections!.stopWorkspace(workspace),
     bootEnv: workspace => ({ CLOUD_V2_API_URL: v2.apiUrl, CLOUD_V2_RUNTIME_SHA256: v2.runtime.sha256, ZEROS_WORKSPACE_ID: workspace.id }),
     sandboxName: workspace => cloudV2SandboxName(config.deploymentChannel, "ws", workspace.id, localOwner),
+    // Checkpoints share the runtime's bucket, under cloud-v2/checkpoints/.
+    checkpoints: {
+      storage: cloudV2CheckpointStorage(runtimeStorageClient(v2.runtime.store), v2.runtime.store),
+      seal: (key, id, object) => sealCheckpointKey(key, id, object, keys),
+      open: (sealed, id, object) => openCheckpointKey(sealed, id, object, keys),
+    },
+    remoteHead: async (workspace: CloudV2Workspace) => remoteHeads(workspace.organizationId, workspace.creatorUserId, workspace.repository,
+      workspace.baseBranch,(await github.identities.primary(workspace)).repositoryId),
+    githubToken: (workspace: CloudV2Workspace) => github.workspaceToken(workspace),
     logger: console,
   }) : null;
   return { store, compute, routes, proxy, workers, relay, connections, lifecycle, loginChanges, promptChanges, promptSignals };

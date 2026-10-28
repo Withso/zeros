@@ -38,6 +38,15 @@ function deferred<T>() {
 }
 
 describe("workspace file data cache", () => {
+  it.each(["/personal", "/organization", "cloud://11111111-1111-4111-8111-111111111111/22222222-2222-4222-8222-222222222222"])("shares exact-key video reads without extra source copies in %s", async cwd => {
+    const query = { cwd, path: "clip.mp4" };
+    const value = { kind: "video" as const, path: query.path, bytes: 3, dataUrl: "data:video/mp4;base64,AAEC" };
+    readFile.mockResolvedValue(value);
+    const [first, second] = await Promise.all([loadWorkspaceFileRead(query), loadWorkspaceFileRead(query)]);
+    expect(first).toBe(value); expect(second).toBe(value);
+    expect(readFile).toHaveBeenCalledExactlyOnceWith(cwd, "clip.mp4", { includeVideo: true });
+    expect(peekWorkspaceFileRead({ ...query, cwd: "/another-owner" })).toBeUndefined();
+  });
   it("isolates library source reads from normal files, other providers and other workspaces", async () => {
     const source = { agentId: "claude" as const, path: "/library/review/SKILL.md", name: "review" };
     const query = { cwd: "/repo", path: source.path, skillSource: source };
@@ -80,14 +89,19 @@ describe("workspace file data cache", () => {
     expect(retained).toBeLessThanOrEqual(128 * 1024 * 1024);
   });
 
-  it("accounts for image data URLs rather than only on-disk byte counts", () => {
-    const queries = Array.from({ length: 40 }, (_, index) => ({ cwd: "/repo", path: `image-${index}.png` }));
+  it.each([
+    ["/repo", "image"],
+    ["/repo", "video"],
+    ["cloud://11111111-1111-4111-8111-111111111111/22222222-2222-4222-8222-222222222222", "image"],
+    ["cloud://11111111-1111-4111-8111-111111111111/22222222-2222-4222-8222-222222222222", "video"],
+  ] as const)("bounds retained %s %s payloads by encoded bytes rather than file count", (cwd, kind) => {
+    const queries = Array.from({ length: 40 }, (_, index) => ({ cwd, path: `media-${index}.${kind === "image" ? "png" : "mp4"}` }));
     for (const query of queries) primeWorkspaceFileRead(query, {
-      kind: "image", path: query.path, bytes: 3_000_000,
-      dataUrl: "data:image/png;base64," + "x".repeat(4_000_000),
+      kind, path: query.path, bytes: 3_000_000,
+      dataUrl: `data:${kind}/${kind === "image" ? "png" : "mp4"};base64,` + "x".repeat(4_000_000),
     });
     expect(peekWorkspaceFileRead(queries[0]!) === undefined).toBe(true);
-    expect(peekWorkspaceFileRead(queries.at(-1)!)?.kind).toBe("image");
+    expect(peekWorkspaceFileRead(queries.at(-1)!)?.kind).toBe(kind);
     const retained = queries.reduce((sum, query) => sum + (peekWorkspaceFileRead(query)?.dataUrl?.length ?? 0) * 2, 0);
     expect(retained).toBeLessThanOrEqual(128 * 1024 * 1024);
   });

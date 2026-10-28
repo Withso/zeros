@@ -4,12 +4,14 @@ import {
   designMovementGuardSchema,
   designRelocationSchema,
 } from "@zeros/protocol/design-relocation";
-import { designCatalogReadSchema, type DesignCatalogRead, type DesignCatalogReply } from "@zeros/protocol/design-catalog";
+import { designCatalogReadSchema, designNavigationReadSchema, designFramesPrepareSchema, type DesignCatalogRead, type DesignCatalogReply } from "@zeros/protocol/design-catalog";
+import { prepareDesignNavigationFrames } from "./document";
 import type { DesignCatalogAdmission } from "./catalog";
 import { encodeDesignFramePath } from "@zeros/protocol/design-path";
 import { designPageCreateInputSchema, designPageDeleteInputSchema, designPageIdSchema, designPageRenameInputSchema } from "@zeros/protocol/design-pages";
 import { selectDesignPageHint } from "./page-selection";
-import { DESIGN_CAPTURE_TIMEOUT_MS, designPreviewRequestSchema, designWorkspaceCaptureSchema } from "@zeros/protocol/design-capture";
+import { DESIGN_CAPTURE_TIMEOUT_MS, designPreviewCancelSchema, designPreviewRequestSchema, designWorkspaceCaptureSchema } from "@zeros/protocol/design-capture";
+import type { DesignPreviewJobs } from "./preview-jobs";
 import { captureWorkspaceDesign, previewWorkspaceDesign } from "./workspace-capture";
 import { openDesignVerification, designFramePreviewUrl } from "./verification-service";
 import { createDesignContextReference, inspectDesignContext } from "./context";
@@ -50,7 +52,9 @@ import {
   designDirectoryFromSettings,
   designDocumentMetadataPath,
   readDesignDirectoryRegistry,
+  readDesignStorageFile,
 } from "./metadata";
+import { MAX_DESIGN_TEXT_BYTES } from "./render-budget";
 import * as fs from "node:fs";
 import {
   GitError,
@@ -79,7 +83,7 @@ import {
   forgetWorkspaceDesignApiFrames,
   getWorkspaceDesignApi,
 } from "./design-api";
-import { DesignPageTargetError } from "./pages";
+import { DesignPageTargetError, designPageForWrite, designPageFrameFiles } from "./pages";
 import {
   captureDesignFrameRestorePoint,
   transferDesignNode,
@@ -121,6 +125,7 @@ import { stickyRecognizedDesignDirectories } from "./recognition-store";
 import { withDesignWorkspaceMutation } from "./document-write-lock";
 import { withMeasuredDesignMovement } from "./movement-guard";
 import { upsertDesignTheme } from "./theme-lifecycle";
+import { restoreDesignCatalogChange } from "./page-history";
 import { setDesignRuntimeAudit } from "./runtime-audits";
 import { normalizeDesignScreenshot, setDesignScreenshot } from "./screenshots";
 import { setDesignSelection } from "./selection";
@@ -142,6 +147,10 @@ import {
   designMutationStyles,
 } from "./route-params";
 import {
+  catalogDesignHistoryBytes,
+  catalogDesignHistoryEntry,
+  captureCatalogDesignHistory,
+  MAX_DESIGN_HISTORY_BYTES,
   transferDesignHistoryBytes,
   pruneWorkspaceDesignHistory,
   documentDesignHistoryEntry,
@@ -183,6 +192,8 @@ export interface DesignReadWorkspace {
   designDirectory: string;
 }
 export interface DesignWorkspaceRouteHost {
+  readDesignNavigation(workspaceId: string, remote: boolean, hostLocalResources: boolean): Promise<unknown>;
+  previewJobs: DesignPreviewJobs;
   readDesignCatalog(input: DesignCatalogRead, remote: boolean, admission: DesignCatalogAdmission): Promise<DesignCatalogReply>;
   resolveDesignWorkspace(workspaceId: string, remote: boolean): Workspace;
   resolveReadCwd(workspaceId: string, remote: boolean): string;
@@ -222,9 +233,12 @@ export interface DesignWorkspaceRouteHost {
   ): Promise<DesignWorkspaceSnapshot & { protocolCapability: string | null }>;
 }
 const DESIGN_WORKSPACE_ROUTES = new Set([
+  "design.navigation.read",
+  "design.frames.prepare",
   "design.catalog.read",
   "design.capture",
   "design.preview",
+  "design.preview.cancel",
   "design.styleBuilds.presence",
   "design.styles.refresh",
   "design.context.create",
@@ -288,11 +302,24 @@ export async function handleDesignWorkspaceRoute(
   host: DesignWorkspaceRouteHost,
   op: string,
   params: Params,
-  options: { remote: boolean; hostLocalResources: boolean; catalogAdmission?: DesignCatalogAdmission },
+  options: { remote: boolean; hostLocalResources: boolean; catalogAdmission?: DesignCatalogAdmission; previewAdmission?: DesignCatalogAdmission },
 ): Promise<unknown> {
   const { remote, hostLocalResources } = options;
   const applyDesktopDesignOperation = applyHumanDesignOperation.bind(null, { kind: "human", id: "desktop" });
   switch (op) {
+    case "design.navigation.read": {
+      if (remote || !hostLocalResources) throw new Error("Design navigation requires a Local workspace.");
+      return host.readDesignNavigation(designNavigationReadSchema.parse(params).workspaceId, remote, hostLocalResources);
+    }
+    case "design.frames.prepare": {
+      if (remote || !hostLocalResources) throw new Error("Design preparation requires a Local workspace.");
+      const input = designFramesPrepareSchema.parse(params);
+      const result = await host.withDesignReadWorkspace(input.workspaceId, remote, ({ root }) =>
+        prepareDesignNavigationFrames(root, input.catalogRevision, input.files, input.directoryId));
+      // Older preparation decoders reject unknown fields. Keep their exact
+      // reply shape; a new renderer opts in after capability negotiation.
+      return input.surfaceCosts ? result : { ...result, frames: result.frames.map(({ surfaceCost: _cost, ...frame }) => frame) };
+    }
     case "design.catalog.read": {
       if (!options.catalogAdmission) throw new GitError({ code: "REMOTE_RESTRICTED", message: "Design catalog requires a live connection." });
       return host.readDesignCatalog(designCatalogReadSchema.parse(params), remote, options.catalogAdmission);
@@ -304,7 +331,16 @@ export async function handleDesignWorkspaceRoute(
     case "design.preview": {
       // A canvas preview of the saved source; it never changes the checkout.
       const input = designPreviewRequestSchema.parse(params);
-      return host.withDesignReadWorkspace(input.workspaceId, remote, ({ root }) => previewWorkspaceDesign(root, input));
+      const run = (signal?: AbortSignal) => host.withDesignReadWorkspace(input.workspaceId, remote, ({ root }) => previewWorkspaceDesign(root, input, { signal }));
+      if (!input.jobId) return run();
+      if (!options.previewAdmission || !input.directoryId || !input.deadline || remote)
+        throw new Error("Design preview cancellation requires a live Local connection and directory.");
+      return host.previewJobs.run({ workspaceId: input.workspaceId, directoryId: input.directoryId, jobId: input.jobId, deadline: input.deadline }, options.previewAdmission, run);
+    }
+    case "design.preview.cancel": {
+      const input = designPreviewCancelSchema.parse(params);
+      if (!options.previewAdmission || remote) throw new Error("Design preview cancellation requires a live Local connection.");
+      return host.previewJobs.cancel(input, options.previewAdmission);
     }
     case "design.styleBuilds.presence": {
       // A Design tab shows this workspace, or stopped showing it. Builds start
@@ -551,6 +587,36 @@ export async function handleDesignWorkspaceRoute(
       const entry = source?.pop();
       if (history && source && entry) {
         const destination = direction === "undo" ? history.redo : history.undo;
+        if (entry.kind === "catalog") {
+          const api = getWorkspaceDesignApi(workspace.path);
+          let currentHistory: Awaited<ReturnType<typeof captureCatalogDesignHistory>>;
+          const before = direction === "undo" ? entry.change.after : entry.change.before;
+          const after = direction === "undo" ? entry.change.before : entry.change.after;
+          const changedFiles = entry.change.sources.map(change => change.file.slice(before.directory.length + 1));
+          try {
+            const presentFiles = entry.change.sources.filter(change => (direction === "undo" ? change.after : change.before) !== null)
+              .map(change => change.file.slice(before.directory.length + 1)).filter(file => before.canvas.frames[file]);
+            currentHistory = await captureCatalogDesignHistory(presentFiles, file => api.captureLocalHistory(designDocumentIdForFrame(file)));
+            await restoreDesignCatalogChange(workspace.path, entry.change, direction);
+          } catch (error) {
+            if (error instanceof DesignPageTargetError) history.bytes = Math.max(0, history.bytes - entry.bytes);
+            else source.push(entry);
+            throw error;
+          }
+          forgetWorkspaceDesignApiFrames(workspace.path, changedFiles.filter(file => !after.canvas.frames[file]));
+          const restored = direction === "undo" ? entry.beforeHistory : entry.afterHistory;
+          for (const checkpoint of restored) await api.restoreLocalHistory(checkpoint).catch(() => false);
+          if (direction === "undo") entry.afterHistory = currentHistory.checkpoints;
+          else entry.beforeHistory = currentHistory.checkpoints;
+          const bytes = currentHistory.complete ? catalogDesignHistoryBytes(entry) : MAX_DESIGN_HISTORY_BYTES + 1;
+          history.bytes += bytes - entry.bytes; entry.bytes = bytes;
+          destination.push(entry); pruneWorkspaceDesignHistory(history);
+          const snapshot = await host.readDesignSnapshot(workspace, remote, { hostLocalResources, fresh: true });
+          const page = snapshot.pages?.find(page => page.id === entry.pageId);
+          return { result: null, snapshot,
+            ...(entry.pageId ? { historyPageId: page?.id ?? snapshot.pages?.[0]?.id,
+              historySelection: (page ?? snapshot.pages?.[0])?.frameFiles[0] ?? null } : {}) };
+        }
         if (entry.kind === "transfer") {
           const api = getWorkspaceDesignApi(workspace.path);
           let currentHistory: DesignLocalHistoryCheckpoint[];
@@ -659,11 +725,12 @@ export async function handleDesignWorkspaceRoute(
             hostLocalResources,
             fresh: true,
           });
+          const affectedPage = snapshot.pages?.find(page => page.id === (replacement ?? expected)?.pageId);
           return {
             result: null,
             snapshot,
             historySelection:
-              replacement?.file ?? snapshot.frames[0]?.file ?? null,
+              replacement?.file ?? (affectedPage ? affectedPage.frameFiles[0] : snapshot.frames[0]?.file) ?? null,
             historyFrame: (replacement ?? expected)!.file,
           };
         }
@@ -1174,7 +1241,9 @@ export async function handleDesignWorkspaceRoute(
         sourceVersion,
         warnings,
       });
-      return { ok: true };
+      // Optional readback lets lazy canvases settle this exact frame's audit
+      // without composing every offscreen source via an aggregate refresh.
+      return { ok: true, sourceVersion, violations: warnings };
     }
     case "design.page.select": {
       const workspaceId = reqStr(params, "workspaceId");
@@ -1195,15 +1264,21 @@ export async function handleDesignWorkspaceRoute(
             pageId: params.pageId,
             expectedFrameIds: params.expectedFrameIds,
           });
+          const canvas = await readCanvas(workspace.path);
+          const files = designPageFrameFiles(canvas, designPageForWrite(canvas, input.pageId));
+          const api = getWorkspaceDesignApi(workspace.path);
+          const beforeHistory = await captureCatalogDesignHistory(files, async file => {
+            // A registered source may already be missing. Deleting the page
+            // must retain that absence, while unsafe files still refuse.
+            if (readDesignStorageFile(workspace.path, `${designDirectoryNameFor(workspace.path)}/${file}`, MAX_DESIGN_TEXT_BYTES, true) !== null)
+              return api.captureLocalHistory(designDocumentIdForFrame(file));
+            return null;
+          });
           const deleted = await deleteDesignPage(
             workspace.path,
             input.pageId,
             input.expectedFrameIds,
-          );
-          host.pruneDesignHistoryFrames(
-            workspace.path,
-            deleted.frameFiles,
-            deleted.folder,
+            change => host.recordDesignHistory(workspace.path, catalogDesignHistoryEntry(change, input.pageId, beforeHistory.checkpoints, beforeHistory.complete)),
           );
           forgetWorkspaceDesignApiFrames(
             workspace.path,
@@ -1220,10 +1295,14 @@ export async function handleDesignWorkspaceRoute(
         }
         let page;
         if (op === "design.page.create") {
-          page = await createDesignPage(workspace.path, designPageCreateInputSchema.parse({ title: params.title }));
+          page = await createDesignPage(workspace.path, designPageCreateInputSchema.parse({ title: params.title }), change => {
+            const created = change.after.canvas.pages?.find(page => !change.before.canvas.pages?.some(previous => previous.id === page.id));
+            host.recordDesignHistory(workspace.path, catalogDesignHistoryEntry(change, created?.id));
+          });
         } else {
           const input = designPageRenameInputSchema.parse({ pageId: params.pageId, title: params.title });
-          page = await renameDesignPage(workspace.path, input.pageId, input.title);
+          page = await renameDesignPage(workspace.path, input.pageId, input.title,
+            change => host.recordDesignHistory(workspace.path, catalogDesignHistoryEntry(change, input.pageId)));
         }
         return { page, snapshot: await host.readDesignSnapshot(workspace, remote, { hostLocalResources, fresh: true }) };
       });
@@ -1236,7 +1315,8 @@ export async function handleDesignWorkspaceRoute(
         throw new Error("design.themes.update requires a theme with a string id and label.");
       const input = { id: theme.id, label: theme.label, ...(theme.base === true ? { base: true } : {}) };
       return withDesignWorkspaceMutation(workspace.path, async () => ({
-        themes: await upsertDesignTheme(workspace.path, input),
+        themes: await upsertDesignTheme(workspace.path, input,
+          change => host.recordDesignHistory(workspace.path, catalogDesignHistoryEntry(change))),
         snapshot: await host.readDesignSnapshot(workspace, remote, { hostLocalResources, fresh: true }),
       }));
     }

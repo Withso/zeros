@@ -19,7 +19,10 @@ session itself.
 3. **Review the full diff yourself** (`zstack-review`). For a revised patch you
    already reviewed, review the interdiff (`git range-diff`).
 4. **Commit** with the workspace's own identity. The message gives the why and
-   then the what, and ends with the agent's `Co-Authored-By` trailer.
+   then the what, and ends with the agent's `Co-Authored-By` trailer. For a
+   frozen patch, first check that `git diff --cached | sha256sum` equals its
+   hash; an earlier `git mv` or `git checkout <rev> -- <path>` leaves other
+   work staged.
 5. **Open the PR** with Why, What changes, Tests and Rollout sections, ending
    with the repository's PR footer. Add lane labels the paths need, for example
    `ci:ui-smoke`. Check that all four sections are present before arming.

@@ -18,7 +18,7 @@ export type CardActionKind =
   | "ready-for-review"
   /** Open, non-draft PR, clean tree → Merge. */
   | "merge"
-  /** Local changes but no PR yet → Create PR (opens the workspace). */
+  /** Changes in a GitHub repository but no PR yet → Create PR. */
   | "create-pr"
   /** Nothing done → no button. */
   | null;
@@ -32,10 +32,12 @@ export type CardActionKind =
  *  which came from the now-removed heavy `withChanges` list query): the card
  *  probes dirtiness lazily per-mount. `undefined` means "not yet known" → NO
  *  button, so a dirty open-PR card never flashes a destructive **Merge** while
- *  its change probe is still in flight. */
+ *  its change probe is still in flight. `hasGithubRemote` comes from the owning
+ *  project's metadata; uncommitted changes alone do not enable PR creation. */
 export function resolveCardActionKind(
   w: Workspace,
   hasChanges: boolean | undefined,
+  hasGithubRemote: boolean,
 ): CardActionKind {
   // Worktree gone (folder deleted out-of-band, row un-archived). Takes priority
   // over any PR/change state — the workspace can't be opened or worked on.
@@ -50,6 +52,6 @@ export function resolveCardActionKind(
     if (w.prState === "draft") return "ready-for-review";
     return "merge";
   }
-  if (hasChanges) return "create-pr";
+  if (hasChanges && hasGithubRemote) return "create-pr";
   return null;
 }

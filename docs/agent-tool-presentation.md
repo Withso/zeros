@@ -78,13 +78,13 @@ Real errors, cancellations and unreported completions retain normal treatment.
   active. Unknown provider resource schemes stay readable without invoking an
   arbitrary OS handler. Generated HTML is source content in Files, not trusted
   app code. Do not bypass existing image size or binary-preview limits.
-- Edit file pills prefer their exact Branch comparison, including a recorded
-  source path that Git now reports as renamed. Ignored and unchanged targets
-  open in Files. Use the cached comparison when available; a cold request
-  waits for its own successful comparison before falling back. Preserve the
-  chat's working folder when translating Git-root-relative paths, consume the
-  request with the Files navigation, and keep newer selections and unsaved
-  editors intact. A failed comparison is not evidence of an unchanged file.
+- Diff file pills open Changes at their exact Branch comparison, including a
+  recorded source path that Git now reports as renamed. Ignored and unchanged
+  targets retain that Changes selection with an explicit empty state. Use a
+  cached comparison when available; cold reads never delay navigation or
+  replace the requested file with an unrelated change. Preserve the chat's
+  working folder when translating Git-root-relative paths, keep newer
+  selections and unsaved editors intact, and never wake a cloud VM for hover.
 - Code-agent startup instructions place task files (plans, notes, logs,
   screenshots, handoffs) in `.context/<task>/` and ask agents not to commit
   them unless the user asks. Read relevant existing context, pass exact paths
@@ -321,8 +321,9 @@ and the saved pick and settings are retried after the window. Development
 builds log each refused selection and the account's advertised registry
 schema. `zeros local models` reads the adapter's current catalog, so a refused
 model shows as unavailable there too. Unavailable menu rows retain their saved
-identity, explain the reason, and offer a view of eligible choices without
-changing the selection or favorite.
+identity and explain the reason. Eligible models are directly selectable in
+the same catalog and search, without a separate availability filter. Browsing
+never changes the selection or favorite.
 
 Agent failures stay in the affected chat: terminal initialization failures use an
 inline notice before any prompt exists, prompt failures use their turn notice,
@@ -1054,7 +1055,7 @@ query replacement, host disposal, buffered input, and native cancellation receip
 Keep duration, copy and the action menu in the settled turn's toolbar. Only
 the actual last turn automatically shows its recorded changes; a last turn
 without changes never promotes an older card. Historical turns show aggregate
-green additions and blue deletions beside the menu, including zero-line
+green additions and red deletions beside the menu, including zero-line
 metadata changes. Clicking or pressing Enter/Space toggles that turn's card;
 the control uses `bg1-hover` and exposes its expanded state. A new thread tail
 or a changed chat/workspace identity closes manually opened historical cards.
@@ -1067,8 +1068,9 @@ expansion moves focus to the first newly revealed file. Closing the card or
 changing its owner resets the file-list disclosure.
 
 Review publishes the Changes tab with the explicit selected turn range,
-including for the latest turn, so later work cannot retarget it. File rows
-retain their exact historical diff navigation. Apply this to Claude, Codex
+including for the latest turn, so later work cannot retarget it. Each file row
+opens Changes in single-file presentation with that same explicit turn range
+and the clicked path. Apply this to Claude, Codex
 and Cursor in Personal Local, organization-local and cloud workspaces. Local
 uses keyed turn records; cloud uses the worker's mirrored opening-message
 summary, without waking the VM for passive transcript reads or hover previews.

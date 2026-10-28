@@ -111,7 +111,7 @@ async function main() {
         : command === "auth_get_session_user" ? { sub: "fixture", email: "fixture@example.test", name: "Fixture", provider: "workos" } : null,
       on: () => () => {},
     } });
-    setActiveBridge({ status: "connected", onStatusChange: () => () => {}, onMessage: () => () => {}, on: () => () => {},
+    setActiveBridge({ executionIdentity: { kind: "local", sidecar: "active" }, status: "connected", onStatusChange: () => () => {}, onMessage: () => () => {}, on: () => () => {},
       request: async ({ type, op }: { type?: string; op?: string }) => {
         if (type === "AGENT_LIST_AGENTS") return { type: "AGENT_AGENTS_LIST", agents: agents.map(agent => ({ ...agent, authenticated: true })) };
         if (op === "project.list") return { result: { projects: [] } };
@@ -128,7 +128,7 @@ async function main() {
     if (cloudFolder) {
       // The workspace's worker answers the agent list over its bridge.
       const { setActiveBridge } = await import("../platform/bridge/active-bridge");
-      setActiveBridge({ status: "connected", onStatusChange: () => () => {}, onMessage: () => () => {}, on: () => () => {},
+      setActiveBridge({ executionIdentity: { kind: "local", sidecar: "active" }, status: "connected", onStatusChange: () => () => {}, onMessage: () => () => {}, on: () => () => {},
         request: async () => ({ type: "AGENT_AGENTS_LIST", agents }) } as never);
       const { warmCloudAgentRegistry } = await import("../features/agent/workspace-agent-registry");
       registryOverride = await warmCloudAgentRegistry(cloudFolder);

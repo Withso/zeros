@@ -8,16 +8,20 @@
 // ──────────────────────────────────────────────────────────
 
 import { isNativeRuntime, nativeInvoke } from "./runtime";
+import { fileMediaRangeSchema, type FileMediaDescriptor, type FileMediaRange, type FileMediaRangeResult } from "@zeros/protocol/file-media";
+import { WorkspaceRuntimeClient } from "./bridge/workspace-runtime-client";
+import { runtimeExecutionKey } from "./bridge/ws-client";
 import { getActiveBridge } from "./bridge/active-bridge";
 import {
   bridgeFileRead,
   bridgeFileWrite,
+  workspaceOp,
 } from "./bridge/workspace-bridge";
 import { resolveBridgeWorkspaceIdForCwd } from "./bridge/workspace-id-resolver";
 import { isKnownProjectRoot } from "../state/projects-store";
 import { isCloudWorkspace } from "./bridge/cloud-workspace-key";
 
-export type ReadFileKind = "text" | "image" | "binary" | "too-large" | "error";
+export type ReadFileKind = "text" | "image" | "video" | "binary" | "too-large" | "error";
 
 export interface ReadFileResult {
   kind: ReadFileKind;
@@ -26,8 +30,10 @@ export interface ReadFileResult {
   bytes: number;
   /** Present when kind === "text". */
   content?: string;
-  /** Present when kind === "image" (base64 data URL). */
+  /** Present for image/video previews (bounded base64 data URL). */
   dataUrl?: string;
+  /** Source metadata for native range playback; the cache holds no media bytes. */
+  media?: FileMediaDescriptor;
   /** Present when kind === "error" — a human-readable reason. */
   error?: string;
   /** Engine-tagged Design territory. Design files have exactly one write path
@@ -98,39 +104,67 @@ async function resolveBridgeFileTarget(
 export async function readWorkspaceFile(
   cwd: string,
   relPath: string,
+  options?: { includeVideo?: boolean; streamMedia?: boolean },
 ): Promise<ReadFileResult | null> {
   if (!cwd || !relPath) return null;
+  const fromBridge = async (action: string) => {
+    const { bridge, workspaceId } = await resolveBridgeFileTarget(cwd, action);
+    return options?.streamMedia
+      ? bridgeFileRead(bridge, workspaceId, relPath, options.includeVideo, true)
+      : options?.includeVideo
+      ? bridgeFileRead(bridge, workspaceId, relPath, true)
+      : bridgeFileRead(bridge, workspaceId, relPath);
+  };
   // Desktop: Local main (a registered project root) has no
   // workspace row and isn't under electron-main's trusted IPC roots, so the
   // electron read_file would refuse it. Read it over the engine bridge instead —
   // the engine resolves the repo root via isKnownRepoRoot. Worktrees stay on the
   // faster electron IPC path below.
   if (isCloudWorkspace(cwd) || isKnownProjectRoot(cwd)) {
-    const { bridge, workspaceId } = await resolveBridgeFileTarget(
-      cwd,
-      "read the repository file",
-    );
-    return bridgeFileRead(bridge, workspaceId, relPath);
+    return fromBridge("read the repository file");
   }
   if (!isNativeRuntime()) {
-    const { bridge, workspaceId } = await resolveBridgeFileTarget(
-      cwd,
-      "read the workspace file",
-    );
-    return bridgeFileRead(bridge, workspaceId, relPath);
+    return fromBridge("read the workspace file");
   }
   try {
     return await nativeInvoke<ReadFileResult>("read_file", {
       cwd,
       path: relPath,
+      ...(options?.includeVideo ? { includeVideo: true } : {}),
+      ...(options?.streamMedia ? { streamMedia: true } : {}),
     });
   } catch {
-    const { bridge, workspaceId } = await resolveBridgeFileTarget(
-      cwd,
-      "read the workspace file",
-    );
-    return bridgeFileRead(bridge, workspaceId, relPath);
+    return fromBridge("read the workspace file");
   }
+}
+
+/** Capture the destination once for an entire streamed source. A later owner,
+ * account or runtime cannot receive a previous source's range requests. */
+export function createWorkspaceMediaReader(cwd: string): (input: FileMediaRange) => Promise<FileMediaRangeResult> {
+  const bridge = getActiveBridge();
+  const executionKey = () => bridge instanceof WorkspaceRuntimeClient
+    ? bridge.workspaceExecutionKey(cwd) : bridge ? runtimeExecutionKey(bridge.executionIdentity) : "native";
+  const captured = executionKey();
+  const assertCurrent = () => {
+    if (getActiveBridge() !== bridge || executionKey() !== captured) throw new Error("The preview workspace changed. Reopen this file.");
+  };
+  let workspace: Promise<string> | undefined;
+  return async input => {
+    const range = fileMediaRangeSchema.parse(input);
+    assertCurrent();
+    let result: FileMediaRangeResult;
+    if (isNativeRuntime() && !isCloudWorkspace(cwd) && !isKnownProjectRoot(cwd)) {
+      result = await nativeInvoke<FileMediaRangeResult>("read_file_range", { cwd, ...range });
+    } else {
+      if (!bridge) throw new Error("The workspace reader is unavailable");
+      workspace ??= resolveBridgeWorkspaceIdForCwd(bridge, cwd).then(value => value ?? cwd);
+      const workspaceId = await workspace;
+      assertCurrent();
+      result = await workspaceOp(bridge, "file.readRange", { workspaceId, ...range }, 25_000) as FileMediaRangeResult;
+    }
+    assertCurrent();
+    return result;
+  };
 }
 
 function fileReadAsThumbnail(

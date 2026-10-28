@@ -40,7 +40,7 @@ export async function cloudAccountRequest<T>(
   path: string,
   schema: z.ZodType<T>,
   input?: { body: unknown; idempotencyKey: string; method?: "POST" | "DELETE" | "PUT" | "PATCH" },
-  options?: { promptRecovery?: true; signal?: AbortSignal },
+  options?: { promptRecovery?: true; signal?: AbortSignal; githubPullRequest?: true; mutationReceipt?: true },
 ): Promise<T> {
   if (!isFeatureEnabled("cloud-workspaces"))
     throw new Error("Cloud workspaces are not available in this release channel.");
@@ -57,7 +57,7 @@ export async function cloudAccountRequest<T>(
     method: input?.method ?? (input ? "POST" : "GET"),
     redirect: "error",
     cache: "no-store",
-    signal: options?.signal ? AbortSignal.any([options.signal, AbortSignal.timeout(20_000)]) : AbortSignal.timeout(20_000),
+    signal: options?.signal ? AbortSignal.any([options.signal, AbortSignal.timeout(options.githubPullRequest ? 60_000 : 20_000)]) : AbortSignal.timeout(options?.githubPullRequest ? 60_000 : 20_000),
     headers: {
       authorization: `Bearer ${session.access_token}`,
       ...(input
@@ -75,7 +75,7 @@ export async function cloudAccountRequest<T>(
   // account APIs retain their smaller response budget.
   const body = await readCloudJson(response, options?.promptRecovery && /^\/v1\/cloud-v2\/workspaces\/[^/]+\/prompts\?/.test(path)
     ? 16 * 1024 * 1024 : 4 * 1024 * 1024);
-  if (epoch !== getOrganizationStoreGeneration())
+  if (epoch !== getOrganizationStoreGeneration() && !(response.ok && options?.mutationReceipt))
     throw new Error("Your account changed while loading cloud workspaces");
   if (!response.ok) {
     const error = z

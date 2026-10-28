@@ -23,14 +23,14 @@ import {
   PopoverTrigger,
   Tooltip,
 } from "../../shared/ui/primitives";
-import { useBridge } from "../../platform/bridge/use-bridge";
+import { useBridge, useBridgeStatus } from "../../platform/bridge/use-bridge";
 import { workspaceOp } from "../../platform/bridge/workspace-bridge";
 import { shellOpenUrl } from "../../platform/app";
 import {
   providerAuthRevision,
   subscribeProviderAuth,
 } from "../../platform/provider-auth-state";
-import { useCachedRead } from "../../state/use-cached-read";
+import { useRecoveringRead } from "../../state/use-recovering-read";
 import {
   createSessionToolsResource,
   sessionToolsResource,
@@ -115,10 +115,13 @@ function ToolsPopover({
   const current = useRef<string | null>(null);
   current.current = concealed ? null : key;
   const visible = open && !concealed;
-  const enabled = !concealed && bridge?.status === "connected";
-  const read = useCachedRead(resource.cache, key, resource.fetch, {
+  const connected = useBridgeStatus(workspaceId) === "connected";
+  const enabled = !concealed && !!bridge && connected;
+  const read = useRecoveringRead(resource.cache, key, resource.fetch, {
     enabled: enabled && visible && !preparing,
     maxAgeMs: 5_000,
+    connected,
+    folder: workspaceId ?? "",
   });
   const titleId = useId();
   const refreshTools = read.refresh;

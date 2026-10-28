@@ -34,6 +34,7 @@ export function useInlineReview(
   itemIds: string | readonly string[],
 ) {
   const commentsAvailable = review.commentsAvailable !== false;
+  const canCreate = review.workspaceCommentsAvailable !== false || !!review.external?.postComment;
   const threads = commentsAvailable ? review.threads : EMPTY_REVIEW_THREADS;
   const [record, setRecord] = useState<{
     owner: string;
@@ -86,6 +87,8 @@ export function useInlineReview(
         return;
       }
       const snapshot = current.snapshots.get(itemId);
+      if (current.review.workspaceCommentsAvailable === false &&
+        (snapshot?.kind !== "diff" || !snapshot.confirmedRevision || !current.review.external?.postComment)) return;
       const anchor = snapshot && anchorFromSelection(snapshot, range);
       native.current = {
         owner: current.review.ownerKey,
@@ -100,6 +103,7 @@ export function useInlineReview(
         itemId,
         anchor,
         mode,
+        ...(current.review.workspaceCommentsAvailable === false ? { postToPr: true } : {}),
         ...(snapshot.kind === "diff" && snapshot.confirmedRevision
           ? { confirmedRevision: snapshot.confirmedRevision }
           : {}),
@@ -233,13 +237,13 @@ export function useInlineReview(
   );
   const options = useMemo(
     () => ({
-      enableLineSelection: active && commentsAvailable,
-      enableGutterUtility: active && commentsAvailable,
+      enableLineSelection: active && commentsAvailable && canCreate,
+      enableGutterUtility: active && commentsAvailable && canCreate,
       lineHoverHighlight: "both" as const,
       onLineSelected,
       onGutterUtilityClick,
     }),
-    [active, commentsAvailable, onLineSelected, onGutterUtilityClick],
+    [active, commentsAvailable, canCreate, onLineSelected, onGutterUtilityClick],
   );
 
   const onKeyDown = useCallback(

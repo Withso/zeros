@@ -425,6 +425,20 @@ and validation of a remembered workspace once its exact repository list settles.
 - Create from… publishes the Create route and project atomically; the "open
   the source picker" intent is ephemeral and is consumed or dropped as soon as
   Create shows (or cannot show) that repository.
+- Command+1–9 opens that position among the filtered, sorted workspace rows;
+  headers and pending creates do not count. Command+Option+Up/Down walks the
+  same list beyond the first nine and stops at either end. Collapsed groups
+  retain their destinations, and selecting one reveals its row. Command+N
+  opens Create with the same repository context as the sidebar action.
+  These app-wide shortcuts work from the composer and with a hidden sidebar.
+- Command+Left/Right cycles the focused conversation pane's chat tabs;
+  Command+Option+Left/Right cycles the visible side column's tabs. Keyboard
+  capture follows the native DOM through portaled composers, and overlays
+  keep priority. Retained hidden panes must not handle these keys.
+- Chat Command+Up/Down/Home/End navigates user-message checkpoints through
+  the rail's existing pin, bottom spacer and layout corrections. Keyboard
+  and pointer navigation share one selection; neither measures sticky prompt
+  bubbles or includes assistant/tool rows as message destinations.
 
 ### 2. Treat reads as exact-key server state
 
@@ -544,6 +558,23 @@ and reports that the file no longer exists. Never overwrite an unsaved draft.
 Changing a PR target updates target metadata only. Rebasing or merging the
 working branch is a separate explicit operation; a picker action must never
 implicitly autostash or rewrite history.
+
+Files keeps one draft across source editing, unified editable diff and Markdown
+preview. Diff view is an Edit option; Changes and Review retain their read-only
+comparisons. Pierre receives a stable edit session, a full-context Git baseline,
+and the complete current draft. Native change events update the draft without
+replacing the controlled input on every keystroke. Empty files still provide an
+editable caret, and old/deleted comparison lines never become writable source.
+
+Auto save defaults on and saves after the typing debounce or leaving the editor.
+File options also provides Save file and Discard changes; discard restores the
+last saved source draft. Save failures retain the dirty draft and wait for a new
+edit or explicit save. A pending save cannot clear newer typing, and old save
+echoes cannot undo a newer write. External disk updates keep their established
+authority after acknowledgement. Unsaved tabs show a neutral dot. One keyed Git
+status snapshot supplies status letters for file rows and tabs; tree filenames
+stay neutral, while file tab names use the status color. These decorations do
+not redefine Changes comparisons or counts.
 
 ### 3. Move work before or after the click
 
@@ -712,6 +743,31 @@ dismissal suite samples DOM commits and animation frames, covers the real model
 and repository menus, and checks owner switching, rapid reopen, first-focus
 Escape, native overlay intent cleanup and reduced motion.
 
+### 6.2 Focus belongs to the latest interaction
+
+Typing is not focus navigation. The shared `focus-navigation.ts` policy enables
+keyboard chrome for Tab/Shift-Tab and navigation inside composite widgets;
+pointer interaction resets it. Text-entry controls keep their caret and editing
+cues. Tooltips follow navigation intent, while overlays independently preserve
+their keyboard close/return behavior. A palette category selected by pointer
+keeps search ready to type; Tab/Enter/Space retain deliberate category focus.
+
+Delayed work does not own the keyboard indefinitely. Capture a
+`captureDeferredFocus` predicate before waiting for I/O, layout, or a React
+commit, and recheck it immediately before focusing. New input, another focused
+destination, selected reading text, an overlay, a hidden/inert target, or leaving
+the window retires that request. Callers also recheck the exact workspace,
+editor and surface lifetime. A saving control may release focus to body when it
+is disabled or removed; an uninterrupted action can still finish its handoff.
+When a return control mounts in a later commit, restore from that commit instead
+of assuming the next animation frame will contain it. Editor commands must not
+schedule an additional, unguarded focus after this check.
+
+Browser regressions exercise pointer → ordinary key → Tab, parent/peer and
+shadow-root styling, iframe Tab return, modal containment, and held completions
+followed by another edit. Cover Local, organization-local and organization-cloud
+shared surfaces; Design remains local-only.
+
 ## Zeros implementation map
 
 - Workspace route + target: `OPEN_WORKSPACE` in `apps/desktop/src/renderer/state/workspace-store.ts`.
@@ -728,7 +784,7 @@ Escape, native overlay intent cleanup and reduced motion.
 - File content/diff cache: `apps/desktop/src/renderer/shell/workspace-file-data-cache.ts`.
 - Workspace intent warming: `apps/desktop/src/renderer/shell/prefetch-workspace-surface.ts`.
 - Chat retention: `apps/desktop/src/renderer/shell/conversation/chat-deck.tsx` with store-owned pane hosts.
-- Conversation Summary: `apps/desktop/src/renderer/shell/conversation/conversation-summary.tsx` owns the chat strip's Summary popover and the island beside its top-right pane when Workbench is collapsed. Narrow panes and layouts with side-by-side chat columns keep the popover, bounded inside its owning pane with a 16px right inset; the island reserves body space without remounting chat. Both presentations share Context, run-preview and All Changes data, dismiss on owner changes, and stop active reads when hidden. Starting an Environment action leaves Summary visible; its preview opens the exact URL in the workspace's Browser.
+- Conversation Summary: `apps/desktop/src/renderer/shell/conversation/conversation-summary.tsx` owns the chat strip's Summary popover and the island beside its top-right pane when Workbench is collapsed. The toolbar icon remains available and toggles the complete island; there is no separate collapsed card. Narrow panes and layouts with side-by-side chat columns keep the popover, bounded inside its owning pane with a 16px right inset; the island reserves body space without remounting chat. Both presentations share run-preview and All Changes data and stop active reads when hidden. Summary has no Context section or context-graph reads. Popovers dismiss on owner changes. Starting an Environment action leaves Summary visible; its preview opens the exact URL in the workspace's Browser.
 - Summary Git status is available for managed Local Git workspaces under Personal or organization owners. It shares native status/count generations with Changes through `shell/git-status-reads.ts`, retains exact-owner facts during refresh, and compares the selected base independently of the branch's upstream. The optional Local `git.status` summary fields keep older engines and cloud requests compatible. PR metadata refreshes only while Summary is visible and in the foreground; CI/check verdicts remain in Review. Summary, Create PR and the workbench PR row share workspace mutation claims across remounts. Cloud and plain-folder summaries omit this section.
 - Changes file retention/prefetch: `apps/desktop/src/renderer/shell/workbench/tabs/changes-surface.tsx`.
 - Browser retention: the bounded, cross-workspace iframe deck in `apps/desktop/src/renderer/shell/workbench/workbench-pane.tsx`; retained browser updates carry their original workspace scope.
@@ -740,6 +796,16 @@ Escape, native overlay intent cleanup and reduced motion.
 - Empty-chat transcript row: shared Local folder list, persisted paint and pending prompts in `apps/desktop/src/renderer/features/agent/use-chat-transcript-summaries.ts`; the grace in `agent-chat.tsx`.
 - Long-turn opening prompt: `windowChatMessagesPage` in `apps/desktop/src/engine/db/messages.ts` and `apps/desktop/src/renderer/features/agent/transcript-leading-prompt.ts`.
 - Engine start attribution: `apps/desktop/src/engine/boot-phase-timer.ts` names slow phases on the "Engine ready" line.
+- Engine readiness follows mandatory process/lifecycle recovery and history
+  migration. Archive-ref retention and historical Design ACL cleanup run after
+  readiness through `engine/startup-maintenance.ts`, one task at a time. Stop
+  aborts and joins this queue; maintenance rechecks Local workspace ownership
+  after I/O and never treats another instance's missing row as deletion proof.
+  Queued ACL cleanup cancels admission on Stop while preserving the active
+  mutation owner's lock; already admitted cleanup still joins.
+- PR review annotation reads overlap at most three independent first pages,
+  then consume them in check order under the shared count and byte limits.
+  Pagination stays on demand, and a failed check retains the other findings.
 - Local streaming transcript writes: "Streaming write coalescing" in `apps/desktop/src/engine/db/messages.ts` buffers each streamed row for 150 ms (newest version wins); every read, write or delete of that chat's rows drains it first, prompts stay write-through, and cloud workers keep write-through persistence.
 
 ## Review checklist

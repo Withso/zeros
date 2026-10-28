@@ -1,4 +1,5 @@
 import { getActiveBridge } from "@/renderer/platform/bridge/active-bridge";
+import { hasPendingFilePreview } from "@/renderer/platform/pending-file-preview";
 import { WorkspaceRuntimeClient } from "@/renderer/platform/bridge/workspace-runtime-client";
 import {
   cloudWorkspaceKey,
@@ -74,8 +75,8 @@ function changesQuery(
   };
 }
 
-/** A confirmed Branch list can route a clean/ignored file immediately. A cold
- * list keeps the explicit Changes request until that surface resolves it. */
+/** A diff pill always owns a Changes destination. A confirmed Branch list can
+ * resolve an old rename path, but an absent row must not change the surface. */
 function filePillChangesQuery(
   cwd: string,
   path: string,
@@ -91,7 +92,7 @@ function filePillChangesQuery(
     sections.flatMap((section) => section.files),
     query.path,
   );
-  return file ? { ...query, path: file.path } : null;
+  return file ? { ...query, path: file.path } : query;
 }
 
 /** Exact saved/tool paths need no filesystem search or read before navigation.
@@ -202,8 +203,9 @@ export function warmFilePill(
   const path = filePillPath(cwd, rawPath);
   if (!cwd || !path) return;
   const query = filePillChangesQuery(cwd, path, destination);
-  if (query) prefetchWorkspaceFileDiff({ ...query, diffScope: "all" });
-  // A cold Changes request may resolve to Files. Warm that exact source on
-  // intent too, without adding I/O to the click or searching a Git file list.
-  prefetchWorkspaceFileRead(cwd, path);
+  if (query) {
+    // Passive transcript intent never wakes a sleeping cloud computer.
+    if (!parseCloudWorkspaceKey(cwd))
+      prefetchWorkspaceFileDiff({ ...query, diffScope: "all" });
+  } else if (!hasPendingFilePreview(cwd, path)) prefetchWorkspaceFileRead(cwd, path);
 }

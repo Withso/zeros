@@ -1,0 +1,9 @@
+{
+  "id": "user-message-shortcut-checkpoints",
+  "kind": "replay",
+  "area": "renderer-agent",
+  "fixedBy": "pr:752",
+  "symptom": "Message shortcuts walked assistant replies and sticky bubble geometry instead of sharing the user-message rail's pinned selection and short-final-message alignment.",
+  "rule": "changes/workspace-shortcut-focus.md: keyboard message navigation uses the checkpoint rail's selection, spacer and layout corrections, including repeated keys before React rerenders.",
+  "check": "pnpm exec vitest run apps/desktop/src/renderer/features/agent/__tests__/scroll-measurement-dispatch.test.ts"
+}

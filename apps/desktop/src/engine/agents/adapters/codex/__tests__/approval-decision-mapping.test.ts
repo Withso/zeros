@@ -303,6 +303,17 @@ describe("Codex ordered command approval decisions", () => {
       } as never),
     ).toBe(true);
   });
+
+  it.each([
+    { additionalPermissions: { fileSystem: { write: ["/outside"] } } },
+    { networkApprovalContext: { host: "example.test", protocol: "https" } },
+    { grantRoot: "/outside" },
+    { sandboxPermissions: "require_escalated" },
+  ])("requires explicit consent for expanded authority: %j", (params) => {
+    for (const method of [EXEC, "execCommandApproval", "item/fileChange/requestApproval", "applyPatchApproval"]) {
+      expect(autoEditCanAutoApprove({ method, params } as never)).toBe(false);
+    }
+  });
 });
 
 describe("mapResponseToCodexDecision — permissions request (mirror-on-accept)", () => {

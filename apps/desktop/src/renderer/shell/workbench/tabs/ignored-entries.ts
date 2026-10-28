@@ -336,6 +336,7 @@ export function useIgnoredEntries(
   reloadKey: number | undefined,
   model: IgnoredTreeModel | null,
   enabled = true,
+  fileStatus?: readonly GitStatusEntry[],
 ): IgnoredEntriesState {
   const [state, setState] = useState<IgnoredState>(() => warmState(cwd));
   const [failure, setFailure] = useState<{
@@ -553,8 +554,8 @@ export function useIgnoredEntries(
   // Every ignored DIRECTORY, not just the roots — flattened chains break
   // inheritance (see the header). Files inherit and are omitted.
   const status = useMemo(
-    () => ignoredGitStatus(activeRoots, loaded),
-    [activeRoots, loaded],
+    () => [...ignoredGitStatus(activeRoots, loaded), ...(fileStatus ?? [])],
+    [activeRoots, loaded, fileStatus],
   );
   // A LAYOUT effect, so a seeded mount dims its ignored rows in the SAME commit
   // that puts them on screen. As a passive effect this landed one frame after

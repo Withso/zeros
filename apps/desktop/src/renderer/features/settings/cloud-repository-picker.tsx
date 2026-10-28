@@ -1,33 +1,38 @@
 import { useWorkspaceDispatch } from "../../state/store";
 import { useState } from "react";
 import { Check, ChevronDown, RefreshCw } from "lucide-react";
-import type { CloudGithubRepository } from "@zeros/protocol/github-auth";
+import type { CloudGithubRepositoryPage } from "@zeros/protocol/cloud-github-connection";
 import { Button, GithubIcon, Input } from "../../shared/ui";
 import {
   Popover,
   PopoverContent,
   PopoverTrigger,
 } from "../../shared/ui/primitives/popover";
-import { useCachedRead } from "../../state/use-cached-read";
+import { useRecoveringRead } from "../../state/use-recovering-read";
 import {
-  cloudGithubCatalogCache,
-  cloudGithubRepositoriesCache,
-  cloudGithubScopeKey,
-  readCloudGithubCatalog,
-  readCloudGithubRepositories,
-} from "../../platform/cloud-github";
+  cloudGithubConnectionCache,
+  cloudGithubRepositoryPageCache,
+  cloudGithubConnectionKey,
+  readCloudGithubConnection,
+  readSelectedCloudRepositories,
+} from "../../platform/cloud-github-connection";
 import { requestUserSettingsSection } from "./settings-navigation";
+import { cloudGithubHealthCopy } from "./cloud-github-health";
 
-export type CloudRepositorySelection = CloudGithubRepository & {
-  installationId: string;
-};
+export type CloudRepositorySelection =
+  CloudGithubRepositoryPage["repositories"][number];
 const matches = (a: CloudRepositorySelection, b: CloudRepositorySelection) =>
   a.id === b.id;
+/** A repository chosen by its owner/name, which outlives a GitHub selection. */
+export type CloudRepositoryName = { owner: string; name: string };
 export function CloudRepositoryPicker({
   userId,
   organizationId,
-  value,
+  value = [],
   onChange,
+  isSelected,
+  onToggle,
+  label,
   multiple = false,
   disabled = false,
   active = true,
@@ -35,38 +40,50 @@ export function CloudRepositoryPicker({
 }: {
   userId: string;
   organizationId: string;
-  value: readonly CloudRepositorySelection[];
-  onChange(value: CloudRepositorySelection[]): void;
+  value?: readonly CloudRepositorySelection[];
+  onChange?(value: CloudRepositorySelection[]): void;
+  /** Name-based selection for lists stored by owner/name (Cloud Computer). */
+  isSelected?(repository: CloudRepositoryName): boolean;
+  onToggle?(repository: CloudRepositorySelection): void;
+  /** Trigger text; defaults to the selection count or name. */
+  label?: string;
   multiple?: boolean;
   disabled?: boolean;
   active?: boolean;
   onManageConnections?: () => void;
 }) {
   const dispatch = useWorkspaceDispatch();
-  const [open, setOpen] = useState(false),
-    [installationId, setInstallationId] = useState<string | null>(null);
-  const scope = cloudGithubScopeKey(userId, organizationId);
-  const catalog = useCachedRead(
-    cloudGithubCatalogCache,
+  const [open, setOpen] = useState(false);
+  const scope = cloudGithubConnectionKey(userId, organizationId);
+  const catalog = useRecoveringRead(
+    cloudGithubConnectionCache,
     scope,
-    (key) => readCloudGithubCatalog((JSON.parse(key) as string[])[1]!),
+    (key) => {
+      const [user, org] = JSON.parse(key) as [string, string];
+      return readCloudGithubConnection(user, org);
+    },
     { enabled: active && open, maxAgeMs: 60_000 },
   );
+  const selectedMethod = catalog.data?.selectedMethod;
   const connected =
-    catalog.data?.installations.filter(
-      (row) => row.connected && !row.suspendedAt,
-    ) ?? [];
-  const installation =
-    connected.find((row) => row.id === installationId) ?? connected[0];
+    !!selectedMethod &&
+    catalog.data?.methods[selectedMethod].health === "connected";
+  const selected = (repository: CloudRepositorySelection) =>
+    isSelected
+      ? isSelected(repository)
+      : value.some((row) => matches(row, repository));
   const select = (repository: CloudRepositorySelection) => {
-    if (multiple)
-      onChange(
+    if (onToggle) {
+      onToggle(repository);
+      if (!multiple) setOpen(false);
+    } else if (multiple)
+      onChange?.(
         value.some((row) => matches(row, repository))
           ? value.filter((row) => !matches(row, repository))
           : [...value, repository],
       );
     else {
-      onChange([repository]);
+      onChange?.([repository]);
       setOpen(false);
     }
   };
@@ -80,11 +97,12 @@ export function CloudRepositoryPicker({
           aria-label="Choose cloud repositories"
         >
           <span className="truncate">
-            {multiple
-              ? `${value.length} repositories selected`
-              : value[0]
-                ? `${value[0].owner}/${value[0].name}`
-                : "Choose repository"}
+            {label ??
+              (multiple
+                ? `${value.length} repositories selected`
+                : value[0]
+                  ? `${value[0].owner}/${value[0].name}`
+                  : "Choose repository")}
           </span>
           <ChevronDown className="size-3.5 shrink-0" />
         </Button>
@@ -114,35 +132,26 @@ export function CloudRepositoryPicker({
               Loading GitHub connections…
             </p>
           )}
-          {connected.length > 0 && (
-            <div className="flex flex-wrap gap-1">
-              {connected.map((row) => (
-                <Button
-                  key={row.id}
-                  variant={installation?.id === row.id ? "secondary" : "ghost"}
-                  aria-pressed={installation?.id === row.id}
-                  onClick={() => setInstallationId(row.id)}
-                >
-                  {row.accountLogin}
-                </Button>
-              ))}
-            </div>
-          )}
-          {installation && (
+          {connected && catalog.data && (
             <RepositoryPage
-              key={`${scope}:${installation.id}`}
+              key={`${scope}:${catalog.data.generation}`}
               userId={userId}
               organizationId={organizationId}
-              installationId={installation.id}
-              value={value}
+              generation={catalog.data.generation}
+              isSelected={selected}
               onSelect={select}
               active={active && open}
             />
           )}
-          {!catalog.loading && !connected.length && (
+          {!catalog.loading && !connected && (
             <p className="text-fg2 text-xs">
-              Connect your GitHub account or organization to choose a
-              repository.
+              {
+                cloudGithubHealthCopy[
+                  selectedMethod && catalog.data
+                    ? catalog.data.methods[selectedMethod].health
+                    : "not-connected"
+                ]
+              }
             </p>
           )}
           <Button
@@ -164,32 +173,36 @@ export function CloudRepositoryPicker({
 function RepositoryPage({
   userId,
   organizationId,
-  installationId,
-  value,
+  generation,
+  isSelected,
   onSelect,
   active,
 }: {
   userId: string;
   organizationId: string;
-  installationId: string;
-  value: readonly CloudRepositorySelection[];
+  generation: string;
+  isSelected(value: CloudRepositorySelection): boolean;
   onSelect(value: CloudRepositorySelection): void;
   active: boolean;
 }) {
   const [page, setPage] = useState(1),
     [query, setQuery] = useState("");
-  const key = JSON.stringify([userId, organizationId, installationId, page]);
-  const result = useCachedRead(
-    cloudGithubRepositoriesCache,
+  const key = JSON.stringify([
+    cloudGithubConnectionKey(userId, organizationId),
+    generation,
+    page,
+  ]);
+  const result = useRecoveringRead(
+    cloudGithubRepositoryPageCache,
     key,
     (key) => {
-      const [, org, installation, page] = JSON.parse(key) as [
-        string,
+      const [scope, generation, page] = JSON.parse(key) as [
         string,
         string,
         number,
       ];
-      return readCloudGithubRepositories(org, installation, page);
+      const [user, org] = JSON.parse(scope) as [string, string];
+      return readSelectedCloudRepositories(user, org, generation, page);
     },
     { enabled: active, maxAgeMs: 60_000 },
   );
@@ -225,8 +238,8 @@ function RepositoryPage({
         aria-label="GitHub repositories"
       >
         {repositories.map((row) => {
-          const candidate = { ...row, installationId },
-            selected = value.some((item) => matches(item, candidate));
+          const candidate = row,
+            selected = isSelected(candidate);
           return (
             <Button
               key={row.id}
@@ -239,6 +252,9 @@ function RepositoryPage({
               <span className="min-w-0 flex-1 truncate text-left">
                 {row.owner}/{row.name}
               </span>
+              {!row.canPush && (
+                <span className="text-fg2 text-xs">Read only</span>
+              )}
               {selected && <Check className="size-3.5 shrink-0" />}
             </Button>
           );

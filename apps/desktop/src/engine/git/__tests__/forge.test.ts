@@ -149,6 +149,7 @@ describe("GitHub forge adapter contract", () => {
 
   it.each([
     ["wrong host", { url: "https://example.com/zeros-dev/zeros/pull/42" }],
+    ["wrong repository", { url: "https://github.com/other-owner/zeros/pull/42" }],
     ["wrong number", { url: "https://github.com/zeros-dev/zeros/pull/41" }],
     [
       "review URL fragment",

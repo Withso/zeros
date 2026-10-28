@@ -47,6 +47,68 @@ Design, browser and simulator capabilities are unavailable. See
 [Cloud workspaces](cloud-workspaces.md) for the current runtime and credential
 boundary.
 
+## macOS Full Disk Access
+
+Settings → Local → General → Privacy exposes the Mac's Full Disk Access setup.
+The user grants or revokes access in System Settings → Privacy & Security →
+Full Disk Access, then quits and reopens the app when macOS requests it. The row
+has one description and one "Open System Settings" button. That action first
+attempts the same read-only protected-file probe in Electron main, then opens
+the Full Disk Access pane. A denied request can cause macOS to list its
+responsible app as an unchecked entry; this is an OS-controlled side effect,
+not a supported API for adding or highlighting an application row. No private
+TCC API, database write, or Accessibility automation is used. If the app is
+missing, use the system pane's `+` button to add the running Zeros, Zeros Alpha,
+Zeros Beta, or checkout-specific Local/Dev bundle. Granting another installed
+channel, an engine executable, or a terminal is not the same choice.
+
+Electron main launches the Local engine, which launches provider runtimes and
+terminal hosts. macOS attributes their file access to the responsible app in
+that process chain. Full Disk Access lets these local processes access protected
+files as the current macOS user; it does not provide root access, bypass System
+Integrity Protection, or grant Accessibility, Screen Recording, or Automation.
+The existing app shutdown and parent-death handling retire this process tree
+when the app quits. Reopen the whole app after changing a grant; restarting only
+an agent may retain the old process permission state.
+
+The grant is device-wide for Zeros's personal and organization-owned local
+workspaces. It does not expose the Mac to a cloud workspace or add any command
+to the cloud worker/relay. Provider sandboxing, Plan mode, tool approvals, and
+workspace/path authorization remain independent. Users who intentionally want
+broader agent execution still select the appropriate agent permission mode;
+opening the macOS pane never changes that selection or a managed policy.
+
+There is no public macOS API for reading or setting an app's Full Disk Access
+toggle. The status therefore reports **effective access**, with "Granted"
+meaning that the current desktop process can open the current user's protected
+`~/Library/Application Support/com.apple.TCC/TCC.db` read-only. It immediately
+closes the descriptor without reading any bytes. `O_NOFOLLOW`, `O_NONBLOCK`, and
+a descriptor-level regular-file check prevent misleading symlink/directory
+results. Permission refusals omit the positive label; missing files, unexpected
+errors and inconclusive checks report "Could not verify", never "Granted".
+There is no ordinary-file fallback or private TCC API. A development app may
+inherit access from its launcher, so "Granted" does not assert that its own
+toggle is enabled in System Settings.
+
+Status is neither persisted nor sent to telemetry. Visible Settings panels
+share one device-scoped read and recheck on focus/visibility return. Hidden
+surfaces stop observation; invalidations fence late responses while retaining
+the last confirmed snapshot. Native commands accept
+no arguments and require the app's main frame. The setup action shares a pending
+probe and rechecks the initiating window/frame after it settles, before opening
+one fixed system URL. Neither command exposes arbitrary paths, URLs, commands,
+nor permission writes.
+
+macOS qualification must use the real app on a Mac: check the denied state,
+open the correct system pane, add the running bundle, grant access, quit/reopen,
+then verify both native status and a descendant engine/terminal read without
+printing private contents. Repeat after revocation and verify normal agent
+approval modes remain in effect. Browser fixtures and Linux unit tests cannot
+prove a user-controlled TCC grant. Apple documents the consent boundary in
+[Controlling app access to files](https://support.apple.com/guide/security/controlling-app-access-to-files-secddd1d86a6/web).
+The manual addition flow is described in
+[Privacy & Security settings](https://support.apple.com/guide/mac-help/change-privacy-security-settings-on-mac-mchl211c911f/mac).
+
 ## Turn failure and explicit recovery
 
 Every started provider turn must settle once. Normal stream EOF without a

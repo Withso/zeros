@@ -24,6 +24,8 @@ import {
 // ──────────────────────────────────────────────────────────
 
 import { useCallback, useSyncExternalStore } from "react";
+import { fileMediaType } from "@zeros/protocol/file-media";
+import { isNativeRuntime } from "@/renderer/platform/runtime";
 
 import { gitDiff } from "@/renderer/platform/git";
 import {
@@ -68,30 +70,32 @@ export interface WorkspaceFileDiffQuery {
   turnId?: string;
 }
 
-// Keep the existing entry counts for normal files, but also bound large Local
-// payloads (notably base64 images and full-context patches). String lengths
+// Keep the existing entry counts for normal files, but also bound large media
+// payloads for both placements and Local full-context patches. String lengths
 // estimate retained UTF-16 bytes without allocating a serialized copy. These
 // are soft payload budgets, not file-size limits: subscribed retained viewers
 // and in-flight reads remain pinned. One oversized inactive result stays warm
 // outside the budget without flushing ordinary files; its exact key is retained
 // until a newer oversized result replaces it or the entry limit requires LRU.
-const fileReadCache = new KeyedAsyncCache<ReadFileResult>({
+const fileReadCacheOptions = {
   maxEntries: 96,
   maxWeight: 128 * 1024 * 1024,
   retainNewest: true,
-  weightOf: (value) => 64 + 2 * (
+  weightOf: (value: ReadFileResult) => 64 + 2 * (
     value.path.length + (value.content?.length ?? 0) +
     (value.dataUrl?.length ?? 0) + (value.error?.length ?? 0)
   ),
-});
+};
+const fileReadCache = new KeyedAsyncCache<ReadFileResult>(fileReadCacheOptions);
 const fileDiffCache = new KeyedAsyncCache<string>({
   maxEntries: 160,
   maxWeight: 64 * 1024 * 1024,
   retainNewest: true,
   weightOf: (value) => value.length * 2,
 });
-// Local pressure must not evict Cloud snapshots or change their cache policy.
-const cloudFileReadCache = new KeyedAsyncCache<ReadFileResult>(96);
+// Separate payload budgets: Local media pressure cannot evict Cloud snapshots
+// or vice versa. Cloud diff retention keeps its existing policy.
+const cloudFileReadCache = new KeyedAsyncCache<ReadFileResult>(fileReadCacheOptions);
 const cloudFileDiffCache = new KeyedAsyncCache<string>(160);
 const fileReadCaches = [fileReadCache, cloudFileReadCache];
 const fileDiffCaches = [fileDiffCache, cloudFileDiffCache];
@@ -146,7 +150,11 @@ async function fetchWorkspaceFileRead(
 ): Promise<ReadFileResult> {
   const result = query.skillSource
     ? await readSkillSource(query.cwd, query.skillSource)
-    : await readWorkspaceFile(query.cwd, query.path);
+    : isNativeRuntime() && fileMediaType(query.path)
+      ? await readWorkspaceFile(query.cwd, query.path, { includeVideo: true, streamMedia: true })
+      : /\.(mp4|m4v|webm|mov|ogv|mkv)$/i.test(query.path)
+      ? await readWorkspaceFile(query.cwd, query.path, { includeVideo: true })
+      : await readWorkspaceFile(query.cwd, query.path);
   if (!result) throw new Error("Workspace file reader unavailable");
   // A transport/read failure is not a new file snapshot. Keep confirmed
   // exact-key content; a confirmed deletion remains an authoritative result.

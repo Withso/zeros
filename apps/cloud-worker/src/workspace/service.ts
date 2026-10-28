@@ -4,10 +4,13 @@ import { join } from "node:path";
 import { createMessage, type BridgeMessage } from "@zeros/protocol/messages";
 import { commandRunner, type CommandRunner } from "./commands";
 import { FileService } from "./files";
+import { AttachmentTransfers } from "./attachments";
 import { GitService } from "./git";
 import { unsupported, WorkspaceError, type WorkerConfig, type WorkspaceScope } from "./scope";
 import { CheckoutWatch } from "./watch";
 import { listWorkspaceSkills } from "./skills";
+import { GithubCheckoutReporter, type ReportGithubCheckout } from "./github-checkout";
+import { reconcileGithubRemote } from "./github-remote";
 
 export interface PrSummary { prNumber: number | null; prState: "draft" | "ready" | "merged" | "closed" | null; prUrl: string | null }
 const EMPTY_PR: PrSummary = { prNumber: null, prState: null, prUrl: null };
@@ -18,6 +21,7 @@ export interface WorkspaceServiceOptions {
   lookupPr?: (branch: string) => Promise<PrSummary>;
   watch?: boolean;
   historyDiff?: (params: Record<string, unknown>) => Promise<unknown>;
+  reportGithubCheckout?: ReportGithubCheckout;
 }
 
 /** Native wire contract from engine/workspace/service.ts and git/types.ts,
@@ -25,6 +29,7 @@ export interface WorkspaceServiceOptions {
 export class WorkspaceService {
   readonly git: GitService;
   readonly files: FileService;
+  private readonly attachments: AttachmentTransfers;
   private readonly run: CommandRunner;
   private readonly watcher?: CheckoutWatch;
   private state!: State;
@@ -34,12 +39,25 @@ export class WorkspaceService {
   private readonly prFlights = new Map<string, Promise<PrSummary>>();
   private prEpoch = 0;
   private disposed = false;
+  private readonly githubCheckout?: GithubCheckoutReporter;
+  private configurationEpoch = 0;
+  private githubRepository?: string;
 
   private constructor(readonly scope: WorkspaceScope, private readonly directory: string, private readonly options: WorkspaceServiceOptions) {
     this.run = options.run ?? commandRunner(scope.root);
     this.git = new GitService(scope, { run: this.run, historyDiff: options.historyDiff, baseBranch: () => this.state.baseBranch,
+      githubRepository: () => this.githubRepository ?? this.scope.workspace.repository,
       setBaseBranch: branch => this.update(state => ({ ...state, baseBranch: branch })), changed: () => this.invalidate(true) });
     this.files = new FileService(scope, this.run, () => this.invalidate(false));
+    this.attachments = new AttachmentTransfers(scope, join(directory, "attachment-uploads"), () => this.invalidate(false));
+    if (options.reportGithubCheckout) this.githubCheckout = new GithubCheckoutReporter(async () => {
+      for (let attempt = 0; attempt < 3; attempt++) {
+        const branch = await this.git.branch(), headSha = await this.git.head(), baseBranch = this.state.baseBranch;
+        if (branch === await this.git.branch() && headSha === await this.git.head() && baseBranch === this.state.baseBranch)
+          return { branch: branch === "HEAD" ? null : branch, headSha, baseBranch };
+      }
+      throw new WorkspaceError("GIT_STATE_CHANGED", "The checkout changed while confirming its branch.");
+    }, options.reportGithubCheckout);
     if (options.watch !== false) this.watcher = new CheckoutWatch(scope, this.run, content => this.poll(content));
   }
 
@@ -61,8 +79,11 @@ export class WorkspaceService {
     return service;
   }
 
-  configure(workspace: WorkerConfig["workspace"]): Promise<void> {
-    return this.update(state => state.configuredBase === workspace.baseBranch ? state : { ...state, configuredBase: workspace.baseBranch, baseBranch: workspace.baseBranch });
+  async configure(workspace: WorkerConfig["workspace"]): Promise<void> {
+    const epoch = ++this.configurationEpoch;
+    await this.update(state => state.configuredBase === workspace.baseBranch ? state : { ...state, configuredBase: workspace.baseBranch, baseBranch: workspace.baseBranch });
+    if (workspace.github) await reconcileGithubRemote(this.scope.root,workspace.github,this.run,() => !this.disposed && epoch === this.configurationEpoch);
+    if (!this.disposed && epoch === this.configurationEpoch) this.githubRepository = workspace.github?.repository;
   }
 
   async handle(op: string, params: Record<string, unknown>): Promise<unknown> {
@@ -71,6 +92,15 @@ export class WorkspaceService {
     if (op.startsWith("git.")) return this.git.handle(op, params);
     if (op.startsWith("file.") || op.startsWith("fs.")) return this.files.handle(op, params);
     switch (op) {
+      case "attachment.write": return this.attachments.write(params);
+      case "workspace.prepareGithub": {
+        if (!this.githubCheckout) return unsupported();
+        const published = await this.git.handle("git.prepareGithub", params) as { branch: string; baseBranch: string; headSha: string };
+        const confirmed = await this.githubCheckout.fresh();
+        if (published.branch !== confirmed.branch || published.baseBranch !== confirmed.baseBranch || published.headSha !== confirmed.headSha)
+          throw new WorkspaceError("GIT_STATE_CHANGED", "The branch changed after publication. Refresh before creating the pull request.");
+        return published;
+      }
       case "skills.list": return listWorkspaceSkills(this.scope, params.agentId);
       case "workspace.list": {
         if (params.archived === true || (params.status !== undefined && params.status !== "in-progress") || (params.repoSlug !== undefined && params.repoSlug !== this.scope.workspace.repository)) return { workspaces: [] };
@@ -90,10 +120,13 @@ export class WorkspaceService {
     this.signature = signature;
     if (refsChanged) { this.prEpoch++; this.prs.clear(); }
     if (refsChanged || content) this.publish(refsChanged);
+    await this.githubCheckout?.report().catch(() => {});
   }
   async flush(): Promise<void> { await this.git.flush(); await this.metadataQueue; await this.watcher?.flush(); }
+  get uploading(): boolean { return this.attachments.busy; }
+  stopAttachmentTransfers(): Promise<void> { return this.attachments.dispose(); }
   githubChanged(): void { this.invalidate(true); }
-  async dispose(): Promise<void> { if (this.disposed) return; this.disposed = true; await this.watcher?.dispose(); await this.git.flush(); await this.metadataQueue; }
+  async dispose(): Promise<void> { if (this.disposed) return; this.disposed = true; await this.watcher?.dispose(); await this.attachments.dispose(); await this.git.flush(); await this.metadataQueue; }
 
   private invalidate(refs: boolean): void {
     if (refs) { this.prEpoch++; this.prs.clear(); }
@@ -118,6 +151,7 @@ export class WorkspaceService {
   }
 
   private async pr(branch: string): Promise<PrSummary> {
+    if (this.githubCheckout) return EMPTY_PR;
     if (branch === "HEAD") return EMPTY_PR;
     const cached = this.prs.get(branch); if (cached && Date.now() - cached.time < 30_000) return cached.value;
     const key = `${this.prEpoch}:${branch}`, existing = this.prFlights.get(key); if (existing) return existing;

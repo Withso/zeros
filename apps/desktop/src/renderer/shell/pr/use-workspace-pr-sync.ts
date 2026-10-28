@@ -28,6 +28,7 @@ import { useGitRefreshKey } from "../use-git-refresh-key";
 import { registerPrWorkspaceCacheForget } from "./pr-cache-forget";
 import { isCloudWorkspace, parseCloudScopedId } from "../../platform/bridge/cloud-workspace-key";
 import { documentIsForeground, pollWhileForeground } from "../../shared/lib/element-activity";
+import { publishWorkspacePrDiscovery, workspacePrDiscoverySnapshot } from "./workspace-pr-discovery-state";
 
 /** Last probe per workspace id. Switching INTO a PR-less worktree re-runs the
  *  effect with an unchanged refresh generation — pure navigation, so a recent
@@ -38,7 +39,22 @@ const lastProbe = new Map<string, Probe>();
 const PROBE_FRESH_MS = 60_000;
 const RESUME_PROBE_FRESH_MS = 2_000;
 const MAX_PR_PROBE_WORKSPACES = 128;
-const inflightProbes = new Map<string, Promise<unknown>>();
+type ProbeReason = "refresh" | "resume" | "poll" | "manual";
+type ProbeConsumer = (reason: ProbeReason) => Promise<unknown> | undefined;
+type ProbeFlight = { request: Promise<unknown>; queued: ProbeReason | null };
+const inflightProbes = new Map<string, ProbeFlight>();
+const probeConsumers = new Map<string, Set<ProbeConsumer>>();
+
+function currentProbeConsumer(workspaceId: string): ProbeConsumer | undefined {
+  // One request owns every consumer's shared snapshot. Calling all of them on
+  // retry would make each one queue yet another retry behind the first.
+  return Array.from(probeConsumers.get(workspaceId) ?? []).at(-1);
+}
+
+/** Review's standard failure banner retries the same active discovery owner. */
+export async function retryWorkspacePrDiscovery(workspaceId: string): Promise<void> {
+  await currentProbeConsumer(workspaceId)?.("manual");
+}
 
 /** Synthetic Local-main rows deliberately have no engine workspace record. */
 export function isWorkspacePrSyncEligible(
@@ -59,7 +75,7 @@ export function shouldProbeWorkspacePr(
   reason: "refresh" | "resume" | "poll",
 ): boolean {
   if (!previous) return true;
-  if (reason === "refresh" && previous.refreshKey !== refreshKey) return true;
+  if (reason !== "poll" && previous.refreshKey !== refreshKey) return true;
   return (
     now - previous.at >=
     (reason === "resume" ? RESUME_PROBE_FRESH_MS : PROBE_FRESH_MS)
@@ -76,6 +92,10 @@ function recordProbe(
     const oldest = lastProbe.keys().next().value as string | undefined;
     if (oldest === undefined) break;
     lastProbe.delete(oldest);
+    // Its late reply is no longer admissible, so also retire the pending UI
+    // state. Otherwise that state stays pinned beyond both caches' bounds.
+    const snapshot = workspacePrDiscoverySnapshot(oldest);
+    if (snapshot.pending) publishWorkspacePrDiscovery(oldest, { ...snapshot, pending: false });
   }
 }
 
@@ -111,48 +131,85 @@ export function useWorkspacePrSync(workspace: Workspace | null): void {
   const local = !!workspace && !isCloudWorkspace(workspace.id) && !isCloudWorkspace(workspace.path) && !parseCloudScopedId(workspace.id);
 
   const probe = useCallback(
-    (reason: "refresh" | "resume" | "poll") => {
+    (reason: ProbeReason) => {
       // Only DETECT while unrecorded — once the row has a prNumber, Review's
       // live store owns freshness. Local-main has no PR branch.
       if (!eligible || !id || !repoSlug) return;
       if (!documentIsForeground()) return;
-      if (inflightProbes.has(id)) return;
+      const pending = inflightProbes.get(id);
+      if (pending) {
+        // A turn can create the PR while an older lookup is still reading
+        // "none". Returning from GitHub or retrying can also be the only nudge.
+        // The age gate coalesces mount/focus events that started this read.
+        if (reason === "manual" || shouldProbeWorkspacePr(lastProbe.get(id), refreshKey, Date.now(), reason)) {
+          pending.queued = pending.queued === "manual" ? "manual" : reason;
+        }
+        return pending.request;
+      }
       const now = Date.now();
       const previous = lastProbe.get(id);
       // Cloud Git/DB broadcasts can arrive for every agent write. Discovery
       // is observation, so those broadcasts cannot bypass its error backoff
       // or issue a fresh database-backed probe on every edit.
-      if (!local && previous && (now < (previous.retryAt ?? 0) || now - previous.at < 30_000)) return;
-      if (!shouldProbeWorkspacePr(previous, refreshKey, now, reason)) {
+      if (reason !== "manual" && !local && previous && (now < (previous.retryAt ?? 0) || now - previous.at < 30_000)) return;
+      if (reason !== "manual" && !shouldProbeWorkspacePr(previous, refreshKey, now, reason)) {
         return;
       }
       const probe: Probe = { refreshKey, at: now, failures: previous?.failures ?? 0 };
       recordProbe(id, probe);
-      const request = ghPrSync(id)
+      const snapshot = workspacePrDiscoverySnapshot(id);
+      publishWorkspacePrDiscovery(id, { ...snapshot, pending: true });
+      let found = false;
+      const request: Promise<void> = ghPrSync(id)
         .then((pr) => {
-          if (lastProbe.get(id) === probe) probe.failures = 0;
-          if (!pr || pr.number <= 0) return;
+          // Deletion/eviction retires the observation, including its late tail.
+          if (lastProbe.get(id) !== probe) return;
+          probe.failures = 0;
+          found = !!pr && pr.number > 0;
+          // A queued refresh invalidated this absence. Keep any earlier
+          // confirmation, but let the successor establish a new one.
+          const checked = !found && (snapshot.checked || !inflightProbes.get(id)?.queued);
+          publishWorkspacePrDiscovery(id, { pending: false, checked, error: null });
+          if (!found) return;
           // The engine stamped the row — refresh the workspace-list consumers
           // so Create PR atomically gives way to PR status + Review.
           notifyWorkspacesChanged(repoSlug);
         })
-        .catch(() => {
-          if (!local && lastProbe.get(id) === probe) {
+        .catch((error: unknown) => {
+          if (lastProbe.get(id) !== probe) return;
+          publishWorkspacePrDiscovery(id, { pending: false, checked: snapshot.checked, error });
+          if (!local) {
             probe.failures = Math.min(4, (probe.failures ?? 0) + 1);
             probe.retryAt = Date.now() + Math.min(300_000, 60_000 * 2 ** (probe.failures - 1));
           }
         })
         .finally(() => {
-          if (inflightProbes.get(id) === request) inflightProbes.delete(id);
+          const flight = inflightProbes.get(id);
+          if (flight?.request !== request) return;
+          inflightProbes.delete(id);
+          if (flight.queued && !found) {
+            // Use the currently mounted owner, never the closure that started
+            // an old request. Hidden/unmounted owners cannot start a successor.
+            return currentProbeConsumer(id)?.(flight.queued);
+          }
         });
-      inflightProbes.set(id, request);
+      inflightProbes.set(id, { request, queued: null });
+      return request;
     },
     [eligible, id, repoSlug, refreshKey, local],
   );
 
   useEffect(() => {
-    probe("refresh");
-  }, [probe]);
+    if (!id || !eligible) return;
+    let consumers = probeConsumers.get(id);
+    if (!consumers) { consumers = new Set(); probeConsumers.set(id, consumers); }
+    consumers.add(probe);
+    void probe("refresh");
+    return () => {
+      consumers.delete(probe);
+      if (consumers.size === 0 && probeConsumers.get(id) === consumers) probeConsumers.delete(id);
+    };
+  }, [id, eligible, probe]);
 
   // A PR can be opened entirely on github.com, with no local file/Git event.
   // Re-probe promptly when the user returns to Zeros and periodically while the

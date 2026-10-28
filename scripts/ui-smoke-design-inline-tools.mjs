@@ -1,6 +1,8 @@
 // Inline-tool regressions use the real inspector and the layout/history harness.
 // Only camera setup uses the UI store; document setup never patches the iframe,
 // runtime details, or snapshot caches. Each subscenario starts with a fresh source.
+import { designFrameElementBox } from "./ui-smoke-design-helpers.mjs";
+
 export async function runDesignInlineToolsSmoke({ page, waitFor, check }) {
   const origin = new URL(page.url()).origin;
   const url = `${origin}/apps/desktop/src/renderer/harnesses/harness-design-workspace.html?layoutGestures`;
@@ -90,29 +92,8 @@ export async function runDesignInlineToolsSmoke({ page, waitFor, check }) {
     );
   }
 
-  // Playwright's child-frame boundingBox does not include this transformed
-  // iframe's scale. Convert the runtime viewport rect to outer-page pixels.
   async function screenBox(id = "home-hero") {
-    const rect = await geometry(id);
-    const viewport = await frame
-      .locator(
-        'iframe[data-design-document-buffer="displayed"][data-design-document-ready]',
-      )
-      .evaluate((element) => {
-        const outer = element.getBoundingClientRect();
-        return {
-          x: outer.x,
-          y: outer.y,
-          scaleX: outer.width / element.clientWidth,
-          scaleY: outer.height / element.clientHeight,
-        };
-      });
-    return {
-      x: viewport.x + rect.x * viewport.scaleX,
-      y: viewport.y + rect.y * viewport.scaleY,
-      width: rect.width * viewport.scaleX,
-      height: rect.height * viewport.scaleY,
-    };
+    return designFrameElementBox(runtime.owner(), node(id));
   }
 
   // Read the saved source, not the live preview, for commit/history assertions.
@@ -2427,9 +2408,16 @@ export async function runDesignInlineToolsSmoke({ page, waitFor, check }) {
             (value) => value.height === 16_300,
             "The frame starts just under the limit",
           );
-          await camera(0.05, 40, 50);
+          // Keep the south edge inside the canvas below the secondary toolbar,
+          // including the 40 screen pixels this gesture will travel.
+          await camera(0.05, 40, 0);
           const edge = await box(frameEdge("s"));
           const start = center(edge);
+          const viewport = await box(page.locator("[data-design-canvas-viewport]"));
+          assert(
+            start.y >= viewport.y && start.y + 40 < viewport.y + viewport.height,
+            "The resize starts and ends inside the visible canvas",
+          );
           await page.mouse.move(start.x, start.y);
           await page.mouse.down();
           // 40 screen px at 5% zoom is 800 canvas px: well past the limit.

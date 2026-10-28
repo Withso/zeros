@@ -11,6 +11,7 @@ import { Button, Tooltip } from "../../shared/ui/primitives";
 import { toast } from "../../shared/ui/primitives/elements";
 import { ZerosSpinner } from "../../shared/ui/loading";
 import { useGitRemote } from "../../features/settings/use-git-remote";
+import { useRepositoryRemote } from "../../features/repositories/use-repository-remote";
 import { notifyWorkspacesChanged } from "../../state/use-projects";
 import { CreatePrButton } from "../pr/create-pr-button";
 import { isGithubDotComRemote } from "../pr/github-url";
@@ -38,7 +39,10 @@ import {
 } from "./summary-git-status-model";
 
 const ACTION_CLASS =
-  "text-fg3 hover:text-fg1 hover:bg-bg1-hover shrink-0 font-normal";
+  "text-fg3 hover:text-fg1 enabled:hover:bg-bg2-highlight focus-visible:bg-bg2-highlight shrink-0 font-normal";
+const ROW_CLASS =
+  "flex min-w-0 items-center gap-2 rounded-md px-1.5 py-0.5 hover:bg-bg2-hover focus-within:bg-bg2-hover";
+const LABEL_CLASS = "text-fg1 min-w-0 flex-1 truncate text-xs";
 
 /** Mounted only for managed Local Git workspaces, for both owner types. */
 export function SummaryGitStatus({
@@ -53,7 +57,7 @@ export function SummaryGitStatus({
   onNavigate: () => void;
 }) {
   const nativeReady = useNativeRuntime().ready;
-  const { git, pr, refresh } = useSummaryGitStatus(
+  const { git, pr, refresh, error, readError, connected } = useSummaryGitStatus(
     workspace,
     active && nativeReady,
   );
@@ -62,6 +66,7 @@ export function SummaryGitStatus({
   const sendToChat = useSendToActiveChat(workspace.path);
   const showPr = useShowReviewTab();
   const remote = useGitRemote(workspace.repoRoot);
+  const { remoteUrl } = useRepositoryRemote(workspace.repoRoot, originUrl, active && nativeReady);
   const facts = git.data;
   const rows = summaryGitRows({
     facts,
@@ -70,11 +75,11 @@ export function SummaryGitStatus({
     pr: pr.data ?? null,
     baseBranch: workspace.baseBranch,
   });
-  const unavailable = !nativeReady
+  const unavailable = !nativeReady || !connected
     ? "The engine is reconnecting"
-    : git.error
+    : error
       ? "Refresh Git status before continuing"
-      : !facts
+      : readError || !facts
         ? "Reading Git status…"
         : undefined;
   const createReason =
@@ -179,12 +184,13 @@ export function SummaryGitStatus({
         Git status
       </div>
       {workspace.prNumber == null &&
-        (!originUrl || isGithubDotComRemote(originUrl)) && (
+        isGithubDotComRemote(remoteUrl) && (
           <div className="px-1.5 py-1">
             <CreatePrButton
               workspace={workspace}
-              originUrl={originUrl}
+              originUrl={remoteUrl}
               appearance="primary"
+              size="compact"
               active={active && nativeReady}
               disabled={!!createReason}
               disabledReason={createReason}
@@ -203,12 +209,12 @@ export function SummaryGitStatus({
         return (
           <div
             key={row.id}
-            className="flex min-w-0 items-start justify-between gap-2 px-1.5 py-0.5"
+            className={ROW_CLASS}
             data-git-status-row={row.id}
           >
-            <span className="text-fg2 min-w-0 py-0.5 text-xs break-words">
-              {row.name}
-            </span>
+            <Tooltip label={row.name} side="left">
+              <span className={LABEL_CLASS}>{row.name}</span>
+            </Tooltip>
             <Tooltip label={reason ?? ""} disabled={!reason}>
               <span className="inline-flex shrink-0">
                 <Button
@@ -232,22 +238,22 @@ export function SummaryGitStatus({
           </div>
         );
       })}
-      {git.error && (
-        <div className="flex items-center justify-between gap-2 px-1.5 py-0.5">
-          <span className="text-fg3 text-xs">Git status unavailable</span>
+      {error && (
+        <div className={ROW_CLASS}>
+          <span className={LABEL_CLASS}>Git status unavailable</span>
           <Button
             variant="ghost"
             size="compact"
             className={ACTION_CLASS}
             onClick={refresh}
-            disabled={!active || !nativeReady}
+            disabled={!active || !nativeReady || !connected}
           >
             Retry
           </Button>
         </div>
       )}
-      {facts && !git.error && rows.length === 0 && (
-        <p className="text-fg3 px-1.5 py-1 text-xs">Working tree clean</p>
+      {facts && !error && rows.length === 0 && (
+        <p className="text-fg1 truncate px-1.5 py-1 text-xs">Working tree clean</p>
       )}
     </section>
   );
