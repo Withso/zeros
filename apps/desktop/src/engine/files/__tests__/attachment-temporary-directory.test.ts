@@ -185,6 +185,7 @@ it("reports a native resolver failure without falling back to repository storage
 });
 
 it("uses a private sibling on a Linux workspace volume when ordinary temp storage is elsewhere", async () => {
+  vi.stubGlobal("process", Object.create(process, { platform: { value: "linux" } }));
   const stat = fs.stat.bind(fs);
   vi.spyOn(fs, "stat").mockImplementation((async (target) => {
     const result = await stat(target);
@@ -252,6 +253,7 @@ it("does not trust a configured attachment directory inside the repository", asy
 });
 
 it("never puts sibling fallback storage inside an enclosing repository", async () => {
+  vi.stubGlobal("process", Object.create(process, { platform: { value: "linux" } }));
   await fs.mkdir(path.join(root, ".git"));
   const stat = fs.stat.bind(fs);
   vi.spyOn(fs, "stat").mockImplementation((async (target) => {

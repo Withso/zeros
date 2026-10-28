@@ -12,10 +12,14 @@ afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: 
 it("refuses special settings files without blocking the engine", () => {
   const file = path.join(temporary(), "settings.toml");
   expect(spawnSync("mkfifo", [file]).status).toBe(0);
-  const code = `import { readSettingsFile } from ${JSON.stringify(path.resolve("apps/desktop/src/engine/settings/files.ts"))};
+  // The root package uses CommonJS. Use tsx's matching loader on Node 22
+  // too, so a missing ESM named export cannot mask the FIFO behavior.
+  const code = `const { readSettingsFile } = require(${JSON.stringify(path.resolve("apps/desktop/src/engine/settings/files.ts"))});
     const result = readSettingsFile(${JSON.stringify(file)}); process.exit(result.error ? 0 : 1);`;
-  const result = spawnSync(process.execPath, ["--import", "tsx", "--input-type=module", "-e", code], { timeout: 5_000 });
-  expect(result.status, "reader must reject rather than wait for a FIFO writer").toBe(0);
+  const result = spawnSync(process.execPath, ["--require", "tsx/cjs", "-e", code], {
+    timeout: 5_000, encoding: "utf8", maxBuffer: 64 * 1024,
+  });
+  expect(result.status, `reader must reject rather than wait for a FIFO writer: ${result.stderr}`).toBe(0);
 });
 
 it("refuses oversized settings and descendant symlinks", () => {

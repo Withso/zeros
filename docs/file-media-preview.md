@@ -105,7 +105,10 @@ file-reader and bridge tests cover conversion cleanup, caps and compatibility.
 `node scripts/smoke-file-media-electron.mjs` exercises production Electron/preload/Files
 with a valid sparse 200 MB video: playback, distant seeking, hidden retirement,
 PNG/frame copying and an exact-byte download. It uses the real Local reader and
-the standalone worker through a simulated cloud bridge, and verifies saved-image
-hover cleanup and metadata-only refusal above the hover cap. Run on macOS or under
-`xvfb-run -a` on Linux; this harness does not establish live Boat or physical
-Mac CPU, memory or GPU performance.
+a simulated cloud bridge, and verifies saved-image hover cleanup and metadata-only
+refusal above the hover cap. On Linux the cloud bridge calls the standalone worker
+reader; on macOS it uses the Local reader as its response fixture because the
+worker requires Linux descriptor paths. The report records `cloudFileReader`.
+Run on macOS and under `xvfb-run -a` on Linux to qualify both implementations;
+this harness does not establish live Boat or physical Mac CPU, memory or GPU
+performance.
