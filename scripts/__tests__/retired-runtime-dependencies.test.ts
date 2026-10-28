@@ -42,7 +42,7 @@ describe("retired sandbox dependency and verification graph", () => {
     );
     expect(Object.keys(workspace.patchedDependencies)).toContain("ssh2@1.17.0");
     expect(Object.keys(workspace.patchedDependencies)).toContain(
-      "app-builder-lib@26.15.0",
+      "app-builder-lib@26.15.4",
     );
     for (const file of [
       "patches/@anthropic-ai__sandbox-runtime@0.0.78.patch",

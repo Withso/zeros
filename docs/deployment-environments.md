@@ -603,6 +603,14 @@ separately rechecks notarization/Gatekeeper after stapling. No unpacked `.app`
 crosses the artifact boundary, so its signed modes and symlinks remain inside the
 DMG/ZIP rather than being normalized by Actions artifact upload.
 
+The ZIP must also store each framework's symlinks as links. electron-builder
+26.15.0–26.15.3 built it with 7-Zip 24.09 without `-snl`, so `Versions/Current`
+became a real directory and the ZIP failed verification as "bundle format is
+ambiguous" while the DMG passed; 26.15.4 restores the links. PR packaging checks
+build only an unpacked `--dir` app, so the first ZIP is the release's own.
+`scripts/__tests__/electron-builder-mac-zip-symlinks.test.ts` runs the real archive
+step and fails if a dependency change stops it storing links for macOS.
+
 1. Merge a green PR to `main`. Each release starts its signed Mac build **in
    parallel** with the wait for **required CI for its exact event SHA**. By
    default that is successful Preflight and CodeQL; automatic Alpha can opt in

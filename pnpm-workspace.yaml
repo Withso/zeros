@@ -81,6 +81,6 @@ patchedDependencies:
   # Retain fixed-width Ed25519 public keys with leading zero bytes.
   "ssh2@1.17.0": patches/ssh2@1.17.0.patch
   # Keep the generated macOS keychain password separate from P12 passwords.
-  "app-builder-lib@26.15.0": patches/app-builder-lib@26.15.0.patch
+  "app-builder-lib@26.15.4": patches/app-builder-lib@26.15.4.patch
   # Retire the thumb animation loop when its viewport or surface is removed.
   "@radix-ui/react-scroll-area@1.2.10": patches/@radix-ui__react-scroll-area@1.2.10.patch
