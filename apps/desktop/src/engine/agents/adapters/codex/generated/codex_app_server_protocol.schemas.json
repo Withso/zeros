@@ -1078,6 +1078,30 @@
             },
             "method": {
               "enum": [
+                "thread/memory/read"
+              ],
+              "title": "Thread/memory/readRequestMethod",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/definitions/v2/ThreadMemoryReadParams"
+            }
+          },
+          "required": [
+            "id",
+            "method",
+            "params"
+          ],
+          "title": "Thread/memory/readRequest",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "id": {
+              "$ref": "#/definitions/v2/RequestId"
+            },
+            "method": {
+              "enum": [
                 "memory/status"
               ],
               "title": "Memory/statusRequestMethod",
@@ -8631,6 +8655,23 @@
             ],
             "title": "AmazonBedrockAccount",
             "type": "object"
+          },
+          {
+            "description": "Google Cloud Vertex AI with externally managed credentials.",
+            "properties": {
+              "type": {
+                "enum": [
+                  "gcp"
+                ],
+                "title": "GcpAccountType",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type"
+            ],
+            "title": "GcpAccount",
+            "type": "object"
           }
         ]
       },
@@ -10508,6 +10549,7 @@
               "rateLimitExceeded",
               "flexUnavailable",
               "serverOverloaded",
+              "modelNotFound",
               "cyberPolicy",
               "misalignmentPolicyViolation",
               "tooManyDenials",
@@ -18621,6 +18663,16 @@
               "null"
             ]
           },
+          "reviewDomains": {
+            "description": "Host patterns routed to network approval before ordinary allow rules.",
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
           "socksPort": {
             "format": "uint16",
             "minimum": 0,
@@ -25204,6 +25256,10 @@
             ],
             "description": "Override where approval requests are routed for review on this thread and subsequent turns."
           },
+          "attachToSource": {
+            "description": "Persist the fork as an attached thread of its resolved source, hidden from ordinary lists. The source cannot be deleted while attached threads exist. Requires local storage; incompatible with ephemeral and deferGoalContinuation. Omitted or false creates an ordinary fork.",
+            "type": "boolean"
+          },
           "baseInstructions": {
             "type": [
               "string",
@@ -26870,6 +26926,13 @@
               "null"
             ]
           },
+          "attachedToThreadId": {
+            "description": "Return only persistent threads attached to this thread, including empty threads. Mutually exclusive with parentThreadId and ancestorThreadId. Omitting this filter keeps attached threads hidden from ordinary listings.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "cursor": {
             "description": "Opaque pagination cursor returned by a previous call.",
             "type": [
@@ -27109,6 +27172,34 @@
       "ThreadMemoryModeSetResponse": {
         "$schema": "http://json-schema.org/draft-07/schema#",
         "title": "ThreadMemoryModeSetResponse",
+        "type": "object"
+      },
+      "ThreadMemoryReadParams": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "properties": {
+          "threadId": {
+            "description": "The thread must already be started or resumed.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "threadId"
+        ],
+        "title": "ThreadMemoryReadParams",
+        "type": "object"
+      },
+      "ThreadMemoryReadResponse": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "properties": {
+          "summary": {
+            "description": "Summary from the thread's selected memory version. Null when memory use is disabled or the selected summary is missing, unreadable, or blank.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "title": "ThreadMemoryReadResponse",
         "type": "object"
       },
       "ThreadMetadataGitInfoUpdateParams": {
@@ -28956,6 +29047,16 @@
           },
           "threadId": {
             "type": "string"
+          },
+          "threadSource": {
+            "anyOf": [
+              {
+                "$ref": "#/definitions/v2/ThreadSource"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "turnTrigger": {
             "type": [
