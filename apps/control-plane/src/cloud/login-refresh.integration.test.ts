@@ -33,8 +33,10 @@ suite("Settings changes reach connected cloud workers", () => {
   });
   afterAll(async () => { await listener.end(); await pool.end(); });
   beforeEach(async () => {
-    // These tests isolate credential propagation after source admission.
+    // These tests isolate credential propagation after source admission,
+    // including the running worker's separately verified continuation lease.
     vi.spyOn(CloudV2SourceAuthority.prototype, "workspace").mockResolvedValue();
+    vi.spyOn(CloudV2SourceAuthority.prototype, "continueWorkspace").mockImplementation(async () => ({ recheckAt: Date.now() + 10 * 60_000 }));
     vi.spyOn(CloudGithubSourceIdentities.prototype, "primary").mockResolvedValue({ repository: "example/project", repositoryId: "42" });
     vi.spyOn(CloudGithubConnections.prototype, "access").mockResolvedValue({
       material: { method: "pat", accessToken: "synthetic-github-token", expiresAt: null },

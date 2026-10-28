@@ -24,3 +24,8 @@ Healthy permission refreshes must still discover repository transfers. Reuse
 their immutable-ID responses, share the canonical result across replicas and
 order binding updates by observation time. An outage fallback cannot freeze
 the old name indefinitely or let a delayed success undo a newer rename.
+
+Composition fixtures that isolate provider-login propagation must establish
+both admission and continuation authority. Run login-refresh integration tests
+with the source and relay suites; retain real notification, disconnect, owner
+scope and replacement assertions when updating that isolated boundary.
