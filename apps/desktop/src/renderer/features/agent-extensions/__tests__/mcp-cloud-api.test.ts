@@ -5,6 +5,8 @@ const mocks = vi.hoisted(() => ({
   generation: 1,
   catalog: vi.fn(),
   repositories: vi.fn(),
+  cloudConnection: vi.fn(),
+  cloudRepositories: vi.fn(),
   request: vi.fn(),
 }));
 vi.mock("../../team/control-plane", () => ({ CONTROL_PLANE_URL: "https://control.example.test" }));
@@ -17,11 +19,38 @@ vi.mock("../../../platform/cloud-github", () => ({
   readCloudGithubCatalog: mocks.catalog,
   readCloudGithubRepositories: mocks.repositories,
 }));
+vi.mock("../../../platform/cloud-github-connection", () => ({
+  readCloudGithubConnection: mocks.cloudConnection,
+  readSelectedCloudRepositories: mocks.cloudRepositories,
+}));
 
 import { cloudMcpKey, cloudMcpAuthStatus, probeCloudMcp, readCloudMcpRepositories, startCloudMcpAuth, type CloudMcpExtension } from "../mcp-cloud-api";
 
 const organization = "11111111-1111-4111-8111-111111111111";
 const installation = (id: string, connected = true, suspendedAt: string | null = null) => ({ id, connected, suspendedAt });
+
+describe("explicit cloud MCP repository selection", () => {
+  beforeEach(() => {
+    vi.clearAllMocks(); mocks.account = "account-a"; mocks.generation = 1;
+    mocks.cloudConnection.mockResolvedValue({ selectedMethod: "pat", generation: "selected", methods: { pat: { health: "connected" } } });
+    mocks.cloudRepositories.mockResolvedValue({ generation: "selected", repositories: [{ owner: "cloud", name: "project" }], nextPage: null, complete: true });
+  });
+  it("uses the selected cloud method without borrowing the native catalog", async () => {
+    await expect(readCloudMcpRepositories(cloudMcpKey(organization, "cloud"))).resolves.toEqual([{ value: "cloud/project", label: "cloud/project" }]);
+    expect(mocks.cloudRepositories).toHaveBeenCalledWith("account-a", organization, "selected", 1);
+    expect(mocks.catalog).not.toHaveBeenCalled();
+    expect(mocks.request).not.toHaveBeenCalled();
+  });
+  it("does not fall back to Local when cloud sign-in is unavailable", async () => {
+    mocks.cloudConnection.mockResolvedValue({ selectedMethod: null });
+    await expect(readCloudMcpRepositories(cloudMcpKey(organization, "cloud"))).rejects.toThrow("cloud GitHub");
+    expect(mocks.catalog).not.toHaveBeenCalled();
+  });
+  it("rejects an owner change during selected-connection enumeration", async () => {
+    mocks.cloudRepositories.mockImplementation(async () => { mocks.generation += 2; return { repositories: [], nextPage: null, complete: true }; });
+    await expect(readCloudMcpRepositories(cloudMcpKey(organization, "cloud"))).rejects.toThrow("account changed");
+  });
+});
 
 describe("MCP connection response ownership", () => {
   it.each(["probe", "authorize", "status"])("rejects a late %s reply after account A → B → A", async operation => {

@@ -285,7 +285,7 @@ export async function handleUrl(rawUrl: string): Promise<void> {
       console.log(`[Zeros] deep-link open: spawned engine on port ${port}`);
     } catch (err) {
       const reason = err instanceof Error ? err.message : String(err);
-      console.error(`[Zeros] deep-link open failed: ${reason}`);
+      console.error(`[Zeros] deep-link open failed: ${JSON.stringify(reason).slice(0, 2_048)}`);
       // Typed failure so the renderer can actually toast this. The raw URL is
       // deliberately NOT forwarded: `deep-link` has exactly one subscriber (the
       // invite handler) which ignores non-invite URLs, so this was silent.

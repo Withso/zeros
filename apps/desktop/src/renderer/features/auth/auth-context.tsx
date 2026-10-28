@@ -44,6 +44,7 @@ import {
 } from "../../platform/runtime";
 import { getActiveBridge } from "../../platform/bridge/active-bridge";
 import { CHANNEL } from "../../config/release-channel";
+import { toast } from "../../shared/ui/primitives/elements";
 import { useDismissStartupLoader } from "../../shared/ui/startup-loader";
 import {
   safeBrowserSignInStartError,
@@ -527,6 +528,7 @@ function AuthProviderInner({ children, onStoredIdentity }: {
       await storeSignOut("global");
     } catch (err) {
       console.warn("[auth] global signOut failed:", (err as Error)?.message);
+      toast.error("Signed out on this device. Other devices could not be signed out. Sign in again to retry.");
     }
     finishLocalSignOut();
   }, [finishLocalSignOut]);

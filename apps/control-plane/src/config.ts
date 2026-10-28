@@ -51,6 +51,8 @@ const EnvSchema = z.object({
   AUTH_PROVIDER: z.enum(["auth0", "workos"]).default("auth0"),
   /** The Auth0 tenant domain, e.g. your-tenant.us.auth0.com (no scheme). */
   AUTH0_DOMAIN: z.string().trim().min(1).optional(),
+  /** Server-to-server credential shared only with the Auth0 Pages facade. */
+  AUTH0_SESSION_AUTHORITY_KEY: z.string().regex(/^[a-f\d]{64}$/i).optional(),
   /**
    * Accepted `iss` claims, comma-separated; defaults to
    * `https://${AUTH0_DOMAIN}/`. A custom Auth0 domain deployment lists BOTH
@@ -228,6 +230,7 @@ export type Config = {
   auth: AuthBackendConfig;
   /** Null in legacy Auth0 mode. WorkOS secrets live only on Railway. */
   workos: WorkOSBackendConfig | null;
+  auth0SessionAuthorityKey?: string | null;
   /** Fixed Alpha test identity; omitted/disabled everywhere else. No password. */
   zerosDevAuth?: ZerosDevAuthConfig | null;
   /** Exact, environment-bound invitation landing page (without a query). */
@@ -938,6 +941,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env, diagnostics: Co
     databaseMaintenanceMode: e.DATABASE_MAINTENANCE_MODE === "true",
     auth,
     workos,
+    auth0SessionAuthorityKey: auth.provider === "auth0" ? e.AUTH0_SESSION_AUTHORITY_KEY ?? null : null,
     zerosDevAuth: loadZerosDevAuthConfig(env, deploymentChannel, auth),
     inviteLinkBase,
     port: e.PORT,

@@ -53,6 +53,7 @@
     "@workos/emulate": "0.9.0",
     "tsx": "^4.19.0",
     "typescript": "^5.8.0",
-    "vitest": "^4.1.11"
+    "vite": "7.3.7",
+    "vitest": "^4.1.12"
   }
 }

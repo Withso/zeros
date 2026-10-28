@@ -5,6 +5,24 @@ import { BoatApiClient } from "./boat-client.js";
 describe("cloud v2 Boat compute", () => {
   const client = () => ({ request: vi.fn() });
 
+  it("delivers bounded command input separately from every executable argument", async () => {
+    const boat = client();
+    boat.request.mockImplementation(async (route: string) => route.endsWith("/files")
+      ? { ok: true, success: true, type: "file.written" }
+      : { exitCode: 0, stdout: "done" });
+    const compute = new BoatCloudV2Compute(boat);
+    const input = "synthetic-command-input-canary\n";
+    await compute.execLong("bx_abc12345", "bash -c 'cat >/dev/null'", 60, input);
+    expect(boat.request.mock.calls.find(([route]) => route.endsWith("/files"))?.[1].body.content).toBe(input);
+    const commands = boat.request.mock.calls.filter(([route]) => route.endsWith("/commands")).map(([, args]) => args.body.command);
+    expect(commands.length).toBeGreaterThanOrEqual(3);
+    expect(commands.join("\n")).not.toContain(input.trim());
+    expect(commands.join("\n")).not.toContain(Buffer.from(input).toString("base64"));
+    expect(commands[0]).toContain("umask 077");
+    expect(commands[1]).toMatch(/exec 3<.*rm -f.*<&3/s);
+    expect(commands.at(-1)).toContain("rmdir");
+  });
+
   it("renews the existing sandbox lease with a bounded TTL and never allocates another VM", async () => {
     const boat = client(), compute = new BoatCloudV2Compute(boat);
     await compute.extendLease("bx_abc12345", 86_400);

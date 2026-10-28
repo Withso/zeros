@@ -2,6 +2,7 @@ import { parse, type DefaultTreeAdapterTypes } from "parse5";
 
 import { assertSafeDesignHtmlDocument } from "./html";
 import { rebaseDesignCssReferences, resolveDesignLocalReference } from "./references";
+import { DESIGN_API_MAX_RENDER_PIXELS } from "./api";
 import type {
   DesignHeadlessRenderer,
   DesignRenderArtifact,
@@ -295,8 +296,18 @@ export class PlaywrightDesignRenderer implements DesignHeadlessRenderer {
   async render(input: {
     state: DesignWebDocumentState;
     viewport: Required<DesignRenderViewport>;
+    rasterSize?: { width: number; height: number };
     signal?: AbortSignal;
   }): Promise<DesignRenderArtifact> {
+    const { width, height, deviceScaleFactor } = input.viewport;
+    const pixels = Math.ceil(width * deviceScaleFactor) * Math.ceil(height * deviceScaleFactor);
+    if (![width, height].every(value => Number.isSafeInteger(value) && value > 0) ||
+        !Number.isFinite(deviceScaleFactor) || deviceScaleFactor <= 0 || !Number.isSafeInteger(pixels) || pixels > DESIGN_API_MAX_RENDER_PIXELS)
+      throw new Error("The actual capture exceeds the render pixel budget.");
+    // This backend captures at the device viewport. It must not silently
+    // pretend to implement another backend's downscaled-raster contract.
+    if (input.rasterSize && (input.rasterSize.width !== width || input.rasterSize.height !== height))
+      throw new Error("This renderer does not support a different capture raster size.");
     const deadline = renderDeadline(input.signal, this.timeoutMs);
     let release: (() => void) | null = null;
     let context: PlaywrightBrowserContextLike | null = null;

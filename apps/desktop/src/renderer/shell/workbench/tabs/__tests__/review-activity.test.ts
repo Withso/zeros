@@ -126,12 +126,12 @@ describe("Local Review observation activity", () => {
     expect(review.peekReviewLiveData(provider, "personal-workspace", 42).pr?.title).toBe("personal-workspace");
   });
 
-  it.each(["hidden", "blurred", "retained"])("preserves cloud observation while %s", async mode => {
+  it.each(["hidden", "blurred", "retained"])("starts no cloud reads or timers while %s", async mode => {
     if (mode === "hidden") page.visibilityState = "hidden";
     if (mode === "blurred") focused = false;
     Fixture("cloud://organization/workspace", mode !== "retained");
     await vi.advanceTimersByTimeAsync(60_000);
-    expect(provider.getPr).toHaveBeenCalledTimes(mode === "blurred" ? 2 : 1);
-    expect(vi.getTimerCount()).toBe(mode === "retained" ? 0 : 1);
+    expect(provider.getPr).not.toHaveBeenCalled();
+    expect(vi.getTimerCount()).toBe(0);
   });
 });

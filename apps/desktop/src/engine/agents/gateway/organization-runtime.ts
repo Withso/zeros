@@ -1,3 +1,4 @@
+import { gatewayRegistration, type McpGatewayEndpoint } from "./capability";
 import { createHash, randomUUID } from "node:crypto";
 import { mcpSecretEnvAlias } from "@zeros/protocol/mcp-secrets";
 import type { McpServerRegistration } from "../types";
@@ -14,7 +15,7 @@ interface Dependencies {
   host: Pick<McpHostControl, "generation" | "isCurrent" | "resolve" | "authorize">;
   workspace: (id: string) => McpWorkspaceIdentity | undefined;
   repository: (repoRoot: string) => Promise<string>;
-  gateway: (key: string, backends: GatewayBackend[]) => Promise<string>;
+  gateway: (key: string, backends: GatewayBackend[]) => Promise<McpGatewayEndpoint>;
   removeGateway: (key: string) => Promise<void>;
 }
 
@@ -78,8 +79,8 @@ export class OrganizationMcpRuntime {
     }
     const key = `organization:${workspaceId}`;
     if (backends.length) {
-      const url = await this.deps.gateway(key, backends);
-      servers.unshift({ name: "zeros-gateway", transport: "http", url });
+      const endpoint = await this.deps.gateway(key, backends);
+      servers.unshift(gatewayRegistration(endpoint, variables));
     } else await this.deps.removeGateway(key);
     if (!current()) { await this.deps.removeGateway(key); throw new Error("The MCP account or workspace changed. Try again."); }
     requestSignal.throwIfAborted();

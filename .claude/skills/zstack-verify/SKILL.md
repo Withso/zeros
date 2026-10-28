@@ -149,6 +149,9 @@ pnpm --dir apps/control-plane cloud-v2:gate0 --local --runtime <runtime-sha256>
   concurrent source edits in place to reconstruct the patch. The control plane
   installs separately: run `pnpm --dir apps/control-plane install` in that
   worktree too, or worker suites that import its source fail to load.
+- For browser qualification, put that integration checkout beside the main
+  checkout. Vite deliberately refuses private directories such as `.context`;
+  move the checkout instead of weakening the development serving policy.
 - Make a slow step class (a stop that saves a checkpoint) take at most part
   of a shared slot pool, and claim the steps someone is waiting for first.
 - A fixture for a missing Git object must start from a source that never had

@@ -1,7 +1,7 @@
 // app.zeros.build/auth/logout?return=<https zeros.build url>
 //
 // Ends the BROWSER session. Three steps, in order:
-//   1. delete the KV session record(s) (so the opaque cookie id stops resolving),
+//   1. revoke the browser capabilities in the durable authority,
 //   2. expire the session cookie — BOTH the host-only one and the legacy
 //      .zeros.build-scoped one from the retired auth.zeros.build project,
 //   3. bounce through Auth0's /v2/logout so the IdP session dies too — otherwise
@@ -15,6 +15,7 @@
 
 import { clearSessionCookies, cookieJar, safeReturnFor } from "../../lib/oauth";
 import { parseCookieHeader, SESSION_COOKIE, type Env } from "../../lib/session";
+import { auth0SessionAuthority } from "../../lib/auth0-session-authority";
 import {
   configuredAuthProvider,
   logoutWorkOSBrowserSession,
@@ -27,15 +28,13 @@ export const onRequestGet: PagesFunction<Env> = async ({ request, env }) => {
   const url = new URL(request.url);
   const returnTo = safeReturnFor(env, url.searchParams.get("return"));
 
-  // Delete EVERY session id presented under this cookie name — during the
+  // Revoke session ids presented under this cookie name — during the
   // legacy-cookie overlap window a browser can hold two zeros_session cookies
-  // (host-only + domain-wide) pointing at different KV records.
+  // (host-only + domain-wide) pointing at different authority records.
   const cookies = parseCookieHeader(request.headers.get("Cookie") ?? "");
   const sessionIds = [...new Set(cookies.filter((c) => c.name === SESSION_COOKIE).map((c) => c.value))];
-  if (env.SESSIONS) {
-    for (const id of sessionIds) {
-      if (id) await env.SESSIONS.delete(`session:${id}`);
-    }
+  for (const id of sessionIds.slice(0, 8)) {
+    if (id) await auth0SessionAuthority(env, { action: "revoke", sessionId: id });
   }
 
   const { applyCookies, pending } = cookieJar();

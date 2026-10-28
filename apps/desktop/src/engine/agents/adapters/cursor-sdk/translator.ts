@@ -1103,9 +1103,12 @@ const MAX_INLINE_CURSOR_IMAGE_BASE64_CHARS = 12 * 1024 * 1024;
 
 function pathBasename(value: unknown): string | undefined {
   if (typeof value !== "string" || value.length === 0) return undefined;
-  const clean = value.replace(/[\\/]+$/, "");
-  const pieces = clean.split(/[\\/]/);
-  return pieces[pieces.length - 1] || undefined;
+  if (value.length > 4_096) return undefined;
+  let end = value.length;
+  while (end > 0 && (value[end - 1] === "/" || value[end - 1] === "\\")) end--;
+  let start = end;
+  while (start > 0 && value[start - 1] !== "/" && value[start - 1] !== "\\") start--;
+  return value.slice(start, end) || undefined;
 }
 
 function imageMimeType(fileName: string | undefined): string {

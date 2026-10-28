@@ -88,8 +88,8 @@ d("cloud v2 store", () => {
 
   async function activeComputer(snapshot = `zeros-alpha-${org.replace(/-/g, "").slice(0, 12)}-v1`) {
     const buildId = randomUUID();
-    await pool.query(`INSERT INTO cloud_v2_computer_builds(id,org_id,version,recipe,state,builder_sandbox_id,snapshot_id,created_by)
-      VALUES($1,$2,1,'{}','succeeded','bx_33333333',$3,$4)`, [buildId, org, snapshot, creator]);
+    await pool.query(`INSERT INTO cloud_v2_computer_builds(id,org_id,version,recipe,state,builder_sandbox_id,snapshot_id,created_by,source_policy_version)
+      VALUES($1,$2,1,'{}','succeeded','bx_33333333',$3,$4,2)`, [buildId, org, snapshot, creator]);
     await pool.query("INSERT INTO cloud_v2_computers(org_id,active_build_id,snapshot_name) VALUES($1,$2,$3)", [org, buildId, snapshot]);
     return { buildId, snapshot };
   }
@@ -111,6 +111,23 @@ d("cloud v2 store", () => {
     // A stored key and digest only ever describe a complete checkpoint.
     await expect(pool.query("UPDATE cloud_v2_workspaces SET checkpoint_key=NULL WHERE id=$1", [w.id])).rejects.toThrow(/cloud_v2_checkpoint_complete/);
     await expect(pool.query("UPDATE cloud_v2_workspaces SET checkpoint_object='cloud-v2/checkpoints/../x.zck' WHERE id=$1", [w.id])).rejects.toThrow();
+  });
+
+  it("refuses a legacy shared image for both workspace creation and checkpoint restore", async () => {
+    const image = await activeComputer();
+    await pool.query("UPDATE cloud_v2_computer_builds SET source_policy_version=1 WHERE id=$1", [image.buildId]);
+    expect(await store.activeComputer(org)).toBeNull();
+    await expect(store.createWorkspace({ id: randomUUID(), organizationId: org, creatorUserId: creator,
+      name: "Blocked", repository: "withso/zeros", branch: "work", baseBranch: "main", computerBuildId: image.buildId }))
+      .rejects.toMatchObject({ code: "cloud_computer_changed" });
+    const w = await stopping("bx_legacy");
+    const saved = checkpoint(w.id);
+    await save(w.id, "bx_legacy", saved);
+    await store.transition(w.id, ["stopping"], "stopped");
+    await store.transition(w.id, ["stopped"], "starting");
+    expect(await store.beginRestore(w.id, "bx_legacy", attemptRequest())).toBe("no_computer");
+    expect((await pool.query("SELECT checkpoint_object,source_repositories FROM cloud_v2_workspaces WHERE id=$1", [w.id])).rows[0])
+      .toEqual({ checkpoint_object: saved.object, source_repositories: ["withso/zeros"] });
   });
 
   it("refuses a late save from an earlier stop, so it can never replace a newer checkpoint", async () => {

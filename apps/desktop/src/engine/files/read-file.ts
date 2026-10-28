@@ -16,6 +16,7 @@ import fs from "node:fs";
 import path from "node:path";
 import type { FileMediaDescriptor } from "@zeros/protocol/file-media";
 import { readWorkspaceMediaMetadata } from "./file-media";
+import { openBoundedFileSync, readBoundedBufferDescriptorSync } from "./bounded-read-sync";
 
 const MAX_TEXT_BYTES = 2_000_000; // 2 MB
 const MAX_IMAGE_BYTES = 5 * 1024 * 1024; // same boundary as composer images
@@ -162,7 +163,7 @@ export function isInside(target: string, root: string): boolean {
 export function readWorkspaceFile(
   cwd: string,
   relPath: string,
-  opts?: { remote?: boolean; includeVideo?: boolean; streamMedia?: boolean },
+  opts?: { remote?: boolean; canonicalRoot?: string; includeVideo?: boolean; streamMedia?: boolean },
 ): ReadFileResult {
   const remote = opts?.remote === true;
   const rel = relPath;
@@ -185,89 +186,49 @@ export function readWorkspaceFile(
     return fail(rel, SECRET_REFUSAL);
   }
 
-  let size: number;
-  try {
-    const st = fs.statSync(target);
-    if (st.isDirectory()) return fail(rel, "this is a folder, not a file");
-    if (!st.isFile()) return fail(rel, "not a regular file");
-    size = st.size;
-  } catch (err) {
-    const code = (err as NodeJS.ErrnoException).code;
-    return fail(
-      rel,
-      code === "ENOENT"
-        ? "file no longer exists on disk"
-        : code === "EACCES"
-          ? "permission denied"
-          : `cannot stat file (${code ?? "unknown error"})`,
-    );
-  }
-
-  try {
-    const realTarget = fs.realpathSync(target);
-    const realRoot = fs.realpathSync(root);
-    if (!isInside(realTarget, realRoot)) {
-      return fail(rel, "refusing to follow a symlink outside the workspace");
-    }
-    // (#7) A symlink with an INNOCUOUS name must not resolve to a secret: the
-    // name passed the lexical gate, so re-check the realpath target.
-    if (remote && isSensitiveRepoPath(path.relative(realRoot, realTarget))) {
-      return fail(rel, SECRET_REFUSAL);
-    }
-  } catch {
-    // realpath race/quirk: the lexical gate already passed. For a REMOTE read
-    // FAIL CLOSED — we couldn't prove the resolved target isn't a secret or
-    // doesn't escape the workspace (e.g. a TOCTOU symlink swap between stat and
-    // realpath). A local read proceeds as before.
-    if (remote) return fail(rel, SECRET_REFUSAL);
-  }
-
   const ext = path.extname(target).toLowerCase();
   const imageMime = IMAGE_MIME[ext];
   const videoMime = opts?.includeVideo === true ? VIDEO_MIME[ext] : undefined;
 
+  let fd: number;
+  let size: number;
   try {
+    const realRoot = opts?.canonicalRoot ?? fs.realpathSync(root);
     if (opts?.streamMedia && (imageMime || videoMime)) {
-      return readWorkspaceMediaMetadata(cwd, rel, remote);
+      return readWorkspaceMediaMetadata(cwd, rel, remote, realRoot);
     }
-    if (videoMime) {
-      // Resolve within the same trust boundary, then inspect and read one held
-      // descriptor. A file growing during the read cannot bypass the byte cap.
-      const realRoot = fs.realpathSync(root), realTarget = fs.realpathSync(target);
-      if (!isInside(realTarget, realRoot)) return fail(rel, "refusing to read outside the workspace");
-      if (remote && isSensitiveRepoPath(path.relative(realRoot, realTarget))) return fail(rel, SECRET_REFUSAL);
-      const fd = fs.openSync(realTarget, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK);
-      try {
-        const info = fs.fstatSync(fd);
-        if (!info.isFile()) return fail(rel, "not a regular file");
-        if (info.size > MAX_IMAGE_BYTES) return { kind: "too-large", path: rel, bytes: info.size };
-        const buffer = Buffer.alloc(info.size + 1);
-        let offset = 0;
-        while (offset < buffer.length) {
-          const count = fs.readSync(fd, buffer, offset, buffer.length - offset, offset);
-          if (!count) break;
-          offset += count;
-        }
-        if (offset !== info.size) return fail(rel, "file changed while reading; try again");
-        return { kind: "video", path: rel, bytes: offset, dataUrl: `data:${videoMime};base64,${buffer.subarray(0, offset).toString("base64")}` };
-      } finally { fs.closeSync(fd); }
+    const realTarget = fs.realpathSync(target);
+    if (!isInside(realTarget, realRoot)) return fail(rel, "refusing to follow a symlink outside the workspace");
+    if (remote && isSensitiveRepoPath(path.relative(realRoot, realTarget))) return fail(rel, SECRET_REFUSAL);
+    fd = openBoundedFileSync(realTarget);
+    const stat = fs.fstatSync(fd);
+    if (!stat.isFile()) {
+      fs.closeSync(fd);
+      return fail(rel, stat.isDirectory() ? "this is a folder, not a file" : "not a regular file");
     }
-    if (imageMime) {
+    size = stat.size;
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    return fail(rel, code === "ENOENT" ? "file no longer exists on disk" : `cannot safely read file (${code ?? "unknown error"})`);
+  }
+
+  try {
+    if (imageMime || videoMime) {
       if (size > MAX_IMAGE_BYTES)
         return { kind: "too-large", path: rel, bytes: size };
-      const buf = fs.readFileSync(target);
+      const buf = readBoundedBufferDescriptorSync(fd, MAX_IMAGE_BYTES);
       return {
-        kind: "image",
+        kind: videoMime ? "video" : "image",
         path: rel,
         bytes: size,
-        dataUrl: `data:${imageMime};base64,${buf.toString("base64")}`,
+        dataUrl: `data:${videoMime ?? imageMime};base64,${buf.toString("base64")}`,
       };
     }
 
     if (size > MAX_TEXT_BYTES)
       return { kind: "too-large", path: rel, bytes: size };
 
-    const buf = fs.readFileSync(target);
+    const buf = readBoundedBufferDescriptorSync(fd, MAX_TEXT_BYTES);
     const head = buf.subarray(0, Math.min(buf.length, 8192));
     if (head.includes(0)) return { kind: "binary", path: rel, bytes: size };
 
@@ -280,5 +241,5 @@ export function readWorkspaceFile(
   } catch (err) {
     const code = (err as NodeJS.ErrnoException).code;
     return fail(rel, `cannot read file (${code ?? "unknown error"})`);
-  }
+  } finally { fs.closeSync(fd); }
 }

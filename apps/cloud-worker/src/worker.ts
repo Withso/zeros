@@ -61,6 +61,8 @@ export class CloudWorker {
   private setup?: WorkspaceSetup;
   private checkoutRefresh?: CheckoutRefresh;
   private readonly tokens: GithubTokens;
+  private readonly userTokens: GithubTokens;
+  private githubUserTokensEnabled = false;
   private readonly github: GithubBroker;
   private readonly gitEnvironment: NodeJS.ProcessEnv;
   private configuring: Promise<void> = Promise.resolve();
@@ -75,7 +77,8 @@ export class CloudWorker {
 
   constructor(private readonly options: WorkerOptions) {
     this.tokens = new GithubTokens(frame => this.send(frame));
-    this.github = new GithubBroker(join(options.directory, "github.sock"), () => this.tokens.get(), () => this.workspace?.githubChanged());
+    this.userTokens = new GithubTokens(frame => this.send(frame), { purpose: "gh" });
+    this.github = new GithubBroker(join(options.directory, "github.sock"), purpose => purpose === "gh" && this.githubUserTokensEnabled ? this.userTokens.get() : this.tokens.get(), () => this.workspace?.githubChanged());
     this.gitEnvironment = githubEnvironment(this.github.socketPath, options.gitAskpassPath ?? fileURLToPath(new URL("../bin/git-askpass", import.meta.url)));
   }
 
@@ -87,7 +90,7 @@ export class CloudWorker {
     this.options.transport.start({
       open: async () => {
         if (this.disposed) return;
-        this.online = true; this.idle = undefined; this.tokens.connect();
+        this.online = true; this.idle = undefined; this.tokens.connect(); this.userTokens.connect();
         await this.send({ t: "hello", protocol: CLOUD_V2_RELAY_PROTOCOL, workerVersion: "0.0.0",
           capabilities: { design: false, browser: false, simulators: false, terminal: true, files: true, git: true, agents: ["codex", "claude", "cursor"], mcp: 1 } });
       },
@@ -95,7 +98,7 @@ export class CloudWorker {
       close: () => {
         this.online = false;
         for (const client of this.clients.values()) this.terminals?.detach(client);
-        this.clients.clear(); this.history?.disconnect(); this.tokens.disconnect();
+        this.clients.clear(); this.history?.disconnect(); this.tokens.disconnect(); this.userTokens.disconnect();
       },
     });
   }
@@ -113,7 +116,7 @@ export class CloudWorker {
 
   async dispose(): Promise<void> {
     if (this.disposed) return;
-    this.disposed = true; clearInterval(this.heartbeat); this.tokens.disconnect();
+    this.disposed = true; clearInterval(this.heartbeat); this.tokens.disconnect(); this.userTokens.disconnect();
     await this.configuring.catch(() => {});
     await this.stopCheckout();
     await this.promptInbox?.dispose();
@@ -141,7 +144,7 @@ export class CloudWorker {
     }
     // Checkout preparation can be waiting for this reply. Never queue control
     // replies behind configuration or behind ordinary app work.
-    if (message.t === "reply" || message.t === "refusal") { this.tokens.receive(message); return; }
+    if (message.t === "reply" || message.t === "refusal") { this.tokens.receive(message); this.userTokens.receive(message); return; }
     if (message.t === "prompts") { this.promptInbox?.hint(); return; }
     if (message.t === "stop") {
       // The VM can stop only after the native turn's final rows reach the HTTP
@@ -216,6 +219,8 @@ export class CloudWorker {
     const timing = this.options.transport.reportTiming?.bind(this.options.transport);
     const revision = BigInt(config.loginRevision);
     if (this.configurationRevision !== undefined && revision < this.configurationRevision) return;
+    this.githubUserTokensEnabled = config.githubPullRequests === 1;
+    this.userTokens.invalidate();
     if (this.options.workspaceId && config.workspace.id !== this.options.workspaceId) throw new Error("Workspace identity changed.");
     const scope = new WorkspaceScope(config.workspace);
     if (this.scope && (this.scope.key !== scope.key || this.scope.root !== scope.root || this.scope.workspace.repository !== scope.workspace.repository)) throw new Error("Workspace identity changed.");
@@ -237,6 +242,8 @@ export class CloudWorker {
       this.workspace = await WorkspaceService.open(scope, this.options.directory, {
         historyDiff: params => this.agents!.turns.historyDiff(params),
         ...this.options.workspaceServices,
+        ...(config.githubPullRequests === 1 && this.options.transport.reportGithubCheckout
+          ? { reportGithubCheckout: this.options.transport.reportGithubCheckout.bind(this.options.transport) } : {}),
         run: async (program, args, options) => {
           if (options?.readOnly !== true) await this.touchCheckout();
           return run(program, args, options);

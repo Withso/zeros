@@ -510,7 +510,7 @@ async function removeLocalMembership(
 
 async function applyMembershipEvent(
   tx: Tx,
-  event: NormalizedEvent,
+  event: Pick<NormalizedEvent, "data" | "event">,
 ): Promise<InboxState> {
   const membership = MembershipData.parse(event.data);
   const role = Role.safeParse(membership.role.slug);
@@ -911,62 +911,22 @@ export async function ingestWorkOSManagementEvent(
   );
 }
 
-/** Materialize SCIM/SSO membership projections that arrived before a user's
- * first Zeros authentication. Personal is deliberately unrelated to WorkOS. */
-export async function materializeProjectedMemberships(
-  tx: Tx,
-  userId: string,
-  workosUserId: string,
-): Promise<void> {
+/** First-login and webhook convergence use the same admission, desired-state,
+ * tombstone and revision policy. Acquire organization locks before projection
+ * or membership locks, just as the ordinary event path does. */
+export async function materializeProjectedMemberships(tx: Tx, _userId: string, workosUserId: string): Promise<void> {
   const projections = await tx.query<{
-    organization_id: string;
-    workos_membership_id: string;
-    role: "owner" | "admin" | "member";
-    directory_managed: boolean;
-  }>(
-    `UPDATE workos_membership_projections
-     SET user_id = $1, updated_at = now()
-     WHERE workos_user_id = $2 AND status = 'active'
-     RETURNING organization_id, workos_membership_id, role, directory_managed`,
-    [userId, workosUserId],
-  );
+    workos_membership_id: string; workos_organization_id: string;
+    role: "owner" | "admin" | "member"; directory_managed: boolean; last_provider_event_at: Date;
+  }>(`SELECT workos_membership_id,workos_organization_id,role,directory_managed,last_provider_event_at
+      FROM workos_membership_projections WHERE workos_user_id=$1 AND status='active'
+      ORDER BY organization_id,workos_membership_id`, [workosUserId]);
   for (const projection of projections.rows) {
-    if (!projection.organization_id) continue;
-    const active = await tx.query(
-      `SELECT 1
-       FROM workos_organization_links wol
-       JOIN organizations o ON o.id = wol.organization_id
-       WHERE wol.organization_id = $1 AND wol.state = 'active'
-         AND o.deleted_at IS NULL AND NOT o.is_personal`,
-      [projection.organization_id],
-    );
-    if (!active.rows[0]) continue;
-    await tx.query(
-      `INSERT INTO organization_members (
-         org_id, user_id, role, workos_membership_id, membership_source
-       ) VALUES ($1, $2, $3, $4, $5)
-       ON CONFLICT (org_id, user_id) DO UPDATE
-       SET role = EXCLUDED.role,
-           workos_membership_id = EXCLUDED.workos_membership_id,
-           membership_source = EXCLUDED.membership_source`,
-      [
-        projection.organization_id,
-        userId,
-        projection.role,
-        projection.workos_membership_id,
-        projection.directory_managed ? "scim" : "workos",
-      ],
-    );
-    await tx.query(
-      `INSERT INTO team_members (team_id, org_id, user_id, role)
-       SELECT t.id, t.org_id, $2,
-              CASE WHEN $3 IN ('owner', 'admin')
-                   THEN 'maintainer'::team_role ELSE 'member'::team_role END
-       FROM teams t
-       WHERE t.org_id = $1 AND t.is_default AND t.deleted_at IS NULL
-       ON CONFLICT (team_id, user_id) DO UPDATE SET role = EXCLUDED.role`,
-      [projection.organization_id, userId, projection.role],
-    );
+    await applyMembershipEvent(tx, { event: "organization_membership.updated", data: {
+      id: projection.workos_membership_id, organizationId: projection.workos_organization_id,
+      userId: workosUserId, status: "active", role: { slug: projection.role },
+      directoryManaged: projection.directory_managed, updatedAt: projection.last_provider_event_at.toISOString(),
+    } });
   }
 }
 

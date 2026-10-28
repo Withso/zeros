@@ -311,12 +311,14 @@ export function localAgentFamily(agentId: string | null | undefined): string | n
 export function localModeLevel(agentId: string | null | undefined, modeId: string | null | undefined): LocalModeLevel | null {
   const family = localAgentFamily(agentId);
   if (!family || !modeId) return null;
-  return LOCAL_MODE_LEVEL_BY_FAMILY[family]?.[modeId] ?? null;
+  const modes = LOCAL_MODE_LEVEL_BY_FAMILY[family];
+  return modes && Object.hasOwn(modes, modeId) ? modes[modeId] : null;
 }
 
 export function localModeForLevel(agentId: string | null | undefined, level: LocalModeLevel): string | null {
   const family = localAgentFamily(agentId);
-  return family ? (LOCAL_MODE_FOR_LEVEL_BY_FAMILY[family]?.[level] ?? null) : null;
+  if (!family || !LOCAL_MODE_LEVELS.includes(level)) return null;
+  return LOCAL_MODE_FOR_LEVEL_BY_FAMILY[family]?.[level] ?? null;
 }
 
 // ── Request and argument shapes ───────────────────────────

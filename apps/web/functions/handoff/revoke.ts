@@ -7,6 +7,7 @@
 import { json, TOKENISH } from "../../lib/handoff-security";
 import type { Env } from "../../lib/session";
 import { legacyDesktopHandoffEnabled } from "../../lib/workos-browser.mjs";
+import { auth0SessionAuthority } from "../../lib/auth0-session-authority";
 
 export const onRequestPost: PagesFunction<Env> = async ({ request, env }) => {
   if (!legacyDesktopHandoffEnabled(env)) {
@@ -14,7 +15,7 @@ export const onRequestPost: PagesFunction<Env> = async ({ request, env }) => {
       "cache-control": "no-store",
     });
   }
-  let body: { refresh_token?: unknown };
+  let body: { refresh_token?: unknown; scope?: unknown };
   try {
     body = await request.json();
   } catch {
@@ -23,17 +24,10 @@ export const onRequestPost: PagesFunction<Env> = async ({ request, env }) => {
   const refreshToken = typeof body.refresh_token === "string" ? body.refresh_token : "";
   if (!TOKENISH.test(refreshToken)) return json({ error: "bad_request" }, 400);
 
-  const res = await fetch(`https://${env.AUTH0_DOMAIN}/oauth/revoke`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({
-      client_id: env.AUTH0_CLIENT_ID,
-      client_secret: env.AUTH0_CLIENT_SECRET,
-      token: refreshToken,
-    }),
-  });
-  // Auth0's /oauth/revoke returns 200 even for an already-invalid token — that's
-  // still "revoked" from the caller's perspective, so only a non-2xx is an error.
-  if (!res.ok) return json({ error: "revoke_failed" }, 502);
-  return json({ ok: true });
+  if (!/^z0d_[A-Za-z0-9_-]{43}$/.test(refreshToken)) return json({ error: "reauthentication_required" }, 401, { "cache-control": "no-store" });
+  if (body.scope !== undefined && body.scope !== "current" && body.scope !== "all") return json({ error: "bad_request" }, 400);
+  const result = await auth0SessionAuthority(env, { action: "revoke", sessionId: refreshToken, all: body.scope !== "current" });
+  if (body.scope !== "current" && (result.status !== "terminal" || result.revokedAll !== true))
+    return json({ error: "reauthentication_required" }, 401, { "cache-control": "no-store" });
+  return json({ ok: true }, 200, { "cache-control": "no-store" });
 };

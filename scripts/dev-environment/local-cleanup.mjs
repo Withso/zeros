@@ -1,4 +1,4 @@
-import { assertLocalDatabaseOwner } from "./database.mjs";
+import { assertLocalDatabaseOwner } from "./local-fixtures.mjs";
 
 const SANDBOX_ID = /^bx_[23456789abcdefghjkmnpqrstuvwxyz]{8}$/;
 const missing = error => error?.httpStatus === 404 || error?.code === "provider_not_found";

@@ -12,28 +12,133 @@ function fixture(repositories: { repository: string; defaultBranch: string | nul
   { repository: "example/project", defaultBranch: "master" },
 ]) {
   const requireMember = vi.fn(async () => {});
-  const requireAdmin = vi.fn(async () => { throw new HttpError(403, "forbidden", "Requires an owner or admin"); });
+  const authorizeRepository = vi.fn(async () => {});
+  const authorizeSourceTargets = vi.fn(async () => {});
+  const authorizeBuildRepository = vi.fn(async (_org: string, _user: string, _build: string, repository: string) => ({ repository, repositoryId: "42" }));
+  const sourceRepositoryId = vi.fn(async () => "99");
+  const requireAdmin = vi.fn(async (): Promise<void> => { throw new HttpError(403, "forbidden", "Requires an owner or admin"); });
+  const log = vi.fn(async () => "source-derived-log-canary");
+  const logRepositories = vi.fn(async () => [{ repository: "example/project", repositoryId: "42" }, { repository: "example/private", repositoryId: "43" }]);
   const installedRepositories = vi.fn(async () => repositories);
   const buildId = "44444444-4444-4444-8444-444444444444";
   const activeComputer = vi.fn(async () => repositories ? { buildId, repositories } : null);
   const createWorkspace = vi.fn(async (input: Record<string, unknown>) => ({ ...input, state: "creating" }));
+  const authorizeSource = vi.fn(async () => {});
+  const get = vi.fn(async (id: string) => ({ id }));
+  const readCreateReceipt = vi.fn<() => Promise<{ status: 201; response: Record<string, unknown> } | null>>(async () => null);
+  const createWorkspaceOnce = vi.fn(async () => ({ status: 201 as const, response: { workspace: { id: "55555555-5555-4555-8555-555555555555", name: "original-source-receipt" } } }));
   const app = new Hono();
   app.use("*", async (c, next) => { c.set("user", { id: member } as never); await next(); });
   app.onError((error, c) => error instanceof HttpError
     ? c.json({ error: { code: error.code } }, error.status)
     : c.json({ error: { code: "internal" } }, 500));
   app.route("/", createCloudV2Routes({
-    store: { createWorkspace, activeComputer }, computers: { requireMember, requireAdmin }, installedRepositories,
-    bridgeBaseUrl: "wss://dev.example.test",
+    store: { createWorkspace, activeComputer, get, readCreateReceipt, createWorkspaceOnce }, computers: { requireMember, requireAdmin, log, logRepositories }, installedRepositories, authorizeRepository, authorizeSourceTargets, authorizeBuildRepository, authorizeSource,
+    sourceRepositoryId, bridgeBaseUrl: "wss://dev.example.test",
   } as unknown as CloudV2RouteDeps));
-  const create = (body: Record<string, unknown> = {}) => app.request("/v1/cloud-v2/workspaces", {
-    method: "POST", headers: { "content-type": "application/json" },
+  const create = (body: Record<string, unknown> = {}, key?: string) => app.request("/v1/cloud-v2/workspaces", {
+    method: "POST", headers: { "content-type": "application/json", ...(key ? { "Idempotency-Key": key } : {}) },
     body: JSON.stringify({ organizationId: org, repository: "example/project", ...body }),
   });
-  return { app, create, requireMember, requireAdmin, installedRepositories, activeComputer, buildId, createWorkspace };
+  return { app, create, requireMember, requireAdmin, installedRepositories, authorizeRepository, authorizeSourceTargets, authorizeBuildRepository, sourceRepositoryId, authorizeSource, readCreateReceipt, createWorkspaceOnce, get, activeComputer, buildId, createWorkspace, log, logRepositories };
 }
 
 describe("cloud v2 creation", () => {
+  it.each(["initial read", "creation lock"])("reauthorizes the stored workspace before releasing a receipt found at the %s", async stage => {
+    const f = fixture();
+    const receipt = { status: 201 as const, response: { workspace: { id: "55555555-5555-4555-8555-555555555555", name: "original-source-receipt" } } };
+    if (stage === "initial read") f.readCreateReceipt.mockResolvedValue(receipt);
+    else f.createWorkspaceOnce.mockImplementation(async () => receipt);
+    f.authorizeSource.mockRejectedValue(new HttpError(403, "github_cloud_access_denied", "Original access was revoked"));
+    const response = await f.create({}, "same-intent");
+    expect(response.status).toBe(403);
+    expect(await response.text()).not.toContain("original-source-receipt");
+    expect(f.get).toHaveBeenCalledWith(receipt.response.workspace.id, member);
+    expect(f.authorizeSource).toHaveBeenCalledWith({ id: receipt.response.workspace.id });
+  });
+  it("persists the build's verified repository ID without resolving its reused name again", async () => {
+    const f = fixture();
+    f.authorizeBuildRepository.mockResolvedValue({ repository: "current/project", repositoryId: "42" });
+    const response = await f.create();
+    expect(response.status).toBe(201);
+    expect(f.createWorkspace).toHaveBeenCalledWith(expect.objectContaining({ repository: "example/project", sourceRepositoryId: "42" }));
+    expect(f.sourceRepositoryId).not.toHaveBeenCalled();
+  });
+
+  it("lists the canonical transferred repository and accepts it while preserving the original checkout and branch", async () => {
+    const f = fixture();
+    f.authorizeBuildRepository.mockResolvedValue({ repository: "current/project", repositoryId: "42" });
+    const catalog = await f.app.request(`${computerPath}/repositories`);
+    expect(await catalog.json()).toEqual({ repositories: [{ repository: "current/project", defaultBranch: "master" }] });
+    expect((await f.create({ repository: "current/project" })).status).toBe(201);
+    expect(f.createWorkspace).toHaveBeenCalledWith(expect.objectContaining({ repository: "example/project", baseBranch: "master", sourceRepositoryId: "42" }));
+  });
+
+  it.each(["builds", "recipe"] as const)("refuses client-supplied provenance on %s without changing the public recipe shape", async endpoint => {
+    const f = fixture(); f.requireAdmin.mockResolvedValue(undefined);
+    const response = await f.app.request(`${computerPath}/${endpoint}`, {
+      method: endpoint === "recipe" ? "PUT" : "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ repositories: [{ repository: "example/project", repositoryId: "42" }], ...(endpoint === "recipe" ? { revision: 0 } : {}) }),
+    });
+    expect(response.status).toBe(400);
+    expect(await response.json()).toEqual({ error: { code: "invalid_request" } });
+  });
+  it("does not release repository 42's old log to a reader of replacement repository 99", async () => {
+    const f = fixture(); f.requireAdmin.mockResolvedValue(undefined);
+    f.logRepositories.mockResolvedValueOnce([{ repository: "example/project", repositoryId: "42" }]);
+    f.authorizeSourceTargets.mockRejectedValueOnce(new HttpError(403, "github_cloud_access_denied", "Original source denied"));
+    const response = await f.app.request(`${computerPath}/builds/${f.buildId}/log`);
+    expect(response.status).toBe(403);
+    expect(await response.text()).not.toContain("source-derived-log-canary");
+    expect(f.log).not.toHaveBeenCalled();
+  });
+
+  it("binds creation to the selected build's source even when the submitted name now names an allowed replacement", async () => {
+    const f = fixture();
+    f.authorizeBuildRepository.mockRejectedValue(new HttpError(403, "github_cloud_access_denied", "Original source denied"));
+    expect((await f.create()).status).toBe(403);
+    expect(f.createWorkspace).not.toHaveBeenCalled();
+  });
+  it("requires personal access to every source scope before returning build logs", async () => {
+    const f = fixture();
+    f.requireAdmin.mockResolvedValue(undefined);
+    f.authorizeSourceTargets.mockRejectedValueOnce(new HttpError(403, "github_cloud_access_denied", "Unavailable"));
+    const response = await f.app.request(`${computerPath}/builds/${f.buildId}/log`);
+    expect(response.status).toBe(403);
+    expect(await response.text()).not.toContain("source-derived-log-canary");
+    expect(f.log).not.toHaveBeenCalled();
+  });
+
+  it("returns build logs to a currently authorized administrator", async () => {
+    const f = fixture();
+    f.requireAdmin.mockResolvedValue(undefined);
+    const response = await f.app.request(`${computerPath}/builds/${f.buildId}/log`);
+    expect(response.status).toBe(200);
+    expect(await response.text()).toBe("source-derived-log-canary");
+    expect(f.authorizeSourceTargets).toHaveBeenCalledWith(org, member, [{ repository: "example/project", repositoryId: "42" }, { repository: "example/private", repositoryId: "43" }]);
+  });
+
+  it("withholds logs when repository authority is lost while the log read waits", async () => {
+    const f = fixture();
+    f.requireAdmin.mockResolvedValue(undefined);
+    f.log.mockImplementation(async () => {
+      f.authorizeSourceTargets.mockRejectedValue(new HttpError(403, "github_cloud_access_denied", "Unavailable"));
+      return "source-derived-log-canary";
+    });
+    const response = await f.app.request(`${computerPath}/builds/${f.buildId}/log`);
+    expect(response.status).toBe(403);
+    expect(await response.text()).not.toContain("source-derived-log-canary");
+    expect(f.log).toHaveBeenCalledTimes(1);
+  });
+
+  it("refuses an organization member without personal repository access before creating a VM", async () => {
+    const f = fixture();
+    f.authorizeBuildRepository.mockRejectedValue(new HttpError(403, "github_cloud_access_denied", "Unavailable"));
+    expect((await f.create()).status).toBe(403);
+    expect(f.createWorkspace).not.toHaveBeenCalled();
+    const catalog = await f.app.request(`${computerPath}/repositories`);
+    expect(await catalog.json()).toEqual({ repositories: [] });
+  });
   it("lets members read installed repositories while keeping Computer administration restricted", async () => {
     const f = fixture();
     const response = await f.app.request(`${computerPath}/repositories`);

@@ -201,7 +201,7 @@ export function useEditorCodeReview({
   content: string;
   active: boolean;
 }) {
-  const commentsAvailable = review.commentsAvailable !== false;
+  const commentsAvailable = review.commentsAvailable !== false && review.workspaceCommentsAvailable !== false;
   const inline = useInlineReview(review, active, path);
   const [view, setView] = useState<EditorView | null>(null);
   const snapshot = useMemo<Extract<ReviewCodeSnapshot, { kind: "file" }>>(

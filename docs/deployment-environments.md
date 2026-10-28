@@ -258,6 +258,15 @@ Keep the Post-Login Action that stamps the namespaced email, email verification,
 name, and picture claims consistent across the three clients. Do not let an
 Alpha or Beta web project use the Production client secret or audience.
 
+Auth0 compatibility also requires migration
+`0208_auth0_browser_session_authority.sql` and a channel-specific
+`AUTH0_SESSION_AUTHORITY_KEY`: one random 32-byte key encoded as 64 hex
+characters, shared only by that channel's Pages server and control plane.
+Deploy the authority before the Pages facade and drain older Pages versions.
+Old KV sessions and raw desktop refresh handles require sign-in; changing the
+key also invalidates encrypted sessions. KV remains an abuse-counter store,
+never an authentication fallback. See [the web rollout contract](../apps/web/README.md#authentication-modes).
+
 ## Cloudflare Pages setup
 
 Create `zeros-web-alpha` and `zeros-web-beta` beside the existing `zeros-web`,

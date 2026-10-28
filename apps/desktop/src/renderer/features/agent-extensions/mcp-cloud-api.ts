@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { cloudAccountRequest } from "../../platform/cloud-workspaces";
 import { readCloudGithubCatalog, readCloudGithubRepositories } from "../../platform/cloud-github";
+import { readCloudGithubConnection, readSelectedCloudRepositories } from "../../platform/cloud-github-connection";
 import { CONTROL_PLANE_URL } from "../team/control-plane";
 import { getOrganizationStoreGeneration, getTeamStoreState } from "../team/team-store";
 import { KeyedAsyncCache } from "../../shared/lib/keyed-async-cache";
@@ -16,11 +17,12 @@ const extensionSchema = z.object({
 });
 export type CloudMcpExtension = z.infer<typeof extensionSchema>;
 export const cloudMcpCache = new KeyedAsyncCache<CloudMcpExtension[]>(24);
-export const cloudMcpKey = (organizationId: string) => JSON.stringify([CONTROL_PLANE_URL, getTeamStoreState().me?.user.id, getOrganizationStoreGeneration(), organizationId]);
+export const cloudMcpKey = (organizationId: string, githubPlacement: "local" | "cloud" = "local") => JSON.stringify([CONTROL_PLANE_URL, getTeamStoreState().me?.user.id, getOrganizationStoreGeneration(), organizationId, githubPlacement]);
+const githubPlacement = (key: string) => z.enum(["local", "cloud"]).parse((JSON.parse(key) as unknown[])[4]);
 export function assertMcpOwnerKey(key: string): string {
   const parts = JSON.parse(key) as unknown[];
   const organizationId = uuid.parse(parts[3]);
-  if (key !== cloudMcpKey(organizationId)) throw new Error("Your account changed. Reopen this organization’s MCP servers.");
+  if (key !== cloudMcpKey(organizationId, githubPlacement(key))) throw new Error("Your account changed. Reopen this organization’s MCP servers.");
   return organizationId;
 }
 const base = (organizationId: string) => `/v1/organizations/${uuid.parse(organizationId)}/extensions`;
@@ -39,7 +41,7 @@ function cloudConfig(config: RawServer): RawServer {
 export async function saveCloudMcp(key: string, input: { id: string; owner: "organization" | "user"; repository: string | null; expectedRevision: number | null; config: RawServer; secrets?: McpSecretChanges }): Promise<CloudMcpExtension> {
   const organizationId = assertMcpOwnerKey(key);
   const { id, ...body } = input;
-  const result = await cloudAccountRequest(`${base(organizationId)}/${uuid.parse(id)}`, z.object({ extension: extensionSchema }), {
+  const result = await cloudAccountRequest(`${base(organizationId)}/${uuid.parse(id)}${githubPlacement(key) === "cloud" ? "?githubPlacement=cloud" : ""}`, z.object({ extension: extensionSchema }), {
     method: "PUT", idempotencyKey: crypto.randomUUID(), body: { ...body, kind: "mcp", config: cloudConfig(body.config) },
   });
   assertMcpOwnerKey(key);
@@ -82,6 +84,26 @@ export async function cancelCloudMcpAuth(key: string, attemptId: string) {
 
 export async function readCloudMcpRepositories(key: string) {
   const organizationId = assertMcpOwnerKey(key);
+  if (githubPlacement(key) === "cloud") {
+    const userId = (JSON.parse(key) as string[])[1]!;
+    const connection = await readCloudGithubConnection(userId, organizationId);
+    assertMcpOwnerKey(key);
+    if (!connection.selectedMethod || connection.methods[connection.selectedMethod].health !== "connected")
+      throw new Error("Connect cloud GitHub in this organization's settings to choose repositories.");
+    const repositories = new Map<string, { value: string; label: string }>();
+    for (let page = 1; page <= 100;) {
+      const result = await readSelectedCloudRepositories(userId, organizationId, connection.generation, page);
+      assertMcpOwnerKey(key);
+      for (const row of result.repositories) {
+        const repository = `${row.owner}/${row.name}`;
+        repositories.set(repository.toLowerCase(), { value: repository, label: repository });
+      }
+      if (result.nextPage === null && result.complete) return [...repositories.values()].sort((a, b) => a.label.localeCompare(b.label));
+      if (result.nextPage === null || result.nextPage <= page) break;
+      page = result.nextPage;
+    }
+    throw new Error("The cloud repository catalog could not be loaded completely. Refresh and try again.");
+  }
   // The API only lists recent, actor-bound repository admission. Refresh it
   // through the native human/App intersection; a Cloud Computer or an App's
   // installation-wide token cannot establish the person's repository access.

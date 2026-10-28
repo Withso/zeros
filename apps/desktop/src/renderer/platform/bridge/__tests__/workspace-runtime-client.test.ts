@@ -1,4 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+const github = vi.hoisted(() => ({ request: vi.fn(async () => ({})) }));
+vi.mock("../../cloud-github-pr", () => ({ requestCloudGithubPr: github.request }));
 import { RuntimeClient, type ConnectionStatus } from "../ws-client";
 import { classifyRpcError, isRecoverable } from "../failure";
 import {
@@ -593,22 +595,26 @@ describe("workspace runtime routing", () => {
     } finally { client.dispose(); }
   });
 
-  it("keeps PR suggestions and create preflight on the selected cloud workspace", async () => {
+  it("routes PR suggestions and create preflight through the selected cloud service without waking either VM", async () => {
+    github.request.mockClear();
     const local = vi.spyOn(RuntimeClient.prototype, "request");
     const pa = fakePeer(a), pb = fakePeer(b);
-    const client = new WorkspaceRuntimeClient({ open: async target => target.workspaceId === a.workspaceId ? pa.peer : pb.peer, workspaces: () => [] });
+    const open = vi.fn(async (target: CloudWorkspaceTarget) => target.workspaceId === a.workspaceId ? pa.peer : pb.peer);
+    const client = new WorkspaceRuntimeClient({ open, workspaces: () => [] });
     try {
       for (const target of [a, b]) {
         const workspaceId = cloudWorkspaceKey(target);
         await bridgeGhPrList(client, { workspaceId, originUrl: "https://github.com/example/project.git", state: "open" });
         await bridgeGhRepoAccess(client, workspaceId);
+        expect(github.request).toHaveBeenCalledWith(expect.objectContaining(target), "gh.prList", {
+          workspaceId, originUrl: "https://github.com/example/project.git", state: "open",
+        });
+        expect(github.request).toHaveBeenCalledWith(expect.objectContaining(target), "gh.repoAccess", { workspaceId });
       }
       for (const peer of [pa, pb]) {
-        expect(peer.request).toHaveBeenCalledWith(expect.objectContaining({ op: "gh.prList", params: {
-          workspaceId: "local-main", originUrl: "https://github.com/example/project.git", state: "open",
-        } }), expect.any(Number));
-        expect(peer.request).toHaveBeenCalledWith(expect.objectContaining({ op: "gh.repoAccess", params: { workspaceId: "local-main" } }), expect.any(Number));
+        expect(peer.request).not.toHaveBeenCalled();
       }
+      expect(open).not.toHaveBeenCalled();
       expect(local).not.toHaveBeenCalled();
     } finally { client.dispose(); }
   });

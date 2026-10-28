@@ -67,6 +67,7 @@ import { DEFAULT_SLOW_REQUEST_LOG_MS, requestTiming, type RequestCostObserverSta
 import { createDatabaseTimingReporter } from "./database-timing.js";
 import { observeDatabaseTiming, tracingMiddleware } from "./tracing.js";
 import { cloudAgentCredentialKeys } from "./agent-credentials/agent-credentials.js";
+import { Auth0BrowserSessionAuthority, createAuth0BrowserSessionRoutes } from "./auth0-browser-sessions.js";
 
 export type CreateAppDependencies = {
   /** Cloud workspace v2: creator routes under /v1 and the worker model proxy. */
@@ -214,6 +215,9 @@ export function createApp(
 
   // Dev discovery exposes only the anonymous public-client configuration.
   app.route("/", createDevAuthConfigurationRoutes(config));
+  if (!pendingMigration && config.auth.provider === "auth0" && config.auth0SessionAuthorityKey) {
+    app.route("/", createAuth0BrowserSessionRoutes(new Auth0BrowserSessionAuthority(pool, config.auth0SessionAuthorityKey), config.auth0SessionAuthorityKey));
+  }
   if (!pendingMigration && zerosDevAuthEnabled(config) && config.auth.provider === "workos" && config.workos) {
     app.route("/", createZerosDevAuthRoutes(config, dependencies.zerosDevAuth ?? {
       repository: new DatabaseZerosDevAuthRepository(pool),
@@ -317,11 +321,13 @@ export function createApp(
   // caches even if a future Cloudflare rule becomes broader than today's
   // dynamic pass-through. Set these before routing/auth so error responses
   // (including 401/503) inherit the same boundary.
-  app.use("/v1/github/*", async (c, next) => {
-    c.header("Cache-Control", "no-store");
-    c.header("Pragma", "no-cache");
-    await next();
-  });
+  for (const path of ["/v1/github/*", "/v1/cloud-v2/github/*"]) {
+    app.use(path, async (c, next) => {
+      c.header("Cache-Control", "no-store");
+      c.header("Pragma", "no-cache");
+      await next();
+    });
+  }
 
   // GitHub calls the callback from the system browser, so it cannot carry the
   // desktop user's bearer token. Its one-time state is the
@@ -335,8 +341,10 @@ export function createApp(
   // bearer token` where `503 github_not_configured` belongs, and a desktop
   // whose authentication session had merely lapsed could not tell "GitHub App
   // sign-in is off on this control plane" from "sign in again".
+  const cloudGithub = dependencies.cloudV2?.routes.githubConnections;
   if (config.github) {
-    app.route("/", createGithubPublicRoutes(pool, config.github));
+    app.route("/", createGithubPublicRoutes(pool, config.github, cloudGithub
+      ? { cloudCallback: (state,code,denied) => cloudGithub.callback(state,code,denied) } : {}));
   } else {
     console.warn(
       "[control-plane] GitHub App sign-in is not configured — " +
@@ -345,7 +353,7 @@ export function createApp(
     app.route("/", createGithubUnconfiguredRoutes());
   }
 
-  const mcp = createMcpServices(pool, config);
+  const mcp = createMcpServices(pool, config, cloudGithub?.authorizeRepositoryConfiguration.bind(cloudGithub));
   if (mcp) app.route("/", createMcpPublicRoutes(mcp.oauth));
 
   // Railway's edge supplies X-Real-IP for the original client. Mirror the

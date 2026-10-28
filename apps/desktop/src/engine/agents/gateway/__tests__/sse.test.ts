@@ -204,7 +204,7 @@ describe("MCP gateway explicit SSE", () => {
     cleanups.push(() => agent.close());
     const changed = vi.fn(async () => (await agent.listTools()).tools.map((tool) => tool.name));
     agent.setNotificationHandler(ToolListChangedNotificationSchema, async () => { await changed(); });
-    await agent.connect(new StreamableHTTPClientTransport(new URL(gw.url)));
+    await agent.connect(new StreamableHTTPClientTransport(new URL(gw.url), { requestInit: { headers: { Authorization: gw.authorization } } }));
     expect((await agent.listTools()).tools).toEqual([]);
     await gw.beginAuthorize("reports");
     await gw.completeAuthorize("reports", "fixture-code");
@@ -318,7 +318,7 @@ describe("MCP gateway explicit SSE", () => {
       expect(gw.getStatuses().map((status) => status.name)).toEqual(["latest"]);
       const agent = new Client({ name: "agent", version: "1" });
       cleanups.push(() => agent.close());
-      await agent.connect(new StreamableHTTPClientTransport(new URL(gw.url)));
+      await agent.connect(new StreamableHTTPClientTransport(new URL(gw.url), { requestInit: { headers: { Authorization: gw.authorization } } }));
       expect((await agent.listTools()).tools[0]?.name).toBe("latest__search");
     } finally { release(); spy.mockRestore(); }
   });
@@ -329,7 +329,7 @@ describe("MCP gateway explicit SSE", () => {
     await gw.beginAuthorize("reports");
     await gw.completeAuthorize("reports", "fixture-code");
     const agent = new Client({ name: "agent", version: "1" });
-    await agent.connect(new StreamableHTTPClientTransport(new URL(gw.url)));
+    await agent.connect(new StreamableHTTPClientTransport(new URL(gw.url), { requestInit: { headers: { Authorization: gw.authorization } } }));
     cleanups.push(() => agent.close());
     const tools = await agent.listTools();
     backend.expire(true);
@@ -344,7 +344,7 @@ describe("MCP gateway explicit SSE", () => {
     const gw = gateway(vault);
     await gw.start([{ name: "reports", transport: "sse", url: backend.url, auth: "header", source: "user" }]);
     const agent = new Client({ name: "agent", version: "1" });
-    await agent.connect(new StreamableHTTPClientTransport(new URL(gw.url)));
+    await agent.connect(new StreamableHTTPClientTransport(new URL(gw.url), { requestInit: { headers: { Authorization: gw.authorization } } }));
     cleanups.push(() => agent.close());
     const tools = await agent.listTools();
     backend.expire(true);
@@ -515,7 +515,7 @@ describe("MCP gateway explicit SSE", () => {
       const url = gw.url;
       const agent = new Client({ name: "fixture-agent", version: "1" });
       cleanups.push(() => agent.close());
-      await agent.connect(new StreamableHTTPClientTransport(new URL(url)));
+      await agent.connect(new StreamableHTTPClientTransport(new URL(url), { requestInit: { headers: { Authorization: gw.authorization } } }));
       expect((await agent.listTools()).tools.map((tool) => tool.name)).toEqual([
         "reports__search",
       ]);

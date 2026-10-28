@@ -4,7 +4,7 @@ import { workerChildEnvironment } from "../drivers/shared/agent-environment";
 import { githubEnvironment } from "./github";
 
 const unavailable = () => new Error("GitHub authentication is unavailable.");
-export function brokerRequest(socketPath: string, kind: "token" | "changed"): Promise<Record<string, unknown>> {
+export function brokerRequest(socketPath: string, kind: "token" | "user-token" | "changed"): Promise<Record<string, unknown>> {
   return new Promise((resolve, reject) => {
     if (!socketPath || !socketPath.startsWith("/")) { reject(unavailable()); return; }
     const socket = connect(socketPath); let buffer = "", settled = false;
@@ -24,8 +24,8 @@ export function brokerRequest(socketPath: string, kind: "token" | "changed"): Pr
   });
 }
 
-async function token(socketPath: string): Promise<string> {
-  const result = await brokerRequest(socketPath, "token");
+async function token(socketPath: string, kind: "token" | "user-token" = "token"): Promise<string> {
+  const result = await brokerRequest(socketPath, kind);
   if (typeof result.token !== "string" || !result.token || result.token.length > 8192 || /[\0\r\n]/.test(result.token) || typeof result.expiresAt !== "number" || result.expiresAt <= Date.now()) throw unavailable();
   return result.token;
 }
@@ -52,7 +52,7 @@ const executeGh: GhExecution = (args, env) => new Promise(resolve => {
  * wiring, and no auth login/store command is used. Mutations are never retried. */
 export async function runGh(args: string[], source: NodeJS.ProcessEnv = process.env, execute: GhExecution = executeGh): Promise<number> {
   const socketPath = source.GH_ZEROS_BROKER_SOCKET ?? "";
-  const login = await token(socketPath);
+  const login = await token(socketPath, "user-token");
   const wiring = githubEnvironment(socketPath, source.GIT_ASKPASS ?? "/opt/zeros/worker/bin/git-askpass");
   const env = { ...workerChildEnvironment(source, wiring), GH_TOKEN: login, GH_HOST: "github.com", GH_PROMPT_DISABLED: "1" };
   const code = await execute(args, env);

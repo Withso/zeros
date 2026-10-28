@@ -5,16 +5,18 @@ import { boundedInteger, commandRunner, safeRef, type CommandOptions, type Comma
 import { bucketPorcelain, parseNameStatus, parseNumstat, parseUnifiedDiff, type DiffFileSummary } from "./git-parsers";
 import { reqString, unsupported, WorkspaceError, type WorkspaceScope } from "./scope";
 import { CheckedFiles } from "./checked-files";
+import { githubRemoteRepository } from "./github-remote";
 
 type ConflictState = "merge" | "rebase" | "cherry-pick" | "revert" | null;
 interface GitOptions {
   run?: CommandRunner;
   baseBranch?: () => string;
+  githubRepository?: () => string;
   setBaseBranch?: (branch: string) => Promise<void>;
   changed?: () => void;
   historyDiff?: (params: Record<string, unknown>) => Promise<unknown>;
 }
-const WRITE_OPS = new Set(["git.stage", "git.unstage", "git.discard", "git.clean", "git.commit", "git.push", "git.pull", "git.rebase", "git.fetch", "git.stashSave", "git.stashPop", "git.stashApply", "git.stashDrop", "git.checkoutBranch", "git.createBranch", "git.renameBranch", "git.changeTarget", "git.merge", "git.cherryPick", "git.revert", "git.continue", "git.abort", "git.deleteBranch", "git.tagCreate", "git.tagDelete"]);
+const WRITE_OPS = new Set(["git.prepareGithub", "git.stage", "git.unstage", "git.discard", "git.clean", "git.commit", "git.push", "git.pull", "git.rebase", "git.fetch", "git.stashSave", "git.stashPop", "git.stashApply", "git.stashDrop", "git.checkoutBranch", "git.createBranch", "git.renameBranch", "git.changeTarget", "git.merge", "git.cherryPick", "git.revert", "git.continue", "git.abort", "git.deleteBranch", "git.tagCreate", "git.tagDelete"]);
 export const DEFERRED_GIT_OPS = ["git.reset", "git.restore", "git.stageHunk", "git.unstageHunk", "git.discardHunk", "git.initInPlace", "git.repoBranchCatalog", "git.listAllBranches"] as const;
 
 /** One checkout-scoped writer queue. Ordinary reads never wait behind a
@@ -233,6 +235,26 @@ export class GitService {
 
   private async write(op: string, params: Record<string, unknown>): Promise<unknown> {
     switch (op) {
+      case "git.prepareGithub": {
+        const branch = await this.requireBranch(), headSha = await this.head(), baseBranch = this.baseBranch;
+        const repository = this.options.githubRepository?.() ?? this.scope.workspace.repository;
+        if (branch !== params.branch || baseBranch !== params.baseBranch || !headSha || branch === baseBranch)
+          throw new WorkspaceError("GIT_STATE_CHANGED", "The workspace branch changed. Refresh before creating the pull request.");
+        if (await this.conflictState()) throw new WorkspaceError("GIT_STATE_CHANGED", "Finish the current Git operation before publishing this branch.");
+        const destination = (await this.git(["remote", "get-url", "--push", "--all", "origin"], { readOnly: true })).trim();
+        if (githubRemoteRepository(destination)?.toLowerCase() !== repository.toLowerCase())
+          throw new WorkspaceError("GITHUB_REMOTE_CHANGED", "Origin no longer points to this workspace's GitHub repository. Refresh its connection before publishing.");
+        // Capture the commit and destination: a terminal edit of HEAD or origin
+        // during the request cannot silently publish a different branch/repo.
+        await this.git(["push", "--", destination, `${headSha}:refs/heads/${branch}`], { timeout: 120_000 });
+        const currentDestination = (await this.git(["remote", "get-url", "--push", "--all", "origin"], { readOnly: true })).trim();
+        if (destination !== currentDestination || branch !== await this.branch() || headSha !== await this.head() || baseBranch !== this.baseBranch ||
+          repository !== (this.options.githubRepository?.() ?? this.scope.workspace.repository))
+          throw new WorkspaceError("GIT_STATE_CHANGED", "The commit was pushed, but the checkout changed. Refresh before creating the pull request.");
+        await this.git(["update-ref", `refs/remotes/origin/${branch}`, headSha]);
+        await this.git(["branch", `--set-upstream-to=origin/${branch}`, branch]);
+        return { branch, baseBranch, headSha };
+      }
       case "git.clean": {
         const paths = this.paths(params.paths), literal = this.literal(paths);
         if (!paths.length || params.confirm !== true) throw new WorkspaceError("VALIDATION_FAILED", "Cleaning requires confirmed, explicit file paths.");

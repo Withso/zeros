@@ -26,6 +26,7 @@ import type { MiddlewareHandler } from "hono";
 import type pg from "pg";
 import type { Config } from "./config.js";
 import { withSystemTx, type Tx } from "./db.js";
+import { auth0TokenIsRevoked } from "./auth0-browser-sessions.js";
 import { HttpError, type StaffRole } from "./authz.js";
 import {
   AuthTokenContractError,
@@ -308,6 +309,9 @@ export function createAuthMiddleware(
       };
     }
 
+    if (identity.provider === "auth0" && config.auth0SessionAuthorityKey && await auth0TokenIsRevoked(pool, identity.providerSubject, payload.iat)) {
+      return c.json({ error: { code: "unauthorized", message: "Session revoked" } }, 401);
+    }
     const user = await resolveAuthenticatedUser(
       pool,
       { ...identity },

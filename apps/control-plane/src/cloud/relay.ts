@@ -11,7 +11,7 @@ import { CLOUD_V2_MAX_FRAME_BYTES, CloudV2WorkerFrameSchema, type CloudV2Control
 import type { PostgresSecurityEventBroker } from "../security-events.js";
 import type { CloudV2Store, CloudV2Workspace } from "./store.js";
 import { isCloudV2Token } from "./tokens.js";
-import { dialWorker, workerSupportsCheckout, workerSupportsMcp, workerSupportsSetup, type WorkerRoute } from "./worker-connection.js";
+import { dialWorker, workerSupportsCheckout, workerSupportsMcp, workerSupportsSetup, workerSupportsGithub, type WorkerRoute } from "./worker-connection.js";
 import { emitCloudV2Timing, type CloudV2TimingRecord } from "./lifecycle.js";
 
 export const CLOUD_V2_BRIDGE_PROTOCOL = "zeros.cloud.v2";
@@ -24,6 +24,7 @@ export type CloudV2RelayDeps = {
   store: Pick<CloudV2Store, "consumeConnectTicket" | "get" | "accessEpoch" | "appAccessSnapshot" | "loginRevision">;
   securityEvents?: Pick<PostgresSecurityEventBroker, "start" | "subscribe">;
   config(workspace: CloudV2Workspace): Promise<ConfigFrame>;
+  authorizeSource?(workspace: CloudV2Workspace): Promise<void>;
   workerRoute(workspaceId: string): Promise<WorkerRoute | null>;
   mintWorkerToken(workspaceId: string, bootId: string): string;
   wake(workspace: CloudV2Workspace): Promise<void>;
@@ -140,6 +141,8 @@ export class CloudV2Relay {
   private async authorized(room: Room, admittingSessionId: string | null = null): Promise<boolean> {
     if (room.revoked || this.closed) return false;
     const revision = this.securityRevision;
+    try { await this.deps.authorizeSource?.(room.workspace); }
+    catch { this.revoke(room); return false; }
     const sessions = new Set([...room.clients.values()].flatMap(client => client.sessionId ? [client.sessionId] : []));
     if (admittingSessionId) sessions.add(admittingSessionId);
     const snapshot = await this.deps.store.appAccessSnapshot(room.workspace.id, [...sessions]).catch(() => null);
@@ -316,12 +319,14 @@ export class CloudV2Relay {
       if (!await this.authorized(room) || room.worker !== ws) return false;
       if (revision !== await this.deps.store.loginRevision(room.workspace.id)) { flight.requested = true; flight.force = true; continue; }
       if (room.worker !== ws || room.revoked) return false;
-      const { mcpServers, ...legacy } = config;
-      const { setup, baseCommit, ...workspaceConfig } = config.workspace;
+      const { mcpServers, githubPullRequests, ...legacy } = config;
+      const { setup, baseCommit, github, ...workspaceConfig } = config.workspace;
       send(ws, { ...legacy, workspace: { ...workspaceConfig,
+        ...(workerSupportsGithub(ws) && github ? { github } : {}),
         ...(workerSupportsSetup(ws) && setup !== undefined ? { setup } : {}),
         ...(workerSupportsCheckout(ws) && baseCommit !== undefined ? { baseCommit } : {}) },
-        ...(workerSupportsMcp(ws) && mcpServers ? { mcpServers } : {}), loginRevision: revision }); room.loginRevision = revision; room.configAt = Date.now();
+        ...(workerSupportsMcp(ws) && mcpServers ? { mcpServers } : {}),
+        ...(workerSupportsGithub(ws) && githubPullRequests === 1 ? { githubPullRequests } : {}), loginRevision: revision }); room.loginRevision = revision; room.configAt = Date.now();
     } while (flight.requested);
     return true;
   }

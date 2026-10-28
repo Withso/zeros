@@ -183,17 +183,18 @@ export interface UseResolvedSettings {
 export function useResolvedSettings(
   repoRoot?: string,
   mainRepoRoot?: string,
+  enabled = true,
 ): UseResolvedSettings {
   const bridge = useBridge();
   const bridgeStatus = useBridgeStatus(repoRoot);
-  const active = useDocumentActive(true);
+  const active = useDocumentActive(enabled);
   const key = resolvedSettingsKey(repoRoot, mainRepoRoot);
   const snapshot = useSettingsSnapshot(resolvedSettingsCache, key);
 
   // A manual or DB-triggered refresh bypasses freshness but never clears a
   // resolved document while the engine builds its replacement.
   const refresh = useCallback(() => {
-    if (!bridge || bridgeStatus !== "connected") return;
+    if (!enabled || !bridge || bridgeStatus !== "connected") return;
     return resolvedSettingsCache
       .load(key, () => bridgeSettingsResolve(bridge, repoRoot, mainRepoRoot), {
         force: true,
@@ -201,12 +202,12 @@ export function useResolvedSettings(
       .catch(() => {
         // Error lives in the shared snapshot; confirmed data remains visible.
       });
-  }, [bridge, bridgeStatus, key, repoRoot, mainRepoRoot]);
+  }, [enabled, bridge, bridgeStatus, key, repoRoot, mainRepoRoot]);
 
   // All retained panels for this exact key hear the same broadcast. Mark the
   // key stale synchronously, then coalesce their reads into one microtask.
   const refreshFromBroadcast = useCallback(() => {
-    if (!bridge || bridgeStatus !== "connected") return;
+    if (!enabled || !bridge || bridgeStatus !== "connected") return;
     resolvedSettingsCache.invalidate(key);
     scheduleSettingsRefresh(`resolved:${key}`, () => {
       void resolvedSettingsCache
@@ -217,7 +218,7 @@ export function useResolvedSettings(
         )
         .catch(() => {});
     });
-  }, [bridge, bridgeStatus, key, repoRoot, mainRepoRoot]);
+  }, [enabled, bridge, bridgeStatus, key, repoRoot, mainRepoRoot]);
 
   useEffect(() => {
     if (!active) return;

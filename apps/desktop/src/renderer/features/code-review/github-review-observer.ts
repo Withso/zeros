@@ -1,6 +1,6 @@
 import { getPrInlineReview } from "@/renderer/platform/github-review";
 import { onActiveBridgeConnected } from "@/renderer/platform/bridge/active-bridge";
-import { codeReviewAvailable } from "@/renderer/platform/bridge/code-review-availability";
+import { githubReviewAvailable } from "@/renderer/platform/bridge/code-review-availability";
 import {
   documentIsForeground,
   observeForeground,
@@ -110,7 +110,7 @@ function read(entry: Observation, reset: boolean): Promise<void> {
 
 /** One next-due read, reconnect subscription and foreground observer per PR. */
 export function observeGithubReview(key: string, cwd?: string): () => void {
-  if (!codeReviewAvailable({ cwd, ...githubReviewTargetFromKey(key) })) return () => {};
+  if (!githubReviewAvailable({ cwd, ...githubReviewTargetFromKey(key) })) return () => {};
   let entry = observations.get(key);
   if (!entry) {
     entry = {
@@ -146,7 +146,7 @@ export function refreshGithubReview(
   isCurrent: () => boolean,
 ): Promise<void> {
   if (!isCurrent() || !documentIsForeground() ||
-      !codeReviewAvailable({ cwd, ...githubReviewTargetFromKey(key) })) return Promise.resolve();
+      !githubReviewAvailable({ cwd, ...githubReviewTargetFromKey(key) })) return Promise.resolve();
   const entry = observations.get(key);
   if (entry) return read(entry, true);
   // A committed mutation may refresh before its surface's observation effect.

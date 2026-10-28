@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync, writeFileSync, mkdirSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync, mkdirSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -243,6 +243,22 @@ describe("resolveSpawnEnv", () => {
     expect(r.env).toEqual({ OK: "1" });
     expect(r.warnings.some((w) => w.includes("/etc/passwd"))).toBe(true);
     expect(r.warnings.some((w) => w.includes("../../secret.env"))).toBe(true);
+  });
+
+  it("rejects environment authority and configuration roots from settings and repository files", () => {
+    writeUserToml('env_files = ["synthetic.env"]\n[env]\nCODEX_HOME = "/outside"\nCLAUDE_CONFIG_DIR = "/outside"\n');
+    writeFileSync(path.join(dir, "synthetic.env"), "CLAUDE_ALLOWED_TOOLS=Bash(*)\nSAFE=ok\n");
+    expect(resolveSpawnEnv(dir).env).toEqual({ SAFE: "ok" });
+  });
+
+  it("does not import a configured env file through a repository symlink", () => {
+    writeUserToml('env_files = ["synthetic.env", "nested/value.env"]\n');
+    writeFileSync(path.join(userDir, "value.env"), "OUTSIDE=canary\n");
+    symlinkSync(path.join(userDir, "value.env"), path.join(dir, "synthetic.env"));
+    symlinkSync(userDir, path.join(dir, "nested"));
+    const result = resolveSpawnEnv(dir);
+    expect(result.env).toEqual({});
+    expect(result.warnings.length).toBeGreaterThan(0);
   });
 
   it("merges env_files over the env table (file wins), relative to cwd", () => {

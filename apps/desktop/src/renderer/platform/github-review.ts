@@ -7,10 +7,14 @@ import type {
   PrThreadReplyInput,
   PrThreadResolveInput,
 } from "@zeros/protocol/github-review";
+import { cloudTargetForValue } from "./bridge/cloud-workspace-key";
+import { requestCloudGithubPr } from "./cloud-github-pr";
 import { getActiveBridge } from "./bridge/active-bridge";
 import { workspaceOp } from "./bridge/workspace-bridge";
 
-function request<T>(op: string, input: object): Promise<T> {
+function request<T>(op: string, input: PrReviewTarget & { kind?: string }): Promise<T> {
+  const cloud = cloudTargetForValue(input.workspaceId);
+  if (cloud) return requestCloudGithubPr(cloud, op, { ...input }) as Promise<T>;
   const bridge = getActiveBridge();
   if (!bridge)
     return Promise.reject(
@@ -23,7 +27,7 @@ export function getPrInlineReview(
 ): Promise<PrInlineReview> {
   return request("gh.prInlineReview", input);
 }
-export function getPrReviewDiff(input: PrReviewTarget): Promise<PrReviewDiff> {
+export function getPrReviewDiff(input: PrReviewTarget & { kind?: string }): Promise<PrReviewDiff> {
   return request("gh.prReviewDiff", input);
 }
 // The existing comment write operation keeps its conversation behavior when

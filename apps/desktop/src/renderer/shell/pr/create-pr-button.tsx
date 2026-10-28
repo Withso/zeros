@@ -69,6 +69,20 @@ import {
   releasePrCreateAction,
 } from "./pr-create-claim";
 import { useWorkspaceGitActionClaim } from "./workspace-git-action-claims";
+import {
+  cloudTargetForValue,
+  isCloudWorkspace,
+} from "../../platform/bridge/cloud-workspace-key";
+import { cloudGithubPrAuthority } from "../../platform/cloud-github-pr";
+import { cloudGithubPrScope } from "../../platform/cloud-github-pr-scope";
+import { retryWorkspacePrDiscovery } from "./use-workspace-pr-sync";
+
+const CLOUD_PR_REFRESH_MESSAGE: PrBlockMessage = {
+  title: "Refresh this workspace's GitHub status",
+  description:
+    "The repository or branch could not be verified. Refresh GitHub status, then try again.",
+  openSettings: false,
+};
 
 // The shared dropdown chrome in its SPLIT form (primitives/select.tsx): same
 // 6px corners, 13px text, 14px glyphs, border3 shell and bg2-highlight hover
@@ -184,13 +198,28 @@ function GithubCreatePrButton({
           showBlockToast(describePrAccessBlock(access));
           return;
         }
+        const cloud = cloudTargetForValue(workspace.id);
+        const authority = cloud ? cloudGithubPrAuthority(cloud) : undefined;
+        const scope = cloud ? cloudGithubPrScope(workspace.id) : undefined;
+        // Cloud's repository is selected by its immutable server identity.
+        // A restored or deliberately customized remote cannot replace it.
+        // Unlike direct creation, an agent brief has no later server step
+        // that can supply a missing target before it starts committing.
+        if (cloud && (
+          access.state !== "ok" || !authority ||
+          authority.branch !== workspace.branch ||
+          authority.baseBranch !== workspace.baseBranch
+        )) {
+          showBlockToast(CLOUD_PR_REFRESH_MESSAGE);
+          return;
+        }
         // Best-effort live facts; failures stay explicitly unknown. Inventing
         // "clean" or "no upstream" here can make the agent skip work or push
         // with the wrong assumptions precisely when the bridge is unhealthy.
         let uncommittedCount: number | null = null;
         let statusKnown = false;
         let hasUpstream: boolean | null = null;
-        let repository: string | undefined;
+        let repository = authority?.repository;
         // The blocker facts come from the SAME status read — this path is the
         // recovery the conflict refusal offers, so the brief has to name what
         // the direct create refused to commit.
@@ -199,7 +228,9 @@ function GithubCreatePrButton({
         const [status, counts, catalog] = await Promise.allSettled([
           gitStatus(workspace.id),
           gitChangeCounts(workspace.id),
-          gitRepoBranchCatalog({ repoRoot: workspace.repoRoot }),
+          cloud
+            ? Promise.resolve(null)
+            : gitRepoBranchCatalog({ repoRoot: workspace.repoRoot }),
         ]);
         if (status.status === "fulfilled") {
           statusKnown = true;
@@ -225,6 +256,13 @@ function GithubCreatePrButton({
             configured?.isGitHub === true ? parseRemote(configured.url) : null;
           if (parsed) repository = `${parsed.owner}/${parsed.repo}`;
         }
+        if (cloud && (
+          scope !== cloudGithubPrScope(workspace.id) ||
+          JSON.stringify(authority) !== JSON.stringify(cloudGithubPrAuthority(cloud))
+        )) {
+          showBlockToast(CLOUD_PR_REFRESH_MESSAGE);
+          return;
+        }
         const text = buildPrInstructions({
           branch: workspace.branch,
           baseBranch: workspace.baseBranch,
@@ -236,6 +274,7 @@ function GithubCreatePrButton({
           operationInProgress,
           hasUpstream,
           draft,
+          placement: isCloudWorkspace(workspace.id) ? "cloud" : "local",
         });
         // Auto-sent treatment (2026-07-19): a tidy "Create a PR" bubble with
         // the button's own icon on the brown "sent by Zeros" surface — no
@@ -244,7 +283,12 @@ function GithubCreatePrButton({
           text,
           displayText: prBubbleDisplayText(draft),
           autoAction: draft ? "create-draft-pr" : "create-pr",
-          onSettled: () => releasePrCreateAction(owner),
+          onSettled: () => {
+            releasePrCreateAction(owner);
+            // An explicit Create PR turn can finish within the cloud probe's
+            // broadcast throttle. Its active discovery owner must recheck now.
+            if (isCloudWorkspace(workspace.id)) void retryWorkspacePrDiscovery(workspace.id).catch(() => {});
+          },
         });
         // Keep the synchronous claim (and spinner) through the accepted turn;
         // onSettled releases it on either success or failure. If no active
@@ -348,6 +392,27 @@ function GithubCreatePrButton({
   );
 
   const handleManual = useCallback(async () => {
+    const cloud = cloudTargetForValue(workspace.id);
+    if (cloud) {
+      const access = await ghRepoAccess(workspace.id);
+      if (isPrAccessBlocked(access)) {
+        showBlockToast(describePrAccessBlock(access));
+        return;
+      }
+      const authority = cloudGithubPrAuthority(cloud);
+      if (access.state !== "ok" || !authority ||
+        authority.branch !== workspace.branch || authority.baseBranch !== workspace.baseBranch) {
+        showBlockToast(CLOUD_PR_REFRESH_MESSAGE);
+        return;
+      }
+      const url = githubCompareUrl(
+        `https://github.com/${authority.repository}.git`,
+        authority.baseBranch,
+        authority.branch,
+      );
+      if (url) void shellOpenUrl(url);
+      return;
+    }
     // Open the compare page on the CONFIGURED remote's repository — in a fork
     // workflow (origin = your fork, git.remote = upstream) the stored origin
     // URL names a different GitHub repo than the one PRs target. Best-effort:
@@ -377,7 +442,10 @@ function GithubCreatePrButton({
       return;
     }
     void shellOpenUrl(url);
-  }, [originUrl, workspace.repoRoot, workspace.baseBranch, workspace.branch]);
+  }, [
+    originUrl, workspace.id, workspace.repoRoot,
+    workspace.baseBranch, workspace.branch, showBlockToast,
+  ]);
 
   return (
     <div className={classes.shell}>

@@ -1,11 +1,11 @@
-// app.zeros.build/handoff/refresh  (POST, refresh-token-authed, no cookie)
+// app.zeros.build/handoff/refresh  (POST, desktop-capability-authed, no cookie)
 //
-// Called by the DESKTOP main process to renew its access token. Possession of a
-// valid Auth0 refresh token IS the credential here (same trust model as Auth0's
-// own /oauth/token endpoint) — this is a thin relay that holds the confidential
-// client's secret server-side so the desktop binary never has to.
+// Called by the DESKTOP main process with its opaque z0d_ capability. The
+// durable authority checks expiry/revocation and serializes provider rotation;
+// raw Auth0 refresh tokens are not accepted as desktop authority.
 
-import { refreshGrant, type Env } from "../../lib/session";
+import { refreshBrowserSession, type Env } from "../../lib/session";
+import { auth0SessionAuthority } from "../../lib/auth0-session-authority";
 import { json, TOKENISH } from "../../lib/handoff-security";
 import { clientIp, rateLimit } from "../../lib/ratelimit";
 import { legacyDesktopHandoffEnabled } from "../../lib/workos-browser.mjs";
@@ -16,7 +16,7 @@ export const onRequestPost: PagesFunction<Env> = async ({ request, env }) => {
       "cache-control": "no-store",
     });
   }
-  // Abuse ceiling on the refresh oracle: possession of a refresh token is the
+  // Abuse ceiling on the refresh endpoint: possession of a desktop capability is the
   // only credential here, so cap single-source hammering (a stolen-token replay
   // farm / DoS). Generous — a real desktop refreshes rarely; brute force is
   // infeasible against 256-bit tokens regardless. Fails open if KV is down.
@@ -39,7 +39,11 @@ export const onRequestPost: PagesFunction<Env> = async ({ request, env }) => {
   const refreshToken = typeof body.refresh_token === "string" ? body.refresh_token : "";
   if (!TOKENISH.test(refreshToken)) return json({ error: "bad_request" }, 400);
 
-  const granted = await refreshGrant(env, refreshToken);
+  if (!/^z0d_[A-Za-z0-9_-]{43}$/.test(refreshToken)) return json({ error: "invalid_grant" }, 401, { "cache-control": "no-store" });
+  const current = await auth0SessionAuthority(env, { action: "read", sessionId: refreshToken });
+  if (current.status === "terminal") return json({ error: "invalid_grant" }, 401, { "cache-control": "no-store" });
+  if (current.status === "busy") return json({ error: "refresh_unavailable" }, 503, { "cache-control": "no-store" });
+  const granted = await refreshBrowserSession(env, refreshToken, current.data, current.revision);
   if (!granted.ok) {
     // Terminal (dead refresh token) → 401 so the desktop clears its session and
     // re-signs-in. Transient (Auth0 rate-limit / 5xx / unreachable) → 503 so the
@@ -52,8 +56,8 @@ export const onRequestPost: PagesFunction<Env> = async ({ request, env }) => {
 
   return json(
     {
-      access_token: granted.data.access_token,
-      refresh_token: granted.data.refresh_token ?? refreshToken,
+      access_token: granted.data.accessToken,
+      refresh_token: refreshToken,
     },
     200,
     { "cache-control": "no-store" },

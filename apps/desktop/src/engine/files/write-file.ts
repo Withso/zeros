@@ -20,6 +20,7 @@
 import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
+import { openBoundedDirectorySync } from "./bounded-read-sync";
 import { isSensitiveRepoPath } from "./read-file";
 import { inspectExpectedWorkspaceContent, WorkspaceFileGuardError } from "./file-content-guard";
 
@@ -66,6 +67,7 @@ export function writeWorkspaceFile(
   content: string,
   opts?: {
     remote?: boolean;
+    canonicalRoot?: string;
     expectedContent?: string | null;
     /** Engine-only regular-file mode from validated Git metadata. Applied only
      * when expectedContent is null and the destination remains absent. */
@@ -119,10 +121,11 @@ export function writeWorkspaceFile(
   // only way the lexically-contained target could escape the workspace.
   let realRoot: string;
   try {
-    realRoot = fs.realpathSync(root);
+    realRoot = opts?.canonicalRoot ?? fs.realpathSync(root);
   } catch {
-    realRoot = root;
+    return fail(rel, "cannot safely resolve workspace");
   }
+  let safeTarget: string;
   try {
     const existing = deepestExisting(target);
     const realExisting = fs.realpathSync(existing);
@@ -131,13 +134,14 @@ export function writeWorkspaceFile(
     }
     // An innocuously-named path whose REAL location is a secret must be refused.
     const realTarget = path.join(realExisting, path.relative(existing, target));
+    safeTarget = realTarget;
     if (remote && isSensitiveRepoPath(path.relative(realRoot, realTarget))) {
       return fail(rel, SECRET_REFUSAL);
     }
   } catch {
     // realpath race/quirk. For a REMOTE write FAIL CLOSED (we couldn't prove the
     // resolved target is safe); a LOCAL write proceeds (the owner's own machine).
-    if (remote) return fail(rel, SECRET_REFUSAL);
+    return fail(rel, "cannot safely resolve file parent");
   }
 
   // Don't clobber a directory (statSync follows symlinks, so a symlink→dir is
@@ -156,16 +160,18 @@ export function writeWorkspaceFile(
 
   // Atomic tmp + rename (same dir, same filesystem) — mirrors settings/files.ts.
   try {
-    fs.mkdirSync(path.dirname(target), { recursive: true });
-    const tmp = `${target}.tmp-${process.pid}-${randomUUID()}`;
+    const directory = openBoundedDirectorySync(path.dirname(safeTarget), true);
+    const pinnedTarget = path.join(directory.path, path.basename(safeTarget));
+    const tmp = `${pinnedTarget}.tmp-${process.pid}-${randomUUID()}`;
     try {
       assertStillExpected();
-      fs.writeFileSync(tmp, content, guarded ? { encoding: "utf-8", flag: "wx" } : "utf-8");
+      fs.writeFileSync(tmp, content, { encoding: "utf-8", flag: "wx" });
       // Preserve the existing file's mode (e.g. an executable script's +x) — the
       // fresh tmp would otherwise reset it to the umask default on rename, a
       // silent perms change that also surfaces as a spurious mode diff.
       try {
-        fs.chmodSync(tmp, fs.statSync(target).mode);
+        const previous = fs.lstatSync(pinnedTarget);
+        if (previous.isFile()) fs.chmodSync(tmp, previous.mode);
       } catch (error) {
         if (
           (error as NodeJS.ErrnoException).code === "ENOENT" &&
@@ -174,7 +180,7 @@ export function writeWorkspaceFile(
           fs.chmodSync(tmp, creationMode);
       }
       assertStillExpected();
-      fs.renameSync(tmp, target);
+      fs.renameSync(tmp, pinnedTarget);
     } catch (err) {
       try {
         fs.rmSync(tmp, { force: true });
@@ -182,7 +188,7 @@ export function writeWorkspaceFile(
         /* best-effort tmp cleanup */
       }
       throw err;
-    }
+    } finally { directory.close(); }
   } catch (err) {
     if (err instanceof WorkspaceFileGuardError) return fail(rel, err.message);
     const code = (err as NodeJS.ErrnoException).code;

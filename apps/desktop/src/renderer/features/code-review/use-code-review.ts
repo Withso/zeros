@@ -15,7 +15,8 @@ import {
   replyCodeReviewThread,
   setCodeReviewThreadResolved,
 } from "@/renderer/platform/bridge/code-review-bridge";
-import { codeReviewAvailable } from "@/renderer/platform/bridge/code-review-availability";
+import { useCloudGithubPrScope } from "../../platform/cloud-github-pr-scope";
+import { codeReviewAvailable, githubReviewAvailable } from "@/renderer/platform/bridge/code-review-availability";
 import {
   getActiveBridge,
   onActiveBridgeChange,
@@ -226,6 +227,8 @@ export interface CodeReviewController {
   ownerKey: string;
   /** Shared placement capability, also applied at the bridge boundary. */
   commentsAvailable?: boolean;
+  /** Creating a private workspace comment requires its own persistence. */
+  workspaceCommentsAvailable?: boolean;
   threads: readonly CodeReviewThreadItem[];
   operations: CodeReviewOperations;
   drafts: ReviewDraftStore;
@@ -253,12 +256,15 @@ export function useCodeReview({
   external?: CodeReviewExternalSource;
 }): CodeReviewController {
   const inheritedExternal = useCodeReviewExternal();
-  const commentsAvailable = codeReviewAvailable({ cwd, workspaceId });
+  const workspaceCommentsAvailable = codeReviewAvailable({ cwd, workspaceId });
+  const commentsAvailable = workspaceCommentsAvailable || githubReviewAvailable({ cwd, workspaceId });
   const external = commentsAvailable
     ? suppliedExternal ?? inheritedExternal
     : undefined;
   const target = workspaceId || cwd || "";
-  const key = commentsAvailable && cwd && target ? codeReviewCacheKey(cwd, target) : null;
+  const scope = useCloudGithubPrScope(target);
+  const ownerKey = keyForReviewOwner(target, scope);
+  const key = workspaceCommentsAvailable && cwd && target ? codeReviewCacheKey(cwd, target) : null;
   const subscribe = useCallback(
     (listener: () => void) =>
       key ? codeReviewCache.subscribe(key, listener) : () => {},
@@ -276,7 +282,7 @@ export function useCodeReview({
   const drafts = useMemo(
     () => new ReviewDraftStore(),
     // eslint-disable-next-line react-hooks/exhaustive-deps -- ephemeral drafts have the exact workspace cache owner's lifetime
-    [key],
+    [key, ownerKey],
   );
   useEffect(() => {
     if (!active || !key) return;
@@ -423,8 +429,9 @@ export function useCodeReview({
     else if (current?.partial) await loadCodeReview(key, true);
   }, [key]);
   return {
-    ownerKey: key ?? "",
+    ownerKey: key ?? ownerKey,
     commentsAvailable,
+    workspaceCommentsAvailable,
     threads,
     operations,
     drafts,
@@ -438,3 +445,5 @@ export function useCodeReview({
     loadMore,
   };
 }
+
+function keyForReviewOwner(target: string, scope: string): string { return target ? JSON.stringify([target, scope]) : ""; }

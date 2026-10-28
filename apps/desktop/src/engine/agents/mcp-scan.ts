@@ -24,7 +24,8 @@
 // have and least likely to be able to find.
 // ──────────────────────────────────────────────────────────
 
-import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
+import { existsSync, readdirSync, statSync } from "node:fs";
+import { readBoundedUtf8FileSync } from "../files/bounded-read-sync";
 import os from "node:os";
 import path from "node:path";
 import { parse as parseToml } from "smol-toml";
@@ -152,18 +153,9 @@ function scanSource(baseDir: string, def: SourceDef): DiscoveredMcpSource {
   };
   if (!existsSync(filePath)) return out;
   out.exists = true;
-  try {
-    if (statSync(filePath).size > MAX_CONFIG_BYTES) {
-      out.warning = "config file too large — skipped";
-      return out;
-    }
-  } catch {
-    out.warning = "could not stat file";
-    return out;
-  }
   let text: string;
   try {
-    text = readFileSync(filePath, "utf8");
+    text = readBoundedUtf8FileSync(filePath, MAX_CONFIG_BYTES, { noFollow: true, root: baseDir });
   } catch {
     out.warning = "could not read file";
     return out;
@@ -311,7 +303,7 @@ export function codexPluginMcpServerNames(
       const file = path.join(versionDir, ".mcp.json");
       if (!existsSync(file)) continue;
       try {
-        const doc = JSON.parse(readFileSync(file, "utf8")) as {
+        const doc = JSON.parse(readBoundedUtf8FileSync(file, MAX_CONFIG_BYTES, { noFollow: true, root: cacheRoot })) as {
           mcpServers?: unknown;
         };
         const map = doc?.mcpServers;

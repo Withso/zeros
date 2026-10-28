@@ -3,6 +3,19 @@ import { expect } from "@playwright/test";
 const folder = "/fixture/To-do app";
 const snapshot = async (page) =>
   JSON.parse(await page.locator("[data-folder-state]").textContent());
+const openCleanPage = async (page, nextUrl = page.url()) => {
+  // Let the preceding document flush its durable drafts before clearing the
+  // fixture. Clearing first lets pagehide restore them, and eager store imports
+  // can read that stale state before the next harness's own reset executes.
+  const resetUrl = new URL("/ui-smoke-folder-storage-reset.html", nextUrl).href;
+  await page.route(resetUrl, route => route.fulfill({
+    contentType: "text/html",
+    body: "<!doctype html><title>Folder fixture reset</title>",
+  }), { times: 1 });
+  await page.goto(resetUrl);
+  await page.evaluate(() => { localStorage.clear(); sessionStorage.clear(); });
+  await page.goto(nextUrl);
+};
 const confirmFolderSetup = async (page) => {
   const dialog = page.getByRole("dialog", {
     name: "Create a workspace ?",
@@ -15,11 +28,7 @@ const confirmFolderSetup = async (page) => {
   await expect(dialog).toHaveCount(0);
 };
 const openFixture = async (page, query, confirm = true) => {
-  await page.evaluate(() => {
-    localStorage.clear();
-    sessionStorage.clear();
-  });
-  await page.goto(
+  await openCleanPage(page,
     `${new URL(page.url()).origin}/apps/desktop/src/renderer/harnesses/harness-folder-workspace.html?${query}`,
   );
   await page
@@ -37,11 +46,7 @@ const openFixture = async (page, query, confirm = true) => {
 };
 
 export async function runCreateProjectSelectionSmoke({ page, check }) {
-  await page.evaluate(() => {
-    localStorage.clear();
-    sessionStorage.clear();
-  });
-  await page.goto(
+  await openCleanPage(page,
     `${new URL(page.url()).origin}/apps/desktop/src/renderer/harnesses/harness-folder-workspace.html?create`,
   );
   await page.evaluate(() => window.setFolderInspection(true));
@@ -128,8 +133,7 @@ export async function runCreateProjectSelectionSmoke({ page, check }) {
   check("Opening a project outside the composer still opens its workspace while Create is visible", true);
 
   const resetCreate = async () => {
-    await page.evaluate(() => { localStorage.clear(); sessionStorage.clear(); });
-    await page.reload();
+    await openCleanPage(page);
     await page.getByRole("button", { name: "Show Create", exact: true }).click();
     await editor.fill(prompt);
   };
@@ -453,11 +457,7 @@ export async function runFolderAutoSetupSmoke({ page, check }) {
     true,
   );
 
-  await page.evaluate(() => {
-    localStorage.clear();
-    sessionStorage.clear();
-  });
-  await page.reload();
+  await openCleanPage(page);
   await page.evaluate(() => {
     window.pauseFolderInitialization();
   });
@@ -487,11 +487,7 @@ export async function runFolderAutoSetupSmoke({ page, check }) {
     true,
   );
 
-  await page.evaluate(() => {
-    localStorage.clear();
-    sessionStorage.clear();
-  });
-  await page.reload();
+  await openCleanPage(page);
   await page.evaluate(() => window.failFolderInitialization(true));
   await open.click();
   await confirmFolderSetup(page);
@@ -512,11 +508,7 @@ export async function runFolderAutoSetupSmoke({ page, check }) {
     true,
   );
 
-  await page.evaluate(() => {
-    localStorage.clear();
-    sessionStorage.clear();
-  });
-  await page.reload();
+  await openCleanPage(page);
   await page.evaluate(() =>
     window.setFolderInspection(true, null, false, false),
   );
@@ -532,11 +524,7 @@ export async function runFolderAutoSetupSmoke({ page, check }) {
     true,
   );
 
-  await page.evaluate(() => {
-    localStorage.clear();
-    sessionStorage.clear();
-  });
-  await page.reload();
+  await openCleanPage(page);
   await page.evaluate(() => window.setFolderPreparationFails(true));
   await open.click();
   await confirmFolderSetup(page);
@@ -560,11 +548,7 @@ export async function runFolderAutoSetupSmoke({ page, check }) {
     "Worktree preparation failure keeps the repository available and retries without reinitializing Git",
     true,
   );
-  await page.evaluate(() => {
-    localStorage.clear();
-    sessionStorage.clear();
-  });
-  await page.reload();
+  await openCleanPage(page);
   await page.evaluate(() => window.setFolderCreationFails(true));
   await open.click();
   await confirmFolderSetup(page);
@@ -581,11 +565,7 @@ export async function runFolderAutoSetupSmoke({ page, check }) {
     true,
   );
 
-  await page.evaluate(() => {
-    localStorage.clear();
-    sessionStorage.clear();
-  });
-  await page.reload();
+  await openCleanPage(page);
   await page.evaluate(() => window.setFolderInspection(false, null, true));
   await open.click();
   await expect(
@@ -602,8 +582,7 @@ export async function runFolderAutoSetupSmoke({ page, check }) {
 }
 
 export async function runStartFromScratchSmoke({ page, check }) {
-  await page.evaluate(() => { localStorage.clear(); sessionStorage.clear(); });
-  await page.goto(`${new URL(page.url()).origin}/apps/desktop/src/renderer/harnesses/harness-folder-workspace.html?scratch`);
+  await openCleanPage(page, `${new URL(page.url()).origin}/apps/desktop/src/renderer/harnesses/harness-folder-workspace.html?scratch`);
   const start = page.getByRole("button", { name: "Start from scratch Start a fresh repo", exact: true });
   await expect(start.locator("svg.lucide-plus")).toBeVisible();
   await start.click();

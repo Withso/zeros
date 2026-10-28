@@ -1,13 +1,13 @@
 // Cloud Computer builds. Each organization has exactly one live Boat named
-// snapshot: its active build, with the org's repositories cloned to
-// /home/user/<owner>/<name> and their setup run. Every build is kept here as
+// snapshot: a clean runtime image captured before any source is delivered.
+// Repositories and their setup are verified on the disposable builder only.
+// Workspaces hydrate their one authorized checkout. Every build is kept here as
 // a recipe; activating an older one rebuilds it at the same commits.
 //
 // Admins edit a configured recipe; a build turns it into the live snapshot,
-// and the two differ while changes are unbuilt. A build refreshes the
-// previous snapshot in place when there is one: existing checkouts fetch and
-// keep their installed dependencies, new repositories are cloned and removed
-// ones deleted. The snapshot is refreshed by itself when the worker runtime
+// and the two differ while changes are unbuilt. Every build starts from
+// stock: deleting old checkouts cannot remove copied artifacts or history.
+// The snapshot is refreshed by itself when the worker runtime
 // changes, and once a day while the organization uses cloud workspaces.
 import { randomUUID } from "node:crypto";
 import type pg from "pg";
@@ -17,6 +17,8 @@ import { HttpError } from "../authz.js";
 import type { CloudV2Compute } from "./boat.js";
 import { installRuntimeCommand, type CloudV2Runtime } from "./runtime.js";
 import { cloudV2SandboxName, cloudV2SnapshotName } from "./resource-names.js";
+import { CloudSourceTargetSchema, type CloudSourceTarget } from "./source-authority.js";
+import { computerSourceReviewRequired, readComputerSourceTargets, type CloudV2ComputerSourceResolver } from "./computer-provenance.js";
 export { cloudV2SnapshotName } from "./resource-names.js";
 
 const MAX_LOG_BYTES = 1024 * 1024;
@@ -95,6 +97,13 @@ type Row = {
   created_at: Date; started_at: Date | null; finished_at: Date | null;
   reason: CloudV2BuildReason; base_snapshot: string | null; runtime_sha256: string | null;
 };
+type ComputerConfiguration = {
+  recipe: { repositories?: unknown } | null; recipe_source_targets: unknown;
+  active_build_id: string | null; snapshot_name: string | null; recipe_revision: string;
+};
+type ConfiguredSources = { repositories: CloudV2RepositoryDraft[]; sources: unknown; revision: number; key: string };
+const configurationKey = (row: ComputerConfiguration | undefined) => JSON.stringify(row ?
+  [row.recipe_revision, row.active_build_id, row.recipe, row.recipe_source_targets] : null);
 type Resources = Row & {
   cleanup_requested_at: Date | null; builder_create_pending: boolean; builder_deleted_at: Date | null;
   snapshot_deleted_at: Date | null; operation_until: Date | null; active: boolean; pinned: boolean;
@@ -117,7 +126,8 @@ function notFound(error: unknown): boolean {
 export class CloudV2Computers {
   /** `lockPool` holds the build locks, each for a whole build or cleanup;
    * queries stay on `pool`. */
-  constructor(private readonly pool: pg.Pool, private readonly lockPool: pg.Pool = pool) {}
+  constructor(private readonly pool: pg.Pool, private readonly lockPool: pg.Pool = pool,
+    private readonly resolveRepository?: CloudV2ComputerSourceResolver) {}
 
   private async memberRole(organizationId: string, userId: string): Promise<string> {
     const { rows } = await withSystemTx(this.pool, tx => tx.query<{ role: string }>(
@@ -162,31 +172,86 @@ export class CloudV2Computers {
     return editableRepositories(rows[0]?.recipe);
   }
 
-  private async lockOrganization(tx: Tx, organizationId: string): Promise<void> {
-    const owner = await tx.query(`SELECT 1 FROM organizations WHERE id = $1 AND deleted_at IS NULL AND lifecycle_status='active' FOR UPDATE`, [organizationId]);
-    if (!owner.rowCount) throw new HttpError(404, "not_found", "Organization not found");
+  private async configuredSources(tx: Tx, organizationId: string): Promise<ConfiguredSources> {
+    const row = (await tx.query<ComputerConfiguration>(
+      `SELECT recipe,recipe_source_targets,active_build_id,snapshot_name,recipe_revision::text FROM cloud_v2_computers WHERE org_id=$1`, [organizationId])).rows[0];
+    const repositories = await this.configured(tx, organizationId, row?.recipe ?? null, row?.active_build_id ?? null);
+    const active = !row?.recipe && row?.active_build_id ? (await tx.query<{ source_targets: unknown; source_policy_version: number }>(
+      `SELECT source_targets,source_policy_version FROM cloud_v2_computer_builds WHERE org_id=$1 AND id=$2`, [organizationId, row.active_build_id])).rows[0] : undefined;
+    return { repositories, sources: row?.recipe ? row.recipe_source_targets : active?.source_policy_version === 2 ? active.source_targets : null,
+      revision: Number(row?.recipe_revision ?? 0), key: configurationKey(row) };
   }
 
-  private async writeConfigured(tx: Tx, organizationId: string, userId: string | null, repositories: CloudV2RepositoryDraft[] | null, revision: number): Promise<void> {
+  /** Resolve outside database locks. Retained entries always carry their old
+   * IDs; explicitly added entries acquire a new server observation. */
+  private async admitSources(organizationId: string, userId: string, repositories: readonly CloudV2RepositoryDraft[], previous: ConfiguredSources): Promise<CloudSourceTarget[]> {
+    const retained = repositories.some(entry => previous.repositories.some(old => old.repository.toLowerCase() === entry.repository.toLowerCase()));
+    const known = retained ? readComputerSourceTargets(previous.repositories, previous.sources) : [];
+    const targets: CloudSourceTarget[] = [];
+    for (const entry of repositories) {
+      const pinned = known.find(target => target.repository.toLowerCase() === entry.repository.toLowerCase());
+      const resolved = await this.resolveSource(organizationId, userId, { repository: entry.repository, ...(pinned ? { repositoryId: pinned.repositoryId } : {}) });
+      targets.push({ repository: entry.repository.toLowerCase(), repositoryId: resolved.repositoryId });
+    }
+    return readComputerSourceTargets(repositories, targets);
+  }
+
+  private async resolveSource(organizationId: string, userId: string, target: { repository: string; repositoryId?: string }): Promise<CloudSourceTarget> {
+    if (!this.resolveRepository) throw new HttpError(503, "github_unavailable", "Repository identity could not be verified.");
+    const parsed = CloudSourceTargetSchema.safeParse(await this.resolveRepository(organizationId, userId, target));
+    if (!parsed.success || target.repositoryId && parsed.data.repositoryId !== target.repositoryId) throw computerSourceReviewRequired();
+    return parsed.data;
+  }
+
+  async resolveSourceTargets(organizationId: string, userId: string, targets: readonly CloudSourceTarget[]): Promise<CloudSourceTarget[]> {
+    const resolved: CloudSourceTarget[] = [];
+    for (const target of targets) {
+      if (!CloudSourceTargetSchema.safeParse(target).success) throw computerSourceReviewRequired();
+      resolved.push(await this.resolveSource(organizationId, userId, target));
+    }
+    return resolved;
+  }
+
+  private async requireAdminInTransaction(tx: Tx, organizationId: string, userId: string): Promise<void> {
+    const member = (await tx.query<{ role: string }>(
+      `SELECT m.role FROM organization_members m
+       JOIN users u ON u.id=m.user_id AND u.auth_status='active' AND u.deleted_at IS NULL
+       JOIN organizations o ON o.id=m.org_id AND NOT o.is_personal AND o.cloud_workspaces_allowed
+         AND o.deleted_at IS NULL AND o.lifecycle_status='active'
+       WHERE m.org_id=$1 AND m.user_id=$2`, [organizationId, userId])).rows[0];
+    if (!member || !["owner", "admin"].includes(member.role))
+      throw new HttpError(403, "forbidden", "Requires an owner or admin");
+  }
+
+  private async lockOrganization(tx: Tx, organizationId: string, userId?: string): Promise<void> {
+    const owner = await tx.query(`SELECT 1 FROM organizations WHERE id = $1 AND deleted_at IS NULL AND lifecycle_status='active' FOR UPDATE`, [organizationId]);
+    if (!owner.rowCount) throw new HttpError(404, "not_found", "Organization not found");
+    if (userId) await this.requireAdminInTransaction(tx, organizationId, userId);
+  }
+
+  private async writeConfigured(tx: Tx, organizationId: string, userId: string | null, repositories: CloudV2RepositoryDraft[] | null, revision: number, sources: readonly CloudSourceTarget[] | null = null): Promise<void> {
     await tx.query(
-      `INSERT INTO cloud_v2_computers (org_id, recipe, recipe_revision, recipe_updated_by, recipe_updated_at)
-       VALUES ($1, $2, $3, $4, clock_timestamp())
+      `INSERT INTO cloud_v2_computers (org_id, recipe, recipe_revision, recipe_updated_by, recipe_updated_at, recipe_source_targets)
+       VALUES ($1, $2, $3, $4, clock_timestamp(), $5)
        ON CONFLICT (org_id) DO UPDATE SET recipe = EXCLUDED.recipe, recipe_revision = EXCLUDED.recipe_revision,
-         recipe_updated_by = EXCLUDED.recipe_updated_by, recipe_updated_at = EXCLUDED.recipe_updated_at`,
-      [organizationId, repositories ? JSON.stringify({ repositories }) : null, revision, userId]);
+         recipe_updated_by = EXCLUDED.recipe_updated_by, recipe_updated_at = EXCLUDED.recipe_updated_at, recipe_source_targets = EXCLUDED.recipe_source_targets`,
+      [organizationId, repositories ? JSON.stringify({ repositories }) : null, revision, userId, sources ? JSON.stringify(sources) : null]);
   }
 
   /** Saves the configured repositories. `revision` is the one the editor saw. */
   async saveRecipe(organizationId: string, userId: string, repositories: readonly CloudV2RepositoryDraft[], revision: number):
     Promise<{ recipe: { repositories: CloudV2RepositoryDraft[] }; recipeRevision: number }> {
     const parsed = CloudV2DraftSchema.parse(repositories);
+    await this.requireAdmin(organizationId, userId);
+    const previous = await withSystemTx(this.pool, tx => this.configuredSources(tx, organizationId));
+    if (previous.revision !== revision) throw recipeChanged();
+    const sources = await this.admitSources(organizationId, userId, parsed, previous);
     return withSystemTx(this.pool, async tx => {
-      await this.lockOrganization(tx, organizationId);
-      const current = Number((await tx.query<{ recipe_revision: string }>(
-        `SELECT recipe_revision::text FROM cloud_v2_computers WHERE org_id = $1 FOR UPDATE`, [organizationId])).rows[0]?.recipe_revision ?? 0);
-      if (current !== revision) throw recipeChanged();
-      await this.writeConfigured(tx, organizationId, userId, parsed, current + 1);
-      return { recipe: { repositories: parsed }, recipeRevision: current + 1 };
+      await this.lockOrganization(tx, organizationId, userId);
+      const current = await this.configuredSources(tx, organizationId);
+      if (current.key !== previous.key) throw recipeChanged();
+      await this.writeConfigured(tx, organizationId, userId, parsed, revision + 1, sources);
+      return { recipe: { repositories: parsed }, recipeRevision: revision + 1 };
     });
   }
 
@@ -194,7 +259,7 @@ export class CloudV2Computers {
   async discardRecipe(organizationId: string, userId: string, revision: number):
     Promise<{ recipe: { repositories: CloudV2RepositoryDraft[] }; recipeRevision: number }> {
     return withSystemTx(this.pool, async tx => {
-      await this.lockOrganization(tx, organizationId);
+      await this.lockOrganization(tx, organizationId, userId);
       const computer = (await tx.query<{ recipe_revision: string; active_build_id: string | null }>(
         `SELECT recipe_revision::text, active_build_id FROM cloud_v2_computers WHERE org_id = $1 FOR UPDATE`, [organizationId])).rows[0];
       const current = Number(computer?.recipe_revision ?? 0);
@@ -210,53 +275,62 @@ export class CloudV2Computers {
   async enqueue(organizationId: string, userId: string, recipe: CloudV2Recipe,
     options: { reason?: CloudV2BuildReason; configure?: boolean; runtimeSha256?: string } = {}): Promise<CloudV2Build> {
     const parsed = CloudV2RecipeSchema.parse(recipe);
-    return withSystemTx(this.pool, tx => this.insertBuild(tx, organizationId, userId, parsed, options));
+    await this.requireAdmin(organizationId, userId);
+    const previous = await withSystemTx(this.pool, tx => this.configuredSources(tx, organizationId));
+    const sources = await this.admitSources(organizationId, userId, parsed.repositories, previous);
+    return withSystemTx(this.pool, tx => this.insertBuild(tx, organizationId, userId, parsed, sources, options, previous.key));
   }
 
-  private async insertBuild(tx: Tx, organizationId: string, userId: string, recipe: CloudV2Recipe,
-    options: { reason?: CloudV2BuildReason; configure?: boolean; runtimeSha256?: string; revision?: number }): Promise<CloudV2Build> {
-    await this.lockOrganization(tx, organizationId);
+  private async insertBuild(tx: Tx, organizationId: string, userId: string, recipe: CloudV2Recipe, sources: readonly CloudSourceTarget[],
+    options: { reason?: CloudV2BuildReason; configure?: boolean; runtimeSha256?: string; revision?: number }, expectedConfiguration?: string): Promise<CloudV2Build> {
+    await this.lockOrganization(tx, organizationId, userId);
     const busy = await tx.query(`SELECT 1 FROM cloud_v2_computer_builds WHERE org_id = $1 AND state IN ('queued','building')`, [organizationId]);
     if (busy.rowCount) throw new HttpError(409, "computer_build_in_progress", "A Cloud Computer build is already running");
-    const computer = (await tx.query<{ snapshot_name: string | null; recipe_revision: string; active_build_id: string | null }>(
-      `SELECT snapshot_name, recipe_revision::text, active_build_id FROM cloud_v2_computers WHERE org_id = $1 FOR UPDATE`, [organizationId])).rows[0];
-    return this.insertLocked(tx, organizationId, userId, recipe, computer, options);
+    const computer = (await tx.query<ComputerConfiguration>(
+      `SELECT snapshot_name,recipe_revision::text,active_build_id,recipe,recipe_source_targets FROM cloud_v2_computers WHERE org_id = $1 FOR UPDATE`, [organizationId])).rows[0];
+    if (expectedConfiguration !== undefined && configurationKey(computer) !== expectedConfiguration) throw recipeChanged();
+    return this.insertLocked(tx, organizationId, userId, recipe, sources, computer, options);
   }
 
-  private async insertLocked(tx: Tx, organizationId: string, userId: string, recipe: CloudV2Recipe,
+  private async insertLocked(tx: Tx, organizationId: string, userId: string, recipe: CloudV2Recipe, sources: readonly CloudSourceTarget[],
     computer: { snapshot_name: string | null; recipe_revision: string } | undefined,
     options: { reason?: CloudV2BuildReason; configure?: boolean; runtimeSha256?: string; revision?: number }): Promise<CloudV2Build> {
     const revision = Number(computer?.recipe_revision ?? 0);
     if (options.revision !== undefined && options.revision !== revision) throw recipeChanged();
     const { rows } = await tx.query<Row>(
-      `INSERT INTO cloud_v2_computer_builds (id, org_id, version, recipe, state, created_by, reason, base_snapshot, runtime_sha256)
-       VALUES ($1, $2, coalesce((SELECT max(version) FROM cloud_v2_computer_builds WHERE org_id = $2), 0) + 1, $3, 'queued', $4, $5, $6, $7)
+      `INSERT INTO cloud_v2_computer_builds (id, org_id, version, recipe, state, created_by, reason, base_snapshot, runtime_sha256, source_targets, source_policy_version)
+       VALUES ($1, $2, coalesce((SELECT max(version) FROM cloud_v2_computer_builds WHERE org_id = $2), 0) + 1, $3, 'queued', $4, $5, $6, $7, $8, 2)
        RETURNING ${COLUMNS}`,
-      [randomUUID(), organizationId, JSON.stringify(recipe), userId, options.reason ?? "manual", computer?.snapshot_name ?? null, options.runtimeSha256 ?? null],
+      [randomUUID(), organizationId, JSON.stringify(recipe), userId, options.reason ?? "manual", computer?.snapshot_name ?? null, options.runtimeSha256 ?? null,
+        JSON.stringify(readComputerSourceTargets(recipe.repositories, sources))],
     );
-    if (options.configure) await this.writeConfigured(tx, organizationId, userId, editableRepositories(recipe), revision + 1);
+    if (options.configure) await this.writeConfigured(tx, organizationId, userId, editableRepositories(recipe), revision + 1, sources);
     return build(rows[0]!);
   }
 
   /** Builds the configured repositories as the editor saw them at `revision`. */
   async buildConfigured(organizationId: string, userId: string, revision: number): Promise<CloudV2Build> {
-    return withSystemTx(this.pool, async tx => {
-      await this.lockOrganization(tx, organizationId);
-      const computer = (await tx.query<{ recipe: { repositories?: unknown } | null; active_build_id: string | null }>(
-        `SELECT recipe, active_build_id FROM cloud_v2_computers WHERE org_id = $1 FOR UPDATE`, [organizationId])).rows[0];
-      const repositories = await this.configured(tx, organizationId, computer?.recipe ?? null, computer?.active_build_id ?? null);
-      if (!repositories.length) throw new HttpError(409, "computer_recipe_empty", "Add a repository to the Cloud Computer first");
-      return this.insertBuild(tx, organizationId, userId, CloudV2RecipeSchema.parse({ repositories }), { revision });
-    });
+    await this.requireAdmin(organizationId, userId);
+    const previous = await withSystemTx(this.pool, tx => this.configuredSources(tx, organizationId));
+    if (previous.revision !== revision) throw recipeChanged();
+    if (!previous.repositories.length) throw new HttpError(409, "computer_recipe_empty", "Add a repository to the Cloud Computer first");
+    const sources = readComputerSourceTargets(previous.repositories, previous.sources);
+    await this.resolveSourceTargets(organizationId, userId, sources);
+    return withSystemTx(this.pool, tx => this.insertBuild(tx, organizationId, userId,
+      CloudV2RecipeSchema.parse({ repositories: previous.repositories }), sources, { revision }, previous.key));
   }
 
   /** Re-activating an older build rebuilds its recipe at the commits it used. */
   async reactivate(organizationId: string, userId: string, buildId: string): Promise<CloudV2Build> {
+    await this.requireAdmin(organizationId, userId);
     const { rows } = await withSystemTx(this.pool, tx => tx.query<Row>(
       `SELECT ${COLUMNS} FROM cloud_v2_computer_builds WHERE id = $1 AND org_id = $2 AND state = 'succeeded'`, [buildId, organizationId]));
     const source = rows[0];
     if (!source) throw new HttpError(404, "not_found", "Cloud Computer build not found");
-    return this.enqueue(organizationId, userId, { ...source.recipe, rebuiltFrom: source.version }, { reason: "reactivate", configure: true });
+    const targets = await this.buildSourceTargets(organizationId, buildId);
+    await this.resolveSourceTargets(organizationId, userId, targets);
+    return withSystemTx(this.pool, tx => this.insertBuild(tx, organizationId, userId,
+      { ...source.recipe, rebuiltFrom: source.version }, targets, { reason: "reactivate", configure: true }));
   }
 
   /** Queues a refresh nobody asked for, of exactly the live build it was
@@ -265,6 +339,13 @@ export class CloudV2Computers {
    * when the organization is busy, gone, or its live build changed. */
   async enqueueAutomatic(organizationId: string, expectedActiveBuildId: string, reason: "runtime" | "refresh", runtimeSha256?: string): Promise<CloudV2Build | null> {
     try {
+      const actor = (await withSystemTx(this.pool, tx => tx.query<{ created_by: string | null }>(
+        `SELECT b.created_by FROM cloud_v2_computers c JOIN cloud_v2_computer_builds b ON b.id=c.active_build_id AND b.org_id=c.org_id
+         WHERE c.org_id=$1 AND c.active_build_id=$2 AND b.state='succeeded'`, [organizationId, expectedActiveBuildId]))).rows[0];
+      if (!actor?.created_by) return null;
+      await this.requireAdmin(organizationId, actor.created_by);
+      const sources = await this.buildSourceTargets(organizationId, expectedActiveBuildId);
+      await this.resolveSourceTargets(organizationId, actor.created_by, sources);
       return await withSystemTx(this.pool, async tx => {
         await this.lockOrganization(tx, organizationId);
         const busy = await tx.query(`SELECT 1 FROM cloud_v2_computer_builds WHERE org_id = $1 AND state IN ('queued','building')`, [organizationId]);
@@ -274,13 +355,14 @@ export class CloudV2Computers {
            JOIN cloud_v2_computer_builds b ON b.id = c.active_build_id AND b.org_id = c.org_id AND b.state = 'succeeded'
            WHERE c.org_id = $1 AND c.active_build_id = $2 AND c.snapshot_name IS NOT NULL
            FOR UPDATE OF c`, [organizationId, expectedActiveBuildId])).rows[0];
-        if (!live?.created_by) return null;
+        if (!live?.created_by || live.created_by !== actor.created_by) return null;
+        await this.requireAdminInTransaction(tx, organizationId, live.created_by);
         // A runtime refresh keeps the live commits; a daily one moves to the refs' tips.
         const recipe = CloudV2RecipeSchema.parse(reason === "runtime" ? live.recipe : unpinned(live.recipe));
-        return this.insertLocked(tx, organizationId, live.created_by, recipe, live, { reason, ...(runtimeSha256 ? { runtimeSha256 } : {}) });
+        return this.insertLocked(tx, organizationId, live.created_by, recipe, sources, live, { reason, ...(runtimeSha256 ? { runtimeSha256 } : {}) });
       });
     } catch (error) {
-      if (error instanceof HttpError && error.status === 404) return null;
+      if (error instanceof HttpError && ([403, 404].includes(error.status) || error.code === "cloud_source_review_required")) return null;
       throw error;
     }
   }
@@ -300,7 +382,7 @@ export class CloudV2Computers {
   async refreshCandidates(runtimeSha256: string, limit = 25): Promise<CloudV2RefreshCandidate[]> {
     const { rows } = await withSystemTx(this.pool, tx => tx.query<{ org_id: string; active_build_id: string; created_by: string; recipe: CloudV2Recipe; runtime_stale: boolean; refresh_due: boolean }>(
       `SELECT * FROM (SELECT c.org_id, c.active_build_id, b.created_by, b.recipe, b.finished_at, c.refresh_next_at,
-         (b.runtime_sha256 IS DISTINCT FROM $1
+         ((b.runtime_sha256 IS DISTINCT FROM $1 OR b.source_policy_version <> 2)
            AND NOT EXISTS (SELECT 1 FROM cloud_v2_computer_builds f WHERE f.org_id = c.org_id AND f.reason = 'runtime'
              AND f.runtime_sha256 = $1 AND f.state IN ('failed','cancelled') AND f.created_at > clock_timestamp() - interval '6 hours')
            AND (SELECT count(*) FROM cloud_v2_computer_builds f WHERE f.org_id = c.org_id AND f.reason = 'runtime'
@@ -315,7 +397,7 @@ export class CloudV2Computers {
        JOIN cloud_v2_computer_builds b ON b.id = c.active_build_id AND b.org_id = c.org_id AND b.state = 'succeeded'
        JOIN organizations o ON o.id = c.org_id AND o.deleted_at IS NULL AND o.lifecycle_status = 'active'
          AND NOT o.is_personal AND o.cloud_workspaces_allowed
-       WHERE c.snapshot_name IS NOT NULL AND b.created_by IS NOT NULL
+       WHERE c.snapshot_name IS NOT NULL AND b.created_by IS NOT NULL AND b.source_targets IS NOT NULL AND b.source_policy_version=2
          AND NOT EXISTS (SELECT 1 FROM cloud_v2_computer_builds q WHERE q.org_id = c.org_id AND q.state IN ('queued','building'))
        ) due WHERE runtime_stale OR refresh_due
        ORDER BY runtime_stale DESC, coalesce(refresh_next_at, finished_at) NULLS FIRST, org_id LIMIT $2`, [runtimeSha256, limit]));
@@ -348,13 +430,52 @@ export class CloudV2Computers {
         `SELECT recipe, active_build_id FROM cloud_v2_computers WHERE org_id = $1 AND snapshot_name = $2 FOR UPDATE`, [organizationId, snapshotName])).rows[0];
       if (computer && computer.recipe === null && computer.active_build_id) {
         const live = await this.configured(tx, organizationId, null, computer.active_build_id);
-        await tx.query(`UPDATE cloud_v2_computers SET recipe = $2 WHERE org_id = $1`, [organizationId, JSON.stringify({ repositories: live })]);
+        await tx.query(`UPDATE cloud_v2_computers SET recipe = $2, recipe_source_targets=(
+          SELECT CASE WHEN source_policy_version=2 THEN source_targets END FROM cloud_v2_computer_builds WHERE org_id=$1 AND id=$3)
+          WHERE org_id = $1`, [organizationId, JSON.stringify({ repositories: live }), computer.active_build_id]);
       }
       await tx.query(`UPDATE cloud_v2_computers SET active_build_id = NULL, snapshot_name = NULL, updated_at = clock_timestamp()
         WHERE org_id = $1 AND snapshot_name = $2`, [organizationId, snapshotName]);
       await tx.query(`UPDATE cloud_v2_computer_builds SET snapshot_id = NULL, snapshot_deleted_at = clock_timestamp()
         WHERE org_id = $1 AND snapshot_id = $2`, [organizationId, snapshotName]);
     });
+  }
+
+  private async sourceBuild(organizationId: string, buildId: string): Promise<{ recipe: CloudV2Recipe; sources: CloudSourceTarget[] }> {
+    const row = (await withSystemTx(this.pool, tx => tx.query<{ source_policy_version: number; recipe: unknown; source_targets: unknown }>(
+      `SELECT source_policy_version,recipe,source_targets FROM cloud_v2_computer_builds WHERE org_id=$1 AND id=$2`, [organizationId, buildId]))).rows[0];
+    if (!row) throw new HttpError(404, "not_found", "Cloud Computer build not found");
+    const recipe = CloudV2RecipeSchema.safeParse(row.recipe);
+    if (!recipe.success || row.source_policy_version !== 2) throw computerSourceReviewRequired();
+    return { recipe: recipe.data, sources: readComputerSourceTargets(recipe.data.repositories, row.source_targets) };
+  }
+
+  async buildSourceTargets(organizationId: string, buildId: string): Promise<CloudSourceTarget[]> {
+    return (await this.sourceBuild(organizationId, buildId)).sources;
+  }
+
+  /** Internal creation/hydration guard. Paths select the recorded recipe, then
+   * the immutable ID selects the remote; a reused name cannot replace it. */
+  async resolveBuildRepository(organizationId: string, userId: string, buildId: string, repository: string): Promise<CloudSourceTarget> {
+    const sources = await this.buildSourceTargets(organizationId, buildId);
+    const target = sources.find(source => source.repository.toLowerCase() === repository.toLowerCase());
+    if (!target) throw computerSourceReviewRequired();
+    return this.resolveSource(organizationId, userId, target);
+  }
+
+  /** Integration seam for a workspace ledger that already knows the ID. The
+   * pinned commit, branch and setup always come from that ID's original entry. */
+  async recipeForRepositoryId(organizationId: string, buildId: string, repositoryId: string): Promise<RecipeEntry> {
+    const { recipe, sources } = await this.sourceBuild(organizationId, buildId);
+    const index = sources.findIndex(source => source.repositoryId === repositoryId);
+    if (index < 0) throw computerSourceReviewRequired();
+    return recipe.repositories[index]!;
+  }
+
+  /** Setup output can contain any admitted source, even on partial failure.
+   * Legacy logs remain stored, but names alone cannot authorize their release. */
+  async logRepositories(organizationId: string, buildId: string): Promise<CloudSourceTarget[]> {
+    return this.buildSourceTargets(organizationId, buildId);
   }
 
   async log(organizationId: string, buildId: string): Promise<string> {
@@ -365,12 +486,15 @@ export class CloudV2Computers {
   }
 
   async claim(): Promise<CloudV2Build | null> {
-    const { rows } = await withSystemTx(this.pool, tx => tx.query<Row>(
+    const { rows } = await withSystemTx(this.pool, async tx => {
+      await this.cancelUnauthorizedBuilds(tx);
+      return tx.query<Row>(
       `UPDATE cloud_v2_computer_builds SET state = 'building', started_at = clock_timestamp(), heartbeat_at = clock_timestamp()
        WHERE id = (SELECT b.id FROM cloud_v2_computer_builds b JOIN organizations o ON o.id=b.org_id
          WHERE b.state='queued' AND b.cleanup_requested_at IS NULL AND o.deleted_at IS NULL
          ORDER BY b.created_at LIMIT 1 FOR UPDATE OF b SKIP LOCKED)
-       RETURNING ${COLUMNS}`));
+       RETURNING ${COLUMNS}`);
+    });
     return rows[0] ? build(rows[0]) : null;
   }
 
@@ -411,9 +535,13 @@ export class CloudV2Computers {
   /** Makes the build live and returns the snapshot it replaced. */
   async activate(buildId: string, snapshotName: string): Promise<{ previousSnapshot: string | null }> {
     return withSystemTx(this.pool, async tx => {
+      const actor = (await tx.query<{ org_id: string; created_by: string | null }>(
+        "SELECT org_id,created_by FROM cloud_v2_computer_builds WHERE id=$1", [buildId])).rows[0];
+      if (!actor?.created_by) throw new HttpError(403, "forbidden", "Build creator is unavailable");
+      await this.lockOrganization(tx, actor.org_id, actor.created_by);
       const { rows } = await tx.query<{ org_id: string }>(
-        `UPDATE cloud_v2_computer_builds SET state = 'succeeded', snapshot_id = $2, finished_at = clock_timestamp()
-         WHERE id = $1 AND state = 'building' AND cleanup_requested_at IS NULL
+        `UPDATE cloud_v2_computer_builds SET state = 'succeeded', snapshot_id = $2, source_policy_version=2, finished_at = clock_timestamp()
+         WHERE id = $1 AND state = 'building' AND cleanup_requested_at IS NULL AND source_targets IS NOT NULL AND source_policy_version=2
            AND EXISTS (SELECT 1 FROM organizations o WHERE o.id=org_id AND o.deleted_at IS NULL)
          RETURNING org_id`, [buildId, snapshotName]);
       if (!rows[0]) throw new Error("build is not running");
@@ -468,10 +596,25 @@ export class CloudV2Computers {
   }
 
   async running(id: string): Promise<boolean> {
-    const { rowCount } = await withSystemTx(this.pool, tx => tx.query(`SELECT 1 FROM cloud_v2_computer_builds b
+    const { rowCount } = await withSystemTx(this.pool, async tx => {
+      await this.cancelUnauthorizedBuilds(tx, id);
+      return tx.query(`SELECT 1 FROM cloud_v2_computer_builds b
       JOIN organizations o ON o.id=b.org_id WHERE b.id=$1 AND b.state='building'
-      AND b.cleanup_requested_at IS NULL AND o.deleted_at IS NULL`, [id]));
+      AND b.cleanup_requested_at IS NULL AND o.deleted_at IS NULL`, [id]);
+    });
     return !!rowCount;
+  }
+
+  private async cancelUnauthorizedBuilds(tx: Tx, id?: string): Promise<void> {
+    await tx.query(`UPDATE cloud_v2_computer_builds b SET state='cancelled',
+      error_code='computer_admin_access_lost',finished_at=clock_timestamp()
+      WHERE ($1::uuid IS NULL OR b.id=$1) AND b.state IN ('queued','building') AND NOT EXISTS (
+        SELECT 1 FROM organization_members m
+        JOIN users u ON u.id=m.user_id AND u.auth_status='active' AND u.deleted_at IS NULL
+        JOIN organizations o ON o.id=m.org_id AND NOT o.is_personal AND o.cloud_workspaces_allowed
+          AND o.deleted_at IS NULL AND o.lifecycle_status='active'
+        WHERE m.org_id=b.org_id AND m.user_id=b.created_by AND m.role IN ('owner','admin')
+      )`, [id ?? null]);
   }
 
   /** Persist intent BEFORE a provider call. After a lost connection, cleanup
@@ -524,14 +667,14 @@ function asZeros(lines: readonly string[]): string {
  * dependencies stay; a missing one is cloned. Prints the verified branch and
  * the commit. The token stays in a per-command header; no saved remote URL
  * carries it. */
-function checkoutScript(entry: RecipeEntry, dir: string, auth: string): string[] {
+function checkoutScript(entry: RecipeEntry, dir: string, canonicalRepository = entry.repository): string[] {
   const q = shellQuote, d = q(dir);
-  const header = q(`http.extraHeader=Authorization: Basic ${auth}`);
+  const header = "--config-env=http.extraHeader=ZEROS_GITHUB_AUTH_HEADER";
   // A pinned commit (activating an earlier build) is checked out directly: its
   // branch or tag may have moved or been deleted since. Fetch it by id when
   // the branches no longer reach it.
   const pinned = entry.commit ? [
-    `if ! git -C ${d} cat-file -e ${q(`${entry.commit}^{commit}`)} 2>/dev/null; then git -C ${d} -c ${header} fetch --quiet origin ${q(entry.commit)} || true; fi`,
+    `if ! git -C ${d} cat-file -e ${q(`${entry.commit}^{commit}`)} 2>/dev/null; then git -C ${d} ${header} fetch --quiet origin ${q(entry.commit)} || true; fi`,
   ] : [];
   const target = entry.commit ? [] : entry.ref ? [
     `  if git -C ${d} rev-parse --verify --quiet ${q(`refs/remotes/origin/${entry.ref}^{commit}`)} >/dev/null; then`,
@@ -547,14 +690,16 @@ function checkoutScript(entry: RecipeEntry, dir: string, auth: string): string[]
   ];
   return [
     "set -e",
+    "IFS= read -r ZEROS_GITHUB_AUTH_HEADER",
+    "export ZEROS_GITHUB_AUTH_HEADER",
     `if [ -d ${q(`${dir}/.git`)} ]; then`,
     // Always prune, so a deleted branch is never recorded as a workspace base.
-    `  git -C ${d} -c ${header} fetch --quiet --prune --force --tags origin`,
-    `  git -C ${d} -c ${header} remote set-head origin --auto >/dev/null 2>&1 || true`,
+    `  git -C ${d} ${header} fetch --quiet --prune --force --tags origin`,
+    `  git -C ${d} ${header} remote set-head origin --auto >/dev/null 2>&1 || true`,
     ...target,
     "else",
     `  mkdir -p ${q(dir.slice(0, dir.lastIndexOf("/")))}`,
-    `  git -c ${header} clone ${entry.ref && !entry.commit ? `--branch ${q(entry.ref)} ` : ""}${q(`https://github.com/${entry.repository}.git`)} ${d}`,
+    `  git ${header} clone ${entry.ref && !entry.commit ? `--branch ${q(entry.ref)} ` : ""}${q(`https://github.com/${canonicalRepository}.git`)} ${d}`,
     "fi",
     ...pinned,
     // A pinned build's branch hint: its ref while that branch still exists,
@@ -598,10 +743,10 @@ export class CloudV2ComputerBuilder {
     /** The worker runtime cached into every build. */
     runtime: CloudV2Runtime;
     /** A short-lived GitHub token able to clone one repository. */
-    cloneToken(organizationId: string, userId: string, repository: string): Promise<string>;
+    cloneToken(organizationId: string, userId: string, target: CloudSourceTarget): Promise<string>;
     /** The commit at the tip of a remote branch, or null when it cannot be read
      * now. Without it every daily refresh is assumed to have new commits. */
-    remoteHead?(organizationId: string, userId: string, repository: string, branch: string): Promise<string | null>;
+    remoteHead?(organizationId: string, userId: string, target: CloudSourceTarget, branch: string): Promise<string | null>;
     /** Candidates visited per refresh scan. */
     refreshPage?: number;
     now?: () => number;
@@ -664,12 +809,17 @@ export class CloudV2ComputerBuilder {
   private async repositoriesMoved(candidate: CloudV2RefreshCandidate): Promise<boolean | null> {
     const { remoteHead } = this.deps;
     if (!remoteHead) return true;
-    for (const entry of candidate.recipe.repositories) {
+    let targets: CloudSourceTarget[];
+    try {
+      targets = await this.deps.computers.resolveSourceTargets(candidate.organizationId, candidate.createdBy,
+        await this.deps.computers.buildSourceTargets(candidate.organizationId, candidate.activeBuildId));
+    } catch { return null; }
+    for (const [index, entry] of candidate.recipe.repositories.entries()) {
       if (!entry.commit || (!entry.ref && !entry.branch)) return true;
       // A tag does not move; an explicit or default branch does.
       const branch = entry.ref ? (entry.ref === entry.branch ? entry.ref : null) : entry.branch!;
       if (!branch) continue;
-      const head = await remoteHead(candidate.organizationId, candidate.createdBy, entry.repository, branch).catch(() => null);
+      const head = await remoteHead(candidate.organizationId, candidate.createdBy, targets[index]!, branch).catch(() => null);
       if (head === null) return null;
       if (head !== entry.commit) return true;
     }
@@ -689,7 +839,7 @@ export class CloudV2ComputerBuilder {
   /** The same key and body replay an uncertain create. */
   private builderInput(job: { id: string; baseSnapshot: string | null }) {
     return {
-      key: job.id, ...(job.baseSnapshot ? { from: job.baseSnapshot } : {}),
+      key: job.id,
       name: cloudV2SandboxName(this.deps.channel, "build", job.id, this.deps.localOwner), env: {},
     };
   }
@@ -734,21 +884,14 @@ export class CloudV2ComputerBuilder {
 
   private async run(job: CloudV2Build, assertHeld: () => void): Promise<void> {
     const { compute, computers } = this.deps;
+    // Old queued work cannot become a new trusted build during a rolling deploy.
+    await computers.buildSourceTargets(job.organizationId, job.id);
     const log = (text: string) => computers.append(job.id, text);
     await log(`[zeros] building Cloud Computer v${job.version}${REASON_LABEL[job.reason]}\n`);
-    await log(job.baseSnapshot ? "[zeros] starting from the live computer\n" : "[zeros] starting from Boat's stock image\n");
+    await log("[zeros] starting from Boat's stock image\n");
     assertHeld();
     if (!await computers.prepareResource(job.id)) return;
-    let sandboxId: string;
-    try {
-      ({ sandboxId } = await compute.create(this.builderInput(job)));
-    } catch (error) {
-      if (!job.baseSnapshot || !notFound(error)) throw error;
-      // The live snapshot is gone at Boat. Workspaces cannot start from it
-      // either; forget it so the next build starts clean.
-      await computers.baseMissing(job.id, job.organizationId, job.baseSnapshot);
-      throw Object.assign(new Error("base snapshot missing"), { code: "computer_base_missing" });
-    }
+    const { sandboxId } = await compute.create(this.builderInput(job));
     assertHeld();
     await computers.update(job.id, { builderSandboxId: sandboxId });
     // The named snapshot is an independent copy of the disk, so the builder
@@ -770,23 +913,22 @@ export class CloudV2ComputerBuilder {
     if (installed.exitCode !== 0 || installed.timedOut) throw Object.assign(new Error("runtime install failed"), { code: "worker_runtime_install_failed" });
     await computers.setRuntime(job.id, sha256);
     await log(`[zeros] runtime ${sha256.slice(0, 12)} installed\n`);
-    let pinned: CloudV2Recipe["repositories"];
-    if (job.reason === "runtime" && job.baseSnapshot) {
-      // The live computer already has these commits and their setup.
-      pinned = job.recipe.repositories;
-      await log("[zeros] repositories unchanged\n");
-    } else pinned = await this.installRepositories(job, sandboxId, assertHeld);
-    if (!pinned.length) return;
-    assertHeld();
-    if (!await computers.running(job.id)) return;
-    await computers.update(job.id, { recipe: { ...job.recipe, repositories: pinned } });
-    // Boat captures a running sandbox's disk; flush it first.
+    // Capture before clone, credentials or setup. Cleanup after clone is not
+    // a confidentiality boundary: scripts can copy source anywhere on disk.
     await compute.exec(sandboxId, "sync", 120);
     const name = cloudV2SnapshotName(this.deps.channel, job.organizationId, job.version, this.deps.localOwner);
     assertHeld();
     if (!await computers.prepareResource(job.id, name)) return;
     await compute.saveSnapshot(sandboxId, name);
     assertHeld(); await computers.snapshotSettled(job.id);
+    const pinned = await this.installRepositories({ ...job, baseSnapshot: null }, sandboxId, assertHeld);
+    if (!pinned.length) return;
+    assertHeld();
+    if (!await computers.running(job.id)) return;
+    await computers.resolveSourceTargets(job.organizationId, job.createdBy!, await computers.buildSourceTargets(job.organizationId, job.id));
+    assertHeld();
+    await computers.update(job.id, { recipe: { ...job.recipe, repositories: pinned } });
+    assertHeld();
     await computers.activate(job.id, name);
     await log(`[zeros] Cloud Computer v${job.version} is live as ${name}\n`);
   }
@@ -795,37 +937,33 @@ export class CloudV2ComputerBuilder {
   private async installRepositories(job: CloudV2Build, sandboxId: string, assertHeld: () => void): Promise<CloudV2Recipe["repositories"]> {
     const { compute, computers } = this.deps;
     const log = (text: string) => computers.append(job.id, text);
-    if (job.baseSnapshot) {
-      const kept = new Set(job.recipe.repositories.map(entry => entry.repository.toLowerCase()));
-      // Only names that are safe directory parts; never a path that leaves /home/user.
-      const removed = ((await computers.baseRecipe(job.id))?.repositories ?? [])
-        .map(entry => entry.repository).filter(name => !kept.has(name.toLowerCase()) && repository.safeParse(name).success);
-      if (removed.length) {
-        const lines = removed.flatMap(name => {
-          const dir = `/home/user/${name}`;
-          return [`rm -rf -- ${shellQuote(dir)}`, `rmdir -- ${shellQuote(dir.slice(0, dir.lastIndexOf("/")))} 2>/dev/null || true`];
-        });
-        const removal = await compute.exec(sandboxId, asZeros(["set -e", ...lines]), 300);
-        if (removal.exitCode !== 0 || removal.timedOut) throw Object.assign(new Error("removal failed"), { code: "computer_remove_failed" });
-        for (const name of removed) await log(`[zeros] removed ${name}\n`);
-      }
-    }
     const pinned: CloudV2Recipe["repositories"] = [];
-    for (const entry of job.recipe.repositories) {
+    const sources = await computers.buildSourceTargets(job.organizationId, job.id);
+    for (const [index, entry] of job.recipe.repositories.entries()) {
       assertHeld();
       if (!await computers.running(job.id)) return [];
       if (!job.createdBy) throw Object.assign(new Error("no creator"), { code: "computer_build_creator_missing" });
-      const token = await this.deps.cloneToken(job.organizationId, job.createdBy, entry.repository);
+      const [target] = await computers.resolveSourceTargets(job.organizationId, job.createdBy, [sources[index]!]);
+      const current = async () => {
+        const [latest] = await computers.resolveSourceTargets(job.organizationId, job.createdBy!, [target!]);
+        if (latest!.repository.toLowerCase() !== target!.repository.toLowerCase()) throw computerSourceReviewRequired();
+      };
+      const token = await this.deps.cloneToken(job.organizationId, job.createdBy, target!);
+      await current();
+      if (!await computers.running(job.id)) return [];
       const dir = `/home/user/${entry.repository}`;
       const auth = Buffer.from(`x-access-token:${token}`).toString("base64");
-      const clone = await compute.execLong(sandboxId, asZeros(checkoutScript(entry, dir, auth)), 900);
+      assertHeld();
+      const clone = await compute.execLong(sandboxId, asZeros(checkoutScript(entry, dir, target!.repository)), 900, `Authorization: Basic ${auth}\n`);
       await log(`[zeros] clone ${entry.repository}: exit ${clone.exitCode}\n`);
       if (clone.exitCode !== 0) throw Object.assign(new Error("clone failed"), { code: "computer_clone_failed" });
       const commit = clone.stdout.trim().split("\n").pop() ?? "";
       const branch = /(?:^|\n)zeros-build-branch=([^\r\n]*)/.exec(clone.stdout)?.[1];
+      await current();
       assertHeld();
       if (!await computers.running(job.id)) return [];
       if (entry.setup) {
+        assertHeld();
         const setup = await compute.execLong(sandboxId, `${asZeros([`cd ${shellQuote(dir)}`, entry.setup])} 2>&1`, 3600);
         await log(setup.stdout.slice(-64 * 1024) + `\n[zeros] setup ${entry.repository}: exit ${setup.exitCode}\n`);
         if (setup.exitCode !== 0) throw Object.assign(new Error("setup failed"), { code: "computer_setup_failed" });

@@ -21,20 +21,31 @@ const GITHUB_CREDENTIAL_RE =
   /\b(?:ghs_\d+_[A-Za-z0-9._-]{40,}|ghs_[A-Za-z0-9_-]{4,}(?:\.[A-Za-z0-9_-]{8,})+|(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{16,})\b/g;
 const GITHUB_REFRESH_BINDING_RE =
   /\bzghrb_v1\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b/g;
+const AUTH0_DESKTOP_CAPABILITY_RE = /\bz0d_[A-Za-z0-9_-]{43}(?![A-Za-z0-9_-])/g;
 const CLOUD_CAPABILITY_RE = /\b(?:zws|zwh|zwb|zwp|zsh|zgw|zgp|zgn|zwa)_[A-Za-z0-9_-]{43}(?![A-Za-z0-9_-])/g;
 const CLOUD_PROTOCOL_CREDENTIAL_RE = /\bzeros-cloud-token\.[A-Za-z0-9_-]{63}(?![A-Za-z0-9_-])/g;
+
+/** Tokenize once before testing a candidate. An unanchored email expression
+ * retries every suffix of a long malformed local part, producing quadratic work. */
+function redactEmails(input: string): string {
+  return input.replace(/[A-Za-z0-9._%+-]+(?:@[A-Za-z0-9.-]+)?/g, (candidate) => {
+    if (!candidate.includes("@")) return candidate;
+    return candidate.replace(/^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b/, "[email]");
+  });
+}
 
 /** Redact absolute filesystem paths and obvious secrets from a free-form
  *  string. Conservative by design — when in doubt, redact. The output is safe
  *  to send as analytics metadata. */
 export function redactSensitive(input: string): string {
   let s = input;
+  s = s.replace(AUTH0_DESKTOP_CAPABILITY_RE, "[redacted]");
   s = s.replace(GITHUB_CREDENTIAL_RE, "[redacted]");
   s = s.replace(GITHUB_REFRESH_BINDING_RE, "[redacted]");
   // Email addresses → [email]. Analytics is anonymous (we never identify()), so
   // an email surfacing in an error message (auth faults, "user x@y not found",
   // a path under a mail dir) would be PII. Redact before the path/token rules.
-  s = s.replace(/\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b/g, "[email]");
+  s = redactEmails(s);
   // POSIX home dirs → ~  (/Users/alice/…, /home/alice/…) — strips the username.
   s = s.replace(/\/(?:Users|home)\/[^/\s:]+/g, "~");
   // Windows user dirs → ~
@@ -58,13 +69,14 @@ export function redactSensitive(input: string): string {
  *  user Views is exactly what is shared. */
 export function redactLogSecrets(input: string): string {
   let s = input;
+  s = s.replace(AUTH0_DESKTOP_CAPABILITY_RE, "[redacted]");
   // Cloud service headers and WebSocket subprotocols do not necessarily use
   // an Authorization or JSON token field. Scrub their explicit wire shapes.
   s = s.replace(CLOUD_CAPABILITY_RE, "[redacted]");
   s = s.replace(CLOUD_PROTOCOL_CREDENTIAL_RE, "[redacted]");
   // Emails → [email] (same rationale as redactSensitive — logs are shared
   // with support/issue trackers; the feedback form has its own email field).
-  s = s.replace(/\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b/g, "[email]");
+  s = redactEmails(s);
   // Secret-bearing JSON fields — replace the VALUE only, keeping the JSONL
   // line parseable: "token":"abc" → "token":"[redacted]". The store writes
   // every record with JSON.stringify, so a secret logged as an object field

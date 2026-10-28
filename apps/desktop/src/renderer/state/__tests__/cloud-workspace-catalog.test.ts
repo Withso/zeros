@@ -4,6 +4,10 @@ import type { CloudWorkspaceDocument } from "../../platform/cloud-workspaces";
 import { resetSidebarListPreferencesForTests, setSidebarRepositoryIds, sidebarRepositoryFilterOwner, sidebarRepositoryIds } from "../sidebar-list-preferences";
 import { changedSidebarWorkspaceFolders } from "../../shell/sidebar-workspace-activity";
 import { peekWorkspacesFor, setWorkspaceRowsForTesting } from "../use-projects";
+import { cloudGithubPrScope } from "../../platform/cloud-github-pr-scope";
+import { cloudGithubPrCatalogContext } from "../../platform/cloud-github-pr-capability";
+import { clearCloudGithubPr } from "../../platform/cloud-github-pr";
+import { githubReviewCache, githubReviewKey } from "../../features/code-review/github-review-cache";
 const api = vi.hoisted(() => ({ list: vi.fn(), read: vi.fn(), lifecycle: vi.fn(), forget: vi.fn(), projects: vi.fn(() => [] as unknown[]), rollout: false, complete: true }));
 vi.mock("../../platform/cloud-workspace-access", async importOriginal => ({
   ...await importOriginal<typeof import("../../platform/cloud-workspace-access")>(), forgetCloudWorkspacePortForwarding:api.forget,
@@ -77,6 +81,56 @@ function doc(version: number, status = "ready"): CloudWorkspaceDocument {
     },
   };
 }
+
+it.each(["capability", "branch", "repository"])("retires protected PR presentation when catalog %s changes", change => {
+  const initial = doc(1);
+  initial.capabilities.githubPullRequests = 1;
+  initial.github = { repositoryId: "42", branch: "feature", baseBranch: "main", headSha: "a".repeat(40), prNumber: 7, prState: "ready", prUrl: "https://github.com/example/fixture/pull/7" };
+  acceptCloudWorkspaceDocument(initial);
+  const key = `cloud://${target.organizationId}/${target.workspaceId}`;
+  const reviewKey = githubReviewKey(key, 7), scope = cloudGithubPrScope(key);
+  githubReviewCache.setData(reviewKey, { headSha: "a".repeat(40), baseSha: "b".repeat(40), threads: [], threadsTruncated: false, annotations: [], annotationsTruncated: false, annotationError: null });
+  const next = { ...initial, version: 2, capabilities: { ...initial.capabilities }, github: { ...initial.github } };
+  if (change === "capability") delete next.capabilities.githubPullRequests;
+  else if (change === "branch") next.github.branch = "another-branch";
+  else next.github.repositoryId = "43";
+  acceptCloudWorkspaceDocument(next);
+  expect(cloudGithubPrScope(key)).not.toBe(scope);
+  expect(githubReviewCache.peekSnapshot(reviewKey).data).toBeUndefined();
+});
+
+it("retains unchanged PR context but retires it across a branch round trip", () => {
+  const initial = doc(1);
+  initial.capabilities.githubPullRequests = 1;
+  initial.github = { repositoryId: "42", branch: "feature", baseBranch: "main", headSha: "a".repeat(40), prNumber: 7, prState: "ready", prUrl: "https://github.com/example/fixture/pull/7" };
+  acceptCloudWorkspaceDocument(initial);
+  const context = cloudGithubPrCatalogContext(target);
+  const scope = cloudGithubPrScope(`cloud://${target.organizationId}/${target.workspaceId}`);
+  acceptCloudWorkspaceDocument({ ...initial, version: 2 });
+  expect(cloudGithubPrCatalogContext(target)).toBe(context);
+  expect(cloudGithubPrScope(`cloud://${target.organizationId}/${target.workspaceId}`)).toBe(scope);
+  acceptCloudWorkspaceDocument({ ...initial, version: 3, github: { ...initial.github, branch: "another-branch" } });
+  acceptCloudWorkspaceDocument({ ...initial, version: 4 });
+  expect(cloudGithubPrCatalogContext(target)).not.toBe(context);
+});
+
+it("retires an organization's review caches even after its transport snapshot was evicted", () => {
+  const initial = doc(1);
+  initial.capabilities.githubPullRequests = 1;
+  const other = { ...initial, organizationId: "33333333-3333-4333-8333-333333333333" };
+  acceptCloudWorkspaceDocument(initial);
+  acceptCloudWorkspaceDocument(other);
+  const key = githubReviewKey(`cloud://${initial.organizationId}/${initial.id}`, 7);
+  const otherKey = githubReviewKey(`cloud://${other.organizationId}/${other.id}`, 7);
+  const value = { headSha: "a".repeat(40), baseSha: "b".repeat(40), threads: [], threadsTruncated: false, annotations: [], annotationsTruncated: false, annotationError: null };
+  // Presentation caches have a separate lifetime from the bounded transport
+  // snapshot map. A connection change must retire all of this owner's data.
+  githubReviewCache.setData(key, value);
+  githubReviewCache.setData(otherKey, value);
+  clearCloudGithubPr(initial.organizationId);
+  expect(githubReviewCache.peekSnapshot(key).data).toBeUndefined();
+  expect(githubReviewCache.peekSnapshot(otherKey).data).toBe(value);
+});
 
 it("prunes a sidebar repository filter only when its last cloud workspace is removed", () => {
   const second = { ...doc(1), id: "33333333-3333-4333-8333-333333333333" };

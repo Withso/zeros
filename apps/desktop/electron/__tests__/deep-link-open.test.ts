@@ -38,6 +38,15 @@ beforeEach(() => {
 });
 
 describe("zeros://open", () => {
+  it("escapes decoded control characters in failure logs", async () => {
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      isPlausibleProject.mockReturnValue(false);
+      await handleUrl("zeros://open?path=" + encodeURIComponent("/tmp/a\nFORGED\u001b[31m"));
+      const logged = String(error.mock.calls[0]?.[0]);
+      for (const control of ["\r", "\n", "\u001b"]) expect(logged).not.toContain(control);
+    } finally { error.mockRestore(); }
+  });
   it("re-roots the engine and announces the root for a real project", async () => {
     await handleUrl("zeros://open?path=/Users/me/proj");
     expect(spawnEngine).toHaveBeenCalledWith("/Users/me/proj");

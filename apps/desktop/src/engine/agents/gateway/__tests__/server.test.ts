@@ -94,9 +94,9 @@ async function makeFakeBackend(toolNames: string[]): Promise<FakeBackend> {
   };
 }
 
-async function connectAgentClient(gatewayUrl: string): Promise<Client> {
+async function connectAgentClient(gateway: McpGateway): Promise<Client> {
   const client = new Client({ name: "test-agent", version: "1.0.0" });
-  await client.connect(new StreamableHTTPClientTransport(new URL(gatewayUrl)));
+  await client.connect(new StreamableHTTPClientTransport(new URL(gateway.url), { requestInit: { headers: { Authorization: gateway.authorization } } }));
   return client;
 }
 
@@ -106,6 +106,16 @@ describe("McpGateway (networking)", () => {
   const cleanups: (() => Promise<void>)[] = [];
   afterEach(async () => {
     for (const c of cleanups.splice(0).reverse()) await c().catch(() => {});
+  });
+
+  it("requires its own capability for every request, including session resumption", async () => {
+    const gateway = new McpGateway({ port: 0, callbackPort: 0 });
+    cleanups.push(() => gateway.stop());
+    await gateway.start([]);
+    for (const authorization of [undefined, "Bearer wrong"]) {
+      const response = await fetch(gateway.url, { method: "POST", headers: { "content-type": "application/json", "mcp-session-id": "foreign-session", ...(authorization ? { authorization } : {}) }, body: '{}' });
+      expect(response.status).toBe(401);
+    }
   });
 
   it("binds, connects a header backend, and fronts its namespaced tools to an agent (with the brokered header)", async () => {
@@ -138,7 +148,7 @@ describe("McpGateway (networking)", () => {
     // the gateway sent the brokered header to the backend (never the agent)
     expect(backend.authHeaders.some((h) => h === "Bearer test-123")).toBe(true);
 
-    const agent = await connectAgentClient(gw.url);
+    const agent = await connectAgentClient(gw);
     cleanups.push(() => agent.close());
     const { tools } = await agent.listTools();
     expect(tools.map((t) => t.name).sort()).toEqual(["fake__fetch", "fake__search"]); // namespaced
@@ -172,11 +182,11 @@ describe("McpGateway (networking)", () => {
     );
     expect(badOrigin.status).toBe(403);
 
-    // A normal loopback request (what an agent sends) is NOT blocked by the guard.
+    // A capability-bearing loopback request is admitted.
     const good = await rawPost(
       port,
       "/mcp",
-      { Host: `127.0.0.1:${port}`, "content-type": "application/json", accept: "application/json, text/event-stream" },
+      { Host: `127.0.0.1:${port}`, Authorization: gw.authorization, "content-type": "application/json", accept: "application/json, text/event-stream" },
       body,
     );
     expect(good.status).not.toBe(403);
@@ -196,7 +206,7 @@ describe("McpGateway (networking)", () => {
     expect(status.toolCount).toBe(2); // a + c (b filtered)
     expect(status.tools?.sort()).toEqual(["a", "b", "c"]); // full list still reported for the UI
 
-    const agent = await connectAgentClient(gw.url);
+    const agent = await connectAgentClient(gw);
     cleanups.push(() => agent.close());
     const { tools } = await agent.listTools();
     expect(tools.map((t) => t.name).sort()).toEqual(["be__a", "be__c"]); // b not exposed
@@ -219,7 +229,7 @@ describe("McpGateway (networking)", () => {
     expect(statuses.find((s) => s.name === "good")?.state).toBe("connected");
     expect(statuses.find((s) => s.name === "bad")?.state).toBe("error");
 
-    const agent = await connectAgentClient(gw.url);
+    const agent = await connectAgentClient(gw);
     cleanups.push(() => agent.close());
     const { tools } = await agent.listTools();
     expect(tools.map((t) => t.name)).toEqual(["good__ok"]); // only the healthy backend's tool
@@ -238,7 +248,7 @@ describe("McpGateway (networking)", () => {
     const m = gw.url.match(/127\.0\.0\.1:(\d+)\/mcp/);
     expect(m).toBeTruthy();
     expect(Number(m![1])).toBeGreaterThan(0); // a real assigned port, not 0
-    const agent = await connectAgentClient(gw.url);
+    const agent = await connectAgentClient(gw);
     cleanups.push(() => agent.close());
     expect((await agent.listTools()).tools.map((t) => t.name)).toEqual(["b__t"]);
   });

@@ -7,7 +7,7 @@ import * as registry from "../agents/mcp-registry";
 describe("engine MCP catalog lifetime", () => {
   it("keeps existing gateway clients connected when the last backend is removed, then reuses that endpoint", async () => {
     const resolve = vi.spyOn(registry, "resolveMcpServers").mockReturnValue({ servers: [], sources: [], gatewayBackends: [], warnings: [] });
-    const gateway = { url: "http://127.0.0.1:9000/mcp", catalogRevision: "fixture:1", reload: vi.fn().mockResolvedValue(undefined), stop: vi.fn().mockResolvedValue(undefined) };
+    const gateway = { url: "http://127.0.0.1:9000/mcp", authorization: `Bearer ${"a".repeat(43)}`, catalogRevision: "fixture:1", reload: vi.fn().mockResolvedValue(undefined), stop: vi.fn().mockResolvedValue(undefined) };
     const engine = Object.assign(Object.create(ZerosEngine.prototype), {
       mcpGateway: gateway, gatewayError: null, gatewayReloadChain: Promise.resolve(),
       scopedMcpGateways: { roots: () => [] },
@@ -25,7 +25,7 @@ describe("engine MCP catalog lifetime", () => {
       engine.reloadGateway();
       await engine.gatewayReloadChain;
       expect(gateway.reload).toHaveBeenLastCalledWith([backend]);
-      expect(engine.agents.setGatewayServer).toHaveBeenLastCalledWith(gateway.url, expect.any(Function));
+      expect(engine.agents.setGatewayServer).toHaveBeenLastCalledWith({ url: gateway.url, authorization: gateway.authorization }, expect.any(Function));
       const revision = engine.agents.setGatewayServer.mock.calls.at(-1)![1];
       expect(revision()).toBe("fixture:1");
       gateway.catalogRevision = "fixture:2";

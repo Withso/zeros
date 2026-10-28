@@ -1,9 +1,7 @@
 // Auth0 Authorization Code + PKCE flow for app.zeros.build.
 //
-// Moved verbatim-in-spirit from the retired auth.zeros.build project (its
-// lib/session.ts) — one web app, one env surface, one host. Sessions still live
-// in Cloudflare KV (the cookie only carries an opaque session id; see
-// lib/session.ts for reads).
+// One web app, one env surface, one host. The control plane owns durable
+// PostgreSQL sessions; the cookie carries only an opaque lookup id.
 //
 // COOKIE SCOPE CHANGE from the two-subdomain era: cookies are now HOST-ONLY
 // (no Domain attribute). The old flow minted the session on auth.zeros.build
@@ -16,6 +14,7 @@
 import { appOrigin, redirectUri } from "./hosts";
 import { SESSION_COOKIE, SESSION_TTL_S, type Env, type SessionData } from "./session";
 import { b64url, sha256B64url } from "./handoff-security";
+import { auth0SessionAuthority } from "./auth0-session-authority";
 
 /** @deprecated Prefer redirectUri(env). Kept as the production default string
  *  for docs/tests that assert the Auth0 callback URL. */
@@ -188,20 +187,19 @@ function claimBool(claims: Record<string, unknown>, key: string): boolean {
   return claims[key] === true;
 }
 
-/** Create a browser session in KV from a fresh Auth0 token response, returning
- *  the opaque session id to set as the SESSION_COOKIE value. Rejects an
- *  unverified email — the invitation accept flow binds an invite to the
- *  verified email claim as its anti-takeover control. */
+/** Create a durable session from a fresh Auth0 token response. Return the
+ * opaque cookie id and explicit verification status so the callback can route
+ * unverified identities separately. Invite acceptance requires verified email. */
 export async function createSession(
   env: Env,
   tokens: TokenResponse,
 ): Promise<{ sessionId: string; email: string; emailVerified: boolean }> {
-  if (!env.SESSIONS) {
-    throw new Error(
-      "SESSIONS KV binding is not configured on this Pages project/environment — check Settings > Functions > KV namespace bindings.",
-    );
-  }
   const claims = decodeIdTokenClaims(tokens.id_token);
+  // These claims came directly from the authenticated Auth0 code exchange.
+  // Preserve its issue time so a delayed callback cannot undo global logout.
+  const issuedAt = claims.iat;
+  if (typeof issuedAt !== "number" || !Number.isSafeInteger(issuedAt) || issuedAt <= 0)
+    throw new Error("Auth0 did not return a valid token issue time");
   // Fail CLOSED: only an explicit `email_verified: true` counts. A MISSING claim
   // is treated as unverified — the invitation accept flow trusts email as its
   // sole anti-takeover control, so a connection that omits the claim must not be
@@ -218,9 +216,8 @@ export async function createSession(
     refreshToken: tokens.refresh_token ?? null,
     verifiedAt: Date.now(), // just proven live via the code exchange
   };
-  await env.SESSIONS.put(`session:${sessionId}`, JSON.stringify(data), {
-    expirationTtl: SESSION_TTL_S,
-  });
+  const created = await auth0SessionAuthority(env, { action: "create", sessionId, data, issuedAt });
+  if (created.status !== "active") throw new Error("Unable to create the browser session");
   return { sessionId, email: data.email, emailVerified };
 }
 

@@ -8,6 +8,8 @@ import type { CloudV2MessageRow } from "./contract.js";
 import { hashCloudV2Token, newCloudV2Token } from "./tokens.js";
 import { CLOUD_V2_LIVE_ACCESS as LIVE_ACCESS } from "./workspace-access.js";
 import { CloudV2PromptOutbox } from "./prompt-outbox.js";
+import { computerSourceReviewRequired, readComputerSourceTargets } from "./computer-provenance.js";
+import { CloudSourceTargetSchema } from "./source-authority.js";
 
 import { mirrorMessageWindow, type MessageWindow, type WindowOptions } from "./history.js";
 
@@ -18,6 +20,7 @@ export type CloudV2InstalledRepository = { repository: string; defaultBranch: st
 type CreateWorkspace = {
   id: string; organizationId: string; creatorUserId: string; name: string; repository: string; branch: string;
   baseBranch: string; computerBuildId: string | null;
+  sourceRepositoryId?: string;
 };
 type CreateReceipt = { status: 201; response: Record<string, unknown> };
 type HistoryInput = {
@@ -157,6 +160,7 @@ export class CloudV2Store {
   }
 
   private async insertWorkspace(tx: Tx, input: CreateWorkspace): Promise<CloudV2Workspace> {
+    let sourceRepositoryId = input.sourceRepositoryId;
     const member = await tx.query(
       `SELECT 1 FROM organization_members m JOIN organizations o ON o.id = m.org_id AND o.deleted_at IS NULL
        WHERE m.org_id = $1 AND m.user_id = $2 AND NOT o.is_personal AND o.cloud_workspaces_allowed FOR SHARE OF o,m`,
@@ -166,20 +170,30 @@ export class CloudV2Store {
     if (input.computerBuildId) {
       // Activation waits for this lock, so cleanup observes the new workspace
       // pin before it can retire an inactive source snapshot.
-      const selected = await tx.query(
-        `SELECT 1 FROM cloud_v2_computers c
+      const selected = await tx.query<{ recipe: { repositories: { repository: string }[] }; source_targets: unknown }>(
+        `SELECT b.recipe,b.source_targets FROM cloud_v2_computers c
          JOIN cloud_v2_computer_builds b ON b.id=c.active_build_id AND b.org_id=c.org_id
          WHERE c.org_id=$1 AND c.active_build_id=$2 AND c.snapshot_name IS NOT NULL
-           AND b.state='succeeded' AND b.snapshot_id=c.snapshot_name AND b.snapshot_deleted_at IS NULL AND b.cleanup_requested_at IS NULL
+           AND b.state='succeeded' AND b.source_policy_version=2 AND b.snapshot_id=c.snapshot_name AND b.snapshot_deleted_at IS NULL AND b.cleanup_requested_at IS NULL
          FOR SHARE OF c,b`, [input.organizationId, input.computerBuildId]);
       if (!selected.rowCount) throw new HttpError(409, "cloud_computer_changed", "The Cloud Computer changed. Create the workspace again.");
+      const build = selected.rows[0]!;
+      const target = readComputerSourceTargets(build.recipe.repositories, build.source_targets)
+        .find(source => source.repository.toLowerCase() === input.repository.toLowerCase());
+      if (!target || sourceRepositoryId !== undefined && sourceRepositoryId !== target.repositoryId) throw computerSourceReviewRequired();
+      sourceRepositoryId = target.repositoryId;
     }
     const row = (await tx.query<Row>(
-      `INSERT INTO cloud_v2_workspaces (id, org_id, creator_user_id, name, repository, branch, base_branch, state, computer_build_id)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, 'creating', $8) RETURNING ${COLUMNS}`,
+      `INSERT INTO cloud_v2_workspaces (id, org_id, creator_user_id, name, repository, branch, base_branch, state, computer_build_id, source_repositories)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, 'creating', $8, ARRAY[lower($5)]) RETURNING ${COLUMNS}`,
       [input.id, input.organizationId, input.creatorUserId, input.name, input.repository, input.branch,
         input.baseBranch, input.computerBuildId],
     )).rows[0]!;
+    if (sourceRepositoryId !== undefined) {
+      if (!CloudSourceTargetSchema.safeParse({ repository: input.repository, repositoryId: sourceRepositoryId }).success) throw new HttpError(422, "github_repository_invalid", "Invalid repository identity.");
+      await tx.query("INSERT INTO cloud_v2_github_sources(workspace_id,source_repository,repository_id) VALUES($1,lower($2),$3)",
+        [input.id, input.repository, sourceRepositoryId]);
+    }
     return workspace(row);
   }
 
@@ -580,7 +594,7 @@ export class CloudV2Store {
       const active = await tx.query<{ id: string; snapshot_name: string }>(
         `SELECT b.id, c.snapshot_name FROM cloud_v2_computers c
          JOIN cloud_v2_computer_builds b ON b.id=c.active_build_id AND b.org_id=c.org_id
-         WHERE c.org_id=$1 AND c.snapshot_name IS NOT NULL AND b.state='succeeded' AND b.snapshot_id=c.snapshot_name
+         WHERE c.org_id=$1 AND c.snapshot_name IS NOT NULL AND b.state='succeeded' AND b.source_policy_version=2 AND b.snapshot_id=c.snapshot_name
            AND b.snapshot_deleted_at IS NULL AND b.cleanup_requested_at IS NULL
          FOR SHARE OF c,b`, [rows[0].org_id]);
       if (!active.rows[0]) return "no_computer";
@@ -647,13 +661,14 @@ export class CloudV2Store {
   async computerSnapshot(organizationId: string, buildId: string | null = null): Promise<string | null> {
     if (buildId) {
       const { rows } = await withSystemTx(this.pool, tx => tx.query<{ snapshot_id: string | null }>(
-        `SELECT snapshot_id FROM cloud_v2_computer_builds WHERE id=$1 AND org_id=$2 AND state='succeeded'
+        `SELECT snapshot_id FROM cloud_v2_computer_builds WHERE id=$1 AND org_id=$2 AND state='succeeded' AND source_policy_version=2
          AND snapshot_deleted_at IS NULL AND cleanup_requested_at IS NULL`, [buildId, organizationId]));
       return rows[0]?.snapshot_id ?? null;
     }
     // Pre-pin workspaces retain their original active-computer behavior.
     const { rows } = await withSystemTx(this.pool, tx => tx.query<{ snapshot_name: string | null }>(
-      `SELECT snapshot_name FROM cloud_v2_computers WHERE org_id = $1`, [organizationId]));
+      `SELECT c.snapshot_name FROM cloud_v2_computers c JOIN cloud_v2_computer_builds b ON b.id=c.active_build_id
+       WHERE c.org_id = $1 AND b.source_policy_version=2`, [organizationId]));
     return rows[0]?.snapshot_name ?? null;
   }
 
@@ -662,7 +677,7 @@ export class CloudV2Store {
     const { rows } = await withSystemTx(this.pool, tx => tx.query<{ id: string; recipe: { repositories?: { repository?: unknown; branch?: unknown }[] } }>(
       `SELECT build.id, build.recipe FROM cloud_v2_computers computer
        JOIN cloud_v2_computer_builds build ON build.id = computer.active_build_id AND build.org_id = computer.org_id
-       WHERE computer.org_id = $1 AND computer.snapshot_name IS NOT NULL AND build.state = 'succeeded'`,
+       WHERE computer.org_id = $1 AND computer.snapshot_name IS NOT NULL AND build.state = 'succeeded' AND build.source_policy_version=2`,
       [organizationId],
     ));
     if (!rows[0]) return null;

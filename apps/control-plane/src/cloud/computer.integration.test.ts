@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { execFile } from "node:child_process";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -11,9 +11,14 @@ import type { CloudV2Compute } from "./boat.js";
 import { CloudV2ComputerBuilder, CloudV2Computers, cloudV2SnapshotName } from "./computer.js";
 import { CloudProviderError } from "./provider-error.js";
 import { CloudV2Store } from "./store.js";
+import type { CloudV2ComputerSourceResolver } from "./computer-provenance.js";
 
 const d = process.env.TEST_DATABASE_URL ? describe : describe.skip;
 const commit = "a".repeat(40);
+const fixtureRepositoryId = (repository: string) => BigInt(`0x${createHash("sha256").update(repository.toLowerCase()).digest("hex").slice(0, 12)}`).toString();
+const resolveRepository: CloudV2ComputerSourceResolver = async (_org, _user, target) => ({
+  repository: target.repository, repositoryId: target.repositoryId ?? fixtureRepositoryId(target.repository),
+});
 
 d("cloud v2 Cloud Computer builds", () => {
   let pool: pg.Pool;
@@ -26,7 +31,7 @@ d("cloud v2 Cloud Computer builds", () => {
   afterAll(async () => { await pool.end(); });
   beforeEach(async () => {
     await resetMigratedTestDatabase(pool);
-    computers = new CloudV2Computers(pool);
+    computers = new CloudV2Computers(pool, pool, resolveRepository);
     [admin, member] = [randomUUID(), randomUUID()];
     for (const id of [admin, member]) await pool.query(`INSERT INTO users (id, email, display_name) VALUES ($1, $2, 'U')`, [id, `u-${id}@example.test`]);
     org = randomUUID();
@@ -60,9 +65,85 @@ d("cloud v2 Cloud Computer builds", () => {
     await expect(computers.enqueue(org, admin, recipe)).rejects.toMatchObject({ code: "computer_build_in_progress" });
   });
 
+  it.each(["save", "discard", "enqueue", "configured", "reactivate", "automatic"] as const)(
+    "rechecks the administrator after an organization lock wait (%s)", async operation => {
+      await pool.query("UPDATE organization_members SET role='owner' WHERE org_id=$1 AND user_id=$2", [org, member]);
+      const previous = await computers.enqueue(org, admin, recipe, { configure: true });
+      await computers.claim();
+      await computers.activate(previous.id, "security-role-fixture");
+      await computers.requireAdmin(org, admin);
+      const blocker = await pool.connect();
+      let pending: Promise<{ value?: unknown; error?: unknown }> | undefined;
+      try {
+        await blocker.query("BEGIN");
+        await blocker.query("SELECT 1 FROM organizations WHERE id=$1 FOR UPDATE", [org]);
+        const pid = (await blocker.query("SELECT pg_backend_pid() AS pid")).rows[0].pid;
+        const actions = {
+          save: () => computers.saveRecipe(org, admin, [{ repository: "example/new" }], 1),
+          discard: () => computers.discardRecipe(org, admin, 1),
+          enqueue: () => computers.enqueue(org, admin, recipe),
+          configured: () => computers.buildConfigured(org, admin, 1),
+          reactivate: () => computers.reactivate(org, admin, previous.id),
+          automatic: () => computers.enqueueAutomatic(org, previous.id, "runtime", runtime.sha256),
+        };
+        pending = actions[operation]().then(value => ({ value }), error => ({ error }));
+        await vi.waitFor(async () => {
+          expect((await pool.query("SELECT 1 FROM pg_stat_activity WHERE $1=ANY(pg_blocking_pids(pid))", [pid])).rowCount).toBeGreaterThan(0);
+        });
+        await blocker.query("UPDATE organization_members SET role='member',authorization_revision=authorization_revision+1 WHERE org_id=$1 AND user_id=$2", [org, admin]);
+        await blocker.query("COMMIT");
+        if (operation === "automatic") expect(await pending).toEqual({ value: null });
+        else expect(await pending).toMatchObject({ error: { status: 403 } });
+        const overview = await computers.overview(org);
+        expect(overview.recipeRevision).toBe(1);
+        expect(overview.builds).toHaveLength(1);
+      } finally {
+        await blocker.query("ROLLBACK").catch(() => {});
+        blocker.release();
+        await pending;
+      }
+    },
+  );
+
   it("allows ordinary members to read the Computer's repositories", async () => {
     await expect(computers.requireMember(org, member)).resolves.toBeUndefined();
     await expect(computers.requireMember(org, randomUUID())).rejects.toMatchObject({ status: 404 });
+  });
+
+  it("does not run a queued build after its creator loses administration", async () => {
+    const boat = compute(), cloneToken = vi.fn(async () => "synthetic");
+    await computers.enqueue(org, admin, recipe);
+    await pool.query("UPDATE organization_members SET role='member' WHERE org_id=$1 AND user_id=$2", [org, admin]);
+    const builder = new CloudV2ComputerBuilder({ computers, compute: boat, channel: "alpha", runtime, cloneToken });
+    await builder.tick();
+    expect(boat.create).not.toHaveBeenCalled();
+    expect(cloneToken).not.toHaveBeenCalled();
+    expect((await computers.overview(org)).builds[0]).toMatchObject({ state: "cancelled", errorCode: "computer_admin_access_lost" });
+  });
+
+  it("does not activate a build when its creator is demoted during setup", async () => {
+    const boat = compute();
+    vi.mocked(boat.execLong).mockImplementation(async (_id, command) => {
+      if (command.includes("pnpm install"))
+        await pool.query("UPDATE organization_members SET role='member' WHERE org_id=$1 AND user_id=$2", [org, admin]);
+      return { exitCode: 0, stdout: command.includes("rev-parse") ? `zeros-build-branch=master\n${commit}\n` : "installed", timedOut: false };
+    });
+    const job = await computers.enqueue(org, admin, recipe);
+    const builder = new CloudV2ComputerBuilder({ computers, compute: boat, channel: "alpha", runtime, cloneToken: async () => "synthetic" });
+    await builder.tick();
+    expect((await computers.overview(org)).activeBuildId).toBeNull();
+    expect((await computers.overview(org)).builds[0]).toMatchObject({ state: "cancelled", errorCode: "computer_admin_access_lost" });
+    expect(boat.deleteSnapshot).toHaveBeenCalledWith(cloudV2SnapshotName("alpha", org, job.version));
+  });
+
+  it("keeps exact source IDs on clean builds and refuses inherited legacy log scope", async () => {
+    const old = await computers.enqueue(org, admin, { repositories: [{ repository: "example/removed" }] });
+    await computers.claim(); await computers.activate(old.id, "legacy-log-source");
+    const current = await computers.enqueue(org, admin, recipe);
+    await computers.claim(); await computers.activate(current.id, "current-log-source");
+    expect(await computers.logRepositories(org, current.id)).toEqual([{ repository: "withso/zeros", repositoryId: fixtureRepositoryId("withso/zeros") }]);
+    await pool.query("UPDATE cloud_v2_computer_builds SET source_policy_version=1 WHERE id=$1", [current.id]);
+    await expect(computers.logRepositories(org, current.id)).rejects.toMatchObject({ code: "cloud_source_review_required" });
   });
 
   it.each(["disabled", "deleted"])("hides a %s organization from members", async state => {
@@ -94,14 +175,19 @@ d("cloud v2 Cloud Computer builds", () => {
     expect(await new CloudV2Store(pool).installedRepositories(org)).toEqual([{ repository: "withso/zeros", defaultBranch: "master" }]);
     const cloneCommand = vi.mocked(boat.execLong).mock.calls[0]![1];
     expect(cloneCommand).not.toContain("ghs_token");
+    expect(cloneCommand).not.toContain(Buffer.from("x-access-token:ghs_token").toString("base64"));
     // A named snapshot is an independent copy: the builder goes as soon as it is ready.
     expect(boat.saveSnapshot).toHaveBeenCalledWith("bx_build1", cloudV2SnapshotName("alpha", org, 1));
+    // Shared images must be captured before any repository or setup script can
+    // leave source, caches, history, or copied artifacts anywhere on the disk.
+    expect(vi.mocked(boat.saveSnapshot).mock.invocationCallOrder[0]).toBeLessThan(vi.mocked(boat.execLong).mock.invocationCallOrder[0]!);
     expect(boat.delete).toHaveBeenCalledWith("bx_build1");
     expect(boat.stop).not.toHaveBeenCalled();
 
     vi.mocked(boat.create).mockResolvedValueOnce({ sandboxId: "bx_build2" });
     await computers.reactivate(org, admin, overview.builds[0]!.id);
     await builder.tick();
+    expect(vi.mocked(boat.create).mock.calls.every(([request]) => !request.from)).toBe(true);
     overview = await computers.overview(org);
     expect(overview.snapshotName).toBe(cloudV2SnapshotName("alpha", org, 2));
     expect(overview.builds[0]!.recipe).toMatchObject({ rebuiltFrom: 1 });
@@ -161,10 +247,12 @@ d("cloud v2 Cloud Computer builds", () => {
       await run("git", ["-C", origin, "tag", "v1.2.3"]);
       const pinnedCommit = (await run("git", ["-C", origin, "rev-parse", "HEAD"])).stdout.trim();
       const boat = compute();
-      vi.mocked(boat.execLong).mockImplementation(async (_id, command) => {
+      vi.mocked(boat.execLong).mockImplementation(async (_id, command, _timeout, input) => {
         const local = command.replaceAll("https://github.com/example/project.git", origin)
           .replaceAll("/home/user", join(root, "checkouts"));
-        const result = await run("bash", ["-c", local]);
+        const child = run("bash", ["-c", local]);
+        child.child.stdin?.end(input);
+        const result = await child;
         return { exitCode: 0, stdout: result.stdout, timedOut: false };
       });
       const builder = new CloudV2ComputerBuilder({ computers, compute: boat, channel: "alpha", runtime, cloneToken: async () => "fixture" });
@@ -174,7 +262,7 @@ d("cloud v2 Cloud Computer builds", () => {
       const overview = await computers.overview(org);
       expect(overview.builds[0]).toMatchObject({ state: "succeeded", recipe: { repositories: [{ branch: "master", commit: pinnedCommit }] } });
       expect(await new CloudV2Store(pool).installedRepositories(org)).toEqual([{ repository: "example/project", defaultBranch: "master" }]);
-      // This is the worker's new-workspace source; it must exist in the snapshot.
+      // The disposable builder verifies that the recorded branch can be used.
       await run("git", ["-C", join(root, "checkouts/example/project"), "switch", "-c", "zeros/created", "origin/master"]);
     } finally { await rm(root, { recursive: true, force: true }); }
   });
@@ -190,7 +278,8 @@ d("cloud v2 Cloud Computer builds", () => {
     expect(overview.snapshotName).toBeNull();
     expect(overview.builds[0]).toMatchObject({ state: "failed", errorCode: "computer_setup_failed" });
     expect(await computers.log(org, build.id)).toContain("ERR! missing");
-    expect(boat.saveSnapshot).not.toHaveBeenCalled();
+    expect(boat.saveSnapshot).toHaveBeenCalledOnce();
+    expect(boat.deleteSnapshot).toHaveBeenCalled();
     expect(boat.delete).toHaveBeenCalledWith("bx_build1");
   });
 
@@ -262,7 +351,7 @@ d("cloud v2 Cloud Computer builds", () => {
     expect(overview.recipe.repositories).toEqual([{ repository: "withso/zeros", setup: "pnpm install" }]);
   });
 
-  it("refreshes the live snapshot in place, deleting removed repositories", async () => {
+  it("rebuilds from stock so removed repositories and copied artifacts cannot survive", async () => {
     const boat = compute();
     const builder = new CloudV2ComputerBuilder({ computers, compute: boat, channel: "alpha", runtime, cloneToken: async () => "ghs_token" });
     await computers.enqueue(org, admin, { repositories: [{ repository: "withso/zeros" }, { repository: "withso/old" }] });
@@ -271,16 +360,13 @@ d("cloud v2 Cloud Computer builds", () => {
     const second = await computers.enqueue(org, admin, { repositories: [{ repository: "withso/zeros" }, { repository: "withso/new" }] });
     expect(second.baseSnapshot).toBe(cloudV2SnapshotName("alpha", org, 1));
     await builder.tick();
-    expect(boat.create).toHaveBeenLastCalledWith({ key: second.id, from: cloudV2SnapshotName("alpha", org, 1),
+    expect(boat.create).toHaveBeenLastCalledWith({ key: second.id,
       name: `zeros-alpha-build-${second.id.slice(0, 8)}`, env: {} });
-    const removal = vi.mocked(boat.exec).mock.calls.map(([, command]) => command).find(command => command.includes("rm -rf -- "));
-    expect(removal).toContain("rm -rf -- '\\''/home/user/withso/old'\\''");
-    expect(removal).not.toContain("withso/zeros");
-    expect(removal).not.toContain("withso/new");
+    expect(vi.mocked(boat.exec).mock.calls.some(([, command]) => command.includes("rm -rf -- "))).toBe(false);
     expect((await computers.overview(org)).builds[0]).toMatchObject({ id: second.id, state: "succeeded" });
   });
 
-  it("fetches existing checkouts in place, keeping ignored files, and clones additions with a real Git", async () => {
+  it("validates current source and setup on fresh disposable builders with a real Git", async () => {
     const root = await mkdtemp(join(tmpdir(), "zeros-computer-refresh-"));
     const run = promisify(execFile);
     const git = (cwd: string, ...args: string[]) => run("git", ["-C", cwd, "-c", "user.name=Fixture", "-c", "user.email=fixture@example.test", ...args]);
@@ -299,8 +385,10 @@ d("cloud v2 Cloud Computer builds", () => {
         return text;
       };
       const boat = compute();
-      const shell = async (_id: string, command: string) => {
-        const result = await run("bash", ["-c", local(command)]);
+      const shell = async (_id: string, command: string, _timeout?: number, input?: string) => {
+        const child = run("bash", ["-c", local(command)]);
+        child.child.stdin?.end(input);
+        const result = await child;
         return { exitCode: 0, stdout: result.stdout, timedOut: false };
       };
       vi.mocked(boat.execLong).mockImplementation(shell);
@@ -313,7 +401,8 @@ d("cloud v2 Cloud Computer builds", () => {
       await writeFile(join(origin("kept"), "README.md"), "kept, second\n");
       await git(origin("kept"), "commit", "-am", "second");
       const head = (await run("git", ["-C", origin("kept"), "rev-parse", "HEAD"])).stdout.trim();
-      // The builder disk persists between ticks here, like the snapshot it starts from.
+      // Each build gets a new stock disk; old caches never enter a shared image.
+      await rm(join(root, "checkouts"), { recursive: true, force: true });
       await computers.enqueue(org, admin, { repositories: [{ repository: "example/kept", setup }, { repository: "example/added" }] });
       await builder.tick();
       const overview = await computers.overview(org);
@@ -321,13 +410,13 @@ d("cloud v2 Cloud Computer builds", () => {
         { repository: "example/kept", branch: "master", commit: head }, { repository: "example/added", branch: "master" },
       ] } });
       const checkouts = join(root, "checkouts/example");
-      expect((await run("cat", [join(checkouts, "kept/node_modules/marker")])).stdout).toBe("installed\ninstalled\n");
+      expect((await run("cat", [join(checkouts, "kept/node_modules/marker")])).stdout).toBe("installed\n");
       expect((await run("cat", [join(checkouts, "kept/README.md")])).stdout).toBe("kept, second\n");
       expect((await run("ls", [checkouts])).stdout.split("\n").filter(Boolean)).toEqual(["added", "kept"]);
     } finally { await rm(root, { recursive: true, force: true }); }
   }, 60_000);
 
-  it("refreshes only the runtime when it changes, without Git or setup, and backs off a failing refresh", async () => {
+  it("rebuilds a clean image on runtime changes, verifies the pinned recipe, and backs off failures", async () => {
     const boat = compute();
     await computers.enqueue(org, admin, recipe);
     await new CloudV2ComputerBuilder({ computers, compute: boat, channel: "alpha", runtime, cloneToken: async () => "ghs_token" }).tick();
@@ -340,7 +429,7 @@ d("cloud v2 Cloud Computer builds", () => {
     let overview = await computers.overview(org);
     expect(overview.builds[0]).toMatchObject({ reason: "runtime", state: "succeeded", runtimeSha256: "c".repeat(64),
       baseSnapshot: cloudV2SnapshotName("alpha", org, 1), recipe: { repositories: [{ repository: "withso/zeros", commit, branch: "master" }] } });
-    expect(boat.execLong).not.toHaveBeenCalled();
+    expect(boat.execLong).toHaveBeenCalledTimes(2);
     expect(vi.mocked(boat.exec).mock.calls.some(([, command]) => command.includes(`/opt/zeros/runtime/${"c".repeat(64)}`))).toBe(true);
 
     // A refresh that keeps failing is retried later, not on every scan.
@@ -367,7 +456,7 @@ d("cloud v2 Cloud Computer builds", () => {
     await builder.scheduleRefreshes(); await builder.tick();
     expect((await computers.overview(org)).builds[0]).toMatchObject({ reason: "runtime", state: "succeeded", runtimeSha256: runtime.sha256,
       recipe: { repositories: [{ repository: "withso/zeros", commit, branch: "master" }] } });
-    expect(boat.execLong).not.toHaveBeenCalled();
+    expect(boat.execLong).toHaveBeenCalledTimes(2);
     // Recorded now, so the same pin is not refreshed again.
     expect(await computers.refreshCandidates(runtime.sha256)).toEqual([]);
   });
@@ -391,7 +480,7 @@ d("cloud v2 Cloud Computer builds", () => {
     const worker = new pg.Pool({ connectionString: process.env.TEST_DATABASE_URL, max: 2, connectionTimeoutMillis: 1_000 });
     const locks = new pg.Pool({ connectionString: process.env.TEST_DATABASE_URL, max: 2, connectionTimeoutMillis: 1_000 });
     try {
-      const separate = new CloudV2Computers(worker, locks);
+      const separate = new CloudV2Computers(worker, locks, resolveRepository);
       await separate.withBuildLock(randomUUID(), async () => {
         await separate.withBuildLock(randomUUID(), async () => {
           // The lifecycle and the build's own queries still get a connection.
@@ -416,7 +505,7 @@ d("cloud v2 Cloud Computer builds", () => {
       repository: "withso/zeros", branch: "zeros/w", baseBranch: "master", computerBuildId: null });
     const unchanged = builder();
     await unchanged.scheduleRefreshes();
-    expect(remoteHead).toHaveBeenCalledWith(org, admin, "withso/zeros", "master");
+    expect(remoteHead).toHaveBeenCalledWith(org, admin, { repository: "withso/zeros", repositoryId: fixtureRepositoryId("withso/zeros") }, "master");
     expect((await computers.overview(org)).builds).toHaveLength(1);
     // Checked and unchanged: not asked again until tomorrow, by any process.
     now += 11 * 60_000; await builder().scheduleRefreshes();
@@ -451,18 +540,18 @@ d("cloud v2 Cloud Computer builds", () => {
     expect((await computers.overview(org)).builds).toHaveLength(2);
   });
 
-  it("forgets a live snapshot Boat no longer has, so the next build starts clean", async () => {
+  it("does not infer a missing live snapshot from a failed stock-image creation", async () => {
     const boat = compute();
     const builder = new CloudV2ComputerBuilder({ computers, compute: boat, channel: "alpha", runtime, cloneToken: async () => "ghs_token" });
     await computers.enqueue(org, admin, recipe); await builder.tick();
     vi.mocked(boat.create).mockRejectedValueOnce(new CloudProviderError("provider_not_found", "Boat API request did not succeed", false, { httpStatus: 404 }));
     const second = await computers.enqueue(org, admin, recipe); await builder.tick();
     let overview = await computers.overview(org);
-    expect(overview.builds[0]).toMatchObject({ id: second.id, state: "failed", errorCode: "computer_base_missing" });
-    expect(overview.snapshotName).toBeNull();
-    expect((await pool.query("SELECT builder_create_pending FROM cloud_v2_computer_builds WHERE id = $1", [second.id])).rows[0].builder_create_pending).toBe(false);
+    expect(overview.builds[0]).toMatchObject({ id: second.id, state: "failed", errorCode: "provider_not_found" });
+    expect(overview.snapshotName).toBe(cloudV2SnapshotName("alpha", org, 1));
+    expect((await pool.query("SELECT builder_create_pending FROM cloud_v2_computer_builds WHERE id = $1", [second.id])).rows[0].builder_create_pending).toBe(true);
     const third = await computers.enqueue(org, admin, recipe);
-    expect(third.baseSnapshot).toBeNull();
+    expect(third.baseSnapshot).toBe(cloudV2SnapshotName("alpha", org, 1));
     await builder.tick();
     expect(boat.create).toHaveBeenLastCalledWith({ key: third.id, name: `zeros-alpha-build-${third.id.slice(0, 8)}`, env: {} });
     overview = await computers.overview(org);
@@ -544,9 +633,13 @@ d("cloud v2 Cloud Computer builds", () => {
     await computers.enqueue(org, admin, recipe, { configure: true }); await builder.tick();
     let overview = await computers.overview(org);
     await computers.discardRecipe(org, admin, overview.recipeRevision);
-    vi.mocked(boat.create).mockRejectedValueOnce(new CloudProviderError("provider_not_found", "Boat API request did not succeed", false, { httpStatus: 404 }));
     overview = await computers.overview(org);
-    await computers.buildConfigured(org, admin, overview.recipeRevision); await builder.tick();
+    const missing = await computers.buildConfigured(org, admin, overview.recipeRevision);
+    await computers.claim();
+    // An explicit missing-snapshot observation can clear its pointer. A stock
+    // image create failure cannot establish that the previous snapshot is gone.
+    await computers.baseMissing(missing.id, org, overview.snapshotName!);
+    await computers.fail(missing.id, "computer_base_missing");
     overview = await computers.overview(org);
     expect(overview.activeBuildId).toBeNull();
     expect(overview.recipe.repositories).toEqual([{ repository: "withso/zeros", setup: "pnpm install" }]);
@@ -592,8 +685,10 @@ d("cloud v2 Cloud Computer builds", () => {
       await git(origin, "config", "uploadpack.allowAnySHA1InWant", "true");
       const local = (command: string) => command.replaceAll("https://github.com/example/project.git", origin).replaceAll("/home/user", join(root, "checkouts"));
       const boat = compute();
-      vi.mocked(boat.execLong).mockImplementation(async (_id, command) => {
-        const result = await run("bash", ["-c", local(command)]);
+      vi.mocked(boat.execLong).mockImplementation(async (_id, command, _timeout, input) => {
+        const child = run("bash", ["-c", local(command)]);
+        child.child.stdin?.end(input);
+        const result = await child;
         return { exitCode: 0, stdout: result.stdout, timedOut: false };
       });
       const builder = new CloudV2ComputerBuilder({ computers, compute: boat, channel: "alpha", runtime, cloneToken: async () => "fixture" });

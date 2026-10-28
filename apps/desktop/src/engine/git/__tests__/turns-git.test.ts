@@ -7,7 +7,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { mkdtemp, mkdir, rm, writeFile, readFile } from "node:fs/promises";
+import { mkdtemp, mkdir, rm, writeFile, readFile, rename, symlink, link } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
@@ -70,6 +70,34 @@ describe("turns-git", () => {
   afterEach(async () => {
     vi.restoreAllMocks();
     await rm(root, { recursive: true, force: true });
+  });
+
+  it("never reads or merges a tracked file through an exchanged ancestor", async () => {
+    await mkdir(path.join(root, "nested"));
+    await writeFile(path.join(root, "nested/file.txt"), "L1\nL2\nL3\n");
+    const before = await snapshotWorkingTree(root, snapshotRef("safe", "one", "pre"));
+    await writeFile(path.join(root, "nested/file.txt"), "L1\nL2\nX\n");
+    const after = await snapshotWorkingTree(root, snapshotRef("safe", "one", "post"));
+    const outside = await mkdtemp(path.join(tmpdir(), "zeros-turn-outside-"));
+    try {
+      await writeFile(path.join(outside, "file.txt"), "Y\nL2\nX\n");
+      await rename(path.join(root, "nested"), path.join(root, "saved"));
+      await symlink(outside, path.join(root, "nested"));
+      const result = await applyTurnReset(root, "safe", ["nested/file.txt"], before, after);
+      expect(result.applied).toHaveLength(0);
+      expect(await readFile(path.join(outside, "file.txt"), "utf8")).toBe("Y\nL2\nX\n");
+    } finally { await rm(outside, { recursive: true, force: true }); }
+  });
+
+  it("publishes a merge without mutating another hard link to the current inode", async () => {
+    await writeFile(path.join(root, "file.txt"), "L1\nL2\nL3\n");
+    const before = await snapshotWorkingTree(root, snapshotRef("hard", "one", "pre"));
+    await writeFile(path.join(root, "file.txt"), "L1\nL2\nX\n");
+    const after = await snapshotWorkingTree(root, snapshotRef("hard", "one", "post"));
+    await writeFile(path.join(root, "file.txt"), "Y\nL2\nX\n");
+    await link(path.join(root, "file.txt"), path.join(root, "other.txt"));
+    await applyTurnReset(root, "hard", ["file.txt"], before, after);
+    expect(await readFile(path.join(root, "other.txt"), "utf8")).toBe("Y\nL2\nX\n");
   });
 
   it("snapshots the work tree to a hidden ref and resolves blobs", async () => {

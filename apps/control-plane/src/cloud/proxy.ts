@@ -4,7 +4,7 @@
 // never reaches the VM. The upstream host is fixed; a caller picks only the path.
 import { Hono } from "hono";
 import type { CloudV2AgentLogins } from "./agent-logins.js";
-import type { CloudV2Store } from "./store.js";
+import type { CloudV2Store, CloudV2Workspace } from "./store.js";
 import { isCloudV2Token } from "./tokens.js";
 import { OpenAiModelAvailability } from "./model-availability.js";
 
@@ -21,6 +21,7 @@ const DROP = new Set([
 export type CloudV2ProxyDeps = {
   store: Pick<CloudV2Store, "verifyProxyToken">;
   logins: CloudV2AgentLogins;
+  authorizeSource?(workspace: CloudV2Workspace): Promise<void>;
   /** Renews the creator's ChatGPT login through the vault's single-use refresh. */
   refreshCodex?: (ownerUserId: string, organizationId: string) => Promise<void>;
   fetch?: typeof fetch;
@@ -57,6 +58,8 @@ export function createCloudV2ProxyRoutes(deps: CloudV2ProxyDeps): Hono {
     if (!isCloudV2Token(token, "proxy")) return failure(401, "proxy_token_invalid", "Invalid workspace proxy token");
     const workspace = await deps.store.verifyProxyToken(token);
     if (!workspace) return failure(401, "proxy_token_invalid", "The workspace proxy token expired or was revoked");
+    try { await deps.authorizeSource?.(workspace); }
+    catch { return failure(401, "workspace_access_revoked", "Repository access could not be verified"); }
     const length = Number(c.req.header("content-length") ?? 0);
     if (length > MAX_REQUEST_BYTES) return failure(413, "payload_too_large", "Request is too large");
 

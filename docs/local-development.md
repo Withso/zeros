@@ -68,6 +68,20 @@ instead of stealing a live run.
 
 ## Accounts and network services
 
+The renderer and marketing Vite servers bind to loopback by default and serve
+only explicit application source roots. Environment files, credentials, private
+workspace state and databases remain denied, including through `public` and
+resolved aliases. For an authenticated remote preview, explicitly set
+`ZEROS_DEV_BIND_HOST` and the comma-separated exact hostnames in
+`ZEROS_DEV_PREVIEW_HOSTS`; do not use a wildcard host allowlist. The standalone
+loader showcase is also loopback-only and bounds paths and file responses.
+
+Development engine builds copy `sass-host.cjs` and
+`host-process-supervisor.mjs` beside `dist-engine/cli.js`. Packaged Electron
+supplies absolute product-resource paths for these helpers and the owned Node
+runtime. Helpers never resolve from the workspace being opened. Rebuild the
+engine after changing these assets; a missing trusted helper fails closed.
+
 Local has no Zeros user, access token, WorkOS session or substitute account.
 The organization menu has no sign-in action. Settings → Account explains the
 account-free mode and directs sign-in testing to Zeros Dev.

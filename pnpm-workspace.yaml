@@ -36,16 +36,36 @@ overrides:
   # their entries; keep each override until its parent lock entry naturally
   # resolves to an equal or newer release.
   "@hono/node-server": "2.1.0"
+  "@babel/core": "7.29.6"
+  axios: "1.20.0"
+  baseline-browser-mapping: "2.11.0"
+  "brace-expansion@1": "1.1.21"
+  "brace-expansion@2": "2.1.7"
+  "brace-expansion@5": "5.0.12"
+  browserslist: "4.28.7"
+  builder-util-runtime: "9.7.0"
   body-parser: "2.4.0"
+  "esbuild@0.27.3": "0.28.1"
   fast-uri: "3.1.9"
   fflate: "0.4.9"
+  follow-redirects: "1.16.1"
+  form-data: "4.0.6"
   hono: "4.13.11"
   ip-address: "10.7.4"
   js-yaml: "4.3.2"
+  joi: "18.2.9"
   nanoid: "3.3.18"
+  # Typography pins an older 6.x parser; 6.1.5 fixes GHSA-rj75-hqrm-r3gf.
+  "postcss-selector-parser@<6.1.5": "6.1.5"
   # express accepts ~2.0.7; 2.0.8 fixes GHSA-jqcg-44mw-7w3h.
   proxy-addr: "2.0.8"
   qs: "6.16.0"
+  shell-quote: "1.11.0"
+  tar: "7.5.21"
+  tmp: "0.2.7"
+  "undici@6": "6.29.1"
+  "undici@7": "7.30.1"
+  vitest: "4.1.12"
   # postcss accepts ^1.2.1; 1.2.2 fixes GHSA-68fv-2mgg-jv7q.
   source-map-js: "1.2.2"
 
@@ -61,6 +81,6 @@ patchedDependencies:
   # Retain fixed-width Ed25519 public keys with leading zero bytes.
   "ssh2@1.17.0": patches/ssh2@1.17.0.patch
   # Keep the generated macOS keychain password separate from P12 passwords.
-  "app-builder-lib@26.8.1": patches/app-builder-lib@26.8.1.patch
+  "app-builder-lib@26.15.0": patches/app-builder-lib@26.15.0.patch
   # Retire the thumb animation loop when its viewport or surface is removed.
   "@radix-ui/react-scroll-area@1.2.10": patches/@radix-ui__react-scroll-area@1.2.10.patch

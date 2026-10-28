@@ -13,6 +13,7 @@ import {
   createHmac,
   hkdfSync,
   randomBytes,
+  randomUUID,
   timingSafeEqual,
 } from "node:crypto";
 import { Hono } from "hono";
@@ -24,6 +25,8 @@ import type { GithubBackendConfig } from "./config.js";
 import { withSystemTx, withUserTx, type Tx } from "./db.js";
 import { HttpError, requireOrganizationMembership } from "./authz.js";
 import { GithubCloudUserAccess } from "./github-user-access.js";
+import { GithubRepositoryAuthority } from "./github-repository-authority.js";
+export { mintGithubInstallationToken } from "./github-installation-tokens.js";
 import { createGithubAppJwt } from "./github-app-jwt.js";
 import { githubCommitProfile, type GithubCommitProfile } from "./github-git-author.js";
 import { rateLimit } from "./ratelimit.js";
@@ -82,11 +85,11 @@ const CloudInstallationTokenBodySchema = z
           .regex(/^[A-Za-z0-9._-]+$/),
       )
       .min(1)
-      .max(500)
-      .refine((items) => new Set(items).size === items.length, {
+      .max(10)
+      .refine((items) => new Set(items.map(item => item.toLowerCase())).size === items.length, {
         message: "Repository names must be unique",
-      })
-      .optional(),
+      }),
+    access: z.enum(["read", "write"]).default("read"),
   })
   .strict();
 
@@ -96,6 +99,8 @@ export interface GithubRouteDependencies {
   fetch?: FetchLike;
   now?: () => number;
   random?: (bytes: number) => Buffer;
+  /** Cloud credentials stay server-side; Local keeps its existing handoff. */
+  cloudCallback?: (state: string, code: string | undefined, denied: boolean) => Promise<void>;
 }
 
 /** Physically purge short-lived OAuth secrets after their logical expiry.
@@ -108,6 +113,7 @@ export async function cleanupExpiredGithubOauth(pool: pg.Pool): Promise<void> {
       `DELETE FROM github_oauth_handoffs WHERE expires_at <= now()`,
     );
     await tx.query(`DELETE FROM github_oauth_states WHERE expires_at <= now()`);
+    await tx.query(`DELETE FROM cloud_github_oauth_states WHERE expires_at <= now()`);
   });
 }
 
@@ -278,6 +284,7 @@ interface RefreshBindingPayload {
   ownerUserId: string;
   appVariant: string;
   refreshTokenHash: string;
+  grantGeneration: string;
   expiresAtMs: number;
 }
 
@@ -301,6 +308,7 @@ function createRefreshBinding(
     appVariant: string;
     refreshToken: string;
     expiresAtMs: number;
+    grantGeneration: string;
   },
 ): string {
   const payload: RefreshBindingPayload = {
@@ -308,6 +316,7 @@ function createRefreshBinding(
     ownerUserId: input.ownerUserId,
     appVariant: input.appVariant,
     refreshTokenHash: base64url(sha256(input.refreshToken)),
+    grantGeneration: input.grantGeneration,
     expiresAtMs: input.expiresAtMs,
   };
   const encodedPayload = Buffer.from(JSON.stringify(payload), "utf8").toString(
@@ -327,7 +336,7 @@ function assertRefreshBinding(
     refreshToken: string;
     nowMs: number;
   },
-): void {
+): RefreshBindingPayload {
   const parts = binding.split(".");
   const [prefix, encodedPayload, encodedSignature] = parts;
   if (
@@ -364,6 +373,7 @@ function assertRefreshBinding(
     payload?.v === 1 &&
     payload.ownerUserId === input.ownerUserId &&
     payload.appVariant === input.appVariant &&
+    z.string().uuid().safeParse(payload.grantGeneration).success &&
     payload.refreshTokenHash === base64url(sha256(input.refreshToken)) &&
     Number.isSafeInteger(payload.expiresAtMs) &&
     payload.expiresAtMs > input.nowMs;
@@ -374,6 +384,7 @@ function assertRefreshBinding(
       "The GitHub refresh authorization is invalid. Reconnect the GitHub App.",
     );
   }
+  return payload;
 }
 
 function githubHeaders(token?: string): Record<string, string> {
@@ -439,7 +450,7 @@ function positiveInteger(value: unknown): number | undefined {
     : undefined;
 }
 
-async function exchangeGithubToken(
+export async function exchangeGithubToken(
   fetchImpl: FetchLike,
   config: GithubBackendConfig,
   params: URLSearchParams,
@@ -791,35 +802,35 @@ async function persistAuthorization(
     referenceBindingId?: string;
   },
 ): Promise<void> {
-  await persistInstallations(tx, {
-    ownerUserId: input.pending.owner_user_id,
-    appVariant: input.pending.app_variant,
-    installations: input.installations,
-    complete: input.installationsComplete,
-  });
+  const grantGeneration = randomUUID();
   await tx.query(
     `INSERT INTO github_authorizations (
-       owner_user_id, app_variant, github_login, github_user_id, git_author_name, last_verified_at
-     ) VALUES ($1, $2, $3, $4, $5, now())
+       owner_user_id, app_variant, github_login, github_user_id, git_author_name, last_verified_at, grant_generation
+     ) VALUES ($1, $2, $3, $4, $5, now(), $6)
      ON CONFLICT (owner_user_id, app_variant)
      DO UPDATE SET
        github_login = EXCLUDED.github_login,
        github_user_id = EXCLUDED.github_user_id,
        git_author_name = EXCLUDED.git_author_name,
+       grant_generation = EXCLUDED.grant_generation,
        last_verified_at = now(),
        updated_at = now()`,
-    [input.pending.owner_user_id, input.pending.app_variant, input.login, input.githubUserId, input.gitName],
+    [input.pending.owner_user_id, input.pending.app_variant, input.login, input.githubUserId, input.gitName, grantGeneration],
   );
+  await persistInstallations(tx, {
+    ownerUserId: input.pending.owner_user_id, appVariant: input.pending.app_variant,
+    installations: input.installations, complete: input.installationsComplete,
+  });
   if(input.referenceBindingId)await tx.query(`INSERT INTO dev_github_handoffs(nonce_hash,owner_user_id,binding_id,expires_at) VALUES($1,$2,$3,$4)`,
     [input.nonceHash,input.pending.owner_user_id,input.referenceBindingId,new Date(input.nowMs+GITHUB_HANDOFF_TTL_MS)]);
   else await tx.query(
     `INSERT INTO github_oauth_handoffs (
        nonce_hash, owner_user_id, app_variant, access_token_sealed,
        access_token_expires_at, refresh_token_sealed, refresh_token_expires_at,
-       login, installations, installations_complete, expires_at
+       login, installations, installations_complete, expires_at, grant_generation
      )
      VALUES (
-       $1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, $10, $11
+       $1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, $10, $11, $12
      )`,
     [
       input.nonceHash,
@@ -833,6 +844,7 @@ async function persistAuthorization(
       JSON.stringify(input.installations),
       input.installationsComplete,
       new Date(input.nowMs + GITHUB_HANDOFF_TTL_MS),
+      grantGeneration,
     ],
   );
   await tx.query(
@@ -857,13 +869,13 @@ async function persistAuthorization(
  * one access token, leaving the authorization grant usable. */
 async function assertLiveAuthorization(
   tx: Tx,
-  input: { ownerUserId: string; appVariant: string },
+  input: { ownerUserId: string; appVariant: string; grantGeneration: string },
 ): Promise<void> {
   const live = await tx.query(
     `SELECT 1
      FROM github_authorizations
-     WHERE owner_user_id = $1 AND app_variant = $2`,
-    [input.ownerUserId, input.appVariant],
+     WHERE owner_user_id = $1 AND app_variant = $2 AND grant_generation = $3`,
+    [input.ownerUserId, input.appVariant, input.grantGeneration],
   );
   if (live.rowCount === 0) {
     throw new HttpError(
@@ -950,116 +962,6 @@ async function revokeGithubAccessToken(
   return response.ok || response.status === 404;
 }
 
-interface CloudInstallationRow {
-  suspended_at: Date | null;
-}
-
-async function assertCloudInstallationAccess(
-  tx: Tx,
-  input: {
-    ownerUserId: string;
-    appVariant: string;
-    installationId: number;
-  },
-): Promise<void> {
-  // Look up the caller-owned row first. RLS plus the explicit owner predicate
-  // make a foreign id indistinguishable from a nonexistent id (404), even
-  // when the caller has never connected GitHub. Only a known owner should get
-  // authorization-expired or suspension detail.
-  const result = await tx.query<CloudInstallationRow>(
-    `SELECT suspended_at
-     FROM github_installations
-     WHERE owner_user_id = $1
-       AND app_variant = $2
-       AND github_installation_id = $3`,
-    [input.ownerUserId, input.appVariant, input.installationId],
-  );
-  const row = result.rows[0];
-  if (!row) {
-    throw new HttpError(
-      404,
-      "github_installation_not_found",
-      "This GitHub App installation is not connected to your account.",
-    );
-  }
-  await assertLiveAuthorization(tx, {
-    ownerUserId: input.ownerUserId,
-    appVariant: input.appVariant,
-  });
-  if (row.suspended_at) {
-    throw new HttpError(
-      409,
-      "github_installation_suspended",
-      "This GitHub App installation is suspended.",
-    );
-  }
-}
-
-async function revokeGithubInstallationToken(
-  fetchImpl: FetchLike,
-  config: GithubBackendConfig,
-  token: string,
-): Promise<void> {
-  await fetchWithTimeout(fetchImpl, `${config.apiBaseUrl}/installation/token`, {
-    method: "DELETE",
-    headers: githubHeaders(token),
-  }).catch(() => undefined);
-}
-
-export async function mintGithubInstallationToken(
-  fetchImpl: FetchLike,
-  config: GithubBackendConfig,
-  input: {
-    installationId: number;
-    repositories?: readonly string[];
-    nowMs: number;
-  },
-): Promise<{ token: string; expiresAtMs: number }> {
-  const response = await fetchWithTimeout(
-    fetchImpl,
-    `${config.apiBaseUrl}/app/installations/${input.installationId}/access_tokens`,
-    {
-      method: "POST",
-      headers: {
-        accept: "application/vnd.github+json",
-        authorization: `Bearer ${createGithubAppJwt(config, input.nowMs)}`,
-        "content-type": "application/json",
-        "user-agent": "zeros-control-plane",
-        "x-github-api-version": API_VERSION,
-      },
-      body: JSON.stringify(
-        input.repositories ? { repositories: input.repositories } : {},
-      ),
-    },
-  );
-  const raw = await responseJson(response);
-  const body =
-    raw && typeof raw === "object" && !Array.isArray(raw)
-      ? (raw as Record<string, unknown>)
-      : {};
-  const token = stringField(body.token, 4_096);
-  const expiresAtMs = Date.parse(String(body.expires_at ?? ""));
-  if (
-    !response.ok ||
-    response.status !== 201 ||
-    !token ||
-    !Number.isFinite(expiresAtMs) ||
-    expiresAtMs - input.nowMs < 5 * 60_000 ||
-    expiresAtMs - input.nowMs > 70 * 60_000
-  ) {
-    throw new HttpError(
-      response.status === 404 ? 404 : 503,
-      response.status === 404
-        ? "github_installation_not_found"
-        : "github_unavailable",
-      response.status === 404
-        ? "GitHub no longer recognizes this App installation."
-        : "GitHub could not issue a cloud workspace credential.",
-    );
-  }
-  return { token, expiresAtMs };
-}
-
 /** Send browser-only handoff material in the fragment so the hosted completion
  * page can offer an exact-channel Open Zeros link without exposing the nonce
  * to Cloudflare request logs, referrers, or query-string analytics. */
@@ -1130,6 +1032,12 @@ export function createGithubPublicRoutes(
       throw new HttpError(422, "invalid_oauth_state", "Invalid OAuth state.");
     }
     const state = parsedState.data;
+    if (state.startsWith("zcg_") && dependencies.cloudCallback) {
+      await dependencies.cloudCallback(state, c.req.query("code"), !!c.req.query("error"));
+      c.header("Content-Security-Policy", "default-src 'none'; frame-ancestors 'none'");
+      c.header("Referrer-Policy", "no-referrer");
+      return c.html("<!doctype html><html lang=\"en\"><meta charset=\"utf-8\"><title>GitHub connected</title><h1>GitHub connected</h1><p>Return to Zeros to continue. You can close this tab.</p></html>");
+    }
     // No table-wide expiry sweep here: this route is unauthenticated, so any
     // caller with a well-formed `state` could otherwise drive one write
     // transaction plus a full-table DELETE per request against the same pool
@@ -1537,6 +1445,7 @@ export function createGithubRoutes(
           login: string;
           installations: GithubInstallation[];
           installations_complete: boolean;
+          grant_generation: string | null;
         }>(
           `DELETE FROM github_oauth_handoffs
            WHERE nonce_hash = $1
@@ -1545,7 +1454,7 @@ export function createGithubRoutes(
            RETURNING app_variant, access_token_sealed,
                      access_token_expires_at, refresh_token_sealed,
                      refresh_token_expires_at, login,
-                     installations, installations_complete`,
+                     installations, installations_complete, grant_generation`,
           [sha256(nonce), user.id],
         );
         return result.rows[0] ?? null;
@@ -1557,6 +1466,10 @@ export function createGithubRoutes(
           "This GitHub handoff expired or was already used.",
         );
       }
+      if (!row.grant_generation) throw new HttpError(401, "github_binding_invalid", "Reconnect GitHub to renew this authorization.");
+      await withUserTx(pool, user.id, tx => assertLiveAuthorization(tx, {
+        ownerUserId: user.id, appVariant: row.app_variant, grantGeneration: row.grant_generation!,
+      }));
       let accessToken: string;
       let refreshToken: string;
       try {
@@ -1587,6 +1500,7 @@ export function createGithubRoutes(
         refreshBinding: createRefreshBinding(config, {
           ownerUserId: user.id,
           appVariant: row.app_variant,
+          grantGeneration: row.grant_generation,
           refreshToken,
           expiresAtMs: refreshTokenExpiresAtMs,
         }),
@@ -1611,7 +1525,7 @@ export function createGithubRoutes(
       const refreshToken = parse(TokenSchema, body.refreshToken);
       const refreshBinding = parse(RefreshBindingSchema, body.refreshBinding);
       const nowMs = now();
-      assertRefreshBinding(config, refreshBinding, {
+      const binding = assertRefreshBinding(config, refreshBinding, {
         ownerUserId: user.id,
         appVariant: config.variantKey,
         refreshToken,
@@ -1623,6 +1537,7 @@ export function createGithubRoutes(
         assertLiveAuthorization(tx, {
           ownerUserId: user.id,
           appVariant: config.variantKey,
+          grantGeneration: binding.grantGeneration,
         }),
       );
       const bundle = await exchangeGithubToken(
@@ -1645,6 +1560,7 @@ export function createGithubRoutes(
           assertLiveAuthorization(tx, {
             ownerUserId: user.id,
             appVariant: config.variantKey,
+            grantGeneration: binding.grantGeneration,
           }),
         );
       } catch (error) {
@@ -1682,6 +1598,7 @@ export function createGithubRoutes(
           ownerUserId: user.id,
           appVariant: config.variantKey,
           refreshToken: bundle.refreshToken,
+          grantGeneration: binding.grantGeneration,
           expiresAtMs: bundle.refreshTokenExpiresAtMs,
         }),
       });
@@ -1700,7 +1617,7 @@ export function createGithubRoutes(
       const accessToken = parse(TokenSchema, body.accessToken);
       const refreshToken = parse(TokenSchema, body.refreshToken);
       const refreshBinding = parse(RefreshBindingSchema, body.refreshBinding);
-      assertRefreshBinding(config, refreshBinding, {
+      const binding = assertRefreshBinding(config, refreshBinding, {
         ownerUserId: user.id,
         appVariant: config.variantKey,
         refreshToken,
@@ -1713,8 +1630,8 @@ export function createGithubRoutes(
       const stillConnected = await withUserTx(pool, user.id, async (tx) => {
         const live = await tx.query(
           `SELECT 1 FROM github_authorizations
-           WHERE owner_user_id = $1 AND app_variant = $2`,
-          [user.id, config.variantKey],
+           WHERE owner_user_id = $1 AND app_variant = $2 AND grant_generation = $3`,
+          [user.id, config.variantKey, binding.grantGeneration],
         );
         return (live.rowCount ?? 0) > 0;
       });
@@ -1740,11 +1657,13 @@ export function createGithubRoutes(
       // when GitHub is offline. The desktop also deletes its encrypted pair;
       // remote revocation remains best-effort and the access token is bounded.
       await withUserTx(pool, user.id, async (tx) => {
-        await tx.query(
+        const removed = await tx.query(
           `DELETE FROM github_authorizations
-           WHERE owner_user_id = $1 AND app_variant = $2`,
-          [user.id, config.variantKey],
+           WHERE owner_user_id = $1 AND app_variant = $2 AND grant_generation = $3 RETURNING owner_user_id`,
+          [user.id, config.variantKey, binding.grantGeneration],
         );
+        // A reconnect can commit while GitHub is answering the old revoke.
+        if (removed.rowCount !== 1) return;
         await tx.query(
           `DELETE FROM github_installations
            WHERE owner_user_id = $1 AND app_variant = $2`,
@@ -1908,32 +1827,9 @@ export function createGithubRoutes(
         CloudInstallationTokenBodySchema,
         await c.req.json().catch(() => ({})),
       );
-      const access = {
-        ownerUserId: user.id,
-        appVariant: config.variantKey,
-        installationId,
-      };
-      // Authorize before touching GitHub. A caller cannot use this endpoint to
-      // probe whether another user's installation id exists.
-      await withUserTx(pool, user.id, (tx) =>
-        assertCloudInstallationAccess(tx, access),
-      );
-      const nowMs = now();
-      const minted = await mintGithubInstallationToken(fetchImpl, config, {
-        installationId,
-        ...(body.repositories ? { repositories: body.repositories } : {}),
-        nowMs,
+      const minted = await new GithubRepositoryAuthority(pool, config, fetchImpl).mint({
+        userId: user.id, installationId, repositories: body.repositories, access: body.access,
       });
-      // Disconnect/suspension can race the network round trip. Re-check before
-      // releasing the bearer, and revoke the just-created token on a lost race.
-      try {
-        await withUserTx(pool, user.id, (tx) =>
-          assertCloudInstallationAccess(tx, access),
-        );
-      } catch (error) {
-        await revokeGithubInstallationToken(fetchImpl, config, minted.token);
-        throw error;
-      }
       try {
         await withUserTx(pool, user.id, (tx) =>
           tx.query(

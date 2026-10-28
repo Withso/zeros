@@ -24,6 +24,19 @@ const INSTALL_COMMAND_SET = new Set<string>(
   Object.values(AGENT_INSTALL_COMMANDS),
 );
 
+const LOGIN_BY_INSTALL = new Map<string, string>([
+  [AGENT_INSTALL_COMMANDS.claude, "claude /login"],
+  [AGENT_INSTALL_COMMANDS.codex, "codex login"],
+  [AGENT_INSTALL_COMMANDS.cursor, "cursor-agent login"],
+]);
+
+/** Return only a bundled login command paired with its own installer. */
+export function trustedInstallLogin(install: string, requested: unknown): string {
+  const login = LOGIN_BY_INSTALL.get(install);
+  if (!login || requested !== login) throw new Error("login command does not match the recognized agent installer");
+  return login;
+}
+
 /** True when `cmd` is exactly one of the bundled, trusted install commands. */
 export function isKnownInstallCommand(cmd: string): boolean {
   return INSTALL_COMMAND_SET.has(cmd);
