@@ -12,6 +12,7 @@ import {
   type ComposerInitialContent,
 } from "../features/agent/composer-editor/use-composer-editor";
 import { TooltipProvider } from "../shared/ui/primitives/tooltip";
+import { Input } from "../shared/ui/primitives/input";
 import { setActiveBridge } from "../platform/bridge/active-bridge";
 import type { RuntimeClient } from "../platform/bridge/ws-client";
 import { useWorkspaceStore } from "../state/store";
@@ -280,6 +281,7 @@ function Harness() {
 
   return (
     <div data-zeros-root="" className="bg-bg1 text-fg1 min-h-screen p-4">
+      {query.has("focus-races") && <Input aria-label="Other editor" />}
       <div
         data-testid="composer-host"
         className="border-border1 bg-bg2 relative w-[800px] max-w-full rounded-lg border p-4"

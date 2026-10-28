@@ -21,6 +21,7 @@ function harness(cwd = folder, engine = "new-engine", visible = true) {
   const term = { write: vi.fn(), writeln: vi.fn(), focus: vi.fn() };
   const row = { id: "shell", resumePending: true };
   const context: any = {
+    hostRef: { current: null }, captureDeferredFocus: () => () => false,
     term, sessionId: "shell", cwd, visible, visibleRef: { current: visible }, xtermRef: { current: term },
     attachInFlightRef: { current: false }, createdRef: { current: true }, spawnStartedRef: { current: true },
     reconnectPendingRef: { current: true }, exitedRef: { current: false }, restartBlockedRef: { current: false },

@@ -1,0 +1,9 @@
+{
+  "id": "keyboard-focus-intent",
+  "kind": "scenario",
+  "area": "renderer-shared-ui",
+  "fixedBy": "pr:754",
+  "symptom": "Typing after a pointer selection revealed keyboard rings and hidden actions on tabs and buttons; shortcut category clicks left subsequent text outside search.",
+  "rule": "changes/keyboard-focus-intent.md and playbooks/ui-design.md: distinguish navigation from typing in real Chromium, including parent/peer styles, shadow roots, iframe return and accessible keyboard controls.",
+  "check": "pnpm test:ui-smoke"
+}

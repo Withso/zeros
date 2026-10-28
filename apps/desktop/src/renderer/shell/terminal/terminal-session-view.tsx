@@ -43,6 +43,7 @@
 // ──────────────────────────────────────────────────────────
 
 import React, { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { captureDeferredFocus } from "@/renderer/shared/ui/deferred-focus";
 import { useWorkbenchStatusSource } from "../workbench/tab-status";
 import { Terminal as XTerm } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
@@ -597,6 +598,7 @@ export const TerminalSessionView = React.memo(function TerminalSessionView({
   /** Spawn the PTY on the main process, wire stdin/stdout. */
   const spawn = async (term: XTerm, reconnect = false) => {
     if (attachInFlightRef.current || xtermRef.current !== term) return;
+    const mayFocus = captureDeferredFocus(hostRef.current);
     const target = parseCloudWorkspaceKey(cwd);
     if (target && !attachOnly && !ephemeral && !loginProvider &&
         !["ready", "busy"].includes(cloudWorkspaceDocument(target)?.status ?? "")) {
@@ -678,7 +680,7 @@ export const TerminalSessionView = React.memo(function TerminalSessionView({
       engineInstanceRef.current = cloudTerminalEngineId(cwd);
       setReadFailure(null);
       setHasScrollback(true);
-      if (loginProvider) term.focus();
+      if (loginProvider && visibleRef.current && mayFocus()) term.focus();
       // A fresh/reattached PTY is live again — clear the exited latch so
       // keystrokes flow to the shell instead of triggering another
       // restart (matters on the restart path; harmless on first spawn).
@@ -813,12 +815,13 @@ export const TerminalSessionView = React.memo(function TerminalSessionView({
    *  plain shell (workbench panel, null agentId) just gets a fresh prompt.
    *  markAlive clears the tab's "(exited)" badge. */
   const restart = async (term: XTerm) => {
+    const mayFocus = captureDeferredFocus(hostRef.current);
     agentLaunchedRef.current = false;
     markAlive(sessionId);
     term.writeln("\x1b[2m[restarting…]\x1b[0m");
     await spawn(term);
     try {
-      term.focus();
+      if (visibleRef.current && xtermRef.current === term && mayFocus()) term.focus();
     } catch {
       /* not laid out yet */
     }
@@ -952,6 +955,7 @@ export const TerminalSessionView = React.memo(function TerminalSessionView({
   // renderer skips paints while the ancestor is `visibility:hidden`.
   useEffect(() => {
     if (!visible) return;
+    const mayFocus = captureDeferredFocus(hostRef.current);
     // A collapsed panel can become visible while its seam gesture is still
     // active. Keep the complete reveal follow-up pending until release; a fit
     // alone cannot repaint DOM-renderer rows skipped under visibility:hidden
@@ -963,7 +967,7 @@ export const TerminalSessionView = React.memo(function TerminalSessionView({
       if (term) {
         try {
           term.refresh(0, Math.max(0, term.rows - 1));
-          term.focus();
+          if (visibleRef.current && mayFocus()) term.focus();
         } catch {
           /* not laid out yet */
         }

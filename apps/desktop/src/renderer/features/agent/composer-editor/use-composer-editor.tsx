@@ -30,6 +30,7 @@ import {
   type ReactNode,
 } from "react";
 import { createPortal } from "react-dom";
+import { captureDeferredFocus } from "@/renderer/shared/ui/deferred-focus";
 import { EditorContent, useEditor } from "@tiptap/react";
 import type { Editor, Range } from "@tiptap/core";
 import Document from "@tiptap/extension-document";
@@ -37,6 +38,7 @@ import Paragraph from "@tiptap/extension-paragraph";
 import Text from "@tiptap/extension-text";
 import { Placeholder, UndoRedo } from "@tiptap/extensions";
 import { closeHistory } from "@tiptap/pm/history";
+import { TextSelection } from "@tiptap/pm/state";
 import { X as XIcon } from "lucide-react";
 
 import "./composer-editor.css";
@@ -192,8 +194,12 @@ export interface ComposerEditorApi {
   /** Snapshot the editor for submit / draft. Null before the editor mounts. */
   serialize: () => ComposerSerialized | null;
   /** Stage files (paste/drop/pick) as inline attachment pills at the caret.
-   *  A video's key frames and timeline text follow it once they are read. */
-  insertFiles: (files: FileList | File[] | null | undefined) => Promise<void>;
+   *  Background deliveries append with atEnd and focus: false, preserving the
+   *  current selection. A video's key frames and timeline text follow it. */
+  insertFiles: (
+    files: FileList | File[] | null | undefined,
+    options?: { focus?: boolean; atEnd?: boolean },
+  ) => Promise<void>;
   /** True while a video in the document is still having its key frames
    *  read. A send waits for them (waitForAttachmentReads) so they go with
    *  the video instead of landing in the next message. */
@@ -204,7 +210,8 @@ export interface ComposerEditorApi {
   /** Stage a SYNTHESIZED text attachment (a chat transcript) under a
    *  caller-owned key, replacing anything already staged under that key — so
    *  switching a transcript from concise to full swaps the chip instead of
-   *  adding a second one. */
+   *  adding a second one. Deferred/background deliveries pass `focus: false`
+   *  when the initiating interaction no longer owns the keyboard. */
   insertTextAttachment: (input: {
     sourceKey: string;
     name: string;
@@ -216,7 +223,7 @@ export interface ComposerEditorApi {
      *  wasn't mounted. Returned rather than swallowed because an invalid
      *  attachment is EXCLUDED at send: a caller that doesn't surface this
      *  ships a chip for a file the agent never receives. */
-  }) => AttachmentValidation | null;
+  }, options?: { focus?: boolean }) => AttachmentValidation | null;
   /** Remove whatever is staged under `sourceKey`. No-op when absent. */
   removeAttachmentBySourceKey: (sourceKey: string) => void;
   /** The sourceKeys currently in the document. Recomputed on every doc change,
@@ -632,7 +639,6 @@ export function useComposerEditor(
     (editor: Editor, range: Range, item: MentionItem) => {
       editor
         .chain()
-        .focus()
         .insertContentAt(range, [
           {
             type: "mention",
@@ -645,7 +651,9 @@ export function useComposerEditor(
           },
           { type: "text", text: " " },
         ])
+        .scrollIntoView()
         .run();
+      editor.view.focus();
     },
     [],
   );
@@ -656,11 +664,12 @@ export function useComposerEditor(
         const skill = skillSourcesRef.current.find(skill => skill.id === item.name || skill.name === item.name);
         const path = skill ? filePillPath(optsRef.current.cwd, skill.path) : null;
         const source = skill && !path ? { agentId: optsRef.current.agentId, path: skill.path, name: skill.name } : null;
-        editor.chain().focus().insertContentAt(range, [{ type: "skill", attrs: {
+        editor.chain().insertContentAt(range, [{ type: "skill", attrs: {
           name: item.name, label: skill?.name || item.name, path: path || "",
           source: validSkillSource(source) ? source : null,
           provider: optsRef.current.agentId,
-        } }, { type: "text", text: " " }]).run();
+        } }, { type: "text", text: " " }]).scrollIntoView().run();
+        editor.view.focus();
         return;
       }
       // Inline action / terminal command → run it, insert nothing.
@@ -668,14 +677,16 @@ export function useComposerEditor(
         optsRef.current.onSlashCommand?.(item.name) ||
         optsRef.current.onTerminalCommand?.(item.name)
       ) {
-        editor.chain().focus().deleteRange(range).run();
+        // The action may have opened another editor or menu. It owns focus.
+        editor.chain().deleteRange(range).run();
         return;
       }
       editor
         .chain()
-        .focus()
         .insertContentAt(range, [{ type: "text", text: `/${item.name} ` }])
+        .scrollIntoView()
         .run();
+      editor.view.focus();
     },
     [],
   );
@@ -684,9 +695,10 @@ export function useComposerEditor(
     (editor: Editor, range: Range, item: PrPickerItem) => {
       editor
         .chain()
-        .focus()
         .insertContentAt(range, [{ type: "text", text: `#${item.number} ` }])
+        .scrollIntoView()
         .run();
+      editor.view.focus();
     },
     [],
   );
@@ -946,7 +958,10 @@ export function useComposerEditor(
 
   // ── attachment staging ──
   const insertFiles = useCallback(
-    async (files: FileList | File[] | null | undefined) => {
+    async (files: FileList | File[] | null | undefined, options?: { focus?: boolean; atEnd?: boolean }) => {
+      const ed = editorRef.current;
+      if (!ed || ed.isDestroyed) return;
+      const mayFocus = options?.focus === false ? () => false : captureDeferredFocus(ed.view.dom);
       const v = optsRef.current;
       const picked = Array.from(files ?? []);
       const atts = await filesToAttachments(picked, {
@@ -956,8 +971,7 @@ export function useComposerEditor(
         portableSources: v.portableAttachmentSources,
       });
       if (atts.length === 0) return;
-      const ed = editorRef.current;
-      if (!ed) return;
+      if (editorRef.current !== ed || ed.isDestroyed || optsRef.current.cwd !== v.cwd) return;
       const content: object[] = [];
       for (const a of atts) {
         attachmentMapRef.current.set(a.id, a);
@@ -972,7 +986,17 @@ export function useComposerEditor(
         });
         content.push({ type: "text", text: " " });
       }
-      ed.chain().focus().insertContent(content).run();
+      if (options?.atEnd) {
+        ed.chain().insertContentAt(TextSelection.atEnd(ed.state.doc).to, content, {
+          updateSelection: options.focus !== false,
+        }).run();
+      } else {
+        ed.chain().insertContent(content, { updateSelection: options?.focus !== false }).run();
+      }
+      // TipTap's focus command schedules another animation frame. Focus the
+      // view synchronously after checking intent so a later click cannot be
+      // overtaken by that unowned frame.
+      if (mayFocus()) ed.view.focus();
       setIsEmpty(ed.isEmpty);
       syncSourceKeys(ed);
       // Even a video too large to attach gets its frames: they still show
@@ -1007,7 +1031,6 @@ export function useComposerEditor(
       // bytes to be available during that same call stack.
       attachmentMapRef.current.set(attachment.id, attachment);
       ed.chain()
-        .focus()
         .insertContent([
           {
             type: "attachment",
@@ -1020,7 +1043,9 @@ export function useComposerEditor(
           },
           { type: "text", text: " " },
         ])
+        .scrollIntoView()
         .run();
+      ed.view.focus();
       setIsEmpty(ed.isEmpty);
       syncSourceKeys(ed);
     },
@@ -1041,7 +1066,7 @@ export function useComposerEditor(
       name: string;
       text: string;
       preview?: ComposerAttachmentPreview;
-    }): AttachmentValidation | null => {
+    }, options?: { focus?: boolean }): AttachmentValidation | null => {
       const ed = editorRef.current;
       // isDestroyed too: the ref is assigned but never nulled, so a read that
       // lands after the surface unmounted would otherwise dispatch into a torn
@@ -1058,8 +1083,7 @@ export function useComposerEditor(
         sourceKey: input.sourceKey,
         preview: input.preview,
       });
-      ed.chain()
-        .focus()
+      const transaction = ed.chain()
         .insertContent([
           {
             type: "attachment",
@@ -1072,8 +1096,10 @@ export function useComposerEditor(
             },
           },
           { type: "text", text: " " },
-        ])
-        .run();
+        ]);
+      if (options?.focus !== false) transaction.scrollIntoView();
+      transaction.run();
+      if (options?.focus !== false) ed.view.focus();
       setIsEmpty(ed.isEmpty);
       syncSourceKeys(ed);
       return attachment.validation;
@@ -1255,14 +1281,18 @@ export function useComposerEditor(
 
   const appendText = useCallback((text: string) => {
     const ed = editorRef.current;
-    if (!ed || !text) return;
+    if (!ed || ed.isDestroyed || !text) return;
     const end = ed.state.doc.content.size;
-    ed.chain().insertContentAt(end, text).focus("end").run();
+    ed.chain().insertContentAt(end, text).scrollIntoView().run();
+    ed.view.focus();
     setIsEmpty(ed.isEmpty);
   }, []);
 
   const focus = useCallback(() => {
-    editorRef.current?.commands.focus("end");
+    const ed = editorRef.current;
+    if (!ed || ed.isDestroyed) return;
+    ed.chain().setTextSelection(TextSelection.atEnd(ed.state.doc).from).scrollIntoView().run();
+    ed.view.focus();
   }, []);
 
   // ── render nodes ──

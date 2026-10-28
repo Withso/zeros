@@ -195,7 +195,7 @@ export function SidebarRepositoryHeader({
                   "items-center gap-0.5",
                   menuOpen
                     ? "flex"
-                    : "hidden group-hover/repo:flex group-has-[:focus-visible]/repo:flex",
+                    : "hidden group-hover/repo:flex group-has-focus-visible/repo:flex",
                 )}
               >
                 <button

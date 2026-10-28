@@ -25,6 +25,7 @@ import * as React from "react";
 import {
   PaletteDialog,
   PaletteCommand,
+  PaletteCategoryButton,
 } from "../shared/ui/primitives/palette-dialog";
 
 import {
@@ -48,6 +49,7 @@ export function ShortcutsPalette({
   open,
   onOpenChange,
 }: ShortcutsPaletteProps) {
+  const searchRef = React.useRef<HTMLInputElement>(null);
   const [query, setQuery] = React.useState("");
   const [activeCategoryId, setActiveCategoryId] = React.useState(
     SHORTCUT_CATEGORIES[0].id,
@@ -86,6 +88,7 @@ export function ShortcutsPalette({
     >
       <PaletteCommand>
         <CommandInput
+          ref={searchRef}
           autoFocus
           showSearchIcon={false}
           value={query}
@@ -102,23 +105,26 @@ export function ShortcutsPalette({
             {SHORTCUT_CATEGORIES.map((category) => {
               const active = category.id === activeCategoryId;
               return (
-                <button
+                <PaletteCategoryButton
                   key={category.id}
+                  searchRef={searchRef}
                   type="button"
+                  variant="ghost"
+                  aria-pressed={active}
                   onClick={() => setActiveCategoryId(category.id)}
                   // Rounded category pills: h-7, no border, fill + fg1 when
                   // active or hovered. The fill is the TRANSLUCENT
                   // --selected-glass semantic token (semantic-tokens.css)
                   // so the pill stays glassy on the frosted panel.
                   className={cn(
-                    "flex h-7 shrink-0 cursor-pointer items-center rounded-full px-2.5 text-xs font-medium transition-colors select-none",
+                    "flex h-7 shrink-0 cursor-pointer items-center rounded-full border-0 px-2.5 text-xs font-medium transition-colors select-none hover:bg-[var(--selected-glass)] hover:text-fg1",
                     active
                       ? "text-fg1 bg-[var(--selected-glass)]"
                       : "text-fg2 hover:text-fg1 hover:bg-[var(--selected-glass)]",
                   )}
                 >
                   {category.label}
-                </button>
+                </PaletteCategoryButton>
               );
             })}
           </div>

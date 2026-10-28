@@ -152,6 +152,11 @@
  * except light. */
 @custom-variant dark (&:is([data-theme="dark"] *));
 
+/* Keep every direct, group, peer and inverse focus-visible utility on the same
+ * navigation policy. Documents without the desktop tracker keep native focus.
+ * Text-entry controls always retain their normal editing cue. */
+@custom-variant focus-visible (&:focus-visible:where(:not([data-zeros-focus-visible="false"])));
+
 /* ──────────────────────────────────────────────────────────
    1. TAILWIND v4 @theme inline — wire primitives → utility classes
    ──────────────────────────────────────────────────────────

@@ -403,7 +403,7 @@ describe("sidebar repository headers", () => {
 
   it("keep + visible and reveal settings and ⋯ on hover or while the menu is open", () => {
     expect(HEADER).toMatch(
-      /menuOpen\s*\?\s*"flex"\s*:\s*"hidden group-hover\/repo:flex group-has-\[:focus-visible\]\/repo:flex"/,
+      /menuOpen\s*\?\s*"flex"\s*:\s*"hidden group-hover\/repo:flex group-has-focus-visible\/repo:flex"/,
     );
     const actions = HEADER.slice(HEADER.indexOf('"items-center gap-0.5"'));
     const plus = actions.indexOf(

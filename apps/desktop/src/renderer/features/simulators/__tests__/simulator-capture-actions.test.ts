@@ -11,10 +11,12 @@ const api = vi.hoisted(() => ({
 }));
 const toasts = vi.hoisted(() => ({ error: vi.fn(), info: vi.fn() }));
 const delivery = vi.hoisted(() => ({ deliverFilesToChat: vi.fn() }));
+const focus = vi.hoisted(() => ({ version: 0 }));
 
 vi.mock("../simulator-api", () => api);
 vi.mock("../../../shared/ui/primitives/elements", () => ({ toast: toasts }));
 vi.mock("../../agent/composer-file-attachment-delivery", () => delivery);
+vi.mock("../../../shared/ui/focus-navigation", () => ({ getFocusInteractionVersion: () => focus.version }));
 
 import {
   addSimulatorCaptureToChat,
@@ -57,6 +59,7 @@ beforeEach(() => {
   resetSimulatorCapturesForTests();
   for (const mock of [...Object.values(api), ...Object.values(toasts)]) mock.mockReset();
   delivery.deliverFilesToChat.mockReset();
+  focus.version = 0;
   api.dragSimulatorCapture.mockResolvedValue(undefined);
 });
 
@@ -144,6 +147,21 @@ describe("simulator recordings", () => {
 });
 
 describe("capture thumbnails", () => {
+  it.each([false, true])("preserves file delivery but revokes focus after newer input: %s", async (interrupted) => {
+    let finish!: (file: SimulatorCaptureFile) => void;
+    api.loadSimulatorCaptureFile.mockReturnValue(new Promise(resolve => { finish = resolve; }));
+    const adding = addSimulatorCaptureToChat(SCREENSHOT, "chat-1");
+    expect(api.loadSimulatorCaptureFile).toHaveBeenCalledWith("capture-1");
+    if (interrupted) focus.version++;
+    finish({ fileName: SCREENSHOT.fileName, mimeType: "image/png", bytes: new Uint8Array([137, 80, 78, 71]) });
+    await expect(adding).resolves.toBe(true);
+    expect(delivery.deliverFilesToChat).toHaveBeenCalledTimes(1);
+    const [chatId, sent, options] = delivery.deliverFilesToChat.mock.calls[0]!;
+    expect(chatId).toBe("chat-1");
+    expect(sent.files[0].name).toBe(SCREENSHOT.fileName);
+    expect(options?.focus ?? true).toBe(!interrupted);
+  });
+
   it("adds the saved file to the chat's composer and closes its thumbnail", async () => {
     captureThumbnails.show(SCREENSHOT);
     const bytes = new Uint8Array([0x89, 0x50, 0x4e, 0x47]);

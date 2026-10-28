@@ -50,6 +50,7 @@ import { useOpenPrUrlInReviewTab } from "@/renderer/shell/pr/use-open-review-tab
 import { warmWorkspaceFiles } from "@/renderer/shell/workspace-files-cache";
 import { nativeInvoke, useNativeRuntime } from "@/renderer/platform/runtime";
 import { ZerosSpinner } from "@/renderer/shared/ui/loading";
+import { captureDeferredFocus } from "@/renderer/shared/ui/deferred-focus";
 import {
   useWorkspaceStore,
   useWorkspaceDispatch,
@@ -1949,13 +1950,12 @@ function AgentChatBody({
   }, [composerEditor, readOnly]);
 
   // A fork publishes its new tab before the transcript read settles. Register
-  // only while THIS retained surface is active: insertTextAttachment focuses
-  // the editor, so a hidden destination must queue the chip instead of stealing
-  // focus from whichever chat the user moved to meanwhile.
+  // only while THIS retained surface is active. Delivery is background work:
+  // keep the current focus, and let a hidden destination queue the chip.
   useEffect(() => {
     if (!chatId || !interactive || !composerEditor) return;
     return registerLiveChatTextAttachmentStager(chatId, (input) => {
-      const staged = stageTextAttachment(input);
+      const staged = stageTextAttachment(input, { focus: false });
       if (staged && !staged.ok) {
         toast.warning(
           `Attached "${input.name}", but it won't be sent — ${staged.reason ?? "it exceeds this model's attachment budget"}.`,
@@ -1971,14 +1971,15 @@ function AgentChatBody({
   // read-only composer leaves the delivery queued for this exact chat.
   useEffect(() => {
     if (!chatId || !interactive || readOnly || !composerEditor) return;
-    return registerLiveChatFileStager(chatId, ({ files }) => {
+    return registerLiveChatFileStager(chatId, ({ files }, { focus }) => {
       if (composerEditor.isDestroyed) return false;
-      // Append after the typed text rather than splitting it at a stale caret.
-      composerEditor.commands.focus("end");
-      void addFiles(files);
+      // A queued delivery may drain after the user has moved to another input.
+      // Append without moving its focus or the parked composer's caret.
+      if (focus) focusComposer();
+      void addFiles(files, { focus, atEnd: true });
       return true;
     });
-  }, [addFiles, chatId, composerEditor, interactive, readOnly]);
+  }, [addFiles, chatId, composerEditor, focusComposer, interactive, readOnly]);
 
   // ── attach another chat's transcript ──
   //
@@ -2076,6 +2077,7 @@ function AgentChatBody({
 
   const attachTranscript = useCallback(
     (summary: ChatSummaryWire, mode: TranscriptMode) => {
+      const mayFocus = captureDeferredFocus(composerEditor?.view.dom ?? null);
       const label = transcriptPillLabel(summary);
       const sourceId = summary.chatId;
       // A fresh attach clears any standing cancel for this chat, so
@@ -2142,7 +2144,7 @@ function AgentChatBody({
               userMessageCount: summary.userMessageCount,
               lastMessageAt: summary.lastMessageAt,
             },
-          });
+          }, { focus: surfaceActiveRef.current && mayFocus() });
           // An over-budget attachment is EXCLUDED at send (encode-attachments)
           // — so if it isn't said here it is never said at all. The pill would
           // otherwise show a green check for a file the agent never receives,
@@ -2174,7 +2176,7 @@ function AgentChatBody({
       transcriptAttachesRef.current.add(run);
       void run.finally(() => transcriptAttachesRef.current.delete(run));
     },
-    [stageTextAttachment],
+    [composerEditor, stageTextAttachment],
   );
 
   const removeTranscript = useCallback(
@@ -3529,13 +3531,20 @@ function AgentChatBody({
     }
     if (action !== "focus") return;
     acquiredComposerFocusRef.current = true;
+    const mayFocus = captureDeferredFocus(composerEditor?.view.dom ?? null);
+    let cancelled = false;
     // Defer one microtask: a just-revealed retained layer clears its `inert`
     // this commit, and a pane/tab click blurs the previous composer as its
     // default action — both must settle before we read document.activeElement
     // and move focus.
     queueMicrotask(() => {
       // A fast re-switch may have moved on since the effect ran.
-      if (chatId && useWorkspaceStore.getState().activeChatId !== chatId)
+      if (cancelled || !mayFocus() || !composerOwnsFocus({
+        chatId,
+        activeChatId: useWorkspaceStore.getState().activeChatId,
+        composerConcealed: composerConcealedRef.current,
+        cardHoldsKeyboard: cardHoldsKeyboardRef.current,
+      }))
         return;
       const paneRoot =
         composerEditor?.view.dom.closest("[data-pane-root]") ?? null;
@@ -3548,6 +3557,7 @@ function AgentChatBody({
         return;
       composerFocusRef.current();
     });
+    return () => { cancelled = true; };
   }, [chatId, activeChatId, composerConcealed, cardHoldsKeyboard, composerEditor]);
 
   // ── "Composer always focused in the chat column" guardian ────────────────
@@ -3590,8 +3600,9 @@ function AgentChatBody({
       // Cheap early-out before scheduling: a click outside this window is never
       // ours (workbench, another pane, the top bar).
       if (!interactionInsidePane) return;
+      const mayFocus = captureDeferredFocus(composerDom);
       setTimeout(() => {
-        if (!surfaceActiveRef.current) return;
+        if (!surfaceActiveRef.current || !mayFocus()) return;
         const selection = window.getSelection();
         if (
           shouldReclaimComposerFocus({

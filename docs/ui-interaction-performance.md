@@ -729,6 +729,31 @@ dismissal suite samples DOM commits and animation frames, covers the real model
 and repository menus, and checks owner switching, rapid reopen, first-focus
 Escape, native overlay intent cleanup and reduced motion.
 
+### 6.2 Focus belongs to the latest interaction
+
+Typing is not focus navigation. The shared `focus-navigation.ts` policy enables
+keyboard chrome for Tab/Shift-Tab and navigation inside composite widgets;
+pointer interaction resets it. Text-entry controls keep their caret and editing
+cues. Tooltips follow navigation intent, while overlays independently preserve
+their keyboard close/return behavior. A palette category selected by pointer
+keeps search ready to type; Tab/Enter/Space retain deliberate category focus.
+
+Delayed work does not own the keyboard indefinitely. Capture a
+`captureDeferredFocus` predicate before waiting for I/O, layout, or a React
+commit, and recheck it immediately before focusing. New input, another focused
+destination, selected reading text, an overlay, a hidden/inert target, or leaving
+the window retires that request. Callers also recheck the exact workspace,
+editor and surface lifetime. A saving control may release focus to body when it
+is disabled or removed; an uninterrupted action can still finish its handoff.
+When a return control mounts in a later commit, restore from that commit instead
+of assuming the next animation frame will contain it. Editor commands must not
+schedule an additional, unguarded focus after this check.
+
+Browser regressions exercise pointer → ordinary key → Tab, parent/peer and
+shadow-root styling, iframe Tab return, modal containment, and held completions
+followed by another edit. Cover Local, organization-local and organization-cloud
+shared surfaces; Design remains local-only.
+
 ## Zeros implementation map
 
 - Workspace route + target: `OPEN_WORKSPACE` in `apps/desktop/src/renderer/state/workspace-store.ts`.

@@ -53,7 +53,7 @@ export function createDesignPagesHarness(
       JSON.stringify({ snapshot, documents: [...documents.values()] }),
     );
   const calls: Array<{ op: string; params: Record<string, unknown> }> = [];
-  const control = { calls, holdCreate: false, releaseCreate: () => {} };
+  const control = { calls, holdCreate: false, releaseCreate: () => {}, holdRename: false, releaseRename: () => {} };
   (
     window as Window & { __zerosHarnessPages?: typeof control }
   ).__zerosHarnessPages = control;
@@ -162,6 +162,7 @@ export function createDesignPagesHarness(
         return { page, snapshot };
       }
       if (op === "design.page.rename") {
+        if (control.holdRename) await new Promise<void>((resolve) => { control.releaseRename = resolve; });
         const title = designPageTitleSchema.parse(params.title);
         snapshot = {
           ...snapshot,
