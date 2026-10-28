@@ -150,13 +150,25 @@ it("boots through the runtime symlink, waits for a token, serves a dial-in PTY a
   // Reserve an ephemeral test port; production has no bind-address override.
   const reservation = createServer(); await new Promise<void>(resolve => reservation.listen(0, "127.0.0.1", resolve));
   const port = (reservation.address() as AddressInfo).port; await new Promise<void>(resolve => reservation.close(() => resolve()));
-  const messages: any[] = [], requests: Array<{ path: string; authenticated: boolean }> = [];
-  let expectedToken = "fixture-package-worker", bootId = "";
+  const messages: any[] = [], requests: Array<{ path: string; authenticated: boolean; rotated: boolean }> = [];
+  const initialToken = "fixture-package-worker", rotatedToken = "fixture-rotated-package-worker";
+  const acceptedAuthorization = new Set([`Bearer ${initialToken}`]);
+  let bootId = "";
+  let holdNextHistory = false, heldHistory = false, heldOriginalToken = false;
+  let releaseHistory!: () => void;
+  const historyReleased = new Promise<void>(resolve => { releaseHistory = resolve; });
   const server = createServer(async (request, response) => {
     const path = request.url!.split("/").at(-1)!;
+    if (path === "history" && holdNextHistory) {
+      holdNextHistory = false;
+      heldOriginalToken = request.headers.authorization === `Bearer ${initialToken}`;
+      heldHistory = true;
+      await historyReleased;
+    }
     const chunks: Buffer[] = []; for await (const chunk of request) chunks.push(chunk);
     const body = chunks.length ? JSON.parse(Buffer.concat(chunks).toString()) : {};
-    requests.push({ path, authenticated: request.headers.authorization === `Bearer ${expectedToken}` });
+    requests.push({ path, authenticated: acceptedAuthorization.has(request.headers.authorization ?? ""),
+      rotated: request.headers.authorization === `Bearer ${rotatedToken}` });
     if (path === "hello") bootId = body.bootId;
     const value = path === "hello" || path === "config" ? { config: { ...config, workspace: scope.workspace, agents: {} } }
       : path === "history" ? { sequence: body.sequence }
@@ -175,7 +187,7 @@ it("boots through the runtime symlink, waits for a token, serves a dial-in PTY a
     child.stdout!.on("data", data => { output += data; }); child.stderr!.on("data", data => { output += data; });
     await expect.poll(() => output.includes("credential-unavailable")).toBe(true);
     expect(child.exitCode).toBeNull(); expect(requests).toEqual([]);
-    await writeFile(tokenFile, expectedToken, { mode: 0o600 }); await chmod(tokenFile, 0o600);
+    await writeFile(tokenFile, initialToken, { mode: 0o600 }); await chmod(tokenFile, 0o600);
     await expect.poll(() => bootId, { timeout: 5000 }).not.toBe("");
     const now = Math.floor(Date.now() / 1000);
     const payload = `v1.${Buffer.from(JSON.stringify({ iss: "zeros-cp", aud: WORKSPACE_ID, boot: bootId, iat: now, exp: now + 60, jti: randomUUID() })).toString("base64url")}`;
@@ -192,17 +204,32 @@ it("boots through the runtime symlink, waits for a token, serves a dial-in PTY a
     socket.send(JSON.stringify({ t: "open", clientId: CLIENT_A }));
     await expect.poll(() => messages.some(message => message.t === "frame" && message.frame.type === "PTY_DATA"
       && message.frame.data.includes("BUNDLED_PTY_OK")), { timeout: 5000 }).toBe(true);
-    expectedToken = "fixture-rotated-package-worker"; await writeFile(tokenFile, expectedToken, { mode: 0o600 });
+    // Hold a real authenticated request across rotation. Its old bearer was
+    // read before the replacement file existed, even if its body arrives later.
+    holdNextHistory = true;
+    socket.send(JSON.stringify({ t: "frame", clientId: CLIENT_A, frame: browserFrame("WORKSPACE_REQUEST", { op: "chats.upsert", params: {
+      chat: { id: "package-chat-before-rotation", folder: root, agentId: "codex", title: "Before rotation", createdAt: 99 },
+    } }) }));
+    await expect.poll(() => heldHistory, { timeout: 5000 }).toBe(true);
+    expect(heldOriginalToken).toBe(true);
+    // Requests already signed with the issued token remain authenticated while
+    // rotation is in flight. Still reject missing/unknown bearers, and below
+    // require a subsequent real request to prove the worker reread the file.
+    acceptedAuthorization.add(`Bearer ${rotatedToken}`);
+    await writeFile(tokenFile, rotatedToken, { mode: 0o600 });
+    releaseHistory();
     const histories = requests.filter(request => request.path === "history").length;
     socket.send(JSON.stringify({ t: "frame", clientId: CLIENT_A, frame: browserFrame("WORKSPACE_REQUEST", { op: "chats.upsert", params: {
       chat: { id: "package-chat", folder: root, agentId: "codex", title: "Fixture", createdAt: 100 },
     } }) }));
     await expect.poll(() => requests.filter(request => request.path === "history").length).toBeGreaterThan(histories);
+    await expect.poll(() => requests.some(request => request.path === "history" && request.rotated)).toBe(true);
     expect(requests.every(request => request.authenticated)).toBe(true);
     const exited = once(child, "exit"); child.kill("SIGTERM"); await exited;
     expect(child.exitCode).toBe(0);
-    for (const secret of ["fixture-package-worker", expectedToken, "fixture-private-route-token", grant]) expect(output.includes(secret)).toBe(false);
+    for (const secret of [initialToken, rotatedToken, "fixture-private-route-token", grant]) expect(output.includes(secret)).toBe(false);
   } finally {
+    releaseHistory();
     if (child?.exitCode === null && child.signalCode === null) { const exited = once(child, "exit"); child.kill("SIGKILL"); await exited; }
     socket?.terminate(); await new Promise<void>(resolve => server.close(() => resolve()));
     await rm(harness, { force: true });
