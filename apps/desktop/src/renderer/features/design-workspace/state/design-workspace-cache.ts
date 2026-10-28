@@ -55,7 +55,7 @@ import {
 import type { DesignTransaction } from "@zeros/design-core";
 import type { DesignRuntimeGenerationPatch, DesignRuntimeNodeInsert } from "@zeros/protocol/design-runtime";
 import { KeyedAsyncCache } from "../../../shared/lib/keyed-async-cache";
-import { DesignFramePreparation, readDesignNavigation } from "./design-workspace-preparation";
+import { DesignFramePreparation, readDesignNavigation, projectDesignMutationSnapshot } from "./design-workspace-preparation";
 import { preparedDesignSnapshot } from "./design-frame-view";
 import { onActiveBridgeConnected } from "../../../platform/bridge/active-bridge";
 import { isCloudWorkspace } from "../../../platform/bridge/cloud-workspace-key";
@@ -294,10 +294,29 @@ export async function prepareDesignMovementFrame(
   workspaceId: string,
   frame: DesignCanvasFrameWire,
 ): Promise<DesignCanvasFrameWire> {
+  const owner = designMutationOwner(workspaceId);
   await waitForPendingDesignEdits(workspaceId);
-  const current = designWorkspaceSnapshotCache
-    .peekSnapshot(workspaceId)
-    .data?.frames.find((candidate) => candidate.file === frame.file);
+  assertDesignMutationOwner(workspaceId, owner);
+  const epoch = designWorkspaceSnapshotCache.peekSnapshot(workspaceId).data?.preparation?.epoch;
+  const read = (): DesignCanvasFrameWire | null | undefined => {
+    const snapshot = designWorkspaceSnapshotCache.peekSnapshot(workspaceId).data;
+    if (designMutationOwner(workspaceId) !== owner || snapshot?.preparation?.epoch !== epoch) return null;
+    const current = snapshot?.frames.find(candidate => candidate.file === frame.file);
+    if (!current || snapshot?.preparation?.errors[frame.file]) return null;
+    // A scoped acknowledgement may retain this frame only as a cover. Wait
+    // for the active preparation lane; old pixels cannot authorize a move.
+    if (snapshot?.preparation && !snapshot.preparation.current.includes(frame.file)) return undefined;
+    return current;
+  };
+  const available = read();
+  const current = available === undefined ? await new Promise<DesignCanvasFrameWire | null>(resolve => {
+    const finish = (value: DesignCanvasFrameWire | null) => { clearTimeout(timer); unsubscribe(); resolve(value); };
+    const unsubscribe = designWorkspaceSnapshotCache.subscribe(workspaceId, () => {
+      const next = read();
+      if (next !== undefined) finish(next);
+    });
+    const timer = setTimeout(() => finish(null), 2_000);
+  }) : available;
   if (
     !current ||
     current.sourceVersion !==
@@ -1312,6 +1331,7 @@ function publishDesignWorkspaceSnapshot(
   next: DesignWorkspaceSnapshotWire,
 ): DesignWorkspaceSnapshotWire {
   const previous = designWorkspaceSnapshotCache.peekSnapshot(workspaceId).data;
+  next = projectDesignMutationSnapshot(previous, next);
   if ((pendingLocalMutationByWorkspace.get(workspaceId)?.depth ?? 0) > 0) {
     rememberAdvancedFrameRuntimeAudits(workspaceId, previous, next);
   }
@@ -1527,13 +1547,16 @@ export async function duplicateDesignFrameCached(
   workspaceId: string,
   frame: string,
   pageId?: string,
+  placement?: Parameters<typeof designDuplicateFrame>[3],
 ): Promise<{
   frame: DesignFrameSummaryWire;
   snapshot: DesignWorkspaceSnapshotWire;
 }> {
   return runLocalDesignMutation(workspaceId, async (assertOwner) => {
     const beforeSnapshot = designWorkspaceSnapshotCache.peekSnapshot(workspaceId).data;
-    const result = await designDuplicateFrame(workspaceId, frame, pageId);
+    const result = placement
+      ? await designDuplicateFrame(workspaceId, frame, pageId, placement)
+      : await designDuplicateFrame(workspaceId, frame, pageId);
     assertOwner();
     const snapshot = publishDesignWorkspaceSnapshot(
       workspaceId,
@@ -2112,6 +2135,7 @@ export function applyDesignEditCached(
   }: Pick<DesignFrameDocumentWire, "file" | "sourceVersion">,
   intent: DesignEditIntent | (() => DesignEditIntent),
   measured?: DesignMeasuredMovement,
+  options?: { structurePreviewId?: string },
 ): Promise<DesignApiMutationReplyWire> {
   return applyPreparedDesignTransactionCached(workspaceId, file, async () => {
     const key = designFoundationKey(
@@ -2129,7 +2153,7 @@ export function applyDesignEditCached(
       documentId: foundation.summary.documentId,
       baseRevision: foundation.summary.revision,
     };
-  }, measured);
+  }, measured, undefined, options?.structurePreviewId);
 }
 
 export function applyDesignTransactionCached(
@@ -2158,6 +2182,7 @@ async function applyPreparedDesignTransactionCached(
   prepare: () => Promise<DesignTransaction>,
   measured?: DesignMeasuredMovement,
   runtimeInserts?: readonly DesignRuntimeNodeInsert[],
+  structurePreviewId?: string,
 ): Promise<DesignApiMutationReplyWire> {
   const presentation: LocalEditPresentation = { frame, ready: false };
   return runLocalDesignMutation(workspaceId, async (assertOwner) => {
@@ -2168,7 +2193,7 @@ async function applyPreparedDesignTransactionCached(
     };
     assertCurrent();
     const transaction = await prepare();
-    const visual = transactionRuntimeAdoption(transaction, runtimeInserts);
+    const visual = transactionRuntimeAdoption(transaction, runtimeInserts, structurePreviewId);
     presentation.ready = !!visual && !visual.patch?.tokens && !visual.patch?.keyframes;
     assertCurrent();
     const revisionKey = frameMutationKey(workspaceId, frame);
@@ -2199,6 +2224,7 @@ async function applyPreparedDesignTransactionCached(
         result.result?.revision,
       );
       if (result.snapshot) {
+        result.snapshot = projectDesignMutationSnapshot(beforeSnapshot, result.snapshot);
         const nextSourceVersion = result.snapshot.frames.find(
           (candidate) => candidate.file === frame,
         )?.sourceVersion;
@@ -2208,7 +2234,7 @@ async function applyPreparedDesignTransactionCached(
           previousSourceVersion,
           nextSourceVersion,
         );
-        const adoption = transactionRuntimeAdoption(rebasedTransaction, runtimeInserts);
+        const adoption = transactionRuntimeAdoption(rebasedTransaction, runtimeInserts, structurePreviewId);
         if (adoption && previousSourceVersion) {
           const adopted = await adoptDesignStyleGeneration(
             workspaceId,
@@ -2299,6 +2325,7 @@ function adoptableInsert(
 function transactionRuntimeAdoption(
   transaction: DesignTransaction,
   runtimeInserts?: readonly DesignRuntimeNodeInsert[],
+  structurePreviewId?: string,
 ): {
   styleUpdates: Array<{
     nodeId: string;
@@ -2313,6 +2340,8 @@ function transactionRuntimeAdoption(
       (operation) =>
         operation.type !== "node.set-styles" &&
         operation.type !== "node.move" &&
+        operation.type !== "node.duplicate" &&
+        operation.type !== "node.delete" &&
         operation.type !== "frame.set-geometry" &&
         operation.type !== "keyframes.set" &&
         !adoptableInsert(operation, runtimeInserts),
@@ -2321,11 +2350,22 @@ function transactionRuntimeAdoption(
     return null;
   }
   const inserts: DesignRuntimeNodeInsert[] = [];
+  const structure: NonNullable<DesignRuntimeGenerationPatch["structure"]> = [];
   const moves: NonNullable<DesignRuntimeGenerationPatch["moves"]> = [];
   const stylesByNode = new Map<string, Record<string, string | null>>();
   const keyframes: NonNullable<DesignRuntimeGenerationPatch["keyframes"]> = [];
   for (const operation of transaction.operations) {
     if (operation.type === "frame.set-geometry") continue;
+    if (operation.type === "node.duplicate" || operation.type === "node.delete") {
+      // The runtime applies structures before styles and placements. A copy
+      // after a style edit must include that edit in its source; reloading is
+      // the safe path for transaction orders this projection cannot preserve.
+      if (stylesByNode.size || moves.length || inserts.length || keyframes.length) return null;
+      structure.push(operation.type === "node.duplicate"
+        ? { type: "duplicate", nodeId: operation.nodeId, duplicateNodeId: operation.duplicateNodeId }
+        : { type: "delete", nodeId: operation.nodeId });
+      continue;
+    }
     const insert = adoptableInsert(operation, runtimeInserts);
     if (insert) {
       inserts.push(insert);
@@ -2361,16 +2401,20 @@ function transactionRuntimeAdoption(
     nodeId,
     styles,
   }));
-  if (styleUpdates.length === 0 && keyframes.length === 0 && moves.length === 0 && inserts.length === 0)
+  if (structure.length && (keyframes.length || inserts.length || moves.some(move =>
+    !structure.some(operation => operation.type === "duplicate" && operation.duplicateNodeId === move.nodeId)))) return null;
+  if (styleUpdates.length === 0 && keyframes.length === 0 && moves.length === 0 && inserts.length === 0 && structure.length === 0)
     return null;
   return {
     styleUpdates,
-    ...(keyframes.length > 0 || moves.length > 0 || inserts.length > 0
+    ...(keyframes.length > 0 || moves.length > 0 || inserts.length > 0 || structure.length > 0
       ? {
           patch: {
             ...(keyframes.length ? { keyframes } : {}),
             ...(moves.length ? { moves } : {}),
             ...(inserts.length ? { inserts } : {}),
+            ...(structure.length ? { structure } : {}),
+            ...(structure.length && structurePreviewId ? { structurePreviewId } : {}),
           },
         }
       : {}),
@@ -2410,6 +2454,7 @@ async function adoptDesignStyleGeneration(
   if (!current()) return false;
   // An older runtime would ignore inserts it cannot adopt; reload instead.
   if (patch?.inserts?.length && !runtime.supports("previewInsert")) return false;
+  if (patch?.structure?.length && !runtime.supports("commitStructure")) return false;
   try {
     const adopted = patch
       ? await runtime.commitStyles(updates, nextSourceVersion, patch)
@@ -2425,6 +2470,11 @@ async function adoptDesignStyleGeneration(
         .map((details) => details.layout?.parentId)
         .filter(Boolean),
     );
+    for (const operation of patch?.structure ?? []) {
+      const parent = cachedFrame?.detailsByNode[operation.nodeId]?.layout?.parentId;
+      if (parent) affectedParents.add(parent);
+    }
+    if (adopted.snapshot.frame.oid) updatedNodeIds.add(adopted.snapshot.frame.oid);
     // A layout change (padding, a gap, a size) can move boxes it never
     // touched: children, siblings, the whole flow after it. Only what is
     // measured again below is promoted; every other cached box is dropped and
@@ -2446,7 +2496,7 @@ async function adoptDesignStyleGeneration(
       .filter(
         (nodeId) =>
           !updatedNodeIds.has(nodeId) &&
-          (patch ||
+          ((patch && !patch.structure) ||
             affectedParents.has(nodeId) ||
             (layoutChanged && selectedNodeIds.has(nodeId)) ||
             cachedFrame?.detailsByNode[nodeId]?.childrenLayout?.nodeIds.some(

@@ -68,6 +68,39 @@ describe("design document", () => {
     await rm(root, { recursive: true, force: true });
   });
 
+  it.each(["canvas", "frame"])("copies a nested layer to %s without changing its original, with exact undo", async destination => {
+    const from = await createDesignFrame(root, { title: "Source" });
+    const to = await createDesignFrame(root, { title: "Destination" });
+    await writeFile(path.join(root, DESIGN_DIRECTORY_NAME, from.file), '<!doctype html><html><head></head><body><div data-oid="moving"><span data-oid="label">Keep</span></div></body></html>');
+    const original = await captureDesignFrameRestorePoint(root, from.file);
+    const beforeTo = await captureDesignFrameRestorePoint(root, to.file);
+    const copy = await transferDesignNode(root, {
+      frame: from.file, sourceVersion: (await readDesignFrameRenderIdentity(root, from.file)).sourceVersion,
+      nodeId: "moving", duplicateNodeId: "copy",
+      ...(destination === "frame" ? { destinationFrame: to.file, destinationSourceVersion: (await readDesignFrameRenderIdentity(root, to.file)).sourceVersion,
+        parentId: "::zeros-document-body" } : {}),
+      geometry: { x: 700, y: 50, w: 100, h: 80, z: 1 },
+    });
+    expect(copy.nodeId).toBe("copy");
+    expect(await captureDesignFrameRestorePoint(root, from.file)).toEqual(original);
+    expect((await captureDesignFrameRestorePoint(root, copy.frame)).source).toContain('data-oid="copy-label"');
+    expect(copy.changes).toHaveLength(1);
+    await restoreDesignFrameChanges(root, copy.changes, "undo");
+    expect(await captureDesignFrameRestorePoint(root, from.file)).toEqual(original);
+    expect(await captureDesignFrameRestorePoint(root, to.file)).toEqual(beforeTo);
+    await restoreDesignFrameChanges(root, copy.changes, "redo");
+    expect((await captureDesignFrameRestorePoint(root, copy.frame)).source).toContain('data-oid="copy"');
+  });
+
+  it("duplicates a frame at the released geometry in its single history entry", async () => {
+    const original = await createDesignFrame(root, { title: "Original" });
+    const sourceVersion = (await readDesignFrameRenderIdentity(root, original.file)).sourceVersion;
+    const geometry = { x: 803, y: -103, w: original.width, h: original.height, z: 2 };
+    const copy = await duplicateDesignFrame(root, original.file, { geometry, sourceVersion });
+    expect(await captureDesignFrameRestorePoint(root, copy.file)).toMatchObject({ geometry });
+    await expect(duplicateDesignFrame(root, original.file, { geometry, sourceVersion: "0".repeat(24) })).rejects.toThrow(/changed/i);
+  });
+
   it("detaches and reattaches a child atomically with exact structural undo", async () => {
     const frame = await createDesignFrame(root);
     const before = await readDesignFrame(root, frame.file);

@@ -228,25 +228,29 @@ export async function runDesignParkedReferenceRemovalSmoke({ page, check }) {
 }
 
 export async function runDesignSelectedFrameDeletionSmoke({ page, check }) {
-  await page.goto(`${new URL(page.url()).origin}/apps/desktop/src/renderer/harnesses/harness-design-workspace.html?selectionReferences`, { waitUntil: "networkidle" });
-  await page.evaluate(async () => {
-    const { useDesignWorkspaceUiStore } = await import("/apps/desktop/src/renderer/features/design-workspace/state/design-workspace-ui.ts");
-    useDesignWorkspaceUiStore.getState().setPanels("ws_design_harness", { inspectorVisible: true, layersVisible: true });
-  });
-  await page.locator('[data-design-frame-row="home.html"]').click();
-  const pricing = page.locator('[data-design-frame-row="pricing.html"]');
-  await pricing.click({ modifiers: ["Shift"] });
-  await expect(page.locator("[data-composer-design-frame]")).toHaveText("2 selected");
-  await pricing.press("Delete");
-  await expect(page.locator('[data-design-frame="pricing.html"]')).toHaveCount(0);
-  await expect(page.locator('[data-design-frame="home.html"]')).toHaveCount(1);
-  await expect(page.locator("[data-composer-design-frame]")).toHaveText("home.html");
-  expect(await page.evaluate(async () => {
-    const { designWorkspaceView } = await import("/apps/desktop/src/renderer/features/design-workspace/state/design-workspace-ui.ts");
-    const { selectedTargets, selectedFrame, frameSelected } = designWorkspaceView("ws_design_harness");
-    return { selectedTargets, selectedFrame, frameSelected };
-  })).toEqual({ selectedTargets: [{ frame: "home.html" }], selectedFrame: "home.html", frameSelected: true });
-  check("actual frame deletion preserves the surviving canonical reference and inspector selection", true);
+  for (const scoped of [false, true]) {
+    // The continuity fixture releases source preparation normally; the raw
+    // lazy fixture deliberately holds it until its loading test releases it.
+    await page.goto(`${new URL(page.url()).origin}/apps/desktop/src/renderer/harnesses/harness-design-workspace.html?selectionReferences${scoped ? "&scopedMutations&measureContinuity&engineDelayMs=0" : ""}`, { waitUntil: "networkidle" });
+    await page.evaluate(async () => {
+      const { useDesignWorkspaceUiStore } = await import("/apps/desktop/src/renderer/features/design-workspace/state/design-workspace-ui.ts");
+      useDesignWorkspaceUiStore.getState().setPanels("ws_design_harness", { inspectorVisible: true, layersVisible: true });
+    });
+    await page.locator('[data-design-frame-row="home.html"]').click();
+    const pricing = page.locator('[data-design-frame-row="pricing.html"]');
+    await pricing.click({ modifiers: ["Shift"] });
+    await expect(page.locator("[data-composer-design-frame]")).toHaveText("2 selected");
+    await pricing.press("Delete");
+    await expect(page.locator('[data-design-frame="pricing.html"]')).toHaveCount(0);
+    await expect(page.locator('[data-design-frame="home.html"]')).toHaveCount(1);
+    await expect(page.locator("[data-composer-design-frame]")).toHaveText("home.html");
+    expect(await page.evaluate(async () => {
+      const { designWorkspaceView } = await import("/apps/desktop/src/renderer/features/design-workspace/state/design-workspace-ui.ts");
+      const { selectedTargets, selectedFrame, frameSelected } = designWorkspaceView("ws_design_harness");
+      return { selectedTargets, selectedFrame, frameSelected };
+    })).toEqual({ selectedTargets: [{ frame: "home.html" }], selectedFrame: "home.html", frameSelected: true });
+    check(`actual frame deletion preserves the surviving canonical reference and inspector selection (${scoped ? "scoped" : "aggregate"} snapshot)`, true);
+  }
 }
 
 export async function runDesignSelectionLimitSmoke({ page, check }) {

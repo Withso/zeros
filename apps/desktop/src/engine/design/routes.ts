@@ -224,6 +224,7 @@ export interface DesignWorkspaceRouteHost {
       designDirectory?: string;
       hostLocalResources?: boolean;
       fresh?: boolean;
+      affectedFrames?: string[];
     },
   ): Promise<DesignWorkspaceSnapshot & { protocolCapability: string | null }>;
   readDesignSnapshotRequest(
@@ -572,6 +573,7 @@ export async function handleDesignWorkspaceRoute(
         snapshot: await host.readDesignSnapshot(workspace, remote, {
           hostLocalResources,
           fresh: true,
+          ...(params.snapshotMode === "scoped" ? { affectedFrames: [...new Set([reqStr(params, "frame"), ...transaction.operations.flatMap(operation => operation.type === "frame.set-geometry" ? [operation.frame] : [])])] } : {}),
         }),
       };
     }
@@ -1375,6 +1377,7 @@ export async function handleDesignWorkspaceRoute(
         snapshot: await host.readDesignSnapshot(workspace, remote, {
           hostLocalResources,
           fresh: true,
+          ...(params.snapshotMode === "scoped" ? { affectedFrames: [frame.file] } : {}),
         }),
       };
     }
@@ -1413,7 +1416,8 @@ export async function handleDesignWorkspaceRoute(
       const frame = await duplicateDesignFrame(
         workspace.path,
         reqStr(params, "frame"),
-        { pageId: designPageIdSchema.optional().parse(params.pageId) },
+        { pageId: designPageIdSchema.optional().parse(params.pageId),
+          ...(params.geometry !== undefined ? designMovementGuardSchema.parse({ sourceVersion: params.sourceVersion, geometry: params.geometry }) : {}) },
       );
       host.recordDesignHistory(
         workspace.path,
@@ -1427,6 +1431,7 @@ export async function handleDesignWorkspaceRoute(
         snapshot: await host.readDesignSnapshot(workspace, remote, {
           hostLocalResources,
           fresh: true,
+          ...(params.snapshotMode === "scoped" ? { affectedFrames: [frame.file, reqStr(params, "frame")] } : {}),
         }),
       };
     }
@@ -1448,6 +1453,7 @@ export async function handleDesignWorkspaceRoute(
         snapshot: await host.readDesignSnapshot(workspace, remote, {
           hostLocalResources,
           fresh: true,
+          ...(params.snapshotMode === "scoped" ? { affectedFrames: [] } : {}),
         }),
       };
     }
@@ -1495,6 +1501,7 @@ export async function handleDesignWorkspaceRoute(
         snapshot: await host.readDesignSnapshot(workspace, remote, {
           hostLocalResources,
           fresh: true,
+          ...(params.snapshotMode === "scoped" ? { affectedFrames: [frame] } : {}),
         }),
         foundationRevision: {
           before: applied.receipt.beforeRevision,
@@ -1524,6 +1531,7 @@ export async function handleDesignWorkspaceRoute(
         snapshot: await host.readDesignSnapshot(workspace, remote, {
           hostLocalResources,
           fresh: true,
+          ...(params.snapshotMode === "scoped" ? { affectedFrames: moves.map(move => move.frame) } : {}),
         }),
       };
     }
@@ -1546,6 +1554,7 @@ export async function handleDesignWorkspaceRoute(
       }
       const result = await transferDesignNode(workspace.path, {
         frame,
+        ...(params.duplicateNodeId !== undefined ? { duplicateNodeId: reqStr(params, "duplicateNodeId") } : {}),
         pageId: designPageIdSchema.optional().parse(params.pageId),
         sourceVersion: reqStr(params, "sourceVersion"),
         nodeId: reqStr(params, "nodeId"),
@@ -1611,6 +1620,7 @@ export async function handleDesignWorkspaceRoute(
         snapshot: await host.readDesignSnapshot(workspace, remote, {
           hostLocalResources,
           fresh: true,
+          ...(params.snapshotMode === "scoped" ? { affectedFrames: [result.frame, frame] } : {}),
         }),
       };
     }

@@ -7,7 +7,7 @@ import { designRuntimeFrameState } from "./state/design-runtime-store";
 export function createDesignDragPresentation(
   workspaceId: string,
   frame: DesignCanvasFrameWire,
-  details: DesignRuntimeNodeDetails,
+  details: Pick<DesignRuntimeNodeDetails, "oid" | "rect">,
   article: HTMLElement,
 ) {
   const world = article.closest<HTMLElement>("[data-design-canvas-world]");
@@ -56,6 +56,13 @@ export function createDesignDragPresentation(
   };
   let hasPixels = screenshot !== null;
   if (screenshot) showPixels(screenshot.dataUrl, !exactNode);
+  else {
+    const sourceImage = article.querySelector<HTMLImageElement>(`img[data-design-source-ready][data-design-source-version="${CSS.escape(frame.sourceVersion)}"]`);
+    if (sourceImage?.complete && sourceImage.naturalWidth > 0) {
+      showPixels(sourceImage.currentSrc || sourceImage.src, true);
+      hasPixels = true;
+    }
+  }
   world.appendChild(element);
   let disposeWatch: (() => void) | null = null;
   const remove = () => {

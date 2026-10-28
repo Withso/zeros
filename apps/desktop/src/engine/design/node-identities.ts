@@ -204,9 +204,13 @@ export function healDesignOids(source: string): {
       fixed.push({ kind: "missing", line: startTag.startLine, oid });
     }
   }
-  let html = source;
-  for (const edit of edits.sort((a, b) => b.start - a.start)) {
-    html = `${html.slice(0, edit.start)}${edit.text}${html.slice(edit.end)}`;
+  const parts: string[] = [];
+  let offset = 0;
+  for (const edit of edits.sort((a, b) => a.start - b.start)) {
+    parts.push(source.slice(offset, edit.start), edit.text);
+    offset = edit.end;
   }
+  parts.push(source.slice(offset));
+  const html = parts.join("");
   return { html, changed: edits.length > 0, fixed };
 }

@@ -40,6 +40,7 @@ export function startDesignLayoutDrag(input: {
   frame: DesignCanvasFrameWire;
   details: DesignRuntimeNodeDetails;
   zoom: () => number;
+  point?: (pointer: { clientX: number; clientY: number }) => { x: number; y: number };
   paint: (
     details:
       | DesignRuntimeNodeDetails
@@ -50,6 +51,7 @@ export function startDesignLayoutDrag(input: {
   clicked: () => void;
   failed: (error: unknown) => void;
   saving?: (save: Promise<void>) => void;
+  copied?: (frame: DesignCanvasFrameWire, nodeId: string) => void;
   isCurrent?: () => boolean;
   detach?: (
     origin: { x: number; y: number },
@@ -58,6 +60,7 @@ export function startDesignLayoutDrag(input: {
     canWrite: () => boolean,
     /** The pointer at release, in the source frame's coordinates. */
     pointer: { x: number; y: number },
+    duplicateNodeId?: string,
   ) => Promise<boolean>;
 }): (() => void) | null {
   const { event, workspaceId } = input;
@@ -70,6 +73,16 @@ export function startDesignLayoutDrag(input: {
   )
     return null;
   let runtime = initialRuntime;
+  const duplicateNodeId = event.altKey ? `copy-${crypto.randomUUID()}` : undefined;
+  const transactionId = `desktop:${crypto.randomUUID()}`;
+  if (duplicateNodeId && (!runtime.previewStructure || !runtime.supports("previewStructure") || !runtime.supports("commitStructure"))) {
+    input.failed(new Error("This document must finish updating before it can be copied."));
+    event.preventDefault();
+    event.stopPropagation();
+    return () => {};
+  }
+  let originalDetails = details;
+  let copyPreview: Promise<void> | null = null;
   const owner = event.currentTarget;
   const article = owner.closest<HTMLElement>("[data-design-frame]");
   if (!article) return null;
@@ -185,6 +198,18 @@ export function startDesignLayoutDrag(input: {
     if (inFlight) return inFlight;
     if (!dirty || !targets || stopped) return Promise.resolve();
     assertCurrent();
+    if (duplicateNodeId) {
+      if (!copyPreview) inFlight = copyPreview = runtime.previewStructure!({ previewId: transactionId,
+        operations: [{ type: "duplicate", nodeId: originalDetails.oid, duplicateNodeId }],
+      }).then(() => {
+        details = { ...originalDetails, oid: duplicateNodeId };
+        resolveDrop = createDesignLayoutDropResolver(details, targets!, { zoom: input.zoom, preserveFreePosition: freePosition });
+        if (stopped) void runtime.clearPreviewStructure?.(transactionId).catch(() => {});
+      }).finally(() => { inFlight = null; });
+      await copyPreview;
+      if (stopped) return;
+      assertCurrent();
+    }
     dirty = false;
     latest = resolveDrop!(point, origin());
     paintLine(latest);
@@ -375,6 +400,7 @@ export function startDesignLayoutDrag(input: {
         throw new Error(
           "This runtime cannot measure inherited appearance for safe layer movement.",
         );
+      originalDetails = details;
       resolveDrop = createDesignLayoutDropResolver(details, targets, {
         zoom: input.zoom,
         preserveFreePosition: freePosition,
@@ -407,10 +433,9 @@ export function startDesignLayoutDrag(input: {
           input.failed(error);
         }
       });
-    const currentBounds = article.getBoundingClientRect();
-    point = {
-      x: (pointer.clientX - currentBounds.left) / input.zoom(),
-      y: (pointer.clientY - currentBounds.top) / input.zoom(),
+    point = input.point ? input.point(pointer) : {
+      x: (pointer.clientX - bounds.left) / input.zoom(),
+      y: (pointer.clientY - bounds.top) / input.zoom(),
     };
     // A free layer goes exactly where the pointer puts it, so its box is
     // painted there on every sample, as in a design tool. Waiting for the
@@ -437,6 +462,7 @@ export function startDesignLayoutDrag(input: {
     input.finished();
   };
   const restore = async () => {
+    await copyPreview?.catch(() => {});
     await inFlight?.catch(() => {});
     if (
       dragOwners.get(article) !== ownership ||
@@ -447,6 +473,7 @@ export function startDesignLayoutDrag(input: {
       return;
     }
     if (previewedIds.size === 0 && !suppressed) {
+      if (duplicateNodeId) await runtime.clearPreviewStructure?.(transactionId).catch(() => {});
       const restored = await runtime
         .getLayoutTargets(undefined, details.oid)
         .catch(() => []);
@@ -481,9 +508,10 @@ export function startDesignLayoutDrag(input: {
         }).catch(() => {}),
       ),
     );
+    if (duplicateNodeId) await runtime.clearPreviewStructure?.(transactionId).catch(() => {});
     if (isCurrent())
       input.paint(
-        details,
+        originalDetails,
         targets?.find((target) => target.oid === details.layout?.parentId),
       );
     presentation?.remove();
@@ -520,11 +548,13 @@ export function startDesignLayoutDrag(input: {
       if (!drop) {
         const transferred = await input.detach?.(
           origin(),
-          details,
+          duplicateNodeId ? originalDetails : details,
           (target) => presentation?.handoff(target) ?? Promise.resolve(),
           isCurrent,
           { ...point },
+          duplicateNodeId,
         );
+        if (duplicateNodeId) await runtime.clearPreviewStructure?.(transactionId).catch(() => {});
         if (!transferred) await restore();
         else presentation?.remove();
         return;
@@ -538,7 +568,7 @@ export function startDesignLayoutDrag(input: {
         await restore();
         return;
       }
-      if (drop.relocation) {
+      if (drop.relocation && !duplicateNodeId) {
         // The preview carried every inherited value; the saved move keeps
         // only what the drop parent, measured now, would not give the layer.
         const parent = await runtime
@@ -581,6 +611,7 @@ export function startDesignLayoutDrag(input: {
         (candidate) => candidate.oid === drop.parentId,
       );
       const operations: DesignOperation[] = [
+        ...(duplicateNodeId ? [{ operationId: crypto.randomUUID(), type: "node.duplicate" as const, nodeId: originalDetails.oid, duplicateNodeId }] : []),
         {
           operationId: crypto.randomUUID(),
           type: "node.move",
@@ -613,19 +644,25 @@ export function startDesignLayoutDrag(input: {
           responsiveContext: "base",
           stateContext: "default",
         });
-      await applyDesignEditCached(
+      const result = await applyDesignEditCached(
         workspaceId,
         { ...frame, sourceVersion },
         {
           schemaVersion: 1,
-          transactionId: `desktop:${crypto.randomUUID()}`,
+          transactionId,
           actor: { kind: "human", id: "desktop" },
-          intent: "Move layer",
+          intent: duplicateNodeId ? "Copy and place layer" : "Move layer",
           createdAt: Date.now(),
           operations,
         },
         { movementGuard: { sourceVersion, geometry }, isCurrent },
+        duplicateNodeId ? { structurePreviewId: transactionId } : undefined,
       );
+      if (duplicateNodeId) {
+        await runtime.clearPreviewStructure?.(transactionId).catch(() => {});
+        const confirmed = result.snapshot?.frames.find(candidate => candidate.file === frame.file);
+        if (confirmed && ownsPointer() && isCurrentDesignPageOwner(pageOwner)) input.copied?.(confirmed, duplicateNodeId);
+      }
       presentation?.remove();
     })();
     pendingSaves.set(saveKey, save);

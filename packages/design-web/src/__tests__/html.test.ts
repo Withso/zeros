@@ -210,6 +210,35 @@ describe("HTML source adapter", () => {
     );
   });
 
+  it("preserves a large authored subtree and its neighbors through copy and delete", () => {
+    const children = Array.from({ length: 1_000 }, (_, index) =>
+      `<div class='item' data-oid="node-${index}"><!-- ${index} --><span data-oid="label-${index}">A &amp; B</span></div>`,
+    ).join("\n");
+    const subtree = `<main data-oid="root">\n${children}\n</main>`;
+    const before = '<!doctype html><html><head><style>.item { color: red }</style></head><body>\n';
+    const after = '\n<aside data-oid="copy-node-0">Neighbor</aside></body></html>';
+    const source = before + subtree + after;
+    const copied = mutateDesignNodeDuplicateSource(source, "root", "copy");
+    expect(copied.startsWith(before + subtree)).toBe(true);
+    expect(copied.endsWith(after)).toBe(true);
+    expect(copied).toContain('data-oid="copy-node-0-2"');
+    expect(copied).toContain('data-oid="copy-label-999"');
+    expect(mutateDesignNodeDeleteSource(copied, "copy")).toBe(source);
+    expect(mutateDesignNodeDeleteSource(copied, "root").replaceAll(/data-oid="[^"]+"/g, "data-oid"))
+      .toBe(source.replaceAll(/data-oid="[^"]+"/g, "data-oid"));
+  });
+
+  it("repairs a thousand missing identities without rewriting authored bytes", () => {
+    const source = '<!doctype html><html><body>' + Array.from({ length: 1_000 }, (_, index) =>
+      `<section class='item'>${index} &amp; text<!-- preserve spacing --><img src='assets/a.png' /></section>`,
+    ).join("\r\n") + "</body></html>";
+    const healed = healDesignHtmlIdentities(source);
+    expect(healed.healed).toBe(2_000);
+    expect(healed.source.replaceAll(/ data-oid="[^"]+"/g, "")).toBe(source);
+    expect(new Set([...healed.source.matchAll(/ data-oid="([^"]+)"/g)].map(match => match[1])).size).toBe(2_000);
+    expect(healDesignHtmlIdentities(healed.source)).toEqual({ source: healed.source, changed: false, healed: 0 });
+  });
+
   it("allows only local contained URL references in HTML and CSS", () => {
     expect(() =>
       assertSafeDesignHtmlFragment(

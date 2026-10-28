@@ -138,12 +138,26 @@ Escape cancels a text draft before saving starts. Once its transaction starts,
 retain the painted text through the displayed-buffer handoff, including Escape
 before React has published the committing state and during settling.
 
+Hold source writes while exercising repeated duplicate, duplicate → Delete →
+Delete, and immediate transfer → edit. Resolve semantic input order, not the
+last React render or an outgoing runtime. For scoped acknowledgements, verify
+through the real producer and consumer that unrelated HTML is not prepared,
+retained covers do not authorize edits, and late preparation cannot overwrite
+a newer mutation epoch. A parent layout effect can prune a deleted selection
+before a child's passive activation runs; fence that resting refresh against
+current semantic selection so it cannot erase surviving targets.
+Hold the live document and source projection unavailable during a canvas-frame
+nudge. Geometry-only movement must remain usable, including queued saves,
+cancellation and Undo/Redo; child-layout edits still require current geometry.
+
 Charge displayed and inactive loaded images to one retention pool. Counting
 only inactive images lets a destination add a full working set on top of a full
 warm cache. Reclaim older unleased images when a new display is confirmed,
 preserve their encoded source, and never evict a displayed image to satisfy an
 optional cache limit. Test a full 256-frame Personal → organization → Personal
 return within the shared budget as well as pressure beyond that capacity.
+Hold a sharper image's decode across culling and return: an encoded refinement
+must not hide an already-decoded same-owner cover or delay its first paint.
 Qualification must distinguish retired display work from bounded completed
 cache entries. Prove passive source ownership without selecting an editor or
 acquiring a cache lease; those actions change the workload being measured.

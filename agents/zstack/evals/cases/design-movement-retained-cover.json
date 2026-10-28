@@ -1,0 +1,9 @@
+{
+  "id": "design-movement-retained-cover",
+  "kind": "replay",
+  "area": "desktop-design-state",
+  "fixedBy": "pr:761",
+  "symptom": "Movement preparation could return retained frame pixels as editable source while that frame was still unprepared after revalidation.",
+  "rule": "agents/zstack/playbooks/performance.md: retained covers do not authorize edits and late preparation cannot overwrite a newer mutation epoch.",
+  "check": "pnpm exec vitest run --config vitest.config.ts apps/desktop/src/renderer/features/design-workspace/__tests__/design-workspace-cache.test.ts -t \"waits for source preparation\""
+}

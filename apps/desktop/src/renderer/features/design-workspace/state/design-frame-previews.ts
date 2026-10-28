@@ -398,8 +398,8 @@ export class DesignFramePreviews {
 
   /** Admission reserves pixels before any <img> or decoder receives the URL.
    * Try a cached smaller picture if detail would exceed the display budget. */
-  acquire(target: DesignPreviewTarget): DesignPreviewPictureLease | null {
-    const candidates = this.candidates(target);
+  acquire(target: DesignPreviewTarget, accept?: (picture: DesignPreviewPicture) => boolean): DesignPreviewPictureLease | null {
+    const candidates = this.candidates(target).filter(picture => !accept || accept(picture));
     // Optional refinement must try an already cached smaller cover before
     // reclaiming another frame's warm pixels. A genuinely cold display may
     // still request pressure after every non-evicting candidate failed.

@@ -1,5 +1,9 @@
 import { z } from "zod";
 
+/** Optional duplicate identity/placement on Local copy gestures. Older engines
+ * must never receive a copy as a move that removes its source. */
+export const DESIGN_COPY_PLACEMENT_CAPABILITY = "design.copy-placement.v1";
+
 export const DESIGN_RELOCATION_INHERITED_PROPERTIES = [
   "color",
   "font-family",

@@ -1,5 +1,6 @@
 import { expect } from "@playwright/test";
 import { runDesignSourceSurfacesSmoke, runDesignVectorSurfacesSmoke } from "./ui-smoke-design-source-surfaces.mjs";
+import { runDesignWarmPreviewRefinementSmoke } from "./ui-smoke-design-preview-continuity.mjs";
 
 async function openZoomedOut(page) {
   const origin = new URL(page.url()).origin;
@@ -47,6 +48,7 @@ export async function runDesignPicturesSmoke({ page, check }) {
   await runDesignTextPicturesSmoke({ page, check });
   await runDesignOverviewChromeSmoke({ page, check });
   await runDesignOverviewContinuitySmoke({ page, check });
+  await runDesignWarmPreviewRefinementSmoke({ page, check });
   await runDesignRetinaTileHandoffSmoke({ page, check });
   // This fixture persists a directory and camera, unlike the legacy fixtures
   // without a directory identity. Keep its reloads in one isolated context so

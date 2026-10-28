@@ -30,6 +30,8 @@ import {
   type DesignRuntimeGenerationPatch,
   type DesignRuntimeInsertPreview,
   type DesignRuntimeInsertPreviewResult,
+  type DesignRuntimeStructurePreview,
+  type DesignRuntimeStructurePreviewResult,
   type DesignRuntimeMotionPreview,
   type DesignRuntimePlaybackStopped,
   type DesignRuntimeNodeDetails,
@@ -70,6 +72,7 @@ export interface DesignFrameRuntimeCallbacks {
     event: "ready" | "mutation",
   ) => void;
   onReady?: (capabilities: DesignRuntimeCapabilities) => void;
+  onGenerationChanged?: () => void;
   onPlaybackStopped?: (event: DesignRuntimePlaybackStopped) => void;
 }
 
@@ -135,6 +138,8 @@ export interface DesignFrameRuntimeConnection {
   ): Promise<DesignRuntimeInsertPreviewResult>;
   /** Remove the named previews (all when omitted). */
   clearPreviewInserts(nodeIds?: readonly string[], signal?: AbortSignal): Promise<{ snapshot: DesignRuntimeSnapshot }>;
+  previewStructure?(input: DesignRuntimeStructurePreview, signal?: AbortSignal): Promise<DesignRuntimeStructurePreviewResult>;
+  clearPreviewStructure?(previewId?: string, signal?: AbortSignal): Promise<void>;
   previewStyles(
     nodeId: string,
     styles: Record<string, string | null>,
@@ -767,6 +772,21 @@ class DesignRuntimeConnectionImpl implements DesignFrameRuntimeConnection {
     return result as { applied: number; snapshot: DesignRuntimeSnapshot };
   }
 
+  async previewStructure(input: DesignRuntimeStructurePreview, signal?: AbortSignal): Promise<DesignRuntimeStructurePreviewResult> {
+    if (!this.supports("previewStructure")) throw runtimeError("previewStructure is not supported", "METHOD_NOT_SUPPORTED");
+    const result = await this.request("previewStructure", { ...input }, signal) as Partial<DesignRuntimeStructurePreviewResult> | null;
+    const ids = input.operations.flatMap(operation => operation.type === "duplicate" ? [operation.duplicateNodeId] : []);
+    if (!result || result.sourceVersion !== this.expectedSourceVersion || !Array.isArray(result.details) || result.details.length !== ids.length ||
+      result.details.some((detail, index) => !isNodeDetails(detail) || detail.sourceVersion !== result.sourceVersion || detail.oid !== ids[index]))
+      throw runtimeError("previewStructure returned malformed data");
+    return result as DesignRuntimeStructurePreviewResult;
+  }
+
+  async clearPreviewStructure(previewId?: string, signal?: AbortSignal): Promise<void> {
+    if (!this.supports("clearPreviewStructure")) throw runtimeError("clearPreviewStructure is not supported", "METHOD_NOT_SUPPORTED");
+    await this.request("clearPreviewStructure", previewId === undefined ? {} : { previewId }, signal);
+  }
+
   async previewInsert(
     input: DesignRuntimeInsertPreview,
     signal?: AbortSignal,
@@ -927,7 +947,10 @@ class DesignRuntimeConnectionImpl implements DesignFrameRuntimeConnection {
         result.details.some((details) => details.sourceVersion !== expected)
       )
         throw runtimeError("restoreGeneration returned malformed data");
-      if (commit) this.expectedSourceVersion = targetSourceVersion;
+      if (commit) {
+        this.expectedSourceVersion = targetSourceVersion;
+        this.callbacks.onGenerationChanged?.();
+      }
       return result;
     };
     return commit ? this.changeGeneration(restore) : restore();
@@ -961,7 +984,7 @@ class DesignRuntimeConnectionImpl implements DesignFrameRuntimeConnection {
     }
     return this.changeGeneration(async () => {
       const result = await this.sendRequest(
-        "commitStyles",
+        patch?.structure ? "commitStructure" : "commitStyles",
         { updates, nextSourceVersion, ...(patch ? { patch } : {}) },
         signal,
       );
@@ -976,6 +999,7 @@ class DesignRuntimeConnectionImpl implements DesignFrameRuntimeConnection {
         throw runtimeError("commitStyles returned malformed data");
       }
       this.expectedSourceVersion = nextSourceVersion;
+      this.callbacks.onGenerationChanged?.();
       return result;
     });
   }
@@ -1161,6 +1185,11 @@ export function connectDesignFrameRuntime(
     host,
     {
       ...callbacks,
+      onGenerationChanged: () => {
+        if (connectionsByFrame.get(key) !== connection) return;
+        for (const waiter of [...(readyWaiters.get(key) ?? [])]) waiter();
+        callbacks.onGenerationChanged?.();
+      },
       onReady: (capabilities) => {
         if (connectingByFrame.get(key) !== connection) return;
         connectingByFrame.delete(key);
@@ -1195,26 +1224,39 @@ export function designFrameRuntime(
   return connectionsByFrame.get(frameKey(workspaceId, frame)) ?? null;
 }
 
-/** The frame's runtime once its document is ready, or null after
- * `timeoutMs`. A canvas gesture asks a frame to go live and waits for it. */
+/** Wait for editable authority, including an incoming replacement while the
+ * outgoing document still paints. One bounded event subscription, no polling. */
 export function waitForDesignFrameRuntime(
   workspaceId: string,
   frame: string,
   timeoutMs: number,
+  options?: { sourceVersion?: string; signal?: AbortSignal },
 ): Promise<DesignFrameRuntimeConnection | null> {
-  const current = designFrameRuntime(workspaceId, frame);
+  if (options?.signal?.aborted) return Promise.resolve(null);
+  const read = () => {
+    const runtime = designFrameRuntime(workspaceId, frame);
+    return runtime && (!options?.sourceVersion || runtime.sourceVersion === options.sourceVersion) ? runtime : null;
+  };
+  const current = read();
   if (current) return Promise.resolve(current);
   const key = frameKey(workspaceId, frame);
   return new Promise((resolve) => {
     let waiters = readyWaiters.get(key);
     if (!waiters) readyWaiters.set(key, (waiters = new Set()));
-    const settle = () => {
+    const settle = (runtime: DesignFrameRuntimeConnection | null) => {
       clearTimeout(timer);
-      waiters!.delete(settle);
+      options?.signal?.removeEventListener("abort", abort);
+      waiters!.delete(ready);
       if (!waiters!.size) readyWaiters.delete(key);
-      resolve(designFrameRuntime(workspaceId, frame));
+      resolve(runtime);
     };
-    const timer = setTimeout(settle, Math.max(0, timeoutMs));
-    waiters.add(settle);
+    const ready = () => {
+      const runtime = read();
+      if (runtime) settle(runtime);
+    };
+    const abort = () => settle(null);
+    const timer = setTimeout(abort, Math.max(0, timeoutMs));
+    waiters.add(ready);
+    options?.signal?.addEventListener("abort", abort, { once: true });
   });
 }

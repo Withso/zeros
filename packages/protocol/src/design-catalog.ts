@@ -172,6 +172,14 @@ export type DesignCatalogReply = z.infer<typeof designCatalogReplySchema>;
 /** Local navigation and bounded authoritative preparation; opt in only after
  * capability negotiation. Catalog revisions never stand in for source hashes. */
 export const DESIGN_LAZY_PREPARATION_CAPABILITY = "design.preparation.v1";
+export const DESIGN_MUTATION_SNAPSHOTS_CAPABILITY = "design.mutation-snapshots.v1";
+/** Complete metadata plus only the source generations affected by a write.
+ * Other documents must be prepared on demand before they authorize edits. */
+export const designMutationCatalogSchema = z.object({
+  revision,
+  frames: z.array(designCatalogFrameSchema).max(DESIGN_CATALOG_DESCRIPTOR_LIMIT),
+}).strict();
+export type DesignMutationCatalog = z.infer<typeof designMutationCatalogSchema>;
 export const designNavigationReadSchema = z.object({ workspaceId: z.string().min(1).max(4096) }).strict();
 export const designFramesPrepareSchema = z.object({
   workspaceId: z.string().min(1).max(4096),

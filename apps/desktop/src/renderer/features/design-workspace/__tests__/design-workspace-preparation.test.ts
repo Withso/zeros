@@ -1,6 +1,6 @@
 import { expect, it, vi } from "vitest";
 import type { DesignWorkspaceSnapshotWire, DesignCanvasFrameWire } from "../../../platform/bridge/design-bridge";
-import { DesignFramePreparation } from "../state/design-workspace-preparation";
+import { DesignFramePreparation, projectDesignMutationSnapshot } from "../state/design-workspace-preparation";
 import { designFrameViews, isPreparedDesignFrame, preparedDesignSnapshot } from "../state/design-frame-view";
 
 function frame(file: string): DesignCanvasFrameWire {
@@ -16,6 +16,20 @@ function snapshot(epoch = 1, count = 3): DesignWorkspaceSnapshotWire {
 }
 function deferred<T>() { let resolve!: (value: T) => void; let reject!: (error: Error) => void; const promise = new Promise<T>((done, fail) => { resolve = done; reject = fail; }); return { promise, resolve, reject }; }
 const reply = (files: readonly string[]) => ({ catalogRevision: "a".repeat(64), frames: files.map(frame), errors: [] });
+
+it("retains exact-owner covers after a scoped mutation without promoting unchecked source", () => {
+  const previous = { ...snapshot(), frames: [frame("f0.html"), frame("f1.html"), frame("removed.html")] };
+  const edited = { ...frame("f0.html"), sourceVersion: "b".repeat(24) };
+  const next = { ...snapshot(), preparation: undefined, frames: [edited], mutationCatalog: { revision: "b".repeat(64),
+    frames: [edited, frame("f1.html")].map((frame, order) => ({ ...frame, id: frame.frameId!, pageId: frame.pageId!, source: frame.file,
+      kind: "html" as const, order, preparation: "unprepared" as const })) } };
+  const projected = projectDesignMutationSnapshot(previous, next);
+  expect(projected.frames).toEqual([edited, previous.frames[1]]);
+  expect(preparedDesignSnapshot(projected)!.frames).toEqual([edited]);
+  expect(designFrameViews(projected)[1]).toHaveProperty("previous", previous.frames[1]);
+  expect(projectDesignMutationSnapshot({ ...previous, directoryId: "design_other" }, next).frames).toEqual([edited]);
+  expect(projectDesignMutationSnapshot(previous, next).preparation!.epoch).not.toBe(projected.preparation!.epoch);
+});
 
 it("does not fabricate a prepared generation from metadata or a previous matching hash", () => {
   const value = snapshot(); value.frames = [frame("f0.html")];

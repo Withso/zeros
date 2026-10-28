@@ -12,6 +12,17 @@ const ROOT = path.resolve(
 );
 
 describe("UI smoke Vite configuration", () => {
+  it("keeps browser dependency URLs valid while a development server optimizes its own graph", async () => {
+    const smoke = await resolveConfig({ root: ROOT }, "serve", "ui-smoke");
+    const development = await resolveConfig({ root: ROOT }, "serve", "development");
+
+    expect(smoke.cacheDir).not.toBe(development.cacheDir);
+    // The browser still serves generated modules through the same allowlist.
+    expect(
+      smoke.cacheDir.startsWith(path.join(ROOT, "node_modules") + path.sep),
+    ).toBe(true);
+  });
+
   it("disables reloads that destroy in-flight browser evaluations", async () => {
     const config = await resolveConfig({ root: ROOT }, "serve", "ui-smoke");
 
