@@ -145,9 +145,15 @@ export async function runFolderWorkspaceSmoke({ page, check }) {
     ).toHaveCount(0);
     await row.click({ button: "right" });
     await expect(
+      page.getByRole("menuitem", { name: "Copy link", exact: true }),
+    ).toBeVisible();
+    await expect(
       page.getByRole("menuitem", { name: /Archive|Set status/ }),
     ).toHaveCount(0);
+    await page.keyboard.press("Escape");
+    await expect(page.getByRole("menu")).toHaveCount(0);
     await row.click();
+    await expect(row).toHaveCount(0);
     await expect
       .poll(async () => (await state()).activeFolder)
       .toBe("/fixture/To-do app");

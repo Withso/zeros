@@ -27,3 +27,8 @@ fixture that had persisted an attached device. The feature was available, but
 the restored device replaced setup. Start the public first-use assertion with a
 fresh workbench, as the Android setup scenario already does; keep the existing
 device and cloud restoration checks intact.
+
+Public Local CLI also makes Copy link available on folder cards. Their smoke
+previously assumed right-click opened nothing, so its next click was blocked by
+the newly available modal menu. Assert Copy link, retain the absence of Git-only
+actions, and close the menu with Escape before exercising normal navigation.
