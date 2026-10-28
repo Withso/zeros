@@ -16,11 +16,14 @@
 import { NodeViewWrapper, type NodeViewProps } from "@tiptap/react";
 import {
   useCallback,
+  useMemo,
+  useEffect,
+  useRef,
   useState,
   useSyncExternalStore,
   type ReactNode,
 } from "react";
-import { Book, X } from "lucide-react";
+import { Book, Download, Files, Film, MoreHorizontal, X } from "lucide-react";
 
 import { cn } from "../../../shared/ui/cn";
 import { FileTypeIcon } from "./file-type-icon";
@@ -33,7 +36,13 @@ import {
   HoverCardTrigger,
   Tooltip,
   Button,
+  DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger,
 } from "@/renderer/shared/ui/primitives";
+import { attachmentNodeIds } from "./attachment-group";
+import { openComposerAttachmentGroup } from "../attachment-group-files";
+import { isVideoFile } from "./video-key-frames";
+import { downloadAttachment } from "../attachment-download";
+import { toast } from "@/renderer/shared/ui/primitives/elements";
 import {
   AttachmentTextPreview,
   attachmentTextPreviewKey,
@@ -179,7 +188,45 @@ export function SkillPill(props: NodeViewProps) {
 // ── AttachmentPill — inline image / text-file attachment ───
 
 export function AttachmentPill(props: NodeViewProps) {
+  if (attachmentNodeIds(props.node.attrs).length > 1) return <AttachmentGroupPill {...props} />;
+  return <SingleAttachmentPill {...props} />;
+}
+
+function AttachmentGroupPill(props: NodeViewProps) {
+  const ctx = useComposerEditorContext();
+  const ids = useMemo(() => attachmentNodeIds(props.node.attrs), [props.node.attrs]);
+  const files = ids.map(id => ctx.getAttachment(id));
+  const progress = useSyncExternalStore(useCallback(listener => {
+    if (!ctx.cwd || !ctx.attachmentImagesActive) return () => {};
+    const stops = ids.map(id => subscribeFileAttachmentProgress(ctx.cwd!, ctx.getAttachment(id)?.contextAttachmentId ?? id, listener));
+    return () => stops.forEach(stop => stop());
+  }, [ctx, ids]), () => ids.map(id =>
+    ctx.cwd ? getFileAttachmentProgress(ctx.cwd, ctx.getAttachment(id)?.contextAttachmentId ?? id)?.phase ?? "" : "").join(","), () => "");
+  const invalid = files.some(file => !file || !file.validation.ok || file.unavailable) || progress.includes("error");
+  const name = String(props.node.attrs.name), id = String(props.node.attrs.groupId);
+  const available = files.filter((file): file is NonNullable<typeof file> => !!file);
+  const open = () => {
+    if (ctx.onOpenAttachment) return; // Create's menu below opens each selected source.
+    openComposerAttachmentGroup(ctx.cwd, id, name, available);
+  };
+  const label = <><span className="max-w-[16rem] truncate">{name}</span><span className="text-muted-fg shrink-0 text-xxs">+{ids.length - 1}</span></>;
+  return <Tooltip label={`${name} · ${ids.length} files${invalid ? " · Some files are unavailable" : progress.includes("saving") ? " · Saving attachments" : ""}`}>
+    <NodeViewWrapper as="span" contentEditable={false} data-attachment-pill="" data-attachment-group="" aria-busy={progress.includes("saving") || undefined}
+      className={cn(PILL_SHELL, "composer-pill", COMPOSER_PILL_SPACING, props.selected && "ring-highlighted-bright/40 ring-2", invalid && "border-yellow-icon/40")}>
+      <PillRemoveButton label={name} disabled={!ctx.editable} onRemove={() => removePill(props)}><Files size={13} /></PillRemoveButton>
+      {ctx.onOpenAttachment ? <DropdownMenu>
+        <DropdownMenuTrigger asChild><Button variant="ghost" aria-label={`Open ${name}, ${ids.length} files`} disabled={!ctx.attachmentImagesActive}
+          onMouseDown={event => event.preventDefault()} className="m-0 flex min-w-0 gap-2 border-0 bg-transparent p-0 text-inherit">{label}</Button></DropdownMenuTrigger>
+        <DropdownMenuContent>{available.map(file => <DropdownMenuItem key={file.id} onSelect={() => ctx.onOpenAttachment?.(file)}>{file.name}</DropdownMenuItem>)}</DropdownMenuContent>
+      </DropdownMenu> : <Button variant="ghost" aria-label={`Open ${name}, ${ids.length} files`} disabled={!ctx.attachmentImagesActive || !ctx.cwd || !available.length}
+        onMouseDown={event => event.preventDefault()} onClick={open} className="m-0 flex min-w-0 gap-2 border-0 bg-transparent p-0 text-inherit">{label}</Button>}
+    </NodeViewWrapper>
+  </Tooltip>;
+}
+
+function SingleAttachmentPill(props: NodeViewProps) {
   const [previewOpen, setPreviewOpen] = useState(false);
+  const [extracting, setExtracting] = useState(false);
   const attrs = props.node.attrs as {
     attachmentId: string;
     name: string;
@@ -188,6 +235,9 @@ export function AttachmentPill(props: NodeViewProps) {
   };
   const ctx = useComposerEditorContext();
   const att = ctx.getAttachment(attrs.attachmentId);
+  const download = useRef<AbortController | null>(null);
+  const [downloading, setDownloading] = useState(false);
+  useEffect(() => () => { download.current?.abort(); download.current = null; setDownloading(false); }, [ctx.cwd, ctx.attachmentImagesActive, att]);
   const imageMime = imagePreviewMimeType(attrs.name, att?.mimeType ?? attrs.mimeType);
   const isImage = imageMime !== null;
   const progressId = att?.contextAttachmentId ?? attrs.attachmentId;
@@ -300,6 +350,24 @@ export function AttachmentPill(props: NodeViewProps) {
             text resizes this pill and rewraps every later file in a drop. */}
         <span className="max-w-[16rem] truncate">{attrs.name}</span>
       </Button>
+      {att && isVideoFile({ name: att.name, mimeType: att.mimeType }) && <DropdownMenu>
+        <DropdownMenuTrigger asChild><Button variant="ghost" aria-label={`Actions for ${att.name}`}
+          disabled={!ctx.editable || !ctx.attachmentImagesActive} onMouseDown={event => event.preventDefault()}
+          className="text-fg2 size-4 shrink-0 border-0 bg-transparent p-0"><MoreHorizontal size={12} /></Button></DropdownMenuTrigger>
+        <DropdownMenuContent align="start">
+          <DropdownMenuItem disabled={downloading || !att.validation.ok || att.unavailable} onSelect={() => {
+            if (download.current) return;
+            const controller = new AbortController(); download.current = controller; setDownloading(true);
+            void downloadAttachment(att, ctx.cwd, controller.signal).catch(() => {
+              if (!controller.signal.aborted) toast.error("Couldn't download this file.");
+            }).finally(() => { if (download.current === controller) { download.current = null; setDownloading(false); } });
+          }}><Download className="size-3.5" />{downloading ? "Downloading…" : "Download"}</DropdownMenuItem>
+          <DropdownMenuItem disabled={extracting || !ctx.attachVideoFrames} onSelect={() => {
+            setExtracting(true);
+            void Promise.resolve(ctx.attachVideoFrames?.(attrs.attachmentId)).finally(() => setExtracting(false));
+          }}><Film className="size-3.5" />{extracting ? "Extracting frames…" : "Attach as frames"}</DropdownMenuItem>
+        </DropdownMenuContent>
+      </DropdownMenu>}
     </NodeViewWrapper>
   );
 

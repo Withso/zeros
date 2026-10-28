@@ -18,6 +18,18 @@ afterEach(() => {
   for (const root of roots.splice(0)) fs.rmSync(root, { recursive: true, force: true });
 });
 
+it.each([false, true])("streams a PDF instead of exposing its source as editable text (remote=%s)", async remote => {
+  const root = fixture("report.PDF", 0);
+  const bytes = Buffer.from("%PDF-1.7\n1 0 obj << /Type /Catalog >> endobj\n%%EOF");
+  fs.writeFileSync(path.join(root, "report.PDF"), bytes);
+  const result = readWorkspaceFile(root, "report.PDF", { remote, streamMedia: true });
+  expect(result).toMatchObject({ kind: "binary", bytes: bytes.length,
+    media: { mimeType: "application/pdf", version: expect.any(String) } });
+  expect(result.content).toBeUndefined();
+  expect(await readWorkspaceMediaRange(root, { path: "report.PDF", version: result.media!.version, offset: 0, length: bytes.length }, remote))
+    .toEqual({ base64: bytes.toString("base64"), bytes: bytes.length });
+});
+
 it.each([false, true])("returns metadata for a 200 MB image/video without reading bytes (remote=%s)", remote => {
   for (const name of ["large.mp4", "large.png"]) {
     const root = fixture(name, 200_000_000);

@@ -10,8 +10,10 @@ import {
   RotateCcw,
   Volume2,
   VolumeX,
+  MoreHorizontal,
+  Film,
 } from "lucide-react";
-import { IconButton, Input, Tooltip } from "@/renderer/shared/ui/primitives";
+import { IconButton, Input, Tooltip, DropdownMenu, DropdownMenuTrigger, DropdownMenuContent, DropdownMenuItem } from "@/renderer/shared/ui/primitives";
 import { toast } from "@/renderer/shared/ui/primitives/elements";
 import { useDocumentActive } from "@/renderer/state/use-document-active";
 import { WorkbenchEmptyState } from "../tab-status";
@@ -21,9 +23,13 @@ import { useFileMediaViewport } from "./file-media-viewport";
 import { cn } from "@/renderer/shared/ui/cn";
 import type { FileMediaDescriptor } from "@zeros/protocol/file-media";
 import { openWorkspaceMedia, type FileMediaLease } from "@/renderer/platform/file-media";
+import { useWorkspaceStore } from "@/renderer/state/store";
+import { workspaceFileAccessKey } from "@/renderer/platform/workspace-file-scope";
+import { deliverFilesToChat } from "@/renderer/features/agent/composer-file-attachment-delivery";
 
 interface FileMediaPreviewProps {
   kind: "image" | "video";
+  cwd?: string;
   source?: string;
   sourceIdentity?: string;
   mediaSource?: { cwd: string; bytes: number; media: FileMediaDescriptor };
@@ -36,6 +42,7 @@ interface FileMediaPreviewProps {
  * it by workspace/tab/path/revision; the existing read cache owns source bytes. */
 export function FileMediaPreview({
   kind,
+  cwd: workspaceCwd,
   source,
   sourceIdentity,
   mediaSource,
@@ -76,6 +83,34 @@ export function FileMediaPreview({
   const camera = useFileMediaViewport(media, identity, visible, ready);
   const playback = useRef({ identity, time: 0, muted: false });
   if (playback.current.identity !== identity) playback.current = { identity, time: 0, muted: false };
+  const [extracting, setExtracting] = useState(false);
+  const extraction = useRef<AbortController | null>(null);
+  const targetChatId = useWorkspaceStore(state => {
+    if (!workspaceCwd) return null;
+    const id = state.activeChatByFolder[workspaceCwd] ?? state.activeChatId;
+    return state.chats.some(chat => chat.id === id && chat.folder === workspaceCwd && !chat.archived) ? id : null;
+  });
+  useEffect(() => {
+    setExtracting(false);
+    return () => { extraction.current?.abort(); extraction.current = null; };
+  }, [visible, identity, workspaceCwd, targetChatId]);
+  const attachFrames = async () => {
+    if (!visible || !ready || !displayedSource || !workspaceCwd || !targetChatId || extraction.current) return;
+    const controller = new AbortController(); extraction.current = controller; setExtracting(true);
+    const access = workspaceFileAccessKey(workspaceCwd), name = path.split("/").pop() ?? path;
+    try {
+      const { videoContextFiles } = await import("@/renderer/features/agent/composer-editor/video-context-files");
+      const files = await videoContextFiles({ name, url: displayedSource }, controller.signal);
+      if (controller.signal.aborted || workspaceFileAccessKey(workspaceCwd) !== access) return;
+      const state = useWorkspaceStore.getState();
+      if ((state.activeChatByFolder[workspaceCwd] ?? state.activeChatId) !== targetChatId ||
+          !state.chats.some(chat => chat.id === targetChatId && chat.folder === workspaceCwd && !chat.archived)) return;
+      if (!files.length) { toast.error("No frames could be extracted from this video."); return; }
+      deliverFilesToChat(targetChatId, { id: `video-frames:${crypto.randomUUID()}`, files, groupName: `${name} frames` }, { focus: false });
+      toast.success("Frames and timeline attached");
+    } catch { if (!controller.signal.aborted) toast.error("Couldn't attach video frames."); }
+    finally { if (extraction.current === controller) { extraction.current = null; setExtracting(false); } }
+  };
 
   useLayoutEffect(() => {
     if (!visible && media?.tagName === "VIDEO")
@@ -152,7 +187,14 @@ export function FileMediaPreview({
                 <Copy className="size-3.5" />
               </IconButton>
             </Tooltip>
-            <Tooltip label={downloadLabel}>
+            {kind === "video" ? <DropdownMenu>
+              <DropdownMenuTrigger asChild><IconButton label="Video actions" size="compact" className={WORKBENCH_TITLE_ACTION_CLS}><MoreHorizontal className="size-3.5" /></IconButton></DropdownMenuTrigger>
+              <DropdownMenuContent align="start">
+                {lease ? <DropdownMenuItem onSelect={() => { void lease.download(path.split("/").pop() ?? path).catch(() => toast.error("Couldn't download this file.")); }}><Download className="size-3.5" />Download</DropdownMenuItem>
+                  : <DropdownMenuItem asChild disabled={!source}><a href={source} download={path.split("/").pop()}><Download className="size-3.5" />Download</a></DropdownMenuItem>}
+                <DropdownMenuItem disabled={!ready || !visible || !targetChatId || extracting} onSelect={() => void attachFrames()}><Film className="size-3.5" />{extracting ? "Extracting frames…" : "Attach as frames"}</DropdownMenuItem>
+              </DropdownMenuContent>
+            </DropdownMenu> : <Tooltip label={downloadLabel}>
               {lease ? <IconButton
                 label={downloadLabel}
                 size="compact"
@@ -169,7 +211,7 @@ export function FileMediaPreview({
                   <Download className="size-3.5" />
                 </a>
               </IconButton>}
-            </Tooltip>
+            </Tooltip>}
           </>,
           actionsContainer,
         )}
@@ -206,6 +248,7 @@ export function FileMediaPreview({
             />
           ) : (
             <video
+              key={identity}
               ref={setMedia}
               src={displayedSource}
               crossOrigin="anonymous"

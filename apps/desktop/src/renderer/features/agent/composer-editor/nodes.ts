@@ -81,6 +81,8 @@ export const AttachmentNode = Node.create({
       // Key into the editor hook's side store (the bytes live there, not
       // in the doc, so getJSON() drafts stay small).
       attachmentId: { default: "" },
+      attachmentIds: { default: null, rendered: false },
+      groupId: { default: "", rendered: false },
       name: { default: "" },
       mimeType: { default: "" },
       kind: { default: "image" },

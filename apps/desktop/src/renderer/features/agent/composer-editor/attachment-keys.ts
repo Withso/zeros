@@ -11,6 +11,7 @@
 // ──────────────────────────────────────────────────────────
 
 import type { Node as ProseMirrorNode } from "@tiptap/pm/model";
+import { attachmentNodeIds } from "./attachment-group";
 
 /** One attachment node's span and identity. */
 export interface AttachmentHit {
@@ -42,8 +43,7 @@ export function collectAttachmentIds(doc: ProseMirrorNode): string[] {
   const ids: string[] = [];
   doc.descendants((node) => {
     if (node.type.name !== "attachment") return;
-    const id = node.attrs.attachmentId;
-    if (typeof id === "string" && id) ids.push(id);
+    ids.push(...attachmentNodeIds(node.attrs));
   });
   return ids;
 }
@@ -61,7 +61,7 @@ export function positionAfterAttachment(
   doc.descendants((node, pos) => {
     if (place) return false;
     if (node.type.name !== "attachment") return;
-    if (node.attrs.attachmentId !== attachmentId) return;
+    if (!attachmentNodeIds(node.attrs).includes(attachmentId)) return;
     const to = pos + node.nodeSize;
     const after = doc.nodeAt(to);
     const spaced = !!(after?.isText && after.text?.startsWith(" "));

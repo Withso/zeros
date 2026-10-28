@@ -103,6 +103,9 @@ import { statusForGeneration } from "./changes-tab";
 import type { SkillSource } from "../../../platform/skill-source";
 import { Inline } from "@/renderer/shared/ui/layout/inline";
 import { FileMediaPreview } from "./file-media-preview";
+import { fileMediaType } from "@zeros/protocol/file-media";
+const FilePdfPreview = React.lazy(() => import("./file-pdf-preview").then(module => ({ default: module.FilePdfPreview })));
+const FileWordPreview = React.lazy(() => import("./file-word-preview").then(module => ({ default: module.FileWordPreview })));
 import { usePendingFilePreview } from "@/renderer/platform/pending-file-preview";
 import { useDocumentActive } from "@/renderer/state/use-document-active";
 
@@ -410,7 +413,9 @@ export function FileViewer({
     diskResult?.kind === "error" &&
     diskResult.error === "file no longer exists on disk";
   const result = pendingPreview ?? diskResult;
-  const isText = result?.kind === "text";
+  const isDocument = fileMediaType(path)?.kind === "document";
+  const DocumentPreview = /\.docx$/i.test(path) ? FileWordPreview : FilePdfPreview;
+  const isText = result?.kind === "text" && !isDocument;
   const readLoading = !result && readSnapshot.loading;
   const readFailed = !result && !readSnapshot.loading && !!readSnapshot.error;
   const rawDiff = workspaceId ? (diffSnapshot.data ?? null) : "";
@@ -637,7 +642,7 @@ export function FileViewer({
     [previewShown, result],
   );
 
-  const canCopy = result?.kind === "text" && result.content != null;
+  const canCopy = isText && result.content != null;
   const isMedia = result?.kind === "image" || result?.kind === "video";
 
   // Local source editing also repairs conflicted Design metadata. In a cloud
@@ -701,8 +706,8 @@ export function FileViewer({
           data-testid="file-path-actions"
           className="flex min-w-0 items-center gap-1"
         >
-          {path && <PathBreadcrumbs path={path} truncateFilename={isMedia} />}
-          {isMedia && <span ref={setMediaActionsContainer} className="flex shrink-0 items-center gap-1" />}
+          {path && <PathBreadcrumbs path={path} truncateFilename={isMedia || isDocument} />}
+          {(isMedia || isDocument) && <span ref={setMediaActionsContainer} className="flex shrink-0 items-center gap-1" />}
           {canCopy && (
             <CodeBlockCopyButton
               text={result!.content ?? ""}
@@ -831,11 +836,18 @@ export function FileViewer({
             aria-busy={readLoading || diffLoading || undefined}
           >
             {readFailed && !diffShown && <WorkbenchEmptyState type="files" message="Retry to load this file." />}
-            {result?.kind === "binary" && !diffShown && (
+            {result?.kind === "binary" && !isDocument && !diffShown && (
               <Placeholder
                 Icon={FileX2}
                 text="Binary file — preview not available"
               />
+            )}
+            {isDocument && result && ["binary", "text"].includes(result.kind) && !diffShown && (
+              result.media || result.blob || result.dataUrl ? <React.Suspense fallback={null}>
+                <DocumentPreview key={JSON.stringify([tabId, readKey, result.media?.version])}
+                  source={{ cwd, path, bytes: result.bytes, media: result.media, blob: result.blob, dataUrl: result.dataUrl }}
+                  active={active} actionsContainer={mediaActionsContainer} />
+              </React.Suspense> : !hasPendingPreview && <WorkbenchEmptyState type="files" message="Update the workspace runtime to preview this document." />
             )}
             {result?.kind === "too-large" && !diffShown && (
               <Placeholder
@@ -853,6 +865,7 @@ export function FileViewer({
               result.dataUrl || result.media || hasPendingPreview ? (
                 <FileMediaPreview key={JSON.stringify([tabId, readKey])} kind={result.kind}
                   sourceIdentity={hasPendingPreview ? readKey : undefined}
+                  cwd={cwd}
                   source={result.dataUrl} mediaSource={result.media && cwd ? { cwd, bytes: result.bytes, media: result.media } : undefined}
                   path={path} active={active} actionsContainer={mediaActionsContainer} />
               ) : <Placeholder Icon={ImageOff} text="Media unavailable" />

@@ -9,22 +9,27 @@ import { createReadStream } from "node:fs";
 import { createHash } from "node:crypto";
 import os from "node:os";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { createServer } from "node:net";
 import { spawn } from "node:child_process";
 import { build } from "esbuild";
 import { _electron as electron, expect } from "@playwright/test";
+import { previewPdf, previewDocx } from "./document-preview-fixtures.mjs";
 
 const repo = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const cloudFileReader = process.platform === "linux" ? "worker" : "local-fixture";
+const packaged = process.argv.includes("--packaged");
 const root = await fs.mkdtemp(path.join(os.tmpdir(), "zeros-media-electron-"));
 const workspace = path.join(root, "workspace"), profile = path.join(root, "profile");
 const listener = createServer();
 await new Promise(resolve => listener.listen(0, "127.0.0.1", resolve));
 const port = listener.address().port;
 await new Promise(resolve => listener.close(resolve));
-const url = `http://127.0.0.1:${port}/apps/desktop/src/renderer/harnesses/harness-file-media.html?native-media`;
-const vite = spawn("pnpm", ["exec", "vite", "--mode", "ui-smoke", "--host", "127.0.0.1", "--port", String(port), "--strictPort"], { cwd: repo, stdio: "ignore", detached: true });
+const output = path.join(repo, ".context", "packaged-file-media");
+const url = packaged
+  ? `${pathToFileURL(path.join(output, "apps/desktop/src/renderer/harnesses/harness-file-media.html")).href}?native-media`
+  : `http://127.0.0.1:${port}/apps/desktop/src/renderer/harnesses/harness-file-media.html?native-media`;
+const vite = packaged ? null : spawn("pnpm", ["exec", "vite", "--mode", "ui-smoke", "--host", "127.0.0.1", "--port", String(port), "--strictPort"], { cwd: repo, stdio: "ignore", detached: true });
 let app;
 const errors = [], reports = [];
 async function digest(file) {
@@ -88,7 +93,17 @@ async function sparseVideo(file, template) {
   } finally { await fileHandle.close(); }
 }
 try {
+  if (packaged) {
+    const { build: buildRenderer, loadConfigFromFile } = await import("vite");
+    const { config } = await loadConfigFromFile({ command: "build", mode: "production" }, path.join(repo, "vite.config.ts"));
+    await buildRenderer({ ...config, configFile: false, logLevel: "warn", build: {
+      ...config.build, outDir: output, emptyOutDir: true,
+      rollupOptions: { ...config.build.rollupOptions, input: path.join(repo, "apps/desktop/src/renderer/harnesses/harness-file-media.html") },
+    } });
+  }
   await fs.mkdir(workspace); await fs.mkdir(profile);
+  await fs.writeFile(path.join(workspace, "report.pdf"), previewPdf());
+  await fs.writeFile(path.join(workspace, "report.docx"), previewDocx());
   const fixture = await fs.readFile(path.join(repo, "apps/desktop/src/renderer/harnesses/harness-file-media-fixtures.ts"), "utf8");
   const video = Buffer.from(fixture.match(/base64,([A-Za-z0-9+/=]+)/)[1], "base64");
   await sparseVideo(path.join(workspace, "clip.webm"), video);
@@ -132,7 +147,7 @@ try {
     }).catch(error => { console.error(error); app.exit(1); });
   ` }, outfile: main, bundle: true, platform: "node", format: "cjs", external: ["electron"], logLevel: "silent" });
   const deadline = Date.now() + 60_000;
-  while (!(await fetch(url).then(response => response.ok, () => false))) {
+  while (!packaged && !(await fetch(url).then(response => response.ok, () => false))) {
     assert(Date.now() < deadline, "Vite did not start");
     await new Promise(resolve => setTimeout(resolve, 100));
   }
@@ -160,8 +175,10 @@ try {
     await page.evaluate(() => { document.querySelector("video").currentTime = 480; });
     await page.waitForFunction(() => { const video = document.querySelector("video"); return !video.seeking && video.currentTime >= 480; });
     await sample("seek");
-    const range = await page.evaluate(async source => {
-      const response = await fetch(source, { headers: { Range: "bytes=199999968-199999999" } });
+    // Probe the protocol from Electron: the packaged renderer intentionally
+    // permits media playback without allowing fetch() to this scheme.
+    const range = await app.evaluate(async ({ net }, source) => {
+      const response = await net.fetch(source, { headers: { Range: "bytes=199999968-199999999" } });
       return { status: response.status, range: response.headers.get("content-range"), bytes: [...new Uint8Array(await response.arrayBuffer())] };
     }, source);
     assert.equal(range.status, 206); assert.equal(range.range, "bytes 199999968-199999999/200000000");
@@ -176,7 +193,7 @@ try {
     const beforeHide = await app.evaluate(() => globalThis.mediaReads.length);
     await page.evaluate(owner => window.__zerosFileMediaHarness.render(owner, "clip.webm", false), owner);
     await page.waitForFunction(() => !document.querySelector("video"));
-    assert.equal(await page.evaluate(async source => (await fetch(source)).status, source), 404);
+    assert.equal(await app.evaluate(async ({ net }, source) => (await net.fetch(source)).status, source), 404);
     await page.waitForTimeout(250);
     assert.equal(await app.evaluate(() => globalThis.mediaReads.length), beforeHide);
     await page.evaluate(owner => window.__zerosFileMediaHarness.render(owner, "clip.webm"), owner);
@@ -195,7 +212,8 @@ try {
   }
   const downloaded = path.join(root, "downloaded.webm");
   await app.evaluate(({ dialog }, filePath) => { dialog.showSaveDialog = async () => ({ canceled: false, filePath }); }, downloaded);
-  await page.getByRole("button", { name: "Download video", exact: true }).click();
+  await page.getByRole("button", { name: "Video actions", exact: true }).click();
+  await page.getByRole("menuitem", { name: "Download", exact: true }).click();
   const downloadDeadline = Date.now() + 60_000;
   while (!(await fs.stat(downloaded).catch(() => null))) {
     assert(Date.now() < downloadDeadline, "Download did not finish");
@@ -220,7 +238,7 @@ try {
     assert(source.startsWith("zeros-media://"), "Saved image hover must use the native stream");
     await page.evaluate(owner => window.__zerosFileMediaHarness.hover(owner, "sample.png", false), owner);
     await expect(hoverImage).toHaveCount(0);
-    assert.equal(await page.evaluate(async source => (await fetch(source)).status, source), 404);
+    assert.equal(await app.evaluate(async ({ net }, source) => (await net.fetch(source)).status, source), 404);
     const beforeLarge = await app.evaluate(() => globalThis.mediaReads.length);
     await page.evaluate(owner => window.__zerosFileMediaHarness.hover(owner, "large.png"), owner);
     await page.mouse.move(900, 600);
@@ -229,13 +247,32 @@ try {
     await expect(hoverImage).toHaveCount(0);
     assert.equal(await app.evaluate((_electron, before) => globalThis.mediaReads.slice(before).filter(read => read.cmd === "read_file_range").length, beforeLarge), 0, "Oversized hover must not load any image bytes");
   }
+  for (const owner of ["personal", "organization", "cloud"]) {
+    await page.evaluate(owner => window.__zerosFileMediaHarness.render(owner, "report.pdf"), owner);
+    await expect(page.getByRole("region", { name: "PDF page 1", exact: true })).toContainText("Document preview - page 1");
+    await page.getByRole("button", { name: "Next page", exact: true }).click();
+    await expect(page.getByRole("region", { name: "PDF page 2", exact: true })).toContainText("Document preview - page 2");
+    await page.screenshot({ path: path.join(repo, ".context", `native-pdf-${owner}.png`) });
+    const pdf = path.join(root, `${owner}.pdf`);
+    await app.evaluate(({ dialog }, filePath) => { dialog.showSaveDialog = async () => ({ canceled: false, filePath }); }, pdf);
+    await page.getByRole("button", { name: "Download PDF", exact: true }).click();
+    await expect.poll(() => fs.readFile(pdf).then(bytes => bytes.equals(previewPdf()), () => false)).toBe(true);
+    await page.evaluate(owner => window.__zerosFileMediaHarness.render(owner, "report.docx"), owner);
+    await expect(page.frameLocator("iframe").getByText("Word document preview", { exact: true })).toBeVisible();
+    await expect.poll(() => page.frameLocator("iframe").locator("img").evaluate(image => image.naturalWidth)).toBe(1);
+    await page.screenshot({ path: path.join(repo, ".context", `native-word-${owner}.png`) });
+    const word = path.join(root, `${owner}.docx`);
+    await app.evaluate(({ dialog }, filePath) => { dialog.showSaveDialog = async () => ({ canceled: false, filePath }); }, word);
+    await page.getByRole("button", { name: "Download document", exact: true }).click();
+    await expect.poll(() => fs.readFile(word).then(bytes => bytes.equals(previewDocx()), () => false)).toBe(true);
+  }
   assert.deepEqual(errors, []);
-  const report = { platform: process.platform, simulatedCloudBridge: true, cloudFileReader, nativeSaveDialogAutomated: true, reports, streamedDownloadBytes: 200_000_000, exactDownload: true, imageCopy: true, savedImageHover: true, oversizedHoverMetadataOnly: true };
+  const report = { platform: process.platform, packagedRenderer: packaged, simulatedCloudBridge: true, cloudFileReader, nativeSaveDialogAutomated: true, reports, streamedDownloadBytes: 200_000_000, exactDownload: true, imageCopy: true, savedImageHover: true, oversizedHoverMetadataOnly: true, pdfAndWordPages: true, exactDocumentDownloads: true };
   await fs.mkdir(path.join(repo, ".context"), { recursive: true });
   await fs.writeFile(path.join(repo, ".context/media-stream-native-report.json"), JSON.stringify(report, null, 2) + "\n");
   console.log(JSON.stringify(report));
 } finally {
   await app?.close();
-  process.kill(-vite.pid, "SIGTERM");
+  if (vite) process.kill(-vite.pid, "SIGTERM");
   await fs.rm(root, { recursive: true, force: true });
 }

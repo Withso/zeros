@@ -1,4 +1,27 @@
 import { readFile } from "node:fs/promises";
+import { expect } from "@playwright/test";
+
+export async function runVideoSourceRefreshSmoke({ page, check }) {
+  const origin = new URL(page.url()).origin;
+  await page.goto(`${origin}/apps/desktop/src/renderer/harnesses/harness-file-media.html`);
+  for (const owner of ["personal", "organization", "cloud"]) {
+    await page.evaluate(owner => window.__zerosFileMediaHarness.render(owner, "refresh.webm"), owner);
+    await expect(page.getByRole("button", { name: "Copy current frame", exact: true })).toBeEnabled({ timeout: 15_000 });
+    const replacement = await page.evaluate(owner => {
+      const harness = window.__zerosFileMediaHarness;
+      const bytes = Uint8Array.from(atob(harness.videoSource().split(",")[1]), c => c.charCodeAt(0));
+      const url = URL.createObjectURL(new Blob([bytes], { type: "video/webm" }));
+      window.__originalVideoSource = harness.videoSource();
+      harness.video(url);
+      harness.prime(owner, "refresh.webm");
+      return url;
+    }, owner);
+    await expect.poll(() => page.locator("video").evaluate((video, url) => video.getAttribute("src") === url && video.readyState >= 2, replacement)).toBe(true);
+    await expect(page.getByRole("button", { name: "Play video", exact: true })).toBeEnabled();
+    await page.evaluate(() => window.__zerosFileMediaHarness.video(window.__originalVideoSource));
+    check(`${owner}: refreshing the same video source keeps its replacement decoder usable`, true);
+  }
+}
 
 export async function runFileMediaSmoke({ page, check, screenshots }) {
   const initialViewport = page.viewportSize();
@@ -342,7 +365,8 @@ export async function runFileMediaSmoke({ page, check, screenshots }) {
     frameSize[0] === 160 && frameSize[1] === 96,
   );
   const videoDownloadPending = page.waitForEvent("download");
-  await page.getByRole("link", { name: "Download video", exact: true }).click();
+  await button("Video actions").click();
+  await page.getByRole("menuitem", { name: "Download", exact: true }).click();
   const videoDownload = await videoDownloadPending;
   const videoBytes = await readFile(await videoDownload.path());
   const videoOriginal = await page.evaluate(() =>
@@ -355,13 +379,15 @@ export async function runFileMediaSmoke({ page, check, screenshots }) {
   );
   await videoDownload.delete();
   await render("cloud", "clip.webm");
+  await button("Video actions").click();
   check(
     "Cloud videos use the same viewer and original download",
     (await percentage.textContent()) === "100%" &&
       (await page
-        .getByRole("link", { name: "Download video", exact: true })
+        .getByRole("menuitem", { name: "Download", exact: true })
         .getAttribute("href")) === videoOriginal,
   );
+  await page.keyboard.press("Escape");
   check(
     "Only video files opt into the new bridge result kind",
     await page.evaluate(() => {
@@ -422,6 +448,7 @@ export async function runFileMediaSmoke({ page, check, screenshots }) {
   }
   if (initialViewport) await page.setViewportSize(initialViewport);
   await runPendingMediaUploadSmoke({ page, check });
+  await runVideoSourceRefreshSmoke({ page, check });
 }
 
 async function runPendingMediaUploadSmoke({ page, check }) {

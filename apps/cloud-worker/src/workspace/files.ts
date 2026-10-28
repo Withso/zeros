@@ -66,12 +66,15 @@ export class FileService {
       try {
         const info = await file.stat(), extension = extname(path).toLowerCase();
         const videoMime = includeVideo ? VIDEO_TYPES[extension] : undefined;
-        const mime = IMAGE_TYPES[extension] ?? videoMime;
+        const document = fileMediaType(path);
+        const documentMime = document?.kind === "document" ? document.mimeType : undefined;
+        const mime = IMAGE_TYPES[extension] ?? videoMime ?? documentMime;
         if (mime && streamMedia) {
           await this.checked.assertDescriptor(file);
           if (info.size > MAX_FILE_MEDIA_BYTES) return { kind: "too-large", path, bytes: info.size };
-          return { kind: videoMime ? "video" : "image", path, bytes: info.size, media: { mimeType: mime, version: fileMediaVersion(info) } };
+          return { kind: documentMime ? "binary" : videoMime ? "video" : "image", path, bytes: info.size, media: { mimeType: mime, version: fileMediaVersion(info) } };
         }
+        if (documentMime) return { kind: "binary", path, bytes: info.size };
         const limit = mime ? IMAGE_LIMIT : TEXT_LIMIT;
         if (info.size > limit) return { kind: "too-large", path, bytes: info.size };
         const buffer = Buffer.alloc(Math.min(info.size + 1, limit + 1));

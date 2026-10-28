@@ -54,6 +54,17 @@ it("bounds text, image and binary reads and oversized writes", async () => {
   expect(await readFile(join(root, "readme.txt"), "utf8")).toBe("initial\n");
 });
 
+it("streams PDF documents without decoding their contents as source text", async () => {
+  const { scope, root } = await repositoryFixture(); const files = new FileService(scope);
+  const bytes = Buffer.from("%PDF-1.7\n1 0 obj << /Type /Catalog >> endobj\n%%EOF");
+  await writeFile(join(root, "report.PDF"), bytes);
+  const result = await files.handle("file.read", { path: "report.PDF", streamMedia: true }) as { media: { version: string } };
+  expect(result).toMatchObject({ kind: "binary", bytes: bytes.length,
+    media: { mimeType: "application/pdf", version: expect.any(String) } });
+  expect(await files.handle("file.readRange", { path: "report.PDF", version: result.media.version, offset: 0, length: bytes.length }))
+    .toEqual({ base64: bytes.toString("base64"), bytes: bytes.length });
+});
+
 it("opts into video previews with Local's MIME, original bytes and media cap", async () => {
   const { scope, root } = await repositoryFixture(); const files = new FileService(scope);
   const bytes = Buffer.from([0, 0, 0, 24, 102, 116, 121, 112]);

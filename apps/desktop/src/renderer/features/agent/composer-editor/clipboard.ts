@@ -13,6 +13,7 @@ import { parseLocalLink } from "@zeros/protocol/local-orchestration";
 import { linkNeedsSpaceBefore, textNeedsSpaceAfterLink } from "./local-link-node";
 import { attachmentOwner, sameAttachmentOwner } from "../attachment-owner";
 import { rememberAttachmentClipboardSources } from "../attachment-source-retention";
+import { attachmentNodeIds } from "./attachment-group";
 import {
   prepareAttachmentSource,
   supplyLegacyAttachmentBytes,
@@ -98,16 +99,15 @@ export function clipboardPayload(
   const attachments = new Map<string, ComposerAttachment>();
   const textOf = (node: JSONContent): string => {
     if (node.type === "attachment") {
-      const a =
-        getAttachment(node.attrs?.attachmentId) ??
-        unavailableAttachment(node.attrs ?? {});
-      if (a.delivery !== "reference" && a.validation.ok) {
-        supplyLegacyAttachmentBytes(a);
-        if (a.sourceFile && !a.sourceRecoveryId)
-          void prepareAttachmentSource(a).catch(() => {});
-      }
-      attachments.set(a.id, referenceMetadata(a, owner));
-      return sourcePath(a, owner);
+      return attachmentNodeIds(node.attrs ?? {}).map(id => {
+        const a = getAttachment(id) ?? unavailableAttachment({ ...node.attrs, attachmentId: id });
+        if (a.delivery !== "reference" && a.validation.ok) {
+          supplyLegacyAttachmentBytes(a);
+          if (a.sourceFile && !a.sourceRecoveryId) void prepareAttachmentSource(a).catch(() => {});
+        }
+        attachments.set(a.id, referenceMetadata(a, owner));
+        return sourcePath(a, owner);
+      }).join("\n");
     }
     if (node.type === "mention")
       return node.attrs?.token || node.attrs?.label || "";
@@ -218,21 +218,23 @@ export function prepareClipboardPaste(
     if (node.type === "skill" && !sameAttachmentOwner(payload.owner, owner))
       return { type: "text", text: `/${node.attrs?.name ?? ""}` };
     if (node.type === "attachment") {
-      const a =
-        refs.get(node.attrs?.attachmentId) ??
-        unavailableAttachment(node.attrs ?? {});
-      if (!sameAttachmentOwner(a.owner ?? payload.owner, owner))
-        return { type: "text", text: sourcePath(a, payload.owner) };
-      const pasted = { ...a, id: `att-paste-${crypto.randomUUID()}`, owner };
-      attachments.push(pasted);
+      const members = attachmentNodeIds(node.attrs ?? {}).map(id =>
+        refs.get(id) ?? unavailableAttachment({ ...node.attrs, attachmentId: id }));
+      if (!members.length) throw new Error("Missing attachment");
+      if (members.some(a => !sameAttachmentOwner(a.owner ?? payload.owner, owner)))
+        return { type: "text", text: members.map(a => sourcePath(a, payload.owner)).join("\n") };
+      const copies = members.map(a => ({ ...a, id: `att-paste-${crypto.randomUUID()}`, owner }));
+      attachments.push(...copies);
+      const pasted = copies[0];
       return {
         type: "attachment",
         attrs: {
           attachmentId: pasted.id,
-          name: pasted.name,
+          name: copies.length > 1 && typeof node.attrs?.name === "string" ? node.attrs.name.slice(0, 512) : pasted.name,
           mimeType: pasted.mimeType,
           kind: pasted.kind,
           sourceKey: pasted.sourceKey ?? "",
+          ...(copies.length > 1 ? { attachmentIds: copies.map(a => a.id), groupId: `group-${crypto.randomUUID()}` } : {}),
         },
       };
     }

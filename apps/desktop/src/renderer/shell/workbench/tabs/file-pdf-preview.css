@@ -1,0 +1,14 @@
+/* PDF paper is authored document content: preserve its white page in either
+   app theme. The renderer supplies the actual page colors. */
+.zeros-pdf-page {
+  background: white;
+}
+/* The PDF.js text layer is supplied by its imported viewer stylesheet. */
+.zeros-pdf-page .textLayer {
+  user-select: text;
+}
+.zeros-pdf-thumbnail {
+  width: 92px;
+  min-height: 120px;
+  object-fit: contain;
+}

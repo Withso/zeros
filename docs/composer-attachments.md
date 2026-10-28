@@ -64,11 +64,39 @@ an active transfer. Explicit Stop aborts partial uploads before its acknowledgem
 Retries first resolve a completed record, including after a lost final reply,
 then restart incomplete uploads from the retained source.
 
-Clicking a selected image/video while it uploads opens Files immediately from
+Clicking a selected image, video, PDF or Word document while it uploads opens Files immediately from
 its local Blob, without waiting for the VM. A visible preview keeps its lease
 through completion; closing or hiding releases it. Files previews support
 200 MB, independently of the 500 MB attachment limit. See
 [Files media previews](file-media-preview.md) for streaming and resource limits.
+
+## Groups and video frames
+
+Selecting several files together creates one pill showing the first filename
+and `+N` for the remaining files. A group can mix any supported attachment
+formats. Opening it shows a Files tab with a member list and Previous/Next
+controls, using the ordinary preview for each member. Narrow panes start with
+the list collapsed and let the user toggle it. The active member is remembered
+with that workspace's tab. Before a workspace exists, Create's group menu opens
+each source with its existing local preview.
+
+Groups are presentation metadata over independent files, not a new file format
+or archive. Every member retains its original bytes, attachment identity,
+validation, transfer, source recovery and agent delivery. Editor JSON records
+the member IDs; persisted message segments remain individual attachments with
+an optional group ID/name. Older clients still see all files. Copy/paste remaps
+editor IDs, while draft reload, undo and edit/resend retain every saved reference.
+Groups are bounded to 1,000 members; larger selections split into complete groups.
+
+Attaching a video adds only the original video. Its composer overflow menu offers
+Download and Attach as frames. Explicit extraction adds independent JPEG key
+frames plus a timeline `.txt` as one group beside the original. The video Files
+preview offers the same action and delivers to the exact selected chat in that
+workspace. Hiding the surface, changing workspace/chat or removing the source
+retires the operation; late frames cannot enter a different composer. Unsupported
+video codecs leave the original available and report that no frames were extracted.
+
+## File publication
 
 The engine validates size, format, upload identity and offsets. Incomplete
 uploads and final copies live in owner-only temporary directories outside the

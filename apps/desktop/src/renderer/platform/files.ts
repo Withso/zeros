@@ -32,6 +32,8 @@ export interface ReadFileResult {
   content?: string;
   /** Present for image/video previews (bounded base64 data URL). */
   dataUrl?: string;
+  /** Pending selected file only; never transported or persisted. */
+  blob?: Blob;
   /** Source metadata for native range playback; the cache holds no media bytes. */
   media?: FileMediaDescriptor;
   /** Present when kind === "error" — a human-readable reason. */

@@ -1,4 +1,5 @@
 import { runFileMediaSmoke } from "./ui-smoke-file-media.mjs";
+import { runDocumentPreviewsSmoke } from "./ui-smoke-document-previews.mjs";
 
 export async function runFilePrefetchSmoke({ page, check }) {
   const origin = new URL(page.url()).origin;
@@ -100,4 +101,5 @@ export async function runFilePrefetchSmoke({ page, check }) {
   );
   await page.evaluate(() => window.__zerosFilePrefetchHarness.release());
   await runFileMediaSmoke({ page, check });
+  await runDocumentPreviewsSmoke({ page, check });
 }
