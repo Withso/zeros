@@ -540,7 +540,7 @@ export function createRoutes(
           "This invite link is no longer valid",
         );
       }
-      if (invitation.email.toLowerCase() !== user.email.toLowerCase()) {
+      if ((!user.identity.verifiedEmail || invitation.email.toLowerCase() !== user.identity.verifiedEmail.trim().toLowerCase())) {
         throw new HttpError(
           403,
           "wrong_account",
@@ -818,8 +818,8 @@ function createOrganizationRouter(
       throw new HttpError(422, "invalid_input", "Nothing to update");
     }
     const organization = await withSystemTx(pool, async (tx) => {
+      await assertCollaborativeOrganization(tx, orgId, user.id);
       await requireOrganizationRole(tx, orgId, user.id, "admin");
-      await assertCollaborativeOrganization(tx, orgId);
       const updated = await tx.query<{
         name: string;
         data_revision: string | number;
@@ -904,13 +904,13 @@ function createOrganizationRouter(
       (body as { role?: unknown }).role,
     );
     await withSystemTx(pool, async (tx) => {
+      await assertCollaborativeOrganization(tx, orgId, actor.id);
       const actorRole = await requireOrganizationRole(
         tx,
         orgId,
         actor.id,
         "admin",
       );
-      await assertCollaborativeOrganization(tx, orgId);
       const target = await tx.query<{
         role: OrganizationRole;
         membership_source: string;
@@ -1021,11 +1021,11 @@ function createOrganizationRouter(
     const orgId = param(c);
     const targetId = uuidParam(c.req.param("user"));
     await withSystemTx(pool, async (tx) => {
+      await assertCollaborativeOrganization(tx, orgId, actor.id);
       const selfLeave = actor.id === targetId;
       const actorRole = selfLeave
         ? await requireOrganizationMembership(tx, orgId, actor.id)
         : await requireOrganizationRole(tx, orgId, actor.id, "admin");
-      await assertCollaborativeOrganization(tx, orgId);
       const target = await tx.query<{
         role: OrganizationRole;
         membership_source: string;
@@ -1180,8 +1180,8 @@ function createOrganizationRouter(
       body.role ?? "member",
     );
     const result = await withSystemTx(pool, async (tx) => {
+      await assertCollaborativeOrganization(tx, orgId, user.id);
       await requireOrganizationRole(tx, orgId, user.id, "admin");
-      await assertCollaborativeOrganization(tx, orgId);
       const superseded = await tx.query<{
         id: string;
         email: string;
@@ -1286,8 +1286,8 @@ function createOrganizationRouter(
     const user = c.get("user");
     const orgId = param(c);
     const invitations = await withUserTx(pool, user.id, async (tx) => {
+      await assertCollaborativeOrganization(tx, orgId, user.id);
       await requireOrganizationRole(tx, orgId, user.id, "admin");
-      await assertCollaborativeOrganization(tx, orgId);
       const result = await tx.query(
         `SELECT id, email, role, expires_at, created_at
          FROM invitations
@@ -1306,8 +1306,8 @@ function createOrganizationRouter(
     const orgId = param(c);
     const inviteId = uuidParam(c.req.param("id"));
     await withSystemTx(pool, async (tx) => {
+      await assertCollaborativeOrganization(tx, orgId, user.id);
       await requireOrganizationRole(tx, orgId, user.id, "admin");
-      await assertCollaborativeOrganization(tx, orgId);
       const result = await tx.query<{
         email: string;
         role: OrganizationRole;
@@ -1377,8 +1377,8 @@ function createOrganizationRouter(
     const user = c.get("user");
     const orgId = param(c);
     await withUserTx(pool, user.id, async (tx) => {
+      await assertCollaborativeOrganization(tx, orgId, user.id);
       await requireOrganizationRole(tx, orgId, user.id, "admin");
-      await assertCollaborativeOrganization(tx, orgId);
     });
     throw new HttpError(
       409,
@@ -1460,8 +1460,8 @@ function createOrganizationRouter(
     const scope = parse(ScopeSchema, body.scope ?? "*");
     const doc = parse(SettingsDocSchema, body.doc ?? {});
     await withSystemTx(pool, async (tx) => {
+      await assertCollaborativeOrganization(tx, orgId, user.id);
       await requireOrganizationRole(tx, orgId, user.id, "admin");
-      await assertCollaborativeOrganization(tx, orgId);
       await tx.query(
         `INSERT INTO organization_settings (org_id, scope, doc, updated_by)
          VALUES ($1, $2, $3, $4)
@@ -1496,11 +1496,14 @@ function createOrganizationRouter(
 async function assertCollaborativeOrganization(
   tx: Tx,
   orgId: string,
+  actorId: string,
 ): Promise<void> {
   const result = await tx.query<{ is_personal: boolean }>(
-    `SELECT is_personal FROM organizations
-     WHERE id = $1 AND deleted_at IS NULL FOR UPDATE`,
-    [orgId],
+    `SELECT o.is_personal FROM organizations o
+     WHERE o.id = $1 AND o.deleted_at IS NULL
+       AND EXISTS (SELECT 1 FROM organization_members m WHERE m.org_id=o.id AND m.user_id=$2)
+     FOR UPDATE OF o`,
+    [orgId, actorId],
   );
   if (!result.rows[0]) {
     throw new HttpError(404, "not_found", "Organization not found");

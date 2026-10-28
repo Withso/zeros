@@ -36,6 +36,7 @@ import { isCuratedModel } from "./agents/adapters/shared/curated-models";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { randomBytes } from "node:crypto";
+import { openBoundedDirectorySync } from "./files/bounded-read-sync";
 
 import { DESIGN_CATALOG_READ_CAPABILITY, DESIGN_CATALOG_READ_OPERATION, DESIGN_LAZY_PREPARATION_CAPABILITY } from "@zeros/protocol/design-catalog";
 import { DESIGN_PREVIEW_JOBS_CAPABILITY } from "@zeros/protocol/design-capture";
@@ -845,7 +846,7 @@ export class ZerosEngine {
     gateway: async (key, backends) => {
       const gateway = await this.scopedMcpGateways.get(key, backends);
       this.agents.registerGatewayCatalog(gateway.url, () => gateway.catalogRevision);
-      return gateway.url;
+      return { url: gateway.url, authorization: gateway.authorization };
     },
     removeGateway: key => this.scopedMcpGateways.remove(key),
   });
@@ -2352,7 +2353,7 @@ export class ZerosEngine {
     this.agents.setOrganizationMcpResolver((id, env, signal) => this.organizationMcp.resolve(id, env, signal));
     this.agents.setScopedMcpGateway(async (root, backends) => {
       const gateway = await this.projectMcpGateway(root, backends);
-      return gateway?.url ?? null;
+      return gateway ? { url: gateway.url, authorization: gateway.authorization } : null;
     });
     this.agents.setMcpSecretResolver((servers, env) => {
       const vault = this.ensureMcpVault();
@@ -2426,7 +2427,7 @@ export class ZerosEngine {
       await gw.start(gatewayBackends);
       this.mcpGateway = gw;
       this.gatewayError = null;
-      this.agents.setGatewayServer(gw.url, () => gw.catalogRevision);
+      this.agents.setGatewayServer({ url: gw.url, authorization: gw.authorization }, () => gw.catalogRevision);
       console.log(
         `[Zeros] MCP gateway on ${gw.url} fronting ${gatewayBackends.length} backend(s): ` +
           gw
@@ -2464,7 +2465,7 @@ export class ZerosEngine {
         } else {
           await this.mcpGateway.reload(gatewayBackends);
           const gw = this.mcpGateway;
-          this.agents.setGatewayServer(gw.url, () => gw.catalogRevision);
+          this.agents.setGatewayServer({ url: gw.url, authorization: gw.authorization }, () => gw.catalogRevision);
           this.gatewayError = null;
         }
       } catch (err) {
@@ -9711,20 +9712,20 @@ export class ZerosEngine {
    *  user-committed `setup.sh`. Best-effort; no-ops once the repo is clean. */
   private sweepLegacyDotZeros(): void {
     try {
-      const legacy = path.join(this.root, ".zeros");
-      if (!fs.existsSync(legacy)) return;
-      for (const f of [".port", ".token", ".busy"]) {
-        try {
-          fs.unlinkSync(path.join(legacy, f));
-        } catch {
-          /* not present — fine */
-        }
-      }
+      const root = fs.realpathSync(this.root);
+      const parent = openBoundedDirectorySync(root);
       try {
-        fs.rmdirSync(legacy); // succeeds only if now empty
-      } catch {
-        /* non-empty (attachments / setup.sh) or already gone — leave it */
-      }
+        const legacy = openBoundedDirectorySync(path.join(root, ".zeros"));
+        try {
+          for (const f of [".port", ".token", ".busy"]) {
+            try { fs.unlinkSync(path.join(legacy.path, f)); }
+            catch { /* Missing or changed entries remain untouched. */ }
+          }
+        } finally { legacy.close(); }
+        // rmdir never follows the final symlink and the parent stays pinned.
+        try { fs.rmdirSync(path.join(parent.path, ".zeros")); }
+        catch { /* Preserve non-empty directories, replacements and links. */ }
+      } finally { parent.close(); }
     } catch {
       /* best-effort */
     }

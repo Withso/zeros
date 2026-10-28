@@ -89,6 +89,31 @@ it("reports the committed login revision for poll repair and retains native hist
   expect(f.deps.store.writeWorkerHistory).toHaveBeenCalledWith(f.token, f.bootId, 1, { chats: [{ id: "native-chat" }] });
   expect((await f.request("history", { ...history, chats: Array.from({ length: 501 }, () => ({ id: "x" })) })).status).toBe(400);
 });
+
+it.each([false, true])("records authenticated activity during a GitHub outage with prompt outbox=%s", async prompts => {
+  const f = fixture(prompts);
+  f.deps.authorizeSource = vi.fn(async () => { throw new HttpError(503, "github_unavailable", "GitHub unavailable"); });
+  const response = await f.request("activity", { idle: false });
+  expect(response.status).toBe(200);
+  expect(f.deps.store.markActive).toHaveBeenCalledTimes(1);
+  expect(f.deps.authorizeSource).not.toHaveBeenCalled();
+  expect((await f.request("activity", { idle: true })).status).toBe(200);
+  expect(f.deps.store.markActive).toHaveBeenCalledTimes(1);
+  f.revoke();
+  expect((await f.request("activity", { idle: false })).status).toBe(401);
+  expect(f.deps.store.markActive).toHaveBeenCalledTimes(1);
+});
+it("refreshes an existing worker's configuration during grace but keeps initial hello strict", async () => {
+  const f = fixture();
+  f.deps.authorizeSource = vi.fn(async () => { throw new HttpError(503, "github_unavailable", "unavailable"); });
+  f.deps.continueSource = vi.fn(async () => ({ recheckAt: Date.now() + 60_000 }));
+  f.revise("2");
+  const response = await f.request("config");
+  expect(response.status).toBe(200);
+  expect(await response.json()).toMatchObject({ config: { loginRevision: "2", agents: {} } });
+  expect(f.deps.authorizeSource).not.toHaveBeenCalled();
+  expect((await f.request("hello", { bootId: f.bootId, protocol: 2, runtimeSha256: "a".repeat(64) })).status).toBe(503);
+});
 it("discards credential reads made obsolete by a concurrent committed Settings change", async () => {
   const f = fixture(), original = await f.deps.config({} as CloudV2Workspace);
   vi.mocked(f.deps.config).mockImplementationOnce(async () => { f.revise("1"); return { ...original, agents: { cursor: { apiKey: "synthetic-old-token" } } }; });

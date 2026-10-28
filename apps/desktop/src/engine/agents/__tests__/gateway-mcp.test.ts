@@ -211,13 +211,14 @@ describe("AgentGateway per-session MCP resolution", () => {
         `[[mcp.servers]]\nname = "ctx7"\ntransport = "stdio"\ncommand = "npx"\n`,
     );
     const servers = await newSessionWith(repoDir, (gw) =>
-      gw.setGatewayServer("http://127.0.0.1:39217/mcp"),
+      gw.setGatewayServer({ url: "http://127.0.0.1:39217/mcp", authorization: `Bearer ${"a".repeat(43)}` }),
     );
     expect(servers).toEqual([
       {
         name: "zeros-gateway",
         transport: "http",
         url: "http://127.0.0.1:39217/mcp",
+        headersFromEnv: { Authorization: "ZEROS_MCP_GATEWAY_CAPABILITY" },
       },
       { name: "ctx7", transport: "stdio", command: "npx" },
     ]);
@@ -232,25 +233,25 @@ describe("AgentGateway per-session MCP resolution", () => {
       "settings.local.toml",
       `[[mcp.servers]]\nname = "project"\ntransport = "http"\nurl = "https://project/mcp"\nauth = "oauth"\n`,
     );
-    const scoped = vi.fn(async () => "http://127.0.0.1:39218/mcp");
+    const scoped = vi.fn(async () => ({ url: "http://127.0.0.1:39218/mcp", authorization: `Bearer ${"b".repeat(43)}` }));
     const servers = await newSessionWith(repoDir, gw => {
-      gw.setGatewayServer("http://127.0.0.1:39217/mcp");
+      gw.setGatewayServer({ url: "http://127.0.0.1:39217/mcp", authorization: `Bearer ${"a".repeat(43)}` });
       gw.setScopedMcpGateway(scoped);
     });
     expect(scoped).toHaveBeenCalledExactlyOnceWith(repoDir, [
       expect.objectContaining({ name: "project", url: "https://project/mcp" }),
     ]);
     expect(servers).toEqual([
-      { name: "zeros-gateway", transport: "http", url: "http://127.0.0.1:39218/mcp" },
+      { name: "zeros-gateway", transport: "http", url: "http://127.0.0.1:39218/mcp", headersFromEnv: { Authorization: "ZEROS_MCP_GATEWAY_CAPABILITY" } },
       { name: "ctx7", transport: "stdio", command: "npx" },
     ]);
   });
 
   it.each([null, "http://127.0.0.1:39218/mcp"])("omits an empty project gateway without falling back to the global endpoint (%s)", async retained => {
     writeUser(`[[mcp.servers]]\nname = "ctx7"\ntransport = "stdio"\ncommand = "npx"\n`);
-    const scoped = vi.fn(async () => retained);
+    const scoped = vi.fn(async () => retained ? { url: retained, authorization: `Bearer ${"b".repeat(43)}` } : null);
     const servers = await newSessionWith(repoDir, gw => {
-      gw.setGatewayServer("http://127.0.0.1:39217/mcp");
+      gw.setGatewayServer({ url: "http://127.0.0.1:39217/mcp", authorization: `Bearer ${"a".repeat(43)}` });
       gw.setScopedMcpGateway(scoped);
     });
     expect(scoped).toHaveBeenCalledExactlyOnceWith(repoDir, []);

@@ -13,6 +13,25 @@ const MAX_COMPONENT_BYTES = 512 * 1024;
 const MAX_COMPONENT_SOURCE_BYTES_PER_FRAME = 16 * 1024 * 1024;
 const MAX_EXPANSION_BYTES = 2 * 1024 * 1024;
 const MAX_EXPANSION_DEPTH = 8;
+const MAX_EXPANSION_INSTANCES = 2_048;
+const MAX_EXPANSION_WORK = 32 * 1024 * 1024;
+const MAX_COMPONENT_DIAGNOSTICS = 128;
+
+class ComponentBudgetExceeded extends Error {
+  constructor() { super("Component expansion exceeded its work or output limit."); }
+}
+
+class ExpansionBudget {
+  remaining = MAX_EXPANSION_WORK;
+  instances = 0;
+  charge(characters: number): void {
+    this.remaining -= characters;
+    if (this.remaining < 0) throw new ComponentBudgetExceeded();
+  }
+  output(size: number): void {
+    if (size > MAX_EXPANSION_BYTES) throw new ComponentBudgetExceeded();
+  }
+}
 
 interface ComponentDefinition {
   name: string;
@@ -38,15 +57,17 @@ type ParentNode =
 
 function elements(node: ParentNode): DefaultTreeAdapterTypes.Element[] {
   const result: DefaultTreeAdapterTypes.Element[] = [];
-  const visit = (current: ParentNode) => {
-    for (const child of current.childNodes ?? []) {
-      if ("tagName" in child) {
-        result.push(child);
-        visit(child);
-      }
+  const pending: Array<{ node: ParentNode; index: number }> = [{ node, index: 0 }];
+  while (pending.length) {
+    const current = pending[pending.length - 1]!;
+    const child = current.node.childNodes[current.index++];
+    if (!child) { pending.pop(); continue; }
+    if ("tagName" in child) {
+      if (result.length >= 50_000) throw new ComponentBudgetExceeded();
+      result.push(child);
+      pending.push({ node: child, index: 0 });
     }
-  };
-  visit(node);
+  }
   return result;
 }
 
@@ -137,7 +158,7 @@ async function loadDefinitions(
     const parseErrors: Array<{ code: string }> = [];
     const document = parse(source, {
       sourceCodeLocationInfo: true,
-      onParseError: (error) => parseErrors.push(error),
+      onParseError: (error) => { if (!parseErrors.length) parseErrors.push(error); },
     });
     for (const nestedName of referencedComponentNames(document)) {
       if (!scheduled.has(nestedName)) {
@@ -247,7 +268,9 @@ function fillSlots(
   definitionBody: string,
   instanceSource: string,
   instance: DefaultTreeAdapterTypes.Element,
+  budget: ExpansionBudget,
 ): string {
+  budget.charge(definitionBody.length);
   const fragment = parseFragment(definitionBody, {
     sourceCodeLocationInfo: true,
   });
@@ -274,6 +297,8 @@ function fillSlots(
         ? escapeText(attributes.get(attributeName) ?? "")
         : fallback
       : instanceChildren || fallback;
+    budget.charge(result.length + replacement.length);
+    budget.output(Buffer.byteLength(result) - Buffer.byteLength(result.slice(location.startOffset, location.endOffset)) + Buffer.byteLength(replacement));
     result = `${result.slice(0, location.startOffset)}${replacement}${result.slice(location.endOffset)}`;
   }
   return result;
@@ -283,7 +308,13 @@ function injectComponentStyles(
   source: string,
   used: readonly string[],
   definitions: ReadonlyMap<string, ComponentDefinition>,
+  budget: ExpansionBudget,
 ): string {
+  let bytes = Buffer.byteLength(source);
+  for (const name of used) for (const style of definitions.get(name)?.styles ?? []) {
+    bytes += Buffer.byteLength(style) + Buffer.byteLength(name) + 40;
+    budget.output(bytes);
+  }
   const styleMarkup = used
     .flatMap((name) =>
       (definitions.get(name)?.styles ?? []).map(
@@ -304,6 +335,19 @@ export async function expandDesignComponents(
   sources?: Readonly<Record<string, string>>,
   entryFile = "",
 ): Promise<DesignComponentExpansion> {
+  try {
+    if (source.length > MAX_EXPANSION_BYTES || Buffer.byteLength(source) > MAX_EXPANSION_BYTES) throw new ComponentBudgetExceeded();
+    return await expandBoundedComponents(workspacePath, source, sources, entryFile);
+  } catch (error) {
+    if (!(error instanceof ComponentBudgetExceeded)) throw error;
+    return { html: Buffer.byteLength(source) <= MAX_EXPANSION_BYTES ? source : "", usedComponents: [], errors: [{ component: "", message: error.message }] };
+  }
+}
+
+async function expandBoundedComponents(
+  workspacePath: string, source: string, sources: Readonly<Record<string, string>> | undefined, entryFile: string,
+): Promise<DesignComponentExpansion> {
+  const budget = new ExpansionBudget();
   const loaded = await loadDefinitions(workspacePath, source, sources);
   const definitions = loaded.definitions;
   // Existing definitions use Design-root URL origins. Rebase only definition
@@ -327,6 +371,7 @@ export async function expandDesignComponents(
     depth: number,
   ): string => {
     if (depth > MAX_EXPANSION_DEPTH) return markup;
+    budget.charge(markup.length);
     const fragment = parseFragment(markup, { sourceCodeLocationInfo: true });
     const instances = elements(fragment).filter(
       (element) =>
@@ -340,20 +385,24 @@ export async function expandDesignComponents(
         (right.sourceCodeLocation?.startOffset ?? 0) -
         (left.sourceCodeLocation?.startOffset ?? 0),
     )) {
+      if (++budget.instances > MAX_EXPANSION_INSTANCES) throw new ComponentBudgetExceeded();
       const name = instance.tagName.slice(3);
       const definition = definitions.get(name);
       if (!definition) continue;
       if (stack.includes(name) || depth === MAX_EXPANSION_DEPTH) {
-        errors.push({
+        if (errors.length < MAX_COMPONENT_DIAGNOSTICS) errors.push({
           component: name,
           message: `Component cycle or depth limit reached for zd-${name}.`,
         });
         continue;
       }
       used.add(name);
-      const filled = fillSlots(definition.body, markup, instance);
+      const filled = fillSlots(definition.body, markup, instance, budget);
       const expanded = expand(filled, [...stack, name], depth + 1);
       const location = instance.sourceCodeLocation!;
+      budget.charge(result.length + expanded.length);
+      // Charge construction before allocating; the exact output is checked below.
+      budget.output(Buffer.byteLength(result) + Buffer.byteLength(expanded));
       if (location.startTag && location.endTag) {
         result = `${result.slice(0, location.startTag.endOffset)}${expanded}${result.slice(location.endTag.startOffset)}`;
       } else {
@@ -363,11 +412,7 @@ export async function expandDesignComponents(
         result = `${result.slice(0, location.startOffset)}${startTag}${expanded}</${instance.tagName}>${result.slice(location.endOffset)}`;
       }
       if (Buffer.byteLength(result, "utf8") > MAX_EXPANSION_BYTES) {
-        errors.push({
-          component: name,
-          message: "Expanded component output exceeded the 2 MiB limit.",
-        });
-        return markup;
+        throw new ComponentBudgetExceeded();
       }
     }
     return result;
@@ -377,6 +422,7 @@ export async function expandDesignComponents(
     expand(source, [], 0),
     [...used].sort(),
     definitions,
+    budget,
   );
   return {
     html,
@@ -384,6 +430,6 @@ export async function expandDesignComponents(
     // loadDefinitions visits only the frame's bounded transitive dependency
     // graph. Keep nested diagnostics even when an ancestor is also invalid:
     // invalid definitions remain previewable and their safe remainder expands.
-    errors: [...loaded.errors, ...errors],
+    errors: [...loaded.errors, ...errors].slice(0, MAX_COMPONENT_DIAGNOSTICS),
   };
 }

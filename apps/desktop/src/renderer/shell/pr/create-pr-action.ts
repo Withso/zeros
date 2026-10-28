@@ -16,12 +16,13 @@ export interface GithubAccessProbe {
  *  Both direct creation and the agent brief use this preflight before
  *  publishing existing branch commits with the same brokered credential.
  *
- *  `unknown` deliberately proceeds. A probe that could not complete is not
+ *  `unknown` is not a refusal. A probe that could not complete is not
  *  evidence, and grounding the button on it would refuse work that would have
- *  succeeded — the one failure mode a preflight must not have. */
+ *  succeeded. A cloud agent brief separately needs a current, verified
+ *  repository identity before it can name an external CLI target. */
 export function isPrAccessBlocked(
   access: GithubAccessProbe | null | undefined,
-): access is GithubAccessProbe {
+): access is GithubAccessProbe & { state: "blocked" } {
   return access?.state === "blocked";
 }
 

@@ -44,7 +44,10 @@ import {
 } from "./primitives";
 import { PROTOCOL_VERSION, isCompatible } from "../version";
 
-const HS_LABEL = "zeros-bridge-v2";
+// Handshake format is versioned separately from application messages. Legacy
+// peers cannot enroll: both ends must explicitly negotiate this protected proof.
+const HANDSHAKE_VERSION = 3;
+const HS_LABEL = "zeros-bridge-handshake-v3";
 const DIR_C2D = 0x01; // client → daemon
 const DIR_D2C = 0x02; // daemon → client
 const DEFAULT_RATCHET_INTERVAL = 1 << 16; // 65536 records per direction
@@ -82,9 +85,9 @@ export interface ServerHandshakeOptions {
   /** The host's long-term Ed25519 identity. */
   identityKeyPair: KeyPairBytes;
   /** Device-registry gate. Return false to reject the connecting client. The
-   *  second arg is the pairing nonce the client echoed from the offer —
-   *  the gate uses it to TOFU-accept an unknown device only when it proves
-   *  possession of the current offer, not merely knowledge of serverId.
+   *  second arg is the decrypted offer nonce, authenticated to this client's
+   *  identity and handshake. Enrollment MUST atomically check expiry and consume
+   *  the offer. Share one gate per offer (or use a durable registry transaction).
    *  Omit to accept any client (trust-on-first-use is the caller's job). */
   isTrusted?: (clientIdPublicKeyB64: string, pairingNonce?: string) => boolean;
   ratchetInterval?: number;
@@ -112,7 +115,7 @@ export interface ClientHandshakeOptions {
   identitySigner?: IdentitySigner;
   /** Host identity public key from the pairing offer — PINNED (anti-MITM). */
   expectedServerIdPublicKeyB64: string;
-  /** The offer's pairing nonce, echoed to the daemon so an unknown device
+  /** The offer's pairing nonce, encrypted to the authenticated host so a device
    *  can only TOFU-pair when it holds the current offer. Absent on a trusted
    *  reconnect (the device registry already knows it). */
   pairingNonce?: string;
@@ -124,14 +127,15 @@ export interface ClientHandshakeOptions {
 
 interface HelloFrame {
   t: "hello";
+  h: number;
   v: number;
   ce: string; // client ephemeral X25519 public key
   cn: string; // client nonce
   ci: string; // client identity Ed25519 public key
-  pn?: string; // Pairing nonce echoed from the offer (TOFU gate; optional)
 }
 interface AuthFrame {
   t: "auth";
+  h: number;
   se: string; // server ephemeral X25519 public key
   sn: string; // server nonce
   sig: string; // server Ed25519 signature over the transcript
@@ -140,9 +144,11 @@ interface AuthFrame {
 interface ConfirmFrame {
   t: "confirm";
   sig: string; // client Ed25519 signature over the transcript
+  proof?: string; // AEAD-sealed offer nonce, bound to this transcript
 }
 interface ReadyFrame {
   t: "ready";
+  proof: string;
 }
 
 // ── Internal helpers ────────────────────────────────────────
@@ -190,6 +196,7 @@ function computeTranscript(
   clientIdPub: Uint8Array,
   serverEphPub: Uint8Array,
   serverNonce: Uint8Array,
+  serverIdPub: Uint8Array,
 ): Uint8Array {
   return sha256Hash(
     concatBytes(
@@ -200,8 +207,62 @@ function computeTranscript(
       clientIdPub,
       serverEphPub,
       serverNonce,
+      serverIdPub,
     ),
   );
+}
+
+function proofKey(shared: Uint8Array, transcript: Uint8Array, purpose: string): Uint8Array {
+  return hkdfSha256(shared, transcript, utf8Encode(`${HS_LABEL}|${purpose}`), 32);
+}
+
+function sealProof(key: Uint8Array, text: string, transcript: Uint8Array): string {
+  const nonce = randomBytes(NONCE_LEN);
+  return toBase64(concatBytes(nonce, aeadSeal(key, nonce, utf8Encode(text), transcript)));
+}
+
+function openProof(key: Uint8Array, proof: string, transcript: Uint8Array): string {
+  if (typeof proof !== "string" || proof.length > 1024) throw new HandshakeError("protocol", "invalid proof");
+  try {
+    const bytes = fromBase64(proof);
+    return utf8Decode(aeadOpen(key, bytes.slice(0, NONCE_LEN), bytes.slice(NONCE_LEN), transcript));
+  } catch { throw new HandshakeError("bad-signature", "handshake proof authentication failed"); }
+}
+
+async function receiveFrame<T>(io: HandshakeIO, timeout: number): Promise<T> {
+  const frame = await withTimeout(io.recv(), timeout);
+  if (typeof frame !== "string" || frame.length > 4096) throw new HandshakeError("protocol", "invalid handshake frame");
+  try {
+    const value = JSON.parse(frame);
+    if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error();
+    return value as T;
+  } catch { throw new HandshakeError("protocol", "invalid handshake frame"); }
+}
+
+function keyBytes(value: string): Uint8Array {
+  if (typeof value !== "string" || value.length > 48) throw new HandshakeError("protocol", "invalid handshake key");
+  const bytes = fromBase64(value);
+  if (bytes.length !== 32) throw new HandshakeError("protocol", "invalid handshake key");
+  return bytes;
+}
+
+/** In-process single-use admission. All connections for an offer must share
+ * this gate; multi-process hosts instead consume in their durable registry. */
+export function createPairingTrustGate(options: {
+  nonce: string;
+  expiresAt: number;
+  isTrusted: (id: string) => boolean;
+  enroll: (id: string) => boolean;
+  now?: () => number;
+}): (id: string, nonce?: string) => boolean {
+  let consumed = false;
+  const now = options.now ?? Date.now;
+  return (id, nonce) => {
+    if (options.isTrusted(id)) return true;
+    if (consumed || !Number.isFinite(options.expiresAt) || now() >= options.expiresAt || !nonce || nonce !== options.nonce) return false;
+    consumed = true;
+    return options.enroll(id);
+  };
 }
 
 function deriveDirKeys(
@@ -357,18 +418,18 @@ export async function serverHandshake(
   const timeout = opts.handshakeTimeoutMs ?? DEFAULT_HANDSHAKE_TIMEOUT_MS;
   const ratchetInterval = opts.ratchetInterval ?? DEFAULT_RATCHET_INTERVAL;
 
-  const hello = JSON.parse(await withTimeout(io.recv(), timeout)) as HelloFrame;
+  const hello = await receiveFrame<HelloFrame>(io, timeout);
   if (hello.t !== "hello")
     throw new HandshakeError("protocol", `expected hello, got ${hello.t}`);
-  if (!isCompatible(hello.v)) {
+  if (hello.h !== HANDSHAKE_VERSION || !isCompatible(hello.v) || "pn" in hello) {
     throw new HandshakeError(
       "version",
       `unsupported protocol version ${hello.v}`,
     );
   }
-  const clientEphPub = fromBase64(hello.ce);
-  const clientNonce = fromBase64(hello.cn);
-  const clientIdPub = fromBase64(hello.ci);
+  const clientEphPub = keyBytes(hello.ce);
+  const clientNonce = keyBytes(hello.cn);
+  const clientIdPub = keyBytes(hello.ci);
 
   const serverEph = generateEphemeralKeyPair();
   const serverNonce = randomBytes(32);
@@ -383,10 +444,12 @@ export async function serverHandshake(
     clientIdPub,
     serverEph.publicKey,
     serverNonce,
+    opts.identityKeyPair.publicKey,
   );
   const sigD = sign(transcript, opts.identityKeyPair.secretKey);
   const authFrame: AuthFrame = {
     t: "auth",
+    h: HANDSHAKE_VERSION,
     se: toBase64(serverEph.publicKey),
     sn: toBase64(serverNonce),
     sig: toBase64(sigD),
@@ -394,31 +457,29 @@ export async function serverHandshake(
   };
   io.send(JSON.stringify(authFrame));
 
-  const confirm = JSON.parse(
-    await withTimeout(io.recv(), timeout),
-  ) as ConfirmFrame;
+  const confirm = await receiveFrame<ConfirmFrame>(io, timeout);
   if (confirm.t !== "confirm") {
     throw new HandshakeError("protocol", `expected confirm, got ${confirm.t}`);
   }
-  if (!verify(fromBase64(confirm.sig), transcript, clientIdPub)) {
+  const confirmation = sha256Hash(concatBytes(transcript, utf8Encode(confirm.proof ?? "")));
+  if (!verify(fromBase64(confirm.sig), confirmation, clientIdPub)) {
     throw new HandshakeError(
       "bad-signature",
       "client signature verification failed",
     );
   }
   const clientIdB64 = toBase64(clientIdPub);
-  // Hand the gate the echoed pairing nonce so it can require an unknown
-  // device to prove it holds the current offer (not just serverId) before TOFU.
-  if (opts.isTrusted && !opts.isTrusted(clientIdB64, hello.pn)) {
+  const shared = deriveSharedSecret(serverEph.secretKey, clientEphPub);
+  const nonce = confirm.proof === undefined ? undefined : openProof(proofKey(shared, transcript, "pairing"), confirm.proof, transcript);
+  if (opts.isTrusted && !opts.isTrusted(clientIdB64, nonce)) {
     throw new HandshakeError(
       "untrusted-device",
       "connecting device is not trusted",
     );
   }
 
-  const shared = deriveSharedSecret(serverEph.secretKey, clientEphPub);
   const { kC2D, kD2C } = deriveDirKeys(shared, clientNonce, serverNonce);
-  const readyFrame: ReadyFrame = { t: "ready" };
+  const readyFrame: ReadyFrame = { t: "ready", proof: sealProof(proofKey(shared, transcript, "ready"), "ready", confirmation) };
   io.send(JSON.stringify(readyFrame));
 
   return EncryptedChannel._create({
@@ -438,6 +499,8 @@ export async function clientHandshake(
 ): Promise<EncryptedChannel> {
   const timeout = opts.handshakeTimeoutMs ?? DEFAULT_HANDSHAKE_TIMEOUT_MS;
   const ratchetInterval = opts.ratchetInterval ?? DEFAULT_RATCHET_INTERVAL;
+  if (opts.pairingNonce !== undefined && (typeof opts.pairingNonce !== "string" || !opts.pairingNonce || opts.pairingNonce.length > 256))
+    throw new HandshakeError("protocol", "invalid pairing nonce");
 
   // Accept either a raw byte key (Node/tests) or a non-extractable signer (web).
   const identitySign: (m: Uint8Array) => Promise<Uint8Array> | Uint8Array =
@@ -464,32 +527,28 @@ export async function clientHandshake(
   const clientNonce = randomBytes(32);
   const helloFrame: HelloFrame = {
     t: "hello",
+    h: HANDSHAKE_VERSION,
     v: PROTOCOL_VERSION,
     ce: toBase64(clientEph.publicKey),
     cn: toBase64(clientNonce),
     ci: toBase64(clientIdPub),
-    // Echo the offer's pairing nonce (omitted on a trusted reconnect).
-    ...(opts.pairingNonce ? { pn: opts.pairingNonce } : {}),
   };
   io.send(JSON.stringify(helloFrame));
 
-  const auth = JSON.parse(await withTimeout(io.recv(), timeout)) as AuthFrame;
+  const auth = await receiveFrame<AuthFrame>(io, timeout);
   if (auth.t !== "auth")
     throw new HandshakeError("protocol", `expected auth, got ${auth.t}`);
-  const serverEphPub = fromBase64(auth.se);
-  const serverNonce = fromBase64(auth.sn);
-  const expectedServerIdPub = fromBase64(opts.expectedServerIdPublicKeyB64);
-  // Bind the version the server agreed to. A new server echoes `auth.v`; an
-  // old one omits it (fall back to our constant — identical at today's version).
-  // If the server agreed to a DIFFERENT version than we offered, that's a
-  // downgrade/mismatch — refuse rather than bind a value the peer didn't.
-  if (auth.v !== undefined && auth.v !== PROTOCOL_VERSION) {
+  const serverEphPub = keyBytes(auth.se);
+  const serverNonce = keyBytes(auth.sn);
+  const expectedServerIdPub = keyBytes(opts.expectedServerIdPublicKeyB64);
+  // Both versions must be explicit. Never downgrade to plaintext enrollment.
+  if (auth.h !== HANDSHAKE_VERSION || auth.v !== PROTOCOL_VERSION) {
     throw new HandshakeError(
       "version",
       `server agreed to protocol ${auth.v}, expected ${PROTOCOL_VERSION}`,
     );
   }
-  const agreedVersion = auth.v ?? PROTOCOL_VERSION;
+  const agreedVersion = auth.v;
   const transcript = computeTranscript(
     agreedVersion,
     clientEph.publicKey,
@@ -497,6 +556,7 @@ export async function clientHandshake(
     clientIdPub,
     serverEphPub,
     serverNonce,
+    expectedServerIdPub,
   );
   if (!verify(fromBase64(auth.sig), transcript, expectedServerIdPub)) {
     throw new HandshakeError(
@@ -505,15 +565,19 @@ export async function clientHandshake(
     );
   }
 
-  const sigC = await identitySign(transcript);
-  const confirmFrame: ConfirmFrame = { t: "confirm", sig: toBase64(sigC) };
+  const shared = deriveSharedSecret(clientEph.secretKey, serverEphPub);
+  const proof = opts.pairingNonce === undefined ? undefined : sealProof(proofKey(shared, transcript, "pairing"), opts.pairingNonce, transcript);
+  const confirmation = sha256Hash(concatBytes(transcript, utf8Encode(proof ?? "")));
+  const sigC = await identitySign(confirmation);
+  const confirmFrame: ConfirmFrame = { t: "confirm", sig: toBase64(sigC), ...(proof ? { proof } : {}) };
   io.send(JSON.stringify(confirmFrame));
 
-  const ready = JSON.parse(await withTimeout(io.recv(), timeout)) as ReadyFrame;
+  const ready = await receiveFrame<ReadyFrame>(io, timeout);
   if (ready.t !== "ready")
     throw new HandshakeError("protocol", `expected ready, got ${ready.t}`);
 
-  const shared = deriveSharedSecret(clientEph.secretKey, serverEphPub);
+  if (openProof(proofKey(shared, transcript, "ready"), ready.proof, confirmation) !== "ready")
+    throw new HandshakeError("bad-signature", "invalid ready proof");
   const { kC2D, kD2C } = deriveDirKeys(shared, clientNonce, serverNonce);
 
   return EncryptedChannel._create({

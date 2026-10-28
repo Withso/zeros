@@ -2,6 +2,27 @@ import { createHash } from "node:crypto";
 
 // Each reviewed migration lists its exact exempted statements by rule.
 const reviewed: Readonly<Record<string, Readonly<Record<string, readonly string[]>>>> = {
+  "0213_mcp_repository_identities.sql": {},
+  "0206_github_authorization_generations.sql": {
+    "grant-generation-fingerprint": [`CREATE OR REPLACE FUNCTION cloud_github_actor_fingerprint(target_org_id uuid,target_user_id uuid)
+RETURNS text LANGUAGE sql STABLE
+SET search_path = pg_catalog, public, pg_temp
+AS $$
+  SELECT encode(digest(jsonb_build_array(account.id,account.auth_revision,organization.id,organization.authorization_revision,
+    member.authorization_revision,member.created_at,github_auth.github_user_id,github_auth.grant_generation)::text,'sha256'),'hex')
+  FROM organization_members member JOIN users account ON account.id=member.user_id
+  JOIN organizations organization ON organization.id=member.org_id
+  JOIN github_authorizations github_auth ON github_auth.owner_user_id=member.user_id AND github_auth.app_variant='github.com'
+  WHERE member.org_id=target_org_id AND member.user_id=target_user_id
+    AND account.auth_status='active' AND account.deleted_at IS NULL AND organization.deleted_at IS NULL AND NOT organization.is_personal AND app_is_system()
+$$;`],
+  },
+  "0207_cloud_source_boundaries.sql": {
+    "privilege-tightening": ["REVOKE ALL ON FUNCTION cloud_v2_preserve_source_scope() FROM PUBLIC;"],
+  },
+  "0212_cloud_computer_source_provenance.sql": {
+    "privilege-tightening": ["REVOKE ALL ON FUNCTION cloud_v2_preserve_computer_sources() FROM PUBLIC;"],
+  },
   "0136_cloud_runtime_transfers.sql": {
     "widen-check": [3, 4, 5].map(n =>
       `ALTER TABLE cloud_workspace_generation_transitions DROP CONSTRAINT cloud_workspace_generation_transitions_check${n};`),
@@ -328,6 +349,13 @@ const cloudV2PromptErasureDigests: Record<string, string> = {
   "chat-prompt-erasure": "f60ad7f894f37de2af9632bcab7104db5cdc4db0310063c8c37244109ea8f8a5",
 };
 
+// Same trigger signatures and privileges; legacy name scopes keep their prior
+// behavior, while newly ID-bound definitions notify only the original source.
+const mcpRepositoryIdentityDigests: Record<string, string> = {
+  "mcp-identity-notifications": "28a5a69a74521b08e909381558fd8d22a60bb74e6ee863ba73e7417e78c3345e",
+  "mcp-identity-sign-in": "87e62308e27c9f4fe1811cb4d3ff9502f34325c70d1669aa4d1f459fcfc1b58e",
+};
+
 // Exact additions retain prior save proof and physical-purge authority.
 const ownerExistingDeleteDigests: Record<string,string> = {
   "new-table-privileges": "5dcd878e4e2935bddcf73f215d27bd635dde05c6ecea4e29b07911e0ed542699",
@@ -443,6 +471,8 @@ export function applyReviewedExpandExceptions(file: string, sql: string): string
         createHash("sha256").update(statement).digest("hex") === cloudV2AppSessionSignoutDigest) ||
       (file === "0202_cloud_v2_prompt_outbox.sql" &&
         createHash("sha256").update(statement).digest("hex") === cloudV2PromptErasureDigests[rule]) ||
+      (file === "0213_mcp_repository_identities.sql" &&
+        createHash("sha256").update(statement).digest("hex") === mcpRepositoryIdentityDigests[rule]) ||
       (file === "0178_cloud_owner_existing_delete.sql" &&
         createHash("sha256").update(statement).digest("hex") === ownerExistingDeleteDigests[rule]);
     if (!allowed) throw new Error("Expand exception does not match its exact reviewed statement");

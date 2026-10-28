@@ -60,6 +60,9 @@ function signingHarness() {
     "@electron/osx-sign": {},
     "@electron/osx-sign/dist/cjs/util-identities": {},
     "../util/flags": {},
+    "../util/dynamicImport": {
+      dynamicImport: async () => { throw new Error("Unexpected signing import during keychain creation"); },
+    },
   };
   /** Fail on unmodeled imports so an upstream refactor cannot accidentally
    * reach real filesystem or keychain commands through the test harness. */

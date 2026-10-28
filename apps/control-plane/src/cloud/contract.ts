@@ -24,6 +24,7 @@ export const CloudV2CapabilitiesSchema = z.object({
   git: z.boolean(),
   agents: z.array(CloudV2AgentSchema).max(3),
   promptOutbox: z.literal(1).optional(),
+  githubPullRequests: z.literal(1).optional(),
   mcp: z.literal(1).optional(),
 }).strict();
 export type CloudV2Capabilities = z.infer<typeof CloudV2CapabilitiesSchema>;
@@ -67,7 +68,7 @@ export const CloudV2WorkerFrameSchema = z.discriminatedUnion("t", [
   CloudV2HistoryFrameSchema,
   /** Idle means no running agent turn or recent terminal activity. */
   z.object({ t: z.literal("idle"), idle: z.boolean() }).strict(),
-  z.object({ t: z.literal("request"), id: z.string().uuid(), kind: z.literal("github-token") }).strict(),
+  z.object({ t: z.literal("request"), id: z.string().uuid(), kind: z.literal("github-token"), purpose: z.enum(["git", "gh"]).optional() }).strict(),
   z.object({ t: z.literal("stop-ack"), id: z.string().uuid() }).strict(),
 ]);
 export type CloudV2WorkerFrame = z.infer<typeof CloudV2WorkerFrameSchema>;
@@ -104,6 +105,7 @@ export const CloudV2ControlFrameSchema = z.discriminatedUnion("t", [
   z.object({
     t: z.literal("config"),
     promptOutbox: z.literal(1).optional(),
+  githubPullRequests: z.literal(1).optional(),
     loginRevision: z.string().regex(/^(0|[1-9][0-9]{0,19})$/),
     mcpServers: z.array(RuntimeMcpServerSchema).max(128).optional(),
     workspace: z.object({
@@ -111,6 +113,10 @@ export const CloudV2ControlFrameSchema = z.discriminatedUnion("t", [
       organizationId: z.string().uuid(),
       checkoutPath: z.string().min(1).max(1024),
       repository: z.string().min(1).max(512),
+      github: z.object({ repositoryId: z.string().regex(/^[1-9][0-9]{0,15}$/),
+        repository: z.string().regex(/^[A-Za-z0-9_.-]{1,100}\/[A-Za-z0-9_.-]{1,100}$/),
+        previousRepositories: z.array(z.string().regex(/^[A-Za-z0-9_.-]{1,100}\/[A-Za-z0-9_.-]{1,100}$/)).max(102),
+      }).strict().optional(),
       /** Created from the locally available baseCommit, else the on-disk baseBranch. */
       branch: z.string().min(1).max(255),
       baseBranch: z.string().min(1).max(255),

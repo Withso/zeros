@@ -261,7 +261,15 @@ export function extractLocalLinks(text: string, limit = 64): LocalLink[] {
   const seen = new Set<string>();
   const pattern = /zeros(?:-alpha|-beta|-dev)?:\/\/(?:chat|workspace)\/[A-Za-z0-9_.:%-]+/g;
   for (const match of text.matchAll(pattern)) {
-    const link = parseLocalLink(match[0].replace(/[.:-]+$/, ""));
+    // A suffix regexp retries from every punctuation character when a long
+    // internal run ends in a non-punctuation character. Scan only the suffix.
+    const candidate = match[0];
+    let end = candidate.length;
+    while (
+      end > 0 &&
+      (candidate[end - 1] === "." || candidate[end - 1] === ":" || candidate[end - 1] === "-")
+    ) end--;
+    const link = parseLocalLink(candidate.slice(0, end));
     if (!link) continue;
     const key = `${link.scheme}:${link.kind}:${link.id}`;
     if (seen.has(key)) continue;
@@ -311,12 +319,14 @@ export function localAgentFamily(agentId: string | null | undefined): string | n
 export function localModeLevel(agentId: string | null | undefined, modeId: string | null | undefined): LocalModeLevel | null {
   const family = localAgentFamily(agentId);
   if (!family || !modeId) return null;
-  return LOCAL_MODE_LEVEL_BY_FAMILY[family]?.[modeId] ?? null;
+  const modes = LOCAL_MODE_LEVEL_BY_FAMILY[family];
+  return modes && Object.hasOwn(modes, modeId) ? modes[modeId] : null;
 }
 
 export function localModeForLevel(agentId: string | null | undefined, level: LocalModeLevel): string | null {
   const family = localAgentFamily(agentId);
-  return family ? (LOCAL_MODE_FOR_LEVEL_BY_FAMILY[family]?.[level] ?? null) : null;
+  if (!family || !LOCAL_MODE_LEVELS.includes(level)) return null;
+  return LOCAL_MODE_FOR_LEVEL_BY_FAMILY[family]?.[level] ?? null;
 }
 
 // ── Request and argument shapes ───────────────────────────

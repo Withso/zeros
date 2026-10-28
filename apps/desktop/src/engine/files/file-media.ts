@@ -2,17 +2,18 @@ import fs from "node:fs";
 import path from "node:path";
 import { FILE_MEDIA_CHUNK_BYTES, MAX_FILE_MEDIA_BYTES, fileMediaRangeSchema, fileMediaType, fileMediaVersion, type FileMediaRangeResult } from "@zeros/protocol/file-media";
 import { isInside, isSensitiveRepoPath } from "./read-file";
+import { openBoundedFileSync } from "./bounded-read-sync";
 
 /** A range never trusts a previous successful metadata lookup. Resolve and
  * authorize again, then read a held regular-file descriptor and check revision
  * before AND after I/O. No whole-file buffer, hash or retained descriptor. */
-function openMedia(cwd: string, relativePath: string, remote: boolean) {
+function openMedia(cwd: string, relativePath: string, remote: boolean, canonicalRoot?: string) {
   if (!cwd || !relativePath || relativePath.includes("\0") || !fileMediaType(relativePath)) throw new Error("Invalid media path");
-  const root = fs.realpathSync(cwd), lexicalRoot = path.resolve(cwd), lexical = path.resolve(cwd, relativePath);
+  const root = canonicalRoot ?? fs.realpathSync(cwd), lexicalRoot = path.resolve(cwd), lexical = path.resolve(cwd, relativePath);
   if (!isInside(lexical, lexicalRoot) || (remote && isSensitiveRepoPath(path.relative(lexicalRoot, lexical)))) throw new Error("Media path is outside the workspace");
   const target = fs.realpathSync(lexical);
   if (!isInside(target, root) || (remote && isSensitiveRepoPath(path.relative(root, target)))) throw new Error("Media path is outside the workspace");
-  const fd = fs.openSync(target, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK);
+  const fd = openBoundedFileSync(target);
   try {
     const info = fs.fstatSync(fd), current = fs.statSync(target);
     if (!info.isFile() || info.dev !== current.dev || info.ino !== current.ino || fs.realpathSync(lexical) !== target || fs.realpathSync(cwd) !== root) throw new Error("Media file changed");
@@ -23,8 +24,8 @@ function openMedia(cwd: string, relativePath: string, remote: boolean) {
   } catch (error) { fs.closeSync(fd); throw error; }
 }
 
-export function readWorkspaceMediaMetadata(cwd: string, relativePath: string, remote: boolean) {
-  const { fd, info } = openMedia(cwd, relativePath, remote);
+export function readWorkspaceMediaMetadata(cwd: string, relativePath: string, remote: boolean, canonicalRoot?: string) {
+  const { fd, info } = openMedia(cwd, relativePath, remote, canonicalRoot);
   try {
     if (info.size > MAX_FILE_MEDIA_BYTES) return { kind: "too-large" as const, path: relativePath, bytes: info.size };
     const type = fileMediaType(relativePath)!;
@@ -32,9 +33,9 @@ export function readWorkspaceMediaMetadata(cwd: string, relativePath: string, re
   } finally { fs.closeSync(fd); }
 }
 
-export async function readWorkspaceMediaRange(cwd: string, input: unknown, remote = false): Promise<FileMediaRangeResult> {
+export async function readWorkspaceMediaRange(cwd: string, input: unknown, remote = false, canonicalRoot?: string): Promise<FileMediaRangeResult> {
   const range = fileMediaRangeSchema.parse(input);
-  const { fd, info } = openMedia(cwd, range.path, remote);
+  const { fd, info } = openMedia(cwd, range.path, remote, canonicalRoot);
   try {
     if (info.size > MAX_FILE_MEDIA_BYTES || fileMediaVersion(info) !== range.version || range.offset > info.size) throw new Error("Media file changed; reopen it to continue");
     const length = Math.min(range.length, info.size - range.offset, FILE_MEDIA_CHUNK_BYTES);

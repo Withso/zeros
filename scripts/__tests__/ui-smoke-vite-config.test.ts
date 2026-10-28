@@ -29,16 +29,19 @@ describe("UI smoke Vite configuration", () => {
     expect(config.optimizeDeps.entries).toEqual(["index.html"]);
   });
 
-  it("runs the composer smoke server in its isolated mode", () => {
+  it.each(["ui-smoke-composer.mjs", "smoke-file-media-electron.mjs"])("runs %s in the isolated browser mode", (script) => {
     const source = readFileSync(
-      path.join(ROOT, "scripts/ui-smoke-composer.mjs"),
+      path.join(ROOT, "scripts", script),
       "utf8",
     );
 
     const smokeMode = source.match(
-      /"exec",\s*"vite",\s*"--mode",\s*"([^"]+)"/,
+      /"--mode",\s*"([^"]+)"/,
     )?.[1];
 
     expect(smokeMode).toBe("ui-smoke");
+    // The runner probes and navigates 127.0.0.1. On IPv6-first hosts,
+    // localhost can bind only ::1 and leave that probe unreachable.
+    expect(source.match(/"--host",\s*"([^"]+)"/)?.[1]).toBe("127.0.0.1");
   });
 });

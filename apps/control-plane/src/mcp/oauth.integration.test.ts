@@ -6,6 +6,7 @@ import { McpStore } from "./store.js";
 import { McpOAuth } from "./oauth.js";
 import { createMcpPublicRoutes } from "./routes.js";
 import { openMcpMaterial, sealMcpMaterial } from "./envelope.js";
+import { CloudV2Store } from "../cloud/store.js";
 import type { FetchLike } from "@modelcontextprotocol/sdk/shared/transport.js";
 
 const d = process.env.TEST_DATABASE_URL ? describe : describe.skip;
@@ -259,9 +260,39 @@ d("durable organization MCP OAuth", () => {
       expect(body.get("grant_type")).toBe("refresh_token");
       return Response.json({ access_token: "fixture-renewed", refresh_token: "fixture-renewed-refresh", token_type: "Bearer", expires_in: 3600 });
     };
-    expect((await oauth.authorizationForRepository(org, admin, "org/repo", id, true, true)).headers.Authorization).toBe("Bearer fixture-renewed");
+    expect((await oauth.authorizationForRepository(org, admin, "org/repo", id, true, { repositoryId: "42" })).headers.Authorization).toBe("Bearer fixture-renewed");
     expect((await pool.query("SELECT binding,envelope->>'keyVersion' AS key_version FROM organization_mcp_oauth WHERE extension_id=$1", [id])).rows)
       .toEqual(expect.arrayContaining([{ binding: previous.oauth_binding, key_version: "2" }]));
+  });
+
+  it("binds scoped OAuth release and refresh notifications to the original repository after transfer", async () => {
+    const catalog = [{ repository: "org/repo", repositoryId: "42" }];
+    store = new McpStore(pool, keys, async () => catalog);
+    oauth = new McpOAuth(store, "https://api.example.test", fetcher);
+    const id = randomUUID();
+    await write(id, { repository: "org/repo" });
+    await pool.query("UPDATE organizations SET cloud_workspaces_allowed=true WHERE id=$1", [org]);
+    const workspaces = new CloudV2Store(pool);
+    const original = await workspaces.createWorkspace({ id: randomUUID(), organizationId: org, creatorUserId: admin,
+      name: "original", repository: "org/repo", sourceRepositoryId: "42", branch: "work", baseBranch: "main", computerBuildId: null });
+    const replacement = await workspaces.createWorkspace({ id: randomUUID(), organizationId: org, creatorUserId: admin,
+      name: "replacement", repository: "org/repo", sourceRepositoryId: "99", branch: "work", baseBranch: "main", computerBuildId: null });
+    const attempt = await connect(id);
+    await oauth.callback(attempt.state, "fixture-code");
+    expect(await workspaces.loginRevision(original.id)).toBe("1");
+    expect(await workspaces.loginRevision(replacement.id)).toBe("0");
+    catalog.splice(0, catalog.length, { repository: "org/repo", repositoryId: "99" },
+      { repository: "current/project", repositoryId: "42" });
+    await expect(oauth.authorizationForRepository(org, admin, "org/repo", id, false, { repositoryId: "99" }))
+      .rejects.toMatchObject({ code: "not_found" });
+    await expect(oauth.authorizationForRepository(org, admin, "org/repo", id)).rejects.toMatchObject({ code: "not_found" });
+    expect((await oauth.authorizationForRepository(org, admin, "current/project", id, false, { repositoryId: "42" })).headers.Authorization)
+      .toBe("Bearer fixture-access");
+    const renamed = await write(id, { repository: "current/project", expectedRevision: 1 });
+    expect(renamed.oauth.status).toBe("connected");
+    expect((await oauth.authorizationForRepository(org, admin, "current/project", id)).headers.Authorization).toBe("Bearer fixture-access");
+    expect(await workspaces.loginRevision(original.id)).toBe("2");
+    expect(await workspaces.loginRevision(replacement.id)).toBe("0");
   });
 
   it.each(["pending", "connected", "legacy"])("retains a %s unsaved attempt's identity through rotation, probe and atomic save", async phase => {

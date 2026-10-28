@@ -469,7 +469,9 @@ function clearCapturedSession(
       snapshot &&
       (scope === "all"
         ? sameAccount(latest.tokens, snapshot.tokens)
-        : latest.tokens.provider === "workos" &&
+        : (latest.tokens.provider === "auth0" && snapshot.tokens.provider === "auth0" &&
+           latest.tokens.refreshToken === snapshot.tokens.refreshToken) ||
+          latest.tokens.provider === "workos" &&
           snapshot.tokens.provider === "workos" &&
           latest.tokens.sessionId === snapshot.tokens.sessionId);
     if (sameTarget && latest) {
@@ -480,19 +482,22 @@ function clearCapturedSession(
 }
 
 async function signOutWorkOS(scope: "current" | "all"): Promise<boolean> {
-  const session = await getValidSessionForMain().catch(() => null);
   const rawAtStart = getSecret(TOKENS_KEY);
   const snapshot = parseStoredTokenSnapshot(rawAtStart);
+  const session = await getValidSessionForMain().catch(() => null);
+  let revoked = false;
   if (
     session?.provider === "workos" &&
     snapshot?.tokens.provider === "workos" &&
     session.sessionId === snapshot.tokens.sessionId
   ) {
-    if (!(await requestWorkOSDesktopRevocation(scope, session.accessToken, controlPlaneFetch))) {
+    revoked = await requestWorkOSDesktopRevocation(scope, session.accessToken, controlPlaneFetch).catch(() => false);
+    if (!revoked) {
       console.warn("[auth] WorkOS revoke unavailable");
     }
   }
   clearCapturedSession(rawAtStart, snapshot, scope);
+  if (scope === "all" && !revoked) throw new Error("Signed out on this device. Could not sign out other devices. Sign in again to retry.");
   return true;
 }
 
@@ -501,29 +506,33 @@ export const authClearSession: CommandHandler = async () => {
   if (snapshot?.tokens.provider === "workos") {
     return signOutWorkOS("current");
   }
+  if (snapshot?.tokens.provider === "auth0" && snapshot.tokens.refreshToken.startsWith("z0d_")) {
+    return signOutAuth0("current");
+  }
   deleteSecret(TOKENS_KEY);
   notifySessionChanged();
   return true;
 };
 
-async function signOutAuth0Everywhere(): Promise<boolean> {
+async function signOutAuth0(scope: "current" | "all"): Promise<boolean> {
   const rawAtStart = getSecret(TOKENS_KEY);
   const snapshot = parseStoredTokenSnapshot(rawAtStart);
+  let revoked = false;
   if (snapshot) {
     try {
-      await fetch(`${appBaseUrl()}/handoff/revoke`, {
+      const response = await fetch(`${appBaseUrl()}/handoff/revoke`, {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ refresh_token: snapshot.tokens.refreshToken }),
+        body: JSON.stringify({ refresh_token: snapshot.tokens.refreshToken, scope }),
         signal: AbortSignal.timeout(AUTH_REQUEST_TIMEOUT_MS),
       });
-    } catch (error) {
-      console.warn(
-        `[auth] revoke network call failed: ${(error as Error).message}`,
-      );
+      revoked = response.ok;
+    } catch {
+      console.warn("[auth] revoke unavailable");
     }
   }
-  clearCapturedSession(rawAtStart, snapshot, "all");
+  clearCapturedSession(rawAtStart, snapshot, scope);
+  if (scope === "all" && !revoked) throw new Error("Signed out on this device. Could not sign out other devices. Sign in again to retry.");
   return true;
 }
 
@@ -531,5 +540,5 @@ export const authSignOutEverywhere: CommandHandler = async () => {
   const snapshot = readTokenSnapshot();
   return snapshot?.tokens.provider === "workos"
     ? signOutWorkOS("all")
-    : signOutAuth0Everywhere();
+    : signOutAuth0("all");
 };

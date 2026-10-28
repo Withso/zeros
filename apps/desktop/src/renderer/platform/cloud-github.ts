@@ -11,6 +11,8 @@ import { z } from "zod";
 import { nativeInvoke } from "./runtime";
 import { KeyedAsyncCache } from "../shared/lib/keyed-async-cache";
 import { getOrganizationStoreGeneration } from "../features/team/team-store";
+import { clearCloudGithubPr } from "./cloud-github-pr";
+import { clearCloudGithubConnections } from "./cloud-github-connection";
 
 export type CloudGithubCatalog = z.infer<typeof cloudGithubCatalogSchema>;
 export type CloudGithubRepositoryPage = z.infer<
@@ -24,6 +26,8 @@ export const cloudGithubRepositoriesCache =
 export const cloudGithubScopeKey = (userId: string, organizationId: string) =>
   JSON.stringify([userId, organizationId]);
 export function clearCloudGithub(): void {
+  clearCloudGithubConnections();
+  clearCloudGithubPr();
   for (const key of cloudGithubCatalogCache.keys())
     cloudGithubCatalogCache.forget(key);
   for (const key of cloudGithubRepositoriesCache.keys())

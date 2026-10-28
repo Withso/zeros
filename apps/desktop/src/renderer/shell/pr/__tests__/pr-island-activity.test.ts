@@ -17,7 +17,7 @@ const source = ts.createSourceFile("pr-status-island.tsx", readFileSync(new URL(
 const effects: string[] = [], declarations: string[] = [];
 function visit(node: ts.Node) {
   if (ts.isFunctionDeclaration(node) && ["livePr", "rememberIslandData"].includes(node.name?.text ?? "")) declarations.push(node.getText(source));
-  if (ts.isVariableDeclaration(node) && ["local", "foreground", "observing", "ISLAND_FRESH_MS", "MAX_PR_ISLAND_SNAPSHOTS"].includes(node.name.getText(source)))
+  if (ts.isVariableDeclaration(node) && ["local", "cloudDocument", "scope", "nativeReads", "foreground", "observing", "ISLAND_FRESH_MS", "MAX_PR_ISLAND_SNAPSHOTS"].includes(node.name.getText(source)))
     declarations.push(`const ${node.getText(source)};`);
   if (ts.isCallExpression(node) && node.expression.getText(source) === "useEffect") {
     const body = node.arguments[0]?.getText(source) ?? "";
@@ -33,25 +33,29 @@ let page: EventTarget & { visibilityState: string; hasFocus: () => boolean };
 let focused: boolean;
 let cloudPrReads: CloudPrStatusReads;
 let reconciledCloudPrReads: WeakSet<object>;
+let cloudScope = "0";
 const cleanups: Array<() => void> = [];
 function unmount() { for (const cleanup of cleanups.splice(0)) cleanup(); }
 beforeEach(() => {
   vi.useFakeTimers(); vi.setSystemTime(1_000_000); focused = true;
   cloudPrReads = new CloudPrStatusReads();
   reconciledCloudPrReads = new WeakSet();
+  cloudScope = "0";
   page = Object.assign(new EventTarget(), { visibilityState: "visible", hasFocus: () => focused });
   vi.stubGlobal("document", page); vi.stubGlobal("window", Object.assign(new EventTarget(), { setTimeout, clearTimeout, setInterval, clearInterval }));
 });
 afterEach(() => { unmount(); expect(vi.getTimerCount()).toBe(0); vi.useRealTimers(); vi.unstubAllGlobals(); });
 function mount(path = "/personal/project", id = "personal-workspace", rawKind = "ready", cache = new Map(),
   options: { refreshKey?: number; failed?: boolean; reads?: ReturnType<typeof vi.fn>[];
-    prState?: string; sync?: ReturnType<typeof vi.fn> } = {}) {
+    prState?: string; sync?: ReturnType<typeof vi.fn>; cloudStatus?: string } = {}) {
   const reads = options.reads ?? [vi.fn(async () => null), vi.fn(async () => null),
     vi.fn(async () => { if (options.failed) throw new Error("unavailable"); return { number: 42, state: "ready" }; }), vi.fn(async () => null)];
   const setLive = vi.fn();
   const context = {
     ...refreshRules, useDocumentActive, documentIsForeground, isCloudWorkspace, parseCloudScopedId,
     document, window, Date, Promise, cloudPrReads, reconciledCloudPrReads,
+    useCloudGithubPrDocument: () => ({ status: options.cloudStatus ?? "ready" }),
+    useCloudGithubPrScope: () => cloudScope, cloudGithubPrScope: () => cloudScope,
     workspace: { id, path, repoRoot: path, prState: options.prState ?? "ready", repoSlug: "repo", prNumber: 42 },
     active: true, localDesktop: true, prNumber: 42, dataKey: `${id}#42`, refreshKey: options.refreshKey ?? 1, forceRefreshAt: 0,
     activationKeyRef: { current: null }, lastRequestAtRef: { current: 0 }, lastKnownData: cache,
@@ -105,6 +109,29 @@ describe("Local PR island activity", () => {
     expect(first.reads[1]).toHaveBeenCalledTimes(30);
     expect(first.reads[2]).toHaveBeenCalledOnce();
     expect(first.reads[3]).toHaveBeenCalledOnce();
+  });
+  it("reads published PR status while the cloud VM is stopped without asking it for Git state", async () => {
+    const id = "cloud://organization/workspace";
+    const { reads, setLive } = mount(id, id, "ready", new Map(), { cloudStatus: "stopped" });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(reads[0]).not.toHaveBeenCalled();
+    expect(reads[1]).not.toHaveBeenCalled();
+    expect(reads[2]).toHaveBeenCalledOnce();
+    expect(reads[3]).toHaveBeenCalledOnce();
+    expect(setLive).toHaveBeenCalledOnce();
+  });
+  it("does not publish a late PR result after the cloud connection is replaced", async () => {
+    const id = "cloud://organization/workspace";
+    let finish!: (value: unknown) => void;
+    const reads = [vi.fn(async () => null), vi.fn(async () => null),
+      vi.fn(() => new Promise(resolve => { finish = resolve; })), vi.fn(async () => null)];
+    const { setLive, cache } = mount(id, id, "ready", new Map(), { reads });
+    await vi.advanceTimersByTimeAsync(0);
+    cloudScope = "1";
+    finish({ number: 42, state: "ready" });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(setLive).not.toHaveBeenCalled();
+    expect(cache.size).toBe(0);
   });
   it("does not repeat a failed durable reconciliation for every reuse of a cloud PR observation", async () => {
     const id = "cloud://organization/workspace", cache = new Map();

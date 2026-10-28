@@ -19,6 +19,14 @@ export default defineConfig([
     sourcemap: true,
     clean: true,
     outDir: "dist-engine",
+    onSuccess: async () => {
+      // Standalone development launches resolve trusted helpers beside cli.js.
+      // The packaged sidecar receives absolute resource paths from Electron.
+      await Promise.all([
+        fs.promises.copyFile("apps/desktop/src/engine/design/sass-host.cjs", "dist-engine/sass-host.cjs"),
+        fs.promises.copyFile("apps/desktop/src/engine/agents/containment/host-process-supervisor.mjs", "dist-engine/host-process-supervisor.mjs"),
+      ]);
+    },
     platform: "node",
     target: "node18",
     external: [

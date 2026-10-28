@@ -1221,6 +1221,14 @@ records pass unknown fields through:
   condition, then `sass`, `style` or a stylesheet `main`), at most 1,024 files.
   Sass's own filesystem loading is never used. A generation records every
   file it read, including misses, and its CSS is then imported as plain CSS.
+  Evaluation runs in the product's dedicated Node subprocess, with no project
+  JavaScript, provider environment or Node startup hooks. At most two compiles
+  run at once; the queue holds at most 16, with a 10-second wait budget. Each
+  compile has a 10-second execution budget, a 192 MiB V8 heap setting, bounded
+  importer traffic and 2 MiB of returned CSS. Cancellation or timeout kills the
+  child and retains its slot until exit. The heap setting is not a total RSS
+  guarantee or a new security sandbox; descriptor-safe imports and process
+  lifetime bounds remain separate controls.
 - **App fonts** (`engine/design/style-fonts.ts`) is a source the engine adds
   first, as `@fonts`, when `meta/canvas.json` `fonts` declares fonts or any
   source imports Google Fonts: `{ "family", "provider": "google", "variable",

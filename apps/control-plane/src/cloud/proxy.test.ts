@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import type { CloudAgentCredentialMaterial } from "../agent-credentials/agent-credential-envelope.js";
-import { createCloudV2ProxyRoutes } from "./proxy.js";
+import { createCloudV2ProxyRoutes, type CloudV2ProxyDeps } from "./proxy.js";
+import { HttpError } from "../authz.js";
 import type { CloudV2Workspace } from "./store.js";
 import { newCloudV2Token } from "./tokens.js";
 
@@ -8,7 +9,7 @@ const token = newCloudV2Token("proxy").token;
 const workspace = { id: "w", organizationId: "org", creatorUserId: "creator", state: "running" } as CloudV2Workspace;
 const secret = (value: string) => value.padEnd(24, "x");
 
-function setup(logins: Partial<Record<"codex" | "claude" | "cursor", CloudAgentCredentialMaterial>>, refreshed?: CloudAgentCredentialMaterial) {
+function setup(logins: Partial<Record<"codex" | "claude" | "cursor", CloudAgentCredentialMaterial>>, refreshed?: CloudAgentCredentialMaterial, authority: Partial<Pick<CloudV2ProxyDeps, "authorizeSource" | "continueSource">> = {}) {
   const fetch = vi.fn(async (_url: string, _init: RequestInit) => new Response("data: ok\n\n", { status: 200, headers: { "content-type": "text/event-stream", "set-cookie": "a=b" } }));
   let now = 1_000_000_000;
   const verifyProxyToken = vi.fn(async (value: string) => value === token ? workspace : null);
@@ -20,6 +21,7 @@ function setup(logins: Partial<Record<"codex" | "claude" | "cursor", CloudAgentC
     refreshCodex,
     fetch: fetch as unknown as typeof globalThis.fetch,
     now: () => now,
+    ...authority,
   });
   return { app, fetch, refreshCodex, verifyProxyToken, login, advance: (ms: number) => { now += ms; } };
 }
@@ -128,6 +130,27 @@ describe("cloud Codex account model discovery", () => {
 });
 
 describe("cloud v2 model proxy", () => {
+  it.each([[503, "github_unavailable", 503], [429, "github_rate_limited", 503], [403, "github_cloud_access_denied", 401]] as const)(
+    "reports source verification %s/%s without misclassifying a temporary outage as revocation", async (status, code, expected) => {
+      const env = setup({ codex: { kind: "codex-api-key", apiKey: secret("key") } }, undefined, {
+        continueSource: async () => { throw new HttpError(status, code, "private-error-canary"); },
+      });
+      const response = await env.app.request("/v2/cloud/proxy/openai/responses", { method: "POST", headers: { authorization: `Bearer ${token}` }, body: "{}" });
+      expect(response.status).toBe(expected);
+      expect(await response.text()).not.toContain("private-error-canary");
+      expect(env.fetch).not.toHaveBeenCalled();
+    });
+
+  it("continues Codex requests on an existing grant without fresh GitHub admission", async () => {
+    const authorizeSource = vi.fn(async () => { throw new HttpError(503, "github_unavailable", "unavailable"); });
+    const continueSource = vi.fn(async () => ({ recheckAt: Date.now() + 60_000 }));
+    const env = setup({ codex: { kind: "codex-api-key", apiKey: secret("key") } }, undefined, { authorizeSource, continueSource });
+    const response = await env.app.request("/v2/cloud/proxy/openai/responses", { method: "POST", headers: { authorization: `Bearer ${token}` }, body: "{}" });
+    expect(response.status).toBe(200);
+    expect(env.fetch).toHaveBeenCalledOnce();
+    expect(authorizeSource).not.toHaveBeenCalled();
+    expect(continueSource).toHaveBeenCalledOnce();
+  });
   it("swaps the workspace token for the creator's ChatGPT login and streams the reply", async () => {
     const { app, fetch } = setup({ codex: { kind: "codex-chatgpt", accessToken: secret("chatgpt-access"), accountId: "acct_1", expiresAt: 2_000_000 } });
     const response = await app.request("/v2/cloud/proxy/openai/responses?x=1", {

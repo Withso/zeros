@@ -29,6 +29,8 @@ export interface BrowserClickRiskInput {
 
 /** The element a key press reaches, as the page describes it. */
 export interface BrowserKeyTarget extends BrowserClickRiskInput {
+  /** Effective destination and form semantics approved before dispatch. */
+  actionKey?: string;
   /** Text goes into it, so Space types and Enter clicks nothing. */
   typing?: boolean;
   /** Enter in it submits its form. */
@@ -257,9 +259,13 @@ export function classifyBrowserClick(
   }
   // Visible text is evidence, not the security boundary. Any structural form
   // submit pauses even when its label is an icon, "Continue", or localized.
+  // The isolated DOM policy can prove there is no form owner. A button's
+  // default type is still "submit" in that case, but clicking it submits none.
+  // Keep the type fallback for callers that did not inspect form ownership.
   if (
     detail.submitsForm ||
-    detail.inputType?.toLocaleLowerCase() === "submit"
+    (detail.submitsForm === undefined &&
+      detail.inputType?.toLocaleLowerCase() === "submit")
   ) {
     return "external-submit";
   }

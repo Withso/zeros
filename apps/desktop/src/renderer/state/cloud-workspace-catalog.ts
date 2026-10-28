@@ -1,4 +1,5 @@
 import type { Workspace } from "../platform/git";
+import { publishCloudGithubPrCapabilities } from "../platform/cloud-github-pr-capability";
 import {
   CloudWorkspaceDocumentSchema,
   changeCloudWorkspaceLifecycle,
@@ -155,6 +156,7 @@ export function cloudWorkspaceDocument(
 }
 
 function rebuild(documentsChanged = false, { pruneRepositoryFilters = true } = {}): void {
+  publishCloudGithubPrCapabilities(documents.filter(canReadCloudWorkspace));
   const knownKeys = new Set(
     documents
       .filter(canReadCloudWorkspace)
@@ -199,6 +201,8 @@ function rebuild(documentsChanged = false, { pruneRepositoryFilters = true } = {
       nextFilterOwners.set(project.id, sidebarRepositoryFilterOwner(doc.createdBy, doc.organizationId));
       nextOwners.set(key, project);
       const engine = engineRows.get(key);
+      const branch = engine?.branch || doc.github?.branch || doc.name;
+      const github = doc.github?.branch === branch ? doc.github : undefined;
       const row: Workspace = {
         ...engine,
         id: key,
@@ -208,16 +212,16 @@ function rebuild(documentsChanged = false, { pruneRepositoryFilters = true } = {
         organizationId: doc.organizationId,
         placement: "cloud",
         kind: engine?.kind ?? "code",
-        branch: engine?.branch || doc.name,
-        baseBranch: engine?.baseBranch || doc.repository.revision,
+        branch,
+        baseBranch: engine?.baseBranch || github?.baseBranch || doc.repository.revision,
         status: engine?.status ?? "in-progress",
         createdAt: Date.parse(doc.createdAt),
         archivedAt:
           doc.status === "archived" ? Date.parse(doc.updatedAt) : null,
         stashRef: null,
-        prNumber: engine?.prNumber ?? null,
-        prState: engine?.prState ?? null,
-        prUrl: engine?.prUrl ?? null,
+        prNumber: github ? github.prNumber : engine?.prNumber ?? null,
+        prState: github ? github.prState : engine?.prState ?? null,
+        prUrl: github ? github.prUrl : engine?.prUrl ?? null,
         agentId: engine?.agentId ?? null,
         lastActiveAt: engine?.lastActiveAt ?? null,
         present: true,

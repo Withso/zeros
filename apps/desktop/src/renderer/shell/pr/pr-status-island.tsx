@@ -105,6 +105,8 @@ import {
   rememberPrIslandLastState,
 } from "./pr-island-last-state";
 import { publishPrIslandKind } from "./pr-island-state-store";
+import { useCloudGithubPrDocument, useCloudGithubPrScope } from "../../platform/use-cloud-github-pr";
+import { cloudGithubPrScope } from "../../platform/cloud-github-pr-scope";
 import { useGitRemote } from "../../features/settings/use-git-remote";
 import { useSendToActiveChat } from "./use-send-to-active-chat";
 import {
@@ -299,6 +301,9 @@ export function PrStatusIsland({
   localDesktop,
 }: PrStatusIslandProps) {
   const local = !!workspace.path && !isCloudWorkspace(workspace.path) && !isCloudWorkspace(workspace.id) && !parseCloudScopedId(workspace.id);
+  const cloudDocument = useCloudGithubPrDocument(workspace.id);
+  const scope = useCloudGithubPrScope(workspace.id);
+  const nativeReads = local || cloudDocument?.status === "ready" || cloudDocument?.status === "busy";
   const foreground = useDocumentActive(active, true);
   const observing = foreground;
   const prNumber = workspace.prNumber;
@@ -311,7 +316,7 @@ export function PrStatusIsland({
   // Show-checks action (which lands directly on its Checks sub-tab).
   const showPr = useShowReviewTab();
 
-  const dataKey = `${workspace.id}#${prNumber ?? "none"}`;
+  const dataKey = `${workspace.id}#${prNumber ?? "none"}${local ? "" : `@${scope}`}`;
   // Live state carries its key so a prNumber change can never render another
   // PR's stale batch; until this key's fetch lands we fall back to the module
   // cache (instant on remount) and only then to the loading row.
@@ -413,11 +418,11 @@ export function PrStatusIsland({
       ghPrChecks({ workspaceId: workspace.id, prNumber }),
     ]);
     void Promise.all([
-      Promise.allSettled([statusForGeneration(workspace.id, refreshKey, workspace.path),
-        changeCountsForGeneration(workspace.id, refreshKey)]),
+      Promise.allSettled([nativeReads ? statusForGeneration(workspace.id, refreshKey, workspace.path) : Promise.resolve(null),
+        nativeReads ? changeCountsForGeneration(workspace.id, refreshKey) : Promise.resolve(null)]),
       local ? readGithub() : cloudPrReads.read(dataKey, readGithub),
     ]).then(([[s, n], [p, c]]) => {
-      if (cancelled) return;
+      if (cancelled || cloudGithubPrScope(workspace.id) !== scope) return;
       const prev = lastKnownData.get(dataKey);
       const next: IslandData = {
         status: s.status === "fulfilled" ? s.value : (prev?.status ?? null),
@@ -461,6 +466,8 @@ export function PrStatusIsland({
     dataKey,
     refreshKey,
     forceRefreshAt,
+    nativeReads,
+    scope,
   ]);
 
   // External GitHub changes do not touch this machine's file watcher. Catch
@@ -513,6 +520,7 @@ export function PrStatusIsland({
    *  refetch the engine write triggers then confirms it. */
   const applyOptimistic = useCallback(
     (mutate: (d: IslandData) => IslandData) => {
+      if (cloudGithubPrScope(workspace.id) !== scope) return;
       if (!local) cloudPrReads.forget(dataKey);
       const prev = lastKnownData.get(dataKey);
       if (!prev) return;
@@ -520,7 +528,7 @@ export function PrStatusIsland({
       rememberIslandData(dataKey, next);
       setLive({ key: dataKey, data: next });
     },
-    [dataKey, local],
+    [dataKey, local, workspace.id, scope],
   );
 
   const actionErrorToast = useCallback((title: string, err: unknown) => {
@@ -777,7 +785,7 @@ export function PrStatusIsland({
               }
             : null,
         },
-        { allowContinue: localDesktop },
+        { allowContinue: localDesktop && local },
       )
     : null;
   // A raw "checking"

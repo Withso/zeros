@@ -97,7 +97,9 @@ npm run typecheck
 npm test               # web/session/auth regression tests
 ```
 
-The ordinary `dev` scripts keep the legacy Auth0/KV path. For a local WorkOS
+The ordinary `dev` scripts select Auth0 compatibility. That mode now needs a
+local control plane, disposable Postgres and the shared server-only
+`AUTH0_SESSION_AUTHORITY_KEY`; KV is used only for abuse counters. For a local WorkOS
 end-to-end browser login, run the Railway control plane locally with a loopback
 `CONTROL_PLANE_URL` and its own disposable Postgres. WorkOS credentials stay in
 that control-plane process; never copy them into local Pages bindings.
@@ -120,7 +122,7 @@ After changing `apps/marketing/package.json`, regenerate that lockfile:
 | **Build output directory** | `dist` ← change from `public`                                       |
 | **Root directory**         | `apps/web`                                                          |
 | **Production branch**      | Alpha: `main`; Beta/Production: selected `release/X.Y.Z`            |
-| **KV binding**             | `SESSIONS` — retained per project for Auth0 rollback/abuse controls |
+| **KV binding**             | `SESSIONS` — retained per project for best-effort abuse counters; never session authority |
 | **Custom domains**         | Channel app or Ops domain; only Production web owns marketing       |
 
 Disable Preview deployments on these release projects. Configure the following
@@ -142,7 +144,7 @@ Provider-specific Pages configuration:
 
 | Mode                | Variables and runtime secrets                                                                                |
 | ------------------- | ------------------------------------------------------------------------------------------------------------ |
-| Auth0 compatibility | `AUTH0_DOMAIN`, `AUTH0_CLIENT_ID`, secret `AUTH0_CLIENT_SECRET`, and channel `AUTH0_AUDIENCE`                |
+| Auth0 compatibility | `AUTH0_DOMAIN`, `AUTH0_CLIENT_ID`, secret `AUTH0_CLIENT_SECRET`, channel `AUTH0_AUDIENCE`, and secret `AUTH0_SESSION_AUTHORITY_KEY` shared only with the matching control plane |
 | WorkOS              | No provider-specific Pages values. `APP_ORIGIN` and `CONTROL_PLANE_URL` select the matching Railway service. |
 
 `ASSETS` is provided automatically by Pages (static output). Do not add it manually.
@@ -164,6 +166,24 @@ same-origin `Origin`, JSON content type, and `X-Zeros-Request: dashboard`.
 Auth0 remains selectable only for the declared migration rollback window. Use a
 separate Regular Web Application per channel with that environment's callback
 and logout origin.
+
+Auth0 browser sessions and desktop handoff use the control plane's PostgreSQL
+authority. Apply `0208_auth0_browser_session_authority.sql` and configure the
+same random 32-byte key, encoded as 64 hex characters, in Pages and the matching
+control plane's `AUTH0_SESSION_AUTHORITY_KEY` before deploying the Pages change.
+Use a different key per channel; never put it in a `VITE_*` value or browser
+binding. Session token payloads are encrypted at rest, refreshes serialize with
+leases and revisions, tickets are consumed atomically, and sessions have an
+absolute 30-day lifetime. A delayed OAuth callback cannot undo global logout.
+
+The desktop receives an opaque `z0d_` refresh capability, not the provider's
+refresh token. Its revocation is independent of the browser and other devices,
+while refresh rotation is serialized against the underlying provider grant.
+Old KV sessions and raw Auth0 refresh handles require sign-in after cutover;
+there is no fallback to KV or raw handles. Drain old Pages versions during the
+coordinated rollout. Key replacement invalidates encrypted sessions and requires
+fresh sign-in. Retain the schema on rollback and do not restore an older version
+that treats KV or raw refresh tokens as authority.
 
 WorkOS browser sessions use authorization code plus PKCE. The browser cookie
 contains only a random 256-bit lookup ID. Railway stores only its SHA-256
@@ -334,7 +354,7 @@ apps/web/
 | Unknown path (either host)  | Static `404.html` with a real 404 status — without that file, Pages' implicit SPA mode would serve the marketing homepage with 200 on `app.zeros.build/<unknown>`                                                                  |
 | `*.pages.dev` / localhost   | Default to **app** (OAuth/hub); set `MARKETING_HOSTS` to preview marketing                                                                                                                                                         |
 | Session cookies             | Still host-only on app; never widened for marketing                                                                                                                                                                                |
-| Dashboard credentials       | Auth0 grants stay in compatibility KV; WorkOS sealed/refresh state stays in PlanetScale behind the Railway control plane; browser boot data contains identity and organization summaries only                                      |
+| Dashboard credentials       | Auth0 encrypted grants and WorkOS sealed/refresh state stay in PlanetScale behind the Railway control plane; browser boot data contains identity and organization summaries only                                      |
 | WorkOS refresh outage       | Pre-rotation transient failures preserve the exact record; a post-rotation verification outage persists the replacement seal but withholds the bearer                                                                              |
 | WorkOS lifecycle event      | Pages preserves exact bytes; Railway verifies the signature before reducing the complete management event set; webhooks are idempotent and Events API repairs misses                                                               |
 | Account resolution          | Recovery/conflict/fresh-auth/inactive states have dedicated fixed UI; provider text and bearer/refresh material never render                                                                                                       |

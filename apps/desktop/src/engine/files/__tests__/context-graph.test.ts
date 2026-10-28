@@ -486,6 +486,23 @@ describe("stageContextGraphAttachment", () => {
     );
   });
 
+  it("does not publish an attachment through a parent exchanged at rename", async () => {
+    await ensureContextGraph(root);
+    const directory = graph("attachments", "att-swap"), outside = path.join(root, "outside");
+    await fs.mkdir(directory, { recursive: true }); await fs.mkdir(outside);
+    await fs.writeFile(path.join(outside, "notes.txt"), "canary");
+    const rename = fs.rename;
+    let swapped = false;
+    vi.spyOn(fs, "rename").mockImplementation(async (from, to) => {
+      if (!swapped && String(to).endsWith("/notes.txt")) {
+        swapped = true; await rename(directory, `${directory}-saved`); await fs.symlink(outside, directory);
+      }
+      return rename(from, to);
+    });
+    await stageContextGraphAttachment(root, { attachmentId: "att-swap", filename: "notes.txt", base64: Buffer.from("new").toString("base64") });
+    expect(await fs.readFile(path.join(outside, "notes.txt"), "utf8")).toBe("canary");
+  });
+
   it("leaves a PRE-EXISTING two-scope divergence alone", async () => {
     // An id hand-copied into both earlier scopes: the write refreshes the
     // shared copy (the one a share action moved) and never deletes the other.

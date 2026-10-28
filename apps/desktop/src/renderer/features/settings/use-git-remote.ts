@@ -10,6 +10,7 @@
 // DB_CHANGED{settings} → useResolvedSettings refetches → the value updates.
 
 import { useResolvedSettings } from "./use-settings";
+import { isCloudWorkspace } from "../../platform/bridge/cloud-workspace-key";
 
 export const DEFAULT_GIT_REMOTE = "origin";
 
@@ -17,7 +18,9 @@ export const DEFAULT_GIT_REMOTE = "origin";
  *  default until the resolve lands — briefs built in that window match the
  *  engine's own fallback, so they're never *wrong*, just pre-refresh. */
 export function useGitRemote(repoRoot: string | undefined): string {
-  const { resolved } = useResolvedSettings(repoRoot);
+  const cloud = isCloudWorkspace(repoRoot);
+  const { resolved } = useResolvedSettings(repoRoot, undefined, !cloud);
+  if (cloud) return DEFAULT_GIT_REMOTE;
   const git = resolved?.effective?.git;
   if (git && typeof git === "object" && !Array.isArray(git)) {
     const remote = (git as Record<string, unknown>).remote;

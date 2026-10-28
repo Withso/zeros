@@ -47,20 +47,23 @@ const resolvedSettingsCache = new KeyedAsyncCache<ResolvedSettingsWire>(48);
 const settingsLayerCache = new KeyedAsyncCache<SettingsReadWire>(48);
 const SETTINGS_CACHE_MAX_AGE_MS = 30_000;
 const MAX_BOOT_PREFETCH_REPOS = 8;
-const scheduledSettingsRefreshes = new Map<string, () => void>();
+const scheduledSettingsRefreshes = new Map<string, { refresh: () => void }>();
 
 /** Coalesce the synchronous fan-out from retained settings panels. Every
  * subscriber first marks its exact key stale; one microtask then performs the
  * read. A second DB event during that read is still observed by
  * KeyedAsyncCache and becomes one queued generation. */
 function scheduleSettingsRefresh(id: string, refresh: () => void): void {
-  const alreadyScheduled = scheduledSettingsRefreshes.has(id);
-  scheduledSettingsRefreshes.set(id, refresh);
-  if (alreadyScheduled) return;
+  const queued = scheduledSettingsRefreshes.get(id);
+  if (queued) {
+    queued.refresh = refresh;
+    return;
+  }
+  const pending = { refresh };
+  scheduledSettingsRefreshes.set(id, pending);
   queueMicrotask(() => {
-    const scheduled = scheduledSettingsRefreshes.get(id);
     scheduledSettingsRefreshes.delete(id);
-    scheduled?.();
+    pending.refresh();
   });
 }
 
@@ -183,17 +186,18 @@ export interface UseResolvedSettings {
 export function useResolvedSettings(
   repoRoot?: string,
   mainRepoRoot?: string,
+  enabled = true,
 ): UseResolvedSettings {
   const bridge = useBridge();
   const bridgeStatus = useBridgeStatus(repoRoot);
-  const active = useDocumentActive(true);
+  const active = useDocumentActive(enabled);
   const key = resolvedSettingsKey(repoRoot, mainRepoRoot);
   const snapshot = useSettingsSnapshot(resolvedSettingsCache, key);
 
   // A manual or DB-triggered refresh bypasses freshness but never clears a
   // resolved document while the engine builds its replacement.
   const refresh = useCallback(() => {
-    if (!bridge || bridgeStatus !== "connected") return;
+    if (!enabled || !bridge || bridgeStatus !== "connected") return;
     return resolvedSettingsCache
       .load(key, () => bridgeSettingsResolve(bridge, repoRoot, mainRepoRoot), {
         force: true,
@@ -201,12 +205,12 @@ export function useResolvedSettings(
       .catch(() => {
         // Error lives in the shared snapshot; confirmed data remains visible.
       });
-  }, [bridge, bridgeStatus, key, repoRoot, mainRepoRoot]);
+  }, [enabled, bridge, bridgeStatus, key, repoRoot, mainRepoRoot]);
 
   // All retained panels for this exact key hear the same broadcast. Mark the
   // key stale synchronously, then coalesce their reads into one microtask.
   const refreshFromBroadcast = useCallback(() => {
-    if (!bridge || bridgeStatus !== "connected") return;
+    if (!enabled || !bridge || bridgeStatus !== "connected") return;
     resolvedSettingsCache.invalidate(key);
     scheduleSettingsRefresh(`resolved:${key}`, () => {
       void resolvedSettingsCache
@@ -217,7 +221,7 @@ export function useResolvedSettings(
         )
         .catch(() => {});
     });
-  }, [bridge, bridgeStatus, key, repoRoot, mainRepoRoot]);
+  }, [enabled, bridge, bridgeStatus, key, repoRoot, mainRepoRoot]);
 
   useEffect(() => {
     if (!active) return;

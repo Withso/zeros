@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import {
   serverHandshake,
   clientHandshake,
@@ -7,6 +7,7 @@ import {
   toBase64,
   fromBase64,
   HandshakeError,
+  createPairingTrustGate,
   type HandshakeIO,
   type EncryptedChannel,
 } from "../index";
@@ -46,6 +47,91 @@ describe("EncryptedChannel", () => {
   const client = generateIdentityKeyPair();
   const serverIdB64 = toBase64(server.publicKey);
   const clientIdB64 = toBase64(client.publicKey);
+
+  it("keeps the pairing secret out of relay-visible frames", async () => {
+    const [clientIO, serverIO] = makePipe();
+    const frames: string[] = [];
+    const pairingNonce = "synthetic-pairing-nonce-with-entropy";
+    const results = await Promise.all([
+      clientHandshake({ ...clientIO, send: frame => { frames.push(frame); clientIO.send(frame); } }, {
+        identityKeyPair: client, expectedServerIdPublicKeyB64: serverIdB64, pairingNonce,
+      }),
+      serverHandshake(serverIO, {
+        identityKeyPair: server, isTrusted: (id, nonce) => id === clientIdB64 && nonce === pairingNonce,
+      }),
+    ]);
+    expect(results.every(channel => channel.state === "established")).toBe(true);
+    expect(frames.join("\n")).not.toContain(pairingNonce);
+    expect(JSON.parse(frames[0])).not.toHaveProperty("pn");
+  });
+
+  it("consumes enrollment once, rejects expiration, and checks revocation on reconnect", () => {
+    let now = 100;
+    const trusted = new Set<string>();
+    const gate = createPairingTrustGate({ nonce: "offer", expiresAt: 200, now: () => now,
+      isTrusted: id => trusted.has(id), enroll: id => { trusted.add(id); return true; } });
+    expect(gate("device-a", "wrong")).toBe(false);
+    expect(gate("device-a", "offer")).toBe(true);
+    expect(gate("device-b", "offer")).toBe(false);
+    expect(gate("device-a")).toBe(true);
+    trusted.delete("device-a");
+    expect(gate("device-a", "offer")).toBe(false);
+    now = 200;
+    const expired = createPairingTrustGate({ nonce: "expired", expiresAt: 200, now: () => now,
+      isTrusted: () => false, enroll: () => { throw new Error("must not enroll"); } });
+    expect(expired("device-b", "expired")).toBe(false);
+  });
+
+  it("rejects legacy plaintext enrollment without invoking the trust gate", async () => {
+    const [clientIO, serverIO] = makePipe();
+    const isTrusted = vi.fn(() => true);
+    const results = await Promise.allSettled([
+      clientHandshake({ ...clientIO, send: frame => {
+        const value = JSON.parse(frame); delete value.h; value.pn = "stolen-nonce";
+        clientIO.send(JSON.stringify(value));
+      } }, { identityKeyPair: client, expectedServerIdPublicKeyB64: serverIdB64, handshakeTimeoutMs: 30 }),
+      serverHandshake(serverIO, { identityKeyPair: server, isTrusted, handshakeTimeoutMs: 30 }),
+    ]);
+    expect(results[1]).toMatchObject({ status: "rejected", reason: { code: "version" } });
+    expect(isTrusted).not.toHaveBeenCalled();
+  });
+
+  it("authenticates the pinned host before sending any enrollment proof", async () => {
+    const [clientIO, serverIO] = makePipe();
+    const send = vi.fn(clientIO.send);
+    const results = await Promise.allSettled([
+      clientHandshake({ ...clientIO, send }, { identityKeyPair: client,
+        expectedServerIdPublicKeyB64: toBase64(generateIdentityKeyPair().publicKey),
+        pairingNonce: "offer-that-must-not-leak", handshakeTimeoutMs: 30 }),
+      serverHandshake(serverIO, { identityKeyPair: server, handshakeTimeoutMs: 30 }),
+    ]);
+    expect(results[0]).toMatchObject({ status: "rejected", reason: { code: "bad-signature" } });
+    expect(send).toHaveBeenCalledTimes(1);
+    expect(send.mock.calls[0][0]).not.toContain("offer-that-must-not-leak");
+  });
+
+  it("rejects a proof transplanted into another identity's handshake", async () => {
+    let stolenProof = "";
+    const [firstClient, firstServer] = makePipe();
+    await Promise.all([
+      clientHandshake({ ...firstClient, send: frame => {
+        stolenProof = JSON.parse(frame).proof ?? stolenProof; firstClient.send(frame);
+      } }, { identityKeyPair: client, expectedServerIdPublicKeyB64: serverIdB64, pairingNonce: "offer" }),
+      serverHandshake(firstServer, { identityKeyPair: server, isTrusted: () => true }),
+    ]);
+    const [nextClient, nextServer] = makePipe();
+    const isTrusted = vi.fn(() => true);
+    const results = await Promise.allSettled([
+      clientHandshake({ ...nextClient, send: frame => {
+        const value = JSON.parse(frame);
+        if (value.t === "confirm") value.proof = stolenProof;
+        nextClient.send(JSON.stringify(value));
+      } }, { identityKeyPair: generateIdentityKeyPair(), expectedServerIdPublicKeyB64: serverIdB64, pairingNonce: "other", handshakeTimeoutMs: 30 }),
+      serverHandshake(nextServer, { identityKeyPair: server, isTrusted, handshakeTimeoutMs: 30 }),
+    ]);
+    expect(results[1]).toMatchObject({ status: "rejected", reason: { code: "bad-signature" } });
+    expect(isTrusted).not.toHaveBeenCalled();
+  });
 
   async function establish(opts?: {
     isTrusted?: (id: string) => boolean;

@@ -150,25 +150,21 @@ it("boots through the runtime symlink, waits for a token, serves a dial-in PTY a
   // Reserve an ephemeral test port; production has no bind-address override.
   const reservation = createServer(); await new Promise<void>(resolve => reservation.listen(0, "127.0.0.1", resolve));
   const port = (reservation.address() as AddressInfo).port; await new Promise<void>(resolve => reservation.close(() => resolve()));
-  const messages: any[] = [], requests: Array<{ path: string; authenticated: boolean; rotated: boolean }> = [];
   const initialToken = "fixture-package-worker", rotatedToken = "fixture-rotated-package-worker";
-  const acceptedAuthorization = new Set([`Bearer ${initialToken}`]);
+  const messages: any[] = [], requests: Array<{ path: string; generation: "initial" | "rotated" | null; chatIds: string[] }> = [];
   let bootId = "";
-  let holdNextHistory = false, heldHistory = false, heldOriginalToken = false;
-  let releaseHistory!: () => void;
-  const historyReleased = new Promise<void>(resolve => { releaseHistory = resolve; });
   const server = createServer(async (request, response) => {
     const path = request.url!.split("/").at(-1)!;
-    if (path === "history" && holdNextHistory) {
-      holdNextHistory = false;
-      heldOriginalToken = request.headers.authorization === `Bearer ${initialToken}`;
-      heldHistory = true;
-      await historyReleased;
-    }
+    // A request may already be in flight while the credential file rotates.
+    // Classify its actual header, then require the new history mutation below
+    // to use the rotated token. A mutable expectation after reading the body
+    // incorrectly marks an authenticated in-flight request as unauthenticated.
+    const generation = request.headers.authorization === `Bearer ${initialToken}` ? "initial"
+      : request.headers.authorization === `Bearer ${rotatedToken}` ? "rotated" : null;
     const chunks: Buffer[] = []; for await (const chunk of request) chunks.push(chunk);
     const body = chunks.length ? JSON.parse(Buffer.concat(chunks).toString()) : {};
-    requests.push({ path, authenticated: acceptedAuthorization.has(request.headers.authorization ?? ""),
-      rotated: request.headers.authorization === `Bearer ${rotatedToken}` });
+    requests.push({ path, generation, chatIds: (body.chats ?? []).map((chat: { id: string }) => chat.id) });
+    if (!generation) { response.writeHead(401).end(); return; }
     if (path === "hello") bootId = body.bootId;
     const value = path === "hello" || path === "config" ? { config: { ...config, workspace: scope.workspace, agents: {} } }
       : path === "history" ? { sequence: body.sequence }
@@ -204,32 +200,18 @@ it("boots through the runtime symlink, waits for a token, serves a dial-in PTY a
     socket.send(JSON.stringify({ t: "open", clientId: CLIENT_A }));
     await expect.poll(() => messages.some(message => message.t === "frame" && message.frame.type === "PTY_DATA"
       && message.frame.data.includes("BUNDLED_PTY_OK")), { timeout: 5000 }).toBe(true);
-    // Hold a real authenticated request across rotation. Its old bearer was
-    // read before the replacement file existed, even if its body arrives later.
-    holdNextHistory = true;
-    socket.send(JSON.stringify({ t: "frame", clientId: CLIENT_A, frame: browserFrame("WORKSPACE_REQUEST", { op: "chats.upsert", params: {
-      chat: { id: "package-chat-before-rotation", folder: root, agentId: "codex", title: "Before rotation", createdAt: 99 },
-    } }) }));
-    await expect.poll(() => heldHistory, { timeout: 5000 }).toBe(true);
-    expect(heldOriginalToken).toBe(true);
-    // Requests already signed with the issued token remain authenticated while
-    // rotation is in flight. Still reject missing/unknown bearers, and below
-    // require a subsequent real request to prove the worker reread the file.
-    acceptedAuthorization.add(`Bearer ${rotatedToken}`);
-    await writeFile(tokenFile, rotatedToken, { mode: 0o600 });
-    releaseHistory();
-    const histories = requests.filter(request => request.path === "history").length;
+    expect(requests.some(request => request.path === "hello" && request.generation === "initial")).toBe(true);
+    await writeFile(`${tokenFile}.next`, rotatedToken, { mode: 0o600 });
+    await rename(`${tokenFile}.next`, tokenFile);
     socket.send(JSON.stringify({ t: "frame", clientId: CLIENT_A, frame: browserFrame("WORKSPACE_REQUEST", { op: "chats.upsert", params: {
       chat: { id: "package-chat", folder: root, agentId: "codex", title: "Fixture", createdAt: 100 },
     } }) }));
-    await expect.poll(() => requests.filter(request => request.path === "history").length).toBeGreaterThan(histories);
-    await expect.poll(() => requests.some(request => request.path === "history" && request.rotated)).toBe(true);
-    expect(requests.every(request => request.authenticated)).toBe(true);
+    await expect.poll(() => requests.find(request => request.path === "history" && request.chatIds.includes("package-chat"))?.generation).toBe("rotated");
+    expect(requests.every(request => request.generation !== null)).toBe(true);
     const exited = once(child, "exit"); child.kill("SIGTERM"); await exited;
     expect(child.exitCode).toBe(0);
     for (const secret of [initialToken, rotatedToken, "fixture-private-route-token", grant]) expect(output.includes(secret)).toBe(false);
   } finally {
-    releaseHistory();
     if (child?.exitCode === null && child.signalCode === null) { const exited = once(child, "exit"); child.kill("SIGKILL"); await exited; }
     socket?.terminate(); await new Promise<void>(resolve => server.close(() => resolve()));
     await rm(harness, { force: true });

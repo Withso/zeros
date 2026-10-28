@@ -71,7 +71,7 @@ function frameTreeNodeIds(frame: WebFrameMain | null | undefined): number[] {
 /** Strip iframe-blocking headers from this session's http(s)
  *  responses. Idempotent — calling twice replaces the listener.
  *  Pass `win.webContents.session` from createMainWindow(). */
-export function installIframeHeaderStripping(session: Session): void {
+export function installIframeHeaderStripping(session: Session, appDocument?: { url: string; webContentsId: number; csp: string }): void {
   session.webRequest.onBeforeSendHeaders(
     { urls: ["https://*/*", "wss://*/*"] },
     (details, callback) => {
@@ -99,9 +99,16 @@ export function installIframeHeaderStripping(session: Session): void {
     },
   );
   session.webRequest.onHeadersReceived(
-    // Filter: only http(s) — file:// renderer assets pass through.
-    { urls: ["http://*/*", "https://*/*"] },
+    { urls: ["http://*/*", "https://*/*", ...(appDocument ? ["file://*/*"] : [])] },
     (details, callback) => {
+      if (appDocument && details.resourceType === "mainFrame" && details.webContentsId === appDocument.webContentsId &&
+          details.url?.split(/[?#]/, 1)[0] === appDocument.url) {
+        const headers = { ...(details.responseHeaders ?? {}) };
+        for (const key of Object.keys(headers)) if (key.toLowerCase() === "content-security-policy") delete headers[key];
+        headers["Content-Security-Policy"] = [appDocument.csp];
+        callback({ cancel: false, responseHeaders: headers });
+        return;
+      }
       // Only strip framing protections for subframe documents (the
       // browser-tab iframes, which must be able to frame arbitrary sites). The
       // app's own document and its sub-resources (scripts/xhr/styles) keep their
@@ -125,8 +132,8 @@ export function installIframeHeaderStripping(session: Session): void {
           // semi-separated.
           const values = Array.isArray(value) ? value : [value];
           const stripped = values
-            .map((v) => v.replace(/(?:^|;)\s*frame-ancestors[^;]*/gi, ""))
-            .map((v) => v.replace(/^;\s*/, "").trim())
+            .flatMap((v) => v.split(","))
+            .map((v) => v.split(";").map(d => d.trim()).filter(d => d && !/^frame-ancestors(?:\s|$)/i.test(d)).join("; "))
             .filter((v) => v.length > 0);
           if (stripped.length > 0) next[key] = stripped;
           continue;

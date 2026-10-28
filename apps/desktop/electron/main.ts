@@ -14,6 +14,8 @@ if (LOCAL_DEVELOPMENT_BUILD_ERROR) {
 }
 
 import { hydrateShellPath } from "./shell-path";
+import { pathToFileURL } from "node:url";
+import { appDocumentPolicy } from "./app-document-security";
 import { rendererProcessOwners } from "./renderer-process-owners";
 import { startElectronDesignCapture } from "./design-capture";
 import { setDesignCaptureEnvironment } from "./sidecar";
@@ -39,63 +41,7 @@ import type { DesignCaptureService } from "../src/engine/design/capture-service"
 //   content extends under the traffic lights.
 // ──────────────────────────────────────────────────────────
 
-// === EARLIEST TRACE (packaged app debug) ===
-// Runs before any imports that could fail silently so we get at
-// least one line in /tmp proving main.cjs executed. Remove after
-// early-launch telemetry is no longer required.
-try {
-  // SECURITY: redact any zeros:// / zeros-dev:// / zeros-beta:// deep-link arg
-  // before writing. On Windows/Linux cold-launch the URL lands in argv, and this
-  // log is persistent (flag:"a"). Both bearer secrets ride in the #fragment — the
-  // OAuth handoff `#ticket=…` and the pairing `#offer=…` — so redact from the
-  // first `?` OR `#` (the old query-only redaction missed fragment-borne
-  // secrets). The scheme match covers EVERY channel (zeros, zeros-<channel>) so a
-  // Beta cold-launch doesn't leak its ticket just because this runs before
-  // ZEROS_CHANNEL is seeded — over-matching a non-secret arg is harmless.
-  const safeArgv = process.argv.map((a) =>
-    /^zeros(-[a-z0-9]+)?:\/\//i.test(a)
-      ? a.replace(/([?#]).*$/, "$1<redacted>")
-      : a,
-  );
-  // SECURITY: a hardcoded "/tmp/zeros-boot.log" opened for APPEND is the classic
-  // insecure-temp-file shape (CodeQL js/insecure-temporary-file). /tmp is shared
-  // and world-writable, so on a multi-user machine any other local account can
-  // pre-create that exact path as a SYMLINK and this append lands wherever the
-  // link points — with the app's privileges. Three changes close it without
-  // losing the trace:
-  //   • O_NOFOLLOW  — refuse a path that is a symlink, instead of following it.
-  //   • per-uid name — two accounts no longer contend for one file at all.
-  //   • mode 0600    — the argv line (redacted, but still paths) stops being
-  //                    world-readable, which it was under the default 0666&~umask.
-  // os.tmpdir() replaces the literal /tmp so this is also correct off-macOS.
-  // O_NOFOLLOW is POSIX-only and undefined on Windows; `?? 0` degrades to the
-  // old behaviour there rather than throwing on the constant lookup.
-  const fs = require("node:fs") as typeof import("node:fs");
-  const os = require("node:os") as typeof import("node:os");
-  const bootLog = require("node:path").join(
-    os.tmpdir(),
-    `zeros-boot-${os.userInfo().uid}.log`,
-  );
-  const fd = fs.openSync(
-    bootLog,
-    fs.constants.O_WRONLY |
-      fs.constants.O_CREAT |
-      fs.constants.O_APPEND |
-      (fs.constants.O_NOFOLLOW ?? 0),
-    0o600,
-  );
-  try {
-    fs.writeSync(
-      fd,
-      `[${new Date().toISOString()}] main.cjs loaded, argv=${JSON.stringify(safeArgv)}\n`,
-    );
-  } finally {
-    fs.closeSync(fd);
-  }
-} catch {
-  // ignore — can't even write to the temp dir, or the path was a symlink we
-  // refused to follow. Either way a boot trace is not worth failing launch over.
-}
+// The build banner owns early boot diagnostics in a private per-process file.
 
 import {
   app,
@@ -803,10 +749,9 @@ setupLogFile();
 // mismatch keeps the failure mode obvious.
 const DEV_URL = process.env.ELECTRON_RENDERER_URL ?? "http://localhost:5193";
 const isDev = IS_DEV;
-// Same prefix rule the session permission handlers use to recognize the app's
-// own document; a preview window must never load a page that would match it.
-const isAppDocumentUrl = (url: string): boolean =>
-  url.startsWith("file://") || url.startsWith(DEV_URL);
+const APP_DOCUMENT_URL = pathToFileURL(path.join(__dirname, "..", "dist", "index.html")).href;
+const appDocument = appDocumentPolicy({ ...(isDev ? { devUrl: DEV_URL } : {}), documentUrl: APP_DOCUMENT_URL });
+const isAppDocumentUrl = appDocument.isDocument;
 
 function createMainWindow(): BrowserWindow {
   // Durable theme mode (userData appearance.json — see ipc/commands/window.ts).
@@ -906,46 +851,23 @@ function createMainWindow(): BrowserWindow {
   else if (windowState?.maximized) win.maximize();
   attachWindowStatePersistence(win, app.getPath("userData"));
 
-  // Strip X-Frame-Options and CSP
-  // frame-ancestors so browser-tab iframes can load arbitrary URLs.
-  // See apps/desktop/electron/iframe-headers.ts for the rationale.
-  installIframeHeaderStripping(win.webContents.session);
-
-  // Deny sensitive permissions (camera/mic/geolocation/clipboard-read) to
-  // browser-tab iframe content. Electron's default approves most requests, so a
-  // visited page could otherwise read the clipboard or activate the camera with
-  // no prompt. The APP's own document (file:// / dev server) keeps full access.
-  const isAppOrigin = (url: string | undefined): boolean =>
-    !url ||
-    url === "null" ||
-    url.startsWith("file://") ||
-    url.startsWith(DEV_URL);
-  const SENSITIVE_PERMS = new Set([
-    "media",
-    "camera",
-    "microphone",
-    "geolocation",
-    "clipboard-read",
-    "clipboard-sanitized-write",
-    "midi",
-    "midiSysex",
-    "hid",
-    "serial",
-    "usb",
-  ]);
+  // Native ownership and frame identity are required even for an app URL.
+  const SAFE_PREVIEW_PERMISSIONS = new Set(["fullscreen", "pointerLock"]);
   win.webContents.session.setPermissionRequestHandler(
-    (_wc, permission, callback, details) => {
-      if (isAppOrigin(details?.requestingUrl)) {
-        callback(true);
-        return;
-      }
-      callback(!SENSITIVE_PERMS.has(permission));
+    (wc, permission, callback, details) => {
+      const owned = wc === win.webContents && !wc.isDestroyed();
+      callback(appDocument.request({ owned, currentUrl: owned ? wc.mainFrame.url : undefined,
+        requestingUrl: details?.requestingUrl, isMainFrame: details?.isMainFrame }) ||
+        (owned && SAFE_PREVIEW_PERMISSIONS.has(permission)));
     },
   );
   win.webContents.session.setPermissionCheckHandler(
-    (_wc, permission, requestingOrigin) => {
-      if (isAppOrigin(requestingOrigin)) return true;
-      return !SENSITIVE_PERMS.has(permission);
+    (wc, permission, requestingOrigin, details) => {
+      const owned = wc === win.webContents && !wc.isDestroyed();
+      return appDocument.request({ owned, currentUrl: owned ? wc.mainFrame.url : undefined,
+        requestingOrigin, requestingUrl: details?.requestingUrl,
+        isMainFrame: details?.isMainFrame, securityOrigin: details?.securityOrigin }) ||
+        (owned && SAFE_PREVIEW_PERMISSIONS.has(permission));
     },
   );
 
@@ -960,7 +882,7 @@ function createMainWindow(): BrowserWindow {
   });
   win.webContents.on("will-navigate", (event, url) => {
     // Allow only the app's own document (dev server / packaged file://).
-    if (url.startsWith(DEV_URL) || url.startsWith("file://")) return;
+    if (isAppDocumentUrl(url)) return;
     event.preventDefault();
     const externalUrl = normalizeExternalHttpUrl(url);
     if (externalUrl) void shell.openExternal(externalUrl);
@@ -973,8 +895,7 @@ function createMainWindow(): BrowserWindow {
   // reach for: no <object>/<embed>, no <base> hijack, no framing of the app, no
   // plain-http/data: exfil channel. Low-risk hardening layered under sandbox +
   // contextIsolation + the preload allowlist.
-  if (IS_PACKAGED) {
-    const CSP = [
+  const CSP = [
       "default-src 'self'",
       "script-src 'self' 'wasm-unsafe-eval' 'unsafe-inline'",
       "style-src 'self' 'unsafe-inline'",
@@ -990,23 +911,9 @@ function createMainWindow(): BrowserWindow {
       "form-action 'self'",
       "frame-ancestors 'none'",
     ].join("; ");
-    win.webContents.session.webRequest.onHeadersReceived(
-      { urls: ["file://*/*"] },
-      (details, callback) => {
-        // Only the top app document — not sub-resources or browser-tab frames.
-        if (details.resourceType !== "mainFrame") {
-          callback({ cancel: false });
-          return;
-        }
-        const headers = { ...(details.responseHeaders ?? {}) };
-        for (const k of Object.keys(headers)) {
-          if (k.toLowerCase() === "content-security-policy") delete headers[k];
-        }
-        headers["Content-Security-Policy"] = [CSP];
-        callback({ cancel: false, responseHeaders: headers });
-      },
-    );
-  }
+  // Electron retains only the last response listener: compose both policies.
+  installIframeHeaderStripping(win.webContents.session, IS_PACKAGED
+    ? { url: APP_DOCUMENT_URL, webContentsId: win.webContents.id, csp: CSP } : undefined);
 
   // DevTools policy. Packaged builds USED to force-close DevTools on the same
   // tick it opened, which is why ⌥⌘I flickered and did nothing in Alpha, Beta

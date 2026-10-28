@@ -84,6 +84,8 @@ export type CloudV2LifecycleDeps = {
   remoteHead?(workspace: CloudV2Workspace): Promise<string | null>;
   /** A repository token, for a restore that must fetch or clone from GitHub. */
   githubToken?(workspace: CloudV2Workspace): Promise<{ token: string }>;
+  authorizeSource?(workspace: CloudV2Workspace): Promise<void>;
+  prepareRepository?(workspace: CloudV2Workspace, sandboxId: string): Promise<void>;
   /** Cloud Computer builds share this loop; one runs at a time. */
   builds?: { tick(): Promise<void>; cleanup?(): Promise<void> };
   now?: () => number;
@@ -243,6 +245,7 @@ export class CloudV2Lifecycle {
 
   private async step(workspace: CloudV2LifecycleWorkspace & { attempts: number }, now: number): Promise<void> {
     const { store, compute } = this.deps;
+    if (workspace.state === "creating" || workspace.state === "starting") await this.deps.authorizeSource?.(workspace);
     switch (workspace.state) {
       case "creating": {
         if (now - Date.parse(workspace.createdAt) > BOOT_DEADLINE_MS) {
@@ -265,6 +268,10 @@ export class CloudV2Lifecycle {
           await store.markLeaseRenewed(workspace.id, sandboxId, renewedAt);
         }
         await this.measure(workspace, "runtime_install", () => this.ensureRuntime(sandboxId), runtimeChanged => ({ runtimeChanged }));
+        if (this.deps.prepareRepository) {
+          await store.defer(workspace.id, "creating", 17 * 60_000);
+          await this.deps.prepareRepository(workspace, sandboxId);
+        }
         if (!await this.measure(workspace, "protected_route", () => this.host(workspace, sandboxId))) return;
         // The worker reads it with its configuration, after the token arrives.
         const commit = await baseCommit;
@@ -450,7 +457,8 @@ export class CloudV2Lifecycle {
   private async applyCheckpoint(workspace: CloudV2LifecycleWorkspace, sandboxId: string): Promise<void> {
     const checkpoints = this.deps.checkpoints, checkpoint = workspace.checkpoint;
     if (!checkpoints || !checkpoint) throw checkpointError("checkpoint_restore_failed");
-    const github = await this.deps.githubToken?.(workspace).catch(() => null) ?? null;
+    await this.deps.authorizeSource?.(workspace);
+    const github = await this.deps.githubToken?.(workspace) ?? null;
     const key = checkpoints.open(checkpoint.key, workspace.id, checkpoint.object);
     try {
       const command = restoreCommand({ checkoutPath: `${CLOUD_V2_HOME}/${workspace.repository}`, home: CLOUD_V2_HOME, key,
@@ -474,6 +482,7 @@ export class CloudV2Lifecycle {
   }
 
   private async deliverToken(workspace: CloudV2Workspace, sandboxId: string): Promise<void> {
+    await this.deps.authorizeSource?.(workspace);
     const token = await this.deps.store.rotateWorkerToken(workspace.id);
     const result = await this.execWhenReady(sandboxId, deliverWorkerTokenCommand(token, this.deps.bootEnv(workspace)), 30);
     if (result.exitCode !== 0 || result.timedOut) throw Object.assign(new Error("token delivery failed"), { code: "worker_token_delivery_failed" });

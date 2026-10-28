@@ -20,6 +20,8 @@ const originalOrder = [
   "text-selection",
   "git-review-actions",
   "code-review",
+  "cloud-github",
+  "cloud-github-pr",
   "code-review-retention",
   "create-composer",
   "create-source-immediate-escape",

@@ -303,12 +303,14 @@ export function chatModeOf(chat: Pick<ChatRow, "agentId" | "lastModeId" | "permi
   modeId: string | null;
   level: LocalModeLevel | null;
 } {
-  const family = localAgentFamily(chat.agentId);
-  const known = family ? LOCAL_MODE_LEVEL_BY_FAMILY[family] ?? {} : {};
   for (const candidate of [liveModeId, chat.lastModeId]) {
-    if (candidate && known[candidate]) return { modeId: candidate, level: known[candidate]! };
+    if (candidate) {
+      const level = localModeLevel(chat.agentId, candidate);
+      if (!level) throw new LocalOrchestrationError("MODE_FORBIDS", "The creator's permission mode is unknown. Select a valid mode before creating a chat.");
+      return { modeId: candidate, level };
+    }
   }
-  const posture = LEVEL_BY_POSTURE[chat.permissionMode];
+  const posture = Object.hasOwn(LEVEL_BY_POSTURE, chat.permissionMode) ? LEVEL_BY_POSTURE[chat.permissionMode] : null;
   if (posture) {
     return { modeId: localModeForLevel(chat.agentId, posture), level: posture };
   }
@@ -414,6 +416,7 @@ export function resolveChildSettings(input: {
   // Permission mode: never above the creator's level.
   const parentMode = chatModeOf(input.parent, input.parentLiveModeId);
   const parentLevel = parentMode.level;
+  if (!parentLevel) throw new LocalOrchestrationError("MODE_FORBIDS", "The creator's permission level is unknown.");
   let modeId: string | null;
   let prePlanModeId: string | null = null;
   if (input.requested.mode) {

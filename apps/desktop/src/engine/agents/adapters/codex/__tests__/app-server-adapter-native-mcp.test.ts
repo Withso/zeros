@@ -375,7 +375,7 @@ describe("CodexAppServerAdapter explicit native MCP opt-out", () => {
 
   it("never disables a server Zeros is injecting under the same name", async () => {
     const adapter = makeAdapter();
-    rt.mcpServers = { node_repl: { command: "node" }, directus: {} };
+    rt.mcpServers = { node_repl: { command: "/opt/node_repl" }, directus: {} };
 
     // Zeros' registry lands in the same `mcp_servers` table, so a same-name
     // entry merges. Disabling `node_repl` here would take Zeros' own injected
@@ -445,6 +445,7 @@ describe("CodexAppServerAdapter explicit native MCP opt-out", () => {
 
     // Never disable a server Zeros itself registered under that name.
     const own = makeAdapter();
+    rt.mcpServers = { cua_repl: { command: "own" } };
     await own.newSession({
       cwd: "/tmp/proj",
       computerUse: { codexNative: false },

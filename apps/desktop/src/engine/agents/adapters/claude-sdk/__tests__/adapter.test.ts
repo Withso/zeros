@@ -7396,19 +7396,19 @@ describe("Claude native MCP identity", () => {
     { matchedAskRule: { toolName: "mcp__zeros_local__run" } },
     { defaultToNo: true },
     { suppressAlwaysAllowRule: true },
-  ])("asks for the Local CLI tool when the user's own rule says so: %j", async (rule) => {
+  ].flatMap(rule => ["zeros_local", "zeros_browser", "zeros_computer"].map(server => ({ rule, server }))))("asks for every control tool when the user's own rule says so: %j", async ({ rule, server }) => {
     const perms: PermCapture[] = [];
     const live = makePushableQuery();
     const ctx = makeCtx([], perms);
-    ctx.mcpServers = [{ name: "zeros_local", transport: "http", url: "http://127.0.0.1:9/mcp" }];
+    ctx.mcpServers = [{ name: server, transport: "http", url: "http://127.0.0.1:9/mcp" }];
     const adapter = new ClaudeSdkAdapter(ctx, { queryFn: live.queryFn });
     try {
       const { session } = await adapter.newSession({ cwd: "/tmp" });
       const turn = adapter.prompt({ sessionId: session.sessionId, prompt: [textBlock("Coordinate")] }).catch(() => null);
       await tick();
       const callback = live.captured[0].canUseTool as (name: string, input: object, options: object) => Promise<unknown>;
-      const decision = callback("mcp__zeros_local__run", { args: ["whoami"] }, {
-        signal: new AbortController().signal, toolUseID: "local", mcpServer: { name: "zeros_local", source: "dynamic" }, ...rule,
+      const decision = callback(`mcp__${server}__run`, { args: ["whoami"] }, {
+        signal: new AbortController().signal, toolUseID: "local", mcpServer: { name: server, source: "dynamic" }, ...rule,
       });
       await vi.waitFor(() => expect(perms).toHaveLength(1));
       adapter.respondToPermission({ permissionId: perms[0].id, response: { outcome: { outcome: "selected", optionId: "reject_once" } } });

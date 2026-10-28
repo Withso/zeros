@@ -10,6 +10,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { CLOUD_V2_BRIDGE_PROTOCOL, CloudV2Relay, type CloudV2RelayDeps } from "./relay.js";
 import type { CloudV2Workspace } from "./store.js";
 import { newCloudV2Token } from "./tokens.js";
+import { HttpError } from "../authz.js";
 
 const workspaceId = "6f2b7c1e-3b0a-4f7e-9d43-8a0b2b9c6d11";
 const ticket = newCloudV2Token("connect").token;
@@ -125,6 +126,103 @@ describe("cloud v2 relay", () => {
     await vi.waitFor(() => expect(timing).toHaveBeenCalledTimes(1));
     expect(timing).toHaveBeenCalledWith({ workspaceId: workspaceId.slice(0, 8), phase: "relay_ready", durationMs: 75 });
     expect(deps.workerRoute).toHaveBeenCalledTimes(2);
+  });
+
+  it("keeps the socket heartbeat free of permission, login and database polling", async () => {
+    deps.authorizeSource = vi.fn(async () => {});
+    await worker();
+    await vi.waitFor(() => expect(deps.config).toHaveBeenCalledTimes(1));
+    await new Promise(resolve => setImmediate(resolve));
+    vi.mocked(deps.authorizeSource).mockClear();
+    vi.mocked(deps.store.appAccessSnapshot).mockClear();
+    vi.mocked(deps.store.loginRevision).mockClear();
+    (relay as unknown as { heartbeat(): void }).heartbeat();
+    await new Promise(resolve => setImmediate(resolve));
+    expect(deps.authorizeSource).not.toHaveBeenCalled();
+    expect(deps.store.appAccessSnapshot).not.toHaveBeenCalled();
+    expect(deps.store.loginRevision).not.toHaveBeenCalled();
+  });
+
+  it("forwards an ordinary output burst without queuing each authorized frame", async () => {
+    const w = await worker(), a = sockets[0]!, replies: any[] = [];
+    a.on("message", raw => replies.push(JSON.parse(String(raw))));
+    await vi.waitFor(() => expect(deps.config).toHaveBeenCalledTimes(1));
+    vi.mocked(deps.store.appAccessSnapshot).mockClear();
+    for (let sequence = 0; sequence < 256; sequence++)
+      w.send(JSON.stringify({ t: "frame", clientId: "*", frame: { sequence } }));
+    await vi.waitFor(() => expect(replies).toHaveLength(256));
+    expect(replies.map(frame => frame.sequence)).toEqual(Array.from({ length: 256 }, (_, index) => index));
+    expect(w.readyState).toBe(WebSocket.OPEN);
+    expect(deps.store.appAccessSnapshot).not.toHaveBeenCalled();
+  });
+
+  it("ignores app transport heartbeats without permission or database reads", async () => {
+    const w = await worker(), a = sockets[0]!;
+    await vi.waitFor(() => expect(deps.config).toHaveBeenCalledTimes(1));
+    await new Promise(resolve => setImmediate(resolve));
+    vi.mocked(deps.store.appAccessSnapshot).mockClear();
+    vi.mocked(deps.store.loginRevision).mockClear();
+    const sent: unknown[] = [];
+    w.on("message", data => sent.push(JSON.parse(String(data))));
+    for (let i = 0; i < 20; i++) a.send(JSON.stringify({ type: "HEARTBEAT" }));
+    await new Promise(resolve => setTimeout(resolve, 30));
+    expect(deps.store.appAccessSnapshot).not.toHaveBeenCalled();
+    expect(deps.store.loginRevision).not.toHaveBeenCalled();
+    expect(sent).toEqual([]);
+  });
+
+  it("refuses a fresh admission during an outage without closing the existing session", async () => {
+    deps.authorizeSource = vi.fn(async () => {});
+    deps.continueSource = vi.fn(async () => ({ recheckAt: Date.now() + 600_000 }));
+    const w = await worker(), existing = sockets[0]!;
+    await vi.waitFor(() => expect(deps.config).toHaveBeenCalledTimes(1));
+    vi.mocked(deps.authorizeSource).mockRejectedValue(new HttpError(503, "github_unavailable", "unavailable"));
+    ticketSession = "session-b";
+    const b = await app(), closed = vi.fn(); b.on("close", closed);
+    await vi.waitFor(() => expect(b.readyState).toBe(WebSocket.CLOSED));
+    expect(closed).toHaveBeenCalledWith(1013, expect.anything());
+    expect(existing.readyState).toBe(WebSocket.OPEN);
+    expect(w.readyState).toBe(WebSocket.OPEN);
+    const reply = nextMessage(existing);
+    w.send(JSON.stringify({ t: "frame", clientId: "*", frame: { continued: true } }));
+    expect(await reply).toEqual({ continued: true });
+  });
+
+  it("checks session expiry before streaming past an otherwise current GitHub grant", async () => {
+    let now = 1000;
+    deps.now = () => now;
+    vi.mocked(deps.store.appAccessSnapshot).mockImplementation(async (_id, sessions) => ({ accessEpoch,
+      activeSessionIds: now < 2000 ? sessions : [], ...(now < 2000 ? { validUntil: 2000 } : {}) }));
+    const w = await worker(), a = sockets[0]!, replies: unknown[] = [];
+    a.on("message", raw => replies.push(JSON.parse(String(raw))));
+    await vi.waitFor(() => expect(deps.config).toHaveBeenCalledTimes(1));
+    now = 2000;
+    w.send(JSON.stringify({ t: "frame", clientId: "*", frame: { private: "expired-session-canary" } }));
+    await vi.waitFor(() => expect(a.readyState).toBe(WebSocket.CLOSED));
+    expect(replies).toEqual([]);
+  });
+
+  it("bounds output waiting on a slow authority read without leaking queued data", async () => {
+    let now = 1000;
+    deps.now = () => now;
+    const w = await worker(), a = sockets[0]!, replies: unknown[] = [];
+    a.on("message", raw => replies.push(JSON.parse(String(raw))));
+    await vi.waitFor(() => expect(deps.config).toHaveBeenCalledTimes(1));
+    const original = vi.mocked(deps.store.appAccessSnapshot).getMockImplementation()!;
+    let release!: () => void;
+    vi.mocked(deps.store.appAccessSnapshot).mockImplementationOnce(async (id, sessions) => {
+      await new Promise<void>(resolve => { release = resolve; });
+      return original(id, sessions);
+    });
+    now += 600_001;
+    w.send(JSON.stringify({ t: "frame", clientId: "*", frame: { sequence: 0 } }));
+    await vi.waitFor(() => expect(release).toBeTypeOf("function"));
+    const closed = vi.fn(); w.on("close", closed);
+    for (let i = 0; i < 5; i++) w.send(JSON.stringify({ t: "frame", clientId: "*", frame: { content: "x".repeat(1024 * 1024) } }));
+    await vi.waitFor(() => expect(w.readyState).toBe(WebSocket.CLOSED));
+    expect(closed).toHaveBeenCalledWith(1013, expect.anything());
+    expect(replies).toEqual([]);
+    release();
   });
 
   it.each([false, true])("delivers optional MCP config only after WebSocket upgrade support=%s", async supported => {
@@ -330,6 +428,26 @@ describe("cloud v2 relay", () => {
     await vi.waitFor(() => expect(a.readyState).toBe(WebSocket.CLOSED));
     expect(b.readyState).toBe(WebSocket.OPEN);
     expect(w.readyState).toBe(WebSocket.OPEN);
+  });
+
+  it.each(["revalidateSources", "refreshLogins"] as const)("runs %s notifications outside an unrelated released provider lock", async method => {
+    const w = await worker(), a = sockets[0]!, closed = vi.fn();
+    a.on("close", closed);
+    await vi.waitFor(() => expect(deps.config).toHaveBeenCalledTimes(1));
+    const original = vi.mocked(deps.store.appAccessSnapshot).getMockImplementation()!;
+    vi.mocked(deps.store.appAccessSnapshot).mockImplementation(async (id, sessions) => {
+      assertWorkOSProviderLockHeld();
+      return original(id, sessions);
+    });
+    const lock = new AbortController();
+    const socket = await withHeldWorkOSProviderLock(lock.signal, async () => new AsyncResource("fixture-source-notification"));
+    lock.abort(new WorkOSProviderLockLostError());
+    authorized = false; loginRevision = "1";
+    try { await socket.runInAsyncScope(() => relay[method]({})); }
+    finally { socket.emitDestroy(); }
+    await vi.waitFor(() => expect(a.readyState).toBe(WebSocket.CLOSED));
+    expect(closed).toHaveBeenCalledWith(4001, expect.anything());
+    await vi.waitFor(() => expect(w.readyState).toBe(WebSocket.CLOSED));
   });
 
   it("does not let a signed-out pending admission disturb a sibling's running worker", async () => {

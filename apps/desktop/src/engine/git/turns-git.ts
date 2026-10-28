@@ -30,6 +30,9 @@
 // ──────────────────────────────────────────────────────────
 
 import { constants, promises as fs } from "node:fs";
+import { randomUUID } from "node:crypto";
+import { openLocalFile, openLocalDirectory } from "../local-orchestration/filesystem";
+import { openBoundedDirectorySync } from "../files/bounded-read-sync";
 import { createGitTemporaryDirectory, writeGitTemporaryFile } from "./git-temporary";
 import * as os from "node:os";
 import * as nodePath from "node:path";
@@ -618,18 +621,71 @@ async function indexBlobOid(cwd: string, path: string): Promise<string | null> {
 /** The OID the on-disk file at `path` (relative to `cwd`) would hash to, or null
  *  when it doesn't exist on disk. */
 async function diskBlobOid(cwd: string, path: string): Promise<string | null> {
-  const abs = nodePath.resolve(cwd, path);
-  try {
-    await fs.access(abs);
-  } catch {
-    return null;
-  }
-  try {
-    const { stdout } = await runGit(cwd, ["hash-object", "--", abs]);
+  const contents = await readTurnFile(cwd, path);
+  if (!contents) return null;
+  {
+    const { stdout } = await runGit(cwd, ["hash-object", `--path=${path}`, "--stdin"], { input: contents });
     const oid = stdout.trim();
     return /^[0-9a-f]{40,64}$/.test(oid) ? oid : null;
-  } catch {
-    return null;
+  }
+}
+
+function turnPath(cwd: string, relative: string): string {
+  const root = nodePath.resolve(cwd), target = nodePath.resolve(root, relative);
+  if (target === root || !target.startsWith(root + nodePath.sep) || nodePath.relative(root, target).split(nodePath.sep).includes(".git"))
+    throw new Error("Turn reset path is outside the workspace.");
+  return target;
+}
+
+async function readTurnFile(cwd: string, path: string): Promise<Buffer | null> {
+  let handle: fs.FileHandle;
+  try { handle = await openLocalFile(turnPath(cwd, path)); }
+  catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return null; throw error; }
+  try {
+    const stat = await handle.stat();
+    if (!stat.isFile() || stat.size > 64 * 1024 * 1024) throw new Error("Turn file is not a bounded regular file.");
+    const buffer = Buffer.alloc(stat.size + 1);
+    let offset = 0;
+    while (offset < buffer.length) { const { bytesRead } = await handle.read(buffer, offset, buffer.length - offset, null); if (!bytesRead) break; offset += bytesRead; }
+    const after = await handle.stat();
+    if (offset !== stat.size || after.size !== stat.size || after.mtimeMs !== stat.mtimeMs || after.ctimeMs !== stat.ctimeMs)
+      throw new Error("The file changed during turn reset.");
+    return buffer.subarray(0, offset);
+  } finally { await handle.close(); }
+}
+
+/** Stage Git's binary-safe checkout outside the working tree; all publication
+ * and deletion effects use the pinned destination directory. */
+async function restoreTurnPath(cwd: string, path: string, revision: string | null, expectedOid?: string | null): Promise<void> {
+  const target = turnPath(cwd, path);
+  openBoundedDirectorySync(nodePath.dirname(target), true).close();
+  const directory = await openLocalDirectory(nodePath.dirname(target));
+  const destination = nodePath.join(directory.path, nodePath.basename(target));
+  const temporary = `${destination}.${randomUUID()}.reset`;
+  let scratch: string | undefined;
+  try {
+    if (revision) {
+      scratch = await createGitTemporaryDirectory(nodePath.join(os.tmpdir(), "zeros-turn-restore-"));
+      const env = { GIT_INDEX_FILE: nodePath.join(scratch, "index") };
+      const checkout = nodePath.join(scratch, "worktree");
+      await fs.mkdir(checkout);
+      await runGit(cwd, ["read-tree", revision], { env });
+      await runGit(cwd, ["checkout-index", `--prefix=${checkout}${nodePath.sep}`, "--", path], { env });
+      const source = nodePath.join(checkout, path);
+      const stat = await fs.lstat(source);
+      if (stat.isSymbolicLink()) await fs.symlink(await fs.readlink(source), temporary);
+      else if (stat.isFile()) await fs.copyFile(source, temporary, constants.COPYFILE_EXCL);
+      else throw new Error("Unsupported turn file type.");
+    }
+    if (expectedOid !== undefined && await diskBlobOid(cwd, path) !== expectedOid)
+      throw new Error("The file changed during turn reset; retry after reviewing it.");
+    if (!revision) await fs.unlink(destination).catch(error => { if (error.code !== "ENOENT") throw error; });
+    else if (expectedOid === null) { await fs.link(temporary, destination); await fs.unlink(temporary); }
+    else await fs.rename(temporary, destination);
+  } finally {
+    await fs.unlink(temporary).catch(() => {});
+    await directory.handle.close();
+    if (scratch) await fs.rm(scratch, { recursive: true, force: true });
   }
 }
 
@@ -655,7 +711,8 @@ async function readDiskText(
   path: string,
 ): Promise<{ text: string; isBinary: boolean } | null> {
   try {
-    const buf = await fs.readFile(nodePath.resolve(cwd, path));
+    const buf = await readTurnFile(cwd, path);
+    if (!buf) return null;
     const text = buf.toString("utf8");
     return { text, isBinary: buf.includes(0) };
   } catch {
@@ -866,14 +923,8 @@ async function resetPath(
     const stagedSameBlob =
       currentOid != null && (await indexBlobOid(cwd, path)) === currentOid;
     if (targetOid) {
-      await runGit(cwd, [
-        "restore",
-        `--source=${targetCommit}`,
-        ...(stagedSameBlob ? ["--staged"] : []),
-        "--worktree",
-        "--",
-        path,
-      ]);
+      await restoreTurnPath(cwd, path, targetCommit, currentOid);
+      if (stagedSameBlob) await runGit(cwd, ["restore", `--source=${targetCommit}`, "--staged", "--", path]);
       return { path, result: "restored" };
     }
     // Target absent → the file didn't exist before the span → remove it (and
@@ -884,7 +935,7 @@ async function resetPath(
           () => {},
         );
       }
-      await fs.rm(nodePath.resolve(cwd, path), { force: true }).catch(() => {});
+      await restoreTurnPath(cwd, path, null, currentOid);
       return { path, result: "deleted" };
     }
     return { path, result: "skipped", reason: "nothing to do" };
@@ -914,14 +965,20 @@ async function resetPath(
   if (conflict) {
     return { path, result: "conflict", reason: "overlapping concurrent edit" };
   }
-  const target = nodePath.resolve(cwd, path);
-  const handle = await fs.open(target, constants.O_RDWR | constants.O_NOFOLLOW);
+  const target = turnPath(cwd, path);
+  const directory = await openLocalDirectory(nodePath.dirname(target));
+  const pinned = nodePath.join(directory.path, nodePath.basename(target));
+  const temporary = `${pinned}.${randomUUID()}.merge`;
   try {
-    // Publish/check the pinned inode before mutating it. Unlike a path-based
-    // write this cannot recreate a worker-owned file as an engine-owned one.
-    await handle.truncate(0);
-    await handle.writeFile(merged);
-  } finally { await handle.close(); }
+    const previous = await fs.lstat(pinned);
+    await fs.writeFile(temporary, merged, { flag: "wx", mode: previous.mode & 0o777 });
+    const latest = await readDiskText(cwd, path);
+    if (!latest || latest.text !== cur.text) return { path, result: "conflict", reason: "file changed during merge" };
+    await fs.rename(temporary, pinned);
+  } finally {
+    await fs.unlink(temporary).catch(() => {});
+    await directory.handle.close();
+  }
   return { path, result: "merged" };
 }
 
@@ -1159,18 +1216,10 @@ export async function undoTurnReset(
     try {
       const oid = await blobOid(cwd, snapshot, path);
       if (oid) {
-        await runGit(cwd, [
-          "restore",
-          `--source=${snapshot}`,
-          "--worktree",
-          "--",
-          path,
-        ]);
+        await restoreTurnPath(cwd, path, snapshot);
         out.push({ path, result: "restored" });
       } else {
-        await fs
-          .rm(nodePath.resolve(cwd, path), { force: true })
-          .catch(() => {});
+        await restoreTurnPath(cwd, path, null);
         out.push({ path, result: "deleted" });
       }
     } catch (err) {

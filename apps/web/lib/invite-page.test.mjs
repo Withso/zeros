@@ -39,7 +39,8 @@ function webScript(page) {
 function testElement() {
   const classes = new Set(["hidden"]);
   return {
-    addEventListener() {},
+    listeners: {},
+    addEventListener(name, callback) { this.listeners[name] = callback; },
     classList: {
       add: (value) => classes.add(value),
       remove: (value) => classes.delete(value),
@@ -49,7 +50,7 @@ function testElement() {
   };
 }
 
-async function runWebScript(page, storage) {
+async function runWebScript(page, storage, click = true) {
   const elements = new Map([
     ["message", testElement()],
     ["retry", testElement()],
@@ -74,8 +75,17 @@ async function runWebScript(page, storage) {
     },
   });
   await result;
+  if (click) await elements.get("retry").listeners.click();
   return { elements, replacements };
 }
+
+test("opening an invitation never changes membership or initiates acceptance", async () => {
+  const page = renderInvitationPage({ token: TOKEN, scheme: "zeros-alpha", marketingOrigin: "https://zeros.build", mode: "web", nonce: "testnonce" });
+  const { elements, replacements } = await runWebScript(page, new Map(), false);
+  assert.deepEqual(replacements, []);
+  assert.match(page.html, /id="retry" type="button">Accept invitation/);
+  assert.equal(elements.get("retry").classList.contains("hidden"), false);
+});
 
 test("the invitation landing page offers exact-channel desktop and explicit web acceptance", () => {
   const page = renderInvitationPage({

@@ -1,6 +1,8 @@
 // Real Chromium custom-protocol playback, ranges, canvas copy and download.
-// Runs on macOS, or Linux with DISPLAY (for example xvfb-run). The cloud case
-// exercises the standalone worker reader over a simulated bridge, not Boat.
+// Runs on macOS, or Linux with DISPLAY (for example xvfb-run). Cloud identity
+// and transport are simulated. Linux uses the real standalone worker reader;
+// macOS uses the Local reader as its cloud-response fixture because the worker
+// intentionally requires Linux descriptor paths. Qualify both hosts.
 import assert from "node:assert/strict";
 import fs from "node:fs/promises";
 import { createReadStream } from "node:fs";
@@ -14,6 +16,7 @@ import { build } from "esbuild";
 import { _electron as electron, expect } from "@playwright/test";
 
 const repo = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+const cloudFileReader = process.platform === "linux" ? "worker" : "local-fixture";
 const root = await fs.mkdtemp(path.join(os.tmpdir(), "zeros-media-electron-"));
 const workspace = path.join(root, "workspace"), profile = path.join(root, "profile");
 const listener = createServer();
@@ -21,7 +24,7 @@ await new Promise(resolve => listener.listen(0, "127.0.0.1", resolve));
 const port = listener.address().port;
 await new Promise(resolve => listener.close(resolve));
 const url = `http://127.0.0.1:${port}/apps/desktop/src/renderer/harnesses/harness-file-media.html?native-media`;
-const vite = spawn("pnpm", ["exec", "vite", "--host", "127.0.0.1", "--port", String(port), "--strictPort"], { cwd: repo, stdio: "ignore", detached: true });
+const vite = spawn("pnpm", ["exec", "vite", "--mode", "ui-smoke", "--host", "127.0.0.1", "--port", String(port), "--strictPort"], { cwd: repo, stdio: "ignore", detached: true });
 let app;
 const errors = [], reports = [];
 async function digest(file) {
@@ -122,10 +125,10 @@ try {
         if (cmd !== "read_file" && cmd !== "read_file_range") return {};
         const placement = String(args.cwd).startsWith("cloud://") ? "cloud" : "local";
         globalThis.mediaReads.push({ placement, cmd, offset: args.offset, length: args.length, path: args.path, streamMedia: args.streamMedia });
-        if (placement === "cloud") return cloud.handle(cmd === "read_file" ? "file.read" : "file.readRange", { ...args, cwd: root, workspaceId: "22222222-2222-4222-8222-222222222222" });
+        if (placement === "cloud" && ${JSON.stringify(cloudFileReader)} === "worker") return cloud.handle(cmd === "read_file" ? "file.read" : "file.readRange", { ...args, cwd: root, workspaceId: "22222222-2222-4222-8222-222222222222" });
         return cmd === "read_file" ? readWorkspaceFile(root, args.path, args) : readWorkspaceMediaRange(root, args);
       });
-      await window.loadURL(${JSON.stringify(url)});
+      await window.loadURL("about:blank");
     }).catch(error => { console.error(error); app.exit(1); });
   ` }, outfile: main, bundle: true, platform: "node", format: "cjs", external: ["electron"], logLevel: "silent" });
   const deadline = Date.now() + 60_000;
@@ -138,6 +141,9 @@ try {
   app.on("console", message => { if (message.type() === "error") console.error(message.text()); });
   const page = await app.firstWindow();
   page.on("pageerror", error => errors.push(error.message));
+  // Attach diagnostics before navigating; the first renderer import can fail
+  // before firstWindow() returns when the main process navigates immediately.
+  await page.goto(url);
   await page.waitForFunction(() => !!window.__zerosFileMediaHarness);
   for (const owner of ["personal", "organization", "cloud"]) {
     const stages = [];
@@ -224,7 +230,7 @@ try {
     assert.equal(await app.evaluate((_electron, before) => globalThis.mediaReads.slice(before).filter(read => read.cmd === "read_file_range").length, beforeLarge), 0, "Oversized hover must not load any image bytes");
   }
   assert.deepEqual(errors, []);
-  const report = { platform: process.platform, simulatedCloudBridge: true, nativeSaveDialogAutomated: true, reports, streamedDownloadBytes: 200_000_000, exactDownload: true, imageCopy: true, savedImageHover: true, oversizedHoverMetadataOnly: true };
+  const report = { platform: process.platform, simulatedCloudBridge: true, cloudFileReader, nativeSaveDialogAutomated: true, reports, streamedDownloadBytes: 200_000_000, exactDownload: true, imageCopy: true, savedImageHover: true, oversizedHoverMetadataOnly: true };
   await fs.mkdir(path.join(repo, ".context"), { recursive: true });
   await fs.writeFile(path.join(repo, ".context/media-stream-native-report.json"), JSON.stringify(report, null, 2) + "\n");
   console.log(JSON.stringify(report));

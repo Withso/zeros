@@ -74,7 +74,7 @@ export function WorkspaceHeaderView({ name, icon, actions, readOnly, windowContr
   windowControlsInset?: boolean;
   trailing?: ReactNode;
 }) {
-  return <PanelHeader size="window" aria-label="Workspace header" data-workspace-header="">
+  return <PanelHeader size="window" aria-label="Workspace header" data-workspace-header="" data-tauri-drag-region="">
     {windowControlsInset && <span className="block h-full w-[108px] shrink-0" aria-hidden="true" data-window-controls-reserve="" />}
     <div className="text-fg2 inline-flex shrink-0 items-center" data-workspace-placement="">{icon}</div>
     <Tooltip label={name}>

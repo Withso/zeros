@@ -28,6 +28,8 @@ import { constants as fsConstants, type Dirent } from "node:fs";
 import { randomUUID } from "node:crypto";
 import path from "node:path";
 import { createAttachmentTemporaryDirectory } from "./attachment-temporary-directory";
+import { openLocalDirectory, openLocalFile } from "../local-orchestration/filesystem";
+import { openBoundedDirectorySync } from "./bounded-read-sync";
 import { cleanupLegacyAttachmentStaging } from "./attachment-legacy-staging";
 import {
   assertContextDirectory,
@@ -492,10 +494,7 @@ async function existingFileMatches(
 ): Promise<boolean> {
   let handle: fs.FileHandle | null = null;
   try {
-    handle = await fs.open(
-      filePath,
-      fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW,
-    );
+    handle = await openLocalFile(filePath);
     const openedStat = await handle.stat();
     if (!openedStat.isFile() || openedStat.size !== expected.length)
       return false;
@@ -528,8 +527,11 @@ async function atomicWriteAttachment(
   workspaceRoot: string,
 ): Promise<void> {
   const temporary = await createAttachmentTemporaryDirectory(workspaceRoot);
+  const destination = await openLocalDirectory(path.dirname(filePath));
+  const staging = await openLocalDirectory(temporary.path);
+  const destinationPath = path.join(destination.path, path.basename(filePath));
   const temporaryPath = path.join(
-    temporary.path,
+    staging.path,
     `.${path.basename(filePath)}.${randomUUID()}.staging`,
   );
   let handle: fs.FileHandle | null = null;
@@ -551,7 +553,7 @@ async function atomicWriteAttachment(
     handle = null;
     if (!Buffer.isBuffer(contents)) await contents.verify?.();
     try {
-      await fs.rename(temporaryPath, filePath);
+      await fs.rename(temporaryPath, destinationPath);
     } catch (err) {
       const code = (err as NodeJS.ErrnoException).code;
       if (
@@ -562,14 +564,14 @@ async function atomicWriteAttachment(
       ) {
         throw err;
       }
-      // The destination is a directory-shaped squatter. Remove the entry and
-      // retry the rename; rename itself still replaces any file/symlink planted
-      // in the gap rather than following it.
-      await fs.rm(filePath, { recursive: true, force: true });
-      await fs.rename(temporaryPath, filePath);
+      // A directory may contain user data. Refuse instead of recursively
+      // deleting a collision during an attachment write.
+      throw new Error("An attachment path is occupied by a directory.");
     }
   } finally {
     await handle?.close().catch(() => {});
+    await staging.handle.close().catch(() => {});
+    await destination.handle.close().catch(() => {});
     await temporary.dispose().catch(() => {});
   }
 }
@@ -634,6 +636,7 @@ async function stageAttachmentContents(
   buf: AttachmentContents,
 ): Promise<ContextGraphStageResult> {
   try {
+    workspaceRoot = await fs.realpath(workspaceRoot);
     const scaffold = await ensureContextGraph(workspaceRoot);
     if (!scaffold.ok) {
       return {
@@ -659,7 +662,7 @@ async function stageAttachmentContents(
     if (!(await isConfined(dir, workspaceRoot))) {
       return { ok: false, error: "path escapes workspace" };
     }
-    await fs.mkdir(dir, { recursive: true });
+    openBoundedDirectorySync(dir, true).close();
     if (!(await isConfined(dir, workspaceRoot))) {
       return { ok: false, error: "path escapes workspace" };
     }

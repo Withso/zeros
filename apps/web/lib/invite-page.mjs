@@ -241,11 +241,11 @@ function webInner(token, nonce) {
     another.addEventListener("click", () => {
       try { sessionStorage.removeItem(AUTH_ATTEMPT_KEY); } catch {}
     });
-    accept();`;
-  return `<div class="title">Accepting your invitation</div>
+    retry.classList.remove("hidden");`;
+  return `<div class="title">Accept your invitation</div>
           <div class="sub">Zeros will verify your signed-in account before changing organization access.</div>
-          <div class="msg" id="message" aria-live="polite">Checking your invitation…</div>
-          <button class="btn secondary hidden" id="retry" type="button">Try again</button>
+          <div class="msg" id="message" aria-live="polite">Choose Accept invitation to join using your signed-in account.</div>
+          <button class="btn secondary" id="retry" type="button">Accept invitation</button>
           <a class="btn secondary hidden" id="another" href="${escapeHtml(logout)}">Use another account</a>
           <script nonce="${nonce}">${script}</script>`;
 }
