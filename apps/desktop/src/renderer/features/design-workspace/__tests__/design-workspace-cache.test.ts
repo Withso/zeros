@@ -181,6 +181,45 @@ function snapshot(
 }
 
 describe("design workspace cache", () => {
+  it("waits for source preparation instead of authorizing a retained movement cover", async () => {
+    const workspaceId = "local/preparing-movement";
+    const before = snapshot();
+    before.directoryId = "design-a";
+    const frame = before.frames[0]!;
+    const { file, title, x, y, width, height, z } = frame;
+    const pending = { ...before, preparation: { epoch: 2, revision: "b".repeat(64),
+      descriptions: [{ preparation: "unprepared" as const, file, title, x, y, width, height, z, frameId: "home", pageId: "page" }],
+      current: [], errors: {} } };
+    designWorkspaceSnapshotCache.setData(workspaceId, pending);
+    let completed = false;
+    const movement = prepareDesignMovementFrame(workspaceId, frame).then(result => { completed = true; return result; });
+    // Drain promise callbacks without a timer standing in for preparation.
+    await Promise.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(completed).toBe(false);
+    designWorkspaceSnapshotCache.setData(workspaceId, { ...pending, preparation: { ...pending.preparation, current: [file] } });
+    await expect(movement).resolves.toBe(frame);
+  });
+
+  it("retires pending movement preparation when the directory is replaced", async () => {
+    const workspaceId = "local/retired-movement";
+    const before = snapshot();
+    before.directoryId = "design-a";
+    const frame = before.frames[0]!;
+    const { file, title, x, y, width, height, z } = frame;
+    const pending = { ...before, preparation: { epoch: 3, revision: "b".repeat(64),
+      descriptions: [{ preparation: "unprepared" as const, file, title, x, y, width, height, z, frameId: "home", pageId: "page" }],
+      current: [], errors: {} } };
+    designWorkspaceSnapshotCache.setData(workspaceId, pending);
+    const movement = prepareDesignMovementFrame(workspaceId, frame);
+    const refused = expect(movement).rejects.toThrow(/directory changed|frame changed/);
+    await Promise.resolve();
+    await Promise.resolve();
+    designWorkspaceSnapshotCache.setData(workspaceId, { ...before, directoryId: "design-b" });
+    await refused;
+  });
+
   it.each(["workspace-a", "cloud://org/workspace-a"])(
     "prepares movement after its local acknowledgement but rejects foreign source or scene changes in %s",
     async (workspaceId) => {
@@ -1973,6 +2012,60 @@ describe("design workspace cache", () => {
     expect(
       designRuntimeFrameState(workspaceId, previousFrame.file)?.sourceVersion,
     ).toBe(nextSourceVersion);
+  });
+
+  it("reloads source when adopting structures first would reorder the authored transaction", async () => {
+    const workspaceId = "structure-order";
+    const previous = snapshot();
+    const frame = previous.frames[0]!;
+    const next = snapshot();
+    next.frames[0] = { ...frame, sourceVersion: "e".repeat(24) };
+    designWorkspaceSnapshotCache.setData(workspaceId, previous);
+    useDesignRuntimeStore.getState().publishSnapshot(workspaceId, "/design/structure", frame.file, {
+      sourceVersion: frame.sourceVersion, revision: 1, tree: [], warnings: [],
+      frame: { sourceVersion: frame.sourceVersion, oid: "root", tag: "main", name: "Root", text: null, selector: "main",
+        visible: true, breadcrumb: [], rect: { x: 0, y: 0, width: 1440, height: 900 }, styles: {} },
+      viewport: { width: 1440, height: 900, scrollX: 0, scrollY: 0 },
+    }, frame.sourceVersion);
+    runtimeMocks.designFrameRuntime.mockReturnValue({ sourceVersion: frame.sourceVersion, supports: () => true,
+      commitStyles: runtimeMocks.commitStyles });
+    platformMocks.applyTransaction.mockResolvedValue({ result: null, snapshot: next });
+    const operations: DesignTransaction["operations"] = [
+      { operationId: "style", type: "node.set-styles", nodeId: "hero", styles: { color: "red" }, scope: "auto", responsiveContext: "base", stateContext: "default" },
+      { operationId: "copy", type: "node.duplicate", nodeId: "hero", duplicateNodeId: "copy" },
+    ];
+    await applyDesignTransactionCached(workspaceId, frame.file, { schemaVersion: 1, transactionId: "structure-order",
+      documentId: "home", baseRevision: "revision:1", actor: { kind: "human", id: "desktop" }, intent: "Style then copy", createdAt: 1, operations });
+    expect(platformMocks.applyTransaction).toHaveBeenCalled();
+    expect(runtimeMocks.commitStyles).not.toHaveBeenCalled();
+    expect(designWorkspaceSnapshotCache.peekSnapshot(workspaceId).data?.frames[0]?.sourceVersion).toBe(next.frames[0].sourceVersion);
+  });
+
+  it.each(["duplicate", "delete"] as const)("adopts a confirmed node %s without reloading the live document", async action => {
+    const workspaceId = `structure-${action}`;
+    const previous = snapshot();
+    const frame = previous.frames[0]!;
+    const next = snapshot();
+    next.frames[0] = { ...frame, sourceVersion: "e".repeat(24) };
+    const details = { sourceVersion: next.frames[0]!.sourceVersion, oid: "copy", tag: "div", name: "Copy",
+      text: null, selector: '[data-oid="copy"]', visible: true, breadcrumb: [], rect: { x: 0, y: 0, width: 100, height: 80 }, styles: {} };
+    const runtimeSnapshot = { sourceVersion: frame.sourceVersion, revision: 1, tree: [], warnings: [],
+      frame: { ...details, oid: "root", sourceVersion: frame.sourceVersion }, viewport: { width: 1440, height: 900, scrollX: 0, scrollY: 0 } };
+    designWorkspaceSnapshotCache.setData(workspaceId, previous);
+    useDesignRuntimeStore.getState().publishSnapshot(workspaceId, "/design/structure", frame.file, runtimeSnapshot, frame.sourceVersion);
+    runtimeMocks.designFrameRuntime.mockReturnValue({ sourceVersion: frame.sourceVersion, supports: () => true,
+      commitStyles: runtimeMocks.commitStyles, getNodeDetails: vi.fn().mockResolvedValue(null) });
+    runtimeMocks.commitStyles.mockResolvedValue({ sourceVersion: next.frames[0]!.sourceVersion, treeUnchanged: false,
+      snapshot: { ...runtimeSnapshot, sourceVersion: next.frames[0]!.sourceVersion, frame: { ...runtimeSnapshot.frame, sourceVersion: next.frames[0]!.sourceVersion } },
+      details: action === "duplicate" ? [details] : [] });
+    platformMocks.applyTransaction.mockResolvedValue({ result: null, snapshot: next });
+    await applyDesignTransactionCached(workspaceId, frame.file, { schemaVersion: 1, transactionId: `structure-${action}`,
+      documentId: "home", baseRevision: "revision:1", actor: { kind: "human", id: "desktop" }, intent: action, createdAt: 1,
+      operations: [action === "duplicate" ? { operationId: "copy", type: "node.duplicate", nodeId: "hero", duplicateNodeId: "copy" }
+        : { operationId: "remove", type: "node.delete", nodeId: "hero" }] });
+    expect(runtimeMocks.commitStyles).toHaveBeenCalledWith([], next.frames[0]!.sourceVersion,
+      { structure: [action === "duplicate" ? { type: "duplicate", nodeId: "hero", duplicateNodeId: "copy" } : { type: "delete", nodeId: "hero" }] });
+    expect(designRuntimeFrameState(workspaceId, frame.file)?.sourceVersion).toBe(next.frames[0]!.sourceVersion);
   });
 
   it("holds a watcher refresh and the last runtime audit until a local style generation is adopted", async () => {

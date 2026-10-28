@@ -54,7 +54,8 @@ import {
 
 import { useWorkbenchStatusSource } from "../../shell/workbench/tab-status";
 import { retainDesignResource } from "./state/design-resource-counters";
-import { designFrameRuntime, type DesignFrameRuntimeConnection } from "../../platform/bridge/design-frame-runtime";
+import { designFrameRuntime, waitForDesignFrameRuntime, type DesignFrameRuntimeConnection } from "../../platform/bridge/design-frame-runtime";
+import { applyDesignNodeAction } from "./state/design-node-actions";
 import {
   type DesignCanvasFrameWire,
   type DesignFrameGeometryWire,
@@ -153,6 +154,7 @@ import {
   flattenDesignLayerTree,
 } from "./design-layer-tree";
 import { startDesignLayoutDrag } from "./design-layout-drag-gesture";
+import { startDesignFrameCopy } from "./design-frame-copy-gesture";
 import { DESIGN_REPARENT_HYSTERESIS_PIXELS, designMovementDelta, designNodeMovementStyles, designNudgeStep } from "./design-movement-geometry";
 import { designSelectionMutationTargets } from "./design-selected-targets";
 import {
@@ -526,7 +528,7 @@ export function DesignCanvas({
     return message ? new Error(message) : null;
   }, [snapshot?.preparation?.errors]);
   useWorkbenchStatusSource({ error: preparationError, pending: false, hasContent: !!snapshot, active, retry: refresh }, workspaceId ?? undefined);
-  const selectedDescription = frameViews.find((frame) => frame.file === view.selectedFrame) ?? frameViews[0];
+  const selectedDescription = view.selectedFrame === null ? frameViews[0] : frameViews.find((frame) => frame.file === view.selectedFrame);
   const selectedFrame = selectedDescription && isPreparedDesignFrame(selectedDescription) ? selectedDescription : null;
   const canvasFoundation = useDesignFoundation(
     workspaceId,
@@ -1009,7 +1011,14 @@ export function DesignCanvas({
     hitStackGenerationRef.current += 1;
     setHitStackMenu(null);
   }, [workspaceId, active, view.activePageId]);
-  const nodeActionRef = useRef(false);
+  const frameActionIntentRef = useRef(0);
+  const frameActionPendingRef = useRef(0);
+  const pendingFrameCopyRef = useRef<{
+    owner: ReturnType<typeof captureDesignPageOwner>;
+    selectionEvent: number | undefined;
+    frame: string;
+    result: Promise<DesignCanvasFrameWire | null>;
+  } | null>(null);
   const [selectionOverlaySuppressed, setSelectionOverlaySuppressed] =
     useState(false);
   const nudgeGestureRef = useRef<
@@ -2251,202 +2260,84 @@ export function DesignCanvas({
     [workspaceId],
   );
 
-  const applyCanvasNodeOperation = useCallback(
-    async (
-      action: "duplicate" | "delete",
-      nodeIds: readonly string[],
-      duplicateNodeIds: readonly string[] = [],
-      duplicateMode: "copy" | "duplicate" = "duplicate",
-    ) => {
-      if (
-        !workspaceId ||
-        !folder ||
-        !selectedFrame ||
-        nodeActionRef.current ||
-        nodeIds.length === 0
-      ) {
-        return;
-      }
-      if (
-        action === "duplicate" &&
-        duplicateNodeIds.length !== nodeIds.length
-      ) {
-        throw new Error("Every selected element needs a duplicate identity.");
-      }
-      nodeActionRef.current = true;
-      try {
-        const foundation =
-          canvasFoundation.data ??
-          (await designFoundationCache.load(
-            designFoundationKey(
-              workspaceId,
-              selectedFrame.file,
-              selectedFrame.sourceVersion,
-            ),
-            () =>
-              fetchDesignFoundation(
-                designFoundationKey(
-                  workspaceId,
-                  selectedFrame.file,
-                  selectedFrame.sourceVersion,
-                ),
-              ),
-            { maxAgeMs: Number.POSITIVE_INFINITY },
-          ));
-        const operations: DesignOperation[] = nodeIds.map((nodeId, index) =>
-          action === "duplicate"
-            ? {
-                operationId: `duplicate:${crypto.randomUUID()}`,
-                type: "node.duplicate",
-                nodeId,
-                duplicateNodeId: duplicateNodeIds[index]!,
-              }
-            : {
-                operationId: `delete:${crypto.randomUUID()}`,
-                type: "node.delete",
-                nodeId,
-              },
-        );
-        const result = await applyDesignTransactionCached(
-          workspaceId,
-          selectedFrame.file,
-          {
-            schemaVersion: 1,
-            transactionId: `desktop:${crypto.randomUUID()}`,
-            documentId: foundation.summary.documentId,
-            baseRevision: foundation.summary.revision,
-            actor: { kind: "human", id: "desktop" },
-            intent:
-              action === "duplicate"
-                ? `${duplicateMode === "copy" ? "Copy" : "Duplicate"} ${nodeIds.length} selected ${nodeIds.length === 1 ? "layer" : "layers"}`
-                : `Delete ${nodeIds.length} selected ${nodeIds.length === 1 ? "layer" : "layers"}`,
-            createdAt: Date.now(),
-            operations,
-          },
-        );
-        if (action === "duplicate") {
-          const currentFrame =
-            result.snapshot?.frames.find(
-              (candidate) => candidate.file === selectedFrame.file,
-            ) ?? selectedFrame;
-          await selectDesignFrame(workspaceId, currentFrame, { owner: canvasPageOwner });
-          void selectDesignNodes({
-            workspaceId,
-            folder,
-            frame: currentFrame,
-            nodeIds: duplicateNodeIds,
-            primaryNodeId: duplicateNodeIds[0],
-            owner: canvasPageOwner,
-          }).catch(() => {
-            // The replacement iframe's ready snapshot retries the semantic
-            // selection after it owns the duplicate source generation.
-          });
-          // The selected duplicate on canvas is the confirmation; no toast.
-        } else {
-          const currentFrame =
-            result.snapshot?.frames.find(
-              (candidate) => candidate.file === selectedFrame.file,
-            ) ?? selectedFrame;
-          // The deletion is already durable. Keep selection persistence off
-          // its critical path so a transient selection write cannot turn a
-          // successful delete into an error toast.
-          void selectDesignFrame(workspaceId, currentFrame, { owner: canvasPageOwner }).catch(() => {});
-        }
-      } finally {
-        nodeActionRef.current = false;
-      }
-    },
-    [canvasFoundation.data, folder, selectedFrame, workspaceId, canvasPageOwner],
-  );
-
   const duplicateSelectedNode = useCallback(
     async (duplicateMode: "copy" | "duplicate" = "duplicate") => {
-      const nodeIds = designLayerTopLevelSelectionIds(
-        selectedRuntimeTree,
-        view.selectedNodeIds,
-      );
-      if (nodeIds.length === 0) return;
-      const duplicateNodeIds = nodeIds.map((nodeId) => {
-        const suffix = crypto.randomUUID().slice(0, 8);
-        return `${nodeId.slice(0, Math.max(1, 242 - suffix.length))}-copy-${suffix}`;
-      });
+      if (!workspaceId || !folder) return;
       try {
-        await applyCanvasNodeOperation(
-          "duplicate",
-          nodeIds,
-          duplicateNodeIds,
-          duplicateMode,
-        );
+        const save = applyDesignNodeAction({ workspaceId, folder, action: "duplicate", copy: duplicateMode === "copy" });
+        savedEditingSession?.retain(save);
+        await save;
       } catch (error) {
-        toast.error(
-          duplicateMode === "copy"
-            ? "Couldn't copy the element"
-            : "Couldn't duplicate the element",
-          { description: errorMessage(error) },
-        );
+        toast.error(duplicateMode === "copy" ? "Couldn't copy the element" : "Couldn't duplicate the element", { description: errorMessage(error) });
       }
     },
-    [applyCanvasNodeOperation, selectedRuntimeTree, view.selectedNodeIds],
+    [workspaceId, folder, savedEditingSession],
   );
 
   const duplicateSelectedFrame = useCallback(
     async (duplicateMode: "copy" | "duplicate" = "duplicate") => {
-      if (!workspaceId || !selectedFrame || nodeActionRef.current) return;
-      nodeActionRef.current = true;
+      if (!workspaceId) return;
+      const selected = designWorkspaceView(workspaceId);
+      const frame = designFrameViews(designWorkspaceSnapshotCache.peekSnapshot(workspaceId).data).find(candidate => candidate.file === selected.selectedFrame);
+      if (!frame) return;
+      if (frameActionPendingRef.current >= 256) {
+        toast.error("Let the pending copies finish before adding more");
+        return;
+      }
+      const owner = captureDesignPageOwner(workspaceId);
+      const intent = ++frameActionIntentRef.current;
+      frameActionPendingRef.current++;
+      const save = duplicateDesignFrameCached(workspaceId, frame.file, owner.pageId);
+      const pending = { owner, selectionEvent: selected.selectionEvent, frame: frame.file,
+        result: save.then(result => result.snapshot.frames.find(candidate => candidate.file === result.frame.file) ?? null) };
+      pendingFrameCopyRef.current = pending;
       try {
-        const result = await duplicateDesignFrameCached(
-          workspaceId,
-          selectedFrame.file,
-          canvasPageOwner?.pageId,
-        );
-        const duplicate = result.snapshot.frames.find(
-          (candidate) => candidate.file === result.frame.file,
-        );
-        if (duplicate) {
-          await selectDesignFrame(workspaceId, duplicate, {
-            selected: true,
-            reveal: true,
-            owner: canvasPageOwner,
-          });
-        }
+        savedEditingSession?.retain(save);
+        const duplicate = await pending.result;
+        if (frameActionIntentRef.current !== intent || !isCurrentDesignPageOwner(owner) || designWorkspaceView(workspaceId).selectionEvent !== selected.selectionEvent) return;
+        if (duplicate) void selectDesignFrame(workspaceId, duplicate, { selected: true, reveal: true, owner }).catch(() => {});
       } catch (error) {
-        toast.error(
-          duplicateMode === "copy"
-            ? "Couldn't copy the frame"
-            : "Couldn't duplicate the frame",
-          { description: errorMessage(error) },
-        );
+        toast.error(duplicateMode === "copy" ? "Couldn't copy the frame" : "Couldn't duplicate the frame", { description: errorMessage(error) });
       } finally {
-        nodeActionRef.current = false;
+        frameActionPendingRef.current--;
+        if (pendingFrameCopyRef.current === pending) pendingFrameCopyRef.current = null;
       }
     },
-    [selectedFrame, workspaceId, canvasPageOwner],
+    [workspaceId, savedEditingSession],
   );
 
-  const deleteSelectedNode = useCallback(async () => {
-    if (selectedFrame?.kind === "text") {
-      await onDeleteFrame(selectedFrame);
+  const deleteSelectedFrame = useCallback(async (frame: DesignCanvasFrameWire) => {
+    const pending = pendingFrameCopyRef.current;
+    if (workspaceId && pending?.frame === frame.file && isCurrentDesignPageOwner(pending.owner) &&
+      pending.selectionEvent === designWorkspaceView(workspaceId).selectionEvent) {
+      // Delete follows the latest copy command even before its file exists.
+      // A fresh explicit selection of the original retires that follow intent.
+      frameActionIntentRef.current++;
+      pendingFrameCopyRef.current = null;
+      useDesignWorkspaceUiStore.getState().setSelection(workspaceId, frame.file, null, undefined, { owner: pending.owner });
+      const copy = await pending.result.catch(() => null);
+      if (copy && isCurrentDesignPageOwner(pending.owner)) await onDeleteFrame(copy);
       return;
     }
-    const nodeIds = designLayerTopLevelSelectionIds(
-      selectedRuntimeTree,
-      view.selectedNodeIds,
-    );
-    if (nodeIds.length === 0) return;
-    try {
-      await applyCanvasNodeOperation("delete", nodeIds);
-    } catch (error) {
-      toast.error("Couldn't delete the element", {
-        description: errorMessage(error),
-      });
+    await onDeleteFrame(frame);
+  }, [workspaceId, onDeleteFrame]);
+
+  const deleteSelectedNode = useCallback(async () => {
+    if (!workspaceId || !folder) return;
+    const selected = designWorkspaceView(workspaceId);
+    const frame = designWorkspaceSnapshotCache.peekSnapshot(workspaceId).data?.frames.find(candidate => candidate.file === selected.selectedFrame);
+    if (frame?.kind === "text") {
+      await deleteSelectedFrame(frame);
+      return;
     }
-  }, [
-    applyCanvasNodeOperation,
-    onDeleteFrame,
-    selectedFrame,
-    selectedRuntimeTree,
-    view.selectedNodeIds,
-  ]);
+    try {
+      const save = applyDesignNodeAction({ workspaceId, folder, action: "delete" });
+      savedEditingSession?.retain(save);
+      await save;
+    } catch (error) {
+      toast.error("Couldn't delete the element", { description: errorMessage(error) });
+    }
+  }, [workspaceId, folder, deleteSelectedFrame, savedEditingSession]);
 
   const navigateToNode = useCallback(
     (nodeId: string) => {
@@ -3160,6 +3051,10 @@ export function DesignCanvas({
       const currentSelection = designWorkspaceView(workspaceId);
       const selectedScene = currentSelection.selectedTargets.some((target) => target.frame === frame.file && !target.nodeId);
       if (mode === "move" && selectedScene && currentSelection.selectedTargets.some((target) => target.frame !== frame.file)) {
+        if (event.altKey) {
+          toast.error("Copy one canvas frame at a time", { description: "Select a single canvas frame to Option-drag a copy." });
+          return;
+        }
         // Selected frames move together in one write and one undo step.
         if (currentSelection.selectedTargets.every((target) => !target.nodeId)) {
           startFrameGroupMove(event, currentSelection.selectedTargets.map((target) => target.frame));
@@ -3174,6 +3069,22 @@ export function DesignCanvas({
         "[data-design-frame]",
       );
       if (!element) return;
+      if (mode === "move" && event.altKey && folder) {
+        const viewport = viewportRef.current;
+        if (!viewport) return;
+        const bounds = viewport.getBoundingClientRect();
+        const lifetime = ++nudgeLifetimeRef.current;
+        const canvasLifetime = canvasLifetimeRef.current;
+        gestureCancelRef.current = startDesignFrameCopy({ event, workspaceId, folder, frame,
+          point: pointer => designCanvasPointFromClient({ x: pointer.clientX, y: pointer.clientY }, bounds,
+            wheelViewportRef.current ?? designWorkspaceView(workspaceId)),
+          current: () => nudgeLifetimeRef.current === lifetime && canvasLifetimeRef.current === canvasLifetime,
+          nest: showNestTarget, finished: () => { gestureCancelRef.current = null; },
+          saving: save => savedEditingSession?.retain(save),
+          failed: error => toast.error("Couldn't copy the frame", { description: errorMessage(error) }),
+        });
+        return;
+      }
       const previewKey = `${canvasDocumentOwner}\0${frame.file}`;
       const pageOwner = captureDesignPageOwner(workspaceId);
       const selectionEvent = designWorkspaceView(workspaceId).selectionEvent;
@@ -3195,7 +3106,8 @@ export function DesignCanvas({
       const startY = event.clientY;
       const viewport = viewportRef.current;
       if (!viewport) return;
-      const startWorld = designCanvasPointFromClient({ x: startX, y: startY }, viewport.getBoundingClientRect(), wheelViewportRef.current ?? designWorkspaceView(workspaceId));
+      const viewportBounds = viewport.getBoundingClientRect();
+      const startWorld = designCanvasPointFromClient({ x: startX, y: startY }, viewportBounds, wheelViewportRef.current ?? designWorkspaceView(workspaceId));
       const grab = { x: startWorld.x - start.x, y: startWorld.y - start.y };
       let latest = start;
       const startRect = {
@@ -3307,7 +3219,7 @@ export function DesignCanvas({
         if (!nestable || designWorkspaceView(workspaceId).selectedTargets.length !== 1) return;
         nestPointer = designCanvasPointFromClient(
           { x: pointerEvent.clientX, y: pointerEvent.clientY },
-          viewport.getBoundingClientRect(),
+          viewportBounds,
           wheelViewportRef.current ?? designWorkspaceView(workspaceId),
         );
         // The confirmed frames now; another frame may have moved meanwhile.
@@ -3342,7 +3254,7 @@ export function DesignCanvas({
         // A trackpad pinch repaints the camera up to 80ms before the store
         // learns the new zoom, so travel divides by what is on screen now.
         const zoom = liveDesignZoom();
-        const delta = designMovementDelta({ x: pointerEvent.clientX, y: pointerEvent.clientY }, viewport.getBoundingClientRect(), wheelViewportRef.current ?? designWorkspaceView(workspaceId), start, grab);
+        const delta = designMovementDelta({ x: pointerEvent.clientX, y: pointerEvent.clientY }, viewportBounds, wheelViewportRef.current ?? designWorkspaceView(workspaceId), start, grab);
         const dx = delta.x;
         const dy = delta.y;
         if (!moved && Math.hypot(dx, dy) < 3 / zoom) return;
@@ -3487,7 +3399,9 @@ export function DesignCanvas({
               y: latest.y - frame.y,
             });
             try {
-              const measured = await designFrameRuntime(workspaceId, frame.file)?.getNodeDetails(rootId, undefined, { relocation: true });
+              const sourceRuntime = await waitForDesignFrameRuntime(workspaceId, frame.file, 2_000, { sourceVersion: acknowledgedFrame.sourceVersion });
+              if (!ownerIsCurrent()) return acknowledgedFrame;
+              const measured = await sourceRuntime?.getNodeDetails(rootId, undefined, { relocation: true });
               if (!ownerIsCurrent()) return acknowledgedFrame;
               if (!measured)
                 throw new Error("This frame's document is still loading. Try again in a moment.");
@@ -4538,6 +4452,14 @@ export function DesignCanvas({
         "[data-design-frame]",
       );
       if (!article) return false;
+      const viewport = viewportRef.current;
+      if (!viewport) return false;
+      const viewportBounds = viewport.getBoundingClientRect();
+      const pointInFrame = (pointer: { clientX: number; clientY: number }) => {
+        const world = designCanvasPointFromClient({ x: pointer.clientX, y: pointer.clientY }, viewportBounds,
+          wheelViewportRef.current ?? designWorkspaceView(workspaceId));
+        return { x: world.x - frame.x, y: world.y - frame.y };
+      };
       event.preventDefault();
       event.stopPropagation();
       const runtime = designFrameRuntime(workspaceId, frame.file);
@@ -4545,6 +4467,14 @@ export function DesignCanvas({
         toast.error("Wait for the selected scene to finish loading");
         return true;
       }
+      const duplicate = event.altKey;
+      if (duplicate && (!runtime.previewStructure || !runtime.supports("commitStructure"))) {
+        toast.error("Wait for this document to update before copying layers");
+        return true;
+      }
+      const transactionId = `desktop:${crypto.randomUUID()}`;
+      const copyIds = new Map(duplicate ? nodes.map(node => [node.oid, `copy-${crypto.randomUUID()}`]) : []);
+      let copyPreview: Promise<unknown> | null = null;
       gestureCancelRef.current?.();
       const owner = captureDesignPageOwner(workspaceId);
       const selection = designWorkspaceView(workspaceId);
@@ -4593,10 +4523,7 @@ export function DesignCanvas({
           .map((details) => details.rect),
         ...(parentOutlineDetails ? [parentOutlineDetails.rect] : []),
       ];
-      const startX = event.clientX;
-      const startY = event.clientY;
-      const initialBounds = article.getBoundingClientRect();
-      const grab = { x: (startX - initialBounds.left) / liveDesignZoom(), y: (startY - initialBounds.top) / liveDesignZoom() };
+      const grab = pointInFrame(event);
       let delta = { x: 0, y: 0 };
       let latestRawBounds = groupBounds;
       let moved = false;
@@ -4619,13 +4546,17 @@ export function DesignCanvas({
       };
       const updates = () =>
         starts.map((start) => ({
-          nodeId: start.details.oid,
+          nodeId: duplicate ? copyIds.get(start.details.oid)! : start.details.oid,
           styles: designNodeMovementStyles(start.details, delta),
         }));
       // The whole group is one flight: its members must never land a frame apart.
       const loop = createDesignGestureLoop<unknown>({
         request: async () => {
           if (!isCurrent()) throw new Error("The group changed during this move.");
+          if (duplicate) await (copyPreview ??= runtime.previewStructure!({ previewId: transactionId,
+            operations: starts.map(start => ({ type: "duplicate", nodeId: start.details.oid, duplicateNodeId: copyIds.get(start.details.oid)! })),
+          }));
+          if (!isCurrent()) return;
           const next = updates();
           for (const update of next) publishDesignGestureLivePreview(workspaceId, frame.file, update.nodeId, update.styles);
           return runtime.previewLayout({ updates: next, nodeIds: [], children: false });
@@ -4639,6 +4570,7 @@ export function DesignCanvas({
         }
       };
       const restore = () => {
+        if (duplicate) void copyPreview?.finally(() => runtime.clearPreviewStructure?.(transactionId)).catch(() => {});
         if (nudgeLifetimeRef.current !== lifetime || runtime.sourceVersion !== frame.sourceVersion || designFrameRuntime(workspaceId, frame.file) !== runtime) return;
         for (const start of painted) {
           if (start.overlay) {
@@ -4652,7 +4584,7 @@ export function DesignCanvas({
               workspaceId,
               frame: frame.file,
               sourceVersion: frame.sourceVersion,
-              nodeId: start.details.oid,
+              nodeId: duplicate ? copyIds.get(start.details.oid)! : start.details.oid,
             }),
           ),
         ).catch(() => {});
@@ -4662,9 +4594,9 @@ export function DesignCanvas({
         // learns the new zoom, so travel divides by what is on screen now.
         const zoom = liveDesignZoom();
         if (!isCurrent()) return;
-        const currentBounds = article.getBoundingClientRect();
-        const rawX = (pointerEvent.clientX - currentBounds.left) / zoom - grab.x;
-        const rawY = (pointerEvent.clientY - currentBounds.top) / zoom - grab.y;
+        const point = pointInFrame(pointerEvent);
+        const rawX = point.x - grab.x;
+        const rawY = point.y - grab.y;
         if (!moved && Math.hypot(rawX, rawY) < 3 / zoom) return;
         moved = true;
         releasePointer = { x: grab.x + rawX, y: grab.y + rawY };
@@ -4782,6 +4714,7 @@ export function DesignCanvas({
               folder,
               frame,
               details: measured,
+              ...(duplicate ? { duplicateNodeId: copyIds.get(single.oid)! } : {}),
               origin: { x: frame.x + measured.rect.x, y: frame.y + measured.rect.y },
               pointer,
               isCurrent,
@@ -4790,6 +4723,7 @@ export function DesignCanvas({
           })()
             .then((transferred) => {
               if (!transferred) restore();
+              else if (duplicate) void runtime.clearPreviewStructure?.(transactionId).catch(() => {});
             })
             .catch((error) => {
               restore();
@@ -4807,24 +4741,35 @@ export function DesignCanvas({
             { settle: true },
           );
         }
-        void (async () => {
-          await applyDesignEditCached(workspaceId, frame, {
+        const save = (async () => {
+          await copyPreview;
+          const result = await applyDesignEditCached(workspaceId, frame, {
             schemaVersion: 1,
-            transactionId: `desktop:${crypto.randomUUID()}`,
+            transactionId,
             actor: { kind: "human", id: "desktop" },
-            intent: `Move ${finalUpdates.length} selected layers`,
+            intent: `${duplicate ? "Copy and place" : "Move"} ${finalUpdates.length} selected layers`,
             createdAt: Date.now(),
-            operations: finalUpdates.map((update) => ({
+            operations: [...(duplicate ? starts.map(start => ({ operationId: crypto.randomUUID(), type: "node.duplicate" as const,
+              nodeId: start.details.oid, duplicateNodeId: copyIds.get(start.details.oid)! })) : []), ...finalUpdates.map((update) => ({
               operationId: `move:${crypto.randomUUID()}`,
-              type: "node.set-styles",
+              type: "node.set-styles" as const,
               nodeId: update.nodeId,
               styles: update.styles,
-              scope: "auto",
-              responsiveContext: "base",
-              stateContext: "default",
-            })),
-          }, { isCurrent, movementGuard: { sourceVersion: frame.sourceVersion, geometry: frameGeometry(frame) } });
-        })().catch((error) => {
+              scope: "auto" as const,
+              responsiveContext: "base" as const,
+              stateContext: "default" as const,
+            }))],
+          }, { isCurrent, movementGuard: { sourceVersion: frame.sourceVersion, geometry: frameGeometry(frame) } }, duplicate ? { structurePreviewId: transactionId } : undefined);
+          if (duplicate) {
+            await runtime.clearPreviewStructure?.(transactionId).catch(() => {});
+            const confirmed = result.snapshot?.frames.find(candidate => candidate.file === frame.file);
+            if (confirmed && folder && isCurrentDesignPageOwner(owner) && nudgeLifetimeRef.current === lifetime &&
+              designWorkspaceView(workspaceId).selectionEvent === selection.selectionEvent)
+              void selectDesignNodes({ workspaceId, folder, frame: confirmed, nodeIds: [...copyIds.values()], owner }).catch(() => {});
+          }
+        })();
+        savedEditingSession?.retain(save);
+        void save.catch((error) => {
           restore();
           toast.error("Couldn't move the selected elements", {
             description: errorMessage(error),
@@ -4857,6 +4802,7 @@ export function DesignCanvas({
       parentOutlineDetails,
       peerGeometryDetails,
       selectedNodeDetailsList,
+      savedEditingSession,
       showNestTarget,
       workspaceId,
     ],
@@ -5313,13 +5259,22 @@ export function DesignCanvas({
         ) {
           gestureCancelRef.current?.();
           const lifetime = ++nudgeLifetimeRef.current;
+          const gestureViewportBounds = viewportRef.current?.getBoundingClientRect();
           const cancel = startDesignLayoutDrag({
             saving: (save) => savedEditingSession?.retain(save),
+            copied: (copyFrame, nodeId) => {
+              if (folder) void selectDesignNode({ workspaceId, folder, frame: copyFrame, nodeId }).catch(() => {});
+            },
             event,
             workspaceId,
             frame,
             details,
             zoom: liveDesignZoom,
+            point: gestureViewportBounds ? pointer => {
+              const world = designCanvasPointFromClient({ x: pointer.clientX, y: pointer.clientY }, gestureViewportBounds,
+                wheelViewportRef.current ?? designWorkspaceView(workspaceId));
+              return { x: world.x - frame.x, y: world.y - frame.y };
+            } : undefined,
             isCurrent: () => nudgeLifetimeRef.current === lifetime,
             paint: (geometry, parent) => {
               const box =
@@ -5342,12 +5297,13 @@ export function DesignCanvas({
               );
             },
             detach: folder
-              ? (origin, movedDetails, presented, canWrite, pointer) =>
+              ? (origin, movedDetails, presented, canWrite, pointer, duplicateNodeId) =>
                   transferDesignLayerAtRelease({
                     workspaceId,
                     folder,
                     frame,
                     details: movedDetails,
+                    duplicateNodeId,
                     origin: { x: frame.x + origin.x, y: frame.y + origin.y },
                     pointer: { x: frame.x + pointer.x, y: frame.y + pointer.y },
                     isCurrent: () => nudgeLifetimeRef.current === lifetime,
@@ -5953,14 +5909,10 @@ export function DesignCanvas({
       const designSurfaceFocused =
         activeElement instanceof Element &&
         Boolean(activeElement.closest("[data-design-workspace-surface]"));
-      const selectedNodeIsTarget = Boolean(
-        selectedFrame && view.selectedNodeId,
-      );
-      const selectedFrameIsTarget = Boolean(
-        selectedFrame &&
-        view.frameSelected &&
-        view.selectedFrame === selectedFrame.file,
-      );
+      const shortcutView = designWorkspaceView(workspaceId);
+      const shortcutFrame = workspaceId ? designWorkspaceSnapshotCache.peekSnapshot(workspaceId).data?.frames.find(frame => frame.file === shortcutView.selectedFrame) : undefined;
+      const selectedNodeIsTarget = Boolean(shortcutFrame && shortcutView.selectedNodeId);
+      const selectedFrameIsTarget = Boolean(shortcutFrame && shortcutView.frameSelected);
       const selectionShortcut = resolveDesignSelectionShortcut(
         event,
         editableTarget,
@@ -5970,11 +5922,11 @@ export function DesignCanvas({
         event.preventDefault();
         if (selectionShortcut === "delete") {
           if (selectedNodeIsTarget) void deleteSelectedNode();
-          else if (selectedFrame) void onDeleteFrame(selectedFrame);
+          else if (shortcutFrame) void deleteSelectedFrame(shortcutFrame);
         } else {
           const duplicateMode =
             selectionShortcut === "copy" ? "copy" : "duplicate";
-          if (selectedFrame?.kind === "text" || !selectedNodeIsTarget) {
+          if (shortcutFrame?.kind === "text" || !selectedNodeIsTarget) {
             void duplicateSelectedFrame(duplicateMode);
           } else {
             void duplicateSelectedNode(duplicateMode);
@@ -6234,6 +6186,7 @@ export function DesignCanvas({
     active,
     activeTool,
     activateTool,
+    deleteSelectedFrame,
     deleteSelectedNode,
     duplicateSelectedFrame,
     duplicateSelectedNode,

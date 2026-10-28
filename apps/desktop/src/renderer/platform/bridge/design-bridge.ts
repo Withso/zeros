@@ -4,7 +4,7 @@
 // semantics still go through its shared workspaceOp helper, while the design
 // wire vocabulary remains cohesive and cheap for the design shell to import.
 
-import type { DesignRelocation, DesignMovementGuard } from "@zeros/protocol/design-relocation";
+import { DESIGN_COPY_PLACEMENT_CAPABILITY, type DesignRelocation, type DesignMovementGuard } from "@zeros/protocol/design-relocation";
 import {
   designFoundationManifestSchema,
   designTransactionSchema,
@@ -27,7 +27,7 @@ import {
   type DesignPreviewReply,
 } from "@zeros/protocol/design-capture";
 import { designPageCatalogSchema, designPageIdSchema, normalizeDesignPagesSnapshot, type DesignPageSummary } from "@zeros/protocol/design-pages";
-import { DESIGN_LAZY_PREPARATION_CAPABILITY, designFramesPrepareSchema, designFramesPrepareReplySchema } from "@zeros/protocol/design-catalog";
+import { DESIGN_LAZY_PREPARATION_CAPABILITY, DESIGN_MUTATION_SNAPSHOTS_CAPABILITY, designMutationCatalogSchema, designPreparedFrameSchema, designFramesPrepareSchema, designFramesPrepareReplySchema, type DesignMutationCatalog } from "@zeros/protocol/design-catalog";
 import { DESIGN_SOURCE_SURFACES_CAPABILITY } from "@zeros/protocol/design-surface";
 import { isCloudWorkspace } from "./cloud-workspace-key";
 
@@ -212,6 +212,7 @@ export interface DesignAssetWire {
 }
 
 export interface DesignWorkspaceSnapshotWire {
+  mutationCatalog?: DesignMutationCatalog;
   /** Renderer-owned projection, never an authored or persisted source version. */
   preparation?: {
     revision: string;
@@ -249,14 +250,37 @@ function validProtocolCapability(
   );
 }
 
+function validMutationSnapshot(snapshot: DesignWorkspaceSnapshotWire | undefined): boolean {
+  return validProtocolCapability(snapshot) &&
+    (snapshot?.mutationCatalog === undefined || isDesignWorkspaceSnapshotWire(snapshot));
+}
+
 export function isDesignWorkspaceSnapshotWire(
   value: unknown,
 ): value is DesignWorkspaceSnapshotWire {
   const snapshot = value as DesignWorkspaceSnapshotWire | undefined;
   if (!snapshot || !validProtocolCapability(snapshot)) return false;
+  if (snapshot.pages !== undefined && !designPageCatalogSchema.safeParse(snapshot.pages).success) return false;
+  if (snapshot.mutationCatalog !== undefined) {
+    const catalog = designMutationCatalogSchema.safeParse(snapshot.mutationCatalog);
+    if (!catalog.success || !snapshot.directoryId || !Array.isArray(snapshot.frames) || !snapshot.pages) return false;
+    const descriptions = new Map(catalog.data.frames.map(frame => [frame.source, frame]));
+    if (descriptions.size !== catalog.data.frames.length || new Set(catalog.data.frames.map(frame => frame.id)).size !== descriptions.size) return false;
+    if (snapshot.frames.some(frame => {
+      const description = descriptions.get(frame?.file);
+      return !description || !designPreparedFrameSchema.safeParse(frame).success || frame.frameId !== description.id || frame.pageId !== description.pageId ||
+        (frame.kind === "text" ? "text" : "html") !== description.kind ||
+        (["title", "x", "y", "width", "height", "z"] as const).some(key => frame[key] !== description[key]);
+    })) return false;
+    const described = snapshot.pages.flatMap(page => page.frameFiles);
+    if (described.length !== descriptions.size || described.some(file => !descriptions.has(file)) ||
+      snapshot.pages.some(page => page.frameFiles.some((file, index) => {
+        const description = descriptions.get(file);
+        return !description || description.pageId !== page.id || description.order !== index || page.frameIds?.[index] !== description.id;
+      }))) return false;
+  }
   if (Object.hasOwn(snapshot, "nextCursor") || Object.hasOwn(snapshot, "coverage")) return false;
   if (snapshot.pages !== undefined) {
-    if (!designPageCatalogSchema.safeParse(snapshot.pages).success) return false;
     const files = new Set<string>();
     if (!Array.isArray(snapshot.frames) || snapshot.frames.some((frame) => {
       if (!frame || typeof frame.file !== "string" || files.has(frame.file)) return true;
@@ -520,6 +544,7 @@ export async function bridgeDesignApplyTransaction(
       transaction: parsed,
       dryRun,
       ...(movementGuard ? { movementGuard } : {}),
+      ...scopedMutationSnapshot(bridge, workspaceId),
     }),
     "design.transaction.apply",
     !dryRun,
@@ -894,6 +919,7 @@ export async function bridgeDesignCreateFrame(
 }> {
   const result = (await workspaceOp(bridge, "design.frame.create", {
     workspaceId,
+    ...scopedMutationSnapshot(bridge, workspaceId),
     ...(pageId !== undefined ? { pageId } : {}),
     ...(title ? { title } : {}),
     ...(geometry ? geometry : {}),
@@ -913,7 +939,7 @@ export async function bridgeDesignCreateFrame(
     !result?.frame ||
     typeof result.frame.file !== "string" ||
     !result.snapshot ||
-    !validProtocolCapability(result.snapshot)
+    !validMutationSnapshot(result.snapshot)
   ) {
     throw new Error("design.frame.create: malformed engine response");
   }
@@ -962,6 +988,7 @@ export async function bridgeDesignUpdateCanvas(
     workspaceId,
     frame,
     ...geometry,
+    ...scopedMutationSnapshot(bridge, workspaceId),
   })) as {
     geometry?: DesignFrameGeometryWire;
     snapshot?: DesignWorkspaceSnapshotWire;
@@ -972,7 +999,7 @@ export async function bridgeDesignUpdateCanvas(
     !result?.geometry ||
     typeof result.geometry.x !== "number" ||
     !result.snapshot ||
-    !validProtocolCapability(result.snapshot) ||
+    !validMutationSnapshot(result.snapshot) ||
     (revision !== undefined &&
       (typeof revision.before !== "string" ||
         typeof revision.after !== "string"))
@@ -1000,6 +1027,7 @@ export async function bridgeDesignMoveFrames(
   const result = (await workspaceOp(bridge, "design.frames.move", {
     workspaceId,
     moves,
+    ...scopedMutationSnapshot(bridge, workspaceId),
   })) as { snapshot?: DesignWorkspaceSnapshotWire };
   if (!result?.snapshot || !isDesignWorkspaceSnapshotWire(result.snapshot))
     throw new Error("design.frames.move: malformed engine response");
@@ -1011,14 +1039,19 @@ export async function bridgeDesignDuplicateFrame(
   workspaceId: string,
   frame: string,
   pageId?: string,
+  placement?: { sourceVersion: string; geometry: DesignFrameGeometryWire },
 ): Promise<{
   frame: DesignFrameSummaryWire;
   snapshot: DesignWorkspaceSnapshotWire;
 }> {
+  if (placement && (isCloudWorkspace(workspaceId) || !bridge.supportsEngineCapability?.(DESIGN_COPY_PLACEMENT_CAPABILITY, workspaceId)))
+    throw new Error("Update the Local engine to copy frames at the pointer.");
   const result = (await workspaceOp(bridge, "design.frame.duplicate", {
     workspaceId,
     frame,
     ...(pageId !== undefined ? { pageId } : {}),
+    ...placement,
+    ...scopedMutationSnapshot(bridge, workspaceId),
   })) as {
     frame?: DesignFrameSummaryWire;
     snapshot?: DesignWorkspaceSnapshotWire;
@@ -1026,7 +1059,7 @@ export async function bridgeDesignDuplicateFrame(
   if (
     !result.frame ||
     !result.snapshot ||
-    !validProtocolCapability(result.snapshot)
+    !validMutationSnapshot(result.snapshot)
   ) {
     throw new Error("design.frame.duplicate: malformed engine response");
   }
@@ -1044,6 +1077,7 @@ export async function bridgeDesignDeleteFrame(
   const result = (await workspaceOp(bridge, "design.frame.delete", {
     workspaceId,
     frame,
+    ...scopedMutationSnapshot(bridge, workspaceId),
   })) as {
     deleted?: { file: string };
     snapshot?: DesignWorkspaceSnapshotWire;
@@ -1051,7 +1085,7 @@ export async function bridgeDesignDeleteFrame(
   if (
     !result.deleted ||
     !result.snapshot ||
-    !validProtocolCapability(result.snapshot)
+    !validMutationSnapshot(result.snapshot)
   ) {
     throw new Error("design.frame.delete: malformed engine response");
   }
@@ -1063,6 +1097,7 @@ export interface DesignNodeTransferInput {
   pageId?: string;
   sourceVersion: string;
   nodeId: string;
+  duplicateNodeId?: string;
   destinationFrame?: string;
   destinationSourceVersion?: string;
   parentId?: string;
@@ -1091,9 +1126,12 @@ export async function bridgeDesignTransferNode(
   nodeId: string;
   snapshot: DesignWorkspaceSnapshotWire;
 }> {
+  if (input.duplicateNodeId !== undefined && (isCloudWorkspace(workspaceId) || !bridge.supportsEngineCapability?.(DESIGN_COPY_PLACEMENT_CAPABILITY, workspaceId)))
+    throw new Error("Update the Local engine to copy layers between frames.");
   const value = (await workspaceOp(bridge, "design.node.transfer", {
     workspaceId,
     ...input,
+    ...scopedMutationSnapshot(bridge, workspaceId),
   })) as {
     frame?: string;
     nodeId?: string;
@@ -1106,6 +1144,11 @@ export async function bridgeDesignTransferNode(
   )
     throw new Error("Invalid layer transfer response.");
   return { frame: value.frame, nodeId: value.nodeId, snapshot: value.snapshot };
+}
+
+function scopedMutationSnapshot(bridge: RuntimeClient, workspaceId: string) {
+  return !isCloudWorkspace(workspaceId) && bridge.supportsEngineCapability?.(DESIGN_MUTATION_SNAPSHOTS_CAPABILITY, workspaceId)
+    ? { snapshotMode: "scoped" } : {};
 }
 
 export async function bridgeDesignUpdateStyles(

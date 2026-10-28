@@ -1917,11 +1917,22 @@ original unsnapped geometry writes nothing and preserves authored sizing.
 #### Continuous rendering and state
 
 An authored value change is not a loading transition. Visual-only writes patch
-the mounted runtime and advance its exact generation atomically. Structural and
-text commits prepare one incoming live iframe while the displayed iframe keeps
+the mounted runtime and advance its exact generation atomically. Negotiated
+`commitStructure` runtimes also adopt subtree duplicate/delete and a copied
+root's final placement in place, with exact DOM identity through Undo/Redo.
+Other structural and text commits prepare one incoming live iframe while the displayed iframe keeps
 painting, then swap after runtime handshake, fonts/layout, theme, selected-node
 readback, and compositor frames are ready. Rapid A → B → C replaces only the
 unpainted incoming buffer.
+
+`previewStructure` clones only already-sanitized DOM and keeps speculative
+pixels separate from confirmed snapshots. A named preview is rewound before a
+source generation is adopted, then remaining previews are rebuilt in input
+order. Escape, gesture retirement and runtime teardown remove their owned
+previews. Structural adoption publishes current ancestry immediately; optional
+contrast/style audits remain coalesced readback work. Transactions whose order
+cannot be mirrored exactly (for example, styling a source before copying it)
+use the source-reload path. Older runtimes retain that fallback too.
 
 Native frame resources, snapshot reads, and Design mutations resolve the same
 active directory in an operation-scoped lease. They do not depend on an earlier
@@ -1938,6 +1949,16 @@ failed native handshake revalidates the workspace and hydrates that frame throug
 the bounded, exact-version, sanitized bridge cache. Persistent failures offer
 an inline Retry frame action. Recovery timers stop for inactive surfaces and
 retired sessions; mutations are never automatically replayed.
+
+Movement waits for the exact prepared source generation, including an incoming
+runtime while the outgoing frame still paints. Bounded readiness waits subscribe
+to runtime publication/adoption rather than polling; a retained cover never
+authorizes a move. Selection shortcuts resolve the current semantic target at
+input time and queue in the existing source lane. Repeated commands are not
+dropped behind a busy flag. Delete immediately after a pending copy belongs to
+that copy, unless a newer explicit selection retires the follow intent; another
+Delete cannot fall through to the original. Keyboard copies follow selection
+after confirmation, while supported previews paint before the write completes.
 
 Runtime snapshots and hot collection references remain stable. Style writes
 retain the existing tree reference where structure permits; display/visibility
@@ -2046,6 +2067,16 @@ it changes. A warm
 revalidation (a watcher echo after a save, a style build or a tab return)
 keeps the confirmed aggregate visible while the frames the surface demands are
 prepared through the same bounded lane, then publishes once.
+
+Capable Local engines negotiate `design.mutation-snapshots.v1` for transaction,
+create, duplicate, delete, geometry and transfer acknowledgements. Each reply
+contains complete validated page/frame metadata and prepared source for at most
+16 affected frames. Unchecked same-owner frames remain visible covers until
+the active preparation lane validates them; their old source versions are not
+editing authority. Every projection advances its preparation epoch to fence
+late reads. Legacy layouts, larger affected sets and catalog races retain the
+aggregate fallback. Personal and organization-owned Local use the same path;
+cloud Design remains unavailable.
 
 A single application-wide incoming generation may overlap steady admission;
 both generations' source costs and vector bytes remain charged until removal.
@@ -2170,6 +2201,14 @@ planner cannot place, or a component instance inside the moving layer, is
 refused. `node.move` preserves exact source spans and stable identities.
 `design.node.transfer` performs the two-document change through the engine's
 Design metadata journal, including geometry and exact structural history.
+Option-drag preserves the original and copies on actual movement. The
+`design.copy-placement.v1` capability admits top-level copy-at-release geometry
+and cross-frame copies with fresh subtree identities in one checked history
+entry. Unsupported engines reject those requests before sending a move.
+Selected sibling layers can copy together; Option-dragging several top-level
+frames is explicitly refused. Free-canvas frame copying does not wait for a
+live editor, while nesting requires current source/destination measurements.
+Pointer coordinates reuse viewport bounds with the live camera transform.
 Transfers retain local stylesheet dependencies within the Design directory.
 Trusted in-process API history checkpoints preserve edits before and after a
 transfer. They reattach only to the exact restored document revision and count
@@ -2513,8 +2552,8 @@ Pending metadata, page-layout or semantic journals return `unsettled`; this
 read-only API does not recover, migrate or rewrite them. Existing lifecycle
 recovery owns settlement. Cloud v2 does not advertise this Design capability.
 
-Renderer catalog consumption, coherent group geometry/history, negotiated
-mutation receipts and larger admission are separate integration layers. Before
+Negotiated scoped mutation snapshots integrate the current bounded canvas with
+the metadata catalog; larger admission remains a separate integration layer. Before
 raising admission, update every lifecycle/order/undo/checkpoint guard and reject
 unnegotiated prospective-large writes **before** committing. Keep resource
 budgets independent: Foundation's 1,024 files/16 MiB bound one entry/dependency
@@ -2547,6 +2586,12 @@ boundaries, not targets to relax casually:
   15 MiB sanitized output, and 16 MiB runtime-enabled output;
 - live projection: 20,000 nodes across at most 32 emitted nesting levels and
   5,000 audited elements, with explicit truncation advisories;
+- structural previews: 32 pending previews, 256 operations and 4 MiB estimated
+  retained subtree cost; copied documents also stay within the live node bound.
+  In-place history retains at most 64 generations / 4 MiB estimated changes.
+  These estimates are not total browser or GPU memory ceilings;
+- keyboard structural commands: 256 pending commands per workspace, with at
+  most 32 active workspace lanes and drained lanes removed;
 - headless rendering: two concurrent pages by default (four maximum), a
   15-second default deadline (60 seconds maximum), 16,777,216 output pixels,
   and 16 MiB artifacts;

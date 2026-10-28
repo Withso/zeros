@@ -470,6 +470,23 @@ export interface DesignRuntimeGenerationPatch {
   tokens?: DesignRuntimeTokenUpdate[];
   /** Opt-in (`previewInsert`): structural appends adopted in place. */
   inserts?: DesignRuntimeNodeInsert[];
+  /** Opt-in (`commitStructure`): engine-confirmed subtree edits. */
+  structure?: DesignRuntimeStructureOperation[];
+  structurePreviewId?: string;
+}
+
+export type DesignRuntimeStructureOperation =
+  | { type: "duplicate"; nodeId: string; duplicateNodeId: string }
+  | { type: "delete"; nodeId: string };
+
+export interface DesignRuntimeStructurePreview {
+  previewId: string;
+  operations: DesignRuntimeStructureOperation[];
+}
+
+export interface DesignRuntimeStructurePreviewResult {
+  sourceVersion: string;
+  details: DesignRuntimeNodeDetails[];
 }
 
 /** Result of adopting an engine-confirmed visual generation in-place. */
@@ -496,6 +513,9 @@ export type DesignRuntimeMethod =
   | "previewHistory"
   | "previewGeometry"
   | "commitStyles"
+  | "commitStructure"
+  | "previewStructure"
+  | "clearPreviewStructure"
   | "previewText"
   | "clearPreviewText"
   | "previewMotion"
@@ -510,7 +530,7 @@ export type DesignRuntimeMethod =
 /** Methods a runtime advertises only when the host's handshake lists them
  * in `features`, so a host that predates them still accepts the runtime's
  * capabilities. */
-export const DESIGN_RUNTIME_OPT_IN_METHODS = ["previewStylesheet", "setPlayback", "previewInsert", "clearPreviewInserts", "previewHistory"] as const;
+export const DESIGN_RUNTIME_OPT_IN_METHODS = ["previewStylesheet", "setPlayback", "previewInsert", "clearPreviewInserts", "previewHistory", "commitStructure", "previewStructure", "clearPreviewStructure"] as const;
 
 export interface DesignRuntimePlaybackStopped {
   sourceVersion: string;
@@ -571,6 +591,9 @@ const DESIGN_RUNTIME_METHODS = new Set<DesignRuntimeMethod>([
   "previewHistory",
   "previewGeometry",
   "commitStyles",
+  "commitStructure",
+  "previewStructure",
+  "clearPreviewStructure",
   "previewText",
   "clearPreviewText",
   "previewMotion",
@@ -1048,7 +1071,7 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
   ];
   // Advertised only to a host whose handshake asks for them, so a host that
   // predates a method still accepts these capabilities.
-  var OPT_IN_METHODS = ["previewStylesheet", "setPlayback", "previewInsert", "clearPreviewInserts", "previewHistory"];
+  var OPT_IN_METHODS = ["previewStylesheet", "setPlayback", "previewInsert", "clearPreviewInserts", "previewHistory", "commitStructure", "previewStructure", "clearPreviewStructure"];
   var enabledOptInMethods = [];
   var MAX_PREVIEW_STYLESHEET_CHARS = 4194304;
   // Everything one frame of direct manipulation paints from. Deliberately tiny:
@@ -2629,7 +2652,8 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
     return warnings;
   }
 
-  function snapshot() {
+  function snapshot(retainAudits) {
+    if (structurePreviews.length) return withStructurePresentation(function () { return snapshot(retainAudits); });
     // A snapshot is the semantic cache generation. Theme changes and observed
     // DOM/style mutations both arrive through this boundary.
     authoredStylePropertiesCache = new WeakMap();
@@ -2652,7 +2676,11 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
         if (rootNode) roots.push(rootNode);
       }
     }
-    var warnings = auditWarnings();
+    // Structural adoption needs current ancestry immediately. Contrast/style
+    // audits are separate readback work, coalesced by the host after editing.
+    var warnings = retainAudits && lastSnapshot
+      ? lastSnapshot.warnings.filter(function (warning) { return warning.ruleId !== "layer-tree-limit" && elementsByOid.has(warning.oid); })
+      : auditWarnings();
     if (treeBudget.truncated) {
       warnings.unshift({
         ruleId: "layer-tree-limit",
@@ -3713,15 +3741,174 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
     }).map(function (element) { return detailsOf(element, true); });
   }
 
-  function prepareMoves(moves) {
+  /** Match design-web's authored duplicate identity rule. The parity tests
+   * compare real DOM output with the source adapter, including collisions. */
+  function duplicateStructureIdentity(rootId, originalId, index, used) {
+    var safe = originalId.replace(/[^A-Za-z0-9._:-]+/g, "-").replace(/^-+|-+$/g, "") || "node-" + index;
+    var prefix = (rootId + "-" + safe).slice(0, 248);
+    var candidate = prefix;
+    var suffix = 2;
+    while (used.has(candidate)) {
+      var ending = "-" + suffix++;
+      candidate = prefix.slice(0, 256 - ending.length) + ending;
+    }
+    return candidate;
+  }
+
+  /** Clone only the existing sanitized DOM, never host-supplied HTML. Prepare
+   * every operation and bound its retained subtree before the first write. */
+  function prepareStructure(operations) {
+    var result = { inserts: [], deletes: [], elements: new Map(), bytes: 0 };
+    if (operations === undefined) return result;
+    if (enabledOptInMethods.indexOf("commitStructure") < 0) throw new Error("Structural commits require commitStructure.");
+    if (!Array.isArray(operations) || operations.length < 1 || operations.length > 256) throw new Error("Invalid structural edits.");
+    ensureElementMap();
+    var used = new Set(elementsByOid.keys());
+    var projectedNodes = elementsByOid.size - (document.body ? 1 : 0);
+    var selected = [];
+    var nodes = 0;
+    operations.forEach(function (operation) {
+      if (!operation || (operation.type !== "duplicate" && operation.type !== "delete") || typeof operation.nodeId !== "string") throw new Error("Invalid structural edit.");
+      var element = elementForOid(operation.nodeId);
+      if (element === document.body || element === document.documentElement || !element.parentElement ||
+          selected.some(function (other) { return other === element || other.contains(element) || element.contains(other); })) throw new Error("Overlapping structural edits.");
+      selected.push(element);
+      var descendants = element.getElementsByTagName("*");
+      nodes += descendants.length + 1;
+      if (nodes > MAX_TREE_NODES) throw new Error("Structural edits exceed the node budget.");
+      var bytes = element.outerHTML.length * 2 + (descendants.length + 1) * 256;
+      result.bytes += bytes;
+      if (result.bytes > 4 * 1024 * 1024) throw new Error("Structural edits exceed the memory budget.");
+      var originals = [element].concat(Array.from(descendants));
+      // A speculative style/move is not authored source. The host can safely
+      // reload instead when a subtree has another gesture still in progress.
+      if (originals.some(function (node) { var id = node.getAttribute("data-oid"); return previewStyleOverridesByOid.has(id) || previewMovesByOid.has(id) || previewInsertsByOid.has(id); }))
+        throw new Error("The subtree still has an unconfirmed preview.");
+      if (operation.type === "delete") {
+        projectedNodes -= originals.length;
+        result.deletes.push({ oid: operation.nodeId, element: element, parent: element.parentElement, before: element.nextSibling, bytes: bytes });
+        return;
+      }
+      projectedNodes += originals.length;
+      if (projectedNodes > MAX_TREE_NODES) throw new Error("The copied document exceeds the node budget.");
+      if (typeof operation.duplicateNodeId !== "string" || !operation.duplicateNodeId.length || operation.duplicateNodeId.length > 256 ||
+          operation.duplicateNodeId.trim() !== operation.duplicateNodeId || /[\u0000-\u001f\u007f]/.test(operation.duplicateNodeId) || used.has(operation.duplicateNodeId)) throw new Error("Invalid duplicate identity.");
+      var clone = element.cloneNode(true);
+      var copies = [clone].concat(Array.from(clone.getElementsByTagName("*")));
+      copies.forEach(function (node, index) {
+        var oldId = node.getAttribute("data-oid");
+        if (!oldId) return;
+        var id = index === 0 ? operation.duplicateNodeId : duplicateStructureIdentity(operation.duplicateNodeId, oldId, index, used);
+        node.setAttribute("data-oid", id);
+        used.add(id);
+        result.elements.set(id, node);
+      });
+      result.inserts.push({ oid: operation.duplicateNodeId, element: clone, parent: element.parentElement, before: element.nextSibling, bytes: bytes });
+    });
+    return result;
+  }
+
+  var structurePreviews = [];
+
+  function paintStructure(plan) {
+    withoutObservedMutations(function () {
+      plan.inserts.forEach(function (insert) { insert.parent.insertBefore(insert.element, insert.before && insert.before.parentNode === insert.parent ? insert.before : null); });
+      plan.deletes.forEach(function (deleted) { deleted.element.remove(); });
+    });
+    refreshElementMap();
+  }
+
+  function rewindStructurePreviews() {
+    var previous = structurePreviews;
+    structurePreviews = [];
+    if (!previous.length) return previous;
+    withoutObservedMutations(function () {
+      previous.slice().reverse().forEach(function (preview) {
+        preview.updates = [];
+        preview.moves = [];
+        preview.plan.elements.forEach(function (element, oid) {
+          var styles = previewStyleOverridesByOid.get(oid);
+          if (styles) preview.updates.push({ nodeId: oid, styles: Object.fromEntries(Array.from(styles, function (entry) { return [entry[0], entry[1].latestValue]; })) });
+          if (previewMovesByOid.has(oid) && element.parentElement) preview.moves.push({ nodeId: oid,
+            parentId: targetOidOf(element.parentElement), beforeId: element.nextElementSibling ? targetOidOf(element.nextElementSibling) : null });
+          previewStyleOverridesByOid.delete(oid);
+          previewMovesByOid.delete(oid);
+        });
+        preview.plan.deletes.slice().reverse().forEach(function (deleted) {
+          deleted.parent.insertBefore(deleted.element, deleted.before && deleted.before.parentNode === deleted.parent ? deleted.before : null);
+        });
+        preview.plan.inserts.slice().reverse().forEach(function (insert) { insert.element.remove(); });
+      });
+    });
+    refreshElementMap();
+    return previous;
+  }
+
+  function repaintStructurePreviews(previous) {
+    previous.forEach(function (preview) {
+      try {
+        // Earlier writes may have changed the copied source. Rebuild from the
+        // confirmed DOM, in input order, rather than promoting an old clone.
+        var plan = prepareStructure(preview.operations);
+        if (plan.bytes + structurePreviews.reduce(function (sum, current) { return sum + current.plan.bytes; }, 0) > 4 * 1024 * 1024) return;
+        paintStructure(plan);
+        structurePreviews.push({ id: preview.id, operations: preview.operations, plan: plan });
+        if (preview.updates && preview.updates.length || preview.moves && preview.moves.length)
+          previewLayout({ updates: preview.updates, moves: preview.moves, nodeIds: [] });
+      } catch (_retiredPreview) {
+        // This projection has lost its source. The checked source operation
+        // owns any conflict; a failed optional repaint cannot fail a save.
+      }
+    });
+  }
+
+  function previewStructure(args) {
+    if (!args || typeof args.previewId !== "string" || args.previewId.length < 1 || args.previewId.length > 128) throw new Error("Invalid structural preview identity.");
+    if (structurePreviews.some(function (preview) { return preview.id === args.previewId; })) throw new Error("Structural preview already exists.");
+    if (structurePreviews.length >= 32) throw new Error("Too many pending structural previews.");
+    var plan = prepareStructure(args.operations);
+    if (plan.bytes + structurePreviews.reduce(function (sum, preview) { return sum + preview.plan.bytes; }, 0) > 4 * 1024 * 1024 ||
+        args.operations.length + structurePreviews.reduce(function (sum, preview) { return sum + preview.operations.length; }, 0) > 256) throw new Error("Pending structural previews exceed their budget.");
+    paintStructure(plan);
+    structurePreviews.push({ id: args.previewId, operations: args.operations, plan: plan });
+    // No snapshot publication or source generation change: these are pixels
+    // awaiting a checked source write, not confirmed document authority.
+    return { sourceVersion: SOURCE_VERSION, details: plan.inserts.map(function (insert) { return detailsOf(insert.element); }) };
+  }
+
+  function clearPreviewStructure(args) {
+    if (args.previewId !== undefined && (typeof args.previewId !== "string" || args.previewId.length > 128)) throw new Error("Invalid structural preview identity.");
+    if (args.previewId !== undefined && !structurePreviews.some(function (preview) { return preview.id === args.previewId; })) return {};
+    var previous = rewindStructurePreviews();
+    if (args.previewId !== undefined) repaintStructurePreviews(previous.filter(function (preview) { return preview.id !== args.previewId; }));
+    return {};
+  }
+
+  function withStructurePresentation(commit, patch) {
+    var id = patch && patch.structurePreviewId;
+    var own = structurePreviews.find(function (preview) { return preview.id === id; });
+    if (own && JSON.stringify(own.operations) !== JSON.stringify(patch.structure)) throw new Error("Structural preview does not match the confirmed edit.");
+    var previous = rewindStructurePreviews();
+    var committed = false;
+    try {
+      var result = commit();
+      committed = true;
+      return result;
+    } finally {
+      repaintStructurePreviews(committed ? previous.filter(function (preview) { return preview.id !== id; }) : previous);
+    }
+  }
+
+  function prepareMoves(moves, inserted) {
     if (moves === undefined) return [];
     if (!Array.isArray(moves) || moves.length > 32) throw new Error("Too many layer moves.");
     var seen = new Set();
     var plans = moves.map(function (move) {
       if (!move || typeof move.nodeId !== "string" || typeof move.parentId !== "string") throw new Error("Invalid layer move.");
-      var element = elementForOid(move.nodeId);
-      var parent = elementForOid(move.parentId);
-      var before = move.beforeId ? elementForOid(move.beforeId) : null;
+      var find = function (oid) { return inserted && inserted.get(oid) || elementForOid(oid); };
+      var element = find(move.nodeId);
+      var parent = find(move.parentId);
+      var before = move.beforeId ? find(move.beforeId) : null;
       if (seen.has(element) || element === document.body || element === parent || element.contains(parent) || (before && (before.parentElement !== parent || before === element))) throw new Error("Invalid layer destination.");
       if (/^(AREA|BASE|BR|COL|EMBED|HR|IMG|INPUT|LINK|META|PARAM|SOURCE|TRACK|WBR|SELECT|OPTION|TABLE|THEAD|TBODY|TFOOT|TR|UL|OL|DL)$/.test(parent.tagName)) throw new Error("This layer cannot contain a frame.");
       seen.add(element);
@@ -3787,6 +3974,7 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
     var from = versions.lastIndexOf(paintedSourceVersion);
     var to = versions.lastIndexOf(target);
     if (from < 0 || to < 0) throw new Error("History generation is no longer retained.");
+    rewindStructurePreviews();
     // A speculative inverse may already be painted. Confirmation must still
     // publish every node (and structural change) between the saved versions.
     var confirmedFrom = versions.lastIndexOf(SOURCE_VERSION);
@@ -3794,7 +3982,7 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
       var entry = generationHistory[index];
       if (!entry) continue;
       entry.nodeIds.forEach(function (oid) { touched.add(oid); });
-      if (entry.moves.length || (entry.inserts && entry.inserts.length) || entry.changes.some(function (change) { return /^(display|visibility|flex-direction|flex-flow|all)$/.test(change.property); })) treeUnchanged = false;
+      if (entry.moves.length || (entry.inserts && entry.inserts.length) || (entry.deletes && entry.deletes.length) || entry.changes.some(function (change) { return /^(display|visibility|flex-direction|flex-flow|all)$/.test(change.property); })) treeUnchanged = false;
     }
     withoutObservedMutations(function () {
       cancelMovePreviews();
@@ -3802,8 +3990,12 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
       Array.from(previewStyleOverridesByOid.keys()).forEach(clearPreviewStyles);
       var apply = function (entry, forward) {
         var inserts = entry.inserts || [];
-        if (entry.moves.length || inserts.length || entry.changes.some(function (change) { return /^(display|visibility|flex-direction|flex-flow|all)$/.test(change.property); })) treeUnchanged = false;
+        var deletes = entry.deletes || [];
+        if (entry.moves.length || inserts.length || deletes.length || entry.changes.some(function (change) { return /^(display|visibility|flex-direction|flex-flow|all)$/.test(change.property); })) treeUnchanged = false;
         entry.nodeIds.forEach(function (oid) { touched.add(oid); });
+        if (!forward) deletes.slice().reverse().forEach(function (deleted) {
+          deleted.parent.insertBefore(deleted.element, deleted.before && deleted.before.parentNode === deleted.parent ? deleted.before : null);
+        });
         if (forward) inserts.forEach(function (insert) {
           insert.parent.insertBefore(insert.element, insert.before && insert.before.parentNode === insert.parent ? insert.before : null);
         });
@@ -3822,6 +4014,7 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
         if (!forward) inserts.slice().reverse().forEach(function (insert) {
           if (insert.element.parentNode) insert.element.parentNode.removeChild(insert.element);
         });
+        if (forward) deletes.forEach(function (deleted) { deleted.element.remove(); });
       };
       while (from > to) { from -= 1; apply(generationHistory[from], false); }
       while (from < to) { apply(generationHistory[from], true); from += 1; }
@@ -3899,13 +4092,25 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
     if (!/^[a-f0-9]{24}$/.test(nextSourceVersion)) {
       throw new Error("nextSourceVersion must be a valid source generation.");
     }
-    var moves = prepareMoves(patch && patch.moves);
     var inserts = prepareInserts(patch ? patch.inserts : undefined);
+    var structure = prepareStructure(patch ? patch.structure : undefined);
+    var moves = prepareMoves(patch && patch.moves, structure.elements);
+    if (patch && patch.structure && (inserts.length || patch.tokens || patch.keyframes ||
+        moves.some(function (move) { return !structure.inserts.some(function (insert) { return insert.element === move.element; }) || structure.elements.has(targetOidOf(move.parent)); }))) throw new Error("Structural commits can only place their copied roots.");
+    // A new copy has no prior authored location. Its final placement belongs
+    // to the insertion history, so Undo removes it and Redo puts it back there.
+    moves = moves.filter(function (move) {
+      var insert = structure.inserts.find(function (candidate) { return candidate.element === move.element; });
+      if (!insert) return true;
+      insert.parent = move.parent;
+      insert.before = move.before;
+      return false;
+    });
     var generationPatch = prepareGenerationPatch(patch && { keyframes: patch.keyframes, tokens: patch.tokens });
     if (
       !Array.isArray(updates) ||
       updates.length > ${DESIGN_LAYOUT_CHILD_LIMIT + 1} ||
-      (updates.length < 1 && !generationPatch.changed && moves.length === 0 && inserts.length === 0)
+      (updates.length < 1 && !generationPatch.changed && moves.length === 0 && inserts.length === 0 && structure.inserts.length === 0 && structure.deletes.length === 0)
     ) {
       throw new Error("A commit must contain styles or a generation patch.");
     }
@@ -3936,7 +4141,8 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
           throw new Error("Invalid committed style: " + property);
         }
       });
-      var element = elementForOid(oid);
+      var element = structure.elements.get(oid) || elementForOid(oid);
+      if (structure.deletes.some(function (deleted) { return deleted.element === element || deleted.element.contains(element); })) throw new Error("Cannot style a deleted subtree.");
       var preview = previewStyleOverridesByOid.get(oid);
       if (preview) {
         var committedProperties = new Set(entries.map(function (entry) { return entry[0]; }));
@@ -3972,7 +4178,7 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
       return { oid: oid, element: element, preview: preview, plans: plans };
     });
     var changes = [];
-    var historyInserts = [];
+    var historyInserts = structure.inserts.slice();
     var historyMoves = moves.map(function (move) {
       var prior = previewMovesByOid.get(move.oid);
       return Object.assign({}, move, { oldParent: prior ? prior.parent : move.element.parentElement, oldBefore: prior ? prior.before : move.element.nextSibling });
@@ -3982,6 +4188,7 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
       return move.oldParent !== move.parent || before !== move.before;
     });
     withoutObservedMutations(function () {
+      structure.inserts.forEach(function (insert) { insert.parent.insertBefore(insert.element, insert.before); });
       prepared.forEach(function (update) {
         update.plans.forEach(function (plan) {
           var target = plan.rule ? plan.rule.style : update.element.style;
@@ -4043,15 +4250,16 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
         }
         historyInserts.push({ oid: plan.oid, element: element, parent: plan.parent, before: plan.before });
       });
+      structure.deletes.forEach(function (deleted) { deleted.element.remove(); });
       if (generationPatch.changed) applyCommittedGenerationPatch(generationPatch);
     });
-    if (historyInserts.length) refreshElementMap();
+    if (historyInserts.length || structure.deletes.length) refreshElementMap();
     if (generationPatch.changed) generationHistory = [];
     else {
       var branch = generationHistory.findIndex(function (entry) { return entry.from === SOURCE_VERSION; });
       if (branch >= 0) generationHistory.splice(branch);
-      generationHistory.push({ from: SOURCE_VERSION, to: nextSourceVersion, changes: changes, moves: historyMoves, inserts: historyInserts, nodeIds: prepared.map(function (update) { return update.oid; }).concat(moves.map(function (move) { return move.oid; })).concat(historyInserts.map(function (insert) { return insert.oid; })) });
-      var bytes = function (entry) { return entry.changes.reduce(function (total, change) { return total + (change.before.length + change.after.length + change.property.length) * 2 + 128; }, 0) + entry.moves.length * 256 + (entry.inserts ? entry.inserts.length : 0) * 256; };
+      generationHistory.push({ from: SOURCE_VERSION, to: nextSourceVersion, changes: changes, moves: historyMoves, inserts: historyInserts, deletes: structure.deletes, nodeIds: prepared.map(function (update) { return update.oid; }).concat(moves.map(function (move) { return move.oid; })).concat(historyInserts.map(function (insert) { return insert.oid; })).concat(structure.deletes.map(function (deleted) { return deleted.oid; })) });
+      var bytes = function (entry) { return entry.changes.reduce(function (total, change) { return total + (change.before.length + change.after.length + change.property.length) * 2 + 128; }, 0) + entry.moves.length * 256 + (entry.inserts || []).concat(entry.deletes || []).reduce(function (total, node) { return total + (node.bytes || 256); }, 0); };
       var historyBytes = generationHistory.reduce(function (total, entry) { return total + bytes(entry); }, 0);
       while (generationHistory.length > 64 || historyBytes > 4 * 1024 * 1024) historyBytes -= bytes(generationHistory.shift());
     }
@@ -4060,7 +4268,7 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
     revision += 1;
     SOURCE_VERSION = nextSourceVersion;
     window.__zerosDesignSourceVersion = SOURCE_VERSION;
-    var treeUnchanged = historyMoves.length === 0 && historyInserts.length === 0 && prepared.every(function (update) {
+    var treeUnchanged = historyMoves.length === 0 && historyInserts.length === 0 && structure.deletes.length === 0 && prepared.every(function (update) {
       return update.plans.every(function (plan) {
         return plan.property !== "display" &&
           plan.property !== "visibility" &&
@@ -4069,7 +4277,7 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
           plan.property !== "all";
       });
     });
-    var nextSnapshot = treeUnchanged ? styleOnlySnapshot() : snapshot();
+    var nextSnapshot = treeUnchanged ? styleOnlySnapshot() : snapshot(true);
     return {
       sourceVersion: SOURCE_VERSION,
       treeUnchanged: treeUnchanged,
@@ -4618,7 +4826,16 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
       case "previewGeometry":
         return previewGeometry(args.nodeId, args.styles, args.children);
       case "commitStyles":
-        return withHistoryPresentation(function () { return commitStyles(args.updates, args.nextSourceVersion, args.patch); });
+        return withHistoryPresentation(function () { return withStructurePresentation(function () { return commitStyles(args.updates, args.nextSourceVersion, args.patch); }, args.patch); });
+      case "commitStructure":
+        if (enabledOptInMethods.indexOf("commitStructure") < 0) throw new Error("Unknown design runtime method: commitStructure");
+        return withHistoryPresentation(function () { return withStructurePresentation(function () { return commitStyles(args.updates, args.nextSourceVersion, args.patch); }, args.patch); });
+      case "previewStructure":
+        if (enabledOptInMethods.indexOf("previewStructure") < 0) throw new Error("Unknown design runtime method: previewStructure");
+        return previewStructure(args);
+      case "clearPreviewStructure":
+        if (enabledOptInMethods.indexOf("clearPreviewStructure") < 0) throw new Error("Unknown design runtime method: clearPreviewStructure");
+        return clearPreviewStructure(args);
       case "previewText":
         return previewText(args.nodeId, args.text);
       case "clearPreviewText":
@@ -4655,6 +4872,7 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
   }
 
   function teardown() {
+    rewindStructurePreviews();
     if (disposed) return;
     stopPlayback();
     disposed = true;

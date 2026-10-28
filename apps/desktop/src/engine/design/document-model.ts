@@ -195,6 +195,7 @@ export interface DesignMutationResult {
 }
 
 export interface DesignWorkspaceSnapshot {
+  mutationCatalog?: import("@zeros/protocol/design-catalog").DesignMutationCatalog;
   pages: DesignPageSummary[];
   /** Lightweight frames in canvas z-order. The custom protocol hydrates only
    * the bounded live-frame set, avoiding an all-frame HTML/srcDoc IPC payload. */

@@ -2,6 +2,7 @@ import { expect } from "@playwright/test";
 import { designFrameElementBox } from "./ui-smoke-design-helpers.mjs";
 import { runDesignSavedEditingSmoke } from "./ui-smoke-design-saved-editing.mjs";
 import { runDesignNestingSmoke } from "./ui-smoke-design-nesting.mjs";
+import { runDesignCopySmoke } from "./ui-smoke-design-copy.mjs";
 import { runDesignPicturesSmoke } from "./ui-smoke-design-pictures.mjs";
 import { runDesignResidencySmoke } from "./ui-smoke-design-residency.mjs";
 
@@ -895,6 +896,7 @@ export async function runDesignCanvasRefinementsSmoke(options) {
   await runDesignFrameDirectoryReplacementSmoke(options);
   await runDesignPanDirectoryReplacementSmoke(options);
   await runDesignNestingSmoke(options);
+  await runDesignCopySmoke(options);
   await runDesignPicturesSmoke(options);
   await runDesignResidencySmoke(options);
 }

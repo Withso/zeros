@@ -104,7 +104,7 @@ beforeEach(() => {
   mocks.directoryId = "directory-one";
   mocks.listeners.clear();
   mocks.runtimeFor.mockImplementation(() => mocks.runtime);
-  mocks.waitForRuntime.mockResolvedValue(null);
+  mocks.waitForRuntime.mockReset().mockResolvedValue(null);
   resetDesignWorkspaceUiForTests();
   useDesignWorkspaceUiStore
     .getState()
@@ -327,6 +327,19 @@ describe("design-tool nesting", () => {
     expect(mocks.transfer).not.toHaveBeenCalled();
   });
 
+  it("waits for the exact replacement while the outgoing destination still paints", async () => {
+    mocks.confirmedFrames = [source, confirmed];
+    const replacement = { ...(mocks.runtime as object), sourceVersion: confirmed.sourceVersion };
+    mocks.waitForRuntime.mockImplementationOnce(async () => {
+      mocks.runtimeFor.mockImplementation((file: string) => file === destination.file ? replacement : mocks.runtime);
+      return replacement;
+    });
+    await expect(transferDesignLayerAtRelease({ ...input, pointer: { x: 1100, y: 100 } })).resolves.toBe(true);
+    expect(mocks.waitForRuntime).toHaveBeenCalledWith(input.workspaceId, destination.file, expect.any(Number),
+      expect.objectContaining({ sourceVersion: confirmed.sourceVersion }));
+    expect(mocks.transfer.mock.calls[0]?.[1]).toMatchObject({ destinationSourceVersion: confirmed.sourceVersion });
+  });
+
   it("discovers destinations only on the source frame's page", () => {
     const frames = [
       { ...source, pageId: "current" },
@@ -483,7 +496,7 @@ describe("design-tool nesting", () => {
       return mocks.runtime;
     });
     await expect(transferDesignLayerOnCanvas({ ...input })).resolves.toBe(true);
-    expect(mocks.waitForRuntime).toHaveBeenCalledWith(input.workspaceId, destination.file, expect.any(Number));
+    expect(mocks.waitForRuntime).toHaveBeenCalledWith(input.workspaceId, destination.file, expect.any(Number), { sourceVersion: destination.sourceVersion });
     expect(mocks.transfer).toHaveBeenCalledOnce();
     mocks.runtimeFor.mockImplementation((file: string) => (file === destination.file ? null : mocks.runtime));
     mocks.waitForRuntime.mockResolvedValueOnce(null);

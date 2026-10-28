@@ -283,6 +283,7 @@ import {
   DESIGN_CANVAS_FILE,
   readDesignWorkspaceSnapshot,
   readDesignNavigationSnapshot,
+  readDesignMutationSnapshot,
   type DesignWorkspaceSnapshot,
 } from "../design/document";
 import {
@@ -2228,6 +2229,7 @@ export class WorkspaceService {
       hostLocalResources?: boolean;
       /** Mutation replies must not share a read admitted before their write. */
       fresh?: boolean;
+      affectedFrames?: string[];
     } = {},
   ) {
     const root = options.root ?? workspace.path;
@@ -2241,15 +2243,15 @@ export class WorkspaceService {
     // The resolved directory is equally load-bearing: two concurrent leases
     // can point synchronous document readers at different Design documents
     // under the same workspace root.
-    const key = `${workspace.id}\u0000${nodePath.resolve(root)}\u0000${writeBack ? "write" : "read"}\u0000${designDirectory}\u0000${hostLocalResources ? "host-resources" : "bridge-resources"}`;
+    const key = `${workspace.id}\u0000${nodePath.resolve(root)}\u0000${writeBack ? "write" : "read"}\u0000${designDirectory}\u0000${hostLocalResources ? "host-resources" : "bridge-resources"}${options.affectedFrames ? `\u0000${JSON.stringify(options.affectedFrames)}` : ""}`;
     const epoch = designSnapshotReadEpoch(root);
     const current = this.designSnapshotFlights.get(key);
     if (current && !options.fresh && this.joinsDesignSnapshotFlight(current, epoch))
       return current;
     const request = (async () => {
-      const snapshot = await readDesignWorkspaceSnapshot(root, {
-        writeBack,
-      });
+      const snapshot = options.affectedFrames && hostLocalResources && !remote
+        ? await readDesignMutationSnapshot(root, options.affectedFrames)
+        : await readDesignWorkspaceSnapshot(root, { writeBack });
       // The directory this desktop's canvas shows, for prompt change polling.
       if (!remote) noteDesignSnapshotDirectory(root, designDirectory);
       return {

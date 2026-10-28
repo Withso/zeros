@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import * as safeFiles from "../safe-files";
 import { primeDesignDirectoryName, forgetDesignDirectoryName } from "../directory-registry";
-import { readDesignNavigationSnapshot, prepareDesignNavigationFrames, readDesignFrame } from "../document";
+import { readDesignNavigationSnapshot, readDesignMutationSnapshot, prepareDesignNavigationFrames, readDesignFrame } from "../document";
 
 let root: string;
 const directory = "Product - Design";
@@ -35,6 +35,17 @@ it("opens 256 descriptors without reading frame HTML, then prepares only the req
   expect(result.frames.map((frame) => frame.file)).toEqual(["page-1/f0.html", "page-1/f1.html"]);
   expect(new Set(reads.mock.calls.filter(([, file]) => file.endsWith(".html")).map(([, file]) => path.basename(file))))
     .toEqual(new Set(["f0.html", "f1.html"]));
+});
+
+it("acknowledges an edit among 256 frames by preparing only affected source, with complete metadata", async () => {
+  const reads = vi.spyOn(safeFiles, "readSafeRegularFile");
+  const snapshot = await readDesignMutationSnapshot(root, ["page-1/f0.html", "removed.html"]);
+  expect(snapshot.frames.map(frame => frame.file)).toEqual(["page-1/f0.html"]);
+  expect(snapshot.mutationCatalog?.frames).toHaveLength(256);
+  expect(snapshot.pages[0]!.frameFiles).toHaveLength(256);
+  expect(new Set(reads.mock.calls.filter(([, file]) => file.endsWith(".html")).map(([, file]) => path.basename(file))))
+    .toEqual(new Set(["f0.html"]));
+  expect(snapshot.frames[0]!.sourceVersion).toBe((await readDesignFrame(root, "page-1/f0.html")).sourceVersion);
 });
 
 it("revalidates source and shared dependencies independently of the metadata revision", async () => {

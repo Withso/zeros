@@ -42,6 +42,7 @@ import {
   createDesignWebDocumentState,
   mutateDesignNodeAttributeSource,
   mutateDesignNodeDeleteSource,
+  mutateDesignNodeDuplicateSource,
   mutateDesignNodeHtmlSource,
   mutateDesignNodeMoveSource,
   mutateDesignNodeStyles,
@@ -49,6 +50,7 @@ import {
   rebaseDesignHtmlReferences,
 } from "@zeros/design-web";
 import { parse, type DefaultTreeAdapterTypes } from "parse5";
+import { designNodeIdSchema } from "@zeros/design-core";
 import { withDesignDocumentWrite as withDocumentWrite } from "./document-write-lock";
 
 import { designDirectoryNameFor } from "./directory-registry";
@@ -437,17 +439,20 @@ function reseedFrameOids(source: string, salt: string): string {
       text: `data-oid="${next}"`,
     });
   }
-  let updated = source;
-  for (const edit of edits.sort((left, right) => right.start - left.start)) {
-    updated = `${updated.slice(0, edit.start)}${edit.text}${updated.slice(edit.end)}`;
+  const parts: string[] = [];
+  let offset = 0;
+  for (const edit of edits.sort((left, right) => left.start - right.start)) {
+    parts.push(source.slice(offset, edit.start), edit.text);
+    offset = edit.end;
   }
-  return updated;
+  parts.push(source.slice(offset));
+  return parts.join("");
 }
 
 export async function duplicateDesignFrame(
   workspacePath: string,
   frame: string,
-  input: { pageId?: string } = {},
+  input: { pageId?: string; geometry?: DesignFrameGeometry; sourceVersion?: string } = {},
 ): Promise<DesignFrameSummary> {
   const originalFile = assertFrameFile(frame);
   return withDocumentWrite(workspacePath, async () => {
@@ -460,6 +465,10 @@ export async function duplicateDesignFrame(
       workspacePath,
       originalFile,
     );
+    if (input.geometry) {
+      if (!input.sourceVersion || (await readDesignFrameRenderIdentityFromSource(workspacePath, originalFile, original)).sourceVersion !== input.sourceVersion)
+        throw new Error("The source frame changed before the copy.");
+    }
     const originalMeta = readFrameMeta(
       parse(original, { sourceCodeLocationInfo: true }),
       originalFile,
@@ -477,10 +486,11 @@ export async function duplicateDesignFrame(
       rewriteFrameTitleSource(original, title),
       `${file}:${randomUUID()}`,
     ), originalFile, file, { strict: true });
-    const geometry = nextFrameGeometry(
+    const automatic = nextFrameGeometry(
       designPageFrameFiles(canvas, page).map(file => canvas.frames[file]!),
       originalMeta,
     );
+    const geometry = input.geometry ? normalizeGeometry(input.geometry, automatic) : automatic;
     canvas.frames[file] = geometry;
     canvas.frame_info[file] = { id: `frame_${randomUUID().replace(/-/g, "")}`, title, kind: originalMeta.kind };
     await writeCanvas(workspacePath, canvas, [
@@ -802,6 +812,8 @@ export async function moveDesignFrameGeometries(
 export async function transferDesignNode(
   workspacePath: string,
   input: DesignFrameMutationInput & {
+    /** Copy into the destination; preserve the exact original source bytes. */
+    duplicateNodeId?: string;
     pageId?: string;
     destinationFrame?: string;
     destinationSourceVersion?: string;
@@ -820,6 +832,10 @@ export async function transferDesignNode(
     geometry: DesignFrameGeometry;
   },
 ): Promise<{ frame: string; nodeId: string; changes: DesignFrameChange[] }> {
+  if (input.duplicateNodeId !== undefined) {
+    input = { ...input, duplicateNodeId: designNodeIdSchema.parse(input.duplicateNodeId) };
+    if (input.duplicateNodeId === input.nodeId) throw new Error("A copy needs a fresh identity.");
+  }
   return withDocumentWrite(workspacePath, async () => {
     await initializeDesignDocumentUnlocked(workspacePath);
     const { restorePoint: from } = await designFrameRestorePointUnlocked(
@@ -889,9 +905,10 @@ export async function transferDesignNode(
     if (input.destinationFrame === from.file && relocationStyles) {
       if (input.destinationSourceVersion !== input.sourceVersion)
         throw new Error("The destination frame changed before the layer move.");
+      const nodeId = input.duplicateNodeId ?? input.nodeId;
       const moved = mutateDesignNodeMoveSource(
-        fromSource,
-        input.nodeId,
+        input.duplicateNodeId ? mutateDesignNodeDuplicateSource(fromSource, input.nodeId, input.duplicateNodeId) : fromSource,
+        nodeId,
         input.parentId ?? "::zeros-document-body",
         input.beforeId ?? null,
       );
@@ -901,7 +918,7 @@ export async function transferDesignNode(
         files: { [from.file]: moved },
       });
       let source = mutateDesignNodeStyles(state, {
-        nodeId: input.nodeId,
+        nodeId,
         styles: relocationStyles,
         scope: "inline",
         appendInlineOverrides: true,
@@ -913,7 +930,7 @@ export async function transferDesignNode(
         changes,
         new Map([[from.file, input.sourceVersion]]),
       );
-      return { frame: from.file, nodeId: input.nodeId, changes };
+      return { frame: from.file, nodeId, changes };
     }
     const body = bodyElement;
     const bodySpan = bodyLocation;
@@ -934,6 +951,10 @@ export async function transferDesignNode(
         .map(([name, value]) => ` ${name}="${escapeAttribute(value!)}"`)
         .join("");
       fragment = `<div data-oid="${nodeId}"${carried}>${fragment}</div>`;
+    }
+    if (input.duplicateNodeId) {
+      fragment = mutateDesignNodeDeleteSource(mutateDesignNodeDuplicateSource(fragment, nodeId, input.duplicateNodeId), nodeId);
+      nodeId = input.duplicateNodeId;
     }
     const root =
       wholeFrame ||
@@ -1079,7 +1100,7 @@ export async function transferDesignNode(
         file = `${prefix}${base}-${suffix}.html`;
       fragment = mutateDesignNodeAttributeSource(
         fragment,
-        input.nodeId,
+        nodeId,
         "data-zeros-frame-root",
         "",
         from.file,
@@ -1148,7 +1169,7 @@ export async function transferDesignNode(
       }).files[after.file]!;
     }
     const changes = [
-      { before: from, after: remaining },
+      ...(input.duplicateNodeId ? [] : [{ before: from, after: remaining }]),
       { before: destination, after },
     ];
     await applyDesignFrameChangesUnlocked(

@@ -1033,7 +1033,7 @@ async function mapDesignFramesBounded<T>(
 
 /** Metadata/controls for opening a registered Local canvas. Recovery keeps
  * the same transaction boundary as aggregate reads; no HTML is scanned. */
-export async function readDesignNavigationSnapshot(workspacePath: string): Promise<{
+export async function readDesignNavigationSnapshot(workspacePath: string, affectedFiles?: readonly string[]): Promise<{
   snapshot: DesignWorkspaceSnapshot; catalogRevision: string; directoryId: string;
 }> {
   return withDocumentWrite(workspacePath, async () => {
@@ -1041,23 +1041,38 @@ export async function readDesignNavigationSnapshot(workspacePath: string): Promi
     const directory = designDirectoryNameFor(workspacePath);
     const metadata = await readDesignCatalogMetadata(workspacePath, directory);
     const context = await readCanvasContext(workspacePath);
-    const [tokens, assets, styles] = await Promise.all([
+    const [tokens, assets, styles, frames] = await Promise.all([
       readDesignTokensDocument(workspacePath, context, { includeUsage: false }),
       listDesignAssets(workspacePath),
       readDesignStyleSources(workspacePath, context.canvas),
+      Promise.all(metadata.frames.filter(frame => affectedFiles?.includes(frame.source)).map(frame =>
+        prepareRegisteredDesignFrame(workspacePath, frame.source, context.canvas))),
     ]);
     if (inspectDesignCatalog(workspacePath, directory).revision !== metadata.revision) throw new DesignCatalogError("stale");
     return { catalogRevision: metadata.revision, directoryId: metadata.directoryId, snapshot: {
       pages: metadata.pages.map((page) => ({ id: page.id, title: page.title, folder: page.folder,
         frameFiles: metadata.frames.filter((frame) => frame.pageId === page.id).map((frame) => frame.source),
         frameIds: metadata.frames.filter((frame) => frame.pageId === page.id).map((frame) => frame.id) })),
-      frames: [], tokens: tokens.tokens, tokenSourceVersion: tokens.sourceVersion, assets,
+      frames, tokens: tokens.tokens, tokenSourceVersion: tokens.sourceVersion, assets,
+      ...(affectedFiles ? { mutationCatalog: { revision: metadata.revision, frames: metadata.frames } } : {}),
       styleSources: styles.sources.map(({ css: _css, fontImports: _fonts, ...status }) => status),
       styleSourceErrors: styles.errors,
       themes: mergeDesignThemes(readDesignThemeCatalog(context.canvas), [...tokens.themes, ...styles.sources.flatMap((source) => source.themes)]),
       lint: { workspacePath, checkedFiles: [], violations: [], healedOids: 0 },
     } };
   });
+}
+
+/** A write acknowledgement never scans unrelated HTML on registered layouts.
+ * Legacy documents retain the aggregate contract; metadata races re-read
+ * authoritatively instead of turning an applied write into an apparent failure. */
+export async function readDesignMutationSnapshot(workspacePath: string, files: readonly string[]): Promise<DesignWorkspaceSnapshot> {
+  if (files.length > 16) return readDesignWorkspaceSnapshot(workspacePath);
+  try { return (await readDesignNavigationSnapshot(workspacePath, files)).snapshot; }
+  catch (error) {
+    if (!(error instanceof DesignCatalogError)) throw error;
+    return readDesignWorkspaceSnapshot(workspacePath);
+  }
 }
 
 async function prepareRegisteredDesignFrame(workspacePath: string, file: string, canvas: CanvasDocument): Promise<DesignCanvasFrame> {

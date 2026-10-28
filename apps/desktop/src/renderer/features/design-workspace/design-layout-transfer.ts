@@ -140,6 +140,7 @@ export async function transferDesignLayerOnCanvas(input: {
   frame: DesignCanvasFrameWire;
   frames: readonly DesignFrameView[];
   details: DesignRuntimeNodeDetails;
+  duplicateNodeId?: string;
   origin: { x: number; y: number };
   detach: boolean;
   isCurrent?: () => boolean;
@@ -185,10 +186,13 @@ export async function transferDesignLayerOnCanvas(input: {
   const destinationDirectoryId = destinationScope?.directoryId;
   // A small frame paints a picture until the gesture asks for it; give its
   // document a moment to become ready before resolving the drop inside it.
+  const outgoingRuntime = destination ? designFrameRuntime(workspaceId, destination.file) : null;
   const targetRuntime = destination
-    ? (designFrameRuntime(workspaceId, destination.file) ??
-      (await waitForDesignFrameRuntime(workspaceId, destination.file, DESTINATION_READY_MS)))
+    ? outgoingRuntime?.sourceVersion === destination.sourceVersion
+      ? outgoingRuntime
+      : await waitForDesignFrameRuntime(workspaceId, destination.file, DESTINATION_READY_MS, { sourceVersion: destination.sourceVersion })
     : null;
+  if (!hasIntent() || input.canWrite?.() === false) return false;
   if (destination && (!targetRuntime || targetRuntime.sourceVersion !== destination.sourceVersion))
     throw stillLoading();
   const destinationIsCurrent = () => {
@@ -302,6 +306,7 @@ export async function transferDesignLayerOnCanvas(input: {
         }
       : {}),
     nodeId: details.oid,
+    ...(input.duplicateNodeId ? { duplicateNodeId: input.duplicateNodeId } : {}),
     ...(destination && drop
       ? {
           destinationFrame: destination.file,

@@ -138,6 +138,13 @@ Escape cancels a text draft before saving starts. Once its transaction starts,
 retain the painted text through the displayed-buffer handoff, including Escape
 before React has published the committing state and during settling.
 
+Hold source writes while exercising repeated duplicate, duplicate → Delete →
+Delete, and immediate transfer → edit. Resolve semantic input order, not the
+last React render or an outgoing runtime. For scoped acknowledgements, verify
+through the real producer and consumer that unrelated HTML is not prepared,
+retained covers do not authorize edits, and late preparation cannot overwrite
+a newer mutation epoch.
+
 Charge displayed and inactive loaded images to one retention pool. Counting
 only inactive images lets a destination add a full working set on top of a full
 warm cache. Reclaim older unleased images when a new display is confirmed,

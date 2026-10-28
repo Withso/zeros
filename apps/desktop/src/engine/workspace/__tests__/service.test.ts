@@ -21,6 +21,7 @@ import * as mcpRegistry from "../../agents/mcp-registry";
 import * as git from "../../git";
 import * as gitCommands from "../../git/git-exec";
 import * as designDirectories from "../../design/directory";
+import * as designSafeFiles from "../../design/safe-files";
 import {
   setStateRootForTesting,
   closeState,
@@ -2851,6 +2852,61 @@ describe("WorkspaceService", () => {
         includeBranch: true,
       });
     }
+  });
+
+  it.each([null, "11111111-1111-4111-8111-111111111111"])("returns scoped edit, copy, transfer and canvas acknowledgements for Local owner %s", async organizationId => {
+    execFileSync("git", ["-c", "user.email=t@t", "-c", "user.name=t", "commit", "--allow-empty", "-qm", "init"], { cwd: dir });
+    await initializeDesignDocument(dir);
+    const { workspaces } = await svc.handle("workspace.list") as { workspaces: Workspace[] };
+    insertWorkspace({ ...workspaces.find(row => row.id === LOCAL_MAIN_WORKSPACE_ID)!, organizationId, kind: "design", viewMode: "design" });
+    const target = { workspaceId: LOCAL_MAIN_WORKSPACE_ID, snapshotMode: "scoped" };
+    const source = await createDesignFrame(dir, { title: "Source" });
+    const destination = await createDesignFrame(dir, { title: "Destination" });
+    const unused = await createDesignFrame(dir, { title: "Unrelated" });
+    const sourceDocument = await readDesignFrame(dir, source.file);
+    const destinationDocument = await readDesignFrame(dir, destination.file);
+    const foundation = await svc.handle("design.foundation.open", { ...target, frame: source.file }) as {
+      summary: { documentId: string; revision: string };
+    };
+    type SnapshotReply = { snapshot: Awaited<ReturnType<typeof readDesignWorkspaceSnapshot>> };
+    const reads = vi.spyOn(designSafeFiles, "readSafeRegularFile");
+    try {
+      const edited = await svc.handle("design.transaction.apply", { ...target, frame: source.file, transaction: {
+        schemaVersion: 1, transactionId: "scoped-edit", documentId: foundation.summary.documentId, baseRevision: foundation.summary.revision,
+        actor: { kind: "human", id: "desktop" }, intent: "Edit source", createdAt: 1,
+        operations: [{ operationId: "style", type: "node.set-styles", nodeId: sourceDocument.tree[0]!.oid!, styles: { padding: "12px" } }],
+      } }) as SnapshotReply;
+      expect(edited.snapshot.mutationCatalog?.frames).toHaveLength(3);
+      expect(edited.snapshot.frames.map(frame => frame.file)).toEqual([source.file]);
+      const copied = await svc.handle("design.frame.duplicate", { ...target, frame: source.file }) as SnapshotReply & { frame: { file: string } };
+      expect(copied.snapshot.mutationCatalog?.frames).toHaveLength(4);
+      expect(new Set(copied.snapshot.frames.map(frame => frame.file))).toEqual(new Set([source.file, copied.frame.file]));
+      const transferred = await svc.handle("design.node.transfer", { ...target, frame: source.file,
+        sourceVersion: edited.snapshot.frames[0]!.sourceVersion, nodeId: sourceDocument.tree[0]!.oid!, duplicateNodeId: "nested-copy",
+        destinationFrame: destination.file, destinationSourceVersion: destinationDocument.sourceVersion,
+        parentId: destinationDocument.tree[0]!.oid!, x: 10, y: 20, w: 100, h: 100, z: 1,
+      }) as SnapshotReply;
+      expect(transferred.snapshot.mutationCatalog?.frames).toHaveLength(4);
+      expect(new Set(transferred.snapshot.frames.map(frame => frame.file))).toEqual(new Set([source.file, destination.file]));
+      const created = await svc.handle("design.frame.create", { ...target, title: "New" }) as SnapshotReply & { frame: { file: string } };
+      expect(created.snapshot.mutationCatalog?.frames).toHaveLength(5);
+      expect(created.snapshot.frames.map(frame => frame.file)).toEqual([created.frame.file]);
+      const geometry = { x: 20, y: 30, w: 200, h: 300, z: 2 };
+      const positioned = await svc.handle("design.canvas.update", { ...target, frame: created.frame.file, ...geometry }) as SnapshotReply;
+      expect(positioned.snapshot.frames).toMatchObject([{ file: created.frame.file, x: 20, y: 30, width: 200, height: 300 }]);
+      expect(positioned.snapshot.frames).toHaveLength(1);
+      const moved = await svc.handle("design.frames.move", { ...target, moves: [
+        { frame: created.frame.file, from: geometry, to: { ...geometry, x: 100, y: 120 } },
+      ] }) as SnapshotReply;
+      expect(moved.snapshot.frames).toMatchObject([{ file: created.frame.file, x: 100, y: 120 }]);
+      expect(moved.snapshot.frames).toHaveLength(1);
+      const deleted = await svc.handle("design.frame.delete", { ...target, frame: created.frame.file }) as SnapshotReply;
+      expect(deleted.snapshot.frames).toEqual([]);
+      expect(deleted.snapshot.mutationCatalog?.frames).toHaveLength(4);
+      expect(deleted.snapshot.mutationCatalog?.frames.some(frame => frame.source === created.frame.file)).toBe(false);
+      expect(reads.mock.calls.some(([, file]) => file.endsWith(unused.file))).toBe(false);
+      expect(fs.readFileSync(path.join(dir, designDirectoryNameFor(dir), source.file), "utf8")).not.toContain("nested-copy");
+    } finally { reads.mockRestore(); }
   });
 
   it("serializes Design transactions, deduplicates retries, and rejects stale revisions", async () => {

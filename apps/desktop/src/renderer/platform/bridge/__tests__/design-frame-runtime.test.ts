@@ -9,11 +9,47 @@ import {
 import {
   connectDesignFrameRuntime,
   designFrameRuntime,
+  waitForDesignFrameRuntime,
   DesignFrameRuntimeError,
 } from "../design-frame-runtime";
 
 const SOURCE_VERSION = "111111111111111111111111";
 const NEXT_SOURCE_VERSION = "222222222222222222222222";
+
+it("waits for the requested generation across an outgoing and incoming document", async () => {
+  const workspace = "replacement-wait";
+  const host = { setTimeout: (work: () => void, ms: number) => setTimeout(work, ms) as unknown as number,
+    clearTimeout: (id: number) => clearTimeout(id) };
+  const connect = (version: string) => {
+    const source = { postMessage: vi.fn() };
+    const connection = connectDesignFrameRuntime(workspace, "home.html", version,
+      { contentWindow: source } as unknown as HTMLIFrameElement, {}, host);
+    const port = source.postMessage.mock.calls[0]![1].transfer[0] as MessagePort;
+    const ready = () => port.postMessage({ protocol: DESIGN_RUNTIME_PROTOCOL, version: DESIGN_RUNTIME_VERSION,
+      type: "event", event: "ready", payload: { sourceVersion: version, capabilities,
+        snapshot: { ...snapshot(1), sourceVersion: version, frame: { ...snapshot(1).frame, sourceVersion: version } } } });
+    return { connection, port, ready };
+  };
+  const outgoing = connect(SOURCE_VERSION);
+  let incoming: ReturnType<typeof connect> | undefined;
+  try {
+    outgoing.ready();
+    await vi.waitFor(() => expect(designFrameRuntime(workspace, "home.html")).toBe(outgoing.connection));
+    const observed = vi.fn();
+    const pending = waitForDesignFrameRuntime(workspace, "home.html", 1000, { sourceVersion: NEXT_SOURCE_VERSION }).then(observed);
+    await Promise.resolve();
+    expect(observed).not.toHaveBeenCalled();
+    incoming = connect(NEXT_SOURCE_VERSION);
+    incoming.ready();
+    await pending;
+    expect(observed).toHaveBeenCalledExactlyOnceWith(incoming.connection);
+  } finally {
+    outgoing.connection.destroy(true);
+    outgoing.port.close();
+    incoming?.connection.destroy(true);
+    incoming?.port.close();
+  }
+});
 
 it("shares capture admission across frame ports and retains it through cancellation cleanup", async () => {
   const peers = ["one", "two"].map((name) => {
@@ -255,7 +291,7 @@ describe("design frame runtime client", () => {
       sourceVersion: SOURCE_VERSION,
       // Opt-in methods: a runtime advertises them only when asked, so a host
       // that predates one still accepts the runtime's capabilities.
-      features: ["previewStylesheet", "setPlayback", "previewInsert", "clearPreviewInserts", "previewHistory"],
+      features: ["previewStylesheet", "setPlayback", "previewInsert", "clearPreviewInserts", "previewHistory", "commitStructure", "previewStructure", "clearPreviewStructure"],
     });
     expect(handshake?.[1]).toMatchObject({ targetOrigin: "*" });
     const framePort = handshake?.[1]?.transfer?.[0] as MessagePort;

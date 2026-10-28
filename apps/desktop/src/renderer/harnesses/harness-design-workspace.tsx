@@ -16,6 +16,7 @@ import {
   DESIGN_RUNTIME_DOCUMENT_BODY_ID,
 } from "@zeros/protocol/design-runtime";
 import { designFrameGeometryError } from "@zeros/design-core";
+import { mutateDesignNodeDuplicateSource, mutateDesignNodeDeleteSource } from "@zeros/design-web/html";
 import {
   mutateDesignKeyframes,
   readDesignKeyframes,
@@ -42,11 +43,12 @@ const engineDelayMs = measureContinuityHarness
   ? Math.max(0, Math.min(500, Number.isFinite(requestedEngineDelay) ? requestedEngineDelay : 400)) : 0;
 const delayedOperations = new Set(["design.frames.prepare", "design.navigation.read", "design.frame.create", "design.transaction.apply", "design.node.styles"]);
 if (measureManipulationHarness)
-  for (const operation of ["design.canvas.update", "design.frames.move", "design.node.transfer", "design.history.undo", "design.history.redo"])
+  for (const operation of ["design.canvas.update", "design.frames.move", "design.frame.duplicate", "design.node.transfer", "design.history.undo", "design.history.redo"])
     delayedOperations.add(operation);
 const delayedRequests: Array<{ op: string; workspaceId: string; started: number; released: number | null }> = [];
 const measurementHolds = new Map<string, { promise: Promise<void>; release(): void }>();
-const lazyPreparationHarness = measureContinuityHarness || new URLSearchParams(window.location.search).has("lazyPreparation");
+const scopedMutationsHarness = new URLSearchParams(window.location.search).has("scopedMutations");
+const lazyPreparationHarness = scopedMutationsHarness || measureContinuityHarness || new URLSearchParams(window.location.search).has("lazyPreparation");
 const HOME_SOURCE_VERSION = "aaaaaaaaaaaaaaaaaaaaaaaa";
 const PRICING_SOURCE_VERSION = "bbbbbbbbbbbbbbbbbbbbbbbb";
 const HARNESS_LAYER_COUNT = new URLSearchParams(window.location.search).has(
@@ -707,7 +709,7 @@ async function main() {
   const performanceSources = new Map<string, string>();
   let currentWorkspaceSnapshot =
     designWorkspaceSnapshotCache.getSnapshot(workspaceId).data!;
-  const lazyRevision = "a".repeat(64);
+  let lazyRevision = "a".repeat(64);
   let releasePreparation: (() => void) | null = null;
   let preparationBarrier: Promise<void> | null = null;
   const preparationCalls: Array<{ workspaceId: string; files: string[] }> = [];
@@ -857,12 +859,46 @@ async function main() {
     frame?: string;
   }> = [];
   const layoutRedo: typeof layoutUndo = [];
+  type FixtureRequest = { type?: string; op?: string; params?: Record<string, unknown> };
+  let mutationCatalogGeneration = 0;
+  const withScopedMutationSnapshots = (request: (message: FixtureRequest) => Promise<unknown>) => async (message: FixtureRequest) => {
+    const reply = await request(message) as { result?: { snapshot?: DesignWorkspaceSnapshotWire; frame?: string | { file: string } } };
+    if (!scopedMutationsHarness || !reply.result?.snapshot || message.op === "design.navigation.read") return reply;
+    const original = reply.result.snapshot;
+    const frames = original.frames.map(frame => ({ ...frame, pageId: "main",
+      frameId: frame.frameId ?? `fixture_${frame.file.replace(/[^a-zA-Z0-9_-]/g, "_")}` }));
+    const snapshot = { ...original, frames, pages: [{ id: "main", title: "Design", folder: "",
+      frameFiles: frames.map(frame => frame.file), frameIds: frames.map(frame => frame.frameId) }] };
+    if (original === currentWorkspaceSnapshot) currentWorkspaceSnapshot = snapshot;
+    if (message.params?.snapshotMode !== "scoped") return { ...reply, result: { ...reply.result, snapshot } };
+    lazyRevision = (++mutationCatalogGeneration).toString(16).padStart(64, "0");
+    const resultFrame = reply.result.frame;
+    const affected = new Set([
+      ...(typeof message.params.frame === "string" ? [message.params.frame] : []),
+      ...(typeof resultFrame === "string" ? [resultFrame] : resultFrame ? [resultFrame.file] : []),
+      ...((message.params.moves ?? []) as Array<{ frame: string }>).map(move => move.frame),
+      ...((message.params.transaction as { operations?: Array<{ type: string; frame?: string }> } | undefined)?.operations ?? [])
+        .flatMap(operation => operation.type === "frame.set-geometry" && operation.frame ? [operation.frame] : []),
+    ]);
+    return { ...reply, result: { ...reply.result, snapshot: { ...snapshot,
+      mutationCatalog: { revision: lazyRevision, frames: frames.map((frame, order) => ({
+        id: frame.frameId, pageId: frame.pageId, source: frame.file, title: frame.title,
+        kind: frame.kind === "text" ? "text" : "html", x: frame.x, y: frame.y, width: frame.width, height: frame.height,
+        z: frame.z, order, preparation: "unprepared",
+      })) },
+      frames: frames.filter(frame => affected.has(frame.file)),
+      lint: { ...snapshot.lint, checkedFiles: snapshot.lint.checkedFiles.filter(file => affected.has(file)),
+        violations: snapshot.lint.violations.filter(violation => affected.has(violation.file)) },
+    } } };
+  };
   setActiveBridge({
     executionIdentity: { kind: "local", sidecar: "active" },
     status: "connected",
     on: () => () => {},
     onStatusChange: () => () => {},
-    supportsEngineCapability: (capability: string) => lazyPreparationHarness && ["design.preparation.v1", "design.catalog.read.v1"].includes(capability),
+    supportsEngineCapability: (capability: string) => capability === "design.copy-placement.v1" ||
+      scopedMutationsHarness && capability === "design.mutation-snapshots.v1" ||
+      lazyPreparationHarness && ["design.preparation.v1", "design.catalog.read.v1"].includes(capability),
     requestConnected: async (message: { op: string; params: { workspaceId: string; intent: number } }) => {
       if (!lazyPreparationHarness || message.op !== "design.catalog.read") throw new Error("Unexpected connected fixture request.");
       const frames = currentWorkspaceSnapshot.frames.map((frame, order) => ({ id: frame.frameId!, pageId: frame.pageId!, source: frame.file,
@@ -872,7 +908,7 @@ async function main() {
         intent: message.params.intent, binding: "b".repeat(64), revision: lazyRevision, pages: [{ id: "main", title: "Design", folder: "", count: frames.length }],
         total: frames.length, offset: 0, frames, coverage: "complete", nextCursor: null } };
     },
-    request: async (message: {
+    request: withScopedMutationSnapshots(async (message: {
       type?: string;
       op?: string;
       params?: Record<string, unknown>;
@@ -1028,6 +1064,28 @@ async function main() {
           result: { geometry, snapshot: currentWorkspaceSnapshot },
         };
       }
+      if (layoutGestureHarness && message.op === "design.frame.duplicate") {
+        const params = message.params!;
+        const original = currentWorkspaceSnapshot.frames.find(frame => frame.file === params.frame)!;
+        if (params.sourceVersion && params.sourceVersion !== original.sourceVersion) throw new Error("The copied source changed.");
+        layoutUndo.push({ source: currentHomeSource, snapshot: currentWorkspaceSnapshot });
+        layoutRedo.length = 0;
+        const file = `copy-${++nestedFrameCounter}.html`;
+        const sourceVersion = nextStyleSourceVersion();
+        const source = original.file === "home.html" ? currentHomeSource : currentPricingSource;
+        const geometry = params.geometry as { x: number; y: number; w: number; h: number; z: number } | undefined;
+        const frame = { ...original, file, frameId: `copy_${nestedFrameCounter}`, title: `${original.title} copy`, sourceVersion,
+          ...(geometry ? { x: geometry.x, y: geometry.y, width: geometry.w, height: geometry.h, z: geometry.z } : { x: original.x + original.width + 120 }) };
+        performanceSources.set(file, source);
+        currentWorkspaceSnapshot = { ...currentWorkspaceSnapshot, frames: [...currentWorkspaceSnapshot.frames, frame] };
+        if (currentWorkspaceSnapshot.pages) currentWorkspaceSnapshot = { ...currentWorkspaceSnapshot,
+          pages: currentWorkspaceSnapshot.pages.map(page => page.id === original.pageId ? { ...page, frameFiles: [...page.frameFiles, file],
+            frameIds: [...page.frameIds ?? [], frame.frameId] } : page) };
+        designFrameDocumentCache.setData(designFrameDocumentKey(workspaceId, file, sourceVersion), {
+          ...frame, source, srcDoc: withDesignRuntime(source, sourceVersion), tree: [],
+        });
+        return { type: "WORKSPACE_RESPONSE", result: { frame, snapshot: currentWorkspaceSnapshot } };
+      }
       if (layoutGestureHarness && message.op === "design.node.transfer") {
         const params = message.params!;
         designShortcutOperations.push("transfer:waiting");
@@ -1066,6 +1124,12 @@ async function main() {
             element.removeAttribute("data-zeros-frame-root");
             layer = destinationDocument.importNode(element, true) as HTMLElement;
           }
+          if (typeof params.duplicateNodeId === "string") {
+            const cloned = mutateDesignNodeDeleteSource(mutateDesignNodeDuplicateSource(layer.outerHTML, nodeId, params.duplicateNodeId), nodeId);
+            layer = new DOMParser().parseFromString(cloned, "text/html").body.firstElementChild as HTMLElement;
+            nodeId = params.duplicateNodeId;
+            removeFrame = false;
+          }
           const background = typeof params.frameBackground === "string" ? params.frameBackground : null;
           if (background) layer.style.setProperty("background-color", background);
           if (params.relocation)
@@ -1085,7 +1149,7 @@ async function main() {
           const versions = new Map<string, string>();
           const documents = new Map<string, string>();
           documents.set(destinationFile, `<!doctype html>${destinationDocument.documentElement.outerHTML}`);
-          if (!removeFrame) documents.set(sourceFile, `<!doctype html>${moved.documentElement.outerHTML}`);
+          if (!removeFrame && !params.duplicateNodeId) documents.set(sourceFile, `<!doctype html>${moved.documentElement.outerHTML}`);
           for (const [file, html] of documents) {
             write(file, html);
             versions.set(file, nextStyleSourceVersion());
@@ -1370,6 +1434,7 @@ async function main() {
                 operationId?: string;
                 type?: string;
                 nodeId?: string;
+                duplicateNodeId?: string;
                 parentId?: string;
                 beforeId?: string | null;
                 text?: string;
@@ -1459,6 +1524,8 @@ async function main() {
               operation.type === "node.set-styles" ||
               operation.type === "node.set-attribute" ||
               operation.type === "node.set-html" ||
+              operation.type === "node.duplicate" ||
+              operation.type === "node.delete" ||
               operation.type === "frame.set-geometry",
           )
         ) {
@@ -1489,8 +1556,12 @@ async function main() {
               operation.nodeId ? [operation.nodeId] : [],
             ),
           });
-          let transactionSource = currentHomeSource;
+          let transactionSource = frameFile === "home.html" ? currentHomeSource : frameFile === "pricing.html" ? currentPricingSource : performanceSources.get(frameFile)!;
           for (const operation of transaction?.operations ?? []) {
+            if (operation.type === "node.duplicate" && operation.nodeId && operation.duplicateNodeId)
+              transactionSource = mutateDesignNodeDuplicateSource(transactionSource, operation.nodeId, operation.duplicateNodeId);
+            if (operation.type === "node.delete" && operation.nodeId)
+              transactionSource = mutateDesignNodeDeleteSource(transactionSource, operation.nodeId);
             if (
               operation.type === "keyframes.set" &&
               operation.file === frameFile &&
@@ -1570,8 +1641,11 @@ async function main() {
               target.style.setProperty(property, value ?? "");
             }
           }
-          if (transaction?.operations?.some((operation) => operation.type !== "frame.set-geometry"))
-            currentHomeSource = `<!doctype html>${parsed.documentElement.outerHTML}`;
+          const savedSource = transaction?.operations?.some((operation) => operation.type !== "frame.set-geometry")
+            ? `<!doctype html>${parsed.documentElement.outerHTML}` : transactionSource;
+          if (frameFile === "home.html") currentHomeSource = savedSource;
+          else if (frameFile === "pricing.html") currentPricingSource = savedSource;
+          else performanceSources.set(frameFile, savedSource);
           textTransactionCounter += 1;
           const nextSourceVersion = textTransactionCounter
             .toString(16)
@@ -1606,8 +1680,8 @@ async function main() {
             designFrameDocumentKey(workspaceId, frameFile, nextSourceVersion),
             {
               ...nextFrame,
-              source: currentHomeSource,
-              srcDoc: withDesignRuntime(currentHomeSource, nextSourceVersion),
+              source: savedSource,
+              srcDoc: withDesignRuntime(savedSource, nextSourceVersion),
               tree: [],
             },
           );
@@ -2245,7 +2319,7 @@ async function main() {
           ...(lazyPreparationHarness ? { sourceVersion, violations: warnings } : {}) } };
       }
       return { type: "WORKSPACE_RESPONSE", result: { ok: true } };
-    },
+    }),
   } as never);
 
   (

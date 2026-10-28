@@ -257,9 +257,8 @@ export function parseDesignWebProjection(input: {
   };
 }
 
-function elementForMutation(source: string, nodeId: string): Element {
-  const document = parse(source, { sourceCodeLocationInfo: true });
-  const matches = elements(document).filter(
+function elementForMutation(source: string, nodeId: string, records?: readonly Element[]): Element {
+  const matches = (records ?? elements(parse(source, { sourceCodeLocationInfo: true }))).filter(
     (element) => isDesignElement(element) && oid(element) === nodeId,
   );
   if (matches.length !== 1 || !matches[0]) {
@@ -284,6 +283,20 @@ function escapeAttribute(value: string, quote: string): string {
   return quote === "'"
     ? escaped.replace(/'/g, "&#39;")
     : escaped.replace(/"/g, "&quot;");
+}
+
+/** Copy each unchanged span once. Rebuilding the entire string per identity
+ * makes a subtree copy or repair quadratic in its authored size. */
+function applySourceEdits(source: string, edits: Array<{ start: number; end: number; text: string }>): string {
+  if (!edits.length) return source;
+  const parts: string[] = [];
+  let offset = 0;
+  for (const edit of edits.sort((left, right) => left.start - right.start)) {
+    parts.push(source.slice(offset, edit.start), edit.text);
+    offset = edit.end;
+  }
+  parts.push(source.slice(offset));
+  return parts.join("");
 }
 
 export function mutateDesignNodeTextSource(
@@ -334,27 +347,28 @@ export function mutateDesignNodeDuplicateSource(
   rawDuplicateNodeId: string,
 ): string {
   const duplicateNodeId = designNodeIdSchema.parse(rawDuplicateNodeId);
+  const records = elements(parse(source, { sourceCodeLocationInfo: true }));
   const existingIds = new Set(
-    elements(parse(source))
+    records
       .map(oid)
       .filter((id): id is string => Boolean(id)),
   );
   if (existingIds.has(duplicateNodeId)) {
     throw new Error(`Design element already exists: ${duplicateNodeId}`);
   }
-  const element = elementForMutation(source, nodeId);
+  const element = elementForMutation(source, nodeId, records);
   const location = element.sourceCodeLocation;
   if (!location)
     throw new Error(`Design element has no authored span: ${nodeId}`);
   const cloneSource = source.slice(location.startOffset, location.endOffset);
   const fragment = parseFragment(cloneSource, { sourceCodeLocationInfo: true });
-  const records = fragmentElements(fragment);
-  if (records.length === 0) {
+  const cloneRecords = fragmentElements(fragment);
+  if (cloneRecords.length === 0) {
     throw new Error(`Design element cannot be duplicated: ${nodeId}`);
   }
   const used = new Set(existingIds);
   const edits: Array<{ start: number; end: number; text: string }> = [];
-  records.forEach((record, index) => {
+  cloneRecords.forEach((record, index) => {
     const originalId = oid(record);
     if (!originalId) return;
     const nextId =
@@ -372,10 +386,7 @@ export function mutateDesignNodeDuplicateSource(
       text: `data-oid="${escapeAttribute(nextId, '"')}"`,
     });
   });
-  let duplicate = cloneSource;
-  for (const edit of edits.sort((left, right) => right.start - left.start)) {
-    duplicate = `${duplicate.slice(0, edit.start)}${edit.text}${duplicate.slice(edit.end)}`;
-  }
+  const duplicate = applySourceEdits(cloneSource, edits);
   return `${source.slice(0, location.endOffset)}${duplicate}${source.slice(location.endOffset)}`;
 }
 
@@ -803,9 +814,6 @@ export function healDesignHtmlIdentities(source: string, identity = identityBase
         : location.startTag.startOffset + slash.index;
     edits.push({ start: insertAt, end: insertAt, text: ` data-oid="${next}"` });
   }
-  let result = source;
-  for (const edit of edits.sort((left, right) => right.start - left.start)) {
-    result = `${result.slice(0, edit.start)}${edit.text}${result.slice(edit.end)}`;
-  }
+  const result = applySourceEdits(source, edits);
   return { source: result, changed: result !== source, healed: edits.length };
 }

@@ -750,6 +750,7 @@ export async function designDuplicateFrame(
   workspaceId: string,
   frame: string,
   pageId?: string,
+  placement?: Parameters<typeof bridgeDesignDuplicateFrame>[4],
 ): Promise<{
   frame: DesignFrameSummaryWire;
   snapshot: DesignWorkspaceSnapshotWire;
@@ -759,6 +760,7 @@ export async function designDuplicateFrame(
     workspaceId,
     frame,
     pageId,
+    placement,
   );
 }
 
