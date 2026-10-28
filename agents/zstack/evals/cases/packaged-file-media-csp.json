@@ -1,0 +1,9 @@
+{
+  "id": "packaged-file-media-csp",
+  "kind": "replay",
+  "area": "desktop-renderer",
+  "fixedBy": "33910a41d77f47436049bb627ad66e74bba59187",
+  "symptom": "Saved images and videos were blank in the packaged Files viewer because its meta CSP blocked the native media scheme.",
+  "rule": "Qualify media against the production renderer meta and Electron response policies together. Keep the allowance limited to image and media sources.",
+  "check": "pnpm exec vitest run scripts/__tests__/renderer-media-csp.test.ts"
+}

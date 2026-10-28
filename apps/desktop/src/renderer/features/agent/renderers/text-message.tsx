@@ -354,13 +354,14 @@ function MessageAttachmentPill({
     diskPath: seg.diskPath,
     attachmentId: seg.attachmentId,
     legacyUri: seg.thumbnailUri,
-    enabled: active !== false && seg.kind === "image" && !seg.diskPath,
+    enabled: active !== false && seg.kind === "image",
   });
   if (saved.path && cwd) return <Tooltip label={seg.name}><Button variant="ghost" data-attachment-pill=""
     disabled={active === false || saved.resolving} aria-label={`Open ${seg.name}`} className={`${PILL_SHELL} px-1.5`}
     onPointerEnter={() => warmFilePill(cwd, saved.path!)} onFocus={() => warmFilePill(cwd, saved.path!)}
     onClick={event => { event.stopPropagation(); openFilePill(cwd, saved.path!); }}>
-    <FileTypeIcon name={seg.name} kind="file" size={13} /><span className="max-w-[16rem] truncate">{seg.name}</span>
+    {seg.kind === "image" && source ? <img src={source} alt="" loading="lazy" decoding="async" className="size-4 shrink-0 rounded-sm object-cover" />
+      : <FileTypeIcon name={seg.name} kind="file" size={13} />}<span className="max-w-[16rem] truncate">{seg.name}</span>
   </Button></Tooltip>;
   return (
     <AttachmentPillView

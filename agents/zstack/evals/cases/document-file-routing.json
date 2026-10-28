@@ -1,0 +1,9 @@
+{
+  "id": "document-file-routing",
+  "kind": "replay",
+  "area": "desktop-renderer",
+  "fixedBy": "33910a41d77f47436049bb627ad66e74bba59187",
+  "symptom": "Opening a PDF in Files displayed encoded source instead of document pages.",
+  "rule": "Route document extensions through compatible binary metadata and authorized bounded ranges before text detection, with Local and cloud reader coverage.",
+  "check": "pnpm exec vitest run apps/desktop/src/engine/files/__tests__/file-media-stream.test.ts"
+}

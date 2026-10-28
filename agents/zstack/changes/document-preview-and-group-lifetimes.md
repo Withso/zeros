@@ -24,6 +24,9 @@
 - An edited group's later members were treated as unchanged → pristine-edit
   comparison inspected only the primary attachment → compare every member's
   durable identity and order → `edit-draft-preservation.test.ts`.
+- Saved image navigation lost its thumbnail → the new Files-link branch skipped
+  the existing image source → preserve thumbnail loading and verify the click
+  opens the original image → `runSavedImageAttachmentSmoke`.
 - A screenshot captured an empty Word frame during navigation → a mounted iframe
   did not prove document paint → wait for readable frame content before capture
   → document and group browser screenshot assertions.

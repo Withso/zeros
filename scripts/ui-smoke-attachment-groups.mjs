@@ -2,6 +2,49 @@ import { readFile } from "node:fs/promises";
 import { expect } from "@playwright/test";
 import { previewPdf, previewDocx } from "./document-preview-fixtures.mjs";
 
+export async function runSavedImageAttachmentSmoke({ page, check }) {
+  const origin = new URL(page.url()).origin;
+  await page.goto(
+    `${origin}/apps/desktop/src/renderer/harnesses/harness-composer-editor.html?media-preview&workspace=/sent-image`,
+  );
+  await page.locator(".composer-pm").waitFor();
+  await page.evaluate(async () => {
+    const canvas = document.createElement("canvas");
+    canvas.width = canvas.height = 8;
+    const blob = await new Promise((resolve) => canvas.toBlob(resolve));
+    await window.__composerHarness.insertFiles([
+      new File([blob], "saved.png", { type: "image/png" }),
+    ]);
+  });
+  await expect
+    .poll(() =>
+      page.evaluate(
+        () => !!window.__composerHarness.serialize().attachments[0].diskPath,
+      ),
+    )
+    .toBe(true);
+  await page.evaluate(() => window.__showComposerMessage());
+  const sent = page.getByTestId("sent-attachment-message");
+  await expect(sent.locator("img")).toBeVisible();
+  await expect
+    .poll(() => sent.locator("img").evaluate((image) => image.naturalWidth))
+    .toBe(8);
+  await sent
+    .getByRole("button", { name: "Open saved.png", exact: true })
+    .click();
+  await expect
+    .poll(() =>
+      page
+        .locator('[data-file-media-preview="image"] img')
+        .evaluate((image) => image.naturalWidth),
+    )
+    .toBe(8);
+  check(
+    "Saved image pills retain their thumbnails and open the original image in Files",
+    true,
+  );
+}
+
 export async function runRemovedVideoExtractionSmoke({ page, check }) {
   const origin = new URL(page.url()).origin;
   await page.goto(
@@ -411,4 +454,5 @@ export async function runAttachmentGroupsSmoke({ page, check, screenshots }) {
     );
   }
   await runRemovedVideoExtractionSmoke({ page, check });
+  await runSavedImageAttachmentSmoke({ page, check });
 }
