@@ -38,6 +38,24 @@ describe("SHORTCUT_CATEGORIES", () => {
     expect(matches.map(shortcut => shortcut.id)).toEqual(["command-palette"]);
   });
 
+  it("documents workspace positions, both tab strips, Create and user-message navigation", () => {
+    const shortcuts = new Map(SHORTCUT_CATEGORIES.flatMap(category => category.shortcuts).map(shortcut => [shortcut.id, shortcut]));
+    for (const [id, keys] of [
+      ["create-workspace", ["⌘N"]],
+      ["workspace-by-number", ["⌘1–9"]],
+      ["previous-workspace", ["⌥⌘↑"]],
+      ["next-workspace", ["⌥⌘↓"]],
+      ["previous-chat", ["⌘←"]],
+      ["next-chat", ["⌘→"]],
+      ["previous-side-tab", ["⌥⌘←"]],
+      ["next-side-tab", ["⌥⌘→"]],
+    ] as const) expect(shortcuts.get(id)?.keys).toEqual(keys);
+    for (const id of ["previous-message", "next-message", "first-message", "last-message"]) {
+      expect(shortcuts.get(id)?.label).toContain("user message");
+    }
+    expect(shortcuts.get("workspace-by-number")?.label).toContain("first 9");
+  });
+
   it("gives every shortcut a label and non-empty key chords", () => {
     for (const category of SHORTCUT_CATEGORIES) {
       expect(category.shortcuts.length).toBeGreaterThan(0);

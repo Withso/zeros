@@ -262,7 +262,9 @@ import { requestProviderSettings, requestUserSettingsSection } from "../settings
 import { isSubscriptionProvider } from "../settings/subscription-connection";
 import { latestAuthenticationRecoveryTurn } from "./auth-prompt-recovery";
 import { useAgentSessions } from "./sessions-hooks";
-import { useStickyBottom, nextTextMessageTarget } from "./use-sticky-bottom";
+import { useStickyBottom } from "./use-sticky-bottom";
+import { navigationShortcutBlocked, resolveNavigationShortcut, type MessageNavigation } from "../../shared/lib/navigation-shortcuts";
+import { hasShortcutPriorityClaim } from "./shortcut-priority";
 import {
   groupMessagesIntoTurns,
   isProviderTurnTail,
@@ -630,6 +632,7 @@ function AgentChatBody({
   // correct tick before the first paint, instead of flashing the 1st
   // tick until the rail's own post-paint effect corrects it.
   const checkpointRecomputeRef = useRef<(() => void) | null>(null);
+  const checkpointNavigateRef = useRef<((direction: MessageNavigation) => boolean) | null>(null);
   // Send-jump count (2026-07-17, replaces the 2026-07-16 send-follow) —
   // armed by the send paths below, consumed by the
   // last-checkpoint-changed effect further down (see its comment for
@@ -3077,24 +3080,15 @@ function AgentChatBody({
     setScrollEl(node);
   }, []);
 
-  // ⌘↑ / ⌘↓ — jump-by-text-message: walks user prompts and final
-  // assistant text, skipping tool-call + thinking chunks. Solves the
-  // need to find the initiating prompt during long runs.
-  // ⌘Home / ⌘End — first/last message. All gated on the textarea
-  // not being focused so plain typing keeps native behavior.
+  // Message shortcuts navigate the same user prompts as the checkpoint rail.
+  // Capture reaches the rich composer; DOM ownership keeps retained chats and
+  // other columns from reacting to the focused pane's keypress.
   useEffect(() => {
+    if (!surfaceActive) return;
     const handler = (e: KeyboardEvent) => {
-      if (!surfaceActive) return;
-      if (!(e.metaKey || e.ctrlKey)) return;
-
-      // Remaining bindings need plain ⌘ (no shift/alt).
-      if (e.shiftKey || e.altKey) return;
-
-      // Split panes (2026-07-17): multiple AgentChat instances can be
-      // mounted at once. Only the FOCUSED pane's chat (the global
-      // active chat) owns these app-wide bindings — otherwise ⌘↑/↓
-      // would scroll every pane. Chats
-      // mounted without a chatId (picker/beta flows) keep them.
+      if (hasShortcutPriorityClaim() || navigationShortcutBlocked(e)) return;
+      const shortcut = resolveNavigationShortcut(e);
+      if (shortcut?.kind !== "message") return;
       if (chatId) {
         const workspaceState = useWorkspaceStore.getState();
         if (
@@ -3104,49 +3098,18 @@ function AgentChatBody({
           return;
         }
       }
-
-      // Skip jump-by-message bindings while typing — preserves
-      // native cursor/selection behavior in the textarea.
-      const target = e.target as HTMLElement | null;
-      const tag = target?.tagName;
-      if (tag === "TEXTAREA" || tag === "INPUT") return;
-
       const el = scrollRef.current;
       if (!el) return;
-
-      if (e.key === "ArrowUp") {
-        const top = nextTextMessageTarget(el, { direction: "up" });
-        if (top !== null) {
-          e.preventDefault();
-          beginChatScrollNavigation(el, { target: top });
-          el.scrollTo({ top, behavior: "smooth" });
-        }
-        return;
-      }
-      if (e.key === "ArrowDown") {
-        const top = nextTextMessageTarget(el, { direction: "down" });
-        if (top !== null) {
-          e.preventDefault();
-          beginChatScrollNavigation(el, { target: top });
-          el.scrollTo({ top, behavior: "smooth" });
-        }
-        return;
-      }
-      if (e.key === "Home") {
+      const owner = el.closest("[data-pane-root]") ?? el.closest(".zeros-agent-surface");
+      if (!(e.target instanceof Node) || !owner?.contains(e.target)) return;
+      if (checkpointNavigateRef.current?.(shortcut.direction)) {
         e.preventDefault();
-        beginChatScrollNavigation(el, { target: 0 });
-        el.scrollTo({ top: 0, behavior: "smooth" });
-        return;
-      }
-      if (e.key === "End") {
-        e.preventDefault();
-        jumpToBottom(true);
-        return;
+        e.stopPropagation();
       }
     };
-    window.addEventListener("keydown", handler);
-    return () => window.removeEventListener("keydown", handler);
-  }, [chatId, surfaceActive, jumpToBottom]);
+    window.addEventListener("keydown", handler, true);
+    return () => window.removeEventListener("keydown", handler, true);
+  }, [chatId, surfaceActive]);
 
   // File picker for the "+" → "Add attachment" menu (routes through the
   // editor's insertFiles, same as drag-drop / paste).
@@ -5132,6 +5095,7 @@ function AgentChatBody({
           bottomSpacerPx={checkpointSpacerPx}
           onBottomSpacerChange={setCheckpointSpacerPx}
           recomputeRef={checkpointRecomputeRef}
+          navigateRef={checkpointNavigateRef}
         />
       </div>
 

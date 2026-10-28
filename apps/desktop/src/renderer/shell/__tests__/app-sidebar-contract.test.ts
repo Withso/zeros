@@ -80,7 +80,8 @@ describe("app shell navigation", () => {
     const createButton = nav.slice(nav.lastIndexOf("<Button", create), create);
     expect(createButton).not.toContain("data-state");
     expect(createButton).not.toContain("aria-current");
-    expect(nav).toContain("openDispatcher(contextProject?.id)");
+    expect(nav).toContain("onClick={handleCreateWorkspace}");
+    expect(SIDEBAR).toContain("() => openDispatcher(contextProject?.id)");
     // Adding a repository lives on Create, the welcome view and the menu bar.
     expect(SIDEBAR).not.toContain("Add repository");
   });

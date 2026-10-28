@@ -492,6 +492,7 @@ export function ChatTabs({
   // Roving-tabIndex keyboard navigation within THIS pane's tabs.
   const handleTabKeyDown = useCallback(
     (chatId: string, e: React.KeyboardEvent) => {
+      if (e.metaKey || e.ctrlKey || e.altKey || e.shiftKey) return;
       const ids = chats.map((c) => c.id);
       const idx = ids.indexOf(chatId);
       if (idx < 0) return;

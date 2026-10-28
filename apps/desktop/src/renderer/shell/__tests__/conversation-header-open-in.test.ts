@@ -67,7 +67,8 @@ afterEach(() => vi.unstubAllGlobals());
 describe("Local workspace and replica Open in targets", () => {
   it.each(["/Users/fixture/personal", "/Users/fixture/organization-local"])("keeps default-app and copy hints/actions for %s", path => {
     const html = renderToStaticMarkup(createElement(OpenInSubmenu, { path }));
-    expect(html).toContain("⌘O"); expect(html).toContain("⌘C");
+    const text = html.replace(/<[^>]*>/g, "");
+    expect(text).toContain("⌘O"); expect(text).toContain("⌘C");
     for (const label of ["Finder", "Visual Studio Code", "Terminal", "Copy path"]) expect(html).toContain(label);
     fixture.selections[2]();
     expect(fixture.setDefault).toHaveBeenCalledWith("terminal");
@@ -81,7 +82,8 @@ describe("Local workspace and replica Open in targets", () => {
     const path = "/Users/fixture/downloaded-cloud";
     const html = renderToStaticMarkup(createElement(OpenInPathButton, { path }));
     expect(html).toContain(path);
-    expect(html).not.toContain("⌘O"); expect(html).not.toContain("⌘C");
+    const text = html.replace(/<[^>]*>/g, "");
+    expect(text).not.toContain("⌘O"); expect(text).not.toContain("⌘C");
     fixture.buttons.get("Open sync directory in Visual Studio Code")!();
     expect(fixture.open).toHaveBeenCalledWith("vscode", path);
     expect(fixture.setDefault).not.toHaveBeenCalled();

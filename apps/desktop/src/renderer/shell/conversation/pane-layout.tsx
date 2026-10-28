@@ -37,6 +37,8 @@ import React, {
 } from "react";
 
 import { cn } from "../../shared/ui/cn";
+import { adjacentNavigationIndex, navigationShortcutBlocked, resolveNavigationShortcut } from "../../shared/lib/navigation-shortcuts";
+import { hasShortcutPriorityClaim } from "../../features/agent/shortcut-priority";
 import { useResizeHint } from "../use-resize-hint";
 import {
   selectActiveFolder,
@@ -1154,6 +1156,7 @@ function ChatPane({ paneId, ctx }: { paneId: string; ctx: PaneCtx }) {
     paneChats,
   );
   const isFocused = ctx.focusedPaneId === paneId;
+  const onSelectChat = ctx.onSelectChat;
 
   // Publish this pane's displayed chat for the terminal deck.
   // useLayoutEffect so a terminal that just became this pane's chat is
@@ -1305,6 +1308,29 @@ function ChatPane({ paneId, ctx }: { paneId: string; ctx: PaneCtx }) {
       el.removeEventListener("focusin", handlePaneActivation, true);
     };
   }, [handlePaneActivation]);
+
+  // Native capture also reaches the portaled composer/terminal body. Only the
+  // pane containing keyboard focus owns Command+Left/Right.
+  useEffect(() => {
+    const root = rootRef.current;
+    if (!root) return;
+    const handler = (event: KeyboardEvent) => {
+      if (hasShortcutPriorityClaim() || navigationShortcutBlocked(event)) return;
+      const shortcut = resolveNavigationShortcut(event);
+      if (shortcut?.kind !== "chat-tab") return;
+      const state = useWorkspaceStore.getState();
+      if (state.activePage !== "workspace") return;
+      const current = paneChats.findIndex(chat => chat.id === state.activeChatId);
+      if (current < 0) return;
+      const index = adjacentNavigationIndex(paneChats.length, current, shortcut.direction, true);
+      if (index === null) return;
+      event.preventDefault();
+      event.stopPropagation();
+      onSelectChat(paneChats[index].id);
+    };
+    root.addEventListener("keydown", handler, true);
+    return () => root.removeEventListener("keydown", handler, true);
+  }, [onSelectChat, paneChats]);
 
   // Show the synthetic Untitled tab only while the whole WORKSPACE has
   // no chats (the keeper is mid-spawn) — and only in the FIRST pane,

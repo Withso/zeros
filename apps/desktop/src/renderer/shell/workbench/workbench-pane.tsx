@@ -61,6 +61,8 @@ import { useBrowserFloatEntries } from "../../features/browser/browser-float-sto
 import { activeBrowserDeckKeys, browserViewKey } from "./browser-deck-keys";
 import { ActivityScope } from "../../shared/ui/loading/activity-scope";
 import { isCloudWorkspace } from "../../platform/bridge/cloud-workspace-key";
+import { adjacentNavigationIndex, navigationShortcutBlocked, resolveNavigationShortcut } from "../../shared/lib/navigation-shortcuts";
+import { hasShortcutPriorityClaim } from "../../features/agent/shortcut-priority";
 
 import { popoverBoundaryProps } from "@/renderer/shared/ui/popover-boundary";
 // Proportional columns (2026-07-17): workbench grows by `(1 - ratio)·100`,
@@ -441,6 +443,28 @@ export function WorkbenchPane({
     useTerminalStore.getState().setActiveTerminalTab(folderKey, SETUP_SUBTAB);
     useTerminalPanelLayoutStore.getState().setExpanded(true);
   }, [activeWorkspace, chatCwd, folderKey, dispatch]);
+
+  useEffect(() => {
+    if (!surfaceActive || collapsed || settling) return;
+    const handler = (event: KeyboardEvent) => {
+      if (hasShortcutPriorityClaim() || navigationShortcutBlocked(event)) return;
+      const shortcut = resolveNavigationShortcut(event);
+      if (shortcut?.kind !== "side-tab") return;
+      const state = useWorkspaceStore.getState();
+      if (state.activePage !== "workspace" || workbenchScopeKey(state) !== scope) return;
+      const selected = selectWorkbench(state).activeId;
+      const current = tabs.findIndex(tab => tab.id === selected);
+      const index = adjacentNavigationIndex(tabs.length,
+        current < 0 ? tabs.findIndex(tab => tab.id === activeId) : current,
+        shortcut.direction, true);
+      if (index === null) return;
+      event.preventDefault();
+      event.stopPropagation();
+      dispatch({ type: "ACTIVATE_WORKBENCH_TAB", id: tabs[index].id, scope });
+    };
+    window.addEventListener("keydown", handler, true);
+    return () => window.removeEventListener("keydown", handler, true);
+  }, [activeId, collapsed, dispatch, scope, settling, surfaceActive, tabs]);
 
   // Browser iframes live in the renderer-wide bounded deck below. Pinned source
   // views stay alive here. The active File is mounted normally; any OTHER dirty
