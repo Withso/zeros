@@ -50,6 +50,14 @@ describe("design workspace shortcuts", () => {
     ).toBeNull();
   });
 
+  it("preserves Windows Ctrl+Y redo without stealing Command-Y or text history", () => {
+    const event = shortcutEvent({ key: "y", ctrlKey: true, metaKey: false });
+    expect(resolveDesignWorkspaceShortcut(event, false)).toBe("redo");
+    expect(resolveDesignWorkspaceShortcut(event, true)).toBeNull();
+    expect(resolveDesignWorkspaceShortcut({ ...event, shiftKey: true }, false)).toBeNull();
+    expect(resolveDesignWorkspaceShortcut({ ...event, ctrlKey: false, metaKey: true }, false)).toBeNull();
+  });
+
   it("rejects partial, composing, alternate, and Save As chords", () => {
     expect(
       resolveDesignWorkspaceShortcut(shortcutEvent({ metaKey: false }), false),

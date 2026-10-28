@@ -114,7 +114,11 @@ describe("design workspace interaction wiring", () => {
       "publishSelection(selectedDescription ?? null, { selected: view.frameSelected, explicit: false });",
     );
     expect(source).toContain(
-      "view.selectedTargets.some(target => target.frame === frame.file && !target.nodeId)",
+      "paintedSelectedTargets.some(target => target.frame === frame.file && !target.nodeId)",
+    );
+    // History may paint the frame it selects first; gestures keep the view.
+    expect(source).toContain(
+      "const paintedSelectedTargets = historySelection?.selectedTargets ?? view.selectedTargets;",
     );
     // Body hit tests use the same stale-response guard as other selections.
     expect(source).toContain("selectDesignFrameBodyAtLocation({");

@@ -1,4 +1,5 @@
 import type { DesignLocalHistoryCheckpoint } from "@zeros/design-web";
+import type { DesignCatalogChange } from "./page-history";
 import {
   type DesignFrameChange,
   type DesignFrameGeometry,
@@ -6,6 +7,14 @@ import {
 } from "./document";
 
 export type WorkspaceDesignHistoryEntry =
+  | {
+      kind: "catalog";
+      change: DesignCatalogChange;
+      pageId?: string;
+      beforeHistory: DesignLocalHistoryCheckpoint[];
+      afterHistory: DesignLocalHistoryCheckpoint[];
+      bytes: number;
+    }
   | {
       kind: "transfer";
       changes: DesignFrameChange[];
@@ -44,6 +53,35 @@ export interface WorkspaceDesignHistoryState {
 export const MAX_DESIGN_HISTORY_WORKSPACES = 16;
 export const MAX_DESIGN_HISTORY_ENTRIES = 100;
 export const MAX_DESIGN_HISTORY_BYTES = 16 * 1024 * 1024;
+
+export function catalogDesignHistoryBytes(entry: Extract<WorkspaceDesignHistoryEntry, { kind: "catalog" }>): number {
+  return JSON.stringify(entry.change).length * 2 +
+    [...entry.beforeHistory, ...entry.afterHistory].reduce((sum, checkpoint) => sum + checkpoint.bytes, 0) + 256;
+}
+export function catalogDesignHistoryEntry(change: DesignCatalogChange, pageId?: string,
+  beforeHistory: DesignLocalHistoryCheckpoint[] = [], complete = true): Extract<WorkspaceDesignHistoryEntry, { kind: "catalog" }> {
+  const entry = { kind: "catalog" as const, change, ...(pageId ? { pageId } : {}), beforeHistory, afterHistory: [], bytes: 0 };
+  entry.bytes = complete ? catalogDesignHistoryBytes(entry) : MAX_DESIGN_HISTORY_BYTES + 1;
+  return entry;
+}
+
+/** Stop before checkpoints pin an entire large page beyond the shared stack
+ * cap. An incomplete restore point is discarded, never kept as partial Undo. */
+export async function captureCatalogDesignHistory(
+  files: readonly string[],
+  capture: (file: string) => Promise<DesignLocalHistoryCheckpoint | null>,
+): Promise<{ checkpoints: DesignLocalHistoryCheckpoint[]; complete: boolean }> {
+  const checkpoints: DesignLocalHistoryCheckpoint[] = [];
+  let bytes = 0;
+  for (const file of files) {
+    const checkpoint = await capture(file);
+    if (!checkpoint) continue;
+    bytes += checkpoint.bytes;
+    if (bytes > MAX_DESIGN_HISTORY_BYTES) return { checkpoints: [], complete: false };
+    checkpoints.push(checkpoint);
+  }
+  return { checkpoints, complete: true };
+}
 
 export function transferDesignHistoryBytes(
   entry: Extract<WorkspaceDesignHistoryEntry, { kind: "transfer" }>,
@@ -86,7 +124,9 @@ export function pruneWorkspaceDesignFrameHistory(
     files.has(file) || (folder !== undefined && file.startsWith(`${folder}/`));
   const keep = (entry: WorkspaceDesignHistoryEntry): boolean => {
     const deleted =
-      entry.kind === "frame"
+      entry.kind === "catalog"
+        ? [entry.change.before.canvas, entry.change.after.canvas].some(canvas => Object.keys(canvas.frames).some(deletedFile))
+        : entry.kind === "frame"
         ? [entry.before, entry.after].some(
             (point) => point && deletedFile(point.file),
           )

@@ -1,0 +1,9 @@
+{
+  "id": "design-history-focus-owner",
+  "kind": "replay",
+  "area": "desktop-renderer",
+  "fixedBy": "pending",
+  "symptom": "Electron's native Undo/Redo menu roles bypassed Design's canvas history even while Design had focus.",
+  "rule": "Route menu and keyboard history through one exact active focus owner, preserving native text and non-app history; zstack-review requires inert hidden surfaces and owner-bound editing sessions.",
+  "check": "pnpm exec vitest run --config vitest.config.ts apps/desktop/electron/__tests__/menu-design-history.test.ts --testNamePattern 'routes menu'"
+}

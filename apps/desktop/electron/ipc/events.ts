@@ -13,6 +13,7 @@
 //   project-changed    { root: string, port: number }
 //   project-opening    { root: string } (early "folder picked" signal, pre-respawn)
 //   menu-open-project  {} (File → Open Folder / Cmd+O → renderer openProject)
+//   menu-edit-history  { direction: "undo" | "redo" } (focused app surface)
 //   deep-link          string
 //   local-navigation   string (validated chat/workspace link; navigation only)
 //   engine-restarted   { port: number }

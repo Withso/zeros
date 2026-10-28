@@ -30,6 +30,7 @@ export function resolveDesignWorkspaceShortcut(
   }
   const key = event.key.toLowerCase();
   if (key === "s") return event.shiftKey ? null : "save";
+  if (key === "y" && event.ctrlKey && !event.metaKey && !event.shiftKey && !editableTarget) return "redo";
   if (key !== "z" || editableTarget) return null;
   return event.shiftKey ? "redo" : "undo";
 }

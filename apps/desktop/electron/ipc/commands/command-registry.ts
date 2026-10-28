@@ -11,6 +11,7 @@ import { ghCloud } from "./cloud-github";
 // ──────────────────────────────────────────────────────────
 
 import { setCommand } from "../router";
+import { editHistory } from "./edit-history";
 import { cursorSubscription } from "./cursor-subscription";
 import { providerSubscription } from "./provider-subscription";
 import { cloudProviderAuth } from "./cloud-provider-auth";
@@ -123,6 +124,7 @@ export function registerAllCommands(): void {
   // renderer analytics layer to route events to the right PostHog
   // project (Zeros Dev vs Zeros). Metadata only.
   setCommand("app_info", appInfo);
+  setCommand("edit_history", editHistory);
   setCommand("full_disk_access_status", fullDiskAccessStatus);
   setCommand("full_disk_access_open_settings", fullDiskAccessOpenSettings);
   setCommand("local_navigation_ready", localNavigationReady);

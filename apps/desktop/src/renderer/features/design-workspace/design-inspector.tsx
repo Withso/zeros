@@ -63,7 +63,12 @@ import {
   Tooltip,
   toast,
 } from "../../shared/ui/primitives";
-import { isEditableHotkeyTarget } from "../../shell/editable-target";
+import {
+  dispatchFocusedDesignHistory,
+  isDesignHistoryFocusOwner,
+  isNativeHistoryTarget,
+  registerDesignHistoryCommand,
+} from "./state/design-history-commands";
 import {
   designAutoLayoutUpdates,
   designFrameRootFixedStyles,
@@ -1247,8 +1252,22 @@ export function DesignInspector({
   }, [workspaceId, queueInspectorAction]);
 
 
+  const historyActionRef = useRef(runHistory);
+  const historyDirectoryRevision = useDesignWorkspaceUiStore(state => workspaceId ? state.byWorkspace[workspaceId]?.directoryRevision : undefined);
+  useLayoutEffect(() => { historyActionRef.current = runHistory; }, [runHistory]);
+  useLayoutEffect(() => {
+    if (!active || !workspaceId) return;
+    const root = inspectorRef.current?.closest("[data-design-workspace-surface]");
+    if (!root) return;
+    return registerDesignHistoryCommand({
+      workspaceId, root,
+      isCurrent: () => useDesignWorkspaceUiStore.getState().byWorkspace[workspaceId]?.directoryRevision === historyDirectoryRevision,
+      run: (direction) => historyActionRef.current(direction),
+    });
+  }, [active, workspaceId, historyDirectoryRevision]);
+
   useEffect(() => {
-    if (!active) return;
+    if (!active || !workspaceId) return;
     const onKeyDown = (event: KeyboardEvent) => {
       // Review owns its keyboard, including portaled filter options. This
       // capture listener runs before a dialog's React handlers can intercept
@@ -1257,7 +1276,8 @@ export function DesignInspector({
         (event.metaKey || event.ctrlKey) &&
         document.querySelector('[data-design-review][data-state="open"]')
       ) return;
-      const editableTarget = isEditableHotkeyTarget(event.target);
+      if (event.defaultPrevented || !isDesignHistoryFocusOwner(workspaceId, true)) return;
+      const editableTarget = isNativeHistoryTarget(event.target);
       dispatchDesignWorkspaceShortcut(event, editableTarget, {
         save: () => {
           // Inspector and inline-text fields publish drafts on blur. React
@@ -1268,14 +1288,14 @@ export function DesignInspector({
           }
           saveDesignChanges();
         },
-        undo: () => runHistory("undo"),
-        redo: () => runHistory("redo"),
+        undo: () => { dispatchFocusedDesignHistory("undo"); },
+        redo: () => { dispatchFocusedDesignHistory("redo"); },
       });
     };
     window.addEventListener("keydown", onKeyDown, { capture: true });
     return () =>
       window.removeEventListener("keydown", onKeyDown, { capture: true });
-  }, [active, runHistory, saveDesignChanges]);
+  }, [active, workspaceId, saveDesignChanges]);
 
   const exportPng = async () => {
     if (!workspaceId || !folder || !frame || frameAction) return;
@@ -2313,7 +2333,7 @@ export function DesignInspector({
                 {zoomPercentage}%
               </Button>
             </DropdownMenuTrigger>
-            <DropdownMenuContent align="end" className="w-48">
+            <DropdownMenuContent data-design-history-owner={workspaceId ?? undefined} align="end" className="w-48">
               <DropdownMenuItem
                 disabled={zoom >= DESIGN_MAX_ZOOM}
                 aria-label="Zoom in"

@@ -210,7 +210,8 @@ import {
 import { useDesignRuntimeStore, waitForDesignRuntimeFrame } from "./state/design-runtime-store";
 import { clearDesignFrameIntent, noteDesignFrameIntent, primeDesignFrameIntent, useDesignFrameIntent } from "./state/design-frame-intent";
 import { useDesignFrameResidency } from "./state/use-design-frame-residency";
-import { designFrameViews, isPreparedDesignFrame, type DesignFrameView } from "./state/design-frame-view";
+import { designFrameViews, designFramesAtPresentedGeometry, isPreparedDesignFrame, type DesignFrameView } from "./state/design-frame-view";
+import { useDesignHistoryGeometryPreview, useDesignHistorySelection } from "./state/design-history-presentation";
 import { useDesignFramePreparation } from "./state/use-design-frame-preparation";
 import { designBackgroundWork } from "./state/design-background-work";
 import { activeDesignPreviewDemand, designPreviewDemandItems, type DesignPreviewLevel } from "./state/design-frame-previews";
@@ -505,7 +506,19 @@ export function DesignCanvas({
     [snapshot?.themes],
   );
   const frameTheme = effectiveDesignTheme(view.activeTheme, baseThemeId);
-  const frameViews = designFrameViews(snapshot);
+  // Undo and Redo show a frame's earlier place at once, before the engine
+  // confirms it. Painting and hit testing read that presentation; every
+  // write still checks the confirmed catalog.
+  const historyGeometry = useDesignHistoryGeometryPreview(workspaceId ?? "");
+  // Undo of a frame change also shows the frame it selects at once; this
+  // paints frame chrome only. Gestures and writes keep the confirmed view.
+  const historySelection = useDesignHistorySelection(active ? workspaceId : null);
+  const paintedSelectedTargets = historySelection?.selectedTargets ?? view.selectedTargets;
+  const confirmedFrameViews = designFrameViews(snapshot);
+  const frameViews = useMemo(
+    () => designFramesAtPresentedGeometry(confirmedFrameViews, active ? historyGeometry?.frames : null),
+    [active, confirmedFrameViews, historyGeometry],
+  );
   const preparedFrames = useMemo(() => frameViews.filter(isPreparedDesignFrame), [frameViews]);
   const preparationError = useMemo(() => {
     const message = Object.values(snapshot?.preparation?.errors ?? {})[0];
@@ -7599,7 +7612,7 @@ export function DesignCanvas({
             // Frame chrome follows the semantic selection shared by body,
             // label, Layers, and keyboard navigation.
             const frameSelectedOnly =
-              view.selectedTargets.some(target => target.frame === frame.file && !target.nodeId);
+              paintedSelectedTargets.some(target => target.frame === frame.file && !target.nodeId);
             const secondaryElements = (prepared ? view.selectedTargets : []).filter(target => target.frame === frame.file && target.nodeId &&
               !selectedElements.some(details => details.oid === target.nodeId)).map(target => secondaryTargetDetails[`${frame.file}\u0000${target.nodeId}`])
               .filter((details): details is DesignRuntimeNodeDetails => Boolean(details && details.sourceVersion === frame.sourceVersion));

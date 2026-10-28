@@ -46,6 +46,7 @@ import {
   warmDesignNodeDetailsWindow,
 } from "./state/design-selection";
 import { useDesignRuntimeStore } from "./state/design-runtime-store";
+import { useDesignHistoryPresentation, useDesignHistorySelection } from "./state/design-history-presentation";
 import { noteDesignFrameIntent } from "./state/design-frame-intent";
 import { useActiveWorkspace } from "../../state/use-active-workspace";
 import { useReadRecovery } from "../../state/use-read-recovery";
@@ -508,23 +509,31 @@ function OwnedDesignWorkspaceSidebarPanels({
     hasContent: snapshot.data !== undefined, retry: snapshot.refresh,
     connected, active, folder: folder ?? "",
   });
-  const selectedFrameFile = useDesignWorkspaceUiStore((state) =>
+  // Undo and Redo show their frame catalog, selection and trees at once; the
+  // tree paints them while row actions and owner keys stay confirmed.
+  const historyPresentation = useDesignHistoryPresentation(active ? workspaceId : null);
+  const historySelection = useDesignHistorySelection(active ? workspaceId : null);
+  const confirmedSelectedFrameFile = useDesignWorkspaceUiStore((state) =>
     workspaceId
       ? (state.byWorkspace[workspaceId]?.selectedFrame ?? null)
       : null,
   );
-  const selectedNodeId = useDesignWorkspaceUiStore((state) =>
+  const confirmedSelectedNodeId = useDesignWorkspaceUiStore((state) =>
     workspaceId
       ? (state.byWorkspace[workspaceId]?.selectedNodeId ?? null)
       : null,
   );
-  const selectedNodeIds = useDesignWorkspaceUiStore((state) =>
+  const confirmedSelectedNodeIds = useDesignWorkspaceUiStore((state) =>
     workspaceId
       ? (state.byWorkspace[workspaceId]?.selectedNodeIds ??
         EMPTY_SELECTED_NODE_IDS)
       : EMPTY_SELECTED_NODE_IDS,
   );
-  const selectedTargets = useDesignWorkspaceUiStore(state => workspaceId ? state.byWorkspace[workspaceId]?.selectedTargets : undefined);
+  const confirmedSelectedTargets = useDesignWorkspaceUiStore(state => workspaceId ? state.byWorkspace[workspaceId]?.selectedTargets : undefined);
+  const selectedFrameFile = historySelection ? historySelection.selectedFrame : confirmedSelectedFrameFile;
+  const selectedNodeId = historySelection ? historySelection.selectedNodeId : confirmedSelectedNodeId;
+  const selectedNodeIds = historySelection ? historySelection.selectedNodeIds : confirmedSelectedNodeIds;
+  const selectedTargets = historySelection ? historySelection.selectedTargets : confirmedSelectedTargets;
   const targetSelected = (frame: string, nodeId?: string) => selectedTargets?.some((target: DesignSelectionTarget) => target.frame === frame && target.nodeId === nodeId) ?? false;
   /** A selected frame already has its editor; noting it as intent would only
    * publish and clear again on every hovered or focused row. */
@@ -532,14 +541,18 @@ function OwnedDesignWorkspaceSidebarPanels({
     if (workspaceId && !selectedTargets?.some((target: DesignSelectionTarget) => target.frame === file))
       noteDesignFrameIntent(workspaceId, file);
   };
-  const frameSelected = useDesignWorkspaceUiStore((state) =>
+  const confirmedFrameSelected = useDesignWorkspaceUiStore((state) =>
     workspaceId
       ? (state.byWorkspace[workspaceId]?.frameSelected ?? false)
       : false,
   );
+  const frameSelected = historySelection ? historySelection.frameSelected : confirmedFrameSelected;
   const activePageId = useDesignWorkspaceUiStore(state => workspaceId ? state.byWorkspace[workspaceId]?.activePageId : undefined);
   const ownerRevision = useDesignWorkspaceUiStore(state => workspaceId ? state.byWorkspace[workspaceId]?.ownerRevision : undefined);
-  const pageSnapshot = useDesignPageSnapshot(snapshot.data, activePageId);
+  const pageSnapshot = useDesignPageSnapshot(
+    historyPresentation?.catalog?.deref() ?? snapshot.data,
+    historySelection?.activePageId ?? activePageId,
+  );
   const layerOwnerKey = workspaceId
     ? JSON.stringify([workspaceId, pageSnapshot?.directoryId, activePageId, ownerRevision])
     : null;
@@ -580,9 +593,12 @@ function OwnedDesignWorkspaceSidebarPanels({
       return roots;
     }),
   );
+  const historyRuntime = historyPresentation?.runtime;
   const treesByFile = useMemo(() => {
     const trees: Record<string, readonly DesignRuntimeTreeNode[]> = {};
-    for (const [file, tree] of Object.entries(rawTreesByFile)) {
+    const presented = { ...rawTreesByFile };
+    for (const [file, inverse] of historyRuntime ?? []) if (inverse.tree) presented[file] = inverse.tree;
+    for (const [file, tree] of Object.entries(presented)) {
       trees[file] = designFrameLayerChildren(
         tree,
         frames.find((frame) => frame.file === file)?.kind === "text"
@@ -591,7 +607,7 @@ function OwnedDesignWorkspaceSidebarPanels({
       );
     }
     return trees;
-  }, [frames, rawTreesByFile, rootIdsByFile]);
+  }, [frames, historyRuntime, rawTreesByFile, rootIdsByFile]);
   const rootSelected = Boolean(
     selectedFrame &&
     selectedNodeId &&

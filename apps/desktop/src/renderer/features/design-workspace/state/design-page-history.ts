@@ -28,7 +28,7 @@ export async function restoreDesignPageHistorySelection(
   )
     return;
   const affected = result.historyFrame ?? result.historySelection;
-  const page = affected
+  const page = snapshot?.pages.find((page) => page.id === result.historyPageId) ?? (affected
     ? snapshot?.pages.find(
         (page) =>
           page.frameFiles.includes(affected) ||
@@ -36,7 +36,7 @@ export async function restoreDesignPageHistorySelection(
             ? affected.startsWith(page.folder + "/")
             : !affected.includes("/")),
       )
-    : undefined;
+    : undefined);
   if (page)
     useDesignWorkspaceUiStore
       .getState()

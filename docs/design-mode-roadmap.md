@@ -2284,10 +2284,44 @@ For frames narrower than 128 screen pixels, inactive frame labels and Play
 controls reveal on hover or keyboard focus so they do not cover an overview.
 The active, selected, renaming or playing frame retains its controls.
 
+A focused Design surface owns Undo/Redo through one command registry. Native
+Edit-menu commands enter the same registry as canvas shortcuts; text inputs,
+modal dialogs, unrelated surfaces and focused DevTools keep their native
+history. Marked inspector portals share their Design owner. A hidden retained
+surface cannot consume a command. Windows Ctrl+Y remains a Redo chord.
+Save also requires Design focus, including its editable text drafts. Native
+macOS qualification must cover text-field Undo through the menu-to-IPC native
+fallback as well as canvas, portal and DevTools focus routing.
+
+The engine owns one ordered Design history per Local workspace: document
+transactions, frame lifecycle and geometry, transfers, page create/rename/delete,
+and theme catalog changes. Catalog restore points preserve the registration,
+tracked metadata and affected sources with the normal write lane, CAS and
+rollback. Native edits that conflict with a restore point are not overwritten.
+The existing limits remain 100 entries and 16 MiB per workspace, across at most
+16 workspaces. Page checkpoint collection stops at the byte cap; an incomplete
+restore point is discarded rather than retained as a partial Undo. Private
+viewport/navigation state is not part of the authored catalog restore point.
+
 A runtime retains up to 64 reversible layout generations, capped at 4 MiB of
-style history. The renderer predicts known layout undo/redo against exact
-workspace snapshot identities, while the engine remains authoritative. Unknown
-or externally changed history falls back to the confirmed document. The browser
+style history. The renderer's separate inverse journal records known generation,
+frame-geometry and weak catalog targets against the exact directory session and
+workspace snapshot identity. Geometry, Layers, selection and inspector values
+share a transient presentation; predicted state never enters the confirmed
+snapshot or durable navigation stores. Selection hints yield to a newer explicit
+page or selection. The renderer journal is limited to 64 entries per owner,
+16 owners and 1 MiB of metadata; transient presentation and pending visual intents
+are separately bounded at 1 MiB and 16 owners, with at most eight runtime frames
+and 32 details per frame in a presentation. Catalog references are weak, not a
+second retained source cache.
+
+The optional runtime `previewHistory` capability keeps a pending inverse
+separate from its confirmed baseline: an arriving save adopts against authority,
+then reapplies the current inverse in the same task. Clearing it does not measure
+a hidden document. Older runtimes defer prediction until earlier edits settle.
+Unknown, evicted or externally changed history falls back to authority. All
+paths fence directory replacement and Personal/organization Local switching;
+cloud v2 has no Design history capability. The browser
 regression harness deliberately delays history replies by 500 ms and verifies
 that layout inverses paint first without replacing the iframe or element.
 It also delays frame movement and transfer by 700 ms, and style saves by

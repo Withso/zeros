@@ -32,6 +32,20 @@ import { canBackgroundSyncCloudWorkspace } from "../state/cloud-workspace-catalo
 // from either module.
 export { isElectron, isNativeRuntime, runtimeName } from "./runtime";
 
+export type EditHistoryDirection = "undo" | "redo";
+
+export async function onMenuEditHistory(
+  handler: (payload: { direction: EditHistoryDirection }) => void,
+): Promise<() => void> {
+  if (!isNativeRuntime()) return () => {};
+  return nativeListen<{ direction: EditHistoryDirection }>("menu-edit-history", handler);
+}
+
+export async function nativeEditHistory(direction: EditHistoryDirection): Promise<void> {
+  if (!isNativeRuntime()) return;
+  await nativeInvoke<void>("edit_history", { direction });
+}
+
 export type ProjectChangedPayload = {
   root: string;
   port: number;

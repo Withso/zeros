@@ -1,3 +1,4 @@
+/* global window, document, localStorage */
 import { expect } from "@playwright/test";
 import {
   designCanvasPoint,
@@ -14,7 +15,189 @@ export async function runDesignPagesSmoke({ page, check }) {
     await page.evaluate(() => localStorage.clear());
     await exercisePages({ page, check });
     await exercisePageLayersNavigation({ page, check });
+    await runDesignPagesHistorySmoke({ page, check });
   } finally {
+    await visitPageStorage(page);
+    await page.evaluate((entries) => {
+      localStorage.clear();
+      for (const [key, value] of entries) localStorage.setItem(key, value);
+    }, storage);
+  }
+}
+
+export async function runDesignPagesHistorySmoke({ page, check }) {
+  await visitPageStorage(page);
+  const storage = await page.evaluate(() => Object.entries(localStorage));
+  await page.evaluate(() => localStorage.clear());
+  const origin = new URL(page.url()).origin;
+  try {
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await page.goto(
+      `${origin}/apps/desktop/src/renderer/harnesses/harness-design-workspace.html?pages=1&pagesHistory=1`,
+      { waitUntil: "networkidle" },
+    );
+    const picker = page.getByRole("button", { name: /^Page: / });
+    const viewport = page.locator("[data-design-canvas-viewport]");
+    const persisted = () =>
+      page.evaluate(
+        () =>
+          JSON.parse(localStorage.getItem("zeros:harness-design-pages-v1"))
+            .snapshot,
+      );
+    const confirmed = () =>
+      page.evaluate(async () => {
+        const { designWorkspaceView } =
+          await import("/apps/desktop/src/renderer/features/design-workspace/state/design-workspace-ui.ts");
+        const { activePageId, selectedFrame, frameSelected, selectedNodeId } =
+          designWorkspaceView("ws_design_pages_harness");
+        return { activePageId, selectedFrame, frameSelected, selectedNodeId };
+      });
+    const holdHistory = async (direction) => {
+      const before = await persisted();
+      const calls = await page.evaluate(() => {
+        window.__zerosHarnessPages.holdHistory = true;
+        return window.__zerosHarnessPages.calls.filter((call) =>
+          call.op.startsWith("design.history."),
+        ).length;
+      });
+      await viewport.focus();
+      await page.keyboard.press(
+        direction === "undo" ? "Control+z" : "Control+Shift+z",
+      );
+      await expect
+        .poll(() =>
+          page.evaluate(
+            () =>
+              window.__zerosHarnessPages.calls.filter((call) =>
+                call.op.startsWith("design.history."),
+              ).length,
+          ),
+        )
+        .toBe(calls + 1);
+      return before;
+    };
+    const releaseHistory = async () => {
+      await page.evaluate(() => window.__zerosHarnessPages.releaseHistory());
+      await expect
+        .poll(() =>
+          page.evaluate(async () => {
+            const { designHistoryPresentation } =
+              await import("/apps/desktop/src/renderer/features/design-workspace/state/design-history-presentation.ts");
+            return (
+              designHistoryPresentation("ws_design_pages_harness") === null
+            );
+          }),
+        )
+        .toBe(true);
+    };
+    const assertEmptyPage = async (title) => {
+      await expect(picker).toHaveAccessibleName("Page: " + title);
+      await expect(page.locator("[data-design-frame]")).toHaveCount(0);
+      await expect(page.locator("[data-design-frame-row]")).toHaveCount(0);
+      await expect(page.locator("[data-design-selected-element]")).toHaveCount(
+        0,
+      );
+    };
+
+    await expect(picker).toHaveAccessibleName("Page: Page 1");
+    await expect(
+      page.locator(
+        '[data-design-frame="page-1/home.html"] iframe[data-design-document-ready]',
+      ),
+    ).toBeVisible();
+    await picker.click();
+    await page.getByRole("menuitem", { name: "New page", exact: true }).click();
+    await assertEmptyPage("Page 2");
+    const secondPage = (await confirmed()).activePageId;
+
+    const beforeUndoCreate = await holdHistory("undo");
+    await expect(
+      page.locator('[data-design-frame="page-1/home.html"]'),
+    ).toBeVisible();
+    await expect(
+      page.locator('[data-design-frame-row="page-1/home.html"]'),
+    ).toBeVisible();
+    expect(await persisted()).toEqual(beforeUndoCreate);
+    expect((await confirmed()).activePageId).toBe(secondPage);
+    await releaseHistory();
+    await expect.poll(async () => (await persisted()).pages.length).toBe(1);
+    await expect.poll(confirmed).toMatchObject({
+      activePageId: beforeUndoCreate.pages[0].id,
+      selectedFrame: "page-1/home.html",
+    });
+
+    const beforeRedoCreate = await holdHistory("redo");
+    await assertEmptyPage("Page 2");
+    expect(await persisted()).toEqual(beforeRedoCreate);
+    expect((await confirmed()).activePageId).toBe(beforeRedoCreate.pages[0].id);
+    await releaseHistory();
+    await expect.poll(confirmed).toMatchObject({
+      activePageId: secondPage,
+      selectedFrame: null,
+      selectedNodeId: null,
+      frameSelected: false,
+    });
+    check(
+      "Page create Undo/Redo paints catalog, Layers and empty selection before the held engine reply",
+      true,
+    );
+
+    await picker.click();
+    await page
+      .getByRole("menuitem", { name: "Rename page…", exact: true })
+      .click();
+    const title = page.getByRole("textbox", { name: "Page title" });
+    await title.fill("Renamed");
+    await title.press("Enter");
+    await expect(picker).toHaveAccessibleName("Page: Renamed");
+    const beforeUndoRename = await holdHistory("undo");
+    await assertEmptyPage("Page 2");
+    expect(await persisted()).toEqual(beforeUndoRename);
+    await releaseHistory();
+    await expect
+      .poll(async () => (await persisted()).pages[1].title)
+      .toBe("Page 2");
+    check(
+      "Page rename Undo paints its prior title while the engine reply is held",
+      true,
+    );
+
+    await picker.click();
+    await page
+      .getByRole("menuitem", { name: "Delete page…", exact: true })
+      .click();
+    await expect(picker).toHaveAccessibleName("Page: Page 1");
+    const beforeUndoDelete = await holdHistory("undo");
+    await assertEmptyPage("Page 2");
+    expect(await persisted()).toEqual(beforeUndoDelete);
+    await releaseHistory();
+    await expect.poll(confirmed).toMatchObject({
+      activePageId: secondPage,
+      selectedFrame: null,
+      selectedNodeId: null,
+      frameSelected: false,
+    });
+    check(
+      "Undo of empty-page deletion restores that page without borrowing another page's frame",
+      true,
+    );
+
+    // A later explicit page choice supersedes the history selection hint.
+    await holdHistory("redo");
+    await expect(picker).toHaveAccessibleName("Page: Page 1");
+    await picker.click();
+    await page
+      .getByRole("menuitemradio", { name: "Page 1", exact: true })
+      .click();
+    const explicit = await confirmed();
+    await releaseHistory();
+    await expect.poll(confirmed).toEqual(explicit);
+    check(
+      "A page choice made while history is pending remains selected after authority settles",
+      true,
+    );
+  } finally {
+    await page.evaluate(() => window.__zerosHarnessPages?.releaseHistory?.());
     await visitPageStorage(page);
     await page.evaluate((entries) => {
       localStorage.clear();

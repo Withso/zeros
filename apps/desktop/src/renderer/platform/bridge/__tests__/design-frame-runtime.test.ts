@@ -105,6 +105,36 @@ function snapshot(
 }
 
 describe("design frame runtime client", () => {
+  it("negotiates history previews and validates against authority, never the speculative target", async () => {
+    const source = { postMessage: vi.fn() };
+    const connection = connectDesignFrameRuntime("history-preview", "home.html", SOURCE_VERSION,
+      { contentWindow: source } as unknown as HTMLIFrameElement, {},
+      { setTimeout: vi.fn(() => 7), clearTimeout: vi.fn() });
+    const port = source.postMessage.mock.calls[0]![1].transfer[0] as MessagePort;
+    let foreign = false;
+    const requests: unknown[] = [];
+    port.onmessage = ({ data }) => {
+      if (data.type !== "request") return;
+      requests.push(data);
+      const result = snapshot(1, foreign ? NEXT_SOURCE_VERSION : SOURCE_VERSION);
+      port.postMessage({ protocol: DESIGN_RUNTIME_PROTOCOL, version: DESIGN_RUNTIME_VERSION, type: "response", requestId: data.requestId, ok: true,
+        result: data.args.targetSourceVersion === null ? null : { sourceVersion: result.sourceVersion, snapshot: result, details: [result.frame], treeUnchanged: true } });
+    };
+    port.start();
+    try {
+      await expect(connection.previewHistory!(NEXT_SOURCE_VERSION)).rejects.toMatchObject({ code: "METHOD_NOT_SUPPORTED" });
+      expect(requests).toHaveLength(0);
+      port.postMessage({ protocol: DESIGN_RUNTIME_PROTOCOL, version: DESIGN_RUNTIME_VERSION, type: "event", event: "ready",
+        payload: { sourceVersion: SOURCE_VERSION, capabilities: { ...capabilities, methods: [...capabilities.methods, "previewHistory"] }, snapshot: snapshot(1) } });
+      await vi.waitFor(() => expect(connection.supports("previewHistory")).toBe(true));
+      await expect(connection.previewHistory!(NEXT_SOURCE_VERSION, ["frame"])).resolves.toMatchObject({ sourceVersion: SOURCE_VERSION });
+      expect(connection.sourceVersion).toBe(SOURCE_VERSION);
+      foreign = true;
+      await expect(connection.previewHistory!(NEXT_SOURCE_VERSION)).rejects.toThrow("malformed");
+      await expect(connection.previewHistory!(null)).resolves.toBeNull();
+    } finally { connection.destroy(); port.close(); }
+  });
+
   it("negotiates frame playback and source-fences lifecycle events on its private port", async () => {
     const source = { postMessage: vi.fn() };
     const onPlaybackStopped = vi.fn();
@@ -225,7 +255,7 @@ describe("design frame runtime client", () => {
       sourceVersion: SOURCE_VERSION,
       // Opt-in methods: a runtime advertises them only when asked, so a host
       // that predates one still accepts the runtime's capabilities.
-      features: ["previewStylesheet", "setPlayback", "previewInsert", "clearPreviewInserts"],
+      features: ["previewStylesheet", "setPlayback", "previewInsert", "clearPreviewInserts", "previewHistory"],
     });
     expect(handshake?.[1]).toMatchObject({ targetOrigin: "*" });
     const framePort = handshake?.[1]?.transfer?.[0] as MessagePort;
