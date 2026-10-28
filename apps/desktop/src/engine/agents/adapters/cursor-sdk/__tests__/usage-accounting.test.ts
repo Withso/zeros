@@ -10,7 +10,7 @@ const tokens = {
   outputTokens: 10,
   cacheReadTokens: 50,
   cacheWriteTokens: 5,
-  totalTokens: 165,
+  totalTokens: 110,
 };
 const entry = (runId: string, cents?: number) => ({
   runId,
@@ -31,15 +31,15 @@ describe("Cursor owned usage", () => {
     expect(cursorRunUsage(snapshot([]), "b")).toBeUndefined();
     expect(cursorRunUsage(snapshot([entry("b", 0)]), "b")).toMatchObject({
       totalCostUsd: 0,
-      inputTokens: 155,
+      inputTokens: 100,
     });
     expect(
       cursorRunUsage(snapshot([entry("b")]), "b")?.totalCostUsd,
     ).toBeUndefined();
   });
-  it("normalizes cache-inclusive input without inventing missing counts", () => {
+  it("preserves cache-inclusive input without inventing missing counts", () => {
     expect(cursorTokenUsage(tokens)).toMatchObject({
-      inputTokens: 155,
+      inputTokens: 100,
       outputTokens: 10,
       cacheReadTokens: 50,
     });
@@ -47,6 +47,13 @@ describe("Cursor owned usage", () => {
     expect(
       cursorTokenUsage({ inputTokens: Number.NaN, outputTokens: -1 }),
     ).toBeUndefined();
+  });
+  it.each([14999, 29948, undefined])("does not add cache subsets or trust SDK total %s", totalTokens => {
+    // Numeric-only native 1.1.0 fixture: the first send wrote the prompt cache;
+    // the next read it. Input still includes both cache buckets. Older SDKs
+    // computed totalTokens differently without changing those component counts.
+    const native = { inputTokens: 14959, outputTokens: 40, cacheReadTokens: 14900, cacheWriteTokens: 49 };
+    expect(cursorTokenUsage({ ...native, totalTokens })).toEqual(native);
   });
   it("updates the earlier turn once when billing settles during the next turn", async () => {
     vi.useFakeTimers();
@@ -82,7 +89,7 @@ describe("Cursor owned usage", () => {
     await vi.advanceTimersByTimeAsync(3_000);
     expect(emit.mock.calls.at(-1)?.[1]).toMatchObject({
       totalCostUsd: 0.3,
-      inputTokens: 310,
+      inputTokens: 200,
     });
     usage.dispose();
   });

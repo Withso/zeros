@@ -113,7 +113,7 @@ it("uses cumulative wait usage and only an exact run's billed cost", async () =>
   const f = await setup();
   const frames = [{ kind: "delta", value: { type: "turn-ended", usage: { inputTokens: 500 } } },
     { kind: "message", value: { type: "usage", usage: { inputTokens: 300 } } }];
-  const result = { usage: { inputTokens: 10, cacheReadTokens: 20, cacheWriteTokens: 3, outputTokens: 4 } };
+  const result = { usage: { inputTokens: 33, cacheReadTokens: 20, cacheWriteTokens: 3, outputTokens: 4 } };
   const first = await f.driver.prompt(prompt({ frames, result, billed: { runs: [{ runId: "run-1", usage: { inputTokens: 999 }, cost: { chargedCents: 5 } }] } }));
   expect(first.usage).toMatchObject({ accountingVersion: 1, costKind: "reported", inputTokens: 33, cacheReadTokens: 20, outputTokens: 4, totalCostUsd: 0.05 });
   const second = await f.driver.prompt(prompt({ frames, result, billed: { runs: [{ runId: "different-billing-uuid", usage: result.usage, cost: { chargedCents: 5 } }] } }));
