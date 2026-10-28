@@ -76,6 +76,39 @@ export async function runDesignTransformCommitSmoke({ page, check }) {
   );
 }
 
+/** A scrub's value previews in the same frame the shared pointer owner
+ * samples its move, as a canvas drag does; a second wait for the next frame
+ * added a frame of lag to every inspector scrub. Ordering, not a timing
+ * threshold: at most the sampling frame may run between move and request. */
+export async function runDesignScrubLeadingPreviewSmoke({ page, check }) {
+  await openHeading(page);
+  await page.evaluate(async () => {
+    const { designFrameRuntime } = await import("/apps/desktop/src/renderer/platform/bridge/design-frame-runtime.ts");
+    const runtime = designFrameRuntime("ws_design_harness", "home.html");
+    const state = { tick: 0, moveTick: -1, previews: [] };
+    window.__scrubOrdering = state;
+    const count = () => { state.tick += 1; requestAnimationFrame(count); };
+    requestAnimationFrame(count);
+    window.addEventListener("pointermove", () => { state.moveTick = state.tick; }, true);
+    const previewGeometry = runtime.previewGeometry.bind(runtime);
+    runtime.previewGeometry = (...args) => {
+      state.previews.push({ tick: state.tick, moveTick: state.moveTick });
+      return previewGeometry(...args);
+    };
+  });
+  const scrub = await page.getByRole("button", { name: "Scrub Size", exact: true }).boundingBox();
+  const start = { x: scrub.x + scrub.width / 2, y: scrub.y + scrub.height / 2 };
+  await page.mouse.move(start.x, start.y);
+  await page.mouse.down();
+  await page.mouse.move(start.x + 12, start.y);
+  await expect.poll(() => page.evaluate(() => window.__scrubOrdering.previews.length)).toBeGreaterThan(0);
+  const first = await page.evaluate(() => window.__scrubOrdering.previews[0]);
+  await page.keyboard.press("Escape");
+  await page.mouse.up();
+  expect(first.tick - first.moveTick, JSON.stringify(first)).toBeLessThanOrEqual(1);
+  check("an inspector scrub previews in the frame its move is sampled, not a frame later", true);
+}
+
 export async function runDesignColorInputRacesSmoke({ page, check }) {
   await openHeading(page);
   await page.evaluate(() => {
@@ -132,6 +165,7 @@ export async function runDesignColorInputRacesSmoke({ page, check }) {
 
 export async function runDesignInspectorEditsSmoke(context) {
   await runDesignTransformCommitSmoke(context);
+  await runDesignScrubLeadingPreviewSmoke(context);
   await runDesignColorInputRacesSmoke(context);
   await runDesignPaintRemovalSmoke(context);
 }

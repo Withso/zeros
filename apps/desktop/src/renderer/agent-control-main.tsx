@@ -12,6 +12,7 @@ import { createRoot } from "react-dom/client";
 import "../../../../styles/zeros-tokens.css";
 import "../../../../styles/semantic-tokens.css";
 import "../../../../styles/globals.css";
+import "./shared/ui/focus-navigation";
 import {
   AgentControlOverlay,
   type AgentControlOverlayBridge,

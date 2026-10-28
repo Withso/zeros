@@ -382,6 +382,16 @@ describe("CursorSdkTranslator", () => {
     });
   });
 
+  it("handles adversarial image paths in linear time", () => {
+    const { t, out } = capture();
+    const start = performance.now();
+    t.feed({ type: "tool_call", call_id: "path-bounds", name: "generateImage", status: "completed", args: {}, result: {
+      status: "success", value: { filePath: "/".repeat(65_536) + "blue.png", imageData: "aGVsbG8=" },
+    } });
+    expect(performance.now() - start).toBeLessThan(500);
+    expect(updates(out)).toHaveLength(1);
+  });
+
   it("keeps screen recordings inspectable while redacting provider-local paths", () => {
     const { t, out } = capture();
     t.feed({

@@ -6,7 +6,7 @@ import { InMemorySpanExporter } from "@opentelemetry/sdk-trace";
 import {HttpError} from "./authz.js";
 import { DatabaseAcquireTimeoutError } from "./db.js";
 
-import { createApp } from "./app.js";
+import { createApp, type CreateAppDependencies } from "./app.js";
 import type { Config, GithubBackendConfig } from "./config.js";
 import { configureControlPlaneTracing, shutdownControlPlaneTracing } from "./tracing.js";
 
@@ -391,6 +391,57 @@ describe("app assembly — GitHub App registered", () => {
     expect(response.status).toBe(401);
     expect(response.headers.get("cache-control")).toBe("no-store");
     expect(response.headers.get("pragma")).toBe("no-cache");
+  });
+});
+
+describe("app assembly — cloud GitHub connections", () => {
+  function cloudDependencies(callback = vi.fn(async () => {})): CreateAppDependencies {
+    return { cloudV2: {
+      routes: { store: {}, computers: {}, bridgeBaseUrl: "wss://api.example.test",
+        githubConnections: { callback, authorizeRepositoryConfiguration: vi.fn() } },
+      workers: {}, proxy: {},
+    } } as unknown as CreateAppDependencies;
+  }
+
+  it.each([true, false])("requires authentication for App and PAT routes (App configured=%s)", async configured => {
+    const app = createApp(config(configured ? githubConfig : null), pool, emailConfig as never, cloudDependencies());
+    for (const [method, path] of [
+      ["GET", "/v1/cloud-v2/github/connection"],
+      ["POST", "/v1/cloud-v2/github/connection"],
+      ["GET", "/v1/cloud-v2/github/repositories"],
+    ]) {
+      const response = await app.request(path!, { method });
+      expect(response.status).toBe(401);
+      expect(response.headers.get("cache-control")).toBe("no-store");
+      expect(response.headers.get("pragma")).toBe("no-cache");
+    }
+  });
+
+  it("dispatches cloud OAuth from the browser without returning credentials or Local handoff data", async () => {
+    const callback = vi.fn(async () => {}), state = `zcg_${"a".repeat(43)}`;
+    const app = createApp(config(githubConfig), pool, emailConfig as never, cloudDependencies(callback));
+    const response = await app.request(`/v1/github/oauth/callback?state=${state}&code=synthetic-code`);
+    expect(response.status).toBe(200);
+    expect(callback).toHaveBeenCalledExactlyOnceWith(state, "synthetic-code", false);
+    expect(response.headers.get("cache-control")).toBe("no-store");
+    expect(response.headers.get("referrer-policy")).toBe("no-referrer");
+    expect(response.headers.get("content-security-policy")).toContain("default-src 'none'");
+    expect(response.headers.get("location")).toBeNull();
+    const html = await response.text();
+    expect(html).toContain("Return to Zeros");
+    expect(html).not.toContain(state);
+    expect(html).not.toContain("synthetic-code");
+  });
+
+  it("keeps non-cloud states on the Local single-use handoff route", async () => {
+    const callback = vi.fn(async () => {}), query = vi.fn(async (_sql: string) => ({ rows: [] }));
+    const localPool = { connect: async () => ({ query, release: vi.fn() }) } as unknown as pg.Pool;
+    const app = createApp(config(githubConfig), localPool, emailConfig as never, cloudDependencies(callback));
+    const response = await app.request(`/v1/github/oauth/callback?state=${"b".repeat(43)}&code=synthetic-code`);
+    expect(response.status).toBe(422);
+    expect(await response.json()).toMatchObject({ error: { code: "oauth_state_expired" } });
+    expect(callback).not.toHaveBeenCalled();
+    expect(query.mock.calls.some(([sql]) => String(sql).includes("DELETE FROM github_oauth_states"))).toBe(true);
   });
 });
 

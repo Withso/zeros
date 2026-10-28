@@ -19,7 +19,9 @@ import type {
 // ──────────────────────────────────────────────────────────
 
 import type { RuntimeClient } from "./ws-client";
-import { cloudWorkspaceKey, parseCloudScopedId } from "./cloud-workspace-key";
+import { cloudTargetForValue, cloudWorkspaceKey, parseCloudScopedId } from "./cloud-workspace-key";
+import { CLOUD_GITHUB_PR_OPERATIONS } from "@zeros/protocol/cloud-github-pr";
+import { requestCloudGithubPr, cloudGithubPrAuthority } from "../cloud-github-pr";
 import { prepareCloudPromptErasure } from "../cloud-prompt-erasure";
 import { WorkspaceRuntimeClient, type ChatSnapshotRefresh } from "./workspace-runtime-client";
 import type { BridgeMessage } from "./messages";
@@ -152,6 +154,23 @@ export async function workspaceOp(
   params: Record<string, unknown> = {},
   timeoutMs = 10_000,
 ): Promise<unknown> {
+  if (CLOUD_GITHUB_PR_OPERATIONS.has(op)) {
+    const target = cloudTargetForValue(params.workspaceId);
+    if (target) {
+      if (op === "gh.prCreate") {
+        await requestCloudGithubPr(target, "gh.repoAccess", {});
+        const before = cloudGithubPrAuthority(target);
+        if (!before) throw new Error("Refresh this workspace's GitHub connection before publishing.");
+        await workspaceOp(bridge, "workspace.prepareGithub", { workspaceId: params.workspaceId, branch: before.branch, baseBranch: before.baseBranch }, 150_000);
+        await requestCloudGithubPr(target, "gh.repoAccess", {});
+        const after = cloudGithubPrAuthority(target);
+        if (!after || before.connectionGeneration !== after.connectionGeneration || before.repositoryId !== after.repositoryId ||
+          before.repository !== after.repository || before.branch !== after.branch || before.baseBranch !== after.baseBranch)
+          throw new Error("Your GitHub connection or branch changed after publishing. Refresh before creating the pull request.");
+      }
+      return requestCloudGithubPr(target, op, params);
+    }
+  }
   const tracked = GIT_OP_ANALYTICS[op];
   const resp = (await bridge.request(
     { type: "WORKSPACE_REQUEST", op, params } as Partial<BridgeMessage> & {

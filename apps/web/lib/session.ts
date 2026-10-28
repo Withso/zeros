@@ -1,12 +1,14 @@
-// Provider-neutral browser-session facade. Auth0 compatibility sessions remain
-// in KV; WorkOS sessions are opaque-cookie lookups through the control plane and
-// never expose refresh material to Pages or the browser.
+// Provider-neutral browser-session facade. Auth0 compatibility sessions
+// use a PostgreSQL authority; WorkOS sessions are opaque-cookie lookups through
+// the control plane and never expose refresh material to Pages or the browser.
 //
 import {
   configuredAuthProvider,
   readWorkOSBrowserSession,
   refreshWorkOSBrowserSession,
 } from "./workos-browser.mjs";
+
+import { auth0SessionAuthority } from "./auth0-session-authority";
 
 export interface Env {
   /** Explicit deployment identity. Required by the Cloudflare build guard. */
@@ -18,6 +20,8 @@ export interface Env {
   AUTH0_DOMAIN: string;
   AUTH0_CLIENT_ID: string;
   AUTH0_CLIENT_SECRET: string;
+  /** Server-only key shared with the PostgreSQL session authority. */
+  AUTH0_SESSION_AUTHORITY_KEY?: string;
   /** Auth0 API identifier (defaults in lib/oauth.ts to https://api.zeros.build). */
   AUTH0_AUDIENCE?: string;
   /**
@@ -58,7 +62,7 @@ export type SessionData = {
   refreshToken: string | null;
   /** Epoch ms of the last time this session was proven live against Auth0
    *  (created or successfully refreshed). Drives periodic revalidation so a
-   *  deleted/blocked user's 30-day KV session doesn't keep showing "signed in".
+   *  deleted/blocked user's 30-day session doesn't keep showing "signed in".
    *  Optional: sessions minted before this field existed revalidate on next read. */
   verifiedAt?: number;
 };
@@ -74,10 +78,10 @@ export type SessionSnapshot = {
 };
 
 export const SESSION_COOKIE = "zeros_session";
-export const SESSION_TTL_S = 60 * 60 * 24 * 30; // 30 days — the KV entry's TTL
+export const SESSION_TTL_S = 60 * 60 * 24 * 30; // Immutable absolute browser-session lifetime
 
 /** How stale a session may get before the next read re-proves it against Auth0.
- *  A KV session is otherwise a 30-day cache that never rechecks the IdP. */
+ * Durable revocation and the absolute expiry are checked on every read. */
 export const SESSION_REVALIDATE_AFTER_MS = 60 * 60 * 24 * 1000; // 24h
 
 export function parseCookieHeader(
@@ -97,10 +101,7 @@ export function parseCookieHeader(
   return out;
 }
 
-/** Read the live browser session (cookie → selected provider authority), with
- *  its session id. Auth0 callers may write an updated KV session back (see
- *  refreshGrant's rotation note); WorkOS reads the control-plane database. Returns null
- *  if signed out or the session has expired/been evicted. */
+/** Read the opaque cookie through the selected durable session authority. */
 export async function getSessionWithId(
   env: Env,
   request: Request,
@@ -108,16 +109,14 @@ export async function getSessionWithId(
   if (configuredAuthProvider(env) === "workos") {
     return readWorkOSBrowserSession(env, request);
   }
-  if (!env.SESSIONS) {
-    throw new Error(
-      "SESSIONS KV binding is not configured on this Pages project/environment — check Settings > Functions > KV namespace bindings.",
-    );
-  }
   const cookies = parseCookieHeader(request.headers.get("Cookie") ?? "");
-  const sessionId = cookies.find((c) => c.name === SESSION_COOKIE)?.value;
-  if (!sessionId) return null;
-  const raw = await env.SESSIONS.get(`session:${sessionId}`);
-  return raw ? { sessionId, data: JSON.parse(raw) as SessionData } : null;
+  const sessionId = cookies.find(c => c.name === SESSION_COOKIE)?.value;
+  if (!sessionId || !/^[A-Za-z0-9_-]{43}$/.test(sessionId)) return null;
+  const result = await auth0SessionAuthority(env, { action: "read", sessionId });
+  return result.status === "terminal" ? null : {
+    sessionId, data: result.data, revision: result.revision,
+    refreshStatus: result.status === "busy" ? "transient" : "active",
+  };
 }
 
 /** Convenience wrapper for callers that only need the session data. */
@@ -129,55 +128,18 @@ export async function getSession(
   return result?.data ?? null;
 }
 
-/** Like getSession, but re-proves the session against Auth0 once it's older than
- *  SESSION_REVALIDATE_AFTER_MS. Returns null (and clears the KV record) if the
- *  refresh grant is terminally rejected — i.e. the user was deleted, blocked, or
- *  their tokens revoked — so the hub stops rendering "signed in" for a dead
- *  account. Transient Auth0 outages keep the session (fail safe). Use this on
- *  page-render paths; mint/redeem already refresh, so they use getSession*.
- *
- *  Rotation-race guard: with Refresh Token Rotation on, two concurrent tabs
- *  could each consume the same refresh token — the loser gets invalid_grant and
- *  would wrongly nuke a LIVE session. A short KV lock collapses that to one
- *  revalidation at a time (best-effort; KV isn't atomic, but it removes the
- *  common multi-tab case). */
+/** Revalidate Auth0 periodically. The durable refresh lease serializes token
+ * rotation across regions; no cache write can create or revive a session. */
 export async function getVerifiedSessionWithId(
   env: Env,
   request: Request,
 ): Promise<SessionSnapshot | null> {
-  // Railway refreshes before returning a near-expiry access token and
-  // serializes every exchange for this opaque session id in PostgreSQL.
-  if (configuredAuthProvider(env) === "workos") {
-    return getSessionWithId(env, request);
-  }
   const found = await getSessionWithId(env, request);
-  if (!found) return null;
-  const { sessionId, data } = found;
-
-  const age = Date.now() - (data.verifiedAt ?? 0);
-  if (age < SESSION_REVALIDATE_AFTER_MS) return found; // still fresh
-  if (!data.refreshToken) return found; // nothing to re-prove with; leave as-is
-
-  const lockKey = `reval-lock:${sessionId}`;
-  if (await env.SESSIONS.get(lockKey)) return found; // another request is on it
-  await env.SESSIONS.put(lockKey, "1", { expirationTtl: 60 });
-
-  const granted = await refreshGrant(env, data.refreshToken);
-  if (granted.ok) {
-    const updated: SessionData = {
-      ...data,
-      accessToken: granted.data.access_token,
-      refreshToken: granted.data.refresh_token ?? data.refreshToken,
-      verifiedAt: Date.now(),
-    };
-    await putSession(env, sessionId, updated, SESSION_TTL_S);
-    return { sessionId, data: updated };
-  }
-  if (granted.terminal) {
-    await env.SESSIONS.delete(`session:${sessionId}`);
-    return null;
-  }
-  return found; // transient outage — keep the session, retry on the next read
+  if (!found || configuredAuthProvider(env) === "workos" || found.refreshStatus === "transient") return found;
+  if (Date.now() - (found.data.verifiedAt ?? 0) < SESSION_REVALIDATE_AFTER_MS || !found.data.refreshToken) return found;
+  const refreshed = await refreshBrowserSession(env, found.sessionId, found.data, found.revision);
+  if (refreshed.ok) return { sessionId: found.sessionId, data: refreshed.data, revision: refreshed.revision };
+  return refreshed.terminal ? null : { ...found, data: { ...found.data, accessToken: "", refreshToken: null }, refreshStatus: "transient" };
 }
 
 /** Verified session data for page-render callers that do not need to rotate it
@@ -207,15 +169,13 @@ type RefreshResponse = {
  *                  rather than sign the user out on a network blip. */
 export type RefreshResult =
   | { ok: true; data: RefreshResponse }
-  | { ok: false; terminal: boolean };
+  | { ok: false; terminal: boolean; ambiguous?: boolean };
 
 export type BrowserSessionRefreshResult =
-  | { ok: true; data: SessionData }
+  | { ok: true; data: SessionData; revision?: number }
   | { ok: false; terminal: boolean };
 
-/** Refresh the selected provider's browser session. WorkOS performs and
- * persists the serialized rotation in the control-plane database. Auth0 retains the
- * released KV behavior until the compatibility provider is removed. */
+/** Refresh under the selected provider\'s durable session authority. */
 export async function refreshBrowserSession(
   env: Env,
   sessionId: string,
@@ -227,30 +187,42 @@ export async function refreshBrowserSession(
     if (result.status === "active") return { ok: true, data: result.data };
     return { ok: false, terminal: result.status === "terminal" };
   }
-  if (!current.refreshToken) return { ok: false, terminal: false };
-  const granted = await refreshGrant(env, current.refreshToken);
-  if (!granted.ok) return granted;
-  const updated: SessionData = {
-    ...current,
-    accessToken: granted.data.access_token,
-    refreshToken: granted.data.refresh_token ?? current.refreshToken,
-    verifiedAt: Date.now(),
-  };
-  await putSession(env, sessionId, updated, SESSION_TTL_S);
-  return { ok: true, data: updated };
+  let admitted;
+  try {
+    const observed = revision === undefined ? await auth0SessionAuthority(env, { action: "read", sessionId }) : null;
+    if (observed?.status === "terminal") return { ok: false, terminal: true };
+    if (observed?.status === "busy") return { ok: false, terminal: false };
+    admitted = await auth0SessionAuthority(env, { action: "begin", sessionId, revision: revision ?? observed!.revision });
+    if (admitted.status === "terminal") return { ok: false, terminal: true };
+    if (admitted.status === "busy") return { ok: false, terminal: false };
+    if (admitted.status === "active") return { ok: true, data: admitted.data, revision: admitted.revision };
+    const lease = admitted.lease!;
+    if (!admitted.data.refreshToken) {
+      await auth0SessionAuthority(env, { action: "release", sessionId, lease, terminal: false });
+      return { ok: false, terminal: false };
+    }
+    const granted = await refreshGrant(env, admitted.data.refreshToken);
+    if (!granted.ok) {
+      // A lost provider response may already have rotated the token. Leave the
+      // lease fenced until its deadline; never start a second ambiguous grant.
+      if (!granted.ambiguous)
+        await auth0SessionAuthority(env, { action: "release", sessionId, lease, terminal: granted.terminal });
+      return granted;
+    }
+    const committed = await auth0SessionAuthority(env, { action: "commit", sessionId, lease, data: {
+      ...admitted.data, accessToken: granted.data.access_token,
+      refreshToken: granted.data.refresh_token ?? admitted.data.refreshToken, verifiedAt: Date.now(),
+    } });
+    return committed.status === "active"
+      ? { ok: true, data: committed.data, revision: committed.revision }
+      : { ok: false, terminal: committed.status === "terminal" };
+  } catch { return { ok: false, terminal: false }; }
 }
 
-/** One extra /oauth/token refresh-grant call against Auth0, producing a token
- *  pair distinct from whatever the browser hub is currently holding — this is
- *  what makes the desktop's handoff session independently revocable rather than
- *  a literal copy of the browser's tokens.
- *
- *  NOTE: whether this call rotates the underlying Auth0 refresh token (and thus
- *  requires writing the rotated value back into the browser's own KV session so
- *  its NEXT refresh doesn't fail) depends on the tenant's Refresh Token Rotation
- *  setting — verify against the Auth0 dashboard during setup. This function
- *  always returns the response verbatim; the caller decides what to persist
- *  where. */
+/** Exchange the provider grant only while holding the durable refresh lease.
+ * The caller commits any rotated token before exposing the replacement bearer.
+ * Device capabilities are separately revocable references to this grant;
+ * another refresh call does not create an independent provider token family. */
 export async function refreshGrant(
   env: Env,
   refreshToken: string,
@@ -259,6 +231,8 @@ export async function refreshGrant(
   try {
     res = await fetch(`https://${env.AUTH0_DOMAIN}/oauth/token`, {
       method: "POST",
+      signal: AbortSignal.timeout(10_000),
+      redirect: "manual",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
         grant_type: "refresh_token",
@@ -270,13 +244,17 @@ export async function refreshGrant(
   } catch {
     // Network/DNS/TLS failure reaching Auth0 — transient, do NOT treat the
     // refresh token as dead.
-    return { ok: false, terminal: false };
+    return { ok: false, terminal: false, ambiguous: true };
   }
   if (res.ok) {
     try {
-      return { ok: true, data: (await res.json()) as RefreshResponse };
+      const data = (await res.json()) as RefreshResponse;
+      if (typeof data.access_token !== "string" || !data.access_token || data.access_token.length > 32_768 ||
+        (data.refresh_token !== undefined && (typeof data.refresh_token !== "string" || !data.refresh_token || data.refresh_token.length > 32_768)) ||
+        !Number.isFinite(data.expires_in) || data.expires_in <= 0) throw new Error("Invalid grant");
+      return { ok: true, data };
     } catch {
-      return { ok: false, terminal: false };
+      return { ok: false, terminal: false, ambiguous: true };
     }
   }
   // Only an explicit Auth0 rejection of the grant is terminal (invalid_grant on
@@ -293,16 +271,5 @@ export async function refreshGrant(
     res.status === 401 ||
     res.status === 403 ||
     (res.status === 400 && errorCode === "invalid_grant");
-  return { ok: false, terminal };
-}
-
-export async function putSession(
-  env: Env,
-  sessionId: string,
-  data: SessionData,
-  ttlSeconds: number,
-): Promise<void> {
-  await env.SESSIONS.put(`session:${sessionId}`, JSON.stringify(data), {
-    expirationTtl: ttlSeconds,
-  });
+  return { ok: false, terminal, ambiguous: !terminal && res.status !== 429 };
 }

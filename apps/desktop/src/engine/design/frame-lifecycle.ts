@@ -94,7 +94,7 @@ import {
   type DesignRelocation,
   type DesignMovementGuard,
 } from "@zeros/protocol/design-relocation";
-import { assertDesignRelocationSource, designRelocationRootStyles } from "./relocation-source";
+import { assertDesignRelocationSource, designRelocationFlowRootStyles, designRelocationRootStyles } from "./relocation-source";
 
 export async function createDesignFrame(
   workspacePath: string,
@@ -1103,12 +1103,21 @@ export async function transferDesignNode(
         },
       };
     }
-    const styles = relocationStyles
+    // A drop slot in an auto layout (flex or grid) places the layer itself;
+    // it joins that flow with its appearance and pose, not its free offset.
+    const flowSlot =
+      relocationStyles !== null &&
+      input.destinationFrame !== undefined &&
+      (input.styles?.position === "relative" || input.styles?.position === "static");
+    const placedStyles = flowSlot
+      ? designRelocationFlowRootStyles(input.relocation, input.styles!)
+      : relocationStyles;
+    const styles = placedStyles
       ? {
           ...(input.frameBackground && wholeFrame
             ? { "background-color": input.frameBackground }
             : {}),
-          ...relocationStyles,
+          ...placedStyles,
         }
       : (input.destinationFrame
         ? (input.styles ?? {})

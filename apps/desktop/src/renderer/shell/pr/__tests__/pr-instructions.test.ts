@@ -3,6 +3,16 @@ import { describe, it, expect } from "vitest";
 import { buildPrInstructions, prBubbleDisplayText } from "../pr-instructions";
 
 describe("buildPrInstructions", () => {
+  it("scopes cloud commits to intended paths and retains unrelated edits", () => {
+    const out = buildPrInstructions({
+      branch: "feature", baseBranch: "main", uncommittedCount: 3,
+      hasUpstream: false, draft: false, placement: "cloud",
+    });
+    expect(out).toContain("stage only the intended paths");
+    expect(out).toContain("Preserve unrelated staged and unstaged changes");
+    expect(out).not.toContain("git add -A");
+    expect(out).toContain("--body-file");
+  });
   it("interpolates branch, target, and the exact push/create commands", () => {
     const out = buildPrInstructions({
       branch: "zeros/my-feature",

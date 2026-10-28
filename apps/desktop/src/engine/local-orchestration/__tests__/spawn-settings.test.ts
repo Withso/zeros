@@ -135,6 +135,11 @@ describe("new chat settings", () => {
     expect(resolve({ agent: "claude" }, cursorParent)).toMatchObject({ modeId: "bypass", level: "full" });
   });
 
+  it.each(["constructor", "__proto__", "toString", "unknown"])("refuses an unknown parent mode %s instead of dropping its ceiling", (mode) => {
+    expect(() => resolve({ mode: "bypass" }, parent({ lastModeId: mode, permissionMode: mode }))).toThrow(/permission|mode/i);
+    expect(() => resolve({}, parent({ lastModeId: mode }))).toThrow(/permission|mode/i);
+  });
+
   it("reads modes from the live session first, then the row", () => {
     expect(chatModeOf(parent(), "plan")).toEqual({ modeId: "plan", level: "plan" });
     expect(chatModeOf(parent({ lastModeId: null, permissionMode: "tool-approval" }))).toEqual({ modeId: "default", level: "ask" });

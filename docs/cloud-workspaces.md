@@ -9,7 +9,10 @@ keep their own engine, provider permissions and Host lifecycle.
 Cloud requires a non-personal organization with `cloud_workspaces_allowed`.
 Only the workspace creator can list, connect to or manage it, and they must
 still belong to that organization. Organization admins manage the shared
-Cloud Computer; ordinary members can read its installed repository list.
+Cloud Computer. Each person must also have current GitHub access to every
+repository whose source is present in their workspace. Repository lists are
+filtered through that person's GitHub connection; organization membership or
+the GitHub App's installation alone does not grant repository access.
 
 ## VM, connections and runtime
 
@@ -51,7 +54,7 @@ and workspace authorization loss still revoke the whole workspace room.
 The worker keeps outbound HTTPS to the control plane under
 `/v2/cloud/worker/*` for work that continues without an attached app: `hello`
 and configuration, the history mirror, activity reports and GitHub
-installation tokens. Each request carries the worker credential and the
+credentials. Each request carries the worker credential and the
 worker's boot identity; history batches are sequenced per boot so a retried
 batch is a no-op. A renderer `workspace.list` row from the worker uses native
 paths and the workspace UUID, not the HTTP workspace document shape; the
@@ -77,23 +80,36 @@ as unbuilt changes, with Discard and Build computer; nothing changes for
 workspaces until a build succeeds. Older apps that send the repositories with
 the build still work, and their selection becomes the configured recipe.
 
-A build starts from the live snapshot when there is one, otherwise from Boat's
-stock image. It installs the runtime, then fetches existing checkouts and moves
-them to the recipe's ref in place, keeping ignored files such as installed
-dependencies. It clones added repositories, deletes removed ones and runs the
-setup scripts. It records each repository's branch and commit and the runtime it
-cached. A successful build becomes the active snapshot, and the temporary
-builder is deleted. An inactive build's snapshot is deleted once no creating
-workspace still needs it; its recipe stays in the history. Activating an older
-build rebuilds it at the same commits and makes its repositories the configured
-ones. If Boat no longer has the live snapshot, the build fails and the next one
-starts clean.
+A build always starts from Boat's stock image. It installs the pinned runtime
+and waits for Boat to finish capturing a clean snapshot **before** delivering
+any repository credential, cloning source or running recipe scripts. It then
+validates the repositories and setup scripts on the disposable builder,
+recording each branch and commit. Only a successful validation makes that
+snapshot active. The shared image caches the runtime; it contains no project
+checkouts, dependency trees or setup outputs. Deleting a checkout after setup
+would not establish this boundary, because setup can copy source elsewhere.
+
+The builder is deleted afterward. An inactive snapshot is deleted once no
+creating workspace still needs it; its recipe remains in history. Activating
+an older build rebuilds its selected commits on a fresh stock image and makes
+its repositories the configured recipe. Build admission, execution and
+activation require the original creator to remain an organization admin.
+Queued work is cancelled if that authority is lost. Build logs require admin
+access and personal access to every recorded source ID, checked together before
+and after the log read. Before queueing a build, the server records each
+repository's immutable GitHub ID separately from the public recipe. Failed and
+partial builds retain those identities. A retained recipe never obtains a new
+identity merely because its old owner/name now names another repository.
+Reactivation and refresh carry the original IDs and pinned setup selection.
+The clone uses the verified current canonical remote while its directory and
+recipe path stay unchanged. Unknown legacy provenance blocks log access,
+reactivation and automatic refresh; the logs and recipes remain stored.
 
 The builder also refreshes the snapshot without being asked. A new runtime pin
-refreshes the runtime only, without Git or setup, so creates and wakes stop
-downloading it. A snapshot whose build recorded no runtime, from before builds
-did, is refreshed the same way. A refresh installs the runtime it was queued
-for, even when a process still on the previous pin picks it up during a deploy.
+queues another clean image and validates the recipe on its disposable builder,
+including Git and setup. A snapshot whose build recorded no runtime is
+refreshed the same way. A refresh installs the runtime it was queued for, even
+when a process still on the previous pin picks it up during a deploy.
 Failures are retried after six hours, at most three times per pin. Builds and
 their cleanup hold their locks on a separate two-connection pool, so the
 lifecycle's two database connections stay free. Once a day, an organization that used cloud workspaces in the last week is
@@ -107,10 +123,55 @@ refreshed this way. Scans run beside build admission, never ahead of it. Each
 lifecycle process runs one build at a time: a build holds a dedicated lock
 connection for its whole run.
 
-New workspaces fork the snapshot of the build they pinned at creation. The
-worker fetches origin and switches to the workspace branch, creating it from
-the selected base only when absent; it never resets an existing branch.
-Runtime updates never require a manual rebuild of the Cloud Computer.
+New workspaces fork the clean snapshot of the build they pinned at creation.
+After checking the creator's repository access, the control plane clones only
+the selected repository into that VM. The worker switches to the workspace
+branch, creating it from the selected base only when absent; it never resets
+an existing branch. Setup runs inside the individual workspace. Creation and
+replacement-VM restore therefore need GitHub and can take longer; ordinary
+wakes preserve the existing disk and installed dependencies. Runtime updates
+continue to refresh automatically. The transition from legacy source-bearing
+images requires the coordinated rebuild described below.
+
+Repository authorization uses the immutable GitHub user ID and the exact
+connection generation, verifies read or write permission as needed, and
+mints installation tokens for explicit repositories and permissions only.
+Additional repositories need separate authorization; a shared recipe is not a
+credential grant. New connections, create/wake/restore, GitHub credentials and
+PR actions require source verification no older than 30 seconds, measured
+before remote I/O. Running workspaces reuse exact-source permission evidence
+for ten minutes, then refresh it on actual work in the background. During a
+GitHub outage or rate limit, existing chat, files, terminal, history and model
+proxy requests can continue for at most one hour from the original successful
+verification. Failures never restart that clock. Confirmed denial, disconnected
+credentials, changed connection generations and unverified source IDs cannot
+use grace. Organization membership, worker boot and app session checks still
+apply independently.
+
+The relay's 30-second transport heartbeat sends only socket pings; it does not
+poll GitHub, login revisions or per-workspace database authority. Security and
+login notifications invalidate observations, and actual traffic repairs missed
+notifications and checks session expiry. Permission refreshes share a bounded
+cache and one in-flight check per actor within a replica. Durable observations,
+short compare-and-set claims and actor cooldowns coalesce replicas. Transient
+failures back off from one to fifteen minutes, with bounded jitter, and respect
+GitHub's longer retry delay. An idle workspace does not refresh GitHub access.
+
+Current authenticated worker activity records independently of GitHub, even
+with the prompt outbox disabled, so an outage cannot make an active turn look
+idle. Configuration refreshes can reuse the previously verified canonical
+repository ID while applying current provider/MCP changes. Healthy source
+verification also refreshes the canonical name and notifies the worker after a
+rename or transfer, reusing the same GitHub response. Database timestamps keep
+late responses from undoing a newer binding. Configuration refreshes never issue
+GitHub tokens from stale evidence. Stop remains available. Grace expiry blocks
+further protected requests with a retryable availability error; it is not
+reported as an access revocation and does not delete work. A confirmed GitHub
+denial withdraws the grant and initiates stopping.
+Confirmed access loss stops a running workspace while retaining its disk and
+checkpoint. Stop and Delete remain available for cleanup. Revocation does not
+erase source or credentials already delivered to the VM; the VM remains one
+trust domain.
 
 ## Testing a branch
 
@@ -128,15 +189,33 @@ the upstream credential and ChatGPT renewal stay in the control plane.
 Each child receives only its own login through a shared environment allowlist.
 Config refreshes replace the entire configuration; idle drivers reopen as
 needed, while active turns keep their spawn-time credentials. Git and `gh`
-request short-lived GitHub installation tokens through the worker's broker.
-Credentials must never be written to transcripts, command arguments or logs.
+request credentials from the creator's selected cloud GitHub connection through
+the worker's broker. With the GitHub App selected, Git receives an installation
+token narrowed to the pinned repository and the human's current read/write
+permission; `gh` receives the human's App user token. With PAT selected, both
+receive that PAT. Broker caching is bounded to two minutes, but does not shorten
+a credential's GitHub lifetime or reduce a PAT's scopes. A user token delivered
+to the VM can be used by any process there, including other agent sessions.
+Control-plane clone commands receive their one-command authorization header
+through a private Boat file upload, opened and unlinked before execution, then
+passed on stdin. Git reads it through an environment reference. Neither the
+token nor its encoded header belongs in command arguments, remote URLs,
+transcripts or logs. This protects command metadata, not other processes
+already running with the same VM permissions.
 
 Customize stores organization MCP definitions separately from provider logins.
 Definitions can be organization-shared or private to one member and can target
 all repositories or one admitted GitHub `owner/repo`. The control plane
 encrypts variable/header/client-secret values, OAuth attempts and per-user
 grants; edits use definition revisions and recheck membership, role and
-repository admission. Each member authorizes their own account for a shared
+repository admission. New scoped definitions record the repository's immutable
+GitHub ID from the selected cloud connection or refreshed native admission.
+Cloud workers resolve scoped definitions by their original source ID, so a
+transfer retains tools and a replacement at the old name receives no secrets.
+Name-only legacy definitions remain stored and keep their Local compatibility;
+an authorized editor must save them with verified repository access before they
+can be delivered to cloud. The server never backfills them from today's names.
+Each member authorizes their own account for a shared
 OAuth definition. A denied provider callback settles the attempt immediately.
 OAuth discovery honors the resource's advertised protected-resource metadata.
 
@@ -202,6 +281,91 @@ recording, installed on create or wake; older turns without snapshots do not
 gain a reconstructed comparison. Older workers may still refuse `turns.list`,
 which the renderer treats as unavailable history. Reset/undo remain Local-only.
 
+## Cloud GitHub connections and pull requests
+
+Settings → Integrations offers **Zeros GitHub App** and **Personal Access
+Token** for each person's selected organization. Both credentials can be saved;
+only the explicitly selected method is used. Connecting, selecting, replacing
+or disconnecting one method never imports a Mac login, borrows an administrator's
+connection, or silently switches to the other method. Local Personal and
+organization-local connections keep their existing native vault and behavior.
+
+GitHub sign-in identifies the human by GitHub's immutable user ID. The Zeros
+account email establishes no GitHub permissions. App access is the intersection
+of that human's repository rights and the App installation's selected
+repositories and permissions. A PAT uses its own GitHub scopes, selected
+repositories, organization approval and SSO restrictions. Prefer a fine-grained
+PAT with only the repositories and permissions the workspace needs. Repository
+lists omit undiscoverable repositories and label entries without push rights as
+read only. GitHub may intentionally return the same refusal for a missing
+repository and one the caller cannot access; Zeros does not infer which it is.
+
+The control plane encrypts credentials with its versioned vault keyring.
+OAuth uses a single-use, ten-minute state and PKCE. App-token renewal uses a
+durable lease: an ambiguous refresh is not replayed with a potentially consumed
+refresh token. Reconnect starts a new generation. Every operation checks the
+selected connection, account and organization membership; late callbacks,
+credential requests and responses cannot restore an earlier generation.
+Renderer snapshots contain connection health and the GitHub login, never
+saved credential material. Disconnect withdraws future broker access; it does
+not revoke copies already delivered to the VM at GitHub. Revoking such a
+credential requires GitHub's own token/App authorization controls.
+
+New workspaces record the immutable repository ID from the selected build's
+server-owned provenance. Creation rechecks this mapping under the same lock
+that pins the active build; a second lookup of the mutable name cannot replace
+it. The installed-repository picker shows the current canonical name while
+checkout, default branch and setup retain the original recipe binding. All
+later source checks retain the original source ledger and resolve its pinned IDs.
+A verified rename or transfer updates the displayed canonical name, GitHub
+links and eligible `origin` fetch/push URLs. The checkout path, workspace ID,
+working files, staged changes and original source scope stay intact. Custom
+fork destinations, URL rewrites and concurrent Git configuration edits are
+preserved. A reused old `owner/name` cannot redirect PR or source operations
+to a different repository. Moving to another repository is a separate explicit
+selection; it is not a transfer of the original ID.
+
+Organization MCP settings retain **On this Mac** as their default repository
+connection. Selecting **Cloud** explicitly uses the saved cloud method and its
+repository catalog. A restore onto a newer clean Computer never runs setup
+from a different repository that reused an original source name.
+
+Once the worker has reported its checkout and the source scope is authorized,
+the workspace advertises `githubPullRequests: 1`. Published PR discovery,
+status, checks, commits, reviews, diff and inline discussions use authenticated
+HTTPS to the control plane. These reads also work while the VM is stopped.
+Private workspace comments remain unavailable in cloud; a GitHub reply or
+line comment is explicitly posted to the PR and never written to Local SQLite.
+
+Create PR requires a running checkout. The primary action gives the agent a
+branch-specific instruction using the selected cloud connection, and refreshes
+discovery when that turn settles. The brief pins both its HTTPS push URL and
+`gh --repo` target to the freshly verified canonical repository; a stale or
+custom Git remote cannot replace it. Connection/branch changes while gathering
+Git facts require a refresh before the brief can be sent. The manual compare
+link uses the same verified identity. Local briefs and compare links retain
+their configured remote behavior. Direct creation uses the existing explicit
+commit-and-publish flow, then creates or adopts the exact repository/head/base
+PR. Both paths publish to the canonical repository. Cross-repository fork PRs
+are outside this implementation. HTTPS public actions and `gh` use the human's
+credential, so they are attributed to that GitHub account; a Git installation
+token does not impersonate the human as a PR author.
+
+Ready, edit, close/reopen, merge, comment, reply and resolve actions revalidate
+the connection, immutable repository, PR and displayed head/base revisions.
+GitHub enforces operation permissions, branch protection, required checks and
+reviews. A successful public write stays a successful outcome if its following
+metadata refresh fails. Connection, repository and branch changes retire
+protected PR/review caches and drafts, including switching away and back;
+hidden surfaces stop discovery, checks and review polling.
+
+An unavailable workspace keeps its recovery controls. Its PR surface explains
+whether to connect/reconnect GitHub, grant the App repository access, authorize
+SSO, check the selected account's rights, retry a provider failure, or review
+historical source provenance. Withheld PR data is not replaced by a stale
+cached discussion. A denied repository is never made accessible merely by
+belonging to its Zeros organization.
+
 ## Lifecycle
 
 Each lifecycle replica admits up to four workspace steps concurrently and
@@ -223,9 +387,9 @@ retains the VM disk and saves a checkpoint; Delete removes the VM, its
 checkpoints and its access. Account
 and organization deletion also enqueue their workspaces for cleanup.
 
-A new workspace branch starts from the Cloud Computer checkout already on
-disk, so the worker becomes ready without waiting for GitHub. At creation the
-control plane records GitHub's head of the base branch. Workers advertising
+A new workspace branch starts from the authorized checkout hydrated into its
+own VM before worker startup. At creation the control plane records GitHub's
+head of the base branch. Workers advertising
 `checkout-v2` receive it as `baseCommit` and start the branch there when the
 VM has that commit; otherwise the branch starts from the cached
 `origin/<baseBranch>`. The worker then fetches `origin` in the background, and
@@ -256,6 +420,20 @@ command on the VM, bounded to 540 seconds. The command stops the worker
 service, collects the checkpoint, encrypts it and uploads it through a
 presigned URL that expires in 15 minutes. Boat stops the VM only after that.
 
+A stop that finds the workspace exactly as the last checkpoint holds it keeps
+that checkpoint instead of uploading an identical one. The command compares a
+fingerprint of what it would save: the manifest, with the index and worktree
+trees in place of their commits, and digests of the ignored files,
+attachments and session files by name, kind, permission bits, link target
+and content. Times and owners never count, because the worker rewrites
+unchanged files on every boot. The fingerprint also covers the capture
+itself, so a release that changes what is saved starts a new comparison. A
+checkpoint is reused only when everything it left out is still reachable from
+the current base branch, only by the object it was recorded for, and only
+after the control plane confirms that object's stored size. A part that
+cannot be read disables reuse; it is never skipped. Each stop's `checkpoint`
+timing record says whether it saved a new checkpoint or kept the last one.
+
 A checkpoint holds:
 
 - the workspace repository's Git state: branches with their local commits,
@@ -275,16 +453,15 @@ A checkpoint holds:
 It never holds credential files, the worker token, setup status, incomplete
 attachment uploads, or other ignored
 directories such as dependencies and build outputs. Those come back from the
-Cloud Computer, the setup script and credential delivery. Git objects that the
+workspace's setup script and credential delivery. Git objects that the
 base branch already has stay out, so a checkpoint normally holds only the
 user's own work. Edits to files marked assume-unchanged or skip-worktree are
 kept and come back as ordinary unstaged changes, without the marks. Not kept:
 the commits and changes inside a submodule's or another nested repository's own
 `.git` (the Cloud Computer does not initialize submodules), and sparse-checkout
-settings. A restored workspace has a full checkout, even if the new Cloud
-Computer checkout was sparse, and every saved file comes back. Untracked files
-that the new checkout itself has, from the Cloud Computer, stay, as in any new
-workspace.
+settings. A restored workspace has a full checkout, even if the replacement
+checkout was sparse, and every saved file comes back. Restore does not remove
+untracked files in the replacement checkout.
 Ignored attachments use a separate archive, avoiding large Git objects and
 duplicate copies of files already captured by Git. Capture visits only the
 registered layout's fixed depth, skips symlinks and rejects oversized files
@@ -323,6 +500,27 @@ the latest remaining one, then prunes again.
 A failed or oversized checkpoint (over 4 GiB) never blocks the stop: the
 previous checkpoint stays, and the workspace records `checkpoint_error`.
 
+With `CLOUD_V2_CHECKPOINT_RETRY_ENABLED`, a stopped workspace whose latest
+stop has no checkpoint is retried on a fork of its stopped VM. The VM itself
+is never woken, and its creator can open it meanwhile. The first retry starts
+10 minutes after the stop; later ones back off to once a day, and none starts
+12 days after the stop, two days before Boat deletes the disk. Each lifecycle
+process runs one retry at a time, only with a slot to spare. Boat's stop
+returns while the VM is still `archiving`, for about ten seconds, and refuses
+to fork it (`409 fork_failed`) until it is `archived`, so a retry checks first.
+Boat names every fork "<source name> fork", whatever name is requested; the
+retry asks for and records exactly that name. A retry records its fork before
+requesting it and deletes it when the attempt ends; the next retry, deletion
+and the Dev drain remove a fork whose reply was lost, by replaying its request
+within Boat's key lifetime and by that name afterwards. A
+retry's writes are fenced to the stop it retries, so a newer stop, a restore
+or deletion refuses them. An oversized checkpoint or a VM Boat no longer has
+ends the retries at once. When they end without a checkpoint, the control
+plane logs `[cloud-v2] checkpoint retries exhausted (<code>)` with the
+shortened workspace ID; the workspace keeps its previous checkpoint, if any,
+for a later restore. Enable it only after forking a stopped VM is qualified
+on the deployment's Boat account.
+
 A wake whose VM Boat deleted restores the last checkpoint:
 
 1. Pin the organization's active Cloud Computer and record the restore, with its
@@ -333,15 +531,15 @@ A wake whose VM Boat deleted restores the last checkpoint:
    lifetime the VM is found by its name instead, never created twice. A late
    reply for an earlier attempt cannot take a later attempt's place, and a
    later restore uses a new attempt.
-3. Install the runtime.
+3. Install the runtime and hydrate the selected repository after rechecking
+   the creator's source access.
 4. Download the checkpoint, verify its digest and apply it, before the worker
    starts.
 5. Deliver the route and a fresh worker credential as usual.
 
-The restore fetches from GitHub, with a repository token, only when the
-Cloud Computer lacks a base commit the checkpoint needs. If the Cloud Computer
-no longer has the repository, the restore clones it. The worker then runs the
-setup once more, because the replacement VM comes from a newer Cloud Computer.
+The restore first clones the authorized repository with a scoped token, then
+fetches additional base objects if the checkpoint needs them. The worker runs
+setup once more because the clean replacement VM has no project dependencies.
 A stop or deletion during a restore still finds the replacement. A replacement
 that has not received the checkpoint is never checkpointed itself, so it cannot
 replace the real one. A restore that still fails after its retries, or runs past its 25-minute
@@ -562,6 +760,7 @@ The control plane reads these names in
 | --- | --- |
 | `CLOUD_V2_ENABLED` | Enables the v2 routes, the app bridge relay and lifecycle roles. |
 | `CLOUD_V2_PROMPT_OUTBOX_ENABLED` | Enables durable HTTPS sends and advertises `promptOutbox: 1`. Defaults to `false`; enable only with a compatible worker runtime. `electron:cloud` defaults it to `true`. |
+| `CLOUD_V2_CHECKPOINT_RETRY_ENABLED` | Retries a stop's failed checkpoint on a fork of the stopped VM. Defaults to `false`; enable only after qualifying forks of stopped VMs on the deployment's Boat account. `electron:cloud` passes it through when set. |
 | `BOAT_API_KEY`, optional `BOAT_BILLING_ORG` | Boat provisioning and billing. |
 | `CLOUD_V2_API_URL`, `CLOUD_V2_REALTIME_URL` | Public HTTPS API (also the worker's outbound origin) and the app's WSS bridge origin. |
 | `CLOUD_V2_WORKER_SIGNING_KEY`, optional `CLOUD_V2_WORKER_SIGNING_KEY_PREVIOUS` | Ed25519 PKCS#8 private key (base64 DER) that signs worker grants. VMs trust both public keys after their next create or wake, so a rotation keeps the previous key until every running VM has woken with the new trust file. |
@@ -596,6 +795,155 @@ only when its live pin is known, and `--no-prune` skips this. A removed runtime
 can be published again from the commit its index records. Tests use fake worker connections and native provider streams;
 live verification must also cover the private route, stop, offline history, wake
 and deletion.
+
+### Source-authority rollout
+
+Apply migrations `0206_github_authorization_generations.sql` and
+`0207_cloud_source_boundaries.sql` before enabling the new control-plane
+runtime, together with `0212_cloud_computer_source_provenance.sql`,
+`0214_cloud_github_source_verifications.sql` and the
+selected-credential/workspace source-ledger integration. Existing signed
+GitHub bindings do not have a grant generation:
+members reconnect GitHub through the existing flow. Empty repository scopes,
+stale generations and new permissions unavailable from GitHub fail closed.
+Existing verified running workspaces use the bounded continuation policy above.
+
+Quiesce cloud admission and drain old builders, API and relay instances during
+the cutover; an old binary does not enforce the new source policy. Use the new
+builder to rebuild each active Cloud Computer, and verify
+`state = 'succeeded'`, `source_policy_version = 2` and complete `source_targets`
+before reopening creation and checkpoint restore. New admitted builds record
+version 2 and their IDs before execution; only successful clean capture and
+source/setup validation allow activation. Migration alone does not certify an
+image, and an older builder still writes version 1 with unknown identities.
+
+Migration 0212 leaves all existing build and configured-recipe identities NULL;
+it does not infer them from today's repository names. The source binding and
+source-bearing build recipe are immutable; completion can record commits and
+branch observations. For an unverified configured recipe, an admin can remove
+its entries and save, then explicitly select and save the current repositories
+and build a new clean image. This establishes new provenance only: old logs
+stay inaccessible and old workspace source IDs are never rewritten. Use
+verified recovery evidence for old data, not a current-name lookup. A workspace
+restore can change its current Computer pin, so its original source IDs must
+remain in the independent workspace ledger. The current build is not evidence
+of an older disk's identity.
+
+Migration conservatively records every historical repository in an
+organization on its existing pinned workspaces, including removed recipe
+entries that earlier snapshots could have retained. The scope is immutable
+across wake and restore. New workspaces record only their selected repository.
+Existing workspaces without reliable provenance remain blocked for source
+review, with their files and checkpoints retained. An admin removing a recipe
+entry, switching the active image or restoring a checkpoint never narrows the
+recorded scope. Recover access by restoring the creator's repository authority
+or using an explicitly reviewed recovery process; do not clear the source
+scope to make admission succeed.
+
+Fresh admission has a maximum 30-second observation lifetime, measured from
+before remote verification starts. For a workspace with multiple source
+repositories, every observation must remain within its applicable admission
+or continuation window through the complete check and final identity reads.
+A slow check or a connection changed midway fails admission; retry can refresh
+expired observations without narrowing the recorded source scope.
+
+Migration 0214 starts with no permission evidence. It contains no credentials
+and grants access only to the system database role. Its keys include the
+organization, creator and immutable repository ID; observations also require
+the exact selected-connection fingerprint. Removing organization membership
+deletes its observations. Database-clock ages and claim generations keep slow
+responses, clock skew and superseded refreshes from extending grace. No timer
+scans this table. A replica restart can read existing evidence but cannot invent
+a new grant. The migration also records canonical-name observation timestamps,
+retaining existing bindings and aliases without creating permission evidence.
+Keep this additive migration on rollback.
+
+GitHub secondary limits can be HTTP 403 with a retry header or the documented
+rate-limit message. These are temporary; ordinary 403/404, explicit credential
+refusal and SSO requirements are denials. A failed rotating-token refresh may
+have consumed the old refresh token: an uncertain result is unavailable, never
+replayed or reported as confirmed revocation. Existing source grace remains
+bounded; reconnect the GitHub connection to restore new access if that rotation
+cannot be recovered.
+
+Before release, qualify the actual Boat file-upload permissions, snapshot
+readiness, clean disk contents, creation, stop/wake and lost-VM checkpoint
+restore. Exercise a member lacking one recipe repository and access loss while
+a workspace is connected. Confirm that setup depending on other repositories
+has separate authorization and runs successfully in a fresh individual VM.
+Mock provider tests do not establish these live properties.
+
+Rollback keeps the additive migrations and existing checkpoints. If the new
+runtime must be withdrawn, keep cloud admission closed until a compatible
+fix is deployed. Reverting to a binary that ignores source scope or reusing a
+legacy source-bearing shared image is not a safe rollback.
+
+### GitHub connection and PR rollout
+
+This extension depends on the source-authority foundation above and its
+authentication cutover, including `0208_auth0_browser_session_authority.sql`
+where Auth0 compatibility sessions are enabled. Apply the additive migrations
+in order:
+
+1. `0209_cloud_v2_github_metadata.sql` records checkout/PR metadata and operation
+   leases.
+2. `0210_cloud_github_credentials.sql` records encrypted per-person App/PAT
+   credentials, selection generations, refresh leases and OAuth state.
+3. `0211_cloud_github_source_identities.sql` pins each workspace's original
+   source names to immutable repository IDs.
+4. `0212_cloud_computer_source_provenance.sql` records Computer build, recipe
+   and log provenance. The selected cloud connection resolves these IDs for
+   build admission, credentials, repository listing, creation and log reads.
+5. `0213_mcp_repository_identities.sql` records verified repository IDs for MCP
+   definitions and native admission, and refreshes workers by their original ID.
+6. `0214_cloud_github_source_verifications.sql` shares exact-generation permission
+   observations, canonical names, refresh claims and retry delays across
+   control-plane replicas, and orders verified canonical-binding updates.
+
+The new cloud connection is independent of the earlier installation record and
+the Local GitHub login. Members must explicitly connect and select a cloud
+method, including build creators whose connection is used to validate recipes.
+Keep every encryption key version needed to open existing rows.
+
+Migration 0211 deliberately does not look up historical IDs using current
+names. A transferred name can be reused, and current access does not prove
+what source a legacy disk, checkpoint or build contained. For each legacy
+workspace, an operator must establish the original ID of **every** entry in
+its immutable source ledger from trusted admission records or equivalent
+reviewed provenance. In a scoped system transaction, lock the workspace,
+verify that original ledger and record only those proven mappings. Preserve
+all prior entries and refuse conflicting mappings. Recheck the creator's
+current access to every pinned ID before enabling reads, credentials or wake.
+There is no end-user or automatic name-based backfill endpoint. Without this
+evidence, keep `cloud_source_review_required`, the disk and the checkpoint;
+do not clear source scope, change the ID to a new name's occupant, or delete
+user work to make admission pass.
+
+Roll out the compatible database and API/relay/lifecycle code together with
+the security cutover. Publish a matching SHA-pinned worker, verify new creation
+and wake with its canonical binding and checkout report, then enable the
+desktop controls through the advertised capability. An older worker without
+checkout reports does not gain PR creation by pretending that its saved
+branch metadata is current. Existing snapshots must satisfy the clean-image
+policy before new admission or replacement restore.
+
+Before release, qualify App and PAT with allowed, denied and read-only
+repositories, SSO/installation restrictions, rotation/revocation, transfer and
+old-name reuse; exercise PR creation/discovery/checks/review and a normal
+stop/wake and lost-VM restore. Include the Computer build/log boundary in live
+qualification: verify that historical logs and recipe admission cannot
+authorize the new occupant of a reused name, and that a transfer during token
+issuance or clone prevents setup and activation. Workspaces' pinned IDs do not
+retroactively establish build provenance. Review and rebuild an unverified
+name-only recipe against the intended canonical repository before new
+admission. Offline regressions cover these checks; they do not establish the
+deployed GitHub/Boat behavior.
+
+Keep migrations and retained user data on rollback. Withdraw the new UI
+capability or close cloud admission while fixing incompatible code; never
+fall back to broad installation tokens, another person's credentials or
+legacy source-bearing images. A merged PR or published runtime alone is not
+evidence that these deployables and recovery steps have reached users.
 
 ### Outbox rollout
 

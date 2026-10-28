@@ -1,4 +1,4 @@
-import type { DesignCanvasFrameWire, DesignFrameDescriptionWire, DesignWorkspaceSnapshotWire } from "../../../platform/bridge/design-bridge";
+import type { DesignCanvasFrameWire, DesignFrameDescriptionWire, DesignFrameGeometryWire, DesignWorkspaceSnapshotWire } from "../../../platform/bridge/design-bridge";
 
 export type DesignFrameView = DesignCanvasFrameWire | (DesignFrameDescriptionWire & { previous?: DesignCanvasFrameWire });
 export function isPreparedDesignFrame(frame: DesignFrameView): frame is DesignCanvasFrameWire {
@@ -39,5 +39,30 @@ export function designFrameViews(snapshot: DesignWorkspaceSnapshotWire | undefin
     return frame && current.has(description.file) ? frame : { ...description, ...(frame ? { previous: frame } : {}) };
   });
   views.set(snapshot, result);
+  return result;
+}
+
+const placed = new WeakMap<readonly DesignFrameView[], WeakMap<ReadonlyMap<string, DesignFrameGeometryWire>, readonly DesignFrameView[]>>();
+/** Frames where Undo or Redo shows them before the engine confirms it.
+ * Painting and hit testing read these; every write still checks the
+ * confirmed catalog. Stable per frames and geometry, so hot selectors keep
+ * their references. */
+export function designFramesAtPresentedGeometry(
+  frames: readonly DesignFrameView[],
+  geometry: ReadonlyMap<string, DesignFrameGeometryWire> | null | undefined,
+): readonly DesignFrameView[] {
+  if (!geometry?.size) return frames;
+  let byGeometry = placed.get(frames);
+  if (!byGeometry) placed.set(frames, (byGeometry = new WeakMap()));
+  const cached = byGeometry.get(geometry);
+  if (cached) return cached;
+  const result = frames.map((frame) => {
+    const next = geometry.get(frame.file);
+    if (!next) return frame;
+    const place = { x: next.x, y: next.y, width: next.w, height: next.h, z: next.z };
+    if (isPreparedDesignFrame(frame)) return { ...frame, ...place };
+    return { ...frame, ...place, ...(frame.previous ? { previous: { ...frame.previous, ...place } } : {}) };
+  });
+  byGeometry.set(geometry, result);
   return result;
 }

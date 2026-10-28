@@ -8,6 +8,8 @@ import type { CloudV2MessageRow } from "./contract.js";
 import { hashCloudV2Token, newCloudV2Token } from "./tokens.js";
 import { CLOUD_V2_LIVE_ACCESS as LIVE_ACCESS } from "./workspace-access.js";
 import { CloudV2PromptOutbox } from "./prompt-outbox.js";
+import { computerSourceReviewRequired, readComputerSourceTargets } from "./computer-provenance.js";
+import { CloudSourceTargetSchema } from "./source-authority.js";
 
 import { mirrorMessageWindow, type MessageWindow, type WindowOptions } from "./history.js";
 
@@ -18,6 +20,7 @@ export type CloudV2InstalledRepository = { repository: string; defaultBranch: st
 type CreateWorkspace = {
   id: string; organizationId: string; creatorUserId: string; name: string; repository: string; branch: string;
   baseBranch: string; computerBuildId: string | null;
+  sourceRepositoryId?: string;
 };
 type CreateReceipt = { status: 201; response: Record<string, unknown> };
 type HistoryInput = {
@@ -49,8 +52,20 @@ export type CloudV2Workspace = {
   updatedAt: string;
 };
 
-/** The last confirmed checkpoint; the key is still sealed. */
-export type CloudV2Checkpoint = { object: string; key: unknown; sha256: string; bytes: number; savedAt: string; stopGeneration: string | null };
+/** What a checkpoint is compared by at the next stop: the fingerprint of what
+ * it holds and the base commit whose objects it left out. */
+export type CloudV2CheckpointReuse = { fingerprint: string; base: string | null };
+/** The last confirmed checkpoint; the key is still sealed. `reuse` is present
+ * only when it was recorded for this exact object. */
+export type CloudV2Checkpoint = { object: string; key: unknown; sha256: string; bytes: number; savedAt: string; stopGeneration: string | null;
+  reuse?: CloudV2CheckpointReuse };
+/** A fork of a stopped VM that a checkpoint retry requested, recorded before
+ * the request. `sandboxId` is null until Boat's reply arrives. */
+export type CloudV2CheckpointFork = { attempt: string; name: string; source: string; requestedAt: string; sandboxId: string | null };
+/** Which stop a checkpoint write belongs to: the one still stopping the VM,
+ * or a retry of the latest stop while that VM is stopped or woken again. */
+export type CloudV2CheckpointScope = "stop" | "retry";
+export type CloudV2CheckpointRetry = { generation: string; attempts: number; stoppedAt: string; exhaustedAt: string | null };
 
 /** Internal lifecycle metadata is never included in public workspace documents. */
 export type CloudV2LifecycleWorkspace = CloudV2Workspace & {
@@ -67,6 +82,8 @@ export type CloudV2LifecycleWorkspace = CloudV2Workspace & {
   stopGeneration: string;
   /** The latest time an upload whose outcome is unknown could still land. */
   checkpointUploadUntil: string | null;
+  /** A checkpoint retry's fork that may still exist at Boat. */
+  checkpointRetryFork: CloudV2CheckpointFork | null;
 };
 export type CloudV2RestoreCreate = { from: string; name: string; env: Record<string, string>; requestedAt: string };
 
@@ -84,24 +101,60 @@ type LifecycleRow = Row & {
   restore_create: CloudV2RestoreCreate | null; checkpoint_uploads: Record<string, string>;
   stop_generation: string; checkpoint_stop_generation: string | null;
   checkpoint_object: string | null; checkpoint_key: unknown; checkpoint_sha256: string | null; checkpoint_bytes: string | null; checkpoint_saved_at: Date | null;
+  checkpoint_reuse: unknown; checkpoint_retry_fork: unknown;
 };
 const LIFECYCLE_COLUMNS = `${COLUMNS}, lease_renewed_at, base_commit, restore_pending, restore_attempt, restore_create, checkpoint_uploads,
   stop_generation, checkpoint_stop_generation,
-  checkpoint_object, checkpoint_key, checkpoint_sha256, checkpoint_bytes, checkpoint_saved_at`;
+  checkpoint_object, checkpoint_key, checkpoint_sha256, checkpoint_bytes, checkpoint_saved_at, checkpoint_reuse, checkpoint_retry_fork`;
+type RetryRow = LifecycleRow & { retry_stopped_at: Date; checkpoint_retry_generation: string; checkpoint_retry_attempts: number; checkpoint_retry_exhausted_at: Date | null };
 
 function uploadHorizon(uploads: Record<string, string>): string | null {
   const latest = Math.max(...Object.values(uploads ?? {}).map(value => Date.parse(value)).filter(Number.isFinite));
   return Number.isFinite(latest) ? new Date(latest).toISOString() : null;
 }
 
+const FINGERPRINT = /^[0-9a-f]{64}$/, COMMIT = /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/, SANDBOX = /^bx_[a-z0-9]{4,32}$/;
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+
+/** Trusted only for the object it was recorded with; anything else, such as
+ * an object an older release saved without one, is compared by nothing. */
+function checkpointReuse(value: unknown, object: string): CloudV2CheckpointReuse | null {
+  const reuse = value as { object?: unknown; fingerprint?: unknown; base?: unknown } | null;
+  if (!reuse || reuse.object !== object || typeof reuse.fingerprint !== "string" || !FINGERPRINT.test(reuse.fingerprint)) return null;
+  if (reuse.base !== null && (typeof reuse.base !== "string" || !COMMIT.test(reuse.base))) return null;
+  return { fingerprint: reuse.fingerprint, base: reuse.base as string | null };
+}
+
+function checkpointFork(value: unknown): CloudV2CheckpointFork | null {
+  const fork = value as Partial<Record<keyof CloudV2CheckpointFork, unknown>> | null;
+  if (!fork || typeof fork.attempt !== "string" || !UUID.test(fork.attempt) || typeof fork.name !== "string" ||
+      typeof fork.source !== "string" || !SANDBOX.test(fork.source) || typeof fork.requestedAt !== "string" ||
+      (fork.sandboxId !== undefined && fork.sandboxId !== null && (typeof fork.sandboxId !== "string" || !SANDBOX.test(fork.sandboxId)))) return null;
+  return { attempt: fork.attempt, name: fork.name, source: fork.source, requestedAt: new Date(fork.requestedAt).toISOString(),
+    sandboxId: typeof fork.sandboxId === "string" ? fork.sandboxId : null };
+}
+
 function lifecycleWorkspace(row: LifecycleRow): CloudV2LifecycleWorkspace {
+  const reuse = row.checkpoint_object ? checkpointReuse(row.checkpoint_reuse, row.checkpoint_object) : null;
   const checkpoint = row.checkpoint_object && row.checkpoint_sha256 && row.checkpoint_bytes && row.checkpoint_saved_at
     ? { object: row.checkpoint_object, key: row.checkpoint_key, sha256: row.checkpoint_sha256, bytes: Number(row.checkpoint_bytes),
-        savedAt: row.checkpoint_saved_at.toISOString(), stopGeneration: row.checkpoint_stop_generation }
+        savedAt: row.checkpoint_saved_at.toISOString(), stopGeneration: row.checkpoint_stop_generation, ...(reuse ? { reuse } : {}) }
     : null;
   return { ...workspace(row), leaseRenewedAt: row.lease_renewed_at?.toISOString() ?? null, baseCommit: row.base_commit,
     checkpoint, restorePending: row.restore_pending, restoreAttempt: row.restore_attempt, restoreCreate: row.restore_create,
-    stopGeneration: row.stop_generation, checkpointUploadUntil: uploadHorizon(row.checkpoint_uploads) };
+    stopGeneration: row.stop_generation, checkpointUploadUntil: uploadHorizon(row.checkpoint_uploads),
+    checkpointRetryFork: checkpointFork(row.checkpoint_retry_fork) };
+}
+
+/** Where a checkpoint write may land. A stop's own write needs that stop to
+ * still be stopping this VM. A retry's needs the latest stop to be the one it
+ * retries, with that VM, and no checkpoint for it yet; the VM may have been
+ * woken since, but a stop, a restore or deletion fences it out. */
+function checkpointFence(scope: CloudV2CheckpointScope): string {
+  return scope === "stop"
+    ? "boat_sandbox_id=$2 AND state='stopping' AND NOT restore_pending AND stop_generation=$3::bigint"
+    : `boat_sandbox_id=$2 AND state IN ('stopped','starting','running','failed') AND NOT restore_pending AND stop_generation=$3::bigint
+       AND checkpoint_stop_generation IS DISTINCT FROM stop_generation`;
 }
 
 function workspace(row: Row): CloudV2Workspace {
@@ -157,6 +210,7 @@ export class CloudV2Store {
   }
 
   private async insertWorkspace(tx: Tx, input: CreateWorkspace): Promise<CloudV2Workspace> {
+    let sourceRepositoryId = input.sourceRepositoryId;
     const member = await tx.query(
       `SELECT 1 FROM organization_members m JOIN organizations o ON o.id = m.org_id AND o.deleted_at IS NULL
        WHERE m.org_id = $1 AND m.user_id = $2 AND NOT o.is_personal AND o.cloud_workspaces_allowed FOR SHARE OF o,m`,
@@ -166,20 +220,30 @@ export class CloudV2Store {
     if (input.computerBuildId) {
       // Activation waits for this lock, so cleanup observes the new workspace
       // pin before it can retire an inactive source snapshot.
-      const selected = await tx.query(
-        `SELECT 1 FROM cloud_v2_computers c
+      const selected = await tx.query<{ recipe: { repositories: { repository: string }[] }; source_targets: unknown }>(
+        `SELECT b.recipe,b.source_targets FROM cloud_v2_computers c
          JOIN cloud_v2_computer_builds b ON b.id=c.active_build_id AND b.org_id=c.org_id
          WHERE c.org_id=$1 AND c.active_build_id=$2 AND c.snapshot_name IS NOT NULL
-           AND b.state='succeeded' AND b.snapshot_id=c.snapshot_name AND b.snapshot_deleted_at IS NULL AND b.cleanup_requested_at IS NULL
+           AND b.state='succeeded' AND b.source_policy_version=2 AND b.snapshot_id=c.snapshot_name AND b.snapshot_deleted_at IS NULL AND b.cleanup_requested_at IS NULL
          FOR SHARE OF c,b`, [input.organizationId, input.computerBuildId]);
       if (!selected.rowCount) throw new HttpError(409, "cloud_computer_changed", "The Cloud Computer changed. Create the workspace again.");
+      const build = selected.rows[0]!;
+      const target = readComputerSourceTargets(build.recipe.repositories, build.source_targets)
+        .find(source => source.repository.toLowerCase() === input.repository.toLowerCase());
+      if (!target || sourceRepositoryId !== undefined && sourceRepositoryId !== target.repositoryId) throw computerSourceReviewRequired();
+      sourceRepositoryId = target.repositoryId;
     }
     const row = (await tx.query<Row>(
-      `INSERT INTO cloud_v2_workspaces (id, org_id, creator_user_id, name, repository, branch, base_branch, state, computer_build_id)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, 'creating', $8) RETURNING ${COLUMNS}`,
+      `INSERT INTO cloud_v2_workspaces (id, org_id, creator_user_id, name, repository, branch, base_branch, state, computer_build_id, source_repositories)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, 'creating', $8, ARRAY[lower($5)]) RETURNING ${COLUMNS}`,
       [input.id, input.organizationId, input.creatorUserId, input.name, input.repository, input.branch,
         input.baseBranch, input.computerBuildId],
     )).rows[0]!;
+    if (sourceRepositoryId !== undefined) {
+      if (!CloudSourceTargetSchema.safeParse({ repository: input.repository, repositoryId: sourceRepositoryId }).success) throw new HttpError(422, "github_repository_invalid", "Invalid repository identity.");
+      await tx.query("INSERT INTO cloud_v2_github_sources(workspace_id,source_repository,repository_id) VALUES($1,lower($2),$3)",
+        [input.id, input.repository, sourceRepositoryId]);
+    }
     return workspace(row);
   }
 
@@ -277,6 +341,8 @@ export class CloudV2Store {
          checkpoint_sha256 = CASE WHEN $3 = 'deleted' THEN NULL ELSE checkpoint_sha256 END,
          checkpoint_bytes = CASE WHEN $3 = 'deleted' THEN NULL ELSE checkpoint_bytes END,
          checkpoint_saved_at = CASE WHEN $3 = 'deleted' THEN NULL ELSE checkpoint_saved_at END,
+         checkpoint_reuse = CASE WHEN $3 = 'deleted' THEN NULL ELSE checkpoint_reuse END,
+         stopped_at = CASE WHEN $3 = 'stopped' THEN clock_timestamp() ELSE stopped_at END,
          restore_pending = restore_pending AND $3 <> 'deleted',
          attempts = 0, next_attempt_at = NULL, updated_at = clock_timestamp()
        WHERE id = $1 AND state = ANY($2::text[]) AND ($8::bigint IS NULL OR stop_generation = $8::bigint) RETURNING ${COLUMNS}`,
@@ -311,13 +377,19 @@ export class CloudV2Store {
 
   /** One read for a room's workspace authority and every attached session;
    * streaming must not add one database transaction per viewing device. */
-  async appAccessSnapshot(id: string, sessionIds: readonly string[]): Promise<{ accessEpoch: string; activeSessionIds: string[] } | null> {
-    const { rows } = await withSystemTx(this.pool, tx => tx.query<{ access_epoch: string; active_session_ids: string[] }>(
-      `SELECT access_epoch::text, ARRAY(SELECT s.provider_session_id FROM auth_sessions s
-         WHERE s.provider_session_id = ANY($2::text[]) AND ${LIVE_SESSION}) AS active_session_ids
+  async appAccessSnapshot(id: string, sessionIds: readonly string[]): Promise<{ accessEpoch: string; loginRevision?: string; validUntil?: number; activeSessionIds: string[] } | null> {
+    const started = Date.now();
+    const { rows } = await withSystemTx(this.pool, tx => tx.query<{ access_epoch: string; login_revision: string; active_session_ids: string[]; session_expires_at: Date | null; database_now: Date }>(
+      `SELECT access_epoch::text, login_revision::text, ARRAY(SELECT s.provider_session_id FROM auth_sessions s
+         WHERE s.provider_session_id = ANY($2::text[]) AND ${LIVE_SESSION}) AS active_session_ids,
+         (SELECT min(s.provider_session_expires_at) FROM auth_sessions s
+          WHERE s.provider_session_id = ANY($2::text[]) AND ${LIVE_SESSION}) AS session_expires_at,
+         clock_timestamp() AS database_now
        FROM cloud_v2_workspaces w WHERE w.id = $1 AND w.state NOT IN ('deleting','deleted') AND ${LIVE_ACCESS}`,
       [id, sessionIds]));
-    return rows[0] ? { accessEpoch: rows[0].access_epoch, activeSessionIds: rows[0].active_session_ids } : null;
+    const row = rows[0];
+    return row ? { accessEpoch: row.access_epoch, loginRevision: row.login_revision, activeSessionIds: row.active_session_ids,
+      ...(row.session_expires_at ? { validUntil: started + Math.max(0, row.session_expires_at.getTime() - row.database_now.getTime()) } : {}) } : null;
   }
 
   /** Internal only: private route data is deliberately absent from workspace(). */
@@ -451,13 +523,13 @@ export class CloudV2Store {
     return rows[0] ? { userId: rows[0].user_id, accessEpoch: rows[0].access_epoch, wake: rows[0].wake_on_connect, sessionId: rows[0].provider_session_id } : null;
   }
 
-  async verifyProxyToken(token: string): Promise<CloudV2Workspace | null> {
-    const { rows } = await withSystemTx(this.pool, tx => tx.query<Row>(
-      `SELECT ${COLUMNS.replace(/\b(\w+)\b/g, "w.$1")} FROM cloud_v2_tokens t JOIN cloud_v2_workspaces w ON w.id = t.workspace_id
+  async verifyProxyToken(token: string): Promise<(CloudV2Workspace & { accessEpoch?: string; loginRevision?: string }) | null> {
+    const { rows } = await withSystemTx(this.pool, tx => tx.query<Row & { access_epoch: string; login_revision: string }>(
+      `SELECT ${COLUMNS.replace(/\b(\w+)\b/g, "w.$1")},w.access_epoch::text,w.login_revision::text FROM cloud_v2_tokens t JOIN cloud_v2_workspaces w ON w.id = t.workspace_id
        WHERE t.token_hash = $1 AND t.kind = 'proxy' AND t.expires_at > clock_timestamp() AND w.state = 'running' AND ${LIVE_ACCESS}`,
       [hashCloudV2Token(token)],
     ));
-    return rows[0] ? workspace(rows[0]) : null;
+    return rows[0] ? { ...workspace(rows[0]), accessEpoch: rows[0].access_epoch, loginRevision: rows[0].login_revision } : null;
   }
 
   /** Leases up to `limit` workspaces in a transitional state to one lifecycle
@@ -512,32 +584,44 @@ export class CloudV2Store {
     return rows[0]?.base_commit ?? null;
   }
 
-  /** Only the stop that is still stopping this VM records what it uploaded.
-   * Returns the checkpoint it replaced, or false when it was fenced out. */
-  async saveCheckpoint(id: string, sandboxId: string, generation: string, checkpoint: Omit<CloudV2Checkpoint, "savedAt" | "stopGeneration">): Promise<{ replaced: string | null } | false> {
+  /** Only the stop that is still stopping this VM, or a retry of the latest
+   * stop, records what it uploaded. Returns the checkpoint it replaced, or
+   * false when it was fenced out. */
+  async saveCheckpoint(id: string, sandboxId: string, generation: string, checkpoint: Omit<CloudV2Checkpoint, "savedAt" | "stopGeneration">,
+    scope: CloudV2CheckpointScope = "stop"): Promise<{ replaced: string | null } | false> {
     return withSystemTx(this.pool, async tx => {
       const { rows } = await tx.query<{ checkpoint_object: string | null }>(
-        `SELECT checkpoint_object FROM cloud_v2_workspaces WHERE id=$1 AND boat_sandbox_id=$2 AND state='stopping' AND NOT restore_pending
-           AND stop_generation=$3::bigint FOR UPDATE`,
+        `SELECT checkpoint_object FROM cloud_v2_workspaces WHERE id=$1 AND ${checkpointFence(scope)} FOR UPDATE`,
         [id, sandboxId, generation]);
       if (!rows[0]) return false;
+      const reuse = checkpoint.reuse ? { object: checkpoint.object, fingerprint: checkpoint.reuse.fingerprint, base: checkpoint.reuse.base } : null;
       await tx.query(
-        `UPDATE cloud_v2_workspaces SET checkpoint_object=$2, checkpoint_key=$3, checkpoint_sha256=$4, checkpoint_bytes=$5,
+        `UPDATE cloud_v2_workspaces SET checkpoint_object=$2, checkpoint_key=$3, checkpoint_sha256=$4, checkpoint_bytes=$5, checkpoint_reuse=$6,
            checkpoint_saved_at=clock_timestamp(), checkpoint_stop_generation=stop_generation, checkpoint_error=NULL WHERE id=$1`,
-        [id, checkpoint.object, JSON.stringify(checkpoint.key), checkpoint.sha256, checkpoint.bytes]);
+        [id, checkpoint.object, JSON.stringify(checkpoint.key), checkpoint.sha256, checkpoint.bytes, reuse ? JSON.stringify(reuse) : null]);
       return { replaced: rows[0].checkpoint_object };
     });
   }
 
-  /** Recorded before an upload URL exists, and only while this stop still
-   * owns the VM: once deletion has begun no new upload is admitted. `until`
-   * bounds when the upload could still land if its outcome is never known. */
-  async checkpointUpload(id: string, sandboxId: string, generation: string, object: string, until: Date): Promise<boolean> {
+  /** The VM found everything as `object` holds it: that checkpoint now also
+   * covers this stop. Refused unless `object` is still the one compared. */
+  async checkpointUnchanged(id: string, sandboxId: string, generation: string, object: string, scope: CloudV2CheckpointScope = "stop"): Promise<boolean> {
+    const result = await withSystemTx(this.pool, tx => tx.query(
+      `UPDATE cloud_v2_workspaces SET checkpoint_stop_generation=stop_generation, checkpoint_error=NULL
+       WHERE id=$1 AND ${checkpointFence(scope)} AND checkpoint_object=$4 AND checkpoint_reuse->>'object'=$4`,
+      [id, sandboxId, generation, object]));
+    return Boolean(result.rowCount);
+  }
+
+  /** Recorded before an upload URL exists, and only while the stop or retry
+   * still owns the VM: once deletion has begun no new upload is admitted.
+   * `until` bounds when the upload could still land if its outcome is never known. */
+  async checkpointUpload(id: string, sandboxId: string, generation: string, object: string, until: Date, scope: CloudV2CheckpointScope = "stop"): Promise<boolean> {
     const result = await withSystemTx(this.pool, tx => tx.query(
       `UPDATE cloud_v2_workspaces SET checkpoint_uploads = coalesce((SELECT jsonb_object_agg(key, value) FROM jsonb_each_text(checkpoint_uploads)
-           WHERE value::timestamptz > clock_timestamp()), '{}'::jsonb) || jsonb_build_object($3::text, $4::timestamptz)
-       WHERE id=$1 AND boat_sandbox_id=$2 AND state='stopping' AND NOT restore_pending AND stop_generation=$5::bigint`,
-      [id, sandboxId, object, until, generation]));
+           WHERE value::timestamptz > clock_timestamp()), '{}'::jsonb) || jsonb_build_object($4::text, $5::timestamptz)
+       WHERE id=$1 AND ${checkpointFence(scope)}`,
+      [id, sandboxId, generation, object, until]));
     return Boolean(result.rowCount);
   }
 
@@ -561,10 +645,78 @@ export class CloudV2Store {
       `UPDATE cloud_v2_workspaces SET checkpoint_uploads = checkpoint_uploads - $2::text WHERE id=$1`, [id, object]));
   }
 
-  async checkpointFailed(id: string, sandboxId: string, generation: string, code: string): Promise<void> {
+  async checkpointFailed(id: string, sandboxId: string, generation: string, code: string, scope: CloudV2CheckpointScope = "stop"): Promise<void> {
     await withSystemTx(this.pool, tx => tx.query(
-      `UPDATE cloud_v2_workspaces SET checkpoint_error=$3 WHERE id=$1 AND boat_sandbox_id=$2 AND state='stopping' AND stop_generation=$4::bigint`,
-      [id, sandboxId, /^[a-z0-9_]{1,64}$/.test(code) ? code : "checkpoint_failed", generation]));
+      `UPDATE cloud_v2_workspaces SET checkpoint_error=$4 WHERE id=$1 AND ${checkpointFence(scope)}`,
+      [id, sandboxId, generation, /^[a-z0-9_]{1,64}$/.test(code) ? code : "checkpoint_failed"]));
+  }
+
+  /** Leases one workspace whose latest stop has no checkpoint and is due a
+   * retry, or one whose earlier retry may have left a fork. A first retry
+   * waits `firstDelayMs` after the stop; none starts after `windowMs`. */
+  async claimCheckpointRetry(input: { leaseMs: number; firstDelayMs: number; windowMs: number; excludeIds?: readonly string[] }):
+    Promise<(CloudV2LifecycleWorkspace & { retry: CloudV2CheckpointRetry }) | null> {
+    const { rows } = await withSystemTx(this.pool, tx => tx.query<RetryRow>(
+      `WITH due AS MATERIALIZED (
+         SELECT id FROM cloud_v2_workspaces
+         WHERE NOT (id = ANY($4::uuid[])) AND (
+           (checkpoint_retry_fork IS NOT NULL AND state NOT IN ('deleting','deleted')
+             AND coalesce(checkpoint_retry_at, '-infinity') <= clock_timestamp())
+           OR (state = 'stopped' AND boat_sandbox_id IS NOT NULL AND NOT restore_pending
+             AND checkpoint_stop_generation IS DISTINCT FROM stop_generation
+             AND coalesce(stopped_at, updated_at) > clock_timestamp() - make_interval(secs => $3::double precision / 1000)
+             AND (checkpoint_retry_generation IS DISTINCT FROM stop_generation OR checkpoint_retry_exhausted_at IS NULL)
+             AND CASE WHEN checkpoint_retry_generation IS NOT DISTINCT FROM stop_generation THEN coalesce(checkpoint_retry_at, '-infinity')
+               ELSE coalesce(stopped_at, updated_at) + make_interval(secs => $2::double precision / 1000) END <= clock_timestamp()))
+         ORDER BY coalesce(checkpoint_retry_at, stopped_at, updated_at) LIMIT 1 FOR UPDATE SKIP LOCKED)
+       UPDATE cloud_v2_workspaces w SET
+         checkpoint_retry_attempts = CASE WHEN w.checkpoint_retry_generation IS NOT DISTINCT FROM w.stop_generation THEN w.checkpoint_retry_attempts ELSE 0 END,
+         checkpoint_retry_exhausted_at = CASE WHEN w.checkpoint_retry_generation IS NOT DISTINCT FROM w.stop_generation THEN w.checkpoint_retry_exhausted_at END,
+         checkpoint_retry_generation = w.stop_generation,
+         checkpoint_retry_at = clock_timestamp() + make_interval(secs => $1::double precision / 1000)
+       FROM due WHERE w.id = due.id
+       RETURNING ${LIFECYCLE_COLUMNS.replace(/\b(\w+)\b/g, "w.$1")}, coalesce(w.stopped_at, w.updated_at) AS retry_stopped_at,
+         w.checkpoint_retry_generation, w.checkpoint_retry_attempts, w.checkpoint_retry_exhausted_at`,
+      [input.leaseMs, input.firstDelayMs, input.windowMs, input.excludeIds ?? []]));
+    const row = rows[0];
+    return row ? { ...lifecycleWorkspace(row), retry: { generation: row.checkpoint_retry_generation, attempts: row.checkpoint_retry_attempts,
+      stoppedAt: row.retry_stopped_at.toISOString(), exhaustedAt: row.checkpoint_retry_exhausted_at?.toISOString() ?? null } } : null;
+  }
+
+  /** Records a retry's fork before it is requested, while the latest stop of
+   * `source` still lacks a checkpoint and no other fork is recorded. */
+  async beginCheckpointFork(id: string, generation: string, fork: Pick<CloudV2CheckpointFork, "attempt" | "name" | "source">): Promise<CloudV2CheckpointFork | null> {
+    const { rows } = await withSystemTx(this.pool, tx => tx.query<{ checkpoint_retry_fork: unknown }>(
+      `UPDATE cloud_v2_workspaces SET checkpoint_retry_attempts = checkpoint_retry_attempts + 1,
+         checkpoint_retry_fork = jsonb_build_object('attempt',$3::text,'name',$4::text,'source',$2::text,'requestedAt',clock_timestamp())
+       WHERE id=$1 AND state='stopped' AND boat_sandbox_id=$2 AND NOT restore_pending AND stop_generation=$5::bigint
+         AND checkpoint_stop_generation IS DISTINCT FROM stop_generation AND checkpoint_retry_generation=$5::bigint
+         AND checkpoint_retry_fork IS NULL
+       RETURNING checkpoint_retry_fork`, [id, fork.source, fork.attempt, fork.name, generation]));
+    return rows[0] ? checkpointFork(rows[0].checkpoint_retry_fork) : null;
+  }
+
+  async checkpointForkCreated(id: string, attempt: string, sandboxId: string): Promise<boolean> {
+    const result = await withSystemTx(this.pool, tx => tx.query(
+      `UPDATE cloud_v2_workspaces SET checkpoint_retry_fork = checkpoint_retry_fork || jsonb_build_object('sandboxId',$3::text)
+       WHERE id=$1 AND checkpoint_retry_fork->>'attempt'=$2`, [id, attempt, sandboxId]));
+    return Boolean(result.rowCount);
+  }
+
+  /** Boat confirmed that fork is gone, or it was never created. */
+  async checkpointForkGone(id: string, attempt: string): Promise<void> {
+    await withSystemTx(this.pool, tx => tx.query(
+      `UPDATE cloud_v2_workspaces SET checkpoint_retry_fork=NULL WHERE id=$1 AND checkpoint_retry_fork->>'attempt'=$2`, [id, attempt]));
+  }
+
+  /** Schedules this stop's next retry, ends its retries, or records that they
+   * ran out; a retry for an older stop changes nothing. */
+  async checkpointRetryNext(id: string, generation: string, next: { at: Date } | { done: true } | { exhausted: true }): Promise<void> {
+    await withSystemTx(this.pool, tx => tx.query(
+      `UPDATE cloud_v2_workspaces SET checkpoint_retry_at=$3,
+         checkpoint_retry_exhausted_at=CASE WHEN $4::boolean THEN clock_timestamp() ELSE checkpoint_retry_exhausted_at END
+       WHERE id=$1 AND checkpoint_retry_generation=$2::bigint`,
+      [id, generation, "at" in next ? next.at : null, "exhausted" in next]));
   }
 
   /** Boat lost the VM. Pins the organization's active Cloud Computer and
@@ -580,7 +732,7 @@ export class CloudV2Store {
       const active = await tx.query<{ id: string; snapshot_name: string }>(
         `SELECT b.id, c.snapshot_name FROM cloud_v2_computers c
          JOIN cloud_v2_computer_builds b ON b.id=c.active_build_id AND b.org_id=c.org_id
-         WHERE c.org_id=$1 AND c.snapshot_name IS NOT NULL AND b.state='succeeded' AND b.snapshot_id=c.snapshot_name
+         WHERE c.org_id=$1 AND c.snapshot_name IS NOT NULL AND b.state='succeeded' AND b.source_policy_version=2 AND b.snapshot_id=c.snapshot_name
            AND b.snapshot_deleted_at IS NULL AND b.cleanup_requested_at IS NULL
          FOR SHARE OF c,b`, [rows[0].org_id]);
       if (!active.rows[0]) return "no_computer";
@@ -647,13 +799,14 @@ export class CloudV2Store {
   async computerSnapshot(organizationId: string, buildId: string | null = null): Promise<string | null> {
     if (buildId) {
       const { rows } = await withSystemTx(this.pool, tx => tx.query<{ snapshot_id: string | null }>(
-        `SELECT snapshot_id FROM cloud_v2_computer_builds WHERE id=$1 AND org_id=$2 AND state='succeeded'
+        `SELECT snapshot_id FROM cloud_v2_computer_builds WHERE id=$1 AND org_id=$2 AND state='succeeded' AND source_policy_version=2
          AND snapshot_deleted_at IS NULL AND cleanup_requested_at IS NULL`, [buildId, organizationId]));
       return rows[0]?.snapshot_id ?? null;
     }
     // Pre-pin workspaces retain their original active-computer behavior.
     const { rows } = await withSystemTx(this.pool, tx => tx.query<{ snapshot_name: string | null }>(
-      `SELECT snapshot_name FROM cloud_v2_computers WHERE org_id = $1`, [organizationId]));
+      `SELECT c.snapshot_name FROM cloud_v2_computers c JOIN cloud_v2_computer_builds b ON b.id=c.active_build_id
+       WHERE c.org_id = $1 AND b.source_policy_version=2`, [organizationId]));
     return rows[0]?.snapshot_name ?? null;
   }
 
@@ -662,7 +815,7 @@ export class CloudV2Store {
     const { rows } = await withSystemTx(this.pool, tx => tx.query<{ id: string; recipe: { repositories?: { repository?: unknown; branch?: unknown }[] } }>(
       `SELECT build.id, build.recipe FROM cloud_v2_computers computer
        JOIN cloud_v2_computer_builds build ON build.id = computer.active_build_id AND build.org_id = computer.org_id
-       WHERE computer.org_id = $1 AND computer.snapshot_name IS NOT NULL AND build.state = 'succeeded'`,
+       WHERE computer.org_id = $1 AND computer.snapshot_name IS NOT NULL AND build.state = 'succeeded' AND build.source_policy_version=2`,
       [organizationId],
     ));
     if (!rows[0]) return null;

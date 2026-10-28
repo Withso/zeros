@@ -1333,6 +1333,12 @@ async function doSpawnEngine(
   extraEnv.ZEROS_PTY_HOST_RUNTIME = process.execPath;
   extraEnv.ZEROS_PTY_HOST_RUNTIME_ELECTRON = "1";
   extraEnv.ZEROS_HOST_SUPERVISOR_RUNTIME = process.execPath;
+  // The compiler runs in an owned Node process even when the engine is Bun.
+  // These paths come from the installed app, never a repository or its PATH.
+  extraEnv.ZEROS_SASS_HOST_SCRIPT = IS_PACKAGED
+    ? path.join(process.resourcesPath, "sass-host.cjs")
+    : path.resolve(__dirname, "../apps/desktop/src/engine/design/sass-host.cjs");
+  extraEnv.ZEROS_SASS_MODULE = require.resolve("sass");
   const hostProcessSupervisor = resolveHostProcessSupervisorPath();
   if (hostProcessSupervisor) {
     extraEnv.ZEROS_HOST_SUPERVISOR_SCRIPT = hostProcessSupervisor;

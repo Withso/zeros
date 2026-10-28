@@ -3568,7 +3568,7 @@ possible-typed-array-names@1.1.0
   Source: https://github.com/ljharb/possible-typed-array-names
   License documents: 5e325595b4ea
 
-postcss-selector-parser@6.0.10
+postcss-selector-parser@6.1.5
   License: MIT
   Surfaces: root pnpm workspace
   Source: https://github.com/postcss/postcss-selector-parser
@@ -8982,8 +8982,8 @@ License: CC-BY-3.0
 ================================================================================
 DOCUMENT 2998094b38f7
 SHA-256: 2998094b38f7ace25f141fb36f334d8338f65a1812978d618b1161f4d77ae10e
-Applies to: postcss-selector-parser@6.0.10
-Source labels: postcss-selector-parser@6.0.10 — LICENSE-MIT
+Applies to: postcss-selector-parser@6.1.5
+Source labels: postcss-selector-parser@6.1.5 — LICENSE-MIT
 ================================================================================
 
 Copyright (c) Ben Briggs <beneb.info@gmail.com> (http://beneb.info)

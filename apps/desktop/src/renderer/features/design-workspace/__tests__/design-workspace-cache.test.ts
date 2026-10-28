@@ -1739,6 +1739,9 @@ describe("design workspace cache", () => {
         snapshot: next,
       });
 
+      // A hidden runtime must not execute commit/readback callbacks. Model
+      // the independent selection intent before its retained data settles.
+      if (!active) chooseLatestSelection();
       await updateDesignNodeStylesCached(workspaceId, {
         frame: previousFrame.file,
         nodeId: "hero",
@@ -1770,8 +1773,12 @@ describe("design workspace cache", () => {
           "copy",
         ]);
         expect(platformMocks.setSelection).toHaveBeenCalledTimes(1);
-      } else {
+      } else if (active) {
         expect(getNodeDetails).toHaveBeenCalledExactlyOnceWith("parent");
+        expect(platformMocks.setSelection).not.toHaveBeenCalled();
+      } else {
+        expect(runtimeMocks.commitStyles).not.toHaveBeenCalled();
+        expect(getNodeDetails).not.toHaveBeenCalled();
         expect(platformMocks.setSelection).not.toHaveBeenCalled();
       }
     },

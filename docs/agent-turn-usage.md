@@ -57,9 +57,16 @@ deltas; missed earlier notifications cannot be reconstructed. Context-only
 compaction counters rebase future deltas without erasing already counted work.
 Codex native input already includes cache subsets.
 
-Cursor 1.0.31 `RunResult.usage` sums native turns in that run. Prefer it over
+Cursor `RunResult.usage` sums native turns in that run. Prefer it over
 separately summed stream/callback usage; never add the two delivery lanes.
-Cursor native input excludes caches. `getUsage()` totals span the agent and
+Native input already includes cache reads and writes: keep those fields as
+subsets, without adding them again. This was verified with cache-write and
+cache-read turns on both the desktop's 1.1.0 SDK and the worker's independently
+pinned 1.0.40 SDK. The older SDK's `totalTokens` adds the cache buckets again;
+1.1.0 computes input plus output and recomputes that total when reading an old
+SDK run. Zeros uses the component fields, never that derived total. Existing
+Zeros turn rows are not rewritten because they lack the original native counts.
+`getUsage()` totals span the agent and
 may change when old bills settle, so before/after agent-wide subtraction is
 not turn accounting. Accept only an exact owned entry from `runs[]`.
 
@@ -70,8 +77,9 @@ cannot be proved. Cloud/native entries with matching run identity are supported,
 including charged zero. A bounded per-execution reconciliation lane retries
 missing cost after 3, 10, 30 and 60 seconds and updates the original turn. It
 stops on settlement, replacement or disposal. Failed/hung billing lookups are
-bounded to 500ms and do not fail agent work. No paid live billing was exercised
-by the mock-backed regression suites.
+bounded to 500ms and do not fail agent work. Mock-backed billing regressions
+do not establish live dollar attribution; the native upgrade probes verified
+token semantics only.
 
 ## Context-window snapshots
 

@@ -9,11 +9,36 @@ import {
   resetDesignLivePreviewForTests,
   useDesignLivePreviewStore,
 } from "../state/design-live-preview";
+import {
+  clearDesignHistoryPresentation,
+  presentDesignHistory,
+  presentDesignHistoryRuntime,
+  setDesignHistoryPresentationOwnerReader,
+} from "../state/design-history-presentation";
+import { resetDesignWorkspaceUiForTests } from "../state/design-workspace-ui";
+
+function presentInverse(workspace: string, sequence: number, token = {}) {
+  presentDesignHistory(workspace, token, {});
+  const detail = { sourceVersion: "before", oid: "hero", tag: "div", name: "Hero", text: null,
+    selector: "div", breadcrumb: [], visible: true, styles: { "border-radius": "0px" },
+    rect: { x: 0, y: 0, width: 100, height: 100 } };
+  presentDesignHistoryRuntime(workspace, token, "home.html", {
+    sourceVersion: "before", snapshot: { frame: { ...detail, oid: "body" } }, details: [detail],
+  }, sequence);
+  return token;
+}
 
 describe("design live preview", () => {
-  beforeEach(() => resetDesignLivePreviewForTests());
+  beforeEach(() => {
+    resetDesignLivePreviewForTests();
+    resetDesignWorkspaceUiForTests();
+    clearDesignHistoryPresentation();
+    setDesignHistoryPresentationOwnerReader(() => "owner-a");
+  });
   afterEach(() => {
     resetDesignLivePreviewForTests();
+    clearDesignHistoryPresentation();
+    setDesignHistoryPresentationOwnerReader(() => "");
     vi.useRealTimers();
   });
 
@@ -191,5 +216,49 @@ describe("design live preview", () => {
     expect(
       designLivePreviewValue("workspace-a", "home.html", "heading", "height"),
     ).toBeUndefined();
+  });
+
+  it("suppresses older scalars only where an exact inverse has details and restores them if it is cleared", () => {
+    const publication = publishDesignLivePreviewStyles("workspace-a", "home.html", "hero", {
+      "border-radius": "24px", padding: "8px",
+    });
+    for (const [workspace, frame, node] of [
+      ["workspace-b", "home.html", "hero"],
+      ["workspace-a", "other.html", "hero"],
+      ["workspace-a", "home.html", "other"],
+    ]) publishDesignLivePreviewStyles(workspace!, frame!, node!, { "border-radius": "12px" });
+    const token = presentInverse("workspace-a", Math.max(...Object.values(publication)));
+    expect(designLivePreviewValue("workspace-a", "home.html", "hero", "border-radius")).toBeUndefined();
+    expect(designLivePreviewValue("workspace-a", "home.html", "hero", "padding")).toBeUndefined();
+    expect(designLivePreviewValue("workspace-b", "home.html", "hero", "border-radius")).toBe("12px");
+    expect(designLivePreviewValue("workspace-a", "other.html", "hero", "border-radius")).toBe("12px");
+    expect(designLivePreviewValue("workspace-a", "home.html", "other", "border-radius")).toBe("12px");
+    publishDesignLivePreviewStyles("workspace-a", "home.html", "hero", { "border-radius": "32px" });
+    expect(designLivePreviewValue("workspace-a", "home.html", "hero", "border-radius")).toBe("32px");
+    clearDesignHistoryPresentation("workspace-a", token);
+    expect(designLivePreviewValue("workspace-a", "home.html", "hero", "padding")).toBe("8px");
+    expect(designLivePreviewValue("workspace-a", "home.html", "hero", "border-radius")).toBe("32px");
+  });
+
+  it("notifies when identical new input supersedes an inverse, then keeps identical snapshots stable", () => {
+    const publication = publishDesignLivePreviewStyles("workspace-a", "home.html", "hero", { "border-radius": "24px" });
+    presentInverse("workspace-a", publication["border-radius"]!);
+    expect(designLivePreviewValue("workspace-a", "home.html", "hero", "border-radius")).toBeUndefined();
+    let notifications = 0;
+    const unsubscribe = useDesignLivePreviewStore.subscribe(() => { notifications++; });
+    publishDesignLivePreviewStyles("workspace-a", "home.html", "hero", { "border-radius": "24px" });
+    expect(designLivePreviewValue("workspace-a", "home.html", "hero", "border-radius")).toBe("24px");
+    expect(notifications).toBe(1);
+    publishDesignLivePreviewStyles("workspace-a", "home.html", "hero", { "border-radius": "24px" });
+    expect(notifications).toBe(1);
+    unsubscribe();
+  });
+
+  it("does not apply a replaced owner's inverse to its live values", () => {
+    const publication = publishDesignLivePreviewStyles("workspace-a", "home.html", "hero", { "border-radius": "24px" });
+    presentInverse("workspace-a", publication["border-radius"]!);
+    expect(designLivePreviewValue("workspace-a", "home.html", "hero", "border-radius")).toBeUndefined();
+    setDesignHistoryPresentationOwnerReader(() => "owner-b");
+    expect(designLivePreviewValue("workspace-a", "home.html", "hero", "border-radius")).toBe("24px");
   });
 });

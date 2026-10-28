@@ -5,6 +5,7 @@ import { InboundBridge } from "./inbound-bridge";
 import { readWorkerToken, WORKER_TOKEN_FILE } from "./worker-token";
 import type { PromptOperation, Transport, TransportHandlers } from "./transport";
 import type { McpAuthorization } from "./mcp/gateway";
+import { CloudGithubCheckoutSchema, type CloudGithubCheckout } from "@zeros/protocol/cloud-github-pr";
 
 type ConfigFrame = Extract<CloudV2ControlFrame, { t: "config" }>;
 export type HybridStatus = "connected" | "disconnected" | "credential-unavailable" | "unauthorized" | "stopped" | "protocol-error";
@@ -89,7 +90,7 @@ export class HybridTransport implements Transport {
     if (frame.t === "request") {
       // Do not await delivery into a configuring worker: checkout preparation
       // may already be waiting on this very credential request.
-      void this.request("github-token", {}).then(value => {
+      void this.request("github-token", frame.purpose ? { purpose: frame.purpose } : {}).then(value => {
         const reply = CloudV2ControlFrameSchema.safeParse({ t: "reply", id: frame.id, ...value });
         return this.handlers!.frame(reply.success ? reply.data : { t: "refusal", id: frame.id, code: "github_token_unavailable" });
       }).catch(async error => {
@@ -112,6 +113,11 @@ export class HybridTransport implements Transport {
   async promptRequest(operation: PromptOperation, body: unknown, signal?: AbortSignal): Promise<unknown> {
     try { return await this.request(`prompts/${operation}`, body, signal, operation === "pull" ? 35_000 : 10_000); }
     catch (error) { if (error instanceof HttpFailure && error.status === 401) this.failed(error); throw error; }
+  }
+  async reportGithubCheckout(value: CloudGithubCheckout): Promise<void> {
+    const input = CloudGithubCheckoutSchema.parse(value);
+    const reply = await this.request("github-checkout", input);
+    if (reply.sequence !== input.sequence) throw new Error("Invalid GitHub checkout acknowledgement.");
   }
   reportTiming(record: CloudV2WorkerTiming): void {
     if (this.stopped || !this.registered || this.reportedTimings.has(record.phase)) return;
@@ -239,7 +245,7 @@ export class HybridTransport implements Transport {
         method: payload === undefined ? "GET" : "POST", headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json", "X-Zeros-Worker-Boot": this.bootId,
           // An HTTP header is ignored by older control planes; adding a JSON
           // field would break their strict hello schema before configuration.
-          "X-Zeros-Worker-Features": "prompt-outbox-v1,mcp-v1,workspace-setup-v1,checkout-v2" },
+          "X-Zeros-Worker-Features": "prompt-outbox-v1,mcp-v1,workspace-setup-v1,checkout-v2,github-pr-v1" },
         ...(payload === undefined ? {} : { body: payload }), redirect: "error", signal: controller.signal,
       });
       if (!response.ok) { await response.body?.cancel(); throw new HttpFailure(response.status); }

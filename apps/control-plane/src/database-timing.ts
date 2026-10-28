@@ -2,14 +2,14 @@
  * argument, provider name supplied by a caller, or raw URL as a dimension. */
 export const ADVISORY_LOCK_PURPOSES = [
   "agent-credential-owner", "auth-email", "auth-identity", "workos-authentication",
-  "workos-provider", "workos-user-event", "workos-organization-event", "browser-session-refresh",
+  "workos-provider", "workos-user-event", "workos-organization-event", "browser-session-refresh", "auth0-session-authority",
   "security-event-publish", "schema-migration", "zeros-dev-auth-rate",
   "dev-connection-outbox", "dev-connection-generation", "dev-connection-bootstrap", "dev-connection-migration",
   "object-storage", "runtime-qualification", "diagnostic-retention", "computer-image-retirement",
   "computer-version", "computer-gc", "workspace-fork", "codex-auth-renewal", "customization",
   "release-canary", "runtime-image-retirement", "device-key-rotation", "replica-command", "replica-receipt",
   "capability-key", "actor-session-capacity", "cloud-v2-computer-build", "cloud-v2-workspace-create",
-  "mcp-configuration", "mcp-authorization-start", "mcp-repository-admission",
+  "mcp-configuration", "mcp-authorization-start", "mcp-repository-admission", "cloud-github-connection",
 ] as const;
 export type AdvisoryLockPurpose = typeof ADVISORY_LOCK_PURPOSES[number];
 const purposes = new Set<string>(ADVISORY_LOCK_PURPOSES);

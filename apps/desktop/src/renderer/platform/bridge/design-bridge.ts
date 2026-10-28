@@ -26,7 +26,7 @@ import {
   designPreviewReplySchema,
   type DesignPreviewReply,
 } from "@zeros/protocol/design-capture";
-import { designPageCatalogSchema, normalizeDesignPagesSnapshot, type DesignPageSummary } from "@zeros/protocol/design-pages";
+import { designPageCatalogSchema, designPageIdSchema, normalizeDesignPagesSnapshot, type DesignPageSummary } from "@zeros/protocol/design-pages";
 import { DESIGN_LAZY_PREPARATION_CAPABILITY, designFramesPrepareSchema, designFramesPrepareReplySchema } from "@zeros/protocol/design-catalog";
 import { DESIGN_SOURCE_SURFACES_CAPABILITY } from "@zeros/protocol/design-surface";
 import { isCloudWorkspace } from "./cloud-workspace-key";
@@ -398,6 +398,8 @@ export interface DesignApiMutationReplyWire {
   /** Affected frame for semantic, structural and transfer history, including
    * removed frames. Its folder lets the renderer reveal the affected page. */
   historyFrame?: string;
+  /** Catalog history can affect an empty page with no frame to identify it. */
+  historyPageId?: string;
 }
 
 function designFoundationOpenReply(value: unknown): DesignFoundationOpenWire {
@@ -449,6 +451,8 @@ function designApiMutationReply(
       typeof reply.historySelection !== "string") ||
     (reply.historyFrame !== undefined &&
       typeof reply.historyFrame !== "string") ||
+    (reply.historyPageId !== undefined &&
+      !designPageIdSchema.safeParse(reply.historyPageId).success) ||
     (requireSnapshot &&
       (!reply.snapshot ||
         !validProtocolCapability(reply.snapshot) ||

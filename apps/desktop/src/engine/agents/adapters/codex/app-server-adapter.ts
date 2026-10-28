@@ -148,6 +148,7 @@ import {
   readNativeMcpSurface,
   scopeNativeMcpSurface,
 } from "./native-mcp";
+import { mcpWorkingDirectory } from "../../mcp-working-directory";
 import { CodexAppServerTranslator } from "./app-server-translator";
 import { CodexThreadNotifications } from "./thread-notifications";
 import { listCodexSessions } from "./history";
@@ -253,6 +254,15 @@ export function autoEditCanAutoApprove(
   request: Pick<CodexApprovalRequest, "method" | "params">,
 ): boolean {
   if (!AUTO_EDIT_AUTO_APPROVE_METHODS.has(request.method)) return false;
+  // All envelopes (including legacy exec/patch) can carry an expansion.
+  // A one-shot accept decision does not mean that the operation stays inside
+  // the already granted sandbox. Unknown expansion shapes remain user gates.
+  for (const name of ["additionalPermissions", "additional_permissions", "networkApprovalContext", "network_approval_context", "grantRoot", "grant_root", "permissions", "sandboxPolicy", "sandbox_policy"]) {
+    if (request.params[name] != null) return false;
+  }
+  for (const name of ["sandboxPermissions", "sandbox_permissions"]) {
+    if (request.params[name] != null && request.params[name] !== "use_default") return false;
+  }
   if (request.method !== "item/commandExecution/requestApproval") return true;
   const available = request.params.availableDecisions;
   // Newer app-server builds can constrain a command gate to policy-amendment
@@ -2586,6 +2596,8 @@ export class CodexAppServerAdapter implements AgentAdapter {
         codexHome: opts.env?.CODEX_HOME,
         includePlugins: !cloudExtensions,
         requireConfig: true,
+        registeredServers: mcpServers.map(server => server.transport === "stdio" && server.cwd
+          ? { ...server, cwd: mcpWorkingDirectory(server.cwd, opts.cwd) } : server),
       });
       accountAppBridgeEnabled =
         cloudExtensions &&
@@ -2603,7 +2615,7 @@ export class CodexAppServerAdapter implements AgentAdapter {
                         !nativeMcp.shadowedAccountServerNames?.includes(name),
                     )
                   : []),
-                ...mcpServers.map((server) => server.name),
+                ...(nativeMcp.registeredServerNames ?? []),
               ],
             },
           ),

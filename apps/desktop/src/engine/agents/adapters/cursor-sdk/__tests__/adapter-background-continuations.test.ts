@@ -197,7 +197,7 @@ describe("Cursor adapter background run ownership", () => {
       expect(result).toMatchObject({
         stopReason: "end_turn",
         response: {
-          usage: { inputTokens: 63, outputTokens: 6, cacheReadTokens: 3 },
+          usage: { inputTokens: 60, outputTokens: 6, cacheReadTokens: 3 },
         },
       });
       expect(result.response.usage?.totalCostUsd).toBeUndefined();
@@ -229,7 +229,7 @@ describe("Cursor adapter background run ownership", () => {
       ).toEqual([
         expect.objectContaining({
           turnId: "user-turn",
-          usage: expect.objectContaining({ inputTokens: 63 }),
+          usage: expect.objectContaining({ inputTokens: 60 }),
         }),
       ]);
     } finally {

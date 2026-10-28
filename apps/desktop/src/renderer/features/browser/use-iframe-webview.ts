@@ -40,6 +40,8 @@ import {
   useNativeRuntime,
 } from "../../platform/runtime";
 import type { ForkSnapshotPayload } from "./variant-types";
+import { sanitizeForkBehavior } from "./fork-behavior-policy";
+import { capturePickerSelection } from "./picker-capture";
 import {
   computePickerCaptureRegion,
   createPickerRateLimiter,
@@ -216,7 +218,7 @@ const EMPTY_STATE: IframeWebviewState = {
 /** Bound and validate main-world fork output before it reaches tab persistence.
  *  Local dev pages share that world and can forge postMessages, so TypeScript's
  *  compile-time payload type is not a runtime trust boundary. */
-function sanitizeForkSnapshot(value: unknown): ForkSnapshotPayload | null {
+export function sanitizeForkSnapshot(value: unknown): ForkSnapshotPayload | null {
   if (!value || typeof value !== "object") return null;
   const raw = value as Partial<ForkSnapshotPayload>;
   const bounded = (input: unknown, max: number): input is string =>
@@ -234,37 +236,15 @@ function sanitizeForkSnapshot(value: unknown): ForkSnapshotPayload | null {
 
   const mock = raw.mockData;
   const images = Array.isArray(mock?.images)
-    ? mock.images
+    ? mock.images.slice(0, 200)
         .filter((item): item is string => bounded(item, 8192))
-        .slice(0, 200)
     : [];
   const texts = Array.isArray(mock?.texts)
-    ? mock.texts
+    ? mock.texts.slice(0, 500)
         .filter((item): item is string => bounded(item, 8192))
-        .slice(0, 500)
     : [];
 
-  let behaviorManifest = raw.behaviorManifest;
-  if (behaviorManifest) {
-    try {
-      const validShape =
-        Array.isArray(behaviorManifest.behaviors) &&
-        Array.isArray(behaviorManifest.scriptRefs) &&
-        Array.isArray(behaviorManifest.platformHints) &&
-        typeof behaviorManifest.runtimeMode === "string" &&
-        typeof behaviorManifest.sourceUrl === "string";
-      if (
-        !validShape ||
-        behaviorManifest.behaviors.length > 2_000 ||
-        behaviorManifest.scriptRefs.length > 500 ||
-        behaviorManifest.platformHints.length > 100 ||
-        JSON.stringify(behaviorManifest).length > 512 * 1024
-      )
-        behaviorManifest = undefined;
-    } catch {
-      behaviorManifest = undefined;
-    }
-  }
+  const behaviorManifest = sanitizeForkBehavior(raw.behaviorManifest);
 
   return {
     html: raw.html,
@@ -802,6 +782,7 @@ export function useIframeWebview(
   const [designModeActive, setDesignModeActive] = useState(false);
   // Synchronous mode mirror used to reject late async screenshot completions.
   const designModeActiveRef = useRef(false);
+  const selectionGenerationRef = useRef(0);
   const [selectedElements, setSelectedElements] = useState<SelectedElement[]>(
     [],
   );
@@ -835,6 +816,7 @@ export function useIframeWebview(
   // (not only after load) so stale chips/fork results cannot cross pages.
   useEffect(() => {
     if (!state.isLoading) return;
+    selectionGenerationRef.current += 1;
     setSelectedElements([]);
     setAltClickedElement(null);
     if (forkResolverRef.current) cancelPendingFork();
@@ -844,6 +826,7 @@ export function useIframeWebview(
   // clear its timer without scheduling state updates on the unmounted hook.
   useEffect(
     () => () => {
+      selectionGenerationRef.current += 1;
       if (forkTimeoutRef.current) clearTimeout(forkTimeoutRef.current);
       forkTimeoutRef.current = null;
       activeForkRequestIdRef.current = null;
@@ -1142,7 +1125,7 @@ export function useIframeWebview(
         return;
       }
       if (op === "single-selected") {
-        if (!designModeActiveRef.current) return;
+        if (!designModeActiveRef.current || !tabActiveRef.current) return;
         if (!selectionLimiterRef.current(performance.now())) return;
         const sanitized = sanitizePickerSelection(
           (msg as { payload?: unknown }).payload,
@@ -1158,10 +1141,13 @@ export function useIframeWebview(
             ? { ...sanitized, altKey: false }
             : sanitized;
         const generation = documentGenerationRef.current;
+        const selectionGeneration = ++selectionGenerationRef.current;
+        if (!payload.altKey) setSelectedElements([payload]);
         const screenshot = await captureElementScreenshot(payload.rect);
         if (
           generation !== documentGenerationRef.current ||
-          !designModeActiveRef.current
+          selectionGeneration !== selectionGenerationRef.current ||
+          !designModeActiveRef.current || !tabActiveRef.current
         )
           return;
         const enriched: SelectedElement = { ...payload, screenshot };
@@ -1176,7 +1162,7 @@ export function useIframeWebview(
         return;
       }
       if (op === "batch-selected") {
-        if (!designModeActiveRef.current) return;
+        if (!designModeActiveRef.current || !tabActiveRef.current) return;
         if (!selectionLimiterRef.current(performance.now())) return;
         // Bounded length; malformed entries are skipped.
         const valid = sanitizePickerBatch(
@@ -1185,18 +1171,14 @@ export function useIframeWebview(
         );
         if (!valid || valid.length === 0) return;
         const generation = documentGenerationRef.current;
-        // Capture screenshots in parallel — these are independent
-        // IPC calls and the user just released Shift expecting
-        // the chip to appear immediately.
-        const enriched = await Promise.all(
-          valid.map(async (el) => ({
-            ...el,
-            screenshot: await captureElementScreenshot(el.rect),
-          })),
-        );
+        const selectionGeneration = ++selectionGenerationRef.current;
+        setSelectedElements(valid);
+        const enriched = await capturePickerSelection(valid, captureElementScreenshot, () =>
+          selectionGeneration === selectionGenerationRef.current && generation === documentGenerationRef.current && designModeActiveRef.current && tabActiveRef.current);
         if (
           generation !== documentGenerationRef.current ||
-          !designModeActiveRef.current
+          selectionGeneration !== selectionGenerationRef.current ||
+          !designModeActiveRef.current || !tabActiveRef.current
         )
           return;
         setSelectedElements(enriched);
@@ -1259,12 +1241,14 @@ export function useIframeWebview(
   ]);
 
   const clearSelectedElements = useCallback(() => {
+    selectionGenerationRef.current += 1;
     setSelectedElements([]);
     postToPicker("clear-selections");
   }, [postToPicker]);
 
   const removeSelectedElementAt = useCallback(
     (index: number) => {
+      selectionGenerationRef.current += 1;
       // If this was the last pill, send clear-selections instead so
       // the picker fully unfreezes (vs. just removing one overlay
       // and leaving the picker frozen with no chip and nothing to
@@ -1282,6 +1266,7 @@ export function useIframeWebview(
   );
 
   const clearAltClickedElement = useCallback(() => {
+    selectionGenerationRef.current += 1;
     setAltClickedElement(null);
   }, []);
 

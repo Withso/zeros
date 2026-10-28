@@ -27,7 +27,7 @@
 // Main includes it in trusted navigation/favicon events so several mounted
 // browsers cannot update one another's address/title/artwork state.
 
-import { webFrameMain, type BrowserWindow, type WebFrameMain } from "electron";
+import { screen, webFrameMain, type BrowserWindow, type WebFrameMain } from "electron";
 import { setCommand } from "./router";
 import { emitEvent } from "./events";
 import { PICKER_SCRIPT } from "../iframe-picker-script";
@@ -546,9 +546,25 @@ function attachAutoInject(win: BrowserWindow): void {
 // Capture region — renderer-driven, for picker chip thumbnails
 // ──────────────────────────────────────────────────────────
 
-async function handleCaptureRegion(
+const captureBudgets = new WeakMap<BrowserWindow, { busy: boolean; windowStart: number; captures: number; pixels: number }>();
+
+async function handleCaptureRegion(win: BrowserWindow, args: unknown): Promise<{ ok: true; dataUrl: string } | { ok: false; error: string }> {
+  let budget = captureBudgets.get(win);
+  const now = performance.now();
+  if (!budget) { budget = { busy: false, windowStart: now, captures: 0, pixels: 0 }; captureBudgets.set(win, budget); }
+  if (budget.busy) return { ok: false, error: "capture already in progress" };
+  if (now - budget.windowStart >= 1000) { budget.windowStart = now; budget.captures = 0; budget.pixels = 0; }
+  if (budget.captures >= 8) return { ok: false, error: "capture budget exceeded" };
+  budget.busy = true;
+  budget.captures++;
+  try { return await performCaptureRegion(win, args, budget); }
+  finally { budget.busy = false; }
+}
+
+async function performCaptureRegion(
   win: BrowserWindow,
   args: unknown,
+  budget: { pixels: number },
 ): Promise<{ ok: true; dataUrl: string } | { ok: false; error: string }> {
   if (win.isDestroyed()) {
     return { ok: false, error: "main window not available" };
@@ -588,9 +604,16 @@ async function handleCaptureRegion(
   if (!region) {
     return { ok: false, error: "clamped to empty rect" };
   }
+  const scale = Math.max(1, ...(screen?.getAllDisplays() ?? []).map(display => display.scaleFactor)) * Math.max(1, win.webContents.getZoomFactor?.() ?? 1);
+  const pixels = Math.ceil(region.width * scale) * Math.ceil(region.height * scale);
+  if (!Number.isSafeInteger(pixels) || pixels > 4_000_000 || budget.pixels + pixels > 16_000_000)
+    return { ok: false, error: "capture pixel budget exceeded" };
+  budget.pixels += pixels;
   try {
     const img = await win.webContents.capturePage(region);
-    return { ok: true, dataUrl: img.toDataURL() };
+    const dataUrl = img.toDataURL();
+    if (dataUrl.length > 2 * 1024 * 1024) return { ok: false, error: "capture output budget exceeded" };
+    return { ok: true, dataUrl };
   } catch (err) {
     return {
       ok: false,

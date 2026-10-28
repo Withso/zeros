@@ -246,5 +246,7 @@ databaseDescribe("resetPublicSchema controlled migration replay", () => {
       readFileSync(path.join(MIGRATIONS_DIR, file), "utf8").includes("-- zeros:requires-controlled-downtime"),
     ).join(","));
     await expect(resetPublicSchema(pool)).resolves.toEqual(LADDER);
-  });
+    // Replays the whole SQL ladder, like migrations.test.ts. The default 5 s
+    // unit-test budget can expire while those transactions still progress.
+  }, 30_000);
 });

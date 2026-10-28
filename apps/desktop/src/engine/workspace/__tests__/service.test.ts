@@ -1585,6 +1585,12 @@ describe("WorkspaceService", () => {
             api as unknown as { sessions: Map<string, unknown> }
           ).sessions;
           expect(sessions.has(`frame:${second.frame.file}`)).toBe(false);
+          const restoredPage = await svc.handle("design.history.undo", target);
+          expect(restoredPage).toMatchObject({ historyPageId: page.page.id });
+          if (deletion === "empty page")
+            expect(await svc.handle("design.history.undo", target)).toMatchObject({ historyFrame: second.frame.file });
+          await svc.handle("design.history.undo", target); // Frame B creation.
+          await svc.handle("design.history.undo", target); // Page B creation.
         } else {
           await svc.handle("design.history.undo", target);
           await deleteDesignPage(design.path, page.page.id, []);
@@ -1597,6 +1603,9 @@ describe("WorkspaceService", () => {
             }
           ).designHistoryState(design.path);
           expect(history.redo).toEqual([]);
+          // Native removal also invalidates the older page-create target.
+          // It must not block all preceding document history indefinitely.
+          await expect(svc.handle("design.history.undo", target)).rejects.toThrow(/page.*not found|page.*missing/i);
         }
         const undone = (await svc.handle("design.history.undo", target)) as {
           historyFrame: string;

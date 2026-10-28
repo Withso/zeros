@@ -425,6 +425,20 @@ and validation of a remembered workspace once its exact repository list settles.
 - Create from… publishes the Create route and project atomically; the "open
   the source picker" intent is ephemeral and is consumed or dropped as soon as
   Create shows (or cannot show) that repository.
+- Command+1–9 opens that position among the filtered, sorted workspace rows;
+  headers and pending creates do not count. Command+Option+Up/Down walks the
+  same list beyond the first nine and stops at either end. Collapsed groups
+  retain their destinations, and selecting one reveals its row. Command+N
+  opens Create with the same repository context as the sidebar action.
+  These app-wide shortcuts work from the composer and with a hidden sidebar.
+- Command+Left/Right cycles the focused conversation pane's chat tabs;
+  Command+Option+Left/Right cycles the visible side column's tabs. Keyboard
+  capture follows the native DOM through portaled composers, and overlays
+  keep priority. Retained hidden panes must not handle these keys.
+- Chat Command+Up/Down/Home/End navigates user-message checkpoints through
+  the rail's existing pin, bottom spacer and layout corrections. Keyboard
+  and pointer navigation share one selection; neither measures sticky prompt
+  bubbles or includes assistant/tool rows as message destinations.
 
 ### 2. Treat reads as exact-key server state
 
@@ -728,6 +742,31 @@ keyboard focus, retained file-tree owners and canvas anchors in Chromium. Its
 dismissal suite samples DOM commits and animation frames, covers the real model
 and repository menus, and checks owner switching, rapid reopen, first-focus
 Escape, native overlay intent cleanup and reduced motion.
+
+### 6.2 Focus belongs to the latest interaction
+
+Typing is not focus navigation. The shared `focus-navigation.ts` policy enables
+keyboard chrome for Tab/Shift-Tab and navigation inside composite widgets;
+pointer interaction resets it. Text-entry controls keep their caret and editing
+cues. Tooltips follow navigation intent, while overlays independently preserve
+their keyboard close/return behavior. A palette category selected by pointer
+keeps search ready to type; Tab/Enter/Space retain deliberate category focus.
+
+Delayed work does not own the keyboard indefinitely. Capture a
+`captureDeferredFocus` predicate before waiting for I/O, layout, or a React
+commit, and recheck it immediately before focusing. New input, another focused
+destination, selected reading text, an overlay, a hidden/inert target, or leaving
+the window retires that request. Callers also recheck the exact workspace,
+editor and surface lifetime. A saving control may release focus to body when it
+is disabled or removed; an uninterrupted action can still finish its handoff.
+When a return control mounts in a later commit, restore from that commit instead
+of assuming the next animation frame will contain it. Editor commands must not
+schedule an additional, unguarded focus after this check.
+
+Browser regressions exercise pointer → ordinary key → Tab, parent/peer and
+shadow-root styling, iframe Tab return, modal containment, and held completions
+followed by another edit. Cover Local, organization-local and organization-cloud
+shared surfaces; Design remains local-only.
 
 ## Zeros implementation map
 

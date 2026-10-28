@@ -152,7 +152,7 @@ import {
   TRAFFIC_LIGHT_RESERVE_CLS,
 } from "./sidebar-toggle";
 import { useWorkspaceRunActivitySync } from "./terminal/run-activity-store";
-import { useCustomWindowDrag } from "./use-custom-window-drag";
+import { useWorkspaceNavigationHotkeys } from "./use-workspace-navigation-hotkeys";
 import { useHomeSidebarResizeDrag } from "./use-home-sidebar-drag";
 import { useResizeHint } from "./use-resize-hint";
 import { warmWorkspaceFiles } from "./workspace-files-cache";
@@ -299,11 +299,6 @@ export function AppSidebar({ hidden = false }: { hidden?: boolean }) {
     [activeFolder, projects],
   );
 
-  // The title band is the window's drag handle; its interactive descendants
-  // are excluded automatically by useCustomWindowDrag.
-  const titleBandRef = useRef<HTMLDivElement | null>(null);
-  useCustomWindowDrag(titleBandRef);
-
   // Older builds persisted Active and repository-only presentations. Paint the
   // folded value immediately and persist it once, so the stored filter always
   // names one of the presentations this navigation offers.
@@ -428,13 +423,17 @@ export function AppSidebar({ hidden = false }: { hidden?: boolean }) {
     [dedupedPendingCreates, listFilter, preferences.sort, repositoryIds, activeAtByWorkspaceId, projects, realWorkspaces],
   );
   const listedItems = useMemo(() => sidebarWorkspaceItems(entries), [entries]);
+  const navigableWorkspaces = useMemo(
+    () => listedItems.flatMap(item => item.kind === "workspace" ? [item.workspace] : []),
+    [listedItems],
+  );
   // Repository filtering also bounds Back/Forward destinations; collapse does
   // not remove a destination from history.
   const historyScope = useMemo<SidebarHistoryScope>(() => ({
     projects,
-    workspaces: listedItems.flatMap(item => item.kind === "workspace" ? [item.workspace] : []),
+    workspaces: navigableWorkspaces,
     pendingCreates: listedItems.flatMap(item => item.kind === "pending" ? [item.pending] : []),
-  }), [listedItems, projects]);
+  }), [listedItems, navigableWorkspaces, projects]);
 
   // A cold repository switch is allowed to publish its remembered folder
   // before the workspace list settles. Only a completed exact-key snapshot may
@@ -605,6 +604,16 @@ export function AppSidebar({ hidden = false }: { hidden?: boolean }) {
     [openWorkspace],
   );
 
+  const handleCreateWorkspace = useCallback(
+    () => openDispatcher(contextProject?.id),
+    [contextProject?.id, openDispatcher],
+  );
+  useWorkspaceNavigationHotkeys({
+    workspaces: navigableWorkspaces,
+    onSelect: handleSelectWorkspace,
+    onCreate: handleCreateWorkspace,
+  });
+
   const handlePrefetchWorkspace = useCallback(
     (workspace: WorkspaceNavigationTarget) => {
       // Warm the workbench and the existing conversation together.
@@ -727,7 +736,7 @@ export function AppSidebar({ hidden = false }: { hidden?: boolean }) {
             app-level controls at its end: resources, then back and forward.
             These four 28px controls set the sidebar's 220px floor. */}
         <div
-          ref={titleBandRef}
+          data-tauri-drag-region
           className="flex h-10 shrink-0 items-center gap-1 pr-2"
         >
           <div className={TRAFFIC_LIGHT_RESERVE_CLS} aria-hidden="true" />
@@ -797,7 +806,8 @@ export function AppSidebar({ hidden = false }: { hidden?: boolean }) {
               className={cn(SIDEBAR_ENTRY_CLS, "[&_[data-draft-icon]]:size-3")}
               aria-label="Create workspace"
               aria-description={showCreateDraft ? "Unsent draft" : undefined}
-              onClick={() => openDispatcher(contextProject?.id)}
+              onClick={handleCreateWorkspace}
+              aria-keyshortcuts="Meta+N"
             >
               <Plus strokeWidth={1.5} />
               <span className="truncate">Create</span>

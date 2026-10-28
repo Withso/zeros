@@ -73,6 +73,18 @@ describe("worktree recovery seed (app-data; .zeros retired)", () => {
     expect(getWorkspaceById(ws.id)?.path).toBe(ws.path);
   });
 
+  it.each(["../outside", "repo.*", "a".repeat(10_000)])("refuses an invalid recovered repository slug without deleting the checkout", repoSlug => {
+    const ws = makeWs(root);
+    mkdirSync(path.dirname(worktreeSeedPath(ws.path)), { recursive: true });
+    writeFileSync(worktreeSeedPath(ws.path), JSON.stringify({ ...ws, repoSlug }));
+    const legacy = path.join(ws.path, ".zeros");
+    mkdirSync(legacy);
+    writeFileSync(path.join(legacy, "workspace.json"), JSON.stringify({ ...ws, repoSlug }));
+    expect(seedFromDisk().inserted).toBe(0);
+    expect(getWorkspaceById(ws.id)).toBeNull();
+    expect(existsSync(ws.path)).toBe(true);
+  });
+
   it("coerces an ownerless cloud seed to local during best-effort recovery", () => {
     const ws = makeWs(root);
     mkdirSync(path.dirname(worktreeSeedPath(ws.path)), { recursive: true });

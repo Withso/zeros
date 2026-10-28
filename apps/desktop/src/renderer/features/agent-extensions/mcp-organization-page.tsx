@@ -7,6 +7,7 @@ import { useRecoveringRead } from "../../state/use-recovering-read";
 import { KeyedAsyncCache } from "../../shared/lib/keyed-async-cache";
 import { shellOpenUrl } from "../../platform/app";
 import type { OrganizationSummary } from "../team/control-plane";
+import { isFeatureEnabled } from "../../config/release-channel";
 import { mcpConnectionCache, mcpConnectionKey, rememberMcpConnection } from "./mcp-connection-status";
 import { McpServerEditor, type McpProbeResult, type McpProjectOption } from "./mcp-server-editor";
 import { saveMcpDraft, secretChangesFromDraft } from "./mcp-form-save";
@@ -39,7 +40,9 @@ function OrganizationMcpRow({ row, ownerKey, observedAt, busy, onEdit, onConnect
 }
 
 export function OrganizationMcpPage({ organization, surfaceActive }: { organization: OrganizationSummary; surfaceActive: boolean }) {
-  const key = cloudMcpKey(organization.id);
+  const cloudEnabled = isFeatureEnabled("cloud-workspaces");
+  const [githubPlacement, setGithubPlacement] = useState<"local" | "cloud">("local");
+  const key = cloudMcpKey(organization.id, githubPlacement);
   const read = useRecoveringRead(cloudMcpCache, key, readCloudMcp, { enabled: surfaceActive, maxAgeMs: 30_000 });
   const repositories = useRecoveringRead(repositoriesCache, key, readCloudMcpRepositories, { enabled: surfaceActive, maxAgeMs: 30_000 });
   const [view, setView] = useState<{ kind: "list" } | { kind: "editor"; initial: CloudMcpExtension | null; connect?: boolean }>({ kind: "list" });
@@ -77,6 +80,12 @@ export function OrganizationMcpPage({ organization, surfaceActive }: { organizat
             <p className="text-fg2 m-0 text-xs">Connect tools and services for {organization.name}.</p>
           </div><Button variant="default" onClick={() => setView({ kind: "editor", initial: null })}><Plus aria-hidden="true" />Add server</Button></div>
           {!read.data && <p className="text-fg3 m-0 text-sm" role="status">{read.error ? "Could not load MCP servers. Reopen this page to try again." : "Loading MCP servers…"}</p>}
+          {cloudEnabled && <div className="flex flex-wrap items-center gap-2" role="group" aria-label="GitHub connection for repository selection">
+            <span className="text-fg2 text-xs">Repository connection</span>
+            <Button variant={githubPlacement === "local" ? "secondary" : "ghost"} aria-pressed={githubPlacement === "local"} onClick={() => setGithubPlacement("local")}>On this Mac</Button>
+            <Button variant={githubPlacement === "cloud" ? "secondary" : "ghost"} aria-pressed={githubPlacement === "cloud"} onClick={() => setGithubPlacement("cloud")}>Cloud</Button>
+          </div>}
+          {repositories.error && <p className="text-fg2 m-0 text-xs" role="status">{repositories.error.message}</p>}
           {(["organization", "user"] as const).map(owner => {
             const rows = (read.data ?? []).filter(row => row.owner === owner);
             return <section className="flex flex-col gap-3" key={owner} aria-label={owner === "organization" ? "Shared servers" : "Your servers"}>

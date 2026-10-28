@@ -287,6 +287,29 @@ describe("designer layout values", () => {
     ).toMatchObject({ left: "26px", right: "auto" });
   });
 
+  it("reads and edits a relocated layer at the position it is drawn, normalizing an older translate", () => {
+    // Older relocations saved the layer's offset in transform: drawn 66, 223
+    // from a box at 0, 0. X and Y must read where it is drawn.
+    const legacy = node({ left: "0px", top: "0px", transform: "matrix(1, 0, 0, 1, 66, 223)", transformOrigin: "0px 0px" });
+    legacy.layout = { ...legacy.layout!, x: 0, y: 0 };
+    expect(designLayoutFieldValue(legacy, "left")).toBe("66px");
+    expect(designLayoutFieldValue(legacy, "top")).toBe("223px");
+    expect(designLayoutActionStyles(legacy, { type: "position", axis: "x", value: 100 })).toMatchObject({ left: "100px", top: "223px", transform: "none" });
+    expect(designLayoutActionStyles(legacy, { type: "align", axis: "x", value: "start" })).toMatchObject({ left: "0px", top: "223px", transform: "none" });
+    // A turned layer keeps its pose, only its offset becomes its position.
+    const turned = node({ left: "0px", top: "0px", transform: "matrix(0, 1, -1, 0, 66, 223)", transformOrigin: "0px 0px" });
+    turned.layout = { ...turned.layout!, x: 0, y: 0 };
+    expect(designLayoutActionStyles(turned, { type: "position", axis: "y", value: 10 })).toMatchObject({ left: "66px", top: "10px", transform: "matrix(0,1,-1,0,0,0)" });
+    // A layer without an offset keeps its transform untouched, and so does an
+    // authored translate: it is the layer's Transform, not its position.
+    expect(designLayoutActionStyles(node(), { type: "position", axis: "x", value: 12 }).transform).toBeUndefined();
+    const authored = node({ transform: "matrix(0.98, 0.17, -0.17, 0.98, 5, 8)", transformOrigin: "50px 30px" });
+    expect(designLayoutFieldValue(authored, "left")).toBe("40px");
+    expect(designLayoutActionStyles(authored, { type: "position", axis: "x", value: 12 }).transform).toBeUndefined();
+    const written = { ...legacy, authoredStyles: { transform: { origin: "inline" as const, value: "translate(66px, 223px)" } } };
+    expect(designLayoutFieldValue(written, "left")).toBe("0px");
+  });
+
   it("rotates clockwise relative to each layer and preserves translation and scale", () => {
     const details = node({
       rotate: "30deg",

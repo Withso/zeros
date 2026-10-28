@@ -5,6 +5,7 @@ import {
   cloudWorkspaceKey,
   parseCloudScopedId,
   parseCloudWorkspaceKey,
+  isCloudRepositorySlug,
 } from "../cloud-workspace-key";
 
 const target = {
@@ -13,6 +14,12 @@ const target = {
 };
 
 describe("cloud workspace UI identity", () => {
+  it("rejects malformed and oversized legacy repository identities without backtracking", () => {
+    const start = performance.now();
+    expect(isCloudRepositorySlug(`cloud-${target.organizationId}:github:${"/".repeat(32_768)}\nx`)).toBe(false);
+    expect(performance.now() - start).toBeLessThan(500);
+    expect(isCloudRepositorySlug(`cloud-${target.organizationId}:github:owner/repo`)).toBe(true);
+  });
   it("isolates the same native conversation in different workspaces", () => {
     const other = {
       ...target,

@@ -19,6 +19,30 @@ afterEach(() => {
 });
 
 describe("iframe request header admission", () => {
+  it("composes packaged document CSP and iframe rewrites in one response listener", () => {
+    const response = vi.fn();
+    installIframeHeaderStripping({ webRequest: { onBeforeSendHeaders: vi.fn(), onHeadersReceived: response } } as never,
+      { url: "file:///app/dist/index.html", webContentsId: 12, csp: "default-src 'self'; frame-ancestors 'none'" });
+    expect(response).toHaveBeenCalledTimes(1);
+    const callback = vi.fn();
+    response.mock.calls[0][1]({ resourceType: "mainFrame", webContentsId: 12, url: "file:///app/dist/index.html" }, callback);
+    expect(callback.mock.calls[0][0].responseHeaders["Content-Security-Policy"]).toEqual(["default-src 'self'; frame-ancestors 'none'"]);
+    callback.mockClear();
+    response.mock.calls[0][1]({ resourceType: "mainFrame", webContentsId: 14, url: "file:///app/dist/index.html" }, callback);
+    expect(callback.mock.calls[0][0].responseHeaders).toBeUndefined();
+  });
+  it("keeps independent CSP policies and their non-framing directives", () => {
+    const response = vi.fn();
+    installIframeHeaderStripping({ webRequest: { onBeforeSendHeaders: vi.fn(), onHeadersReceived: response } } as never);
+    const callback = vi.fn();
+    response.mock.calls[0][1]({ resourceType: "subFrame", responseHeaders: {
+      "Content-Security-Policy": ["frame-ancestors 'none', script-src 'none'; connect-src 'self'"],
+    } }, callback);
+    const csp = callback.mock.calls[0][0].responseHeaders["Content-Security-Policy"].join(",");
+    expect(csp).toContain("script-src 'none'");
+    expect(csp).toContain("connect-src 'self'");
+    expect(csp).not.toContain("frame-ancestors");
+  });
   it("injects native HMR headers only for the owned secure WebSocket frame", () => {
     let listener: (
       details: BeforeSendHeadersDetails,

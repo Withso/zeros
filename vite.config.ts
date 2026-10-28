@@ -2,6 +2,19 @@ import { defineConfig, loadEnv } from "vite";
 import path from "path";
 import tailwindcss from "@tailwindcss/vite";
 import react from "@vitejs/plugin-react";
+import { developmentFileBoundary, developmentServerOptions } from "./scripts/dev-server-policy.mjs";
+import { showcaseMiddleware } from "./scripts/showcase-server.mjs";
+
+// Only the browser source graph and public assets. A few pure shared constants
+// live beside native code; admitting those files does not expose its whole root.
+const rendererServeRoots = [
+  "index.html", "agent-control.html", "public", "apps/desktop/src/renderer", "apps/desktop/src/assets",
+  "apps/desktop/shared", "apps/desktop/src/engine/runtime.ts", "apps/desktop/src/engine/git/branch-naming.ts",
+  "apps/desktop/src/engine/settings/env-names.ts", "apps/control-plane/src/cloud/channels.json",
+  // Synthetic data shared by the Personal and sidebar development harnesses.
+  "scripts/__tests__/fixtures/organization-list.json",
+  "packages", "catalogs", "styles", "node_modules",
+].map(dir => path.resolve(__dirname, dir));
 
 // Strict CSP for the PACKAGED Electron renderer (loaded from file://). Injected
 // ONLY by `vite build` — dev (serve) needs HMR's ws+eval. connect-src enumerates
@@ -102,50 +115,10 @@ function loadersShowcasePlugin() {
   // dir). Still served under /loaders and /Loaders for back-compat, e.g.
   // http://localhost:5193/Loaders/loaders-preview.html.
   const loadersDir = path.resolve(__dirname, "styles/Artifacts");
-  const mime: Record<string, string> = {
-    ".html": "text/html; charset=utf-8",
-    ".css": "text/css; charset=utf-8",
-    ".js": "application/javascript; charset=utf-8",
-  };
-
   return {
     name: "zeros-loaders-showcase",
     configureServer(server) {
-      server.middlewares.use((req, res, next) => {
-        const url = (req.url ?? "").split("?")[0];
-        if (!url.startsWith("/loaders") && !url.startsWith("/Loaders")) {
-          return next();
-        }
-
-        let rel = url
-          .replace(/^\/loaders\/?/i, "")
-          .replace(/^\/Loaders\/?/i, "");
-        if (!rel || rel === "/") rel = "loaders-preview.html";
-
-        const filePath = path.join(loadersDir, rel);
-        if (!filePath.startsWith(loadersDir)) {
-          res.statusCode = 403;
-          res.end("Forbidden");
-          return;
-        }
-
-        import("node:fs")
-          .then(({ existsSync, readFileSync }) => {
-            if (!existsSync(filePath)) {
-              res.statusCode = 404;
-              res.end("Not found");
-              return;
-            }
-            const ext = path.extname(filePath);
-            res.setHeader(
-              "Content-Type",
-              mime[ext] ?? "application/octet-stream",
-            );
-            res.setHeader("Cache-Control", "no-store");
-            res.end(readFileSync(filePath));
-          })
-          .catch(next);
-      });
+      server.middlewares.use(showcaseMiddleware(loadersDir));
     },
   };
 }
@@ -161,6 +134,7 @@ export default defineConfig(({ command, mode }) => ({
   // changed" line that diagnosed the problem in the first place.
   clearScreen: false,
   server: {
+    ...developmentServerOptions(rendererServeRoots),
     hmr: mode === "ui-smoke" ? false : undefined,
     // Pinned desktop-renderer port. Distinct from the marketing site (3000)
     // and the Wrangler web hub (8788), so Electron's Vite never collides
@@ -175,7 +149,6 @@ export default defineConfig(({ command, mode }) => ({
     // engine's WS origin allowlist via the same var). Unset → the pinned 5193.
     port: Number(process.env.ZEROS_VITE_PORT) || 5193,
     strictPort: true,
-    host: true,
     watch: {
       // 2026-05-29 audit: a long dev session showed Vite force-
       // reloading the Electron renderer 19+ times in an hour with
@@ -243,6 +216,7 @@ export default defineConfig(({ command, mode }) => ({
     },
   },
   plugins: [
+    developmentFileBoundary(rendererServeRoots),
     react(),
     tailwindcss(),
     electronRendererCsp(command, mode),

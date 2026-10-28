@@ -5,11 +5,11 @@ import type { CloudAgentCredentialKeys } from "../agent-credentials/agent-creden
 import { McpUuidSchema, type RuntimeMcpServer } from "../cloud/contract.js";
 import { openMcpMaterial, sealMcpMaterial, type McpBinding, type McpEnvelope } from "./envelope.js";
 import type { McpRepository } from "./repositories.js";
-import { McpConfigSchema, McpDraftSchema, McpRepositorySchema, McpSecretsPatchSchema, McpWriteSchema,
+import { McpConfigSchema, McpDraftSchema, McpRepositorySchema, McpRepositoryIdSchema, McpSecretsPatchSchema, McpWriteSchema,
   materializeMcp, mergeMcpSecrets, newOAuthBinding, sameOAuthIdentity, selectMcpEntries, type McpConfig, type McpDraft, type McpSecrets } from "./model.js";
 
 export interface McpRow {
-  id: string; org_id: string; owner_user_id: string | null; kind: "mcp"; repository: string | null; revision: number;
+  id: string; org_id: string; owner_user_id: string | null; kind: "mcp"; repository: string | null; repository_id: string | null; repository_identity_revision: number | null; revision: number;
   config: McpConfig; secret_names: { env: string[]; headers: string[]; oauthClientSecret: boolean };
   secret_envelope: McpEnvelope; oauth_binding: string; updated_at: Date; connected?: boolean;
 }
@@ -18,6 +18,9 @@ export interface McpExtension {
   secrets: McpRow["secret_names"]; canEdit: boolean; updatedAt: string; oauth: { status: "connected" | "needs-auth" };
 }
 export type AttachOAuth = (tx: Tx, organizationId: string, userId: string, attemptId: string, row: McpRow) => Promise<void>;
+export type CloudMcpRepositoryTarget = { repositoryId: string };
+export type CloudMcpRepositoryAdmission = (organizationId: string, userId: string, repository: string) => Promise<
+  CloudMcpRepositoryTarget & { assertCurrent(tx: Tx): Promise<void> }>;
 export const mcpNotFound = () => new HttpError(404, "not_found", "MCP configuration not found");
 export const mcpConflict = () => new HttpError(409, "revision_conflict", "MCP configuration changed. Reload it before saving.");
 export function uuid(value: string): string {
@@ -36,7 +39,8 @@ const connected = `g.refresh_claim IS NULL AND (g.access_expires_at IS NULL OR g
 export class McpStore {
   attachOAuth?: AttachOAuth;
   constructor(readonly pool: pg.Pool, readonly keys: CloudAgentCredentialKeys,
-    private readonly repositories: (organizationId: string, userId: string, tx?: Tx) => Promise<readonly (string | McpRepository)[] | null>) {}
+    private readonly repositories: (organizationId: string, userId: string, tx?: Tx) => Promise<readonly (string | McpRepository)[] | null>,
+    private readonly cloudRepositoryAdmission?: CloudMcpRepositoryAdmission) {}
 
   async member(tx: Tx, organizationId: string, userId: string, mutation = false): Promise<OrganizationRole> {
     const result = await tx.query<{ role: OrganizationRole }>(
@@ -60,10 +64,12 @@ export class McpStore {
     await this.requireMember(organizationId, userId);
     return (rows ?? []).map(row => typeof row === "string" ? { repository: row } : row);
   }
-  async requireRepository(organizationId: string, userId: string, repository: string, tx?: Tx): Promise<void> {
+  async requireRepository(organizationId: string, userId: string, repository: string, tx?: Tx): Promise<McpRepository> {
     const parsed = McpRepositorySchema.safeParse(repository);
-    if (!parsed.success || !(await this.repositories(organizationId, userId, tx))?.some(row => (typeof row === "string" ? row : row.repository).toLowerCase() === parsed.data))
+    const admitted = parsed.success ? (await this.repositories(organizationId, userId, tx))?.find(row => (typeof row === "string" ? row : row.repository).toLowerCase() === parsed.data) : undefined;
+    if (!admitted)
       throw new HttpError(404, "repository_not_found", "Select a repository available to this organization");
+    return typeof admitted === "string" ? { repository: admitted } : admitted;
   }
   binding(row: McpRow): McpBinding {
     return { organizationId: row.org_id, ownerUserId: row.owner_user_id, id: row.id, revision: row.revision, purpose: "config" };
@@ -119,22 +125,41 @@ export class McpStore {
     });
   }
 
-  async put(organizationId: string, userId: string, id: string, raw: unknown): Promise<McpExtension> {
+  async put(organizationId: string, userId: string, id: string, raw: unknown, githubPlacement: "local" | "cloud" = "local"): Promise<McpExtension> {
     organizationId = uuid(organizationId); userId = uuid(userId); id = uuid(id);
     const parsed = McpWriteSchema.safeParse(raw);
     if (!parsed.success) throw new HttpError(422, "invalid_mcp_config", "Invalid MCP configuration");
     const input = parsed.data;
     await this.requireMember(organizationId, userId);
+    // The settings chooser is explicit. Cloud provider I/O finishes before
+    // the mutation transaction; native runtime admission below stays separate.
+    let cloudAdmission: Awaited<ReturnType<CloudMcpRepositoryAdmission>> | undefined;
+    if (input.repository && githubPlacement === "cloud") {
+      if (!this.cloudRepositoryAdmission) throw new HttpError(503, "cloud_github_unavailable", "Cloud GitHub is unavailable.");
+      cloudAdmission = await this.cloudRepositoryAdmission(organizationId, userId, input.repository);
+    }
     try {
       return await withSystemTx(this.pool, async tx => {
         // Mutations alone serialize the per-owner bound and name uniqueness.
         const role = await this.mutation(tx, organizationId, userId);
-        if (input.repository) await this.requireRepository(organizationId, userId, input.repository, tx);
+        let repositoryId: string | null = null;
+        if (cloudAdmission) {
+          await cloudAdmission.assertCurrent(tx);
+          repositoryId = McpRepositoryIdSchema.parse(cloudAdmission.repositoryId);
+        } else if (input.repository) {
+          const admitted = await this.requireRepository(organizationId, userId, input.repository, tx);
+          repositoryId = admitted.repositoryId ? McpRepositoryIdSchema.parse(admitted.repositoryId) : null;
+        }
         if (input.owner === "organization" && !roleAtLeast(role, "admin")) throw new HttpError(403, "forbidden", "Requires admin role");
         const existing = (await tx.query<McpRow>("SELECT * FROM organization_extensions WHERE id=$1 FOR UPDATE", [id])).rows[0];
         if (existing && (existing.org_id !== organizationId || (existing.owner_user_id !== null && existing.owner_user_id !== userId))) throw mcpNotFound();
         if (existing?.owner_user_id === null && !roleAtLeast(role, "admin")) throw new HttpError(403, "forbidden", "Requires admin role");
         if (existing ? existing.revision !== input.expectedRevision : input.expectedRevision !== null) throw mcpConflict();
+        // Never downgrade recorded identity, or silently rebind retained secrets
+        // when an unrelated repository takes an existing definition's name.
+        if (existing?.repository_id && input.repository && (!repositoryId ||
+          (existing.repository === input.repository && existing.repository_id !== repositoryId)))
+          throw new HttpError(409, "mcp_repository_changed", "This repository changed. Select the original repository's current name before saving.");
         const ownerUserId = input.owner === "user" ? userId : null;
         const count = await tx.query<{ count: number }>(`SELECT count(*)::int AS count FROM organization_extensions
           WHERE org_id=$1 AND owner_user_id IS NOT DISTINCT FROM $2::uuid AND id<>$3`, [organizationId, ownerUserId, id]);
@@ -148,13 +173,15 @@ export class McpStore {
         const revision = (existing?.revision ?? 0) + 1;
         const names = { env: Object.keys(next.secrets.env ?? {}), headers: Object.keys(next.secrets.headers ?? {}), oauthClientSecret: !!next.secrets.oauthClientSecret };
         const envelope = sealMcpMaterial(next.secrets, { organizationId, ownerUserId, id, revision, purpose: "config" }, this.keys);
-        const result = await tx.query<McpRow>(`INSERT INTO organization_extensions(id,org_id,owner_user_id,kind,repository,revision,config,secret_names,secret_envelope,oauth_binding)
-          VALUES($1,$2,$3,'mcp',$4,$5,$6,$7,$8,$9)
-          ON CONFLICT(id) DO UPDATE SET owner_user_id=excluded.owner_user_id,repository=excluded.repository,revision=excluded.revision,
+        const result = await tx.query<McpRow>(`INSERT INTO organization_extensions(id,org_id,owner_user_id,kind,repository,revision,config,secret_names,secret_envelope,oauth_binding,repository_id,repository_identity_revision)
+          VALUES($1,$2,$3,'mcp',$4,$5,$6,$7,$8,$9,$10,CASE WHEN $10::bigint IS NOT NULL THEN $5::integer END)
+          ON CONFLICT(id) DO UPDATE SET owner_user_id=excluded.owner_user_id,repository=excluded.repository,repository_id=excluded.repository_id,
+            repository_identity_revision=excluded.repository_identity_revision,revision=excluded.revision,
             config=excluded.config,secret_names=excluded.secret_names,secret_envelope=excluded.secret_envelope,oauth_binding=excluded.oauth_binding,updated_at=clock_timestamp()
-          RETURNING *`, [id, organizationId, ownerUserId, input.repository, revision, next.config, names, envelope, binding]);
+          RETURNING *`, [id, organizationId, ownerUserId, input.repository, revision, next.config, names, envelope, binding, repositoryId]);
         const row = result.rows[0]!;
-        if (existing && (existing.oauth_binding !== binding || existing.owner_user_id !== ownerUserId || existing.repository !== input.repository))
+        if (existing && (existing.oauth_binding !== binding || existing.owner_user_id !== ownerUserId ||
+          existing.repository_id !== repositoryId || (!repositoryId && existing.repository !== input.repository)))
           await tx.query("DELETE FROM organization_mcp_oauth WHERE extension_id=$1", [id]);
         if (input.oauthAttemptId) {
           if (!this.attachOAuth) throw new HttpError(409, "mcp_auth_unavailable", "OAuth is unavailable");
@@ -197,19 +224,27 @@ export class McpStore {
       return { input, ...next, binding };
     });
   }
-  async resolve(organizationId: string, userId: string, repository: string, admittedWorkspace = false): Promise<RuntimeMcpServer[]> {
+  async resolve(organizationId: string, userId: string, repository: string, admittedWorkspace?: CloudMcpRepositoryTarget): Promise<RuntimeMcpServer[]> {
     await this.requireMember(organizationId, userId);
     repository = McpRepositorySchema.parse(repository);
-    // A live worker's authoritative workspace row already admits its checkout;
-    // removing a repo from the next Computer image cannot break that workspace.
+    // A cloud caller supplies its admitted workspace's immutable source ID.
+    // Name-only legacy definitions remain available to Local, but cannot prove
+    // cloud provenance; saving them with verified access records their identity.
     return withSystemTx(this.pool, async tx => {
       await this.member(tx, organizationId, userId);
-      if (!admittedWorkspace) await this.requireRepository(organizationId, userId, repository, tx);
+      const admitted = admittedWorkspace ?? await this.requireRepository(organizationId, userId, repository, tx);
+      const repositoryId = admitted.repositoryId ? McpRepositoryIdSchema.parse(admitted.repositoryId) : null;
+      if (admittedWorkspace && !repositoryId)
+        throw new HttpError(409, "mcp_repository_identity_required", "Verify this workspace's original repository before loading its tools.");
       const rows = (await tx.query<McpRow>(`SELECT * FROM organization_extensions WHERE org_id=$1
-        AND (owner_user_id IS NULL OR owner_user_id=$2) AND (repository IS NULL OR repository=$3)
-        ORDER BY id LIMIT 129`, [organizationId, userId, repository])).rows;
+        AND (owner_user_id IS NULL OR owner_user_id=$2) AND (repository IS NULL OR (repository_id=$4::bigint AND repository_identity_revision=revision)
+          OR ($5::boolean AND repository_id IS NULL AND repository=$3))
+        ORDER BY id LIMIT 129`, [organizationId, userId, repository, repositoryId, !admittedWorkspace])).rows;
       if (rows.length > 128) throw new HttpError(409, "mcp_limit", "Too many MCP configurations");
-      return selectMcpEntries(rows.map(row => ({ ...row, ownerUserId: row.owner_user_id })), userId, repository).map(row => this.runtime(row));
+      // All scoped rows above already match the admitted identity. Normalize
+      // only this selection view so renamed repositories retain override order.
+      return selectMcpEntries(rows.map(row => ({ ...row, ownerUserId: row.owner_user_id,
+        repository: row.repository === null ? null : repository })), userId, repository).map(row => this.runtime(row));
     });
   }
   runtime(row: McpRow): RuntimeMcpServer {

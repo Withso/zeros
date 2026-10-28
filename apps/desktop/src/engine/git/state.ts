@@ -1029,6 +1029,10 @@ function recoveredWorkspaceOwnership(seed: Partial<Workspace>): {
  *  missing workspace whose worktree still exists. The current home for seeds
  *  (the in-worktree `.zeros/workspace.json` was retired). Uses each seed's own
  *  `path`; idempotent — existing ids skipped, vanished worktrees not resurrected. */
+function recoveredRepositorySlug(value: unknown): string | null {
+  return typeof value === "string" && value.length <= 255 && /^[a-z0-9][a-z0-9-]*$/.test(value) ? value : null;
+}
+
 function seedFromAppData(): { inserted: number; skipped: number } {
   let inserted = 0;
   let skipped = 0;
@@ -1062,11 +1066,13 @@ function seedFromAppData(): { inserted: number; skipped: number } {
       skipped++;
       continue;
     }
+    const repoSlug = recoveredRepositorySlug(seed.repoSlug ?? path.basename(path.dirname(seed.path)));
+    if (!repoSlug) { skipped++; continue; }
     insertWorkspace({
       id: seed.id,
       kind: seed.kind === "design" ? "design" : "code",
       ...recoveredWorkspaceOwnership(seed),
-      repoSlug: seed.repoSlug ?? path.basename(path.dirname(seed.path)),
+      repoSlug,
       repoRoot: seed.repoRoot,
       branch: seed.branch,
       baseBranch: seed.baseBranch ?? "main",
@@ -1133,11 +1139,13 @@ function seedFromRoot(root: string): { inserted: number; skipped: number } {
         skipped++;
         continue;
       }
+      const recoveredSlug = recoveredRepositorySlug(seed.repoSlug ?? repoSlug);
+      if (!recoveredSlug) { skipped++; continue; }
       const ws: Workspace = {
         id: seed.id,
         kind: seed.kind === "design" ? "design" : "code",
         ...recoveredWorkspaceOwnership(seed),
-        repoSlug: seed.repoSlug ?? repoSlug,
+        repoSlug: recoveredSlug,
         repoRoot: seed.repoRoot,
         branch: seed.branch,
         baseBranch: seed.baseBranch ?? "main",

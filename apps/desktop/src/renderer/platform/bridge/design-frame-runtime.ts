@@ -163,6 +163,12 @@ export interface DesignFrameRuntimeConnection {
     /** Extra boxes to measure at the restored generation (the selection). */
     measure?: readonly string[],
   ): Promise<DesignRuntimeStyleCommit>;
+  /** Opt-in pending history presentation, isolated from commit baselines. */
+  previewHistory?(
+    targetSourceVersion: string | null,
+    measure?: readonly string[],
+    signal?: AbortSignal,
+  ): Promise<DesignRuntimeStyleCommit | null>;
   previewText(
     nodeId: string,
     text: string,
@@ -925,6 +931,23 @@ class DesignRuntimeConnectionImpl implements DesignFrameRuntimeConnection {
       return result;
     };
     return commit ? this.changeGeneration(restore) : restore();
+  }
+
+  async previewHistory(
+    targetSourceVersion: string | null,
+    measure?: readonly string[],
+    signal?: AbortSignal,
+  ): Promise<DesignRuntimeStyleCommit | null> {
+    if (!this.supports("previewHistory"))
+      throw runtimeError("previewHistory is not supported", "METHOD_NOT_SUPPORTED");
+    const result = await this.request("previewHistory", { targetSourceVersion,
+      ...(measure?.length ? { measure: [...measure] } : {}) }, signal);
+    if (targetSourceVersion === null && result === null) return null;
+    if (!isStyleCommit(result) || result.sourceVersion !== this.expectedSourceVersion ||
+      result.snapshot.sourceVersion !== this.expectedSourceVersion ||
+      result.details.some(detail => detail.sourceVersion !== this.expectedSourceVersion))
+      throw runtimeError("previewHistory returned malformed data");
+    return result;
   }
 
   async commitStyles(

@@ -1,4 +1,6 @@
 import { afterEach, expect, it, vi } from "vitest";
+const cloudGithub = vi.hoisted(() => ({ request: vi.fn(async (_target: unknown, op: string) => op === "gh.prGet" ? { number: 12, title: "Cloud PR" } : op === "gh.authStatus" ? { authenticated: true, login: "cloud-user" } : {}) }));
+vi.mock("../../cloud-github-pr", () => ({ requestCloudGithubPr: cloudGithub.request }));
 import { RuntimeClient } from "@/renderer/platform/bridge/ws-client";
 import {
   WorkspaceRuntimeClient,
@@ -82,9 +84,18 @@ afterEach(() => {
   setActiveBridge(null);
   for (const client of clients.splice(0)) client.dispose();
   vi.restoreAllMocks();
+  cloudGithub.request.mockReset();
+  cloudGithub.request.mockImplementation(async (_target, op) => op === "gh.prGet" ? { number: 12, title: "Cloud PR" } : op === "gh.authStatus" ? { authenticated: true, login: "cloud-user" } : {});
 });
 
-it("a connected cloud workspace loads its Review PR independently of write-access preflight", async () => {
+it("reads the cloud GitHub identity with no Local engine or VM connection", async () => {
+  setActiveBridge(null);
+  const provider = resolveReviewProvider("github.com")!;
+  await expect(provider.authStatus(folder)).resolves.toEqual({ authenticated: true, login: "cloud-user" });
+  expect(cloudGithub.request).toHaveBeenCalledWith(expect.objectContaining({ workspaceId: scope.workspaceId }), "gh.authStatus", {});
+});
+
+it("a cloud workspace loads Review through HTTPS independently of its VM and write-access preflight", async () => {
   const { client, request } = runtime();
   setActiveBridge(client);
   const provider = resolveReviewProvider("github.com")!;
@@ -92,7 +103,8 @@ it("a connected cloud workspace loads its Review PR independently of write-acces
   expect(peekReviewLiveData(provider, folder, 12).error).toBeNull();
   expect(
     request.mock.calls.some(([message]) => message.op === "gh.prGet"),
-  ).toBe(true);
+  ).toBe(false);
+  expect(cloudGithub.request).toHaveBeenCalledWith(expect.objectContaining({ workspaceId: scope.workspaceId }), "gh.prGet", expect.objectContaining({ prNumber: 12 }));
 });
 
 it("Undo after a cloud turn reset never dispatches to the Local engine", async () => {
@@ -170,15 +182,8 @@ it("confirmed cloud history remains readable while the Local engine is disconnec
 });
 
 it("Review retains real read-auth failures and Local still probes its own auth", async () => {
-  const { client, request } = runtime();
-  const original = request.getMockImplementation()!;
-  request.mockImplementation(async (message) => {
-    if (message.op === "gh.prGet")
-      throw Object.assign(new Error("Read credential expired"), {
-        code: "NOT_AUTHENTICATED",
-      });
-    return original(message);
-  });
+  const { client } = runtime();
+  cloudGithub.request.mockRejectedValue(Object.assign(new Error("Read credential expired"), { code: "NOT_AUTHENTICATED" }));
   setActiveBridge(client);
   const provider = resolveReviewProvider("github.com")!;
   await prefetchReviewLiveData(provider, folder, 14, { force: true });

@@ -75,6 +75,10 @@ extraResources:
   # on the same Electron-as-Node runtime (engine/git/watch-host-client.ts).
   - from: apps/desktop/src/engine/git/watch-host.cjs
     to: watch-host.cjs
+  # Terminable Node Sass compiler. Imports are brokered by the engine's bounded
+  # reader; the helper receives no agent or workspace credentials.
+  - from: apps/desktop/src/engine/design/sass-host.cjs
+    to: sass-host.cjs
   # The Zeros Design skill, packaged like a Claude Code plugin. The engine finds
   # it beside its binary (engine/design/design-skill.ts) and names its SKILL.md
   # in Design conversation context. `**/*` skips dot-folders, so the plugin
@@ -312,6 +316,10 @@ asar: true
 # Native .node binaries must live outside asar so dyld can dlopen.
 asarUnpack:
   - "**/node_modules/node-pty/**/*"
+  # Sass runs in Electron's Node mode too. Its compiler and immutable runtime
+  # must be ordinary files; sass-process.ts translates main's archived path.
+  - "**/node_modules/sass/**/*"
+  - "**/node_modules/immutable/**/*"
   # Cursor SDK host (cursor-host.cjs) runs under ELECTRON_RUN_AS_NODE, which
   # DISABLES Electron's asar support — so @cursor/sdk, every package its CJS
   # build require()s, and the native sqlite3 binding it pulls must all live

@@ -1,4 +1,4 @@
-import { assertLocalDatabaseOwner } from "./database.mjs";
+import { assertLocalDatabaseOwner } from "./local-fixtures.mjs";
 
 const SANDBOX_ID = /^bx_[23456789abcdefghjkmnpqrstuvwxyz]{8}$/;
 const missing = error => error?.httpStatus === 404 || error?.code === "provider_not_found";
@@ -67,7 +67,10 @@ export async function drainLocalCloudResources({ runtime, withSystemTx, request,
     await client.query("UPDATE cloud_v2_workspaces SET worker_token_hash=NULL WHERE worker_token_hash IS NOT NULL");
     await client.query("DELETE FROM cloud_v2_tokens");
     return {
-      workspaces: (await client.query("SELECT id,state,boat_sandbox_id,next_attempt_at FROM cloud_v2_workspaces ORDER BY id")).rows,
+      // A checkpoint retry's fork is a second VM; read through to_jsonb so a
+      // database from before the column existed still drains.
+      workspaces: (await client.query(`SELECT id,state,boat_sandbox_id,next_attempt_at,to_jsonb(w)->'checkpoint_retry_fork' AS retry_fork
+        FROM cloud_v2_workspaces w ORDER BY id`)).rows,
       builds: (await client.query("SELECT id,org_id,version,builder_sandbox_id,builder_create_pending,snapshot_id,operation_until FROM cloud_v2_computer_builds ORDER BY id")).rows,
     };
   });
@@ -89,6 +92,15 @@ export async function drainLocalCloudResources({ runtime, withSystemTx, request,
     const key = `workspace:${row.id}`;
     try {
       if (!row.boat_sandbox_id && row.next_attempt_at && row.next_attempt_at.getTime() > Date.now()) { pending.add(key); continue; }
+      const fork = row.retry_fork;
+      if (fork) {
+        // Boat names a fork after its source: this workspace's VM or one of its replacements.
+        if (typeof fork.name !== "string" || !fork.name.startsWith(sandboxName("ws", row.id)) || !fork.name.endsWith(" fork")) { pending.add(key); continue; }
+        const removed = await sandbox(typeof fork.sandboxId === "string" ? fork.sandboxId : null, fork.name);
+        if (!removed.confirmed) { pending.add(key); continue; }
+        await tx(client => client.query("UPDATE cloud_v2_workspaces SET checkpoint_retry_fork=NULL WHERE id=$1 AND checkpoint_retry_fork->>'attempt'=$2",
+          [row.id, fork.attempt]));
+      }
       const result = await sandbox(row.boat_sandbox_id, sandboxName("ws", row.id));
       if (!result.confirmed) { pending.add(key); continue; }
       await tx(client => client.query(`UPDATE cloud_v2_workspaces SET state='deleted',boat_sandbox_id=coalesce($2,boat_sandbox_id),
@@ -122,7 +134,7 @@ export async function drainLocalCloudResources({ runtime, withSystemTx, request,
   // An unbacked/foreign active snapshot pointer must keep reset incomplete;
   // never discard it merely because every build row has been processed.
   const unfinished = await tx(async client => (await client.query(`
-    SELECT 'workspace:'||id::text AS key FROM cloud_v2_workspaces WHERE state<>'deleted'
+    SELECT 'workspace:'||id::text AS key FROM cloud_v2_workspaces w WHERE state<>'deleted' OR to_jsonb(w)->'checkpoint_retry_fork' <> 'null'::jsonb
     UNION SELECT 'build:'||id::text FROM cloud_v2_computer_builds
       WHERE builder_create_pending OR builder_deleted_at IS NULL OR snapshot_deleted_at IS NULL OR snapshot_id IS NOT NULL OR operation_until IS NOT NULL
     UNION SELECT CASE WHEN active_build_id IS NULL THEN 'computer:'||org_id::text ELSE 'build:'||active_build_id::text END

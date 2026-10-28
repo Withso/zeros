@@ -14,6 +14,28 @@ import {
 let root: string;
 let workspace: string;
 let privateData: string;
+
+function linuxMounts(mountFor: (directory: string) => number = () => 1) {
+  vi.stubGlobal("process", Object.create(process, { platform: { value: "linux" } }));
+  const open = fs.open.bind(fs);
+  const readFile = fs.readFile.bind(fs);
+  const descriptors = new Map<number, string>();
+  vi.spyOn(fs, "open").mockImplementation((async (target, ...args) => {
+    const handle = await open(target, ...args);
+    descriptors.set(handle.fd, String(target));
+    return handle;
+  }) as typeof fs.open);
+  vi.spyOn(fs, "readFile").mockImplementation((async (target, ...args) => {
+    const match = /^\/proc\/self\/fdinfo\/(\d+)$/.exec(String(target));
+    if (match) {
+      const directory = descriptors.get(Number(match[1]));
+      if (!directory) throw new Error("Unexpected fixture descriptor");
+      return `mnt_id:\t${mountFor(directory)}\n`;
+    }
+    return readFile(target, ...args);
+  }) as typeof fs.readFile);
+}
+
 beforeEach(async () => {
   root = await fs.mkdtemp(path.join(os.tmpdir(), "zeros-private-temp-test-"));
   workspace = path.join(root, "workspace with 'quotes' and spaces");
@@ -185,6 +207,7 @@ it("reports a native resolver failure without falling back to repository storage
 });
 
 it("uses a private sibling on a Linux workspace volume when ordinary temp storage is elsewhere", async () => {
+  linuxMounts();
   const stat = fs.stat.bind(fs);
   vi.spyOn(fs, "stat").mockImplementation((async (target) => {
     const result = await stat(target);
@@ -210,23 +233,8 @@ it("rejects a separate Linux bind mount even when its device matches the workspa
   await fs.mkdir(staging, { mode: 0o700 });
   vi.stubEnv("ZEROS_ATTACHMENT_TEMP_DIR", staging);
   vi.spyOn(os, "tmpdir").mockReturnValue(privateData);
-  vi.stubGlobal("process", Object.create(process, { platform: { value: "linux" } }));
-  const open = fs.open.bind(fs);
-  const readFile = fs.readFile.bind(fs);
-  const descriptors = new Map<number, string>();
-  vi.spyOn(fs, "open").mockImplementation((async (target, ...args) => {
-    const handle = await open(target, ...args);
-    descriptors.set(handle.fd, String(target));
-    return handle;
-  }) as typeof fs.open);
-  vi.spyOn(fs, "readFile").mockImplementation((async (target, ...args) => {
-    const fd = /^\/proc\/self\/fdinfo\/(\d+)$/.exec(String(target));
-    if (!fd) return readFile(target, ...args);
-    const directory = descriptors.get(Number(fd[1]));
-    const sameMount = directory === workspace || directory === staging ||
-      directory?.startsWith(staging + path.sep);
-    return `pos:\t0\nflags:\t0300000\nmnt_id:\t${sameMount ? 71 : 72}\n`;
-  }) as typeof fs.readFile);
+  linuxMounts(directory => directory === workspace || directory === staging ||
+    directory.startsWith(staging + path.sep) ? 71 : 72);
   const temporary = await createAttachmentTemporaryDirectory(workspace);
   try {
     expect(path.dirname(temporary.path)).toBe(staging);
@@ -252,6 +260,7 @@ it("does not trust a configured attachment directory inside the repository", asy
 });
 
 it("never puts sibling fallback storage inside an enclosing repository", async () => {
+  linuxMounts();
   await fs.mkdir(path.join(root, ".git"));
   const stat = fs.stat.bind(fs);
   vi.spyOn(fs, "stat").mockImplementation((async (target) => {

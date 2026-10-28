@@ -23,7 +23,7 @@
 
 import http from "node:http";
 import type { AddressInfo } from "node:net";
-import { randomUUID } from "node:crypto";
+import { randomUUID, randomBytes, timingSafeEqual } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
@@ -105,6 +105,8 @@ export interface GatewayBackendStatus {
 }
 
 export class McpGateway {
+  private capability = randomBytes(32).toString("base64url");
+  get authorization(): string { return `Bearer ${this.capability}`; }
   // Mutable: when constructed with port 0 (ephemeral), the OS-assigned port is
   // written back after listen() so `url`/`callbackUrl` report the real address.
   private port: number;
@@ -317,6 +319,7 @@ export class McpGateway {
    *  `backends`. */
   async start(backends: readonly GatewayBackend[]): Promise<void> {
     if (this.httpServer) return this.reload(backends);
+    this.capability = randomBytes(32).toString("base64url");
     const operation = ++this.operationRevision;
     if (!this.removeCallback) this.removeCallback = this.callback.register(query => {
       const flight = this.authFlight;
@@ -345,6 +348,7 @@ export class McpGateway {
   async reconnect(): Promise<void> { await this.reload(this.backendList); }
 
   async stop(): Promise<void> {
+    this.capability = randomBytes(32).toString("base64url");
     this.operationRevision++;
     await this.cancelAuthorization();
     await this.disconnectBackends();
@@ -815,9 +819,19 @@ export class McpGateway {
         res.end();
         return;
       }
+      const supplied = req.headers.authorization;
+      const expected = this.authorization;
+      if (typeof supplied !== "string" || Buffer.byteLength(supplied) !== Buffer.byteLength(expected) ||
+          !timingSafeEqual(Buffer.from(supplied), Buffer.from(expected))) {
+        res.statusCode = 401;
+        res.end();
+        return;
+      }
+      if (req.url !== "/mcp") { res.statusCode = 404; res.end(); return; }
       const sid = req.headers["mcp-session-id"];
       let transport: StreamableHTTPServerTransport | undefined =
         typeof sid === "string" ? this.sessions.get(sid) : undefined;
+      if (sid && !transport) { res.statusCode = 404; res.end(); return; }
       if (!transport) {
         const server = this.makeServer();
         const t: StreamableHTTPServerTransport =

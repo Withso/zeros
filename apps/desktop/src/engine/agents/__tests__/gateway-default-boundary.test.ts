@@ -6,7 +6,7 @@ import { AgentGateway } from "../gateway";
 import type { ExecutionBoundary } from "../containment/types";
 
 describe("AgentGateway default execution boundary", () => {
-  it("resolves native supervisor assets from the gateway project root", () => {
+  it("resolves native supervisor assets from the product independently of the workspace", () => {
     const projectRoot = path.join(process.cwd(), "alternate-project-root");
     const gateway = new AgentGateway({
       projectRoot,
@@ -21,12 +21,15 @@ describe("AgentGateway default execution boundary", () => {
     const boundary = (
       gateway as unknown as {
         executionBoundary: {
-          options: { host: { projectRoot: string } };
+          options: { host: { supervisorScript: string } };
         };
       }
     ).executionBoundary;
 
-    expect(boundary.options.host.projectRoot).toBe(projectRoot);
+    expect(boundary.options.host.supervisorScript).toBe(
+      path.resolve(import.meta.dirname, "../containment/host-process-supervisor.mjs"),
+    );
+    expect(boundary.options.host.supervisorScript).not.toContain(projectRoot);
   });
 
   it("routes code-only work through native host parity when no boundary is injected", async () => {

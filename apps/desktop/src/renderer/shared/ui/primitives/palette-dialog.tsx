@@ -1,6 +1,7 @@
-import type { ComponentProps } from "react";
+import type { ComponentProps, RefObject } from "react";
 import { cn } from "../cn";
 import { Command } from "./command";
+import { Button } from "./button";
 import {
   Dialog,
   DialogBody,
@@ -62,6 +63,39 @@ export function PaletteCommand({
         "**:data-[slot=command-input-wrapper]:border-fg1/15 min-h-0 bg-transparent **:data-[slot=command-input-wrapper]:h-12 **:data-[slot=command-input-wrapper]:shrink-0",
         className,
       )}
+    />
+  );
+}
+
+/** Browsing categories with a pointer keeps a search-first palette ready to
+ * type. Tab/Enter/Space keep the user's explicit keyboard focus on the button. */
+export function PaletteCategoryButton({
+  searchRef,
+  onPointerDown,
+  onClick,
+  onKeyDown,
+  ...props
+}: ComponentProps<typeof Button> & {
+  searchRef: RefObject<HTMLInputElement | null>;
+}) {
+  return (
+    <Button
+      {...props}
+      onPointerDown={(event) => {
+        onPointerDown?.(event);
+        if (event.button === 0 && !event.ctrlKey) event.preventDefault();
+      }}
+      onClick={(event) => {
+        onClick?.(event);
+        if (!event.defaultPrevented && event.detail > 0) {
+          searchRef.current?.focus({ preventScroll: true });
+        }
+      }}
+      onKeyDown={(event) => {
+        onKeyDown?.(event);
+        // cmdk must not activate a result when Enter activates this category.
+        if (event.key === "Enter") event.stopPropagation();
+      }}
     />
   );
 }

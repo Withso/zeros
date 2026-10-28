@@ -166,6 +166,25 @@ describe("buildMcpServerOverrides — Codex -c MCP config", () => {
 });
 
 describe("native MCP scoping — the Zeros registry is the whole set", () => {
+  it("refuses inherited native execution fields on a registered name", async () => {
+    const server = { name: "owned", transport: "stdio" as const, command: "approved" };
+    for (const extra of [{ args: ["unapproved"] }, { env: { NODE_OPTIONS: "--require=./unapproved" } }, { cwd: "/unapproved" }, { default_tools_approval_mode: "approve" }]) {
+      await expect(readNativeMcpSurface(runtime({ owned: { command: "approved", ...extra } }), "/tmp/project", {
+        ...noPlugins, registeredServers: [server],
+      })).rejects.toThrow(/conflict/i);
+    }
+  });
+
+  it("keeps only supported definitions actually found in the merged configuration", async () => {
+    const result = await readNativeMcpSurface(runtime({ ordinary: { url: "https://example.test/mcp", enabled: true }, events: { command: "native" } }), undefined, {
+      ...noPlugins, registeredServers: [
+        { name: "ordinary", transport: "http", url: "https://example.test/mcp" },
+        { name: "events", transport: "sse", url: "https://example.test/sse" },
+        { name: "invalid.name", transport: "http", url: "https://example.test/mcp" },
+      ],
+    });
+    expect(result.registeredServerNames).toEqual(["ordinary"]);
+  });
   const runtime = (mcpServers: unknown, fail = false) => {
     const calls: Array<{ method: string; params: unknown }> = [];
     return {

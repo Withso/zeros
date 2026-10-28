@@ -18,7 +18,7 @@ describe("source-preserving relocation admission", () => {
   });
 
   it("preserves the measured local size and full affine pose without carrying root margins", () => {
-    expect(designRelocationRootStyles({ width: 100, height: 80, matrix: [0, 2, -3, 0, 240, 0], inheritedStyles: { color: "navy", "font-size": "30px", "--accent": "red" } })).toMatchObject({ width: "100px", height: "80px", margin: "0", left: "0px", top: "0px", transform: "matrix(0,2,-3,0,240,0)", "transform-origin": "0 0", color: "navy", "font-size": "30px", "--accent": "red" });
+    expect(designRelocationRootStyles({ width: 100, height: 80, matrix: [0, 2, -3, 0, 240, 0], inheritedStyles: { color: "navy", "font-size": "30px", "--accent": "red" } })).toMatchObject({ width: "100px", height: "80px", margin: "0", left: "240px", top: "0px", transform: "matrix(0,2,-3,0,0,0)", "transform-origin": "0 0", color: "navy", "font-size": "30px", "--accent": "red" });
   });
 
   it("rejects nonfinite, singular and non-inherited payloads", () => {

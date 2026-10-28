@@ -66,6 +66,8 @@ export const scenarioRegistry = [
     780,
   ),
   fresh("code-review", "code-review", "runCodeReviewSmoke", 1180, 900),
+  fresh("cloud-github", "cloud-github", "runCloudGithubSmoke", 1180, 1000),
+  fresh("cloud-github-pr", "cloud-github-pr", "runCloudGithubPrSmoke", 1180, 1000),
   fresh(
     "code-review-retention",
     "review-retention",

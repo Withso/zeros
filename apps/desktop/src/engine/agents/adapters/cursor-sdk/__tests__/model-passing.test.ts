@@ -1281,7 +1281,7 @@ describe("CursorSdkAdapter — model is always passed AND validated", () => {
     });
 
     expect(completed.response.usage).toEqual({
-      inputTokens: 204,
+      inputTokens: 120,
       outputTokens: 30,
       cacheReadTokens: 80,
       cacheWriteTokens: 4,

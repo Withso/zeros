@@ -2005,7 +2005,14 @@ export class CursorSdkAdapter implements AgentAdapter {
       const detail = doc?.error;
       if (detail && typeof detail === "object") return detail;
       const message = typeof detail === "string" && detail.trim() ? detail.trim() : undefined;
-      if (message || doc?.errorCode) return { message, code: doc?.errorCode };
+      // SDK 1.1 stores a native code as `[code] message`. Match its bounded
+      // prefix contract only; incidental tags in provider prose are not codes.
+      // The helper is SDK-internal, so preserve this fallback without a deep import.
+      const stored = message && /^\[([A-Za-z][A-Za-z0-9_]{0,63})\] ([\s\S]*)$/.exec(message);
+      if (message || doc?.errorCode) return {
+        message: stored ? stored[2] : message,
+        code: doc?.errorCode ?? (stored ? stored[1] : undefined),
+      };
       return null;
     } catch (err) {
       this.ctx.emit.onAgentStderr(

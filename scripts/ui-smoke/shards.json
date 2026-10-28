@@ -5,6 +5,8 @@
     "text-selection",
     "design-inline-tools",
     "code-review",
+    "cloud-github",
+    "cloud-github-pr",
     "design-layout",
     "design-frame-recovery",
     "pr-actions",

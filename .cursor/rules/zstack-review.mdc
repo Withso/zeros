@@ -12,6 +12,10 @@ Review the complete diff, then each test against the behavior it claims to
 cover. A finding needs evidence, either a file and line plus a concrete
 failing input, or a reproduction. Drop anything you can't substantiate.
 
+Name the exact revision you reviewed: its commit, or `git stash create` for
+uncommitted work. Before reporting a blocker, confirm it still exists at the
+branch head. A review of a stale or standalone checkout reports fixed work.
+
 ## Checklist
 
 **Placements and state** (`RULES.md` §8 and the `zeros-workspaces` skill)

@@ -51,6 +51,8 @@ const EnvSchema = z.object({
   AUTH_PROVIDER: z.enum(["auth0", "workos"]).default("auth0"),
   /** The Auth0 tenant domain, e.g. your-tenant.us.auth0.com (no scheme). */
   AUTH0_DOMAIN: z.string().trim().min(1).optional(),
+  /** Server-to-server credential shared only with the Auth0 Pages facade. */
+  AUTH0_SESSION_AUTHORITY_KEY: z.string().regex(/^[a-f\d]{64}$/i).optional(),
   /**
    * Accepted `iss` claims, comma-separated; defaults to
    * `https://${AUTH0_DOMAIN}/`. A custom Auth0 domain deployment lists BOTH
@@ -228,6 +230,7 @@ export type Config = {
   auth: AuthBackendConfig;
   /** Null in legacy Auth0 mode. WorkOS secrets live only on Railway. */
   workos: WorkOSBackendConfig | null;
+  auth0SessionAuthorityKey?: string | null;
   /** Fixed Alpha test identity; omitted/disabled everywhere else. No password. */
   zerosDevAuth?: ZerosDevAuthConfig | null;
   /** Exact, environment-bound invitation landing page (without a query). */
@@ -252,6 +255,9 @@ export type Config = {
 export type CloudV2Config = {
   /** Enable only after publishing the matching outbox-capable runtime. */
   promptOutbox?: boolean;
+  /** Retries a stop's failed checkpoint on a fork of the stopped VM. Enable
+   * only once forking a stopped VM is qualified on the deployment's Boat account. */
+  checkpointRetry?: boolean;
   boat: { apiKey: string; billingOrg?: string };
   /** https:// origin of the API service; agents reach the model proxy here. */
   apiUrl: string;
@@ -274,6 +280,8 @@ function loadCloudV2Config(env: NodeJS.ProcessEnv): CloudV2Config | null {
   const billingOrg = env.BOAT_BILLING_ORG?.trim();
   const promptOutbox = env.CLOUD_V2_PROMPT_OUTBOX_ENABLED?.trim().toLowerCase();
   if (promptOutbox && !["true", "false"].includes(promptOutbox)) throw new Error("Invalid environment: CLOUD_V2_PROMPT_OUTBOX_ENABLED must be true or false");
+  const checkpointRetry = env.CLOUD_V2_CHECKPOINT_RETRY_ENABLED?.trim().toLowerCase();
+  if (checkpointRetry && !["true", "false"].includes(checkpointRetry)) throw new Error("Invalid environment: CLOUD_V2_CHECKPOINT_RETRY_ENABLED must be true or false");
   const origin = (name: string, protocol: "https:" | "wss:") => {
     const raw = env[name]?.trim();
     let url: URL;
@@ -298,6 +306,7 @@ function loadCloudV2Config(env: NodeJS.ProcessEnv): CloudV2Config | null {
   return {
     boat: { apiKey, ...(billingOrg ? { billingOrg } : {}) },
     promptOutbox: promptOutbox === "true",
+    checkpointRetry: checkpointRetry === "true",
     workerSigningKey, ...(previous ? { workerSigningKeyPrevious: previous } : {}),
     apiUrl: origin("CLOUD_V2_API_URL", "https:"),
     realtimeUrl: origin("CLOUD_V2_REALTIME_URL", "wss:"),
@@ -938,6 +947,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env, diagnostics: Co
     databaseMaintenanceMode: e.DATABASE_MAINTENANCE_MODE === "true",
     auth,
     workos,
+    auth0SessionAuthorityKey: auth.provider === "auth0" ? e.AUTH0_SESSION_AUTHORITY_KEY ?? null : null,
     zerosDevAuth: loadZerosDevAuthConfig(env, deploymentChannel, auth),
     inviteLinkBase,
     port: e.PORT,

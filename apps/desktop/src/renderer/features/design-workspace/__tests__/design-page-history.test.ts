@@ -46,6 +46,14 @@ describe("Design history page ownership", () => {
       }),
     );
   });
+  it("restores an empty page by its explicit history identity", async () => {
+    await restoreDesignPageHistorySelection("workspace", captureDesignPageOwner("workspace"), {
+      ...reply, historyFrame: undefined, historySelection: null, historyPageId: "b",
+      snapshot: { ...reply.snapshot!, pages: pages.map(page => ({ ...page, frameFiles: [] })), frames: [] },
+    } as DesignApiMutationReplyWire, "undo");
+    expect(designWorkspaceView("workspace").activePageId).toBe("b");
+    expect(selectFrame).toHaveBeenCalledWith("workspace", null, expect.objectContaining({ owner: expect.objectContaining({ pageId: "b" }) }));
+  });
   it("can reveal the page of a deleted frame that is absent from rendered frames", async () => {
     await restoreDesignPageHistorySelection(
       "workspace",

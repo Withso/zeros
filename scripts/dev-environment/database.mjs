@@ -80,7 +80,9 @@ async function execute(request) {
         sandboxName: (kind, id) => cloudV2SandboxName("development", kind, id, request.owner) });
     }
     if (request.action === "inventory") {
-      return inventoryLocalWorkspaces(runtime, withSystemTx);
+      // This scope owns both pools. Settle the transaction before finally
+      // closes them, including when acquisition or the query is still pending.
+      return await inventoryLocalWorkspaces(runtime, withSystemTx);
     }
     return { verified: true };
   } finally { await Promise.all([migration.end(), runtime.end()]); }

@@ -5,9 +5,10 @@ export const REVIEW_GUTTER_CSS = `
     background: var(--bg2);
     border: 1px solid var(--border2);
     border-radius: var(--radius-sm);
+    outline: none;
   }
   [data-utility-button]:hover { color: var(--fg1); background: var(--bg2-hover); }
-  [data-utility-button]:focus-visible { outline: 1px solid var(--highlighted-bright); }
+  [data-utility-button]:focus-visible:where(:not([data-zeros-focus-visible="false"])) { outline: 1px solid var(--highlighted-bright); }
 `;
 
 /** Pierre supplies the real click/drag button; annotate its accessible name. */

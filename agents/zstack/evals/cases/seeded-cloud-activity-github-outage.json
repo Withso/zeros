@@ -1,0 +1,9 @@
+{
+  "id": "seeded-cloud-activity-github-outage",
+  "kind": "seeded",
+  "area": "cloud-workspaces",
+  "fixedBy": "pr:747",
+  "symptom": "A GitHub outage suppressed authenticated worker activity and let an active VM become eligible for idle stop, including bridge turns without the prompt outbox.",
+  "rule": "Record current-worker activity independently of GitHub verification and keep bounded source continuation separate from admission. See changes/cloud-github-availability.md.",
+  "check": "pnpm --dir apps/control-plane exec vitest run src/cloud/worker-routes.test.ts"
+}

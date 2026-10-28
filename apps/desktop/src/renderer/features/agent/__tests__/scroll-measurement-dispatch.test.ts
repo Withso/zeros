@@ -85,6 +85,34 @@ function findJump(node: unknown, label: string): (() => void) | undefined {
 }
 
 describe("scroll measurements with an idle React parent", () => {
+  it.each([true, undefined])("keyboard navigation follows user checkpoints and their pinned selection (local=%s)", local => {
+    hooks.scope = local;
+    const el = scroller(1800);
+    const navigateRef = { current: null as ((direction: "previous" | "next" | "first" | "last") => boolean) | null };
+    const props = {
+      scrollEl: el as unknown as HTMLElement,
+      checkpoints: [0, 1, 2].map(index => ({ id: `prompt-${index}`, text: `Prompt ${index}` })),
+      bottomSpacerPx: 0,
+      onBottomSpacerChange: (height: number) => { el.scrollHeight = 2400 + height; },
+      navigateRef,
+    };
+    CheckpointRail(props); commit();
+    expect(navigateRef.current).toBeTypeOf("function");
+    // At the tail the last user prompt owns the rail, so Previous must
+    // skip the assistant answer and reach the preceding prompt.
+    expect(navigateRef.current!("previous")).toBe(true);
+    expect(el.scrollTop).toBe(988);
+    // Repeated keys before another React render follow the explicit pin.
+    navigateRef.current!("previous");
+    expect(el.scrollTop).toBe(0);
+    navigateRef.current!("next");
+    expect(el.scrollTop).toBe(988);
+    navigateRef.current!("last");
+    expect(el.scrollTop).toBe(1988);
+    navigateRef.current!("first");
+    expect(el.scrollTop).toBe(0);
+  });
+
   it.each(["Personal Local", "organization-local"])("%s follows 100 growth rounds without retaining no-op updaters", () => {
     const el = scroller(1800);
     useStickyBottom(el as unknown as HTMLElement, []); commit();

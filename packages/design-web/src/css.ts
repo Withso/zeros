@@ -454,27 +454,32 @@ function mutateInlineStyles(
 }
 
 function lineAndColumn(
-  source: string,
+  lineStarts: readonly number[],
   offset: number,
 ): { line: number; column: number } {
-  let line = 1;
-  let column = 1;
-  for (let index = 0; index < offset; index += 1) {
-    if (source[index] === "\n") {
-      line += 1;
-      column = 1;
-    } else column += 1;
+  let low = 0, high = lineStarts.length;
+  while (low + 1 < high) {
+    const middle = (low + high) >>> 1;
+    if (lineStarts[middle]! <= offset) low = middle;
+    else high = middle;
   }
-  return { line, column };
+  return { line: low + 1, column: offset - lineStarts[low]! + 1 };
+}
+
+function sourceLineStarts(source: string): number[] {
+  const starts = [0];
+  for (let index = 0; index < source.length; index++) if (source[index] === "\n") starts.push(index + 1);
+  return starts;
 }
 
 function sourceSpan(
   source: string,
   startOffset: number,
   endOffset: number,
+  lineStarts = sourceLineStarts(source),
 ): DesignSourceSpan {
-  const start = lineAndColumn(source, startOffset);
-  const end = lineAndColumn(source, endOffset);
+  const start = lineAndColumn(lineStarts, startOffset);
+  const end = lineAndColumn(lineStarts, endOffset);
   return {
     startOffset,
     endOffset,
@@ -664,6 +669,8 @@ function stylesheetCandidates(
   runtimeSelectors: ReadonlySet<string> = new Set(),
 ): StylesheetCandidate[] {
   const candidates: StylesheetCandidate[] = [];
+  const linesByFile = new Map<string, number[]>();
+  let remainingRules = 50_000;
   for (const stylesheet of authoredStylesheets(state.files)) {
     const { file, source, offsetBase } = stylesheet;
     let root: postcss.Root;
@@ -673,6 +680,7 @@ function stylesheetCandidates(
       continue;
     }
     root.walkRules((rule) => {
+      if (--remainingRules < 0) throw new Error("Stylesheet inspection exceeded its rule limit.");
       if (
         !selectorTargetsNode(rule.selector, nodeId) &&
         !runtimeSelectors.has(rule.selector.trim())
@@ -682,6 +690,9 @@ function stylesheetCandidates(
       for (const declaration of directRuleDeclarations(rule, property)) {
         const offsets = declarationOffsets(source, declaration);
         if (!offsets) continue;
+        if (candidates.length >= 10_000) throw new Error("Stylesheet inspection exceeded its declaration limit.");
+        let lines = linesByFile.get(file);
+        if (!lines) { lines = sourceLineStarts(state.files[file]!); linesByFile.set(file, lines); }
         candidates.push({
           node: declaration,
           source,
@@ -702,6 +713,7 @@ function stylesheetCandidates(
               state.files[file]!,
               offsetBase + offsets.start,
               offsetBase + offsets.end,
+              lines,
             ),
             writable: true,
           },
@@ -930,6 +942,14 @@ export function mutateDesignNodeStyles(
     const validateFor = (file: string) =>
       value === null ? null : validateDesignCssValue(property, value, file);
     const inline = inlineAuthoredDeclarations(state, input.nodeId, property);
+    // An explicit or existing inline declaration owns the mutation; enumerating
+    // unrelated stylesheets cannot alter that decision.
+    if (scope === "inline" || inline.length > 0) {
+      inlineMutations.set(property, validateFor(state.entryFile));
+      decisions.push({ property, requestedScope: scope, appliedScope: "inline", file: state.entryFile, selector: null,
+        reason: inline.length > 0 ? "existing-inline" : "explicit-inline" });
+      continue;
+    }
     const allRules = stylesheetCandidates(state, input.nodeId, property);
     const rules =
       scope === "rule"
@@ -947,21 +967,11 @@ export function mutateDesignNodeStyles(
                 input.nodeId,
               ),
           );
-    if (scope === "inline" || inline.length > 0) {
-      inlineMutations.set(property, validateFor(state.entryFile));
-      decisions.push({
-        property,
-        requestedScope: scope,
-        appliedScope: "inline",
-        file: state.entryFile,
-        selector: null,
-        reason: inline.length > 0 ? "existing-inline" : "explicit-inline",
-      });
-      continue;
-    }
     if (rules.length === 1) {
       const rule = rules[0]!;
       const validated = validateFor(rule.declaration.file);
+      if (validated !== null && rule.declaration.file.toLowerCase().endsWith(".html") && /<\/style[\t\n\f\r />]/i.test(validated))
+        throw new Error("A CSS value cannot close its containing HTML style element.");
       const offsets = declarationOffsets(rule.source, rule.node);
       if (!offsets)
         throw new Error(`CSS declaration has no source span: ${property}`);

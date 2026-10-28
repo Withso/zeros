@@ -14,6 +14,10 @@ import { createCloudAgentCredentialRoutes } from "../agent-credentials/agent-cre
 import { createCloudV2 } from "./composition.js";
 import { sealPortToken } from "./worker-port-token.js";
 import { CLOUD_V2_BRIDGE_PROTOCOL } from "./relay.js";
+import { CloudV2SourceAuthority } from "./source-authority.js";
+import { CloudGithubSourceIdentities } from "./github-source-identities.js";
+import { CloudGithubConnections } from "./github-connections.js";
+import { CloudGithubApi } from "./github-api.js";
 
 const suite = process.env.TEST_DATABASE_URL ? describe : describe.skip;
 const key = Buffer.alloc(32, 7).toString("base64url");
@@ -29,6 +33,18 @@ suite("Settings changes reach connected cloud workers", () => {
   });
   afterAll(async () => { await listener.end(); await pool.end(); });
   beforeEach(async () => {
+    // These tests isolate credential propagation after source admission,
+    // including the running worker's separately verified continuation lease.
+    vi.spyOn(CloudV2SourceAuthority.prototype, "workspace").mockResolvedValue();
+    vi.spyOn(CloudV2SourceAuthority.prototype, "continueWorkspace").mockImplementation(async () => ({ recheckAt: Date.now() + 10 * 60_000 }));
+    vi.spyOn(CloudGithubSourceIdentities.prototype, "primary").mockResolvedValue({ repository: "example/project", repositoryId: "42" });
+    vi.spyOn(CloudGithubConnections.prototype, "access").mockResolvedValue({
+      material: { method: "pat", accessToken: "synthetic-github-token", expiresAt: null },
+      identity: { id: "1", login: "fixture" }, login: "fixture", generation: "fixture-generation", assertCurrent: async () => {},
+      api: new CloudGithubApi({ apiBaseUrl: "https://api.example.test", token: "synthetic-github-token", assertCurrent: async () => {},
+        fetch: async () => Response.json({ id: 42, name: "project", owner: { login: "example" }, default_branch: "main", private: true,
+          archived: false, permissions: { pull: true, push: true } }) }),
+    });
     await resetMigratedTestDatabase(pool);
     owner = await seedCredentialOwner(pool);
     const service = new DatabaseCloudAgentCredentialService(pool, { currentKeyVersion: 1, keys: { 1: key } });
@@ -36,7 +52,7 @@ suite("Settings changes reach connected cloud workers", () => {
     settings.use("*", async (c, next) => { c.set("user", { id: owner.userId } as never); await next(); });
     settings.onError((error, c) => error instanceof HttpError ? c.json({ error: error.code }, error.status) : c.json({ error: "internal" }, 500));
     settings.route("/", createCloudAgentCredentialRoutes(service));
-    runtime = createCloudV2({ deploymentChannel: "alpha", cloudAgentCredentials: { settingsSecretKeyV1: key }, cloudV2: {
+    runtime = createCloudV2({ deploymentChannel: "alpha", github: {} as Config["github"], cloudAgentCredentials: { settingsSecretKeyV1: key }, cloudV2: {
       boat: { apiKey: "synthetic-boat-key-never-used" }, apiUrl: "https://example.test", realtimeUrl: "wss://example.test",
       workerSigningKey: generateKeyPairSync("ed25519").privateKey.export({ type: "pkcs8", format: "der" }).toString("base64"),
       runtime: { sha256: "b".repeat(64), store: { endpoint: "https://storage.example.test", bucket: "test", accessKeyId: "fixture", secretAccessKey: "fixture" } },
@@ -63,6 +79,7 @@ suite("Settings changes reach connected cloud workers", () => {
     await vi.waitFor(() => expect(frames.filter(frame => frame.t === "config")).toHaveLength(1));
   });
   afterEach(async () => {
+    vi.restoreAllMocks();
     app?.terminate(); worker?.terminate(); runtime?.connections?.close(); await runtime?.loginChanges?.stop();
     if (workerServer) await new Promise(resolve => workerServer.close(resolve));
     if (server) await new Promise(resolve => server.close(resolve));

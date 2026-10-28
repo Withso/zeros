@@ -150,12 +150,18 @@ pnpm --dir apps/control-plane cloud-v2:gate0 --local --runtime <runtime-sha256>
   concurrent source edits in place to reconstruct the patch. The control plane
   installs separately: run `pnpm --dir apps/control-plane install` in that
   worktree too, or worker suites that import its source fail to load.
+- For browser qualification, put that integration checkout beside the main
+  checkout. Vite deliberately refuses private directories such as `.context`;
+  move the checkout instead of weakening the development serving policy.
 - Make a slow step class (a stop that saves a checkpoint) take at most part
   of a shared slot pool, and claim the steps someone is waiting for first.
 - A fixture for a missing Git object must start from a source that never had
   it; assert `git cat-file -e` fails before relying on it.
 - Run `pnpm test:git` under CI's `umask 022`. This sandbox defaults to 0002,
   and four dev-environment script suites then fail their permission checks.
+- This sandbox's user holds every capability, `CAP_DAC_OVERRIDE` included, so
+  `chmod 000` does not make a file unreadable. Test a read-failure path by
+  failing the reader itself, for example with a `PATH` wrapper.
 - A test helper that trims `git status --porcelain` drops the first line's
   leading space. Assert with `git diff --name-only` (and `--cached`) instead.
 - A compare-and-set on state and resource identity is no fence once states

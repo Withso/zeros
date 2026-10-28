@@ -41,7 +41,8 @@ describe("bounded source-preserving relocation", () => {
     const { frame, file, before, input } = await fixture();
     const result = await transferDesignNode(workspace, input);
     const moved = await captureDesignFrameRestorePoint(workspace, result.frame);
-    expect(moved.source).toContain("matrix(0,2,-3,0,240,0)");
+    expect(moved.source).toContain("matrix(0,2,-3,0,0,0)");
+    expect(moved.source).toMatch(/left:\s*240px/);
     expect(moved.source).toMatch(/font-size:\s*30px/);
     expect(moved.source).toMatch(/--accent:\s*red/);
     expect(moved.source).toMatch(/margin:\s*0(?:;|")/);
@@ -60,7 +61,7 @@ describe("bounded source-preserving relocation", () => {
     const result = await transferDesignNode(workspace, { ...input, destinationFrame: input.frame, destinationSourceVersion: input.sourceVersion, parentId: "destination" });
     expect(result.changes).toHaveLength(1);
     expect(result.frame).toBe(input.frame);
-    expect((await captureDesignFrameRestorePoint(workspace, input.frame)).source).toContain("matrix(0,2,-3,0,240,0)");
+    expect((await captureDesignFrameRestorePoint(workspace, input.frame)).source).toMatch(/left:\s*240px;\s*top:\s*0px;.*transform:\s*matrix\(0,2,-3,0,0,0\)/);
     await restoreDesignFrameChanges(workspace, result.changes, "undo");
     expect(await captureDesignFrameRestorePoint(workspace, input.frame)).toEqual(before);
   });
@@ -153,7 +154,8 @@ describe("bounded source-preserving relocation", () => {
     expect(nested.source).toContain(".title{font-weight:600}");
     expect(nested.source).toMatch(/background-color:\s*snow/);
     expect(nested.source).toMatch(/padding:\s*12px/);
-    expect(nested.source).toContain("matrix(1,0,0,1,40,60)");
+    expect(nested.source).toMatch(/left:\s*40px;\s*top:\s*60px/);
+    expect(nested.source).toMatch(/transform:\s*none/);
     expect(existsSync(innerFile)).toBe(false);
     expect(await listDesignFrames(workspace)).toHaveLength(1);
     await restoreDesignFrameChanges(workspace, result.changes, "undo");
@@ -163,6 +165,29 @@ describe("bounded source-preserving relocation", () => {
       frame: inner.file, sourceVersion: innerIdentity.sourceVersion, nodeId: "::zeros-document-body",
       geometry: { x: 0, y: 0, w: 400, h: 300, z: 1 },
     })).rejects.toThrow(/whole frame/);
+  });
+
+  it("joins an auto layout parent's flow when nested into another frame, instead of floating above it", async () => {
+    const { input } = await fixture();
+    const destination = await createDesignFrame(workspace, { title: "Stack" });
+    const destinationFile = path.join(workspace, DESIGN_DIRECTORY_NAME, destination.file);
+    await writeFile(destinationFile, '<!doctype html><html><head></head><body><section data-oid="stack" style="display:flex;flex-direction:column;gap:20px"><p data-oid="first">First</p></section></body></html>');
+    const destinationIdentity = await readDesignFrameRenderIdentity(workspace, destination.file);
+    const result = await transferDesignNode(workspace, {
+      ...input,
+      destinationFrame: destination.file,
+      destinationSourceVersion: destinationIdentity.sourceVersion,
+      parentId: "stack",
+      beforeId: null,
+      styles: { position: "relative", left: "auto", top: "auto", right: "auto", bottom: "auto", "flex-grow": "0", "flex-shrink": "0", "flex-basis": "auto", order: "0" },
+    });
+    const nested = await captureDesignFrameRestorePoint(workspace, result.frame);
+    const style = /data-oid="child"[^>]*style="([^"]*)"/.exec(nested.source)?.[1] ?? "";
+    expect(style).toMatch(/position:\s*relative/);
+    expect(style).not.toMatch(/position:\s*absolute/);
+    expect(style).toMatch(/transform:\s*matrix\(0,2,-3,0,0,0\)/);
+    expect(style).not.toMatch(/240px/);
+    expect(style).toMatch(/font-size:\s*30px/);
   });
 
   it("does not overwrite a source saved after measurement", async () => {

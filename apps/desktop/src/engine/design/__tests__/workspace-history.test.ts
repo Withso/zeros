@@ -2,11 +2,17 @@ import { describe, expect, it } from "vitest";
 import type { DesignLocalHistoryCheckpoint } from "@zeros/design-web";
 import type { DesignFrameRestorePoint } from "../document";
 import {
+  catalogDesignHistoryEntry,
+  catalogDesignHistoryBytes,
   documentDesignHistoryEntry,
   frameDesignHistoryEntry,
   pruneWorkspaceDesignFrameHistory,
+  pruneWorkspaceDesignHistory,
+  MAX_DESIGN_HISTORY_BYTES,
+  MAX_DESIGN_HISTORY_ENTRIES,
   type WorkspaceDesignHistoryEntry,
 } from "../workspace-history";
+import type { DesignCatalogChange } from "../page-history";
 
 const removed = "page-b/home.html";
 const kept = "page-a/home.html";
@@ -92,4 +98,39 @@ describe("deleted Design frame history", () => {
       });
     },
   );
+});
+
+describe("catalog history uses the existing retention limits", () => {
+  function change(source = "before"): DesignCatalogChange {
+    const canvas: DesignCatalogChange["before"]["canvas"] = { version: 3, frames: {}, frame_info: {},
+      foundation: { schemaVersion: 1, parameters: [], variants: [], components: [] },
+      pages: [{ id: "a", title: "A", folder: "a", frames: [], extension: { native: "keep" } }] };
+    return {
+      before: { directory: "Design", registration: { file: "Design/meta/design.toml", source: "registration" }, canvas },
+      after: { directory: "Design", registration: { file: "Design/meta/design.toml", source: "registration" }, canvas },
+      sources: [{ file: "Design/a/home.html", before: source, after: null }],
+    };
+  }
+  it("counts source, metadata extensions and both sides' document checkpoints", () => {
+    const input = change();
+    const entry = catalogDesignHistoryEntry(input, "a", [{ bytes: 4096 } as DesignLocalHistoryCheckpoint]);
+    const initialBytes = entry.bytes;
+    expect(initialBytes).toBeGreaterThan(JSON.stringify(input).length * 2);
+    entry.afterHistory.push({ bytes: 8192 } as DesignLocalHistoryCheckpoint);
+    expect(catalogDesignHistoryBytes(entry)).toBe(initialBytes + 8192);
+    const large = change("x".repeat(MAX_DESIGN_HISTORY_BYTES / 2));
+    const oversized = catalogDesignHistoryEntry(large);
+    const state = { undo: [oversized], redo: [], bytes: oversized.bytes };
+    pruneWorkspaceDesignHistory(state);
+    expect(state).toEqual({ undo: [], redo: [], bytes: 0 });
+  });
+  it("bounds mixed catalog/document entries across both stacks", () => {
+    const catalog = catalogDesignHistoryEntry(change());
+    const document = documentDesignHistoryEntry("a/home.html");
+    const state = { undo: Array.from({ length: MAX_DESIGN_HISTORY_ENTRIES }, () => catalog), redo: [document],
+      bytes: catalog.bytes * MAX_DESIGN_HISTORY_ENTRIES + document.bytes };
+    pruneWorkspaceDesignHistory(state);
+    expect(state.undo.length + state.redo.length).toBe(MAX_DESIGN_HISTORY_ENTRIES);
+    expect(state.bytes).toBe(catalog.bytes * (MAX_DESIGN_HISTORY_ENTRIES - 1) + document.bytes);
+  });
 });

@@ -114,9 +114,37 @@ reviewed entry to `scripts/agent-runtime/reviews.json` with `provider`,
 `implemented`, `sdk-owned`, `preserved-generically`, `generated-only`,
 `intentionally-deferred` and `upstream-blocked`. Unknown changes fail the surface
 gate. The full bounded JSON artifact holds the detail; PR comments summarize it.
+The comment previews only the first 20 unreviewed declarations. Use the complete
+artifact or local surface output to determine review scope.
 Schema annotation removal applies only to schema objects. Property/definition
 names and literal `const`, `default`, and `enum` data remain part of the contract,
 including fields named `description`, `title`, or `examples`.
+
+### Cursor 1.0.40 to 1.1.0 review
+
+All 256 declaration changes (117 added, 139 changed) have individual fingerprint
+decisions in `scripts/agent-runtime/reviews.json`. The review preserves the 17
+native tool presentations. The SDK's schema references replace expanded types;
+the inventory gate resolves both forms and still rejects unreviewed tool names.
+The audit compared input/output types for 133 existing schemas across tool,
+delta, message and conversation declarations; their data shapes remain equivalent.
+
+| Area | Decision |
+| --- | --- |
+| Filesystem trees, overlays, factories, file-tool helpers and re-exports | Defer adoption. Zeros agents continue to operate on their workspace checkout. |
+| `local.fs`, `reportedWorkspacePath`, `resourceProviderOptions` and send overrides | Leave unset. Virtual trees disable host shell, Git context, hooks and skill discovery, and require their own persistence and capability design. |
+| Delete executor override | Leave unset; this override bypasses the SDK's host delete permission checks. |
+| Checkpoint `loadLatest` | SDK-owned type cleanup: its state alias is `unknown`, and absent checkpoints remain normal. Keep JSONL on Local and the worker's existing store. |
+| Stored run errors | Preserve SDK-decoded message/code pairs; decode the bounded stored prefix in Local's fallback when `wait()` has no details. Plain legacy errors remain readable. |
+| Stored usage and totals | Preserve inclusive input counts in Local and cloud. Cache-heavy native turns on both pins confirmed the previous adapter added cache counts twice. Ignore SDK-derived totals and retain exact-run billing ownership. |
+| Cloud API metadata and run-event tailer | SDK-owned internal changes; Zeros does not implement these hooks or use Cursor-hosted cloud execution. |
+
+No new screen or control is required. The existing usage card receives corrected
+counts, and existing error recovery receives the native code. Virtual-filesystem
+UI would be a separate feature requiring workspace selection, tool availability,
+overlay apply/discard and artifact retention decisions. The worker stays pinned
+to 1.0.40; its accounting correction requires the normal worker runtime delivery
+process and is not a live deployment from this review.
 
 ## Privilege and persistence boundaries
 
