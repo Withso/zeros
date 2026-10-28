@@ -1412,6 +1412,10 @@ export async function transferDesignNodeCached(
   workspaceId: string,
   input: Parameters<typeof designTransferNode>[1],
   isCurrent?: () => boolean,
+  /** Runs with the engine's result just before its snapshot publishes, so a
+   * selection that follows the move lands in the same render as the frame
+   * change and no page binding observes the source frame missing first. */
+  beforePublish?: (result: Awaited<ReturnType<typeof designTransferNode>>) => void,
 ) {
   return runLocalDesignMutation(workspaceId, async () => {
     if (isCurrent?.() === false) throw new Error("The layer move no longer owns the active selection.");
@@ -1433,6 +1437,7 @@ export async function transferDesignNodeCached(
         : {}),
     });
     historyPreview.clear(workspaceId);
+    beforePublish?.(result);
     const snapshot = publishDesignWorkspaceSnapshot(
       workspaceId,
       result.snapshot,

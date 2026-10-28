@@ -280,99 +280,108 @@ export async function transferDesignLayerOnCanvas(input: {
       : undefined;
   if (relocation && sourceRuntime?.sourceVersion !== details.sourceVersion)
     throw new Error("The source frame changed before the layer move.");
+  const transfer: Parameters<typeof transferDesignNodeCached>[1] = {
+    frame: frame.file,
+    pageId: owner.pageId,
+    sourceVersion: relocation
+      ? details.sourceVersion
+      : (sourceRuntime?.sourceVersion ?? frame.sourceVersion),
+    ...(relocation
+      ? {
+          relocation,
+          movementGuard: {
+            sourceVersion: details.sourceVersion,
+            geometry: {
+              x: frame.x,
+              y: frame.y,
+              w: frame.width,
+              h: frame.height,
+              z: frame.z,
+            },
+          },
+        }
+      : {}),
+    nodeId: details.oid,
+    ...(destination && drop
+      ? {
+          destinationFrame: destination.file,
+          destinationSourceVersion:
+            targetRuntime?.sourceVersion ?? destination.sourceVersion,
+          parentId: drop.parentId,
+          beforeId: drop.beforeId,
+          styles: drop.styles,
+          ...(parentStyles ? { parentStyles } : {}),
+          ...(frameBackground ? { frameBackground } : {}),
+          ...(relocation
+            ? {
+                destinationMovementGuard: {
+                  sourceVersion:
+                    targetRuntime?.sourceVersion ?? destination.sourceVersion,
+                  geometry: {
+                    x: destination.x,
+                    y: destination.y,
+                    w: destination.width,
+                    h: destination.height,
+                    z: destination.z,
+                  },
+                },
+              }
+            : {}),
+        }
+      : {}),
+    x: relocation ? origin.x : Math.round(origin.x),
+    y: relocation ? origin.y : Math.round(origin.y),
+    w: Math.max(
+      1,
+      relocation ? details.rect.width : Math.round(details.rect.width),
+    ),
+    h: Math.max(
+      1,
+      relocation ? details.rect.height : Math.round(details.rect.height),
+    ),
+    z: Math.max(0, ...input.frames.map((candidate) => candidate.z + 1)),
+  };
+  // The selection follows the move in the same render that publishes it. A
+  // whole frame leaves its page there; were the selection published after,
+  // page binding would first see it missing and the canvas reveal another.
+  let followedEvent: number | undefined;
+  const followTransfer = (reply: { frame: string; nodeId: string }) => {
+    const current = designWorkspaceView(workspaceId);
+    if (
+      !isCurrentDesignPageOwner(owner) ||
+      current.selectionEvent !== initialSelection.selectionEvent ||
+      input.isCurrent?.() === false ||
+      current.selectedFrame !== initialSelection.selectedFrame ||
+      current.selectedNodeId !== initialSelection.selectedNodeId ||
+      current.frameSelected !== initialSelection.frameSelected
+    )
+      return;
+    useDesignWorkspaceUiStore
+      .getState()
+      .setSelection(
+        workspaceId,
+        reply.frame,
+        destination ? reply.nodeId : null,
+        undefined,
+        { frameSelected: !destination, owner },
+      );
+    followedEvent = designWorkspaceView(workspaceId).selectionEvent;
+  };
   const result = await transferDesignNodeCached(
     workspaceId,
-    {
-      frame: frame.file,
-      pageId: owner.pageId,
-      sourceVersion: relocation
-        ? details.sourceVersion
-        : (sourceRuntime?.sourceVersion ?? frame.sourceVersion),
-      ...(relocation
-        ? {
-            relocation,
-            movementGuard: {
-              sourceVersion: details.sourceVersion,
-              geometry: {
-                x: frame.x,
-                y: frame.y,
-                w: frame.width,
-                h: frame.height,
-                z: frame.z,
-              },
-            },
-          }
-        : {}),
-      nodeId: details.oid,
-      ...(destination && drop
-        ? {
-            destinationFrame: destination.file,
-            destinationSourceVersion:
-              targetRuntime?.sourceVersion ?? destination.sourceVersion,
-            parentId: drop.parentId,
-            beforeId: drop.beforeId,
-            styles: drop.styles,
-            ...(parentStyles ? { parentStyles } : {}),
-            ...(frameBackground ? { frameBackground } : {}),
-            ...(relocation
-              ? {
-                  destinationMovementGuard: {
-                    sourceVersion:
-                      targetRuntime?.sourceVersion ?? destination.sourceVersion,
-                    geometry: {
-                      x: destination.x,
-                      y: destination.y,
-                      w: destination.width,
-                      h: destination.height,
-                      z: destination.z,
-                    },
-                  },
-                }
-              : {}),
-          }
-        : {}),
-      x: relocation ? origin.x : Math.round(origin.x),
-      y: relocation ? origin.y : Math.round(origin.y),
-      w: Math.max(
-        1,
-        relocation ? details.rect.width : Math.round(details.rect.width),
-      ),
-      h: Math.max(
-        1,
-        relocation ? details.rect.height : Math.round(details.rect.height),
-      ),
-      z: Math.max(0, ...input.frames.map((candidate) => candidate.z + 1)),
-    },
-    ...(relocation || destinationEpoch !== undefined
-      ? ([() => hasIntent() && input.canWrite?.() !== false && destinationIsCurrent()] as const)
-      : []),
+    transfer,
+    relocation || destinationEpoch !== undefined
+      ? () => hasIntent() && input.canWrite?.() !== false && destinationIsCurrent()
+      : undefined,
+    followTransfer,
   );
   const nextFrame = result.snapshot.frames.find(
     (candidate) => candidate.file === result.frame,
   );
   if (nextFrame) {
-    const current = designWorkspaceView(workspaceId);
-    const followsTransfer =
-      isCurrentDesignPageOwner(owner) &&
-      current.selectionEvent === initialSelection.selectionEvent &&
-      input.isCurrent?.() !== false &&
-      current.selectedFrame === initialSelection.selectedFrame &&
-      current.selectedNodeId === initialSelection.selectedNodeId &&
-      current.frameSelected === initialSelection.frameSelected;
-    if (followsTransfer)
-      useDesignWorkspaceUiStore
-        .getState()
-        .setSelection(
-          workspaceId,
-          nextFrame.file,
-          destination ? result.nodeId : null,
-          undefined,
-          { frameSelected: !destination, owner },
-        );
     // Selecting the destination makes it a live-frame priority. Its old
     // document cannot inspect the newly transferred node; wait for presentation.
-    if (!followsTransfer) return true;
-    const followedEvent = designWorkspaceView(workspaceId).selectionEvent;
+    if (followedEvent === undefined) return true;
     await input.presented?.(nextFrame);
     const selected = designWorkspaceView(workspaceId);
     if (

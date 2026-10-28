@@ -1580,15 +1580,19 @@ export function DesignCanvas({
   const revealedFrameRef = useRef<{
     owner: string;
     file: string | null;
+    event: number | undefined;
   } | null>(null);
   useLayoutEffect(() => {
     const file = selectedDescription?.file ?? null;
+    const event = view.selectionEvent;
     const previous = revealedFrameRef.current;
-    revealedFrameRef.current = { owner: liveFrameOwner, file };
+    revealedFrameRef.current = { owner: liveFrameOwner, file, event };
     // The selection an owner opens with restores a session; it does not ask
     // the camera to move.
     if (!previous || previous.owner !== liveFrameOwner) return;
-    if (!active || !workspaceId || !selectedDescription || previous.file === file)
+    // Only a person's own choice moves the camera. A frame chosen for them
+    // when theirs left the page (nested into another, deleted) stays put.
+    if (!active || !workspaceId || !selectedDescription || previous.file === file || previous.event === event)
       return;
     const next = designRevealRectViewport(
       view,
@@ -1608,7 +1612,7 @@ export function DesignCanvas({
     setViewport(workspaceId, next, canvasPageOwner);
     // Only a change of frame reveals; the camera and size are read at it.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [active, liveFrameOwner, selectedDescription?.file, workspaceId]);
+  }, [active, liveFrameOwner, selectedDescription?.file, view.selectionEvent, workspaceId]);
 
   /** Show what an agent is writing without selecting it: one frame comes
    * into view like a Layers selection, several are fitted, and a frame on
