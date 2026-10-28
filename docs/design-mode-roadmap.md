@@ -2168,6 +2168,9 @@ fails because nesting could not: the frame stays where it was dropped and the
 reason is shown. Several selected frames drag and arrow-nudge together in one
 canvas write and one `geometry` undo step (`design.frames.move`); a selection
 that mixes frames with layers of other frames is refused without writing.
+Single-frame keyboard movement uses that same checked geometry path. Its
+preview and queued saves do not wait for a live iframe or Foundation source
+projection. Layer movement still requires exact runtime geometry.
 
 Relocation places a layer by `left`/`top`, which are its X and Y, and keeps
 only its pose (rotation, scale, reflection) in a `transform` about its corner

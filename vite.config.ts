@@ -128,6 +128,13 @@ export default defineConfig(({ command, mode }) => ({
   // an absolute '/assets/*' would resolve to the filesystem root and render a
   // blank window. (The web target that needed '/' was removed.)
   base: "./",
+  // The smoke harness scans a different entry graph. Keep its optimized
+  // dependencies separate so a concurrent dev server cannot invalidate URLs
+  // already loaded by a browser scenario.
+  cacheDir:
+    mode === "ui-smoke"
+      ? path.resolve(__dirname, "node_modules/.vite-ui-smoke")
+      : undefined,
   // Keep prior Vite logs visible across restarts so debugging a
   // dev-session cascade doesn't lose the lead-up. Without this every
   // server restart wipes the terminal, hiding the "vite.config.ts

@@ -146,6 +146,9 @@ retained covers do not authorize edits, and late preparation cannot overwrite
 a newer mutation epoch. A parent layout effect can prune a deleted selection
 before a child's passive activation runs; fence that resting refresh against
 current semantic selection so it cannot erase surviving targets.
+Hold the live document and source projection unavailable during a canvas-frame
+nudge. Geometry-only movement must remain usable, including queued saves,
+cancellation and Undo/Redo; child-layout edits still require current geometry.
 
 Charge displayed and inactive loaded images to one retention pool. Counting
 only inactive images lets a destination add a full working set on top of a full

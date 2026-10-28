@@ -1034,15 +1034,7 @@ export function DesignCanvas({
         dy: number;
       }
     | {
-        mode: "frame";
-        frame: DesignCanvasFrameWire;
-        element: HTMLElement;
-        preview: { geometry: DesignFrameGeometryWire; settled: boolean };
-        dx: number;
-        dy: number;
-      }
-    | {
-        // Several selected frames; `frame` is the selected one.
+        // Canvas geometry only; `frame` is the primary selected frame.
         mode: "frames";
         frame: DesignCanvasFrameWire;
         selectionKey: string;
@@ -1090,7 +1082,7 @@ export function DesignCanvas({
     lifetime: number;
     theme: string | null;
     sourceVersion?: string;
-    /** Several selected frames: geometry only, no live document needed. */
+    /** Canvas frames: geometry only, no live document needed. */
     frames: boolean;
     dx: number;
     dy: number;
@@ -2492,10 +2484,9 @@ export function DesignCanvas({
     });
   }, [canvasFoundation.data, selectedFrame, motionNodeDetails, workspaceId]);
 
-  // Arrow keys on several selected frames move them together, in the nudge
-  // lifecycle of one frame: presses while the key is held land as one canvas
-  // write and one undo step on release; Escape, leaving the window and a page
-  // or selection change restore them; presses during a save wait for it.
+  // Canvas frame movement depends on confirmed metadata, not the document's
+  // loading state. Held keys produce one write and undo step on release;
+  // Escape, blur and owner changes restore the confirmed geometry.
   const nudgeSelectedFrames = useCallback(
     (files: readonly string[], deltaX: number, deltaY: number): boolean => {
       const viewport = viewportRef.current;
@@ -2559,8 +2550,7 @@ export function DesignCanvas({
         const queued = previous && previous.selectionEvent === selection.selectionEvent && previous.lifetime === nudgeLifetimeRef.current && previous.frame === selectedFrame.file && previous.theme === selection.activeTheme && isCurrentDesignPageOwner(previous.owner) ? previous : {
           owner: captureDesignPageOwner(workspaceId), frame: selectedFrame.file,
           selectionEvent: selection.selectionEvent, lifetime: nudgeLifetimeRef.current, theme: selection.activeTheme,
-          frames: selection.selectedTargets.every((target) => !target.nodeId) &&
-            selection.selectedTargets.some((target) => target.frame !== selectedFrame.file),
+          frames: selection.selectedTargets.every((target) => !target.nodeId),
           dx: 0, dy: 0, released: false,
         };
         queued.dx += deltaX;
@@ -2571,9 +2561,9 @@ export function DesignCanvas({
       }
       const roots = designSelectionMutationTargets(selection.selectedTargets, new Map([[selectedFrame.file, selectedRuntimeTree]]));
       if (!roots.length) return false;
+      if (roots.every((target) => !target.nodeId))
+        return nudgeSelectedFrames(roots.map((target) => target.frame), deltaX, deltaY);
       if (roots.some((target) => target.frame !== selectedFrame.file)) {
-        if (roots.every((target) => !target.nodeId))
-          return nudgeSelectedFrames(roots.map((target) => target.frame), deltaX, deltaY);
         toast.error("Move frames or layers, not both", { description: "Select only frames, or layers in one frame, to move them together. Nothing was moved." });
         return true;
       }
@@ -2589,20 +2579,6 @@ export function DesignCanvas({
       }
       const runtimeState = useDesignRuntimeStore.getState().byWorkspace[workspaceId]?.frames[selectedFrame.file];
       const context = { owner: captureDesignPageOwner(workspaceId), selectionEvent: selection.selectionEvent, lifetime: nudgeLifetimeRef.current, canvasLifetime: canvasLifetimeRef.current, retired: false, runtime, runtimeRevision: runtimeState?.snapshot?.revision, theme: selection.activeTheme };
-      if (roots.some((target) => !target.nodeId)) {
-        const element = viewportRef.current?.querySelector<HTMLElement>(`[data-design-frame="${CSS.escape(selectedFrame.file)}"]`);
-        if (!element) return false;
-        const current = nudgeGestureRef.current;
-        const gesture: NonNullable<typeof nudgeGestureRef.current> = current?.mode === "frame" && current.frame.file === selectedFrame.file && current.selectionEvent === selection.selectionEvent
-          ? current : { mode: "frame" as const, frame: selectedFrame, element, preview: { geometry: frameGeometry(selectedFrame), settled: false }, dx: 0, dy: 0, ...context };
-        gesture.dx += deltaX;
-        gesture.dy += deltaY;
-        gesture.preview.geometry = { ...frameGeometry(gesture.frame), x: Math.max(-DESIGN_FRAME_COORDINATE_LIMIT, Math.min(DESIGN_FRAME_COORDINATE_LIMIT, gesture.frame.x + gesture.dx)), y: Math.max(-DESIGN_FRAME_COORDINATE_LIMIT, Math.min(DESIGN_FRAME_COORDINATE_LIMIT, gesture.frame.y + gesture.dy)) };
-        frameGeometryPreviewsRef.current.set(`${canvasDocumentOwner}\0${gesture.frame.file}`, gesture.preview);
-        paintFrameGeometry(element, gesture.preview.geometry);
-        nudgeGestureRef.current = gesture;
-        return true;
-      }
       if (!selectedNodeDetails) return false;
       if (roots.length > 1) {
         const known = new Set<string>();
@@ -2679,7 +2655,6 @@ export function DesignCanvas({
       selectedNodeDetails,
       selectedNodeDetailsList,
       selectedRuntimeTree,
-      canvasDocumentOwner,
       nudgeSelectedFrames,
       workspaceId,
     ],
@@ -2759,8 +2734,8 @@ export function DesignCanvas({
       return;
     }
     gesture.retired ||= cancelled || gesture.lifetime !== nudgeLifetimeRef.current || designWorkspaceView(workspaceId).selectionEvent !== gesture.selectionEvent;
-    // Several frames move by canvas geometry alone; one frame's guarded move
-    // and layer edits need the live document they previewed in.
+    // Canvas frames move by metadata alone. Layer edits retain the exact live
+    // document and layout revision they previewed in.
     const isCurrent = () => !gesture.retired && gesture.canvasLifetime === canvasLifetimeRef.current &&
       isCurrentDesignPageOwner(gesture.owner) &&
       (gesture.mode === "frames" || (
@@ -2768,7 +2743,6 @@ export function DesignCanvas({
         gesture.runtime?.isActive?.() === true &&
         designFrameRuntime(workspaceId, gesture.frame.file) === gesture.runtime &&
         useDesignRuntimeStore.getState().byWorkspace[workspaceId]?.frames[gesture.frame.file]?.snapshot?.revision === gesture.runtimeRevision));
-    const frameKey = `${canvasDocumentOwner}\0${gesture.frame.file}`;
     const restore = async () => {
       if (gesture.mode === "frames") {
         const confirmed = designFrameViews(designWorkspaceSnapshotCache.peekSnapshot(workspaceId).data);
@@ -2781,11 +2755,6 @@ export function DesignCanvas({
             paintFrameGeometry(member.element, frame ? frameGeometry(frame) : member.start);
         }
         refreshFrameResidency();
-      } else if (gesture.mode === "frame") {
-        if (frameGeometryPreviewsRef.current.get(frameKey) !== gesture.preview) return;
-        frameGeometryPreviewsRef.current.delete(frameKey);
-        const confirmed = designWorkspaceSnapshotCache.peekSnapshot(workspaceId).data?.frames.find((frame) => frame.file === gesture.frame.file);
-        if (gesture.element.isConnected && isCurrentDesignPageOwner(gesture.owner)) paintFrameGeometry(gesture.element, frameGeometry(confirmed ?? gesture.frame));
       } else if (!nudgeGestureRef.current && !gestureCancelRef.current && gesture.runtime &&
         designFrameRuntime(workspaceId, gesture.frame.file) === gesture.runtime && gesture.runtime.sourceVersion === gesture.frame.sourceVersion) {
         const ids = gesture.mode === "move" ? gesture.nodes.map((node) => node.nodeId) : [gesture.nodeId];
@@ -2811,19 +2780,16 @@ export function DesignCanvas({
         await restore();
         return;
       }
-      const updates = gesture.mode === "frame" ? [] : gesture.mode === "move"
+      const updates = gesture.mode === "move"
         ? gesture.nodes.map((node) => ({ nodeId: node.nodeId, styles: designNodeMovementStyles(node.details, { x: gesture.dx, y: gesture.dy }) }))
         : [{ nodeId: gesture.nodeId, styles: preserveDesignLayoutPins(gesture.details, { width: `${Math.max(1, Math.round(gesture.width + gesture.dw))}px`, height: `${Math.max(1, Math.round(gesture.height + gesture.dh))}px` }) }];
-      const operations: DesignOperation[] = gesture.mode === "frame"
-        ? [{ operationId: crypto.randomUUID(), type: "frame.set-geometry", frame: gesture.frame.file, geometry: { x: gesture.preview.geometry.x, y: gesture.preview.geometry.y, width: gesture.preview.geometry.w, height: gesture.preview.geometry.h, z: gesture.preview.geometry.z } }]
-        : updates.map((update) => ({ operationId: crypto.randomUUID(), type: "node.set-styles", nodeId: update.nodeId, styles: update.styles, scope: "auto", responsiveContext: "base", stateContext: "default" }));
-      const result = await applyDesignEditCached(workspaceId, gesture.frame, { schemaVersion: 1, transactionId: `desktop:${crypto.randomUUID()}`, actor: { kind: "human", id: "desktop" }, intent: gesture.mode === "frame" ? "Move canvas frame" : `Move ${updates.length} selected layers`, createdAt: Date.now(), operations }, {
+      const operations: DesignOperation[] = updates.map((update) => ({ operationId: crypto.randomUUID(), type: "node.set-styles", nodeId: update.nodeId, styles: update.styles, scope: "auto", responsiveContext: "base", stateContext: "default" }));
+      const result = await applyDesignEditCached(workspaceId, gesture.frame, { schemaVersion: 1, transactionId: `desktop:${crypto.randomUUID()}`, actor: { kind: "human", id: "desktop" }, intent: `Move ${updates.length} selected layers`, createdAt: Date.now(), operations }, {
         movementGuard: { sourceVersion: gesture.frame.sourceVersion, geometry: frameGeometry(gesture.frame) },
         isCurrent,
       });
       const queued = queuedNudgeRef.current;
       if (queued) queued.sourceVersion = result.snapshot?.frames.find((frame) => frame.file === queued.frame)?.sourceVersion;
-      if (gesture.mode === "frame") await restore();
     })().catch(async (error) => {
       queuedNudgeRef.current = null;
       await restore();
@@ -2835,7 +2801,7 @@ export function DesignCanvas({
     });
     nudgeCommitRef.current = pending;
     savedEditingSession?.retain(pending);
-  }, [workspaceId, canvasDocumentOwner, savedEditingSession, refreshFrameResidency]);
+  }, [workspaceId, savedEditingSession, refreshFrameResidency]);
 
   useEffect(() => {
     const queued = queuedNudgeRef.current;

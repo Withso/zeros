@@ -803,6 +803,70 @@ export async function runDesignWorldNudgeSmoke({ page, check }) {
   );
 }
 
+export async function runDesignFrameNudgeWithoutRuntimeSmoke({ page: parent, check }) {
+  // Catalog fixtures persist directory identity. Keep it out of the shared
+  // legacy interaction page, including the next layer-movement scenario.
+  const page = await parent.context().browser().newPage();
+  const errors = [];
+  page.on("pageerror", error => errors.push(error.message));
+  try {
+    const origin = `${new URL(parent.url()).origin}/ui-smoke-frame-nudge-origin.html`;
+    await page.route(origin, route => route.fulfill({ contentType: "text/html", body: "<!doctype html><title>Frame nudge smoke origin</title>" }), { times: 1 });
+    await page.goto(origin);
+    await runDesignFrameNudgeWithoutRuntimeChecks({ page, check });
+    expect(errors).toEqual([]);
+  } finally { await page.close(); }
+}
+
+async function runDesignFrameNudgeWithoutRuntimeChecks({ page, check }) {
+  for (const scoped of [false, true]) {
+    await openCanvasFixture(page, `layoutGestures&coldFoundation&measureContinuity&measureManipulation&engineDelayMs=0${scoped ? "&scopedMutations" : ""}`);
+    const frame = page.locator('[data-design-frame="home.html"]');
+    await frame.locator("[data-design-frame-label]").click();
+    const before = await frameGeometry(frame);
+    const confirmedX = () => page.evaluate(async () => {
+      const { designWorkspaceSnapshotCache } = await import("/apps/desktop/src/renderer/features/design-workspace/state/design-workspace-cache.ts");
+      return designWorkspaceSnapshotCache.peekSnapshot("ws_design_harness").data.frames.find(frame => frame.file === "home.html").x;
+    });
+    // Retire the real port while the selected frame's source projection is
+    // still held. Moving its canvas rectangle needs neither child layout nor
+    // a live document; this also covers a replacement's handshake gap.
+    await page.evaluate(async () => {
+      const { designFrameRuntime } = await import("/apps/desktop/src/renderer/platform/bridge/design-frame-runtime.ts");
+      designFrameRuntime("ws_design_harness", "home.html").destroy();
+      window.__zerosHarnessDesignSurface.measurement.hold("design.frames.move");
+    });
+    await page.keyboard.down("ArrowRight");
+    await page.keyboard.down("ArrowRight");
+    await page.keyboard.down("ArrowRight");
+    await expect.poll(() => frameGeometry(frame)).toMatchObject({ x: before.x + 3, y: before.y });
+    expect(await confirmedX()).toBe(before.x);
+    await page.keyboard.up("ArrowRight");
+    await page.waitForFunction(() => window.__zerosHarnessDesignSurface.measurement.requests.some(request => request.op === "design.frames.move"));
+    await page.keyboard.press("ArrowRight");
+    expect(await confirmedX()).toBe(before.x);
+    await page.evaluate(() => window.__zerosHarnessDesignSurface.measurement.release("design.frames.move"));
+    await expect.poll(confirmedX).toBe(before.x + 4);
+    expect(await transactionWrites(page)).toBe(0);
+    expect(await page.evaluate(() => window.__zerosHarnessFrameMoves.length)).toBe(2);
+    await page.keyboard.down("ArrowLeft");
+    await expect.poll(() => frameGeometry(frame)).toMatchObject({ x: before.x + 3 });
+    await page.keyboard.press("Escape");
+    await page.keyboard.up("ArrowLeft");
+    await expect.poll(() => frameGeometry(frame)).toMatchObject({ x: before.x + 4 });
+    expect(await confirmedX()).toBe(before.x + 4);
+    expect(await page.evaluate(() => window.__zerosHarnessFrameMoves.length)).toBe(2);
+    for (const [key, offset] of [["Control+z", 3], ["Control+z", 0], ["Control+Shift+z", 3], ["Control+Shift+z", 4]]) {
+      await page.keyboard.press(key);
+      await expect.poll(confirmedX).toBe(before.x + offset);
+    }
+    expect(await page.locator('[data-design-frame-row="pricing.html"]').count()).toBe(1);
+    expect(await page.locator("[data-sonner-toast]").allTextContents()).toEqual([]);
+    await page.evaluate(() => window.__zerosHarnessFoundation.release());
+    check(`single-frame nudges survive absent runtime, held source and queued saves with exact cancellation and Undo/Redo (${scoped ? "scoped" : "aggregate"} replies)`, true);
+  }
+}
+
 export async function runDesignFreeRelocationSmoke({ page, check }) {
   await openCanvasFixture(page, "layoutGestures&freeRelocation");
   await page.locator('[data-design-layer-id="home-hero"]').click();
@@ -879,6 +943,7 @@ export async function runDesignCanvasRefinementsSmoke(options) {
   await runDesignGroupDetachmentRefusalSmoke(options);
   await runDesignFreeRelocationSmoke(options);
   await runDesignWorldNudgeSmoke(options);
+  await runDesignFrameNudgeWithoutRuntimeSmoke(options);
   await runDesignRelativePinnedMovementSmoke(options);
   await runDesignLayoutAffineCameraSmoke(options);
   await runDesignFramePointerOwnershipSmoke(options);

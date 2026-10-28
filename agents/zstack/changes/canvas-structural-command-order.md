@@ -39,3 +39,15 @@
   fixture state on the base revision reproduced the failure; an isolated Motion
   run passed. Directory-persisting copy checks now own a fresh browser context,
   preserving every assertion and leaving the shared scenario page untouched.
+- The full browser run also lost optimized dependency URLs when a normal dev
+  server rebuilt a shared Vite cache for its different entry graph. Keep smoke
+  and development caches separate under the existing served-file boundary.
+  `ui-smoke-vite-config.test.ts` reproduces the collision through resolved
+  configurations; the complete browser run retains every scenario.
+- A rapid single-frame arrow sequence could be refused between a saved move
+  and its replacement runtime. Single-frame nudges unnecessarily used a source
+  transaction guarded by live layout, while group nudges already used checked
+  canvas geometry. Both now use that geometry path. The browser regression
+  retires the real runtime, holds source preparation and the first save, and
+  verifies repeated input, cancellation and Undo/Redo with aggregate/scoped
+  replies. Layer edits retain their runtime and source guards.
