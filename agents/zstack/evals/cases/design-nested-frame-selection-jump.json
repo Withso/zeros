@@ -1,0 +1,9 @@
+{
+  "id": "design-nested-frame-selection-jump",
+  "kind": "replay",
+  "area": "desktop-design-state",
+  "fixedBy": "pr:750",
+  "symptom": "Dropping a Design frame onto another frame nested it, then selected the page's first frame and moved the camera to it instead of keeping the nested layer selected.",
+  "rule": "agents/zstack/changes/design-layout-truth.md: publish a selection that follows a structural write in the same step as its snapshot; the canvas moves its camera only for explicit selections.",
+  "check": "pnpm test:ui-smoke --shard=2/3"
+}

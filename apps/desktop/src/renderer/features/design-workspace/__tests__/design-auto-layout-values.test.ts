@@ -10,6 +10,7 @@ import {
   designAutoLayoutFlowStyles,
   designGridTrackCount,
   designAutoLayoutUpdates,
+  designFrameAlwaysClips,
   designFrameResizeRootStyles,
   designFrameRootFixedStyles,
 } from "../design-auto-layout-values";
@@ -72,6 +73,28 @@ describe("auto layout intent", () => {
       expect([...updates.keys()]).toEqual(["parent"]);
     },
   );
+
+  it("brings free children into a new auto layout at their flow place, not the offset they were drawn at", () => {
+    // A nested frame was placed with a translate; vertical auto layout must
+    // stack it at the top-left, as in a design tool.
+    const parent = { ...node({ display: "block" }, "block"), oid: "parent" };
+    const moved = { ...node({ position: "absolute", left: "0px", top: "0px", transform: "matrix(1, 0, 0, 1, 66, 223)", transformOrigin: "0px 0px" }, "block"), oid: "moved" };
+    const turned = { ...node({ position: "absolute", left: "10px", top: "20px", transform: "matrix(0, 1, -1, 0, 5, 6)", transformOrigin: "0px 0px" }, "block"), oid: "turned" };
+    const updates = designAutoLayoutUpdates([parent], [moved, turned], "column");
+    expect(updates.get("moved")).toMatchObject({ position: "relative", left: "auto", top: "auto", transform: "none" });
+    expect(updates.get("turned")).toMatchObject({ position: "relative", transform: "matrix(0,1,-1,0,0,0)" });
+  });
+
+  it("reports a frame's own layer as clipping at the frame's edges, as the canvas draws it", () => {
+    // A canvas frame is a document of its own: content past its edges is
+    // never drawn, so "Clip content" must not read unchecked for it.
+    const root = { ...node({ overflow: "visible" }, "block"), oid: "root", rect: { x: 0, y: 0, width: 400, height: 300 } };
+    expect(designFrameAlwaysClips(root, true)).toBe(true);
+    expect(designFrameAlwaysClips({ ...root, oid: "::zeros-document-body", tag: "body" }, true)).toBe(true);
+    // A smaller root, or the same layer selected as a child, follows its CSS.
+    expect(designFrameAlwaysClips({ ...root, rect: { x: 0, y: 0, width: 200, height: 300 } }, true)).toBe(false);
+    expect(designFrameAlwaysClips(root, false)).toBe(false);
+  });
 
   it("keeps a stretched background and fixed overlays out of a drawn layout", () => {
     const parent = { ...node({ display: "block" }), oid: "parent" };

@@ -3,7 +3,7 @@ import type {
   DesignRuntimeNodeMove,
 } from "@zeros/protocol/design-runtime";
 import { canInsertDesignFrame } from "./design-frame-insertion";
-import { borderSize, cssSize, designLayoutMode } from "./design-layout-values";
+import { borderSize, cssSize, designFlowTransformStyles, designLayoutMode } from "./design-layout-values";
 import {
   DESIGN_REPARENT_HYSTERESIS_PIXELS,
   designNodeRelocation,
@@ -117,12 +117,15 @@ export function createDesignLayoutDropResolver(
       (target) =>
         target.visible &&
         !below(target) &&
+        // A free layer placed in another free parent needs it positioned; an
+        // auto layout places the layer itself, static or not.
         !(
           node.relocationContext &&
           options?.preserveFreePosition &&
           target !== original &&
           target.tag !== "body" &&
-          target.styles.position === "static"
+          target.styles.position === "static" &&
+          designLayoutMode(target.styles.display ?? "") === "none"
         ) &&
         (canInsertDesignFrame(target) || target.tag === "body"),
     )
@@ -179,9 +182,10 @@ export function createDesignLayoutDropResolver(
     currentParent = parent;
     if (!parent) return null;
     const sameParent = parent.oid === node.layout?.parentId;
+    // A free layer stays free within its own parent. Dragged into another
+    // auto layout it joins that flow, as in a design tool.
     const flow =
-      (sameParent || options?.preserveFreePosition) &&
-      node.styles.position === "absolute"
+      sameParent && node.styles.position === "absolute"
         ? "none"
         : designLayoutMode(parent.styles.display ?? "");
     const styles: Record<string, string | null> = {
@@ -282,6 +286,9 @@ export function createDesignLayoutDropResolver(
       }
       return { nodeId: node.oid, parentId: parent.oid, beforeId, styles };
     }
+    // A free layer joining this flow drops the offset it was drawn at.
+    if (["absolute", "fixed"].includes(node.styles.position ?? ""))
+      Object.assign(styles, designFlowTransformStyles(node));
     const children = flowChildren.get(parent.oid) ?? [];
     const column =
       flow === "flex" &&

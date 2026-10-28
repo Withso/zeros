@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { DesignRuntimeNodeDetails } from "@zeros/protocol/design-runtime";
 import {
+  bindDesignWorkspacePages,
   resetDesignWorkspaceUiForTests,
   useDesignWorkspaceUiStore,
   designWorkspaceView,
@@ -108,7 +109,11 @@ beforeEach(() => {
   useDesignWorkspaceUiStore
     .getState()
     .setSelection(input.workspaceId, source.file, node.oid);
-  mocks.transfer.mockResolvedValue(reply);
+  // The cache publishes the follow-selection just before the snapshot.
+  mocks.transfer.mockImplementation(async (_workspaceId: string, _input: unknown, _isCurrent: unknown, beforePublish?: (result: typeof reply) => void) => {
+    beforePublish?.(reply);
+    return reply;
+  });
 });
 afterEach(() => vi.useRealTimers());
 
@@ -219,12 +224,9 @@ describe("canvas transfer presentation", () => {
           frames: [source, lower, upper],
         }),
       ).resolves.toBe(true);
-      expect(mocks.transfer).toHaveBeenCalledWith(
-        input.workspaceId,
-        expect.objectContaining({
-          destinationFrame: upper.file,
-        }),
-      );
+      expect(mocks.transfer.mock.calls[0]?.[1]).toMatchObject({
+        destinationFrame: upper.file,
+      });
     },
   );
 
@@ -368,7 +370,7 @@ describe("design-tool nesting", () => {
     const right = { ...destination, file: "right.html", x: 1400, width: 300 };
     mocks.transfer.mockResolvedValue({ frame: right.file, nodeId: node.oid, snapshot: { frames: [source, left, right] } });
     await transferDesignLayerOnCanvas({ ...input, frames: [source, left, right], origin: { x: 1100, y: 100 }, pointer: { x: 1500, y: 150 } });
-    expect(mocks.transfer).toHaveBeenCalledWith(input.workspaceId, expect.objectContaining({ destinationFrame: right.file }));
+    expect(mocks.transfer.mock.calls[0]?.[1]).toMatchObject({ destinationFrame: right.file });
   });
 
   it("makes a static destination parent positioned instead of refusing the move", async () => {
@@ -420,6 +422,32 @@ describe("design-tool nesting", () => {
       relocation: { width: 600, height: 400, matrix: [1, 0, 0, 1, 40, 60], inheritedStyles: { color: "dimgray" } },
     });
     expect(sent.relocation.inheritedStyles).not.toHaveProperty("font-family");
+  });
+
+  it("selects the nested frame before its source leaves the page, so the canvas never jumps to the first frame", async () => {
+    mocks.targets = [{ oid: "target-root", tag: "main", styles: { position: "relative" }, childCoordinateSpace: [1, 0, 0, 1, 0, 0] }];
+    mocks.destinationDetails = { relocationContext: { inheritedStyles: {}, baseStyles: {}, unsupported: [] } };
+    const body = {
+      oid: "::zeros-document-body",
+      sourceVersion: source.sourceVersion,
+      rect: { x: 0, y: 0, width: 600, height: 400 },
+      styles: {},
+      relocationContext: { inheritedStyles: {}, baseStyles: {}, unsupported: [] },
+    } as unknown as DesignRuntimeNodeDetails;
+    const page = { id: "page", title: "Page", folder: "", frameFiles: ["first.html", source.file, destination.file] };
+    bindDesignWorkspacePages(input.workspaceId, mocks.directoryId, [page]);
+    useDesignWorkspaceUiStore.getState().setSelection(input.workspaceId, source.file, null, undefined, { frameSelected: true });
+    const nested = { frame: destination.file, nodeId: "frame-1234abcd", snapshot: { frames: [confirmed] } };
+    // The page binding observes the published snapshot (a layout effect)
+    // before the transfer's own continuation resumes.
+    mocks.transfer.mockImplementationOnce(async (_workspaceId: string, _input: unknown, _isCurrent: unknown, beforePublish?: (result: typeof nested) => void) => {
+      beforePublish?.(nested);
+      bindDesignWorkspacePages(input.workspaceId, mocks.directoryId, [{ ...page, frameFiles: ["first.html", destination.file] }]);
+      return nested;
+    });
+    await expect(transferDesignLayerOnCanvas({ ...input, detach: false, details: body, origin: { x: 1040, y: 60 }, destination, pointer: { x: 1100, y: 100 } })).resolves.toBe(true);
+    expect(designWorkspaceView(input.workspaceId)).toMatchObject({ selectedFrame: destination.file, selectedNodeId: "frame-1234abcd" });
+    expect(mocks.selectNode).toHaveBeenCalledWith(expect.objectContaining({ nodeId: "frame-1234abcd" }));
   });
 
   it("releases a layer into the frame under the pointer among the frames confirmed at release", async () => {

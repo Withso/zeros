@@ -493,6 +493,7 @@ export type DesignRuntimeMethod =
   | "getLayoutTargets"
   | "previewLayout"
   | "restoreGeneration"
+  | "previewHistory"
   | "previewGeometry"
   | "commitStyles"
   | "previewText"
@@ -509,7 +510,7 @@ export type DesignRuntimeMethod =
 /** Methods a runtime advertises only when the host's handshake lists them
  * in `features`, so a host that predates them still accepts the runtime's
  * capabilities. */
-export const DESIGN_RUNTIME_OPT_IN_METHODS = ["previewStylesheet", "setPlayback", "previewInsert", "clearPreviewInserts"] as const;
+export const DESIGN_RUNTIME_OPT_IN_METHODS = ["previewStylesheet", "setPlayback", "previewInsert", "clearPreviewInserts", "previewHistory"] as const;
 
 export interface DesignRuntimePlaybackStopped {
   sourceVersion: string;
@@ -567,6 +568,7 @@ const DESIGN_RUNTIME_METHODS = new Set<DesignRuntimeMethod>([
   "getLayoutTargets",
   "previewLayout",
   "restoreGeneration",
+  "previewHistory",
   "previewGeometry",
   "commitStyles",
   "previewText",
@@ -1046,7 +1048,7 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
   ];
   // Advertised only to a host whose handshake asks for them, so a host that
   // predates a method still accepts these capabilities.
-  var OPT_IN_METHODS = ["previewStylesheet", "setPlayback", "previewInsert", "clearPreviewInserts"];
+  var OPT_IN_METHODS = ["previewStylesheet", "setPlayback", "previewInsert", "clearPreviewInserts", "previewHistory"];
   var enabledOptInMethods = [];
   var MAX_PREVIEW_STYLESHEET_CHARS = 4194304;
   // Everything one frame of direct manipulation paints from. Deliberately tiny:
@@ -3516,6 +3518,8 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
   var previewInsertsByOid = new Map();
   var generationHistory = [];
   var paintedSourceVersion = SOURCE_VERSION;
+  var historyPresentationTarget = null;
+  var historyPresentationMeasure = [];
   var INSERT_PARENT_REJECTED = /^(AREA|BASE|BR|COL|COLGROUP|EMBED|HR|IMG|INPUT|LINK|META|PARAM|SOURCE|TRACK|WBR|SELECT|OPTION|OPTGROUP|TABLE|THEAD|TBODY|TFOOT|TR|UL|OL|DL|SCRIPT|STYLE|TEMPLATE|TEXTAREA|IFRAME|SVG)$/i;
 
   /** Validate every insert before the first write. A previewed element is the
@@ -3775,7 +3779,7 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
     return measured.map(function (element) { return geometryOf(element, args.children !== false); });
   }
 
-  function restoreGeneration(target, commit, measure) {
+  function restoreGeneration(target, commit, measure, readback) {
     if (!/^[a-f0-9]{24}$/.test(target)) throw new Error("Invalid history generation.");
     var versions = generationHistory.length ? [generationHistory[0].from].concat(generationHistory.map(function (entry) { return entry.to; })) : [SOURCE_VERSION];
     var touched = new Set();
@@ -3794,6 +3798,7 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
     }
     withoutObservedMutations(function () {
       cancelMovePreviews();
+      if (clearInsertPreviews()) treeUnchanged = false;
       Array.from(previewStyleOverridesByOid.keys()).forEach(clearPreviewStyles);
       var apply = function (entry, forward) {
         var inserts = entry.inserts || [];
@@ -3827,6 +3832,7 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
       window.__zerosDesignSourceVersion = SOURCE_VERSION;
     }
     revision += 1;
+    if (readback === false) return null;
     var nextSnapshot = treeUnchanged ? styleOnlySnapshot() : snapshot();
     // An undone insert is no longer in the document; report only live nodes.
     var details = Array.from(touched).slice(0, 256).flatMap(function (oid) {
@@ -3851,6 +3857,42 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
     return { sourceVersion: SOURCE_VERSION, treeUnchanged: treeUnchanged,
       snapshot: treeUnchanged ? Object.assign({}, nextSnapshot, { tree: [] }) : nextSnapshot,
       details: details };
+  }
+
+  // A pending Undo is presentation, never the next save's baseline. Authority
+  // is applied and measured on its own source, then the latest inverse is
+  // repainted in this same task, before the browser can display the save.
+  function withHistoryPresentation(commit) {
+    var target = historyPresentationTarget;
+    if (target !== null) restoreGeneration(SOURCE_VERSION, false, undefined, false);
+    try {
+      var result = commit();
+      if (target !== null) {
+        var measured = new Set(result.details.map(function (detail) { return detail.oid; }));
+        historyPresentationMeasure.forEach(function (oid) {
+          if (measured.has(oid)) return;
+          try { result.details.push(detailsOf(elementForOid(oid))); } catch (_missingSelection) {}
+        });
+      }
+      return result;
+    } finally {
+      if (target !== null) {
+        try { restoreGeneration(target, false, undefined, false); }
+        catch (_expiredHistory) { historyPresentationTarget = null; historyPresentationMeasure = []; }
+      }
+    }
+  }
+
+  function previewHistory(args) {
+    if (args.targetSourceVersion !== null &&
+        (typeof args.targetSourceVersion !== "string" || !/^[a-f0-9]{24}$/.test(args.targetSourceVersion)))
+      throw new Error("Invalid history presentation generation.");
+    var target = args.targetSourceVersion;
+    var measure = Array.isArray(args.measure) ? args.measure.filter(function (oid) { return typeof oid === "string"; }).slice(0, 64) : [];
+    var result = restoreGeneration(target === null ? SOURCE_VERSION : target, false, measure, target !== null);
+    historyPresentationTarget = target;
+    historyPresentationMeasure = target === null ? [] : measure;
+    return result;
   }
 
   function commitStyles(updates, nextSourceVersion, patch) {
@@ -4567,11 +4609,16 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
       case "previewLayout":
         return previewLayout(args);
       case "restoreGeneration":
-        return restoreGeneration(args.targetSourceVersion, args.commit === true, args.measure);
+        return args.commit === true
+          ? withHistoryPresentation(function () { return restoreGeneration(args.targetSourceVersion, true, args.measure); })
+          : restoreGeneration(args.targetSourceVersion, false, args.measure);
+      case "previewHistory":
+        if (enabledOptInMethods.indexOf("previewHistory") < 0) throw new Error("Unknown design runtime method: previewHistory");
+        return previewHistory(args);
       case "previewGeometry":
         return previewGeometry(args.nodeId, args.styles, args.children);
       case "commitStyles":
-        return commitStyles(args.updates, args.nextSourceVersion, args.patch);
+        return withHistoryPresentation(function () { return commitStyles(args.updates, args.nextSourceVersion, args.patch); });
       case "previewText":
         return previewText(args.nodeId, args.text);
       case "clearPreviewText":

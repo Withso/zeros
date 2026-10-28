@@ -1,5 +1,6 @@
 import { parse } from "parse5";
 import {
+  designRelocationFlowStyles,
   designRelocationSchema,
   designRelocationStyles,
 } from "@zeros/protocol/design-relocation";
@@ -34,14 +35,29 @@ export function assertDesignRelocationSource(
   }
 }
 
-export function designRelocationRootStyles(
-  input: unknown,
-): Record<string, string> {
+function admittedRelocation(input: unknown) {
   const relocation = designRelocationSchema.parse(input);
   for (const [property, value] of Object.entries(relocation.inheritedStyles)) {
     validateDesignCssValue(property, value);
     if (value.toLowerCase().includes("url("))
       throw new Error("Inherited asset references cannot be relocated safely.");
   }
-  return designRelocationStyles(relocation);
+  return relocation;
+}
+
+export function designRelocationRootStyles(
+  input: unknown,
+): Record<string, string> {
+  return designRelocationStyles(admittedRelocation(input));
+}
+
+/** The same admitted relocation joining a flex or grid drop slot. */
+export function designRelocationFlowRootStyles(
+  input: unknown,
+  flow: Readonly<Record<string, string | null | undefined>>,
+): Record<string, string> {
+  const styles = designRelocationFlowStyles(admittedRelocation(input), flow);
+  for (const [property, value] of Object.entries(styles))
+    validateDesignCssValue(property, value);
+  return styles;
 }

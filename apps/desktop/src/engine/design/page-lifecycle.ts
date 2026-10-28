@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { lstat, mkdir, readdir, rmdir } from "node:fs/promises";
+import { mkdir, readdir, rmdir } from "node:fs/promises";
 import path from "node:path";
 import {
   isDesignPageFolder,
@@ -15,13 +15,13 @@ import { withDesignDocumentWrite } from "./document-write-lock";
 import { initializeDesignDocumentUnlocked } from "./document-transactions";
 import {
   designDirectory,
-  readBoundedDesignFrameSource,
   readCanvas,
   writeCanvas,
 } from "./document-storage";
 import { designDirectoryNameFor } from "./directory-registry";
 import {
   assertSafeDesignStoragePath,
+  readDesignStorageFile,
   type DesignStorageChange,
 } from "./metadata";
 import {
@@ -31,15 +31,19 @@ import {
 } from "./pages";
 import { assertDesignWriteAuthorized } from "./write-authority";
 import { designTitleSlug } from "./design-naming";
+import { MAX_DESIGN_TEXT_BYTES } from "./render-budget";
+import { captureDesignCatalogPoint, publishDesignCatalogChange, type CaptureDesignCatalogChange } from "./page-history";
 
 export async function createDesignPage(
   workspace: string,
   input: { title?: string } = {},
+  capture?: CaptureDesignCatalogChange,
 ): Promise<DesignPageSummary> {
   const parsed = designPageCreateInputSchema.parse(input);
   return withDesignDocumentWrite(workspace, async () => {
     await initializeDesignDocumentUnlocked(workspace);
     const canvas = await readCanvas(workspace);
+    const before = capture ? captureDesignCatalogPoint(workspace, canvas) : undefined;
     const pages = canvas.pages!;
     if (pages.length >= 64)
       throw new Error("Design directory exceeds the 64-page limit.");
@@ -90,6 +94,7 @@ export async function createDesignPage(
     await mkdir(target);
     pages.push(page);
     await writeCanvas(workspace, canvas);
+    publishDesignCatalogChange(workspace, before, canvas, [], capture);
     return designCanvasPageCatalog(canvas, undefined, true).find(
       (candidate) => candidate.id === page.id,
     )!;
@@ -100,15 +105,18 @@ export async function renameDesignPage(
   workspace: string,
   pageId: string,
   title: string,
+  capture?: CaptureDesignCatalogChange,
 ): Promise<DesignPageSummary> {
   const input = designPageRenameInputSchema.parse({ pageId, title });
   return withDesignDocumentWrite(workspace, async () => {
     await initializeDesignDocumentUnlocked(workspace);
     const canvas = await readCanvas(workspace);
+    const before = capture ? captureDesignCatalogPoint(workspace, canvas) : undefined;
     const page = designPageForWrite(canvas, input.pageId);
     if (page.title !== input.title) {
       page.title = input.title;
       await writeCanvas(workspace, canvas);
+      publishDesignCatalogChange(workspace, before, canvas, [], capture);
     }
     return designCanvasPageCatalog(canvas, undefined, true).find(
       (candidate) => candidate.id === page.id,
@@ -120,11 +128,13 @@ export async function deleteDesignPage(
   workspace: string,
   pageId: string,
   expectedFrameIds: readonly string[],
+  capture?: CaptureDesignCatalogChange,
 ): Promise<{ folder: string; frameFiles: string[] }> {
   const input = designPageDeleteInputSchema.parse({ pageId, expectedFrameIds });
   return withDesignDocumentWrite(workspace, async () => {
     await initializeDesignDocumentUnlocked(workspace);
     const canvas = await readCanvas(workspace);
+    const before = capture ? captureDesignCatalogPoint(workspace, canvas) : undefined;
     const page = designPageForWrite(canvas, input.pageId);
     if (canvas.pages!.length === 1)
       throw new Error("Cannot delete the last page.");
@@ -140,18 +150,9 @@ export async function deleteDesignPage(
     const files = designPageFrameFiles(canvas, page);
     for (const file of files) {
       const relative = `${designDirectoryNameFor(workspace)}/${file}`;
-      const target = assertSafeDesignStoragePath(workspace, relative);
-      const present = await lstat(target).catch(
-        (error: NodeJS.ErrnoException) => {
-          if (error.code === "ENOENT") return null;
-          throw error;
-        },
-      );
       sources.push({
         file: relative,
-        before: present
-          ? await readBoundedDesignFrameSource(workspace, file)
-          : null,
+        before: readDesignStorageFile(workspace, relative, MAX_DESIGN_TEXT_BYTES, true),
         after: null,
       });
       delete canvas.frames[file];
@@ -161,6 +162,7 @@ export async function deleteDesignPage(
       (candidate) => candidate.id !== page.id,
     );
     await writeCanvas(workspace, canvas, sources);
+    publishDesignCatalogChange(workspace, before, canvas, sources, capture);
     assertDesignWriteAuthorized();
     // rmdir never follows a symlink or recursively removes unregistered source.
     await rmdir(path.join(designDirectory(workspace), page.folder!)).catch(

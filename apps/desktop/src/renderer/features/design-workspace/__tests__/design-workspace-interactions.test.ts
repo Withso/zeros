@@ -114,7 +114,11 @@ describe("design workspace interaction wiring", () => {
       "publishSelection(selectedDescription ?? null, { selected: view.frameSelected, explicit: false });",
     );
     expect(source).toContain(
-      "view.selectedTargets.some(target => target.frame === frame.file && !target.nodeId)",
+      "paintedSelectedTargets.some(target => target.frame === frame.file && !target.nodeId)",
+    );
+    // History may paint the frame it selects first; gestures keep the view.
+    expect(source).toContain(
+      "const paintedSelectedTargets = historySelection?.selectedTargets ?? view.selectedTargets;",
     );
     // Body hit tests use the same stale-response guard as other selections.
     expect(source).toContain("selectDesignFrameBodyAtLocation({");
@@ -747,7 +751,8 @@ describe("design workspace interaction wiring", () => {
     // A selected frame is never noted again, so hovering its rows cannot
     // publish and clear intent (and re-render the canvas) on every row.
     expect(layersSource).toContain("if (workspaceId && !selectedTargets?.some((target: DesignSelectionTarget) => target.frame === file))");
-    expect(layersSource).toContain("onPointerEnter={() => noteFrameIntent(frame.file)}");
+    expect(layersSource).toContain("onPointerEnter={() => actions.frameIntent(frame.file)}");
+    expect(layersSource).toContain("frameIntent: noteFrameIntent,");
   });
 
   it("reads the Option measure modifier outside the canvas focus scope", () => {

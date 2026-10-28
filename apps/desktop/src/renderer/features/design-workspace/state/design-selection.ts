@@ -1786,41 +1786,171 @@ interface DesignNodeWarmRead {
   sourceVersion: string;
   nodeId: string;
 }
-const warmReadByWorkspace = new Map<string, { active: boolean; pending: DesignNodeWarmRead | null }>();
+interface DesignNodeWarmWindow {
+  cancelled: boolean;
+  pending: DesignNodeWarmRequest[];
+}
+interface DesignNodeWarmRequest extends DesignNodeWarmRead {
+  owner: DesignPageOwner;
+  runtime: DesignFrameRuntimeConnection;
+  window?: DesignNodeWarmWindow;
+}
+interface DesignNodeWarmQueue {
+  running: DesignNodeWarmRequest | null;
+  controller: AbortController | null;
+  priority: DesignNodeWarmRequest | null;
+  window: DesignNodeWarmWindow | null;
+  scheduled: boolean;
+}
+const MAX_WARM_NODE_OWNERS = 32;
+const MAX_WARM_WINDOW_NODES = 12;
+const warmReadByWorkspace = new Map<string, DesignNodeWarmQueue>();
+
+function currentDesignWarmRequest(request: DesignNodeWarmRequest): boolean {
+  const workspace = useDesignRuntimeStore.getState().byWorkspace[request.workspaceId];
+  const snapshot = readSelectionSnapshot(request.workspaceId);
+  return !request.window?.cancelled && isCurrentDesignPageOwner(request.owner) &&
+    request.runtime.isActive?.() !== false &&
+    designFrameRuntime(request.workspaceId, request.frame) === request.runtime &&
+    (request.runtime.sourceVersion === undefined || request.runtime.sourceVersion === request.sourceVersion) &&
+    (!workspace || workspace.folder === request.folder) &&
+    (!snapshot || snapshot.lint.workspacePath === request.folder);
+}
+
+function designWarmRequest(input: DesignNodeWarmRead): DesignNodeWarmRequest | null {
+  const runtime = designFrameRuntime(input.workspaceId, input.frame);
+  if (!runtime) return null;
+  const request = { ...input, runtime, owner: captureDesignPageOwner(input.workspaceId) };
+  if (!currentDesignWarmRequest(request)) return null;
+  const cached = designRuntimeFrameState(input.workspaceId, input.frame)?.detailsByNode[input.nodeId];
+  return cached?.sourceVersion === input.sourceVersion ? null : request;
+}
+
+function retireDesignWarmQueue(queue: DesignNodeWarmQueue): void {
+  queue.priority = null;
+  if (queue.window) queue.window.cancelled = true;
+  queue.window = null;
+  queue.controller?.abort();
+}
+
+function designWarmQueue(workspaceId: string): DesignNodeWarmQueue {
+  let queue = warmReadByWorkspace.get(workspaceId);
+  if (queue) return queue;
+  queue = { running: null, controller: null, priority: null, window: null, scheduled: false };
+  warmReadByWorkspace.set(workspaceId, queue);
+  while (warmReadByWorkspace.size > MAX_WARM_NODE_OWNERS) {
+    const oldest = warmReadByWorkspace.keys().next().value!;
+    retireDesignWarmQueue(warmReadByWorkspace.get(oldest)!);
+    warmReadByWorkspace.delete(oldest);
+  }
+  return queue;
+}
+
+async function readDesignWarmRequest(queue: DesignNodeWarmQueue, request: DesignNodeWarmRequest): Promise<void> {
+  if (!currentDesignWarmRequest(request)) return;
+  const cached = designRuntimeFrameState(request.workspaceId, request.frame)?.detailsByNode[request.nodeId];
+  if (cached?.sourceVersion === request.sourceVersion) return;
+  const controller = new AbortController();
+  queue.controller = controller;
+  queue.running = request;
+  try {
+    const details = await request.runtime.getNodeDetails(request.nodeId, controller.signal);
+    if (!controller.signal.aborted && warmReadByWorkspace.get(request.workspaceId) === queue &&
+      currentDesignWarmRequest(request) && details.sourceVersion === request.sourceVersion && details.oid === request.nodeId) {
+      const view = designWorkspaceView(request.workspaceId);
+      const retainNodeIds = view.selectedTargets.flatMap(target =>
+        target.frame === request.frame && target.nodeId ? [target.nodeId] : []);
+      const frameRoot = designRuntimeFrameState(request.workspaceId, request.frame)?.snapshot?.frame.oid;
+      if (view.selectedFrame === request.frame && view.frameSelected && frameRoot) retainNodeIds.push(frameRoot);
+      useDesignRuntimeStore.getState().publishNodeDetails(
+        request.workspaceId, request.folder, request.frame, details, request.sourceVersion, { retainNodeIds });
+    }
+  } catch {
+    // Speculative: a node or its exact runtime may disappear before readback.
+  } finally {
+    if (queue.running === request) {
+      queue.running = null;
+      queue.controller = null;
+    }
+  }
+}
+
+function pumpDesignWarmQueue(workspaceId: string, queue: DesignNodeWarmQueue): void {
+  if (warmReadByWorkspace.get(workspaceId) !== queue || queue.running) return;
+  if (queue.priority) {
+    const request = queue.priority;
+    queue.priority = null;
+    void readDesignWarmRequest(queue, request).finally(() => pumpDesignWarmQueue(workspaceId, queue));
+  } else if (queue.window?.pending.length) {
+    if (queue.scheduled) return;
+    queue.scheduled = true;
+    // One node per idle admission; pointer gestures pause this existing queue.
+    // Focus intent can start immediately while a window waits for admission.
+    void designBackgroundWork.schedule(`node-warm:${workspaceId}`, async () => {
+      if (warmReadByWorkspace.get(workspaceId) !== queue || queue.running) return;
+      const request = queue.window?.pending.shift();
+      if (request) await readDesignWarmRequest(queue, request);
+    }, { latest: true }).finally(() => {
+      queue.scheduled = false;
+      pumpDesignWarmQueue(workspaceId, queue);
+    });
+  } else if (!queue.scheduled) {
+    warmReadByWorkspace.delete(workspaceId);
+  }
+}
 
 /** Keyboard focus is intent too: read a focused row's exact details into the
  * runtime cache so selecting it paints the inspector at once. Latest-only per
  * workspace; no hover state, no selection, nothing for a missing runtime. */
 export function warmDesignNodeDetails(input: DesignNodeWarmRead): void {
-  const cached = designRuntimeFrameState(input.workspaceId, input.frame)?.detailsByNode[input.nodeId];
-  if (cached?.sourceVersion === input.sourceVersion) return;
-  const queue = warmReadByWorkspace.get(input.workspaceId) ?? { active: false, pending: null };
-  warmReadByWorkspace.set(input.workspaceId, queue);
-  queue.pending = input;
-  if (queue.active) return;
-  queue.active = true;
-  void (async () => {
-    while (queue.pending) {
-      const request: DesignNodeWarmRead = queue.pending;
-      queue.pending = null;
-      const runtime = designFrameRuntime(request.workspaceId, request.frame);
-      if (!runtime || runtime.isActive?.() === false ||
-        (runtime.sourceVersion !== undefined && runtime.sourceVersion !== request.sourceVersion)) continue;
-      try {
-        const details = await runtime.getNodeDetails(request.nodeId);
-        if (details.sourceVersion === request.sourceVersion &&
-          designFrameRuntime(request.workspaceId, request.frame) === runtime)
-          useDesignRuntimeStore.getState().publishNodeDetails(
-            request.workspaceId, request.folder, request.frame, details, request.sourceVersion);
-      } catch {
-        // Speculative: the row may disappear before its readback.
-      }
+  const request = designWarmRequest(input);
+  if (!request) return;
+  const queue = designWarmQueue(input.workspaceId);
+  queue.priority = request;
+  pumpDesignWarmQueue(input.workspaceId, queue);
+}
+
+/** Warm only the caller's visible/neighbor window. The runtime must already
+ * be active; this never prepares frames or changes hover/selection. Returning
+ * the cleanup from the caller's active-only effect retires held replies too. */
+export function warmDesignNodeDetailsWindow(input: {
+  workspaceId: string;
+  folder: string;
+  targets: readonly { frame: string; sourceVersion: string; nodeId: string }[];
+}): () => void {
+  const window: DesignNodeWarmWindow = { cancelled: false, pending: [] };
+  const seen = new Set<string>();
+  // Bound traversal as well as retained reads if a caller supplies a full tree.
+  for (const target of input.targets.slice(0, MAX_WARM_WINDOW_NODES * 4)) {
+    const key = `${target.frame}\u0000${target.sourceVersion}\u0000${target.nodeId}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    const request = designWarmRequest({ workspaceId: input.workspaceId, folder: input.folder, ...target });
+    if (request) window.pending.push({ ...request, window });
+    if (window.pending.length === MAX_WARM_WINDOW_NODES) break;
+  }
+  if (!window.pending.length) {
+    const previous = warmReadByWorkspace.get(input.workspaceId);
+    if (previous?.window) {
+      previous.window.cancelled = true;
+      previous.window = null;
+      if (previous.running?.window) previous.controller?.abort();
+      pumpDesignWarmQueue(input.workspaceId, previous);
     }
-  })().finally(() => {
-    queue.active = false;
-    if (!queue.pending && warmReadByWorkspace.get(input.workspaceId) === queue)
-      warmReadByWorkspace.delete(input.workspaceId);
-  });
+    return () => {};
+  }
+  const queue = designWarmQueue(input.workspaceId);
+  if (queue.window) queue.window.cancelled = true;
+  if (queue.running?.window) queue.controller?.abort();
+  queue.window = window;
+  pumpDesignWarmQueue(input.workspaceId, queue);
+  return () => {
+    window.cancelled = true;
+    window.pending = [];
+    if (queue.window === window) queue.window = null;
+    if (queue.running?.window === window) queue.controller?.abort();
+    pumpDesignWarmQueue(input.workspaceId, queue);
+  };
 }
 
 export async function setDesignNodeVisibility(input: {
@@ -2175,6 +2305,7 @@ export function resetDesignSelectionWorkflowsForTests(): void {
     queue.pending?.resolve();
   }
   hoverReadQueueByWorkspace.clear();
+  for (const queue of warmReadByWorkspace.values()) retireDesignWarmQueue(queue);
   warmReadByWorkspace.clear();
   runtimeAuditPublicationByFrame.clear();
   selectionVersion = 0;

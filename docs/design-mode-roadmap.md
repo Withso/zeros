@@ -2036,7 +2036,13 @@ workspace owner, ranked with that explicit demand, so its editor boots before
 the click; selecting that frame fulfils it, and leaving the canvas or
 deactivating the surface clears it, so an overview with nothing selected keeps
 no editor. Passing over a frame's pixels is not intent: it never turns a
-passive frame into an editor. A warm
+passive frame into an editor. While the Layers tree is open, the selected
+row's neighbours (or the top of the list) have their details warmed in the
+background through one bounded window (at most 12 nodes, one read at a time,
+fenced by owner, active runtime and source generation at completion), so a
+layer never read before shows its values as soon as it is chosen. Layers rows
+are memoized with stable handlers: a hover or selection repaints only the rows
+it changes. A warm
 revalidation (a watcher echo after a save, a style build or a tab return)
 keeps the confirmed aggregate visible while the frames the surface demands are
 prepared through the same bounded lane, then publishes once.
@@ -2114,7 +2120,11 @@ the diagnostics data rather than the inspector chrome.
 
 A single layer dragged inside flex/grid changes authored sibling order with an
 insertion marker. Crossing a container boundary changes its parent and resets
-positional pins; a free container uses its local coordinate space. Moving out
+positional pins; a free container uses its local coordinate space. A free
+(absolute) layer keeps its free position only within its own parent; dragged
+into another flex or grid parent, in its own frame or another, it takes a slot
+in that flow, as in a design tool. A static flex or grid destination needs no
+positioning to hold it. Moving out
 of the document creates a canvas frame, and moving a frame into another transfers
 its subtree. As in a design tool, the frame under the pointer is the drop
 target, and it is outlined while a frame drag would nest into it; Cmd/Ctrl
@@ -2127,6 +2137,23 @@ fails because nesting could not: the frame stays where it was dropped and the
 reason is shown. Several selected frames drag and arrow-nudge together in one
 canvas write and one `geometry` undo step (`design.frames.move`); a selection
 that mixes frames with layers of other frames is refused without writing.
+
+Relocation places a layer by `left`/`top`, which are its X and Y, and keeps
+only its pose (rotation, scale, reflection) in a `transform` about its corner
+(`transform-origin: 0 0`); an identity pose is `none`. A relocation into a flow
+slot writes no position at all: the slot's flow properties, its size and pose.
+Older relocations saved the offset as the transform's translate, which painted
+at the same place but read as X 0, Y 0 and survived into auto layout as a stray
+shift. Such an offset is recognized only by that signature (a plain `matrix()`
+about `0 0`, never an authored `translate()` or another origin): X and Y read
+where the layer is drawn; typing a position, aligning or pinning moves the
+offset into its insets (both pins of a stretched axis together, so its size is
+kept); turning on auto layout or joining a flow drops it and keeps the pose.
+Typing a position for a stretched layer keeps the size it had on that axis.
+A frame is its own document, so nothing it holds is drawn past its edges on the
+canvas. Clip content on a frame's own layer (its body, or a root filling the
+frame) stays that layer's authored overflow, which matters outside the canvas,
+and says that the canvas always clips the frame at its edges.
 
 Relocation carries only the inherited values the layer's own context sets
 beyond its frame's base: standard properties unlike the body's and custom
@@ -2152,6 +2179,18 @@ eligibility, so an arriving layout snapshot cannot discard a focused draft.
 Each numeric commit paints immediately and advances its local baseline before
 saving. Escape in a new draft leaves the preceding committed preview intact;
 unit-menu close and blur cannot register the same edit twice.
+
+A free layer's selection box is painted where the pointer puts it on every
+sample and settles on the runtime's measurement once the pointer rests; waiting
+for each reply left the box behind during motion, since every reply describes
+a sample the pointer has already left. The next preview leaves as soon as the
+runtime answers. Outside its frame a layer is drawn from pixels: cached ones for
+its exact generation, or a capture made directly for that drag (background
+capture is paused during a gesture). An inspector scrub sends its value in the
+frame its move is sampled; later values in that frame coalesce into the newest.
+Nesting a frame publishes the follow selection with the snapshot that removes
+the dragged frame, so page binding never falls back to another frame, and the
+canvas moves its camera only for a selection the person made.
 
 `previewLayout` applies a bounded batch before measuring, avoiding a reflow and
 round trip for every child. Drag targets are measured once, with a bounded lean
@@ -2254,10 +2293,44 @@ For frames narrower than 128 screen pixels, inactive frame labels and Play
 controls reveal on hover or keyboard focus so they do not cover an overview.
 The active, selected, renaming or playing frame retains its controls.
 
+A focused Design surface owns Undo/Redo through one command registry. Native
+Edit-menu commands enter the same registry as canvas shortcuts; text inputs,
+modal dialogs, unrelated surfaces and focused DevTools keep their native
+history. Marked inspector portals share their Design owner. A hidden retained
+surface cannot consume a command. Windows Ctrl+Y remains a Redo chord.
+Save also requires Design focus, including its editable text drafts. Native
+macOS qualification must cover text-field Undo through the menu-to-IPC native
+fallback as well as canvas, portal and DevTools focus routing.
+
+The engine owns one ordered Design history per Local workspace: document
+transactions, frame lifecycle and geometry, transfers, page create/rename/delete,
+and theme catalog changes. Catalog restore points preserve the registration,
+tracked metadata and affected sources with the normal write lane, CAS and
+rollback. Native edits that conflict with a restore point are not overwritten.
+The existing limits remain 100 entries and 16 MiB per workspace, across at most
+16 workspaces. Page checkpoint collection stops at the byte cap; an incomplete
+restore point is discarded rather than retained as a partial Undo. Private
+viewport/navigation state is not part of the authored catalog restore point.
+
 A runtime retains up to 64 reversible layout generations, capped at 4 MiB of
-style history. The renderer predicts known layout undo/redo against exact
-workspace snapshot identities, while the engine remains authoritative. Unknown
-or externally changed history falls back to the confirmed document. The browser
+style history. The renderer's separate inverse journal records known generation,
+frame-geometry and weak catalog targets against the exact directory session and
+workspace snapshot identity. Geometry, Layers, selection and inspector values
+share a transient presentation; predicted state never enters the confirmed
+snapshot or durable navigation stores. Selection hints yield to a newer explicit
+page or selection. The renderer journal is limited to 64 entries per owner,
+16 owners and 1 MiB of metadata; transient presentation and pending visual intents
+are separately bounded at 1 MiB and 16 owners, with at most eight runtime frames
+and 32 details per frame in a presentation. Catalog references are weak, not a
+second retained source cache.
+
+The optional runtime `previewHistory` capability keeps a pending inverse
+separate from its confirmed baseline: an arriving save adopts against authority,
+then reapplies the current inverse in the same task. Clearing it does not measure
+a hidden document. Older runtimes defer prediction until earlier edits settle.
+Unknown, evicted or externally changed history falls back to authority. All
+paths fence directory replacement and Personal/organization Local switching;
+cloud v2 has no Design history capability. The browser
 regression harness deliberately delays history replies by 500 ms and verifies
 that layout inverses paint first without replacing the iframe or element.
 It also delays frame movement and transfer by 700 ms, and style saves by

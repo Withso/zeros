@@ -29,20 +29,20 @@ a vendor grants redistribution rights beyond its stated terms.
 
 TERMS-GOVERNED COMPONENTS — RELEASE REVIEW REQUIRED
 ----------------------------------------------------
-- @anthropic-ai/claude-agent-sdk@0.3.309: Proprietary/terms-governed; redistribution and authentication flows require an explicit vendor/legal review.
+- @anthropic-ai/claude-agent-sdk@0.3.311: Proprietary/terms-governed; redistribution and authentication flows require an explicit vendor/legal review.
 - @cursor/sdk@1.0.40: Proprietary/terms-governed; redistribution and authentication flows require an explicit vendor/legal review.
 
-PACKAGE INVENTORY (693 resolved package/version records)
+PACKAGE INVENTORY (692 resolved package/version records)
 -----------------
 
-@anthropic-ai/claude-agent-sdk-darwin-arm64@0.3.309
+@anthropic-ai/claude-agent-sdk-darwin-arm64@0.3.311
   License: SEE LICENSE IN LICENSE.md
   Surfaces: desktop packaged runtime (macOS arm64)
   Author: Anthropic <support@anthropic.com>
   Source: https://github.com/anthropics/claude-agent-sdk-typescript
   License documents: 8ce94b9478bb
 
-@anthropic-ai/claude-agent-sdk@0.3.309
+@anthropic-ai/claude-agent-sdk@0.3.311
   License: SEE LICENSE IN README.md
   Surfaces: root pnpm workspace
   Author: Anthropic <support@anthropic.com>
@@ -3813,15 +3813,9 @@ qrcode.react@4.2.0
   Source: https://github.com/zpao/qrcode.react
   License documents: 908a4454d01d
 
-qs@6.16.0
-  License: BSD-3-Clause
-  Surfaces: root pnpm workspace
-  Source: https://github.com/ljharb/qs
-  License documents: e7dc37bf662d
-
 qs@6.16.1
   License: BSD-3-Clause
-  Surfaces: control plane
+  Surfaces: control plane, root pnpm workspace
   Source: https://github.com/ljharb/qs
   License documents: e7dc37bf662d
 
@@ -16680,8 +16674,8 @@ THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLI
 ================================================================================
 DOCUMENT 8ce94b9478bb
 SHA-256: 8ce94b9478bb9868f9641f818e06cd722fbe55d4c22e2d2ed11971b20146173a
-Applies to: @anthropic-ai/claude-agent-sdk-darwin-arm64@0.3.309, @anthropic-ai/claude-agent-sdk@0.3.309
-Source labels: @anthropic-ai/claude-agent-sdk-darwin-arm64@0.3.309 — terms supplied by @anthropic-ai/claude-agent-sdk@0.3.309 — LICENSE.md; @anthropic-ai/claude-agent-sdk@0.3.309 — LICENSE.md
+Applies to: @anthropic-ai/claude-agent-sdk-darwin-arm64@0.3.311, @anthropic-ai/claude-agent-sdk@0.3.311
+Source labels: @anthropic-ai/claude-agent-sdk-darwin-arm64@0.3.311 — terms supplied by @anthropic-ai/claude-agent-sdk@0.3.311 — LICENSE.md; @anthropic-ai/claude-agent-sdk@0.3.311 — LICENSE.md
 ================================================================================
 
 © Anthropic PBC. All rights reserved. Use is subject to the Legal Agreements outlined here: https://code.claude.com/docs/en/legal-and-compliance.
@@ -25350,8 +25344,8 @@ License: Expat
 ================================================================================
 DOCUMENT e7dc37bf662d
 SHA-256: e7dc37bf662d7f786efcb46c545615e70c1daf458a38385521c63cf6607cdfe1
-Applies to: qs@6.16.0, qs@6.16.1
-Source labels: qs@6.16.0 — LICENSE.md; qs@6.16.1 — LICENSE.md
+Applies to: qs@6.16.1
+Source labels: qs@6.16.1 — LICENSE.md
 ================================================================================
 
 BSD 3-Clause License

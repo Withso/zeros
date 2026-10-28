@@ -23,6 +23,7 @@ const PERSIST_DEBOUNCE_MS = 150;
 export type DesignBottomPanel = "layers" | "assets";
 let nextSelectionEvent = 0;
 let nextOwnerRevision = 0;
+let nextDirectoryRevision = 0;
 
 export interface DesignWorkspaceViewState {
   directoryId?: string;
@@ -42,6 +43,8 @@ export interface DesignWorkspaceViewState {
   selectedTargets: readonly DesignSelectionTarget[];
   selectionEvent?: number;
   ownerRevision?: number;
+  /** Runtime session identity; page navigation does not invalidate history. */
+  directoryRevision?: number;
   panel: DesignBottomPanel;
   activeTheme: string | null;
   /** Null follows the active theme's --bg2; a concrete color is an explicit
@@ -295,7 +298,7 @@ function pruneViews(
 function writeViews(views: Record<string, DesignWorkspaceViewState>): void {
   if (typeof window === "undefined") return;
   try {
-    window.localStorage.setItem(STORAGE_KEY, JSON.stringify(views, (key, value) => key === "selectionEvent" || key === "ownerRevision" ? undefined : value));
+    window.localStorage.setItem(STORAGE_KEY, JSON.stringify(views, (key, value) => key === "selectionEvent" || key === "ownerRevision" || key === "directoryRevision" ? undefined : value));
   } catch {
     // Navigation persistence is best-effort in private/quota-limited storage.
   }
@@ -373,6 +376,8 @@ function updateWorkspaceView(
     byPage: undefined,
   });
   next.selectionEvent = patch.selectionEvent ?? previous.selectionEvent;
+  next.directoryRevision = previous.directoryId !== next.directoryId
+    ? ++nextDirectoryRevision : previous.directoryRevision;
   next.ownerRevision = (previous.directoryId !== undefined && previous.directoryId !== next.directoryId) ||
     (previous.activePageId !== undefined && previous.activePageId !== next.activePageId)
     ? ++nextOwnerRevision : previous.ownerRevision;
@@ -418,6 +423,7 @@ export const useDesignWorkspaceUiStore = create<DesignWorkspaceUiStore>(
           Object.keys(previous.byPage ?? {}).length === Object.keys(bounded).length &&
           Object.entries(bounded).every(([id, view]) => savedPage(previous.byPage, id) === view)) return state;
         const next = { ...base, ...active, ...(directoryId ? { directoryId } : {}), activePageId, byPage: bounded, updatedAt: Date.now(),
+          directoryRevision: directoryId !== undefined && previous.directoryId !== directoryId ? ++nextDirectoryRevision : previous.directoryRevision,
           ownerRevision: replaced || (previous.activePageId !== undefined && previous.activePageId !== activePageId) ? ++nextOwnerRevision : previous.ownerRevision };
         const byWorkspace = pruneViews({ ...state.byWorkspace, [workspaceId]: next });
         persistViews(byWorkspace);

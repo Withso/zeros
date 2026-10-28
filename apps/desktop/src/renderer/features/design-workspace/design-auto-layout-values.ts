@@ -1,6 +1,10 @@
 import { DESIGN_FRAME_MAX_SIZE } from "@zeros/design-core";
-import type { DesignRuntimeNodeDetails } from "@zeros/protocol/design-runtime";
 import {
+  DESIGN_RUNTIME_DOCUMENT_BODY_ID,
+  type DesignRuntimeNodeDetails,
+} from "@zeros/protocol/design-runtime";
+import {
+  designFlowTransformStyles,
   borderSize,
   cssSize,
   designLayoutConstraint,
@@ -311,6 +315,8 @@ export function designAutoLayoutUpdates(
           "--zeros-layout-x": null,
           "--zeros-layout-y": null,
           "--zeros-layout-origin-flow": flow === "none" ? "1" : null,
+          // Joining a flow drops the offset it was drawn at; it keeps its pose.
+          ...(flow === "none" ? {} : designFlowTransformStyles(child)),
         });
       } else if (oldMode !== "none" && flow !== "none" && !positioned) {
         const next = {
@@ -420,5 +426,27 @@ export function designGridTrackCount(value: string): number {
       value.replace(/\[[^\]]*\]/g, "").match(/(?:[^\s()]+\([^)]*\)|[^\s]+)/g) ??
       []
     ).length,
+  );
+}
+
+/** Whether a selected frame's own layer is clipped at the frame's edges on
+ * the canvas whatever its overflow says. A canvas frame is its own document,
+ * so nothing it holds is drawn outside it: its body, or a root layer filling
+ * the whole frame, always clips there. "Clip content" stays the layer's own
+ * overflow (it matters outside the canvas) and says so. */
+export function designFrameAlwaysClips(
+  details: DesignRuntimeNodeDetails,
+  frameSelected: boolean | undefined,
+): boolean {
+  if (!frameSelected) return false;
+  if (details.oid === DESIGN_RUNTIME_DOCUMENT_BODY_ID || details.tag === "body") return true;
+  const layout = details.layout;
+  if (!layout) return false;
+  const near = (left: number, right: number) => Math.abs(left - right) < 0.5;
+  return (
+    near(details.rect.x, 0) &&
+    near(details.rect.y, 0) &&
+    near(details.rect.width, layout.parentWidth) &&
+    near(details.rect.height, layout.parentHeight)
   );
 }
