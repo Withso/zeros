@@ -914,7 +914,7 @@ export function useComposerEditor(
   const readVideoContext = useCallback(
     (videoId: string) => {
       const attachment = attachmentMapRef.current.get(videoId);
-      if (!attachment || !attachment.validation.ok || !editorRef.current?.isEditable || optsRef.current.attachmentImagesActive === false || videoReadsRef.current.has(videoId)) return;
+      if (!attachment || !attachment.validation.ok || attachment.unavailable || !editorRef.current?.isEditable || optsRef.current.attachmentImagesActive === false || videoReadsRef.current.has(videoId)) return;
       const capturedCwd = optsRef.current.cwd;
       const access = capturedCwd ? workspaceFileAccessKey(capturedCwd) : null;
       const controller = new AbortController();

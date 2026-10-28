@@ -467,10 +467,11 @@ async function runPendingMediaUploadSmoke({ page, check }) {
     await page.waitForFunction(() => !!window.__composerHarness.serialize().attachments[0].diskPath);
     await page.getByRole("button", { name: "Open previous.txt", exact: true }).click();
     await page.waitForFunction(() => localStorage.getItem("column3-tabs-by-scope-v1")?.includes("previous.txt"));
+    await page.evaluate(() => window.__composerAttachmentTransport.preserveForReload());
     url.searchParams.set("hold-uploads", "");
     await page.goto(url.href, { waitUntil: "networkidle" });
     await page.locator(".composer-pm").waitFor();
-    await page.waitForFunction(() => window.__composerAttachmentTransport.reads().some(path => path.endsWith("/previous.txt")));
+    await page.getByText("Existing file tab", { exact: true }).waitFor({ timeout: 5000 });
     check(`${cwd}: an existing file tab restores independently of the new upload`, true);
     const initialReadCount = await page.evaluate(() => window.__composerAttachmentTransport.reads().length);
     const source = await page.evaluate(async () => {
@@ -519,6 +520,7 @@ async function runPendingMediaUploadSmoke({ page, check }) {
 
     // Native file pickers can report text/plain for SVG. Preview MIME follows
     // the same filename policy as the saved workspace reader, before upload.
+    await page.evaluate(() => window.__composerAttachmentTransport.preserveForReload());
     await page.goto(url.href, { waitUntil: "networkidle" });
     await page.evaluate(async () => {
       const svg = '<svg xmlns="http://www.w3.org/2000/svg" width="180" height="120"><rect width="180" height="120" fill="teal"/></svg>';

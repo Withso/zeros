@@ -386,7 +386,7 @@ function SingleAttachmentPill(props: NodeViewProps) {
               if (!controller.signal.aborted) toast.error("Couldn't download this file.");
             }).finally(() => { if (download.current === controller) { download.current = null; setDownloading(false); } });
           }}><Download className="size-3.5" />{downloading ? "Downloading…" : "Download"}</DropdownMenuItem>
-          <DropdownMenuItem disabled={extracting || !ctx.attachVideoFrames} onSelect={() => {
+          <DropdownMenuItem disabled={extracting || !ctx.attachVideoFrames || !att.validation.ok || att.unavailable} onSelect={() => {
             setExtracting(true);
             void Promise.resolve(ctx.attachVideoFrames?.(attrs.attachmentId)).finally(() => setExtracting(false));
           }}><Film className="size-3.5" />{extracting ? "Extracting frames…" : "Attach as frames"}</DropdownMenuItem>

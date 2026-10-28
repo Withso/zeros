@@ -94,12 +94,15 @@ const pendingWrites: Array<{
   filename: string;
   finish: (error?: string) => void;
 }> = [];
+const fixtureFilesKey = "zeros:composer-fixture-files";
+const snapshotFiles = () => [...records].map(([id, file]) => ({ id, ...file, bytes: Array.from(file.bytes) }));
 
 window.__composerAttachmentTransport = {
   read: readFixtureFile,
   reads: () => mediaReads,
   pending: () => pendingWrites.map(({ filename }) => filename),
-  snapshot: () => [...records].map(([id, file]) => ({ id, ...file, bytes: Array.from(file.bytes) })),
+  snapshot: snapshotFiles,
+  preserveForReload: () => sessionStorage.setItem(fixtureFilesKey, JSON.stringify({ cwd, files: snapshotFiles() })),
   restore: files => {
     for (const { id, ...file } of files) records.set(id, { ...file, bytes: new Uint8Array(file.bytes) });
   },
@@ -109,6 +112,15 @@ window.__composerAttachmentTransport = {
     pendingWrites.splice(index, 1)[0].finish(error);
   },
 };
+
+// Simulate the workspace filesystem before restored tabs issue their first
+// read. The explicit snapshot is consumed once and belongs to this exact cwd.
+const preservedFiles = sessionStorage.getItem(fixtureFilesKey);
+sessionStorage.removeItem(fixtureFilesKey);
+if (preservedFiles) {
+  const saved = JSON.parse(preservedFiles) as { cwd: string; files: ReturnType<typeof snapshotFiles> };
+  if (saved.cwd === cwd) window.__composerAttachmentTransport.restore(saved.files);
+}
 
 function readFixtureFile(path: string) {
   const record = [...records.values()].find(value => value.relativePath === path);
@@ -223,6 +235,7 @@ declare global {
       reads: () => string[];
       pending: () => string[];
       snapshot: () => Array<{ id: string; relativePath: string; mimeType: string; bytes: number[] }>;
+      preserveForReload: () => void;
       restore: (files: Array<{ id: string; relativePath: string; mimeType: string; bytes: number[] }>) => void;
       releaseNext: (filename: string, error?: string) => void;
     };

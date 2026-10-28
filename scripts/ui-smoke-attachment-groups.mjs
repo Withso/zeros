@@ -453,6 +453,49 @@ export async function runAttachmentGroupsSmoke({ page, check, screenshots }) {
       true,
     );
   }
+  await runUnavailableVideoActionsSmoke({ page, check });
   await runRemovedVideoExtractionSmoke({ page, check });
   await runSavedImageAttachmentSmoke({ page, check });
+}
+
+export async function runUnavailableVideoActionsSmoke({ page, check }) {
+  const origin = new URL(page.url()).origin;
+  const workspaces = [
+    "/unavailable-video-personal",
+    "/unavailable-video-organization",
+    "cloud://11111111-1111-4111-8111-111111111111/22222222-2222-4222-8222-222222222222",
+  ];
+  for (const cwd of workspaces) {
+    await page.goto(`${origin}/apps/desktop/src/renderer/harnesses/harness-composer-editor.html?media-preview&workspace=${encodeURIComponent(cwd)}`);
+    await page.locator(".composer-pm").waitFor();
+    await page.evaluate(async () => {
+      // Exercise selection's real size policy without allocating 500 MB.
+      const oversized = new File(["video"], "oversized.webm", { type: "video/webm" });
+      Object.defineProperty(oversized, "size", { value: 500_000_001 });
+      await window.__composerHarness.insertFiles([oversized]);
+    });
+    expect(await page.evaluate(() => window.__composerHarness.serialize().attachments[0].validation.ok)).toBe(false);
+    await page.getByRole("button", { name: "Actions for oversized.webm", exact: true }).click();
+    await expect(page.getByRole("menuitem", { name: "Download", exact: true })).toBeDisabled();
+    await expect(page.getByRole("menuitem", { name: "Attach as frames", exact: true })).toBeDisabled();
+    check(`${cwd}: rejected videos disable download and frame extraction`, true);
+    await page.keyboard.press("Escape");
+
+    await page.evaluate(() => {
+      window.__composerHarness.setContent({
+        json: { type: "doc", content: [{ type: "paragraph", content: [{ type: "attachment", attrs: {
+          attachmentId: "missing-video", name: "missing.webm", mimeType: "video/webm", kind: "file",
+        } }] }] },
+        attachments: [{ id: "missing-video", name: "missing.webm", mimeType: "video/webm", kind: "file",
+          size: 100, data: "", delivery: "reference", validation: { ok: true }, unavailable: true,
+          diskPath: ".context/attachments/missing-video/missing.webm" }],
+      });
+    });
+    await page.getByRole("button", { name: "Actions for missing.webm", exact: true }).click();
+    await expect(page.getByRole("menuitem", { name: "Download", exact: true })).toBeDisabled();
+    await expect(page.getByRole("menuitem", { name: "Attach as frames", exact: true })).toBeDisabled();
+    expect(await page.evaluate(() => window.__composerHarness.hasPendingAttachmentReads())).toBe(false);
+    check(`${cwd}: unavailable videos cannot start frame extraction`, true);
+    await page.keyboard.press("Escape");
+  }
 }
