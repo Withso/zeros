@@ -108,6 +108,27 @@ describe("agent capability notice toast", () => {
     );
   });
 
+  it.each([
+    [{ fallback: "zeros-browser" as const }, "info", "Codex's built-in browser isn't available, so Codex is using the Zeros browser."],
+    [{}, "warning", "Codex can't use its built-in browser"],
+  ] as const)("names the node_repl configuration when Codex starts without its browser (%o)", async (extra, kind, title) => {
+    const { notifyAgentCapabilityNotice } = await import(
+      "../agent-capability-notice-toast"
+    );
+
+    expect(
+      notifyAgentCapabilityNotice({
+        notice: { code: "codex-browser-config-conflict", ...extra },
+      }),
+    ).toBe(true);
+    expect(mocks[kind]).toHaveBeenCalledExactlyOnceWith(
+      title,
+      expect.objectContaining({
+        description: expect.stringMatching(/~\/\.codex\/config\.toml has its own node_repl setup/),
+      }),
+    );
+  });
+
   it("ignores a notice code from a newer engine", async () => {
     const { notifyAgentCapabilityNotice } = await import(
       "../agent-capability-notice-toast"

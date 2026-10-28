@@ -20,6 +20,8 @@ const rt = vi.hoisted(() => ({
   bootOptions: [] as Array<Record<string, unknown>>,
   bootError: null as Error | null,
   startError: null as Error | null,
+  /** Merged `config/read` payload reported by each booted runtime, by boot order. */
+  configByRuntime: [] as Array<Record<string, unknown> | undefined>,
 }));
 
 const browserHost = vi.hoisted(() => ({
@@ -58,7 +60,7 @@ vi.mock("../app-server", () => ({
     rt.handlers[runtime] = handlers;
     const requestTyped = vi.fn(async (method: string, params: unknown) => {
       rt.requests.push({ runtime, method, params });
-      if (method === "config/read") return { config: {} };
+      if (method === "config/read") return { config: rt.configByRuntime[runtime] ?? {} };
       if (method === "model/list" || method === "skills/list") {
         return { data: [] };
       }
@@ -183,6 +185,7 @@ function makeAdapter() {
   const onSessionUpdate = vi.fn();
   const onAgentStderr = vi.fn();
   const onCapabilityNotice = vi.fn();
+  const onAgentExit = vi.fn();
   const ctx = {
     projectRoot: "/tmp/proj",
     mcpServers: [],
@@ -192,7 +195,7 @@ function makeAdapter() {
       onPermissionRequest: vi.fn(),
       onQuestionRequest: vi.fn(),
       onAgentStderr,
-      onAgentExit: vi.fn(),
+      onAgentExit,
       onCapabilityNotice,
     },
   } as unknown as AgentAdapterContext;
@@ -201,6 +204,7 @@ function makeAdapter() {
     onSessionUpdate,
     onAgentStderr,
     onCapabilityNotice,
+    onAgentExit,
   };
 }
 
@@ -224,6 +228,7 @@ describe("Codex opaque provider bindings", () => {
     rt.bootOptions = [];
     rt.bootError = null;
     rt.startError = null;
+    rt.configByRuntime = [];
     browserHost.register.mockClear();
     browserHost.settle.mockClear();
     browserRuntime.resolve.mockReset();
@@ -537,6 +542,147 @@ describe("Codex opaque provider bindings", () => {
       await adapter.disposeSession(started.session.sessionId);
     },
   );
+
+  // ChatGPT Desktop writes its own [mcp_servers.node_repl] table to
+  // ~/.codex/config.toml. Codex merges Zeros' verified Browser override into
+  // it, so the effective definition is a hybrid. Never run that hybrid, but
+  // never strand the chat either: start once more without the built-in browser.
+  const chatgptNodeRepl = {
+    command: "/Applications/ChatGPT.app/Contents/Resources/cua_node/bin/node_repl",
+    args: [],
+    env_vars: ["HOME", "PATH", "TMPDIR"],
+    startup_timeout_sec: 120,
+    env: {
+      NODE_REPL_INSTRUCTIONS_USE_CASE_CHROME: "",
+      NODE_REPL_INSTRUCTIONS_USE_CASE_COMPUTER_USE: "",
+      SKY_CUA_SERVICE_PATH: "/Applications/ChatGPT.app/Contents/Resources/cua_node/service.mjs",
+    },
+  };
+  it.each([
+    ["the Zeros browser", [zerosBrowser], ["zeros_browser"], { code: "codex-browser-config-conflict", fallback: "zeros-browser" }],
+    ["no browser", [], [], { code: "codex-browser-config-conflict" }],
+  ] as const)(
+    "starts Codex with %s when ChatGPT's node_repl declaration conflicts",
+    async (_label, servers, fallbackNames, notice) => {
+      rt.configByRuntime = [
+        { mcp_servers: { node_repl: { ...chatgptNodeRepl, command: "/tmp/node_repl" } } },
+        { mcp_servers: { node_repl: chatgptNodeRepl } },
+      ];
+      const { adapter, onAgentStderr, onCapabilityNotice } = makeAdapter();
+      const started = await adapter.newSession({
+        executionId: "execution-browser-config-conflict",
+        cwd: "/tmp/proj",
+        mcpServers: [...servers],
+        browserUse: {
+          kind: "codex-app-server",
+          browserSessionId: "browser_config_conflict",
+        },
+      });
+
+      expect(
+        rt.bootOptions.map((options) =>
+          (options.mcpServers as McpServerRegistration[]).map((server) => server.name),
+        ),
+      ).toEqual([["node_repl"], fallbackNames]);
+      expect(rt.disposeCalls).toEqual([0]);
+      expect(rt.startParams).toHaveLength(1);
+      expect(rt.startParams[0]).toMatchObject({
+        config: {
+          "plugins.browser@openai-bundled.enabled": false,
+          mcp_servers: { node_repl: { enabled: false } },
+        },
+      });
+      expect(browserHost.register).not.toHaveBeenCalled();
+      expect(sessionPaths.remove).not.toHaveBeenCalled();
+      expect(onCapabilityNotice).toHaveBeenCalledExactlyOnceWith("codex", {
+        sessionId: "execution-browser-config-conflict",
+        notice,
+      });
+      expect(onAgentStderr).toHaveBeenCalledWith(
+        "codex",
+        expect.stringMatching(/node_repl.*Codex configuration/),
+      );
+      await adapter.disposeSession(started.session.sessionId);
+    },
+  );
+
+  it("ignores a late exit from the retired runtime after the fallback starts", async () => {
+    rt.configByRuntime = [
+      { mcp_servers: { node_repl: { ...chatgptNodeRepl, command: "/tmp/node_repl" } } },
+      { mcp_servers: { node_repl: chatgptNodeRepl } },
+    ];
+    const { adapter, onAgentExit } = makeAdapter();
+    const started = await adapter.newSession({
+      executionId: "execution-browser-late-exit",
+      cwd: "/tmp/proj",
+      browserUse: {
+        kind: "codex-app-server",
+        browserSessionId: "browser_late_exit",
+      },
+    });
+    const exitOf = (index: number) =>
+      rt.bootOptions[index]!.onExit as (code: number | null, signal: NodeJS.Signals | null) => void;
+
+    exitOf(0)(0, "SIGTERM");
+    expect(onAgentExit).not.toHaveBeenCalled();
+    exitOf(1)(1, null);
+    expect(onAgentExit).toHaveBeenCalledExactlyOnceWith(
+      "codex", 1, null, "execution-browser-late-exit",
+    );
+    await adapter.disposeSession(started.session.sessionId);
+  });
+
+  it("still refuses a conflicting registration Zeros does not own", async () => {
+    rt.configByRuntime = [
+      { mcp_servers: { owned: { command: "approved", env: { NODE_OPTIONS: "--require=./unapproved" } } } },
+    ];
+    const { adapter, onCapabilityNotice } = makeAdapter();
+
+    await expect(
+      adapter.newSession({
+        executionId: "execution-owned-conflict",
+        cwd: "/tmp/proj",
+        mcpServers: [{ name: "owned", transport: "stdio", command: "approved" }],
+        browserUse: {
+          kind: "codex-app-server",
+          browserSessionId: "browser_owned_conflict",
+        },
+      }),
+    ).rejects.toThrow(/MCP configuration conflict for owned/);
+
+    expect(rt.bootOptions).toHaveLength(1);
+    expect(rt.disposeCalls).toEqual([0]);
+    expect(rt.startParams).toHaveLength(0);
+    expect(sessionPaths.remove).toHaveBeenCalledWith("execution-owned-conflict");
+    expect(onCapabilityNotice).not.toHaveBeenCalled();
+    await adapter.dispose();
+  });
+
+  it("refuses a conflicting imported node_repl once the built-in browser is off", async () => {
+    rt.configByRuntime = [
+      { mcp_servers: { node_repl: { ...chatgptNodeRepl, command: "/tmp/node_repl" } } },
+      { mcp_servers: { node_repl: chatgptNodeRepl } },
+    ];
+    const { adapter } = makeAdapter();
+
+    await expect(
+      adapter.newSession({
+        executionId: "execution-imported-node-repl",
+        cwd: "/tmp/proj",
+        mcpServers: [{ name: "node_repl", transport: "stdio", command: "/opt/imported/node_repl" }],
+        browserUse: {
+          kind: "codex-app-server",
+          browserSessionId: "browser_imported_node_repl",
+        },
+      }),
+    ).rejects.toThrow(/MCP configuration conflict for node_repl/);
+
+    expect(rt.bootOptions).toHaveLength(2);
+    expect(rt.disposeCalls).toEqual([0, 1]);
+    expect(rt.startParams).toHaveLength(0);
+    expect(sessionPaths.remove).toHaveBeenCalledWith("execution-imported-node-repl");
+    await adapter.dispose();
+  });
 
   it("tells the desktop Codex switched browsers when discovery fails", async () => {
     browserRuntime.resolve.mockRejectedValueOnce(new Error("cache unreadable"));

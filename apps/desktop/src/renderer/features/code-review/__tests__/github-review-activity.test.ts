@@ -95,6 +95,35 @@ describe("Local inline review activity", () => {
     expect(fixture.read).toHaveBeenCalled();
   });
 
+  // A signed-out or refused GitHub connection is not a file, Changes or Review
+  // read failure: those reads succeeded. Retry cannot fix it; Settings can.
+  it.each([
+    ["/personal/project", "NOT_AUTHENTICATED", "Not signed in to GitHub",
+      "Connect GitHub in Settings → Integrations to show pull request comments."],
+    ["/organization/project", "NOT_AUTHENTICATED", "GitHub no longer accepts this connection.",
+      "Connect GitHub in Settings → Integrations to show pull request comments."],
+    ["/personal/project", "GITHUB_SSO_REQUIRED", "GitHub requires organization sign-in for this connection.",
+      "Check your GitHub connection in Settings → Integrations to show pull request comments."],
+    ["/organization/project", "GITHUB_REPO_NOT_INSTALLED", "This repository is not available to the selected connection.",
+      "Check your GitHub connection in Settings → Integrations to show pull request comments."],
+  ])("shows a connection notice instead of a load failure in %s for %s", async (cwd, code, message, notice) => {
+    fixture.read.mockRejectedValue(Object.assign(new Error(message), { code }));
+    Fixture(cwd); await vi.advanceTimersByTimeAsync(0); unmount();
+    const review = Fixture(cwd);
+    expect(review.error).toBeUndefined();
+    expect(review.notice).toBe(notice);
+    expect(review.source).toMatchObject({ notice });
+    expect(review.source).not.toHaveProperty("error");
+    for (const [tab, source] of [["files", "github-comments"], ["changes", "comparison-sources"], ["review", "review-resources"]] as const) {
+      const status = new WorkbenchStatusSources();
+      status.update(tab, { primary: true, hasContent: true, pending: false });
+      status.update(source, { error: review.source?.error, pending: false, retry: review.refresh });
+      await vi.advanceTimersByTimeAsync(2_000);
+      expect(status.snapshot()).toMatchObject({ hasContent: true, failure: null });
+    }
+    expect(fixture.read).toHaveBeenCalled();
+  });
+
   it("restores exact Local review data across a cloud visit without a cloud read", async () => {
     Fixture(); await vi.advanceTimersByTimeAsync(0); unmount();
     const confirmed = Fixture().snapshot; unmount();

@@ -144,6 +144,7 @@ import {
   type CodexUserInputRequest,
 } from "./app-server";
 import {
+  McpConfigurationConflictError,
   mcpDisabledThreadConfig,
   readNativeMcpSurface,
   scopeNativeMcpSurface,
@@ -2447,6 +2448,14 @@ export class CodexAppServerAdapter implements AgentAdapter {
     let effectiveBrowserUse = opts.browserUse;
     let nativeBrowserSkill: CodexNativeBrowserSkill | null = null;
     let mcpServers = opts.mcpServers ?? this.ctx.mcpServers;
+    // Zeros' own Browser registration, retired once if a native declaration of
+    // the same server changes its effective definition (see below).
+    let nativeBrowserRegistration: {
+      serverName: string;
+      fallbackServers: McpServerRegistration[];
+      zerosBrowserFallback: boolean;
+      withoutNative: string;
+    } | null = null;
     if (mcpServers.some((server) => server.transport === "sse")) {
       this.ctx.emit.onAgentStderr(
         this.agentId,
@@ -2510,6 +2519,12 @@ export class CodexAppServerAdapter implements AgentAdapter {
           noticeFallback();
         }
         if (nativeBrowser) {
+          nativeBrowserRegistration = {
+            serverName: nativeBrowser.mcpServer.name,
+            fallbackServers: mcpServers,
+            zerosBrowserFallback,
+            withoutNative,
+          };
           mcpServers = mergeCodexNativeBrowserMcp(mcpServers, nativeBrowser)
             .filter((server) => server.name !== BROWSER_TOOL_NAMESPACE);
           nativeBrowserSkill = nativeBrowser.browserSkill;
@@ -2546,41 +2561,51 @@ export class CodexAppServerAdapter implements AgentAdapter {
         }
       }
     }
-    try {
-      runtime = await bootCodexAppServerRuntime({
-        cwd: opts.cwd,
-        env: opts.env,
-        cliBinary: opts.cliBinary,
-        clientInfo: CLIENT_INFO,
-        executionBoundary: opts.executionBoundary,
-        mcpServers,
-        logTag: `codex-app-server:${zerosSessionId.slice(0, 8)}`,
-        onApprovalRequest: (request) =>
-          this.handleApprovalRequest(session, request),
-        onApprovalSettled: (permissionId) =>
-          this.handleApprovalSettled(session, permissionId),
-        onUserInputRequest: (request) =>
-          this.handleUserInputRequest(session, request),
-        onUserInputSettled: (questionId) =>
-          this.handleUserInputSettled(session, questionId),
-        onStderr: (line) => {
-          this.ctx.emit.onAgentStderr(this.agentId, line);
-        },
-        // `session` is forward-declared and assigned just below, so the
-        // closure captures it by reference — the exit handler resolves the
-        // live object even though it's undefined at spawn time (a crash
-        // during boot; handled inside).
-        onExit: (code, signal) => this.handleRuntimeExit(session, code, signal),
-      });
-    } catch (err) {
-      await removeSessionDir(zerosSessionId).catch(() => {});
-      // Initialize-time failures with auth-flavoured messages should
-      // surface as the canonical auth-required AgentFailure so the
-      // gateway flips the green dot + the UI shows the "sign in"
-      // banner — same surface the legacy adapter routes through.
-      const stage = opts.kind === "resume" ? "loadSession" : "newSession";
-      throw classifyBootFailure(err, stage);
-    }
+    const bootRuntime = async (): Promise<CodexAppServerHandle> => {
+      let booted: CodexAppServerHandle | undefined;
+      try {
+        booted = await bootCodexAppServerRuntime({
+          cwd: opts.cwd,
+          env: opts.env,
+          cliBinary: opts.cliBinary,
+          clientInfo: CLIENT_INFO,
+          executionBoundary: opts.executionBoundary,
+          mcpServers,
+          logTag: `codex-app-server:${zerosSessionId.slice(0, 8)}`,
+          onApprovalRequest: (request) =>
+            this.handleApprovalRequest(session, request),
+          onApprovalSettled: (permissionId) =>
+            this.handleApprovalSettled(session, permissionId),
+          onUserInputRequest: (request) =>
+            this.handleUserInputRequest(session, request),
+          onUserInputSettled: (questionId) =>
+            this.handleUserInputSettled(session, questionId),
+          onStderr: (line) => {
+            this.ctx.emit.onAgentStderr(this.agentId, line);
+          },
+          // `session` is forward-declared and assigned just below, so the
+          // closure captures it by reference — the exit handler resolves the
+          // live object even though it's undefined at spawn time (a crash
+          // during boot; handled inside).
+          // A retired boot attempt must not report its exit against the
+          // session that a later attempt created.
+          onExit: (code, signal) => {
+            if (session && booted && session.runtime !== booted) return;
+            this.handleRuntimeExit(session, code, signal);
+          },
+        });
+        return booted;
+      } catch (err) {
+        await removeSessionDir(zerosSessionId).catch(() => {});
+        // Initialize-time failures with auth-flavoured messages should
+        // surface as the canonical auth-required AgentFailure so the
+        // gateway flips the green dot + the UI shows the "sign in"
+        // banner — same surface the legacy adapter routes through.
+        const stage = opts.kind === "resume" ? "loadSession" : "newSession";
+        throw classifyBootFailure(err, stage);
+      }
+    };
+    runtime = await bootRuntime();
 
     // Disk MCP declarations (stdio AND HTTP) require Customize → Import.
     // Keep provider-installed plugins and the account app bridge in normal
@@ -2589,43 +2614,76 @@ export class CodexAppServerAdapter implements AgentAdapter {
       undefined,
       opts.executionBoundary,
     );
-    let nativeMcpConfig: ReturnType<typeof mcpDisabledThreadConfig>;
+    let nativeMcpConfig!: ReturnType<typeof mcpDisabledThreadConfig>;
     let accountAppBridgeEnabled = false;
-    try {
-      const nativeMcp = await readNativeMcpSurface(runtime, opts.cwd, {
-        codexHome: opts.env?.CODEX_HOME,
-        includePlugins: !cloudExtensions,
-        requireConfig: true,
-        registeredServers: mcpServers.map(server => server.transport === "stdio" && server.cwd
-          ? { ...server, cwd: mcpWorkingDirectory(server.cwd, opts.cwd) } : server),
-      });
-      accountAppBridgeEnabled =
-        cloudExtensions &&
-        !nativeMcp.shadowedAccountServerNames?.includes("codex_apps") &&
-        !mcpServers.some((server) => server.name === "codex_apps");
-      nativeMcpConfig = {
-        ...mcpDisabledThreadConfig(
-          scopeNativeMcpSurface(
-            withCodexComputerUseDisabled(nativeMcp, opts.computerUse),
-            {
-              serverNames: [
-                ...(cloudExtensions
-                  ? ["codex_apps"].filter(
-                      (name) =>
-                        !nativeMcp.shadowedAccountServerNames?.includes(name),
-                    )
-                  : []),
-                ...(nativeMcp.registeredServerNames ?? []),
-              ],
-            },
+    for (;;) {
+      try {
+        const nativeMcp = await readNativeMcpSurface(runtime, opts.cwd, {
+          codexHome: opts.env?.CODEX_HOME,
+          includePlugins: !cloudExtensions,
+          requireConfig: true,
+          registeredServers: mcpServers.map(server => server.transport === "stdio" && server.cwd
+            ? { ...server, cwd: mcpWorkingDirectory(server.cwd, opts.cwd) } : server),
+        });
+        accountAppBridgeEnabled =
+          cloudExtensions &&
+          !nativeMcp.shadowedAccountServerNames?.includes("codex_apps") &&
+          !mcpServers.some((server) => server.name === "codex_apps");
+        nativeMcpConfig = {
+          ...mcpDisabledThreadConfig(
+            scopeNativeMcpSurface(
+              withCodexComputerUseDisabled(nativeMcp, opts.computerUse),
+              {
+                serverNames: [
+                  ...(cloudExtensions
+                    ? ["codex_apps"].filter(
+                        (name) =>
+                          !nativeMcp.shadowedAccountServerNames?.includes(name),
+                      )
+                    : []),
+                  ...(nativeMcp.registeredServerNames ?? []),
+                ],
+              },
+            ),
           ),
-        ),
-        ...codexComputerUseThreadConfig(opts.computerUse),
-      };
-    } catch (error) {
-      await runtime.dispose().catch(() => {});
-      await removeSessionDir(zerosSessionId).catch(() => {});
-      throw error;
+          ...codexComputerUseThreadConfig(opts.computerUse),
+        };
+        break;
+      } catch (error) {
+        await runtime.dispose().catch(() => {});
+        const retired = nativeBrowserRegistration;
+        if (
+          retired &&
+          error instanceof McpConfigurationConflictError &&
+          error.serverName === retired.serverName
+        ) {
+          // ChatGPT Desktop can declare its own node_repl in config.toml; Codex
+          // merges Zeros' override into it. Never run that hybrid: start once
+          // more without the built-in browser, which leaves the native
+          // declaration disabled for this thread like any unimported one.
+          nativeBrowserRegistration = null;
+          mcpServers = retired.fallbackServers;
+          effectiveBrowserUse = undefined;
+          nativeBrowserSkill = null;
+          this.ctx.emit.onAgentStderr(
+            this.agentId,
+            `[codex-app-server] Official Browser runtime conflicts with the ${retired.serverName} declaration in Codex configuration. ${retired.withoutNative}`,
+          );
+          this.ctx.emit.onCapabilityNotice?.(this.agentId, {
+            sessionId: zerosSessionId,
+            notice: {
+              code: "codex-browser-config-conflict",
+              ...(retired.zerosBrowserFallback
+                ? { fallback: "zeros-browser" as const }
+                : {}),
+            },
+          });
+          runtime = await bootRuntime();
+          continue;
+        }
+        await removeSessionDir(zerosSessionId).catch(() => {});
+        throw error;
+      }
     }
 
     // Resume can emit the restored cumulative snapshot before its RPC returns.

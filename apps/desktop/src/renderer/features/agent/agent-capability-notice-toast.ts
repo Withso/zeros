@@ -30,6 +30,10 @@ export function notifyAgentCapabilityNotice(
         version ? `version ${version} of ` : ""
       }ChatGPT's Browser plugin yet.`;
       break;
+    case "codex-browser-config-conflict":
+      fix =
+        "~/.codex/config.toml has its own node_repl setup, which Zeros won't combine with its verified browser.";
+      break;
     case "codex-browser-unavailable":
       if (!usingZerosBrowser) return false;
       break;
