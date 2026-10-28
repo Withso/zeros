@@ -163,10 +163,22 @@ so moving a feature to its next stage changes only that table.
 | `experimental` | Anyone who turns on the feature's Settings → Experimental switch, which starts off.                          |
 | `default`      | Everyone, with no switch.                                                                                    |
 
-All four features are `internal` today. Each stage has one switch, so a
-feature never has two places to turn it off. The switch is a rollout gate,
-not an authority boundary: each feature keeps its own Settings, approvals and
-managed policy.
+All four features are `default`: available to every user without an Internal
+or Experimental switch. Previously saved rollout opt-outs no longer disable
+them. Their normal Settings, approvals, managed policy and workspace support
+still apply: cloud does not gain Browser, computer use or simulators, and
+Zeros Local CLI remains scoped to Personal Local workspaces.
+Computer use also defaults on in normal settings; existing explicit opt-outs
+remain off. Accessibility, Screen Recording, blocked apps and per-app approval
+requirements still apply before an agent can control an app.
+
+The Internal tab instead offers a default-on Resource summary switch for
+authorized internal users. It shows live full-app memory in the sidebar and
+opens the resource inspector. Sampling pauses when the window is hidden or
+unfocused, the sidebar is hidden, or the Internal switch/access is disabled.
+
+Each non-default stage has one rollout switch; it does not replace a feature's
+own Settings, approvals or managed policy.
 
 A closed feature behaves as Zeros did before it:
 

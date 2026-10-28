@@ -103,12 +103,12 @@ describe("Computer use settings panel", () => {
     },
   );
 
-  it("keeps computer use off until enabled, with Codex on its built-in default", () => {
+  it("enables computer use by default, with Codex on its built-in default", () => {
     state.organization = { id: "personal", isPersonal: true };
     state.selected = "";
     const html = renderToStaticMarkup(createElement(ComputerUsePanel));
     expect(html).toMatch(
-      /aria-checked="false"[^>]*id="computer-use-enabled"/,
+      /aria-checked="true"[^>]*id="computer-use-enabled"/,
     );
     expect(html).toMatch(
       /aria-checked="true"[^>]*id="computer-use-codex-native"/,

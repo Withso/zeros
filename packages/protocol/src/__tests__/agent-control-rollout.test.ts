@@ -39,7 +39,7 @@ const CLOSED: AgentControlAvailability = {
 const FAMILIES = ["codex", "claude", "cursor"] as const;
 
 describe("agent control rollout", () => {
-  it("starts every staged feature with staff", () => {
+  it("ships all four agent control features to everyone by default", () => {
     expect(AGENT_CONTROL_FEATURES).toEqual([
       "zerosBrowser",
       "computerUse",
@@ -47,7 +47,7 @@ describe("agent control rollout", () => {
       "localOrchestration",
     ]);
     for (const feature of AGENT_CONTROL_FEATURES) {
-      expect(AGENT_CONTROL_ROLLOUT[feature]).toBe("internal");
+      expect(AGENT_CONTROL_ROLLOUT[feature]).toBe("default");
     }
   });
 
@@ -79,7 +79,7 @@ describe("agent control rollout", () => {
   });
 
   it("assumes only features that are on for everyone until told otherwise", () => {
-    expect(initialAgentControlAvailability()).toEqual(CLOSED);
+    expect(initialAgentControlAvailability()).toEqual(OPEN);
     expect(
       initialAgentControlAvailability({
         zerosBrowser: "default",

@@ -12,7 +12,7 @@ async function resetHarness(page, harnessBase, query = "") {
 }
 
 export async function checkSidebarNarrowHeader({ page, check, harnessBase }) {
-  await resetHarness(page, harnessBase);
+  await resetHarness(page, harnessBase, "?internal");
   // Below the floor: the sidebar stops where its title band still fits.
   await page.evaluate(() => window.appSidebarSetWidth(200));
   const resources = page.getByRole("button", {
@@ -20,12 +20,12 @@ export async function checkSidebarNarrowHeader({ page, check, harnessBase }) {
     exact: true,
   });
   await expect(resources).toBeVisible();
-  await expect(resources).toHaveText("");
+  await expect(resources).toHaveText("1.20 GB");
   await expect(
     page.getByRole("button", { name: /Archived workspaces/ }),
   ).toHaveCount(0);
   const sidebarBox = await page.locator("[data-app-sidebar]").boundingBox();
-  expect(sidebarBox.width).toBe(220);
+  expect(sidebarBox.width).toBe(280);
   let previousEnd = sidebarBox.x;
   for (const name of [
     "Hide sidebar",
@@ -36,7 +36,8 @@ export async function checkSidebarNarrowHeader({ page, check, harnessBase }) {
     const box = await page
       .getByRole("button", { name, exact: true })
       .boundingBox();
-    expect(box.width).toBe(28);
+    expect(box.height).toBe(28);
+    if (name !== "App resources") expect(box.width).toBe(28);
     expect(box.x).toBeGreaterThanOrEqual(previousEnd);
     previousEnd = box.x + box.width;
   }
@@ -47,8 +48,31 @@ export async function checkSidebarNarrowHeader({ page, check, harnessBase }) {
   await expect(details).toContainText("1.20 GB");
   await expect(details).toContainText("CPU");
   await page.keyboard.press("Escape");
+  for (const theme of ["dark", "light"]) {
+    await page.evaluate((value) => { document.documentElement.dataset.theme = value; }, theme);
+    const organization = await page.getByRole("button", { name: "Switch organization", exact: true }).boundingBox();
+    const home = await page.getByRole("button", { name: "Home", exact: true }).boundingBox();
+    expect(home.y - (organization.y + organization.height)).toBe(4);
+  }
+  await page.evaluate(() => window.appSidebarSetMemory(3 * 1024 ** 3));
+  await expect(resources).toHaveText("3.00 GB", { timeout: 7_000 });
+  // A persisted narrow rail comes back when the Internal summary is disabled.
+  await page.evaluate(async () => {
+    const { setInternalFeatureEnabled } = await import("/apps/desktop/src/renderer/features/settings/internal-features.ts");
+    setInternalFeatureEnabled("resourceSummary", false);
+  });
+  await expect(resources).toHaveCount(0);
+  expect((await page.locator("[data-app-sidebar]").boundingBox()).width).toBe(220);
+  await page.evaluate(async () => {
+    const { setInternalFeatureEnabled } = await import("/apps/desktop/src/renderer/features/settings/internal-features.ts");
+    setInternalFeatureEnabled("resourceSummary", true);
+  });
+  await expect(resources).toHaveText("3.00 GB");
+  await resetHarness(page, harnessBase);
+  await expect(resources).toHaveCount(0);
+  expect(await page.evaluate(() => window.appSidebarRequests.filter(request => request.op === "process_metrics_snapshot"))).toEqual([]);
   check(
-    "Resources, Go back and Go forward fit after the toggle at the 220px floor, with no Archive picker",
+    "Internal live memory fits with navigation, toggles without losing sidebar width, and stays absent for ordinary users",
     true,
   );
 }
@@ -405,7 +429,7 @@ export async function checkSidebarResourceDiagnostics({
   check,
   harnessBase,
 }) {
-  await resetHarness(page, harnessBase, "?resource-pressure");
+  await resetHarness(page, harnessBase, "?resource-pressure&internal");
   await page.context().grantPermissions(["clipboard-read", "clipboard-write"]).catch(() => {});
   await page.getByRole("button", { name: "App resources", exact: true }).click();
   const details = page.getByRole("dialog", { name: "App resources" });
@@ -446,7 +470,7 @@ export async function checkSidebarResourceDiagnostics({
     "Resources lists the engine, agents and their tools, Mac pressure and other Zeros apps; Copy builds the native diagnostics report",
     true,
   );
-  await resetHarness(page, harnessBase, "?resource-pressure&resource-pending-cpu");
+  await resetHarness(page, harnessBase, "?resource-pressure&resource-pending-cpu&internal");
   await page.getByRole("button", { name: "App resources", exact: true }).click();
   await expect(details.getByRole("row", { name: /^tsc\./ }).getByRole("gridcell").nth(1)).toHaveText("—");
   await expect(details.getByRole("row", { name: /^App\./ }).getByRole("gridcell").nth(1)).toHaveText("—");

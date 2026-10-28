@@ -100,10 +100,12 @@ export function useIsInternalUser(): boolean {
 /** The set of internal feature flags.
  *  - `copyLogs` — ⇧⌘L copies the scrubbed recent-log tail (the exact
  *    bytes a feedback submission shares) to the clipboard.
+ *  - `resourceSummary` — live app memory and the resource inspector.
  *  - Agent control features while their rollout stage is `internal`
  *    (agent-control-rollout.ts). */
 export type InternalFeature =
   | "copyLogs"
+  | "resourceSummary"
   | AgentControlFeature;
 
 const STORAGE_KEY = "zeros.internalFeatures";
@@ -111,11 +113,13 @@ const STORAGE_KEY = "zeros.internalFeatures";
 // A stored retired key must never read as on.
 const KNOWN: ReadonlySet<string> = new Set<InternalFeature>([
   "copyLogs",
+  "resourceSummary",
   ...AGENT_CONTROL_FEATURES,
 ]);
 // Staff dogfood these unless they turn them off.
 const ON_BY_DEFAULT: ReadonlySet<string> = new Set<InternalFeature>([
   "copyLogs",
+  "resourceSummary",
   ...AGENT_CONTROL_FEATURES,
 ]);
 

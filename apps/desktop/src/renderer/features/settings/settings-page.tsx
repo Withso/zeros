@@ -11,8 +11,8 @@ import { KeepAwakeSetting } from "./keep-awake-setting";
 // administration remain browser-owned; repository settings live on each repository page
 // (Home rail → repository → Settings tab).
 // Settings is its own page: this section nav takes the app sidebar's place
-// (the sidebar is hidden while here), with a Back row (→ Dashboard) under a
-// 40px title band that holds the macOS traffic lights. There is no header bar
+// (the sidebar is hidden while here), with Back (→ Dashboard) in the
+// 40px title band beside the macOS traffic lights. There is no header bar
 // — "Open settings.toml" (reveal in Finder) floats at the detail pane's
 // top-right, mirroring the repo page. The section nav sits flat on
 // the page canvas (`--sidebar-bg`); the detail pane is flat `--bg1`
@@ -152,6 +152,7 @@ import { GitHubSection } from "./github-section";
 import { prefetchGithubAuthSnapshot } from "./github-auth-prefetch";
 import { JoinTeamDialog } from "../team/join-team-dialog";
 import { OrganizationSwitcher } from "../team/organization-switcher";
+import { TRAFFIC_LIGHT_RESERVE_CLS } from "../../shell/sidebar-toggle";
 import { getActiveOrganizationIdSnapshot, useActiveOrganization, useTeams } from "../team/team-store";
 import { readScopedSettingsSelection, writeScopedSettingsSelection, settingsOwnerKey } from "./settings-scope";
 import { retainedDialogOpen } from "./retained-surface";
@@ -719,31 +720,32 @@ function ScopedSettingsPage({ owner }: { owner: string }) {
           page — the section nav below takes the app sidebar's place with a
           Back row at its top (→ Dashboard), and "Open settings.toml" floats at
           the content's top-right, mirroring the repo page. The nav's 40px band
-          holds the macOS traffic lights and drags the window. */}
+          holds the macOS traffic lights and Back, and drags the window. */}
       <div className="relative flex min-h-0 min-w-0 flex-1 overflow-hidden">
         {/* Sidebar — the MAIN nav here (the app sidebar is hidden on Settings).
-              A Back row (→ Dashboard) sits under the title band, then the
+              Back (→ Dashboard) sits in the title band, then the
               labelled SECTION_GROUPS. Repo settings live on each repo's page. */}
         <div className="flex min-h-0 shrink-0 basis-[256px] flex-col">
           <div
             data-tauri-drag-region
-            className="h-10 shrink-0"
-            aria-hidden="true"
-          />
+            className="flex h-10 shrink-0 items-center justify-between pr-3"
+          >
+            <div className={TRAFFIC_LIGHT_RESERVE_CLS} aria-hidden="true" />
+            <Button
+              variant="ghost"
+              className="text-fg2 hover:bg-sidebar-bg-hover hover:text-fg1"
+              onClick={handleBack}
+            >
+              <ArrowLeft strokeWidth={1.5} />
+              <span>Back</span>
+            </Button>
+          </div>
           <nav
             className="flex min-h-0 flex-1 flex-col overflow-y-auto px-3 pt-4 pb-2"
             role="tablist"
             aria-label="Settings sections"
           >
             <OrganizationSwitcher />
-            <Button
-              variant="ghost"
-              className={cn(SIDEBAR_ENTRY_CLS, "mb-2")}
-              onClick={handleBack}
-            >
-              <ArrowLeft size={14} strokeWidth={1.5} />
-              <span>Back</span>
-            </Button>
             {SECTION_GROUPS.map((group, groupIndex) => {
               const sections = group.ids.flatMap((id) => {
                 const section = availableSections.find((s) => s.id === id);
@@ -1620,6 +1622,7 @@ function InternalAgentControlRow({ feature }: { feature: AgentControlFeature }) 
 // staff-only, so the headline stands alone (2026-09-14).
 function InternalPanel() {
   const [copyLogs, setCopyLogs] = useInternalFeature("copyLogs");
+  const [resourceSummary, setResourceSummary] = useInternalFeature("resourceSummary");
   const agentControlFeatures = agentControlFeaturesAt("internal");
   return (
     <div className="flex flex-col gap-6">
@@ -1632,6 +1635,16 @@ function InternalPanel() {
             checked={copyLogs}
             onCheckedChange={setCopyLogs}
             aria-label="Enable the copy-logs shortcut"
+          />
+        </SettingsRow>
+        <SettingsRow
+          label="Resource summary"
+          hint="Show live app memory in the sidebar and inspect resource usage."
+        >
+          <Switch
+            checked={resourceSummary}
+            onCheckedChange={setResourceSummary}
+            aria-label="Show resource summary"
           />
         </SettingsRow>
       </SettingsGroup>

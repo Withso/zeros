@@ -346,7 +346,10 @@ describe("Zeros browser tool client", () => {
   });
 
   it("keeps Codex on its built-in browser while the Zeros browser is closed", async () => {
-    setAgentControlAvailability(initialAgentControlAvailability());
+    setAgentControlAvailability({
+      ...initialAgentControlAvailability(),
+      zerosBrowser: false,
+    });
     vi.mocked(opSettingsResolve).mockReturnValue({
       effective: {
         browser: { codex_enabled: true, codex_native: false, provider: "isolated" },

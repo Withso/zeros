@@ -121,6 +121,7 @@ import {
   type WorkspaceNavigationTarget,
 } from "./prefetch-workspace-surface";
 import { ResourceMonitor } from "./resource-monitor";
+import { useInternalFeatureActive } from "../features/settings/internal-features";
 import {
   setRepositoryCollapsed,
   useCollapsedRepositories,
@@ -650,6 +651,7 @@ export function AppSidebar({ hidden = false }: { hidden?: boolean }) {
 
   // Persisted, drag-resizable width (module store → survives reloads).
   const railWidth = useHomeSidebarWidth();
+  const resourceSummary = useInternalFeatureActive("resourceSummary");
   const railRef = useRef<HTMLDivElement | null>(null);
   const onResizePointerDown = useHomeSidebarResizeDrag(railRef);
   const { hintHandlers, hint } = useResizeHint(
@@ -715,7 +717,9 @@ export function AppSidebar({ hidden = false }: { hidden?: boolean }) {
       {...(hidden ? { inert: "" } : {})}
       aria-hidden={hidden || undefined}
       className={cn(
-        "relative flex min-w-[220px] shrink-0",
+        "relative flex shrink-0",
+        // Preserve the saved width; only the live memory label needs extra room.
+        resourceSummary ? "min-w-[280px]" : "min-w-[220px]",
         SIDEBAR_MAX_WIDTH_CLS,
         // Out of flow and invisible rather than display:none, which would
         // reset the workspace list's scroll offset while Settings is open.
@@ -734,7 +738,7 @@ export function AppSidebar({ hidden = false }: { hidden?: boolean }) {
             (trafficLightPosition in electron/main.ts), the panel-left toggle
             right after them. The rest is a window drag handle carrying the
             app-level controls at its end: resources, then back and forward.
-            These four 28px controls set the sidebar's 220px floor. */}
+            The Internal memory summary raises the floor to fit its label. */}
         <div
           data-tauri-drag-region
           className="flex h-10 shrink-0 items-center gap-1 pr-2"

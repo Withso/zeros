@@ -14,7 +14,7 @@ get a separate CLI/API later.
 Related guides:
 
 - [Agent control](agent-control.md) owns the staged-rollout table this feature
-  joins (`localOrchestration`, stage `internal`).
+  joins (`localOrchestration`, stage `default`).
 - [Agent identity model](agent-identity-model.md) owns conversations,
   executions and provider bindings, which the CLI reuses unchanged.
 - [Tool presentation](agent-tool-presentation.md) owns steering, Stop and cards
@@ -277,6 +277,8 @@ arrive after the caller received `starting`.
 
 ## Rollout
 
-`localOrchestration` starts at `internal`. A renderer push without the key
+`localOrchestration` is available to every user at the `default` stage, with
+no Internal or Experimental switch. It retains the Personal Local ownership
+checks above. For compatibility, an older renderer's push without the key
 still applies and keeps the feature closed. Admission happens when an
-execution starts, so opening the feature reaches chats on their next session.
+execution starts, so the public rollout reaches chats on their next session.

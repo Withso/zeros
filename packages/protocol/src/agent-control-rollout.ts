@@ -26,10 +26,10 @@ export type AgentControlRolloutStage = "internal" | "experimental" | "default";
 export const AGENT_CONTROL_ROLLOUT: Readonly<
   Record<AgentControlFeature, AgentControlRolloutStage>
 > = Object.freeze({
-  zerosBrowser: "internal",
-  computerUse: "internal",
-  simulators: "internal",
-  localOrchestration: "internal",
+  zerosBrowser: "default",
+  computerUse: "default",
+  simulators: "default",
+  localOrchestration: "default",
 });
 
 /** Which staged features this copy of Zeros has open. The renderer decides

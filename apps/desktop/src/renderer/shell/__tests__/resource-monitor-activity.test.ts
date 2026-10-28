@@ -9,7 +9,7 @@ const hooks = vi.hoisted(() => ({
   effects: [] as Array<{ deps?: readonly unknown[]; cleanup?: () => void }>,
   pending: [] as Array<{ index: number; run: () => void | (() => void); deps?: readonly unknown[] }>,
   stateIndex: 0, refIndex: 0, callbackIndex: 0, effectIndex: 0,
-  writes: vi.fn(), ready: true,
+  writes: vi.fn(), ready: true, internal: true,
 }));
 vi.mock("react", async (original) => ({
   ...(await original<typeof import("react")>()),
@@ -40,6 +40,9 @@ const native = vi.hoisted(() => ({
   connected: new Set<(...args: unknown[]) => void>(),
 }));
 vi.mock("../../platform/runtime", () => ({ useNativeRuntime: () => ({ ready: hooks.ready }) }));
+vi.mock("../../features/settings/internal-features", () => ({
+  useInternalFeatureActive: (feature: string) => feature === "resourceSummary" && hooks.internal,
+}));
 vi.mock("../../platform/process-metrics", () => ({ processMetricsSnapshot: native.snapshot, processDiagnosticsReport: vi.fn() }));
 vi.mock("../../platform/pty", () => ({
   ptyProcessPids: native.census,
@@ -68,10 +71,11 @@ const snapshot = (sampledAt: number): ProcessMetricsSnapshot => ({
 function render(open: boolean) {
   hooks.states[0] = open;
   hooks.stateIndex = hooks.refIndex = hooks.callbackIndex = hooks.effectIndex = 0;
-  ResourceMonitor({});
+  const result = ResourceMonitor({});
   const pending = hooks.pending.splice(0);
   for (const { index } of pending) hooks.effects[index]?.cleanup?.();
   for (const { index, run, deps } of pending) hooks.effects[index] = { deps, cleanup: run() || undefined };
+  return result;
 }
 function foreground(visible: boolean, focus = true) {
   page.visibilityState = visible ? "visible" : "hidden"; focused = focus;
@@ -89,7 +93,7 @@ beforeEach(() => {
   win = Object.assign(new EventTarget(), { setTimeout, clearTimeout });
   vi.stubGlobal("document", page); vi.stubGlobal("window", win);
   hooks.states.length = hooks.refs.length = hooks.callbacks.length = hooks.pending.length = 0;
-  hooks.ready = true; hooks.writes.mockClear();
+  hooks.ready = hooks.internal = true; hooks.writes.mockClear();
   native.snapshot.mockReset().mockResolvedValue(snapshot(1));
   native.census.mockReset().mockResolvedValue([10]);
 });
@@ -120,13 +124,54 @@ describe("resource monitor activity", () => {
     expect(hooks.writes).toHaveBeenCalledWith(null);
     expect(hooks.states[1]).toEqual(snapshot(1));
   });
-  it("does no process scans, census reads or registry work while closed", async () => {
-    render(false); await vi.advanceTimersByTimeAsync(60_000);
-    console.info(JSON.stringify({ closedMs: 60_000, scans: native.snapshot.mock.calls.length,
-      census: native.census.mock.calls.length, timers: vi.getTimerCount() }));
-    expect(native.snapshot).not.toHaveBeenCalled();
+  it("keeps full-app memory live every five seconds without PTY reads while closed", async () => {
+    render(false); await settle();
+    expect(native.snapshot).toHaveBeenCalledOnce();
+    expect(native.snapshot).toHaveBeenLastCalledWith({ terminalPids: [], terminalRootsKnown: false, detail: true });
+    await vi.advanceTimersByTimeAsync(4_999);
+    expect(native.snapshot).toHaveBeenCalledOnce();
+    native.snapshot.mockResolvedValueOnce(snapshot(2));
+    await vi.advanceTimersByTimeAsync(1);
+    expect(native.snapshot).toHaveBeenCalledTimes(2);
+    expect(hooks.states[1]).toEqual(snapshot(2));
     expect(native.census).not.toHaveBeenCalled();
     expect(native.terminals.size + native.bridgeChanges.size + native.connected.size).toBe(0);
+    expect(vi.getTimerCount()).toBe(1);
+  });
+
+  it.each([false, true])("does not render or sample without Internal access (open=%s)", async (open) => {
+    hooks.internal = false;
+    expect(render(open)).toBeNull();
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(native.snapshot).not.toHaveBeenCalled();
+    expect(native.census).not.toHaveBeenCalled();
+    expect(native.terminals.size).toBe(0);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("retires a held scan when Internal access is disabled and resumes without overlap", async () => {
+    let finish!: (value: ProcessMetricsSnapshot) => void;
+    native.snapshot.mockReturnValueOnce(new Promise(resolve => { finish = resolve; }));
+    render(true); await settle();
+    hooks.internal = false;
+    expect(render(true)).toBeNull();
+    hooks.writes.mockClear();
+    finish(snapshot(99)); await settle();
+    expect(hooks.writes).not.toHaveBeenCalledWith(snapshot(99));
+    expect(vi.getTimerCount()).toBe(0);
+    hooks.internal = true; render(false); await settle();
+    expect(native.snapshot).toHaveBeenCalledTimes(2);
+    expect(hooks.states[1]).toEqual(snapshot(1));
+  });
+
+  it("pauses the live summary while hidden and catches up once on reveal", async () => {
+    foreground(false); render(false); await vi.advanceTimersByTimeAsync(30_000);
+    expect(native.snapshot).not.toHaveBeenCalled();
+    expect(vi.getTimerCount()).toBe(0);
+    foreground(true); await settle();
+    expect(native.snapshot).toHaveBeenCalledOnce();
+    foreground(false); await vi.advanceTimersByTimeAsync(30_000);
+    expect(native.snapshot).toHaveBeenCalledOnce();
     expect(vi.getTimerCount()).toBe(0);
   });
 

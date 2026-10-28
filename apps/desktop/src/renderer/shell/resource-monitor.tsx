@@ -1,8 +1,7 @@
 // ============================================
 // COMPONENT: ResourceMonitor
-// PURPOSE: App resource icon, memory tooltip and process-inspection popover.
-// USED IN: AppSidebar's title band, immediately before the archived-workspaces
-//          control.
+// PURPOSE: Internal live app memory summary and process-inspection popover.
+// USED IN: AppSidebar's title band, immediately before history navigation.
 // ============================================
 
 // --- IMPORTS ---
@@ -36,6 +35,7 @@ import {
 } from "../platform/process-metrics";
 import { ptyProcessPids, onPtyTerminalsChanged } from "../platform/pty";
 import { useNativeRuntime } from "../platform/runtime";
+import { useInternalFeatureActive } from "../features/settings/internal-features";
 import {
   getActiveBridge,
   onActiveBridgeChange,
@@ -74,6 +74,7 @@ import { Inline } from "@/renderer/shared/ui/layout/inline";
 // --- CONSTANTS ---
 
 const OPEN_SAMPLE_INTERVAL_MS = 1_000;
+const SUMMARY_SAMPLE_INTERVAL_MS = 5_000;
 const MAX_VISIBLE_TREE_DEPTH = 8;
 const MAX_RENDERED_PROCESS_ROWS = 500;
 
@@ -270,8 +271,13 @@ const ResourceProcessRow = memo(function ResourceProcessRow({
 
 export const ResourceMonitor = memo(function ResourceMonitor() {
   const { ready } = useNativeRuntime();
-  // Only an open foreground inspector owns process sampling.
+  const resourceSummary = useInternalFeatureActive("resourceSummary");
+  const enabled = ready && resourceSummary;
+  // The foreground summary samples slowly; the open inspector samples faster.
   const [open, setOpen] = useState(false);
+  useEffect(() => {
+    if (!enabled) setOpen(false);
+  }, [enabled]);
   // Last confirmed app-global process snapshot; retained through refresh errors.
   const [snapshot, setSnapshot] = useState<ProcessMetricsSnapshot | null>(null);
   // Latest polling error; it never clears the retained confirmed snapshot.
@@ -366,7 +372,7 @@ export const ResourceMonitor = memo(function ResourceMonitor() {
     // session would issue a PTY_LIST per mount, terminal change, and
     // reconnect for a surface it never shows — and the engine withholds
     // processPids from non-local clients, so every one of them fails.
-    if (!ready || !open) return;
+    if (!enabled || !open) return;
     let settleTimer: number | null = null;
     let detach: (() => void) | undefined;
     const active = () => !!detach && documentIsForeground();
@@ -412,12 +418,13 @@ export const ResourceMonitor = memo(function ResourceMonitor() {
     const unwatch = observeForeground(update);
     update();
     return () => { unwatch(); stop(); };
-  }, [open, ready, refreshTerminalOwnership]);
+  }, [open, enabled, refreshTerminalOwnership]);
 
-  // Every scan runs `ps` in the native process. Closed, hidden and unfocused
-  // inspectors retain their snapshot without owning a timer or starting reads.
+  // Both cadences read the full app tree, including engine/agent children;
+  // Electron-only metrics would change the memory scope when opening details.
+  // Hidden, unfocused and disabled surfaces own no timer and start no reads.
   useEffect(() => {
-    if (!ready || !open) return;
+    if (!enabled) return;
     let disposed = false;
     let active = false;
     let timer: number | null = null;
@@ -433,7 +440,7 @@ export const ResourceMonitor = memo(function ResourceMonitor() {
       if (!canSample()) return;
       timer = window.setTimeout(
         () => { timer = null; void sample(); },
-        OPEN_SAMPLE_INTERVAL_MS,
+        open ? OPEN_SAMPLE_INTERVAL_MS : SUMMARY_SAMPLE_INTERVAL_MS,
       );
     };
     const sample = async (): Promise<void> => {
@@ -442,9 +449,11 @@ export const ResourceMonitor = memo(function ResourceMonitor() {
       const generation = ++requestGeneration.current;
       try {
         // Private Setup/ephemeral PTYs do not publish registry events.
-        await refreshTerminalOwnership();
+        if (open) await refreshTerminalOwnership();
         if (!canSample() || generation !== requestGeneration.current) return;
-        const ownership = terminalOwnership.current;
+        const ownership = open
+          ? terminalOwnership.current
+          : { pids: [], known: false };
         const next = await processMetricsSnapshot({
           terminalPids: ownership.pids,
           terminalRootsKnown: ownership.known,
@@ -494,7 +503,7 @@ export const ResourceMonitor = memo(function ResourceMonitor() {
       clearTimer();
       unwatch();
     };
-  }, [open, ready, refreshTerminalOwnership]);
+  }, [open, enabled, refreshTerminalOwnership]);
 
   const selectedSnapshot = selectResourceSnapshot(
     includeTerminal,
@@ -664,15 +673,8 @@ export const ResourceMonitor = memo(function ResourceMonitor() {
     }
   }, [copying, displaySnapshot, includesTerminal, otherAppNodes, totals, view]);
 
-  if (!ready) return null;
+  if (!enabled) return null;
 
-  const scopeLabel = selectedSnapshot.usingRetainedTerminalSnapshot
-    ? "excluding terminal processes using the last confirmed sample"
-    : !currentTerminalFilterAvailable
-      ? "including all processes while terminal classification is unavailable"
-      : includesTerminal
-        ? "including terminal processes"
-        : "excluding terminal processes";
   const terminalControlLabel = !currentTerminalFilterAvailable
     ? includeTerminal
       ? "Terminal process filter unavailable"
@@ -680,11 +682,14 @@ export const ResourceMonitor = memo(function ResourceMonitor() {
     : includesTerminal
       ? "Exclude terminal processes"
       : "Include terminal processes";
-  const triggerLabel = totals
-    ? `${formatResourceMemory(totals.memoryBytes)} ${
-        memoryIsFootprint ? "memory" : "resident memory"
-      }, ${scopeLabel}`
-    : open ? "Collecting app resource usage" : "Inspect app resource usage";
+  // The summary always shows the whole app, independently of the inspector's
+  // terminal filter and its retained exact-key snapshot.
+  const summaryMemory = snapshot
+    ? formatResourceMemory(snapshot.totals.all.memoryBytes)
+    : "—";
+  const triggerLabel = snapshot
+    ? `${summaryMemory} ${snapshot.memorySource === "footprint" ? "memory" : "resident memory"}, including terminal processes`
+    : "Collecting app resource usage";
 
   return (
     <div className="flex h-full shrink-0 items-center">
@@ -694,13 +699,14 @@ export const ResourceMonitor = memo(function ResourceMonitor() {
             <Button
               type="button"
               variant="ghost"
-              size="icon"
-              className="h-7 w-7 shrink-0 rounded-md text-fg2 hover:bg-sidebar-bg-hover hover:text-fg1 data-[active=true]:bg-sidebar-bg-hover data-[active=true]:text-fg1"
+              size="sm"
+              className="h-7 shrink-0 gap-1 rounded-md border-border2 px-2 text-fg2 hover:bg-sidebar-bg-hover hover:text-fg1 data-[active=true]:bg-sidebar-bg-hover data-[active=true]:text-fg1"
               data-active={open}
               aria-label="App resources"
               aria-expanded={open}
             >
               <Cpu className="size-3.5" strokeWidth={1.5} aria-hidden="true" />
+              <span className="tabular-nums">{summaryMemory}</span>
             </Button>
           </PopoverTrigger>
         </Tooltip>

@@ -131,6 +131,24 @@ describe("isInternalUser — the staff gate", () => {
 });
 
 describe("internal feature flags", () => {
+  it("defaults resource summary on only for internal users and preserves an opt-out", async () => {
+    const backing = installLocalStorageStub();
+    const store = await freshStore();
+    expect(store.isInternalFeatureEnabled("resourceSummary")).toBe(true);
+    for (const role of [null, "support_admin", "developer", "platform_owner"] as const) {
+      signedInAs(role);
+      expect(store.isInternalFeatureActive("resourceSummary")).toBe(
+        role === "developer" || role === "platform_owner",
+      );
+    }
+    signedOut();
+    expect(store.isInternalFeatureActive("resourceSummary")).toBe(false);
+    signedInAs("developer");
+    store.setInternalFeatureEnabled("resourceSummary", false);
+    expect(JSON.parse(backing.get("zeros.internalFeatures")!)).toEqual({ resourceSummary: false });
+    expect((await freshStore()).isInternalFeatureActive("resourceSummary")).toBe(false);
+  });
+
   it("reads the retired Cloud Computer key without granting access or losing other flags", async () => {
     const backing = installLocalStorageStub();
     backing.set("zeros.internalFeatures", JSON.stringify({ cloudComputerV2: true, copyLogs: true }));

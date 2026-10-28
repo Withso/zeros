@@ -149,4 +149,55 @@ export async function runRepoSettingsSmoke({ page, check }) {
     "Legacy repository Design sections resolve to Environment without Design operations",
     true,
   );
+
+  // The real app settings rail keeps Back in its native title band, for every
+  // owner and in both themes. Public agent controls no longer need staff access.
+  for (const theme of ["dark", "light"]) {
+    await page.evaluate(value => { document.documentElement.dataset.theme = value; }, theme);
+    for (const [name] of selections) {
+      await selectRepo(name);
+      await page.evaluate(() => window.repoSettingsOpenApp());
+      const sections = page.getByRole("tablist", { name: "Settings sections" });
+      const back = page.getByRole("button", { name: "Back", exact: true });
+      const band = back.locator("xpath=..");
+      await expect(band).toHaveAttribute("data-tauri-drag-region", "true");
+      const [backBox, bandBox, orgBox] = await Promise.all([
+        back.boundingBox(), band.boundingBox(),
+        sections.getByRole("button", { name: "Switch organization", exact: true }).boundingBox(),
+      ]);
+      expect(bandBox.height).toBe(40);
+      expect(backBox.x).toBeGreaterThanOrEqual(bandBox.x + 80);
+      expect(backBox.y).toBeGreaterThanOrEqual(bandBox.y);
+      expect(backBox.y + backBox.height).toBeLessThanOrEqual(bandBox.y + bandBox.height);
+      expect(orgBox.y).toBeGreaterThanOrEqual(bandBox.y + bandBox.height);
+      expect(await back.evaluate(node => getComputedStyle(node).getPropertyValue("-webkit-app-region"))).toBe("no-drag");
+      for (const feature of ["Browser", "Computer use", "Simulators"])
+        await expect(sections.getByRole("tab", { name: feature, exact: true })).toBeVisible();
+      await expect(sections.getByRole("tab", { name: "Internal", exact: true })).toHaveCount(0);
+      await back.focus();
+      await page.keyboard.press("Enter");
+      await expect(sections).toHaveCount(0);
+    }
+  }
+  check("Settings Back stays beside native window controls and public agent settings are available for every owner in both themes", true);
+
+  await selectRepo("Local");
+  await page.evaluate(() => {
+    window.repoSettingsSetInternal(true);
+    window.repoSettingsOpenApp();
+  });
+  const internal = page.getByRole("tab", { name: "Internal", exact: true });
+  await internal.click();
+  const resourceSummary = page.getByRole("switch", { name: "Show resource summary", exact: true });
+  await expect(resourceSummary).toBeChecked();
+  await expect(page.getByRole("switch")).toHaveCount(2);
+  await resourceSummary.click();
+  await expect(resourceSummary).not.toBeChecked();
+  await page.getByRole("tab", { name: "General", exact: true }).click();
+  await internal.click();
+  await expect(resourceSummary).not.toBeChecked();
+  await page.evaluate(() => window.repoSettingsSetInternal(false));
+  await expect(internal).toHaveCount(0);
+  await expect(resourceSummary).toHaveCount(0);
+  check("Internal offers only Copy logs and default-on Resource summary, preserves the toggle and closes on staff revocation", true);
 }

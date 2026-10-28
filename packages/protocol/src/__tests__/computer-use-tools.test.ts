@@ -48,7 +48,7 @@ describe("Zeros computer-use tool contract", () => {
   it("routes each agent by the computer-use table", () => {
     const defaults = computerUseSettings(undefined);
     expect(defaults).toEqual({
-      enabled: false,
+      enabled: true,
       codexNative: true,
       showAgentCursor: true,
       blockedApps: [...DEFAULT_COMPUTER_BLOCKED_APPS],
@@ -60,12 +60,12 @@ describe("Zeros computer-use tool contract", () => {
         resolveComputerUseRoute(agent, defaults),
         resolveComputerUseRoute(agent, on),
         resolveComputerUseRoute(agent, codexOff),
-        resolveComputerUseRoute(agent, { ...defaults, codexNative: false }),
+        resolveComputerUseRoute(agent, { ...defaults, enabled: false, codexNative: false }),
       ]),
     ).toEqual([
       ["codex-native", "codex-native", "zeros", "off"],
-      ["off", "zeros", "zeros", "off"],
-      ["off", "zeros", "zeros", "off"],
+      ["zeros", "zeros", "zeros", "off"],
+      ["zeros", "zeros", "zeros", "off"],
       ["off", "off", "off", "off"],
     ]);
   });
@@ -85,7 +85,7 @@ describe("Zeros computer-use tool contract", () => {
         ],
       }),
     ).toEqual({
-      enabled: false,
+      enabled: true,
       codexNative: false,
       showAgentCursor: false,
       blockedApps: ["com.apple.Safari", "com.apple.Notes"],

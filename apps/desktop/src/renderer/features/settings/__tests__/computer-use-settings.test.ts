@@ -19,22 +19,22 @@ import {
 } from "../computer-use-settings";
 
 describe("Computer use settings", () => {
-  it("keeps Zeros computer use off and Codex on its own computer use by default", () => {
+  it("enables Zeros computer use by default while keeping Codex's native route", () => {
     expect(computerUseSettingsFromEffective({})).toEqual({
-      enabled: false,
+      enabled: true,
       codexNative: true,
       showAgentCursor: true,
       blockedApps: [...DEFAULT_COMPUTER_BLOCKED_APPS],
     });
-    expect(computerUseSettingsFromEffective(null).enabled).toBe(false);
+    expect(computerUseSettingsFromEffective(null).enabled).toBe(true);
   });
 
   it("routes each agent the way the engine does", () => {
     const open = { computerUse: true };
     expect(computerUseRoutesFromEffective({}, open)).toEqual({
       codex: "codex-native",
-      claude: "off",
-      cursor: "off",
+      claude: "zeros",
+      cursor: "zeros",
     });
     expect(
       computerUseRoutesFromEffective({ computer_use: { enabled: true } }, open),

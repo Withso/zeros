@@ -23,7 +23,7 @@ vi.mock("../../../platform/runtime", () => ({
   isLocalDevelopment: () => env.localDevelopment,
 }));
 
-function signedInAs(staffRole: "developer" | "platform_owner" | null): void {
+function signedInAs(staffRole: "developer" | "platform_owner" | "support_admin" | null): void {
   env.me = {
     user: {
       id: "00000000-0000-0000-0000-000000000001",
@@ -55,7 +55,7 @@ async function fresh(): Promise<{
 }
 
 const OPEN = { zerosBrowser: true, computerUse: true, simulators: true, localOrchestration: true };
-const CLOSED = { zerosBrowser: false, computerUse: false, simulators: false, localOrchestration: false };
+const FEATURES = ["zerosBrowser", "computerUse", "simulators", "localOrchestration"] as const;
 
 beforeEach(() => {
   vi.unstubAllGlobals();
@@ -64,60 +64,44 @@ beforeEach(() => {
 });
 
 describe("agent control rollout gate", () => {
-  it("opens every internal-stage feature for staff, who can turn each off", async () => {
-    const { rollout, internal } = await fresh();
-    signedInAs("developer");
+  it("opens all four features without an account or an opt-in", async () => {
+    const { rollout } = await fresh();
     expect(rollout.agentControlAvailability()).toEqual(OPEN);
-    internal.setInternalFeatureEnabled("computerUse", false);
-    expect(rollout.agentControlAvailability()).toEqual({
-      ...OPEN,
-      computerUse: false,
-    });
-    signedInAs("platform_owner");
-    expect(rollout.isAgentControlFeatureActive("simulators")).toBe(true);
-  });
-
-  it("stays closed for everyone else, whatever their stored flags say", async () => {
-    const { rollout, internal, experimental } = await fresh();
-    for (const feature of ["zerosBrowser", "computerUse", "simulators", "localOrchestration"] as const) {
-      internal.setInternalFeatureEnabled(feature, true);
-      experimental.setExperimentalEnabled(feature, true);
+    for (const role of [null, "developer", "platform_owner", "support_admin"] as const) {
+      signedInAs(role);
+      expect(rollout.agentControlAvailability()).toEqual(OPEN);
     }
-    expect(rollout.agentControlAvailability()).toEqual(CLOSED);
-    signedInAs(null);
-    expect(rollout.agentControlAvailability()).toEqual(CLOSED);
   });
 
-  it("opens in a local development build, which has no staff account", async () => {
+  it("ignores old rollout opt-outs across account changes and reloads", async () => {
+    const { rollout, internal, experimental } = await fresh();
+    for (const feature of FEATURES) {
+      internal.setInternalFeatureEnabled(feature, false);
+      experimental.setExperimentalEnabled(feature, false);
+    }
+    for (const role of ["developer", null, "platform_owner"] as const) {
+      signedInAs(role);
+      expect(rollout.agentControlAvailability()).toEqual(OPEN);
+    }
+    env.me = null;
+    expect(rollout.agentControlAvailability()).toEqual(OPEN);
+    vi.resetModules();
+    const restored = await import("../agent-control-rollout");
+    expect(restored.agentControlAvailability()).toEqual(OPEN);
+  });
+
+  it("keeps local development open with old Internal flags off", async () => {
     const { rollout, internal } = await fresh();
     env.localDevelopment = true;
     expect(rollout.agentControlAvailability()).toEqual(OPEN);
     internal.setInternalFeatureEnabled("zerosBrowser", false);
-    expect(rollout.isAgentControlFeatureActive("zerosBrowser")).toBe(false);
+    expect(rollout.isAgentControlFeatureActive("zerosBrowser")).toBe(true);
   });
 
-  it("lists each stage's switches in display order", async () => {
+  it("removes public features from both rollout settings panels", async () => {
     const { rollout } = await fresh();
-    expect(rollout.agentControlFeaturesAt("internal")).toEqual([
-      "zerosBrowser",
-      "computerUse",
-      "simulators",
-      "localOrchestration",
-    ]);
+    expect(rollout.agentControlFeaturesAt("internal")).toEqual([]);
     expect(rollout.agentControlFeaturesAt("experimental")).toEqual([]);
-    for (const feature of rollout.agentControlFeaturesAt("internal")) {
-      expect(rollout.AGENT_CONTROL_FEATURE_ROWS[feature].label).toBeTruthy();
-    }
-  });
-
-  it("closes Local CLI on a flag change or loss of staff access", async () => {
-    const { rollout, internal } = await fresh();
-    signedInAs("developer");
-    expect(rollout.isAgentControlFeatureActive("localOrchestration")).toBe(true);
-    internal.setInternalFeatureEnabled("localOrchestration", false);
-    expect(rollout.agentControlAvailability()).toEqual({ ...OPEN, localOrchestration: false });
-    internal.setInternalFeatureEnabled("localOrchestration", true);
-    signedInAs(null);
-    expect(rollout.agentControlAvailability()).toEqual(CLOSED);
+    expect(rollout.agentControlFeaturesAt("default")).toEqual(FEATURES);
   });
 });

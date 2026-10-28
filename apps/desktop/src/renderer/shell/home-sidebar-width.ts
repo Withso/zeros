@@ -23,7 +23,9 @@ const STORAGE_KEY = "zeros:home-sidebar-width:v1";
 export const HOME_SIDEBAR_DEFAULT_PX = 256;
 /** Narrowest useful rail. The title band needs 216px: the 80px traffic-light
  *  reserve, then the sidebar toggle, resources, back and forward (28px each)
- *  with their gaps and end padding. Mirrored by AppSidebar's `min-w-[220px]`. */
+ *  with their gaps and end padding. Mirrored by AppSidebar's `min-w-[220px]`;
+ *  the Internal resource summary applies a 280px CSS floor without changing
+ *  this saved preference, so disabling it restores the narrower rail. */
 export const HOME_SIDEBAR_MIN_PX = 220;
 /** Widest the rail may grow — keeps the content pane usable on laptops. */
 export const HOME_SIDEBAR_MAX_PX = 420;

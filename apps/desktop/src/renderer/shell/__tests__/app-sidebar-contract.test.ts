@@ -59,7 +59,7 @@ describe("app shell navigation", () => {
     );
     expect(settings).not.toContain("useCustomWindowDrag");
     expect(settings).toMatch(
-      /data-tauri-drag-region\s*className="h-10 shrink-0"/,
+      /data-tauri-drag-region\s*className="flex h-10 shrink-0/,
     );
   });
 
@@ -303,7 +303,7 @@ describe("sidebar collapse and geometry", () => {
 
   it("floors the sidebar at the width its title band controls need", () => {
     expect(SIDEBAR).toContain(
-      `"relative flex min-w-[${HOME_SIDEBAR_MIN_PX}px] shrink-0"`,
+      `resourceSummary ? "min-w-[280px]" : "min-w-[${HOME_SIDEBAR_MIN_PX}px]"`,
     );
   });
 
