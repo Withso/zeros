@@ -18,3 +18,5 @@
   preference overrides for Zoom, Fill, Minimize and Do Nothing. Let the native
   zoom animation settle before sending the next gesture: published final bounds
   alone do not mean AppKit is accepting another double-click yet.
+  Compare each preference with a stock titlebar: macOS Fill keeps the filled
+  bounds on a repeated double-click, while Zoom restores the previous bounds.
