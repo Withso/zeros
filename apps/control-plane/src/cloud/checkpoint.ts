@@ -9,10 +9,12 @@
 // Ignored directories (dependencies, build outputs) come back from the Cloud
 // Computer and the setup script instead. The VM builds and uploads the object
 // itself through a short-lived presigned URL; the data key exists only in the
-// command and sealed in the database.
+// command and sealed in the database. A stop that finds everything above
+// exactly as the last checkpoint holds it keeps that checkpoint instead of
+// uploading an identical one; the comparison covers contents, never times.
 import { DeleteObjectCommand, GetObjectCommand, HeadObjectCommand, ListObjectsV2Command, PutObjectCommand, type S3Client } from "@aws-sdk/client-s3";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
-import { hkdfSync } from "node:crypto";
+import { createHash, hkdfSync } from "node:crypto";
 import { z } from "zod";
 import { openCredentialBytes, sealCredentialBytes, type CloudAgentCredentialKeys } from "../agent-credentials/agent-credential-envelope.js";
 import type { CloudV2RuntimeStore } from "./runtime.js";
@@ -30,6 +32,11 @@ export const CLOUD_V2_WORKER_STATE = ".local/share/zeros/cloud-worker";
 const SESSION_PATHS = [CLOUD_V2_WORKER_STATE, ".claude/projects", ".codex/sessions", ".codex/archived_sessions", ".cursor/chats", ".cursor/projects"];
 /** Written after a restore; the worker then runs the setup once more. */
 export const CLOUD_V2_RESTORED_MARKER = `${CLOUD_V2_WORKER_STATE}/restored-from-checkpoint`;
+/** Never saved from the session paths: setup status, partial uploads, the
+ * broker socket, the restore marker and credential files. The archive and its
+ * fingerprint both leave out exactly these. */
+const SESSION_EXCLUDED_PATHS = ["workspace-setup", "attachment-uploads", "github.sock", "restored-from-checkpoint"].map(name => `${CLOUD_V2_WORKER_STATE}/${name}`);
+const SESSION_EXCLUDED_NAMES = [".credentials.json", "auth.json"];
 const IGNORED_FILE_BYTES = 1024 * 1024, IGNORED_TOTAL_BYTES = 32 * 1024 * 1024;
 
 // Mirrored from protocol/attachment-policy: this deploys independently of the
@@ -118,6 +125,56 @@ if (mode === "encrypt") {
   }
 } else process.exit(2);
 closeSync(source); closeSync(target);
+`;
+
+// One digest over what a part of the checkpoint holds. Each field is length-
+// prefixed, so no name or content can imitate another entry. Names, kinds,
+// permission bits, link targets and file contents count; owners and times do
+// not, because the worker rewrites unchanged files. "files" reads a NUL-
+// separated list of paths under root; "tree" walks the session paths as tar
+// saves them, without following links, minus the same exclusions.
+const DIGEST = String.raw`
+import { createHash } from "node:crypto";
+import { closeSync, lstatSync, openSync, readFileSync, readSync, readdirSync, readlinkSync } from "node:fs";
+const [mode, root, ...rest] = process.argv.slice(2);
+const digest = createHash("sha256"), chunk = Buffer.alloc(1 << 20);
+const field = value => {
+  const bytes = Buffer.isBuffer(value) ? value : Buffer.from(String(value)), size = Buffer.alloc(8);
+  size.writeBigUInt64BE(BigInt(bytes.length)); digest.update(size); digest.update(bytes);
+};
+const under = name => Buffer.concat([Buffer.from(root + "/"), name]);
+const entry = name => {
+  const path = under(name), stat = lstatSync(path);
+  field(name); field((stat.mode & 0o170000).toString(8)); field((stat.mode & 0o7777).toString(8));
+  if (stat.isSymbolicLink()) field(readlinkSync(path, { encoding: "buffer" }));
+  else if (stat.isFile()) {
+    const hash = createHash("sha256"), fd = openSync(path, "r");
+    try { for (let read; (read = readSync(fd, chunk, 0, chunk.length, null)) > 0;) hash.update(chunk.subarray(0, read)); } finally { closeSync(fd); }
+    field(hash.digest());
+  }
+  return stat;
+};
+if (mode === "files") {
+  const list = readFileSync(rest[0]);
+  for (let start = 0; start < list.length;) {
+    let end = list.indexOf(0, start); if (end < 0) end = list.length;
+    if (end > start) entry(list.subarray(start, end));
+    start = end + 1;
+  }
+} else if (mode === "tree") {
+  const split = rest.indexOf("--");
+  if (split < 0) process.exit(2);
+  const paths = new Set(rest.slice(0, split).filter(value => value.startsWith("path:")).map(value => value.slice(5)));
+  const names = new Set(rest.slice(0, split).filter(value => value.startsWith("name:")).map(value => value.slice(5)));
+  const walk = name => {
+    const text = name.toString("latin1");
+    if (paths.has(text) || names.has(text.slice(text.lastIndexOf("/") + 1))) return;
+    if (!entry(name).isDirectory()) return;
+    for (const child of readdirSync(under(name), { encoding: "buffer" }).sort(Buffer.compare)) walk(Buffer.concat([name, Buffer.from("/"), child]));
+  };
+  for (const top of rest.slice(split + 1)) walk(Buffer.from(top));
+} else process.exit(2);
+process.stdout.write(digest.digest("hex") + "\n");
 `;
 
 const quote = (value: string) => `'${value.replace(/'/g, "'\\''")}'`;
@@ -227,21 +284,42 @@ function prologue(kind: "checkpoint" | "restore", lines: string[]): string[] {
   ];
 }
 
-/** Builds `$work/checkpoint.zck` and sets `bytes` and `sha`. The worker must
- * not be running: its sessions and the repository must be quiet. */
-export function checkpointArchiveSteps(input: CheckpointPaths & { baseBranch: string; key: Buffer; maxBytes?: number }): string[] {
+/** What an existing checkpoint is compared by: the fingerprint of what it
+ * holds, and the base commit whose objects it left out (null if none). */
+export type CheckpointReuse = { fingerprint: string; base: string | null };
+type ArchiveInput = CheckpointPaths & { baseBranch: string; key: Buffer; maxBytes?: number; reuse?: CheckpointReuse | null };
+const FINGERPRINT = /^[0-9a-f]{64}$/, COMMIT = /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/;
+
+/** Builds `$work/checkpoint.zck` and sets `bytes`, `sha`, `fingerprint` and
+ * `base_commit`. Given `reuse`, it instead reports unchanged and exits when
+ * the workspace still holds exactly what that checkpoint does. The worker
+ * must not be running: its sessions and the repository must be quiet. */
+export function checkpointArchiveSteps(input: ArchiveInput): string[] {
   // Quoted for the shell and always prefixed for Git; only option-like or
   // multi-line names are refused.
   if (!/^[^\0\r\n]{1,255}$/.test(input.baseBranch) || input.baseBranch.startsWith("-")) throw new Error("Invalid checkpoint base branch");
   const maxBytes = input.maxBytes ?? CLOUD_V2_CHECKPOINT_MAX_BYTES;
   if (!Number.isSafeInteger(maxBytes) || maxBytes < 1 || maxBytes > CLOUD_V2_CHECKPOINT_MAX_BYTES) throw new Error("Invalid checkpoint limit");
+  if (input.reuse && (!FINGERPRINT.test(input.reuse.fingerprint) || (input.reuse.base !== null && !COMMIT.test(input.reuse.base))))
+    throw new Error("Invalid checkpoint fingerprint");
+  // A fingerprint is only comparable with one made by the same capture: any
+  // change to what or how this saves starts a new comparison.
+  const template = archiveSteps({ ...input, key: Buffer.alloc(32), reuse: null }, "0".repeat(64));
+  return archiveSteps(input, createHash("sha256").update(template.join("\n")).digest("hex"));
+}
+
+function archiveSteps(input: ArchiveInput, revision: string): string[] {
+  const reuse = input.reuse ?? null, maxBytes = input.maxBytes ?? CLOUD_V2_CHECKPOINT_MAX_BYTES;
   return [
     ...prologue("checkpoint", [...paths(input), `base=${quote(input.baseBranch)}`]),
     `printf %s ${quote(dataKey(input.key))} > "$work/key"`,
+    `printf %s ${quote(b64(DIGEST))} | base64 -d > "$work/digest.mjs"`,
     "c=\"$work/c\"; mkdir \"$c\"; m=\"$c/manifest\"; printf 'zeros-checkpoint 1\\n' > \"$m\"",
+    // Digests of the parts outside Git; a part that cannot be read disables reuse.
+    "have_repo='' tree='' staged_tree='' base_commit='' digests=1; : > \"$work/parts\"",
     "step=repository",
     "if [ -d \"$repo\" ] && top=$(git -C \"$repo\" rev-parse --show-toplevel) && [ \"$(cd \"$repo\" && pwd -P)\" = \"$(cd \"$top\" && pwd -P)\" ]; then",
-    "  cd \"$repo\"; cleanup_refs=1",
+    "  cd \"$repo\"; cleanup_refs=1; have_repo=1",
     "  head=$(git rev-parse -q --verify 'HEAD^{commit}' || true)",
     "  if ref=$(git symbolic-ref -q HEAD); then printf 'head ref %s\\n' \"$ref\" >> \"$m\"",
     "  elif [ -n \"$head\" ]; then printf 'head detached %s\\n' \"$head\" >> \"$m\"; fi",
@@ -285,7 +363,7 @@ export function checkpointArchiveSteps(input: CheckpointPaths & { baseBranch: st
     "      | scratch --literal-pathspecs add -f --sparse --pathspec-from-file=- --pathspec-file-nul",
     "  fi",
     "  forget \"$work/index\"",
-    "  tree=$(scratch write-tree)",
+    "  tree=$(scratch write-tree) staged_tree=$staged",
     "  parent=(); if [ -n \"$head\" ]; then parent=(-p \"$head\"); fi",
     "  if [ -n \"$staged\" ]; then",
     "    staged=$(git commit-tree --no-gpg-sign ${parent[@]+\"${parent[@]}\"} -m zeros-checkpoint-index \"$staged\")",
@@ -321,9 +399,7 @@ export function checkpointArchiveSteps(input: CheckpointPaths & { baseBranch: st
     "    printf 'stash %s %s\\n' \"$sha\" \"$(printf %s \"${subject:-stash}\" | base64 -w0)\" >> \"$m\"",
     "  done < <(git log -g --format='%H %gs' refs/stash 2>/dev/null || true)",
     // Objects the base branch already has stay out; a new Cloud Computer has them.
-    "  step=bundle",
-    "  negative=(); if git rev-parse -q --verify \"refs/remotes/origin/$base^{commit}\"; then negative=(--not \"refs/remotes/origin/$base\"); fi",
-    "  git bundle create \"$c/repo.bundle\" --branches --tags --glob=refs/zeros-checkpoint ${negative[@]+\"${negative[@]}\"}",
+    "  base_commit=$(git rev-parse -q --verify \"refs/remotes/origin/$base^{commit}\" || true)",
     // Ignore rules often hide the whole .context directory. Enumerate only
     // registered layouts, at their fixed depth, without following any links.
     // Tracked/nonignored attachments are already in the Git snapshot; ignored
@@ -341,7 +417,6 @@ export function checkpointArchiveSteps(input: CheckpointPaths & { baseBranch: st
     `    [ "$(stat -c %s -- "$path")" -le ${CLOUD_V2_ATTACHMENT_MAX_BYTES} ] || fail checkpoint_too_large`,
     "    printf '%s\\0' \"$path\" >> \"$work/attachments\"",
     "  done < \"$work/attachment-ignored\"",
-    "  if [ -s \"$work/attachments\" ]; then tar --sparse --null --verbatim-files-from --no-recursion --hard-dereference -T \"$work/attachments\" -cf \"$c/attachments.tar\"; fi",
     "  step=ignored; total=0",
     "  while IFS= read -r -d '' path; do",
     "    case \"$path\" in */) continue ;; esac",
@@ -351,14 +426,45 @@ export function checkpointArchiveSteps(input: CheckpointPaths & { baseBranch: st
     `      if [ "$size" -le ${IGNORED_FILE_BYTES} ] && [ $((total + size)) -le ${IGNORED_TOTAL_BYTES} ]; then total=$((total + size)); printf '%s\\0' "$path" >> "$work/ignored"; fi`,
     "    fi",
     "  done < <(git ls-files -z --others --ignored --exclude-standard --directory)",
-    "  if [ -s \"$work/ignored\" ]; then tar --null --verbatim-files-from --no-recursion -T \"$work/ignored\" -cf \"$c/ignored.tar\"; fi",
+    "  step=fingerprint",
+    "  for part in attachments ignored; do",
+    "    if [ -s \"$work/$part\" ]; then printf '%s ' \"$part\" >> \"$work/parts\"; node \"$work/digest.mjs\" files \"$repo\" \"$work/$part\" >> \"$work/parts\" || digests=''; fi",
+    "  done",
     "fi",
     "step=sessions",
     "cd \"$home\"; set --",
     `for p in ${SESSION_PATHS.map(quote).join(" ")}; do if [ -e "$p" ] && [ ! -L "$p" ]; then set -- "$@" "$p"; fi; done`,
+    "step=fingerprint",
+    `if [ $# -gt 0 ]; then printf 'home ' >> "$work/parts"; node "$work/digest.mjs" tree "$home" ${[...SESSION_EXCLUDED_PATHS.map(path => `path:${path}`), ...SESSION_EXCLUDED_NAMES.map(name => `name:${name}`)].map(quote).join(" ")} -- "$@" >> "$work/parts" || digests=''; fi`,
+    // The Git part is the manifest with the index and worktree commits, whose
+    // times change on every run, replaced by their trees.
+    "fingerprint=''",
+    "if [ -n \"$digests\" ]; then",
+    `  { printf 'zeros-checkpoint-fingerprint 1\\nrevision %s\\n' ${revision}; grep -v -E '^(index|worktree) ' "$m" || true; printf 'index-tree %s\\nworktree-tree %s\\n' "\${staged_tree:--}" "\${tree:--}"; cat "$work/parts"; } > "$work/fingerprint"`,
+    "  fingerprint=$(sha256sum \"$work/fingerprint\" | cut -c1-64)",
+    "fi",
+    // Same contents, and everything the old checkpoint left out is still
+    // reachable from this base: restoring it gives back exactly this workspace.
+    ...(reuse ? [
+      `if [ "$fingerprint" = ${reuse.fingerprint} ] && { ${reuse.base === null ? "true" : `[ -n "$base_commit" ] && git -C "$repo" merge-base --is-ancestor ${reuse.base} "$base_commit"`}; }; then`,
+      "  report \"zeros-checkpoint-unchanged fingerprint=$fingerprint\"; exit 0",
+      "fi",
+    ] : []),
+    "step=bundle",
+    "if [ -n \"$have_repo\" ]; then",
+    "  cd \"$repo\"",
+    "  negative=(); if [ -n \"$base_commit\" ]; then negative=(--not \"$base_commit\"); fi",
+    "  git bundle create \"$c/repo.bundle\" --branches --tags --glob=refs/zeros-checkpoint ${negative[@]+\"${negative[@]}\"}",
+    "  step=attachments",
+    "  if [ -s \"$work/attachments\" ]; then tar --sparse --null --verbatim-files-from --no-recursion --hard-dereference -T \"$work/attachments\" -cf \"$c/attachments.tar\"; fi",
+    "  step=ignored",
+    "  if [ -s \"$work/ignored\" ]; then tar --null --verbatim-files-from --no-recursion -T \"$work/ignored\" -cf \"$c/ignored.tar\"; fi",
+    "fi",
+    "step=sessions",
+    "cd \"$home\"",
     "if [ $# -gt 0 ]; then",
-    "  tar -cf \"$c/home.tar\" --exclude=\"$state/workspace-setup\" --exclude=\"$state/attachment-uploads\" --exclude=\"$state/github.sock\" --exclude=\"$state/restored-from-checkpoint\" \\",
-    "    --exclude='.credentials.json' --exclude='auth.json' --warning=no-file-changed --warning=no-file-removed --ignore-failed-read \"$@\" || [ $? -eq 1 ]",
+    `  tar -cf "$c/home.tar" ${[...SESSION_EXCLUDED_PATHS, ...SESSION_EXCLUDED_NAMES].map(path => `--exclude=${quote(path)}`).join(" ")} \\`,
+    "    --warning=no-file-changed --warning=no-file-removed --ignore-failed-read \"$@\" || [ $? -eq 1 ]",
     "fi",
     "step=pack",
     "(cd \"$c\" && tar -cf - .) | gzip -1 > \"$work/plain\"; rm -rf \"$c\"",
@@ -369,14 +475,19 @@ export function checkpointArchiveSteps(input: CheckpointPaths & { baseBranch: st
   ];
 }
 
-/** Stops the worker, builds the checkpoint and uploads it. */
-export function checkpointCommand(input: CheckpointPaths & { baseBranch: string; key: Buffer; uploadUrl: string; maxBytes?: number }): string {
+/** A saved checkpoint's result line: its size and digest, and what a later
+ * stop compares it by whenever the VM could read every part. */
+export const CHECKPOINT_SAVED_REPORT = "report \"zeros-checkpoint-saved bytes=$bytes sha256=$sha${fingerprint:+ fingerprint=$fingerprint} base=${base_commit:--}\"";
+
+/** Stops the worker, then builds the checkpoint and uploads it, or reports
+ * that the one `reuse` describes still holds everything. */
+export function checkpointCommand(input: ArchiveInput & { uploadUrl: string }): string {
   const url = https(input.uploadUrl);
   const script = [
     ...checkpointArchiveSteps(input),
     "step=upload",
     `curl -fsS --retry 3 --retry-delay 2 --connect-timeout 10 --max-time 420 -T "$work/checkpoint.zck" ${quote(url)} || fail checkpoint_upload_failed`,
-    "report \"zeros-checkpoint-saved bytes=$bytes sha256=$sha\"",
+    CHECKPOINT_SAVED_REPORT,
   ];
   // The worker is told to stop first; systemd's stop also ends its agents,
   // terminals and anything they started before the files are read.
@@ -515,16 +626,25 @@ export function restoreCommand(input: RestoreInput & { downloadUrl: string }): s
   ].join("\n"))}`;
 }
 
-export type CheckpointResult = { ok: true; bytes: number; sha256: string } | { ok: false; code: CloudV2CheckpointError; step: string };
+export type CheckpointResult =
+  /** A new object, with what a later stop can compare it by when the VM could tell. */
+  | { ok: true; unchanged?: never; bytes: number; sha256: string; reuse?: CheckpointReuse }
+  /** The existing checkpoint still holds everything; nothing was uploaded. */
+  | { ok: true; unchanged: true; fingerprint: string }
+  | { ok: false; code: CloudV2CheckpointError; step: string };
 
 /** The one result line a checkpoint command prints; anything else is a failure. */
 export function parseCheckpointResult(stdout: string): CheckpointResult {
   for (const line of stdout.split(/\r?\n/)) {
-    const saved = /^zeros-checkpoint-saved bytes=([1-9][0-9]{0,15}) sha256=([0-9a-f]{64})$/.exec(line);
+    const saved = /^zeros-checkpoint-saved bytes=([1-9][0-9]{0,15}) sha256=([0-9a-f]{64})(?: fingerprint=([0-9a-f]{64}))?(?: base=([0-9a-f]{40}(?:[0-9a-f]{24})?|-))?$/.exec(line);
     if (saved) {
       const bytes = Number(saved[1]);
-      if (Number.isSafeInteger(bytes) && bytes <= CLOUD_V2_CHECKPOINT_MAX_BYTES + 64 * 1024 * 1024) return { ok: true, bytes, sha256: saved[2]! };
+      if (Number.isSafeInteger(bytes) && bytes <= CLOUD_V2_CHECKPOINT_MAX_BYTES + 64 * 1024 * 1024)
+        return { ok: true, bytes, sha256: saved[2]!,
+          ...(saved[3] && saved[4] ? { reuse: { fingerprint: saved[3], base: saved[4] === "-" ? null : saved[4] } } : {}) };
     }
+    const unchanged = /^zeros-checkpoint-unchanged fingerprint=([0-9a-f]{64})$/.exec(line);
+    if (unchanged) return { ok: true, unchanged: true, fingerprint: unchanged[1]! };
     const failed = /^zeros-checkpoint-error ([a-z_]+)(?: ([a-z]+))?$/.exec(line);
     if (failed) return { ok: false, code: errorCode(failed[1]!, "checkpoint_failed"), step: failed[2] ?? "unknown" };
   }

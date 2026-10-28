@@ -38,6 +38,14 @@ describe("electron:cloud control plane", () => {
     expect(webEnvironment(w, p, ports.api)).not.toHaveProperty("CLOUD_V2_PROMPT_OUTBOX_ENABLED");
   });
 
+  it("leaves checkpoint retries off unless explicitly enabled for qualification", () => {
+    const { workspace: w, profile: p } = fixture();
+    const runtime = { ZEROS_CLOUD_V2_RUNTIME_SHA256: RUNTIME };
+    expect(backendEnvironment(w, p, ports, run, runtime)).not.toHaveProperty("CLOUD_V2_CHECKPOINT_RETRY_ENABLED");
+    expect(backendEnvironment(w, p, ports, run, { ...runtime, CLOUD_V2_CHECKPOINT_RETRY_ENABLED: "true" }).CLOUD_V2_CHECKPOINT_RETRY_ENABLED).toBe("true");
+    expect(desktopEnvironment(w, p)).not.toHaveProperty("CLOUD_V2_CHECKPOINT_RETRY_ENABLED");
+  });
+
   it("runs cloud v2 on this workspace's tunnel origin with its own stable keys", () => {
     const { workspace: w, profile: p } = fixture();
     const api = backendEnvironment(w, p, ports, run, { ZEROS_CLOUD_V2_RUNTIME_SHA256: RUNTIME });

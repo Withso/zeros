@@ -617,4 +617,167 @@ d("cloud v2 store", () => {
       await result;
     }
   });
+
+  const fingerprint = "f".repeat(64), base = "b".repeat(40);
+  const reuseOf = async (id: string) => (await pool.query("SELECT checkpoint_reuse FROM cloud_v2_workspaces WHERE id=$1", [id])).rows[0].checkpoint_reuse;
+  const lifecycleRow = async (id: string) => (await store.claimPending(10, 0, [], ["stopping", "creating", "starting", "deleting"])).find(row => row.id === id);
+
+  /** A workspace whose latest stop finished, on VM `sandboxId`. */
+  async function stopped(sandboxId: string, saved?: ReturnType<typeof checkpoint> & { reuse?: { fingerprint: string; base: string | null } }) {
+    const w = await stopping(sandboxId);
+    if (saved) await save(w.id, sandboxId, saved);
+    await store.transition(w.id, ["stopping"], "stopped");
+    return w;
+  }
+  const retryInput = { leaseMs: 60_000, firstDelayMs: 0, windowMs: 12 * 86_400_000 };
+
+  it("compares with a checkpoint only by what was recorded for that exact object", async () => {
+    const w = await stopping("bx_first"), first = { ...checkpoint(w.id), reuse: { fingerprint, base } };
+    expect(await save(w.id, "bx_first", first)).toEqual({ replaced: null });
+    expect(await reuseOf(w.id)).toEqual({ object: first.object, fingerprint, base });
+    expect((await lifecycleRow(w.id))?.checkpoint?.reuse).toEqual({ fingerprint, base });
+    // A release that knows nothing of fingerprints saves another object: the old one no longer applies.
+    const legacy = checkpoint(w.id);
+    await pool.query(`UPDATE cloud_v2_workspaces SET checkpoint_object=$2, checkpoint_sha256=$3, checkpoint_bytes=$4, checkpoint_key=$5,
+      checkpoint_saved_at=clock_timestamp(), checkpoint_stop_generation=stop_generation WHERE id=$1`,
+      [w.id, legacy.object, legacy.sha256, legacy.bytes, JSON.stringify(legacy.key)]);
+    const row = await lifecycleRow(w.id);
+    expect(row?.checkpoint?.object).toBe(legacy.object);
+    expect(row?.checkpoint).not.toHaveProperty("reuse");
+    expect(await store.checkpointUnchanged(w.id, "bx_first", await generation(w.id), legacy.object)).toBe(false);
+    // A save without a fingerprint clears it; a malformed record is never trusted.
+    await save(w.id, "bx_first", { ...checkpoint(w.id), reuse: { fingerprint, base: null } });
+    expect((await lifecycleRow(w.id))?.checkpoint?.reuse).toEqual({ fingerprint, base: null });
+    await save(w.id, "bx_first", checkpoint(w.id));
+    expect(await reuseOf(w.id)).toBeNull();
+    const current = (await lifecycleRow(w.id))!.checkpoint!.object;
+    await pool.query("UPDATE cloud_v2_workspaces SET checkpoint_reuse=$2 WHERE id=$1", [w.id, JSON.stringify({ object: current, fingerprint: "x", base })]);
+    expect((await lifecycleRow(w.id))?.checkpoint).not.toHaveProperty("reuse");
+  });
+
+  it("lets an unchanged stop keep the checkpoint only while that stop still owns the VM and the checkpoint is the one compared", async () => {
+    const w = await stopping("bx_first"), kept = { ...checkpoint(w.id), reuse: { fingerprint, base } };
+    await save(w.id, "bx_first", kept);
+    await store.transition(w.id, ["stopping"], "stopped");
+    await store.transition(w.id, ["stopped"], "starting"); await store.transition(w.id, ["starting"], "running");
+    await store.transition(w.id, ["running"], "stopping");
+    const g = await generation(w.id);
+    await store.checkpointFailed(w.id, "bx_first", g, "checkpoint_upload_failed");
+    expect(await store.checkpointUnchanged(w.id, "bx_other", g, kept.object)).toBe(false);
+    expect(await store.checkpointUnchanged(w.id, "bx_first", String(BigInt(g) - 1n), kept.object)).toBe(false);
+    expect(await store.checkpointUnchanged(w.id, "bx_first", g, checkpoint(w.id).object)).toBe(false);
+    expect(await store.checkpointUnchanged(w.id, "bx_first", g, kept.object)).toBe(true);
+    const row = (await pool.query("SELECT checkpoint_stop_generation::text AS c, checkpoint_error, checkpoint_object FROM cloud_v2_workspaces WHERE id=$1", [w.id])).rows[0];
+    expect(row).toEqual({ c: g, checkpoint_error: null, checkpoint_object: kept.object });
+    await store.transition(w.id, ["stopping"], "stopped");
+    expect(await store.checkpointUnchanged(w.id, "bx_first", g, kept.object)).toBe(false);
+  });
+
+  it("records when each stop finished and forgets fingerprints on deletion", async () => {
+    const w = await stopping("bx_first");
+    await save(w.id, "bx_first", { ...checkpoint(w.id), reuse: { fingerprint, base } });
+    const before = Date.now();
+    await store.transition(w.id, ["stopping"], "stopped");
+    const at = (await pool.query("SELECT stopped_at FROM cloud_v2_workspaces WHERE id=$1", [w.id])).rows[0].stopped_at as Date;
+    expect(at.getTime()).toBeGreaterThanOrEqual(before - 1000);
+    await store.transition(w.id, ["stopped"], "deleting");
+    await store.transition(w.id, ["deleting"], "deleted");
+    expect(await reuseOf(w.id)).toBeNull();
+  });
+
+  it("retries only a stopped workspace whose latest stop has no checkpoint, after the first delay and within the window", async () => {
+    await stopped("bx_covered", checkpoint(randomUUID()));
+    const failed = await stopped("bx_failed");
+    const old = await stopped("bx_old");
+    await pool.query("UPDATE cloud_v2_workspaces SET stopped_at=clock_timestamp()-interval '13 days' WHERE id=$1", [old.id]);
+    const waiting = await stopped("bx_waiting");
+    await pool.query("UPDATE cloud_v2_workspaces SET stopped_at=clock_timestamp()+interval '1 hour' WHERE id=$1", [waiting.id]);
+    const claimed = await store.claimCheckpointRetry(retryInput);
+    expect(claimed?.id).toBe(failed.id);
+    expect(claimed?.retry).toEqual({ generation: await generation(failed.id), attempts: 0, stoppedAt: expect.any(String), exhaustedAt: null });
+    // The lease keeps another replica from taking it meanwhile; nothing else is due.
+    expect(await store.claimCheckpointRetry(retryInput)).toBeNull();
+    expect(await store.claimCheckpointRetry({ ...retryInput, leaseMs: 0, excludeIds: [failed.id] })).toBeNull();
+  });
+
+  it("records a retry's fork before asking for it, fenced to the stop it retries", async () => {
+    const w = await stopped("bx_stopped", checkpoint(randomUUID()));
+    // Stop 1 had a checkpoint; stop 2 does not.
+    await store.transition(w.id, ["stopped"], "starting"); await store.transition(w.id, ["starting"], "running");
+    await store.transition(w.id, ["running"], "stopping");
+    await store.transition(w.id, ["stopping"], "stopped");
+    const claimed = (await store.claimCheckpointRetry(retryInput))!, g = claimed.retry.generation, attempt = randomUUID();
+    const fork = { attempt, name: `zeros-alpha-ws-c${attempt.slice(0, 8)}`, source: "bx_stopped" };
+    expect(await store.beginCheckpointFork(w.id, g, { ...fork, source: "bx_other" })).toBeNull();
+    expect(await store.beginCheckpointFork(w.id, String(BigInt(g) - 1n), fork)).toBeNull();
+    expect(await store.beginCheckpointFork(w.id, g, fork)).toEqual({ ...fork, requestedAt: expect.any(String), sandboxId: null });
+    // Only one fork at a time.
+    expect(await store.beginCheckpointFork(w.id, g, { ...fork, attempt: randomUUID() })).toBeNull();
+    expect(await store.checkpointForkCreated(w.id, randomUUID(), "bx_fork1")).toBe(false);
+    expect(await store.checkpointForkCreated(w.id, attempt, "bx_fork1")).toBe(true);
+    // Deletion and cleanup find it with the workspace.
+    await store.transition(w.id, ["stopped"], "deleting");
+    expect((await lifecycleRow(w.id))?.checkpointRetryFork).toEqual({ ...fork, requestedAt: expect.any(String), sandboxId: "bx_fork1" });
+    await store.checkpointForkGone(w.id, attempt);
+    expect((await lifecycleRow(w.id))?.checkpointRetryFork).toBeNull();
+  });
+
+  it("saves a retry's checkpoint while the stop it retries is the latest, even if the VM was woken, and never after a newer stop", async () => {
+    const w = await stopped("bx_vm"), g = await generation(w.id), upload = checkpoint(w.id);
+    expect(await store.checkpointUpload(w.id, "bx_vm", g, upload.object, new Date(Date.now() + 60_000), "retry")).toBe(true);
+    // A stop's own scope no longer applies to a stopped VM.
+    expect(await store.saveCheckpoint(w.id, "bx_vm", g, upload)).toBe(false);
+    await store.transition(w.id, ["stopped"], "starting");
+    expect(await store.saveCheckpoint(w.id, "bx_other", g, upload, "retry")).toBe(false);
+    expect(await store.saveCheckpoint(w.id, "bx_vm", g, upload, "retry")).toEqual({ replaced: null });
+    // Once this stop has a checkpoint, a second retry write is refused.
+    expect(await store.saveCheckpoint(w.id, "bx_vm", g, checkpoint(w.id), "retry")).toBe(false);
+    await store.transition(w.id, ["starting"], "running");
+    await store.transition(w.id, ["running"], "stopping");
+    const newer = await generation(w.id);
+    await store.transition(w.id, ["stopping"], "stopped");
+    for (const scope of ["retry", "stop"] as const) expect(await store.saveCheckpoint(w.id, "bx_vm", g, checkpoint(w.id), scope)).toBe(false);
+    expect(await store.checkpointUpload(w.id, "bx_vm", g, checkpoint(w.id).object, new Date(Date.now() + 60_000), "retry")).toBe(false);
+    expect(await store.saveCheckpoint(w.id, "bx_vm", newer, checkpoint(w.id), "retry")).toMatchObject({ replaced: upload.object });
+    // Deletion fences every retry write.
+    const gone = await stopped("bx_gone"), gg = await generation(gone.id);
+    await store.transition(gone.id, ["stopped"], "deleting");
+    expect(await store.checkpointUpload(gone.id, "bx_gone", gg, checkpoint(gone.id).object, new Date(Date.now() + 60_000), "retry")).toBe(false);
+    expect(await store.saveCheckpoint(gone.id, "bx_gone", gg, checkpoint(gone.id), "retry")).toBe(false);
+  });
+
+  it("schedules, ends and exhausts only the stop it belongs to, and starts over for a newer stop", async () => {
+    const w = await stopped("bx_sched");
+    let claimed = (await store.claimCheckpointRetry(retryInput))!;
+    const g = claimed.retry.generation, attempt = randomUUID();
+    await store.beginCheckpointFork(w.id, g, { attempt, name: "zeros-alpha-ws-c1", source: "bx_sched" });
+    await store.checkpointForkGone(w.id, attempt);
+    await store.checkpointRetryNext(w.id, g, { at: new Date(Date.now() - 1000) });
+    claimed = (await store.claimCheckpointRetry(retryInput))!;
+    expect(claimed.retry).toMatchObject({ generation: g, attempts: 1, exhaustedAt: null });
+    await store.checkpointRetryNext(w.id, g, { exhausted: true });
+    expect(await store.claimCheckpointRetry({ ...retryInput, leaseMs: 0 })).toBeNull();
+    // An older stop's late outcome changes nothing.
+    await store.checkpointRetryNext(w.id, String(BigInt(g) - 1n), { at: new Date(Date.now() - 1000) });
+    expect(await store.claimCheckpointRetry({ ...retryInput, leaseMs: 0 })).toBeNull();
+    // A newer stop is retried from the start.
+    await store.transition(w.id, ["stopped"], "starting"); await store.transition(w.id, ["starting"], "running");
+    await store.transition(w.id, ["running"], "stopping"); await store.transition(w.id, ["stopping"], "stopped");
+    const next = (await store.claimCheckpointRetry(retryInput))!;
+    expect(next.retry).toMatchObject({ generation: await generation(w.id), attempts: 0, exhaustedAt: null });
+    expect(next.retry.generation).not.toBe(g);
+  });
+
+  it("claims a fork an earlier attempt left in any live state, once its lease has passed", async () => {
+    const w = await stopped("bx_left");
+    const g = (await store.claimCheckpointRetry(retryInput))!.retry.generation, attempt = randomUUID();
+    await store.beginCheckpointFork(w.id, g, { attempt, name: "zeros-alpha-ws-c2", source: "bx_left" });
+    await store.checkpointForkCreated(w.id, attempt, "bx_fork2");
+    // The user woke the workspace meanwhile.
+    await store.transition(w.id, ["stopped"], "starting"); await store.transition(w.id, ["starting"], "running");
+    expect(await store.claimCheckpointRetry(retryInput)).toBeNull();
+    await pool.query("UPDATE cloud_v2_workspaces SET checkpoint_retry_at=clock_timestamp()-interval '1 second' WHERE id=$1", [w.id]);
+    const claimed = await store.claimCheckpointRetry(retryInput);
+    expect(claimed).toMatchObject({ id: w.id, state: "running", checkpointRetryFork: { attempt, sandboxId: "bx_fork2" } });
+  });
 });
