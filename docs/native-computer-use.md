@@ -6,13 +6,14 @@ the user's browser credentials. The provider owns its tool definitions,
 skills, hooks, application and website approvals, and control-session
 lifecycle.
 
-Separately, **Settings → Computer use** turns on Zeros' own computer-control
-runtime (the pinned Cua driver below), which any local agent family can then
-use through the `zeros_computer` tools. The two paths are independent: Codex's
-native plugins stay provider-owned, and the Zeros runtime stays off until the
-user enables it. Zeros computer use reaches users in stages; while its
-[rollout](agent-control.md#rollout) keeps it closed, Settings → Computer use
-is hidden and Codex keeps its native plugins.
+Separately, **Settings → Computer use** controls Zeros' own computer-control
+runtime (the pinned Cua driver below), which local agent families can use
+through the `zeros_computer` tools. It is available and enabled by default
+for every user; explicit opt-outs and managed restrictions still take precedence.
+The two paths are independent: Codex's native plugins stay provider-owned.
+Zeros still requires the Mac's Accessibility and Screen Recording grants,
+and each chat asks before using an app. The [rollout](agent-control.md#rollout)
+has reached the public `default` stage, with no Internal switch.
 
 ## Zeros computer use (Cua driver)
 

@@ -46,16 +46,17 @@ const organization: OrganizationSummary = {
   workspaceCapabilities: { local: true, cloud: true },
   teamCapabilities: { multiple: false, canCreate: false },
 };
-acceptOrganizationSnapshot({
+const membership = {
   user: {
     id: "fixture",
     email: "fixture@example.test",
     displayName: "Fixture",
-    staffRole: null,
+    staffRole: null as "developer" | null,
   },
   organizations: [organization],
   teams: [organization],
-});
+};
+acceptOrganizationSnapshot(membership);
 // Cloud repository IDs come from the catalog and stay stable across reloads.
 acceptCloudWorkspaceDocument({
   id: "22222222-2222-4222-8222-222222222222",
@@ -109,6 +110,11 @@ function openProject(projectId: string) {
 
 const requests: string[] = [];
 Object.assign(window, {
+  repoSettingsOpenApp: () => useWorkspaceStore.getState().dispatch({ type: "SET_ACTIVE_PAGE", page: "settings" }),
+  repoSettingsSetInternal: (internal: boolean) => acceptOrganizationSnapshot({
+    ...membership,
+    user: { ...membership.user, staffRole: internal ? "developer" : null },
+  }),
   repoSettingsRequests: requests,
   repoSettingsProjects: projects,
   openRepoSettingsSection: (section: string) => {

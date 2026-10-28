@@ -314,7 +314,7 @@ export function computerUseSettings(raw: unknown): ComputerUseSettings {
     blockedApps.push(bundleId);
   }
   return {
-    enabled: flag("enabled", false),
+    enabled: flag("enabled", true),
     codexNative: flag("codex_native", true),
     showAgentCursor: flag("show_agent_cursor", true),
     blockedApps,

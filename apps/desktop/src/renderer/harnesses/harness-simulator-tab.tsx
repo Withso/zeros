@@ -661,9 +661,8 @@ async function invoke(command: string, args: Record<string, unknown> = {}): Prom
 }
 
 window.__ZEROS_NATIVE__ = {
-  // A local development build has the simulators rollout open;
-  // `?rolloutClosed` stands for a copy of Zeros without it.
-  localDevelopment: !params.has("rolloutClosed"),
+  // `?public` exercises availability without trusted development access.
+  localDevelopment: !params.has("public"),
   invoke: <T,>(command: string, args?: Record<string, unknown>) =>
     invoke(command, args) as Promise<T>,
   on: <T,>(name: string, callback: (payload: T) => void) => {

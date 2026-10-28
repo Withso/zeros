@@ -18,7 +18,7 @@ describe("resolveSettings — precedence", () => {
       navigation_approval: "always-ask",
     });
     expect(r.effective.computer_use).toEqual({
-      enabled: false,
+      enabled: true,
       codex_native: true,
       show_agent_cursor: true,
       blocked_apps: [
@@ -257,6 +257,18 @@ describe("resolveSettings — layer hygiene", () => {
       in_app_enabled: false,
     });
     expect(resolved.sources["browser.in_app_enabled"]).toBe("user");
+  });
+
+  it("enables public agent controls by default while preserving computer-use opt-outs", () => {
+    const defaults = resolveSettings({});
+    expect(defaults.effective.browser).toMatchObject({ in_app_enabled: true });
+    expect(defaults.effective.computer_use).toMatchObject({ enabled: true });
+    expect(defaults.effective.simulators).toMatchObject({ enabled: true });
+    for (const layer of ["user", "managed"] as const) {
+      const disabled = resolveSettings({ [layer]: { computer_use: { enabled: false } } });
+      expect(disabled.effective.computer_use).toMatchObject({ enabled: false });
+      expect(disabled.sources["computer_use.enabled"]).toBe(layer);
+    }
   });
 
   it("lets an organization lock computer use and ignores repository files", () => {

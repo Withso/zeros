@@ -150,7 +150,7 @@ export function OrganizationSwitcher({
         <Button
           type="button"
           variant="ghost"
-          className="text-fg1 hover:bg-sidebar-bg-hover data-[state=open]:bg-sidebar-bg-hover [&_svg]:text-fg2 mb-2 h-7.5 w-fit max-w-full min-w-0 justify-start gap-2 rounded-md px-1 text-xs font-medium [&_svg]:shrink-0"
+          className="text-fg1 hover:bg-sidebar-bg-hover data-[state=open]:bg-sidebar-bg-hover [&_svg]:text-fg2 h-7.5 w-fit max-w-full min-w-0 justify-start gap-2 rounded-md px-1 text-xs font-medium [&_svg]:shrink-0"
           aria-label="Switch organization"
         >
           <OrganizationIcon organization={active} />

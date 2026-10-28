@@ -307,11 +307,18 @@ Object.assign(window, {
       projectIds: getCloudProjects().map(project => project.id) };
   },
   appSidebarRequests: requests,
+  appSidebarSetMemory: (bytes: number) => {
+    resourceSnapshot.totals = {
+      all: { ...resourceSnapshot.totals.all, memoryBytes: bytes },
+      excludingTerminals: resourceSnapshot.totals.excludingTerminals,
+    };
+  },
   __ZEROS_NATIVE__: {
+    localDevelopment: params.has("internal"),
     on: () => () => {},
     invoke: async (op: string, invokeParams?: Record<string, unknown>) => {
       requests.push({ op, params: invokeParams });
-      if (op === "process_metrics_snapshot") return resourceSnapshot;
+      if (op === "process_metrics_snapshot") return structuredClone(resourceSnapshot);
       if (op === "process_diagnostics_report")
         return {
           text: "# Zeros diagnostics report\n## Recent app logs (secret-scrubbed JSONL, newest last)\n",

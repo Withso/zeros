@@ -44,9 +44,9 @@ export const DEFAULT_SETTINGS: RawSettingsDoc = {
     navigation_approval: "always-ask",
   },
   computer_use: {
-    // Controlling Mac apps needs Accessibility and Screen Recording grants,
-    // so Zeros computer use stays off until the user turns it on.
-    enabled: false,
+    // Availability starts on; Mac permissions and per-app approvals still
+    // authorize every use, and explicit user/managed opt-outs take precedence.
+    enabled: true,
     codex_native: true,
     show_agent_cursor: true,
     blocked_apps: [...DEFAULT_COMPUTER_BLOCKED_APPS],

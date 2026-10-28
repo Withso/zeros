@@ -777,25 +777,13 @@ export async function runSimulatorTabSmoke({ page, check, harnessBase }) {
   await screenshot("cloud");
   check("Cloud workspaces show the local-only notice and read no devices", true);
 
-  // A copy of Zeros without the simulators rollout keeps restored tabs inert.
-  await page.goto(`${harnessBase}/harness-simulator-tab.html?rolloutClosed`);
-  await expect(page.locator("[data-workbench-banner]:visible")).toContainText(
-    "Simulators aren't available in this copy of Zeros.",
-  );
-  await expect(page.locator("[data-simulator-setup-screen]")).toHaveCount(0);
-  // The shell's app-wide followers still mirror main's in-memory agent and
-  // recording state, as computer use does; nothing reads a device.
-  const appWideReads = ["simulator_agent_state", "simulator_recordings"];
-  expect(
-    await page.evaluate(
-      (mirrors) =>
-        window.simulatorFixture.calls.filter(
-          (call) => call.startsWith("simulator_") && !mirrors.includes(call),
-        ),
-      appWideReads,
-    ),
-  ).toEqual([]);
-  check("A closed simulators rollout shows a notice and reads no devices", true);
+  // Public users get the same simulator setup without Internal access.
+  await page.goto(`${harnessBase}/harness-simulator-tab.html?public`);
+  await expect(page.locator("[data-simulator-setup-screen]")).toBeVisible();
+  await expect(attach).toBeEnabled();
+  expect(await page.evaluate(() => window.__ZEROS_NATIVE__.localDevelopment)).toBe(false);
+  expect(await page.evaluate(() => window.simulatorFixture.calls)).toContain("simulator_hub_state");
+  check("Public users can set up simulators without Internal access", true);
 
   // Settings → Simulators: Xcode's status, and the switches and idle
   // shutdown write the user settings file.
