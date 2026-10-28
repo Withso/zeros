@@ -261,7 +261,15 @@ export function extractLocalLinks(text: string, limit = 64): LocalLink[] {
   const seen = new Set<string>();
   const pattern = /zeros(?:-alpha|-beta|-dev)?:\/\/(?:chat|workspace)\/[A-Za-z0-9_.:%-]+/g;
   for (const match of text.matchAll(pattern)) {
-    const link = parseLocalLink(match[0].replace(/[.:-]+$/, ""));
+    // A suffix regexp retries from every punctuation character when a long
+    // internal run ends in a non-punctuation character. Scan only the suffix.
+    const candidate = match[0];
+    let end = candidate.length;
+    while (
+      end > 0 &&
+      (candidate[end - 1] === "." || candidate[end - 1] === ":" || candidate[end - 1] === "-")
+    ) end--;
+    const link = parseLocalLink(candidate.slice(0, end));
     if (!link) continue;
     const key = `${link.scheme}:${link.kind}:${link.id}`;
     if (seen.has(key)) continue;

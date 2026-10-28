@@ -47,7 +47,7 @@ export async function openLocalDirectory(directory: string): Promise<LocalDirect
 /** Open once, without following any mutable path component. The caller must
  * inspect and read this descriptor, never reopen the validated pathname. */
 export async function openLocalFile(file: string): Promise<FileHandle> {
-  if (process.platform === "darwin") return open(resolveSystemPath(file), constants.O_RDONLY | constants.O_NONBLOCK | DARWIN_NOFOLLOW_ANY);
+  if (process.platform === "darwin") return open(resolveSystemPath(file), constants.O_RDONLY | constants.O_NONBLOCK | DARWIN_NOFOLLOW_ANY, 0o600);
   const directory = await openLocalDirectory(path.dirname(file));
   try {
     return await open(path.join(directory.path, path.basename(file)), LOCAL_READ_FLAGS);

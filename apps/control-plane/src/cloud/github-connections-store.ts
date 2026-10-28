@@ -60,7 +60,12 @@ type Row = {
   refresh_lease: string | null;
   refresh_lease_until: Date | null;
 };
-type Snapshot = { actor: Actor; generation: string; rows: Row[] };
+type Snapshot = {
+  scope: CloudGithubConnectionScope;
+  actor: Actor;
+  generation: string;
+  rows: Row[];
+};
 const changed = () =>
   new HttpError(
     409,
@@ -107,11 +112,11 @@ export class CloudGithubConnectionStore {
     tx: Tx,
     scope: CloudGithubConnectionScope,
   ): Promise<Snapshot> {
-    const actor = (
-      await tx.query<Actor>(
+    const confirmed = (
+      await tx.query<Actor & { organization_id: string; user_id: string }>(
         `SELECT u.auth_revision::text AS user_revision,o.authorization_revision::text AS org_revision,
       m.authorization_revision::text AS member_revision,m.created_at::text AS member_created,
-      s.selected_method,s.generation::text AS selection_generation
+      s.selected_method,s.generation::text AS selection_generation,m.org_id AS organization_id,m.user_id
       FROM organization_members m JOIN users u ON u.id=m.user_id JOIN organizations o ON o.id=m.org_id
       LEFT JOIN cloud_github_selections s ON s.org_id=m.org_id AND s.owner_user_id=m.user_id
       WHERE m.org_id=$1 AND m.user_id=$2 AND u.auth_status='active' AND u.deleted_at IS NULL
@@ -119,8 +124,13 @@ export class CloudGithubConnectionStore {
         [scope.organizationId, scope.userId],
       )
     ).rows[0];
-    if (!actor)
+    if (!confirmed)
       throw new HttpError(404, "not_found", "Organization not found.");
+    const {
+      organization_id: organizationId,
+      user_id: userId,
+      ...actor
+    } = confirmed;
     const rows = (
       await tx.query<Row>(
         "SELECT * FROM cloud_github_credentials WHERE org_id=$1 AND owner_user_id=$2 ORDER BY method",
@@ -130,8 +140,8 @@ export class CloudGithubConnectionStore {
     const generation = createHash("sha256")
       .update(
         JSON.stringify([
-          scope.organizationId,
-          scope.userId,
+          organizationId,
+          userId,
           actor,
           rows.map((row) => [
             row.id,
@@ -142,7 +152,7 @@ export class CloudGithubConnectionStore {
         ]),
       )
       .digest("hex");
-    return { actor, generation, rows };
+    return { scope: { organizationId, userId }, actor, generation, rows };
   }
   private read(scope: CloudGithubConnectionScope) {
     return withSystemTx(this.pool, (tx) => this.snapshot(tx, scope));
@@ -162,8 +172,8 @@ export class CloudGithubConnectionStore {
     generation: string,
   ): Promise<void> {
     await tx.query(
-      "SELECT pg_advisory_xact_lock(hashtextextended($1,0)) /* lock_purpose='cloud-github-connection' */",
-      [JSON.stringify([scope.organizationId, scope.userId])],
+      `SELECT pg_advisory_xact_lock(hashtextextended(format('["%s","%s"]',$1::uuid::text,$2::uuid::text),0)) /* lock_purpose='cloud-github-connection' */`,
+      [scope.organizationId, scope.userId],
     );
     if ((await this.snapshot(tx, scope)).generation !== generation)
       throw changed();
@@ -201,9 +211,10 @@ export class CloudGithubConnectionStore {
   ): Promise<T> {
     return withSystemTx(this.pool, async (tx) => {
       // Short mutation-only lock; no provider I/O occurs while it is held.
+      // Canonical UUIDs share the existing JSON lock key across spellings.
       await tx.query(
-        "SELECT pg_advisory_xact_lock(hashtextextended($1,0)) /* lock_purpose='cloud-github-connection' */",
-        [JSON.stringify([scope.organizationId, scope.userId])],
+        `SELECT pg_advisory_xact_lock(hashtextextended(format('["%s","%s"]',$1::uuid::text,$2::uuid::text),0)) /* lock_purpose='cloud-github-connection' */`,
+        [scope.organizationId, scope.userId],
       );
       const value = await this.snapshot(tx, scope);
       if (value.generation !== expected) throw changed();
@@ -243,18 +254,18 @@ export class CloudGithubConnectionStore {
       !/^[A-Za-z0-9_.-]{1,100}$/.test(identity.login)
     )
       throw expired();
-    const seal = {
-      id: randomUUID(),
-      generation: randomUUID(),
-      organizationId: scope.organizationId,
-      userId: scope.userId,
-      method: material.method,
-      version: 1,
-      keyVersion: this.keys.currentKeyVersion,
-    };
-    const envelope = sealGithubCredential(material, seal, this.keys);
-    await this.edit(scope, expected, async (tx) => {
-      await this.selection(tx, scope, material.method);
+    await this.edit(scope, expected, async (tx, value) => {
+      const seal = {
+        id: randomUUID(),
+        generation: randomUUID(),
+        organizationId: value.scope.organizationId,
+        userId: value.scope.userId,
+        method: material.method,
+        version: 1,
+        keyVersion: this.keys.currentKeyVersion,
+      };
+      const envelope = sealGithubCredential(material, seal, this.keys);
+      await this.selection(tx, value.scope, material.method);
       await tx.query(
         `INSERT INTO cloud_github_credentials(id,org_id,owner_user_id,method,generation,github_user_id,github_login,
         version,key_version,nonce,ciphertext,auth_tag,expires_at) VALUES($1,$2,$3,$4,$5,$6,$7,1,$8,$9,$10,$11,$12)
@@ -264,8 +275,8 @@ export class CloudGithubConnectionStore {
         refresh_lease=NULL,refresh_lease_until=NULL,updated_at=now()`,
         [
           seal.id,
-          scope.organizationId,
-          scope.userId,
+          seal.organizationId,
+          seal.userId,
           material.method,
           seal.generation,
           identity.id,
@@ -286,7 +297,7 @@ export class CloudGithubConnectionStore {
   ): Promise<void> {
     await this.edit(scope, expected, async (tx, value) => {
       if (!value.rows.some((row) => row.method === method)) throw required();
-      await this.selection(tx, scope, method);
+      await this.selection(tx, value.scope, method);
     });
   }
   async disconnect(
@@ -301,7 +312,7 @@ export class CloudGithubConnectionStore {
       );
       await this.selection(
         tx,
-        scope,
+        value.scope,
         value.actor.selected_method === method
           ? null
           : value.actor.selected_method,
@@ -317,7 +328,7 @@ export class CloudGithubConnectionStore {
     return this.edit(scope, expected, async (tx, value) => {
       // Starting a new attempt invalidates older callbacks without changing the
       // selected method or discarding its usable credential.
-      await this.selection(tx, scope, value.actor.selected_method);
+      await this.selection(tx, value.scope, value.actor.selected_method);
       const generation = (await this.snapshot(tx, scope)).generation;
       await tx.query(
         "DELETE FROM cloud_github_oauth_states WHERE org_id=$1 AND owner_user_id=$2",
@@ -378,7 +389,7 @@ export class CloudGithubConnectionStore {
     expected: string,
   ): Promise<void> {
     await this.edit(scope, expected, async (tx, value) => {
-      await this.selection(tx, scope, value.actor.selected_method);
+      await this.selection(tx, value.scope, value.actor.selected_method);
       await tx.query(
         "DELETE FROM cloud_github_oauth_states WHERE org_id=$1 AND owner_user_id=$2",
         [scope.organizationId, scope.userId],

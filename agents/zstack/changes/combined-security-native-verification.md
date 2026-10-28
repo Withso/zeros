@@ -32,3 +32,29 @@
   local PostgreSQL clusters must also provide the `postgres` administrative
   role that the CI service and hosted authority check expect, without granting
   it to the runtime fixture.
+- Git's `config --file` replaces its target, so reopening `config.lock` after
+  those edits lost ownership of the lock. Stage Git rewrites privately, hold
+  the original exclusive descriptor, verify its pathname before publishing and
+  never remove a replacement lock. The remote-repair regression swaps the lock
+  after Git's last rewrite and requires both configurations to survive intact.
+- OAuth callback metadata flowed into an authorization-generation hash. Build
+  that public fingerprint from confirmed database identity and revision fields.
+  Equivalent UUID spellings must also share the same advisory-lock key; the
+  database regressions hold the canonical lock across both mutation paths.
+  Use that confirmed identity for credential envelope bindings and revocation
+  notifications too; an uppercase save must decrypt through its stored identity.
+- A trailing-punctuation regexp became quadratic on long internal punctuation
+  runs in pasted links. A backward suffix scan preserves link parsing and runs
+  in linear time; the regression isolates adversarial input in a bounded child.
+- File-open analysis can overlook Darwin's numeric read-only flags. Keep the
+  no-follow flags and supply an explicit private mode; do not add create/write
+  flags or combine the incompatible Darwin no-follow variants. Tests inspect
+  and read one held descriptor instead of reopening a checked pathname.
+- A later CodeQL run also flagged a callback selected from a keyed map. Keep
+  each refresh callback on its captured queue record, while map keys coalesce
+  repeated requests. Settings tests retain one read per exact Local,
+  organization-local and cloud root across repeated listener broadcasts.
+- Forward Vitest path filters directly through a pnpm script. An extra `--`
+  puts those paths in Vitest's pass-through options and can silently run the
+  whole root suite. Confirm the matched file count before labeling a receipt
+  as an adjacent run; retain the actual scope and any interrupted run.

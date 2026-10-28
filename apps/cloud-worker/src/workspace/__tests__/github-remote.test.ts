@@ -1,4 +1,4 @@
-import { readFile, writeFile } from "node:fs/promises";
+import { readFile, writeFile, rename } from "node:fs/promises";
 import { join } from "node:path";
 import { expect, it } from "vitest";
 import { commandRunner } from "../commands";
@@ -124,4 +124,29 @@ it("never repairs a binding that was retired while Git was reading", async () =>
   expect(await git("remote", "get-url", "origin")).toBe(
     "https://github.com/former/project.git",
   );
+});
+
+it("refuses a replaced repair lock and preserves the replacement", async () => {
+  const { root, git } = await repositoryFixture(),
+    run = commandRunner(root);
+  await git("remote", "add", "origin", "https://github.com/former/project.git");
+  const config = join(root, ".git/config"),
+    lock = `${config}.lock`;
+  const before = await readFile(config, "utf8");
+  const replacement =
+    '[remote "origin"]\nurl = https://github.com/another/project.git\n';
+  let replaced = false;
+  const racing: typeof run = async (program, args, options) => {
+    const result = await run(program, args, options);
+    if (!replaced && args.includes("--add")) {
+      replaced = true;
+      await rename(lock, join(root, "retired-repair-lock"));
+      await writeFile(lock, replacement, { flag: "wx", mode: 0o600 });
+    }
+    return result;
+  };
+  expect(await reconcileGithubRemote(root, binding, racing)).toBe(false);
+  expect(replaced).toBe(true);
+  expect(await readFile(config, "utf8")).toBe(before);
+  expect(await readFile(lock, "utf8")).toBe(replacement);
 });

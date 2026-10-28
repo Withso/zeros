@@ -47,20 +47,23 @@ const resolvedSettingsCache = new KeyedAsyncCache<ResolvedSettingsWire>(48);
 const settingsLayerCache = new KeyedAsyncCache<SettingsReadWire>(48);
 const SETTINGS_CACHE_MAX_AGE_MS = 30_000;
 const MAX_BOOT_PREFETCH_REPOS = 8;
-const scheduledSettingsRefreshes = new Map<string, () => void>();
+const scheduledSettingsRefreshes = new Map<string, { refresh: () => void }>();
 
 /** Coalesce the synchronous fan-out from retained settings panels. Every
  * subscriber first marks its exact key stale; one microtask then performs the
  * read. A second DB event during that read is still observed by
  * KeyedAsyncCache and becomes one queued generation. */
 function scheduleSettingsRefresh(id: string, refresh: () => void): void {
-  const alreadyScheduled = scheduledSettingsRefreshes.has(id);
-  scheduledSettingsRefreshes.set(id, refresh);
-  if (alreadyScheduled) return;
+  const queued = scheduledSettingsRefreshes.get(id);
+  if (queued) {
+    queued.refresh = refresh;
+    return;
+  }
+  const pending = { refresh };
+  scheduledSettingsRefreshes.set(id, pending);
   queueMicrotask(() => {
-    const scheduled = scheduledSettingsRefreshes.get(id);
     scheduledSettingsRefreshes.delete(id);
-    scheduled?.();
+    pending.refresh();
   });
 }
 

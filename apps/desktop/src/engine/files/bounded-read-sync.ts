@@ -49,7 +49,7 @@ export function openBoundedFileSync(file: string, root?: string): number {
     target = path.join(realpathSync(root), relative);
   } else target = resolveSystemPath(target);
   if (process.platform === "darwin")
-    return openSync(target, constants.O_RDONLY | constants.O_NONBLOCK | 0x20000000);
+    return openSync(target, constants.O_RDONLY | constants.O_NONBLOCK | 0x20000000, 0o600);
   if (process.platform !== "linux") throw new Error("Safe configuration reads are unavailable on this host.");
   const directoryFlags = constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW;
   let directory = openSync("/", directoryFlags);

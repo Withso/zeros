@@ -13,7 +13,7 @@
 
 import { appOrigin, redirectUri } from "./hosts";
 import { SESSION_COOKIE, SESSION_TTL_S, type Env, type SessionData } from "./session";
-import { b64url, sha256B64url } from "./handoff-security";
+import { b64url } from "./handoff-security";
 import { auth0SessionAuthority } from "./auth0-session-authority";
 
 /** @deprecated Prefer redirectUri(env). Kept as the production default string

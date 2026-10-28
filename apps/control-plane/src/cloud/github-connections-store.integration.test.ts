@@ -10,6 +10,7 @@ import {
   vi,
 } from "vitest";
 import { resetMigratedTestDatabase } from "../test-database.js";
+import { withSystemTx } from "../db.js";
 import { CloudGithubConnectionStore } from "./github-connections-store.js";
 
 const database = process.env.TEST_DATABASE_URL ? describe : describe.skip;
@@ -71,6 +72,78 @@ database("cloud GitHub connection ownership and rotation", () => {
       material,
     );
   }
+  it("fingerprints the confirmed database identity across equivalent UUID spellings", async () => {
+    await save();
+    const canonical = await store.fingerprint(scope());
+    expect(
+      await store.fingerprint({
+        organizationId: organizationId.toUpperCase(),
+        userId: userId.toUpperCase(),
+      }),
+    ).toBe(canonical);
+  });
+  it("binds saved credentials to the confirmed database identity", async () => {
+    const alias = {
+      organizationId: organizationId.toUpperCase(),
+      userId: userId.toUpperCase(),
+    };
+    await store.save(alias, await store.fingerprint(alias), identity, pat);
+    expect((await store.credential(scope())).material).toEqual(pat);
+    expect((await store.credential(alias)).material).toEqual(pat);
+  });
+  it.each(["lockCurrent", "edit"] as const)("serializes %s across equivalent UUID spellings", async (method) => {
+    await save();
+    const generation = await store.fingerprint(scope());
+    const alias = {
+      organizationId: organizationId.toUpperCase(),
+      userId: userId.toUpperCase(),
+    };
+    const holder = await pool.connect();
+    let settled = false;
+    let pending: Promise<unknown> | undefined;
+    try {
+      await holder.query("BEGIN");
+      const { rows: [{ pid }] } = await holder.query<{ pid: number }>(
+        "SELECT pg_backend_pid() AS pid, pg_advisory_xact_lock(hashtextextended($1,0))",
+        [JSON.stringify([organizationId, userId])],
+      );
+      pending = (
+        method === "lockCurrent"
+          ? withSystemTx(pool, (tx) => store.lockCurrent(tx, alias, generation))
+          : store.disconnect(alias, generation, "pat")
+      ).then(
+        () => {
+          settled = true;
+          return { completed: true };
+        },
+        (error: unknown) => {
+          settled = true;
+          return error;
+        },
+      );
+      await vi.waitFor(async () => {
+        expect(settled).toBe(false);
+        const waiting = await pool.query(
+          "SELECT pid FROM pg_stat_activity WHERE $1=ANY(pg_blocking_pids(pid))",
+          [pid],
+        );
+        expect(waiting.rowCount).toBe(1);
+      });
+      await holder.query(
+        "UPDATE cloud_github_selections SET generation=gen_random_uuid() WHERE org_id=$1 AND owner_user_id=$2",
+        [organizationId, userId],
+      );
+      await holder.query("COMMIT");
+      expect(await pending).toMatchObject({
+        code: "github_authorization_changed",
+      });
+      expect((await store.status(scope())).methods.pat.configured).toBe(true);
+    } finally {
+      await holder.query("ROLLBACK");
+      holder.release();
+      await pending;
+    }
+  });
   it("keeps credentials encrypted and returns only the selected user's metadata", async () => {
     await save();
     const status = await store.status(scope());

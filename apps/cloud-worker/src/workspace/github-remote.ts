@@ -2,14 +2,18 @@ import {
   closeSync,
   constants,
   fstatSync,
+  lstatSync,
+  mkdtempSync,
   openSync,
-  readFileSync,
+  readSync,
   renameSync,
+  rmSync,
   unlinkSync,
   writeFileSync,
   fchmodSync,
   fsyncSync,
 } from "node:fs";
+import { tmpdir } from "node:os";
 import { join, relative, isAbsolute } from "node:path";
 import type { CommandRunner } from "./commands";
 
@@ -57,13 +61,32 @@ export function githubRemoteRepository(value: string): string | null {
 }
 
 function readConfig(path: string) {
-  const fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+  const fd = openSync(
+    path,
+    constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK,
+    0o600,
+  );
   try {
     const stat = fstatSync(fd);
     if (!stat.isFile() || stat.size > 2 * 1024 * 1024)
       throw new Error("Unsupported Git configuration.");
+    const bytes = Buffer.alloc(stat.size + 1);
+    let size = 0;
+    while (size < bytes.length) {
+      const count = readSync(fd, bytes, size, bytes.length - size, null);
+      if (!count) break;
+      size += count;
+    }
+    const after = fstatSync(fd);
+    if (
+      size !== stat.size ||
+      after.size !== stat.size ||
+      after.mtimeMs !== stat.mtimeMs ||
+      after.ctimeMs !== stat.ctimeMs
+    )
+      throw new Error("Git configuration changed during read.");
     return {
-      data: readFileSync(fd, "utf8"),
+      data: bytes.subarray(0, size).toString("utf8"),
       ino: stat.ino,
       dev: stat.dev,
       mtimeMs: stat.mtimeMs,
@@ -160,24 +183,37 @@ export async function reconcileGithubRemote(
   if (!edits.length || !current() || !unchanged(readConfig(path), before))
     return false;
   const lock = `${path}.lock`;
+  let fd: number | undefined;
+  let staging: string | undefined;
   let owned = false;
+  const ownsLock = () => {
+    if (fd === undefined || !owned) return false;
+    try {
+      const held = fstatSync(fd),
+        named = lstatSync(lock);
+      return named.isFile() && held.ino === named.ino && held.dev === named.dev;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
+      throw error;
+    }
+  };
   try {
-    const fd = openSync(
+    fd = openSync(
       lock,
       constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL,
       0o600,
     );
     owned = true;
-    try {
-      writeFileSync(fd, before.data);
-    } finally {
-      closeSync(fd);
-    }
+    // Git replaces the file passed to --file. Keep its edits in a private
+    // staging directory while holding our original config.lock descriptor.
+    staging = mkdtempSync(join(tmpdir(), "zeros-github-config-"));
+    const stagedConfig = join(staging, "config");
+    writeFileSync(stagedConfig, before.data, { flag: "wx", mode: 0o600 });
     for (const key of edits) {
       await run("git", [
         "config",
         "--file",
-        lock,
+        stagedConfig,
         "--no-includes",
         "--unset-all",
         key,
@@ -186,26 +222,24 @@ export async function reconcileGithubRemote(
         await run("git", [
           "config",
           "--file",
-          lock,
+          stagedConfig,
           "--no-includes",
           "--add",
           key,
           rewrite(value),
         ]);
     }
+    const replacement = readConfig(stagedConfig).data;
     if (
       !(await effective()) ||
       !current() ||
-      !unchanged(readConfig(path), before)
+      !unchanged(readConfig(path), before) ||
+      !ownsLock()
     )
       return false;
-    const written = openSync(lock, constants.O_RDWR | constants.O_NOFOLLOW);
-    try {
-      fchmodSync(written, before.mode & 0o777);
-      fsyncSync(written);
-    } finally {
-      closeSync(written);
-    }
+    writeFileSync(fd, replacement);
+    fchmodSync(fd, before.mode & 0o777);
+    fsyncSync(fd);
     renameSync(lock, path);
     owned = false;
     return true;
@@ -213,12 +247,14 @@ export async function reconcileGithubRemote(
     if ((error as NodeJS.ErrnoException).code === "EEXIST") return false;
     throw error;
   } finally {
-    if (owned) {
-      try {
-        unlinkSync(lock);
-      } catch {
-        /* Preserve the original result. */
-      }
+    try {
+      if (ownsLock()) unlinkSync(lock);
+    } catch {
+      /* Preserve the original result and any replacement lock. */
+    } finally {
+      if (fd !== undefined) closeSync(fd);
+      if (staging !== undefined)
+        rmSync(staging, { recursive: true, force: true });
     }
   }
 }

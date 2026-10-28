@@ -17,9 +17,12 @@ it("writes boot diagnostics into a fresh private directory without following a p
     const directory = fs.readdirSync(root).find(name => name.startsWith("zeros-boot-") && fs.statSync(path.join(root, name)).isDirectory())!;
     const log = path.join(root, directory, "boot.log");
     expect(fs.statSync(path.dirname(log)).mode & 0o777).toBe(0o700);
-    expect(fs.statSync(log).mode & 0o777).toBe(0o600);
     expect(fs.readFileSync(outside, "utf8")).toBe("canary");
-    expect(fs.readFileSync(log, "utf8")).not.toContain("synthetic confidential message");
+    const fd = fs.openSync(log, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW, 0o600);
+    try {
+      expect(fs.fstatSync(fd).mode & 0o777).toBe(0o600);
+      expect(fs.readFileSync(fd, "utf8")).not.toContain("synthetic confidential message");
+    } finally { fs.closeSync(fd); }
     processStub.emit("exit");
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
