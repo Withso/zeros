@@ -19,11 +19,9 @@ export function cursorTokenUsage(raw: unknown): TurnUsage | undefined {
     const value = (raw as Record<string, unknown>)[key];
     if (valid(value)) result[key] = value;
   }
-  // Native Cursor input excludes both cache buckets (SDK totalTokens sums all
-  // three). Canonical input is inclusive; cache counts are subsets for display.
-  if (result.inputTokens !== undefined)
-    result.inputTokens +=
-      (result.cacheReadTokens ?? 0) + (result.cacheWriteTokens ?? 0);
+  // Native input already includes cache reads and writes. SDK 1.1 corrected
+  // totalTokens to input + output; older totals double-counted the caches.
+  // Keep the component counts, including when reloading an older stored run.
   return Object.keys(result).length ? result : undefined;
 }
 

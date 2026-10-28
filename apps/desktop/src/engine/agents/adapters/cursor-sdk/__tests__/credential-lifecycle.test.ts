@@ -132,6 +132,11 @@ describe("Cursor credential lifecycle", () => {
       "transport-closed",
     ],
     ["[unknown] The fixture credential was revoked.", "auth-required"],
+    // SDK 1.1 persists native codes in the store's single error string. The
+    // neutral message must not erase classification when wait has no detail.
+    ["[unauthenticated] Request rejected.", "auth-required"],
+    ["[resource_exhausted] Request rejected.", "rate-limited"],
+    ["Context mentions [resource_exhausted] in prose.", "protocol-error"],
     [
       { code: "unauthenticated", message: "The access token has expired." },
       "auth-required",

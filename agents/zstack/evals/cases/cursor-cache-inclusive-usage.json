@@ -1,0 +1,9 @@
+{
+  "id": "cursor-cache-inclusive-usage",
+  "kind": "replay",
+  "area": "agents",
+  "fixedBy": "pr:749",
+  "symptom": "Cursor input tokens were inflated by adding cache-read and cache-write subsets to already inclusive native input in both Local and cloud workspaces.",
+  "rule": "changes/cursor-sdk-surface-and-cache-contract.md: verify native component semantics on independent SDK pins and stored runs instead of inferring them from a derived total.",
+  "check": "pnpm exec vitest run apps/desktop/src/engine/agents/adapters/cursor-sdk/__tests__/usage-accounting.test.ts"
+}
