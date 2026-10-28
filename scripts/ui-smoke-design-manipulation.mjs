@@ -26,10 +26,12 @@ await mkdir(output, { recursive: true });
 const wants = name => !values.only || values.only.split(",").includes(name);
 const identity = async () => {
   const archived = await readFile(resolve(sourceRoot, ".baseline-source.json"), "utf8").then(JSON.parse).catch(() => null);
-  const files = (archived
+  const files = (Array.isArray(archived?.files) ? archived.files : archived
     ? execFileSync("git", ["ls-tree", "-r", "--name-only", archived.revision], { encoding: "utf8" }).split("\n")
     : execFileSync("git", ["ls-files", "--cached", "--others", "--exclude-standard", "-z"], { cwd: sourceRoot, encoding: "utf8" }).split("\0"))
     .filter(file => /^(apps\/desktop\/src\/|packages\/|styles\/)/.test(file) || ["vite.config.ts", "package.json", "pnpm-lock.yaml"].includes(file)).sort();
+  if (files.some(file => typeof file !== "string" || file.split("/").some(part => part === ".." || part === ".")))
+    throw new Error("The archived source manifest contains an invalid path.");
   const digest = createHash("sha256");
   for (const file of files) digest.update(file).update("\0").update(await readFile(resolve(sourceRoot, file))).update("\0");
   return { revision: archived?.revision ?? execFileSync("git", ["rev-parse", "HEAD"], { cwd: sourceRoot, encoding: "utf8" }).trim(),
