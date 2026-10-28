@@ -1,0 +1,9 @@
+{
+  "id": "design-node-warming-lifetime",
+  "kind": "replay",
+  "area": "desktop-renderer",
+  "fixedBy": "pending",
+  "symptom": "A focused Design layer's held detail reply could publish after hiding, directory A-to-B-to-A replacement, same-connection source advancement or queue reset.",
+  "rule": "Fence speculative reads at completion by owner lifetime, active connection and source generation; retired queues cannot publish or start pending reads. Keep hidden surfaces inert and caches exact-keyed, as required by zstack-review.",
+  "check": "pnpm exec vitest run --config vitest.config.ts apps/desktop/src/renderer/features/design-workspace/__tests__/design-node-warming.test.ts --testNamePattern 'drops a warm reply|does not publish an old directory|does not reintroduce|retires an in-flight'"
+}

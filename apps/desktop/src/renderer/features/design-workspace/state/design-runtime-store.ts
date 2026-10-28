@@ -71,6 +71,7 @@ interface DesignRuntimeStore {
     frame: string,
     details: DesignRuntimeNodeDetails,
     sourceVersion: string,
+    options?: { retainNodeIds: readonly string[] },
   ): void;
   publishScreenshot(
     workspaceId: string,
@@ -494,7 +495,7 @@ export const useDesignRuntimeStore = create<DesignRuntimeStore>((set) => ({
     });
   },
 
-  publishNodeDetails(workspaceId, folder, frame, details, sourceVersion) {
+  publishNodeDetails(workspaceId, folder, frame, details, sourceVersion, options) {
     if (details.sourceVersion !== sourceVersion) return;
     set((state) => {
       const existing = state.byWorkspace[workspaceId]?.frames[frame];
@@ -524,8 +525,16 @@ export const useDesignRuntimeStore = create<DesignRuntimeStore>((set) => ({
           const detailOrder = touchOrder(
             current.detailOrder,
             details.oid,
-            MAX_DETAILS_PER_FRAME,
+            options ? MAX_DETAILS_PER_FRAME + 1 : MAX_DETAILS_PER_FRAME,
           );
+          if (detailOrder.length > MAX_DETAILS_PER_FRAME) {
+            // Speculative values may evict other speculative values, but not
+            // the selected inspector's resident details. Keep the same bound.
+            const retained = new Set(options?.retainNodeIds.filter(nodeId => current.detailsByNode[nodeId]).slice(0, MAX_DETAILS_PER_FRAME));
+            const removable = detailOrder.findIndex(nodeId => !retained.has(nodeId));
+            if (removable < 0 || detailOrder[removable] === details.oid) return current;
+            detailOrder.splice(removable, 1);
+          }
           return {
             ...current,
             sourceVersion: current.sourceVersion ?? sourceVersion,
