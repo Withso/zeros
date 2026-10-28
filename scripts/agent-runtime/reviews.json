@@ -3,6 +3,67 @@
   "decisions": [
     {
       "provider": "claude",
+      "fingerprint": "e2ddc7a2b993af1fa97e8cb1ddee2f9a6f050a07477d3f2e19002c0de421d760",
+      "disposition": "preserved-generically",
+      "rationale": "AgentOutput.toolsUsed is optional native summary metadata. Local and cloud retain it in the Agent raw output through replay, task settlement and history persistence. Actual child tool events retain their own identities; the summary does not synthesize child rows or change task completion.",
+      "evidence": [
+        "scripts/__tests__/claude-runtime-upgrade-contract.ts",
+        "apps/desktop/src/engine/agents/adapters/claude/__tests__/runtime-upgrade.test.ts",
+        "apps/cloud-worker/src/drivers/claude/__tests__/runtime-upgrade.test.ts",
+        "apps/cloud-worker/src/drivers/claude/__tests__/parity.test.ts"
+      ]
+    },
+    {
+      "provider": "claude",
+      "fingerprint": "0d1e72d60b9e5e7080596c87a50aaf15cb92ad4484c578acd4b18e2777ecb070",
+      "disposition": "intentionally-deferred",
+      "rationale": "ProjectsOutput.project_info adds optional local_file metadata. Both translators preserve ordinary native tool-result content with or without the pointer. Opening that provider path or adding a project-details UI is deferred; it is not treated as a Zeros workspace identity or automatically read.",
+      "evidence": [
+        "scripts/__tests__/claude-runtime-upgrade-contract.ts",
+        "apps/desktop/src/engine/agents/adapters/claude/__tests__/runtime-upgrade.test.ts",
+        "apps/cloud-worker/src/drivers/claude/__tests__/runtime-upgrade.test.ts",
+        "apps/cloud-worker/src/drivers/claude/__tests__/parity.test.ts"
+      ]
+    },
+    {
+      "provider": "claude",
+      "fingerprint": "5548d3efe4a4d01a0e8b60fdd0c920fa7c8c336440ea87fc632ce79c67c09a0f",
+      "disposition": "intentionally-deferred",
+      "rationale": "ModelUsage.cacheCreationEphemeral5mInputTokens and cacheCreationEphemeral1hInputTokens are optional subsets of cacheCreationInputTokens and may undercount older or unknown-lifetime writes. Defer the lifetime breakdown; Local and cloud keep aggregate cache writes, cumulative usage deltas and provider-reported estimated cost without adding these subsets again or repricing them.",
+      "evidence": [
+        "scripts/__tests__/claude-runtime-upgrade-contract.ts",
+        "apps/desktop/src/engine/agents/adapters/claude/__tests__/runtime-upgrade.test.ts",
+        "apps/cloud-worker/src/drivers/claude/__tests__/runtime-upgrade.test.ts",
+        "apps/desktop/src/engine/agents/adapters/claude/translator.ts",
+        "apps/cloud-worker/src/drivers/claude/translator.ts"
+      ]
+    },
+    {
+      "provider": "claude",
+      "fingerprint": "d13a2bb237ee9dc8d4673db70bc160305934bc030707ae7507601bfdd30520b9",
+      "disposition": "sdk-owned",
+      "rationale": "SDKPermissionRuleEntry.source adds mcpMount for the native permission-rule listing. Neither Local nor cloud invokes or interprets list_permission_rules. Native rule evaluation remains SDK-owned, with the existing permission callbacks and approvals unchanged.",
+      "evidence": [
+        "apps/desktop/src/engine/agents/adapters/claude-sdk/adapter.ts",
+        "apps/cloud-worker/src/drivers/claude/driver.ts",
+        "docs/claude-event-coverage.md"
+      ]
+    },
+    {
+      "provider": "claude",
+      "fingerprint": "88a0c76ab54336505c7244a1e9f480b53646e2f84fb0e5a61cc3d20806436f74",
+      "disposition": "sdk-owned",
+      "rationale": "Settings adds marketplace pluginDigests metadata. The native runtime owns managed-plugin verification; neither Local nor cloud overrides these digests or adds marketplace controls. Existing plugin installation feedback and failure handling remain in place.",
+      "evidence": [
+        "apps/desktop/src/engine/agents/adapters/claude-sdk/adapter.ts",
+        "apps/cloud-worker/src/drivers/claude/driver.ts",
+        "apps/desktop/src/engine/agents/adapters/claude/__tests__/sdk-event-feedback.test.ts",
+        "apps/cloud-worker/src/drivers/claude/__tests__/parity.test.ts",
+        "docs/claude-event-coverage.md"
+      ]
+    },
+    {
+      "provider": "claude",
       "fingerprint": "ad6226f2cdf3cc4329e4a37d79660871ffe1f1d1cdb152602ac1baa165c7b417",
       "disposition": "intentionally-deferred",
       "rationale": "BrowserQueryOptionsBase adds supportedDialogKinds?: string[]. This browser transport option does not apply: Local and cloud use the Node SDK query API, whose dialog options are already configured independently.",
