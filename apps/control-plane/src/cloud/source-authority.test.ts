@@ -90,7 +90,7 @@ it("does not publish an interrupted clone over the workspace's final directory",
 
 it("requires every legacy source, even when the selected checkout is allowed", async () => {
   const github = { fingerprintFor: vi.fn(async () => "epoch"), check: vi.fn(async (input: { repositories: readonly string[] }) => {
-    if (input.repositories[0] === "private") throw new Error("denied");
+    if (input.repositories[0] === "private") throw new HttpError(403, "github_cloud_access_denied", "denied");
     return "epoch";
   }) };
   const pool = { query: async () => ({ rows: [{ source_repositories: ["example/selected", "example/private"] }] }) };
@@ -158,7 +158,7 @@ it("coalesces checks, expires positive observations, and never reuses them acros
   generation = "two";
   await source.repository("org", "user", "example/repo");
   expect(github.check).toHaveBeenCalledTimes(3);
-  github.check.mockRejectedValue(new Error("revoked")); now += 30_001;
+  github.check.mockRejectedValue(new HttpError(403, "github_cloud_access_denied", "revoked")); now += 30_001;
   await expect(source.repository("org", "user", "example/repo")).rejects.toThrow("revoked");
   await expect(source.repository("org", "user", "example/repo")).rejects.toThrow("revoked");
 });

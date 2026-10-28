@@ -8,6 +8,7 @@ import type { CloudV2Store, CloudV2WorkerSession, CloudV2Workspace } from "./sto
 import { isCloudV2Token } from "./tokens.js";
 import { CloudV2PromptAckSchema, CloudV2PromptBeginSchema, CloudV2PromptOutcomeSchema, CloudV2PromptPullSchema, CloudV2PromptStopReplySchema, CloudV2PromptStopSchema } from "./prompt-contract.js";
 import { CloudGithubCheckoutSchema, type CloudGithubCheckout } from "./github-pr-contract.js";
+import type { CloudSourceContinuation, CloudSourceProof } from "./source-authority.js";
 
 export const CLOUD_V2_WORKER_API = "/v2/cloud/worker";
 type ConfigFrame = Extract<CloudV2ControlFrame, { t: "config" }>;
@@ -17,8 +18,9 @@ export type CloudV2WorkerRouteDeps = {
   promptOutbox?: boolean;
   timing?: (record: CloudV2TimingRecord) => void;
   waitForPrompts?(workspaceId: string, waitMs: number, signal: AbortSignal): { wait: Promise<void>; dispose(): void };
-  config(workspace: CloudV2Workspace): Promise<ConfigFrame>;
+  config(workspace: CloudV2Workspace, mode?: "admission" | "continuation"): Promise<ConfigFrame>;
   authorizeSource?(workspace: CloudV2Workspace): Promise<void>;
+  continueSource?(workspace: CloudV2Workspace, proof?: CloudSourceProof): Promise<CloudSourceContinuation>;
   githubToken(workspace: CloudV2Workspace, purpose?: "git" | "gh"): Promise<{ token: string; expiresAt: number }>;
   githubCheckout?(token: string, bootId: string, value: CloudGithubCheckout): Promise<void>;
   mcpAuthorization?(workspace: CloudV2Workspace, id: string, force: boolean): Promise<{ headers: Record<string, string>; expiresAt?: number }>;
@@ -39,21 +41,25 @@ async function body<T>(c: Context, schema: z.ZodType<T>): Promise<T> {
   if (!parsed.success) throw new HttpError(400, "invalid_request", "Invalid worker request");
   return parsed.data;
 }
-async function session(c: Context, deps: CloudV2WorkerRouteDeps): Promise<{ token: string; bootId: string; workspace: CloudV2WorkerSession }> {
+async function session(c: Context, deps: CloudV2WorkerRouteDeps, source = true): Promise<{ token: string; bootId: string; workspace: CloudV2WorkerSession }> {
   const token = bearer(c), bootId = c.req.header("x-zeros-worker-boot");
   if (!bootId || !z.string().uuid().safeParse(bootId).success) throw unauthorized();
   const workspace = await deps.store.workerSession(token, bootId);
   if (!workspace) throw unauthorized();
   // Retain Stop's final history/ack path even when source authority is lost.
-  if (workspace.state !== "stopping") await deps.authorizeSource?.(workspace);
+  if (source && workspace.state !== "stopping") {
+    if (deps.continueSource) await deps.continueSource(workspace, workspace);
+    else await deps.authorizeSource?.(workspace);
+  }
   return { token, bootId, workspace };
 }
-async function configuration(deps: CloudV2WorkerRouteDeps, workspace: CloudV2WorkerSession, token: string, bootId: string, features: ReadonlySet<string>): Promise<ConfigFrame> {
-  await deps.authorizeSource?.(workspace);
+async function configuration(deps: CloudV2WorkerRouteDeps, workspace: CloudV2WorkerSession, token: string, bootId: string, features: ReadonlySet<string>, mode: "admission" | "continuation" = "admission"): Promise<ConfigFrame> {
+  if (mode === "continuation" && deps.continueSource) await deps.continueSource(workspace, workspace);
+  else await deps.authorizeSource?.(workspace);
   for (let attempt = 0; attempt < 8; attempt++) {
     const revision = await deps.store.loginRevision(workspace.id);
     if (revision === null || !await deps.store.workerSession(token, bootId)) throw unauthorized();
-    const config = await deps.config(workspace);
+    const config = await deps.config(workspace, mode);
     if (!await deps.store.workerSession(token, bootId)) throw unauthorized();
     if (revision === await deps.store.loginRevision(workspace.id)) {
       const { mcpServers, githubPullRequests, ...legacy } = config;
@@ -109,13 +115,18 @@ export function createCloudV2WorkerRoutes(deps: CloudV2WorkerRouteDeps): Hono {
     return c.json({ sequence });
   });
   app.post(`${CLOUD_V2_WORKER_API}/activity`, async c => {
-    const auth = await session(c, deps), { idle } = await body(c, CloudV2WorkerActivitySchema);
+    // Activity releases no source or credential. Its current worker/boot proof
+    // still applies, but a GitHub outage must never turn a busy VM into idle.
+    const auth = await session(c, deps, false), { idle } = await body(c, CloudV2WorkerActivitySchema);
     if (!idle) await deps.store.markActive(auth.workspace.id);
+    // Actual active work can refresh its cached permission in the background.
+    // Neither a slow check nor its failure can suppress the activity receipt.
+    if (!idle && auth.workspace.state === "running") void deps.continueSource?.(auth.workspace, auth.workspace).catch(() => {});
     return c.json({ loginRevision: auth.workspace.loginRevision, state: auth.workspace.state });
   });
   app.get(`${CLOUD_V2_WORKER_API}/config`, async c => {
     const auth = await session(c, deps);
-    return c.json({ config: await configuration(deps, auth.workspace, auth.token, auth.bootId, workerFeatures(c)) });
+    return c.json({ config: await configuration(deps, auth.workspace, auth.token, auth.bootId, workerFeatures(c), "continuation") });
   });
   app.post(`${CLOUD_V2_WORKER_API}/mcp/:id/authorization`, async c => {
     const auth = await session(c, deps), input = await body(c, z.object({ force: z.boolean().optional() }).strict());

@@ -137,10 +137,37 @@ Repository authorization uses the immutable GitHub user ID and the exact
 connection generation, verifies read or write permission as needed, and
 mints installation tokens for explicit repositories and permissions only.
 Additional repositories need separate authorization; a shared recipe is not a
-credential grant. Source-access observations are coalesced for at most 30
-seconds, measured before remote I/O, with durable identity rechecked on every
-use. Failure never falls back to stale authority. This covers connection,
-history, prompts, wake/restore, worker configuration and model proxy paths.
+credential grant. New connections, create/wake/restore, GitHub credentials and
+PR actions require source verification no older than 30 seconds, measured
+before remote I/O. Running workspaces reuse exact-source permission evidence
+for ten minutes, then refresh it on actual work in the background. During a
+GitHub outage or rate limit, existing chat, files, terminal, history and model
+proxy requests can continue for at most one hour from the original successful
+verification. Failures never restart that clock. Confirmed denial, disconnected
+credentials, changed connection generations and unverified source IDs cannot
+use grace. Organization membership, worker boot and app session checks still
+apply independently.
+
+The relay's 30-second transport heartbeat sends only socket pings; it does not
+poll GitHub, login revisions or per-workspace database authority. Security and
+login notifications invalidate observations, and actual traffic repairs missed
+notifications and checks session expiry. Permission refreshes share a bounded
+cache and one in-flight check per actor within a replica. Durable observations,
+short compare-and-set claims and actor cooldowns coalesce replicas. Transient
+failures back off from one to fifteen minutes, with bounded jitter, and respect
+GitHub's longer retry delay. An idle workspace does not refresh GitHub access.
+
+Current authenticated worker activity records independently of GitHub, even
+with the prompt outbox disabled, so an outage cannot make an active turn look
+idle. Configuration refreshes can reuse the previously verified canonical
+repository ID while applying current provider/MCP changes. Healthy source
+verification also refreshes the canonical name and notifies the worker after a
+rename or transfer, reusing the same GitHub response. Database timestamps keep
+late responses from undoing a newer binding. Configuration refreshes never issue
+GitHub tokens from stale evidence. Stop remains available. Grace expiry blocks
+further protected requests with a retryable availability error; it is not
+reported as an access revocation and does not delete work. A confirmed GitHub
+denial withdraws the grant and initiates stopping.
 Confirmed access loss stops a running workspace while retaining its disk and
 checkpoint. Stop and Delete remain available for cleanup. Revocation does not
 erase source or credentials already delivered to the VM; the VM remains one
@@ -737,11 +764,13 @@ and deletion.
 
 Apply migrations `0206_github_authorization_generations.sql` and
 `0207_cloud_source_boundaries.sql` before enabling the new control-plane
-runtime, together with `0212_cloud_computer_source_provenance.sql` and the
+runtime, together with `0212_cloud_computer_source_provenance.sql`,
+`0214_cloud_github_source_verifications.sql` and the
 selected-credential/workspace source-ledger integration. Existing signed
 GitHub bindings do not have a grant generation:
 members reconnect GitHub through the existing flow. Empty repository scopes,
-stale generations and permissions unavailable from GitHub fail closed.
+stale generations and new permissions unavailable from GitHub fail closed.
+Existing verified running workspaces use the bounded continuation policy above.
 
 Quiesce cloud admission and drain old builders, API and relay instances during
 the cutover; an old binary does not enforce the new source policy. Use the new
@@ -775,12 +804,31 @@ recorded scope. Recover access by restoring the creator's repository authority
 or using an explicitly reviewed recovery process; do not clear the source
 scope to make admission succeed.
 
-GitHub permission observations have a maximum 30-second lifetime, measured
-from before remote verification starts. For a workspace with multiple source
-repositories, every observation must remain fresh through the complete check
-and the final durable identity reads. A slow check or a connection changed
-midway fails admission; retry can refresh expired observations without
-narrowing the recorded source scope.
+Fresh admission has a maximum 30-second observation lifetime, measured from
+before remote verification starts. For a workspace with multiple source
+repositories, every observation must remain within its applicable admission
+or continuation window through the complete check and final identity reads.
+A slow check or a connection changed midway fails admission; retry can refresh
+expired observations without narrowing the recorded source scope.
+
+Migration 0214 starts with no permission evidence. It contains no credentials
+and grants access only to the system database role. Its keys include the
+organization, creator and immutable repository ID; observations also require
+the exact selected-connection fingerprint. Removing organization membership
+deletes its observations. Database-clock ages and claim generations keep slow
+responses, clock skew and superseded refreshes from extending grace. No timer
+scans this table. A replica restart can read existing evidence but cannot invent
+a new grant. The migration also records canonical-name observation timestamps,
+retaining existing bindings and aliases without creating permission evidence.
+Keep this additive migration on rollback.
+
+GitHub secondary limits can be HTTP 403 with a retry header or the documented
+rate-limit message. These are temporary; ordinary 403/404, explicit credential
+refusal and SSO requirements are denials. A failed rotating-token refresh may
+have consumed the old refresh token: an uncertain result is unavailable, never
+replayed or reported as confirmed revocation. Existing source grace remains
+bounded; reconnect the GitHub connection to restore new access if that rotation
+cannot be recovered.
 
 Before release, qualify the actual Boat file-upload permissions, snapshot
 readiness, clean disk contents, creation, stop/wake and lost-VM checkpoint
@@ -812,6 +860,9 @@ in order:
    build admission, credentials, repository listing, creation and log reads.
 5. `0213_mcp_repository_identities.sql` records verified repository IDs for MCP
    definitions and native admission, and refreshes workers by their original ID.
+6. `0214_cloud_github_source_verifications.sql` shares exact-generation permission
+   observations, canonical names, refresh claims and retry delays across
+   control-plane replicas, and orders verified canonical-binding updates.
 
 The new cloud connection is independent of the earlier installation record and
 the Local GitHub login. Members must explicitly connect and select a cloud

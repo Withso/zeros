@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { HttpError } from "./authz.js";
+import { githubRateLimit } from "./github-availability.js";
 import type { GithubBackendConfig } from "./config.js";
 
 const name = z
@@ -68,7 +69,9 @@ export class GithubCloudUserAccess {
       );
     }
     if (!response.ok) {
-      await response.body?.cancel();
+      const limited = await githubRateLimit(response);
+      void response.body?.cancel().catch(() => {});
+      if (limited) throw limited;
       if (response.status === 404 || response.status === 403)
         throw new HttpError(
           403,

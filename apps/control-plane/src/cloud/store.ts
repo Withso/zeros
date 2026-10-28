@@ -325,13 +325,19 @@ export class CloudV2Store {
 
   /** One read for a room's workspace authority and every attached session;
    * streaming must not add one database transaction per viewing device. */
-  async appAccessSnapshot(id: string, sessionIds: readonly string[]): Promise<{ accessEpoch: string; activeSessionIds: string[] } | null> {
-    const { rows } = await withSystemTx(this.pool, tx => tx.query<{ access_epoch: string; active_session_ids: string[] }>(
-      `SELECT access_epoch::text, ARRAY(SELECT s.provider_session_id FROM auth_sessions s
-         WHERE s.provider_session_id = ANY($2::text[]) AND ${LIVE_SESSION}) AS active_session_ids
+  async appAccessSnapshot(id: string, sessionIds: readonly string[]): Promise<{ accessEpoch: string; loginRevision?: string; validUntil?: number; activeSessionIds: string[] } | null> {
+    const started = Date.now();
+    const { rows } = await withSystemTx(this.pool, tx => tx.query<{ access_epoch: string; login_revision: string; active_session_ids: string[]; session_expires_at: Date | null; database_now: Date }>(
+      `SELECT access_epoch::text, login_revision::text, ARRAY(SELECT s.provider_session_id FROM auth_sessions s
+         WHERE s.provider_session_id = ANY($2::text[]) AND ${LIVE_SESSION}) AS active_session_ids,
+         (SELECT min(s.provider_session_expires_at) FROM auth_sessions s
+          WHERE s.provider_session_id = ANY($2::text[]) AND ${LIVE_SESSION}) AS session_expires_at,
+         clock_timestamp() AS database_now
        FROM cloud_v2_workspaces w WHERE w.id = $1 AND w.state NOT IN ('deleting','deleted') AND ${LIVE_ACCESS}`,
       [id, sessionIds]));
-    return rows[0] ? { accessEpoch: rows[0].access_epoch, activeSessionIds: rows[0].active_session_ids } : null;
+    const row = rows[0];
+    return row ? { accessEpoch: row.access_epoch, loginRevision: row.login_revision, activeSessionIds: row.active_session_ids,
+      ...(row.session_expires_at ? { validUntil: started + Math.max(0, row.session_expires_at.getTime() - row.database_now.getTime()) } : {}) } : null;
   }
 
   /** Internal only: private route data is deliberately absent from workspace(). */
@@ -465,13 +471,13 @@ export class CloudV2Store {
     return rows[0] ? { userId: rows[0].user_id, accessEpoch: rows[0].access_epoch, wake: rows[0].wake_on_connect, sessionId: rows[0].provider_session_id } : null;
   }
 
-  async verifyProxyToken(token: string): Promise<CloudV2Workspace | null> {
-    const { rows } = await withSystemTx(this.pool, tx => tx.query<Row>(
-      `SELECT ${COLUMNS.replace(/\b(\w+)\b/g, "w.$1")} FROM cloud_v2_tokens t JOIN cloud_v2_workspaces w ON w.id = t.workspace_id
+  async verifyProxyToken(token: string): Promise<(CloudV2Workspace & { accessEpoch?: string; loginRevision?: string }) | null> {
+    const { rows } = await withSystemTx(this.pool, tx => tx.query<Row & { access_epoch: string; login_revision: string }>(
+      `SELECT ${COLUMNS.replace(/\b(\w+)\b/g, "w.$1")},w.access_epoch::text,w.login_revision::text FROM cloud_v2_tokens t JOIN cloud_v2_workspaces w ON w.id = t.workspace_id
        WHERE t.token_hash = $1 AND t.kind = 'proxy' AND t.expires_at > clock_timestamp() AND w.state = 'running' AND ${LIVE_ACCESS}`,
       [hashCloudV2Token(token)],
     ));
-    return rows[0] ? workspace(rows[0]) : null;
+    return rows[0] ? { ...workspace(rows[0]), accessEpoch: rows[0].access_epoch, loginRevision: rows[0].login_revision } : null;
   }
 
   /** Leases up to `limit` workspaces in a transitional state to one lifecycle

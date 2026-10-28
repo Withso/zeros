@@ -1,0 +1,5 @@
+{
+  "file": "apps/control-plane/src/cloud/worker-routes.ts",
+  "before": "const auth = await session(c, deps, false), { idle } = await body(c, CloudV2WorkerActivitySchema);",
+  "after": "const auth = await session(c, deps), { idle } = await body(c, CloudV2WorkerActivitySchema);"
+}

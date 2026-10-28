@@ -7,6 +7,8 @@ import type { CloudV2AgentLogins } from "./agent-logins.js";
 import type { CloudV2Store, CloudV2Workspace } from "./store.js";
 import { isCloudV2Token } from "./tokens.js";
 import { OpenAiModelAvailability } from "./model-availability.js";
+import { isGithubAccessRevoked } from "../github-availability.js";
+import type { CloudSourceContinuation, CloudSourceProof } from "./source-authority.js";
 
 export const CLOUD_V2_PROXY_PREFIX = "/v2/cloud/proxy";
 const MAX_REQUEST_BYTES = 32 * 1024 * 1024;
@@ -22,13 +24,14 @@ export type CloudV2ProxyDeps = {
   store: Pick<CloudV2Store, "verifyProxyToken">;
   logins: CloudV2AgentLogins;
   authorizeSource?(workspace: CloudV2Workspace): Promise<void>;
+  continueSource?(workspace: CloudV2Workspace, proof?: CloudSourceProof): Promise<CloudSourceContinuation>;
   /** Renews the creator's ChatGPT login through the vault's single-use refresh. */
   refreshCodex?: (ownerUserId: string, organizationId: string) => Promise<void>;
   fetch?: typeof fetch;
   now?: () => number;
 };
 
-function failure(status: 400 | 401 | 404 | 413, code: string, message: string): Response {
+function failure(status: 400 | 401 | 404 | 413 | 503, code: string, message: string): Response {
   return Response.json({ error: { type: "zeros_proxy_error", code, message } }, { status });
 }
 
@@ -58,8 +61,15 @@ export function createCloudV2ProxyRoutes(deps: CloudV2ProxyDeps): Hono {
     if (!isCloudV2Token(token, "proxy")) return failure(401, "proxy_token_invalid", "Invalid workspace proxy token");
     const workspace = await deps.store.verifyProxyToken(token);
     if (!workspace) return failure(401, "proxy_token_invalid", "The workspace proxy token expired or was revoked");
-    try { await deps.authorizeSource?.(workspace); }
-    catch { return failure(401, "workspace_access_revoked", "Repository access could not be verified"); }
+    try {
+      if (deps.continueSource) await deps.continueSource(workspace,
+        workspace.accessEpoch && workspace.loginRevision ? { accessEpoch: workspace.accessEpoch, loginRevision: workspace.loginRevision } : undefined);
+      else await deps.authorizeSource?.(workspace);
+    } catch (error) {
+      return isGithubAccessRevoked(error)
+        ? failure(401, "workspace_access_revoked", "Repository access was revoked")
+        : failure(503, "workspace_verification_unavailable", "Repository verification is temporarily unavailable. Retry shortly.");
+    }
     const length = Number(c.req.header("content-length") ?? 0);
     if (length > MAX_REQUEST_BYTES) return failure(413, "payload_too_large", "Request is too large");
 

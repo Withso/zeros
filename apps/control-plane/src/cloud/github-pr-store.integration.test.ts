@@ -121,6 +121,23 @@ database("cloud GitHub checkout metadata", () => {
     ).rejects.toMatchObject({ code: "github_checkout_conflict" });
   });
 
+  it("never rolls a canonical name back when an older successful permission refresh arrives late", async () => {
+    const { workspace, token, boot } = await fixture();
+    await github.checkout(token, boot, initial);
+    const context = await github.context(workspace.id, creatorUserId);
+    const observed = (at: string) => ({ at: new Date(at), assertCurrent: async () => {} });
+    await github.repository(context, identity, observed("2026-01-01T00:00:00Z"));
+    const current = await github.context(workspace.id, creatorUserId);
+    await github.repository(current, identity, observed("2026-01-01T00:20:00Z"));
+    const revision = await workspaces.loginRevision(workspace.id);
+    await github.repository(current, { ...identity, repository: "intermediate/project" }, observed("2026-01-01T00:10:00Z"));
+    expect((await github.context(workspace.id, creatorUserId)).repository).toBe(identity.repository);
+    expect(await workspaces.loginRevision(workspace.id)).toBe(revision);
+    expect(await github.aliases(workspace)).not.toContain("intermediate/project");
+    await expect(github.repository(current, { ...identity, repositoryId: "99" }, observed("2025-01-01T00:00:00Z")))
+      .rejects.toMatchObject({ code: "github_repository_changed" });
+  });
+
   it("rejects an old worker boot and retires an old checkout revision after restart", async () => {
     const { workspace, token, boot } = await fixture();
     await github.checkout(token, boot, initial);

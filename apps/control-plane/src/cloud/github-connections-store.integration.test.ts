@@ -12,6 +12,7 @@ import {
 import { resetMigratedTestDatabase } from "../test-database.js";
 import { withSystemTx } from "../db.js";
 import { CloudGithubConnectionStore } from "./github-connections-store.js";
+import { HttpError } from "../authz.js";
 
 const database = process.env.TEST_DATABASE_URL ? describe : describe.skip;
 database("cloud GitHub connection ownership and rotation", () => {
@@ -72,6 +73,14 @@ database("cloud GitHub connection ownership and rotation", () => {
       material,
     );
   }
+  it("does not turn an uncertain token rotation into a confirmed access revocation or replay it", async () => {
+    await store.save(scope(), await store.fingerprint(scope()), identity, { ...app, expiresAt: Date.now() - 1 });
+    const refresh = vi.fn(async () => { throw new HttpError(503, "github_unavailable", "unavailable"); });
+    await expect(store.credential(scope(), refresh)).rejects.toMatchObject({ code: "github_unavailable" });
+    await pool.query("UPDATE cloud_github_credentials SET refresh_lease_until=clock_timestamp()-interval '1 second' WHERE org_id=$1", [organizationId]);
+    await expect(store.credential(scope(), refresh)).rejects.toMatchObject({ status: 503, code: "github_refresh_uncertain" });
+    expect(refresh).toHaveBeenCalledTimes(1);
+  });
   it("fingerprints the confirmed database identity across equivalent UUID spellings", async () => {
     await save();
     const canonical = await store.fingerprint(scope());

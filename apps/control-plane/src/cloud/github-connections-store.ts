@@ -489,7 +489,7 @@ export class CloudGithubConnectionStore {
         live?.refresh_lease_until &&
         live.refresh_lease_until.getTime() <= Date.now()
       )
-        throw expired();
+        throw new HttpError(503, "github_refresh_uncertain", "GitHub connection refresh could not be verified. Reconnect GitHub to restore new access.");
       throw new HttpError(
         503,
         "github_refresh_pending",

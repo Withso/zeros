@@ -1,10 +1,12 @@
 import { randomUUID } from "node:crypto";
 import pg from "pg";
 import { Hono } from "hono";
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { resetMigratedTestDatabase } from "../test-database.js";
 import { CloudV2Store } from "./store.js";
 import { createCloudV2Routes, type CloudV2RouteDeps } from "./routes.js";
+import { createCloudV2WorkerRoutes } from "./worker-routes.js";
+import { HttpError } from "../authz.js";
 
 const d = process.env.TEST_DATABASE_URL ? describe : describe.skip;
 
@@ -37,6 +39,25 @@ d("cloud v2 store", () => {
   const create = () => store.createWorkspace({
     id: randomUUID(), organizationId: org, creatorUserId: creator, name: "zeros", repository: "withso/zeros", branch: "zeros/w", baseBranch: "main",
     computerBuildId: null,
+  });
+
+  it.each([false, true])("records real worker activity through a GitHub outage before an idle-stop race (outbox=%s)", async promptOutbox => {
+    const w = await create(), token = await store.rotateWorkerToken(w.id), boot = randomUUID();
+    await store.acceptWorkerHello(token, boot);
+    await pool.query("UPDATE cloud_v2_workspaces SET active_at=clock_timestamp()-interval '11 minutes' WHERE id=$1", [w.id]);
+    const cutoff = new Date(Date.now() - 10 * 60_000);
+    expect((await store.idleSince(cutoff)).map(row => row.id)).toContain(w.id);
+    const authorizeSource = vi.fn(async () => { throw new HttpError(503, "github_unavailable", "unavailable"); });
+    const app = createCloudV2WorkerRoutes({ store, authorizeSource, continueSource: async () => { throw new HttpError(503, "github_unavailable", "unavailable"); },
+      runtimeSha256: "a".repeat(64), promptOutbox, config: async () => { throw new Error("unused"); }, githubToken: async () => { throw new Error("unused"); } });
+    const response = await app.request("/v2/cloud/worker/activity", { method: "POST", headers: {
+      authorization: `Bearer ${token}`, "x-zeros-worker-boot": boot, "content-type": "application/json",
+    }, body: JSON.stringify({ idle: false }) });
+    expect(response.status).toBe(200);
+    await store.stopIdle(w.id, cutoff);
+    expect((await store.get(w.id, creator)).state).toBe("running");
+    expect((await store.idleSince(cutoff)).map(row => row.id)).not.toContain(w.id);
+    expect(authorizeSource).not.toHaveBeenCalled();
   });
 
   it("excludes in-flight workspaces before applying the claim limit even when their lease has expired", async () => {

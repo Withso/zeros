@@ -257,6 +257,24 @@ d("migration ladder", { timeout: 30_000 }, () => {
     }
   };
 
+  it("retains canonical repository metadata without inventing permission evidence during the availability upgrade", async () => {
+    await reset();
+    const boundary = LADDER.indexOf("0214_cloud_github_source_verifications.sql");
+    expect(boundary).toBeGreaterThan(0);
+    await applyThrough(boundary);
+    const owner = await seedCredentialOwner(pool), workspace = randomUUID();
+    await pool.query(`INSERT INTO cloud_v2_workspaces(id,org_id,creator_user_id,name,repository,branch,base_branch,state)
+      VALUES($1,$2,$3,'Retained','former/project','work','main','stopped')`, [workspace, owner.organizationId, owner.userId]);
+    await pool.query(`INSERT INTO cloud_v2_github_workspaces(workspace_id,repository_id,canonical_repository,repository_aliases)
+      VALUES($1,42,'current/project',ARRAY['former/project','current/project'])`, [workspace]);
+    const before = (await pool.query("SELECT to_jsonb(g) AS row FROM cloud_v2_github_workspaces g WHERE workspace_id=$1", [workspace])).rows[0].row;
+    await applyAndRecord(LADDER[boundary]!);
+    const after = (await pool.query("SELECT to_jsonb(g)-'repository_observed_at' AS row, repository_observed_at=updated_at AS ordered FROM cloud_v2_github_workspaces g WHERE workspace_id=$1", [workspace])).rows[0];
+    expect(after.row).toEqual(before);
+    expect(after.ordered).toBe(true);
+    expect((await pool.query("SELECT * FROM cloud_github_source_verifications")).rowCount).toBe(0);
+  });
+
   it("retains legacy MCP secrets without inventing repository identity during upgrade", async () => {
     await reset();
     const boundary = LADDER.indexOf("0213_mcp_repository_identities.sql");

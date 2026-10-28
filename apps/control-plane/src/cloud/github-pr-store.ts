@@ -95,7 +95,7 @@ export class CloudGithubPrStore {
   private async assertContext(
     tx: Tx,
     expected: CloudGithubPrContext,
-  ): Promise<void> {
+  ): Promise<CloudGithubPrContext> {
     const live = await this.readContext(
       tx,
       expected.workspaceId,
@@ -109,33 +109,34 @@ export class CloudGithubPrStore {
       live.organizationId !== expected.organizationId
     )
       throw changed();
+    return live;
   }
 
   repository(
     context: CloudGithubPrContext,
-    identity: CloudGithubRepositoryIdentity,
+    identity: Pick<CloudGithubRepositoryIdentity, "repositoryId" | "repository">,
+    observation?: { at: Date; assertCurrent(tx: Tx): Promise<void> },
   ): Promise<void> {
     return withSystemTx(this.pool, async (tx) => {
-      await this.assertContext(tx, context);
+      await observation?.assertCurrent(tx);
+      const current = await this.assertContext(tx, context);
+      if (current.repositoryId && current.repositoryId !== identity.repositoryId)
+        throw new HttpError(409, "github_repository_changed", "The saved GitHub repository identity changed.");
       const result = await tx.query(
-        `INSERT INTO cloud_v2_github_workspaces(workspace_id,repository_id,canonical_repository)
-        VALUES($1,$2,$3) ON CONFLICT(workspace_id) DO UPDATE SET repository_id=EXCLUDED.repository_id,
+        `INSERT INTO cloud_v2_github_workspaces(workspace_id,repository_id,canonical_repository,repository_observed_at)
+        VALUES($1,$2,$3,coalesce($4::timestamptz,clock_timestamp())) ON CONFLICT(workspace_id) DO UPDATE SET repository_id=EXCLUDED.repository_id,
           canonical_repository=EXCLUDED.canonical_repository,
+          repository_observed_at=EXCLUDED.repository_observed_at,
           repository_aliases=ARRAY(SELECT DISTINCT alias FROM unnest(cloud_v2_github_workspaces.repository_aliases ||
             ARRAY[cloud_v2_github_workspaces.canonical_repository,EXCLUDED.canonical_repository]) alias WHERE alias IS NOT NULL ORDER BY alias LIMIT 100),
           updated_at=CASE WHEN cloud_v2_github_workspaces.canonical_repository IS DISTINCT FROM EXCLUDED.canonical_repository
             THEN clock_timestamp() ELSE cloud_v2_github_workspaces.updated_at END
-        WHERE cloud_v2_github_workspaces.repository_id IS NULL OR cloud_v2_github_workspaces.repository_id=EXCLUDED.repository_id
+        WHERE (cloud_v2_github_workspaces.repository_id IS NULL OR cloud_v2_github_workspaces.repository_id=EXCLUDED.repository_id)
+          AND (cloud_v2_github_workspaces.repository_observed_at IS NULL OR cloud_v2_github_workspaces.repository_observed_at<EXCLUDED.repository_observed_at)
         RETURNING workspace_id`,
-        [context.workspaceId, identity.repositoryId, identity.repository],
+        [context.workspaceId, identity.repositoryId, identity.repository, observation?.at ?? null],
       );
-      if (!result.rowCount)
-        throw new HttpError(
-          409,
-          "github_repository_changed",
-          "The saved GitHub repository identity changed.",
-        );
-      if (context.repository !== identity.repository) {
+      if (result.rowCount && current.repository !== identity.repository) {
         await tx.query(
           "UPDATE cloud_v2_workspaces SET login_revision=login_revision+1 WHERE id=$1",
           [context.workspaceId],

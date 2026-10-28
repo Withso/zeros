@@ -12,6 +12,7 @@ import {
   githubName,
   githubRepositorySchema,
   type CloudGithubRepositoryTarget,
+  type CloudGithubRepositoryIdentity,
 } from "./github-http.js";
 import {
   CloudGithubConnectionStore,
@@ -356,6 +357,9 @@ export class CloudGithubConnections {
     };
   }
   async check(input: RepositoryRequest): Promise<string> {
+    return (await this.verify(input)).fingerprint;
+  }
+  async verify(input: RepositoryRequest): Promise<{ fingerprint: string; repositories: CloudGithubRepositoryIdentity[] }> {
     const scope = this.scope(input);
     if (
       !githubName.safeParse(input.owner).success ||
@@ -372,6 +376,7 @@ export class CloudGithubConnections {
         "Repository access could not be verified.",
       );
     const access = await this.access(scope);
+    const repositories: CloudGithubRepositoryIdentity[] = [];
     for (const [index, name] of input.repositories.entries()) {
       const target = await this.repositoryTarget(
         scope,
@@ -396,8 +401,9 @@ export class CloudGithubConnections {
         `/repositories/${repository.repositoryId}/branches?per_page=1`,
         z.array(z.unknown()).max(1),
       );
+      repositories.push(repository);
     }
     await access.assertCurrent();
-    return access.generation;
+    return { fingerprint: access.generation, repositories };
   }
 }

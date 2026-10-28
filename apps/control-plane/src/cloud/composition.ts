@@ -98,11 +98,13 @@ export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boo
     return target;
   };
   const authorizeSource = github.authorizeSource;
+  const continueSource = github.continueSource;
   const mcp = createMcpServices(pool, config, github.connections.authorizeRepositoryConfiguration.bind(github.connections));
   const timing = (record: CloudV2TimingRecord) => console.log(`[cloud-v2] timing ${JSON.stringify(record)}`);
 
-  const workerConfig = async (workspace: CloudV2Workspace): Promise<ConfigFrame> => {
-    await authorizeSource(workspace);
+  const workerConfig = async (workspace: CloudV2Workspace, mode: "admission" | "continuation" = "admission"): Promise<ConfigFrame> => {
+    const authorize = () => mode === "continuation" ? continueSource(workspace) : authorizeSource(workspace);
+    await authorize();
     const proxy = async () => {
       const issued = await store.issueToken({ workspaceId: workspace.id, kind: "proxy", userId: null, ttlMs: PROXY_TOKEN_TTL_MS });
       return { token: issued.token, expiresAt: issued.expiresAt.getTime() };
@@ -113,9 +115,11 @@ export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boo
       logins(workspace.creatorUserId, workspace.organizationId, "cursor"),
       github.workspaceSetup(workspace, computers),
       store.baseCommit(workspace.id),
-      github.binding(workspace),
+      github.binding(workspace, mode),
     ]);
     const agents = await cloudV2AgentConfig({ codex, claude, cursor }, proxyBase, proxy);
+    const mcpServers = mcp ? await mcp.store.resolve(workspace.organizationId, workspace.creatorUserId, workspace.repository, repositoryBinding) : undefined;
+    await authorize();
     return {
       t: "config",
       githubPullRequests: 1,
@@ -129,7 +133,7 @@ export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boo
         ...(baseCommit ? { baseCommit } : {}),
       },
       agents,
-      ...(mcp ? { mcpServers: await mcp.store.resolve(workspace.organizationId, workspace.creatorUserId, workspace.repository, repositoryBinding) } : {}),
+      ...(mcpServers ? { mcpServers } : {}),
     };
   };
 
@@ -137,15 +141,15 @@ export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boo
     store,
     computers,
     installedRepositories: organizationId => store.installedRepositories(organizationId),
-    authorizeRepository, authorizeRepositories, authorizeSourceTargets, authorizeBuildRepository, authorizeSource,
+    authorizeRepository, authorizeRepositories, authorizeSourceTargets, authorizeBuildRepository, authorizeSource, continueSource,
     github: { service: github.service, documents: github.documents },
     githubConnections: github.connections,
     bridgeBaseUrl: v2.realtimeUrl,
     promptOutbox: v2.promptOutbox === true,
   };
-  const proxy: CloudV2ProxyDeps = { store, logins, authorizeSource, ...(keys ? { refreshCodex: createCloudV2CodexRefresh(pool, keys) } : {}) };
+  const proxy: CloudV2ProxyDeps = { store, logins, authorizeSource, continueSource, ...(keys ? { refreshCodex: createCloudV2CodexRefresh(pool, keys) } : {}) };
   const connections = roles.relay || roles.lifecycle ? new CloudV2Relay({
-    store, timing, authorizeSource, ...(securityEvents ? { securityEvents } : {}),
+    store, timing, authorizeSource, continueSource, ...(securityEvents ? { securityEvents } : {}),
     config: workerConfig,
     workerRoute: async id => {
       const route = await store.workerRoute(id);
@@ -158,7 +162,7 @@ export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boo
   }) : null;
   const relay = roles.relay ? connections : null;
   const promptSignals = new CloudV2PromptSignals();
-  const workers: CloudV2WorkerRouteDeps = { store, timing, authorizeSource, config: workerConfig, githubToken, runtimeSha256: v2.runtime.sha256,
+  const workers: CloudV2WorkerRouteDeps = { store, timing, authorizeSource, continueSource, config: workerConfig, githubToken, runtimeSha256: v2.runtime.sha256,
     githubCheckout: (token,bootId,value) => github.metadata.checkout(token,bootId,value),
     ...(mcp ? { mcpAuthorization: async (workspace, id, force) =>
       mcp.oauth.authorizationForRepository(workspace.organizationId, workspace.creatorUserId, workspace.repository, id, force,
@@ -173,17 +177,23 @@ export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boo
     },
   }) : null;
   void promptChanges?.start().catch(() => {});
-  const loginChanges = relay ? postgresNotificationSubscription(listenerPool, {
-    channels: ["zeros_cloud_v2_logins"],
-    onReady: () => { void relay.refreshLogins(); },
+  const loginChanges = postgresNotificationSubscription(listenerPool, {
+    // The existing shared LISTEN connection carries both hints. No connection
+    // or polling loop is added for permission-cache invalidation.
+    channels: ["zeros_cloud_v2_logins", "zeros_cloud_github_access"],
+    onReady: () => { source.invalidate(); relay?.revalidateSources({}); void relay?.refreshLogins(); },
     onNotification: notice => {
       try {
         const scope = JSON.parse(notice.payload ?? "");
-        if ((typeof scope?.ownerUserId === "string" || scope?.ownerUserId === null) && (scope.organizationId === null || typeof scope.organizationId === "string"))
-          void relay.refreshLogins({ ...(typeof scope.ownerUserId === "string" ? { ownerUserId: scope.ownerUserId } : {}), ...(scope.organizationId ? { organizationId: scope.organizationId } : {}) });
+        if ((typeof scope?.ownerUserId === "string" || scope?.ownerUserId === null) && (scope.organizationId === null || typeof scope.organizationId === "string")) {
+          const identity = { ...(typeof scope.ownerUserId === "string" ? { ownerUserId: scope.ownerUserId } : {}), ...(scope.organizationId ? { organizationId: scope.organizationId } : {}) };
+          source.invalidate({ ...(identity.ownerUserId ? { userId: identity.ownerUserId } : {}), ...(identity.organizationId ? { organizationId: identity.organizationId } : {}) });
+          relay?.revalidateSources(identity);
+          if (notice.channel === "zeros_cloud_v2_logins") void relay?.refreshLogins(identity);
+        }
       } catch { /* Invalid wake hints carry no authority. */ }
     },
-  }) : null;
+  });
   void loginChanges?.start().catch(() => {}); // The shared listener retries and re-reads onReady.
   const runtime = cloudV2Runtime(v2.runtime.sha256, v2.runtime.store);
   const remoteHeads = github.remoteHead;

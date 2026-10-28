@@ -2,6 +2,7 @@ import { z } from "zod";
 import type { GithubBackendConfig } from "./config.js";
 import { HttpError } from "./authz.js";
 import { createGithubAppJwt } from "./github-app-jwt.js";
+import { GithubTemporaryError, githubRateLimit, githubRetryAfter } from "./github-availability.js";
 
 export type GithubRepositoryPermissions = {
   metadata: "read";
@@ -14,9 +15,14 @@ export const githubHeaders = (token: string) => ({
 });
 
 export async function githubJson(fetchImpl: typeof fetch, url: string, init: RequestInit): Promise<unknown> {
-  const response = await fetchImpl(url, { ...init, redirect: "error", signal: AbortSignal.timeout(15_000) });
+  let response: Response;
+  try { response = await fetchImpl(url, { ...init, redirect: "error", signal: AbortSignal.timeout(15_000) }); }
+  catch { throw new GithubTemporaryError("github_unavailable"); }
   if (!response.ok) {
-    await response.body?.cancel();
+    const limited = await githubRateLimit(response);
+    void response.body?.cancel().catch(() => {});
+    if (limited) throw limited;
+    if (response.status >= 500) throw new GithubTemporaryError("github_unavailable", githubRetryAfter(response));
     throw new HttpError(response.status === 403 || response.status === 404 ? 403 : 503,
       "github_repository_unavailable", "GitHub could not verify repository access. Reconnect GitHub or try again.");
   }

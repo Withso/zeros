@@ -11,7 +11,7 @@ import { CloudV2DraftSchema, CloudV2RecipeSchema, type CloudV2Computers } from "
 import { readCloudV2History } from "./history.js";
 import { CLOUD_V2_BRIDGE_PROTOCOL } from "./relay.js";
 import { createCloudV2PromptRoutes } from "./prompt-routes.js";
-import { CloudSourceTargetSchema, type CloudSourceTarget } from "./source-authority.js";
+import { CloudSourceTargetSchema, type CloudSourceTarget, type CloudSourceContinuation } from "./source-authority.js";
 import { CloudGithubPrService } from "./github-pr-service.js";
 import type { CloudGithubConnections } from "./github-connections.js";
 import { createCloudGithubConnectionRoutes } from "./github-connection-routes.js";
@@ -53,6 +53,7 @@ export type CloudV2RouteDeps = {
   authorizeSourceTargets?(organizationId: string, userId: string, targets: readonly CloudSourceTarget[]): Promise<void>;
   authorizeBuildRepository?(organizationId: string, userId: string, buildId: string, repository: string): Promise<CloudSourceTarget>;
   authorizeSource?(workspace: CloudV2Workspace): Promise<void>;
+  continueSource?(workspace: CloudV2Workspace): Promise<CloudSourceContinuation>;
   /** Public wss:// base of the realtime service, e.g. wss://realtime.example.com. */
   bridgeBaseUrl: string;
   /** Default branch names start with this, e.g. "zeros/". */
@@ -76,6 +77,10 @@ export function createCloudV2Routes(deps: CloudV2RouteDeps): Hono {
   const documents = async (workspaces: readonly CloudV2Workspace[]) =>
     (deps.github ? await deps.github.documents(workspaces) : workspaces).map(workspace => workspaceDocument(workspace, deps.promptOutbox === true));
   const document = async (workspace: CloudV2Workspace) => (await documents([workspace]))[0]!;
+  const continueWorkspace = async (workspace: CloudV2Workspace) => {
+    if (workspace.state === "running" && deps.continueSource) await deps.continueSource(workspace);
+    else await deps.authorizeSource?.(workspace);
+  };
   const authorizeReceipt = async (response: Record<string, unknown>, userId: string) => {
     const original = z.object({ workspace: z.object({ id: uuid }) }).safeParse(response);
     if (!original.success || !deps.authorizeSource) throw new HttpError(503, "github_unavailable", "Original source access could not be verified.");
@@ -84,7 +89,7 @@ export function createCloudV2Routes(deps: CloudV2RouteDeps): Hono {
   if (deps.promptOutbox) {
     if (!deps.store.prompts) throw new Error("Cloud prompt store is required");
     app.route("/", createCloudV2PromptRoutes(deps.store.prompts, async (id, userId) => {
-      await deps.authorizeSource?.(await deps.store.get(id, userId));
+      await continueWorkspace(await deps.store.get(id, userId));
     }));
   }
   const prefix = deps.branchPrefix ?? "zeros/";
@@ -198,7 +203,7 @@ export function createCloudV2Routes(deps: CloudV2RouteDeps): Hono {
     const id = uuid.safeParse(c.req.param("id"));
     if (!id.success) throw new HttpError(404, "not_found", "Cloud workspace not found");
     const workspace = await deps.store.get(id.data, c.get("user").id);
-    await deps.authorizeSource?.(workspace);
+    await continueWorkspace(workspace);
     return c.json({ result: await readCloudV2History(deps.store, workspace.id, await c.req.json().catch(() => null)) });
   });
 

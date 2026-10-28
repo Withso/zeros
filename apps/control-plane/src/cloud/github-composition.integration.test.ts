@@ -14,6 +14,7 @@ import { CloudV2Store } from "./store.js";
 import { createCloudGithubServices } from "./github-composition.js";
 import { HttpError } from "../authz.js";
 import { CloudV2Computers } from "./computer.js";
+import { PostgresGithubVerificationStore } from "./github-verification-store.js";
 
 const database = process.env.TEST_DATABASE_URL ? describe : describe.skip;
 database("cloud GitHub composition", () => {
@@ -144,6 +145,99 @@ database("cloud GitHub composition", () => {
     });
     return { workspace, token, boot };
   }
+
+  it.each([503, 403] as const)("retains existing workspace access across replicas during GitHub status %s", async status => {
+    const f = await fixture();
+    const workspace = await workspaces.get(f.workspace.id, userId);
+    await services.authorizeSource(workspace);
+    await pool.query("UPDATE cloud_github_source_verifications SET verified_at=clock_timestamp()-interval '11 minutes' WHERE org_id=$1", [organizationId]);
+    fetcher.mockImplementationOnce(async () => Response.json({ message: status === 403 ? "You have exceeded a secondary rate limit." : "private-provider-canary" },
+      { status, headers: { "retry-after": "300" } }));
+    const other = createCloudGithubServices(pool, null, keys, workspaces, fetcher);
+    const lease = await other.continueSource(workspace);
+    await expect(lease.refresh).rejects.toMatchObject({ code: status === 403 ? "github_rate_limited" : "github_unavailable" });
+    expect((await workspaces.get(workspace.id, userId)).state).toBe("running");
+    fetcher.mockClear();
+    const restarted = createCloudGithubServices(pool, null, keys, workspaces, fetcher);
+    await expect(restarted.continueSource(workspace)).resolves.toMatchObject({ recheckAt: expect.any(Number) });
+    await expect(restarted.authorizeSource(workspace)).rejects.toMatchObject({ code: status === 403 ? "github_rate_limited" : "github_unavailable" });
+    expect(fetcher).not.toHaveBeenCalled();
+    expect((await workspaces.get(workspace.id, userId)).state).toBe("running");
+  });
+
+  it("ends a running workspace only after a confirmed background denial", async () => {
+    const f = await fixture();
+    const workspace = await workspaces.get(f.workspace.id, userId);
+    await services.authorizeSource(workspace);
+    await pool.query("UPDATE cloud_github_source_verifications SET verified_at=clock_timestamp()-interval '11 minutes' WHERE org_id=$1", [organizationId]);
+    services.source.invalidate();
+    fetcher.mockImplementationOnce(async () => Response.json({ message: "Resource not accessible by personal access token" }, { status: 403 }));
+    const lease = await services.continueSource(workspace);
+    await expect(lease.refresh).rejects.toMatchObject({ code: "github_cloud_access_denied" });
+    await vi.waitFor(async () => expect((await workspaces.get(workspace.id, userId)).state).toBe("stopping"));
+    expect((await pool.query("SELECT verified_at FROM cloud_github_source_verifications WHERE org_id=$1", [organizationId])).rows[0].verified_at).toBeNull();
+  });
+
+  it("retains the verified repository binding and catalog during an outage without issuing GitHub credentials", async () => {
+    const f = await fixture(), workspace = await workspaces.get(f.workspace.id, userId);
+    await services.authorizeSource(workspace);
+    const verified = await services.binding(workspace);
+    expect(verified.repositoryId).toBe("42");
+    expect(verified.repository).toBe("current/project");
+    await pool.query("UPDATE cloud_github_source_verifications SET verified_at=clock_timestamp()-interval '11 minutes' WHERE org_id=$1", [organizationId]);
+    services.source.invalidate();
+    fetcher.mockImplementationOnce(async () => new Response(null, { status: 503 }));
+    const lease = await services.continueSource(workspace);
+    await expect(lease.refresh).rejects.toMatchObject({ code: "github_unavailable" });
+    fetcher.mockClear();
+    expect(await services.binding(workspace, "continuation")).toMatchObject({ repositoryId: "42", repository: "current/project" });
+    const document = (await services.documents([workspace]))[0]!;
+    expect(document.github?.repositoryId).toBe("42");
+    expect(document.githubUnavailableReason).toBeUndefined();
+    await expect(services.workspaceToken(workspace)).rejects.toMatchObject({ code: "github_unavailable" });
+    expect(fetcher).not.toHaveBeenCalled();
+    await pool.query("UPDATE cloud_v2_github_workspaces SET repository_id=99 WHERE workspace_id=$1", [workspace.id]);
+    await expect(services.binding(workspace, "continuation")).rejects.toMatchObject({ code: "github_repository_changed" });
+  });
+  it("repairs a missed denial notification on the next authenticated request to another replica", async () => {
+    const f = await fixture(), before = (await workspaces.workerSession(f.token, f.boot))!;
+    await services.authorizeSource(before);
+    const other = createCloudGithubServices(pool, null, keys, workspaces, fetcher);
+    await other.continueSource(before, before);
+    const observations = new PostgresGithubVerificationStore(pool);
+    const scope = { organizationId, userId, repositoryId: "42", fingerprint: await services.connections.fingerprintFor({ organizationId, userId }) };
+    await pool.query("UPDATE cloud_github_source_verifications SET verified_at=clock_timestamp()-interval '11 minutes' WHERE org_id=$1", [organizationId]);
+    const claim = await observations.claim(scope);
+    await observations.finish(scope, claim!.claimId!, { allowed: false, temporary: false, retryAfterMs: 60_000,
+      error: new HttpError(403, "github_cloud_access_denied", "denied") });
+    const after = (await workspaces.workerSession(f.token, f.boot))!;
+    expect(BigInt(after.loginRevision)).toBeGreaterThan(BigInt(before.loginRevision));
+    await expect(other.continueSource(after, after)).rejects.toMatchObject({ code: "github_cloud_access_denied" });
+    expect((await workspaces.get(after.id, userId)).state).toBe("stopping");
+  });
+  it("updates a running checkout's canonical binding from a healthy continuation without extra GitHub calls", async () => {
+    owner = "former";
+    const f = await fixture(), workspace = await workspaces.get(f.workspace.id, userId);
+    await services.authorizeSource(workspace);
+    await services.binding(workspace);
+    const before = await workspaces.loginRevision(workspace.id);
+    await pool.query("UPDATE cloud_github_source_verifications SET verified_at=clock_timestamp()-interval '11 minutes' WHERE org_id=$1", [organizationId]);
+    owner = "current"; // The old name now resolves to repository 99.
+    const other = createCloudGithubServices(pool, null, keys, workspaces, fetcher);
+    fetcher.mockClear();
+    const lease = await other.continueSource(workspace);
+    await lease.refresh;
+    await vi.waitFor(async () => expect((await other.metadata.context(workspace.id, userId)).repository).toBe("current/project"));
+    expect(BigInt((await workspaces.loginRevision(workspace.id))!)).toBeGreaterThan(BigInt(before!));
+    const calls = fetcher.mock.calls.length;
+    const restarted = createCloudGithubServices(pool, null, keys, workspaces, fetcher);
+    expect(await restarted.binding(workspace, "continuation")).toMatchObject({ repositoryId: "42", repository: "current/project",
+      previousRepositories: expect.arrayContaining(["former/project"]) });
+    expect(fetcher.mock.calls).toHaveLength(calls);
+    expect(fetcher.mock.calls.map(([url]) => new URL(String(url)).pathname)).toEqual([
+      "/user", "/repositories/42", "/repositories/42/branches",
+    ]);
+  });
   it("uses the selected cloud connection to retain Computer identity and setup through a transfer", async () => {
     owner = "former";
     const computers = new CloudV2Computers(

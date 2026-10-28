@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { HttpError } from "../authz.js";
+import { GithubTemporaryError, githubRateLimit, githubRetryAfter } from "../github-availability.js";
 
 export type CloudGithubHttpOptions = {
   apiBaseUrl: string;
@@ -95,22 +96,14 @@ export class CloudGithubHttp {
       }
     }
     if (!response.ok) {
-      await response.body?.cancel();
+      const limited = await githubRateLimit(response);
+      void response.body?.cancel().catch(() => {});
+      if (limited) throw limited;
       if (response.status === 401)
         throw new HttpError(
           409,
           "github_authorization_expired",
           "Reconnect your GitHub connection to continue.",
-        );
-      if (
-        response.status === 429 ||
-        (response.status === 403 &&
-          response.headers.get("x-ratelimit-remaining") === "0")
-      )
-        throw new HttpError(
-          429,
-          "github_rate_limited",
-          "GitHub's rate limit was reached. Try again shortly.",
         );
       if (
         response.status === 403 &&
@@ -151,7 +144,7 @@ export class CloudGithubHttp {
           "github_invalid_operation",
           "GitHub could not apply this action. Refresh the pull request and check its current state.",
         );
-      throw unavailable();
+      throw new GithubTemporaryError("github_unavailable", githubRetryAfter(response));
     }
     if (response.status === 204) {
       if (!mutation) await this.options.assertCurrent();

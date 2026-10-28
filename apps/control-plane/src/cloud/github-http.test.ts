@@ -1,4 +1,5 @@
 import { expect, it, vi } from "vitest";
+import { z } from "zod";
 import {
   CloudGithubHttp,
   resolveCloudGithubRepository,
@@ -13,6 +14,20 @@ const row = {
   archived: false,
   permissions: { push: true },
 };
+
+it.each([
+  { headers: { "retry-after": "120" }, body: { message: "Please retry later." } },
+  { headers: {}, body: { message: "You have exceeded a secondary rate limit. Please wait a few minutes before you try again." } },
+  { headers: {}, body: { message: "You have triggered an abuse detection mechanism. Please wait a few minutes before you try again." } },
+])("classifies GitHub secondary throttling as retryable without disclosing its body", async ({ headers, body }) => {
+  const http = new CloudGithubHttp({
+    apiBaseUrl: "https://api.github.com", token: "synthetic-token", assertCurrent: async () => {},
+    fetch: vi.fn(async () => Response.json({ ...body, private: "private-provider-canary" }, { status: 403, headers })),
+  });
+  const error = await http.json("/user", z.unknown()).catch(error => error);
+  expect(error).toMatchObject({ status: 429, code: "github_rate_limited" });
+  expect(String(error)).not.toContain("private-provider-canary");
+});
 it("follows GitHub's repository redirect without forgetting an immutable ID", async () => {
   const fetcher = vi
     .fn()

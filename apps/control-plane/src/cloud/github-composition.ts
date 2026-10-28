@@ -2,10 +2,12 @@ import type pg from "pg";
 import type { GithubBackendConfig } from "../config.js";
 import type { CloudAgentCredentialKeys } from "../agent-credentials/agent-credential-envelope.js";
 import { HttpError } from "../authz.js";
+import { isGithubAccessRevoked } from "../github-availability.js";
 import { CloudGithubConnections } from "./github-connections.js";
 import { CloudGithubConnectionStore } from "./github-connections-store.js";
 import { CloudGithubSourceIdentities } from "./github-source-identities.js";
-import { CloudV2SourceAuthority } from "./source-authority.js";
+import { CloudV2SourceAuthority, type CloudSourceProof } from "./source-authority.js";
+import { PostgresGithubVerificationStore } from "./github-verification-store.js";
 import { CloudGithubPrStore } from "./github-pr-store.js";
 import { CloudGithubPrService } from "./github-pr-service.js";
 import { CloudGithubActions } from "./github-actions.js";
@@ -50,12 +52,14 @@ export function createCloudGithubServices(
   );
   const identities = new CloudGithubSourceIdentities(pool),
     metadata = new CloudGithubPrStore(pool),
-    actions = new CloudGithubActions(pool);
+    actions = new CloudGithubActions(pool),
+    verifications = new PostgresGithubVerificationStore(pool);
   const source = new CloudV2SourceAuthority(
     pool,
     connections,
     Date.now,
     (workspace, sources) => identities.targets(workspace, sources),
+    verifications,
   );
   const token = createSelectedCloudGithubTokens(pool, connections, fetchImpl);
   const resolveRepository: CloudV2ComputerSourceResolver = async (
@@ -99,20 +103,42 @@ export function createCloudGithubServices(
     );
     return recipe.setup ?? null;
   };
+  const retireRevoked = async (workspace: CloudV2Workspace, error: unknown) => {
+    if (isGithubAccessRevoked(error)) await workspaces.transition(workspace.id, ["running"], "stopping");
+  };
   const authorizeSource = async (workspace: CloudV2Workspace) => {
     try {
       await source.workspace(workspace);
     } catch (error) {
-      if (
-        error instanceof HttpError &&
-        ([403, 404].includes(error.status) ||
-          [
-            "github_connection_required",
-            "github_authorization_expired",
-            "github_authorization_changed",
-          ].includes(error.code))
-      )
-        await workspaces.transition(workspace.id, ["running"], "stopping");
+      await retireRevoked(workspace, error);
+      throw error;
+    }
+  };
+  const observedRefreshes = new WeakSet<Promise<void>>();
+  const refreshVerifiedBinding = async (workspace: CloudV2Workspace) => {
+    const scope = { organizationId: workspace.organizationId, userId: workspace.creatorUserId };
+    const target = await identities.primary(workspace);
+    const fingerprint = await connections.fingerprintFor(scope);
+    const verified = await verifications.read({ ...scope, repositoryId: target.repositoryId, fingerprint });
+    if (!verified?.canonicalRepository || !verified.observedAt || verified.failure) return;
+    const saved = await metadata.context(workspace.id, workspace.creatorUserId);
+    await metadata.repository(saved, { repositoryId: target.repositoryId, repository: verified.canonicalRepository }, {
+      at: verified.observedAt, assertCurrent: tx => connections.store.lockCurrent(tx, scope, fingerprint),
+    });
+  };
+  const continueSource = async (workspace: CloudV2Workspace, proof?: CloudSourceProof) => {
+    try {
+      const lease = await source.continueWorkspace(workspace, proof);
+      if (lease.refresh && !observedRefreshes.has(lease.refresh)) {
+        observedRefreshes.add(lease.refresh);
+        void lease.refresh.then(
+          () => refreshVerifiedBinding(workspace),
+          error => retireRevoked(workspace, error),
+        ).catch(() => {});
+      }
+      return lease;
+    } catch (error) {
+      await retireRevoked(workspace, error);
       throw error;
     }
   };
@@ -167,7 +193,8 @@ export function createCloudGithubServices(
         };
         try {
           const generation = await connections.fingerprintFor(scope);
-          await authorizeSource(row);
+          if (row.state === "running") await continueSource(row);
+          else await authorizeSource(row);
           await connections.store.assertCurrent(scope, generation);
           allowed.set(row.id, generation);
         } catch (error) {
@@ -204,9 +231,22 @@ export function createCloudGithubServices(
       }),
     );
   };
-  const binding = async (workspace: CloudV2Workspace) => {
-    const target = await identities.primary(workspace),
-      grant = await connections.access({
+  const binding = async (workspace: CloudV2Workspace, mode: "admission" | "continuation" = "admission") => {
+    const target = await identities.primary(workspace);
+    if (mode === "continuation") {
+      // Configuration refresh must still apply provider removals during an
+      // outage. The canonical binding was verified on admission and cannot be
+      // reconstructed from a possibly reused name; require the original ID.
+      // Successful source checks already resolved the immutable ID. Reuse
+      // that result to discover transfers, with no extra provider request.
+      await refreshVerifiedBinding(workspace);
+      const saved = await metadata.context(workspace.id, workspace.creatorUserId);
+      if (saved.repositoryId && saved.repositoryId !== target.repositoryId)
+        throw new HttpError(409, "github_repository_changed", "The saved GitHub repository identity changed.");
+      if (saved.repositoryId) return { repositoryId: saved.repositoryId, repository: saved.repository,
+        previousRepositories: await metadata.aliases(workspace) };
+    }
+    const grant = await connections.access({
         organizationId: workspace.organizationId,
         userId: workspace.creatorUserId,
       });
@@ -273,6 +313,7 @@ export function createCloudGithubServices(
     documents,
     source,
     authorizeSource,
+    continueSource,
     binding,
     token,
     workspaceToken,
