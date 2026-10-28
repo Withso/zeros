@@ -14,7 +14,7 @@
 //
 // Chord glyphs use the macOS convention (⌃⌥⇧⌘ ordering, then the key):
 //   ⌘ Command · ⇧ Shift · ⌥ Option · ⌃ Control · ↵ Return
-//   ← → ↑ ↓ arrows · ↖ Home · ↘ End
+//   ← → ↑ ↓ arrows · Home / End use names, with Fn+arrow alternatives
 // ──────────────────────────────────────────────────────────
 
 export interface ShortcutDef {
@@ -181,14 +181,14 @@ export const SHORTCUT_CATEGORIES: ShortcutCategory[] = [
       {
         id: "first-message",
         label: "First user message",
-        keys: ["⌘↖"],
-        keywords: ["top", "home", "start"],
+        keys: ["⌘Home", "Fn⌘←"],
+        keywords: ["top", "home", "start", "function"],
       },
       {
         id: "last-message",
         label: "Last user message",
-        keys: ["⌘↘"],
-        keywords: ["bottom", "end", "latest"],
+        keys: ["⌘End", "Fn⌘→"],
+        keywords: ["bottom", "end", "latest", "function"],
       },
       {
         id: "send-message",

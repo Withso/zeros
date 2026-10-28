@@ -1,0 +1,9 @@
+{
+  "id": "chat-tab-shortcut-focus",
+  "kind": "scenario",
+  "area": "renderer",
+  "fixedBy": "pr:760",
+  "symptom": "Command+Left/Right stopped switching chats after the first key because focus remained in the outgoing hidden composer. The browser check manually repaired focus between presses and missed the regression.",
+  "rule": "changes/chat-tab-shortcut-focus.md: hand focus through the persistent destination tab before hiding old content; consecutive keys must produce one selection each without manual refocus, across split panes and Local/cloud owners.",
+  "check": "pnpm test:ui-smoke --shard=2/3"
+}

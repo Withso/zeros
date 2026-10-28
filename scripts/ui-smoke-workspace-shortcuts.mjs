@@ -5,7 +5,6 @@ import { join } from "node:path";
 export async function runWorkspaceShortcutsSmoke({ page, check, harnessBase, screenshotDir }) {
   const viewport = page.viewportSize();
   await page.setViewportSize({ width: 1600, height: 1000 });
-  await page.evaluate(() => { localStorage.clear(); sessionStorage.clear(); });
   await page.goto(`${harnessBase}/harness-app-sidebar.html?shortcuts&long-list&filter=ungrouped`, { waitUntil: "networkidle" });
   const state = () => page.evaluate(() => window.appSidebarState());
   const rows = page.locator("[data-workspace-id]");
@@ -83,18 +82,49 @@ export async function runWorkspaceShortcutsSmoke({ page, check, harnessBase, scr
   await expect(chatTabs).toHaveCount(3);
   await chatTabs.nth(0).click();
   await composer().focus();
-  await page.keyboard.press("Meta+ArrowRight");
+  // Do not repair focus between presses: the outgoing composer becomes inert
+  // during selection, and the shortcut must hand off before that happens.
+  for (const [key, index] of [
+    ["ArrowRight", 1], ["ArrowRight", 2], ["ArrowRight", 0], ["ArrowLeft", 2],
+  ]) {
+    await page.keyboard.press(`Meta+${key}`);
+    await expect(chatTabs.nth(index)).toHaveAttribute("aria-selected", "true");
+    await expect(composer()).toBeFocused();
+    if (index === 0) await expect(composer()).toHaveText("Keep this chat draft");
+  }
+  check("Command+Left/Right preserves composer focus across consecutive chat switches and wrapping", true);
+
+  const chatIds = await chatTabs.evaluateAll(nodes => nodes.map(node => node.dataset.chatId));
+  const rapidSelections = await page.evaluate(async () => {
+    const { useWorkspaceStore } = await import("/apps/desktop/src/renderer/state/workspace-store.ts");
+    const selections = [];
+    const unsubscribe = useWorkspaceStore.subscribe((state, previous) => {
+      if (state.activeChatId !== previous.activeChatId) selections.push(state.activeChatId);
+    });
+    try {
+      // Deliver both keys before React can refresh the pane's focus listener.
+      for (let index = 0; index < 2; index++) document.activeElement.dispatchEvent(new KeyboardEvent("keydown", {
+        key: "ArrowRight", code: "ArrowRight", metaKey: true, bubbles: true, cancelable: true,
+      }));
+      return selections;
+    } finally { unsubscribe(); }
+  });
+  expect(rapidSelections).toEqual([chatIds[0], chatIds[1]]);
   await expect(chatTabs.nth(1)).toHaveAttribute("aria-selected", "true");
-  await composer().focus();
-  await page.keyboard.press("Meta+ArrowRight");
-  await expect(chatTabs.nth(2)).toHaveAttribute("aria-selected", "true");
-  await composer().focus();
-  await page.keyboard.press("Meta+ArrowRight");
-  await expect(chatTabs.nth(0)).toHaveAttribute("aria-selected", "true");
-  await composer().focus();
-  await page.keyboard.press("Meta+ArrowLeft");
-  await expect(chatTabs.nth(2)).toHaveAttribute("aria-selected", "true");
-  check("Command+Left/Right cycles chat tabs in the focused composer, including the ends", true);
+  await expect(composer()).toBeFocused();
+  check("Rapid chat shortcuts publish exactly one selection per key without restoring a stale tab", true);
+
+  await chatTabs.nth(0).focus();
+  await page.keyboard.press("ArrowRight");
+  await expect(chatTabs.nth(1)).toBeFocused();
+  for (const [key, index] of [["ArrowRight", 2], ["ArrowRight", 0], ["ArrowLeft", 2]]) {
+    await page.keyboard.press(`Meta+${key}`);
+    await expect(chatTabs.nth(index)).toHaveAttribute("aria-selected", "true");
+    await expect(chatTabs.nth(index)).toBeFocused();
+  }
+  // A deliberate pointer return releases tab-strip keyboard focus.
+  await composer().click();
+  check("Chat shortcuts preserve deliberate tab-strip focus and move it to the selected tab", true);
 
   const sideTabs = page.locator('[data-zeros-column-3] [data-workbench-tab="true"]');
   const sideCount = await sideTabs.count();
@@ -155,26 +185,45 @@ export async function runWorkspaceShortcutsSmoke({ page, check, harnessBase, scr
   const paneIndex = await paneTabs.evaluateAll(nodes => nodes.findIndex(node => node.getAttribute("aria-selected") === "true"));
   await page.keyboard.press("Meta+ArrowRight");
   await expect(paneTabs.nth((paneIndex + 1) % 2)).toHaveAttribute("aria-selected", "true");
-  await twoTabs.locator(".composer-pm:visible").focus();
+  await expect(twoTabs.locator(".composer-pm:visible")).toBeFocused();
+  await page.keyboard.press("Meta+ArrowLeft");
+  await expect(paneTabs.nth(paneIndex)).toHaveAttribute("aria-selected", "true");
+  await expect(twoTabs.locator(".composer-pm:visible")).toBeFocused();
   await page.keyboard.press("Meta+Home");
   expect(await neighbor.locator(".zeros-agent-body:visible").evaluate(node => node.scrollTop)).toBe(neighborBefore);
   await expect(neighbor.getByRole("tab")).toHaveAttribute("aria-selected", "true");
   check("Split panes route keys through the portaled composer without changing the neighboring chat", true);
+
+  await neighbor.locator(".composer-pm:visible").click();
+  for (const key of ["ArrowLeft", "ArrowRight"]) {
+    await page.keyboard.press(`Meta+${key}`);
+    await expect(neighbor.locator(".composer-pm:visible")).toBeFocused();
+    expect((await state()).chatId).toBe(thirdChatId);
+  }
+  await twoTabs.locator(".composer-pm:visible").click();
+  check("A single-tab pane keeps its composer and selection when cycling", true);
 
   const beforeOverlay = await state();
   await page.keyboard.press("Meta+Alt+Slash");
   const palette = page.getByRole("dialog", { name: "Keyboard shortcuts", exact: true });
   const search = palette.getByRole("combobox");
   await expect(search).toBeFocused();
-  for (const key of ["Meta+Digit1", "Meta+KeyN", "Meta+Alt+ArrowDown", "Meta+Alt+ArrowRight"]) await page.keyboard.press(key);
+  for (const key of ["Meta+Digit1", "Meta+KeyN", "Meta+Alt+ArrowDown", "Meta+Alt+ArrowRight", "Meta+ArrowLeft", "Meta+ArrowRight", "Meta+Home", "Meta+End"]) await page.keyboard.press(key);
   expect((await state()).folder).toBe(beforeOverlay.folder);
   expect((await state()).page).toBe("workspace");
+  expect((await state()).chatId).toBe(beforeOverlay.chatId);
   expect((await state()).workbench.activeId).toBe(beforeOverlay.workbench.activeId);
   if (screenshotDir) await mkdir(screenshotDir, { recursive: true });
   for (const theme of ["dark", "light"]) {
     await page.evaluate(theme => { document.documentElement.dataset.theme = theme; }, theme);
     for (const category of ["Workspace", "Chats", "View"]) {
       await palette.getByRole("button", { name: category, exact: true }).click();
+      if (category === "Chats") {
+        const firstMessage = palette.locator('[data-slot="command-item"]').filter({ hasText: "First user message" });
+        const lastMessage = palette.locator('[data-slot="command-item"]').filter({ hasText: "Last user message" });
+        await expect(firstMessage.locator('[data-slot="kbd"]')).toHaveText(["⌘Home", "Fn⌘←"]);
+        await expect(lastMessage.locator('[data-slot="kbd"]')).toHaveText(["⌘End", "Fn⌘→"]);
+      }
       const arrows = palette.locator('[data-slot="kbd"] svg');
       expect(await arrows.count()).toBeGreaterThanOrEqual(2);
       expect(await arrows.evaluateAll(nodes => nodes.every(node => {
@@ -202,9 +251,10 @@ export async function runWorkspaceShortcutsSmoke({ page, check, harnessBase, scr
   await composer().focus();
   await page.keyboard.press("Meta+ArrowRight");
   await expect(chatTabs.nth(1)).toHaveAttribute("aria-selected", "true");
-  await composer().focus();
+  await expect(composer()).toBeFocused();
   await page.keyboard.press("Meta+ArrowLeft");
   await expect(chatTabs.nth(0)).toHaveAttribute("aria-selected", "true");
+  await expect(composer()).toBeFocused();
   for (const [key, index] of [["End", 3], ["Home", 0], ["ArrowDown", 1]]) {
     await composer().focus();
     await page.keyboard.press(`Meta+${key}`);
@@ -247,5 +297,6 @@ export async function runWorkspaceShortcutsSmoke({ page, check, harnessBase, scr
   await page.keyboard.press("Meta+Digit5");
   await expect(row(ids[4])).toHaveAttribute("data-active", "true");
   check("Workspace shortcuts isolate cloud organizations and restore Local ordering across A → B → A", true);
+
   await page.setViewportSize(viewport);
 }
