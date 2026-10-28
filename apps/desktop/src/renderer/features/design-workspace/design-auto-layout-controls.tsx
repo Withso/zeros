@@ -51,6 +51,7 @@ import {
   type DesignLayoutFieldOptions,
 } from "./design-layout-values";
 import {
+  designFrameAlwaysClips,
   canFillDesignContainer,
   canHugDesignContents,
   designAutoLayoutAlignment,
@@ -208,6 +209,7 @@ export function DesignAutoLayoutControls({
   const clipped = ["overflow", "overflow-x", "overflow-y"].some((property) =>
     ["hidden", "clip"].includes(value(property)),
   );
+  const frameClips = designFrameAlwaysClips(details, frameSelected);
   const hasLimit = (property: string) =>
     addedLimits.includes(property) ||
     !["", "0px", "auto", "none"].includes(value(property));
@@ -768,12 +770,22 @@ export function DesignAutoLayoutControls({
         />
       )}
       {container ? (
-        <InspectorCheckboxRow
-          label="Clip content"
-          checked={clipped}
-          disabled={disabled}
-          onChange={() => onAction({ type: "clip" })}
-        />
+        frameClips ? (
+          <InspectorCheckboxRow
+            label="Clip content"
+            checked
+            disabled
+            title="A frame on the canvas always clips its content at its edges"
+            onChange={() => {}}
+          />
+        ) : (
+          <InspectorCheckboxRow
+            label="Clip content"
+            checked={clipped}
+            disabled={disabled}
+            onChange={() => onAction({ type: "clip" })}
+          />
+        )
       ) : null}
     </div>
   );

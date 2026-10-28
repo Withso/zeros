@@ -416,4 +416,14 @@ export async function runDesignNestedOffsetsSmoke({ page, check }) {
   await expect(layout.getByLabel("X", { exact: true })).toHaveValue("0");
   await expect(layout.getByLabel("Y", { exact: true })).toHaveValue("0");
   check("vertical auto layout stacks nested frames from the parent's top-left, without their old offsets", true);
+
+  // The frame itself is a document: nothing past its edges is ever drawn.
+  await page.locator('[data-design-frame="home.html"] [data-design-frame-label]').click();
+  const clip = layout.getByRole("checkbox", { name: "Clip content", exact: true });
+  await expect(clip).toBeChecked();
+  await expect(clip).toBeDisabled();
+  // A layer inside it still follows its own CSS.
+  await select("home-hero");
+  await expect(layout.getByRole("checkbox", { name: "Clip content", exact: true })).toBeEnabled();
+  check("a frame's Clip content reads as the canvas draws it: always clipped at the frame's edges", true);
 }

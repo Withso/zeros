@@ -1,5 +1,8 @@
 import { DESIGN_FRAME_MAX_SIZE } from "@zeros/design-core";
-import type { DesignRuntimeNodeDetails } from "@zeros/protocol/design-runtime";
+import {
+  DESIGN_RUNTIME_DOCUMENT_BODY_ID,
+  type DesignRuntimeNodeDetails,
+} from "@zeros/protocol/design-runtime";
 import {
   designFlowTransformStyles,
   borderSize,
@@ -423,5 +426,26 @@ export function designGridTrackCount(value: string): number {
       value.replace(/\[[^\]]*\]/g, "").match(/(?:[^\s()]+\([^)]*\)|[^\s]+)/g) ??
       []
     ).length,
+  );
+}
+
+/** Whether a selected frame's own layer clips at the frame's edges whatever
+ * its overflow says. A canvas frame is its own document, so nothing it holds
+ * is ever drawn outside it: its body, or a root layer filling the whole
+ * frame, always clips there. "Clip content" shows that truth. */
+export function designFrameAlwaysClips(
+  details: DesignRuntimeNodeDetails,
+  frameSelected: boolean | undefined,
+): boolean {
+  if (!frameSelected) return false;
+  if (details.oid === DESIGN_RUNTIME_DOCUMENT_BODY_ID || details.tag === "body") return true;
+  const layout = details.layout;
+  if (!layout) return false;
+  const near = (left: number, right: number) => Math.abs(left - right) < 0.5;
+  return (
+    near(details.rect.x, 0) &&
+    near(details.rect.y, 0) &&
+    near(details.rect.width, layout.parentWidth) &&
+    near(details.rect.height, layout.parentHeight)
   );
 }

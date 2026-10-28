@@ -10,6 +10,7 @@ import {
   designAutoLayoutFlowStyles,
   designGridTrackCount,
   designAutoLayoutUpdates,
+  designFrameAlwaysClips,
   designFrameResizeRootStyles,
   designFrameRootFixedStyles,
 } from "../design-auto-layout-values";
@@ -82,6 +83,17 @@ describe("auto layout intent", () => {
     const updates = designAutoLayoutUpdates([parent], [moved, turned], "column");
     expect(updates.get("moved")).toMatchObject({ position: "relative", left: "auto", top: "auto", transform: "none" });
     expect(updates.get("turned")).toMatchObject({ position: "relative", transform: "matrix(0,1,-1,0,0,0)" });
+  });
+
+  it("reports a frame's own layer as clipping at the frame's edges, as the canvas draws it", () => {
+    // A canvas frame is a document of its own: content past its edges is
+    // never drawn, so "Clip content" must not read unchecked for it.
+    const root = { ...node({ overflow: "visible" }, "block"), oid: "root", rect: { x: 0, y: 0, width: 400, height: 300 } };
+    expect(designFrameAlwaysClips(root, true)).toBe(true);
+    expect(designFrameAlwaysClips({ ...root, oid: "::zeros-document-body", tag: "body" }, true)).toBe(true);
+    // A smaller root, or the same layer selected as a child, follows its CSS.
+    expect(designFrameAlwaysClips({ ...root, rect: { x: 0, y: 0, width: 200, height: 300 } }, true)).toBe(false);
+    expect(designFrameAlwaysClips(root, false)).toBe(false);
   });
 
   it("keeps a stretched background and fixed overlays out of a drawn layout", () => {
