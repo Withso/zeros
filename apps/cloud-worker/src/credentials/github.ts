@@ -16,9 +16,13 @@ export class GithubTokens {
   private pending?: Pending;
   private flight?: Promise<GithubToken>;
   private readonly now: () => number;
-  constructor(private readonly send: (frame: CloudV2WorkerFrame) => Promise<boolean>, private readonly options: { now?: () => number; timeoutMs?: number } = {}) { this.now = options.now ?? Date.now; }
+  constructor(private readonly send: (frame: CloudV2WorkerFrame) => Promise<boolean>, private readonly options: { now?: () => number; timeoutMs?: number; purpose?: "git" | "gh" } = {}) { this.now = options.now ?? Date.now; }
   connect(): void { this.disconnect(); this.online = true; }
-  invalidate(): void { this.cached = undefined; }
+  invalidate(): void {
+    this.cached = undefined;
+    if (this.pending) this.refuse(this.pending.id);
+    this.flight = undefined;
+  }
   disconnect(): void {
     this.online = false; this.cached = undefined;
     if (this.pending) { clearTimeout(this.pending.timer); this.pending.reject(unavailable()); this.pending = undefined; }
@@ -32,7 +36,7 @@ export class GithubTokens {
     const pending = new Promise<GithubToken>((resolve, reject) => {
       const timer = setTimeout(() => this.refuse(id), this.options.timeoutMs ?? 15_000); timer.unref?.();
       this.pending = { id, resolve, reject, timer };
-      void this.send({ t: "request", id, kind: "github-token" }).then(sent => { if (!sent) this.refuse(id); }, () => this.refuse(id));
+      void this.send({ t: "request", id, kind: "github-token", ...(this.options.purpose ? { purpose: this.options.purpose } : {}) }).then(sent => { if (!sent) this.refuse(id); }, () => this.refuse(id));
     });
     const flight = pending.finally(() => { if (this.flight === flight) this.flight = undefined; }); this.flight = flight;
     return flight;
@@ -60,7 +64,7 @@ export function githubEnvironment(socketPath: string, askpassPath: string): Node
 export class GithubBroker {
   private server?: Server;
   private readonly sockets = new Set<Socket>();
-  constructor(readonly socketPath: string, private readonly token: () => Promise<GithubToken>, private readonly changed: () => void = () => {}) {}
+  constructor(readonly socketPath: string, private readonly token: (purpose: "git" | "gh") => Promise<GithubToken>, private readonly changed: () => void = () => {}) {}
   async start(): Promise<void> {
     if (this.server) return;
     await mkdir(dirname(this.socketPath), { recursive: true, mode: 0o700 });
@@ -100,7 +104,7 @@ export class GithubBroker {
         const request: unknown = JSON.parse(buffer.trim());
         if (!request || typeof request !== "object" || !("kind" in request)) throw unavailable();
         if (request.kind === "changed") { this.changed(); return { ok: true }; }
-        if (request.kind === "token") return this.token();
+        if (request.kind === "token" || request.kind === "user-token") return this.token(request.kind === "user-token" ? "gh" : "git");
         throw unavailable();
       };
       void reply().then(value => { if (!socket.destroyed) socket.end(JSON.stringify(value) + "\n"); }, () => { if (!socket.destroyed) socket.end('{"error":"unavailable"}\n'); });

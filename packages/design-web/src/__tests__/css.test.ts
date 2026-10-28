@@ -1,4 +1,5 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
+import postcss from "postcss";
 
 import {
   DesignStyleAmbiguityError,
@@ -15,6 +16,24 @@ import { createDesignWebDocumentState } from "../revision";
 import { FRAME_CSS, FRAME_HTML, webState } from "./fixtures";
 
 describe("CSS provenance and mutation", () => {
+  it.each(["</style>", "</StYlE >", "</STYLE\t>"])("refuses HTML raw-text termination in embedded CSS: %s", delimiter => {
+    const html = '<html><head><style>[data-oid="card"] { --label:"safe"; }</style></head><body><div data-oid="card"></div></body></html>';
+    const state = createDesignWebDocumentState({ documentId: "css-boundary", entryFile: "index.html", files: { "index.html": html } });
+    expect(() => mutateDesignNodeStyles(state, { nodeId: "card", scope: "rule", styles: { "--label": `"${delimiter}<div>injected</div>"` } })).toThrow(/style|HTML/i);
+    expect(state.files["index.html"]).toBe(html);
+  });
+
+  it("takes the explicit inline path without enumerating unrelated stylesheet rules", () => {
+    const state = createDesignWebDocumentState({
+      documentId: "inline-fast-path", entryFile: "index.html",
+      files: { "index.html": FRAME_HTML, "styles.css": FRAME_CSS, "unrelated.css": "/* unrelated-sheet-marker */ .other { color: red; }" },
+    });
+    const parse = vi.spyOn(postcss, "parse");
+    try {
+      expect(mutateDesignNodeStyles(state, { nodeId: "card", scope: "inline", styles: { color: "blue" } }).decisions[0]?.appliedScope).toBe("inline");
+      expect(parse.mock.calls.some(([source]) => String(source).includes("unrelated-sheet-marker"))).toBe(false);
+    } finally { parse.mockRestore(); }
+  });
   it.each(["inline", "auto", "rule"] as const)(
     "validates %s styles against the containing page frame",
     (scope) => {

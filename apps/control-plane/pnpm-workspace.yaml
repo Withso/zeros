@@ -4,3 +4,11 @@
 # is a fallback — approved so pnpm v10/v11 never hard-fails the install.
 onlyBuiltDependencies:
   - esbuild
+
+# The test/dev graph is independent from the desktop workspace overrides.
+overrides:
+  nanoid: "3.3.18"
+  postcss: "8.5.25"
+  source-map-js: "1.2.2"
+  vite: "7.3.7"
+  vitest: "4.1.12"

@@ -85,3 +85,39 @@ it("keeps raw read failures available to settings write guards while presentatio
   expect(current.layer).toMatchObject({ error: null, readError: "temporary settings read" });
   expect(current.resolved).toMatchObject({ error: null, readError: "temporary effective settings read" });
 });
+
+it("coalesces retained settings listeners independently for Local and cloud roots", async () => {
+  const listeners: Array<(message: { kinds: string[] }) => void> = [];
+  state.bridge = { on: (_type: string, listener: (message: { kinds: string[] }) => void) => {
+    listeners.push(listener);
+    return () => {};
+  } };
+  state.status = "connected";
+  const roots = [
+    "/personal/settings-broadcast",
+    "/organization/settings-broadcast",
+    "cloud://11111111-1111-4111-8111-111111111111/33333333-3333-4333-8333-333333333333",
+  ];
+  vi.mocked(bridgeSettingsResolve).mockResolvedValue({ effective: {}, sources: {}, warnings: [] });
+  vi.mocked(bridgeSettingsRead).mockImplementation(async (_bridge, layer, root) => ({
+    layer, path: `${root}/settings.toml`, doc: {}, exists: true,
+  }));
+  for (const root of roots) {
+    read(root);
+    read(root);
+  }
+  const cleanup = state.effects.map(effect => effect());
+  try {
+    for (const listener of listeners) listener({ kinds: ["settings"] });
+    expect(bridgeSettingsRead).not.toHaveBeenCalled();
+    expect(bridgeSettingsResolve).not.toHaveBeenCalled();
+    await vi.waitFor(() => {
+      expect(bridgeSettingsRead).toHaveBeenCalledTimes(roots.length);
+      expect(bridgeSettingsResolve).toHaveBeenCalledTimes(roots.length);
+    });
+    expect(vi.mocked(bridgeSettingsRead).mock.calls.map(call => call[2])).toEqual(roots);
+    expect(vi.mocked(bridgeSettingsResolve).mock.calls.map(call => call[1])).toEqual(roots);
+  } finally {
+    for (const stop of cleanup) stop?.();
+  }
+});

@@ -68,6 +68,16 @@ afterEach(() => {
   vi.useRealTimers();
 });
 
+it("refuses the actual physical capture budget before browser startup, even with a tiny raster", async () => {
+  const harness = browserHarness();
+  const renderer = new PlaywrightDesignRenderer({ browserType: harness.browserType });
+  try {
+    await expect(renderer.render({ state: state("pixel-budget"), viewport: { ...VIEWPORT, width: 8192, height: 8192, deviceScaleFactor: 2 },
+      rasterSize: { width: 100, height: 100 } } as Parameters<typeof renderer.render>[0])).rejects.toThrow(/pixel|raster/i);
+    expect(harness.browserType.launch).not.toHaveBeenCalled();
+  } finally { await renderer.close(); }
+});
+
 describe("headless HTML preparation budgets", () => {
   it("resolves stylesheet hrefs relative to the nested HTML entry", () => {
     const document = createDesignWebDocumentState({

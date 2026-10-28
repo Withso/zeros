@@ -93,7 +93,7 @@ export interface RunFileOptions {
   cwd?: string;
   maxBufferBytes?: number;
   timeoutMs?: number;
-  input?: string;
+  input?: string | Uint8Array;
   env?: Record<string, string | undefined>;
   /** Abort the process and its request when the owning capability is revoked. */
   signal?: AbortSignal;
@@ -221,7 +221,7 @@ export async function runFile(
         stdin:
           opts.input === undefined
             ? "ignore"
-            : new TextEncoder().encode(opts.input),
+            : typeof opts.input === "string" ? new TextEncoder().encode(opts.input) : opts.input,
         stdout: "pipe",
         stderr: "pipe",
         maxBuffer: maxBufferBytes,
@@ -330,7 +330,7 @@ export interface RunGitOptions {
   /** Write this string to the child's stdin then close it. Used by
    *  patch-on-stdin operations like `git apply --cached` (hunk staging,
    *  D.6). */
-  input?: string;
+  input?: string | Uint8Array;
   /** Extra environment variables for this invocation, merged over the engine's
    *  process.env. Used by the per-turn snapshot path to point GIT_INDEX_FILE at a
    *  scratch index (so a whole-tree snapshot never disturbs the user's real

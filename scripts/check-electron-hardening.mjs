@@ -18,6 +18,7 @@ import { readFileSync } from "node:fs";
 
 const main = readFileSync("apps/desktop/electron/main.ts", "utf8");
 const preload = readFileSync("apps/desktop/electron/preload.ts", "utf8");
+const responsePolicy = readFileSync("apps/desktop/electron/iframe-headers.ts", "utf8");
 
 const errs = [];
 
@@ -28,10 +29,16 @@ const required = [
   [/sandbox:\s*true/, "sandbox: true"],
   [/setWindowOpenHandler/, "setWindowOpenHandler (deny/triage window.open targets)"],
   [/["']will-navigate["']/, "will-navigate guard (block in-page navigation away)"],
-  [/Content-Security-Policy/, "Content-Security-Policy injection"],
+  [/installIframeHeaderStripping\(win\.webContents\.session,\s*IS_PACKAGED[\s\S]*?csp:\s*CSP/, "composed packaged-document CSP installation"],
 ];
 for (const [re, label] of required) {
   if (!re.test(main)) errs.push(`apps/desktop/electron/main.ts: missing hardening — ${label}`);
+}
+if (!/headers\["Content-Security-Policy"\]\s*=\s*\[appDocument\.csp\]/.test(responsePolicy) ||
+    !/details\.resourceType === "mainFrame"/.test(responsePolicy) ||
+    !/details\.webContentsId === appDocument\.webContentsId/.test(responsePolicy) ||
+    (responsePolicy.match(/\.onHeadersReceived\(/g) ?? []).length !== 1 || /\.onHeadersReceived\(/.test(main)) {
+  errs.push("apps/desktop/electron/iframe-headers.ts: app CSP must share the single response listener and target the owned main frame");
 }
 // Preload must only bridge via contextBridge.
 if (!/contextBridge\.exposeInMainWorld/.test(preload)) {

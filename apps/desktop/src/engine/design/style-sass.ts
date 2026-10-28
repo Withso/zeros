@@ -1,5 +1,6 @@
 import path from "node:path";
 import type { DesignTailwindImportProblem, DesignTailwindSkippedImport, TailwindFileDiagnosis, TailwindFileReader } from "./style-tailwind";
+import { compileSassInOwnedProcess } from "./sass-process";
 
 // Compiled Sass style sources. A source names the application's Sass entry
 // (.scss or .sass); Zeros compiles it with its own bundled Dart Sass. Every
@@ -19,6 +20,7 @@ const SASS_EXTENSIONS = [".scss", ".sass", ".css"] as const;
 
 export interface DesignSassResult {
   css: string;
+  version: string | null;
   /** Repository files the compile read, sorted. */
   files: string[];
 }
@@ -58,18 +60,20 @@ function sassCandidates(file: string, fromImport: boolean): string[] {
 /** The Sass entry a package names: `exports` with the sass, style or default
  * condition, then `sass`, `style`, a stylesheet `main`, or an index file. */
 function packageEntry(manifest: Record<string, unknown>, subpath: string): string | null {
-  const conditional = (value: unknown): string | null => {
+  let visited = 0;
+  const conditional = (value: unknown, depth = 0): string | null => {
+    if (++visited > 4096 || depth > 32) throw new Error("Sass package manifest budget exceeded");
     if (typeof value === "string") return value;
     if (Array.isArray(value)) {
       for (const entry of value) {
-        const target = conditional(entry);
+        const target = conditional(entry, depth + 1);
         if (target) return target;
       }
       return null;
     }
     if (value && typeof value === "object") {
       const conditions = value as Record<string, unknown>;
-      return conditional(conditions.sass) ?? conditional(conditions.style) ?? conditional(conditions.default);
+      return conditional(conditions.sass, depth + 1) ?? conditional(conditions.style, depth + 1) ?? conditional(conditions.default, depth + 1);
     }
     return null;
   };
@@ -90,6 +94,9 @@ function packageEntry(manifest: Record<string, unknown>, subpath: string): strin
 }
 
 export interface DesignSassOptions {
+  signal?: AbortSignal;
+  /** May lower the hard 10-second execution ceiling. */
+  executionTimeoutMs?: number;
   /** Explains a manifest the reader refused (a link outside the checkout). */
   diagnose?: TailwindFileDiagnosis;
   /** Whether the checkout has installed dependencies at all, so a missing
@@ -103,12 +110,36 @@ type Resolution = { file: string } | { problem: DesignTailwindImportProblem };
  * sources and package manifests). */
 export async function compileDesignSass(
   entry: { file: string; content: string },
-  read: TailwindFileReader,
+  readSource: TailwindFileReader,
   options: DesignSassOptions = {},
 ): Promise<DesignSassResult> {
   const { diagnose, installed } = options;
-  const sass = await import("sass");
+  if (entry.file.length > 4096 || !insideRepository(entry.file) || Buffer.byteLength(entry.content) > 2 * 1024 * 1024)
+    throw new Error("Sass source budget exceeded");
+  const cache = new Map<string, Promise<string | null>>();
+  let inputBytes = Buffer.byteLength(entry.content);
+  const read: TailwindFileReader = file => {
+    if (options.signal?.aborted) return Promise.reject(new Error("Sass compilation cancelled"));
+    if (file.length > 4096 || !insideRepository(file)) return Promise.resolve(null);
+    const existing = cache.get(file);
+    if (existing) return existing;
+    if (cache.size >= 16_384) return Promise.reject(new Error("Sass import lookup budget exceeded"));
+    const pending = readSource(file).then(content => {
+      if (content !== null) {
+        const bytes = Buffer.byteLength(content);
+        inputBytes += bytes;
+        if (bytes > 2 * 1024 * 1024 || inputBytes > 16 * 1024 * 1024) throw new Error("Sass input byte budget exceeded");
+      }
+      return content;
+    });
+    cache.set(file, pending);
+    return pending;
+  };
   const loaded = new Set<string>([entry.file]);
+  const track = (file: string) => {
+    loaded.add(file);
+    if (loaded.size > MAX_SASS_FILES) throw new Error("Sass import file budget exceeded");
+  };
   const skipped = new Map<string, DesignTailwindImportProblem>();
   const toUrl = (file: string) => new URL(`${SCHEME}/${file.split("/").map(encodeURIComponent).join("/")}`);
   const fromUrl = (url: URL | string) => decodeURIComponent(String(url).slice(`${SCHEME}/`.length));
@@ -159,7 +190,7 @@ export async function compileDesignSass(
       if (url.startsWith(SCHEME)) {
         const file = path.posix.normalize(fromUrl(url));
         const found = insideRepository(file) ? await firstFile(file, context.fromImport) : null;
-        if (found) loaded.add(found);
+        if (found) track(found);
         return found ? toUrl(found) : null;
       }
       const containing = context.containingUrl && String(context.containingUrl).startsWith(SCHEME)
@@ -179,7 +210,7 @@ export async function compileDesignSass(
       const resolved = await resolvePackage(specifier, containing, context.fromImport);
       if ("problem" in resolved) return problem(url, resolved.problem);
       if (loaded.size >= MAX_SASS_FILES) throw new Error(`A Sass source may read at most ${MAX_SASS_FILES} files.`);
-      loaded.add(resolved.file);
+      track(resolved.file);
       return toUrl(resolved.file);
     },
     async load(canonicalUrl: URL) {
@@ -192,18 +223,12 @@ export async function compileDesignSass(
   };
 
   try {
-    const result = await sass.compileStringAsync(entry.content, {
-      url: toUrl(entry.file),
+    const result = await compileSassInOwnedProcess({
+      content: entry.content,
+      url: toUrl(entry.file).href,
       syntax: entry.file.endsWith(".sass") ? "indented" : "scss",
-      importer,
-      importers: [importer],
-      style: "expanded",
-      charset: false,
-      sourceMap: false,
-      // Deprecation notices belong to the application's own build output.
-      logger: sass.Logger.silent,
-    });
-    return { css: result.css, files: [...loaded].sort() };
+    }, importer, options);
+    return { css: result.css, version: result.version, files: [...loaded].sort() };
   } catch (error) {
     if (skipped.size > 0) {
       throw new DesignSassImportError(

@@ -25,14 +25,14 @@ it("shares live revisions only with the owning gateway endpoint, including an em
     await (gateway as unknown as { adapterFor(id: string): Promise<AgentAdapter> }).adapterFor("cursor");
     expect(context.mcpCatalogRevision!(server)).toBeUndefined();
     let revision = "generation:1";
-    gateway.setGatewayServer(server.url, () => revision);
+    gateway.setGatewayServer({ url: server.url, authorization: `Bearer ${"a".repeat(43)}` }, () => revision);
     expect(context.mcpCatalogRevision!(server)).toBe(revision);
     expect(context.mcpCatalogRevision!({ ...server, name: "user-server" })).toBeUndefined();
     expect(context.mcpCatalogRevision!({ ...server, url: `${server.url}/other` })).toBeUndefined();
     revision = "generation:2";
     gateway.setGatewayServer(null);
     expect(context.mcpCatalogRevision!(server)).toBe(revision);
-    gateway.setGatewayServer(server.url, () => "replacement:1");
+    gateway.setGatewayServer({ url: server.url, authorization: `Bearer ${"a".repeat(43)}` }, () => "replacement:1");
     expect(context.mcpCatalogRevision!(server)).toBe("replacement:1");
   } finally {
     await gateway.dispose(); factory.mockRestore(); vi.unstubAllEnvs();

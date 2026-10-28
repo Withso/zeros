@@ -325,14 +325,17 @@ Zeros runs the same product against two runtimes. Handle both on every change.
      Session directories and child environment allowlists are not security
      boundaries; agents can access other conversations and delivered credentials
      on their VM.
-   - Access is creator-only and requires current organization membership;
+   - Access is creator-only and requires current organization membership and
+     the creator's own GitHub access to the workspace's recorded source scope;
      enforce it on the server. Each organization has one Cloud Computer;
      organization admins manage its recipe, builds and active snapshot.
      Several devices belonging to the creator may attach and must converge.
    - Create and wake install the control plane's SHA-pinned runtime under
      `/opt/zeros/runtime/<sha256>`, reached through `/opt/zeros/worker`.
-     Cloud Computer builds start from Boat's stock image and cache the runtime
-     alongside installed repositories in an organization snapshot.
+     Cloud Computer builds start from Boat's stock image and capture a clean
+     runtime snapshot before credentials, source or setup reach the builder.
+     Each workspace then hydrates its authorized repository and runs setup
+     inside its own VM. Existing source scopes survive checkpoint restores.
    - Cloud advertises no Browser, Design or simulator capability. Do not route
      an unavailable cloud feature to Local. Chat, files, Git and terminals use
      the shared UI and existing bridge messages.

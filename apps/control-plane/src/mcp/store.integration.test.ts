@@ -1,10 +1,12 @@
 import { randomBytes, randomUUID } from "node:crypto";
 import pg from "pg";
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { resetMigratedTestDatabase } from "../test-database.js";
 import { withUserTx } from "../db.js";
 import { McpStore } from "./store.js";
 import { SECRET_REF } from "./model.js";
+import { CloudV2Store } from "../cloud/store.js";
+import { sealMcpMaterial } from "./envelope.js";
 
 const d = process.env.TEST_DATABASE_URL ? describe : describe.skip;
 d("organization MCP store", () => {
@@ -33,6 +35,104 @@ d("organization MCP store", () => {
     await expect(store.list(org, outsider)).rejects.toMatchObject({ status: 404 });
     await expect(store.remove(org, admin, mine.id, mine.revision)).rejects.toMatchObject({ status: 404 });
     expect(await withUserTx(pool, member, tx => tx.query("SELECT * FROM organization_extensions"))).toMatchObject({ rowCount: 0 });
+  });
+
+  it("uses explicit cloud repository authority for configuration without widening Local runtime admission", async () => {
+    const final = vi.fn(async () => {}), authorize = vi.fn(async () => ({ repositoryId: "42", assertCurrent: final }));
+    const selected = new McpStore(pool, keys, async () => ["org/repo"], authorize);
+    const id = randomUUID();
+    await selected.put(org, member, id, input("user", "cloud/project"), "cloud");
+    expect(authorize).toHaveBeenCalledWith(org, member, "cloud/project");
+    expect(final).toHaveBeenCalledOnce();
+    await expect(selected.resolve(org, member, "cloud/project")).rejects.toMatchObject({ code: "repository_not_found" });
+    expect(await selected.resolve(org, member, "cloud/project", { repositoryId: "42" })).toMatchObject([{ id }]);
+    await selected.put(org, member, randomUUID(), input("user", "org/repo"));
+    expect(authorize).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not release a name-only repository's MCP secrets to a cloud workspace reusing that name", async () => {
+    const id = randomUUID();
+    await store.put(org, admin, id, input("organization", "org/repo"));
+    // The old definition predates immutable identity recording. A newly
+    // admitted workspace can belong to a different repository at the same name;
+    // current access to that name cannot establish the definition's provenance.
+    expect(await store.resolve(org, member, "org/repo", { repositoryId: "99" })).toEqual([]);
+    expect(await store.resolve(org, member, "org/repo")).toMatchObject([{ id }]);
+  });
+
+  it("retains an ID-bound definition across a transfer and excludes a replacement name in Local and cloud", async () => {
+    const catalog = [{ repository: "org/repo", repositoryId: "42" }];
+    let selectedId = "42";
+    const selected = new McpStore(pool, keys, async () => catalog,
+      async () => ({ repositoryId: selectedId, assertCurrent: async () => {} }));
+    const id = randomUUID();
+    const original = await selected.put(org, admin, id, input("organization", "org/repo"), "cloud");
+    expect((await selected.get(org, admin, id)).repository_id).toBe("42");
+    catalog.splice(0, catalog.length, { repository: "org/repo", repositoryId: "99" },
+      { repository: "current/project", repositoryId: "42" });
+    expect(await selected.resolve(org, member, "current/project", { repositoryId: "42" })).toMatchObject([{ id, env: { KEY: "fixture-secret" } }]);
+    expect(await selected.resolve(org, member, "current/project")).toMatchObject([{ id }]);
+    expect(await selected.resolve(org, member, "org/repo", { repositoryId: "99" })).toEqual([]);
+    expect(await selected.resolve(org, member, "org/repo")).toEqual([]);
+
+    selectedId = "99";
+    await expect(selected.put(org, admin, id, { ...input("organization", "org/repo"), expectedRevision: 1,
+      config: original.config }, "cloud")).rejects.toMatchObject({ code: "mcp_repository_changed" });
+    expect((await selected.get(org, admin, id)).revision).toBe(1);
+    selectedId = "42";
+    await selected.put(org, admin, id, { ...input("organization", "current/project"), expectedRevision: 1,
+      config: original.config }, "cloud");
+    expect((await selected.get(org, admin, id)).repository_id).toBe("42");
+    expect(await selected.resolve(org, member, "org/repo", { repositoryId: "42" })).toMatchObject([{ id }]);
+  });
+
+  it("records native admission IDs for cloud use without allowing an old catalog to erase them", async () => {
+    let catalog: { repository: string; repositoryId?: string }[] = [{ repository: "org/repo", repositoryId: "42" }];
+    const selected = new McpStore(pool, keys, async () => catalog), id = randomUUID();
+    const original = await selected.put(org, admin, id, input("organization", "org/repo"));
+    expect(await selected.resolve(org, member, "org/repo", { repositoryId: "42" })).toMatchObject([{ id }]);
+    catalog = [{ repository: "org/repo" }];
+    expect(await selected.resolve(org, member, "org/repo")).toEqual([]);
+    await expect(selected.put(org, admin, id, { ...input("organization", "org/repo"), expectedRevision: 1,
+      config: original.config })).rejects.toMatchObject({ code: "mcp_repository_changed" });
+    expect((await selected.get(org, admin, id)).repository_id).toBe("42");
+  });
+
+  it("withdraws a definition's ID proof when an older API saves a new revision without that proof", async () => {
+    const selected = new McpStore(pool, keys, async () => [{ repository: "org/repo", repositoryId: "42" }]);
+    const id = randomUUID();
+    await selected.put(org, admin, id, input("organization", "org/repo"));
+    const envelope = sealMcpMaterial({ env: { KEY: "fixture-replacement-secret" } },
+      { organizationId: org, ownerUserId: null, id, revision: 2, purpose: "config" }, keys);
+    // The preceding writer atomically updates config/secrets/revision, but
+    // knows only the repository name and cannot affirm a previously saved ID.
+    await pool.query("UPDATE organization_extensions SET revision=2,secret_envelope=$2 WHERE id=$1", [id, envelope]);
+    expect(await selected.resolve(org, member, "org/repo", { repositoryId: "42" })).toEqual([]);
+    expect(await selected.resolve(org, member, "org/repo")).toEqual([]);
+  });
+
+  it("refreshes only the original workspace after a transferred repository's definition changes", async () => {
+    await pool.query("UPDATE organizations SET cloud_workspaces_allowed=true WHERE id=$1", [org]);
+    const workspaces = new CloudV2Store(pool);
+    const original = await workspaces.createWorkspace({ id: randomUUID(), organizationId: org, creatorUserId: member,
+      name: "original", repository: "org/repo", sourceRepositoryId: "42", branch: "work", baseBranch: "main", computerBuildId: null });
+    const replacement = await workspaces.createWorkspace({ id: randomUUID(), organizationId: org, creatorUserId: member,
+      name: "replacement", repository: "current/project", sourceRepositoryId: "99", branch: "work", baseBranch: "main", computerBuildId: null });
+    const selected = new McpStore(pool, keys, async () => [],
+      async () => ({ repositoryId: "42", assertCurrent: async () => {} }));
+    const saved = await selected.put(org, admin, randomUUID(), input("organization", "current/project"), "cloud");
+    expect(await workspaces.loginRevision(original.id)).toBe("1");
+    expect(await workspaces.loginRevision(replacement.id)).toBe("0");
+    await selected.remove(org, admin, saved.id, saved.revision);
+    expect(await workspaces.loginRevision(original.id)).toBe("2");
+    expect(await workspaces.loginRevision(replacement.id)).toBe("0");
+  });
+
+  it("rolls back a cloud-scoped configuration when its connection changes after preflight", async () => {
+    const selected = new McpStore(pool, keys, async () => ["org/repo"], async () => ({ repositoryId: "42", assertCurrent: async () => { throw new Error("connection changed"); } }));
+    const id = randomUUID();
+    await expect(selected.put(org, member, id, input("user", "cloud/project"), "cloud")).rejects.toThrow("connection changed");
+    expect((await pool.query("SELECT id FROM organization_extensions WHERE id=$1", [id])).rowCount).toBe(0);
   });
 
   it("seals variables, validates the repository, and uses exact CAS under concurrent edits", async () => {

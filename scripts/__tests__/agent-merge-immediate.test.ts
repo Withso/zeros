@@ -94,6 +94,11 @@ function fakeGh(snapshot = fixture()) {
   };
   const spawn = vi.fn((command: string, args: string[], _options: unknown) => {
     calls.push(args);
+    if (command === "git" && args[0] === "--no-replace-objects") {
+      const stdout = args.includes("diff") ? snapshot.files.map(file => `M\0${file.filename}\0`).join("")
+        : args.includes("--is-shallow-repository") ? "false\n" : args.includes("merge-base") ? BASE + "\n" : "";
+      return { status: 0, stdout, stderr: "" };
+    }
     if (command === "git") {
       expect(args).toEqual(["var", "GIT_AUTHOR_IDENT"]);
       controls.beforeGitRead(++gitReads, snapshot);
@@ -578,9 +583,9 @@ describe("immediate-only agent merge", () => {
         false,
       );
       for (const call of gh.spawn.mock.calls) {
-        if (call[0] === "git")
+        if (call[0] === "git" && call[1][0] !== "--no-replace-objects")
           expect(call[1]).toEqual(["var", "GIT_AUTHOR_IDENT"]);
-        else expect(call[0]).toBe("gh");
+        else expect(["gh", "git"]).toContain(call[0]);
         expect(call[2]).toMatchObject({ shell: false, stdio: "pipe" });
         expect(call[2]).not.toHaveProperty("env");
       }

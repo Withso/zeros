@@ -134,6 +134,11 @@ it.skipIf(process.platform !== "linux")("starts a real shell in the held descrip
   const output = () => a.frames.map(message => message.type === "PTY_DATA" ? message.data : "").join("");
   await vi.waitFor(() => expect(output()).toMatch(/cwd=\S+\r\n/), { timeout: 10_000 });
   expect(output()).toContain(`cwd=${await realpath(root)}\r\n`);
+  // Bash writes its history on exit. Keep the fixture alive until that exit
+  // is observed instead of racing its write with recursive teardown.
+  await service.handle(a.client, frame("PTY_WRITE", { sessionId: "real", data: "exit 0\r" }));
+  await vi.waitFor(() => expect(a.frames.some(message => message.type === "PTY_EXIT" && message.sessionId === "real")).toBe(true), { timeout: 10_000 });
+  await service.flush();
 });
 
 // The owner's naming: zeros@<number>-<the workspace's own repositories>. The
@@ -155,6 +160,9 @@ it.skipIf(process.platform !== "linux")("shows that name in a real shell's promp
   await service.handle(a.client, frame("PTY_WRITE", { sessionId: "named", data: "PS1='mine> '\r" }));
   await service.handle(a.client, frame("PTY_WRITE", { sessionId: "named", data: "echo done\r" }));
   await vi.waitFor(() => expect(output()).toMatch(/done\r\nmine> $/), { timeout: 10_000 });
+  await service.handle(a.client, frame("PTY_WRITE", { sessionId: "named", data: "exit 0\r" }));
+  await vi.waitFor(() => expect(a.frames.some(message => message.type === "PTY_EXIT" && message.sessionId === "named")).toBe(true), { timeout: 10_000 });
+  await service.flush();
 }, 30_000);
 
 it("honors kill while native spawn is pending", async () => {

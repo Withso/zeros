@@ -3339,16 +3339,16 @@ export class ClaudeSdkAdapter implements AgentAdapter {
       if (
         state.permissionMode !== "plan" &&
         isZerosControlTool(toolName, zerosControlServers, options.mcpServer) &&
-        // An explicit user ask/deny rule for the Local CLI tool still wins.
+        // Explicit user and SDK approval requirements win for every control
+        // namespace, including browser and computer actions.
         !(
-          options.mcpServer?.name === LOCAL_ORCHESTRATION_TOOL_SERVER &&
           (options.matchedAskRule != null || options.defaultToNo === true || options.suppressAlwaysAllowRule === true)
         )
       ) {
         return Promise.resolve({ behavior: "allow", updatedInput: input });
       }
       const requiresExplicitApproval =
-        options.defaultToNo === true || options.suppressAlwaysAllowRule === true;
+        options.matchedAskRule != null || options.defaultToNo === true || options.suppressAlwaysAllowRule === true;
       const permissionId = randomUUID();
       const toolCallId = options.toolUseID ?? `${Date.now()}`;
       // "Allow for this project" persists an ALLOW RULE to localSettings

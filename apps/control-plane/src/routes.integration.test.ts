@@ -917,6 +917,50 @@ d("organization routes", () => {
     expect(accepted?.status).toBe(200);
   });
 
+  it("does not accept an invitation for a historical profile email", async () => {
+    actor = owner;
+    const created = await request("/v1/organizations", { method: "POST", body: { name: `Identity check ${randomUUID()}` } });
+    const org = (await created.json()).organization.id;
+    const invited = await request(`/v1/organizations/${org}/invitations`, { method: "POST", body: { email: member.email } });
+    const token = (await invited.json()).invitation.token;
+    try {
+      for (const verifiedEmail of [undefined, `changed-${randomUUID()}@example.test`]) {
+        actor = { ...member, identity: { ...member.identity, verifiedEmail } };
+        const result = await request("/v1/invitations/accept", { method: "POST", body: { token } });
+        expect(result.status).toBe(403);
+      }
+      actor = { ...member, identity: { ...member.identity, verifiedEmail: member.email.toUpperCase() } };
+      expect((await request("/v1/invitations/accept", { method: "POST", body: { token } })).status).toBe(200);
+    } finally { actor = owner; }
+  });
+
+  it("rechecks an administrator after waiting behind their demotion", async () => {
+    actor = owner;
+    const created = await request("/v1/organizations", { method: "POST", body: { name: `Role race ${randomUUID()}` } });
+    const org = (await created.json()).organization.id;
+    const admin = await signup("Demoted"), target = await signup("Target");
+    await pool.query("INSERT INTO organization_members(org_id,user_id,role) VALUES($1,$2,'admin'),($1,$3,'member')", [org, admin.id, target.id]);
+    const blocker = await pool.connect();
+    let pending: Promise<Response> | undefined;
+    try {
+      await blocker.query("BEGIN");
+      await blocker.query("SELECT 1 FROM organizations WHERE id=$1 FOR UPDATE", [org]);
+      const pid = (await blocker.query("SELECT pg_backend_pid() AS pid")).rows[0].pid;
+      actor = admin;
+      pending = request(`/v1/organizations/${org}/members/${target.id}`, { method: "PATCH", body: { role: "admin" } });
+      await vi.waitFor(async () => {
+        const result = await pool.query("SELECT 1 FROM pg_stat_activity WHERE $1=ANY(pg_blocking_pids(pid))", [pid]);
+        expect(result.rowCount).toBeGreaterThan(0);
+      });
+      await blocker.query("UPDATE organization_members SET role='member',authorization_revision=authorization_revision+1 WHERE org_id=$1 AND user_id=$2", [org, admin.id]);
+      await blocker.query("COMMIT");
+      expect((await pending).status).toBe(403);
+      expect((await pool.query("SELECT role FROM organization_members WHERE org_id=$1 AND user_id=$2", [org, target.id])).rows[0].role).toBe("member");
+    } finally {
+      await blocker.query("ROLLBACK").catch(() => {}); blocker.release(); await pending; actor = owner;
+    }
+  });
+
   it("revokes a pending local rejoin token when removing a member during Auth0 rollback", async () => {
     actor = owner;
     const created = await request("/v1/organizations", {

@@ -143,6 +143,8 @@ const vite = spawn(
     "vite",
     "--mode",
     "ui-smoke",
+    "--host",
+    "127.0.0.1",
     "--port",
     String(port),
     "--strictPort",

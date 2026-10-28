@@ -15,7 +15,7 @@ suite("durable cloud create requests", () => {
   afterAll(async () => pool.end());
   beforeEach(async () => {
     await resetMigratedTestDatabase(pool);
-    store = new CloudV2Store(pool); computers = new CloudV2Computers(pool);
+    store = new CloudV2Store(pool); computers = new CloudV2Computers(pool, pool, async (_org, _user, target) => ({ repository: target.repository, repositoryId: "42" }));
     org = randomUUID(); creator = randomUUID(); member = randomUUID();
     for (const id of [creator, member]) await pool.query("INSERT INTO users(id,email,display_name) VALUES($1,$2,'User')", [id, `${id}@example.test`]);
     await pool.query(`INSERT INTO organizations(id,slug,name,created_by,is_personal,cloud_workspaces_allowed)
@@ -56,11 +56,27 @@ suite("durable cloud create requests", () => {
     expect(await store.list(org, creator)).toEqual([]);
     expect((await api()("changing-build")).status).toBe(201);
   });
+
+  it("cannot persist a replacement repository ID under the original build's source name", async () => {
+    await expect(store.createWorkspace({ id: randomUUID(), organizationId: org, creatorUserId: creator,
+      name: "Transferred", repository: "example/project", branch: "topic", baseBranch: "master",
+      computerBuildId: buildId, sourceRepositoryId: "99" })).rejects.toMatchObject({ code: "cloud_source_review_required" });
+    expect(await store.list(org, creator)).toEqual([]);
+  });
+
+  it("derives the workspace ledger from the locked build even when a caller omits the ID", async () => {
+    const workspace = await store.createWorkspace({ id: randomUUID(), organizationId: org, creatorUserId: creator,
+      name: "Pinned", repository: "example/project", branch: "topic", baseBranch: "master", computerBuildId: buildId });
+    expect((await pool.query("SELECT source_repository,repository_id::text FROM cloud_v2_github_sources WHERE workspace_id=$1", [workspace.id])).rows)
+      .toEqual([{ source_repository: "example/project", repository_id: "42" }]);
+  });
   function api(userId = creator, storage = store) {
     const app = new Hono();
     app.use("*", async (c, next) => { c.set("user", { id: userId } as never); await next(); });
     app.onError((error, c) => error instanceof HttpError ? c.json({ error: { code: error.code } }, error.status) : c.json({ error: { code: "internal" } }, 500));
-    app.route("/", createCloudV2Routes({ store: storage, computers, installedRepositories: id => storage.installedRepositories(id), bridgeBaseUrl: "wss://example.test" }));
+    app.route("/", createCloudV2Routes({ store: storage, computers, installedRepositories: id => storage.installedRepositories(id),
+      authorizeBuildRepository: (org, user, build, repository) => computers.resolveBuildRepository(org, user, build, repository),
+      authorizeSource: async () => {}, bridgeBaseUrl: "wss://example.test" }));
     return (key: string, body: object = {}) => app.request("/v1/cloud-v2/workspaces", { method: "POST",
       headers: { "content-type": "application/json", "Idempotency-Key": key },
       body: JSON.stringify({ organizationId: org, repository: "example/project", ...body }) });

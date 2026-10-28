@@ -68,15 +68,17 @@ describe("extension file read races", () => {
   }
 
   it.each(kinds)(
-    "reads the inspected %s file when its path is replaced",
+    "rejects a %s file whose metadata changes during the read",
     (kind) => {
       const { file, source, read } = fixture(kind);
-      const expected = read();
+      expect(read()).not.toBeNull();
       afterInspection(file, () => {
         fs.renameSync(file, `${file}.old`);
         fs.writeFileSync(file, source.replaceAll("original", "replacement"));
       });
-      expect(read()).toEqual(expected);
+      if (kind === "native")
+        expect(read()).toMatchObject({ partial: true, entries: [] });
+      else expect(read()).toBeNull();
     },
   );
 

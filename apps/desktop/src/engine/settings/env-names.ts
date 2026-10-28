@@ -51,6 +51,17 @@ export function isSecretEnvName(name: string): boolean {
  *  unlike a setup script (whose env is scrubbed), the agent env is not, so this
  *  is the backstop. */
 const DANGEROUS_ENV_NAMES = new Set([
+  // These select trusted configuration or grant tool authority. They belong
+  // to the engine/provider permission channel, never ordinary dotenv data.
+  "CODEX_HOME",
+  "CLAUDE_CONFIG_DIR",
+  "CURSOR_CONFIG_DIR",
+  "CLAUDE_ALLOWED_TOOLS",
+  "CLAUDE_DISALLOWED_TOOLS",
+  "CLAUDE_CODE_SKIP_PERMISSIONS",
+  "HOME",
+  "XDG_CONFIG_HOME",
+  "XDG_DATA_HOME",
   "NODE_OPTIONS",
   "BASH_ENV",
   "ENV",

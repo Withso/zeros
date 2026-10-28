@@ -34,6 +34,32 @@ it("ends refused, offline and timed-out requests cleanly without retrying", asyn
   await expect(tokens.get()).rejects.toThrow("GitHub authentication is unavailable"); expect(frames).toHaveLength(2);
 });
 
+it("withdraws an in-flight credential when the selected connection is invalidated", async () => {
+  const frames: CloudV2WorkerFrame[] = [];
+  const tokens = new GithubTokens(async frame => { frames.push(frame); return true; });
+  cleanup.push(async () => tokens.disconnect()); tokens.connect();
+  const pending = tokens.get(), rejected = expect(pending).rejects.toThrow("GitHub authentication is unavailable");
+  const first = frames[0] as Extract<CloudV2WorkerFrame, { t: "request" }>;
+  tokens.invalidate();
+  tokens.receive({ t: "reply", id: first.id, token: "fixture-retired", expiresAt: Date.now() + 120_000 });
+  await rejected;
+  const current = tokens.get();
+  expect(frames).toHaveLength(2);
+  tokens.receive({ t: "reply", id: (frames[1] as typeof first).id, token: "fixture-current", expiresAt: Date.now() + 120_000 });
+  expect(await current).toMatchObject({ token: "fixture-current" });
+});
+
+it("uses the Git credential for askpass and the human credential for gh", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "worker-github-actor-"));
+  cleanup.push(() => rm(directory, { recursive: true, force: true }));
+  const broker = new GithubBroker(join(directory, "github.sock"), async purpose => ({ token: purpose === "git" ? "fixture-installation" : "fixture-human", expiresAt: Date.now() + 120_000 }));
+  await broker.start(); cleanup.push(() => broker.dispose());
+  expect(await askpass("Password for 'https://x-access-token@github.com': ", broker.socketPath)).toBe("fixture-installation");
+  await runGh(["pr", "create"], { PATH: "/usr/bin", GH_ZEROS_BROKER_SOCKET: broker.socketPath }, async (_args, env) => {
+    expect(env.GH_TOKEN).toBe("fixture-human"); return 0;
+  });
+});
+
 it("serves a private Unix socket without persisting token material", async () => {
   const directory = await mkdtemp(join(tmpdir(), "worker-broker-")); cleanup.push(() => rm(directory, { recursive: true, force: true }));
   let changes = 0;

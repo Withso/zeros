@@ -572,12 +572,13 @@ export function safeWorkOSReturnPath(
   raw: string | null,
   origin: string,
 ): string {
-  if (!raw) return "/";
+  if (!raw || raw.length > 8_192 || raw.includes("\\") || Array.from(raw).some(char => char.charCodeAt(0) < 32 || char.charCodeAt(0) === 127)) return "/";
   try {
     const expected = new URL(origin);
     const target = new URL(raw, expected);
     if (
       target.origin !== expected.origin ||
+      target.pathname.startsWith("//") ||
       target.username ||
       target.password
     ) {

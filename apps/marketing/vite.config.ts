@@ -3,6 +3,10 @@ import type { Plugin } from "vite";
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
 import tailwindcss from "@tailwindcss/vite";
+import path from "node:path";
+import { developmentFileBoundary, developmentServerOptions } from "../../scripts/dev-server-policy.mjs";
+
+const marketingServeRoots = ["src", "public", "index.html", "node_modules", "../../node_modules", "../../packages/zeros-logo-particles"].map(dir => path.resolve(__dirname, dir));
 
 // Zeros development ports must not overlap:
 //   marketing site → 3000 (this file)
@@ -49,7 +53,7 @@ function marketingPreviewBust(): Plugin {
       if (withEntry.includes("location.replace")) return withEntry;
       return withEntry.replace(
         '<div id="root"></div>',
-        `<script>if(!/[?&]v=plain/.test(location.search)){const u=new URL(location.href);u.searchParams.set("v","plain");location.replace(u.pathname+u.search+u.hash)}</script>\n    <div id="root"></div>`,
+        `<script>if(!/[?&]v=plain/.test(location.search)){const u=new URL(location.href);u.searchParams.set("v","plain");location.replace(u.href)}</script>\n    <div id="root"></div>`,
       );
     },
     configureServer(server) {
@@ -76,15 +80,11 @@ function marketingPreviewBust(): Plugin {
 }
 
 export default defineConfig({
-  plugins: [react(), tailwindcss(), marketingPreviewBust()],
+  plugins: [developmentFileBoundary(marketingServeRoots), react(), tailwindcss(), marketingPreviewBust()],
   server: {
+    ...developmentServerOptions(marketingServeRoots),
     port: 3000,
     strictPort: true,
-    // Dual-stack. `--host 0.0.0.0` is IPv4-only; Cursor port-forward
-    // often connects to ::1 and gets ERR_CONNECTION_REFUSED otherwise.
-    host: true,
-    // Cloud-agent / tunnel previews hit this via *.trycloudflare.com etc.
-    allowedHosts: true,
     headers: {
       "Cache-Control": NO_STORE,
       Pragma: "no-cache",

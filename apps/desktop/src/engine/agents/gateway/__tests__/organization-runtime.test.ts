@@ -17,7 +17,7 @@ function setup(servers: RuntimeMcpServer[]) {
   const removeGateway = vi.fn(async () => {});
   const runtime = new OrganizationMcpRuntime({ host, workspace: () => workspace,
     repository: async () => "example/repo", removeGateway,
-    gateway: async (_key, values) => { backends = values; return "http://127.0.0.1:1234/mcp"; },
+    gateway: async (_key, values) => { backends = values; return { url: "http://127.0.0.1:1234/mcp", authorization: `Bearer ${"a".repeat(43)}` }; },
   });
   return { runtime, host, removeGateway, backends: () => backends,
     switchAccount: () => generation++, setWorkspace: (value: McpWorkspaceIdentity) => { workspace = value; } };
@@ -49,7 +49,7 @@ describe("organisation MCP admission on Local", () => {
   it("fetches authorization only on request and fences account changes", async () => {
     const fixture = setup([{ id: one, name: "remote", transport: "http", url: "https://example.test/mcp", auth: "oauth" }]);
     const servers = await fixture.runtime.resolve("workspace", {});
-    expect(servers).toEqual([{ name: "zeros-gateway", transport: "http", url: "http://127.0.0.1:1234/mcp" }]);
+    expect(servers).toEqual([{ name: "zeros-gateway", transport: "http", url: "http://127.0.0.1:1234/mcp", headersFromEnv: { Authorization: "ZEROS_MCP_GATEWAY_CAPABILITY" } }]);
     expect(fixture.host.authorize).not.toHaveBeenCalled();
     await expect(fixture.backends()[0]!.authorization!(false)).resolves.toEqual({ Authorization: "only-this-user" });
     fixture.switchAccount();

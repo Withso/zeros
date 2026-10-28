@@ -79,7 +79,14 @@ export function isCloudWorkspace(value: unknown): boolean {
 /** Persisted catalog repository namespace; membership can become empty without
  * changing its backend owner. This is identity, never an access grant. */
 export function isCloudRepositorySlug(value: unknown): value is string {
-  return typeof value === "string" && new RegExp(`^cloud-${UUID}:[^:]+:.+/.+$`, "i").test(value);
+  if (typeof value !== "string" || value.length > 512 || /[\s\\]/.test(value)) return false;
+  const prefix = new RegExp(`^cloud-${UUID}:`, "i").exec(value);
+  if (!prefix) return false;
+  const rest = value.slice(prefix[0].length);
+  const separator = rest.indexOf(":");
+  if (separator < 1) return false;
+  const repository = rest.slice(separator + 1).split("/");
+  return repository.length === 2 && repository.every(part => /^[A-Za-z0-9_.-]+$/.test(part) && part !== "." && part !== "..");
 }
 
 export function cloudTargetForValue(

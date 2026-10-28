@@ -21,6 +21,8 @@ type Snapshot = {
     isDraft: boolean;
     isCrossRepository: boolean;
     headRefOid: string;
+    baseRefOid: string;
+    baseRefName: string;
     changedFiles: number;
     autoMergeRequest: AutoMerge;
   };
@@ -46,6 +48,8 @@ function fixture(): Snapshot {
       isDraft: false,
       isCrossRepository: false,
       headRefOid: HEAD,
+      baseRefOid: "b".repeat(40),
+      baseRefName: "main",
       changedFiles: 1,
       autoMergeRequest: null,
     },
@@ -79,11 +83,17 @@ function fakeGh(snapshot = fixture()) {
     string,
     { status: number; stdout: string; stderr?: string }
   >();
-  const spawn = vi.fn((_command: string, args: string[], _options: unknown) => {
+  const spawn = vi.fn((command: string, args: string[], _options: unknown) => {
     calls.push(args);
     const key = args.slice(0, 3).join(" ");
     const override = responses.get(key);
     if (override) return override;
+    if (command === "git") {
+      const stdout = args.includes("diff") ? snapshot.files.map(file => file.previous_filename
+        ? `R100\0${file.previous_filename}\0${file.filename}\0` : `M\0${file.filename}\0`).join("")
+        : args.includes("--is-shallow-repository") ? "false\n" : args.includes("merge-base") ? snapshot.pr.baseRefOid + "\n" : "";
+      return { status: 0, stdout, stderr: "" };
+    }
     if (args[0] === "pr" && args[1] === "view") return json(snapshot.pr);
     if (args[0] === "pr" && args[1] === "checks")
       return json(snapshot.requiredChecks);
@@ -414,6 +424,24 @@ describe("documented human override", () => {
 });
 
 describe("agent merge CLI", () => {
+  it("does not classify mutable PR files when the selected commit changes A to B to A", async () => {
+    const snapshot = fixture();
+    const gh = fakeGh(snapshot);
+    const original = gh.spawn.getMockImplementation()!;
+    gh.spawn.mockImplementation((command, args, options) => {
+      if (command === "git") {
+        if (args.includes("diff")) return { status: 0, stdout: "M\0.github/workflows/ci.yml\0", stderr: "" };
+        if (args.includes("merge-base")) return { status: 0, stdout: "b".repeat(40) + "\n", stderr: "" };
+        if (args.includes("--is-shallow-repository")) return { status: 0, stdout: "false\n", stderr: "" };
+        return { status: 0, stdout: "", stderr: "" };
+      }
+      // The mutable endpoint momentarily reports B's ordinary source change.
+      return original(command, args, options);
+    });
+    expect(await runAgentMerge(["123"], gh)).toBe(1);
+    expect(gh.calls.some(args => args[1] === "merge")).toBe(false);
+  });
+
   it("uses the workspace gh, pins the checked head and supplies the checked commit message", async () => {
     const snapshot = fixture();
     snapshot.pr.title = "Fix navigation `literal` $(literal)";
@@ -437,7 +465,7 @@ describe("agent merge CLI", () => {
     ]);
     expect(existsSync(merge[merge.indexOf("--body-file") + 1])).toBe(false);
     for (const call of gh.spawn.mock.calls) {
-      expect(call[0]).toBe("gh");
+      expect(["gh", "git"]).toContain(call[0]);
       expect(call[2]).toMatchObject({ shell: false, stdio: "pipe" });
       expect(call[2]).not.toHaveProperty("env.GH_TOKEN");
     }
@@ -463,31 +491,15 @@ describe("agent merge CLI", () => {
     expect(gh.stderr).not.toHaveBeenCalled();
   });
 
-  it("reads every file page and detects protected renamed paths on a later page", async () => {
+  it("checks both sides of renamed paths in the immutable diff", async () => {
     const snapshot = fixture();
     snapshot.pr.changedFiles = 2;
+    snapshot.files.push({ filename: "docs/config.md", previous_filename: "vitest.config.ts", status: "renamed" });
     const gh = fakeGh(snapshot);
-    gh.responses.set(
-      `api repos/${REPOSITORY}/pulls/123/files?per_page=100 --paginate`,
-      json([
-        snapshot.files,
-        [
-          {
-            filename: "docs/config.md",
-            previous_filename: "vitest.config.ts",
-            status: "renamed",
-          },
-        ],
-      ]),
-    );
     expect(await runAgentMerge(["123"], gh)).toBe(1);
     expect(gh.stderr).toHaveBeenCalledWith(OWNER_REVIEW);
-    expect(gh.calls).toContainEqual([
-      "api",
-      `repos/${REPOSITORY}/pulls/123/files?per_page=100`,
-      "--paginate",
-      "--slurp",
-    ]);
+    expect(gh.calls.some(args => args.includes("diff") && args.includes(HEAD))).toBe(true);
+    expect(gh.calls.some(args => args.some(arg => arg.includes("/files?")))).toBe(false);
   });
 
   it("reads every open-PR page instead of only the first 100 PRs", async () => {
@@ -547,8 +559,8 @@ describe("agent merge CLI", () => {
       ]),
     ],
     [
-      `api repos/${REPOSITORY}/pulls/123/files?per_page=100 --paginate`,
-      json([{}]),
+      "--no-replace-objects diff --no-ext-diff",
+      { status: 0, stdout: "malformed-diff-without-NUL" },
     ],
   ])(
     "fails closed on unavailable or malformed gh data (%s) without echoing it",

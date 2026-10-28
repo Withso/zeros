@@ -202,7 +202,7 @@ function CloudComputerScope({ userId, organizationId, canManage, active }: {
         )}
       </SettingsGroup>
 
-      <SettingsGroup title="Repositories" description="Installed in every new cloud workspace. Changes take effect after you build the computer.">
+      <SettingsGroup title="Repositories" description="Available to members who have repository access. Changes take effect after you build the computer.">
         {configured.map(row => (
           <div key={row.repository} className="flex flex-col gap-2">
             <div className="flex items-center justify-between gap-3">

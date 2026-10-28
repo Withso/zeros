@@ -17,6 +17,10 @@ import { codexPluginMcpServerNames } from "../../mcp-scan";
 import type { JsonValue as GenJsonValue } from "./generated/serde_json/JsonValue";
 import type { CodexAppServerHandle } from "./app-server";
 import { isBundledCodexRuntimePlugin } from "./bundled-runtime-plugins";
+import { isDeepStrictEqual } from "node:util";
+import { parse as parseToml } from "smol-toml";
+import { buildMcpServerOverrides } from "./mcp-overrides";
+import type { McpServerRegistration } from "../../types";
 
 /** Placeholder transport paired with `enabled = false`.
  *
@@ -54,6 +58,7 @@ const CODEX_INTERNAL_SERVER_NAMES = ["codex_apps"] as const;
  *      way, so this is the common case rather than the exotic one. */
 export interface NativeMcpSurface {
   serverNames: string[];
+  registeredServerNames?: string[];
   /** Local declarations must not inherit an internal account bridge's exemption. */
   shadowedAccountServerNames?: string[];
   /** Config-declared servers that use the Streamable HTTP transport, by name →
@@ -88,8 +93,10 @@ export async function readNativeMcpSurface(
     codexHome?: string;
     includePlugins?: boolean;
     requireConfig?: boolean;
+    registeredServers?: readonly McpServerRegistration[];
   },
 ): Promise<NativeMcpSurface> {
+  let merged: unknown;
   const configured = await runtime
     .requestTyped<"config/read", { config?: { mcp_servers?: unknown } | null }>(
       "config/read",
@@ -108,7 +115,8 @@ export async function readNativeMcpSurface(
               Array.isArray(config.mcp_servers))))
       )
         throw new Error("Incomplete MCP configuration");
-      return enabledMcpServers(config?.mcp_servers);
+      merged = config?.mcp_servers;
+      return enabledMcpServers(merged);
     })
     .catch(() => {
       if (opts?.requireConfig)
@@ -117,6 +125,7 @@ export async function readNativeMcpSurface(
         );
       return { names: [] as string[], httpUrls: {} as Record<string, string> };
     });
+  const registeredServerNames = verifiedRegistrations(merged, opts?.registeredServers ?? []);
   let fromPlugins: string[] = [];
   try {
     fromPlugins =
@@ -133,6 +142,7 @@ export async function readNativeMcpSurface(
     (name) => localNames.has(name),
   );
   return {
+    ...(opts?.registeredServers ? { registeredServerNames } : {}),
     serverNames: [
       ...new Set([
         ...configured.names,
@@ -149,6 +159,35 @@ export async function readNativeMcpSurface(
       ? { httpServerUrls: configured.httpUrls }
       : {}),
   };
+}
+
+/** Codex 0.164 recursively merges even whole-table CLI overrides. A matching
+ * name is not authority: verify the complete effective definition before
+ * thread/start can spawn anything. Conflicts require an explicit native config
+ * repair/import; never silently run a hybrid of two definitions. */
+function verifiedRegistrations(merged: unknown, servers: readonly McpServerRegistration[]): string[] {
+  const overrides = buildMcpServerOverrides(servers).filter((_, index) => index % 2 === 1);
+  const expected = (parseToml(overrides.join("\n")).mcp_servers ?? {}) as Record<string, Record<string, unknown>>;
+  const configured = merged && typeof merged === "object" && !Array.isArray(merged) ? merged as Record<string, unknown> : {};
+  const normalize = (input: Record<string, unknown>) => {
+    const result: Record<string, unknown> = {};
+    for (const [key, value] of Object.entries(input)) {
+      if (value == null || (key === "enabled" && value === true) || (key === "environment_id" && value === "local")) continue;
+      if (["args", "env_vars", "disabled_tools"].includes(key) && Array.isArray(value) && value.length === 0) continue;
+      if (["env", "http_headers", "env_http_headers"].includes(key) && value && typeof value === "object" && !Array.isArray(value) && !Object.keys(value).length) continue;
+      result[key] = value;
+    }
+    return result;
+  };
+  const names: string[] = [];
+  for (const [name, definition] of Object.entries(expected)) {
+    const actual = Object.hasOwn(configured, name) ? configured[name] : undefined;
+    if (actual === undefined) continue;
+    if (!actual || typeof actual !== "object" || Array.isArray(actual) || !isDeepStrictEqual(normalize(actual as Record<string, unknown>), normalize(definition)))
+      throw new Error(`MCP configuration conflict for ${name}. Remove the conflicting native declaration or import its complete configuration before reopening this chat.`);
+    names.push(name);
+  }
+  return names;
 }
 
 /** Account-managed packages may be materialized on disk too. Use provider

@@ -1,6 +1,7 @@
 // Cloud workspace v2 API. Responses map into the existing CloudWorkspaceDocument
 // so the shared workspace UI renders v2 workspaces without its own copy.
 import { z } from "zod";
+import { CloudGithubUnavailableReasonSchema } from "@zeros/protocol/cloud-github-connection";
 import { prepareCloudPromptErasure } from "./cloud-prompt-erasure";
 import { cloudAccountRequest } from "./cloud-workspaces";
 import type { CloudWorkspaceDocument } from "./cloud-workspace-contract";
@@ -12,6 +13,7 @@ export const CloudV2CapabilitiesSchema = z.object({
   terminal: z.boolean(), files: z.boolean(), git: z.boolean(),
   agents: z.array(z.enum(["codex", "claude", "cursor"])),
   promptOutbox: z.literal(1).optional(),
+  githubPullRequests: z.literal(1).optional(),
 });
 export type CloudV2Capabilities = z.infer<typeof CloudV2CapabilitiesSchema>;
 
@@ -31,6 +33,10 @@ export const CloudV2WorkspaceSchema = z.object({
   updatedAt: z.string(),
   version: z.literal(2),
   capabilities: CloudV2CapabilitiesSchema,
+  githubUnavailableReason: CloudGithubUnavailableReasonSchema.optional(),
+  github: z.object({ repositoryId: z.string().regex(/^[1-9][0-9]*$/), branch: z.string().nullable(), baseBranch: z.string(), headSha: z.string().nullable(),
+    prNumber: z.number().int().positive().nullable(), prState: z.enum(["draft", "ready", "merged", "closed"]).nullable(), prUrl: z.string().url().nullable() }).optional(),
+  checkoutPath: z.string().optional(),
 }).passthrough();
 export type CloudV2Workspace = z.infer<typeof CloudV2WorkspaceSchema>;
 
@@ -70,11 +76,15 @@ export function cloudV2Document(workspace: CloudV2Workspace): CloudWorkspaceDocu
     status: workspace.archivedAt && (workspace.state === "stopped" || workspace.state === "failed") ? "archived" : STATUS[workspace.state],
     capabilities: {
       ...(workspace.capabilities.promptOutbox === 1 ? { promptOutbox: 1 as const } : {}),
+      ...(workspace.capabilities.githubPullRequests === 1 ? { githubPullRequests: 1 as const } : {}),
       canWrite: true, canEdit: true, canManage: true,
       canStart: workspace.state === "stopped" || (workspace.state === "failed" && RETRYABLE.has(workspace.errorCode ?? "")),
       startUnavailableReason: workspace.state === "failed" && !RETRYABLE.has(workspace.errorCode ?? "") ? "This workspace failed. Create a new one." : null,
     },
     repository: { forge: "github.com", owner, name, revision: workspace.baseBranch },
+    ...(workspace.github ? { github: workspace.github } : {}),
+    ...(workspace.githubUnavailableReason ? { githubUnavailableReason: workspace.githubUnavailableReason } : {}),
+    ...(workspace.checkoutPath ? { checkoutPath: workspace.checkoutPath } : {}),
     generation: {
       number: 1,
       architecture: "linux/amd64",
@@ -93,8 +103,8 @@ export function cloudV2Document(workspace: CloudV2Workspace): CloudWorkspaceDocu
 
 /** The worker's native checkout, as the control plane configures it
  * (`CLOUD_V2_HOME/<repository>`). Mirror rows carry this path. */
-export function cloudV2CheckoutPath(document: Pick<CloudWorkspaceDocument, "repository">): string {
-  return `/home/user/${document.repository.owner}/${document.repository.name}`;
+export function cloudV2CheckoutPath(document: Pick<CloudWorkspaceDocument, "repository" | "checkoutPath">): string {
+  return document.checkoutPath ?? `/home/user/${document.repository.owner}/${document.repository.name}`;
 }
 
 const one = z.object({ workspace: CloudV2WorkspaceSchema });

@@ -41,6 +41,7 @@ import { parseCodexNativeCache, sealCodexNativeCache, CODEX_AUTH_RUNTIME_VERSION
 import { rememberCodexRefreshSeed } from "./agent-credentials/codex-auth-renewal.js";
 import { seedCredentialOwner } from "./agent-credentials/test-fixtures.js";
 import { migrationPhase } from "./migration-phase.js";
+import { sealMcpMaterial, openMcpMaterial } from "./mcp/envelope.js";
 import {
   migrationChecksum,
   renamedMigrationAliasesFor,
@@ -256,6 +257,49 @@ d("migration ladder", { timeout: 30_000 }, () => {
     }
   };
 
+  it("retains canonical repository metadata without inventing permission evidence during the availability upgrade", async () => {
+    await reset();
+    const boundary = LADDER.indexOf("0214_cloud_github_source_verifications.sql");
+    expect(boundary).toBeGreaterThan(0);
+    await applyThrough(boundary);
+    const owner = await seedCredentialOwner(pool), workspace = randomUUID();
+    await pool.query(`INSERT INTO cloud_v2_workspaces(id,org_id,creator_user_id,name,repository,branch,base_branch,state)
+      VALUES($1,$2,$3,'Retained','former/project','work','main','stopped')`, [workspace, owner.organizationId, owner.userId]);
+    await pool.query(`INSERT INTO cloud_v2_github_workspaces(workspace_id,repository_id,canonical_repository,repository_aliases)
+      VALUES($1,42,'current/project',ARRAY['former/project','current/project'])`, [workspace]);
+    const before = (await pool.query("SELECT to_jsonb(g) AS row FROM cloud_v2_github_workspaces g WHERE workspace_id=$1", [workspace])).rows[0].row;
+    await applyAndRecord(LADDER[boundary]!);
+    const after = (await pool.query("SELECT to_jsonb(g)-'repository_observed_at' AS row, repository_observed_at=updated_at AS ordered FROM cloud_v2_github_workspaces g WHERE workspace_id=$1", [workspace])).rows[0];
+    expect(after.row).toEqual(before);
+    expect(after.ordered).toBe(true);
+    expect((await pool.query("SELECT * FROM cloud_github_source_verifications")).rowCount).toBe(0);
+  });
+
+  it("retains legacy MCP secrets without inventing repository identity during upgrade", async () => {
+    await reset();
+    const boundary = LADDER.indexOf("0213_mcp_repository_identities.sql");
+    expect(boundary).toBeGreaterThan(0);
+    await applyThrough(boundary);
+    const owner = await seedCredentialOwner(pool), id = randomUUID();
+    const keys = { currentKeyVersion: 1, keys: { 1: randomBytes(32).toString("base64url") } };
+    const binding = { organizationId: owner.organizationId, ownerUserId: owner.userId, id, revision: 1, purpose: "config" as const };
+    const envelope = sealMcpMaterial({ env: { KEY: "fixture-legacy-secret" } }, binding, keys);
+    await pool.query(`INSERT INTO organization_extensions(id,org_id,owner_user_id,kind,repository,revision,config,secret_names,secret_envelope,oauth_binding)
+      VALUES($1,$2,$3,'mcp','former/project',1,$4,$5,$6,$7)`, [id, owner.organizationId, owner.userId,
+      { name: "legacy", transport: "stdio", command: "server", env: { KEY: "${zeros.secret}" } },
+      { env: ["KEY"], headers: [], oauthClientSecret: false }, envelope, "ab".repeat(32)]);
+    const before = (await pool.query("SELECT to_jsonb(e) AS row FROM organization_extensions e WHERE id=$1", [id])).rows[0].row;
+    const privileges = (await pool.query("SELECT proname,proacl FROM pg_proc WHERE proname IN ('organization_mcp_changed','organization_mcp_sign_in_changed') ORDER BY proname")).rows;
+    await applyAndRecord(LADDER[boundary]!);
+    const after = (await pool.query("SELECT to_jsonb(e)-'repository_id'-'repository_identity_revision' AS row,repository_id,repository_identity_revision,secret_envelope FROM organization_extensions e WHERE id=$1", [id])).rows[0];
+    expect(after.row).toEqual(before);
+    expect(after.repository_id).toBeNull();
+    expect(after.repository_identity_revision).toBeNull();
+    expect(openMcpMaterial(after.secret_envelope, binding, keys)).toEqual({ env: { KEY: "fixture-legacy-secret" } });
+    expect((await pool.query("SELECT proname,proacl FROM pg_proc WHERE proname IN ('organization_mcp_changed','organization_mcp_sign_in_changed') ORDER BY proname")).rows).toEqual(privileges);
+    expect(await withUserTx(pool, owner.userId, tx => tx.query("SELECT id FROM organization_extensions WHERE id=$1", [id]))).toMatchObject({ rowCount: 0 });
+  });
+
   const runLegacyMigrations = async () => {
     await pool.query("CREATE TABLE IF NOT EXISTS schema_migrations(name text PRIMARY KEY,applied_at timestamptz NOT NULL DEFAULT now())");
     const applied = new Set((await pool.query<{name:string}>("SELECT name FROM schema_migrations")).rows.map(row=>row.name));
@@ -263,6 +307,46 @@ d("migration ladder", { timeout: 30_000 }, () => {
     for (const file of pending) await applyAndRecord(file);
     return pending;
   };
+
+  it("retains existing Computer logs and recipes without inventing source IDs during the provenance upgrade", async () => {
+    await applyThrough(LADDER.indexOf("0212_cloud_computer_source_provenance.sql"));
+    const user = randomUUID(), org = randomUUID(), build = randomUUID();
+    const recipe = { repositories: [{ repository: "former/project", setup: "echo fixture", commit: "a".repeat(40) }] };
+    await pool.query("INSERT INTO users(id,email) VALUES($1,'migration-provenance@example.test')", [user]);
+    await pool.query("INSERT INTO organizations(id,slug,name,created_by,is_personal,cloud_workspaces_allowed) VALUES($1,$2,'Migration provenance',$3,false,true)", [org, `source-${org}`, user]);
+    await pool.query(`INSERT INTO cloud_v2_computer_builds(id,org_id,version,recipe,state,snapshot_id,created_by,source_policy_version,log)
+      VALUES($1,$2,1,$3,'succeeded','retained-snapshot',$4,2,'retained-source-canary')`, [build, org, JSON.stringify(recipe), user]);
+    await pool.query("INSERT INTO cloud_v2_computers(org_id,active_build_id,snapshot_name,recipe,recipe_revision) VALUES($1,$2,'retained-snapshot',$3,7)", [org, build, JSON.stringify(recipe)]);
+    const previousBuild = (await pool.query("SELECT * FROM cloud_v2_computer_builds WHERE id=$1", [build])).rows[0];
+    const previousComputer = (await pool.query("SELECT * FROM cloud_v2_computers WHERE org_id=$1", [org])).rows[0];
+    await runMigrations(pool);
+    expect((await pool.query("SELECT * FROM cloud_v2_computer_builds WHERE id=$1", [build])).rows[0]).toEqual({ ...previousBuild, source_targets: null });
+    expect((await pool.query("SELECT * FROM cloud_v2_computers WHERE org_id=$1", [org])).rows[0]).toEqual({ ...previousComputer, recipe_source_targets: null });
+    await expect(pool.query("UPDATE cloud_v2_computer_builds SET source_targets=$2 WHERE id=$1", [build,
+      JSON.stringify([{ repository: "former/project", repositoryId: "99" }])])).rejects.toThrow("source identities are immutable");
+  });
+
+  it("preserves every historical source on legacy disks and never promotes an old image to clean", async () => {
+    await applyThrough(LADDER.indexOf("0206_github_authorization_generations.sql"));
+    const user = randomUUID(), org = randomUUID(), old = randomUUID(), current = randomUUID(), pinned = randomUUID(), unknown = randomUUID();
+    await pool.query("INSERT INTO users(id,email) VALUES($1,'migration-source@example.test')", [user]);
+    await pool.query("INSERT INTO organizations(id,slug,name,created_by,is_personal,cloud_workspaces_allowed) VALUES($1,$2,'Migration source',$3,false,true)", [org, `source-${org}`, user]);
+    await pool.query("INSERT INTO organization_members(org_id,user_id,role) VALUES($1,$2,'owner')", [org, user]);
+    for (const [index, build, repository] of [[1, old, "Example/Removed"], [2, current, "example/selected"]] as const)
+      await pool.query(`INSERT INTO cloud_v2_computer_builds(id,org_id,version,recipe,state,snapshot_id,created_by)
+        VALUES($1,$2,$3,$4,'succeeded',$5,$6)`, [build, org, index, JSON.stringify({ repositories: [{ repository }] }), `legacy-${index}`, user]);
+    await pool.query(`INSERT INTO cloud_v2_workspaces(id,org_id,creator_user_id,name,repository,branch,base_branch,state,computer_build_id)
+      VALUES($1,$2,$3,'Pinned','example/selected','work','main','stopped',$4),
+            ($5,$2,$3,'Unknown','example/selected','other','main','stopped',NULL)`, [pinned, org, user, current, unknown]);
+    await runMigrations(pool);
+    const rows = (await pool.query("SELECT id,source_repositories FROM cloud_v2_workspaces WHERE org_id=$1", [org])).rows;
+    expect(rows.find(row => row.id === pinned).source_repositories).toEqual(["example/removed", "example/selected"]);
+    expect(rows.find(row => row.id === unknown).source_repositories).toBeNull();
+    expect((await pool.query("SELECT DISTINCT source_policy_version FROM cloud_v2_computer_builds WHERE org_id=$1", [org])).rows).toEqual([{ source_policy_version: 1 }]);
+    await expect(pool.query("UPDATE cloud_v2_workspaces SET source_repositories=ARRAY['example/selected'] WHERE id=$1", [pinned])).rejects.toThrow("source scope is immutable");
+    await pool.query("UPDATE cloud_v2_workspaces SET computer_build_id=$2 WHERE id=$1", [pinned, old]);
+    expect((await pool.query("SELECT source_repositories FROM cloud_v2_workspaces WHERE id=$1", [pinned])).rows[0].source_repositories).toEqual(["example/removed", "example/selected"]);
+  });
 
   const seedLegacyCloudTenant = async (input: {
     userId: string;

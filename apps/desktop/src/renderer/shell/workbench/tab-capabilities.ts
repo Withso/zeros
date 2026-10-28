@@ -1,17 +1,16 @@
 import type { Project } from "../../state/projects-store";
-import { isCloudWorkspace } from "../../platform/bridge/cloud-workspace-key";
+import { githubReviewAvailable } from "../../platform/bridge/code-review-availability";
 import { isGithubDotComRemote } from "../pr/github-url";
 import type { WorkbenchTab } from "./tab-model";
 import { visibleWorkbenchTabs } from "./terminal-tabs";
 
-/** Pull request review is Local-only for now: the cloud v2 worker serves no
- * GitHub review operations. */
+/** Older cloud APIs keep Review unavailable until they advertise the service. */
 export function isWorkspaceReviewAvailable(
   project: (Pick<Project, "isGitRepository" | "originUrl"> & { repoRoot?: string }) | null,
 ): boolean {
   return (
     project?.isGitRepository !== false &&
-    !isCloudWorkspace(project?.repoRoot) &&
+    githubReviewAvailable({ cwd: project?.repoRoot }) &&
     isGithubDotComRemote(project?.originUrl)
   );
 }

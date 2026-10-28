@@ -1103,8 +1103,9 @@ async function loadSassGeneration(root: string, declaration: DesignStyleSourceDe
   if (entry === null) return generation(failure(declaration, `${declaration.path} could not be read.`), { entryProblem: await diagnose(declaration.path) });
   let compiled: string;
   try {
-    compiled = (await compileDesignSass({ file: declaration.path, content: entry }, read, { diagnose, installed })).css;
-    sassVersion ??= /\b(\d+\.\d+\.\d+)\b/.exec((await import("sass")).info)?.[1] ?? null;
+    const result = await compileDesignSass({ file: declaration.path, content: entry }, read, { diagnose, installed });
+    compiled = result.css;
+    sassVersion ??= result.version;
   } catch (error) {
     if (error instanceof DesignSassImportError) {
       return generation(failure(declaration, `Sass could not compile ${declaration.path}.`), { skippedImports: error.skipped });

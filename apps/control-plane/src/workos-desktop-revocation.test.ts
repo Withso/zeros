@@ -14,7 +14,7 @@ function provider(
       return { subject: "user_example", sessionId: "session_exact" };
     },
     async listSessions() {
-      return { data: [], listMetadata: { after: null } };
+      return { data: [{ id: "session_exact", status: "active" }], listMetadata: { after: null } };
     },
     async revokeSession() {},
     ...overrides,
@@ -22,6 +22,18 @@ function provider(
 }
 
 describe("Railway WorkOS desktop revocation", () => {
+  it("refuses global revocation from a revoked but unexpired bearer", async () => {
+    const revokeSession = vi.fn();
+    const app = createWorkOSDesktopRevocationRoutes(provider({
+      revokeSession,
+      async listSessions() { return { data: [{ id: "session_other", status: "active" }], listMetadata: { after: null } }; },
+    }));
+    const response = await app.request("/auth/desktop-revoke", {
+      method: "POST", headers: { authorization: "Bearer signed-access-token", "content-type": "application/json" }, body: JSON.stringify({ scope: "all" }),
+    });
+    expect(response.status).toBe(401);
+    expect(revokeSession).not.toHaveBeenCalled();
+  });
   it("targets the exact cryptographically verified current session", async () => {
     const revoked: string[] = [];
     expect(
@@ -70,7 +82,7 @@ describe("Railway WorkOS desktop revocation", () => {
       await revokeWorkOSDesktopSessions({
         scope: "all",
         subject: "user_example",
-        sessionId: "session_exact",
+        sessionId: "session_1",
         provider: auth,
       }),
     ).toEqual({ revoked: 2 });
@@ -100,7 +112,7 @@ describe("Railway WorkOS desktop revocation", () => {
     expect(notify).toHaveBeenCalledOnce();
     expect(notify).toHaveBeenCalledWith({
       providerSubject: "user_example",
-      revoked: 0,
+      revoked: 1,
     });
   });
 
@@ -147,7 +159,7 @@ describe("Railway WorkOS desktop revocation", () => {
       });
 
       expect(response.status).toBe(200);
-      expect(await response.json()).toEqual({ revoked: 0 });
+      expect(await response.json()).toEqual({ revoked: 1 });
       expect(errorLog).toHaveBeenCalledOnce();
       expect(errorLog).toHaveBeenCalledWith(
         "[auth] sessions-revoked notification enqueue failed",

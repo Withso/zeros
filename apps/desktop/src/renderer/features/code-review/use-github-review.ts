@@ -6,7 +6,8 @@ import {
   replyPrReviewThread,
   setPrReviewThreadResolved,
 } from "@/renderer/platform/github-review";
-import { codeReviewAvailable } from "@/renderer/platform/bridge/code-review-availability";
+import { useCloudGithubPrScope } from "../../platform/cloud-github-pr-scope";
+import { githubReviewAvailable } from "@/renderer/platform/bridge/code-review-availability";
 import { useDocumentActive } from "@/renderer/state/use-document-active";
 import type { AsyncCacheSnapshot } from "@/renderer/shared/lib/keyed-async-cache";
 import {
@@ -63,9 +64,9 @@ export function useGithubReview({
   confirmedBaseSha?: string;
   renamedPaths?: ReadonlyMap<string, string>;
 }) {
-  const available = codeReviewAvailable({ cwd, workspaceId });
-  // Cloud v2 can report a PR summary but does not serve inline review. A null
-  // key also hides any stale unsupported response cached by an older renderer.
+  const scope = useCloudGithubPrScope(workspaceId ?? cwd);
+  const available = githubReviewAvailable({ cwd, workspaceId });
+  // Unsupported backends keep stale inline-review snapshots hidden.
   const key = available && workspaceId && prNumber ? githubReviewKey(workspaceId, prNumber) : null;
   const foreground = useDocumentActive(!!key && active, true);
   const subscribe = useCallback((listener: () => void) =>
@@ -73,7 +74,7 @@ export function useGithubReview({
   [key, foreground]);
   const getSnapshot = useCallback(() => key ? githubReviewCache.getSnapshot(key) : IDLE, [key]);
   const snapshot = useSyncExternalStore(subscribe, getSnapshot, getSnapshot);
-  const consumer = useMemo(() => ({ current: active, key, cwd }), [key, active, cwd]);
+  const consumer = useMemo(() => ({ current: active, key, cwd, scope }), [key, active, cwd, scope]);
   const loadedHeadSha = snapshot.data?.headSha;
   const loadedBaseSha = snapshot.data?.baseSha;
   const threads = useMemo(

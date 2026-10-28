@@ -77,6 +77,8 @@ export async function revokeWorkOSDesktopSessions(options: {
     after = pageAfter(page.listMetadata.after);
   } while (after);
 
+  if (!sessionIds.has(sessionId))
+    throw Object.assign(new Error("The authorizing session is no longer active"), { code: "session_inactive" });
   await revokeInBatches(provider, [...sessionIds]);
   return { revoked: sessionIds.size };
 }
@@ -212,7 +214,8 @@ export function createWorkOSDesktopRevocationRoutes(
           });
       }
       return json(result);
-    } catch {
+    } catch (error) {
+      if ((error as { code?: string }).code === "session_inactive") return json({ error: "unauthorized" }, 401);
       return json({ error: "unavailable" }, 503);
     }
   });

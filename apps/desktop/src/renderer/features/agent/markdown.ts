@@ -43,18 +43,27 @@ marked.use({
 // `target` attribute through sanitisation (DOMPurify strips it by
 // default since `_blank` can be abused without `rel`). Configured
 // once at module load.
-// Keep a strictly validated passive identity as data while DOMPurify removes
-// the custom-scheme href. Only the gated Local transcript renderer uses it;
-// other markdown consumers never gain custom-protocol navigation.
+// Keep validated Local links outside the DOM until attribute sanitization is
+// complete. Raw data attributes must never impersonate renderer-owned links.
+const sanitizedLocalLinks = new WeakMap<Node, string>();
+DOMPurify.addHook("uponSanitizeElement", (node, _data, config) => {
+  if (config.ALLOW_DATA_ATTR !== false || node.nodeName !== "INPUT") return;
+  const input = node as HTMLInputElement;
+  // GFM task lists are passive checkboxes. Prose cannot add active controls.
+  if (input.type !== "checkbox" || !input.disabled) input.remove();
+});
 DOMPurify.addHook("uponSanitizeAttribute", (node, data) => {
   if (node.nodeName === "A" && data.attrName === "href" && parseLocalLink(data.attrValue))
-    (node as Element).setAttribute("data-local-link", data.attrValue);
+    sanitizedLocalLinks.set(node, data.attrValue);
 });
 DOMPurify.addHook("afterSanitizeAttributes", (node) => {
   if (node.nodeName === "A") {
     const a = node as HTMLAnchorElement;
     a.setAttribute("target", "_blank");
     a.setAttribute("rel", "noopener noreferrer");
+    const localLink = sanitizedLocalLinks.get(node);
+    if (localLink) a.setAttribute("data-local-link", localLink);
+    sanitizedLocalLinks.delete(node);
     if (isLoopbackUrl(a.getAttribute("href") ?? "")) a.setAttribute("data-local-preview", "");
   }
 });
@@ -68,6 +77,36 @@ DOMPurify.addHook("afterSanitizeAttributes", (node) => {
  *  user can click into the underlying tool call (Read/Bash card) for
  *  the full content. */
 const MARKDOWN_MAX_INPUT_BYTES = 1_000_000;
+
+/** Prose has no authority over application styling or named controls. Apply
+ * this before adding our own table wrappers/file chips; authored Design HTML
+ * uses its separate preview policy. */
+function sanitizeProse(html: string): string {
+  // Bytes alone do not bound DOM construction: deeply nested raw HTML can
+  // make the browser parser quadratic. Charge structural work before parsing.
+  let tags = 0;
+  let truncated = false;
+  for (let index = 0; index < html.length; index++) {
+    if (html[index] === "<" && ++tags > 2_048) {
+      html = html.slice(0, index);
+      truncated = true;
+      break;
+    }
+  }
+  return DOMPurify.sanitize(html, {
+    ALLOWED_TAGS: [
+      "p", "br", "hr", "h1", "h2", "h3", "h4", "h5", "h6", "blockquote",
+      "ul", "ol", "li", "dl", "dt", "dd", "pre", "code", "a", "img",
+      "table", "thead", "tbody", "tfoot", "tr", "th", "td", "caption",
+      "em", "strong", "b", "i", "s", "del", "sub", "sup", "kbd", "mark",
+      "small", "abbr", "cite", "div", "span", "details", "summary", "input",
+    ],
+    ALLOWED_ATTR: ["href", "title", "src", "alt", "width", "height", "align", "start", "reversed", "checked", "disabled", "type", "open"],
+    ALLOW_DATA_ATTR: false,
+    ALLOW_ARIA_ATTR: false,
+    ADD_ATTR: ["target"],
+  }) + (truncated ? "<p>[…content truncated; open the originating tool card for the full output]</p>" : "");
+}
 
 /** Render markdown text to sanitised HTML. Returns a string suitable
  *  for `dangerouslySetInnerHTML`. The empty / undefined text shortcut
@@ -88,10 +127,7 @@ export function renderMarkdown(text: string): string {
   // configured. We don't use any, but `async: false` makes the typing
   // explicit and avoids accidental misuse.
   const raw = marked.parse(input, { async: false }) as string;
-  const wrapped = wrapTablesInScroller(raw);
-  return DOMPurify.sanitize(wrapped, {
-    ADD_ATTR: ["target"],
-  });
+  return wrapTablesInScroller(sanitizeProse(raw));
 }
 
 /** Wrap each `<table>` in a `<div class="zeros-md-table-wrap">` so wide
@@ -228,12 +264,10 @@ function renderMarkdownTokenSegments(tokens: TokensList): MarkdownSegment[] {
     // slice or those links would render as literal text.
     const slice = prose as unknown as TokensList;
     slice.links = tokens.links;
-    const html = wrapTablesInScroller(marked.parser(slice));
+    const html = wrapTablesInScroller(sanitizeProse(marked.parser(slice)));
     segments.push({
       type: "html",
-      html: DOMPurify.sanitize(linkifyFilePaths(html), {
-        ADD_ATTR: ["target"],
-      }),
+      html: linkifyFilePaths(html),
     });
     prose = [];
   };
@@ -267,27 +301,32 @@ function renderMarkdownTokenSegments(tokens: TokensList): MarkdownSegment[] {
  *  `data-file-path` drives the renderer's click handler; DOMPurify keeps the
  *  class / data-* / role / tabindex by default. */
 function linkifyFilePaths(html: string): string {
-  let out = html;
-  if (out.includes("<a ")) {
-    out = out.replace(
-      /<a href="([^"]*)"[^>]*>([\s\S]*?)<\/a>/g,
-      (full, href: string, inner: string) => {
-        const path = fileRefPath(decodeLinkText(href), true);
-        return path == null ? full : fileChip(path, inner);
-      },
-    );
+  // Work on sanitized, normalized HTML. Each section is visited once; a
+  // missing closer ends the scan instead of retrying every later opener.
+  const tags = /<(a|pre|code)\b[^>]*>/g;
+  const chunks: string[] = [];
+  let offset = 0;
+  for (let match = tags.exec(html); match; match = tags.exec(html)) {
+    const tag = match[1];
+    const end = html.indexOf(`</${tag}>`, tags.lastIndex);
+    if (end < 0) break;
+    const next = end + tag.length + 3;
+    const inner = html.slice(tags.lastIndex, end);
+    let replacement: string | null = null;
+    if (tag === "a") {
+      const href = /\shref="([^"]*)"/.exec(match[0])?.[1];
+      const file = href === undefined ? null : fileRefPath(decodeLinkText(href), true);
+      if (file) replacement = fileChip(file, inner);
+    } else if (tag === "code" && match[0] === "<code>" && !inner.includes("<")) {
+      const file = fileRefPath(decodeLinkText(inner));
+      if (file) replacement = fileChip(file, inner);
+    }
+    chunks.push(html.slice(offset, match.index), replacement ?? html.slice(match.index, next));
+    offset = next;
+    tags.lastIndex = next;
   }
-  if (out.includes("<code>")) {
-    out = out.replace(
-      /<a\b[^>]*>[\s\S]*?<\/a>|<pre\b[^>]*>[\s\S]*?<\/pre>|<code>([^<]+)<\/code>/g,
-      (full, inner: string) => {
-        if (inner === undefined) return full;
-        const path = fileRefPath(decodeLinkText(inner));
-        return path == null ? full : fileChip(path, inner);
-      },
-    );
-  }
-  return out;
+  chunks.push(html.slice(offset));
+  return chunks.join("");
 }
 
 function decodeLinkText(value: string): string {
