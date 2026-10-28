@@ -21,3 +21,9 @@ CLI ownership and unsupported cloud capabilities keep their existing guards.
 Check the normal setting defaults as well as the rollout stage: Computer use
 still defaulted off in both the protocol normalizer and engine resolver. Their
 regressions now cover the enabled default and explicit user/managed opt-outs.
+
+The simulator public-rollout smoke initially expected setup after reopening a
+fixture that had persisted an attached device. The feature was available, but
+the restored device replaced setup. Start the public first-use assertion with a
+fresh workbench, as the Android setup scenario already does; keep the existing
+device and cloud restoration checks intact.

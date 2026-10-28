@@ -778,6 +778,8 @@ export async function runSimulatorTabSmoke({ page, check, harnessBase }) {
   check("Cloud workspaces show the local-only notice and read no devices", true);
 
   // Public users get the same simulator setup without Internal access.
+  // Start with a fresh workbench; otherwise an attached iOS tab is restored.
+  await page.evaluate(() => localStorage.clear());
   await page.goto(`${harnessBase}/harness-simulator-tab.html?public`);
   await expect(page.locator("[data-simulator-setup-screen]")).toBeVisible();
   await expect(attach).toBeEnabled();
