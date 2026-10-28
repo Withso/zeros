@@ -21,3 +21,9 @@
   operation-order regression requires fallback whenever projection cannot
   mirror source semantics. Source stress timings and browser continuity are
   recorded separately from native performance qualification.
+- Full UI smoke caught a surviving multi-selection being cleared after frame
+  deletion. A parent layout effect had already pruned the deleted primary, but
+  a child's passive activation replayed the older rendered selection. Fence
+  resting activation against current semantic selection as well as page owner.
+  `ui-smoke-design-selection-references.mjs` exercises deletion with aggregate
+  and scoped mutation snapshots; neither can lose the surviving reference.

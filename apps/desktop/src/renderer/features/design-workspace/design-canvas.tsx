@@ -1441,7 +1441,13 @@ export function DesignCanvas({
   // get_selection agrees with the inspector before the user clicks anything.
   // The user's frame-selected state survives snapshot republication verbatim.
   useEffect(() => {
-    if (!active || !snapshot) return;
+    if (!active || !snapshot || !workspaceId) return;
+    // Page membership can prune a deleted primary in a parent layout effect.
+    // This render's passive activation must not clear the surviving selection
+    // (or replace an input intent published since the render).
+    const current = designWorkspaceView(workspaceId);
+    if (current.selectedFrame !== view.selectedFrame || current.selectedNodeId !== view.selectedNodeId ||
+      current.frameSelected !== view.frameSelected || current.selectionEvent !== view.selectionEvent) return;
     if (view.selectedNodeId) return;
     publishSelection(selectedDescription ?? null, { selected: view.frameSelected, explicit: false });
   }, [
@@ -1450,7 +1456,10 @@ export function DesignCanvas({
     selectedDescription,
     snapshot,
     view.frameSelected,
+    view.selectedFrame,
     view.selectedNodeId,
+    view.selectionEvent,
+    workspaceId,
   ]);
 
   useLayoutEffect(() => {
