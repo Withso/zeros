@@ -47,7 +47,6 @@ import {
   loadWorkspaceFiles,
 } from "../workspace-files-cache";
 import { ZerosSpinner } from "../../shared/ui/loading";
-import { useCustomWindowDrag } from "../use-custom-window-drag";
 import { shouldInitializeFreshWorkspace } from "./fresh-workspace";
 import { useInstantViewSwitch } from "../../shared/ui/use-instant-view-switch";
 import { DiffWorkerPoolProvider } from "./diff-worker-pool";
@@ -310,9 +309,6 @@ export function WorkbenchPane({
     availableWorkbenchIds,
   );
 
-  // Window drag + double-click-zoom on the header.
-  const headerRef = useRef<HTMLDivElement | null>(null);
-  useCustomWindowDrag(headerRef);
   const workbenchRef = useRef<HTMLDivElement | null>(null);
 
   // Collapse hides the whole column with display:none, which clamps every
@@ -495,7 +491,7 @@ export function WorkbenchPane({
             {/* Primary File / Design / Changes / Review / Browser / Terminal tabs. */}
             <div className={WORKBENCH_CONTENT_CLS}>
               <div
-                ref={headerRef}
+                data-tauri-drag-region
                 data-testid="workbench-header"
                 className={WORKBENCH_HEADER_CLS}
               >

@@ -37,7 +37,6 @@ import React, {
   useCallback,
   useEffect,
   useMemo,
-  useRef,
   useState,
 } from "react";
 import { ChevronDown, Copy, Pencil } from "lucide-react";
@@ -48,7 +47,6 @@ import { toast } from "../../shared/ui/primitives/elements";
 import { Badge, Kbd, Tooltip } from "@/renderer/shared/ui/primitives";
 import { branchDisplayName } from "../../shared/lib/branch-name";
 import { WorkbenchToggleButton } from "../workbench/toggle-button";
-import { useCustomWindowDrag } from "../use-custom-window-drag";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -609,11 +607,6 @@ export function ConversationHeader({
   workbenchCollapsed = false,
   onToggleWorkbench,
 }: ConversationHeaderProps = {}) {
-  // Window drag + double-click-zoom via JS/IPC instead of CSS drag
-  // region — so single clicks on this row dismiss popovers as
-  // expected (macOS `-webkit-app-region: drag` swallows clicks).
-  const topbarRef = useRef<HTMLDivElement | null>(null);
-  useCustomWindowDrag(topbarRef);
   // Resolve the breadcrumb folder inside the selector so this returns a
   // primitive string|null — the topbar re-renders only when the resolved
   // folder changes, not on every `chats` mutation. `selectActiveFolder` falls
@@ -658,7 +651,7 @@ export function ConversationHeader({
   // height when switching chats, but the content is muted.
   if (!project) {
     return (
-      <div ref={topbarRef} className={TOPBAR_CLS}>
+      <div data-tauri-drag-region className={TOPBAR_CLS}>
         <span className="text-fg2 px-1.5 text-xs">No workspace selected</span>
         <div className="flex-1" />
         {workbenchCollapsed && onToggleWorkbench && (
@@ -695,7 +688,7 @@ export function ConversationHeader({
   const openInPath = workspace?.path ?? project.repoRoot;
 
   return (
-    <div ref={topbarRef} className={TOPBAR_CLS}>
+    <div data-tauri-drag-region className={TOPBAR_CLS}>
       <div className={BREADCRUMB_CLS}>
         <span className={PROJECT_ICON_CLS} aria-hidden="true">
           <RepositoryIcon project={project} className="size-full rounded-sm" />
