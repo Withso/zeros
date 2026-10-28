@@ -1,5 +1,6 @@
-/* Clear even a wrapped island in a narrow pane. The viewers' ResizeObservers
-   use the remaining content box when fitting a page. */
+/* Clear even a wrapped island using the runtime's 4px spacing unit. Design's
+   --space-<step> variables do not exist in the app. The viewers' ResizeObservers
+   fit to the remaining content box. */
 .zeros-document-viewport {
-  padding-bottom: calc(var(--space-12) + var(--space-8));
+  padding-bottom: calc(var(--spacing) * 20);
 }

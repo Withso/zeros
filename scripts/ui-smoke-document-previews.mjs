@@ -46,6 +46,25 @@ export async function runDocumentPreviewsSmoke({ page, check, screenshots }) {
       page.getByRole("button", { name: "Fit page", exact: true }),
     ).toHaveText(/^\d+%$/);
   };
+  const assertFitClearance = async (format) => {
+    const content = page.locator(
+      format === "pdf"
+        ? ".zeros-pdf-page"
+        : '[data-file-document-preview="docx"] iframe',
+    );
+    await expect
+      .poll(async () => {
+        const bounds = await content.boundingBox();
+        const controls = await island.boundingBox();
+        return Boolean(
+          bounds &&
+            controls &&
+            bounds.height > 0 &&
+            bounds.y + bounds.height < controls.y,
+        );
+      })
+      .toBe(true);
+  };
   for (const owner of ["personal", "organization", "cloud"]) {
     await open(owner, "report.pdf");
     // The first PDF loads the viewer, local font/CMap URLs and worker through
@@ -54,6 +73,7 @@ export async function runDocumentPreviewsSmoke({ page, check, screenshots }) {
       page.getByRole("region", { name: "PDF page 1", exact: true }),
     ).toContainText("Document preview - page 1", { timeout: 15_000 });
     await assertIsland("pdf");
+    await assertFitClearance("pdf");
     await page.getByRole("button", { name: "Next page", exact: true }).click();
     await expect(
       page.getByRole("region", { name: "PDF page 2", exact: true }),
@@ -93,6 +113,7 @@ export async function runDocumentPreviewsSmoke({ page, check, screenshots }) {
       page.locator('iframe[title="Word document page 1"]'),
     ).toHaveAttribute("sandbox", "");
     await assertIsland("docx");
+    await assertFitClearance("docx");
     await page.getByRole("button", { name: "Next page", exact: true }).click();
     await expect(
       page
@@ -118,9 +139,7 @@ export async function runDocumentPreviewsSmoke({ page, check, screenshots }) {
     .toBeGreaterThan(0);
   const fitWidth = (await pdf.boundingBox()).width;
   await assertIsland("pdf");
-  expect(
-    (await pdf.boundingBox()).y + (await pdf.boundingBox()).height,
-  ).toBeLessThan((await island.boundingBox()).y);
+  await assertFitClearance("pdf");
   await page.getByRole("button", { name: "Zoom out", exact: true }).click();
   await expect
     .poll(async () => (await pdf.boundingBox()).width)
@@ -158,6 +177,7 @@ export async function runDocumentPreviewsSmoke({ page, check, screenshots }) {
         .getByText("Word document preview", { exact: true }),
     ).toBeVisible();
     await assertIsland("docx");
+    await assertFitClearance("docx");
     if (screenshots)
       await page.screenshot({
         path: `${screenshots}/word-preview-${theme}.png`,
@@ -167,37 +187,30 @@ export async function runDocumentPreviewsSmoke({ page, check, screenshots }) {
       page.getByRole("region", { name: "PDF page 1", exact: true }),
     ).toContainText("Document preview - page 1");
     await assertIsland("pdf");
+    await assertFitClearance("pdf");
     if (screenshots)
       await page.screenshot({
         path: `${screenshots}/pdf-preview-${theme}.png`,
       });
     await open("personal", "report.docx");
   }
-  await page.setViewportSize({ width: 320, height: 520 });
-  for (const format of ["pdf", "docx"]) {
-    await open("organization", `report.${format}`);
-    await assertIsland(format);
-    await page.getByLabel("Page number", { exact: true }).fill("");
-    await page.getByLabel("Page number", { exact: true }).press("Enter");
-    await expect(page.getByLabel("Page number", { exact: true })).toHaveValue(
-      "1",
-    );
-    await page.getByRole("button", { name: "Zoom in", exact: true }).click();
-    await page.getByRole("button", { name: "Fit page", exact: true }).click();
-    const content = page.locator(
-      format === "pdf"
-        ? ".zeros-pdf-page"
-        : '[data-file-document-preview="docx"] iframe',
-    );
-    await expect
-      .poll(async () => {
-        const bounds = await content.boundingBox();
-        return bounds.y + bounds.height < (await island.boundingBox()).y;
-      })
-      .toBe(true);
+  for (const width of [1000, 320]) {
+    await page.setViewportSize({ width, height: 520 });
+    for (const format of ["pdf", "docx"]) {
+      await open("organization", `report.${format}`);
+      await assertIsland(format);
+      await page.getByLabel("Page number", { exact: true }).fill("");
+      await page.getByLabel("Page number", { exact: true }).press("Enter");
+      await expect(page.getByLabel("Page number", { exact: true })).toHaveValue(
+        "1",
+      );
+      await page.getByRole("button", { name: "Zoom in", exact: true }).click();
+      await page.getByRole("button", { name: "Fit page", exact: true }).click();
+      await assertFitClearance(format);
+    }
   }
   check(
-    "Document controls float at the bottom in both themes and narrow panes, without covering the fitted page",
+    "Document controls clear fitted pages in both themes, wide short panes and narrow panes",
     true,
   );
   if (originalViewport) await page.setViewportSize(originalViewport);
