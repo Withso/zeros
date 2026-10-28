@@ -1280,14 +1280,17 @@ function ChatPane({ paneId, ctx }: { paneId: string; ctx: PaneCtx }) {
   // tabbing into the strip/composer (and xterm's hidden textarea) without a
   // pointer event.
   const handlePaneActivation = useCallback(() => {
+    const activeChatId = useWorkspaceStore.getState().activeChatId;
     if (
       !paneActiveChatId ||
-      useWorkspaceStore.getState().activeChatId === paneActiveChatId
+      // A shortcut can select another chat before this listener is refreshed.
+      // Focus moving within that same pane must not restore the old selection.
+      paneChats.some(chat => chat.id === activeChatId)
     ) {
       return;
     }
     dispatch({ type: "SET_ACTIVE_CHAT", id: paneActiveChatId });
-  }, [paneActiveChatId, dispatch]);
+  }, [paneActiveChatId, paneChats, dispatch]);
 
   // NATIVE capture listeners — NOT React onPointerDownCapture/onFocusCapture
   // props on the section. The chat/terminal body is portaled into this pane's
@@ -1326,7 +1329,16 @@ function ChatPane({ paneId, ctx }: { paneId: string; ctx: PaneCtx }) {
       if (index === null) return;
       event.preventDefault();
       event.stopPropagation();
-      onSelectChat(paneChats[index].id);
+      if (index === current) return;
+      const nextId = paneChats[index].id;
+      // Move focus before hiding the old composer. Otherwise it remains the
+      // engaged input while the next chat mounts, blocking its autofocus; once
+      // Chromium blurs the inert layer to body, subsequent keys miss this pane.
+      // The strip survives the switch and also holds focus for read-only chats
+      // or a destination whose composer/terminal is not ready yet.
+      root.querySelector<HTMLElement>(`[data-chat-tab="true"][data-chat-id="${CSS.escape(nextId)}"]`)
+        ?.focus({ preventScroll: true });
+      onSelectChat(nextId);
     };
     root.addEventListener("keydown", handler, true);
     return () => root.removeEventListener("keydown", handler, true);

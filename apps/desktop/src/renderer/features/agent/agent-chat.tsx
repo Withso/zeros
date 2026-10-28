@@ -13,7 +13,7 @@ import { notifyAgentSendFailure } from "./agent-send-failure-toast";
 //
 // ──────────────────────────────────────────────────────────
 
-import { beginChatScrollNavigation, CHAT_SCROLL_NAVIGATION_EVENT } from "./chat-scroll-navigation";
+import { beginChatScrollNavigation, CHAT_SCROLL_NAVIGATION_EVENT, scrollChatToBoundary } from "./chat-scroll-navigation";
 import { transcriptParentId } from "./transcript-parent";
 import { useTranscriptHistoryStatus } from "./use-transcript-history-status";
 import { presentLeadingPrompt } from "./transcript-leading-prompt";
@@ -3082,15 +3082,15 @@ function AgentChatBody({
     setScrollEl(node);
   }, []);
 
-  // Message shortcuts navigate the same user prompts as the checkpoint rail.
-  // Capture reaches the rich composer; DOM ownership keeps retained chats and
-  // other columns from reacting to the focused pane's keypress.
+  // Message shortcuts use the checkpoint rail; panel shortcuts reach the
+  // scroll boundaries. Capture reaches the rich composer; DOM ownership keeps
+  // retained chats and other columns from reacting to the focused pane's key.
   useEffect(() => {
     if (!surfaceActive) return;
     const handler = (e: KeyboardEvent) => {
       if (hasShortcutPriorityClaim() || navigationShortcutBlocked(e)) return;
       const shortcut = resolveNavigationShortcut(e);
-      if (shortcut?.kind !== "message") return;
+      if (shortcut?.kind !== "message" && shortcut?.kind !== "agent-panel-scroll") return;
       if (chatId) {
         const workspaceState = useWorkspaceStore.getState();
         if (
@@ -3104,6 +3104,13 @@ function AgentChatBody({
       if (!el) return;
       const owner = el.closest("[data-pane-root]") ?? el.closest(".zeros-agent-surface");
       if (!(e.target instanceof Node) || !owner?.contains(e.target)) return;
+      if (shortcut.kind === "agent-panel-scroll") {
+        e.preventDefault();
+        e.stopPropagation();
+        pendingHydrateRestoreRef.current = null;
+        scrollChatToBoundary(el, shortcut.direction);
+        return;
+      }
       if (checkpointNavigateRef.current?.(shortcut.direction)) {
         e.preventDefault();
         e.stopPropagation();

@@ -16,6 +16,7 @@ import type { ProcessMetricsSnapshot } from "../platform/process-metrics";
 const params = new URLSearchParams(location.search);
 const hoverCards = params.has("hover-cards");
 const shortcutHarness = params.has("shortcuts");
+let shortcutCloudRows: () => readonly Workspace[] = () => [];
 const legacyMainFolder = params.has("legacy-main")
   ? `/fixture/zeros${params.has("subdirectory") ? "/packages/app" : ""}`
   : null;
@@ -241,6 +242,7 @@ Object.assign(window, {
     const { setActiveOrganizationSelection } = await import("../features/team/active-team");
     const { controlPlane } = await import("../features/team/control-plane");
     const { acceptCloudWorkspaceDocument, getCloudProjects, getCloudWorkspaceRows } = await import("../state/cloud-workspace-catalog");
+    if (shortcutHarness) shortcutCloudRows = getCloudWorkspaceRows;
     const { notifyProjectsChanged, setWorkspaceRowsForTesting } = await import("../state/use-projects");
     const organizationId = "11111111-1111-4111-8111-111111111111";
     const otherOrganizationId = "44444444-4444-4444-8444-444444444444";
@@ -362,7 +364,9 @@ const fixtureBridge = {
       const slug = message.params?.repoSlug;
       result = {
         workspaces:
-          rows.filter((row) => (!slug || row.repoSlug === slug) &&
+          // The shortcut fixture also navigates cloud rows. Revalidation must
+          // return those same rows instead of clearing their seeded cache.
+          [...rows, ...shortcutCloudRows()].filter((row) => (!slug || row.repoSlug === slug) &&
             (message.params?.archived === true ? row.archivedAt != null : row.archivedAt == null)),
       };
     }

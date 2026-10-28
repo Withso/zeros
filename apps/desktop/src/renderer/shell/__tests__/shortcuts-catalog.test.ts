@@ -49,10 +49,16 @@ describe("SHORTCUT_CATEGORIES", () => {
       ["next-chat", ["⌘→"]],
       ["previous-side-tab", ["⌥⌘←"]],
       ["next-side-tab", ["⌥⌘→"]],
+      ["scroll-agent-panel-top", ["⇧⌘↑"]],
+      ["scroll-agent-panel-bottom", ["⇧⌘↓"]],
     ] as const) expect(shortcuts.get(id)?.keys).toEqual(keys);
-    for (const id of ["previous-message", "next-message", "first-message", "last-message"]) {
+    for (const id of ["previous-message", "next-message"]) {
       expect(shortcuts.get(id)?.label).toContain("user message");
     }
+    expect(shortcuts.get("scroll-agent-panel-top")?.label).toBe("Scroll agent panel to top");
+    expect(shortcuts.get("scroll-agent-panel-bottom")?.label).toBe("Scroll agent panel to bottom");
+    expect(shortcuts.has("first-message")).toBe(false);
+    expect(shortcuts.has("last-message")).toBe(false);
     expect(shortcuts.get("workspace-by-number")?.label).toContain("first 9");
   });
 
