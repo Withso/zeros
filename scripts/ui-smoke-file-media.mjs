@@ -456,9 +456,23 @@ async function runPendingMediaUploadSmoke({ page, check }) {
   const workspaces = ["/media-personal", "/media-organization", "cloud://11111111-1111-4111-8111-111111111111/22222222-2222-4222-8222-222222222222"];
   for (const cwd of workspaces) {
     const url = new URL(`${origin}/apps/desktop/src/renderer/harnesses/harness-composer-editor.html`);
-    url.searchParams.set("workspace", cwd); url.searchParams.set("hold-uploads", ""); url.searchParams.set("media-preview", "");
+    url.searchParams.set("workspace", cwd); url.searchParams.set("media-preview", "");
     await page.goto(url.href, { waitUntil: "networkidle" });
     await page.locator(".composer-pm").waitFor();
+    // Full runs reuse browser storage across scenarios. Keep a real existing
+    // tab so unrelated restoration reads cannot be mistaken for upload reads.
+    await page.evaluate(async () => {
+      await window.__composerHarness.insertFiles([new File(["Existing file tab"], "previous.txt", { type: "text/plain" })]);
+    });
+    await page.waitForFunction(() => !!window.__composerHarness.serialize().attachments[0].diskPath);
+    await page.getByRole("button", { name: "Open previous.txt", exact: true }).click();
+    await page.waitForFunction(() => localStorage.getItem("column3-tabs-by-scope-v1")?.includes("previous.txt"));
+    url.searchParams.set("hold-uploads", "");
+    await page.goto(url.href, { waitUntil: "networkidle" });
+    await page.locator(".composer-pm").waitFor();
+    await page.waitForFunction(() => window.__composerAttachmentTransport.reads().some(path => path.endsWith("/previous.txt")));
+    check(`${cwd}: an existing file tab restores independently of the new upload`, true);
+    const initialReadCount = await page.evaluate(() => window.__composerAttachmentTransport.reads().length);
     const source = await page.evaluate(async () => {
       const canvas = document.createElement("canvas"); canvas.width = 96; canvas.height = 64;
       const context = canvas.getContext("2d"); context.fillRect(0, 0, 96, 64);
@@ -473,7 +487,7 @@ async function runPendingMediaUploadSmoke({ page, check }) {
     await image.waitFor();
     await page.waitForFunction(() => document.querySelector("[data-file-media-preview] img")?.naturalWidth === 96);
     const objectUrl = await image.getAttribute("src");
-    check(`Uploading media opens immediately from a Blob in ${cwd}`, objectUrl.startsWith("blob:") && await page.evaluate(() => window.__composerAttachmentTransport.reads().length === 0));
+    check(`Uploading media opens immediately from a Blob in ${cwd}`, objectUrl.startsWith("blob:") && await page.evaluate(count => window.__composerAttachmentTransport.reads().length === count, initialReadCount));
     await page.getByRole("button", { name: "Zoom in", exact: true }).click();
     await page.evaluate(() => window.__setComposerActive(false));
     await page.waitForFunction(() => !document.querySelector("[data-file-media-preview] img"));
@@ -486,7 +500,7 @@ async function runPendingMediaUploadSmoke({ page, check }) {
       await page.evaluate(() => window.__composerAttachmentTransport.releaseNext("uploading.png"));
     }
     await page.waitForFunction(() => !!window.__composerHarness.serialize().attachments[0].diskPath);
-    check("Upload completion keeps the open preview intact without a second read", await image.getAttribute("src") === displayedUrl && await page.evaluate(() => window.__composerAttachmentTransport.reads().length === 0));
+    check("Upload completion keeps the open preview intact without a second read", await image.getAttribute("src") === displayedUrl && await page.evaluate(count => window.__composerAttachmentTransport.reads().length === count, initialReadCount));
     await page.waitForFunction(async id => {
       const open = indexedDB.open("zeros:attachment-sources:v1", 1);
       return await new Promise(resolve => {
@@ -497,10 +511,10 @@ async function runPendingMediaUploadSmoke({ page, check }) {
     check("The active composer releases its completed recovery snapshot", true);
     await page.evaluate(() => window.__setComposerActive(false));
     await page.waitForFunction(() => !document.querySelector("[data-file-media-preview] img"));
-    const retired = await page.evaluate(async ({ cwd, id }) => {
+    const retired = await page.evaluate(async ({ cwd, id, initialReadCount }) => {
       const { hasPendingFilePreview } = await import("/apps/desktop/src/renderer/platform/pending-file-preview.ts");
-      return !hasPendingFilePreview(cwd, `.context/attachments/${id}/uploading.png`) && window.__composerAttachmentTransport.reads().length === 0;
-    }, { cwd, id: source.id });
+      return !hasPendingFilePreview(cwd, `.context/attachments/${id}/uploading.png`) && window.__composerAttachmentTransport.reads().length === initialReadCount;
+    }, { cwd, id: source.id, initialReadCount });
     check("Closing a completed preview drops its final local Blob lease without a hidden remote read", retired);
 
     // Native file pickers can report text/plain for SVG. Preview MIME follows
