@@ -1,7 +1,7 @@
 # Claude SDK event coverage
 
-Audited against installed `@anthropic-ai/claude-agent-sdk` **0.3.309** and its
-bundled CLI **2.1.309**. The installed `sdk.d.ts` and wrapper are the contract;
+Audited against installed `@anthropic-ai/claude-agent-sdk` **0.3.311** and its
+bundled CLI **2.1.311**. The installed `sdk.d.ts` and wrapper are the contract;
 online documentation can describe a different version.
 
 The public `SDKMessage` union has 39 member aliases and 42 distinct type/subtype
@@ -63,12 +63,37 @@ the table and native fixtures whenever the pinned SDK changes.
 | `system/informational` | handled | Plain bounded content as an inbetween message, tool-scoped where identified. `prevent_continuation` explains runtime behavior but is not itself a terminal result. |
 | `conversation_reset` | handled | Existing idempotent accounting reset at `/clear`. **Limitation:** the SDK's fresh-transcript/title remount is unsupported; this handler does not erase saved chat history or invent a new chat. Native session binding follows init plus confirmed root work/success. |
 
-## 0.3.309 surface review
+## 0.3.311 surface review
 
 Local Personal, organization-local and standalone cloud workers pin the same
-0.3.309 Node SDK. The public message inventory remains at 39 aliases and 42
-discriminators. The launch smoke checks the real wrapper and bundled 2.1.309
-process without inference.
+0.3.311 Node SDK. The cloud package, native launcher guard and advertised agent
+version move together. The public message inventory remains at 39 aliases and
+42 discriminators. These five additive declaration changes need no new UI,
+wire fields or storage migration:
+
+| Native field or surface | Disposition | Supported behavior / limitation |
+| --- | --- | --- |
+| `AgentOutput.toolsUsed` | preserved generically | Retain the optional tool-name summary in the Agent raw output through replay, settlement and history. Native child calls retain their own identities; the summary does not create rows or settle work. |
+| `ProjectsOutput.project_info.local_file` | intentionally deferred | Keep ordinary native tool-result content readable with or without the pointer. No automatic file read, workspace mapping or dedicated project-details UI. |
+| `ModelUsage.cacheCreationEphemeral5mInputTokens` / `cacheCreationEphemeral1hInputTokens` | intentionally deferred | These are subsets of aggregate cache writes, not additional tokens. They may be absent or sum below the aggregate after older sessions or writes with unknown lifetimes. Keep existing cache totals, cumulative usage deltas and provider-reported estimated cost; defer the lifetime breakdown. |
+| `SDKPermissionRuleEntry.source: "mcpMount"` | SDK-owned | Neither integration calls or interprets native `list_permission_rules`. Native rule evaluation and existing permission callbacks remain unchanged. |
+| `Settings` marketplace `pluginDigests` | SDK-owned | Native managed-plugin verification owns the digests. Preserve existing plugin progress/failure feedback; add no marketplace settings. |
+
+Each change has a fingerprinted disposition in
+[`scripts/agent-runtime/reviews.json`](../scripts/agent-runtime/reviews.json).
+Both placements run `runtime-upgrade.test.ts` against the shared history reducer;
+cloud parity also exercises the installed wrapper and persisted session replay.
+`claude-version.test.ts` ties the cloud launcher and initialization/list metadata
+to the installed packages, and the relocated package smoke checks CLI 2.1.311.
+Existing owner/placement isolation and unavailable cloud capabilities remain
+unchanged.
+
+## 0.3.309 surface review
+
+The 0.3.309 upgrade aligned Local Personal, organization-local and standalone
+cloud workers on that Node SDK. Its public message inventory remained at 39
+aliases and 42 discriminators. The launch smoke checked the real wrapper and
+bundled 2.1.309 process without inference.
 
 The 20 declaration changes from 0.3.296 have fingerprinted dispositions in
 [`scripts/agent-runtime/reviews.json`](../scripts/agent-runtime/reviews.json).
