@@ -12,7 +12,11 @@ export async function runAgentNoticesSmoke({ page, check }) {
     "href",
     "https://example.com/usage",
   );
-  await expect(fixture.locator("[data-agent-notice]")).toHaveCount(5);
+  await expect(fixture.locator("[data-agent-notice]")).toHaveCount(4);
+  const warning = fixture.locator("[data-provider-notice]");
+  await expect(warning).toHaveCount(1);
+  await expect(warning).toContainText("The provider is nearing its usage limit.");
+  await expect(warning.locator("[data-agent-notice]")).toHaveCount(0);
   const geometry = await fixture
     .locator("[data-agent-notice]")
     .evaluateAll((notices) =>
@@ -63,7 +67,7 @@ export async function runAgentNoticesSmoke({ page, check }) {
     "Failure cards keep 8px margins in the gapless turn lane, without one above as its first child; other notices rely on container gaps",
     spacing.lane === "8px 0px" &&
       spacing.firstInLane === "0px 0px 8px" &&
-      spacing.gapManaged.length === 2 &&
+      spacing.gapManaged.length === 1 &&
       spacing.gapManaged.every((value) => value === "0px"),
     JSON.stringify(spacing),
   );
@@ -94,9 +98,22 @@ export async function runAgentNoticesSmoke({ page, check }) {
           }),
         );
       check(
-        `Errors, warnings and sign-in notices use brown without overflow in ${theme} mode`,
+        `Blocking failures and sign-in notices use brown without overflow in ${theme} mode`,
         readable,
       );
+      const quietStatus = await warning.evaluate((element) => {
+        const probe = document.createElement("span");
+        probe.style.color = "var(--fg2)";
+        element.appendChild(probe);
+        const expectedColor = getComputedStyle(probe).color;
+        probe.remove();
+        const actual = getComputedStyle(element);
+        return actual.color === expectedColor &&
+          actual.backgroundColor === "rgba(0, 0, 0, 0)" &&
+          actual.paddingLeft === "0px" && actual.paddingRight === "0px" &&
+          element.scrollWidth <= element.clientWidth;
+      });
+      check(`Nonblocking provider notices stay plain, readable status in ${theme} mode`, quietStatus);
       const hover = await card.evaluate((element) => {
         const probe = document.createElement("span");
         element.appendChild(probe);

@@ -167,7 +167,10 @@ export async function readNativeMcpSurface(
  * repair/import; never silently run a hybrid of two definitions. */
 function verifiedRegistrations(merged: unknown, servers: readonly McpServerRegistration[]): string[] {
   const overrides = buildMcpServerOverrides(servers).filter((_, index) => index % 2 === 1);
-  const expected = (parseToml(overrides.join("\n")).mcp_servers ?? {}) as Record<string, Record<string, unknown>>;
+  // smol-toml creates null-prototype tables; config/read arrives as plain
+  // JSON objects. Compare the complete JSON values, including nested env and
+  // header maps, without mistaking their JS prototypes for a config conflict.
+  const expected = JSON.parse(JSON.stringify(parseToml(overrides.join("\n")).mcp_servers ?? {})) as Record<string, Record<string, unknown>>;
   const configured = merged && typeof merged === "object" && !Array.isArray(merged) ? merged as Record<string, unknown> : {};
   const normalize = (input: Record<string, unknown>) => {
     const result: Record<string, unknown> = {};
