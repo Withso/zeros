@@ -60,6 +60,8 @@ export function createDesignPagesHarness(
     calls,
     holdCreate: false,
     releaseCreate: () => {},
+    holdRename: false,
+    releaseRename: () => {},
     holdHistory: false,
     releaseHistory: () => {},
   };
@@ -205,6 +207,7 @@ export function createDesignPagesHarness(
         return { page, snapshot };
       }
       if (op === "design.page.rename") {
+        if (control.holdRename) await new Promise<void>((resolve) => { control.releaseRename = resolve; });
         const title = designPageTitleSchema.parse(params.title);
         snapshot = {
           ...snapshot,

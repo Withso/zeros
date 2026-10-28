@@ -91,7 +91,7 @@ function SheetContent({
       >
         {children}
         {showCloseButton && (
-          <SheetPrimitive.Close className="absolute top-4 right-4 rounded-sm opacity-70 ring-offset-bg1 transition-opacity hover:opacity-100 focus:ring-2 focus:ring-highlighted-bright focus:ring-offset-2 focus:outline-hidden disabled:pointer-events-none data-[state=open]:bg-bg2-hover">
+          <SheetPrimitive.Close className="absolute top-4 right-4 rounded-sm opacity-70 ring-offset-bg1 transition-opacity hover:opacity-100 focus-visible:ring-2 focus-visible:ring-highlighted-bright focus-visible:ring-offset-2 focus-visible:outline-hidden disabled:pointer-events-none data-[state=open]:bg-bg2-hover">
             <XIcon className="size-4" />
             <span className="sr-only">Close</span>
           </SheetPrimitive.Close>

@@ -26,6 +26,7 @@ import {
 } from "lucide-react";
 import {
   PaletteCommand,
+  PaletteCategoryButton,
   PaletteDialog,
 } from "../shared/ui/primitives/palette-dialog";
 import { Button, Kbd } from "../shared/ui/primitives";
@@ -102,6 +103,7 @@ export function CommandPalette({
   onSelect,
   onIntent,
 }: CommandPaletteProps) {
+  const searchRef = useRef<HTMLInputElement>(null);
   const [selection, setSelection] = useState("");
   const priorFocus = useRef(document.activeElement);
   const restoreFocus = useRef(true);
@@ -156,6 +158,7 @@ export function CommandPalette({
         }}
       >
         <CommandInput
+          ref={searchRef}
           autoFocus
           showSearchIcon={false}
           value={query}
@@ -200,8 +203,9 @@ export function CommandPalette({
           className="flex shrink-0 flex-wrap items-center gap-1 px-2 py-2"
         >
           {PALETTE_CATEGORIES.map((tab) => (
-            <Button
+            <PaletteCategoryButton
               key={tab.id}
+              searchRef={searchRef}
               variant="ghost"
               size="sm"
               aria-pressed={category === tab.id}
@@ -214,7 +218,7 @@ export function CommandPalette({
               )}
             >
               {tab.label}
-            </Button>
+            </PaletteCategoryButton>
           ))}
         </div>
         {category === "workspaces" && (
@@ -226,8 +230,9 @@ export function CommandPalette({
             className="flex shrink-0 items-center gap-1 px-3 pb-2"
           >
             {(["active", "archived", "all"] as const).map((filter) => (
-              <Button
+              <PaletteCategoryButton
                 key={filter}
+                searchRef={searchRef}
                 variant="ghost"
                 size="sm"
                 aria-pressed={workspaceFilter === filter}
@@ -247,7 +252,7 @@ export function CommandPalette({
                   : filter === "active"
                     ? "Active"
                     : "Archived"}
-              </Button>
+              </PaletteCategoryButton>
             ))}
           </div>
         )}

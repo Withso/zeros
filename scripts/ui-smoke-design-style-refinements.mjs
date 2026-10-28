@@ -1,5 +1,6 @@
 import { expect } from "@playwright/test";
 import { runDesignStyleTokensSmoke } from "./ui-smoke-design-style-tokens.mjs";
+import { runDesignDeferredFocusSmoke, runDesignCloseFocusSmoke } from "./ui-smoke-design-focus.mjs";
 
 async function openStyleDesign(page) {
   await page.setViewportSize({ width: 1440, height: 900 });
@@ -431,4 +432,7 @@ export async function runDesignStyleRefinementsSmoke(context) {
   await runDesignInspectorPreviewOwnerSmoke(context);
   // The inspector names the tokens and sources behind the selected styles.
   await runDesignStyleTokensSmoke(context);
+  await runDesignDeferredFocusSmoke(context);
+  await runDesignDeferredFocusSmoke({ ...context, moveFocus: false });
+  await runDesignCloseFocusSmoke(context);
 }

@@ -3,6 +3,7 @@
 import { z } from "zod";
 import { randomUUID } from "node:crypto";
 import type { BoatApiClient } from "../cloud/boat-client.js";
+import { CloudProviderError } from "./provider-error.js";
 
 const SANDBOX_ID = /^bx_[a-z0-9]{4,32}$/;
 const SNAPSHOT_NAME = /^[a-z0-9][a-z0-9-]{0,61}[a-z0-9]$/;
@@ -20,6 +21,12 @@ export interface CloudV2Compute {
   /** Idempotent per key: a retry after a lost reply returns the same sandbox. */
   /** From a named snapshot, or Boat's stock image without `from`. */
   create(input: { key: string; from?: string; name: string; env: Record<string, string> }): Promise<{ sandboxId: string }>;
+  /** A new VM from another VM's disk, here an archived (stopped) one; the
+   * source is not resumed. Idempotent per key, like create. Boat names every
+   * fork "<source name> fork", whatever name is requested. */
+  fork(sourceId: string, input: { key: string; name?: string; ttlSeconds: number }): Promise<{ sandboxId: string }>;
+  /** A sandbox's name and state, e.g. "archiving" until a stop completes, then "archived". */
+  inspect(sandboxId: string): Promise<{ name: string | null; state: string }>;
   resume(sandboxId: string): Promise<void>;
   /** Boat sets the deadline to now + ttl, without restarting the sandbox. */
   extendLease(sandboxId: string, ttlSeconds: number): Promise<void>;
@@ -38,6 +45,9 @@ export interface CloudV2Compute {
 }
 
 const Created = z.object({ sandbox: z.object({ id: z.string().regex(SANDBOX_ID) }).passthrough() }).passthrough();
+const Forked = z.object({ sandbox: z.object({ id: z.string().regex(SANDBOX_ID) }).passthrough().optional(),
+  sandboxId: z.string().regex(SANDBOX_ID).optional() }).passthrough();
+const Inspected = z.object({ sandbox: z.object({ name: z.string().max(256).nullable().optional(), state: z.string().min(1).max(64) }).passthrough() }).passthrough();
 const Listed = z.object({
   sandboxes: z.array(z.object({ id: z.string(), name: z.string().nullable().optional(), createdAt: z.string() }).passthrough()),
   pageInfo: z.object({ nextCursor: z.string().nullable().optional(), hasMore: z.boolean() }).passthrough(),
@@ -78,6 +88,27 @@ export class BoatCloudV2Compute implements CloudV2Compute {
       },
     });
     return { sandboxId: Created.parse(reply).sandbox.id };
+  }
+
+  async fork(sourceId: string, input: { key: string; name?: string; ttlSeconds: number }): Promise<{ sandboxId: string }> {
+    const source = this.id(sourceId);
+    if (!Number.isSafeInteger(input.ttlSeconds) || input.ttlSeconds <= 0 || input.ttlSeconds > CLOUD_V2_LEASE_SECONDS) throw new Error("Invalid Boat lease");
+    const reply = await this.client.request(`/sandboxes/${source}/fork`, {
+      method: "POST",
+      idempotencyKey: input.key,
+      // The fork inherits nothing it does not need; the tracer stays off, as on every VM.
+      body: { type: this.machineType, ...(input.name ? { name: input.name } : {}), ttlSeconds: input.ttlSeconds, env: {}, monitoring: false },
+    });
+    // A fork is an action receipt that names the new VM, not a ready VM.
+    const forked = Forked.parse(reply), child = forked.sandbox?.id ?? forked.sandboxId;
+    if (!child || child === source || (forked.sandbox && forked.sandboxId !== undefined && forked.sandboxId !== forked.sandbox.id))
+      throw new CloudProviderError("provider_response_invalid", "Boat returned an invalid response", false);
+    return { sandboxId: child };
+  }
+
+  async inspect(sandboxId: string): Promise<{ name: string | null; state: string }> {
+    const { sandbox } = Inspected.parse(await this.client.request(`/sandboxes/${this.id(sandboxId)}`, { method: "GET" }));
+    return { name: sandbox.name ?? null, state: sandbox.state };
   }
 
   async resume(sandboxId: string): Promise<void> {

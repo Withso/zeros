@@ -18,7 +18,7 @@
   scrollbar-color: var(--border3) transparent;
 }
 .composer-pm:focus,
-.composer-pm:focus-visible {
+.composer-pm:focus-visible:where(:not([data-zeros-focus-visible="false"])) {
   outline: none;
   box-shadow: none;
 }
@@ -68,11 +68,11 @@
 }
 
 .composer-pill:hover .composer-pill-remove [data-composer-pill-icon],
-.composer-pill-remove:focus-visible [data-composer-pill-icon] {
+.composer-pill-remove:focus-visible:where(:not([data-zeros-focus-visible="false"])) [data-composer-pill-icon] {
   opacity: 0;
 }
 
 .composer-pill:hover .composer-pill-remove .lucide-x,
-.composer-pill-remove:focus-visible .lucide-x {
+.composer-pill-remove:focus-visible:where(:not([data-zeros-focus-visible="false"])) .lucide-x {
   opacity: 1;
 }

@@ -3,6 +3,8 @@ import { expect } from "@playwright/test";
 /** Real browser storage and clipboard events, with only engine transport
  * replaced by the fixture. Reload discards every renderer module and Blob. */
 export async function runAttachmentPersistenceSmoke({ page, check }) {
+  await runAttachmentFocusSmoke({ page, check });
+  await runComposerActionFocusSmoke({ page, check });
   const url = new URL(page.url());
   url.pathname =
     "/apps/desktop/src/renderer/harnesses/harness-composer-editor.html";
@@ -315,4 +317,56 @@ export async function runAttachmentPersistenceSmoke({ page, check }) {
   check("completed-source cleanup preserves another queued transfer until its own confirmation", completed.retainedForQueue && completed.lastOwnerReleased);
   check("completed-source cleanup preserves clipboard recovery and releases it after ownership ends", completed.retainedForClipboard && completed.clipboardReleased);
   check("failed draft persistence keeps recovery bytes available", completed.retainedOnPersistenceFailure);
+}
+
+export async function runAttachmentFocusSmoke({ page, check }) {
+  const url = new URL(page.url());
+  url.pathname = "/apps/desktop/src/renderer/harnesses/harness-composer-editor.html";
+  for (const workspace of ["/focus/local", "/focus/organization", "cloud://11111111-1111-4111-8111-111111111111/22222222-2222-4222-8222-222222222222"]) {
+    url.search = new URLSearchParams({ "focus-races": "", workspace }).toString();
+    await page.goto(url.href);
+    await page.locator(".composer-pm").click();
+    await page.evaluate(async () => {
+      // Move focus while the real asynchronous import is pending. The editor
+      // must still receive its attachment, without taking the user's keyboard.
+      const pending = window.__composerHarness.insertFiles([new File(["content"], "focus.txt")]);
+      document.querySelector('[aria-label="Other editor"]').focus();
+      await pending;
+      await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+    });
+    await expect(page.getByRole("textbox", { name: "Other editor" })).toBeFocused();
+    expect(await page.evaluate(() => window.__composerHarness.serialize().attachments.map(({ name }) => name))).toEqual(["focus.txt"]);
+    check(`${workspace.startsWith("cloud:") ? "cloud" : "local"}: attachment completion preserves a newer editor focus`, true);
+  }
+}
+
+export async function runComposerActionFocusSmoke({ page, check }) {
+  const url = new URL(page.url());
+  url.pathname = "/apps/desktop/src/renderer/harnesses/harness-composer-editor.html";
+  for (const workspace of ["/focus/local", "/focus/organization", "cloud://11111111-1111-4111-8111-111111111111/22222222-2222-4222-8222-222222222222"]) {
+    url.search = new URLSearchParams({ "focus-races": "", workspace }).toString();
+    await page.goto(url.href);
+    await page.locator(".composer-pm").click();
+    for (const action of ["focus", "append", "attachment", "paste"]) {
+      await page.evaluate(async (action) => {
+        const api = window.__composerHarness;
+        api.setText("prompt");
+        api.focus();
+        if (action === "append") api.appendText(" context");
+        if (action === "attachment") api.insertTextAttachment({ sourceKey: "focus", name: "context.txt", text: "context" });
+        if (action === "paste") {
+          const clipboardData = new DataTransfer();
+          clipboardData.setData("text/plain", "x".repeat(4001));
+          api.editor.view.dom.dispatchEvent(new ClipboardEvent("paste", { clipboardData, bubbles: true, cancelable: true }));
+        }
+        document.querySelector('[aria-label="Other editor"]').focus();
+        await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+      }, action);
+      await expect(page.getByRole("textbox", { name: "Other editor" })).toBeFocused();
+      const result = await page.evaluate(() => window.__composerHarness.serialize());
+      if (action === "append") expect(result.displayText).toBe("prompt\n context");
+      if (action === "attachment" || action === "paste") expect(result.attachments).toHaveLength(1);
+    }
+    check(`${workspace.startsWith("cloud:") ? "cloud" : "local"}: composer actions leave no delayed focus behind`, true);
+  }
 }

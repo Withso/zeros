@@ -15,14 +15,17 @@ function mockEl({
   tagName = "DIV",
   contentEditable = false,
   role = null,
+  keyboardFocus = false,
 }: {
   tagName?: string;
   contentEditable?: boolean;
-  role?: "menu" | "dialog" | null;
+  role?: "menu" | "dialog" | "alertdialog" | "listbox" | "combobox" | "tree" | "grid" | null;
+  keyboardFocus?: boolean;
 } = {}): Element {
   return {
     tagName,
     isContentEditable: contentEditable,
+    getAttribute: (name: string) => name === "data-zeros-focus-visible" ? String(keyboardFocus) : null,
     closest(selector: string) {
       if (role && selector.includes(`role=${role}`)) return this;
       return null;
@@ -108,6 +111,13 @@ describe("isFocusEngaged", () => {
     expect(isFocusEngaged(mockEl({ role: "menu" }))).toBe(true);
     expect(isFocusEngaged(mockEl({ role: "dialog" }))).toBe(true);
   });
+
+  it("protects native selects and ARIA widgets from passive composer focus", () => {
+    expect(isFocusEngaged(mockEl({ tagName: "SELECT" }))).toBe(true);
+    for (const role of ["alertdialog", "listbox", "combobox", "tree", "grid"] as const) {
+      expect(isFocusEngaged(mockEl({ role })), role).toBe(true);
+    }
+  });
 });
 
 // A pane root that "contains" a fixed set of elements — models the DOM
@@ -120,6 +130,10 @@ function mockPaneRoot(children: Element[]): Element {
 }
 
 describe("isFocusHeldElsewhere", () => {
+  it("keeps a keyboard-selected tab inside the active chat pane focused", () => {
+    const tab = mockEl({ tagName: "BUTTON", keyboardFocus: true });
+    expect(isFocusHeldElsewhere({ activeElement: tab, paneRoot: mockPaneRoot([tab]) })).toBe(true);
+  });
   it("holds for an engaged input/menu/dialog regardless of pane", () => {
     expect(
       isFocusHeldElsewhere({

@@ -4,6 +4,7 @@ import type { SimulatorDevice } from "@zeros/protocol/simulators";
 import { deliverFilesToChat } from "../agent/composer-file-attachment-delivery";
 import { useWorkspaceStore } from "../../state/workspace-store";
 import { toast } from "../../shared/ui/primitives/elements";
+import { getFocusInteractionVersion } from "../../shared/ui/focus-navigation";
 import { annotationFileNames, annotationMarksText } from "./simulator-annotation-model";
 import { readAnnotationPalette, renderAnnotatedScreen } from "./simulator-annotation-painter";
 import { openSimulatorTabIds, simulatorAnnotations } from "./simulator-annotation-store";
@@ -50,6 +51,7 @@ export async function addAnnotationToChat(
     return false;
   }
   const { serial, deviceName } = annotation;
+  const focusVersion = getFocusInteractionVersion();
   const marks = annotation.history.marks;
   const toastId = `simulator-annotate:${annotation.deviceId}`;
   simulatorAnnotations.setAdding(tabId, serial, true);
@@ -87,7 +89,9 @@ export async function addAnnotationToChat(
       return false;
     }
   }
-  deliverFilesToChat(chatId, { id: `simulator-annotation:${tabId}:${serial}`, files });
+  deliverFilesToChat(chatId, { id: `simulator-annotation:${tabId}:${serial}`, files }, {
+    focus: focusVersion === getFocusInteractionVersion(),
+  });
   simulatorAnnotations.end(tabId);
   return true;
 }

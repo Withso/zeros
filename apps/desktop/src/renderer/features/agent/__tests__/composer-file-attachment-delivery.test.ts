@@ -21,7 +21,7 @@ describe("chat-owned composer file delivery", () => {
     const first = delivery("one");
 
     expect(deliverFilesToChat("chat-a", first)).toBe("staged");
-    expect(stage).toHaveBeenCalledWith(first);
+    expect(stage).toHaveBeenCalledWith(first, { focus: true });
     expect(hasPendingFileDelivery("chat-a")).toBe(false);
     unregister();
   });
@@ -38,7 +38,7 @@ describe("chat-owned composer file delivery", () => {
     const exact = vi.fn(() => true);
     const unregisterExact = registerLiveChatFileStager("chat-a", exact);
     expect(exact).toHaveBeenCalledTimes(1);
-    expect(exact).toHaveBeenCalledWith(first);
+    expect(exact).toHaveBeenCalledWith(first, { focus: false });
     expect(hasPendingFileDelivery("chat-a")).toBe(false);
     unregisterWrong();
     unregisterExact();
@@ -72,6 +72,17 @@ describe("chat-owned composer file delivery", () => {
 
     expect(deliverFilesToChat("chat-a", delivery("one"))).toBe("queued");
     expect(stage).not.toHaveBeenCalled();
+  });
+
+  it("retained deliveries lose focus authority before the same chat registers", () => {
+    const focusRequests: boolean[] = [];
+    deliverFilesToChat("chat-a", delivery("retained"));
+    registerLiveChatFileStager("chat-a", (_input, options = { focus: true }) => {
+      focusRequests.push(options.focus);
+      return true;
+    });
+    deliverFilesToChat("chat-a", delivery("live"));
+    expect(focusRequests).toEqual([false, true]);
   });
 
   it("bounds the per-chat queue", () => {

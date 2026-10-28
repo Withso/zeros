@@ -420,6 +420,20 @@ command on the VM, bounded to 540 seconds. The command stops the worker
 service, collects the checkpoint, encrypts it and uploads it through a
 presigned URL that expires in 15 minutes. Boat stops the VM only after that.
 
+A stop that finds the workspace exactly as the last checkpoint holds it keeps
+that checkpoint instead of uploading an identical one. The command compares a
+fingerprint of what it would save: the manifest, with the index and worktree
+trees in place of their commits, and digests of the ignored files,
+attachments and session files by name, kind, permission bits, link target
+and content. Times and owners never count, because the worker rewrites
+unchanged files on every boot. The fingerprint also covers the capture
+itself, so a release that changes what is saved starts a new comparison. A
+checkpoint is reused only when everything it left out is still reachable from
+the current base branch, only by the object it was recorded for, and only
+after the control plane confirms that object's stored size. A part that
+cannot be read disables reuse; it is never skipped. Each stop's `checkpoint`
+timing record says whether it saved a new checkpoint or kept the last one.
+
 A checkpoint holds:
 
 - the workspace repository's Git state: branches with their local commits,
@@ -485,6 +499,27 @@ A failed transfer, a timeout or a lost reply keeps it, and deletion waits for
 the latest remaining one, then prunes again.
 A failed or oversized checkpoint (over 4 GiB) never blocks the stop: the
 previous checkpoint stays, and the workspace records `checkpoint_error`.
+
+With `CLOUD_V2_CHECKPOINT_RETRY_ENABLED`, a stopped workspace whose latest
+stop has no checkpoint is retried on a fork of its stopped VM. The VM itself
+is never woken, and its creator can open it meanwhile. The first retry starts
+10 minutes after the stop; later ones back off to once a day, and none starts
+12 days after the stop, two days before Boat deletes the disk. Each lifecycle
+process runs one retry at a time, only with a slot to spare. Boat's stop
+returns while the VM is still `archiving`, for about ten seconds, and refuses
+to fork it (`409 fork_failed`) until it is `archived`, so a retry checks first.
+Boat names every fork "<source name> fork", whatever name is requested; the
+retry asks for and records exactly that name. A retry records its fork before
+requesting it and deletes it when the attempt ends; the next retry, deletion
+and the Dev drain remove a fork whose reply was lost, by replaying its request
+within Boat's key lifetime and by that name afterwards. A
+retry's writes are fenced to the stop it retries, so a newer stop, a restore
+or deletion refuses them. An oversized checkpoint or a VM Boat no longer has
+ends the retries at once. When they end without a checkpoint, the control
+plane logs `[cloud-v2] checkpoint retries exhausted (<code>)` with the
+shortened workspace ID; the workspace keeps its previous checkpoint, if any,
+for a later restore. Enable it only after forking a stopped VM is qualified
+on the deployment's Boat account.
 
 A wake whose VM Boat deleted restores the last checkpoint:
 
@@ -725,6 +760,7 @@ The control plane reads these names in
 | --- | --- |
 | `CLOUD_V2_ENABLED` | Enables the v2 routes, the app bridge relay and lifecycle roles. |
 | `CLOUD_V2_PROMPT_OUTBOX_ENABLED` | Enables durable HTTPS sends and advertises `promptOutbox: 1`. Defaults to `false`; enable only with a compatible worker runtime. `electron:cloud` defaults it to `true`. |
+| `CLOUD_V2_CHECKPOINT_RETRY_ENABLED` | Retries a stop's failed checkpoint on a fork of the stopped VM. Defaults to `false`; enable only after qualifying forks of stopped VMs on the deployment's Boat account. `electron:cloud` passes it through when set. |
 | `BOAT_API_KEY`, optional `BOAT_BILLING_ORG` | Boat provisioning and billing. |
 | `CLOUD_V2_API_URL`, `CLOUD_V2_REALTIME_URL` | Public HTTPS API (also the worker's outbound origin) and the app's WSS bridge origin. |
 | `CLOUD_V2_WORKER_SIGNING_KEY`, optional `CLOUD_V2_WORKER_SIGNING_KEY_PREVIOUS` | Ed25519 PKCS#8 private key (base64 DER) that signs worker grants. VMs trust both public keys after their next create or wake, so a rotation keeps the previous key until every running VM has woken with the new trust file. |

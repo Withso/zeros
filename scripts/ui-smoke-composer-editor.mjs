@@ -72,6 +72,9 @@ export async function runComposerEditorSmoke({ page, check }) {
   );
   await page.mouse.move(850, 500);
   await firstRemove.focus();
+  await page.keyboard.press("Shift+Tab");
+  await page.keyboard.press("Tab");
+  await expect(firstRemove).toBeFocused();
   const focused = await removeState();
   check(
     "keyboard focus exposes the attachment remove control",

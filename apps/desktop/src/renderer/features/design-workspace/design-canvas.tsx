@@ -191,6 +191,7 @@ import {
   createDesignTextNodeId,
 } from "./design-text-editing";
 import { DesignThemeEditor } from "./design-theme-editor";
+import { captureDeferredFocus } from "../../shared/ui/deferred-focus";
 import { designThemeView, effectiveDesignTheme } from "./design-themes";
 import { DesignToolbarButton } from "./design-inspector-kit";
 import { designRuntimeLayerLabel } from "./design-layer-label";
@@ -978,25 +979,21 @@ export function DesignCanvas({
     );
   }, []);
   const themeEditorTriggerRef = useRef<HTMLButtonElement | null>(null);
-  const focusThemeEditorTrigger = useCallback(() => {
-    // Radix Slot may own the outer Tooltip ref. The scoped data hook keeps
-    // controlled-dialog restoration deterministic without a global selector.
-    const trigger =
-      themeEditorTriggerRef.current ??
-      viewportRef.current?.querySelector<HTMLButtonElement>(
-        "[data-design-theme-trigger]",
-      );
-    trigger?.focus();
-  }, []);
   const setThemeEditorOpenWithFocus = useCallback(
     (open: boolean) => {
+      // Radix Slot may own the outer Tooltip ref; use the scoped hook too.
+      const trigger = themeEditorTriggerRef.current ??
+        viewportRef.current?.querySelector<HTMLButtonElement>("[data-design-theme-trigger]") ?? null;
+      const mayRestoreFocus = captureDeferredFocus(trigger);
       setThemeEditorOpen(open);
       if (open) return;
       // Controlled dialogs have no Radix DialogTrigger to restore. Wait until
       // FocusScope has unmounted, then return keyboard users to the canvas tool.
-      window.requestAnimationFrame(focusThemeEditorTrigger);
+      window.requestAnimationFrame(() => {
+        if (mayRestoreFocus()) trigger?.focus();
+      });
     },
-    [focusThemeEditorTrigger],
+    [],
   );
   const changeActiveTheme = useCallback(
     (theme: string | null) => {
@@ -8760,8 +8757,6 @@ export function DesignCanvas({
           activeTheme={view.activeTheme === baseThemeId ? null : view.activeTheme}
           active={active}
           open={themeEditorOpen}
-          returnFocusRef={themeEditorTriggerRef}
-          onReturnFocus={focusThemeEditorTrigger}
           onOpenChange={setThemeEditorOpenWithFocus}
           onActiveThemeChange={changeActiveTheme}
         />

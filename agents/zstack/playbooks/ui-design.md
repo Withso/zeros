@@ -26,6 +26,10 @@ them.
    after the user approves the frame.
 4. **Red.** A bug needs a failing test or ui-smoke assertion first; a behavior
    change needs a concrete usage example.
+   For focus bugs, exercise real pointer → ordinary key → Tab sequences and
+   include descendant selectors and shadow-root controls. Hold deferred work,
+   move focus, then release it; also verify the uninterrupted handoff so a
+   focus guard cannot pass merely by disabling restoration.
 5. **Implement with the system.** Compose the shared primitives and layout
    blocks, and map frame values to utilities (`var(--bg2)` is `bg-bg2`; a
    `--space-<step>` value is that Tailwind step) instead of copying frame

@@ -11,6 +11,7 @@ const api = vi.hoisted(() => ({
 }));
 const toasts = vi.hoisted(() => ({ error: vi.fn(), info: vi.fn() }));
 const delivery = vi.hoisted(() => ({ deliverFilesToChat: vi.fn() }));
+const focus = vi.hoisted(() => ({ version: 0 }));
 const painter = vi.hoisted(() => ({
   readAnnotationPalette: vi.fn(() => ({ color: {}, contrast: "white" })),
   renderAnnotatedScreen: vi.fn<() => Promise<Blob>>(),
@@ -31,6 +32,7 @@ const workspace = vi.hoisted(() => {
 vi.mock("../simulator-api", () => api);
 vi.mock("../../../shared/ui/primitives/elements", () => ({ toast: toasts }));
 vi.mock("../../agent/composer-file-attachment-delivery", () => delivery);
+vi.mock("../../../shared/ui/focus-navigation", () => ({ getFocusInteractionVersion: () => focus.version }));
 vi.mock("../simulator-annotation-painter", () => painter);
 vi.mock("../../../state/workspace-store", () => ({
   useWorkspaceStore: workspace.useWorkspaceStore,
@@ -90,6 +92,7 @@ beforeEach(() => {
   simulatorAnnotations.reset();
   for (const mock of Object.values(toasts)) mock.mockReset();
   delivery.deliverFilesToChat.mockReset();
+  focus.version = 0;
   painter.renderAnnotatedScreen.mockReset();
   painter.renderAnnotatedScreen.mockResolvedValue(new Blob(["png"], { type: "image/png" }));
   api.loadSimulatorAnnotationSnapshot.mockReset();
@@ -127,6 +130,22 @@ describe("Annotate", () => {
 });
 
 describe("Add to chat", () => {
+  it.each([false, true])("preserves annotation delivery but revokes focus after newer input: %s", async (interrupted) => {
+    await annotated();
+    let finish!: (blob: Blob) => void;
+    painter.renderAnnotatedScreen.mockReturnValue(new Promise(resolve => { finish = resolve; }));
+    const adding = addAnnotationToChat(TAB, CHAT, themed);
+    expect(simulatorAnnotations.get(TAB)?.adding).toBe(true);
+    if (interrupted) focus.version++;
+    finish(new Blob(["png"], { type: "image/png" }));
+    await expect(adding).resolves.toBe(true);
+    expect(delivery.deliverFilesToChat).toHaveBeenCalledTimes(1);
+    const [chatId, sent, options] = delivery.deliverFilesToChat.mock.calls[0]!;
+    expect(chatId).toBe(CHAT);
+    expect(sent.files).toHaveLength(2);
+    expect(options?.focus ?? true).toBe(!interrupted);
+  });
+
   it("sends the annotated screen and its marks file to the chat, then ends", async () => {
     await annotated();
     await expect(addAnnotationToChat(TAB, CHAT, themed)).resolves.toBe(true);

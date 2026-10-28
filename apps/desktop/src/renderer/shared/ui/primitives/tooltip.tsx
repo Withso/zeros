@@ -3,7 +3,7 @@ import * as TooltipPrimitive from "@radix-ui/react-tooltip";
 
 import { cn } from "@/renderer/shared/ui/cn";
 import { ANCHORED_OVERLAY_MOTION } from "@/renderer/shared/ui/anchored-overlay-motion";
-import { getLastInputModality } from "@/renderer/shared/ui/overlay-focus";
+import { isKeyboardNavigationActive } from "@/renderer/shared/ui/focus-navigation";
 import { useNativeSurfaceOverlayIntent } from "@/renderer/shared/ui/native-surface-overlay";
 
 // ──────────────────────────────────────────────────────────
@@ -96,10 +96,10 @@ function TooltipRoot({
 // when it closes. If that element is a tooltip trigger, its tooltip
 // pops open with no hover and hangs (e.g. the model picker's hidden
 // per-row ★ "Set as default" — first tabbable because cmdk rows are
-// divs). Guard: while the user is mousing, cancel the focus-open
-// (preventDefault → Radix's composed handler bails). Keyboard focus
-// (Tab / arrow) keeps tooltips, so a11y is unchanged. Same modality
-// split as overlay-focus.ts, which fixes the close-side twin bug.
+// divs). Only deliberate Tab or widget navigation enables focus-open
+// (preventDefault → Radix's composed handler bails). Typing into a search
+// field must not open help when an overlay restores its trigger. Overlay
+// focus restoration tracks the closing input separately in overlay-focus.ts.
 const TooltipTrigger = React.forwardRef<
   React.ComponentRef<typeof TooltipPrimitive.Trigger>,
   React.ComponentPropsWithoutRef<typeof TooltipPrimitive.Trigger>
@@ -109,7 +109,7 @@ const TooltipTrigger = React.forwardRef<
     onFocus={(event) => {
       onFocus?.(event);
       if (
-        getLastInputModality() === "pointer" ||
+        !isKeyboardNavigationActive() ||
         popupIsOpen(event.currentTarget)
       ) event.preventDefault();
     }}

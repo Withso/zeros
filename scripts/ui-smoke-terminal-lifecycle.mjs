@@ -186,7 +186,39 @@ export async function runRunTerminalTitleSmoke({ page, check }) {
 }
 
 export async function runTerminalLifecycleSmoke(context) {
+  await runDeferredTerminalFocusSmoke(context);
   await runRestoredTerminalScopeSmoke(context);
   await runHiddenTerminalAttachmentSmoke(context);
   await runRunTerminalTitleSmoke(context);
+}
+
+export async function runDeferredTerminalFocusSmoke({ page, check }) {
+  const origin = new URL(page.url()).origin;
+  for (const query of ["", "?cloud"]) {
+    await page.goto(`${origin}/apps/desktop/src/renderer/harnesses/harness-terminal-workbench.html${query}`, { waitUntil: "networkidle" });
+    await page.getByRole("button", { name: "New File, Browser, or Terminal tab" }).click();
+    await page.getByRole("option", { name: "Terminal", exact: true }).click();
+    const main = page.locator("[data-terminal-workbench]");
+    await expect(main.locator(".xterm-helper-textarea")).toBeFocused();
+    const toggle = page.getByRole("button", { name: "Toggle workspace visibility" });
+    await toggle.click();
+    await expect(main).toBeHidden();
+    await page.evaluate(async () => {
+      const { beginContinuousLayoutResize } = await import("/apps/desktop/src/renderer/shell/terminal/continuous-layout-resize.ts");
+      window.releaseFocusResize = beginContinuousLayoutResize();
+    });
+    await toggle.click();
+    await expect(main).toBeVisible();
+    // The actual reveal scheduler is held by a resize, not a test timeout.
+    // Returning to a toolbar control is a newer deliberate keyboard choice.
+    const destination = page.getByRole("button", { name: "Workspace B", exact: true });
+    await destination.focus();
+    await page.evaluate(async () => {
+      window.releaseFocusResize();
+      delete window.releaseFocusResize;
+      await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+    });
+    await expect(destination).toBeFocused();
+    check(`${query ? "Cloud" : "Local"}: delayed terminal reveal fits without stealing newer focus`, true);
+  }
 }

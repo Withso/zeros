@@ -1380,6 +1380,7 @@ async function main() {
                 styles?: Record<string, string>;
                 file?: string;
                 name?: string;
+                theme?: string | null;
                 keyframes?: DesignKeyframeInput[];
                 frame?: string;
                 geometry?: {
@@ -1392,6 +1393,53 @@ async function main() {
               }>;
             }
           | undefined;
+        if (transaction?.operations?.length && transaction.operations.every((operation) => operation.type === "token.set")) {
+          const frameFile = String(message.params?.frame ?? "");
+          const currentFrame = currentWorkspaceSnapshot.frames.find((frame) => frame.file === frameFile)!;
+          const key = designFoundationKey(workspaceId, frameFile, currentFrame.sourceVersion);
+          const previous = foundationReplies.get(key)!;
+          if (transaction.documentId !== previous.summary.documentId || transaction.baseRevision !== previous.summary.revision)
+            throw new Error("The token transaction document or revision is stale.");
+          const tokens = structuredClone(currentWorkspaceSnapshot.tokens);
+          for (const operation of transaction.operations) {
+            let token = tokens.find((candidate) => candidate.name === operation.name);
+            if (!token) {
+              token = {
+                name: operation.name!, syntax: "*", inherits: true,
+                initialValue: operation.value ?? "", value: "", themeValues: {},
+                usageCount: 0, line: tokens.length + 1,
+              };
+              tokens.push(token);
+            }
+            if (operation.theme) {
+              if (operation.value === null) delete token.themeValues[operation.theme];
+              else token.themeValues[operation.theme] = operation.value!;
+            } else token.value = operation.value ?? "";
+          }
+          const revision = `harness:tokens:${transaction.transactionId}`;
+          currentWorkspaceSnapshot = { ...currentWorkspaceSnapshot, tokens, tokenSourceVersion: revision };
+          publishFoundation(key, {
+            ...previous,
+            summary: { ...previous.summary, revision },
+            foundation: { ...previous.foundation, revision },
+          });
+          return {
+            type: "WORKSPACE_RESPONSE",
+            result: {
+              result: {
+                revision,
+                receipt: {
+                  status: "applied", transactionId: transaction.transactionId,
+                  documentId: transaction.documentId, beforeRevision: transaction.baseRevision,
+                  afterRevision: revision,
+                  appliedOperationIds: transaction.operations.map((operation) => operation.operationId),
+                  skippedOperationIds: [],
+                },
+              },
+              snapshot: currentWorkspaceSnapshot,
+            },
+          };
+        }
         // Mirror the adapter: storage cannot hold out-of-range frame geometry.
         for (const operation of transaction?.operations ?? []) {
           const invalid =

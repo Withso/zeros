@@ -14,7 +14,7 @@
 //
 // Chord glyphs use the macOS convention (⌃⌥⇧⌘ ordering, then the key):
 //   ⌘ Command · ⇧ Shift · ⌥ Option · ⌃ Control · ↵ Return
-//   ↑ ↓ arrows · ↖ Home · ↘ End
+//   ← → ↑ ↓ arrows · ↖ Home · ↘ End
 // ──────────────────────────────────────────────────────────
 
 export interface ShortcutDef {
@@ -84,6 +84,18 @@ export const SHORTCUT_CATEGORIES: ShortcutCategory[] = [
     label: "View",
     shortcuts: [
       {
+        id: "previous-side-tab",
+        label: "Previous side column tab",
+        keys: ["⌥⌘←"],
+        keywords: ["workbench", "left", "files", "changes", "browser", "terminal"],
+      },
+      {
+        id: "next-side-tab",
+        label: "Next side column tab",
+        keys: ["⌥⌘→"],
+        keywords: ["workbench", "right", "files", "changes", "browser", "terminal"],
+      },
+      {
         id: "toggle-right-panel",
         label: "Toggle right panel",
         keys: ["⌥⌘B"],
@@ -143,26 +155,38 @@ export const SHORTCUT_CATEGORIES: ShortcutCategory[] = [
         keywords: ["tab", "shell"],
       },
       {
+        id: "previous-chat",
+        label: "Previous chat tab (chat focused)",
+        keys: ["⌘←"],
+        keywords: ["agent", "conversation", "left", "composer"],
+      },
+      {
+        id: "next-chat",
+        label: "Next chat tab (chat focused)",
+        keys: ["⌘→"],
+        keywords: ["agent", "conversation", "right", "composer"],
+      },
+      {
         id: "previous-message",
-        label: "Previous message",
+        label: "Previous user message",
         keys: ["⌘↑"],
         keywords: ["jump", "scroll", "up"],
       },
       {
         id: "next-message",
-        label: "Next message",
+        label: "Next user message",
         keys: ["⌘↓"],
         keywords: ["jump", "scroll", "down"],
       },
       {
         id: "first-message",
-        label: "First message",
+        label: "First user message",
         keys: ["⌘↖"],
         keywords: ["top", "home", "start"],
       },
       {
         id: "last-message",
-        label: "Last message",
+        label: "Last user message",
         keys: ["⌘↘"],
         keywords: ["bottom", "end", "latest"],
       },
@@ -190,6 +214,30 @@ export const SHORTCUT_CATEGORIES: ShortcutCategory[] = [
     id: "workspace",
     label: "Workspace",
     shortcuts: [
+      {
+        id: "create-workspace",
+        label: "Create workspace",
+        keys: ["⌘N"],
+        keywords: ["new", "page", "composer"],
+      },
+      {
+        id: "workspace-by-number",
+        label: "Go to workspace 1–9 (first 9 in sidebar order)",
+        keys: ["⌘1–9"],
+        keywords: ["switch", "number", "sort", "composer"],
+      },
+      {
+        id: "previous-workspace",
+        label: "Previous workspace",
+        keys: ["⌥⌘↑"],
+        keywords: ["switch", "up", "sidebar", "sort", "composer"],
+      },
+      {
+        id: "next-workspace",
+        label: "Next workspace",
+        keys: ["⌥⌘↓"],
+        keywords: ["switch", "down", "sidebar", "sort", "composer"],
+      },
       {
         id: "run",
         label: "Run",

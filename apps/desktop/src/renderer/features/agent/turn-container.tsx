@@ -660,12 +660,13 @@ function TurnPromptEditor({
     imagePreviewOverlay,
     dragActive,
     dragHandlers,
+    focus: focusEditor,
   } = composer;
 
   // Focus + caret at end once the editor mounts.
   useEffect(() => {
-    if (editor) editor.commands.focus("end");
-  }, [editor]);
+    if (editor) focusEditor();
+  }, [editor, focusEditor]);
 
   // Click outside the editor closes it (pills/menus render in-tree, so a
   // `contains` check covers the editor, attach button, pills, and overlay).

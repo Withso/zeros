@@ -1,12 +1,12 @@
 import { execFileSync, spawnSync } from "node:child_process";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
-import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, renameSync, rmSync, symlinkSync, truncateSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, renameSync, rmSync, symlinkSync, truncateSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
-  checkpointArchiveSteps, checkpointCommand, checkpointRestoreSteps, cloudV2CheckpointObject, openCheckpointKey,
-  parseCheckpointResult, parseRestoreResult, restoreCommand, sealCheckpointKey, type RestoreInput,
+  CHECKPOINT_SAVED_REPORT, checkpointArchiveSteps, checkpointCommand, checkpointRestoreSteps, cloudV2CheckpointObject, openCheckpointKey,
+  parseCheckpointResult, parseRestoreResult, restoreCommand, sealCheckpointKey, type CheckpointReuse, type RestoreInput,
 } from "./checkpoint.js";
 
 const roots: string[] = [];
@@ -860,5 +860,172 @@ describe("cloud v2 checkpoints", () => {
     expect(() => openCheckpointKey(sealed, other, cloudV2CheckpointObject(other, id), keys)).toThrow();
     expect(() => openCheckpointKey(sealed, workspace, cloudV2CheckpointObject(workspace, randomUUID()), keys)).toThrow();
     expect(() => openCheckpointKey(sealed, workspace, object, { keys: { 1: keys.keys[1] }, currentKeyVersion: 1 })).toThrow();
+  });
+});
+
+/** Captures as the stop command does, reporting its real result line. */
+function capture(input: { home: string; repo: string; reuse?: CheckpointReuse; out?: string; key?: Buffer; base?: string; maxBytes?: number }, env: NodeJS.ProcessEnv) {
+  const result = run([
+    ...checkpointArchiveSteps({ checkoutPath: input.repo, home: input.home, baseBranch: input.base ?? "main", key: input.key ?? randomBytes(32),
+      ...(input.maxBytes ? { maxBytes: input.maxBytes } : {}), ...(input.reuse ? { reuse: input.reuse } : {}) }),
+    ...(input.out ? [`cp "$work/checkpoint.zck" '${input.out}'`] : []),
+    CHECKPOINT_SAVED_REPORT,
+  ], env);
+  return { ...result, parsed: parseCheckpointResult(result.stdout) };
+}
+
+/** A workspace with every kind of state a checkpoint holds, and its first checkpoint. */
+function worked() {
+  const w = workspaces(), { git, write } = w;
+  w.write(join(w.oldRepo, ".gitignore"), "node_modules/\n.env*\n*.log\n.context/\n");
+  git(w.oldRepo, "add", ".gitignore"); git(w.oldRepo, "commit", "-q", "-m", "ignore context");
+  git(w.oldRepo, "switch", "-q", "-c", "zeros/work");
+  write(join(w.oldRepo, "feature.txt"), "one\n"); git(w.oldRepo, "add", "feature.txt"); git(w.oldRepo, "commit", "-q", "-m", "local");
+  write(join(w.oldRepo, "a.txt"), "a2 staged\n"); git(w.oldRepo, "add", "a.txt");
+  write(join(w.oldRepo, "b.txt"), "b2 unstaged\n");
+  write(join(w.oldRepo, "notes/todo.md"), "untracked\n");
+  write(join(w.oldRepo, ".env.local"), "TOKEN=old\n");
+  write(join(w.oldRepo, ".context/attachments/up/clip.bin"), "attachment\n");
+  write(join(w.oldRepo, "node_modules/dep/index.js"), "dependency\n");
+  const state = join(w.oldHome, ".local/share/zeros/cloud-worker");
+  write(join(state, "workspace.json"), "{\"workspaceId\":\"w\"}");
+  write(join(state, "sessions/chat.json"), "{\"rows\":[]}");
+  write(join(w.oldHome, ".claude/projects/p/session.jsonl"), "{\"type\":\"user\"}\n");
+  write(join(w.oldHome, ".codex/sessions/2026/10/28/rollout.jsonl"), "{}\n");
+  const first = capture({ home: w.oldHome, repo: w.oldRepo }, w.env);
+  if (!first.parsed.ok || first.parsed.unchanged || !first.parsed.reuse) throw new Error(`first checkpoint failed: ${first.stdout}`);
+  return { ...w, state, reuse: first.parsed.reuse };
+}
+
+/** Rewrites a file with the same bytes under a new inode and modification time, as the worker does. */
+function rewrite(path: string) {
+  const bytes = readFileSync(path), temporary = `${path}.tmp`;
+  writeFileSync(temporary, bytes); renameSync(temporary, path);
+  utimesSync(path, new Date(NOW_FOR_TIMES), new Date(NOW_FOR_TIMES));
+}
+const NOW_FOR_TIMES = Date.parse("2030-01-01T00:00:00Z");
+
+describe("cloud v2 checkpoint reuse", () => {
+  it("keeps the last checkpoint when nothing it holds changed, however files were rewritten or the base moved on", () => {
+    const w = worked();
+    expect(w.reuse.base).toMatch(/^[0-9a-f]{40}$/);
+    // The worker rewrites unchanged state on every boot; status refreshes stat data; agents touch sessions.
+    for (const path of [join(w.state, "workspace.json"), join(w.state, "sessions/chat.json"), join(w.oldHome, ".claude/projects/p/session.jsonl"),
+      join(w.oldRepo, "b.txt"), join(w.oldRepo, ".env.local"), join(w.oldRepo, ".context/attachments/up/clip.bin")]) rewrite(path);
+    w.git(w.oldRepo, "status", "--porcelain");
+    // Things a checkpoint never holds may change freely.
+    w.write(join(w.oldRepo, "node_modules/dep/index.js"), "rebuilt dependency\n");
+    w.write(join(w.state, "workspace-setup/w.json"), "{\"state\":\"running\"}");
+    w.write(join(w.state, "attachment-uploads/upload.part"), "partial");
+    w.write(join(w.oldHome, ".claude/projects/p/.credentials.json"), "secret");
+    w.write(join(w.oldHome, ".config/zeros/worker-token"), "secret");
+    // Main moved on and the worker fetched it: the old checkpoint's base is still an ancestor.
+    w.write(join(w.seed, "e.txt"), "e1\n"); w.git(w.seed, "add", "e.txt"); w.git(w.seed, "commit", "-q", "-m", "newer main"); w.git(w.seed, "push", "-q", "origin", "main");
+    w.git(w.oldRepo, "fetch", "-q", "origin");
+    const out = join(w.root, "never.zck");
+    const again = capture({ home: w.oldHome, repo: w.oldRepo, reuse: w.reuse, out }, w.env);
+    expect(again.parsed).toEqual({ ok: true, unchanged: true, fingerprint: w.reuse.fingerprint });
+    expect(again.stdout.trim().split("\n")).toHaveLength(1);
+    expect(existsSync(out)).toBe(false);
+    // Nothing is left behind, exactly as after a full checkpoint.
+    expect(w.git(w.oldRepo, "for-each-ref", "refs/zeros-checkpoint")).toBe("");
+    expect(execFileSync("ls", ["-A", join(w.oldHome, ".cache")], { encoding: "utf8" })).toBe("");
+    // Without a previous checkpoint to compare with, the same workspace is saved in full.
+    const full = capture({ home: w.oldHome, repo: w.oldRepo }, w.env);
+    expect(full.parsed.ok && !full.parsed.unchanged && full.parsed.reuse?.fingerprint).toBe(w.reuse.fingerprint);
+  }, 60_000);
+
+  it.each<[string, (w: ReturnType<typeof worked>) => void]>([
+    ["an unstaged edit", w => w.write(join(w.oldRepo, "b.txt"), "b3\n")],
+    ["a staged edit", w => { w.write(join(w.oldRepo, "c.txt"), "c2\n"); w.git(w.oldRepo, "add", "c.txt"); }],
+    ["unstaging", w => w.git(w.oldRepo, "reset", "-q", "--", "a.txt")],
+    ["a new untracked file", w => w.write(join(w.oldRepo, "notes/more.md"), "more\n")],
+    ["a deleted file", w => rmSync(join(w.oldRepo, "d.txt"))],
+    ["an executable bit", w => chmodSync(join(w.oldRepo, "c.txt"), 0o755)],
+    ["a file replaced by a link", w => { rmSync(join(w.oldRepo, "c.txt")); symlinkSync("a.txt", join(w.oldRepo, "c.txt")); }],
+    ["a commit", w => w.git(w.oldRepo, "commit", "-q", "-m", "commit the staged edit")],
+    ["a new branch", w => w.git(w.oldRepo, "branch", "spare")],
+    ["a deleted branch", w => { w.git(w.oldRepo, "switch", "-q", "main"); w.git(w.oldRepo, "branch", "-q", "-D", "zeros/work"); }],
+    ["a switched branch", w => w.git(w.oldRepo, "switch", "-q", "-c", "elsewhere")],
+    ["a tag", w => w.git(w.oldRepo, "tag", "v1")],
+    ["a stash", w => w.git(w.oldRepo, "stash", "push", "-q", "-m", "idea")],
+    ["another remote", w => w.git(w.oldRepo, "remote", "add", "fork", "https://example.test/fork.git")],
+    ["an upstream", w => { w.git(w.oldRepo, "config", "branch.zeros/work.remote", "origin"); w.git(w.oldRepo, "config", "branch.zeros/work.merge", "refs/heads/zeros/work"); }],
+    ["a small ignored file", w => w.write(join(w.oldRepo, ".env.local"), "TOKEN=new\n")],
+    ["an ignored attachment", w => w.write(join(w.oldRepo, ".context/attachments/up/clip.bin"), "replaced\n")],
+    ["a new ignored attachment", w => w.write(join(w.oldRepo, ".context/attachments/up2/photo.png"), "png\n")],
+    ["a session's contents", w => w.write(join(w.oldHome, ".claude/projects/p/session.jsonl"), "{\"type\":\"user\"}\n{\"type\":\"assistant\"}\n")],
+    ["a new session", w => w.write(join(w.oldHome, ".cursor/chats/c/store.db"), "chat\n")],
+    ["a session's permissions", w => chmodSync(join(w.oldHome, ".claude/projects/p/session.jsonl"), 0o600)],
+    ["the worker's state", w => w.write(join(w.state, "sessions/chat.json"), "{\"rows\":[1]}")],
+    ["an empty session folder", w => mkdirSync(join(w.oldHome, ".claude/projects/q"))],
+  ])("takes a new checkpoint after %s", (_label, change) => {
+    const w = worked();
+    change(w);
+    const again = capture({ home: w.oldHome, repo: w.oldRepo, reuse: w.reuse }, w.env);
+    expect(again.parsed.ok && !again.parsed.unchanged).toBe(true);
+    expect(again.parsed.ok && !again.parsed.unchanged && again.parsed.reuse?.fingerprint).not.toBe(w.reuse.fingerprint);
+  }, 60_000);
+
+  it("takes a new checkpoint when the base it left out was rewritten, even though nothing else changed", () => {
+    const w = worked();
+    w.git(w.seed, "checkout", "-q", "--orphan", "rewritten"); w.write(join(w.seed, "fresh.txt"), "fresh\n");
+    w.git(w.seed, "add", "-A"); w.git(w.seed, "commit", "-q", "-m", "rewritten main"); w.git(w.seed, "push", "-q", "-f", "origin", "rewritten:main");
+    w.git(w.oldRepo, "fetch", "-q", "origin");
+    const again = capture({ home: w.oldHome, repo: w.oldRepo, reuse: w.reuse }, w.env);
+    expect(again.parsed.ok && !again.parsed.unchanged && again.parsed.reuse).toEqual({ fingerprint: w.reuse.fingerprint, base: w.git(w.oldRepo, "rev-parse", "origin/main") });
+  }, 60_000);
+
+  it("compares only with a checkpoint made by the same capture", () => {
+    const w = worked();
+    const other = capture({ home: w.oldHome, repo: w.oldRepo, reuse: w.reuse, maxBytes: 1024 ** 3 }, w.env).parsed;
+    expect(other.ok && !other.unchanged).toBe(true);
+    expect(other.ok && !other.unchanged && other.reuse?.fingerprint).not.toBe(w.reuse.fingerprint);
+  }, 60_000);
+
+  it("saves in full, without a fingerprint, when a part cannot be read", () => {
+    const w = worked();
+    // A digest that fails, as reading an unreadable or vanishing file does; encryption still runs.
+    const bin = join(w.root, "bin"), node = execFileSync("sh", ["-c", "command -v node"], { encoding: "utf8" }).trim();
+    w.write(join(bin, "node"), `#!/bin/sh\ncase "$1" in *digest.mjs) exit 1 ;; esac\nexec '${node}' "$@"\n`); chmodSync(join(bin, "node"), 0o755);
+    const again = capture({ home: w.oldHome, repo: w.oldRepo, reuse: w.reuse }, { ...w.env, PATH: `${bin}:${w.env.PATH}` });
+    expect(again.parsed.ok && !again.parsed.unchanged).toBe(true);
+    expect(again.parsed.ok && !again.parsed.unchanged && again.parsed.reuse).toBeUndefined();
+  }, 60_000);
+
+  it("restores a kept checkpoint to exactly the workspace it was kept for", () => {
+    const w = worked(), key = randomBytes(32), archive = join(w.root, "kept.zck");
+    const kept = capture({ home: w.oldHome, repo: w.oldRepo, key, out: archive }, w.env).parsed;
+    expect(kept.ok && !kept.unchanged && kept.reuse).toEqual(w.reuse);
+    for (const path of [join(w.state, "workspace.json"), join(w.oldRepo, "b.txt"), join(w.oldHome, ".claude/projects/p/session.jsonl")]) rewrite(path);
+    expect(capture({ home: w.oldHome, repo: w.oldRepo, reuse: w.reuse }, w.env).parsed).toMatchObject({ unchanged: true });
+    w.git(w.root, "clone", "-q", w.origin, w.newRepo);
+    expect(restore({ home: w.newHome, repo: w.newRepo, key, sha256: sha(archive), from: archive }, w.env).parsed).toEqual({ ok: true });
+    for (const args of [["symbolic-ref", "HEAD"], ["rev-parse", "HEAD"], ["diff", "--cached", "--binary"], ["diff", "--binary"]])
+      expect(w.git(w.newRepo, ...args)).toBe(w.git(w.oldRepo, ...args));
+    expect(sorted(w.git(w.newRepo, "status", "--porcelain=v1", "--untracked-files=all")))
+      .toEqual(sorted(w.git(w.oldRepo, "status", "--porcelain=v1", "--untracked-files=all")));
+    for (const file of [".env.local", ".context/attachments/up/clip.bin", "notes/todo.md"])
+      expect(readFileSync(join(w.newRepo, file), "utf8")).toBe(readFileSync(join(w.oldRepo, file), "utf8"));
+    for (const file of [".local/share/zeros/cloud-worker/workspace.json", ".claude/projects/p/session.jsonl"])
+      expect(readFileSync(join(w.newHome, file), "utf8")).toBe(readFileSync(join(w.oldHome, file), "utf8"));
+  }, 60_000);
+
+  it("parses the reuse fields and rejects anything else", () => {
+    const f = "f".repeat(64), b = "a".repeat(40);
+    expect(parseCheckpointResult(`zeros-checkpoint-saved bytes=12 sha256=${"b".repeat(64)} fingerprint=${f} base=${b}`))
+      .toEqual({ ok: true, bytes: 12, sha256: "b".repeat(64), reuse: { fingerprint: f, base: b } });
+    expect(parseCheckpointResult(`zeros-checkpoint-saved bytes=12 sha256=${"b".repeat(64)} fingerprint=${f} base=-`))
+      .toEqual({ ok: true, bytes: 12, sha256: "b".repeat(64), reuse: { fingerprint: f, base: null } });
+    // A capture that could not read a part reports no fingerprint, and is never reused.
+    expect(parseCheckpointResult(`zeros-checkpoint-saved bytes=12 sha256=${"b".repeat(64)} base=${b}`)).toEqual({ ok: true, bytes: 12, sha256: "b".repeat(64) });
+    expect(parseCheckpointResult(`zeros-checkpoint-unchanged fingerprint=${f}`)).toEqual({ ok: true, unchanged: true, fingerprint: f });
+    for (const bad of [`zeros-checkpoint-unchanged fingerprint=${f.slice(1)}`, "zeros-checkpoint-unchanged", `zeros-checkpoint-unchanged fingerprint=${f} extra`,
+      `zeros-checkpoint-saved bytes=12 sha256=${"b".repeat(64)} fingerprint=${f} base=xyz`])
+      expect(parseCheckpointResult(bad)).toEqual({ ok: false, code: "checkpoint_failed", step: "unknown" });
+    const key = randomBytes(32), command = (reuse: CheckpointReuse) => checkpointCommand({ checkoutPath: "/home/user/acme/app", home: "/home/user", baseBranch: "main", key, uploadUrl: "https://x.test/", reuse });
+    expect(command({ fingerprint: f, base: b })).toContain(f);
+    for (const reuse of [{ fingerprint: "x".repeat(64), base: null }, { fingerprint: f, base: "'; rm -rf / #" }, { fingerprint: `${f}'`, base: null }])
+      expect(() => command(reuse)).toThrow("Invalid checkpoint fingerprint");
   });
 });

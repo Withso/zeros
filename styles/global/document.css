@@ -56,6 +56,12 @@ body {
    native editing surfaces do so here, including controls mounted in portals.
    Keep this in the base layer so content/control utilities can narrow it. */
 @layer base {
+  /* Native outlines follow the same policy as the Tailwind focus variant,
+     including raw controls and portalled UI outside the application root. */
+  [data-zeros-focus-visible="false"]:focus-visible {
+    outline: none;
+  }
+
   body,
   button,
   [role="button"],

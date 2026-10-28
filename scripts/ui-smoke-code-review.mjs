@@ -2,6 +2,7 @@ import { chromium, expect } from "@playwright/test";
 import { pathToFileURL } from "node:url";
 import { mkdir } from "node:fs/promises";
 import { runReviewComparisonSmoke } from "./ui-smoke-review-comparison.mjs";
+import { runCodeReviewFocusSmoke } from "./ui-smoke-code-focus.mjs";
 
 /** Drive the retained gutter anchor through real document input, including a
  * document edit while the pointer still owns a gutter drag. */
@@ -466,6 +467,7 @@ export async function runCodeReviewSmoke({
   );
   await runReviewComparisonSmoke({ page, check, harnessBase: base });
   await checkReviewAvailability({ page, check, harnessBase: base });
+  await runCodeReviewFocusSmoke({ page, check, harnessBase: base });
 }
 
 async function checkReviewAvailability({ page, check, harnessBase }) {
