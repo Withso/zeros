@@ -81,7 +81,8 @@ export const ReleaseIdentityBase = z.object({ version: z.literal(1), ready: z.li
   worker: z.unknown().optional(), workerQualified: z.boolean().optional(),
 });
 export const ReleaseIdentity = ReleaseIdentityBase;
-export const WorkOSVerification = z.object({ kind: z.literal("workos-handshake-v1"), surfaces: z.array(z.enum(["app", "ops"])), verifiedAt: z.string().datetime() });
+export const WorkOSVerification = z.object({ kind: z.literal("workos-handshake-v1"), surfaces: z.array(z.enum(["app", "ops"])),
+  desktopVerified: z.literal(true).optional(), verifiedAt: z.string().datetime() });
 export const HostedReceipt = z.object({ version: z.literal(1), status: z.literal("success"), channel: z.enum(["alpha", "beta", "production"]),
   sourceSha: z.string().regex(SHA), branch: z.string(), repository: z.string(), runId: z.string().regex(/^\d+$/), runAttempt: z.string().regex(/^\d+$/),
   migration: MigrationReceipt, backend: ReleaseIdentity, railwayDeploymentId: id, pages: z.array(z.object({ id, surface: z.enum(["app", "ops"]) })),

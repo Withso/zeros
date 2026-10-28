@@ -371,7 +371,7 @@ describe("Stage 2 automatic Alpha admission", () => {
     await expect(test.client.assertCurrent()).rejects.toThrow("Alpha live API/schema identity is unavailable; forward-only admission refused");
   });
 
-  it("refuses a stalled API within the existing five-second deadline", async () => {
+  it("refuses a stalled API after three bounded five-second attempts", async () => {
     vi.useFakeTimers();
     try {
       const test = fixture({ ZEROS_ALPHA_FORWARD_ONLY: "enabled", GITHUB_JOB: "ci" });
@@ -379,11 +379,31 @@ describe("Stage 2 automatic Alpha admission", () => {
       test.fetcher.mockImplementation(async (input, init) => String(input).endsWith("/v1/release-identity")
         ? new Promise<Response>(() => {}) : original(input, init));
       const rejected = expect(test.client.assertCurrent()).rejects.toBeInstanceOf(AlphaAdmissionRejectedError);
-      await vi.advanceTimersByTimeAsync(5_001);
+      await vi.advanceTimersByTimeAsync(15_001);
       await rejected;
-      const request = test.fetcher.mock.calls.find(([input]) => String(input).endsWith("/v1/release-identity"));
-      expect(request?.[1]?.signal?.aborted).toBe(true);
+      const requests = test.fetcher.mock.calls.filter(([input]) => String(input).endsWith("/v1/release-identity"));
+      expect(requests).toHaveLength(3);
+      expect(requests.every(request => request[1]?.signal?.aborted)).toBe(true);
+      expect(test.sleeps).toEqual([1_000, 2_000]);
     } finally { vi.useRealTimers(); }
+  });
+
+  it("rechecks recovered API ancestry before permitting a destination mutation", async () => {
+    const test = fixture({ ZEROS_ALPHA_FORWARD_ONLY: "enabled" });
+    const original = test.fetcher.getMockImplementation()!;
+    let identities = 0;
+    test.fetcher.mockImplementation(async (input, init) => {
+      if (String(input).endsWith("/v1/release-identity") && identities++ === 0) {
+        test.state.api = descendant;
+        throw new Error("private connection diagnostics");
+      }
+      return original(input, init);
+    });
+    const mutation = vi.fn();
+    await expect((async () => { await test.client.assertCurrent(); mutation(); })()).rejects.toBeInstanceOf(AlphaAdmissionRejectedError);
+    expect(identities).toBe(2);
+    expect(test.sleeps).toEqual([1_000]);
+    expect(mutation).not.toHaveBeenCalled();
   });
 
   it.each(destinations)("accepts equal and ancestor %s sources before admission", async destination => {
