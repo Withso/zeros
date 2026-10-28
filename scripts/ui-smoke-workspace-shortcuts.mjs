@@ -197,6 +197,34 @@ export async function runWorkspaceShortcutsSmoke({ page, check, harnessBase, scr
   await page.getByRole("button", { name: "Home", exact: true }).focus();
   await page.keyboard.press("Meta+Digit1");
   await expect.poll(async () => (await state()).folder).toBe(cloud.keys[0]);
+  await expect(chatTabs).toHaveCount(3);
+  await chatTabs.nth(0).click();
+  await composer().focus();
+  await page.keyboard.press("Meta+ArrowRight");
+  await expect(chatTabs.nth(1)).toHaveAttribute("aria-selected", "true");
+  await composer().focus();
+  await page.keyboard.press("Meta+ArrowLeft");
+  await expect(chatTabs.nth(0)).toHaveAttribute("aria-selected", "true");
+  for (const [key, index] of [["End", 3], ["Home", 0], ["ArrowDown", 1]]) {
+    await composer().focus();
+    await page.keyboard.press(`Meta+${key}`);
+    await expect.poll(() => atPrompt(index)).toBe(true);
+  }
+  // This cloud fixture does not advertise GitHub Review. The keyboard follows
+  // the same filtered strip as clicks, including visible unavailable pages.
+  await expect(sideTabs.filter({ hasText: "Review" })).toHaveCount(0);
+  const cloudSideCount = await sideTabs.count();
+  expect(cloudSideCount).toBeGreaterThan(1);
+  const cloudSideIndex = await selectedSide();
+  const cloudChatId = (await state()).chatId;
+  await composer().focus();
+  await page.keyboard.press("Meta+Alt+ArrowRight");
+  await expect.poll(selectedSide).toBe((cloudSideIndex + 1) % cloudSideCount);
+  await composer().focus();
+  await page.keyboard.press("Meta+Alt+ArrowLeft");
+  await expect.poll(selectedSide).toBe(cloudSideIndex);
+  expect((await state()).chatId).toBe(cloudChatId);
+  check("Cloud chat, message and side-tab keys follow the visible tabs and respect Review availability", true);
   await composer().focus();
   await page.keyboard.press("Meta+Alt+ArrowDown");
   await expect.poll(async () => (await state()).folder).toBe(cloud.keys[1]);

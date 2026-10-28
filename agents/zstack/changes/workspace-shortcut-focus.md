@@ -22,3 +22,8 @@ for every side tab the navigation can activate. A mock sufficient for the
 sidebar alone cannot verify the full workbench. Chromium is installed before
 running the browser-backed adjacent suites; the prerequisite failure remains
 in the local receipt.
+
+SSR assertions for icon-backed shortcut chips compare the canonical `Kbd`
+markup and assert that replica actions expose no chips. Do not strip HTML with
+a regular expression to inspect its text: CodeQL reports that pattern as
+incomplete sanitization, including when it only appears in a test assertion.

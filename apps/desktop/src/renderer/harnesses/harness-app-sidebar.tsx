@@ -271,6 +271,12 @@ Object.assign(window, {
         folder: `cloud://${fixture.organizationId}/${fixture.id}`,
         title: `${fixture.name} activity`,
       }));
+      if (shortcutHarness) {
+        for (const chat of [...cloudChats]) {
+          cloudChats.push({ ...chat, id: `${chat.id}-second`, title: "Second chat" },
+            { ...chat, id: `${chat.id}-third`, title: "Third chat" });
+        }
+      }
       useWorkspaceStore.setState(state => ({ chats: [...state.chats, ...cloudChats] }));
       for (const chat of cloudChats) useSessionsStore.getState().setSession(chat.id, {
         ...BLANK, cwd: chat.folder, transcriptState: "resident", messages: [{
