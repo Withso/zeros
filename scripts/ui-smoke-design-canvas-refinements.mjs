@@ -299,6 +299,40 @@ export async function runDesignFreeDragSyncSmoke({ page, check }) {
   check("a free layer's selection box follows the pointer on every sample and settles on the layer", true);
 }
 
+/** A layer dragged out of its frame can only be shown by its pixels: the
+ * frame's document clips it. With none cached for this generation, the drag
+ * captures them, so the layer follows the pointer instead of an empty box. */
+export async function runDesignDragOutPixelsSmoke({ page, check }) {
+  await openCanvasFixture(page, "autoLayout=1");
+  await page.locator('[data-design-layer-id="home-heading"]').click();
+  const overlay = page.locator('[data-design-element-overlay="home-heading"]');
+  await expect(overlay).toBeVisible();
+  const frame = await page.locator('[data-design-frame="home.html"]').boundingBox();
+  const box = await overlay.boundingBox();
+  const start = { x: box.x + box.width / 2, y: box.y + box.height / 2 };
+  await page.mouse.move(start.x, start.y);
+  await page.mouse.down();
+  await page.mouse.move(start.x + 8, start.y + 8, { steps: 2 });
+  // The drag paused background work; no cached pixels exist for this
+  // generation, as after an edit the frame's last capture predates.
+  await page.evaluate(async () => {
+    const { useDesignRuntimeStore } = await import("/apps/desktop/src/renderer/features/design-workspace/state/design-runtime-store.ts");
+    useDesignRuntimeStore.setState((state) => {
+      const owner = state.byWorkspace.ws_design_harness;
+      const frame = owner.frames["home.html"];
+      return { byWorkspace: { ...state.byWorkspace, ws_design_harness: { ...owner, frames: { ...owner.frames, "home.html": { ...frame, screenshotsByNode: {} } } } } };
+    });
+  });
+  await page.mouse.move(start.x + 10, frame.y + frame.height + 80, { steps: 8 });
+  const ghost = page.locator('[data-design-drag-preview="home-heading"]');
+  await expect(ghost.locator("img")).toHaveCount(1);
+  await expect(ghost).toBeVisible();
+  await page.keyboard.press("Escape");
+  await page.mouse.up();
+  await expect(ghost).toHaveCount(0);
+  check("a layer dragged out of its frame shows its own pixels even when none were cached", true);
+}
+
 export async function runDesignGestureReleasePositionSmoke({ page, check }) {
   await openCanvasFixture(page);
   await page.locator('[data-design-layer-id="home-hero"]').click();
@@ -822,6 +856,7 @@ export async function runDesignCanvasRefinementsSmoke(options) {
   await runDesignGroupResizePointerOwnershipSmoke(options);
   await runDesignLayoutDragPointerOwnershipSmoke(options);
   await runDesignFreeDragSyncSmoke(options);
+  await runDesignDragOutPixelsSmoke(options);
   await runDesignGestureReleasePositionSmoke(options);
   await runDesignCompletedCanvasGesturesSmoke(options);
   await runDesignNoopCanvasResizeSmoke(options);

@@ -152,6 +152,7 @@ export function startDesignLayoutDrag(input: {
     null;
   let presentation: ReturnType<typeof createDesignDragPresentation> = null;
   let suppressed = false;
+  let capturing = false;
   let latest: DesignLayoutDrop | null = null;
   let moved = false;
   let stopped = false;
@@ -196,6 +197,21 @@ export function startDesignLayoutDrag(input: {
       );
       presentation?.paint(origin());
       input.paint({ rect: { ...details.rect, ...origin() } });
+      // Outside its frame the layer can only be shown by its pixels. Capture
+      // them once, directly (background work is paused during a gesture),
+      // when none were cached for this generation.
+      if (presentation && !presentation.hasPixels && !capturing) {
+        capturing = true;
+        const scale = Math.min(2, Math.max(1, input.zoom() * window.devicePixelRatio));
+        void runtime
+          .captureScreenshot(details.oid, scale, undefined, "explicit")
+          .then((captured) => {
+            if (stopped || !isCurrent()) return;
+            presentation?.adopt(captured);
+            schedule();
+          })
+          .catch(() => {});
+      }
       if (!suppressed && presentation?.hasPixels) {
         suppressed = true;
         inFlight = runtime
