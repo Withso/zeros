@@ -770,22 +770,13 @@ export function DesignAutoLayoutControls({
         />
       )}
       {container ? (
-        frameClips ? (
-          <InspectorCheckboxRow
-            label="Clip content"
-            checked
-            disabled
-            title="A frame on the canvas always clips its content at its edges"
-            onChange={() => {}}
-          />
-        ) : (
-          <InspectorCheckboxRow
-            label="Clip content"
-            checked={clipped}
-            disabled={disabled}
-            onChange={() => onAction({ type: "clip" })}
-          />
-        )
+        <InspectorCheckboxRow
+          label="Clip content"
+          checked={clipped}
+          disabled={disabled}
+          title={frameClips ? "The canvas always clips a frame at its edges. This sets the frame's own overflow." : undefined}
+          onChange={() => onAction({ type: "clip" })}
+        />
       ) : null}
     </div>
   );

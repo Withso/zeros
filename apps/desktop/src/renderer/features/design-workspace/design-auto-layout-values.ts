@@ -429,10 +429,11 @@ export function designGridTrackCount(value: string): number {
   );
 }
 
-/** Whether a selected frame's own layer clips at the frame's edges whatever
- * its overflow says. A canvas frame is its own document, so nothing it holds
- * is ever drawn outside it: its body, or a root layer filling the whole
- * frame, always clips there. "Clip content" shows that truth. */
+/** Whether a selected frame's own layer is clipped at the frame's edges on
+ * the canvas whatever its overflow says. A canvas frame is its own document,
+ * so nothing it holds is drawn outside it: its body, or a root layer filling
+ * the whole frame, always clips there. "Clip content" stays the layer's own
+ * overflow (it matters outside the canvas) and says so. */
 export function designFrameAlwaysClips(
   details: DesignRuntimeNodeDetails,
   frameSelected: boolean | undefined,

@@ -2150,9 +2150,10 @@ where the layer is drawn; typing a position, aligning or pinning moves the
 offset into its insets (both pins of a stretched axis together, so its size is
 kept); turning on auto layout or joining a flow drops it and keeps the pose.
 Typing a position for a stretched layer keeps the size it had on that axis.
-A frame's own layer (its body, or a root filling the frame) reports Clip content
-as checked and fixed: a frame is its own document and nothing it holds is drawn
-past its edges.
+A frame is its own document, so nothing it holds is drawn past its edges on the
+canvas. Clip content on a frame's own layer (its body, or a root filling the
+frame) stays that layer's authored overflow, which matters outside the canvas,
+and says that the canvas always clips the frame at its edges.
 
 Relocation carries only the inherited values the layer's own context sets
 beyond its frame's base: standard properties unlike the body's and custom

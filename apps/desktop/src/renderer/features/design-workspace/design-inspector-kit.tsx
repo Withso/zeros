@@ -273,7 +273,7 @@ export function InspectorCheckboxRow({
   label: string;
   checked: boolean;
   disabled?: boolean;
-  /** Why the value is fixed; a disabled row with one still shows it. */
+  /** Explains the setting on hover, including on a disabled row. */
   title?: string;
   onChange: () => void;
 }) {
