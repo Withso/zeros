@@ -99,6 +99,10 @@ fences held replies while retaining confirmed data. Workspace deletion retires
 observation and forgets its cached PR discussions.
 A successful write remains successful if its follow-up refresh fails, so a sent
 draft is not presented for accidental retry.
+A signed-out or refused GitHub connection (`NOT_AUTHENTICATED`, SSO, scope,
+installation or repository access) is not a failure of the File, Changes or
+Review tab hosting the comments: it is a neutral notice naming Settings →
+Integrations, and only other read failures reach the tab's error banner.
 
 Aggregate reads cap thread pages, per-thread comment bytes, total discussion
 bytes, annotated check runs and annotation pages/bytes. Partial results carry

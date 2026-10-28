@@ -165,6 +165,30 @@ export function githubReviewItems(
   ];
 }
 
+/** GitHub refusals whose fix is a connection change in Settings, mirroring
+ * pr-github-access. The file, Changes and Review reads themselves succeeded;
+ * only the optional pull request comment overlay is unavailable. */
+const CONNECTION_CODES = new Set([
+  "NOT_AUTHENTICATED",
+  "GITHUB_SSO_REQUIRED",
+  "GITHUB_FORBIDDEN_SCOPE",
+  "GITHUB_REPO_NOT_INSTALLED",
+  "GITHUB_INSTALLATION_SUSPENDED",
+]);
+
+export function githubReviewConnectionNotice(
+  error: unknown,
+): string | undefined {
+  const code =
+    error && typeof error === "object"
+      ? (error as { code?: unknown }).code
+      : undefined;
+  if (typeof code !== "string" || !CONNECTION_CODES.has(code)) return undefined;
+  return code === "NOT_AUTHENTICATED"
+    ? "Connect GitHub in Settings → Integrations to show pull request comments."
+    : "Check your GitHub connection in Settings → Integrations to show pull request comments.";
+}
+
 export function githubReviewNotice(
   snapshot: PrInlineReview | undefined,
 ): string | undefined {

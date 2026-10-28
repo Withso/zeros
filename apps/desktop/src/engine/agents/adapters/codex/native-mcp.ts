@@ -161,6 +161,15 @@ export async function readNativeMcpSurface(
   };
 }
 
+/** The effective definition of a Zeros-registered server differs from the one
+ * Zeros passed. `serverName` lets the owner of a registration retire it. */
+export class McpConfigurationConflictError extends Error {
+  constructor(readonly serverName: string) {
+    super(`MCP configuration conflict for ${serverName}. Remove the conflicting native declaration or import its complete configuration before reopening this chat.`);
+    this.name = "McpConfigurationConflictError";
+  }
+}
+
 /** Codex 0.164 recursively merges even whole-table CLI overrides. A matching
  * name is not authority: verify the complete effective definition before
  * thread/start can spawn anything. Conflicts require an explicit native config
@@ -187,7 +196,7 @@ function verifiedRegistrations(merged: unknown, servers: readonly McpServerRegis
     const actual = Object.hasOwn(configured, name) ? configured[name] : undefined;
     if (actual === undefined) continue;
     if (!actual || typeof actual !== "object" || Array.isArray(actual) || !isDeepStrictEqual(normalize(actual as Record<string, unknown>), normalize(definition)))
-      throw new Error(`MCP configuration conflict for ${name}. Remove the conflicting native declaration or import its complete configuration before reopening this chat.`);
+      throw new McpConfigurationConflictError(name);
     names.push(name);
   }
   return names;

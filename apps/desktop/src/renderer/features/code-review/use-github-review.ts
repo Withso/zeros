@@ -22,6 +22,7 @@ import {
 } from "./github-review-observer";
 import {
   githubLineCommentForAnchor,
+  githubReviewConnectionNotice,
   githubReviewItems,
   githubReviewNotice,
   githubReviewRevision,
@@ -209,8 +210,10 @@ export function useGithubReview({
     },
     [key, cwd, confirmed, confirmedBaseSha, renamedPaths, refreshAfterWrite],
   );
-  const error = snapshot.error?.message;
-  const notice = githubReviewNotice(snapshot.data);
+  // A refused connection is guidance, not a failed read of the hosting tab.
+  const connectionNotice = githubReviewConnectionNotice(snapshot.error);
+  const error = connectionNotice ? undefined : snapshot.error?.message;
+  const notice = connectionNotice ?? githubReviewNotice(snapshot.data);
   const source = useMemo(
     () =>
       key

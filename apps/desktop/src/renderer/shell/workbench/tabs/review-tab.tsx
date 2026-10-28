@@ -516,7 +516,7 @@ export function ReviewView({
     return (
       <ReviewEmptyState
         title={`Connect ${provider.hostLabel}`}
-        subtitle={`Sign in under Settings → General → ${provider.hostLabel} to open and review pull requests.`}
+        subtitle={`Connect ${provider.hostLabel} in Settings → Integrations to open and review pull requests.`}
       />
     );
   }
