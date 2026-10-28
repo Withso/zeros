@@ -15,11 +15,14 @@ function setup(maxWarmBytes = 256, maxDecodedBytes = 1024, now = Date.now) {
   const confirmed = vi.fn();
   const previews = new DesignPreviewDecodes({
     hasPicture: (input) => memory.has(designPreviewKey(input)),
-    acquire: (input) => {
+    acquire: (input, accept) => {
       const key = designPreviewKey(input);
+      const picture: DesignPreviewPicture = { key, url: `blob:${key}`, width: 4, height: 4,
+        sourceVersion: input.sourceVersion, level: input.level, current: true };
+      if (accept && !accept(picture)) return null;
       const lease = memory.acquire(key);
       return lease ? {
-        picture: { key, url: lease.image.url, width: 4, height: 4, sourceVersion: input.sourceVersion, level: input.level, current: true },
+        picture,
         confirmDecoded: confirmed, release: lease.release,
       } : null;
     },
@@ -40,6 +43,24 @@ function setup(maxWarmBytes = 256, maxDecodedBytes = 1024, now = Date.now) {
 }
 
 describe("decoded Design preview continuity", () => {
+  it("probes ready covers without decoding cold images or evicting another frame's warm pixels", async () => {
+    const { previews, seed, ready, calls, budget, confirmed } = setup(128, 128);
+    const a = target(), b = target("b.html");
+    seed(a); seed(b); previews.setOwner({}, a);
+    const shown = previews.acquire(a)!;
+    const disposed = await ready(0); await shown.whenReady; shown.release();
+    expect(previews.acquireReady(b)).toBeNull();
+    expect(calls).toHaveLength(1);
+    expect(disposed).not.toHaveBeenCalled();
+    expect(budget.usage().decodedBytes).toBe(128);
+    const cover = previews.acquireReady(a)!;
+    expect(cover.ready).toBe(true);
+    expect(confirmed).not.toHaveBeenCalled();
+    cover.confirmDecoded(); expect(confirmed).toHaveBeenCalledTimes(1);
+    cover.release(); previews.clearWarm();
+    expect(budget.usage().decodedBytes).toBe(0);
+  });
+
   it("keeps completed fallback pixels across hidden and other-owner navigation without another decode", async () => {
     const { previews, calls, seed, ready, budget } = setup();
     const a = target(), b = target("b.html", "/organization/b");

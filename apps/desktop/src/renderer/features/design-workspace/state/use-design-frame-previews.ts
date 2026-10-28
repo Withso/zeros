@@ -72,7 +72,7 @@ export const designFramePreviews = new DesignFramePreviews({
 });
 
 export const designPreviewDecodes = new DesignPreviewDecodes({
-  acquire: (target) => designFramePreviews.acquire(target),
+  acquire: (target, accept) => designFramePreviews.acquire(target, accept),
   hasPicture: (target) => !!designFramePreviews.picture(target),
   retain: (key) => designFramePreviews.pin(key),
   decode: decodeDesignPreviewPicture,
@@ -207,7 +207,14 @@ export function useDesignFramePreview(target: DesignPreviewTarget | null): (Desi
       setShown(null);
       return;
     }
-    if (shownRef.current?.frameKey !== frameKey) setShown(null);
+    let shownKey = shownRef.current?.frameKey === frameKey ? shownRef.current.lease.picture.key : null;
+    if (!shownKey) {
+      // The preferred encoded level may have arrived while this frame was
+      // culled. Paint its already-decoded cover before starting that upgrade.
+      const cover = designPreviewDecodes.acquireReady(stableTarget);
+      shownKey = cover?.picture.key ?? null;
+      setShown(cover ? { frameKey, lease: cover } : null);
+    }
     let cancelled = false;
     let decoding = false;
     let stopWaiting: (() => void) | undefined;
@@ -221,7 +228,7 @@ export function useDesignFramePreview(target: DesignPreviewTarget | null): (Desi
       }
       if (lease.picture.key !== designFramePreviews.picture(stableTarget)?.key)
         stopWaiting ??= designFramePreviews.subscribeAvailable(attempt);
-      if (lease.picture.key === shownRef.current?.lease.picture.key) {
+      if (lease.picture.key === shownKey) {
         lease.release();
         return;
       }
@@ -231,6 +238,7 @@ export function useDesignFramePreview(target: DesignPreviewTarget | null): (Desi
       const publish = () => {
         if (cancelled) return;
         transferred = true;
+        shownKey = lease.picture.key;
         setShown({ frameKey, lease });
       };
       // A culled frame's owned decoder is ready synchronously. A layout

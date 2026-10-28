@@ -42,7 +42,7 @@ export class DesignPreviewDecodes {
   private warmBytes = 0;
 
   constructor(private readonly deps: {
-    acquire(target: DesignPreviewTarget): DesignPreviewPictureLease | null;
+    acquire(target: DesignPreviewTarget, accept?: (picture: DesignPreviewPicture) => boolean): DesignPreviewPictureLease | null;
     hasPicture(target: DesignPreviewTarget): boolean;
     retain(key: string): () => void;
     decode(picture: DesignPreviewPicture, signal: AbortSignal): Promise<DecodedImage>;
@@ -65,10 +65,20 @@ export class DesignPreviewDecodes {
   }
 
   acquire(target: DesignPreviewTarget): DesignDecodedPreviewLease | null {
+    return this.acquireImage(target, false);
+  }
+
+  /** A remount can paint a retained cover while its preferred level decodes.
+   * A miss must neither start a decoder nor reclaim another warm image. */
+  acquireReady(target: DesignPreviewTarget): DesignDecodedPreviewLease | null {
+    return this.acquireImage(target, true);
+  }
+
+  private acquireImage(target: DesignPreviewTarget, readyOnly: boolean): DesignDecodedPreviewLease | null {
     for (const entry of this.entries.values())
       if (!entry.users && this.now() - entry.touched >= IDLE_MS) this.remove(entry);
-    let display = this.deps.acquire(target);
-    if (!display && this.deps.hasPicture(target)) {
+    let display = this.deps.acquire(target, readyOnly ? picture => !!this.entries.get(picture.key)?.image : undefined);
+    if (!display && !readyOnly && this.deps.hasPicture(target)) {
       // The picture pool can have a tighter local cap than the shared budget.
       // A cold cache miss is not capacity pressure: evicting peers cannot
       // produce that missing picture and destroys their return-pan coverage.

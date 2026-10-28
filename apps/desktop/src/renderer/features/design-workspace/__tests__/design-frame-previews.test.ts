@@ -1,5 +1,6 @@
 import { expect, it, vi } from "vitest";
 import { DesignImageResidency } from "../state/design-image-residency";
+import { DesignPreviewDecodes } from "../state/design-preview-decodes";
 import type { DesignPreviewReply } from "@zeros/protocol/design-capture";
 import type {
   DesignPreviewIndexEntry,
@@ -206,6 +207,51 @@ it("retires a live document only after its exact-generation display lease confir
   expect(displayed().size).toBe(0);
   // The encoded cache survives display retirement and can be leased again.
   expect(h.previews.pictured(local, "dark", frames, 0.1).has("a.html")).toBe(true);
+});
+
+it("leases a warm exact-owner cover while the preferred encoded level decodes without promoting stale pixels", async () => {
+  const h = harness();
+  const target = { owner: local, file: "a.html", sourceVersion: version(1), theme: "dark", level: "thumbnail" as const };
+  h.previews.setDemand(h.token, { owner: local, theme: "dark", items: [{ ...target, live: false }] });
+  await h.settle();
+  let finish: (() => void) | undefined;
+  const decode = vi.fn(async (picture: { level: string }) => {
+    if (picture.level === "overview") await new Promise<void>(resolve => { finish = resolve; });
+    return { dispose: vi.fn() };
+  });
+  const decodes = new DesignPreviewDecodes({
+    acquire: (input, accept) => h.previews.acquire(input, accept),
+    hasPicture: input => !!h.previews.picture(input),
+    retain: key => h.previews.pin(key), decode,
+  });
+  decodes.setOwner({}, target);
+  const first = decodes.acquire(target)!;
+  await first.whenReady; first.release();
+  h.previews.setDemand(h.token, demand(local, [["a.html", 1]]));
+  await h.settle();
+  const sharper = { ...target, level: "overview" as const };
+  const upgrade = decodes.acquire(sharper)!;
+  await Promise.resolve();
+  expect(upgrade.ready).toBe(false);
+  const cover = decodes.acquireReady(sharper)!;
+  expect(cover.ready).toBe(true);
+  expect(cover.picture).toMatchObject({ key: first.picture.key, level: "thumbnail", current: true });
+  for (const input of [{ ...sharper, theme: "light" },
+    { ...sharper, file: "b.html" },
+    { ...sharper, owner: { ...local, workspaceId: "organization-local" } },
+    { ...sharper, owner: { ...local, directoryId: "other-design" } },
+    { ...sharper, owner: { ...local, scope: "cloud:other-account" } }])
+    expect(decodes.acquireReady(input)).toBeNull();
+  const newerSource = { ...sharper, sourceVersion: version(2) };
+  const stale = decodes.acquireReady(newerSource)!;
+  expect(stale.picture.current).toBe(false);
+  stale.confirmDecoded();
+  expect(h.previews.pictured(local, "dark", [{ file: target.file, sourceVersion: newerSource.sourceVersion }], 0, true).size).toBe(0);
+  stale.release();
+  expect(decode).toHaveBeenCalledTimes(2);
+  finish!(); await upgrade.whenReady;
+  upgrade.release(); cover.release(); decodes.clearWarm();
+  expect(h.previews.usage().decodedBytes).toBe(0);
 });
 
 it("falls back within display capacity while preserving the shown generation's lease", async () => {

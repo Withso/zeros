@@ -153,6 +153,8 @@ warm cache. Reclaim older unleased images when a new display is confirmed,
 preserve their encoded source, and never evict a displayed image to satisfy an
 optional cache limit. Test a full 256-frame Personal → organization → Personal
 return within the shared budget as well as pressure beyond that capacity.
+Hold a sharper image's decode across culling and return: an encoded refinement
+must not hide an already-decoded same-owner cover or delay its first paint.
 Qualification must distinguish retired display work from bounded completed
 cache entries. Prove passive source ownership without selecting an editor or
 acquiring a cache lease; those actions change the workload being measured.

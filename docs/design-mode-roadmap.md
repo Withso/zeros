@@ -2316,6 +2316,11 @@ stays mounted through editor activation, and a ready editor hides it in the
 same style pass to preserve authored alpha. Encoded availability is never
 treated as readiness. Warm retention favors small covers over optional detail;
 an optional refinement tries cached smaller pixels before evicting peer covers.
+A returning surface first leases a ready same-owner cover, even when its
+preferred sharper image is already encoded but still decoding. That warm-only
+lookup starts no decoder and creates no cache pressure; the normal refinement
+replaces the cover only after its own decode completes. Older source pixels
+remain explicitly stale and never establish current editing authority.
 A missing encoded picture is not memory pressure and cannot clear warm peers.
 Warm pixels still yield to foreground image admission. Completed fallback
 previews survive hidden/app and owner navigation within the same 32 MiB pool,

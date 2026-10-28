@@ -27,3 +27,15 @@
   resting activation against current semantic selection as well as page owner.
   `ui-smoke-design-selection-references.mjs` exercises deletion with aggregate
   and scoped mutation snapshots; neither can lose the surviving reference.
+- A warm overview could blank on a return pan when its sharper image was
+  encoded but still decoding. The mount chose encoded quality before decoded
+  readiness. Lease a ready same-owner cover before starting refinement, within
+  the existing pool. `ui-smoke-design-preview-continuity.mjs` holds the decode
+  across real culling/return; it fails on the base revision and preserves every
+  sampled paint after the fix. Producer/consumer tests retain source, theme,
+  directory, workspace and account fences and prove cold probes cause no work.
+- The serial browser run exposed fixture state leaking from scoped-copy tests
+  into a legacy motion fixture without directory metadata. Replaying the saved
+  fixture state on the base revision reproduced the failure; an isolated Motion
+  run passed. Directory-persisting copy checks now own a fresh browser context,
+  preserving every assertion and leaving the shared scenario page untouched.

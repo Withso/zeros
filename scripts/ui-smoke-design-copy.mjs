@@ -27,7 +27,22 @@ const copies = frame => frame.locator('[data-oid^="home-hero-copy-"]').filter({ 
 
 /** Held source writes exercise real shortcuts and pointer handling. These are
  * continuity/correctness assertions; they do not certify presentation latency. */
-export async function runDesignCopySmoke({ page, check }) {
+export async function runDesignCopySmoke({ page: parent, check }) {
+  // Scoped replies persist a real directory/page catalog. Keep that identity
+  // out of the shared page used by legacy fixtures without directory metadata.
+  const page = await parent.context().browser().newPage({ viewport: { width: 1600, height: 1000 } });
+  const errors = [];
+  page.on("pageerror", error => errors.push(error.message));
+  try {
+    const origin = `${new URL(parent.url()).origin}/ui-smoke-design-copy-origin.html`;
+    await page.route(origin, route => route.fulfill({ contentType: "text/html", body: "<!doctype html><title>Copy smoke origin</title>" }), { times: 1 });
+    await page.goto(origin);
+    await runDesignCopyChecks({ page, check });
+    expect(errors).toEqual([]);
+  } finally { await page.close(); }
+}
+
+async function runDesignCopyChecks({ page, check }) {
   await page.setViewportSize({ width: 1600, height: 1000 });
   let frame = await load(page);
   const original = await frame.locator('[data-oid="home-hero"]').evaluate(node => node.outerHTML);
