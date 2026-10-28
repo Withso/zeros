@@ -22,3 +22,10 @@
   `.focus()` and naming it keyboard navigation. Reset the fixture's persisted
   composer draft before each independent attachment case; a successful earlier
   case must not turn the next case's Attach control into Remove.
+- Run full root Vitest and UI smoke sequentially in one checkout. The
+  development-serving tests start Vite against the same dependency cache;
+  concurrent runs can invalidate browser imports with an outdated-bundle 504.
+  Use separate checkouts/caches when those checks need to overlap.
+- Finish draft-to-ready and lane-label changes before the final push. Both
+  can restart CI for the same head, cancelling the earlier run; follow the
+  newest run instead of its cancelled predecessor's failed roll-ups.
