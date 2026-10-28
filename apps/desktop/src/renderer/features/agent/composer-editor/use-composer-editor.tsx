@@ -194,8 +194,12 @@ export interface ComposerEditorApi {
   /** Snapshot the editor for submit / draft. Null before the editor mounts. */
   serialize: () => ComposerSerialized | null;
   /** Stage files (paste/drop/pick) as inline attachment pills at the caret.
-   *  A video's key frames and timeline text follow it once they are read. */
-  insertFiles: (files: FileList | File[] | null | undefined) => Promise<void>;
+   *  Background deliveries append with atEnd and focus: false, preserving the
+   *  current selection. A video's key frames and timeline text follow it. */
+  insertFiles: (
+    files: FileList | File[] | null | undefined,
+    options?: { focus?: boolean; atEnd?: boolean },
+  ) => Promise<void>;
   /** True while a video in the document is still having its key frames
    *  read. A send waits for them (waitForAttachmentReads) so they go with
    *  the video instead of landing in the next message. */
@@ -954,10 +958,10 @@ export function useComposerEditor(
 
   // ── attachment staging ──
   const insertFiles = useCallback(
-    async (files: FileList | File[] | null | undefined) => {
+    async (files: FileList | File[] | null | undefined, options?: { focus?: boolean; atEnd?: boolean }) => {
       const ed = editorRef.current;
       if (!ed || ed.isDestroyed) return;
-      const mayFocus = captureDeferredFocus(ed.view.dom);
+      const mayFocus = options?.focus === false ? () => false : captureDeferredFocus(ed.view.dom);
       const v = optsRef.current;
       const picked = Array.from(files ?? []);
       const atts = await filesToAttachments(picked, {
@@ -982,7 +986,13 @@ export function useComposerEditor(
         });
         content.push({ type: "text", text: " " });
       }
-      ed.chain().insertContent(content).run();
+      if (options?.atEnd) {
+        ed.chain().insertContentAt(TextSelection.atEnd(ed.state.doc).to, content, {
+          updateSelection: options.focus !== false,
+        }).run();
+      } else {
+        ed.chain().insertContent(content, { updateSelection: options?.focus !== false }).run();
+      }
       // TipTap's focus command schedules another animation frame. Focus the
       // view synchronously after checking intent so a later click cannot be
       // overtaken by that unowned frame.

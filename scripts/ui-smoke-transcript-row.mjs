@@ -162,6 +162,64 @@ export async function runTranscriptFocusSmoke({ page, check, harnessBase }) {
       check(`${cloud ? "cloud" : "Local"}: background fork attachment preserves the current focus`, true);
     }
   }
+  await runFileDeliveryFocusSmoke({ page, check, harnessBase });
+}
+
+/** Retained delivery is background work even when its destination registers
+ * again. Its files append without taking focus or disturbing the draft. */
+export async function runFileDeliveryFocusSmoke({ page, check, harnessBase }) {
+  for (const cloud of [false, true]) {
+    await page.goto(`${harnessBase}/harness-transcript-row.html?focus-races${cloud ? "&cloud" : ""}`);
+    const empty = page.locator('[data-chat-pane="chat-empty"]');
+    const sender = page.locator('[data-chat-pane="chat-sender"]');
+    await empty.locator(".composer-pm").fill("Existing draft");
+    await empty.locator(".composer-pm").press("Home");
+    const emptyId = await page.evaluate(async () => {
+      const { useWorkspaceStore } = await import("/apps/desktop/src/renderer/state/workspace-store.ts");
+      return useWorkspaceStore.getState().activeChatId;
+    });
+    const other = page.getByRole("textbox", { name: "Other editor" });
+    await other.fill("Keep this edit");
+    const queue = (chatId, name) => page.evaluate(async ({ chatId, name }) => {
+      const { deliverFilesToChat } = await import("/apps/desktop/src/renderer/features/agent/composer-file-attachment-delivery.ts");
+      return deliverFilesToChat(chatId ?? window.transcriptRowFixture.senderId, {
+        id: name, files: [new File(["Queued delivery"], name, { type: "text/plain" })],
+      });
+    }, { chatId, name });
+    expect(await queue(null, "retained-sender.txt")).toBe("queued");
+    // A background navigation/recovery publishes the surface without a new
+    // pointer or keyboard interaction taking focus from the current editor.
+    await page.getByRole("button", { name: "Sender", exact: true }).evaluate(button => button.click());
+    await expect(sender.locator(".composer-pm")).toContainText("retained-sender.txt");
+    await expect(other).toBeFocused();
+    await expect(other).toHaveValue("Keep this edit");
+
+    const remount = page.getByRole("button", { name: "Remount chat", exact: true });
+    await remount.click();
+    await expect(remount).toBeFocused();
+    expect(await queue(emptyId, "retained-empty.txt")).toBe("queued");
+    await page.getByRole("button", { name: cloud ? "Empty A" : "Empty", exact: true }).evaluate(button => button.click());
+    await expect(empty.locator(".composer-pm")).toContainText("retained-empty.txt");
+    await expect(remount).toBeFocused();
+    expect(await empty.locator(".composer-pm").innerText()).toMatch(/Existing draft.*retained-empty\.txt/s);
+    check(`${cloud ? "cloud" : "Local"}: queued file delivery preserves input and pointer-button focus across retained chat registration`, true);
+
+    await page.getByRole("button", { name: "Deliver files", exact: true }).click();
+    await expect(empty.locator(".composer-pm")).toContainText("live-focus.txt");
+    await expect(empty.locator(".composer-pm")).toBeFocused();
+    check(`${cloud ? "cloud" : "Local"}: a direct file action still focuses the destination composer`, true);
+
+    await other.fill("Newer than the file read");
+    await page.evaluate(async (chatId) => {
+      const { deliverFilesToChat } = await import("/apps/desktop/src/renderer/features/agent/composer-file-attachment-delivery.ts");
+      deliverFilesToChat(chatId, {
+        id: "late-file", files: [new File(["Late bytes"], "late-file.txt", { type: "text/plain" })],
+      }, { focus: false });
+    }, emptyId);
+    await expect(empty.locator(".composer-pm")).toContainText("late-file.txt");
+    await expect(other).toBeFocused();
+    check(`${cloud ? "cloud" : "Local"}: a file producer can complete without reclaiming focus after newer input`, true);
+  }
 }
 
 async function checkCloudTranscriptRow({ page, check, harnessBase, screenshotDir }) {

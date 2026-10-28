@@ -135,6 +135,7 @@ const { BLANK, useSessionsStore } = await import("../features/agent/sessions-sto
 const { loadAgents } = await import("../features/agent/agents-cache");
 const { useWorkspaceStore } = await import("../state/workspace-store");
 const { Button, Input, TooltipProvider } = await import("../shared/ui/primitives");
+const { deliverFilesToChat } = await import("../features/agent/composer-file-attachment-delivery");
 
 if (cloud) {
   const { installAccountPresentationIdentity } = await import("../state/account-presentation");
@@ -196,9 +197,14 @@ function Harness() {
           }}>{label}</Button>)}
           <Button onClick={() => setMount((value) => value + 1)}>Remount chat</Button>
           {params.has("focus-races") && <Input aria-label="Other editor" />}
+          {params.has("focus-races") && <Button onClick={() => {
+            const id = useWorkspaceStore.getState().activeChatId;
+            if (id) deliverFilesToChat(id, { id: "live-focus", files: [new File(["Live delivery"], "live-focus.txt", { type: "text/plain" })] });
+          }}>Deliver files</Button>}
         </nav>
         <div className="flex min-h-0 w-full max-w-3xl flex-1 flex-col">
           {chats.map((chat, index) => <div key={chat.id} data-chat-pane={names[index]}
+            data-pane-root={params.has("focus-races") ? "" : undefined}
             className={selected === index ? "flex min-h-0 flex-1 flex-col" : "hidden"}
             {...(selected === index ? {} : { inert: "" })}>
             <Chat key={mount} id={chat.id} active={selected === index} />

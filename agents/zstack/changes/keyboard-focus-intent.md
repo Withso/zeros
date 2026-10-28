@@ -29,3 +29,8 @@
 - Finish draft-to-ready and lane-label changes before the final push. Both
   can restart CI for the same head, cancelling the earlier run; follow the
   newest run instead of its cancelled predecessor's failed roll-ups.
+- Audit every delivery registry: files and synthesized text take separate
+  paths. A retained file queue is background work when it drains; append its
+  pills without focusing or replacing the parked selection. Simulator reads
+  and image rendering also capture input intent before I/O and revoke focus
+  after a newer interaction. Direct user actions retain their focus handoff.

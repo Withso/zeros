@@ -10,7 +10,10 @@ export interface ComposerFileDelivery {
 
 /** Returns false when the composer cannot accept files yet; the delivery then
  * stays queued for the next registration of the same chat. */
-export type ComposerFileStager = (delivery: ComposerFileDelivery) => boolean;
+export type ComposerFileStager = (
+  delivery: ComposerFileDelivery,
+  options: { focus: boolean },
+) => boolean;
 
 export type ComposerFileDeliveryOutcome = "staged" | "queued";
 
@@ -21,13 +24,15 @@ const MAX_PENDING_PER_CHAT = 8;
 
 /** Deliver to the mounted exact-chat composer, or retain a bounded keyed
  * intent until that chat's composer registers. Another chat's composer can
- * never drain it. */
+ * never drain it. Async producers revoke focus if newer input overtakes their
+ * read; retained deliveries always lose their original focus authority. */
 export function deliverFilesToChat(
   chatId: string,
   delivery: ComposerFileDelivery,
+  options?: { focus?: boolean },
 ): ComposerFileDeliveryOutcome {
   const stage = stagers.get(chatId);
-  if (stage?.(delivery)) return "staged";
+  if (stage?.(delivery, { focus: options?.focus !== false })) return "staged";
   let byId = pending.get(chatId);
   if (!byId) {
     byId = new Map();
@@ -56,7 +61,7 @@ export function registerLiveChatFileStager(
   const queued = pending.get(chatId);
   if (queued) {
     for (const [id, delivery] of queued) {
-      if (!stage(delivery)) break;
+      if (!stage(delivery, { focus: false })) break;
       queued.delete(id);
     }
     if (queued.size === 0) pending.delete(chatId);
