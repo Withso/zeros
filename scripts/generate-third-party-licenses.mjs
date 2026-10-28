@@ -59,6 +59,13 @@ const PACKAGED_PLATFORM_PACKAGES = [
     packageName: "@parcel/watcher-darwin-arm64",
     license: "MIT",
   },
+  {
+    // PDF.js includes the optional Node canvas runtime. Its native archive
+    // and wrapper share the MIT license; the release only ships this target.
+    parentName: "@napi-rs/canvas",
+    packageName: "@napi-rs/canvas-darwin-arm64",
+    license: "MIT",
+  },
 ];
 
 // A darwin-only optional package is installed, and therefore packed into the
@@ -284,6 +291,7 @@ const isHostPlatformRecord = (record) =>
   record.name.startsWith("@cursor/sdk-") ||
   record.name.startsWith("@vscode/ripgrep-") ||
   record.name.startsWith("@parcel/watcher-") ||
+  record.name.startsWith("@napi-rs/canvas-") ||
   CUA_NATIVE_VARIANT.test(record.name) ||
   (record.name === "@openai/codex" &&
     CODEX_PLATFORM_VERSION.test(record.version));
@@ -490,6 +498,13 @@ function stagedReleaseRecords() {
 const NESTED_LICENSE_DOCUMENTS = new Map([
   // Its simulator accessibility bridge adapts Meta's idb (MIT).
   ["agent-device", ["apple/snapshot-bridge/LICENSE.idb"]],
+  // PDF rendering ships these fallback fonts, CMaps and image decoders as
+  // local assets. Their separate notices must travel with the renderer.
+  ["pdfjs-dist", [
+    "cmaps/LICENSE", "standard_fonts/LICENSE_FOXIT", "standard_fonts/LICENSE_LIBERATION",
+    "wasm/LICENSE_JBIG2", "wasm/LICENSE_OPENJPEG", "wasm/LICENSE_QCMS",
+    "wasm/LICENSE_PDFJS_JBIG2", "wasm/LICENSE_PDFJS_OPENJPEG", "wasm/LICENSE_PDFJS_QCMS",
+  ]],
 ]);
 
 function packageDocuments(record) {

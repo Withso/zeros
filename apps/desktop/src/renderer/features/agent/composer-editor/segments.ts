@@ -37,4 +37,5 @@ export type ComposerSegment =
       name: string;
       mimeType: string;
       kind: "image" | "text" | "file";
+      group?: { id: string; name: string };
     };

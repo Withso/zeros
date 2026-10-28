@@ -49,6 +49,13 @@ import {
 } from "@/renderer/shared/ui/primitives/elements";
 import { Tooltip } from "@/renderer/shared/ui/primitives";
 import { trimTrailingSegments } from "./trim-trailing-segments";
+import { groupMessageSegments, type GroupedMessageSegment } from "../composer-editor/attachment-group";
+import { openFileGroup } from "@/renderer/shell/workbench/file-group-navigation";
+import { openFilePill, warmFilePill } from "@/renderer/shell/workbench/file-pill-navigation";
+import { useAttachmentPillFile } from "../attachment-pill-file";
+import { Button } from "@/renderer/shared/ui/primitives";
+import { FileTypeIcon } from "../composer-editor/file-type-icon";
+import { PILL_SHELL } from "../composer-editor/pill-views";
 import { MarkdownCodeBlock } from "./markdown-code-block";
 import { useAttachmentImageSource } from "../attachment-image-source";
 import { useStreamingText, useStreamingTextEdge } from "./use-streaming-text";
@@ -126,7 +133,7 @@ export const TextMessage: Renderer<AgentTextMessage> = memo(
     // Only the END is trimmed — interior + leading whitespace is kept verbatim.
     const displaySegments = useMemo(
       () =>
-        message.segments ? trimTrailingSegments(message.segments) : undefined,
+        message.segments ? groupMessageSegments(trimTrailingSegments(message.segments)) : undefined,
       [message.segments],
     );
 
@@ -297,12 +304,24 @@ function MessageSegmentView({
   attachmentCwd,
   attachmentImagesActive,
 }: {
-  seg: MessageContentSegment;
+  seg: GroupedMessageSegment;
   onPreviewImage?: (src: string) => void;
   attachmentCwd?: string | null;
   attachmentImagesActive?: boolean;
 }) {
   if (seg.type === "text") return <LocalLinkText text={seg.text} />;
+  if (seg.type === "attachment-group") {
+    const available = !!attachmentCwd && attachmentImagesActive !== false && seg.files.every(file => !!file.diskPath);
+    return <Tooltip label={`${seg.name} · ${seg.files.length} files`}><Button variant="ghost" data-attachment-pill="" data-attachment-group=""
+      className={`${PILL_SHELL} gap-2 px-1.5`} disabled={!available} aria-label={`Open ${seg.name}, ${seg.files.length} files`}
+      onClick={event => { event.stopPropagation(); if (available) openFileGroup(attachmentCwd, {
+        id: seg.id, name: seg.name, files: seg.files.map(file => ({ name: file.name, path: file.diskPath!, attachmentId: file.attachmentId })),
+      }); }}>
+      <FileTypeIcon name={seg.files[0].name} kind="file" size={13} />
+      <span className="max-w-[16rem] truncate">{seg.name}</span>
+      <span className="text-muted-fg text-xxs">+{seg.files.length - 1}</span>
+    </Button></Tooltip>;
+  }
   if (seg.type === "mention") {
     return (
       <MentionPillView label={seg.label} path={seg.path} kind={seg.kind} />
@@ -329,6 +348,7 @@ function MessageAttachmentPill({
   active?: boolean;
   onPreview?: (src: string) => void;
 }) {
+  const saved = useAttachmentPillFile({ cwd, diskPath: seg.diskPath, attachmentId: seg.attachmentId, enabled: active !== false });
   const source = useAttachmentImageSource({
     cwd,
     diskPath: seg.diskPath,
@@ -336,6 +356,13 @@ function MessageAttachmentPill({
     legacyUri: seg.thumbnailUri,
     enabled: active !== false && seg.kind === "image",
   });
+  if (saved.path && cwd) return <Tooltip label={seg.name}><Button variant="ghost" data-attachment-pill=""
+    disabled={active === false || saved.resolving} aria-label={`Open ${seg.name}`} className={`${PILL_SHELL} px-1.5`}
+    onPointerEnter={() => warmFilePill(cwd, saved.path!)} onFocus={() => warmFilePill(cwd, saved.path!)}
+    onClick={event => { event.stopPropagation(); openFilePill(cwd, saved.path!); }}>
+    {seg.kind === "image" && source ? <img src={source} alt="" loading="lazy" decoding="async" className="size-4 shrink-0 rounded-sm object-cover" />
+      : <FileTypeIcon name={seg.name} kind="file" size={13} />}<span className="max-w-[16rem] truncate">{seg.name}</span>
+  </Button></Tooltip>;
   return (
     <AttachmentPillView
       name={seg.name}

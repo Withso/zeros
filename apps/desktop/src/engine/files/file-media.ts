@@ -29,7 +29,9 @@ export function readWorkspaceMediaMetadata(cwd: string, relativePath: string, re
   try {
     if (info.size > MAX_FILE_MEDIA_BYTES) return { kind: "too-large" as const, path: relativePath, bytes: info.size };
     const type = fileMediaType(relativePath)!;
-    return { kind: type.kind, path: relativePath, bytes: info.size, media: { mimeType: type.mimeType, version: fileMediaVersion(info) } };
+    // Documents retain the existing binary wire kind. Older renderers show
+    // their safe fallback; new ones opt into a viewer using the MIME metadata.
+    return { kind: type.kind === "document" ? "binary" as const : type.kind, path: relativePath, bytes: info.size, media: { mimeType: type.mimeType, version: fileMediaVersion(info) } };
   } finally { fs.closeSync(fd); }
 }
 

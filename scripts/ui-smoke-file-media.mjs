@@ -1,4 +1,27 @@
 import { readFile } from "node:fs/promises";
+import { expect } from "@playwright/test";
+
+export async function runVideoSourceRefreshSmoke({ page, check }) {
+  const origin = new URL(page.url()).origin;
+  await page.goto(`${origin}/apps/desktop/src/renderer/harnesses/harness-file-media.html`);
+  for (const owner of ["personal", "organization", "cloud"]) {
+    await page.evaluate(owner => window.__zerosFileMediaHarness.render(owner, "refresh.webm"), owner);
+    await expect(page.getByRole("button", { name: "Copy current frame", exact: true })).toBeEnabled({ timeout: 15_000 });
+    const replacement = await page.evaluate(owner => {
+      const harness = window.__zerosFileMediaHarness;
+      const bytes = Uint8Array.from(atob(harness.videoSource().split(",")[1]), c => c.charCodeAt(0));
+      const url = URL.createObjectURL(new Blob([bytes], { type: "video/webm" }));
+      window.__originalVideoSource = harness.videoSource();
+      harness.video(url);
+      harness.prime(owner, "refresh.webm");
+      return url;
+    }, owner);
+    await expect.poll(() => page.locator("video").evaluate((video, url) => video.getAttribute("src") === url && video.readyState >= 2, replacement)).toBe(true);
+    await expect(page.getByRole("button", { name: "Play video", exact: true })).toBeEnabled();
+    await page.evaluate(() => window.__zerosFileMediaHarness.video(window.__originalVideoSource));
+    check(`${owner}: refreshing the same video source keeps its replacement decoder usable`, true);
+  }
+}
 
 export async function runFileMediaSmoke({ page, check, screenshots }) {
   const initialViewport = page.viewportSize();
@@ -342,7 +365,8 @@ export async function runFileMediaSmoke({ page, check, screenshots }) {
     frameSize[0] === 160 && frameSize[1] === 96,
   );
   const videoDownloadPending = page.waitForEvent("download");
-  await page.getByRole("link", { name: "Download video", exact: true }).click();
+  await button("Video actions").click();
+  await page.getByRole("menuitem", { name: "Download", exact: true }).click();
   const videoDownload = await videoDownloadPending;
   const videoBytes = await readFile(await videoDownload.path());
   const videoOriginal = await page.evaluate(() =>
@@ -355,13 +379,15 @@ export async function runFileMediaSmoke({ page, check, screenshots }) {
   );
   await videoDownload.delete();
   await render("cloud", "clip.webm");
+  await button("Video actions").click();
   check(
     "Cloud videos use the same viewer and original download",
     (await percentage.textContent()) === "100%" &&
       (await page
-        .getByRole("link", { name: "Download video", exact: true })
+        .getByRole("menuitem", { name: "Download", exact: true })
         .getAttribute("href")) === videoOriginal,
   );
+  await page.keyboard.press("Escape");
   check(
     "Only video files opt into the new bridge result kind",
     await page.evaluate(() => {
@@ -422,6 +448,7 @@ export async function runFileMediaSmoke({ page, check, screenshots }) {
   }
   if (initialViewport) await page.setViewportSize(initialViewport);
   await runPendingMediaUploadSmoke({ page, check });
+  await runVideoSourceRefreshSmoke({ page, check });
 }
 
 async function runPendingMediaUploadSmoke({ page, check }) {
@@ -429,9 +456,24 @@ async function runPendingMediaUploadSmoke({ page, check }) {
   const workspaces = ["/media-personal", "/media-organization", "cloud://11111111-1111-4111-8111-111111111111/22222222-2222-4222-8222-222222222222"];
   for (const cwd of workspaces) {
     const url = new URL(`${origin}/apps/desktop/src/renderer/harnesses/harness-composer-editor.html`);
-    url.searchParams.set("workspace", cwd); url.searchParams.set("hold-uploads", ""); url.searchParams.set("media-preview", "");
+    url.searchParams.set("workspace", cwd); url.searchParams.set("media-preview", "");
     await page.goto(url.href, { waitUntil: "networkidle" });
     await page.locator(".composer-pm").waitFor();
+    // Full runs reuse browser storage across scenarios. Keep a real existing
+    // tab so unrelated restoration reads cannot be mistaken for upload reads.
+    await page.evaluate(async () => {
+      await window.__composerHarness.insertFiles([new File(["Existing file tab"], "previous.txt", { type: "text/plain" })]);
+    });
+    await page.waitForFunction(() => !!window.__composerHarness.serialize().attachments[0].diskPath);
+    await page.getByRole("button", { name: "Open previous.txt", exact: true }).click();
+    await page.waitForFunction(() => localStorage.getItem("column3-tabs-by-scope-v1")?.includes("previous.txt"));
+    await page.evaluate(() => window.__composerAttachmentTransport.preserveForReload());
+    url.searchParams.set("hold-uploads", "");
+    await page.goto(url.href, { waitUntil: "networkidle" });
+    await page.locator(".composer-pm").waitFor();
+    await page.getByText("Existing file tab", { exact: true }).waitFor({ timeout: 5000 });
+    check(`${cwd}: an existing file tab restores independently of the new upload`, true);
+    const initialReadCount = await page.evaluate(() => window.__composerAttachmentTransport.reads().length);
     const source = await page.evaluate(async () => {
       const canvas = document.createElement("canvas"); canvas.width = 96; canvas.height = 64;
       const context = canvas.getContext("2d"); context.fillRect(0, 0, 96, 64);
@@ -446,7 +488,7 @@ async function runPendingMediaUploadSmoke({ page, check }) {
     await image.waitFor();
     await page.waitForFunction(() => document.querySelector("[data-file-media-preview] img")?.naturalWidth === 96);
     const objectUrl = await image.getAttribute("src");
-    check(`Uploading media opens immediately from a Blob in ${cwd}`, objectUrl.startsWith("blob:") && await page.evaluate(() => window.__composerAttachmentTransport.reads().length === 0));
+    check(`Uploading media opens immediately from a Blob in ${cwd}`, objectUrl.startsWith("blob:") && await page.evaluate(count => window.__composerAttachmentTransport.reads().length === count, initialReadCount));
     await page.getByRole("button", { name: "Zoom in", exact: true }).click();
     await page.evaluate(() => window.__setComposerActive(false));
     await page.waitForFunction(() => !document.querySelector("[data-file-media-preview] img"));
@@ -459,7 +501,7 @@ async function runPendingMediaUploadSmoke({ page, check }) {
       await page.evaluate(() => window.__composerAttachmentTransport.releaseNext("uploading.png"));
     }
     await page.waitForFunction(() => !!window.__composerHarness.serialize().attachments[0].diskPath);
-    check("Upload completion keeps the open preview intact without a second read", await image.getAttribute("src") === displayedUrl && await page.evaluate(() => window.__composerAttachmentTransport.reads().length === 0));
+    check("Upload completion keeps the open preview intact without a second read", await image.getAttribute("src") === displayedUrl && await page.evaluate(count => window.__composerAttachmentTransport.reads().length === count, initialReadCount));
     await page.waitForFunction(async id => {
       const open = indexedDB.open("zeros:attachment-sources:v1", 1);
       return await new Promise(resolve => {
@@ -470,14 +512,15 @@ async function runPendingMediaUploadSmoke({ page, check }) {
     check("The active composer releases its completed recovery snapshot", true);
     await page.evaluate(() => window.__setComposerActive(false));
     await page.waitForFunction(() => !document.querySelector("[data-file-media-preview] img"));
-    const retired = await page.evaluate(async ({ cwd, id }) => {
+    const retired = await page.evaluate(async ({ cwd, id, initialReadCount }) => {
       const { hasPendingFilePreview } = await import("/apps/desktop/src/renderer/platform/pending-file-preview.ts");
-      return !hasPendingFilePreview(cwd, `.context/attachments/${id}/uploading.png`) && window.__composerAttachmentTransport.reads().length === 0;
-    }, { cwd, id: source.id });
+      return !hasPendingFilePreview(cwd, `.context/attachments/${id}/uploading.png`) && window.__composerAttachmentTransport.reads().length === initialReadCount;
+    }, { cwd, id: source.id, initialReadCount });
     check("Closing a completed preview drops its final local Blob lease without a hidden remote read", retired);
 
     // Native file pickers can report text/plain for SVG. Preview MIME follows
     // the same filename policy as the saved workspace reader, before upload.
+    await page.evaluate(() => window.__composerAttachmentTransport.preserveForReload());
     await page.goto(url.href, { waitUntil: "networkidle" });
     await page.evaluate(async () => {
       const svg = '<svg xmlns="http://www.w3.org/2000/svg" width="180" height="120"><rect width="180" height="120" fill="teal"/></svg>';

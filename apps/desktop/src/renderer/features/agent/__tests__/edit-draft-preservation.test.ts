@@ -35,6 +35,20 @@ const original = () =>
     })),
   });
 
+const grouped = () =>
+  messageToEditorContent({
+    text: "inspect ",
+    segments: ["first", "second", "third"].map((id) => ({
+      type: "attachment" as const,
+      name: `${id}.pdf`,
+      mimeType: "application/pdf",
+      kind: "file" as const,
+      attachmentId: id,
+      delivery: "reference" as const,
+      group: { id: "reports", name: "Reports" },
+    })),
+  });
+
 function pristine(
   initial: ReturnType<typeof original>,
   edited: ReturnType<typeof original>,
@@ -98,5 +112,21 @@ describe("sent-message edit draft preservation", () => {
   });
   it("recognizes an unchanged message reconstructed with fresh editor node ids", () => {
     expect(pristine(original(), original())).toBe(true);
+  });
+  it("retains a replacement of a non-primary group member", () => {
+    const initial = grouped(),
+      edited = structuredClone(initial);
+    edited.attachments[1]!.contextAttachmentId = "replacement";
+    expect(pristine(initial, edited)).toBe(false);
+  });
+  it("retains reordered members within an otherwise unchanged group", () => {
+    const initial = grouped(),
+      edited = structuredClone(initial);
+    const ids = (edited.json as any).content[0].content[0].attrs.attachmentIds;
+    [ids[1], ids[2]] = [ids[2], ids[1]];
+    expect(pristine(initial, edited)).toBe(false);
+  });
+  it("recognizes every durable group member after editor ids are regenerated", () => {
+    expect(pristine(grouped(), grouped())).toBe(true);
   });
 });

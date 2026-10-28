@@ -34,6 +34,7 @@ const content = z.discriminatedUnion("type", [
 const attachment = z.object({ name: z.string().max(1024), mimeType: z.string().max(128), kind: z.enum(["image", "text", "file"]),
   delivery: z.literal("reference").optional(), size: z.number().nonnegative().optional(), thumbnailUri: text.optional(),
   diskPath: z.string().max(2048).optional(), attachmentId: z.string().max(256).optional() }).strict();
+const attachmentGroup = z.object({ id: z.string().min(1).max(160), name: z.string().min(1).max(512) }).strict().optional();
 export const CloudV2PromptSchema = z.object({
   chatId: CloudV2PromptIdSchema, userMessageId: CloudV2PromptIdSchema,
   agentId: z.enum(["codex", "claude", "cursor"]), model: z.string().max(256).optional(), effort: z.string().max(64).optional(),
@@ -43,7 +44,7 @@ export const CloudV2PromptSchema = z.object({
     attachments: z.array(attachment).max(100).optional(), segments: z.array(z.discriminatedUnion("type", [
       z.object({ type: z.literal("text"), text }).strict(),
       z.object({ type: z.literal("mention"), label: z.string().max(1024), path: z.string().max(2048), kind: z.enum(["file", "folder", "selection"]) }).strict(),
-      attachment.extend({ type: z.literal("attachment") }).strict(),
+      attachment.extend({ type: z.literal("attachment"), group: attachmentGroup }).strict(),
     ])).max(512).optional(),
   }).strict().optional(),
 }).strict();

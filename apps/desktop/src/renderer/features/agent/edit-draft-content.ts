@@ -1,4 +1,5 @@
 import type { ComposerAttachment } from "./composer-attachments";
+import { attachmentNodeIds } from "./composer-editor/attachment-group";
 
 type DraftContent = { json?: object | null; attachments: ComposerAttachment[] };
 
@@ -18,16 +19,20 @@ export function isPristineEditDraft(
       const node = value as Record<string, unknown>;
       if (node.type === "attachment") {
         const attrs = (node.attrs ?? {}) as Record<string, unknown>;
-        const attachment = attachments.get(String(attrs.attachmentId));
-        const graphId = attachment?.diskPath?.match(
-          /^\.context(?:-graph)?\/(?:local|shared)\/attachments\/([^/]+)\//,
-        )?.[1];
         return [
           "attachment",
-          attachment?.contextAttachmentId ??
-            graphId ??
-            attachment?.diskPath ??
-            attrs.attachmentId,
+          attachmentNodeIds(attrs).map((id) => {
+            const attachment = attachments.get(id);
+            const graphId = attachment?.diskPath?.match(
+              /^\.context(?:-graph)?\/(?:local|shared)\/attachments\/([^/]+)\//,
+            )?.[1];
+            return (
+              attachment?.contextAttachmentId ??
+              graphId ??
+              attachment?.diskPath ??
+              id
+            );
+          }),
           attrs.name,
           attrs.mimeType,
           attrs.kind,

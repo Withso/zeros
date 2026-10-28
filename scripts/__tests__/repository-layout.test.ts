@@ -506,6 +506,7 @@ describe("repository layout contracts", () => {
       `@anthropic-ai/claude-agent-sdk-darwin-arm64@${dependencies["@anthropic-ai/claude-agent-sdk"]}`,
       `@cursor/sdk-darwin-arm64@${dependencies["@cursor/sdk"]}`,
       "@vscode/ripgrep-darwin-arm64@1.18.0",
+      "@napi-rs/canvas-darwin-arm64@1.0.13",
       // The staged Codex runtime is redistributed inside Contents/Resources,
       // so its platform package must carry terms — not just the JS wrapper.
       // npm publishes it as an alias, hence the platform-suffixed version.
@@ -519,7 +520,7 @@ describe("repository layout contracts", () => {
     }
 
     expect(licenses).not.toMatch(
-      /@(?:anthropic-ai\/claude-agent-sdk|cursor\/sdk|vscode\/ripgrep)-linux-/,
+      /@(?:anthropic-ai\/claude-agent-sdk|cursor\/sdk|vscode\/ripgrep|napi-rs\/canvas)-linux-/,
     );
     // pyright's darwin-only file watcher is installed, and therefore packed,
     // only on a macOS host. Every host must record it from the reviewed copy,

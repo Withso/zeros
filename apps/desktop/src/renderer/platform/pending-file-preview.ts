@@ -79,6 +79,8 @@ export function usePendingFilePreview(cwd: string | undefined, path: string, act
     return () => { value.release(); setLease(current => current?.value === value ? null : current); };
   }, [visible, cwd, path, key, entry]);
   if (!entry) return null;
-  return { kind: entry.bytes > MAX_FILE_MEDIA_BYTES ? "too-large" : fileMediaType(path)!.kind, path, bytes: entry.bytes,
+  const type = fileMediaType(path)!;
+  return { kind: entry.bytes > MAX_FILE_MEDIA_BYTES ? "too-large" : type.kind === "document" ? "binary" : type.kind, path, bytes: entry.bytes,
+    ...(type.kind === "document" && lease?.key === key ? { blob: lease.value.blob } : {}),
     dataUrl: lease?.key === key ? lease.value.url : undefined };
 }

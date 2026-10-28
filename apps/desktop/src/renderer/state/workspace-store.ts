@@ -2116,6 +2116,9 @@ function reducer(state: WorkspaceState, action: Action): WorkspaceState {
       if (target.skillSource && Object.prototype.hasOwnProperty.call(action.updates, "filePath") &&
         action.updates.filePath !== target.filePath && !Object.prototype.hasOwnProperty.call(action.updates, "skillSource"))
         updatedTarget.skillSource = undefined;
+      if (target.fileGroup && Object.prototype.hasOwnProperty.call(action.updates, "filePath") &&
+        !Object.prototype.hasOwnProperty.call(action.updates, "fileGroup"))
+        updatedTarget.fileGroup = undefined;
       if (
         (target.type === "files" || target.type === "changes") &&
         Object.prototype.hasOwnProperty.call(action.updates, "filePath") &&

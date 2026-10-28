@@ -52,10 +52,10 @@ function waitFor(
   });
 }
 
-function release(video: HTMLVideoElement, url: string): void {
+function release(video: HTMLVideoElement, url: string, owned = true): void {
   video.removeAttribute("src");
   video.load();
-  URL.revokeObjectURL(url);
+  if (owned) URL.revokeObjectURL(url);
 }
 
 class VideoReader {
@@ -67,18 +67,21 @@ class VideoReader {
     private readonly signal: AbortSignal | undefined,
     /** Null when the video doesn't say how long it runs. */
     readonly durationMs: number | null,
+    private readonly ownsUrl: boolean,
   ) {}
 
-  static async open(blob: Blob, signal: AbortSignal | undefined): Promise<VideoReader | null> {
+  static async open(source: Blob | string, signal: AbortSignal | undefined): Promise<VideoReader | null> {
     const video = document.createElement("video");
     video.muted = true;
     video.playsInline = true;
     video.preload = "auto";
-    const url = URL.createObjectURL(blob);
+    video.crossOrigin = "anonymous";
+    const ownsUrl = typeof source !== "string";
+    const url = typeof source === "string" ? source : URL.createObjectURL(source);
     const loaded = waitFor(video, "loadeddata", OPEN_TIMEOUT_MS, signal);
     video.src = url;
     if (!(await loaded) || !video.videoWidth || !video.videoHeight) {
-      release(video, url);
+      release(video, url, ownsUrl);
       return null;
     }
     // A recording written as it streams, such as a browser's WebM, leaves
@@ -94,6 +97,7 @@ class VideoReader {
       url,
       signal,
       Number.isFinite(seconds) && seconds > 0 ? seconds * 1000 : null,
+      ownsUrl,
     );
     if (!(await reader.seek(0))) {
       reader.close();
@@ -144,7 +148,7 @@ class VideoReader {
   }
 
   close(): void {
-    release(this.video, this.url);
+    release(this.video, this.url, this.ownsUrl);
   }
 }
 
@@ -159,10 +163,10 @@ async function recordingTimeline(video: Blob): Promise<SimulatorRecordingTimelin
 
 async function readVideoContext(
   name: string,
-  video: Blob,
+  video: Blob | string,
   signal: AbortSignal | undefined,
 ): Promise<File[]> {
-  const timeline = await recordingTimeline(video);
+  const timeline = typeof video === "string" ? null : await recordingTimeline(video);
   if (signal?.aborted) return [];
   const reader = await VideoReader.open(video, signal);
   const frames: Array<{ file: File; moment: KeyFrameMoment }> = [];
@@ -215,11 +219,11 @@ let reading: Promise<unknown> = Promise.resolve();
 /** The key frames and timeline text a dropped video adds beside itself;
  * none when Zeros can read neither, or `signal` aborts first. */
 export function videoContextFiles(
-  video: { name: string; blob: Blob },
+  video: { name: string; blob: Blob } | { name: string; url: string },
   signal?: AbortSignal,
 ): Promise<File[]> {
   const read = reading.then(() =>
-    signal?.aborted ? [] : readVideoContext(video.name, video.blob, signal),
+    signal?.aborted ? [] : readVideoContext(video.name, "blob" in video ? video.blob : video.url, signal),
   );
   reading = read.catch(() => undefined);
   return read.catch(() => []);

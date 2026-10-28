@@ -25,6 +25,7 @@ export interface ComposerEditorContextValue {
   /** Create has no workspace in which to open repository or skill sources. */
   sourceFilesOpen?: boolean;
   onOpenAttachment?: (attachment: ComposerAttachment) => void;
+  attachVideoFrames?: (id: string) => Promise<void> | undefined;
   agentId?: string | null;
   skills?: readonly Skill[];
 }

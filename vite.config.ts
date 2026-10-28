@@ -64,13 +64,13 @@ export function buildElectronRendererCsp(controlPlaneOrigin: string): string {
     // via <meta> (header-only), and the Electron window is never framed anyway.
     "script-src 'self' 'wasm-unsafe-eval'",
     "style-src 'self' 'unsafe-inline'",
-    "img-src 'self' data: blob: https:",
+    "img-src 'self' data: blob: https: zeros-media:",
     "font-src 'self' data:",
     `connect-src ${connectSrc}`,
     "frame-src https: http: blob: data: zeros-design:",
     "worker-src 'self' blob:",
     "child-src 'self' blob:",
-    "media-src 'self' blob: data:",
+    "media-src 'self' blob: data: zeros-media:",
   ].join("; ");
 }
 

@@ -215,6 +215,9 @@ export type MessageContentSegment =
       name: string;
       mimeType: string;
       kind: "image" | "text" | "file";
+      /** Optional presentation group. Every member remains an independent
+       * attachment, readable by clients that do not understand grouping. */
+      group?: { id: string; name: string };
       delivery?: "reference";
       size?: number;
       /** Legacy data URL for images persisted by older clients. */

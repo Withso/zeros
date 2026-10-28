@@ -51,6 +51,21 @@ regression test covers that dependency change.
 
 ## Generated and vendored code
 
+### File document previews
+
+- **PDF:** [`pdfjs-dist` 6.4.299](https://github.com/mozilla/pdf.js), Apache-2.0,
+  including its worker and viewer stylesheet. CMaps, fallback fonts and image
+  decoders are bundled locally; previews do not use an external document service.
+  The unmodified assets carry Adobe, PDFium/Foxit, Liberation, OpenJPEG, JBIG2
+  and QCMS terms. All accompanying notices are included in
+  `THIRD-PARTY-LICENSES.txt`, including Liberation's GPL-2.0 font exceptions.
+  Corresponding font sources and provenance are maintained in the upstream
+  [standard fonts directory](https://github.com/mozilla/pdf.js/tree/v6.4.299/external/standard_fonts).
+- **Word:** [`docx-preview` 0.4.1](https://github.com/VolodymyrBaydalka/docxjs),
+  Apache-2.0. Its JSZip dependency is used under the MIT option. Rendered
+  document content is sanitized with the existing DOMPurify dependency and
+  shown in a scriptless, isolated frame.
+
 ### Cloud language servers
 
 - **Components:** `typescript-language-server` 5.1.3 (Apache-2.0), the locked

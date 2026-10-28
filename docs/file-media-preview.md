@@ -1,4 +1,4 @@
-# Files image and video previews
+# Files media and document previews
 
 The Files viewer shows a bottom-left zoom control for images and videos. It
 opens at 100% of the contained preview size, never enlarging a small source
@@ -6,7 +6,8 @@ automatically. Zoom is limited to 25–500%. Reset restores 100% and centers the
 media. Drag pans; wheel and trackpad pinch zoom around the pointer. With the
 preview focused, `+`/`-` zoom, arrow keys pan and `0` resets.
 
-Copy and Download appear beside the file title. Download preserves the original
+Copy appears beside the file title. Images have a Download action there; videos
+put Download and Attach as frames in their overflow menu. Download preserves the original
 bytes and filename. Copy writes the original image dimensions as PNG, or the
 current video frame; the viewport's zoom and translation do not crop the copy.
 Streamed/selected images and video frames use a temporary canvas only on explicit
@@ -18,6 +19,41 @@ Hiding the tab or document releases the decoder and buffered video, retaining
 the camera, playback position and mute state without autoplay on return. Unsupported
 codecs keep Download available and show a neutral preview-unavailable state.
 An unvisited hidden preview does not create a decoder or open a media stream.
+
+## PDF and Word
+
+Attached and agent-generated PDF and Word `.docx` files open as document pages.
+PDF supports thumbnails, page selection, Fit, zoom, rotation, selectable text,
+password entry and original download. Word supports page selection, Fit, zoom,
+formatted text, tables, embedded images and original download. Word pagination
+uses section breaks and saved page breaks; its rendering can differ from Word,
+especially for documents without saved pagination. The original remains intact.
+Other document formats retain their existing fallback.
+
+Page navigation and zoom share a floating bottom island in both viewers. The
+percentage shows the rendered scale; clicking it fits the page again. PDF
+thumbnails and rotation remain in the file title actions beside Download.
+The page viewport reserves space for the island, including in narrow panes,
+so Fit and the end of a zoomed page stay readable. Hidden views remove the
+island along with their rendering resources.
+
+PDF.js runs in a local worker with packaged fonts, CMaps and image decoders.
+It reads exact-workspace ranges, caps each coalesced allocation at 32 MiB, and
+renders only the selected page and a virtualized thumbnail window. Hidden views
+destroy the worker and canvases while keeping page, rotation and zoom selection.
+
+Word previews read at most 50 MB in bounded chunks. ZIP headers, local entry
+offsets, compression methods and actual expanded lengths are checked before
+parsing, with limits of 2,000 entries, 32 MB per entry and 64 MB total expansion.
+Rendering occurs in a detached document. DOMPurify sanitizes the result before
+it enters a scriptless, opaque-origin iframe whose CSP blocks network resources
+and active content. External hyperlinks are inert. Previews use no external
+document service, and hidden Word views release their rendered pages.
+
+Documents use the existing `binary` wire kind with optional MIME/revision
+metadata. Updated Local and cloud readers support document ranges. Older
+runtimes show a neutral runtime-update fallback instead of exposing PDF source.
+Downloads preserve original bytes, including when a document cannot be previewed.
 
 ## Ownership and resource limits
 
@@ -112,3 +148,9 @@ worker requires Linux descriptor paths. The report records `cloudFileReader`.
 Run on macOS and under `xvfb-run -a` on Linux to qualify both implementations;
 this harness does not establish live Boat or physical Mac CPU, memory or GPU
 performance.
+Pass `--packaged` to build the harness with the production Vite CSP and load it
+over `file://`. This also checks PDF/Word pages and exact document downloads.
+The renderer meta policy and the Electron response policy must both allow
+`zeros-media:` in `img-src` and `media-src`; allowing it in only one still blocks
+playback. Protocol fetch probes run in Electron main without broadening the
+renderer's `connect-src`.

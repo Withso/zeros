@@ -14,7 +14,7 @@
 
 import fs from "node:fs";
 import path from "node:path";
-import type { FileMediaDescriptor } from "@zeros/protocol/file-media";
+import { fileMediaType, type FileMediaDescriptor } from "@zeros/protocol/file-media";
 import { readWorkspaceMediaMetadata } from "./file-media";
 import { openBoundedFileSync, readBoundedBufferDescriptorSync } from "./bounded-read-sync";
 
@@ -189,12 +189,13 @@ export function readWorkspaceFile(
   const ext = path.extname(target).toLowerCase();
   const imageMime = IMAGE_MIME[ext];
   const videoMime = opts?.includeVideo === true ? VIDEO_MIME[ext] : undefined;
+  const document = fileMediaType(rel)?.kind === "document";
 
   let fd: number;
   let size: number;
   try {
     const realRoot = opts?.canonicalRoot ?? fs.realpathSync(root);
-    if (opts?.streamMedia && (imageMime || videoMime)) {
+    if (opts?.streamMedia && (imageMime || videoMime || document)) {
       return readWorkspaceMediaMetadata(cwd, rel, remote, realRoot);
     }
     const realTarget = fs.realpathSync(target);
@@ -213,6 +214,7 @@ export function readWorkspaceFile(
   }
 
   try {
+    if (document) return { kind: "binary", path: rel, bytes: size };
     if (imageMime || videoMime) {
       if (size > MAX_IMAGE_BYTES)
         return { kind: "too-large", path: rel, bytes: size };

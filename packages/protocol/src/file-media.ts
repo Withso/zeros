@@ -14,14 +14,19 @@ const VIDEO_TYPES: Record<string, string> = {
   mp4: "video/mp4", m4v: "video/mp4", webm: "video/webm", mov: "video/quicktime",
   ogv: "video/ogg", mkv: "video/x-matroska",
 };
-export function fileMediaType(path: string): { kind: "image" | "video"; mimeType: string } | null {
+const DOCUMENT_TYPES: Record<string, string> = {
+  pdf: "application/pdf",
+  docx: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+};
+export function fileMediaType(path: string): { kind: "image" | "video" | "document"; mimeType: string } | null {
   const ext = /\.([^./\\]+)$/.exec(path)?.[1].toLowerCase() ?? "";
   if (Object.hasOwn(IMAGE_TYPES, ext)) return { kind: "image", mimeType: IMAGE_TYPES[ext] };
   if (Object.hasOwn(VIDEO_TYPES, ext)) return { kind: "video", mimeType: VIDEO_TYPES[ext] };
+  if (Object.hasOwn(DOCUMENT_TYPES, ext)) return { kind: "document", mimeType: DOCUMENT_TYPES[ext] };
   return null;
 }
 export const fileMediaDescriptorSchema = z.object({
-  mimeType: z.string().refine(value => [...Object.values(IMAGE_TYPES), ...Object.values(VIDEO_TYPES)].includes(value)),
+  mimeType: z.string().refine(value => [...Object.values(IMAGE_TYPES), ...Object.values(VIDEO_TYPES), ...Object.values(DOCUMENT_TYPES)].includes(value)),
   version: z.string().min(1).max(192).regex(/^[0-9.:-]+$/),
 });
 export type FileMediaDescriptor = z.infer<typeof fileMediaDescriptorSchema>;

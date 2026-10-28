@@ -137,6 +137,7 @@ export function buildFilePillOpenAction(
     literalPath: true,
   });
   const intent = {
+    fileGroup: undefined,
     diff: destination === "changes",
     diffScope: "all" as const,
     diffSha: undefined,

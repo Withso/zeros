@@ -116,3 +116,23 @@ it("keeps durable HTTP prompt bounds and strict schemas identical across Zod ver
     expect(schemas.CloudV2PromptOutcomeSchema.safeParse({ userMessageId: CLIENT_A, deliveryId: CLIENT_A, state: "accepted" }).success).toBe(false);
   }
 });
+
+it("preserves optional attachment groups through both durable prompt contracts without weakening bounds", () => {
+  const segment = { type: "attachment", name: "frame.jpg", mimeType: "image/jpeg", kind: "image",
+    delivery: "reference", diskPath: ".context/local/attachments/att-1/frame.jpg", attachmentId: "att-1" };
+  const payload = { chatId: "chat", userMessageId: CLIENT_A, agentId: "codex",
+    prompt: [{ type: "text", text: "Review the frames" }], startedAt: 1 };
+  for (const schemas of [sharedPrompts, controlPrompts]) {
+    // Older clients still submit the same individual attachment segments.
+    const legacy = { ...payload, bubble: { segments: [segment] } };
+    expect(schemas.CloudV2PromptSchema.parse(legacy)).toEqual(legacy);
+    for (const group of [{ id: "group-frames", name: "Video frames" }, { id: "g".repeat(160), name: "n".repeat(512) }]) {
+      const grouped = { ...payload, bubble: { segments: [{ ...segment, group }] } };
+      expect(schemas.CloudV2PromptSchema.safeParse(grouped).success).toBe(true);
+      expect(schemas.CloudV2PromptSchema.parse(grouped)).toEqual(grouped);
+    }
+    for (const group of [null, {}, { id: "", name: "frames" }, { id: "g".repeat(161), name: "frames" },
+      { id: "g", name: "" }, { id: "g", name: "n".repeat(513) }, { id: "g", name: "frames", unrelated: true }])
+      expect(schemas.CloudV2PromptSchema.safeParse({ ...payload, bubble: { segments: [{ ...segment, group }] } }).success).toBe(false);
+  }
+});

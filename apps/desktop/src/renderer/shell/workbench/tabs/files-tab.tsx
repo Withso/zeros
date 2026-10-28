@@ -49,6 +49,7 @@ import { useFilesSidebarFraction } from "./files-sidebar-width";
 import { useSidebarResizeDrag } from "./use-sidebar-drag";
 import { useResizeHint } from "../../use-resize-hint";
 import { FileViewer } from "./file-viewer";
+import { FileGroupViewer } from "./file-group-viewer";
 import { resolveFilesTabLayout } from "./files-tab-layout";
 import { WorkspaceFileTree } from "./workspace-file-tree";
 import { DesignFilesPane, useHasDesignSection } from "./design-files-pane";
@@ -419,7 +420,9 @@ const WorkspaceFilesTab = React.memo(function WorkspaceFilesTab({
       data-testid="files-tab"
       className="bg-bg1 relative flex h-full min-h-0 overflow-hidden"
     >
-      {layout.viewerVisible ? (
+      {tab.fileGroup ? <FileGroupViewer group={tab.fileGroup} path={filePath} cwd={cwd} active={active} tabId={tab.id} refreshKey={gitRefresh}
+        onSelect={path => dispatch({ type: "UPDATE_WORKBENCH_TAB", id: tab.id, scope,
+          updates: { filePath: path, fileGroup: tab.fileGroup, title: tab.fileGroup?.name } })} /> : layout.viewerVisible ? (
         <div
           data-testid="files-viewer-pane"
           className="h-full min-h-0 min-w-0 flex-1 overflow-hidden"

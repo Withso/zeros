@@ -31,6 +31,7 @@ const pending: { key: string; finish: () => void }[] = [];
 const held = new Set<string>();
 const nativeMedia = new URLSearchParams(location.search).has("native-media");
 const images = new Map<string, string>();
+const documents = new Map<string, Uint8Array>();
 function image(owner: string) {
   let source = images.get(owner);
   if (source) return source;
@@ -86,7 +87,11 @@ let videoSource = FILE_MEDIA_VIDEO;
 let revision = 0,
   commits = 0;
 const fixtureResult = (cwd: string, path: string): ReadFileResult =>
-  path.endsWith(".webm")
+  documents.has(path)
+    ? { kind: "binary", path, bytes: documents.get(path)!.length, media: {
+        version: `1:${revision}:0`, mimeType: path.endsWith(".pdf") ? "application/pdf" : "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+      } }
+    : path.endsWith(".webm")
     ? { kind: "video", path, bytes: 1000, dataUrl: videoSource }
     : path.endsWith(".txt")
       ? { kind: "text", path, bytes: 4, content: "text" }
@@ -129,6 +134,9 @@ setActiveBridge({
         await new Promise<void>((resolve) =>
           pending.push({ key, finish: resolve }),
         );
+    } else if (op === "file.readRange") {
+      const bytes = documents.get(String(params.path))!.slice(Number(params.offset), Number(params.offset) + Number(params.length));
+      result = { bytes: bytes.length, base64: btoa(Array.from(bytes, byte => String.fromCharCode(byte)).join("")) };
     } else if (op === "workspace.list") result = [];
     return { type: "WORKSPACE_RESPONSE", result };
   },
@@ -137,6 +145,7 @@ const root = createRoot(document.getElementById("root")!);
 const harness = {
   owners,
   requests,
+  document(path: string, bytes: number[]) { documents.set(path, new Uint8Array(bytes)); },
   get commits() {
     return commits;
   },

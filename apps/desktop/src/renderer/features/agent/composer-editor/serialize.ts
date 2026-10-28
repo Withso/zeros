@@ -18,6 +18,7 @@ import type { MessageContentSegment } from "@zeros/protocol/agent-messages";
 import type { ComposerSegment } from "./segments";
 import type { ComposerAttachment } from "../composer-attachments";
 import { unavailableAttachment } from "./clipboard";
+import { attachmentNodeIds, validAttachmentGroup } from "./attachment-group";
 
 export interface ComposerSerialized {
   /** No text, no mentions, no attachments → nothing to send. */
@@ -63,6 +64,7 @@ export function toMessageSegments(
       name: s.name,
       mimeType: s.mimeType,
       kind: s.kind,
+      ...(s.group ? { group: s.group } : {}),
       ...(bubbleAttachment?.delivery ? { delivery: bubbleAttachment.delivery, size: bubbleAttachment.size } : {}),
       ...(bubbleAttachment?.diskPath
         ? { diskPath: bubbleAttachment.diskPath }
@@ -152,16 +154,16 @@ export function serializeComposer(
       return false;
     }
     if (name === "attachment") {
-      const id = node.attrs.attachmentId as string;
-      segments.push({
-        type: "attachment",
-        attachmentId: id,
-        name: (node.attrs.name as string) || "",
-        mimeType: (node.attrs.mimeType as string) || "",
-        kind: (node.attrs.kind as "image" | "text" | "file") || "image",
-      });
-      const att = getAttachment(id);
-      attachments.push(att ?? unavailableAttachment(node.attrs));
+      const ids = attachmentNodeIds(node.attrs);
+      const group = { id: node.attrs.groupId, name: node.attrs.name };
+      for (const id of ids) {
+        const att = getAttachment(id) ?? unavailableAttachment({ ...node.attrs, attachmentId: id });
+        segments.push({ type: "attachment", attachmentId: id, name: att.name,
+          mimeType: att.mimeType, kind: att.kind,
+          ...(ids.length > 1 && validAttachmentGroup(group) ? { group } : {}),
+        });
+        attachments.push(att);
+      }
       return false;
     }
     if (name === "paragraph") {

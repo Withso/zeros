@@ -4,7 +4,7 @@ import "../../../../../styles/zeros-tokens.css";
 import "../../../../../styles/semantic-tokens.css";
 import "../../../../../styles/globals.css";
 
-import { lazy, Suspense, useLayoutEffect, useState } from "react";
+import { lazy, Suspense, useEffect, useLayoutEffect, useState } from "react";
 import { createRoot } from "react-dom/client";
 import {
   useComposerEditor,
@@ -19,6 +19,11 @@ import { useWorkspaceStore } from "../state/store";
 import { parseCloudWorkspaceKey } from "../platform/bridge/cloud-workspace-key";
 import { acceptCloudWorkspaceDocument } from "../state/cloud-workspace-catalog";
 import { fileMediaType } from "@zeros/protocol/file-media";
+import { registerLiveChatFileStager } from "../features/agent/composer-file-attachment-delivery";
+import { bornChatThread } from "../state/spawn-default-chat";
+import { toMessageSegments } from "../features/agent/composer-editor/serialize";
+import type { AgentTextMessage } from "../features/agent/use-agent-session";
+import type { RendererContext } from "../features/agent/renderers/types";
 
 const query = new URLSearchParams(location.search);
 const cwd = query.get("workspace") ?? "/composer-editor-harness";
@@ -35,6 +40,10 @@ const sourceCatalog = () => [
   { id: "library-review", name: "Library Review", description: "Review from the provider library", icon: "FileText", body: "Library review.", path: "/home/fixture/.claude/skills/library-review/SKILL.md", content: "# Library source\n\nLibrary review." },
 ];
 const SourceViewer = lazy(() => import("../shell/workbench/tabs/file-viewer").then(module => ({ default: module.FileViewer })));
+const GroupViewer = lazy(() => import("../shell/workbench/tabs/file-group-viewer").then(module => ({ default: module.FileGroupViewer })));
+const SentMessage = lazy(() => import("../features/agent/renderers/text-message").then(module => ({ default: module.TextMessage })));
+const fixtureChat = bornChatThread(null, cwd);
+if (mediaFixture) useWorkspaceStore.getState().dispatch({ type: "ADD_CHAT", chat: fixtureChat });
 if (suggestionsFixture) {
   window.__ZEROS_NATIVE__ = {
     on: () => () => {},
@@ -85,11 +94,18 @@ const pendingWrites: Array<{
   filename: string;
   finish: (error?: string) => void;
 }> = [];
+const fixtureFilesKey = "zeros:composer-fixture-files";
+const snapshotFiles = () => [...records].map(([id, file]) => ({ id, ...file, bytes: Array.from(file.bytes) }));
 
 window.__composerAttachmentTransport = {
   read: readFixtureFile,
   reads: () => mediaReads,
   pending: () => pendingWrites.map(({ filename }) => filename),
+  snapshot: snapshotFiles,
+  preserveForReload: () => sessionStorage.setItem(fixtureFilesKey, JSON.stringify({ cwd, files: snapshotFiles() })),
+  restore: files => {
+    for (const { id, ...file } of files) records.set(id, { ...file, bytes: new Uint8Array(file.bytes) });
+  },
   releaseNext: (filename, error) => {
     const index = pendingWrites.findIndex((write) => write.filename === filename);
     if (index < 0) throw new Error(`No pending write for ${filename}`);
@@ -97,13 +113,23 @@ window.__composerAttachmentTransport = {
   },
 };
 
+// Simulate the workspace filesystem before restored tabs issue their first
+// read. The explicit snapshot is consumed once and belongs to this exact cwd.
+const preservedFiles = sessionStorage.getItem(fixtureFilesKey);
+sessionStorage.removeItem(fixtureFilesKey);
+if (preservedFiles) {
+  const saved = JSON.parse(preservedFiles) as { cwd: string; files: ReturnType<typeof snapshotFiles> };
+  if (saved.cwd === cwd) window.__composerAttachmentTransport.restore(saved.files);
+}
+
 function readFixtureFile(path: string) {
   const record = [...records.values()].find(value => value.relativePath === path);
   const media = fileMediaType(path);
   return record ? {
     path, bytes: record.bytes.length,
     ...(media
-      ? { kind: media.kind, dataUrl: `data:${media.mimeType};base64,${btoa(Array.from(record.bytes, byte => String.fromCharCode(byte)).join(""))}` }
+      ? media.kind === "document" ? { kind: "binary", media: { version: "1:0:0", mimeType: media.mimeType } }
+      : { kind: media.kind, dataUrl: `data:${media.mimeType};base64,${btoa(Array.from(record.bytes, byte => String.fromCharCode(byte)).join(""))}` }
       : { kind: "text", content: new TextDecoder().decode(record.bytes) }),
   } : path === "skills/review-agent/SKILL.md"
     ? { kind: "text", path, bytes: sourceContent.length, content: sourceContent }
@@ -184,6 +210,11 @@ setActiveBridge({
       };
     }
     if (message.op === "file.read") { mediaReads.push(String(p.path)); result = readFixtureFile(String(p.path)); }
+    if (message.op === "file.readRange") {
+      const record = [...records.values()].find(value => value.relativePath === p.path)!;
+      const bytes = record.bytes.slice(Number(p.offset), Number(p.offset) + Number(p.length));
+      result = { bytes: bytes.length, base64: btoa(Array.from(bytes, byte => String.fromCharCode(byte)).join("")) };
+    }
     return { type: "WORKSPACE_RESPONSE", result };
   },
   onStatusChange: () => () => {},
@@ -196,12 +227,16 @@ declare global {
     __composerWorkbench: () => ReturnType<typeof useWorkspaceStore.getState>["workbenchByScope"];
     __setComposerActive: (active: boolean) => void;
     __setComposerAgent: (agentId: "claude" | "codex" | "cursor") => void;
+    __showComposerMessage: () => void;
     __composerActionCalls: string[];
     __releaseComposerSkills: () => void;
     __composerAttachmentTransport: {
       read: typeof readFixtureFile;
       reads: () => string[];
       pending: () => string[];
+      snapshot: () => Array<{ id: string; relativePath: string; mimeType: string; bytes: number[] }>;
+      preserveForReload: () => void;
+      restore: (files: Array<{ id: string; relativePath: string; mimeType: string; bytes: number[] }>) => void;
       releaseNext: (filename: string, error?: string) => void;
     };
   }
@@ -247,6 +282,7 @@ const initialContent: ComposerInitialContent | undefined = new URLSearchParams(
 
 function Harness() {
   const [active, setActive] = useState(true);
+  const [message, setMessage] = useState<AgentTextMessage | null>(null);
   const [agentId, setAgentId] = useState<"claude" | "codex" | "cursor" | null>(suggestionsFixture ? "claude" : null);
   const workbench = useWorkspaceStore(state => state.workbenchByScope[cwd]);
   const tab = workbench?.tabs.find(tab => tab.id === workbench.activeId);
@@ -274,10 +310,34 @@ function Harness() {
     window.__setComposerActive = setActive;
     window.__setComposerAgent = setAgentId;
     window.__composerActionCalls = composerActionCalls;
+    window.__showComposerMessage = () => {
+      const value = composer.serialize();
+      if (!value) return;
+      setMessage({ id: "sent-attachment-group", kind: "text", role: "user", text: value.displayText, createdAt: 1,
+        segments: toMessageSegments(value.segments, value.attachments, new Map(value.attachments.map(file => [file.id, {
+          diskPath: file.diskPath, attachmentId: file.contextAttachmentId ?? file.id, delivery: "reference" as const, size: file.size,
+        }]))),
+      });
+    };
     return () => {
       delete window.__composerHarness;
     };
   }, [composer]);
+  const insertFiles = composer.insertFiles;
+  useEffect(() => {
+    if (!mediaFixture || !active) return;
+    return registerLiveChatFileStager(fixtureChat.id, ({ files, groupName }, { focus }) => {
+      void insertFiles(files, { groupName, focus, atEnd: true });
+      return true;
+    });
+  }, [insertFiles, active]);
+  const messageContext: RendererContext = {
+    isStreaming: false, lastMessageId: null, activeTurnStartedAt: 0, editBaselines: new Map(),
+    pendingPermission: null, pendingQuestionToolCallIds: new Set(), chatId: fixtureChat.id,
+    attachmentCwd: cwd, attachmentImagesActive: active, setMode: null, subagentChildren: new Map(),
+    respondToQuestion: () => {}, respondToPermission: () => {}, retrySafetyReview: async () => {},
+    recordPolicy: () => {}, editAndResubmit: () => {},
+  };
 
   return (
     <div data-zeros-root="" className="bg-bg1 text-fg1 min-h-screen p-4">
@@ -291,12 +351,16 @@ function Harness() {
         {composer.suggestionPopup}
       </div>
       {composer.imagePreviewOverlay}
+      {message && <Suspense fallback={null}><div data-testid="sent-attachment-message"><SentMessage message={message} ctx={messageContext} /></div></Suspense>}
       {(suggestionsFixture || mediaFixture) && tab?.filePath && <Suspense fallback={null}>
         <div data-testid="composer-source-viewer" className="border-border1 mt-4 h-96 overflow-hidden rounded-md border">
-          <SourceViewer tabId={tab.id} cwd={cwd} path={tab.filePath} active={active}
+          {tab.fileGroup ? <GroupViewer group={tab.fileGroup} tabId={tab.id} cwd={cwd} path={tab.filePath} active={active} refreshKey={0}
+            onSelect={path => useWorkspaceStore.getState().dispatch({ type: "UPDATE_WORKBENCH_TAB", id: tab.id, scope: cwd,
+              updates: { filePath: path, fileGroup: tab.fileGroup, title: tab.fileGroup?.name } })} />
+          : <SourceViewer tabId={tab.id} cwd={cwd} path={tab.filePath} active={active}
             workspaceId={null} refreshKey={0} skillSource={tab.skillSource} readOnly={!!tab.skillSource}
             viewerMode={tab.viewerMode} onOpenPath={() => {}}
-            onViewerModeChange={viewerMode => useWorkspaceStore.getState().dispatch({ type: "UPDATE_WORKBENCH_TAB", id: tab.id, scope: cwd, updates: { viewerMode } })} />
+            onViewerModeChange={viewerMode => useWorkspaceStore.getState().dispatch({ type: "UPDATE_WORKBENCH_TAB", id: tab.id, scope: cwd, updates: { viewerMode } })} />}
         </div>
       </Suspense>}
     </div>

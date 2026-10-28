@@ -57,6 +57,8 @@ export interface BrowserPreviewSource {
   portId?: string;
 }
 
+import { normalizeFileGroup, type FileGroup } from "./file-group";
+
 export interface WorkbenchTab {
   id: string;
   type: WorkbenchTabType;
@@ -77,6 +79,7 @@ export interface WorkbenchTab {
    *  optional — with none the tab shows its tree + a "select a file" viewer
    *  and is titled "Open file". */
   filePath?: string;
+  fileGroup?: FileGroup;
   /** Provider library source; read through discovery, never as a repo path. */
   skillSource?: SkillSource;
   /** Files/Changes tab: open the viewer in Diff mode (vs the read-only source
@@ -337,6 +340,7 @@ export function blankFixedFilesTab(tab: WorkbenchTab): WorkbenchTab {
     title: "Open file",
     filePath: undefined,
     skillSource: undefined,
+    fileGroup: undefined,
     fileTreeVisible: true,
     diff: false,
     diffScope: undefined,
@@ -793,6 +797,7 @@ export function normalizeWorkbenchTabs(parsed: WorkbenchTab[]): WorkbenchTab[] {
           pinned: false,
           filePath,
           skillSource: filePath && validSkillSource(tab.skillSource) && tab.skillSource.path === filePath ? tab.skillSource : undefined,
+          fileGroup: filePath && !tab.skillSource ? normalizeFileGroup(tab.fileGroup) : undefined,
           reviewSubtab: undefined,
           changesView: undefined,
           browserConversationId: undefined,

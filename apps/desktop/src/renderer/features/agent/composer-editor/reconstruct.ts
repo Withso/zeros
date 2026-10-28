@@ -21,6 +21,7 @@ import type {
 
 import type { ComposerAttachment } from "../composer-attachments";
 import type { ComposerInitialContent } from "./use-composer-editor";
+import { groupMessageSegments } from "./attachment-group";
 
 /** Ids minted here mark a chip REBUILT from an already-sent message, not a
  *  fresh attach. The context-graph staging paths key off this prefix: the
@@ -101,7 +102,7 @@ export function messageToEditorContent(opts: {
 
   const content: object[] = [];
   const attachments: ComposerAttachment[] = [];
-  for (const s of segments) {
+  for (const s of groupMessageSegments(segments)) {
     if (s.type === "text") {
       if (s.text) content.push({ type: "text", text: s.text });
     } else if (s.type === "mention") {
@@ -113,6 +114,13 @@ export function messageToEditorContent(opts: {
         type: "mention",
         attrs: { token, label: s.label, path: s.path, kind: s.kind },
       });
+    } else if (s.type === "attachment-group") {
+      const members = s.files.map(file => reconstructAttachment(file, freshId()));
+      attachments.push(...members);
+      content.push({ type: "attachment", attrs: {
+        attachmentId: members[0].id, attachmentIds: members.map(file => file.id), groupId: s.id,
+        name: s.name, mimeType: members[0].mimeType, kind: members[0].kind,
+      } });
     } else {
       const id = freshId();
       attachments.push(reconstructAttachment(s, id));

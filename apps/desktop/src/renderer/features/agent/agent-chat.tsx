@@ -1974,12 +1974,12 @@ function AgentChatBody({
   // read-only composer leaves the delivery queued for this exact chat.
   useEffect(() => {
     if (!chatId || !interactive || readOnly || !composerEditor) return;
-    return registerLiveChatFileStager(chatId, ({ files }, { focus }) => {
+    return registerLiveChatFileStager(chatId, ({ files, groupName }, { focus }) => {
       if (composerEditor.isDestroyed) return false;
       // A queued delivery may drain after the user has moved to another input.
       // Append without moving its focus or the parked composer's caret.
       if (focus) focusComposer();
-      void addFiles(files, { focus, atEnd: true });
+      void addFiles(files, { focus, atEnd: true, groupName });
       return true;
     });
   }, [addFiles, chatId, composerEditor, focusComposer, interactive, readOnly]);

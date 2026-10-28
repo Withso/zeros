@@ -2,6 +2,7 @@
 // attachment controls. Called by the main UI smoke with its shared server.
 import { expect } from "@playwright/test";
 import { runComposerSuggestionsSmoke } from "./ui-smoke-composer-suggestions.mjs";
+import { runAttachmentGroupsSmoke } from "./ui-smoke-attachment-groups.mjs";
 
 export async function runComposerEditorSmoke({ page, check }) {
   const base = new URL(page.url());
@@ -17,15 +18,14 @@ export async function runComposerEditorSmoke({ page, check }) {
     const canvas = document.createElement("canvas");
     canvas.width = canvas.height = 1;
     const blob = await new Promise((resolve) => canvas.toBlob(resolve));
-    await window.__composerHarness.insertFiles(
-      Array.from(
+    // Separate selections intentionally create separate atoms for this caret test.
+    for (const file of Array.from(
         { length: 3 },
         (_, index) =>
           new File([blob], `Screenshot 2026-09-14 at 6.4${index}.45 AM.png`, {
             type: "image/png",
           }),
-      ),
-    );
+      )) await window.__composerHarness.insertFiles([file]);
     return [...new Uint8Array(await blob.arrayBuffer())];
   });
   await pills.last().waitFor();
@@ -458,6 +458,7 @@ export async function runComposerEditorSmoke({ page, check }) {
   );
   await runFilePillNavigationSmoke({ page, check, base });
   await runComposerSuggestionsSmoke({ page, check, harnessBase: `${base.origin}/apps/desktop/src/renderer/harnesses` });
+  await runAttachmentGroupsSmoke({ page, check });
 }
 
 async function runFilePillNavigationSmoke({ page, check, base }) {
@@ -468,13 +469,13 @@ async function runFilePillNavigationSmoke({ page, check, base }) {
     await page.evaluate(async () => {
       const svg = '<svg xmlns="http://www.w3.org/2000/svg" width="240" height="120"><rect width="240" height="120" fill="teal"/><script>window.__svgExecuted = true</script></svg>';
       const gif = Uint8Array.from(atob("R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7"), (c) => c.charCodeAt(0));
-      await window.__composerHarness.insertFiles([
+      for (const file of [
         new File([svg], "Logo ü.SVG", { type: "text/plain" }),
         new File([gif], "loop.gif", { type: "image/gif" }),
         new File(["export const a = 1"], "notes.ts", { type: "text/plain" }),
         new File(["movie"], "clip.mp4", { type: "video/mp4" }),
         new File(["other source"], "notes.ts", { type: "text/plain" }),
-      ]);
+      ]) await window.__composerHarness.insertFiles([file]);
     });
     const pills = page.locator("[data-attachment-pill]");
     await expect(pills).toHaveCount(5);

@@ -6,6 +6,7 @@ export interface ComposerFileDelivery {
   /** Caller-owned identity; a repeated id replaces the queued entry. */
   id: string;
   files: File[];
+  groupName?: string;
 }
 
 /** Returns false when the composer cannot accept files yet; the delivery then
