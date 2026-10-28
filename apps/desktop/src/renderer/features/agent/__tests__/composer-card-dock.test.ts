@@ -84,7 +84,8 @@ describe("AgentChat wiring", () => {
 
   it("hands the keyboard to a blocking card in both focus paths", () => {
     const owns = AGENT_CHAT.match(/composerOwnsFocus\(\{[\s\S]*?\}\)/g) ?? [];
-    expect(owns).toHaveLength(2);
+    // Acquisition, the deferred acquisition recheck, and the click guardian.
+    expect(owns).toHaveLength(3);
     for (const call of owns) expect(call).toMatch(/cardHoldsKeyboard/);
   });
 

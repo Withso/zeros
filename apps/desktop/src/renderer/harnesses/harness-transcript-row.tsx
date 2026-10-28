@@ -42,6 +42,8 @@ const fixture = {
   failSummaries: false,
   holdSummaries: params.has("hold"),
   summaryReleases: [] as Array<() => void>,
+  holdTranscript: params.has("focus-races"),
+  transcriptReleases: [] as Array<() => void>,
   graceTimers: 0,
   createdCommits: 0,
   summaryReads: 0,
@@ -67,6 +69,14 @@ const fixture = {
   },
 };
 Object.assign(window, { transcriptRowFixture: fixture });
+if (params.has("focus-races")) {
+  // Each focus case starts with an empty destination, not the attachment draft
+  // persisted by the preceding case. The ordinary restart fixture keeps it.
+  localStorage.removeItem("zeros:composer-drafts:v1");
+  fixture.summariesDelayMs = 0;
+  fixture.setRows([{ chatId: fixture.senderId, folder, title: "Cold focus", summary: "Read this chat",
+    summaryAt: 1, agentId: "codex", agentName: "Codex", userMessageCount: 1, lastMessageAt: 1 }]);
+}
 if (cloud) {
   const timeout = window.setTimeout.bind(window);
   window.setTimeout = ((handler: TimerHandler, delay?: number, ...args: unknown[]) => {
@@ -92,6 +102,14 @@ setActiveBridge({
     let result: unknown = {};
     if (request.op === "project.list") result = { projects: [repo] };
     if (request.op === "workspace.list") result = { workspaces: request.params?.archived === true ? [] : [workspace] };
+    if (request.op === "messages.window" && params.has("focus-races")) {
+      if (fixture.holdTranscript) await new Promise<void>(resolve => fixture.transcriptReleases.push(resolve));
+      result = { messages: [
+        { id: "prompt", kind: "text", role: "user", text: "Read this chat", createdAt: 1 },
+        { id: "answer", kind: "text", role: "agent", text: "A completed answer", createdAt: 2 },
+      ].map(message => ({ msgId: message.id, kind: message.kind, payload: JSON.stringify(message), createdAt: message.createdAt })) };
+    }
+    if (request.op === "messages.windowOlder") result = { messages: [] };
     if (request.op === "chats.summariesForFolder") {
       fixture.summaryReads += 1;
       if (fixture.firstReadAt === null) {
@@ -116,7 +134,7 @@ const { useChatSession } = await import("../features/agent/sessions-hooks");
 const { BLANK, useSessionsStore } = await import("../features/agent/sessions-store");
 const { loadAgents } = await import("../features/agent/agents-cache");
 const { useWorkspaceStore } = await import("../state/workspace-store");
-const { Button, TooltipProvider } = await import("../shared/ui/primitives");
+const { Button, Input, TooltipProvider } = await import("../shared/ui/primitives");
 
 if (cloud) {
   const { installAccountPresentationIdentity } = await import("../state/account-presentation");
@@ -177,6 +195,7 @@ function Harness() {
             setSelected(index);
           }}>{label}</Button>)}
           <Button onClick={() => setMount((value) => value + 1)}>Remount chat</Button>
+          {params.has("focus-races") && <Input aria-label="Other editor" />}
         </nav>
         <div className="flex min-h-0 w-full max-w-3xl flex-1 flex-col">
           {chats.map((chat, index) => <div key={chat.id} data-chat-pane={names[index]}

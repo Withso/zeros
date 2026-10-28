@@ -37,6 +37,10 @@
 
 type InputModality = "pointer" | "keyboard";
 
+// Both policies observe input, but an Escape close may restore focus without
+// turning a pointer user's search/shortcut into keyboard-navigation chrome.
+import "./focus-navigation";
+
 // Default to "pointer": before any interaction there is nothing to
 // restore focus *from*, and "pointer" is the no-ring branch, so the
 // safe default is to never paint a spurious ring.

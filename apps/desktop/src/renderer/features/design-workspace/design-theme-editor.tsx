@@ -52,6 +52,7 @@ import {
   toast,
 } from "../../shared/ui/primitives";
 import { cn } from "../../shared/ui/cn";
+import { captureDeferredFocus } from "../../shared/ui/deferred-focus";
 import {
   applyDesignTransactionCached,
   refreshDesignStylesCached,
@@ -107,8 +108,6 @@ interface DesignThemeEditorProps {
    * with drafts and position, but hidden and inert over the other tab. */
   active: boolean;
   open: boolean;
-  returnFocusRef?: React.RefObject<HTMLButtonElement | null>;
-  onReturnFocus?: () => void;
   onOpenChange: (open: boolean) => void;
   onActiveThemeChange: (theme: string | null) => void;
 }
@@ -243,9 +242,9 @@ function ThemeValueField({
 
   const resetToBase = async () => {
     if (!onReset || disabled || savingRef.current) return;
-    const nameFocusTarget = inputRef.current
-      ?.closest("[data-design-theme-row]")
-      ?.querySelector<HTMLElement>(".zd-theme-token-name");
+    const row = inputRef.current?.closest<HTMLElement>("[data-design-theme-row]") ?? null;
+    const mayRestoreFocus = captureDeferredFocus(row);
+    const nameFocusTarget = row?.querySelector<HTMLElement>(".zd-theme-token-name");
     // Reset supersedes any local draft; disabling the focused input may blur it.
     skipCommitRef.current = true;
     savingRef.current = true;
@@ -265,7 +264,7 @@ function ThemeValueField({
       window.requestAnimationFrame(() => {
         // A mode's final override can remove its column from the snapshot.
         const target = inputRef.current ?? nameFocusTarget;
-        if (target?.isConnected) target.focus();
+        if (mayRestoreFocus() && target?.isConnected) target.focus();
       });
     }
   };
@@ -425,8 +424,6 @@ export const DesignThemeEditor = React.memo(function DesignThemeEditor({
   activeTheme,
   active,
   open,
-  returnFocusRef,
-  onReturnFocus,
   onOpenChange,
   onActiveThemeChange,
 }: DesignThemeEditorProps) {
@@ -462,6 +459,13 @@ export const DesignThemeEditor = React.memo(function DesignThemeEditor({
   const [newVariableValue, setNewVariableValue] = useState("");
   const [newThemeOpen, setNewThemeOpen] = useState(false);
   const [newTheme, setNewTheme] = useState("");
+  const restoreThemeFocusRef = useRef<(() => boolean) | null>(null);
+  useLayoutEffect(() => {
+    if (newThemeOpen) return;
+    const mayRestoreFocus = restoreThemeFocusRef.current;
+    restoreThemeFocusRef.current = null;
+    if (mayRestoreFocus?.()) newThemeTriggerRef.current?.focus();
+  }, [newThemeOpen]);
   const [action, setAction] = useState<string | null>(null);
   // null shows the manual tokens; a removed source falls back to them.
   const [sourceId, setSourceId] = useState<string | null>(null);
@@ -626,6 +630,7 @@ export const DesignThemeEditor = React.memo(function DesignThemeEditor({
 
   const importCss = async () => {
     if (parsedImport.error || parsedImport.imports.length === 0) return;
+    const mayRestoreFocus = captureDeferredFocus(panelRef.current);
     try {
       await applyOperations(
         "import",
@@ -633,7 +638,7 @@ export const DesignThemeEditor = React.memo(function DesignThemeEditor({
         parsedImport.imports.map(tokenOperation),
       );
       setPasteOpen(false);
-      pasteTriggerRef.current?.focus();
+      if (mayRestoreFocus()) pasteTriggerRef.current?.focus();
     } catch (error) {
       toast.error("Couldn't import CSS variables", {
         description: errorMessage(error),
@@ -645,6 +650,7 @@ export const DesignThemeEditor = React.memo(function DesignThemeEditor({
     const name = newVariableName.trim();
     const value = newVariableValue.trim();
     if (!name || !value || variableNameInvalid || !canCreate) return;
+    const mayRestoreFocus = captureDeferredFocus(panelRef.current);
     try {
       await applyOperations("variable", `Create ${name}`, [
         tokenOperation({ name, theme: null, value }, 0),
@@ -652,7 +658,7 @@ export const DesignThemeEditor = React.memo(function DesignThemeEditor({
       setNewVariableOpen(false);
       setNewVariableName("");
       setNewVariableValue("");
-      newVariableTriggerRef.current?.focus();
+      if (mayRestoreFocus()) newVariableTriggerRef.current?.focus();
     } catch (error) {
       toast.error("Couldn't create the theme variable", {
         description: errorMessage(error),
@@ -665,6 +671,7 @@ export const DesignThemeEditor = React.memo(function DesignThemeEditor({
     const label = newTheme.trim();
     const theme = designThemeIdFromName(label);
     if (!label || !theme || themeNameInvalid || !canAddTheme) return;
+    const mayRestoreFocus = captureDeferredFocus(panelRef.current);
     try {
       await applyOperations(
         `theme:${theme}`,
@@ -681,9 +688,9 @@ export const DesignThemeEditor = React.memo(function DesignThemeEditor({
         await updateDesignThemeCached(workspaceId, { id: theme, label });
       }
       setNewTheme("");
+      restoreThemeFocusRef.current = mayRestoreFocus;
       setNewThemeOpen(false);
       onActiveThemeChange(theme);
-      window.requestAnimationFrame(() => newThemeTriggerRef.current?.focus());
     } catch (error) {
       toast.error("Couldn't create the theme", {
         description: errorMessage(error),
@@ -868,11 +875,8 @@ export const DesignThemeEditor = React.memo(function DesignThemeEditor({
             }
           }}
           onCloseAutoFocus={(event) => {
+            // The canvas captures restoration intent when it closes this tool.
             event.preventDefault();
-            window.requestAnimationFrame(() => {
-              if (onReturnFocus) onReturnFocus();
-              else returnFocusRef?.current?.focus();
-            });
           }}
         >
           <div data-design-theme-titlebar="" className="zd-theme-titlebar">
@@ -1227,11 +1231,9 @@ export const DesignThemeEditor = React.memo(function DesignThemeEditor({
                               } else if (event.key === "Escape") {
                                 event.preventDefault();
                                 event.stopPropagation();
+                                restoreThemeFocusRef.current = captureDeferredFocus(panelRef.current);
                                 setNewThemeOpen(false);
                                 setNewTheme("");
-                                window.requestAnimationFrame(() =>
-                                  newThemeTriggerRef.current?.focus(),
-                                );
                               }
                             }}
                           />

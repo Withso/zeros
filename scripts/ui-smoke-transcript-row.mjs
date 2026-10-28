@@ -124,7 +124,44 @@ export async function checkEmptyChatTranscriptRow({ page, check, harnessBase, sc
     `${provisional.total} frames: ${provisional.missing} without the row, ${provisional.loading} with Loading`);
   await page.evaluate(() => window.transcriptRowFixture.setDelay(0));
   await checkCloudTranscriptRow({ page, check, harnessBase, screenshotDir });
+  await runTranscriptFocusSmoke({ page, check, harnessBase });
   await page.clock.pauseAt((await page.evaluate(() => Date.now())) + 1_000);
+}
+
+/** Hold the production transcript read across another edit, then deliver a
+ * fork attachment to the same mounted chat without transferring its focus. */
+export async function runTranscriptFocusSmoke({ page, check, harnessBase }) {
+  for (const cloud of [false, true]) {
+    for (const moveFocus of [true, false]) {
+      await page.goto(`${harnessBase}/harness-transcript-row.html?focus-races${cloud ? "&cloud" : ""}`);
+      const pane = page.locator('[data-chat-pane="chat-empty"]');
+      await pane.getByRole("button", { name: /^Attach transcript of Cold focus/ }).click();
+      await expect.poll(() => page.evaluate(() => window.transcriptRowFixture.transcriptReleases.length)).toBeGreaterThan(0);
+      const other = page.getByRole("textbox", { name: "Other editor" });
+      if (moveFocus) await other.fill("A newer edit");
+      await page.evaluate(() => {
+        const fixture = window.transcriptRowFixture;
+        fixture.holdTranscript = false;
+        for (const release of fixture.transcriptReleases.splice(0)) release();
+      });
+      await expect(pane.getByRole("button", { name: /^Remove transcript of Cold focus/ })).toBeVisible();
+      await expect(pane.locator(".composer-pm")).toContainText("cold-focus.concise.txt");
+      await expect(moveFocus ? other : pane.locator(".composer-pm")).toBeFocused();
+      check(`${cloud ? "cloud" : "Local"}: cold transcript attachment ${moveFocus ? "preserves a newer edit" : "completes its uninterrupted focus handoff"}`, true);
+
+      await other.fill("Keep editing here");
+      await page.evaluate(async () => {
+        const { deliverTextAttachmentToChat } = await import("/apps/desktop/src/renderer/features/agent/composer-text-attachment-delivery.ts");
+        const { useWorkspaceStore } = await import("/apps/desktop/src/renderer/state/workspace-store.ts");
+        deliverTextAttachmentToChat(useWorkspaceStore.getState().activeChatId, {
+          sourceKey: "focus-fork", name: "fork-focus.txt", text: "Completed fork transcript",
+        });
+      });
+      await expect(pane.locator(".composer-pm")).toContainText("fork-focus.txt");
+      await expect(other).toBeFocused();
+      check(`${cloud ? "cloud" : "Local"}: background fork attachment preserves the current focus`, true);
+    }
+  }
 }
 
 async function checkCloudTranscriptRow({ page, check, harnessBase, screenshotDir }) {

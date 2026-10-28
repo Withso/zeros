@@ -1,0 +1,9 @@
+{
+  "id": "deferred-focus-ownership",
+  "kind": "scenario",
+  "area": "renderer-shared-ui",
+  "fixedBy": "pr:754",
+  "symptom": "Terminal reveal, attachment insertion, failed Review posts and Design save/close callbacks could steal focus from a newer edit, while frame-based restoration could miss a not-yet-mounted control.",
+  "rule": "changes/keyboard-focus-intent.md and playbooks/ui-design.md: hold deferred work across a newer interaction and verify both cancellation and uninterrupted restoration on the current visible owner.",
+  "check": "pnpm test:ui-smoke"
+}

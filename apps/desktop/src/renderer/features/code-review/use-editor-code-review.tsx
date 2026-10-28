@@ -130,13 +130,13 @@ const reviewEditorTheme = EditorView.theme({
     cursor: "pointer",
     opacity: "0",
   },
-  ".cm-gutterElement:hover .zeros-review-comment-button, .zeros-review-comment-button:focus-visible":
+  '.cm-gutterElement:hover .zeros-review-comment-button, .zeros-review-comment-button:focus-visible:where(:not([data-zeros-focus-visible="false"]))':
     { opacity: "1" },
   ".zeros-review-comment-button:hover": {
     background: "var(--bg2-hover)",
     color: "var(--fg1)",
   },
-  ".zeros-review-comment-button:focus-visible": {
+  '.zeros-review-comment-button:focus-visible:where(:not([data-zeros-focus-visible="false"]))': {
     outline: "1px solid var(--fg2)",
     outlineOffset: "1px",
   },

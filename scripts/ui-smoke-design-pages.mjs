@@ -1,4 +1,5 @@
 import { expect } from "@playwright/test";
+import { runDesignPageFocusSmoke } from "./ui-smoke-design-focus.mjs";
 import {
   designCanvasPoint,
   designCanvasSafeRect,
@@ -14,6 +15,8 @@ export async function runDesignPagesSmoke({ page, check }) {
     await page.evaluate(() => localStorage.clear());
     await exercisePages({ page, check });
     await exercisePageLayersNavigation({ page, check });
+    await runDesignPageFocusSmoke({ page, check });
+    await runDesignPageFocusSmoke({ page, check, moveFocus: false });
   } finally {
     await visitPageStorage(page);
     await page.evaluate((entries) => {

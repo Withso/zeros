@@ -41,7 +41,7 @@
 }
 
 .zd-field:focus-within,
-.zd-field:focus-visible,
+.zd-field:focus-visible:where(:not([data-zeros-focus-visible="false"])),
 .zd-field[data-state="open"] {
   background-color: var(--bg2);
   box-shadow: inset 0 0 0 1px var(--highlighted-bright);
@@ -156,7 +156,7 @@
   color: var(--fg1);
 }
 
-.zd-segment:focus-visible {
+.zd-segment:focus-visible:where(:not([data-zeros-focus-visible="false"])) {
   outline: 1px solid var(--highlighted-bright);
   outline-offset: -1px;
 }
@@ -200,7 +200,7 @@
   color: var(--fg1);
 }
 
-.zd-icon-button:focus-visible {
+.zd-icon-button:focus-visible:where(:not([data-zeros-focus-visible="false"])) {
   outline: 1px solid var(--highlighted-bright);
   outline-offset: -1px;
 }
@@ -307,7 +307,7 @@
   color: var(--fg1);
 }
 
-.zd-panel-tab:focus-visible {
+.zd-panel-tab:focus-visible:where(:not([data-zeros-focus-visible="false"])) {
   outline: 1px solid var(--highlighted-bright);
   outline-offset: -1px;
 }
@@ -352,7 +352,7 @@
   color: var(--fg1);
 }
 
-.zd-size-trigger:focus-visible {
+.zd-size-trigger:focus-visible:where(:not([data-zeros-focus-visible="false"])) {
   outline: 1px solid var(--highlighted-bright);
   outline-offset: -1px;
 }
@@ -372,7 +372,7 @@
 }
 
 .zd-limit-field:hover .zd-limit-remove,
-.zd-limit-remove:focus-visible {
+.zd-limit-remove:focus-visible:where(:not([data-zeros-focus-visible="false"])) {
   opacity: 1;
 }
 
@@ -406,7 +406,7 @@
   background-color: var(--bg2-hover);
 }
 
-.zd-alignment-point:focus-visible {
+.zd-alignment-point:focus-visible:where(:not([data-zeros-focus-visible="false"])) {
   outline: 1px solid var(--highlighted-bright);
   outline-offset: -1px;
 }
@@ -444,7 +444,7 @@
   color: var(--design-selection-stroke);
 }
 
-.zd-constraint-pin:focus-visible {
+.zd-constraint-pin:focus-visible:where(:not([data-zeros-focus-visible="false"])) {
   outline: 1px solid var(--highlighted-bright);
   outline-offset: -1px;
 }
@@ -573,7 +573,7 @@
   color: var(--design-selection-stroke);
 }
 
-.zd-field-keyframe:focus-visible {
+.zd-field-keyframe:focus-visible:where(:not([data-zeros-focus-visible="false"])) {
   outline: 1px solid var(--highlighted-bright);
   outline-offset: -1px;
 }
@@ -698,7 +698,7 @@
   background-color: var(--bg1-hover);
 }
 
-.zd-design-directory-trigger:focus-visible {
+.zd-design-directory-trigger:focus-visible:where(:not([data-zeros-focus-visible="false"])) {
   outline: 1px solid var(--highlighted-bright);
   outline-offset: -1px;
 }
@@ -814,7 +814,7 @@
   color: var(--design-selection-label-fg);
 }
 
-.zd-canvas-tool:focus-visible {
+.zd-canvas-tool:focus-visible:where(:not([data-zeros-focus-visible="false"])) {
   outline: 1px solid var(--highlighted-bright);
   outline-offset: -1px;
 }
@@ -928,7 +928,7 @@
 }
 
 [data-design-origin-handle]:hover .zd-design-origin-marker,
-[data-design-origin-handle]:focus-visible .zd-design-origin-marker,
+[data-design-origin-handle]:focus-visible:where(:not([data-zeros-focus-visible="false"])) .zd-design-origin-marker,
 [data-design-origin-dragging] .zd-design-origin-marker {
   opacity: 1;
 }
@@ -1151,8 +1151,8 @@
   visibility: hidden;
 }
 
-.zd-design-inline-spacing-handle:focus-visible > .zd-design-inline-spacing-line,
-.zd-design-inline-gap-handle:focus-visible .zd-design-inline-spacing-line {
+.zd-design-inline-spacing-handle:focus-visible:where(:not([data-zeros-focus-visible="false"])) > .zd-design-inline-spacing-line,
+.zd-design-inline-gap-handle:focus-visible:where(:not([data-zeros-focus-visible="false"])) .zd-design-inline-spacing-line {
   outline: 1px solid var(--design-spacing-line-border);
 }
 
@@ -1242,7 +1242,7 @@
   color: var(--fg1);
 }
 
-.zd-design-layer-row:focus-visible {
+.zd-design-layer-row:focus-visible:where(:not([data-zeros-focus-visible="false"])) {
   border-color: transparent;
   outline: 1px solid var(--highlighted-bright);
   outline-offset: -1px;
@@ -1318,7 +1318,7 @@
   background-color: var(--bg1-hover);
 }
 
-.zd-design-layers-fold:focus-visible {
+.zd-design-layers-fold:focus-visible:where(:not([data-zeros-focus-visible="false"])) {
   outline: 1px solid var(--highlighted-bright);
   outline-offset: -1px;
 }

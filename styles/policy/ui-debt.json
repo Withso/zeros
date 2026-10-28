@@ -506,9 +506,6 @@
       "apps/desktop/src/renderer/shell/repository-icon-dialog.tsx": {
         "button": 2
       },
-      "apps/desktop/src/renderer/shell/shortcuts-palette.tsx": {
-        "button": 1
-      },
       "apps/desktop/src/renderer/shell/sidebar-repository-header.tsx": {
         "button": 4
       },

@@ -39,7 +39,7 @@
 }
 
 .zd-motion-resize-handle:hover::after,
-.zd-motion-resize-handle:focus-visible::after,
+.zd-motion-resize-handle:focus-visible:where(:not([data-zeros-focus-visible="false"]))::after,
 [data-design-motion-resizing] .zd-motion-resize-handle::after {
   background: var(--design-selection-stroke);
 }
@@ -363,7 +363,7 @@
   cursor: ew-resize;
 }
 
-.zd-motion-keyframe:focus-visible {
+.zd-motion-keyframe:focus-visible:where(:not([data-zeros-focus-visible="false"])) {
   outline: 1px solid var(--fg1);
   outline-offset: 4px;
 }

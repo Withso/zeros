@@ -42,6 +42,7 @@ import {
 } from "./review-shared-components";
 import { ZerosSpinner } from "@/renderer/shared/ui/loading";
 import { useScrollMemoryRef } from "../../scroll-memory";
+import { captureDeferredFocus } from "@/renderer/shared/ui/deferred-focus";
 
 export function ReviewTimelineSection({
   pr,
@@ -387,6 +388,7 @@ function CommentComposer({
   const submit = async () => {
     const body = value.trim();
     if (!body || busy) return;
+    const mayRestoreFocus = captureDeferredFocus(textareaRef.current?.parentElement ?? null);
     setBusy(true);
     setError(null);
     // Optimistic: clear immediately (the card appears in the timeline); on
@@ -397,7 +399,7 @@ function CommentComposer({
     } catch (e) {
       setValue(body);
       setError(humanGitError(e));
-      textareaRef.current?.focus();
+      if (mayRestoreFocus()) textareaRef.current?.focus();
     } finally {
       setBusy(false);
     }

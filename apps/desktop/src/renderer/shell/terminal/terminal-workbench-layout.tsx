@@ -311,7 +311,7 @@ export function TerminalWorkbenchLayout({
                             (entry.kind === "setup" ||
                               entry.runActionId ||
                               entry.closable) &&
-                              "group-hover/terminal:opacity-0 group-has-[:focus-visible]/terminal:opacity-0",
+                              "group-hover/terminal:opacity-0 group-has-focus-visible/terminal:opacity-0",
                           )}
                         >
                           {entry.dot && (
@@ -340,7 +340,7 @@ export function TerminalWorkbenchLayout({
                       </Button>
                       {(entry.kind === "setup" || entry.runActionId) && (
                         <div
-                          className="pointer-events-none absolute inset-y-0 right-1 flex items-center opacity-0 group-hover/terminal:pointer-events-auto group-hover/terminal:opacity-100 group-has-[:focus-visible]/terminal:pointer-events-auto group-has-[:focus-visible]/terminal:opacity-100"
+                          className="pointer-events-none absolute inset-y-0 right-1 flex items-center opacity-0 group-hover/terminal:pointer-events-auto group-hover/terminal:opacity-100 group-has-focus-visible/terminal:pointer-events-auto group-has-focus-visible/terminal:opacity-100"
                           data-terminal-row-actions=""
                         >
                           {entry.runActionId && entry.running ? (
@@ -388,7 +388,7 @@ export function TerminalWorkbenchLayout({
                           onClick={() => onClose(entry.id)}
                           className={cn(
                             WORKBENCH_TITLE_ACTION_CLS,
-                            "pointer-events-none absolute top-0.5 right-1 opacity-0 group-hover/terminal:pointer-events-auto group-hover/terminal:opacity-100 group-has-[:focus-visible]/terminal:pointer-events-auto group-has-[:focus-visible]/terminal:opacity-100",
+                            "pointer-events-none absolute top-0.5 right-1 opacity-0 group-hover/terminal:pointer-events-auto group-hover/terminal:opacity-100 group-has-focus-visible/terminal:pointer-events-auto group-has-focus-visible/terminal:opacity-100",
                           )}
                         >
                           <X className="text-fg2 size-3.5" />
