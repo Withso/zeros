@@ -75,6 +75,14 @@ describe("post-Pages WorkOS handshake verification", () => {
     expect(JSON.stringify(result)).not.toContain(desktop.url.searchParams.get("state"));
     expect(JSON.stringify(result)).not.toContain(desktop.url.searchParams.get("code_challenge"));
   });
+  it("keeps prior receipt readers compatible with serialized Desktop verification", async () => {
+    const f = fixture(), result = await verifyWorkOS(config, workosEnv, f.fetcher);
+    const persisted = JSON.parse(JSON.stringify(result));
+    const priorReader = WorkOSVerification.omit({ desktopVerified: true });
+    const { desktopVerified: _, ...legacy } = result;
+    expect(persisted).toHaveProperty("desktopVerified", true);
+    expect(priorReader.parse(persisted)).toEqual(legacy);
+  });
   it.each(["origin", "callback", "client", "pkce", "cookie", "cookie-domain"])("refuses %s drift before worker qualification", async change => {
     const f = fixture(response => {
       const location = new URL(response.headers.get("location")!);

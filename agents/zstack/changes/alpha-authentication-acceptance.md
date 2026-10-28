@@ -23,3 +23,7 @@
   successful grace-route reads before a provider-deletion denial probe. The
   deployed-source evidence and its limits are recorded in the authentication
   rollout guide.
+- Review lesson: accepting an old receipt with the new reader covers only one
+  direction. The WorkOS receipt test also serializes the new optional field
+  and parses it with the prior schema, proving the older reader accepts the
+  artifact without acquiring the new verification claim.
