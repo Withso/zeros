@@ -490,6 +490,13 @@ function stagedReleaseRecords() {
 const NESTED_LICENSE_DOCUMENTS = new Map([
   // Its simulator accessibility bridge adapts Meta's idb (MIT).
   ["agent-device", ["apple/snapshot-bridge/LICENSE.idb"]],
+  // PDF rendering ships these fallback fonts, CMaps and image decoders as
+  // local assets. Their separate notices must travel with the renderer.
+  ["pdfjs-dist", [
+    "cmaps/LICENSE", "standard_fonts/LICENSE_FOXIT", "standard_fonts/LICENSE_LIBERATION",
+    "wasm/LICENSE_JBIG2", "wasm/LICENSE_OPENJPEG", "wasm/LICENSE_QCMS",
+    "wasm/LICENSE_PDFJS_JBIG2", "wasm/LICENSE_PDFJS_OPENJPEG", "wasm/LICENSE_PDFJS_QCMS",
+  ]],
 ]);
 
 function packageDocuments(record) {
