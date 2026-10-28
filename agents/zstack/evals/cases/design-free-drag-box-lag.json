@@ -1,0 +1,9 @@
+{
+  "id": "design-free-drag-box-lag",
+  "kind": "replay",
+  "area": "desktop-design-state",
+  "fixedBy": "pending",
+  "symptom": "While a free Design layer was dragged, its selection box stayed behind the layer and the pointer, up to a hundred pixels, until the pointer rested.",
+  "rule": "agents/zstack/changes/design-layout-truth.md: paint a gesture's prediction on every sample and let the runtime's measurement settle it at rest.",
+  "check": "pnpm test:ui-smoke --shard=2/3"
+}

@@ -2028,7 +2028,13 @@ workspace owner, ranked with that explicit demand, so its editor boots before
 the click; selecting that frame fulfils it, and leaving the canvas or
 deactivating the surface clears it, so an overview with nothing selected keeps
 no editor. Passing over a frame's pixels is not intent: it never turns a
-passive frame into an editor. A warm
+passive frame into an editor. While the Layers tree is open, the selected
+row's neighbours (or the top of the list) have their details warmed in the
+background through one bounded window (at most 12 nodes, one read at a time,
+fenced by owner, active runtime and source generation at completion), so a
+layer never read before shows its values as soon as it is chosen. Layers rows
+are memoized with stable handlers: a hover or selection repaints only the rows
+it changes. A warm
 revalidation (a watcher echo after a save, a style build or a tab return)
 keeps the confirmed aggregate visible while the frames the surface demands are
 prepared through the same bounded lane, then publishes once.
@@ -2106,7 +2112,11 @@ the diagnostics data rather than the inspector chrome.
 
 A single layer dragged inside flex/grid changes authored sibling order with an
 insertion marker. Crossing a container boundary changes its parent and resets
-positional pins; a free container uses its local coordinate space. Moving out
+positional pins; a free container uses its local coordinate space. A free
+(absolute) layer keeps its free position only within its own parent; dragged
+into another flex or grid parent, in its own frame or another, it takes a slot
+in that flow, as in a design tool. A static flex or grid destination needs no
+positioning to hold it. Moving out
 of the document creates a canvas frame, and moving a frame into another transfers
 its subtree. As in a design tool, the frame under the pointer is the drop
 target, and it is outlined while a frame drag would nest into it; Cmd/Ctrl
@@ -2119,6 +2129,22 @@ fails because nesting could not: the frame stays where it was dropped and the
 reason is shown. Several selected frames drag and arrow-nudge together in one
 canvas write and one `geometry` undo step (`design.frames.move`); a selection
 that mixes frames with layers of other frames is refused without writing.
+
+Relocation places a layer by `left`/`top`, which are its X and Y, and keeps
+only its pose (rotation, scale, reflection) in a `transform` about its corner
+(`transform-origin: 0 0`); an identity pose is `none`. A relocation into a flow
+slot writes no position at all: the slot's flow properties, its size and pose.
+Older relocations saved the offset as the transform's translate, which painted
+at the same place but read as X 0, Y 0 and survived into auto layout as a stray
+shift. Such an offset is recognized only by that signature (a plain `matrix()`
+about `0 0`, never an authored `translate()` or another origin): X and Y read
+where the layer is drawn; typing a position, aligning or pinning moves the
+offset into its insets (both pins of a stretched axis together, so its size is
+kept); turning on auto layout or joining a flow drops it and keeps the pose.
+Typing a position for a stretched layer keeps the size it had on that axis.
+A frame's own layer (its body, or a root filling the frame) reports Clip content
+as checked and fixed: a frame is its own document and nothing it holds is drawn
+past its edges.
 
 Relocation carries only the inherited values the layer's own context sets
 beyond its frame's base: standard properties unlike the body's and custom
@@ -2144,6 +2170,18 @@ eligibility, so an arriving layout snapshot cannot discard a focused draft.
 Each numeric commit paints immediately and advances its local baseline before
 saving. Escape in a new draft leaves the preceding committed preview intact;
 unit-menu close and blur cannot register the same edit twice.
+
+A free layer's selection box is painted where the pointer puts it on every
+sample and settles on the runtime's measurement once the pointer rests; waiting
+for each reply left the box behind during motion, since every reply describes
+a sample the pointer has already left. The next preview leaves as soon as the
+runtime answers. Outside its frame a layer is drawn from pixels: cached ones for
+its exact generation, or a capture made directly for that drag (background
+capture is paused during a gesture). An inspector scrub sends its value in the
+frame its move is sampled; later values in that frame coalesce into the newest.
+Nesting a frame publishes the follow selection with the snapshot that removes
+the dragged frame, so page binding never falls back to another frame, and the
+canvas moves its camera only for a selection the person made.
 
 `previewLayout` applies a bounded batch before measuring, avoiding a reflow and
 round trip for every child. Drag targets are measured once, with a bounded lean
