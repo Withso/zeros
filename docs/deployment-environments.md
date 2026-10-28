@@ -938,8 +938,17 @@ Do not move tags or discard ledger history merely to unblock admission.
 Stage 2 admission and both stages' later checkpoints read the deployed identity from a valid
 HTTP 503 readiness response so a newer candidate can repair an unready Alpha
 by moving forward. Maintenance, non-current or mismatched migration heads,
-channel mismatch, invalid or unreadable identities, other HTTP failures and
+channel mismatch, invalid or persistently unreadable identities, other HTTP failures and
 destinations newer than or divergent from the candidate still refuse admission.
+
+The Alpha frontier reader retries transport failures, timeouts, HTTP 408/429/500/502/504
+gateway failures and non-JSON 503 responses up to three times. Each attempt has
+its own five-second abort deadline, with one- and two-second backoffs: at most
+18 seconds overall. A received JSON identity with an invalid channel, source,
+schema or maintenance state is refused immediately. The recovered identity
+still passes the existing ancestry checks before any destination mutation.
+This covers the failure where a healthy API answered just after a runner's
+first connection timed out, after the signed desktop had already built.
 
 Alpha hosted plans and pre-deploy worker preparation use the same bounded
 identity reader even when forward-only mode is off. A valid 503 identity from
@@ -1007,9 +1016,14 @@ subprocesses is withheld, and receipts contain allowlisted public fields only.
 
 WorkOS verification anonymously exercises `/auth/start` on every channel Pages
 surface, checks the exact issuer/client/callback, PKCE, no-store and host-only
-flow-cookie contract, requires the provider to accept the authorization request,
-and checks public JWKS availability. Receipts retain only the surface list and
-verification time, never state, cookies or authorization URLs. This is a public
+flow-cookie contract, and requires the provider to accept the authorization request.
+It also exercises the installed app's `/auth/desktop` entrypoint with fresh
+channel-prefixed state and PKCE, checking the distinct Desktop client, exact
+`/auth/desktop/callback`, unchanged state/challenge, no-store and no-referrer,
+then provider acceptance and public JWKS availability. Receipts retain only
+the surface list, `desktopVerified: true` and verification time, never state,
+cookies or authorization URLs. Older receipts remain readable and do not gain
+a Desktop verification claim. This is a public
 handshake/readiness gate, **not** an authenticated login/logout or native desktop
 canary. The owner still rehearses those complete flows with dedicated approved
 accounts before enabling a channel.
@@ -1204,7 +1218,7 @@ from GitHub's `Latest` flag when retired higher-version tags remain; the same
 successful-publication cross-check applies. Do not manufacture or move a
 baseline tag to bypass a cutover.
 
-Every guard performs one anonymous, five-second public identity read. If the
+Every disabled-promotion guard performs one anonymous, five-second public identity read. If the
 endpoint answers, its readiness/schema state takes precedence over the
 publication baseline. An answering but unready or malformed identity cannot be replaced
 with an older tag's proof. If neither a usable baseline nor an identity answers,

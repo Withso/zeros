@@ -91,7 +91,10 @@ const AlphaFrontierIdentity = ReleaseIdentityBase.extend({ ready: z.boolean(),
     state: z.enum(["healthy", "disabled", "unready", "unknown"]) }),
 });
 
-export async function alphaFrontierIdentity(fetcher: typeof fetch = fetch) {
+const defaultSleep = (milliseconds: number) => new Promise<void>(resolve => setTimeout(resolve, milliseconds));
+const RETRY_IDENTITY = Symbol("retry identity transport");
+
+async function readAlphaFrontierIdentity(fetcher: typeof fetch): Promise<z.infer<typeof AlphaFrontierIdentity> | null | typeof RETRY_IDENTITY> {
   const controller = new AbortController();
   let timer: ReturnType<typeof setTimeout> | undefined;
   const deadline = new Promise<never>((_, reject) => {
@@ -101,13 +104,33 @@ export async function alphaFrontierIdentity(fetcher: typeof fetch = fetch) {
     return await Promise.race([(async () => {
       const response = await fetcher(`${CHANNELS.alpha.api}/v1/release-identity`, { method: "GET", credentials: "omit",
         redirect: "error", cache: "no-store", headers: { accept: "application/json" }, signal: controller.signal });
+      if ([408, 429, 500, 502, 504].includes(response.status)) {
+        await response.body?.cancel();
+        return RETRY_IDENTITY;
+      }
       if (response.status !== 200 && response.status !== 503) return null;
       const text = await response.text();
       if (text.length > 64 * 1024) return null;
-      const parsed = (response.status === 503 ? AlphaFrontierIdentity : ReleaseIdentity).safeParse(JSON.parse(text));
+      let value: unknown;
+      try { value = JSON.parse(text); }
+      catch { return response.status === 503 ? RETRY_IDENTITY : null; }
+      const parsed = (response.status === 503 ? AlphaFrontierIdentity : ReleaseIdentity).safeParse(value);
       return parsed.success && parsed.data.channel === "alpha" && parsed.data.migrations.head === parsed.data.migrations.expectedHead ? parsed.data : null;
     })(), deadline]);
-  } catch { return null; } finally { clearTimeout(timer); }
+  } catch { return RETRY_IDENTITY; } finally { clearTimeout(timer); }
+}
+
+/** A slow connection must not discard a signed release after one failed read.
+ * Each attempt still aborts after five seconds; three attempts plus backoff
+ * take at most eighteen seconds. A received but invalid identity fails closed
+ * immediately. Only the final fresh identity can reach the ancestry checks. */
+export async function alphaFrontierIdentity(fetcher: typeof fetch = fetch, sleep = defaultSleep) {
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const result = await readAlphaFrontierIdentity(fetcher);
+    if (result !== RETRY_IDENTITY) return result;
+    if (attempt < 2) await sleep(1_000 * (attempt + 1));
+  }
+  return null;
 }
 
 async function alphaTagSource(read: Read) {
@@ -129,7 +152,6 @@ async function alphaTagSource(read: Read) {
 // upload). A read inside that window finds no asset; a few short retries let
 // it settle. A ledger that stays missing or unreadable still refuses below.
 const LEDGER_READ_ATTEMPTS = 6, LEDGER_READ_RETRY_MS = 5_000;
-const defaultSleep = (milliseconds: number) => new Promise<void>(resolve => setTimeout(resolve, milliseconds));
 
 async function liveReleaseLedger(repository: string, token: string | undefined, fetcher: typeof fetch,
   sleep: (milliseconds: number) => Promise<void>): Promise<unknown> {
@@ -152,7 +174,7 @@ export async function assertAlphaDestinations(candidate: { repository: string; s
   // guard also uses githubClient; this avoids a module initialization cycle.
   const { publicPagesSource } = await import("./guard");
   const [identity, app, ops, tag, previous] = await Promise.all([
-    alphaFrontierIdentity(fetcher),
+    alphaFrontierIdentity(fetcher, sleep),
     publicPagesSource(CHANNELS.alpha.app, "app", fetcher),
     publicPagesSource(CHANNELS.alpha.ops, "ops", fetcher),
     alphaTagSource(read),

@@ -1049,9 +1049,10 @@ exception and replacement-membership outbox command. That campaign's complete
 database-backed control-plane suite was green with 343 tests; the current
 post-cutover suite is green with 348, including reviewed migration of an active
 Auth0 identity and fail-closed active-WorkOS-identity conflict handling. A
-campaign run against the final merged and deployed corrective
-SHA remains a release gate; the failed baseline is retained here as evidence
-and is not relabeled as a pass.
+complete reviewed-recovery and membership-reprojection campaign against the
+merged, deployed corrective source remains a release gate. The October 28
+browser/API campaign below verifies the recovery-required boundary on a newer
+deployed source; the failed baseline is retained as historical evidence.
 
 At that historical snapshot, the remaining Alpha requirements were:
 
@@ -1079,6 +1080,64 @@ At that historical snapshot, the remaining Alpha requirements were:
 MFA is currently disabled in the Alpha Hosted UI, so the conditional MFA item
 is not applicable to this Alpha configuration. Radar remains disabled by the
 explicit product decision above.
+
+### Acceptance coverage update — 2026-10-28 (UTC)
+
+The release probe now verifies the public Desktop handoff as well as App/Ops
+browser sign-in. It checks the independent Desktop application, the exact
+channel callback, unchanged state and PKCE challenge, provider acceptance and
+no-store/no-referrer headers. New receipts include `desktopVerified: true`;
+historical receipts remain readable without acquiring that claim.
+
+The real WorkOS SDK/emulator test now verifies JWT signatures and the complete
+resource-server claims for both clients, performs Desktop code exchange and
+refresh without a client secret, refuses a valid browser token at the Desktop
+boundary, and proves that revoking Desktop leaves browser refresh usable.
+It retains the wrong-PKCE-verifier refusal. Run it with:
+
+```sh
+pnpm --dir apps/control-plane exec vitest run src/workos-provider.emulator.test.ts src/workos-provider.test.ts src/auth-token-contract.test.ts
+pnpm exec vitest run --config scripts/release/vitest.config.ts
+```
+
+The public App/Ops/Desktop handshake passed against deployed Alpha source
+`ffd50b5168dd2d3929d4e4a90bb74bdeb5faad93`, published as
+`0.1.28-alpha.649`. A disposable reserved-domain campaign on that same source
+also verified:
+
+- invalid Magic Auth rejection and signed Web Application token claims;
+- one local-only Personal root, the same account across two browser API
+  sessions, and revoking one session without revoking the other;
+- a 30-day account deletion window, revocation of existing sessions, fresh
+  authentication followed by explicit restore, and stable account/Personal IDs;
+- successful recovery-route reads by two fresh sessions during deletion grace,
+  followed by denial of both after provider-user deletion; and
+- `account_recovery_required` for a recreated same-email identity during that
+  grace period, without silently relinking the account.
+
+All campaign-owned provider users were removed. The two disposable Zeros
+accounts, including an earlier harness attempt, are scheduled for the ordinary
+purge worker; readback confirmed neither remains active. Programmatic staging
+evidence covers browser tokens and API behavior. Desktop uses public PKCE;
+the server-side Magic Auth SDK sends a client secret and does not qualify that
+client. Account deletion revokes existing sessions, so restore and
+provider-deletion probes must first authenticate again.
+
+These automated checks do not complete the remaining human acceptance gates:
+
+| Acceptance | Remaining evidence |
+| --- | --- |
+| Google, GitHub and Magic Auth | First/returning hosted sign-in and same-person linking with an owner-approved account, on Web and the released macOS app. |
+| Native invitation | Exactly one delivered email, browser and macOS acceptance, active membership, retired provider artifacts and no dead letters on the deployed revision. |
+| Provider-user deletion and recovery | Disposable identity with both released clients open, observed revocation, reviewed recovery during deletion grace, then explicit restore. |
+| Ops authorization | Distinct owner and developer participants, exact temporary grant, reviewed recovery, and immediate grant consumption/revocation. |
+| Interruption | Live provider/security-stream interruption and recovery; automated outage coverage remains separate evidence. |
+
+Keep the exact deployed source and client version with each live result. Use
+disposable identities for deletion/recreation; a real owner's sign-in check
+does not authorize deleting their WorkOS identity. Windows/Linux qualification
+is required before adding those release platforms; current macOS evidence
+does not qualify them.
 
 ## Primary references
 
