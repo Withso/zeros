@@ -30,6 +30,13 @@ uses section breaks and saved page breaks; its rendering can differ from Word,
 especially for documents without saved pagination. The original remains intact.
 Other document formats retain their existing fallback.
 
+Page navigation and zoom share a floating bottom island in both viewers. The
+percentage shows the rendered scale; clicking it fits the page again. PDF
+thumbnails and rotation remain in the file title actions beside Download.
+The page viewport reserves space for the island, including in narrow panes,
+so Fit and the end of a zoomed page stay readable. Hidden views remove the
+island along with their rendering resources.
+
 PDF.js runs in a local worker with packaged fonts, CMaps and image decoders.
 It reads exact-workspace ranges, caps each coalesced allocation at 32 MiB, and
 renders only the selected page and a virtualized thumbnail window. Hidden views

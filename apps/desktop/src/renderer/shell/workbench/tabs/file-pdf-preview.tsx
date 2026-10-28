@@ -8,16 +8,7 @@ import {
 } from "react";
 import { createPortal } from "react-dom";
 import { useVirtualizer } from "@tanstack/react-virtual";
-import {
-  ChevronLeft,
-  ChevronRight,
-  Download,
-  Maximize2,
-  Minus,
-  PanelLeft,
-  Plus,
-  RotateCw,
-} from "lucide-react";
+import { Download, PanelLeft, RotateCw } from "lucide-react";
 import type {
   PDFDocumentLoadingTask,
   PDFDocumentProxy,
@@ -39,6 +30,7 @@ import { WORKBENCH_TITLE_ACTION_CLS } from "../tab-chrome";
 import type { PdfSource } from "./file-pdf-runtime";
 import "pdfjs-dist/web/pdf_viewer.css";
 import "./file-pdf-preview.css";
+import { DocumentControls } from "./document-controls";
 
 export function FilePdfPreview({
   source,
@@ -59,7 +51,6 @@ export function FilePdfPreview({
   const passwordId = useId();
   const unlock = useRef<((password: string) => void) | null>(null);
   const [page, setPage] = useState(1);
-  const [pageInput, setPageInput] = useState("1");
   const [zoom, setZoom] = useState<number | null>(null);
   const [renderedScale, setRenderedScale] = useState(1);
   const [rotation, setRotation] = useState(0);
@@ -120,15 +111,12 @@ export function FilePdfPreview({
       void task?.destroy();
     };
   }, [visible, cwd, path, bytes, blob, dataUrl, version]);
-  useEffect(() => setPageInput(String(page)), [page]);
   const go = (number: number) => {
     if (!document || !Number.isFinite(number)) {
-      setPageInput(String(page));
       return;
     }
     const next = Math.min(document.numPages, Math.max(1, Math.floor(number)));
     setPage(next);
-    setPageInput(String(next));
   };
   const download = async () => {
     if (!cwd || !source.media) return;
@@ -147,123 +135,66 @@ export function FilePdfPreview({
   return (
     <div
       data-file-document-preview="pdf"
-      className="flex h-full min-h-0 flex-col overflow-hidden"
+      className="relative flex h-full min-h-0 flex-col overflow-hidden"
     >
       {actionsContainer &&
         active &&
         createPortal(
-          <Tooltip label="Download PDF">
-            {source.media ? (
+          <>
+            <Tooltip label="Toggle page thumbnails">
               <IconButton
-                label="Download PDF"
+                label="Toggle page thumbnails"
+                aria-pressed={sidebar}
                 size="compact"
                 className={WORKBENCH_TITLE_ACTION_CLS}
-                onClick={() =>
-                  void download().catch(() =>
-                    toast.error("Couldn't download this file."),
-                  )
-                }
+                disabled={!document}
+                onClick={() => setSidebar((value) => !value)}
               >
-                <Download className="size-3.5" />
+                <PanelLeft className="size-3.5" />
               </IconButton>
-            ) : (
+            </Tooltip>
+            <Tooltip label="Rotate page">
               <IconButton
-                label="Download PDF"
+                label="Rotate page"
                 size="compact"
                 className={WORKBENCH_TITLE_ACTION_CLS}
-                asChild
-                disabled={!dataUrl}
+                disabled={!document}
+                onClick={() => setRotation((value) => (value + 90) % 360)}
               >
-                <a href={dataUrl} download={path.split("/").pop()}>
+                <RotateCw className="size-3.5" />
+              </IconButton>
+            </Tooltip>
+            <Tooltip label="Download PDF">
+              {source.media ? (
+                <IconButton
+                  label="Download PDF"
+                  size="compact"
+                  className={WORKBENCH_TITLE_ACTION_CLS}
+                  onClick={() =>
+                    void download().catch(() =>
+                      toast.error("Couldn't download this file."),
+                    )
+                  }
+                >
                   <Download className="size-3.5" />
-                </a>
-              </IconButton>
-            )}
-          </Tooltip>,
+                </IconButton>
+              ) : (
+                <IconButton
+                  label="Download PDF"
+                  size="compact"
+                  className={WORKBENCH_TITLE_ACTION_CLS}
+                  asChild
+                  disabled={!dataUrl}
+                >
+                  <a href={dataUrl} download={path.split("/").pop()}>
+                    <Download className="size-3.5" />
+                  </a>
+                </IconButton>
+              )}
+            </Tooltip>
+          </>,
           actionsContainer,
         )}
-      <div
-        className="border-border1 flex shrink-0 flex-wrap items-center gap-1 border-b px-2 py-1"
-        aria-label="PDF controls"
-      >
-        <IconButton
-          label="Toggle page thumbnails"
-          aria-pressed={sidebar}
-          size="compact"
-          onClick={() => setSidebar((value) => !value)}
-        >
-          <PanelLeft className="size-3.5" />
-        </IconButton>
-        <IconButton
-          label="Previous page"
-          size="compact"
-          disabled={!document || page <= 1}
-          onClick={() => go(page - 1)}
-        >
-          <ChevronLeft className="size-3.5" />
-        </IconButton>
-        <Input
-          aria-label="Page number"
-          type="number"
-          min={1}
-          max={document?.numPages ?? 1}
-          value={pageInput}
-          disabled={!document}
-          className="h-6 w-12 px-1 text-center text-xs tabular-nums"
-          onChange={(event) => setPageInput(event.target.value)}
-          onBlur={() => go(Number(pageInput))}
-          onKeyDown={(event) => {
-            if (event.key === "Enter") go(Number(pageInput));
-          }}
-        />
-        <span className="text-fg3 text-xs tabular-nums">
-          / {document?.numPages ?? "—"}
-        </span>
-        <IconButton
-          label="Next page"
-          size="compact"
-          disabled={!document || page >= document.numPages}
-          onClick={() => go(page + 1)}
-        >
-          <ChevronRight className="size-3.5" />
-        </IconButton>
-        <div className="border-border1 mx-1 h-4 border-l" />
-        <IconButton
-          label="Zoom out"
-          size="compact"
-          disabled={!document || renderedScale <= 0.25}
-          onClick={() => setZoom(Math.max(0.25, renderedScale - 0.25))}
-        >
-          <Minus className="size-3.5" />
-        </IconButton>
-        <span className="text-fg2 w-12 text-center text-xs tabular-nums">
-          {zoom === null ? "Fit" : `${Math.round(zoom * 100)}%`}
-        </span>
-        <IconButton
-          label="Zoom in"
-          size="compact"
-          disabled={!document || renderedScale >= 4}
-          onClick={() => setZoom(Math.min(4, renderedScale + 0.25))}
-        >
-          <Plus className="size-3.5" />
-        </IconButton>
-        <IconButton
-          label="Fit page"
-          size="compact"
-          disabled={!document}
-          onClick={() => setZoom(null)}
-        >
-          <Maximize2 className="size-3.5" />
-        </IconButton>
-        <IconButton
-          label="Rotate page"
-          size="compact"
-          disabled={!document}
-          onClick={() => setRotation((value) => (value + 90) % 360)}
-        >
-          <RotateCw className="size-3.5" />
-        </IconButton>
-      </div>
       {passwordRequired ? (
         <form
           className="flex flex-1 flex-col items-center justify-center gap-3 p-4"
@@ -308,6 +239,18 @@ export function FilePdfPreview({
       ) : (
         <WorkbenchEmptyState type="files" message="Opening document…" />
       )}
+      {document && visible && !error && !passwordRequired && (
+        <DocumentControls
+          label="PDF controls"
+          page={page}
+          pageCount={document.numPages}
+          scale={renderedScale}
+          fit={zoom === null}
+          maxScale={4}
+          onPage={go}
+          onZoom={setZoom}
+        />
+      )}
     </div>
   );
 }
@@ -336,7 +279,7 @@ function PdfThumbnails({
       ref={host}
       role="navigation"
       aria-label="PDF pages"
-      className="border-border1 bg-bg2 w-32 shrink-0 overflow-y-auto border-r p-2"
+      className="zeros-document-viewport border-border1 bg-bg2 w-32 shrink-0 overflow-y-auto border-r p-2"
     >
       <div className="relative w-full" style={{ height: rows.getTotalSize() }}>
         {rows.getVirtualItems().map((row) => (
@@ -516,7 +459,7 @@ function PdfPage({
   return (
     <div
       ref={host}
-      className="bg-bg2 min-h-0 min-w-0 flex-1 overflow-auto p-4"
+      className="zeros-document-viewport bg-bg2 min-h-0 min-w-0 flex-1 overflow-auto p-4"
       role="region"
       aria-label={`PDF page ${page}`}
     >

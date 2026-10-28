@@ -1,0 +1,5 @@
+/* Clear even a wrapped island in a narrow pane. The viewers' ResizeObservers
+   use the remaining content box when fitting a page. */
+.zeros-document-viewport {
+  padding-bottom: calc(var(--space-12) + var(--space-8));
+}

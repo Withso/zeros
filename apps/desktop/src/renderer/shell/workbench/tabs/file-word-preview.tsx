@@ -1,14 +1,8 @@
 import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import {
-  ChevronLeft,
-  ChevronRight,
-  Download,
-  Maximize2,
-  Minus,
-  Plus,
-} from "lucide-react";
-import { IconButton, Input, Tooltip } from "@/renderer/shared/ui/primitives";
+import { Download } from "lucide-react";
+import { IconButton, Tooltip } from "@/renderer/shared/ui/primitives";
+import { DocumentControls } from "./document-controls";
 import { toast } from "@/renderer/shared/ui/primitives/elements";
 import { useDocumentActive } from "@/renderer/state/use-document-active";
 import { openWorkspaceMedia } from "@/renderer/platform/file-media";
@@ -46,7 +40,6 @@ export function FileWordPreview({
     host = useRef<HTMLDivElement>(null);
   const [pages, setPages] = useState<WordPage[]>([]),
     [page, setPage] = useState(1);
-  const [pageInput, setPageInput] = useState("1");
   const [error, setError] = useState<string | null>(null),
     [zoom, setZoom] = useState<number | null>(null);
   const [size, setSize] = useState({ width: 0, height: 0 });
@@ -205,14 +198,12 @@ export function FileWordPreview({
     observer.observe(host.current);
     return () => observer.disconnect();
   }, [visible, pages]);
-  useEffect(() => setPageInput(String(page)), [page]);
   const go = (value: number) => {
     const next =
       Number.isFinite(value) && pages.length
         ? Math.min(pages.length, Math.max(1, Math.floor(value)))
         : page;
     setPage(next);
-    setPageInput(String(next));
   };
   const current = visible ? pages[page - 1] : undefined;
   const scale =
@@ -243,7 +234,7 @@ export function FileWordPreview({
   return (
     <div
       data-file-document-preview="docx"
-      className="flex h-full min-h-0 flex-col"
+      className="relative flex h-full min-h-0 flex-col overflow-hidden"
     >
       {actionsContainer &&
         active &&
@@ -278,70 +269,9 @@ export function FileWordPreview({
           </Tooltip>,
           actionsContainer,
         )}
-      <div className="border-border1 flex shrink-0 flex-wrap items-center gap-1 border-b px-2 py-1">
-        <IconButton
-          label="Previous page"
-          size="compact"
-          disabled={!current || page === 1}
-          onClick={() => go(page - 1)}
-        >
-          <ChevronLeft className="size-3.5" />
-        </IconButton>
-        <Input
-          type="number"
-          aria-label="Page number"
-          className="h-6 w-12 px-1 text-center text-xs"
-          value={pageInput}
-          min={1}
-          max={pages.length || 1}
-          disabled={!current}
-          onChange={(event) => setPageInput(event.target.value)}
-          onBlur={() => go(Number(pageInput))}
-          onKeyDown={(event) => {
-            if (event.key === "Enter") go(Number(pageInput));
-          }}
-        />
-        <span className="text-fg3 text-xs">/ {pages.length || "—"}</span>
-        <IconButton
-          label="Next page"
-          size="compact"
-          disabled={!current || page === pages.length}
-          onClick={() => go(page + 1)}
-        >
-          <ChevronRight className="size-3.5" />
-        </IconButton>
-        <div className="border-border1 mx-1 h-4 border-l" />
-        <IconButton
-          label="Zoom out"
-          size="compact"
-          disabled={!current || scale <= 0.25}
-          onClick={() => setZoom(Math.max(0.25, scale - 0.25))}
-        >
-          <Minus className="size-3.5" />
-        </IconButton>
-        <span className="text-fg2 w-12 text-center text-xs tabular-nums">
-          {zoom === null ? "Fit" : `${Math.round(zoom * 100)}%`}
-        </span>
-        <IconButton
-          label="Zoom in"
-          size="compact"
-          disabled={!current || scale >= 3}
-          onClick={() => setZoom(Math.min(3, scale + 0.25))}
-        >
-          <Plus className="size-3.5" />
-        </IconButton>
-        <IconButton
-          label="Fit page"
-          size="compact"
-          disabled={!current}
-          onClick={() => setZoom(null)}
-        >
-          <Maximize2 className="size-3.5" />
-        </IconButton>
-      </div>
       <div
         ref={host}
-        className="bg-bg2 min-h-0 min-w-0 flex-1 overflow-auto p-4"
+        className="zeros-document-viewport bg-bg2 min-h-0 min-w-0 flex-1 overflow-auto p-4"
       >
         {error ? (
           <WorkbenchEmptyState type="files" message={error} />
@@ -370,6 +300,18 @@ export function FileWordPreview({
           <WorkbenchEmptyState type="files" message="Opening document…" />
         )}
       </div>
+      {current && !error && (
+        <DocumentControls
+          label="Word controls"
+          page={page}
+          pageCount={pages.length}
+          scale={scale}
+          fit={zoom === null}
+          maxScale={3}
+          onPage={go}
+          onZoom={setZoom}
+        />
+      )}
     </div>
   );
 }
