@@ -1,0 +1,9 @@
+{
+  "id": "cloud-agent-live-settings",
+  "kind": "replay",
+  "area": "vm-engine-agents",
+  "fixedBy": "pr:763",
+  "symptom": "The renderer marked effort/Fast changes applied for every provider, but cloud rejected Claude/Cursor updates and their drivers kept opening-time settings; Claude also omitted Fast and Cursor sent bare model IDs.",
+  "rule": "Trace the complete composer snapshot through every provider's exact cloud execution to native live controls or the next send. Retain authoritative clears, staged Max restarts and account-owned Cursor schemas. See agents/zstack/changes/cloud-agent-live-settings.md and agents/zstack/playbooks/bug-fix.md.",
+  "check": "pnpm --dir apps/cloud-worker test src/__tests__/worker.test.ts src/drivers/claude/__tests__ src/drivers/cursor/__tests__"
+}

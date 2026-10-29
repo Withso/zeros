@@ -13,10 +13,15 @@ Full relay config replaces provider logins; active turns keep their spawn token.
 Credentials are kept out of arguments, logs and session files.
 Tests use synthetic native streams and local processes without model access.
 
-Codex effort and Fast changes update the exact active turn when native support
-allows it, and persist for later turns and reopening. Model changes apply to
-the next turn. The shared renderer catalog includes GPT-6.1 Terra in both
-placements; the worker's model proxy supplies account availability.
+All three providers accept typed model/effort/Fast updates and persist them for
+later turns and reopening. Claude applies ordinary effort and Fast live; Max
+transitions recreate with resume on the next explicit prompt. Codex updates the
+exact active turn when native support allows it. Cursor keeps each running
+run's selection and resolves the account's native parameters or advertised
+legacy variants on the next send. See the
+[configuration timing table](../../docs/agent-harness-capability-boundary.md#mid-chat-configuration-timing).
+The shared renderer catalog and standalone control-plane consent catalog both
+include GPT-6.1 Terra; the worker's Codex proxy supplies account availability.
 
 Run `pnpm --dir apps/cloud-worker test` for the adjacent tests.
 Run `pnpm --dir apps/cloud-worker typecheck` for the package typecheck.

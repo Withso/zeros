@@ -14,7 +14,8 @@ function fixture() {
     create: async options => { calls.push({ kind: "create", options }); return agent; },
     resume: async (id, options) => { calls.push({ kind: id, options }); return agent; },
   };
-  const host = new CursorHost(sdk, event => { events.push(event); return Promise.resolve(); }, "fixture-cursor");
+  const host = new CursorHost(sdk, event => { events.push(event); return Promise.resolve(); }, "fixture-cursor",
+    async () => [{ id: "composer-2.5" }, { id: "grok-4.7", parameters: [] }]);
   return { host, events, calls, agent, run, result, end, cancels: () => cancels };
 }
 

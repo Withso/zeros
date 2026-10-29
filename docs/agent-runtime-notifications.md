@@ -21,6 +21,9 @@ branch-writing workflows ship disabled; repository configuration enables them.
    the bot's root-only mechanical bump does not establish worker parity.
    `check:codex-pin` enforces the Codex manifest equality. The control-plane
    auth-only keeper keeps its separate qualification pin.
+   Curated model additions also update the standalone control-plane provider
+   identities and consent regressions in `src/agent-credentials/agent-models`;
+   its catalog parity check runs outside the root model verification suite.
 4. Later eligible versions append a normal commit to that PR's current head.
    Human commits remain in its history. There is no force push, reset, automatic
    rebase, automatic conflict resolution or automatic merge.
@@ -142,6 +145,14 @@ terminal acknowledgements, Stop, stale completions, serialized changes, lost
 settings replies, complete cloud config snapshots and reopen persistence. See
 [the Codex harness contract](codex-app-server-compatibility.md#01650-compatibility)
 for the precise field and lifecycle rules.
+
+Cloud configuration now routes Claude and Cursor selections as well. The
+[configuration timing table](agent-harness-capability-boundary.md#mid-chat-configuration-timing)
+records when each provider applies effort/Fast in Local and cloud. Regression
+coverage includes native Claude live flags and deferred Max transitions, and
+Cursor's catalog-backed next-send selection. GPT-6.1 Terra is also admitted by
+the standalone control plane under existing all-model consent, while explicit
+legacy grants remain unchanged.
 
 ### Cursor 1.0.40 to 1.1.0 review
 

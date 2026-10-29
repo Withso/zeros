@@ -48,6 +48,9 @@ export class ClaudeDriver implements Driver {
   private resumed = false;
   private model?: string;
   private effort?: string;
+  private fast = false;
+  private pendingRestart = false;
+  private configRevision = 0;
   private mapper?: ClaudeStreamTranslator;
   private process?: Process;
   private active?: Turn;
@@ -63,7 +66,7 @@ export class ClaudeDriver implements Driver {
     if (input.proxy || !!input.oauthToken === !!input.apiKey) throw new Error("Provide one Claude OAuth token or API key.");
     if (input.nativeSessionId && !/^[\da-f]{8}-[\da-f]{4}-[\da-f]{4}-[\da-f]{4}-[\da-f]{12}$/i.test(input.nativeSessionId)) throw new Error("Invalid Claude session id.");
     this.input = input; this.nativeSessionId = input.nativeSessionId ?? randomUUID(); this.resumed = !!input.nativeSessionId; this.model = input.model;
-    this.effort = input.effort;
+    this.effort = input.effort; this.fast = input.fast === true;
     this.mapper = new ClaudeStreamTranslator({ sessionId: input.sessionId, streamPartials: true, emit: event => this.emit(event) });
     return { nativeSessionId: this.nativeSessionId, ...(!this.resumed ? { provisional: true } : {}) };
   }
@@ -92,16 +95,45 @@ export class ClaudeDriver implements Driver {
   async setModel(model: string): Promise<void> {
     this.ready();
     if (!model.trim() || model.length > 200 || /\s/.test(model)) throw new Error("Invalid Claude model.");
-    const process = this.process, changed = this.model !== model;
+    const process = this.process, changed = this.model !== model, revision = ++this.configRevision;
     try {
       await process?.query.setModel(model);
+      if (revision !== this.configRevision) return;
+      if (this.disposed || (process && process !== this.process)) throw new Error("Claude session changed during model selection.");
       // Omission shallow-merges in the SDK. Null resets even a creation-time
       // max effort to the new model's default; false revokes ultracode.
       if (changed) await process?.query.applyFlagSettings({ effortLevel: null, ultracode: false });
     } catch (error) { throw this.error(error); }
     if (this.disposed || (process && process !== this.process)) throw new Error("Claude session changed during model selection.");
+    if (revision !== this.configRevision) return;
     this.model = model;
     if (changed) this.effort = undefined;
+  }
+
+  async updateConfig(config: { model?: string; effort?: string; fast: boolean }): Promise<void> {
+    this.ready();
+    if (config.model !== undefined && (!config.model.trim() || config.model.length > 200 || /\s/.test(config.model))) throw new Error("Invalid Claude model.");
+    const process = this.process, revision = ++this.configRevision;
+    const modelChanged = config.model !== undefined && config.model !== this.model;
+    const maxEffortToggled = (this.effort === "max") !== (config.effort === "max");
+    // The complete typed snapshot is authoritative even if a live control is
+    // rejected or its query ends while the reply is in flight.
+    if (config.model !== undefined) this.model = config.model;
+    this.effort = config.effort; this.fast = config.fast;
+    if (maxEffortToggled) this.pendingRestart = true;
+    if (modelChanged) {
+      try { await process?.query.setModel(config.model!); }
+      catch { console.warn("[claude] Live model update failed; selection remains set for the next query."); }
+    }
+    if (!process || this.disposed || this.process !== process || this.configRevision !== revision || maxEffortToggled) return;
+    try {
+      await process.query.applyFlagSettings({
+        ...claudeSettings(config.effort, config.fast),
+        // The native SDK shallow-merges settings. Omission cannot clear an
+        // effort override, while explicit false revokes Fast and ultracode.
+        ...(!config.effort?.trim() ? { effortLevel: null } : {}),
+      });
+    } catch { console.warn("[claude] Live settings update failed; selections remain set for the next query."); }
   }
 
   interrupt(): Promise<void> {
@@ -137,13 +169,22 @@ export class ClaudeDriver implements Driver {
   }
 
   private ensureQuery(): Process {
-    if (this.process) return this.process;
+    if (this.process && !this.pendingRestart) return this.process;
+    // Max is a creation-time Options.effort, outside Settings.effortLevel.
+    // Like Local, consume its transition only at the next explicit prompt,
+    // after the active-turn guard. Retiring this generation fences its reader.
+    if (this.process) {
+      const previous = this.process;
+      this.detach(previous); previous.query.close();
+    }
+    this.pendingRestart = false;
     const session = this.input!, input = new InputQueue<SDKUserMessage>();
     let process: Process | undefined;
     const options: Options = {
       cwd: session.cwd, ...(this.model ? { model: this.model } : {}),
       ...(session.mcpServers ? { mcpServers: session.mcpServers } : {}),
-      ...claudeEffort(this.effort),
+      settings: claudeSettings(this.effort, this.fast),
+      ...(this.effort?.trim() === "max" ? { effort: "max" as const } : {}),
       ...(this.resumed ? { resume: this.nativeSessionId } : { sessionId: this.nativeSessionId }),
       env: agentEnvironment(session.oauthToken ? { agent: "claude", oauthToken: session.oauthToken } : { agent: "claude", apiKey: session.apiKey! }, this.options.environment, this.options.gitEnvironment),
       permissionMode: "bypassPermissions", allowDangerouslySkipPermissions: true,
@@ -326,14 +367,11 @@ export class ClaudeDriver implements Driver {
 
 // Local's effort mapping, without importing the desktop runtime. The SDK's
 // ultracode setting grants dynamic workflows; it is distinct from plain xhigh.
-function claudeEffort(value: string | undefined): Pick<Options, "effort" | "settings"> {
+function claudeSettings(value: string | undefined, fast: boolean): Partial<Settings> {
   const effort = value?.trim(), ultracode = effort === "ultracode";
   const effortLevel: Settings["effortLevel"] = ultracode ? "xhigh"
     : effort === "low" || effort === "medium" || effort === "high" || effort === "xhigh" ? effort : undefined;
-  return {
-    settings: { ...(effortLevel ? { effortLevel } : {}), ultracode },
-    ...(effort === "max" ? { effort: "max" } : {}),
-  };
+  return { ...(effortLevel ? { effortLevel } : {}), fastMode: fast, ultracode };
 }
 
 function pinnedExecutable(): string {

@@ -3,6 +3,17 @@ import type { AgentOptions, SDKUserMessage } from "@cursor/sdk";
 import type { Serializable } from "node:child_process";
 import type { NativeRun, NativeSend } from "../../native-types";
 
+export const Cursor = { models: { list: async () => [
+  { id: "composer-2.5" }, { id: "composer-2.5-fast" },
+  { id: "default", aliases: ["auto"] },
+  { id: "grok-4.7", parameters: [
+    { id: "effort", values: ["low", "high", "xhigh"].map(value => ({ value })) },
+    { id: "fast", values: ["true", "false"].map(value => ({ value })) },
+  ], variants: [{ displayName: "Default", isDefault: true, params: [
+    { id: "context", value: "large" }, { id: "effort", value: "high" }, { id: "fast", value: "false" },
+  ] }] },
+] } };
+
 /** Offline SDK double behind the real child host and IPC protocol. No test
  * hooks enter the shipped host; esbuild aliases this module in tests only. */
 export class Agent {
@@ -52,7 +63,7 @@ export class Agent {
           }) as typeof process.send;
         }
         return { id, status: stopped ? "cancelled" : "finished", model: options.model, ...fixture.result,
-          ...(fixture.inspect ? { result: JSON.stringify({ sends: this.sends, resumed: this.resumed, model: options.model,
+          ...(fixture.inspect ? { result: JSON.stringify({ sends: this.sends, resumed: this.resumed, model: options.model, initialModel: this.options.model,
             mode: options.mode, cwd: this.options.local?.cwd, local: this.options.local, images: message.images,
             ownLogin: !!process.env.CURSOR_API_KEY && process.env.CURSOR_API_KEY === this.options.apiKey,
             forbidden: ["ZEROS_WORKER_TOKEN", "ANTHROPIC_AUTH_TOKEN", "ZEROS_CLOUD_PROXY_TOKEN", "NODE_OPTIONS", "GH_TOKEN"].some(key => !!process.env[key]),
@@ -61,6 +72,7 @@ export class Agent {
       },
       cancel: async () => { stopped = true; release(); },
       steer: async text => {
+        if (text === "finish run") { release(); return "complete_delivered"; }
         if (text === "lost receipt") return new Promise(() => {});
         if (text !== "follow up\n\n.context/reference.md") throw new Error("Text blocks were lost.");
         return fixture.steer ?? "complete_delivered";

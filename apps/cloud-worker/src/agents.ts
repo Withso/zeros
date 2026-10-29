@@ -19,6 +19,7 @@ interface Waiter { client: AppClient; requestId: string; receivedAt: number }
 interface Runtime {
   id: string; chatId: string; agentId: CloudV2Agent; model?: string; effort?: string; fast?: boolean;
   driver?: Driver; unsubscribe?: () => void; login?: string; opening?: Promise<void>;
+  configRevision?: number;
   preparing?: Promise<void>;
   retiring?: Promise<void>; pendingNative?: string; admitting: number;
   cancelling?: Promise<"succeeded" | "failed" | "cancelled">;
@@ -168,10 +169,15 @@ export class Agents {
         }
         case "AGENT_SET_MODEL": {
           const route = this.route(message);
+          const revision = route.configRevision = (route.configRevision ?? 0) + 1;
           await this.ensureDriver(route);
           this.assertCurrent(route);
+          if (route.configRevision !== revision) return;
           await route.driver!.setModel(message.model);
           this.assertCurrent(route);
+          // The renderer sends model selection and complete config without
+          // awaiting either. An older native ACK cannot erase newer knobs.
+          if (route.configRevision !== revision) return;
           if (route.model !== message.model) {
             route.model = message.model; route.effort = undefined;
             // Keep a credential refresh or VM restart from restoring the old
@@ -185,11 +191,12 @@ export class Agents {
         }
         case "AGENT_UPDATE_CONFIG": {
           const route = this.route(message);
-          if (route.agentId !== "codex") throw new WorkspaceError("CLOUD_V2_UNSUPPORTED", "Live configuration is not available for this cloud agent.");
+          const model = message.env[MODEL_ENV[route.agentId]]?.trim() || undefined;
+          if (model && (model.length > 200 || /\s/.test(model))) throw new WorkspaceError("invalid-params", "Invalid agent model.");
+          const revision = route.configRevision = (route.configRevision ?? 0) + 1;
           await route.preparing;
           this.assertCurrent(route);
-          const model = message.env.OPENAI_MODEL?.trim() || undefined;
-          if (model && (model.length > 200 || /\s/.test(model))) throw new WorkspaceError("invalid-params", "Invalid Codex model.");
+          if (route.configRevision !== revision) return;
           const effort = message.env.ZEROS_THINKING_EFFORT || undefined;
           const fast = message.env.ZEROS_FAST_MODE === "1";
           if (model) route.model = model;
@@ -201,9 +208,11 @@ export class Agents {
           });
           while (route.opening) await route.opening;
           this.assertCurrent(route);
+          if (route.configRevision !== revision) return;
           // Apply the latest snapshot after any opening driver is ready.
           // Only typed selections cross; credentials and arbitrary caller
-          // environment never replace worker configuration. Model stays next-turn.
+          // environment never replace worker configuration. Each driver owns
+          // its provider's live-versus-next-prompt application boundary.
           await route.driver?.updateConfig?.({ ...(route.model ? { model: route.model } : {}), effort: route.effort, fast: route.fast === true });
           return;
         }

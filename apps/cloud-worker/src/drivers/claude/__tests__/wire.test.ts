@@ -10,6 +10,39 @@ import { join } from "node:path";
 const oauth = { oauthToken: "offline-oauth-placeholder" };
 const api = { apiKey: "offline-api-key-placeholder" };
 
+it("carries a mid-chat cloud config into the live query and the next prompt's staged restart", async () => {
+  const { scope, state } = await repositoryFixture(), relay = new FakeRelay(), h = harness();
+  const worker = new CloudWorker({ directory: state, transport: relay, prepareCheckout: async () => {},
+    drivers: { claude: () => new ClaudeDriver({ query: h.query, executable: "/fixture/claude", environment: {} }) } });
+  const request = (type: string, fields: Record<string, unknown>) => relay.request(CLIENT_A, browserFrame(type, { agentId: "claude", ...fields }));
+  try {
+    worker.start(); await relay.receive({ ...config, workspace: scope.workspace, agents: { claude: oauth } });
+    await relay.receive({ t: "open", clientId: CLIENT_A });
+    await request("AGENT_NEW_SESSION", { cwd: scope.root, chatId: "settings", env: { ZEROS_THINKING_EFFORT: "low" } });
+    const created = relay.bridge("AGENT_SESSION_CREATED")[0].frame;
+    if (created.type !== "AGENT_SESSION_CREATED") throw new Error("Missing session");
+    const sessionId = created.session.sessionId;
+    const prompt = () => request("AGENT_PROMPT", { sessionId, prompt: [{ type: "text", text: "fixture" }] });
+    await prompt(); await expect.poll(() => h.queries.length).toBe(1);
+    const query = h.queries[0], first = await query.read(), nativeId = query.args.options.sessionId!;
+    await request("AGENT_UPDATE_CONFIG", { sessionId, env: { ZEROS_THINKING_EFFORT: "ultracode", ZEROS_FAST_MODE: "1" } });
+    expect(query.flagSettings).toEqual([{ effortLevel: "xhigh", fastMode: true, ultracode: true }]);
+    await request("AGENT_UPDATE_CONFIG", { sessionId, env: { ZEROS_THINKING_EFFORT: "max" } });
+    expect(query.closed).toBe(false); expect(query.interrupts).toBe(0);
+    query.push(result(first.uuid, { session_id: nativeId }));
+    await expect.poll(() => relay.bridge("AGENT_PROMPT_COMPLETE").length).toBe(1);
+    await prompt(); await expect.poll(() => h.queries.length).toBe(2);
+    const next = h.queries[1], second = await next.read();
+    expect(next.args.options).toMatchObject({ resume: nativeId, effort: "max", settings: { fastMode: false, ultracode: false } });
+    next.push(result(second.uuid, { session_id: nativeId }));
+    await expect.poll(() => relay.bridge("AGENT_PROMPT_COMPLETE").length).toBe(2);
+    await worker.flush();
+    const stored = await SessionStore.open(join(state, "sessions"), scope.key);
+    expect(stored.metadata("settings")?.chat).toMatchObject({ effort: "max", fast: false });
+    expect(relay.bridge("AGENT_ERROR")).toEqual([]);
+  } finally { await worker.dispose(); }
+});
+
 it("routes Claude frames through the relay, mirrors background rows and resumes stored identity", async () => {
   const { scope, state } = await repositoryFixture(), relay = new FakeRelay(), h = harness();
   const worker = new CloudWorker({ directory: state, transport: relay, prepareCheckout: async () => {},
