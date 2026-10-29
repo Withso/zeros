@@ -1,10 +1,7 @@
 import { devConnectionRuntime } from "./dev-connections/runtime.js";
-// GitHub App OAuth/install flow.
-//
-// The control plane is the confidential-client boundary: the GitHub client secret
-// never ships in Electron. OAuth state + PKCE verifier are single-use (10 min);
-// the resulting token pair crosses a second, Zeros-account-bound handoff row for
-// at most 90 seconds before Electron persists it in safeStorage.
+// The control plane keeps the GitHub client secret out of Electron. Single-use
+// OAuth state and PKCE last 10 minutes; the account-bound handoff lasts 90 seconds
+// before Electron stores the token pair in safeStorage.
 
 import {
   createCipheriv,
@@ -36,21 +33,15 @@ export { createGithubAppJwt };
 
 const API_VERSION = "2026-03-10";
 const OAUTH_STATE_TTL_MS = 10 * 60_000;
-/** The hosted page exposes its Open Zeros link for one minute. Keep only 30
- * seconds beyond that for the deep link to reach Electron and finish the
- * authenticated exchange; an abandoned tab must not create a five-minute
- * redemption window. */
+/** Allow 30 seconds after the hosted page's one-minute Open Zeros window
+ * for Electron to complete the authenticated exchange. */
 export const GITHUB_HANDOFF_TTL_MS = 90_000;
 const MAX_INSTALLATION_PAGES = 10;
 const MAX_REPOSITORY_COUNT_PROBES = 50;
 const REPOSITORY_COUNT_CONCURRENCY = 4;
 const GITHUB_REQUEST_TIMEOUT_MS = 15_000;
-/** Ceiling for one route's whole GitHub conversation. The per-request timeout
- *  bounds a single call; without an aggregate deadline 10 installation pages
- *  plus 50 count probes could hold a handler for ~6 minutes — long after the
- *  browser gave up, and long enough for 20 rate-limit-permitted requests from
- *  one account to pin the process. Past the deadline the inventory is reported
- *  incomplete rather than pursued. */
+/** Bound the whole inventory conversation: per-call timeouts alone let pages
+ * and count probes occupy a handler for minutes. A deadline leaves it incomplete. */
 const GITHUB_FLOW_DEADLINE_MS = 30_000;
 
 const NonceSchema = z
@@ -103,10 +94,8 @@ export interface GithubRouteDependencies {
   cloudCallback?: (state: string, code: string | undefined, denied: boolean) => Promise<void>;
 }
 
-/** Physically purge short-lived OAuth secrets after their logical expiry.
- * Route-level deletes remain defense in depth; this sweep prevents an
- * abandoned browser flow from leaving a still-valid refresh token in a dead
- * handoff row until the next user happens to connect. */
+/** Abandoned handoffs can retain live refresh tokens after logical expiry;
+ * sweep them without waiting for another user to connect. */
 export async function cleanupExpiredGithubOauth(pool: pg.Pool): Promise<void> {
   await withSystemTx(pool, async (tx) => {
     await tx.query(
@@ -177,16 +166,9 @@ interface PendingOauthState {
 
 export type GithubOauthFlowKind = "oauth" | "install";
 
-/** A desktop only knows whether this Mac has a credential. The control plane
- * owns the account-level view needed to distinguish a genuine first install
- * from a second Mac reconnecting to an installation that already exists.
- *
- * Authorization alone deliberately counts as prior setup for the automatic
- * choice: a bounded or failed installation inventory read still persists the
- * usable authorization but may have no installation rows. The desktop keeps
- * that unknown inventory distinct from a completed empty inventory. Once it
- * has confirmed zero installations, its explicit recovery action must bypass
- * prior account state so GitHub can create an installation again. */
+/** Account-level authorization counts as prior setup even when installation
+ * inventory is unknown, so a second Mac reconnects instead of reinstalling.
+ * Explicit recovery after a confirmed empty inventory may force installation. */
 export function resolveGithubOauthFlowKind(input: {
   installRequested: boolean;
   forceInstallRequested: boolean;
@@ -229,14 +211,9 @@ function pkceChallenge(verifier: string): string {
   return base64url(createHash("sha256").update(verifier, "utf8").digest());
 }
 
-// ── Handoff token sealing ────────────────────────────────────────────────
-// The browser→desktop handoff must park a GitHub access/refresh pair somewhere
-// the desktop can collect it, and the desktop's proof of ownership is the client
-// nonce. Deriving the key from that nonce — of which Postgres keeps only a
-// SHA-256 — means the row is useless without the nonce: a WAL segment, a PITR
-// restore, or the nightly off-platform dump yields ciphertext, not credentials.
-// The short-lived row TTL never bounds that risk by itself, because a refresh
-// token stays live for ~6 months after the row is gone.
+// Seal with the desktop nonce, of which Postgres retains only a hash, so
+// backups and WAL contain ciphertext without its key. Row expiry cannot bound
+// the lifetime of the refresh token inside it.
 
 const HANDOFF_SEAL_INFO = "zeros-github-handoff.v1";
 const HANDOFF_SEAL_IV_BYTES = 12;
@@ -292,9 +269,7 @@ function refreshBindingSignature(
   config: GithubBackendConfig,
   encodedPayload: string,
 ): Buffer {
-  // Deliberately NOT the OAuth client secret unless the operator left them the
-  // same: rotating the client secret is routine, and a binding key that rotates
-  // with it invalidates every outstanding binding at once.
+  // Keep this key separate: routine OAuth client-secret rotation must not invalidate live bindings.
   return createHmac("sha256", config.refreshBindingSecret)
     .update("zeros-github-refresh-binding.v1\0", "utf8")
     .update(encodedPayload, "utf8")
@@ -674,13 +649,8 @@ async function listGithubInstallations(
       (value): value is Omit<GithubInstallation, "repositoryCount"> =>
         value !== null,
     );
-  // `installationFromGithub` drops any installation belonging to a different
-  // app_id (github.ts, `appId !== config.appId`). That filter is correct, and
-  // silent — so a wrong GITHUB_APP_ID looks EXACTLY like success: the token
-  // exchange works, /user works, the list fetches, every row is discarded, and
-  // the user is told to install an App they just installed. Zod cannot catch it
-  // (any positive integer is well-formed), so the log is the only place this
-  // can ever surface.
+  // A valid-looking but wrong App ID silently filters out every installation;
+  // diagnose that configuration error instead of treating the inventory as empty.
   if (rawInstallations.length > 0 && installations.length === 0) {
     console.warn(
       `[github] GitHub returned ${rawInstallations.length} installation(s) ` +
@@ -692,9 +662,7 @@ async function listGithubInstallations(
     ...installation,
     repositoryCount: null,
   }));
-  // Repository counts enrich Settings only. Bound both cardinality and
-  // concurrency so an account with hundreds of organizations cannot turn one
-  // Refresh click into a 15-minute request train or a GitHub API burst.
+  // Bound optional count probes by cardinality and concurrency to avoid an API burst.
   const probeCount = enrichCounts ? Math.min(result.length, MAX_REPOSITORY_COUNT_PROBES) : 0;
   for (
     let offset = 0;
@@ -861,12 +829,8 @@ async function persistAuthorization(
   );
 }
 
-/** The signed binding proves who minted the refresh token, but it is stateless
- * and therefore cannot know the grant was disconnected. Without this check a
- * leaked or backed-up (refreshToken, refreshBinding) pair keeps minting fresh
- * access tokens for the refresh token's whole lifetime AFTER the user clicks
- * Disconnect — GitHub's own /applications/{id}/token revocation only kills the
- * one access token, leaving the authorization grant usable. */
+/** Signed refresh bindings are stateless; the liveness row makes Disconnect
+ * terminal. GitHub access-token revocation leaves the refresh grant usable. */
 async function assertLiveAuthorization(
   tx: Tx,
   input: { ownerUserId: string; appVariant: string; grantGeneration: string },
@@ -903,11 +867,8 @@ async function assertAuthorizedGithubLogin(
     [input.ownerUserId, input.appVariant],
   );
   const expectedLogin = expected.rows[0]?.github_login;
-  // "No authorization at all" and "a token for a different account" are
-  // different states and need different codes. Reporting a disconnected grant
-  // as a mismatch left the other device's Settings row stuck on `unavailable`
-  // forever, because a mismatch is not something the desktop can recover from,
-  // whereas `github_authorization_expired` drives its reconnect path.
+  // An absent grant needs the reconnect code; account mismatch is a distinct,
+  // non-recoverable credential error for the desktop.
   if (!expectedLogin) {
     throw new HttpError(
       401,
@@ -931,10 +892,8 @@ async function assertAuthorizedGithubLogin(
   );
 }
 
-/** Ask GitHub to drop one user access token. Per GitHub this kills only that
- *  token — the grant, the refresh token, and the installation survive, which is
- *  why `github_authorizations` carries the server-side liveness row that
- *  `assertLiveAuthorization` enforces. Returns false when GitHub refused. */
+/** GitHub revokes only this access token; the grant, refresh token and
+ * installation survive. assertLiveAuthorization enforces local disconnects. */
 async function revokeGithubAccessToken(
   fetchImpl: FetchLike,
   config: GithubBackendConfig,
@@ -988,11 +947,8 @@ function installUrl(config: GithubBackendConfig, state?: string): string {
   return url.toString();
 }
 
-/** Stand-in for every GitHub route when no App is registered for this
- * environment. A precise code matters: without it the desktop got the router's
- * generic 404 ("Not found") and had no way to tell "GitHub sign-in is off here"
- * from "your request was malformed". Mount this instead of both real routers so
- * a missing registration costs one feature, not the whole control plane. */
+/** Missing App configuration must answer a distinct 503 even before auth,
+ * so the desktop can distinguish unavailable sign-in from an expired session. */
 export function createGithubUnconfiguredRoutes(): Hono {
   const app = new Hono();
   app.all("/v1/github/*", (c) =>
@@ -1021,12 +977,7 @@ export function createGithubPublicRoutes(
   const now = dependencies.now ?? Date.now;
 
   app.get("/v1/github/oauth/callback", async (c) => {
-    // Take the PARSED value, not the raw query string: NonceSchema begins with
-    // `.trim()`, so a padded `state` validates while `sha256(raw)` hashes
-    // something else entirely — the code would then check one value and look up
-    // another. It fails closed today (no lookup hit), and our own states never
-    // carry whitespace, but validating a different string than you use is the
-    // shape of a real bypass, not a style nit.
+    // Hash the validated, trimmed nonce; validation and lookup must use the same bytes.
     const parsedState = NonceSchema.safeParse(c.req.query("state") ?? "");
     if (!parsedState.success) {
       throw new HttpError(422, "invalid_oauth_state", "Invalid OAuth state.");
@@ -1038,11 +989,8 @@ export function createGithubPublicRoutes(
       c.header("Referrer-Policy", "no-referrer");
       return c.html("<!doctype html><html lang=\"en\"><meta charset=\"utf-8\"><title>GitHub connected</title><h1>GitHub connected</h1><p>Return to Zeros to continue. You can close this tab.</p></html>");
     }
-    // No table-wide expiry sweep here: this route is unauthenticated, so any
-    // caller with a well-formed `state` could otherwise drive one write
-    // transaction plus a full-table DELETE per request against the same pool
-    // /healthz uses. `startGithubOauthCleanup` already sweeps every 60 s, and
-    // the `expires_at > now()` predicate below is what makes state single-use.
+    // Keep expiry sweeps off this unauthenticated route to prevent arbitrary
+    // table-wide writes. The atomic DELETE and expiry predicate guard this state.
     const pending = await withSystemTx(pool, async (tx) => {
       const result = await tx.query<PendingOauthState>(
         `DELETE FROM github_oauth_states
@@ -1092,12 +1040,8 @@ export function createGithubPublicRoutes(
         params,
         nowMs,
       );
-      // The `code` is now spent and a ~6-month refresh token exists at GitHub.
-      // Identity is required to record it; the installation inventory is not.
-      // Failing the whole callback on a cosmetic listing error used to abandon
-      // that credential with no row, no audit entry, and nothing able to revoke
-      // it. `installations_complete: false` is the honest way to say
-      // "authorized, inventory unknown" — Settings Refresh fills it in.
+      // The spent code has minted a long-lived credential: record its identity even
+      // when optional inventory fails, keeping unknown distinct from confirmed empty.
       const { login, githubUserId, gitName } = await githubUser(fetchImpl, config, bundle.accessToken);
       let installationSnapshot: GithubInstallationSnapshot = {
         installations: [],
@@ -1137,10 +1081,7 @@ export function createGithubPublicRoutes(
           login, githubUserId, gitName,
           installations: installationSnapshot.installations,
           installationsComplete: installationSnapshot.complete,
-          // Re-read the clock: the handoff TTL is the window the DESKTOP gets
-          // after this redirect, so it must not be shortened by the GitHub
-          // round trips above (token exchange + user + installation pages +
-          // repository-count probes, each allowed REQUEST_TIMEOUT_MS).
+          // Start the desktop handoff window after the GitHub round trips.
           nowMs: now(),
         });
       });
@@ -1154,10 +1095,7 @@ export function createGithubPublicRoutes(
         error.code === "github_authorization_expired"
           ? "authorization_expired"
           : "github_unavailable";
-      // This is the only GitHub route whose failures are invisible: the browser
-      // gets a 302 and Railway logs just the status line, so a wrong client
-      // secret or a Postgres fault would read to operators as "GitHub is down".
-      // Log the classification (never the URL, code, or tokens).
+      // Redirects hide callback failures in HTTP logs; retain only the classification, never tokens or URLs.
       console.error(
         `[github] oauth callback failed (reported as ${kind}): ${
           error instanceof HttpError
@@ -1551,10 +1489,8 @@ export function createGithubRoutes(
         }),
         nowMs,
       );
-      // The liveness check above committed before this round trip, so a
-      // Disconnect landing in between would otherwise be answered with a
-      // credential minted after the user asked to stop. Re-check, and give the
-      // token GitHub just issued back before failing.
+      // Disconnect can commit during token rotation; recheck liveness and revoke
+      // the newly issued access token before failing if the grant was removed.
       try {
         await withUserTx(pool, user.id, (tx) =>
           assertLiveAuthorization(tx, {
@@ -1571,11 +1507,8 @@ export function createGithubRoutes(
         ).catch(() => undefined);
         throw error;
       }
-      // The signed binding above is the security decision and is verified
-      // before the single-use token rotates. Audit is deliberately
-      // best-effort after rotation: a transient DB write failure must not
-      // suppress the new pair and strand the desktop with the consumed old
-      // refresh token.
+      // After rotation, a failed audit must not suppress the new pair and leave
+      // the desktop holding the consumed refresh token. Binding validation ran first.
       try {
         await withUserTx(pool, user.id, async (tx) => {
           await tx.query(
@@ -1624,9 +1557,7 @@ export function createGithubRoutes(
         nowMs: now(),
       });
 
-      // Already disconnected — stay idempotent. Without this, a retry (or a
-      // second device) sent GitHub another authenticated revoke and appended a
-      // duplicate audit row for a grant this control plane no longer knows about.
+      // A retry or second device must not revoke or audit an already-disconnected grant again.
       const stillConnected = await withUserTx(pool, user.id, async (tx) => {
         const live = await tx.query(
           `SELECT 1 FROM github_authorizations
@@ -1682,11 +1613,8 @@ export function createGithubRoutes(
           ],
         );
       });
-      // Deliberately NOT an error: the deletion above has already committed, so
-      // a 503 here would tell the desktop the disconnect failed while the only
-      // record that could ever retry the GitHub-side revoke is gone. Deleting
-      // the liveness row is what makes the refresh token unusable through this
-      // control plane, so the disconnect really did take effect.
+      // Local disconnect already committed and blocks future refreshes; a remote
+      // revocation failure must not report that the local operation failed.
       if (remoteFailure) {
         console.warn(
           `[github] local disconnect completed but GitHub token revocation ` +
@@ -1697,10 +1625,6 @@ export function createGithubRoutes(
     },
   );
 
-  // No `GET /v1/github/install-url`. It had no caller, and it echoed a
-  // caller-supplied `state` into an install URL WITHOUT inserting the matching
-  // `github_oauth_states` row — so any install driven through it was guaranteed
-  // to 422 at the callback. `/oauth/start` is the one supported entry point.
 
   app.post(
     "/v1/github/installations/refresh",
@@ -1713,10 +1637,8 @@ export function createGithubRoutes(
       >;
       const accessToken = parse(TokenSchema, body.accessToken);
       const nowMs = now();
-      // Resolve the identity, then confirm it owns this connection BEFORE
-      // enumerating. Running both concurrently let any authenticated Zeros user
-      // spend up to 60 outbound GitHub calls — against our IP reputation and
-      // the token's own rate budget — on a token that is not theirs.
+      // Verify connection ownership before enumeration so a foreign token cannot
+      // spend this service's outbound GitHub budget.
       const { login, githubUserId, gitName } = await githubUser(fetchImpl, config, accessToken);
       await withUserTx(pool, user.id, (tx) =>
         assertAuthorizedGithubLogin(tx, {

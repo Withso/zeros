@@ -1,12 +1,8 @@
 import type { CodexFingerprintKeys } from "./agent-credentials/codex-fingerprint-keys.js";
 import { CloudAgentCredentialEnvSchema, loadCloudAgentCredentialConfig, type CloudAgentCredentialConfig } from "./agent-credentials/agent-credential-config.js";
-// ──────────────────────────────────────────────────────────
-// Config — every knob comes from the environment, validated at boot.
-//
 // Authentication is selected explicitly. Legacy Auth0 deployments may still
 // derive their verification URLs from AUTH0_DOMAIN during the staged cutover;
 // WorkOS and future providers must supply the exact issuer/JWKS contract.
-// ──────────────────────────────────────────────────────────
 
 import { isIP } from "node:net";
 import path from "node:path";
@@ -81,24 +77,13 @@ const EnvSchema = z.object({
   ZEROS_SELF_HOSTED: z.enum(["true", "false"]).default("false"),
   PORT: z.coerce.number().int().positive().default(8080),
   HOST: z.enum(["127.0.0.1", "0.0.0.0", "::"]).optional(),
-  /** "production" tightens error bodies; anything else is dev-friendly. */
   NODE_ENV: z.string().default("development"),
   /** Optional server-only key; never projected into desktop or cloud agents. */
   CHAT_TITLE_OPENAI_API_KEY: z.string().trim().max(512).refine((value) => !/\s/.test(value)).optional(),
 });
 
-// ──────────────────────────────────────────────────────────
-// GitHub App — an OPTIONAL feature block, not a boot requirement.
-//
-// These five values only exist once a GitHub App has been registered for the
-// environment. Requiring them at boot made an unset variable take down the
-// entire control plane — teams, invitations, settings, and `/healthz` with it,
-// which on Railway (healthcheck + restart-on-failure) becomes a crash loop.
-// A missing registration must cost exactly one feature, so an absent or
-// unusable block resolves to `null` and the GitHub routes answer
-// `github_not_configured`, which the desktop already renders as
-// "use gh CLI or a Personal Access Token for now".
-// ──────────────────────────────────────────────────────────
+// Missing or invalid GitHub configuration disables only that feature;
+// unrelated APIs and health checks must still boot.
 
 const GithubEnvSchema = z.object({
   /** Public numeric id of the environment-specific GitHub App registration. */
@@ -127,15 +112,9 @@ const GithubEnvSchema = z.object({
     .string()
     .url()
     .default("https://app.zeros.build/github/connected"),
-  /**
-   * Key for the refresh-token binding HMAC. Defaults to the client secret for
-   * continuity, but SET IT SEPARATELY in any environment that rotates the
-   * client secret: bindings signed with the old secret stop verifying, and the
-   * desktop treats a rejected binding as "reconnect", so sharing the two keys
-   * makes routine secret rotation a fleet-wide reconnect prompt.
-   */
+  /** Separate this HMAC key from the OAuth secret before rotating that secret;
+   * the compatibility fallback otherwise invalidates all outstanding bindings. */
   GITHUB_REFRESH_BINDING_SECRET: z.string().min(16).optional(),
-  /** Host seams for a future GHES registration. */
   GITHUB_WEB_BASE_URL: z.string().url().default("https://github.com"),
   GITHUB_API_BASE_URL: z.string().url().default("https://api.github.com"),
   NODE_ENV: z.string().default("development"),
@@ -908,10 +887,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env, diagnostics: Co
     e.ZEROS_SELF_HOSTED === "true",
   );
 
-  // An operator who supplied NONE of the GitHub variables has simply not
-  // registered an App yet — that is a normal state and stays quiet. Anything
-  // partial or malformed is a mistake, so it is logged loudly, but it still
-  // must not deny the rest of the control plane to every user.
+  // An entirely absent App block is normal; report partial or invalid settings
+  // while keeping the rest of the control plane available.
   const supplied = GITHUB_REQUIRED_KEYS.filter(
     (key) => (env[key] ?? "").trim().length > 0,
   );

@@ -1,19 +1,10 @@
 import { devConnectionRuntime } from "./dev-connections/runtime.js";
-// ──────────────────────────────────────────────────────────
-// Auth — verify provider-issued JWTs locally (JWKS) and JIT-mirror the user.
-//
-// Sign-in provisions the user row plus the account's permanent Personal
-// organization and its default team. Collaborative organizations remain
-// explicit: a user creates one or joins one by invitation.
-//
-// The JWT proves WHO (sub, email); the database decides WHAT (authz.ts).
-// jose's createRemoteJWKSet caches keys in memory and re-fetches only
-// when an unknown `kid` appears (key rotation).
+// JWTs prove identity; the database decides authorization (authz.ts).
+// Collaborative organizations require explicit creation or invitation.
 //
 // users.id is an internally-generated uuid, decoupled from every provider's
 // `sub`. user_identities maps (provider, provider_sub) -> users.id, so product
 // ownership never depends on an authentication-vendor identifier.
-// ──────────────────────────────────────────────────────────
 
 import { randomBytes } from "node:crypto";
 import {
@@ -97,10 +88,8 @@ export type AuthedUser = {
     authTime: number | null;
     tokenExpiresAt: number | null;
   };
-  /** Product-wide staff role, or null for the ordinary case. Re-read from
-   *  Postgres on every request by ensureUser below — never taken from a claim,
-   *  so revoking it needs no token expiry. Gates Settings → Internal in the
-   *  Mac app; see apps/control-plane/migrations/0007_staff_role.sql. */
+  /** Read from Postgres on each request, never token claims, so staff access
+   * can be revoked without waiting for token expiry. */
   staffRole: StaffRole | null;
 };
 
@@ -171,10 +160,7 @@ export function createAuthMiddleware(
     try {
       ({ payload } = await jwtVerify(token, jwks, verifyOptions));
     } catch (err) {
-      // Surface jose's error code (JWKS_NO_MATCHING_KEY = old-key token,
-      // JWT_CLAIM_VALIDATION_FAILED = issuer/audience mismatch, JWT_EXPIRED).
-      // Codes only — never claims or key material; this is safe to show and
-      // turns "it doesn't work" into a one-look diagnosis.
+      // Diagnose verification by code and claim name, never claim values or key material.
       const code =
         err && typeof err === "object" && "code" in err
           ? String((err as { code: unknown }).code)
@@ -183,8 +169,6 @@ export function createAuthMiddleware(
         err && typeof err === "object" && "claim" in err
           ? ` (claim: ${String((err as { claim: unknown }).claim)})`
           : "";
-      // Railway HTTP logs only show the status line; without this line the
-      // whole fleet can 401 for days with no visible cause.
       console.warn(`[auth] 401 token verification failed [${code}${claim}]`);
       return c.json(
         {
@@ -335,14 +319,8 @@ export function createAuthMiddleware(
   };
 }
 
-// Backstop against just-in-time signup flooding. ensureUser mints a
-// user + identity row for any never-seen (provider, sub), so an
-// attacker holding many provider identities could mass-create rows and bloat the
-// DB. This caps NEW signups globally per window; RETURNING users are
-// never touched (the guard only fires on the create branch). In-memory and
-// per-instance like ratelimit.ts — abuse control, not a hard security boundary;
-// the provider's own attack protection is the first line. Tune the cap if
-// a real launch spike ever trips it (it logs when it does).
+// Limit new-identity provisioning without blocking returning users. This
+// per-process budget bounds abuse; it is not a cross-instance security boundary.
 const SIGNUP_WINDOW_MS = 60 * 60 * 1000; // 1h
 const SIGNUP_MAX_PER_WINDOW = 200;
 let signupWindow = { count: 0, resetAt: 0 };
@@ -875,13 +853,8 @@ export async function resolveAuthenticatedUser(
   return created;
 }
 
-/**
- * JIT provisioning, idempotent under concurrency: identity link → user row →
- * permanent Personal organization → default team. Collaborative organizations
- * are still explicitly created/joined.
- * Parallel first requests are serialized by the unique indexes
- * (provider+sub, email) and settle via ON CONFLICT / row re-reads.
- */
+/** Provision identity, account, Personal organization and default team
+ * idempotently; collaborative membership still requires explicit user action. */
 export async function ensureUser(
   pool: pg.Pool,
   input: AuthenticatedIdentityInput,
@@ -907,11 +880,8 @@ async function ensureUserWithoutProviderLock(
     );
     if (!linked.rows[0]) {
       await requireUnfencedWorkOSIdentity(tx, input);
-      // Serialize only the first-request path for one provider identity, then
-      // re-read after acquiring the lock. Unique constraints reject duplicates,
-      // but without this lock the losing transaction surfaces an opaque 500
-      // instead of reusing the row the winner just provisioned. Hash collisions
-      // cause harmless extra serialization.
+      // Serialize first requests for one identity, then reread the winning row;
+      // unique constraints alone would turn the losing request into an opaque failure.
       await tx.query(`SELECT pg_advisory_xact_lock(hashtextextended($1, 0)) /*lock_purpose='auth-identity'*/`, [
         `identity:${input.provider.length}:${input.provider}:${input.providerSubject}`,
       ]);
@@ -944,12 +914,8 @@ async function ensureUserWithoutProviderLock(
           "This sign-in identity is no longer active.",
         );
       }
-      // Mirror the IdP's email — UNLESS another user already owns it, in which
-      // case the UPDATE would trip the users.email unique constraint and abort
-      // the tx as a 500 on every request (locking this user out entirely). An
-      // email change colliding with an existing account needs a deliberate
-      // resolution, not an outage: keep the stored email and let the user keep
-      // working. The WHERE NOT EXISTS makes the guard atomic with the write.
+      // Keep the stored email on collision: aborting this update would lock out
+      // the account on every request. Resolve conflicting ownership explicitly.
       const updated = await tx.query<typeof row>(
         `UPDATE users SET
            email = CASE
@@ -990,9 +956,7 @@ async function ensureUserWithoutProviderLock(
         );
       }
     } else {
-      // A brand-new identity → a real signup. Charge the global signup budget
-      // BEFORE creating anything, so a flood of fresh provider subs can't mass-
-      // provision rows. Throws 429 past the window cap.
+      // Charge new identities before any rows are created.
       chargeSignupBudget(Date.now());
       // Different provider identities can race with the same case-insensitive
       // email. Serialize that narrower signup branch so the loser observes the
@@ -1000,14 +964,8 @@ async function ensureUserWithoutProviderLock(
       await tx.query(`SELECT pg_advisory_xact_lock(hashtextextended($1, 1)) /*lock_purpose='auth-email'*/`, [
         `email:${input.email.toLowerCase()}`,
       ]);
-      // No identity link yet for this (provider, sub). If a DIFFERENT identity
-      // already owns this email, this is a SECOND sign-in method for the same
-      // person (e.g. GitHub after Google). We deliberately do NOT auto-link on
-      // email — that would be an account-takeover vector if two IdPs report the
-      // same address — but we also must not blindly INSERT and hit the
-      // users.email UNIQUE constraint, which aborts the whole tx as an opaque
-      // 500 on EVERY future request with that provider (a permanent lockout).
-      // Fail with a deliberate, actionable 409 instead.
+      // Never auto-link identities by email: two providers can assert the same
+      // address. Return an actionable conflict instead of a unique-constraint failure.
       const emailOwner = await tx.query<{
         id: string;
         auth_status: AccountAuthStatus;
@@ -1172,11 +1130,8 @@ async function ensureUserWithoutProviderLock(
   return result.user;
 }
 
-/**
- * Make Personal a database invariant, not a first-page side effect. Running on
- * every authenticated request repairs an interrupted/manual import and updates
- * the fallback "Personal" label if an identity provider later supplies a name.
- */
+/** Repair Personal membership and its default team during provisioning;
+ * promote only the fallback label when the provider supplies a name. */
 export async function ensurePersonalOrganization(
   tx: Tx,
   user: {
@@ -1308,7 +1263,7 @@ export async function ensurePersonalOrganization(
   }
 }
 
-/** Short random slug suffix (base36) — collision-avoidance, not security. */
+/** Slug collision avoidance, not an authentication secret. */
 export function randomSuffix(): string {
   return randomBytes(4).toString("hex");
 }
