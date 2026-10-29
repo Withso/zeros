@@ -1,36 +1,8 @@
 import { trackAgentTurnUsage } from "@/renderer/platform/observability/analytics/agent-events";
 import { turnRowCache, turnRowKey } from "@/renderer/state/read-caches";
-// ──────────────────────────────────────────────────────────
-// sessions-store — Zustand store for per-chat session slots
-// ──────────────────────────────────────────────────────────
-//
-// Before the per-chat store split, every
-// chat lived in a single React useState<Record<chatId, slot>>
-// inside <AgentSessionsProvider>. That meant a token arriving
-// for chat A re-rendered chat B's MessageView, the sidebar
-// row for chat C, and every other consumer of the context.
-//
-// Zustand inverts that: subscribers pick the slice they care
-// about and only re-render when *that slice* changes. The
-// per-chat hook (`useChatSession`) now subscribes to one
-// `sessions[chatId]` slot via a selector — chat A's stream no
-// longer touches chat B.
-//
-// What lives here:
-//   - `sessions`: the chatId-keyed slot map (the one truth)
-//   - `warmAgentIds`: set of agent ids the engine confirmed alive
-//   - `executionToChatId`: O(1) reverse index for bridge dispatch
-//     (kept in the store so it stays consistent with `sessions`
-//     instead of as a separate React ref that can drift)
-//   - Pure mutators + bridge-notification reducers
-//
-// What does NOT live here:
-//   - The bridge client (lives in <AgentSessionsProvider>)
-//   - Async actions that talk to the bridge (sendPrompt,
-//     ensureSession, …) — those need bridge access and stay
-//     in the provider as React-callback methods
-//
-// ──────────────────────────────────────────────────────────
+// Per-chat session slots in Zustand, so a subscriber re-renders only when its
+// own slice changes: chat A's stream never re-renders chat B. Bridge actions
+// (sendPrompt, ensureSession) live in AgentSessionsProvider.
 
 import {
   agentActivity,
@@ -143,16 +115,10 @@ function sameWorkflows(a: WorkflowProgress[], b: WorkflowProgress[]): boolean {
   });
 }
 
-/** Append a newly-arrived gate to the pending queue.
- *
- *  Arrival order, with ONE exception: a pending PLAN REVIEW yields to a real
- *  Allow/Deny gate. Plan review deliberately does NOT take the composer's slot
- *  (the user may keep typing to refine the plan), so it can legitimately sit at
- *  the head for minutes — and only the head renders. A real gate arriving behind
- *  it would then stay invisible until its own engine-side auto-deny timeout,
- *  with the turn blocked the whole time. Real gates therefore queue AHEAD of
- *  plan reviews; the plan re-surfaces (unanswered, undisturbed) as soon as they
- *  are decided. Two real gates keep strict arrival order between themselves. */
+/** Append a gate to the pending queue in arrival order, except that a real
+ *  Allow/Deny gate queues ahead of a pending plan review. Only the head renders,
+ *  and a plan review can sit there for minutes while the user refines it; a
+ *  real gate behind it would stay invisible until its auto-deny. */
 function queuePermission(
   existing: PendingPermission[],
   incoming: PendingPermission,
@@ -169,26 +135,11 @@ function queuePermission(
   ];
 }
 
-/** Merge the engine's authoritative recent-message window into a local slot's
- *  message list (the cross-device reconcile in <AgentSessionsProvider>).
- *
- *  The window is the canonical most-recent tail. The only reason the local
- *  `current` list can be LONGER is a scroll-up that loaded older history above
- *  the window. We anchor the window by its first id inside `current`:
- *
- *   - anchor found → keep `current` ABOVE the anchor (the scrolled-up history)
- *     and let the window own everything from the anchor down. A remote
- *     truncation returns a shorter (non-empty) window, so the now-stale tail
- *     below the anchor is DROPPED rather than overlaid back in (the cross-device
- *     click-to-edit "stale messages stay visible" bug).
- *   - anchor absent → the window's head isn't loaded here, so it's a full
- *     remote reset; replace wholesale with the window.
- *   - empty window → AMBIGUOUS: a genuine remote clear is indistinguishable
- *     from a transient empty read (older builds returned [] when the bridge
- *     is momentarily unavailable). Don't let that wipe a populated slot — keep
- *     what we have; a real clear reflects on the next full re-hydrate (re-open).
- *
- *  Pure + side-effect-free so it's unit-testable without the provider. */
+/** Merge the engine's authoritative recent window into a local message list.
+ *  Anchor the window by its first id: above the anchor keep scrolled-up
+ *  history and let the window own the rest, dropping a remotely truncated
+ *  tail; without the anchor, replace wholesale. An empty window is ambiguous
+ *  (a clear or a transient empty read), so keep what is there. */
 export function mergeWindowedTail(
   current: AgentMessage[],
   windowed: AgentMessage[],
@@ -198,11 +149,8 @@ export function mergeWindowedTail(
   return retainMessageReferences(current, anchor >= 0 ? [...current.slice(0, anchor), ...windowed] : windowed);
 }
 
-/** Per-chat debounce timers for scroll-position persistence. Scroll
- *  events fire many times per second; we let the in-memory store
- *  update on every event (free) but coalesce writes into one per chat per
- *  second of scroll-idle. The trailing write captures the user's final resting
- *  position. Scroll state is device-local. */
+/** Scroll positions update in memory on every event but persist once per chat
+ *  per second of scroll-idle, capturing the final resting position. */
 const SCROLL_PERSIST_DEBOUNCE_MS = 1000;
 const scrollPersistTimers = new Map<string, ReturnType<typeof setTimeout>>();
 
@@ -219,11 +167,8 @@ function schedulePersistScrollPosition(
   scrollPersistTimers.set(chatId, t);
 }
 
-// The question-resolution stamp model (QuestionRecordStamp / build / read)
-// moved to @zeros/protocol/agent-messages (2026-07-04): the ADAPTERS now stamp
-// the engine-persisted transcript on settle (a synthetic tool_call_update),
-// so the engine needs the same builder. Re-exported here so every existing
-// sessions-store import site keeps resolving.
+// The question-stamp model lives in @zeros/protocol/agent-messages, where the
+// adapters also use it; re-exported for existing import sites.
 export {
   buildQuestionStamp,
   readQuestionStamp,
@@ -234,11 +179,9 @@ import {
   type QuestionRecordStamp,
 } from "@zeros/protocol/agent-messages";
 
-/** Renderer-side cap on per-chat message history. The engine streams
- *  every tool-call delta as a separate notification; long edit-heavy
- *  sessions can produce tens of thousands of entries. We keep the most
- *  recent N so the renderer doesn't grow without bound. SQLite remains the
- *  source of truth, and older history is loaded through the windowed view. */
+/** Renderer cap on per-chat messages: edit-heavy sessions emit tens of
+ *  thousands of deltas. SQLite stays the source of truth; older history loads
+ *  through the windowed view. */
 export const MAX_MESSAGES_PER_CHAT = 1000;
 
 function capMessages(messages: AgentMessage[]): AgentMessage[] {
@@ -361,51 +304,27 @@ export interface SessionsStoreState {
   // hydration reconciles durable row ids in reconcileHistoryMessages. Equal
   // content or tool inputs do not prove that two events are the same call.
 
-  /** Per-chat scroll position. When the user swaps
-   *  between parallel agent chats, each chat restores its last scroll
-   *  position rather than snapping to bottom. 2026-07-21: the value is a
-   *  ChatScrollPosition (anchor turn id + offset + at-bottom flag), not a
-   *  bare px — pixel offsets drift in the content-visibility transcript
-   *  (see chat-scroll-anchor.ts). Hydrated at app boot via
-   *  `seedScrollPositions`, so the layoutEffect on chat mount finds the
-   *  durable value synchronously. Writes persist on a 1-second
-   *  scroll-idle debounce (see `setScrollPosition`). */
+  /** Per-chat scroll position, restored when switching between chats. An anchor
+   *  turn, offset and at-bottom flag rather than pixels, which drift in the
+   *  content-visibility transcript (chat-scroll-anchor.ts). Seeded at boot so
+   *  the mount layout effect finds it synchronously. */
   scrollPositions: Record<string, ChatScrollPosition>;
 
-  /** Chats whose user has just clicked Cancel. The cancel sends a
-   *  SIGTERM to the agent subprocess, which exits with code 143;
-   *  the engine emits AGENT_PROMPT_FAILED — but that's an *expected*
-   *  exit, not a real failure. Without this flag, the cancel path
-   *  flips status to "failed" and shows an "agent error" tag, leaving
-   *  the user stranded. With it, the prompt-failure handler ignores
-   *  the post-cancel exit and the chat stays in "ready" state so the
-   *  user can immediately type a new prompt. The flag is cleared
-   *  inside the prompt-failure handler when the expected exit arrives. */
+  /** Chats the user just cancelled. The stopped subprocess exits with
+   *  AGENT_PROMPT_FAILED; this flag keeps that expected exit from marking the
+   *  chat failed. Cleared when the exit arrives. */
   cancellingChats: Set<string>;
 
-  /** chatId → the user-message id of the turn THIS renderer currently has in
-   *  flight (its optimistic bubble is in the transcript and its prompt has not
-   *  settled). Empty for every chat after a reload.
-   *
-   *  Top-level, not a slot field, deliberately: a mid-send session rebuild
-   *  re-seeds the slot from BLANK, which is exactly when the fact matters.
-   *
-   *  It exists because "is this turn in flight?" was being inferred from
-   *  `status === "warming" && no events yet` — and reopening a chat (a tab
-   *  switch, a workspace switch, an app reload) goes through the same warming
-   *  window, so a turn STOPPED before it produced any output — no events, ever —
-   *  was repainted as live: agent shimmer plus an elapsed timer counting from
-   *  the original prompt, with its footer suppressed, until the session settled.
-   *  A turn id cannot be confused that way. */
+  /** chatId → the user-message id of the turn this renderer has in flight.
+   *  Top-level, not a slot field, because a mid-send rebuild re-seeds the slot.
+   *  Inferring "in flight" from warming status misfired: reopening a chat warms
+   *  it too, so a turn stopped before any output was repainted as live. */
   pendingLocalTurns: Record<string, string>;
 
-  /** Per-chat permission policies ("Always allow Bash",
-   *  etc.). Loaded from localStorage at boot; kept in memory and
-   *  persisted on every mutation. Keys are chat ids; values are
-   *  ordered lists (newest last). */
+  /** Per-chat permission policies ("Always allow Bash"), loaded from
+   *  localStorage at boot and persisted on every mutation. Newest last. */
   chatPolicies: Record<string, PolicyRule[]>;
 
-  // ── Pure mutators ───────────────────────────────────────
   setSession: (chatId: string, slot: AgentSessionState) => void;
   patchSession: (chatId: string, patch: Partial<AgentSessionState>, pendingTurnId?: string | null) => void;
   presentCloudStop: (chatId: string) => AgentSessionState["cloudStop"];
@@ -422,12 +341,8 @@ export interface SessionsStoreState {
    *  bounded retained-view deck. The live runtime shell and reverse routing
    *  index stay intact so turns, gates and scheduled work keep functioning. */
   evictTranscript: (chatId: string) => void;
-  /** Drop the message with
-   *  fromMsgId and every later message in this chat from the in-memory
-   *  store. Used by the click-to-edit flow before re-sending the edited
-   *  prompt. The caller persists the corresponding SQLite truncation
-   *  via agent-history-client.truncateMessagesFrom — this is the
-   *  in-memory half. No-op when the message id isn't in the slot. */
+  /** Drop the message fromMsgId and every later one from memory, for
+   *  click-to-edit. The caller persists the matching SQLite truncation. */
   truncateMessagesFromInMemory: (chatId: string, fromMsgId: string) => void;
   /** Drop only the volatile live session slot. Used when a workspace is
    * archived: transcript linkage, scroll anchor, and policies must survive so
@@ -436,10 +351,7 @@ export interface SessionsStoreState {
   removeSession: (chatId: string) => void;
   setWarmAgent: (agentId: string, warm: boolean) => void;
   setScrollPosition: (chatId: string, pos: ChatScrollPosition) => void;
-  /** Replace the scrollPositions map with the boot-time hydrated copy
-   *  from device-local storage. Called once at app start before any chat
-   *  mounts so the layoutEffect's `scrollPositions[chatId]` lookup is
-   *  populated. */
+  /** Replace scrollPositions with the boot-time copy, before any chat mounts. */
   seedScrollPositions: (positions: Record<string, ChatScrollPosition>) => void;
   setCancelling: (chatId: string, value: boolean) => void;
   /** Publish (or clear, with null) the turn this renderer has in flight for a
@@ -448,25 +360,16 @@ export interface SessionsStoreState {
   setPendingLocalTurn: (chatId: string, turnId: string | null) => void;
   clearAll: () => void;
 
-  // Policy mutators.
   addPolicy: (chatId: string, rule: PolicyRule) => void;
-  /** Pull the durable copy of a chat's policies from SQLite and
-   *  replace the in-memory slice for that chat. Called on chat
-   *  open so localStorage's bootstrap data is overlaid with the
-   *  authoritative DB rows. Idempotent. */
+  /** Reload a chat's policies on open; idempotent. */
   hydrateChatPolicies: (chatId: string) => Promise<void>;
 
-  // ── Bridge-notification reducers ────────────────────────
-  /** Dispatch a SessionNotification to its chat's slot. Splits on
-   *  notification kind: `usage_update`/`current_mode_update`/
-   *  `available_commands_update` patch top-level fields; everything else
-   *  feeds into the messages reducer (`applyUpdate`). */
+  /** Usage, mode and command updates patch top-level fields; everything else
+   *  goes through the messages reducer (applyUpdate). */
   applyBridgeUpdate: (notification: SessionNotification) => void;
   /** Local transcript content already grouped by one provider flush. Controls
    * and cloud notifications keep their individual, ordered reducer path. */
   applyBridgeTranscriptUpdates: (notifications: readonly SessionNotification[]) => void;
-  /** CP restore state only; a separately proved live/native snapshot keeps its
-   * own transcript lineage. This does not settle or cancel any native turn. */
 
   /** Permission requests are routed through the request's sessionId. */
   applyBridgePermissionRequest: (
@@ -479,15 +382,9 @@ export interface SessionsStoreState {
    * single-card rendering contract. */
   settlePendingPermission: (chatId: string, permissionId: string) => void;
 
-  /** Drop a STRANDED plan-review card (Claude's ExitPlanMode gate) when its
-   *  turn reaches a TERMINAL state with the gate still pending — the adapter's
-   *  30-minute auto-deny fired, or the turn died mid-plan. The engine already
-   *  released the gate, so the PlanReviewCard's buttons would click into a
-   *  resolved gate (a silent no-op) with no way to dismiss the card. Called
-   *  from the turn-settle `finally`: clears `pendingPermission` IFF it's a plan
-   *  review — a real Allow/Deny gate (which REPLACES the composer) is
-   *  deliberately left untouched. No-op in the happy path, where Approve / a
-   *  typed follow-up already cleared the gate before the turn settled. */
+  /** Drop a plan-review card stranded by a terminal turn (the 30-minute
+   *  auto-deny, or a turn that died mid-plan). The gate is already released, so
+   *  its buttons would do nothing. Real Allow/Deny gates are left untouched. */
   clearStrandedPlanReview: (chatId: string) => void;
 
   /** Blocking questions — routed like permissions, but APPENDED to a queue
@@ -498,11 +395,8 @@ export interface SessionsStoreState {
     request: QuestionRequest,
   ) => void;
 
-  /** Durable question-record: stamp the resolution onto the matching
-   *  transcript tool message (by toolCallId) so the read-only record shows
-   *  ANSWERED (with the user's per-question answers) or SKIPPED (dismissed /
-   *  timed out — the agent proceeded with its default). No-op if the message
-   *  isn't found yet. */
+  /** Stamp the outcome onto the matching tool message so its read-only record
+   *  shows ANSWERED (with answers) or SKIPPED. No-op until the message lands. */
   stampQuestionAnswer: (
     chatId: string,
     toolCallId: string,
@@ -514,11 +408,9 @@ export interface SessionsStoreState {
    *  AWAITING). Matches by toolCallId OR nativeToolCallId like the stamper. */
   clearQuestionStamp: (chatId: string, toolCallId: string) => void;
 
-  /** A question settled ENGINE-SIDE (response timeout, turn abort, or another
-   *  client answered). Evict it from whichever chat's queue holds it — its
-   *  resolver is gone, so a parked card would answer into the void — and stamp
-   *  the transcript record with the outcome. No-op when the questionId isn't
-   *  queued (the local client already answered it). */
+  /** A question settled engine-side (timeout, abort, another client): evict it,
+   *  since its resolver is gone, and stamp the outcome. No-op when already
+   *  answered here. */
   applyBridgeQuestionSettled: (
     questionId: string,
     outcome: QuestionOutcome,
@@ -534,16 +426,10 @@ export interface SessionsStoreState {
     entries: ReadonlyArray<{ agentId: string; line: string }>,
   ) => void;
 
-  /** Subprocess exited. Any chat on this agent that wasn't already in a
-   *  terminal state flips to `reconnecting` so the next user action can
-   *  drive a fresh ensureSession. We do NOT auto-retry — that path
-   *  produced eternal "Reconnecting…" bugs in the past.
-   *
-   *  `sessionId` scopes the exit to ONE chat (Codex runs one app-server
-   *  child per chat). When set, only the chat bound to that sessionId
-   *  flips — sibling chats on the same agent stay live, and the agent
-   *  isn't cooled. When absent, the exit is agent-wide (a shared
-   *  subprocess) and every non-terminal chat flips. */
+  /** The subprocess exited: non-terminal chats on the agent flip to
+   *  reconnecting so the next user action rebuilds; no auto-retry, which looped
+   *  forever before. sessionId scopes it to one chat (Codex runs a child per
+   *  chat) without cooling the agent. */
   applyBridgeAgentExit: (agentId: string, sessionId?: string | null) => void;
 
   /** Apply an exact execution-boundary update. A revoked boundary is stronger
@@ -622,9 +508,7 @@ export const useSessionsStore = create<SessionsStoreState>((set, get) => ({
   scrollPositions: {},
   cancellingChats: new Set(),
   pendingLocalTurns: {},
-  // Load existing policies eagerly so the first permission
-  // request after boot can already auto-respond. The doc is small
-  // (a few rules per chat) so eager load has no measurable cost.
+  // Load policies eagerly so the first request after boot can auto-respond.
   chatPolicies: loadPolicies().byChat,
 
   setScrollPosition: (chatId, pos) => {
@@ -638,16 +522,13 @@ export const useSessionsStore = create<SessionsStoreState>((set, get) => ({
         scrollPositions: { ...state.scrollPositions, [chatId]: pos },
       };
     });
-    // Debounced persist — coalesces a fast scroll burst into one write at
-    // scroll-idle. Errors are swallowed (in-memory state is the truth
-    // until restart).
+    // Debounced; write errors are swallowed (memory is the truth until restart).
     schedulePersistScrollPosition(chatId, pos);
   },
 
   seedScrollPositions: (positions) => {
-    // Replace, not merge — the SQLite copy is authoritative at boot.
-    // No-op when positions is empty so non-Electron harnesses don't
-    // wipe any in-memory state seeded by tests.
+    // Replace, not merge: the SQLite copy is authoritative at boot. Skip an empty
+    // map so harnesses keep their seeded state.
     if (Object.keys(positions).length === 0) return;
     set(() => ({ scrollPositions: { ...positions } }));
   },
@@ -714,23 +595,17 @@ export const useSessionsStore = create<SessionsStoreState>((set, get) => ({
     get().patchSession(chatId, { cloudTurnPresentations });
   },
 
-  // ── Policies (localStorage bootstrap, then device-local SQLite) ──
   addPolicy: (chatId, rule) => {
     set((state) => {
       const existing = state.chatPolicies[chatId] ?? [];
       const nextRules = [...existing, rule];
       const nextByChat = { ...state.chatPolicies, [chatId]: nextRules };
-      // Persist on every mutation. The doc is tiny (a few rules per chat) so
-      // the localStorage write is cheap enough to skip debouncing.
       savePolicies({ byChat: nextByChat });
       return { chatPolicies: nextByChat };
     });
   },
   hydrateChatPolicies: async (chatId) => {
-    // Re-read this chat's rules from localStorage on open, so a change made in
-    // another window/tab since boot is picked up. localStorage is the sole store
-    // now that the retired electron/db.ts backstop is gone. Async signature kept
-    // for callers.
+    // Re-read on open so a change made in another window since boot is picked up.
     const rules = loadPolicies().byChat[chatId] ?? [];
     set((state) => {
       const previous = state.chatPolicies[chatId] ?? [];
@@ -956,10 +831,7 @@ export const useSessionsStore = create<SessionsStoreState>((set, get) => ({
         ...slot,
         messages: truncated,
         leadingPrompt: cutsLeadingTurn ? null : slot.leadingPrompt,
-        // Pending permission may have been bound to a tool the user
-        // is now removing — clear it so the inline cluster doesn't
-        // dangle. Plan stays since the user's intent is "edit this
-        // prompt and continue"; the planner can re-emit if needed.
+        // The pending permission may belong to a removed tool; clear it.
         pendingPermission: null,
         pendingPermissions: [],
       };
@@ -994,11 +866,8 @@ export const useSessionsStore = create<SessionsStoreState>((set, get) => ({
   },
 
   removeSession: (chatId) => {
-    // Clear any pending scroll-persist debounce timer first. Otherwise
-    // a debounce timer scheduled in the last second writes to a
-    // deleted chat_id row (SQLite UPSERT recreates the row) AFTER the
-    // user explicitly removed the chat. Cleanup-on-removal closes the
-    // race window cleanly.
+    // Clear the pending scroll-persist timer first, or its UPSERT recreates the
+    // row after the chat was removed.
     const pendingTimer = scrollPersistTimers.get(chatId);
     if (pendingTimer) {
       clearTimeout(pendingTimer);
@@ -1077,14 +946,9 @@ export const useSessionsStore = create<SessionsStoreState>((set, get) => ({
   },
 
   applyBridgeUpdate: (notification) => {
-    // Engine-authoritative chatId (stamped on the notification by the bridge
-    // listener) wins over the local executionId→chatId index, which can be
-    // momentarily stale (mid force-respawn the old execution is de-indexed
-    // before the new one binds; an agent may emit before its executionId is
-    // stored). This is the keystone fix for "messages/tool calls vanish, only
-    // mode-switch banners survive": banners are synthesized locally with the
-    // live sessionId so they always routed, while agent content arrived on a
-    // sessionId the index didn't (yet) know and was silently dropped here.
+    // The engine-stamped chatId wins over the executionId→chatId index, which can
+    // be stale mid force-respawn or before an agent's executionId is stored.
+    // Routing by the index alone silently dropped agent content.
     const chatId =
       (notification as { chatId?: string }).chatId ??
       get().executionToChatId[
@@ -1247,10 +1111,8 @@ export const useSessionsStore = create<SessionsStoreState>((set, get) => ({
           lastStopReason: null,
           foregroundTurnId: upd.turnId ?? slot.foregroundTurnId,
           ...(slot.cloudPromptPending ? { cloudPromptPending: false } : {}),
-          // A local send starts this clock before session admission. Cursor's
-          // provider create can acknowledge seconds later; lifecycle updates
-          // may refine the start earlier, but must never move it forward and
-          // visibly reset the timer.
+          // A local send starts this clock before admission. Lifecycle updates may move
+          // the start earlier, never later, or the timer visibly resets.
           activeTurnStartedAt:
             (slot.foregroundTurnId && slot.foregroundTurnId !== upd.turnId && !pendingTurn) || slot.activeTurnStartedAt == null
               ? engineStartedAt
@@ -1280,12 +1142,9 @@ export const useSessionsStore = create<SessionsStoreState>((set, get) => ({
               }) } : {}),
             },
           },
-          // Cloud process retirement and its durable command receipt can
-          // outlast the actual turn. Clear this exact presentation owner with
-          // the terminal state, so Claude's activity selector cannot keep the
-          // finished answer running or restart its now-cleared elapsed clock.
-          // The pending RPC/queue lock remains independent. An older turn or
-          // another execution must never release a newer optimistic send.
+          // Cloud retirement and its durable receipt can outlast the turn. Clear this
+          // exact presentation owner on terminal state, so a finished answer stops
+          // reading as running; an older turn cannot release a newer send.
           pendingLocalTurns: state.pendingLocalTurns[chatId] === upd.turnId
             ? withoutPendingLocalTurn(state.pendingLocalTurns, chatId)
             : state.pendingLocalTurns,
@@ -1394,26 +1253,17 @@ export const useSessionsStore = create<SessionsStoreState>((set, get) => ({
       const workspace = useWorkspaceStore.getState();
       const chat = workspace.chats.find((candidate) => candidate.id === chatId);
       if (chat && chat.effort !== effort) {
-        // ONLY the chat snapshot moves. This notification is not a user choice:
-        // Codex raises its own thread to native `ultra` mid-turn (see the
-        // app-server adapter's thread/settings/updated hook), so writing the
-        // exact model's durable memory here would let the model's own behavior
-        // reopen every FUTURE chat at the tier it escalated to — and mirror
-        // that into the user's settings.toml. The composer still follows the
-        // running session, which is what this update is for.
+        // Only the chat snapshot moves: Codex raises its own thread to ultra mid-turn,
+        // and writing the model's durable memory would reopen every future chat at
+        // that tier and mirror it into settings.toml.
         workspace.dispatch({
           type: "UPDATE_CHAT_SETTINGS",
           id: chatId,
           updates: { effort },
         });
-        // The agent is ALREADY running at this tier — it reported the change
-        // itself. Advance the live slot's applied-env stamp with the chat, or
-        // sendPrompt's settings-drift reconcile reads the write above as user
-        // drift and performs an unnecessary close→resume before the next send.
-        // Only the effort slot moves, so an unapplied model/Fast/add-dir change
-        // is still reconciled. <AgentSessionsProvider> additionally pushes
-        // AGENT_UPDATE_CONFIG so the ENGINE's session env matches what the
-        // composer now shows (codex re-reads it on every turn/start).
+        // The agent already runs at this tier. Advance the slot's applied-env stamp
+        // for the effort only, or sendPrompt reads the write above as user drift and
+        // close-resumes before the next send.
         const applied = effortAdoptedEnvKey(
           get().sessions[chatId]?.appliedChatEnvKey,
           effort,
@@ -1505,7 +1355,6 @@ export const useSessionsStore = create<SessionsStoreState>((set, get) => ({
       return;
     }
 
-    // Everything else → feed to the messages reducer.
     set((state) => reduceTranscriptUpdate(state, chatId, notification));
   },
 
@@ -1532,15 +1381,9 @@ export const useSessionsStore = create<SessionsStoreState>((set, get) => ({
               pending.request.nativeRequestId === request.nativeRequestId,
           );
     if (nativeDuplicateIndex >= 0) {
-      // A rebuilt SDK re-arms the same vendor request under a fresh local id.
-      // Preserve its queue position/card, but adopt the live resolver id so the
-      // eventual answer cannot be sent into the dead pre-rebuild request.
-      //
-      // This can only ever collapse a REPLAY, never two live gates: every
-      // vendor id we key on is unique per parked request — Claude's
-      // `canUseTool` carries the control envelope's `requestId`, and its
-      // toolUseID fallback is documented unique per tool call within an
-      // assistant message.
+      // A rebuilt SDK re-arms the same vendor request under a fresh local id: keep
+      // its queue position but adopt the live resolver id. Vendor ids are unique per
+      // parked request, so this collapses only replays.
       const pendingPermissions = existing.map((pending, index) =>
         index === nativeDuplicateIndex
           ? { agentId, permissionId, request }
@@ -1607,9 +1450,8 @@ export const useSessionsStore = create<SessionsStoreState>((set, get) => ({
     if (!chatId) return;
     const slot = get().sessions[chatId];
     if (!slot) return;
-    // Dedup on nativeRequestId (SDK re-arms in-flight requests on reconnect and
-    // the adapter mints a fresh questionId for the same underlying request), and
-    // on questionId itself. APPEND — never clobber a queued question.
+    // Dedupe on nativeRequestId (the SDK re-arms on reconnect under a fresh
+    // questionId) and questionId; append, never clobber.
     const existing = slot.pendingQuestions ?? [];
     const dupe = existing.some(
       (q) =>
@@ -1802,14 +1644,10 @@ export const useSessionsStore = create<SessionsStoreState>((set, get) => ({
         };
       }
 
-      // Revocation is authoritative and execution-scoped. Do not retain the
-      // route merely because a local send/rebind is active: doing so lets its
-      // next AGENT_PROMPT target an execution the engine has already removed.
-      // Keep transcript, cwd, usage and providerBinding/providerMetadata — they
-      // are conversation state and are exactly what silent re-adoption needs.
-      // A cloud route names the conversation, not the native execution.
-      // Its retained Stop still needs that route and turn until the command
-      // observer proves retirement; revocation alone cannot settle it.
+      // Revocation is execution-scoped and authoritative: never keep the route for
+      // an active send, or its next prompt targets a removed execution. Keep the
+      // conversation state silent re-adoption needs. A cloud route's retained Stop
+      // still needs its route and turn until retirement is proved.
       const stoppingCloud = isCloudWorkspace(slot.cwd) && !!slot.cloudStop;
       const terminal =
         slot.status === "failed" || slot.status === "auth-required";
@@ -1857,10 +1695,7 @@ export const useSessionsStore = create<SessionsStoreState>((set, get) => ({
   },
 
   applyBridgeAgentExit: (agentId, sessionId) => {
-    // A per-session exit (Codex: one app-server child per chat) must NOT
-    // cool the whole agent — sibling chats on the same agent are still
-    // live. Only an agent-wide exit (a shared subprocess, no sessionId)
-    // marks the pool cold.
+    // A per-session exit must not cool the agent; sibling chats stay live.
     if (!sessionId) get().setWarmAgent(agentId, false);
     set((state) => {
       let changed = false;
@@ -1873,26 +1708,15 @@ export const useSessionsStore = create<SessionsStoreState>((set, get) => ({
           next[chatId] = slot;
           continue;
         }
-        // Evict any parked question card for this dead session REGARDLESS of
-        // status (even streaming) — a pending card must not outlive the request
-        // that spawned it. The engine resolver fails closed on the crash; a
-        // stale card would send an answer into a dead session. Runs BEFORE the
-        // activelyDriven early-return, which otherwise skips the streaming case.
+        // Evict a parked question for the dead session regardless of status: its
+        // resolver failed with the process, and an answer would go nowhere.
         let cur = slot;
         if ((slot.pendingQuestions?.length ?? 0) > 0) {
           cur = { ...slot, pendingQuestions: [] };
           changed = true;
         }
-        // Same rule for a parked Allow/Deny permission gate (incl. Claude's plan
-        // review, which is a pendingPermission): the SDK's canUseTool resolver
-        // died with the subprocess, so the card can never resolve — clicking
-        // Allow/Deny fires AGENT_PERMISSION_RESPONSE into a dead session (a
-        // silent no-op) while the card keeps CONCEALING the composer
-        // (permissionCardActive → the composer card is display:none). Left in
-        // place it was a second way a crashed/rebuilt chat wedged the composer
-        // (the first being the failed-state read-only editor). Evict REGARDLESS
-        // of status — mirrors pendingQuestions above — so the composer returns
-        // and sendPrompt's rebuild+resend path starts from a clean gate.
+        // Same for a parked permission gate (including plan review): its resolver died
+        // too, and the card would keep concealing the composer.
         if (cur.pendingPermission) {
           cur = {
             ...cur,
@@ -1901,11 +1725,8 @@ export const useSessionsStore = create<SessionsStoreState>((set, get) => ({
           };
           changed = true;
         }
-        // Active task snapshots are owned by this provider process. Once the
-        // process exits they are no longer usable stale-while-revalidate data:
-        // no task in that snapshot can still receive progress or a scoped Stop.
-        // Clear before the activelyDriven branch too, so a turn-recovery race
-        // cannot leave dead work docked while the replacement session warms.
+        // Task snapshots belong to the exited process; clear them before the
+        // activelyDriven branch so dead work cannot stay docked.
         if (
           cur.backgroundTasks.length > 0 ||
           cur.waitingForBackgroundTasks ||
@@ -1929,13 +1750,8 @@ export const useSessionsStore = create<SessionsStoreState>((set, get) => ({
         // clear next step — don't downgrade them to a transient blip.
         const terminal =
           cur.status === "failed" || cur.status === "auth-required";
-        // A SESSION-SCOPED crash while a turn is in flight (streaming) or a
-        // rebuild is warming is already owned by the prompt-retry path: the
-        // codex adapter throws a recoverable transport-closed that sendPrompt
-        // rebuilds + resends from. Clearing the sessionId here would race
-        // that recovery, so leave the actively-driven chat alone. (An
-        // agent-wide exit has no in-flight prompt to lean on, so it still
-        // flips.)
+        // A session-scoped crash during a turn or rebuild belongs to the prompt-retry
+        // path, which rebuilds and resends; clearing the sessionId would race it.
         const activelyDriven =
           !!sessionId &&
           (cur.status === "streaming" || cur.status === "warming");
@@ -1955,11 +1771,9 @@ export const useSessionsStore = create<SessionsStoreState>((set, get) => ({
           executionId: null,
           sessionId: null,
           session: null,
-          // The boundary belonged to the exact execution that just died, and
-          // with executionId nulled the status-changed guard drops any late
-          // engine publish for it — so a stale snapshot here (e.g. `draining`
-          // from a territory restart) would render, and spin, forever. The
-          // next create/load response repopulates both fields.
+          // The boundary belonged to the dead execution, and late publishes for it are
+          // now dropped, so a stale snapshot would spin forever. The next create or load
+          // repopulates it.
           boundary: null,
           boundaryPorts: null,
           foregroundTurnId: null,
@@ -1998,10 +1812,6 @@ function withoutPendingLocalTurn(
   return next;
 }
 
-// ──────────────────────────────────────────────────────────
-// Selector hooks — preferred over reading the whole store
-// ──────────────────────────────────────────────────────────
-
 export function useChatAgentActivity(chatId: string | null | undefined): AgentActivity {
   return useSessionsStore((state) => chatId ? chatAgentActivity(state.sessions[chatId], state.pendingLocalTurns[chatId]) : null);
 }
@@ -2022,26 +1832,9 @@ export function useAnyChatWorkingActivity(chatIds: readonly string[]): AgentActi
   return useSessionsStore((state) => combinedAgentActivity(chatIds.map((id) => workingActivity(state.sessions[id], state.pendingLocalTurns[id]))));
 }
 
-/** True if ANY chat in the given id list currently has an in-flight
- *  turn (status === "streaming"). Used by Repository panel's WorkspaceRow to
- *  swap the GitBranch icon for the ZerosSpinner whenever any agent
- *  bound to a chat in that workspace is actively producing output.
- *
- *  Implementation note: we return a plain boolean (computed inside
- *  the Zustand selector) rather than the full slot list, so tabs
- *  unrelated to the workspace don't trigger re-renders on every
- *  token chunk. Selector identity is stable when the truthy result
- *  doesn't flip — sessions[chatId].status is the only field read,
- *  not the slot reference. */
-/** The user-message id of the turn THIS renderer has in flight for a chat, or
- *  null. A primitive, so a transcript re-renders only when its own pending turn
- *  changes.
- *
- *  This is the honest answer to "is the tail turn in flight?", and it is why a
- *  reopened chat no longer flashes its last turn as live: session status cannot
- *  distinguish a mid-send rebuild from a chat that is merely being resumed, and
- *  a turn stopped before it produced any output looks identical to a turn that
- *  has not produced output YET. See pendingLocalTurns. */
+/** The user-message id of the turn this renderer has in flight, or null. A
+ *  primitive, so a transcript re-renders only when its own pending turn
+ *  changes. Session status cannot tell a mid-send rebuild from a resume. */
 export function usePendingLocalTurnId(
   chatId: string | null | undefined,
 ): string | null {
@@ -2088,14 +1881,9 @@ export function useAnyChatAgentWorking(chatIds: readonly string[]): boolean {
   });
 }
 
-/** True if ANY chat in the given id list has an agent actively occupying its
- *  session — "warming" (a queued prompt is about to run), "streaming" (turn in
- *  flight), or "reconnecting" (respawn reviving an in-flight turn). Broader
- *  than {@link useAnyChatStreaming}: the PR surfaces use it to park their
- *  git-mutating actions (Create PR / Commit-and-push / Merge) while the agent
- *  may still be reshaping the branch — including the warm-up/reconnect windows
- *  where no tokens stream yet but work is committed. Primitive boolean, so the
- *  subscription is stable across token-chunk churn. */
+/** True if any chat's agent occupies its session (warming, streaming or
+ *  reconnecting). PR surfaces park Git-mutating actions while the agent may
+ *  still be reshaping the branch. */
 export function useAnyChatWorking(chatIds: readonly string[]): boolean {
   return useSessionsStore((s) => {
     for (const id of chatIds) {
@@ -2113,12 +1901,8 @@ export function useAnyChatWorking(chatIds: readonly string[]): boolean {
   });
 }
 
-/** Whether THIS chat presents a running turn. Local keeps its streaming
- *  status; cloud can finish presentation before command retirement.
- *  Used by the chat-tab row to swap its
- *  AgentIcon for a ZerosSpinner while the agent is producing
- *  output. Returns a primitive boolean so the subscription is
- *  stable across token-chunk churn. */
+/** Whether this chat presents a running turn. Local keeps its streaming
+ *  status; cloud can finish presentation before command retirement. */
 export function useChatStreaming(chatId: string | null | undefined): boolean {
   return useSessionsStore((s) => {
     if (!chatId) return false;
@@ -2127,17 +1911,8 @@ export function useChatStreaming(chatId: string | null | undefined): boolean {
   });
 }
 
-/** What a chat's agent is ASKING the user, if anything:
- *    • "plan"  — Claude's plan review pends (ExitPlanMode gate)
- *    • "input" — a question or a regular permission gate pends
- *    • null    — nothing asked
- *  Sidebar workspace rows and chat tabs show the matching glyph (clipboard for
- *  plan review, message-circle-question-mark for input) in a slot of its own
- *  while this holds, beside the workspace square or agent icon rather than
- *  instead of it (see agent-awaiting-indicator.tsx). Whether the agent keeps
- *  working meanwhile is parkedOnUser's call (agent-activity.ts): a blocking
- *  ask rests the square, an optional one leaves it moving. Primitive
- *  string|null so the subscription stays stable across token-chunk churn. */
+/** What a chat's agent is asking: "plan" (plan review), "input" (a question or
+ *  a permission gate), or null (agent-awaiting-indicator.tsx). */
 export type ChatAwaitingKind = "plan" | "input" | null;
 
 export function awaitingKindOfSlot(slot: AgentSessionState): ChatAwaitingKind {
@@ -2179,15 +1954,10 @@ export function useAnyChatAwaitingKind(
   });
 }
 
-/** True if ANY session across the whole app has work an app restart would
- *  interrupt: an open provider turn ("streaming"), a send this renderer still
- *  owns (including a cloud send waiting for its workspace or agent), or the
- *  turn, background-task and workflow evidence behind
- *  {@link agentSessionHasActiveWork}. A bare "warming" or "reconnecting" status
- *  is session admission, not work: every opened chat warms before anything is
- *  sent, and idle chats rest in "reconnecting" after an exit or superseded bind
- *  until their next use. Read by both update surfaces to decide whether to
- *  offer "Restart when idle" and when a deferred restart may fire. */
+/** True if any session has work an app restart would interrupt: an open turn,
+ *  a send this renderer owns (a cloud send waiting included), or background
+ *  tasks and workflows. Warming and reconnecting alone are not work. Both
+ *  update surfaces read it before restarting. */
 export function anyAgentHasActiveWork(
   state: Pick<SessionsStoreState, "sessions" | "pendingLocalTurns">,
 ): boolean {

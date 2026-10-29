@@ -1,37 +1,9 @@
-// ──────────────────────────────────────────────────────────
-// EditCard — file edit / write tool calls (AI Elements)
-// ──────────────────────────────────────────────────────────
-//
-// Renders any tool with kind="edit". Today: Claude `Edit` and
-// `Write`, Codex `apply_patch`, Cursor edit, and equivalent tool events.
-//
-// Layout (mapped onto AI Elements <Tool>):
-//   ┌────────────────────────────────────────────────────┐
-//   │ [▶ pencil]  src/foo/bar.ts   +12 −3   18ms [✓]      │  ← ToolHeader
-//   ├────────────────────────────────────────────────────┤
-//   │ unified diff, syntax highlighted                   │  ← ToolContent
-//   │ side-by-side ≥800px panel; stacked otherwise       │
-//   └────────────────────────────────────────────────────┘
-//
-// Two render modes (driven by adapter, not by agent):
-//   - **Patch mode** (Codex apply_patch):
-//     adapter feeds the unified diff directly via tool.content
-//     (`{ type: "diff", path, oldText, newText }`).
-//   - **Replacement mode** (Claude Edit/Write, Cursor editTool):
-//     adapter feeds raw before+after via rawInput;
-//     renderer computes a diff.
-//
-// High-volume cards default to collapsed; +N/-M counts remain visible
-// in the header so the user can scan a turn at a glance.
-//
-// 2026-06-20 — the diff body renders via @pierre/diffs <PatchDiff>
-// (the same engine the Changes/Review tabs use):
-// syntax highlighting, word-level intra-line diff, collapsed-unchanged
-// regions, gutters. We build a git-style unified-diff string from the
-// extracted before/after (see `buildUnifiedDiffPatch`) and hand it over,
-// themed to Zeros tokens via `zerosDiffOptions`. The prior hand-rolled
-// shiki+hunk renderer (DiffView/Hunk/DiffLine) was removed.
-// ──────────────────────────────────────────────────────────
+// EditCard renders every kind="edit" tool: Claude Edit and Write, Codex
+// apply_patch, Cursor edit. Patch-mode adapters supply a unified diff;
+// replacement-mode adapters supply before and after, which are diffed here. The
+// body uses @pierre/diffs <PatchDiff>, the Changes tab's engine, fed a git-style
+// patch and themed through zerosDiffOptions. Busy cards start collapsed with
+// their +N/−M counts in the header.
 
 import { memo, useMemo } from "react";
 import { useTurnDisclosure } from "../turn-disclosures";
@@ -56,17 +28,13 @@ interface DiffSource {
   before: string;
   /** Post-edit content. */
   after: string;
-  /** True for a whole-file write (Claude Write, Cursor write, Codex add) —
-   *  the row reads "Write N lines" (like "Read N lines") with no ± badge,
-   *  since the label already states the full line count. Snippet edits/patches
-   *  stay "Edit <file> +N −M". */
+  /** A whole-file write: the row reads "Write N lines" with no ± badge, since
+   *  the label already states the count. */
   write?: boolean;
-  /** A REAL unified diff for this edit — hunk headers carry the file's actual
-   *  line numbers (Claude's result-side `structuredPatch`, Cursor's result
-   *  `diffString`, Codex's `update` patch). When present, <EditDiff> feeds it
-   *  to <PatchDiff> verbatim instead of re-diffing
-   *  the reconstructed before/after — which restarts numbering at 1 and
-   *  invents "No newline" markers. */
+  /** A real unified diff with the file's actual line numbers (Claude's
+   *  structuredPatch, Cursor's diffString, Codex's update patch). EditDiff
+   *  renders it verbatim; re-diffing the reconstructed pair restarts numbering
+   *  at 1 and invents "No newline" markers. */
   patch?: string;
 }
 
@@ -77,10 +45,9 @@ export const EditCard: Renderer<AgentToolMessage> = memo(function EditCard({
   ctx,
 }) {
   const tool = message;
-  // A full-content Write carries no prior file content, so on its own it renders
-  // as all-additions. When the agent already wrote this same file earlier in the
-  // session, that prior content is the real "before" — use it so an overwrite
-  // shows what CHANGED, not the whole file. (Ch.1, 2026-06-20)
+  // A Write carries no prior content and alone renders as all additions. When the
+  // agent wrote this file earlier in the session, that content is the real
+  // before, so an overwrite shows what changed.
   const baseline = ctx.editBaselines.get(tool.toolCallId);
   const sources = useMemo(
     () => extractDiffSources(tool, baseline),
@@ -222,17 +189,8 @@ const EditFileRow = memo(function EditFileRow({
   );
 });
 
-// ──────────────────────────────────────────────────────────
-// EditDiff — @pierre/diffs <PatchDiff> (the same renderer as the
-// Changes tab). We feed it a git-style unified-diff string
-// built from the extracted before/after; it owns the syntax
-// highlighting, word-level intra-line diff, collapsed-unchanged
-// regions, gutters, and colors — themed to Zeros tokens via
-// `zerosDiffOptions` (shadow-DOM unsafeCSS bridge). `disableFileHeader`
-// drops its in-diff header because the EditCard row already shows the
-// path + counts; `disableWorkerPool` keeps these small inline diffs on
-// the main thread (no worker spin-up per card).
-// ──────────────────────────────────────────────────────────
+// disableFileHeader: the row above already shows the path and counts.
+// disableWorkerPool keeps these small diffs on the main thread.
 
 function EditDiff({
   source,
@@ -241,10 +199,8 @@ function EditDiff({
   source: DiffSource;
   compact?: boolean;
 }) {
-  // A real agent-supplied patch renders verbatim — its hunk headers carry the
-  // file's ACTUAL line numbers, so the gutter matches the file on disk and
-  // unchanged gaps collapse into accurate "N unmodified lines" separators.
-  // Only snippet edits (no real patch available) fall back to re-diffing.
+  // A real agent patch renders verbatim, so the gutter matches the file on disk;
+  // only snippet edits fall back to re-diffing.
   const patch = useMemo(
     () =>
       source.patch
@@ -271,12 +227,9 @@ export function buildUnifiedDiffPatch(
   before: string,
   after: string,
 ): string {
-  // Snippet inputs (Claude old_string/new_string) aren't whole files, so a
-  // missing trailing newline is an artifact of the extraction, not a fact
-  // about the file — normalize it away or jsdiff stamps a bogus
-  // "\ No newline at end of file" marker mid-card.
-  // Real patches (DiffSource.patch) bypass this builder and keep their
-  // truthful markers.
+  // Snippet inputs are not whole files, so a missing trailing newline is an
+  // extraction artifact; normalize it or jsdiff stamps a bogus "No newline"
+  // marker. Real patches bypass this builder.
   const norm = (s: string): string =>
     s.length > 0 && !s.endsWith("\n") ? `${s}\n` : s;
   const p = structuredPatch(path, path, norm(before), norm(after), "", "", {
@@ -388,14 +341,10 @@ export function countLineDelta(source: DiffSource | null): {
   return { added, removed };
 }
 
-/** Authoritative +N/−M from the tool OUTPUT, for adapters that report line
- *  counts directly. Cursor's edit result carries
- *  `value.{linesAdded,linesRemoved}` and its write result carries
- *  `value.linesCreated`; the args hold only the path, so the only reliable
- *  count is the one the agent reports. Preferred over diffing reconstructed
- *  before/after (which mis-counts no-op re-applies and trailing-newline edge
- *  cases). Returns null for agents that don't report counts (Claude/Codex →
- *  fall back to `countLineDelta`). */
+/** Authoritative +N/−M from the tool output, for adapters that report counts
+ *  (Cursor's linesAdded, linesRemoved and linesCreated; its args hold only the
+ *  path). Preferred over diffing a reconstructed pair, which mis-counts no-op
+ *  re-applies. null for Claude and Codex. */
 export function outputLineCounts(
   tool: AgentToolMessage,
 ): { added: number; removed: number } | null {
@@ -413,27 +362,17 @@ export function outputLineCounts(
   return null;
 }
 
-/** The +N/−M shown in the header chip.
- *
- *  Precedence: the agent's authoritative output count wins, EXCEPT when the card
- *  renders a real before→after diff against a session `baseline` (a Write that
- *  overwrites a file the agent wrote earlier this session — see
- *  `computeEditBaselines`). There the badge MUST describe that delta, so we diff
- *  the source. A Write's authoritative count is Cursor's `linesCreated` = the
- *  WHOLE new file (all additions); over a baseline diff that reads "+120 −0"
- *  above a body showing "+3 −2". With no baseline the two agree (`linesCreated`
- *  == the all-additions delta), and authoritative still wins so it keeps handling
- *  Cursor Edit no-op re-applies / renames the reconstructed diff would mis-count.
- *  A baseline is only ever attached to a full-content Write (Edit/MultiEdit/patch
- *  carry no full body), so this never strips Cursor Edit's `linesAdded/Removed`. */
+/** The header's +N/−M: the agent's output count wins, except when the card
+ *  diffs a Write against a session baseline, where the badge must describe
+ *  that delta (Cursor's linesCreated counts the whole new file). Baselines
+ *  attach only to full-content writes, so Cursor Edit counts are never
+ *  stripped. */
 export function resolveEditCounts(
   tool: AgentToolMessage,
   source: DiffSource | null,
   baseline: string | undefined,
 ): { added: number; removed: number } | null {
-  // A real agent-supplied patch is the ground truth — count its +/− lines
-  // directly. (Reconstructed before/after can mis-pair across multi-hunk
-  // gaps, and the badge must match the rendered patch body exactly.)
+  // A real patch is ground truth, and the badge must match the rendered body.
   if (source?.patch) return patchSigilCounts(source.patch);
   if (baseline !== undefined) return countLineDelta(source);
   return outputLineCounts(tool) ?? countLineDelta(source);
@@ -478,24 +417,10 @@ function readOutputDiffString(out: unknown): string | null {
   return d && /(^|\n)@@ /.test(d) ? d : null;
 }
 
-// ──────────────────────────────────────────────────────────
-// Source extraction
-// ──────────────────────────────────────────────────────────
-//
-// Adapters can deliver before/after in three shapes:
-//
-// 1. Replacement mode (Claude Edit, Cursor edit):
-//    rawInput.{old_string, new_string} (Edit) or
-//    rawInput.{content} for Write (no old_string → new file).
-//    The full-file delta isn't sent; we diff old_string ⇄ new_string
-//    directly.
-//
-// 2. Patch mode (Codex apply_patch):
-//    tool.content[i] = { type: "diff", path, oldText, newText }
-//    The branch remains for adapters that supply structured patch content.
-//
-// 3. Tool-result diff (some adapters mirror the diff into the
-//    output text). We don't try to parse those.
+// Adapters deliver before and after as: replacement input (old_string and
+// new_string, or a Write's content); a structured diff payload in tool.content;
+// a unified diff in the input; or a unified diff in the output (Cursor's
+// diffString).
 
 export function extractDiffSource(
   tool: AgentToolMessage,
@@ -521,12 +446,9 @@ export function extractDiffSource(
   const inputPath = isObj(inp) ? readPath(inp) : null;
   const inputFullContent = isObj(inp) ? writeFullContent(inp) : null;
 
-  // Path 0 — Claude's result-side `structuredPatch` (attached by the claude
-  // translator): jsdiff hunks with REAL file line numbers, for Edit, Write
-  // AND MultiEdit. Preferred over every input-side reconstruction — the
-  // gutter shows the file's true line numbers and a Write-overwrite shows
-  // the real delta without needing a session baseline. `write` still keys
-  // off the INPUT shape (full content = a Write) for the "Write N lines" row.
+  // Claude's result-side structuredPatch, with real line numbers for Edit, Write
+  // and MultiEdit, beats every input-side reconstruction. write still follows
+  // the input shape.
   const structured = readStructuredPatchHunks(tool.rawOutput);
   if (structured && inputPath) {
     const patch = patchFromStructuredHunks(inputPath, structured);
@@ -542,9 +464,7 @@ export function extractDiffSource(
     }
   }
 
-  // Path 1 — replacement mode from rawInput. Accept BOTH snake_case
-  // (Claude Edit) and camelCase (Cursor edit) field names so every
-  // adapter's edit renders a diff, not just Claude's. (Ch.1)
+  // Accept snake_case (Claude) and camelCase (Cursor) field names.
   if (isObj(inp)) {
     const path = inputPath;
 
@@ -556,10 +476,8 @@ export function extractDiffSource(
       return { path, before: oldStr, after: newStr };
     }
 
-    // Claude MultiEdit: { file_path, edits:[{old_string,new_string}] }. The
-    // tool input has no full-file content, so we stack the edits — all old text
-    // vs all new text. Line numbers are snippet-relative, exactly as a single
-    // Edit (whose old/new are also snippets, not the whole file). (Ch.1)
+    // Claude MultiEdit has no full-file content, so stack the edits; line numbers
+    // are snippet-relative, as for a single Edit.
     const edits = readEdits(inp);
     if (path && edits) {
       return {
@@ -576,16 +494,13 @@ export function extractDiffSource(
       return { path, before: baseline ?? "", after: fullContent, write: true };
     }
 
-    // Path 3a — Codex apply_patch: rawInput.changes[] of FileUpdateChange
-    // ({ path, kind:{type}, diff }). Handles add/delete (diff = raw content)
-    // AND update (diff = unified diff) so every Codex edit renders a diff,
-    // matching Claude/Cursor.
+    // Codex apply_patch changes[]: add and delete carry raw content, update a
+    // unified diff.
     const fileChange = readFileChange(inp);
     if (fileChange) return fileChange;
 
-    // Path 3b — a raw unified-diff string at the top level (other patch-style
-    // shapes). The original patch renders verbatim (real line numbers);
-    // before/after are still reconstructed for the ± counts.
+    // A top-level unified-diff string renders verbatim; before and after are
+    // reconstructed only for the counts.
     const patch = readUnifiedDiff(inp);
     if (patch) {
       const recon = reconstructFromUnifiedDiff(patch);
@@ -599,10 +514,8 @@ export function extractDiffSource(
     }
   }
 
-  // Path 4 — unified-diff string in the tool OUTPUT. Cursor's main edit tool
-  // carries only `{ path }` in its args; the patch lands on the result as
-  // `value.diffString` (a real unified diff with `@@` hunks + real line
-  // numbers). It renders verbatim; before/after are reconstructed for counts.
+  // Cursor's main edit tool carries only { path } in its args; the patch lands on
+  // the result as value.diffString.
   const outPatch = readOutputDiffString(tool.rawOutput);
   if (outPatch) {
     const recon = reconstructFromUnifiedDiff(outPatch);
@@ -656,9 +569,7 @@ export function editBatchLabel(
 
 function readPath(input: unknown): string | null {
   if (!isObj(input)) return null;
-  // `target_file` is Cursor's edit-path field; include it so Cursor edits
-  // show the real path (and feed the edit:<path> mergeKey) instead of the
-  // tool title.
+  // target_file is Cursor's path field.
   const p =
     input.file_path ?? input.path ?? input.filePath ?? input.target_file;
   return typeof p === "string" ? p : null;
@@ -671,25 +582,12 @@ function writeFullContent(inp: Record<string, unknown>): string | null {
   return readString(inp, ["content", "contents", "text", "fileText"]);
 }
 
-/** Pre-edit baselines for full-content writes, keyed by toolCallId → the prior
- *  full content of the SAME file earlier in the session.
- *
- *  A Write carries only the new file body, so on its own it renders as
- *  all-additions even when it overwrites an existing file. When the agent
- *  already wrote this file earlier this session, that prior body is the real
- *  "before", so the overwrite shows what changed. We chain ONLY full-content
- *  writes: an Edit/MultiEdit/patch reveals just a snippet (not the whole file),
- *  so it INVALIDATES the running baseline for its path — a later Write then
- *  falls back to all-additions rather than diffing against stale content.
- *
- *  STATUS matters (2026-08-01): only a COMPLETED write is on disk. A FAILED
- *  edit of any shape changed nothing — it must neither record its never-
- *  applied content as the next write's baseline nor invalidate a baseline
- *  that is still true. A pending/in-flight tool's outcome is unknown (an
- *  aborted turn can strand one forever), so it conservatively invalidates;
- *  the recompute on its completion restores the chain. Every edit row still
- *  RECEIVES the baseline that held before it ran — for a failed write that
- *  diff truthfully reads "what this would have changed". */
+/** Pre-edit baselines for full-content writes: toolCallId → the same file's
+ *  prior full content in this session. Only full writes chain; a snippet edit
+ *  or patch invalidates its path's baseline. Only a completed write is on
+ *  disk: a failed edit neither records nor invalidates, and a pending one
+ *  (whose outcome may never arrive) invalidates until it completes. Each row
+ *  still receives the baseline that held before it ran. */
 export function computeEditBaselines(
   messages: readonly AgentMessage[],
 ): Map<string, string> {
@@ -724,15 +622,9 @@ export function computeEditBaselines(
   return baselines;
 }
 
-/** The text an edit tool's RESULT carries: any text in its content blocks,
- *  else a STRING rawOutput. Two consumers — the body of a card with no
- *  extractable diff, and the error line above a FAILED edit's attempted diff
- *  (for a failed tool this text IS the error, via the translator's
- *  tool_call_update content). Deliberately does NOT JSON-dump an object/array
- *  rawOutput — edit tools (notably Codex's fileChange) set rawOutput to a raw
- *  protocol envelope, and dumping that would splat JSON-RPC noise into the
- *  card. Object output with no readable text falls through to the caller's
- *  placeholder. */
+/** The text an edit result carries: text in its content blocks, else a string
+ *  rawOutput. Used for a card with no diff and for a failed edit's error line.
+ *  Never JSON-dumps object output: Codex sets rawOutput to a protocol envelope. */
 export function editFallbackText(tool: AgentToolMessage): string | null {
   const parts: string[] = [];
   for (const block of tool.content ?? []) {
@@ -799,14 +691,9 @@ function readEdits(
   return pairs.length > 0 ? pairs : null;
 }
 
-/** Codex apply_patch shape — `rawInput.changes[]` of FileUpdateChange:
- *  `{ path, kind:{ type:"add"|"delete"|"update" }, diff }`. Per the generated
- *  protocol (v2/FileUpdateChange + PatchChangeKind), `diff` is the full new
- *  content for an `add`, the full removed content for a `delete`, and a unified
- *  diff for an `update`. The renderer turns each into a before/after pair so
- *  Codex edits show a diff on expand like Claude (old/new) and Cursor
- *  (result diffString). Every path-bearing change remains available to a
- *  batched edit card; the singular helper below preserves its legacy API. */
+/** Codex apply_patch changes[] (FileUpdateChange): diff is the new content for
+ *  add, the removed content for delete, and a unified diff for update. Every
+ *  path-bearing change stays available to a batched card. */
 function readFileChanges(inp: Record<string, unknown>): DiffSource[] {
   if (!Array.isArray(inp.changes)) return [];
   return inp.changes.flatMap((change) => {

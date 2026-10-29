@@ -1,23 +1,8 @@
-// ──────────────────────────────────────────────────────────
-// use-composer-editor — the TipTap composer, assembled
-// ──────────────────────────────────────────────────────────
-//
-// One hook the three composer surfaces (AgentChat, EmptyComposer, edit-in-
-// place) consume. It owns:
-//   • the TipTap editor (minimal schema + reference/attachment atoms + keymap +
-//     placeholder + undo) with React-18-safe options
-//   • the @/slash/# Suggestion bridge wired to the EXISTING filters via refs
-//     (editor is created once, yet always sees current files/commands/PRs)
-//   • the attachment side store (bytes by id; nodes reference by id)
-//   • drag-drop / paste / file-pick → inline attachment pills at the caret,
-//     with optional video frames and timeline text added on request
-//   • the image-preview lightbox
-//   • serialize() → { displayText, segments, attachments, json } for submit,
-//     drafts, and the inline sent-bubble
-//
-// Surfaces render `editorContent` where the textarea was and `suggestionPopup`
-// inside the (position:relative) composer card.
-// ──────────────────────────────────────────────────────────
+// The TipTap composer shared by AgentChat, EmptyComposer and edit-in-place:
+// the editor (created once, reading current data through refs), the @, slash
+// and # suggestion bridge, the attachment side store (bytes by id), drag, drop
+// and paste staging, the image lightbox, and serialize() for submit, drafts and
+// the sent bubble.
 
 import {
   useCallback,
@@ -113,13 +98,9 @@ const EDITOR_MIN_HEIGHT_CLASS = "min-h-[40px]";
 const COMPOSER_FALLBACK_MIN_HEIGHT = 44;
 const EMPTY_SKILLS: Skill[] = [];
 
-// The editable area caps at 200px tall, then scrolls IN PLACE. The cap +
-// overflow MUST live on the SAME element — the .composer-pm contenteditable
-// (the canonical TipTap recipe). Earlier the max-height sat on the
-// <EditorContent> wrapper (overflow:visible) while overflow-y-auto sat on the
-// inner contenteditable (no max-height), so a long paste grew unbounded and
-// spilled out the bottom of the composer card. overscroll-contain stops the
-// composer's scroll from chaining into the chat transcript. (2026-06-16)
+// The 200px cap and its overflow must live on the same element, the
+// .composer-pm contenteditable, or a long paste grows past the composer card.
+// overscroll-contain keeps the scroll from chaining into the transcript.
 const EDITOR_CLASS = `composer-pm w-full ${EDITOR_MIN_HEIGHT_CLASS} max-h-[200px] overflow-y-auto overscroll-contain p-0 text-sm leading-snug text-fg1 [scrollbar-width:thin]`;
 
 /** Editor state seed for a draft restore / edit-in-place. */
@@ -138,14 +119,10 @@ export interface UseComposerEditorOpts {
   /** False while a retained chat is hidden, so reconstructed image pills do
    *  not acquire and pin full-resolution disk blobs. Defaults true. */
   attachmentImagesActive?: boolean;
-  /** Default true: attachments stage into `<cwd>/.context/` the moment
-   *  they're added, and unstage when their chip is removed (the Context tab's
-   *  attach-time sync). Set false on surfaces whose cwd is NOT the workspace
-   *  the attachments belong to — the dispatcher composes against the primary
-   *  checkout's root while the real worktree doesn't exist yet, and staging
-   *  there would leave permanent phantom cards on the trunk workspace's
-   *  canvas. Such surfaces rely on the send-path safety net, which stages
-   *  into whatever workspace the prompt actually lands in. */
+  /** Stage attachments into <cwd>/.context/ as they are added (default). Set
+   *  false where cwd is not the attachments' workspace, such as the dispatcher
+   *  composing on the trunk before the worktree exists; the send path stages
+   *  into wherever the prompt lands. */
   stageIntoContextGraph?: boolean;
   /** Create drafts must recover independently of a native source or workspace. */
   portableAttachmentSources?: boolean;
@@ -164,9 +141,8 @@ export interface UseComposerEditorOpts {
   placeholder: string;
   /** Plain Enter / ⌘Enter. */
   onSubmit: () => void;
-  /** Escape (when no picker is open) — e.g. cancel edit-in-place or drop
-   *  the queued-card selection. Return false to fall through to the editor
-   *  default (void/true = consumed, back-compat). */
+  /** Escape when no picker is open; return false to fall through to the editor
+   *  default. */
   onEscape?: () => void | boolean;
   /** ⌘/Ctrl+Enter, tried before onSubmit — e.g. "send queued row now".
    *  Return false to fall through to the normal submit. */
@@ -201,18 +177,15 @@ export interface ComposerEditorApi {
     files: FileList | File[] | null | undefined,
     options?: { focus?: boolean; atEnd?: boolean; groupName?: string },
   ) => Promise<void>;
-  /** True while requested video frames are still being extracted.
-   *  A send waits for them (waitForAttachmentReads) so they go with
-   *  the video instead of landing in the next message. */
+  /** True while requested video frames are still being read; a send waits for
+   *  them so they go with the video. */
   hasPendingAttachmentReads: () => boolean;
   /** Resolves once every requested extraction still in the document has its
    *  frames and timeline beside it, or turned out to have none. */
   waitForAttachmentReads: () => Promise<void>;
-  /** Stage a SYNTHESIZED text attachment (a chat transcript) under a
-   *  caller-owned key, replacing anything already staged under that key — so
-   *  switching a transcript from concise to full swaps the chip instead of
-   *  adding a second one. Deferred/background deliveries pass `focus: false`
-   *  when the initiating interaction no longer owns the keyboard. */
+  /** Stage a synthesized text attachment (a chat transcript) under a caller-owned
+   *  key, replacing any chip already under it, so switching concise to full swaps
+   *  the chip. */
   insertTextAttachment: (input: {
     sourceKey: string;
     name: string;
@@ -220,17 +193,14 @@ export interface ComposerEditorApi {
     /** Turns the chip's tooltip into the same hover preview its source pill
      *  has. Frozen at staging time — the chip is a file, not a live view. */
     preview?: ComposerAttachmentPreview;
-    /** The validation verdict for what was staged, or null when the editor
-     *  wasn't mounted. Returned rather than swallowed because an invalid
-     *  attachment is EXCLUDED at send: a caller that doesn't surface this
-     *  ships a chip for a file the agent never receives. */
+    /** The validation verdict, or null when unmounted. Returned because an invalid
+     *  attachment is excluded at send, and a caller that ignores it ships a chip for
+     *  a file the agent never receives. */
   }, options?: { focus?: boolean }) => AttachmentValidation | null;
   /** Remove whatever is staged under `sourceKey`. No-op when absent. */
   removeAttachmentBySourceKey: (sourceKey: string) => void;
-  /** The sourceKeys currently in the document. Recomputed on every doc change,
-   *  so a caller that re-renders reads a live value — this is what lets the
-   *  transcript pills derive their added state from the composer rather than
-   *  keeping a second, drift-prone copy of it. */
+  /** The sourceKeys in the document, recomputed on every change, so transcript
+   *  pills derive their state from the composer instead of a second copy. */
   stagedSourceKeys: readonly string[];
   /** Reset to an empty document and drop staged attachment bytes. */
   clear: () => void;
@@ -258,27 +228,11 @@ export interface ComposerEditorApi {
   };
 }
 
-/** Delete the attachment node carrying `sourceKey`. Returns whether anything
- *  was removed. The search + ordering it depends on live in
- *  attachment-keys.ts, where they are unit-testable without a DOM.
- *
- *  The NODE goes; the bytes deliberately stay in the side store. Deleting them
- *  here made the removal half-undoable: the node deletion rides the UndoRedo
- *  plugin and ⌘Z brings the chip back, but a Map eviction does not, so the
- *  restored chip resolved to nothing. `serializeComposer` drops an attachment
- *  it cannot look up while still emitting its segment, so the send omitted the
- *  file with the sent bubble still drawing the chip — and because the
- *  attachment never reached `encodeAttachments`, not even its `skipped`
- *  channel could report it.
- *
- *  This is also what the chip's own × already does (pills.tsx calls
- *  `deleteNode()` alone), so the two removal routes now agree. Orphans are
- *  bounded and reaped wholesale by `clear()` (every send) and `setContent()`
- *  (every draft/edit seed), which is the same lifetime they have always had.
- *
- *  Exported for the test, which drives it against a real (DOM-free)
- *  EditorState + history plugin — the undo round trip is the whole point and
- *  it cannot be observed from the position helpers alone. */
+/** Delete the attachment node carrying sourceKey; true when one was removed.
+ *  The bytes stay in the side store on purpose: ⌘Z restores the node through
+ *  the history plugin but not a Map eviction, so a restored chip would resolve
+ *  to nothing and silently drop the file at send. clear() and setContent()
+ *  reap orphans. Exported for the undo round-trip test. */
 export function removeBySourceKey(ed: Editor, sourceKey: string): boolean {
   const hits = findAttachmentsBySourceKey(ed.state.doc, sourceKey);
   if (hits.length === 0) return false;
@@ -289,16 +243,10 @@ export function removeBySourceKey(ed: Editor, sourceKey: string): boolean {
   return true;
 }
 
-/** Put `attachments` just after `besideId`'s node, each with its separator
- *  space, for files that arrive after the one they belong with (a video's
- *  key frames). The caret maps through the insert, so typing since the drop
- *  stays whole. Always its own undo step, however soon it follows the drop
- *  or precedes more typing: ⌘Z takes the additions back and keeps the
- *  video. False once that node has left the document.
- *
- *  Like removeBySourceKey, the side store must already hold the bytes:
- *  onUpdate stages the new nodes during this dispatch. Exported for the
- *  test, which drives it against a real EditorState + history plugin. */
+/** Insert attachments just after besideId's node (a video's key frames), as
+ *  their own undo step, so ⌘Z removes them and keeps the video. The caret maps
+ *  through the insert. False once that node is gone. The side store must
+ *  already hold the bytes. */
 export function insertAttachmentsAfter(
   ed: Editor,
   besideId: string,
@@ -346,12 +294,11 @@ export function useComposerEditor(
   const localLinks = useLocalLinks();
   const localLinksRef = useRef(localLinks);
   localLinksRef.current = localLinks;
-  // agentName / agentSupportsImage / modelId are read at call time via optsRef
-  // (so the once-built editor always validates against the current agent/model).
+  // Read through optsRef at call time, so the once-built editor validates against
+  // the current agent and model.
   const { agentId, cwd, originUrl, availableCommands, placeholder } = opts;
   const attachmentImagesActive = opts.attachmentImagesActive !== false;
 
-  // ── latest-value refs (read by stable closures + the once-built editor) ──
   const optsRef = useRef(opts);
   optsRef.current = opts;
 
@@ -373,51 +320,31 @@ export function useComposerEditor(
     }
   }
 
-  // Which keyed attachments are staged right now. Kept as state rather than
-  // derived on demand so a consumer (the transcript pill row) re-renders when
-  // the user removes a chip with × — the doc is the one source of truth for
-  // "is this attached", and this is its published edge.
+  // State, not derived, so the transcript pill row re-renders when a chip is
+  // removed with ×.
   const [stagedSourceKeys, setStagedSourceKeys] = useState<string[]>([]);
   const syncSourceKeys = useCallback((ed: Editor) => {
     const next = collectSourceKeys(ed.state.doc);
     setStagedSourceKeys((prev) =>
       prev.length === next.length && prev.every((k, i) => k === next[i])
-        ? prev // reference-stable when nothing moved
+        ? prev
         : next,
     );
   }, []);
 
-  // ── context-graph attach-time sync ──
-  //
-  // The doc's attachment-id set, diffed on every USER edit: an id appearing
-  // stages its file into `.context/` right away, so the Context tab
-  // shows it while the prompt is still being typed. Diffing the doc — rather
-  // than instrumenting insertFiles/paste/drop directly — is what makes every
-  // attach gesture agree: paste, drop, pick, transcript pill, undo and redo
-  // all land here identically.
-  //
-  // The sync is STAGE-ONLY — the graph is append-only by explicit product
-  // decision (2026-08-03(3)): an id disappearing (chip ×, Backspace,
-  // select-all delete, transcript untoggle) never deletes its graph record;
-  // only the user deleting the file on disk removes it. See
-  // context-graph-staging.ts for the full rationale.
-  //
-  // Programmatic swaps (clear on send, setContent for drafts/edit seeds,
-  // setText) SUPPRESS the diff and just resync the set: those transitions say
-  // nothing about user intent toward the files — an edit-in-place seed
-  // reconstructs already-sent chips that were staged by their own send. See
-  // context-graph-staging.ts for what else deliberately stays out (byte-less
-  // reconstructions, over-cap bodies).
+  // Diff the document's attachment ids on every user edit: a new id stages its
+  // file into .context/ at once, so paste, drop, pick, pills, undo and redo all
+  // agree. Stage-only: the graph is append-only, so removing a chip never deletes
+  // its record (context-graph-staging.ts). Programmatic swaps (send, draft and
+  // edit seeds) resync the set without diffing.
   const graphIdsRef = useRef<ReadonlySet<string>>(new Set());
   const graphSyncSuppressedRef = useRef(false);
   const resyncGraphIds = useCallback((ed: Editor) => {
     graphIdsRef.current = new Set(collectAttachmentIds(ed.state.doc));
   }, []);
-  // Seed sweep: idempotently ensure every byte-carrying attachment in the doc
-  // has a graph record. Runs on the mounts/swaps that arrive whole (onCreate,
-  // setContent) and again when a provisioning worktree lands — the one moment
-  // the dispatcher-seeded draft can finally be staged. Stage-only by design;
-  // see planSeedStage for why a seed must never unstage.
+  // Idempotently stage every byte-carrying attachment in the document, on whole
+  // mounts and swaps and when a provisioning worktree lands. Stage-only; see
+  // planSeedStage.
   const stageDocIntoGraph = useCallback((ed: Editor) => {
     if (optsRef.current.stageIntoContextGraph === false) return;
     const cwd = optsRef.current.cwd;
@@ -447,9 +374,8 @@ export function useComposerEditor(
     executeGraphSync(cwd, plan);
   }, []);
 
-  // Re-pushes fresh items into the open picker when an async load lands.
-  // Assigned below once the item getters exist; called indirectly through this
-  // ref to sidestep the getPrItems → ensurePrsLoaded → refresh declaration cycle.
+  // Called through a ref to break the getPrItems → ensurePrsLoaded → refresh
+  // declaration cycle.
   const refreshRef = useRef<() => void>(() => {});
   const filesSearch = useMemo(
     () => new MentionFileSearch(() => refreshRef.current()),
@@ -464,11 +390,8 @@ export function useComposerEditor(
   const browserSelectionRef = useRef(browserSelection);
   browserSelectionRef.current = browserSelection;
 
-  // Project skills (`<cwd>/skills/*.md`) — an INSTANT, agent-agnostic skill
-  // source so the picker's Skills tab is populated the moment "/" opens
-  // (commands have their curated floor; this is the skill equivalent, and it
-  // needs no live agent session). It is ALSO the only skill source for Cursor,
-  // whose SDK reports no skills/commands at all.
+  // Project skills (<cwd>/skills/*.md) populate the picker the moment "/" opens,
+  // with no live session, and are Cursor's only skill source.
   const skillKey = opts.discoverSkills === false ? null : skillCatalogKey(cwd, agentId);
   const skillDiscoveryReady = useSyncExternalStore(subscribeCloudWorkspaces, () => {
     const target = parseCloudWorkspaceKey(cwd);
@@ -485,9 +408,7 @@ export function useComposerEditor(
   })), [skillSources]);
 
   const slashCommands = useMemo(
-    // mergeCommands(projectSkills, availableCommands): the agent's OWN reported
-    // entries win on a name clash (they're authoritative + already kind-tagged
-    // at the adapter); project skills fill in instantly and cover Cursor.
+    // The agent's own entries win a name clash; project skills fill in at once.
     () =>
       filterCloudNativeCommands(composerCommandsFor(
         agentId,
@@ -499,13 +420,8 @@ export function useComposerEditor(
   slashCommandsRef.current = slashCommands;
   useEffect(() => { store.dismiss(); }, [store, cwd, agentId, attachmentImagesActive]);
 
-  // Re-push into an already-open "/" menu whenever the slash list changes
-  // (project skills land async, or the agent reports/updates its commands), so
-  // the new entries appear without the user re-typing. This runs AFTER the
-  // render that updates slashCommandsRef, so getSlashItems (which reads that
-  // ref) sees the fresh list — unlike a synchronous refresh inside the
-  // listSkills .then. A no-op when no menu is open (refreshActiveSuggestion
-  // early-returns), so the mount pass costs nothing.
+  // Re-push into an open "/" menu when the slash list changes, after the render
+  // that updates slashCommandsRef so getSlashItems reads the fresh list.
   useEffect(() => {
     refreshRef.current();
     const editor = editorRef.current;
@@ -554,7 +470,6 @@ export function useComposerEditor(
     if (!state.open || state.trigger !== "#") prsSearch.clear();
   }), [prsSearch, store]);
 
-  // ── stable suggestion data + pick handlers (read refs) ──
   const getMentionItems = useCallback(
     (query: string): MentionItem[] => {
       const dir = optsRef.current.cwd;
@@ -596,7 +511,6 @@ export function useComposerEditor(
 
   const prEnabled = useCallback(() => !!originUrlRef.current, []);
 
-  // Load state the Suggestion plugins read when (re)opening a menu.
   const getFilesStatus = useCallback((): SuggestionStatus => {
     const dir = optsRef.current.cwd;
     if (!dir) return "ready";
@@ -614,10 +528,8 @@ export function useComposerEditor(
     [getFilesStatus, getPrStatus],
   );
 
-  // Recompute the open picker's items + status after an async load lands, so
-  // "Loading…" flips to results / empty / error without an extra keystroke.
-  // Search subscriptions latch their exact key until close/switch, so a
-  // failed load notification cannot turn refresh into an automatic retry loop.
+  // Recompute the open picker after an async load lands. Search subscriptions
+  // latch their key until close, so a failed load cannot become a retry loop.
   const refreshActiveSuggestion = useCallback(() => {
     const s = store.getSnapshot();
     if (!s.open) return;
@@ -635,8 +547,6 @@ export function useComposerEditor(
         status: getPrStatus(),
       });
     } else if (s.trigger === "/") {
-      // Project skills land async (listSkills) → re-push into an already-open
-      // "/" menu so they appear without the user re-typing.
       store.setData({ items: getSlashItems(s.query), status: "ready" });
     }
   }, [store, getMentionItems, getSlashItems, getFilesStatus, getPrItems, getPrStatus]);
@@ -710,7 +620,7 @@ export function useComposerEditor(
     [],
   );
 
-  // ── submit (guard: Enter while a picker is open accepts the item) ──
+  // Enter while a picker is open accepts the item.
   const handleSubmit = useCallback(() => {
     if (store.isOpen) return;
     optsRef.current.onSubmit();
@@ -733,10 +643,8 @@ export function useComposerEditor(
     [],
   );
 
-  // ── isEmpty (drives the send button) ──
   const [isEmpty, setIsEmpty] = useState(true);
 
-  // ── the editor (created once; React-18-safe options) ──
   const extensions = useMemo(
     () => [
       Document,
@@ -838,12 +746,9 @@ export function useComposerEditor(
       setIsEmpty(e.isEmpty);
       // A seeded draft can already carry keyed attachments.
       syncSourceKeys(e);
-      // Record what the seed mounted with (the diff must not read the seed as
-      // user adds), then SWEEP it into the graph. The sweep is what puts a
-      // dispatcher-seeded draft's files on the Context tab before the first
-      // send; for a restored draft it is an idempotent no-op self-heal. An
-      // edit-in-place seed is safe: reconstruct.ts mints prefixed ids that
-      // planSeedStage skips, so a sent message's record is never duplicated.
+      // Record the seed's ids so the diff cannot read them as user adds, then sweep
+      // it into the graph. Edit-in-place seeds use prefixed ids that planSeedStage
+      // skips, so a sent message's record is never duplicated.
       resyncGraphIds(e);
       stageDocIntoGraph(e);
     },
@@ -886,13 +791,9 @@ export function useComposerEditor(
     refreshPlaceholderDecoration();
   }, [placeholder, refreshPlaceholderDecoration]);
 
-  // While a dispatcher-created worktree is still being provisioned,
-  // executeGraphSync retains every staged attachment in its exact-cwd queue —
-  // writing into the reserved path would make `git worktree add` fail. The
-  // queue flushes when provisioning ends; this idempotent document sweep is a
-  // second recovery layer for restored drafts and any write interrupted at
-  // the lifecycle boundary. False for every already-existing workspace,
-  // where the mount sweep in onCreate has already run.
+  // While a dispatcher worktree is provisioning, staged attachments wait in an
+  // exact-cwd queue (writing into the reserved path would fail git worktree add);
+  // this sweep is a second recovery layer once it lands.
   const provisioning = useWorkspaceProvisioning(cwd ?? null);
   useEffect(() => {
     if (provisioning) return;
@@ -901,11 +802,8 @@ export function useComposerEditor(
     stageDocIntoGraph(ed);
   }, [provisioning, cwd, stageDocIntoGraph]);
 
-  // ── videos' key frames ──
-  //
-  // Explicit Attach as frames reads key frames and timeline text on this
-  // device, then groups them beside the video. A
-  // programmatic swap (send, draft or edit seed) or unmount abandons them.
+  // Attach as frames reads key frames and timeline text on this device and
+  // groups them beside the video. A programmatic swap or unmount abandons them.
   const abandonVideoReads = useCallback(() => {
     for (const { controller } of videoReadsRef.current.values()) controller.abort();
     videoReadsRef.current.clear();
@@ -974,7 +872,6 @@ export function useComposerEditor(
     await Promise.allSettled(videoReadsInDocument());
   }, [videoReadsInDocument]);
 
-  // ── attachment staging ──
   const insertFiles = useCallback(
     async (files: FileList | File[] | null | undefined, options?: { focus?: boolean; atEnd?: boolean; groupName?: string }) => {
       const ed = editorRef.current;
@@ -1052,13 +949,8 @@ export function useComposerEditor(
   );
   insertPastedTextRef.current = insertPastedText;
 
-  // ── synthesized (keyed) attachments ──
-  //
-  // Transcripts don't arrive as a File the way a paste or drop does — they are
-  // built in memory from an engine read. They go through the same node + side
-  // store as everything else so the chip, the draft, the serializer and the
-  // send encoder need no special case; the only addition is `sourceKey`, which
-  // gives the caller a stable handle for replace + remove.
+  // Transcripts are built in memory, not pasted as a File; sourceKey gives the
+  // caller a stable handle for replace and remove.
   const insertTextAttachment = useCallback(
     (input: {
       sourceKey: string;
@@ -1067,10 +959,8 @@ export function useComposerEditor(
       preview?: ComposerAttachmentPreview;
     }, options?: { focus?: boolean }): AttachmentValidation | null => {
       const ed = editorRef.current;
-      // isDestroyed too: the ref is assigned but never nulled, so a read that
-      // lands after the surface unmounted would otherwise dispatch into a torn
-      // -down view and throw from inside the caller's try, reporting a read
-      // failure for a read that succeeded.
+      // isDestroyed too: the ref is never nulled, and a read landing after unmount
+      // would throw into a torn-down view and report a successful read as failed.
       if (!ed || ed.isDestroyed) return null;
       // Replace-in-place: attaching the full transcript of a chat whose
       // concise one is already staged must swap the chip, not add a rival.
@@ -1117,7 +1007,6 @@ export function useComposerEditor(
     [syncSourceKeys],
   );
 
-  // ── drag overlay + document file:// guard ──
   const [dragActive, setDragActive] = useState(false);
   const dragDepth = useRef(0);
   useEffect(() => {
@@ -1129,13 +1018,9 @@ export function useComposerEditor(
     const onDragOver = (e: DragEvent) => {
       if (looksLikeFileDrag(e)) e.preventDefault();
     };
-    // Any drop or drag-end anywhere ends the gesture — clear the overlay
-    // state even when the composer card never saw its dragleave (it goes
-    // display:none while the permission/question card holds its slot, and a
-    // hidden element receives no drag events). Without this the "Drop files
-    // to attach" overlay could stick on when the composer returns. Document
-    // listeners fire AFTER the card's own onDrop (bubble order), so files
-    // dropped on the card still insert first.
+    // Any drop or drag end clears the overlay, even when the composer never saw
+    // its dragleave (it is display:none while a card holds its slot). Document
+    // listeners fire after the card's onDrop, so drops on the card insert first.
     const endDrag = () => {
       dragDepth.current = 0;
       setDragActive(false);
@@ -1185,7 +1070,6 @@ export function useComposerEditor(
     [insertFiles],
   );
 
-  // ── image preview lightbox ──
   const [previewSrc, setPreviewSrc] = useState<string | null>(null);
   const openPreview = useCallback((src: string) => setPreviewSrc(src), []);
   const closePreview = useCallback(() => setPreviewSrc(null), []);
@@ -1199,7 +1083,6 @@ export function useComposerEditor(
     return () => document.removeEventListener("keydown", onKey);
   }, [previewSrc, closePreview, attachmentImagesActive]);
 
-  // ── imperative API ──
   const serialize = useCallback((): ComposerSerialized | null => {
     const ed = editorRef.current;
     if (!ed) return null;
@@ -1294,9 +1177,8 @@ export function useComposerEditor(
     ed.view.focus();
   }, []);
 
-  // ── render nodes ──
-  // setEditable emits an update without changing the ProseMirror document.
-  // Publish that boolean once for all pill actions, including queued clicks.
+  // setEditable emits an update without changing the document; publish that
+  // boolean once for every pill action.
   const editable = useSyncExternalStore(
     useCallback(
       (listener) => {
@@ -1329,9 +1211,8 @@ export function useComposerEditor(
   const editorContent = (
     <ComposerEditorProvider value={ctxValue}>
       {editor ? (
-        // The wrapper fits the contenteditable (two-line min-height + 200px
-        // cap + scroll all live on .composer-pm, see EDITOR_CLASS); pb-1 is
-        // the 4px breathing room above the toolbar.
+        // The size limits live on .composer-pm (EDITOR_CLASS); pb-1 is the gap above
+        // the toolbar.
         <EditorContent
           editor={editor}
           className="pb-1"

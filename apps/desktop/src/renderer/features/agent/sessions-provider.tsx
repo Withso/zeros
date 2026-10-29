@@ -1,23 +1,9 @@
 import { PermissionModeChanges } from "./permission-mode-change";
 import { awaitComposerMode } from "./composer-mode";
 import { backfillLocalPromptTranscript, LocalPromptRecoveryError, requestLocalPrompt } from "./local-prompt-recovery";
-// ──────────────────────────────────────────────────────────
-// AgentSessionsProvider — bridge-connected actions over the Zustand store
-// ──────────────────────────────────────────────────────────
-//
-// Session responsibilities are split in two:
-//   - sessions-store.ts owns *data* (per-chat slots, warm-agent set,
-//     bridge-notification reducers). Subscribes via selectors so chat
-//     A's stream doesn't re-render chat B's components.
-//   - This file owns *actions that need the bridge* (ensureSession,
-//     sendPrompt, …). It writes to the store via store actions.
-//
-// The public API (`useChatSession`, `useAgentSessions`) is unchanged
-// from the caller's perspective. Internally, slot reads are now
-// scoped to one chat via Zustand selectors, killing the cross-chat
-// re-render cascade.
-//
-// ──────────────────────────────────────────────────────────
+// Bridge-connected session actions (ensureSession, sendPrompt, …). Data lives
+// in sessions-store.ts, whose selectors keep one chat's stream from
+// re-rendering another's components.
 
 import { SendQueue } from "./send-queue";
 import { AGENT_UPDATE_BACKLOG_LIMIT, createAgentUpdateFlushScheduler } from "./agent-update-flush-scheduler";
@@ -247,25 +233,14 @@ import { cloudPromptHasLegacyActivity, projectCloudPromptSession } from "./cloud
 import { definitiveCloudStopFailure } from "./cloud-turn-presentation";
 import { CloudPromptHandoff } from "./cloud-prompt-handoff";
 
-// 2026-06-09: reconcile now runs on EVERY bind (new session, respawn, resume).
-// It used to run at most once per chat to avoid clobbering a mode the user
-// changed mid-session via the pill — but mid-session mode changes are now
-// PERSISTED to chat.permissionMode (composer pill / "+" menu / plan toggle), so
-// re-applying chat.permissionMode is idempotent and is exactly what restores
-// the user's mode after an effort/model/fast force-respawn (which otherwise
-// dropped it — e.g. plan mode silently reverted) and after an app restart.
+// Reconcile runs on every bind (new session, respawn, resume): re-applying the
+// persisted chat.permissionMode is idempotent and restores the user's mode
+// after a force-respawn or restart.
 
-/** Resolve the cwd to spawn/resume a chat's agent in, defensively. The caller
- *  (ChatBody) usually threads the right cwd, but several recovery paths spawn
- *  WITHOUT it (sendPrompt's `!sessionId` rebuild, a model-swap force respawn, a
- *  bridge-reconnect retry) and would otherwise reach the gateway with an empty
- *  cwd → "Agent cannot spawn: chat has no project folder bound", even though
- *  the chat itself knows its folder. So when the caller/slot didn't supply one,
- *  recover the chat's OWN `folder` and then the active scope (`newAgentFolder`)
- *  live from the workspace store — the same chain the renderer's useChatCwd
- *  uses. Returns null only when the chat genuinely has no folder anywhere, in
- *  which case the gateway's clear error still fires (and the renderer's
- *  NoFolderPanel / empty-composer CTA prompt the user to bind one). */
+/** The cwd to spawn or resume a chat's agent in. Several recovery paths spawn
+ *  without one (sendPrompt's rebuild, a model-swap respawn, a reconnect retry),
+ *  so fall back to the chat's own folder and then the active scope, as
+ *  useChatCwd does. null only when the chat has no folder anywhere. */
 function resolveSpawnCwd(
   chatId: string,
   optionsCwd: string | undefined,
@@ -281,11 +256,9 @@ function resolveSpawnCwd(
   return null;
 }
 
-/** The chat's composer env (model/effort/fast/dirs via envForChat), read
- *  fresh from the workspace store. Undefined when the chat isn't in the
- *  store (e.g. a surface with no ChatThread yet). Used by sendPrompt's
- *  session recovery + settings-drift reconcile (2026-07-13) so a prompt can
- *  never run on a session whose env silently diverged from the pills. */
+/** The chat's composer env, read fresh from the store, so a prompt never runs
+ *  on a session whose env silently diverged from the pills. Undefined without a
+ *  ChatThread. */
 function chatComposerEnv(
   chatId: string,
   initialize: InitializeResponse | null,
@@ -312,13 +285,9 @@ function resolveSpawnWorkspaceId(
   return resolveBridgeWorkspaceIdForCwd(bridge, cwd);
 }
 
-/** Apply a chat's pre-session permission posture (chosen in the empty
- *  composer, before any modes existed) to the agent's mode now that the
- *  session has bound and its modes are known. See agentModeForPermission
- *  for the posture→native mapping (a posture with no matching mode → no-op).
- *  Quiet by design: nothing is dropped into the timeline — the active mode
- *  shows on the composer pills. No-op
- *  when no safe target exists or the target already matches. */
+/** Apply a permission posture chosen before the session existed, now that its
+ *  modes are known (agentModeForPermission). Quiet: the active mode shows on
+ *  the composer pills. A no-op without a safe target or when already applied. */
 async function reconcilePermissionModeAtBind(
   bridge: NonNullable<ReturnType<typeof useBridge>>,
   getStore: typeof useSessionsStore.getState,
@@ -353,11 +322,9 @@ async function reconcilePermissionModeAtBind(
   // not the sessions store that `getStore` snapshots.
   const chat = useWorkspaceStore.getState().chats.find((c) => c.id === chatId);
   if (!chat) return;
-  // Prefer the EXACT mode id the user last selected in-session (lastModeId) —
-  // it round-trips losslessly, so bypass/auto/plan survive a respawn. Fall back
-  // to the persisted POSTURE bucket for a chat with no in-session change yet.
-  // Restoring the posture is safe: a new chat is born in the safe "auto" default,
-  // and the "danger" posture only ever exists because the user picked it.
+  // Prefer the exact mode id last selected in-session (lastModeId), which
+  // round-trips losslessly; otherwise the persisted posture. A new chat starts in
+  // the safe "auto" default, and "danger" exists only if the user picked it.
   const exact =
     chat.lastModeId && availableModes.find((m) => m.id === chat.lastModeId);
   const desired =
@@ -392,15 +359,9 @@ async function reconcilePermissionModeAtBind(
   }
 }
 
-/** How many messages we hydrate into memory per chat on first mount.
- *  Older messages stay on disk and load on scroll-up. 200 covers a
- *  multi-hour session without scrolling. */
+/** Messages hydrated into memory per chat on first mount; older ones load on
+ *  scroll-up. */
 const HYDRATE_WINDOW = 200;
-
-// (MAX_MESSAGES_PER_CHAT no longer re-exported — Track 4.C: Vite Fast
-// Refresh requires this file to export only React components / hooks
-// to keep its HMR boundary clean. Consumers import the constant
-// directly from `./sessions-store`.)
 
 /** Three attempts with exponential backoff for failures that prove the prior
  *  request is no longer running (transport replacement or an expired durable
@@ -414,25 +375,15 @@ const ENSURE_SESSION_BACKOFF_MS = [0, 800, 2_000];
  *  permission/question event, question settlement, or user response. */
 const PROMPT_INACTIVITY_TIMEOUT_MS = 30 * 60_000;
 
-/** Absolute per-turn backstop, independent of the inactivity reset above. The
- *  inactivity watchdog is disarmed by ANY streamed chunk, so a transport that
- *  half-opens mid-turn (a completion dropped under the request's `timeoutMs: 0`,
- *  or a remote transport idle-reset that never surfaces as a socket `close`) could
- *  otherwise hold the prompt promise — and the `sendingChatsRef` lock it gates,
- *  which blocks EVERY later send for the chat via drainNextQueued — forever. This
- *  fires ONCE from turn start regardless of activity, so the promise (hence the
- *  lock) always settles within a bounded window. Set well beyond any real turn
- *  (turns may legitimately stream for hours) — a safety net, not a UX cap; the
- *  inactivity watchdog is the fast path for a genuinely idle stall. */
+/** An absolute per-turn backstop beside the inactivity watchdog, which any
+ *  streamed chunk disarms. A half-open transport could otherwise hold the
+ *  prompt promise, and the sendingChatsRef lock that blocks every later send,
+ *  forever. Far beyond any real turn: a safety net, not a UX cap. */
 const PROMPT_ABSOLUTE_TIMEOUT_MS = 6 * 60 * 60_000;
 
-/** How long to wait for the engine's AGENT_QUESTION_SETTLED echo after
- *  sending a question answer. The echo is the DELIVERY RECEIPT — the adapter
- *  emits it right after resolving the parked SDK promise, so on a local
- *  engine it lands in milliseconds. No echo means the answer may be lost:
- *  ws-client.send() silently drops when the socket is mid-reconnect, or the
- *  engine settled/rebuilt the question underneath. Without this watchdog the
- *  turn sits "loading" until the 30-minute timeout with no explanation. */
+/** How long to wait for AGENT_QUESTION_SETTLED, the answer's delivery receipt.
+ *  No echo means the answer may be lost (ws-client drops sends mid-reconnect),
+ *  and the turn would otherwise sit loading until the inactivity timeout. */
 const ANSWER_ACK_TIMEOUT_MS = 10_000;
 
 /** The guaranteed-delivery fallback: when the blocking answer channel fails
@@ -484,12 +435,6 @@ function openClaudeModelsSettings(): void {
     .dispatch({ type: "SET_ACTIVE_PAGE", page: "settings" });
 }
 
-// SessionsActions / SessionsCtx / StartForChatOptions / ActionsCtx all
-// live in ./sessions-context now — splitting them out kept Vite Fast
-// Refresh's "this file exports only components" boundary clean
-// (Track 5.C). Hooks live in ./sessions-hooks. This file is the
-// component-only surface.
-
 export function AgentSessionsProvider({
   children,
 }: {
@@ -498,8 +443,8 @@ export function AgentSessionsProvider({
   const bridge = useBridge();
   const cloudComputerV2 = useCloudWorkspaceAccountAccess();
 
-  // Helper: snapshot the store. Used inside async actions to bypass
-  // React's closure capture problem (state read pre-await is stale).
+  // Async actions read the store through this, because state captured before an
+  // await is stale.
   const getStore = useSessionsStore.getState;
 
   // Turn-state pushes can settle a prompt that began before this renderer was
@@ -533,26 +478,20 @@ export function AgentSessionsProvider({
     new Map<string, Promise<boolean>>(),
   );
 
-  // Identity of the loadIntoChat flight currently registered in
-  // ensureInFlightRef, keyed by chatId. Boot effect re-fires re-call
-  // loadIntoChat with the same (agent, binding) while the first load is
-  // still warming; without this key each re-run bumped the cancel
-  // generation, superseded the in-flight admission at the engine
-  // ("lifecycle-superseded") and started over. Only a DIFFERENT explicit
-  // binding may supersede a running load.
+  // The key of the loadIntoChat flight registered in ensureInFlightRef. Boot
+  // effects re-call loadIntoChat with the same agent and binding while it warms;
+  // without the key each call superseded the admission at the engine. Only a
+  // different explicit binding may supersede a running load.
   const loadFlightKeysRef = useRef(new Map<string, string>());
   // Whether the registered load flight is only probing for an already-live
   // execution. A real focus/send may share the RPC, but must retry admission
   // if that probe settles without a route.
   const loadFlightAdoptOnlyRef = useRef(new Map<string, boolean>());
 
-  // Chats whose disk hydrate could NOT be trusted: the bridge was absent /
-  // mid-reconnect (an engine respawn, a cold boot racing the socket, a dev
-  // HMR swap) or the window RPC rejected. An empty read in that state is
-  // indistinguishable from "no history", and treating it as authoritative
-  // parks the chat on a permanently blank transcript while its tab stays
-  // visible. Parked ids follow their workspace's connection, independently
-  // of the Local engine and of other cloud workspaces.
+  // Chats whose disk hydrate could not be trusted: the bridge was absent or
+  // reconnecting, or the window RPC failed. An empty read then is not "no
+  // history", and trusting it parks the chat on a blank transcript. Parked ids
+  // follow their own workspace's connection.
   const retryHydrateRef = useRef<(chatId: string, isCurrent: () => boolean) => Promise<void>>(async () => {});
   const pendingHydratesRef = useRef(new TranscriptHydrationRetries(
     (chatId, isCurrent) => retryHydrateRef.current(chatId, isCurrent),
@@ -576,63 +515,44 @@ export function AgentSessionsProvider({
   // an abandoned concurrent render.
   const retainedChatIdsRef = useRef<ReadonlySet<string>>(new Set());
 
-  // Atomic guard against concurrent sendPrompt calls. The Zustand
-  // `status === "streaming"` check is a read-then-act
-  // pattern: two rapid Send-button clicks can both pass it before
-  // either flips the flag. The ref-based map is updated synchronously
-  // at the very top of sendPrompt, before any awaited operation, so
-  // the second call sees the lock and bails immediately.
+  // A synchronous lock against concurrent sendPrompt calls: two rapid clicks can
+  // both pass the status === "streaming" check before either flips it. Set at
+  // the top of sendPrompt, before any await.
   const sendingChatsRef = useRef(new Map<string, symbol>());
 
-  // Cursor "duplicate turn" guard. Tracks whether the in-flight turn for a
-  // chat has already STREAMED assistant content (text / reasoning / a tool
-  // call) via AGENT_SESSION_UPDATE. Reset at the top of every turn; flipped
-  // true by the update listener on the first chunk. sendPrompt's recoverable-
-  // failure handler reads it: when a prompt request fails *recoverably* — most
-  // often a transport blip (forceReconnect / socket close) whose engine-side
-  // turn is still alive — a cold rebuild + resend would run the SAME prompt on
-  // a SECOND session and stream the turn twice. If output already landed, the
-  // turn effectively completed, so we DON'T resend.
+  // Whether the in-flight turn has streamed assistant content. When a prompt
+  // fails recoverably (often a transport blip while the engine-side turn lives
+  // on), resending after output landed would run the turn twice on a second
+  // session.
   const turnProducedOutputRef = useRef(new Map<string, boolean>());
-  // Per-chat set of additional dirs already announced to the agent. The gateway
-  // announces the dirs present at the FIRST turn (its preamble); this tracks
-  // them so a dir added mid-conversation (/add-dir) gets a one-time awareness
-  // notice on the next turn — and isn't re-announced after. See sendPrompt.
+  // Additional dirs already announced to the agent. The first-turn preamble names
+  // the dirs present then; a dir added later (/add-dir) gets one notice on the
+  // next turn.
   const announcedDirsRef = useRef(new Map<string, Set<string>>());
 
-  // Answer-ack watchdog (2026-07-04). questionId → the timer waiting for the
-  // engine's AGENT_QUESTION_SETTLED delivery receipt after we sent an answer.
-  // Cleared by the settled listener; fired = the answer was lost in transit
-  // (ws-client.send drops silently when the socket is mid-reconnect) → the
-  // question re-queues ONCE so the user can answer again instead of staring
-  // at a turn that never resumes. `retried` tracks the one re-queue per id.
+  // questionId → the timer awaiting AGENT_QUESTION_SETTLED after an answer. If it
+  // fires, the answer was lost in transit, and the question re-queues once so
+  // the user can answer again.
   const answerAcksRef = useRef(
     new Map<string, ReturnType<typeof setTimeout>>(),
   );
   const retriedAnswersRef = useRef(new Set<string>());
   const promptActivityRef = useRef(new Map<string, () => void>());
   const questionChatRef = useRef(new Map<string, string>());
-  /** `setModel` / `updateConfig` are declared below this component's bridge
-   *  effect, so the notification flush reaches them through refs (same pattern
-   *  as `ensureSessionRef`). Used for provider-originated composer changes — an
-   *  agent that raises its OWN effort still needs the new env pushed into the
-   *  live session, exactly as a pill click does. */
+  /** Declared below the bridge effect, so the flush reaches them through refs. A
+   *  provider that raises its own effort still needs the new env pushed into the
+   *  live session, as a pill click does. */
   const setModelRef = useRef<SessionsActions["setModel"] | null>(null);
   const updateConfigRef = useRef<SessionsActions["updateConfig"] | null>(null);
   // One warning per exact session/task/timestamp; bounded against task-id churn.
   const warnedLongWakeupsRef = useRef(new Set<string>());
   const flushLocalNotificationsRef = useRef<(chatId?: string) => void>(() => {});
 
-  // Bridge listeners feed the store. Transcript content is buffered and
-  // drained in one frame-aligned flush inside `startTransition`, so token-rate
-  // inputs (10–100/s during a streaming response) are applied together once
-  // per frame. Local transcript bursts publish the store once; cloud content
-  // retains its existing per-notification publication contract.
-  // Frames stop while the window is minimized, hidden or occluded;
-  // the flush scheduler's deadline timer and backlog bound keep background
-  // streams draining instead of parking until the turn ends. Permissions,
-  // questions, agent exits and turn boundaries drain synchronously: a policy
-  // auto-answer or a parked agent must never wait for the window to paint.
+  // Transcript content drains once per frame inside startTransition, so
+  // token-rate input applies together. Hidden windows stop frames, so the flush
+  // scheduler's deadline and backlog bound keep streams draining. Permissions,
+  // questions, exits and turn boundaries drain synchronously: an auto-answer or
+  // a parked agent must never wait for a paint.
   useEffect(() => {
     if (!bridge) return;
 
@@ -689,18 +609,13 @@ export function AgentSessionsProvider({
       const stderrs = stderrBuffer.splice(0);
       const exits = exitBuffer.splice(0);
 
-      // Permissions and exits are control-plane events — they affect
-      // routing (session status, sign-in chip). Keep them URGENT so the
-      // user sees the prompt / failure immediately. Token chunks and
-      // stderr are content; they go through startTransition so React
-      // can drop intermediate frames if a newer one arrives.
+      // Permissions and exits change routing, so they stay urgent; token chunks and
+      // stderr go through startTransition.
       const store = useSessionsStore.getState();
 
       for (const p of perms) {
-        // Auto-respond if a chat policy matches the
-        // incoming request. We need the chatId to look up policies,
-        // which the store derives from request.sessionId. Mirror that
-        // lookup here so we can intercept before the prompt UI lands.
+        // Auto-respond when a chat policy matches, before the prompt UI lands. Policies
+        // are keyed by chat, derived from the request's sessionId as the store does.
         const sid = (p.request as { sessionId?: string }).sessionId;
         const chatId = sid ? store.executionToChatId[sid] : undefined;
         const policies = chatId ? (store.chatPolicies[chatId] ?? []) : [];
@@ -733,9 +648,8 @@ export function AgentSessionsProvider({
             toolKind: tool.kind,
           });
           if (chatId) promptActivityRef.current.get(chatId)?.();
-          // Skip the regular set-pendingPermission path so the UI
-          // never blinks the prompt. The auto-allow is deliberately
-          // silent — no attribution chip (removed 2026-07-06).
+          // Skip the pendingPermission path so the prompt never blinks; auto-allow is
+          // silent.
           continue;
         }
         store.applyBridgePermissionRequest(
@@ -751,8 +665,8 @@ export function AgentSessionsProvider({
         }
       }
       for (const q of questions) {
-        // No auto-policy path — questions are always shown (they carry no
-        // allow/deny semantics an "always" rule could match).
+        // Questions carry no allow/deny semantics an "always" rule could match, so
+        // they are always shown.
         store.applyBridgeQuestionRequest(q.agentId, q.questionId, q.request);
       }
       for (const qs of questionSettles) {
@@ -764,11 +678,9 @@ export function AgentSessionsProvider({
         store.applyBridgeAgentExit(e.agentId, e.sessionId);
       }
 
-      // An agent can raise its OWN reasoning tier mid-session (Codex moving a
-      // thread to native `ultra`) and report it back as current_effort_update.
-      // applyBridgeUpdate persists that onto the chat so the ONE effort picker
-      // stays truthful; snapshot the pre-flush value here so we can tell an
-      // actual adoption from a repeated notification.
+      // An agent can raise its own reasoning tier (Codex moving to native ultra) and
+      // report it; snapshot the pre-flush value to tell a real adoption from a
+      // repeated notification.
       const effortBefore = new Map<string, string>();
       for (const n of updates) {
         const u = n.update as { sessionUpdate?: string };
@@ -807,10 +719,9 @@ export function AgentSessionsProvider({
           if (terminalTurn && exactSession && chatId && before.sessions[chatId] !== after.sessions[chatId] &&
               after.sessions[chatId]?.foregroundTurnId === terminalTurn.turnId) {
             s.clearStrandedPlanReview(chatId);
-            // Release, not just drain: for a turn this renderer did not issue
-            // there is no sendPrompt finally to resolve a queue parked behind
-            // it, and drainNextQueued alone would leave it stuck whenever the
-            // settle left the chat unhealthy.
+            // Release, not just drain: a turn this renderer did not issue has no
+            // sendPrompt finally, and drainNextQueued alone would strand the queue when
+            // the settle left the chat unhealthy.
             releaseQueueRef.current(chatId);
             // Adopted turns (renderer reloaded mid-prompt) have no sendPrompt
             // finally. Emit finish from the engine's durable turn_state push;
@@ -859,13 +770,9 @@ export function AgentSessionsProvider({
         s.applyBridgeStderrLines(stderrs);
       });
 
-      // Push an adopted effort into the LIVE session, exactly as the composer's
-      // pills do. Codex re-reads `session.env` on every turn/start, so without
-      // this the picker would show the new tier while the next turn explicitly
-      // re-sent the old one. setModel FIRST, then updateConfig — the same order
-      // and for the same reason as the ModelPill: updateConfig pushes the WHOLE
-      // env and is what stamps appliedChatEnvKey, so the model it carries has to
-      // really be applied rather than merely recorded as applied.
+      // Push an adopted effort into the live session as the pills do: Codex re-reads
+      // session.env on every turn/start. setModel first, then updateConfig, which
+      // pushes the whole env and stamps appliedChatEnvKey.
       for (const [cid, before] of effortBefore) {
         const chat = useWorkspaceStore
           .getState()
@@ -995,12 +902,8 @@ export function AgentSessionsProvider({
           });
         }
       }
-      // Engine-authoritative chatId wins over the (possibly stale) local
-      // sessionId→chatId index, so a live update is never dropped mid
-      // force-respawn / create-load / early session emit.
-      // (The old loadSession content-suppression that lived here was removed
-      // 2026-06-08 — no current adapter replays on resume, so it only ever
-      // swallowed live turns. See the note in sessions-store.ts.)
+      // The engine's chatId wins over the possibly stale sessionId→chatId index, so a
+      // live update is never dropped mid respawn, create-load or early emit.
       const chatId =
         msg.chatId ??
         state.executionToChatId[
@@ -1064,13 +967,8 @@ export function AgentSessionsProvider({
           msg.notification.sessionId,
         );
       }
-      // TTFT: the first streamed output of an in-flight turn (assistant text,
-      // reasoning, or a tool call — whichever lands first) emits
-      // agent_first_response with the elapsed time since the prompt was sent.
-      // Measured HERE at receive time — before the rAF buffer — so the latency
-      // isn't skewed by up to a frame of batching. trackAgentFirstResponse
-      // no-ops after the first chunk and when no turn is armed, so it's one
-      // event per turn. (Load-replay content events already returned above.)
+      // Time-to-first-token: measured at receive time, before the frame buffer, so
+      // batching does not skew it. trackAgentFirstResponse emits once per turn.
       if (chatId) {
         promptActivityRef.current.get(chatId)?.();
         const su = (msg.notification.update as { sessionUpdate?: string })
@@ -1081,12 +979,9 @@ export function AgentSessionsProvider({
           trackAgentFirstResponse(chatId, "thought");
         else if (su === "tool_call")
           trackAgentFirstResponse(chatId, "tool_call");
-        // Record that THIS turn streamed visible content (text / reasoning / a
-        // tool call). sendPrompt's recoverable-failure handler reads this so a
-        // transport blip that rejects the in-flight prompt — while the engine-
-        // side turn is still alive and has already produced its answer — does
-        // NOT trigger a cold rebuild + resend that would stream the same turn
-        // a second time (the cursor "duplicate turn" bug).
+        // Record that this turn streamed visible content, so a transport blip that
+        // rejects the prompt while the engine-side turn has already answered does not
+        // trigger a resend that streams the turn twice.
         if (
           su === "agent_message_chunk" ||
           su === "agent_thought_chunk" ||
@@ -1259,19 +1154,11 @@ export function AgentSessionsProvider({
         code: number | null;
         signal: string | null;
       };
-      // Agent subprocess exited. The ENGINE owns respawn entirely (see
-      // the always-warm pool in session-manager.ts). The UI's job is
-      // just to reflect the blip — mark chats `reconnecting` and clear
-      // the dead sessionId. The next user action triggers ensureSession,
-      // which lands on the (by-then) respawned subprocess.
-      //
-      // `sessionId` (when present) scopes the blip to ONE chat — Codex runs
-      // one app-server child per chat, so a crash must not flip every open
-      // Codex chat to reconnecting.
-      //
-      // We intentionally do NOT schedule an automatic retry. Loops here
-      // produced "reconnecting forever" bugs when revival was impossible
-      // (e.g. missing auth).
+      // The agent subprocess exited; the engine owns respawn (session-manager.ts).
+      // Mark the chat reconnecting and clear its dead sessionId; the next user action
+      // lands on the respawned process. sessionId scopes the blip to one chat (Codex
+      // runs a child per chat). No automatic retry: those loops reconnected forever
+      // when revival was impossible.
       exitBuffer.push({
         agentId: msg.agentId,
         sessionId: msg.sessionId ?? null,
@@ -1313,16 +1200,11 @@ export function AgentSessionsProvider({
     };
   }, [bridge, cloudPrompts]);
 
-  // ── Actions ─────────────────────────────────────────────
-
   const listAgents = useCallback<SessionsActions["listAgents"]>(
     async (force = false) => {
-      // Throw like initAgent rather than resolving [] — a missing bridge is
-      // "engine unreachable", not an authoritative "zero adapters" registry.
-      // A silent [] here used to flow into the agents-cache as a SUCCESSFUL
-      // load: it overwrote the persisted stale-while-revalidate snapshot and
-      // pinned the 30s freshness TTL on a lie, so agent resolution (new-chat
-      // binding, pickers) saw "no agents installed" during a bridge blip.
+      // Throw rather than resolve []: a missing bridge means the engine is
+      // unreachable, and an empty list would be cached as an authoritative "no
+      // agents installed".
       if (!bridge) throw new Error("Engine not connected");
       const resp = await bridge.request<AgentAgentsListMessage>(
         { type: "AGENT_LIST_AGENTS", force },
@@ -1499,18 +1381,15 @@ export function AgentSessionsProvider({
     [getStore],
   );
 
-  // When a queued send flushes, the finally below hands its placeholder bubble
-  // id to the re-entrant sendPrompt via this map (chatId → bubbleId). sendPrompt
-  // then PROMOTES that placeholder into a live bubble at the transcript end.
-  // Follow-up placeholders live in the queued card; the admission placeholder
-  // is already visible at the tail and retains its id/time through promotion.
-  // If the session cannot be re-established, demotion keeps the user's text.
+  // A flushed queued send hands its placeholder bubble id to the re-entrant
+  // sendPrompt through this map, which promotes the placeholder into the live
+  // bubble at the transcript end. If the session cannot be re-established,
+  // demotion keeps the user's text.
   const flushBubbleRef = useRef(new Map<string, string>());
 
-  /** Chats whose send queue is PARKED because the user is editing a queued
-   *  message (holdQueue/releaseQueue). While held, a settling turn leaves the
-   *  queue in place instead of draining it — the edit target can't be sent
-   *  out from under the user mid-edit. releaseQueue drains if idle+ready. */
+  /** Chats whose queue is held while the user edits a queued message, so a
+   *  settling turn cannot send the edit target. releaseQueue drains when idle
+   *  and ready. */
   const queueHeldRef = useRef(new Set<string>());
 
   /** chatId → cancel generation. Bumped by every cancel() and re-read by an
@@ -1816,18 +1695,11 @@ export function AgentSessionsProvider({
     },
     [getStore, flushQueuedPrompt],
   );
-  /** Resolve a chat's send queue once whatever it was parked behind has
-   *  finished: drain the head if the chat came back healthy, otherwise DROP the
-   *  queue with a toast.
-   *
-   *  Dropping (not draining) into a broken chat is deliberate — draining
-   *  spawn-storms, and keeping the queue freezes the composer, because every
-   *  later send parks behind a queue that can no longer drain (drainNextQueued
-   *  requires `ready`). Every path that can leave a chat parked has to call this
-   *  or the queue is stranded: the turn-completion finally, and the two warm
-   *  paths (ensureSession / loadIntoChat), which sends now park behind while
-   *  `warming` (shouldQueuePrompt) and which can end in
-   *  failed/auth-required/reconnecting. */
+  /** Resolve a queue once what it waited on finished: drain the head if the chat
+   *  is healthy, otherwise drop it with a toast. Draining into a broken chat
+   *  spawn-storms, and keeping the queue freezes the composer. Every path that
+   *  can leave a chat parked must call this: the turn-completion finally and both
+   *  warm paths (ensureSession, loadIntoChat). */
   const drainOrDropQueue = useCallback(
     (chatId: string): void => {
       const queued = sendQueueRef.current.get(chatId);
@@ -1936,11 +1808,8 @@ export function AgentSessionsProvider({
       if (hadActiveTurn) {
         getStore().setPendingLocalTurn(chatId, null);
       }
-      // Give the words back. Now that a plain first send parks instead of
-      // blocking (§5.0 sendSessionRecoveryMode), a failed spawn drops a message
-      // the user never got to keep — so restore the oldest dropped text as this
-      // chat's composer draft. Guarded on an empty draft: whatever the user has
-      // typed since is newer and must win.
+      // Give the words back: restore the oldest dropped text as the composer draft,
+      // unless the user has typed something newer.
       const restorable = dropped
         .map((entry) => {
           const [, wire, display] = entry.args;
@@ -2128,15 +1997,8 @@ export function AgentSessionsProvider({
         existing = getStore().sessions[chatId];
       }
 
-      // Resolve cwd ONCE so the slot and the bridge call agree. Earlier
-      // versions persisted `options?.cwd ?? existing?.cwd` on the slot
-      // but sent only `options?.cwd` to the bridge — meaning a force
-      // rebuild that omitted cwd (sendPrompt's `!sessionId` recovery)
-      // landed at the gateway with cwd=undefined and triggered "chat
-      // has no project folder bound" even though the slot remembered
-      // the right path. resolveSpawnCwd additionally recovers the chat's
-      // OWN folder / active scope from the store, so a spawn from ANY
-      // recovery path lands in the right folder instead of throwing.
+      // Resolve cwd once so the slot and the bridge call agree; resolveSpawnCwd also
+      // recovers the chat's own folder for recovery paths that omit it.
       const resolvedCwd = resolveSpawnCwd(chatId, options?.cwd, existing?.cwd);
       const executionActor = executionActorForRecovery(existing, options);
 
@@ -2156,19 +2018,13 @@ export function AgentSessionsProvider({
           hasTranscript: existing?.hasTranscript ?? false,
           messages: existing?.messages ?? [],
           ...(existing?.cloudSendWait ? { cloudSendWait: existing.cloudSendWait } : {}),
-          // Carry the context-gauge reading across a rebuild of the SAME
-          // agent (model/effort swap force-respawn, silent retry). The old
-          // numbers stay honest — nothing was sent yet on the new session —
-          // and the first settled turn overwrites them. Blanking here makes
-          // the ring vanish on every model change.
-          // A different agent's numbers never carry.
+          // Keep the context-gauge reading across a same-agent rebuild; the next settled
+          // turn overwrites it. Another agent's numbers never carry.
           usage: existing?.agentId === agentId ? existing.usage : BLANK.usage,
         });
 
-        // Race the bridge request against an outer setTimeout. The
-        // ws-client has its own reconnect-queue window
-        // (RECONNECT_GRACE_MS, ~7s) which would otherwise mask the cap
-        // we pass down — the race makes it absolute.
+        // Race the bridge request against an outer timer: ws-client's reconnect grace
+        // (about 7 s) would otherwise mask the cap passed down.
         let lastFailure: AgentFailure | null = null;
         const attemptOnce = async (): Promise<
           AgentSessionCreatedMessage | AgentErrorMessage | null
@@ -2226,7 +2082,7 @@ export function AgentSessionsProvider({
               type: "AGENT_NEW_SESSION",
               agentId,
               ...executionActor,
-              chatId, // Bind the session to its chat for engine persistence.
+              chatId,
               cwd: resolvedCwd ?? undefined,
               workspaceId: spawnWorkspaceId ?? undefined,
               env: mergedEnv,
@@ -2352,12 +2208,9 @@ export function AgentSessionsProvider({
             }
             getStore().patchSession(chatId, { status: "ready" });
             trackAgentSessionStarted(agentId, chatId);
-            // A queue parked while this chat was down — a held queued-edit, or a
-            // send stranded because recovery landed via ensureSession rather than
-            // a turn-completion — drains now that the session is ready again;
-            // otherwise it sits until the user sends another message. A no-op mid
-            // rebuild (sendingChatsRef still set) and self-gated (ready + idle +
-            // not held) inside drainNextQueued, so it can't spawn-storm.
+            // A queue parked while the chat was down drains now that it is ready again.
+            // drainNextQueued is self-gated (ready, idle, not held), so this cannot
+            // spawn-storm.
             drainNextQueued(chatId);
             return;
           } catch (err) {
@@ -2541,17 +2394,8 @@ export function AgentSessionsProvider({
       if (!bridge) return;
       const preparation = cloudSend && flushBubbleRef.current.has(chatId) ? null : prepareForSend(chatId, wakeIntent);
       if (preparation) await preparation;
-      // Atomic lock — fix #8. Two synchronous Enter presses both
-      // observed `status !== "streaming"` before either could flip
-      // it; the second prompt overrode the first's pendingTurn and
-      // the first's response was lost. ref.add() is synchronous so
-      // the second call sees the lock immediately.
-      // If this call is the FIFO flush of a queued send, the finally handed us
-      // the placeholder's bubble id (see flushBubbleRef). Read EARLY so the
-      // enqueue branch below can't re-queue a flush (a flush must bypass the
-      // "park behind an existing queue" condition or the head would loop).
-      // Declared OUTSIDE the try so the finally can demote the placeholder if
-      // we bail before committing a live bubble.
+      // A FIFO flush's placeholder bubble id (see flushBubbleRef), read early so the
+      // enqueue branch below cannot re-queue a flush and loop the head.
       const flushBubbleId = flushBubbleRef.current.get(chatId);
       if (flushBubbleId) flushBubbleRef.current.delete(chatId);
       const entrySlot = getStore().sessions[chatId];
@@ -2629,14 +2473,9 @@ export function AgentSessionsProvider({
         queueHeld: queueHeldRef.current.has(chatId),
         flushing: !!flushBubbleId,
       };
-      // A turn is already in flight for this chat (sendingChatsRef stays set
-      // for the whole turn) — OR earlier sends are still queued/parked (a
-      // holdQueue edit, or a queue awaiting drain): QUEUE this send FIFO and
-      // flush it in order — instead of silently dropping it (the prior
-      // behavior that made "send while the agent is working" vanish with no
-      // feedback). The engine still only ever sees one turn at a time, so
-      // there's no "prompt already in flight" rejection. Queued sends render
-      // in the composer's queued-messages card (not the transcript).
+      // A turn is in flight or earlier sends are still queued: queue this send in
+      // order instead of dropping it. The engine only ever sees one turn; queued
+      // sends render in the composer's queue card.
       if (
         shouldQueuePrompt({
           status: entryStatus,
@@ -2661,11 +2500,9 @@ export function AgentSessionsProvider({
           ...(presentation === "active-turn"
             ? { queuedPresentation: "active-turn" as const }
             : {}),
-          // The composer-based edit flow rebuilds the wire text through the
-          // normal send pipeline (mentions re-expand), so an @-mention
-          // expansion no longer blocks editing. The ONE remaining unsafe case
-          // is a send whose wire text carries an invisible import preamble
-          // (<from_previous_chat> blocks) — editing would silently drop it.
+          // The edit flow rebuilds the wire text through the normal pipeline, so
+          // mentions re-expand. A send carrying an invisible import preamble
+          // (<from_previous_chat>) stays uneditable, or editing would drop it.
           queuedEditable:
             !autoAction && !text.trimStart().startsWith("<from_previous_chat"),
           ...(bubbleAttachments && bubbleAttachments.length > 0
@@ -2713,21 +2550,11 @@ export function AgentSessionsProvider({
         } else drainNextQueued(chatId);
         return;
       }
-      // The send needs an admission before it can dispatch: either no session
-      // exists yet (fresh chat still admitting, engine respawn, a pristine
-      // agent switch racing the keystroke-armed spawn) or the live session's
-      // env drifted from the composer pills (model/effort changed while it was
-      // warming) and must be force-respawned. The old path fell into the turn
-      // body and awaited the full provider-session admission there — after runSend had
-      // already cleared the composer and before any bubble was appended — so
-      // the user's first send into a new chat was invisible for the whole
-      // admission (tens of seconds under a burst), while a SECOND send
-      // correctly queued behind sendingChatsRef. Park such a send the same way
-      // a send into a `warming` chat parks: active turn visible now, session
-      // build kicked in the background, dispatch via ensureSession's
-      // ready-drain. Must happen BEFORE sendingChatsRef.set — the
-      // turn-completion finally treats a non-`ready` settle as unhealthy and
-      // would drop this very queue.
+      // A send that needs admission (no session yet, or env drift from the pills)
+      // parks like a send into a warming chat: the active turn shows now, the
+      // session builds in the background, and ensureSession's ready-drain
+      // dispatches it. Before sendingChatsRef.set, whose finally would drop the
+      // queue on a non-ready settle.
       {
         const slot = getStore().sessions[chatId];
         const expectedEnv = slot?.agentId
@@ -2885,21 +2712,18 @@ export function AgentSessionsProvider({
         reasoningTokens?: number;
         costUsd?: number;
       } | null = null;
-      // This send's cancel generation, captured once (see bumpCancelGeneration).
-      // Preparation below can await a session rebuild, a settings-drift respawn,
-      // or a resume-and-retry — all with the chat already showing Stop — so
-      // every one of those awaits re-reads this before letting the prompt out.
+      // Captured once: preparation can await a rebuild, a drift respawn or a resume
+      // while the chat shows Stop, and each await re-reads it before the prompt goes
+      // out (see bumpCancelGeneration).
       const sendGeneration = cancelGeneration(
         cancelGenerationsRef.current,
         chatId,
       );
       const stoppedByUser = () =>
         cancelledSince(cancelGenerationsRef.current, chatId, sendGeneration);
-      /** Leave the chat exactly as a completed stop leaves it. cancel() already
-       *  published ready + "cancelled", so this only undoes a `streaming` /
-       *  `warming` state a preparation step set AFTER the stop, and releases the
-       *  cancel-suppression flag that no in-flight prompt will now consume. A
-       *  recorded failure is never overwritten — it's the more useful truth. */
+      /** Leave the chat as a completed stop leaves it: undo a streaming or warming
+       *  state set after the stop and release the unused cancel flag. A recorded
+       *  failure is never overwritten. */
       const settleStoppedSend = () => {
         const slot = getStore().sessions[chatId];
         // Observation loss and provider completion do not prove the accepted
@@ -2926,20 +2750,9 @@ export function AgentSessionsProvider({
         if (!current || !current.agentId) return;
         if (current.status === "streaming") return;
 
-        // If the session bounced (engine respawn, agent crashed mid-turn)
-        // await one rebuild before dropping the prompt. Thread the slot's
-        // cwd through — the chat may have been opened via loadIntoChat,
-        // which is the only path that writes cwd to the slot from the
-        // chat metadata, so without this the rebuild would land at the
-        // gateway with cwd=undefined and surface "chat has no project
-        // folder bound" the moment the engine respawned.
-        //
-        // 2026-07-13 fix: the rebuild must ALSO carry the chat's composer env
-        // (model/effort/fast/dirs via envForChat). This path used to pass cwd
-        // only, minting a session with NO model env at all — the engine then
-        // ran the CLI's own default model while the pill showed the chat's
-        // pick (the "pill says Haiku, turn ran Opus" bug, e.g. via the
-        // dispatcher auto-send racing ahead of the chat view's spawn effect).
+        // The session bounced: await one rebuild before dropping the prompt, passing
+        // the slot's cwd and the chat's composer env. Without the env the session ran
+        // the CLI's default model while the pill showed the chat's pick.
         if (!current.sessionId && ensureSessionRef.current) {
           try {
             await ensureSessionRef.current(chatId, current.agentId, {
@@ -2955,18 +2768,11 @@ export function AgentSessionsProvider({
         }
         if (!current.sessionId) return;
 
-        // Settings-drift reconcile (2026-07-13): the composer's model/effort
-        // pills can change while a session is warming — the live
-        // setModel/updateConfig calls silently no-op without a sessionId, and
-        // the chat view's envKey respawn detector can be poisoned by an
-        // already-existing session (it stamps the current key without
-        // verifying what the session was created with). This is the single
-        // choke point every prompt passes through, so verify HERE: if the
-        // chat's current env differs from what the live session was actually
-        // created/updated with, force-respawn with the right env first (the
-        // rebuild resumes — Claude session id / Codex thread / Cursor agent —
-        // so the conversation survives). Undefined appliedChatEnvKey = legacy
-        // slot from before this guard → skip rather than respawn on unknowns.
+        // The single choke point every prompt passes: if the chat's env differs from
+        // what the live session was created with (pills changed while warming, when
+        // live updates no-op), force-respawn first. The rebuild resumes the provider
+        // conversation. A slot without appliedChatEnvKey predates the guard and is
+        // skipped.
         {
           const expected = chatComposerEnv(chatId, current.initialize);
           if (
@@ -2991,12 +2797,9 @@ export function AgentSessionsProvider({
           }
         }
 
-        // Point of no return: everything above could await (session rebuild,
-        // drift respawn), and the composer showed Stop the whole time. A Stop in
-        // that window means this prompt must never reach the engine — the bug
-        // was that it did, so the agent started working right after the user
-        // stopped it, and the engine then held a live turn the chat believed was
-        // over (which reappeared as a running shimmer on the next reload).
+        // The point of no return: a Stop during the awaits above means this prompt
+        // must never reach the engine, or the agent starts work right after the user
+        // stopped it.
         if (stoppedByUser()) {
           settleStoppedSend();
           return;
@@ -3018,11 +2821,7 @@ export function AgentSessionsProvider({
           text: displayText ?? text,
           ...(displayText != null && displayText !== text ? { retryText: text } : {}),
           createdAt: admissionPlaceholder?.createdAt ?? Date.now(),
-          // Persist attachment chips on
-          // the user bubble so the timeline shows them right above the
-          // text — matches what the user staged in the composer.
-          // Empty array → undefined so we don't bloat persisted JSON
-          // for prompts without attachments.
+          // Persist attachment chips on the user bubble; omit an empty array.
           ...(bubbleAttachments && bubbleAttachments.length > 0
             ? { attachments: bubbleAttachments }
             : {}),
@@ -3052,11 +2851,8 @@ export function AgentSessionsProvider({
             autoAction,
           ],
         );
-        // Mid-chat /add-dir awareness. The gateway's first-turn preamble already
-        // names the dirs present when the chat started (and a resumed chat has
-        // them in its transcript); here we tell the agent about a dir ADDED LATER,
-        // once, on the next turn it sends. Prepended to the AGENT text only — the
-        // displayed bubble (userMessage.text, above) stays clean.
+        // Tell the agent once, on its next turn, about a dir added after the chat
+        // started. Prepended to the agent text only; the bubble stays clean.
         const chatDirs =
           useWorkspaceStore.getState().chats.find((c) => c.id === chatId)
             ?.additionalDirectories ?? [];
@@ -3083,20 +2879,9 @@ export function AgentSessionsProvider({
           { type: "text", text: prependSystemInstruction(dirNotice, text) },
           ...(attachments ?? []),
         ];
-        // Faithful-bubble payload: the engine persists this onto the user
-        // message so a REOPENED chat re-renders inline mention/attachment pills
-        // exactly as composed. Without it the engine only knows the wire
-        // `prompt` text and a reloaded bubble falls back to plain backtick text
-        // (the "pills disappear on reopen" bug). Retain the expanded request
-        // separately so explicit Retry can recover it after a reload.
-        //
-        // displayText ALSO shields the persisted bubble from the wire prompt's
-        // <system_instruction> dir notice: persistUserPrompt stores the wire text
-        // VERBATIM whenever the bubble carries no displayText, so a notice-bearing
-        // turn would otherwise render the raw block inside the user's own message
-        // on reopen. When a notice is present we carry the clean text (the
-        // mention/import displayText if any, else `text`) so the engine persists
-        // THAT, not the notice. The live optimistic bubble is already clean.
+        // The engine persists displayText so a reopened bubble renders its pills as
+        // composed, and keeps the expanded request for explicit Retry. displayText
+        // also keeps the wire prompt's dir notice out of the persisted bubble.
         const bubbleDisplayText = displayText ?? text;
         const bubble: AgentPromptBubble | undefined =
           segments?.length || bubbleAttachments?.length ||
@@ -3142,11 +2927,9 @@ export function AgentSessionsProvider({
         // on the first assistant chunk; the recoverable-failure handler below
         // reads it to decide whether a resend would duplicate the turn.
         turnProducedOutputRef.current.set(chatId, false);
-        // Publish WHICH turn this renderer has in flight (cleared in the
-        // finally). The transcript's tail reads it to decide whether the turn is
-        // still running — a question session status cannot answer, because the
-        // `warming` window it used to infer from is also every chat reopen. See
-        // pendingLocalTurns / tailTurnInFlight.
+        // Publish which turn this renderer has in flight (cleared in the finally). The
+        // tail reads it to tell a running turn from a reopen, which session status
+        // cannot (pendingLocalTurns, tailTurnInFlight).
         getStore().setPendingLocalTurn(chatId, userMessage.id);
         if (isCloudWorkspace(current.cwd)) cloudSendOwner = { cwd: current.cwd, agentId: current.agentId, sessionId: current.sessionId };
         // A cloud turn that this send no longer owns, or that the user
@@ -3221,11 +3004,8 @@ export function AgentSessionsProvider({
         // telemetry share one durable correlation id across rebuild/retry.
         const promptId = newPromptDiagnosticId();
 
-        // The prompt argument is parameterized
-        // so rebuildAndRetry can prepend a <previous_conversation> replay
-        // preamble to it on session-expired fallbacks. The prior closure baked
-        // in a single ContentBlock[]; the retry path now
-        // builds a different one.
+        // The prompt is a parameter so rebuildAndRetry can prepend a
+        // <previous_conversation> replay preamble.
         const runPrompt = async (
           sessionId: string,
           promptToSend: ContentBlock[],
@@ -3298,11 +3078,8 @@ export function AgentSessionsProvider({
 
             promptActivityRef.current.set(chatId, touchActivity);
             touchActivity();
-            // Absolute ceiling: set ONCE, never reset by touchActivity, so a
-            // half-open transport under `timeoutMs: 0` (below) can't hold this
-            // promise — and the sendingChatsRef lock gating every later send —
-            // forever. See PROMPT_ABSOLUTE_TIMEOUT_MS. Reuses the inactivity
-            // error so the settle reads as a hard stall (→ failed, retry-by-send).
+            // Set once, never reset by activity, so a half-open transport cannot hold this
+            // promise and the send lock forever (PROMPT_ABSOLUTE_TIMEOUT_MS).
             absoluteTimer = setTimeout(() => {
               controller.abort();
               finishReject(promptInactivityError());
@@ -3350,10 +3127,8 @@ export function AgentSessionsProvider({
               .then(finishResolve, finishReject);
           });
 
-        // Whether there's genuine prior context to preserve on a rebuild.
-        // A brand-new chat (no agent turn yet) has nothing to "continue", so
-        // we never replay or show the "Continuing session" notice for it —
-        // that banner on a first "hi" was pure confusion.
+        // A brand-new chat has nothing to continue, so it never replays or shows the
+        // "Continuing session" notice.
         const hasPriorContext = current.messages.some(
           (m) => m.kind === "text" && m.role === "agent",
         );
@@ -3460,10 +3235,8 @@ export function AgentSessionsProvider({
               chatId,
             );
             prebindBackgroundTasksRef.current.clearChat(chatId);
-            // The resume above can take up to a minute with the chat still
-            // showing Stop. Re-check before re-sending: rebuildAndRetry treats
-            // null as "couldn't resume" and its own post-await check turns that
-            // into a clean stop rather than a cold rebuild.
+            // The resume can take a minute with the chat showing Stop; re-check before
+            // re-sending. null here becomes a clean stop, not a cold rebuild.
             if (stoppedByUser()) return null;
             promptRetryCount += 1;
             return await runPrompt(recovered.executionId, prompt);
@@ -3483,20 +3256,15 @@ export function AgentSessionsProvider({
           AgentPromptCompleteMessage | AgentPromptFailedMessage | null
         > => {
           if (!ownsPromptIdentity()) return null;
-          // A recovery is a RE-SEND of the user's prompt. After a Stop there is
-          // nothing to recover: retrying would restart the very turn the user
-          // just ended (the "I stopped it and it kept going" report).
+          // A recovery re-sends the prompt; after a Stop it would restart the turn the
+          // user just ended.
           if (stoppedByUser()) {
             settleStoppedSend();
             return null;
           }
-          // ── True-resume fast path ───────────────────────────────
-          // The session is almost always just gone from a restarted engine
-          // (a dev HMR respawn on a apps/desktop/src/engine save, or the watchdog) — NOT a
-          // genuine vendor-side expiry. Re-attach the SAME session id and
-          // retry with --resume: full context, NO replay preamble, NO
-          // "Continuing session" banner. Only when there's prior context to
-          // preserve — a fresh chat falls straight through to a cold start.
+          // The session is almost always just gone from a restarted engine (a dev
+          // respawn or the watchdog), not expired. Re-attach the same session and retry
+          // with full context and no replay preamble, when there is context to keep.
           if (opts?.replayHistory && current.sessionId && hasPriorContext) {
             // A second registered-owner transition can begin after loadSession
             // admits the replacement but before its prompt dispatch. Retry the
@@ -3572,10 +3340,8 @@ export function AgentSessionsProvider({
               const resumeFailedRecoverably =
                 resumeFailure !== null &&
                 promptFailureShouldRecover(resumeFailure);
-              // Clean success (or a non-recoverable failure the user must
-              // see) ends here. Only a recoverable RE-failure (a real
-              // --resume rejection: "no conversation found") falls through to
-              // the cold rebuild + replay-preamble path below.
+              // Success or a failure the user must see ends here; only a recoverable
+              // re-failure (a real resume rejection) falls through to the cold rebuild.
               if (!resumeFailedRecoverably) {
                 getStore().patchSession(chatId, {
                   status: "streaming",
@@ -3588,19 +3354,13 @@ export function AgentSessionsProvider({
             }
           }
 
-          // ── Cold rebuild (fresh session) ────────────────────────
           getStore().patchSession(chatId, {
             status: "warming",
             error: null,
             failure: null,
           });
           try {
-            // Thread the chat's
-            // original cwd through the rebuild so the strict gateway
-            // doesn't reject the force-call with "chat has no project
-            // folder bound." `current` is the pre-rebuild slot snapshot
-            // captured at sendPrompt entry — its cwd was set when the
-            // chat first warmed (see ensureSession's setSession block).
+            // Pass the chat's original cwd, or the strict gateway rejects the force call.
             await ensureSessionRef.current?.(chatId, current.agentId!, {
               force: true,
               replaceProviderConversation: true,
@@ -3619,26 +3379,16 @@ export function AgentSessionsProvider({
           const rebuilt = getStore().sessions[chatId];
           if (!rebuilt?.sessionId || rebuilt.status !== "ready") return null;
 
-          // When the rebuild was triggered by session-expired,
-          // prepend the prior conversation as a replay preamble so the
-          // fresh agent has context. The stitch is INVISIBLE by design: no
-          // "Continuing session" notice, no
-          // divider — the user just keeps typing and it works. Replay
-          // ONLY when there's real prior context to restore; a fresh
-          // chat (no agent turn yet) reaching the cold-rebuild path just
-          // starts clean. Reaching here WITH hasPriorContext means the
-          // true-resume fast path above couldn't restore the session
-          // (genuine --resume rejection), so replaying is the correct
-          // fallback to avoid agent amnesia.
+          // After a session-expired rebuild, prepend the prior conversation as an
+          // invisible replay preamble, but only when there is real context: reaching
+          // here with it means the true resume above failed, and replay avoids amnesia.
           const promptToSend: ContentBlock[] = prompt;
           let messagesAfterRebuild = rebuilt.messages;
           const userMsgIndex = rebuilt.messages.findIndex(
             (m) => m.id === userMessage.id,
           );
           if (userMsgIndex < 0) {
-            // Defensive fallback — userMessage was somehow pruned from
-            // the slot (it's normally already there via capUserAppend
-            // pre-runPrompt). Re-append so the prompt stays visible.
+            // Defensive: re-append the user message if it was pruned from the slot.
             messagesAfterRebuild = capUserAppend(
               rebuilt.messages,
               userMessage,
@@ -3706,10 +3456,7 @@ export function AgentSessionsProvider({
               ? current.initialize.protocolVersion
               : undefined,
         });
-        // Arm TTFT for this turn — the first streamed chunk (detected in the
-        // AGENT_SESSION_UPDATE listener above) emits agent_first_response with
-        // the time since now. Covers any rebuild/retry below, so it reflects the
-        // user-perceived "send → first token" latency.
+        // Arm time-to-first-token for this turn, covering any rebuild or retry below.
         trackAgentTurnStarted(current.agentId!, chatId);
         try {
           let resp:
@@ -3717,24 +3464,17 @@ export function AgentSessionsProvider({
             | AgentPromptFailedMessage
             | null;
           try {
-            // `current` was snapshotted several awaits ago; a concurrent
-            // load/rebuild may have replaced this chat's execution since.
-            // Dispatch to the LIVE execution so the prompt cannot target a
-            // superseded id the adapter no longer owns ("no live session").
+            // current was captured several awaits ago; dispatch to the live execution so
+            // the prompt cannot target a superseded id.
             resp = await runPrompt(
               getStore().sessions[chatId]?.sessionId ?? current.sessionId,
               prompt,
             );
           } catch (firstErr) {
             if (!ownsPromptTurn()) return;
-            // A Stop is the most common reason this rejects: killing the
-            // provider tears the stream down, which classifies as the
-            // RECOVERABLE transport-closed — and this path then rebuilt the
-            // session and re-sent the prompt, so the agent went straight back to
-            // work on the turn the user had just stopped. (The
-            // AGENT_PROMPT_FAILED branch below always had this guard; the
-            // rejection path did not.) The expected exit of a cancelled turn is
-            // not a fault: settle quietly, exactly like a clean cancel.
+            // A Stop is the usual reason this rejects: killing the provider reads as a
+            // recoverable transport close, and rebuilding would restart the stopped turn.
+            // Settle quietly, like a clean cancel.
             if (stoppedByUser() || getStore().cancellingChats.has(chatId)) {
               settleStoppedSend();
               return;
@@ -3773,13 +3513,10 @@ export function AgentSessionsProvider({
               });
               return;
             }
-            // Cursor duplicate-turn guard: if this turn ALREADY streamed
-            // assistant content, the recoverable error is a transport blip
-            // (forceReconnect / socket close) whose engine-side turn is still
-            // alive — it produced its answer, which already landed via
-            // AGENT_SESSION_UPDATE. Re-running the prompt on a fresh session
-            // would stream the same turn a second time. Keep the chat usable,
-            // but record an interrupted outcome for telemetry.
+            // If this turn already streamed content, the recoverable error is a transport
+            // blip while the engine-side turn lives on. Re-running it on a fresh session
+            // would stream the turn twice; keep the chat usable and record the
+            // interruption.
             if (turnProducedOutputRef.current.get(chatId)) {
               promptInterruptedAfterOutput = failure;
               getStore().patchSession(chatId, {
@@ -3789,10 +3526,8 @@ export function AgentSessionsProvider({
               });
               return;
             }
-            // Only replay history when the failure indicates
-            // the agent's session is gone. transport-closed / timeout
-            // are network glitches — the agent's context is still alive
-            // on the other end of the rebuild, so no replay needed.
+            // Replay history only when the agent's session is gone; transport closes and
+            // timeouts leave its context alive.
             resp = await rebuildAndRetry({
               replayHistory: promptFailureShouldResumeProvider(failure),
             });
@@ -3801,23 +3536,17 @@ export function AgentSessionsProvider({
 
           if (!ownsPromptTurn()) return;
           if (resp.type === "AGENT_PROMPT_FAILED") {
-            // If the user just clicked Cancel, this PROMPT_FAILED is the
-            // expected exit of the SIGTERM'd subprocess — not a real
-            // failure. The cancel handler already optimistically flipped
-            // status to ready; just clear the flag and bail. The generation is
-            // the reliable half of the test: cancel() records it before it needs
-            // a live session id, so a stop that arrived while this send was
-            // still being prepared is caught here too.
+            // After a user cancel, this failure is the expected exit of the stopped
+            // subprocess. The generation catches a stop that arrived while the send was
+            // still being prepared.
             if (stoppedByUser() || getStore().cancellingChats.has(chatId)) {
               settleStoppedSend();
               return;
             }
             if (abandonedCloudPrompt()) return;
-            // Another turn already runs on this session: an agent's message
-            // through the Zeros Local CLI, or another window's send. Nothing
-            // was delivered, so this is not a failure. Queue the message behind
-            // that turn (its terminal turn_state releases the queue) instead
-            // of showing a banner under the other turn's output.
+            // Another turn already runs on this session (a Local CLI message, another
+            // window). Nothing was delivered, so queue behind it instead of showing a
+            // failure.
             if (resp.activeTurn && !cloudSend) {
               const slot = getStore().sessions[chatId];
               const queued = slot && queueBehindRunningTurn({
@@ -3847,18 +3576,11 @@ export function AgentSessionsProvider({
               "prompt",
             );
             if (settleCloudPromptFailure(failure)) return;
-            // If the agent reported a
-            // recoverable failure (most often `session-expired` — Codex
-            // "no rollout found", Claude "session not found"), silently
-            // rebuild a fresh session and retry the same prompt instead
-            // of surfacing a hard error to the user. Without this hop, the user
-            // saw an "Error: Session expired" pill and a
-            // disabled composer — for what should be self-healing.
+            // A recoverable failure (usually session-expired: Codex "no rollout found",
+            // Claude "session not found") rebuilds and retries silently instead of
+            // showing an error.
             if (promptFailureShouldRecover(failure)) {
-              // Same cursor duplicate-turn guard as the throw path above: a
-              // recoverable AGENT_PROMPT_FAILED for a turn that already streamed
-              // content means the answer is in; don't rebuild + resend. Keep the
-              // chat usable, but preserve the interruption for telemetry.
+              // The same duplicate-turn guard as the throw path: the answer is already in.
               if (turnProducedOutputRef.current.get(chatId)) {
                 promptInterruptedAfterOutput = failure;
                 getStore().patchSession(chatId, {
@@ -3874,8 +3596,7 @@ export function AgentSessionsProvider({
               if (!retried || !ownsPromptTurn()) return;
               if (retried.type === "AGENT_PROMPT_FAILED") {
                 if (abandonedCloudPrompt()) return;
-                // The retry itself failed — surface the second failure
-                // without a third attempt. Two strikes is enough.
+                // The retry failed too; surface it without a third attempt.
                 const retryFailure = failureFromAgentError(
                   {
                     ...retried,
@@ -3911,12 +3632,9 @@ export function AgentSessionsProvider({
             if (windowed.length) getStore().patchSession(chatId, { messages: mergeWindowedTail(fresh.messages, windowed) });
           }
 
-          // Fold per-turn usage counters into the running session total.
-          // Read the incoming wire object with the CANONICAL TurnUsage field
-          // names the engine actually sends (cacheReadTokens / cacheWriteTokens
-          // / reasoningTokens) — NOT the store's AgentUsage names. These match
-          // the analytics block below; keeping the two casts in sync is what
-          // prevents the "cache always 0" drift this fold used to have.
+          // Read the wire usage with the canonical TurnUsage names (cacheReadTokens,
+          // cacheWriteTokens, reasoningTokens), not the store's AgentUsage names, as the
+          // analytics block below does.
           const turnUsage = (resp.response as { usage?: unknown } | undefined)
             ?.usage as
             | {
@@ -3972,11 +3690,7 @@ export function AgentSessionsProvider({
             activeTurnStartedAt: pendingCloudStop ? slot.activeTurnStartedAt : null,
             usage: nextUsage,
           });
-          // Analytics: a prompt turn completed. Metadata only — model NAME,
-          // token counts, cost (best-effort per agent). No content.
-          // Read usage with the CANONICAL TurnUsage field names the engine
-          // sends (cacheReadTokens/reasoningTokens), not the store's
-          // AgentUsage names used by the folding cast above.
+          // Analytics: metadata only (model name, token counts, cost), never content.
           const promptResponse = resp.response as
             | {
                 effectiveModel?: string;
@@ -4024,8 +3738,6 @@ export function AgentSessionsProvider({
             outputTokens: tu?.outputTokens,
             costUsd: tu?.totalCostUsd,
           });
-          // PostHog native LLM Analytics — populates the cost/token/latency
-          // dashboards for every agent that now reports usage.
           trackAiGeneration({
             agentId: current.agentId!,
             model: effectiveModel,
@@ -4186,23 +3898,12 @@ export function AgentSessionsProvider({
         }
         if (ownsTerminalSlot) {
           if (sendingChatsRef.current.get(chatId) === sendOwner) sendingChatsRef.current.delete(chatId);
-          // Drop a STRANDED plan-review card. A plan gate BLOCKS its turn, so in
-          // the happy path Approve / a typed follow-up cleared pendingPermission
-          // before we reached here — this only bites when the turn hit a terminal
-          // state with the gate still pending (the adapter's 30-min auto-deny, or
-          // a turn that died mid-plan), which would otherwise leave the
-          // PlanReviewCard up with buttons that click into an already-resolved
-          // gate. Gated to plan reviews (a real Allow/Deny gate is untouched).
-          // Status is terminal by here, so a pending plan gate is stranded by
-          // definition — see clearStrandedPlanReview.
+          // Drop a plan-review card stranded by a terminal turn (the adapter's
+          // 30-minute auto-deny, or a turn that died mid-plan); its buttons would click
+          // into a resolved gate. Real Allow/Deny gates are untouched.
           getStore().clearStrandedPlanReview(chatId);
-          // If this was a queued-send flush that bailed BEFORE committing a live
-          // bubble (e.g. the session couldn't be re-established under engine
-          // churn), the placeholder is still present and greyed. Demote it to a
-          // normal bubble — moved to the transcript END, because a follow-up
-          // placeholder's array slot can be mid-old-turn. An active admission
-          // placeholder is already the tail. Either way the user's text remains;
-          // on success the placeholder was already promoted, so this is a no-op.
+          // A queued flush that bailed before committing keeps its greyed placeholder:
+          // demote it to a normal bubble at the transcript end, keeping the user's text.
           if (flushBubbleId) {
             const slot = getStore().sessions[chatId];
             const ph = slot?.messages.find((m) => m.id === flushBubbleId);
@@ -4225,21 +3926,10 @@ export function AgentSessionsProvider({
               });
             }
           }
-          // Flush the next queued send (FIFO) — but ONLY when the turn settled
-          // HEALTHY and the queue isn't parked by an in-progress queued-message
-          // edit. By here status is "ready" (success) or a failure state
-          // (failed / reconnecting / auth-required), never "streaming".
-          //
-          // Draining into an UNHEALTHY chat is what turns a stuck turn into a
-          // spawn storm: each queued send fires into the dead/rebuilding
-          // session, hits a recoverable failure, and triggers a `force:true`
-          // rebuild — which bypasses ensureSession's de-dup — so every queued
-          // send mints a fresh AGENT_NEW_SESSION. Dozens of codex app-server
-          // children pile up, the machine thrashes, turns hang, and the
-          // composer freezes with an ever-growing queue that never sends.
-          // When the turn didn't recover, STOP draining: drop the pending
-          // queue and remove its greyed placeholders so the
-          // user resends deliberately once the chat is healthy again.
+          // Drain the next queued send only when the turn settled healthy and the queue
+          // is not held. Draining into an unhealthy chat spawn-storms: each send hits a
+          // recoverable failure and a force rebuild that bypasses ensureSession's
+          // de-dup. Otherwise drop the queue so the user resends deliberately.
           if (lifecycleCancelled) {
             // Stop preserved and paused follow-ups. A later explicit send may
             // have resumed them; the queue owns that choice, never this old turn.
@@ -4417,13 +4107,9 @@ export function AgentSessionsProvider({
 
   const cancel = useCallback<SessionsActions["cancel"]>(
     async (chatId) => {
-      // FIRST, ahead of every early return below — including the bridge guard:
-      // a send whose AGENT_PROMPT hasn't gone out yet (still awaiting a session
-      // rebuild / resume) must abort instead of dispatching after the user
-      // stopped. That send is exactly the case where there is no sessionId — or
-      // even a live bridge — to address a cancel at, so recording the intent
-      // cannot be conditional on having one. It is a local counter bump; no
-      // bridge is needed to make the in-flight send read it.
+      // First, before every early return including the bridge guard: a send still
+      // awaiting a rebuild or resume has no session id to address a cancel at, so
+      // recording the intent is a local counter bump.
       bumpCancelGeneration(cancelGenerationsRef.current, chatId);
       // Stop publishes the entire received Local tail before marking it final.
       // The callback filters by exact chat and leaves cloud scheduling intact.
@@ -4589,34 +4275,23 @@ export function AgentSessionsProvider({
         await promise;
         return;
       }
-      // Optimistic state transition: cancel is intentional, the chat
-      // should immediately be ready for the next prompt. The flag
-      // suppresses the AGENT_PROMPT_FAILED that arrives when the
-      // SIGTERM'd subprocess exits — we'd otherwise mark the chat as
-      // failed and the user gets stuck behind an "agent error" tag.
-      // The flag is cleared inside the prompt-failure handler when
-      // the expected exit lands (or the next handler if a real failure
-      // races in).
+      // Optimistically ready for the next prompt. The flag suppresses the
+      // AGENT_PROMPT_FAILED from the stopped subprocess's exit, which would
+      // otherwise mark the chat failed.
       getStore().setCancelling(chatId, true);
       getStore().patchSession(chatId, {
         status: "ready",
         error: null,
         failure: null,
         lastStopReason: "cancelled",
-        // There is no active turn after a stop. The terminal turn_state clears
-        // this too, but not before it arrives (and a wedged adapter may never
-        // send one) — and it is what the tail shimmer anchors its elapsed timer
-        // to, so a stale value is exactly the "timer keeps running after I
-        // stopped" symptom.
+        // No turn is active after a stop. The terminal turn_state clears this too,
+        // but may never arrive, and the tail's elapsed timer anchors to it.
         activeTurnStartedAt: null,
-        // Drop any open permission prompt — the engine releases the gate on
-        // cancel (adapter.cancel resolves pendingPermissions), so the inline
-        // card would otherwise be stranded + clickable against a dead turn.
+        // The engine releases the gate on cancel; a leftover card would answer a dead
+        // turn.
         pendingPermission: null,
         pendingPermissions: [],
-        // Same for parked questions — adapter.cancel dismisses them engine-
-        // side, so a leftover card would keep replacing the composer and
-        // answer into a dead resolver.
+        // Parked questions are dismissed engine-side too.
         pendingQuestions: [],
       });
       const stop = {
@@ -4752,11 +4427,8 @@ export function AgentSessionsProvider({
         blocking: head.request.blocking,
       });
       promptActivityRef.current.get(chatId)?.();
-      // Durable record: stamp the resolution onto the transcript tool message
-      // — ANSWERED with per-question answers, DECLINED on an explicit refusal,
-      // or SKIPPED on dismiss — so the
-      // read-only card shows the outcome after the composer card is gone
-      // (best-effort — no-op if the tool message hasn't landed).
+      // Stamp the outcome (answered, declined or skipped) onto the transcript tool
+      // message so its read-only card shows it after the composer card is gone.
       const toolCallId = head.request.toolCallId;
       if (toolCallId) {
         getStore().stampQuestionAnswer(
@@ -4770,22 +4442,11 @@ export function AgentSessionsProvider({
         pendingQuestions: current.pendingQuestions.slice(1),
       });
 
-      // The delivery watchdog is self-healing: re-queueing with a toast makes
-      // the user re-answer in a loop. The engine
-      // echoes AGENT_QUESTION_SETTLED right after resolving the parked SDK
-      // promise — no echo means the answer never landed (dropped send during
-      // a socket blip, or the engine settled/rebuilt the question
-      // underneath). Recovery is now automatic and invisible:
-      //   miss 1 → silently RE-SEND the same response (the socket usually
-      //            healed; the engine drops a duplicate loudly-but-harmlessly).
-      //   miss 2 → guaranteed-delivery fallback: release the stuck turn and
-      //            deliver the answer as a regular next prompt. One toast
-      //            explains what happened; the user never re-answers.
-      //
-      // CAPABILITY-GATED on request.expiresAt: only engines that stamp the
-      // skip deadline also emit the settled echo (both shipped together). An
-      // OLDER engine delivers answers fine but never echoes — arming the
-      // watchdog against it would report "stuck" on every healthy answer.
+      // Recover a lost answer invisibly. The engine echoes AGENT_QUESTION_SETTLED
+      // after resolving the parked promise, so no echo means the answer never
+      // landed. Miss 1 re-sends it; miss 2 releases the stuck turn and delivers the
+      // answer as the next prompt. Only engines that stamp expiresAt also echo;
+      // older ones would look stuck on every healthy answer.
       if (
         options?.deliveryWatchdog === false ||
         typeof head.request.expiresAt !== "number"
@@ -4923,11 +4584,8 @@ export function AgentSessionsProvider({
         return request.owns(slot?.executionId ?? slot?.sessionId) && slot?.currentModeId === modeId;
       };
       getStore().patchSession(chatId, { currentModeId: modeId });
-      // No timeline banner for the switch: a
-      // "Switched mode X → Y" row per toggle was pure noise — the active
-      // mode already shows on the Plan toggle + Permissions menu. The flip
-      // above is the only state change; the engine round-trip below
-      // confirms or reverts it.
+      // No timeline row for a mode switch: the toggle already shows the mode. The
+      // engine round trip confirms or reverts the flip above.
       try {
         const resp = await bridge.request<
           AgentModeChangedMessage | AgentErrorMessage
@@ -5006,12 +4664,8 @@ export function AgentSessionsProvider({
     (chatId, model) => {
       if (!bridge || !model) return;
       const current = getStore().sessions[chatId];
-      // Only meaningful for a LIVE session. The chat's model is already
-      // persisted (UPDATE_CHAT_SETTINGS); this applies it to the running
-      // session so it takes effect on the next turn without a rebuild.
-      // Fire-and-forget — model changes are non-critical and the SDK
-      // applies it on the next turn. Adapters without live model selection
-      // ignore it (the choice still applies on the next session creation).
+      // Only for a live session: apply the persisted model for the next turn
+      // without a rebuild. Adapters without live model selection ignore it.
       if (!current?.agentId || !current.sessionId) return;
       bridge.send({
         type: "AGENT_SET_MODEL",
@@ -5064,14 +4718,9 @@ export function AgentSessionsProvider({
     (chatId) => {
       if (!bridge) return;
       const current = getStore().sessions[chatId];
-      // Only meaningful for a LIVE session. The chat's config (effort / fast /
-      // ultracode / additionalDirectories / allow-deny / maxTurns) is already
-      // persisted (UPDATE_CHAT_SETTINGS); this applies it to the running
-      // session for the next turn without a rebuild. Codex also applies
-      // supported effort/Fast changes to its exact active native turn.
-      // No-op (just the persisted chat.* state stands) when there is no live
-      // session yet — the config then applies on the next session creation.
-      // Fire-and-forget — adapters without live config changes ignore it.
+      // Only for a live session: apply the persisted config for the next turn
+      // without a rebuild (Codex also updates its active turn's effort and Fast).
+      // Without a session, it applies at the next creation.
       if (!current?.agentId || !current.sessionId) return;
       // Config thread (carrying model/effort/fast/dirs/permissionMode) lives in
       // the workspace store, not the sessions store that `getStore` snapshots.
@@ -5079,14 +4728,9 @@ export function AgentSessionsProvider({
         .getState()
         .chats.find((c) => c.id === chatId);
       if (!chat) return;
-      // Build the full composer env via the SAME encoder session-creation uses,
-      // so the live update and a respawn carry an identical config map.
-      // `current.initialize` is passed for the same reason: sendPrompt's
-      // reconcile compares against envForChat(chat, initialize), and a stamp
-      // built WITHOUT it reads as drift for any agent that overrides its model
-      // env var via _meta — which unnecessarily close→resumes the provider on
-      // the next send for a change that had already been applied live. The two
-      // must be built identically.
+      // Build the env with the same encoder and initialize data as session creation:
+      // sendPrompt's reconcile compares against envForChat(chat, initialize), and a
+      // mismatch would read as drift and close-resume the provider needlessly.
       const env = envForChat(chat, current.initialize);
       bridge.send({
         type: "AGENT_UPDATE_CONFIG",
@@ -5095,16 +4739,9 @@ export function AgentSessionsProvider({
         sessionId: current.sessionId,
         env,
       });
-      // Settings-drift guard: this env is now live-applied — stamp it so
-      // sendPrompt's reconcile doesn't ALSO force-respawn for the same change.
-      //
-      // Only stamp when the agent ACTUALLY applies config live. The gateway
-      // silently no-ops AGENT_UPDATE_CONFIG for adapters without the optional
-      // hook, so stamping unconditionally would record a change
-      // that never landed — sendPrompt would then skip its reconcile and run
-      // the turn on the stale model/effort. Leaving the key stale is the
-      // correct signal: the reconcile respawns at send time, once, instead of
-      // on every pill click.
+      // Stamp the env as applied only when the agent applies config live; the
+      // gateway silently ignores AGENT_UPDATE_CONFIG otherwise, and a stale key is
+      // what makes sendPrompt respawn once at send time.
       if (!agentAppliesConfigLive(current.agentId)) return;
       getStore().patchSession(chatId, {
         appliedChatEnvKey: chatEnvDriftKey(env),
@@ -5261,14 +4898,8 @@ export function AgentSessionsProvider({
       if (q?.find((e) => e.bubbleId === messageId)?.steerRequest) return;
       if (!q?.some((e) => e.bubbleId === messageId)) return;
       const displayText = payload.displayText ?? text;
-      // Replace the still-pending send's FULL payload so the edit takes
-      // effect when it flushes. The payload was built by the composer's
-      // normal send pipeline (mentions re-expanded into `text`, attachments
-      // re-encoded), so nothing from the original entry needs preserving —
-      // including a (theoretical) autoAction: an edited message is
-      // user-authored, so the 7th arg is deliberately dropped. (In practice
-      // auto-sent bubbles are queued with queuedEditable=false, so this
-      // path can't see one.)
+      // Replace the pending send's full payload, built by the normal send pipeline.
+      // An edited message is user-authored, so no autoAction carries over.
       sendQueueRef.current.set(
         chatId,
         q.map((e) =>
@@ -5644,12 +5275,9 @@ export function AgentSessionsProvider({
     [getStore],
   );
 
-  // Cross-device message sync: re-window a chat against the engine when its
-  // transcript changed on ANOTHER device. The robust backbone behind "messages
-  // sync Mac↔web" — independent of live AGENT_SESSION_UPDATE routing, which
-  // drops updates for an unopened chat or mid force-respawn. Skips a chat that
-  // is actively streaming HERE (the live turn is canonical) and no-ops when the
-  // window already matches, so it's cheap to call on every nudge.
+  // Re-window a chat whose transcript changed on another device, independent of
+  // live routing, which drops updates for unopened chats. Skips a chat streaming
+  // here and no-ops when the window matches, so every nudge can call it.
   const reconcileChatMessages = useCallback(
     (chatId: string): Promise<void> => {
       if (!chatId) return Promise.resolve();
@@ -5769,8 +5397,7 @@ export function AgentSessionsProvider({
       let request!: Promise<void>;
       // eslint-disable-next-line prefer-const
       request = (async () => {
-        // Fix #2 — refresh the device-local policy slice alongside message
-        // hydration. The store mutator preserves its reference when unchanged.
+        // Refresh the device-local policy slice alongside message hydration.
         void getStore().hydrateChatPolicies(chatId);
 
         const slot = getStore().sessions[chatId];
@@ -5852,13 +5479,8 @@ export function AgentSessionsProvider({
           ) {
             return;
           }
-          // Pre-fix builds (before 2026-04-26) wrote agent replay events
-          // to disk on every reopen, so existing chats have stacked
-          // duplicates. Collapse runs of identical consecutive messages
-          // before showing them. New duplicates can't accrue anymore — no
-          // current adapter replays its transcript on resume — so this is
-          // purely cleanup of pre-existing disk content + the safety net
-          // should a future adapter ever start replaying.
+          // Older builds wrote replay events to disk on every reopen; collapse identical
+          // consecutive messages.
           const deduped = reconcileHistoryMessages(page.messages);
           // Re-read the slot after the await — the user may have started
           // typing while we were fetching, in which case live state wins.
@@ -6015,12 +5637,8 @@ export function AgentSessionsProvider({
     await hydrateChat(chatId);
   };
 
-  // Apply the engine's transcript-changed nudge. When a turn runs (or an edit
-  // happens) on ANOTHER device, the engine broadcasts DB_CHANGED({kinds:
-  // ["messages"], chatIds}) (debounced); re-window each named open chat so it
-  // shows up here — the cross-device "messages sync" path, robust to live-stream
-  // routing gaps. Desktop ignores its OWN nudges (running slot) and reflects a
-  // remote device's edits the same way the web reflects the Mac's.
+  // The engine broadcasts DB_CHANGED for transcripts changed on another device;
+  // re-window each named open chat. A running slot here ignores its own nudges.
   useEffect(() => {
     if (!bridge) return;
     const unsub = bridge.on("DB_CHANGED", (raw) => {
@@ -6172,18 +5790,10 @@ export function AgentSessionsProvider({
       const bindCancelled = () =>
         cancelledSince(cancelGenerationsRef.current, chatId, bindGeneration);
       let bindWasSuperseded = false;
-      // Preserve any messages already in the slot (typically just put
-      // there by hydrateChat) — wiping them here is what produced the
-      // "chat empty on reopen" bug for agents whose loadSession doesn't
-      // replay (Codex, Cursor). Disk is the source of truth.
+      // Preserve messages already hydrated; agents whose loadSession doesn't replay
+      // (Codex, Cursor) would otherwise reopen empty. Disk is the source of truth.
       const existing = getStore().sessions[chatId];
-      // Persist cwd on the slot so any later rebuild path (sendPrompt
-      // recovery, rebuildAndRetry, env-change force respawn) can reuse
-      // it. Before this fix, loadIntoChat's spread `...BLANK` clobbered
-      // cwd to null even though the bridge call below carried it
-      // correctly — so the FIRST send worked but a session-expired
-      // rebuild minutes later threw "chat has no project folder bound."
-      // resolveSpawnCwd also recovers the chat's own folder from the store.
+      // Persist cwd on the slot so later rebuild paths can reuse it.
       const resolvedCwd = resolveSpawnCwd(chatId, options?.cwd, existing?.cwd);
       const executionActor = executionActorForRecovery(existing, options);
       getStore().setSession(chatId, {
@@ -6253,7 +5863,7 @@ export function AgentSessionsProvider({
           {
             type: "AGENT_LOAD_SESSION",
             agentId,
-            chatId, // Bind the resumed session to its chat for persistence.
+            chatId,
             ...(providerBinding
               ? {
                   providerBinding,
@@ -6279,25 +5889,16 @@ export function AgentSessionsProvider({
           return true;
         }
         if (resp.type === "AGENT_ERROR") {
-          // Classify so transport-closed / session-expired / timeout
-          // route to status="reconnecting" (silent self-heal) rather
-          // than a hard "Agent error" toast. Without this, an engine
-          // swap during chat-open fires
-          //   "Codex: Agent error / Engine swapping — request aborted"
-          // even though every other code path correctly maps that to
-          // transport-closed. Same shape as sendPrompt's catch.
+          // Classify so an engine swap or expiry reconnects silently instead of showing
+          // an agent error.
           const failure = failureFromAgentError(resp, "loadSession");
           if (bindFailureWasSuperseded(failure)) {
             bindWasSuperseded = true;
             return true;
           }
-          // Adopt-only miss (lazy boot resume): there was no live execution to
-          // re-own, and by construction nothing was admitted, nothing was asked
-          // of the provider, and therefore nothing was learned about whether the
-          // durable binding is still good. Fall back to `idle` with the binding
-          // and transcript untouched — NOT to the invalidate/create branches
-          // below, which would throw away a perfectly valid resume id on every
-          // app start. The chat admits for real on focus / keystroke / send.
+          // An adopt-only miss admitted nothing and learned nothing about the durable
+          // binding: fall back to idle with the binding and transcript untouched, rather
+          // than discarding a valid resume id on every start.
           if (options?.adoptOnly) {
             getStore().patchSession(chatId, {
               status: "idle",
@@ -6395,11 +5996,8 @@ export function AgentSessionsProvider({
         if (prebindDirtySession && prebindDirtySession !== executionId) {
           prebindDirtySessionsRef.current.delete(chatId);
         }
-        // Re-apply the chat's persisted permission posture on resume too. The
-        // agent's resumed session starts at its OWN default mode (permission
-        // mode is a runtime setting, not part of the on-disk transcript), so
-        // without this an app restart would silently drop the user's mode
-        // (e.g. plan). reconcile is idempotent — a no-op when already matching.
+        // Re-apply the persisted permission posture on resume: the resumed session
+        // starts at its own default mode, which is not part of the transcript.
         if (bridge) {
           await reconcilePermissionModeAtBind(bridge, getStore, {
             chatId,
@@ -6445,10 +6043,7 @@ export function AgentSessionsProvider({
         return true;
       } catch (err) {
         if (bindCancelled()) return true;
-        // Classify the raw rejection (engine-swap rejections carry
-        // code:"ENGINE_SWAPPING"; WS-disconnect timeouts match
-        // TIMEOUT_RX) so the renderer's reconnect chip surfaces for
-        // recoverable cases instead of the hard-failure toast.
+        // Classify the raw rejection so recoverable cases show the reconnect chip.
         const failure = classifyRpcError({
           agentId,
           stage: "loadSession",
@@ -6703,10 +6298,8 @@ export function AgentSessionsProvider({
     capabilityRefreshInFlightRef.current.clear();
     loadFlightAdoptOnlyRef.current.clear();
     authPromptsRef.current.clear();
-    // Note: we deliberately do NOT clear the disk transcript here.
-    // disposeAll is called on engine respawn (in-place project swap),
-    // when the in-memory sessionIds become stale but the user still
-    // wants their history when chats reopen on the new engine.
+    // Keep the disk transcript: disposeAll runs on engine respawn, and the user
+    // still wants the history when chats reopen.
   }, [getStore]);
 
   const closeSession = useCallback<SessionsActions["closeSession"]>(
@@ -6855,9 +6448,7 @@ export function AgentSessionsProvider({
     [bridge, cancel, getStore, cloudPrompts, migrateCloudSends],
   );
 
-  // The actions object is stable across renders. No `sessions` field —
-  // consumers reach into the store directly via useChatSession (sliced)
-  // or useAgentSessions (full snapshot via subscription).
+  // Stable across renders; consumers read sessions from the store directly.
   const actions = useMemo<SessionsActions>(
     () => ({
       getSession,
@@ -6949,15 +6540,9 @@ export function AgentSessionsProvider({
     ],
   );
 
-  // ── Transcript cache subscription ───────────────────────
-  //
-  // The engine persists transcripts on emit, so the renderer never writes
-  // them. This subscription only keeps the presentation caches current:
-  //   • a resident window that leaves memory (deck eviction) is remembered
-  //     immediately from its last resident state;
-  //   • a settled resident window (turn finished, edit, reconcile) is marked
-  //     and remembered once on an idle tick — never per streamed chunk.
-  // It also releases native confirmation receipts with their transcript.
+  // The engine persists transcripts; this only keeps presentation caches
+  // current. A window leaving memory is remembered at once; a settled window is
+  // remembered on an idle tick, never per streamed chunk.
   useEffect(() => {
     let prevSessions = useSessionsStore.getState().sessions;
     let prevPendingTurns = useSessionsStore.getState().pendingLocalTurns;
@@ -7010,7 +6595,7 @@ export function AgentSessionsProvider({
       for (const chatId in nextSessions) {
         const slot = nextSessions[chatId];
         const before = prevSessions[chatId];
-        if (slot === before) continue; // unchanged
+        if (slot === before) continue;
         // Any sign of history ends the known-empty fast path at once.
         if (slot.messages.length > 0 || slot.hasTranscript) forgetEmptyLocalChat(chatId);
         if (slot.transcriptState !== "resident") {
@@ -7076,18 +6661,9 @@ export function AgentSessionsProvider({
     };
   }, []);
 
-  // ── Analytics: agent failures ───────────────────────────
-  //
-  // Single choke point for `agent_failed` across every path
-  // (ensureSession, sendPrompt, loadSession): observe when a slot's
-  // `failure` becomes newly set. Deduped per chat by kind:stage so a
-  // re-render of an already-failed slot doesn't re-emit; cleared when
-  // the slot recovers (failure → null) so a later identical failure
-  // counts again. Recoverable failures that self-heal clear `failure`
-  // mid-retry, so only genuine end-state failures are reported.
-  // Metadata only (kind + stage + a HASH of the technical message,
-  // never the text): the UI shows simplified copy, so the hash is what
-  // keeps distinct faults distinguishable in PostHog.
+  // The single point that reports agent_failed: when a slot's failure becomes
+  // newly set, deduped per chat by kind and stage and cleared on recovery.
+  // Metadata only, with a hash of the technical message instead of its text.
   useEffect(() => {
     let prev = useSessionsStore.getState().sessions;
     const lastSig = new Map<string, string>();
@@ -7131,11 +6707,8 @@ export function AgentSessionsProvider({
   return <ActionsCtx.Provider value={actions}>{children}</ActionsCtx.Provider>;
 }
 
-/** Append the user's just-sent bubble to a message list, preserving the
- *  per-chat cap. Extracted because it's used in two places (initial
- *  send + retry-after-rebuild). `uncapped` mirrors slot.historyExpanded —
- *  while the user holds paged-in older history, trimming here would pull
- *  the transcript out from under them just like a live append would. */
+/** Append the just-sent bubble, preserving the per-chat cap unless the reader
+ *  holds paged-in history (slot.historyExpanded). */
 function capUserAppend(
   messages: AgentMessage[],
   userMessage: AgentTextMessage,
@@ -7146,12 +6719,9 @@ function capUserAppend(
   return next.slice(-MAX_MESSAGES_PER_CHAT);
 }
 
-/** Remove the placeholder with `id` and append `userMessage` at the END.
- *  Used when a queued send flushes/steers: the placeholder was appended
- *  mid-previous-turn (streamed events landed after it in the array), and
- *  queued messages render in the composer's queued-card rather than the
- *  transcript — so the promoted live bubble must start its turn AFTER the
- *  previous turn's tail events, not at the stale enqueue slot. */
+/** Replace the placeholder with userMessage at the end: a queued placeholder
+ *  was appended mid-turn, and the promoted bubble must start its turn after
+ *  the previous turn's tail. */
 function promoteToEnd(
   messages: AgentMessage[],
   id: string,
@@ -7164,10 +6734,3 @@ function promoteToEnd(
     uncapped,
   );
 }
-
-// Hooks `useChatSession` + `useAgentSessions` live in ./sessions-hooks
-// (Track 5.C). This file is now component-only so Vite Fast Refresh
-// hot-swaps the provider on edit instead of full-reloading the page.
-// Warm-agent state lives in ./sessions-store (`warmAgentIds`). Type
-// re-exports of `AgentMessage` etc. happen via ./sessions-hooks where
-// the hooks live.
