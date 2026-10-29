@@ -3,20 +3,8 @@ import type {
   ChangesHistory,
   TurnHistoryCursor,
 } from "@zeros/protocol/changes-history";
-// ──────────────────────────────────────────────────────────
-// workspace-bridge — renderer-to-engine workspace API client
-// ──────────────────────────────────────────────────────────
-//
-// The engine workspace API is reached with a single
-// WORKSPACE_REQUEST { op, params } → WORKSPACE_RESPONSE { result } RPC pair,
-// correlated by requestId (RuntimeClient.request handles that). The desktop
-// renderer uses this client over its local engine socket; optional remote relay
-// clients can use the same bounded contract.
-//
-// Implements the workspace surface over the bridge: workspace
-// list/create, file tree/read, the git suite, GitHub PR ops, and chat /
-// message / project history.
-// ──────────────────────────────────────────────────────────
+// Client for the engine's WORKSPACE_REQUEST → WORKSPACE_RESPONSE RPC. Optional
+// remote relay clients use the same bounded contract.
 
 import type { RuntimeClient } from "./ws-client";
 import { cloudTargetForValue, cloudWorkspaceKey, parseCloudScopedId } from "./cloud-workspace-key";
@@ -75,18 +63,12 @@ interface WorkspaceErrorLike {
   op: string;
   code: string;
   message: string;
-  /** The engine attaches a remediation hint on structured GitErrors
-   *  (index.ts WORKSPACE_ERROR envelope). It was previously dropped here —
-   *  preserve it so the renderer can show actionable guidance. */
+  /** Remediation hint the engine attaches to structured GitErrors. */
   remediation?: string;
 }
 
-/** Error thrown for a WORKSPACE_ERROR. Carries the engine's `code` and
- *  `remediation` (not just `message`) so the renderer's `isGitErrorShape()`
- *  matches (it keys on a string `code`) and `humanError()` can render the
- *  remediation hint. Previously `workspaceOp` threw a bare `Error`, so every
- *  git/GitHub error reached the UI as a message-only string with no `code` and
- *  no remediation — defeating all the engine's structured error UX. */
+/** Carries the engine's `code` and `remediation`, so `isGitErrorShape()` (keyed
+ *  on a string `code`) matches and `humanError()` can render the hint. */
 class WorkspaceOpError extends Error {
   readonly code: string;
   readonly remediation?: string;
@@ -98,13 +80,9 @@ class WorkspaceOpError extends Error {
   }
 }
 
-/** Git WRITE ops the UI issues over the bridge → the analytics `git_op` enum.
- *  Recording here (the single op choke point) restores `git_op` coverage that
- *  the removed commit-bar `trackGitOp` calls used to provide — now centrally,
- *  for every UI-issued git write. NOTE: gh.* PR ops are intentionally excluded
- *  (review-tab tracks `pr_create` directly — avoid double-counting), and
- *  agent-shell commits bypass the bridge entirely (the engine has no analytics
- *  client), so those remain out of scope here. */
+/** Git writes issued over the bridge → the analytics `git_op` enum, recorded at
+ *  this single choke point. gh.* PR ops are excluded because review-tab tracks
+ *  `pr_create` itself; agent-shell commits never reach the bridge. */
 const GIT_OP_ANALYTICS: Record<
   string,
   "commit" | "push" | "pull" | "stage" | "unstage" | "discard"
@@ -117,14 +95,10 @@ const GIT_OP_ANALYTICS: Record<
   "git.discard": "discard",
 };
 
-/** Budget for NETWORK-BOUND git/GitHub writes (push / pull / fetch / rebase,
- *  PR create / mark-ready / merge / discovery). The 10s `workspaceOp` default is tuned for
- *  local DB reads; a slow remote or the GitHub merge API routinely exceeds it,
- *  so "Merge PR" used to reject with "Request timeout" → "Couldn't merge PR"
- *  even though GitHub completed the merge. If the op outlives even this budget
- *  the result still lands: these ops are in the engine's LONG_LIFECYCLE_OPS
- *  (apps/desktop/src/engine/workspace/change-events.ts), so the completion DB_CHANGED
- *  broadcast includes the originator and the stale card self-heals. */
+/** Network-bound git/GitHub writes (push, pull, fetch, rebase, PR create, ready,
+ *  merge, discovery). A slow remote or GitHub's merge API routinely exceeds the
+ *  10s default. An op that outlives even this still lands: it is in the engine's
+ *  LONG_LIFECYCLE_OPS, so its DB_CHANGED also reaches the originator. */
 const NETWORK_GIT_TIMEOUT_MS = 60_000;
 
 /** Budget for LOCAL-ONLY index writes (stage / commit). No network, but a huge
@@ -187,8 +161,6 @@ export async function workspaceOp(
   return resp.result;
 }
 
-
-// ── Turns (v13: footer / per-turn changes / reset) ──────────
 
 export async function bridgeTurnsList(
   bridge: RuntimeClient,
@@ -330,10 +302,9 @@ export async function requestProjectList(
   return result?.projects ?? [];
 }
 
-// ── Projects (write-through) ────────────────────────────────
-// Keyed on repoRoot. Desktop pushes its curated projects so the engine — and
-// therefore optional remote clients — sees repos that have no worktree yet. Host-approved
-// for remote clients (WRITE_OPS); a local desktop client runs without a prompt.
+// Desktop pushes its curated projects (keyed on repoRoot) so the engine and
+// remote clients see repos without a worktree. Host-approved for remote
+// clients; a local desktop client is not prompted.
 
 interface ProjectPush {
   repoRoot: string;
@@ -378,10 +349,9 @@ export async function bridgeProjectBulkUpsert(
   await workspaceOp(bridge, "project.bulkUpsert", { projects });
 }
 
-// ── Remote-access restriction (per-workspace opt-out) ──────
-// LOCAL-ONLY ops (off the engine's remote allowlist): the desktop owner decides
-// what a paired device may see. Default is share-all (remote == local); adding a
-// workspace here hides it — and its chats — from every relay client.
+// LOCAL-ONLY (off the engine's remote allowlist): the desktop owner decides what
+// a paired device may see. Default is share-all; a listed workspace and its
+// chats are hidden from every relay client.
 
 export async function bridgeListRemoteRestricted(
   bridge: RuntimeClient,
@@ -407,11 +377,9 @@ export async function bridgeSetRemoteRestricted(
   });
 }
 
-// ── Working directories (per-worktree sparse-checkout) ────────
-// LOCAL-ONLY ops, like the restriction list above. Deselecting a folder removes
-// it from the checkout, so the agent, the terminal and the Files tab all stop
-// seeing it at once. Nothing is destroyed — reselecting restores it from the
-// object store.
+// Per-worktree sparse checkout, LOCAL-ONLY like the restriction list.
+// Deselecting a folder removes it for the agent, terminal and Files tab at once;
+// reselecting restores it from the object store.
 
 /** Why the picker can't operate on this worktree. Mirrors the engine's union
  *  (`apps/desktop/src/engine/git/sparse-checkout.ts`); duplicated rather than imported so
@@ -427,9 +395,7 @@ const UNSUPPORTED_REASONS = new Set<string>([
   "unrepresentable-name",
 ]);
 
-/** The one line the picker shows for each obstacle. All three used to render
- *  "Needs a git repository with at least one commit", which is false for the
- *  other two and gives the user nothing to act on. */
+/** The picker's line for each obstacle, so the empty state names the real one. */
 export const WORKING_DIRECTORIES_UNSUPPORTED_COPY: Record<
   WorkingDirectoriesUnsupportedReason,
   string
@@ -452,7 +418,6 @@ export interface WorkingDirectoriesWire {
   locked: string[];
   /** The subset currently materialized on disk. */
   included: string[];
-  /** Whether sparse-checkout is active right now. */
   sparse: boolean;
   /** False when the checkout can't support this (no commits / not a repo). */
   supported: boolean;
@@ -530,17 +495,13 @@ export async function bridgeSetWorkingDirectories(
       bridge,
       "workspace.setWorkingDirectories",
       { workspaceId, directories },
-      // 60s, not the 10s default: this unlinks or materializes every file in
-      // the affected folders, which on a large monorepo runs well past 10s.
-      // A timeout here is worse than slow — the engine finishes and broadcasts
-      // DB_CHANGED to everyone EXCEPT the originator, so the client that made
-      // the change is the one left showing a stale tree.
+      // 60s: this unlinks or materializes every file in the affected folders. A
+      // timeout is worse than slow, because the engine's DB_CHANGED skips the
+      // originator and leaves it showing a stale tree.
       60_000,
     ),
   );
 }
-
-// ── Host folder picker (browse to open a project remotely) ──
 
 export interface HostDirListing {
   /** The directory that was listed (realpath-resolved). */
@@ -575,15 +536,10 @@ export async function bridgeWorkspaceCreate(
   bridge: RuntimeClient,
   args: Record<string, unknown>,
 ): Promise<unknown> {
-  // Create is a heavy op (best-effort fetch + `git worktree add` + file seeds).
-  // The slow setup script no longer runs synchronously (it's a background PTY)
-  // and the engine bounds its network probes (fetch 8s, ls-remote 5s) and the
-  // ignored-file seed scan (8s) — but `git worktree add` itself is a full
-  // checkout whose cost scales with repo size and disk cache. 60s (was 30s,
-  // which large repos exceeded in the field): the engine keeps working past a
-  // client-side timeout, so an under-budget cap doesn't cancel anything — it
-  // just shows a spurious "Request timeout: WORKSPACE_REQUEST" and then the
-  // workspace "magically" appears when the engine finishes anyway.
+  // `git worktree add` is a full checkout whose cost scales with repo size; 30s
+  // was exceeded in the field. The engine keeps working past a client timeout, so
+  // a short cap only shows a spurious "Request timeout" before the workspace
+  // appears.
   return workspaceOp(bridge, "workspace.create", { ...args }, 60_000);
 }
 
@@ -628,9 +584,8 @@ export async function bridgeWorkspacePrepareCreate(
   };
 }
 
-// ── Chats (sidebar list) ────────────────────────────────────
-// The chat list over the bridge — web reads it; desktop write-throughs into it.
-// Not host-approved (a chat is the user's own metadata).
+// Web reads the chat list here; desktop writes through into it. Not
+// host-approved: a chat is the user's own metadata.
 
 export async function bridgeChatList(
   bridge: RuntimeClient,
@@ -721,14 +676,11 @@ export async function bridgeChatSummaries(
     folder,
     ...(excludeChatId ? { excludeChatId } : {}),
   })) as { summaries?: ChatSummaryWire[] } | undefined;
-  // The two aggregates are coerced, and nothing else is. This op can be served
-  // by an engine that is not the one this renderer shipped with (a relay
-  // client, or a stale sidecar surviving a respawn), and `userMessageCount`
-  // was `messageCount` until 2026-07-30 — a missing field would otherwise
-  // render as "undefined prompts" in the hover header and an empty span on the
-  // pill. A wrong-but-shaped 0 degrades quietly; `undefined` does not. The rest
-  // of the row is left a bare cast on purpose: a string field arriving
-  // undefined is a bug worth seeing, not one worth papering over.
+  // Only the two aggregates are coerced. An engine this renderer did not ship
+  // with (a relay client, a stale sidecar) may serve this op, and
+  // `userMessageCount` was `messageCount` until 2026-07-30; a shaped 0 degrades
+  // quietly where `undefined` renders "undefined prompts". Other fields stay a
+  // bare cast so a missing string field remains visible.
   return (r?.summaries ?? []).map((s) => ({
     ...s,
     userMessageCount: Number(s.userMessageCount) || 0,
@@ -788,8 +740,6 @@ export async function bridgeChatTitleSeedsByOwner(
   return (await Promise.all(reads)).flat();
 }
 
-// ── Incremental delta sync ──────────────────────────────────
-
 /** A transcript row changed since the pull cursor (the message half of delta
  *  sync), tagged with its owning chatId + ord so the client routes + orders it. */
 export interface ChatMessageDelta {
@@ -836,9 +786,6 @@ export async function bridgeDbPull(
     messageResets: Array.isArray(r?.messageResets) ? r.messageResets : [],
   };
 }
-
-// ── Transcript reads ────────────────────────────────────────
-// The engine persists messages on emit; the web reads windows of them here.
 
 export async function bridgeMessageWindow(
   bridge: RuntimeClient,
@@ -960,8 +907,6 @@ export async function bridgeMessageSearch(
   return r?.hits ?? [];
 }
 
-// ── Files (read) ────────────────────────────────────────────
-
 export interface WorkspaceFileListing {
   files: string[];
   /** Absent on older engines; an empty array is a confirmed lack of Design roots. */
@@ -1005,18 +950,11 @@ export async function bridgeFileTree(
   return r?.files ?? [];
 }
 
-/** The .gitignore'd entries under a workspace, which bridgeFileTree omits:
- *  without `dir`, the collapsed ignored roots (`node_modules/`, `dist/`,
- *  `.env`); with `dir`, one level inside one of them. Directories come back
- *  with a trailing "/".
- *
- *  DESKTOP ONLY — unlike `file.tree`, this op is neither remote-readable nor
- *  per-path filtered: a relay client is refused outright (absent from the remote
- *  allowlist AND an explicit REMOTE_RESTRICTED throw). With `dir` it is a
- *  directory enumerator whose only boundary was .gitignore, which is exactly
- *  what it stops honouring — see the handler in workspace/service.ts. The
- *  renderer's `listIgnoredEntries` short-circuits before reaching here, so a web
- *  client never spends a round-trip on a guaranteed refusal. */
+/** The .gitignore'd entries bridgeFileTree omits: without `dir`, the collapsed
+ *  ignored roots; with `dir`, one level inside one of them (directories end in
+ *  "/"). DESKTOP ONLY: a relay client is refused outright, because with `dir`
+ *  this enumerates exactly what .gitignore hides. listIgnoredEntries
+ *  short-circuits remote clients before the round-trip. */
 export async function bridgeIgnoredEntries(
   bridge: RuntimeClient,
   workspaceId: string,
@@ -1106,11 +1044,9 @@ export async function bridgeAttachmentWrite(
   };
 }
 
-// ── Context graph (the workspace's `.context/` listing) ─────
-// DESKTOP ONLY, same posture as `file.ignored`: `.context/` holds private
-// workspace material, so the engine refuses remote callers outright. The
-// renderer façade (platform/context-graph.ts) short-circuits remote clients
-// before a round-trip is spent.
+// DESKTOP ONLY, like `file.ignored`: `.context/` holds private workspace
+// material, so the engine refuses remote callers. platform/context-graph.ts
+// short-circuits them first.
 
 /** Everything in the workspace's `.context/`. */
 export async function bridgeContextGraphList(
@@ -1144,8 +1080,6 @@ export async function bridgeContextGraphScaffold(
     ...(typeof r?.error === "string" ? { error: r.error } : {}),
   };
 }
-
-// ── Git (read) ──────────────────────────────────────────────
 
 export async function bridgeGitStatus(
   bridge: RuntimeClient,
@@ -1335,13 +1269,10 @@ export async function bridgeGitRemoteBranches(
   return r?.branches ?? [];
 }
 
-// ── Git (write) ─────────────────────────────────────────────
-//
-// One helper per engine WRITE op (service.ts WRITE_OPS). Op names + params
-// match the engine switch cases EXACTLY. Writes from a remote client are
-// host-approved engine-side: workspaceOp() either resolves with the op's
-// result or rejects with the WORKSPACE_ERROR message (e.g. APPROVAL_DENIED) —
-// the caller handles neither approval nor the host prompt.
+// One helper per engine WRITE op; op names and params match the engine switch
+// exactly. Remote writes are host-approved engine-side, so workspaceOp()
+// resolves with the result or rejects with the WORKSPACE_ERROR (e.g.
+// APPROVAL_DENIED).
 
 export async function bridgeGitStage(
   bridge: RuntimeClient,
@@ -1545,17 +1476,10 @@ export async function bridgeGitChangeTargetBranch(
   })) as { baseBranch: string; conflicts: string[] };
 }
 
-// ── GitHub PR ops ───────────────────────────────────────────
-//
-// One helper per engine `gh.*` op. The engine resolves the workspaceId →
-// owner/repo itself, so reads pass { workspaceId, prNumber } and the writes
-// mirror the git-write contract: host-approved engine-side, workspaceOp()
-// either resolves with the result or rejects with the WORKSPACE_ERROR message.
-// PR metadata is NOT file content, so there is no secret filter on either end.
-// Auth-credential mutations (sign-in / set-token / sign-out) are deliberately
-// not remoted — there is no helper for them.
-
-// ── GitHub (read) ───────────────────────────────────────────
+// One helper per engine `gh.*` op; the engine resolves workspaceId →
+// owner/repo, and writes follow the git-write contract. PR metadata is not file
+// content, so there is no secret filter. Auth-credential mutations are
+// deliberately not remoted.
 
 /** Host's GitHub auth status (takes no workspaceId — probes the host token). */
 export async function bridgeGhAuthStatus(
@@ -1660,8 +1584,6 @@ export async function bridgeGhPrReviews(
     prNumber: args.prNumber,
   })) as PrTimelineItem[];
 }
-
-// ── GitHub (write) ──────────────────────────────────────────
 
 export async function bridgeGhPrCreate(
   bridge: RuntimeClient,
@@ -1826,9 +1748,7 @@ export async function bridgeGhPrList(
   return (await workspaceOp(bridge, "gh.prList", { ...args })) as PR[];
 }
 
-// ── Git: extended single-writer operations ──────────────────
-// Thin pass-throughs to the engine handle() cases added in
-// workspace/service.ts. Return shapes mirror apps/desktop/src/renderer/platform/git.ts.
+// Pass-throughs to workspace/service.ts; return shapes mirror platform/git.ts.
 
 export async function bridgeGitReset(
   bridge: RuntimeClient,
@@ -2004,8 +1924,6 @@ export async function bridgeGitRepoBranchCatalog(
     args.fetch ? 20_000 : undefined,
   )) as RepoBranchCatalog;
 }
-
-// ── Workspace lifecycle (single-writer operations) ──────────
 
 export async function bridgeWorkspaceGet(
   bridge: RuntimeClient,
@@ -2233,10 +2151,8 @@ export async function bridgeWorkspaceCreateFromBranch(
     prUrl?: string | null;
   },
 ): Promise<CreatedWorkspace> {
-  // Opening a remote-only branch (a teammate's PR) fetches it first, so give
-  // the op the same generous budget as workspace.create (60s, vs the 10s
-  // default) — the engine bounds that fetch itself, so a hung remote fails
-  // cleanly server-side instead of surfacing "Request timeout: WORKSPACE_REQUEST".
+  // Opening a remote-only branch fetches it first, so use the create budget. The
+  // engine bounds that fetch, so a hung remote fails server-side.
   return (await workspaceOp(
     bridge,
     "workspace.createFromBranch",
@@ -2314,8 +2230,6 @@ export async function bridgeWorkspaceStopSetup(
     ...args,
   })) as { ok: boolean };
 }
-
-// ── Run actions (Run tab — the Setup trio, applied to run) ──
 
 /** One run action's status as the engine reports it (RunManager). */
 export interface RunActionStatusWire {
@@ -2404,8 +2318,6 @@ export async function bridgeWorkspaceProposeBranchName(
   };
 }
 
-// ── Detach mode ─────────────────────────────────────────────
-
 export async function bridgeDetachStart(
   bridge: RuntimeClient,
   workspaceId: string,
@@ -2442,11 +2354,9 @@ export async function bridgeDetachStatus(bridge: RuntimeClient): Promise<{
   };
 }
 
-// ── Settings (engine-owned TOML layers) ──
-// Wire shapes mirror apps/desktop/src/engine/settings: resolve returns the deep-merged
-// effective document plus a dot-path → layer provenance map (what renders
-// "Inherited from User"); read/write address ONE layer file. Optional remote
-// clients receive secret-shaped environment values only in masked form.
+// Wire shapes mirror apps/desktop/src/engine/settings: resolve returns the merged
+// document plus a dot-path → layer provenance map; read/write address one layer
+// file. Remote clients receive secret-shaped environment values only masked.
 
 export type SettingsLayer =
   | "user"
@@ -2458,9 +2368,8 @@ export type SettingsDoc = Record<string, unknown>;
 
 export interface ResolvedSettingsWire {
   effective: SettingsDoc;
-  // Mirrors the engine's SettingsLayerName (engine/settings/schema.ts) — the
-  // resolver stamps whichever layer won, INCLUDING the cloud `team` layer,
-  // which this union omitted.
+  // Mirrors the engine's SettingsLayerName (engine/settings/schema.ts); unlike
+  // SettingsLayer it includes `team` and `default`.
   sources: Record<
     string,
     | "default"
@@ -2515,8 +2424,6 @@ export async function bridgeSettingsRead(
     ...(repoRoot ? { repoRoot } : {}),
   })) as SettingsReadWire;
 }
-
-// ── Files to copy (Settings → Files to copy) ───────────────────────────────
 
 /** One include-list line plus how many files it matches on its own. A
  *  `matchCount` of 0 on a positive line is the typo signal the UI surfaces;
@@ -2604,8 +2511,6 @@ export async function bridgeFilesToCopyPreview(
   )) as FilesToCopyPreviewWire;
 }
 
-// ── MCP adopt-scan (Customize → MCP "Import from other tools") ─────────────
-
 /** One server discovered in another tool's native MCP config. Mirrors the
  *  engine McpServerRegistration union. */
 export type DiscoveredMcpServerWire =
@@ -2674,8 +2579,6 @@ export async function bridgeMcpResolveComposed(
   };
   return r.servers ?? [];
 }
-
-// ── MCP gateway (auth:"oauth" backends, "Sign in" / status) ────────────────
 
 export interface GatewayBackendStatusWire {
   name: string;

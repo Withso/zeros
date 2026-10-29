@@ -10,9 +10,7 @@ import type {
 
 export { normalizeChatPermissionMode } from "./chat-permission";
 
-// Re-export the Zustand store + slice selector hooks so consumers keep
-// importing from "./store" (their existing path) while migrating off the
-// whole-store `useWorkspace()` shim. See ./workspace-store.ts for the hooks.
+// Re-exported so consumers keep importing from "./store".
 export {
   useWorkspaceStore,
   useWorkspaceDispatch,
@@ -47,11 +45,8 @@ export {
   type Action,
 } from "./workspace-store";
 
-// Per-surface composer draft. Survives the
-// ChatView remount-on-chat-switch cycle (the chat view is
-// keyed by activeChatId, so the underlying AgentChat is destroyed
-// when the user navigates away). Storing here lets the next mount
-// seed back to the user's last-typed state.
+// Survives ChatView's remount on chat switch, so the next mount restores the
+// last-typed state.
 export interface ComposerDraft {
   text: string;
   attachments: ComposerAttachment[];
@@ -63,11 +58,8 @@ export interface ComposerDraft {
   designFrame?: import("../features/agent/design-frame-attachment").DesignFrameAttachmentSelection | null;
 }
 
-// Per-message edit-mode draft. Same lifecycle reasoning as the
-// composer drafts above: the chat view remounts on chat switch, so
-// keeping this in TurnPromptHeader's local state lost the work
-// whenever the user navigated away. Lifted here keyed by
-// `${chatId}:${messageId}` so cleanup on chat delete is trivial.
+// Lifted out of TurnPromptHeader so an edit survives the chat view's remount.
+// Keyed `${chatId}:${messageId}`, so chat deletion cleans up by prefix.
 export interface EditDraftStash {
   text: string;
   newAttachments: ComposerAttachment[];
@@ -80,10 +72,6 @@ export interface EditDraftStash {
    *  stay for back-compat + the pristine check. */
   json?: object | null;
 }
-
-// ──────────────────────────────────────────────────────────
-// Types
-// ──────────────────────────────────────────────────────────
 
 export type ProjectConnection = {
   name: string;
@@ -155,7 +143,6 @@ export type AiSettings = {
   agentTeams: boolean;
 };
 
-// ── Theme / Token types ──
 export type TokenSyntax =
   | "color"
   | "length-percentage"
@@ -221,11 +208,9 @@ export type WorkspaceState = {
   // restores Dashboard / Settings / the repository hub in the first snapshot.
   lastHomePage: HomePage;
 
-  // The project (repo) whose Home-tab repo page is open when activePage ===
-  // "repo". Kept when navigating away so returning to the Home tab can land
-  // back on the same repo. Validated against the live project list at render
-  // time (MainShellBody) — a removed repo falls back to the Dashboard rather
-  // than rendering a dead page.
+  // Kept when navigating away so the Home tab returns to the same repo; validated
+  // against the live project list at render, so a removed repo falls back to the
+  // Dashboard.
   activeRepoId: string | null;
   /** Ephemeral native-link destination. Its fresh ownership snapshot supports
    * explicit main-checkout links; passive navigation cannot create or resume. */
@@ -237,61 +222,37 @@ export type WorkspaceState = {
   repoPageViewByProject: Record<string, RepoPageView>;
   isLoading: boolean;
 
-  // AI settings
   aiSettings: AiSettings;
 
-  // Chat threads are persisted via apps/desktop/src/renderer/platform/settings.ts;
-  // `activeChatId` scopes which conversation the Conversation pane Chat panel is
-  // currently rendering. Session messages live in the sessions store and
-  // recent transcript DOM lives in a bounded retained deck.
+  // Messages live in the sessions store, not here; recent transcript DOM lives in
+  // a bounded retained deck.
   chats: ChatThread[];
   activeChatId: string | null;
 
-  // One-shot handoff to the Conversation pane's chat panel. InlineEdit
-  // and the feedback pill used to call the AI themselves; in the Mac
-  // app all AI flows route into the integrated chat instead. Setting
-  // this triggers Conversation pane to switch to the Chat tab, AIChatPanel to
-  // auto-submit the text, then clear via CONSUME_CHAT_SUBMISSION.
+  // One-shot handoff into the Conversation pane's chat, which auto-submits the
+  // text and clears it through CONSUME_CHAT_SUBMISSION.
   pendingChatSubmission: PendingChatSubmission | null;
 
-  // Exact-chat auto-send intents. A prepared workspace can expose its composer
-  // before checkout finishes; pressing Send records that chat id here and keeps
-  // its full TipTap draft intact. Once the exact create lifecycle publishes and
-  // the session is ready, AgentChat serializes its own composer and consumes
-  // only that id. A map (rather than the former single slot) lets many workspace
-  // creates queue independently without the newest one overwriting the others.
-  //
-  // The value is WHEN the turn was parked (epoch ms). It is what bounds the
-  // wait: a park whose session never settles has no status transition to be
-  // noticed by, so without a stamp it could sit armed and unreported forever —
-  // which is precisely what it did. Persisted with the draft that is its
-  // payload (persist-composer-drafts) so a reload inside the setup window
-  // still delivers the message instead of stranding it in the composer.
+  // Exact-chat auto-send intents. A prepared workspace can show its composer
+  // before checkout finishes, so Send records the chat id and AgentChat
+  // serializes its own composer once the session is ready. The value is when the
+  // turn was parked: that stamp bounds the wait, since a session that never
+  // settles has no transition to notice. Persisted with the draft, so a reload
+  // during setup still delivers it.
   pendingAutoSend: Record<string, number>;
 
-  // ⌥+click in the browser-tab element picker
-  // appends element context to the active chat's composer WITHOUT
-  // submitting (unlike pendingChatSubmission which auto-fires). The
-  // AgentChat component picks this up, merges text into its local
-  // input state, and dispatches CONSUME_COMPOSER_APPEND.
+  // ⌥+click element context, appended to the active chat's composer without
+  // submitting; AgentChat consumes it with CONSUME_COMPOSER_APPEND.
   pendingComposerAppend: PendingComposerAppend | null;
 
-  // Scope override for the EmptyComposer. Normally the new-agent
-  // surface resolves its folder from the engine's project root. When
-  // the user clicks "+" on a secondary workspace section in Repository panel,
-  // we want the empty composer to be contextual to *that* workspace,
-  // not the engine root — so the first chat created from it lands in
-  // the right project. Cleared by the composer after ADD_CHAT.
+  // EmptyComposer scope override: "+" on a secondary workspace makes the first
+  // chat land in that workspace instead of the engine root. Cleared after
+  // ADD_CHAT.
   newAgentFolder: string | null;
 
-  // Last resolved active-workspace folder — the workspace the user was
-  // looking at, persisted across restarts so a reopen lands on the SAME
-  // workspace. Unlike `newAgentFolder` (the empty-composer scope, which is
-  // CLEARED the moment a chat becomes active), this mirrors the active chat's
-  // folder OR newAgentFolder and is NEVER cleared, so it survives the boot
-  // window before chats hydrate. It is the final fallback in the folder
-  // resolution chain (selectActiveFolder) — without it the topbar/tabs
-  // flash "No workspace selected" until HYDRATE_CHATS lands.
+  // The last active-workspace folder, persisted so a reopen lands on the same
+  // workspace. Unlike newAgentFolder it is never cleared, so it is the final
+  // fallback in selectActiveFolder before chats hydrate.
   lastWorkspaceFolder: string | null;
 
   // Last workspace selection PER repository root. `lastWorkspaceFolder` stays
@@ -308,58 +269,32 @@ export type WorkspaceState = {
   // loaded. Keep the default-chat keeper idle until that backend has replied.
   pendingChatHydrationFolder: string | null;
 
-  // Per-workspace last-active chat — maps a workspace folder path to the id of
-  // the chat the user was last VIEWING there. Restores your place when you
-  // switch away from a workspace and back. Without it, returning to a workspace
-  // re-derived the chat by `updatedAt DESC` (the most recently *edited* chat),
-  // which is not the one you were *looking at* — selecting/viewing a chat never
-  // bumps updatedAt, so the strip silently jumped to whichever chat had the
-  // latest activity. Recorded after every dispatch (rememberActiveChatForFolder),
-  // validated against the live chat list on restore, and persisted across
-  // reloads via persist-ui-state so a reopen + switch still lands on the right
-  // chat. Keyed by the exact folder string (same identity chats match on).
+  // The chat last viewed per workspace folder; viewing never bumps `updatedAt`,
+  // so that cannot stand in for it. Recorded after every dispatch, validated on
+  // restore and persisted across reloads; keyed by the exact folder string.
   activeChatByFolder: Record<string, string>;
 
-  // Bumps every time the user swaps the engine project root via Open
-  // Workspace. Project-scoped consumers (repository panel's currentRoot probe,
-  // workbench file tree, terminal, git panel) read this in their effect
-  // deps so they refresh without needing a full webview reload.
-  // Source-of-truth on the new root lives in the native engine — we
-  // don't carry the path in the store, only the generation counter.
+  // Bumps when Open Workspace swaps the engine root; project-scoped consumers
+  // include it in effect deps. The root itself lives in the engine.
   projectGeneration: number;
 
-  // Persistent draft state per composer surface
-  // so a user who's typing/attaching can switch chats (or away and
-  // back to the new-agent landing) without losing their work. Stored
-  // with live snapshots and metadata persisted by persist-composer-drafts.
-  // The saved snapshot seeds this store synchronously on app reload.
-  // - chatComposerDrafts: keyed by chatId for the AgentChat composer
-  // Cleared on submit; the cleanup-on-unmount writes the live state
-  // back through SET_*_DRAFT.
+  // Composer drafts keyed by chatId, persisted by persist-composer-drafts and
+  // seeded synchronously on reload, so switching chats never loses work. Cleared
+  // on submit.
   chatComposerDrafts: Record<string, ComposerDraft>;
 
-  // Per-past-user-message edit drafts. Keyed by `${chatId}:${messageId}`
-  // so cleanup on chat delete is a prefix scan. Survives chat switches
-  // — that was the bug: the local state in TurnPromptHeader died with
-  // AgentChat's unmount, and a user who clicked away after editing
-  // came back to find their work gone.
+  // Edit drafts keyed `${chatId}:${messageId}`, so chat deletion cleans up with a
+  // prefix scan.
   editComposerDrafts: Record<string, EditDraftStash>;
 
-  // Workbench tabs, scoped PER WORKTREE (keyed by folder path). The tab strip
-  // in workbench's own header drives the active worktree's slice; one tab body
-  // renders at a time. Persisted to localStorage via
-  // workbench/tab-model.saveScopes; hydrated at store init from loadScopes().
-  // The active slice is read via selectWorkbench (workspace-store.ts) so tabs
-  // stay with their worktree instead of leaking across all of them.
+  // Workbench tabs per worktree folder, persisted by tab-model.saveScopes and read
+  // through selectWorkbench so tabs never leak across worktrees.
   workbenchByScope: WorkbenchScopeMap;
 };
 
-/** A summary imported from a prior chat in the
- *  same folder. The EmptyComposer surfaces these as monochrome chips
- *  above its textarea; on submit they're serialized into
- *  <from_previous_chat> blocks and prepended to the user's prompt
- *  text. The new chat's agent then reads them as plain context — the
- *  format is universal across agents. */
+/** A summary imported from a prior chat in the same folder. On submit it is
+ *  serialized into a <from_previous_chat> block prepended to the prompt, which
+ *  every agent reads as plain context. */
 export interface SummaryImport {
   /** Source chat id — for dedupe + provenance. */
   chatId: string;
@@ -373,15 +308,9 @@ export interface SummaryImport {
   summary: string;
 }
 
-/** Append (don't submit) into a chat's
- *  composer. Used by ⌥+click in the browser-tab element picker to
- *  drop element context into the user's prompt without submitting.
- *  Distinct from PendingChatSubmission, which auto-fires.
- *
- *  Targeting: `chatId` pins the append to a specific chat thread.
- *  (A null chatId once landed in the new-agent landing's draft; that
- *  landing was removed 2026-06-18, so a null-chatId append now has no
- *  consumer.) AgentChat consumers ignore appends for other chatIds. */
+/** Append, without submitting, into one chat's composer (⌥+click element
+ *  context). AgentChat ignores appends for other chats; a null chatId has no
+ *  consumer since the new-agent landing was removed. */
 export type PendingComposerAppend = {
   id: string;
   /** Text to append (typically formatted element context). */
@@ -400,45 +329,26 @@ export type PendingChatSubmission = {
    *  in agent-chat serializes them into <from_previous_chat> blocks
    *  and prepends to the prompt text on first send. */
   imports?: SummaryImport[];
-  /** Inline image attachments encoded as
-   *  ContentBlocks. Previously the EmptyComposer's image picker
-   *  built these in-place but they were never carried to the new
-   *  chat — only `text` survived through ENQUEUE_CHAT_SUBMISSION.
-   *  Putting them here so any submission path can ride along. The
-   *  shape is the bridge's `ContentBlock` (see
-   *  apps/desktop/src/renderer/platform/bridge/agent-events.ts) — kept as `unknown[]` here to
-   *  avoid pulling the bridge type into the store layer. */
+  /** Inline image attachments in the bridge's ContentBlock shape
+   *  (platform/bridge/agent-events.ts), typed `unknown[]` so the store layer
+   *  never imports the bridge. */
   attachments?: unknown[];
   /** Staged composer attachment records whose image bytes still need to pass
    *  through the canonical encoder/disk writer. Used by browser captures so
    *  their full-resolution base64 never becomes bubble metadata. */
   composerAttachments?: unknown[];
-  /** Metadata to stamp on the user-message bubble
-   *  when the new chat opens — names + disk references for the chip row
-   *  the renderer paints above the user's text. Shape mirrors
-   *  `AgentTextMessageAttachment` from
-   *  apps/desktop/src/renderer/features/agent/use-agent-session.tsx; kept as `unknown[]` here
-   *  for the same store-layer-decoupling reason as `attachments`. */
+  /** Bubble chip metadata (AgentTextMessageAttachment shape), `unknown[]` for the
+   *  same decoupling. */
   bubbleAttachments?: unknown[];
-  /** 2026-06-08: ordered bubble segments (text + inline mention/attachment
-   *  pills) so the new chat's first user bubble renders exactly as composed.
-   *  Shape mirrors `MessageContentSegment`; kept as `unknown[]` for the same
-   *  store-layer decoupling as the fields above. */
+  /** Ordered bubble segments, so the first user bubble renders exactly as
+   *  composed (MessageContentSegment shape, `unknown[]` likewise). */
   segments?: unknown[];
 };
 
-/** How much reasoning effort the model should spend before replying.
- *  Mapped per-agent to the right flag/env on session spawn.
- *
- *  The effort ladder Zeros exposes (per the composer effort toggle):
- *    low · medium · high · xhigh · max · ultracode
- *  Not every model supports the whole ladder — see effortLevelsFor() in
- *  model-catalog.ts; exact live capabilities override the bundled fallback.
- *  Mapping to the agent: Claude takes `low|medium|high|xhigh|max` as the SDK
- *  `effort` option, and "ultracode" → `xhigh` + the `ultracode` setting
- *  (xhigh effort plus standing multi-agent-workflow permission). Codex maps
- *  the existing “Ultra” picker value (`ultracode`) to its native `ultra`
- *  effort token and maps provider-originated `ultra` updates back again. */
+/** Reasoning effort, mapped per agent at spawn. The ladder is low · medium ·
+ *  high · xhigh · max · ultracode; effortLevelsFor() in model-catalog.ts says
+ *  what each model supports. Claude maps "ultracode" to `xhigh` plus the
+ *  `ultracode` setting; Codex maps it to its native `ultra` token and back. */
 export type ChatEffort =
   | "low"
   | "medium"
@@ -456,10 +366,6 @@ export type ChatEffort =
  *    danger        → Claude "bypass" / Codex "full-access" — no checks at all */
 export type ChatPermissionMode = "plan" | "auto" | "tool-approval" | "danger";
 
-/** Map a persisted (possibly legacy) permission value onto the current posture.
- *  The pre-2026-07 vocabulary was full/auto-edit/ask/plan-only; normalize it so
- *  old chats open in a sensible posture. This only backs the coarse posture
- *  bucket — a chat's `lastModeId` still restores its EXACT native mode when set. */
 export type ChatThread = {
   id: string;
   /** Engine-confirmed authoring intent; independent of provider permissions. */
@@ -535,11 +441,9 @@ export type ChatThread = {
   /** Pinned to the top of the sidebar, independent of project grouping.
    *  Defaults to false / undefined for old records. */
   pinned?: boolean;
-  /** Soft-deleted. Archived chats hide from the main sidebar groupings
-   *  (pinned + per-project) and surface in a collapsible "Archived"
-   *  section at the bottom, where they can be restored or permanently
-   *  deleted. The on-disk transcript is never touched by archive —
-   *  only DELETE_CHAT removes the metadata entry. */
+  /** Soft-deleted: hidden from the main groupings and listed under Archived for
+   *  restore or permanent deletion. Archive never touches the transcript; only
+   *  DELETE_CHAT removes the metadata entry. */
   archived?: boolean;
   /** Zeros conversation that this chat branched from. This is product-owned
    * lineage only: it never identifies or resumes a provider session. The
@@ -547,17 +451,3 @@ export type ChatThread = {
    * the new composer. */
   sourceChatId?: string;
 };
-
-// The `Action` union, `initialState`, and the `reducer` moved to
-// ./workspace-store.ts during the Zustand migration (2026-05-31). They are
-// reused there verbatim as the store's engine — see that file's header. The
-// type definitions above stay here as the module's public surface.
-
-// ──────────────────────────────────────────────────────────
-// Helpers
-// ──────────────────────────────────────────────────────────
-
-// The Zustand store, slice selectors, `useWorkspaceDispatch`, and reload
-// persistence now live in ./workspace-store.ts (re-exported at the top of
-// this file). The old `WorkspaceProvider` + `useWorkspace()` Context shim
-// were removed once every consumer moved to slice selectors.

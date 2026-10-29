@@ -1,24 +1,6 @@
-// ──────────────────────────────────────────────────────────
-// Browser Tab — embedded browser chrome
-// ──────────────────────────────────────────────────────────
-//
-// Two browser panes share the workbench tab model:
-//   - ordinary preview/design tabs render their existing iframe tree;
-//   - conversation-owned agent tabs attach the exact isolated main-process
-//     WebContentsView used by the canonical browser tools.
-//
-// Per-tab state:
-//   - `tab.url`   — last navigated URL (persisted)
-//   - `tab.title` — page title (persisted; cross-origin pages
-//     fall back to URL slug since contentDocument is unreadable)
-//
-// Supported interactions:
-//   - Type a URL, hit Enter → loads
-//   - Back / forward / reload buttons work
-//   - URL bar tracks internal navigation
-//   - ⋯ menu: Hard Reload, DevTools / separate preview window, device
-//     toolbar, page Appearance (per tab), Clear Cache + Clear Cookies via IPC
-//   - Float preview: the live viewport moves over the chat without reloading
+// Two browser panes share the workbench tab model: preview and Design tabs
+// render an iframe, and conversation-owned agent tabs attach the isolated
+// main-process WebContentsView that the browser tools use.
 
 import React, {
   useCallback,
@@ -160,8 +142,6 @@ import {
 const EMPTY_BROWSER_VARIANTS: BrowserTabVariant[] = [];
 const PREVIEW_RENEW_AHEAD_MS = 5 * 60_000;
 const PREVIEW_RENEW_RETRY_MS = 15_000;
-
-// ── Component ─────────────────────────────────────────────
 
 interface BrowserTabProps {
   tab: WorkbenchTab;
@@ -727,17 +707,12 @@ function IframeBrowserTab({ tab, active, scope }: BrowserTabProps) {
     },
     [dispatch, scope, tab.id],
   );
-  // The reactive hook lets a late-arriving
-  // preload bridge (build race / HMR refresh / stale dist-electron)
-  // unblocks the URL bar without a manual reload.
+  // Reactive, so a late preload bridge (build race, HMR, stale dist-electron)
+  // unblocks the URL bar without a reload.
   const electron = useNativeRuntime().ready;
-  // Body is a plain <iframe>. The retained Browser deck handles inactive-tab
-  // visibility without unmounting or reordering the node, preserving history,
-  // scroll, form input, and JS heap. Design Mode is auto-injected by main on
-  // did-frame-finish-load and controlled via postMessage; only the chip's element
-  // thumbnail capture takes an IPC hop. See use-iframe-webview.ts.
-  // Persisted URLs are still treated as untrusted input: only canonical http(s)
-  // pages are restored. External http(s) sites are valid browser content.
+  // The retained Browser deck hides inactive tabs without unmounting the iframe,
+  // preserving history, scroll, form input and JS heap. Persisted URLs are
+  // untrusted input: only canonical http(s) pages are restored.
   const safeTabUrl = normalizeBrowserUrl(tab.url ?? "") ?? "";
   const cloudBrowser = isCloudWorkspace(scope ?? "");
   const nativeCloudPreview = cloudBrowser && Boolean(tab.previewSource || isLoopbackUrl(safeTabUrl));
@@ -1069,18 +1044,9 @@ function IframeBrowserTab({ tab, active, scope }: BrowserTabProps) {
     if (!localToolsEnabled && tab.canvasMode) updateTab({ canvasMode: false });
   }, [localToolsEnabled, tab.canvasMode, updateTab]);
 
-  // ── ⌥+click direct-to-composer ──────────────────────────
-  //
-  // The preload sets `altKey=true` when the user holds Option while
-  // clicking. The hook routes those to a separate one-shot slot
-  // (`altClickedElement`) instead of the multi-select array — so
-  // ⌥+click never opens the chip. We consume the slot here: format
-  // the element context as a short single-line block and append it
-  // to the active chat's composer via pendingComposerAppend.
-  // AgentChat picks that up (see agent-chat.tsx) and merges into
-  // its local input state — the user can keep typing around the
-  // inserted block before submitting.
-  // No active chat → toast; never silently spawn one.
+  // ⌥+click lands in a one-shot slot (`altClickedElement`), never the chip.
+  // Format it as one compact block and append it to the active chat's composer
+  // via pendingComposerAppend. No active chat → toast; never spawn one.
   useEffect(() => {
     if (!active) return;
     const el = webview.altClickedElement;
@@ -1108,12 +1074,10 @@ function IframeBrowserTab({ tab, active, scope }: BrowserTabProps) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [active, webview.altClickedElement]);
 
-  // ── Persist URL + title back to the tab ──────────────────
-  // The webview drives canonical state (final URL after redirects,
-  // page title once <title> resolves). Mirror to the tab so the
-  // tab strip label updates and a reload restores the right URL.
-  // Cloud URL persistence uses committed native observations above, so an
-  // optimistic frame URL cannot overwrite a pending logical admission.
+  // Mirror the webview's canonical URL and title into the tab, so the strip label
+  // updates and a reload restores the right URL. Cloud URLs persist from
+  // committed native observations above, so an optimistic frame URL cannot
+  // overwrite a pending admission.
   useEffect(() => {
     if (nativeCloudPreview || (cloudBrowser && electron)) return;
     const url = webview.state.currentUrl;
@@ -1168,20 +1132,9 @@ function IframeBrowserTab({ tab, active, scope }: BrowserTabProps) {
     webview.state.title,
   ]);
 
-  // ── ⌘+Shift+D global shortcut ────────────────────────────
-  //
-  // Two listening paths because the keystroke can land in either
-  // context:
-  //   (1) DOM-level keydown on `window` — fires when focus is in
-  //       the React renderer (chrome row, URL bar, tab strip).
-  //       Only active tab listens; inactive ones bail.
-  //   (2) Picker-forwarded postMessage — when focus is inside the
-  //       iframe, our picker script intercepts ⌘+Shift+D and posts
-  //       `zeros:picker:toggle-request` to the parent. The hook
-  //       turns that into setDesignModeActive toggle (see
-  //       use-iframe-webview.ts). Only the tab whose iframe sent
-  //       the message gets the toggle, since each tab's hook has
-  //       its own message listener scoped to its iframe.
+  // ⌘⇧D toggles Design Mode here for the active tab. With focus inside the
+  // iframe, the picker forwards the chord as `zeros:picker:toggle-request` to
+  // that tab's own listener (use-iframe-webview.ts).
   useEffect(() => {
     if (!active || !designModeEnabled) return;
     const handler = (e: KeyboardEvent) => {
@@ -1194,19 +1147,9 @@ function IframeBrowserTab({ tab, active, scope }: BrowserTabProps) {
     return () => window.removeEventListener("keydown", handler);
   }, [active, designModeEnabled, webview]);
 
-  // ── Escape exits Design Mode (renderer-side) ─────────────
-  //
-  // Escape has two layers:
-  //   1st Escape → dismiss chip (handled by ElementChip's own
-  //      keydown listener; stops propagation so this handler
-  //      doesn't fire)
-  //   2nd Escape → exit Design Mode (this handler)
-  //
-  // The picker also handles Escape inside the iframe and posts
-  // `zeros:picker:exited` which flips designModeActive in the
-  // hook. This handler covers the case where focus is in the
-  // React shell (e.g., after the chip dismisses, focus may settle
-  // on body before the user clicks back into the page).
+  // The first Escape dismisses the chip (ElementChip stops propagation); the next
+  // exits Design Mode. The picker handles Escape inside the iframe; this covers
+  // focus left in the React shell.
   useEffect(() => {
     if (!active || !designModeEnabled || !webview.designModeActive) return;
     const handler = (e: KeyboardEvent) => {
@@ -1223,32 +1166,18 @@ function IframeBrowserTab({ tab, active, scope }: BrowserTabProps) {
 
   const hasUrl = Boolean(webview.state.currentUrl || safeTabUrl);
 
-  // ── Canvas mode ─────────────────────────────────────────
-  //
-  // Canvas mode (Palette button in chrome / ⌘\) reframes the
-  // body so the iframe becomes a centered resizable "frame"
-  // inside a scrollable area, with viewport presets on the
-  // right column edge and a height-reset indicator below.
-  // In fill mode (default) the iframe edges = column edges as
-  // before.
-  //
-  // Important: the iframe element must stay mounted across
-  // mode toggles. We achieve that by always rendering the
-  // <iframe> in the same JSX position, and only changing
-  // wrapper className/style based on mode. The chip is also
-  // a sibling of the iframe inside the same wrapper so its
-  // click-coord-based positioning stays correct in both modes.
-  // Canvas, the device toolbar and the float are mutually exclusive layouts
-  // of that one frame; a float takes precedence and both others resume after.
+  // Canvas (⌘\) turns the iframe into a centered, resizable frame. The iframe
+  // must stay mounted across modes, so it keeps one JSX position and only wrapper
+  // styles change; the chip is its sibling so click positioning holds. Canvas,
+  // the device toolbar and the float are exclusive layouts of that frame; a float
+  // wins and the others resume after.
   const canvasMode = localToolsEnabled && !floating && (tab.canvasMode ?? false);
   const deviceMode =
     hasUrl && !floating && !canvasMode && tab.deviceToolbar === true;
   const persistedW = tab.viewportWidth ?? BROWSER_DEFAULT_WIDTH;
   const persistedH = tab.viewportHeight ?? BROWSER_DEFAULT_HEIGHT;
-  // Drag state — live dims during a pointer drag for smooth
-  // updates without per-move dispatch. On pointerup we persist
-  // via UPDATE_WORKBENCH_TAB. While not dragging this is null and
-  // we read straight from the tab record.
+  // Live size during a pointer drag, persisted on pointerup via
+  // UPDATE_WORKBENCH_TAB; null otherwise.
   const [dragDims, setDragDims] = useState<{
     w: number;
     h: number;
@@ -1265,11 +1194,9 @@ function IframeBrowserTab({ tab, active, scope }: BrowserTabProps) {
     [updateTab],
   );
 
-  // ── Device toolbar ──────────────────────────────────────
-  //
-  // A fixed-size viewport, top-aligned and centered in a scrollable body,
-  // scaled by the zoom menu ("Fit" never enlarges). It shares the persisted
-  // viewport size with Canvas mode. Measurement runs only while visible.
+  // Device toolbar: a fixed-size viewport, top-aligned and centered, scaled by the
+  // zoom menu ("Fit" never enlarges). It shares Canvas's persisted viewport size;
+  // measurement runs only while visible.
   const devicePresetId = normalizeBrowserDevicePreset(tab.devicePreset);
   const deviceSize = clampBrowserDeviceSize(effW, effH);
   const [deviceZoom, setDeviceZoom] = useState<BrowserDeviceZoom>("fit");
@@ -1436,19 +1363,9 @@ function IframeBrowserTab({ tab, active, scope }: BrowserTabProps) {
     ],
   );
 
-  // ── Infinite canvas viewport ────────────────────────────
-  //
-  // Viewport controls on top of an infinite canvas. State:
-  //   - `canvasViewport.x/y` translates the frame in screen px
-  //   - `canvasViewport.zoom` scales it (0.2–2)
-  //
-  // Pan: Space + drag (window-level keydown tracking + pointer
-  // capture on the canvas body). Zoom: ⌘/Ctrl + wheel, anchored
-  // at the cursor so the point under the cursor stays fixed.
-  // Frame canvas position is always (0, 0); on every transition
-  // into canvas mode the viewport is reset to center the frame
-  // at zoom 1. We don't persist pan/zoom — width/height of the
-  // frame already persist, which is what the user asked for.
+  // Pan and zoom (0.2–2) are not persisted; the frame's size is. Space + drag
+  // pans, ⌘/Ctrl + wheel zooms around the cursor, and each entry into canvas mode
+  // recenters the frame at zoom 1.
   const [canvasViewport, setCanvasViewport] = useState({
     x: 0,
     y: 0,
@@ -1503,11 +1420,8 @@ function IframeBrowserTab({ tab, active, scope }: BrowserTabProps) {
     [effW, effH, persistViewport, canvasViewport.zoom],
   );
 
-  // Center the frame in the visible canvas area and auto-fit the
-  // zoom so both the frame AND the preset rail (which sits to the
-  // right of the frame, also inside the wrapper so it pans/zooms
-  // with the frame) are visible. We never zoom in past 1; only
-  // zoom out when the natural-size frame would overflow.
+  // Center the frame and zoom out only as needed to show it and its preset rail;
+  // never zoom past 1.
   const centerFrame = useCallback(() => {
     const el = canvasBodyRef.current;
     if (!el) return;
@@ -1524,10 +1438,7 @@ function IframeBrowserTab({ tab, active, scope }: BrowserTabProps) {
     setCanvasViewport({ x, y, zoom });
   }, [effW, effH, tab.variants]);
 
-  // Snap-center on every canvas-mode entry. We watch canvasMode
-  // directly; the ref-guard ensures we don't re-center mid-session
-  // when the user has pan/zoomed elsewhere (only on the false →
-  // true transition).
+  // Recenter only on the false → true transition, not after the user pans.
   const wasCanvasModeRef = useRef(false);
   useEffect(() => {
     // A retained browser can first mount while its workspace is hidden. Wait
@@ -1654,7 +1565,6 @@ function IframeBrowserTab({ tab, active, scope }: BrowserTabProps) {
     [updateTab],
   );
 
-  // ── ⌘+\ — toggle canvas mode ────────────────────────────
   useEffect(() => {
     if (!active || !localToolsEnabled || floating) return;
     const handler = (e: KeyboardEvent) => {
@@ -1838,11 +1748,9 @@ function IframeBrowserTab({ tab, active, scope }: BrowserTabProps) {
     panToRevealStrip,
   ]);
 
-  // ── Float preview ───────────────────────────────────────
-  //
-  // React renders the viewport into a detached host element. The host moves
-  // between the docked slot below and this tab's float slot with an atomic
-  // DOM move, so floating and docking never reload the page.
+  // React renders the viewport into a detached host that moves between the docked
+  // slot and the float slot with an atomic DOM move, so floating and docking never
+  // reload the page.
   const [viewportHost] = useState<HTMLDivElement | null>(() => {
     if (typeof document === "undefined") return null;
     const host = document.createElement("div");
@@ -1906,7 +1814,6 @@ function IframeBrowserTab({ tab, active, scope }: BrowserTabProps) {
     requestWorkbenchCollapse();
   };
 
-  // ── Separate window / DevTools ──────────────────────────
   const windowInput = {
     frameName,
     url: effectiveUrl,
@@ -1995,19 +1902,11 @@ function IframeBrowserTab({ tab, active, scope }: BrowserTabProps) {
           />
         )}
       </WorkbenchTabToolbar>
-      {/* Browser body — a real <iframe>. CSS positions it; in
-          canvas mode the iframe becomes a centered explicit-sized
-          frame with edge resize handles and a viewport preset
-          rail; otherwise it fills the column. Sandbox attribute
-          grants the capabilities local development pages need:
-          allow-same-origin keeps cookies/localStorage usable for the user's dev
-          server, allow-scripts/forms/popups/modals lets typical
-          web apps run normally, allow-popups-to-escape-sandbox
-          is required so OAuth and similar window.open flows can
-          land in a fresh tab/window without being trapped inside
-          the iframe. X-Frame-Options + CSP frame-ancestors are
-          stripped for http(s) responses (see
-          apps/desktop/electron/iframe-headers.ts) so most arbitrary URLs load. */}
+      {/* The sandbox grants what local dev pages need: allow-same-origin keeps
+          cookies and localStorage for the dev server, and
+          allow-popups-to-escape-sandbox lets OAuth window.open flows reach a real
+          window. Main strips X-Frame-Options and CSP frame-ancestors for http(s)
+          responses (electron/iframe-headers.ts). */}
       <div
         ref={canvasBodyRef}
         className="relative min-h-0 flex-1 overflow-hidden"
@@ -2039,8 +1938,6 @@ function IframeBrowserTab({ tab, active, scope }: BrowserTabProps) {
         {renderInViewportHost(
           showStartPage ? null : (
           <>
-            {/* Canvas background — dot grid that pans/zooms with
-                the viewport. Only painted in canvas mode. */}
             {canvasMode && (
               <div
                 className="pointer-events-none absolute inset-0"
@@ -2053,13 +1950,8 @@ function IframeBrowserTab({ tab, active, scope }: BrowserTabProps) {
                 }}
               />
             )}
-            {/* Iframe wrapper — same React tree position in every
-                layout, only the style differs. Stays mounted across
-                mode toggles so page nav + scroll + JS heap survive.
-                Fill: inset:0 fills the body. Canvas: absolute-positioned
-                with the viewport transform. Device: a scroll area around
-                a fixed-size scaled frame. Float: the frame keeps its
-                layout size and the float box scales it. */}
+            {/* One tree position in every layout, so navigation, scroll and JS heap
+                survive mode toggles; only the style differs. */}
             <div
               ref={viewportWrapperRef}
               className={
@@ -2118,36 +2010,18 @@ function IframeBrowserTab({ tab, active, scope }: BrowserTabProps) {
                         : webview.frameSrc || safeTabUrl || ""
                       : "about:blank"
                   }
-                  // `title` is the iframe's accessible name for screen readers.
-                  // (A hover Tooltip over the full page body would pop a chip on
-                  // every hover and can stick open, since the iframe swallows
-                  // pointerleave — so the frame name stays a plain attribute.)
+                  // The accessible name. Not a Tooltip: the iframe swallows pointerleave, so a
+                  // tooltip could stick open.
                   title={tab.title}
-                  // Pinned to its pre-gesture size during seam drags even
-                  // while VISIBLE (resize-gesture-freeze.ts): resizing an
-                  // iframe re-lays-out the guest document every frame, the
-                  // most expensive thing a drag can trigger. It clips/shows
-                  // surface bg mid-drag and snaps once on release — the
-                  // standard webview treatment during sash drags. Inline px
-                  // from the freeze beat size-full; in canvas mode the size
-                  // is already fixed, so the pin is a no-op there — but only
-                  // because the freeze normalizes its measurement by the
-                  // wrapper's scale(zoom): pinning the raw (visual) rect
-                  // would resize the iframe to zoom×layout for the drag.
+                  // Pinned to its pre-gesture size during seam drags (resize-gesture-freeze.ts):
+                  // re-laying out the guest every frame is the most expensive thing a drag can
+                  // trigger. In canvas mode the freeze divides by the wrapper's zoom, so the pin
+                  // stays a no-op there.
                   data-zeros-resize-freeze=""
                   className="bg-bg1 absolute inset-0 block size-full border-0"
-                  // Block pointer events on the iframe while a
-                  // resize drag is happening so the drag pointer
-                  // doesn't get captured by the iframe content.
-                  // Also block while the element chip is open — in
-                  // Electron, sibling overlays don't always win hit
-                  // testing over iframes; the input still works via
-                  // autoFocus but fork/close clicks were falling
-                  // through to the page underneath.
-                  // During Space+pan, block iframe so canvas pan wins.
-                  // Chromium gives the page this frame's color scheme as its
-                  // prefers-color-scheme, live and across origins. Unset, the
-                  // frame inherits the Zeros theme.
+                  // No pointer events during a resize drag, Space+pan, or while the chip is open:
+                  // Electron's sibling overlays don't always win hit testing over iframes.
+                  // colorScheme is the page's live prefers-color-scheme; unset, it follows Zeros.
                   style={{
                     pointerEvents:
                       isResizing || chipVisible || spaceHeld ? "none" : "auto",
@@ -2280,8 +2154,6 @@ function FloatingPreviewPlaceholder({ onDock }: { onDock: () => void }) {
   );
 }
 
-// ── Chrome row (back/forward/reload + URL + design mode + ⋯) ──
-
 interface BrowserChromeProps {
   webview: ReturnType<typeof useIframeWebview>;
   displayUrl: string;
@@ -2372,10 +2244,7 @@ function BrowserChrome({
   );
 
   return (
-    // 36px (h-9) chrome — 24px (size-6) icon buttons + the 24px search bar sit
-    // centered with breathing room.
     <PanelHeader size="window" className="h-9">
-      {/* Navigation buttons */}
       <Button
         variant="ghost"
         size="icon-sm"
@@ -2444,8 +2313,6 @@ function BrowserChrome({
             onChange={(e) => setAddress(e.target.value)}
             onFocus={(e) => {
               setFocused(true);
-              // Select all on focus so the user can replace the address
-              // immediately.
               e.currentTarget.select();
             }}
             onBlur={() => {
@@ -2462,12 +2329,8 @@ function BrowserChrome({
         </div>
       </form>
 
-      {/* Design Mode toggle — element picker. When on, the
-          in-iframe picker (auto-injected on every http(s) iframe
-          load by main's did-frame-finish-load hook) starts handling
-          hover and click events. Clicking pops the ElementChip in the
-          BrowserTab body. Both toggles stay in place (disabled) while
-          the page floats so the float button does not shift. */}
+      {/* Both toggles stay in place (disabled) while the page floats, so the float
+          button does not shift. */}
       {designModeAvailable && (
         <Tooltip label="Design mode" shortcut="⌘⇧D">
           <Button
@@ -2529,9 +2392,6 @@ function BrowserChrome({
         </Button>
       </Tooltip>
 
-      {/* Iframe migration — Radix DropdownMenu z-indexes naturally
-          over the iframe body. No more native menu, no overlay-lock,
-          no screenshot backdrop. */}
       <DropdownMenu>
         <DropdownMenuTrigger asChild>
           <Button
@@ -2599,8 +2459,6 @@ function BrowserChrome({
   );
 }
 
-// ── Design Mode element chip ─────────────────────────────
-
 interface ElementChipProps {
   elements: SelectedElement[];
   onSubmit: (text: string) => void;
@@ -2611,24 +2469,14 @@ interface ElementChipProps {
   onFork?: () => void;
 }
 
-/** Approximate chip dimensions — used for viewport-bounds clamping
- *  so the chip doesn't disappear off-screen when the user clicks
- *  something near a window edge. The canvas inspector uses the
- *  same pattern (`feedback-pill.ts:100-137`). */
-// ── Canvas-mode sub-components ───────────────────────────
-
 interface CanvasPresetRailProps {
   width: number;
   onApplyWidth: (width: number) => void;
 }
 
-/** Viewport preset rail anchored to the RIGHT EDGE OF THE FRAME
- *  (not the column). The rail is a child of the frame wrapper, so
- *  it inherits the wrapper's CSS transform — pans/zooms with the
- *  frame, exactly like the height indicator below. Shows the
- *  current width as a pill plus one button per preset (Desktop /
- *  Laptop / Tablet / Mobile). Active preset (width within ±20px
- *  of preset value) gets the accent background. */
+/** Viewport preset rail on the frame's right edge. It sits inside the frame
+ *  wrapper, so it pans and zooms with the frame. A preset within ±20px of the
+ *  width is active. */
 function CanvasPresetRail({ width, onApplyWidth }: CanvasPresetRailProps) {
   return (
     <div
@@ -2703,20 +2551,16 @@ function CanvasHeightIndicator({
   );
 }
 
+// Approximate chip size, for clamping it inside the viewport near a window edge.
 const CHIP_WIDTH = 340;
 const CHIP_HEIGHT_BASE = 76; // base row (tags) + (input row when expanded)
 const CHIP_GAP = 12;
 
-/** Floating popover anchored to the most-recently-clicked element.
- *  Rendered as a sibling of the iframe; click coords come from the
- *  picker (iframe-local CSS px) and are already in this container's
- *  coord space because the iframe sits at inset:0 of the container.
- *  Edge-flips when overflowing right or bottom of the container.
- *
- *  Shows ALL selected elements as removable tags, plus
- *  an "+ Add" button to pick another element. Submitting stages every
- *  element in the active chat's composer (one screenshot pill each plus
- *  a details .txt pill); it never sends. */
+/** Popover anchored to the most recently clicked element. Picker coordinates
+ *  are iframe-local CSS px, already in this container's space because the iframe
+ *  sits at inset:0. Flips at the right and bottom edges. Submitting stages every
+ *  selected element in the active chat's composer (a screenshot pill each plus a
+ *  details .txt pill); it never sends. */
 function ElementChip({
   elements,
   onSubmit,
@@ -2733,12 +2577,8 @@ function ElementChip({
   // Anchor to the LAST element clicked (most recent intent).
   const anchor = elements[elements.length - 1];
 
-  // requestAnimationFrame ensures the input is mounted, the parent
-  // overlay-lock has triggered the visibility flip, and the DOM is
-  // painted before we claim focus. Plain `autoFocus` and synchronous
-  // .focus() in useEffect both race the layout and intermittently
-  // miss — the canvas inspector uses this exact pattern
-  // (`feedback-pill.ts:442`).
+  // rAF: plain autoFocus or a synchronous focus() in an effect races layout and
+  // intermittently misses.
   useEffect(() => {
     const raf = requestAnimationFrame(() => {
       inputRef.current?.focus();
@@ -2818,18 +2658,11 @@ function ElementChip({
       onClick={(e) => e.stopPropagation()}
     >
       <div className="border-border1 bg-bg3 flex flex-col gap-1.5 rounded-lg border p-2 shadow-lg">
-        {/* Tag row: one removable pill per selected element + the
-            "+" add-another button. flex-wrap so the row grows
-            vertically when many elements are selected. */}
         <div className="flex flex-wrap items-center gap-1">
           {elements.map((el, i) => (
             <Tooltip key={`${el.selector}-${i}`} label={`${el.selector}`}>
               <span className="bg-bg3-hover text-fg1 inline-flex items-center gap-1 rounded-sm px-1.5 py-0.5 text-xs">
-                {/* Prefer human-readable component name (React fiber,
-                    Vue, data-component, CSS module, aria-label, semantic
-                    tag) — falls back to <tag> when no better name is
-                    detectable. Mono only on the tag fallback so component
-                    names read as natural text. */}
+                {/* Mono only on the <tag> fallback, so component names read as text. */}
                 {el.componentName ? (
                   <span className="font-medium">{el.componentName}</span>
                 ) : (
@@ -2847,7 +2680,6 @@ function ElementChip({
             </Tooltip>
           ))}
         </div>
-        {/* Input + fork + dismiss row */}
         <div className="flex items-center gap-2">
           <input
             ref={inputRef}

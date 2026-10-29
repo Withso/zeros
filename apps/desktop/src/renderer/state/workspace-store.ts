@@ -1,28 +1,3 @@
-// ──────────────────────────────────────────────────────────
-// workspace-store — Zustand store for workspace / shell state
-// ──────────────────────────────────────────────────────────
-//
-// This store replaces the React Context + `useReducer` that used to live in
-// `store.tsx`. Every consumer of that single Context value re-rendered on
-// ANY state change (active chat, selection, drafts, project meta, …). The
-// sessions store (`../agent/sessions-store.ts`) already proved the fix:
-// hold state in Zustand, let each consumer subscribe to the narrow slice it
-// reads, and unrelated changes no longer wake it.
-//
-// Fidelity guarantee: the EXACT original `reducer`, `Action` union, and
-// `initialState` are reused verbatim as the store's engine — no state-
-// transition logic was rewritten (that's where regressions hide). Zustand
-// only changes how state is *held* and *subscribed to*. `dispatch(action)`
-// is preserved 1:1 so every existing `dispatch({ type: ... })` call site
-// keeps working unchanged while surfaces migrate to selectors.
-//
-// No-op preservation: the reducer returns the SAME state reference for
-// no-ops (e.g. CONSUME_* id mismatch, REMOVE last tab). `set((s) =>
-// reducer(s, a))` then hands Zustand back the identical reference, which
-// its `Object.is` check treats as a no-op — so the reducer's no-op short-
-// circuits still suppress re-renders exactly as under `useReducer`.
-// ──────────────────────────────────────────────────────────
-
 import { create } from "zustand";
 import { buildDirectFileOpenAction } from "../shell/workbench/direct-file-open";
 import { isRunSessionId } from "../platform/workspace-run-identity";
@@ -128,9 +103,6 @@ function migratePersistedChat(c: ChatThread, previous?: ChatThread): ChatThread 
   return previous && samePersistedChat(previous, migrated) ? previous : migrated;
 }
 
-// ──────────────────────────────────────────────────────────
-// Action union (moved verbatim from store.tsx)
-// ──────────────────────────────────────────────────────────
 export type Action =
   | {
       type: "SET_BROWSER_PICKER_SELECTION";
@@ -168,12 +140,8 @@ export type Action =
        * exact repository workspace snapshot confirms it. */
       validationPending?: boolean;
       chatHydrationPending?: boolean;
-      /** Repoint the active-workspace pointers (chat / folder / scope) WITHOUT
-       *  leaving the current page. Set by the archive/delete repoint so removing
-       *  the active workspace from a full-window Home page (Dashboard / Repo /
-       *  Settings) fixes the underlying selection but keeps the user on that page
-       *  instead of yanking them into the workspace view. Defaults to false — a
-       *  normal open always switches to "workspace". */
+      /** Repoint the active workspace without leaving the current page, so removing
+       *  it from a full-window Home page keeps the user there. */
       preservePage?: boolean;
       /** Explicit filter transition for a repository-picker navigation. */
       workspaceListFilter?: WorkspaceListFilter;
@@ -181,9 +149,7 @@ export type Action =
   | { type: "CONFIRM_WORKSPACE_TARGET"; folder: string }
   /** Clear a disappearing workspace before destructive owner teardown. */
   | { type: "CLEAR_WORKSPACE_TARGET" }
-  // Open the Home tab's repo page for one project. A dedicated action (not a
-  // SET_ACTIVE_PAGE payload) so the page and its target repo change atomically
-  // — no frame where activePage is "repo" but activeRepoId still points at the
+  // One action, so activePage is never "repo" while activeRepoId still names the
   // previous repo.
   | {
       type: "OPEN_REPO_PAGE";
@@ -227,7 +193,6 @@ export type Action =
     }
   | { type: "DISCONNECT_PROJECT" }
   | { type: "SET_AI_SETTINGS"; settings: AiSettings }
-  // Chat threading
   | { type: "HYDRATE_CHATS"; chats: ChatThread[]; activeChatId: string | null; confirmedCloudWorkspaces?: readonly string[]; confirmedLocalChats?: boolean }
   | { type: "MERGE_CHATS"; chats: ChatThread[] }
   | { type: "REVALIDATE_CLOUD_CHATS" }
@@ -285,8 +250,6 @@ export type Action =
   | { type: "TOUCH_CHAT"; id: string }
   | { type: "SET_CHAT_COMPOSER_MODE"; id: string; folder: string; mode: "code" | "design"; revision: number }
   | { type: "TOGGLE_PIN_CHAT"; id: string }
-  // Per-surface composer drafts. See comment
-  // on `chatComposerDrafts` in WorkspaceState.
   | { type: "SET_CHAT_DRAFT"; chatId: string; draft: ComposerDraft }
   | { type: "CLEAR_CHAT_DRAFT"; chatId: string }
   | {
@@ -296,24 +259,17 @@ export type Action =
       stash: EditDraftStash;
     }
   | { type: "CLEAR_EDIT_DRAFT"; chatId: string; messageId: string }
-  // Auto-submit into Conversation pane chat
   | { type: "ENQUEUE_CHAT_SUBMISSION"; submission: PendingChatSubmission }
   | { type: "CONSUME_CHAT_SUBMISSION"; id: string }
-  // New-workspace dispatcher one-shot: auto-send a freshly-created chat's
-  // SEEDED composer the moment its session is ready. Unlike
-  // ENQUEUE_CHAT_SUBMISSION (which carries the text and bypasses the editor),
-  // this lets the mounted AgentChat serialize its own seeded composer — full
-  // fidelity for inline mentions + attachments with zero duplication of
-  // handleSend. Set by the dispatcher's "Create" (when a prompt was typed),
-  // consumed by AgentChat.
+  // Auto-send a new chat's seeded composer once its session is ready. Unlike
+  // ENQUEUE_CHAT_SUBMISSION, the mounted AgentChat serializes its own composer, so
+  // inline mentions and attachments keep full fidelity.
   | { type: "REQUEST_AUTO_SEND"; chatId: string }
   | { type: "CONSUME_AUTO_SEND"; chatId: string }
   | { type: "ENQUEUE_COMPOSER_APPEND"; append: PendingComposerAppend }
   | { type: "CONSUME_COMPOSER_APPEND"; id: string }
-  // EmptyComposer scope override — see newAgentFolder doc on WorkspaceState.
   | { type: "SET_NEW_AGENT_FOLDER"; folder: string | null }
   | { type: "BUMP_PROJECT_GENERATION" }
-  // Workbench tabs
   | ({ type: "OPEN_WORKBENCH_TERMINAL"; scope: string } & OpenTerminalIntent)
   | {
       type: "RECONCILE_WORKBENCH_TERMINALS";
@@ -375,17 +331,9 @@ export type Action =
       outcome: "removed" | "reverted";
     };
 
-// ──────────────────────────────────────────────────────────
-// Initial state (moved verbatim from store.tsx)
-// ──────────────────────────────────────────────────────────
-// Hydrate the reload-survivable slice synchronously. `loadPersistedUiState`
-// is type-guarded — bad / missing fields fall back to the defaults below,
-// so a corrupt localStorage entry can never crash the store.
+// Type-guarded: a corrupt localStorage entry falls back to the defaults below.
 const persistedUiState = loadPersistedUiState();
 
-// Composer drafts (chat / empty / edit). Previously volatile-by-design;
-// flipped to persistent so reload doesn't lose an in-flight prompt.
-// Each record is type-guarded on read — corrupt entries become empty.
 const persistedDrafts = loadPersistedDrafts();
 const bootChats = loadCachedChatsForBoot().map(chat => migratePersistedChat(chat));
 const persistedActiveChatId =
@@ -542,33 +490,26 @@ const initialState: WorkspaceState = {
   workspaceActivityByFolder: persistedUiState.workspaceActivityByFolder ?? {},
   createWorkspaceProjectId: persistedUiState.createWorkspaceProjectId ?? null,
   lastHomePage: persistedUiState.lastHomePage ?? "dashboard",
-  // Restored with activePage so a reload on a repo page reopens the same repo.
-  // persist-ui-state guarantees the pair is consistent (a persisted "repo"
-  // page without an id falls back to the Dashboard on read).
+  // persist-ui-state keeps this consistent with activePage: a "repo" page without
+  // an id reads back as the Dashboard.
   activeRepoId: persistedUiState.activeRepoId ?? null,
   repoPageViewByProject: persistedUiState.repoPageViewByProject ?? {},
   isLoading: false,
   aiSettings: loadAiSettings(),
-  // The validated local snapshot is available before React mounts. SQLite is
-  // still authoritative and revalidates in ChatsPersistence, but cold start no
-  // longer paints a null chat and repairs it in a post-paint effect.
+  // SQLite stays authoritative and revalidates in ChatsPersistence; this snapshot
+  // only keeps cold start from painting a null chat.
   chats: bootChats,
   activeChatId: bootActiveChatId,
   pendingChatSubmission: null,
-  // Parked first turns the last run did not get to dispatch. Recovery is
-  // filtered (draft still present, arm still fresh) in one place —
-  // recoverPendingAutoSend — so a reload inside a workspace's setup window
-  // resumes the promise the user was shown instead of leaving their text in a
-  // composer that will never send it.
+  // A reload during workspace setup still sends the first turn the user was
+  // shown; recoverPendingAutoSend drops stale or draftless arms.
   pendingAutoSend: recoverPendingAutoSend(persistedDrafts, Date.now()),
   pendingComposerAppend: null,
-  // Restored from persist-ui-state so a reload mid-Untitled-tab keeps
-  // Repository panel / topbar / tabs / EmptyComposer all agreeing on the same
-  // workspace. Without this, those four surfaces diverge after Cmd+R.
+  // Restored so the Repository panel, topbar, tabs and EmptyComposer agree on the
+  // workspace after a reload.
   newAgentFolder: persistedUiState.newAgentFolder ?? null,
-  // Restored from persist-ui-state so the app reopens on the SAME workspace
-  // the user left — resolved synchronously at boot, before HYDRATE_CHATS, so
-  // the topbar/tabs never flash "No workspace selected". See WorkspaceState.
+  // Resolved before HYDRATE_CHATS, so the topbar and tabs never flash "No
+  // workspace selected".
   lastWorkspaceFolder: persistedUiState.lastWorkspaceFolder ?? null,
   lastWorkspaceByRepoRoot: initialWorkspaceByRepoRoot(),
   pendingWorkspaceValidationFolder: initialPendingWorkspaceValidation(),
@@ -576,27 +517,16 @@ const initialState: WorkspaceState = {
     bootChats.find(chat => chat.id === bootActiveChatId)?.folder ||
     cloudFolderForChatId(bootActiveChatId) ||
     persistedUiState.newAgentFolder || persistedUiState.lastWorkspaceFolder || null,
-  // Per-workspace last-active chat, restored from persist-ui-state so that
-  // switching back to a workspace after a reload still lands on the chat the
-  // user was viewing there. See rememberActiveChatForFolder below.
   activeChatByFolder: persistedUiState.activeChatByFolder ?? {},
   projectGeneration: 0,
   chatComposerDrafts: persistedDrafts.chats,
   editComposerDrafts: persistedDrafts.edits,
-  // Workbench tabs, hydrated per worktree (keyed by folder path). See
-  // selectWorkbench / workbenchScopeKey below.
   workbenchByScope: loadScopes(),
 };
 
-// ──────────────────────────────────────────────────────────
-// Active-workspace folder resolution (shared by every Conversation pane surface)
-// ──────────────────────────────────────────────────────────
-// The active workspace is DERIVED from a folder path. Three surfaces — the
-// topbar breadcrumb, the chat-tabs strip, and useActiveWorkspace — must resolve
-// it identically, so they all go through `selectActiveFolder`. The `||` (not
-// `??`) chain treats an empty-string folder as "unset" and falls through, so a
-// legacy chat with `folder: ""` degrades to the last workspace instead of
-// "No workspace selected". `lastWorkspaceFolder` is the persisted boot fallback.
+// Every surface resolves the active workspace through selectActiveFolder.
+// `||`, not `??`: a legacy chat with `folder: ""` falls back to the last
+// workspace instead of "No workspace selected".
 
 /** The LIVE active-workspace folder: the active chat's folder, else the
  *  empty-composer scope. Null when neither is set. Used to decide what to
@@ -615,17 +545,14 @@ export function selectActiveFolder(s: WorkspaceState): string | null {
   return selectLiveFolder(s) || s.lastWorkspaceFolder || null;
 }
 
-/** Keep `lastWorkspaceFolder` mirroring the live active-workspace folder so a
- *  reopen lands on the same workspace. Never clears it — leaving for the empty
- *  composer or closing every chat shouldn't forget where you were. Runs after
- *  every dispatch; a no-op reducer result (same live folder) returns the SAME
+/** Mirror the live folder into `lastWorkspaceFolder` so a reopen lands on the
+ *  same workspace. Never clears it. An unchanged folder returns the same
  *  reference, preserving Zustand's Object.is no-op skip. */
 function rememberActiveFolder(next: WorkspaceState): WorkspaceState {
   const live = selectLiveFolder(next);
   if (!live) return next;
-  // Hot chat/session actions overwhelmingly keep the same folder. OPEN_WORKSPACE
-  // and the boot migration already attribute that identity, so bail before the
-  // project-registry read on every unrelated streaming/draft update.
+  // Most streaming and draft updates keep the folder; bail before the
+  // project-registry read.
   if (live === next.lastWorkspaceFolder) return next;
   const project = findProjectForFolder(live, loadProjects());
   return {
@@ -671,18 +598,10 @@ function rememberRepoPageView(
   };
 }
 
-/** Remember the last-active chat PER workspace folder so returning to a
- *  workspace restores the chat the user was VIEWING — not the most recently
- *  *edited* one. Merely selecting/viewing a chat never bumps `updatedAt`, so
- *  the old `updatedAt DESC` pick (repository panel's chatsByWorkspace) silently jumped
- *  to whichever chat had the latest activity and lost the user's place. Mirrors
- *  rememberActiveFolder: runs after every dispatch, keyed off the live active
- *  chat. A null active chat (empty composer, just-archived) leaves the prior
- *  memory intact — tabbing to the new-agent surface shouldn't forget which chat
- *  was open. A same-reference no-op return preserves Zustand's Object.is skip.
- *  Stale entries (deleted/archived/moved chats) are harmless because restore
- *  validates against the live chat list (selectActiveChatForFolder). The map is
- *  also bounded so years of removed worktrees cannot grow boot storage forever. */
+/** Remember the chat the user was viewing per folder. `updatedAt` cannot stand
+ *  in for it, because viewing a chat never bumps it. A null active chat keeps
+ *  the prior memory; restore validates entries against live chats, and the map
+ *  is bounded. A same-reference no-op return preserves Zustand's Object.is skip. */
 function rememberActiveChatForFolder(next: WorkspaceState): WorkspaceState {
   const id = next.activeChatId;
   if (!id) return next;
@@ -700,10 +619,8 @@ function rememberActiveChatForFolder(next: WorkspaceState): WorkspaceState {
   };
 }
 
-/** The chat id the user was last viewing in `folder`, but only if that chat is
- *  still live and still belongs to the folder — else null so the caller falls
- *  back to its default pick. Pure; used by the workspace-switch handlers in
- *  repository panel to restore the user's place. */
+/** The chat last viewed in `folder` if it is still live there, else null so the
+ *  caller falls back to its default pick. */
 export function selectActiveChatForFolder(
   s: WorkspaceState,
   folder: string | null,
@@ -729,13 +646,10 @@ export function selectMostRecentChatForFolder(
   return best?.id ?? null;
 }
 
-/** THE chat to land on when a workspace comes into view: the chat the user was
- *  last VIEWING there (validated), else the most-recently-touched live chat at
- *  that path, else null (caller then auto-spawns a default chat — the app-wide
- *  invariant since 2026-07-06 is that a workspace in view ALWAYS has an active
- *  chat; Conversation pane renders a dead pane otherwise). Pure; shared by the boot
- *  hydrator, the repository panel/workspace-open handlers, and the tab strip's
- *  selection keeper so the pick can never drift between surfaces. */
+/** The chat to land on when a workspace comes into view: the last viewed one
+ *  (validated), else the most recently touched live chat there, else null and
+ *  the caller creates a default chat, because a workspace in view always has an
+ *  active chat. Every restore path shares this so the pick cannot drift. */
 export function selectChatToRestoreForFolder(
   s: WorkspaceState,
   folder: string | null,
@@ -746,13 +660,8 @@ export function selectChatToRestoreForFolder(
   );
 }
 
-// ──────────────────────────────────────────────────────────
-// Workbench tabs — scoped per worktree (folder path)
-// ──────────────────────────────────────────────────────────
-// Tabs belong to a worktree, not the app — a file opened in one worktree must
-// not appear in another. The scope key is the active worktree's folder (the
-// same identity chats use); switching worktrees just reads a different slice
-// (no remount, so workbench's terminal panel and resize state survive).
+// Tabs are scoped per worktree folder. Switching worktrees reads another slice
+// without a remount, so the terminal panel and resize state survive.
 
 /** The key under which the ACTIVE worktree's tab slice lives — its folder path,
  *  or a sentinel for the ambient/no-folder scope. */
@@ -856,9 +765,6 @@ function retainBrowserTabsForConversations(
   return next;
 }
 
-// ──────────────────────────────────────────────────────────
-// Reducer (moved verbatim from store.tsx)
-// ──────────────────────────────────────────────────────────
 function nextChatUpdatedAt(chat: ChatThread, now = Date.now()): number {
   // Every local metadata writer must retain an optimistic edit's ordering,
   // including late title/session callbacks while the device clock is behind.
@@ -1006,9 +912,7 @@ function reducer(state: WorkspaceState, action: Action): WorkspaceState {
             action.repoRoot,
             loadProjects(),
           );
-      // A repoint (preservePage) fixes the active-workspace target but must not
-      // navigate — it keeps whatever page is showing (e.g. the Dashboard). A
-      // normal open always lands on the workspace view.
+      // A repoint keeps the current page; a normal open lands on the workspace.
       const nextActivePage = action.preservePage
         ? state.activePage
         : "workspace";
@@ -1299,7 +1203,6 @@ function reducer(state: WorkspaceState, action: Action): WorkspaceState {
       return { ...state, isLoading: action.loading };
     case "SET_AI_SETTINGS":
       return { ...state, aiSettings: action.settings };
-    // ── Chat threads ──────────────────────────────────────
     case "REVALIDATE_CLOUD_CHATS": {
       const folder = selectActiveFolder(state);
       // A lifecycle remount (including hot refresh) must release cached cloud
@@ -1372,11 +1275,9 @@ function reducer(state: WorkspaceState, action: Action): WorkspaceState {
       };
     }
     case "MERGE_CHATS": {
-      // Live cross-device sync (DB_CHANGED): fold the engine's chat list into the
-      // local one — ADD chats we don't have, refresh ones the engine has a NEWER
-      // copy of — WITHOUT touching activeChatId, drafts, or local-only UI state.
-      // The updatedAt guard keeps a just-made local edit from being reverted by a
-      // stale notification that races the write-through.
+      // Cross-device sync: add missing chats and refresh older copies without touching
+      // activeChatId, drafts or local UI state. The updatedAt guard keeps a stale
+      // notification from reverting a just-made local edit.
       if (action.chats.length === 0) return state;
       const byId = new Map(state.chats.map((c) => [c.id, c]));
       let changed = false;
@@ -1394,10 +1295,8 @@ function reducer(state: WorkspaceState, action: Action): WorkspaceState {
       return changed ? { ...state, chats: [...byId.values()] } : state;
     }
     case "ADD_CHAT": {
-      // Chat tabs are unbounded — every live chat in a workspace shows
-      // as a tab and the strip scrolls, so there's nothing to evict.
-      // Creating a chat also consumes the EmptyComposer scope (the chat
-      // now carries its own folder).
+      // Chat tabs are unbounded (the strip scrolls), so nothing is evicted. The chat
+      // carries its own folder, so it consumes the EmptyComposer scope.
       return {
         ...state,
         workspaceActivityByFolder: action.recordWorkspaceActivity
@@ -1462,13 +1361,9 @@ function reducer(state: WorkspaceState, action: Action): WorkspaceState {
             ),
           )
         : state.editComposerDrafts;
-      // Replacement pick when the ACTIVE chat is deleted: stay in the same
-      // workspace (most-recent live sibling at the deleted chat's folder)
-      // rather than jumping to whatever chat happens to sit last in the
-      // global array — that jump silently teleported the user to another
-      // worktree. Fall back to the most-recent live chat anywhere; null only
-      // when no live chats remain (the tab strip's selection keeper then
-      // auto-spawns a fresh chat so Conversation pane never shows a dead pane).
+      // Replace a deleted active chat with the most recent live sibling in its
+      // workspace; the last chat in the global array could be in another worktree.
+      // Null only when no live chats remain, and the tab strip then creates one.
       let nextActiveId = state.activeChatId;
       if (state.activeChatId === action.id) {
         const pick = (pred: (c: ChatThread) => boolean): string | null => {
@@ -1487,9 +1382,7 @@ function reducer(state: WorkspaceState, action: Action): WorkspaceState {
         ...state,
         chats: next,
         activeChatId: nextActiveId,
-        // Keep the chrome pinned to the deleted chat's workspace when no
-        // replacement exists there — mirrors ARCHIVE_CHAT's safety net so
-        // the strip never degrades to "No workspace selected".
+        // No replacement in that workspace: keep the chrome on it, as ARCHIVE_CHAT does.
         newAgentFolder:
           state.activeChatId === action.id && nextActiveId === null
             ? (deleted?.folder ?? state.newAgentFolder)
@@ -1504,18 +1397,9 @@ function reducer(state: WorkspaceState, action: Action): WorkspaceState {
       };
     }
     case "ARCHIVE_CHAT": {
-      // Soft-delete: flip the archived flag and drop the active
-      // selection if the archived chat was open. Pin is cleared so the
-      // chat doesn't reappear in pinned the moment it's restored — the
-      // user can re-pin from Archived if they want.
-      //
-      // If the archived chat was active, ALSO pin newAgentFolder to the
-      // closed chat's folder so the chrome (Repository panel highlight, topbar,
-      // tabs strip) doesn't degrade to "No workspace selected". Callers
-      // that pick a replacement chat (conversation/pane-layout handleCloseTab)
-      // will overwrite this with SET_ACTIVE_CHAT, which clears
-      // newAgentFolder for them — so this is only the safety net for
-      // archive paths that don't run that handler.
+      // Archive clears the pin so a restored chat does not reappear pinned. If it was
+      // active, newAgentFolder keeps the chrome on its workspace; callers that pick a
+      // replacement override this with SET_ACTIVE_CHAT.
       const target = state.chats.find((c) => c.id === action.id);
       if (!target || target.archived) return state;
       // Closing is a local metadata edit. Advance past the observed row even
@@ -1523,14 +1407,9 @@ function reducer(state: WorkspaceState, action: Action): WorkspaceState {
       // snapshot cannot win a timestamp tie and reopen the optimistic tab.
       const updatedAt = nextChatUpdatedAt(target);
       const wasActive = state.activeChatId === action.id;
-      // When the ACTIVE chat is archived, hand the selection to the most-
-      // recently-touched live sibling in the SAME workspace instead of
-      // nulling it — a null selection renders a dead Conversation pane (the
-      // EmptyComposer landing was deleted 2026-06-18). Callers with a better
-      // pick (conversation/pane-layout' pane-neighbor strategy) dispatch their own
-      // SET_ACTIVE_CHAT right after, which simply overrides this. Null only
-      // when the workspace has no live chats left — then newAgentFolder pins
-      // the scope and the tab strip's keeper auto-spawns a fresh chat.
+      // Hand the selection to the most recent live sibling in the same workspace; a
+      // null selection renders a dead Conversation pane. Callers with a better pick
+      // dispatch SET_ACTIVE_CHAT afterwards.
       let replacementId: string | null = null;
       if (wasActive) {
         let best: ChatThread | null = null;
@@ -1751,10 +1630,8 @@ function reducer(state: WorkspaceState, action: Action): WorkspaceState {
       return { ...state, newAgentFolder: action.folder };
     case "BUMP_PROJECT_GENERATION":
       return { ...state, projectGeneration: state.projectGeneration + 1 };
-    // ── Workbench tabs — scoped per worktree (see selectWorkbench) ──
-    // Each case reads/writes the ACTIVE worktree's slice in workbenchByScope,
-    // seeding from the per-scope default home tabs when the
-    // worktree has no slice yet.
+    // Workbench cases edit the active worktree's slice, seeded from its default
+    // home tabs when absent.
     case "OPEN_WORKBENCH_TERMINAL":
     case "RECONCILE_WORKBENCH_TERMINALS": {
       const scope = workbenchScopeForFolder(action.scope);
@@ -2042,8 +1919,7 @@ function reducer(state: WorkspaceState, action: Action): WorkspaceState {
     case "REORDER_WORKBENCH_TABS": {
       const scope = workbenchScopeKey(state);
       const cur = state.workbenchByScope[scope] ?? defaultScopeFor(scope);
-      // Reorder using the supplied id list. Tabs missing from the list
-      // are preserved at the end (defensive — caller should pass all ids).
+      // Tabs missing from the id list stay at the end.
       const byId = new Map(cur.tabs.map((t) => [t.id, t] as const));
       const reordered: WorkbenchTab[] = [];
       for (const id of action.ids) {
@@ -2291,14 +2167,9 @@ function reducer(state: WorkspaceState, action: Action): WorkspaceState {
   }
 }
 
-// ──────────────────────────────────────────────────────────
-// Store
-// ──────────────────────────────────────────────────────────
-// Shape = the full WorkspaceState (flat) + a `dispatch` that runs the
-// verbatim reducer. Keeping state flat (rather than nested under a `state`
-// key) is what lets the reducer's same-reference no-op returns flow
-// straight into Zustand's `Object.is` skip. `dispatch` is a stable
-// reference for the store's lifetime, so selecting it never re-renders.
+// State stays flat so the reducer's same-reference no-op returns reach
+// Zustand's Object.is skip. `dispatch` is stable, so selecting it never
+// re-renders.
 export interface WorkspaceStore extends WorkspaceState {
   dispatch: (action: Action) => void;
 }
@@ -2334,10 +2205,8 @@ function noteChatTranscriptLifecycle(state: WorkspaceState, action: Action): voi
 
 export const useWorkspaceStore = create<WorkspaceStore>((set, get) => ({
   ...initialState,
-  // rememberActiveFolder keeps `lastWorkspaceFolder` in sync with the live
-  // workspace after every action; rememberActiveChatForFolder records the
-  // active chat per workspace folder so switching back restores the user's
-  // place (a no-op reducer result stays a no-op through both).
+  // Both remember passes return the same reference for an unchanged result, so
+  // a reducer no-op stays a no-op.
   dispatch: (action) => {
     noteChatTranscriptLifecycle(get(), action);
     set((s) => {
@@ -2370,15 +2239,9 @@ export function recordWorkspaceActivity(folder: string): void {
   });
 }
 
-// ──────────────────────────────────────────────────────────
-// Reload-persistence (formerly the effects in WorkspaceProvider)
-// ──────────────────────────────────────────────────────────
-// Mirror the persisted slices to localStorage whenever they change. The
-// schedule helpers debounce internally (300 ms UI-state / 500 ms drafts) and
-// flush on `beforeunload`. We compare the exact fields the old effect
-// dependency arrays watched, so a write is scheduled on precisely the same
-// changes — no more, no less. Subscribed once at module load; lives for the
-// app's lifetime, so there's no teardown.
+// Persist slices when they change. The schedule helpers debounce (300 ms UI
+// state, 500 ms drafts) and flush on `beforeunload`; these subscriptions live
+// for the app's lifetime.
 const stopAttachmentSourceMaintenance = startAttachmentSourceMaintenance(() => [
   useWorkspaceStore.getState().chatComposerDrafts,
   useWorkspaceStore.getState().editComposerDrafts,
@@ -2446,26 +2309,16 @@ useWorkspaceStore.subscribe((s, prev) => {
   }
 });
 
-/** Stable `dispatch` without subscribing to any state. Write-only / event-
- *  handler consumers use this instead of `useWorkspace()` so they stop
- *  re-rendering on unrelated state changes. The selected reference never
- *  changes, so this hook never triggers a re-render. */
+/** Stable `dispatch` without subscribing to state, for event handlers that
+ *  must not re-render on unrelated changes. */
 export function useWorkspaceDispatch(): (action: Action) => void {
   return useWorkspaceStore((s) => s.dispatch);
 }
 
-// ──────────────────────────────────────────────────────────
-// Selector hooks — prefer these over useWorkspace() so a consumer
-// re-renders ONLY when the slice it reads changes (the migration's whole
-// point). Single-field selectors return the field reference directly, so
-// Zustand's default `Object.is` compare suppresses re-renders when that
-// field is untouched. Derived selectors that build a fresh array/object
-// (e.g. a filtered chat list) must wrap the selector in `useShallow` at the
-// call site, or return a primitive — see conversation/terminal-deck / the
-// derived-folder reads in conversation/conversation-header & the store helper hooks.
-// ──────────────────────────────────────────────────────────
+// Selector hooks re-render only when their slice changes. A selector that
+// builds a fresh array or object must use `useShallow` at the call site, or
+// return a primitive.
 
-/** Current complete shell destination. */
 export function useActivePage(): WorkspaceState["activePage"] {
   return useWorkspaceStore((s) => s.activePage);
 }
@@ -2488,7 +2341,6 @@ export function useActiveRepoId(): string | null {
   return useWorkspaceStore((s) => s.activeRepoId);
 }
 
-/** The id of the active chat, or null. */
 export function useActiveChatId(): string | null {
   return useWorkspaceStore((s) => s.activeChatId);
 }
@@ -2498,7 +2350,6 @@ export function useNewAgentFolder(): string | null {
   return useWorkspaceStore((s) => s.newAgentFolder);
 }
 
-/** The connected project, or null. */
 export function useProjectConnection(): WorkspaceState["project"] {
   return useWorkspaceStore((s) => s.project);
 }

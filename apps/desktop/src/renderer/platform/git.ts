@@ -1,19 +1,9 @@
 import type { ChangesHistory } from "@zeros/protocol/changes-history";
-// ──────────────────────────────────────────────────────────
-// Native bindings — Git, GitHub, detach, and cross-tool IPC
-// ──────────────────────────────────────────────────────────
-//
-// Renderer-side typed façade for git/GitHub/detach/cross-tool ops. Most ops
-// are now bridge-routed through the engine WorkspaceService; only a handful
-// (~6) of native IPC commands remain. The native-bound calls here route
-// through `nativeInvoke()`. Engine-backed reads never synthesize empty success:
-// a disconnected transport is not proof that a repository has no data.
-//
-// Engine source-of-truth: apps/desktop/src/engine/git/index.ts. The types below
-// mirror that module's exports — copying them into the renderer keeps
-// the IPC boundary explicit and avoids importing the engine into the
-// React bundle.
-// ──────────────────────────────────────────────────────────
+// Renderer façade for git, GitHub, detach and cross-tool operations. Most route
+// through the engine WorkspaceService; a few use native IPC. Engine-backed reads
+// never synthesize empty success: a disconnected transport is not proof that a
+// repository has no data. Types mirror apps/desktop/src/engine/git/index.ts so
+// the React bundle never imports the engine.
 
 import { isNativeRuntime, nativeInvoke, nativeListen } from "./runtime";
 import type {
@@ -204,8 +194,6 @@ export type {
   DesignWorkspaceSnapshotWire,
 } from "./bridge/design-bridge";
 export { WORKING_DIRECTORIES_UNSUPPORTED_COPY } from "./bridge/workspace-bridge";
-
-// ── Types ────────────────────────────────────────────────
 
 export type WorkspaceStatus =
   | "backlog"
@@ -404,16 +392,11 @@ export interface AuthStatusResult {
   login?: string;
 }
 
-// ── Engine bridge (single-writer) ────────────────────────
-//
-// After the single-writer migration, every DB-touching git/GitHub/workspace op
-// runs on the engine over the bridge — on DESKTOP too (BridgeProvider registers
-// the local client; the agents connection is always present once connected).
-// Both reads and writes require the installed RuntimeClient. It queues requests
-// while the local engine is connecting; if the provider is genuinely absent,
-// rejecting preserves the caller's last confirmed exact-key snapshot instead
-// of publishing a false empty repository. DB-FREE ops (clone/inspectFolder,
-// worktree file listing, gh auth) keep using native IPC.
+// Every DB-touching git, GitHub and workspace op runs on the engine over the
+// bridge, desktop included. The client queues while the local engine connects;
+// with no provider, rejecting keeps the caller's last confirmed snapshot rather
+// than publishing a false empty repository. DB-free ops (clone, inspectFolder,
+// worktree file listing, gh auth) keep native IPC.
 function requireBridge(action: string) {
   const bridge = getActiveBridge();
   if (!bridge) {
@@ -423,8 +406,6 @@ function requireBridge(action: string) {
   }
   return bridge;
 }
-
-// ── Workspace lifecycle ──────────────────────────────────
 
 export interface PreparedWorkspaceCreate {
   workspaceId: string;
@@ -456,10 +437,8 @@ export async function workspaceCreate(
     requireBridge("create a workspace"),
     args as unknown as Record<string, unknown>,
   )) as CreatedWorkspace;
-  // Workspace creation is the designated re-probe point for the topbar
-  // "Open in…" IDE list. This is fire-and-forget so create latency
-  // is unaffected. Sits here (not in the 5 UI call sites) so every
-  // create path hits it.
+  // Creation is the re-probe point for the topbar "Open in…" IDE list;
+  // fire-and-forget so it never adds latency.
   void refreshDetectedOpenApps();
   return created;
 }
@@ -1195,8 +1174,6 @@ export async function workspaceStopSetup(args: {
   ) as Promise<{ ok: boolean }>;
 }
 
-// ── Run actions (Run tab — the Setup trio, applied to run) ──
-
 /** One run action's engine-reported status (see RunManager). */
 export type WorkspaceRunActionStatus = RunActionStatusWire;
 
@@ -1239,8 +1216,6 @@ export async function workspaceRunLog(args: {
 }): Promise<{ log: string; truncated: boolean }> {
   return bridgeWorkspaceRunLog(requireBridge("read run output"), args);
 }
-
-// ── Repository initialization and clone dialogs ─────────
 
 export type InitTemplate = "empty";
 
@@ -1325,8 +1300,6 @@ export async function dialogPickFolder(
   if (!isNativeRuntime()) return null;
   return nativeInvoke<string | null>("dialog_pick_folder", args);
 }
-
-// ── Git ops (read + write) ───────────────────────────────
 
 export interface StatusResult {
   staged: FileChange[];
@@ -1532,20 +1505,11 @@ async function readWorkspaceFileListing(
   }
 }
 
-/** The .gitignore'd entries listWorkspaceFiles omits — what the Files tab needs
- *  to show `node_modules/`, `dist/`, `.env`. Without `dir`: the collapsed
- *  ignored roots. With `dir`: one level inside one of them. Directories carry a
- *  trailing "/". Bridge-only (no native fast path): it is called once per
- *  workspace plus once per directory the user actually opens, so the extra
- *  round-trip is invisible and there is no second code path to keep in sync.
- *
- *  DESKTOP ONLY, and short-circuited here rather than left to fail at the
- *  engine: `file.ignored` is refused for relay clients (it is a one-level
- *  directory enumerator, and .gitignore is the boundary it stops honouring —
- *  see its handler). Without this check a remote client would fire a
- *  guaranteed-REMOTE_OP_NOT_ALLOWED round-trip on every workspace open and
- *  every refresh signal. Returning [] is the same thing the caller does with
- *  the rejection, minus the traffic. */
+/** The .gitignore'd entries listWorkspaceFiles omits: without `dir`, the
+ *  collapsed ignored roots; with `dir`, one level inside one of them
+ *  (directories end in "/"). Bridge-only, since it runs once per workspace plus
+ *  once per opened directory. DESKTOP ONLY: relay clients get [] here instead
+ *  of a guaranteed REMOTE_OP_NOT_ALLOWED round-trip on every open and refresh. */
 export async function listIgnoredEntries(
   cwd: string,
   dir?: string,
@@ -1636,8 +1600,6 @@ export async function gitListAllBranches(args: {
 }): Promise<Branch[]> {
   return bridgeGitListAllBranches(requireBridge("list all Git branches"), args);
 }
-
-// ── Repo branch catalog (repo page Git dropdowns) ────────
 
 export interface RepoRemote {
   name: string;
@@ -1779,8 +1741,6 @@ export async function gitClean(args: {
     confirm: true,
   });
 }
-
-// ── GitHub ───────────────────────────────────────────────
 
 export async function ghAuthStatus(workspaceId?: string): Promise<AuthStatusResult> {
   const cloud = cloudTargetForValue(workspaceId);
@@ -1970,8 +1930,6 @@ export async function ghRepoAccess(
   }
 }
 
-// ── Publish to GitHub (desktop-only) ─────────────────────
-
 /** Owners (authed user + orgs) for the publish dialog's dropdown. */
 export async function ghListOwners(): Promise<GithubOwner[]> {
   return bridgeGhListOwners(requireBridge("list GitHub owners"));
@@ -2098,8 +2056,6 @@ export async function ghPrMerge(args: {
   return bridgeGhPrMerge(requireBridge("merge the pull request"), args);
 }
 
-// ── Pull-request review data ─────────────────────────────
-
 export interface PrCheck {
   name: string;
   status: string;
@@ -2206,7 +2162,7 @@ export async function ghPrComment(args: {
   );
 }
 
-// ── GitError shape (from apps/desktop/src/engine/git/errors.ts) ──────
+// Mirrors apps/desktop/src/engine/git/errors.ts.
 
 export interface GitErrorShape {
   name: "GitError";

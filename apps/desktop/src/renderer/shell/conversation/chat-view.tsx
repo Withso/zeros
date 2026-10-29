@@ -1,33 +1,8 @@
-// ──────────────────────────────────────────────────────────
-// Conversation pane — Chat view (per-chat native agent session)
-// ──────────────────────────────────────────────────────────
-//
-// Replaces the Phase-0 AIChatPanel in Conversation pane's Chat tab. Each
-// ChatThread in the store gets its own agent session, scoped to
-// the chat's folder and agent. Recent views live in ConversationPaneLayout' bounded
-// retained deck, so switching hides/shows complete transcript trees while
-// this component continues to read its explicit chatId.
-//
-// Four states:
-//   - no active chat            → null (EmptyComposer landing deleted
-//                                 2026-06-18; replacement lands via the
-//                                 redesign branch on merge to main)
-//   - chat kind w/o agent       → AUTO-BIND to the resolved default
-//                                 (explicit → Codex → Claude → Cursor → first)
-//                                 then re-render as ChatBody. The
-//                                 user never sees a picker; 2026-05-23
-//                                 the legacy NoAgentView path was
-//                                 retired because the product rule is
-//                                 "every chat always has an agent".
-//   - chat kind w/ agent        → AgentChat (messages + composer)
-//   - terminal kind             → return null; body owned by the
-//                                 TerminalDeck sibling so the
-//                                 PTY survives chat-tab switches.
-//
-// Lazy start: the session isn't created until the view mounts
-// with a chat that has an agentId — typing a prompt warms the
-// subprocess at composer-focus time (handled by AgentChat).
-// ──────────────────────────────────────────────────────────
+// One agent session per ChatThread, scoped to its folder and agent. Recent views
+// stay in ConversationPaneLayout's bounded retained deck; this component always
+// reads its explicit chatId. An agentless chat auto-binds to the resolved
+// default, terminal chats render nothing here because TerminalDeck owns their
+// PTY, and the session starts lazily once the view mounts with an agent.
 
 import React, { useEffect, useLayoutEffect, useRef, useState } from "react";
 import {
@@ -101,9 +76,7 @@ export function ChatView({
   readOnly?: boolean;
   composerReplacement?: React.ReactNode;
 }) {
-  // Split panes (2026-07-17): the displayed chat is an explicit prop —
-  // each pane passes its own — instead of the global active chat (the
-  // panes container derives per-pane display from the layout model).
+  // The displayed chat is an explicit prop, so each split pane shows its own.
   const active = useChatById(chatId);
   const dispatch = useWorkspaceDispatch();
   const cloud = isCloudWorkspace(active?.folder);
@@ -111,54 +84,34 @@ export function ChatView({
   // history, but a registry request would claim its speculative runtime peer.
   const agents = useWorkspaceAgents(active?.folder, surfaceActive || (!cloud && preparing));
   const bindingActive = !readOnly && (surfaceActive || !cloud);
-  // Canonical cwd resolution: the chat's own `folder` OR the current scope
-  // (`newAgentFolder` — the worktree row the user has selected). Same chain
-  // as useChatCwd / repository panel / the topbar. Without the fallback, a chat with
-  // an empty `folder` (created via a path that didn't bind one — e.g. the
-  // command palette, or a pre-folder persisted record) dropped the active
-  // scope and the gateway threw "Agent cannot spawn: chat has no project
-  // folder bound", which put the session in isErrorState and DISABLED the
-  // composer. Resolving to the active scope here lets the spawn succeed in
-  // the folder the user is actually in (not the engine root — that footgun
-  // is avoided because newAgentFolder is the user's selected worktree).
+  // Resolve cwd as the chat's folder or the selected worktree scope
+  // (newAgentFolder), like useChatCwd and the topbar. A chat with an empty folder
+  // would otherwise fail to spawn ("chat has no project folder bound") and
+  // disable the composer.
   const resolvedCwd = useChatCwd();
   // A binding made before the registry answered is a guess. Correct it here —
   // this hook outlives AutoBindAgent, which unmounts the instant it binds.
   useProvisionalBindingReconcile(active, bindingActive);
 
   if (!active) {
-    // EmptyComposer (the no-chat "start a new chat" landing) no longer exists
-    // in this worktree.
-    // The replacement for the no-active-chat state ships on the redesign branch
-    // and reconciles on merge to main; until then this renders nothing.
     return null;
   }
 
-  // Terminal-kind chat — the PTY + xterm grid live in
-  // TerminalDeck (a sibling of this component in
-  // ConversationPane) so they survive chat-tab switches. This
-  // TerminalSessionView still belongs to the always-mounted terminal deck so
-  // the shell survives pane moves and retained-chat eviction.
+  // TerminalDeck owns the PTY and xterm grid, so the shell survives chat-tab
+  // switches, pane moves and retained-chat eviction.
   if (active.kind === "terminal") {
     return null;
   }
 
-  // Chat has no agent bound yet — auto-bind to the resolved default
-  // (explicit → Codex → Claude → Cursor → first runnable) and re-render as ChatBody.
-  // The hydration step in app-shell.tsx already backfills persisted
-  // records, so this branch only catches edge cases (a brand-new
-  // chat created elsewhere, a corrupted record bypassing migration).
+  // Auto-bind an agentless chat to the resolved default. App-shell hydration
+  // backfills persisted records, so this only catches edge cases.
   if (!readOnly && !active.agentId) {
     return bindingActive ? <AutoBindAgent chat={active} /> : null;
   }
 
-  // The chat is bound to an agent the registry no longer knows about —
-  // the adapter was removed from the product (first case: the retired
-  // `gemini` CLI). Don't attempt a doomed spawn; show a dead-end card
-  // whose "Switch agent" clears the dead binding so AutoBindAgent rebinds
-  // the resolved default. Gated on a loaded registry (isRemovedAgent
-  // returns false while `agents` is null) so a cold start can't flash
-  // this over a still-resolving agent.
+  // The bound agent was removed from the product (first case: `gemini`). Show a
+  // dead-end card whose "Switch agent" clears the binding so AutoBindAgent
+  // rebinds. Gated on a loaded registry so a cold start can't flash it.
   if (!readOnly && active.agentId && isRemovedAgent(active.agentId, agents)) {
     return (
       <AgentRemovedPanel
@@ -176,15 +129,9 @@ export function ChatView({
   }
 
   const cwd = active.folder || resolvedCwd || "";
-  // Keystone guard (Bug 1): never hand an empty cwd to the session layer.
-  // The gateway throws "Agent cannot spawn: chat has no project folder
-  // bound" on an empty cwd, which surfaces as a red "Agent error" pill +
-  // a dead composer for every agent (cursor, codex, …). This single
-  // check catches a folderless chat from ANY entry point — a brand-new
-  // user who typed before picking a folder, a stale persisted record
-  // whose folder never resolved, an all-workspaces-closed state — and
-  // shows a pick-a-folder panel instead. Binding a folder flips cwd
-  // non-empty and re-renders into ChatBody, which spawns normally.
+  // Never hand an empty cwd to the session layer: the gateway would fail every
+  // agent with "no project folder bound" and a dead composer. Show a
+  // pick-a-folder panel instead; binding a folder re-renders into ChatBody.
   if (!readOnly && !cwd) {
     return <NoFolderPanel chatId={active.id} />;
   }
@@ -220,24 +167,13 @@ function priorIdentityOf(chat: ChatThread): PriorChatIdentity {
   };
 }
 
-/** Side-effect component: when mounted with a chat that has no agentId,
- *  resolves the default and writes it back to the store. The write happens in a
- *  LAYOUT effect, so React re-renders into ChatBody before this frame paints —
- *  the composer is the first thing the user sees, not an intermediate state.
- *
- *  The lookup priority mirrors `pickAgentForNewChat` in default-agent.ts:
- *  explicit default > Claude > Codex > Cursor > first, relaxing from
- *  enabled+runnable down to best-detected so the registry ALWAYS binds — a
- *  machine with nothing signed in gets the composer's "Sign in required" flow,
- *  never a dead pane.
- *
- *  Binding does NOT wait for the live registry. The agents cache hydrates its
- *  snapshot from localStorage at module load, so it is usually already warm;
- *  when it is genuinely cold (true first run) the product chain resolves the
- *  guess, {@link rememberProvisionalBinding} records it, and
- *  {@link useProvisionalBindingReconcile} corrects it as soon as the
- *  authoritative list lands. Holding the pane behind a spinner + timeout
- *  instead would be exactly the hidden data waterfall AGENTS.md forbids. */
+/** Binds an agentless chat to the resolved default in a layout effect, so the
+ *  composer is the first thing painted. Priority mirrors `pickAgentForNewChat`
+ *  and relaxes down to best-detected, so the registry always binds. Binding
+ *  never waits for the live registry: a cold-cache guess is recorded by
+ *  {@link rememberProvisionalBinding} and corrected by
+ *  {@link useProvisionalBindingReconcile}. Holding the pane behind a spinner
+ *  would be the hidden data waterfall AGENTS.md forbids. */
 function AutoBindAgent({ chat }: { chat: ChatThread }) {
   const dispatch = useWorkspaceDispatch();
   const { agentId: starredId } = useDefaultAgent();
@@ -297,17 +233,11 @@ function useProvisionalBindingReconcile(
   const boundAgentId = chat?.agentId ?? null;
   const hasSession = Boolean(chat?.providerBinding ?? chat?.sessionId);
 
-  // The cache's only routine loader lives in AgentChat, which never mounts
-  // while a chat is agentless. On a cold cache (fresh install, new dev data
-  // dir) nothing else fills the snapshot, so kick the load here. Gated on a
-  // connected bridge (same idiom as settings-page) so a boot-time blip doesn't
-  // convert into a spurious `[]` registry; the status flip re-runs this.
-  //
-  // Keyed on CONFIRMATION, not on `agents !== null`: a failed load leaves a
-  // published `[]` behind, and stopping there meant nothing ever asked the
-  // engine again. Re-running is bounded by the snapshot's own reference —
-  // repeated failures keep publishing the same `[]`, which React bails out of —
-  // so this retries when the array actually changes or the bridge reconnects.
+  // AgentChat owns the cache's routine loader and never mounts while a chat is
+  // agentless, so kick the load here on a cold cache. Gated on a connected bridge
+  // so a boot blip doesn't become a spurious `[]`. Keyed on confirmation, not
+  // `agents !== null`: a failed load publishes `[]`, and identical snapshots let
+  // React bail out, so retries stay bounded.
   useEffect(() => {
     if (!enabled) return;
     if (isCloudWorkspace(chat?.folder) || hasConfirmedAgents() || bridgeStatus !== "connected") return;
@@ -465,11 +395,8 @@ function ChatBody({
     });
   }, [chatId, composerHasText, readOnly]);
 
-  // Initial spawn (idempotent). ensureSession short-circuits if the
-  // same (chatId, agentId) pair is already ready. When the chat has a
-  // persisted provider binding (either seeded by "Resume recent thread" or
-  // carried over from a previous app run), we ask the provider to resume it
-  // instead of creating a new one.
+  // Initial spawn (idempotent): ensureSession short-circuits when the same
+  // (chatId, agentId) is ready, and a persisted provider binding resumes instead.
   const sessions = useAgentSessions();
   // Publish a remembered transcript before this view's first visible
   // paint, so a chat that left the retained deck reopens with its content
@@ -520,15 +447,10 @@ function ChatBody({
     }
     if (!readOnly && workspaceProvisioning) return;
     let cancelled = false;
-    // AWAIT the disk hydrate BEFORE spawning/resuming. loadIntoChat /
-    // ensureSession reset the slot with `messages: existing?.messages ?? []`;
-    // if hydrate hasn't landed yet that `existing.messages` is [], so a cold
-    // open flashed empty (and could lose the optimistic bubble) until hydrate
-    // self-healed a frame later. Awaiting it first means the slot already
-    // holds the disk transcript when the spawn resets it. (Hydrate is a cheap
-    // no-op when the slot already has messages — a live session, a tab swap.)
-    // No current adapter replays its transcript on resume, so there's nothing
-    // to collide with the hydrate (the old content-suppression was removed).
+    // Await the disk hydrate before spawning: ensureSession resets the slot from its
+    // existing messages, so spawning first would flash an empty transcript and
+    // could drop the optimistic bubble. Hydrate is a no-op when the slot has
+    // messages.
     void (async () => {
       await session.hydrateChat();
       if (cancelled) return;
@@ -713,45 +635,25 @@ function ChatBody({
     dispatch,
   ]);
 
-  // Respawn when the user changes model/effort — but ONLY for an agent that
-  // cannot absorb the change live (see agent/live-config-support.ts).
-  //
-  // 2026-07-29: this effect used to fire for EVERY agent, and that was a bug
-  // with three faces. Claude and Codex already had the change pushed into the
-  // running session by agent-chat's pill handlers (setModel / updateConfig),
-  // so the respawn was pure duplicate work — and because `force` bypasses the
-  // in-flight de-dup in ensureSession, cycling the effort pill N times fired N
-  // concurrent AGENT_NEW_SESSION spawns that the engine then had to supersede.
-  //
-  // Worse, the rebuild is COLD: AGENT_NEW_SESSION carries no prior session id,
-  // so Claude minted a fresh claudeSessionId (no `--resume`) and Codex a fresh
-  // thread, while the renderer kept the transcript on screen — a
-  // mid-conversation model change silently gave the agent amnesia and
-  // overwrote the resumable provider binding on the way out. And on a chat
-  // with nothing sent yet the warming→ready flip makes the empty-state line
-  // blink out and back on every pill click.
-  //
-  // For the agents that DO need it, the rebuild still runs here. For everyone
-  // else the safety net is sendPrompt's settings-drift reconcile
-  // (sessions-provider.tsx), which respawns at send time if the live apply
-  // never landed — see the appliedChatEnvKey stamp, which is deliberately only
-  // written when the agent really applied it.
+  // Respawn on a model/effort change only for agents that cannot apply it live
+  // (agent/live-config-support.ts). Claude and Codex get the change through
+  // agent-chat's pill handlers; respawning them duplicated work, fired concurrent
+  // spawns (`force` bypasses ensureSession's de-dup) and rebuilt a cold session
+  // that lost the conversation and its resumable binding. For the rest,
+  // sendPrompt's settings-drift reconcile (sessions-provider.tsx) respawns at
+  // send time if a live apply never landed (see appliedChatEnvKey).
   useEffect(() => {
     if (readOnly || navigationOnly || !surfaceActive) return;
     if (envKey === envKeyRef.current) return;
-    // Bail BEFORE stamping (2026-07-13 fix): stamping first meant a change
-    // that landed while `chat` was momentarily null was recorded as applied
-    // and permanently swallowed — the session then kept running the old
-    // model/effort with no later render able to notice.
+    // Bail before stamping: a change that lands while `chat` is momentarily null
+    // must not be recorded as applied and swallowed.
     if (!chat) return;
     envKeyRef.current = envKey;
     if (agentAppliesConfigLive(agentId)) return;
     void session.ensureSession(agentId, {
       agentName,
-      // Pass cwd verbatim so the
-      // gateway can surface "no project folder bound" as an explicit
-      // error instead of silently falling back to engine projectRoot.
-      // The prior `cwd || undefined` collapse hid the bug.
+      // Verbatim cwd, so the gateway reports a missing folder instead of falling back
+      // to the engine projectRoot.
       cwd,
       env: envForChat(chat, session.initialize),
       force: true,
@@ -759,13 +661,10 @@ function ChatBody({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [envKey, surfaceActive, readOnly, navigationOnly]);
 
-  // Auto-retry on bridge reconnect. The chat lands in `failed` state
-  // when its initial load hits a transient bridge error (queue full
-  // mid-respawn, AGENT_LOAD_SESSION timeout while the engine is
-  // restarting). Without this effect the user has to manually click
-  // away and back to retry — a real "stuck" feeling. We only retry
-  // once per reconnect: on the rising edge of bridgeStatus going to
-  // "connected" while the session is in a failed/transient state.
+  // Retry once per reconnect, on the rising edge to "connected": a chat whose
+  // initial load hit a transient bridge error (queue full mid-respawn, a load
+  // timeout during an engine restart) otherwise sits in `failed` until the user
+  // clicks away and back.
   const bridgeStatus = useBridgeStatus(cwd);
   const lastBridgeStatusRef = useRef(bridgeStatus);
   useEffect(() => {
@@ -789,10 +688,8 @@ function ChatBody({
     if (persistedProviderBinding) {
       void sessions.loadIntoChat(chatId, agentId, persistedProviderBinding, {
         agentName,
-        // Pass cwd verbatim so the
-        // gateway can surface "no project folder bound" as an explicit
-        // error instead of silently falling back to engine projectRoot.
-        // The prior `cwd || undefined` collapse hid the bug.
+        // Verbatim cwd, so the gateway reports a missing folder instead of falling back
+        // to the engine projectRoot.
         cwd,
         env,
         ...(navigationOnly ? { adoptOnly: true } : {}),

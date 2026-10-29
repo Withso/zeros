@@ -2,43 +2,6 @@ import { isSettingsSectionAvailable } from "./settings-section-availability";
 import { CloudComputerPanel, prefetchCloudComputer } from "./cloud-computer-panel";
 import { CloudGithubSection } from "./cloud-github-section";
 import { KeepAwakeSetting } from "./keep-awake-setting";
-// ──────────────────────────────────────────────────────────
-// Settings page — sidebar + per-section panel
-// ──────────────────────────────────────────────────────────
-//
-// Sidebar + detail pane: ONE sidebar with grouped
-// sections scoped to Local or the selected organization. Membership and billing
-// administration remain browser-owned; repository settings live on each repository page
-// (Home rail → repository → Settings tab).
-// Settings is its own page: this section nav takes the app sidebar's place
-// (the sidebar is hidden while here), with Back (→ Dashboard) in the
-// 40px title band beside the macOS traffic lights. There is no header bar
-// — "Open settings.toml" (reveal in Finder) floats at the detail pane's
-// top-right, mirroring the repo page. The section nav sits flat on
-// the page canvas (`--sidebar-bg`); the detail pane is flat `--bg1`
-// separated by a single `border-l` seam, content in a centered reading
-// column.
-//
-// Active selection encoding — one string persisted under
-// `settings:active-section`:
-//   - `user:<sectionId>`                → a User-scope section
-//   - `repo:<projectId>:<repoSection>`  → LEGACY; redirects to the repo
-//     page's Settings tab (kept parsing so old deep links keep working)
-// Legacy bare `general` / `repo:<id>` values migrate forward on read.
-//
-// 2026-05-22 (Settings revamp): Agents → Providers rename + API Keys
-// folded into the Providers panel. Provider auth-method + binary-path
-// overrides live in provider-prefs.ts, consumed at session spawn time.
-//
-// 2026-08-08: nav LABELS only — Preferences → "General", Agent providers →
-// "Agents", Git → "Git & PR". `SectionId`s are untouched, so persisted
-// `settings:active-section` values and deep links keep resolving.
-//
-// Repositories live in their own repository scope rather than a bottom sidebar
-// group; the
-// per-repo detail gained a background-less section nav. Repo settings are
-// engine-owned TOML (bridge ops), not localStorage.
-// ──────────────────────────────────────────────────────────
 
 import React, {
   useCallback,
@@ -233,14 +196,10 @@ type SectionDef = {
   Panel: ComponentType<{ surfaceActive?: boolean }>;
 };
 
-// Internal's nav row is the ONE coloured entry in the rail — label AND icon
-// carry `--brown-primary` (the warm accent) in every state, so a staff-only
-// tab reads as staff-only at a glance instead of sitting silently among the
-// fg2 rows. Declared ABOVE `SECTIONS` because the array evaluates at module
-// load and a `const` below would be in its temporal dead zone. Every state
-// SIDEBAR_ENTRY_CLS paints (rest / hover / active / active+hover, row + svg)
-// is restated here so twMerge — which keeps the LAST class per group+modifier
-// — swaps them all; miss one and that state falls back to fg1/fg2.
+// Internal's row is the one colored entry: label and icon carry
+// `--brown-primary` in every state. Declared above SECTIONS, which evaluates at
+// module load. It restates every state SIDEBAR_ENTRY_CLS paints because twMerge
+// keeps the last class per group and modifier; a missed state falls back.
 const INTERNAL_NAV_CLS =
   "text-brown-primary hover:text-brown-primary data-[state=active]:text-brown-primary data-[state=active]:hover:text-brown-primary [&>svg]:text-brown-primary data-[state=active]:[&>svg]:text-brown-primary";
 
@@ -309,13 +268,9 @@ const SECTIONS: SectionDef[] = [
     icon: GitPullRequest,
     Panel: GitDefaultsPanel,
   },
-  // "mcp" left Settings entirely (2026-07-22): MCP servers are managed on the
-  // Customize page (Home rail → Customize), scoped User / per-repo. A stale
-  // persisted `user:mcp` selection redirects there (see the effect below).
-  // "repos" left the settings tree because repository settings live on each
-  // repository's page. The id
-  // stays in SectionId only so legacy `repo:<id>:<section>` selections keep
-  // parsing — the redirect effect below sends them to the repo page.
+  // MCP servers live on Customize and repository settings on each repository
+  // page. A stale `user:mcp` redirects to Customize; "repos" stays in SectionId
+  // only so legacy `repo:<id>:<section>` selections parse and redirect.
   {
     id: "integrations",
     label: "Integrations",
@@ -347,11 +302,8 @@ const SECTIONS: SectionDef[] = [
   },
 ];
 
-// Sidebar grouping — the nav renders these labelled groups (in order),
-// each listing the SECTIONS entries named by id. A section gated off in
-// `availableSections` (e.g. terminal-agents behind its experimental
-// flag) just drops out of its group. The per-repo "Your Repos" list
-// renders after these, straight from the projects store.
+// Labelled nav groups, in order. A section gated off in `availableSections`
+// drops out of its group.
 const SECTION_GROUPS: Array<{ label: string; ids: SectionId[] }> = [
   {
     label: "Personal",
@@ -371,16 +323,10 @@ const SECTION_GROUPS: Array<{ label: string; ids: SectionId[] }> = [
   { label: "Workspace", ids: ["cloud-computer", "environment", "git"] },
 ];
 
-// ── Active-selection encoding ───────────────────────────
-//
-// One persisted string drives the whole page. Two scopes (the
-// User/Repo toggle), encoded so a single value restores both which
-// scope AND which section/repo on reload:
-//
-//   user:<sectionId>                 — a User-scope section
-//   repo:<projectId>:<repoSection>   — a repo + its open section
-//
-// Legacy values (bare `general` / `repo:<id>`) map forward on read.
+// One persisted string encodes the selection: `user:<sectionId>`, or a legacy
+// `repo:<projectId>:<repoSection>` that redirects to the repository page. Bare
+// legacy values map forward on read. Section ids are independent of nav labels,
+// so persisted values and deep links survive renames.
 
 /** The repo drill-in's landing page (the card list), a
  *  pseudo-section alongside the real repo sections. */
@@ -450,14 +396,6 @@ function parseSelection(active: string): Selection {
   return { scope: "user", section: isStaticSection(bare) ? bare : "general" };
 }
 
-// ── Shared layout class strings ──────────────────────────
-//
-// The flat section/row/list vocabulary now lives in settings-ui.tsx
-// (SettingsSection / SettingsRow / SettingsList). Only the page-level
-// heading and a one-off hint string remain here.
-
-// `text-lg` = 1.125rem = 18px at the app's 16px rem base. One class governs
-// every settings tab's <h1>.
 const PAGE_HEADING_CLS = "m-0 text-lg font-medium leading-tight text-fg1";
 
 const HINT_CLS = "text-sm text-fg2";
@@ -487,36 +425,14 @@ function loadInitialSection(owner: string): string {
     : repoSelection(sel.repoId, sel.section);
 }
 
-// Sidebar entry button — shared shape for static sections + per-repo
-// rows. Hoisted out of the JSX so the long class string isn't
-// duplicated and the active-state contract stays in one place.
-// HEIGHT: `py-1.5` + the `text-sm` line-box (20px) → a 32px row; the
-// list spaces rows apart with `gap-1` (see the nav).
-// WEIGHT: every row stays `font-normal`, selected included — selection is
-// encoded by COLOR only (`fg2 → fg1` + the lifted background), so rows
-// don't visually shift width when the choice changes.
-// HOVER: lifts only the BACKGROUND (`hover:bg-sidebar-bg-hover`, same as
-// the selected row — the nav sits on the page's `--sidebar-bg` canvas, and
-// `--bg1-hover` would be invisible there since it equals `--sidebar-bg`).
-// The label + icon
-// keep `fg2` — `hover:text-fg2` is REQUIRED to cancel the ghost Button
-// variant's built-in `hover:text-fg1` (twMerge keeps the later class);
-// without it the label pops to fg1 on hover. The selected row keeps
-// `fg1` even while hovered via the higher-specificity
-// `data-[state=active]:hover:text-fg1`.
-// ICON SIZE: 14px, set in CSS — NOT via each icon's `size` prop. The Button
-// primitive paints `[&_svg]:size-4` on every button, and a CSS width/height
-// beats the `width`/`height` ATTRIBUTES lucide's `size` prop emits, so
-// `<Icon size={14} />` alone still rendered 16px. `[&_svg]:size-3.5` reuses
-// the primitive's exact selector so twMerge drops the 16px rule outright
-// rather than leaving two rules to fight on source order.
+// Shared by static sections and per-repo rows. Selection is color only (fg2 →
+// fg1 plus the lifted background), so rows keep their width. `hover:text-fg2`
+// cancels the ghost Button's `hover:text-fg1` (twMerge keeps the later class).
+// Icons are sized by `[&_svg]:size-3.5`, the primitive's own selector, because
+// CSS size beats the attributes lucide's `size` prop emits.
 const SIDEBAR_ENTRY_CLS =
   "flex h-auto w-full min-w-0 items-center justify-start gap-2.5 rounded-md border-0 bg-transparent px-2.5 py-1.5 text-left text-sm font-normal text-fg2 transition-colors duration-150 ease-out hover:bg-sidebar-bg-hover hover:text-fg2 data-[state=active]:bg-sidebar-bg-hover data-[state=active]:text-fg1 data-[state=active]:hover:text-fg1 [&_svg]:size-3.5 [&>svg]:shrink-0 [&>svg]:text-fg2 data-[state=active]:[&>svg]:text-fg1";
 
-// Group label in the section list ("Personal" / "Agents" / …) — a quiet,
-// non-interactive divider. `pt-5` opens a clear gap above it (the FIRST
-// label overrides to `pt-1`); `text-muted-fg` keeps it subordinate to
-// the row labels.
 const SETTINGS_GROUP_HEADER_CLS =
   "select-none px-2.5 pb-1.5 pt-5 text-xs font-normal text-muted-fg";
 
@@ -539,10 +455,8 @@ function ScopedSettingsPage({ owner }: { owner: string }) {
   const dispatch = useWorkspaceDispatch();
   const pageActive = useActivePage() === "settings";
   const { projects } = useOrganizationProjects();
-  // Persisted across reloads via native settings — Cmd+R on Providers
-  // lands you back on Providers, not General. Type-guarded on read so
-  // a stale value from a renamed section can never crash mount; repo
-  // ids are re-validated below once `projects` hydrates.
+  // Restored from native settings. Type-guarded so a renamed section cannot crash
+  // mount; repo ids are re-validated once `projects` hydrates.
   const [active, setActiveState] = useState<string>(() => loadInitialSection(owner));
   const setActive = useCallback((next: string) => {
     setActiveState(next);
@@ -591,12 +505,10 @@ function ScopedSettingsPage({ owner }: { owner: string }) {
     if (local) void ensureSettingsTomlMigrated(bridge);
   }, [bridge, local]);
 
-  // Legacy repository-selection redirect: repository settings moved to the repository page
-  // (one Workspaces/section toggle), so a persisted / deep-linked
-  // `repo:<id>:<section>` selection re-routes there and the settings page
-  // resets to its first section. The empty-at-mount guard mirrors the old
-  // revalidation effect: an un-hydrated project list (the async web fetch)
-  // must not eat a restored repo selection before the redirect can resolve it.
+  // Repository settings moved to the repository page, so a `repo:<id>:<section>`
+  // selection re-routes there and Settings resets to its first section. Wait for
+  // a non-empty project list: the async fetch must not eat a restored selection
+  // before the redirect can resolve it.
   const prevProjectsLenRef = useRef(projects.length);
   useEffect(() => {
     const prevLen = prevProjectsLenRef.current;
@@ -615,11 +527,9 @@ function ScopedSettingsPage({ owner }: { owner: string }) {
     setActive(userSelection("general"));
   }, [projects, active, dispatch, local, setActive]);
 
-  // MCP left Settings for the Customize page (2026-07-22). A persisted or
-  // deep-linked `user:mcp` (or legacy bare `mcp`) selection re-routes there;
-  // the settings page resets to its first section so the retired key never
-  // lingers. (parseSelection already maps the unknown id to "general", so
-  // this checks the RAW persisted string.)
+  // A persisted or deep-linked `user:mcp` (or bare `mcp`) re-routes to Customize
+  // and resets Settings. This checks the raw string, because parseSelection
+  // already maps the unknown id to "general".
   useEffect(() => {
     const bare = active.startsWith("user:")
       ? active.slice("user:".length)
@@ -629,17 +539,10 @@ function ScopedSettingsPage({ owner }: { owner: string }) {
     dispatch({ type: "SET_ACTIVE_PAGE", page: "customize" });
     // setActive is stable for the component's lifetime (state setter + setSetting).
   }, [active, dispatch, setActive]);
-  // Experimental gating: the Terminal Agents tab is hidden — and not
-  // resolvable as an active section — until opted in from Experimental.
-  // `availableSections` drops the gated entries when their flag is off,
-  // so a stale `user:terminal-agents` selection falls back to the first
-  // section instead of rendering a panel with no sidebar entry.
-  //
-  // Internal gating: the Internal tab exists ONLY for allowlisted
-  // internal accounts (settings/internal-features.ts). Same mechanism —
-  // dropping it here hides the sidebar row and makes a stale/forged
-  // `user:internal` selection unresolvable, so signing out (or into a
-  // non-internal account) can never leave the panel reachable.
+  // Gated sections (Terminal Agents behind its experimental flag, Internal for
+  // allowlisted accounts) drop out of `availableSections`, so a stale or forged
+  // selection falls back to the first section and signing out never leaves a
+  // gated panel reachable.
   const [terminalAgentsEnabled] = useExperimentalFeature("terminalAgents");
   const internalUser = useIsInternalUser();
   // Agent control rollout (agent-control-rollout.ts): a closed feature has
@@ -659,12 +562,8 @@ function ScopedSettingsPage({ owner }: { owner: string }) {
       ? (availableSections.find((s) => s.id === selection.section) ??
         availableSections[0])
       : local ? null : availableSections[0];
-  // Normalize a selection whose section a gate just dropped (an
-  // experimental/internal flag flipping
-  // off): the fallback panel above already renders, but without this
-  // rewrite the sidebar shows NO active row and — worse — the retired
-  // selection lies in wait, spontaneously reactivating if its gate ever
-  // reopens.
+  // Rewrite a selection whose gate just closed; otherwise no row is active and the
+  // retired selection reactivates if the gate reopens.
   useEffect(() => {
     if (selection.scope !== "user" && local) return;
     if (selection.scope === "user" && availableSections.some((s) => s.id === selection.section)) return;
@@ -684,17 +583,12 @@ function ScopedSettingsPage({ owner }: { owner: string }) {
     availableSectionIds,
   );
 
-  // Every section panel shares the ONE detail scroller below, and inactive
-  // panels hide with display:none — so a section switch collapses the content
-  // and the browser clamps scrollTop. Keyed memory gives each section its own
-  // remembered offset: switching back lands exactly where the user left,
-  // switching to an unvisited section starts at the top.
+  // Inactive panels hide with display:none in one shared scroller, so a switch
+  // clamps scrollTop. Keyed memory gives each section its own offset.
   const detailScrollRef = useScrollMemoryRef(
     activeSection ? `settings:${owner}:${activeSection.id}` : null,
   );
 
-  // Back returns to the Home tab (Dashboard); Settings is its own page now,
-  // with its section nav as the main sidebar (the Home rail is hidden here).
   const handleBack = () => {
     dispatch({ type: "SET_ACTIVE_PAGE", page: "dashboard" });
   };
@@ -716,15 +610,7 @@ function ScopedSettingsPage({ owner }: { owner: string }) {
       ref={pageSurfaceRef}
       className="bg-sidebar-bg flex h-full min-h-0 w-full min-w-0 flex-1 flex-col overflow-hidden"
     >
-      {/* No header bar: Settings is its own
-          page — the section nav below takes the app sidebar's place with a
-          Back row at its top (→ Dashboard), and "Open settings.toml" floats at
-          the content's top-right, mirroring the repo page. The nav's 40px band
-          holds the macOS traffic lights and Back, and drags the window. */}
       <div className="relative flex min-h-0 min-w-0 flex-1 overflow-hidden">
-        {/* Sidebar — the MAIN nav here (the app sidebar is hidden on Settings).
-              Back (→ Dashboard) sits in the title band, then the
-              labelled SECTION_GROUPS. Repo settings live on each repo's page. */}
         <div className="flex min-h-0 shrink-0 basis-[256px] flex-col">
           <div
             data-tauri-drag-region
@@ -790,14 +676,7 @@ function ScopedSettingsPage({ owner }: { owner: string }) {
           </nav>
         </div>
 
-        {/* Detail pane — flat `--bg1`, full-bleed to the window edges, with
-              a single `border-l` seam against the sidebar-bg canvas (the
-              floating rounded island was retired 2026-07-12). Native
-              overflow — macOS overlay scrollbars auto-hide, so no custom
-              Radix thumb. Content is a CENTERED 680px reading column (the
-              Cursor-style settings recipe, 2026-09-14): a 24px gutter on
-              each side so the column shrinks with the window below 728px,
-              and `mx-auto` centers it above that. */}
+        {/* Native overflow, because macOS overlay scrollbars auto-hide. */}
         <div className="border-border1 bg-bg1 relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden border-l">
           {/* "Open settings.toml" floats at the top right, mirroring the repo
               page — a transparent drag strip; the button opts out of drag. */}
@@ -814,14 +693,8 @@ function ScopedSettingsPage({ owner }: { owner: string }) {
             ref={detailScrollRef}
             className="min-h-0 flex-1 overflow-y-auto px-6"
           >
-            {/* `settings-type-scale` sets this tab surface's type: NAMES
-                14px, everything else 13px (see settings-page.css). Names carry
-                `text-[14px]` (settings-ui + the custom labels in the panels)
-                so they opt out of the shrink; the scope pulls the remaining
-                `text-sm` chrome — dropdown TRIGGERS, buttons — down to 13px.
-                Descriptions are native `text-xs` = 13px. Open dropdown LISTS
-                are already 13px (Radix portals them to <body>, outside this
-                column, and their items are native `text-xs`). */}
+            {/* `settings-type-scale` (settings-page.css) sets names to 14px and everything
+                else to 13px; names carry `text-[14px]` to opt out of the shrink. */}
             <div
               {...popoverBoundaryProps}
               className="settings-type-scale mx-auto w-full max-w-[680px] pt-10 pb-16"
@@ -867,11 +740,6 @@ function ScopedSettingsPage({ owner }: { owner: string }) {
   );
 }
 
-// ──────────────────────────────────────────────────────────
-// Section nav button — one shared shape for both the User and Repo
-// section lists in the body's left rail.
-// ──────────────────────────────────────────────────────────
-
 function SectionNavButton({
   icon: Icon,
   label,
@@ -911,12 +779,9 @@ function SectionNavButton({
   );
 }
 
-// ── General ─────────────────────────────────────────────
-
 function GeneralPanel({ surfaceActive = true }: { surfaceActive?: boolean }) {
   const showHidden = useShowHiddenWorkspaces();
   const restartAutomatically = useRestartAutomaticallyOnUpdate();
-  // Grouped-card layout (SettingsGroup) — same recipe as Appearance.
   return (
     <div className="flex flex-col gap-6">
       <SettingsGroup>
@@ -949,10 +814,8 @@ function GeneralPanel({ surfaceActive = true }: { surfaceActive?: boolean }) {
   );
 }
 
-// ── Account — Zeros account, sign-in methods, sign out ──
-//
-// Reads the live main-process-owned session via useAuth(). The renderer sees
-// bounded identity metadata and a short-lived bearer, never refresh material.
+// The renderer sees bounded identity metadata and a short-lived bearer from
+// useAuth(), never refresh material.
 
 function SignInMethodRow({
   label,
@@ -1010,7 +873,6 @@ function AccountPanel() {
     // The AuthGate flips to the login screen and unmounts this view.
   };
 
-  // Grouped-card layout (SettingsGroup) — same recipe as Appearance.
   return (
     <div className="flex flex-col gap-6">
       {authed ? (
@@ -1110,8 +972,6 @@ function AccountPanel() {
   );
 }
 
-// ── Privacy — native file access and anonymous usage analytics ──
-//
 // Both controls belong to this device, independently of sign-in. Analytics
 // remains opt-out and metadata-only; macOS owns the Full Disk Access grant.
 
@@ -1141,12 +1001,6 @@ function PrivacyGroup({ surfaceActive }: { surfaceActive: boolean }) {
   );
 }
 
-// ── Integrations — external services Zeros connects to (GitHub, …) ──
-//
-// Moved out of General: GitHub is the keystone integration (PRs, reviews,
-// checks), not a "general" toggle. Any future third-party integration joins
-// this list.
-
 function IntegrationsPanel({ surfaceActive = true }: { surfaceActive?: boolean }) {
   const organization = useActiveOrganization();
   const { me } = useTeams();
@@ -1161,26 +1015,13 @@ function IntegrationsPanel({ surfaceActive = true }: { surfaceActive?: boolean }
 // "coming soon" panel is a step backwards: register the section only once it
 // has something to show.
 
-// ── Models — one global default model + plan posture ──
-//
-// Agent + model form one global default identity (and one star across the model
-// menu). With no choice, connected providers resolve Codex → Claude → Cursor;
-// their family fallbacks are GPT-5.6 Sol / Opus 5 / Composer 2.5. Effort and
-// Fast are edited and remembered per exact model in the model menu.
+// Agent and model form one global default (one star across the model menu).
+// With no choice, connected providers resolve Codex → Claude → Cursor. Effort
+// and Fast are remembered per exact model in the model menu.
 
-/** The Models tab groups its rows into filled sections: a borderless
- *  subtle-fill card with `--border1` hairlines
- *  between rows (overrides the SettingsList default `divide-border2`). The
- *  fill is `--bg1-bright` (#1C1C1C dark, = bg2 light), NOT the requested `--bg3`: in dark they're
- *  close, but light bg3 = bg1 = white so the
- *  card would vanish (check:ui guards this); same recipe as the
- *  repositories-panel list card.
- *
- *  Padding = 12px on all four sides: `px-3`
- *  insets left/right, and `[&>*]:py-3` sets each row's vertical padding to
- *  12px (overriding SettingsRow's default `py-3.5`) — the box carries NO py
- *  of its own, so the edge-to-content gap is exactly the row's 12px top and
- *  bottom, and adjacent rows sit 24px apart (tighter than the old 28px). */
+/** Filled card with `--border1` hairlines. The fill is `--bg1-bright`, not
+ *  `--bg3`: light bg3 equals bg1 (white), so the card would vanish (check:ui
+ *  guards this). Rows carry the 12px vertical padding; the box has none. */
 const MODELS_SECTION_CLS =
   "bg-bg1-bright divide-border1 rounded-lg px-3 [&>*]:py-3";
 
@@ -1319,9 +1160,6 @@ function ModelsPanel({ surfaceActive = false }: { surfaceActive?: boolean }) {
   };
 
   return (
-    // gap-4: tighter spacing between the filled setting sections. The sections
-    // stay distinct via their
-    // `--bg1-highlight` fill, so they don't need a 32px trough between them.
     <div className="flex flex-col gap-4">
       <SettingsList className={MODELS_SECTION_CLS}>
         <SettingsRow label="Default agent" hint="Agent for new chats">
@@ -1525,9 +1363,7 @@ function GitDefaultsPanel() {
   );
 }
 
-// The Terminal Agents tab body — the launch-profile editor, gated
-// behind the `terminalAgents` experimental flag (see SECTIONS). Lives
-// here as a thin wrapper so the section component stays presentational.
+// Thin wrapper so the launch-profile section component stays presentational.
 function TerminalAgentsPanel() {
   return <TerminalAgentsSection />;
 }
@@ -1539,7 +1375,6 @@ function ExperimentalPanel() {
     "hideArchivedWorkspacesAfter15Days",
   );
   const [gibberishThinking, setGibberishThinking] = useExperimentalFeature("gibberishAgentThinking");
-  // Grouped-card layout (SettingsGroup) — same recipe as Appearance.
   return (
     <div className="flex flex-col gap-6">
       <p className={HINT_CLS}>
@@ -1609,17 +1444,10 @@ function InternalAgentControlRow({ feature }: { feature: AgentControlFeature }) 
   );
 }
 
-// The Internal tab body — allowlisted-account-only feature switches
-// (settings/internal-features.ts). NOT experimental features: these may
-// never ship to users, and non-internal accounts never see this tab
-// (gated in `availableSections`). Each flag applies to THIS app install
-// only — every channel (Zeros / Beta / Dev) has its own localStorage —
-// which is the point: enable a feature in Beta, leave it off in
-// Production, compare.
-//
-// Grouped-card layout (SettingsGroup) — same recipe as Appearance. No intro
-// paragraph: the per-channel scoping is documented above, and the tab is
-// staff-only, so the headline stands alone (2026-09-14).
+// Allowlisted-account-only switches (settings/internal-features.ts), not
+// experimental features: they may never ship. Each flag applies to this app
+// install only, because every channel has its own localStorage, so a feature can
+// be on in Beta and off in Production.
 function InternalPanel() {
   const [copyLogs, setCopyLogs] = useInternalFeature("copyLogs");
   const [resourceSummary, setResourceSummary] = useInternalFeature("resourceSummary");
@@ -1659,19 +1487,7 @@ function InternalPanel() {
   );
 }
 
-// ── Appearance — theme mode + code theme ──
-//
-// 2026-05-26: hue + intensity sliders removed (see prefs.ts
-// history block). Tokens are concrete HSL values in
-// zeros-tokens.css.
-//
-// 2026-07-11: the light theme shipped ([data-theme="light"] block
-// in zeros-tokens.css), so Light joins the picker and System now
-// genuinely follows macOS.
-// 2026-08-08: Dark's structural tokens became neutral; bg1, bg2, and
-// sidebar-bg moved one lightness point up.
-// 2026-09-14: the "Orka black" warm dark palette was retired — Dark and
-// Light are the only two themes.
+// Dark and Light are the only themes; System follows macOS.
 
 const THEME_OPTIONS: Array<{ value: ThemeMode; label: string }> = [
   { value: "system", label: "System" },
@@ -1688,8 +1504,6 @@ function AppearancePanel() {
   const variant = useThemeVariant();
   const codeThemes = codeThemesForVariant(variant);
 
-  // Grouped-card layout (SettingsGroup): the app theme stands alone in an
-  // unlabeled card; the code theme + its live preview share a "Code" card.
   return (
     <div className="flex flex-col gap-6">
       <SettingsGroup>

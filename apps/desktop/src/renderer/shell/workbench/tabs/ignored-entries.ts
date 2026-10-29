@@ -1,57 +1,15 @@
-// ──────────────────────────────────────────────────────────
-// Ignored entries in the Files tree — lazy, per-directory
-// ──────────────────────────────────────────────────────────
+// Ignored entries for the Files tree, loaded lazily per directory (engine:
+// git/workspace-files.ts). A repo can hold tens of thousands of ignored files
+// and the tree materializes every path it gets, so roots come first (`git
+// ls-files --directory` collapses an ignored directory to one trailing-slash
+// row) and children load only when a directory is expanded.
 //
-// The Files tab used to render `git ls-files -co --exclude-standard`, i.e. the
-// paths git cares about. That quietly excluded everything a setup script, an
-// agent, or a terminal command actually produces — `node_modules/`, `dist/`,
-// `.env` — so the tab could not answer "did the install work?" at all.
-//
-// Showing them is not a matter of dropping a flag: this repo has 60,888
-// ignored files against ~2,300 tracked ones, and the tree model materializes
-// every path it is given. So the listing is TWO-PHASE (engine side:
-// git/workspace-files.ts):
-//
-//   • roots — `git ls-files --directory` collapses a wholly-ignored directory
-//     to one trailing-slash entry, so the initial paint costs ~8 extra rows.
-//     A trailing slash is @pierre/trees' marker for "directory node with no
-//     children yet", which is exactly an unexpanded `node_modules/`.
-//   • children — fetched only when the user expands one of those directories,
-//     one level at a time.
-//
-// This hook only produces the path list and the expansion set; how they reach
-// the tree is workspace-file-tree.tsx's business — it applies an ignored-only
-// change as an incremental `model.batch()` precisely so that a build writing
-// into an open `dist/` doesn't collapse the user's tracked browsing along with
-// it. `expandedDirs` is what the whole-tree rebuild path replays.
-//
-// COLOUR: we hand the tree a `gitStatus` entry per ignored DIRECTORY we know
-// about — the roots plus the directory children of whatever is open. The library
-// propagates `ignored` down to every descendant of an ignored directory
-// (model/gitStatus.js), so we never build a 60k-entry status map; ignored FILES
-// inside a known ignored directory inherit and are left out.
-//
-// Roots alone are NOT enough while `flattenEmptyDirectories` is on: the
-// library only propagates from an ancestor that is a VISIBLE ROW
-// (`row.ancestorPaths`), and a flattened chain's head is not one — a fresh
-// `node_modules/` whose only child is `.pnpm/` renders as a single flattened row
-// keyed on the TERMINAL, so a roots-only entry left it painted like tracked
-// code. Flattening only ever chains directory→directory (path-store/flatten.js),
-// so covering every known ignored directory covers every possible terminal.
-// The tree runs UNFLATTENED since 2026-08-03 (Finder-style nesting), which
-// makes roots-only propagation sufficient again — the child coverage is kept
-// because it is already bounded by what is open and it keeps this module
-// correct under either tree configuration.
-//
-// MEMORY: `loaded` is pruned when a branch is collapsed (see withCollapsed), so
-// everything above is bounded by what is actually on screen rather than by the
-// deepest the user ever browsed.
-//
-// SWITCHING WORKSPACES: a mount starts from ignored-entries-cache's warm roots
-// (warmState) rather than from nothing, because the tracked listing is seeded
-// the same way — and half a seeded tree is worse than none. See that module's
-// header for why an unseeded mount made the whole tab look like it reloaded.
-// ──────────────────────────────────────────────────────────
+// The tree gets a `gitStatus` entry per known ignored directory; the library
+// propagates `ignored` to descendants, so no 60k-entry map is built. Covering
+// directory children, not just roots, keeps this correct even with
+// `flattenEmptyDirectories` on. `loaded` is pruned on collapse, so cost tracks
+// what is on screen, and a mount starts from warm roots (ignored-entries-cache)
+// like the tracked listing.
 
 import {
   useCallback,
@@ -96,14 +54,10 @@ export function mergeIgnoredPaths(
   return [...seen];
 }
 
-/** The status entries to hand the tree: every ignored path that is a DIRECTORY,
- *  plus any ignored ROOT that is a file (`.env`, `.mcp.json` — nothing above
- *  them to inherit from). Files nested inside a known ignored directory are
- *  omitted; the library propagates `ignored` down to them.
- *
- *  Directory children are covered and not just roots so this stays correct
- *  even under `flattenEmptyDirectories` — see the header. Bounded by what is
- *  open, because collapsing prunes `loaded`. */
+/** Status entries for the tree: every ignored directory plus ignored root files
+ *  (`.env`, `.mcp.json`); nested files inherit. Children are covered, not only
+ *  roots, so this stays correct under `flattenEmptyDirectories`; collapsing
+ *  prunes `loaded`, which bounds it. */
 export function ignoredGitStatus(
   roots: readonly string[],
   loaded?: ReadonlyMap<string, readonly string[]>,
@@ -136,26 +90,13 @@ export interface IgnoredPathDeltaPlan {
   applied: ReadonlySet<string>;
 }
 
-/** The add/remove ops that take the tree from `applied` to `next`.
- *
- *  Applying an ignored-side change incrementally instead of through resetPaths
- *  is what keeps a build writing into `dist/` from collapsing every TRACKED
- *  directory the user had open — resetPaths rebuilds the store closed, and only
- *  the ignored branches can be replayed. It has to be a strict delta: `add`
- *  throws on a path the store already holds.
- *
- *  REMOVES ARE RECURSIVE AND DE-NESTED, both because the store throws otherwise
- *  and because that throw is expensive: `batch` does not roll back, so a
- *  mid-batch throw leaves the store half-mutated and the caller has to fall back
- *  to the whole-tree rebuild this function exists to avoid.
- *    • `remove` on a directory that still holds children throws
- *      "Cannot remove a non-empty directory without recursive".
- *    • ops came out PARENT-FIRST (the merged set is seeded from roots), so a
- *      parent's own removal hit that throw before its removed descendants.
- *      De-nesting makes one recursive parent op cover that whole branch.
- *
- *  Staggered roots/child refreshes and kind changes need the richer plan below;
- *  this compatibility helper returns only its operations. */
+/** The add/remove ops from `applied` to `next`. Incremental updates keep a
+ *  build writing into `dist/` from collapsing open tracked directories
+ *  (resetPaths rebuilds closed). The delta must be strict, since `add` throws
+ *  on a held path, and removes are recursive and de-nested, since removing a
+ *  non-empty directory throws and `batch` does not roll back. Staggered
+ *  refreshes and kind changes need planIgnoredPathDelta; this compatibility
+ *  helper returns only its operations. */
 export function ignoredPathDelta(
   applied: ReadonlySet<string>,
   next: ReadonlySet<string>,
@@ -373,16 +314,10 @@ export function useIgnoredEntries(
   const expandedRef = useRef(active?.expanded ?? EMPTY_EXPANDED);
   expandedRef.current = active?.expanded ?? EMPTY_EXPANDED;
 
-  // Re-listed for a new workspace AND on every refresh signal — the same bus
-  // that tells the tracked listing a file changed. Two passes:
-  //   • roots, so a `dist/` a build just created shows up; and
-  //   • every OPEN directory, so a file written into one from a terminal, an
-  //     agent, or an install shows up without closing and reopening it. (The
-  //     engine's chokidar watcher skips node_modules entirely, so for that
-  //     subtree this pass is the only thing that refreshes it — which is why
-  //     it re-lists rather than trusting an event.)
-  // Both are no-ops when nothing changed, so an idle refresh costs two cheap
-  // reads and does not touch React state.
+  // Re-list on a new workspace and every refresh signal: roots, so a new `dist/`
+  // appears, and every open directory, so files written there appear without
+  // reopening it. The engine's watcher skips node_modules, so this pass is the
+  // only refresh there. Both are no-ops when nothing changed.
   useEffect(() => {
     if (!enabled) return;
     if (!cwd) {
@@ -416,12 +351,9 @@ export function useIgnoredEntries(
           if (!cancelled) setFailure({ cwd, error });
           return;
         }
-        // In PARALLEL, not in sequence. reloadKey bumps faster than a chain of
-        // bridge round-trips can finish while an agent is writing, and each bump
-        // cancels the previous chain — so a serial loop would restart from the
-        // top every time and the branches at the end of the list would never be
-        // refreshed at all. The count is bounded by how many directories the user
-        // has open, which is a handful.
+        // In parallel: reloadKey bumps faster than a serial chain of round-trips while
+        // an agent writes, and each bump cancels the previous chain, so the last
+        // branches would never refresh. Bounded by the open directories.
         await Promise.all(
           [...expandedRef.current].map(async (dir) => {
             try {
@@ -467,14 +399,10 @@ export function useIgnoredEntries(
         children = await listIgnoredEntries(cwd, dir);
       } catch (error) {
         if (currentCwd.current === cwd) setFailure({ cwd, error });
-        // A FAILED listing is not an empty directory. Recording [] would cache
-        // the failure as fact — `withLoadedDir` refuses to overwrite an existing
-        // entry and a loaded dir is never "pending", so a single bridge timeout
-        // left `node_modules/` looking genuinely empty with no way to retry
-        // (collapse/re-expand included). Leave it unrecorded so it stays pending
-        // and the next notification or refresh retries it — but report the
-        // failure, because the caller must NOT re-arm the watcher on it (that
-        // would busy-loop a dir that is reliably unreadable).
+        // A failed listing is not an empty directory. Recording [] would cache the
+        // failure with no way to retry, so leave it pending for the next notification
+        // or refresh. Report it, though: re-arming the watcher on it would busy-loop an
+        // unreadable directory.
         return "failed";
       }
       setState((prev) => withLoadedDir(prev, cwd, dir, children));
@@ -518,12 +446,8 @@ export function useIgnoredEntries(
         inFlightRef.current.add(dir);
         void loadDir(dir).then((outcome) => {
           inFlightRef.current.delete(dir);
-          // A load that resolved to no state change (workspace moved on, dir
-          // already recorded) produces no model notification, so re-arm
-          // explicitly rather than waiting for an interaction that may never
-          // come. NOT on a failure: the dir is deliberately left pending, so
-          // re-arming would spin on a reliably-unreadable directory. It gets
-          // retried by the next notification or refresh instead.
+          // A load that changed nothing produces no model notification, so re-arm
+          // explicitly; not after a failure, which would spin on an unreadable directory.
           if (outcome !== "failed") rescan();
         });
       }
@@ -694,24 +618,12 @@ export function withLoadedDir(
   return { ...prev, expanded, loaded };
 }
 
-/** The user collapsed directories. Forgets them AND drops their cached children,
- *  the whole subtree.
- *
- *  Forgetting `expanded` keeps the next refresh from re-opening a branch they
- *  just closed. Dropping `loaded` is what keeps the feature's cost proportional
- *  to what is on SCREEN rather than to the deepest the user ever browsed: those
- *  children stay in the merged path list, in the tree store, in the git-status
- *  map, and in the set the expansion watcher walks on every model notification —
- *  so one trip into `node_modules/.pnpm` used to cost ~2.5ms of main-thread work
- *  per notification (and ~1s of engine stat calls per refresh) for the lifetime
- *  of the workspace, invisibly.
- *
- *  It also repairs re-expansion: a dir still in `loaded` is not "pending", and
- *  `withLoadedDir` is the only writer of `expanded` — so before this pruned, a
- *  collapse/re-expand cycle left the branch permanently absent from `expanded`,
- *  which stopped it being re-listed on refresh (new files never appeared) and
- *  left it out of the resetPaths replay (it slammed shut on the next unrelated
- *  save). Re-expanding now simply re-fetches, one bridge round-trip. */
+/** The user collapsed directories: forget them and drop their cached children.
+ *  Forgetting `expanded` keeps the next refresh from reopening them. Dropping
+ *  `loaded` keeps cost proportional to what is on screen: those children
+ *  otherwise stay in the path list, tree store, status map and watcher set
+ *  (~2.5ms per notification after one trip into `node_modules/.pnpm`). It also
+ *  makes re-expansion re-fetch, so the branch is re-listed and replayed again. */
 export function withCollapsed(
   prev: IgnoredState,
   dirs: readonly string[],
@@ -733,16 +645,10 @@ export function withCollapsed(
   return changed ? { ...prev, expanded, loaded } : prev;
 }
 
-/** Directories that are no longer ignored paths at all — the branch was deleted
- *  from disk, so the roots/children listings stopped reporting it. Drops them
- *  from `expanded` (and their cached children with them).
- *
- *  Distinct from a collapse, and deliberately NOT keyed on "absent from the tree
- *  model": a row can be missing mid-rebuild, and closing a branch over that would
- *  fight the user. Keyed on the listings instead, which is the durable signal.
- *  Without it, expanding `dist/` and then `rm -rf dist` left `dist` in `expanded`
- *  forever, so every later refresh spent a bridge round-trip and an engine
- *  readdir on a directory that does not exist. */
+/** Directories the listings stopped reporting (deleted from disk): drop them
+ *  from `expanded` with their children. Keyed on the listings, not on absence
+ *  from the tree model, because a row can be missing mid-rebuild. Otherwise a
+ *  deleted `dist/` costs a round-trip and an engine readdir on every refresh. */
 export function withoutVanishedDirs(
   prev: IgnoredState,
   known: ReadonlySet<string>,

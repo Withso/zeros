@@ -1,28 +1,10 @@
-// ──────────────────────────────────────────────────────────
-// Repository settings — Settings → Repo → <repo>
-// ──────────────────────────────────────────────────────────
-//
-// Shown when a Repo section (Environment / Git / Actions / Paths)
-// is active on the repo page. `RepoDetail` renders the active section's body
-// — one section at a time. (Providers is USER-scope only — there is no
-// per-repo provider config; MCP left the repo scope entirely on 2026-07-17.)
-//
-// TOML-backed, flat settings with inheritance.
-// Values live in engine-owned layer files — which, since the 2026-07-17
-// repo-file slimming, carry only scripts + the git/prompts tables these tabs
-// edit (+ repo-local's workspaces.path):
-//   <repo>/.zeros/settings.local.toml — personal and ignored: scripts, git, prompts
-//   <repo>/.zeros/settings.local.toml  — personal (gitignored): + machine paths
-// (Environment is Keychain-vault-backed, not file-backed — env-vault.ts.)
-// Each section reads BOTH the resolved tree (effective value + per-leaf
-// provenance, via settings.resolve) and the raw repo layer (what THIS repo
-// file sets, via settings.read) so it can show what's inherited from User and
-// offer Override / Reset. Writes ride settings.write; external edits arrive via
-// DB_CHANGED { kinds: ["settings"] }.
-//
-// Zeros Foundation: flat sections (SettingsSection/Row/Field/List), default
-// text fg2 / focal fg1, hairline dividers, strict 12/14 type, no cards.
-// ──────────────────────────────────────────────────────────
+// Repository settings sections on the repo page; `RepoDetail` renders one at a
+// time. Values live in the engine-owned, personal
+// `<repo>/.zeros/settings.local.toml` (Environment is Keychain-backed,
+// env-vault.ts). Each section reads the resolved tree (effective value plus
+// per-leaf provenance) and the raw repo layer, so it can show inheritance and
+// offer Override / Reset; external edits arrive via DB_CHANGED { kinds:
+// ["settings"] }.
 
 import React, {
   useCallback,
@@ -178,8 +160,6 @@ import {
 import { resetEngineToDefault } from "../../platform/app";
 import { ZerosSpinner } from "@/renderer/shared/ui/loading";
 
-// ── Section model ────────────────────────────────────────
-
 export type RepoSectionId =
   | "environment"
   | "git"
@@ -207,8 +187,6 @@ const REPO_SECTION_IDS = REPO_SECTIONS.map((s) => s.id);
 export function isRepoSectionId(value: string): value is RepoSectionId {
   return (REPO_SECTION_IDS as string[]).includes(value);
 }
-
-// ── Resolved-tree helpers (effective value + provenance) ──
 
 /** Read a dot-path leaf out of the resolved effective tree + its source. */
 function pick(
@@ -250,19 +228,13 @@ async function resetKey(
   }
 }
 
-// ──────────────────────────────────────────────────────────
-// RepoDetail — floating section nav (no bg) + active section body
-// ──────────────────────────────────────────────────────────
-
 /** Repository forms all edit the main checkout's personal, ignored file. */
 export type EditableRepoLayer = "repo-local";
 
-/** A highlighted TOML editor: a transparent textarea (caret + input) overlaid
- *  on a Shiki-highlighted layer, with a line-number gutter. AUTO-HEIGHT — it
- *  grows with content and the settings pane scrolls (no inner scroll, so no
- *  scroll-sync to drift). Lines wrap (whitespace-pre-wrap); the gutter is one
- *  number per logical line. Identical font/leading/padding on all three layers
- *  so the caret sits exactly over the colored glyphs (mirrors CodeWithGutter). */
+/** A highlighted TOML editor: a transparent textarea over a Shiki layer, with
+ *  a line-number gutter. Auto-height, so the pane scrolls and no scroll sync can
+ *  drift; all three layers share font, leading and padding so the caret sits
+ *  over the glyphs (mirrors CodeWithGutter). */
 function TomlSourceEditor({
   value,
   onChange,
@@ -392,12 +364,9 @@ export function RawTomlEditor({
   );
 }
 
-/** Renders the body of ONE repo settings section against the chosen layer
- *  ("repo-local" = personal `.zeros/settings.local.toml`
- *  `.zeros/settings.local.toml`). The section nav, the You/Team toggle, and the
- *  "Edit settings.toml" raw toggle all live in the settings-page shell now — this
- *  is purely the active section's form. Paths manages its own scope and
- *  ignores `layer`. */
+/** The body of one repo settings section against `layer` (the personal
+ *  `.zeros/settings.local.toml`); the settings-page shell owns the nav and the
+ *  raw toggle. Paths manages its own scope and ignores `layer`. */
 export function RepoDetail({
   project,
   section,
@@ -416,10 +385,8 @@ export function RepoDetail({
     case "paths":
       return <PathsSection project={project} />;
     case "files":
-      // Per-repo by design: saving writes THIS project's
-      // `.zeros/settings.local.toml`, never a global list (see the section
-      // header). Gated on surfaceActive so a retained-but-hidden copy of this
-      // pane never scans the repo.
+      // Saves only this project's `.zeros/settings.local.toml`. Gated on
+      // surfaceActive so a retained hidden copy never scans the repo.
       return (
         <FilesToCopySection
           project={project}
@@ -429,11 +396,8 @@ export function RepoDetail({
         />
       );
     case "environment":
-      // Secrets and every workspace command belong to the same Environment
-      // view. Keep the three modules independent so each retains its own save
-      // behavior while presenting one consolidated settings surface.
-      //
-      // Scripts use the same personal repository file as the other preferences.
+      // Secrets and workspace commands share one Environment view, but the three
+      // modules stay independent so each keeps its own save behavior.
       return (
         <div className="flex flex-col gap-9">
           <EnvironmentSection project={project} layer={layer} root={root} />
@@ -512,11 +476,8 @@ function OverrideField({
   );
 }
 
-// ── Environment (repo vars + Inherited from User config) ──
-
-/** The renderer's typed view of a repo-scoped layer document — the keys those
- *  files carry: scripts plus the git/prompts
- *  tables the Git and Actions tabs edit). */
+/** The renderer's typed view of a repo-scoped layer document: scripts plus the
+ *  git/prompts tables the Git and Actions tabs edit. */
 interface RepoSharedDoc {
   git?: { remote?: string; base_branch?: string };
   scripts?: { setup?: string; run?: string; archive?: string };
@@ -675,18 +636,13 @@ function EnvVarRow({
   );
 }
 
-/** Environment vars for one scope — Keychain-only (env-vault.ts): nothing is
- *  ever written to settings.toml / settings.local.toml, every value is
- *  encrypted at rest. Rows render masked and are never edited in place: the
- *  eye reveals a value on demand, clicking it copies, and the pencil reopens
- *  the Add dialog pre-filled (every mutation is a whole-map vault write).
- *  `layer === "user"` edits the user scope (every agent, this Mac); any repo
- *  layer edits the repo scope keyed by `root` (agents in every worktree of
- *  the repo). File-based `[env]` resolves from the USER file (and team/managed
- *  policy) only — repo settings files stopped carrying env in the 2026-07-17
- *  slimming — and shows read-only below, as do user-scope vault vars on a
- *  repo page under "Inherited from User config" (no Override: user vars reach
- *  every repo by definition). */
+/** Environment vars for one scope, Keychain-only (env-vault.ts): nothing is
+ *  written to settings files and every value is encrypted at rest. Rows are
+ *  masked and never edited in place; every mutation is a whole-map vault
+ *  write. `layer === "user"` edits the user scope, any repo layer the repo
+ *  scope keyed by `root`. File-based `[env]` resolves only from the user file
+ *  and team/managed policy and shows read-only, as do user-scope vars on a repo
+ *  page: they reach every repo, so there is no Override. */
 export function EnvironmentSection({
   project,
   layer,
@@ -755,13 +711,10 @@ export function EnvironmentSection({
     };
   }, [scope]);
 
-  // Provider API keys (Settings → Providers) that WILL be injected into the
-  // agent's process env at spawn — shown read-only here so the Environment
-  // panel is a truthful picture of what agents actually receive. Presence
-  // only: the value never leaves the encrypted secret store. A key row shows
-  // iff (a) a key is stored AND (b) the provider is in API-key auth mode
-  // (deriveProviderEnv's exact injection condition). User layer only — keys
-  // are global, not per-repo.
+  // Provider API keys that agents receive at spawn, shown read-only and
+  // presence-only so this panel truthfully shows agent env. A row shows iff a key
+  // is stored and the provider uses API-key auth (deriveProviderEnv's condition).
+  // User layer only.
   const [providerKeyVars, setProviderKeyVars] = useState<
     Array<{ envVar: string; vendor: string }>
   >([]);
@@ -786,14 +739,10 @@ export function EnvironmentSection({
     };
   }, [layer]);
 
-  // FILE-based env still visible to agents (the user's own `[env]` table, team
-  // policy — resolved by the engine's hazard-filtered spawn-env; repo-scoped
-  // files can't carry env anymore): shown read-only so this panel stays a
-  // truthful picture of what agents receive. Values that are secret markers
-  // (sentinel) or engine-masked stay presence-only (no reveal, no copy — the
-  // real value isn't readable here). Entries the USER layer file sets group
-  // under "Inherited from User config", next to the user-scope vault vars;
-  // team/managed entries keep the generic settings-files label.
+  // File-based env agents still receive (the user's `[env]`, team policy),
+  // read-only so the panel stays truthful. Secret markers and engine-masked values
+  // stay presence-only. User-file entries group under "Inherited from User
+  // config".
   const effectiveEnv = (resolved.resolved?.effective.env ?? {}) as Record<
     string,
     unknown
@@ -1016,20 +965,11 @@ export function UserEnvironmentPanel() {
   return <EnvironmentSection layer="user" />;
 }
 
-// ── Git (branch-from + remote pickers) ───────────────────
-//
-// Two dropdowns backed by the layered `git.remote` / `git.base_branch` keys,
-// replacing freetext Remote / Base-branch inputs:
-//   • "Branch new workspaces from" — the remote branches of the effective
-//     remote (GitHub glyph when that remote is github.com, globe for another
-//     host, laptop + LOCAL branches when the repo has no usable remote).
-//     Picking writes `git.base_branch` (a PLAIN name — createWorkspace forks
-//     from `<remote>/<name>`); unset = auto-detect the remote's HEAD.
-//   • "Remote origin" — which git remote push / pull / PR-create target.
-//     Picking writes `git.remote`; the engine ops resolve it live
-//     (settings/repo-git.ts), so the choice applies to existing workspaces too.
-// Selections save immediately (no Save button); inheritance keeps the section
-// idiom — a SourceTag on values from weaker layers, Reset on this layer's own.
+// Two pickers over the layered `git.base_branch` and `git.remote` keys. The base
+// is a plain name (createWorkspace forks from `<remote>/<name>`; unset
+// auto-detects the remote's HEAD). The remote applies live to existing
+// workspaces (settings/repo-git.ts). Selections save immediately; values from
+// weaker layers carry a SourceTag and this layer's own get Reset.
 
 /** The repo's remotes + forkable branches, freshened in two passes: an
  *  instant local-refs read paints first, then a network pass (bounded
@@ -1087,11 +1027,9 @@ function useRepoBranchCatalog(
         setLoadingSnapshot({ repoRoot, loading: false });
       }
     }
-    // Freshen in the BACKGROUND — the awaited part of refresh() is only the
-    // instant pass, so a save's `await refresh()` can't hold the section's
-    // controls hostage for a slow/unreachable remote (the fetch pass is
-    // bounded at ~13s worst case). The epoch guard keeps it safe: any newer
-    // refresh invalidates this pass's result.
+    // Freshen in the background: refresh() awaits only the instant pass, so a
+    // save's `await refresh()` never waits on a slow remote (the fetch is bounded
+    // at ~13s). The epoch guard discards a superseded pass.
     void (async () => {
       try {
         const fresh = await gitRepoBranchCatalog({ repoRoot, fetch: true });
@@ -1126,9 +1064,8 @@ function useRepoBranchCatalog(
   return { catalog, loading, refresh };
 }
 
-// Same secondary-control family as the target-branch dropdown, sized for the
-// settings page (28px, 13px text). `min-w-0`+truncate so a long branch name
-// shrinks instead of overflowing the centered column.
+// `min-w-0` + truncate so a long branch name shrinks instead of overflowing the
+// column.
 const GIT_PICKER_TRIGGER_CLS =
   "inline-flex h-7 max-w-full min-w-0 items-center gap-1.5 rounded-md border border-border2 bg-transparent pl-2.5 pr-2 text-xs text-fg1 transition-colors duration-120 ease-out hover:border-border3 hover:bg-bg2-hover disabled:opacity-50";
 
@@ -1221,10 +1158,9 @@ function GitSection({
   // user's own save operation is mutually exclusive.
   const busy = saving;
 
-  // ── Branch picker rows ──
-  // The saved base may no longer exist on the remote (deleted branch) — keep
-  // it pickable at the top, flagged, so the trigger value is always in the
-  // list and the user can see why creation would fall back.
+  // The saved base may no longer exist on the remote (deleted branch). Keep it
+  // pickable at the top, flagged, so the trigger value is always in the list and
+  // the user can see why creation would fall back.
   const branchRows: { name: string; missing?: boolean }[] = catalog
     ? catalog.branches.some((b) => b.name === effectiveBase) ||
       catalog.branches.length === 0
@@ -1497,8 +1433,6 @@ function GitSection({
   );
 }
 
-// ── Scripts (setup / run / archive) ──────────────────────
-
 const SCRIPT_AUTOSAVE_DELAY_MS = 500;
 
 function ScriptsSection({
@@ -1528,12 +1462,10 @@ function ScriptsSection({
   const autosaveRunningRef = useRef(false);
   const autosaveQueuedRef = useRef(false);
 
-  // NOTE: no "Run" field here anymore — run commands are configured in the
-  // "Run actions" module rendered below this one (which supersedes the legacy
-  // `scripts.run` string and clears it on save). Setup / Archive autosave as a
-  // pair, never touching `run`, so the two modules can't fight over the key.
-  // Writes are serialized: if the user keeps typing during one bridge write,
-  // the latest complete pair follows it instead of racing an older snapshot.
+  // Run commands live in the "Run actions" module below, which clears the legacy
+  // `scripts.run`, so Setup / Archive autosave as a pair that never touches
+  // `run`. Writes are serialized: typing during a bridge write queues the latest
+  // complete pair instead of racing an older one.
   const autosaveLatest = useCallback(async () => {
     if (autosaveRunningRef.current) {
       autosaveQueuedRef.current = true;
@@ -1621,14 +1553,9 @@ function ScriptsSection({
   );
 }
 
-// ── Actions (per-repo agent instructions) ───────────────
-//
-// "General preferences" = the repo's `[prompts] general` in .zeros/settings.local.toml.
-// spawn-env emits it as ZEROS_PROMPTS_GENERAL → the gateway folds it into the
-// first-turn <system_instruction> (see system-instructions/). Review /
-// Create-PR / Fix-errors / Resolve-conflicts / Branch-rename prompts are
-// planned as well; those land when their buttons are built (the schema
-// already reserves them, and the text home is system-instructions/templates.ts).
+// "General preferences" is the repo's `[prompts] general`; spawn-env passes it
+// as ZEROS_PROMPTS_GENERAL and the gateway folds it into the first-turn
+// <system_instruction> (system-instructions/).
 function ActionsSection({
   project,
   layer,
@@ -1724,8 +1651,6 @@ function ActionsSection({
     </SettingsSection>
   );
 }
-
-// ── Paths (identity read-only + workspaces path, repo-local) ──
 
 interface RepoLocalDoc {
   workspaces?: { path?: string };
@@ -1855,22 +1780,10 @@ function PathsSection({ project }: { project: Project }) {
   );
 }
 
-// ── Remove repository (end of Paths) ─────────────────────
-//
-// Removes the repo from Zeros: deletes EVERY Zeros-created worktree (the
-// ~/zeros/workspaces/<slug>/* folders) and drops the project from the sidebar
-// + its per-repo UI prefs. The repo's own source checkout (repoRoot) is NEVER
-// touched:
-//   • workspaceList() already strips the synthetic `local-main` row (the source
-//     checkout); we ALSO guard with isLocalMainWorkspace as belt-and-suspenders.
-//   • deleteWorkspace runs `git worktree remove --force <worktree>` — never the
-//     repoRoot — and we pass includeBranch:false, so the source repo's branches
-//     and refs are left intact too. (Engine: apps/desktop/src/engine/git/worktree.ts.)
-// Chats inside the removed repo are deleted too (renderer store + engine DB +
-// localStorage cache, step 4 below) — a removed repo's data should be gone, not
-// silently orphaned. We only bounce the active workspace away if the user is
-// currently inside the repo being removed, so "Back" never lands on a dead
-// "No workspace selected" pane.
+// Removing a repository deletes every Zeros-created worktree, its chats and its
+// per-repo UI prefs, but never the source checkout: the synthetic local-main
+// row is skipped twice over, and deleteWorkspace runs `git worktree remove`
+// with includeBranch:false, so source branches and refs stay intact.
 function RemoveRepositorySection({ project }: { project: Project }) {
   const plainFolder = project.isGitRepository === false;
   const [confirmOpen, setConfirmOpen] = useState(false);
