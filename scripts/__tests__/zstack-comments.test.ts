@@ -35,8 +35,17 @@ describe("comments-only comparison", () => {
     expect(codes(compareSource("x.tsx", before, after))).toEqual(["zstack_comments_code_changed"]);
   });
 
-  it("accepts removing an inline JSX comment when the rendered text is unchanged", () => {
-    expect(compareSource("x.tsx", "const v = <p>one {/* c */} two</p>;\n", "const v = <p>one  two</p>;\n")).toEqual([]);
+  it("refuses joining or splitting nonempty JSX text children at a comment", () => {
+    // React.Children.count sees two children before and one after.
+    expect(codes(compareSource("x.tsx", "const v = <Counter>one {/* c */} two</Counter>;\n", "const v = <Counter>one  two</Counter>;\n")))
+      .toEqual(["zstack_comments_code_changed"]);
+    expect(codes(compareSource("x.tsx", "const v = <Counter>one  two</Counter>;\n", "const v = <Counter>one {/* c */} two</Counter>;\n")))
+      .toEqual(["zstack_comments_code_changed"]);
+  });
+
+  it("accepts removing an inline JSX comment beside an element", () => {
+    expect(compareSource("x.tsx", "const v = <p>one {/* c */}<b /></p>;\n", "const v = <p>one <b /></p>;\n")).toEqual([]);
+    expect(compareSource("x.tsx", "const v = <p>one {/* c */} two</p>;\n", "const v = <p>one {/* why */} two</p>;\n")).toEqual([]);
   });
 
   it.each([
@@ -64,6 +73,14 @@ describe("comments-only comparison", () => {
       .toEqual(["zstack_comments_protected_comment"]);
     expect(codes(compareSource("x.mjs", `${base}/* @__PURE__ */ f();\ng();\n`, `${base}f();\n/* @__PURE__ */ g();\n`)))
       .toEqual(["zstack_comments_protected_comment", "zstack_comments_protected_comment"]);
+  });
+
+  it("refuses reordering protected comments that share an anchor", () => {
+    // TypeScript honours the last of these, so the swap turns checking off.
+    const code = "const n = 1;\nn();\n";
+    expect(codes(compareSource("x.ts", `// @ts-nocheck\n// @ts-check\n${code}`, `// @ts-check\n// @ts-nocheck\n${code}`)))
+      .toEqual(["zstack_comments_protected_comment"]);
+    expect(compareSource("x.ts", `// @ts-nocheck\n// narration\n// @ts-check\n${code}`, `// @ts-nocheck\n// @ts-check\n${code}`)).toEqual([]);
   });
 
   it("refuses a removed line between a next-line directive and its target", () => {
@@ -158,6 +175,17 @@ describe("comments-only verification of a Git range", () => {
     chmodSync(join(repo.root, "scripts/tool.mjs"), 0o755);
     const head = repo.commit({ "scripts/tool.mjs": "export const a = 1;\n" });
     expect(codes(verifyCommentsOnly(repo.root, { base: repo.base, head }).problems)).toEqual(["zstack_comments_mode_changed"]);
+  });
+
+  it("compares from the merge base, so a moved base branch adds nothing", () => {
+    const repo = repository({ "src/a.ts": "// narration\nexport const a = 1;\n", "src/b.ts": "export const b = 1;\n" });
+    repo.run("checkout", "-q", "-b", "cleanup");
+    const head = repo.commit({ "src/a.ts": "export const a = 1;\n" });
+    repo.run("checkout", "-q", "main");
+    const main = repo.commit({ "src/b.ts": "export const b = 2;\n", "src/c.ts": "export const c = 1;\n" });
+    repo.run("checkout", "-q", "cleanup");
+    expect(verifyCommentsOnly(repo.root, { base: main, head })).toEqual({ files: 1, problems: [] });
+    expect(verifyCommentsOnly(repo.root, { base: main })).toEqual({ files: 1, problems: [] });
   });
 
   it("compares the working tree, including untracked files, when no head is given", () => {

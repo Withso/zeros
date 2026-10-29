@@ -63,12 +63,13 @@ Clean in small, area-scoped PRs that change nothing but comments.
 2. Edit only comments, reading the code around each one first. When a comment
    holds an invariant the code cannot express, keep it as one sentence.
 3. Prove it: `node scripts/zstack/comments.mjs verify --base origin/main` must
-   report no problems. It compares each file's parsed structure and token text
-   with comments and layout removed, JSX text runs and character references
-   included. Protected comments must keep their text and the code they attach
-   to, so removing, adding or moving one fails, and so do protected paths,
-   added or removed files, mode changes and files other than JavaScript and
-   TypeScript.
+   report no problems. It starts at the merge base, like `git diff
+   origin/main...`, and compares each file's parsed structure and token text
+   with comments and layout removed. JSX text counts too: a comment between two
+   text runs separates two children, so removing it fails. Protected comments
+   must keep their text, order and the code they attach to, so removing,
+   adding, moving or reordering one fails, and so do protected paths, added or
+   removed files, mode changes and files other than JavaScript and TypeScript.
 4. Run the touched test directories, `pnpm typecheck`, `pnpm lint` and
    `pnpm check:ui`.
 5. After the squash merge, the next cleanup PR adds that commit to

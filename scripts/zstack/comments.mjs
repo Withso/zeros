@@ -1,9 +1,10 @@
 // Proves that a diff changes only comments, and measures comment density.
 //
 //   node scripts/zstack/comments.mjs verify --base <rev> [--head <rev>]
-//       exit 1 unless every changed file differs from <base> only in comments
-//       and whitespace, and no protected comment or path changed. Without
-//       --head, the working tree (tracked and untracked files) is compared.
+//       exit 1 unless every file changed since the merge base with <base>
+//       differs only in comments and whitespace, and no protected comment or
+//       path changed. Without --head, the working tree (tracked and untracked
+//       files) is compared.
 //   node scripts/zstack/comments.mjs report [--top <n>] [--json] [path...]
 //       comment-only lines per file, densest first.
 import { execFileSync } from "node:child_process";
@@ -84,16 +85,17 @@ function jsxText(raw) {
   return text;
 }
 
-// Each text node is cleaned and entity-decoded on its own, and adjacent cleaned
-// text renders as one run. A junction that could complete a character reference
-// (&am + p;) stays marked, so joining the halves never compares equal.
+// Each text node is cleaned on its own. Two nonempty texts separated by a
+// comment-only expression are two children (React.Children.count sees both),
+// and their junction could complete a character reference (&am + p;), so it
+// stays marked and never compares equal to one joined text.
 function jsxChildren(node, sf) {
   const children = [];
   let raw = null, run = "";
   const clean = () => {
     if (raw === null) return;
     const text = jsxText(raw);
-    run += /&[#A-Za-z0-9]*$/.test(run) && /^[#A-Za-z0-9]*;/.test(text) ? `\u0000${text}` : text;
+    run += run && text ? `\u0000${text}` : text;
     raw = null;
   };
   const flush = () => { clean(); if (run) children.push(`JsxText(${JSON.stringify(run)})`); run = ""; };
@@ -161,6 +163,10 @@ export function compareSource(path, before, after) {
   for (const [key, left] of remaining) {
     if (left > 0) problems.push({ path, code: "zstack_comments_protected_comment", detail: `added or moved: ${JSON.parse(key).text.slice(0, 80)}` });
   }
+  // Directives sharing an anchor can depend on their order (@ts-nocheck, @ts-check).
+  const sequence = (entries) => entries.map((entry) => entry.key).join("\n");
+  if (!problems.length && sequence(before_) !== sequence(after_))
+    problems.push({ path, code: "zstack_comments_protected_comment", detail: "reordered" });
   return problems;
 }
 
@@ -209,9 +215,12 @@ function changedFiles(root, base, head) {
 
 const readAt = (root, rev, path) => git(["show", `${rev}:${path}`], root).toString("utf8");
 
-/** Verify that base..head (or base..worktree) changes only comments. */
-export function verifyCommentsOnly(root, { base, head } = {}) {
-  if (!base) throw new Error("zstack_comments_base_required");
+/** Verify that base...head (or base...worktree) changes only comments. Like
+ *  `git diff base...head`, this starts at the merge base, so commits that
+ *  landed on the base branch afterwards are not part of the proof. */
+export function verifyCommentsOnly(root, { base: target, head } = {}) {
+  if (!target) throw new Error("zstack_comments_base_required");
+  const base = git(["merge-base", target, head ?? "HEAD"], root).toString("utf8").trim();
   const problems = [];
   const files = changedFiles(root, base, head);
   for (const { status, path, modeChanged } of files) {
