@@ -258,10 +258,9 @@ export function admissionRouteWithoutFlight(input: {
   return input.force ? "restart" : "resume";
 }
 
-/** Map a failure classification to the UI session status. The single
- * definition, shared by the RPC paths in <AgentSessionsProvider> and by the
- * store's turn-state settle — those two must not be able to disagree about
- * what a recorded failure means. */
+/** Map a failure to the UI session status. The single definition shared by the
+ *  provider's RPC paths and the store's turn-state settle, so they cannot
+ *  disagree. */
 export function statusForFailure(failure: AgentFailure): SessionStatus {
   if (failure.kind === "auth-required") return "auth-required";
   if (isRecoverable(failure)) return "reconnecting";
@@ -320,20 +319,12 @@ export function resumeFailureInvalidatesBinding(
   );
 }
 
-/** How a terminal engine `turn_state` settles the slot.
- *
- * The engine emits terminal turn_state for EVERY turn, not just re-adopted
- * ones — and it rides the rAF-buffered update path, so for a locally-issued
- * prompt it lands a frame AFTER sendPrompt already recorded the classified
- * failure from AGENT_PROMPT_FAILED. Clearing error/failure here therefore
- * erased the real reason a turn died one frame after the user saw it: the chat
- * read as healthy with no explanation, and an auth-required turn lost its
- * Sign-in button (the footer derives it from `session.failure`).
- *
- * So the settle is non-destructive: a failure this renderer already classified
- * wins. A slot with nothing recorded — the genuinely re-adopted turn, which has
- * no local RPC result to recover a classification from — still flattens to
- * `ready` and lets the durable failed turn row tell the history. */
+/** How a terminal engine turn_state settles the slot. It arrives for every
+ *  turn through the frame buffer, so for a local prompt it lands after
+ *  sendPrompt recorded the classified failure. Non-destructive: a recorded
+ *  failure wins (clearing it erased why the turn died and the Sign-in
+ *  button); a slot with nothing recorded, the re-adopted turn, settles to
+ *  ready. */
 export function settledTurnStatus(slot: {
   error: string | null;
   failure: AgentFailure | null;
@@ -493,39 +484,20 @@ export function queuedSendNowAction(input: {
   return "flush";
 }
 
-/** Whether an explicit send must rebuild the chat's session BEFORE the message
- * can go anywhere — the composer's retry affordance for a chat sitting in
- * `failed` / `auth-required` / `reconnecting` (or one that never spawned).
- *
- * `warming` and `streaming` are deliberately NOT recovery states: something is
- * already in flight for them, and shouldQueuePrompt above is what owns that
- * case. Treating `warming` as recovery is what made a send into a slow-spawning
- * chat (a cold Cursor host: up to three 10s attempts) look broken — the send sat
- * on the spawn with the text still in the composer and no bubble anywhere, so
- * every further Enter re-entered and enqueued another copy of the same message.
- * Parking it instead shows the message immediately in the queued card and
- * dispatches it the moment the session is ready. */
+/** Whether an explicit send must rebuild the session first: the retry for a
+ *  chat that is failed, auth-required or reconnecting, or never spawned.
+ *  warming and streaming are not recovery states; shouldQueuePrompt owns them.
+ *  Treating warming as recovery held the text in the composer during a slow
+ *  spawn, so each Enter queued another copy. */
 export function sendNeedsSessionRecovery(status: SessionStatus): boolean {
   return status !== "ready" && status !== "warming" && status !== "streaming";
 }
 
-/** How a send that needs a session should pay for it.
- *
- * `await` is the old universal behavior: block the send, spinner on the button,
- * the user's text hostage in the composer for the whole admission. It is kept
- * for exactly one case — a chat whose last spawn ENDED BADLY
- * (`failed` / `auth-required`). There the send is the user's explicit retry
- * after fixing something, the likely outcome is another failure, and the honest
- * place for that failure is the send itself rather than a queued card that
- * would be dropped a second later.
- *
- * `park` is the new default for a chat that simply has no session yet
- * (`idle` — first send in a fresh chat, or a chat whose engine restarted, or
- * `reconnecting` after a transport bounce). Nothing failed; the session just
- * has to be built. So: kick the build in the background, accept the message
- * into the queued card immediately, and let the existing readiness drain
- * dispatch it. That makes EVERY send accepted in <100 ms regardless of what
- * admission costs, without weakening the execution boundary. */
+/** How a send that needs a session pays for it. "await" blocks the send, kept
+ *  only for a chat whose last spawn ended badly: the send is the explicit retry
+ *  and the honest place for another failure. "park", the default for a chat
+ *  with no session yet, builds it in the background and accepts the message
+ *  into the queued card at once, so every send is accepted in under 100 ms. */
 export function sendSessionRecoveryMode(
   status: SessionStatus,
 ): "none" | "park" | "await" {
@@ -533,25 +505,12 @@ export function sendSessionRecoveryMode(
   return status === "failed" || status === "auth-required" ? "await" : "park";
 }
 
-/** Whether a send that has already passed shouldQueuePrompt still needs an
- * ADMISSION before it can dispatch — and must therefore park in the queued
- * card rather than fall into the turn body.
- *
- * The turn body used to pay for these inline: "!sessionId → await
- * ensureSession" and the settings-drift force-respawn each awaited a full
- * provider-session admission after runSend had already cleared the composer and before any
- * bubble was appended. The user's first send into a new chat was invisible for
- * the whole admission, while a SECOND send — queueing behind the first's local
- * send lock — rendered a queued card immediately. Deciding it here, before the
- * local send lock is taken, gives every admission-needing send the same
- * visible park.
- *
- * `session-build` — no live session (fresh chat whose spawn is still
- * admitting, an engine restart, a pristine agent switch racing the
- * keystroke-armed spawn). `drift-respawn` — a live session whose recorded env
- * stamp no longer matches the composer pills (model/effort changed while it
- * was warming); the respawn resumes the provider thread. An unstamped
- * (legacy) slot never reads as drift, mirroring the in-turn reconcile. */
+/** Whether a send past shouldQueuePrompt still needs admission and must park
+ *  instead of entering the turn body, decided before the local send lock is
+ *  taken. Inline admission there made a first send invisible for its whole
+ *  duration. "session-build" means no live session; "drift-respawn" means
+ *  the session's env stamp no longer matches the pills (resuming the provider
+ *  thread). An unstamped legacy slot never reads as drift. */
 export function sendAdmissionPark(input: {
   hasAgent: boolean;
   hasSession: boolean;
@@ -573,17 +532,9 @@ export function sendAdmissionPark(input: {
   return null;
 }
 
-/** The counterpart to shouldQueuePrompt: what becomes of a parked queue once
- * whatever it was parked behind has finished.
- *
- * Every park site needs a release site. `warming` became a park reason above, and
- * the only automatic drain (drainNextQueued) requires `ready` — so a warm that
- * ends failed/auth-required/reconnecting would strand the queue AND freeze the
- * composer, because each later send parks behind a queue that can never drain.
- *
- * `drop` rather than `drain` for an unhealthy chat is the long-standing policy:
- * draining into a dead/rebuilding session makes every queued send force a
- * rebuild, so the queue turns into a spawn storm. The drop is announced. */
+/** What becomes of a parked queue once what it waited on finished; every park
+ *  site needs a release site. "drop", announced, for an unhealthy chat:
+ *  draining into it makes every queued send force a rebuild and spawn-storms. */
 export function queueReleaseAction(input: {
   status: SessionStatus;
   queueHeld: boolean;
@@ -596,28 +547,12 @@ export function queueReleaseAction(input: {
   return input.status === "ready" ? "drain" : "drop";
 }
 
-/** What to do with a send that arrived while this chat's transcript could not
- * be read — a failed cold read, an engine mid-respawn, a dropped transport.
- *
- * Appending a user bubble to a partial transcript is not an option (it would
- * be written into a history Zeros has not finished reading), so this send
- * cannot go out now. What it MUST NOT do is what it used to: return, in
- * silence, with the text still in the composer and nothing anywhere saying the
- * send did not happen — indistinguishable, to the user, from a broken Enter
- * key. Reported as the other half of "I sent it before the workspace was ready
- * and it never went".
- *
- * `park` — the composer still holds the payload, so keep it as the chat's
- *   draft and arm the one-shot auto-send: the readiness drain dispatches it
- *   when the read succeeds. Exactly one automatic retry per disconnect
- *   (`alreadyRetried`), because the drain re-enters the same send path and a
- *   second failure would otherwise cycle park → drain → park at hydrate-RPC
- *   speed.
- * `report` — cannot be parked usefully: a hand-off payload lives outside the
- *   composer, the one retry is spent, or the session ended terminally so no
- *   drain will ever come. Say so instead of promising a delivery.
- * `ignore` — nothing to send; Enter on an empty composer has nothing to
- *   report. */
+/** A send that arrived while the transcript could not be read. A bubble cannot
+ *  be appended to a partial history, but the send must not vanish silently.
+ *  "park" keeps the composer payload as the draft and arms one automatic retry
+ *  per disconnect (a second failure would cycle park and drain). "report" is
+ *  for a payload outside the composer, a spent retry or a terminal session.
+ *  "ignore" when there is nothing to send. */
 export function unreadableTranscriptSendAction(input: {
   /** There is something to send at all. */
   hasPayload: boolean;
@@ -637,39 +572,18 @@ export function unreadableTranscriptSendAction(input: {
     : "park";
 }
 
-/** The longest a parked FIRST turn may wait before Zeros reports that it did
- * not go out. See queuedFirstTurnAction — deliberately the same span as
- * PENDING_AUTO_SEND_RECOVERY_MAX_AGE_MS (state/persist-composer-drafts), which
- * decides whether a park survives a restart at all.
- *
- * Sized against what a legitimate pre-ready wait can cost — a worktree
- * checkout, execution admission, a cold provider host, or an engine respawn —
- * with room to spare. Anything past it is not slow, it is stuck. */
+/** The longest a parked first turn may wait before Zeros reports it did not go
+ *  out, the same span as PENDING_AUTO_SEND_RECOVERY_MAX_AGE_MS. Sized for a
+ *  checkout, admission, a cold provider host or an engine respawn; past it the
+ *  wait is stuck, not slow. */
 export const QUEUED_FIRST_TURN_MAX_WAIT_MS = 10 * 60_000;
 
-/** What to do with a first turn parked BEFORE its chat could run it (the
- * "Message queued: it will send as soon as this workspace finishes setting up"
- * park — REQUEST_AUTO_SEND, kept as the chat's own composer draft).
- *
- * This is the same doctrine as queueReleaseAction one function up, applied to
- * the earlier park: every park site needs a release site. It had none. The
- * only drain condition was `status === "ready"`, so a park whose spawn ended
- * `failed` / `auth-required` — or whose session never settled at all — stayed
- * armed with the user's text in the composer, no bubble in the transcript, and
- * nothing anywhere saying the promise had not been kept.
- *
- * `send` — the session is ready and the composer still holds the payload.
- * `release` — hand it back: retire the intent, keep the text where it is, and
- *   say so. Terminal statuses qualify immediately; anything else qualifies once
- *   it has out-waited the bound, which is the only signal a session that never
- *   settles will ever produce.
- * `wait` — a real pre-ready state (`idle`, `warming`, `reconnecting`, an
- *   unfinished checkout). Waiting is what the user was promised.
- *
- * Provisioning suppresses `release` for a failed status on purpose: chat-view
- * refuses to spawn into an announced-but-unchecked-out path, so such a failure
- * belongs to an earlier attempt and the create is still on its way. The bound
- * still applies — it has to, or an abandoned create would strand the park. */
+/** What to do with a first turn parked before its chat could run it
+ *  (REQUEST_AUTO_SEND). Its only drain was status ready, so a park whose spawn
+ *  failed or never settled stayed armed silently. "send" when ready; "release"
+ *  hands the text back and says so, at once for terminal statuses and after the
+ *  bound otherwise; "wait" for real pre-ready states. During provisioning a
+ *  failed status belongs to an earlier attempt, so only the bound releases. */
 export function queuedFirstTurnAction(input: {
   status: SessionStatus;
   /** The chat's workspace is still being created (optimistic create window). */
@@ -700,19 +614,11 @@ export function queuedFirstTurnAction(input: {
     : "wait";
 }
 
-/** Stop is a promise, and a send is not atomic: sendPrompt may await a session
- * rebuild, a settings-drift respawn, or a resume-and-retry before its
- * AGENT_PROMPT ever reaches the engine — all while the chat already reads
- * `streaming` and the composer shows Stop. A cancel in that window used to be
- * addressed at a session that had no live turn yet (or none at all), so the
- * pending prompt dispatched anyway and the agent started working right after the
- * user stopped it.
- *
- * So cancellation is a per-chat GENERATION rather than a flag: a send captures
- * it once at entry and re-reads it after every await. Monotonic, so it can
- * neither be missed nor consumed by the wrong send, and a chat with no session
- * still records the intent.
- */
+/** A send can await a rebuild, a drift respawn or a resume before its prompt
+ *  reaches the engine, all while the chat shows Stop. Cancellation is a
+ *  per-chat generation, not a flag: a send captures it at entry and re-reads it
+ *  after every await. Monotonic, so it can be neither missed nor consumed by
+ *  the wrong send, and it needs no session. */
 export function bumpCancelGeneration(
   generations: Map<string, number>,
   chatId: string,

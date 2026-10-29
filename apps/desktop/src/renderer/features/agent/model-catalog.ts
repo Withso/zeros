@@ -1,36 +1,10 @@
-// ──────────────────────────────────────────────────────────
-// Model catalog — curated display, live capabilities and account eligibility
-// ──────────────────────────────────────────────────────────
-//
-// The composer model picker shows a CURATED list we control: the per-family
-// `families` map in `catalogs/models-v1.json` (a plain bundled file — NO remote
-// fetch / cache / publish system; those were retired). You decide exactly which
-// models appear, in what order, with what labels.
-//
-// Live agent discovery (Claude `query.supportedModels()`, Codex `model/list`,
-// Cursor's SDK model list, surfaced via `initialize._meta.models`) overlays
-// capabilities without renaming curated rows. A complete account-scoped list
-// also controls eligibility: absent models stay visible but disabled, including
-// when the account returns an empty list. Older unscoped discovery keeps its
-// capability-only policy. Saved exact IDs are never replaced by this metadata.
-//
-// MODEL NAMES ARE CURATED, FOR EVERY AGENT. Each provider ships its own
-// marketing name for the same wire id (the Claude CLI calls `claude-opus-5[1m]`
-// "Opus (1M context)"; Codex and Cursor rename their own ids too), and those
-// names change under us on any CLI/account update. `overlayLiveCapabilities`
-// enforces the split via an allowlist of overlayable fields; `label` is not on
-// it, so only `catalogs/models-v1.json` can rename a row.
-//
-// Resolution per agent family:
-//   1. CURATED_FAMILIES[family]                         (drives DISPLAY + NAMES)
-//      └─ live capabilities and, when scoped, eligibility (never names)
-//   2. If a family has no curated entries → fall back to whatever the agent
-//      advertised live (so an unmapped/3rd-party agent still shows something —
-//      there is no curated name to protect for a model we never listed).
-//
-// Adding a model: run `pnpm models:list <agent>` to copy the exact real id,
-// add it to `catalogs/models-v1.json`, then `pnpm models:verify`.
-// ──────────────────────────────────────────────────────────
+// The picker shows the curated list in catalogs/models-v1.json. Live discovery
+// (Claude supportedModels, Codex model/list, Cursor's SDK list) overlays
+// capabilities and, when account-scoped and complete, eligibility, but never
+// names: providers rename the same wire id, so overlayLiveCapabilities keeps
+// label off its allowlist. A family with no curated entries falls back to its
+// live list. Add a model with `pnpm models:list <agent>`, the catalog, then
+// `pnpm models:verify`.
 
 import type {
   InitializeResponse,
@@ -79,14 +53,12 @@ export type ModelOption = {
   defaultEffort?: ChatEffort;
   /** Whether this model supports Fast mode (drives the FastPill). */
   supportsFast?: boolean;
-  /** Minimum agent CLI version this model needs (e.g. Fable 5 → "2.1.170").
-   *  Verified at build time by models:verify; runtime availability/capability
-   *  comes from the pinned CLI's live discovery response. */
+  /** Minimum agent CLI version this model needs, verified at build time by
+   *  models:verify; runtime capability comes from live discovery. */
   minCliVersion?: string;
 };
 
-// ── Coercion helpers (declared before the JSON-derived constants below, which
-//    run them at module load) ───────────────────────────────
+// Declared before the JSON-derived constants below, which run them at load.
 
 const VALID_EFFORTS: readonly ChatEffort[] = [
   "low",
@@ -103,10 +75,8 @@ function isModelOption(x: unknown): x is { value: string; label: string } {
   return typeof o.value === "string" && typeof o.label === "string";
 }
 
-/** Coerce a raw catalog / `_meta.models[]` entry into a {@link ModelOption},
- *  validating the advertised effort ladder + fast flag. Returns null for
- *  malformed entries (dropped). Effort levels arrive as plain strings; we filter
- *  to known ChatEfforts. */
+/** Coerce a catalog or _meta.models entry into a ModelOption, keeping known
+ *  effort levels; malformed entries return null. */
 function coerceModelOption(x: unknown): ModelOption | null {
   if (!isModelOption(x)) return null;
   const o = x as Record<string, unknown>;
@@ -203,8 +173,6 @@ function coerceModelOption(x: unknown): ModelOption | null {
   return out;
 }
 
-// ── Curated catalog (bundled JSON) ────────────────────────
-
 interface CuratedCatalog {
   families: Record<string, unknown[]>;
   modelEnvVars: Record<string, string>;
@@ -233,11 +201,8 @@ const MODEL_ENV_VARS: Record<string, string> = catalog.modelEnvVars ?? {};
  *  its curated entry. */
 const ALIASES: Record<string, Record<string, string>> = catalog.aliases ?? {};
 
-/** Per-family fallback favorite: the model a new chat opens on
- *  when the user hasn't selected one — claude → Opus 5.5, codex → GPT-6.1 Sol,
- *  cursor → Grok 4.7. Curated in models-v1.json so the catalog stays the
- *  single source of truth; validated against family membership here (a typo'd
- *  id degrades to the family's first curated model instead of a dead value). */
+/** Per-family default model for a chat with no selection, curated in
+ *  models-v1.json. A misspelled id degrades to the family's first model. */
 const DEFAULT_FAVORITES: Record<string, string> =
   catalog.defaultFavorites ?? {};
 
@@ -251,21 +216,11 @@ export function defaultFavoriteModelFor(family: string): string | null {
   return list[0]?.value ?? null;
 }
 
-// ── The one global default-model selection (READ side) ────
-//
-// The star's storage keys and its read path live here, not in
-// model-favorites.ts, for one reason: this module has to answer "what model
-// does a null `ChatThread.model` actually mean?" — and it must answer it the
-// SAME way the pill and the picker do. model-favorites imports this module
-// for agentFamily/modelsForAgent/defaultFavoriteModelFor, so it cannot be
-// imported back without a cycle; the read side therefore lives at the bottom
-// of the dependency chain and model-favorites re-exports it. WRITES + the
-// pub/sub bus stay in model-favorites (nothing here needs them).
-//
-// Before this move the two sides disagreed: display resolved a null model to
-// the favorite while the capability gates and the spawn env resolved it to
-// `models[0]`, so a null-model Claude chat rendered "Opus 5" while the engine
-// ran Fable 5 with a Fast flag Opus supports and Fable does not.
+// The default-model read path lives here, not in model-favorites.ts, so every
+// surface answers "what does a null ChatThread.model mean?" the same way:
+// model-favorites imports this module, so it cannot be imported back. When the
+// sides disagreed, a null-model Claude chat showed "Opus 5" while the engine
+// ran Fable 5. Writes and the pub/sub bus stay in model-favorites.
 
 export const DEFAULT_MODEL_SELECTION_KEY = "default-model-selection";
 export const LEGACY_DEFAULT_AGENT_KEY = "default-agent-id";
@@ -311,18 +266,11 @@ export function curatedLegacyFavorites(
   return curated;
 }
 
-/** The one family a legacy favorites map can speak for on its own.
- *
- *  The star is a single global identity now, so a map naming exactly one
- *  curated family IS that identity — and it has to be read this way, because
- *  the old composer star deliberately never wrote `default-agent-id`. Anyone
- *  who starred a model without also visiting Settings has favorites and no
- *  agent id; requiring the id dropped their choice on upgrade.
- *
- *  Two or more entries is a genuine ambiguity: the old model let all three
- *  coexist and nothing in storage says which was the default. Forging one would
- *  silently move the user's provider, so those keep resolving through the
- *  catalog fallbacks. Returns "" when there is no sole family. */
+/** The one family a legacy favorites map speaks for. A map naming exactly one
+ *  curated family is that identity: the old composer star never wrote
+ *  default-agent-id. Two or more is ambiguous, and forging one would move the
+ *  user's provider, so those use catalog fallbacks. "" when there is no sole
+ *  family. */
 export function soleLegacyFavoriteFamily(favorites: unknown): string {
   const curated = curatedLegacyFavorites(favorites);
   if (curated.size !== 1) return "";
@@ -341,14 +289,9 @@ function legacySelection(): FavoriteModelSelection | null {
   };
 }
 
-/** Raw user choice. Null means provider connectivity decides the fallback.
- *
- * PURE by contract. Every model surface calls this during render (the pill's
- * label, the picker's ✓, Settings → Models), so normalizing the legacy keys
- * here would make a hot selector write storage inside render. The normalizing
- * write is one explicit boot step instead — `migrateDefaultModelSelection()` in
- * model-favorites.ts — and resolution stays correct without it because the
- * legacy read below is the same answer, just recomputed. */
+/** Raw user choice; null means provider connectivity decides. Pure by
+ *  contract: every model surface calls this during render, so the legacy-key
+ *  normalization is a separate boot step (migrateDefaultModelSelection). */
 export function getFavoriteSelection(): FavoriteModelSelection | null {
   return (
     sanitizeSelection(getSetting<unknown>(DEFAULT_MODEL_SELECTION_KEY, null)) ??
@@ -383,10 +326,9 @@ export function effectiveFavoriteModel(
   const family = agentFamily(agentId ?? null);
   if (!family) return null;
   const selected = getFavoriteModel(agentId);
-  // Visibility and durable identity are different questions. An
-  // account-qualified (`liveRequired`) row is deliberately absent from the cold
-  // picker, but an exact saved value or alias still names a curated model. Keep
-  // that raw value so discovery cannot silently rewrite the user's favorite.
+  // An account-qualified (liveRequired) row is hidden from the cold picker, but an
+  // exact saved value or alias still names a curated model. Keep it, so
+  // discovery cannot silently rewrite the user's favorite.
   if (selected && curatedModelForValue(family, selected)) return selected;
   return defaultFavoriteModelFor(family);
 }
@@ -402,14 +344,10 @@ export function agentFamily(agentId: string | null): string {
   return "";
 }
 
-/** The curated family that LISTS `modelValue`, or "" if none does. Unlike
- *  agentFamily() — which substring-matches an AGENT id — this matches a MODEL
- *  value against catalog membership, so a model whose value embeds another
- *  family's name (e.g. Cursor's `claude-opus-4-8-thinking-high` or `gpt-5.3-codex`)
- *  resolves to its real owner ("cursor"), not "claude"/"codex". A value shared
- *  across families (e.g. `gpt-5.3-codex`, under both codex and cursor) resolves
- *  to the FIRST curated family that lists it — callers that need an exact owner
- *  must carry the agent id, not the bare model value. */
+/** The curated family that lists modelValue, or "". Unlike agentFamily this
+ *  matches catalog membership, so Cursor's claude-opus-4-8-thinking-high
+ *  resolves to "cursor". A value shared by families resolves to the first;
+ *  callers needing the exact owner must carry the agent id. */
 export function familyForModelValue(
   modelValue: string | null | undefined,
 ): string {
@@ -420,16 +358,13 @@ export function familyForModelValue(
   return "";
 }
 
-/** Normalize a model id to its canonical curated slug, so a picked / persisted
- *  / live-discovered id matches the right curated entry across version drift:
- *    1. strip a context-window suffix (`[1m]`) → base model,
- *    2. strip a trailing dated snapshot (`-YYYYMMDD`) → dateless id,
- *    3. resolve a known alias (`opus` → `claude-opus-4-8`).
- *  Used for the capability overlay (curated ↔ live) and {@link resolveModelOption}. */
+/** Normalize an id to its curated slug across version drift: strip a context
+ *  suffix ([1m]) and a dated snapshot (-YYYYMMDD), then resolve aliases (opus →
+ *  claude-opus-4-8). */
 export function normalizeModelSlug(family: string, id: string): string {
   let s = id.trim().toLowerCase();
-  s = s.replace(/\[[^\]]*\]\s*$/, ""); // drop "[1m]"-style context suffix
-  s = s.replace(/-\d{8}$/, ""); // drop trailing dated snapshot
+  s = s.replace(/\[[^\]]*\]\s*$/, "");
+  s = s.replace(/-\d{8}$/, "");
   const famAliases = ALIASES[family];
   if (famAliases && typeof famAliases[s] === "string") return famAliases[s];
   return s;
@@ -463,12 +398,8 @@ function hiddenCompatibilityModel(
     : null;
 }
 
-/** Agents that honour a discrete reasoning-effort level.
- *  - Claude: the Agent SDK `effort` option (low|medium|high|xhigh|max) +
- *    the `ultracode` setting.
- *  - Codex: reads ZEROS_THINKING_EFFORT → `turn/start.effort`.
- *  - Cursor: an advertised effort ladder maps to native model parameters (or
- *    a legacy catalog-backed suffix); models without a ladder hide the toggle. */
+/** Agents with a discrete reasoning-effort level: Claude's SDK effort option,
+ *  Codex's turn/start effort, and Cursor models with an advertised ladder. */
 export function agentSupportsEffort(
   agentId: string | null,
   model: string | null = null,
@@ -486,11 +417,9 @@ export function agentSupportsEffort(
   return fam === "claude" || fam === "codex";
 }
 
-/** Heuristic effort ladders — the FALLBACK when a model has no resolved
- *  per-model `effortLevels` (i.e. it's neither curated nor advertised). Verified
- *  against code.claude.com/model-config (2026-06): Opus/Fable = low…max(+xhigh);
- *  Sonnet 4.6 = low,medium,high,max (NO xhigh); Haiku = low…high; Codex =
- *  low…xhigh. `ultracode` is our setting-tier on top of xhigh. */
+/** Fallback effort ladders for models with no resolved effortLevels, checked
+ *  against code.claude.com/model-config: Sonnet 4.6 has no xhigh, Haiku stops
+ *  at high. ultracode is a Zeros setting tier above xhigh. */
 const CLAUDE_OPUS_LADDER: ChatEffort[] = [
   "low",
   "medium",
@@ -515,14 +444,9 @@ export const EFFORT_LABELS: Record<ChatEffort, string> = {
   ultracode: "Ultra Code",
 };
 
-/** Per-family effort-label overrides. Each agent brands its
- *  reasoning tiers differently: Codex reads "Low … Extra High … Max …
- *  Ultra". "Max" sits between "Extra High" and "Ultra", so max keeps its
- *  default label and the internal ultracode
- *  level carries "Ultra"), Claude "Low … Extra High … Max … Ultracode". Only
- *  the levels that DIFFER from {@link EFFORT_LABELS} are listed; unlisted
- *  levels fall back to the default. Cursor (Grok low/medium/high) uses the
- *  defaults, so it needs no entry. */
+/** Per-family effort labels that differ from EFFORT_LABELS: Codex calls the
+ *  internal ultracode tier "Ultra", Claude "Ultracode". Cursor uses the
+ *  defaults. */
 const EFFORT_LABELS_BY_FAMILY: Record<
   string,
   Partial<Record<ChatEffort, string>>
@@ -550,9 +474,8 @@ export function effortLevelsFor(
   model: string | null,
   initialize: InitializeResponse | null = null,
 ): ChatEffort[] {
-  // Prefer the resolved (curated, capability-overlaid) per-model ladder. An
-  // advertised array — even empty ("no effort knob") — is authoritative; only
-  // an absent advertisement (undefined) falls through to the family heuristic.
+  // An advertised ladder is authoritative, even empty ("no effort knob"); only an
+  // absent one falls through to the family heuristic.
   const advertised = resolveModelOption(
     agentId,
     model,
@@ -611,16 +534,10 @@ export function defaultEffortForModel(
   return initial && levels.includes(initial) ? initial : defaultEffortForLevels(levels);
 }
 
-/** The effort this exact model can actually run: the stored tier when its
- * ladder advertises it, else that ladder's default. A model with no knob keeps
- * the stored value (nothing to clamp to).
- *
- * ONE clamp, shared by the composer pill's label, the model menu's editor, and
- * the spawn env — the same reason `resolveModelOption` owns the null-model
- * question. A stored tier can go off-ladder without any user action (a catalog
- * update retires a tier, a hand-edited settings.toml), and the surfaces used to
- * disagree about it: the pill read `ChatThread.effort` verbatim and rendered
- * "Ultracode" while the popover it opened showed and applied "Max". */
+/** The effort this model can actually run: the stored tier when its ladder has
+ *  it, else the ladder's default. One clamp shared by the pill label, the
+ *  menu's editor and the spawn env, because a stored tier can go off-ladder
+ *  (a retired tier, a hand-edited settings.toml) and the surfaces disagreed. */
 export function effectiveEffort(
   agentId: string | null,
   model: string | null,
@@ -632,11 +549,8 @@ export function effectiveEffort(
   return defaultEffortForModel(agentId, model, initialize);
 }
 
-/** Whether the agent+model supports Fast mode (lower-latency inference at
- *  higher token cost). Advertised per-model via the resolved option's
- *  `supportsFast` when present; otherwise the cold-start family heuristic:
- *  Claude Opus only, Codex GPT-5.x. Null resolves through the same visible
- *  default model as the composer before this fallback is considered. */
+/** Whether the model supports Fast mode: the resolved option's supportsFast
+ *  when present, else the family heuristic (Claude Opus, Codex GPT-5.x). */
 export function agentSupportsFast(
   agentId: string | null,
   model: string | null,
@@ -651,15 +565,9 @@ export function agentSupportsFast(
   return false;
 }
 
-/** The label shown in the model picker. The input is always the CURATED label
- *  (see {@link overlayLiveCapabilities} — provider names never get here), and
- *  this only trims it for the surface: it drops a redundant brand prefix (the
- *  agent is already implied by the dropdown heading / composer context) and
- *  normalizes a "(1M)"-style context suffix to a bare "1M". Examples (claude
- *  family): "Claude Opus 5" → "Opus 5"; "Claude Opus 4.8 (1M)" →
- *  "Opus 4.8 1M". Other families keep their labels ("GPT-5.5"); the brand is
- *  only stripped for the claude family, so e.g. Cursor's "Claude Opus 4.8"
- *  (Cursor running a Claude model) keeps its brand. */
+/** The picker label: the curated label with a redundant brand prefix dropped
+ *  for the claude family ("Claude Opus 5" → "Opus 5") and a "(1M)" suffix
+ *  normalized to "1M". */
 export function displayModelLabel(
   agentId: string | null,
   label: string,
@@ -678,12 +586,9 @@ export interface ConfiguredModelLabelParts {
   metadata: string[];
 }
 
-/** The semantic parts of the composer's one model label. Keeping configuration
- * separate lets renderers visually subordinate effort/Fast without splitting
- * them back into independent controls. Capability-gating here prevents stale
- * stored flags from claiming a model supports an option it cannot run, and the
- * effort is clamped through `effectiveEffort` so the label names the tier the
- * menu edits and the engine receives — never a retired one. */
+/** The parts of the composer's model label. Capability-gated, so stale stored
+ *  flags cannot claim an option the model cannot run, with effort clamped
+ *  through effectiveEffort. */
 export function configuredModelLabelParts(
   agentId: string | null,
   model: string | null,
@@ -724,13 +629,9 @@ export function configuredModelLabel(
   return [parts.model, ...parts.metadata].join(" ");
 }
 
-// ── Permission posture ⇆ native agent mode ───────────────
-//
-// The composer's "Permissions" menu offers four postures — Plan / Auto / Tool
-// approval / Danger. Each maps to a CONCRETE native mode PER AGENT, by id, so we
-// never guess from prose. `auto` is the safe default (Claude's classifier,
-// Codex's on-failure sandbox); `danger` is the explicit no-checks escape hatch.
-// Cursor has only plan/agent, so every execute-posture collapses to "agent".
+// The Permissions menu's four postures (Plan, Auto, Tool approval, Danger) map
+// to a concrete native mode per agent, by id. Cursor has only plan and agent,
+// so every execute posture collapses to "agent".
 
 /** posture → native mode id, keyed by agent family. */
 const NATIVE_MODE_BY_POSTURE: Record<
@@ -777,10 +678,8 @@ const POSTURE_BY_NATIVE: Record<string, Record<string, ChatPermissionMode>> = {
   cursor: { plan: "plan", auto: "auto", agent: "danger" },
 };
 
-/** Resolve a posture to the agent's native {@link SessionMode}, or null when the
- *  agent doesn't advertise a matching mode (the caller then keeps the current
- *  mode). Used at session bind to apply the chat's persisted posture, and by the
- *  composer to translate a menu pick into a `session/set_mode` call. */
+/** Resolve a posture to the agent's native mode, or null when the agent offers
+ *  none (the caller keeps the current mode). */
 export function agentModeForPermission(
   permission: ChatPermissionMode,
   availableModes: SessionMode[],
@@ -792,11 +691,8 @@ export function agentModeForPermission(
   return availableModes.find((m) => m.id === targetId) ?? null;
 }
 
-/** Reverse of {@link agentModeForPermission}: classify a native mode id into a
- *  posture bucket, so an in-session mode change (or a restored `lastModeId`)
- *  shows the right ✓ in the Permissions menu and persists a meaningful posture.
- *  Falls back to id-shape heuristics for a mode we don't explicitly map (an
- *  adapter renaming/adding one), defaulting to the safe "auto". */
+/** Classify a native mode id into a posture, with id-shape heuristics for
+ *  unmapped modes, defaulting to the safe "auto". */
 export function permissionForAgentMode(
   modeId: string,
   agentId?: string | null,
@@ -811,12 +707,9 @@ export function permissionForAgentMode(
   return "auto";
 }
 
-/** posture → this family's native mode id, WITHOUT needing the live
- *  `availableModes` (unlike {@link agentModeForPermission}). Used pre-session by
- *  the new-workspace dispatcher to seed a LOSSLESS native modeId from the born
- *  posture, so a dispatcher pick of e.g. Claude "Accept Edits" is stamped as
- *  lastModeId="accept-edits" (not collapsed to "auto" at bind). Returns null for
- *  a family/posture with no mapping. */
+/** posture → native mode id without the live availableModes, so the
+ *  new-workspace dispatcher stamps a lossless lastModeId (Claude
+ *  "accept-edits", not "auto"). null when unmapped. */
 export function nativeModeIdForPosture(
   agentId: string | null,
   permission: ChatPermissionMode,
@@ -825,25 +718,11 @@ export function nativeModeIdForPosture(
   return NATIVE_MODE_BY_POSTURE[fam]?.[permission] ?? null;
 }
 
-// ── Native permission modes cycled by the composer permission toggle ──
-//
-// The toggle (composer-pills PermissionToggle) cycles each agent's REAL native
-// modes (by id), relabelled to the product vocabulary — not the internal
-// 4-posture bucket. This lets modes that share one posture bucket (Claude
-// accept-edits AND auto both bucket to "auto") be picked DISTINCTLY, and each
-// pick round-trips losslessly via chat.lastModeId. Selecting a mode calls the
-// live session's setMode(id) and persists lastModeId=id (+ its posture bucket
-// for env carriage / pre-session). Because the ids are STATIC per family, the
-// toggle renders identically before or after the session binds (no dependency
-// on advertised availableModes).
-//
-//   Claude: Manual(default) · Accept Edits · Plan · Auto · Bypass
-//           (Haiku drops Auto — its classifier isn't available, so Auto would
-//            silently behave like Accept Edits; offering it is misleading.)
-//   Codex:  Ask for approval(ask) · Approve for me(auto-edit) · Full access
-//           (read-only is intentionally omitted from the composer menu.)
-//   Cursor: Ask(plan) · Auto(auto) · Full access(agent) — sdk mode plan|agent
-//           paired with the create-time autoReview flag (Auto = agent+autoReview).
+// The permission toggle cycles each agent's real native modes, relabelled, so
+// modes sharing a posture (Claude accept-edits and auto) stay distinct and
+// round-trip through chat.lastModeId. Static ids render the same before and
+// after bind. Claude Haiku drops Auto (no classifier); Codex omits read-only;
+// Cursor's Auto is agent plus the create-time autoReview flag.
 
 /** family → native mode id → user-facing label (the vocabulary the menu shows). */
 const PERMISSION_MODE_LABELS: Record<string, Record<string, string>> = {
@@ -875,10 +754,8 @@ const PERMISSION_MODE_ORDER: Record<string, string[]> = {
 
 export type PermissionMenuItem = { modeId: string; label: string };
 
-/** The native permission modes the composer permission toggle cycles through
- *  for this agent+model, each with its user-facing label, in display order.
- *  Per-model filtering: Claude Haiku drops "auto" (no classifier). Returns []
- *  for a family we don't model modes for (the toggle then hides itself). */
+/** The modes the permission toggle cycles for this agent and model, labelled,
+ *  in display order; [] hides the toggle. */
 export function permissionMenuItems(
   agentId: string | null,
   model: string | null = null,
@@ -908,9 +785,7 @@ export function permissionMenuItems(
     }));
 }
 
-/** Whether the composer's permission toggle should render for this agent+model
- *  (i.e. we have a native-mode vocabulary for it). Now true for Cursor too
- *  (Ask/Edit), where it used to be Claude/Codex only. */
+/** Whether the permission toggle renders: we have a native-mode vocabulary. */
 export function agentHasPermissionMenu(
   agentId: string | null,
   model: string | null = null,
@@ -918,18 +793,14 @@ export function agentHasPermissionMenu(
   return permissionMenuItems(agentId, model).length > 0;
 }
 
-// The native modes where the agent PROPOSES instead of acting — Claude's Plan,
-// Codex's Ask for approval (its read-only twin included for persisted chats),
-// Cursor's Ask. These modes draw the dashed composer frame and the map icon on
-// the permission toggle.
+// Modes where the agent proposes instead of acting (Claude Plan, Codex Ask and
+// its read-only twin, Cursor Ask) draw the dashed composer frame.
 const GUARDED_PERMISSION_MODES: Record<string, string[]> = {
   claude: ["plan"],
   codex: ["ask", "read-only"],
   cursor: ["plan"],
 };
 
-/** Whether the composer should draw its dashed "guarded" frame for this
- *  agent+mode — the modes where the agent asks/plans before acting. */
 export function permissionModeShowsFrame(
   agentId: string | null,
   modeId: string | null,
@@ -940,17 +811,10 @@ export function permissionModeShowsFrame(
   );
 }
 
-/** Coerce a native permission-mode id to one the given model's menu actually
- *  OFFERS, for marking the active (✓) row. When the mode is still valid it's
- *  returned unchanged; when it isn't — e.g. an "auto" chat whose model is
- *  switched to Claude Haiku, whose menu drops "auto" (no classifier) — it's
- *  coerced so the Permissions menu never ends up with NO active row (the user
- *  can't tell what mode they're in). "auto" already behaves as "accept-edits" on
- *  a classifier-less model (see CLAUDE_MODES), so coercing to it is TRUTHFUL, not
- *  a silent change: the persisted mode is left alone, so switching back to a
- *  model that supports "auto" restores it. Prefers "accept-edits", else the
- *  menu's first entry. A null/unset mode, or a family with no menu, passes
- *  through unchanged. */
+/** Coerce a mode id to one this model's menu offers, so the menu always has an
+ *  active row: an "auto" chat switched to Claude Haiku shows "accept-edits",
+ *  which is how auto behaves without a classifier. The persisted mode is left
+ *  alone, so switching back restores it. */
 export function coerceModeIdForModel(
   agentId: string | null,
   model: string | null,
@@ -964,16 +828,10 @@ export function coerceModeIdForModel(
   return (items.find((i) => i.modeId === "accept-edits") ?? items[0]).modeId;
 }
 
-// A native agent's permission modes, mirrored on the renderer for the
-// PRE-SESSION window — a brand-new chat that's still warming, or one whose
-// bind failed (no folder). Until the engine advertises `availableModes`, the
-// "+" → Permissions menu would otherwise fall back to the GENERIC local posture
-// list (Full Access / Auto Edit / Ask First / Plan Only), which has no Bypass
-// and reads like Codex's vocabulary — confusing on a Claude chat. Returning the
-// agent's REAL modes here surfaces e.g. Claude's Bypass immediately. Once the
-// session binds, the engine's live modes (same ids) replace these, so a pick
-// made pre-bind reconciles by id (reconcilePermissionModeAtBind + lastModeId).
-// Keep CLAUDE_MODES byte-for-byte in sync with claude-sdk/adapter.ts `MODES`.
+// Native modes mirrored for the pre-session window, so the menu shows the
+// agent's real vocabulary (Claude's Bypass) before availableModes arrives; the
+// live modes reconcile by id on bind. Keep in sync with claude-sdk/adapter.ts
+// MODES.
 const CLAUDE_MODES: SessionMode[] = [
   { id: "default", name: "Default", description: "Ask before edits." },
   { id: "plan", name: "Plan", description: "Design without executing." },
@@ -995,11 +853,9 @@ const CLAUDE_MODES: SessionMode[] = [
   },
 ];
 
-// Cursor's three Zeros modes (sdk mode plan|agent × create-time autoReview).
-// Mirror them for the pre-session window so a reopened Cursor chat shows its
-// mode toggle IMMEDIATELY from persisted state — before the SDK re-advertises
-// `availableModes` (which otherwise only happened after the user switched chats
-// and back). Keep in sync with cursor-sdk/adapter.ts CURSOR_SDK_MODES.
+// Cursor's modes (plan or agent, times autoReview), mirrored so a reopened chat
+// shows its toggle before the SDK re-advertises. Keep in sync with
+// cursor-sdk/adapter.ts CURSOR_SDK_MODES.
 const CURSOR_MODES: SessionMode[] = [
   { id: "plan", name: "Ask", description: "Designs a plan; makes no edits." },
   {
@@ -1015,12 +871,8 @@ const CURSOR_MODES: SessionMode[] = [
   },
 ];
 
-/** The selected agent's statically-known permission modes for the pre-session
- *  window. Claude + Cursor mirror their real modes here so the pre-bind composer
- *  matches the agent's true vocabulary — Claude's Bypass in the "+" menu,
- *  Cursor's Plan toggle. Codex returns [] on purpose: its Plan toggle is covered
- *  by the family shortcut, its "+" menu by the fixed posture list, and its live
- *  modes reconcile by posture at bind. Unknown agents also get []. */
+/** Statically known permission modes for the pre-session window. Codex returns
+ *  [] on purpose: its modes reconcile by posture at bind. */
 export function staticModesForAgent(agentId: string | null): SessionMode[] {
   switch (agentFamily(agentId)) {
     case "claude":
@@ -1031,8 +883,6 @@ export function staticModesForAgent(agentId: string | null): SessionMode[] {
       return [];
   }
 }
-
-// ── Live-discovery extraction (capability overlay source) ──
 
 /** The unified cloud menu can show Codex while Claude/Cursor owns the chat.
  * Never apply one agent's account eligibility to another, or borrow a Local
@@ -1067,14 +917,11 @@ function extractMetaModels(
   return valid.length > 0 ? valid : null;
 }
 
-/** Resolve the {@link ModelOption} for a picked model value against the (curated,
- *  capability-overlaid) list, preferring an exact match then an alias-normalized
- *  one. A hidden account-qualified compatibility value can still resolve for
- *  labels/configuration, but is returned with `selectable: false` and never
- *  joins the picker list. A null/unset `model` resolves to the agent's global
- *  default (the star, falling back to the catalog head) — the single definition of "what a null
- *  ChatThread.model means", shared by the capability gates, the spawn env, and
- *  the composer pill's label. Returns null only when the agent has no models. */
+/** Resolve the ModelOption for a model value: exact match first, then alias.
+ *  A hidden account-qualified value resolves for labels with selectable false.
+ *  A null model resolves to the agent's global default: the single meaning of a
+ *  null ChatThread.model, shared by capability gates, the spawn env and the
+ *  pill. */
 export function resolveModelOption(
   agentId: string | null,
   model: string | null,
@@ -1082,14 +929,8 @@ export function resolveModelOption(
 ): ModelOption | null {
   const family = agentFamily(agentId);
   const list = modelsForAgent(agentId, initialize);
-  // A null/empty model means "the agent's global default" — the very model the
-  // ModelPill DISPLAYS as active. Resolve it through the SAME favorite-first
-  // chain the pill uses so the Effort/Fast capability gates match what the pill
-  // shows. Without this a fresh Cursor chat displays "Composer 2.5" but the
-  // gates read the cursor family heuristic (false) and HIDE the Fast toggle
-  // that Composer 2.5 supports; and a null-model Claude chat displayed the
-  // starred Opus 5 while the gates read models[0] (Fable 5) — a model with a
-  // different Fast capability than the one on screen.
+  // Resolve null through the same favorite-first chain the pill displays, so the
+  // Effort and Fast gates match what is on screen.
   if (!model) {
     const favorite = effectiveFavoriteModel(agentId);
     if (favorite) {
@@ -1116,15 +957,9 @@ export function resolveModelOption(
   );
 }
 
-// ── Curated-name invariant ───────────────────────────────
-
-/** The ONLY `ModelOption` fields live provider discovery is allowed to write
- *  onto a curated row. Everything absent from this list — `value`, `label`,
- *  `badge`, `liveRequired`, `minCliVersion` — stays exactly as curated.
- *
- *  This is an allowlist, not a denylist, on purpose: a new display field added
- *  to {@link ModelOption} must be opted IN here to ever come from a provider,
- *  so no future field can leak provider copy into the picker by accident. */
+/** The only fields live discovery may write onto a curated row. An allowlist on
+ *  purpose: a new display field must be opted in, so provider copy cannot leak
+ *  into the picker by accident. */
 export const LIVE_OVERLAYABLE_FIELDS = [
   "aliases",
   "parameters",
@@ -1134,27 +969,11 @@ export const LIVE_OVERLAYABLE_FIELDS = [
   "supportsFast",
 ] as const satisfies readonly (keyof ModelOption)[];
 
-/** Merge a curated row with the SAME model's live discovery record.
- *
- *  MODEL NAMES ARE NEVER FETCHED. `label` is curated-only, full stop — the
- *  picker, the composer pill, Settings → Models, and the transcript cards all
- *  read this one label, and every provider ships its own marketing name for the
- *  same wire id: the Claude CLI calls `claude-opus-5[1m]` "Opus (1M context)",
- *  Codex's `model/list` renames `gpt-5.6-sol`, Cursor renames its own ids. Any
- *  of those silently rewrote the curated name — and worse, an id that
- *  alias-normalizes onto a NEIGHBOURING curated row (the CLI's floating `opus`
- *  selector) put one model's name on another's row. Provider renames now change
- *  nothing a user sees; only `catalogs/models-v1.json` does.
- *
- *  `description` is curated-owned too, with live allowed to FILL IN a row the
- *  catalog left blank (extra provider detail is additive; overwriting our copy
- *  is not).
- *
- *  Capabilities go the other way: a field the live record CARRIES is
- *  authoritative for this account/runtime even when it answers "none" (`[]`,
- *  `false`), because keeping a bundled full ladder would offer controls the
- *  provider rejects. A field the live record OMITS leaves the curated fallback
- *  standing. */
+/** Merge a curated row with the same model's live record. Names are never
+ *  fetched: providers rename wire ids, and an alias landing on a neighbouring
+ *  row once put one model's name on another. Live may only fill a blank
+ *  description. A capability the live record carries is authoritative even when
+ *  it says none; an omitted one leaves the curated fallback. */
 export function overlayLiveCapabilities(
   curated: ModelOption,
   live: ModelOption,
@@ -1172,23 +991,10 @@ export function overlayLiveCapabilities(
   return out;
 }
 
-// ── Public API ────────────────────────────────────────────
-
-/** Resolve the model list the picker DISPLAYS for the given agent. The curated
- *  catalog drives WHICH models show AND what each is NAMED; live
- *  `initialize._meta.models` discovery only OVERLAYS per-model capabilities
- *  (effort ladder + fast + selectability). Families with no curated entries
- *  fall back to whatever the agent advertised live — there is no curated name
- *  to protect for a model we never listed.
- *
- *  Display copy (`label`, and `description` when curated) is NEVER taken from
- *  the provider: see {@link overlayLiveCapabilities}.
- *
- *  Note: a model's `minCliVersion` is checked at BUILD time by
- *  `pnpm models:verify` (and the catalog vitest), NOT gated here at runtime — a
- *  runtime gate made a model VANISH the moment you selected it (the version
- *  signal transitions as the session binds), and the SDK is pinned to a CLI that
- *  supports the curated models anyway. */
+/** The model list the picker displays: curated rows with live capabilities and
+ *  eligibility overlaid; families without curated rows use the live list.
+ *  minCliVersion is checked at build time (models:verify), not here: a runtime
+ *  gate made a model vanish as its session bound. */
 export function modelsForAgent(
   agentId: string | null,
   initialize: InitializeResponse | null,
@@ -1200,9 +1006,6 @@ export function modelsForAgent(
   if (curated.length === 0) return advertised ?? [];
   if (!advertised) return curated.filter((model) => !model.liveRequired);
 
-  // The bundled catalog owns WHICH models are displayed AND WHAT THEY ARE
-  // CALLED. Exact live metadata owns what this installed runtime/account can
-  // actually execute.
   const liveBySlug = new Map<string, ModelOption>();
   for (const m of advertised)
     liveBySlug.set(normalizeModelSlug(family, m.value), m);
@@ -1220,12 +1023,8 @@ export function modelsForAgent(
   });
 }
 
-/** A wire model id's display label ("claude-fable-5-20260203" →
- *  "Fable 5"), falling back to the raw id when the catalog doesn't list it.
- *  `agentId` may be null — a model id substring-matches its own family
- *  (agentFamily("claude-sonnet-5") === "claude"), so the id itself is used as
- *  the owner then. Used by the turn footer's usage popover and the
- *  Model-switched / Turn-stopped transcript cards. */
+/** A wire model id's display label, or the raw id when uncatalogued. Used by
+ *  the usage popover and the model-switched and turn-stopped cards. */
 export function displayNameForModelValue(
   agentId: string | null,
   id: string,
@@ -1259,36 +1058,21 @@ export function modelEnvVarForAgent(
 /** Env var for thinking effort. Zeros convention, not agent spec. */
 export const EFFORT_ENV_VAR = "ZEROS_THINKING_EFFORT";
 
-/** Env var carrying the composer's Fast-mode toggle ("1" when on). Zeros
- *  convention. Read by the Claude SDK adapter (→ `fastMode` setting) and the
- *  Codex app-server adapter (→ `service_tier: "fast"`), or by Cursor to set a
- *  native model parameter / legacy live-catalog fast variant. */
+/** Env var carrying the Fast toggle ("1" when on), read by the Claude SDK
+ *  (fastMode), Codex (service_tier fast) and Cursor adapters. */
 export const FAST_MODE_ENV_VAR = "ZEROS_FAST_MODE";
 
-/** Env var carrying the composer's local permission posture
- *  (full | auto-edit | ask | plan-only). Zeros convention. Mode-advertising
- *  agents are driven live by the PermissionsPill via setMode, so this is
- *  the carriage channel for env-consuming agents plus a durable record of
- *  the pre-session choice the session-start reconcile applies. */
+/** Env var carrying the pre-session permission posture, for env-consuming
+ *  agents and the session-start reconcile; mode-advertising agents change mode
+ *  live through setMode. */
 export const PERMISSION_MODE_ENV_VAR = "ZEROS_PERMISSION_MODE";
 
-/** Stable key for "which composer env is this live session actually running",
- *  used BOTH to stamp a session slot (`appliedChatEnvKey`) and to compare
- *  against the chat's current env in sendPrompt's settings-drift reconcile.
- *  One function so the two sites can never drift apart — a stamp computed
- *  differently from the comparison is indistinguishable from a real change and
- *  costs a cold respawn.
- *
- *  Object key order is NOT normalized on purpose: every env here is built by
- *  envForChat, which assigns keys in a fixed order, so JSON.stringify is
- *  already stable between the two callers.
- *
- *  PERMISSION_MODE_ENV_VAR is excluded. The permission posture is applied to a
- *  live session through its own RPC (AGENT_SET_MODE — implemented by all three
- *  adapters, not an optional hook), so a mode change can never be a reason to
- *  rebuild. Leaving it in the key made every Plan-mode toggle look like drift,
- *  and the reconcile then needlessly close→resumed the provider execution on
- *  the next send. */
+/** The key both stamped on a slot (appliedChatEnvKey) and compared in
+ *  sendPrompt's drift reconcile; one function so the two can never differ,
+ *  which would cost a cold respawn. Key order is stable because envForChat
+ *  assigns keys in a fixed order. PERMISSION_MODE_ENV_VAR is excluded: modes
+ *  change live through AGENT_SET_MODE, and including it made every Plan toggle
+ *  look like drift. */
 export function chatEnvDriftKey(
   env: Record<string, string> | undefined,
 ): string {
@@ -1297,20 +1081,11 @@ export function chatEnvDriftKey(
   return JSON.stringify(rest);
 }
 
-/** Move an EXISTING `appliedChatEnvKey` stamp onto a new effort, leaving every
- *  other component of the key untouched.
- *
- *  For a PROVIDER-ORIGINATED effort change (Codex raising its own thread to
- *  Ultra, reported back via `current_effort_update`) the running session is
- *  already at the new tier, so persisting it onto the chat must NOT read as
- *  user drift in sendPrompt's reconcile — that would close→resume an already
- *  correct execution. Re-stamping only the effort slot is what keeps a
- *  genuinely-unapplied model/Fast/add-dir change still visible as drift, which
- *  a full `chatEnvDriftKey(envForChat(chat))` re-stamp would silently swallow.
- *
- *  Returns undefined when there is nothing safe to re-stamp: an unstamped slot
- *  (legacy — the reconcile skips those anyway), an unparseable stamp, or one
- *  built without an effort entry. */
+/** Move an existing appliedChatEnvKey stamp onto a new effort, leaving the rest
+ *  of the key untouched. A provider-originated effort change (Codex raising
+ *  itself to Ultra) is already applied, so it must not read as drift, while an
+ *  unapplied model, Fast or add-dir change stays visible. undefined when there
+ *  is nothing safe to re-stamp. */
 export function effortAdoptedEnvKey(
   appliedChatEnvKey: string | undefined,
   effort: string,
@@ -1334,10 +1109,8 @@ export function effortAdoptedEnvKey(
   return JSON.stringify(env);
 }
 
-/** Env var carrying the composer's extra working directories (Claude `/add-dir`)
- *  as a JSON array of absolute paths. Zeros convention. Read by the Claude SDK
- *  adapter (→ `Options.additionalDirectories`). Only emitted when non-empty so
- *  it never perturbs the respawn key for chats without extra dirs. */
+/** Env var carrying extra working directories (Claude /add-dir) as a JSON
+ *  array; emitted only when non-empty so it never perturbs the respawn key. */
 export const ADDITIONAL_DIRS_ENV_VAR = "ZEROS_ADDITIONAL_DIRS";
 
 /** Renderer→engine carriage for the bounded persistent-query idle lifetime. */
@@ -1356,26 +1129,15 @@ export function envForChatSettings(args: {
 }): Record<string, string> {
   const env: Record<string, string> = {};
   const modelEnv = modelEnvVarForAgent(args.agentId, args.initialize);
-  // A null model means "the agent's global default". Resolve it to the SAME
-  // model the ModelPill displays (resolveModelOption's null branch — favorite
-  // first, catalog head as the floor) and SEND it, instead of omitting the env
-  // var and letting the agent CLI fall back to its own configured default —
-  // which can silently differ from what the pill shows (2026-07-13: pill
-  // displayed the catalog default while the engine ran the user's ~/.claude
-  // model). Resolving through the shared chain is what keeps the engine on the
-  // model the user can actually see: sending models[0] here while the pill
-  // rendered the starred model ran Fable 5 under an "Opus 5" label. Unknown
-  // families with no catalog still omit (nothing displayed to contradict).
+  // Resolve a null model to what the pill displays and send it, rather than
+  // letting the CLI fall back to its own default, which can differ from the pill.
   const model =
     args.model ??
     resolveModelOption(args.agentId, null, args.initialize)?.value ??
     null;
   if (model && modelEnv) env[modelEnv] = model;
-  // Send the tier this model can actually run. The pill's label and the menu's
-  // editor apply the same clamp, so a stored tier that went off-ladder (retired
-  // by a catalog update, hand-edited into settings.toml) can never make the
-  // engine run something other than what is on screen. An unknown string is
-  // passed through untouched — an extension agent owns its own vocabulary.
+  // Send the tier this model can run, the same clamp the label and editor apply.
+  // Unknown strings pass through: extension agents own their vocabulary.
   const family = agentFamily(args.agentId);
   const nativeFamily =
     family === "claude" || family === "codex" || family === "cursor";

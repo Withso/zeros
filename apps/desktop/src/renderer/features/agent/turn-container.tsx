@@ -1,30 +1,7 @@
-// ──────────────────────────────────────────────────────────
-// TurnContainer — per-turn structural wrapper for the chat
-// ──────────────────────────────────────────────────────────
-//
-// Every event between two consecutive user
-// prompts forms a "turn." The renderer wraps each turn in a
-// container so the active turn's user prompt can be sticky-
-// positioned at the top of the scroll viewport for the entire
-// duration of that turn, keeping the initiating prompt visible
-// during long-running work.
-//
-// Once the next turn starts (a new user prompt arrives), the
-// previous turn's container is no longer active, sticky drops
-// off, and the prompt scrolls naturally with the rest of the
-// transcript.
-//
-// `groupMessagesIntoTurns` is the pure boundary-detection
-// helper. A turn starts on every text message with role:"user".
-// Everything else (assistant text, thinking, tool calls) is
-// part of the most recent turn's `events`. Messages that arrive
-// before any user prompt land in a "system turn" with
-// `userPrompt: null` (rare; happens during agent warm-up).
-// It lives in turn-grouping.ts (React-free, so the transcript
-// formatter and unit tests can group without this module's
-// React/composer/store imports) and is re-exported here.
-//
-// ──────────────────────────────────────────────────────────
+// Every event between two user prompts forms a turn. groupMessagesIntoTurns
+// (turn-grouping.ts, React-free for the transcript formatter and tests) starts
+// a turn at each user text message; events before any prompt form a system
+// turn with a null prompt.
 
 import React, { memo, useCallback, useEffect, useRef, useState } from "react";
 import type { LocalMessageChatRef } from "@zeros/protocol/agent-messages";
@@ -78,10 +55,7 @@ export {
 
 interface TurnContainerProps {
   turn: Turn;
-  /** True when this is the most recent turn (and therefore the
-   *  one whose user prompt sticky-pins to the viewport top).
-   *  Only one turn is active at a time; older turns scroll
-   *  naturally with the rest of the transcript. */
+  /** True for the most recent turn; only one turn is active at a time. */
   isActive: boolean;
   children: React.ReactNode | (() => React.ReactNode);
   /** Only provisional cloud windows defer rich offscreen trees. The retained
@@ -92,15 +66,8 @@ interface TurnContainerProps {
   scrollRoot?: HTMLElement | null;
 }
 
-/**
- * Wraps a turn's children in a container that establishes the
- * positioning context for the sticky user-prompt header. The
- * actual sticky styling lives on the inner `<TurnPromptHeader>`
- * — the container itself just provides the layout boundary.
- *
- * Memoized so a streaming chunk to the active turn doesn't
- * re-render the inactive turns above it.
- */
+/** Establishes the layout boundary for the turn's prompt header. Memoized so
+ *  a chunk streaming into the active turn doesn't re-render the turns above. */
 export const TurnContainer = memo(function TurnContainer({
   turn,
   isActive,
@@ -123,34 +90,19 @@ export const TurnContainer = memo(function TurnContainer({
     if (element.current) observer.observe(element.current);
     return () => observer.disconnect();
   }, [showContent, surfaceActive, scrollRoot]);
-  // The .zeros-agent-turn / -turn-active class names are retained for
-  // any external DOM selectors (e.g. future jump-by-turn navigation);
-  // visual styling now lives on the inline utilities below. content-
-  // visibility lets the browser skip layout/paint for off-viewport
-  // finalized turns; the active turn always renders so its sticky
-  // prompt + live tool cards stay in the layout tree.
-  //
-  // `auto` in contain-intrinsic-size makes a skipped turn use its
-  // LAST RENDERED height instead of the fixed 240px estimate. Without it,
-  // hiding a chat (visibility-hidden deck layer, workspace switch) collapsed
-  // every turn to 240px — the transcript's scrollHeight shrank, the browser
-  // clamped scrollTop, and the reading position shifted on every reveal by
-  // the accumulated estimate error. With the remembered size, hide/reveal is
-  // geometry-preserving for any turn that has been rendered at least once;
-  // never-rendered far history keeps the 240px estimate (identical at save
-  // and restore time, so offsets stay consistent there too).
+  // `zeros-agent-turn` and `zeros-agent-turn-active` stay as hooks for DOM
+  // selectors; styling lives in the utilities.
+  // content-visibility skips layout and paint for finalized off-screen turns;
+  // the active turn always renders. `auto` in contain-intrinsic-size makes a
+  // skipped turn keep its last rendered height instead of the 240px estimate,
+  // so hiding and revealing a chat no longer shifts the reading position.
   const className = isActive
     ? "zeros-agent-turn zeros-agent-turn-active flex flex-col gap-4 relative [content-visibility:visible] [contain-intrinsic-size:auto_0px_auto_240px]"
     : "zeros-agent-turn flex flex-col gap-4 relative [content-visibility:auto] [contain-intrinsic-size:auto_0px_auto_240px]";
-  // The old per-turn TurnRail duplicated the collapsed-turn chip row, so the
-  // checkpoint id is now the only left-gutter navigation hook.
-  //
-  // data-checkpoint-id is the CheckpointRail's scroll-spy /
-  // click-to-jump anchor. It lives on THIS element (not the prompt
-  // header inside) because this is the content-visibility boundary —
-  // measuring a descendant would force layout of every skipped turn on
-  // each scroll frame. The container's top equals the prompt's top (the
-  // prompt is the first child), so the rail's math is exact.
+  // data-checkpoint-id is CheckpointRail's anchor. It sits on this
+  // content-visibility boundary because measuring a descendant would force
+  // layout of every skipped turn; the prompt is the first child, so their tops
+  // match.
   return (
     <div
       ref={element}
@@ -171,42 +123,19 @@ export const TurnContainer = memo(function TurnContainer({
   );
 });
 
-// Still-pending queued sends render in the QueuedMessagesCard docked above the
-// composer, not as greyed transcript bubbles. See
-// apps/desktop/src/renderer/features/agent/queued-messages-card.tsx.
-
-/**
- * Sticky-positioned wrapper for a turn's user prompt.
- *
- * All turns are sticky: as the user scrolls up through history
- * each turn's prompt pins to the viewport top until the next turn's
- * prompt arrives and pushes it off. Previously only the active turn
- * pinned, which lost the "what did I ask?" anchor for older turns.
- *
- * Click-to-edit: when `originalText` + `onEdit` are passed,
- * clicking the header swaps the children for an editable textarea
- * pre-filled with the original prompt. Cmd+Enter / Enter submits;
- * Esc cancels. Submission truncates this message + everything after
- * (caller's responsibility) and re-sends the edited text. Files on
- * disk are NOT reverted; reverting files is a separate snapshot operation.
- *
- * Long prompts (>3 lines) collapse to a clamped preview
- * with a chevron toggle, so a multi-paragraph prompt doesn't eat
- * viewport while pinned. Short prompts (single line, ≤3 lines)
- * skip the chrome entirely — the chevron only appears when content
- * actually overflows the clamp.
- */
-/** Agent context the edit-mode composer needs for attachment
- *  validation and image-vs-disk routing. Mirrors the args
- *  `useComposerAttachments` accepts so the edit composer behaves
- *  identically to the main one. */
+/** A turn's user prompt bubble. With originalText and onEdit, its edit button
+ *  swaps in an inline editor seeded with the prompt; submitting truncates from
+ *  this message (the caller's job) and resends. Files on disk are not reverted;
+ *  that is a separate snapshot operation. */
+/** Agent context the edit composer needs for attachment validation and
+ *  image-versus-disk routing, as the main composer has. */
 export interface EditAgentContext {
   agentId: string | null;
   agentName: string | null;
   agentSupportsImage: boolean | undefined;
   modelId: string | null;
-  /** Slash-command + @-mention + #-PR picker inputs (so the edit composer
-   *  has the SAME pickers as the chat composer via useComposerPickers). */
+  /** Picker inputs, so the edit composer has the same pickers as the chat
+   *  composer. */
   availableCommands?: AvailableCommand[];
   cwd?: string | null;
   originUrl?: string | null;
@@ -230,27 +159,21 @@ export const TurnPromptHeader = memo(function TurnPromptHeader({
   surfaceActive = true,
 }: {
   children: React.ReactNode;
-  /** The chat this turn belongs to. Used together with `messageId`
-   *  to key the persistent edit-draft stash in the workspace store
-   *  (so a draft survives chat switches). */
+  /** With messageId, keys the edit-draft stash in the workspace store so a draft
+   *  survives chat switches. */
   chatId?: string;
-  /** The user message id this header represents. Drives single-edit-
-   *  at-a-time coordination via `editingMessageId` lifted to the
-   *  parent (only the header whose id matches enters edit mode). */
+  /** Only the header whose id matches the parent's editingMessageId edits. */
   messageId?: string;
   /** Epoch-ms the user message was created. Rendered as a compact
    *  age ("6s" / "6m" / "6h" / "6d" / "6y") in the hover actions row. */
   createdAt?: number;
-  /** The parent owns "which turn is being
-   *  edited" so opening edit on one turn auto-closes any other.
-   *  `null` = no turn in edit mode. */
+  /** Lifted to the parent, so opening one turn's edit closes any other; null
+   *  means none. */
   editingMessageId?: string | null;
   /** Called with this header's `messageId` to claim edit mode, or
    *  with `null` to release it. */
   onRequestEdit?: (id: string | null) => void;
-  /** The plain text of the user message wrapped by this header. When
-   *  paired with `onEdit`, clicking the header opens an editable
-   *  textarea seeded with this text. Omit both to disable editing. */
+  /** The message's plain text; with onEdit, enables editing. */
   originalText?: string;
   /** Attachments stamped on the original user message. Disk-backed image
    *  references are reconstructed into the inline editor; legacy data URLs
@@ -259,28 +182,21 @@ export const TurnPromptHeader = memo(function TurnPromptHeader({
   /** Ordered segments of the original message — reconstructs mention pills
    *  when editing (plain-text fallback for pre-editor messages). */
   originalSegments?: MessageContentSegment[];
-  /** Submit handler for the click-to-edit flow. Called with the trimmed
-   *  edited text, ALL staged attachments (reconstructed originals + new,
-   *  inline), and the ordered bubble segments. Omit to disable editing. */
+  /** Submit for click-to-edit, with the trimmed text, every staged attachment
+   *  (reconstructed originals and new ones) and the ordered segments. */
   onEdit?: (
     editedText: string,
     attachments: ComposerAttachment[],
     segments: ComposerSegment[],
   ) => void | boolean | Promise<void | boolean>;
-  /** Pills (model / effort / permissions) rendered in the edit-mode
-   *  toolbar so editing a past message has the same affordances as
-   *  the main composer. The component appends its own Cancel/Send
-   *  controls after these pills. */
+  /** Pills rendered in the edit toolbar, before its own Cancel and Send. */
   editToolbarPills?: React.ReactNode;
-  /** The edit composer is a full composer, so
-   *  so it needs the same agent / model context the main composer
-   *  feeds into `useComposerAttachments` for per-attachment
-   *  validation. Required when `onEdit` is set. */
+  /** The agent and model context for per-attachment validation; required with
+   *  onEdit. */
   editAgentContext?: EditAgentContext;
-  /** Set when Zeros auto-sent this message on the user's behalf (PR-island /
-   *  Create-PR buttons). Renders the brown "sent by Zeros" bubble with the
-   *  action's icon. Callers also omit `onEdit` for these — the wire text is a
-   *  generated brief the short label can't round-trip. */
+  /** Set when Zeros sent this message on the user's behalf (PR island, Create
+   *  PR): the brown "sent by Zeros" bubble. Callers also omit onEdit, because the
+   *  wire text is a generated brief the label cannot round-trip. */
   autoAction?: string;
   /** Provenance belongs above the bubble, including steers and saved history. */
   localFrom?: LocalMessageChatRef;
@@ -289,12 +205,8 @@ export const TurnPromptHeader = memo(function TurnPromptHeader({
    *  true for callers that do not track surfacing. */
   surfaceActive?: boolean;
 }) {
-  // Edit-mode draft state lives in
-  // the workspace store keyed by `${chatId}:${messageId}` so it
-  // survives the chat-view remount when the user switches chats and
-  // comes back. Local TurnPromptHeader state would die with AgentChat
-  // — and that bug was exactly what users hit ("after a few minutes
-  // it was gone" = they switched chats in between).
+  // Edit drafts live in the workspace store, keyed by chatId:messageId, so they
+  // survive the chat view remounting on a chat switch; local state died with it.
   const dispatch = useWorkspaceDispatch();
   const editStashKey =
     chatId && messageId !== undefined ? `${chatId}:${messageId}` : null;
@@ -314,10 +226,6 @@ export const TurnPromptHeader = memo(function TurnPromptHeader({
   }, [chatId, messageId, dispatch]);
 
   const editable = !localFrom && !!onEdit && typeof originalText === "string";
-  // Editing is derived from the lifted parent state — only the
-  // header whose messageId matches editingMessageId is in edit mode.
-  // Switching to another header auto-closes this one (the parent
-  // updates editingMessageId to the new id and this branch unmounts).
   const editing =
     editable && messageId !== undefined && messageId === editingMessageId;
 
@@ -330,12 +238,8 @@ export const TurnPromptHeader = memo(function TurnPromptHeader({
     onRequestEdit?.(null);
   }, [onRequestEdit]);
 
-  // ── Editing ──────────────────────────────────────────────
-  // Expand to a full-width composer card so the inline editor has room.
-  // Echoes the bottom composer's chrome (bg-bg2 + border-border2 +
-  // px-3.5 py-3) so editing a past message reads as the same surface
-  // family. The inner TurnPromptEditor neutralises its own InputGroup
-  // chrome so this wrapper's chrome shows through.
+  // Edit mode expands to a full-width card that echoes the bottom composer's
+  // chrome; TurnPromptEditor neutralizes its own InputGroup chrome.
   if (editing && onEdit) {
     return (
       <div
@@ -344,10 +248,8 @@ export const TurnPromptHeader = memo(function TurnPromptHeader({
           PROMPT_SURFACE_RADIUS,
         )}
       >
-        {/* Mounted-only-while-editing keeps `useComposerAttachments`'
-            document-level drag listeners scoped to the active edit
-            (otherwise every TurnPromptHeader on the page would attach
-            its own pair). */}
+        {/* Mounted only while editing, so its document-level drag listeners exist
+            for the active edit alone. */}
         <TurnPromptEditor
           key={editStashKey}
           chatId={chatId}
@@ -368,46 +270,13 @@ export const TurnPromptHeader = memo(function TurnPromptHeader({
     );
   }
 
-  // ── Display ──────────────────────────────────────────────
-  // A right-aligned, fit-to-content bubble (capped at min(800px, 100%)). The
-  // right offset + bubble shape is what signals "this is what *you* said"
-  // and distinguishes it from agent output. The 800px cap matches the
-  // agent answer lane's cap (turn-event-list.tsx): both content streams read
-  // inside the conversation's 800px content column (the max-w-[856px]
-  // band/composer envelope minus its 28px gutters). The
-  // wrapper's `items-end` right-anchors this bubble to the band's right edge
-  // (lining up with the composer's right edge); the answer lane is the
-  // left-anchored counterpart, so the conversation reads prompt-right /
-  // answer-left within the wide envelope. The 100% arm of the cap is
-  // LOAD-BEARING: `w-fit` floors at the content's min-content width, and a
-  // pasted log/JSON blob (no spaces → no soft-wrap opportunities) or an
-  // inline attachment pill can push min-content past a narrow pane. Because
-  // `items-end` anchors the RIGHT edge, every overflowing pixel spilled off
-  // the LEFT edge, where the scroller's overflow-x-hidden clipped it — the
-  // bubble read as "cut off" until the pane was widened. min(800px, 100%)
-  // keeps the fit-to-content look but never lets the bubble exceed the lane
-  // (text-message.tsx pairs this with `wrap-anywhere` so the text inside
-  // wraps rather than clips). NOT sticky
-  // any more:
-  // the prompt scrolls freely with the transcript (the JumpToPromptPill
-  // still offers a manual "jump to your prompt" when it scrolls off).
-  //   • bg-highlighted-bg + border-border1 + px-3 py-2 (12px horizontal /
-  //     8px vertical) + PROMPT_SURFACE_RADIUS (12px, all corners — the same
-  //     corner the composer the message was typed in wears) — the inner
-  //     MessageContent keeps its text-fg1, so the bubble look is unchanged
-  //     from before; only the width + alignment changed.
-  //   • cursor-text/select-text: the bubble is plain content now, so its
-  //     text is selectable — click-to-edit moved to the explicit edit
-  //     button in the hover actions row beneath it.
-  // The actions row (edit / copy / age) is absolutely positioned at the
-  // bottom-right and fades in on hover, so it costs no layout height.
-  // Auto-sent bubbles ("sent by Zeros" — PR island / Create PR): the brown
-  // treatment + the firing button's icon differentiates them from typed
-  // messages. Copy-only (editable is false — callers omit onEdit).
-  // Sent prompts deliberately have no max-height: typed long-form messages
-  // remain fully visible. Oversized clipboard text is converted into a .txt
-  // attachment before send, but legacy and intentionally typed prose still
-  // renders without a truncation overlay.
+  // A right-aligned, fit-to-content bubble capped at min(800px, 100%), matching
+  // the answer lane's cap (turn-event-list.tsx). The 100% arm matters: w-fit
+  // floors at min-content width, and an unbreakable paste would spill off the
+  // left edge, where the scroller clips it. text-message.tsx pairs it with
+  // wrap-anywhere. The text is selectable; editing uses the hover row's button.
+  // Long prompts are never truncated: oversized clipboard text becomes a .txt
+  // attachment before send.
   const AutoIcon = autoAction ? autoActionIcon(autoAction) : null;
   const bubble = (
     <div
@@ -416,18 +285,15 @@ export const TurnPromptHeader = memo(function TurnPromptHeader({
         "w-fit max-w-[min(800px,100%)] cursor-text border px-3 py-2 select-text",
         PROMPT_SURFACE_RADIUS,
         autoAction
-          ? // font-medium (500) sets the auto-sent label apart from typed
-            // prose — only these "Create a PR" / "Commit & Push" bubbles.
+          ?
             "bg-brown-bg text-brown-fg border-transparent font-medium"
           : "border-border1 bg-highlighted-bg",
       )}
     >
-      {/* Preserve the former reveal component's two block wrappers so
-          removing the clamp does not change fit-content width geometry. */}
+      {/* Two block wrappers keep the fit-content width geometry unchanged. */}
       <div className="relative">
         <div>
           {AutoIcon ? (
-            // 16px icon at 2px stroke, with a tight 6px gap to the label.
             <div className="flex items-start gap-1.5">
               <AutoIcon
                 className="text-brown-fg mt-0.5 size-4 shrink-0"
@@ -445,10 +311,8 @@ export const TurnPromptHeader = memo(function TurnPromptHeader({
   return (
     <div className="zeros-agent-turn-prompt group/usermsg relative flex flex-col items-end">
       {localFrom ? (
-        // Provenance and its bubble form one right-aligned group. The bubble
-        // fits its text and stays flush right; the header keeps its own width
-        // at the group's left edge — the bubble's left edge when the message
-        // is wider, flush right above a shorter message.
+        // Provenance and its bubble form one right-aligned group; the header keeps its
+        // own width at the group's left edge.
         <div data-local-from-group="" className="flex w-fit max-w-[min(800px,100%)] min-w-0 flex-col items-end">
           <div data-local-from="" className="mb-2 flex max-w-full min-w-0 items-center gap-1 self-start text-xs text-fg3">
             <span className="shrink-0">Sent from</span>
@@ -471,14 +335,9 @@ export const TurnPromptHeader = memo(function TurnPromptHeader({
   );
 });
 
-// ──────────────────────────────────────────────────────────
-// UserMessageActions — hover row beneath a sent user bubble
-// ──────────────────────────────────────────────────────────
-//
-// Floats at the bubble's bottom-right (absolute, top-full) and fades in
-// on hover/focus of the surrounding `group/usermsg`. Holds the edit and
-// copy affordances plus a compact age badge. pointer-events are gated on
-// hover so the (invisible) row never intercepts clicks on content below.
+// The hover row beneath a sent user bubble: edit, copy and a compact age. It is
+// absolutely positioned and takes pointer events only on hover, so the hidden
+// row never intercepts clicks.
 function UserMessageActions({
   text,
   createdAt,
@@ -498,9 +357,8 @@ function UserMessageActions({
 
   const copy = useCallback(async () => {
     try {
-      // Trim trailing whitespace so the clipboard matches the rendered
-      // bubble (text-message.tsx trims the display) — copy never carries
-      // stray end-of-message newlines/spaces. Edit keeps the raw text.
+      // Trim trailing whitespace to match the rendered bubble; edit keeps the raw
+      // text.
       await navigator.clipboard.writeText(text.trimEnd());
       setCopied(true);
       setTimeout(() => setCopied(false), 1500);
@@ -509,7 +367,6 @@ function UserMessageActions({
     }
   }, [text]);
 
-  // 16px button with a 12px icon (2px pad); age badge sits at text-xs (12px).
   const btn =
     "inline-flex size-4 items-center justify-center rounded-sm text-fg2 transition-colors hover:bg-bg1-hover hover:text-fg1 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-highlighted-bright";
 
@@ -553,10 +410,6 @@ function UserMessageActions({
     </div>
   );
 }
-
-// ──────────────────────────────────────────────────────────
-// TurnPromptEditor — mounted only while edit mode is active.
-// ──────────────────────────────────────────────────────────
 
 function TurnPromptEditor({
   chatId,
@@ -603,12 +456,9 @@ function TurnPromptEditor({
     };
   }, []);
 
-  // Seed the editor: a prior in-progress edit (stash json), then its plain-text
-  // mirror, then the WHOLE original message reconstructed as inline content —
-  // text + mention pills + attachment pills (images retain a disk reference),
-  // in place. No separate "originals" row; everything is
-  // inline + editable. The choice itself lives in edit-seed.ts, which explains
-  // why the middle rung is load-bearing.
+  // Seed order: a prior in-progress edit, its plain-text mirror, then the whole
+  // original message reconstructed inline (edit-seed.ts explains why the middle
+  // rung matters).
   const originalContentRef = useRef<ComposerInitialContent | null>(null);
   originalContentRef.current ??= messageToEditorContent({
     text: originalText,
@@ -663,13 +513,12 @@ function TurnPromptEditor({
     focus: focusEditor,
   } = composer;
 
-  // Focus + caret at end once the editor mounts.
   useEffect(() => {
     if (editor) focusEditor();
   }, [editor, focusEditor]);
 
-  // Click outside the editor closes it (pills/menus render in-tree, so a
-  // `contains` check covers the editor, attach button, pills, and overlay).
+  // Pills and menus render in-tree, so a contains check covers everything that
+  // belongs to the editor.
   useEffect(() => {
     const onDocPointerDown = (e: PointerEvent) => {
       if (submittingRef.current) return;
@@ -686,9 +535,8 @@ function TurnPromptEditor({
     };
   }, [onCancel]);
 
-  // Live-state mirror for the unmount persist/discard (can't read state in the
-  // cleanup closure). Refreshed on every editor change. `submittedRef` flips
-  // true only on send → discard the stash.
+  // Mirrors live state for the unmount persist or discard, which cannot read
+  // state in its cleanup; submittedRef flips on send to discard the stash.
   const liveRef = useRef<{
     text: string;
     attachments: ComposerAttachment[];
@@ -793,8 +641,7 @@ function TurnPromptEditor({
   return (
     <div
       ref={wrapperRef}
-      // Stop click bubbling so the parent wrapper's beginEdit handler
-      // doesn't re-fire on every interaction inside the editor.
+      // Stop clicks from re-firing the parent's beginEdit.
       onClick={(e) => e.stopPropagation()}
     >
       <PromptInput
@@ -804,12 +651,8 @@ function TurnPromptEditor({
         }}
       >
         <div
-          // The edit composer drops its
-          // own card chrome (border/bg/padding/shadow) so the outer
-          // sticky wrapper's chrome shows through. The chromeless
-          // override on PromptInputBody below also nullifies the
-          // InputGroup primitive's default border/shadow/radius so
-          // the surrounding sticky chrome reads cleanly.
+          // The edit composer drops its own card chrome so the outer wrapper's shows
+          // through.
           className={`zeros-agent-turn-prompt-edit relative${
             dragActive ? "ring-highlighted-bright/40 ring-2" : ""
           }`}
@@ -817,16 +660,11 @@ function TurnPromptEditor({
         >
           <PromptInputBody className="items-stretch rounded-none border-0 bg-transparent p-0 shadow-none has-[[data-slot=input-group-control]:focus-visible]:border-0 has-[[data-slot=input-group-control]:focus-visible]:shadow-none has-[[data-slot=input-group-control]:focus-visible]:ring-0">
             {suggestionPopup}
-            {/* TipTap editor — the whole message inline: text + mention pills +
-                attachment pills (originals reconstructed in place + any new
-                ones). Enter submits, Esc cancels (via the editor keymap). */}
             {editorContent}
             <PromptInputToolbar
               data-permission-feedback-boundary=""
               className="min-w-0 flex-nowrap gap-1.5 pt-1 pr-0 pb-1 pl-0"
             >
-              {/* gap-0.5: exactly 2px between the + and the pill block, matching
-                  the main composer. */}
               <PromptInputTools className="min-w-0 flex-nowrap gap-0.5">
                 <Button
                   variant="ghost"
@@ -869,6 +707,3 @@ function TurnPromptEditor({
     </div>
   );
 }
-
-// Edit mode reconstructs the whole message inline via the editor, so there is
-// no separate originals row.
