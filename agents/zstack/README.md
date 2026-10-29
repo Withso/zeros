@@ -21,6 +21,7 @@ branch, preferably with a test or check rather than more prose.
 | `evals/cases/<id>.json` | Eval cases, one per file. Each one is an escaped bug with the check that should have caught it. `evals/cases.json` holds the original cases. |
 | `changes/<id>.md` | Lessons waiting to be folded at the next version; at most 40. |
 | `records/` | Dated measurement records that other documents cite. |
+| `comment-debt.json` | The divider-comment count that may only shrink. |
 | `CHANGELOG.md` | One entry per pack version, recording the lessons that caused it. |
 
 ## Skills
@@ -29,6 +30,7 @@ branch, preferably with a test or check rather than more prose.
 |---|---|
 | `zstack` | Start here for every task. It records the mode, picks a playbook and runs the loop. |
 | `zstack-verify` | Choose and run checks for Local and cloud. Evidence rules. |
+| `zstack-comments` | Fresh-context comment pass over a diff, the keep-list, and comments-only cleanups. |
 | `zstack-review` | Independent review of a diff against Zeros invariants. |
 | `zstack-eval` | Run and extend the eval cases. Pack changes must not regress them. |
 | `zstack-learn` | End-of-loop retrospective that writes lessons back into the pack. |

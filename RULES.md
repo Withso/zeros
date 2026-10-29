@@ -259,6 +259,14 @@ is the normative guide; token values and contrast results are generated into
   documented follow-up, never a claimed pass.
 - Update architecture and operator documentation in the same change when a
   boundary, command, deploy root, environment variable, or ownership rule moves.
+- A comment states only a non-obvious why that the code cannot show: an
+  invariant, a trust or security boundary, a compatibility contract, an ordering
+  or concurrency requirement, or a quirk of an external platform, provider, or
+  protocol. Do not narrate the code, restate names or types, add dividers, keep
+  history or ticket narratives (the PR records them), or leave commented-out
+  code. Functional comments, directives, generated files, and license headers
+  are never cleanup targets: the `zstack-comments` skill lists them, and
+  `node scripts/zstack/comments.mjs verify` proves a cleanup changed nothing else.
 
 ## 8. Local and cloud workspaces
 
