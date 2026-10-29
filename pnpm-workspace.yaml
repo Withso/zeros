@@ -35,7 +35,7 @@ overrides:
   # Transitive security floors. Compatibility exceptions are documented beside
   # their entries; keep each override until its parent lock entry naturally
   # resolves to an equal or newer release.
-  "@hono/node-server": "2.1.0"
+  "@hono/node-server": "2.1.3"
   "@babel/core": "7.29.6"
   axios: "1.20.0"
   baseline-browser-mapping: "2.11.0"
