@@ -99,6 +99,7 @@ const validAutoMerge = (value) =>
   value === null ||
   (typeof value?.enabledAt === "string" &&
     Number.isFinite(Date.parse(value.enabledAt)));
+const hasControlBytes = (value) => [...value].some(char => char.charCodeAt(0) < 32 || char.charCodeAt(0) === 127);
 
 function missingPrSections(body) {
   const inlineText = (tokens) => tokens.map(token => token.tokens
@@ -519,8 +520,9 @@ export async function runAgentMerge(
     );
     if (
       !match?.[1].trim() ||
-      /[\x00-\x1f\x7f]/.test(match[1]) ||
-      !/^[^\s<>@\x00-\x1f\x7f]+@[^\s<>@\x00-\x1f\x7f]+$/.test(match[2]) ||
+      hasControlBytes(match[1]) ||
+      hasControlBytes(match[2]) ||
+      !/^[^\s<>@]+@[^\s<>@]+$/.test(match[2]) ||
       match[2].length > 254 ||
       (immediateAuthorEmail !== null && immediateAuthorEmail !== match[2])
     )

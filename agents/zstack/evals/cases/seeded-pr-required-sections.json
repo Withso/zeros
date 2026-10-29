@@ -2,7 +2,7 @@
   "id": "seeded-pr-required-sections",
   "kind": "seeded",
   "area": "scripts-ci",
-  "fixedBy": "pending",
+  "fixedBy": "pr:774",
   "symptom": "A human or agent PR can be armed without the engineering receipt or Local and cloud impact sections when the body gate is bypassed.",
   "rule": "RULES.md section 8 requires both placement impacts; zstack requires Why, What changes, Tests and Rollout. agent-merge checks visible Markdown headings and exempts only GitHub-confirmed bot authors.",
   "check": "pnpm test:git scripts/__tests__/agent-merge.test.ts scripts/__tests__/agent-merge-immediate.test.ts"
