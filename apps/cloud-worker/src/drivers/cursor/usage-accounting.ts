@@ -21,9 +21,9 @@ export function cursorTokenUsage(raw: unknown): TurnUsage | undefined {
     const value = (raw as Record<string, unknown>)[key];
     if (valid(value)) result[key] = value;
   }
-  // Native input already includes cache reads and writes, including on the
-  // worker's independent 1.0.40 pin. Its totalTokens double-counts the caches;
-  // use the component counts just as the Local adapter does with SDK 1.1.
+  // Native input already includes cache reads and writes (verified on 1.0.40
+  // and 1.1.0). 1.0.40's totalTokens double-counted the caches and 1.1.0
+  // derives it; use the component counts, as the Local adapter does.
   return Object.keys(result).length ? result : undefined;
 }
 

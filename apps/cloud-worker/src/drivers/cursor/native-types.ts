@@ -1,7 +1,7 @@
 import type { AgentOptions, SDKUserMessage } from "@cursor/sdk";
 import type { DriverMcpServers } from "../../mcp/gateway";
 
-export const CURSOR_VERSION = "1.0.40";
+export const CURSOR_VERSION = "1.1.0";
 export type { AgentUsage as CursorAgentUsage } from "@cursor/sdk";
 export interface NativeResult { id: string; status: string; result?: string; error?: { message?: string; code?: string }; model?: { id: string }; usage?: unknown }
 export interface NativeRun {

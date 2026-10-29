@@ -188,7 +188,7 @@ delivery shapes.
 ## Cursor SDK compatibility
 
 Desktop Local workspaces (Personal and organization-owned) and the standalone
-cloud worker bundle Cursor SDK 1.0.40 with zod 4.6.7. The SDK now accepts zod
+cloud worker bundle Cursor SDK 1.1.0 with zod 4.6.7. The SDK now accepts zod
 as a peer and builds its exported schemas through `zod/v3`, which is included
 in zod 4. The expanded `ZodType` declarations preserve existing tool, callback
 and conversation shapes. No vulnerable zod 3 package or audit exception is
