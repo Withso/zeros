@@ -1,9 +1,9 @@
 {
   "id": "provider-api-key-source",
   "kind": "replay",
-  "area": "agents",
+  "area": "desktop-agents",
   "fixedBy": "pr:695",
   "symptom": "A working Cursor agent could use an inherited API key while Settings reported no key configured; an unreadable saved-key store also appeared empty.",
-  "rule": "Read effective key source from the engine's credential selection, separate it from saved-key controls and authentication validity, and keep unknown storage distinct from absence. See changes/provider-api-key-source.md.",
+  "rule": "Read effective key source from the engine's credential selection, separate it from saved-key controls and authentication validity, and keep unknown storage distinct from absence. See git show 7b6eb9e6:agents/zstack/changes/provider-api-key-source.md.",
   "check": "pnpm exec vitest run apps/desktop/src/engine/agents/__tests__/gateway-api-key-source.test.ts"
 }

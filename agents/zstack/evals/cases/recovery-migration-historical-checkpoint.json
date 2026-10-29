@@ -1,7 +1,7 @@
 {
   "id": "recovery-migration-historical-checkpoint",
   "kind": "replay",
-  "area": "control-plane-lifecycle",
+  "area": "control-plane",
   "fixedBy": "pr:500",
   "symptom": "The pre-0113 recovery-migration fixture called today's final-checkpoint completion, which read the native-writer table introduced in 0139. SQLSTATE 42P01 was masked as a stale checkpoint, so all three repair tests failed before the migration ran.",
   "rule": "The bug-fix playbook requires migration fixtures to seed historical receipts using their cutoff schema, inspect the underlying SQL error, and run recovery-migration beside current-schema checkpoint/stop tests. An absent future table is not evidence that native seal checks should be bypassed.",

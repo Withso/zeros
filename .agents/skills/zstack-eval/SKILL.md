@@ -16,7 +16,7 @@ stays readable, but don't append to it. Each case records:
 |---|---|
 | `id` | Stable kebab-case identifier |
 | `kind` | `replay` (a real fix), `seeded` (a deliberate mutation) or `scenario` (a live Local or cloud flow) |
-| `area` | Subsystem from the owner map |
+| `area` | Closed subsystem name from `scripts/zstack/evals.mjs`; ownership map in `agents/zstack/evals/README.md` |
 | `fixedBy` | The merge commit that fixed it. The pre-fix tree is its first parent. |
 | `symptom` | What was observed |
 | `rule` | What the pack now says, and which skill or playbook says it |
@@ -31,11 +31,22 @@ stays readable, but don't append to it. Each case records:
   `--execute --receipt <file>` to run it. Multiple `--case` arguments select a
   bounded subset; `--all` refuses with `zstack_case_limit` if the corpus exceeds
   32 cases, without dropping cases. Select explicit batches for a larger corpus.
-  Record the same orchestration mode/models as the engineering task.
-- A replay resolves `fixedBy` only from local Git objects. `pr:<n>` must map to
+  Record the same orchestration mode/models as the engineering task; `co-masters`
+  uses `--agent` and `--master` for a peer pair with no subagents.
+- A replay resolves `fixedBy` only from local commits. `pr:<n>` must map to
   exactly one first-parent mainline commit. It copies source into disposable
   projections, overlays the fixed tests onto the parent, and binds workspace
-  dependencies to the projection. It neither checks out nor installs anything.
+  dependencies to the projection. It never checks out or moves refs.
+- Execution needs Git 2.45+. Missing promised trees/blobs are fetched in batches
+  before bounded local reads, with `--refetch` to bypass stale commit-graph
+  negotiation. A full clone with its required objects needs no network fetch.
+- Root and standalone pnpm locks are independent. Exact installed graphs are
+  reused; other historical graphs are installed outside the checkout, offline
+  from the shared store first, then online. The default cache is
+  `~/.cache/zeros-zstack-dependencies`, or `--dependency-cache <directory>`.
+  Keys include lock/install inputs and native ABI; eight graphs/8 GiB are
+  retained. Active projections pin entries until cleanup. Cache, install and
+  Git failures remain **unverified**, never catches. See `tools.md` for bounds.
 - Seeded cases use `evals/seeds/<id>.json` and require `--revision <full-sha>`.
   Each seed replaces one exact source string in the disposable red tree; a
   stale or ambiguous target refuses execution. Product source stays untouched.
@@ -61,3 +72,6 @@ stays readable, but don't append to it. Each case records:
   placeholder can never reach `main`.
 - A pack change may not remove a case or make a case's check pass on a
   pre-fix tree.
+- Pick an existing `area` by code ownership; adding a subsystem requires updating
+  the closed vocabulary and its ownership table. When a lesson is folded out of
+  the pack, preserve its historical rule as `git show <commit>:<path>`.

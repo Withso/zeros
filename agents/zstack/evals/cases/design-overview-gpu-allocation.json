@@ -1,9 +1,9 @@
 {
   "id": "design-overview-gpu-allocation",
   "kind": "replay",
-  "area": "renderer",
+  "area": "renderer-state",
   "fixedBy": "pr:695",
   "symptom": "A 256-frame native overview allocated more than 16 GB of physical app memory because maximum-zoom iframe density amplified GPU backing surfaces while RSS appeared small.",
-  "rule": "agents/zstack/changes/design-gpu-allocation-and-vector-retirement.md: keep ordinary document density, bound temporary HTML layout, retain decoded vectors through camera movement, and require physical GPU/app footprint measurements on macOS.",
+  "rule": "git show 7b6eb9e6:agents/zstack/changes/design-gpu-allocation-and-vector-retirement.md: keep ordinary document density, bound temporary HTML layout, retain decoded vectors through camera movement, and require physical GPU/app footprint measurements on macOS.",
   "check": "pnpm test:ui-smoke --shard=2/3"
 }

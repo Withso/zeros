@@ -1,9 +1,9 @@
 {
   "id": "design-mutation-snapshot-freshness",
   "kind": "seeded",
-  "area": "engine-design-snapshot",
+  "area": "desktop-engine",
   "fixedBy": "pr:668",
   "symptom": "The pending-read redo test failed under CI filesystem load because waitFor allowed only one second to reach the mutation's snapshot lookup. Removing that scheduling assumption must retain the stale-reply regression.",
-  "rule": "agents/zstack/changes/design-mutation-snapshot-observation.md: observe the exact-key lookup, preserve the existing test budget and old-versus-fresh content assertions, and join both requests before fixture teardown. The seed removes the fresh-read guard to verify the retained behavioral assertion, not to replay the timing fix.",
+  "rule": "git show 7b6eb9e6:agents/zstack/changes/design-mutation-snapshot-observation.md: observe the exact-key lookup, preserve the existing test budget and old-versus-fresh content assertions, and join both requests before fixture teardown. The seed removes the fresh-read guard to verify the retained behavioral assertion, not to replay the timing fix.",
   "check": "pnpm exec vitest run apps/desktop/src/engine/workspace/__tests__/service.test.ts -t \"returns fresh frame and history mutation snapshots\""
 }

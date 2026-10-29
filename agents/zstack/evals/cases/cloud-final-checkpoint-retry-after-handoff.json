@@ -1,7 +1,7 @@
 {
   "id": "cloud-final-checkpoint-retry-after-handoff",
   "kind": "replay",
-  "area": "cloud-engine-stop",
+  "area": "desktop-engine",
   "fixedBy": "pr:534",
   "symptom": "After record handoff, cancellation or supersession of a final checkpoint prevented later stop/delete directives from reaching the engine. An immutable writer seal also caused replacement final capture to fail before it could reuse the frozen database pair.",
   "rule": "Keep authenticated final-checkpoint control separate from record-write and workload admission. Retry only the original current writer, retain irreversible admission fences, reconcile exact cancellation first, and never reopen sealed NORMAL storage.",

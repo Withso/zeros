@@ -1,9 +1,9 @@
 {
   "id": "summary-toolbar-compact-status",
   "kind": "scenario",
-  "area": "renderer-shared-ui",
+  "area": "renderer-ui",
   "fixedBy": "pr:729",
   "symptom": "The docked Summary hid its toolbar icon and could only collapse its contents. Its Create PR control was 28px tall, while Git labels wrapped and row/action hovers did not form distinct surfaces.",
-  "rule": "Keep one reachable toolbar toggle across Summary presentations and verify actual compact geometry, single-line fg1 labels, distinct row/action hovers in both themes, and hidden-reader/menu cleanup. The removed Context section must issue no reads, including on hover/focus or graph changes. See agents/zstack/changes/summary-island-toolbar-and-rows.md.",
+  "rule": "Keep one reachable toolbar toggle across Summary presentations and verify actual compact geometry, single-line fg1 labels, distinct row/action hovers in both themes, and hidden-reader/menu cleanup. The removed Context section must issue no reads, including on hover/focus or graph changes. See git show 7b6eb9e6:agents/zstack/changes/summary-island-toolbar-and-rows.md.",
   "check": "pnpm test:ui-smoke --shard=3/3"
 }

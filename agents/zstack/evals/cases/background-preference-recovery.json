@@ -1,9 +1,9 @@
 {
   "id": "background-preference-recovery",
   "kind": "replay",
-  "area": "desktop-renderer",
+  "area": "renderer-settings",
   "fixedBy": "pr:738",
   "symptom": "One failed background preference sync raises a toast or rejects chat preparation before recovery can finish.",
-  "rule": "Keep the first failure pending through a quiet retry, retain unacknowledged choices, and dismiss a single persistent failure notice on recovery. See agents/zstack/changes/transient-read-presentation.md.",
+  "rule": "Keep the first failure pending through a quiet retry, retain unacknowledged choices, and dismiss a single persistent failure notice on recovery. See git show 7b6eb9e6:agents/zstack/changes/transient-read-presentation.md.",
   "check": "pnpm exec vitest run --config vitest.config.ts apps/desktop/src/renderer/features/settings/__tests__/agent-preferences-sync.test.ts apps/desktop/src/renderer/features/settings/__tests__/personal-preferences-sync.test.ts"
 }

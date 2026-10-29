@@ -1,7 +1,7 @@
 {
   "id": "cloud-history-gap-recovery",
   "kind": "replay",
-  "area": "cloud-engine-resume",
+  "area": "desktop-engine",
   "fixedBy": "pr:507",
   "symptom": "An interrupted stop retired the current writer without a seal, making every later wake refuse an older checkpoint. Prepared recovery crashes could lose the latest edit/delete fence, and the next clean stop still rejected unsealed mutation provenance.",
   "rule": "Recover only through CP-authorized retired-predecessor custody. Keep FULL, ACKs and immutable heads; test every prepare cut, four activated gaps and the next clean stop. Pin canonical custody hashes in CP activation and successor seal inventory, reject missing or changed lineage, quarantine inherited requests and expose the exact-workspace unknown-coverage warning only after activation.",

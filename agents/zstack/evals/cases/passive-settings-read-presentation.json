@@ -1,9 +1,9 @@
 {
   "id": "passive-settings-read-presentation",
   "kind": "replay",
-  "area": "desktop-renderer",
+  "area": "renderer-settings",
   "fixedBy": "pr:738",
   "symptom": "Settings, provider status, organization panels and Summary display errors during startup or a first failed passive read.",
-  "rule": "Use owning-runtime readiness and bounded passive-read recovery without weakening write guards. See agents/zstack/changes/transient-read-presentation.md.",
+  "rule": "Use owning-runtime readiness and bounded passive-read recovery without weakening write guards. See git show 7b6eb9e6:agents/zstack/changes/transient-read-presentation.md.",
   "check": "pnpm exec vitest run --config vitest.config.ts apps/desktop/src/renderer/features/settings/__tests__/passive-read-presentation.test.ts apps/desktop/src/renderer/features/settings/__tests__/settings-read-startup.test.ts apps/desktop/src/renderer/features/settings/__tests__/subscription-connection-panel.test.ts apps/desktop/src/renderer/features/team/__tests__/team-read-presentation.test.ts apps/desktop/src/renderer/shell/conversation/__tests__/summary-startup.test.ts"
 }

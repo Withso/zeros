@@ -1,7 +1,7 @@
 {
   "id": "seeded-cloud-close-ack-owner",
   "kind": "seeded",
-  "area": "cloud-engine-resume",
+  "area": "renderer-state",
   "fixedBy": "pr:675",
   "symptom": "A real cloud close ACK omits its conversation identity and a route-less renderer slot cannot finish closing.",
   "rule": "Pair the production adapter and renderer callback. A cold close requires exact authenticated conversation identity while foreign or late replies remain inert.",

@@ -1,9 +1,9 @@
 {
   "id": "pr-review-bounded-reads",
   "kind": "replay",
-  "area": "engine-git",
+  "area": "desktop-git",
   "fixedBy": "pr:731",
   "symptom": "PR review loading serialized independent check-annotation requests and stopped reading the remaining checks when one request failed.",
-  "rule": "Overlap a bounded first-page window while preserving deterministic result order, shared payload limits and independent check failures; zstack changes/startup-maintenance-readiness.md.",
+  "rule": "Overlap a bounded first-page window while preserving deterministic result order, shared payload limits and independent check failures; zstack git show 7b6eb9e6:agents/zstack/changes/startup-maintenance-readiness.md.",
   "check": "pnpm exec vitest run apps/desktop/src/engine/git/__tests__/github-inline-review.test.ts"
 }

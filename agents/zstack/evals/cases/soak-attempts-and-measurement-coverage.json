@@ -1,7 +1,7 @@
 {
   "id": "soak-attempts-and-measurement-coverage",
   "kind": "seeded",
-  "area": "release-dev-environment",
+  "area": "scripts-release",
   "fixedBy": "pr:512",
   "symptom": "A soak report can erase failed attempts, backfill an old window with later work, count throttled log lines as attempts or report absent counters as perfect reliability.",
   "rule": "zstack-verify reports must authenticate each attempt's signed producer and public verifier, retain all earlier failures, bound the historical window and keep missing coverage unknown. Count actual sockets and admission retries separately. Validate file output on the opened descriptor without deleting replacements.",

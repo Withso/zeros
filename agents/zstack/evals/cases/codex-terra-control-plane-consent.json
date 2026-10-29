@@ -1,9 +1,9 @@
 {
   "id": "codex-terra-control-plane-consent",
   "kind": "replay",
-  "area": "agent-runtime",
+  "area": "control-plane",
   "fixedBy": "pr:763",
   "symptom": "GPT-6.1 Terra was added to the shared renderer catalog but omitted from the standalone control-plane provider list, failing hosted parity and existing all-model consent admission.",
-  "rule": "Every curated provider identity addition updates and verifies the independently deployed control-plane catalog, admitting it under all-model consent without expanding explicit legacy grants. See agents/zstack/changes/cloud-agent-live-settings.md and docs/agent-runtime-notifications.md.",
+  "rule": "Every curated provider identity addition updates and verifies the independently deployed control-plane catalog, admitting it under all-model consent without expanding explicit legacy grants. See git show 7b6eb9e6:agents/zstack/changes/cloud-agent-live-settings.md and docs/agent-runtime-notifications.md.",
   "check": "pnpm --dir apps/control-plane exec vitest run src/agent-credentials/agent-models.test.ts"
 }

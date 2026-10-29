@@ -1,7 +1,7 @@
 {
   "id": "background-task-hidden-clock",
   "kind": "replay",
-  "area": "1: renderer state and interaction",
+  "area": "renderer-agents",
   "fixedBy": "pr:524",
   "symptom": "Each mounted background-task elapsed label kept a one-second interval when its window was hidden, and reveal waited for another timer tick to display elapsed hidden time.",
   "rule": "Count the actual display consumers and their timers: share one visible clock, cancel it when hidden or unused, catch up from wall time on reveal, and keep authoritative task and auth deadlines separate.",

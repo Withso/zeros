@@ -4,6 +4,6 @@
   "area": "renderer-settings",
   "fixedBy": "pr:723",
   "symptom": "MCP setup displayed connection or sign-in requirements without an actionable Connect route. The list could retain stale sign-in status or hide a failed gateway behind cached success. Failed cancellation could leave controls locked, and fallback code fields lacked accessible labels and keyboard submission.",
-  "rule": "changes/mcp-connection-recovery.md: derive recovery actions with status, authorize only the saved definition, retire canceled attempts immediately and verify both Local and organization flows through their real UI boundaries.",
+  "rule": "git show 7b6eb9e6:agents/zstack/changes/mcp-connection-recovery.md: derive recovery actions with status, authorize only the saved definition, retire canceled attempts immediately and verify both Local and organization flows through their real UI boundaries.",
   "check": "pnpm test:ui-smoke --shard=2/3"
 }

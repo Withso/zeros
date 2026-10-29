@@ -1,9 +1,9 @@
 {
   "id": "seeded-cloud-github-read-coalescing",
   "kind": "seeded",
-  "area": "cloud-workspaces",
+  "area": "control-plane",
   "fixedBy": "pr:652",
   "symptom": "Concurrent identical repository reads repeated the same database authority transactions for every reader.",
-  "rule": "Share only overlapping exact engine/token/actor/read identities; keep both authority boundaries and each caller budget charge. See changes/cloud-observation-db-budget.md.",
+  "rule": "Share only overlapping exact engine/token/actor/read identities; keep both authority boundaries and each caller budget charge. See git show 7b6eb9e6:agents/zstack/changes/cloud-observation-db-budget.md.",
   "check": "pnpm --dir apps/control-plane exec vitest run src/cloud-workspaces/github-read.integration.test.ts"
 }

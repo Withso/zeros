@@ -1,7 +1,7 @@
 {
   "id": "scroll-area-thumb-retirement",
   "kind": "scenario",
-  "area": "renderer",
+  "area": "renderer-state",
   "fixedBy": "pr:539",
   "symptom": "Unmounting a scrolling shared ScrollArea kept Radix's thumb animation loop reading the detached viewport after its debounce was cancelled; replacing only the viewport also retained the old loop.",
   "rule": "zstack bug-fix: arm the real producer before retiring a surface, count detached work, and test replacement plus remount. Cancelling the debounce must also cancel the animation work that the debounce would have retired.",

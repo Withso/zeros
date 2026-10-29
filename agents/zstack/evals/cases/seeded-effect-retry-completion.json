@@ -1,9 +1,9 @@
 {
   "id": "seeded-effect-retry-completion",
   "kind": "seeded",
-  "area": "desktop-renderer",
+  "area": "renderer-state",
   "fixedBy": "pr:738",
   "symptom": "An effect-driven MCP retry reports completion before its result commits, exposing an error for one frame.",
-  "rule": "Await effect-driven reads through their committed result or retirement; a state update is not completion. See agents/zstack/changes/transient-read-presentation.md.",
+  "rule": "Await effect-driven reads through their committed result or retirement; a state update is not completion. See git show 7b6eb9e6:agents/zstack/changes/transient-read-presentation.md.",
   "check": "pnpm exec vitest run --config vitest.config.ts apps/desktop/src/renderer/features/agent-extensions/__tests__/mcp-import-recovery.test.ts"
 }

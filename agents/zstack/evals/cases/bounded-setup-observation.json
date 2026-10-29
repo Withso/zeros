@@ -1,7 +1,7 @@
 {
   "id": "bounded-setup-observation",
   "kind": "replay",
-  "area": "release-dev-environment",
+  "area": "scripts-release",
   "fixedBy": "pr:489",
   "symptom": "The harness timed out during resume without naming the setup attempt or claim, and failed cleanup could replace the original failure.",
   "rule": "Reuse bounded status reads for closed current-generation setup evidence, name the lifecycle wait, and retain its first failure separately from cleanup. Longer server retries never extend a harness deadline.",

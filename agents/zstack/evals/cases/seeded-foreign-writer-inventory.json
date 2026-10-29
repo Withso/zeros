@@ -1,7 +1,7 @@
 {
   "id": "seeded-foreign-writer-inventory",
   "kind": "seeded",
-  "area": "cloud engine authority",
+  "area": "desktop-engine",
   "fixedBy": "pr:504",
   "symptom": "A native activity inventory from another writer epoch is admitted as current evidence.",
   "rule": "zstack-eval seeds a missing writer comparison in a disposable projection; foreign captured provenance must stay unknown and cannot authorize retirement.",

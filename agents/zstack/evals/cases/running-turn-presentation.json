@@ -1,7 +1,7 @@
 {
   "id": "running-turn-presentation",
   "kind": "replay",
-  "area": "renderer",
+  "area": "renderer-agents",
   "fixedBy": "pr:537",
   "symptom": "A running turn lost its working indicator during reconnect or when an older turn's completion arrived on the same execution.",
   "rule": "Track foreground turn identity independently of liveness; stale receipts and rejected notifications cannot change a successor or release its gates (zstack-review).",

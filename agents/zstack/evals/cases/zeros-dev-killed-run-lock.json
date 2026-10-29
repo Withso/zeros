@@ -1,7 +1,7 @@
 {
   "id": "zeros-dev-killed-run-lock",
   "kind": "replay",
-  "area": "release-dev-environment",
+  "area": "scripts-release",
   "fixedBy": "pr:501",
   "symptom": "SIGKILL during a zeros-dev lifecycle left an empty run-lock directory, so later commands failed with receipt_busy and could not reuse the saved intent.",
   "rule": "Persist owner PID, boot/namespace and process-start identity before work. Reclaim only with proof that the same-host owner is dead, never by age. Fence competing reclaimers, keep live or unverifiable owners busy, and preserve signed idempotency keys. Test with a real killed child and deterministic contention barriers.",

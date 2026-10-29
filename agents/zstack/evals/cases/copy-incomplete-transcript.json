@@ -1,7 +1,7 @@
 {
   "id": "copy-incomplete-transcript",
   "kind": "replay",
-  "area": "renderer",
+  "area": "renderer-state",
   "fixedBy": "pr:531",
   "symptom": "Copy transcript interpreted an incomplete cloud projection as an empty conversation or the end of history.",
   "rule": "Validate the current history receipt and restore head on every page before exposing bare rows to Copy (zstack-review).",

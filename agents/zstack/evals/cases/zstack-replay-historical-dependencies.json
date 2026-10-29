@@ -1,0 +1,9 @@
+{
+  "id": "zstack-replay-historical-dependencies",
+  "kind": "replay",
+  "area": "zstack",
+  "fixedBy": "pr:772",
+  "symptom": "Replaying a fix with an older pnpm lockfile returned zstack_dependencies_unavailable even when its packages were available in the shared store.",
+  "rule": "zstack-eval installs each historical dependency graph in a bounded external cache, tries the shared store offline first, and binds workspace dependencies to each projection's own source; real install failures remain unverified.",
+  "check": "pnpm test:git scripts/__tests__/zstack-source.test.ts -t 'installs an absent historical graph once'"
+}

@@ -1,7 +1,7 @@
 {
   "id": "archive-suspends-all-design-tools",
   "kind": "replay",
-  "area": "engine-design-territory",
+  "area": "desktop-agents",
   "fixedBy": "pr:584",
   "symptom": "Archiving one Local workspace failed a Codex prompt in another workspace with Bun's bare \"The operation was aborted.\" protocol-error card; the provider was never called.",
   "rule": "Drive scoped-gate selection through the real WORKSPACE_REQUEST dispatcher for every lifecycle op it names, and hold (not fail) prompt preparation while Design grants are suspended. See playbooks/bug-fix.md and the archive-suspends-all-design-tools change fragment.",

@@ -1,7 +1,7 @@
 {
   "id": "checkpoint-progress-isolated-evidence",
   "kind": "replay",
-  "area": "control-plane-lifecycle",
+  "area": "control-plane",
   "fixedBy": "pr:511",
   "symptom": "A committed checkpoint delivery did not show whether its engine handler began or where sealing stalled. Optional diagnostic traffic on the ordinary internal ingress budget could also throttle checkpoint completion.",
   "rule": "The bug-fix playbook requires strict-wire compatibility, separate reporting capacity, current exact-request authority, cancellation races, and canonical identifiers for immutable bounded diagnostic receipts.",

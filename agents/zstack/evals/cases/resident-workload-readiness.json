@@ -1,7 +1,7 @@
 {
   "id": "resident-workload-readiness",
   "kind": "scenario",
-  "area": "engine-test-fixtures",
+  "area": "desktop-engine",
   "fixedBy": "pr:513",
   "symptom": "A resident terminal test accepted a busy launch wrapper as readiness, then observed a quiet shell before its background command had started after owner handoff.",
   "rule": "The ci-red playbook requires an acknowledgement from the actual workload before testing persistent activity. Retain a controlled launch gap and both idle and busy assertions without masking the gap with recent terminal input or extending timeouts.",

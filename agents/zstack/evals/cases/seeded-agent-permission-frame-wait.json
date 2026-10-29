@@ -1,7 +1,7 @@
 {
   "id": "seeded-agent-permission-frame-wait",
   "kind": "seeded",
-  "area": "desktop-renderer",
+  "area": "renderer-agents",
   "fixedBy": "pr:570",
   "symptom": "A hidden window parked permission requests, including previously authorized policy responses, until a later flush.",
   "rule": "Control events must drain synchronously in arrival order instead of depending on animation frames. Execute the real provider listener with frames suspended, including exact Local and cloud ownership.",

@@ -1,7 +1,7 @@
 {
   "id": "design-verification-source-entry",
   "kind": "replay",
-  "area": "engine-design",
+  "area": "desktop-design",
   "fixedBy": "pr:695",
   "symptom": "The native Design command supplied to an agent ran bun design without the source entry, failing in the task checkout; Node source commands also omitted required loader arguments.",
   "rule": "zstack-verify: execute the exact advertised CLI command from a task workspace, covering Node and Bun source runtimes and the compiled executable instead of only calling the internal handler.",

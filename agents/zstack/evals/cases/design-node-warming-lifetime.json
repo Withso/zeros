@@ -1,7 +1,7 @@
 {
   "id": "design-node-warming-lifetime",
   "kind": "replay",
-  "area": "desktop-renderer",
+  "area": "desktop-design",
   "fixedBy": "pr:750",
   "symptom": "A focused Design layer's held detail reply could publish after hiding, directory A-to-B-to-A replacement, same-connection source advancement or queue reset.",
   "rule": "Fence speculative reads at completion by owner lifetime, active connection and source generation; retired queues cannot publish or start pending reads. Keep hidden surfaces inert and caches exact-keyed, as required by zstack-review.",

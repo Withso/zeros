@@ -1,9 +1,9 @@
 {
   "id": "cloud-turn-feedback",
   "kind": "replay",
-  "area": "cloud-workspaces",
+  "area": "renderer-agents",
   "fixedBy": "pr:706",
   "symptom": "Cloud working feedback and composer clearing waited for HTTPS acceptance, native completion waited for receipt retirement, and Stop kept the composer and spinner running while cancellation settled.",
-  "rule": "Separate exact-turn presentation and private commit from delivery and cancellation authority. Publish head bubble and indicator atomically, release only the submitted draft on commit, and freeze the footer at native completion or Stop while retaining every queue fence. See agents/zstack/changes/cloud-turn-feedback.md.",
+  "rule": "Separate exact-turn presentation and private commit from delivery and cancellation authority. Publish head bubble and indicator atomically, release only the submitted draft on commit, and freeze the footer at native completion or Stop while retaining every queue fence. See git show 7b6eb9e6:agents/zstack/changes/cloud-turn-feedback.md.",
   "check": "pnpm vitest run apps/desktop/src/renderer/features/agent/__tests__/cloud-turn-feedback.test.ts apps/desktop/src/renderer/features/agent/__tests__/cloud-prompt-runtime.test.ts -t 'publishes the head bubble|mounts the exact native terminal footer|notifies the composer only after its private commit'"
 }

@@ -1,7 +1,7 @@
 {
   "id": "transcript-cache-paint-deadline",
   "kind": "replay",
-  "area": "renderer",
+  "area": "renderer-state",
   "fixedBy": "pr:526",
   "symptom": "A hung native disk read withheld a transient history failure indefinitely.",
   "rule": "Bound provisional cache paint, preserve the original failure, and fence late callbacks after the request settles (zstack-review).",

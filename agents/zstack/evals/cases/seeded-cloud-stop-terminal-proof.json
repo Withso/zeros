@@ -1,7 +1,7 @@
 {
   "id": "seeded-cloud-stop-terminal-proof",
   "kind": "seeded",
-  "area": "cloud-engine-resume",
+  "area": "renderer-state",
   "fixedBy": "pr:673",
   "symptom": "A queue acknowledgement or dispatching receipt is mistaken for completed native cancellation.",
   "rule": "Stop is pending until the exact command is terminal; a paused queue and a live provider receipt cannot prove retirement.",

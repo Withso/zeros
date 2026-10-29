@@ -1,7 +1,7 @@
 {
   "id": "transcript-incremental-refresh",
   "kind": "replay",
-  "area": "renderer",
+  "area": "renderer-agents",
   "fixedBy": "pr:531",
   "symptom": "A changed history window replaced unchanged message objects and completed turns in an open chat.",
   "rule": "Preserve equal same-ID row references only after exact-owner and restore-head checks while retaining authoritative order and truncation (zstack-review).",

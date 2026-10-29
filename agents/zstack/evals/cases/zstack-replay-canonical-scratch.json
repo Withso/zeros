@@ -1,0 +1,9 @@
+{
+  "id": "zstack-replay-canonical-scratch",
+  "kind": "replay",
+  "area": "zstack",
+  "fixedBy": "pr:772",
+  "symptom": "A symlinked temporary-directory root, as used by macOS /var paths, made both historical and seeded replay preparation fail zstack_source_unsafe on safe disposable source.",
+  "rule": "zstack-eval canonicalizes the scratch directory before creating projections, retains no-follow source checks, and removes the projections after replay or seed execution.",
+  "check": "pnpm test:git scripts/__tests__/zstack-replay.test.ts -t 'canonicalizes a symlinked'"
+}

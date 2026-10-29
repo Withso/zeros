@@ -1,7 +1,7 @@
 {
   "id": "design-nesting-outgoing-runtime",
   "kind": "replay",
-  "area": "desktop-design-state",
+  "area": "desktop-design",
   "fixedBy": "pr:761",
   "symptom": "Nesting into a frame whose replacement document was preparing immediately reported that the frame was still loading because the outgoing runtime was treated as current authority.",
   "rule": "agents/zstack/playbooks/performance.md: resolve semantic input order and wait for the exact source generation rather than accepting an outgoing runtime.",

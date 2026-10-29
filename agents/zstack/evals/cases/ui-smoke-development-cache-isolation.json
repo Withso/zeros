@@ -1,9 +1,9 @@
 {
   "id": "ui-smoke-development-cache-isolation",
   "kind": "replay",
-  "area": "ci",
+  "area": "scripts-ci",
   "fixedBy": "pr:761",
   "symptom": "A development server replaced UI smoke's optimized dependency graph, leaving running browser scenarios with 504 module responses and missing Design documents.",
-  "rule": "agents/zstack/changes/canvas-structural-command-order.md: smoke and development entry graphs must not replace each other's optimized dependency cache.",
+  "rule": "git show 7b6eb9e6:agents/zstack/changes/canvas-structural-command-order.md: smoke and development entry graphs must not replace each other's optimized dependency cache.",
   "check": "pnpm test:git scripts/__tests__/ui-smoke-vite-config.test.ts"
 }

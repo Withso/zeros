@@ -1,7 +1,7 @@
 {
   "id": "seeded-optional-systemd-anchor-reference",
   "kind": "seeded",
-  "area": "vm-image-bootstrap",
+  "area": "scripts-release",
   "fixedBy": "pr:632",
   "symptom": "Releasing original anchor descriptors before timestamp backoff leaves recyclable mount IDs without continuity and loses the required reference custody.",
   "rule": "Retain at most two original non-inheritable anchor references across backoff and diagnostics; release every per-pass descriptor and all references on exit.",

@@ -1,9 +1,9 @@
 {
   "id": "cloud-turn-summary-freshness",
   "kind": "replay",
-  "area": "renderer",
+  "area": "renderer-agents",
   "fixedBy": "pr:719",
   "symptom": "A lost live completion update leaves a cloud turn without its recorded changes because the renderer cannot prove that the mirror's unstamped final summary is newer than the worker opening.",
-  "rule": "Advance each changed worker summary's timestamp, preserve that authority through replay and imports, and accept a newer stamp against the creation time of a legacy opening. See agents/zstack/changes/turn-changes-disclosure.md.",
+  "rule": "Advance each changed worker summary's timestamp, preserve that authority through replay and imports, and accept a newer stamp against the creation time of a legacy opening. See git show 7b6eb9e6:agents/zstack/changes/turn-changes-disclosure.md.",
   "check": "pnpm exec vitest run --config vitest.config.ts apps/desktop/src/renderer/features/agent/__tests__/cloud-transcript-hydrate.test.ts -t 'worker.*final diff through the mirror'"
 }

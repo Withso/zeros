@@ -1,7 +1,7 @@
 {
   "id": "scroll-area-drag-retirement",
   "kind": "scenario",
-  "area": "renderer",
+  "area": "renderer-state",
   "fixedBy": "pr:542",
   "symptom": "Cancelling a native ScrollArea thumb drag or losing its capture left selection disabled and allowed later pointer motion to keep scrolling; unmount and viewport replacement also retained the drag resources. Treating callback-ref null as removal then aborted healthy drags on ordinary parent renders or caller-ref changes.",
   "rule": "Keep the acquired pointer, capture target and viewport together. Retire once before releasing capture on matching end, cancellation, loss or actual node replacement/removal; callback-ref reassignment of the same connected node must preserve the drag. Fence deferred removal checks to the acquired drag and ref notification, restore exact styles and reject late or foreign-pointer events without synthesizing pointerup.",

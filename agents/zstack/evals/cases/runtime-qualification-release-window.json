@@ -4,6 +4,6 @@
   "area": "control-plane-workers",
   "fixedBy": "pr:640",
   "symptom": "New-base smoke qualification walked historical releases and fell back to older runtimes after the newest failed, spending a provider allocation on each candidate.",
-  "rule": "Bound the newest eligible release window before filtering qualification and terminal run history; a newest-release failure blocks automatic fallback on that base compatibility. Preserve explicit queued work and forced retries. See changes/runtime-qualification-release-window.md.",
+  "rule": "Bound the newest eligible release window before filtering qualification and terminal run history; a newest-release failure blocks automatic fallback on that base compatibility. Preserve explicit queued work and forced retries. See git show 7b6eb9e6:agents/zstack/changes/runtime-qualification-release-window.md.",
   "check": "pnpm --dir apps/control-plane exec vitest run src/cloud-workspaces/runtime-qualification-window.integration.test.ts"
 }

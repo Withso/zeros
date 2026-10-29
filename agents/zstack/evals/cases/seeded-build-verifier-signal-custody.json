@@ -1,7 +1,7 @@
 {
   "id": "seeded-build-verifier-signal-custody",
   "kind": "seeded",
-  "area": "cloud workspace authority",
+  "area": "scripts",
   "fixedBy": "pr:635",
   "symptom": "Repeated cancellation during the fixed build verifier transport can abandon a spawned child, interrupt retirement, or replace the original failure before ownership is released.",
   "rule": "zstack-review requires positive original-process retirement, original deadlines and retained custody across cancellation and final I/O.",

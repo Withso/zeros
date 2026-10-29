@@ -1,7 +1,7 @@
 {
   "id": "design-reset-layer-outranks-utilities",
   "kind": "replay",
-  "area": "engine-design-render",
+  "area": "desktop-design",
   "fixedBy": "pr:579",
   "symptom": "In frames with an imported Tailwind source, the seeded tokens.css `@layer reset` zeroed heading margins and replaced utility type on form controls.",
   "rule": "Engine-seeded cascade layers are ordered before imported source layers (`@layer reset;` prelude); verify computed styles in a browser.",

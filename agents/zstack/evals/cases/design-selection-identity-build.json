@@ -1,7 +1,7 @@
 {
   "id": "design-selection-identity-build",
   "kind": "replay",
-  "area": "desktop-engine",
+  "area": "desktop-design",
   "fixedBy": "pr:570",
   "symptom": "Selection and render-version checks compiled frame Tailwind CSS and assembled render output that the caller discarded.",
   "rule": "Use identity-only preparation while preserving exact sourceVersion, node IDs and geometry. Performance regressions need a failing operation-count check plus output parity, as required by the bug-fix playbook.",

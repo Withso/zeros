@@ -1,7 +1,7 @@
 {
   "id": "cloud-chat-mirror-admission",
   "kind": "seeded",
-  "area": "desktop-cloud-ui-state",
+  "area": "renderer-state",
   "fixedBy": "pr:666",
   "symptom": "Passive chat snapshots repeatedly request cloud admission after a non-retryable refusal, including duplicate attempts for an optional identity clear and its metadata upsert.",
   "rule": "The bug-fix playbook requires terminal admission refusals to survive passive consumers for the exact owner, with explicit reauthorization, fresh identities, transient failures and held account transitions covered.",

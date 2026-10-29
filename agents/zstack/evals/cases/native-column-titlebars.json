@@ -1,9 +1,9 @@
 {
   "id": "native-column-titlebars",
   "kind": "replay",
-  "area": "desktop-renderer",
+  "area": "renderer-state",
   "fixedBy": "pr:748",
   "symptom": "The workspace header ignored macOS titlebar double-clicks while other column headers emulated only some native actions and missed headers mounted after setup.",
-  "rule": "Trace the rendered window chrome and use native hit regions with interactive-control exclusions. Preserve open-overlay dismissal and ignore closed or inert retained overlays, as recorded in changes/native-column-titlebars.md.",
+  "rule": "Trace the rendered window chrome and use native hit regions with interactive-control exclusions. Preserve open-overlay dismissal and ignore closed or inert retained overlays, as recorded in git show 7b6eb9e6:agents/zstack/changes/native-column-titlebars.md.",
   "check": "pnpm test:git apps/desktop/src/renderer/shell/__tests__/workspace-header.test.ts apps/desktop/src/renderer/shell/__tests__/native-window-chrome.test.ts"
 }

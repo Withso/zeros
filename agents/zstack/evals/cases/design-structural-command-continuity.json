@@ -1,7 +1,7 @@
 {
   "id": "design-structural-command-continuity",
   "kind": "scenario",
-  "area": "desktop-design-state",
+  "area": "desktop-design",
   "fixedBy": "pr:761",
   "symptom": "Rapid duplicate commands were discarded while saving, deletion after nesting could resolve an old target, and Option-drag moved originals instead of copying them.",
   "rule": "agents/zstack/playbooks/performance.md: hold source writes while exercising repeated duplicate, duplicate followed by Delete twice, and immediate transfer followed by edit; preserve semantic command order and original source.",

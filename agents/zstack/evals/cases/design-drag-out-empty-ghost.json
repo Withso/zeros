@@ -1,9 +1,9 @@
 {
   "id": "design-drag-out-empty-ghost",
   "kind": "replay",
-  "area": "desktop-design-state",
+  "area": "desktop-design",
   "fixedBy": "pr:750",
   "symptom": "Dragging a Design layer out of its frame after an edit showed only an empty selection box following the pointer while the layer stayed clipped inside its frame.",
-  "rule": "agents/zstack/changes/design-layout-truth.md: outside its frame a layer is drawn from pixels; capture them directly for the drag when none are cached for its generation.",
+  "rule": "git show 7b6eb9e6:agents/zstack/changes/design-layout-truth.md: outside its frame a layer is drawn from pixels; capture them directly for the drag when none are cached for its generation.",
   "check": "pnpm test:ui-smoke --shard=2/3"
 }

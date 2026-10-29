@@ -1,7 +1,7 @@
 {
   "id": "hourly-actions-fixture-umask",
   "kind": "replay",
-  "area": "release-dev-environment",
+  "area": "scripts-release",
   "fixedBy": "pr:497",
   "symptom": "Eleven hourly Actions integration tests failed before orchestration because a shared-group umask made their synthetic Git directory group-writable.",
   "rule": "Create private credential-fixture directories with an explicit mode and test permissive and restrictive umasks. Diagnose fixture admission before attributing downstream missing receipts to merged product logic. See the ci-red playbook.",

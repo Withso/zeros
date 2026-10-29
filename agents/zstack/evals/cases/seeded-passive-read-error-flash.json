@@ -1,9 +1,9 @@
 {
   "id": "seeded-passive-read-error-flash",
   "kind": "seeded",
-  "area": "desktop-renderer",
+  "area": "renderer-state",
   "fixedBy": "pr:738",
   "symptom": "Returning a raw read error while its retry is pending flashes an error before the final successful DOM.",
-  "rule": "Record every React commit across cold and warm Local, organization-local and cloud reads; final success alone cannot prove the absence of a flash. See agents/zstack/changes/transient-read-presentation.md.",
+  "rule": "Record every React commit across cold and warm Local, organization-local and cloud reads; final success alone cannot prove the absence of a flash. See git show 7b6eb9e6:agents/zstack/changes/transient-read-presentation.md.",
   "check": "pnpm exec vitest run --config vitest.config.ts apps/desktop/src/renderer/state/__tests__/read-recovery.test.ts"
 }

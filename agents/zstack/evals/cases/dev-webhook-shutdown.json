@@ -1,7 +1,7 @@
 {
   "id": "dev-webhook-shutdown",
   "kind": "replay",
-  "area": "dev-environments",
+  "area": "scripts-dev",
   "fixedBy": "pr:746",
   "symptom": "Local Dev WorkOS webhooks remain enabled after failed startup or normal shutdown and repeatedly deliver to an offline tunnel.",
   "rule": "The dev-webhook-shutdown lesson requires public readiness before delivery, owned endpoint suspension before process shutdown, and retryable provider cleanup without losing the Events API cursor.",

@@ -1,7 +1,7 @@
 {
   "id": "runtime-headless-browser-closure",
   "kind": "replay",
-  "area": "vm-image-bootstrap",
+  "area": "scripts-release",
   "fixedBy": "pr:614",
   "symptom": "The runtime archive downloaded full Chromium even though cloud capture launches the headless shell; the closure probe checked the unused binary and could accept a missing or invalid shell.",
   "rule": "Check the native executable selected by the real launch options with fallback binaries absent, retaining sandboxing, font rendering and positive teardown coverage.",

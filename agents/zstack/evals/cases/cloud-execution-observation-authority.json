@@ -1,7 +1,7 @@
 {
   "id": "cloud-execution-observation-authority",
   "kind": "replay",
-  "area": "cloud-engine-resume",
+  "area": "desktop-engine",
   "fixedBy": "pr:650",
   "symptom": "An accepted cloud turn was retired after reconnect because client or push observation expiry was treated as execution revocation.",
   "rule": "An exact accepted execution survives observation loss while retaining its original provider deadline, explicit Stop and real revocation. Observation cannot mint or renew another command.",

@@ -1,9 +1,9 @@
 {
   "id": "file-pill-source-fallback",
   "kind": "replay",
-  "area": "desktop-renderer",
+  "area": "renderer-state",
   "fixedBy": "pr:694",
   "symptom": "Tool file pills left ignored or unchanged sources on an empty Changes view, and a legacy dirty Changes editor could duplicate nested folder prefixes when opening another source.",
-  "rule": "Use the exact successful Branch comparison to resolve absent tool targets into Files, consuming the original request atomically while preserving newer selections, rename targets and unsaved drafts; keep Git-root and chat-relative paths distinct for Local and cloud owners. See agents/zstack/changes/file-pill-source-fallback.md.",
+  "rule": "Use the exact successful Branch comparison to resolve absent tool targets into Files, consuming the original request atomically while preserving newer selections, rename targets and unsaved drafts; keep Git-root and chat-relative paths distinct for Local and cloud owners. See git show 7b6eb9e6:agents/zstack/changes/file-pill-source-fallback.md.",
   "check": "pnpm test:git apps/desktop/src/renderer/shell/workbench/__tests__/file-pill-navigation.test.ts apps/desktop/src/renderer/state/__tests__/requested-changes-file.test.ts apps/desktop/src/renderer/shell/workbench/tabs/__tests__/changes-selection.test.ts"
 }

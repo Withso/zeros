@@ -1,9 +1,9 @@
 {
   "id": "computer-build-graceful-handoff",
   "kind": "replay",
-  "area": "cloud-workspaces",
+  "area": "control-plane",
   "fixedBy": "pr:598",
   "symptom": "A control-plane deploy failed and cleaned an in-flight Computer build when its next install poll observed worker shutdown.",
-  "rule": "Treat shutdown separately from revoked authority. Yield only at verified checkpoints, retaining the builder, pins, stage, original deadline and helper identity while advancing the CP fence; never adopt an uncheckpointed clone. See changes/computer-build-graceful-handoff.md.",
+  "rule": "Treat shutdown separately from revoked authority. Yield only at verified checkpoints, retaining the builder, pins, stage, original deadline and helper identity while advancing the CP fence; never adopt an uncheckpointed clone. See git show 7b6eb9e6:agents/zstack/changes/computer-build-graceful-handoff.md.",
   "check": "pnpm --dir apps/control-plane exec vitest run src/cloud-workspaces/computer-template-worker.integration.test.ts -t 'hands an in-flight install'"
 }

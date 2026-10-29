@@ -1,7 +1,7 @@
 {
   "id": "cloud-checkpoint-independent-api",
   "kind": "replay",
-  "area": "engine-runtime",
+  "area": "scripts",
   "fixedBy": "pr:596",
   "symptom": "Checkpoint push remained active while realtime's pool failed, so an API-queued before_stop could expire before the engine made another heartbeat request.",
   "rule": "zstack-review requires an independently observed API discovery deadline under a scoped pool failure, with bounded optional I/O and request-start freshness. A cached pong cannot refresh it.",

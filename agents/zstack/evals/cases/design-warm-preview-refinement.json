@@ -1,7 +1,7 @@
 {
   "id": "design-warm-preview-refinement",
   "kind": "scenario",
-  "area": "desktop-design-state",
+  "area": "desktop-design",
   "fixedBy": "pr:761",
   "symptom": "A culled frame returned blank while a sharper encoded preview decoded, despite a smaller decoded cover remaining in the warm cache.",
   "rule": "agents/zstack/playbooks/performance.md: hold a sharper image's decode across culling and return; encoded quality must not delay the ready same-owner cover's first paint.",

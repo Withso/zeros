@@ -1,7 +1,7 @@
 {
   "id": "cloud-history-command-origin-seal",
   "kind": "replay",
-  "area": "cloud-engine-resume",
+  "area": "desktop-engine",
   "fixedBy": "pr:669",
   "symptom": "A clean idle successor sealed its event stream at zero, then the next cloud wake refused terminal command history whose higher cursor was covered by its original acknowledged writer seal.",
   "rule": "Rebuild bounds retained event cursors by their exact acknowledged origin and actor scope. A present invalid seal cannot fall back to the legacy actor-only envelope. Exercise unchanged succeeded and cancelled history through repeated sealed handoffs with nonzero origin cursors and idle successors.",

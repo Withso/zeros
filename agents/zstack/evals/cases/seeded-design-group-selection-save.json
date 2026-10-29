@@ -1,7 +1,7 @@
 {
   "id": "seeded-design-group-selection-save",
   "kind": "seeded",
-  "area": "engineering verification",
+  "area": "zstack",
   "fixedBy": "pr:684",
   "symptom": "The Design canvas smoke Shift-clicks a selected group member after its fill preview paints but before the save settles. Source promotion between pointer-down and pointer-up retires the gesture and both layers remain selected.",
   "rule": "CI-red interaction fixtures must join an already-submitted edit and confirm its displayed runtime generation before starting the next pointer gesture. Preserve the source-change retirement guard, exact selection assertion, bounded readiness and modifier cleanup.",

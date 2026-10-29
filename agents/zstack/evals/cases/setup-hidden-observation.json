@@ -1,7 +1,7 @@
 {
   "id": "setup-hidden-observation",
   "kind": "scenario",
-  "area": "1: renderer state and interaction",
+  "area": "scripts",
   "fixedBy": "pr:524",
   "symptom": "The Setup output poll stayed armed while the window was hidden. A queued invalidation could read after hide or owner retirement, and reveal could publish a superseded response before catch-up. Sibling status and provenance observers also read while hidden. Missing a hidden rerun's empty snapshot left the old text in equal or longer replacement logs.",
   "rule": "Exercise the real Setup consumers in Local Personal, organization-local and cloud. Cancel hidden timers and reads, retain confirmed exact-key output, coalesce one reveal catch-up and fence A to B to A responses without stopping setup execution. Append only an exact confirmed prefix extension; test equal and longer replacement logs after a hidden reset.",

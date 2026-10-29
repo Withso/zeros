@@ -1,7 +1,7 @@
 {
   "id": "computer-build-closed-failure",
   "kind": "replay",
-  "area": "vm-image-bootstrap",
+  "area": "control-plane",
   "fixedBy": "pr:621",
   "symptom": "A Computer self-test failure discarded its closed failed-check names before deleting the builder, leaving only a generic integrity error.",
   "rule": "Retain command-specific closed diagnostics before cleanup under the current build fence; reject arbitrary output and preserve failure/cleanup when reporting fails. See agents/zstack/playbooks/bug-fix.md.",

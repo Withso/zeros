@@ -1,7 +1,7 @@
 {
   "id": "empty-base-same-boot-readiness",
   "kind": "replay",
-  "area": "vm-image-bootstrap",
+  "area": "scripts-release",
   "fixedBy": "pr:628",
   "symptom": "Same-boot base verification and repeated sanitation refused the disk epoch that sanitation had deliberately emptied.",
   "rule": "Run sanitize, verify, sanitize, verify and fresh boot through the real readiness methods. Empty-base verification requires exact absence, original marker metadata and the existing boot, Host and persistence proofs; ordinary and cold admission keep a positive epoch.",

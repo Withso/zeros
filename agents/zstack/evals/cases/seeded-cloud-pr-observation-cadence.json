@@ -1,9 +1,9 @@
 {
   "id": "seeded-cloud-pr-observation-cadence",
   "kind": "seeded",
-  "area": "cloud-workspaces",
+  "area": "renderer-state",
   "fixedBy": "pr:652",
   "symptom": "Cloud Git broadcasts issued fresh GitHub reads on every edit and repeated failures without backoff.",
-  "rule": "Separate remote PR observation cadence from local Git freshness; bound exact-key observations and preserve deletion/mutation fences. See changes/cloud-observation-db-budget.md.",
+  "rule": "Separate remote PR observation cadence from local Git freshness; bound exact-key observations and preserve deletion/mutation fences. See git show 7b6eb9e6:agents/zstack/changes/cloud-observation-db-budget.md.",
   "check": "pnpm exec vitest run apps/desktop/src/renderer/shell/pr/__tests__/cloud-pr-status-reads.test.ts apps/desktop/src/renderer/shell/pr/__tests__/pr-island-activity.test.ts"
 }

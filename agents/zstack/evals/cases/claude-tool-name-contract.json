@@ -1,9 +1,9 @@
 {
   "id": "claude-tool-name-contract",
   "kind": "seeded",
-  "area": "Claude runtime compatibility",
+  "area": "desktop-agents",
   "fixedBy": "pr:717",
   "symptom": "A special-cased Claude tool name can drift from the installed SDK without failing event fixtures.",
-  "rule": "Read actual routing names against the SDK exports, with explicit retired-name exceptions; changes/claude-tool-name-contract.md.",
+  "rule": "Read actual routing names against the SDK exports, with explicit retired-name exceptions; git show 7b6eb9e6:agents/zstack/changes/claude-tool-name-contract.md.",
   "check": "pnpm test:git apps/desktop/src/engine/agents/adapters/claude/__tests__/tool-name-contract.test.ts"
 }

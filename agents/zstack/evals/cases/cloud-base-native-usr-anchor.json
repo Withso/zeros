@@ -1,7 +1,7 @@
 {
   "id": "cloud-base-native-usr-anchor",
   "kind": "replay",
-  "area": "vm-image-bootstrap",
+  "area": "scripts-release",
   "fixedBy": "pr:632",
   "symptom": "Cold base verification refused the fixed root-owned /usr edge when its mount identity differed from root, despite equal inode metadata.",
   "rule": "Prove a fixed native root/usr anchor from descriptors and the exact mount table; preserve child-mount, ownership, ACL, absence and original-policy fences.",

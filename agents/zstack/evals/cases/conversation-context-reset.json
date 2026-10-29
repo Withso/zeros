@@ -1,9 +1,9 @@
 {
   "id": "conversation-context-reset",
   "kind": "replay",
-  "area": "agent lifecycle",
+  "area": "desktop-engine",
   "fixedBy": "e30feefb214e1aa34f7adf72243f750dd6c04b35",
   "symptom": "Reset truncates a chat's visible transcript but its persisted Claude, Codex or Cursor binding still resumes the discarded provider history after reopening.",
-  "rule": "Retire the exact chat's execution and detach its durable native binding with the transcript cut; test restart, Undo, late results and mixed-version replay ownership. See agents/zstack/playbooks/bug-fix.md and agents/zstack/changes/conversation-context-reset.md.",
+  "rule": "Retire the exact chat's execution and detach its durable native binding with the transcript cut; test restart, Undo, late results and mixed-version replay ownership. See agents/zstack/playbooks/bug-fix.md and git show 7b6eb9e6:agents/zstack/changes/conversation-context-reset.md.",
   "check": "pnpm test:git apps/desktop/src/engine/workspace/__tests__/turns-reset-service.test.ts"
 }

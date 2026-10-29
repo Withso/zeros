@@ -1,9 +1,9 @@
 {
   "id": "github-pr-discovery-canonical-repository",
   "kind": "replay",
-  "area": "git",
+  "area": "desktop-git",
   "fixedBy": "pr:733",
   "symptom": "A PR created successfully in a transferred repository remains undiscovered because the REST head filter retains the old owner. Similar branch names and bounded closed-PR history also misidentify or hide PRs.",
-  "rule": "Resolve canonical repository identity before qualifying the head, validate the stable head repository ID, search open PRs first, and reconcile recorded PRs by number. See agents/zstack/changes/github-pr-discovery-identity.md.",
+  "rule": "Resolve canonical repository identity before qualifying the head, validate the stable head repository ID, search open PRs first, and reconcile recorded PRs by number. See git show 7b6eb9e6:agents/zstack/changes/github-pr-discovery-identity.md.",
   "check": "pnpm exec vitest run --config vitest.config.ts apps/desktop/src/engine/git/__tests__/sync-workspace-pr.test.ts"
 }

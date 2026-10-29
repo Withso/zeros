@@ -1,7 +1,7 @@
 {
   "id": "organization-sync-hidden-observation",
   "kind": "replay",
-  "area": "1: renderer state and interaction",
+  "area": "renderer-state",
   "fixedBy": "pr:524",
   "symptom": "The Local organization courier continued its 15-minute CP poll while hidden. Held settings could publish after A to B to A, and a same-owner account generation reset did not clear the old engine context before revalidation.",
   "rule": "The bug-fix playbook requires passive observation gating without disabling account/owner clearing. Hold account reads, settings, ownership repair and clear acknowledgements across hide and owner/account changes; fence the observation epoch as well as the exact key.",

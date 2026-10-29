@@ -1,7 +1,7 @@
 {
   "id": "cleanup-after-failed-wake",
   "kind": "replay",
-  "area": "release-dev-environment",
+  "area": "scripts-release",
   "fixedBy": "pr:488",
   "symptom": "A failed wake followed by the control plane's system stop exhausted cleanup's wait and prevented DELETE, retaining the fixture's only workspace slot.",
   "rule": "Explicit cleanup records the exact signed workspace's settled observed outcome without inventing wake completion, then persists and replays its own deletion key. Transient setup reports pending within the existing bound.",

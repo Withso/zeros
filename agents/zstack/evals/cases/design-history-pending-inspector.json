@@ -1,7 +1,7 @@
 {
   "id": "design-history-pending-inspector",
   "kind": "replay",
-  "area": "desktop-renderer",
+  "area": "desktop-design",
   "fixedBy": "pr:750",
   "symptom": "Undo inverted a pending style edit on the canvas while the inspector kept the edit's older live scalar until persistence completed.",
   "rule": "Present inverse details over older exact-node live scalars while retaining later input and rejection recovery; the performance playbook requires separate element and inspector evidence.",

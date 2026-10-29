@@ -1,9 +1,9 @@
 {
   "id": "cloud-restart-presentation",
   "kind": "replay",
-  "area": "cloud-workspaces",
+  "area": "renderer-state",
   "fixedBy": "pr:706",
   "symptom": "The first cloud lifecycle installation after restart pruned the same account's saved workspace and chat before its catalog could validate them.",
-  "rule": "Treat same-account installation as revalidation, and retire presentation only on a confirmed identity boundary or complete deletion evidence. Exercise the mounted lifecycle with real persisted navigation. See agents/zstack/changes/cloud-restart-presentation.md.",
+  "rule": "Treat same-account installation as revalidation, and retire presentation only on a confirmed identity boundary or complete deletion evidence. Exercise the mounted lifecycle with real persisted navigation. See git show 7b6eb9e6:agents/zstack/changes/cloud-restart-presentation.md.",
   "check": "pnpm vitest run apps/desktop/src/renderer/state/__tests__/cloud-startup-lifecycle.test.ts -t 'keeps the saved cloud route and chat when the same account first installs'"
 }

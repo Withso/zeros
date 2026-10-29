@@ -1,7 +1,7 @@
 {
   "id": "accepted-final-save-survives-capture-failure",
   "kind": "replay",
-  "area": "cloud-engine-stop",
+  "area": "desktop-engine",
   "fixedBy": "pr:639",
   "symptom": "A failed explicit final checkpoint called the idle cancellation endpoint, silently superseding an accepted Stop and allowing later lifecycle code to retire an unsaved source.",
   "rule": "Keep the accepted destructive lifecycle separate from finite capture attempts. Join all admitted I/O, retain original sealed custody and exact uncertain commit bytes, and require current final proof at every provider dispatch boundary. Alerts belong to operators; observer detachment is not completion.",

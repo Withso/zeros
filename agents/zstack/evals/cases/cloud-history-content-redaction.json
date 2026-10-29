@@ -1,7 +1,7 @@
 {
   "id": "cloud-history-content-redaction",
   "kind": "replay",
-  "area": "cloud-engine-resume",
+  "area": "desktop-engine",
   "fixedBy": "pr:653",
   "symptom": "A normal cloud turn could publish incomplete history because its pinned content scrubber rewrote canonical routing identity when a configured literal or one-character prefix overlapped it.",
   "rule": "agents/zstack/playbooks/bug-fix.md: exercise actual turn persistence and the pinned kind-aware content redactor; keep identity, watermark and native-outcome proof guards independent.",

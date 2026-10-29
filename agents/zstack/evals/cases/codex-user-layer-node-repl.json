@@ -1,9 +1,9 @@
 {
   "id": "codex-user-layer-node-repl",
   "kind": "replay",
-  "area": "agent-adapters",
+  "area": "desktop-agents",
   "fixedBy": "pr:764",
   "symptom": "Codex's built-in browser stayed off for every user whose ChatGPT Desktop declared node_repl in ~/.codex/config.toml, because the conflict check could not tell the user's own inert keys from a repository's injected settings.",
-  "rule": "On a Browser registration conflict, read config/read layers; accept only allowlisted inert keys from the sole user layer that equal its values, replace args/env_vars explicitly, and refuse project, system and every other key. See changes/codex-user-layer-node-repl.md.",
+  "rule": "On a Browser registration conflict, read config/read layers; accept only allowlisted inert keys from the sole user layer that equal its values, replace args/env_vars explicitly, and refuse project, system and every other key. See git show 7b6eb9e6:agents/zstack/changes/codex-user-layer-node-repl.md.",
   "check": "pnpm test:git apps/desktop/src/engine/agents/adapters/codex/__tests__/mcp-overrides.test.ts apps/desktop/src/engine/agents/adapters/codex/__tests__/app-server-adapter-binding.test.ts apps/desktop/src/engine/agents/adapters/codex/__tests__/browser-tools.test.ts"
 }

@@ -8,19 +8,20 @@ import { writeReceipt } from "./runner.mjs";
 
 export const HELP = `node scripts/zstack/eval-replay.mjs --case ID [--case ID ...] | --all
   [--execute --receipt /private/scratch/replay.json] [--baseline FILE]
-  [--revision FULL_SHA] [--allow-pending]
-  [--mode single-session|master-subagents --agent MODEL --master MODEL]
-Default is an offline plan. Execution uses only locally available Git objects
-and installed dependencies. Each case gets 120 seconds per side; at most 32
-cases run, sequentially. --revision pins seeded inputs. Raw child output is
-discarded. Unverified, missed and caught results are distinct. No fetch/install.`;
+  [--revision FULL_SHA] [--allow-pending] [--dependency-cache DIRECTORY]
+  [--mode single-session|master-subagents|co-masters --agent MODEL --master MODEL]
+Default is an offline plan. Execution prefetches missing promised Git objects
+and caches historical pnpm graphs outside the checkout (offline store first).
+Each case gets 120 seconds per side and four Vitest workers; at most 32 cases
+run sequentially. --revision pins seeds. Child output is discarded. Caught,
+missed and unverified results are distinct. See agents/zstack/tools.md.`;
 
 export async function runCli(args, { cwd = process.cwd(), read = readEvalCases, run = replayCase, seed = replaySeed,
   write = value => process.stdout.write(`${JSON.stringify(value)}\n`), receipt = writeReceipt, signal } = {}) {
   try {
     if (!args.length || args[0] === "--help") { write({ schema: "zeros.zstack-help/v1", help: HELP }); return 0; }
     const options = { cases: [], execute: false, all: false, "allow-pending": false, mode: "single-session", agent: "unspecified", master: null };
-    const flags = new Set(["--execute", "--all", "--allow-pending"]), values = new Set(["--case", "--receipt", "--baseline", "--revision", "--mode", "--agent", "--master"]), seen = new Set();
+    const flags = new Set(["--execute", "--all", "--allow-pending"]), values = new Set(["--case", "--receipt", "--baseline", "--revision", "--mode", "--agent", "--master", "--dependency-cache"]), seen = new Set();
     for (let index = 0; index < args.length; index++) {
       const flag = args[index];
       if (seen.has(flag) && flag !== "--case") throw new Error(); seen.add(flag);
@@ -30,8 +31,8 @@ export async function runCli(args, { cwd = process.cwd(), read = readEvalCases, 
       } else throw new Error();
     }
     if ((!options.all && !options.cases.length) || (options.all && options.cases.length) ||
-      options.execute && !options.receipt || !["single-session", "master-subagents"].includes(options.mode) ||
-      options.mode === "master-subagents" && (!options.master || options.agent === "unspecified") ||
+      options.execute && !options.receipt || !["single-session", "master-subagents", "co-masters"].includes(options.mode) ||
+      options.mode !== "single-session" && (!options.master || options.agent === "unspecified") ||
       options.agent.length > 100 || (options.master?.length ?? 0) > 100) throw new Error();
     const value = read(cwd);
     if (validateEvalCases(value, { allowPending: options["allow-pending"] }).length) throw new Error();
@@ -45,9 +46,10 @@ export async function runCli(args, { cwd = process.cwd(), read = readEvalCases, 
       let result;
       if (entry.kind === "seeded") {
         const definition = await sourceBytes(cwd, `agents/zstack/evals/seeds/${entry.id}.json`);
-        result = definition ? await seed(entry, JSON.parse(definition.bytes.toString("utf8")), { cwd, revision: options.revision, signal })
+        result = definition ? await seed(entry, JSON.parse(definition.bytes.toString("utf8")), { cwd, revision: options.revision, signal,
+          cacheRoot: options["dependency-cache"] && path.resolve(cwd, options["dependency-cache"]) })
           : { id: entry.id, status: "unverified", code: "seed_definition_required" };
-      } else result = await run(entry, { cwd, signal });
+      } else result = await run(entry, { cwd, signal, cacheRoot: options["dependency-cache"] && path.resolve(cwd, options["dependency-cache"]) });
       results.push(result);
       write({ schema: "zeros.zstack-eval-progress/v1", id: entry.id, status: result.status, code: result.code });
     }

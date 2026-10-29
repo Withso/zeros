@@ -4,6 +4,6 @@
   "area": "renderer-settings",
   "fixedBy": "pr:703",
   "symptom": "The GitHub disconnect dialog lost focus after its opening menu retired; a quick dismissal could be masked by the old menu's exit callback.",
-  "rule": "changes/anchored-overlay-dismissal.md: menu-opened dialogs restore focus to a persistent trigger, suppress inactive returns and await focus independently of visibility.",
+  "rule": "git show 7b6eb9e6:agents/zstack/changes/anchored-overlay-dismissal.md: menu-opened dialogs restore focus to a persistent trigger, suppress inactive returns and await focus independently of visibility.",
   "check": "pnpm test:ui-smoke --shard=3/3"
 }

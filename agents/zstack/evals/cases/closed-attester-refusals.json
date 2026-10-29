@@ -1,7 +1,7 @@
 {
   "id": "closed-attester-refusals",
   "kind": "replay",
-  "area": "control-plane-workers",
+  "area": "scripts",
   "fixedBy": "pr:597",
   "symptom": "A failed attester completion lost its closed refusal, repeated qualification failures exhausted setup retries, and missing reports looked like proved immutable drift.",
   "rule": "Retain strict attester evidence through helper, audit and evidence reads. Only completed predicates prove terminal refusal; broad names wrapping missing input or a probe that never ran retain bounded retries. Absent reports cannot authorize automatic replacement.",

@@ -1,7 +1,7 @@
 {
   "id": "cloud-stop-seal-budget-race",
   "kind": "replay",
-  "area": "control-plane-lifecycle",
+  "area": "control-plane",
   "fixedBy": "pr:500",
   "symptom": "A compute lease tick superseded a slow user stop, cancelled its final checkpoint and stopped the provider with the current native writer unsealed. The following resume correctly refused the older checkpoint.",
   "rule": "The bug-fix playbook requires a real lease tick during a pending final checkpoint, preservation of its original lifecycle intent, native seal checks and an audited bounded fallback on every provider-stop path. Neither a stop decision nor lease expiry is positive retirement or checkpoint custody proof.",

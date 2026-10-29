@@ -48,7 +48,7 @@ describe("zstack pack", () => {
     const temp = mkdtempSync(join(tmpdir(), "zstack-evals-"));
     mkdirSync(join(temp, "agents/zstack/evals/cases"), { recursive: true });
     cpSync(join(root, "agents/zstack/evals/cases.json"), join(temp, "agents/zstack/evals/cases.json"));
-    const entry = { id: "new-case", kind: "replay", area: "a", fixedBy: "pr:1", symptom: "s", rule: "r", check: "c" };
+    const entry = { id: "new-case", kind: "replay", area: "zstack", fixedBy: "pr:1", symptom: "s", rule: "r", check: "c" };
     writeFileSync(join(temp, "agents/zstack/evals/cases/new-case.json"), JSON.stringify(entry));
     writeFileSync(join(temp, "agents/zstack/evals/cases/wrong-name.json"), JSON.stringify({ ...entry, id: "other" }));
     const cases = readEvalCases(temp).cases;
@@ -58,7 +58,7 @@ describe("zstack pack", () => {
 
   it("accepts a pending fixedBy only when explicitly allowed", () => {
     const pending = { schema: "zeros.zstack-evals/v1", cases: [
-      { id: "pending-case", kind: "replay", area: "a", fixedBy: "pending", symptom: "s", rule: "r", check: "c" },
+      { id: "pending-case", kind: "replay", area: "zstack", fixedBy: "pending", symptom: "s", rule: "r", check: "c" },
     ] };
     expect(validateEvalCases(pending)).toEqual([expect.stringMatching(/fixedBy must be a full commit SHA or pr:<number>$/)]);
     expect(validateEvalCases(pending, { allowPending: true })).toEqual([]);

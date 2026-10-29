@@ -1,7 +1,7 @@
 {
   "id": "owner-discard-legacy-capture-retention",
   "kind": "seeded",
-  "area": "cloud-workspaces",
+  "area": "control-plane",
   "fixedBy": "pr:672",
   "symptom": "Owner-approved deletion failed after its receipt froze legacy terminal captures because lazy recovery adoption also generated a retirement identity.",
   "rule": "Enroll recovery ownership separately from capture adoption when recording exact loss dispositions. Replay pre-migration terminal history and prove provider, object and record erasure without changing the captured facts.",

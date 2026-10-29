@@ -1,7 +1,7 @@
 {
   "id": "portable-census-consumer-faults",
   "kind": "replay",
-  "area": "engine-test-fixtures",
+  "area": "desktop-agents",
   "fixedBy": "pr:513",
   "symptom": "Changing a shared portable process reader bypassed an indirect cleanup consumer's fault injection, silently turning its incomplete and unavailable census cases into successful empty proof.",
   "rule": "The ci-red playbook requires all direct and transitive helper importers before READY and explicit observation injection that preserves negative census cases when replacing a reader.",
