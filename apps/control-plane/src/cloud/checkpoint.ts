@@ -1,17 +1,10 @@
-// Workspace checkpoints. Boat deletes a stopped VM's disk after 14 days, so
-// every stop saves what the workspace needs to come back on a new VM, as one
-// encrypted object in our own storage, kept until the workspace is deleted:
-// - the workspace repository's Git state: branches, local commits, stashes,
-//   the index and every tracked or untracked file that is not ignored, plus
-//   small ignored files outside ignored directories (such as `.env.local`);
-// - completed composer attachments, including inside ignored context roots;
-// - the worker's state and the agents' session files.
-// Ignored directories (dependencies, build outputs) come back from the Cloud
-// Computer and the setup script instead. The VM builds and uploads the object
-// itself through a short-lived presigned URL; the data key exists only in the
-// command and sealed in the database. A stop that finds everything above
-// exactly as the last checkpoint holds it keeps that checkpoint instead of
-// uploading an identical one; the comparison covers contents, never times.
+// Boat deletes stopped disks after 14 days. Retain one encrypted checkpoint
+// until workspace deletion: Git history/index and nonignored files, small ignored
+// files outside ignored directories, completed composer attachments even in
+// ignored roots, and worker/provider session state. Setup restores dependencies
+// and build outputs. The VM uploads through a short-lived presigned URL; the
+// data key exists only in the command and sealed in the database. Compare
+// contents, not timestamps, to reuse an unchanged checkpoint.
 import { DeleteObjectCommand, GetObjectCommand, HeadObjectCommand, ListObjectsV2Command, PutObjectCommand, type S3Client } from "@aws-sdk/client-s3";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 import { createHash, hkdfSync } from "node:crypto";
@@ -350,10 +343,8 @@ function archiveSteps(input: ArchiveInput, revision: string): string[] {
     "  fi",
     "  index=$(git rev-parse --git-path index)",
     "  if ! { [ -f \"$index\" ] && cp \"$index\" \"$work/index\" && unhide && addall; }; then",
-    // A fresh index, seeded from the staged tree as Conductor's checkpointer
-    // does, and made as complete as a copy: sparse files absent from disk keep
-    // their mark, and every path the real index lists (unmerged and
-    // intent-to-add entries included) is added even if it matches .gitignore.
+    // Seed a scratch index from the staged tree without losing absent sparse
+    // paths or real index entries, including unmerged, intent-to-add and ignored files.
     "    rm -f \"$work/index\"",
     "    if [ -n \"$staged\" ]; then scratch read-tree \"$staged\"; elif [ -n \"$head\" ]; then scratch read-tree \"$head\"; else scratch read-tree --empty; fi",
     "    while IFS= read -r -d '' path; do if ! [ -e \"$path\" ] && ! [ -L \"$path\" ]; then printf '%s\\0' \"$path\"; fi; done \\",

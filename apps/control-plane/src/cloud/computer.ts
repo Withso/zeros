@@ -1,14 +1,9 @@
-// Cloud Computer builds. Each organization has exactly one live Boat named
-// snapshot: a clean runtime image captured before any source is delivered.
-// Repositories and their setup are verified on the disposable builder only.
-// Workspaces hydrate their one authorized checkout. Every build is kept here as
-// a recipe; activating an older one rebuilds it at the same commits.
-//
-// Admins edit a configured recipe; a build turns it into the live snapshot,
-// and the two differ while changes are unbuilt. Every build starts from
-// stock: deleting old checkouts cannot remove copied artifacts or history.
-// The snapshot is refreshed by itself when the worker runtime
-// changes, and once a day while the organization uses cloud workspaces.
+// Each organization keeps one live Boat snapshot, captured before credentials
+// or source reach the disposable builder. Workspaces hydrate their authorized
+// checkout; configured recipes can differ from the live build until rebuilt.
+// Always build from stock: deleting checkouts cannot remove copied artifacts.
+// Re-activation rebuilds the recorded commits. Refresh on runtime changes and
+// daily while cloud workspaces are in use.
 import { randomUUID } from "node:crypto";
 import type pg from "pg";
 import { z } from "zod";
@@ -662,17 +657,12 @@ function asZeros(lines: readonly string[]): string {
   return `bash -lc ${shellQuote(lines.join("\n"))}`;
 }
 
-/** Brings one repository to the recipe's ref. A checkout the previous build
- * left is fetched and moved in place, so ignored files such as installed
- * dependencies stay; a missing one is cloned. Prints the verified branch and
- * the commit. The token stays in a per-command header; no saved remote URL
- * carries it. */
+/** Reuse checkouts so ignored dependencies survive; credentials stay in a
+ * per-command header, never a saved remote URL. */
 function checkoutScript(entry: RecipeEntry, dir: string, canonicalRepository = entry.repository): string[] {
   const q = shellQuote, d = q(dir);
   const header = "--config-env=http.extraHeader=ZEROS_GITHUB_AUTH_HEADER";
-  // A pinned commit (activating an earlier build) is checked out directly: its
-  // branch or tag may have moved or been deleted since. Fetch it by id when
-  // the branches no longer reach it.
+  // Fetch pinned commits directly when moved or deleted refs no longer reach them.
   const pinned = entry.commit ? [
     `if ! git -C ${d} cat-file -e ${q(`${entry.commit}^{commit}`)} 2>/dev/null; then git -C ${d} ${header} fetch --quiet origin ${q(entry.commit)} || true; fi`,
   ] : [];
