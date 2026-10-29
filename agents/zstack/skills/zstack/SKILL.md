@@ -46,7 +46,11 @@ Use this for any change to Zeros, whichever host you run in. `AGENTS.md` and
 
 | Task | Load |
 |---|---|
+| New or changed behavior | `agents/zstack/playbooks/feature.md` |
 | Bug or regression | `agents/zstack/playbooks/bug-fix.md` |
+| Behavior-preserving rename, move, extraction or deletion | `agents/zstack/playbooks/refactor.md` |
+| Read-only question, explanation or decision support | `agents/zstack/playbooks/investigation.md` |
+| Throwaway sketch to settle a design or behavior question | `agents/zstack/playbooks/prototype.md` |
 | CI red, flaky test or release failure | `agents/zstack/playbooks/ci-red.md` |
 | Integrating or merging someone's patch (master) | `agents/zstack/playbooks/integrate-pr.md` |
 | Live Alpha DB, provider, Railway or WorkOS action | `agents/zstack/playbooks/alpha-operator.md` |
@@ -54,6 +58,7 @@ Use this for any change to Zeros, whichever host you run in. `AGENTS.md` and
 | UI, styling, tokens or mockups | `agents/zstack/playbooks/ui-design.md` and the `zeros-ui` skill |
 | Performance or a new canvas/runtime backend | `agents/zstack/playbooks/performance.md` and `zstack-verify` |
 | Workspaces, engine, bridge, agents or Git | the `zeros-workspaces` skill (Local and cloud owners and placements) |
+| Changing the zstack pack itself | `agents/zstack/playbooks/skill-eval.md` when the change can alter agent behavior, and `zstack-learn` |
 
 Every task also uses `agents/zstack/principles.md`: the eighteen principles
 that hold Zeros' recorded lessons, each with the eval cases behind it.
@@ -75,8 +80,8 @@ Guard the context window. Read the feature area you are changing and the docs
 4. **Verify** with `zstack-verify`: adjacent suites plus the required static
    gates, and live Alpha checks when the change needs them.
 5. **Eval** with `zstack-eval` when the pack or a covered area changed.
-6. **Review** with `zstack-review`. Review the full diff yourself; no other
-   reviewer replaces that.
+6. **Review.** Run the `zstack-comments` pass, then `zstack-review`. Review the
+   full diff yourself; no other reviewer replaces that.
 7. **Fix** what the review found, in bounded rounds, then re-verify the files
    you touched.
 8. **Deliver** a PR with Why, What changes, Tests and Rollout sections, merged

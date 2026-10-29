@@ -17,6 +17,16 @@ where it is encoded.
   caps waiting fragments at 40 and their length, budgets every skill, playbook
   and reference, and checks that each case a principle cites exists. The fragment
   proposal is adopted and its file removed (`zstack-learn`, `changes/README.md`).
+- **Comments had no rule, and a purge would have broken releases.** Migrations
+  are checksummed and generators read marker comments, yet narration and
+  dividers piled up. `RULES.md` §7 now limits comments to a non-obvious why;
+  `zstack-comments` adds a fresh-context pass over each diff and the keep-list;
+  `scripts/zstack/comments.mjs verify` proves a cleanup changed only comments;
+  divider comments may only shrink (`comment-debt.json`).
+- **The router had no playbook for the most common tasks.** Features, refactors,
+  investigations, prototypes and pack changes now have playbooks
+  (`feature.md`, `refactor.md`, `investigation.md`, `prototype.md`,
+  `skill-eval.md`), and the loop's review step runs the comment pass first.
 - **Two masters shared one workspace.** The co-master mode splits file
   ownership and worktrees, has one master arm every merge after reviewing the
   other's diff, and changes shared contracts only through explicit deltas
