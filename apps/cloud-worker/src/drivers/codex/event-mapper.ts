@@ -5,43 +5,6 @@
 import { boundedStructuredOutput, canonicalToolContent } from "../shared/tool-content";
 import { codexModelUnavailableMessage } from "@zeros/protocol/model-rejection";
 import { CodexTurnUsage } from "./usage-accounting";
-// ──────────────────────────────────────────────────────────
-// Codex app-server → SessionNotification translator.
-// ──────────────────────────────────────────────────────────
-//
-// Maps the ~60 app-server `ServerNotification` event types onto our
-// canonical `SessionNotification` shape. Replaced the legacy
-// `codex exec --json` stream translator; the
-// app-server wire is JSON-RPC notifications with method names like
-// `item/started`, `item/agentMessage/delta`, etc., rather than flat
-// per-line JSON.
-//
-// The output (canonical SessionNotification) is identical, so the
-// renderer doesn't know which transport is underneath.
-//
-// Event mapping (drawn from `./generated/v2/ServerNotification.ts`,
-// regenerated against the codex version pinned in
-// `package.json#codexProtocolVersion`):
-//
-//   thread/started             → captures threadId (no UI event)
-//   turn/started               → no-op (turn boundary implicit)
-//   turn/completed             → terminal; stopReason=end_turn|cancelled
-//   item/started               → tool_call (for commandExecution, fileChange, etc.)
-//   item/completed             → tool_call_update {status: completed|failed}
-//   item/agentMessage/delta    → agent_message_chunk
-//   item/reasoning/textDelta   → agent_thought_chunk
-//   item/reasoning/summary*    → agent_thought_chunk (summary subchannel)
-//   item/commandExecution/outputDelta → tool_call_update (streaming exec output)
-//   item/fileChange/outputDelta       → tool_call_update (streaming edit)
-//   item/fileChange/patchUpdated      → tool_call_update (final patch)
-//   turn/diff/updated, turn/plan/updated → known aggregate no-ops
-//   error                      → terminal unless willRetry; emits notice row
-//   warning / deprecationNotice / configWarning → notice row (info-tier)
-//   mcpServer/startupStatus/updated → known no-op; connection state lives in Tools
-//   account/updated            → captured externally by the adapter (not a UI event here)
-//   account/rateLimits/updated → ditto
-//
-// ──────────────────────────────────────────────────────────
 
 import { normalizeProviderError, type ProviderError } from "../shared/provider-error";
 import { randomUUID } from "node:crypto";
@@ -153,18 +116,11 @@ export class CodexEventMapper {
    *  in a turn gets its OWN timeline row (never appended into one blob). */
   private noticeSeq = 0;
 
-  /** True once the CURRENT retry burst (`error` notifications with
-   *  `willRetry:true`) has produced its api_retry notice row — codex retries
-   *  the SAME turn itself, so one "Reconnecting agent" row per burst (parity
-   *  with the Claude translator's api_retry handling), not one per attempt.
-   *  Cleared by any item/turn progress (the retried call got through). */
+  /** Native willRetry keeps the turn alive; emit one notice until item/turn progress. */
   private retryBurstNoticed = false;
 
-  /** Zeros-side (minted) tool call id for a native itemId — lets the adapter
-   *  address a timeline row it only knows by vendor id (the question-stamp
-   *  tool_call_update on requestUserInput settle). Undefined until the item
-   *  has streamed through item/started or a requestUserInput row has been
-   *  synthesized from the server request. */
+  /** The adapter knows native IDs; return the emitted row ID only after an item
+   * or a synthesized question has established that identity. */
   toolCallIdFor(itemId: string): string | undefined {
     return this.toolCallIds.get(itemId);
   }
@@ -351,7 +307,6 @@ export class CodexEventMapper {
     this.unparentedIds.clear();
   }
 
-  // ── Public accessors ────────────────────────────────────
 
   get codexThreadId(): string | null {
     return this.threadId;
@@ -384,11 +339,8 @@ export class CodexEventMapper {
     return this.lastTurnUsage;
   }
 
-  /** True when the NEXT contextCompaction item was initiated by the user
-   *  (Compact now / typed /compact → adapter.compactContext armed this
-   *  right before the thread/compact/start RPC). Stamps the row's
-   *  rawInput.trigger "manual" so the renderer places it standalone;
-   *  codex's own auto-compactions stay "auto" (grouped). */
+  /** Stamp user-initiated compaction as manual before the RPC so it stays
+   * standalone; automatic compaction belongs to the working group. */
   private manualCompactionExpected = false;
 
   /** Adapter hook — see manualCompactionExpected. */
@@ -515,7 +467,6 @@ export class CodexEventMapper {
     this.retryBurstNoticed = false;
   }
 
-  // ── Notification entry point ────────────────────────────
 
   /** Dispatch a server notification by method name + params. The
    *  runtime registered this as the handler in `onNotification`. */
@@ -649,7 +600,6 @@ export class CodexEventMapper {
     }
   }
 
-  // ── Handlers ────────────────────────────────────────────
 
   private onThreadStarted(params: unknown): void {
     const p = params as { thread?: { id?: string } };
@@ -712,23 +662,9 @@ export class CodexEventMapper {
     }
   }
 
-  /** Codex fans out token usage per turn via `thread/tokenUsage/updated`
-   *  (ThreadTokenUsageUpdatedNotification). Mirror Claude's `usage_update`
-   *  so the context gauge lights up for Codex too.
-   *
-   *  `used` = CURRENT WINDOW FILL, not the cumulative thread total:
-   *  `last.totalTokens` is the latest inference call's full prompt + its
-   *  output — the context as the model just saw it. Unlike
-   *  `total.totalTokens` (a lifetime odometer that only climbs), this
-   *  reading DROPS after a compaction, which is what makes the gauge
-   *  honest. Wire-verified 2026-07-12 (Codex 0.144.1): on a
-   *  normal turn last.totalTokens ≡ inputTokens+outputTokens, but the
-   *  POST-COMPACTION re-report carries the new fill ONLY in totalTokens
-   *  (input/output are 0 — no inference ran), so summing the parts made
-   *  the gauge read a false ZERO right after compacting. Falls back to
-   *  input+output (older shapes), then the cumulative total. `size` = the
-   *  model's context window (0 when the server reports null). No `cost` —
-   *  the app-server protocol carries token counts but not pricing. */
+  /** Context fill uses last.totalTokens, which drops after compaction; its
+   * input/output fields can then be zero because no inference ran. Fall back to
+   * those parts, then cumulative totals for older shapes. No pricing is sent. */
   private onTokenUsage(params: unknown): void {
     const p = params as {
       turnId?: string;
@@ -978,12 +914,7 @@ export class CodexEventMapper {
         return;
 
       case "contextCompaction": {
-        // The two-state compaction row. rawInput.trigger
-        // records WHO initiated it: "manual" (the user's Compact now /
-        // /compact routed through compactContext — the adapter armed the
-        // flag right before the RPC) renders STANDALONE in the transcript;
-        // "auto" (codex compacting on its own mid-turn) stays inside the
-        // turn's working group.
+        // Manual compaction gets a standalone row; automatic compaction stays in the turn group.
         const toolCallId = this.ensureToolCallId(item.id);
         const trigger = this.manualCompactionExpected ? "manual" : "auto";
         this.manualCompactionExpected = false;
@@ -1008,11 +939,7 @@ export class CodexEventMapper {
         if (item.type === "sleep") this.pendingSleepItems.add(item.id);
         const toolCallId = this.ensureToolCallId(item.id);
         const mergeKey = computeMergeKey(item);
-        // For shell executions, prefer codex's own command parse
-        // (`commandActions`) so a plain `cat`/`rg`/`ls` renders as a Read /
-        // Grep / List card instead of a generic Bash row.
-        // Falls back to the raw-command "execute" shape when the command is
-        // compound or unparsed.
+        // Trust the provider's action parse only when the whole command has one recognized kind.
         const parsed =
           item.type === "commandExecution"
             ? summarizeCommandActions(item)
@@ -1033,12 +960,7 @@ export class CodexEventMapper {
       }
 
       case "collabAgentToolCall": {
-        // Codex multi-agent collaboration — the model coordinating subagent
-        // threads (spawnAgent / messaging / wait / resume / interrupt / close).
-        // spawnAgent routes to the Agent card (kind "subagent", like Claude's
-        // Task); the coordination verbs render as plain rows with a human
-        // title instead of the raw JSON blob they'd get from the unknown-item
-        // fallback.
+        // Spawning owns a subagent card; coordination verbs use their human-readable row titles.
         const toolCallId = this.ensureToolCallId(item.id);
         const collab = describeCollabTool(item);
         this.emitToolCallUpsert(toolCallId, {
@@ -1159,10 +1081,7 @@ export class CodexEventMapper {
                   : undefined,
             }
           : toolOutput(item, streamedOutput);
-        // Surface the command's plain text output as a content block (not just
-        // the `{exitCode, output}` rawOutput object). This lets the renderer
-        // show clean output in the detail body AND derive the "N lines" count
-        // for Read cards / the match grep heuristic from real text.
+        // Plain content feeds detail text and line/match counts; rawOutput alone does not.
         const contentText =
           item.type === "commandExecution" &&
           typeof item.aggregatedOutput === "string"
@@ -1417,14 +1336,8 @@ export class CodexEventMapper {
     // terminalInteraction reports what Codex wrote to stdin, not command
     // output. It is a lifecycle beat and must not pollute the visible log.
     if (method === "item/commandExecution/terminalInteraction") return;
-    // The two payload shapes are NOT interchangeable, and the field name is
-    // the only thing that distinguishes them. `delta` is an increment and must
-    // be appended; `output` names a whole-log snapshot and must REPLACE, or
-    // each notification re-glues everything already shown ("abc" →
-    // "abcabcdef"). Every method wired above carries `delta` in the pinned
-    // 0.146 schema, so the snapshot arm is a guard against a future/legacy
-    // shape rather than a live path — which is exactly why it must not
-    // silently inherit append semantics.
+    // delta appends, output replaces: treating a snapshot as a delta duplicates
+    // everything already shown. Preserve both wire shapes.
     const previous = this.emittedToolOutput.get(p.itemId) ?? "";
     let text: string;
     if (typeof p.delta === "string" && p.delta) {
@@ -1770,11 +1683,7 @@ export class CodexEventMapper {
     const willRetry = p?.willRetry === true;
     const cls = classifyCodexErrorInfo(p?.error?.codexErrorInfo);
     if (willRetry) {
-      // Codex will retry the SAME turn itself — the turn is alive, nothing is
-      // lost. Surface ONE api_retry notice per burst (parity with Claude's
-      // system/api_retry): while it's the streaming tail the renderer shows
-      // the shimmering "Reconnecting agent" row; the technical detail stays
-      // inspectable via expand once it settles.
+      // The server retries this turn itself; one notice per burst avoids transcript spam.
       if (this.retryBurstNoticed) return;
       this.retryBurstNoticed = true;
       // Simple copy by design (UI-indication consolidation 2026-07-10) —
@@ -1838,7 +1747,6 @@ export class CodexEventMapper {
     });
   }
 
-  // ── Helpers ─────────────────────────────────────────────
 
   private enrichArtwork(
     item: Extract<ThreadItemUnion, { type: "mcpToolCall" }>,
@@ -1974,7 +1882,6 @@ export class CodexEventMapper {
   }
 }
 
-// ── Item-shape unions + helpers ──────────────────────────────
 
 /** Codex's best-effort parse of a shell command into the action(s) it
  *  performs (generated `CommandAction`). The app-server attaches this to every
@@ -2189,14 +2096,8 @@ function nativeNodeReplTitle(
   return title ? truncate(title.replace(/\s+/g, " "), 160) : null;
 }
 
-/** Map codex's `commandActions` parse onto a friendlier tool kind + display
- *  shape, so a shell `cat`/`rg`/`ls` renders as a Read / Grep / List card the
- *  same way the Claude adapter does. Returns null — meaning "render as a generic
- *  Bash execution" — unless the WHOLE command maps cleanly to a single
- *  recognized action type. A compound/mixed command (e.g. `pwd && rg --files`,
- *  where `pwd` parses as `unknown`) deliberately stays a Bash row rather than
- *  guessing. The chosen `rawInput` field names match what `event-meta.ts`
- *  reads per kind (read→file_path, search→query, list→path). */
+/** Keep mixed or unknown command actions as Bash rather than guessing a file
+ * operation; recognized rawInput keys must match the renderer's event metadata. */
 function summarizeCommandActions(
   item: Extract<ThreadItemUnion, { type: "commandExecution" }>,
 ): { kind: ToolKind; title: string; rawInput: unknown } | null {

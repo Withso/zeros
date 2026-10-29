@@ -1,28 +1,11 @@
 // Ported from apps/desktop/src/engine/agents/adapters/cursor-sdk/subagent-transcript.ts
 // Source commit: 8f82a98221dba09560a715b7c2f45d0ae54a98c5. Preserve native transcript semantics; Local imports are test-only.
 import { boundedStructuredOutput } from "../shared/tool-content";
-// ──────────────────────────────────────────────────────────
-// Cursor subagent transcript reader
-// ──────────────────────────────────────────────────────────
-//
-// Cursor can omit a child's internals from the parent stream and leave
-// `value.conversationSteps` empty in local mode. Recover those checkpoints
-// from the transcript JSONL the SDK persists to disk:
-//
-//   ~/.cursor/projects/<slug(cwd)>/agent-transcripts/<agentDir>/subagents/<subagentId>.jsonl
-//
-// where `slug` mirrors the SDK's own sanitizer and `<subagentId>` is the
-// `agentId` carried on complete native task arguments or results. The file is the raw
-// Anthropic message format (`{ role, message: { content: [ {type:"text"},
-// {type:"tool_use", name, input}, {type:"thinking"} ] } }`) — tool NAMES are
-// Claude-style (Glob / Read / Grep / Shell / Edit / …). Some runtime versions
-// omit tool_result blocks; their calls must remain unresolved.
-//
-// Read live checkpoints and the final snapshot into the same nested feed.
-// Require native parent/child identity; prompts and recency never establish
-// ownership. Missing/malformed files degrade to null without borrowing another
-// child's transcript. The translator owns the final conversationSteps fallback.
-// ──────────────────────────────────────────────────────────
+// Cursor may omit child steps from its parent stream. Read the SDK's JSONL under
+// ~/.cursor/projects/<slug(cwd)>/agent-transcripts/<agentDir>/subagents/<agentId>.jsonl
+// only through native parent/child identity; prompts and recency prove no ownership.
+// Missing tool_result records remain unresolved, and missing files never borrow
+// another child's transcript. The translator owns conversationSteps fallback.
 
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -88,22 +71,16 @@ export function agentTranscriptsRoot(
   );
 }
 
-/** The subagent agentId encoded in a transcript path — the filename stem
- *  (`…/subagents/<agentId>.jsonl` → `<agentId>`). Lets the translator tell
- *  whether a task's authoritative `transcriptPath` points at the same file a
- *  live poll already streamed from. Tolerates either path separator. */
+/** Compare the result's authoritative path with the child already polled;
+ * accept either platform's separator. */
 export function agentIdFromTranscriptPath(path: string): string {
   const norm = path.replace(/\\/g, "/");
   const base = norm.slice(norm.lastIndexOf("/") + 1);
   return base.endsWith(".jsonl") ? base.slice(0, -".jsonl".length) : base;
 }
 
-/** Pure parser for a subagent transcript's JSONL text (exported for tests).
- *  Walks assistant messages, emitting tool_use → tool step, thinking →
- *  thought step, text → narration step; the LAST assistant text becomes the
- *  final report (pulled out of `steps`). The leading user message is the
- *  prompt (shown in the Prompt block) — skipped. Tool results in user records
- *  update their native-ID-matched call, even if the records arrive out of order. */
+/** Keep the final answer out of narration steps; user records can carry
+ * out-of-order tool results that must join by native ID. */
 export function parseSubagentTranscript(jsonl: string): ParsedSubagentTranscript {
   const parser = new SubagentTranscriptParser();
   for (const [index, line] of jsonl.split("\n").entries()) parser.push(line, index);
@@ -208,10 +185,7 @@ export class SubagentTranscriptParser {
   }
 }
 
-/** Map a transcript `tool_use` (Claude-style name + input) to a Zeros tool
- *  card. Inputs are normalized to the field names event-meta.ts reads
- *  (`path` / `pattern` / `command` / `file_path`+`old_string`/`new_string`)
- *  so each child row gets the right icon, label, and target. */
+/** Normalize child input keys to the renderer's event-metadata contract. */
 function mapTranscriptTool(
   name: string,
   input: unknown,
@@ -283,12 +257,7 @@ function mapTranscriptTool(
       title: "Fetch",
       rawInput: { url: str(inp.url ?? inp.URL) },
     };
-  // Was `/^mcp__|mcp/`, where `^` bound only to the first alternative — so the
-  // bare `mcp` branch already matched everything the anchored one did, making
-  // the whole pattern exactly `/mcp/` with a misleading anchor bolted on
-  // (CodeQL js/regex/missing-regexp-anchor). Loose matching is deliberate here
-  // and matches the neighbouring /delete/ and /fetch/ probes, so this keeps the
-  // behaviour and drops the part that never did anything.
+  // Loose matching is intentional, as with the neighboring delete/fetch probes.
   if (/mcp/.test(n)) return { toolKind: "mcp", title: name, rawInput: inp };
   if (/^(task|agent|spawn)/.test(n))
     return {

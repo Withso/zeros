@@ -3,36 +3,6 @@
 import { ClaudeQueryUsage } from "./usage-accounting";
 import { isClaudeBackgroundAcknowledgement, type ClaudeResultOwnership } from "./result-ownership";
 import { boundedStructuredOutput, canonicalResourceLinks, canonicalToolContent, mergeToolContent, type CanonicalToolContent } from "../shared/tool-content";
-// ──────────────────────────────────────────────────────────
-// Claude stream-json → SessionNotification translator
-// ──────────────────────────────────────────────────────────
-//
-// The live feeder is the Agent SDK's `SDKMessage` stream (this class is
-// reused by `claude-sdk/adapter.ts`). Those messages mirror the JSON
-// objects Claude Code emits one-per-line under
-// `--output-format stream-json --verbose`, so the shapes below still
-// describe the input verbatim. Shape roughly:
-//
-//   {"type":"system","subtype":"init","session_id":"...","model":"...","tools":[...]}
-//   {"type":"user","message":{"role":"user","content":[...]}}
-//   {"type":"assistant","message":{"role":"assistant","content":[
-//     {"type":"thinking","thinking":"..."},
-//     {"type":"text","text":"..."},
-//     {"type":"tool_use","id":"toolu_01","name":"Read","input":{...}}
-//   ]}}
-//   {"type":"user","message":{"role":"user","content":[
-//     {"type":"tool_result","tool_use_id":"toolu_01","content":"...","is_error":false}
-//   ]}}
-//   {"type":"result","subtype":"success","result":"...","total_cost_usd":0.01,"usage":{...},"session_id":"..."}
-//
-// This class converts each Claude event into one or more
-// SessionNotification payloads matching the wire shape. The UI
-// already knows how to render them (unchanged).
-//
-// State is per-translator-instance, keyed on the Zeros session id
-// passed at construction. Each new session gets a fresh translator.
-//
-// ──────────────────────────────────────────────────────────
 
 import { createHash, randomUUID } from "node:crypto";
 import { LEGACY_TOOL_NAME_ALIASES, type BUILTIN_TOOL_NAMES } from "@anthropic-ai/claude-agent-sdk";
@@ -542,13 +512,8 @@ export class ClaudeStreamTranslator {
     return toolCallId;
   }
 
-  /** Claude tool_use_ids whose corresponding tool_result
-   *  should be swallowed instead of emitted as a tool_call_update.
-   *
-   *  Currently this is the TodoWrite path — the tool_use is intercepted
-   *  and routed to a canonical `plan` notification, so emitting the
-   *  matching tool_result as a regular update would create an orphan
-   *  tool message in the UI. */
+  /** Tools routed to canonical plan notifications must not later emit orphan
+   * tool-result updates. */
   private readonly suppressedToolUseIds = new Set<string>();
 
   private readonly transcript = new ClaudeTranscriptState((update) => {
@@ -660,20 +625,11 @@ export class ClaudeStreamTranslator {
   private readonly seenUsageResets = new Set<string>();
   private usageConversationId: string | null = null;
 
-  /** True once the CURRENT retry burst has produced its error_notice row.
-   *  The CLI emits one `system/api_retry` per attempt (up to ~10 with
-   *  exponential backoff); one row per burst tells the user the stall is a
-   *  network blip being retried without writing ten rows into the
-   *  transcript. Cleared by accepted root model progress or a result. */
+  /** One notice per native retry burst; accepted root progress or a result resets it. */
   private retryBurstNoticed = false;
 
-  // ── Compaction lifecycle ──
-  //
-  // The SDK narrates a compaction as: `system/status {status:"compacting"}`
-  // (start) → on success a `system/compact_boundary` with metadata; on
-  // failure a `system/status {compact_result:"failed", compact_error}`.
-  // We open ONE two-state row on the start signal and settle it on
-  // whichever end signal arrives.
+  // Compaction starts at status:compacting and settles at compact_boundary or
+  // a failure status; both signals must address the same row.
   /** Open compaction row id, or null. Cleared on boundary/failure (the
    *  definitive settles) and at result (turn end), so a second compaction
    *  in a later run opens a fresh row. */
@@ -693,13 +649,8 @@ export class ClaudeStreamTranslator {
     this.manualCompactionExpected = true;
   }
 
-  // ── Overload-fallback detection ───────────────────────────
-  //
-  // The SDK swaps to Options.fallbackModel silently when the primary is
-  // overloaded/unavailable; the only per-message trace is the assistant
-  // message's `model` field. The adapter arms detection with the primary
-  // model it configured; we surface one fallback narration message per turn
-  // when a top-level assistant message answers on a different model.
+  // The SDK silently switches to fallbackModel; assistant model metadata is
+  // the evidence for a single fallback notice per turn.
   /** The primary model the adapter configured (verbatim id, may carry the
    *  `[1m]` suffix). Null = no explicit model → detection disabled. */
   private expectedModel: string | null = null;
@@ -720,7 +671,6 @@ export class ClaudeStreamTranslator {
     this.fallbackArmed = fallbackConfigured;
   }
 
-  // ── Budget-cap context ────────────────────────────────────
   /** The per-turn USD cap the adapter configured (Options.maxBudgetUsd).
    *  Only used to render the cap amount inside the "Turn stopped" record. */
   budgetCapUsd: number | null = null;
@@ -1151,7 +1101,6 @@ export class ClaudeStreamTranslator {
     }
   }
 
-  // ── Partial stream deltas (token-by-token) ──────────────
   //
   // Only active with `includePartialMessages: true`. Native message ids and
   // block indices keep partials and completed snapshots on the same row.
@@ -1286,7 +1235,6 @@ export class ClaudeStreamTranslator {
     return this.currentTurnUsage;
   }
 
-  // ── System init ─────────────────────────────────────────
   private onSystem(event: ClaudeSystemEvent): void {
     if (event.subtype === "init" && typeof event.session_id === "string") {
       if (this.usageConversationId && this.usageConversationId !== event.session_id) this.queryUsage.reset();
@@ -1309,12 +1257,7 @@ export class ClaudeStreamTranslator {
       this.sessionActivityState = event.state;
       this.emitBackgroundTasks();
     }
-    // `api_retry` — the CLI hit a retryable API error (network blip, 5xx,
-    // overload) and is retrying the SAME call itself after a backoff delay.
-    // The turn is still alive; nothing is lost. Surface ONE compact
-    // error_notice row per burst so the user sees why the stream stalled
-    // instead of a silent multi-minute shimmer. (SDKAPIRetryMessage shape:
-    // attempt / max_retries / retry_delay_ms / error_status|null.)
+    // The CLI retries this live call itself; one notice per burst explains the pause.
     if ((event as { subtype?: string }).subtype === "api_retry") {
       this.onApiRetry(
         event as unknown as {
@@ -1323,15 +1266,8 @@ export class ClaudeStreamTranslator {
         },
       );
     }
-    // `status` — the CLI's live activity signal. `status:"compacting"`
-    // opens the two-state compaction row ("Compacting.."); a later
-    // `compact_result:"failed"` settles it as a visible failure with the
-    // CLI's reason (wire-verified 2026-07-12: a too-small conversation
-    // answers /compact with status:compacting → compact_result:"failed",
-    // compact_error:"Not enough messages to compact." and NO boundary —
-    // before this handler, all of it was dropped and /compact looked like
-    // it did nothing). `compact_result:"success"` settles early when it
-    // beats the boundary; the boundary then only merges its metadata.
+    // Failed compaction may have no boundary, so status must settle its row;
+    // success can also beat the boundary, which then only enriches metadata.
     if ((event as { subtype?: string }).subtype === "status") {
       this.onStatus(
         event as unknown as {
@@ -2689,26 +2625,8 @@ export class ClaudeStreamTranslator {
     });
   }
 
-  // ── User turn (tool results only) ───────────────────────
-  //
-  // In `claude -p --output-format stream-json`, a `{"type":"user"}`
-  // event is NEVER a new user turn we should render. It is one of:
-  //   1. Claude echoing back the prompt we just sent (the real user
-  //      bubble is already shown optimistically by the renderer AND
-  //      seeded into the transcript by the engine's persistUserPrompt,
-  //      so re-emitting it produces a DUPLICATE user bubble).
-  //   2. A tool_result wrapper (the result of a tool the assistant ran).
-  //   3. A SUBAGENT's internal user turn — stamped with
-  //      `parent_tool_use_id`. Emitting these as top-level
-  //      user_message_chunks incorrectly presents a subagent's internal
-  //      message as the user's message.
-  //
-  // So we NEVER emit a user_message_chunk from the live stream. We only
-  // forward tool_result blocks (correlated by tool_use_id to the
-  // tool_call we already emitted). For `type:"user"` stream events we
-  // extract only tool_result blocks and never re-emit a user message. History
-  // replay (history.ts) still renders prior user prompts for a cold
-  // import; the LIVE stream must not.
+  // Live user envelopes can be prompt echoes or a child's internal turn. Forward
+  // only native-ID-correlated tool results; history import owns prior prompts.
   private onUser(event: ClaudeMessageEvent): void {
     this.rememberFrame(event);
     // A user event ends the previous assistant message logically — the
@@ -2716,24 +2634,12 @@ export class ClaudeStreamTranslator {
     // text-only (e.g. tool result → assistant continues with more text).
     this.transcript.boundary(event.parent_tool_use_id ?? "");
 
-    // `message.content` can be a plain STRING, not a block array — the SDK
-    // emits string-content user messages (e.g. the continuation summary it
-    // replays after a /compact). There's nothing to forward from those
-    // (only tool_result blocks matter here), but `.filter` on a string
-    // crashed the whole translate call ("blocks.filter is not a function",
-    // observed 2026-07-12 running /compact on Claude).
+    // Compaction summaries can arrive as string content, with no tool-result blocks.
     const content = event.message?.content;
     const blocks = Array.isArray(content) ? content : [];
 
-    // The envelope's `tool_use_result` (Claude Code's rich result) carries
-    // `structuredPatch` for edit tools — real hunks with REAL file line
-    // numbers. Surface just that field as rawOutput so the EditCard renders
-    // the true patch (line numbers, correct collapse regions) instead of
-    // re-diffing the input snippets from line 1. Only when this event holds
-    // exactly ONE tool_result — the envelope field can't be attributed
-    // across a batched result message. The rest of the rich result (e.g.
-    // `originalFile`, the whole pre-edit file) is deliberately dropped:
-    // rawOutput persists to SQLite per tool call.
+    // structuredPatch preserves real file line numbers, but the envelope is
+    // attributable only with one result. Do not persist its whole originalFile.
     const resultCount = blocks.filter((b) => b.type === "tool_result").length;
     const structuredPatch =
       resultCount === 1 ? readStructuredPatch(event.tool_use_result) : null;
@@ -2914,7 +2820,6 @@ export class ClaudeStreamTranslator {
     }
   }
 
-  // ── Assistant turn (thinking, text, tool_use) ───────────
   private onAssistant(event: ClaudeMessageEvent): void {
     this.rememberFrame(event);
     // Same string-content guard as onUser — never trust `content` to be an
@@ -2929,12 +2834,8 @@ export class ClaudeStreamTranslator {
         ? { code: event.error, message: blocks.filter((block) => block.type === "text").map((block) => block.text ?? "").join("\n") }
         : null;
     }
-    // When Claude routes a Task subagent's emissions
-    // through the parent stream, every event in this assistant chunk
-    // is stamped with `parent_tool_use_id` pointing at the Task tool's
-    // tool_use_id. We translate that to the parent's Zeros-side tool
-    // id (so the renderer can match it against the SubagentCard's
-    // toolCallId) and propagate it onto every emitted update.
+    // Correlate the native parent ID with the emitted Task row so child updates
+    // stay nested under the correct tool call.
     const claudeParentId = event.parent_tool_use_id ?? undefined;
     const parentToolId = claudeParentId
       ? this.toolCallIds.get(claudeParentId)
@@ -3044,7 +2945,6 @@ export class ClaudeStreamTranslator {
     this.feedback.flushTools();
   }
 
-  // ── Result (final) ──────────────────────────────────────
   private onResult(event: ClaudeResultEvent, preserveTurnActivity = false): void {
     if (isClaudeBackgroundAcknowledgement(event)) {
       this.currentTurnUsage = this.queryUsage.record(event);
@@ -3074,23 +2974,12 @@ export class ClaudeStreamTranslator {
     if (removedWorkflow) {
       this.emitWorkflows();
     }
-    // A result settles the parent turn, not every process-owned workflow.
-    // Preserve pause state and narrator dedupe until native task termination.
-    // A compaction row that never got its definitive settle (success-status
-    // with no boundary, or a run cut short) must not leak into the next
-    // run — a later compaction opens its own row. If it settled we just
-    // drop the reference; if it's still in_progress, close it out so the
-    // spinner can't shimmer forever.
+    // A parent result does not terminate process-owned workflows: retain their
+    // pause/narrator state until native termination. Settle unfinished compaction
+    // so its row cannot leak into the next turn.
     this.finishUnconfirmedCompaction();
-    // Reset the terminal-error capture at the START of every result so it
-    // reflects ONLY this turn. The SDK adapter reuses ONE translator for the
-    // whole session (persistent query()), and the adapter reads
-    // `terminalError` after each result to classify auth-required /
-    // session-expired. If we left a prior turn's error string in place, a
-    // later SUCCESSFUL turn would re-match AUTH_RX/SESSION_EXPIRED and be
-    // wrongly rejected — permanently poisoning the session. (The legacy
-    // per-prompt adapter got a fresh translator each turn, so this never
-    // surfaced there.)
+    // One translator survives multiple turns; clear old terminal detail before
+    // classifying this result so a past error cannot poison a later success.
     this.terminalErrorMsg = null;
     this.terminalErrorCode = undefined;
     const assistantFailure = this.assistantFailure;
@@ -3099,11 +2988,8 @@ export class ClaudeStreamTranslator {
     // its own "Model switched" record.
     this.fallbackNoticedThisTurn = false;
     this.fallbackGeneration++;
-    // Named endings first: the SDK's subtype/terminal_reason carry
-    // structured stop causes that must NOT degrade into a generic "refusal"
-    // (they'd render as an error toast) or a clean "end_turn" (a truncated
-    // answer masquerading as finished). Checked BEFORE is_error because the
-    // budget/blocking results arrive as SDKResultError with is_error set.
+    // Structured endings precede is_error: budget/blocking SDKResultErrors must
+    // keep their stop cause instead of becoming a generic refusal or clean finish.
     const captureTerminalError = () => {
       const raw =
         Array.isArray(event.errors) &&
@@ -3193,18 +3079,11 @@ export class ClaudeStreamTranslator {
   }
 }
 
-/** Per-model context window, delegated to the shared
- *  `claudeContextWindow` in @zeros/protocol so the engine's gauge fallback and the
- *  renderer's attachment budget can't drift apart again. The local copy this
- *  replaced granted 1M only to `/opus-4-[78].*\[1m\]/`, so Fable 5, Sonnet 5,
- *  and Opus 5 — all natively 1M — reported 200k here while the picker showed
- *  them as 1M models. See packages/protocol/src/model-context.ts for the
- *  registry-verified table and why Haiku is special-cased. */
+/** Share context limits with the renderer's attachment budget and engine gauge. */
 function contextWindowForClaudeModel(model: string | null): number {
   return claudeContextWindow(model);
 }
 
-// ── helpers ──────────────────────────────────────────────
 
 function retainToolInput(
   name: string,
@@ -3501,11 +3380,8 @@ function scheduledWakeupName(schedule: string, reason: string | null): string {
   return reason ? `${base} · ${reason}` : base;
 }
 
-/** Claude wraps failed tool results in `<tool_use_error>…</tool_use_error>` —
- *  protocol plumbing meant for the model, not the user. Unwrap it so error
- *  rows show the plain message ("Unknown skill: foo") instead of raw XML.
- *  The failed status already carries the error semantics (is_error → the
- *  red status tone), so nothing is lost. */
+/** The provider's tool_use_error wrapper is model plumbing; failed status
+ * already carries its semantics in the transcript. */
 function stripToolUseError(s: string): string {
   const m = s.match(/^\s*<tool_use_error>([\s\S]*?)<\/tool_use_error>\s*$/);
   return m ? m[1].trim() : s;

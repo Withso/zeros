@@ -1,59 +1,16 @@
 // Ported from apps/desktop/src/engine/pty/mirror.ts at 89202f45.
 // Local stays unchanged; golden fixtures compare the resolved screen exactly.
-// ──────────────────────────────────────────────────────────
-// TerminalMirror — engine-side virtual terminal per PTY session
-// ──────────────────────────────────────────────────────────
-//
-// A headless xterm (@xterm/headless) that consumes the EXACT same byte stream
-// the engine forwards to clients, maintaining the *resolved* screen + scrollback
-// grid inside the engine process. Its job is to produce a clean reattach
-// snapshot via @xterm/addon-serialize instead of replaying raw PTY history — so
-// a page refresh, panel reopen, OR a second device attaching repaints the exact
-// pre-existing screen with no double-rendered TUI frames.
-//
-// This is the sole engine-side terminal mirror (the desktop terminal now runs
-// through the engine PtyService, so there is no parallel electron-main copy).
-// It is deliberately dependency-light (only @xterm/headless +
-// @xterm/addon-serialize — no node-pty, no electron, no Zeros IPC) so it stays
-// testable without the native binding and runs unchanged inside the daemon.
-//
-// WHY THIS EXISTS — the "rendered twice" fix
-// ──────────────────────────────────────────
-// Redraw-based TUIs (Ink apps like `cursor-agent`, full-screen `claude`/`codex`)
-// paint a frame then repaint via cursor-relative sequences ("cursor up N, erase,
-// redraw"). Those only mean anything against the exact grid they were emitted
-// against. Concatenating raw bytes and `term.write()`-replaying them into a
-// FRESH xterm leaves a ghost of the earlier frame (the "cursor up N" no longer
-// matches). Feeding the same bytes into a real headless grid resolves the cursor
-// math against an actual terminal; serialize() then emits only the final
-// resolved state. No ghost.
-//
-// OSC 133 SEAM
-// ────────────
-// The headless grid is also the natural home for shell-integration parsing
-// (OSC 133 prompt/command-exit markers → agent idle/working status). The parser
-// hook would register in the constructor below; the matching half emits the
-// markers around the zsh prompt in the ZDOTDIR wrapper (shell-setup.ts). Not
-// wired yet; documented seam only.
-// ──────────────────────────────────────────────────────────
+// Cursor-relative TUI redraws need their original grid; serialize resolved state
+// so a fresh terminal does not replay those bytes against the wrong layout.
 
 import { Terminal } from "@xterm/headless";
 import type { ITerminalAddon } from "@xterm/headless";
 import { SerializeAddon } from "@xterm/addon-serialize";
 
-// Lines of scrollback the mirror keeps AND the cap we serialize on reattach.
-// Bounds both engine memory per session and the replay payload pushed over the
-// bridge. ~2000 lines covers the "started a dev server, refreshed, don't lose
-// the log" case without shipping multi-MB snapshots. (Clients keep a deeper
-// scrollback for live scrolling; this only governs what survives a reattach.)
+// Bound retained history per PTY and on reattach; live clients may keep deeper scrollback.
 const MIRROR_SCROLLBACK_LINES = 2000;
 
-// Hard ceiling on the serialized reattach payload. Even within the line cap, a
-// pathological full-screen TUI (dense SGR styling on a very wide grid) can
-// serialize to hundreds of KB; this bounds the message + JSON parse on every
-// refresh / reattach. snapshot() walks down the ladder below until the UTF-8
-// payload fits, flagging `truncated` when it had to drop history. 256 KB
-// comfortably holds a full 2000-line log of ordinary output.
+// Dense styling can exceed a line-based cap, so reduce scrollback to a UTF-8 byte budget.
 const MIRROR_SNAPSHOT_MAX_BYTES = 256 * 1024;
 
 // Scrollback rungs snapshot() tries (most → least) to fit the byte budget. The
@@ -93,19 +50,12 @@ export class TerminalMirror {
       allowProposedApi: true,
     });
     this.serializer = new SerializeAddon();
-    // The headless `ITerminalAddon` and the SerializeAddon's `@xterm/xterm`-typed
-    // `ITerminalAddon` are structurally identical (activate/dispose); only the
-    // nominal Terminal type on `activate` differs across packages. At runtime
-    // SerializeAddon only reads buffer/cols/rows/options — all present on the
-    // headless Terminal — a documented, supported combination. The cast bridges
-    // the cross-package type seam.
+    // The addon supports headless buffer/cols/rows/options at runtime; this cast
+    // bridges only the packages' nominal Terminal types.
     this.term.loadAddon(this.serializer as unknown as ITerminalAddon);
   }
 
-  /** Feed one chunk of PTY stdout — the same bytes clients receive, so the grid
-   *  stays in lockstep with what the user saw. Parsing is async (xterm buffers
-   *  writes); we don't block the live data path on it. `snapshot()` awaits a
-   *  drain before serializing so a reattach can't capture a half-parsed burst. */
+  /** Keep live writes asynchronous; snapshot drains them before reading the grid. */
   write(data: string): void {
     this.term.write(data);
   }
@@ -117,9 +67,7 @@ export class TerminalMirror {
     });
   }
 
-  /** Keep the grid sized to the live PTY. Call on every resize and on the
-   *  reattach dim-reconcile so the snapshot is produced at the width the
-   *  client's xterm will receive it at (serialize expects a same-size target). */
+  /** Reconcile live and reattach dimensions: serialization expects a same-size target. */
   resize(cols: number, rows: number): void {
     if (cols === this.term.cols && rows === this.term.rows) return;
     try {
@@ -129,15 +77,9 @@ export class TerminalMirror {
     }
   }
 
-  /** Clean reattach payload: the resolved screen + bounded scrollback as a
-   *  single escape-sequence blob that reproduces the exact visible state —
-   *  including terminal modes (mouse tracking, bracketed paste, alt buffer) and
-   *  cursor position — when written into a same-size xterm.
-   *
-   *  Awaits a write drain first so the snapshot reflects every byte clients have
-   *  seen, then walks SNAPSHOT_SCROLLBACK_LADDER until the UTF-8 payload fits
-   *  `maxBytes`. Never throws: a serialize hiccup yields whatever smaller blob
-   *  already succeeded and the client starts clean. */
+  /** Drain writes before restoring the screen, modes and cursor into a same-size
+   * xterm. Reduce scrollback to fit the byte budget while retaining the visible
+   * screen even if it exceeds that budget; serializer failure keeps the last blob. */
   async snapshot(
     maxBytes: number = MIRROR_SNAPSHOT_MAX_BYTES,
   ): Promise<TerminalSnapshot> {
