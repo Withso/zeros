@@ -193,12 +193,28 @@ export async function runDesignLayeredLayoutSmoke({ page, check }) {
   );
   // Renaming a second layer exercises the saved-generation path again.
   const copyRow = page.locator('[data-design-layer-id="home-hero"]');
+  const displayedBuffer =
+    '[data-design-frame="home.html"] iframe[data-design-document-buffer="displayed"]';
+  const previousBuffer = await page.locator(displayedBuffer).elementHandle();
   await copyRow.press("F2");
   await name.fill("Content");
   await name.press("Enter");
   await expect(copyRow.locator("[data-design-layer-name]")).toHaveText(
     "Content",
   );
+  // The layer name updates a few frames before the saved document becomes the
+  // displayed buffer; measuring in that window reads a frame being detached.
+  await expect
+    .poll(() =>
+      page.evaluate(
+        ([selector, previous]) => {
+          const shown = document.querySelector(selector);
+          return shown !== previous && !!shown?.hasAttribute("data-design-document-ready");
+        },
+        [displayedBuffer, previousBuffer],
+      ),
+    )
+    .toBe(true);
   expect(
     await copy.evaluate((element) => element.getBoundingClientRect().toJSON()),
   ).toEqual(before);
