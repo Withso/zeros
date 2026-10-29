@@ -62,7 +62,10 @@ Clean in small, area-scoped PRs that change nothing but comments.
 1. Pick targets: `node scripts/zstack/comments.mjs report --top 40 <paths>`
    lists comment-only lines per file, densest first.
 2. Edit only comments, reading the code around each one first. When a comment
-   holds an invariant the code cannot express, keep it as one sentence.
+   holds an invariant the code cannot express, keep it as one sentence. Check
+   that each doc block still sits on the declaration it describes: inserted
+   code often strands one above a neighbour. Move it beside its target, and
+   correct any comment that no longer matches the code.
 3. Prove it: `node scripts/zstack/comments.mjs verify --base origin/main` must
    report no problems. It starts at the merge base, like `git diff
    origin/main...`, and compares each file's parsed structure and token text
