@@ -25,6 +25,7 @@ gates: `pnpm typecheck`, `pnpm lint`, `pnpm check:ui`,
 | `.github/workflows/` | `pnpm check:actions` (owner merge required) |
 | Migrations, packaging, protocol or deploy paths | the matching `check:*` scripts in `package.json` |
 | Runtime dependencies or packaged assets | `pnpm check:licenses` |
+| Agent runtime pins (Codex, Claude, Cursor SDK/CLI) | Move Local and `apps/cloud-worker` to the same exact version in one PR, with the worker's `VERSIONS` and `CURSOR_VERSION`; run `scripts/__tests__/agent-runtime-pin-parity.test.ts`, the cloud-worker suite and `pnpm check:licenses` (owner merge: lockfile) |
 | Engine lifecycle | `pnpm smoke:engine`, on macOS only |
 | Control-plane concurrency, locks or transactions | Label the PR `ci:control-plane-db`. PR CI is path-selected, and without the label the full CP database lane runs only after merge, where a timing race turns `main` red. |
 
