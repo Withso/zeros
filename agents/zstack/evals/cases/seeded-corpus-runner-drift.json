@@ -1,0 +1,9 @@
+{
+  "id": "seeded-corpus-runner-drift",
+  "kind": "seeded",
+  "area": "zstack",
+  "fixedBy": "pr:780",
+  "symptom": "A corpus run can blend observations from different runner versions when it only pins case recipes.",
+  "rule": "Bind the receipt to runner bytes and case inputs before and after execution; source drift fails closed. See agents/zstack/tools.md and agents/zstack/evals/README.md.",
+  "check": "pnpm test:git scripts/__tests__/zstack-corpus.test.ts -t 'invalidates evidence when the runner changes'"
+}
