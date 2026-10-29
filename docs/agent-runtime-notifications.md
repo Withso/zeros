@@ -27,6 +27,18 @@ branch-writing workflows ship disabled; repository configuration enables them.
    `pnpm agent:merge` continues to refuse these PRs. A later upstream version
    opens the next PR from the actual main pin.
 
+### Runtime pin parity
+
+Local and the standalone cloud worker always pin the same exact versions of
+every agent runtime: `@openai/codex` (its CLI binary), `@anthropic-ai/claude-agent-sdk`
+(it carries the Claude Code CLI) and `@cursor/sdk`. A provider PR moves the root
+`package.json` and `apps/cloud-worker/package.json` together, plus the worker's
+runtime constants (`VERSIONS` in `apps/cloud-worker/src/agents.ts` and the
+Cursor host's `CURSOR_VERSION`), and integrates both the desktop adapter and the
+worker driver. `scripts/__tests__/agent-runtime-pin-parity.test.ts` fails CI
+when any of them differ. A worker change still reaches cloud workspaces through
+the normal worker runtime delivery.
+
 The four-hour schedule is the normal refresh point. Dispatch **Agent runtime
 radar → scan** to refresh sooner. Routine candidates must have been published
 for a day; successful advances are limited to one per provider per day. Awareness
@@ -142,9 +154,10 @@ delta, message and conversation declarations; their data shapes remain equivalen
 No new screen or control is required. The existing usage card receives corrected
 counts, and existing error recovery receives the native code. Virtual-filesystem
 UI would be a separate feature requiring workspace selection, tool availability,
-overlay apply/discard and artifact retention decisions. The worker stays pinned
-to 1.0.40; its accounting correction requires the normal worker runtime delivery
-process and is not a live deployment from this review.
+overlay apply/discard and artifact retention decisions. The worker first stayed
+on 1.0.40; it now pins 1.1.0 too, because Local and the cloud worker always pin
+the same Codex, Claude and Cursor runtime versions (see "Runtime pin parity").
+Its runtime reaches cloud workspaces through the normal worker runtime delivery.
 
 ## Privilege and persistence boundaries
 

@@ -98,7 +98,7 @@ the exact runtime pins, dependency versions and SHA-256 of every shipped file.
 The bundle contains the protocol, WebSocket and terminal-screen libraries.
 External runtime packages are node-pty (including its native addon), Codex
 0.164.0 and its platform binary, Claude Agent SDK 0.3.311 and its platform CLI,
-and Cursor SDK 1.0.40 and its platform binaries. Their runtime dependencies and
+and Cursor SDK 1.1.0 and its platform binaries. Their runtime dependencies and
 required peer dependencies are included; provider binaries do not download at
 agent startup.
 

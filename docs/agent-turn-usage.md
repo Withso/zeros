@@ -61,8 +61,8 @@ Cursor `RunResult.usage` sums native turns in that run. Prefer it over
 separately summed stream/callback usage; never add the two delivery lanes.
 Native input already includes cache reads and writes: keep those fields as
 subsets, without adding them again. This was verified with cache-write and
-cache-read turns on both the desktop's 1.1.0 SDK and the worker's independently
-pinned 1.0.40 SDK. The older SDK's `totalTokens` adds the cache buckets again;
+cache-read turns on SDK 1.1.0 and the worker's former 1.0.40 pin; both now run
+1.1.0. The older SDK's `totalTokens` adds the cache buckets again;
 1.1.0 computes input plus output and recomputes that total when reading an old
 SDK run. Zeros uses the component fields, never that derived total. Existing
 Zeros turn rows are not rewritten because they lack the original native counts.
