@@ -29,7 +29,11 @@ stays readable, but don't append to it. Each case records:
 - `node scripts/zstack/eval-replay.mjs --case <id>` plans a replay. Add
   `--execute --receipt <file>` to run it. Multiple `--case` arguments select a
   bounded subset; `--all` refuses with `zstack_case_limit` if the corpus exceeds
-  32 cases, without dropping cases. Select explicit batches for a larger corpus.
+  32 cases, without dropping cases. For the whole corpus use
+  `node scripts/zstack/eval-corpus.mjs`; add `--execute --output <new-directory>`
+  to run batches against `evals/baseline.json`. It preserves partial receipts and
+  refuses dropped/changed recipes, lost catches or a lower overall rate. Seeds
+  use HEAD by default. Provenance and the nightly workflow are in `evals/README.md`.
   Record the same orchestration mode/models as the engineering task; `co-masters`
   uses `--agent` and `--master` for a peer pair with no subagents.
 - A replay resolves `fixedBy` only from local commits. `pr:<n>` must map to

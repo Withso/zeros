@@ -44,3 +44,48 @@ actual desktop, control-plane, worker or script boundary exercised by the check.
 Add cases under `cases/<id>.json`; do not append to the legacy `cases.json`.
 Consolidated lesson references use `git show 7b6eb9e6:agents/zstack/changes/<id>.md`
 so the original rule remains reviewable after its fragment is removed.
+
+## Whole-corpus runs
+
+```sh
+node scripts/zstack/eval-corpus.mjs
+mkdir -p .context
+node scripts/zstack/eval-corpus.mjs --execute --output .context/eval-attempt-01
+```
+
+The first command plans every case in deterministic ID order. Execution uses
+the same replay engine in sequential batches of at most 32, with a 150-minute
+corpus deadline by default. `--batch-size` can lower that bound;
+`--timeout-minutes` accepts 1–180. `--revision <full-sha>` pins seeded execution;
+otherwise it uses HEAD. Mode, models and dependency-cache options match the
+replay tool. Create the output's parent first; each attempt needs a new output
+directory. `plan.json`, `batch-NNN.json`, `progress-NNN.json` and `receipt.json`
+retain coverage and partial results, including cancellation or malformed batches.
+Receipts exclude raw child output. The original failure is never overwritten.
+
+`baseline.json` is a composite observation: B1's original 359-case run found
+169 caught, 4 missed and 186 unverified; a separate mainline replay of its four
+new cases caught all four. That makes 363 cases, 173 catches (47.6584%), four
+misses and 186 verification gaps. It was not one 363-case run. The source groups
+record revisions, times and evidence hashes. No missing revision or unsupported
+check was replaced to raise the score.
+
+The gate compares every baseline case, not just totals. It refuses missing or
+duplicate results, changed kind/fix/check/seed recipes, lost individual catches
+and a lower catch rate over **all** current cases. A previously unresolved fix
+may become resolved when its recipe is unchanged. Once known, a replay's fixed
+commit and parent remain pinned. Seed execution advances with the source
+revision while retaining its mutation fingerprint. Partial runs always fail;
+an exit of 1 from a batch is expected for known misses or gaps only when its
+complete, valid receipt agrees with that exit.
+
+The `Zstack Eval Corpus` workflow runs nightly at 03:40 UTC and by manual
+dispatch. It checks out full history and objects, installs both pnpm graphs and
+Chromium, and uploads the evidence even on failure. It uses read-only repository
+permissions and no live-provider credentials. Its first hosted execution and
+native macOS coverage are separate from local runner tests.
+
+Changing the baseline is a reviewed evidence update: retain the prior raw
+receipts, state the source revisions and reasons for any recipe change, and
+show the before/after per-case comparison. Do not delete an unverified case,
+convert an infrastructure failure to a catch, or silently lower the floor.
