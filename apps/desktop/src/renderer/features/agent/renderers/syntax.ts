@@ -51,9 +51,9 @@ async function ensureTheme(hl: Highlighter, theme: string): Promise<void> {
 }
 
 // Result cache shared by the sync and async paths, so re-rendering the same
-// (code, lang) never costs another worker round-trip. Inputs above SYNC_HL_MAX
-// aren't cached, and total cached HTML is bounded by bytes so memory stays
-// flat.
+// (code, lang) never costs another worker round-trip. Inputs above
+// HTML_CACHE_MAX_INPUT aren't cached, and total cached HTML is bounded by bytes
+// so memory stays flat.
 const HTML_CACHE_MAX_INPUT = 300_000;
 const HTML_CACHE_MAX_BYTES = 8_000_000;
 // Above this input length, codeToHtml blocks the main thread for hundreds of ms
