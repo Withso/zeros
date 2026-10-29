@@ -1,29 +1,9 @@
-// ──────────────────────────────────────────────────────────
-// Curated built-in slash commands — per agent
-// ──────────────────────────────────────────────────────────
-//
-// File-based discovery (shared/discovery.ts) only finds USER-AUTHORED
-// custom command files (.claude/commands, ~/.codex/prompts, …). The
-// built-in commands every CLI ships with (`/init`, `/compact`, `/review`,
-// …) live INSIDE the agent and are not enumerable that way — except for
-// Claude, whose SDK reports the full list via `supportedCommands()`.
-//
-// This module is the curated floor: a hand-maintained, conservative list
-// of each agent's documented, prompt-meaningful built-in commands. It is
-// merged with whatever the agent discovers at runtime so:
-//   - the composer picker is never empty (typing `/` always shows a list),
-//   - the new-chat composer can show commands before a session exists,
-//   - agents whose protocol under-reports (Codex skills/list + file scan)
-//     still surface their built-ins.
-//
-// Sourced from each vendor's official docs (2026-06). Pure-TUI chrome
-// commands (vim/theme/keymap/statusline/raw) are deliberately omitted —
-// they have no meaning when the agent is driven programmatically by Zeros.
-//
-// Merge precedence: discovered (SDK/skills/file) wins over curated on a
-// name clash, so the agent's own richer metadata always takes over once it
-// reports. See composerCommandsFor().
-// ──────────────────────────────────────────────────────────
+// The curated floor of each agent's documented built-in slash commands. File
+// discovery finds only user-authored commands and the built-ins live inside
+// each CLI (only Claude's SDK lists them), so this keeps the picker populated
+// before a session exists and for agents that under-report. Pure TUI chrome
+// commands are omitted. Discovered entries win on a name clash
+// (composerCommandsFor).
 
 import type { AvailableCommand } from "./agent-events";
 

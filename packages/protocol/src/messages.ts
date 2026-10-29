@@ -1,13 +1,5 @@
-// ──────────────────────────────────────────────────────────
-// Zeros Protocol — Message types for browser ↔ engine
-// ──────────────────────────────────────────────────────────
-//
-// These types define the WebSocket protocol between:
-//   - The Zeros renderer runtime client (ws-client.ts) — agent
-//     streaming and the bridge request/response protocol
-//   - Zeros Engine (the bun/node sidecar; loopback base port 24193 prod / 24293 dev)
-//
-// ──────────────────────────────────────────────────────────
+// WebSocket protocol between the renderer's runtime client and the Zeros engine
+// sidecar (loopback base port 24193 prod, 24293 dev).
 
 import type {
   AgentConfigurationProvenance,
@@ -47,10 +39,8 @@ import type {
 
 export type MessageSource = "browser" | "engine";
 
-// ── Agent registry entry (mirror of the engine-side shape) ─
-//
-// We redeclare the browser-visible fields here rather than import the Node
-// module from the browser bundle. Fields track apps/desktop/src/engine/agents/registry.ts.
+// Browser-visible registry fields, redeclared so the browser bundle never
+// imports the engine module; they track apps/desktop/src/engine/agents/registry.ts.
 
 /** Per-provider account / subscription details shown in the Providers
  *  panel's connection block. Populated by the engine's account probe (the
@@ -114,31 +104,20 @@ export interface BridgeRegistryAgent {
     command: string;
     docsUrl?: string;
   };
-  /** Evaluated from the engine manifest's `AuthProbe`, AND-ed with runtime
-   *  availability (see `runtimeUnavailableReason`). True = the CLI has
-   *  credentials on disk / keychain **and** the runtime this app would actually
-   *  spawn exists. Lets the Agents panel stop calling
-   *  `ai_cli_is_authenticated` on every mount (which had its own, drifted,
-   *  marker table).
-   *
-   *  The AND is load-bearing. The probe alone only asks whether a credential
-   *  ARTIFACT exists (a keychain item, `~/.claude/.credentials.json`) — which
-   *  stays true forever after a first sign-in, even after the token is revoked
-   *  or the runtime goes missing. A packaged build whose bundled Claude Code
-   *  binary wasn't shipped therefore showed a green "Connected" badge while
-   *  every send failed with "AGENT RESPONSE FAILURE". Credentials present ≠
-   *  agent usable. */
+  /** The manifest's AuthProbe AND-ed with runtime availability (see
+   *  `runtimeUnavailableReason`). The AND is load-bearing: a credential artifact
+   *  stays present after its token is revoked or the runtime goes missing, and a
+   *  build missing its bundled Claude Code binary once showed "Connected" while
+   *  every send failed. */
   authenticated?: boolean;
   apiKeySource?: ProviderApiKeySource;
   /** Present when Zeros could not execute the authentication probe. This is an
    * infrastructure result, not proof that the provider rejected credentials;
    * `authenticated` is intentionally absent in this state. */
   authenticationUnavailableReason?: string;
-  /** Set when the agent's RUNTIME cannot be started at all, carrying a
-   *  user-actionable reason. Distinguishes "you need to sign in" from "this
-   *  build is missing the Claude Code binary" — previously indistinguishable,
-   *  because the only signal was one boolean that meant neither. Absent = the
-   *  runtime resolved fine. */
+  /** Set when the agent's runtime cannot start at all, with a user-actionable
+   *  reason, so "sign in" and "this build is missing the binary" stay distinct.
+   *  Absent = the runtime resolved. */
   runtimeUnavailableReason?: string;
   /** Raw version string from `<cliBinary> --version` — lets the UI
    *  surface "installed: X.Y.Z" next to the agent name. */
@@ -161,13 +140,9 @@ export interface BridgeRegistryAgent {
   account?: AccountDetails;
 }
 
-// ── Engine-side registry shapes ───────────────────────────
-//
-// The engine builds these with `installed`/`launchKind` always
-// populated; the renderer reads them via AGENT_AGENTS_LIST.
-// Kept here (alongside the optional-field `BridgeRegistryAgent`
-// above) so the engine imports them from @zeros/protocol too —
-// EnrichedRegistryAgent is assignable to BridgeRegistryAgent.
+// Engine-side registry shapes, with `installed`/`launchKind` always populated.
+// They live here so the engine imports them too; EnrichedRegistryAgent is
+// assignable to BridgeRegistryAgent.
 
 export interface RegistryAgent {
   id: string;
@@ -219,15 +194,11 @@ export interface EnrichedRegistryAgent extends RegistryAgent {
   account?: AccountDetails;
 }
 
-// ── Base envelope ────────────────────────────────────────
-
 export interface BaseMessage {
   id: string;
   source: MessageSource;
   timestamp: number;
 }
-
-// ── Engine → Browser ─────────────────────────────────────
 
 export interface EngineReadyMessage extends BaseMessage {
   type: "ENGINE_READY";
@@ -306,13 +277,10 @@ export interface GithubCredentialChangedMessage extends BaseMessage {
   reason: "credential-invalid";
 }
 
-/** Engine → browser: a CAUGHT engine-side error, relayed for PostHog error
- *  tracking (gap A — the engine has no PostHog client of its own). All fields
- *  are scrubbed metadata (see @zeros/protocol/scrub) — error class/name, a redacted
- *  message + stack, and (for a structured GitError) its `code`. NEVER raw
- *  paths, prompts, diffs, or secrets. Fatal engine crashes are reported
- *  separately by the sidecar (apps/desktop/electron/sidecar.ts → "engine-crash"); this is
- *  for the non-fatal, handled errors that would otherwise only hit the log. */
+/** Engine → browser: a caught, non-fatal engine error relayed for PostHog (the
+ *  engine has no client of its own). Every field is scrubbed metadata
+ *  (@zeros/protocol/scrub), never raw paths, prompts, diffs or secrets. Fatal
+ *  crashes are reported by the sidecar ("engine-crash"). */
 export interface EngineErrorMessage extends BaseMessage {
   type: "ENGINE_ERROR";
   /** Where it originated — handler/op name, e.g. "workspace:git.push". */
@@ -330,8 +298,6 @@ export interface EngineErrorMessage extends BaseMessage {
    *  only — nothing in the engine branches on it. */
   severity?: string;
 }
-
-// ── Connection ───────────────────────────────────────────
 
 export interface ConnectedMessage extends BaseMessage {
   type: "CONNECTED";
@@ -382,10 +348,8 @@ export interface HeartbeatMessage extends BaseMessage {
   type: "HEARTBEAT";
 }
 
-// ── Agent runtime ────────────────────────────────────────
-//
-// These wire types mirror apps/desktop/src/engine/agents/types.ts. Keep both
-// sides in sync or the bridge message union becomes incomplete.
+// These mirror apps/desktop/src/engine/agents/types.ts; keep both sides in sync
+// or the bridge message union becomes incomplete.
 
 export interface AgentListAgentsMessage extends BaseMessage {
   type: "AGENT_LIST_AGENTS";
@@ -495,12 +459,9 @@ export interface AgentTitleGeneratedMessage extends BaseMessage {
   error?: string;
 }
 
-/** Rich-bubble metadata for the user's turn — the displayText, inline
- *  segments (mention/attachment pills) and attachment chips exactly as the
- *  TipTap composer rendered them. The wire `prompt` (expanded text + content
- *  blocks) is what the agent actually sees; `bubble` is purely so the engine
- *  can persist a user message that re-renders inline pills faithfully when the
- *  chat is reopened (instead of falling back to plain backtick text). */
+/** Rich-bubble metadata for the user's turn, exactly as the composer rendered
+ *  it. The agent sees only the wire `prompt`; `bubble` lets the engine persist
+ *  a user message that re-renders inline pills on reopen. */
 export interface AgentPromptBubble {
   /** Expanded request retained for explicit retry without re-reading mentions. */
   retryText?: string;
@@ -977,13 +938,10 @@ export interface AgentSessionUpdateMessage extends BaseMessage {
   agentId: string;
   notification: SessionNotification;
   executionId?: ExecutionId;
-  /** Engine-authoritative chat binding for this update (the engine's own
-   *  executionId→conversationId map). The renderer routes by THIS when present,
-   *  falling back to its executionToChatId index only when absent — so an update can
-   *  never be dropped because the renderer's index is momentarily stale (mid
-   *  force-respawn, during execution create/load, or for an adapter that
-   *  emits before the renderer has stored the executionId). Optional so older
-   *  engines / clients still interoperate. */
+  /** Engine-authoritative chat binding for this update. The renderer routes by it
+   *  when present, so an update is never dropped because its executionId index
+   *  is momentarily stale (mid-respawn, during create/load, or before the
+   *  executionId is stored). Optional for older engines. */
   chatId?: string;
 }
 
@@ -1028,9 +986,6 @@ export interface AgentPermissionRequestMessage extends BaseMessage {
   chatId?: ConversationId;
 }
 
-/** A permission resolver settled engine-side (response, timeout, or abort).
- * The renderer uses this receipt to evict a card whose resolver no longer
- * exists and advance any concurrently queued helper gate. */
 /** Who answered a card when it was not the person at this chat: another
  * Local chat's agent, through the Zeros Local CLI. Engine-derived from the
  * answering execution, never supplied by the agent. */
@@ -1041,6 +996,9 @@ export interface CardAnsweredBy {
   link: string;
 }
 
+/** A permission resolver settled engine-side (response, timeout, or abort).
+ * The renderer uses this receipt to evict a card whose resolver no longer
+ * exists and advance any concurrently queued helper gate. */
 export interface AgentPermissionSettledMessage extends BaseMessage {
   type: "AGENT_PERMISSION_SETTLED";
   agentId: string;
@@ -1098,11 +1056,9 @@ export interface AgentPromptFailedMessage extends BaseMessage {
   sessionId: string;
   executionId?: ExecutionId;
   error: string;
-  /** Mirror of the engine-side AgentPromptFailedMessage.failure.
-   *  Populated when the adapter threw AgentFailureError so the
-   *  renderer can route on `kind` instead of regex-matching the
-   *  message string. Optional for back-compat with the AGENT_ERROR
-   *  envelope, which also carries this field. */
+  /** Mirrors the engine's AgentPromptFailedMessage.failure, so the renderer routes
+   *  on `kind` instead of matching the message. Optional for back-compat; the
+   *  AGENT_ERROR envelope carries it too. */
   failure?: BridgeAgentFailure;
   /** Set when this prompt was not admitted because another turn is already
    *  running on the session (another window's send, or an agent's message
@@ -1196,11 +1152,9 @@ export interface BridgeAgentFailure {
     | "stopBackgroundTask"
     | "setMode";
   agentId?: string;
-  /** User-actionable next step, written for the END USER (not logs). The UI
-   *  suppresses technical `message` detail from toasts (UI-indication
-   *  consolidation 2026-07-10); `advice` is the explicit opt-back-in — when
-   *  set, the toast shows it as the description even for prompt-stage
-   *  failures that would otherwise rely on the turn-footer pill alone. */
+  /** A user-actionable next step written for the end user. Toasts suppress
+   *  technical `message` detail; `advice`, when set, is shown as the description
+   *  even for prompt-stage failures. */
   advice?: string;
   exit?: {
     code: number | null;
@@ -1215,18 +1169,14 @@ export interface AgentErrorMessage extends BaseMessage {
   agentId?: string;
   code: string;
   message: string;
-  /** New: structured classification. Populated by the engine since the
-   *  `AgentFailure` refactor. Older engine builds won't send this — the UI
-   *  falls back to `message` + `code` in that case. */
+  /** Structured classification; older engines omit it and the UI falls back to
+   *  `message` + `code`. */
   failure?: BridgeAgentFailure;
 }
 
-// ── Remote Workspace API (files, git read+write, approvals) ──
-//
-// A single RPC pair carries the whole workspace surface, keyed by an `op`
-// string (e.g. "file.read", "git.status", "git.commit"). The engine
-// dispatches to the existing git/files modules. Writes from a remote
-// client require host approval (the two APPROVAL messages).
+// One RPC pair carries the whole workspace surface, keyed by an `op` string
+// (e.g. "file.read", "git.status"); the engine dispatches to its git and files
+// modules.
 
 export interface WorkspaceRequestMessage extends BaseMessage {
   type: "WORKSPACE_REQUEST";
@@ -1248,16 +1198,11 @@ export interface WorkspaceErrorMessage extends BaseMessage {
   message: string;
   remediation?: string;
 }
-// (Removed) WORKSPACE_APPROVAL_REQUEST / WORKSPACE_APPROVAL_RESPONSE — the
-// per-op host-approval broker was removed engine-side (it was never wired to a
-// desktop prompt, so it always timed out; see apps/desktop/src/engine/zeros-engine.ts). The real
-// remote-write gate is the per-workspace remote-restriction list.
+// Remote writes are gated by the per-workspace remote-restriction list; there
+// is no per-op approval message.
 
-// ── Terminal (PTY) — engine-owned shells over the bridge ──
-//
-// The engine owns node-pty sessions; clients drive them over the bridge.
-// Output streams as PTY_DATA, exit as PTY_EXIT — both routed to the owning
-// client. Remote (relay) PTY_CREATE is host-approved (a shell is powerful).
+// The engine owns node-pty sessions; clients drive them over the bridge, and
+// PTY_DATA / PTY_EXIT route to the owning client.
 
 /** Local-only cwd token for hidden agent-auth PTYs. The engine resolves this
  *  to an app-owned directory outside every project so a CLI trust prompt can
@@ -1376,14 +1321,9 @@ export interface PtyTerminalsChangedMessage extends BaseMessage {
   type: "PTY_TERMINALS_CHANGED";
 }
 
-// ── Agent binary resolution ───────────────────────────────
-//
-// The renderer's inline embedded-terminal commands (`claude /mcp`, …) need the
-// SAME on-disk CLI the user runs — resolved host-side because the renderer
-// can't stat the filesystem. The engine resolves a clean absolute path (or the
-// bare binary name as a login-shell-PATH fallback) and the client writes
-// `<path> /<cmd>` into the ephemeral PTY. LOCAL-only: a relay client never
-// needs (or is told) a host binary path.
+// Inline embedded-terminal commands (`claude /mcp`, …) must use the CLI the user
+// runs, resolved host-side: an absolute path, or the bare name for login-shell
+// PATH resolution. LOCAL only; a relay client is never told a host binary path.
 
 /** Client → engine: resolve the on-disk CLI binary path for an agent. */
 export interface ResolveAgentBinaryMessage extends BaseMessage {
@@ -1402,8 +1342,6 @@ export interface AgentBinaryResolvedMessage extends BaseMessage {
    *  `source`, to avoid clashing with `BaseMessage.source` (browser|engine). */
   resolvedVia: "override" | "well-known" | "path" | "fallback";
 }
-
-// ── Union ────────────────────────────────────────────────
 
 export type BridgeMessage =
   | ConnectedMessage
@@ -1499,8 +1437,6 @@ export type BridgeMessage =
   // Agent binary resolution
   | ResolveAgentBinaryMessage
   | AgentBinaryResolvedMessage;
-
-// ── Helpers ──────────────────────────────────────────────
 
 export function createMessageId(): string {
   return typeof crypto !== "undefined" && crypto.randomUUID

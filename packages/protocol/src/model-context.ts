@@ -1,20 +1,10 @@
-// @zeros/protocol/model-context — per-model context-window truth.
-//
-// ONE source of truth, because there used to be two and they drifted:
-//   • the engine's context-gauge fallback (claude/translator.ts) granted 1M
-//     only to /opus-4-[78].*\[1m\]/, so Fable 5 / Sonnet 5 / Opus 5 all read
-//     200K — the picker promised "1M" while the gauge said 200K.
-//   • the renderer's attachment budget (agent-attachments.ts) listed
-//     fable-5[1m] + opus-4-8[1m] but had NO row for sonnet-5 or opus-5, so
-//     those two fell to the 100K unknown-model fallback — a 10x under-budget
-//     on the two newest models.
-// Both bugs were the same bug: a hand-maintained per-model table that nobody
-// updates when a model lands. Adding a model now means editing THIS file, and
+// Per-model context-window truth, in one place because two hand-maintained
+// tables drifted (the gauge read 200K for 1M models; attachment budgets fell to
+// a 100K fallback). Adding a model means editing this file, and
 // model-context.test.ts walks the curated catalog so a missing row fails CI.
 //
-// VALUES VERIFIED 2026-07-25 against the bundled agent SDK's own model
-// registry (@anthropic-ai/claude-agent-sdk 0.3.220 → sdk.mjs), reading each
-// entry's `context: { window, native_1m, supports_1m_beta, supports_1m_suffix }`:
+// Values verified 2026-07-25 against the bundled agent SDK's model registry
+// (@anthropic-ai/claude-agent-sdk 0.3.220):
 //
 //   model              window   native_1m  1m_suffix  1m_beta
 //   claude-fable-5       1e6      yes         -        yes
@@ -32,15 +22,12 @@
 //   claude-opus-4-0      200k      -        yes        -
 //   claude-haiku-4-5     200k      -        yes        -
 //
-// Two things that surprised us and are easy to "fix" wrongly:
-//   1. Fable 5 and Sonnet 5 do NOT declare `supports_1m_suffix` — because they
-//      are natively 1M and don't need one. The catalog's `claude-fable-5[1m]` /
-//      `claude-sonnet-5[1m]` ids are therefore REDUNDANT, not broken (the CLI
-//      accepts them; Sonnet 5 was live-verified billing under the suffixed id).
-//      Do not "clean up" those ids — persisted chats reference them.
-//   2. Haiku declares `supports_1m_suffix` but has NO `supports_1m_beta` and a
-//      200k window, so a `[1m]` on Haiku buys nothing. It is pinned to 200k
-//      below ahead of the generic suffix rule.
+// Two traps:
+//   1. Fable 5 and Sonnet 5 declare no `supports_1m_suffix` because they are
+//      natively 1M, so the catalog's `[1m]` ids for them are redundant, not
+//      broken. Keep those ids: persisted chats reference them.
+//   2. Haiku declares the suffix but has no 1M beta and a 200k window, so it is
+//      pinned to 200k ahead of the generic suffix rule.
 
 /** Prompt-side context window for a model we can't identify. 200k is the
  *  floor across the whole Claude 3.x/4.x family, so it never over-promises. */

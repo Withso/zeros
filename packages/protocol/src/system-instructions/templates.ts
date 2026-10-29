@@ -1,32 +1,12 @@
-// ──────────────────────────────────────────────────────────
-// Shared workspace and legacy-role instruction templates
-// ──────────────────────────────────────────────────────────
-//
-// The workspace preamble, "/add-dir" notice, and retained legacy-role text
-// live here. The assemblers in ./build.ts fill these templates and ./index.ts
-// re-exports them. Conversation-owned Code/Design mode instructions live in
-// ../composer-mode.ts and refresh before each prompt/steer or after a mode switch.
-//
-// Each template is tagged with a stable `[SYS-INSTR: <id>]` marker so you can
-// grep the codebase for where it's USED (build.ts / the send path).
-//
-// Delivery model — two mechanisms, chosen per agent by the gateway:
-//   • Mechanism "A" (in-band — Cursor and adapters without a native channel): wrapped in
-//     <system_instruction>…</system_instruction> and PREPENDED to a user
-//     message's agent-facing text. Used for agents whose protocol gives us no
-//     separate system channel; the bubble the user sees stays clean.
-//     FIRST-TURN preamble: injected ONCE, on the first user message of a chat
-//     (it then rides along in the conversation history; not re-sent per turn).
-//   • Mechanism "B" (native channel — adapters declaring
-//     `nativeSystemInstruction`, today Codex and Claude): the SAME assembled body, sent
-//     UNWRAPPED on the protocol's instruction field
-//     (thread/start|resume.developerInstructions) instead of the first user
-//     turn — it survives compaction and never masquerades as user speech.
-//   • CONDITIONAL notices (e.g. /add-dir): always mechanism A, injected on the
-//     specific message where the condition applies.
-//
-// Placeholders use {UPPER_SNAKE} and are substituted in ./build.ts.
-// ──────────────────────────────────────────────────────────
+// The workspace preamble, "/add-dir" notice and retained legacy-role text,
+// filled by ./build.ts; Code/Design mode instructions live in
+// ../composer-mode.ts. Each template carries a `[SYS-INSTR: <id>]` marker to
+// grep for its use. Mechanism "A" wraps the text in <system_instruction> and
+// prepends it once to the first user message (Cursor and adapters without a
+// native channel); mechanism "B" sends the same body unwrapped on the native
+// instruction field (Codex and Claude), so it survives compaction. Conditional
+// notices such as /add-dir are always mechanism A. Placeholders are
+// {UPPER_SNAKE}.
 
 /** [SYS-INSTR: workspace-preamble]
  *  The base, agent-agnostic workspace orientation. Prepended once on the first
@@ -84,10 +64,6 @@ export const DESIGN_AGENT_CONTEXT_NOTICE = `These additional directories are rea
 export const SYSTEM_INSTRUCTION_OPEN = "<system_instruction>";
 export const SYSTEM_INSTRUCTION_CLOSE = "</system_instruction>";
 
-// ── Future per-action prompts ──────────────────────────────
-// The Settings → Repo → Actions tab exposes these, one editable prompt per
-// action button. For now only `general` (→ the first-turn preamble's
-// custom-instructions slot) is wired.
-// When the Review / Create-PR / Fix-errors / Resolve-conflicts /
-// Rename-branch buttons are built, their hardcoded scaffolding goes HERE,
-// tagged `[SYS-INSTR: action-<name>]`, and is assembled in ./build.ts.
+// Per-action prompts for the Settings → Repo → Actions tab go here, tagged
+// `[SYS-INSTR: action-<name>]` and assembled in ./build.ts; only `general` is
+// wired today.

@@ -1,27 +1,7 @@
-// ──────────────────────────────────────────────────────────
-// Agent event types — wire format between engine + renderer
-// ──────────────────────────────────────────────────────────
-//
-// Native event vocabulary owned by Zeros. Defines every shape
-// the engine + renderer pass over the bridge — content blocks,
-// tool calls, plan/mode/usage updates, permission flow.
-// No external protocol dependency.
-//
-// Lives at the bridge layer because both processes consume them:
-//   - engine (apps/desktop/src/engine/agents/**) emits SessionNotification
-//     payloads from each adapter's translator
-//   - renderer (apps/desktop/src/renderer/features/agent/**) folds them into the chat UI
-//
-// Shapes intentionally mirror what the engine adapters already
-// emit — translators (Claude, Codex, Cursor) keep producing the
-// same JSON; this module just gives us a type vocabulary we own.
-//
-// The import sites were migrated off the external SDK and the
-// dependency was dropped from package.json — these are now the
-// sole source for these types.
-// ──────────────────────────────────────────────────────────
-
-// ── Identifiers ─────────────────────────────────────────────
+// The native event vocabulary the engine and renderer share over the bridge:
+// content blocks, tool calls, plan/mode/usage updates and the permission
+// flow. The shapes mirror what the engine adapters (Claude, Codex, Cursor)
+// already emit; there is no external protocol dependency.
 
 import type {
   ExecutionId,
@@ -40,10 +20,7 @@ export type ToolCallId = string;
 export type SessionModeId = string;
 export type SessionModelId = string;
 
-// ── Content blocks ──────────────────────────────────────────
-//
-// The basic unit of content inside a message chunk or tool-call
-// payload. Mirrors the structure used by every adapter today.
+// The basic unit of content inside a message chunk or tool-call payload.
 
 export type ContentBlock =
   | TextContent
@@ -107,8 +84,6 @@ export interface ContentAnnotations {
   lastModified?: string;
   priority?: number;
 }
-
-// ── Tool calls ──────────────────────────────────────────────
 
 /** Canonical tool category. Adapters set this so the renderer can
  *  pick the right card without guessing from `title`.
@@ -237,8 +212,6 @@ export type ToolCallContent =
   | { type: "content"; content: ContentBlock }
   | { type: "diff"; path: string; oldText?: string; newText: string }
   | { type: "terminal"; terminalId: string };
-
-// ── Session-level state ────────────────────────────────────
 
 export interface SessionMode {
   id: SessionModeId;
@@ -373,8 +346,6 @@ export interface UsageStats {
   cost?: UsageCost;
 }
 
-// ── Background work ──────────────────────────────────────
-
 /** One task in the engine-authoritative set of background work owned by a
  * session. The set contains active tasks only. Providers can enrich fields as
  * lifecycle events arrive, but `taskId`, `name`, and `startedAt` are always
@@ -402,8 +373,6 @@ export interface BackgroundTask {
   /** Exact epoch milliseconds for a provider-scheduled one-shot wake-up. */
   scheduledFor?: number;
 }
-
-// ── Foreground workflows ─────────────────────────────────
 
 /** Compact, provider-neutral progress for one phase of a foreground workflow.
  * The renderer deliberately receives counts only — never token/cost telemetry
@@ -505,10 +474,8 @@ export interface AgentGoal {
   updatedAt: number;
 }
 
-// ── Session updates (the streaming notification payload) ────
-//
-// Engine adapters emit these over the bridge as the chat unfolds.
-// Each variant carries enough fields to drive its renderer.
+// Adapters emit these over the bridge as the chat unfolds; each variant carries
+// enough to drive its renderer.
 
 export type SessionUpdate =
   | UserMessageChunkUpdate
@@ -735,20 +702,11 @@ export interface CurrentModelUpdate {
   turnStartedAt: number;
 }
 
-/** Timeline-visible record of a mode change. Distinct from
- *  CurrentModeUpdate (which patches session state). The banner emitted
- *  for this event is what the user actually sees in their transcript:
- *  "─── Switched to Plan mode ──── 14:32 ───".
- *
- *  Sources we expect to fire this:
- *    - User toggles the PermissionsPill → source: "user"
- *    - Agent autonomously switches (Claude ExitPlanMode after user
- *      approval) → source: "agent"
- *
- *  axis discriminates phase (plan / execute / explore) from permission
- *  (manual / accept-edits / auto / bypass) from tier (reserved for
- *  future agents that expose a capability tier). Renderer uses it to
- *  pick the right verb. */
+/** Timeline-visible record of a mode change, distinct from CurrentModeUpdate
+ *  (which patches session state). Sources are "user" (the PermissionsPill) and
+ *  "agent" (e.g. Claude's ExitPlanMode after approval). `axis` separates phase
+ *  (plan / execute / explore) from permission (manual / accept-edits / auto /
+ *  bypass) and the reserved tier, so the renderer picks the right verb. */
 export interface ModeSwitchUpdate {
   sessionUpdate: "mode_switch";
   source: "user" | "agent";
@@ -902,8 +860,6 @@ export interface SessionNotification {
   update: SessionUpdate;
 }
 
-// ── Permission flow ────────────────────────────────────────
-
 export type PermissionOptionKind =
   | "allow_once"
   | "allow_always"
@@ -968,11 +924,10 @@ export interface RequestPermissionResponse {
   outcome: RequestPermissionOutcome;
 }
 
-// ── Question / user-input flow ─────────────────────────────
-// A first-class BLOCKING interaction, twin of the permission flow. ONE card
-// handles single-select, multi-select, free-text ("Type something…"), and
-// MULTIPLE questions (carousel). The card always emits QuestionAnswer[]; each
-// adapter reshapes it into the provider's native answer format.
+// A blocking interaction, twin of the permission flow. One card handles
+// single-select, multi-select, free text and several questions; it always
+// emits QuestionAnswer[], and each adapter reshapes that into its provider's
+// native answer format.
 
 export interface QuestionOption {
   /** Stable id. Claude: synth `o${i}`. Codex: MUST equal `label` (the vendor
@@ -1080,8 +1035,6 @@ export interface QuestionResponse {
   outcome: QuestionOutcome;
 }
 
-// ── Session lifecycle responses ────────────────────────────
-
 export type StopReason =
   | "end_turn"
   | "max_tokens"
@@ -1098,12 +1051,11 @@ export type StopReason =
   | "blocking_limit"
   | "prompt_too_long";
 
-/** One model's share of a turn's bill (SDK `result.modelUsage`).
- *  A single Claude turn can span models (subagents on Haiku, an overload
- *  fallback). Retained for accounting/debugging; the footer shows one total.
- *  No reasoning-token field by design (2026-07-13 decision): Anthropic folds
- *  thinking into outputTokens, so surfacing it for one agent only would be an
- *  inconsistent readout. */
+/** One model's share of a turn's bill (SDK `result.modelUsage`); a Claude turn
+ *  can span models (Haiku subagents, an overload fallback). Kept for
+ *  accounting; the footer shows one total. There is no reasoning-token field:
+ *  Anthropic folds thinking into outputTokens, so it would read inconsistently
+ *  across agents. */
 export interface TurnModelUsage {
   model: string;
   inputTokens?: number;
@@ -1199,8 +1151,6 @@ export interface ListSessionsResponse {
   sessions: SessionInfo[];
   nextCursor?: string | null;
 }
-
-// ── Auth methods + capabilities ────────────────────────────
 
 export interface AuthEnvVar {
   name: string;

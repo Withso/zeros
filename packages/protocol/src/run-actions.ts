@@ -1,28 +1,9 @@
-// ──────────────────────────────────────────────────────────
-// Run actions — the shared `[scripts.run_actions]` model
-// ──────────────────────────────────────────────────────────
-//
-// One repo may declare MULTIPLE named run actions (dev server, tests,
-// storybook…), each with an icon, a platform filter, and a one-shot flag:
-//
-//   [[scripts.run_actions]]
-//   id = "dev"
-//   name = "Dev"
-//   command = "pnpm dev"
-//   icon = "play"
-//   default = true
-//
-// This module is the single parser/normalizer BOTH sides run: the engine
-// (resolving what to spawn — apps/desktop/src/engine/settings/repo-scripts.ts) and the
-// renderer (deciding which Run sub-tabs / menu items to render —
-// apps/desktop/src/renderer/shell/terminal/use-run-control.ts). Pure TS, no runtime deps, so it can
-// live on either side of the bridge.
-//
-// Legacy migration is READ-TIME: a repo with only the old single `scripts.run`
-// string resolves to one default action with the fixed id "run" — nothing is
-// rewritten on disk, and that id maps back to the legacy per-folder session id
-// so existing persisted run terminals keep matching (see runSessionId).
-// ──────────────────────────────────────────────────────────
+// The shared `[[scripts.run_actions]]` model: named run actions with an icon, a
+// platform filter and a one-shot flag. The engine (repo-scripts.ts) and the
+// renderer (use-run-control.ts) run this one pure parser. A repo with only the
+// legacy `scripts.run` string resolves at read time to one default action with
+// the fixed id "run", which maps back to the legacy session id so persisted run
+// terminals keep matching.
 
 export const RUN_ACTION_PLATFORMS = ["mac", "linux", "win"] as const;
 export type RunActionPlatform = (typeof RUN_ACTION_PLATFORMS)[number];
