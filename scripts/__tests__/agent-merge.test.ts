@@ -9,6 +9,34 @@ const REPOSITORY = "Withso/zeros";
 const COMMENT_URL = `https://github.com/${REPOSITORY}/pull/123#issuecomment-456`;
 const OWNER_REVIEW =
   "This PR changes CI definitions; the owner must review and merge it.";
+const SECTIONS = [
+  "Why", "What changes", "Tests", "Rollout",
+  "Local workspace impact", "Cloud workspace impact",
+];
+const PR_BODY = `## Why
+
+Keep the selected workspace while refreshing.
+
+## What changes
+
+Retain the current selection.
+
+### Local workspace impact
+
+Personal and organization-local navigation retain their selection.
+
+### Cloud workspace impact
+
+Cloud navigation retains its selection too.
+
+## Tests
+
+Both placement regressions pass.
+
+## Rollout
+
+Normal release.
+`;
 
 type AutoMerge = { enabledAt: string } | null;
 type Snapshot = {
@@ -17,6 +45,7 @@ type Snapshot = {
     number: number;
     title: string;
     body: string;
+    author?: { login: string; is_bot?: boolean } | null;
     state: string;
     isDraft: boolean;
     isCrossRepository: boolean;
@@ -43,7 +72,8 @@ function fixture(): Snapshot {
     pr: {
       number: 123,
       title: "Fix workspace navigation",
-      body: "Keep the selected workspace while refreshing.",
+      body: PR_BODY,
+      author: { login: "workspace-owner", is_bot: false },
       state: "OPEN",
       isDraft: false,
       isCrossRepository: false,
@@ -136,6 +166,115 @@ function json(value: unknown, status = 0) {
 }
 
 describe("agent merge decision", () => {
+  it.each(SECTIONS)("refuses a human PR missing the %s section", async (section) => {
+    const snapshot = fixture();
+    snapshot.pr.body = PR_BODY.replace(section, "Other notes");
+    expect(decideMerge(snapshot, { isCiDefinitionPath })).toMatchObject({
+      allowed: false, code: "pr-sections",
+    });
+    for (const args of [["123"], ["123", "--dry-run"]]) {
+      const gh = fakeGh(snapshot);
+      expect(await runAgentMerge(args, gh)).toBe(1);
+      expect(gh.stderr).toHaveBeenCalledWith(expect.stringContaining(section));
+      expect(gh.calls.some((call) => call[1] === "merge")).toBe(false);
+    }
+  });
+
+  it("lists every missing section in a dry-run without printing the body", async () => {
+    const snapshot = fixture();
+    snapshot.pr.body = "Private body fixture: Why, What changes, Tests, Rollout, Local workspace impact, Cloud workspace impact.";
+    const gh = fakeGh(snapshot);
+    expect(await runAgentMerge(["123", "--dry-run"], gh)).toBe(1);
+    for (const section of SECTIONS)
+      expect(gh.stderr).toHaveBeenCalledWith(expect.stringContaining(section));
+    expect(JSON.stringify(gh.stderr.mock.calls)).not.toContain("Private body fixture");
+    expect(gh.calls.some((call) => call[1] === "merge")).toBe(false);
+  });
+
+  it.each([
+    "```md\n## Tests\n```",
+    "~~~\n## Tests\n~~~",
+    "<!--\n## Tests\n-->",
+    "> ## Tests",
+    "    ## Tests",
+    "- ## Tests",
+  ])("does not count a heading hidden inside %s", (text) => {
+    const snapshot = fixture();
+    snapshot.pr.body = PR_BODY.replace("## Tests", text);
+    expect(decideMerge(snapshot, { isCiDefinitionPath })).toMatchObject({
+      allowed: false, code: "pr-sections",
+      message: expect.stringContaining("Tests"),
+    });
+  });
+
+  it("accepts visible Markdown headings with case, emphasis, and closing markers", () => {
+    const snapshot = fixture();
+    snapshot.pr.body = PR_BODY.replace("## Why", "WHY\n---")
+      .replace("## Tests", "## **Tests** ##")
+      .replace("### Cloud workspace impact", "### Cloud workspace impact:");
+    expect(decideMerge(snapshot, { isCiDefinitionPath }).allowed).toBe(true);
+  });
+
+  it.each(["renovate[bot]", "zeros-agent-runtime[bot]", "zeros-ci-incident[bot]"])(
+    "preserves the body policy for a confirmed %s author", async (login) => {
+      const snapshot = fixture();
+      snapshot.pr.author = { login, is_bot: true };
+      snapshot.pr.body = "Automated maintenance.";
+      const gh = fakeGh(snapshot);
+      expect(await runAgentMerge(["123", "--dry-run"], gh)).toBe(0);
+      for (const call of gh.calls.filter((call) => call[0] === "pr" && call[1] === "view"))
+        expect(call.at(-1)?.split(",")).toContain("author");
+      expect(gh.calls.some((call) => call[1] === "merge")).toBe(false);
+    },
+  );
+
+  it.each([null, undefined, { login: "renovate[bot]", is_bot: false }, { login: "renovate[bot]" }])(
+    "requires sections without confirmed bot metadata (%j)", (author) => {
+      const snapshot = fixture();
+      snapshot.pr.author = author;
+      snapshot.pr.title = "Automated runtime maintenance";
+      snapshot.pr.body = "Automated maintenance. Agent: GPT-6 Astra.";
+      expect(decideMerge(snapshot, { isCiDefinitionPath })).toMatchObject({
+        allowed: false, code: "pr-sections",
+      });
+    },
+  );
+
+  it.each([
+    { login: "another-author", is_bot: false },
+    { login: "workspace-owner", is_bot: true },
+  ])("refuses an author identity change during preflight (%j)", async (author) => {
+    const snapshot = fixture();
+    const gh = fakeGh(snapshot), spawn = gh.spawn.getMockImplementation()!;
+    let reads = 0;
+    gh.spawn.mockImplementation((command, args, options) => {
+      if (args[0] === "pr" && args[1] === "view" && ++reads === 2) snapshot.pr.author = author;
+      return spawn(command, args, options);
+    });
+    expect(await runAgentMerge(["123"], gh)).toBe(1);
+    expect(gh.calls.some(call => call[1] === "merge")).toBe(false);
+  });
+
+  it.each([
+    [".github/workflows/ci.yml", "ci-definition"],
+    [".github/ci-incidents/open.json", "incident"],
+  ])("preserves the %s refusal for bot PRs without sections", (filename, code) => {
+    const snapshot = fixture();
+    snapshot.pr.author = { login: "maintenance[bot]", is_bot: true };
+    snapshot.pr.body = "Automated maintenance.";
+    snapshot.files[0].filename = filename;
+    expect(decideMerge(snapshot, { isCiDefinitionPath })).toMatchObject({ allowed: false, code });
+  });
+
+  it("cannot override missing sections with --force", async () => {
+    const snapshot = fixture();
+    snapshot.pr.body = "A short human change.";
+    const gh = fakeGh(snapshot);
+    expect(await runAgentMerge(["123", "--force", "--reason", COMMENT_URL], gh)).toBe(1);
+    expect(gh.stderr).toHaveBeenCalledWith(expect.stringContaining("Why"));
+    expect(gh.calls.some((call) => call[1] === "merge")).toBe(false);
+  });
+
   it("exports a pure decision that keeps its input unchanged", () => {
     const snapshot = fixture();
     const before = structuredClone(snapshot);

@@ -1,0 +1,5 @@
+{
+  "file": "scripts/agent-merge.mjs",
+  "before": "const missing = botAuthor ? [] : missingPrSections(pr.body);",
+  "after": "const missing = [];"
+}

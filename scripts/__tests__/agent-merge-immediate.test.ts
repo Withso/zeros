@@ -28,7 +28,8 @@ function fixture() {
       id: "PR_fixture",
       number: 123,
       title: "Fix navigation `literal` $(literal)",
-      body: 'Preserve the workspace.\n\nLiteral "text".',
+      body: '## Why\n\nPreserve the workspace.\n\n## What changes\n\nLiteral "text".\n\n### Local workspace impact\n\nPreserved.\n\n### Cloud workspace impact\n\nPreserved.\n\n## Tests\n\nRegression passed.\n\n## Rollout\n\nNormal release.',
+      author: { login: "workspace-owner", __typename: "User" },
       state: "OPEN",
       isDraft: false,
       isCrossRepository: false,
@@ -208,6 +209,29 @@ function expectNoWrite(gh: ReturnType<typeof fakeGh>) {
 }
 
 describe("immediate-only agent merge", () => {
+  it("refuses missing sections before either a dry-run or an immediate mutation", async () => {
+    for (const args of [["123", "--immediate", "--dry-run"], ["123", "--immediate"]]) {
+      const snapshot = fixture();
+      snapshot.pr.body = "Preserve the workspace.";
+      const gh = fakeGh(snapshot);
+      expect(await runAgentMerge(args, gh)).toBe(1);
+      expect(gh.stderr).toHaveBeenCalledWith(expect.stringContaining("Why"));
+      expectNoWrite(gh);
+    }
+  });
+
+  it("reads the GraphQL author kind and preserves confirmed bot body policy", async () => {
+    const snapshot = fixture();
+    snapshot.pr.author = { login: "maintenance[bot]", __typename: "Bot" };
+    snapshot.pr.body = "Automated maintenance.";
+    const gh = fakeGh(snapshot);
+    expect(await runAgentMerge(["123", "--immediate", "--dry-run"], gh)).toBe(0);
+    const queries = gh.calls.flat().filter((arg) => arg.includes("ImmediateMergePreflight"));
+    expect(queries.length).toBeGreaterThan(0);
+    for (const query of queries) expect(query).toMatch(/author\s*\{[^}]*__typename/);
+    expectNoWrite(gh);
+  });
+
   it("pins the real workspace Git author email in the API request and both receipts", async () => {
     const snapshot = fixture();
     const selected = "another-operator+merge@example.test";
@@ -863,6 +887,18 @@ describe("immediate-only agent merge", () => {
       "body",
       (s: Snapshot) => {
         s.pr.body = "Another body";
+      },
+    ],
+    [
+      "PR author login",
+      (s: Snapshot) => {
+        s.pr.author.login = "another-author";
+      },
+    ],
+    [
+      "PR author kind",
+      (s: Snapshot) => {
+        s.pr.author.__typename = "Bot";
       },
     ],
     ...unsafe,
