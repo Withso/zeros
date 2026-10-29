@@ -123,6 +123,14 @@ pnpm --dir apps/control-plane cloud-v2:gate0 --local --runtime <runtime-sha256>
 - A pipe through `sed`/`grep` buffers output. Use `sed -u` or
   `--line-buffered` when a later step needs a line immediately, such as a URL
   the owner must open.
+- `cd X && (a) & (b) & wait` runs only the first job in X; every later job
+  runs in the shell's own directory, so its result describes a different tree.
+  Put the `cd` inside each background job (`(cd X && a) & (cd X && b) & wait`)
+  and confirm the tree in the evidence, for example by a scanned-file count.
+- A held runtime-updater PR qualifies only when its tested merge commit's base
+  parent is the current `main`. After anything lands on `main`, merge `main`
+  into that PR branch (never force-push the bot branch), rerun CI and wait for
+  the report to name the new head; land other PRs only after it merges.
 - Time windows: tolerate clock skew between this host and Alpha (about 0.5 s
   observed). Compare against the documented bound, never an exact value.
 - Harness input files must be regular files you own, mode 0600 and small.
