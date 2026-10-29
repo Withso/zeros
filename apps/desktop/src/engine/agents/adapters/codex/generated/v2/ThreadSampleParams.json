@@ -5,6 +5,9 @@
       "description": "A non-empty reasoning effort value advertised by the model.",
       "minLength": 1,
       "type": "string"
+    },
+    "ThreadSource": {
+      "type": "string"
     }
   },
   "properties": {
@@ -42,6 +45,16 @@
     },
     "threadId": {
       "type": "string"
+    },
+    "threadSource": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/ThreadSource"
+        },
+        {
+          "type": "null"
+        }
+      ]
     },
     "turnTrigger": {
       "type": [

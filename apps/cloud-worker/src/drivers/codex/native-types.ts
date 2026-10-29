@@ -1,4 +1,4 @@
-// Read-side shapes consumed by the mapper, checked against @openai/codex 0.164.0.
+// Read-side shapes consumed by the mapper, checked against @openai/codex 0.165.0.
 // Source: the pinned Local generated schema; mapper originally ported at 4baf69ec.
 // These describe consumed fields only; runtime snapshots may include more data.
 export type MessagePhase = "commentary" | "final_answer";

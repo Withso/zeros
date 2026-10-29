@@ -7,11 +7,11 @@ import { ClaudeDriver } from "../driver";
 import { input, result, text } from "./fake-query";
 
 it.each([
-  { effort: "low", expected: { settings: { effortLevel: "low", ultracode: false } } },
-  { effort: "max", expected: { settings: { ultracode: false }, effort: "max" } },
-  { effort: "ultracode", expected: { settings: { effortLevel: "xhigh", ultracode: true } } },
-  { effort: "unknown", expected: { settings: { ultracode: false } } },
-  { effort: undefined, expected: { settings: { ultracode: false } } },
+  { effort: "low", expected: { settings: { effortLevel: "low", fastMode: false, ultracode: false } } },
+  { effort: "max", expected: { settings: { fastMode: false, ultracode: false }, effort: "max" } },
+  { effort: "ultracode", expected: { settings: { effortLevel: "xhigh", fastMode: false, ultracode: true } } },
+  { effort: "unknown", expected: { settings: { fastMode: false, ultracode: false } } },
+  { effort: undefined, expected: { settings: { fastMode: false, ultracode: false } } },
 ])("serializes $effort and its model-change reset through the pinned SDK", async ({ effort, expected }) => {
   const directory = await mkdtemp(join(tmpdir(), "worker-claude-effort-"));
   const driver = new ClaudeDriver({ executable: fileURLToPath(new URL("./fixtures/cli.mjs", import.meta.url)), environment: { PATH: process.env.PATH, HOME: directory } });
@@ -22,6 +22,26 @@ it.each([
     await driver.setModel("claude-haiku-5-5");
     await expect(driver.prompt(text(`fixture:${JSON.stringify([{ fixtureFlagSettings: [{ effortLevel: null, ultracode: false }] }, result("@input")])}`)))
       .resolves.toMatchObject({ stopReason: "end_turn" });
+  } finally { await driver.dispose(); await rm(directory, { recursive: true, force: true }); }
+});
+
+it("serializes Fast, live effort resets and a Max-boundary restart through the pinned SDK", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "worker-claude-settings-"));
+  const driver = new ClaudeDriver({ executable: fileURLToPath(new URL("./fixtures/cli.mjs", import.meta.url)), environment: { PATH: process.env.PATH, HOME: directory } });
+  const send = (frames: object[]) => driver.prompt(text(`fixture:${JSON.stringify([...frames, result("@input")])}`));
+  try {
+    await driver.open({ ...input, cwd: directory, effort: "low", fast: true });
+    await send([{ fixtureOptions: { settings: { effortLevel: "low", fastMode: true, ultracode: false } } }]);
+    await driver.updateConfig({ effort: "ultracode", fast: false });
+    await driver.updateConfig({ fast: false });
+    await send([{ fixtureFlagSettings: [
+      { effortLevel: "xhigh", fastMode: false, ultracode: true },
+      { effortLevel: null, fastMode: false, ultracode: false },
+    ] }]);
+    await driver.updateConfig({ effort: "max", fast: true });
+    await send([{ fixtureOptions: { effort: "max", settings: { fastMode: true, ultracode: false } } }, { fixtureFlagSettings: [] }]);
+    await driver.updateConfig({ fast: false });
+    await send([{ fixtureOptions: { settings: { fastMode: false, ultracode: false } } }, { fixtureFlagSettings: [] }]);
   } finally { await driver.dispose(); await rm(directory, { recursive: true, force: true }); }
 });
 

@@ -47,6 +47,39 @@ Design, browser and simulator capabilities are unavailable. See
 [Cloud workspaces](cloud-workspaces.md) for the current runtime and credential
 boundary.
 
+## Mid-chat configuration timing
+
+The composer sends a complete `AGENT_UPDATE_CONFIG` snapshot. Effort and Fast
+choices remain saved for later prompts and reopening. The owning adapter or
+driver determines when the native runtime can apply them:
+
+| Provider | Local Personal and organization-local | Organization cloud worker |
+| --- | --- | --- |
+| Claude | Ordinary effort and Fast apply to the live query through `applyFlagSettings`. A transition into or out of Max waits for the next explicit prompt, which recreates the query with resume. | Same effort/Fast behavior, including Fast at query creation and resume. A staged Max transition never retires the running query. |
+| Codex | Changed effort/Fast apply to the exact active turn through `turn/settings/update` when the native model supports it; saved choices also reach the next `turn/start`. | Same exact-turn behavior and native support checks. |
+| Cursor | Effort/Fast apply on the next `agent.send`; the SDK cannot change a running run. | Same next-send behavior, with a selection captured before the send yields. Create, resume and send use the same account catalog resolver. |
+
+Claude clears a live effort override with `effortLevel: null` and clears Fast
+and ultracode with explicit false values. Max is a top-level `Options.effort`,
+outside `Settings.effortLevel`. Local's other restart-only config option,
+`CLAUDE_MAX_TURNS`, also waits for the next explicit prompt; it is not exposed
+by the cloud model/effort/Fast courier. Local permissions, directories, memory
+and process-lifetime options retain their existing boundaries. Rejected Claude
+live controls preserve the saved selections for the next query creation.
+
+Codex never changes the active model. Model changes and their remembered knobs
+wait for the next turn; omitting effort clears only the next-turn override,
+because the active-turn request has no null-effort reset. Rejected live updates
+are nonfatal. Cursor preserves the provider's full default variant, overrides
+only advertised parameters, and uses legacy suffixed IDs only when offered by
+that account. Missing registry schemas refuse rather than guess parameters.
+
+Cloud routes all three providers through the exact execution, persists the
+selection, waits for an opening driver, and passes typed model/effort/Fast
+values only. Caller credentials and arbitrary environment settings do not cross
+this boundary. Owner or placement switching never redirects a stale update to
+a replacement execution.
+
 ## macOS Full Disk Access
 
 Settings → Local → General → Privacy exposes the Mac's Full Disk Access setup.

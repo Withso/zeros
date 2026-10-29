@@ -1,7 +1,7 @@
 {
   "$schema": "./models-v1.schema.json",
-  "version": 13,
-  "updatedAt": "2026-10-08",
+  "version": 14,
+  "updatedAt": "2026-10-29",
   "notes": "Curated model-picker source of truth. See catalogs/README.md for capability precedence, compatibility contracts, runtime context handling, verification, and update requirements.",
   "families": {
     "claude": [
@@ -79,6 +79,13 @@
       {
         "value": "gpt-6.1-sol",
         "label": "GPT-6.1 Sol",
+        "effortLevels": ["low", "medium", "high", "xhigh", "max", "ultracode"],
+        "defaultEffort": "max",
+        "supportsFast": true
+      },
+      {
+        "value": "gpt-6.1-terra",
+        "label": "GPT-6.1 Terra",
         "effortLevels": ["low", "medium", "high", "xhigh", "max", "ultracode"],
         "defaultEffort": "max",
         "supportsFast": true

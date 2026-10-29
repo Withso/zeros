@@ -22,4 +22,11 @@ describe("standalone control-plane provider catalog", () => {
       expect(cloudAgentModelAllowed(kind, "claude-haiku-4-5", ["claude-haiku-4-5"], false)).toBe(true);
     }
   });
+  it("admits GPT-6.1 Terra under existing all-model consent without expanding explicit grants", () => {
+    for (const kind of ["codex-api-key", "codex-chatgpt"]) {
+      expect(cloudAgentModelAllowed(kind, "gpt-6.1-terra", ["gpt-6.1-sol"], true)).toBe(true);
+      expect(cloudAgentModelAllowed(kind, "gpt-6.1-terra", ["gpt-6.1-sol"], false)).toBe(false);
+      expect(cloudAgentModelAllowed(kind, "gpt-6.1-sol", ["gpt-6.1-sol"], false)).toBe(true);
+    }
+  });
 });

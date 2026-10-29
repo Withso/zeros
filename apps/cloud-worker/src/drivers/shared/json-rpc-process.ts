@@ -41,7 +41,7 @@ export class JsonRpcProcess {
     this.child.stderr.resume();
   }
 
-  request<T>(method: string, params: unknown): Promise<T> {
+  request<T>(method: string, params: unknown, options?: { fatalTimeout?: boolean }): Promise<T> {
     if (this.closed) return Promise.reject(new RpcError("Codex app-server is closed."));
     const id = ++this.nextId;
     return new Promise<T>((resolve, reject) => {
@@ -51,7 +51,7 @@ export class JsonRpcProcess {
         reject(error);
         // A lost mutation receipt is uncertain. Retire the process rather than
         // accepting another turn that could duplicate still-running work.
-        this.fail(error);
+        if (options?.fatalTimeout !== false) this.fail(error);
       }, this.options.requestTimeoutMs);
       this.pending.set(id, { resolve: (value) => resolve(value as T), reject, timer });
       this.write({ id, method, params });

@@ -63,7 +63,7 @@ it.each([
   await driver.open({ ...input, effort });
   const turn = driver.prompt(text("ok")), query = queries[0], sent = await query.read();
   query.push(result(sent.uuid)); await turn;
-  expect(query.args.options.settings).toEqual(settings);
+  expect(query.args.options.settings).toEqual({ ...settings, fastMode: false });
   if ("topLevel" in expected) expect(query.args.options.effort).toBe(expected.topLevel);
   else expect(query.args.options).not.toHaveProperty("effort");
 });

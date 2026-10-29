@@ -326,7 +326,7 @@ export class SessionStore {
 
   /** Serialize selection with the inbox and imported history. Only untouched
    * conversations may change provider; a queued first Send already owns it. */
-  async selectAgent(input: { id: string; folder: string; agentId: string; agentName: string; model?: string; effort?: string; executionId: string }, admit: () => void): Promise<ChatRow> {
+  async selectAgent(input: { id: string; folder: string; agentId: string; agentName: string; model?: string; effort?: string; fast?: boolean; executionId: string }, admit: () => void): Promise<ChatRow> {
     const { executionId, ...selection } = input;
     const initial = coerceChat({ ...selection, createdAt: Date.now(), updatedAt: Date.now() })!;
     return this.change(input.id, (draft) => {
@@ -337,10 +337,12 @@ export class SessionStore {
         if (established(draft)) throw new WorkspaceError("session-expired", "This conversation belongs to another agent.");
         chat.agentId = input.agentId; chat.agentName = input.agentName;
         chat.model = input.model ?? null; chat.effort = input.effort ?? "";
+        chat.fast = input.fast ?? false;
         chat.updatedAt = Date.now();
       } else if (!established(draft)) {
         if (input.model !== undefined && input.model !== chat.model) { chat.model = input.model; chat.effort = ""; }
         if (input.effort !== undefined) chat.effort = input.effort;
+        if (input.fast !== undefined) chat.fast = input.fast;
       }
       return chat;
     }, initial);

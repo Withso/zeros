@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "codexProtocolVersion": "0.164.0",
+  "codexProtocolVersion": "0.165.0",
   "threadItems": {
     "handled": [
       "userMessage",
@@ -26,6 +26,7 @@
   "clientRequests": {
     "handled": [
       "initialize",
+      "turn/settings/update",
       "thread/start",
       "thread/resume",
       "thread/fork",
@@ -179,7 +180,7 @@
       "fuzzyFileSearch/sessionStart",
       "fuzzyFileSearch/sessionUpdate",
       "fuzzyFileSearch/sessionStop",
-      "turn/settings/update",
+      "thread/memory/read",
       "server/diagnostics",
       "thread/queue/add",
       "thread/queue/list",

@@ -12,6 +12,7 @@ function runCheck(overrides: Record<string, string> = {}) {
   const files = {
     "package.json": JSON.stringify({ codexProtocolVersion: "0.160.0" }),
     "node_modules/@openai/codex/package.json": JSON.stringify({ version: "0.160.0" }),
+    "apps/cloud-worker/package.json": JSON.stringify({ dependencies: { "@openai/codex": "0.160.0" } }),
     [`${generated}/.version`]: "0.160.0\n",
     [`${generated}/LICENSE`]: "Apache License",
     [`${generated}/NOTICE`]: "OpenAI Codex",
@@ -52,6 +53,14 @@ describe("Codex runtime qualification pins", () => {
     });
     expect(result.status).toBe(1);
     expect(result.output).toContain("control-plane native keeper");
+  });
+
+  it.each(["0.159.0", "^0.160.0", undefined])("rejects a cloud worker pin of %s that does not exactly match Local", version => {
+    const result = runCheck({
+      "apps/cloud-worker/package.json": JSON.stringify({ dependencies: { "@openai/codex": version } }),
+    });
+    expect(result.status).toBe(1);
+    expect(result.output).toContain("cloud worker");
   });
 
   it("rejects missing keeper pins rather than comparing two absent values", () => {
