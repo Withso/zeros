@@ -1,36 +1,10 @@
-// ──────────────────────────────────────────────────────────
-// transcript-format — a chat's messages → copyable Markdown
-// ──────────────────────────────────────────────────────────
-//
-// Backs the chat tab's "Copy full transcript" / "Copy concise transcript"
-// context-menu actions. Pure and React-free (types are `import type`, so
-// nothing here drags in the renderer tree) — it unit-tests without a DOM or
-// store harness, the same way turn-partition.ts does.
-//
-// Two modes:
-//   full     — every visible message in order: user prompts, agent narration,
-//              reasoning, tool calls with their input/output, sub-agent work
-//              (indented under its parent), errors.
-//   concise  — user prompt → the turn's concluding answer, alternating. The
-//              working feed (tools, thinking, in-between narration) is
-//              dropped. `partitionTurn` draws the same boundary the UI uses
-//              to render the answer brightly, so "concise" is exactly what
-//              the chat shows once a turn collapses.
-//
-// The visibility pass mirrors agent-chat.tsx's `visibleMessages`: queued
-// sends (never dispatched), resume-boundary notices (invisible by spec),
-// legacy mode_switch rows, and sub-agent children (folded under their parent)
-// are all excluded from the top level — a copied transcript should match what
-// the user actually saw.
-//
-// "What the user actually saw" also governs VOLUME, which is where the first
-// cut of this file went wrong. A tool card is collapsed by default
-// (event-row.tsx) and, once expanded, scrolls inside max-h-[200px] — call it
-// eight lines. Emitting the payload whole instead put 347-line `cat -n` dumps
-// in the clipboard: one single-prompt chat exported at 116 KB, 70% of it file
-// contents the reader could open for themselves. Hence TRANSCRIPT_PAYLOAD_*:
-// prose is generous, tool payloads are bounded and say what they dropped.
-// ──────────────────────────────────────────────────────────
+// A chat's messages → copyable Markdown for "Copy full transcript" and "Copy
+// concise transcript". Pure and React-free, so it unit-tests without a DOM.
+// Full mode is every visible message in order; concise alternates each prompt
+// with its turn's concluding answer, using partitionTurn's boundary so it
+// matches a collapsed turn. Visibility mirrors agent-chat.tsx's
+// `visibleMessages`, and volume follows what the user saw: prose is generous,
+// while tool payloads are bounded and say what they dropped.
 
 import {
   readQuestionStamp,
@@ -75,19 +49,12 @@ export interface FormattedTranscript {
  *  block. Generous on purpose: the prose is the transcript. */
 export const TRANSCRIPT_TEXT_MAX = 20_000;
 
-/** Per-payload caps for ONE tool input/output block, whichever trips first.
- *
- *  Far tighter than the prose cap, and that asymmetry is the whole point. A
- *  "full" transcript is a record of what the agent DID; it is not a second
- *  copy of every file the agent read. Holding prose and payloads to one
- *  shared 20k cap is what produced a 116 KB export of a single-prompt chat
- *  whose 70% was `cat -n` file dumps the reader can open for themselves.
- *
- *  The reference caps the same blocks at 10 lines / 500 chars. These are
- *  deliberately looser — a real shell command's output usually still fits
- *  whole — but bounded, and a cut always leaves a marker saying how much is
- *  missing. An UNMARKED cut is the failure that matters: a reader who can't
- *  see that output was elided reads a truncated test run as the whole run. */
+/** Per-payload caps for one tool input or output block, far tighter than the
+ *  prose cap: a full transcript records what the agent did, not a copy of every
+ *  file it read (one shared 20k cap once exported 116 KB, 70% file dumps).
+ *  Looser than the reference's 10 lines / 500 chars so typical command output
+ *  fits whole. A cut always leaves a marker; an unmarked cut makes a truncated
+ *  test run read as the whole run. */
 export const TRANSCRIPT_PAYLOAD_LINES = 40;
 export const TRANSCRIPT_PAYLOAD_MAX = 2_000;
 
@@ -99,8 +66,6 @@ export const TRANSCRIPT_TOTAL_MAX = 2_000_000;
 /** Same guard asDisplayString uses — never splat base64 image/blob data into
  *  a transcript. */
 const BASE64_BLOB = /"(?:data|blob|base64)"\s*:\s*"[A-Za-z0-9+/=\\]{200,}"/;
-
-// ── Visibility ─────────────────────────────────────────────
 
 interface VisibleMessages {
   /** Top-level timeline, in order. */
@@ -143,8 +108,6 @@ function selectVisible(messages: AgentMessage[]): VisibleMessages {
   return { top, children };
 }
 
-// ── Text helpers ───────────────────────────────────────────
-
 /** A fence longer than any backtick run inside `body`, so a tool output that
  *  itself contains ``` can't terminate the block early. */
 function fenceFor(body: string): string {
@@ -155,12 +118,9 @@ function fenceFor(body: string): string {
   return "`".repeat(Math.max(3, longest + 1));
 }
 
-/** Prefix of `s` at most `max` code units long, never splitting a surrogate
- *  pair — a lone surrogate is ill-formed and the clipboard rewrites it to
- *  U+FFFD (in the DOM it paints as a tofu box).
- *
- *  Exported because the pill label truncates too (transcriptPillLabel), and it
- *  had this exact bug: one definition beats a second copy that drifts. */
+/** Prefix of `s` at most `max` code units, never splitting a surrogate pair (a
+ *  lone surrogate becomes U+FFFD on the clipboard). Exported so the pill label
+ *  shares it. */
 export function sliceSafe(s: string, max: number): string {
   if (s.length <= max) return s;
   const c = s.charCodeAt(max - 1);
@@ -299,16 +259,11 @@ function textFromBlock(b: ContentBlock): string {
   }
 }
 
-/** Harness plumbing an agent SDK writes into a tool result rather than
- *  conversation the user had: `<system-reminder>` envelopes, and the
- *  async-subagent LAUNCH receipt (an internal agent id, a temp transcript
- *  path under the user's home, and instructions addressed to the model).
- *
- *  Stripping the receipt loses nothing — the work it launched renders right
- *  below it under `Sub-agent:`. Keeping it is actively wrong: it pastes an
- *  internal id and a private path into a document made to be shared, and its
- *  own text says "never quote or paste any part of it … into a user-facing
- *  reply", which is exactly what a transcript is. */
+/** Harness plumbing an agent SDK writes into a tool result: `<system-reminder>`
+ *  envelopes and the async-subagent launch receipt (an internal id, a private
+ *  temp path and instructions addressed to the model). The launched work
+ *  renders below under `Sub-agent:`, so stripping it loses nothing and keeps
+ *  private ids and paths out of a shared document. */
 const INTERNAL_NOISE_LINE =
   /^(?:Async agent launched successfully\b|agentId:|output_file:|The agent is working in the background\b|Do not duplicate this agent's work\b|Do NOT Read or tail this file\b)/m;
 
@@ -355,8 +310,6 @@ function toolOutputText(tool: AgentToolMessage): string {
   return output.filter(Boolean).join("\n");
 }
 
-// ── Render context ─────────────────────────────────────────
-
 interface Ctx {
   /** Sub-agent messages keyed by their parent tool-call id. */
   children: Map<string, AgentMessage[]> | undefined;
@@ -394,8 +347,6 @@ function relativize(s: string, root: string | undefined): string {
   // split/join, not RegExp — a path is not a safe pattern.
   return s.split(`${base}/`).join("").split(base).join(".");
 }
-
-// ── Message rendering (full mode) ──────────────────────────
 
 function renderUser(m: AgentTextMessage, depth: Depth = 0): string {
   const head = `${h(2, depth)} User`;
@@ -508,20 +459,10 @@ function safeRender(m: AgentMessage, ctx: Ctx, depth: Depth = 0): string {
   }
 }
 
-/** The same guarantee, for the CONCISE path.
- *
- *  Concise assembles its sections by hand instead of going through
- *  renderMessage, so it did not inherit safeRender's protection: one legacy
- *  row with a missing `text` threw out of formatTranscript entirely — losing
- *  the whole transcript, not one message — while the same chat rendered fine
- *  in full mode. That asymmetry is what made it worth fixing rather than
- *  leaving: concise is the DEFAULT click path (chat-transcript-pills passes
- *  "concise" from a plain click), so the failure landed on the gesture users
- *  actually make, and "Couldn't read that transcript" for a chat whose full
- *  transcript copies fine is an unexplainable state to be in.
- *
- *  Per PART rather than per turn, matching full mode: a bad answer must not
- *  also swallow the prompt that asked for it. */
+/** The same guarantee for the concise path, which assembles sections by hand
+ *  and so missed safeRender: one malformed legacy row once threw away the whole
+ *  transcript on the default click path. Per part rather than per turn, so a
+ *  bad answer doesn't swallow its prompt. */
 function safeSection(render: () => string, what: string): string {
   try {
     return render();
@@ -569,8 +510,6 @@ function renderMessage(m: AgentMessage, ctx: Ctx, depth: Depth): string {
       return "";
   }
 }
-
-// ── Assembly ───────────────────────────────────────────────
 
 /** `2026-07-29T22:26Z`, or "" for a missing/unrepresentable stamp. UTC and
  *  minute-precision on purpose: unambiguous in a pasted document and stable

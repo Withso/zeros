@@ -1,26 +1,8 @@
-// ──────────────────────────────────────────────────────────
-// Shared syntax highlighter — shiki singleton, lazy-loaded
-// ──────────────────────────────────────────────────────────
-//
-// Edit and Read cards need code highlighting. Shiki runs off the main thread
-// in a Web Worker (./syntax.worker.ts)
-// so a long streaming response with many code blocks doesn't pin the
-// main thread. The `highlightCode` async signature is unchanged so
-// callers don't need to know.
-//
-// Fallback paths (in order):
-//   1. Web Worker via `new Worker(new URL("./syntax.worker.ts", …))`
-//      — primary path under Vite + Electron.
-//   2. Main-thread shiki — if Worker construction fails (test
-//      harness, jsdom, server-render). Same singleton pattern.
-//   3. Plain `<pre>` — if the language isn't loaded or shiki
-//      isn't available at all.
-//
-// Lazy-init pattern: shiki + grammars are big, so we don't import
-// them on the initial paint of agent-chat.tsx. The first call to
-// highlightCode() spawns the worker (or main-thread highlighter)
-// and stashes the promise. Subsequent calls reuse it.
-// ──────────────────────────────────────────────────────────
+// Shared Shiki highlighter, lazy-loaded so its grammars stay off agent-chat's
+// first paint. It runs in a Web Worker (./syntax.worker.ts) so long streaming
+// responses don't pin the main thread, falls back to main-thread Shiki where a
+// Worker can't be built (tests, jsdom), then to a plain `<pre>` when the
+// language isn't loaded.
 
 // `shiki` types are imported as type-only so the dynamic
 // import below is the only thing that pulls in runtime code.
@@ -68,14 +50,10 @@ async function ensureTheme(hl: Highlighter, theme: string): Promise<void> {
   }
 }
 
-// ─── result cache (shared by the sync + async paths) ──────
-// Highlighting the same (code, lang) twice — a re-render, a file re-open, a
-// scroll that remounts a row — should be instant, not another worker round-trip.
-// Capped LRU-ish: oldest entry evicted past the cap; pathologically large inputs
-// aren't cached (one-off cost, keeps the map small).
-// Cap the INPUT we cache (anything larger highlights in the worker off the main
-// thread — see SYNC_HL_MAX); bound the TOTAL cached HTML by bytes so RAM stays
-// flat regardless of file sizes (the user cares about memory).
+// Result cache shared by the sync and async paths, so re-rendering the same
+// (code, lang) never costs another worker round-trip. Inputs above
+// HTML_CACHE_MAX_INPUT aren't cached, and total cached HTML is bounded by bytes
+// so memory stays flat.
 const HTML_CACHE_MAX_INPUT = 300_000;
 const HTML_CACHE_MAX_BYTES = 8_000_000;
 // Above this input length, codeToHtml blocks the main thread for hundreds of ms
@@ -130,19 +108,11 @@ function cachePut(
   }
 }
 
-// ─── token cache (the editor's Shiki color layer) ─────────
-//
-// The CodeMirror editor paints from shiki TOKENS rather than HTML, and it needs
-// them SYNCHRONOUSLY while its EditorState is built so the first painted frame
-// is already themed instead of flashing plain text (see
-// code-editor/shiki-highlight.ts). Tokenizing a ~950-line TSX file costs ~25ms,
-// so switching back to a file you just had open must not pay it again — hence
-// this cache.
-//
-// Keyed by the code STRING itself (outer map) so the key costs no extra
-// allocation the way `${theme} ${lang} ${code}` would, then by theme+lang
-// (inner, almost always a single entry). Bounded by the total retained TOKEN
-// count, which is what actually drives the memory.
+// Token cache for the editor's Shiki color layer. CodeMirror needs tokens
+// synchronously while its EditorState is built, so the first frame is already
+// themed (code-editor/shiki-highlight.ts); tokenizing a ~950-line TSX file costs
+// ~25ms, so reopening a file must not pay it again. Keyed by the code string,
+// then theme+lang, and bounded by total retained tokens.
 const TOKEN_CACHE_MAX_INPUT = 200_000;
 const TOKEN_CACHE_MAX_TOKENS = 60_000;
 /** Full main-thread tokenization stays inside ~40ms up to this input size.
@@ -248,8 +218,6 @@ export function nthNewlineIndex(s: string, n: number): number {
   return idx;
 }
 
-// ─── Worker path (primary) ────────────────────────────────
-
 interface WorkerResponse {
   id: number;
   html: string | null;
@@ -304,12 +272,9 @@ function getWorker(): Promise<Worker | null> {
   return workerPromise;
 }
 
-// ─── Main-thread highlighter (also powers the SYNC path) ──
-//
-// Once this is loaded, `highlightSync` can colorize on the spot — no worker
-// round-trip, so views render highlighted on FIRST paint with no white flash.
-// `warmHighlighter()` loads it at idle; until then callers fall back to the
-// async worker path + a plain placeholder.
+// Once loaded, `highlightSync` colorizes on the spot, so views render
+// highlighted on first paint. `warmHighlighter()` loads it at idle; until then
+// callers use the async worker path with a plain placeholder.
 
 let highlighterPromise: Promise<Highlighter> | null = null;
 let mainHighlighter: Highlighter | null = null;
@@ -569,13 +534,9 @@ export async function highlightToTokens(
   return tokenizeNow(hl, code, shikiLang, theme, false, opts?.cacheScope);
 }
 
-// ─── Prewarm ──────────────────────────────────────────────
-//
-// tokenizeSync can only answer once the grammar + theme are in the shared
-// highlighter, so the surfaces that know a file is ABOUT to open (the tree
-// click, the Changes row, workspace intent prefetch) warm the exact pair while
-// the file's own read IPC is still in flight. By the time the editor mounts, its
-// first paint is themed.
+// tokenizeSync can answer only once the grammar and theme are loaded, so
+// surfaces that know a file is about to open (tree click, Changes row, intent
+// prefetch) warm the exact pair while the file's read is in flight.
 
 const prewarmedVariants = new Map<string, Promise<void>>();
 const MAX_PREWARMED_VARIANTS = 256;
@@ -607,13 +568,9 @@ export function prewarmSyntax(
   return pending;
 }
 
-// ─── Theme colors (bg / fg / ANSI palette) ────────────────
-//
-// Some surfaces need MORE than per-token spans: the terminal wants the theme's
-// 16-color ANSI palette (terminal-session-view), and the editor's Shiki layer
-// paints the theme's base foreground for uncolored text (shiki-highlight.ts).
-// Both read from the shared highlighter's RESOLVED theme registration, which
-// shiki exposes via `getTheme(name)` once the theme is loaded.
+// Some surfaces need theme colors beyond token spans: the terminal's 16-color
+// ANSI palette and the editor's base foreground. Both read the shared
+// highlighter's resolved theme via `getTheme(name)` once it is loaded.
 
 /** xterm ANSI slots, in xterm's own theme-key order. */
 export interface AnsiPalette {

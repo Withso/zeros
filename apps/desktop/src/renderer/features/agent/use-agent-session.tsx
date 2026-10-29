@@ -1,20 +1,6 @@
-// ──────────────────────────────────────────────────────────
-// Agent session — type definitions + pure utilities
-// ──────────────────────────────────────────────────────────
-//
-// This module used to export a `useAgentSession()` React hook that
-// owned the whole session lifecycle. The lifecycle is now split into:
-//   - `sessions-store.ts` — Zustand store + pure mutators
-//   - `sessions-provider.tsx` — bridge wiring + side effects
-//   - `sessions-hooks.ts` — `useChatSession(chatId)` / `useAgentSessions()`
-// The hook was kept around for back-compat but never re-wired anywhere.
-// 2026-05-28: confirmed dead by grep (only the definition matched
-// `useAgentSession(`) and removed. This module now ONLY exports:
-//   - type definitions (AgentSessionState / AgentMessage / etc.)
-//   - `applyUpdate()` — pure SessionNotification → message-list folder
-//   - `BLANK_USAGE` — initial token-usage struct
-// All consumers import these via `import type {…}` or directly.
-// ──────────────────────────────────────────────────────────
+// Agent session type definitions and pure utilities: `applyUpdate()` (the pure
+// SessionNotification → message folder) and `BLANK_USAGE`. The lifecycle lives
+// in sessions-store.ts, sessions-provider.tsx and sessions-hooks.ts.
 
 import type {
   AvailableCommand,
@@ -139,13 +125,9 @@ export interface AgentSessionState {
   /** Exact live listener state for this execution. Never persisted across an
    * execution replacement. */
   boundaryPorts: ExecutionBoundaryPortsSnapshot | null;
-  /** The chat's folder, captured
-   *  on first ensureSession + restored on rebuilds. Without this, the
-   *  silent-retry path called ensureSession({ force:true })
-   *  with no cwd, the strict gateway threw "chat has no project folder
-   *  bound", and the user saw the error pill on the third or fourth
-   *  prompt of a working chat. Persisting the cwd on the slot ensures
-   *  every rebuild lands in the same folder the chat started in. */
+  /** The chat's folder, captured on the first ensureSession and restored on
+   *  rebuilds, so a silent-retry rebuild lands in the same folder instead of
+   *  failing with "chat has no project folder bound". */
   cwd: string | null;
   initialize: InitializeResponse | null;
   session: NewSessionResponse | null;
@@ -244,14 +226,12 @@ export interface AgentSessionState {
   /** Original request start while parked. Session-owned so waiting/resuming
    * and retained-view remounts cannot restart the visible timer. */
   backgroundTasksWaitingSince: number | null;
-  /** Settings-drift guard (2026-07-13): JSON of the CHAT-derived env
-   *  (envForChat — model/effort/fast/dirs) this session was actually created
-   *  with (or last live-applied via updateConfig). sendPrompt compares it
-   *  against the chat's CURRENT env before every prompt and force-respawns
-   *  on mismatch, so a model picked while the session was warming — where
-   *  the live setModel/updateConfig calls silently no-op — can never run a
-   *  turn on the stale model (the "pill says Haiku, turn ran Opus" bug).
-   *  Undefined = unknown (legacy slot) → the reconcile skips it. */
+  /** Settings-drift guard: JSON of the chat-derived env (model, effort, fast,
+   *  dirs) this session was created with or last live-applied. sendPrompt compares
+   *  it with the chat's current env before every prompt and respawns on mismatch,
+   *  so a model picked while the session warmed (when live setModel/updateConfig
+   *  no-op) never runs a turn on the stale model. Undefined = unknown legacy slot,
+   *  which reconcile skips. */
   appliedChatEnvKey?: string;
   /** Local revisions avoid comparing renderer and remote-engine wall clocks. */
   modelSelectionRevision?: number;

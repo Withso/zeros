@@ -1,14 +1,6 @@
-// ──────────────────────────────────────────────────────────
-// Composer pills — model, effort, permissions, context
-// ──────────────────────────────────────────────────────────
-//
-// Reusable dropdown/pill primitives for the agent chat composer.
-// Uses the same visual language as the legacy AIChatPanel so the
-// two surfaces feel part of one product, not two.
-//
-// All state is per-chat and dispatched via UPDATE_CHAT_SETTINGS
-// in the workspace store — no local component state.
-// ──────────────────────────────────────────────────────────
+// Composer toolbar pills (model, effort, permissions, context). All state is
+// per-chat and dispatched through UPDATE_CHAT_SETTINGS; no local component
+// state.
 
 import {
   createContext,
@@ -56,57 +48,30 @@ import type { BridgeRegistryAgent } from "../../platform/bridge/messages";
 // custom outside-click again, prefer Popover or add a small typed hook
 // in apps/desktop/src/renderer/shared/lib/ rather than redefining it inline here.
 
-// Shared Tailwind utility string for the composer toolbar pill trigger.
-// Exported (01c Wave 2) as the SINGLE CANONICAL pill chrome — every
-// composer-toolbar pill (Model, Effort, Permissions, Branch, Agent,
-// Workspace) consumes this constant. Density variants (e.g. AgentPill's
-// compact mode) pass an override class through cn(TOOLBAR_PILL, …) so
-// tailwind-merge resolves the px-* delta cleanly. Replaces the dropped
-// `.zeros-chat-toolbar-pill` CSS rule from engine-chat-leftovers.css.
-// Pill labels use text-xs (12px), one step under the text-sm (14px) textarea
-// body so chrome reads one
-// notch quieter than the text you are writing. Stays a stock token
-// (no arbitrary px). Icon sizes
-// at 11 stay (icon-to-label balance reads correctly at 12/11).
-// Composer toolbar pills sit at a 6px radius:
-// rounded-md on the fixed 4/6/8 scale (model pill + context pills are the
-// canonical 6px use case; see styles/zeros-tokens.css radii block).
+// The one canonical composer-toolbar pill chrome. Density variants pass an
+// override through cn(TOOLBAR_PILL, …) so tailwind-merge resolves the px delta.
+// Labels are text-xs, one step under the textarea's text-sm, so chrome reads
+// quieter than the text being written; rounded-md is the 6px radius
+// (styles/zeros-tokens.css).
 export const TOOLBAR_PILL =
   "inline-flex items-center gap-1 rounded-md border-0 bg-transparent px-2 py-1 text-xs font-medium text-fg2 cursor-pointer transition-[background-color,color] duration-150 ease-out hover:bg-bg2-hover hover:text-fg1";
 
 // The model pill is just logo + label, with no caret.
 
-// The "engaged" pill chrome — the Fast pill (on) is its sole consumer.
-// Background = --bg3-hover (the same neutral fill as model-dropdown row
-// hover; replaced --highlighted-secondary-bg when that token was retired,
-// 2026-07-11), text + icon = --yellow-fg (replaced --highlighted-fg when
-// that token was retired, 2026-07-11). Width hugs the content (inline-flex,
-// no fixed width), so the background fits the text, not the other way
-// around.
+// The engaged pill chrome, used only by the Fast pill when on: --bg3-hover fill
+// and --yellow-fg text, hugging its content.
 export const TOOLBAR_PILL_ACTIVE =
   "inline-flex items-center gap-1.5 rounded-md border-0 bg-bg2-hover px-2 py-1 text-xs font-medium text-yellow-fg cursor-pointer transition-[background-color,color] duration-150 ease-out";
 
-// ── ComposerConcealedContext ─────────────────────────────
-//
-// True while the composer hosting these pills is concealed — the permission
-// or question card has taken the composer's slot, so the composer card is
-// display:none (NOT unmounted; the typed draft must survive). Any pill whose
-// popover content portals to <body> must close while concealed: once the
-// trigger loses its layout box, Radix's popper has a zero-rect anchor and
-// re-parks the still-open popover at the viewport origin (top-left corner).
-// Default false — the edit composer (turn-container) renders the same pills
-// without a provider and is never concealed.
+// True while a permission or question card has taken the composer's slot and
+// the composer card is display:none (not unmounted, so the draft survives).
+// Pills whose popovers portal to <body> must close then, or Radix re-parks them
+// at the viewport origin. Default false: the edit composer has no provider.
 export const ComposerConcealedContext = createContext(false);
 
-// ── ModelPill ────────────────────────────────────────────
-//
-// The pill opens the UNIFIED agent+model dropdown
-// (AgentModelMenu — focused universal search, one collapsed selected row, and
-// a grouped hover/focus catalog). A
-// same-agent pick routes through `onChange` exactly as
-// before; a pick under a DIFFERENT agent routes through `onSelectAgentModel`
-// so the host can move the chat to that agent (agent-chat opens a tab bound
-// to it — a chat's agentId is set-once by design).
+// Opens the unified agent+model menu. A same-agent pick calls `onChange`; a
+// pick under another agent calls `onSelectAgentModel`, since a chat's agentId
+// is set once.
 
 export function ModelPill({
   agents,
@@ -235,16 +200,9 @@ export function ModelPill({
   );
 }
 
-// ── EffortPill (effort toggle) ───────────────────────────
-//
-// A minimal, text-only toggle: it renders the current effort label (e.g.
-// "Max") and cycles the model's ladder (wrapping) on click; default High.
-// Text only: no resting background and no battery/charge-fill indicator. Label
-// color is --fg2,
-// matching the composer toolbar's default (inactive) pill; hover gets the same
-// bg-bg3 wash as the other pills (2026-07-10 follow-up). The label still drops
-// in gently from the top on each USER toggle (only on a real click — see
-// labelAnimKey below); motion is slow + smooth (calm deceleration ease).
+// A text-only toggle that cycles the model's effort ladder (wrapping; default
+// High). No resting background; the label drops in only on a user click (see
+// labelAnimKey).
 
 export function EffortPill({
   agentId,
@@ -261,14 +219,10 @@ export function EffortPill({
   value: ChatEffort;
   onChange: (v: ChatEffort) => void;
 }) {
-  // Click-driven label animation. The drop-in must replay ONLY when the user
-  // clicks the toggle — NOT on mount/remount (app refresh, workspace change,
-  // chat-tab switch) and NOT when `value` changes because a different chat's
-  // effort rendered. `userToggledRef` is armed in onClick; the layout effect
-  // (which also runs on mount) only bumps the key when that flag is set, so a
-  // fresh mount or an external value change never animates. Hooks sit above the
-  // early return to satisfy the rules of hooks. useLayoutEffect (not useEffect)
-  // so the keyed remount lands before paint — no flash of the un-animated text.
+  // The drop-in replays only on a user click, never on mount or when another
+  // chat's value renders: onClick arms `userToggledRef`, and the layout effect
+  // bumps the key only when it is set, before paint so nothing flashes. Hooks sit
+  // above the early return.
   const [labelAnimKey, setLabelAnimKey] = useState(0);
   const userToggledRef = useRef(false);
   useLayoutEffect(() => {
@@ -320,13 +274,9 @@ export function EffortPill({
   );
 }
 
-// ── FastPill ─────────────────────────────────────────────
-//
-// Fast mode — lower-latency inference at higher token cost. Claude maps it to
-// the SDK `fastMode` setting, Codex to `service_tier: "fast"`, and Cursor to a
-// live-catalog fast model variant. Off = outline bolt only; On = engaged chrome + filled bolt +
-// no label. The parent only renders this when the model supports it
-// (agentSupportsFast).
+// Fast mode trades token cost for latency (Claude `fastMode`, Codex
+// `service_tier: "fast"`, Cursor a fast model variant). Rendered only when the
+// model supports it (agentSupportsFast).
 
 export function FastPill({
   active,
@@ -350,26 +300,18 @@ export function FastPill({
   );
 }
 
-// ── PermissionToggle ─────────────────────────────────────
-//
-// The composer's permission-mode toggle — replaces both the old Plan pill and
-// the "+" → Permissions submenu. Icon-only at rest: no
-// resting background, icon in --fg2, hover gets the bg-bg3 wash (mirrors the
-// stripped EffortPill). Clicking the ICON cycles the agent's REAL native modes
-// in menu order (wrapping); the picked mode's name flashes to its right for
-// 3s, moving above only when the toolbar has no room;
-// hover names the current mode (tooltip = just the name, no prefix). Each
-// family's modes get their own icon:
+// Icon-only permission-mode toggle. Clicking cycles the agent's real native
+// modes in menu order (wrapping), and the picked name flashes beside it for 3s;
+// hover names the current mode. Each family's modes get their own icon:
 //
 //   Claude: Manual=shield-question-mark · Accept Edits=shield-ellipsis ·
 //           Plan=map · Auto=shield · Bypass=shield-half
 //   Codex:  Ask for approval=map · Approve for me=shield · Full access=shield-half
 //   Cursor: Ask=map · Auto=shield · Full access=shield-half
 //
-// The "map" modes (agent proposes instead of acting) also draw the dashed
-// composer frame — see permissionModeShowsFrame + PlanModeFrame. The icon drops
-// in from the top on each USER toggle, exactly like the effort label (same
-// keyframe, same click-armed key bump — see EffortPill's labelAnimKey notes).
+// The "map" modes (the agent proposes instead of acting) also draw the dashed
+// composer frame (permissionModeShowsFrame, PlanModeFrame). The icon drop-in is
+// click-armed like EffortPill's labelAnimKey.
 
 /** family → native mode id → toggle icon (see the box comment above). */
 const PERMISSION_MODE_ICONS: Record<string, Record<string, LucideIcon>> = {
@@ -415,12 +357,9 @@ export function PermissionToggle({
    *  session (session/set_mode) and persists chat.lastModeId. */
   onSelectMode: (modeId: string) => void;
 }) {
-  // Click-driven animation — same contract as EffortPill's labelAnimKey: armed
-  // only by a real click, bumped when the mode actually changes, so a
-  // mount/tab-switch or an external mode change never replays the drop-in. The
-  // SAME key drives the icon and the transient name label, so rapid clicks
-  // remount + replay both in lockstep. Each click also (re)arms the 3s hide
-  // timer on the label.
+  // Same click-armed contract as EffortPill's labelAnimKey. One key drives the
+  // icon and the transient name label, so rapid clicks replay both in lockstep;
+  // each click re-arms the label's 3s hide timer.
   const [animKey, setAnimKey] = useState(0);
   const [labelVisible, setLabelVisible] = useState(false);
   const [tooltipOpen, setTooltipOpen] = useState(false);
@@ -601,21 +540,12 @@ export function PermissionToggle({
   );
 }
 
-// ── PlanModeFrame (dashed "guarded mode" border) ─────────
-//
-// In the guarded permission modes (Claude Plan, Codex Ask for approval, Cursor
-// Ask — see permissionModeShowsFrame) the composer
-// card gets a frame of evenly-spaced DASHES in --border4. Native
-// `border-style: dashed` packs
-// segments too tightly with no length/spacing control, so we overlay an
-// absolutely-positioned SVG <rect> with round caps + an explicit dash array:
-// `3 5` paints a 3-long rounded dash with a 5 gap; the near-zero `0.01` dot is
-// too small. The svg is inset 1px so we avoid
-// calc() in SVG geometry (Chromium-flaky) and the rect fills it at 100%.
-// rx/ry follow the nesting rule off that 1px inset: the card's 18px
-// COMPOSER_SURFACE_RADIUS − 1px = 17.
-// Render INSIDE the composer card (position: relative); pair with a
-// transparent base border so only the dashes show.
+// In the guarded modes (permissionModeShowsFrame) the composer card gets an
+// SVG frame of evenly spaced dashes in --border4: native `border-style: dashed`
+// has no length or spacing control. The `3 5` array paints 3-long round-capped
+// dashes with 5 gaps. The svg is inset 1px to avoid calc() in SVG geometry
+// (Chromium-flaky), so rx/ry are COMPOSER_SURFACE_RADIUS − 1 = 17. Render
+// inside the card (position: relative) with a transparent base border.
 export function PlanModeFrame() {
   // An <svg> is a REPLACED element with an intrinsic 300×150 size — absolute
   // insets alone do NOT stretch it (it'd paint a 300×150 dotted box in the
