@@ -54,12 +54,6 @@ export function parseNumstat(raw: string): Array<{ path: string; additions: numb
   return files;
 }
 
-// Shared `git status --porcelain=v1 -z` parser.
-//
-// Extracted into its own module (no other engine imports) so every
-// porcelain consumer — diff.ts `status`, ops.ts `listConflictedPaths`,
-// worktree.ts `detectConflictPaths` — shares one byte-exact parse
-// without import cycles.
 
 /** One parsed `git status --porcelain=v1 -z` record.
  *
@@ -76,32 +70,18 @@ export interface PorcelainEntry {
 /** Conflict (unmerged) status codes from porcelain v1. */
 const CONFLICT_CODES = new Set(["DD", "AU", "UD", "UA", "DU", "AA", "UU"]);
 
-/** True when a porcelain entry is an unmerged/conflicted file. */
 export function isConflictEntry(e: PorcelainEntry): boolean {
   return CONFLICT_CODES.has(`${e.x}${e.y}`) || e.x === "U" || e.y === "U";
 }
 
-/** Parse `git status --porcelain=v1 -z` output into structured entries.
- *
- *  **Why `-z`:** the human porcelain format C-quotes any
- *  path containing a space, quote, or non-ASCII byte (`"weird\"name"`).
- *  A line-based parser surfaces that quoted+escaped literal, which then
- *  fails to match the real file when fed back to `git add`/`git diff`
- *  — so the user cannot stage or diff any file with a space. With `-z`,
- *  records are NUL-separated and **paths are byte-exact** (no quoting).
- *
- *  Record shape: `XY <SP> PATH NUL`. For rename/copy entries (X ∈ {R, C})
- *  git emits a second NUL field with the source path, in
- *  destination-then-source order, so we consume the next field as
- *  `oldPath`. The trailing NUL yields an empty final field, skipped. */
+/** NUL-separated porcelain avoids C-style path quoting. Rename/copy records
+ * carry destination then source, so consume both fields without trimming paths. */
 export function parsePorcelainZ(out: string): PorcelainEntry[] {
   const fields = out.split("\0");
   const entries: PorcelainEntry[] = [];
   let i = 0;
   while (i < fields.length) {
     const field = fields[i];
-    // Minimal valid record is "XY " + ≥1 path char = 4 bytes. Empties
-    // (incl. the trailing NUL's field) are skipped.
     if (!field || field.length < 4) {
       i++;
       continue;
@@ -122,9 +102,6 @@ export function parsePorcelainZ(out: string): PorcelainEntry[] {
 
 const HUNK_HEADER_RE = /^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/;
 
-/** Parse a unified diff into structured hunks. Each `@@ -A,B +C,D @@`
- *  header opens a new hunk; the body up to the next header (or the
- *  next "diff --git" or EOF) is the hunk's lines. */
 export function parseUnifiedDiff(raw: string): Hunk[] {
   const out: Hunk[] = [];
   const lines = raw.split("\n");
@@ -145,12 +122,8 @@ export function parseUnifiedDiff(raw: string): Hunk[] {
   for (const line of lines) {
     if (line.startsWith("diff --git")) {
       flush();
-      // Format: `diff --git a/<path> b/<path>` — capture BOTH sides (b is the
-      // canonical path, a is the pre-image / rename source). If the header
-      // can't be parsed (e.g. a path containing " b/", or quoting), set both to
-      // "" so the hunk fails CLOSED in the remote secret filter rather than
-      // inheriting a stale path. (We also run diff with core.quotePath=false so
-      // non-ASCII paths parse cleanly.)
+      // Clear both paths on an unrecognized header so remote secret filtering cannot
+      // inherit the previous file identity; b is the destination, a the pre-image.
       const m = line.match(/^diff --git a\/(.+) b\/(.+)$/);
       currentOldFilePath = m ? m[1] : "";
       currentFilePath = m ? m[2] : "";

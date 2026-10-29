@@ -1,26 +1,8 @@
 // Ported from apps/desktop/src/engine/agents/adapters/cursor-sdk/translator.ts
 // Source commit: 8f82a98221dba09560a715b7c2f45d0ae54a98c5. Preserve native transcript semantics; Local imports are test-only.
 import { boundedStructuredOutput } from "../shared/tool-content";
-// ──────────────────────────────────────────────────────────
-// @cursor/sdk SDKMessage → SessionNotification translator
-// ──────────────────────────────────────────────────────────
-//
-// The SDK streams typed `SDKMessage` objects from `run.stream()`; this maps
-// them onto Zeros' canonical SessionUpdate vocabulary the engine owns, so
-// the renderer is unchanged.
-//
-// The SDK's tool shape (`{ call_id, name, status, args, result }`) is
-// cleaner than the CLI's (`{ tool_call: { <name>: {...} } }`), so the
-// tool-kind / merge-key / todo / subagent helpers port directly. Tool
-// NAMES are assumed to match the CLI's `*ToolCall` vocabulary; unknown
-// names degrade to a generic "other" card. The installed tool-type inventory
-// test requires a reviewed disposition for every SDK tool, including generic
-// computerUse events.
-//
-// Text/thought chunks share an id within one uninterrupted segment. A new
-// tool or a change of role starts another segment so final replies retain
-// their position after working narration in the shared exact-id reducer.
-// ──────────────────────────────────────────────────────────
+// Text/thought IDs span one uninterrupted segment; tools or role changes start
+// another so the exact-ID reducer preserves order. Unknown tool names stay visible.
 
 import { createHash, randomUUID } from "node:crypto";
 import { CursorTextReconciliation } from "./text-reconciliation";
@@ -218,23 +200,16 @@ export class CursorSdkTranslator {
   get sawTerminal(): boolean {
     return this.hasSeenTerminal;
   }
-  /** True once an in-band `status:'ERROR'|'EXPIRED'` message has been seen.
-   *  The adapter throws a classified failure when this is set (unless the
-   *  user cancelled), so a failed turn never reports as a clean end_turn. */
+  /** In-band ERROR/EXPIRED must become a classified failure unless the user cancelled. */
   get sawError(): boolean {
     return this.hasSeenError;
   }
-  /** Whether this turn emitted any visible assistant text. Cursor's stream can
-   *  occasionally finish without an assistant event even though wait().result
-   *  contains the complete final answer; the adapter uses this to apply that
-   *  result only as a non-duplicating fallback. */
+  /** The stream may omit text that wait().result contains; use that final answer
+   * only as a non-duplicating fallback. */
   get sawAssistantText(): boolean {
     return this.hasSeenAssistantText;
   }
-  /** Error detail from the in-band ERROR/EXPIRED status message
-   *  (SDKStatusMessage.message), when the CLI provided one — so the adapter
-   *  surfaces the real reason instead of a generic "run error", and
-   *  classifyCursorSdkError can route auth/rate-limit/expired correctly. */
+  /** Preserve native detail for auth, rate-limit and expiry classification. */
   get errorDetail(): string | null {
     return this.errorMessage;
   }
@@ -687,10 +662,8 @@ export class CursorSdkTranslator {
     this.toolRecords.set(callId, { name, status, rawOutput: presentation.rawOutput, snapshot });
     this.opened.add(callId);
 
-    // A task result can be a completed child or a background launch receipt.
-    // Native deltas carry live output; older transports use owned checkpoints.
-    // Record the result now and defer final file capture until the run ends,
-    // since reading at tool completion can race Cursor's transcript write.
+    // Task results may be background-launch receipts; final transcript capture
+    // waits for run end so it cannot race the provider's write.
     const isSubagent = mapToolKind(name) === "task";
 
     const existing = this.toolCallIds.get(callId);
@@ -735,11 +708,8 @@ export class CursorSdkTranslator {
     this.subagentAgentIds.delete(callId);
   }
 
-  /** Record a finished subagent's result, agentId, and transcriptPath on its
-   *  live entry (creating one if the task had no running leg), so
-   *  flushSubagents() can emit the tail tool calls + narration + report. The
-   *  Cursor task success result carries `value.{agentId,transcriptPath,
-   *  finalMessage,toolCallCount}` — the most reliable source for all three. */
+  /** The task result's value carries authoritative child identity and transcript
+   * path, including tasks whose running leg was never observed. */
   private markSubagentDone(
     toolCallId: string,
     callId: string,
@@ -979,11 +949,9 @@ export class CursorSdkTranslator {
     return toolOrdinal;
   }
 
-  /** Resolve a subagent's internals + final report. Prefers the on-disk
-   *  transcript (the reliable source — Cursor leaves the result's
-   *  conversationSteps empty in local mode): first by the exact `transcriptPath`
-   *  the result handed us, or by agentId when no path was supplied. Uncaptured
-   *  final transcripts can fall back to the result's conversationSteps. */
+  /** Local SDK results can omit conversationSteps; prefer the exact transcript
+   * path, then native agentId when no path exists. Only uncaptured final results
+   * may fall back to conversationSteps. */
   private async resolveSubagentFor(entry: {
     agentId?: string;
     transcriptPath?: string;
@@ -1073,7 +1041,6 @@ export class CursorSdkTranslator {
     }
   }
 
-  // ── helpers ─────────────────────────────────────────────
 
   private messageIdFor(role: "text" | "thought"): string {
     if (this.activeText?.role !== role) {
@@ -1122,7 +1089,6 @@ export class CursorSdkTranslator {
   }
 }
 
-// ── shared helpers (ported from cursor/translator.ts) ─────
 
 function isObj(x: unknown): x is Record<string, unknown> {
   return !!x && typeof x === "object" && !Array.isArray(x);
@@ -1353,11 +1319,7 @@ function extractResultText(result: unknown): string {
   return "";
 }
 
-/** The Cursor task success result's `value` payload, tolerating the two
- *  serialized shapes seen across the SDK/host boundary:
- *    { status:"success", value:{ agentId, finalMessage, transcriptPath, … } }
- *    { result:{ case:"success", value:{ … } } }   (protobuf oneof, un-flattened)
- *  Returns null when there's no recognizable value object. */
+/** Accept both SDK value and protobuf result.value envelopes across the host boundary. */
 function readTaskResultValue(result: unknown): Record<string, unknown> | null {
   if (!isObj(result)) return null;
   if (isObj(result.value)) return result.value;
@@ -1475,10 +1437,7 @@ function readStepText(message: unknown): string {
   return "";
 }
 
-/** Map one Cursor subagent `toolCall` conversation step (`{ type, args,
- *  result }`, discriminated on the inner tool `type`) onto a Zeros tool card.
- *  Field names follow @cursor/sdk's ConversationStep tool variants. Unknown
- *  tool types degrade to a generic `other` row rather than being dropped. */
+/** Preserve unknown child tools as visible generic rows. */
 function mapConversationToolCall(message: unknown): {
   title: string;
   kind: ToolKind;
