@@ -40,6 +40,7 @@ const PROTECTED_COMMENT = new RegExp([
   String.raw`\bCopyright\b|SPDX-License-Identifier|\bLicensed under\b`,
   String.raw`sourceMappingURL`,
   String.raw`lock_purpose`,
+  String.raw`check:ui\s+ignore|gitleaks:allow|check-secrets:allow|\btslint:`,
 ].join("|"));
 // JavaScript files can carry checked JSDoc types.
 const JS_TYPE_COMMENT = /@(?:type|typedef|template|satisfies|import|callback|enum)\b|@(?:param|returns?|property|prop)\s*\{/;

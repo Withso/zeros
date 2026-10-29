@@ -43,7 +43,10 @@ Never edit or remove these as cleanup:
 - **Directives.** `eslint-disable*`, `@ts-expect-error`, `@ts-ignore`,
   `@ts-nocheck`, `@ts-check`, `prettier-ignore`, `/// <reference`,
   `/* global */`, `@vitest-environment`, `@vite-ignore`, `#__PURE__`, coverage
-  ignores, `@jsx*`, and JSDoc types in JavaScript files.
+  ignores, `@jsx*`, JSDoc types in JavaScript files, and the repository's own
+  scanner markers: `check:ui ignore-line` and `ignore-next` (never add or
+  remove a line between `ignore-next` and its target), `gitleaks:allow` and
+  `check-secrets:allow-*`.
 - **Generated and vendored trees.** `codex/generated/**`,
   `engine/design/generated/**` and `third_party/**`.
 - **Legal notices.** License, copyright, SPDX and NOTICE headers (§6).

@@ -44,8 +44,14 @@ describe("comments-only comparison", () => {
     ["// @ts-expect-error the untyped module\n", "x.ts"],
     ["/* Copyright 2026 Example */\n", "x.ts"],
     ["/** @type {number} */\n", "x.mjs"],
+    ["// check:ui ignore-next (floating control over the scrim)\n", "x.tsx"],
   ])("refuses removing the protected comment %j", (comment, path) => {
     expect(codes(compareSource(path, `${comment}const x = 1;\n`, "const x = 1;\n"))).toEqual(["zstack_comments_protected_comment"]);
+  });
+
+  it("refuses removing a same-line scanner allowance", () => {
+    expect(codes(compareSource("x.ts", "const label = \"Conductor\"; // check-secrets:allow-identity\n", "const label = \"Conductor\";\n")))
+      .toEqual(["zstack_comments_protected_comment"]);
   });
 
   it("allows removing JSDoc type tags from TypeScript", () => {
