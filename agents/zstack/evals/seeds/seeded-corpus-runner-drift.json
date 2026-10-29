@@ -1,0 +1,5 @@
+{
+  "file": "scripts/zstack/eval-corpus.mjs",
+  "before": "const sourceSignature = data => hash(JSON.stringify([data.inputs, data.toolSha256]));",
+  "after": "const sourceSignature = data => hash(JSON.stringify(data.inputs));"
+}

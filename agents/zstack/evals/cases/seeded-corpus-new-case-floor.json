@@ -1,0 +1,9 @@
+{
+  "id": "seeded-corpus-new-case-floor",
+  "kind": "seeded",
+  "area": "zstack",
+  "fixedBy": "pr:780",
+  "symptom": "Adding an unverified scenario lowers the overall catch rate and fails unchanged baseline coverage without identifying a regression.",
+  "rule": "Compare the same baseline case set, preserving its unverified denominator; report additions and the overall rate separately. See agents/zstack/evals/README.md.",
+  "check": "pnpm test:git scripts/__tests__/zstack-corpus.test.ts -t 'reports a new unverified scenario'"
+}
