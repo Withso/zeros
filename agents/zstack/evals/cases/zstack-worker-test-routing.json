@@ -1,0 +1,9 @@
+{
+  "id": "zstack-worker-test-routing",
+  "kind": "replay",
+  "area": "zstack",
+  "fixedBy": "pr:785",
+  "symptom": "The verifier sent cloud-worker suites to root Vitest, whose include list excludes the package, so worker-only verification produced no passing assertions and mixed selections did not execute a separate worker recipe.",
+  "rule": "tools.md requires adjacent root, control-plane and cloud-worker suites to run through their own package configurations, including mixed selections.",
+  "check": "pnpm test:git scripts/__tests__/zstack-check-plan.test.ts -t 'cloud-worker'"
+}
