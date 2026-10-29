@@ -3937,7 +3937,7 @@ that own rendering resources must extend the workload before increasing its
 limits. See the [zstack performance playbook](../agents/zstack/playbooks/performance.md)
 for commands, budgets, build/measurement limits and the required evidence.
 
-The [2026-10-27 measurement record](../agents/zstack/changes/design-performance-measurements.md)
+The [2026-10-27 measurement record](../agents/zstack/records/design-performance-measurements.md)
 preserves the last complete 100-cycle result: 2.200435 GiB app/engine peak,
 638.220169 MiB GPU peak, 0.294250% retained growth and 0.133664 percentage
 points worst incremental idle CPU. These met their budgets for that source

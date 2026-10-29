@@ -3,6 +3,25 @@
 Each entry records the lesson behind the change as symptom → cause → rule →
 where it is encoded.
 
+## 0.2.0
+
+- **Lessons were written but never read.** 427 fragments (about 165k tokens)
+  waited for a fold that never came, and `bug-fix.md` grew from 17 to 285 lines
+  of incident rules, many for retired v1 subsystems. Every fragment is folded:
+  eighteen principles with their eval cases (`principles.md`), playbooks and
+  `zstack-review` cut to procedure plus principle references, and environment
+  facts moved from `zstack-verify` into `gotchas.md`, which is read when a check
+  fails. The folded fragments are deleted; `git show 7b6eb9e6:agents/zstack/changes/<id>.md`
+  still reads them. The Design measurement record moved to `records/`.
+- **Nothing stopped the pile from returning.** `scripts/__tests__/zstack-pack.test.ts`
+  caps waiting fragments at 40 and their length, budgets every skill, playbook
+  and reference, and checks that each case a principle cites exists. The fragment
+  proposal is adopted and its file removed (`zstack-learn`, `changes/README.md`).
+- **Two masters shared one workspace.** The co-master mode splits file
+  ownership and worktrees, has one master arm every merge after reviewing the
+  other's diff, and changes shared contracts only through explicit deltas
+  (`zstack`).
+
 ## 0.1.7
 
 - Folds cloud lifecycle lessons on bounded SQL claims, timestamp precision,
