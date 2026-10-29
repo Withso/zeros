@@ -22,6 +22,8 @@ const rt = vi.hoisted(() => ({
   startError: null as Error | null,
   /** Merged `config/read` payload reported by each booted runtime, by boot order. */
   configByRuntime: [] as Array<Record<string, unknown> | undefined>,
+  /** `config/read { includeLayers: true }` layers, by boot order. */
+  layersByRuntime: [] as Array<unknown[] | undefined>,
 }));
 
 const browserHost = vi.hoisted(() => ({
@@ -60,7 +62,12 @@ vi.mock("../app-server", () => ({
     rt.handlers[runtime] = handlers;
     const requestTyped = vi.fn(async (method: string, params: unknown) => {
       rt.requests.push({ runtime, method, params });
-      if (method === "config/read") return { config: rt.configByRuntime[runtime] ?? {} };
+      if (method === "config/read")
+        return {
+          config: rt.configByRuntime[runtime] ?? {},
+          ...((params as { includeLayers?: boolean })?.includeLayers && rt.layersByRuntime[runtime]
+            ? { layers: rt.layersByRuntime[runtime] } : {}),
+        };
       if (method === "model/list" || method === "skills/list") {
         return { data: [] };
       }
@@ -229,6 +236,7 @@ describe("Codex opaque provider bindings", () => {
     rt.bootError = null;
     rt.startError = null;
     rt.configByRuntime = [];
+    rt.layersByRuntime = [];
     browserHost.register.mockClear();
     browserHost.settle.mockClear();
     browserRuntime.resolve.mockReset();
@@ -238,6 +246,7 @@ describe("Codex opaque provider bindings", () => {
       pluginId: "browser@openai-bundled",
       pluginRoot:
         "/tmp/.codex/plugins/cache/openai-bundled/browser/26.803.61601",
+      codexHome: "/tmp/.codex",
       browserSkill: {
         name: "control-in-app-browser",
         path: "/tmp/.codex/plugins/cache/openai-bundled/browser/26.803.61601/skills/control-in-app-browser/SKILL.md",
@@ -246,6 +255,7 @@ describe("Codex opaque provider bindings", () => {
         name: "node_repl",
         transport: "stdio",
         command: "/tmp/node_repl",
+        replaceNativeLists: true,
       },
     } satisfies CodexNativeBrowserRuntime;
     browserRuntime.resolve.mockResolvedValue(runtime);
@@ -605,6 +615,62 @@ describe("Codex opaque provider bindings", () => {
       await adapter.disposeSession(started.session.sessionId);
     },
   );
+
+  // Every user's ChatGPT Desktop writes the same shape under their own
+  // CODEX_HOME. Only that user layer may keep the built-in browser.
+  const chatgptInert = {
+    SKY_CUA_SERVICE_PATH: "/tmp/.codex/computer-use/Codex Computer Use.app",
+    NODE_REPL_INSTRUCTIONS_USE_CASE_CHROME: "",
+    NODE_REPL_INSTRUCTIONS_USE_CASE_COMPUTER_USE: "",
+  };
+  const zerosLayer = { name: { type: "sessionFlags" }, version: "0", config: { mcp_servers: { node_repl: { command: "/tmp/node_repl", args: [], env_vars: [] } } } };
+  const userLayer = { name: { type: "user", file: "/tmp/.codex/config.toml" }, version: "1", config: { mcp_servers: { node_repl: { ...chatgptNodeRepl, env: { ...chatgptNodeRepl.env, ...chatgptInert } } } } };
+  const keptEffective = { mcp_servers: { node_repl: { command: "/tmp/node_repl", args: [], environment_id: "local", enabled: true, env: chatgptInert } } };
+
+  it("keeps Codex's built-in browser with ChatGPT's own node_repl settings", async () => {
+    rt.configByRuntime = [keptEffective];
+    rt.layersByRuntime = [[zerosLayer, userLayer]];
+    const { adapter, onAgentStderr, onCapabilityNotice } = makeAdapter();
+    const started = await adapter.newSession({
+      executionId: "execution-browser-user-declaration",
+      cwd: "/tmp/proj",
+      mcpServers: [zerosBrowser],
+      browserUse: { kind: "codex-app-server", browserSessionId: "browser_user_declaration" },
+    });
+
+    expect(rt.bootOptions).toHaveLength(1);
+    expect(bootedServerNames()).toEqual(["node_repl"]);
+    expect(rt.startParams[0]).toMatchObject({ config: { "plugins.browser@openai-bundled.enabled": true } });
+    expect((rt.startParams[0]!.config as { mcp_servers?: Record<string, unknown> }).mcp_servers ?? {}).not.toHaveProperty("node_repl");
+    expect(onCapabilityNotice).not.toHaveBeenCalled();
+    expect(browserHost.register).toHaveBeenCalledWith(expect.objectContaining({ browserSessionId: "browser_user_declaration" }));
+    expect(onAgentStderr).toHaveBeenCalledWith("codex", expect.stringMatching(/kept node_repl settings from the Codex user configuration/));
+    await adapter.disposeSession(started.session.sessionId);
+  });
+
+  it("drops the built-in browser when a repository's configuration declares node_repl", async () => {
+    const projectLayer = { name: { type: "project", dotCodexFolder: "/tmp/proj/.codex" }, version: "2", config: { mcp_servers: { node_repl: { env: { NODE_OPTIONS: "--require=./x.js" } } } } };
+    rt.configByRuntime = [
+      { mcp_servers: { node_repl: { ...keptEffective.mcp_servers.node_repl, env: { ...chatgptInert, NODE_OPTIONS: "--require=./x.js" } } } },
+      { mcp_servers: { node_repl: chatgptNodeRepl } },
+    ];
+    rt.layersByRuntime = [[zerosLayer, projectLayer, userLayer]];
+    const { adapter, onCapabilityNotice } = makeAdapter();
+    const started = await adapter.newSession({
+      executionId: "execution-browser-project-declaration",
+      cwd: "/tmp/proj",
+      mcpServers: [zerosBrowser],
+      browserUse: { kind: "codex-app-server", browserSessionId: "browser_project_declaration" },
+    });
+
+    expect(rt.bootOptions).toHaveLength(2);
+    expect(rt.startParams[0]).toMatchObject({ config: { "plugins.browser@openai-bundled.enabled": false } });
+    expect(onCapabilityNotice).toHaveBeenCalledExactlyOnceWith("codex", {
+      sessionId: "execution-browser-project-declaration",
+      notice: { code: "codex-browser-config-conflict", fallback: "zeros-browser" },
+    });
+    await adapter.disposeSession(started.session.sessionId);
+  });
 
   it("ignores a late exit from the retired runtime after the fallback starts", async () => {
     rt.configByRuntime = [

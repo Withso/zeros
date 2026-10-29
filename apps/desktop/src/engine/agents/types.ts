@@ -246,6 +246,9 @@ export type McpServerRegistration =
       listenUrl?: string;
       /** Provider startup allowance for heavyweight local MCP runtimes. */
       startupTimeoutSec?: number;
+      /** Codex merges a same-name native declaration into this one. True makes
+       * `args` and pass-through `env_vars` exactly this registration's. */
+      replaceNativeLists?: true;
     }
   | McpRemoteServerRegistration<"http">
   | McpRemoteServerRegistration<"sse">;

@@ -58,10 +58,12 @@ export function buildMcpServerOverrides(
       // original argv unchanged. Credential values never enter command arguments.
       const commandArgs = refs.length ? ["-c", `${refs.map(([name, reference]) => `${name}="$${reference}"; export ${name}; unset ${reference};`).join(" ")} exec "$@"`, "zeros-mcp", s.command, ...(s.args ?? [])] : s.args;
       args.push("-c", `${base}.command="${escapeTomlString(command)}"`);
-      if (commandArgs && commandArgs.length > 0) {
-        args.push("-c", `${base}.args=${tomlStringArray(commandArgs)}`);
+      // Arrays replace rather than merge, so an explicit list also removes a
+      // native declaration's arguments and inherited variables.
+      if ((commandArgs && commandArgs.length > 0) || s.replaceNativeLists) {
+        args.push("-c", `${base}.args=${tomlStringArray(commandArgs ?? [])}`);
       }
-      if (refs.length) args.push("-c", `${base}.env_vars=${tomlStringArray(refs.map(([, reference]) => reference))}`);
+      if (refs.length || s.replaceNativeLists) args.push("-c", `${base}.env_vars=${tomlStringArray(refs.map(([, reference]) => reference))}`);
       if (s.env && Object.keys(s.env).length > 0) {
         args.push("-c", `${base}.env=${tomlInlineTable(s.env)}`);
       }

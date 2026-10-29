@@ -112,6 +112,7 @@ import { isDevRuntime } from "../../../runtime";
 import {
   codexPromptRequestsBrowserSkill,
   codexBrowserThreadConfig,
+  codexNativeBrowserDeclarationAllowance,
   codexNativeBrowserUnavailableReason,
   injectCodexBrowserSkillInput,
   mergeCodexNativeBrowserMcp,
@@ -2510,6 +2511,7 @@ export class CodexAppServerAdapter implements AgentAdapter {
     // the same server changes its effective definition (see below).
     let nativeBrowserRegistration: {
       serverName: string;
+      codexHome: string;
       fallbackServers: McpServerRegistration[];
       zerosBrowserFallback: boolean;
       withoutNative: string;
@@ -2579,6 +2581,7 @@ export class CodexAppServerAdapter implements AgentAdapter {
         if (nativeBrowser) {
           nativeBrowserRegistration = {
             serverName: nativeBrowser.mcpServer.name,
+            codexHome: nativeBrowser.codexHome,
             fallbackServers: mcpServers,
             zerosBrowserFallback,
             withoutNative,
@@ -2682,7 +2685,18 @@ export class CodexAppServerAdapter implements AgentAdapter {
           requireConfig: true,
           registeredServers: mcpServers.map(server => server.transport === "stdio" && server.cwd
             ? { ...server, cwd: mcpWorkingDirectory(server.cwd, opts.cwd) } : server),
+          // ChatGPT Desktop's own node_repl in the user's config.toml keeps
+          // the built-in browser when it adds only inert keys.
+          ...(nativeBrowserRegistration
+            ? { nativeDeclarationAllowance: codexNativeBrowserDeclarationAllowance({ codexHome: nativeBrowserRegistration.codexHome }) }
+            : {}),
         });
+        if (nativeBrowserRegistration && nativeMcp.userLayerServerNames?.includes(nativeBrowserRegistration.serverName)) {
+          this.ctx.emit.onAgentStderr(
+            this.agentId,
+            `[codex-app-server] Official Browser runtime kept ${nativeBrowserRegistration.serverName} settings from the Codex user configuration that do not change it.`,
+          );
+        }
         accountAppBridgeEnabled =
           cloudExtensions &&
           !nativeMcp.shadowedAccountServerNames?.includes("codex_apps") &&

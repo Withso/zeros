@@ -32,7 +32,7 @@ export function notifyAgentCapabilityNotice(
       break;
     case "codex-browser-config-conflict":
       fix =
-        "~/.codex/config.toml has its own node_repl setup, which Zeros won't combine with its verified browser.";
+        "A Codex configuration file changes node_repl in a way Zeros can't verify, such as a project's .codex/config.toml.";
       break;
     case "codex-browser-unavailable":
       if (!usingZerosBrowser) return false;

@@ -12,6 +12,7 @@ import { delimiter, isAbsolute, join, relative, resolve } from "node:path";
 
 import type { McpServerRegistration } from "../../types";
 import type { CodexUserInput } from "./app-server";
+import type { NativeDeclarationAllowance } from "./native-mcp";
 
 /** The one plugin whose enablement `codexBrowserThreadConfig` owns. Exported
  * so the native-MCP scoping can leave that key alone instead of contending
@@ -43,6 +44,8 @@ export function codexNativeBrowserUnavailableReason(options: {
 export interface CodexNativeBrowserRuntime {
   pluginId: typeof BROWSER_PLUGIN_ID;
   pluginRoot: string;
+  /** The CODEX_HOME given to node_repl. */
+  codexHome: string;
   browserSkill: CodexNativeBrowserSkill;
   mcpServer: Extract<McpServerRegistration, { transport: "stdio" }>;
 }
@@ -152,6 +155,7 @@ export async function resolveCodexNativeBrowserRuntime(
     return {
       pluginId: BROWSER_PLUGIN_ID,
       pluginRoot: plugin.root,
+      codexHome,
       browserSkill: {
         name: "control-in-app-browser",
         path: plugin.browserSkillPath,
@@ -161,6 +165,9 @@ export async function resolveCodexNativeBrowserRuntime(
         transport: "stdio",
         command: runtime.nodeReplPath,
         args: [],
+        // ChatGPT Desktop can declare node_repl itself; its arguments and
+        // inherited variables never reach the verified runtime.
+        replaceNativeLists: true,
         startupTimeoutSec: 120,
         env: await nodeReplBrowserEnv({
           codexCliPath: trustedCodexCli,
@@ -219,6 +226,44 @@ async function nodeReplBrowserEnv(options: {
     NODE_REPL_TRUSTED_SERVICES: JSON.stringify({
       browser: plugin.trust.servicePath,
     }),
+  };
+}
+
+const NODE_REPL_INSTRUCTIONS = /^NODE_REPL_INSTRUCTIONS_USE_CASE_[A-Z0-9_]{1,64}$/;
+
+/** What ChatGPT/Codex Desktop's own `[mcp_servers.node_repl]` in the user's
+ * `$CODEX_HOME/config.toml` may add to Zeros' verified runtime. Zeros' values
+ * win every key it sets and replace the argument/variable lists, so only these
+ * remain, and each is inert under Zeros' browser-only trust:
+ *   • use-case instruction text for use cases Zeros does not enable;
+ *   • a bounded per-tool timeout;
+ *   • SKY_CUA_SERVICE_PATH equal to the default the CUA client derives from
+ *     CODEX_HOME anyway ("<CODEX_HOME>/computer-use/Codex Computer Use.app"),
+ *     read only when a computer-use call starts that helper.
+ * Anything else, including trust lists, Node options or another service path,
+ * keeps the conflict. Holds for every user's own CODEX_HOME. */
+export function codexNativeBrowserDeclarationAllowance(options: {
+  codexHome?: string;
+}): NativeDeclarationAllowance {
+  const computerUse = options.codexHome
+    ? join(options.codexHome, "computer-use", "Codex Computer Use.app")
+    : undefined;
+  return {
+    serverName: "node_repl",
+    acceptsUserKey(path, value) {
+      if (path.length === 1)
+        return (
+          path[0] === "tool_timeout_sec" &&
+          typeof value === "number" &&
+          Number.isInteger(value) &&
+          value > 0 &&
+          value <= 3_600
+        );
+      if (path.length !== 2 || path[0] !== "env" || typeof value !== "string")
+        return false;
+      if (NODE_REPL_INSTRUCTIONS.test(path[1])) return value.length <= 32_768;
+      return path[1] === "SKY_CUA_SERVICE_PATH" && computerUse !== undefined && value === computerUse;
+    },
   };
 }
 
