@@ -1,40 +1,8 @@
-// ──────────────────────────────────────────────────────────
-// replay — synthesize a "previous_conversation" preamble
-// ──────────────────────────────────────────────────────────
-//
-// When a provider's silent fresh-start fallback fires (for example, "no
-// rollout found" or "session not found"), the agent gets a new sessionId but
-// has no in-memory context from the prior chat.
-// `synthesizeReplayPrompt` produces a compact context preamble that
-// gets prepended to the user's pending prompt so the agent can
-// continue the conversation without amnesia.
-//
-// What's included:
-//   - User text messages (their prompts)
-//   - Assistant final text replies (skipping tool calls + thinking —
-//     they're verbose and don't carry portable context. Replaying tool
-//     outputs across a session boundary creates more confusion than
-//     value: the agent didn't actually run those tools this time.)
-//   - System messages (rare; usually session-init notes — skip them
-//     too. A previously-injected replay notice is intentionally NOT
-//     re-replayed to avoid recursive nesting on a second rebuild.)
-//
-// What's NOT included:
-//   - Tool calls (verbose, vendor-specific, not portable)
-//   - Thinking / reasoning blocks (private to the prior session)
-//   - Empty or whitespace-only messages (no signal)
-//   - The active user prompt that triggered the rebuild (added by
-//     the caller after this preamble)
-//
-// Token budget:
-//   - Hard caps prevent a 200-message chat from blasting 50k tokens
-//     of replay. We take the most recent N messages (`MAX_MESSAGES`)
-//     and char-cap the total (`MAX_CHARS`) — older messages drop first.
-//   - For typical 20-30 message chats, the full transcript fits.
-//   - The caller should still expect a one-time ~5-15k token spend on
-//     the rare resume-after-cleanup case.
-//
-// ──────────────────────────────────────────────────────────
+// When a provider silently starts fresh ("no rollout found", "session not
+// found"), synthesizeReplayPrompt prepends a compact preamble so the agent can
+// continue without amnesia. It keeps user prompts and final assistant replies,
+// never tool calls, thinking, system notes, earlier replay notices or empty
+// messages, and only the most recent MAX_MESSAGES within MAX_CHARS.
 
 import type { AgentMessage, AgentTextMessage } from "./agent-messages";
 

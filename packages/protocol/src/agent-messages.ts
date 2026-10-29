@@ -1,15 +1,7 @@
-// ──────────────────────────────────────────────────────────
-// Agent message model + the pure SessionNotification → message folder
-// ──────────────────────────────────────────────────────────
-//
-// Moved out of apps/desktop/src/renderer/features/agent/use-agent-session.tsx into @zeros/protocol so BOTH
-// the renderer (live coalescing) AND the engine (persist-on-emit) run
-// the SAME reducer — no duplication, no drift. Pure TS (no React). The engine
-// folds streaming chunks into AgentMessages with applyUpdate() and upserts them
-// to the unified Zeros DB as it streams (it's the source — works even for a
-// running agent whose client is disconnected). use-agent-session.tsx re-exports
-// this so every existing import site keeps resolving unchanged.
-// ──────────────────────────────────────────────────────────
+// The agent message model and the pure SessionNotification → message folder.
+// The renderer (live coalescing) and the engine (persist-on-emit, which works
+// even while no client is connected) run this same reducer, so they cannot
+// drift. use-agent-session.tsx re-exports it for existing import sites.
 
 import type {
   AgentMessagePhase,
@@ -81,29 +73,18 @@ export interface AgentTextMessage {
    *  routes it inside the SubagentCard rather than the top-level
    *  timeline. See same field on AgentToolMessage. */
   parentToolId?: string;
-  /** True for the agent message that holds user-triggered summary text. The
-   *  renderer styles this with
-   *  a "── Summary ──" divider so the user can see where the chat's
-   *  context was compacted. The replay synthesizer uses
-   *  this as a boundary: only messages AT or AFTER the latest
-   *  summary boundary are replayed; everything before is implicitly
-   *  represented by the summary text itself. */
+  /** The agent message holding user-triggered summary text, styled with a
+   *  "── Summary ──" divider. Replay sends only messages at or after the latest
+   *  summary boundary; earlier ones are represented by the summary itself. */
   summaryBoundary?: boolean;
-  /** Marks the synthetic system message inserted when an agent session expires
-   *  and Zeros silently
-   *  rebuilt + replayed prior messages. The renderer draws a thin
-   *  "── Continuing session ──" divider in the timeline INSTEAD of
-   *  a bubble. `text` carries the divider label so copy stays
-   *  pluggable per locale / future iteration. */
+  /** The synthetic message inserted when an expired session was silently rebuilt
+   *  and replayed. It renders as a "── Continuing session ──" divider instead of
+   *  a bubble; `text` carries the label. */
   resumeBoundary?: boolean;
-  /** Attachments stamped on the user message at send time so the timeline
-   *  bubble can render the
-   *  same chip row the user saw in the composer. Persisted to
-   *  SQLite via the normal payload flow. New image messages keep only a
-   *  cwd-relative `diskPath`; `thumbnailUri` is legacy compatibility for
-   *  transcripts written before disk-backed attachment storage. For text
-   *  files, the body itself is too large to keep on every message — only the
-   *  filename + mime is stored. */
+  /** Attachments stamped at send time so the bubble shows the composer's chip
+   *  row. New images keep only a cwd-relative `diskPath` (`thumbnailUri` is for
+   *  transcripts written before disk-backed storage); text files store only
+   *  their filename and mime. */
   attachments?: AgentTextMessageAttachment[];
   /** Ordered content of a user message: text interleaved with
    *  inline mention + attachment pills, exactly as composed (the TipTap
@@ -135,13 +116,10 @@ export interface AgentTextMessage {
    *  opening user message whose persisted turn row owns duration, status,
    *  authored files, and reset semantics. */
   steeredTurnId?: string;
-  /** Set on a user message that Zeros sent automatically on the user's behalf
-   *  (Create PR / Resolve / Commit & Push /
-   *  Update branch buttons). Carries the action kind (e.g. `create-pr`).
-   *  The renderer paints these bubbles in the brown "sent by Zeros" treatment
-   *  with the action's icon and offers Copy only (no Edit — the wire text is a
-   *  generated brief the short label can't round-trip). Persisted with the
-   *  payload so reopened chats keep the treatment. */
+  /** Set on a user message Zeros sent on the user's behalf (Create PR, Resolve,
+   *  Commit & Push, Update branch); carries the action kind. The bubble gets the
+   *  "sent by Zeros" treatment and offers Copy only, since the wire text is a
+   *  generated brief the short label can't round-trip. */
   autoAction?: string;
   /** Zeros Local CLI: another chat's agent sent this user-role message
    *  (`zeros local message send`). Engine-stamped only; a client never sets
@@ -267,18 +245,10 @@ export interface AgentToolMessage {
   settledAt?: number;
 }
 
-// ──────────────────────────────────────────────────────────
-// Canonical message kinds
-// ──────────────────────────────────────────────────────────
-//
-// These extend the AgentMessage union with semantically-distinct
-// variants the renderer can specialise on. Today applyUpdate folds
-// every event into AgentTextMessage or AgentToolMessage. Specific
-// events use these variants so the registry can dispatch to purpose-built cards
-// (ThinkingBlock, PlanPanel, QuestionCard,
-// SubagentCard, ErrorNotice). The contract lives here so the
-// renderer registry's `unknown` fallback catches anything we
-// haven't handled yet — drift never silently disappears.
+// Semantically distinct message variants the registry dispatches to
+// purpose-built cards (ThinkingBlock, PlanPanel, QuestionCard, SubagentCard,
+// ErrorNotice). The renderer registry's `unknown` fallback catches anything
+// unhandled, so drift never silently disappears.
 
 /** Streaming reasoning content from the agent. Replaces the
  *  AgentTextMessage(role="thought") indirection. Dedicated thought events map
@@ -413,17 +383,11 @@ export type AgentMessage =
   | AgentSubagentMessage
   | AgentErrorNoticeMessage;
 
-// ──────────────────────────────────────────────────────────
-// Question resolution stamps (the ANSWERED / DECLINED / SKIPPED record)
-// ──────────────────────────────────────────────────────────
-
-/** Durable resolution record stamped onto a question tool message's
- *  rawOutput (key `zerosQuestion`). Drives the transcript card's
- *  ANSWERED / DECLINED / SKIPPED states after the interactive composer card is gone.
- *  Written by BOTH sides: the renderer stamps optimistically on submit, and
- *  the adapters emit a synthetic tool_call_update carrying it on settle so
- *  the ENGINE-persisted transcript is stamped too (reload / window-reconcile
- *  / cross-device all keep the record). */
+/** Durable resolution record on a question tool message's rawOutput (key
+ *  `zerosQuestion`), driving the ANSWERED / DECLINED / SKIPPED states after the
+ *  composer card is gone. The renderer stamps optimistically on submit, and the
+ *  adapters emit a synthetic update on settle, so the engine-persisted
+ *  transcript carries it across reloads and devices. */
 export interface QuestionRecordStamp {
   outcome: "answered" | "declined" | "skipped";
   /** One-line flat summary of the answers (answered only). */
@@ -481,22 +445,14 @@ export function readQuestionStamp(
   return stamp as unknown as QuestionRecordStamp;
 }
 
-// ──────────────────────────────────────────────────────────
-// Fold a SessionNotification into the running message list
-// ──────────────────────────────────────────────────────────
-
 const isPlainObject = (x: unknown): x is Record<string, unknown> =>
   !!x && typeof x === "object" && !Array.isArray(x);
 
-/** tool_call_update rawOutput merge. An update's rawOutput normally REPLACES
- *  the message's — but a question tool message carries the durable
- *  resolution record (`zerosQuestion`, see QuestionRecordStamp) and the
- *  vendor's tool_result lands MILLISECONDS around it, in either order:
- *    stamp → tool_result   (renderer's optimistic stamp, then vendor output)
- *    tool_result → stamp   (adapter's synthetic stamp update lands late)
- *  A wholesale replace would wipe one side, so the stamp is carried from
- *  whichever side has it (next wins on conflict) and a stamp-ONLY update
- *  overlays the existing output instead of erasing it. */
+/** Merge a tool_call_update's rawOutput, which normally replaces the
+ *  message's. A question message's `zerosQuestion` stamp and the vendor's
+ *  tool_result land milliseconds apart in either order, so the stamp is carried
+ *  from whichever side has it (next wins on conflict) and a stamp-only update
+ *  overlays the existing output. */
 function mergeRawOutput(prev: unknown, next: unknown): unknown {
   if (next === undefined || next === null) return prev;
   const prevStamp = isPlainObject(prev) ? prev.zerosQuestion : undefined;
@@ -593,21 +549,11 @@ export function applyUpdate(
         text: modelFallbackText(info), modelFallback: info, parentToolId: upd.parentToolId, createdAt: Date.now() }];
     }
     case "user_message_chunk": {
-      // Speculative dedup. sendPrompt() adds the user's bubble locally
-      // before the AGENT_PROMPT round-trip so the UI updates instantly.
-      // Some agents then echo the prompt back as a user record, which the
-      // translator turns into user_message_chunk — without dedup, this
-      // lands as a SECOND identical bubble. Claude / Codex / Cursor are
-      // all subject to the same race depending on schema. The check: the
-      // most recent message is a user text
-      // bubble with no engine messageId yet (i.e. the speculative one
-      // we just added). Adopt the engine's messageId on it instead of
-      // creating a new bubble. Replay-from-disk is unaffected — there
-      // the messages array fills *only* via translator events, so the
-      // last-message check fails (or it has a messageId already from
-      // a prior replayed turn). New messages from the user side never
-      // race with replay because replay runs to completion before the
-      // first live prompt.
+      // Speculative dedup: sendPrompt() adds the user's bubble before the round-trip,
+      // and agents may echo the prompt back as a user_message_chunk. When the last
+      // message is a user bubble with no engine messageId yet, adopt the engine's id
+      // instead of adding a duplicate. Replay is unaffected: it fills only from
+      // translator events and finishes before the first live prompt.
       const last = messages[messages.length - 1];
       const incomingId =
         typeof upd.messageId === "string" ? upd.messageId : undefined;

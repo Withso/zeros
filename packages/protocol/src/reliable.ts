@@ -1,24 +1,9 @@
-// ──────────────────────────────────────────────────────────
-// ReliableStream — seq/ack/replay over a reconnectable channel
-// ──────────────────────────────────────────────────────────
-//
-// A relay link can drop and reconnect across unreliable or sleeping devices.
-// TCP/WS guarantees in-order, lossless delivery WITHIN one socket, but a
-// reconnect loses whatever was in flight when the old socket died. This layer
-// makes the app stream survive that:
-//
-//   • each side numbers its outbound app messages with a monotonic `seq` and
-//     keeps unacked ones in a bounded buffer
-//   • each side acks the highest CONTIGUOUS seq it has received (cumulative)
-//   • a received `ack` frees the sender's buffer up to that seq
-//   • on reconnect the receiver reports its lastReceived; the sender replays
-//     everything after it (and the receiver drops any duplicate from an
-//     overlapping replay)
-//
-// Pure + I/O-free, so the correctness (off-by-one, dedup, replay window,
-// buffer bound) is exhaustively unit-testable. The transport ends
-// (engine RelayTransport, connectViaRelay) wrap/unwrap frames with it.
-// ──────────────────────────────────────────────────────────
+// seq/ack/replay over a reconnectable relay channel. A socket guarantees order
+// only within itself, so each side numbers outbound app messages, buffers
+// unacked ones (bounded), acks the highest contiguous seq it received, and on
+// reconnect replays everything after the peer's last seq; the receiver drops
+// overlap duplicates. Pure and I/O-free, so it is tested exhaustively; the
+// transport ends wrap frames with it.
 
 /** A transport-internal frame. Rides INSIDE the E2EE channel, below the app
  *  protocol — the app never sees it. */

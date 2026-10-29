@@ -1,15 +1,7 @@
-// ──────────────────────────────────────────────────────────
-// Privacy-safe error scrubbing for analytics / error tracking
-// ──────────────────────────────────────────────────────────
-//
-// Zeros' analytics contract is metadata-only: error MESSAGES and STACKS can
-// embed file paths (which leak the username + project layout), branch names,
-// prompt fragments, or secrets — so they must be scrubbed before they ever
-// reach PostHog. Both sides of the bridge run errors through here first:
-//   • the engine, before relaying a caught error to the renderer (gap A), and
-//   • the renderer's reportError() for handled errors (gap C).
-// Living in @zeros/protocol keeps the redaction rule identical on both sides.
-// ──────────────────────────────────────────────────────────
+// Analytics is metadata-only: error messages and stacks can carry file paths,
+// branch names, prompt fragments or secrets, so the engine (before relaying a
+// caught error) and the renderer's reportError() both scrub through this one
+// shared rule.
 
 const MAX_MESSAGE = 300;
 const MAX_STACK = 2000;
