@@ -1,48 +1,13 @@
-// ──────────────────────────────────────────────────────────
-// PrStatusIsland — shared Changes/Review PR row: status + one-tap actions
-// ──────────────────────────────────────────────────────────
-//
-// A status bar rendered above the retained Changes/Review bodies whenever the
-// active workspace has a PR (else that row holds the Create PR button; see
-// Workbench → PrStatusRow). It shows a single
-// derived state — "View PR ↗ Draft PR open", "Ready to merge", "Merged", … —
-// with the button that resolves it.
-//
-// Data: exact net change counts + gitStatus (local conflicts / ahead-behind) +
-// ghPrGet (GitHub mergeable state) + ghPrChecks (CI). Local changes re-fetch on
-// the shared useGitRefreshKey signal; external github.com changes refresh on
-// app resume and a bounded active-only poll. Once the effective PR state is
-// TERMINAL (merged/closed) every recurring lane goes quiet — only the
-// activation fetch re-checks, so a reopened PR still recovers (see
-// shouldPollPrStatus in pr-status-refresh.ts).
-//
-// Two rules keep the status row from presenting transient mixed state:
-//   • ATOMIC applies — the three sources resolve at very different speeds
-//     (local git in ms, gh over the network), so results are applied as ONE
-//     settled batch. Applying them as they land renders mixed-generation
-//     states — e.g. fresh "ahead 2" over a stale pr → a wrong "Ahead by 2"
-//     flash that resolves to "Ready to merge" a second later.
-//   • LAST-KNOWN cache — leaving the Changes/Review pair or switching workspace
-//     unmounts the row, so without it returning remounted the island empty and flashed
-//     the "PR open" placeholder before the refetch landed. The cache re-renders
-//     the last-known status instantly and updates in place. The last RENDERED
-//     state is additionally persisted per workspace#pr (pr-island-last-state)
-//     so an app relaunch or dev reload resumes from it too — the
-//     refetch still runs, in the background, and repaints only on an actual
-//     status change. "Loading..." (plain text, no spinner)
-//     appears only for a PR with no derivation history on this machine.
-//
-// Action boundaries:
-//   • prompt  — Resolve / Commit & Push / Update branch send a brief to the
-//     active chat as an AUTO-SENT message (short label + icon bubble; the
-//     agent receives the full text).
-//   • direct  — Push / Pull / Ready-for-review / Merge / Continue / Archive
-//     act in the engine: the button dims with an inline spinner where its icon
-//     was, and the derived state flips optimistically the moment the op lands
-//     (the refresh-key refetch then confirms) — no intermediate loading state.
-//   • nav     — Show checks focuses the Review tab's Checks sub-tab; the
-//     View PR chip focuses the Review tab.
-// ──────────────────────────────────────────────────────────
+// The shared Changes/Review PR row: one derived state ("Draft PR open", "Ready
+// to merge", "Merged", …) with the button that resolves it. Inputs are net
+// change counts, gitStatus, ghPrGet and ghPrChecks. Local changes refetch on
+// useGitRefreshKey, GitHub changes on app resume and a bounded active-only
+// poll, and a merged or closed PR stops recurring refreshes
+// (pr-status-refresh.ts). Results apply as one settled batch, since sources
+// resolving at different speeds rendered mixed states, and a last-known cache
+// (persisted per workspace#pr) repaints instantly after a remount or relaunch.
+// Prompt actions auto-send a brief to the active chat; direct actions run in
+// the engine and flip the state optimistically.
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
@@ -357,17 +322,11 @@ export function PrStatusIsland({
   // isActionGatedWhileAgentWorking for the policy).
   const agentWorking = useWorkspaceAgentWorking(workspace);
 
-  // Fetch local + GitHub state whenever the workspace, PR, refresh signal, or
-  // active external-refresh boundary changes. Local reads are coalesced with
-  // the Changes surfaces for the same generation. The four results are applied
-  // as ONE settled batch (see header) — a failed
-  // source keeps its last-known value rather than blanking the row.
-  //
-  // A remount on an unchanged refresh generation (workspace hop, Changes↔
-  // Review switch) whose batch is still fresh renders the cache and fetches
-  // nothing — pure navigation must not burn GitHub calls. A TERMINAL
-  // (merged/closed) batch is additionally fresh across refresh generations
-  // and suppresses refresh-key refetches entirely; see the two guards below.
+  // Fetch local and GitHub state when the workspace, PR, refresh signal or
+  // external-refresh boundary changes; local reads coalesce with the Changes
+  // surfaces, and a failed source keeps its last-known value. A remount on an
+  // unchanged generation with a fresh batch fetches nothing, and a merged or
+  // closed batch also ignores refresh-key bumps (the guards below).
   useEffect(() => {
     // Blur pauses the same surface; it is not a new tab activation. Keep
     // terminal-state suppression and same-key navigation freshness intact.
@@ -396,14 +355,10 @@ export function PrStatusIsland({
     ) {
       return;
     }
-    // Terminal PRs don't change from local git activity, so a refresh-key
-    // bump (agent turn-end, engine git write) skips the whole round — this is
-    // what let a merged PR be re-fetched every few seconds forever. The
-    // activation fetch and an explicit force (forceRefreshAt advanced past
-    // this batch) still go through, so a PR reopened on GitHub recovers on
-    // the next tab activation / forced boundary. The gate is re-derived from
-    // the CURRENT batch + persisted row on every run — a re-evaluable
-    // suppression, never a latch.
+    // Terminal PRs don't change from local git activity, so a refresh-key bump
+    // skips the round; a merged PR once refetched every few seconds forever.
+    // Activation and an explicit force still run, so a reopened PR recovers.
+    // Re-derived on every run, never latched.
     if (
       prev &&
       forceRefreshAt <= prev.at &&
@@ -470,14 +425,10 @@ export function PrStatusIsland({
     scope,
   ]);
 
-  // External GitHub changes do not touch this machine's file watcher. Catch
-  // them when the user returns to Zeros and with a slow poll while this exact
-  // row is visible. Hidden retained tabs stay completely inert. Terminal
-  // (merged/closed) PRs mute BOTH lanes: GitHub can't change them behind our
-  // back except by an explicit reopen, so re-probing every minute + every
-  // focus forever only burns the API budget. The gate reads the CURRENT batch
-  // on each event (never latched); a reopen recovers via the activation fetch,
-  // whose settled batch then lifts this gate too.
+  // External GitHub changes never reach the file watcher, so refresh on app
+  // resume and with a slow poll while this row is visible; hidden tabs stay
+  // inert. Merged or closed PRs mute both lanes, since only a reopen changes
+  // them; the gate reads the current batch on each event.
   useEffect(() => {
     if (!active || prNumber == null) return;
     const requestExternalRefresh = (trigger: "interval" | "resume") => {
@@ -788,17 +739,11 @@ export function PrStatusIsland({
         { allowContinue: localDesktop && local },
       )
     : null;
-  // A raw "checking"
-  // derivation (GitHub recomputing mergeability after a push/merge/base-move
-  // or after its cache expired while the app was backgrounded) is masked —
-  // indefinitely, actions intact — by the generation's last definitive state,
-  // so a resume re-check never flaps the row through "Checking mergeability…"
-  // and back. See pr-status-stability.ts.
-  //
-  // No settled batch yet (app relaunch / dev reload / first visit this
-  // session): render the DURABLE last-known state while the fetch runs in the
-  // background — the row repaints only if the settled result actually differs.
-  // "Loading..." is reserved for a PR with no persisted state at all.
+  // A raw "checking" derivation (GitHub recomputing mergeability) is masked by
+  // the generation's last definitive state, so a resume never flaps the row
+  // (pr-status-stability.ts). Before the first settled batch, render the durable
+  // last-known state while the fetch runs; "Loading..." only for a PR with no
+  // persisted state.
   const island = derived
     ? stabilizePrIslandState(stabilityKey, derived)
     : getPrIslandLastState(dataKey);
@@ -820,16 +765,10 @@ export function PrStatusIsland({
     rememberPrIslandLastState(dataKey, sk, state);
   }, [dataKey, persistJson]);
 
-  // While the RAW derivation is stuck on "checking", re-probe quickly with a
-  // bounded backoff (5s → 10s → 20s) instead of waiting for the 60s poll —
-  // GitHub's mergeability recompute settles in seconds, and each settle
-  // re-arms this effect via the batch timestamp. The retry budget is per
-  // head/base generation (stabilityKey) and is NOT refunded by an intermediate
-  // definitive read: when GitHub flaps between "checking" and a definitive
-  // mergeable_state, a refunded counter restarted the 5s burst on every flap —
-  // sustaining a ~5s probe loop with no user action. Once the budget is spent
-  // the 60s poll owns any further re-checks; a new push (new stabilityKey)
-  // starts a fresh budget.
+  // While the raw derivation is stuck on "checking", re-probe with a bounded
+  // backoff (5s → 10s → 20s) instead of waiting for the 60s poll. The budget is
+  // per head/base generation and is not refunded by a definitive read in
+  // between, which once sustained a ~5s loop while GitHub flapped.
   const rawKind = derived?.kind ?? null;
   const dataAt = data?.at ?? 0;
   const checkingRetryRef = useRef<{ key: string; tries: number }>({
@@ -852,12 +791,9 @@ export function PrStatusIsland({
     return () => window.clearTimeout(timer);
   }, [observing, stabilityKey, rawKind, dataAt]);
 
-  // Publish the RENDERED kind for the top bar's workspace tabs (they paint a
-  // per-status PR glyph) — the stabilized state, so the tab can't flap either.
-  // Retained after unmount so a background tab keeps its last-known icon; a
-  // null derivation (loading / prNumber changed / Continue cleared the PR)
-  // CLEARS the entry so a stale kind can't outrank the workspace row's
-  // fresher persisted state in the tab fallback.
+  // Publish the rendered (stabilized) kind for the top bar's workspace tabs. It
+  // is retained after unmount; a null derivation clears it, so a stale kind can't
+  // outrank the row's fresher persisted state.
   const islandKind = island?.kind ?? null;
   useEffect(() => {
     if (prNumber != null) {

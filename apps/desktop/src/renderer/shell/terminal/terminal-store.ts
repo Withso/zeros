@@ -1,55 +1,9 @@
-// ──────────────────────────────────────────────────────────
-// Terminal Store — workbench terminal panel terminal panel
-// ──────────────────────────────────────────────────────────
-//
-// Tracks open PTY sessions across the app. Each session is
-// scoped to a workspace folder (= the chat's `folder` at create
-// time) so when the user switches workspaces, the panel filters
-// to the right set of terminals.
-//
-// Collapsing terminal panel keeps every TerminalSessionView mounted; survival across a
-// full workbench collapse is METADATA-ONLY today. The
-// <Workbench> tree (which owns the panel + every TerminalSessionView)
-// unmounts on collapse, so the underlying PTYs die; the store
-// keeps title/folder/alive bits so a re-expand restores the tab
-// strip with the right names. A full hoist that keeps shells
-// alive across collapse is a follow-up — the obvious approach
-// (move the panel to MainShellBody) made the panel cover conversation pane's
-// chat composer on first paint and was reverted on 2026-05-23.
-//
-// State shape:
-//   sessions:        flat array; ordered by createdAt ASC so newer
-//                    tabs land on the right
-//   activeTerminalTabByFolder:
-//                    per-folder active TERMINAL TAB — "setup" OR a
-//                    session id (the run terminal or a plain "Terminal N").
-//                    This is which Setup / Run / Terminal tab is focused.
-// Terminal panel expansion and height are separate GLOBAL layout state in
-// terminal-panel-layout.ts (shared across workspaces/repos); session
-// persistence stays here.
-//
-// PTY lifecycle:
-//   - `createSession`   → renderer mints an id + dispatches
-//                         `pty_create` in the terminal panel panel; the
-//                         session view component owns the IPC.
-//                         This store only records the metadata.
-//   - `closeSession`    → removes from list AND fires `pty_kill`.
-//   - `markExited`      → external (PTY exited on its own); marks
-//                         the entry so the tab shows a "(exited)"
-//                         badge until the user closes it.
-//
-// Title naming:
-//   - Exactly one terminal in the folder → titled "Terminal"
-//     (no number).
-//   - Two or more → titled "Terminal 1" / "Terminal 2" / … by
-//     `createdAt` ascending. The list re-numbers contiguously on
-//     every create/delete so the user always sees 1, 2, 3 with
-//     no gaps. Custom renames via the tab pill are intentionally
-//     overwritten by the next mutation — the user explicitly
-//     asked for the strict ascending order.
-//   - The last terminal in a folder cannot be closed (the close
-//     affordance is hidden when `sessions.length === 1`).
-// ──────────────────────────────────────────────────────────
+// Metadata for open PTY sessions, scoped per workspace folder. The PTY lives in
+// main keyed by sessionId: TerminalSessionView owns its IPC, closeSession kills
+// it, and markExited badges a tab "(exited)". Plain terminals are numbered
+// contiguously by createdAt ("Terminal" alone, else "Terminal 1", "Terminal 2",
+// …), and a folder's last one cannot be closed. Panel expansion and height are
+// global layout state in terminal-panel-layout.ts.
 
 import { create } from "zustand";
 import { clearTerminalTabIndicators } from "./terminal-tab-indicators";
@@ -71,11 +25,10 @@ import {
 import { recordWorkspaceActivity } from "../../state/workspace-store";
 import { cloudScopedId, parseCloudScopedId, parseCloudWorkspaceKey } from "../../platform/bridge/cloud-workspace-key";
 
-// Per-(folder, action) run session ids live in @zeros/protocol/run-actions now —
-// the ENGINE mints/validates the same ids (RunManager), so the hash has one
-// home. Re-exported verbatim so existing imports keep working: runSessionId
-// keeps the legacy unsuffixed id for the migrated "run" action, so persisted
-// run terminals keep matching.
+// The engine mints and validates the same run ids, so they live in
+// @zeros/protocol/run-actions and are re-exported for existing imports.
+// runSessionId keeps the legacy unsuffixed id for "run", so persisted run
+// terminals still match.
 export { runSessionId, isRunSessionId } from "../../platform/workspace-run-identity";
 
 export interface TerminalSession {
@@ -127,7 +80,6 @@ interface TerminalStoreState {
   /** Explicit owner deletion invalidates retained terminal/Setup DOM decks. */
   retentionGeneration: number;
 
-  // ── Mutators ─────────────────────────────────────────────
   /** Create (or, when `id` matches an existing session, focus) a terminal in
    *  `folder`. `initialCommand` is typed into the shell once on first spawn
    *  (the repo's run script); `id` lets a caller use a deterministic session
@@ -254,11 +206,9 @@ function loadPersistedSessions(): PersistedSessions {
     const activeTerminalTabByFolder = parseTerminalSelections(
       rec.activeTerminalTabByFolder,
     );
-    // Defensive: re-mark every restored session as "alive=true". The
-    // actual PTY state lives in main; if a session is dead there, the
-    // reattach in TerminalSessionView still spawns a fresh shell with
-    // the same sessionId (idempotent). The store's `alive` flag is a
-    // UI affordance updated by the markExited callback below.
+    // Restored sessions start alive: main owns the real PTY state, and
+    // TerminalSessionView's reattach respawns a dead one under the same id. `alive`
+    // is a UI flag that markExited updates.
     return {
       sessions: sessions
         .map((s) => ({
@@ -353,13 +303,10 @@ function renumberFolder(
   const inFolder = sessions
     .filter((s) => s.folder === folder)
     .sort((a, b) => a.createdAt - b.createdAt);
-  // Pinned terminals keep their own title and are RESERVED so the generated
-  // "Terminal N" names skip them — otherwise renaming a terminal to e.g.
-  // "Terminal 2" collides with an auto-numbered one (a duplicate in the list).
-  // Pinned = run/setup terminals (runtime `initialCommand`, OR the persisted
-  // `pty-run-`/`pty-setup-` id so a RELOADED one — whose initialCommand was
-  // dropped — still keeps its title and stays out of the plain sequence) and
-  // user-renamed ones.
+  // Pinned terminals keep their title and reserve it, so generated "Terminal N"
+  // names skip it. Pinned means a run or setup terminal (by runtime
+  // initialCommand or the persisted `pty-run-`/`pty-setup-` id, since a reload
+  // drops initialCommand) or a renamed one.
   const isPinned = (s: TerminalSession) =>
     !!s.initialCommand ||
     !!s.renamed ||
@@ -417,7 +364,6 @@ function closeSessionImpl(
   set((s) => {
     const remaining = s.sessions.filter((sess) => sess.id !== id);
     const renumbered = renumberFolder(remaining, target.folder);
-    // Repoint terminal panel's active terminal tab.
     let nextActive = s.activeTerminalTabByFolder;
     if (nextActive[target.folder] === id) {
       const siblings = renumbered.filter((x) => x.folder === target.folder);
@@ -464,7 +410,6 @@ export const useTerminalStore = create<TerminalStoreState>((set, get) => ({
       if (existing) {
         if (!activate) return existing;
         set((s) => {
-          // Reuse focuses the terminal's sub-tab.
           const activeTerminalTabByFolder = setTerminalSelection(
             s.activeTerminalTabByFolder,
             folder,
@@ -502,7 +447,6 @@ export const useTerminalStore = create<TerminalStoreState>((set, get) => ({
       initialCommand,
     };
     set((s) => {
-      // A new terminal focuses its terminal panel tab.
       const next = {
         sessions: renumberFolder([...s.sessions, session], folder),
         activeTerminalTabByFolder: activate
@@ -771,35 +715,15 @@ export function selectSessionsForFolder(
     .sort((a, b) => a.createdAt - b.createdAt);
 }
 
-// ──────────────────────────────────────────────────────────
-// PTY event router — one listener per event, dispatched by sessionId.
-//
-// A listener per `TerminalSessionView` mount would register its own
-// `nativeListen("pty-data")` handler and filter on sessionId
-// in JS. The preload fans every event to every subscriber, so with N
-// open terminals each PTY byte triggered N callbacks — quadratic in
-// tab count.
-//
-// Now: the store installs exactly one `pty-data` and one `pty-exit`
-// listener on first bind. Session views register a per-id callback
-// via `bindWriter` / `bindExitHandler`. Dispatch is a single Map
-// lookup; unknown ids no-op.
-// ──────────────────────────────────────────────────────────
+// One `pty-data` and one `pty-exit` listener for the app, dispatched by
+// sessionId. The preload fans every event to every subscriber, so a listener
+// per view cost N callbacks per PTY byte with N open terminals.
 
-// One sessionId can be mounted by MORE THAN ONE TerminalSessionView at
-// once. The clearest case: a conversation pane terminal-agent chat whose PTY the
-// engine also publishes in the shared registry (handlePtyCreate adds every
-// non-ephemeral session), so the workbench terminal panel — when open on the
-// same folder — mounts a SECOND view for the same shell. Both views must
-// render the live stream, so each id maps to a SET of consumers and the
-// router fans every event out to all of them.
-//
-// The previous single-entry Map (`writers.set(id, fn)`) silently dropped
-// all but the most-recently-bound view: the user typed into the visible
-// conversation pane terminal but the PTY echo rendered only in the hidden workbench copy,
-// so the terminal looked frozen — the "can't type in the 2nd-column
-// terminal" bug. A Set keyed by id fixes it without having to prevent the
-// (intentional, multiplayer) double-mount.
+// One sessionId can have several mounted views: a terminal-agent chat's PTY is
+// also in the shared registry, so the workbench panel on the same folder mounts
+// a second view. Each id maps to a set of consumers and every event fans out to
+// all of them; a single-entry map once sent the echo only to the hidden copy,
+// so typing looked frozen.
 const writers = new Map<string, Set<(data: string) => void>>();
 const exitHandlers = new Map<string, Set<(evt: PtyExitEvent) => void>>();
 let routerInstalled = false;

@@ -1,36 +1,11 @@
-// ──────────────────────────────────────────────────────────
-// useIframeWebview — React hook for an iframe-based browser tab
-// ──────────────────────────────────────────────────────────
-//
-// Replaces the WebContentsView-based
-// `useWebview` hook. Same surface area (ref, navigate, back,
-// forward, reload, state) so the BrowserTab callsite doesn't need
-// to restructure — but the implementation is an order of magnitude
-// simpler:
-//
-//   - No main-process IPC for create / destroy / set-bounds /
-//     set-visible. The iframe IS a DOM element; mounting and
-//     unmounting the React component creates and destroys it.
-//   - No setBounds. CSS positions the iframe; pan / zoom in a
-//     parent React Flow canvas works naturally because
-//     iframes inherit transforms.
-//   - No setVisible. The bounded Browser deck keeps inactive tabs mounted in
-//     stable DOM positions and makes their wrapper inert + invisible, which
-//     preserves history, JS heap, scroll position, and form input.
-//   - No screenshot backdrop. DOM popovers (dropdowns, chips,
-//     tooltips) z-index above the iframe naturally; the iframe
-//     is a sibling, not an OS overlay.
-//
-// What we DO need main for: clear cache, clear cookies (session-
-// scoped operations the iframe can't perform itself). See
-// apps/desktop/electron/ipc/iframe-session.ts.
-//
-// Cross-origin caveat: renderer DOM cannot read an external iframe's
-// URL/title/favicon. Electron therefore observes frame navigation and resolves
-// favicon artwork in main, then emits trusted iframe-name-scoped events here.
-// Design Mode picker postMessages are accepted from any http(s) page, but only
-// through picker-message-guard.ts: the page shares the picker's world and can
-// forge them, so they are validated, clamped and rate-limited as page input.
+// The iframe-backed Browser tab hook. The iframe is a DOM element, so CSS
+// positions it, canvas transforms apply naturally and DOM popovers stack above
+// it; the bounded Browser deck keeps inactive tabs mounted and inert, which
+// preserves history, JS heap, scroll and form input. Main is needed only for
+// session-wide cache and cookie clears (electron/ipc/iframe-session.ts) and for
+// cross-origin observation: it reports frame navigation and favicons through
+// trusted, frame-name-scoped events. Picker postMessages come from the page's
+// own world, so picker-message-guard.ts validates, clamps and rate-limits them.
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
@@ -88,10 +63,7 @@ export function patchIframeWebviewState(
   };
 }
 
-/** Payload pushed by the in-iframe element picker. Field-for-field
- *  the same shape as the old WebContentsView SelectedElement so
- *  the chip / chat-submission code doesn't need to know which
- *  picker captured it. Events arrive through postMessage. */
+/** Payload from the in-iframe element picker, delivered by postMessage. */
 export interface SelectedElement {
   selector: string;
   tag: string;
@@ -108,9 +80,7 @@ export interface SelectedElement {
   devicePixelRatio?: number;
 }
 
-// ── Picker postMessage protocol ──────────────────────────────
-// Parent ↔ iframe-main-world communication. All messages have
-// type "zeros:picker:<op>".
+// Parent ↔ iframe main-world messages are all typed "zeros:picker:<op>".
 
 const MSG_PREFIX = "zeros:picker:";
 
@@ -187,7 +157,6 @@ export interface UseIframeWebviewResult {
   /** Clear cookies (only) for the iframe session. */
   clearCookies: () => Promise<void>;
 
-  // ── Design Mode ────────────────────────────────────────
   // Main injects the picker into every http(s) Browser frame; it posts
   // SelectedElement payloads back through the scoped listener below.
   designModeActive: boolean;
@@ -323,7 +292,6 @@ export function useIframeWebview(
   }));
   const faviconDataUrl = useBrowserTabFavicon(frameName);
 
-  // ── State sync helper ───────────────────────────────────
   const loadWaiters = useRef(new Set<() => void>());
   const updateState = useCallback((patch: Partial<IframeWebviewState>) => {
     setState((prev) => patchIframeWebviewState(prev, patch));
@@ -502,25 +470,14 @@ export function useIframeWebview(
     };
   }, [frameName, nativeReady, updateState, recomputeNav]);
 
-  // ── Iframe load/error → state update ────────────────────
-  //
-  // The load + error listeners are attached via a CALLBACK REF
-  // (`setIframeNode`, defined below) rather than a useEffect. The old
-  // effect bailed whenever `ref.current` was null — which is exactly a
-  // fresh tab: the iframe only mounts once the user leaves the empty
-  // state, and the effect (keyed on the stable `updateState`) never
-  // re-ran to attach the listener. So the `load` that clears
-  // `isLoading` was missed and the reload spinner span forever. A
-  // callback ref runs synchronously the moment the node mounts —
-  // before it can fire its first async load — so the listener is
-  // always in place.
+  // Load and error listeners attach through the `setIframeNode` callback ref, not
+  // an effect: a fresh tab's iframe mounts later, an effect keyed on stable deps
+  // never re-ran, and the missed first `load` left the reload spinner spinning.
 
-  // ── Navigation primitives ───────────────────────────────
-  //
-  // Explicit navigation updates frameRequest + browser chrome. Trusted
-  // observations update browser chrome only: binding iframe src directly to an
-  // observed SPA URL would turn every pushState/link into an unwanted reload.
-  // reload/hardReload remain imperative because their URL does not change.
+  // Explicit navigation updates frameRequest and browser chrome; trusted
+  // observations update chrome only, because binding src to an observed SPA URL
+  // would reload on every pushState. reload and hardReload stay imperative since
+  // the URL doesn't change.
 
   /** Browser-only/detached-frame fallback without coupling iframe src to the
    *  observed URL main reports for internal links and redirects. */
@@ -771,13 +728,9 @@ export function useIframeWebview(
     await nativeInvoke("iframe:clear-cookies");
   }, []);
 
-  // ── Design mode ──────────────────────────────────────────
-  //
-  // Picker auto-injects on every iframe load (main process hooks
-  // did-frame-finish-load). The picker stays dormant until we
-  // postMessage activate. All control + event flow uses
-  // postMessage; only screenshot capture takes an IPC hop (main
-  // process is the only thing that can call capturePage).
+  // The picker is injected dormant on every iframe load (main's
+  // did-frame-finish-load hook) and activates by postMessage. Only screenshot
+  // capture needs IPC, since only main can call capturePage.
 
   const [designModeActive, setDesignModeActive] = useState(false);
   // Synchronous mode mirror used to reject late async screenshot completions.
@@ -876,11 +829,8 @@ export function useIframeWebview(
     [],
   );
 
-  // ── Iframe node listeners (callback ref) ─────────────────
-  //
-  // `handleLoadRef` / `handleErrorRef` hold the LIVE handlers,
-  // reassigned every render so the stable listeners below always see
-  // the current designModeActive without needing to re-attach.
+  // The handler refs are reassigned every render, so the stable listeners below
+  // always see current state without re-attaching.
   const handleLoadRef = useRef<() => void>(() => {});
   const handleErrorRef = useRef<() => void>(() => {});
 
@@ -1056,24 +1006,10 @@ export function useIframeWebview(
     postToPicker("deactivate");
   }, [designModeActive, frameName, state.isLoading, postToPicker]);
 
-  // (The "re-arm design mode + clear stale chip on every load" logic
-  // that used to live here is now part of the callback-ref load
-  // handler above — handleLoadRef — so it can't miss a late-mounting
-  // iframe either.)
-
-  /** Forward Shift-release to the picker. Bug from the first
-   *  Stage-2 ship: keyboard events go to whichever window has
-   *  focus. If the user shift+clicks elements inside the iframe
-   *  (focus transfers there), then moves the cursor to the React
-   *  chrome before releasing Shift, the keyup lands HERE, not in
-   *  the iframe. The iframe never sees the release and the batch
-   *  never flushes.
-   *
-   *  Fix: at the renderer level, listen for any keyup of Shift
-   *  while design mode is active and forward via postMessage.
-   *  The picker's flush-batch handler is idempotent — if it
-   *  already flushed (iframe heard the keyup itself), the parent
-   *  forward is a no-op (pendingShiftPicks is empty). */
+  /** Forward a Shift release to the picker. Keyboard events go to the focused
+   *  window: after shift+clicking inside the iframe and moving to the React
+   *  chrome, the keyup lands here and the iframe's batch would never flush. The
+   *  picker's flush is idempotent, so a duplicate forward is a no-op. */
   useEffect(() => {
     if (!designModeActive) return;
     const onKeyUp = (e: KeyboardEvent) => {

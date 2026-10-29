@@ -1,12 +1,3 @@
-// ──────────────────────────────────────────────────────────
-// Conversation pane — Agent Workspace
-// ──────────────────────────────────────────────────────────
-//
-// Conversation pane hosts the conversation layer (AIChatPanel / agent session
-// for the active chat). IDE tools (Git / Terminal / Env / Todo)
-// live in Workbench where they have room to breathe.
-// ──────────────────────────────────────────────────────────
-
 import React, { useCallback, useLayoutEffect, useRef, useState } from "react";
 import { ConversationPaneLayout } from "./pane-layout";
 import { TerminalDeck } from "./terminal-deck";
@@ -40,73 +31,28 @@ import {
   ConversationSummaryTrigger,
   ConversationSummaryIsland,
 } from "./conversation-summary";
-// ── Conversation pane className constants ───────────────────────────
-// Wave 1.5 finalize (2026-05-16): the .zeros-conversation pane family
-// (lines 97-270 of the original app-shell.css) is now inline
-// utilities. The bare class names stay as DOM hooks: jump-by-
-// message navigation + content scripts query by class name.
 
-// 2026-06-16: dropped `border-r border-border1`. 2026-07-11 flush redesign:
-// the conversation/workbench seam line came back, but workbench owns it now (`border-l` on
-// WORKBENCH_PANE_CLS) — conversation pane stays borderless so the seam is a single 1px line.
-// The column starts with one workspace header beside the sidebar and workbench.
-// Pane-owned chat strips follow it inside the split tree.
+// Borderless: Workbench owns the single 1px seam (`border-l` on
+// WORKBENCH_PANE_CLS).
 const CONVERSATION_BASE_CLS = "flex flex-col bg-bg1 overflow-hidden relative";
-// Width policy (2026-07-17 — proportional columns):
-//   - Conversation pane's share of the two-column row is a RATIO, not a pixel
-//     width. `flex-grow: var(--zeros-column-2-ratio)` on conversation pane and
-//     `flex-grow: calc(1 - ratio)` on workbench (see WORKBENCH_PANE_CLS) make BOTH
-//     columns absorb window-resize deltas proportionally — before
-//     this, conversation pane held a fixed pixel basis and every resize/maximize
-//     delta flowed into workbench alone.
-//   - `flex-basis: 0` so the grow factors alone decide the split;
-//     `flex-shrink: 1` keeps degenerate cases well-defined.
-//   - `min-w-[360px]` is the readability floor when the window gets
-//     tiny (workbench floors at 200px on its side).
-//   - `max-w-[min(2400px,70%)]` keeps the historical cap: workbench
-//     always retains at least a 30% strip, and chat never exceeds
-//     2400px on very wide monitors. The JS drag clamp
-//     (`clampConversationRatio`) enforces the same bounds so the live
-//     drag never exceeds what CSS would allow — no snap on release.
-//   - Both grow factors are scaled ×100 (ratio·100 / (1−ratio)·100).
-//     The proportions are identical, but flexbox only hands out ALL
-//     remaining free space when the unfrozen items' grow factors sum
-//     to ≥ 1 — with bare 0..1 factors, conversation pane hitting its 2400px cap
-//     on an ultrawide left workbench with `(1−ratio)·row` instead of the
-//     full remainder, i.e. an empty gap at the window's right edge.
-//   - The flex declaration is IDENTICAL in both the workbench-open and
-//     workbench-collapsed states. Only the max-width cap differs (see
-//     CONVERSATION_FULL_WIDTH_CLS). Two reasons, both bugs we used to ship:
-//       1. Collapsed used to be `flex-1 basis-auto`, i.e. grow 1. On
-//          expand, conversation pane went from grow 1 to grow ratio·100 while workbench
-//          appeared at grow (1−ratio)·100 — so the first frame handed col
-//          2 only 1/(1+50) of the row and it slammed into its 360px floor
-//          before growing back out. With a `transition-[flex-grow]` on
-//          top, that overshoot was *animated*: a measured 1600 → 360 →
-//          800px jerk on every expand. Same grow factor in both states =
-//          no overshoot and nothing to animate.
-//       2. `basis-auto` makes the browser compute the max-content width
-//          of the whole chat transcript to size the column. `basis: 0`
-//          costs nothing.
-//     There is deliberately NO transition on flex-grow: the only things
-//     that ever changed it were the collapse toggle and the boot-time
-//     variable write, and both were glitches rather than motion design.
+// Proportional columns: conversation pane grows by --zeros-column-2-ratio and
+// workbench by 1 − ratio (flex-basis 0), so both absorb window resizes. Floors
+// are 360px here and 200px for workbench; max-w-[min(2400px,70%)] keeps a 30%
+// workbench strip, and clampConversationRatio enforces the same bounds during a
+// drag. Grow factors are scaled ×100 because flexbox hands out all free space
+// only when unfrozen grow factors sum to ≥ 1. The flex declaration is the same
+// with workbench open or collapsed (only max-width differs) and never
+// transitions: changing grow factors on expand caused a 1600 → 360 → 800px jerk.
 const CONVERSATION_DEFAULT_WIDTH_CLS =
   "[flex:calc(var(--zeros-column-2-ratio,0.5)*100)_1_0px] min-w-[360px] max-w-[min(2400px,70%)]";
-// Collapsed: conversation pane is the only item in the row, so the grow factor hands
-// it everything — but the 70% share cap would leave a 30% void where workbench
-// used to be, so it is lifted here (and the 2400px ultrawide ceiling with
-// it, matching the previous collapsed behaviour). Everything else is
-// character-for-character CONVERSATION_DEFAULT_WIDTH_CLS; see the note above.
+// Collapsed: the only item in the row, so lift the 70% and 2400px caps that
+// would leave a void; otherwise identical to CONVERSATION_DEFAULT_WIDTH_CLS.
 const CONVERSATION_FULL_WIDTH_CLS =
   "[flex:calc(var(--zeros-column-2-ratio,0.5)*100)_1_0px] min-w-[360px] max-w-none";
 
-// Resize handle — a 6px hit strip at conversation pane's right edge, which now butts
-// directly against workbench (workbench dropped its left padding, so there's
-// no bg-1 gutter between them). `right-0` (not a negative offset) keeps the
-// strip INSIDE conversation pane's `overflow-hidden` box. The strip stays transparent;
-// the resize cursor + the idle "Drag to resize" hint that rides above the
-// pointer are the only affordances.
+// A 6px hit strip at the right edge, inside the `overflow-hidden` box (`right-0`,
+// not a negative offset). It stays transparent; the cursor and the "Drag to
+// resize" hint are the only affordances.
 const RESIZE_HANDLE_CLS =
   "absolute inset-y-0 right-0 z-10 w-1.5 cursor-ew-resize";
 const RESIZE_HANDLE_HIDDEN_CLS = "hidden";
@@ -118,36 +64,21 @@ const DRAG_THRESHOLD_PX = 3;
 
 const BODY_BASE_CLS =
   "flex-1 overflow-hidden min-h-0 flex flex-col p-0 [&>*]:flex-1 [&>*]:min-h-0";
-/** Stacking wrapper for the body — the split-pane tree and the
- *  terminal deck both live here as siblings, so the long-lived
- *  terminal layers persist across pane-layout churn while each pane
- *  keyed-remounts its own chat view. (Chat-content centering is owned
- *  by AgentChat's inner `mx-auto max-w-[856px]` measure; the per-pane
- *  chat-root classes moved into conversation/pane-layout.tsx.) */
+/** The split-pane tree and the terminal deck are siblings here, so terminal
+ *  layers persist across pane-layout churn. */
 const BODY_STACK_CLS = "relative size-full min-h-0";
 /** The pane tree fills the stack; terminal layers portal into panes. */
 const PANE_TREE_ROOT_CLS = "absolute inset-0 flex min-h-0 min-w-0 flex-col";
 
-/** 2026-07-17 proportional columns: persist conversation pane's SHARE of the
- *  two-column row (0..1) instead of a pixel width, so both columns
- *  scale together on window resize / maximize. The storage + clamp math
- *  lives in conversation/pane-sizing.ts (a leaf module, unit-testable without the
- *  chat tree, and importable from the pre-render boot path).
- *
- *  Applies the committed ratio as --zeros-column-2-ratio on the two-column
- *  row. Live drag frames bypass this inherited variable and write direct
- *  flex-grow values to the two flex items. Returns the current ratio and a
- *  setter that persists it and keeps the pre-render boot value current. */
+/** Persist conversation pane's share of the row (0..1; math in pane-sizing.ts)
+ *  so both columns scale on resize. The committed ratio applies as
+ *  --zeros-column-2-ratio; live drag frames write flex-grow directly instead. */
 function useConversationRatio(sectionRef: React.RefObject<HTMLElement | null>) {
   const [ratio, setRatio] = useState<number>(readPersistedConversationRatio);
 
-  // Layout effect, not effect: the write must land before paint. Note
-  // this is NOT the only writer — main.tsx publishes the same value on
-  // <html> before the first render, because a descendant layout effect
-  // that measures (ChatPane's split-availability observer) can flush
-  // style before this one runs. Without the boot write the flush
-  // resolved the columns at the 0.5 fallback first, which is a real
-  // style change and therefore an animatable one. See boot-layout-vars.ts.
+  // A layout effect so the write lands before paint. main.tsx also publishes the
+  // value on <html> before the first render, because a descendant's measuring
+  // layout effect can flush style first (boot-layout-vars.ts).
   useLayoutEffect(() => {
     sectionRef.current?.parentElement?.style.setProperty(
       CONVERSATION_RATIO_VAR,
@@ -243,14 +174,9 @@ export function ConversationPane({
       } catch {
         /* capture can fail in rare cases; we'll proceed without it */
       }
-      // Deliberately NO React state for "is resizing": the column's flex
-      // declaration no longer transitions, so a resizing flag would exist
-      // only to re-render ConversationPaneLayout (every pane, every transcript)
-      // twice per gesture — a visible hitch at grab and release.
-      // Geometry of the two-column flex ROW (conversation pane's parent), measured once.
-      // The pointer's offset into the row IS conversation pane's share. Workbench is kept as
-      // an explicit target so live frames can update the two standard
-      // `flex-grow` properties without changing an inherited custom property.
+      // No React "is resizing" state: it would only re-render every pane twice per
+      // gesture. The pointer's offset into the row is the share; live frames write
+      // the two flex items' flex-grow directly.
       const row = sectionRef.current?.parentElement;
       const conversationPane = sectionRef.current;
       const workbenchPane = row?.querySelector<HTMLElement>(
@@ -268,15 +194,9 @@ export function ConversationPane({
       // real drag past the threshold writes the variable or persists.
       let moved = false;
 
-      // 01q: belt-and-suspenders cleanup. Pointer events sometimes
-      // disappear (focus loss, browser quirk, devtools interruption).
-      // When pointerup doesn't fire, the move listener can stay
-      // attached and the column keeps following the cursor. Therefore:
-      //   • Listeners are added on BOTH the handle (primary path)
-      //     AND on window (fallback). Either source triggers cleanup.
-      //   • A unified `finish()` function runs cleanup exactly once
-      //     via an `isFinished` guard.
-      //   • Also listen for blur and pointerleave-window to abort.
+      // Pointer events can vanish (focus loss, devtools), leaving the column
+      // following the cursor. Listen on both the handle and window, abort on blur and
+      // pointerleave, and run one guarded finish().
       let isFinished = false;
       // Starting the shared gesture also freezes every hidden retained layer
       // and iframe at its current size (see resize-gesture-freeze.ts), so the
@@ -410,16 +330,8 @@ export function ConversationPane({
       }}
       aria-label={readOnly ? "Workspace history" : "Agent Workspace"}
     >
-      {/* The per-workspace bar (project › workspace breadcrumb +
-          "Open in" dropdown) is HIDDEN — the app sidebar already
-          shows the repository and workspace, so a second one was pure noise. It
-          stays MOUNTED so its functionality survives —
-          the ⌘O (open in default app) and ⌘C (copy path) window-level
-          shortcuts it registers keep working. Window dragging is
-          unaffected (the app sidebar's title band and Workbench's header
-          own the drag regions). The workspace header owns the workbench
-          expand button while the panel is collapsed. Remove the `hidden`
-          wrapper to bring this legacy row back. */}
+      {/* Hidden but mounted: the app sidebar already names the repository and
+          workspace, and this row still registers the ⌘O / ⌘C shortcuts. */}
       {!readOnly && (
         <div className="hidden">
           <ConversationHeader />
@@ -476,9 +388,7 @@ export function ConversationPane({
       {/* Floated Browser tabs hover over the chat's bottom-right corner,
           stacked above the agent browser picture in picture. */}
       {!readOnly && <BrowserFloatStack onRevealWorkbench={revealWorkbench} />}
-      {/* Drag handle for the right
-          edge. Hidden when workbench is collapsed (conversation pane is full-width then).
-          Width persists across reload via localStorage. */}
+      {/* Hidden while workbench is collapsed; conversation pane is full width then. */}
       <div
         className={cn(
           RESIZE_HANDLE_CLS,
