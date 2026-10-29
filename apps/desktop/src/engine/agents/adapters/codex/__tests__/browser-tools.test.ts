@@ -111,6 +111,10 @@ describe("Codex browser tool adapter", () => {
     });
 
     expect(runtime?.pluginId).toBe("browser@openai-bundled");
+    // The allowance for ChatGPT's own node_repl compares against this home,
+    // and Zeros' lists replace a native declaration's.
+    expect(runtime?.codexHome).toBe(fixture.codexHome);
+    expect(runtime?.mcpServer.replaceNativeLists).toBe(true);
     expect(runtime?.browserSkill).toEqual({
       name: "control-in-app-browser",
       path: join(

@@ -133,7 +133,23 @@ client in the kernel, so Zeros hashes `scripts/browser-client.mjs` into
 `NODE_REPL_TRUSTED_SERVICES` and makes sure `NODE_REPL_TRUSTED_CODE_PATHS`
 covers the plugin's folder, mirroring what ChatGPT Desktop passes. It replaces
 any user-configured MCP entry named `node_repl` with that verified
-registration. If the official runtime, plugin manifest, trusted Browser client,
+registration.
+
+ChatGPT Desktop also writes its own `[mcp_servers.node_repl]` to the user's
+`$CODEX_HOME/config.toml`, and Codex merges Zeros' override into that table.
+Zeros' values win every key it sets, and its `args` and `env_vars` lists replace
+the native ones. The remaining keys are verified against `config/read`'s layer
+provenance: when only the user's own layer declares `node_repl` and it adds
+only use-case instruction text, a bounded `tool_timeout_sec`, or a
+`SKY_CUA_SERVICE_PATH` equal to the
+`<CODEX_HOME>/computer-use/Codex Computer Use.app` default the computer-use
+client derives anyway, the built-in browser stays on. A repository's
+`.codex/config.toml`, a system layer, or any other key (trust lists, Node
+options, another service path) still conflicts; Zeros then restarts the thread
+once without the built-in browser, disables the native declaration and shows a
+toast. Other MCP conflicts keep blocking the chat.
+
+If the official runtime, plugin manifest, trusted Browser client,
 Codex executable, architecture, or platform does not match, the built-in
 browser fails closed for that thread. The normal Codex agent remains available
 and uses `zeros_browser` when its route allows; the reason reaches the user as

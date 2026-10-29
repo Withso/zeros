@@ -5,6 +5,7 @@ import {
   readNativeMcpSurface,
   scopeNativeMcpSurface,
 } from "../native-mcp";
+import { codexNativeBrowserDeclarationAllowance } from "../browser-tools";
 import type { McpServerRegistration } from "../../../types";
 
 describe("buildMcpServerOverrides — Codex -c MCP config", () => {
@@ -123,6 +124,16 @@ describe("buildMcpServerOverrides — Codex -c MCP config", () => {
     );
     expect(args).toContain('mcp_servers.ctx7.env={ "DEBUG" = "1" }');
     expect(args).toContain("mcp_servers.ctx7.startup_timeout_sec=120");
+  });
+
+  it("replaces native argument and environment pass-through lists when asked", () => {
+    const args = buildMcpServerOverrides([
+      { name: "node_repl", transport: "stdio", command: "/opt/verified/node_repl", replaceNativeLists: true },
+      { name: "ordinary", transport: "stdio", command: "npx" },
+    ]);
+    expect(args).toContain("mcp_servers.node_repl.args=[]");
+    expect(args).toContain("mcp_servers.node_repl.env_vars=[]");
+    expect(args.join(" ")).not.toMatch(/mcp_servers\.ordinary\.(?:args|env_vars)=/);
   });
 
   it("skips a server whose name isn't TOML-key-safe (no injection)", () => {
@@ -428,6 +439,135 @@ describe("native MCP scoping — the Zeros registry is the whole set", () => {
   it("is an empty fragment when nothing needs disabling", () => {
     // Callers spread this unconditionally.
     expect(mcpDisabledThreadConfig({ serverNames: [] })).toEqual({});
+  });
+});
+
+// ChatGPT Desktop writes its own [mcp_servers.node_repl] to the user's
+// ~/.codex/config.toml. Codex merges Zeros' verified override into it. Only the
+// user's own layer may contribute, and only inert keys on the allowlist.
+describe("native Browser declarations from the user's Codex configuration", () => {
+  const codexHome = "/Users/person/.codex";
+  const cuaPath = `${codexHome}/computer-use/Codex Computer Use.app`;
+  const zerosEnv = { NODE_REPL_NODE_PATH: "/opt/verified/node", CODEX_HOME: codexHome };
+  const browser = {
+    name: "node_repl", transport: "stdio", command: "/opt/verified/node_repl",
+    args: [], startupTimeoutSec: 120, env: zerosEnv, replaceNativeLists: true,
+  } satisfies McpServerRegistration;
+  const chatgptExtras = {
+    SKY_CUA_SERVICE_PATH: cuaPath,
+    NODE_REPL_INSTRUCTIONS_USE_CASE_CHROME: "",
+    NODE_REPL_INSTRUCTIONS_USE_CASE_COMPUTER_USE: "",
+  };
+  const chatgptDeclaration = (env: Record<string, string> = chatgptExtras) => ({
+    command: "/Applications/ChatGPT.app/Contents/Resources/cua_node/bin/node_repl",
+    args: [], env_vars: ["HOME", "PATH", "TMPDIR"], startup_timeout_sec: 60,
+    env: { NODE_REPL_NODE_PATH: "/Applications/ChatGPT.app/Contents/Resources/cua_node/bin/node", ...env },
+  });
+  const effective = (env: Record<string, string> = chatgptExtras) => ({
+    command: "/opt/verified/node_repl", args: [], startup_timeout_sec: 120,
+    environment_id: "local", enabled: true, tool_timeout_sec: null,
+    env: { ...zerosEnv, ...env },
+  });
+  const layered = (
+    merged: unknown,
+    layers: Array<{ type: string; nodeRepl?: unknown }>,
+    failLayers = false,
+  ) => {
+    const calls: Array<Record<string, unknown>> = [];
+    return {
+      calls,
+      requestTyped: async (_method: string, params: Record<string, unknown>) => {
+        calls.push(params);
+        if (!params.includeLayers) return { config: { mcp_servers: { node_repl: merged } } };
+        if (failLayers) throw new Error("layer read failed");
+        return {
+          config: { mcp_servers: { node_repl: merged } },
+          layers: layers.map((layer, index) => ({
+            name: { type: layer.type }, version: String(index),
+            config: layer.nodeRepl === undefined ? {} : { mcp_servers: { node_repl: layer.nodeRepl } },
+          })),
+        };
+      },
+    } as unknown as Parameters<typeof readNativeMcpSurface>[0] & { calls: Array<Record<string, unknown>> };
+  };
+  const read = (rt: Parameters<typeof readNativeMcpSurface>[0]) =>
+    readNativeMcpSurface(rt, "/tmp/project", {
+      codexHome: "/nonexistent-codex-home", requireConfig: true, registeredServers: [browser],
+      nativeDeclarationAllowance: codexNativeBrowserDeclarationAllowance({ codexHome }),
+    });
+  const sessionFlags = { type: "sessionFlags", nodeRepl: { command: browser.command, args: [], env_vars: [], env: zerosEnv } };
+
+  it("accepts ChatGPT's inert extras when only the user's configuration declares them", async () => {
+    const rt = layered(effective(), [sessionFlags, { type: "user", nodeRepl: chatgptDeclaration() }, { type: "system" }]);
+    const surface = await read(rt);
+    expect(surface.registeredServerNames).toEqual(["node_repl"]);
+    expect(rt.calls).toEqual([
+      { includeLayers: false, cwd: "/tmp/project" },
+      { includeLayers: true, cwd: "/tmp/project" },
+    ]);
+  });
+
+  it.each([
+    ["a repository's .codex/config.toml", [sessionFlags, { type: "project", nodeRepl: { env: chatgptExtras } }, { type: "user", nodeRepl: chatgptDeclaration() }]],
+    ["a system configuration", [sessionFlags, { type: "system", nodeRepl: chatgptDeclaration() }]],
+    ["two user layers", [sessionFlags, { type: "user", nodeRepl: chatgptDeclaration() }, { type: "user", nodeRepl: { env: {} } }]],
+    ["no layer at all", [sessionFlags]],
+  ])("refuses the same extras when they come from %s", async (_label, layers) => {
+    await expect(read(layered(effective(), layers))).rejects.toThrow(/MCP configuration conflict for node_repl/);
+  });
+
+  it.each([
+    ["an inherited Node option", { ...chatgptExtras, NODE_OPTIONS: "--require=./unapproved" }],
+    ["a widened service trust list", { ...chatgptExtras, NODE_REPL_TRUSTED_SERVICES: '{"computer":"/tmp/x"}' }],
+    ["a computer-use service outside CODEX_HOME", { ...chatgptExtras, SKY_CUA_SERVICE_PATH: "/tmp/Codex Computer Use.app" }],
+    ["a computer-use service that escapes its folder", { ...chatgptExtras, SKY_CUA_SERVICE_PATH: `${codexHome}/computer-use/../evil.app` }],
+    ["a relative computer-use service", { ...chatgptExtras, SKY_CUA_SERVICE_PATH: "computer-use/Codex Computer Use.app" }],
+    ["another app in the computer-use folder", { ...chatgptExtras, SKY_CUA_SERVICE_PATH: `${codexHome}/computer-use/Other.app` }],
+    ["oversized instructions", { ...chatgptExtras, NODE_REPL_INSTRUCTIONS_USE_CASE_CHROME: "x".repeat(32_769) }],
+    ["an unknown ChatGPT key", { ...chatgptExtras, BROWSER_USE_TINYSKY_ENABLED: "1" }],
+  ])("refuses %s from the user's configuration", async (_label, env) => {
+    const rt = layered(effective(env), [sessionFlags, { type: "user", nodeRepl: chatgptDeclaration(env) }]);
+    await expect(read(rt)).rejects.toThrow(/MCP configuration conflict for node_repl/);
+  });
+
+  // The CUA helper resolves SKY_CUA_SERVICE_PATH, else this exact CODEX_HOME
+  // default, only when a computer-use call starts it; the value is inert here.
+  it.each([
+    ["only instructions", { NODE_REPL_INSTRUCTIONS_USE_CASE_COMPUTER_USE: "Use the computer carefully." }, {}],
+    ["a bounded tool timeout", chatgptExtras, { tool_timeout_sec: 600 }],
+  ])("accepts ChatGPT's user declaration with %s", async (_label, env, fields) => {
+    const rt = layered({ ...effective(env), ...fields }, [sessionFlags, { type: "user", nodeRepl: { ...chatgptDeclaration(env), ...fields } }]);
+    await expect(read(rt)).resolves.toMatchObject({ registeredServerNames: ["node_repl"] });
+  });
+
+  it("refuses an effective value the user's layer does not explain", async () => {
+    const rt = layered(effective(), [sessionFlags, { type: "user", nodeRepl: chatgptDeclaration({ ...chatgptExtras, NODE_REPL_INSTRUCTIONS_USE_CASE_CHROME: "other" }) }]);
+    await expect(read(rt)).rejects.toThrow(/MCP configuration conflict for node_repl/);
+  });
+
+  it("refuses pass-through and execution fields the override did not replace", async () => {
+    for (const extra of [{ env_vars: ["HOME"] }, { args: ["--native"] }, { cwd: "/tmp" }, { enabled: false }, { disabled_tools: ["js"] }, { tool_timeout_sec: 86_400 }]) {
+      const rt = layered({ ...effective(), ...extra }, [sessionFlags, { type: "user", nodeRepl: { ...chatgptDeclaration(), ...extra } }]);
+      await expect(read(rt)).rejects.toThrow(/MCP configuration conflict for node_repl/);
+    }
+  });
+
+  it("keeps the original conflict when the layers cannot be read", async () => {
+    await expect(read(layered(effective(), [], true))).rejects.toThrow(/MCP configuration conflict for node_repl/);
+  });
+
+  it("never extends the allowance to another registered server", async () => {
+    const other = { name: "owned", transport: "stdio", command: "approved" } satisfies McpServerRegistration;
+    const rt = {
+      requestTyped: async (_method: string, params: Record<string, unknown>) => ({
+        config: { mcp_servers: { owned: { command: "approved", env: chatgptExtras } } },
+        ...(params.includeLayers ? { layers: [{ name: { type: "user" }, version: "1", config: { mcp_servers: { owned: { env: chatgptExtras } } } }] } : {}),
+      }),
+    } as unknown as Parameters<typeof readNativeMcpSurface>[0];
+    await expect(readNativeMcpSurface(rt, "/tmp/project", {
+      codexHome: "/nonexistent-codex-home", registeredServers: [other],
+      nativeDeclarationAllowance: codexNativeBrowserDeclarationAllowance({ codexHome }),
+    })).rejects.toThrow(/MCP configuration conflict for owned/);
   });
 });
 
