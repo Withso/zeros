@@ -1,13 +1,15 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { execFileSync } from "node:child_process";
-import { mkdtemp, mkdir, writeFile, symlink, rm, realpath, readFile, readdir } from "node:fs/promises";
+import fs from "node:fs/promises";
+import { syncBuiltinESMExports } from "node:module";
+import { mkdtemp, mkdir, writeFile, symlink, rm, realpath, readFile, readdir, rename } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { fingerprintFiles, linkDependencies, projectRevision, resolveFix, revisionTree } from "../zstack/source.mjs";
+import { captureSource, fingerprintFiles, linkDependencies, projectRevision, resolveFix, revisionTree } from "../zstack/source.mjs";
 
 const roots: string[] = [];
 async function root() { const dir = await realpath(await mkdtemp(path.join(os.tmpdir(), "zstack-source-"))); roots.push(dir); return dir; }
-afterEach(async () => { vi.unstubAllEnvs(); for (const dir of roots.splice(0)) await rm(dir, { recursive: true, force: true }); });
+afterEach(async () => { vi.restoreAllMocks(); syncBuiltinESMExports(); vi.unstubAllEnvs(); for (const dir of roots.splice(0)) await rm(dir, { recursive: true, force: true }); });
 
 const quote = (text: string) => `'${text.replaceAll("'", "'\\''")}'`;
 const lock = (version: string) => `lockfileVersion: '9.0'\nimporters:\n  .:\n    dependencies:\n      external:\n        specifier: ${version}\n        version: ${version}\n  packages/protocol: {}\n`;
@@ -31,6 +33,30 @@ async function installed(directory: string) {
 }
 
 describe("zstack source identity and projection", () => {
+  it("keeps verification and commit resolution usable on Git without --no-lazy-fetch", async () => {
+    const directory = await root(), bin = await root();
+    const executable = execFileSync("sh", ["-c", "command -v git"], { encoding: "utf8" }).trim();
+    const git = (args: string[]) => execFileSync(executable, args, { cwd: directory, encoding: "utf8", stdio: "pipe" }).trim();
+    git(["init", "-q", "--initial-branch=main"]);
+    await writeFile(path.join(directory, "source.ts"), "before"); git(["add", "."]);
+    git(["-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "commit", "-qm", "before"]);
+    const parent = git(["rev-parse", "HEAD"]);
+    await writeFile(path.join(directory, "source.ts"), "after"); git(["add", "."]);
+    git(["-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "commit", "-qm", "fix (#123)"]);
+    const fixed = git(["rev-parse", "HEAD"]);
+    git(["update-ref", "refs/remotes/origin/main", fixed]);
+    await writeFile(path.join(bin, "git"), `#!/bin/sh\nfor arg in "$@"; do\n  if [ "$arg" = --no-lazy-fetch ]; then exit 129; fi\ndone\nexec ${quote(executable)} "$@"\n`, { mode: 0o755 });
+    vi.stubEnv("PATH", `${bin}:${process.env.PATH}`);
+    const snapshot = await captureSource(directory);
+    expect(snapshot.files).toEqual(["source.ts"]);
+    expect(snapshot.evidence.complete).toBe(true);
+    expect(snapshot.evidence.fingerprint).toBe(await fingerprintFiles(directory, ["source.ts"]));
+    expect(resolveFix(directory, "pr:123")).toEqual({ fixed, parent });
+    const output = path.join(await root(), "projected");
+    await expect(projectRevision(directory, fixed, output)).rejects.toThrow("zstack_git_unavailable");
+    await expect(readdir(output)).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
   it("hashes bytes, executable mode and deletions, without reading excluded credentials", async () => {
     const dir = await root(); await mkdir(path.join(dir, "scripts"));
     await writeFile(path.join(dir, "scripts/a.mjs"), "one");
@@ -154,6 +180,63 @@ describe("zstack source identity and projection", () => {
     await releaseFirst(); await releaseSecond();
     const releaseNext = await linkDependencies(original, next, graphFiles, options);
     expect(run).toHaveBeenCalledTimes(2); expect(await readdir(cacheRoot)).toHaveLength(1); await releaseNext();
+  });
+
+  it("releases a finished projection while another graph installation holds the cache lock", async () => {
+    const original = await root(), first = await root(), next = await root(), cacheRoot = await root();
+    await graph(original, "3.0.0"); await graph(first); await graph(next, "2.0.0");
+    const releaseFirst = await linkDependencies(original, first, graphFiles, { cacheRoot,
+      run: async (_command, options) => { await installed(options.cwd); return { status: "passed", code: "ok" }; } });
+    const [entry] = await readdir(cacheRoot);
+    let entered!: () => void, unblock!: () => void;
+    const admission = new Promise<void>(resolve => { entered = resolve; }), held = new Promise<void>(resolve => { unblock = resolve; });
+    const pending = linkDependencies(original, next, graphFiles, { cacheRoot,
+      run: async (_command, options) => { entered(); await held; await installed(options.cwd); return { status: "passed", code: "ok" }; } });
+    await admission;
+    // Advance only the lock deadline; the installer is held at an explicit barrier.
+    let clock = 0;
+    const now = vi.spyOn(Date, "now").mockImplementation(() => (clock += 11 * 60_000));
+    try {
+      await expect(releaseFirst()).resolves.toBeUndefined();
+      expect((await readdir(cacheRoot))).toContain(".lock");
+      expect((await readdir(path.join(cacheRoot, entry))).filter(name => name.startsWith(".lease-"))).toEqual([]);
+    } finally {
+      now.mockRestore(); unblock(); await (await pending)();
+    }
+  });
+
+  it("tolerates a lease released after cache enumeration without trusting a missing file", async () => {
+    const original = await root(), first = await root(), second = await root(), cacheRoot = await root();
+    await graph(original); await graph(first); await graph(second);
+    const run = vi.fn(async (_command, options) => { await installed(options.cwd); return { status: "passed", code: "ok" }; });
+    const releaseFirst = await linkDependencies(original, first, graphFiles, { cacheRoot, run });
+    const [entry] = await readdir(cacheRoot), directory = path.join(cacheRoot, entry);
+    const lease = path.join(directory, (await readdir(directory)).find(name => name.startsWith(".lease-"))!);
+    const nativeOpen = fs.open;
+    const opening = vi.spyOn(fs, "open").mockImplementation(async (...args) => {
+      if (args[0] === lease) await rm(lease, { force: true });
+      return nativeOpen(...args);
+    });
+    syncBuiltinESMExports();
+    try {
+      const releaseSecond = await linkDependencies(original, second, graphFiles, { cacheRoot, run });
+      expect(run).toHaveBeenCalledOnce();
+      await releaseSecond();
+      await expect(releaseFirst()).resolves.toBeUndefined();
+    } finally { opening.mockRestore(); syncBuiltinESMExports(); }
+  });
+
+  it("does not lose a finished result or unlink a replacement lease when cleanup loses custody", async () => {
+    const original = await root(), projection = await root(), cacheRoot = await root();
+    await graph(original); await graph(projection);
+    const release = await linkDependencies(original, projection, graphFiles, { cacheRoot,
+      run: async (_command, options) => { await installed(options.cwd); return { status: "passed", code: "ok" }; } });
+    const [entry] = await readdir(cacheRoot), directory = path.join(cacheRoot, entry);
+    const lease = path.join(directory, (await readdir(directory)).find(name => name.startsWith(".lease-"))!);
+    await rename(lease, path.join(await root(), "retained-inode"));
+    await writeFile(lease, "replacement", { mode: 0o600 });
+    await expect(release()).resolves.toBeUndefined();
+    expect(await readFile(lease, "utf8")).toBe("replacement");
   });
 
   it("cleans cancelled installations and refuses cache aliases or checkout-local caches", async () => {

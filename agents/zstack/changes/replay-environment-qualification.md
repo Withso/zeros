@@ -12,6 +12,10 @@ prefetch object IDs in bounded refetch batches without moving refs. Canonicalize
 scratch roots before applying no-follow source checks, including macOS-style
 symlinked temporary paths.
 
+Scope newer Git options to object replay, not the shared workspace verifier.
+Lease cleanup must never wait behind installation or replace a completed replay's
+result; release only the owned lease and let dead-PID cleanup reclaim leftovers.
+
 Held by the zstack-source and zstack-replay suites and the
 zstack-replay-historical-dependencies, zstack-replay-promisor-prefetch and
 zstack-replay-canonical-scratch evals. Operational bounds are in tools.md.

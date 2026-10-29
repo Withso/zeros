@@ -10,8 +10,8 @@ import { repositoryPath } from "./check-plan.mjs";
 import { childEnvironment, runCommand } from "./runner.mjs";
 
 const LIMIT = 256 * 1024 * 1024;
-export function gitRead(args, cwd, input, { timeoutMs = 60_000 } = {}) {
-  try { return execFileSync("git", ["--no-pager", "--no-lazy-fetch", ...args], { cwd, input, env: childEnvironment(),
+export function gitRead(args, cwd, input, { timeoutMs = 60_000, noLazyFetch = false } = {}) {
+  try { return execFileSync("git", ["--no-pager", ...(noLazyFetch ? ["--no-lazy-fetch"] : []), ...args], { cwd, input, env: childEnvironment(),
     maxBuffer: LIMIT, timeout: timeoutMs, stdio: ["pipe", "pipe", "pipe"] }); }
   catch { throw new Error("zstack_git_unavailable"); }
 }
@@ -21,7 +21,7 @@ export function prefetchObjects(cwd, objects) {
   if (ids.length > 30_000 || ids.some(id => !/^[a-f0-9]{40}$/.test(id))) throw new Error("zstack_source_limit");
   if (!ids.length) return;
   const missing = () => {
-    const rows = gitRead(["cat-file", "--batch-check=%(objectname) %(objecttype)"], cwd, ids.join("\n") + "\n")
+    const rows = gitRead(["cat-file", "--batch-check=%(objectname) %(objecttype)"], cwd, ids.join("\n") + "\n", { noLazyFetch: true })
       .toString("utf8").trimEnd().split("\n");
     if (rows.length !== ids.length || rows.some((row, index) => !["blob", "tree", "missing"].some(type => row === `${ids[index]} ${type}`)))
       throw new Error("zstack_git_unavailable");
@@ -108,9 +108,9 @@ export function resolveFix(cwd, fixedBy, git = args => gitRead(args, cwd).toStri
 
 export function revisionTree(cwd, revision) {
   if (!/^[a-f0-9]{40}$/.test(revision)) throw new Error("zstack_revision_unavailable");
-  const tree = /^tree ([a-f0-9]{40})\n/.exec(gitRead(["cat-file", "commit", revision], cwd).toString("utf8"))?.[1];
+  const tree = /^tree ([a-f0-9]{40})\n/.exec(gitRead(["cat-file", "commit", revision], cwd, undefined, { noLazyFetch: true }).toString("utf8"))?.[1];
   prefetchObjects(cwd, [tree]);
-  const entries = gitRead(["ls-tree", "-rz", "--full-tree", revision], cwd).toString("utf8").split("\0").filter(Boolean).map(row => {
+  const entries = gitRead(["ls-tree", "-rz", "--full-tree", revision], cwd, undefined, { noLazyFetch: true }).toString("utf8").split("\0").filter(Boolean).map(row => {
     const match = /^(100644|100755|120000) blob ([a-f0-9]{40})\t(.+)$/.exec(row);
     if (!match) throw new Error("zstack_projection_unsupported");
     return { mode: match[1], oid: match[2], file: match[3] };
@@ -125,7 +125,7 @@ export async function projectRevision(cwd, revision, destination, entries = revi
   if (entries.some(entry => !repositoryPath(entry.file))) throw new Error("zstack_path_invalid");
   prefetchObjects(cwd, entries.map(entry => entry.oid));
   await mkdir(destination, { mode: 0o700 });
-  const objects = gitRead(["cat-file", "--batch"], cwd, entries.map(entry => entry.oid).join("\n") + "\n");
+  const objects = gitRead(["cat-file", "--batch"], cwd, entries.map(entry => entry.oid).join("\n") + "\n", { noLazyFetch: true });
   let offset = 0; const links = [];
   for (const entry of entries) {
     const end = objects.indexOf(10, offset), header = objects.subarray(offset, end).toString("ascii").split(" ");
@@ -263,8 +263,13 @@ async function cacheLeased(directory) {
     if (!name.startsWith(".lease-")) continue;
     const match = /^\.lease-([1-9][0-9]*)-[a-f0-9-]{36}$/.exec(name);
     if (!match) cacheFailure("unsafe");
-    const file = path.join(directory, name), { info } = await readOwnedFile(file, { privateFile: true, limit: 64 });
-    if (processAlive(Number(match[1]))) live = true; else await unlinkOwned(file, info);
+    try {
+      const file = path.join(directory, name), { info } = await readOwnedFile(file, { privateFile: true, limit: 64 });
+      if (processAlive(Number(match[1]))) live = true; else await unlinkOwned(file, info);
+    } catch (error) {
+      // A projection may release its own lease while an installer scans the cache.
+      if (error.code !== "ENOENT") throw error;
+    }
   }
   return live;
 }
@@ -353,7 +358,13 @@ async function cachedDependencies(original, projection, files, graph, { cacheRoo
     const lease = await open(leaseFile, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600);
     const info = await lease.stat(); await lease.close();
     await utimes(path.join(target, "ready.json"), new Date(), new Date());
-    return { source, release: () => withCacheLock(root, undefined, () => unlinkOwned(leaseFile, info)) };
+    return { source, release: async () => {
+      try { await unlinkOwned(leaseFile, info); }
+      catch {
+        // Cleanup must preserve the replay result. A retained lease stays pinned
+        // until dead-PID reclamation; a replacement file is never ours to remove.
+      }
+    } };
   });
 }
 

@@ -97,7 +97,8 @@ cannot resolve to a commit. Seeds still require an explicit immutable revision.
 If `--all` exceeds 32 cases it refuses with `zstack_case_limit`; use explicit
 case batches. It never silently truncates the corpus to satisfy the bound.
 
-Replay requires Git 2.45+ and locally available fix/parent commits. It preserves
+Replay requires Git 2.45+ and locally available fix/parent commits. Ordinary
+workspace verification does not require the replay-only Git flag. Replay preserves
 the index, refs and working tree. Full clones use local objects. In a partial
 clone, execution discovers a promisor remote and fetches missing trees/blobs in
 batches of at most 4096 IDs before local-only `cat-file` reads. `--refetch`
