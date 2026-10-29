@@ -4701,7 +4701,7 @@
       "provider": "cursor",
       "fingerprint": "e0f3d02fc9f0f6d6882172bea817815ded811b6968205eeaf7186fc31e2eb0a8",
       "disposition": "implemented",
-      "rationale": "SDKAgent.summarize starts a native idle compaction run through the Local host. Busy/preparing sessions refuse without interruption, private summary text is not narrated, and Stop/disposal fences late runs. Cloud keeps the existing manual-compaction refusal shared by all providers.",
+      "rationale": "SDKAgent.summarize starts a native idle compaction run through the Local host. Compaction refuses while any prompt is preparing or unsettled; new prompts wait through summary success/failure and Stop cancels the wait before native send. Engine-admitted ghost-prompt overlap stays allowed. Disposal settles published rows before fencing late events; private summary text is not narrated. Cloud keeps the existing manual-compaction refusal shared by all providers.",
       "evidence": [
         "apps/desktop/src/engine/agents/adapters/cursor-sdk/adapter.ts",
         "apps/desktop/src/engine/agents/adapters/cursor-sdk/__tests__/compact-context.test.ts",

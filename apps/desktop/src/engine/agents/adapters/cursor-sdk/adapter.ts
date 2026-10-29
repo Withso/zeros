@@ -1088,8 +1088,14 @@ interface Session {
   providerHome?: string;
   store?: Promise<CursorLocalStore | null>;
   activeRun: SdkRun | null;
-  prompting?: boolean;
-  compacting?: boolean;
+  /** Compaction admission only: the engine can admit a new prompt while an
+   * older ghost prompt is still unsettled, so this must never lock prompts. */
+  promptsInFlight: number;
+  compacting?: {
+    settled: Promise<void>;
+    stop: AbortController;
+    flush: () => Promise<void>;
+  };
   billing?: CursorUsageReconciler;
   pendingSteers?: Set<(outcome: SteerOutcome) => void>;
   /** Set by cancel() so the prompt loop can distinguish a user-requested
@@ -2116,6 +2122,7 @@ export class CursorSdkAdapter implements AgentAdapter {
       ...(runtime.dispose ? { disposeRuntime: runtime.dispose } : {}),
       ...(runtime.providerHome ? { providerHome: runtime.providerHome } : {}),
       activeRun: null,
+      promptsInFlight: 0,
       cancelRequested: false,
       env: opts.env,
       mcpServers: mcpSource,
@@ -2313,6 +2320,7 @@ export class CursorSdkAdapter implements AgentAdapter {
       ...(runtime.dispose ? { disposeRuntime: runtime.dispose } : {}),
       ...(runtime.providerHome ? { providerHome: runtime.providerHome } : {}),
       activeRun: null,
+      promptsInFlight: 0,
       cancelRequested: false,
       env: opts.env,
       mcpServers: mcpSource,
@@ -2386,10 +2394,29 @@ export class CursorSdkAdapter implements AgentAdapter {
     onNativeOutput?: (kind: NativePromptOutputKind, receivedAtMs?: number) => void;
   }): Promise<{ stopReason: StopReason; response: PromptResponse }> {
     const session = this.sessions.get(opts.sessionId);
-    if (session?.compacting || session?.prompting) throw new Error("Cursor is busy. Wait for the current run or compaction to finish.");
-    if (session) session.prompting = true;
-    try { return await this.runPrompt(opts); }
-    finally { if (session) session.prompting = false; }
+    if (!session) return this.runPrompt(opts);
+    session.promptsInFlight++;
+    try {
+      const compaction = session.compacting;
+      if (compaction) {
+        let stopWaiting!: () => void;
+        const stopped = new Promise<void>(resolve => { stopWaiting = resolve; });
+        const signal = compaction.stop.signal;
+        if (signal.aborted) stopWaiting();
+        else signal.addEventListener("abort", stopWaiting, { once: true });
+        try {
+          // The settlement barrier never rejects: a summary failure belongs
+          // to /compact and must not discard the user's next prompt.
+          await Promise.race([compaction.settled, stopped]);
+        } finally { signal.removeEventListener("abort", stopWaiting); }
+        // runPrompt resets cancelRequested. Observe Stop before entering it,
+        // even if native summarize has not returned a cancellable run yet.
+        if (signal.aborted || session.cancelRequested || session.disposing || this.sessions.get(opts.sessionId) !== session) {
+          return { stopReason: "cancelled", response: { stopReason: "cancelled" } };
+        }
+      }
+      return await this.runPrompt(opts);
+    } finally { session.promptsInFlight--; }
   }
 
   private async runPrompt(opts: Parameters<CursorSdkAdapter["prompt"]>[0]): Promise<{ stopReason: StopReason; response: PromptResponse }> {
@@ -2946,17 +2973,23 @@ export class CursorSdkAdapter implements AgentAdapter {
     if (!session || session.disposing) throw new AgentFailureError({
       kind: "session-expired", stage: "prompt", agentId: AGENT_ID, message: "Cursor session is no longer live.",
     });
-    if (session.prompting || session.compacting || session.activeRun || session.preparingPrompt || session.configurationRefresh) {
+    if (session.promptsInFlight > 0 || session.compacting || session.activeRun || session.preparingPrompt || session.configurationRefresh) {
       throw new Error("Cursor is busy. Wait for the current run to finish before compacting context.");
     }
     const agent = session.agent;
     if (!agent.summarize) throw new Error("Cursor SDK context compaction is unavailable.");
-    session.compacting = true;
     session.cancelRequested = false;
     let run: SdkRun | undefined;
     const ownsSession = () => this.sessions.get(opts.sessionId) === session && !session.disposing && session.agent === agent;
     const translator = new CursorSdkTranslator({ sessionId: opts.sessionId, compactionTrigger: "manual",
       emit: event => { if (ownsSession()) this.ctx.emit.onSessionUpdate(AGENT_ID, event); } });
+    let releasePrompts!: () => void;
+    const compaction = {
+      settled: new Promise<void>(resolve => { releasePrompts = resolve; }),
+      stop: new AbortController(),
+      flush: () => translator.flushSubagents({ readFinal: false, ownsUpdates: ownsSession }),
+    };
+    session.compacting = compaction;
     try {
       run = await agent.summarize();
       if (!ownsSession() || session.cancelRequested) { await run.cancel().catch(() => {}); return; }
@@ -2979,9 +3012,12 @@ export class CursorSdkAdapter implements AgentAdapter {
       await run?.cancel().catch(() => {});
       if (ownsSession() && !session.cancelRequested) throw this.classify(error, "prompt");
     } finally {
-      await translator.flushSubagents({ readFinal: false, ownsUpdates: ownsSession });
-      if (session.activeRun === run) session.activeRun = null;
-      session.compacting = false;
+      try { await compaction.flush(); }
+      finally {
+        if (session.activeRun === run) session.activeRun = null;
+        if (session.compacting === compaction) session.compacting = undefined;
+        releasePrompts();
+      }
     }
   }
 
@@ -2989,6 +3025,7 @@ export class CursorSdkAdapter implements AgentAdapter {
     const session = this.sessions.get(opts.sessionId);
     if (session) {
       session.cancelRequested = true;
+      session.compacting?.stop.abort();
       session.preparingPrompt?.abort();
     }
     // Native cancel can finish after its run has settled and the user has
@@ -3151,9 +3188,15 @@ export class CursorSdkAdapter implements AgentAdapter {
     // session is superseded mid-turn (one-live-session-per-chat teardown in the
     // engine) — mirrors the claude/codex deliberate-teardown semantics.
     session.billing?.dispose();
-    session.disposing = true;
     session.cancelRequested = true;
+    session.compacting?.stop.abort();
     session.preparingPrompt?.abort();
+    // readFinal:false synchronously settles already-published summary rows.
+    // Start that flush before fencing the emitter, with no await in between;
+    // late native completion must never leave a retired row spinning.
+    const compactionSettlement = session.compacting?.flush();
+    session.disposing = true;
+    await compactionSettlement?.catch(() => {});
     try {
       await session.activeRun?.cancel();
     } catch {

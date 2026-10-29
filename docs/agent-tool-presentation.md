@@ -205,12 +205,18 @@ run completion do not prove successful compaction. Summary text is private
 context and is never published as assistant narration.
 
 Local Cursor `/compact` calls `agent.summarize()` without adding a user prompt.
-It requires an idle run and a saved native conversation. Prompt preparation,
-pending sends and another compaction are busy; refusal does not abort them.
-Stop/disposal cancels a late summary run and fences its events. No provider has
-a manual `AGENT_COMPACT` route in the standalone cloud worker; automatic rows
-still work there. Cursor's context gauge remains unavailable because turn
-token usage is not a measurement of the current context-window fill.
+It requires an idle run and a saved native conversation. Compaction refuses
+while any prompt is preparing or unsettled, or another compaction is running;
+that refusal does not abort existing work. A prompt submitted during manual
+compaction waits for its success or failure, then runs normally. Stop cancels
+that wait before the prompt can send, even while native summarization is still
+starting. Prompt admission stays with the engine: an earlier ghost prompt must
+not prevent a newly admitted prompt from running. Disposal settles an already
+published, unconfirmed compaction row as failed before fencing late events.
+Stop/disposal cancels a late summary run. No provider has a manual
+`AGENT_COMPACT` route in the standalone cloud worker; automatic rows still work
+there. Cursor's context gauge remains unavailable because turn token usage is
+not a measurement of the current context-window fill.
 
 SDK 1.2.0 still loads repository `AGENTS.md` during executor prewarm when
 `settingSources` includes `project`. Its text decoder now uses

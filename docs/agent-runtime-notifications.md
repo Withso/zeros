@@ -203,7 +203,7 @@ selection contract remain in place for create, resume and the next send.
 
 | Area | Decision and evidence |
 | --- | --- |
-| `SDKAgent.summarize()` | Local `/compact` starts an idle native summary run through the contained host. Reject busy/preparing sessions without interruption; preserve the SDK's unsaved-conversation error. Adapter and host regressions cover cancellation, stale handles and private result text. Cloud manual compaction remains unavailable, as for Claude/Codex. |
+| `SDKAgent.summarize()` | Local `/compact` starts an idle native summary run through the contained host. Compaction refuses while prompts are unsettled/preparing; new prompts wait through summary success or failure, and Stop cancels that wait before send. Engine-admitted ghost-prompt overlap remains allowed. Disposal settles published rows before fencing late events. Preserve the SDK's unsaved-conversation error and private result text. Cloud manual compaction remains unavailable, as for Claude/Codex. |
 | `SDKMessage`, `SDKSummaryMessage`, `SummaryCompletedUpdateSchema` | Both translators reconcile running/completed/error lifecycles and callback mirrors into existing compaction rows, retaining fallback detail. Native schema inventory and cloud persistence/parity tests cover the contract. |
 | `summaryUpdateToSdkMessage` and public re-exports | SDK-owned conversion/export plumbing; the consumers handle its resulting message and callback shapes. The installed message/delta inventory is exhaustive. |
 | `RunExecutorInput`, `UnimplementedAgent`, `trackSdkOperationFailed` | SDK-owned executor, stub and operation telemetry. Zeros calls the public agent API, never these internals. No custom executor or telemetry integration is introduced. |

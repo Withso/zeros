@@ -3,7 +3,7 @@
   "kind": "replay",
   "area": "vm-engine-agents",
   "fixedBy": "pr:767",
-  "symptom": "Cursor 1.2 summary messages were invisible, and /compact was text rather than native summarization. Callback/stream mirrors and unfinished runs need distinct lifecycle evidence.",
-  "rule": "Inventory provider messages and deltas, reconcile their native lifecycles, and require positive compaction completion. See agents/zstack/changes/cursor-sdk-120-compaction.md.",
+  "symptom": "Cursor 1.2 summary messages were invisible, and /compact was text rather than native summarization. A prompt lock then rejected engine-admitted ghost recovery and prompts sent during compaction, while disposal could leave a published compaction row spinning.",
+  "rule": "Inventory messages and deltas, reconcile native lifecycles, and require positive compaction completion. Count unsettled prompts only to refuse compaction; allow ghost-prompt overlap. New prompts await summary success or failure, with Stop cancelling before native send. Settle published rows before disposal fences events. See agents/zstack/changes/cursor-sdk-120-compaction.md.",
   "check": "pnpm exec vitest run apps/desktop/src/engine/agents/adapters/cursor-sdk/__tests__/compaction.test.ts apps/desktop/src/engine/agents/adapters/cursor-sdk/__tests__/compact-context.test.ts packages/protocol/src/__tests__/builtin-commands.test.ts"
 }
