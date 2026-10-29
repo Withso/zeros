@@ -6,125 +6,83 @@
 |---|---|
 | The failing test is unrelated to the diff and passes alone or on rerun | Flake (timing or load) |
 | A runner or environment message, for example "containment environment not ready" | Infrastructure |
-| Unexpanded names such as `tests-vitest (${{ matrix.part }}/4)` | A cancelled duplicate run, often caused by adding a label. Ignore it; the later run counts. |
+| Unexpanded names such as `tests-vitest (${{ matrix.part }}/4)`, or roll-ups that fail with "Invalid … selection/result" | A run cancelled because a label or ready state changed. Ignore it; the newest run for the head counts. |
 | CodeQL new alerts | Real. Fix it, even when it is in test code. |
 | Assertion in the code you changed | Real |
 
+## Rule out the environment
+
+- Diagnose the earliest fixture-admission failure before inferring a semantic
+  conflict. Check free space and inodes after ENOSPC, the umask (`022` in CI),
+  capabilities (this sandbox bypasses file modes), the Node major and missing
+  host tools. `agents/zstack/gotchas.md` lists the known ones.
+- Before any Git-bearing check, remove `GIT_DIR`, `GIT_WORK_TREE`,
+  `GIT_INDEX_FILE`, `GIT_OBJECT_DIRECTORY`, `GIT_ALTERNATE_OBJECT_DIRECTORIES`,
+  `GIT_COMMON_DIR` and `GIT_CEILING_DIRECTORIES` from runner and fixture
+  environments: `cwd` alone does not isolate Git. Never route a test through
+  the shared checkout's metadata.
+- Compare a failing gate's policy revision with the workflow producing its
+  input: PR CI loads some readers from the trusted base, so rerunning an old
+  event keeps its old policy.
+
 ## Act
 
-- **Database fixture disk pressure:** check free space and inodes after ENOSPC
-  before interpreting downstream failures. Reuse the worker's Postgres instance;
-  stop obsolete disposable clusters before removing their data directories.
-  Preserve the interrupted run as environment evidence, then rerun the gates.
-- **Git fixture isolation:** before any Git-bearing check, remove `GIT_DIR`,
-  `GIT_WORK_TREE`, `GIT_INDEX_FILE`, `GIT_OBJECT_DIRECTORY`,
-  `GIT_ALTERNATE_OBJECT_DIRECTORIES`, `GIT_COMMON_DIR` and
-  `GIT_CEILING_DIRECTORIES` from the runner and fixture subprocess environments.
-  `cwd` alone does not isolate Git. Create fixture repositories in fresh temporary
-  directories; reproduce inherited routing only against another disposable
-  repository. Never route a test through the shared checkout's Git metadata.
-- **Cross-package imports:** a value import in a shared schema module can pull
-  an engine implementation into the control-plane graph. Run
-  `scripts/__tests__/control-plane-scope.test.ts` after changing those imports.
-  When the implementation belongs to engine boot, keep the shared dependency
-  type-only and inject it there; test absent and rejecting implementations.
-  Do not widen the CI input list merely to hide an unintended dependency.
-- **Lifecycle fixture drift:** a test calling a class lifecycle method on a
-  partial object must retain the real prototype helpers. Keep injected service
-  failures and every cleanup assertion; new diagnostics must not replace the
-  original aggregate error. Run the failed-cleanup suite alongside retirement
-  tests, including Local and cloud logging behavior.
 - **PR CI:** rerunning only the failed jobs is fine for a flake or infra
   failure. Record that it was a rerun.
-- **HTML/SVG pixel comparisons:** reproduce the runner's font rasterization
-  settings before changing a pixel tolerance. Linux fontconfig can enable LCD
-  text for an opaque HTML paint while an SVG image uses grayscale antialiasing.
-  Use the same grayscale mode for both test references (`--disable-lcd-text`),
-  retain the strict pixel assertion, and leave application rendering unchanged.
-  A matching browser/font version alone does not prove matching rasterization.
-- **Read-only corruption fixtures:** temporarily permit fixture writes, restore
-  the original mode in `finally`, and keep the byte length unchanged when testing
-  a digest mismatch. Assert the closed failure code. On Linux, a nonzero UID can
-  still hold filesystem-bypass capabilities; reproduce permission failures with
-  inherited, ambient and bounding capabilities dropped, not just another UID.
-- **Pinned documentation inventories:** adding a guide under a directory with
-  an exact file allowlist also changes its layout contract. Run
-  `scripts/__tests__/repository-layout.test.ts` explicitly, update the owning
-  index and preserve existing entries. Docs lint and an interrupted full-root
-  run do not verify that inventory boundary.
-- **Permission-sensitive suites on a shared host:** the Dev environment and
-  auth-profile suites refuse group-writable state. Under a `0002` umask they
-  fail with "private, user-owned files". Rerun them with `umask 022`, which
-  matches CI, before suspecting the diff.
-- **Release workflows:** never rerun only the failed jobs. Carried producer
-  jobs get new IDs and break signed-build provenance. Use a full rerun or a new
-  push. A release that started while another deploy was in flight can fail its
-  forward-only barrier; the next successful release supersedes it.
-- **Alpha release edit 5xx:** retry only the identical metadata edit for the
-  exact repository release object, within the publication lock and original
-  job lifetime. Keep the bound, cancellation and closed diagnostics; never
-  broaden this to creation, assets or tag writes. Execute the actual workflow
-  step against asserted synthetic executables to verify upload/tag ordering.
-- **Alpha tag/ledger disagreement:** the previous publisher uploads the ledger
-  before moving the tag. Read both identities and the prior job outcome before
-  proposing a repair. Initial admission may wait only for an already validated
-  ancestor mismatch, with a bound and fresh CI/frontiers on retry. Never admit
-  unequal identities or manually rewrite publication history to pass a gate.
 - **A flake twice** becomes a deterministic fix PR. Reproduce it under load,
   find the race (often teardown, not the asserted behavior) and fix the
-  fixture without weakening the contract.
-  Portable cgroup fixtures must sample real births and owned groups without
-  depending on unrelated host cgroup metadata that they replace with fake IO.
-  Capture the closed kernel state before changing a process reader: a dead X
-  task can retain its birth after group/session fields are cleared. Validate
-  live identities strictly, and wait for a complete census across real exits.
-  A busy launch wrapper is not command readiness: hold the launch gap, then
-  await the actual workload's acknowledgement before testing owner handoff.
-  An empty mutation queue does not prove that a gesture awaiting preview or
-  admission has completed. Hold that earlier boundary and join the original
-  retained gesture before asserting either a save or a refusal; unrelated
-  inspector reads are not evidence that the gesture was admitted.
-- **Shared test helpers:** enumerate and run every direct and transitive importer,
-  including callers reached through other fixture helpers, before READY. Keep
-  fault injection explicit when replacing a reader: incomplete or unavailable
-  observations must still refuse an empty proof in the consuming tests.
-- **Serializable context races:** a losing writer can reuse the committed context,
-  observe committed capacity, or exhaust its bounded retries before the winner
-  commits. Hold both COMMIT schedules separately from the first INSERT barrier;
-  assert each exact outcome, the stored identity/capacity bound and each caller's
-  original deadline. Uniqueness does not promise both calls succeed. Don't rely
-  on database victim selection, accept any error or widen production retries.
-- **Native journal process races:** initialize each handle before racing CAS
-  writes. A bounded lock refusal is a distinct losing outcome, not process EOF
-  or a successful conflict. Retain exactly one confirmed winner, its exact
-  stored custody, and a stale-revision check from the loser. Hold real locks
-  through open/write refusal, preserve unexpected child failures with bounded
-  stderr diagnostics, and never widen production busy limits to stabilize CI.
-- **Database test timeouts:** first trace whether the changed code actually runs in the failing test,
-  then reproduce with bounded database transit delay. Large lifecycle or pagination fixtures can
-  legitimately exceed the default 5 s test budget. Give only that case a justified bounded timeout,
-  keep every assertion and every production deadline, and test callback overlap with held work and
-  observed completion, never with a sleep or a manual worker tick.
-  Migration cases that execute the whole SQL ladder pay every migration transaction, even when
-  their final assertion is small. Reuse the ladder's explicit per-case budget for a reproduced
-  timeout; retain the real empty/populated upgrade and ledger-permission assertions.
-  Classify test-only budget fixes as timing scenarios: fixed-test replay overlays would erase
-  the failing timeout in the parent.
+  fixture without weakening the contract: hold the real boundary, wait for the
+  actual workload's acknowledgement, and never widen production limits to
+  stabilize CI (principle 14).
+- **Serializable races:** a losing writer can exhaust bounded retries before
+  the winner commits. Hold both COMMIT schedules separately and assert each
+  exact outcome; don't accept any error or widen production retries.
+- **Database test timeouts:** first trace whether the changed code runs in the
+  failing test, then reproduce with bounded database transit delay. Give only
+  that case a justified budget (migration-ladder cases share the ladder's
+  30-second budget) and keep every assertion and production deadline.
+- **Shared test helpers:** run every direct and transitive importer before
+  READY. Lifecycle doubles must include newly owned services and keep every
+  cleanup assertion; a value import in a shared schema can pull an engine
+  implementation into the control-plane graph
+  (`scripts/__tests__/control-plane-scope.test.ts`). A suite that imports
+  another package's sources needs that package installed in its CI job.
+- **Workflow entry points:** run each changed entry with its actual interpreter
+  and loader in a fresh child with no inherited secrets or Git routing. Values
+  hidden before the runner logs its environment belong in Actions secrets.
+- **Pixel comparisons:** reproduce the runner's font rasterization before
+  changing a tolerance; use grayscale text (`--disable-lcd-text`) for both
+  references and leave application rendering unchanged.
+- **Read-only corruption fixtures:** temporarily permit writes, restore the mode
+  in `finally`, keep the byte length when testing a digest mismatch, and assert
+  the closed failure code.
+- **Pinned inventories:** a new guide under an audited directory changes its
+  layout contract; run `scripts/__tests__/repository-layout.test.ts` and update
+  the owning index.
+
+## Releases and main
+
+- **Release workflows:** never rerun only the failed jobs; carried producer jobs
+  break signed-build provenance. Use a full rerun or a new push. A release that
+  started while another deploy was in flight can fail its forward-only barrier;
+  the next successful release supersedes it.
+- **Alpha release edit 5xx:** retry only the identical metadata edit for the
+  exact release object, within the publication lock and original job lifetime.
+- **Alpha tag/ledger disagreement:** the publisher uploads the ledger before
+  moving the tag. Read both identities and the prior job outcome before
+  proposing a repair; never rewrite publication history to pass a gate.
 - **Main red:** the CI incident bot opens a `fix(ci): restore …` PR. A green
   rerun at the same head resolves it; still land the deterministic fix.
 - **Audit-only main red:** compare the advisory's published and updated times
-  with the last green main run before blaming a suspected PR. Repair the root
-  and control-plane graphs. Never override a pinned provider runtime across a
-  major without reading its API use. Bound each reviewed exception in
-  `scripts/__tests__/audit-exceptions.test.ts`.
-- **Dependency automation:** before waiting for a bot PR, check the Renovate
-  Dependency Dashboard's last update and the runtime radar mode. Push
-  `pnpm licenses:generate` output to bot PRs, or supersede them. Triage Electron
-  advisories as production, even though the `--prod` audit skips them.
+  with the last green main run before blaming a PR. Repair the root and
+  control-plane graphs, never override a pinned provider runtime across a major
+  without reading its use, and bound each exception in
+  `scripts/__tests__/audit-exceptions.test.ts`. A production-only audit misses
+  build and test tools and the standalone lockfiles; audit each graph.
+- **Dependency automation:** check the Renovate Dependency Dashboard's last
+  update and the runtime radar mode before waiting for a bot PR. Push
+  `pnpm licenses:generate` output to bot PRs or supersede them. Triage Electron
+  advisories as production even though the `--prod` audit skips them.
 - **Cleanup blocking a repair release:** scope the readiness projection to the
-  artifact being released. Preserve operational alerts and exact artifact
-  qualification. Classify combined lifecycle/rotation signals in one consistent
-  read; test cleanup alone, cleanup plus each critical class, unknown reasons
-  and unchanged v1 receipt parsing before adjusting the gate. Release tests use
-  `--config scripts/release/vitest.config.ts`; confirm the matched file count,
-  since a mixed command can pass while a path outside its include list is ignored.
+  artifact being released, keep operational alerts, and test cleanup alone and
+  beside each critical class before adjusting the gate.

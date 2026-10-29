@@ -7,110 +7,91 @@ globs: "**"
 # zstack-review
 
 Review the complete diff, then each test against the behavior it claims to
-cover. A finding needs evidence, either a file and line plus a concrete
-failing input, or a reproduction. Drop anything you can't substantiate.
+cover. A finding needs evidence: a file and line plus a concrete failing input,
+or a reproduction. Drop anything you can't substantiate. Numbers refer to
+`agents/zstack/principles.md`.
 
 Name the exact revision you reviewed: its commit, or `git stash create` for
 uncommitted work. Before reporting a blocker, confirm it still exists at the
-branch head. A review of a stale or standalone checkout reports fixed work.
+branch head. A fresh-context pass finds what the author's own suites miss:
+reproduce each candidate against the base.
 
 ## Checklist
 
-**Placements and state** (`RULES.md` §8 and the `zeros-workspaces` skill)
+**Placements and state** (`RULES.md` §8, `zeros-workspaces`, principles 1–3)
 - Local Personal, organization-local and cloud owners all behave correctly.
-  Switching A → B → A never shows another owner's data, and late responses
-  are fenced.
+  Switching A → B → A never shows another owner's data; late and failed
+  replies are fenced at completion as well as admission.
 - Keyed server state keeps the last confirmed exact-key snapshot while
-  revalidating. Retained hidden surfaces stay inert: no polling, shortcuts or
-  measurement.
+  revalidating, and unknown never renders as empty, deleted or healthy.
+- Retained hidden surfaces stay inert: no polling, shortcuts or measurement (9).
+- A metadata-only write (archive, close) still advances the revision that
+  readers order by.
 
-**Security**
-- No credential appears in logs, arguments, test output, receipts or URLs that
-  are shown.
-- File checks open the file once (`O_NOFOLLOW`) and validate that descriptor.
-  Never `stat` a path and then read it by path; CodeQL flags this even in
-  tests.
-  If a native library opens independently, bind its actual reader to the held
-  original. Test swap-and-restore at that open, cached descriptor reuse masked
-  by an unrelated open, and cleanup on ambiguous evidence; a pathname or a
-  unique newly observed FD alone is not that proof.
-  On Linux, closing an independent ordinary FD can release a peer SQLite
-  connection's process locks. Verify kernel locks and second-process exclusion
-  through refusal and successful close; `inTransaction` alone is insufficient.
-- Authentication changes don't relax a check that ordinary users rely on. A
+**Security** (17)
+- No credential appears in logs, arguments, test output, receipts or shown URLs.
+- File checks open once without following links and read through the validated
+  descriptor; CodeQL flags stat-then-read even in tests. A native library that
+  opens independently is bound to the held original, and on Linux closing an
+  independent FD can release a peer SQLite connection's locks: verify kernel
+  locks and second-process exclusion, not `inTransaction`.
+- Authentication changes don't relax a check ordinary users rely on. A
   test-only path stays gated, pinned, audited and absent on other channels.
 - SQL is parameterized and RLS context is transaction-local.
-- A destructive tool guarded by a connection URL validates the effective
-  target: refuse query parameters (pg applies `?host=` over the URL host),
-  accept only loopback IP literals (`127.example.com` is a name), resolve
-  `localhost`, and allow-list the database name.
+- Hosts are compared parsed, never by substring; regular expressions over
+  untrusted input stay linear (CodeQL flags quadratic backtracking in moved code
+  too). Secret checks cover encoded forms as well as the literal value.
+- Diagnostics carry closed metadata and executable names, never full command
+  lines (host-injected authentication arguments) or raw provider text. A
+  self-recovering condition logs once, without a stack; a failure that repeats
+  at every launch names its remediation.
+- A destructive tool guarded by a connection URL validates the effective target:
+  refuse query parameters (pg applies `?host=` over the URL host), accept only
+  loopback IP literals, resolve `localhost`, and allow-list the database name.
 
-**Concurrency and time**
-- Read paths don't take mutation locks. Real mutations keep their locks, CAS
+**Concurrency and time** (4–8)
+- Read paths take no mutation locks; real mutations keep their locks, CAS
   checks and revocation publication.
-- Deadlines are anchored at the start of the observation, so a slow response
-  can't extend authority.
-- An open push connection or cached pong does not prove its backing pool is
-  healthy. Exercise an independent API deadline with only that pool failed;
-  bound optional I/O and keep timed-out reads from accumulating.
-- Positive process exit withdraws only the original launch. Cover setup and
-  runtime-transfer enrollment, failed signalling, and final capture on both
-  sides of the authority lock; neither exit nor Stop admission proves erasure.
-- Windows tolerate ordinary clock skew and are compared against documented
-  bounds.
-- A jittered retry has a minimum delay. Full jitter can draw zero, and a
-  zero-delay retry of a failure that arrives without yielding re-enters the
-  loop through promise callbacks and starves the event loop.
+- Deadlines anchor at the start of the observation. An open push connection or
+  cached pong does not prove its backing pool is healthy.
+- Intent is durable before provider I/O; a lost reply reuses the original key
+  and bytes, and Stop aborts deferred work before cancelling what it waits for.
+- Retries are typed and bounded, with a minimum delay. A cancelled waiter
+  releases its callbacks, so cancellation churn cannot grow retained work.
+- A lock is recovered only with process-identity proof; age does not show that
+  its holder died.
 
-**Database cost**
-- Price every recurring query: CPU per call times calls per second, against
-  the database's CPU budget (its vCPU share times 1000 ms/s). On a 1/16-vCPU
-  database (62.5 ms/s), a 25 ms query once a second uses 40% of it.
-- Background loops are state-aware. Archived and stopped resources are not
-  polled at running cadence; derive the next due time from the state.
+**Database cost** (8)
+- Price every recurring query against the database's CPU budget (vCPU share
+  times 1000 ms/s): on a 1/16-vCPU database (62.5 ms/s), a 25 ms query once a
+  second uses 40% of it. The worker role's pool has two connections.
+- Background loops are state-aware: archived and stopped resources are not
+  polled at running cadence.
+- A pipeline that publishes an artifact on every change ships its retention in
+  the same change, keeping what a live deployment may still fetch.
 
-**Compatibility**
-- New wire fields are optional and N/N−1 tested. Persisted keys and
-  externally observable identifiers are preserved or migrated explicitly.
-- Retired request fields are not sent. Check the current route contract, not
-  memory.
-- When absence permits a legacy path, look up immutable evidence before
-  filtering eligibility or revocation. A recorded rejection must not become
-  absence, and a selected attempt cannot downgrade after a later read fails.
-- A durable-delivery rollout can overlap an older bridge turn. An empty outbox
-  cannot retire that turn; require its exact native confirmation. Keep journal
-  commit, server receipt, VM inbox ACK and provider acceptance separate, and
-  mutation-test that a lost response reuses the original message ID and bytes.
+**Compatibility** (10–12)
+- New wire fields are optional and N/N−1 tested in both directions. Persisted
+  keys and externally observable identifiers are preserved or migrated
+  explicitly; retired request fields are not sent.
+- When absence permits a legacy path, look up immutable evidence first: a
+  recorded rejection must not become absence. A recovery change to a shared
+  provider method is opt-in for the callers that have durable retry identity.
+- Every consumer of a changed contract moved in the same change, in both
+  placements, including CI scope lists and bundle entries.
 
-**Tests**
-- Bug fixes include a regression that fails without the fix.
-- Owner-bound editing sessions follow the rendered directory as well as the
-  remembered page and revision. Test a persisted page whose directory first
-  resolves without a revision change, with cold-entry and real owner-refresh
-  controls; retain the unchanged selection assertion and owner guard.
-- No fixed sleeps standing in for contention. Hold the condition until the
-  code under test has actually observed it.
-- When several sources can wake a loop (hint, poll, retry timer), assert
-  structural conditions, not absolute timing floors on `performance.now()`
-  deltas: a gate cannot tell a late hint from the first poll.
-- Provider-shaped fixtures match the real wire shape. Qualify against a real
-  response at least once.
-- Retry waits and terminal codes come from the provider's documented error
-  envelope, not HTTP convention. Pin each documented wait field and each code
-  that ends an operation with a wire-shaped test.
-- Replay provider updates through the shared history reducer as well as the
-  producer. An emitted replacement can look correct while an immutable consumer
-  silently ignores it.
-- Hold advisory previews across authoritative document replacement in both
-  save-event orders. A lingering saved preview cannot overwrite a newer saved
-  generation. Check memory bounds through every retained payload reference,
-  including status metadata, rather than only the field the UI reads.
-- Verify authored CSS provenance against browser-computed results for inline
-  variable shorthands, nesting and element-dependent conditions. If the winner
-  cannot be established, keep computed output and omit the source claim.
+**Tests** (13–15)
+- Bug fixes include a regression that fails without the fix, through the real
+  boundary, with Local and cloud cases for shared paths.
+- No fixed sleeps or absolute timing floors; the race window is asserted open.
+- Provider-shaped fixtures match the real wire shape and the provider's
+  documented error envelope.
+- Performance changes keep the ordering, freshness and liveness contracts of
+  the work they remove: a read that guards a destructive operation never joins
+  an observation started before the caller asked.
 
 ## Output
 
 List findings most severe first. Each one gets a one-line claim, the evidence
-and a concrete failure scenario. Then list what was verified as correct, so
-the integrator knows the review's scope.
+and a concrete failure scenario. Then list what was verified as correct, so the
+integrator knows the review's scope.

@@ -25,7 +25,8 @@ session itself.
    work staged.
 5. **Open the PR** with Why, What changes, Tests and Rollout sections, ending
    with the repository's PR footer. Add lane labels the paths need, for example
-   `ci:ui-smoke`. Check that all four sections are present before arming.
+   `ci:ui-smoke`. Check that all four sections are present before arming. Mark
+   a draft ready before waiting on CI: a draft runs only the merge gate.
 6. **Pin pending eval cases.** The PR number exists only once the PR is open.
    Replace any `"fixedBy": "pending"` in `agents/zstack/evals/cases/*.json` (or
    the legacy `cases.json`) with `pr:<n>`, validate, amend and push with
@@ -76,4 +77,5 @@ session itself.
      plane's `CLOUD_V2_RUNTIME_SHA256`; gate0's `--runtime` must match it.
 9. **Before a release during a freeze,** list which deployables each pending
    PR changes (control plane, cloud runtime, desktop), so the release's effect
-   is known before it ships.
+   is known before it ships. Hold releases while a confirmed data-loss path is
+   unfixed, even when other fixes are ready.

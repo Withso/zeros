@@ -35,6 +35,10 @@ Use this for any change to Zeros, whichever host you run in. `AGENTS.md` and
   - Sending a step is not idempotent. Read the host's documented reply
     shape before treating a send as failed, check the transcript before
     resending, and pass the host's message id flag when it has one.
+- **Co-masters** only when the user pairs two masters. Split file ownership
+  before work, give each master its own worktree and PRs, and let one of them
+  arm every merge after reviewing the other's full diff. Each cross-reviews the
+  other's PRs. Shared contracts change only through an explicit delta message.
 - Write the mode, models and the user's instruction into your first progress
   note.
 
@@ -51,13 +55,17 @@ Use this for any change to Zeros, whichever host you run in. `AGENTS.md` and
 | Performance or a new canvas/runtime backend | `agents/zstack/playbooks/performance.md` and `zstack-verify` |
 | Workspaces, engine, bridge, agents or Git | the `zeros-workspaces` skill (Local and cloud owners and placements) |
 
+Every task also uses `agents/zstack/principles.md`: the eighteen principles
+that hold Zeros' recorded lessons, each with the eval cases behind it.
+
 Guard the context window. Read the feature area you are changing and the docs
 `AGENTS.md` points to for it, not the whole repository.
 
 ## 3. The loop
 
 1. **Plan.** State the observable outcome and acceptance criteria, which
-   subsystem owns the change, and how Local and cloud are affected.
+   subsystem owns the change, how Local and cloud are affected, and which
+   principles the change touches.
 2. **Red.** A bug needs a failing regression test before the fix. A feature
    needs a concrete usage example. A finding becomes work only once it has a
    failing test or a recorded repro.
