@@ -42,6 +42,12 @@ WorkOS. Never use Beta or Production credentials or data.
   digests, upload only the missing asset, move the tag forward to the
   ledger's last `sourceSha` after an ancestry check, run
   `release-ledger-cli.ts --verify`, then fully rerun the latest release run.
+- Rerun a failed Release (alpha) in full (`gh run rerun <id>`), never with
+  `--failed`. Publication verifies that the signed macOS build came from the
+  same run attempt, so a partial rerun redeploys hosted services and then
+  refuses the earlier build ("belongs to another source, run, producing attempt
+  or version"). Before and after, read `https://api-alpha.zeros.build/v1/release-identity`
+  (source SHA, maintenance, ready) and the `alpha` release name.
 
 ## Pins and rebuilds
 

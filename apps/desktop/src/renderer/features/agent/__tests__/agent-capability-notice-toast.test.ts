@@ -124,7 +124,7 @@ describe("agent capability notice toast", () => {
     expect(mocks[kind]).toHaveBeenCalledExactlyOnceWith(
       title,
       expect.objectContaining({
-        description: expect.stringMatching(/~\/\.codex\/config\.toml has its own node_repl setup/),
+        description: expect.stringMatching(/changes node_repl in a way Zeros can't verify/),
       }),
     );
   });

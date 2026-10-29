@@ -1124,8 +1124,9 @@ export type AgentCapabilityNoticeCode =
   | "codex-browser-plugin-incomplete"
   /** ChatGPT's Browser plugin uses a layout this Zeros build cannot load. */
   | "codex-browser-plugin-unsupported"
-  /** Codex configuration declares its own node_repl, which would change the
-   *  verified Browser runtime Zeros starts. */
+  /** A Codex configuration layer changes node_repl beyond the inert settings
+   *  Zeros accepts from the user's own config, so the verified Browser runtime
+   *  cannot start for this chat. */
   | "codex-browser-config-conflict"
   /** Codex's built-in browser could not start for another reason. Sent only
    *  with a `fallback`; without one the loss stays in the agent log. */
