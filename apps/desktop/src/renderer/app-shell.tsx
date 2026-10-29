@@ -1,25 +1,4 @@
 import { subscribeChatSnapshots } from "./state/chat-snapshot-subscription";
-// ──────────────────────────────────────────────────────────
-// Zeros Mac App — App Sidebar + Two-Column Workspace Shell
-// ──────────────────────────────────────────────────────────
-//
-// Layout: one left sidebar owns window chrome and navigation — organization,
-// Dashboard / Customize / Create, and every workspace grouped by repository —
-// beside the agent chat and right-side work surface:
-//
-//   ┌──────────────┬────────────────────────┬──────────────────┐
-//   │ ● ● ●        │ Agent Workspace        │ Browser / panels │
-//   │ Dashboard    │ chat                   │ tabs + workspace │
-//   │ Create       │                        │                  │
-//   │ Workspaces   │                        │                  │
-//   └──────────────┴────────────────────────┴──────────────────┘
-//
-// Home destinations (Dashboard, Customize, repository pages, Create) replace
-// the two columns; Settings replaces the sidebar with its own section nav.
-//
-// Workbench mounts the design workspace beside native-adjacent tools
-// such as Git, Terminal, Env, and Todo.
-// ──────────────────────────────────────────────────────────
 
 import React, { useEffect, useRef } from "react";
 import { CloudWorkspaceLifecycle } from "./state/cloud-workspace-lifecycle";
@@ -170,10 +149,8 @@ import {
 import { useGitRefreshCoordinator } from "./shell/use-git-refresh-key";
 import { GithubAppNotifications } from "./platform/bridge/github-app-notifications";
 
-// Chat localStorage cache keys live in a shared module so the repo-removal
-// path (which bulk-deletes a repo's chats) reconciles the exact same keys this
-// component's ChatsPersistence owns — a drifted key would resurrect deleted
-// chats on reload. See chats-local-cache.ts for the full rationale per key.
+// Shared with the repo-removal path so both reconcile exactly the same keys; a
+// drifted key would resurrect deleted chats on reload.
 import {
   CHATS_BACKUP_KEY,
   CHATS_STORAGE_KEY,
@@ -187,12 +164,6 @@ import { installAccountPresentationIdentity } from "./state/account-presentation
 import { localTranscriptCache } from "./state/local-transcript-cache";
 import { retainTranscriptSummaries } from "./features/agent/use-chat-transcript-summaries";
 import { retainKnownEmptyLocalChats } from "./features/agent/fresh-local-chats";
-/** Engine-session prewarm claim.
- *
- *  This lives in agent-prewarm-singleflight's renderer-global state—not merely
- *  at module scope, because a directly edited module is re-evaluated by Vite.
- *  It resets only when `engineReady` drops false (the engine actually died),
- *  then the next ENGINE_READY transition can claim one fresh warmup. */
 
 // Device-local scroll positions must exist before the first chat layout effect;
 // a passive ChatsPersistence effect is already too late and causes a visible
@@ -204,19 +175,10 @@ try {
   console.warn("[Zeros] scroll-position boot hydration failed:", err);
 }
 
-/**
- * Pre-warm agent subprocesses so the first real session isn't paying
- * cold-start cost (CLI discovery + adapter spawn + agent initialize
- * handshake). Runs once per engine session and warms, in priority order:
- *
- *   1. the active chat's agent (user is about to talk to it)
- *   2. the rest of the agents currently attached to any chat
- *   3. every enabled registry agent (first-run: all of them)
- *
- * Everything is fire-and-forget. Already-warm agents (tracked in the
- * sessions store's `warmAgentIds`) are skipped so the focus-driven
- * rewarm doesn't hammer initAgent when nothing needs warming.
- */
+/** Pre-warm agent subprocesses once per engine session so the first real
+ *  session skips cold start: the active chat's agent, then agents attached to
+ *  chats, then every enabled registry agent. Fire-and-forget; already-warm
+ *  agents are skipped. */
 function PreWarmAgents() {
   const chats = useChats();
   const activeChatId = useActiveChatId();
@@ -236,14 +198,8 @@ function PreWarmAgents() {
         snapshot && hasConfirmedAgents()
           ? snapshot
           : await loadAgents((force) => sessions.listAgents(force));
-      // Build the set of currently-known agent IDs ONCE so the filter
-      // below is O(1). Chat rows persist across registry changes —
-      // user might have an old chat whose `agentId` was removed (e.g.
-      // legacy values deprecated by the current provider model) or that lives only in the
-      // terminal panel registry (e.g. amp). Without this guard, every
-      // app launch fired AGENT_INIT_AGENT for those phantom IDs and
-      // silently caught the engine's "unknown agent" reply — quiet but
-      // wasteful, and confused future audits.
+      // Chat rows can name agents the registry no longer has (deprecated ids,
+      // terminal-only agents such as amp); never init those.
       const registryIds = new Set(registry.map((a) => a.id));
 
       const order: string[] = [];
@@ -264,11 +220,8 @@ function PreWarmAgents() {
         if (a.authenticated === true && !order.includes(a.id)) order.push(a.id);
       }
 
-      // Skip agents the engine already confirmed alive — `warmAgentIds`
-      // is cleared on disposeAll (which fires on engine restart), so a
-      // genuine re-warm only retries agents that actually need it.
-      // Without this, the focus-rewarm + any other trigger would
-      // re-fire AGENT_INIT_AGENT × 3 on every focus event.
+      // warmAgentIds clears on disposeAll (engine restart), so a focus re-warm only
+      // retries agents that need it.
       const warm = useSessionsStore.getState().warmAgentIds;
       const needsWarm = order.filter((id) => !warm.has(id));
       if (needsWarm.length === 0) return;
@@ -276,9 +229,8 @@ function PreWarmAgents() {
       await Promise.all(
         needsWarm.map((id) =>
           prewarmAgentOnce(id, sessions.initAgent).catch((err) => {
-            // Log at debug so a genuine init bug isn't invisible. Don't
-            // re-throw — pre-warm is best-effort by design and the next
-            // user prompt will surface a real failure via ensureSession.
+            // Best-effort: log at debug and let the next prompt surface a real failure
+            // through ensureSession.
             console.debug(
               `[Zeros] prewarm initAgent failed for ${id}:`,
               err instanceof Error ? err.message : err,
@@ -291,12 +243,9 @@ function PreWarmAgents() {
     }
   }, [sessions, chats, activeChatId]);
 
-  // Engine-session-scoped prewarm. Two transitions are relevant:
-  //   • engineReady false → true: this is a fresh engine session.
-  //     If the sentinel is still set from a previous mount, it's
-  //     because the engine hasn't died — skip. Otherwise, arm + warm.
-  //   • engineReady true → false: engine died (watchdog respawn).
-  //     Clear the sentinel so the next ENGINE_READY arms a re-warm.
+  // One warmup per engine session. The claim lives in
+  // agent-prewarm-singleflight's renderer-global state, because Vite re-evaluates
+  // an edited module, and resets only when the engine dies.
   useEffect(() => {
     if (!engineReady) {
       resetAgentPrewarmForEngineSession();
@@ -306,12 +255,8 @@ function PreWarmAgents() {
     void warmAll();
   }, [engineReady, warmAll]);
 
-  // Re-warm on window focus. If the user was backgrounded long enough
-  // for the sidecar watchdog to cycle the engine (or for an agent to
-  // self-exit on idle), this makes everything hot again before they
-  // click anything. Throttled so rapid focus/blur doesn't hammer; the
-  // warmAgentIds skip inside warmAll() ensures it's a no-op when
-  // everything is already warm.
+  // Re-warm on focus, throttled: while backgrounded, the engine may have cycled or
+  // agents exited on idle. warmAll skips warm agents, so this is usually a no-op.
   useEffect(() => {
     if (!engineReady) return;
     let lastRun = 0;
@@ -328,13 +273,8 @@ function PreWarmAgents() {
   return null;
 }
 
-/**
- * Pull the OpenAI API key from the macOS keychain and merge
- * it into AiSettings. The initial store value is synchronous and comes
- * from localStorage without the secret; this effect fills it in a tick
- * later. Any save from the Settings page persists the key back to the
- * keychain, so subsequent reloads find it here.
- */
+/** The OpenAI API key lives in the macOS keychain, not localStorage, so it is
+ *  merged into AiSettings a tick after boot. */
 function HydrateAiApiKey() {
   const dispatch = useWorkspaceDispatch();
   useEffect(() => {
@@ -357,9 +297,8 @@ function HydrateAiApiKey() {
   return null;
 }
 
-/** Translate a renderer-side ChatThread to the SQLite wire shape. The
- *  wire form keeps every field a plain JSON-safe value so the IPC
- *  envelope doesn't need a custom serializer. */
+/** ChatThread → SQLite wire row. Every field stays JSON-safe, so IPC needs no
+ *  custom serializer. */
 function threadToRow(c: ChatThread): ChatRowWire {
   return {
     id: c.id,
@@ -402,10 +341,8 @@ function rowToThread(r: ChatRowWire): ChatThread {
   // Normalize the persisted posture, migrating the legacy vocabulary
   // (full/auto-edit/ask/plan-only) to the current one.
   const permissionMode = normalizeChatPermissionMode(r.permissionMode);
-  // `kind` is a closed enum on the renderer ("chat" | "terminal" |
-  // undefined). The wire form widens to nullable string so legacy rows
-  // round-trip; restrict back here so anything stale lands as undefined
-  // (== "chat" by store convention).
+  // The wire widens `kind` to a nullable string so legacy rows round-trip;
+  // anything else becomes undefined (== "chat").
   const resolvedKind: "chat" | "terminal" | undefined =
     r.kind === "terminal" || r.kind === "chat" ? r.kind : undefined;
   const providerBinding =
@@ -441,23 +378,6 @@ function rowToThread(r: ChatRowWire): ChatThread {
   };
 }
 
-/**
- * Revalidate the synchronous chat boot snapshot against the engine and mirror
- * later mutations. The local snapshot is loaded while the Zustand module is
- * initialized, before React's first render; this component never performs a
- * post-paint "hydrate" repair that would flash the wrong workspace/chat.
- *
- * Storage layering (post-migration):
- *   - SQLite (`chats` table) is the durable source of truth. Survives
- *     a localStorage wipe, no 5–10 MB origin quota.
- *   - localStorage (`zeros-chats-v1` + backup + tombstone) is a sync-boot
- *     cache so chat/workspace chrome paints without a round-trip on cold start.
- *
- * SQLite remains authoritative and revalidates in the background. Incoming
- * rows merge by updatedAt so a late fetch cannot overwrite a newer local edit
- * or teleport the active selection. Engine writes are gated until that first
- * pull settles, preventing a stale boot cache from overwriting newer rows.
- */
 /** Marks chats unread when their agent finishes off screen, for the whole
  *  app session (chat-unread.ts). */
 function ChatUnreadTracking() {
@@ -489,6 +409,11 @@ function ChatTitleBackfill() {
   return null;
 }
 
+/** Revalidate the synchronous chat boot snapshot against the engine and mirror
+ *  later mutations. SQLite is the durable source of truth; the localStorage
+ *  copy only paints chrome without a round-trip on cold start. Rows merge by
+ *  updatedAt and engine writes wait for the first pull, so a stale boot cache
+ *  cannot overwrite newer rows. */
 function ChatsPersistence() {
   const cacheGeneration = accountPresentationGeneration();
   const chats = useChats();
@@ -639,42 +564,19 @@ function ChatsPersistence() {
     });
   }, [bridge, dispatch, pushRowsToEngine, cacheGeneration]);
 
-  // The renderer one-shot import of legacy transcripts was removed:
-  // the engine now migrates the legacy zeros-agent-history.db itself, on startup,
-  // reading the file directly (apps/desktop/src/engine/db/legacy-import.ts) — guaranteed and
-  // independent of the renderer.
-
-  // Persist on change (after hydration).
-  //
-  // Tombstone discipline: the previous version set the tombstone the
-  // moment chats was empty for any reason — a single transient
-  // empty during workspace swap or a reducer hiccup blocked backup
-  // recovery on next mount and visibly wiped the sidebar. Two guards
-  // now prevent that:
-  //
-  //   1. We require a non-empty → empty *transition*. Empty→empty is a
-  //      no-op so genuinely fresh installs don't keep rewriting the
-  //      tombstone (and don't accidentally set it if the initial reducer
-  //      state slips out before hydrate).
-  //   2. After the transition, we wait 5 seconds before writing the
-  //      tombstone. If chats become non-empty again in that window
-  //      (transient hiccup), the timer is cancelled. Only intentional
-  //      "user cleared everything and walked away" sticks.
-  //
-  // Backup updates remain immediate — they're additive and never
-  // destructive, so writing them on every non-empty render is fine.
+  // Persist on change. The tombstone needs a non-empty → empty transition that
+  // lasts 5 s: a transient empty list (workspace swap, reducer race) must not
+  // block backup recovery or wipe the sidebar. Backup writes are additive, so
+  // they stay immediate.
   const prevChatsLengthRef = useRef<number | null>(null);
   const prevChatIdsRef = useRef<Set<string> | null>(null);
   const tombstoneTimerRef = useRef<number | null>(null);
   useEffect(() => {
     if (cacheGeneration !== accountPresentationGeneration()) return;
     persistWorkspaceChatCache(CHATS_STORAGE_KEY, chats, cacheGeneration, activeChatId);
-    // Propagate DELETIONS to the engine. The bulk write below is a non-destructive
-    // MERGE (so one device can't wipe another's chats), so a removed chat must be
-    // deleted explicitly or it lingers in the engine and reappears on reload.
-    // Guarded to a NON-EMPTY list: an empty `chats` is frequently a transient
-    // hiccup (workspace swap, reducer race) — see the tombstone discipline above —
-    // and must never mass-delete the durable engine copy.
+    // The bulk write below is a non-destructive MERGE, so a removed chat must be
+    // deleted explicitly or it reappears on reload. Never for an empty list: that
+    // is usually transient and must not mass-delete the engine copy.
     const currentIds = new Set(chats.map((c) => c.id));
     if (chats.length > 0 && prevChatIdsRef.current) {
       for (const id of prevChatIdsRef.current) {
@@ -714,11 +616,7 @@ function ChatsPersistence() {
     const prev = prevChatsLengthRef.current;
     prevChatsLengthRef.current = 0;
     if (prev === null || prev === 0) {
-      // Empty → empty. Either initial render before hydrate, or a real
-      // fresh install. Don't touch the tombstone — leaving it false
-      // means a future write that genuinely transitions non-empty →
-      // empty will set it correctly, and a future hydrate sees backup
-      // recovery available.
+      // Empty → empty: before hydrate, or a fresh install. Leave the tombstone alone.
       return;
     }
     // Non-empty → empty. Schedule a tombstone write after the debounce.
@@ -732,12 +630,9 @@ function ChatsPersistence() {
   }, [chats, pushRowsToEngine, cacheGeneration, activeChatId]);
 
   useEffect(() => {
-    // Mirror the active chat's picker state into the sticky-defaults
-    // store so the next "+ New Agent" lands with the same agent /
-    // folder / model / effort / permission mode the user is currently
-    // working in. Skipped when activeChatId is null (e.g. user just
-    // clicked New Agent itself) — we want the prior sticky to drive
-    // that empty state, not the absence of a chat.
+    // Mirror the active chat's picker state into sticky defaults so the next
+    // "+ New Agent" starts the same way. Without an active chat (New Agent was just
+    // clicked), the prior sticky defaults stay in charge.
     if (activeChatId) {
       const active = chats.find((c) => c.id === activeChatId);
       if (active) {
@@ -755,25 +650,12 @@ function ChatsPersistence() {
   return null;
 }
 
-/**
- * When the user picks a new project folder, the Electron main process
- * respawns the local engine on a fresh port and emits `project-changed`.
- *
- * In-place swap (no webview reload):
- *   1. Drop every in-memory session — they reference the dead engine's
- *      executionIds. The persistent provider binding on the chat lets us
- *      resume provider state on the user's next chat-open.
- *   2. Force the bridge client to re-resolve the engine port and open a
- *      fresh socket. Pending RPCs reject with a soft-fail — upstream
- *      retry loops handle it.
- *   3. Bump projectGeneration in the store. Project-scoped consumers
- *      (repository panel's currentRoot probe, file tree, terminal) rerun their
- *      effects against the new root.
- *
- * Generation guard: any late callback from the old engine is dropped
- * because (a) the websocket is closed, so events stop arriving, and
- * (b) the in-memory executionId → conversationId map was wiped by disposeAll().
- */
+/** A project-folder change respawns the engine on a new port. Swap in place
+ *  without a reload: drop sessions (they reference the dead engine's
+ *  executionIds; provider bindings resume later), reconnect the bridge, and
+ *  bump projectGeneration so project-scoped consumers rerun. Late callbacks
+ *  from the old engine are dropped: its socket is closed and disposeAll()
+ *  wiped the executionId map. */
 function ReloadOnProjectChange() {
   const sessions = useAgentSessions();
   const bridge = useBridge();
@@ -787,12 +669,10 @@ function ReloadOnProjectChange() {
     [bridge],
   );
 
-  // Settings foundation: import the legacy localStorage settings into the
-  // engine-owned TOML files once, on APP BOOT — not only when the user opens
-  // Settings. The personal repo file is created only after local exclusion is
-  // established; existing file values take precedence over legacy caches.
-  // Flag-guarded + merge-under engine-side, so calling on every bridge change
-  // is safe.
+  // Import legacy localStorage settings into the engine's TOML files at app boot,
+  // not only when Settings opens. The personal repo file is created only after
+  // local exclusion is established. Flag-guarded and merged under existing
+  // values engine-side, so every bridge change may call it.
   useEffect(() => {
     void ensureSettingsTomlMigrated(bridge);
     // One-time import of legacy 🔒 env secrets (`env::<NAME>` + the [env]
@@ -815,28 +695,20 @@ function ReloadOnProjectChange() {
   useEffect(() => {
     let unlisten: (() => void) | null = null;
 
-    // Recent projects are populated only by explicit user action
-    // (Open Folder, Clone, picking a workspace from the dropdown). We
-    // intentionally do NOT auto-seed from the engine root on boot —
-    // the engine always boots into *some* cwd (the dev repo, or the
-    // sentinel ~/.zeros/default-project for end users), and seeding
-    // that into recents resurrects entries the user just cleared.
-    // Fresh start = empty recents until the user picks a folder.
+    // Recents come only from explicit user action. The engine always boots into
+    // some cwd (the dev repo or ~/.zeros/default-project), and seeding that would
+    // resurrect entries the user cleared.
 
     onProjectChanged((payload) => {
       console.log("[Zeros] project changed", payload);
       rememberProject(payload.root);
       sessions.disposeAll();
-      // Clear just the folder hint on the sticky defaults — the user
-      // explicitly switched workspaces, so the next "+ New Agent"
-      // should default to the new engine root, not the old workspace.
-      // Agent / model / effort / permission carry over, since those
-      // are about how the user likes to work, not where.
+      // Clear only the folder hint: the next "+ New Agent" uses the new engine root,
+      // while agent, model, effort and permission carry over.
       saveStickyDefaults({ ...loadStickyDefaults(), folder: null });
       dispatch({ type: "BUMP_PROJECT_GENERATION" });
-      // Fire-and-forget — the bridge will set status to "connecting"
-      // immediately and any consumer waiting on a connected status
-      // sees the update through useBridgeStatus.
+      // Not awaited: status moves to "connecting" at once and consumers follow
+      // useBridgeStatus.
       void bridge?.forceReconnect();
     }).then((fn) => {
       unlisten = fn;
@@ -848,7 +720,6 @@ function ReloadOnProjectChange() {
   return null;
 }
 
-/** Settings remains a full-window route with its purpose-built header. */
 const WORKBENCH_COLLAPSED_KEY = "column-3-collapsed"; // gitleaks:allow — localStorage key name
 
 // Main routes are the app sidebar followed by the two-column body (or a Home
@@ -866,13 +737,8 @@ function ShellRouter() {
   const active = useActiveWorkspace();
   const workspaceToolsAvailable = !active.loading && !workspaceIsReadOnly(active.workspace);
 
-  // Workbench collapse — universal across workspaces. Single persisted
-  // preference; no per-workspace overrides. Previously we force-
-  // collapsed when activeChatId was null (Cursor's new-agent flow
-  // pattern), but the Untitled-tab redesign meant that worktree
-  // welcome surfaces always opened with workbench hidden — confusing.
-  // Now: only the user's explicit toggle (window-chrome icon or
-  // ⌥⌘B shortcut) drives the collapse, and it applies universally.
+  // One persisted Workbench collapse for every workspace, changed only by the
+  // user's toggle (window chrome or ⌥⌘B).
   const [workbenchColumn, setWorkbenchColumn] = React.useState<WorkbenchColumnState>(
     () => ({
       collapsed: getSetting<boolean>(WORKBENCH_COLLAPSED_KEY, false),
@@ -911,14 +777,8 @@ function ShellRouter() {
     [updateWorkbenchColumn],
   );
 
-  // ⌥⌘B anywhere toggles Workbench. Skipped inside editable surfaces so
-  // we don't steal from native text-input bindings (if any use ⌥⌘B).
-  //
-  // Match on `e.code === "KeyB"`, not `e.key`: on macOS, holding Option
-  // remaps `e.key` to the glyph (Option+B → "∫"), so a letter check can
-  // never match and the shortcut is simply dead — even though the palette
-  // advertises it (apps/desktop/src/renderer/shell/shortcuts-catalog.ts). Same fix the ⌥⌘T and
-  // ⌥⌘F handlers below already carry; this one was missed.
+  // ⌥⌘B toggles Workbench. Match `e.code`: on macOS, Option remaps `e.key` to a
+  // glyph (Option+B → "∫").
   React.useEffect(() => {
     const handler = (e: KeyboardEvent) => {
       if (!(e.metaKey || e.ctrlKey) || !e.altKey || e.shiftKey) return;
@@ -934,21 +794,9 @@ function ShellRouter() {
     return () => window.removeEventListener("keydown", handler);
   }, [toggleWorkbench]);
 
-  // ⌥⌘T flips the theme between light and dark. Now that the light
-  // theme has shipped (2026-07-11), this toggles the *resolved*
-  // variant — what's actually on screen — instead of cycling the
-  // stored mode. Cycling the mode (… → system → dark → …) would
-  // no-op on the common macOS setup where the OS is in dark mode:
-  // "system" and "dark" resolve to the same variant, so a keypress
-  // swaps between two identical-looking states and the shortcut feels
-  // dead. Reading the resolved variant and switching to its opposite
-  // guarantees every press produces a visible flip. ("system" stays
-  // available as an explicit choice in the Settings picker.)
-  //
-  // Match on `e.code === "KeyT"`, not `e.key`: on macOS, holding
-  // Option remaps `e.key` to the glyph (Option+T → "†"), so the
-  // letter check never matches. `e.code` is the physical key and
-  // is modifier-agnostic.
+  // ⌥⌘T flips the resolved variant, not the stored mode: with the OS in dark
+  // mode, "system" and "dark" look identical, so cycling modes could look dead.
+  // `e.code` for the same Option reason as ⌥⌘B.
   React.useEffect(() => {
     const handler = (e: KeyboardEvent) => {
       if (!(e.metaKey || e.ctrlKey) || !e.altKey || e.shiftKey) return;
@@ -965,12 +813,9 @@ function ShellRouter() {
     return () => window.removeEventListener("keydown", handler);
   }, []);
 
-  // ⌥⌘F anywhere opens the feedback dialog. One dialog instance lives HERE;
-  // the shortcuts palette and any other surface summon it through the
-  // feedback-controller pub/sub. Like ⌥⌘/ it also fires inside
-  // editable surfaces — the chord types nothing, and feedback is most often
-  // written right after something went wrong in a composer. Match on
-  // `e.code` (Option remaps `e.key` glyphs on macOS — see ⌥⌘T above).
+  // ⌥⌘F opens the app's single feedback dialog; other surfaces summon it through
+  // feedback-controller. It fires inside editable surfaces too: the chord types
+  // nothing, and feedback often follows a composer problem.
   const [feedbackOpen, setFeedbackOpen] = React.useState(false);
   React.useEffect(
     () => onFeedbackDialogRequest(() => setFeedbackOpen(true)),
@@ -1041,9 +886,7 @@ function ShellRouter() {
           toggleWorkbench={toggleWorkbench}
         />}
       </AddProjectProvider>
-      {/* ⌥⌘/ glass shortcuts palette — floats (portalled) above everything. */}
       <ShortcutsPalette open={palette === "shortcuts"} onOpenChange={open => setPalette(current => open ? "shortcuts" : current === "shortcuts" ? null : current)} />
-      {/* ⌥⌘F feedback dialog — the app's single instance (see above). */}
       <FeedbackDialog open={feedbackOpen} onOpenChange={setFeedbackOpen} />
     </div>
   );
@@ -1211,8 +1054,6 @@ function MainShellBody({
             </div>
           )}
 
-          {/* Home shell — sidebar plus a lazy keep-alive deck for Dashboard,
-              Settings, and the repository hub. */}
           {homePageIdsToRender.length > 0 && (
             <div
               {...(!isHome ? { inert: "" } : {})}
@@ -1224,10 +1065,7 @@ function MainShellBody({
               ].join(" ")}
               aria-hidden={!isHome}
             >
-              {/* The Home sub-page column (dashboard / customize / repo hub /
-                  team) — dropdown lists opened inside it stay inside it
-                  (popover-boundary.ts). Settings stamps its own narrower
-                  reading column below. */}
+              {/* Dropdowns opened inside this column stay inside it (popover-boundary.ts). */}
               <div
                 {...popoverBoundaryProps}
                 className={[
@@ -1332,14 +1170,10 @@ function MainShellBody({
 export function AppShellBody() {
   useEditHistoryMenu();
   return (
-    // Repository panel's SidebarProvider previously supplied this app-wide provider as
-    // a hidden side effect. Keep it at the actual app root now that the
-    // sidebar is gone; every shell surface (including Settings) uses Tooltip.
+    // App-wide: every shell surface, including Settings, uses Tooltip.
     <TooltipProvider>
       <BridgeProvider>
         <AgentSessionsProvider>
-          {/* persisted activePage in `zeros:ui-state:v1` restores
-              settings vs main workspace on reload. */}
           <HydrateAiApiKey />
           <AnalyticsBoot />
           <PreWarmAgents />
@@ -1416,15 +1250,9 @@ export function AppShell() {
   return (
     <AppearanceProvider>
       <AuthProvider onStoredIdentity={installAccountPresentationIdentity}>
-        {/* 01u (2026-05-20) — SINGLE app-wide toast surface. Anchored
-            bottom-right. Mounts once; every transient feedback call
-            (toast / toast.error / toast.success / toast.warning /
-            toast.info from @/renderer/shared/ui/primitives/elements) renders through it.
-            Rule: never add new inline pills / banners for transient
-            feedback — see docs/design-system.md (Feedback).
-            Lives ABOVE the AuthGate (with UpdateNotifications) so toasts —
-            in particular the auto-update toast — render on the login screen
-            too, not just after sign-in. */}
+        {/* The single app-wide toast surface: never add inline pills or banners for
+            transient feedback (docs/design-system.md, Feedback). Above the AuthGate
+            so toasts, including auto-update, render on the login screen. */}
         <Toaster />
         <GithubAppNotifications />
         {/* Above the gate so a main-process-staged update can notify on the

@@ -1,39 +1,19 @@
-// ──────────────────────────────────────────────────────────
-// Files-to-copy — pure model for the settings pane
-// ──────────────────────────────────────────────────────────
-//
-// Every decision the pane makes about patterns and rows lives here, with no
-// React and no bridge, so it can be tested directly (the renderer suite runs on
-// `environment: "node"` — there is no DOM to mount into).
-//
-// The one idea worth holding onto: the pane shows TWO different sets.
-//
-//   • `candidates` — everything git ignores in this checkout, directory
-//     collapsed. This is the tick-box universe, and it does not depend on the
-//     patterns. Without it the pane could only ever list what is already
-//     selected, so nothing new would be discoverable.
-//   • `files` — what the CURRENT patterns actually resolve to. This is what
-//     gets copied, and it is what decides which boxes are ticked.
-//
-// A row is therefore "ticked" when the pattern list selects it, not when the
-// user clicked it — which is what lets a hand-written `.env*` and a ticked box
-// mean the same thing and stay in sync.
-// ──────────────────────────────────────────────────────────
+// Pure model for the Files-to-copy pane, testable without a DOM. The pane shows
+// two sets: `candidates`, everything git ignores here (directory-collapsed and
+// independent of the patterns, so new rows stay discoverable), and `files`,
+// what the current patterns resolve to. A row is ticked when the patterns
+// select it, so a hand-written `.env*` and a ticked box stay in sync.
 
 import type {
   FilesToCopyCandidateWire,
   FilesToCopyPreviewWire,
 } from "../../platform/bridge/workspace-bridge";
 
-/** An UNESCAPED glob character — what makes a pattern a GLOB rather than a
- *  plain path. A row selected by one of these can't be unticked by deleting a
- *  line, so the pane says so instead of silently doing nothing.
- *
- *  The escape has to be honoured: a real filename can contain `*?[]` (a
- *  Next.js route file is `[id].js`), and the line this pane writes for it is
- *  backslash-escaped. Reading that as a glob would freeze the row it just
- *  created. Leading `(\\\\)*` consumes escaped BACKSLASHES so `\\*` is
- *  correctly read as an escaped backslash followed by a live `*`. */
+/** An unescaped glob character makes a pattern a glob, and a row a glob
+ *  selects can't be unticked by deleting a line. Escapes count: a real filename
+ *  can contain `*?[]` (Next.js `[id].js`), and this pane writes it
+ *  backslash-escaped. The leading `(\\\\)*` consumes escaped backslashes, so
+ *  `\\*` is an escaped backslash followed by a live `*`. */
 const UNESCAPED_GLOB_CHAR = /(?:^|[^\\])(?:\\\\)*[*?[\]]/;
 
 /** Split the pattern editor's text into lines, exactly as the engine does:
@@ -51,15 +31,10 @@ export function formatPatternText(patterns: readonly string[]): string {
   return patterns.join("\n");
 }
 
-/** Strip the leading `/` (root anchor) and any trailing `/` (directory
- *  marker), leaving the repo-relative path a pattern names. `/certs/` and
- *  `certs` both normalize to `certs`, which is what makes tick-state and
- *  toggling agree regardless of how the line was written.
- *
- *  Takes a PATH as readily as a pattern, so it deliberately does not touch
- *  backslashes — those are ordinary filename characters on Linux. Use
- *  `literalPatternPath` to go the other way, from a written line to the path
- *  it names. */
+/** Strip the root anchor and trailing directory marker, so `/certs/` and
+ *  `certs` both name `certs` and tick state agrees with toggling. Accepts paths
+ *  too, so it leaves backslashes alone (ordinary filename characters on Linux);
+ *  `literalPatternPath` goes the other way. */
 export function normalizePattern(pattern: string): string {
   return pattern.trim().replace(/^\/+/, "").replace(/\/+$/, "");
 }
@@ -79,13 +54,9 @@ export function literalPatternPath(pattern: string): string {
   return normalizePattern(pattern).replace(/\\(.)/g, "$1");
 }
 
-/** A `#` line: the user's note to themselves, not a pattern.
- *
- *  `parsePatternText` keeps comments (they are the user's, and round-tripping
- *  the editor's text must not silently delete them) and the engine's settings
- *  normalizer keeps them too — so a comment arrives back as a "pattern" with
- *  `matchCount: 0`, which the per-line stats rendered as a red `0` and the
- *  words "matches nothing". The pane was calling the user's own note a typo. */
+/** A `#` line is the user's note, not a pattern. Comments survive parsing and
+ *  the engine's normalizer, so one arrives as a pattern with `matchCount: 0`;
+ *  callers must not report it as a typo. */
 export function isCommentPattern(pattern: string): boolean {
   return pattern.trim().startsWith("#");
 }
@@ -107,22 +78,13 @@ export interface CandidateRow extends FilesToCopyCandidateWire {
    *  delete that line and take the row's siblings with it). Toggling is
    *  disabled; the pattern editor is the way out. */
   locked: boolean;
-  /** The line to blame for `locked`, when exactly one can be responsible.
-   *  `null` when several globs could be and naming one would be a guess —
-   *  printing `globs[0]` regardless sent people to edit a pattern that had
-   *  nothing to do with the row.
-   *
-   *  NOT RENDERED right now: the "from `.env*`" pill it fed was removed with
-   *  the rest of the row badges (2026-07-30). Kept because `locked` — which IS
-   *  live, and greys the checkbox — is otherwise unexplained the moment anyone
-   *  asks why a box won't move, and re-adding a tooltip is one line while
-   *  re-deriving the attribution is not. */
+  /** The line to blame for `locked` when exactly one can be; `null` when several
+   *  globs could be. Not rendered now, but kept so `locked` stays explainable: a
+   *  tooltip is one line, re-deriving the attribution is not. */
   lockedBy: string | null;
-  /** Untracked but NOT gitignored. Still copied, but it shows up as a change
-   *  in the new workspace. Only meaningful once selected.
-   *
-   *  Also NOT RENDERED right now — same removal. `applyDraftOverlay` still
-   *  clears it on untick so the flag never outlives the copy it describes. */
+  /** Untracked but not gitignored: still copied, but it shows as a change in the
+   *  new workspace. Not rendered now; `applyDraftOverlay` still clears it on
+   *  untick. */
   notIgnored: boolean;
 }
 
@@ -197,10 +159,9 @@ export function buildCandidateRows(
     const literalBacked =
       literals.has(c.path) ||
       (c.isDir && [...literals].some((l) => l.startsWith(`${c.path}/`)));
-    // A literal naming a PARENT selects this row too, and no checkbox can say
-    // "everything under /certs except this one" — deleting `/certs` would take
-    // the siblings with it. Left unlocked, the box rendered enabled and
-    // `togglePattern` then removed nothing at all: a permanent no-op click.
+    // A literal naming a parent also selects this row, and no checkbox can express
+    // "everything under /certs except this"; left unlocked, the click would remove
+    // nothing.
     const ancestor =
       literalLines.find((l) => c.path.startsWith(`${l.path}/`))?.raw ?? null;
     // No glob and no ancestor means nothing here explains the selection — the
@@ -220,26 +181,13 @@ export function buildCandidateRows(
   });
 }
 
-/** Re-point tick state at the LIVE draft for rows whose literal line the user
- *  has just added or removed.
- *
- *  Without this the boxes lag the click by a debounce: `rows` are built from
- *  the patterns the engine last previewed, so ticking a box left it visibly
- *  unticked until the next scan landed — and clicking it AGAIN in that window
- *  read the stale "not selected", so the untick became a no-op and the row
- *  looked frozen.
- *
- *  Only literal lines are overlaid, because only they are what a checkbox
- *  writes. A row that turns out to be glob-covered after its literal goes away
- *  briefly shows unticked and is corrected by the next preview — honest churn,
- *  and it needs both a literal and an overlapping glob to happen at all.
- *
- *  Membership goes through `literalsSelect`, not an exact-path lookup. A
- *  collapsed directory row is named by its CHILDREN in a materialized list
- *  (`/certs/a.pem`, …), so an exact test said "unchanged" for both sides and
- *  unticking `certs/` left the box visibly ticked for the whole scan. For the
- *  same reason `previewedPatterns` must be the list the preview actually used
- *  — on a first edit that is the materialized set, not an empty list. */
+/** Re-point tick state at the live draft for rows whose literal line was just
+ *  added or removed. `rows` reflect the last engine preview, so without this a
+ *  box lags the click by a debounce and a second click reads the stale state.
+ *  Only literal lines are overlaid, since only they are what a checkbox writes.
+ *  Membership goes through `literalsSelect` because a collapsed directory row
+ *  is named by its children in a materialized list; for the same reason
+ *  `previewedPatterns` must be the list the preview actually used. */
 export function applyDraftOverlay(
   rows: readonly CandidateRow[],
   previewedPatterns: readonly string[],
@@ -276,12 +224,9 @@ export function applyDraftOverlay(
   return changed ? next : (rows as CandidateRow[]);
 }
 
-/** Add or remove one path from the pattern list.
- *
- *  Adding writes the ANCHORED form (`/certs`), which in gitignore syntax means
- *  "this exact path at the project root" — an unanchored `certs` would also
- *  match a nested `packages/app/certs`, copying a directory the user never saw
- *  in the list they were ticking. */
+/** Add or remove one path. Adding writes the anchored form (`/certs`); an
+ *  unanchored `certs` would also match a nested `packages/app/certs` the user
+ *  never saw in the list. */
 export function togglePattern(
   patterns: readonly string[],
   path: string,
@@ -289,10 +234,9 @@ export function togglePattern(
 ): string[] {
   const target = normalizePattern(path);
   if (!on) {
-    // Also drop literals INSIDE the path. A collapsed `certs/` row is ticked
-    // because materialization wrote its files out one by one (`/certs/a.pem`,
-    // …); matching only the exact path removed nothing, so unticking the
-    // directory was a permanent no-op with no error and no way out.
+    // Also drop literals inside the path: a collapsed `certs/` row is ticked by its
+    // materialized files (`/certs/a.pem`, …), so matching only the exact path would
+    // remove nothing.
     const prefix = `${target}/`;
     return patterns.filter((p) => {
       if (!isLiteralPattern(p)) return true;
@@ -308,17 +252,9 @@ export function togglePattern(
     : [...patterns, `/${escapeLiteralPattern(target)}`];
 }
 
-/** Add or remove MANY paths in one pass — what a folder checkbox does.
- *
- *  Folding `togglePattern` over the paths instead is O(k·n): it rebuilds the
- *  whole list per path and re-runs the literal/glob regexes over every line
- *  each time. Ticking a `packages/` holding 100 entries against a materialized
- *  2,000-line list meant ~200k element visits and 100 intermediate arrays,
- *  synchronously inside the click handler. This is one filter plus one concat.
- *
- *  Semantics are exactly `togglePattern` applied in sequence: unticking drops
- *  every literal naming a target OR anything inside one, ticking appends the
- *  anchored form for each target that has no literal yet, in the given order. */
+/** Add or remove many paths in one pass, for a folder checkbox. Folding
+ *  `togglePattern` is O(k·n) inside the click handler; this is one filter plus
+ *  one concat, with the same semantics as `togglePattern` applied in order. */
 export function toggleManyPatterns(
   patterns: readonly string[],
   paths: readonly string[],
@@ -349,15 +285,10 @@ export function toggleManyPatterns(
   return [...patterns, ...additions];
 }
 
-/** The pattern list a first edit starts from.
- *
- *  Before anything is saved for a repo, the effective source is the built-in
- *  `.env*` default (or a hand-edited global list) — a GLOB, which no checkbox
- *  can remove. Ticking anything therefore first writes out what is currently
- *  matched as explicit lines, so the rows on screen become the rows in the
- *  file. That is also the safety property the pane depends on: any saved list
- *  REPLACES the default, so materializing it is what stops a first click from
- *  quietly dropping the user's `.env`. */
+/** The list a first edit starts from. With nothing saved, the effective source
+ *  is the built-in `.env*` default (or a global list): a glob no checkbox can
+ *  remove, which any saved list replaces. Materializing the current matches as
+ *  explicit lines keeps a first click from silently dropping the user's `.env`. */
 export function materializePatterns(
   preview: Pick<FilesToCopyPreviewWire, "files">,
 ): string[] {
@@ -366,13 +297,10 @@ export function materializePatterns(
   );
 }
 
-/** The list a toggle should be applied to: this repo's own list when it has
- *  one, or the materialized effective set on the first edit.
- *
- *  `saved` is `null` when the key is ABSENT — which is what makes "copy
- *  nothing" (`[]`) expressible at all. Collapsing the two meant unticking the
- *  last row deleted the setting, the built-in default came back, and the row
- *  the user had just cleared re-ticked itself. */
+/** This repo's own list, or the materialized effective set on the first edit.
+ *  `saved` is `null` only when the key is absent, which keeps "copy nothing"
+ *  (`[]`) expressible; otherwise unticking the last row would bring the default
+ *  back. */
 export function baseFor(
   preview: Pick<FilesToCopyPreviewWire, "files" | "source" | "sourceLayer">,
   saved: readonly string[] | null,
@@ -380,12 +308,9 @@ export function baseFor(
   return saved !== null ? [...saved] : materializePatterns(preview);
 }
 
-/** Can a first edit safely turn the effective list into explicit lines?
- *
- *  Only when `files` is the WHOLE truth. A cut-short scan reports `files: []`,
- *  so materializing would write an empty list and stop seeding everything; a
- *  truncated one reports the first N of many, so it would silently drop the
- *  rest from every future workspace. Both are worse than refusing to edit. */
+/** Materialize only when `files` is the whole truth: a cut-short scan reports
+ *  `[]` and a truncated one only the first N, and writing either would silently
+ *  stop seeding files. Refusing to edit is safer. */
 export function canMaterialize(
   preview: Pick<FilesToCopyPreviewWire, "complete" | "truncated">,
 ): boolean {
@@ -411,22 +336,11 @@ export function sameList(
   return a.length === b.length && a.every((v, i) => v === b[i]);
 }
 
-/** Do the lines in the pattern editor describe the list the engine actually
- *  evaluated?
- *
- *  Not a formality. With nothing saved, this project's list is ABSENT and the
- *  built-in `.env*` applies — so the box renders empty (there is nothing of
- *  yours to show) while the preview comes back with `.env*` and its match
- *  count. The pane printed that count anyway, which on a repo where `.env*`
- *  matches nothing put a red `0 · .env* matches nothing` under an empty box,
- *  blaming the user for a pattern they never wrote.
- *
- *  Per-line counts explain the lines you can SEE. When these two disagree —
- *  the inherited default, or a draft still inside its debounce — there is
- *  nothing honest to attribute, so the pane says nothing.
- *
- *  Compared the way the engine normalizes a settings array: each entry
- *  trimmed, blanks dropped (`normalizeGlobList`). */
+/** Do the editor's lines describe the list the engine evaluated? With nothing
+ *  saved, the box is empty while the preview evaluates the inherited `.env*`,
+ *  and a draft may still be inside its debounce. Per-line counts would then
+ *  blame the user for lines they cannot see, so the pane shows none. Compared
+ *  like the engine's `normalizeGlobList`: trimmed, blanks dropped. */
 export function patternsDescribeBox(
   boxLines: readonly string[],
   previewPatterns: readonly { raw: string }[],
@@ -460,19 +374,9 @@ export function patternStatsForBox(
   return preview.patterns.filter((p) => !isCommentPattern(p.raw));
 }
 
-// ── folder tree ──────────────────────────────────────────
-//
-// The candidate list is FLAT — `lib/api-zod/node_modules/`, `site/dist/`,
-// `artifacts/zdocs/dist/` and twenty more siblings, one row each. In a real
-// repo that is two or three actual folders wearing twenty-four rows, and the
-// thing you came to tick is somewhere in the middle of it.
-//
-// So the pane renders a tree instead: folders closed, open one to pick inside
-// it. The one rule that makes closing safe is that a selection is never
-// INVISIBLE — the row you ticked is the row you have to find again to untick.
-// A partly-ticked folder therefore surfaces what is ticked inside it even when
-// closed; a fully-ticked one does not need to, because its own box already
-// says so.
+// The flat candidate list renders as a tree with folders closed. A selection is
+// never invisible: a partly-ticked closed folder surfaces what is ticked inside
+// it, while a fully-ticked one says so with its own box.
 
 export interface CandidateTreeNode {
   /** Repo-relative path. Unique, and the expand/collapse key. */
@@ -503,17 +407,10 @@ function isFolder(node: CandidateTreeNode): boolean {
   return node.children.length > 0 || !!node.row?.isDir;
 }
 
-/** Build the display tree from the flat candidate list.
- *
- *  Two things happen on the way:
- *
- *  • A candidate UNDER a collapsed directory candidate is dropped. Git's
- *    `--directory` already folded `node_modules/` into one row that stands for
- *    everything inside it, so listing a child as well would draw the same
- *    selection twice, in two places, with two checkboxes that disagree.
- *  • A folder with exactly one child is merged into it. `scripts` holding only
- *    `node_modules/` is a disclosure triangle that hides nothing; it prints as
- *    the single row `scripts/node_modules/` instead. */
+/** Build the display tree. A candidate under a collapsed directory candidate is
+ *  dropped: git's `--directory` already folded it, and two rows would show one
+ *  selection with disagreeing boxes. A folder with one child merges into it
+ *  (`scripts/node_modules/`). */
 export function buildCandidateTree(
   rows: readonly CandidateRow[],
 ): CandidateTreeNode[] {
@@ -637,13 +534,9 @@ export interface CandidateTreeRow {
   pinned: boolean;
 }
 
-/** Flatten the tree into rows, honouring `expanded`.
- *
- *  A PARTLY-ticked folder still shows what is ticked inside it even while
- *  closed: "some of this" is useless without knowing which, and the row you
- *  ticked is the row you need to find again to untick. A fully-ticked folder
- *  says everything with its own box, so it stays one row — otherwise ticking a
- *  closed folder would burst it open into every file it holds. */
+/** Flatten the tree into rows, honouring `expanded`. A partly-ticked closed
+ *  folder still shows what is ticked inside it; a fully-ticked one stays one
+ *  row, so ticking a closed folder doesn't burst it open. */
 export function flattenTree(
   nodes: readonly CandidateTreeNode[],
   expanded: ReadonlySet<string>,
@@ -724,19 +617,9 @@ export function toggleablePaths(n: CandidateTreeNode): string[] {
   return n.children.flatMap(toggleablePaths);
 }
 
-// ── formatting ───────────────────────────────────────────
-
-/** The bold lead of the sentence under the list, which the pane completes with
- *  "will be copied from <path>". Deliberately not assembled in JSX: the
- *  singular/plural and the zero case are logic, and logic belongs in tests.
- *
- *  Zero reads as "Nothing", never "0 files" — and never as a whole sentence
- *  either, which is what made the row print "Nothing will be copied will be
- *  copied from …". The lead is a NOUN PHRASE in both branches.
- *
- *  Takes the count, not the preview: only a COMPLETE scan gets to state a
- *  total, and the pane decides that (a cut-short scan has no number to print,
- *  which is a different sentence, not a zero). */
+/** The noun-phrase lead the pane completes with "will be copied from <path>".
+ *  Zero reads "Nothing", never "0 files". It takes a count, not the preview,
+ *  because only a complete scan states a total. */
 export function summaryLead(count: number): string {
   if (count === 0) return "Nothing";
   return `${count} ${count === 1 ? "file" : "files"}`;
