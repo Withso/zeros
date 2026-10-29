@@ -1,0 +1,9 @@
+{
+  "id": "ui-smoke-dialog-open-animation-geometry",
+  "kind": "scenario",
+  "area": "renderer-ui",
+  "fixedBy": "pr:767",
+  "symptom": "UI smoke shard 2 failed twice with an identical 1.9383 line count because the reset dialog was measured during its zoom-in-97 open animation.",
+  "rule": "Measure dialog and popover geometry only after their finite open animations finish; getBoundingClientRect includes transforms. See agents/zstack/skills/zstack-verify/SKILL.md.",
+  "check": "pnpm test:ui-smoke --shard=2/3"
+}

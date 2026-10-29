@@ -229,6 +229,16 @@ export async function runComposerSuggestionsSmoke({ page, check, harnessBase }) 
   check("Workspace menus stay inside narrow windows and remain readable in both themes", true);
   await runLateSkillSourceSmoke({ page, check, harnessBase });
   await runStoppedCloudSkillsSmoke({ page, check, harnessBase });
+  await page.goto(`${harnessBase}/harness-composer-editor.html?suggestions`);
+  await page.waitForFunction(() => window.__composerHarness?.editor);
+  await page.evaluate(() => window.__setComposerAgent("cursor"));
+  await page.locator(".composer-pm").fill("/comp");
+  await page.getByRole("button").filter({ hasText: "Summarize the conversation to free up context" }).click();
+  const compactActions = await page.evaluate(() => window.__composerActionCalls
+    .filter(action => action === "compact-action" || action === "submit"));
+  expect(compactActions).toEqual(["compact-action"]);
+  await expect(page.locator(".composer-pm")).toHaveText("");
+  check("Cursor /compact uses the existing inline command action without submitting a prompt", true);
 }
 
 export async function runLateSkillSourceSmoke({ page, check, harnessBase }) {

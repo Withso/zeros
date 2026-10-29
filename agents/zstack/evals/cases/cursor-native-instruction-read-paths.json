@@ -1,0 +1,9 @@
+{
+  "id": "cursor-native-instruction-read-paths",
+  "kind": "scenario",
+  "area": "vm-engine-agents",
+  "fixedBy": "pr:767",
+  "symptom": "A native instruction probe reported missing AGENTS.md after Cursor changed to FileHandle.readFile even though the SDK still assembled the instructions.",
+  "rule": "Observe both filesystem read APIs and native rule assembly with positive project/Local/cloud and negative user/empty source controls. See agents/zstack/changes/cursor-sdk-120-compaction.md.",
+  "check": "pnpm exec vitest run apps/desktop/src/engine/agents/adapters/cursor-sdk/host/__tests__/native-mcp-discovery.test.ts"
+}

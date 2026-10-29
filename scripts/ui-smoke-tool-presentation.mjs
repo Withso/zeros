@@ -7,6 +7,17 @@ export async function runToolPresentationSmoke({ page, check }) {
   await runToolSpacingSmoke({ page, check });
   const fixture = page.locator("#tool-presentation-fixture");
   const rows = fixture.locator("#tool-presentation-rows");
+  await expect(rows.getByRole("button", { name: "Compacting..", exact: true })).toHaveCount(2);
+  await fixture.getByRole("button", { name: "Finish compactions", exact: true }).click();
+  const compacted = rows.getByRole("button", { name: "Context compacted", exact: true });
+  await expect(compacted).toHaveCount(2);
+  await compacted.first().click();
+  await expect(rows).toContainText("Cursor saved a trimmed transcript because it could not generate a summary.");
+  await fixture.getByRole("button", { name: "Reload transcript", exact: true }).click();
+  await expect(compacted.first()).toHaveAttribute("aria-expanded", "true");
+  await expect(compacted).toHaveCount(2);
+  await compacted.first().click();
+  check("Cursor Local/cloud compaction rows settle and retain fallback details and disclosure through reload", true);
   await expect(rows).not.toContainText("Environment connected");
   await expect(rows).not.toContainText("Environment disconnected");
   const providers = ["claude", "codex", "cursor"];

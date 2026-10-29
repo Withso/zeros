@@ -54,7 +54,13 @@ function configureCursorSdk(options) {
 
 function lifecycleAgent(agentId) {
   let closed = false;
-  return { agentId, close() { closed = true; }, getUsage: async () => ({ closed }) };
+  return { agentId, close() { closed = true; }, getUsage: async () => ({ closed }),
+    async summarize() {
+      if (closed) throw new Error("Closed native handle");
+      return { id: "native-summary", async *stream() {
+        for (const status of ["running", "completed"]) yield { type: "summary", agent_id: agentId, run_id: "native-summary", status };
+      }, wait: async () => ({ status: "finished", result: "Synthetic private summary" }), cancel: async () => {} };
+    } };
 }
 
 async function cloudFixture(opts){

@@ -164,7 +164,7 @@ the engine never substitutes an ambient credential for an expired selected key.
 Renewing an access token does not renew that account key. An expired or revoked
 account key uses the existing sign-in / update-key recovery in Settings.
 
-The pinned `@cursor/sdk` 1.1.0 owns access-token refresh, including during active
+The pinned `@cursor/sdk` 1.2.0 owns access-token refresh, including during active
 local runs. This incorporates the refresh correction documented in the
 [1.0.30 changelog](https://cursor.com/docs/sdk/changelog). Do not add a competing
 Zeros refresh timer or restart a healthy execution just to renew its token.

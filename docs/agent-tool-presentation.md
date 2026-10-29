@@ -188,12 +188,43 @@ delivery shapes.
 ## Cursor SDK compatibility
 
 Desktop Local workspaces (Personal and organization-owned) and the standalone
-cloud worker bundle Cursor SDK 1.1.0 with zod 4.6.7. The SDK now accepts zod
+cloud worker bundle Cursor SDK 1.2.0 with zod 4.6.7. The SDK accepts zod
 as a peer and builds its exported schemas through `zod/v3`, which is included
 in zod 4. The expanded `ZodType` declarations preserve existing tool, callback
 and conversation shapes. No vulnerable zod 3 package or audit exception is
 needed. The fingerprinted decisions in `scripts/agent-runtime/reviews.json`
 cover every declaration change from the prior bundled runtime.
+
+Native `summary` messages and `summary-started` / `summary-completed` deltas
+render through the existing compaction card in both placements. Starts show
+“Compacting..”; positive completion shows “Context compacted”. Errors settle
+as failed; a trimmed-transcript fallback adds one explanation in the existing
+detail area. Ordered callback and stream lifecycles share a durable row within
+each run, including delayed mirrors and repeated completions. Stop, EOF and
+run completion do not prove successful compaction. Summary text is private
+context and is never published as assistant narration.
+
+Local Cursor `/compact` calls `agent.summarize()` without adding a user prompt.
+It requires an idle run and a saved native conversation. Compaction refuses
+while any prompt is preparing or unsettled, or another compaction is running;
+that refusal does not abort existing work. A prompt submitted during manual
+compaction waits for its success or failure, then runs normally. Stop cancels
+that wait before the prompt can send, even while native summarization is still
+starting. A Stop applies only to prompts already waiting: a prompt sent while the
+stopped summary unwinds waits for it, then runs. Prompt admission stays with the engine: an earlier ghost prompt must
+not prevent a newly admitted prompt from running. Disposal settles an already
+published, unconfirmed compaction row as failed before fencing late events.
+Stop/disposal cancels a late summary run. No provider has a manual
+`AGENT_COMPACT` route in the standalone cloud worker; automatic rows still work
+there. Cursor's context gauge remains unavailable because turn token usage is
+not a measurement of the current context-window fill.
+
+SDK 1.2.0 still loads repository `AGENTS.md` during executor prewarm when
+`settingSources` includes `project`. Its text decoder now uses
+`fs.promises.open()` followed by `FileHandle.readFile()`. The native probe
+observes both filesystem read APIs and the assembled always-applied rules:
+project, Local and cloud source sets include repository sentinels, while
+user-only and empty sets exclude them. Zeros adds no second instruction copy.
 
 The SDK's optional `teamId` remains unused: it offers no team-listing API, and
 Zeros' account connection retains a minted API key and email without a team

@@ -545,6 +545,18 @@ export class CursorHostClient {
     const identity = { agentId, ...(handleId ? { handleId } : {}) };
     return {
       agentId,
+      summarize: async (): Promise<SdkRun> => {
+        const runId = String(this.nextRunId++);
+        const queue = new AsyncMsgQueue<HostRunQueueItem>();
+        this.queues.set(runId, queue);
+        try {
+          const result = await this.request<{ sdkRunId: string | null }>("agent.summarize", { ...identity, runId });
+          return this.makeRun(runId, result?.sdkRunId ?? null, queue, {});
+        } catch (error) {
+          this.queues.delete(runId);
+          throw error;
+        }
+      },
       send: async (
         message: unknown,
         options?: CursorSdkSendOptions,

@@ -21,6 +21,23 @@ async function setup() {
   return { client, transport, agent: await creating };
 }
 describe("Cursor host send observers", () => {
+  it("registers the summarize run before early summary events and retains its native identity", async () => {
+    const f = await setup();
+    const pending = f.agent.summarize!();
+    const request = f.transport.requests.at(-1)!;
+    expect(request.op).toBe("agent.summarize");
+    expect(request.args).toMatchObject({ agentId: "native" });
+    expect(request.args).not.toHaveProperty("message");
+    const summary = { type: "summary", agent_id: "native", run_id: "native-summary", status: "completed" };
+    f.transport.line?.(JSON.stringify({ k: "ev", ev: "run.msg", runId: request.args.runId, msg: summary }) + "\n");
+    f.transport.reply({ sdkRunId: "native-summary" });
+    const run = await pending;
+    f.transport.line?.(JSON.stringify({ k: "ev", ev: "run.streamEnd", runId: request.args.runId }) + "\n");
+    const items = []; for await (const item of run.stream()) items.push(item);
+    expect(run.id).toBe("native-summary"); expect(items).toEqual([summary]);
+    const waiting = run.wait(); expect(f.transport.requests.at(-1)!.op).toBe("run.wait");
+    f.transport.reply({ status: "finished" }); await waiting;
+  });
   it("reports the native write and run creation outside the wire options", async () => {
     const f = await setup(), observer = vi.fn();
     const pending = f.agent.send({ text: "Synthetic" }, { onNativePromptStage: observer } satisfies CursorSdkSendOptions);

@@ -100,6 +100,7 @@ const BUILTIN_COMMANDS: Record<string, AvailableCommand[]> = {
   // Cursor (via @cursor/sdk). Advertises its commands at runtime
   // (available_commands_update), which overrides these when it arrives.
   cursor: [
+    { name: "compact", description: "Summarize the conversation to free up context" },
     {
       name: "plan",
       description: "Switch to Plan mode to design before coding",
@@ -197,8 +198,7 @@ export function composerCommandsFor(
 // Keyed by NAME so it covers both curated built-ins and the SDK's
 // supportedCommands() list. Unknown → "text" (never breaks a custom command).
 // Claude has the full inline+terminal wiring; Codex has `/compact` (real
-// compaction RPC); other agents get "text" until their command behaviors are
-// researched and wired individually.
+// compaction RPC); Cursor has `/compact` through SDK agent.summarize().
 
 export type SlashCommandKind = "inline" | "terminal" | "text";
 
@@ -248,6 +248,7 @@ export function slashCommandKind(
   if (id.includes("codex") || id.includes("openai")) {
     return CODEX_INLINE_ACTIONS.has(name) ? "inline" : "text";
   }
+  if (id.includes("cursor")) return name === "compact" ? "inline" : "text";
   if (!id.includes("claude")) return "text";
   if (CLAUDE_INLINE_ACTIONS.has(name)) return "inline";
   if (CLAUDE_TERMINAL_COMMANDS.has(name)) return "terminal";

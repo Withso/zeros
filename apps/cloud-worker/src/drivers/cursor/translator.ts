@@ -125,6 +125,7 @@ interface SdkMsg {
 export interface CursorSdkTranslatorOptions {
   sessionId: string;
   emit: Emit;
+  compactionTrigger?: "auto" | "manual";
   onUnknown?: (event: unknown) => void;
   readSubagentTranscript?: (child: ChildTranscriptIdentity, final: boolean) => Promise<TranscriptCapture>;
   /** Legacy checkpoint injection for callers without the asynchronous reader.
@@ -194,6 +195,12 @@ export class CursorSdkTranslator {
   private readonly anonymousToolIds = new Set<string>();
   private readonly deferredToolSteps: Array<{ key: string; message: SdkMsg }> = [];
   private runIdentity: { agentId: string; runId?: string } | undefined;
+  // Summary frames have no item ID. Correlate the ordered lifecycles in each
+  // native delivery lane, so buffered stream mirrors cannot reopen a callback's
+  // completed row or settle a later compaction in the same run.
+  private readonly summaryLanes = { stream: { index: -1, running: false }, delta: { index: -1, running: false } };
+  private readonly summaries: Array<{ id: string; status: "in_progress" | "completed" | "failed"; fallback?: boolean }> = [];
+  private readonly compactionTrigger: "auto" | "manual";
   private errorMessage: string | null = null;
   private lastStopReason: StopReason = "end_turn";
 
@@ -205,6 +212,7 @@ export class CursorSdkTranslator {
     this.loadSubagentTranscript = opts.loadSubagentTranscript;
     this.loadSubagentTranscriptByPath = opts.loadSubagentTranscriptByPath;
     this.onLog = opts.onLog;
+    this.compactionTrigger = opts.compactionTrigger ?? "auto";
   }
 
   get sawTerminal(): boolean {
@@ -277,6 +285,11 @@ export class CursorSdkTranslator {
         break;
       case "status":
         this.onStatus(msg);
+        break;
+      case "summary":
+        if (msg.status === "running" || msg.status === "completed" || msg.status === "error") {
+          this.onSummary("stream", msg.status, raw.fallback === true);
+        } else this.onUnknown?.(raw);
         break;
       case "usage": {
         // SDK usage is emitted once at each native turn end. Its callback may
@@ -370,11 +383,58 @@ export class CursorSdkTranslator {
         this.text.endTurn();
         this.activeText = undefined;
         return;
+      case "summary-started":
+        this.onSummary("delta", "running");
+        return;
+      case "summary-completed":
+        this.onSummary("delta", raw.failed === true ? "error" : "completed", raw.fallback === true);
+        return;
+      // The summary text delta is private context, not assistant output.
       // step/summary/shell
       // lifecycle remains informational until Zeros has a common consumer.
       default:
         return;
     }
+  }
+
+  private onSummary(source: "stream" | "delta", status: "running" | "completed" | "error", fallback = false): void {
+    if (this.subagentsClosing) return;
+    const lane = this.summaryLanes[source];
+    if (status === "running") {
+      if (lane.running) return;
+      lane.index++;
+      lane.running = true;
+    } else {
+      if (lane.index < 0) lane.index = 0;
+      lane.running = false;
+    }
+    let summary = this.summaries[lane.index];
+    if (!summary) {
+      summary = { id: `${this.turnPrefix}-compaction-${lane.index}`, status: "in_progress" };
+      this.summaries[lane.index] = summary;
+      this.activeText = undefined;
+      this.text.streamToolBoundary();
+      this.emit({ sessionId: this.sessionId, update: {
+        sessionUpdate: "tool_call", toolCallId: summary.id, kind: "compaction",
+        title: "Compacting..", status: "in_progress", rawInput: { trigger: this.compactionTrigger },
+      } });
+    }
+    if (status === "running") return;
+    if (summary.status !== "in_progress" && (!fallback || summary.fallback || summary.status === "failed")) return;
+    summary.fallback = fallback;
+    this.settleSummary(summary, status === "error" ? "Cursor could not compact the context; the conversation is unchanged." : undefined);
+  }
+
+  private settleSummary(summary: { id: string; status: "in_progress" | "completed" | "failed"; fallback?: boolean }, error?: string): void {
+    summary.status = error ? "failed" : "completed";
+    this.emit({ sessionId: this.sessionId, update: {
+      sessionUpdate: "tool_call_update", toolCallId: summary.id, status: summary.status,
+      title: error ? "Compaction failed" : "Context compacted",
+      ...(error ? { rawOutput: { error } } : summary.fallback ? {
+        rawOutput: { fallback: true },
+        content: [{ type: "content", content: { type: "text", text: "Cursor saved a trimmed transcript because it could not generate a summary." } }],
+      } : {}),
+    } });
   }
 
   private onSubagentDelta(raw: Record<string, unknown>): void {
@@ -753,6 +813,9 @@ export class CursorSdkTranslator {
     if (this.subagentPoll && canRead()) await transcriptDeadline(this.subagentPoll, deadline, undefined).catch(() => {});
     const ownsUpdates = opts.ownsUpdates ?? (() => true);
     if (!ownsUpdates()) { this.subagents.clear(); this.subagentsFlushed = true; return; }
+    for (const summary of this.summaries) {
+      if (summary.status === "in_progress") this.settleSummary(summary, "Cursor stopped before confirming context compaction completed.");
+    }
     for (const { message } of this.deferredToolSteps.splice(0)) {
       const callId = `step-${randomUUID()}`;
       this.anonymousToolIds.add(callId);

@@ -19,6 +19,7 @@ import { useWorkspaceStore } from "../state/store";
 import { parseCloudWorkspaceKey } from "../platform/bridge/cloud-workspace-key";
 import { acceptCloudWorkspaceDocument } from "../state/cloud-workspace-catalog";
 import { fileMediaType } from "@zeros/protocol/file-media";
+import { slashCommandKind } from "@zeros/protocol/builtin-commands";
 import { registerLiveChatFileStager } from "../features/agent/composer-file-attachment-delivery";
 import { bornChatThread } from "../state/spawn-default-chat";
 import { toMessageSegments } from "../features/agent/composer-editor/serialize";
@@ -298,6 +299,10 @@ function Harness() {
     placeholder: "Message",
     onSubmit: () => { composerActionCalls.push("submit"); },
     onSlashCommand: name => {
+      if (name === "compact" && slashCommandKind(agentId, name) === "inline") {
+        composerActionCalls.push("compact-action");
+        return true;
+      }
       if (name !== "model") return false;
       composerActionCalls.push("model-action");
       return true;

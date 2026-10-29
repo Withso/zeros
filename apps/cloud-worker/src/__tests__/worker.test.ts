@@ -49,6 +49,14 @@ async function setup(driverSetup?: (driver: FakeDriver) => void, agentId: "codex
 }
 
 describe("worker bridge routing through a fake relay", () => {
+  it.each(["claude", "codex", "cursor"] as const)("keeps manual compaction unavailable for cloud %s", async provider => {
+    const { relay, chat, drivers } = await setup(undefined, provider);
+    const sessionId = await chat();
+    const request = browserFrame("AGENT_COMPACT", { agentId: provider, sessionId });
+    await relay.request(CLIENT_A, request);
+    expect(relay.response(request.id)).toMatchObject({ type: "AGENT_ERROR", code: "CLOUD_V2_UNSUPPORTED", message: expect.stringContaining("not available in cloud") });
+    expect(drivers[0].prompts).toHaveLength(0);
+  });
   it("reports value-free initial configuration phases without delaying readiness or requiring telemetry support", async () => {
     const directory = await mkdtemp(join(tmpdir(), "zeros-worker-timing-"));
     const reportTiming = vi.fn(), relay = Object.assign(new FakeRelay(), { reportTiming });

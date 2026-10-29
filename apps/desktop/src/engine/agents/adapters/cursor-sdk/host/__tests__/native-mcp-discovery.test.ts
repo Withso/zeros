@@ -35,7 +35,13 @@ async function fixture() {
 
 describe.skipIf(process.platform !== "linux")("pinned Cursor native MCP discovery", () => {
 
-  it.each(["project", "user", "none"])("records repo instruction sentinels with the %s source", async source => {
+  it.each([
+    { source: "project", sources: ["project"], project: true },
+    { source: "user", sources: ["user"], project: false },
+    { source: "none", sources: [], project: false },
+    { source: "Local", sources: ["project", "user", "team", "mdm", "plugins"], project: true },
+    { source: "cloud", sources: ["project", "user"], project: true },
+  ])("assembles repo instructions during prewarm with $source sources", async ({ sources, project }) => {
     const f = await fixture();
     try {
       await mkdir(path.join(f.cwd, ".cursor/rules"));
@@ -43,9 +49,12 @@ describe.skipIf(process.platform !== "linux")("pinned Cursor native MCP discover
       await writeFile(path.join(f.cwd, ".cursor/rules/always.mdc"), "---\nalwaysApply: true\n---\nCURSOR_RULE_SENTINEL");
       // An admitted server exercises workspace resource loading; this is the
       // real pinned SDK, without credentials or provider network access.
-      const output = f.run({ cwd: f.cwd, local: { cwd: f.cwd, settingSources: source === "none" ? [] : [source] }, mcpServers: { admitted: f.server } });
-      expect(output).toContain(`"repoAgentsRead":${source === "project"}`);
-      expect(output).toContain(`"repoRuleRead":${source === "project"}`);
+      const output = f.run({ cwd: f.cwd, local: { cwd: f.cwd, settingSources: sources }, mcpServers: { admitted: f.server } });
+      expect(output).toContain(`"repoAgentsRead":${project}`);
+      expect(output).toContain(`"repoRuleRead":${project}`);
+      expect(output).toContain(`"repoAgentsRule":${project}`);
+      expect(output).toContain(`"repoAlwaysRule":${project}`);
+      expect(output).toContain(`"readApis":${project ? '["FileHandle.readFile"]' : '[]'}`);
     } finally { await rm(f.root, { recursive: true, force: true }); }
   });
   it.each(["project", "user"])("proves %s source starts unadmitted native MCP despite an explicit empty snapshot", async source => {

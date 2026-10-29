@@ -157,7 +157,7 @@ const SLOW_FIRST_ITEM_MS = 5_000;
  *  model answering. Both land within ~10ms of `send` even on a turn whose first
  *  token takes 77s, so time-to-first-output must be measured past them. Mirrors
  *  RUN_CONTROL_FRAME_TYPES in host/cursor-host.cjs. */
-const CURSOR_RUN_CONTROL_FRAMES = new Set(["request", "status"]);
+const CURSOR_RUN_CONTROL_FRAMES = new Set(["request", "status", "summary"]);
 function isCursorRunControlFrame(type: string | undefined): boolean {
   return CURSOR_RUN_CONTROL_FRAMES.has(type ?? "");
 }
@@ -416,6 +416,7 @@ export interface CursorSdkSendOptions {
 export interface SdkAgent {
   readonly agentId: string;
   send(message: unknown, options?: CursorSdkSendOptions): Promise<SdkRun>;
+  summarize?(): Promise<SdkRun>;
   getUsage?(options?: { runId?: string }): Promise<CursorAgentUsage>;
   close?(): void;
 }
@@ -1087,6 +1088,14 @@ interface Session {
   providerHome?: string;
   store?: Promise<CursorLocalStore | null>;
   activeRun: SdkRun | null;
+  /** Compaction admission only: the engine can admit a new prompt while an
+   * older ghost prompt is still unsettled, so this must never lock prompts. */
+  promptsInFlight: number;
+  compacting?: {
+    settled: Promise<void>;
+    stop: AbortController;
+    flush: () => Promise<void>;
+  };
   billing?: CursorUsageReconciler;
   pendingSteers?: Set<(outcome: SteerOutcome) => void>;
   /** Set by cancel() so the prompt loop can distinguish a user-requested
@@ -2113,6 +2122,7 @@ export class CursorSdkAdapter implements AgentAdapter {
       ...(runtime.dispose ? { disposeRuntime: runtime.dispose } : {}),
       ...(runtime.providerHome ? { providerHome: runtime.providerHome } : {}),
       activeRun: null,
+      promptsInFlight: 0,
       cancelRequested: false,
       env: opts.env,
       mcpServers: mcpSource,
@@ -2310,6 +2320,7 @@ export class CursorSdkAdapter implements AgentAdapter {
       ...(runtime.dispose ? { disposeRuntime: runtime.dispose } : {}),
       ...(runtime.providerHome ? { providerHome: runtime.providerHome } : {}),
       activeRun: null,
+      promptsInFlight: 0,
       cancelRequested: false,
       env: opts.env,
       mcpServers: mcpSource,
@@ -2382,6 +2393,35 @@ export class CursorSdkAdapter implements AgentAdapter {
     onNativePromptStage?: (stage: NativePromptStage) => void;
     onNativeOutput?: (kind: NativePromptOutputKind, receivedAtMs?: number) => void;
   }): Promise<{ stopReason: StopReason; response: PromptResponse }> {
+    const session = this.sessions.get(opts.sessionId);
+    if (!session) return this.runPrompt(opts);
+    session.promptsInFlight++;
+    try {
+      const compaction = session.compacting;
+      if (compaction) {
+        let stopWaiting!: () => void;
+        const stopped = new Promise<void>(resolve => { stopWaiting = resolve; });
+        const signal = compaction.stop.signal;
+        if (signal.aborted) stopWaiting();
+        else signal.addEventListener("abort", stopWaiting, { once: true });
+        try {
+          // The settlement barrier never rejects: a summary failure belongs
+          // to /compact and must not discard the user's next prompt.
+          await Promise.race([compaction.settled, stopped]);
+        } finally { signal.removeEventListener("abort", stopWaiting); }
+        // runPrompt resets cancelRequested. Observe Stop before entering it,
+        // even if native summarize has not returned a cancellable run yet.
+        // Only this wait's signal counts: cancelRequested may still hold an
+        // earlier Stop that belonged to an earlier prompt.
+        if (signal.aborted || session.disposing || this.sessions.get(opts.sessionId) !== session) {
+          return { stopReason: "cancelled", response: { stopReason: "cancelled" } };
+        }
+      }
+      return await this.runPrompt(opts);
+    } finally { session.promptsInFlight--; }
+  }
+
+  private async runPrompt(opts: Parameters<CursorSdkAdapter["prompt"]>[0]): Promise<{ stopReason: StopReason; response: PromptResponse }> {
     const session = this.sessions.get(opts.sessionId);
     if (!session) {
       // An id this adapter never registered is a session from a previous
@@ -2882,6 +2922,7 @@ export class CursorSdkAdapter implements AgentAdapter {
     if (
       !session ||
       !run?.steer ||
+      session.compacting ||
       session.cancelRequested ||
       opts.prompt.some((block) => block.type !== "text")
     )
@@ -2927,10 +2968,71 @@ export class CursorSdkAdapter implements AgentAdapter {
     for (const settle of session.pendingSteers ?? []) settle("interrupted");
   }
 
+  /** SDK 1.2 summarizes an existing idle conversation with a native run. Keep
+   * it turnless: no user prompt or private summary text enters the transcript. */
+  async compactContext(opts: { sessionId: string }): Promise<void> {
+    const session = this.sessions.get(opts.sessionId);
+    if (!session || session.disposing) throw new AgentFailureError({
+      kind: "session-expired", stage: "prompt", agentId: AGENT_ID, message: "Cursor session is no longer live.",
+    });
+    if (session.promptsInFlight > 0 || session.compacting || session.activeRun || session.preparingPrompt || session.configurationRefresh) {
+      throw new Error("Cursor is busy. Wait for the current run to finish before compacting context.");
+    }
+    const agent = session.agent;
+    if (!agent.summarize) throw new Error("Cursor SDK context compaction is unavailable.");
+    session.cancelRequested = false;
+    let run: SdkRun | undefined;
+    const ownsSession = () => this.sessions.get(opts.sessionId) === session && !session.disposing && session.agent === agent;
+    const translator = new CursorSdkTranslator({ sessionId: opts.sessionId, compactionTrigger: "manual",
+      emit: event => { if (ownsSession()) this.ctx.emit.onSessionUpdate(AGENT_ID, event); } });
+    let releasePrompts!: () => void;
+    const compaction = {
+      settled: new Promise<void>(resolve => { releasePrompts = resolve; }),
+      stop: new AbortController(),
+      flush: () => translator.flushSubagents({ readFinal: false, ownsUpdates: ownsSession }),
+    };
+    session.compacting = compaction;
+    try {
+      run = await agent.summarize();
+      if (!ownsSession() || session.cancelRequested) { await run.cancel().catch(() => {}); return; }
+      session.activeRun = run;
+      translator.bindRunIdentity(agent.agentId, run.id);
+      for await (const message of run.stream()) {
+        if (!ownsSession() || session.cancelRequested || session.activeRun !== run) break;
+        if (isRecord(message) && (message.type === "summary" || message.type === "status")) translator.feed(message);
+      }
+      if (!ownsSession() || session.cancelRequested) return;
+      const result = await run.wait();
+      if (!ownsSession() || session.cancelRequested || result?.status?.toLowerCase() === "cancelled") return;
+      if (result?.error || translator.sawError || ["error", "expired"].includes(result?.status?.toLowerCase() ?? "")) {
+        throw result?.error ?? translator.terminalFailure ?? new Error("Cursor context compaction failed.");
+      }
+      if (result?.status?.toLowerCase() !== "finished" && !translator.sawTerminal) {
+        throw new Error("Cursor disconnected before confirming that context compaction finished.");
+      }
+    } catch (error) {
+      await run?.cancel().catch(() => {});
+      if (ownsSession() && !session.cancelRequested) throw this.classify(error, "prompt");
+    } finally {
+      try { await compaction.flush(); }
+      finally {
+        if (session.activeRun === run) session.activeRun = null;
+        if (session.compacting === compaction) session.compacting = undefined;
+        releasePrompts();
+      }
+    }
+  }
+
   async cancel(opts: { sessionId: string }): Promise<void> {
     const session = this.sessions.get(opts.sessionId);
     if (session) {
       session.cancelRequested = true;
+      // Release the prompts waiting now. A fresh signal keeps this Stop from
+      // cancelling prompts sent while the stopped summary unwinds.
+      if (session.compacting) {
+        session.compacting.stop.abort();
+        session.compacting.stop = new AbortController();
+      }
       session.preparingPrompt?.abort();
     }
     // Native cancel can finish after its run has settled and the user has
@@ -3093,9 +3195,15 @@ export class CursorSdkAdapter implements AgentAdapter {
     // session is superseded mid-turn (one-live-session-per-chat teardown in the
     // engine) — mirrors the claude/codex deliberate-teardown semantics.
     session.billing?.dispose();
-    session.disposing = true;
     session.cancelRequested = true;
+    session.compacting?.stop.abort();
     session.preparingPrompt?.abort();
+    // readFinal:false synchronously settles already-published summary rows.
+    // Start that flush before fencing the emitter, with no await in between;
+    // late native completion must never leave a retired row spinning.
+    const compactionSettlement = session.compacting?.flush();
+    session.disposing = true;
+    await compactionSettlement?.catch(() => {});
     try {
       await session.activeRun?.cancel();
     } catch {

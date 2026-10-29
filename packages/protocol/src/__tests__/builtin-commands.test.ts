@@ -167,8 +167,16 @@ describe("slashCommandKind (Claude command behavior)", () => {
       expect(slashCommandKind("codex", name)).toBe("text");
     }
   });
-  it("cursor (and unknown agents) always get text (behaviors not wired yet)", () => {
-    for (const id of ["cursor", null]) {
+  it("Cursor /compact invokes native summarization; other commands retain their behavior", () => {
+    expect(slashCommandKind("cursor", "compact")).toBe("inline");
+    expect(getBuiltinCommands("cursor").some(command => command.name === "compact")).toBe(true);
+    expect(bareInlineSlashCommand("cursor", "/compact", false)).toBe("compact");
+    expect(bareInlineSlashCommand("cursor", "/compact", true)).toBeNull();
+    expect(bareInlineSlashCommand("cursor", "/compact keep this", false)).toBeNull();
+    expect(slashCommandKind("cursor", "plan")).toBe("text");
+  });
+  it("unknown agents retain text commands", () => {
+    for (const id of ["unknown", null]) {
       expect(slashCommandKind(id, "plan")).toBe("text");
       expect(slashCommandKind(id, "compact")).toBe("text");
     }

@@ -22,6 +22,7 @@ const STUB = path.join(HERE, "fixtures", "stub-cursor-sdk.cjs");
 
 /** A live cursor-host.cjs subprocess, driven over its NDJSON stdio protocol. */
 class Host {
+  readonly events: unknown[] = [];
   private child: ChildProcess;
   private buf = "";
   private nextId = 1;
@@ -103,6 +104,7 @@ class Host {
           error?: { message?: string };
         };
         if (msg.k === "ready") signalReady();
+        if (msg.k === "ev") this.events.push(msg);
         if(msg.k==="tool"){
           this.child.stdin?.write(JSON.stringify({k:"tool_result",id:msg.id,result:options.onCloudTool?.(msg.request)??{ok:false,error:"unavailable"}})+"\n");
         }
@@ -153,6 +155,18 @@ afterEach(() => {
 });
 
 describe("cursor host — native handle lifetime", () => {
+  it("invokes summarize on the exact native handle and drains its ordinary run stream", async () => {
+    const h = startHost(); await h.ready();
+    const agent = await h.req<{ agentId: string; handleId: string }>("agent.create", { handleFixture: true });
+    await expect(h.req("agent.summarize", { ...agent, runId: "summary" })).resolves.toEqual({ sdkRunId: "native-summary" });
+    await expect(h.req("run.wait", { runId: "summary" })).resolves.toMatchObject({ status: "finished" });
+    expect(h.events).toEqual(expect.arrayContaining([
+      expect.objectContaining({ ev: "run.msg", runId: "summary", msg: { type: "summary", agent_id: agent.agentId, run_id: "native-summary", status: "running" } }),
+      expect.objectContaining({ ev: "run.msg", runId: "summary", msg: { type: "summary", agent_id: agent.agentId, run_id: "native-summary", status: "completed" } }),
+    ]));
+    await h.req("agent.close", agent);
+    await expect(h.req("agent.summarize", { ...agent, runId: "retired" })).rejects.toThrow("not found");
+  });
   it("rejects a previous host generation's handle after the same conversation resumes", async () => {
     const opts = { cwd: "/w/alpha", handleFixture: true };
     const first = startHost(); await first.ready();
