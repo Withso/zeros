@@ -40,6 +40,13 @@ use the isolated zeros-pr767 tree. The master reviews/pushes; the owner merges.
   ancestry before interpreting unrelated reverse surface diffs. The master
   approved a normal merge of main; the branch was not rebased.
 
+- Delivery: main moved twice during review. A stale local `origin/main` hid
+  #766, so the report rejected the tested base; merge main again after a
+  fresh fetch. A partial CI rerun would also have dropped the runtime
+  evidence, so rerun held PRs in full. The UI smoke reset dialog was measured
+  mid-zoom (1.94 of 2 lines, deterministic); the smoke now waits for its
+  animations. Encoded in zstack-verify and `scripts/ui-smoke-turn-changes.mjs`.
+
 Evidence: adjacent and full suites, native instruction assembly, packaging and
 browser receipts in `.context/pr767/verification.md`. Live inference and
 platform-only checks are listed separately from offline evidence there.

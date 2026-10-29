@@ -135,6 +135,17 @@ pnpm --dir apps/control-plane cloud-v2:gate0 --local --runtime <runtime-sha256>
   parent is the current `main`. After anything lands on `main`, merge `main`
   into that PR branch (never force-push the bot branch), rerun CI and wait for
   the report to name the new head; land other PRs only after it merges.
+  Run `git fetch origin main` immediately before that final push: a stale local
+  `origin/main` once hid a PR that had landed two minutes earlier. Rerun a
+  held PR's CI in full, never with `--failed`: the report reads the
+  qualification artifact and job of the rerun's own attempt, so a partial
+  rerun reports the runtime evidence as missing.
+- UI smoke geometry: `getBoundingClientRect()` includes transforms, so a
+  dialog measured during its open zoom reads about 3% small (1.94 of 2 lines,
+  identical on every failing run). Wait for its finite animations to finish
+  before measuring.
+- `git checkout <ref> --` with no path switches `HEAD`; read another ref's file
+  with `git show <ref>:<path>`.
 - Time windows: tolerate clock skew between this host and Alpha (about 0.5 s
   observed). Compare against the documented bound, never an exact value.
 - Harness input files must be regular files you own, mode 0600 and small.

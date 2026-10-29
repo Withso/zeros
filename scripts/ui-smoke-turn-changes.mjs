@@ -31,6 +31,11 @@ export async function runTurnChangesSmoke({ page, check }) {
         await expect(dialog.getByRole("button", { name: "Reset changes", exact: true })).toBeEnabled();
         const description = dialog.locator("[id]").filter({ hasText: /^Reset this chat and its changes to this point\./ }).last();
         await expect(description).toHaveText("Reset this chat and its changes to this point.This turn and later turns will be removed. You can undo.");
+        // The dialog opens with a 200 ms zoom from 97%. getBoundingClientRect
+        // includes that transform, so measure the settled dialog.
+        await dialog.evaluate(element => Promise.all(element.getAnimations({ subtree: true })
+          .filter(animation => animation.effect?.getTiming().iterations !== Infinity)
+          .map(animation => animation.finished)));
         const lines = await description.evaluate(element => element.getBoundingClientRect().height / Number.parseFloat(getComputedStyle(element).lineHeight));
         expect(lines).toBeCloseTo(2, 1);
         if (owner === "personal" && agent === "claude") {
