@@ -158,6 +158,7 @@ not prove its contents, and bypassing the wrapper remains a review concern.
 | [R81](../../RULES.md#7-tests-and-change-discipline) Check licenses after dependency, generated-code or packaged-asset changes. <!-- rule:RULES.md:e308066b41057772 --> | `check:licenses` | Audited graphs/notices only; provenance still needs human review. |
 | [R82](../../RULES.md#7-tests-and-change-discipline) Report a platform-only check as unverified unless run on that platform. <!-- rule:RULES.md:1c439a8c961d31f3 --> | judgment only | Receipts show the host; interpreting or overstating evidence remains judgment. |
 | [R83](../../RULES.md#7-tests-and-change-discipline) Update durable docs when boundaries, commands, deployments or ownership change. <!-- rule:RULES.md:164786006eaef41a --> | `design-system-docs.test.ts`, `check:ui` | Generated briefs only; prose completeness is judgment. |
+| [R103](../../RULES.md#7-tests-and-change-discipline) Keep comments for non-obvious reasons; protect functional directives, generated files and licenses. <!-- rule:RULES.md:8da281276b746424 --> | `zstack-comments.test.ts`, `zstack/comments.mjs` | The debt ratchet and opt-in verify command check size, protected comments and unchanged code; whether a comment carries a necessary reason remains judgment. |
 | [R84](../../RULES.md#8-local-and-cloud-workspaces) Handle Local Personal, organization-local and cloud owners and placements. <!-- rule:RULES.md:6c712906c6e02c5e --> | `test:workspace-lifecycle`, `workspace-cache-transitions.test.ts` | Covered lifecycle/switching paths only; each changed feature needs placement review. |
 | [R85](../../RULES.md#agent-brief-local-and-cloud-workspaces-in-zeros) Handle Local Personal, organization-local and cloud owners and placements. <!-- rule:RULES.md:9fedb323d833598f --> | `test:workspace-lifecycle`, `workspace-cache-transitions.test.ts` | Covered lifecycle/switching paths only; each changed feature needs placement review. |
 | [R86](../../RULES.md#agent-brief-local-and-cloud-workspaces-in-zeros) Distinguish the Local Personal owner from collaborative tenant organizations. <!-- rule:RULES.md:41a428806184f027 --> | `navigation-memory.test.ts`, `workspace-cache-transitions.test.ts` | Owner routing and switching fixtures; new tenant APIs need authorization tests. |
@@ -242,5 +243,7 @@ a workflow job. CI lanes run only under the repository's existing scope policy.
 | `worker/runtime-boundary.test.ts` | test | `apps/cloud-worker/src/__tests__/runtime-boundary.test.ts` |
 | `worker/worker-auth.test.ts` | test | `apps/cloud-worker/src/__tests__/worker-auth.test.ts` |
 | `workspace-cache-transitions.test.ts` | test | `apps/desktop/src/renderer/state/__tests__/workspace-cache-transitions.test.ts` |
+| `zstack-comments.test.ts` | test | `scripts/__tests__/zstack-comments.test.ts` |
 | `zstack.test.ts` | test | `scripts/__tests__/zstack.test.ts` |
+| `zstack/comments.mjs` | script | `scripts/zstack/comments.mjs` |
 | `zstack/verify.mjs` | script | `scripts/zstack/verify.mjs` |
