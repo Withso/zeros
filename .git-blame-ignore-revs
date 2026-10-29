@@ -6,3 +6,8 @@ fd3efa3411950c1645c1538cbdd1a5a24eb9ff88 # Trim comment narration in the agent c
 3e1301f60f52f5b58f3284a0aaf14cdacc5d960e # Trim narration from twelve terminal, workbench, conversation and bridge comments (#776)
 7cdf16c5d2bbe94209887324e3722bb6ec975b1b # Trim narration from ten protocol wire and shared-model comments (#778)
 f81070b3829d85f8c208d08101f7c41ef02745f1 # Trim narration from eleven Design, agent and settings comments (#779)
+4da0b36030ca9e5f964dd7efcaa391c8cceaea1b # Keep engine comments focused on lifetime and trust invariants (#782)
+3d4431532afa3d3c72d348a2f400128ba413b4fb # docs(electron): keep comments focused on runtime constraints (#783)
+18bf6455657f12f36996318be1494be747b0ca0a # docs(cloud-worker): condense provider and replay comments (#784)
+9edaa78bb76891b19986fd168e597dee9cb19d31 # docs(control-plane): keep comments focused on invariants (#786)
+64cac84c829b7b8e2a4e8ed13106a8afab64301b # docs(scripts): keep qualification comments focused (#787)

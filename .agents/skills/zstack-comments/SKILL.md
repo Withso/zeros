@@ -65,7 +65,10 @@ Clean in small, area-scoped PRs that change nothing but comments.
    holds an invariant the code cannot express, keep it as one sentence. Check
    that each doc block still sits on the declaration it describes: inserted
    code often strands one above a neighbour. Move it beside its target, and
-   correct any comment that no longer matches the code.
+   correct any comment that no longer matches the code. Some comments are
+   functional without being directives: tests that slice source text can use
+   a heading as an anchor (search `readFileSync` consumers of the file), and
+   a comment can be all that keeps a `catch {}` legal under `no-empty`.
 3. Prove it: `node scripts/zstack/comments.mjs verify --base origin/main` must
    report no problems. It starts at the merge base, like `git diff
    origin/main...`, and compares each file's parsed structure and token text

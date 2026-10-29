@@ -27,6 +27,9 @@ where it is encoded.
   investigations, prototypes and pack changes now have playbooks
   (`feature.md`, `refactor.md`, `investigation.md`, `prototype.md`,
   `skill-eval.md`), and the loop's review step runs the comment pass first.
+- **Some ordinary-looking comments were load-bearing.** Removing a heading
+  broke eight tests that slice `main.ts` by it, and emptied `catch` blocks
+  failed `no-empty`. `zstack-comments` now names both consumers.
 - **A merge was armed past a CodeQL alert.** The token cannot read code
   scanning, and one comments-only PR merged while its check said "1 new
   alert": a relocated, unchanged line. Merges now gate on the CodeQL
