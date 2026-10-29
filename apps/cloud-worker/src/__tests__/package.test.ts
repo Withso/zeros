@@ -41,7 +41,7 @@ it("ships a relocatable dependency graph and a complete SHA-256 inventory", asyn
   expect((await lstat(dist)).isSymbolicLink()).toBe(true); expect(await realpath(dist)).toBe(runtime);
   const manifest = JSON.parse(await readFile(join(dist, "runtime-manifest.json"), "utf8"));
   expect(manifest).toMatchObject({ node: "24", platform: process.platform, arch: process.arch,
-    pins: { "@openai/codex": "0.165.0", "@anthropic-ai/claude-agent-sdk": "0.3.311", "@cursor/sdk": "1.1.0", "node-pty": "1.1.0" } });
+    pins: { "@openai/codex": "0.165.0", "@anthropic-ai/claude-agent-sdk": "0.3.311", "@cursor/sdk": "1.2.0", "node-pty": "1.1.0" } });
   const files: string[] = [];
   async function walk(relative = ""): Promise<void> {
     for (const entry of await readdir(join(dist, relative), { withFileTypes: true })) {

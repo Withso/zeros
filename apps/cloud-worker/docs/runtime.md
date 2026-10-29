@@ -91,6 +91,16 @@ transcript reads settle before turn completion. Usage comes from the native run;
 only an exact run-id billing match supplies cost, with no inferred charges or
 late billing polling.
 
+Cursor 1.2.0 automatic summaries use the same compaction rows as Local:
+running, completed (including the native trimmed-transcript fallback), or
+failed. Callback and stream delivery reconcile by ordered lifecycle within
+the exact run. An unfinished summary settles as unconfirmed on Stop or EOF;
+run completion alone never proves compaction succeeded. Private summary text
+is not assistant output. The worker has no `AGENT_COMPACT` route for Claude,
+Codex or Cursor; manual compaction remains unavailable for all three in cloud.
+Repository `AGENTS.md` and `.cursor/rules` load through native project settings;
+1.2.0 reads text using an opened file handle during executor preparation.
+
 ## Runtime package
 
 Build on Linux with Node 24 LTS, on the same architecture and glibc as the VM:
@@ -109,7 +119,7 @@ the exact runtime pins, dependency versions and SHA-256 of every shipped file.
 The bundle contains the protocol, WebSocket and terminal-screen libraries.
 External runtime packages are node-pty (including its native addon), Codex
 0.165.0 and its platform binary, Claude Agent SDK 0.3.311 and its platform CLI,
-and Cursor SDK 1.1.0 and its platform binaries. Their runtime dependencies and
+and Cursor SDK 1.2.0 and its platform binaries. Their runtime dependencies and
 required peer dependencies are included; provider binaries do not download at
 agent startup.
 

@@ -41,6 +41,9 @@ const output = Array.from(
 const readProviders = ["Claude", "Codex", "Cursor"] as const;
 const readOutput = Array.from({ length: 415 }, (_, index) => `source line ${index + 1}`).join("\n") + "\n";
 const initial: AgentMessage[] = [
+  ...(["local", "cloud"] as const).map(placement => tool(`cursor-compaction-${placement}`, {
+    title: "Compacting..", toolKind: "compaction", status: "in_progress", rawInput: { trigger: "auto" },
+  })),
   ...(["connected", "disconnected"] as const).map((state) => tool(`environment-${state}`, {
     title: `Environment ${state}`,
     toolKind: "other",
@@ -145,6 +148,10 @@ export function ToolPresentationFixture({ ctx }: { ctx: RendererContext }) {
     >
       <ToolSpacingFixture ctx={ctx} />
       <div className="flex flex-wrap gap-2">
+        <Button onClick={() => setMessages(previous => ["local", "cloud"].reduce((state, placement) => applyUpdate(state, {
+          sessionId: "fixture", update: { sessionUpdate: "tool_call_update", toolCallId: `cursor-compaction-${placement}`,
+            title: "Context compacted", status: "completed", rawOutput: { fallback: true } },
+        }), previous))}>Finish compactions</Button>
         <Button
           onClick={() =>
             setMessages((previous) =>

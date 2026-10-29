@@ -1,0 +1,9 @@
+{
+  "id": "cursor-sdk-summary-lifecycle",
+  "kind": "replay",
+  "area": "vm-engine-agents",
+  "fixedBy": "pr:767",
+  "symptom": "Cursor 1.2 summary messages were invisible, and /compact was text rather than native summarization. Callback/stream mirrors and unfinished runs need distinct lifecycle evidence.",
+  "rule": "Inventory provider messages and deltas, reconcile their native lifecycles, and require positive compaction completion. See agents/zstack/changes/cursor-sdk-120-compaction.md.",
+  "check": "pnpm exec vitest run apps/desktop/src/engine/agents/adapters/cursor-sdk/__tests__/compaction.test.ts apps/desktop/src/engine/agents/adapters/cursor-sdk/__tests__/compact-context.test.ts packages/protocol/src/__tests__/builtin-commands.test.ts"
+}

@@ -267,7 +267,7 @@ across harnesses, and `—` means unavailable through the current adapter.
 | Official native browser session        |     H |      H |      — |
 | Mid-turn steering                      |     H |      H |      — |
 | Live mode switch                       |     H |      H |      H |
-| Context compaction                     |     H |      H |      — |
+| Context compaction                     |     H |      H |      H |
 | Stop one provider background task      |     H |      H |      — |
 | Native working-tree review command     |     H |      — |      — |
 | Host-answerable permission             |     H |      H |      — |
@@ -281,7 +281,10 @@ across harnesses, and `—` means unavailable through the current adapter.
 | Isolated text generation               |     H |      H |      H |
 
 The table describes implemented product behavior, not every capability the
-upstream vendor may expose. Codex targeted Stop is implemented through the
+upstream vendor may expose. Cursor's compaction entry is updated for SDK 1.2.0:
+Local `/compact` invokes `agent.summarize()` only while idle, and automatic
+summary rows work in Local and cloud. The standalone worker has no manual
+compaction route for any provider. Codex targeted Stop is implemented through the
 background-work domain. Its separate `clean` request remains intentionally
 unexposed because the 0.149 contract stops every running terminal; Zeros has no
 bulk-stop intent in the shared per-row task card.
@@ -296,7 +299,7 @@ bulk-stop intent in the shared per-row task card.
   confirms the same TypeScript APIs. Zeros' Claude adapter still returns an
   empty discovery list and has no fork port, so those are real follow-up gaps,
   not Phase 1 support claims.
-- Cursor 1.0.28 remains the latest qualified pin. Its
+- The original Cursor 1.0.28 qualification's
   [official SDK update](https://cursor.com/changelog/sdk-updates-jun-2026)
   documents durable resume, custom tools, stores, and auto-review. Auto-review
   is a classifier gate, not a host-answerable built-in-tool permission callback;

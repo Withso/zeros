@@ -1699,7 +1699,8 @@ function AgentChatBody({
           // Real compaction uses one path for every agent —
           // AGENT_COMPACT → adapter.compactContext (Codex: the
           // thread/compact/start RPC; Claude: the CLI-intercepted "/compact"
-          // fed turnless into the SDK stream). Deliberately NOT a sendPrompt:
+          // fed turnless into the SDK stream; Cursor: SDK summarize).
+          // Deliberately NOT a sendPrompt:
           // no "/compact" user bubble ever lands in the transcript — the
           // compaction narrates itself as a standalone agent-output row
           // ("Compacting.." → "Context compacted").
@@ -3364,9 +3365,9 @@ function AgentChatBody({
     "This agent";
 
   // Context gauge: the ring + breakdown popover beside Send. Cursor's
-  // SDK reports no token usage and has no compaction call — its ring renders
-  // disabled with an honest popover note instead
-  // of an invented number. Compact-now: ONE path for every agent —
+  // SDK reports turn usage but no current context-window fill, so its ring
+  // stays disabled; Cursor's /compact action uses SDK summarize separately.
+  // Compact-now: ONE path for every agent —
   // compactContext → AGENT_COMPACT (Codex: thread/compact/start RPC; Claude:
   // "/compact" fed turnless into the SDK stream). No user bubble; the
   // standalone compaction row is the feedback.

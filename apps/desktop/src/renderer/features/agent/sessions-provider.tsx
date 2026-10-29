@@ -5028,9 +5028,9 @@ export function AgentSessionsProvider({
     (chatId) => {
       if (!bridge) return;
       const current = getStore().sessions[chatId];
-      // Only meaningful for a LIVE session with a real compaction RPC
-      // (agent-chat gates the trigger to Codex; Claude compacts via its
-      // CLI-native "/compact" prompt instead). Fire-and-forget: the
+      // Only meaningful for a LIVE session with native compaction support
+      // (Codex RPC, Claude turnless /compact, or Cursor summarize).
+      // Fire-and-forget: the
       // "Compacting.." → "Context compacted" row streams back through the
       // normal session-update path.
       if (!current?.agentId || !current.sessionId) return;

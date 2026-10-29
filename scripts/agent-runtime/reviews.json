@@ -4696,6 +4696,130 @@
         "apps/desktop/src/engine/agents/adapters/codex/generated/v2/ThreadSampleParams.ts",
         "docs/codex-app-server-compatibility.md"
       ]
+    },
+    {
+      "provider": "cursor",
+      "fingerprint": "e0f3d02fc9f0f6d6882172bea817815ded811b6968205eeaf7186fc31e2eb0a8",
+      "disposition": "implemented",
+      "rationale": "SDKAgent.summarize starts a native idle compaction run through the Local host. Busy/preparing sessions refuse without interruption, private summary text is not narrated, and Stop/disposal fences late runs. Cloud keeps the existing manual-compaction refusal shared by all providers.",
+      "evidence": [
+        "apps/desktop/src/engine/agents/adapters/cursor-sdk/adapter.ts",
+        "apps/desktop/src/engine/agents/adapters/cursor-sdk/__tests__/compact-context.test.ts",
+        "apps/desktop/src/engine/agents/adapters/cursor-sdk/host/__tests__/store-injection.test.ts",
+        "apps/cloud-worker/src/__tests__/worker.test.ts"
+      ]
+    },
+    {
+      "provider": "cursor",
+      "fingerprint": "33bdaf6c5fcead7f3b1d1600d7c4d1e8a179b050b6739648a4a4a7663ae59743",
+      "disposition": "sdk-owned",
+      "rationale": "The SDK adds its operation name to native failure telemetry. Zeros calls no analytics helper and keeps existing bounded host diagnostics; no custom telemetry integration is added.",
+      "evidence": [
+        "apps/desktop/src/engine/agents/adapters/cursor-sdk/host/cursor-host.cjs",
+        "apps/cloud-worker/src/drivers/cursor/host-entry.ts",
+        "docs/agent-runtime-notifications.md"
+      ]
+    },
+    {
+      "provider": "cursor",
+      "fingerprint": "7cf41b86e9a6ae7064df484d0ee2f3a845cab4b42982fae4a59139ae3dc9d7f1",
+      "disposition": "sdk-owned",
+      "rationale": "The executor input becomes a text-or-summarize union. Zeros uses public agent.send and agent.summarize; the SDK owns conversion into this internal input without a custom run executor.",
+      "evidence": [
+        "apps/desktop/src/engine/agents/adapters/cursor-sdk/host/cursor-host.cjs",
+        "apps/desktop/src/engine/agents/adapters/cursor-sdk/host/__tests__/store-injection.test.ts",
+        "apps/cloud-worker/src/drivers/cursor/host.ts"
+      ]
+    },
+    {
+      "provider": "cursor",
+      "fingerprint": "6548379387456d860a2d2d3bd8626696c8737fd48994b2887201350f15269181",
+      "disposition": "sdk-owned",
+      "rationale": "The public barrel now exports SDKSummaryMessage. Exhaustive installed message and delta coverage and the translators cover the new public contract without importing executor internals.",
+      "evidence": [
+        "apps/desktop/src/engine/agents/adapters/cursor-sdk/__tests__/sdk-message-coverage.test.ts",
+        "apps/desktop/src/engine/agents/adapters/cursor-sdk/translator.ts",
+        "apps/cloud-worker/src/drivers/cursor/translator.ts"
+      ]
+    },
+    {
+      "provider": "cursor",
+      "fingerprint": "3b82f7c54f0f33e23d249d10065fd5522816a4a86b088d3d64151244101468cb",
+      "disposition": "sdk-owned",
+      "rationale": "Internal recovery renames assistantText to resultText so it can also recover summaries. Zeros never invokes it directly; it preserves native terminal errors/results and never turns manual summary result text into an assistant answer.",
+      "evidence": [
+        "apps/desktop/src/engine/agents/adapters/cursor-sdk/__tests__/native-output.test.ts",
+        "apps/desktop/src/engine/agents/adapters/cursor-sdk/__tests__/compact-context.test.ts",
+        "apps/cloud-worker/src/drivers/cursor/driver.ts"
+      ]
+    },
+    {
+      "provider": "cursor",
+      "fingerprint": "5b6b26a3ae6818284fecc12bb32dae19cf3145b79c1bf06e05f799bfaac6efea",
+      "disposition": "implemented",
+      "rationale": "The new summary union member produces existing compaction records in Local and cloud. Running/completed/error and fallback retain exact-run ownership, ordered callback/stream mirror reconciliation and persistence.",
+      "evidence": [
+        "apps/desktop/src/engine/agents/adapters/cursor-sdk/__tests__/sdk-message-coverage.test.ts",
+        "apps/desktop/src/engine/agents/adapters/cursor-sdk/__tests__/compaction.test.ts",
+        "apps/cloud-worker/src/drivers/cursor/__tests__/parity.test.ts",
+        "apps/cloud-worker/src/drivers/cursor/__tests__/fixtures/streams.ts"
+      ]
+    },
+    {
+      "provider": "cursor",
+      "fingerprint": "5dd48d0448176f303993720b8d95fa81744a632a9ee7d8236cbe2a354ac34b2e",
+      "disposition": "implemented",
+      "rationale": "Native summary status is compaction status, not run completion. Both translators settle completed/error rows, preserve trimmed-transcript fallback, and leave private summary text out of narration; EOF/Stop never imply success.",
+      "evidence": [
+        "apps/desktop/src/engine/agents/adapters/cursor-sdk/translator.ts",
+        "apps/cloud-worker/src/drivers/cursor/translator.ts",
+        "apps/desktop/src/engine/agents/adapters/cursor-sdk/__tests__/compaction.test.ts",
+        "scripts/ui-smoke-tool-presentation.mjs"
+      ]
+    },
+    {
+      "provider": "cursor",
+      "fingerprint": "e6ebab77cf1d54a30ff743ac7f3c28474ddfbf309dd79931a9d24ff7ee817f87",
+      "disposition": "sdk-owned",
+      "rationale": "The SDK converts summary-started/completed callbacks into stream messages. Zeros handles both resulting lanes and reconciles their ordered lifecycles rather than calling this conversion helper or duplicating rows.",
+      "evidence": [
+        "apps/desktop/src/engine/agents/adapters/cursor-sdk/__tests__/compaction.test.ts",
+        "apps/desktop/src/engine/agents/adapters/cursor-sdk/__tests__/sdk-message-coverage.test.ts",
+        "apps/cloud-worker/src/drivers/cursor/__tests__/fixtures/streams.ts"
+      ]
+    },
+    {
+      "provider": "cursor",
+      "fingerprint": "628725ca2471f6ee5c33901630182babab26dd2faac8fce18e8297043c679cc1",
+      "disposition": "sdk-owned",
+      "rationale": "The public message barrel re-exports SDKSummaryMessage. Its installed type inventory and parsed native delta schemas are covered; no new production import of internal SDK modules is needed.",
+      "evidence": [
+        "apps/desktop/src/engine/agents/adapters/cursor-sdk/__tests__/sdk-message-coverage.test.ts",
+        "apps/cloud-worker/src/drivers/cursor/native-types.ts"
+      ]
+    },
+    {
+      "provider": "cursor",
+      "fingerprint": "fa5185834de7384f7e181e0da3c29c50e25f0c886cad59fe60dc47b23dcce0e0",
+      "disposition": "sdk-owned",
+      "rationale": "The SDK stub acquires summarize to match SDKAgent. Zeros uses real local agents in both deployments; the contained Local host invokes the real handle, and the cloud worker keeps manual compaction unavailable.",
+      "evidence": [
+        "apps/desktop/src/engine/agents/adapters/cursor-sdk/host/cursor-host.cjs",
+        "apps/desktop/src/engine/agents/adapters/cursor-sdk/host/__tests__/store-injection.test.ts",
+        "apps/cloud-worker/src/__tests__/worker.test.ts"
+      ]
+    },
+    {
+      "provider": "cursor",
+      "fingerprint": "a8e19f0630a33c6e846a5b5c8834e1644f22da700742e6debdbe2f09d6b0a299",
+      "disposition": "implemented",
+      "rationale": "The optional fallback boolean indicates successful trimmed-transcript compaction; failed remains a failed summary with unchanged conversation. Both translators retain these distinctions independently of the surrounding run result.",
+      "evidence": [
+        "apps/desktop/src/engine/agents/adapters/cursor-sdk/__tests__/sdk-message-coverage.test.ts",
+        "apps/desktop/src/engine/agents/adapters/cursor-sdk/__tests__/compaction.test.ts",
+        "apps/cloud-worker/src/drivers/cursor/__tests__/fixtures/streams.ts",
+        "apps/desktop/src/renderer/features/agent/renderers/compaction-card.tsx"
+      ]
     }
   ]
 }

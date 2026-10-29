@@ -1321,7 +1321,7 @@ let runsStarted = 0;
 /** Local acknowledgements rather than model output. The SDK's persisted run
  *  events show these landing at seq 1–2 within ~10ms of `send` even on a turn
  *  whose first token took 77s, so latency must be measured past them. */
-const RUN_CONTROL_FRAME_TYPES = new Set(["request", "status"]);
+const RUN_CONTROL_FRAME_TYPES = new Set(["request", "status", "summary"]);
 function isRunControlFrame(msg) {
   return RUN_CONTROL_FRAME_TYPES.has(String(msg?.type ?? ""));
 }
@@ -1446,6 +1446,7 @@ async function handle(m) {
       ok(id, { items });
       return;
     }
+    case "agent.summarize":
     case "agent.send": {
       const agent = agentFor(args);
       if (!agent) throw new Error(`Agent ${args.agentId} not found`);
@@ -1487,7 +1488,7 @@ async function handle(m) {
       const sendStartedAt = Date.now();
       let run;
       try {
-        run = await agent.send(args.message, sendOptions);
+        run = op === "agent.summarize" ? await agent.summarize() : await agent.send(args.message, sendOptions);
       } catch (error) {
         observedRuns.delete(runId);
         throw error;

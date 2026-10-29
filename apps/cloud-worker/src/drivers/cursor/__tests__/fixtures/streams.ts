@@ -17,6 +17,25 @@ interface Fixture { name: string; before?: Delivery[]; frames: Delivery[]; resul
  * Every fixture crosses a real host process before the canonical row fold. */
 export const streams: Fixture[] = [
   {
+    name: "automatic compaction reconciles callback and stream mirrors with fallback",
+    before: [delta({ type: "summary-started" }), delta({ type: "summary-completed" })],
+    frames: [
+      delta({ type: "summary-started" }),
+      message({ type: "summary", status: "running" }), message({ type: "summary", status: "completed" }),
+      delta({ type: "summary-completed", fallback: true }),
+      message({ type: "summary", status: "running" }), message({ type: "summary", status: "completed", fallback: true }),
+    ], result: { result: "Continued after compaction." },
+  },
+  {
+    name: "compaction error settles its row while the run continues",
+    frames: [message({ type: "summary", status: "running" }), message({ type: "summary", status: "error" })],
+    result: { result: "Continued without compaction." },
+  },
+  {
+    name: "a missing compaction completion never becomes successful at EOF",
+    frames: [message({ type: "summary", status: "running" })], result: { result: "Finished." },
+  },
+  {
     name: "callbacks before send, buffered mirrors and authoritative final text",
     before: [delta({ type: "text-delta", text: "Working" }), step("assistantMessage", { text: "Working" })],
     frames: [

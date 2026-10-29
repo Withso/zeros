@@ -193,6 +193,31 @@ on 1.0.40; it now pins 1.1.0 too, because Local and the cloud worker always pin
 the same Codex, Claude and Cursor runtime versions (see "Runtime pin parity").
 Its runtime reaches cloud workspaces through the normal worker runtime delivery.
 
+### Cursor 1.1.0 to 1.2.0 review
+
+All 11 declaration changes have fingerprinted decisions in
+`scripts/agent-runtime/reviews.json`. Local and the standalone cloud worker
+pin SDK 1.2.0, including native runtime constants and packaging assertions.
+Account catalog discovery (`Cursor.models.list`) and the shared effort/Fast
+selection contract remain in place for create, resume and the next send.
+
+| Area | Decision and evidence |
+| --- | --- |
+| `SDKAgent.summarize()` | Local `/compact` starts an idle native summary run through the contained host. Reject busy/preparing sessions without interruption; preserve the SDK's unsaved-conversation error. Adapter and host regressions cover cancellation, stale handles and private result text. Cloud manual compaction remains unavailable, as for Claude/Codex. |
+| `SDKMessage`, `SDKSummaryMessage`, `SummaryCompletedUpdateSchema` | Both translators reconcile running/completed/error lifecycles and callback mirrors into existing compaction rows, retaining fallback detail. Native schema inventory and cloud persistence/parity tests cover the contract. |
+| `summaryUpdateToSdkMessage` and public re-exports | SDK-owned conversion/export plumbing; the consumers handle its resulting message and callback shapes. The installed message/delta inventory is exhaustive. |
+| `RunExecutorInput`, `UnimplementedAgent`, `trackSdkOperationFailed` | SDK-owned executor, stub and operation telemetry. Zeros calls the public agent API, never these internals. No custom executor or telemetry integration is introduced. |
+| `recoveredResultForLocalStoreOpenFailure` | SDK-owned parameter rename from assistant text to result text, allowing native summary recovery. Zeros retains native run errors/results; summary result text stays private. |
+
+The failing repository-instruction probe was an observation gap: 1.2.0 reads
+text through `FileHandle.readFile()` rather than only `fs.promises.readFile()`.
+The repaired credential-free test observes both and verifies actual native
+always-applied rule construction during prewarm. Repository instructions are
+present for project/Local/cloud sources and absent for user-only/empty sources.
+This proves instruction assembly, not authenticated model inference. No runtime
+instruction injection or setting-source expansion was needed. The unrelated
+Design layout timing failure passed unchanged in the isolated baseline run.
+
 ## Privilege and persistence boundaries
 
 | Job             | Authority                                                                                                                                                                                                                 |

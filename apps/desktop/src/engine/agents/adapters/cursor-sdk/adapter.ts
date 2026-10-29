@@ -157,7 +157,7 @@ const SLOW_FIRST_ITEM_MS = 5_000;
  *  model answering. Both land within ~10ms of `send` even on a turn whose first
  *  token takes 77s, so time-to-first-output must be measured past them. Mirrors
  *  RUN_CONTROL_FRAME_TYPES in host/cursor-host.cjs. */
-const CURSOR_RUN_CONTROL_FRAMES = new Set(["request", "status"]);
+const CURSOR_RUN_CONTROL_FRAMES = new Set(["request", "status", "summary"]);
 function isCursorRunControlFrame(type: string | undefined): boolean {
   return CURSOR_RUN_CONTROL_FRAMES.has(type ?? "");
 }
@@ -416,6 +416,7 @@ export interface CursorSdkSendOptions {
 export interface SdkAgent {
   readonly agentId: string;
   send(message: unknown, options?: CursorSdkSendOptions): Promise<SdkRun>;
+  summarize?(): Promise<SdkRun>;
   getUsage?(options?: { runId?: string }): Promise<CursorAgentUsage>;
   close?(): void;
 }
@@ -1087,6 +1088,8 @@ interface Session {
   providerHome?: string;
   store?: Promise<CursorLocalStore | null>;
   activeRun: SdkRun | null;
+  prompting?: boolean;
+  compacting?: boolean;
   billing?: CursorUsageReconciler;
   pendingSteers?: Set<(outcome: SteerOutcome) => void>;
   /** Set by cancel() so the prompt loop can distinguish a user-requested
@@ -2383,6 +2386,14 @@ export class CursorSdkAdapter implements AgentAdapter {
     onNativeOutput?: (kind: NativePromptOutputKind, receivedAtMs?: number) => void;
   }): Promise<{ stopReason: StopReason; response: PromptResponse }> {
     const session = this.sessions.get(opts.sessionId);
+    if (session?.compacting || session?.prompting) throw new Error("Cursor is busy. Wait for the current run or compaction to finish.");
+    if (session) session.prompting = true;
+    try { return await this.runPrompt(opts); }
+    finally { if (session) session.prompting = false; }
+  }
+
+  private async runPrompt(opts: Parameters<CursorSdkAdapter["prompt"]>[0]): Promise<{ stopReason: StopReason; response: PromptResponse }> {
+    const session = this.sessions.get(opts.sessionId);
     if (!session) {
       // An id this adapter never registered is a session from a previous
       // engine process (or one already retired), not a protocol violation.
@@ -2882,6 +2893,7 @@ export class CursorSdkAdapter implements AgentAdapter {
     if (
       !session ||
       !run?.steer ||
+      session.compacting ||
       session.cancelRequested ||
       opts.prompt.some((block) => block.type !== "text")
     )
@@ -2925,6 +2937,52 @@ export class CursorSdkAdapter implements AgentAdapter {
 
   private finishPendingSteers(session: Session): void {
     for (const settle of session.pendingSteers ?? []) settle("interrupted");
+  }
+
+  /** SDK 1.2 summarizes an existing idle conversation with a native run. Keep
+   * it turnless: no user prompt or private summary text enters the transcript. */
+  async compactContext(opts: { sessionId: string }): Promise<void> {
+    const session = this.sessions.get(opts.sessionId);
+    if (!session || session.disposing) throw new AgentFailureError({
+      kind: "session-expired", stage: "prompt", agentId: AGENT_ID, message: "Cursor session is no longer live.",
+    });
+    if (session.prompting || session.compacting || session.activeRun || session.preparingPrompt || session.configurationRefresh) {
+      throw new Error("Cursor is busy. Wait for the current run to finish before compacting context.");
+    }
+    const agent = session.agent;
+    if (!agent.summarize) throw new Error("Cursor SDK context compaction is unavailable.");
+    session.compacting = true;
+    session.cancelRequested = false;
+    let run: SdkRun | undefined;
+    const ownsSession = () => this.sessions.get(opts.sessionId) === session && !session.disposing && session.agent === agent;
+    const translator = new CursorSdkTranslator({ sessionId: opts.sessionId, compactionTrigger: "manual",
+      emit: event => { if (ownsSession()) this.ctx.emit.onSessionUpdate(AGENT_ID, event); } });
+    try {
+      run = await agent.summarize();
+      if (!ownsSession() || session.cancelRequested) { await run.cancel().catch(() => {}); return; }
+      session.activeRun = run;
+      translator.bindRunIdentity(agent.agentId, run.id);
+      for await (const message of run.stream()) {
+        if (!ownsSession() || session.cancelRequested || session.activeRun !== run) break;
+        if (isRecord(message) && (message.type === "summary" || message.type === "status")) translator.feed(message);
+      }
+      if (!ownsSession() || session.cancelRequested) return;
+      const result = await run.wait();
+      if (!ownsSession() || session.cancelRequested || result?.status?.toLowerCase() === "cancelled") return;
+      if (result?.error || translator.sawError || ["error", "expired"].includes(result?.status?.toLowerCase() ?? "")) {
+        throw result?.error ?? translator.terminalFailure ?? new Error("Cursor context compaction failed.");
+      }
+      if (result?.status?.toLowerCase() !== "finished" && !translator.sawTerminal) {
+        throw new Error("Cursor disconnected before confirming that context compaction finished.");
+      }
+    } catch (error) {
+      await run?.cancel().catch(() => {});
+      if (ownsSession() && !session.cancelRequested) throw this.classify(error, "prompt");
+    } finally {
+      await translator.flushSubagents({ readFinal: false, ownsUpdates: ownsSession });
+      if (session.activeRun === run) session.activeRun = null;
+      session.compacting = false;
+    }
   }
 
   async cancel(opts: { sessionId: string }): Promise<void> {

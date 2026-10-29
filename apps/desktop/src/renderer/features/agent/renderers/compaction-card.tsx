@@ -80,6 +80,8 @@ export const CompactionRecordCard: Renderer<AgentToolMessage> = memo(
     const failed = !running && message.status === "failed";
     const info = readDetail(message.rawInput);
     const error = failed ? readError(message.rawOutput) : null;
+    const fallback = !!message.rawOutput && typeof message.rawOutput === "object" &&
+      (message.rawOutput as { fallback?: unknown }).fallback === true;
 
     const meta: EventMeta = running
       ? {
@@ -105,20 +107,21 @@ export const CompactionRecordCard: Renderer<AgentToolMessage> = memo(
           {error}
         </div>
       ) : undefined
-    ) : info ? (
+    ) : info || fallback ? (
       <div className="bg-bg2/60 text-fg2 flex flex-col gap-0.5 rounded-md p-2.5 text-sm leading-relaxed">
-        {info.trigger ? (
+        {info?.trigger ? (
           <div>
             <span className="text-fg2/70">Trigger: </span>
             {info.trigger}
           </div>
         ) : null}
-        {info.preTokens !== undefined ? (
+        {info?.preTokens !== undefined ? (
           <div>
             <span className="text-fg2/70">Context before: </span>
             {fmtTokens(info.preTokens)} tokens
           </div>
         ) : null}
+        {fallback ? <div>Cursor saved a trimmed transcript because it could not generate a summary.</div> : null}
       </div>
     ) : undefined;
 
