@@ -16,20 +16,6 @@ import { DesignChangePoller, designSnapshotDirectory } from "./design/change-pol
 import { configureDesignFonts } from "./design/style-fonts";
 import { fenceDesignSnapshotReads } from "./design/snapshot-epoch";
 import type { DesignCaptureService } from "./design/capture-service";
-// ──────────────────────────────────────────────────────────
-// ZerosEngine — The heart of Zeros V2
-// ──────────────────────────────────────────────────────────
-//
-// Standalone Node.js process that:
-//   - Reads and writes CSS/source files directly
-//   - Serves the design workspace via WebSocket
-//   - Exposes MCP endpoint for AI tools
-//
-// Usage:
-//   const engine = new ZerosEngine({ port: 24193 });
-//   await engine.start();
-//
-// ──────────────────────────────────────────────────────────
 
 import { SteeringReceiptCapacityError, SteeringReceipts } from "./agents/steering-receipts";
 import { isCuratedModel } from "./agents/adapters/shared/curated-models";
@@ -332,32 +318,24 @@ import {
  * stay available for the complete Changes history until the chat is deleted. */
 const TURN_SNAPSHOT_RETENTION = 100;
 
-/** In-flight state for a turn being recorded (a `prompt()` round-trip). Captured
- *  by beginTurn() before the agent runs, consumed by finishTurn() after. */
 interface TurnSnapshotContext {
   sessionId: string;
   chatId: string;
   /** Opening user message id — the turn id + the transcript-truncation key. */
   turnId: string;
-  /** Agent cwd — where the agent's tool paths resolve (may be a SUBDIR of the
-   *  worktree). Used only to resolve attribution paths; git ops use `root`. */
+  /** Attribution paths resolve from the agent cwd, which may be below the Git root. */
   folder: string;
-  /** Worktree top-level — what snapshots/diffs/reset anchor on (== `folder` when
-   *  the chat folder is the worktree root, or non-git). All turn `files` paths
-   *  are relative to this, and the turn row's `folder` column stores it. */
+  /** Git operations and turn file paths use this root, stored in the turn row's `folder` column. */
   root: string;
   workspaceId: string | null;
-  /** Index into the session's coalesced message list at turn start; messages
-   *  after it are this turn's events (for authored-file attribution). */
+  /** Earlier messages must not contribute to this turn's file attribution. */
   startIndex: number;
-  /** Pre-turn whole-tree snapshot OID, or null (non-git / snapshot skipped). */
+  /** Null for non-Git folders or a skipped snapshot. */
   pre: string | null;
   isGit: boolean;
 }
 
-/** Renderer-independent ownership for an accepted prompt. Local renderer
- * reloads deliberately do not cancel agent work, so this record is the source
- * of truth used to re-adopt the still-running turn. */
+/** Local renderer reloads preserve agent work; re-adoption uses this engine-owned record. */
 interface ActivePromptContext {
   sessionId: string;
   agentId: string;
@@ -366,45 +344,19 @@ interface ActivePromptContext {
   /** Privacy-safe renderer correlation id for prompt telemetry across reload. */
   promptId: string;
   startedAt: number;
-  /** Last sign of life from the adapter (stream chunk, gate opened/settled) or
-   *  from the user answering a gate. Read only by the staleness bound below. */
+  /** Adapter activity and user gate answers both reset the staleness bound. */
   lastActivityAt: number;
-  /** A Stop landed for THIS accepted turn (any cancel site — the user's button,
-   *  chat reset, workspace lifecycle, remote-client drop).
-   *
-   *  Turn-scoped on purpose. The session-wide `cancelRequested` set cannot tell
-   *  "stop the turn I just accepted" from "a stale intent left by a previous
-   *  turn", so AGENT_PROMPT clears that set before dispatching — which silently
-   *  swallowed every Stop clicked during the pre-dispatch window (persist user
-   *  message → pre-snapshot → workspace barrier, seconds on a large repo). The
-   *  adapters cannot cover it either: each clears its own cancel flag as it
-   *  enters prompt(). This flag is minted with the turn, so it is unambiguous. */
+  /** Turn-scoped Stop survives pre-dispatch waits, when session and adapter cancel flags may be cleared. */
   cancelledByUser?: boolean;
-  /** The adapter's prompt promise has settled (either way). Disarms the
-   *  post-cancel settle watchdog — finishTurn's post-snapshot can outlast the
-   *  deadline, and a force-settle racing it would double-write the turn row. */
+  /** Disarm the watchdog before a slow post-snapshot can race it into writing the turn twice. */
   adapterSettled?: boolean;
-  /** This turn's recorded snapshot, once beginTurn has produced one (null when
-   *  there is nothing to record — no chat binding, no folder). Held by
-   *  REFERENCE, because `turnId` above is NOT a reliable name for it: this
-   *  record falls back to `turn-${msg.id}` while beginTurn falls back to the
-   *  persisted user message's id, so the two disagree for any client that omits
-   *  userMessageId. The settle watchdog matched on that id and silently skipped
-   *  the durable write whenever they diverged. */
+  /** Keep the exact snapshot: without userMessageId, this context uses `turn-${msg.id}`
+   * while beginTurn uses the persisted user-message id; null means no bound chat/folder. */
   turnSnapshot?: TurnSnapshotContext | null;
-  /** The post-cancel watchdog has written this turn's ENDING to its durable row.
-   *  Only this suppresses the prompt handler's own finishTurn — never
-   *  `terminalPublished`, which is about the wire event and can be set in
-   *  windows where no row was (or could yet be) closed. Keeping the two apart is
-   *  what stops a suppression outrunning the write it stands for and leaving the
-   *  row recorded as running forever. */
+  /** Only a durable row close suppresses finishTurn; terminal wire publication may precede that write. */
   turnRowSettled?: boolean;
-  /** This turn's terminal `turn_state` has already been emitted by the
-   *  post-cancel watchdog. The prompt handler must not publish a second,
-   *  contradictory ending, and the turn no longer counts as live for
-   *  re-adoption or the concurrency guard. */
+  /** Watchdog publication ends re-adoption/concurrency eligibility and suppresses a second terminal event. */
   terminalPublished?: boolean;
-  /** Pending post-cancel settle deadline (see CANCEL_SETTLE_DEADLINE_MS). */
   cancelSettleTimer?: ReturnType<typeof setTimeout>;
 }
 
@@ -438,28 +390,17 @@ const EXECUTION_ROUTED_AGENT_MESSAGES = new Set([
   "AGENT_OPEN_BOUNDARY_PORT",
 ]);
 
-/** Master switch for the Zeros design surface (CSS selector index, design MCP,
- *  canvas element-picker, apply-change). Currently OFF — the surface is being
- *  rebuilt in the Zeros CLI (see the disabled MCP block in `start()`). While it
- *  is off we skip the per-boot `cache.buildIndex()` walk, which globs + PostCSS-
- *  parses every CSS file in the repo for a feature nothing consumes — pure
- *  startup tax that scales with repo size and is paid on every (re)spawn. Flip
- *  to true alongside re-enabling the MCP to restore the index. */
+/** The legacy selector MCP is disabled, so its per-boot CSS index walk would be unused. */
 const LEGACY_DESIGN_SELECTOR_INDEX_ENABLED = false;
 
-/** Slow workspace calls are diagnostically important, but one line per call
- * turns a request storm into a log storm. The reporter emits one notice and a
- * bounded aggregate per window. */
+/** Aggregate slow calls so a request storm cannot become a log storm. */
 const SLOW_WORKSPACE_OP_MS = 2_000;
 const SLOW_WORKSPACE_REPORT_WINDOW_MS = 10_000;
 
-/** How long after engine construction the login-shell PATH probe waits before
- *  admitting its boundary. Long enough for boot rehydration and the focused
- *  chat's own admission to clear the gate, short enough that the first Setup/Run
- *  of a session still finds the PATH cached. Nothing awaits this. */
+/** Give boot rehydration and foreground admission priority over this unawaited PATH warmup. */
 const BOOT_LOGIN_SHELL_PATH_WARM_DELAY_MS = 20_000;
 
-/** Native agents the Local CLI can start before the registry has answered. */
+/** The Local CLI can start these before the registry answers. */
 const LOCAL_AGENT_NAMES: Readonly<Record<string, string>> = {
   claude: "Claude Code",
   codex: "Codex",
@@ -647,27 +588,11 @@ function workspaceOpCanChangeDesignRecognition(
   return candidates.some(pathCanChangeDesignRecognition);
 }
 
-/** How long a session whose LOCAL owner just disconnected stays reserved for
- *  the desktop. A relay client may not ADOPT it during this window — it covers
- *  a renderer reload, where the agent keeps running but ownership is briefly
- *  cleared, so the reconnecting desktop wins the re-adopt over a connected
- *  relay. */
+/** Reserve a disconnected Local session for renderer re-adoption before a relay client may take it. */
 const LOCAL_REOWN_GRACE_MS = 30_000;
 
-/** How long an accepted prompt may show NO sign of life — no adapter output and
- *  no blocking gate parked on the user — before the engine stops treating it as
- *  the session's live turn.
- *
- *  Only reachable when an adapter's prompt promise neither resolves nor rejects,
- *  because that promise settling is what normally retires the record. The
- *  renderer's own watchdogs abort its request at that point, but an abort is
- *  client-side only — the engine is never told — so without this bound the ghost
- *  record outlives the process and the concurrency guard refuses EVERY later send
- *  for the chat as "already responding", recoverable only by closing the chat.
- *
- *  Deliberately longer than the renderer's PROMPT_INACTIVITY_TIMEOUT_MS (30 min)
- *  so the renderer always gives up first: the engine is the backstop, never the
- *  one to declare a turn dead while a client still waits on it. */
+/** Outlast the renderer's PROMPT_INACTIVITY_TIMEOUT_MS before retiring a silent,
+ * ungated turn whose adapter promise never settles, so later sends are not blocked forever. */
 const PROMPT_STALE_AFTER_MS = 45 * 60_000;
 
 /** Bound client-authored elapsed-time metadata before it reaches live state or
@@ -693,19 +618,8 @@ function normalizedPromptStartedAt(
   );
 }
 
-/** How long after a cancel the engine waits for the adapter's prompt promise to
- *  settle before it publishes the turn's ending itself.
- *
- *  A Stop is a promise to the user, and every adapter settles its turn within a
- *  second or two of one (abort the run, interrupt the turn, drain the stream).
- *  When one does NOT — a run whose stream never closes, an interrupt the
- *  provider never acknowledges — the engine used to keep the accepted prompt as
- *  the session's live turn for the full PROMPT_STALE_AFTER_MS window. The user
- *  saw STOPPED BY USER, then reloaded (or switched tabs, which re-loads the
- *  session) and got the running shimmer back with a timer counting from the
- *  original prompt. This bound makes the stop durable: bookkeeping only — the
- *  adapter's own cancel has already been dispatched and its late settle is
- *  still attributed correctly. */
+/** Persist Stop even if the adapter never settles; cancellation was already sent,
+ * and any late completion still belongs to this turn. */
 const CANCEL_SETTLE_DEADLINE_MS = 15_000;
 
 /** Return only durable, opaque workspace-row ids for DB_CHANGED scoping.
@@ -739,9 +653,7 @@ export interface EngineOptions {
   executionBoundary?: ExecutionBoundary;
 }
 
-/** Expected, user-correctable git/workspace outcomes — control flow, not bugs.
- *  Kept OUT of error tracking (they'd be noise); they still surface in the
- *  renderer's `git_op` analytics funnel as error outcomes. See reportEngineError. */
+/** User-correctable outcomes stay out of error tracking but remain in git_op analytics. */
 const EXPECTED_ENGINE_ERROR_CODES = new Set<string>([
   "VALIDATION_FAILED",
   "BRANCH_IN_USE",
@@ -753,8 +665,6 @@ const EXPECTED_ENGINE_ERROR_CODES = new Set<string>([
   "GITHUB_INSTALLATION_SUSPENDED",
   "NOT_A_REPO",
   "WORKTREE_NOT_FOUND",
-  // The worktree FOLDER is gone from disk — an expected, user-correctable
-  // outcome (the renderer offers "Delete permanently"), not a bug to track.
   "WORKTREE_MISSING",
   "WORKSPACE_NOT_FOUND",
   "WORKSPACE_ALREADY_EXISTS",
@@ -768,10 +678,6 @@ const EXPECTED_ENGINE_ERROR_CODES = new Set<string>([
   "APPROVAL_DENIED",
 ]);
 
-/** Coarse severity for an engine error reaching error tracking (drives the
- *  triage priority). A non-GitError throw is an unexpected fault (likely a bug) =
- *  critical; a transient network failure = minor; other hard git/workspace
- *  faults = major. Expected control-flow codes never get here (skipped). */
 function engineErrorSeverity(
   code: string | undefined,
 ): "critical" | "major" | "minor" {
@@ -818,9 +724,7 @@ export class ZerosEngine {
   /** Packaged Local engines poll the Design directory a Design tab shows on
    * a short interval; see design/change-poller.ts. */
   private designChangePoller: DesignChangePoller | null = null;
-  /** Coalesce filesystem invalidations behind one authority-reconciliation
-   * lane. Settings and Git watchers can fire together for one checkout; this
-   * prevents overlapping session retirement/territory publication. */
+  /** Settings and Git watchers can overlap; serialize their session retirement and territory publication. */
   private designTerritoryReconcileChain: Promise<void> = Promise.resolve();
   /** The local MCP gateway (auth:"oauth" backends fronted on localhost). Lazily
    *  started when the user-level settings declare a gateway-managed server. */
@@ -869,21 +773,14 @@ export class ZerosEngine {
     this.agents?.registerGatewayCatalog(gateway.url, () => gateway.catalogRevision);
     return gateway;
   }
-  /** Why the gateway isn't running when it should be (start/reload failure, e.g.
-   *  the port is taken) — surfaced via mcp.gateway.status so the UI shows
-   *  "Gateway unavailable" instead of an OAuth server silently vanishing.
-   *  null = healthy or not expected (no oauth backends). */
+  /** mcp.gateway.status must expose startup failures instead of hiding an OAuth server;
+   * null means healthy or not expected. */
   private gatewayError: string | null = null;
-  /** Serializes gateway start/reload, so two near-simultaneous settings saves
-   *  can't both construct a McpGateway on the fixed base+8 port (EADDRINUSE)
-   *  or race reload() into orphaned backend clients. */
+  /** Concurrent settings saves must not bind the same port or orphan each other's backend clients. */
   private gatewayReloadChain: Promise<void> = Promise.resolve();
-  /** The OAuth token vault — engine-level (NOT per-gateway) so tokens survive a
-   *  gateway stop/restart within one process. Created + restored once; persisted
-   *  to the host's safeStorage on change via the control fd. */
+  /** Engine ownership keeps tokens alive across gateway restarts; changes persist through the host's safeStorage. */
   private mcpVault: OAuthVault | null = null;
-  /** A boot-restore snapshot the host pushed on stdin before the vault existed,
-   *  applied when the vault is first created (handles the spawn race). */
+  /** Host restoration may arrive before the vault exists. */
   private mcpVaultSeed: VaultSnapshot | null = null;
   /** Debounce for the persist control-fd write (token refresh can fire often). */
   private vaultPersistTimer: ReturnType<typeof setTimeout> | null = null;
@@ -898,23 +795,15 @@ export class ZerosEngine {
   private setup!: SetupManager;
   private runs!: RunManager;
   private readonly executionBoundary: ExecutionBoundary;
-  /** Shared multiplayer terminals: a PTY is an engine-owned shared
-   *  resource, NOT owned by one client. Every paired device may attach to, watch,
-   *  and drive the SAME terminal; the only gate is the per-workspace remote
-   *  restriction. Terminals persist across client disconnects; one relay
-   *  dropping must not kill a shell another client still uses. */
+  /** Paired devices share engine-owned PTYs under the workspace restriction gate;
+   * one client's disconnect must not kill another client's shell. */
   private readonly terminals = new TerminalRegistry();
-  /** PTY sessionIds currently being EXPLICITLY closed (a client sent PTY_KILL).
-   *  Lets onExit tell an explicit close (remove the terminal everywhere) apart
-   *  from a natural shell exit (keep it as "(exited)", restartable). */
+  /** PTY_KILL removes the terminal everywhere; a natural shell exit keeps it restartable. */
   private readonly explicitlyClosing = new Set<string>();
   /** Agent sessionId → agentId, so a disconnecting client's owned sessions can
    *  be cancelled (a remote client must not leave an agent running). */
   private readonly sessionAgent = new Map<string, string>();
-  /** Agent sessionId → renderer chatId. Lets the persist hook write
-   *  the transcript by chatId as the engine streams. Kept while the session
-   *  LIVES (survives a client reload so persistence continues); cleared on
-   *  explicit AGENT_CLOSE_SESSION. */
+  /** Persistence keeps the chat binding across renderer reloads until AGENT_CLOSE_SESSION. */
   private readonly sessionChat = new Map<string, string>();
   /** Durable Zeros conversation → current live execution. Renderer reloads
    * re-adopt through this map without persisting an ephemeral execution id. */
@@ -923,15 +812,10 @@ export class ZerosEngine {
    * settling. Keep their owner/chat/workspace tags until the terminal event is
    * routed and persisted, but never expose them as live executions. */
   private readonly exitedAgentExecutions = new Set<string>();
-  /** Latest provider-bind intent per Zeros conversation. A tab close removes
-   * the token, and a newer create/load replaces it, so an older adapter result
-   * can be disposed instead of publishing an orphan execution after the user's
-   * lifecycle intent has already changed. Tokens are process-monotonic. */
+  /** Process-monotonic tokens fence late adapter results after a conversation closes or rebinds. */
   private conversationBindSerial = 0;
   private readonly conversationBindTokens = new Map<string, number>();
-  /** One admission-cancellation controller per live bind. Aborted when the
-   * conversation is closed or its bind superseded, so a session admission
-   * still queued in the gate is cancelled instead of built for nobody. */
+  /** Closing or superseding a bind must also cancel its admission if it is still queued. */
   private readonly conversationBindAborts = new Map<
     string,
     { token: number; controller: AbortController }
@@ -944,17 +828,12 @@ export class ZerosEngine {
    * History restore waits for the exact close already in progress before it
    * asks any provider to resume the durable binding. */
   private readonly conversationCloseFlights = new Map<string, Promise<void>>();
-  /** Agent sessionId → its workspaceId. Lets the engine withhold a session in a
-   *  remote-restricted workspace from relay devices: its stream +
-   *  permission prompts go to LOCAL clients only, and a relay client may not act
-   *  on it. Empty for sessions with no managed workspace (never restricted). */
+  /** Restricted workspaces keep streams and permission prompts Local and refuse relay actions;
+   * unmanaged sessions have no workspace entry. */
   private readonly sessionWorkspace = new Map<string, string>();
   /** Codex's built-in computer use, forwarded so other chats wait for it. */
   private readonly nativeComputerUse = new NativeComputerUseReports(reportNativeComputerUse);
-  /** Agent sessionIds with a `prompt()` currently in flight. Lets turns.reset
-   *  cancel a live turn ENGINE-side before truncating the timeline it streams
-   *  into (the renderer's footer does the same, but a reset arriving from any
-   *  other device/caller must not race a live stream into zombie rows). */
+  /** turns.reset must cancel live prompts in the engine before truncating their timeline, whichever client asks. */
   private readonly promptSessions = new Set<string>();
   /** Accepted prompts, including the pre-snapshot window before
    * `promptSessions` becomes visible. Survives a local renderer disconnect. */
@@ -980,12 +859,8 @@ export class ZerosEngine {
    *  A mid-turn steer uses this owner instead of opening a second turn row. */
   private readonly activeTurnSnapshots = new Map<string, TurnSnapshotContext>();
   private readonly steeringReceipts = new SteeringReceipts<{ outcome: SteerOutcome; turnId?: string }>();
-  /** Workspace process/session starts and checkout mutations that have crossed
-   *  the caller-side gate but have not settled. Archive/delete wait for these
-   *  promises before enumerating processes and snapshotting. Without this
-   *  barrier, setup env resolution, agent initialization, or a cross-window Git
-   *  write could finish just after the reaper's snapshot and recreate/change a
-   *  removed worktree. */
+  /** Archive/delete must drain admitted starts and checkout writes before reaping,
+   * or late completions could recreate or change the removed worktree. */
   private readonly workspaceProcessStarts = new Map<
     string,
     Set<Promise<unknown>>
@@ -1015,21 +890,12 @@ export class ZerosEngine {
   private readonly ownerDesignTerritoryTransitionTurns = new Set<
     Promise<void>
   >();
-  /** Agent sessionId → the running coalesced message list — the accumulator the
-   *  shared applyUpdate folds chunks into, so the engine upserts only the rows
-   *  that changed on each chunk. */
+  /** The renderer's shared applyUpdate reducer also owns persisted-row coalescing. */
   private readonly sessionMessages = new Map<string, AgentMessage[]>();
   private readonly sessionUpdateBatcher = new LocalSessionUpdateBatcher((agentId, notification) =>
     this.deliverSessionUpdate(agentId, notification));
-  /** Agent sessionIds with a user cancel in flight. Set by AGENT_CANCEL (and
-   *  the remote-client-drop relay cancel) BEFORE the cancel is dispatched,
-   *  consumed by the AGENT_PROMPT catch: a cancel that tears down the
-   *  subprocess can surface as a prompt REJECTION instead of a clean
-   *  stopReason:"cancelled", and without the intent the turn row would be
-   *  recorded "failed" — a reloaded chat would then read AGENT STOPPED
-   *  instead of STOPPED BY USER. Cleared when the in-flight prompt settles,
-   *  and at the start of the next prompt (a stale intent from a previous
-   *  turn must not mislabel a genuine failure). */
+  /** Record intent before dispatch: cancellation can reject a prompt instead of
+   * returning stopReason:"cancelled"; clear it before the next turn to avoid mislabeling failures. */
   private readonly cancelRequested = new Set<string>();
   /** Agent permissionId → owning clientId, so only the client that owns the
    *  session may answer its permission prompts. */
@@ -1083,9 +949,7 @@ export class ZerosEngine {
   private readonly clientAccount = new Map<string, string>();
   /** Profile names are accepted only from verified claims, never client metadata. */
   private readonly clientAccountNames = new Map<string, string>();
-  /** clientId → the bound token's `exp` (Unix seconds). A relay session must
-   *  not outlive the token it bound with — a periodic sweep demotes any client
-   *  whose token has expired, forcing a re-auth with a fresh token. */
+  /** A relay session must not outlive its bound token's exp (Unix seconds). */
   private readonly clientTokenExp = new Map<string, number>();
   /** Periodic token re-verification sweep. Lazily started on the first relay
    *  bind; cleared in stop(). */
@@ -1093,16 +957,11 @@ export class ZerosEngine {
   /** Parent-death watchdog (Electron host only — armed by ZEROS_PARENT_PID). */
   private parentWatchTimer: ReturnType<typeof setInterval> | null = null;
   private parentDeathExiting = false;
-  /** The account that OWNS this desktop — seeded from the LOCAL client's
-   *  (desktop renderer's) verified token. A relay (remote) client must be this
-   *  same account, so "my account, my machine": a leaked pairing offer used by a
-   *  DIFFERENT account is rejected. Null until the signed-in desktop renderer
-   *  connects (then relay clients are fail-closed as owner-unknown). */
+  /** Seed only from the Local client's verified token; when binding is required,
+   * relay clients must match this account and fail closed until it is known. */
   private ownerAccountSub: string | null = null;
   private ownerAccountName: string | null = null;
   private localCatalogBindingEpoch?: number;
-  // Native per-CLI adapter runtime — multiplexes the per-agent
-  // adapter implementations behind a single gateway surface.
   private agents: AgentGateway;
   private root: string;
   private port: number;
@@ -1319,16 +1178,8 @@ export class ZerosEngine {
       createNodePtyShell,
       createTerminalMirror,
     );
-    // Warm the login-shell PATH probe (`$SHELL -ilc 'printf …'`) off the
-    // critical path. It's cached process-wide and every one-shot command shell
-    // — Setup script, Run action — awaits it before spawning; resolving it here
-    // keeps that from showing up as a stall on the FIRST Run of a session.
-    // Fire-and-forget: the resolver already falls back to the inherited PATH.
-    //
-    // DEFERRED, not immediate (§5.1): it admits a real boundary, and starting
-    // that at engine construction put it in the middle of the boot burst.
-    // Nothing needs it until the first Setup/Run, so let boot settle first. The
-    // timer is unref'd so it can never hold the process open.
+    // Defer the probe's process admission until boot settles; warming its cache
+    // keeps the first Setup/Run from paying for a cold probe.
     const loginShellWarmTimer = setTimeout(() => {
       void getLoginShellPath().catch(() => {
         /* probe failures are handled inside the resolver */
@@ -1767,26 +1618,15 @@ export class ZerosEngine {
       },
     );
 
-    // Transports: the loopback server is the only transport in this local-only
-    // build. (A future CloudTransport will be pushed into this.transports[] to
-    // reach an in-sandbox engine over a preview-URL WSS.)
-    //
-    // The loopback WebSocket authenticates with a per-process token minted by
-    // this engine. A sidecar child returns it to Electron over private fd 3;
-    // standalone engines keep it process-local. It never rides the spawn env,
-    // command line, manifest, or logs. Combined with an Origin allowlist,
-    // this stops any website the user visits from driving the engine as a
-    // trusted "local" client. The dev renderer's http origin is allowlisted; the
-    // packaged renderer loads file:// (always allowed).
+    // The per-process token and Origin allowlist keep websites from driving the
+    // Local engine. Sidecar tokens reach Electron only over private fd 3, never
+    // env, argv, manifests or logs; standalone engines keep them process-local.
     this.localToken = randomBytes(32).toString("hex");
     this.workspace.setDesignProtocolCapabilityProvider((workspaceId) =>
       createDesignProtocolCapability(this.localToken, workspaceId),
     );
-    // The dev renderer's http origin is the Vite dev server. Its port is normally
-    // 5193, but a per-worktree dev instance (scripts/dev-instance.mjs) moves Vite
-    // to a free port and exports it as ZEROS_VITE_PORT so this allowlist tracks the
-    // renderer's ACTUAL origin — otherwise the engine would reject that instance's
-    // loopback WS on an Origin mismatch. Packaged builds load file:// (always ok).
+    // Per-worktree Vite ports vary, so authorize the actual renderer origin;
+    // packaged renderers use the separately allowed file:// origin.
     const devPort = Number.parseInt(
       process.env.ZEROS_VITE_PORT?.trim() || "",
       10,
@@ -4220,18 +4060,7 @@ export class ZerosEngine {
       client.close(1008, "account binding required");
       return;
     }
-    // Client→engine AGENT_* messages route to the agent dispatcher. This used
-    // to be a per-type case list DUPLICATING the dispatcher's own switch, and
-    // the two drifted: AGENT_QUESTION_RESPONSE had a dispatcher case but no
-    // routing case, so every question answer was silently discarded at
-    // `default: break` below — the composer card's answer never reached the
-    // agent and the turn hung until the response timeout (field-debugged
-    // 2026-07-04, a full day of "I answered but it keeps loading"). Routing
-    // now keys on the prefix; the dispatcher's own switch decides per-type
-    // (its default warns instead of vanishing), so a client→engine agent
-    // message can never again exist in one switch but not the other.
-    // Engine→client AGENT_* types arriving here would be a protocol violation
-    // and hit the dispatcher's warning default — still better than silence.
+    // Route by prefix so agent message coverage has one dispatcher-owned switch.
     if (msg.type.startsWith("AGENT_")) {
       await this.handleAgentMessage(msg, client);
       return;
@@ -4722,17 +4551,8 @@ export class ZerosEngine {
             throw this.staleConversationBindFailure("newSession");
           }
           if (msg.chatId) {
-            // One live agent session per chat. This fresh session supersedes
-            // any prior session still bound to the same chat — a model/effort
-            // respawn (the envKey force-rebuild) or a self-heal rebuild. Tear
-            // the predecessor(s) down so an old SDK agent / app-server child /
-            // subprocess can't LINGER (resource leak) or keep streaming into
-            // the chat (the second half of the cursor "duplicate turn" bug).
-            // Mirrors the AGENT_CLOSE_SESSION teardown. Best-effort and NON-
-            // blocking: the new session is already live and the renderer has
-            // moved its slot to it, so the predecessor's in-flight work is
-            // abandoned regardless — endSession is fire-and-forget so a slow
-            // or failing dispose can't delay (or fail) this creation.
+            // Retire predecessors so their processes and streams cannot outlive
+            // the chat binding; disposal must not delay the live replacement.
             const superseded: string[] = [];
             for (const [priorSessionId, boundChatId] of this.sessionChat) {
               if (
@@ -4758,11 +4578,8 @@ export class ZerosEngine {
               this.sessionLoadResponses.delete(priorSessionId);
               this.detachedProviderBindings.delete(priorSessionId);
               this.exitedAgentExecutions.delete(priorSessionId);
-              // The predecessor's turn is abandoned by definition here, and its
-              // prompt promise may never settle after endSession — so its own
-              // finally may never run. Retire the record with the rest of the
-              // session's bookkeeping (the identity checks in that finally keep
-              // a late settle from touching anything that outlived it).
+              // endSession may leave the prompt promise unsettled, so its finally
+              // cannot own retirement; identity fences make a late settle harmless.
               this.releasePromptContext(priorSessionId);
               this.clearPendingAgentInteractions(priorSessionId);
               void this.agents
@@ -6253,17 +6070,8 @@ export class ZerosEngine {
                   "This conversation's live execution belongs to a different agent.",
               });
             }
-            // Nothing is spawned here, so cwd/env/cliBinary are moot — but
-            // agentSpawnOpts is ALSO the choke point that refuses a remote
-            // (untrusted) client naming no resolvable managed workspace, and
-            // this path hands the caller a live turn: stream ownership, every
-            // unresolved permission/question card (replayed below), and the
-            // session→chat binding the transcript is written under. Skipping
-            // the check would make re-adoption a way around it, so enforce the
-            // remote half here. Local clients own the machine.
-            //
-            // All of it runs BEFORE any mutation: a refusal must not have
-            // already moved ownership off the client that legitimately holds it.
+            // Re-adoption must pass the remote workspace gate before changing
+            // ownership, even though it does not spawn a process.
             if (client.kind !== "local") {
               this.assertRemoteWorkspaceOperable(
                 msg.workspaceId,
@@ -6796,23 +6604,10 @@ export class ZerosEngine {
     }
   }
 
-  /** Resolve the spawn inputs for an agent session, enforcing the remote
-   *  trust boundary. A LOCAL (desktop) client is trusted and keeps full
-   *  control of cwd/env/cliBinary. A REMOTE (cloud) client is UNTRUSTED, so:
-   *   - its cwd is resolved server-side from a managed `workspaceId` (a raw
-   *     client path is never trusted) and clamped to the
-   *     same allowlist the PTY uses (engine root + managed worktrees);
-   *   - ordinary client environment (provider keys, MCP/env-vault secrets,
-   *     models and app variables) is preserved for normal-workspace parity,
-   *     while the authority-bearing subset is removed/clamped before the
-   *     gateway derives filesystem/socket/toolchain/container grants;
-   *   - the client-supplied `cliBinary` override is dropped so it cannot point
-   *     the spawn at an arbitrary executable (RCE) — the registry default wins.
-   *  Mirrors the PTY clamp + env-scrub. Throws AgentFailureError (→ AGENT_ERROR)
-   *  when a remote client names no resolvable managed workspace. The agent's
-   *  own tool calls remain gated by the per-action permission flow (routed to
-   *  the owning client), so within the workspace the remote operator keeps the
-   *  intended remote-control parity. */
+  /** Local clients own cwd/env/cliBinary; untrusted remote clients must use a
+   * server-resolved managed workspace within the PTY allowlist and the registry
+   * executable. Ordinary child env survives, but host-authority values are
+   * removed before the gateway derives grants. */
   private async agentSpawnOpts(
     msg: {
       agentId?:string;
@@ -6859,22 +6654,9 @@ export class ZerosEngine {
     };
   }
 
-  /** Preserve a cloud session's normal child environment without treating any
-   * client-supplied coordinate as host authority. The returned map is still
-   * completed from the worker's ambient environment by AgentGateway and then
-   * installed only after the attested cloud boundary. This choke point therefore needs to
-   * remove only values consulted while constructing that boundary:
-   *
-   *  - process-start injection and engine/Conductor controls;
-   *  - provider/config HOME roots, PATH/toolchain roots, host agent sockets,
-   *    and ambient container endpoints;
-   *  - unknown future `ZEROS_*` controls (positive allowlist);
-   *  - additional directories outside managed workspace roots.
-   *
-   * API keys, MCP/env-vault secrets, provider routing, loopback application
-   * service URLs, and arbitrary application variables remain intact. Their
-   * child is already inside `agent-code`; service URLs receive a revocable
-   * façade and reserved Zeros ports are rejected again by policy admission. */
+  /** Preserve ordinary child variables and credentials without letting remote
+   * values select host launch/config/toolchain/socket authority; additional
+   * directories must stay within managed roots. */
   private scrubRemoteAgentSpawnEnv(
     env: Record<string, string> | undefined,
   ): Record<string, string> | undefined {
@@ -6907,12 +6689,8 @@ export class ZerosEngine {
     return Object.keys(out).length > 0 ? out : undefined;
   }
 
-  /** The remote (untrusted) half of the spawn clamp, split out so the paths that
-   *  do NOT spawn — re-adopting a live session — can enforce the same trust
-   *  boundary without asking for spawn inputs they have no use for. Returns the
-   *  server-resolved cwd for the named workspace; throws AgentFailureError
-   *  (→ AGENT_ERROR) for a remote caller that named no resolvable, operable,
-   *  allowlisted managed workspace. */
+  /** Re-adoption needs the same managed-workspace gate as spawn, even when no
+   * process is created. */
   private assertRemoteWorkspaceOperable(
     workspaceId: string | undefined,
     stage: "newSession" | "loadSession" | "forkSession",
@@ -6955,9 +6733,8 @@ export class ZerosEngine {
     return cwd;
   }
 
-  /** Native desktop Code is independent of Design-identity transitions. The
-   * ordinary workspace lifecycle gate still prevents archive/delete races;
-   * qualified cloud Code additionally observes its immutable territory gate. */
+  /** Native desktop Code is independent of Design identity; workspace lifecycle
+   * admission still prevents archive/delete races. */
   private assertAgentWorkspaceProcessStartAllowed(
     workspaceId: string | null | undefined,
     ..._targets: Array<string | null | undefined>
@@ -6965,9 +6742,6 @@ export class ZerosEngine {
     this.assertWorkspaceProcessStartAllowed(workspaceId);
   }
 
-  /** A session can depend on a managed sibling through `/add-dir` even though
-   * its chat and cwd belong elsewhere. Prompt/steer admission therefore checks
-   * the gateway's immutable contribution map, not only the primary owner. */
   private assertAgentSessionProcessStartAllowed(
     sessionId: string,
     workspaceId: string | null | undefined,
@@ -6976,19 +6750,9 @@ export class ZerosEngine {
     return;
   }
 
-  /** Sanitize a cloud (untrusted) client's AGENT_UPDATE_CONFIG env before it
-   *  reaches the agent subprocess (Options.env). Mirrors the spawn-path policy
-   *  (agentSpawnOpts refuses caller env entirely for remote), but updateConfig
-   *  needs a few composer knobs — so this is a positive ALLOWLIST: only the
-   *  known-safe knobs pass (with ZEROS_ADDITIONAL_DIRS clamped to the managed
-   *  workspace). An allowlist (vs a denylist) means an unanticipated env-exec /
-   *  credential vector — GIT_ASKPASS, GIT_EDITOR, SSH_ASKPASS, NODE_OPTIONS,
-   *  *_BASE_URL, NODE_REPL_EXTERNAL_MODULE, … — can NEVER slip through a
-   *  denylist gap. We also drop the privilege/manipulation knobs a remote must
-   *  not set this way: CLAUDE_APPEND_SYSTEM_PROMPT (prompt injection),
-   *  CLAUDE_ALLOWED/DISALLOWED_TOOLS (auto-run scope), and ZEROS_PERMISSION_MODE
-   *  (auto-approval posture — that rides the separately-guarded AGENT_SET_MODE
-   *  path). Local clients own the machine and are NOT scrubbed (see call site). */
+  /** Runtime updates allow only composer controls, excluding unknown execution
+   * and credential vectors; ZEROS_PERMISSION_MODE uses guarded AGENT_SET_MODE.
+   * Local clients bypass this scrub at the call site. */
   private scrubRelayUpdateConfigEnv(
     env: Record<string, string>,
   ): Record<string, string> {
@@ -7038,25 +6802,8 @@ export class ZerosEngine {
     if (notification.update.sessionUpdate !== "turn_usage_update") this.persistSessionUpdate(executionId, notification);
   }
 
-  /** Persist a streaming session update to the unified DB AS IT EMITS. The
-   *  engine is the source — this runs even when no client is attached (a cloud
-   *  agent after the laptop closes). It folds the chunk with the SAME shared
-   *  applyUpdate the renderer uses (no drift), then upserts only the rows that
-   *  changed (a streaming text message upserts one growing row; a tool update
-   *  rewrites its row). A Local engine queues agent output through the
-   *  streaming write coalescer (db/messages.ts), which every read drains.
-   *  Best-effort: persistence must NEVER throw into the live
-   *  stream. Only sessions bound to a chat (chatId sent at new/load-session) are
-   *  persisted; unbound sessions (e.g. terminal) are skipped. */
-  /** Persist the user's prompt to the engine transcript — mirroring the renderer's
-   *  speculative user bubble (sendPrompt adds it locally before the round-trip).
-   *  This makes the engine the COMPLETE source: it holds user turns for EVERY
-   *  adapter, not just the ones that echo the prompt back as a user_message_chunk
-   *  (Cursor/Claude/Codex do; others may not). Folding it through the same
-   *  applyUpdate path means a later adapter echo (which carries a messageId)
-   *  ADOPTS this same bubble via the dedup in applyUpdate — so the turn is stored
-   *  exactly once, never duplicated. Non-text blocks (images, etc.) are skipped by
-   *  applyUpdate, same as the renderer's bubble. */
+  /** Some adapters never echo prompts; persist now and use the shared reducer
+   * to adopt later echoes without duplicating the user row. */
   private persistUserPrompt(
     sessionId: string,
     prompt: ContentBlock[],
@@ -7292,6 +7039,9 @@ export class ZerosEngine {
     );
   }
 
+  /** Persist bound chats even without attached clients; the renderer's reducer
+   * and read-drained write coalescer keep both views aligned, and persistence
+   * failures must never interrupt the live stream. */
   private persistSessionUpdate(
     sessionId: string,
     notification: SessionNotification,
