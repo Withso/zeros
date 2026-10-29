@@ -65,9 +65,11 @@ Clean in small, area-scoped PRs that change nothing but comments.
    holds an invariant the code cannot express, keep it as one sentence.
 3. Prove it: `node scripts/zstack/comments.mjs verify --base origin/main` must
    report no problems. It compares each file's parsed structure and token text
-   with comments and layout removed, JSX text runs included, and refuses
-   protected comments and paths, added or removed files, mode changes and
-   files other than JavaScript and TypeScript.
+   with comments and layout removed, JSX text runs and character references
+   included. Protected comments must keep their text and the code they attach
+   to, so removing, adding or moving one fails, and so do protected paths,
+   added or removed files, mode changes and files other than JavaScript and
+   TypeScript.
 4. Run the touched test directories, `pnpm typecheck`, `pnpm lint` and
    `pnpm check:ui`.
 5. After the squash merge, the next cleanup PR adds that commit to

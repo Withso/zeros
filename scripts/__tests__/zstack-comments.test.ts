@@ -58,6 +58,39 @@ describe("comments-only comparison", () => {
     expect(compareSource("x.ts", "/** @param {number} a */\nfunction f(a: number) {}\n", "function f(a: number) {}\n")).toEqual([]);
   });
 
+  it("refuses adding or moving a protected comment", () => {
+    const base = "function f() { console.log(1); }\nfunction g() { console.log(2); }\n";
+    expect(codes(compareSource("x.mjs", `${base}f();\ng();\n`, `${base}/* @__PURE__ */ f();\ng();\n`)))
+      .toEqual(["zstack_comments_protected_comment"]);
+    expect(codes(compareSource("x.mjs", `${base}/* @__PURE__ */ f();\ng();\n`, `${base}f();\n/* @__PURE__ */ g();\n`)))
+      .toEqual(["zstack_comments_protected_comment", "zstack_comments_protected_comment"]);
+  });
+
+  it("refuses a removed line between a next-line directive and its target", () => {
+    const before = "// eslint-disable-next-line no-console\n// narration\nconsole.log(1);\n";
+    expect(codes(compareSource("x.ts", before, "// eslint-disable-next-line no-console\nconsole.log(1);\n")))
+      .toEqual(["zstack_comments_protected_comment", "zstack_comments_protected_comment"]);
+  });
+
+  it("keeps directive anchors when a comment-only JSX expression is removed before them", () => {
+    const before = "const v = (\n  <div>\n    {/* note */}\n    {/* eslint-disable-next-line */}\n    <span />\n  </div>\n);\n";
+    const after = "const v = (\n  <div>\n    {/* eslint-disable-next-line */}\n    <span />\n  </div>\n);\n";
+    expect(compareSource("x.tsx", before, after)).toEqual([]);
+  });
+
+  it("refuses joining JSX text that would complete a character reference", () => {
+    expect(codes(compareSource("x.tsx", "const v = <p>&am{/* c */}p;</p>;\n", "const v = <p>&amp;</p>;\n")))
+      .toEqual(["zstack_comments_code_changed"]);
+    expect(codes(compareSource("x.tsx", "const v = <p>&#6{/* c */}5;</p>;\n", "const v = <p>&#65;</p>;\n")))
+      .toEqual(["zstack_comments_code_changed"]);
+  });
+
+  it("protects every tagged JSDoc in JavaScript", () => {
+    const before = "/** @this {{x:number}} */\nfunction f() { return this.x; }\n";
+    expect(codes(compareSource("x.js", before, "function f() { return this.x; }\n"))).toEqual(["zstack_comments_protected_comment"]);
+    expect(compareSource("x.js", "/** Plain prose. */\nfunction f() {}\n", "function f() {}\n")).toEqual([]);
+  });
+
   it("refuses a changed shebang", () => {
     expect(codes(compareSource("x.mjs", "#!/usr/bin/env node\nconst x = 1;\n", "#!/usr/bin/env bun\nconst x = 1;\n")))
       .toEqual(["zstack_comments_protected_comment"]);

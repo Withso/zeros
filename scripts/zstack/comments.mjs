@@ -41,9 +41,12 @@ const PROTECTED_COMMENT = new RegExp([
   String.raw`sourceMappingURL`,
   String.raw`lock_purpose`,
   String.raw`check:ui\s+ignore|gitleaks:allow|check-secrets:allow|\btslint:`,
+  String.raw`@internal\b`,
 ].join("|"));
-// JavaScript files can carry checked JSDoc types.
-const JS_TYPE_COMMENT = /@(?:type|typedef|template|satisfies|import|callback|enum)\b|@(?:param|returns?|property|prop)\s*\{/;
+// Under checkJs any JSDoc tag can carry types (@this, @extends, @type, …).
+const JS_TYPE_COMMENT = /^\/\*\*[\s\S]*@[A-Za-z]/;
+// These apply to the line after them, so the lines in between matter too.
+const NEXT_LINE_DIRECTIVE = /eslint-disable-next-line|@ts-(?:expect-error|ignore)|prettier-ignore|biome-ignore|check:ui\s+ignore-next|\b(?:istanbul|c8|v8) ignore next/;
 
 const GIT_ROUTING = ["GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY",
   "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_COMMON_DIR", "GIT_CEILING_DIRECTORIES"];
@@ -81,11 +84,18 @@ function jsxText(raw) {
   return text;
 }
 
-// Each text node is cleaned on its own; adjacent cleaned text renders as one run.
+// Each text node is cleaned and entity-decoded on its own, and adjacent cleaned
+// text renders as one run. A junction that could complete a character reference
+// (&am + p;) stays marked, so joining the halves never compares equal.
 function jsxChildren(node, sf) {
   const children = [];
   let raw = null, run = "";
-  const clean = () => { if (raw !== null) run += jsxText(raw); raw = null; };
+  const clean = () => {
+    if (raw === null) return;
+    const text = jsxText(raw);
+    run += /&[#A-Za-z0-9]*$/.test(run) && /^[#A-Za-z0-9]*;/.test(text) ? `\u0000${text}` : text;
+    raw = null;
+  };
   const flush = () => { clean(); if (run) children.push(`JsxText(${JSON.stringify(run)})`); run = ""; };
   for (const child of node.children) {
     if (ts.isJsxText(child)) { raw = (raw ?? "") + child.text; continue; }
@@ -140,16 +150,46 @@ export function compareSource(path, before, after) {
   if (shebang(before) !== shebang(after)) problems.push({ path, code: "zstack_comments_protected_comment", detail: "shebang" });
   const a = parse(path, before), b = parse(path, after);
   if (canonical(a, a) !== canonical(b, b)) problems.push({ path, code: "zstack_comments_code_changed" });
+  const before_ = protectedComments(path, a), after_ = protectedComments(path, b);
   const remaining = new Map();
-  for (const comment of comments(b)) remaining.set(comment.text, (remaining.get(comment.text) ?? 0) + 1);
-  const javascript = /\.[cm]?jsx?$/.test(path);
-  for (const comment of comments(a)) {
-    if (!PROTECTED_COMMENT.test(comment.text) && !(javascript && JS_TYPE_COMMENT.test(comment.text))) continue;
-    const left = remaining.get(comment.text) ?? 0;
-    if (left > 0) remaining.set(comment.text, left - 1);
-    else problems.push({ path, code: "zstack_comments_protected_comment", detail: comment.text.slice(0, 80) });
+  for (const entry of after_) remaining.set(entry.key, (remaining.get(entry.key) ?? 0) + 1);
+  for (const entry of before_) {
+    const left = remaining.get(entry.key) ?? 0;
+    if (left > 0) remaining.set(entry.key, left - 1);
+    else problems.push({ path, code: "zstack_comments_protected_comment", detail: entry.text.slice(0, 80) });
+  }
+  for (const [key, left] of remaining) {
+    if (left > 0) problems.push({ path, code: "zstack_comments_protected_comment", detail: `added or moved: ${JSON.parse(key).text.slice(0, 80)}` });
   }
   return problems;
+}
+
+/** Protected comments with the code they attach to: the tokens on either side,
+ *  whether they trail code on its line, and, for next-line directives, the
+ *  lines to the next token. Tokens of comment-only JSX expressions are not
+ *  counted, so removing one leaves every anchor in place. */
+function protectedComments(path, sf) {
+  const javascript = /\.[cm]?jsx?$/.test(path);
+  const lineOf = (pos) => sf.getLineAndCharacterOfPosition(pos).line;
+  const tokens = [];
+  (function walk(node) {
+    if (ts.isJsxText(node)) return;
+    if (ts.isJsxExpression(node) && !node.expression && !node.dotDotDotToken) return;
+    const kids = syntaxChildren(node, sf);
+    if (kids.length === 0) { if (node.kind !== ts.SyntaxKind.EndOfFileToken) tokens.push(node); return; }
+    kids.forEach(walk);
+  })(sf);
+  const starts = tokens.map((token) => token.getStart(sf));
+  return comments(sf)
+    .filter((comment) => PROTECTED_COMMENT.test(comment.text) || (javascript && JS_TYPE_COMMENT.test(comment.text)))
+    .map((comment) => {
+      let next = starts.findIndex((start) => start >= comment.end);
+      if (next === -1) next = tokens.length;
+      const previous = tokens[next - 1];
+      const trailing = !!previous && lineOf(previous.end) === lineOf(comment.pos);
+      const gap = NEXT_LINE_DIRECTIVE.test(comment.text) && next < tokens.length ? lineOf(starts[next]) - lineOf(comment.end) : null;
+      return { text: comment.text, key: JSON.stringify({ text: comment.text, next, trailing, gap }) };
+    });
 }
 
 function changedFiles(root, base, head) {
