@@ -1,62 +1,11 @@
 #!/usr/bin/env node
-// ──────────────────────────────────────────────────────────
-// agent-smoke.mjs — LIVE agent smoke harness  (manual / opt-in)
-// ──────────────────────────────────────────────────────────
-//
-// SEPARATE from the unit suite (`pnpm test:git`). This spawns the REAL,
-// installed+authed agent CLIs and sends REAL prompts, so it costs tokens /
-// quota and is slow + non-deterministic. It is NEVER run automatically — you
-// trigger it by hand, and the AI must ask before running it.
-//
-// It drives the engine's AgentGateway in-process (same construction as
-// apps/desktop/src/engine/zeros-engine.ts) and, for every installed+authed agent, runs a small
-// capability matrix so you can see — right now — which agents actually work.
-//
-//   Spawn+prompt   newSession → "reply PINGOK"          (auth / wiring / 401s)
-//   Context        2nd turn recalls turn 1               (resume / context loss)
-//   Cancel         long task → cancel mid-turn           (cancel classification)
-//   Teardown       endSession                            (per-session cleanup)
-//   --full only:   sweep every advertised model + effort
-//
-// Agents that aren't installed or authed are SKIPPED (not failed), so it runs
-// with whatever you have configured. Prints a matrix + writes results.json,
-// and exits non-zero if any non-skipped check fails (so it can gate a merge).
-//
-// ── WHY `--require` EXISTS — read this before wiring it to CI ──
-// Skip-tolerance is right for a local run and a TRAP for an automated one: with
-// nothing installed or authed every agent skips, `failCount` is 0, and this
-// exits GREEN having tested nothing. A scheduled job in that state reports
-// "live agents OK" forever, which is strictly worse than no job at all.
-//
-// That is not hypothetical. NO agent here authenticates from an env var — the
-// AuthProbe union in apps/desktop/src/engine/agents/registry.ts has no env-var kind, and
-// evaluateAuthProbe reads process.env only for ZEROS_SECRETS_FILE:
-//   • claude — macOS keychain `Claude Code-credentials`, or an UNEXPIRED
-//     ~/.claude/.credentials.json, or ~/.claude/auth.json. So
-//     ANTHROPIC_API_KEY alone ⇒ authenticated:false.
-//   • codex  — the exit code of `codex login status`, i.e. whatever that CLI
-//     decides. No codex on PATH ⇒ installed:false as well.
-//   • cursor — reads secrets.json[cursor-api-key] via ZEROS_SECRETS_FILE, which
-//     ONLY apps/desktop/electron/sidecar.ts sets. This harness drives the gateway standalone
-//     (no Electron), so cursor is STRUCTURALLY always skipped here — never put
-//     it in --require. Use `pnpm cursor:smoke` for the Cursor host instead.
-// Net: `ANTHROPIC_API_KEY: ${{ secrets.* }}` does not make this test anything.
-// Auth here means real credential FILES on the runner.
-//
-// Hence two guards, both cheap:
-//   • zero agents tested is ALWAYS a failure — no configuration makes "I asked
-//     for a live smoke and nothing ran" a success.
-//   • `--require a,b` fails when a NAMED agent skipped, quoting the probe's own
-//     reason. This is the flag a scheduled job must pass: it turns missing auth
-//     into a red run instead of a meaningless green one.
-//
-// Usage:
-//   pnpm agents:smoke                      # core matrix, default model/agent
-//   pnpm agents:smoke --full               # + every advertised model + effort
-//   pnpm agents:smoke --agents codex,claude
-//   pnpm agents:smoke --require claude     # CI: fail unless claude really ran
-//   pnpm agents:smoke --help
-// ──────────────────────────────────────────────────────────
+// Manual, opt-in live check: this sends real prompts and spends provider
+// quota, so run only with explicit authorization. It drives the shipping gateway.
+// Auth comes from gateway probes, not merely API environment variables: Claude
+// needs its credential files/keychain, Codex uses login status, and Cursor
+// needs Electron's decrypted secret handoff (use cursor:smoke for its host).
+// Zero tested agents must fail; --require names agents that may not skip.
+// See --help for the core and full model/effort matrices.
 
 import fs from "node:fs";
 import fsp from "node:fs/promises";
@@ -81,13 +30,10 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, "..");
 const TMP = path.join(ROOT, ".zeros", "agent-smoke");
 
-// The gateway serves a throwaway repository below, while its native process
-// owner and pinned provider executables belong to this source checkout.
-// Electron's sidecar normally exports these exact paths; the standalone smoke
-// must do the same before it constructs the gateway.
+// Native process ownership and pinned executables belong to this checkout,
+// even though provider prompts run in a disposable repository.
 installAgentSmokeRuntimeEnvironment(ROOT);
 
-// ── args ─────────────────────────────────────────────────
 const argv = process.argv.slice(2);
 if (argv.includes("--help") || argv.includes("-h")) {
   console.log(
@@ -117,7 +63,6 @@ if (FULL && ADMISSION_ONLY) {
 if (!ADMISSION_ONLY && ADMISSION_COPIES !== 1) {
   throw new Error("--admission-copies requires --admission-only");
 }
-/** Comma-separated agent ids following `flag`, or null when absent. */
 function idList(flag) {
   const i = argv.indexOf(flag);
   if (i < 0 || !argv[i + 1]) return null;
@@ -130,7 +75,7 @@ function idList(flag) {
 const agentFilter = idList("--agents");
 const required = idList("--require");
 
-// ── per-agent knobs (engine-side; mirrors catalogs/models-v1 modelEnvVars) ──
+// Match the engine model variables in catalogs/models-v1.
 const MODEL_ENV = {
   claude: "ANTHROPIC_MODEL",
   "claude-code": "ANTHROPIC_MODEL",
@@ -152,7 +97,6 @@ const PROMPT_RECALL =
 const PROMPT_LONG =
   "List the numbers from 1 to 500, one per line, with no other text. Do not stop early.";
 
-// ── glyphs ───────────────────────────────────────────────
 const OK = "✓"; // ✓
 const NO = "✗"; // ✗
 const SKIP = "⏭"; // ⏭
@@ -169,7 +113,6 @@ function supportsEffort(agentId) {
   return [...EFFORT_AGENTS].some((k) => id.includes(k));
 }
 
-// ── compile the engine gateway to an importable ESM bundle ──
 
 /** Externalize bare imports so the SDKs / better-sqlite3 / native deps load at
  *  runtime from ./node_modules — but BUNDLE the `@zeros/*` workspace packages.
@@ -188,8 +131,6 @@ function supportsEffort(agentId) {
 const externalizeNodeModules = {
   name: "externalize-node-modules",
   setup(build) {
-    // Bare specifiers only: anything not starting with "." or "/". Absolute
-    // entry points and relative imports fall through to normal resolution.
     build.onResolve({ filter: /^[^./]/ }, (args) =>
       args.path.startsWith("@zeros/")
         ? null // resolve + bundle from source
@@ -223,15 +164,11 @@ function makeTempRepo() {
     /* git optional — most agents run in a plain dir too */
   }
   fs.writeFileSync(path.join(dir, "README.md"), "# zeros agent smoke\n");
-  // macOS exposes /var as a symlink to /private/var. Git reports the physical
-  // top-level while Node's os.tmpdir() commonly returns the lexical alias; a
-  // mixed pair correctly fails the canonical Design-territory containment
-  // check. Normalize once before the path becomes gateway/session identity.
+  // Canonicalize macOS /var before forming workspace identity; Git uses its
+  // physical /private/var path and containment checks require the same root.
   return canonicalAgentSmokeWorkspace(dir);
 }
 
-// Gateway whose onSessionUpdate accumulates assistant text per session, and
-// which auto-approves any permission prompt so a gated tool doesn't hang.
 function makeGateway(GatewayCtor, projectRoot) {
   const replies = new Map(); // sessionId -> accumulated assistant text
   const harness = { gateway: null, replies };
@@ -280,7 +217,6 @@ function withTimeout(promise, ms, label) {
   return Promise.race([promise.finally(() => clearTimeout(t)), timeout]);
 }
 
-// Run a check, never throw — capture ok + a short detail string.
 async function check(fn) {
   try {
     const detail = await fn();
@@ -290,7 +226,6 @@ async function check(fn) {
   }
 }
 
-// One prompt round-trip on a fresh session. Returns { sessionId, reply }.
 async function askFresh(harness, agentId, cwd, text, env) {
   const session = await harness.gateway.newSession(agentId, { cwd, env });
   const sid = session.sessionId;
@@ -356,7 +291,6 @@ async function smokeAgent(harness, agent, cwd) {
     return r;
   }
 
-  // ── 1. spawn + prompt + 2. context (same session) ──
   let ctxSession = null;
   r.checks.prompt = await check(async () => {
     const { sessionId, reply } = await askFresh(harness, id, cwd, PROMPT_PING);
@@ -381,7 +315,6 @@ async function smokeAgent(harness, agent, cwd) {
       })
     : { ok: false, detail: "skipped (prompt failed)" };
 
-  // ── 3. cancel mid-turn ──
   r.checks.cancel = await check(async () => {
     const session = await gw.newSession(id, { cwd });
     const sid = session.sessionId;
@@ -403,13 +336,11 @@ async function smokeAgent(harness, agent, cwd) {
     return `resolved in ${(elapsed / 1000).toFixed(1)}s${stop ? ` (${stop})` : ""}`;
   });
 
-  // ── 4. teardown ──
   r.checks.teardown = await check(async () => {
     if (ctxSession) await gw.endSession(id, ctxSession);
     return "endSession ok";
   });
 
-  // ── --full: model + effort sweep ──
   if (FULL) {
     const modelEnv = modelEnvFor(id);
     let models = [];
@@ -444,7 +375,6 @@ async function smokeAgent(harness, agent, cwd) {
   return r;
 }
 
-// ── rendering ────────────────────────────────────────────
 function cell(c) {
   if (c?.skip) return SKIP;
   return c?.ok ? OK : NO;
@@ -492,7 +422,6 @@ function render(rows) {
   return failures.length;
 }
 
-// ── main ─────────────────────────────────────────────────
 async function main() {
   console.log("── Zeros LIVE agent smoke ──");
   console.log(
@@ -540,9 +469,7 @@ async function main() {
       continue;
     }
     process.stdout.write(`  running ${id} …\n`);
-    // Keep the provider cwd inside the gateway's one canonical repository.
-    // A sibling mkdtemp is a different workspace and must be rejected by the
-    // Design-territory guard, which made the old harness fail before spawn.
+    // Provider cwd must remain inside the gateway's canonical repository boundary.
     const cwd = agentSmokeProviderCwd(projectRoot, id);
     fs.mkdirSync(cwd, { recursive: true });
     try {
@@ -556,9 +483,7 @@ async function main() {
 
   const failCount = render(rows);
 
-  // ── coverage guards: a green run must mean something ──
-  // Evaluated BEFORE the artifact is written so results.json records the same
-  // verdict the exit code reports.
+  // Compute coverage before writing the artifact so it agrees with the exit verdict.
   const tested = rows.filter((r) => !r.skipped).length;
   const coverage = [];
 
@@ -596,7 +521,6 @@ async function main() {
     for (const c of coverage) console.log(`  ${c}`);
   }
 
-  // Machine-readable artifact for diffing over time / CI gating.
   const out = path.join(TMP, "results.json");
   fs.writeFileSync(
     out,

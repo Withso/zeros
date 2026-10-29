@@ -1,81 +1,13 @@
 #!/usr/bin/env node
-// ──────────────────────────────────────────────────────────
-// cursor-host-smoke — end-to-end "does the Cursor SDK host actually work?" check
-// ──────────────────────────────────────────────────────────
-//
-// Spawns the real cursor-host.cjs subprocess exactly as the engine does, then
-// drives a minimal protocol round-trip and asserts the host came up and served
-// requests WITHOUT a module-resolution failure or a runtime-capability failure.
-//
-// RUN IT UNDER THE RUNTIME THAT SHIPS (`--electron`).
-// The original regression was green under the development Node runtime while
-// the shipped app failed under Electron:
-//
-//   • The engine spawns this host under the ELECTRON binary
-//     (apps/desktop/electron/sidecar.ts sets ZEROS_PTY_HOST_RUNTIME=process.execPath +
-//     ELECTRON_RUN_AS_NODE=1). The exact Electron/Node pair changes with the
-//     lockfile and is therefore exercised rather than copied into this comment.
-//   • @cursor/sdk 1.0.26's default local store needs the `node:sqlite` builtin,
-//     which landed in Node 22.5. The older shipping Electron runtime did not
-//     provide it, so `pnpm cursor:smoke` passed while every packaged
-//     `Agent.create` failed.
-//
-// A runtime the app never uses cannot prove the app works. `--electron` runs
-// the host under the repo's own Electron binary, which is the runtime the
-// packaged app ships.
-//
-// What it proves:
-//   • `ready` (not `fatal`) ⇒ require(@cursor/sdk) succeeded, which pulls the
-//     native binding chain + undici — the packages most likely to be missing
-//     from electron-builder.yml's asarUnpack list.
-//   • store.open must return a NON-NULL storeId. It previously accepted
-//     ok:false ("no backing store is fine"), which made the assertion vacuous
-//     the day @cursor/sdk stopped exporting SqliteLocalAgentStore.
-//   • agent.create exercises the local-store construction path — the one that
-//     broke. Its response is EXPECTED to be ok:false (the key is bogus), but
-//     the error must be an auth/network error, not a runtime-capability error:
-//     a missing node:sqlite surfaces here, and so does the misleading
-//     `Cannot access 'n' before initialization` TDZ that the SDK reports on
-//     every attempt after the first.
-//   • models.list exercises the undici fetch path.
-//   • stderr is scanned for module + runtime errors too.
-//
-// CURATED MODEL IDS (opt-in — needs a key)
-// Cursor resolves its catalog SERVER-SIDE: neither `composer-2.5` nor
-// `grok-4.5` appears anywhere in @cursor/sdk, so unlike Claude (binary string
-// table) and Codex (`model/list` over the app-server), there is no offline
-// source of truth to check curated ids against. `Cursor.models.list` is the
-// only authority and it needs a real API key.
-//
-// So: when CURSOR_API_KEY is set, this asserts every required curated cursor id
-// still RESOLVES against the account's catalog. A `liveRequired` compatibility
-// row is allowed to be absent because availability is account-dependent, but is
-// still verified when offered. Without a key the check SKIPS — loudly, never
-// silently — and `--require-models` turns that skip into a failure so a run
-// meant to verify models cannot quietly degrade into testing nothing.
-//
-// "Resolves", not "is offered verbatim": the catalog curates `grok-4.5` as a
-// LEVEL-FREE base, and the adapter completes such a base against this same live
-// catalog before spawning (applyCursorReasoning), so a suffixed
-// `grok-4.5-…` counts as resolvable for an account that still exposes that
-// compatibility family. See qualifiesAgainst in ./cursor-curated-ids.mjs.
-//
-// The env var is the ONLY source. The app's own store (`<userData>/secrets.json`,
-// which agent-smoke.mjs reaches via ZEROS_SECRETS_FILE) holds safeStorage-
-// ENCRYPTED values that only Electron can decrypt — see resolveCursorKey().
-//
-// Without a real key, a loopback backend rejects the bogus probe keys. This
-// exercises the SDK's store and HTTP paths without depending on remote auth or
-// network retries. With a real key, catalog qualification remains a live check.
-//
-// Dev:      `node scripts/cursor-host-smoke.mjs`            (source/dev runtime)
-// Shipped:  `node scripts/cursor-host-smoke.mjs --electron` (packaged runtime)
-// Packaged app — point it at the shipped resources (the strongest check):
-//   ZEROS_CURSOR_HOST_SCRIPT=/Applications/Zeros.app/Contents/Resources/cursor-host.cjs \
-//   ZEROS_PTY_HOST_RUNTIME=/Applications/Zeros.app/Contents/MacOS/Zeros \
-//   ZEROS_PTY_HOST_RUNTIME_ELECTRON=1 \
-//   ZEROS_CURSOR_SDK_ENTRY=/Applications/Zeros.app/Contents/Resources/app.asar.unpacked/.../@cursor/sdk/dist/cjs/index.js \
-//   node scripts/cursor-host-smoke.mjs
+// Exercise the real Cursor host under --electron to qualify the runtime the
+// app ships: development Node can support capabilities Electron lacks.
+// A ready handshake alone is insufficient; store.open must yield a store, and
+// agent.create must reach authentication rather than fail on runtime capabilities.
+// Without a key, a loopback backend rejects probe keys without remote retries.
+// Live model discovery requires CURSOR_API_KEY; --require-models makes its absence
+// fail. Required IDs must resolve; liveRequired compatibility rows can be absent,
+// and level-free bases may resolve through a suffixed live variant.
+// Environment keys are the only source: the app's safeStorage blobs need Electron.
 
 import { spawn } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
@@ -91,43 +23,26 @@ const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const TIMEOUT_MS = 30000;
 const MODULE_ERR_RX =
   /Cannot find module|MODULE_NOT_FOUND|ERR_MODULE_NOT_FOUND/i;
-// The runtime-capability failures this gate exists to catch. The TDZ pattern is
-// here because it is what the SDK actually reports once its first store load
-// has failed — the real cause appears only on the very first attempt in a host
-// process, and this host is long-lived and shared by every session.
+// After its first store failure, the SDK can report only a TDZ error;
+// include that symptom when diagnosing this long-lived host.
 const RUNTIME_ERR_RX =
   /node:sqlite|ERR_UNKNOWN_BUILTIN_MODULE|NoSqliteDriverError|Cannot access '.+?' before initialization/i;
 
 const useElectron = process.argv.includes("--electron");
 const requireModels = process.argv.includes("--require-models");
 
-/** A real Cursor key, if this environment has one — from the environment ONLY.
- *
- *  Deliberately NOT read from the app's secret store: `<userData>/secrets.json`
- *  is JSON, but every value in it is a `safeStorage.encryptString(...)` base64
- *  blob (apps/desktop/electron/secret-store.ts), decryptable only inside Electron with the
- *  OS keychain. The engine itself never decrypts it — `secret-account` probes
- *  check key PRESENCE and nothing else, on purpose. A script that JSON.parsed
- *  that file would hand an encrypted blob to models.list and report a bogus
- *  auth failure, so the store is not a key source here at all. */
+/** The app's secret-store values are safeStorage ciphertext, not API keys;
+ * only Electron with its OS keychain can decrypt them. */
 function resolveCursorKey() {
   const fromEnv = process.env.CURSOR_API_KEY?.trim();
   return fromEnv ? { key: fromEnv, from: "CURSOR_API_KEY" } : null;
 }
 
-/** Assertion failures collected from responses, reported together by finish().
- *  Declared up here rather than with the other per-run state because
- *  curatedCursorModels() below pushes to it — a `const` read from a function must
- *  not sit in its own TDZ if that function is ever called earlier than today. */
+/** Initialize before curatedCursorModels can report a failure. */
 const problems = [];
 
-/** Curated cursor records to qualify against this account, or `null` when the
- *  catalog could not be read at all.
- *
- *  Never a silent `[]`: an unreadable catalog and an empty one both make the
- *  comparison below vacuous, and a gate that compares nothing has to say so
- *  rather than printing "verified". `null` keeps "we could not look" reportable
- *  as its own cause instead of masquerading as "nothing to check". */
+/** Keep unreadable (null) distinct from confirmed empty ([]); both leave
+ * model coverage unproved and must be reported. */
 function curatedCursorModels() {
   try {
     const cat = JSON.parse(
@@ -144,8 +59,6 @@ function curatedCursorModels() {
 
 const cursorKey = resolveCursorKey();
 
-/** The repo's own Electron binary — `require("electron")` resolves to the
- *  absolute path of the platform binary the packaged app ships. */
 function resolveElectronBinary() {
   try {
     const p = createRequire(import.meta.url)("electron");
@@ -175,8 +88,7 @@ let asNode = process.env.ZEROS_PTY_HOST_RUNTIME_ELECTRON === "1";
 if (useElectron && !process.env.ZEROS_PTY_HOST_RUNTIME) {
   const bin = resolveElectronBinary();
   if (!bin) {
-    // A hard failure, never a skip: --electron was asked for precisely because
-    // the other runtime cannot prove anything about the shipped app.
+    // An explicitly requested shipping runtime cannot fall back to a development-only proof.
     console.error(
       "✗ --electron: could not resolve the Electron binary from node_modules.",
     );
@@ -191,8 +103,6 @@ if (useElectron && !process.env.ZEROS_PTY_HOST_RUNTIME) {
 }
 
 if (requireModels && !cursorKey) {
-  // Explicitly demanded, and impossible — fail NOW rather than after a green
-  // run that verified no model ids at all.
   console.error("✗ --require-models: CURSOR_API_KEY is not set.");
   console.error(
     "  Cursor's catalog is server-side, so there is no offline way to check",
@@ -252,7 +162,6 @@ let outBuf = "";
 let ready = false;
 let fatal = null;
 const got = new Map();
-/** What the curated-model check managed to do, echoed on success. */
 let modelNote = null;
 
 function send(obj) {
@@ -269,7 +178,7 @@ function finish(passed, reason) {
   smokeBackend?.close();
   try {
     child.kill("SIGTERM");
-  } catch {}
+  } catch { /* The host may already have exited. */ }
   const moduleErr = MODULE_ERR_RX.test(stderr);
   const runtimeErr = RUNTIME_ERR_RX.test(stderr);
   const ok =
@@ -382,9 +291,7 @@ child.stdout.on("data", (chunk) => {
     } else if (m.k === "res") {
       got.set(m.id, m);
       if (m.id === 1) {
-        // Must actually yield a store. `{storeId: null}` is the host's "no
-        // store available" answer — it is what silently broke the adapter's
-        // terminal-error recovery, so it fails here rather than passing.
+        // A null store is unavailable, not a successful store.open.
         if (!m.ok) {
           problems.push(`store.open failed: ${errText(m) || "(no message)"}`);
         } else if (!m.result || m.result.storeId == null) {
@@ -413,11 +320,7 @@ child.stdout.on("data", (chunk) => {
             );
           } else {
             const curated = curatedCursorModels();
-            // An empty curated list is a FAILURE, not a quiet no-op: the loop
-            // below would compare nothing while finish() still printed
-            // "Curated cursor model ids verified". Catches the family being
-            // emptied AND its `value` key being renamed out from under the
-            // mapping above — neither of which bumps any version number.
+            // Empty curated input must not turn the verification loop into a passing no-op.
             if (curated?.length === 0) {
               problems.push(
                 "catalogs/models-v1.json lists no cursor models — the curated-id check " +
@@ -445,10 +348,7 @@ child.stdout.on("data", (chunk) => {
                 );
               }
             }
-            // Report the COUNT, so the PASS line's "verified" is falsifiable at
-            // a glance instead of an assertion the reader has to take on trust.
-            // Level-free bases are called out separately because "present" means
-            // something weaker for them — a variant exists, not the id itself.
+            // Report coverage counts and variant resolution so a passing claim is auditable.
             const required =
               curated?.filter((model) => model?.liveRequired !== true).length ??
               0;

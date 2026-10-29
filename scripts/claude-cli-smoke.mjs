@@ -1,44 +1,9 @@
 #!/usr/bin/env node
-// ──────────────────────────────────────────────────────────
-// claude-cli-smoke — "can the Agent SDK actually launch the bundled claude?"
-// ──────────────────────────────────────────────────────────
-//
-// Resolves the `claude` executable through the engine's OWN resolver
-// (claude-sdk/binary-resolver.ts), then drives a real
-// `@anthropic-ai/claude-agent-sdk` `query()` through it and asserts the turn
-// dies on AUTH — not on binary resolution, not on a spawn/handshake failure.
-//
-// WHY THIS EXISTS
-// `check:runtime-pins` execs `claude --version`, which proves the binary is
-// present and runnable. It does NOT prove the SDK can drive it: `query()`
-// spawns the CLI with its own control protocol, and that seam has already
-// broken in production once. binary-resolver.ts's header documents the bug
-// class in full — the SDK locates its ~245 MiB platform binary *relative to
-// sdk.mjs's own on-disk location*, which works in dev (`bun apps/desktop/src/cli.ts`) and is
-// IMPOSSIBLE in the packaged app (bun-compiled single-file engine: sdk.mjs
-// lives in $bunfs, no node_modules on disk). Every send failed with an opaque
-// "AGENT RESPONSE FAILURE", in Beta/Production only.
-//
-// WHAT IT PROVES
-//   1. resolveClaudeCli() returns a path, from a PINNED tier (staged/bundled) —
-//      resolving to the developer's own global install means the shipped
-//      runtime is missing and the gate is measuring the wrong binary.
-//   2. `query()` accepts that path, spawns the CLI, and completes the SDK↔CLI
-//      handshake far enough to report a server-side auth rejection.
-//   3. The failure is auth-shaped. A resolution/spawn/protocol failure —
-//      "Native CLI binary ... not found", ENOENT, EACCES, a non-zero exit
-//      before any response — fails this gate.
-//
-// COST: ZERO TOKENS, BY CONSTRUCTION.
-// The key is deliberately invalid, so the first API call 401s before any
-// inference. HOME is redirected to an empty temp dir so an ambient credential
-// (~/.claude, a keychain-backed session on a dev machine) cannot silently
-// authenticate the run and turn this into a real, billable turn. If the query
-// nevertheless SUCCEEDS, that is treated as a FAILURE: it means credentials
-// leaked in and the gate just spent money proving nothing.
-//
-// Run: `pnpm claude:smoke`.  Exit 0 = the SDK can launch the pinned CLI.
-// ──────────────────────────────────────────────────────────
+// A runnable CLI does not prove that the SDK can launch it through the
+// shipping resolver. Require a pinned binary and an auth-shaped SDK response.
+// Empty credential directories and an invalid key prevent a paid turn; fail
+// if observed output or usage proves real inference. Packaged engines cannot
+// resolve platform binaries relative to an SDK embedded in Bun's filesystem.
 
 import { createRequire } from "node:module";
 import fs from "node:fs";
@@ -54,11 +19,9 @@ const RESOLVER =
   "apps/desktop/src/engine/agents/adapters/claude-sdk/binary-resolver.ts";
 const TIMEOUT_MS = 90_000;
 
-/** Errors that mean the CLI never got far enough to be rejected by the server —
- *  i.e. exactly what this gate exists to catch. */
+/** These failures do not prove that an API request reached authentication. */
 const LAUNCH_ERR_RX =
   /Native CLI binary|not found|ENOENT|EACCES|spawn\b|Permission denied|exited with code|no such file|cannot execute|Exec format error/i;
-/** Errors that mean we DID reach the server and it said no. That is a pass. */
 const AUTH_ERR_RX =
   /401|403|invalid.{0,20}api.?key|authentication|unauthorized|invalid.{0,20}token|credit balance|OAuth/i;
 /** `api_retry` statuses that are themselves proof the server saw us and said no. */
@@ -78,10 +41,8 @@ function die(msg, detail) {
   process.exit(1);
 }
 
-// Compile the engine's real resolver rather than reimplementing its tier order:
-// a gate that resolves the binary its own way cannot catch the resolver
-// regressing. CJS because binary-resolver.ts uses createRequire/require against
-// the repo's node_modules; emitting into the repo keeps that anchored.
+// Bundle the shipping resolver as CJS inside the checkout to preserve
+// require resolution against its own installed dependencies.
 async function loadResolver() {
   fs.mkdirSync(TMP_DIR, { recursive: true });
   const outfile = path.join(TMP_DIR, "binary-resolver.cjs");
@@ -134,26 +95,13 @@ const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "zeros-claude-smoke-"));
 process.env.HOME = fakeHome;
 process.env.USERPROFILE = fakeHome;
 process.env.CLAUDE_CONFIG_DIR = path.join(fakeHome, ".claude");
-// Key-shaped, and low-entropy ON PURPOSE. check:secrets matches `sk-ant-`
-// followed by a 20+ character body and clears the match only when that body has
-// <= 2 distinct characters (its looksLikePlaceholder), so a *descriptive* fake
-// key reads better and turns the gate red. Low entropy is the right lever here
-// rather than excluding this file from the scan: an exclusion would also stop a
-// REAL key pasted onto any other line in this file from being caught.
-//
-// Do NOT dress it up with the real api03 infix to look more authentic. A
-// well-formed key is sent to the API and the turn then hangs past this gate's
-// 90s budget (measured: >60s, no response); a malformed one is rejected in ~1s
-// with the "Invalid API key" this gate asserts on. Fast and deterministic is the
-// whole point — the key never has to be realistic, only rejected.
+// Low entropy keeps this rejected fixture recognizable to the secret scan
+// without exempting real keys. A malformed key also avoids long API retries.
 process.env.ANTHROPIC_API_KEY = "sk-ant-xxxxxxxxxxxxxxxxxxxxxxxx";
 delete process.env.ANTHROPIC_AUTH_TOKEN;
 delete process.env.CLAUDE_CODE_OAUTH_TOKEN;
-// Claude Code treats a 401 as retryable: ten attempts with exponential backoff
-// (~0.5s doubling past 35s) push the rejection this gate asserts on well beyond
-// the 90s budget, and the timeout then reports a handshake failure that never
-// happened. Retrying auth is right for a real session and wrong for a gate whose
-// expected outcome IS the rejection, so make the first 401 terminal.
+// Authentication rejection is the expected result; retries would exhaust
+// the deadline and falsely implicate the handshake.
 process.env.CLAUDE_CODE_MAX_RETRIES = "0";
 
 console.log(`▸ home:     ${fakeHome} (empty — no ambient credentials)\n`);
@@ -170,12 +118,8 @@ const timer = setTimeout(() => {
   abort.abort();
 }, TIMEOUT_MS);
 
-// Token safety is MEASURED, not assumed. The CLI reports an auth rejection by
-// emitting an `assistant` message with `model: "<synthetic>"` — a local
-// error-carrier, not model output — so "did an assistant message arrive" is the
-// wrong question. `total_cost_usd` / `usage.output_tokens` from the result
-// message answer the real one: they are 0 for a rejected turn and non-zero the
-// moment inference actually happens.
+// Synthetic assistant messages carry auth errors too. Use real model output
+// and result cost/token counters to detect unintended inference.
 let realInference = false;
 let spend = { cost: 0, outputTokens: 0 };
 let failure = null;
@@ -197,11 +141,8 @@ try {
   const initialized = await q.initializationResult();
   initializedCliVersion = initialized.claude_code_version;
   for await (const msg of q) {
-    // Belt and braces for CLAUDE_CODE_MAX_RETRIES: if a future CLI stops
-    // honouring it, the retry stream still carries everything this gate asserts —
-    // the SDK drove the CLI far enough to reach the server and be rejected. Take
-    // that as the answer and stop, rather than idling out the budget and blaming
-    // the handshake for a rejection that plainly arrived.
+    // If the CLI ignores the retry limit, an observed 401/403 still proves
+    // the handshake; abort after recording it instead of waiting for timeout.
     if (
       msg?.type === "system" &&
       msg.subtype === "api_retry" &&
@@ -224,8 +165,7 @@ try {
     }
   }
 } catch (err) {
-  // The SDK rethrows an error result as an exception once the stream ends, so
-  // this is the normal path for a rejected turn — not an exceptional one.
+  // The SDK rethrows error results after the stream, including expected auth rejection.
   if (!authRetry) failure = err?.message ?? String(err);
 }
 clearTimeout(timer);
@@ -275,8 +215,7 @@ if (LAUNCH_ERR_RX.test(oneLine) && !AUTH_ERR_RX.test(oneLine)) {
   );
 }
 if (!AUTH_ERR_RX.test(oneLine)) {
-  // Neither clearly auth nor clearly launch. Report rather than guess: a gate
-  // that silently accepts unrecognised failures is a gate that stops failing.
+  // Unknown failure shapes do not prove an authentication round trip.
   die(
     "the query failed, but not with a recognisable auth rejection. If this is a new " +
       "auth error shape, add it to AUTH_ERR_RX; if it is a launch failure, that is a real bug.",

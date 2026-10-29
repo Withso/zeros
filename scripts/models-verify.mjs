@@ -1,31 +1,8 @@
 #!/usr/bin/env node
-// ──────────────────────────────────────────────────────────
-// models-verify.mjs — validate the curated model catalog
-// ──────────────────────────────────────────────────────────
-//
-// `pnpm models:verify` (also run in the unit suite via
-// models-catalog-validity.test.ts). Two layers:
-//
-//   1. STRUCTURAL + CONSISTENCY (always, no auth, no agent boot): shape, valid
-//      effort levels, no duplicate ids per family, an env var per family,
-//      aliases that resolve. This is the always-on gate.
-//   2. CLI-VERSION GATE (no API — just reads the bundled SDK's manifest.json):
-//      warns when a model's `minCliVersion` exceeds the bundled agent CLI, i.e.
-//      it would silently downgrade (the Fable-5-on-2.1.162 class of bug).
-//   3. MODEL-ID EXISTENCE GATE (no API — reads the bundled CLI BINARY): warns
-//      when a curated claude id is one the pinned CLI has never heard of. This
-//      is layer 2's mirror image and the direction it cannot see — see
-//      checkModelIdsKnownToCli for why a version number can't express it.
-//
-//   --live (best-effort, opt-in): shells the agents that expose a model-list
-//      command (`cursor-agent models`) and warns on required curated ids the
-//      live account doesn't list. Explicit `liveRequired` compatibility rows
-//      are account-qualified and may be absent. Agents without a simple list command
-//      (claude / codex) are noted — use `pnpm models:list` / the app.
-//
-// Exits non-zero on any STRUCTURAL/CONSISTENCY error (so it can gate CI).
-// Warnings (version gate, live drift) never fail the build.
-// ──────────────────────────────────────────────────────────
+// A minimum CLI version cannot detect retired model IDs. Qualify catalog
+// structure, the installed CLI version, and IDs from each provider's authority.
+// CLI-version and model-ID drift fail under --strict; incomplete binary
+// extraction stays inconclusive rather than reporting every model removed.
 
 import {
   closeSync,
@@ -60,12 +37,10 @@ const KNOWN_KEYS = new Set([
   "liveRequired",
 ]);
 
-/** Strip a "[1m]"-style context suffix → base id (for alias-target matching). */
 function baseSlug(id) {
   return String(id).replace(/\[[^\]]*\]\s*$/, "");
 }
 
-/** Pure structural + consistency validation. Returns {errors, warnings}. */
 export function validateCatalog(catalog) {
   const errors = [];
   const warnings = [];
@@ -215,10 +190,7 @@ function versionGte(have, need) {
   return true;
 }
 
-/** Read the bundled claude-code CLI version from the LINKED (active) SDK — its
- *  declared `claudeCodeVersion`, falling back to manifest.json. Reads the
- *  symlinked top-level package (not a `.pnpm` glob, which can match a stale
- *  prior version pnpm keeps around after a bump). */
+/** Read the linked SDK, not a .pnpm glob that can select an obsolete install. */
 export function bundledClaudeCliVersion() {
   const linked = join(
     ROOT,
@@ -243,7 +215,6 @@ export function bundledClaudeCliVersion() {
   return null;
 }
 
-/** Warn when a claude model needs a newer CLI than the one bundled. */
 export function checkCliVersionGate(catalog, bundledVersion) {
   const warnings = [];
   if (!bundledVersion) return warnings;
@@ -257,44 +228,18 @@ export function checkCliVersionGate(catalog, bundledVersion) {
   return warnings;
 }
 
-// ── 3. model-ID existence: is the curated id still KNOWN to the CLI? ──
 
-/** Model-id-shaped literals in the Claude binary: `claude-<word>-<digit>…`.
- *  The binary is a `bun build --compile` blob that keeps its string table in the
- *  clear, so every id the CLI accepts appears verbatim — including the regexes
- *  and the `[1m]` variants. Verified against CLI 2.1.220: 42 distinct ids, among
- *  them all five curated ones plus unreleased ones (`claude-mythos-5`). */
+/** Bun-compiled Claude binaries retain model-ID literals in their string table. */
 const CLAUDE_MODEL_ID_RE = /claude-[a-z]+-[0-9][0-9a-z.-]*/g;
 
-/** Overlap kept between chunks. The longest real id is ~26 chars
- *  (`claude-sonnet-4-5-20250929`), so 64 bytes is comfortably more than any id
- *  can straddle. */
+/** Retain more than the longest model ID so a chunk boundary cannot truncate it. */
 const SCAN_OVERLAP = 64;
 
-/** Below this many distinct ids, assume the EXTRACTION broke — a compressed or
- *  re-encoded string table — rather than that Anthropic deleted its whole model
- *  list. 2.1.220 yields 42, so this is a wide margin.
- *
- *  This floor is what makes the gate safe to hard-fail on. Without it, the day
- *  the binary format changes every curated model reads as "removed" and the
- *  check goes red on all five at once — and a check whose failure mode is a
- *  false red on everything is a check that gets deleted. */
+/** Too few IDs indicate broken extraction, not wholesale model retirement. */
 const MIN_PLAUSIBLE_IDS = 8;
 
-/** Distinct model-id literals in a binary, streamed so a ~275 MiB blob costs
- *  ~0.4s and bounded memory instead of a 275 MiB string.
- *
- *  Reads as `latin1` — a byte-for-byte mapping, so no multi-byte decode can
- *  split or mangle an ASCII id and no U+FFFD replacement chars appear mid-match.
- *
- *  A match touching the end of a chunk is DROPPED and re-found via the carry, so
- *  it is never recorded truncated. That matters for exactly one case, which is
- *  also the case this whole gate exists for: if the binary contains only
- *  `claude-opus-5-1` and the chunk splits it after `claude-opus-5`, recording
- *  the truncation would report the retired `claude-opus-5` as still present.
- *
- *  Returns null if the path can't be opened (caller decides whether that's
- *  fatal). */
+/** Stream with byte-preserving latin1. Recheck edge matches in the next chunk
+ * so a partial newer ID cannot falsely prove an older one still exists. */
 export function scanModelIds(binaryPath, re = CLAUDE_MODEL_ID_RE) {
   const CHUNK = 1 << 22; // 4 MiB
   let fd;
@@ -330,11 +275,8 @@ export function scanModelIds(binaryPath, re = CLAUDE_MODEL_ID_RE) {
   return found;
 }
 
-/** The set of model ids the PINNED Claude CLI knows, read off the real binary.
- *  Returns null when the platform package isn't installed for this os/cpu —
- *  it's an OPTIONAL dependency, so `--no-optional` installs legitimately lack
- *  it. `check:runtime-pins` is what fails loudly on that; here it degrades to a
- *  note. */
+/** Optional platform dependencies can be absent; runtime-pins owns that
+ * failure while this scan reports unavailable evidence. */
 export function knownClaudeModelIds() {
   try {
     return scanModelIds(resolveClaudeCliSource().path);
@@ -414,7 +356,6 @@ export function checkModelIdsKnownToCli(catalog, knownIds) {
   return { missing, notes };
 }
 
-// ── CLI runner (only when invoked directly) ───────────────
 
 function liveCheck(catalog) {
   const warnings = [];
@@ -452,9 +393,7 @@ function liveCheck(catalog) {
 }
 
 async function main() {
-  // `--strict` (used in CI): a CLI-version-gate warning becomes a HARD FAILURE.
-  // A curated model that needs a newer CLI than the bundled SDK would silently
-  // downgrade at runtime — fail the build so the SDK pin gets bumped instead.
+  // Fail strict qualification before a too-new model silently falls back at runtime.
   const strict = process.argv.includes("--strict");
   const catalog = JSON.parse(readFileSync(CATALOG_PATH, "utf8"));
   if (process.argv.includes("--require-complete") || (process.argv.includes("--bundled") && process.argv.includes("--live"))) {
@@ -473,8 +412,6 @@ async function main() {
   }
   const { errors, warnings } = validateCatalog(catalog);
   const versionWarnings = checkCliVersionGate(catalog, bundledClaudeCliVersion());
-  // Reads the ~275 MiB binary (~0.4s). Worth it on the only path that can catch
-  // a retired model id; `notes` are always soft, `missing` gates under --strict.
   const { missing, notes } = checkModelIdsKnownToCli(catalog, knownClaudeModelIds());
   const live = process.argv.includes("--live") ? liveCheck(catalog) : [];
 

@@ -1,47 +1,18 @@
-// ============================================================
-// class-candidates.mjs
-// ------------------------------------------------------------
-// Static extraction of Tailwind class candidates from renderer TS/TSX, using
-// the TypeScript AST rather than line regexes. Only DEFINITE class contexts
-// are read, so prose, test names, and ordinary strings never become
-// candidates:
-//
-//   • `className` and `*ClassName` JSX attributes / object properties
-//   • class helper calls: cn, clsx, cx, twMerge, twJoin
-//   • cva(base, { variants, compoundVariants }) recipes
-//   • `[...].join(" ")` / `[...].filter(Boolean).join(" ")` class arrays
-//   • constants whose name says they hold classes (FOO_CLASS, fooClassName),
-//     and the constants a class context references — block-scoped, top-level,
-//     or imported by name (`cn(MENU_ITEM_RADIUS, …)`, `SIZE_CLASSES[size]`)
-//
-// Inside a context, the value expression is walked structurally: conditional
-// branches, `||` / `??` operands, the right side of `&&`, arrays, template
-// literals, string concatenation, and clsx object keys. Comparison operands
-// (`variant === "ghost"`) are conditions, not classes, and are never read.
-//
-// A token built at an interpolation or concatenation boundary (`size-${n}`,
-// "text-" + tone) is dynamic: it is skipped, and so is the expression that
-// completes it. Fully static concatenations are folded first.
-//
-// Two outputs:
-//   • occurrences — every candidate once, at its source position (for the
-//     compiled-class gate and per-token policy rules)
-//   • groups — the classes that land on ONE element, re-expanded at each use
-//     of a shared constant, with cva variants kept apart (for pairing rules)
-// ============================================================
+// Read only definite class contexts so prose and comparison operands never
+// become Tailwind candidates. Fold static strings, but skip partial tokens
+// completed by dynamic concatenation or interpolation.
+// Emit each literal occurrence once; expand its classes at every element use,
+// keeping mutually exclusive cva variants in separate pairing groups.
 import { existsSync, readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import ts from "typescript";
 
 export const CLASS_HELPERS = new Set(["cn", "clsx", "cx", "twMerge", "twJoin"]);
 
-// `className`, `contentClassName`, `iconClassName`, … — the repo's convention
-// for forwarding classes to a slot.
+// Slot class props follow the className / *ClassName convention.
 const CLASS_PROP_RE = /^(?:className|[a-z][A-Za-z0-9]*ClassName)$/;
 
-// Constants that hold class strings by name (FOO_CLASS, FOO_CLASSES,
-// fooClassName, …). Recipes named otherwise — MENU_SURFACE_RADIUS,
-// PROMPT_SURFACE_RADIUS — are still read when a class context references them.
+// References from a class context also admit constants whose names lack CLASS.
 const CLASS_CONST_RE =
   /(?:^|_)CLASS(?:ES|NAME)?(?:_|$)|[a-z0-9](?:Class|Classes|ClassName)$/;
 
@@ -81,7 +52,6 @@ function propertyName(name, sourceFile) {
   return name.getText(sourceFile);
 }
 
-/** Named imports: local name → { specifier, importedName }. */
 function namedImports(sourceFile) {
   const out = new Map();
   for (const statement of sourceFile.statements) {
@@ -99,7 +69,6 @@ function namedImports(sourceFile) {
   return out;
 }
 
-/** `const NAME = …` in one statement list. */
 function constIn(statements, name) {
   for (const statement of statements) {
     if (!ts.isVariableStatement(statement)) continue;
@@ -130,11 +99,8 @@ function resolveLocalConst(node, name) {
 
 const RESOLVE_EXTENSIONS = [".ts", ".tsx", ".mts", ".js", ".mjs", "/index.ts", "/index.tsx"];
 
-/**
- * Resolve an import specifier to a source file. Handles relative paths and the
- * repository's `@/*` → `apps/desktop/src/*` alias (tsconfig.json). Packages are
- * not followed: their classes are not app markup.
- */
+/** Follow repository aliases and relative sources, not package internals:
+ * dependency classes are not application markup. */
 export function resolveModule(specifier, fromFile, root) {
   let base;
   if (specifier.startsWith("@/")) base = join(root, "apps/desktop/src", specifier.slice(2));
@@ -150,7 +116,6 @@ export function resolveModule(specifier, fromFile, root) {
 
 const isStringNode = (node) => ts.isStringLiteral(node) || ts.isNoSubstitutionTemplateLiteral(node);
 
-/** The text of a fully static string expression, or null. */
 function staticText(node) {
   if (isStringNode(node)) return node.text;
   if (ts.isParenthesizedExpression(node)) return staticText(node.expression);
@@ -200,8 +165,7 @@ export function extractClassContexts({ files, root, read }) {
     return id;
   };
 
-  // Read one literal: emit its tokens once overall, and add them to the
-  // current group at EVERY use (a shared constant joins each element using it).
+  // Deduplicate source occurrences, but include shared classes in every consuming element.
   const useText = (unit, node, text, textStart, { trimStart, trimEnd }) => {
     const { sourceFile } = unit;
     const key = `${sourceFile.fileName}:${node.pos}:${node.end}:${node.kind}`;
@@ -301,7 +265,6 @@ export function extractClassContexts({ files, root, read }) {
         visit(unit, node.left, mode, depth + 1);
         visit(unit, node.right, mode, depth + 1);
       } else if (operator === ts.SyntaxKind.PlusToken) {
-        // Mixed static/dynamic concatenation (fully static was folded above).
         const leftText = staticText(node.left);
         const rightText = staticText(node.right);
         if (leftText !== null) {
@@ -406,8 +369,6 @@ export function extractClassContexts({ files, root, read }) {
     activeRefs.delete(key);
   };
 
-  // Walk `path` through object/array literals and const references; the value
-  // at the end of the path is class text.
   const applyPath = (unit, node, path, depth) => {
     if (!node || depth > 24) return;
     while (ts.isParenthesizedExpression(node) || ts.isAsExpression(node) || (ts.isSatisfiesExpression && ts.isSatisfiesExpression(node)) || ts.isNonNullExpression(node)) {
@@ -505,7 +466,6 @@ export function extractClassContexts({ files, root, read }) {
     }
   };
 
-  /** Context roots: each opens the group of classes that land on one element. */
   const scanContexts = (unit) => {
     const { sourceFile } = unit;
     const startRoot = (node, run) => {
@@ -546,7 +506,6 @@ export function extractClassContexts({ files, root, read }) {
   return { occurrences, groups };
 }
 
-/** Candidate occurrences only (each literal once, at its source position). */
 export function extractClassCandidates(options) {
   return extractClassContexts(options).occurrences;
 }

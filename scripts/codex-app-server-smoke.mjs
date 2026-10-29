@@ -1,77 +1,10 @@
 #!/usr/bin/env node
-// ──────────────────────────────────────────────────────────
-// codex-app-server-smoke — "does the pinned codex binary actually run?"
-// ──────────────────────────────────────────────────────────
-//
-// Boots the REAL `codex app-server` through the engine's own
-// `bootCodexAppServerRuntime`, completes the initialize handshake, and asserts
-// the running binary is the one we pinned. Needs NO credentials: `initialize`
-// is a local stdio protocol exchange, so this runs on every PR.
-//
-// WHY THIS EXISTS
-// `check:codex-pin` compares three version STRINGS (installed @openai/codex ↔
-// package.json#codexProtocolVersion ↔ the committed bindings' .version). It is
-// pure arithmetic on numbers — it never touches the artifact. So every one of
-// these ships green:
-//
-//   • the platform package (@openai/codex-<os>-<arch>) is missing, so the
-//     wrapper falls through to a PATH `codex` that isn't there, or IS there and
-//     is some other version entirely;
-//   • the binary stages but cannot exec (wrong arch, lost +x, corrupt);
-//   • the app-server handshake regressed, or the CLI dropped below
-//     MIN_CLI_VERSION, so the committed v2 bindings no longer match the wire.
-//
-// That is the same hole `check:runtime-pins` closed for Claude by EXECUTING
-// `claude --version`. Codex had no equivalent. This is it — and it proves more
-// than `--version` does, because it drives the actual protocol.
-//
-// WHAT IT PROVES
-//   1. The binary RESOLVES (via the engine's own resolveCodexBinary cascade,
-//      not a hand-rolled path) and is spawnable on this platform.
-//   2. `initialize` completes inside the runtime's own 15s budget, and the
-//      `initialized` notification is accepted — i.e. the app-server protocol
-//      the committed bindings were generated from is the one being spoken.
-//   3. The CLI version the SERVER reports equals the @openai/codex version
-//      installed in node_modules. A staged-but-wrong binary fails here.
-//   4. Boot also enforces MIN_CLI_VERSION internally, so a CLI below 0.131.0
-//      throws rather than half-working.
-//   5. Every curated codex model id in catalogs/models-v1.json is one the
-//      pinned binary actually offers, asked over `model/list`.
-//
-// ON (5) — WHY HERE, AND WHY IT IS NOT A STRING SCAN
-// models-verify.mjs gates retired model ids for Claude by scanning the CLI
-// binary's string table, and its own comment explains why that technique does
-// not port to Codex: the native Rust binary packs ids contiguously
-// (`gpt-5.2-codexgpt-5.2-codex`), so set membership is unreliable. But the
-// app-server exposes `model/list`, which is the binary's OWN authoritative
-// answer — strictly better than scraping strings, and it needs no credentials.
-// The server is already booted here, so this costs one extra request rather
-// than a second 5-second boot in CI.
-//
-// The failure it catches: retiring a model id bumps no version number, so
-// nothing can compare against a threshold. The picker keeps offering the dead
-// id and codex silently substitutes another model.
-//
-// "It needs no credentials" is a CONTRACT here, not an aside: because the binary
-// answers `model/list` unauthenticated, an empty or unreadable answer can only
-// mean something broke, so both are hard failures rather than skips. Only a
-// request that never landed is treated as inconclusive.
-//
-// It is deliberately NOT a prompt test: no auth, no tokens, no network, no
-// model. `agents:smoke` is where live turns belong.
-//
-// ── WHAT THIS DOES *NOT* PROVE — read before trusting it ──
-// It proves the installed pin is executable and protocol-compatible. Packaging
-// correctness is separately guarded by stage-codex-cli.mjs,
-// check-packaging-paths.mjs, and the sidecar's ZEROS_CODEX_CLI_PATH handoff.
-// Point ZEROS_CODEX_CLI_PATH at a staged binary to exercise that exact artifact.
-//
-// Resolving via PATH is therefore treated as a FAILURE here, not a pass: in a
-// source checkout it means the @openai/codex platform package did not install,
-// which is precisely the drift this gate exists to catch.
-//
-// Run: `pnpm codex:smoke`.  Exit 0 = the pinned codex boots and matches.
-// ──────────────────────────────────────────────────────────
+// Version strings cannot prove that the pinned binary boots or speaks the
+// engine's protocol. Use the real resolver and app-server handshake; PATH
+// fallback does not qualify a bundled artifact. Packaging remains a separate check.
+// model/list is the binary's credential-free authority: unreadable or empty
+// answers fail, while an unreachable request is explicitly inconclusive.
+// No prompt is sent; live turns belong to agents:smoke.
 
 import { createRequire } from "node:module";
 import fs from "node:fs";
@@ -96,16 +29,11 @@ function die(msg, detail) {
   process.exit(1);
 }
 
-/** Declared before the handlers below, which read it — a `const` referenced
- *  from a handler that can fire at any time must not be in its own TDZ. */
+/** Initialize before asynchronous error handlers can read it. */
 const stderrLines = [];
 
-// A binary that spawns but dies before the handshake (wrong arch, a stub, a
-// non-codex executable) kills the stdio pipe, and the engine's write lands as
-// an ASYNCHRONOUS EPIPE — outside the try/catch around boot. Unhandled, that
-// exits with a raw node:internal stack whose top frame is a stream teardown:
-// a CI failure that names the wrong cause, which is the exact anti-pattern
-// these gates are supposed to avoid. Convert both channels into the real one.
+// A child that exits before handshake can fail writes asynchronously with
+// EPIPE, outside boot's try/catch. Report that as a binary/handshake failure.
 for (const signal of ["uncaughtException", "unhandledRejection"]) {
   process.on(signal, (err) => {
     const msg = err?.message ?? String(err);
@@ -142,12 +70,8 @@ function installedCodexVersion() {
   return JSON.parse(fs.readFileSync(pkg, "utf-8")).version;
 }
 
-// Compile the engine's real app-server module rather than reimplementing the
-// handshake here: a smoke that speaks its own dialect of the protocol proves
-// nothing about the code that ships. CJS on purpose — binary-resolver.ts
-// resolves the platform package with `require.resolve` (the engine is bundled
-// to CJS by tsup), which does not exist in an ESM bundle. Emitting into the
-// repo keeps that resolution anchored at the repo's own node_modules.
+// Compile the shipping runtime so the smoke exercises its protocol and resolver.
+// CJS and a repository-local output preserve the engine's require.resolve behavior.
 async function loadAppServer() {
   fs.mkdirSync(TMP_DIR, { recursive: true });
   const outfile = path.join(TMP_DIR, "app-server.cjs");
@@ -165,13 +89,8 @@ async function loadAppServer() {
 
 const expected = installedCodexVersion();
 const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "zeros-codex-smoke-"));
-// This is a protocol/artifact smoke, not a user's configured Codex session.
-// Keep its SQLite state beside the throwaway cwd so the check remains truly
-// credential-free and works when launched by another coding agent whose
-// sandbox can write tmp/workspace paths but intentionally cannot write
-// ~/.codex. buildSpawnEnvWithLoginPath preserves the AMBIENT CODEX_HOME by
-// design, so seed process.env before boot rather than trying to pass a
-// per-child override that the config-root guard would correctly reject.
+// Keep this credential-free probe's state in scratch. The runtime preserves
+// ambient CODEX_HOME, so set it before boot rather than as a rejected child override.
 const codexHome = path.join(cwd, "codex-home");
 fs.mkdirSync(codexHome, { recursive: true });
 process.env.CODEX_HOME = codexHome;
@@ -213,9 +132,7 @@ if (!handle.initializeResponse) {
   problems.push("initialize returned no response object");
 }
 if (handle.binarySource?.source === "fallback") {
-  // The resolver's last tier is the literal string "codex", left to PATH. In a
-  // source checkout that can only mean the bundled dep is gone — and whatever
-  // answered is by definition not the version we pinned.
+  // PATH fallback cannot certify the pinned platform dependency.
   problems.push(
     "resolved codex from PATH, not the bundled @openai/codex. The platform " +
       "package (@openai/codex-<os>-<arch>) failed to install — an os/cpu-gated " +
@@ -242,15 +159,8 @@ console.log(
 console.log(`▸ reported: codex ${handle.cliVersion ?? "unknown"}`);
 console.log(`▸ userAgent: ${handle.initializeResponse?.userAgent ?? "(none)"}`);
 
-// ── Curated model ids exist in the pinned binary ───────────
-// `includeHidden` on purpose: a model can be pulled from the default picker
-// while still being perfectly usable, and we only care whether the id RESOLVES.
-// Flagging a hidden-but-working model as retired would be a false red.
-//
-// `null` (not `[]`) when the catalog is unreadable, so "we could not look" stays
-// distinguishable from "we looked and it is empty" — both are failures, but they
-// must not report as each other, and the unreadable case already has its own
-// problem line.
+// Hidden models can still resolve. Distinguish an unreadable curated catalog
+// (null) from a confirmed empty one; neither may silently pass.
 const curatedCodex = (() => {
   try {
     const cat = JSON.parse(
@@ -272,13 +182,7 @@ try {
     { includeHidden: true },
     { timeoutMs: 20_000 },
   );
-  // An ANSWER we cannot read is drift, not a blip. `model/list` is the binary's
-  // authoritative RPC, so a missing `data` array means the response shape moved
-  // under us — precisely the protocol regression this gate exists to catch. The
-  // old `res?.data ?? []` collapsed that into the same silent no-op as an empty
-  // list, which would have left the curated-id check permanently vacuous with
-  // one SKIPPED line as the only trace. cursor-host-smoke.mjs already treats an
-  // unusable models.list result as a problem; this matches it.
+  // A successful RPC with an unreadable shape is protocol drift, not a skipped check.
   if (!Array.isArray(res?.data)) {
     problems.push(
       `model/list answered, but with no \`data\` array (got ${JSON.stringify(res)?.slice(0, 160) ?? "undefined"}) — ` +
@@ -289,16 +193,8 @@ try {
     if (ids.length > 0) {
       liveIds = new Set(ids);
     } else {
-      // STRICT on purpose. The pinned binary reports its whole catalog with no
-      // credentials, so `data: []` is not "nothing to report" — it CONTRADICTS
-      // every curated id at once, and there is no reading of it under which the
-      // comparison below has done its job. Passing here would leave the gate
-      // green forever while checking nothing, which is the exact failure this
-      // section exists to prevent.
-      //
-      // The one benign cause is codex starting to require auth for `model/list`.
-      // That is a real change, and worth one red build: fix it by giving this
-      // step a credential, not by softening this back to a skip.
+      // An empty credential-free catalog verifies no curated IDs and must fail.
+      // If the provider starts requiring auth, qualify that change explicitly.
       problems.push(
         "model/list returned an empty list. The pinned binary is expected to report its " +
           "catalog WITHOUT credentials, so this contradicts every curated id at once rather " +
@@ -308,23 +204,14 @@ try {
     }
   }
 } catch (err) {
-  // Inconclusive, not failed: an unreachable model/list must not turn CI red on
-  // every curated model at once. Same discipline as models-verify's
-  // MIN_PLAUSIBLE_IDS guard — report the scan is broken, don't report 4 removals.
-  //
-  // This is the ONLY skip left, and the asymmetry is deliberate: a request that
-  // never landed is a blip, while one that ANSWERED is held to its answer (both
-  // branches above are hard failures). Do not "even these out".
+  // An unreachable request is inconclusive; a received answer must satisfy the
+  // shape and nonempty checks above. Do not report every model as retired.
   console.log(
     `▸ models:   model/list unavailable (${String(err?.message ?? err).slice(0, 90)}) — id check SKIPPED`,
   );
 }
 
-// UNCONDITIONAL, and deliberately not an `else` arm of the check below: an empty
-// curated list means the comparison compares nothing no matter what model/list
-// answered. Guarded on `!liveIds` this could only fire when the check had ALREADY
-// been skipped — so the normal case (model/list healthy, `families.codex` emptied
-// or its `value` key renamed) printed an id count and exited 0.
+// Empty curated input is a failure even when the live catalog is healthy.
 if (curatedCodex?.length === 0) {
   problems.push(
     "catalogs/models-v1.json lists no codex models — the id check ran against nothing.",
@@ -359,7 +246,7 @@ try {
 try {
   fs.rmSync(cwd, { recursive: true, force: true });
 } catch {
-  /* temp dir */
+  /* A cleanup failure must not replace the probe verdict. */
 }
 
 if (problems.length > 0) {

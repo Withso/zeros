@@ -1,46 +1,9 @@
 #!/usr/bin/env node
-// ──────────────────────────────────────────────────────────
-// stage-claude-cli — put the Claude Code CLI where the packaged app can run it
-// ──────────────────────────────────────────────────────────
-//
-// `@anthropic-ai/claude-agent-sdk` ships NO cli.js. The real `claude` executable
-// lives in a platform-specific OPTIONAL dependency
-// (`@anthropic-ai/claude-agent-sdk-<platform>-<arch>`, ~245 MiB), which pnpm
-// links as a SIBLING of sdk.mjs inside the virtual store
-// (`.pnpm/@anthropic-ai+claude-agent-sdk@<v>/node_modules/@anthropic-ai/…`) and
-// never hoists to the root `node_modules/@anthropic-ai/`. The SDK finds it with
-// `createRequire(sdk.mjs).resolve('<pkg>/claude')`.
-//
-// That lookup is IMPOSSIBLE in the packaged app: the engine is a
-// `bun build --compile` single-file binary (scripts/build-sidecar.mjs), so
-// sdk.mjs is bundled in, `import.meta.url` points into bun's `$bunfs`, and there
-// is no node_modules on disk to walk. The SDK then throws
-// "Native CLI binary for darwin-arm64 not found …", which surfaces to the user
-// as "AGENT RESPONSE FAILURE" on every send. In dev the engine is
-// `bun <repo>/apps/desktop/src/cli.ts`, sdk.mjs is a real file, and the lookup succeeds —
-// which is exactly why this only ever broke Beta and Production.
-//
-// So we stage the binary to a STABLE, version-free path that
-// electron-builder.yml can name literally:
-//
-//   binaries/claude                  → Contents/Resources/claude
-//   binaries/claude-cli-version.txt  → Contents/Resources/claude-cli-version.txt
-//
-// apps/desktop/electron/sidecar.ts then hands both to the engine as ZEROS_CLAUDE_CLI_PATH /
-// ZEROS_CLAUDE_CLI_VERSION, the same handoff shape as the PTY and Cursor hosts'
-// ZEROS_*_HOST_SCRIPT. `binaries/` is gitignored and already the home of the
-// bun-compiled engine, so this adds no new packaging concept.
-//
-// A HARDLINK is used when possible: same filesystem, so it is instant and costs
-// no extra disk. electron-builder dereferences it when copying into the .app, so
-// exactly one 245 MiB copy ships (electron-builder.yml `files:` excludes the
-// platform package from app.asar so it can't ship twice).
-//
-// FAILS LOUD. A build with no Claude runtime is the precise defect this script
-// exists to prevent, and it is invisible until a user sends a message.
-//
-// Run: `pnpm stage:claude-cli` (also invoked from scripts/electron-before-pack.cjs).
-// ──────────────────────────────────────────────────────────
+// A Bun-compiled engine cannot resolve the SDK's native CLI beside sdk.mjs.
+// Stage the platform executable and version at fixed extraResources paths;
+// the sidecar passes them through ZEROS_CLAUDE_CLI_PATH / ZEROS_CLAUDE_CLI_VERSION.
+// Prefer hardlinks to avoid a second staging copy; electron-builder copies the
+// runtime into the app and excludes its platform package from app.asar.
 
 import { createRequire } from "node:module";
 import {
@@ -111,10 +74,8 @@ export function resolveClaudeCliSource() {
   );
 }
 
-/** claude-code version the staged binary implements, read from the SDK's
- *  manifest.json (`version`) / package.json (`claudeCodeVersion`). The engine
- *  cannot read this itself in a packaged build (registry.ts's require.resolve
- *  fails in the compiled binary), so we bake it into a sibling file. */
+/** The compiled engine cannot read the SDK manifest, so ship its CLI version
+ * beside the staged executable. */
 export function readClaudeCodeVersion(sdkMain) {
   let dir = dirname(sdkMain);
   for (let i = 0; i < 6; i++) {
@@ -155,8 +116,7 @@ export function stageClaudeCli({ quiet = false } = {}) {
 
   const dest = join(repoRoot, STAGED_BINARY);
   mkdirSync(dirname(dest), { recursive: true });
-  // Idempotent: a stale hardlink from a previous SDK version would silently ship
-  // the WRONG claude-code, so always replace rather than reuse.
+  // Replace old hardlinks so an SDK upgrade cannot stage the previous binary.
   rmSync(dest, { force: true });
   let how;
   try {
@@ -173,8 +133,7 @@ export function stageClaudeCli({ quiet = false } = {}) {
 
   const version = readClaudeCodeVersion(sdkMain);
   const versionDest = join(repoRoot, STAGED_VERSION_FILE);
-  // Always (re)write, including the unknown case: a stale version file from a
-  // previous SDK would mis-report the runtime in Settings → Agent providers.
+  // Rewrite unknown versions too; stale metadata would misidentify the shipped runtime.
   writeFileSync(versionDest, `${version ?? ""}\n`, "utf8");
 
   const mib = (srcStat.size / 1024 / 1024).toFixed(1);
@@ -182,8 +141,7 @@ export function stageClaudeCli({ quiet = false } = {}) {
     `[stage-claude-cli] ${how} ${pkg} → ${STAGED_BINARY} (${mib} MiB, claude-code ${version ?? "unknown"})`,
   );
   if (!version) {
-    // Not fatal — the binary is what matters — but it degrades the version
-    // surface, so make it visible rather than silently shipping "unknown".
+    // Missing version metadata must remain visible even when the binary stages successfully.
     console.warn(
       `[stage-claude-cli] WARNING: could not read claudeCodeVersion from the SDK ` +
         `manifest near ${sdkMain}; Settings → Agent providers will show no ` +
@@ -193,7 +151,6 @@ export function stageClaudeCli({ quiet = false } = {}) {
   return { dest, versionDest, version, size: srcStat.size };
 }
 
-// Run as a script (not when imported by a check/test).
 if (process.argv[1] && resolve(process.argv[1]) === resolve(__filename)) {
   try {
     stageClaudeCli();
