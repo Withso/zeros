@@ -139,6 +139,36 @@ describe("Cursor idle manual compaction", () => {
     expect(f.events).toEqual([]);
   });
 
+  it("runs a prompt sent after Stop once the stopped summary unwinds, and a second Stop still cancels it", async () => {
+    const f = await setup(); const started = deferred<SdkRun>();
+    spies.summarize.mockReturnValueOnce(started.promise);
+    const compacting = f.adapter.compactContext({ sessionId: f.sessionId });
+    await vi.waitFor(() => expect(spies.summarize).toHaveBeenCalled());
+    const stopped = f.adapter.prompt({ sessionId: f.sessionId, prompt: [{ type: "text", text: "Stopped" }] }).catch(error => error);
+    await f.adapter.cancel({ sessionId: f.sessionId });
+    await expect(stopped).resolves.toMatchObject({ stopReason: "cancelled" });
+    const next = f.adapter.prompt({ sessionId: f.sessionId, prompt: [{ type: "text", text: "Next" }] }).catch(error => error);
+    const again = f.adapter.prompt({ sessionId: f.sessionId, prompt: [{ type: "text", text: "Again" }] }).catch(error => error);
+    let againSettled = false;
+    void again.then(() => { againSettled = true; });
+    try {
+      await new Promise<void>(resolve => setImmediate(resolve));
+      // The earlier Stop belongs to the earlier prompt; these wait for the
+      // stopped summary instead of inheriting its cancellation.
+      expect(againSettled).toBe(false);
+      expect(spies.send).not.toHaveBeenCalled();
+      await f.adapter.cancel({ sessionId: f.sessionId });
+      await expect(again).resolves.toMatchObject({ stopReason: "cancelled" });
+      await expect(next).resolves.toMatchObject({ stopReason: "cancelled" });
+      const following = f.adapter.prompt({ sessionId: f.sessionId, prompt: [{ type: "text", text: "Following" }] }).catch(error => error);
+      spies.send.mockResolvedValueOnce(promptRun());
+      started.resolve(run());
+      await compacting;
+      await expect(following).resolves.toMatchObject({ stopReason: "end_turn" });
+      expect(spies.send).toHaveBeenCalledOnce();
+    } finally { started.resolve(run()); await compacting; await next; await again; }
+  });
+
   it("admits a new prompt before a ghost settles and counts every remaining prompt for compaction", async () => {
     const f = await setup(); const ghostFinished = deferred<{ status: string }>();
     const nextStarted = deferred<SdkRun>(); const ghost = promptRun();

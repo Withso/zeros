@@ -25,6 +25,11 @@ use the isolated zeros-pr767 tree. The master reviews/pushes; the owner merges.
   Count in-flight prompts only for compaction admission; settling an older
   prompt must not clear a newer prompt's busy state. Regressions cover overlap,
   pending sends, configuration preparation, summary success/failure and Stop.
+- Master review caught a stale-Stop race: a prompt sent after Stop, while the
+  stopped summary was still unwinding, saw that Stop's aborted signal and
+  `cancelRequested` and returned cancelled without sending. Scope Stop to the
+  waiters present when it fires (Stop renews the wait signal) and never read
+  session-wide `cancelRequested` as this prompt's Stop.
 - A published compaction row must settle before disposal fences its emitter.
   Flush unconfirmed rows as failed before marking the session retired; late
   native completion cannot change them. Tests cover session and adapter disposal

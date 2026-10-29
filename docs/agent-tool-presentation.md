@@ -210,7 +210,8 @@ while any prompt is preparing or unsettled, or another compaction is running;
 that refusal does not abort existing work. A prompt submitted during manual
 compaction waits for its success or failure, then runs normally. Stop cancels
 that wait before the prompt can send, even while native summarization is still
-starting. Prompt admission stays with the engine: an earlier ghost prompt must
+starting. A Stop applies only to prompts already waiting: a prompt sent while the
+stopped summary unwinds waits for it, then runs. Prompt admission stays with the engine: an earlier ghost prompt must
 not prevent a newly admitted prompt from running. Disposal settles an already
 published, unconfirmed compaction row as failed before fencing late events.
 Stop/disposal cancels a late summary run. No provider has a manual

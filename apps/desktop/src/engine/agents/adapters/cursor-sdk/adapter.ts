@@ -2411,7 +2411,9 @@ export class CursorSdkAdapter implements AgentAdapter {
         } finally { signal.removeEventListener("abort", stopWaiting); }
         // runPrompt resets cancelRequested. Observe Stop before entering it,
         // even if native summarize has not returned a cancellable run yet.
-        if (signal.aborted || session.cancelRequested || session.disposing || this.sessions.get(opts.sessionId) !== session) {
+        // Only this wait's signal counts: cancelRequested may still hold an
+        // earlier Stop that belonged to an earlier prompt.
+        if (signal.aborted || session.disposing || this.sessions.get(opts.sessionId) !== session) {
           return { stopReason: "cancelled", response: { stopReason: "cancelled" } };
         }
       }
@@ -3025,7 +3027,12 @@ export class CursorSdkAdapter implements AgentAdapter {
     const session = this.sessions.get(opts.sessionId);
     if (session) {
       session.cancelRequested = true;
-      session.compacting?.stop.abort();
+      // Release the prompts waiting now. A fresh signal keeps this Stop from
+      // cancelling prompts sent while the stopped summary unwinds.
+      if (session.compacting) {
+        session.compacting.stop.abort();
+        session.compacting.stop = new AbortController();
+      }
       session.preparingPrompt?.abort();
     }
     // Native cancel can finish after its run has settled and the user has

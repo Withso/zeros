@@ -129,6 +129,8 @@ pnpm --dir apps/control-plane cloud-v2:gate0 --local --runtime <runtime-sha256>
   runs in the shell's own directory, so its result describes a different tree.
   Put the `cd` inside each background job (`(cd X && a) & (cd X && b) & wait`)
   and confirm the tree in the evidence, for example by a scanned-file count.
+  Likewise create shared log directories before forking: a `mkdir` inside one
+  job races the other jobs' redirects, and the job that loses never runs.
 - A held runtime-updater PR qualifies only when its tested merge commit's base
   parent is the current `main`. After anything lands on `main`, merge `main`
   into that PR branch (never force-push the bot branch), rerun CI and wait for
