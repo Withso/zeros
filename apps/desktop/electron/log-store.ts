@@ -1,42 +1,5 @@
-// ──────────────────────────────────────────────────────────
-// Structured app log store (JSONL)
-// ──────────────────────────────────────────────────────────
-//
-// main.log stays the human-tailable plain-text mirror; THIS store is the
-// machine-readable one: every console line from the main process, the engine
-// sidecar (whose stdout/stderr already flow through main's console), and the
-// renderer (forwarded over the `log_submit` IPC command) lands here as one
-// JSON record per line in <logDir>/app.jsonl.
-//
-// The record shape is chosen so the everyday debugging habits keep working —
-// grep by tag / session id / origin, or paste a slice straight into an agent:
-//
-//   {"id":42,"origin":"frontend","level":"info","text":"…","tags":["…"],
-//    "clientTimestamp":"…","submittedAt":"…"}
-//
-//   origin          — which process produced it: "main" | "frontend" | "engine"
-//   clientTimestamp — when the producing process logged it
-//   submittedAt     — when this store wrote it (≠ clientTimestamp for
-//                     renderer batches, which arrive in coalesced bursts —
-//                     two stamps let you tell "logged late" from "sent late")
-//   id              — monotonic per-run sequence (restarts at each launch)
-//
-// Retention (the "how long are logs available" decision): the live file
-// rotates at 8 MB into app.jsonl.1 and ONE prior generation is kept — up to
-// ~16 MB of history, which in practice is hours-to-days of use and survives
-// app restarts (a run log parked in $TMPDIR would lose its history to temp
-// cleanup; disk under Logs/ is the more durable choice). Consecutive
-// identical lines are additionally coalesced into a single summary record (see
-// "Repeat coalescing" below) so a failure storm can't burn through both
-// generations and evict the useful history. The feedback export ("View" /
-// "Include recent app logs") reads the most recent ~1 MB and then, after
-// scrubbing, shares the last ~500k chars (see MAX_EXPORT_CHARS in
-// apps/desktop/electron/ipc/commands/logs.ts) — enough context to diagnose a session
-// without turning every report into a multi-megabyte upload.
-//
-// This module deliberately has NO electron imports (dir is injected by
-// main.ts) so it stays unit-testable under plain vitest.
-// ──────────────────────────────────────────────────────────
+// app.jsonl retains source and arrival timestamps separately because renderer
+// batches may arrive late; rotation and coalescing bound persistent history.
 
 import fs from "node:fs";
 import os from "node:os";
@@ -69,20 +32,14 @@ export interface LogRecord extends LogRecordInput {
 const MAX_FILE_BYTES = 8 * 1024 * 1024;
 /** Cap a single record's text so one runaway line can't dominate the file. */
 const MAX_TEXT_CHARS = 10_000;
-/** Raw read-tail size pulled before scrubbing + the export cap are applied.
- *  Kept comfortably above MAX_EXPORT_CHARS (apps/desktop/electron/ipc/commands/logs.ts) so
- *  scrubbing has headroom and the shared export reliably reaches its ~500 KB
- *  ceiling. */
+/** Read beyond MAX_EXPORT_CHARS so scrubbing still leaves a useful export tail. */
 export const RECENT_LOG_BYTES = 1024 * 1024;
 
 const FILE_NAME = "app.jsonl";
 
 let logDir: string | null = null;
-// A raw fd + writeSync (not a WriteStream): every record is durably on disk
-// the moment appendLogRecord returns — load-bearing for CRASH diagnostics,
-// where a buffered stream would lose exactly the lines that matter. The
-// volume (console lines + 1 renderer batch/sec) makes the sync write cost
-// negligible.
+// Synchronous writes avoid losing crash diagnostics in a JS stream buffer;
+// suppressed repeat counts still wait for a flush.
 let fd: number | null = null;
 let bytesInFile = 0;
 let nextId = 1;
@@ -112,22 +69,8 @@ function rotateIfNeeded(): void {
   openFile();
 }
 
-// ── Repeat coalescing ─────────────────────────────────────
-//
-// During failure storms (engine respawn loops, IPC-rejection loops) the SAME
-// line is emitted thousands of times back-to-back; writing every copy is what
-// let a single storm chew through megabytes of log and evict the history that
-// would have explained it. So consecutive records with identical
-// origin+level+text collapse: the first occurrence is written normally,
-// subsequent identical copies only bump a counter, and when a DIFFERENT line
-// arrives (or flushLogStore() runs — feedback export / shutdown) one summary
-// record `"<text> [repeated N×]"` is written at the run's origin/level.
-//
-// Identity is deliberately origin+level+text only: args/tags/clientTimestamp
-// vary per copy but carry no extra debugging signal for a storm line, and
-// comparing three fields keeps the hot path allocation-free. The decision is a
-// pure function (state in → decision + next state out) so vitest covers the
-// table without touching the filesystem (apps/desktop/electron/__tests__/log-coalesce.test.ts).
+// Coalesce by origin/level/text so failure storms do not evict useful history;
+// varying tags, arguments and timestamps must not split identical runs.
 
 export interface RepeatRun {
   origin: LogOrigin;
@@ -174,10 +117,7 @@ export function coalesceRepeat(
   };
 }
 
-/** One-line stand-in for a run's suppressed copies. N counts the SUPPRESSED
- *  copies — the first occurrence was already written normally, so a line seen
- *  5 times reads as the original plus `"… [repeated 4×]"`. Pure — exported
- *  for tests. */
+/** Count only suppressed copies: five occurrences are one row plus repeated 4×. */
 export function formatRepeatSummary(text: string, count: number): string {
   return `${text} [repeated ${count}×]`;
 }
@@ -235,10 +175,8 @@ function writeRecord(input: LogRecordInput): void {
   rotateIfNeeded();
 }
 
-/** Append one structured record. Best-effort and re-entrancy-safe: never
- *  throws, never calls console.* (main's console is patched to call US).
- *  Consecutive identical lines are coalesced — see "Repeat coalescing" above —
- *  so a suppressed copy returns without touching the disk. */
+/** Never throw or call console: main's patched console routes back here.
+ * Suppressed repeats stay buffered until flush. */
 export function appendLogRecord(input: LogRecordInput): void {
   if (fd === null || !logDir) return;
   try {
@@ -271,12 +209,8 @@ export function appendLogRecord(input: LogRecordInput): void {
   }
 }
 
-/** Write out any buffered repeat summary NOW. Called where a coalesced run in
- *  progress must become visible: before the feedback export reads the tail
- *  (readRecentLogs) and at shutdown (main.ts before-quit) — otherwise the
- *  storm's final count would sit in memory and die with the process. The run
- *  identity survives the flush (count resets to 0), so an ongoing storm keeps
- *  coalescing afterwards and simply emits another summary later. */
+/** Export and shutdown must flush the final repeat count; retain the run's
+ * identity so an ongoing storm continues coalescing afterwards. */
 export function flushLogStore(): void {
   if (fd === null || !logDir) return;
   const run = repeatRun;
@@ -340,13 +274,8 @@ export function readRecentLogs(maxBytes: number = RECENT_LOG_BYTES): string {
  *  scrubs the content first so the viewed file matches, byte for byte, what a
  *  feedback submission would share — no surprises after the fact. */
 export function exportLogsToTemp(content: string): string {
-  // SECURITY: the name used to be `zeros-feedback-logs-${Date.now()}.jsonl`
-  // directly in the shared temp dir — fully predictable, so another local
-  // account could pre-create that path as a symlink and redirect this write
-  // (CodeQL js/insecure-temporary-file). mkdtempSync creates a 0700 directory
-  // with an unguessable suffix and fails outright if it already exists, so the
-  // file inside it cannot be pre-planted. The timestamp stays in the filename
-  // because it is what makes successive exports readable to a human.
+  // A private, unique directory prevents another account pre-planting a symlink
+  // at the timestamped export path.
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "zeros-feedback-"));
   const file = path.join(dir, `zeros-feedback-logs-${Date.now()}.jsonl`);
   fs.writeFileSync(file, content, { encoding: "utf8", mode: 0o600 });

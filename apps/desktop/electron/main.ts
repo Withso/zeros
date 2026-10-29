@@ -20,28 +20,6 @@ import { rendererProcessOwners } from "./renderer-process-owners";
 import { startElectronDesignCapture } from "./design-capture";
 import { setDesignCaptureEnvironment } from "./sidecar";
 import type { DesignCaptureService } from "../src/engine/design/capture-service";
-// ──────────────────────────────────────────────────────────
-// Zeros Electron — main process entry
-// ──────────────────────────────────────────────────────────
-//
-// Boot sequence:
-//   1. registerIpcHandlers()         — install the `zeros:invoke` router
-//   2. registerAllCommands()         — wire implemented commands
-//   3. start PATH/engine/watchdog    — background, shared single-flight promise
-//   4. createMainWindow()            — immediate BrowserWindow + preload
-//   5. start updater                 — process-owned background service
-//
-// Shutdown:
-//   - app.on("before-quit") → shutdown() kills the engine child,
-//     stops the watchdog, clears state. Without this the Node
-//     process outlives the window and holds port 24193.
-//
-// Window geometry migrated from the legacy native config:
-//   1600x1000 default, 1200x700 min, hidden-inset title bar so app
-//   content extends under the traffic lights.
-// ──────────────────────────────────────────────────────────
-
-// The build banner owns early boot diagnostics in a private per-process file.
 
 import {
   app,
@@ -220,9 +198,6 @@ registerFileMediaProtocolPrivileges();
 // engine + db/paths.ts resolve the SAME channel.
 declare const __ZEROS_CHANNEL_BAKED__: string | undefined;
 
-// ──────────────────────────────────────────────────────────
-// Per-worktree dev instance identity (ZEROS_INSTANCE)
-// ──────────────────────────────────────────────────────────
 // scripts/dev-instance.mjs derives ONE name from the git worktree (or an
 // explicit $ZEROS_INSTANCE) and exports it so a `pnpm electron:dev` in each
 // git worktree is its OWN app — distinct name, userData, Chromium cache,
@@ -252,26 +227,9 @@ const INSTANCE_NAME =
   (process.env.ZEROS_INSTANCE_NAME ?? "").trim() ||
   (INSTANCE_SLUG ? `zeros-${INSTANCE_SLUG}` : "");
 
-// ──────────────────────────────────────────────────────────
-// Dev / prod separation  +  ONE application identity (the crux)
-// ──────────────────────────────────────────────────────────
-// `pnpm electron:dev` runs an unpackaged app; it must behave like a distinct
-// "Zeros Dev" application so it never shares state with a packaged
-// /Applications/Zeros.app. This block establishes the SINGLE identity that drives
-// EVERYTHING for this (channel, instance) — the engine DB, Electron's userData
-// (secrets.json + app-settings.json + the Chromium Singleton lock), the Chromium
-// cache, and the logs — all under ONE reverse-DNS id: com.zeros[.dev|.beta][.<slug>].
-// This ends the historical 3-way split (com.zeros.* DB vs name-based
-// "Zeros — <Label>" userData/secrets/keychain vs design.zeros.app.* caches).
-//
-// It must run BEFORE anything reads app.getName()/app.getPath("userData") — deep
-// link setup, log init, window construction — and before app.ready.
-//
-// ORDER IS LOAD-BEARING (must precede the first zerosDataDir()/appIdentity() call,
-// since those resolve channel()+devInstanceSlug() from these env vars):
-//   1. ZEROS_DEV      — so isDevRuntime()/channel() resolve dev
-//   2. ZEROS_CHANNEL  — so channel() resolves before any data-dir call
-//   3. THEN compute identity from zerosDataDir()/appIdentity()
+// Seed ZEROS_DEV, then ZEROS_CHANNEL, before resolving appIdentity/zerosDataDir
+// or reading app name/userData. One channel-and-instance identity keeps engine,
+// Electron storage, cache and singleton locks isolated across launches.
 const explicitDevEnv =
   process.env.ZEROS_DEV === "1" || process.env.ZEROS_RUNTIME_MODE === "dev";
 const runningDev = IS_DEV || explicitDevEnv;
@@ -397,33 +355,10 @@ if (
   process.env.ZEROS_SHARED_SECRETS_DIR = zerosChannelDataDir();
 }
 
-// ──────────────────────────────────────────────────────────
 // Chromium cache → ~/Library/Caches (macOS-correct, purgeable)
-// ──────────────────────────────────────────────────────────
-// Electron parks Chromium's ENTIRE session profile — the HTTP `Cache`,
-// the V8 `Code Cache`, `GPUCache`/Dawn shader caches, plus Local
-// Storage / IndexedDB / Cookies — under `sessionData`, which itself
-// defaults to `userData` (= ~/Library/Application Support/<app>). That
-// strands hundreds of MB of *regenerable* cache in the backed-up,
-// never-purged location: Time Machine copies it, iCloud/migration
-// drags it along, and macOS never reclaims it under disk pressure.
-//
-// macOS intends ~/Library/Caches/<id> for exactly this — auto-excluded
-// from Time Machine, evicted by the OS when disk is low. A Tauri/WebKit
-// app gets this split for free; Electron does not unless we redirect,
-// because Chromium ignores app.getPath("cache").
-//
-// We move the whole session profile there. Safe because: our Local
-// Storage is an engine-backed boot cache (loss = slower cold start, not
-// data loss); secrets live in <userData>/secrets.json (written via
-// getPath("userData"), untouched here); and the engine's zeros.db
-// resolves its own path (com.zeros), independent of sessionData.
-//
-// To avoid a one-time loss of renderer state that is NOT engine-backed
-// (composer drafts, theme, UI state) we copy the durable storage
-// subdirs old→new once, then reclaim the orphaned cache dirs so the
-// ~430 MB is actually freed for existing installs. Marker-guarded and
-// idempotent. Must run before app.whenReady().
+// Chromium ignores app.getPath("cache"); redirect sessionData before ready so
+// regenerable data uses the OS cache location. Migrate durable renderer stores
+// before reclaiming old caches; secrets and the engine DB use separate paths.
 function relocateChromiumCache(): void {
   // Bound the HTTP disk cache so it can't grow without limit (250 MB).
   app.commandLine.appendSwitch("disk-cache-size", String(250 * 1024 * 1024));
@@ -568,15 +503,8 @@ function setupLogFile(): void {
   // and what its View button opens.
   initLogStore(logDir);
   const logPath = path.join(logDir, "main.log");
-  // Rotation: an append-only log can't be allowed to grow without bound, and a
-  // boot-time check alone provably isn't enough — the primary main.log reached
-  // 29 MB / 305k lines during ONE engine-respawn storm, i.e. entirely within a
-  // single session, which is both unreadable and unshippable in a bug report.
-  // So the cap is enforced twice (keeping ONE previous generation, main.log.1,
-  // each time — same policy as log-store.ts rotateIfNeeded):
-  //   • at boot, below — reclaims growth left over from prior sessions;
-  //   • mid-session, in safeWrite — bytes are counted through the write stream
-  //     and the file rolls the moment the count crosses the cap.
+  // Rotate during writes as well as boot: one failure storm can fill a log
+  // before the next launch. Keep one previous generation.
   const MAX_LOG_BYTES = 8 * 1024 * 1024;
   let logBytes = 0;
   try {
@@ -754,16 +682,8 @@ const appDocument = appDocumentPolicy({ ...(isDev ? { devUrl: DEV_URL } : {}), d
 const isAppDocumentUrl = appDocument.isDocument;
 
 function createMainWindow(): BrowserWindow {
-  // Durable theme mode (userData appearance.json — see ipc/commands/window.ts).
-  // Two consumers on the create path:
-  //   1. nativeTheme.themeSource — native context menus/dialogs follow the APP
-  //      polarity from the first frame. Preserve "system" so the renderer's
-  //      matchMedia-based resolution keeps seeing real OS flips. Left untouched
-  //      on a fresh install (null) — the renderer reports its mode right after
-  //      boot.
-  //   2. additionalArguments — hands the mode to the preload, which exposes it
-  //      to the page so the index.html pre-paint stamp and the appearance store
-  //      can restore the theme when the Caches-backed localStorage was purged.
+  // Restore native polarity before first paint and pass it to preload when
+  // cache-backed localStorage is gone. Preserve "system" so OS changes still flow.
   const persistedMode = readPersistedAppearanceMode();
   if (persistedMode && nativeTheme.themeSource !== persistedMode) {
     nativeTheme.themeSource = persistedMode;
@@ -789,14 +709,8 @@ function createMainWindow(): BrowserWindow {
     width: restoredBounds?.width ?? 1600,
     height: restoredBounds?.height ?? 1000,
     ...(restoredPosition ?? {}),
-    // minWidth keeps all three primary surfaces visible at the floor:
-    //   app sidebar: 256 px default, capped at 100vw − 580 px
-    //     (renderer/shell/app-sidebar.tsx), so 260 px at this floor
-    //   conversation: 360 px hard min (renderer/shell/conversation/conversation-pane.tsx)
-    //   workbench: 200 px hard min (renderer/shell/workbench/workbench-pane.tsx)
-    //   sum: 816 px + seams and breathing room → 840.
-    // The constants live in window-state.ts so the restored-size clamp
-    // and the live window floor can never disagree.
+    // Share the floor with restored-size clamping so sidebar, conversation and
+    // workbench minima cannot disagree with the live window.
     minWidth: MAIN_WINDOW_MIN_WIDTH,
     minHeight: MAIN_WINDOW_MIN_HEIGHT,
     // Window title carries the per-worktree label (or channel name) so users can
@@ -839,14 +753,8 @@ function createMainWindow(): BrowserWindow {
   // blocking Chromium's input queue. Browser-only canvases still cancel wheel.
   void win.webContents.setVisualZoomLevelLimits(1, 1);
 
-  // Finish the reopen-as-closed restore: the discrete states can't be
-  // constructor options. macOS fullscreen (the green button / its own
-  // Space) wins over maximized (title-bar double-click zoom) — both
-  // flags can be true in a stale file, and fullscreen is the one the
-  // user last SAW. Then keep the state file current for this window's
-  // whole life (debounced on resize/move, immediate on state flips and
-  // close), so the NEXT launch — including the macOS dock-activate
-  // reopen, which also runs createMainWindow — picks it up.
+  // Fullscreen cannot be a constructor option and takes precedence over a
+  // stale maximized flag; persist later changes for Dock reopen as well as launch.
   if (windowState?.fullScreen) win.setFullScreen(true);
   else if (windowState?.maximized) win.maximize();
   attachWindowStatePersistence(win, app.getPath("userData"));
@@ -888,13 +796,9 @@ function createMainWindow(): BrowserWindow {
     if (externalUrl) void shell.openExternal(externalUrl);
   });
 
-  // CSP for the app's OWN document (packaged file:// only — the dev server needs
-  // eval/inline/ws for HMR, and is the developer's own machine). Permissive on
-  // script/style/connect-to-https so the Vite bundle, inline styles, the control plane,
-  // PostHog and the relay all keep working, but locks the sinks an XSS would
-  // reach for: no <object>/<embed>, no <base> hijack, no framing of the app, no
-  // plain-http/data: exfil channel. Low-risk hardening layered under sandbox +
-  // contextIsolation + the preload allowlist.
+  // Packaged-document CSP supplements the sandbox and preload allowlist; dev
+  // keeps Vite's HMR requirements. Deny object/base/framing sinks while retaining
+  // the app's declared media, preview and service origins.
   const CSP = [
       "default-src 'self'",
       "script-src 'self' 'wasm-unsafe-eval' 'unsafe-inline'",
@@ -923,19 +827,8 @@ function createMainWindow(): BrowserWindow {
   // old block did buy and how to re-gate Production deliberately if wanted.
   installDevToolsGuard(win);
 
-  // 2026-05-28: swallow Cmd+R / Cmd+Shift+R / F5 at the BrowserWindow
-  // level. Removing the menu items in apps/desktop/electron/menu.ts blocks the
-  // application menu's accelerators, but Chromium itself still
-  // honours these keystrokes by default — the user would still see
-  // their session disappear if they happened to press Cmd+R. We have
-  // no use case for a renderer-only reload; auto-updates restart the
-  // whole app, which is the canonical fresh-state flow.
-  //
-  // 2026-07-14: plain Cmd+R (no shift/alt) is REPURPOSED as the "run the
-  // default run action" shortcut. Chromium's reload stays swallowed
-  // (preventDefault keeps the event from the page too); the keystroke is
-  // forwarded to the renderer as a zeros event instead — the run control
-  // subscribes via nativeListen("run-shortcut"). Cmd+Shift+R / F5 stay dead.
+  // Chromium reload shortcuts remain active even without menu items. Suppress
+  // them here; the unmodified primary R chord emits run-shortcut instead.
   win.webContents.on("before-input-event", (event, input) => {
     if (input.type !== "keyDown") return;
     const key = input.key.toLowerCase();
@@ -957,17 +850,8 @@ function createMainWindow(): BrowserWindow {
   });
 
   if (isDev) {
-    // The dev renderer is served by Vite on :5193. Vite restarts its
-    // dev server whenever vite.config.ts (or a config dependency)
-    // changes, and an active editing / parallel-agent session triggers
-    // that repeatedly. For the ~0.5–1.5 s the server is down, any
-    // navigation to DEV_URL fails with ERR_CONNECTION_REFUSED and the
-    // window is stranded on a blank black page. Cmd+R / F5 are
-    // intentionally swallowed above, so without an automatic retry the
-    // user has no way back short of quitting and relaunching — which is
-    // exactly the "goes black during development" failure we hit.
-    // Retry the load with capped backoff until Vite answers again so
-    // the renderer self-heals across every restart.
+    // Vite restarts can strand a navigation on ERR_CONNECTION_REFUSED; reload
+    // shortcuts are suppressed, so retry with capped backoff until it returns.
     let devReloadTimer: ReturnType<typeof setTimeout> | null = null;
     let devReloadDelay = 250;
     const DEV_RELOAD_MAX_DELAY = 2000;
@@ -1084,28 +968,9 @@ function createMainWindow(): BrowserWindow {
 // zeros:// URLs get dropped).
 setupDeepLink();
 
-// ──────────────────────────────────────────────────────────
-// Dock icon — force the .icns onto the running app's dock tile (DEV ONLY)
-// ──────────────────────────────────────────────────────────
-// A packaged build must NOT touch its own Dock tile. macOS 26 (Tahoe) draws a
-// bundle icon it resolved ITSELF with the full Liquid Glass treatment — the
-// specular rim + bevel that every other app in the Dock has. An image pushed in at
-// runtime via app.dock.setIcon() is blitted as raw pixels instead, with none of
-// that, so the tile reads visibly flat next to its neighbours. Verified on 26.3.1
-// against a live app: same bundle, same .icns, rim before the call, no rim after.
-//
-// Dev is the exception, and only because its bundle PATH is reused across runs
-// (~/.zeros-dev/dev-instances/*.app, plus node_modules' Electron.app for the
-// primary checkout). macOS caches Dock icons per bundle path, so a re-stamped
-// electron.icns can keep showing the old pixels. A packaged bundle doesn't have
-// that problem — and setIcon was in fact a silent no-op there for months (it
-// joined a "../../Resources" path that has never existed) with nobody ever
-// reporting a stale packaged icon.
-//
-// The snag: nativeImage.createFromPath() can't decode .icns (returns empty). So we
-// read the .icns ourselves and pull out its largest embedded PNG representation
-// (iconutil stores the 128–1024px reps as PNG) — the SAME pixels as the bundle
-// icon, so there's no visible "transform" and no separate .png file to keep in sync.
+// setIcon bypasses macOS's bundle-icon treatment, so packaged builds leave the
+// Dock tile alone. Dev reuses bundle paths and must refresh cached pixels;
+// nativeImage cannot decode .icns, so extract its embedded PNG.
 
 /** Extract the largest PNG-encoded representation from an .icns, or null. An icns
  *  is 'icns' + total-len, then a series of TypeCode(4) + len(4) + data chunks;
@@ -2018,16 +1883,6 @@ app.on("before-quit", (event) => {
   agentControlRuntime = null;
   setAgentControlServiceEnvironment(null);
   if (agentControl) void agentControl.stop().catch(() => {});
-  // Interactive PTYs are now engine-owned (apps/desktop/src/renderer/platform/pty.ts → engine bridge),
-  // and the engine reaps them on its own shutdown (Engine.stop → pty.killAll).
-  // Killing the sidecar above tears the engine down, so there are no
-  // renderer-process node-pty children left to reap here.
-  // The legacy agent-history SQLite handle (the retired electron/db.ts) is gone —
-  // chats + transcripts live in the engine's Zeros DB, which the engine closes.
-  //
-  // Last: write out any coalesced-repeat summary the log store is still
-  // holding (log-store.ts buffers runs of identical lines; if the app quits
-  // mid-storm the final count exists only in memory). After the sidecar
-  // shutdown lines above, so this really is the tail of the file.
+  // Flush after sidecar shutdown so the final coalesced count reaches the log.
   flushLogStore();
 });
