@@ -1,61 +1,8 @@
 #!/usr/bin/env node
-// ──────────────────────────────────────────────────────────
-// Codex app-server protocol: TS bindings codegen
-// ──────────────────────────────────────────────────────────
-//
-// Why this exists
-// ───────────────
-//
-// Codex defines its JSON-RPC wire format in Rust (serde + ts-rs +
-// schemars derives on every protocol struct/enum). Until 2026-05-28
-// Zeros hand-transcribed those types into TypeScript at
-// `apps/desktop/src/engine/agents/adapters/codex/app-server.ts`. Every Codex bump
-// risked silent drift — and twice in three days we shipped wrong
-// casing for SandboxPolicy / SandboxMode that the server only
-// rejected at runtime. This script eliminates that bug class.
-//
-// What it does
-// ────────────
-//
-//   1. Read the pinned protocol version from
-//        package.json → "codexProtocolVersion".
-//   2. Check whether `apps/desktop/src/engine/agents/adapters/codex/generated/.version`
-//      already matches that pin. If yes, exit early — codegen output
-//      is committed, so a fresh `git pull` already has the right
-//      bindings and there's no reason to redo work.
-//   3. Otherwise, sparse-clone openai/codex@<tag> into
-//        .codex-protocol-cache/<version>/codex/
-//      (cached across runs; only the protocol crate is checked out).
-//   4. Run the official upstream TypeScript and JSON Schema generators into a
-//      sibling staging directory.
-//   5. Prune retired bindings, copy upstream notices, and write the version
-//      stamp in staging.
-//   6. Replace generated/ only after every preceding step succeeds.
-//
-// Failure modes
-// ─────────────
-//
-// Installed Codex package does not match the protocol pin → fail without
-//   touching generated/. Run `pnpm install` before regenerating.
-//
-// Network down → git can't fetch, returns non-zero. We re-throw so the build
-//   fails loudly; a cached checkout remains usable offline.
-//
-// `gh` / `git` not on PATH → unlikely (project README requires git),
-//   surface a clear message and exit non-zero.
-//
-// Usage
-// ─────
-//
-//   pnpm codegen:codex                  # one-shot regenerate
-//   pnpm codegen:codex --force          # ignore the version stamp
-//   pnpm codegen:codex --pin=0.135.0    # ad-hoc version override
-//
-// The script is chained directly into `build:engine`
-// (`node scripts/codegen-codex.mjs && tsup`), so a routine build picks
-// up bindings without anyone remembering to run it.
-//
-// ──────────────────────────────────────────────────────────
+// Generate from the pinned upstream wire definitions rather than transcribing
+// protocol types. Validate the installed CLI pin first, then stage generated
+// bindings, notices and version before replacing the committed tree.
+// A matching stamp skips regeneration; build:engine invokes this script.
 
 import { spawnSync } from "node:child_process";
 import { createRequire } from "node:module";
@@ -108,7 +55,6 @@ const REMOVED_REMOTE_CONTROL_PAIRING_METHODS = [
   `${REMOTE_CONTROL_PAIRING_METHOD_PREFIX}/status`,
 ];
 
-// ── flags ────────────────────────────────────────────────
 
 const args = process.argv.slice(2);
 const force = args.includes("--force");
@@ -117,7 +63,6 @@ const pinFlag = args
   .find((a) => a.startsWith("--pin="))
   ?.slice("--pin=".length);
 
-// ── helpers ──────────────────────────────────────────────
 
 function log(msg) {
   process.stderr.write(`[codegen-codex] ${msg}\n`);
@@ -191,7 +136,6 @@ function readStamp() {
   }
 }
 
-// ── steps ────────────────────────────────────────────────
 
 function ensureCache(version) {
   const versionDir = join(CACHE_ROOT, version);
@@ -216,9 +160,7 @@ function ensureCache(version) {
     cloneDir,
   ]);
 
-  // Restrict the checkout to just the Rust workspace — the rest of
-  // the upstream repo (npm packages, docs, etc.) is ~hundreds of MB
-  // we don't need.
+  // Sparse checkout avoids downloading unrelated upstream assets.
   run("git", ["sparse-checkout", "set", "codex-rs"], { cwd: cloneDir });
   return cloneDir;
 }
@@ -367,7 +309,6 @@ function pruneRetiredPairingBindings(generatedDir = GENERATED_DIR) {
   }
 }
 
-// ── main ─────────────────────────────────────────────────
 
 function main() {
   if (pruneOnly) {
