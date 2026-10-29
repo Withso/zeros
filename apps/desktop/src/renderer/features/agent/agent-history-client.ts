@@ -1,17 +1,7 @@
-// ──────────────────────────────────────────────────────────
-// agent-history-client — chat + transcript access over the bridge
-// ──────────────────────────────────────────────────────────
-//
-// The engine's unified Zeros DB is the single source of truth for chats and
-// transcripts. This module is a thin typed shell over workspace-bridge.ts for
-// the desktop renderer and optional relay clients.
-// The engine persists agent + user messages ON EMIT, so there is no renderer
-// write path for transcripts.
-//
-// Per-client UI state (scroll offsets, plan snapshots, policies) lives in
-// device-local.ts, not here. Attachments use the workspace bridge's validated
-// context-graph writer, with a native fallback during bridge startup.
-// ──────────────────────────────────────────────────────────
+// Typed chat and transcript access over workspace-bridge.ts. The engine's Zeros
+// DB is the single source of truth and persists messages on emit, so there is no
+// renderer write path for transcripts. Per-client UI state lives in
+// device-local.ts.
 
 import { nativeInvoke } from "../../platform/runtime";
 import {
@@ -237,21 +227,12 @@ export interface LoadedTranscript {
   complete: boolean;
 }
 
-/** A chat's persisted transcript, oldest-first — for "copy transcript", which
- *  must not silently stop at the renderer's window.
- *
- *  Neither in-memory source is usable here: a background tab's slot may be
- *  empty (or hold exactly HYDRATE_WINDOW rows from the tab-hover prefetch,
- *  which looks complete but isn't), and even the active slot is capped at
- *  MAX_MESSAGES_PER_CHAT. So we page the engine.
- *
- *  Two deliberate properties of the walk:
- *   - It cursors on the RAW wire `msgId`, not a parsed message. Mapping
- *     through fromPersistedMessage first would let a page whose rows all fail
- *     to parse filter down to [] and read as "no more history".
- *   - Only an EMPTY page ends it. Treating a short page as the end would
- *     couple this to the engine's exact row clamp, so lowering that clamp
- *     would silently cap every copy in the app. Costs one extra round trip. */
+/** A chat's persisted transcript, oldest-first, for "copy transcript", which
+ *  must not stop at the renderer's window (a background slot may be empty or
+ *  hold only a prefetch window, and the active one is capped), so it pages the
+ *  engine. It cursors on the raw wire `msgId`, so a page whose rows all fail to
+ *  parse can't read as the end, and only an empty page ends the walk, so a
+ *  lower engine clamp can't silently cap every copy. */
 export async function loadFullTranscript(
   chatId: string,
 ): Promise<LoadedTranscript> {
@@ -273,20 +254,11 @@ export async function loadFullTranscript(
       pages.length >= TRANSCRIPT_MAX_PAGES ||
       chars >= TRANSCRIPT_CHAR_BUDGET
     ) {
-      // Hitting a bound is not the same as leaving history behind, and the
-      // difference is user-visible: `complete: false` is what turns an
-      // otherwise silent success into "Attached the most recent part of X —
-      // the full history was too large to read" and into the partial-copy
-      // toast. A tool-heavy chat can blow the 4 MB budget INSIDE its first
-      // page (one page is up to 1000 rows, and a single Read result can be
-      // 100 KB), and that chat is complete — every row of it is in hand.
-      //
-      // So ask, rather than assume, with the cheapest question available: one
-      // row older than the oldest we hold. `limit: 1` is below any clamp the
-      // engine might apply, so this stays uncoupled from TRANSCRIPT_PAGE, and
-      // an empty answer is the same proof-of-end the loop already relies on.
-      // Fetching another full page to find out would cost megabytes to learn
-      // one bit.
+      // Hitting the byte budget is not the same as leaving history behind, and the
+      // difference is user-visible (`complete: false` drives the partial-copy
+      // messages): one page of a tool-heavy chat can exceed 4 MB while the chat is
+      // complete. So ask for one row older than the oldest held; `limit: 1` stays
+      // below any engine clamp, and an empty answer is the same proof of end.
       complete = await noOlderThan(bridge, chatId, page[0].msgId);
       break;
     }
@@ -533,8 +505,6 @@ export async function readTextAttachment(args: {
 // There is deliberately NO remove counterpart: the context graph is
 // append-only from the app (context-graph-staging.ts) — a record leaves the
 // graph only when the user deletes it on disk.
-
-// ── Chat list (sidebar metadata) — engine-backed over the bridge ──────────
 
 /** Wire shape mirrors the engine chats row. The renderer translates to/from the
  *  in-memory ChatThread shape because store.tsx is the single source of truth on

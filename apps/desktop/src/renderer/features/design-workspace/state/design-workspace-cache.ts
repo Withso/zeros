@@ -3,14 +3,9 @@ import type { DesignMovementGuard } from "@zeros/protocol/design-relocation";
 import { normalizeDesignPagesSnapshot } from "@zeros/protocol/design-pages";
 import { forgetDesignLayerDisclosure } from "./design-layer-disclosure";
 import { rememberDesignDirectoryIdentity } from "../../../platform/bridge/design-bridge";
-// ──────────────────────────────────────────────────────────
-// Design workspace cache — exact workspace snapshot server state
-// ──────────────────────────────────────────────────────────
-//
-// Canvas, inspector, and the lower Layers panel consume one aggregate engine
-// response. Keeping it in a bounded keyed cache prevents those siblings from
-// issuing independent bridge requests and preserves the last confirmed canvas
-// while a disk edit revalidates in the background.
+// Canvas, inspector and the Layers panel consume one aggregate engine response.
+// A bounded keyed cache stops those siblings issuing independent bridge requests
+// and keeps the last confirmed canvas while a disk edit revalidates.
 
 import { designBackgroundWork } from "./design-background-work";
 import {

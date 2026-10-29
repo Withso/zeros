@@ -1,23 +1,8 @@
-// ──────────────────────────────────────────────────────────
-// Providers panel — Settings → Providers
-// ──────────────────────────────────────────────────────────
-//
-// One tab per coding agent. Connect opens Account / CLI / API choices, with
-// a single effective authentication method. Executable and existing gateway
-// overrides remain separate provider configuration.
-//
-// Reads/writes:
-//   - `provider-prefs:<agentId>` in the native settings store
-//     (auth method + path overrides; see provider-prefs.ts)
-//   - SECRET_ACCOUNTS.{OPENAI,ANTHROPIC}_API_KEY in the macOS
-//     keychain (apps/desktop/src/renderer/platform/secrets.ts)
-//   - Live agent registry via the bridge (`AGENT_LIST_AGENTS`)
-//
-// The auth-method preference is consumed at session spawn time —
-// see use-agent-session.tsx for the read path. CLI vs API key is
-// purely an env-injection difference; the engine always spawns
+// Settings → Providers: one tab per coding agent with a single effective auth
+// method. Writes `provider-prefs:<agentId>` (provider-prefs.ts) and the
+// keychain API keys (platform/secrets.ts); reads the live registry over the
+// bridge. CLI vs API key only changes env injection at spawn; the engine runs
 // the same headless subprocess either way.
-// ──────────────────────────────────────────────────────────
 
 import React, {
   useCallback,
@@ -312,12 +297,9 @@ function LocalProvidersPanel({ surfaceActive }: { surfaceActive: boolean }) {
     [bridge],
   );
 
-  // Stash the latest listAgents in a ref so the effects below don't
-  // re-bind every time its identity changes (which happened on every
-  // bridge state transition + every HMR remount, repeatedly clearing
-  // and re-scheduling the mount-time timer so it never fired). The
-  // ref lets us read the freshest callback from a single stable
-  // mount effect.
+  // Read listAgents through a ref so the mount effect never re-binds on identity
+  // changes; re-binding on every bridge transition and HMR remount kept clearing
+  // its timer before it fired.
   const listAgentsRef = useRef(listAgents);
   useEffect(() => {
     listAgentsRef.current = listAgents;
@@ -364,14 +346,9 @@ function LocalProvidersPanel({ surfaceActive }: { surfaceActive: boolean }) {
     };
   }, [visible]);
 
-  // Bridge-reconnect refresh. The mount-effect above fires once, and
-  // if the bridge isn't connected yet (engine still booting / mid-
-  // respawn after an `apps/desktop/src/engine/**` save), `listAgents` rejects and
-  // the cache enters its error state with `agents = []` — the panel
-  // then renders "Loading providers…" forever because nothing else
-  // re-fires the fetch. Mirroring empty-composer's pattern: when the
-  // bridge transitions disconnected → connected (initial connect OR
-  // engine-restarted handler's forceReconnect), invalidate + reload.
+  // Refetch on a disconnected → connected transition: a mount-time fetch against
+  // a booting or respawning engine rejects, and nothing else retries it, leaving
+  // "Loading providers…" forever.
   const bridgeStatus = useBridgeStatus();
   const lastBridgeStatusRef = useRef(bridgeStatus);
   useEffect(() => {
@@ -384,19 +361,10 @@ function LocalProvidersPanel({ surfaceActive }: { surfaceActive: boolean }) {
     }
   }, [bridgeStatus, visible]);
 
-  // ENGINE_READY refresh. The bridge-reconnect effect above fires on the
-  // *socket*-connected transition, which after an engine respawn (HMR /
-  // watchdog / crash) can land BEFORE the fresh engine can serve
-  // AGENT_LIST_AGENTS. That single attempt then fails (request dropped /
-  // times out against a not-yet-ready engine), and because bridgeStatus
-  // stays "connected" nothing re-fires — the panel sticks on "Loading
-  // providers…" until a manual refresh (the exact "all agents just keep
-  // loading, then I refreshed the registry and it came back" report).
-  // The engine sends ENGINE_READY once it can actually serve requests, on
-  // EVERY (re)connect — so reload then. We do NOT invalidate here: if the
-  // socket-connect attempt already succeeded the cache is fresh and this
-  // is a no-op; if it failed (lastLoadedAt stayed 0) this re-fetches
-  // against the now-ready engine and self-heals without user action.
+  // Also reload on ENGINE_READY: after a respawn the socket can connect before
+  // the new engine serves AGENT_LIST_AGENTS, and the status then stays
+  // "connected", so nothing else would retry. No invalidation, so a fresh cache
+  // makes this a no-op.
   useEffect(() => {
     if (!visible || !bridge) return;
     return bridge.on("ENGINE_READY", () => {
@@ -462,19 +430,9 @@ function ProviderTabs({
   activeId: string;
   onSelect: (id: string) => void;
 }) {
-  // Underline-tab pattern: parent owns the 1 px baseline; each button
-  // contributes a 2 px `border-b` that sits one pixel below its own
-  // box (negative margin) so the active foreground stripe visually
-  // overlaps the parent baseline. Inactive tabs use a transparent
-  // border so the parent's `border-border1` shows through unchanged.
-  //
-  // Scrollable + hidden scrollbar: the tab count may grow over time
-  // (more agents could land later) and at the settings-panel widths
-  // users see in practice the row overflows. Without `shrink-0
-  // whitespace-nowrap` on each tab the buttons were getting squashed
-  // and the two-word names ("Claude Code", "Cursor Agent") wrapped to
-  // a second line. Same scrollbar-hide pattern as the chat dropdown
-  // agent submenu.
+  // Underline tabs: each button's 2px `border-b` overlaps the parent's 1px
+  // baseline via a negative margin. The row scrolls with a hidden scrollbar, and
+  // `shrink-0 whitespace-nowrap` keeps two-word names from wrapping.
   return (
     <div
       role="tablist"
@@ -682,8 +640,6 @@ function ProviderCard({
     };
   }, [native, supportsApiKey, vendor, keySurfaceActive]);
 
-  // ── persistence helpers ────────────────────────────────
-
   const writePrefs = useCallback(
     (patch: Partial<ProviderPrefs>) => {
       const next: ProviderPrefs = { ...getProviderPrefs(agent.id), ...patch };
@@ -726,12 +682,9 @@ function ProviderCard({
     if (!trimmed) return; // Save is disabled when blank; Remove deletes.
     setSavingApiKey(true);
     try {
-      // Save-time validation: ask the engine to try ONE cheap authenticated
-      // call with this key (Cursor → models.list). A definitive rejection
-      // (401/403) blocks the save with the provider's own error, so the user
-      // learns "bad key" HERE instead of as a failed prompt later. An
-      // inconclusive result (no validator for this agent, engine unreachable,
-      // network error) saves normally.
+      // Validate the key with one cheap authenticated call before saving: a
+      // definitive 401/403 blocks the save with the provider's error; an inconclusive
+      // result (no validator, engine unreachable) saves normally.
       if (bridge) {
         try {
           const resp = await bridge.request<AgentKeyValidatedMessage>(
@@ -810,18 +763,10 @@ function ProviderCard({
     }
   };
 
-  // Run = install + login in one external-Terminal session. We chain
-  // them with `&&` so login only fires after a successful install,
-  // and so the just-installed binary is already on PATH (the same
-  // shell session keeps the npm-global / Homebrew prefix it was
-  // initialised with). When the agent has no login command, we send
-  // only the install line.
-  //
-  // Why external Terminal and not an inline spawn: install commands
-  // can prompt for sudo and the login flows are interactive (OAuth
-  // device codes, paste-token prompts, browser callbacks). The
-  // user's real Terminal handles all of that natively; an embedded
-  // PTY would have to replicate it.
+  // Install and login run chained with `&&` in one external Terminal session, so
+  // login runs only after a successful install with the new binary on PATH. Not
+  // an inline PTY: installs can prompt for sudo and logins are interactive (device
+  // codes, paste-token prompts, browser callbacks).
   const buildLoginLine = (): string | null => {
     if (!agent.authBinary) return null;
     const args = agent.loginArgs ?? [];
@@ -851,8 +796,6 @@ function ProviderCard({
     }
   };
 
-  // ── derived UI state ───────────────────────────────────
-
   const warmConnection = () => {
     if (
       !surfaceActive ||
@@ -868,13 +811,8 @@ function ProviderCard({
           shows the name + icon, and the live "Connected" state now lives on
           the connection block below (CLI mode). */}
 
-      {/* Install row — only when the CLI isn't on PATH. Run opens
-          the user's Terminal.app and chains the install + login in
-          a single session so the user only context-switches once
-          (the alternative — installing inline and then prompting
-          for login — was worse because login flows are interactive
-          and need a real TTY anyway). When the agent has no login
-          command we send only the install line. */}
+      {/* Install row, only when the CLI isn't on PATH; Run opens Terminal.app for
+          the chained install + login (see above). */}
       {!agent.installed && agent.installHint && (
         <SettingsSection
           title={

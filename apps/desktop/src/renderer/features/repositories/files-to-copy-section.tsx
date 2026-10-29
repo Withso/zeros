@@ -1,31 +1,9 @@
-// ──────────────────────────────────────────────────────────
-// Files to copy — the repo page's per-project seeding pane
-// ──────────────────────────────────────────────────────────
-//
-// A new workspace branches from the remote, so it holds TRACKED files only:
-// `.env`, local config and certificates are all missing and the project won't
-// run. This pane picks what rides along.
-//
-// It is deliberately a CHECKLIST first. The engine has already scanned the
-// repo by the time this paints, so the pane can show the real ignored files
-// instead of asking someone who has never written a `.gitignore` to type
-// `.env*` into an empty box and hope. The pattern editor sits underneath,
-// always visible, and both editors write the same setting.
-//
-// The list is a FOLDER TREE, closed by default. Flat, the same repo is two or
-// three real directories wearing two dozen rows (`lib/api-zod/node_modules/`,
-// `lib/db/node_modules/`, …) and the file you came to tick is buried in the
-// middle of them. One rule keeps closing safe: a selection is never invisible,
-// so a partly-ticked folder surfaces what is ticked inside it even while
-// closed — the row you ticked is the row you need to find again to untick.
-//
-// Scope is per-repo, full stop. "Which files does this project need" has no
-// sensible cross-project answer, so there is no global/per-project switch —
-// saving always writes this repo's own `.zeros/settings.local.toml`.
-//
-// All pattern/row/tree logic lives in files-to-copy-model.ts (pure,
-// unit-tested); this file is the wiring and the markup.
-// ──────────────────────────────────────────────────────────
+// The repo page's Files to copy pane. A new workspace holds tracked files only,
+// so `.env`, local config and certificates must ride along. It is a checklist
+// of the engine's real ignored files first, with the pattern editor always
+// visible below; both write the same per-repo `.zeros/settings.local.toml`
+// setting. The list is a folder tree, closed by default, where a selection is
+// never invisible. Pattern, row and tree logic lives in files-to-copy-model.ts.
 
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ChevronRight, Folder, Info, RotateCw } from "lucide-react";
@@ -155,9 +133,8 @@ export function FilesToCopySection({
     [],
   );
 
-  // ── preview ────────────────────────────────────────────
-  // The edit only enters the cache key after the user pauses. Keying on every
-  // keystroke would mint a cache entry (and a git scan) per character.
+  // The edit enters the cache key only after the user pauses; keying every
+  // keystroke would mint a cache entry and a git scan per character.
   const [debounced, setDebounced] = useState<string[] | null>(null);
   useEffect(() => {
     if (sameList(debounced, pending)) return;
@@ -214,7 +191,6 @@ export function FilesToCopySection({
   }, [root]);
   useSettingsChanged(onSettingsChanged);
 
-  // ── autosave (serialized, ScriptsSection pattern) ──────
   const latestRef = useRef(pending);
   latestRef.current = pending;
   const savingRef = useRef(false);
@@ -233,12 +209,10 @@ export function FilesToCopySection({
         const patterns = latestRef.current;
         if (patterns === null) break;
         try {
-          // The ARRAY is written even when empty. `null` would delete the key
-          // and hand the repo back to the built-in `.env*`, so "I unticked
-          // everything" would come back as "copy my .env" — the opposite of
-          // what was asked. Nothing here writes `null` any more: the "Reset to
-          // default" link that did was removed, so going back to the inherited
-          // default means deleting the key from `.zeros/settings.local.toml`.
+          // The array is written even when empty: `null` deletes the key and hands the
+          // repo back to the built-in `.env*`, so unticking everything would mean "copy
+          // my .env". Returning to the inherited default means deleting the key from
+          // `.zeros/settings.local.toml`.
           await writePatterns({ file_include_globs: patterns });
         } catch {
           toast.error("Couldn't save which files to copy");
@@ -260,11 +234,9 @@ export function FilesToCopySection({
     return () => window.clearTimeout(t);
   }, [pending, dirty, local.loading, saveLatest]);
 
-  // ── rows ───────────────────────────────────────────────
-  // Rows are built from the patterns the PREVIEW was computed from — the
-  // engine decided which files those select, and guessing here would show a
-  // selection that does not exist. The one exception is a box the user has
-  // just clicked, which applyDraftOverlay re-points below.
+  // Rows come from the patterns the preview was computed from, since the engine
+  // decided what they select; only a just-clicked box is re-pointed by
+  // applyDraftOverlay below.
   const previewedPatterns = useMemo(
     () => previewPatterns ?? savedGlobs ?? [],
     [previewPatterns, savedGlobs],
@@ -530,12 +502,10 @@ export function FilesToCopySection({
         </pre>
       )}
 
-      {/* The pattern editor, open. It used to sit behind an "Advanced —"
-          disclosure, which hid the box that answers "why is this file being
-          copied" from everyone who had not already guessed it was there.
-          Gated on a landed preview, not merely on `!readOnly`: while the
-          source is unknown the editor would accept typing that a committed
-          `.worktreeinclude` then silently outranks. */}
+      {/* The pattern editor stays open, since hiding it behind a disclosure hid
+          the box that answers "why is this file copied". Gated on a landed preview:
+          until the source is known, typing could be silently outranked by a
+          committed `.worktreeinclude`. */}
       {!!preview && !readOnly && (
         <div className="flex flex-col gap-2">
           <CodeTextarea

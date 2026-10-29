@@ -11,11 +11,6 @@ import {
   type ExistingInlineTextEdit,
   type InlineTextEdit,
 } from "./design-inline-text-editor";
-// ============================================
-// COMPONENT: DesignWorkspaceColumn
-// PURPOSE: Live HTML/CSS canvas and structured design inspector
-// USED IN: MainShellBody in place of the code workspace's Workbench
-// ============================================
 
 // --- IMPORTS ---
 
@@ -461,12 +456,6 @@ function useDelayedColdBusy(loading: boolean): boolean {
   }, [loading]);
   return visible;
 }
-
-// ============================================
-// COMPONENT: DesignCanvas
-// PURPOSE: Pan, zoom, select, create, move, resize, and rename
-// USED IN: DesignWorkspaceColumn
-// ============================================
 
 const DesignPreparingFrame = React.forwardRef<HTMLElement, React.ComponentPropsWithoutRef<"article">>(function DesignPreparingFrame(props, ref) {
   useLayoutEffect(() => retainDesignResource("frameSurfaces"), []);
@@ -5838,14 +5827,11 @@ export function DesignCanvas({
   useEffect(() => {
     if (!active) return;
     const keyDown = (event: KeyboardEvent) => {
-      // A held pointer gesture is modal, so it owns the keyboard for as long as
-      // it runs — wherever focus happens to sit, since a drag is as often
-      // started from a selection made in Layers as on the canvas. Escape aborts
-      // it; nothing else may retarget, delete, duplicate, or resize the element
-      // the pointer is still holding. Escape used to fall through to the
-      // selection stack instead, so a drag both jumped the selection to the
-      // parent — unmounting the overlay the gesture was painting — and
-      // committed anyway on release.
+      // A held pointer gesture is modal and owns the keyboard while it runs, wherever
+      // focus sits (a drag often starts from a Layers selection). Escape aborts it;
+      // nothing else may retarget, delete, duplicate or resize the held element. An
+      // Escape that reached the selection stack would unmount the overlay the gesture
+      // paints and still commit on release.
       if (gestureCancelRef.current) {
         if (event.key === "Escape") {
           event.preventDefault();
