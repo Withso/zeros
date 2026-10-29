@@ -27,6 +27,12 @@ where it is encoded.
   investigations, prototypes and pack changes now have playbooks
   (`feature.md`, `refactor.md`, `investigation.md`, `prototype.md`,
   `skill-eval.md`), and the loop's review step runs the comment pass first.
+- **A merge was armed past a CodeQL alert.** The token cannot read code
+  scanning, and one comments-only PR merged while its check said "1 new
+  alert": a relocated, unchanged line. Merges now gate on the CodeQL
+  check-run title. Recurring CI flakes and the slow UI-smoke shard are
+  recorded too, as is the displaced-doc-block check (`gotchas.md`,
+  `zstack-comments`).
 - **Two masters shared one workspace.** The co-master mode splits file
   ownership and worktrees, has one master arm every merge after reviewing the
   other's diff, and changes shared contracts only through explicit deltas

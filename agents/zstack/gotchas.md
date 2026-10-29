@@ -185,5 +185,16 @@ revision in the same checkout and compare failing test names.
 - Qualify a CLI by running the exact command advertised to agents from a task
   workspace (Node source, Bun source and the compiled executable); calling its
   handler misses dropped source entries and loaders.
+- `Remaining full suite / tests-ui-smoke (2/3)` often runs about 20 minutes; it
+  is not hung before about 30. Recurring infrastructure failures: Chromium
+  `page.screenshot` "Unable to capture screenshot", a ui-smoke
+  `design-frame-recovery` wait timeout, and `nodejs.org` ECONNRESET while
+  better-sqlite3 installs. Rerun only the failed jobs once the run completes,
+  and keep the original failure in the receipt.
+- This token cannot read the code-scanning API (403). Gate merges on the
+  `CodeQL` check run's title, "No new alerts in code changed by this pull
+  request". Otherwise read its annotations (`gh api
+  repos/Withso/zeros/check-runs/<id>/annotations`). A moved but unchanged line
+  can report as new, so confirm it against the base before arming.
 - Alpha's clock differs from this host by about 0.5 s. Compare time windows with
   documented bounds, never exact values.
