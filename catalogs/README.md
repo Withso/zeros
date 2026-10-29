@@ -88,7 +88,18 @@ the model ID and persisted aliases are unchanged.
 
 ## October 2026 qualification
 
-Catalog version 13 ships with Claude Agent SDK 0.3.309 / Claude Code 2.1.309,
+Catalog version 14 adds `gpt-6.1-terra` (GPT-6.1 Terra) immediately after
+GPT-6.1 Sol, qualified against pinned Codex 0.165.0 in both Local and cloud.
+Its bundled catalog and credential-free `model/list` advertise Low, Medium,
+High, Extra High, Max and native `ultra` (displayed as Ultra), plus the `fast`
+speed tier. Like Sol, its curated default is Max and it has no `minCliVersion`
+field; the native default for both is Low. Terra's initial context fallback is
+500,000 tokens, replaced by the runtime's confirmed context size when available.
+The shared renderer catalog supplies both placements, while cloud account
+availability comes from the existing model proxy. No alias, saved default,
+favorite or fallback target changes with this addition.
+
+Catalog version 13 qualified Claude Agent SDK 0.3.309 / Claude Code 2.1.309,
 Codex 0.164.0, and Cursor SDK 1.0.40. Existing saved defaults and persisted aliases
 remain unchanged. Version-specific `opus-5.5` and `sonnet-5.5` aliases resolve
 to their own model IDs. The new `haiku-5.5` alias resolves to `claude-haiku-5-5`;
@@ -97,6 +108,7 @@ to their own model IDs. The new `haiku-5.5` alias resolves to `claude-haiku-5-5`
 | Model                  | Effort controls                               | Fast |
 | ---------------------- | --------------------------------------------- | ---- |
 | GPT-6 Sol, GPT-6.1 Sol | Low, Medium, High, Extra High, Max, Ultra     | Yes  |
+| GPT-6.1 Terra          | Low, Medium, High, Extra High, Max, Ultra     | Yes  |
 | GPT-6 Luna             | Low, Medium, High, Extra High, Max            | Yes  |
 | Claude Opus 5.5        | Low, Medium, High, Extra High, Max, Ultracode | Yes  |
 | Claude Sonnet 5.5      | Low, Medium, High, Extra High, Max            | No   |

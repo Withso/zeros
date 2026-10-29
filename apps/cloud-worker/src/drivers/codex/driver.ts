@@ -11,7 +11,7 @@ import { JsonRpcProcess, RpcError } from "../shared/json-rpc-process";
 import { agentEnvironment } from "../shared/agent-environment";
 import { CodexEventMapper } from "./event-mapper";
 
-export const CODEX_VERSION = "0.164.0";
+export const CODEX_VERSION = "0.165.0";
 
 interface CodexOptions {
   /** Offline fixtures may replace the executable; production uses the pinned package. */
@@ -27,6 +27,9 @@ interface Turn {
   observed?: boolean;
   id?: string;
   model?: string;
+  effort: ReturnType<typeof codexEffort>;
+  fast: boolean;
+  settingsPending?: Promise<void>;
   stopping: boolean;
   ack: Promise<void>;
   acknowledge: () => void;
@@ -51,6 +54,7 @@ export class CodexDriver implements Driver {
   private nativeSessionId?: string;
   private model?: string;
   private effort?: ReturnType<typeof codexEffort>;
+  private fast = false;
   private active?: Turn;
   private lastTurnId?: string;
   private state: "new" | "opening" | "ready" | "closed" = "new";
@@ -68,6 +72,7 @@ export class CodexDriver implements Driver {
     this.input = input;
     this.model = input.model;
     this.effort = codexEffort(input.effort);
+    this.fast = input.fast === true;
     this.mapper = new CodexEventMapper({ sessionId: input.sessionId, resumed: !!input.nativeSessionId, emit: (event) => {
       // A configured proxy token must never escape through provider error text
       // or transcript metadata. Native stderr is not observed at all.
@@ -128,13 +133,14 @@ export class CodexDriver implements Driver {
     const promise = new Promise<PromptResponse>((yes, no) => { resolve = yes; reject = no; });
     const ack = new Promise<void>((yes) => { acknowledge = yes; });
     const done = new Promise<void>((yes) => { finish = yes; });
-    const turn: Turn = { model: this.model, stopping: false, promise, resolve, reject, ack, acknowledge, done, finish, buffered: [] };
+    const turn: Turn = { model: this.model, effort: this.effort, fast: this.fast, stopping: false, promise, resolve, reject, ack, acknowledge, done, finish, buffered: [] };
     this.active = turn;
     this.mapper!.startTurn();
     driverTiming(this.input, "turn_sent");
     void this.rpc!.request<{ turn: { id: string; status?: string } }>("turn/start", {
       threadId: this.nativeSessionId, input, ...(turn.model ? { model: turn.model } : {}),
       ...(this.effort ? { effort: this.effort } : {}),
+      serviceTierForTurn: this.fast ? "fast" : "default",
       // Match Local's complete default-mode settings. Omitting turn.effort
       // alone retains the previous thread override after a model change.
       ...(turn.model ? { collaborationMode: { mode: "default", settings: {
@@ -153,6 +159,7 @@ export class CodexDriver implements Driver {
       for (const frame of buffered) this.notification(frame.method, frame.params);
       if (this.active === turn && ["completed", "interrupted", "failed"].includes(response.turn.status ?? ""))
         this.notification("turn/completed", { threadId: this.nativeSessionId, turn: response.turn });
+      void this.syncActiveTurnSettings(turn);
     }).catch((error: unknown) => { if (this.active === turn) this.settle(this.error(error)); });
     return promise;
   }
@@ -175,10 +182,49 @@ export class CodexDriver implements Driver {
 
   async setModel(model: string): Promise<void> {
     this.assertReady();
-    if (!model.trim() || model.length > 200 || /\s/.test(model)) throw new Error("Invalid Codex model.");
+    validateModel(model);
     // turn/start owns model changes. A currently running turn keeps its model.
     if (this.model !== model) this.effort = undefined;
     this.model = model;
+  }
+
+  async updateConfig(config: { model?: string; effort?: string; fast: boolean }): Promise<void> {
+    this.assertReady();
+    if (config.model !== undefined) { validateModel(config.model); this.model = config.model; }
+    this.effort = codexEffort(config.effort);
+    this.fast = config.fast;
+    if (this.active) await this.syncActiveTurnSettings(this.active);
+  }
+
+  private syncActiveTurnSettings(turn: Turn): Promise<void> {
+    if (turn.settingsPending) return turn.settingsPending;
+    // Publish the promise before the pass, and clear it before resolving. An
+    // unchanged snapshot or pending ACK must not strand a same-tick change.
+    turn.settingsPending = Promise.resolve().then(async () => {
+      try {
+        while (this.state === "ready" && this.active === turn && turn.id && !turn.stopping) {
+          // Model switches and their remembered knobs apply at turn/start.
+          if (turn.model !== this.model) return;
+          const effort = this.effort, fast = this.fast;
+          const effortChanged = effort !== undefined && effort !== turn.effort;
+          const fastChanged = fast !== turn.fast;
+          if (!effortChanged && !fastChanged) return;
+          turn.effort = effort; turn.fast = fast;
+          try {
+            await this.rpc!.request("turn/settings/update", {
+              threadId: this.nativeSessionId, turnId: turn.id,
+              ...(effortChanged ? { effort } : {}),
+              ...(fastChanged ? { serviceTier: fast ? "fast" : null } : {}),
+            }, { fatalTimeout: false });
+          } catch {
+            // The native runtime validates live-effort support. Its refusal or
+            // a lost settings reply cannot fail a running turn. No raw errors.
+            console.warn("[codex] Active-turn settings update failed; selections remain set for the next turn.");
+          }
+        }
+      } finally { turn.settingsPending = undefined; }
+    });
+    return turn.settingsPending;
   }
 
   async interrupt(): Promise<void> {
@@ -299,6 +345,10 @@ export class CodexDriver implements Driver {
     if (pkg.version !== CODEX_VERSION) throw new Error("Codex package version does not match the worker pin.");
     return join(dirname(manifest), "bin/codex.js");
   }
+}
+
+function validateModel(model: string): void {
+  if (!model.trim() || model.length > 200 || /\s/.test(model)) throw new Error("Invalid Codex model.");
 }
 
 // Local's mapCodexEffortFromEnv, copied here to keep the VM runtime standalone.

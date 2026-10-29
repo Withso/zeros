@@ -115,6 +115,61 @@ describe("worker bridge routing through a fake relay", () => {
     expect(drivers[2].opened?.effort).toBeUndefined();
   });
 
+  it("routes Codex config to the exact execution and preserves effort and Fast across reopen", async () => {
+    const { relay, drivers, chat, prompt } = await setup();
+    const sessionId = await chat();
+    await relay.request(CLIENT_A, prompt(sessionId));
+    await expect.poll(() => drivers[0].prompts.length).toBe(1);
+    const update = (id: string, env: Record<string, string>) => browserFrame("AGENT_UPDATE_CONFIG", { agentId: "codex", sessionId: id, env });
+    await relay.request(CLIENT_A, update(sessionId, { ZEROS_THINKING_EFFORT: "high", ZEROS_FAST_MODE: "1", OPENAI_API_KEY: "untrusted-fixture" }));
+    expect(drivers[0].configs).toEqual([{ effort: "high", fast: true }]);
+    await relay.request(CLIENT_B, update("retired-execution", { ZEROS_THINKING_EFFORT: "max" }));
+    expect(drivers[0].configs).toHaveLength(1);
+    drivers[0].complete();
+    await relay.request(CLIENT_A, browserFrame("AGENT_CLOSE_SESSION", { agentId: "codex", chatId: "chat", sessionId, userStop: true }));
+    const reopen = browserFrame("AGENT_NEW_SESSION", { agentId: "codex", chatId: "chat", cwd: WORKSPACE_KEY, workspaceId: WORKSPACE_ID });
+    await relay.request(CLIENT_A, reopen);
+    const reopened = (relay.response(reopen.id) as Extract<BridgeMessage, { type: "AGENT_SESSION_CREATED" }>).session.sessionId;
+    expect(drivers[1].opened).toMatchObject({ effort: "high", fast: true });
+    expect(JSON.stringify(drivers[1].opened)).not.toContain("untrusted-fixture");
+    await relay.request(CLIENT_A, update(reopened, {}));
+    expect(drivers[1].configs).toEqual([{ effort: undefined, fast: false }]);
+  });
+
+  it("applies a complete config snapshot's model before its knobs and retains it across reopen", async () => {
+    const { relay, drivers, chat, prompt } = await setup();
+    const sessionId = await chat();
+    await relay.request(CLIENT_A, prompt(sessionId));
+    await expect.poll(() => drivers[0].prompts.length).toBe(1);
+    await relay.request(CLIENT_A, browserFrame("AGENT_UPDATE_CONFIG", { agentId: "codex", sessionId,
+      env: { OPENAI_MODEL: "gpt-6.1-terra", ZEROS_THINKING_EFFORT: "max", ZEROS_FAST_MODE: "1" } }));
+    expect(drivers[0].model).toBe("gpt-6.1-terra");
+    expect(drivers[0].configs).toEqual([{ model: "gpt-6.1-terra", effort: "max", fast: true }]);
+    drivers[0].complete();
+    await relay.request(CLIENT_A, browserFrame("AGENT_CLOSE_SESSION", { agentId: "codex", chatId: "chat", sessionId, userStop: true }));
+    await relay.request(CLIENT_A, browserFrame("AGENT_NEW_SESSION", { agentId: "codex", chatId: "chat", cwd: WORKSPACE_KEY, workspaceId: WORKSPACE_ID }));
+    expect(drivers[1].opened).toMatchObject({ model: "gpt-6.1-terra", effort: "max", fast: true });
+  });
+
+  it("waits for a replacing driver to open before applying configuration", async () => {
+    let release!: () => void, created = 0;
+    const opening = new Promise<void>(resolve => { release = resolve; });
+    const { relay, drivers, chat } = await setup(driver => { if (++created === 2) driver.opening = opening; });
+    const sessionId = await chat();
+    await relay.receive({ ...config, loginRevision: "1", agents: { codex: { ...config.agents.codex!, token: "fixture-replacement-proxy" } } });
+    const loading = relay.request(CLIENT_A, browserFrame("AGENT_LOAD_SESSION", { agentId: "codex", chatId: "chat", sessionId, adoptOnly: true }));
+    await expect.poll(() => drivers[1]?.opened).toBeDefined();
+    const updating = relay.request(CLIENT_A, browserFrame("AGENT_UPDATE_CONFIG", { agentId: "codex", sessionId,
+      env: { ZEROS_THINKING_EFFORT: "max", ZEROS_FAST_MODE: "1" } }));
+    try {
+      // Drain the incoming request's microtasks while native open remains held.
+      await new Promise<void>(resolve => setImmediate(resolve));
+      expect(drivers[1].configs).toEqual([]);
+    } finally { release(); await Promise.all([loading, updating]); }
+    expect(drivers[0].configs).toEqual([]);
+    expect(drivers[1].configs).toEqual([{ effort: "max", fast: true }]);
+  });
+
   it("acknowledges VM Stop only after cancelling the turn and committing the final mirror", async () => {
     const { worker, relay, drivers, chat, prompt } = await setup();
     const sessionId = await chat(), request = prompt(sessionId);

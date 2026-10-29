@@ -32,12 +32,12 @@ Zeros prunes retired bindings and publishes that tree only after every step
 succeeds. A failed exporter therefore leaves the last committed bindings
 intact. Generated files are not edited by hand.
 
-`pnpm check:codex-pin` verifies both the pin/generated-schema relationship and
-the compatibility manifest. A regenerated method cannot silently appear or
-disappear without review.
+`pnpm check:codex-pin` verifies the installed Local runtime, the exact cloud
+worker dependency, the generated-schema pin and the compatibility manifest.
+A regenerated method or a Local/cloud version mismatch cannot pass silently.
 
 The control-plane authentication keeper is independently qualified at 0.154.0
-while the interactive runtime is 0.164.0. Its version participates in encrypted
+while the interactive runtime is 0.165.0. Its version participates in encrypted
 cache authentication and a database constraint. `check:codex-pin` checks that
 package against `CODEX_AUTH_RUNTIME_VERSION`, not the desktop protocol version;
 Renovate excludes it from routine agent upgrades. A keeper upgrade requires an
@@ -69,7 +69,7 @@ every classified method has a behavioral implementation or test.
 - Notification `forwarded`: generated typed subscription is available, but no
   canonical or product behavior is claimed.
 
-At the 0.164.0 pin this covers 274 methods: 176 client requests, 11 server
+At the 0.165.0 pin this covers 275 methods: 177 client requests, 11 server
 requests, and 87 server notifications. The five `userVerification/*` client
 methods are generated-only: Zeros does not expose native identity verification.
 Relative to 0.154.0, `userVerification/cancel`, the three `thread/attachment/*`
@@ -89,10 +89,65 @@ the same validated, fail-closed form path as `openai/form`. Run
 
 ## Transcript fidelity
 
+### 0.165.0 compatibility
+
+Local and the standalone cloud worker both pin Codex 0.165.0. The shared curated
+catalog adds GPT-6.1 Terra after GPT-6.1 Sol, with Low, Medium, High, Extra High,
+Max and Ultra effort and Fast support. Native `model/list` advertises all six
+efforts, `additionalSpeedTiers: ["fast"]` and the `priority` service tier named
+Fast. The curated Max default matches Sol; Codex's native default is Low for
+both models. Saved defaults, aliases and fallback lists retain their identity.
+The renderer uses this same catalog in Local and cloud; exact account discovery
+can still restrict availability or controls.
+
+Effort and Fast changes now also call `turn/settings/update` for the exact
+active native turn, while retaining the selection for later `turn/start` calls.
+Only changed fields are sent: `effort`, and `serviceTier: "fast"` or `null` to
+clear Fast. Model changes remain next-turn settings; a different model's
+remembered knobs never update the current turn. Omitting effort clears the
+next-turn override; it cannot clear active effort because this RPC defines
+omission and null as unchanged. Native consumers of frozen initial settings
+and child sessions keep their captured settings, per the upstream contract.
+
+Updates serialize and coalesce to the latest selection. A pending start waits
+for its acknowledgement; an already terminal acknowledgement or notification,
+Stop, disposal or replacement fences the update. Completion withdraws only the
+matching native turn's liveness. The public `model/list` shape has no
+`supports_reasoning_effort_updates` field, so native validation owns that
+capability check. An unsupported/rejected update or lost settings reply logs a
+fixed message without aborting the turn, retrying inference or exposing native
+diagnostics. Settings bypass the runtime's generic overload retry, which cannot
+recheck active-turn ownership after backoff. The retained selection still
+applies to the next turn.
+
+Cloud `AGENT_UPDATE_CONFIG` accepts the existing complete composer snapshot,
+extracts model/effort/Fast only, and persists it for restart and credential
+refresh. It waits for an opening driver and checks the exact execution before
+applying the latest settings. Omitted model preserves the admitted selection;
+omitted effort/Fast clears those overrides. Caller credentials and arbitrary
+environment values never replace the worker's provider configuration.
+
+The 11 schema changes have fingerprint decisions in
+`scripts/agent-runtime/reviews.json`:
+
+| Surface | Zeros boundary |
+| --- | --- |
+| `thread/memory/read`, its params and response | Generated-only; a memory-summary reader is deferred. Existing Memory opt-in remains correct: fresh 0.164.0 and 0.165.0 profiles keep `features.memories` false. |
+| `Account.type: "gcp"` | Existing non-ChatGPT account handling returns no subscription details, so Settings shows “—”, as for API key and Bedrock. Cloud continues through its workspace proxy. |
+| `CodexErrorInfo.modelNotFound` | Existing Local/cloud normalizers classify it as `model-unavailable` and offer choosing another model. Regressions pin the native spelling and safe Terra label. |
+| `NetworkRequirements.reviewDomains` | Generated-only; Zeros does not call `configRequirements/read`. |
+| `ThreadForkParams.attachToSource`, `ThreadListParams.attachedToThreadId` | Attached-fork adoption is deferred. Ordinary forks omit the attachment flag; Zeros does not add an attached-thread listing. |
+| `ThreadSampleParams.threadSource` | Generated-only; Zeros does not call `thread/sample`. |
+
+The existing image, tool, Stop and history contracts remain covered by the
+adjacent Local/cloud suites. Offline native startup and model listing do not
+qualify paid inference, account-specific Terra access, macOS packaging or a
+deployed cloud VM.
+
 ### 0.164.0 compatibility
 
-The desktop and standalone cloud worker both pin Codex 0.164.0. Generated
-images now carry either an attachment-store `fileId` or an inline `result`
+The 0.164.0 desktop and standalone cloud worker upgrade introduced generated
+images carrying either an attachment-store `fileId` or an inline `result`
 fallback, plus optional observed `inputImages` path/SHA-256 metadata. Both
 mappers narrow that union before rendering an inline result; a `fileId` is an
 opaque provider reference, not a URL. Existing tool identity, completion,

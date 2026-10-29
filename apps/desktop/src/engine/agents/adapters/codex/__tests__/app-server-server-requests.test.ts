@@ -808,6 +808,42 @@ describe("codex app-server initiated requests", () => {
     await runtime.dispose();
   });
 
+  it.each(["ack", "notification", "error"])("reports a terminal %s before the adapter can update turn settings", async terminal => {
+    const fake = createFakeProcess(); harness.proc = fake.proc;
+    const runtime = await bootCodexAppServerRuntime({ cwd: "/tmp/project", clientInfo: { name: "Zeros-test", version: "0.0.0" } });
+    const onTurnStarted = vi.fn();
+    const turn = runtime.runTurn({ threadId: "thread-1", input: [] } as never, { onTurnStarted });
+    const start = await fake.waitFor(frame => frame.method === "turn/start" && frame.id != null);
+    if (terminal === "notification") fake.send({ method: "turn/completed", params: {
+      threadId: "thread-1", turn: { id: "turn-1", status: "completed" },
+    } });
+    if (terminal === "error") fake.send({ method: "error", params: { error: { message: "Turn failed." }, willRetry: false } });
+    fake.send({ id: start.id, result: { turn: { id: "turn-1", status: terminal === "ack" ? "completed" : "inProgress" } } });
+    await expect(turn).resolves.toMatchObject({ status: terminal === "error" ? "failed" : "completed" });
+    expect(onTurnStarted).toHaveBeenCalledExactlyOnceWith("turn-1", terminal === "error" ? "failed" : "completed");
+    await runtime.dispose();
+  });
+
+  it("does not retry an overloaded settings update after its exact turn completes", async () => {
+    const fake = createFakeProcess(); harness.proc = fake.proc;
+    const runtime = await bootCodexAppServerRuntime({ cwd: "/tmp/project", clientInfo: { name: "Zeros-test", version: "0.0.0" } });
+    const turn = runtime.runTurn({ threadId: "thread-1", input: [] } as never);
+    const start = await fake.waitFor(frame => frame.method === "turn/start");
+    fake.send({ id: start.id, result: { turn: { id: "turn-1", status: "inProgress" } } });
+    const warning = vi.spyOn(console, "warn").mockImplementation(() => {});
+    vi.useFakeTimers();
+    const updating = runtime.requestTyped("turn/settings/update", { threadId: "thread-1", turnId: "turn-1", effort: "high" }).catch(error => error);
+    try {
+      const request = await fake.waitFor(frame => frame.method === "turn/settings/update");
+      fake.send({ id: request.id, error: { code: -32001, message: "Server overloaded" } });
+      fake.send({ method: "turn/completed", params: { threadId: "thread-1", turn: { id: "turn-1", status: "completed" } } });
+      await turn;
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(fake.outbound.filter(frame => frame.method === "turn/settings/update")).toHaveLength(1);
+      await expect(updating).resolves.toMatchObject({ code: -32001 });
+    } finally { await runtime.dispose(); await updating; vi.useRealTimers(); warning.mockRestore(); }
+  });
+
   it("settles an active turn when Codex reports an unscoped terminal error", async () => {
     const fake = createFakeProcess();
     harness.proc = fake.proc;

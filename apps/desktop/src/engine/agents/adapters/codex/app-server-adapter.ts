@@ -404,6 +404,16 @@ export interface CodexSession {
   modeId: CodexModeId;
   /** Most recent in-flight turn id, for interruptTurn(). */
   activeTurnId: string | null;
+  /** Settings belong to one prompt and runtime, including its pending ACK.
+   * A queued config change must never continue on a successor's turn id. */
+  activeTurnSettings?: {
+    runtime: CodexAppServerHandle;
+    turnId?: string;
+    model?: string;
+    effort: ReturnType<typeof mapCodexEffortFromEnv>;
+    fast: boolean;
+    pending?: Promise<void>;
+  };
   /** EVERY in-flight turn in this session's app-server child, keyed
    *  threadId → turnId. The parent thread is one entry; codex collab
    *  subagents (spawn_agent / wait) run as SIBLING THREADS inside the
@@ -1501,6 +1511,8 @@ export class CodexAppServerAdapter implements AgentAdapter {
     // broadcast; the throw below drives the rebuild) rather than an idle
     // reconnecting flip. `childExitedMidTurn` is reset per turn.
     session.turnActive = true;
+    const turnSettings = { runtime: session.runtime, model: model ?? session.threadModel ?? undefined, effort, fast };
+    session.activeTurnSettings = turnSettings;
     session.childExitedMidTurn = false;
     // Clock starts at the handoff to the app-server, so the number reported
     // is the provider's wait rather than our own dispatch above it.
@@ -1537,11 +1549,15 @@ export class CodexAppServerAdapter implements AgentAdapter {
         ...(opts.onNativeOutput ? { onNativeOutput: (kind: NativePromptOutputKind, receivedAtMs?: number) => {
           if (!session.cancelRequested && this.sessions.get(opts.sessionId) === session) return opts.onNativeOutput?.(kind, receivedAtMs);
         } } : {}),
-        onTurnStarted: (turnId: string) => {
-          session.activeTurnId = turnId;
+        onTurnStarted: (turnId: string, status = "inProgress") => {
+          if (session.activeTurnSettings !== turnSettings) return;
+          session.activeTurnId = status === "inProgress" ? turnId : null;
+          session.activeTurnSettings.turnId = turnId;
           if (nativeWorkingTreeReview) session.notifications.bindRootReviewTurn(turnId);
-          if (session.cancelRequested) {
+          if (session.cancelRequested && session.activeTurnId) {
             void session.runtime.interruptTurn(session.threadId, turnId);
+          } else {
+            void this.syncActiveTurnSettings(session);
           }
         },
       };
@@ -1995,9 +2011,8 @@ export class CodexAppServerAdapter implements AgentAdapter {
     session.env = { ...(session.env ?? {}), OPENAI_MODEL: model };
   }
 
-  /** Live config update (effort / fast / model / add-dirs). Same mechanism as
-   *  setModel: the per-turn knobs are read off `session.env` at turn/start, so
-   *  swapping the env in place is a complete live apply — no respawn.
+  /** Keep every selection for turn/start; effort and Fast also update the
+   * exact active turn. Model and add-dirs changes remain next-turn settings.
    *
    *  `opts.env` is the composer's CURRENT snapshot (envForChat), which encodes
    *  Fast and the extra dirs BY OMISSION (absent = off/none). A plain merge
@@ -2018,6 +2033,49 @@ export class CodexAppServerAdapter implements AgentAdapter {
     delete carried.ZEROS_THINKING_EFFORT;
     delete carried.ZEROS_ADDITIONAL_DIRS;
     session.env = { ...carried, ...opts.env };
+    await this.syncActiveTurnSettings(session);
+  }
+
+  private syncActiveTurnSettings(session: CodexSession): Promise<void> {
+    const turn = session.activeTurnSettings;
+    if (!turn) return Promise.resolve();
+    if (turn.pending) return turn.pending;
+    // Serialize and coalesce rapid picker changes. Recheck the original
+    // prompt/runtime after every reply; completion, Stop and disposal fence it.
+    // Assign the shared promise before running even a no-op pass. Clear it
+    // inside that pass, so a same-tick ACK/config cannot join a finished flush.
+    turn.pending = Promise.resolve().then(async () => {
+      try {
+        while (this.sessions.get(session.zerosSessionId) === session &&
+          session.activeTurnSettings === turn && session.runtime === turn.runtime &&
+          session.runtimeAlive && session.turnActive && !session.cancelRequested &&
+          session.activeTurnId && session.activeTurnId === turn.turnId &&
+          !session.translator.sawTurnTerminal) {
+          const model = session.env?.OPENAI_MODEL?.trim() || session.threadModel || undefined;
+          // A different model's remembered knobs belong to its next turn.
+          if (model !== turn.model) return;
+          const effort = mapCodexEffortFromEnv(session.env?.ZEROS_THINKING_EFFORT);
+          const fast = session.env?.ZEROS_FAST_MODE === "1";
+          const effortChanged = effort !== undefined && effort !== turn.effort;
+          const fastChanged = fast !== turn.fast;
+          if (!effortChanged && !fastChanged) return;
+          turn.effort = effort; turn.fast = fast;
+          try {
+            await turn.runtime.requestTyped("turn/settings/update", {
+              threadId: session.threadId, turnId: session.activeTurnId,
+              ...(effortChanged ? { effort } : {}),
+              ...(fastChanged ? { serviceTier: fast ? "fast" : null } : {}),
+            });
+          } catch {
+            // Native validation owns model/provider support for live effort.
+            // Refusal is not a turn failure. Never log provider diagnostics.
+            this.ctx.emit.onAgentStderr(this.agentId,
+              "[codex] Active-turn settings update failed; selections remain set for the next turn.");
+          }
+        }
+      } finally { turn.pending = undefined; }
+    });
+    return turn.pending;
   }
 
   /** Local connection change (API key, CLI login or saved account). The
@@ -3634,9 +3692,12 @@ export class CodexAppServerAdapter implements AgentAdapter {
       track(p?.threadId, p?.turnId);
     });
     runtime.onNotification("turn/completed", (params) => {
-      const p = params as { threadId?: string };
+      const p = params as { threadId?: string; turn?: { id?: string } };
       if (typeof p?.threadId === "string") {
-        session.activeTurns.delete(p.threadId);
+        if (p.turn?.id && session.activeTurns.get(p.threadId) === p.turn.id)
+          session.activeTurns.delete(p.threadId);
+        if (p.threadId === session.threadId && p.turn?.id === session.activeTurnId)
+          session.activeTurnId = null;
         void this.refreshBackgroundTasks(session);
       }
     });

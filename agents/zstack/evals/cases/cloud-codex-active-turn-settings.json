@@ -1,0 +1,9 @@
+{
+  "id": "cloud-codex-active-turn-settings",
+  "kind": "replay",
+  "area": "vm-engine-agents",
+  "fixedBy": "pr:763",
+  "symptom": "Cloud ignored Codex live config updates and Fast on turn start; a partial route can lose full-snapshot model selection or apply configuration to a driver still opening.",
+  "rule": "Route only typed composer selections for the exact execution, persist the full selection and wait for driver readiness. Match Local exact-turn effort/Fast behavior without applying model changes mid-turn or aborting on a rejected/lost settings reply. See agents/zstack/changes/codex-active-turn-settings.md.",
+  "check": "pnpm --dir apps/cloud-worker test src/drivers/codex/__tests__/settings.test.ts src/drivers/codex/__tests__/driver.test.ts src/__tests__/worker.test.ts"
+}

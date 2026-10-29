@@ -223,7 +223,7 @@ describe("curated model catalog (catalogs/models-v1.json)", () => {
   });
 
   it("qualifies Haiku 5.5 without retargeting saved Haiku selections", () => {
-    expect(catalog.version).toBe(13);
+    expect(catalog.version).toBeGreaterThanOrEqual(13);
     expect(catalog.families.claude.find(model => model.value === "claude-haiku-5-5")).toEqual({
       value: "claude-haiku-5-5", label: "Claude Haiku 5.5",
       effortLevels: ["low", "medium", "high", "xhigh", "max"],
@@ -234,6 +234,18 @@ describe("curated model catalog (catalogs/models-v1.json)", () => {
     });
     expect(checkCliVersionGate(catalog, "2.1.292")).toContainEqual(expect.stringContaining('"claude-haiku-5-5"'));
     expect(checkCliVersionGate(catalog, "2.1.293")).toEqual([]);
+  });
+
+  it("qualifies GPT-6.1 Terra immediately after Sol with the full native effort ladder", () => {
+    const rows = catalog.families.codex;
+    const sol = rows.findIndex(model => model.value === "gpt-6.1-sol");
+    expect(rows[sol + 1]).toEqual({
+      value: "gpt-6.1-terra", label: "GPT-6.1 Terra",
+      effortLevels: ["low", "medium", "high", "xhigh", "max", "ultracode"],
+      defaultEffort: "max", supportsFast: true,
+    });
+    expect(catalog.defaultFavorites.codex).toBe("gpt-6.1-sol");
+    expect(catalog.aliases.codex).toEqual({});
   });
 
   it.each(["unsupported", "ultracode", 42])("rejects an invalid or off-ladder default effort: %s", defaultEffort => {

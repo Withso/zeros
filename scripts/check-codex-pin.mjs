@@ -9,7 +9,8 @@
 //   a. the INSTALLED @openai/codex version
 //   b. package.json#codexProtocolVersion (the pin)
 //   c. apps/desktop/src/engine/agents/adapters/codex/generated/.version (the committed bindings)
-// The generated tree must also retain the upstream Apache LICENSE and NOTICE.
+// The cloud worker's Codex dependency must equal that interactive pin. The
+// generated tree must also retain the upstream Apache LICENSE and NOTICE.
 //
 // The failure mode: Renovate bumps @openai/codex without re-running
 // `pnpm codegen:codex`; codegen early-exits because .version still matches the
@@ -60,6 +61,9 @@ const installed = JSON.parse(
 const pinned = JSON.parse(
   readOrDie("package.json", "the repo manifest", "run this from the repo root."),
 ).codexProtocolVersion;
+const workerDeclared = JSON.parse(
+  readOrDie("apps/cloud-worker/package.json", "the cloud worker manifest", "restore the cloud worker package manifest."),
+).dependencies?.["@openai/codex"];
 const generated = readOrDie(
   "apps/desktop/src/engine/agents/adapters/codex/generated/.version",
   "the generated-bindings version stamp",
@@ -99,8 +103,14 @@ if(!keeperPin||keeperDeclared!==keeperPin){
   process.exit(1);
 }
 
+if (!pinned || workerDeclared !== pinned) {
+  console.error("✖ check:codex-pin — cloud worker @openai/codex must exactly match the Local interactive pin");
+  console.error("Fix: update apps/cloud-worker/package.json with the Local Codex version, then regenerate the lockfile and license inventory.");
+  process.exit(1);
+}
+
 if (installed === pinned && pinned === generated) {
-  console.log(`✓ check:codex-pin — installed = pin = bindings = ${installed}`);
+  console.log(`✓ check:codex-pin — installed = pin = bindings = cloud worker = ${installed}`);
   process.exit(0);
 }
 

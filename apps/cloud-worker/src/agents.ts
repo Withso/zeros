@@ -17,7 +17,7 @@ export type DriverFactories = Partial<Record<CloudV2Agent, () => Driver>>;
 export interface AppClient { id: string; send(frame: BridgeMessage): Promise<void> }
 interface Waiter { client: AppClient; requestId: string; receivedAt: number }
 interface Runtime {
-  id: string; chatId: string; agentId: CloudV2Agent; model?: string; effort?: string;
+  id: string; chatId: string; agentId: CloudV2Agent; model?: string; effort?: string; fast?: boolean;
   driver?: Driver; unsubscribe?: () => void; login?: string; opening?: Promise<void>;
   preparing?: Promise<void>;
   retiring?: Promise<void>; pendingNative?: string; admitting: number;
@@ -32,7 +32,7 @@ interface Runtime {
   checkpointTurnId?: string;
 }
 
-const VERSIONS = { codex: "0.164.0", claude: "0.3.311", cursor: "1.0.40" };
+const VERSIONS = { codex: "0.165.0", claude: "0.3.311", cursor: "1.0.40" };
 const NAMES = { codex: "Codex", claude: "Claude", cursor: "Cursor" };
 const MODEL_ENV = { codex: "OPENAI_MODEL", claude: "ANTHROPIC_MODEL", cursor: "CURSOR_MODEL" };
 const initialized = (agentId: CloudV2Agent): InitializeResponse => ({
@@ -183,6 +183,30 @@ export class Agents {
           }
           return;
         }
+        case "AGENT_UPDATE_CONFIG": {
+          const route = this.route(message);
+          if (route.agentId !== "codex") throw new WorkspaceError("CLOUD_V2_UNSUPPORTED", "Live configuration is not available for this cloud agent.");
+          await route.preparing;
+          this.assertCurrent(route);
+          const model = message.env.OPENAI_MODEL?.trim() || undefined;
+          if (model && (model.length > 200 || /\s/.test(model))) throw new WorkspaceError("invalid-params", "Invalid Codex model.");
+          const effort = message.env.ZEROS_THINKING_EFFORT || undefined;
+          const fast = message.env.ZEROS_FAST_MODE === "1";
+          if (model) route.model = model;
+          route.effort = effort; route.fast = fast;
+          await this.store.update(route.chatId, draft => {
+            this.assertCurrent(route);
+            if (model) draft.chat!.model = model;
+            draft.chat!.effort = effort ?? ""; draft.chat!.fast = fast;
+          });
+          while (route.opening) await route.opening;
+          this.assertCurrent(route);
+          // Apply the latest snapshot after any opening driver is ready.
+          // Only typed selections cross; credentials and arbitrary caller
+          // environment never replace worker configuration. Model stays next-turn.
+          await route.driver?.updateConfig?.({ ...(route.model ? { model: route.model } : {}), effort: route.effort, fast: route.fast === true });
+          return;
+        }
         case "AGENT_CLOSE_SESSION": {
           const id = message.executionId ?? message.sessionId;
           const route = id ? this.routes.get(id) : message.chatId ? this.chats.get(message.chatId) : undefined;
@@ -254,7 +278,7 @@ export class Agents {
     const metadata = chatId && !this.chats.has(chatId) ? this.store.metadata(chatId) : undefined;
     if (!chatId || !metadata?.chat || metadata.executionId !== id || metadata.chat.agentId !== agentId) return undefined;
     this.scope.folder(metadata.chat.folder);
-    const route: Runtime = { id, chatId, agentId: this.agent(agentId), model: metadata.chat.model ?? undefined, effort: metadata.chat.effort || undefined,
+    const route: Runtime = { id, chatId, agentId: this.agent(agentId), model: metadata.chat.model ?? undefined, effort: metadata.chat.effort || undefined, fast: metadata.chat.fast,
       admitting: 0, events: Promise.resolve(), stopping: 0, closed: false, waiters: new Map(), steers: new Map() };
     this.chats.set(chatId, route); this.routes.set(id, route);
     return route;
@@ -314,8 +338,9 @@ export class Agents {
           // These existing open couriers carry selections only. Credentials
           // always come from the control plane, never the caller's env.
           model: message.env?.[MODEL_ENV[agentId]] || undefined, effort: message.env?.ZEROS_THINKING_EFFORT || undefined,
+          ...(message.env?.ZEROS_FAST_MODE !== undefined ? { fast: message.env.ZEROS_FAST_MODE === "1" } : {}),
         }, () => this.assertCurrent(selected));
-        selected.model = chat.model ?? undefined; selected.effort = chat.effort || undefined;
+        selected.model = chat.model ?? undefined; selected.effort = chat.effort || undefined; selected.fast = chat.fast;
       })();
     }
     try { await route.preparing; }
@@ -399,7 +424,7 @@ export class Agents {
       try {
         const mcpServers = await this.mcpProviders?.();
         this.assertCurrent(route);
-        const native = await driver.open({ sessionId: route.id, cwd: this.scope.root, model: route.model, effort: route.effort,
+        const native = await driver.open({ sessionId: route.id, cwd: this.scope.root, model: route.model, effort: route.effort, fast: route.fast,
           ...(mcpServers ? { mcpServers } : {}),
           onTiming: stage => {
             if (!route.closed && this.chats.get(route.chatId) === route && route.driver === driver)

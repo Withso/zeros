@@ -707,7 +707,8 @@ export interface AgentSetModelMessage extends BaseMessage {
 /** Apply a mid-session config change (effort / fast / ultracode /
  *  additionalDirectories / allow-deny / maxTurns) to a LIVE session without
  *  rebuilding it. Used by the composer pills + slash commands. Fire-and-forget:
- *  the adapter applies it to the next turn (Claude SDK). Adapters that don't
+ *  the adapter retains it for the next turn; Codex also updates effort/Fast
+ *  on the exact active turn when native support allows it. Adapters that don't
  *  support live config changes ignore it (the choice still applies on the next
  *  session). `env` is the full composer env map (the same `ZEROS_*` encoding
  *  session-creation uses). */

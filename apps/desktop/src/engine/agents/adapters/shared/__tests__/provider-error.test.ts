@@ -2,6 +2,17 @@ import { describe, expect, it } from "vitest";
 import { normalizeProviderError, providerErrorFailure } from "../provider-error";
 
 describe("normalizeProviderError", () => {
+  it.each(["The model `gpt-6.1-terra` was not found.", "Request rejected for model `gpt-6.1-terra`."])("classifies Codex 0.165 modelNotFound as a terminal model refusal: %s", message => {
+    const native = normalizeProviderError("codex", {
+      message, codexErrorInfo: "modelNotFound",
+    });
+    expect(native).toMatchObject({ category: "model-unavailable", code: "modelNotFound" });
+    expect(providerErrorFailure("codex", native, "prompt").failure).toMatchObject({
+      message: "Your Codex connection can't use GPT-6.1 Terra. Pick another model.",
+      advice: "Your Codex connection can't use GPT-6.1 Terra. Pick another model.",
+    });
+  });
+
   it.each([
     ["The model `gpt-6-luna` is unavailable.", "Your Codex connection can't use GPT-6 Luna. Pick another model."],
     ["The model `gpt-4.9` is unavailable.", "Your Codex connection can't use gpt-4.9. Pick another model."],

@@ -56,6 +56,17 @@ the login. Active foreground and background work retain their spawn credential;
 the next idle interaction reopens the query with a changed login and the confirmed
 native conversation id. Codex keeps its proxy token; Cursor keeps its direct key.
 
+Codex accepts the existing `AGENT_UPDATE_CONFIG` composer snapshot for the exact
+execution. It persists model, effort and Fast, waits for an opening driver, then
+applies the latest typed selections. Arbitrary caller env and credentials never
+cross this route. Model changes stay next-turn; changed effort/Fast also use
+`turn/settings/update` on the exact active native turn. Updates serialize and
+coalesce, with Stop, completion, disposal and successor turns fencing queued
+work. Fast-off sends `serviceTier: null`; later turns use
+`serviceTierForTurn: "fast"` or `"default"`. Native validation decides live-effort
+support. A rejection or lost settings reply logs a fixed warning and preserves
+the selection for the next turn, without aborting the current one.
+
 Claude uses one pinned SDK query across prompts and drains native background
 output after the foreground result. Native user UUIDs identify turn and steering
 receipts; child and unrelated autonomous results cannot complete a newer send.
@@ -97,7 +108,7 @@ the exact runtime pins, dependency versions and SHA-256 of every shipped file.
 
 The bundle contains the protocol, WebSocket and terminal-screen libraries.
 External runtime packages are node-pty (including its native addon), Codex
-0.164.0 and its platform binary, Claude Agent SDK 0.3.311 and its platform CLI,
+0.165.0 and its platform binary, Claude Agent SDK 0.3.311 and its platform CLI,
 and Cursor SDK 1.0.40 and its platform binaries. Their runtime dependencies and
 required peer dependencies are included; provider binaries do not download at
 agent startup.

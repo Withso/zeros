@@ -455,10 +455,9 @@ export interface CodexAppServerHandle {
   runTurn(
     params: CodexTurnStartParams,
     opts?: {
-      /** Fires synchronously once the turnId is known (from the
-       *  `turn/start` response, before completion). Use this to set
-       *  `session.activeTurnId` so cancel() can route. */
-      onTurnStarted?: (turnId: string) => void;
+      /** Fires once the native turn is identified. Status includes any
+       * completion already received, so callers cannot mutate a finished turn. */
+      onTurnStarted?: (turnId: string, status?: string) => void;
       onNativePromptStage?: (stage: NativePromptStage) => void;
       onNativeOutput?: (kind: NativePromptOutputKind, receivedAtMs?: number) => void;
     },
@@ -473,7 +472,7 @@ export interface CodexAppServerHandle {
   runReview(
     params: GenReviewStartParams,
     opts?: {
-      onTurnStarted?: (turnId: string) => void;
+      onTurnStarted?: (turnId: string, status?: string) => void;
       onNativePromptStage?: (stage: NativePromptStage) => void;
       onNativeOutput?: (kind: NativePromptOutputKind, receivedAtMs?: number) => void;
     },
@@ -1125,7 +1124,10 @@ export async function bootCodexAppServerRuntime(
         return await client.request<T>(method, params, rpcOpts);
       } catch (err) {
         lastErr = err;
-        if (err instanceof JsonRpcRequestError && err.code === -32001) {
+        if (err instanceof JsonRpcRequestError && err.code === -32001 && method !== "turn/settings/update") {
+          // Settings are owned by one active turn; a transport-level retry
+          // cannot recheck its lifetime after this backoff. Let the adapter
+          // retain those selections for the next turn on any refusal.
           // Server overloaded. Back off with jitter.
           const wait =
             OVERLOAD_RETRY_BASE_MS * 2 ** attempt +
@@ -1155,7 +1157,7 @@ export async function bootCodexAppServerRuntime(
     method: "turn/start" | "review/start",
     params: unknown,
     runOpts?: {
-      onTurnStarted?: (turnId: string) => void;
+      onTurnStarted?: (turnId: string, status?: string) => void;
       onNativePromptStage?: (stage: NativePromptStage) => void;
       onNativeOutput?: (kind: NativePromptOutputKind, receivedAtMs?: number) => void;
     },
@@ -1188,7 +1190,9 @@ export async function bootCodexAppServerRuntime(
           ["inProgress", "completed", "failed", "cancelled", "interrupted"].includes(ack.turn.status))
         observe("native_acceptance_ack");
       output?.accept(turnId, ack.turn.status);
-      runOpts?.onTurnStarted?.(turnId);
+      runOpts?.onTurnStarted?.(turnId,
+        pendingTurnCompletions.get(turnId) ??
+        (unscopedTerminalErrorEpoch !== startingErrorEpoch ? "failed" : ack.turn.status));
 
       const ackStatus = ack.turn.status;
       if (

@@ -1,5 +1,14 @@
 import { expect, it } from "vitest";
 import { normalizeProviderError } from "./provider-error";
+import { codexModelUnavailableMessage } from "@zeros/protocol/model-rejection";
+
+it.each(["The model `gpt-6.1-terra` was not found.", "Request rejected for model `gpt-6.1-terra`."])("classifies Codex 0.165 modelNotFound with the same model recovery as Local: %s", message => {
+  const native = normalizeProviderError("codex", {
+    message, codexErrorInfo: "modelNotFound",
+  });
+  expect(native).toMatchObject({ category: "model-unavailable", code: "modelNotFound" });
+  expect(codexModelUnavailableMessage(native.message)).toBe("Your Codex connection can't use GPT-6.1 Terra. Pick another model.");
+});
 
 it("recognizes the OpenAI project model-access wording while retaining other failure categories", () => {
   const message = "unexpected status 403 Forbidden: Project `proj_fixture` does not have access to model `gpt-6.1-sol`, url: https://proxy.example.test/v2/cloud/proxy/openai/responses, cf-ray: fixture-ray, request id: fixture-request";

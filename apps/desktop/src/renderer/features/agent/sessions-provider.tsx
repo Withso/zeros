@@ -5067,7 +5067,8 @@ export function AgentSessionsProvider({
       // Only meaningful for a LIVE session. The chat's config (effort / fast /
       // ultracode / additionalDirectories / allow-deny / maxTurns) is already
       // persisted (UPDATE_CHAT_SETTINGS); this applies it to the running
-      // session so it takes effect on the next turn without a rebuild.
+      // session for the next turn without a rebuild. Codex also applies
+      // supported effort/Fast changes to its exact active native turn.
       // No-op (just the persisted chat.* state stands) when there is no live
       // session yet — the config then applies on the next session creation.
       // Fire-and-forget — adapters without live config changes ignore it.
