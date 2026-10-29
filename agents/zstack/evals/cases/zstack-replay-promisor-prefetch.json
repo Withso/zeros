@@ -1,0 +1,9 @@
+{
+  "id": "zstack-replay-promisor-prefetch",
+  "kind": "replay",
+  "area": "zstack",
+  "fixedBy": "pr:772",
+  "symptom": "Cold partial-clone replays triggered hundreds of individual lazy fetches, then failed on missing commit-graph objects with zstack_git_unavailable before reaching the regression tests.",
+  "rule": "zstack-eval prefetches missing promised trees and blobs in bounded batches with negotiation bypassed, then reads locally; full clones do not fetch and replay never moves refs or the checkout.",
+  "check": "pnpm test:git scripts/__tests__/zstack-source.test.ts -t 'prefetches a cold'"
+}

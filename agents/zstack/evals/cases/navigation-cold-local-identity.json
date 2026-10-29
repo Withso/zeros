@@ -1,7 +1,7 @@
 {
   "id": "navigation-cold-local-identity",
   "kind": "replay",
-  "area": "renderer",
+  "area": "renderer-state",
   "fixedBy": "pr:525",
   "symptom": "Reopening with a cold or partial Local metadata cache lost the saved chat before its authoritative list arrived.",
   "rule": "Restore durable selection synchronously by semantic owner, then validate against the exact backend; cold metadata is not deletion (zstack-review).",

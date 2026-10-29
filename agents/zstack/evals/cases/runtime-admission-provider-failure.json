@@ -1,7 +1,7 @@
 {
   "id": "runtime-admission-provider-failure",
   "kind": "replay",
-  "area": "control-plane-admission",
+  "area": "control-plane",
   "fixedBy": "pr:505",
   "symptom": "Runtime admission discarded its failed subphase after creating an actor grant. Typed transient provider endpoint errors became internal HTTP 500, cleanup errors were suppressed, and repeat revocation rewrote the terminal row.",
   "rule": "The bug-fix playbook requires faults after grant issuance to retain a closed phase through confirmed cleanup, typed transient classification, and HTTP-boundary tests for defects, uncertain cleanup and repeat retirement.",

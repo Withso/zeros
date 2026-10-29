@@ -1,7 +1,7 @@
 {
   "id": "seeded-cursor-discovery-short-deadline",
   "kind": "seeded",
-  "area": "vm-engine-agents",
+  "area": "desktop-agents",
   "fixedBy": "pr:648",
   "symptom": "A five-second catalog deadline rejects a saved registry model on a slow but successful connection.",
   "rule": "Exercise slow successful discovery and final refusal independently; a timeout must not stand in for an account answer. See the cursor-resume-discovery-recovery change fragment.",

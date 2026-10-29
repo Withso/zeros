@@ -1,9 +1,9 @@
 {
   "id": "design-relocation-offset-auto-layout",
   "kind": "replay",
-  "area": "desktop-design-state",
+  "area": "desktop-design",
   "fixedBy": "pr:750",
   "symptom": "A nested Design layer read X 0, Y 0 while drawn elsewhere, and vertical start-aligned auto layout kept the nested children far from the parent's top-left edge because relocation saved their position as a transform translate.",
-  "rule": "agents/zstack/changes/design-layout-truth.md: position is left/top and a transform holds only the pose; every conversion into a flow drops a relocation offset, recognized only by its own signature.",
+  "rule": "git show 7b6eb9e6:agents/zstack/changes/design-layout-truth.md: position is left/top and a transform holds only the pose; every conversion into a flow drops a relocation offset, recognized only by its own signature.",
   "check": "pnpm exec vitest run --config vitest.config.ts packages/protocol/src/__tests__/design-relocation.test.ts apps/desktop/src/renderer/features/design-workspace/__tests__/design-auto-layout-values.test.ts apps/desktop/src/renderer/features/design-workspace/__tests__/design-layout-values.test.ts"
 }

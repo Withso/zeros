@@ -1,9 +1,9 @@
 {
   "id": "agent-runtime-pin-parity",
   "kind": "replay",
-  "area": "release-dev-environment",
+  "area": "scripts-release",
   "fixedBy": "pr:765",
   "symptom": "Local pinned Cursor SDK 1.1.0 while the cloud worker stayed on 1.0.40, and nothing compared the two manifests or the worker's runtime constants.",
-  "rule": "Pin Codex, Claude and Cursor identically for Local and the cloud worker, including the worker's VERSIONS and CURSOR_VERSION, in the same PR. See changes/agent-runtime-pin-parity.md.",
+  "rule": "Pin Codex, Claude and Cursor identically for Local and the cloud worker, including the worker's VERSIONS and CURSOR_VERSION, in the same PR. See git show 7b6eb9e6:agents/zstack/changes/agent-runtime-pin-parity.md.",
   "check": "pnpm test:git scripts/__tests__/agent-runtime-pin-parity.test.ts"
 }

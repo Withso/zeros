@@ -16,6 +16,15 @@ export const ZSTACK_EVALS_FILE = "agents/zstack/evals/cases.json";
 /** One case per file, so parallel PRs never edit the same file. */
 export const ZSTACK_EVAL_CASES_DIR = "agents/zstack/evals/cases";
 const KINDS = new Set(["replay", "seeded", "scenario"]);
+// RULES.md §2 owns the boundaries; evals/README.md maps these stable subsystem names to them.
+export const EVAL_AREAS = Object.freeze([
+  "desktop-native", "desktop-engine", "desktop-agents", "desktop-git", "desktop-design",
+  "renderer-state", "renderer-ui", "renderer-agents", "renderer-settings",
+  "control-plane", "control-plane-data", "control-plane-workers", "cloud-worker",
+  "web", "marketing", "protocol", "logo-particles", "catalogs", "styles", "third-party", "docs",
+  "scripts", "scripts-ci", "scripts-release", "scripts-dev", "zstack",
+]);
+const AREAS = new Set(EVAL_AREAS);
 const ID = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 const FIXED_BY = /^(?:[0-9a-f]{40}|pr:[1-9][0-9]*)$/;
 
@@ -37,6 +46,8 @@ export function validateEvalCases(value, { allowPending = false } = {}) {
     for (const field of ["area", "symptom", "rule", "check"]) {
       if (typeof entry?.[field] !== "string" || !entry[field].trim()) problems.push(`${at}: ${field} is required`);
     }
+    if (typeof entry?.area === "string" && entry.area.trim() && !AREAS.has(entry.area))
+      problems.push(`${at}: area must be one of ${EVAL_AREAS.join(", ")}`);
     const extra = Object.keys(entry ?? {}).filter((key) => !["id", "kind", "area", "fixedBy", "symptom", "rule", "check"].includes(key));
     if (extra.length) problems.push(`${at}: unknown fields ${extra.join(", ")}`);
   });

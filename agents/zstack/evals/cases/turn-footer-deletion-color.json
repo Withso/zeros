@@ -1,9 +1,9 @@
 {
   "id": "turn-footer-deletion-color",
   "kind": "replay",
-  "area": "renderer",
+  "area": "renderer-agents",
   "fixedBy": "pr:726",
   "symptom": "Agent footer deletion totals, including zero, render blue instead of the red used by file rows and the design system.",
-  "rule": "Use red for every deletion count, including zero, across Local and cloud footers. See agents/zstack/changes/turn-footer-deletion-color.md.",
+  "rule": "Use red for every deletion count, including zero, across Local and cloud footers. See git show 7b6eb9e6:agents/zstack/changes/turn-footer-deletion-color.md.",
   "check": "pnpm exec vitest run --config vitest.config.ts apps/desktop/src/renderer/features/agent/__tests__/turn-footer.test.ts -t 'collapses historical|metadata-only historical'"
 }

@@ -1,9 +1,9 @@
 {
   "id": "cloud-mandatory-compute-drain",
   "kind": "replay",
-  "area": "cloud-engine-resume",
+  "area": "control-plane",
   "fixedBy": "pr:588",
   "symptom": "A failed final capture or a warm owner wake superseded a mandatory compute stop, causing successive lease ticks to replace its intent and deadline.",
-  "rule": "A mandatory drain keeps its exact intent and original capture deadline across engine cancellation and current or previous lifecycle writers. Escalation records stop_unsealed without inventing checkpoint success. See changes/provider-drift-history-retirement.md.",
+  "rule": "A mandatory drain keeps its exact intent and original capture deadline across engine cancellation and current or previous lifecycle writers. Escalation records stop_unsealed without inventing checkpoint success. See git show 7b6eb9e6:agents/zstack/changes/provider-drift-history-retirement.md.",
   "check": "pnpm --dir apps/control-plane exec vitest run src/cloud-workspaces/compute-leases.integration.test.ts -t 'mandatory drain'"
 }

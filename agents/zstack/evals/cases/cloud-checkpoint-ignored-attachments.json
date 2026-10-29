@@ -1,7 +1,7 @@
 {
   "id": "cloud-checkpoint-ignored-attachments",
   "kind": "replay",
-  "area": "cloud-workspaces",
+  "area": "control-plane",
   "fixedBy": "pr:743",
   "symptom": "A completed attachment inside ignored .context directories was absent after restoring a cloud workspace on a replacement VM, despite checkpoint capture reporting success.",
   "rule": "zstack-verify requires checkpoint/restore coverage using the real ignored attachment layout and supported size before deleting local recovery bytes.",

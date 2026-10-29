@@ -4,6 +4,6 @@
   "area": "control-plane-workers",
   "fixedBy": "pr:646",
   "symptom": "Qualification ignores the configured rollout default after a newer candidate base is approved, so organizations on the default cannot receive new runtime fixes.",
-  "rule": "Propagate the rollout policy through the worker factory and qualify the bounded newest-two release window on each assignable compatibility. Pin the base before dispatch. See changes/runtime-qualification-rollout-coverage.md.",
+  "rule": "Propagate the rollout policy through the worker factory and qualify the bounded newest-two release window on each assignable compatibility. Pin the base before dispatch. See git show 7b6eb9e6:agents/zstack/changes/runtime-qualification-rollout-coverage.md.",
   "check": "pnpm --dir apps/control-plane exec vitest run src/cloud-workspaces/runtime-qualification-rollout.integration.test.ts"
 }

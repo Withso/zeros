@@ -1,7 +1,7 @@
 {
   "id": "optimistic-send-presentation",
   "kind": "replay",
-  "area": "renderer",
+  "area": "renderer-agents",
   "fixedBy": "pr:533",
   "symptom": "Accepted cloud prompts and steering stayed hidden until admission or native consumption; ready follow-ups showed Waiting for agent.",
   "rule": "Publish an accepted prompt immediately, preserve explicit Queue intent, and confirm steering in place without weakening delivery ownership (zstack-review).",

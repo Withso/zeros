@@ -1,7 +1,7 @@
 {
   "id": "seeded-detached-agent-native-event",
   "kind": "seeded",
-  "area": "cloud workspace validation",
+  "area": "scripts",
   "fixedBy": "pr:548",
   "symptom": "A task witness and command receipt appear complete while original replay lacks the accepted native completion event.",
   "rule": "Detached offline checks require the exact accepted native terminal and contiguous original replay; observation consistency never establishes authority or live qualification.",

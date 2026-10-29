@@ -1,7 +1,7 @@
 {
   "id": "computer-build-runtime-proof",
   "kind": "replay",
-  "area": "release-dev-environment",
+  "area": "protocol",
   "fixedBy": "pr:489",
   "symptom": "The cloud harness reported Computer build success without proving that its saved runtime/base matched the corrected qualified selection.",
   "rule": "Observe the persisted build and current qualified selection in one read-only snapshot, preserving admission locks on mutations. Require the exact intended tuple before declaring the build verified.",

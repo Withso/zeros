@@ -1,7 +1,7 @@
 {
   "id": "cloud-actor-session-lifetime",
   "kind": "replay",
-  "area": "cloud-workspaces",
+  "area": "desktop-engine",
   "fixedBy": "pr:586",
   "symptom": "Disconnected cloud actors kept renewing and retained registry capacity, refusing new actors after 256 historical sessions in one engine boot.",
   "rule": "Release only after all sockets, durable pending commands and unproved native work end; fence late confirmation and context flights before reclaiming capacity, and retain explicit revocation fences. See playbooks/bug-fix.md.",

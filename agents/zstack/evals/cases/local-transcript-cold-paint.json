@@ -1,7 +1,7 @@
 {
   "id": "local-transcript-cold-paint",
   "kind": "replay",
-  "area": "renderer",
+  "area": "renderer-agents",
   "fixedBy": "pr:568",
   "symptom": "Local chats showed Loading conversation… on every cold reopen, new tab and app launch while the Local engine (about 14 s at launch) answered the transcript read.",
   "rule": "Local presentation readiness: paint the last confirmed Local window provisionally and read-only, confirm it through the engine, and start renderer-minted chats resident (docs/ui-interaction-performance.md).",

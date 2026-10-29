@@ -1,9 +1,9 @@
 {
   "id": "cloud-codex-model-access",
   "kind": "replay",
-  "area": "vm-engine-agents",
+  "area": "desktop-agents",
   "fixedBy": "pr:689",
   "symptom": "A cloud Codex model excluded by the selected OpenAI key's project appears selectable and exposes a raw 403 with project, proxy and request diagnostics in the chat.",
-  "rule": "Classify the provider's exact model-access wording in Local and cloud, separate actionable presentation from native evidence, and scope complete bounded discovery to the selected credential across the unified menu. See agents/zstack/changes/cloud-codex-model-access.md.",
+  "rule": "Classify the provider's exact model-access wording in Local and cloud, separate actionable presentation from native evidence, and scope complete bounded discovery to the selected credential across the unified menu. See git show 7b6eb9e6:agents/zstack/changes/cloud-codex-model-access.md.",
   "check": "pnpm exec vitest run apps/desktop/src/engine/agents/adapters/shared/__tests__/provider-error.test.ts apps/desktop/src/renderer/features/agent/__tests__/model-menu-refresh.test.ts apps/desktop/src/renderer/features/agent/__tests__/turn-failure.test.ts"
 }

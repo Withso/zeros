@@ -4,6 +4,6 @@
   "area": "renderer-settings",
   "fixedBy": "pr:723",
   "symptom": "A gateway status read started before successful sign-in could arrive later and return the MCP editor to Sign-in required. Automatic probes could conceal the stale-status regression.",
-  "rule": "changes/mcp-connection-recovery.md: successful authorization invalidates earlier gateway reads before refreshing; hold the older reply and automatic probes to verify that Connected remains authoritative.",
+  "rule": "git show 7b6eb9e6:agents/zstack/changes/mcp-connection-recovery.md: successful authorization invalidates earlier gateway reads before refreshing; hold the older reply and automatic probes to verify that Connected remains authoritative.",
   "check": "pnpm test:ui-smoke --shard=2/3"
 }

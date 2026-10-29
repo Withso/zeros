@@ -1,7 +1,7 @@
 {
   "id": "native-proof-closed-predicate",
   "kind": "replay",
-  "area": "cloud workspace validation",
+  "area": "scripts",
   "fixedBy": "pr:540",
   "symptom": "A failed native detached proof loses the exact PTY, replay, heartbeat or file predicate in its signed artifact, preventing first-failure classification.",
   "rule": "Attach only a strict closed predicate to failed native evidence, preserve it before cleanup, and keep legacy signed bytes and all proof requirements unchanged.",

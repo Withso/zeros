@@ -1,7 +1,7 @@
 {
   "id": "workbench-literal-file-path",
   "kind": "replay",
-  "area": "renderer",
+  "area": "renderer-state",
   "fixedBy": "pr:705",
   "symptom": "Opening a filename with leading or trailing spaces in the fixed Files home trimmed its filesystem identity, opening the wrong file and preventing exact tab reuse.",
   "rule": "Preserve literal paths through action construction, dispatch and persistence for both local and cloud workspaces; normalize typed input at its own boundary (command-palette-boundaries, zstack-review).",

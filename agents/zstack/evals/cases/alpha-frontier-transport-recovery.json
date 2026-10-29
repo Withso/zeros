@@ -1,9 +1,9 @@
 {
   "id": "alpha-frontier-transport-recovery",
   "kind": "replay",
-  "area": "release-dev-environment",
+  "area": "scripts-release",
   "fixedBy": "pr:756",
   "symptom": "Alpha discarded a successfully signed desktop publication when one anonymous live-identity read timed out just before the healthy API returned HTTP 200.",
-  "rule": "Retry anonymous transport failures with per-attempt aborts and bounded backoff; refuse semantic identity failures and validate recovered ancestry before writes. See changes/alpha-authentication-acceptance.md.",
+  "rule": "Retry anonymous transport failures with per-attempt aborts and bounded backoff; refuse semantic identity failures and validate recovered ancestry before writes. See git show 7b6eb9e6:agents/zstack/changes/alpha-authentication-acceptance.md.",
   "check": "pnpm exec vitest run --config scripts/release/vitest.config.ts scripts/release/alpha-frontier-identity.test.ts"
 }

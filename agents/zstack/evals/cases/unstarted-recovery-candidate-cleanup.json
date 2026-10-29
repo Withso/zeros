@@ -1,7 +1,7 @@
 {
   "id": "unstarted-recovery-candidate-cleanup",
   "kind": "replay",
-  "area": "cloud-workspaces",
+  "area": "control-plane",
   "fixedBy": "pr:658",
   "symptom": "A failed owner recovery candidate never activated a native writer, but its rollback Delete and independent Stop were blocked on an impossible final save.",
   "rule": "Use a distinct exact never-started receipt; retain source checkpoint custody, reject later activation and capture, and keep ordinary provider/erasure gates. Replay the real rollback and compute Stop with different retry deadlines and held provider inspection.",

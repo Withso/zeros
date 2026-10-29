@@ -1,7 +1,7 @@
 {
   "id": "alpha-publication-overlap",
   "kind": "replay",
-  "area": "release-dev-environment",
+  "area": "scripts-release",
   "fixedBy": "pr:485",
   "symptom": "The initial Alpha barrier stopped while an older successful publisher was uploading its ledger and moving the rolling tag in separate writes.",
   "rule": "Treat only validated ancestor tag/ledger disagreement as bounded pending admission; reread CI and all frontiers, never admit unequal identities, and fail closed if it persists. See playbooks/ci-red.md.",

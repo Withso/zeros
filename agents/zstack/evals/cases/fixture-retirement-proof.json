@@ -1,7 +1,7 @@
 {
   "id": "fixture-retirement-proof",
   "kind": "scenario",
-  "area": "cloud-workspaces",
+  "area": "control-plane",
   "fixedBy": "pr:514",
   "symptom": "Hourly fixture cleanup required physical deletion while provider storage remained behind an upload fence after compute had retired, blocking subsequent runs for hours.",
   "rule": "The bug-fix playbook requires separate compute and physical cleanup evidence, exact accepted deletion and all-generation proof, a post-I/O authority recheck, retained storage debt and positive completion after the real D1 purge.",

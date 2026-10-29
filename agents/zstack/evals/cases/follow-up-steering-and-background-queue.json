@@ -1,7 +1,7 @@
 {
   "id": "follow-up-steering-and-background-queue",
   "kind": "replay",
-  "area": "desktop-renderer",
+  "area": "renderer-agents",
   "fixedBy": "pr:508",
   "symptom": "Reopened Claude and Codex chats disabled steering, and queued follow-ups dispatched while Claude still had live background work.",
   "rule": "Restore exact-session capability metadata on adoption, and use live foreground plus background work for queue admission and release. Background ownership updates cannot wait for animation-frame batching.",

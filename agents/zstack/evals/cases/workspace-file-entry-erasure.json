@@ -1,7 +1,7 @@
 {
   "id": "workspace-file-entry-erasure",
   "kind": "seeded",
-  "area": "cloud-workspaces",
+  "area": "control-plane",
   "fixedBy": "pr:685",
   "symptom": "Workspace record erasure completed while mutable file paths and blob descriptors remained after their revision FK had been removed.",
   "rule": "Count every retained projection after actual purge. Delete file entries under the existing workspace/org and purge lease authorization, retaining sibling bytes and full rollback after the statement executes.",

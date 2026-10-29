@@ -1,7 +1,7 @@
 {
   "id": "claude-usage-status-inline",
   "kind": "replay",
-  "area": "renderer",
+  "area": "renderer-agents",
   "fixedBy": "pr:584",
   "symptom": "Above 75% Claude usage, every turn pinned \"Claude is nearing its usage limit.\" below the newest tool row while new tool calls kept streaming in above it, instead of showing it where it arrived among the turn's work.",
   "rule": "docs/agent-tool-presentation.md: Claude usage status is an inbetween working-feed row in source order, shown only where it changes the provider turn's status (including across steer segments) and folded into the working summary once settled; UI and copied transcripts share the projection (zstack-review).",

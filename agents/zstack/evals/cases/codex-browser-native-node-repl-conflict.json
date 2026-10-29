@@ -1,9 +1,9 @@
 {
   "id": "codex-browser-native-node-repl-conflict",
   "kind": "replay",
-  "area": "agent-adapters",
+  "area": "desktop-agents",
   "fixedBy": "pr:762",
   "symptom": "Codex chats with Browser enabled failed to open with an MCP configuration conflict for node_repl after ChatGPT Desktop declared its own node_repl in ~/.codex/config.toml, which Codex merged with Zeros' verified Browser override.",
-  "rule": "Retire only Zeros' own Browser registration once on its conflict, restart without the built-in browser, disable the native declaration and notify; keep every other conflict blocking and ignore a retired runtime's late exit. See changes/github-connection-notices-and-codex-browser-conflicts.md.",
+  "rule": "Retire only Zeros' own Browser registration once on its conflict, restart without the built-in browser, disable the native declaration and notify; keep every other conflict blocking and ignore a retired runtime's late exit. See git show 7b6eb9e6:agents/zstack/changes/github-connection-notices-and-codex-browser-conflicts.md.",
   "check": "pnpm test:git apps/desktop/src/engine/agents/adapters/codex/__tests__/app-server-adapter-binding.test.ts apps/desktop/src/renderer/features/agent/__tests__/agent-capability-notice-toast.test.ts"
 }

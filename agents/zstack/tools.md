@@ -13,7 +13,8 @@ node scripts/zstack/verify.mjs run --test scripts/__tests__/zstack-runner.test.t
 ```
 
 The default mode is `single-session`. Record the actual model with `--agent`;
-master/subagent mode requires both names. Create the private scratch directory
+`master-subagents` and `co-masters` require both model names (`--agent`, `--master`).
+The latter records a peer pair without claiming subagents. Create the private scratch directory
 before running. Receipts use an exclusive, no-follow descriptor, owned mode
 0600, and an owned directory that others cannot write. They never overwrite a
 prior attempt.
@@ -87,22 +88,49 @@ node scripts/zstack/eval-replay.mjs --case repository-name-casing --execute --re
 node scripts/zstack/eval-replay.mjs --case seeded-cache-generation --case seeded-foreign-writer-inventory --revision <full-source-sha> --execute --receipt /private/scratch/seeds.json
 ```
 
-Only bounded Vitest recipes are executable initially: exact files, the root
+Only bounded Vitest recipes are executable: exact files, the root
 or release config, the CP package, and an optional literal test-name filter.
 Python, arbitrary shell chains, live scenarios and unknown commands remain
-unsupported. Each side has a two-minute deadline; at most 32 selected cases
-run sequentially. `--allow-pending` is author validation only: a pending replay
+unsupported. Each side has a two-minute deadline and four workers; at most 32
+selected cases run sequentially. `--allow-pending` is author validation only: a pending replay
 cannot resolve to a commit. Seeds still require an explicit immutable revision.
 If `--all` exceeds 32 cases it refuses with `zstack_case_limit`; use explicit
 case batches. It never silently truncates the corpus to satisfy the bound.
 
-Replay reads Git objects without changing the index, refs or working tree.
-It copies up to 256 MiB into private temporary projections, excludes credentials
-and Git metadata, and reuses installed external dependencies only when the
-lockfile matches. Workspace-package links resolve into each projection. The
-fixed test files are identical on both sides; product helpers and configuration
-remain historical. Missing historical imports stay unverified. Projections
-are deleted in `finally`, including after cancellation and failed checks.
+Replay requires Git 2.45+ and locally available fix/parent commits. Ordinary
+workspace verification does not require the replay-only Git flag. Replay preserves
+the index, refs and working tree. Full clones use local objects. In a partial
+clone, execution discovers a promisor remote and fetches missing trees/blobs in
+batches of at most 4096 IDs before local-only `cat-file` reads. `--refetch`
+bypasses stale commit-graph negotiation; one lazy fetch per blob can otherwise
+fail on a missing commit-graph object or exhaust the read deadline. Fetches have
+a three-minute deadline per batch, write no refs or FETCH_HEAD, and require the
+host's Git access. Missing non-promised objects remain `zstack_git_unavailable`.
+
+Each projection copies at most 256 MiB, excluding credentials and Git metadata.
+Root and standalone pnpm graphs are checked independently against the actual
+installed lock, manifests, workspace settings and patches. Matching complete
+installs are reused. Otherwise, execution installs the historical graph with
+`--frozen-lockfile --offline` from the shared pnpm store, then retries online on
+a store/install miss. Both closed outcomes stay in the cache entry's metadata;
+raw child output is hashed and discarded. A graph gets ten minutes total.
+Installs use the same credential-free environment as checks.
+
+The default cache is `~/.cache/zeros-zstack-dependencies`; `--dependency-cache`
+selects another owned, canonical directory outside the checkout. Keys include
+the lock hash, install inputs, platform, architecture and Node ABI. At most eight
+graphs and 8 GiB are retained (the shared pnpm store has its own lifecycle).
+One installer holds the cache lock. Live projections lease entries; eviction
+removes the least recently used unleased entries. A graph that cannot fit fails
+closed, and failed installs leave no ready entry. Stop the replay before manually
+removing its cache. Workspace-package links always resolve into the projection.
+
+Fixed tests are identical on both sides; helpers and configuration stay
+historical. Missing historical imports stay unverified. Cleanup deletes
+projections and releases their cache leases, including after failed checks.
+`area` uses the closed owner vocabulary in `evals/README.md`; an incident title
+is not a new subsystem. Frozen `git show <sha>:<path>` rule references keep old
+lessons readable after a pack consolidation.
 
 `caught` means the fixed tests passed and the same assertion identities failed
 on the parent or seeded tree. `missed` means the parent passed. `unverified`
@@ -121,5 +149,7 @@ not the precision/recall of an LLM code reviewer.
 Closed failures include `diff_incomplete`, `adjacent_tests_required`,
 `source_changed`, `deadline`, `output_limit`, `cancelled`,
 `test_report_invalid`, `test_environment_failed`, `zstack_revision_unavailable`
-and `zstack_dependencies_unavailable`. The receipt retains the original result
+and `zstack_dependencies_unavailable`. Cache refusals use
+`zstack_dependency_cache_unsafe`, `zstack_dependency_cache_busy` or
+`zstack_dependency_cache_limit`. The receipt retains the original result
 when a later attempt succeeds; create a new output file for each attempt.

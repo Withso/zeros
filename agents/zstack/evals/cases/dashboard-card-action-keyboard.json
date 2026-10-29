@@ -1,9 +1,9 @@
 {
   "id": "dashboard-card-action-keyboard",
   "kind": "scenario",
-  "area": "renderer-shared-ui",
+  "area": "renderer-ui",
   "fixedBy": "pr:700",
   "symptom": "Pressing Enter on a Home board card's Archive action opened the workspace because the containing card handled the bubbled key and prevented the native button click.",
-  "rule": "changes/home-dashboard-presentation.md: composite card keyboard handlers own only events targeting the card; nested actions keep native activation.",
+  "rule": "git show 7b6eb9e6:agents/zstack/changes/home-dashboard-presentation.md: composite card keyboard handlers own only events targeting the card; nested actions keep native activation.",
   "check": "pnpm test:ui-smoke --shard=3/3"
 }

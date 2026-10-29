@@ -1,9 +1,9 @@
 {
   "id": "mcp-import-read-readiness",
   "kind": "replay",
-  "area": "desktop-renderer",
+  "area": "renderer-state",
   "fixedBy": "pr:738",
   "symptom": "MCP import reports a scan failure before the Local engine connects and can replace server settings before the existing document is confirmed.",
-  "rule": "Gate scanning on the owning engine, fence closed-dialog responses, and gate import on a confirmed valid settings read independently of error presentation. See agents/zstack/changes/transient-read-presentation.md.",
+  "rule": "Gate scanning on the owning engine, fence closed-dialog responses, and gate import on a confirmed valid settings read independently of error presentation. See git show 7b6eb9e6:agents/zstack/changes/transient-read-presentation.md.",
   "check": "pnpm exec vitest run --config vitest.config.ts apps/desktop/src/renderer/features/agent-extensions/__tests__/mcp-import-startup.test.ts"
 }

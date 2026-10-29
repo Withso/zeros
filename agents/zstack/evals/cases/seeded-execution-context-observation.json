@@ -1,7 +1,7 @@
 {
   "id": "seeded-execution-context-observation",
   "kind": "seeded",
-  "area": "cloud-engine-resume",
+  "area": "desktop-agents",
   "fixedBy": "pr:650",
   "symptom": "A context observation timer terminates a native child even though its exact execution grant remains live.",
   "rule": "The original context still fences new admission, but only execution-owned authority and explicit revocation govern admitted native work. Test the owned child across expiry and explicit Stop.",

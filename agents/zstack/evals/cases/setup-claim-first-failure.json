@@ -1,7 +1,7 @@
 {
   "id": "setup-claim-first-failure",
   "kind": "replay",
-  "area": "cloud-setup-diagnostics",
+  "area": "control-plane",
   "fixedBy": "pr:491",
   "symptom": "Retry admission reset current stage timings, cleanup or a later heartbeat could replace the first error, and credential-control startup errors collapsed to unknown.",
   "rule": "Commit one closed failure receipt per execution fence before retirement, retain it across cleanup and reclaim, preserve the engine class, and never retry proven integrity failures.",

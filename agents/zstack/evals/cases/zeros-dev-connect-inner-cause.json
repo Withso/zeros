@@ -1,9 +1,9 @@
 {
   "id": "zeros-dev-connect-inner-cause",
   "kind": "replay",
-  "area": "release-dev-environment",
+  "area": "scripts-release",
   "fixedBy": "pr:498",
   "symptom": "An Alpha admission HTTP 500 became runtime_unavailable without its phase or status; the client rejection and hourly result lost the first cause.",
-  "rule": "Capture a closed phase and class before disposing the client; carry it through evidence, the result and signed receipts without raw provider values or new retries. See changes/zeros-dev-closed-connect-and-deadline.md.",
+  "rule": "Capture a closed phase and class before disposing the client; carry it through evidence, the result and signed receipts without raw provider values or new retries. See git show 7b6eb9e6:agents/zstack/changes/zeros-dev-closed-connect-and-deadline.md.",
   "check": "pnpm exec vitest run scripts/__tests__/zeros-dev-runtime.test.ts scripts/__tests__/zeros-dev-cli.test.ts scripts/__tests__/zeros-dev-hourly-main.test.ts scripts/__tests__/zeros-dev-hourly-artifact.test.ts"
 }

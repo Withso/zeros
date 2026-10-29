@@ -1,9 +1,9 @@
 {
   "id": "codex-active-turn-settings",
   "kind": "replay",
-  "area": "local-engine-agents",
+  "area": "desktop-agents",
   "fixedBy": "pr:763",
   "symptom": "Codex effort and Fast changes made during a running turn applied only on the next send; naive live updates can target a completed turn or lose a same-tick acknowledgement/config change.",
-  "rule": "Publish changed effort/Fast to the exact active native turn, serialize and coalesce updates, clear the flush promise before resolution, and fence terminal ACKs, Stop, disposal and successors. Native refusal must remain nonfatal. See agents/zstack/changes/codex-active-turn-settings.md.",
+  "rule": "Publish changed effort/Fast to the exact active native turn, serialize and coalesce updates, clear the flush promise before resolution, and fence terminal ACKs, Stop, disposal and successors. Native refusal must remain nonfatal. See git show 7b6eb9e6:agents/zstack/changes/codex-active-turn-settings.md.",
   "check": "pnpm exec vitest run apps/desktop/src/engine/agents/adapters/codex/__tests__/app-server-adapter-settings.test.ts apps/desktop/src/engine/agents/adapters/codex/__tests__/app-server-server-requests.test.ts"
 }

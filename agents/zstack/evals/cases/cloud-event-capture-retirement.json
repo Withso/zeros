@@ -1,7 +1,7 @@
 {
   "id": "cloud-event-capture-retirement",
   "kind": "replay",
-  "area": "cloud-engine-resume",
+  "area": "desktop-engine",
   "fixedBy": "pr:670",
   "symptom": "Late cloud notifications called a closed durable event journal during engine shutdown, causing unhandled promise and timer failures and hiding the first retirement cause.",
   "rule": "Retire capture before closing the cloud journal; never fan out uncaptured events. Retain only the first closed site and code before cleanup and keep Local routing independent.",

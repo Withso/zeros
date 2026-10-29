@@ -10,7 +10,7 @@ import { planDriver, runDriver } from "./drivers.mjs";
 export const HELP = `node scripts/zstack/verify.mjs plan|run [--test repository/path.test.ts ...]
   run --execute --receipt /private/scratch/receipt.json
   local-ui [--shard 1/3] [--execute --receipt FILE]
-  --mode single-session|master-subagents --agent MODEL [--master MODEL]
+  --mode single-session|master-subagents|co-masters --agent MODEL [--master MODEL]
 Plans are offline. Live cloud proof is the deployed Dev gate0 probe
 (pnpm --dir apps/control-plane cloud-v2:gate0), run only with the task's Alpha
 authorization; this tool never runs it. No workflow, required check or
@@ -30,7 +30,7 @@ function parse(args) {
     const argument = rest[++index];
     if (flag === "--test") value.tests.push(argument); else value[flag.slice(2)] = argument;
   }
-  if (!["single-session", "master-subagents"].includes(value.mode) || value.mode === "master-subagents" && (!value.master || value.agent === "unspecified") ||
+  if (!["single-session", "master-subagents", "co-masters"].includes(value.mode) || value.mode !== "single-session" && (!value.master || value.agent === "unspecified") ||
     value.agent.length > 100 || (value.master?.length ?? 0) > 100 ||
     value.action === "run" && !value.execute || value.execute && !value.receipt || value.action === "plan" && value.execute)
     throw new Error("zstack_input_invalid");

@@ -1,7 +1,7 @@
 {
   "id": "agent-preparation-notices",
   "kind": "replay",
-  "area": "desktop-cloud-ui-state",
+  "area": "renderer-agents",
   "fixedBy": "pr:567",
   "symptom": "Creating or revealing a chat could emit generic provider-error toasts for initialization and reconnect state.",
   "rule": "Keep terminal failures in the affected chat, retain prompt/authentication notices and exact-owner invalidation, and keep recoverable preparation quiet. See docs/agent-tool-presentation.md and the local-provider-auth-persistence change fragment.",

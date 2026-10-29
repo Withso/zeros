@@ -1,7 +1,7 @@
 {
   "id": "boot-archive-pins-per-repository",
   "kind": "replay",
-  "area": "desktop-engine",
+  "area": "desktop-git",
   "fixedBy": "pr:659",
   "symptom": "Engine boot reported archive-refs=25294ms before Engine ready: startup repinning ran one git update-ref per saved archive snapshot, and every archived workspace keeps one.",
   "rule": "Startup maintenance before ready costs O(repositories), not O(rows); count Git argv in the test rather than timing it.",

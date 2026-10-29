@@ -1,7 +1,7 @@
 {
   "id": "provider-connection-identity",
   "kind": "replay",
-  "area": "1: renderer state and interaction",
+  "area": "desktop-native",
   "fixedBy": "pr:567",
   "symptom": "Connected provider methods omitted the account identity, CLI identity did not refresh after external sign-in, and native and engine checks could disagree about the selected CLI login.",
   "rule": "Name only the exact connected account, retain identity-free fallbacks, preserve visible observation generations across native reads, and probe the selected runtime. See the provider-connection-identity change fragment and its browser regression.",

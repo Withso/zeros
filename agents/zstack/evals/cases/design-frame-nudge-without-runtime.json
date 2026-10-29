@@ -1,7 +1,7 @@
 {
   "id": "design-frame-nudge-without-runtime",
   "kind": "scenario",
-  "area": "desktop-design-state",
+  "area": "desktop-design",
   "fixedBy": "pr:761",
   "symptom": "Single-frame keyboard movement was rejected while its preview runtime reloaded, even though the canvas geometry was already confirmed.",
   "rule": "agents/zstack/playbooks/performance.md: hold the live document and source projection unavailable during a canvas-frame nudge; geometry-only movement must retain queued saves, cancellation and history.",

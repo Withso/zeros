@@ -1,7 +1,7 @@
 {
   "id": "dev-database-teardown-drain",
   "kind": "replay",
-  "area": "release-dev-environment",
+  "area": "control-plane",
   "fixedBy": "pr:562",
   "symptom": "A regression test froze a PostgreSQL backend with SIGSTOP; it passed locally and failed with ESRCH in CI, where PostgreSQL runs in a service container.",
   "rule": "Reproduce connection races at the protocol layer (an in-test TCP relay that holds client bytes) and assert the race window was open; never signal or inspect the server's processes. See skills/zstack-verify/SKILL.md.",

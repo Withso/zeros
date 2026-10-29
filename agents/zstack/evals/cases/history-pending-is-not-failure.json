@@ -1,9 +1,9 @@
 {
   "id": "history-pending-is-not-failure",
   "kind": "replay",
-  "area": "desktop-renderer",
+  "area": "renderer-agents",
   "fixedBy": "pr:738",
   "symptom": "A healthy but slow Local or mirrored cloud history read becomes Chat history unavailable after 2.5 seconds.",
-  "rule": "Use an actual rejected history read as the failure signal; elapsed time only changes the pending presentation. See agents/zstack/changes/transient-read-presentation.md.",
+  "rule": "Use an actual rejected history read as the failure signal; elapsed time only changes the pending presentation. See git show 7b6eb9e6:agents/zstack/changes/transient-read-presentation.md.",
   "check": "pnpm exec vitest run --config vitest.config.ts apps/desktop/src/renderer/features/agent/__tests__/transcript-history-status.test.ts -t 'never infers a history failure'"
 }

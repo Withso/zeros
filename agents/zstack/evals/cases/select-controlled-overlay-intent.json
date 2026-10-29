@@ -1,9 +1,9 @@
 {
   "id": "select-controlled-overlay-intent",
   "kind": "scenario",
-  "area": "renderer-shared-ui",
+  "area": "renderer-ui",
   "fixedBy": "pr:703",
   "symptom": "Closing a controlled Select through owner state left its native overlay intent active, preventing the next popup from announcing native-browser parking.",
-  "rule": "changes/anchored-overlay-dismissal.md: retire overlay intent on controlled closure without requiring a Radix callback, then verify the next opening can announce itself.",
+  "rule": "git show 7b6eb9e6:agents/zstack/changes/anchored-overlay-dismissal.md: retire overlay intent on controlled closure without requiring a Radix callback, then verify the next opening can announce itself.",
   "check": "pnpm test:ui-smoke --shard=3/3"
 }

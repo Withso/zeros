@@ -10,6 +10,12 @@ const sha = "a".repeat(40);
 const roots: string[] = [];
 afterEach(async () => { for (const root of roots.splice(0)) await rm(root, { recursive: true, force: true }); });
 describe("zstack verification entry points", () => {
+  it("records a co-master pair without claiming there are subagents", async () => {
+    const write = vi.fn();
+    expect(await runCli(["local-ui", "--mode", "co-masters", "--agent", "GPT-6 Astra", "--master", "Claude Opus 5.5"], { write })).toBe(0);
+    expect(write.mock.calls[0][0]).toMatchObject({ mode: "co-masters", agent: "GPT-6 Astra", master: "Claude Opus 5.5" });
+    expect(await runCli(["local-ui", "--mode", "co-masters", "--agent", "GPT-6 Astra"], { write })).toBe(1);
+  });
   it("uses the existing Linux UI driver and exposes native proof separately", () => {
     expect(planDriver("local-ui", { platform: "linux", shard: "1/3" })).toMatchObject({ command: { argv: ["pnpm", "test:ui-smoke", "--shard=1/3"] },
       unverified: expect.arrayContaining([{ id: "engine-smoke", reason: "requires_macos" }]) });

@@ -1,7 +1,7 @@
 {
   "id": "cloud-checkpoint-stage-observations",
   "kind": "replay",
-  "area": "cloud-engine-stop",
+  "area": "desktop-engine",
   "fixedBy": "pr:511",
   "symptom": "A delivered final-checkpoint directive and a missing next heartbeat did not identify which engine gate had begun or failed before cancellation and cleanup.",
   "rule": "Report the actual checkpoint stage before awaiting it, through finite same-origin diagnostics that never block lifecycle work or extend its deadline. Preserve the first closed failure, and test held stages, delayed transport, exact authority, Local isolation, old CP compatibility and seal timeout observation.",

@@ -1,7 +1,7 @@
 {
   "id": "hourly-signed-cleanup-continuity",
   "kind": "seeded",
-  "area": "release-dev-environment",
+  "area": "scripts-release",
   "fixedBy": "pr:493",
   "symptom": "An interrupted canary could lose its only cleanup receipt, use an expired signal for revocation, or overwrite the primary failure during disconnect and cleanup.",
   "rule": "Checkpoint signed intent before every product mutation, restore only a verified predecessor, and finish bounded signed cleanup before allocating again. Reserve credential revocation time independently and retain the first named failure. Unknown writes stay unknown.",

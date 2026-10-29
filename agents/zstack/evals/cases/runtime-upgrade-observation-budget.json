@@ -1,7 +1,7 @@
 {
   "id": "runtime-upgrade-observation-budget",
   "kind": "replay",
-  "area": "1: renderer state and interaction",
+  "area": "renderer-agents",
   "fixedBy": "pr:495",
   "symptom": "The composer and runtime details owned independent polling intervals, including hidden-window reads and timer wakeups during a pending request.",
   "rule": "Follow the renderer invariants and docs/ui-interaction-performance.md: share exact-key observations, keep hidden surfaces inert, preserve 5s startup and 2s transition cadence, and coalesce external cache flights without resetting their deadline.",

@@ -1,9 +1,9 @@
 {
   "id": "github-connection-not-tab-failure",
   "kind": "replay",
-  "area": "desktop-renderer",
+  "area": "renderer-state",
   "fixedBy": "pr:762",
   "symptom": "After Local GitHub signed out, File, Changes and Review tabs with an open pull request showed Couldn't load this file/changes/the review although their content loaded, because the pull request comment overlay's NOT_AUTHENTICATED read became the tab's failure.",
-  "rule": "Publish GitHub connection refusals from optional comment overlays as a neutral Settings notice and keep genuine read failures as errors. See changes/github-connection-notices-and-codex-browser-conflicts.md.",
+  "rule": "Publish GitHub connection refusals from optional comment overlays as a neutral Settings notice and keep genuine read failures as errors. See git show 7b6eb9e6:agents/zstack/changes/github-connection-notices-and-codex-browser-conflicts.md.",
   "check": "pnpm test:git apps/desktop/src/renderer/features/code-review/__tests__/github-review-activity.test.ts"
 }

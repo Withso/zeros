@@ -1,7 +1,7 @@
 {
   "id": "gate0-hourly-profile-isolation",
   "kind": "seeded",
-  "area": "release-dev-environment",
+  "area": "scripts-release",
   "fixedBy": "pr:512",
   "symptom": "A longer manual rehearsal in the hourly workflow could replace the latest completed canary or activate its merge gate without executing the hourly lifecycle.",
   "rule": "A workflow profile shares signed cleanup ownership but cannot borrow another profile's coverage. Require exact trusted-main job and execution identity; keep the hourly activation latch, completed-result selection and freshness limit unchanged.",

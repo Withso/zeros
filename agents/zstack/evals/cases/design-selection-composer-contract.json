@@ -1,9 +1,9 @@
 {
   "id": "design-selection-composer-contract",
   "kind": "replay",
-  "area": "desktop-renderer",
+  "area": "renderer-agents",
   "fixedBy": "pr:573",
   "symptom": "A removed canvas reference could not be reattached by selecting the same target, and multi-selection lost individual references in the agent payload.",
-  "rule": "Keep a scoped canonical target collection and explicit selection epoch; group only the UI and freeze every submitted reference, as recorded in changes/design-selection-composer-contract.md.",
+  "rule": "Keep a scoped canonical target collection and explicit selection epoch; group only the UI and freeze every submitted reference, as recorded in git show 7b6eb9e6:agents/zstack/changes/design-selection-composer-contract.md.",
   "check": "pnpm test:git apps/desktop/src/renderer/features/agent/__tests__/composer-design-frame.test.ts apps/desktop/src/renderer/features/agent/__tests__/design-frame-attachment.test.ts"
 }

@@ -1,7 +1,7 @@
 {
   "id": "git-fixture-environment-isolation",
   "kind": "scenario",
-  "area": "engineering verification",
+  "area": "zstack",
   "fixedBy": "pr:511",
   "symptom": "A source-only verification runner exported Git directory and worktree overrides. Git commands in a temporary test fixture inherited them and changed the shared checkout's metadata instead of the fixture.",
   "rule": "The CI-red playbook requires runners and fixture subprocesses to strip all seven Git routing variables. Fixtures use fresh temporary directories; the regression injects routing only to another disposable repository and verifies its metadata remains unchanged.",

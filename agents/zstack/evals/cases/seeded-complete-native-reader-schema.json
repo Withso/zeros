@@ -1,7 +1,7 @@
 {
   "id": "seeded-complete-native-reader-schema",
   "kind": "seeded",
-  "area": "cloud checkpoint durability",
+  "area": "desktop-engine",
   "fixedBy": "pr:642",
   "symptom": "A correctly hashed periodic export imports unknown native columns or inherited claim authority into inert recovery records.",
   "rule": "Verify exact inert row schemas and exhaustive coverage as well as hashes; a known table or valid digest is not semantic coverage proof.",

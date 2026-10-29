@@ -1,7 +1,7 @@
 {
   "id": "local-empty-chat-transcript-row",
   "kind": "replay",
-  "area": "renderer",
+  "area": "renderer-agents",
   "fixedBy": "pr:568",
   "symptom": "An empty Local chat's workspace rows or Add chat transcripts row disappeared while the engine was busy or starting, and a sibling chat's new prompt reached that row only after a delay.",
   "rule": "Never gate a visible empty state on a read without a bounded fallback: share one persisted Local folder list, overlay prompts this renderer sent, show the workspace rows after a short grace, and paint known-empty chats provisionally after a restart (docs/ui-interaction-performance.md).",

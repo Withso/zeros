@@ -1,7 +1,7 @@
 {
   "id": "cloud-healthy-observation-after-refusal",
   "kind": "replay",
-  "area": "cloud-workspaces",
+  "area": "control-plane",
   "fixedBy": "pr:643",
   "symptom": "A previous-allocation refusal incremented the retry count used for healthy observation, delaying the first successful dispatch's next check from 500ms to 1000ms even within the original fast window.",
   "rule": "Age healthy observations separately from failed attempts. Initialize only at an accepted successful start, retain the original dispatch-age window and error floors, and keep unknown legacy rows on their conservative schedule.",

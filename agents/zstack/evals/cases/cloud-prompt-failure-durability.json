@@ -1,9 +1,9 @@
 {
   "id": "cloud-prompt-failure-durability",
   "kind": "scenario",
-  "area": "cloud-workspaces",
+  "area": "cloud-worker",
   "fixedBy": "pr:693",
   "symptom": "A failed prompt outcome could reach the control plane before its fallback error notice was durable, causing a flaky disk assertion and a crash window that lost the notice.",
-  "rule": "Commit the user row, failure notice and terminal state in one durable snapshot. Hold the notice write while triggering the independent reporter and inspect disk at the outcome boundary. See agents/zstack/changes/cloud-prompt-failure-durability.md.",
+  "rule": "Commit the user row, failure notice and terminal state in one durable snapshot. Hold the notice write while triggering the independent reporter and inspect disk at the outcome boundary. See git show 7b6eb9e6:agents/zstack/changes/cloud-prompt-failure-durability.md.",
   "check": "pnpm --dir apps/cloud-worker test src/__tests__/prompt-inbox.test.ts"
 }

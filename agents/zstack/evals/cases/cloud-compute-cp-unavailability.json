@@ -1,7 +1,7 @@
 {
   "id": "cloud-compute-cp-unavailability",
   "kind": "scenario",
-  "area": "cloud-workspaces",
+  "area": "control-plane",
   "fixedBy": "pr:546",
   "symptom": "Temporary database connection or pool failure safety-stopped a funded running workspace, and unavailable allocation proof was treated as revocation.",
   "rule": "Keep only confirmed finite prepaid runway through closed database unavailability. Re-observe the exact allocation, reservation, generation and claim after an ambiguous commit; do not replay provider I/O or funding. Preserve deadline stops, revocation and permanent-corruption refusals.",

@@ -1,9 +1,9 @@
 {
   "id": "design-undo-prediction-under-pending-edit",
   "kind": "replay",
-  "area": "desktop-design-state",
+  "area": "desktop-design",
   "fixedBy": "pr:744",
   "symptom": "Pressing Undo right after a Design layout change, while that change was still saving, painted the predicted inverse first; the saving edit then adopted on top of it and recorded it as its baseline, so the confirmed Undo restored an older layout (two steps back).",
-  "rule": "agents/zstack/changes/design-instant-editing-continuity.md: never paint a predicted Undo under an in-flight edit; take the prediction inside the mutation lane once earlier edits land, and keep consecutive history predictions immediate.",
+  "rule": "git show 7b6eb9e6:agents/zstack/changes/design-instant-editing-continuity.md: never paint a predicted Undo under an in-flight edit; take the prediction inside the mutation lane once earlier edits land, and keep consecutive history predictions immediate.",
   "check": "pnpm test:ui-smoke --shard=1/3"
 }

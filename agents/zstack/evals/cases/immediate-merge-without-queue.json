@@ -1,7 +1,7 @@
 {
   "id": "immediate-merge-without-queue",
   "kind": "replay",
-  "area": "ci-merge-safety",
+  "area": "scripts-ci",
   "fixedBy": "pr:580",
   "symptom": "An immediate-only landing authorization could not use the mandatory merge wrapper, whose only mode armed auto-merge; removing the high-level CLI auto flag can still admit a merge queue.",
   "rule": "Use an explicit immediate mode with fresh fail-closed snapshots, a synchronous expected-head-guarded merge and matching merged-SHA confirmation. Bind effective GraphQL principals and the actual merger to the same REST-qualified human by login and immutable IDs; use the CLI's real optional skipping/NEUTRAL pair. Pin the effective workspace Git author email, explicitly supply authorEmail and verify both actual commit-author receipts without treating email as authentication. Refuse queue, auto-armed and bypass-capable states without cancelling existing work; preserve the legacy default and all shared policy protections. Unsupported-option reds establish feature absence, not historical safety-guard failures.",

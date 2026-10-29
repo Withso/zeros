@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { constants } from "node:fs";
-import { mkdtemp, rm, open, mkdir, rename } from "node:fs/promises";
+import { mkdtemp, rm, open, mkdir, rename, realpath } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { repositoryPath } from "./check-plan.mjs";
@@ -58,12 +58,16 @@ export async function replaceProjectionFile(root, file, bytes) {
   } finally { await handle.close(); await rm(temporary, { force: true }); }
 }
 
-export async function prepareReplay(entry, { cwd, scratch = os.tmpdir() }) {
+export async function prepareReplay(entry, { cwd, scratch = os.tmpdir(), cacheRoot, signal }) {
   const revisions = resolveFix(cwd, entry.fixedBy), tree = revisionTree(cwd, revisions.fixed);
   const files = tree.map(row => row.file), command = parseReplayCheck(entry.check, files);
-  const root = await mkdtemp(path.join(scratch, "zstack-replay-"));
+  const root = await mkdtemp(path.join(await realpath(scratch), "zstack-replay-"));
   const green = path.join(root, "fixed"), red = path.join(root, "parent");
-  const dispose = () => rm(root, { recursive: true, force: true });
+  const dependencies = [];
+  const dispose = async () => {
+    try { await rm(root, { recursive: true, force: true }); }
+    finally { for (const release of dependencies.splice(0).reverse()) await release(); }
+  };
   try {
     await projectRevision(cwd, revisions.fixed, green, tree);
     const parentFiles = await projectRevision(cwd, revisions.parent, red);
@@ -74,20 +78,22 @@ export async function prepareReplay(entry, { cwd, scratch = os.tmpdir() }) {
       if (!source || source.mode === 0o120000) throw new Error("zstack_projection_invalid");
       await replaceProjectionFile(red, test, source.bytes);
     }
-    await linkDependencies(cwd, green, files); await linkDependencies(cwd, red, parentFiles);
+    dependencies.push(await linkDependencies(cwd, green, files, { cacheRoot, signal }));
+    dependencies.push(await linkDependencies(cwd, red, parentFiles, { cacheRoot, signal }));
     return { ...revisions, green, red, files, dispose };
   } catch (error) { await dispose(); throw error; }
 }
 
-export async function replayCase(entry, { cwd, scratch, prepare = prepareReplay, run = runCommand, signal, timeoutMs = 120_000 } = {}) {
+export async function replayCase(entry, { cwd, scratch, cacheRoot, prepare = prepareReplay, run = runCommand, signal, timeoutMs = 120_000 } = {}) {
   const startedAt = new Date().toISOString(); let projection, green = null, red = null;
   const result = (status, code) => ({ id: entry.id, kind: entry.kind, status, code, startedAt, completedAt: new Date().toISOString(),
     fixed: projection?.fixed ?? null, parent: projection?.parent ?? null,
     checkSha256: createHash("sha256").update(entry.check).digest("hex"), green, red });
   try {
     if (entry.kind !== "replay") return result("unverified", "explicit_scenario_required");
-    projection = await prepare(entry, { cwd, scratch });
+    projection = await prepare(entry, { cwd, scratch, cacheRoot, signal });
     const command = parseReplayCheck(entry.check, projection.files);
+    command.argv.push("--maxWorkers=4");
     green = await run(command, { cwd: projection.green, signal, timeoutMs });
     if (green.status !== "passed" || green.tests?.passed < 1) return result("unverified", "fixed_failed");
     red = await run(command, { cwd: projection.red, signal, timeoutMs });
@@ -98,7 +104,7 @@ export async function replayCase(entry, { cwd, scratch, prepare = prepareReplay,
     if (!failed?.length || failed.some(test => !passed.has(test.id))) return result("unverified", "assertions_changed");
     return result("caught", "regression_detected");
   } catch (error) {
-    const code = /^zstack_(?:check_unsupported|revision_unavailable|revision_ambiguous|dependencies_unavailable|git_unavailable|projection_invalid|projection_unsupported|source_limit|source_unsafe|seed_invalid|seed_not_applicable)$/.test(error?.message ?? "")
+    const code = /^(?:cancelled|zstack_(?:check_unsupported|revision_unavailable|revision_ambiguous|dependencies_unavailable|dependency_cache_(?:unsafe|busy|limit)|git_unavailable|projection_invalid|projection_unsupported|source_limit|source_unsafe|seed_invalid|seed_not_applicable))$/.test(error?.message ?? "")
       ? error.message : "zstack_replay_failed";
     return result("unverified", code);
   } finally { await projection?.dispose(); }
@@ -113,18 +119,23 @@ export function applySeed(text, seed) {
 }
 
 export async function replaySeed(entry, seed, { revision, ...options }) {
-  const prepare = async (_entry, { cwd, scratch = os.tmpdir() }) => {
+  const prepare = async (_entry, { cwd, scratch = os.tmpdir(), cacheRoot, signal }) => {
     if (!/^[a-f0-9]{40}$/.test(revision ?? "")) throw new Error("zstack_revision_unavailable");
     const tree = revisionTree(cwd, revision), files = tree.map(row => row.file);
     parseReplayCheck(entry.check, files);
-    const root = await mkdtemp(path.join(scratch, "zstack-seed-")), green = path.join(root, "fixed"), red = path.join(root, "seeded");
-    const dispose = () => rm(root, { recursive: true, force: true });
+    const root = await mkdtemp(path.join(await realpath(scratch), "zstack-seed-")), green = path.join(root, "fixed"), red = path.join(root, "seeded");
+    const dependencies = [];
+    const dispose = async () => {
+      try { await rm(root, { recursive: true, force: true }); }
+      finally { for (const release of dependencies.splice(0).reverse()) await release(); }
+    };
     try {
       await projectRevision(cwd, revision, green, tree); await projectRevision(cwd, revision, red, tree);
       const input = await sourceBytes(red, seed.file);
       if (!input || input.mode === 0o120000) throw new Error("zstack_seed_invalid");
       await replaceProjectionFile(red, seed.file, Buffer.from(applySeed(input.bytes.toString("utf8"), seed)));
-      await linkDependencies(cwd, green, files); await linkDependencies(cwd, red, files);
+      dependencies.push(await linkDependencies(cwd, green, files, { cacheRoot, signal }));
+      dependencies.push(await linkDependencies(cwd, red, files, { cacheRoot, signal }));
       return { fixed: revision, parent: revision, green, red, files, dispose };
     } catch (error) { await dispose(); throw error; }
   };

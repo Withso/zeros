@@ -1,9 +1,9 @@
 {
   "id": "seeded-cloud-idle-renewal",
   "kind": "seeded",
-  "area": "cloud-workspaces",
+  "area": "desktop-engine",
   "fixedBy": "pr:652",
   "symptom": "Merely viewing several cloud chats kept every context renewing after native work stopped.",
-  "rule": "Renew only exact contexts with launch, foreground or unproved background ownership; keep the original deadlines and never postpone an existing timer. See changes/cloud-observation-db-budget.md.",
+  "rule": "Renew only exact contexts with launch, foreground or unproved background ownership; keep the original deadlines and never postpone an existing timer. See git show 7b6eb9e6:agents/zstack/changes/cloud-observation-db-budget.md.",
   "check": "pnpm exec vitest run apps/desktop/src/engine/__tests__/cloud-local-command-queue-boot.test.ts -t \"cloud idle observation load\""
 }

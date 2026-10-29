@@ -1,0 +1,9 @@
+{
+  "id": "zstack-eval-closed-areas",
+  "kind": "replay",
+  "area": "zstack",
+  "fixedBy": "pr:772",
+  "symptom": "Eval cases accepted incident-specific area labels, so subsystem discovery and corpus summaries could silently split one code owner into unrelated labels.",
+  "rule": "zstack-eval validates area against the closed subsystem vocabulary derived from RULES.md ownership and documented in agents/zstack/evals/README.md; adding an owner changes the vocabulary and its map together.",
+  "check": "pnpm test:git scripts/__tests__/zstack-eval-replay.test.ts -t 'rejects ad-hoc subsystem names'"
+}

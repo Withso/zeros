@@ -1,9 +1,9 @@
 {
   "id": "github-pr-discovery-refresh-recovery",
   "kind": "replay",
-  "area": "renderer",
+  "area": "desktop-engine",
   "fixedBy": "pr:733",
   "symptom": "Slow PR discovery times out without notifying its caller; refreshes during an in-flight lookup are lost and failures render as no pull request.",
-  "rule": "Use a finite network budget with late completion publication, coalesce a current-owner successor, and distinguish unavailable observations from confirmed absence. See agents/zstack/changes/github-pr-discovery-identity.md.",
+  "rule": "Use a finite network budget with late completion publication, coalesce a current-owner successor, and distinguish unavailable observations from confirmed absence. See git show 7b6eb9e6:agents/zstack/changes/github-pr-discovery-identity.md.",
   "check": "pnpm exec vitest run --config vitest.config.ts apps/desktop/src/renderer/platform/bridge/__tests__/git-read-timeouts.test.ts apps/desktop/src/engine/workspace/__tests__/change-events.test.ts apps/desktop/src/renderer/shell/pr/__tests__/workspace-pr-activity.test.ts apps/desktop/src/renderer/shell/workbench/__tests__/review-discovery.test.ts"
 }

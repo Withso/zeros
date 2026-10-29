@@ -1,7 +1,7 @@
 {
   "id": "cloud-sdk-navigation-target",
   "kind": "replay",
-  "area": "cloud-runtime",
+  "area": "renderer-state",
   "fixedBy": "pr:603",
   "symptom": "A parsed cloud navigation key carried relativePath into the strict native SDK admission command, rejecting normal workspace opens.",
   "rule": "Project renderer navigation metadata into the closed IPC identity, and test the actual parser output against the native schema.",

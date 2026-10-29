@@ -1,7 +1,7 @@
 {
   "id": "boat-body-retry-hints",
   "kind": "replay",
-  "area": "cloud-workspaces",
+  "area": "control-plane",
   "fixedBy": "e05a598787fe71ed1789c7ee17869074de16f8f7",
   "symptom": "The Boat client read only a Retry-After header, which Boat never sends, so 503 retryAfterSeconds, per-IP retryAfter and refused-start windows fell back to generic backoff; a resume refused with 409 snapshot_data_expired failed the wake instead of starting checkpoint recovery.",
   "rule": "Take retry waits and terminal codes from the provider's documented error envelope, not HTTP convention, and pin each with a wire-shaped test. See skills/zstack-review/SKILL.md (Tests).",

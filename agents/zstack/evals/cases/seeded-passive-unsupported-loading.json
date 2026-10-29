@@ -1,9 +1,9 @@
 {
   "id": "seeded-passive-unsupported-loading",
   "kind": "seeded",
-  "area": "desktop-renderer",
+  "area": "renderer-state",
   "fixedBy": "pr:738",
   "symptom": "A passive surface inherits workbench capability classification but has no notice renderer, leaving an unsupported read loading forever.",
-  "rule": "Retain authoritative capability responses outside workbench frames and do not retry them automatically. See agents/zstack/changes/transient-read-presentation.md.",
+  "rule": "Retain authoritative capability responses outside workbench frames and do not retry them automatically. See git show 7b6eb9e6:agents/zstack/changes/transient-read-presentation.md.",
   "check": "pnpm exec vitest run --config vitest.config.ts apps/desktop/src/renderer/state/__tests__/read-recovery.test.ts -t 'keeps a definitive unsupported response'"
 }

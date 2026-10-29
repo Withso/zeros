@@ -1,7 +1,7 @@
 {
   "id": "empty-base-stock-leaves",
   "kind": "replay",
-  "area": "vm-image-bootstrap",
+  "area": "scripts-release",
   "fixedBy": "pr:628",
   "symptom": "The empty-base sanitizer refused stock log and agent aliases and cache sockets before image capture.",
   "rule": "Exercise provider-shaped node kinds through real base sanitation, preserve target bytes and unknown custody, and retain strict default Computer sanitation and saved-tree checks.",

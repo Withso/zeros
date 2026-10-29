@@ -1,7 +1,7 @@
 {
   "id": "infrastructure-profile-coverage-boundary",
   "kind": "scenario",
-  "area": "release-dev-environment",
+  "area": "scripts-release",
   "fixedBy": "pr:522",
   "symptom": "The fixture had no agent API keys and could not borrow owner-org release-check connections. Native terminal coverage must not pass full Gate 0 or the hourly agent merge requirement.",
   "rule": "The alpha-operator lesson fragment requires distinct signed profile and soak scopes, explicit owner-test exclusions, exact native intent/proof binding and every red attempt; an ineligible or skipped product step is not coverage.",

@@ -1,7 +1,7 @@
 {
   "id": "pro-sharing-pagination-test-budget",
   "kind": "replay",
-  "area": "control-plane-collaboration",
+  "area": "control-plane",
   "fixedBy": "pr:492",
   "symptom": "The 101-account Pro guest pagination fixture exceeded Vitest's five-second default under modest database delay. It constructs plain pg.Pool directly, so the API pool deadlines changed by the PR never run.",
   "rule": "playbooks/ci-red.md: trace the actual pool constructor and unchanged transaction helpers, reproduce with bounded database transit delay, then give only the large fixture a justified test budget while retaining its assertions and production deadlines.",

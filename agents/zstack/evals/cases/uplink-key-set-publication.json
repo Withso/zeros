@@ -1,7 +1,7 @@
 {
   "id": "uplink-key-set-publication",
   "kind": "replay",
-  "area": "access-authority",
+  "area": "control-plane",
   "fixedBy": "pr:590",
   "symptom": "Connected verifiers retained an older key set after a control-plane key update, and delayed reads could replace newer state.",
   "rule": "Exercise the real key-store subscription through the uplink and verifier; hold initial reads, fetches and signature verification across a key-set change.",

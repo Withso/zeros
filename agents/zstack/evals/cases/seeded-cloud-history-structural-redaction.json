@@ -1,7 +1,7 @@
 {
   "id": "seeded-cloud-history-structural-redaction",
   "kind": "seeded",
-  "area": "cloud-engine-resume",
+  "area": "desktop-engine",
   "fixedBy": "pr:653",
   "symptom": "A generic terminal scrubber replaces the pinned kind-aware history filter and changes proof fields while capturing a normal turn.",
   "rule": "zstack-eval restores whole-document redaction in a disposable tree; the production persistence regression must catch incomplete capture without weakening proof guards.",

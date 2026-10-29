@@ -1,9 +1,15 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { execFileSync } from "node:child_process";
+import { mkdir, writeFile, readdir, rm, symlink } from "node:fs/promises";
 import { EventEmitter } from "node:events";
 import { PassThrough } from "node:stream";
 import path from "node:path";
-import { parseReplayCheck, replayCase, compareEvalReceipts, applySeed } from "../zstack/replay.mjs";
+import { parseReplayCheck, replayCase, replaySeed, compareEvalReceipts, applySeed } from "../zstack/replay.mjs";
 import { runCommand } from "../zstack/runner.mjs";
+import { privateFixtureRoot } from "./zstack-fixtures";
+
+const roots: string[] = [];
+afterEach(async () => { for (const root of roots.splice(0)) await rm(root, { recursive: true, force: true }); });
 
 const file = "scripts/__tests__/zeros-dev-product.test.ts";
 const entry = { id: "regression", kind: "replay", fixedBy: "a".repeat(40), check: `pnpm exec vitest run ${file}` };
@@ -15,6 +21,30 @@ const prepared = () => ({ fixed: "a".repeat(40), parent: "b".repeat(40), green: 
   files: [file], dispose: vi.fn(async () => {}) });
 
 describe("isolated eval replay", () => {
+  it.each(["replay", "seed"])("canonicalizes a symlinked macOS-style temp root before a %s and cleans its projections", async kind => {
+    const cwd = await privateFixtureRoot(roots), scratch = await privateFixtureRoot(roots), aliasRoot = await privateFixtureRoot(roots);
+    const alias = path.join(aliasRoot, "tmp"); await symlink(scratch, alias);
+    const git = (args: string[]) => execFileSync("git", args, { cwd, encoding: "utf8", stdio: ["pipe", "pipe", "pipe"] }).trim();
+    git(["init", "-q", "--initial-branch=main"]);
+    await mkdir(path.join(cwd, path.dirname(file)), { recursive: true });
+    await mkdir(path.join(cwd, "node_modules/.pnpm"), { recursive: true });
+    await writeFile(path.join(cwd, ".gitignore"), "node_modules/\n");
+    await writeFile(path.join(cwd, "package.json"), '{"name":"fixture"}');
+    const lock = "lockfileVersion: '9.0'\nimporters:\n  .: {}\n";
+    await writeFile(path.join(cwd, "pnpm-lock.yaml"), lock);
+    await writeFile(path.join(cwd, "node_modules/.pnpm/lock.yaml"), lock);
+    await writeFile(path.join(cwd, file), "// assertions supplied by the runner fixture\n");
+    await writeFile(path.join(cwd, "source.ts"), "const fixed = false;\n");
+    const commit = () => { git(["add", "."]); git(["-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "commit", "-qm", "fixture"]); };
+    commit(); await writeFile(path.join(cwd, "source.ts"), "const fixed = true;\n"); commit();
+    const fixedBy = git(["rev-parse", "HEAD"]), run = vi.fn().mockResolvedValueOnce(green).mockResolvedValueOnce(red);
+    const options = { cwd, scratch: alias, run };
+    const result = kind === "replay" ? await replayCase({ ...entry, fixedBy }, options)
+      : await replaySeed({ ...entry, fixedBy, kind: "seeded" }, { file: "source.ts", before: "true", after: "false" }, { ...options, revision: fixedBy });
+    expect(result).toMatchObject({ status: "caught", code: "regression_detected" });
+    expect(run.mock.calls.every(call => call[1].cwd.startsWith(scratch + path.sep))).toBe(true);
+    expect(await readdir(scratch)).toEqual([]);
+  });
   it("parses only known bounded test invocations, retaining literal test-name filters", () => {
     expect(parseReplayCheck(`pnpm test:git ${file}`, [file])).toMatchObject({ kind: "vitest", tests: [file] });
     const cp = "apps/control-plane/src/worker.test.ts";

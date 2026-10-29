@@ -1,9 +1,9 @@
 {
   "id": "base-runner-advertisement",
   "kind": "replay",
-  "area": "vm-image-bootstrap",
+  "area": "desktop-agents",
   "fixedBy": "pr:638",
   "symptom": "A new base advertised runner support and required the native runner probe even with agent_runners off; runtime qualification failed on the new base while the same runtime passed on the old base.",
-  "rule": "Trace base markers separately from product flags. Keep unqualified runner support absent without bypassing present-marker validation or qualification. The fallback does not establish the first live failure. See changes/base-runner-advertisement.md.",
+  "rule": "Trace base markers separately from product flags. Keep unqualified runner support absent without bypassing present-marker validation or qualification. The fallback does not establish the first live failure. See git show 7b6eb9e6:agents/zstack/changes/base-runner-advertisement.md.",
   "check": "pnpm test:git scripts/__tests__/cloud-runtime-base-v4.test.ts scripts/__tests__/cloud-engine-qualification.test.ts apps/desktop/src/engine/agents/containment/__tests__/cloud-runner-native.test.ts"
 }

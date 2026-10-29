@@ -1,7 +1,7 @@
 {
   "id": "typed-admission-retry-boundary",
   "kind": "replay",
-  "area": "release-dev-environment",
+  "area": "desktop-native",
   "fixedBy": "pr:506",
   "symptom": "The shared native client erased typed transient admission advice, so the canary could not retry it safely or retain its first failure after recovery.",
   "rule": "Parse the exact status, closed code and phase, boolean and bounded Retry-After at the shared transport boundary. Retry with fresh proofs under the original deadline and owner/Stop fences; retain first failure and executed retry counts in successful and failed signed evidence.",

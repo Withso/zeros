@@ -1,7 +1,7 @@
 {
   "id": "local-provider-connection-adoption",
   "kind": "replay",
-  "area": "desktop-engine",
+  "area": "desktop-agents",
   "fixedBy": "pr:571",
   "symptom": "Switching a Local provider between an API key, CLI login and saved accounts failed the next send with 'The provider connection changed. Reconnect this session before sending.', and a stale registry read could show Sign-in required.",
   "rule": "A Local execution adopts the current connection in place at the next turn boundary through runtimeConfiguration.updateCredentials, carrying native history to a new config root once no process writes it; cloud keeps its admitted credential; a forced registry refresh never joins a pre-change read. See the local-provider-connection-adoption change fragment.",

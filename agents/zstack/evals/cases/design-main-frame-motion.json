@@ -4,6 +4,6 @@
   "area": "renderer-ui",
   "fixedBy": "pr:695",
   "symptom": "Selecting the main frame shows its existing animation in the inspector, but the Motion toolbar is disabled and opening from the inspector immediately closes the timeline because selectedNodeId is empty.",
-  "rule": "changes/design-main-frame-motion.md: resolve the inspector's style target for explicit frame roots and document bodies, carry that target through draft ownership, preview, save and delete, and distinguish selection eligibility from runtime readiness. Exercise root and child selection round trips through the real browser controls.",
+  "rule": "git show 7b6eb9e6:agents/zstack/changes/design-main-frame-motion.md: resolve the inspector's style target for explicit frame roots and document bodies, carry that target through draft ownership, preview, save and delete, and distinguish selection eligibility from runtime readiness. Exercise root and child selection round trips through the real browser controls.",
   "check": "pnpm test:ui-smoke --shard=2/3"
 }

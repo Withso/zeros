@@ -1,9 +1,9 @@
 {
   "id": "seeded-cloud-qualified-runtime-scan",
   "kind": "seeded",
-  "area": "cloud-workspaces",
+  "area": "control-plane",
   "fixedBy": "pr:652",
   "symptom": "An exact credential lookup scanned unrelated historical runtime registry rows on every warm request.",
-  "rule": "Check actual plans with a representative registry; keep exact parameterized qualification lookups and all refusal predicates. See changes/cloud-observation-db-budget.md.",
+  "rule": "Check actual plans with a representative registry; keep exact parameterized qualification lookups and all refusal predicates. See git show 7b6eb9e6:agents/zstack/changes/cloud-observation-db-budget.md.",
   "check": "pnpm --dir apps/control-plane exec vitest run src/cloud-workspaces/agent-boot-executions.integration.test.ts -t \"bounds the qualified credential lookup\""
 }

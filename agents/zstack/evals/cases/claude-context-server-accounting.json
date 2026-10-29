@@ -1,9 +1,9 @@
 {
   "id": "claude-context-server-accounting",
   "kind": "seeded",
-  "area": "Claude context usage",
+  "area": "protocol",
   "fixedBy": "pr:717",
   "symptom": "Filtering every isLoaded=false tool silently loses used context when native tool search is disabled.",
-  "rule": "Use native category accounting for server shares and qualify summary fixtures against the bundled CLI; changes/claude-context-server-accounting.md.",
+  "rule": "Use native category accounting for server shares and qualify summary fixtures against the bundled CLI; git show 7b6eb9e6:agents/zstack/changes/claude-context-server-accounting.md.",
   "check": "pnpm test:git packages/protocol/src/__tests__/context-usage.test.ts"
 }

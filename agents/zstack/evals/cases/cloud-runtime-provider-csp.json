@@ -1,7 +1,7 @@
 {
   "id": "cloud-runtime-provider-csp",
   "kind": "replay",
-  "area": "cloud-runtime",
+  "area": "scripts",
   "fixedBy": "pr:603",
   "symptom": "The packaged renderer meta CSP blocked the native-validated direct provider WebSocket even though the socket adapter and the native CSP allowed it.",
   "rule": "Verify the packaged meta policy for every admitted transport origin. Keep its provider exception limited to encrypted WebSockets instead of opening arbitrary hosts.",

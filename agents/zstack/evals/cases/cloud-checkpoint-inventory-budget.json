@@ -1,7 +1,7 @@
 {
   "id": "cloud-checkpoint-inventory-budget",
   "kind": "seeded",
-  "area": "cloud-engine-resume",
+  "area": "desktop-engine",
   "fixedBy": "pr:662",
   "symptom": "Wake registered a cloud engine and received authorized history recovery, then local SQLite inventory verification exhausted its 100 ms limit before the first heartbeat. The separate readiness wait obscured the native refusal.",
   "rule": "The bug-fix playbook requires real populated sealed and unsealed restore tests with deterministic elapsed I/O, a shared bounded proof deadline including empty/final reads, both delayed stages observed, and unchanged canonical custody and retirement guards.",

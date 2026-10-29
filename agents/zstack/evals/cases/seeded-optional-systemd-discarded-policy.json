@@ -1,7 +1,7 @@
 {
   "id": "seeded-optional-systemd-discarded-policy",
   "kind": "seeded",
-  "area": "vm-image-bootstrap",
+  "area": "scripts-release",
   "fixedBy": "pr:632",
   "symptom": "A seeded retry wrapper discarded a completed changed optional-systemd policy before checking the immutable original expectation.",
   "rule": "Every completed observation must satisfy the original sealed policy before contention can authorize a retry, even if the changed edge later disappears.",

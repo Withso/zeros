@@ -1,7 +1,7 @@
 {
   "id": "fixture-storage-pending",
   "kind": "replay",
-  "area": "release-dev-environment",
+  "area": "scripts-release",
   "fixedBy": "pr:515",
   "symptom": "A six-hour provider upload fence outlived the hourly cleanup budget, leaving every completed lifecycle red and blocking the next allocation.",
   "rule": "Separate authenticated compute retirement from physical erasure. Match all signed identities and generations, refresh proof before allocation, retain exact disk inventory and bound the backlog without dropping debt. Stale deleting allocation metadata is not fresh compute authority; v1 receipts keep their original erasure rule.",
