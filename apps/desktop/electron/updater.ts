@@ -1,28 +1,4 @@
-// ──────────────────────────────────────────────────────────
-// Auto-updater — in-place download + install (Developer ID signed)
-// ──────────────────────────────────────────────────────────
-//
-// Now that builds are Developer-ID-signed + notarized, electron-updater can
-// replace the app in place. The flow is the industry-standard "background
-// download, apply on quit" model (VS Code / GitHub Desktop):
-//
-//   1. Main checks on launch, focus/resume, and every 5 min. Every packaged channel
-//      uses the GENERIC provider against GitHub Releases — stable via
-//      /releases/latest/download, alpha and beta via their rolling tags. (Generic,
-//      not electron-updater's GitHub provider: see UPDATER_FEED_BY_CHANNEL for why
-//      that one is unusable here.) The check is process-owned, so it continues while
-//      the macOS window is closed.
-//   2. When a newer version exists, DOWNLOAD it silently in the background.
-//      The renderer is notified only after the platform installer has staged it.
-//   3. The staged update applies automatically on the next natural quit
-//      (autoInstallOnAppQuit) — so it NEVER interrupts a running agent session.
-//   4. A user who wants it now clicks the pill → updater_install →
-//      quitAndInstall (relaunches into the new version).
-//
-// electron-updater consumes the `.zip` + `<channel>-mac.yml`; the `.dmg` is only
-// ever for a first-time manual download. Under `pnpm dev` (unpackaged) every
-// entry point no-ops.
-// ──────────────────────────────────────────────────────────
+// electron-updater consumes ZIPs and channel metadata; DMGs are for initial installs.
 
 import {
   app,
@@ -53,61 +29,11 @@ const STABLE_FEED_METADATA_URL = `${RELEASES}/latest/download/latest-mac.yml`;
 const BETA_FEED_METADATA_URL = `${RELEASES}/download/beta/beta-mac.yml`;
 const ALPHA_FEED_METADATA_URL = `${RELEASES}/download/alpha/alpha-mac.yml`;
 
-/** Per-channel updater wiring. A TOTAL Record so adding a channel is a COMPILE
- *  ERROR here instead of silently inheriting Production's feed — which would make a
- *  pre-release install update itself into Stable.
- *
- *  `null` means THIS CHANNEL HAS NO AUTO-UPDATE and must not poll anything (dev only).
- *
- *  WHY THE GENERIC PROVIDER AND NOT electron-updater's GITHUB PROVIDER. The GitHub
- *  provider's channel filter also accepts stable tags, so it 404s on beta-mac.yml
- *  under a stable tag and, with allowDowngrade, tries to swap a pre-release for the
- *  older production build. The generic provider fetches exactly `<base>/<channel>-mac.yml`
- *  and resolves the filenames inside it against the same base — precisely the assets
- *  each release workflow uploads, and nothing else.
- *
- *  HOW THE URLS RESOLVE. electron-updater's `newBaseUrl` appends a trailing slash to
- *  the configured URL before joining, so `<...>/releases/latest/download` +
- *  `latest-mac.yml` gives `<...>/releases/latest/download/latest-mac.yml`, and the
- *  relative `url:` entries inside the feed resolve the same way. Verified end to end
- *  against the live public repo, anonymously: feed 200, payload 206 on a Range
- *  request (so blockmap differential downloads work), and the query below is passed
- *  through harmlessly.
- *
- *  This used to be Cloudflare R2. The only reason for it was that the repo was
- *  PRIVATE, so anonymous clients got 404 on release assets and an installed app could
- *  never read the feed. The repo is public now, the GitHub releases already carry
- *  every file the feed needs, and R2 was pure duplication — plus three secrets, two
- *  prune jobs and a bucket to keep under a free-tier ceiling.
- *
- *  BOTH HALVES OR NEITHER. A channel entry here and its workflow's upload step must
- *  move together. #198 removed beta's uploads while the app kept polling beta's feed,
- *  which produced a stale feed and a false "You're up to date!"; the reverse leaves
- *  assets nobody reads. Every entry point is gated on updaterEnabled(), and
- *  `check:packaging-paths` fails on a half-change in either direction.
- *
- *  `?static=1` pins electron-updater's per-poll `noCache` query OFF (newUrlFromBase
- *  only adds it when the base carries no query), so repeated polls share one CDN cache
- *  key instead of missing it every time. Free on GitHub rather than billable as it was
- *  on R2, but still the polite default at a 5-minute interval.
- *
- *  `allowDowngrade` is false on EVERY channel. Each feed is pinned to its own channel
- *  file and only moves forward, so a feed mishap can never silently replace an install
- *  with an older build. This matters most on stable, where
- *  `/releases/latest/download` follows whatever GitHub marks Latest: with downgrade
- *  off, mis-marking an old release can no longer push it to every stable user.
- *
- *  Stable carried `true` until 2026-07-28 as an escape hatch for the 0.1.x → 0.0.x
- *  version RESET — the retired 0.1.x tags (up to 0.1.179) sort ABOVE the reset line,
- *  so a user stranded on one would read the feed as "older" and get
- *  update-not-available forever. That rationale is retired because it could never
- *  have worked: `allowDowngrade` is read from the config baked into the INSTALLED
- *  app, and every 0.1.x build predates the repo going public, so it was served by
- *  Cloudflare R2 (above) and polls an origin that no longer exists. Those installs
- *  can't reach a live feed at all, let alone honour this flag; only builds from
- *  v0.1.0 forward read it, and that line is monotonic. Channels are separate installs
- *  (own bundle id, feed and ports), so no in-app channel switch needs a downgrade
- *  either. */
+/** Pin generic feeds per channel: the GitHub provider also accepts stable tags,
+ * which may lack prerelease metadata. Feed entries and release uploads must
+ * move together (check:packaging-paths); null channels must not poll.
+ * ?static=1 disables the updater's noCache query so polls share a CDN key.
+ * Never let a bad feed or Latest tag downgrade an installed version. */
 const UPDATER_FEED_BY_CHANNEL: Record<
   Channel,
   {
@@ -171,9 +97,7 @@ export function requireClientUpgrade(value: unknown): void {
   if (wired) checkAutomatically("required");
 }
 
-/** Main-process observers of the status stream (the app menu's dynamic
- *  "Check for Updates" item). The renderer gets the same stream via emitEvent;
- *  this exists because main-side consumers have no IPC event bus to listen on. */
+/** Main-process menu consumers cannot subscribe to the renderer's IPC stream. */
 const statusListeners = new Set<(status: UpdaterStatusSnapshot) => void>();
 
 /** Subscribe a main-process listener to updater status changes. Returns an
@@ -185,7 +109,6 @@ export function subscribeUpdaterStatus(
   return () => statusListeners.delete(listener);
 }
 
-/** Current status snapshot for main-process consumers. */
 export function getUpdaterStatus(): UpdaterStatusSnapshot {
   return currentStatus;
 }
@@ -254,7 +177,6 @@ function compareIdentifiers(
   return left < right ? -1 : 1;
 }
 
-/** True only when both versions are valid and `candidate` is newer. */
 export function isVersionNewer(candidate: string, baseline: string): boolean {
   const left = parseVersion(candidate);
   const right = parseVersion(baseline);
@@ -543,7 +465,6 @@ function applyAndRelaunch(): void {
   });
 }
 
-/** Wire electron-updater's lifecycle events once. */
 export function setupUpdater(): void {
   if (wired) return;
   wired = true;
@@ -705,7 +626,6 @@ export function setupUpdater(): void {
   checkAutomatically("launch");
 }
 
-// ── IPC commands exposed to the renderer ──────────────────
 
 /** Check for updates. Returns lightweight metadata so the renderer can react
  *  immediately when a new version is live; the event stream drives the

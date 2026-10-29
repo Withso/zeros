@@ -1,22 +1,4 @@
-// ──────────────────────────────────────────────────────────
-// Engine sidecar — spawn, track, shutdown, crash watchdog
-// ──────────────────────────────────────────────────────────
-//
-// Electron sidecar manager. The Node.js Zeros engine runs as a child
-// process of the Electron shell. It binds a local
-// WebSocket + HTTP server on a release-channel-owned loopback range
-// (Stable 24193–24200, Beta 24203–24210, Dev 24293–24300) and writes
-// the actual port to its app-data runtime manifest once bound.
-//
-// Crash recovery: short `/health` probes every 3 s detect suspected stalls.
-// A living child needs a bounded confirmation; exact-child work heartbeats
-// defer recovery while work remains live. An observed exit recovers promptly.
-// Replacement emits `engine-restarted` so the renderer can reconnect.
-//
-// `shutdown()` MUST be called from app.on("before-quit") — otherwise
-// the Node child outlives the Electron window and eats a channel-owned
-// engine port on the next launch.
-// ──────────────────────────────────────────────────────────
+// before-quit must call shutdown() so the owned child releases its listening port.
 
 import { execFile, spawn, type ChildProcess } from "node:child_process";
 import {
@@ -365,29 +347,9 @@ function resolveHostProcessSupervisorPath(): string | null {
   return existsSync(development) ? development : null;
 }
 
-/** Resolve the Claude Code CLI the engine should hand the Agent SDK as
- *  `pathToClaudeCodeExecutable`, plus the claude-code version it implements.
- *
- *  WHY Electron main has to do this. `@anthropic-ai/claude-agent-sdk` ships no
- *  cli.js — the executable lives in a platform-specific OPTIONAL dep that the
- *  SDK finds with `createRequire(sdk.mjs).resolve('<pkg>/claude')`. The engine
- *  CANNOT run that lookup in a packaged app: it is a `bun build --compile`
- *  single-file binary, so sdk.mjs is bundled in, `import.meta.url` points into
- *  bun's `$bunfs`, and there is no node_modules on disk to walk. The SDK then
- *  throws "Native CLI binary for <plat>-<arch> not found" from `query()` and the
- *  user sees "AGENT RESPONSE FAILURE" on every send — while dev, where the engine
- *  is `bun <repo>/apps/desktop/src/cli.ts`, works perfectly. The resolver must
- *  therefore exercise the packaged dependency layout.
- *
- *  Same shape as resolvePtyHostPaths / resolveCursorHostPaths: packaged reads the
- *  extraResources copy (scripts/stage-claude-cli.mjs stages it at pack time), dev
- *  resolves the dependency. The version rides along because the engine's own
- *  version read (registry.ts readClaudeBundledCliVersion) is `require.resolve`d
- *  and therefore fails in the compiled binary too.
- *
- *  Returns nulls rather than throwing — the engine's binary-resolver has its own
- *  fallback tiers (a user's global `claude`), and a hard failure here would take
- *  down engine spawn entirely over one agent's runtime. */
+/** The compiled Bun engine cannot resolve the SDK's on-disk CLI or version,
+ * so main supplies the staged runtime. Null preserves the engine's fallback
+ * tiers instead of making one missing provider prevent engine startup. */
 export function resolveClaudeCliPaths(): {
   binary: string | null;
   version: string | null;
@@ -632,15 +594,8 @@ export function resolveCodexCliPaths(): {
   return { binary, version, managedPackageRoot };
 }
 
-/** Run a diagnostic subprocess WITHOUT blocking the Electron main thread.
- *
- *  The reaper/diagnostic paths used spawnSync for lsof/ps — but sidecar.ts IS
- *  Electron main, and those tools routinely take tens-to-hundreds of ms (lsof
- *  can stall for seconds on a busy machine). spawnSync froze the entire UI for
- *  that long, in exactly the failure mode these paths exist to recover from —
- *  a wedged engine driving watchdog respawns every ~21s, each one freezing the
- *  window again. execFile keeps the event loop free; the timeout + SIGKILL
- *  bound a hung tool so a diagnostic can never wedge the app it's diagnosing. */
+/** lsof/ps can stall for seconds; diagnostics must neither block Electron
+ * main nor outlive their timeout. */
 function execFileText(
   cmd: string,
   args: string[],
@@ -677,16 +632,8 @@ async function describeRangeListeners(): Promise<string> {
   return probe.stdout.trim() || "(no listeners found)";
 }
 
-/** Cross-process readiness gate: the engine manifest proves the child believes
- *  it bound `port`; this proves the independent Electron host can repeatedly
- *  reach that exact boot after later startup subsystems are armed. In beta.84,
- *  an early same-process probe passed before Chokidar started a native macOS
- *  FSEvents watcher; that watcher then deadlocked the Bun-compiled event loop,
- *  producing a TCP listener that never answered Electron, curl, or the renderer.
- *
- *  A failed gate blocks publication and lets spawnEngineWithRecovery relaunch
- *  on the next channel-owned candidate instead of handing a dead bridge to the
- *  renderer or waiting for the watchdog's later kill/respawn cycle. */
+/** A manifest proves only the child's own bind; verify the exact boot from
+ * Electron after startup subsystems are armed before publishing its port. */
 async function confirmSpawnReachable(
   port: number,
   generation: number,
@@ -713,21 +660,9 @@ async function confirmSpawnReachable(
   return false;
 }
 
-/** Signal the engine's whole PROCESS GROUP, falling back to the single pid.
- *
- *  The engine is spawned as its own group leader (`detached`, see doSpawnEngine),
- *  so `process.kill(-pid, sig)` (negative pid = process group) reaches the engine
- *  AND its forked Node cursor-host / pty-host children — and the pty shells those
- *  own — in one shot. This is THE fix for the ppid=1 orphan leak: the old
- *  single-pid kill left every grandchild running when the engine was SIGKILLed,
- *  and they reparented to launchd and lived forever (18 stranded `cursor-agent`
- *  procs observed). Even after the leader exits, surviving members keep the pgid,
- *  so a group signal still reaps them; an already-empty group just throws ESRCH.
- *
- *  NB: the SDK-spawned `cursor-agent` runtime is itself detached into a SEPARATE
- *  group, so it is NOT reached here — the cursor-host reaps it via run.cancel()
- *  on its own teardown (see cursor-host.cjs). Windows has no process groups; we
- *  fall straight to the single pid there. */
+/** Descendants may retain inherited sockets after the leader exits, so signal
+ * the owned group. Cursor's separately detached runtime is reaped by its host;
+ * Windows and non-leaders fall back to the individual pid. */
 function signalEngineTree(
   child: ChildProcess | null,
   pid: number | undefined,
@@ -749,27 +684,8 @@ function signalEngineTree(
   }
 }
 
-/** SIGTERM → wait → SIGKILL escalation for the current engine child.
- *
- *  THE BUG this fixes: the old version sent SIGTERM and immediately
- *  returned. If the engine's event loop was blocked (mid file re-index,
- *  heavy cache work), it couldn't process the signal and stayed alive.
- *  spawnEngine then created a NEW engine bound to a NEW port; the OLD
- *  one kept running forever, orphaned — `state.child` already points
- *  to the new spawn, so nothing else ever signals it. Across many
- *  watchdog respawns, orphan engines pile up across the channel's port walk.
- *  each holding a port + file watcher + memory. Repro: git commit
- *  triggers cache rebuild → event loop stall → watchdog times out →
- *  respawn loop. lsof showed 3+ bun processes after a few commits.
- *
- *  The fix: SIGTERM, then poll the child for up to 2 s, then SIGKILL
- *  the PID directly if it's still alive. The PID-based fallback is
- *  important because `current.kill()` is a no-op on a process that
- *  ignored SIGTERM — `process.kill(pid, "SIGKILL")` always lands.
- *
- *  Awaitable so spawnEngine can wait for the port to actually be free
- *  before binding (otherwise the new engine bumps to the next port
- *  and the supposedly-dead one keeps listening on the old port). */
+/** Await retirement before replacement so an unresponsive old child cannot
+ * retain its port after state.child moves to the new process. */
 async function killCurrentChild(): Promise<void> {
   const current = state.child;
   mcpControlClient?.dispose(); mcpControlClient = null;
@@ -787,23 +703,8 @@ async function killCurrentChild(): Promise<void> {
   // whole group so the hosts get their own SIGTERM too, not just via the engine.
   signalEngineTree(current, pid, "SIGTERM");
 
-  // Wait up to 15 s for graceful exit. The `exit` event fires when
-  // the process actually terminates (whether from SIGTERM or any
-  // other cause). Resolve early if it lands within the window.
-  //
-  // 2026-05-28: bumped from 2 s → 5 s. The engine's `stop()` disposes
-  // its chat adapters in parallel; the codex app-server adapter alone
-  // does a JSON-RPC `dispose` round-trip + child kill which can take
-  // 1-2 s end-to-end. At 2 s we were SIGKILLing on every HMR
-  // respawn ("engine PID … ignored SIGTERM; SIGKILLed") which left
-  // half-flushed SQLite writes and in-flight
-  // permission promises in undefined states.
-  //
-  // 2026-08-17: bumped from 5 s → 15 s to stay above the engine's own 12 s
-  // shutdown cap (apps/desktop/src/cli.ts). Provider teardown retires owned
-  // process groups and flushes provider state; killing during that work leaves
-  // crash-recovery records for the next startup. A clean exit still
-  // resolves this wait immediately, so fast restarts stay fast.
+  // Outlast the engine's 12 s shutdown cap so provider teardown can flush state
+  // and retire its processes before escalation; a clean exit resolves early.
   await new Promise<void>((resolve) => {
     let done = false;
     const t = setTimeout(() => {
@@ -821,16 +722,8 @@ async function killCurrentChild(): Promise<void> {
     });
   });
 
-  // Escalate to SIGKILL on the whole GROUP — but ONLY if the engine is still
-  // alive after the grace (i.e. it ignored SIGTERM, event-loop wedged). On a
-  // CLEAN exit we deliberately do NOT group-SIGKILL: the cursor/pty hosts (same
-  // group) received the SIGTERM at t=0 and are mid-teardown, cancelling their
-  // runs so the SDK reaps the DETACHED cursor-agent group — SIGKILLing them now
-  // would strand exactly the grandchildren we're trying to reap. When the engine
-  // IS wedged, the hosts still got their SIGTERM at t=0, so by this 5s mark they
-  // have long finished their ≤2.5s teardown; group-SIGKILLing then fells only the
-  // stuck engine. process.kill(pid, 0) is a no-signal liveness probe (throws
-  // ESRCH if gone).
+  // A cleanly exited leader may leave hosts finishing their detached-runtime
+  // cleanup; group-SIGKILL only while the leader remains alive after the grace.
   if (pid !== undefined) {
     let leaderAlive = false;
     try {
@@ -859,37 +752,9 @@ async function killCurrentChild(): Promise<void> {
  *  our new child from an orphan before bind completes. */
 let orphansReaped = false;
 
-/**
- * Kill stranded engine processes left over from prior app runs.
- *
- * Zeros' engine binds the current release channel's isolated walk range:
- * Stable 24193–24200, Beta 24203–24210, or Dev 24293–24300. When the app was
- * killed without a clean shutdown (crash, force-quit, legacy native migration),
- * the child outlives its parent and keeps the port. The next launch then gets
- * bumped up the retry chain, and the renderer — which probes get_engine_port
- * but falls back to the base — may talk to a zombie that speaks an older
- * protocol or is wedged. Symptom: every agent request times out even though
- * "an engine" is running.
- *
- * We defensively scan THIS launch's range with lsof and match known engine
- * (and engine-host) command lines, gated on ppid 1 so a listener whose owner
- * is still alive — an older sibling build from before channel ranges were
- * isolated, a standalone `zeros serve` under a shell, an engine mid-graceful
- * shutdown — is never cross-killed; the bounded port walk plus Electron's
- * external identity check routes this launch around it instead (see
- * shouldReapRangeListener). A linked-
- * worktree dev launch also finds PPID-1 Bun engines from its exact source CLI
- * + ZEROS_INSTANCE across older dynamic port blocks: the launcher
- * intentionally chooses a new free block, so range-only cleanup cannot see
- * yesterday's orphan. Unrecognized processes are left alone.
- *
- * Kills signal the process GROUP (engines are spawned as group leaders), with
- * a single-pid fallback. The old single-pid kill was the root of the beta.82
- * black-holed-port loop: SIGKILLing just the engine left its children
- * (pty-host, cursor-host, agent CLIs) holding inherited copies of the LISTEN
- * socket, so the port stayed "bound" with nobody accepting and every fresh
- * engine that re-bound it answered nothing.
- */
+/** Reap only known engine-shaped PPID-1 processes in this channel's range;
+ * a live parent or unknown shape keeps ownership. Dynamic dev ports also need
+ * the exact source CLI and ZEROS_INSTANCE match outside the current range. */
 async function reapOrphanEngines(skipPid?: number): Promise<void> {
   const enginePortRange = currentEnginePortRange();
   const rangePids = new Set<number>();
@@ -1051,22 +916,8 @@ async function reapOrphanEngines(skipPid?: number): Promise<void> {
   }
 }
 
-/**
- * Spawn the engine with `projectRoot` as its working directory. Kills any
- * previous child first, then waits through bounded stale-containment recovery
- * for the exact child to publish and answer through its owned manifest.
- */
-// Single-flight chain across ALL respawn drivers: the HMR code-watcher, the
-// crash watchdog, IPC engineRestart/openProjectFolder, and deep-link handling
-// each call spawnEngine() independently. The HMR watcher's `respawning` flag is
-// closure-local and doesn't cover the others, so without a shared guard two
-// spawns can interleave at killCurrentChild()'s await boundary: the second sees
-// state.child already nulled, skips the kill, and spawns a SECOND engine while
-// the first is orphaned (the range reaper mostly cleans it up, but it's a real
-// port-flap / wrong-state.port window). Chaining every spawn through one
-// promise makes them run strictly sequentially — no interleave, no orphan — and
-// the latest request still produces a fresh engine. Errors are swallowed on the
-// chain so one failed spawn doesn't wedge the next.
+// HMR, watchdog and user requests share this chain: interleaved replacement
+// could orphan a child. A failed spawn must not block the next request.
 let spawnChain: Promise<unknown> = Promise.resolve();
 
 // Cold-start PATH hydration is independent of BrowserWindow creation, but the
@@ -1266,17 +1117,7 @@ async function doSpawnEngine(
     /* file may not exist; fine */
   }
 
-  // Always pipe stdio. We used to use `inherit` in dev so engine logs
-  // appeared in the dev terminal — that worked locally but made remote
-  // diagnosis impossible because the central main.log file (the one
-  // the renderer's "View → Toggle Developer Tools → main log path"
-  // surfaces) only captured Electron-main logs. Anything from the
-  // engine subprocess vanished. Now we pipe in both modes and forward:
-  //   - dev:      child stdout/stderr → console.log/error → main.log
-  //               (and the dev terminal still sees them via the
-  //                inherited console writes from Electron main).
-  //   - packaged: same forwarding, plus a side-stream into engine.log
-  //               for raw spool inspection.
+  // Pipe both modes through main.log; packaged builds also retain raw engine.log.
   const isPackaged = IS_PACKAGED;
 
   // Hand the engine the path to the encrypted secret store so its
@@ -1460,16 +1301,8 @@ async function doSpawnEngine(
       // process.env is spread first; extraEnv overrides it. The engine is
       // local-only (no relay); only the loopback bridge listens.
       env: stripWorkOSApiKeys({ ...process.env, ...extraEnv }),
-      // Make the engine its OWN process-group leader (pgid == pid). WITHOUT this
-      // the engine shares Electron-main's group, so killCurrentChild could only
-      // signal the single engine pid — and when the engine was SIGKILLed (which
-      // the HMR/respawn storm did thousands of times) its forked grandchildren
-      // (the Node cursor-host / pty-host, and the pty shells they own) were never
-      // signalled and reparented to launchd (ppid=1), leaking memory forever.
-      // As a group leader we can `process.kill(-pid, …)` to fell the whole engine
-      // subtree atomically (see killCurrentChild / shutdown). We deliberately do
-      // NOT child.unref() — the engine stays a tracked child we manage; detached
-      // only changes the process group, not the stdio pipes or fd 3.
+      // Own a process group so teardown reaches descendants holding inherited
+      // sockets. Keep the child referenced; detached changes grouping, not ownership.
       detached: process.platform !== "win32",
     },
   );
@@ -1953,47 +1786,9 @@ export function currentRoot(): string | null {
   return state.root;
 }
 
-/** Dev-only: watch engine TypeScript sources and respawn the running
- *  engine when any of them change. No-op in packaged builds.
- *
- *  Why we now respawn directly instead of only SIGTERM'ing:
- *  the previous version sent SIGTERM and left the actual respawn to
- *  the watchdog. That worked, but the watchdog needs FAIL_THRESHOLD=5
- *  consecutive unreachable probes at POLL_INTERVAL_MS=3000 to act —
- *  ~15 s on the best day, and far longer when the engine's event
- *  loop is briefly stuck and ignores SIGTERM (we've seen 2+ minute
- *  gaps in main.log between "engine source changed" and the watchdog
- *  actually noticing). During that window every renderer surface
- *  that depends on the bridge — chat dropdown, agents panel,
- *  providers panel — sits on "Engine connecting…" / "Loading
- *  agents…", which looks like a hang every time the user saves a
- *  file in apps/desktop/src/engine/**.
- *
- *  killCurrentChild() inside spawnEngine() already does
- *  SIGTERM → 5 s wait → SIGKILL escalation, so the worst case here
- *  is ~5-6 s instead of 15-120 s.
- *
- *  Coalescing strategy (2026-05-28 audit):
- *  In a real dev session a single user-visible action (git
- *  checkout, branch switch, a checkpoint restore, `pnpm
- *  install`, even a multi-write editor save) can drop dozens of
- *  events on apps/desktop/src/engine/** within a few hundred ms. The previous
- *  250ms debounce caught the inside-burst events, but the 5-second
- *  SIGTERM grace meant each respawn took ~5s end-to-end; a second
- *  burst arriving after the first respawn started would queue
- *  another full respawn back-to-back. Audit log showed 175 respawns
- *  in one hour, ~30 of them inside 30s windows.
- *
- *  Three guards now layer on top of the debounce:
- *    1. POST_RESPAWN_COOLDOWN_MS  — after a respawn lands, ignore
- *       further events for N ms; tsup-watch and similar tools
- *       finish writing within that window.
- *    2. BURST_WINDOW_MS / BURST_THRESHOLD — when many events arrive
- *       in a short window (git checkout territory), extend the
- *       debounce so we only fire ONCE per burst rather than chaining
- *       a respawn per write.
- *    3. shouldIgnoreEventPath — drop noise from generated dirs,
- *       JetBrains/VSCode atomic-save tmp files, and .DS_Store. */
+/** Source changes request replacement directly instead of waiting for health
+ * failure detection. Debounce, cooldown and path filtering coalesce editor and
+ * checkout bursts; packaged builds never watch source. */
 export function startEngineCodeWatcher(): void {
   if (IS_PACKAGED) return;
   // Escape hatch for "develop in one place, TEST in another" setups
@@ -2205,19 +2000,9 @@ export function startEngineCodeWatcher(): void {
     // dropping 30+ files, etc.).
     let scheduled: NodeJS.Timeout | null = null;
 
-    // ── Phantom-event guard (content-aware) ──────────────────
-    // macOS fs.watch (FSEvents) fires "change" for METADATA-only mutations —
-    // atime, xattr, Spotlight (`mds`) indexing — AND, the case that actually
-    // drove the storm here, for mtime bumps with BYTE-IDENTICAL content:
-    // file-sync tools mirror files (rewriting mtime), `git
-    // checkout`/stash restore identical bytes, and editors' atomic save
-    // (write-temp → rename over the original) all move mtime while the source is
-    // unchanged. The old guard compared only `${mtimeMs}:${size}`, so every such
-    // touch read as a "real" edit and respawned the engine — the 15,311-respawn
-    // storm. We now compare a CONTENT HASH: mtime+size is a cheap fast-path
-    // (unchanged → definitely no respawn), and only when they move do we hash the
-    // file and respawn iff the bytes actually differ. A stat/read miss
-    // (delete/rename/unreadable) counts as a real change so we never swallow one.
+    // FSEvents and file-sync tools can report metadata-only or byte-identical
+    // writes. Compare content after the stat fast path; unreadable paths count as
+    // changes so deletes and renames still trigger recovery.
     interface FileSig {
       mtimeMs: number;
       size: number;
@@ -2406,23 +2191,8 @@ export function startWatchdog(): void {
   }, ENGINE_WATCHDOG_INTERVAL_MS);
 }
 
-// ──────────────────────────────────────────────────────────
-// Initial project root resolution
-// ──────────────────────────────────────────────────────────
-//
-// The engine's file watcher indexes every file under its root. That's
-// fine for a user repo (~thousands of files) but catastrophic for
-// $HOME (~millions) or / (entire filesystem). When the watcher exceeds
-// macOS's EMFILE ceiling the engine crashes on every fs event and the
-// IPC bridge stalls indefinitely — the exact "Fetching agent registry..."
-// hang users hit when the packaged app is launched from Finder (CWD=/)
-// or from a shell where the cwd isn't a real project.
-//
-// Strategy: refuse to root at anything that doesn't look like a user
-// project. Use a dedicated empty sentinel at
-//   ~/.zeros/default-project/
-// The user then opens their real project via File → Open Folder,
-// which respawns the engine rooted there.
+// Finder may launch with cwd=/; watching a system or home directory can exhaust
+// file descriptors. Use an empty sentinel until a plausible project is opened.
 
 const SENTINEL_DIR_NAME = "default-project";
 
