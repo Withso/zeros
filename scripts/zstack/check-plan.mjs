@@ -54,11 +54,14 @@ export function planVerification({ policy, evidence, files, tests = [], platform
     const key = JSON.stringify(argv);
     if (!commandKeys.has(key)) { local.push({ id, argv, kind }); commandKeys.add(key); }
   };
-  const rootTests = [...suites].filter(file => !file.startsWith("apps/control-plane/")).sort();
+  const rootTests = [...suites].filter(file => !file.startsWith("apps/control-plane/") && !file.startsWith("apps/cloud-worker/")).sort();
   const cpTests = [...suites].filter(file => file.startsWith("apps/control-plane/")).sort();
+  const workerTests = [...suites].filter(file => file.startsWith("apps/cloud-worker/")).sort();
   if (rootTests.length) add("adjacent-root", ["pnpm", "test:git", ...rootTests], "vitest");
   if (cpTests.length) add("adjacent-control-plane", ["pnpm", "--dir", "apps/control-plane", "exec", "vitest", "run",
     ...cpTests.map(file => file.slice("apps/control-plane/".length))], "vitest");
+  if (workerTests.length) add("adjacent-cloud-worker", ["pnpm", "--dir", "apps/cloud-worker", "exec", "vitest", "run",
+    "--config", "vitest.config.ts", ...workerTests.map(file => file.slice("apps/cloud-worker/".length))], "vitest");
   for (const script of ["typecheck", "lint", "check:ui", "check:secrets"]) add(script.replace(":", "-"), ["pnpm", script]);
   const lint = paths.filter(file => sourceFile.test(file) && available.has(file));
   if (lint.length) add("changed-lint", ["pnpm", "exec", "eslint", ...lint]);

@@ -28,7 +28,8 @@ The tool finds conventional same-directory, `__tests__`, and script-name tests;
 use `--test` for semantic adjacency it cannot infer.
 
 Required local gates always include typecheck, lint, UI policy and the secret
-scan. `test:git` is filtered to adjacent files; CP tests run in their package.
+scan. `test:git` is filtered to adjacent root files; control-plane and cloud-worker
+tests run with their own package configs. A mixed selection runs each group.
 Applicable static `check:*` recipes come from the selected registry. Full root
 and CP suites, packaging, qualification, browser and platform proofs remain in
 the `ci`/`unverified` lists unless explicitly run through their existing path.

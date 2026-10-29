@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
+import { fileURLToPath } from "node:url";
 import { decideScope, loadPolicy, selectChecks } from "../ci/scope.mjs";
 import { planVerification, assertExecutablePlan } from "../zstack/check-plan.mjs";
+import { runCommand } from "../zstack/runner.mjs";
 
 const policy = loadPolicy();
 const head = "a".repeat(40), base = "b".repeat(40), fingerprint = "c".repeat(64);
@@ -49,6 +51,37 @@ describe("zstack check planning", () => {
     expect(commands(value)).not.toContain("pnpm test:control-plane");
     expect(value.ci.some((check: { id: string }) => check.id === "control-plane-database")).toBe(true);
   });
+
+  it("keeps mixed root, control-plane and cloud-worker suites in their owning packages", () => {
+    const cp = "apps/control-plane/src/config.test.ts";
+    const worker = "apps/cloud-worker/src/drivers/cursor/__tests__/usage-accounting.test.ts";
+    const workerSource = "apps/cloud-worker/src/drivers/cursor/usage-accounting.ts";
+    const value = plan({ evidence: evidence([workerSource, source, cp]),
+      files: [cp, worker, workerSource, source, test], tests: [worker, test, cp, worker] });
+    expect(value.blocked).toEqual([]);
+    expect(value.local.filter(check => check.kind === "vitest").map(check => check.argv)).toEqual([
+      ["pnpm", "test:git", test],
+      ["pnpm", "--dir", "apps/control-plane", "exec", "vitest", "run", "src/config.test.ts"],
+      ["pnpm", "--dir", "apps/cloud-worker", "exec", "vitest", "run", "--config", "vitest.config.ts",
+        "src/drivers/cursor/__tests__/usage-accounting.test.ts"],
+    ]);
+    expect(() => assertExecutablePlan(value)).not.toThrow();
+  });
+
+  it("executes inferred cloud-worker assertions through the real planned recipe", async () => {
+    const file = "apps/cloud-worker/src/drivers/cursor/usage-accounting.ts";
+    const adjacent = "apps/cloud-worker/src/drivers/cursor/__tests__/usage-accounting.test.ts";
+    const value = plan({ evidence: evidence([file]), files: [file, adjacent] });
+    expect(value.blocked).toEqual([]);
+    const check = value.local.find(check => check.kind === "vitest");
+    expect(check).toBeDefined();
+    const result = await runCommand(check!, {
+      cwd: fileURLToPath(new URL("../../", import.meta.url)), timeoutMs: 60_000,
+    });
+    expect(result).toMatchObject({ status: "passed", code: "ok", tests: { success: true, failed: 0, pending: 0 } });
+    expect(result.tests!.passed).toBeGreaterThan(0);
+    expect(result.tests!.total).toBe(result.tests!.passed);
+  }, 70_000);
 
   it("requires an explicit adjacent suite when source has no discoverable test", () => {
     const value = plan({ files: [source] });
