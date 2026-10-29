@@ -6,6 +6,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { lexer } from "marked";
 import { parseNameStatus } from "./ci/scope.mjs";
 
 const REPOSITORY = "Withso/zeros";
@@ -15,6 +16,10 @@ const USAGE =
   "usage: pnpm agent:merge <pr-number> [--immediate] [--dry-run] [--force --reason <human-PR-comment-URL>]";
 const SKIP_MARKER =
   /\[(?:skip\s+ci|ci\s+skip|no\s+ci|skip\s+actions|actions\s+skip)\]|skip-checks:\s*true\b/i;
+const PR_SECTIONS = [
+  "Why", "What changes", "Tests", "Rollout",
+  "Local workspace impact", "Cloud workspace impact",
+];
 const CHECK_BUCKETS = new Set([
   "pass",
   "fail",
@@ -50,6 +55,7 @@ const IMMEDIATE_PR_QUERY = `query ImmediateMergePreflight($number: Int!) {
   repository(owner: "Withso", name: "zeros") {
     pullRequest(number: $number) {
       id number title body state isDraft isCrossRepository changedFiles
+      author { login __typename }
       headRefOid baseRefOid baseRefName mergeable mergeStateStatus reviewDecision
       isInMergeQueue viewerCanMergeAsAdmin autoMergeRequest { enabledAt }
       labels(first: 100) { nodes { name } pageInfo { hasNextPage } }
@@ -93,6 +99,16 @@ const validAutoMerge = (value) =>
   value === null ||
   (typeof value?.enabledAt === "string" &&
     Number.isFinite(Date.parse(value.enabledAt)));
+const hasControlBytes = (value) => [...value].some(char => char.charCodeAt(0) < 32 || char.charCodeAt(0) === 127);
+
+function missingPrSections(body) {
+  const inlineText = (tokens) => tokens.map(token => token.tokens
+    ? inlineText(token.tokens)
+    : ["text", "escape", "codespan"].includes(token.type) ? token.text : "").join("");
+  const headings = new Set(lexer(body).filter(token => token.type === "heading")
+    .map(token => inlineText(token.tokens).trim().replace(/\s+/g, " ").replace(/:$/, "").toLowerCase()));
+  return PR_SECTIONS.filter(section => !headings.has(section.toLowerCase()));
+}
 
 function commentId(reason, number) {
   if (typeof reason !== "string") return null;
@@ -206,6 +222,15 @@ export function decideMerge(
     return refuse(
       "incident",
       "This PR changes a CI incident marker; the owner must resolve the incident and merge it.",
+    );
+  }
+  // Only GitHub's author kind exempts automation; names and labels are editable.
+  const botAuthor = pr.author?.is_bot === true && typeof pr.author.login === "string" && !!pr.author.login;
+  const missing = botAuthor ? [] : missingPrSections(pr.body);
+  if (missing.length) {
+    return refuse(
+      "pr-sections",
+      `This PR body is missing required sections: ${missing.join(", ")}. Add Markdown headings before arming a human or agent PR.`,
     );
   }
   if (
@@ -495,8 +520,9 @@ export async function runAgentMerge(
     );
     if (
       !match?.[1].trim() ||
-      /[\x00-\x1f\x7f]/.test(match[1]) ||
-      !/^[^\s<>@\x00-\x1f\x7f]+@[^\s<>@\x00-\x1f\x7f]+$/.test(match[2]) ||
+      hasControlBytes(match[1]) ||
+      hasControlBytes(match[2]) ||
+      !/^[^\s<>@]+@[^\s<>@]+$/.test(match[2]) ||
       match[2].length > 254 ||
       (immediateAuthorEmail !== null && immediateAuthorEmail !== match[2])
     )
@@ -544,7 +570,8 @@ export async function runAgentMerge(
       pr.labels.pageInfo?.hasNextPage !== false
     )
       throw new Error("Incomplete PR labels");
-    return { ...pr, labels: pr.labels.nodes, graphqlViewer: data.viewer };
+    return { ...pr, labels: pr.labels.nodes, graphqlViewer: data.viewer,
+      author: pr.author ? { login: pr.author.login, is_bot: pr.author.__typename === "Bot" } : null };
   };
   const samePr = (left, right) =>
     [
@@ -560,6 +587,8 @@ export async function runAgentMerge(
       "baseRefName",
       "changedFiles",
     ].every((key) => left[key] === right[key]) &&
+    left.author?.login === right.author?.login &&
+    left.author?.is_bot === right.author?.is_bot &&
     JSON.stringify(left.labels) === JSON.stringify(right.labels);
   const readSnapshot = () => {
     const viewer = readWorkspaceViewer();
@@ -572,7 +601,7 @@ export async function runAgentMerge(
           "--repo",
           REPOSITORY,
           "--json",
-          "number,title,body,state,isDraft,isCrossRepository,headRefOid,baseRefOid,baseRefName,changedFiles,labels",
+          "number,title,body,state,isDraft,isCrossRepository,headRefOid,baseRefOid,baseRefName,changedFiles,labels,author",
         ]);
     const files = readImmutableMergeFiles(pr.baseRefOid, pr.headRefOid, args => execute(args, [0], "git").stdout);
     const requiredChecks = json(
@@ -651,7 +680,7 @@ export async function runAgentMerge(
       : null;
     const freshPr = options.immediate ? readImmediatePr() : json([
       "pr", "view", prNumber, "--repo", REPOSITORY, "--json",
-      "number,title,body,state,isDraft,isCrossRepository,headRefOid,baseRefOid,baseRefName,changedFiles,labels",
+      "number,title,body,state,isDraft,isCrossRepository,headRefOid,baseRefOid,baseRefName,changedFiles,labels,author",
     ]);
     if (!samePr(pr, freshPr)) throw new Error("PR changed during preflight");
     return {
