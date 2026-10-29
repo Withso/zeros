@@ -8,7 +8,7 @@ const root = process.cwd();
 describe("zstack pack", () => {
   it("ships the Z0 skills with valid frontmatter", () => {
     expect(zstackSkills(root).map(skill => skill.name)).toEqual(
-      ["zstack", "zstack-eval", "zstack-learn", "zstack-review", "zstack-verify"]);
+      ["zstack", "zstack-comments", "zstack-eval", "zstack-learn", "zstack-review", "zstack-verify"]);
   });
 
   it("renders every skill for Claude, Codex/Zeros and Cursor", () => {

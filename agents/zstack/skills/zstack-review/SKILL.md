@@ -90,6 +90,11 @@ reproduce each candidate against the base.
   the work they remove: a read that guards a destructive operation never joins
   an observation started before the caller asked.
 
+**Comments** (`zstack-comments`)
+- The comment pass ran on this diff: added comments state a non-obvious why,
+  nothing on the keep-list changed, and a cleanup diff passes
+  `node scripts/zstack/comments.mjs verify`.
+
 ## Output
 
 List findings most severe first. Each one gets a one-line claim, the evidence
