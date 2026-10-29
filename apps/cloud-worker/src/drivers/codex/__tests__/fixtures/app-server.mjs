@@ -83,13 +83,14 @@ input.on("line", async (line) => {
         text(JSON.stringify({ config: threadConfig, secretInArgs: process.argv.some(arg => arg.includes("fixture-mcp-secret")) }));
         complete(); return;
       }
-      if (mode === "cost-configuration") {
+      if (mode === "cost-configuration" || mode === "settings-configuration") {
         text(JSON.stringify({ model: params.model, effort: params.effort,
-          reasoningEffort: params.collaborationMode?.settings.reasoning_effort, effectiveEffort: threadEffort }));
+          reasoningEffort: params.collaborationMode?.settings.reasoning_effort, effectiveEffort: threadEffort,
+          ...(mode === "settings-configuration" ? { serviceTierForTurn: params.serviceTierForTurn } : {}) }));
         complete();
         return;
       }
-      if (["wait", "slow-ack", "ignore-interrupt"].includes(mode)) { text("working"); return; }
+      if (["wait", "slow-ack", "ignore-interrupt", "settings", "settings-no-reply"].includes(mode)) { text("working"); return; }
       if (mode === "foreign") {
         text("foreign", "other-chat", "other-turn");
         complete("completed", "other-chat", "other-turn");
@@ -108,6 +109,15 @@ input.on("line", async (line) => {
       complete();
       return;
     }
+    case "turn/settings/update":
+      if (params.threadId !== threadId || params.turnId !== turnId) {
+        output({ id: frame.id, error: { code: -32602, message: "Wrong native turn" } });
+        return;
+      }
+      if (mode === "settings-no-reply") return;
+      text(JSON.stringify({ settings: params }));
+      reply(frame.id, {});
+      return;
     case "turn/interrupt":
       if (params.threadId !== threadId || params.turnId !== turnId) {
         output({ id: frame.id, error: { code: -32602, message: "Wrong native turn" } });

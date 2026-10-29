@@ -4572,6 +4572,130 @@
         "apps/cloud-worker/src/drivers/cursor/__tests__/parity.test.ts",
         "docs/agent-runtime-notifications.md"
       ]
+    },
+    {
+      "provider": "codex",
+      "fingerprint": "7a55cb2a5f871f65eade4f6996a84ecd3f7c3449b6b37755bc8c8627abf8d953",
+      "disposition": "generated-only",
+      "rationale": "The aggregate ClientRequest adds thread/memory/read. Keep its generated request/response types and classify the method generated-only; a memory-summary product reader is deliberately deferred. Existing Memory opt-in is unchanged.",
+      "evidence": [
+        "apps/desktop/src/engine/agents/adapters/codex/protocol-coverage.json",
+        "apps/desktop/src/engine/agents/adapters/codex/generated/v2/ThreadMemoryReadParams.ts",
+        "docs/codex-app-server-compatibility.md"
+      ]
+    },
+    {
+      "provider": "codex",
+      "fingerprint": "8e96c09919aca0ba59c74b618d159e0845e85faf9df8fd460f621d600abad618",
+      "disposition": "preserved-generically",
+      "rationale": "The aggregate v2 schema contains the individually reviewed GCP account variant, modelNotFound error, nullable network requirements, optional fork/list/sample fields and memory-read types. Existing non-ChatGPT account and model-error handling preserve behavior; memory summary, attached forks, config requirements and sampling adoption remain deferred. See the individual fingerprints and the 0.165.0 compatibility table.",
+      "evidence": [
+        "apps/desktop/src/engine/agents/adapters/codex/protocol-coverage.json",
+        "apps/desktop/src/engine/agents/adapters/codex/app-server-adapter.ts",
+        "apps/desktop/src/engine/agents/adapters/shared/__tests__/provider-error.test.ts",
+        "apps/cloud-worker/src/drivers/shared/provider-error.test.ts",
+        "docs/codex-app-server-compatibility.md"
+      ]
+    },
+    {
+      "provider": "codex",
+      "fingerprint": "cdf071cf488333eb493d2ffde61f376da978f39b33fe2ceb413b6d122dec5a32",
+      "disposition": "preserved-generically",
+      "rationale": "The new gcp account variant is Google Cloud Vertex AI authentication, not a ChatGPT subscription. readAccount already returns null for every non-chatgpt variant; Settings retains its missing-account dash as with API key and Bedrock. Cloud continues through its configured workspace proxy and does not consume ChatGPT account details.",
+      "evidence": [
+        "apps/desktop/src/engine/agents/adapters/codex/app-server-adapter.ts",
+        "apps/cloud-worker/src/drivers/codex/driver.ts",
+        "docs/codex-app-server-compatibility.md"
+      ]
+    },
+    {
+      "provider": "codex",
+      "fingerprint": "2bfe407981f6acdc22de10d5530ef0a946d4896ea7df2fbdc56ff6610503427b",
+      "disposition": "generated-only",
+      "rationale": "The v2 request union adds thread/memory/read. Its generated types remain available, but no Zeros caller or renderer memory-summary surface is introduced. The coverage manifest explicitly classifies the request generated-only.",
+      "evidence": [
+        "apps/desktop/src/engine/agents/adapters/codex/protocol-coverage.json",
+        "apps/desktop/src/engine/agents/adapters/codex/generated/v2/ThreadMemoryReadParams.ts",
+        "docs/codex-app-server-compatibility.md"
+      ]
+    },
+    {
+      "provider": "codex",
+      "fingerprint": "b9cba182c412d260fdb302dd83119845f2de057a4ac9ef3d8c7f455e8b9bb0db",
+      "disposition": "preserved-generically",
+      "rationale": "The terminal modelNotFound variant normalizes to the existing model-unavailable category: codeKey removes separators and MODEL_CODES includes model_not_found. Local and cloud regression tests cover the native spelling and the safe GPT-6.1 Terra choose-another-model message without provider diagnostics.",
+      "evidence": [
+        "apps/desktop/src/engine/agents/adapters/shared/provider-error.ts",
+        "apps/desktop/src/engine/agents/adapters/shared/__tests__/provider-error.test.ts",
+        "apps/cloud-worker/src/drivers/shared/provider-error.ts",
+        "apps/cloud-worker/src/drivers/shared/provider-error.test.ts"
+      ]
+    },
+    {
+      "provider": "codex",
+      "fingerprint": "68f53acfffcd15ac2c98d0d210ae623974586f3e5016629640b00821e5f967c3",
+      "disposition": "generated-only",
+      "rationale": "reviewDomains adds nullable native network-review metadata. Zeros has no configRequirements/read consumer; keep generated types without forwarding domains, changing permissions or adding a review surface.",
+      "evidence": [
+        "apps/desktop/src/engine/agents/adapters/codex/protocol-coverage.json",
+        "apps/desktop/src/engine/agents/adapters/codex/generated/v2/NetworkRequirements.ts",
+        "docs/codex-app-server-compatibility.md"
+      ]
+    },
+    {
+      "provider": "codex",
+      "fingerprint": "a04581cd5f3223e175b954addee463e277f20e511e08afcf5e986ee1ad907990",
+      "disposition": "intentionally-deferred",
+      "rationale": "attachToSource enables a new attached-fork relationship. Zeros keeps ordinary thread/fork calls without that flag and its existing native provider-binding persistence. Attached-fork ownership and listing need a separate product decision.",
+      "evidence": [
+        "apps/desktop/src/engine/agents/adapters/codex/app-server-adapter.ts",
+        "apps/desktop/src/engine/agents/adapters/codex/__tests__/app-server-adapter-params.test.ts",
+        "docs/codex-app-server-compatibility.md"
+      ]
+    },
+    {
+      "provider": "codex",
+      "fingerprint": "2c004c5b733f7061d10035f4c1cef4d9eee71376eabeb25544e726758346d46c",
+      "disposition": "intentionally-deferred",
+      "rationale": "attachedToThreadId filters the new attached-fork relationship. Zeros does not adopt attached forks or add a thread/list consumer for this filter; existing durable chat identity and history loading remain authoritative.",
+      "evidence": [
+        "apps/desktop/src/engine/agents/adapters/codex/protocol-coverage.json",
+        "apps/desktop/src/engine/agents/adapters/codex/generated/v2/ThreadListParams.ts",
+        "docs/codex-app-server-compatibility.md"
+      ]
+    },
+    {
+      "provider": "codex",
+      "fingerprint": "8a5c26387516c7d9c8c09db48b66b50d52b6a56ef64e6374a3e070c19ee2126a",
+      "disposition": "generated-only",
+      "rationale": "The new thread/memory/read parameters are generated for protocol completeness. A memory-summary read is out of scope; no thread identity is sent through a new reader and the existing opt-in Memory controls retain their semantics.",
+      "evidence": [
+        "apps/desktop/src/engine/agents/adapters/codex/protocol-coverage.json",
+        "apps/desktop/src/engine/agents/adapters/codex/generated/v2/ThreadMemoryReadParams.ts",
+        "docs/codex-app-server-compatibility.md"
+      ]
+    },
+    {
+      "provider": "codex",
+      "fingerprint": "ead0b60dad3ade4ed1973662d8539c52ceb02384bd416298834f20525b223c30",
+      "disposition": "generated-only",
+      "rationale": "The new memory-read response is not consumed or persisted by Zeros. Defer a summary display and its privacy/lifecycle design while retaining generated wire compatibility and the existing opt-in Memory setting.",
+      "evidence": [
+        "apps/desktop/src/engine/agents/adapters/codex/protocol-coverage.json",
+        "apps/desktop/src/engine/agents/adapters/codex/generated/v2/ThreadMemoryReadResponse.ts",
+        "docs/codex-app-server-compatibility.md"
+      ]
+    },
+    {
+      "provider": "codex",
+      "fingerprint": "b864d6f614839ffb0f247764b22b6de4c5b994dc8a3212350ad3ff7c97dd7c15",
+      "disposition": "generated-only",
+      "rationale": "threadSource adds optional metadata to sampling. thread/sample and thread/sample/cancel remain generated-only; Zeros starts no prediction fork or speculative suggestion request.",
+      "evidence": [
+        "apps/desktop/src/engine/agents/adapters/codex/protocol-coverage.json",
+        "apps/desktop/src/engine/agents/adapters/codex/generated/v2/ThreadSampleParams.ts",
+        "docs/codex-app-server-compatibility.md"
+      ]
     }
   ]
 }

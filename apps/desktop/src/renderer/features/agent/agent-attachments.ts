@@ -79,6 +79,9 @@ const MODEL_CONTEXT_TOKENS: Array<[RegExp, number]> = [
   // 1,050,000-token window (128,000 max output). Live native context usage
   // remains authoritative; these are pre-runtime attachment fallbacks.
   [/^gpt-(?:6-(?:astra|sol|luna)|6\.1-sol)(?:$|-)/i, 1_050_000],
+  // Codex 0.165.0's bundled catalog: 500K default, 872K maximum. Budget
+  // against the default until native token usage supplies the active window.
+  [/^gpt-6\.1-terra(?:$|-)/i, 500_000],
   [/gpt-5\.5|gpt-5\.4/i, 256_000],
   [/gpt-5\.3-codex|gpt-5\.3/i, 200_000],
   [/gpt-5-nano/i, 128_000],

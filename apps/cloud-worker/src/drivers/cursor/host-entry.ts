@@ -1,6 +1,6 @@
 import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
-import { Agent } from "@cursor/sdk";
+import { Agent, Cursor } from "@cursor/sdk";
 import { CursorHost } from "./host";
 import { CURSOR_VERSION, type HostEvent, type HostRequest, type HostResponse, type OpenParams, type PromptParams } from "./native-types";
 
@@ -24,8 +24,10 @@ function send(frame: HostEvent | HostResponse): Promise<void> {
   output = delivery.catch(disconnect);
   return delivery.finally(() => { pendingBytes -= bytes; });
 }
-const host = new CursorHost(Agent, send, process.env.CURSOR_API_KEY);
+const host = new CursorHost(Agent, send, process.env.CURSOR_API_KEY, options => Cursor.models.list(options));
 const record = (value: unknown): Record<string, unknown> => value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
+const validSelection = (params: Record<string, unknown>) => typeof params.model === "string" && params.model.length > 0 && params.model.length <= 200 && !/\s/.test(params.model) &&
+  (params.effort === undefined || typeof params.effort === "string") && (params.fast === undefined || typeof params.fast === "boolean");
 process.on("message", raw => {
   if (Buffer.byteLength(JSON.stringify(raw)) > 16 * 1024 * 1024) { disconnect(); return; }
   const message = record(raw);
@@ -36,11 +38,11 @@ process.on("message", raw => {
       let value: unknown;
       switch (request.method) {
         case "open":
-          if (typeof params.cwd !== "string" || !params.cwd.startsWith("/") || typeof params.model !== "string" ||
+          if (typeof params.cwd !== "string" || !params.cwd.startsWith("/") || !validSelection(params) ||
               (params.nativeSessionId !== undefined && typeof params.nativeSessionId !== "string")) throw new Error("Invalid Cursor session request.");
           value = await host.open(params as unknown as OpenParams); break;
         case "prompt":
-          if (typeof params.turnId !== "string" || typeof params.model !== "string" || typeof record(params.content).text !== "string") throw new Error("Invalid Cursor prompt request.");
+          if (typeof params.turnId !== "string" || !validSelection(params) || typeof record(params.content).text !== "string") throw new Error("Invalid Cursor prompt request.");
           value = await host.prompt(params as unknown as PromptParams); break;
         case "steer":
           if (typeof params.turnId !== "string" || typeof params.text !== "string") throw new Error("Invalid Cursor steer request.");

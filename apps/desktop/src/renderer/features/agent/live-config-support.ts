@@ -30,8 +30,8 @@ import { agentFamily } from "./model-catalog";
  *
  *    claude — `query.setModel` + `applyFlagSettings`
  *             (adapters/claude-sdk/adapter.ts setModel/updateConfig).
- *    codex  — turn/start re-reads `session.env` every turn, so rewriting the
- *             env IS the apply (adapters/codex/app-server-adapter.ts).
+ *    codex  — turn/start re-reads `session.env`; effort/Fast also target the
+ *             exact active turn through turn/settings/update.
  *    cursor — every SDK send accepts an explicit model id; updateConfig
  *             re-resolves effort/Fast to a catalog-backed variant without
  *             replacing the agent (adapters/cursor-sdk/adapter.ts). */

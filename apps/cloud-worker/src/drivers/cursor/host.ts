@@ -1,5 +1,6 @@
 import type { HostEvent, NativeAgent, NativeRun, NativeSDK, OpenParams, PromptParams } from "./native-types";
 import { CURSOR_VERSION } from "./native-types";
+import { CursorModelCatalog, type CursorModelRecord } from "./model-selection";
 
 interface Turn { id: string; run?: NativeRun; cancelled: boolean; accepting: boolean; steers: number; cancel?: Promise<void>; done: Promise<void>; finish(): void }
 const record = (value: unknown): Record<string, unknown> => value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
@@ -18,12 +19,16 @@ export class CursorHost {
   private opening = false;
   private disposed = false;
   private billing?: Promise<unknown>;
-  constructor(private readonly sdk: NativeSDK, private readonly publish: (event: HostEvent) => Promise<void>, private readonly apiKey: string) {}
+  private models?: CursorModelCatalog;
+  constructor(private readonly sdk: NativeSDK, private readonly publish: (event: HostEvent) => Promise<void>, private readonly apiKey: string,
+    private readonly listModels: (options: { apiKey: string }) => Promise<CursorModelRecord[]>) {}
 
   async open(params: OpenParams): Promise<{ nativeSessionId: string; version: string }> {
     if (this.agent || this.opening || this.disposed) throw new Error("Cursor host has already been opened.");
     this.opening = true;
-    const options = { cwd: params.cwd, model: { id: params.model }, apiKey: this.apiKey, mode: "agent" as const,
+    const models = new CursorModelCatalog(await this.listModels({ apiKey: this.apiKey }));
+    if (this.disposed) throw new Error("Cursor host closed during model discovery.");
+    const options = { cwd: params.cwd, model: models.selection(params.model, params.effort, params.fast === true), apiKey: this.apiKey, mode: "agent" as const,
       ...(params.mcpServers ? { mcpServers: params.mcpServers } : {}),
       disallowedTools: ["askQuestion"], local: { cwd: params.cwd, autoReview: false, sandboxOptions: { enabled: false },
         enableAgentRetries: false, settingSources: ["project", "user"] as Array<"project" | "user">, subagentInherit: {} } };
@@ -31,7 +36,7 @@ export class CursorHost {
     if (this.disposed || !agent.agentId || (params.nativeSessionId && agent.agentId !== params.nativeSessionId)) {
       agent.close(); throw new Error("Cursor returned a different or closed native session.");
     }
-    this.agent = agent; return { nativeSessionId: agent.agentId, version: CURSOR_VERSION };
+    this.agent = agent; this.models = models; return { nativeSessionId: agent.agentId, version: CURSOR_VERSION };
   }
 
   async prompt(params: PromptParams): Promise<{ runId: string }> {
@@ -50,7 +55,7 @@ export class CursorHost {
       await this.publish({ t: "event", turnId: turn.id, kind, value });
     };
     try {
-      turn.run = await this.agent.send(params.content, { mode: "agent", model: { id: params.model }, local: { force: true },
+      turn.run = await this.agent.send(params.content, { mode: "agent", model: this.models!.selection(params.model, params.effort, params.fast === true), local: { force: true },
         idempotencyKey: `zeros-${turn.id}`, onDelta: ({ update }) => emit("delta", update), onStep: ({ step }) => emit("step", step) });
       if (this.disposed || this.turn !== turn) { await this.cancel(turn); throw new Error("Cursor turn was closed during send."); }
       await this.publish({ t: "event", turnId: turn.id, kind: "started", value: { agentId: this.agent.agentId, runId: turn.run.id } });

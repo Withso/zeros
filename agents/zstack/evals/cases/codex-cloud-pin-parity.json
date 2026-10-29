@@ -1,0 +1,9 @@
+{
+  "id": "codex-cloud-pin-parity",
+  "kind": "replay",
+  "area": "agent-runtime",
+  "fixedBy": "pr:763",
+  "symptom": "The automatic Codex upgrade advanced Local and generated bindings while the cloud worker remained pinned to the previous runtime, and the existing pin gate accepted that drift.",
+  "rule": "Require the standalone cloud worker's exact Codex dependency to equal the Local interactive protocol pin; keep the auth-only control-plane keeper independently qualified. See agents/zstack/changes/codex-active-turn-settings.md.",
+  "check": "pnpm exec vitest run scripts/__tests__/check-codex-pin.test.ts"
+}

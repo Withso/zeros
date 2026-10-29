@@ -15,6 +15,15 @@ branch-writing workflows ship disabled; repository configuration enables them.
 3. Implement adapter, capability, catalog or test changes on the same branch.
    Review the maintained PR report and the normal required checks. The bot never
    fills in reviewed dispositions, enables capabilities or changes defaults.
+   Pin each interactive runtime (Codex, Claude SDK/CLI and Cursor SDK/CLI) to the
+   same version in Local and the standalone cloud worker. Update the worker
+   manifest, lockfile, runtime constants and packaging expectations together;
+   the bot's root-only mechanical bump does not establish worker parity.
+   `check:codex-pin` enforces the Codex manifest equality. The control-plane
+   auth-only keeper keeps its separate qualification pin.
+   Curated model additions also update the standalone control-plane provider
+   identities and consent regressions in `src/agent-credentials/agent-models`;
+   its catalog parity check runs outside the root model verification suite.
 4. Later eligible versions append a normal commit to that PR's current head.
    Human commits remain in its history. There is no force push, reset, automatic
    rebase, automatic conflict resolution or automatic merge.
@@ -131,6 +140,31 @@ artifact or local surface output to determine review scope.
 Schema annotation removal applies only to schema objects. Property/definition
 names and literal `const`, `default`, and `enum` data remain part of the contract,
 including fields named `description`, `title`, or `examples`.
+
+### Codex 0.165.0 review
+
+All 11 changed/added schema fingerprints have individual decisions. Memory
+summary reads, attached forks, configuration network requirements and sampling
+remain deferred/generated-only. Existing non-ChatGPT account handling accepts
+the GCP variant, and both error normalizers cover terminal `modelNotFound` with
+actionable model selection guidance. The shared catalog adds GPT-6.1 Terra
+with all six native efforts and Fast support; it preserves saved defaults.
+
+Local and cloud now send `turn/settings/update` for changed effort/Fast on the
+exact active turn. Native support checks remain authoritative, failures are
+nonfatal, and model changes stay next-turn. Regression tests cover pending and
+terminal acknowledgements, Stop, stale completions, serialized changes, lost
+settings replies, complete cloud config snapshots and reopen persistence. See
+[the Codex harness contract](codex-app-server-compatibility.md#01650-compatibility)
+for the precise field and lifecycle rules.
+
+Cloud configuration now routes Claude and Cursor selections as well. The
+[configuration timing table](agent-harness-capability-boundary.md#mid-chat-configuration-timing)
+records when each provider applies effort/Fast in Local and cloud. Regression
+coverage includes native Claude live flags and deferred Max transitions, and
+Cursor's catalog-backed next-send selection. GPT-6.1 Terra is also admitted by
+the standalone control plane under existing all-model consent, while explicit
+legacy grants remain unchanged.
 
 ### Cursor 1.0.40 to 1.1.0 review
 

@@ -52,6 +52,8 @@ describe("modelContextTokens", () => {
     // tokenUsage.modelContextWindow remains authoritative once Codex reports it.
     expect(modelContextTokens("gpt-6-astra")).toBe(1_050_000);
     expect(modelContextTokens("gpt-6.1-sol")).toBe(1_050_000);
+    // The 0.165.0 bundled Terra catalog declares a 500K default window.
+    expect(modelContextTokens("gpt-6.1-terra")).toBe(500_000);
     expect(modelContextTokens("gpt-6-sol")).toBe(1_050_000);
     expect(modelContextTokens("gpt-6-luna")).toBe(1_050_000);
     expect(modelContextTokens("gpt-5.5")).toBe(256_000);

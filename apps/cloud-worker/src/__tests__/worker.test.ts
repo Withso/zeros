@@ -16,16 +16,16 @@ import { CLIENT_A, CLIENT_B, WORKSPACE_ID, WORKSPACE_KEY, FakeDriver, FakeRelay,
 
 const cleanups: Array<() => Promise<void>> = [];
 afterEach(async () => { for (const cleanup of cleanups.splice(0).reverse()) await cleanup(); });
-async function setup(driverSetup?: (driver: FakeDriver) => void) {
+async function setup(driverSetup?: (driver: FakeDriver) => void, agentId: "codex" | "claude" | "cursor" = "codex") {
   const directory = await mkdtemp(join(tmpdir(), "zeros-worker-routing-"));
   const relay = new FakeRelay();
   const drivers: FakeDriver[] = [];
-  const worker = new CloudWorker({ directory, transport: relay, prepareCheckout: async () => {}, drivers: { codex: () => {
+  const worker = new CloudWorker({ directory, transport: relay, prepareCheckout: async () => {}, drivers: { [agentId]: () => {
     const driver = new FakeDriver(); driverSetup?.(driver); drivers.push(driver); return driver;
   } } });
   cleanups.push(async () => { await worker.dispose(); await rm(directory, { recursive: true, force: true }); });
   worker.start();
-  await relay.receive(config);
+  await relay.receive({ ...config, agents: { ...config.agents, claude: { oauthToken: "offline-claude-placeholder" }, cursor: { apiKey: "fixture-cursor" } } });
   await relay.receive({ t: "open", clientId: CLIENT_A });
   await relay.receive({ t: "open", clientId: CLIENT_B });
   async function op(op: string, params: Record<string, unknown> = {}, clientId = CLIENT_A) {
@@ -35,15 +35,15 @@ async function setup(driverSetup?: (driver: FakeDriver) => void) {
     return relay.response(request.id)! as Extract<BridgeMessage, { type: "WORKSPACE_RESPONSE" | "WORKSPACE_ERROR" }>;
   }
   async function chat(id = "chat") {
-    await op("chats.upsert", { chat: { id, folder: WORKSPACE_KEY, agentId: "codex", title: "Fixture", createdAt: 100 } });
-    const request = browserFrame("AGENT_NEW_SESSION", { agentId: "codex", chatId: id, cwd: WORKSPACE_KEY, workspaceId: WORKSPACE_ID });
+    await op("chats.upsert", { chat: { id, folder: WORKSPACE_KEY, agentId, title: "Fixture", createdAt: 100 } });
+    const request = browserFrame("AGENT_NEW_SESSION", { agentId, chatId: id, cwd: WORKSPACE_KEY, workspaceId: WORKSPACE_ID });
     await relay.request(CLIENT_A, request);
     const response = relay.response(request.id) as Extract<BridgeMessage, { type: "AGENT_SESSION_CREATED" }>;
     expect(response.type).toBe("AGENT_SESSION_CREATED");
     return response.session.sessionId;
   }
   const prompt = (sessionId: string, id: string = randomUUID()) => browserFrame("AGENT_PROMPT", {
-    agentId: "codex", sessionId, userMessageId: `user-${id}`, prompt: [{ type: "text", text: id }], id,
+    agentId, sessionId, userMessageId: `user-${id}`, prompt: [{ type: "text", text: id }], id,
   });
   return { directory, relay, drivers, worker, op, chat, prompt };
 }
@@ -113,6 +113,85 @@ describe("worker bridge routing through a fake relay", () => {
     expect(drivers).toHaveLength(3);
     expect(drivers[2].opened?.model).toBe("fixture-next-model");
     expect(drivers[2].opened?.effort).toBeUndefined();
+  });
+
+  it.each(["codex", "claude", "cursor"] as const)("routes %s config to the exact execution and preserves effort and Fast across reopen", async agentId => {
+    const { relay, drivers, chat, prompt } = await setup(undefined, agentId);
+    const sessionId = await chat();
+    await relay.request(CLIENT_A, prompt(sessionId));
+    await expect.poll(() => drivers[0].prompts.length).toBe(1);
+    const update = (id: string, env: Record<string, string>) => browserFrame("AGENT_UPDATE_CONFIG", { agentId, sessionId: id, env });
+    await relay.request(CLIENT_A, update(sessionId, { ZEROS_THINKING_EFFORT: "high", ZEROS_FAST_MODE: "1", OPENAI_API_KEY: "untrusted-fixture" }));
+    expect(drivers[0].configs).toEqual([{ effort: "high", fast: true }]);
+    await relay.request(CLIENT_B, update("retired-execution", { ZEROS_THINKING_EFFORT: "max" }));
+    expect(drivers[0].configs).toHaveLength(1);
+    drivers[0].complete();
+    await relay.request(CLIENT_A, browserFrame("AGENT_CLOSE_SESSION", { agentId, chatId: "chat", sessionId, userStop: true }));
+    const reopen = browserFrame("AGENT_NEW_SESSION", { agentId, chatId: "chat", cwd: WORKSPACE_KEY, workspaceId: WORKSPACE_ID });
+    await relay.request(CLIENT_A, reopen);
+    const reopened = (relay.response(reopen.id) as Extract<BridgeMessage, { type: "AGENT_SESSION_CREATED" }>).session.sessionId;
+    expect(drivers[1].opened).toMatchObject({ effort: "high", fast: true });
+    expect(JSON.stringify(drivers[1].opened)).not.toContain("untrusted-fixture");
+    await relay.request(CLIENT_A, update(reopened, {}));
+    expect(drivers[1].configs).toEqual([{ effort: undefined, fast: false }]);
+  });
+
+  it.each([
+    { agentId: "codex", modelKey: "OPENAI_MODEL", model: "gpt-6.1-terra" },
+    { agentId: "claude", modelKey: "ANTHROPIC_MODEL", model: "claude-opus-5-5" },
+    { agentId: "cursor", modelKey: "CURSOR_MODEL", model: "grok-4.7" },
+  ] as const)("applies $agentId's complete config snapshot and retains it across reopen", async ({ agentId, modelKey, model }) => {
+    const { relay, drivers, chat, prompt } = await setup(undefined, agentId);
+    const sessionId = await chat();
+    await relay.request(CLIENT_A, prompt(sessionId));
+    await expect.poll(() => drivers[0].prompts.length).toBe(1);
+    await relay.request(CLIENT_A, browserFrame("AGENT_UPDATE_CONFIG", { agentId, sessionId,
+      env: { [modelKey]: model, ZEROS_THINKING_EFFORT: "max", ZEROS_FAST_MODE: "1" } }));
+    expect(drivers[0].model).toBe(model);
+    expect(drivers[0].configs).toEqual([{ model, effort: "max", fast: true }]);
+    drivers[0].complete();
+    await relay.request(CLIENT_A, browserFrame("AGENT_CLOSE_SESSION", { agentId, chatId: "chat", sessionId, userStop: true }));
+    await relay.request(CLIENT_A, browserFrame("AGENT_NEW_SESSION", { agentId, chatId: "chat", cwd: WORKSPACE_KEY, workspaceId: WORKSPACE_ID }));
+    expect(drivers[1].opened).toMatchObject({ model, effort: "max", fast: true });
+  });
+
+  it("waits for a replacing driver to open before applying configuration", async () => {
+    let release!: () => void, created = 0;
+    const opening = new Promise<void>(resolve => { release = resolve; });
+    const { relay, drivers, chat } = await setup(driver => { if (++created === 2) driver.opening = opening; });
+    const sessionId = await chat();
+    await relay.receive({ ...config, loginRevision: "1", agents: { codex: { ...config.agents.codex!, token: "fixture-replacement-proxy" } } });
+    const loading = relay.request(CLIENT_A, browserFrame("AGENT_LOAD_SESSION", { agentId: "codex", chatId: "chat", sessionId, adoptOnly: true }));
+    await expect.poll(() => drivers[1]?.opened).toBeDefined();
+    const updating = relay.request(CLIENT_A, browserFrame("AGENT_UPDATE_CONFIG", { agentId: "codex", sessionId,
+      env: { ZEROS_THINKING_EFFORT: "max", ZEROS_FAST_MODE: "1" } }));
+    try {
+      // Drain the incoming request's microtasks while native open remains held.
+      await new Promise<void>(resolve => setImmediate(resolve));
+      expect(drivers[1].configs).toEqual([]);
+    } finally { release(); await Promise.all([loading, updating]); }
+    expect(drivers[0].configs).toEqual([]);
+    expect(drivers[1].configs).toEqual([{ effort: "max", fast: true }]);
+  });
+
+  it.each([
+    { agentId: "codex", modelKey: "OPENAI_MODEL", model: "gpt-6.1-terra" },
+    { agentId: "claude", modelKey: "ANTHROPIC_MODEL", model: "claude-opus-5-5" },
+    { agentId: "cursor", modelKey: "CURSOR_MODEL", model: "grok-4.7" },
+  ] as const)("retains $agentId's newer config when a model-only acknowledgement arrives late", async ({ agentId, modelKey, model }) => {
+    const { relay, drivers, chat } = await setup(undefined, agentId);
+    const sessionId = await chat();
+    let release!: () => void;
+    const pending = new Promise<void>(resolve => { release = resolve; });
+    const selection = vi.spyOn(drivers[0], "setModel").mockImplementation(() => pending);
+    const oldSelection = relay.request(CLIENT_A, browserFrame("AGENT_SET_MODEL", { agentId, sessionId, model: "earlier-model" }));
+    await expect.poll(() => selection.mock.calls.length).toBe(1);
+    await relay.request(CLIENT_A, browserFrame("AGENT_UPDATE_CONFIG", { agentId, sessionId,
+      env: { [modelKey]: model, ZEROS_THINKING_EFFORT: "high", ZEROS_FAST_MODE: "1" } }));
+    release(); await oldSelection;
+    await relay.request(CLIENT_A, browserFrame("AGENT_CLOSE_SESSION", { agentId, chatId: "chat", sessionId, userStop: true }));
+    await relay.request(CLIENT_A, browserFrame("AGENT_NEW_SESSION", { agentId, chatId: "chat", cwd: WORKSPACE_KEY, workspaceId: WORKSPACE_ID }));
+    expect(drivers[1].opened).toMatchObject({ model, effort: "high", fast: true });
   });
 
   it("acknowledges VM Stop only after cancelling the turn and committing the final mirror", async () => {

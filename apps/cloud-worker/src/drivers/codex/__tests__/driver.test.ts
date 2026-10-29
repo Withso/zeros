@@ -1,5 +1,5 @@
 import { fileURLToPath } from "node:url";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { SessionNotification } from "@zeros/protocol/agent-events";
 import { CodexDriver } from "../driver";
 
@@ -26,6 +26,39 @@ const prose = (events: SessionNotification[]) => events.flatMap(({ update }) =>
   update.sessionUpdate === "agent_message_chunk" && update.content.type === "text" ? [update.content.text] : []).join("");
 
 describe("Codex driver with an offline app-server process", () => {
+  it("sends active settings over native JSON-RPC and keeps them on the next turn", async () => {
+    const { driver, events } = setup();
+    await driver.open({ ...openInput, effort: "low" });
+    const result = driver.prompt(content("settings"));
+    await expect.poll(() => prose(events)).toBe("working");
+    await driver.updateConfig({ effort: "high", fast: true });
+    expect(prose(events)).toContain(JSON.stringify({ settings: { threadId: "native-chat", turnId: "turn-1", effort: "high", serviceTier: "fast" } }));
+    await driver.interrupt(); await result;
+    events.length = 0;
+    await driver.prompt(content("settings-configuration"));
+    expect(JSON.parse(prose(events))).toMatchObject({ effort: "high", serviceTierForTurn: "fast" });
+  });
+
+  it("keeps a lost settings reply from closing the process or failing the active turn", async () => {
+    const { driver, events } = setup({ requestTimeoutMs: 1000 });
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      await driver.open({ ...openInput, effort: "low" });
+      let settled = false;
+      const result = driver.prompt(content("settings-no-reply")).finally(() => { settled = true; });
+      void result.catch(() => {});
+      await expect.poll(() => prose(events)).toBe("working");
+      await expect(driver.updateConfig({ effort: "high", fast: true })).resolves.toBeUndefined();
+      expect(warn).toHaveBeenCalledOnce();
+      expect(settled).toBe(false);
+      await driver.interrupt();
+      await expect(result).resolves.toMatchObject({ stopReason: "cancelled" });
+      events.length = 0;
+      await driver.prompt(content("settings-configuration"));
+      expect(JSON.parse(prose(events))).toMatchObject({ effort: "high", serviceTierForTurn: "fast" });
+    } finally { warn.mockRestore(); }
+  });
+
   it("sends MCP through native thread configuration and redacts the capability", async () => {
     const { driver, events } = setup();
     const mcpServers = { tools: { type: "http" as const, url: "http://127.0.0.1:3222/mcp/fixture", headers: { Authorization: "Bearer fixture-mcp-secret" } } };

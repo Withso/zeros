@@ -274,6 +274,9 @@ their general method; those subsystems no longer exist.
    undispatched intent, exact allocation and live-engine refusal controls.
 4. **Fix** the root cause with the smallest change. Keep compatibility.
    Local and cloud placements must both stay correct.
+   For live provider configuration, trace the renderer's applied stamp through
+   the cloud route to the native control or next send. Test all providers;
+   storing a choice or advertising a capability does not prove it was applied.
 5. **Green.** Run the regression, the adjacent suites and the static gates
    (`zstack-verify`).
 6. **Review** your own full diff (`zstack-review`), then deliver

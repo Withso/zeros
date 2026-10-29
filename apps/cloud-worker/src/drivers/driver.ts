@@ -9,6 +9,7 @@ interface DriverSession {
   model?: string;
   /** Persisted chat selection. Each driver maps only its supported native values. */
   effort?: string;
+  fast?: boolean;
   nativeSessionId?: string;
   onTiming?: (stage: DriverTimingStage) => void;
   mcpServers?: DriverMcpServers;
@@ -36,6 +37,8 @@ export interface Driver {
   prompt(content: ContentBlock[]): Promise<PromptResponse>;
   steer(content: ContentBlock[]): Promise<SteerOutcome>;
   setModel(model: string): Promise<void>;
+  /** Optional native live settings; credentials never enter this courier. */
+  updateConfig?(config: { model?: string; effort?: string; fast: boolean }): Promise<void>;
   interrupt(): Promise<void>;
   onEvent(emit: (event: SessionNotification) => void): () => void;
   dispose(): Promise<void>;

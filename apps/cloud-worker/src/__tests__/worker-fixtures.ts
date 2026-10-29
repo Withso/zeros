@@ -38,6 +38,7 @@ export class FakeDriver implements Driver {
   prompts: ContentBlock[][] = [];
   steers: ContentBlock[][] = [];
   model?: string;
+  configs: Array<{ model?: string; effort?: string; fast: boolean }> = [];
   disposed = false;
   interrupts = 0;
   steerResult: SteerOutcome | Promise<SteerOutcome> = "delivered";
@@ -58,6 +59,10 @@ export class FakeDriver implements Driver {
   fail(): void { this.reject?.(new Error("Native request failed.")); this.resolve = undefined; this.reject = undefined; }
   async steer(content: ContentBlock[]): Promise<SteerOutcome> { this.steers.push(content); return this.steerResult; }
   async setModel(model: string): Promise<void> { this.model = model; }
+  async updateConfig(config: { model?: string; effort?: string; fast: boolean }): Promise<void> {
+    if (config.model !== undefined) this.model = config.model;
+    this.configs.push(config);
+  }
   async interrupt(): Promise<void> { this.interrupts++; this.complete({ stopReason: "cancelled" }); }
   onEvent(emit: (event: SessionNotification) => void): () => void { this.listeners.add(emit); return () => this.listeners.delete(emit); }
   emit(update: SessionNotification["update"]): void { for (const listener of this.listeners) listener({ sessionId: this.opened!.sessionId, update }); }
