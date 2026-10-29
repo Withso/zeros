@@ -100,8 +100,9 @@ case batches. It never silently truncates the corpus to satisfy the bound.
 `node scripts/zstack/eval-corpus.mjs` plans the whole corpus. Add `--execute
 --output <new-directory>` to run batches of at most 32 against the committed
 `evals/baseline.json`. It retains batch receipts and partial progress, and fails
-on dropped/changed recipes, lost catches or a lower rate, with unverified cases
-in the denominator. Seeds use HEAD unless `--revision` is supplied. See
+on dropped/changed recipes, lost catches or a lower rate over the baseline case
+set, including its unverified cases. New cases and the overall rate are also
+reported. Seeds use HEAD unless `--revision` is supplied. See
 `evals/README.md` for provenance and the nightly workflow.
 
 Replay requires Git 2.45+ and locally available fix/parent commits. Ordinary

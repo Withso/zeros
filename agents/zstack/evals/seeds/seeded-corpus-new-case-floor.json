@@ -1,0 +1,5 @@
+{
+  "file": "scripts/zstack/eval-corpus.mjs",
+  "before": "const allowed = !regressions.length && caughtDelta >= 0;",
+  "after": "const allowed = !regressions.length && after.summary.caught * before.cases.length >= before.summary.caught * after.cases.length;"
+}

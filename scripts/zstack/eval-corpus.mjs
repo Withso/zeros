@@ -36,7 +36,8 @@ export const HELP = `node scripts/zstack/eval-corpus.mjs [--execute --output DIR
 Default is an offline plan of the entire corpus. Execution creates a new evidence
 directory with every batch, progress checkpoint and a final receipt. Existing
 attempts are never overwritten. Known gaps remain in the catch-rate denominator;
-dropped/changed recipes, lost catches and lower rates fail the baseline gate.`;
+the rate floor compares the baseline case set. New cases are reported separately,
+and dropped/changed recipes or lost baseline catches fail the gate.`;
 
 export function splitCorpus(cases, size = 32) {
   if (!validSize(size) || !Array.isArray(cases) || !cases.length || cases.length > MAX_CASES ||
@@ -96,7 +97,8 @@ function sameSummary(summary, cases) {
 }
 
 export function compareCorpusBaseline(before, after) {
-  const invalid = { allowed: false, code: "zstack_corpus_invalid", regressions: [], caughtDelta: null, rateDelta: null };
+  const invalid = { allowed: false, code: "zstack_corpus_invalid", regressions: [], caughtDelta: null, rateDelta: null,
+    covered: null, newCases: [] };
   if (before?.schema !== "zeros.zstack-eval-baseline/v1" || after?.schema !== "zeros.zstack-corpus-receipt/v1" ||
     after.complete !== true || !validRows(before.cases) || !validRows(after.cases) ||
     !sameSummary(before.summary, before.cases) || !sameSummary(after.summary, after.cases) ||
@@ -111,11 +113,14 @@ export function compareCorpusBaseline(before, after) {
           : row.status === "caught" && candidate.status !== "caught" ? "catch_lost" : null;
     if (reason) regressions.push({ id: row.id, reason });
   }
-  const caughtDelta = after.summary.caught - before.summary.caught;
-  const rateDelta = after.summary.catchRate - before.summary.catchRate;
-  // Cross-multiply counts so a floating-point rounding difference cannot lower the floor.
-  const allowed = !regressions.length && after.summary.caught * before.cases.length >= before.summary.caught * after.cases.length;
-  return { allowed, code: allowed ? "ok" : "zstack_corpus_regression", regressions, caughtDelta, rateDelta };
+  const baselineIds = new Set(before.cases.map(row => row.id));
+  const covered = summarizeCases(after.cases.filter(row => baselineIds.has(row.id)), before.cases.length);
+  const newCases = after.cases.filter(row => !baselineIds.has(row.id))
+    .map(({ id, kind, status, code }) => ({ id, kind, status, code }));
+  const caughtDelta = covered.caught - before.summary.caught;
+  const rateDelta = covered.catchRate - before.summary.catchRate;
+  const allowed = !regressions.length && caughtDelta >= 0;
+  return { allowed, code: allowed ? "ok" : "zstack_corpus_regression", regressions, caughtDelta, rateDelta, covered, newCases };
 }
 
 function compactBatch(receipt, batch, inputs) {

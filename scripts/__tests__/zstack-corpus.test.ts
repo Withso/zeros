@@ -45,11 +45,27 @@ describe("corpus regression gate", () => {
     expect(compareCorpusBaseline(baseline(before), observed(after))).toMatchObject({ allowed: false, rateDelta: 0,
       regressions: [{ id: "first", reason: "catch_lost" }] });
   });
-  it("refuses dropped cases and additions that lower the catch rate", () => {
+  it("refuses dropped baseline cases", () => {
     const before = [result("first"), result("second", "unverified")];
     expect(compareCorpusBaseline(baseline(before), observed(before.slice(0, 1)))).toMatchObject({ allowed: false,
       regressions: [{ id: "second", reason: "dropped" }] });
-    expect(compareCorpusBaseline(baseline(before), observed([...before, result("third", "unverified")]))).toMatchObject({ allowed: false });
+  });
+  it("reports a new unverified scenario without changing the baseline rate floor", () => {
+    const before = [result("first"), result("second", "unverified")];
+    const scenario = { ...result("new-scenario", "unverified"), kind: "scenario", code: "explicit_scenario_required" };
+    const after = observed([...before, scenario]);
+    expect(after.summary).toMatchObject({ selected: 3, caught: 1, unverified: 2, catchRate: 1 / 3 });
+    expect(compareCorpusBaseline(baseline(before), after)).toMatchObject({ allowed: true, code: "ok",
+      regressions: [], caughtDelta: 0, rateDelta: 0,
+      covered: { selected: 2, executed: 2, caught: 1, unverified: 1, catchRate: 1 / 2 },
+      newCases: [{ id: "new-scenario", kind: "scenario", status: "unverified", code: "explicit_scenario_required" }] });
+  });
+  it("does not let a new catch replace a lost baseline catch", () => {
+    const before = [result("original")], after = [result("original", "missed"), result("new-catch")];
+    expect(compareCorpusBaseline(baseline(before), observed(after))).toMatchObject({ allowed: false,
+      caughtDelta: -1, rateDelta: -1, regressions: [{ id: "original", reason: "catch_lost" }],
+      covered: { selected: 1, caught: 0, missed: 1, catchRate: 0 },
+      newCases: [{ id: "new-catch", kind: "replay", status: "caught", code: "regression_detected" }] });
   });
   it("permits a previously unresolved fix to become verified with the same recipe", () => {
     expect(compareCorpusBaseline(baseline([result("one", "unverified")]), observed([result("one")]))).toMatchObject({ allowed: true });

@@ -72,16 +72,22 @@ check was replaced to raise the score.
 
 The gate compares every baseline case, not just totals. It refuses missing or
 duplicate results, changed kind/fix/check/seed recipes, lost individual catches
-and a lower catch rate over **all** current cases. A previously unresolved fix
-may become resolved when its recipe is unchanged. Once known, a replay's fixed
-commit and parent remain pinned. Seed execution advances with the source
-revision while retaining its mutation fingerprint. Partial runs always fail;
+and a lower catch rate over the **same baseline case set**, retaining its
+unverified cases in the denominator. The receipt's overall summary still counts
+every current case. `comparison.covered` reports the baseline cases' current
+results, and `comparison.newCases` lists additions with their status and code.
+For example, a new unverified scenario is reported without failing unchanged
+baseline coverage; a new catch cannot offset a lost baseline catch. A previously
+unresolved fix may become resolved when its recipe is unchanged. Once known, a
+replay's fixed commit and parent remain pinned. Seed execution advances with the
+source revision while retaining its mutation fingerprint. Partial runs always fail;
 an exit of 1 from a batch is expected for known misses or gaps only when its
 complete, valid receipt agrees with that exit.
 
 The `Zstack Eval Corpus` workflow runs nightly at 03:40 UTC and by manual
-dispatch. It checks out full history and objects, installs both pnpm graphs and
-Chromium, and uploads the evidence even on failure. It uses read-only repository
+dispatch on Ubuntu 24.04, pinned for Playwright's OS dependencies. It checks out
+full history and objects, installs both pnpm graphs and Chromium, and uploads the
+evidence even on failure. It uses read-only repository
 permissions and no live-provider credentials. Its first hosted execution and
 native macOS coverage are separate from local runner tests.
 
