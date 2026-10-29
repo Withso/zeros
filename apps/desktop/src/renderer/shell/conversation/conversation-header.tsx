@@ -1,37 +1,8 @@
-// ──────────────────────────────────────────────────────────
-// Conversation pane — top bar
-// ──────────────────────────────────────────────────────────
-//
-// Mounts above the existing chat-tabs row in Conversation pane. Layout:
-//
-//   ┌────────────────────────────────────────────────────────┐
-//   │  W  Project › workspace-name          Open in ▼  ⤓     │
-//   └────────────────────────────────────────────────────────┘
-//
-//   Left:
-//     - Project icon + name (read-only; from projects store)
-//     - Workspace name (inline-editable on click; saves via
-//       git_rename_branch; falls back to "main" pseudo-row label
-//       when the active chat sits at the project's root checkout
-//       with no worktree)
-//     (The Target Branch picker moved out of here — it now lives at the left
-//      end of the workbench Changes tab's PR row as the labelled "Target branch"
-//      pill; see TargetBranchButton in apps/desktop/src/renderer/shell/pr/target-branch-select.tsx.)
-//
-//   Right:
-//     - "Open in" split button — app logo (click = open the worktree in
-//       the current default app, ⌘O) + chevron (menu: Finder first, the
-//       supported applications detected on this Mac, then Terminal and Copy
-//       path ⌘C).
-//       Picking anything except Copy path re-points the default + logo.
-//       Detection state lives in apps/desktop/src/renderer/platform/open-apps.ts.
-//     - Reserved space (parent Conversation pane still owns "Show Panel" when
-//       workbench is collapsed; we don't render it here, parent does)
-//
-// State source: the active chat's folder. We look up which project
-// owns that folder (chat.folder matches project.repoRoot, or is a
-// path under project.workspaces[i].path) and resolve the workspace
-// from the workspace_list IPC.
+// The conversation pane's top bar: the project › workspace breadcrumb (inline
+// rename through git_rename_branch; "Local main" for a root checkout) and the
+// "Open in" split button. It resolves the workspace from the active chat's
+// folder through the shared project list, and conversation-pane.tsx mounts it
+// hidden so its ⌘O / ⌘C shortcuts keep working.
 
 import React, {
   useCallback,
@@ -93,18 +64,8 @@ import { OpenAppIcon } from "../../features/agent/open-app-icon";
 import { RepositoryIcon } from "../../features/repositories/repository-icon";
 import { IconButton } from "@/renderer/shared/ui/primitives/icon-button";
 
-// ── className constants ──────────────────────────────────
-
-/** Top bar shell — sits above the chat tabs row on bg2 surface so
- *  the breadcrumb + tab strip read as a single raised header strip
- *  above the chat body (bg1).
- *
- *  Padding is intentionally split into explicit pl-* / pr-* so either edge can
- *  be tuned independently as the adjacent panel controls evolve. */
-// 2026-06-16: dropped `border-b border-border1 bg-bg2` — the top bar is
-// transparent (flat on the column's bg1), matching repository panel / workbench headers, and
-// borderless (no chrome seam in the chat column). h-10 keeps this secondary
-// workspace toolbar aligned with Workbench below the global navigation bar.
+// Transparent and borderless on the column's bg1; h-10 aligns this toolbar with
+// Workbench below the global bar.
 const TOPBAR_CLS = "flex items-center gap-1 h-10 pl-2 pr-2 shrink-0";
 
 /** Breadcrumb chip — left side. Holds project icon + name + chevron
@@ -130,8 +91,6 @@ const WORKSPACE_NAME_INPUT_CLS =
 const OPEN_IN_CHEVRON_BTN_CLS =
   "h-7 w-5 px-0 shrink-0 rounded-sm text-fg2 hover:text-fg1 hover:bg-bg2-hover/40 transition-[background-color,color] duration-120 ease-out";
 
-// ── Helpers ──────────────────────────────────────────────
-
 interface ResolvedContext {
   project: Project | null;
   workspace: Workspace | null;
@@ -155,8 +114,6 @@ function useResolvedContext(folder: string | null): ResolvedContext {
 
   return { project, workspace };
 }
-
-// ── Inline rename input ──────────────────────────────────
 
 interface InlineRenameProps {
   workspaceId: string;
@@ -209,23 +166,12 @@ function InlineRename({
     setBusy(true);
     try {
       const renamed = await gitRenameBranch({ workspaceId, newName: next });
-      // Report what the ENGINE produced. It keeps the branch inside whatever
-      // namespace it already lives in (Settings → Git makes the prefix a
-      // choice), so this used to hardcode `zeros/${next}` — a branch that does
-      // not exist for every workspace on any other prefix, including an
-      // unprefixed one, which got a `zeros/` that was never created.
-      //
-      // That was invisible until 2026-07-30 because the caller ignored the
-      // value it was handed; it now drives the breadcrumb for the length of
-      // the workspace refetch, so being right about the namespace is the
-      // difference between a correct label and a wrong one on screen.
-      //
-      // The fallback covers an engine too old to report the branch back, and
-      // mirrors the engine's rule exactly: everything up to the LAST slash.
-      // Deriving it from branchDisplayName instead would be wrong for the two
-      // cases that matter most here — a branch already renamed once, and an
-      // adopted `cursor/foo` — because that rule concedes a prefix only when
-      // the tail is allocator-shaped, and neither of those tails is.
+      // Report the branch the engine produced: it keeps the branch's existing
+      // namespace (Settings → Git makes the prefix a choice), so a hardcoded `zeros/`
+      // would name a branch that doesn't exist. The fallback, for an engine too old
+      // to report it, mirrors the engine's rule (everything up to the last slash);
+      // branchDisplayName would be wrong for a branch renamed once or an adopted
+      // `cursor/foo`.
       onCommitted(renamed ?? replaceBranchName(current, next));
     } catch (err: unknown) {
       if (isGitErrorShape(err)) {
@@ -269,8 +215,6 @@ function InlineRename({
     />
   );
 }
-
-// ── Open-in split button ─────────────────────────────────
 
 /** True when a key event originates from a surface that owns typing —
  *  the ⌘C copy-path shortcut must never hijack a real copy there
@@ -589,8 +533,6 @@ export function OpenInSubmenu({ path }: OpenInDropdownProps) {
   );
 }
 
-// ── Top bar root ─────────────────────────────────────────
-
 export interface ConversationHeaderProps {
   /** Whether Workbench (the right design panel) is currently collapsed.
    *  When true, the workbench toggle button moves from Workbench's header
@@ -607,43 +549,24 @@ export function ConversationHeader({
   workbenchCollapsed = false,
   onToggleWorkbench,
 }: ConversationHeaderProps = {}) {
-  // Resolve the breadcrumb folder inside the selector so this returns a
-  // primitive string|null — the topbar re-renders only when the resolved
-  // folder changes, not on every `chats` mutation. `selectActiveFolder` falls
-  // back to `newAgentFolder` (Untitled tab) and then the persisted
-  // `lastWorkspaceFolder`, so a fresh boot resolves the workspace the user left
-  // instead of flashing "No workspace selected" before chats hydrate.
+  // Resolve the folder inside the selector, so the topbar re-renders only when it
+  // changes. selectActiveFolder falls back to the persisted folder, so a fresh
+  // boot never flashes "No workspace selected".
   const folder = useWorkspaceStore(selectActiveFolder);
   const { project, workspace } = useResolvedContext(folder);
 
   const [renaming, setRenaming] = useState(false);
-  // The branch the engine just reported for a rename, held only until the
-  // workspace row catches up. `notifyWorkspacesChanged` is a bridge round
-  // trip, so without this the breadcrumb keeps showing the OLD name for the
-  // length of that refetch — right after the user renamed it, which is the one
-  // moment they are looking at it.
-  //
-  // Reset during RENDER, keyed on the branch it was recorded against, rather
-  // than cleared by an effect: an effect only fires after commit, so the first
-  // render that sees the refetched row would still paint the optimistic name
-  // and then correct itself. Storing what we renamed FROM is what makes it
-  // self-clearing — the moment `workspace.branch` is anything else the store
-  // has landed (or the user switched workspaces), and the optimistic value is
-  // dropped on that same render. If the refetch never lands, the name shown is
-  // still the one the ENGINE confirmed it wrote, which is the correct answer to
-  // be stuck on; the stale row is the wrong one.
-  // (Same shape as the grown/body pair in chat-transcript-preview.tsx.)
-  //
-  // Declared up here with the other hooks, ahead of the no-project early
-  // return below — see the note on that return.
+  // The branch the engine just reported for a rename, held until the workspace
+  // row catches up, so the breadcrumb doesn't show the old name during the
+  // refetch. It resets during render, keyed on the branch it replaced: once
+  // `workspace.branch` is anything else, the store has landed or the workspace
+  // changed. If the refetch never lands, the engine-confirmed name is the right
+  // one to show. Declared before the early return below.
   const [renamed, setRenamed] = useState<{ from: string; to: string } | null>(
     null,
   );
-  // 2026-05-23: reactive hook so the "Open in" dropdown unhides
-  // when a late-arriving preload bridge lands. Must be called
-  // unconditionally before the early-return below to satisfy
-  // React's rules-of-hooks (the no-project branch returns before
-  // the rest of the component runs).
+  // Reactive, so the "Open in" dropdown appears once a late preload bridge lands;
+  // called before the early return (rules of hooks).
   const nativeReady = useNativeRuntime().ready;
 
   // Empty state — no active chat, or chat folder isn't in a tracked
@@ -732,10 +655,6 @@ export function ConversationHeader({
           </Tooltip>
         )}
       </div>
-      {/* Run controls live on action rows in the terminal sidebar.
-          Create PR lives in
-          the workbench Changes tab's PR status row (ChangesWorkbenchSurface → PrStatusRow),
-          the same row that becomes the PR status island once a PR exists. */}
       {nativeReady && <OpenInDropdown path={openInPath} />}
       {workbenchCollapsed && onToggleWorkbench && (
         <WorkbenchToggleButton

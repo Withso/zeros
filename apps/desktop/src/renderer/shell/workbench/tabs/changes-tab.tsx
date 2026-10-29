@@ -1,37 +1,9 @@
-// ──────────────────────────────────────────────────────────
-// Changes engine — the shared model + UI behind the Changes tab
-// ──────────────────────────────────────────────────────────
-//
-// The data model and building blocks the workbench Changes tab composes (see
-// ChangesWorkbenchSurface), plus `useWorkspaceChangeCount` (the Changes pill's badge):
-//
-//   • useChangesModel → the persisted scope + turn filters (shared live via
-//     changes-filter-store), the commits/turns dropdown data, the scope-driven
-//     file sections (published to the Viewed store), and the sidebar discard
-//     flow. Scopes: everything this branch changed vs its base (committed AND
-//     uncommitted — the default, "All changes"), just the uncommitted working
-//     tree, or a single picked commit. The choice is remembered per workspace
-//     (changes-scope) so it survives tab/workspace switches and reloads.
-//   • ChangesList / FileSection / TreeSection / FileRow → files render as ONE
-//     flat, header-less list (no groups, conflicts included) with a status
-//     glyph, ± counts and a square badge whose SHAPE is the change type (＋
-//     created · • modified · − deleted) and whose COLOUR is the lifecycle (grey
-//     while uncommitted → green/gold/red once committed; red if conflicted) —
-//     in All changes that lifecycle is judged per file, so committed and pending
-//     files read distinctly in the same list. Hover reveals Discard ("All
-//     changes" filter only) — which fully reverts a tracked file to HEAD or
-//     deletes an untracked/new one, after a confirm.
-//   • changes-scope-menu → the combined history dropdown;
-//     EmptyState / NotAGitRepo / useTrunkGitState / useSourceTarget →
-//     the shared target resolution + non-git-trunk onboarding.
-//
-// Commit / push / pull are NOT surfaced here as manual controls — those
-// flows are agent-driven (the underlying gitCommit/gitPush/gitPull bridge
-// ops + engine handlers remain intact and are exercised by the agent).
-//
-// Drives the live git IPC (status / diff / discard / log / show). Only real
-// engine worktrees have a git surface; the synthetic "Local main" trunk is a
-// first-class editable target, and a non-git folder gets Initialize/Publish.
+// The shared model and building blocks behind the workbench Changes tab, plus
+// the Changes badge count. Scopes are All changes (the branch vs its base,
+// committed and uncommitted; the default), the uncommitted working tree, or one
+// commit, remembered per workspace. Files render as one flat list whose badge
+// shape is the change type and whose color is the lifecycle. Discard is the
+// only write control; commit, push and pull are agent-driven.
 
 import { upsertProject } from "../../../state/projects-store";
 import { notifyProjectsChanged } from "../../../state/use-projects";
@@ -241,15 +213,9 @@ function commitsForGeneration(
   );
 }
 
-// ── source target + change count ─────────────────────────────
-
-/** Resolve the active workspace into the git target the source views address.
- *  Real worktree → its id (full git + PR). Local-main "trunk" → its repoRoot,
- *  which the engine resolves to the primary checkout's working tree — a
- *  first-class EDITABLE target (status/diff/log + stage/commit/discard), the
- *  same as a worktree. There's no PR surface for the trunk itself (main is the
- *  base a PR merges INTO, not a feature branch), so the Review tab renders
- *  its empty state for the trunk. */
+/** The git target the source views address: a worktree's id, or Local main's
+ *  repoRoot, which the engine resolves to the primary checkout as an editable
+ *  target. The trunk has no PR surface, since it is what a PR merges into. */
 export function useSourceTarget(): {
   workspace: ReturnType<typeof useActiveWorkspace>["workspace"];
   isLocalMain: boolean;
@@ -269,8 +235,6 @@ export function useWorkspaceChangeCount(refreshKey: number): number {
   const { changesTarget } = useSourceTarget();
   return useChangeCount(changesTarget, refreshKey);
 }
-
-// ── lightweight change counts for the badge + scope menu ─────
 
 const ZERO_CHANGE_COUNTS: ChangeCounts = Object.freeze({
   all: 0,
@@ -339,8 +303,6 @@ export function useChangeCount(
   return useChangeCounts(workspaceId, refreshKey).all;
 }
 
-// ── non-git trunk: Initialize Git / Publish to GitHub ────────
-
 /** Only a Local folder is probed natively. A cloud trunk reuses the Local main
  *  row with a cloud:// key, which is a device UI identity rather than a path,
  *  and its checkout is always a cloned repository. */
@@ -348,14 +310,10 @@ export function nativeTrunkRoot(root: string | null): string | null {
   return root && !/^cloud:\/\//i.test(root) ? root : null;
 }
 
-/** For Local main, detect a folder that isn't READY for workspaces yet
- *  — either not a git repo, OR a repo with zero commits (unborn HEAD, e.g. a
- *  freshly `git init`'d folder). Both can't host a worktree/diff (`git diff HEAD`
- *  / `rev-parse HEAD` fail), so the panel offers Initialize / Publish instead of
- *  a raw `git … failed`. `checked` gates the trunk render until the (async) probe
- *  resolves, so the raw error never flashes first. Worktrees (root null) report
- *  `{ nonGit: false, checked: true }`. Re-runs on `refreshKey`, so it clears the
- *  moment the folder is initialized. */
+/** Detect a Local main folder that cannot host workspaces yet: not a repo, or a
+ *  repo with no commits (`git diff HEAD` fails). The panel offers Initialize /
+ *  Publish instead of a raw error. `checked` gates rendering until the probe
+ *  resolves so that error never flashes; it re-runs on `refreshKey`. */
 export function useTrunkGitState(
   trunkRoot: string | null,
   refreshKey: number,
@@ -487,8 +445,6 @@ export function NotAGitRepo({
     </Stack>
   );
 }
-
-// ── the Changes data model ───────────────────────────────────
 
 /** Untracked paths → ChangedFile rows. They appear in no diff, so their "+N" is
  *  the file's own line count; they're always uncommitted (grey square). Shared by
@@ -657,7 +613,6 @@ export function useChangesModel({
     (s: Scope) => setChangesScope(workspaceId, s),
     [workspaceId],
   );
-  // Pick a turn from the dropdown (or "No turns" = null) and persist the choice.
   const selectTurnFilter = useCallback(
     (t: TurnInfo | null) =>
       setChangesTurnFilter(
@@ -666,13 +621,10 @@ export function useChangesModel({
       ),
     [workspaceId],
   );
-  // Turn filter (v13): when set, the list shows ONE turn's agent-authored
-  // changes and overrides the scope above. Resolved against the loaded turns
-  // list; an identity whose turn hasn't loaded (or was reset/deleted — see the
-  // cleanup in the turns effect) resolves to null and the scope filter
-  // applies. Once resolved, the SAME TurnInfo reference is kept across turns
-  // reloads of the same selection (matching the old functional-setState
-  // behavior), so effectiveSections/row callbacks don't churn every refresh.
+  // Turn filter: when set, the list shows one turn's agent-authored changes
+  // instead of the scope. An unloaded, reset or deleted turn resolves to null so
+  // the scope applies. The same TurnInfo reference is kept across reloads, so
+  // derived rows don't churn.
   const turnFilterRef = useRef<TurnInfo | null>(null);
   const turnFilter = useMemo(() => {
     if (!turnFilterId) {
@@ -1134,11 +1086,8 @@ export function useChangesModel({
   // comparison, so an AD path reads 0 / 0 / 1 / 1 as Git actually represents it.
   const changeCounts = useChangeCounts(workspaceId, refreshKey, active);
 
-  // ── discard ──
-  // The ONLY write control here. Stage / unstage / commit / push are
-  // agent-driven (no manual buttons). Discard fully reverts a tracked file to
-  // HEAD, or DELETES an untracked / staged-new file — both destructive, so the
-  // row's Discard opens a confirm (discardTarget) and this runs on confirm.
+  // The only write control: Discard reverts a tracked file to HEAD or deletes an
+  // untracked or staged-new one. Both are destructive, so the row confirms first.
   const runDiscard = useCallback(
     (file: ChangedFile) => {
       setDiscardTarget(null);
@@ -1418,8 +1367,6 @@ function VirtualizedFlatFiles({
   );
 }
 
-// ── file list (flat) ─────────────────────────────────────────
-
 export interface RowActions {
   selected: string | null;
   busy: boolean;
@@ -1681,13 +1628,10 @@ const KIND_STYLE: Record<
   conflicted: { committedColor: "text-red-primary", label: "Conflicted" },
 };
 
-/** A 12px lucide-style square badge (square-plus / -dot / -minus — none ship in
- *  lucide-react 1.17, so they're inlined). The SHAPE is the change TYPE (＋
- *  created · • modified · − deleted); the COLOUR is the lifecycle: grey while
- *  uncommitted (untracked / staged / unstaged), then the type's colour once
- *  committed (green created · gold modified · red deleted). A conflict is red
- *  regardless — you must resolve it. Read-only: staging / commits happen via the
- *  agent or terminal, never here. */
+/** A 12px square badge (square-plus/-dot/-minus are not in lucide-react 1.17,
+ *  so they're inlined). Shape is the change type, color the lifecycle: grey
+ *  while uncommitted, then green/gold/red once committed; conflicts are always
+ *  red. */
 function StatusSquare({
   status,
   committed,
@@ -1763,8 +1707,6 @@ function StatusGlyph({ status }: { status: FileChangeStatus }) {
     </span>
   );
 }
-
-// ── file list (tree) ─────────────────────────────────────────
 
 function useTreeExpansion(defaultOpen: boolean, searchQuery: string) {
   const [open, setOpen] = useState(defaultOpen);
@@ -1871,9 +1813,6 @@ function TreeRow({
   );
 }
 
-// (DiscardDialog + discardPath now live in ./discard-file — shared with the
-//  workbench diff header so discard behaves identically in both places.)
-
 /** Line count for an untracked file's contents → its "+N" (untracked files
  *  appear in no diff, so we count their lines here; it's all additions). */
 function countLines(content: string): number {
@@ -1881,8 +1820,6 @@ function countLines(content: string): number {
   const body = content.endsWith("\n") ? content.slice(0, -1) : content;
   return body.length === 0 ? 0 : body.split("\n").length;
 }
-
-// ── misc ─────────────────────────────────────────────────────
 
 export function EmptyState({
   title,

@@ -1,14 +1,10 @@
-// ──────────────────────────────────────────────────────────
-// TerminalPanel — shared terminal controller and retained view deck
-// ──────────────────────────────────────────────────────────
-// Setup, configured Run actions, and plain shells appear in the main terminal
-// sidebar. Selecting a row opens/focuses that destination's own primary tab.
-// Each tab can dock independently into the existing resizable bottom panel.
-// The renderer moves stable portal hosts between the two surfaces so xterm,
-// scrollback, selection, and PTY subscriptions survive a placement change.
-// The engine still owns processes. UI navigation never starts a Run action.
-// Four workspace folders and twelve session views are retained; hidden views
-// remain inert and suspend focus, measurement, shortcuts, and status reads.
+// Setup, configured Run actions and plain shells appear in the main terminal
+// sidebar; selecting a row opens or focuses that destination's tab, and each
+// tab can dock into the bottom panel. Stable portal hosts move between the two
+// surfaces, so xterm, scrollback, selection and PTY subscriptions survive a
+// placement change. The engine owns processes; UI navigation never starts a
+// Run action. Four folders and twelve session views are retained, and hidden
+// views stay inert.
 
 import React, {
   useCallback,
@@ -391,15 +387,10 @@ export function TerminalPanel({
     (action) => runStatuses[action.id]?.state === "running",
   );
   useEffect(() => {
-    // Both guards exist for one reason: this publication is AUTHORITATIVE — it
-    // supersedes the top bar's own poll for this exact folder — so it must
-    // never be made from a placeholder.
-    //   • actionsReady: a settings revalidation must not clear a usable signal
-    //     merely because its action list is temporarily empty.
-    //   • runStatusesReady: the status map reads {} both before the first
-    //     workspace.runInfo lands and when nothing is running. Publishing the
-    //     first as if it were the second blanks the live stream on this
-    //     workspace's own top-bar tab for a round-trip, every cold open.
+    // This publication supersedes the top bar's own poll for this folder, so it
+    // must never come from a placeholder: an action list emptied by revalidation,
+    // or the `{}` status map that reads the same before the first workspace.runInfo
+    // as when nothing runs.
     if (!actionsReady || !runStatusesReady) return;
     publishRunActivity(folderKey, anyRunActionRunning);
   }, [actionsReady, runStatusesReady, anyRunActionRunning, folderKey]);
@@ -416,10 +407,9 @@ export function TerminalPanel({
     [sessions],
   );
 
-  // MIGRATION: the trunk's setup used to run in an inline `pty-setup-*`
-  // terminal here; it now goes through the engine-backed runner (SetupView),
-  // like a worktree. Purge any persisted legacy session so it can't linger as
-  // an invisible zombie tab (force: it may be its folder's only session).
+  // Purge persisted legacy `pty-setup-*` sessions (setup now runs through
+  // SetupView) so none lingers as an invisible tab; forced, since one may be its
+  // folder's only session.
   const forceCloseSession = useTerminalStore((s) => s.forceCloseSession);
   useEffect(() => {
     for (const s of sessions) {
@@ -434,12 +424,9 @@ export function TerminalPanel({
     }
   }, [sessions, forceCloseSession, activeRaw, setActiveTerminalTab, folderKey]);
 
-  // CLEANUP: a run session whose ACTION was removed from settings has no tab
-  // (run ids are filtered from the plain strip and its action tab is gone) —
-  // close it so it can't linger as an invisible zombie, killing its PTY if
-  // the process is still alive (removing the action means stopping its run).
-  // Gated on actionsReady: an empty list during settings load means
-  // "unknown", and must not tear down a live dev server.
+  // Close a run session whose action was removed (it has no tab), killing a live
+  // PTY, since removing the action stops its run. Gated on actionsReady: an empty
+  // list during settings load means unknown, not none.
   useEffect(() => {
     if (!actionsReady) return;
     const valid = new Set(actions.map((a) => runIdFor(a.id)));
@@ -747,18 +734,9 @@ export function TerminalPanel({
         style={!hasPanel ? { display: "none" } : undefined}
         data-terminal-panel=""
         aria-expanded={expanded}
-        // Collapse and expand SNAP. The panel used to carry
-        // `transition-[flex-basis,min-height] duration-300`, which was wrong in
-        // three ways at once:
-        //   • The body is hidden the instant `expanded` flips, so a collapse
-        //     animated an already-empty box shut for 300ms.
-        //   • The expo-out curve put ~half the travel in the first frame and
-        //     then crawled the last few pixels — read as a jerk, not motion.
-        //   • Worst: xterm's ResizeObserver fires on every animated frame while
-        //     the panel is visible. One expand measured 14 distinct body
-        //     heights, i.e. 14 refits and 14 PTY resizes (SIGWINCH) — the
-        //     shell-redraw storm this file's spawn path (see the header note)
-        //     was written to avoid. Snapping makes it exactly one.
+        // Collapse and expand snap. An animated flex-basis made xterm's ResizeObserver
+        // fire every frame: one expand measured 14 body heights, so 14 refits and 14
+        // SIGWINCHes. Snapping makes it one.
         className={cn(
           "bg-bg1 flex shrink-0 flex-col overflow-hidden",
           expanded ? TERMINAL_PANEL_EXPANDED_LAYOUT_CLS : "min-h-10 basis-10",
@@ -1028,18 +1006,13 @@ export function TerminalPanel({
   );
 }
 
-// ── Setup tab status dot ───────────────────────────────────
-
 type SetupStatus = WorkspaceSetupInfo["state"];
 const setupStatusCache = new Map<string, SetupStatus>();
 const MAX_SETUP_STATUS_SNAPSHOTS = 64;
 
-/** Live setup status for the ACTIVE workspace, independent of SetupView's
- *  visibility — exactly when the off-tab dot matters. Fetched from
- *  `workspace.setupInfo` on mount / workspace
- *  switch, then re-pulled on every DB_CHANGED{workspaces} broadcast — the
- *  engine fires one for each setup transition (running / passed / failed /
- *  stopped), for the trunk and worktrees alike. */
+/** Live setup status for the active workspace, independent of SetupView's
+ *  visibility. Fetched on mount and switch, then re-pulled on each
+ *  DB_CHANGED{workspaces}, which the engine fires for every setup transition. */
 function useSetupStatus(
   workspace: Workspace | null,
   active: boolean,
@@ -1158,8 +1131,6 @@ function useSetupTabDot(
   if (status === "running") return "running";
   return unseen;
 }
-
-// ── Run action states (empty / last-run / status cluster) ──
 
 export type RunOutcome = "finished" | "failed" | "stopped";
 
@@ -1381,8 +1352,6 @@ function runTabDot(
   if (status?.state === "failed") return "failed";
   return null;
 }
-
-// ── Sub-tab strip ──────────────────────────────────────────
 
 /** Terminal panel's header: Setup · action(s) · Terminal(s) · [+], using the same pill
  *  geometry and selected background as workbench. Setup + run actions carry no ✕;
@@ -1619,12 +1588,9 @@ function SubTab({
       )}
       {onClose && (
         <>
-          {/* Fade gradient — masks the trailing edge of the label so the close
-              button sits on a clean fade-out instead of chopping the text.
-              The tab is bg2 whenever active/hovered, matching workbench. Pure overlay
-              (absolute) → no flex-width change on hover, no layout shift, so the
-              label keeps its full footprint at rest. Reveal keys off the
-              strip-driven data-hovered, not :hover (sticky-strip rule). */}
+          {/* Fades the label's trailing edge under the close button. An absolute
+              overlay, so hover causes no layout shift; it keys off the strip-driven
+              data-hovered, not :hover (sticky-strip rule). */}
           <span
             aria-hidden
             className="from-bg2 pointer-events-none absolute inset-y-0 right-0 w-8 bg-gradient-to-l from-50% to-transparent opacity-0 transition-none group-data-[hovered=true]/subtab:opacity-100"

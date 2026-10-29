@@ -3,20 +3,10 @@ import { WorkspaceRuntimeClient } from "../platform/bridge/workspace-runtime-cli
 import { useBridgeStatus } from "../platform/bridge/use-bridge";
 import { useReadRecovery } from "./use-read-recovery";
 import { isCloudRepositorySlug, isCloudWorkspace } from "../platform/bridge/cloud-workspace-key";
-// ──────────────────────────────────────────────────────────
-// React bindings for projects + per-project workspaces
-// ──────────────────────────────────────────────────────────
-//
-// `useProjects()` — list + mutate the persisted projects registry.
-// `useWorkspacesFor(repoSlug)` — live list of workspaces for one project,
-//   queried via the workspace_list IPC. Refreshes on a published event so the
-//   global top bar and workspace consumers stay in sync.
-//
-// We don't go full Redux/Zustand for this — projects are small, mutated
-// infrequently, and the cross-tab story isn't urgent. A simple
-// subscribe/publish bus with localStorage as the persistence layer is
-// enough.
-// ──────────────────────────────────────────────────────────
+// React bindings for the persisted projects registry and per-project workspace
+// lists. Projects use a small publish bus over localStorage, since they are
+// small and change rarely; workspace lists are one keyed renderer-wide cache, so
+// every surface reads the same immutable rows.
 
 import {
   useCallback,
@@ -70,8 +60,6 @@ import {
 } from "./workspace-list-persistence";
 
 const MAX_BOOT_PREFETCH_PROJECTS = 8;
-
-// ── Projects subscription bus ────────────────────────────
 
 type ProjectsListener = () => void;
 const projectListeners = new Set<ProjectsListener>();
@@ -215,8 +203,6 @@ export function useSyncProjectsToEngine(): void {
     };
   }, []);
 }
-
-// ── Workspaces subscription bus ──────────────────────────
 
 type WorkspacesListener = (repoSlug: string) => void;
 const workspaceListeners = new Set<WorkspacesListener>();
@@ -454,14 +440,11 @@ function loadCachedWorkspaceCollection(
 function ingestWorkspaceRows(repoSlug: string, rows: Workspace[], cloudConfirmed = false): void {
   if (!repoSlug) return;
   const prior = workspaceCache.peekSnapshot(repoSlug).data;
-  // Provisional-empty guard (mirrors loadCachedWorkspaces): a seeded slug that a
-  // cross-repo discovery read returns empty for is almost always a mid-swap /
-  // unsynced engine, not a genuine emptying — keep the seeded rows and confirm
-  // once via a forced per-repo read. Scoped to provisional slugs, so a real
-  // archive-to-empty (non-provisional by then) still reaches []. Without this,
-  // ONE transient-empty discovery response would blank every repo AND overwrite
-  // persistence with []. While held, further empty ingests keep prior; the
-  // scheduled confirm is the single authoritative decider.
+  // Provisional-empty guard, as in loadCachedWorkspaces: a seeded slug that
+  // discovery returns empty is usually a mid-swap or unsynced engine, so keep the
+  // seed and confirm once with a forced per-repo read. A real archive-to-empty is
+  // no longer provisional and still reaches []. Without it, one transient empty
+  // response would blank every repo and persist [].
   if (
     !cloudConfirmed &&
     rows.length === 0 &&
@@ -701,12 +684,10 @@ let discoveryQueued = false;
 let lastDiscoveryAt = 0;
 let discoveryPromise: Promise<void> | null = null;
 
-/** Populate/repair the single source across ALL repos from one git-free
- * `workspaceList({archived:false})` read: ingest each repo's rows and ingest []
- * for every previously-known slug now absent (cross-repo archive-to-empty +
- * completeness for unregistered-repo rows). This is the fetch-DRIVER the cross-
- * repo union needs — invalidation only marks entries stale, it never reads.
- * Replaces the deleted heavy `withChanges` collection query. */
+/** One git-free `workspaceList({archived:false})` read across all repos:
+ * ingest each repo's rows, and [] for known slugs now absent (archive-to-empty,
+ * unregistered-repo rows). This drives the cross-repo union; invalidation only
+ * marks entries stale. */
 function runDiscovery(force: boolean): Promise<void> {
   const bridge = getActiveBridge();
   if (!bridge || (bridge.status !== "connected" && !(bridge instanceof WorkspaceRuntimeClient))) return Promise.resolve();
@@ -1108,12 +1089,10 @@ export function notifyWorkspacesChanged(
   }
 }
 
-/** Scoped variant of notifyWorkspacesChanged for a DB_CHANGED broadcast that
- *  carries opaque workspace ids: map each id → its repo slug and invalidate only
- *  those repos (each notifyWorkspacesChanged(slug) still refreshes the archived
- *  History collection). Unmappable Local ids fall back to '*' + discovery;
- *  cloud ids wait for their catalog's scoped row publication. Keeps the common per-change case off the invalidate
- *  storm that made the Dashboard lag the top bar. */
+/** Scoped notifyWorkspacesChanged for a DB_CHANGED that carries opaque ids:
+ *  invalidate only the mapped repos. Unmappable Local ids fall back to '*' plus
+ *  discovery; cloud ids wait for their catalog's row publication. A global
+ *  invalidate made the Dashboard lag the top bar. */
 export function notifyWorkspacesChangedForIds(ids: readonly string[]): void {
   if (!ids.length) { notifyWorkspacesChanged("*"); return; }
   const owners = new Map<string, string[]>();
@@ -1178,13 +1157,10 @@ export function useWorkspacesFor(repoSlug: string | null): {
     };
   }, [revalidate, repoSlug]);
 
-  // Refetch when the bridge (re)connects. getActiveBridge() is null on first mount
-  // (BridgeProvider sets the singleton in a later root effect) + the client is
-  // swapped on engine respawn. Without this the top bar's worktrees stay empty
-  // after a cold open until a manual refetch, and go stale after an engine HMR
-  // respawn. The subscribe-time fire (`initial`) happens on EVERY mount while
-  // the app is healthy, so it honours the freshness window — a fresh shared
-  // cache costs nothing. Only genuine (re)connect transitions force a read.
+  // Refetch on bridge (re)connect: the bridge singleton is null on first mount
+  // and swaps on engine respawn, so worktrees would stay empty or stale. The
+  // mount-time fire honours the freshness window; only real (re)connects force a
+  // read.
   useEffect(() => {
     return onActiveBridgeConnected((_client, { initial }) => {
       if (!repoSlug) return;
@@ -1290,18 +1266,11 @@ export function useArchivedWorkspaces(repoSlug?: string): {
   };
 }
 
-/** Live, FLAT cross-repo list of NON-archived workspaces — the Dashboard board
- *  and home-sidebar repo counts. Derived by UNIONing the same per-repo
- *  `workspaceCache` entries the top bar reads (via useWorkspacesFor), so for any
- *  repo every surface projects the IDENTICAL Workspace objects and the views can
- *  never structurally disagree — the old separate heavy `withChanges` collection
- *  query (which diverged in seeding, latency, and invalidation) is gone.
- *
- *  Kept live by: per-slug cache subscriptions (re-subscribed when the project
- *  set changes) + a `liveUnionListeners` poke for discovery-only slugs + a
- *  fetch-driver (runDiscovery on mount / bridge reconnect / coarse bus events,
- *  and a per-slug reload on scoped bus events). hasChanges is intentionally NOT
- *  here — cards probe it lazily. */
+/** The flat cross-repo list of non-archived workspaces (Dashboard board,
+ *  sidebar counts): a union of the per-repo cache entries the top bar reads, so
+ *  every surface projects identical Workspace objects. Kept live by per-slug
+ *  subscriptions, the union bus for discovery-only slugs, and runDiscovery on
+ *  mount, reconnect and coarse events. Cards probe hasChanges lazily. */
 export function useLiveWorkspaces(): {
   workspaces: Workspace[];
   loading: boolean;

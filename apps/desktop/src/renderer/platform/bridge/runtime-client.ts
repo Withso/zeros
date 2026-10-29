@@ -13,30 +13,18 @@ import {
 /** Ladder for reconnect backoff in ms. Index = consecutive-failure count. */
 const RECONNECT_LADDER = [1_000, 2_000, 4_000, 8_000, 15_000];
 
-/** How long to buffer requests made while the socket is briefly down, before
- *  giving up and surfacing a soft-fail error. Must OUTLAST a cold-boot connect:
- *  the renderer fires WORKSPACE_REQUESTs (chat backfill/mirror, history hydrate,
- *  worktree list) before the bridge is stably open, and the local↔relay
- *  handshake plus the reconnect ladder above (…8s, 15s) routinely exceeds 7s on
- *  a cold/dev start. At 7s — SHORTER than the ladder's own 15s top step — those
- *  queued requests rejected with "Request timeout: … (reconnecting)" and the
- *  initial server-state reads fail before the engine came up. 20s lets them
- *  survive the connect and flush once the bridge settles. NOTE: decoupled from
- *  the chat UI's 7s "Reconnecting…" indicator — the indicator may show while
- *  requests keep patiently buffering; they are separate concerns. */
+/** How long requests made during a disconnect stay buffered before a
+ *  soft-fail. It must outlast a cold-boot connect: startup reads fire before the
+ *  bridge is open, and the handshake plus the reconnect ladder (up to 15s)
+ *  exceeds 7s, which once failed those reads. Independent of the chat's 7s
+ *  "Reconnecting…" indicator. */
 const RECONNECT_GRACE_MS = 20_000;
 
-/** Cap on the number of requests we'll queue during a disconnect so
- *  a runaway caller can't pin unbounded memory. The previous 32 was
- *  too tight for realistic multi-chat use — every project switch
- *  triggers a brief disconnect, every chat that's mid-mount fires
- *  AGENT_LOAD_SESSION, and listAgents from the empty composer adds
- *  one more. With 7+ live chats and a 7s reconnect grace window,
- *  hitting the cap was easy and surfaced as "queue full" timeouts on
- *  random chats. 256 covers the realistic upper bound (every chat
- *  the user has open + a handful of registry probes) without burning
- *  meaningful memory. The deadline check still expires entries so a
- *  stuck reconnect doesn't grow the queue forever. */
+/** Queue cap during a disconnect, so a runaway caller can't pin unbounded
+ *  memory. 32 was too tight: a project switch disconnects briefly while every
+ *  mounting chat sends AGENT_LOAD_SESSION, which surfaced as "queue full"
+ *  timeouts. 256 covers every open chat plus registry probes; deadlines still
+ *  expire entries. */
 const MAX_QUEUED_REQUESTS = 256;
 
 /** Parse the untrusted local/cloud WebSocket boundary. The protocol schema
@@ -60,24 +48,15 @@ export function parseInboundBridgeWebSocketFrame(
   }
 }
 
-/** Per-type cap on queued requests for high-fan-out
- *  message types that React effects can re-fire while disconnected.
- *  AGENT_LOAD_SESSION is the worst offender: every chat-view mount
- *  emits one, and a chat-switch storm during a brief reconnect can
- *  pile up dozens for the same chatId. We cap each type at 50 entries
- *  in the queue and drop the oldest when the cap is reached. The
- *  newest write always wins because session state is monotonic. */
+/** Per-type queue caps for messages React effects re-fire while disconnected
+ *  (every chat-view mount sends AGENT_LOAD_SESSION). The oldest entry drops at
+ *  the cap; session state is monotonic, so the newest wins. */
 const PER_TYPE_QUEUE_CAP: Record<string, number> = {
   AGENT_LOAD_SESSION: 50,
   AGENT_LIST_SESSIONS: 50,
-  // AGENT_NEW_SESSION is high-fan-out AND expensive: each one the engine
-  // handles spawns a fresh agent subprocess (a codex app-server child per
-  // session). A rebuild storm (many chats failing at once, or queued sends
-  // draining into an unhealthy chat) could otherwise pile up hundreds and
-  // fork-bomb the machine. Cap it low — the newest rebuild wins, older
-  // queued spawns are dropped. AGENT_LIST_AGENTS is cheap but re-fires from
-  // effects on every error-state flip; cap it too so a reconnect storm
-  // doesn't flood the registry probe.
+  // Each AGENT_NEW_SESSION spawns an agent subprocess, so a rebuild storm could
+  // fork-bomb the machine; cap it low and let the newest win. AGENT_LIST_AGENTS
+  // re-fires on every error-state flip, so it is capped too.
   AGENT_NEW_SESSION: 12,
   AGENT_LIST_AGENTS: 24,
 };
@@ -190,13 +169,9 @@ export function parseRuntimeConnectionTarget(
   return Object.freeze({ ...target, protocols: Object.freeze([...target.protocols]) as typeof target.protocols });
 }
 
-// ── Connection-rejection recovery (pure helpers) ──────────
-//
-// CONNECTION_REJECTED is TERMINAL for the reconnect ladder (retrying the same
-// client/token would just be refused again), so someone must consume it or the
-// app sits in a silent "disconnected" state until relaunch. The always-mounted
-// BridgeProvider (use-bridge.tsx) is that consumer; these helpers keep its
-// policy pure and unit-testable.
+// CONNECTION_REJECTED is terminal for the reconnect ladder, so BridgeProvider
+// (use-bridge.tsx) must consume it or the app sits silently disconnected. These
+// pure helpers hold its policy.
 
 /** Payload of an engine CONNECTION_REJECTED as recorded by the client. `reason`
  *  is one of ConnectionRejectedMessage's literals, kept as `string` here so an
@@ -342,13 +317,9 @@ function clearPendingRequest(pending: PendingRequest): void {
 export class RuntimeClient {
   private readonly environment: RuntimeClientEnvironment;
   private ws: RuntimeTransportSocket | null = null;
-  /** A WebSocket that's been created but hasn't fired onopen yet.
-   *  Tracking this prevents `connect()` from racing with itself: HMR
-   *  reloads or rapid status churn used to stack orphan sockets, each
-   *  holding an open connection to the engine. The engine broadcasts to
-   *  every client, so 3 orphans = every chunk arriving at the renderer
-   *  3 times = one bubble with the response text concatenated 3x.
-   *  See coalesce logic in use-agent-session.tsx:appendText. */
+  /** A socket created but not yet open. It stops connect() racing itself: orphan
+   *  sockets stayed connected, and the engine broadcasts to every client, so each
+   *  orphan duplicated every chunk. */
   private pendingWs: RuntimeTransportSocket | null = null;
   private handlers = new Map<string, Set<(msg: BridgeMessage) => void>>();
   private pendingRequests = new Map<string, PendingRequest>();
@@ -477,12 +448,8 @@ export class RuntimeClient {
   async connect(): Promise<void> {
     if (this._disposed || (this.connectionTarget.kind === "cloud" && this._rejected)) return;
     if (this.ws?.readyState === 1) return;
-    // In-flight guard. Without it, two concurrent connect() calls both
-    // await enginePortPromise then both `new WebSocket(...)` — the
-    // earlier one is orphaned (its onopen never wins the assignment to
-    // this.ws) but its TCP connection stays open until GC. The engine
-    // broadcasts to every connected client, so the renderer sees every
-    // chunk multiplied by the orphan count.
+    // In-flight guard: two concurrent connect() calls would each open a WebSocket,
+    // orphaning one that stays connected and duplicates every broadcast chunk.
     if (this.pendingWs) return;
 
     if (
@@ -707,12 +674,8 @@ export class RuntimeClient {
     // is already running (onclose → scheduleReconnect), so we just
     // wait for onopen → flushQueue() to pick this up.
 
-    // Dedup by (type, sessionId). For idempotent
-    // requests like AGENT_LOAD_SESSION targeting the same session, the
-    // newer call supersedes any older queued copy: chat-view mount
-    // effects and chat-switch storms used to stack 5× the same call.
-    // Drop older copies with a "superseded" reject so upstream retry
-    // loops can decide what to do.
+    // Dedup by (type, sessionId): a newer idempotent request supersedes an older
+    // queued copy, which is rejected as "superseded" so retry loops can decide.
     this.dedupSupersededInQueue(msg);
 
     // Per-type cap — for message types that can balloon under
@@ -855,15 +818,10 @@ export class RuntimeClient {
     ) {
       this.cloudTargetNeedsRefresh = true;
     }
-    // Reject anything in flight — those request ids are bound to a
-    // server process that's about to die. Soft-fail so upstream retry
-    // loops can decide to resend; we don't requeue silently because
-    // the new engine is a different process entirely.
-    //
-    // Tag with `code: "ENGINE_SWAPPING"` so failure.ts can identify
-    // these without relying solely on message-string matching. The
-    // string itself is still matched by TRANSPORT_RX as a defense-in-
-    // depth fallback.
+    // Reject in-flight requests: their ids belong to a server process about to die,
+    // and the new engine is a different process, so nothing is requeued silently.
+    // `code: "ENGINE_SWAPPING"` lets failure.ts identify them; TRANSPORT_RX also
+    // matches the message as a fallback.
     const makeSwapError = (): Error & { code?: string } => {
       const e = new Error("Engine swapping — request aborted") as Error & {
         code?: string;
@@ -941,8 +899,6 @@ export class RuntimeClient {
     this.pendingWs = null;
   }
 
-  // ── Internals ───────────────────────────────────────────
-
   private diagnosticScope(): CloudDiagnosticScope | undefined {
     const target = this.connectionTarget;
     return target.kind === "cloud" ? { organizationId: target.organizationId, workspaceId: target.workspaceId,
@@ -989,17 +945,10 @@ export class RuntimeClient {
     this._rejected = false;
     this.lastRejection = null;
 
-    // Announce ourselves. Attach the current access token (when signed
-    // in) so the engine can bind the connection to an account:
-    //   • LOCAL (desktop renderer): the token ESTABLISHES the engine's owner
-    //     account (the account signed into this Mac). Local clients are never
-    //     gated; this just records who owns the desktop.
-    //   • CLOUD: the control plane already admitted the exact account and
-    //     authority epoch, so no reusable account bearer crosses into sandbox.
-    // Read synchronously from the auth bridge (AuthProvider keeps it fresh).
-    // Local sidecars use the desktop session to seed their owner binding. A
-    // cloud engine was already admitted through the control plane and must
-    // never receive the reusable WorkOS bearer inside its sandbox.
+    // Announce ourselves. Locally, the current access token establishes the
+    // engine's owner account (local clients are never gated). A cloud engine was
+    // already admitted through the control plane, so the reusable WorkOS bearer
+    // never crosses into its sandbox.
     const authToken =
       this.connectionTarget.kind === "local" ? this.environment.getAuthAccessToken() : "";
     this.rawSend({
@@ -1060,13 +1009,10 @@ export class RuntimeClient {
       this._engineConnected = true;
     }
 
-    // Engine REFUSED the connection — protocol skew or account-binding. Stop the
-    // blind reconnect loop (a retry with the same client/token would just be
-    // rejected again) and surface it so the UI can act: prompt an app update
-    // (protocol-*) or a token refresh / re-login (auth-*). BridgeProvider
-    // (use-bridge.tsx) is the consumer: it shows reason-specific toast copy and
-    // calls clearRejection() once there is a path forward (a watchdog engine
-    // respawn for the retryable reasons, a fresh token for the auth ones).
+    // The engine refused the connection (protocol skew or account binding). Stop
+    // the blind reconnect loop, which would only be refused again, and surface it:
+    // BridgeProvider shows reason-specific copy and calls clearRejection() once
+    // there is a path forward.
     if (msg.type === "CONNECTION_REJECTED") {
       const m = msg as { reason?: string; message?: string };
       this._rejected = true;
@@ -1085,7 +1031,6 @@ export class RuntimeClient {
       return;
     }
 
-    // Resolve pending request-response.
     const requestId =
       "requestId" in msg
         ? (msg as { requestId?: string }).requestId
@@ -1103,7 +1048,6 @@ export class RuntimeClient {
       pending.resolve(msg);
     }
 
-    // Notify type-based listeners.
     const listeners = this.handlers.get(msg.type);
     if (listeners) {
       for (const handler of listeners) handler(msg);

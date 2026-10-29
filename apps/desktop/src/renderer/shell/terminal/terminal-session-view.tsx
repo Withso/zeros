@@ -1,46 +1,10 @@
-// ──────────────────────────────────────────────────────────
-// Terminal Session View — xterm instance for one PTY session
-// ──────────────────────────────────────────────────────────
-//
-// One instance per terminal tab. Owns:
-//   - the xterm DOM grid
-//   - the FitAddon (resizing on container resize)
-//   - the bridge between xterm onData → pty_write
-//   - the bridge between pty-data event → xterm.write
-//   - PTY lifecycle: pty_create on mount, pty_kill on unmount
-//
-// The store records metadata only; this component is the
-// canonical owner of the IPC PTY. Mounting a fresh session
-// view = a fresh `pty_create`; unmounting = `pty_kill`.
-//
-// Sessions where `alive=false` skip the create call: the
-// underlying PTY exited, so we replay the stored output buffer.
-// Live PTY state is not persisted across app restarts.
-//
-// Stacked-prompt fix
-// ──────────────────────────
-// The shell used to print its prompt up to 3 times at different
-// widths on first open. Root cause: PTY was spawned in the next
-// rAF after xterm.open(), but the host container could still be
-// in mid-layout (panel just expanded, percentage-height card
-// resolving against a still-measuring parent, font shipping
-// late), so `fit.fit()` returned a tiny cols/rows and the shell
-// printed its login prompt at that width. Subsequent
-// ResizeObserver fires grew the PTY, the shell redrew on each
-// SIGWINCH, and the old narrow prompt(s) stayed in scrollback.
-//
-// Fix is structural:
-//   1. Don't spawn the PTY until the view is visible with a real host box
-//      and `fit.proposeDimensions()` returns a usable measurement. A
-//      ResizeObserver retries as layout settles. A 1.5 s fallback to
-//      80×24 handles missing font metrics, only while visible and laid out.
-//   2. After spawn, the live ResizeObserver waits for native-window bursts
-//      to settle and suspends completely during known pane drags, then fits
-//      once on the next frame. This collapses a gesture into one PTY resize.
-//   3. All resize paths funnel through `proposeDimensions()` →
-//      `fit.fit()` → `ptyResize` (matching dim equality check),
-//      so the PTY and the xterm grid stay in lockstep.
-// ──────────────────────────────────────────────────────────
+// One xterm instance per terminal tab. It owns the PTY: create or reattach on
+// mount, input and output bridging, and resizes; the store records metadata
+// only. The PTY spawns only once the view is visible and FitAddon proposes a
+// real measurement (a 1.5 s 80×24 fallback covers missing font metrics), and
+// later resizes funnel through proposeDimensions → fit → ptyResize after
+// layout settles. Spawning earlier printed the login prompt at a tiny width
+// and left stacked prompts in scrollback.
 
 import React, { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { captureDeferredFocus } from "@/renderer/shared/ui/deferred-focus";
@@ -48,17 +12,9 @@ import { useWorkbenchStatusSource } from "../workbench/tab-status";
 import { Terminal as XTerm } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import "@xterm/xterm/css/xterm.css";
-// 2026-05-28: dropped `@xterm/addon-canvas`. The addon's latest
-// release (0.7.0) was published against xterm@^5; xterm v6 doesn't
-// have a v6-compatible canvas addon yet (pnpm flagged the peer
-// mismatch). The DOM renderer (xterm's built-in default) is what
-// 95%+ of xterm users run on and is sufficient for our agent panel
-// usage. If terminal perf becomes an issue with many simultaneous
-// heavy streams, the right replacement is `@xterm/addon-webgl` —
-// but Chromium caps a renderer at ~16 active WebGL contexts and
-// force-loses the oldest, which in a multi-agent session would
-// manifest as random pane freezes, so adopt it deliberately rather
-// than reflexively. DOM-first stays the safe default.
+// DOM renderer by design: xterm v6 has no canvas addon, and `@xterm/addon-webgl`
+// would hit Chromium's ~16 active WebGL contexts per renderer, which
+// force-loses the oldest and would freeze panes in multi-agent sessions.
 
 import {
   ptyCreate,
@@ -175,11 +131,8 @@ interface TerminalSessionViewProps {
   surfaceToken?: string;
 }
 
-// Wrapped in React.memo so the deck parent (which subscribes to the
-// whole Context-backed workspace store and therefore re-renders on
-// every reducer dispatch) doesn't cascade through to xterm
-// reconciliation. Props are all primitives / nullable strings, so the
-// default shallow comparator is correct.
+// Memoized so the deck parent's re-renders never reach xterm; every prop is a
+// primitive, so the shallow comparator is correct.
 export const TerminalSessionView = React.memo(function TerminalSessionView({
   sessionId,
   cwd,
@@ -267,10 +220,8 @@ export const TerminalSessionView = React.memo(function TerminalSessionView({
   // xterm's concrete bg/fg values never go stale.
   const themeId = useThemeId();
 
-  // Mount xterm once; defer PTY spawn until the host container reports
-  // a real size. See the file header for why this is structural —
-  // spawning at 80×24 (or worse) leaves stale prompt lines in scrollback
-  // every time the panel finishes its expand animation.
+  // Mount xterm once and defer the PTY spawn until the host reports a real size
+  // (see the header).
   useLayoutEffect(() => {
     if (!hostRef.current) return;
     const host = hostRef.current;
@@ -303,13 +254,6 @@ export const TerminalSessionView = React.memo(function TerminalSessionView({
       term.textarea?.setAttribute("aria-label", "Sign-in terminal");
     xtermRef.current = term;
     fitRef.current = fit;
-    // Renderer choice — DOM (xterm's built-in default). See the
-    // import-section comment above for why we dropped the Canvas
-    // addon path. The DOM renderer handles our typical workload
-    // (per-agent worktree pane, scrollback up to 10k lines) without
-    // visible perf issues; if that changes for heavy multi-agent
-    // sessions, evaluate `@xterm/addon-webgl` with the 16-context
-    // ceiling in mind before adopting.
 
     // Cmd/Ctrl shortcuts: bracketed-paste-safe Ctrl/Cmd+V and copy-
     // when-selection on Ctrl/Cmd+C. Returning `false` from the
@@ -321,35 +265,19 @@ export const TerminalSessionView = React.memo(function TerminalSessionView({
       // return true), which is fine — it's a no-op for these chords.
       if (evt.type !== "keydown") return true;
       const mod = evt.metaKey || evt.ctrlKey;
-      // App-level global chords use Cmd/Ctrl+Option (⌥⌘B toggles
-      // Workbench, ⌥⌘T cycles theme). Return false so xterm neither
-      // forwards them to the PTY nor calls preventDefault — the event
-      // then bubbles to the window keydown handlers in app-shell.
-      // macOS terminals never deliver Cmd+Option combos to the shell,
-      // so nothing useful is lost. The matching half of this fix is
-      // the xterm-helper-textarea exemption in editable-target.ts;
-      // without it those window handlers would still bail on the
-      // terminal's hidden <textarea>.
+      // App chords use Cmd/Ctrl+Option (⌥⌘B, ⌥⌘T). Returning false keeps xterm from
+      // forwarding them or calling preventDefault, so they bubble to app-shell's
+      // window handlers; macOS terminals never deliver Cmd+Option to the shell.
+      // editable-target.ts exempts xterm's hidden textarea for the same reason.
       if (mod && evt.altKey) return false;
       if (!mod || evt.altKey) return true;
       const key = evt.key.toLowerCase();
       if (key === "v") {
-        // Do NOT call term.paste() here. The PLATFORM paste path already
-        // pastes: the Electron app menu's { role: "paste" }
-        // (apps/desktop/electron/menu.ts) and the right-click context menu both drive
-        // webContents.paste(), which fires xterm's native `paste`
-        // DOM-event handler; a browser-hosted relay client would fire that same
-        // handler directly from Cmd/Ctrl+V. xterm's native
-        // handler ALREADY wraps the clipboard in bracketed-paste markers
-        // (CSI ?2004h → \x1b[200~…\x1b[201~) via the very routine
-        // term.paste() calls, so multi-line pastes stay intact. Calling
-        // term.paste() in addition pasted a SECOND copy on top of it —
-        // the "git remote -vgit remote -v" duplication.
-        //
-        // We still return false so xterm doesn't ALSO emit Ctrl+V (0x16,
-        // "quoted-insert") to the PTY on Linux/Windows. Returning false
-        // does NOT preventDefault, so the native paste event still fires —
-        // leaving exactly one bracketed paste.
+        // Do not call term.paste(): the platform paste path (Electron's paste role, the
+        // context menu, or a relay client's Cmd/Ctrl+V) already fires xterm's native
+        // paste handler, which adds bracketed-paste markers, so calling it pasted a
+        // second copy. Returning false only stops xterm from also sending Ctrl+V (0x16)
+        // to the PTY; it does not preventDefault, so exactly one paste happens.
         return false;
       }
       if (key === "c" && term.hasSelection()) {
@@ -366,45 +294,25 @@ export const TerminalSessionView = React.memo(function TerminalSessionView({
       return true;
     });
 
-    // Capture-phase wheel handler. TUIs that enable mouse tracking
-    // (vim, tmux, claude-code in input mode, codex) eat wheel events
-    // before xterm gets to scroll its viewport — so the user can't
-    // scrollback while an agent is running. Intercepting at capture
-    // ensures we scroll the buffer regardless of mouse-tracking state.
-    // We DON'T preventDefault at the scrollback boundaries, so an
-    // outer scroller can take over there.
-    //
-    // Everywhere else we take the WHOLE gesture — including the events that are
-    // still sub-line. Releasing those would hand them straight back to the
-    // listener this handler exists to pre-empt: xterm's viewport, which under
-    // mouse tracking forwards them to the TUI as scroll escapes, and otherwise
-    // runs its OWN accumulator on top of ours for a jittery ~2× scroll. One
-    // accumulator owns the gesture, and it carries the remainder between events
-    // instead of rounding it away — which is what made slow trackpad scrolling
-    // do nothing at all (see wheel-scroll.ts).
+    // Capture-phase wheel handler: mouse-tracking TUIs (vim, tmux, agent CLIs)
+    // otherwise eat wheel events, leaving scrollback unreachable while an agent
+    // runs. Take the whole gesture, sub-line deltas included, so xterm's viewport
+    // never forwards them as scroll escapes or runs a second accumulator; ours
+    // carries the remainder so slow trackpad scrolls still move (wheel-scroll.ts).
+    // At the scrollback boundaries the event passes to an outer scroller.
     const wheelLines = new WheelLineAccumulator();
     const onWheelCapture = (evt: WheelEvent) => {
       if (!term.element) return;
-      // NOT a scrollback gesture — release it untouched (no preventDefault), or
-      // we'd both eat the gesture and scroll on its incidental vertical noise.
-      // Both cases became reachable when the accumulator started banking
-      // sub-line deltas that the old `Math.round(deltaY / 20)` discarded:
-      //   • ctrl/⌘+wheel is zoom (Chromium synthesizes trackpad pinch as
-      //     ctrlKey wheel with a few px of deltaY, so a pinch used to be
-      //     rounded to nothing and now scrolls a row per pinch), and
-      //   • a mostly-HORIZONTAL two-finger swipe carries a couple of px of
-      //     vertical jitter, which accumulated into real rows of drift. xterm's
-      //     own viewport zeroes the non-dominant axis for the same reason
-      //     (scrollPredominantAxis).
+      // Not a scrollback gesture: release it untouched. Ctrl/⌘+wheel is zoom
+      // (Chromium sends trackpad pinch as ctrlKey wheel), and a mostly horizontal
+      // swipe's vertical jitter would accumulate into drift; xterm's viewport ignores
+      // the non-dominant axis too.
       if (evt.ctrlKey || evt.metaKey) return;
       if (Math.abs(evt.deltaY) < Math.abs(evt.deltaX)) return;
       const buffer = term.buffer.active;
-      // The ALTERNATE screen has no scrollback (its line buffer is capped at
-      // `rows`), so scrollLines is a no-op there and the wheel belongs to the
-      // full-screen TUI — xterm turns it into an SGR mouse escape or ESC[A/B.
-      // The boundary check below already lets it through, because both atTop and
-      // atBottom hold; this says so once, explicitly, so a transient ydisp of 1
-      // during a resize can't consume a wheel-up that would go nowhere.
+      // The alternate screen has no scrollback, so the wheel belongs to the
+      // full-screen TUI. Saying so explicitly keeps a transient ydisp of 1 during a
+      // resize from consuming a wheel-up.
       if (buffer.type === "alternate") {
         wheelLines.reset();
         return;
@@ -429,12 +337,9 @@ export const TerminalSessionView = React.memo(function TerminalSessionView({
       passive: false,
     });
 
-    // Forward xterm keystrokes to the PTY. Bound ONCE here — NOT
-    // inside `spawn` — so a restart-after-exit respawn doesn't stack a
-    // second onData listener (two listeners would write every
-    // keystroke to the PTY twice). While the shell is dead
-    // (exitedRef), the first keystroke is consumed to restart the
-    // session instead of vanishing into a closed PTY.
+    // Bound once, not inside `spawn`, so a respawn never stacks a second listener
+    // that writes every keystroke twice. While the shell is dead, the first
+    // keystroke restarts it.
     term.onData((data) => {
       if (exitedRef.current) {
         // Run-action terminals don't key-restart — respawning here would give
@@ -519,19 +424,10 @@ export const TerminalSessionView = React.memo(function TerminalSessionView({
     });
     roSpawn.observe(host);
 
-    // Font-load remeasure. Geist Mono Variable is a webfont
-    // (@fontsource-variable/geist-mono); if xterm measures cell
-    // metrics while only the SFMono fallback is loaded, cell width
-    // ends up off by a few pixels and the column count we just
-    // resolved is wrong. When the variable font finally swaps in,
-    // we re-fit so the live grid matches reality.
-    //   - Pre-spawn: triggers another measurement attempt (font may
-    //     have been the reason the host was reporting weird dims).
-    //   - Post-spawn: runs `applyFit`, which is a no-op if cols/rows
-    //     didn't actually change; if they did, it pushes a single
-    //     dimension-checked ptyResize — the shell sees one clean SIGWINCH
-    //     instead of the previous "draw at wrong width → SIGWINCH →
-    //     redraw → ghost" cascade.
+    // Re-fit when the Geist Mono webfont swaps in, because metrics measured against
+    // the fallback are a few pixels off. Before spawn this retries the measurement;
+    // after spawn applyFit sends at most one ptyResize, so the shell sees one clean
+    // SIGWINCH.
     if (
       typeof document !== "undefined" &&
       document.fonts &&
@@ -569,16 +465,10 @@ export const TerminalSessionView = React.memo(function TerminalSessionView({
       term.dispose();
       xtermRef.current = null;
       fitRef.current = null;
-      // 2026-05-28: do NOT ptyKill on unmount. The PTY lives in the
-      // main process and we want it to survive a page refresh + workbench
-      // collapse so `npm run dev` doesn't die every cmd+R. The PTY is
-      // explicitly killed only by the close paths:
-      //   - terminal-store.closeSession (× on tab)
-      //   - Conversation pane chat archive (× on terminal-agent tab)
-      //   - killAllPtySessions on before-quit
-      // ptyCreate is now reattach-aware and returns the existing
-      // session + scrollback when called again with the same
-      // sessionId — so this cleanup just disposes the xterm widget.
+      // Never ptyKill on unmount: the PTY lives in main so `npm run dev` survives a
+      // reload or workbench collapse. Only the close paths kill it
+      // (terminal-store.closeSession, terminal-agent chat archive, killAllPtySessions
+      // on quit); ptyCreate reattaches by sessionId, so this only disposes the widget.
       createdRef.current = false;
     };
     // sessionId + cwd are component identity, never change for a
@@ -686,14 +576,10 @@ export const TerminalSessionView = React.memo(function TerminalSessionView({
       // restart (matters on the restart path; harmless on first spawn).
       exitedRef.current = false;
       restartBlockedRef.current = false;
-      // Repaint from the main-side mirror's serialized snapshot (a clean
-      // escape blob of the resolved grid, NOT raw byte history) captured
-      // while this renderer was disconnected (page refresh, workbench
-      // collapse). Because main resizes the mirror to our measured dims
-      // before serializing, this xterm is already the matching size, so
-      // the snapshot reproduces the exact pre-refresh screen — including
-      // a live TUI's last frame. Queuing the reset and replay together preserves
-      // the order with live writes that arrive before and after the response.
+      // Repaint from main's serialized mirror snapshot (the resolved grid, not raw
+      // history), taken at our measured size, so it reproduces the pre-refresh screen
+      // including a live TUI's last frame. The reset and replay are queued together
+      // to keep their order with live writes.
       if (info.reattached && typeof info.replay === "string") {
         // Queue the reset with the snapshot, after any already queued live bytes.
         // Reconnect replaces the old grid instead of appending duplicate history.
@@ -713,14 +599,10 @@ export const TerminalSessionView = React.memo(function TerminalSessionView({
           /* drop */
         });
       }
-      // Auto-launch input once the shell prompt is ready: an explicit
-      // `initialCommand` (the embedded-terminal `claude /mcp` runner) takes
-      // priority, else the bound terminal-agent's launch line. We give the login
-      // shell ~200 ms to draw its prompt so the line doesn't race shell init (zsh
-      // -l can take ~50–150 ms on a cold cache). The latch keeps re-mounts from
-      // firing a second launch on top of the live session. A re-attach
-      // (info.reattached) short-circuits it — the input already ran on the
-      // original spawn.
+      // Auto-launch once the prompt is ready: `initialCommand` wins over the agent's
+      // launch line. ~200 ms lets a login shell draw its prompt (zsh -l takes ~50–150
+      // ms cold). The latch stops re-mounts from launching twice; a reattach already
+      // ran it.
       if (info.reattached) {
         agentLaunchedRef.current = true;
       }
@@ -731,13 +613,9 @@ export const TerminalSessionView = React.memo(function TerminalSessionView({
         const line = explicit || (agent ? buildLaunchLine({ agent }) : "");
         if (line) {
           agentLaunchedRef.current = true;
-          // Leading-space prefix: with HIST_IGNORE_SPACE (set by Zeros'
-          // ZDOTDIR wrapper in shell-setup.ts), zsh DROPS commands that
-          // start with a space from history. These auto-injected lines
-          // (`claude`, `codex`, `claude /mcp`, …) are Zeros-driven, not
-          // user-typed — keeping them out of recall stops the user's
-          // ~/.zsh_history from filling with them. User-typed commands
-          // still flow through `term.onData` above and DO land in history.
+          // Leading space: with HIST_IGNORE_SPACE (the ZDOTDIR wrapper in shell-setup.ts)
+          // zsh keeps these Zeros-driven lines out of ~/.zsh_history; user-typed commands
+          // still land there.
           launchTimerRef.current = setTimeout(() => {
             if (
               xtermRef.current !== term ||
@@ -806,14 +684,9 @@ export const TerminalSessionView = React.memo(function TerminalSessionView({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [cwd, sessionId, visible]);
 
-  /** Respawn a fresh shell in place after the PTY exited. Triggered by
-   *  the first keystroke on an exited terminal (see the once-bound
-   *  `term.onData` in the mount effect). The main-side session was
-   *  deleted on exit, so `ptyCreate` with the same id spawns a
-   *  brand-new shell rather than reattaching. We re-arm the agent
-   *  auto-launch so a terminal-agent tab brings its agent back; a
-   *  plain shell (workbench panel, null agentId) just gets a fresh prompt.
-   *  markAlive clears the tab's "(exited)" badge. */
+  /** Respawn a fresh shell after the PTY exited, on the first keystroke. Main
+   *  deleted the session on exit, so ptyCreate with the same id spawns a new
+   *  shell; the agent auto-launch re-arms and markAlive clears "(exited)". */
   const restart = async (term: XTerm) => {
     const mayFocus = captureDeferredFocus(hostRef.current);
     agentLaunchedRef.current = false;
@@ -827,10 +700,8 @@ export const TerminalSessionView = React.memo(function TerminalSessionView({
     }
   };
 
-  // Register pty-data + pty-exit handlers via the store's central
-  // router (one nativeListen per event, dispatched by sessionId).
-  // Replaces the previous per-mount listener pair that was O(n) per
-  // PTY byte in the open-tab count.
+  // One nativeListen per event in the store's router, dispatched by sessionId;
+  // per-mount listeners cost O(tabs) per PTY byte.
   useEffect(() => {
     return bindPtyWriter(sessionId, (data) => {
       // A parked view waiting for its first attach will receive the engine's
@@ -852,10 +723,7 @@ export const TerminalSessionView = React.memo(function TerminalSessionView({
         onExitRef.current();
         return;
       }
-      // Arm the restart latch: the shell is gone, so the next
-      // keystroke (handled in the mount effect's onData) respawns it
-      // instead of being lost. Without this an exited terminal was a
-      // dead, un-typeable rectangle.
+      // Arm the restart latch so the next keystroke respawns the shell.
       exitedRef.current = true;
       const exitPolicy = terminalExitPolicy(evt.reason);
       restartBlockedRef.current = exitPolicy.restartBlocked;
@@ -879,21 +747,11 @@ export const TerminalSessionView = React.memo(function TerminalSessionView({
     });
   }, [sessionId, markExited]);
 
-  // Re-apply theme when the concrete app theme flips, or the code theme / surface token changes, so a live theme swap
-  // (and an HMR prop change) repaints the grid. The background +
-  // foreground are app tokens (--bg1/--fg1) and the ANSI palette comes from the
-  // code theme, so both have to be re-resolved on a flip.
-  //
-  // Keyed on `themeId`, NOT `prefs.mode`: an OS flip in System leaves mode
-  // unchanged. Only the concrete id catches that transition and guarantees a
-  // bg/fg re-read.
-  //
-  // useLayoutEffect (not useEffect): applyTheme() sets data-theme on <html>
-  // synchronously inside the store's refresh(), re-theming the whole app in one
-  // commit. A post-paint useEffect re-resolves the xterm a frame LATER, flashing
-  // the old background against the already-flipped app. Running pre-paint (the
-  // token values are live by now) lands the terminal in the same frame; refresh()
-  // forces xterm to repaint the recolored grid immediately.
+  // Re-resolve when the concrete theme flips or the code theme or surface
+  // changes: bg/fg are app tokens and ANSI comes from the code theme. Keyed on
+  // `themeId`, not `prefs.mode`, which an OS flip in System leaves unchanged. A
+  // layout effect, because applyTheme re-themes <html> synchronously and a
+  // passive effect would show the old background for a frame.
   useLayoutEffect(() => {
     const term = xtermRef.current;
     if (!term) return;
@@ -947,12 +805,9 @@ export const TerminalSessionView = React.memo(function TerminalSessionView({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // When this tab becomes visible: re-measure, redraw, focus. Double
-  // rAF is intentional — visibility flip → layout settle → measure.
-  // Without it xterm reads the previous (zero-width) bounds and the
-  // grid clamps to 1×1 until the next external resize. `refresh()`
-  // forces the renderer to paint immediately because the DOM
-  // renderer skips paints while the ancestor is `visibility:hidden`.
+  // On reveal, re-measure, redraw and focus after a double rAF (flip → layout →
+  // measure); otherwise xterm reads zero-width bounds and clamps to 1×1. refresh()
+  // is needed because the DOM renderer skips paints under visibility:hidden.
   useEffect(() => {
     if (!visible) return;
     const mayFocus = captureDeferredFocus(hostRef.current);
@@ -997,12 +852,8 @@ export const TerminalSessionView = React.memo(function TerminalSessionView({
     );
   }
 
-  // Shared "fit + propose + ptyResize" path. Reads the proposed dims
-  // first so we can no-op when nothing changed (avoids IPC churn on
-  // mouse-resize that doesn't cross a cell boundary). All three
-  // resize paths (post-spawn ResizeObserver, visibility flip,
-  // term.onResize callback) funnel through here so behaviour stays
-  // consistent.
+  // The one fit path for every resize trigger. Proposed dims come first, so a
+  // resize that crosses no cell boundary sends no IPC.
   function applyFit(): void {
     if (!hasVisibleHost()) return;
     const fit = fitRef.current;
@@ -1058,24 +909,14 @@ export const TerminalSessionView = React.memo(function TerminalSessionView({
   );
 });
 
-// ──────────────────────────────────────────────────────────
-// Theme — pull current CSS tokens, hand xterm RGB strings.
-// xterm doesn't read CSS variables on its own; the appearance
-// store applies tokens to <html> before React mounts, so by the
-// time this resolver runs the values are always present. If a
-// token ever fails to resolve, we leave the key undefined and
-// xterm uses its built-in default for that field.
-// ──────────────────────────────────────────────────────────
+// xterm cannot read CSS variables, so resolve tokens to concrete colors. Tokens
+// are applied before React mounts; an unresolved token leaves that key to
+// xterm's default.
 
-/** Compose a translucent `#RRGGBBAA` from a resolved token color. The
- *  SELECTION must be translucent: an opaque swatch can't sit behind every
- *  possible foreground (fg1 on opaque --highlighted-bright read ≈2.2:1 in
- *  dark — selected text was near-unreadable). With alpha, the glyphs keep
- *  most of their own contrast against the grid, which is how mainstream
- *  terminals handle selection. Canvas fillStyle normalizes whatever the
- *  token holds (hsl/rgb/hex) to #rrggbb — same trick as derive.ts's
- *  window-background sync. Returns undefined (→ xterm default) if the
- *  color can't be normalized. */
+/** A translucent `#RRGGBBAA` from a token color. Selection must be translucent:
+ *  an opaque swatch can't sit behind every foreground (fg1 on opaque
+ *  --highlighted-bright read ≈2.2:1 in dark). Canvas fillStyle normalizes the
+ *  token to #rrggbb; undefined (→ xterm default) when it can't. */
 function withAlpha(
   color: string | null,
   alphaHex: string,
@@ -1092,17 +933,10 @@ function resolveTerminalTheme(
   surfaceToken = "--bg1",
   themeColors?: ThemeColors | null,
 ) {
-  // `surfaceToken` is the terminal's background surface (--bg1 for both conversation pane
-  // agent terminals and the workbench panel). Resolve it to a concrete color
-  // (xterm can't read CSS vars) so the grid matches the card behind it.
-  //
-  // The terminal background + default foreground are ALWAYS the app tokens —
-  // uniform across every code theme, just like the code blocks / diffs / editor.
-  // ONLY the 16-color ANSI palette comes from the active code theme, so colored
-  // shell output (CJS/WARN badges, ✓/✗, ls colors) follows the theme while the
-  // grid stays readable for every theme (a light theme's dark fg would vanish on
-  // the dark grid). ANSI falls back to xterm's built-in defaults until the
-  // highlighter has loaded the theme (cold first paint).
+  // Background and default foreground are always app tokens, uniform across code
+  // themes; only the 16-color ANSI palette follows the code theme, so colored
+  // output follows the theme while the grid stays readable. ANSI uses xterm's
+  // defaults until the highlighter loads the theme.
   const bg = resolveTokenValue(surfaceToken) ?? undefined;
   const fg = resolveTokenValue("--fg1") ?? undefined;
   // 40% alpha ("66") — see withAlpha: translucent so selected glyphs stay
@@ -1135,30 +969,19 @@ function resolveTerminalTheme(
           brightWhite: ansi.brightWhite,
         }
       : {}),
-    // xterm 6 ships its OWN VS Code-derived scrollbar — real DOM nodes
-    // (`.xterm-scrollable-element > .scrollbar > .slider`), NOT a
-    // `::-webkit-scrollbar` pseudo — so the app's global scrollbar CSS can't
-    // reach it. Its default slider is a light translucent fill that renders as
-    // a heavy, always-on, full-height bar at the terminal's right edge (and
-    // bleeds over the chat when a terminal layer sits behind the conversation).
-    // Drive it through xterm's own theme so it AUTO-HIDES like everything else:
-    // invisible at rest, a subtle token thumb only while the terminal is
-    // hovered. `rgba(0,0,0,0)` (not "transparent") for xterm's color parser.
+    // xterm 6 ships its own DOM scrollbar, which the global scrollbar CSS can't
+    // reach, and its default is a heavy always-on bar. Drive it through the theme
+    // so it auto-hides: invisible at rest, a subtle thumb on hover. `rgba(0,0,0,0)`,
+    // not "transparent", for xterm's color parser.
     scrollbarSliderBackground: "rgba(0,0,0,0)",
     scrollbarSliderHoverBackground: resolveTokenValue("--border3") ?? undefined,
     scrollbarSliderActiveBackground: resolveTokenValue("--border4") ?? undefined,
   };
 }
 
-// ──────────────────────────────────────────────────────────
-// Clipboard helper (copy) — async navigator.clipboard with a
-// graceful fallback to the deprecated execCommand path for
-// browsers / older Electron contexts that gate the async API
-// behind user activation. Silently no-ops on failure so a denied
-// clipboard never throws into render. (Paste is handled entirely
-// by xterm's native `paste` handler — see the Cmd/Ctrl+V branch
-// in attachCustomKeyEventHandler above.)
-// ──────────────────────────────────────────────────────────
+// navigator.clipboard, falling back to execCommand where the async API needs
+// user activation. Failures are silent so a denied clipboard never throws into
+// render. Paste is xterm's native handler (see the Cmd/Ctrl+V branch).
 
 async function writeClipboard(text: string): Promise<void> {
   try {

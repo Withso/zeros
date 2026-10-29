@@ -1,30 +1,9 @@
-// ──────────────────────────────────────────────────────────
-// Conversation pane — split-pane container
-// ──────────────────────────────────────────────────────────
-//
-// Owns the pane tree for the ACTIVE workspace: each leaf pane renders
-// its own chat-tab strip + body (chat view / terminal host), split
-// nodes render two children around a draggable divider. The layout
-// model lives in apps/desktop/src/renderer/state/chat-panes.ts; this file is only the
-// view + the user gestures:
-//
-//   - Tab-strip "⋯" menu → Split Right / Split Down. A pane with 2+
-//     tabs moves its ACTIVE tab into the new pane; a pane with 1 tab
-//     spawns a fresh chat there instead (you can't empty the source).
-//   - Dragging a tab over a pane shows directional drop zones:
-//     right band → split right, bottom band → split down, everywhere
-//     else → move the tab into this pane.
-//   - Splitters resize 50/50 defaults freely (pixel-clamped); a
-//     double-click resets to 50/50.
-//   - Focus follows pointer-down: interacting with a pane makes its
-//     displayed chat the global active chat (composer hotkeys, workbench
-//     scope, and the topbar all follow, exactly like a tab click).
-//
-// This component also inherits two responsibilities that used to live
-// in ChatTabs (which is now a per-pane dumb strip): resolving
-// the active workspace, and the selection-keeper invariant (a
-// workspace in view ALWAYS has an active chat).
-// ──────────────────────────────────────────────────────────
+// Split-pane container for the active workspace (layout model in
+// state/chat-panes.ts). Leaves render their own chat-tab strip and body; split
+// nodes render two children around a draggable divider. A one-tab pane splits
+// by spawning a fresh chat, since the source can't be emptied. Interacting with
+// a pane makes its chat the global active chat, and a workspace in view always
+// has an active chat.
 
 import React, {
   useCallback,
@@ -132,8 +111,6 @@ import {
   WORKBENCH_MIN_PX,
 } from "./pane-sizing";
 
-// ── Layout constants ─────────────────────────────────────
-
 /** Workbench's live element, reached from any node inside the pane tree. It is
  * the conversation column's sibling in the two-column row. */
 function workbenchPaneFor(surface: HTMLElement): HTMLElement | null {
@@ -175,8 +152,6 @@ function measureSplitCapacity(surface: HTMLElement | null): {
   };
 }
 
-// ── Workspace resolution (moved from conversation/chat-tabs) ──
-
 /** Resolve the workspace that owns the given folder path, including chats
  * rooted in a subdirectory. Confirmed managed worktrees win over the broader
  * main-checkout prefix (a linked worktree may itself live below repoRoot). */
@@ -192,8 +167,6 @@ function resolveWorkspaceForFolder(
   const main = buildLocalMainWorkspace(project);
   return findWorkspaceForFolder(folder, [main]) ? main : null;
 }
-
-// ── Shared pane context ──────────────────────────────────
 
 type DropZone = "center" | "right" | "down";
 
@@ -225,8 +198,6 @@ interface PaneCtx {
 }
 
 const EMPTY_CHATS: ChatThread[] = [];
-
-// ── Container ────────────────────────────────────────────
 
 export function ConversationPaneLayout({
   workspace = null,
@@ -281,18 +252,12 @@ export function ConversationPaneLayout({
     [activeFolder, project, workspaces],
   );
   const activeWorkspaceProvisioning = useWorkspaceProvisioning(activeFolder);
-  // ADD_CHAT publishes this exact prepared destination and its first Untitled
-  // chat atomically in the workspace store. Use that same snapshot as the
-  // first-paint presentation owner instead of depending solely on the separate
-  // pending-create store (two external-store updates may commit in either
-  // render). The exact path is still gated from agent spawning until create
-  // confirms; this only makes the already-created chat UI visible.
-  // The selected folder may intentionally be a subdirectory of its workspace.
-  // Validate it through the owning Workspace row, but keep the exact chat cwd
-  // as the state/pane/terminal identity instead of collapsing it to the root.
-  // A locally prepared exact path is also a valid PRESENTATION owner before its
-  // authoritative row lands, which lets its optimistic Untitled chat render
-  // immediately without making the path usable for agent/session spawning.
+  // ADD_CHAT publishes the prepared destination and its first Untitled chat
+  // atomically, so that snapshot owns the first-paint presentation rather than
+  // the separate pending-create store, which may commit in either order. The
+  // path still cannot spawn agents until create confirms. A subdirectory folder
+  // is validated through its owning Workspace row but stays the exact chat, pane
+  // and terminal identity.
   const activeWorkspacePath = resolveWorkspacePresentationFolder({
     activeFolder,
     hasResolvedWorkspace: workspace !== null || activeWorkspace !== null,
@@ -348,10 +313,8 @@ export function ConversationPaneLayout({
       .sort((a, b) => b.updatedAt - a.updatedAt);
   }, [allChats, visibleChats]);
 
-  // ── Selection keeper ────────────────────────────────────
-  // A workspace in view must ALWAYS have an active chat — Conversation pane
-  // renders a dead pane for a null selection. See the original comment
-  // block in conversation/chat-tabs (pre-panes) for the full history.
+  // A workspace in view must always have an active chat; a null selection renders
+  // a dead pane.
   useEffect(() => {
     if (readOnly || navigationOnly) return;
     if (
@@ -400,7 +363,6 @@ export function ConversationPaneLayout({
     dispatch,
   ]);
 
-  // ── Pane layout + membership ─────────────────────────
   const layout = usePaneLayout(layoutFolder);
   const minimumSize = useMemo(
     () => paneTreeMinimumSize(layout.root),
@@ -452,8 +414,6 @@ export function ConversationPaneLayout({
     }
     return firstLeafId(layout.root);
   }, [selectedChatId, visibleChats, layout]);
-
-  // ── Handlers ─────────────────────────────────────────
 
   const handleSelectChat = useCallback(
     (chatId: string) => {
@@ -885,8 +845,6 @@ export function ConversationPaneLayout({
   );
 }
 
-// ── Recursive tree view ──────────────────────────────────
-
 function PaneNodeView({ node, ctx }: { node: PaneNode; ctx: PaneCtx }) {
   if (node.type === "leaf") {
     return <ChatPane paneId={node.id} ctx={ctx} />;
@@ -955,8 +913,6 @@ function SplitView({
     </div>
   );
 }
-
-// ── Splitter ─────────────────────────────────────────────
 
 function PaneSplitter({
   direction,
@@ -1142,8 +1098,6 @@ function PaneSplitter({
   );
 }
 
-// ── Leaf pane ────────────────────────────────────────────
-
 function ChatPane({ paneId, ctx }: { paneId: string; ctx: PaneCtx }) {
   const dispatch = useWorkspaceDispatch();
   const setSlot = usePanePortalsStore((s) => s.setSlot);
@@ -1292,15 +1246,10 @@ function ChatPane({ paneId, ctx }: { paneId: string; ctx: PaneCtx }) {
     dispatch({ type: "SET_ACTIVE_CHAT", id: paneActiveChatId });
   }, [paneActiveChatId, paneChats, dispatch]);
 
-  // NATIVE capture listeners — NOT React onPointerDownCapture/onFocusCapture
-  // props on the section. The chat/terminal body is portaled into this pane's
-  // host node: it's inside the section in the real DOM, but its REACT parent
-  // is the deck component, and React synthetic events propagate through the
-  // React tree — so React handlers here only ever saw the tab strip (a direct
-  // child), and clicking the transcript/composer of an inactive window did
-  // NOT activate it. Native listeners walk the actual DOM, so a pointerdown
-  // (or focus landing) ANYWHERE in the window — strip, transcript, composer,
-  // terminal — activates the pane.
+  // Native capture listeners, not React props: the chat and terminal body are
+  // portaled into this pane's host, so React's synthetic events only reach the
+  // strip, while native listeners walk the real DOM and activate the pane on any
+  // pointerdown or focus inside it.
   useEffect(() => {
     const el = rootRef.current;
     if (!el) return;
@@ -1372,15 +1321,10 @@ function ChatPane({ paneId, ctx }: { paneId: string; ctx: PaneCtx }) {
       ref={rootRef}
       data-pane-root=""
       data-pane-focused={isFocused ? "true" : "false"}
-      // --pane-bg is the window's surface color: bg1 (the :root default — the
-      // ACTIVE window is indistinguishable from the pre-split app) on the
-      // focused pane, bg0 on every other pane so inactive windows read as
-      // recessed/dull. The override is set HERE and inherited by everything
-      // inside the window (tab strip fades, the portaled chat deck fill, the
-      // transcript scroll mask), so the whole window re-tints as one when
-      // focus moves. That window fill is the ONLY inactive-pane treatment:
-      // text, icons and controls keep full contrast (the former bg0/30 veil
-      // over the content dropped readable text below WCAG AA).
+      // --pane-bg is the window surface: bg1 on the focused pane, bg0 elsewhere so
+      // inactive windows read recessed. Everything inside inherits it, so the window
+      // re-tints as one. That fill is the only inactive treatment; text and controls
+      // keep full contrast (a former veil dropped text below WCAG AA).
       className={cn(
         "relative flex min-h-0 min-w-0 flex-1 flex-col bg-(--pane-bg)",
         !isFocused && "[--pane-bg:var(--bg0)]",
@@ -1436,8 +1380,6 @@ function ChatPane({ paneId, ctx }: { paneId: string; ctx: PaneCtx }) {
     </section>
   );
 }
-
-// ── Drop overlay (tab drag targets) ──────────────────────
 
 /** True when a drag carries one of our chat tabs (dataTransfer types
  *  are readable during dragover even though the payload isn't). */

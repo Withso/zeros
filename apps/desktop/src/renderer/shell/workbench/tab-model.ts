@@ -2,9 +2,6 @@ import {
   changesHistorySchema,
   type ChangesHistory,
 } from "@zeros/protocol/changes-history";
-// ──────────────────────────────────────────────────────────
-// Workbench Tab Manager — Types + localStorage persistence
-// ──────────────────────────────────────────────────────────
 
 import type { BrowserTabVariant } from "../../features/browser/variant-types";
 import { validSkillSource, type SkillSource } from "../../platform/skill-source";
@@ -504,12 +501,9 @@ export function createReviewTab(): WorkbenchTab {
   };
 }
 
-/** The path a workbench tab's strip icon should be resolved FROM, or null to use the
- *  tab type's own lucide glyph. A File tab showing a file wears that file's
- *  colored type glyph — the same one the Files tree, the viewer breadcrumb, and
- *  @-mention pills use — so a `.md`, `.json`, or `.sh` tab is identifiable at a
- *  glance instead of every tab reading as the same generic page. A blank
- *  "Open file" tab has no file to describe, so it keeps the generic glyph. */
+/** The path a tab's strip icon resolves from, or null for the type's own glyph.
+ *  A File tab showing a file wears that file's type glyph, as in the tree and
+ *  mention pills; a blank tab keeps the generic one. */
 export function workbenchTabIconPath(tab: WorkbenchTab): string | null {
   if (tab.type !== "files") return null;
   const path = tab.filePath?.trim();
@@ -541,11 +535,6 @@ export const TAB_TYPE_META: Record<WorkbenchTabType, TabTypeMeta> = {
   },
 };
 
-// The worktree's PR review surface is THE pinned "review" home tab above
-// (ReviewSurface → ReviewView) — visible for GitHub repos even without a PR.
-// The legacy secondary source panel (All Files / Changes / "PR #N") is gone;
-// those surfaces now live in the Changes / Files / Review workbench tabs.
-
 // Per-worktree tab state lives under ONE key as a { [folder]: slice } map (see
 // loadScopes/saveScopes). The pre-per-scope GLOBAL keys below mixed tabs from
 // every worktree, so they can't be cleanly attributed — loadScopes drops them.
@@ -555,11 +544,9 @@ const STORAGE_KEY_SCOPES = "column3-tabs-by-scope-v1"; // gitleaks:allow — loc
 const LEGACY_KEY_TABS = "column3-tabs"; // gitleaks:allow — legacy localStorage key name
 const LEGACY_KEY_ACTIVE = "column3-active-tab-id";
 
-/** Legacy / relocated tab types dropped from the workbench's persisted state. "pr" is
- *  the OLD synthetic active-PR tab (later a secondary source view, both gone) —
- *  the PR surface is the pinned "review" home tab now, a DIFFERENT type so a
- *  stale persisted "pr" entry still drops cleanly. Old generic Terminal tabs
- *  without a session identity are dropped during normalization below. */
+/** Retired tab types dropped from persisted state. "pr" was the old synthetic
+ *  PR tab; the pinned Review home is a different type, so a stale "pr" entry
+ *  drops cleanly. */
 // Retire the Context presentation only; `.context` storage and attachment
 // references remain valid. migrateScopes also repairs a selected retired tab.
 const REMOVED_TAB_TYPES = new Set(["git", "env", "todo", "pr", "context"]);
@@ -873,12 +860,8 @@ export function normalizeWorkbenchTabs(parsed: WorkbenchTab[]): WorkbenchTab[] {
   ]);
 }
 
-// ── Per-worktree persistence ───────────────────────────────
-// Workbench tabs belong to a WORKTREE, not the whole app: a file opened in one
-// worktree must not appear in another. State is a map keyed by the active
-// worktree's folder path (the same identity chats use). The store reads the
-// active slice and swaps which slice it reads on a worktree switch — see
-// workbenchScopeKey / selectWorkbench in workspace-store.ts.
+// Tabs belong to a worktree, keyed by its folder path (the identity chats use);
+// the store swaps which slice it reads on a worktree switch (workspace-store.ts).
 
 /** One worktree's workbench tab state. */
 export interface WorkbenchScopeState {
