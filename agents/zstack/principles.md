@@ -1,8 +1,9 @@
 # Zeros engineering principles
 
 These principles fold the lessons recorded through zstack 0.1.7: 427 change
-fragments and their eval cases. Each one names cases that hold it. Read a
-case's `symptom` and `rule` with `node scripts/zstack/evals.mjs --list`, and
+fragments and their eval cases. Each one names cases that hold it: find a
+case with `node scripts/zstack/evals.mjs --list`, read its `symptom` and `rule`
+in `evals/cases/<id>.json` (the first cases live in `evals/cases.json`), and
 its fix through the PR in `fixedBy`. Skills and playbooks refer to these by
 number instead of repeating them.
 
