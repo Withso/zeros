@@ -4252,6 +4252,8 @@ function AgentChatBody({
           maximum, so narrower panes shrink without fixed gutters. */}
       {/* Keeps the top mask outside the scroller, pinned to the viewport top. */}
       <div className="relative flex min-h-0 flex-1 flex-col">
+        {/* `zeros-agent-body` and `zeros-agent-messages` are hooks for
+            styles/global/scrollbars.css and the UI smoke drivers. */}
         <Conversation
           ref={setScrollContainer}
           data-agent-diff-collision-boundary=""

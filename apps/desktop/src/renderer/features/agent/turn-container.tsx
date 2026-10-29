@@ -90,6 +90,8 @@ export const TurnContainer = memo(function TurnContainer({
     if (element.current) observer.observe(element.current);
     return () => observer.disconnect();
   }, [showContent, surfaceActive, scrollRoot]);
+  // `zeros-agent-turn` and `zeros-agent-turn-active` stay as hooks for DOM
+  // selectors; styling lives in the utilities.
   // content-visibility skips layout and paint for finalized off-screen turns;
   // the active turn always renders. `auto` in contain-intrinsic-size makes a
   // skipped turn keep its last rendered height instead of the 240px estimate,
