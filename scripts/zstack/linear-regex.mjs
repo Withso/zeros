@@ -9,11 +9,14 @@ import { fileURLToPath } from "node:url";
 import vm from "node:vm";
 import ts from "typescript";
 
-export const BASE_SIZE = 20_000;
-const MIN_FLAGGED_MS = 100;
-const GROWTH = 2.5;
+// Quadrupling the input quadruples a linear scan and multiplies a quadratic
+// one by sixteen; the threshold sits between them with room for noise.
+export const BASE_SIZE = 5_000;
+const FACTOR = 4;
+const GROWTH = 8;
+const MIN_FLAGGED_MS = 30;
 const GENERIC = [" ", "\n", "\t", "a", "a-", "aB1-", "-", "=", ":", "\"", "'", "<a", "/", "*", "`", "0", ".", "_",
-  "a ", "a=", "a:", " :", "\" ", "\\"];
+  "a ", "a=", "a:", " :", "\" ", "\\", "[", "("];
 
 /** Regular expression literals and `new RegExp("…")` calls with literal arguments. */
 export function regexesIn(text, file) {
@@ -39,7 +42,7 @@ const fill = (unit, size) => `${unit.repeat(Math.ceil(size / unit.length)).slice
 
 /** Repeating units: generic shapes plus each literal word in the pattern. */
 export function attackUnits(pattern) {
-  const words = pattern.replace(/\\./g, " ").replace(/\[[^\]]*\]/g, " ").match(/[A-Za-z]{2,}/g) ?? [];
+  const words = pattern.replace(/\\./g, " ").replace(/\[[^\][]*\]/g, " ").match(/[A-Za-z]{2,}/g) ?? [];
   return [...new Set([...GENERIC, ...words.flatMap((word) => [word, `${word} `, `${word}-`, `${word}a`, `${word}.`])])];
 }
 
@@ -57,18 +60,20 @@ function scan(pattern, flags, input, timeout) {
   return performance.now() - started;
 }
 
+// The fastest of three base scans discounts scheduling noise on a busy host.
 function grows(pattern, flags, unit, size) {
-  const base = scan(pattern, flags, fill(unit, size), 2_000);
-  if (base === Infinity) return { base, double: Infinity };
-  const double = scan(pattern, flags, fill(unit, size * 2), 4_000);
-  return double === Infinity || (double > MIN_FLAGGED_MS && double > GROWTH * Math.max(base, 0.5)) ? { base, double } : null;
+  let base = scan(pattern, flags, fill(unit, size), 2_000);
+  if (base === Infinity) return { base, large: Infinity };
+  for (let run = 1; run < 3; run++) base = Math.min(base, scan(pattern, flags, fill(unit, size), 2_000));
+  const large = scan(pattern, flags, fill(unit, size * FACTOR), 4_000);
+  return large === Infinity || (large > MIN_FLAGGED_MS && large > GROWTH * Math.max(base, 0.25)) ? { base, large } : null;
 }
 
 /** The first input shape whose global scan grows super-linearly, confirmed by a second measurement. */
 export function superLinear({ source, flags }, size = BASE_SIZE) {
   for (const unit of attackUnits(source)) {
     const first = grows(source, flags, unit, size);
-    if (first && grows(source, flags, unit, size)) return { unit, baseMs: Math.round(first.base), doubleMs: Math.round(first.double) };
+    if (first && grows(source, flags, unit, size)) return { unit, baseMs: Math.round(first.base), largeMs: Math.round(first.large) };
   }
   return null;
 }
@@ -82,6 +87,6 @@ export function findSuperLinear(files) {
 if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
   const flagged = findSuperLinear(process.argv.slice(2));
   for (const { file, line, source, flags, growth } of flagged)
-    console.log(`${file}:${line} /${source}/${flags} grows on ${JSON.stringify(growth.unit)}: ${growth.baseMs} ms → ${growth.doubleMs} ms`);
+    console.log(`${file}:${line} /${source}/${flags} grows on ${JSON.stringify(growth.unit)}: ${growth.baseMs} ms → ${growth.largeMs} ms at ${FACTOR}x`);
   process.exitCode = flagged.length ? 1 : 0;
 }
