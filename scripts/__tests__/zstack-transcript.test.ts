@@ -3,7 +3,7 @@ import { mkdirSync, mkdtempSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { digestTranscript, locateTranscripts, parseTranscript, redact, renderDigest } from "../zstack/transcript.mjs";
+import { digestTranscript, locateTranscripts, parseTranscript, readBounded, redact, renderDigest } from "../zstack/transcript.mjs";
 
 const jsonl = (records: unknown[]) => `${records.map((record) => JSON.stringify(record)).join("\n")}\n`;
 const at = (minute: number) => `2026-10-30T03:${String(minute).padStart(2, "0")}:00.000Z`;
@@ -228,6 +228,9 @@ describe("zstack transcript CLI and locate", () => {
     expect(ok.stdout).toContain("# Transcript digest\nsource: claude-code · file: s.jsonl");
     const json = spawnSync(process.execPath, [script, "digest", file, "--json"], { encoding: "utf8" });
     expect(JSON.parse(json.stdout)).toMatchObject({ schema: "zeros.zstack-transcript-digest/v1", counts: { user: 1 } });
+    expect(readBounded(file, 10)).toBeNull();
+    expect(readBounded(file)).toBe(jsonl([claude(0, "user", "Hello")]));
+    expect(readBounded(dir)).toBeNull();
     const bad = spawnSync(process.execPath, [script, "digest", file, "--max-chars", "10"], { encoding: "utf8" });
     expect(bad.status).toBe(2);
     expect(bad.stderr).toContain("usage:");

@@ -3,7 +3,7 @@
 // what failed or was declined, what was retried and where time went. Tool
 // output never leaves the file except one redacted line per failure.
 import { createHash } from "node:crypto";
-import { closeSync, existsSync, fstatSync, openSync, readdirSync, readFileSync, readSync, statSync } from "node:fs";
+import { closeSync, existsSync, fstatSync, openSync, readdirSync, readSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -481,6 +481,28 @@ export function locateTranscripts(cwd, env = process.env, limit = 5) {
   return { claude, codex: rollouts.slice(0, limit) };
 }
 
+// Reads through one held descriptor and stops past the limit, so the file can
+// be neither swapped after the size check nor grown into an unbounded read.
+export function readBounded(file, limit = MAX_FILE_BYTES) {
+  const handle = openSync(file, "r");
+  try {
+    if (!fstatSync(handle).isFile() || fstatSync(handle).size > limit) return null;
+    const chunks = [];
+    let total = 0;
+    for (;;) {
+      const chunk = Buffer.alloc(Math.min(1024 * 1024, limit + 1 - total));
+      const read = readSync(handle, chunk, 0, chunk.length, null);
+      if (read === 0) break;
+      total += read;
+      if (total > limit) return null;
+      chunks.push(chunk.subarray(0, read));
+    }
+    return Buffer.concat(chunks).toString("utf8");
+  } finally {
+    closeSync(handle);
+  }
+}
+
 function main(argv) {
   const [command, ...rest] = argv;
   if (command === "locate") {
@@ -496,18 +518,10 @@ function main(argv) {
     console.error("usage: node scripts/zstack/transcript.mjs digest <file.jsonl> [--json] [--max-chars <n ≥ 1000>]\n       node scripts/zstack/transcript.mjs locate [cwd]");
     return 2;
   }
-  // Size and contents come from one held descriptor, so the file cannot be
-  // swapped between the check and the read.
-  const handle = openSync(file, "r");
-  let text;
-  try {
-    if (fstatSync(handle).size > MAX_FILE_BYTES) {
-      console.error("zstack_transcript_too_large");
-      return 2;
-    }
-    text = readFileSync(handle, "utf8");
-  } finally {
-    closeSync(handle);
+  const text = readBounded(file);
+  if (text == null) {
+    console.error("zstack_transcript_too_large");
+    return 2;
   }
   const digest = digestTranscript(text, { file, maxChars });
   process.stdout.write(json ? `${JSON.stringify(digest, null, 2)}\n` : renderDigest(digest));
