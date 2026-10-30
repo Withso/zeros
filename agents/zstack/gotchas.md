@@ -170,6 +170,13 @@ revision in the same checkout and compare failing test names.
 
 ## Process, CI and delivery
 
+- `codex exec` reads stdin whenever it is not a terminal and waits for it to
+  close. Background and scripted runs need `</dev/null`.
+- To see which skills reach Codex's model, run `codex debug prompt-input` in
+  the repository; it makes no model call. A rollout's `response_item`
+  messages record what an explicit `$skill` turn injected. Cursor's SDK
+  (`@cursor/sdk`) loads project rules and skills, but resolves no `@rule` or
+  `/skill` mention in message text.
 - Long local batches die with the agent session unless detached. Run them with
   `setsid nohup` under a shared slot and append results to a summary file.
 - Never list full process command lines or environments: agent launch arguments
