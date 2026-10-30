@@ -1,0 +1,9 @@
+{
+  "id": "seeded-transcript-file-custody",
+  "kind": "seeded",
+  "area": "zstack",
+  "fixedBy": "pr:793",
+  "symptom": "The transcript reader checked pathname metadata, then reopened that pathname for an unbounded read; replacement could change the digested file, and growth could bypass the size limit.",
+  "rule": "Principle 17 requires reading the held file after validating its metadata. Restore the statSync/readFileSync algorithm in scripts/zstack/transcript.mjs at e615da6f0cf8fdae4d47562945710de7a546ecf8 (fixed by bbf226c45af3ce349d9526b49739f0dd3f4ee124 in PR 790), adapted only to the current readBounded entry point and configurable limit. The enforcer must observe real pathname replacement and in-place growth, then check the consumed bytes and bounded refusal.",
+  "check": "pnpm test:git scripts/__tests__/zstack-transcript-read.test.ts"
+}
