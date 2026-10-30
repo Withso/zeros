@@ -22,9 +22,8 @@ const LIMITS = { user: 600, peer: 300, assistant: 240, command: 160, detail: 200
 // quantifier, so redaction stays linear in the input.
 const CREDENTIAL_FLAG = /(?:^|\s)["']?--?(?:password|passwd|pass|token|secret|api[-_]?key|access[-_]?key|client[-_]?secret|auth|auth-token|user)["']?(?=[=\s]|$)/i;
 const AUTH_SCHEME = /\b(?:Bearer|Basic)\s/i;
-const SENSITIVE_NAME = /(?:TOKEN|SECRET|PASSWORD|PASSWD|API_?KEY|_KEY|CREDENTIALS?)$/;
-const SENSITIVE_WORDS = new Set(["password", "passwd", "secret", "token", "apikey", "api_key", "api-key", "access_key",
-  "access-key", "accesskey", "client_secret", "client-secret", "clientsecret"]);
+// Any name ending like a credential: GH_TOKEN, access_token, X-Api-Key.
+const SENSITIVE_NAME = /(?:token|secret|password|passwd|apikey|[_-]key|credentials?)$/i;
 const KEY_PREFIX = /(?:sk|rk|pk)_(?:live|test)_|xox[abprs]-|glpat-|gh[pousr]_|github_pat_|npm_|phx_|sb_secret_|lin_api_|pscale_(?:tkn|pw|oauth)_|sk-|AKIA|ASIA|eyJ/g;
 const BODY = /[A-Za-z0-9_.-]/;
 const NAME = /[A-Za-z0-9_-]/;
@@ -39,8 +38,8 @@ function credentialCut(line) {
   if (flag) cuts.push(flag.index + flag[0].length);
   const curl = line.search(/\bcurl\b/);
   if (curl >= 0) {
-    const user = line.slice(curl).search(/\s-u/);
-    if (user >= 0) cuts.push(curl + user + 3);
+    const user = /\s["']?-u/.exec(line.slice(curl));
+    if (user) cuts.push(curl + user.index + user[0].length);
   }
   const scheme = AUTH_SCHEME.exec(line);
   if (scheme) cuts.push(scheme.index + scheme[0].length);
@@ -55,7 +54,7 @@ function credentialCut(line) {
     let keyStart = keyEnd;
     while (keyStart > floor && NAME.test(line[keyStart - 1])) keyStart--;
     const key = line.slice(keyStart, keyEnd);
-    if (key && (SENSITIVE_NAME.test(key) || SENSITIVE_WORDS.has(key.toLowerCase()))) {
+    if (key && SENSITIVE_NAME.test(key)) {
       cuts.push(at + 1);
       break;
     }
