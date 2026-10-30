@@ -23,7 +23,7 @@ const LIMITS = { user: 600, peer: 300, assistant: 240, command: 160, detail: 200
 const CREDENTIAL_FLAG = /(?:^|\s)["']?--?(?:password|passwd|pass|token|secret|api[-_]?key|access[-_]?key|client[-_]?secret|auth|auth-token|user)["']?(?=[=\s]|$)/i;
 const AUTH_SCHEME = /\b(?:Bearer|Basic)\s/i;
 // Any name ending like a credential: GH_TOKEN, access_token, X-Api-Key.
-const SENSITIVE_NAME = /(?:token|secret|password|passwd|apikey|[_-]key|credentials?)$/i;
+const SENSITIVE_NAME = /(?:token|secret|password|passwd|apikey|accesskey|[_-]key|credentials?)$/i;
 const KEY_PREFIX = /(?:sk|rk|pk)_(?:live|test)_|xox[abprs]-|glpat-|gh[pousr]_|github_pat_|npm_|phx_|sb_secret_|lin_api_|pscale_(?:tkn|pw|oauth)_|sk-|AKIA|ASIA|eyJ/g;
 const BODY = /[A-Za-z0-9_.-]/;
 const NAME = /[A-Za-z0-9_-]/;

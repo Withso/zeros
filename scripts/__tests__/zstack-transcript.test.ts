@@ -137,7 +137,7 @@ describe("zstack transcript digest: safety and bounds", () => {
     expect(redact("git push -u origin main")).toBe("git push -u origin main");
     expect(redact(`tool '--password' '${value}'`)).toBe("tool '--password' [redacted]");
     for (const form of [`curl "-u" "admin:${value}" https://x.test`, `curl '-u' 'admin:${value}'`, `{"access_token":"${value}"}`,
-      `{"refresh_token": "${value}"}`, `X-Api-Key: ${value}`, `client_secret=${value}`, `aws_secret_access_key = ${value}`])
+      `{"refresh_token": "${value}"}`, `X-Api-Key: ${value}`, `client_secret=${value}`, `aws_secret_access_key = ${value}`, `accesskey=${value}`, `AccessKey: ${value}`])
       expect(redact(form)).not.toContain(value);
     // A quoted value with an escaped quote must not leak its suffix: the rest
     // of a credential line goes, whatever the shell quoting.
