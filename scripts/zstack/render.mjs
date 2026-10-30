@@ -21,10 +21,12 @@ export function parseSkill(text, file) {
   if (!match) throw new Error(`${file} must start with --- frontmatter ---`);
   const fields = {};
   for (const line of match[1].split("\n")) {
-    const field = /^([a-z]+):\s*(.*)$/.exec(line);
+    // The lookahead takes the whole whitespace run once, so the value never
+    // trades characters with it when a stray \r rejects the match.
+    const field = /^([a-z]+):(?=(\s*))\2(.*)$/.exec(line);
     if (!field) throw new Error(`${file}: unsupported frontmatter line ${JSON.stringify(line)}`);
     if (!FIELDS.has(field[1])) throw new Error(`${file}: unknown frontmatter field ${field[1]}`);
-    const raw = field[2].trim();
+    const raw = field[3].trim();
     fields[field[1]] = raw.startsWith("\"") ? JSON.parse(raw) : raw;
   }
   if (!NAME.test(fields.name ?? "")) throw new Error(`${file}: name must match ${NAME}`);
