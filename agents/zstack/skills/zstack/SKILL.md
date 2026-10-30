@@ -59,7 +59,7 @@ Use this for any change to Zeros, whichever host you run in. `AGENTS.md` and
 | Performance or a new canvas/runtime backend | `agents/zstack/playbooks/performance.md` and `zstack-verify` |
 | Workspaces, engine, bridge, agents or Git | the `zeros-workspaces` skill (Local and cloud owners and placements) |
 | Changing the zstack pack itself | `agents/zstack/playbooks/skill-eval.md` when the change can alter agent behavior, and `zstack-learn` |
-| The user asks to reflect on a session | `zstack-reflect`; never start it unprompted |
+| The user asks to reflect on a session or correct recurring mistakes | `zstack-reflect` or `zstack-correct`; never start them unprompted |
 
 Every task also uses `agents/zstack/principles.md`: the eighteen principles
 that hold Zeros' recorded lessons, each with the eval cases behind it.

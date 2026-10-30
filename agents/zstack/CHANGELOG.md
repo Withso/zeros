@@ -20,6 +20,11 @@ where it is encoded.
     states its policy, so switching one leaves no stale file);
   - a manual Cursor rule.
   Unknown frontmatter fields now refuse instead of silently doing nothing.
+- **Repeated mistakes needed a view across history.** `zstack-correct` runs
+  only when asked. Its offline `scripts/zstack/history.mjs` ranks evals by area
+  and principle, judgment-only rules, reverts and repeated file fixes at one
+  commit. A correction needs an enforcer that passes on current source and a
+  caught seeded replay restoring a real historical mistake.
 
 ## 0.2.0
 

@@ -36,6 +36,7 @@ branch, preferably with a test or check rather than more prose.
 | `zstack-learn` | End-of-loop retrospective that writes lessons back into the pack. |
 | `zstack-drive` | Launch, drive and capture Zeros user flows to verify a change in the real app. |
 | `zstack-reflect` | Only when the user asks: mine a whole session transcript for lessons. |
+| `zstack-correct` | Only when asked: mine recurring mistakes and prove a stronger enforcer. |
 
 ## Editing
 

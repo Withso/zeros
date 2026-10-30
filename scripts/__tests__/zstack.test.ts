@@ -8,7 +8,9 @@ const root = process.cwd();
 describe("zstack pack", () => {
   it("ships the Z0 skills with valid frontmatter", () => {
     expect(zstackSkills(root).map(skill => skill.name)).toEqual(
-      ["zstack", "zstack-comments", "zstack-drive", "zstack-eval", "zstack-learn", "zstack-reflect", "zstack-review", "zstack-verify"]);
+      ["zstack", "zstack-comments", "zstack-correct", "zstack-drive", "zstack-eval", "zstack-learn", "zstack-reflect", "zstack-review", "zstack-verify"]);
+    expect(zstackSkills(root).filter(skill => skill.invocation === "user").map(skill => skill.name)).toEqual(
+      ["zstack-correct", "zstack-reflect"]);
   });
 
   it("renders every skill for Claude, Codex/Zeros and Cursor", () => {
