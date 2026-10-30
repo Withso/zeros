@@ -1,0 +1,5 @@
+{
+  "file": "scripts/zstack/comments.mjs",
+  "before": "    if (index < lines.length - 1) {\n      let end = trimmed.length;\n      while (end > 0 && trimmed[end - 1] === \" \") end--;\n      trimmed = trimmed.slice(0, end);\n    }\n",
+  "after": "    if (index < lines.length - 1) trimmed = trimmed.replace(/ +$/, \"\");\n"
+}

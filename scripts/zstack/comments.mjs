@@ -79,7 +79,11 @@ function jsxText(raw) {
   lines.forEach((line, index) => {
     let trimmed = line.replace(/\t/g, " ");
     if (index > 0) trimmed = trimmed.replace(/^ +/, "");
-    if (index < lines.length - 1) trimmed = trimmed.replace(/ +$/, "");
+    if (index < lines.length - 1) {
+      let end = trimmed.length;
+      while (end > 0 && trimmed[end - 1] === " ") end--;
+      trimmed = trimmed.slice(0, end);
+    }
     if (trimmed) text += index === last ? trimmed : `${trimmed} `;
   });
   return text;
