@@ -16,6 +16,7 @@
 import js from "@eslint/js";
 import tseslint from "typescript-eslint";
 import reactHooks from "eslint-plugin-react-hooks";
+import regexp from "eslint-plugin-regexp";
 
 const nodeGlobals = {
   process: "readonly",
@@ -117,6 +118,19 @@ export default [
       // uses block-scoped `const`/`let` inside switch cases and there
       // are no shadowing surprises. Off.
       "no-case-declarations": "off",
+    },
+  },
+  {
+    // zstack tools scan transcripts, Git history and command output that can
+    // be megabytes long. These rules reject backtracking blowups and slow
+    // scans that start at the match position. A slow part behind a literal
+    // prefix or a lookahead escapes them; scripts/zstack/linear-regex.mjs
+    // times those.
+    files: ["scripts/zstack/**/*.{mjs,js,ts}"],
+    plugins: { regexp },
+    rules: {
+      "regexp/no-super-linear-backtracking": "error",
+      "regexp/no-super-linear-move": "error",
     },
   },
   {
