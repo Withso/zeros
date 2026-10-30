@@ -101,7 +101,7 @@ describe("zstack transcript digest: safety and bounds", () => {
       anthropicKey,
       `GH_TOKEN=${"ghx".repeat(4)}Z9`,
       `Authorization: Bearer ${"tok".repeat(6)}`,
-      "postgres://admin:hunter2@db.example.com:5432/app",
+      "postgres://admin:hunter2@db.example.test:5432/app",
       `eyJ${"hbGciOi".repeat(2)}.${"eyJzdWIi".repeat(2)}.${"c2lnbmF0".repeat(2)}`,
       `-----BEGIN OPENSSH ${"PRIVATE KEY"}-----\nAAAA\n-----END OPENSSH ${"PRIVATE KEY"}-----`,
     ];

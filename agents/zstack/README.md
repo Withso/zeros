@@ -81,5 +81,5 @@ parent is a miss, not a catch.
 
 The method draws on pstack, Cursor's plugin of Lauren Tan's engineering
 practices (github.com/cursor/plugins, MIT, researched at `e43c7ee` and
-revisited at `1ba91fc` and `c742dd6`). No pstack text is copied. Where they differ, Zeros'
-own rules take precedence.
+revisited at `1ba91fc` and `c742dd6`). No pstack text is copied. Where they
+differ, Zeros' own rules take precedence.
