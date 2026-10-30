@@ -8,16 +8,42 @@ const root = process.cwd();
 describe("zstack pack", () => {
   it("ships the Z0 skills with valid frontmatter", () => {
     expect(zstackSkills(root).map(skill => skill.name)).toEqual(
-      ["zstack", "zstack-comments", "zstack-drive", "zstack-eval", "zstack-learn", "zstack-review", "zstack-verify"]);
+      ["zstack", "zstack-comments", "zstack-drive", "zstack-eval", "zstack-learn", "zstack-reflect", "zstack-review", "zstack-verify"]);
   });
 
   it("renders every skill for Claude, Codex/Zeros and Cursor", () => {
     const files = renderZstackFiles(root);
-    for (const { name } of zstackSkills(root)) {
+    for (const { name, invocation } of zstackSkills(root)) {
       expect(files[`.claude/skills/${name}/SKILL.md`]).toContain(`name: ${name}`);
       expect(files[`.agents/skills/${name}/SKILL.md`]).toBe(files[`.claude/skills/${name}/SKILL.md`]);
-      expect(files[`.cursor/rules/${name}.mdc`]).toMatch(/^---\ndescription: .+\nglobs: .+\nalwaysApply: false\n---/);
+      expect(files[`.agents/skills/${name}/agents/openai.yaml`]).toBe(
+        `policy:\n  allow_implicit_invocation: ${invocation === "model"}\n`);
+      if (invocation === "model")
+        expect(files[`.cursor/rules/${name}.mdc`]).toMatch(/^---\ndescription: .+\nglobs: .+\nalwaysApply: false\n---/);
     }
+  });
+
+  it("keeps user-invoked skills out of every host's automatic selection", async () => {
+    const { mkdtempSync, mkdirSync, writeFileSync } = await import("node:fs");
+    const { join } = await import("node:path");
+    const { tmpdir } = await import("node:os");
+    const temp = mkdtempSync(join(tmpdir(), "zstack-skills-"));
+    const write = (name: string, extra: string) => {
+      mkdirSync(join(temp, "agents/zstack/skills", name), { recursive: true });
+      writeFileSync(join(temp, "agents/zstack/skills", name, "SKILL.md"),
+        `---\nname: ${name}\ndescription: "Does ${name}."\n${extra}---\n\n# ${name}\n`);
+    };
+    write("zstack-auto", "globs: \"scripts/**\"\n");
+    write("zstack-manual", "invocation: user\n");
+    const files = renderZstackFiles(temp);
+    expect(files[".claude/skills/zstack-manual/SKILL.md"]).toMatch(
+      /^---\nname: zstack-manual\ndescription: "Does zstack-manual."\ndisable-model-invocation: true\n---\n/);
+    expect(files[".agents/skills/zstack-manual/SKILL.md"]).toBe(files[".claude/skills/zstack-manual/SKILL.md"]);
+    expect(files[".agents/skills/zstack-manual/agents/openai.yaml"]).toBe("policy:\n  allow_implicit_invocation: false\n");
+    expect(files[".cursor/rules/zstack-manual.mdc"]).toMatch(/^---\ndescription:\nglobs:\nalwaysApply: false\n---\n\n<!-- GENERATED/);
+    expect(files[".claude/skills/zstack-auto/SKILL.md"]).not.toContain("disable-model-invocation");
+    expect(files[".agents/skills/zstack-auto/agents/openai.yaml"]).toBe("policy:\n  allow_implicit_invocation: true\n");
+    expect(files[".cursor/rules/zstack-auto.mdc"]).toMatch(/^---\ndescription: "Does zstack-auto."\nglobs: scripts\/\*\*\nalwaysApply: false\n---/);
   });
 
   it("keeps the generated copies current (check:ui)", () => {
@@ -28,6 +54,8 @@ describe("zstack pack", () => {
     expect(() => parseSkill("no frontmatter", "x")).toThrow(/frontmatter/);
     expect(() => parseSkill("---\nname: other\ndescription: d\n---\n\nbody", "x")).toThrow(/name must match/);
     expect(() => parseSkill("---\nname: zstack-x\n---\n\nbody", "x")).toThrow(/description is required/);
+    expect(() => parseSkill("---\nname: zstack-x\ndescription: d\ninvocation: never\n---\n\nbody", "x")).toThrow(/invocation must be model or user/);
+    expect(() => parseSkill("---\nname: zstack-x\ndescription: d\ninvocaton: user\n---\n\nbody", "x")).toThrow(/unknown frontmatter field invocaton/);
   });
 
   it("has valid eval cases and rejects malformed ones", () => {

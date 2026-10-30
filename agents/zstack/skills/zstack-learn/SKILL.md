@@ -6,7 +6,9 @@ globs: "**"
 
 # zstack-learn
 
-Run this at the end of every loop, and immediately after any surprise.
+Run this at the end of every loop, and immediately after any surprise. For a
+whole long session, the user can ask for `zstack-reflect`, which mines the
+transcript instead of memory.
 
 ## Find the lessons
 
