@@ -117,7 +117,7 @@ function parsePrinciples(source, ids) {
       const id = Number(list.start) + index;
       const title = /^\*\*([\s\S]+?)\*\*/.exec(item.text)?.[1];
       if (!Number.isSafeInteger(id) || id < 1 || id > 999 || !title || principles.some(entry => entry.id === id)) fail("pack_invalid");
-      const citation = /(?:^|\n)\s*Cases:([\s\S]*)$/.exec(item.text)?.[1] ?? "";
+      const citation = /(?:^|\n)[^\S\n]*Cases:([\s\S]*)$/.exec(item.text)?.[1] ?? "";
       const caseIds = sorted([...citation.matchAll(/`([^`]+)`/g)].map(match => match[1]));
       if (caseIds.some(caseId => !ids.has(caseId)) || citation.trim() && !caseIds.length) fail("pack_invalid");
       principles.push({ id, title: displayText(title), caseIds });

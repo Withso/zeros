@@ -1,0 +1,9 @@
+{
+  "id": "seeded-comment-trailing-space-scan",
+  "kind": "seeded",
+  "area": "zstack",
+  "fixedBy": "pending",
+  "symptom": "comments.mjs trimmed JSX text lines with / +$/, which rescans a space run from every position: 100 KB of spaces before a non-space took 7 s, and doubling it quadrupled the time. Review of #790 had already found four such patterns in transcript.mjs that lint analysis missed.",
+  "rule": "Every regular expression in scripts/zstack must scan crafted input in linear time; scripts/zstack/linear-regex.mjs times each one against generic shapes and its own literal words at two sizes. Restore the / +$/ trim in jsxText.",
+  "check": "pnpm test:git scripts/__tests__/zstack-linear-regex.test.ts"
+}
