@@ -28,9 +28,13 @@ const SECRETS = [
   [/(:\/\/)[^\s/@:"'`]+:[^\s/@"'`]+@/g, "$1[redacted]@"],
   [/\b([A-Z][A-Z0-9_]*(?:TOKEN|SECRET|PASSWORD|PASSWD|API_KEY|APIKEY|_KEY|CREDENTIALS?))("?\s*[=:]\s*)("[^"]*"|'[^']*'|[^\s"'`,;]+)/g, "$1$2[redacted]"],
   [/\b(password|passwd|secret|token|api[_-]?key|access[_-]?key|client[_-]?secret)("?\s*[=:]\s*)("[^"]*"|'[^']*'|[^\s"'`,;]+)/gi, "$1$2[redacted]"],
+  // Short credentials passed as arguments have no recognizable shape.
+  [/(^|\s)(--?(?:password|passwd|pass|token|secret|api[-_]?key|access[-_]?key|client[-_]?secret|auth|auth-token|user)(?:=|\s+))("[^"]*"|'[^']*'|[^\s"'`]+)/gi, "$1$2[redacted]"],
+  [/(\bcurl\b[^\n|;&]*?\s-u\s*)("[^"]*"|'[^']*'|[^\s"'`]+)/g, "$1[redacted]"],
   // Unknown vendors' keys: long runs mixing lower case, upper case and digits.
+  // Each run is tested once; lookaheads restarting inside a run are quadratic.
   // Hex SHAs, UUIDs and identifiers without digits survive.
-  [/\b(?=[A-Za-z0-9_-]*[a-z])(?=[A-Za-z0-9_-]*[A-Z])(?=[A-Za-z0-9_-]*\d)[A-Za-z0-9_-]{32,}/g, "[redacted token]"],
+  [/[A-Za-z0-9_-]{32,}/g, (run) => (/[a-z]/.test(run) && /[A-Z]/.test(run) && /\d/.test(run) ? "[redacted token]" : run)],
 ];
 
 export function redact(text) {

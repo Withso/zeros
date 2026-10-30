@@ -128,6 +128,23 @@ describe("zstack transcript digest: safety and bounds", () => {
     expect(redact(kept)).toBe(kept);
   });
 
+  it("redacts short credentials passed as command arguments", () => {
+    const value = "pw-" + "42";
+    for (const command of [
+      `mysql --password ${value} app`, `tool --password=${value}`, `tool --token "${value} x"`, `tool --api-key '${value}'`,
+      `curl --user admin:${value} https://x.test`, `curl -s -u admin:${value} https://x.test`, `curl -uadmin:${value} https://x.test`,
+    ]) expect(redact(command)).not.toContain(value);
+    expect(redact("git push -u origin main")).toBe("git push -u origin main");
+  });
+
+  it("redacts adversarial input in linear time", () => {
+    for (const input of ["a-".repeat(50_000), "aB1-".repeat(25_000), "A_".repeat(50_000), "x".repeat(100_000), "--token ".repeat(12_000)]) {
+      const started = performance.now();
+      redact(input);
+      expect(performance.now() - started).toBeLessThan(1000);
+    }
+  });
+
   it("redacts before truncating, so a cut never leaves part of a secret", () => {
     const transcript = jsonl([claude(0, "user", `${"x".repeat(590)} ${anthropicKey}`)]);
     const [event] = digestTranscript(transcript).events;
