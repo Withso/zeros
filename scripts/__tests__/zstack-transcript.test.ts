@@ -135,6 +135,7 @@ describe("zstack transcript digest: safety and bounds", () => {
       `curl --user admin:${value} https://x.test`, `curl -s -u admin:${value} https://x.test`, `curl -uadmin:${value} https://x.test`,
     ]) expect(redact(command)).not.toContain(value);
     expect(redact("git push -u origin main")).toBe("git push -u origin main");
+    expect(redact(`tool '--password' '${value}'`)).toBe("tool '--password' [redacted]");
     // A quoted value with an escaped quote must not leak its suffix: the rest
     // of a credential line goes, whatever the shell quoting.
     const tail = ["quote", "suffix", "canary"].join("-");
@@ -146,9 +147,19 @@ describe("zstack transcript digest: safety and bounds", () => {
     for (const input of ["a-".repeat(50_000), "aB1-".repeat(25_000), "A_".repeat(50_000), "x".repeat(100_000), "--token ".repeat(12_000),
       "eyJ-".repeat(25_000), "eyJ.".repeat(25_000), "curl ".repeat(20_000), "curl -u".repeat(14_000), "://a:".repeat(20_000),
       "://a:b@".repeat(14_000), "a:".repeat(50_000), "A=".repeat(50_000), "\"".repeat(100_000), "Bearer ".repeat(14_000),
-      "sk-".repeat(33_000), "-----BEGIN ".repeat(9_000), `-----BEGIN RSA ${"PRIVATE KEY"}-----`.repeat(3_000), `${"a ".repeat(50_000)}:`]) {
+      "sk-".repeat(33_000), "-----BEGIN ".repeat(9_000), `-----BEGIN RSA ${"PRIVATE KEY"}-----`.repeat(3_000), `${"a ".repeat(50_000)}:`,
+      `${" ".repeat(100_000)}A=`, "eyJ".repeat(330_000), "eyJ.".repeat(250_000), `${"\" ".repeat(50_000)}x:`]) {
       const started = performance.now();
       redact(input);
+      expect(performance.now() - started).toBeLessThan(1000);
+    }
+  });
+
+  it("strips host wrappers and tags in linear time", () => {
+    for (const content of ["<system-reminder>".repeat(60_000), "<a ".repeat(300_000), "<conductor_message_sender>".repeat(40_000),
+      "<task-notification>".repeat(50_000), `${"<a<".repeat(300_000)}>`, "<x>".repeat(300_000)]) {
+      const started = performance.now();
+      digestTranscript(jsonl([claude(0, "user", content)]));
       expect(performance.now() - started).toBeLessThan(1000);
     }
   });

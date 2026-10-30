@@ -3,7 +3,7 @@
 // what failed or was declined, what was retried and where time went. Tool
 // output never leaves the file except one redacted line per failure.
 import { createHash } from "node:crypto";
-import { closeSync, existsSync, openSync, readdirSync, readFileSync, readSync, statSync } from "node:fs";
+import { closeSync, existsSync, fstatSync, openSync, readdirSync, readFileSync, readSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -20,7 +20,7 @@ const LIMITS = { user: 600, peer: 300, assistant: 240, command: 160, detail: 200
 // goes. Redaction runs before truncation, so a cut never leaves part of a
 // secret behind. Every rule is a single forward scan with no backtracking
 // quantifier, so redaction stays linear in the input.
-const CREDENTIAL_FLAG = /(?:^|\s)--?(?:password|passwd|pass|token|secret|api[-_]?key|access[-_]?key|client[-_]?secret|auth|auth-token|user)(?=[=\s]|$)/i;
+const CREDENTIAL_FLAG = /(?:^|\s)["']?--?(?:password|passwd|pass|token|secret|api[-_]?key|access[-_]?key|client[-_]?secret|auth|auth-token|user)["']?(?=[=\s]|$)/i;
 const AUTH_SCHEME = /\b(?:Bearer|Basic)\s/i;
 const SENSITIVE_NAME = /(?:TOKEN|SECRET|PASSWORD|PASSWD|API_?KEY|_KEY|CREDENTIALS?)$/;
 const SENSITIVE_WORDS = new Set(["password", "passwd", "secret", "token", "apikey", "api_key", "api-key", "access_key",
@@ -44,19 +44,22 @@ function credentialCut(line) {
   }
   const scheme = AUTH_SCHEME.exec(line);
   if (scheme) cuts.push(scheme.index + scheme[0].length);
-  let keyStart = 0;
+  // Walk back from each separator over quotes and spaces, then over the name,
+  // never past the previous separator, so every character is visited a
+  // bounded number of times.
+  let floor = 0;
   for (let at = 0; at < line.length; at++) {
-    const char = line[at];
-    if (char !== "=" && char !== ":") {
-      if (!NAME.test(char) && char !== " " && char !== "\"" && char !== "'") keyStart = at + 1;
-      continue;
-    }
-    const key = line.slice(keyStart, at).replace(/["' ]+$/, "").replace(/^.*[ "']/, "");
+    if (line[at] !== "=" && line[at] !== ":") continue;
+    let keyEnd = at;
+    while (keyEnd > floor && (line[keyEnd - 1] === " " || line[keyEnd - 1] === "\"" || line[keyEnd - 1] === "'")) keyEnd--;
+    let keyStart = keyEnd;
+    while (keyStart > floor && NAME.test(line[keyStart - 1])) keyStart--;
+    const key = line.slice(keyStart, keyEnd);
     if (key && (SENSITIVE_NAME.test(key) || SENSITIVE_WORDS.has(key.toLowerCase()))) {
       cuts.push(at + 1);
       break;
     }
-    keyStart = at + 1;
+    floor = at + 1;
   }
   return cuts.length ? Math.min(...cuts) : -1;
 }
@@ -65,16 +68,26 @@ function credentialCut(line) {
 function redactKeys(line) {
   let out = "";
   let from = 0;
-  let scanned = 0;
+  let end = 0;
+  let dots = [];
   KEY_PREFIX.lastIndex = 0;
   for (let match; (match = KEY_PREFIX.exec(line));) {
     const bodyStart = match.index + match[0].length;
-    let end = Math.max(bodyStart, scanned);
-    while (end < line.length && BODY.test(line[end])) end++;
-    scanned = end;
-    const body = line.slice(bodyStart, end);
+    if (bodyStart > end) {
+      // A new run: scan it once and remember where its dots are.
+      end = bodyStart;
+      dots = [];
+      while (end < line.length && BODY.test(line[end])) if (line[end++] === ".") dots.push(end - 1);
+    }
+    let first = 0;
+    for (let low = 0, high = dots.length; low < high;) {
+      const middle = (low + high) >> 1;
+      if (dots[middle] < bodyStart) low = first = middle + 1;
+      else high = first = middle;
+    }
+    const length = end - bodyStart;
     const jwt = match[0] === "eyJ";
-    if (jwt ? body.split(".").length >= 3 && body.length >= 20 : body.length >= 16) {
+    if (jwt ? dots.length - first >= 2 && length >= 20 : length >= 16) {
       out += `${line.slice(from, match.index)}[redacted ${jwt ? "jwt" : "key"}]`;
       from = end;
       KEY_PREFIX.lastIndex = end;
@@ -147,20 +160,61 @@ function failureLine(output) {
 
 // Strips host wrappers. Conductor marks a message another agent sent; task
 // notifications and injected instructions are not anyone's words.
+// Removes every <name>…</name> block with indexOf, returning the first
+// block's inner text. An unclosed block runs to the end of the text.
+function removeBlocks(text, name) {
+  const open = `<${name}>`;
+  const close = `</${name}>`;
+  let out = "";
+  let from = 0;
+  let inner = null;
+  for (let at = text.indexOf(open); at >= 0; at = text.indexOf(open, from)) {
+    const end = text.indexOf(close, at + open.length);
+    inner ??= text.slice(at + open.length, end < 0 ? text.length : end);
+    out += text.slice(from, at);
+    from = end < 0 ? text.length : end + close.length;
+  }
+  return { text: out + text.slice(from), inner };
+}
+
+// Replaces anything shaped like a tag with a space. A "<" with no ">" after it
+// ends the scan, and a candidate holding another "<" restarts there, so each
+// character is visited a bounded number of times.
+function stripTags(text) {
+  let out = "";
+  let from = 0;
+  let close = -1;
+  for (let at = text.indexOf("<"); at >= 0;) {
+    if (close <= at) close = text.indexOf(">", at + 1);
+    if (close < 0) break;
+    const inner = text.indexOf("<", at + 1);
+    if (inner >= 0 && inner < close) {
+      at = inner;
+      continue;
+    }
+    if (/^\/?[a-z][a-z_-]*(?:\s[^>]*)?$/.test(text.slice(at + 1, close))) {
+      out += `${text.slice(from, at)} `;
+      from = close + 1;
+    }
+    at = text.indexOf("<", close + 1);
+  }
+  return out + text.slice(from);
+}
+
 function message(raw) {
-  let body = String(raw).replace(/<(system-reminder|system_instruction)>[\s\S]*?<\/\1>/g, "")
-    .replace(/<local-command-stdout>[\s\S]*?<\/local-command-stdout>/g, "");
-  const sender = /<conductor_message_sender>([\s\S]*?)<\/conductor_message_sender>/.exec(body);
-  body = body.replace(/<conductor_message_sender>[\s\S]*?<\/conductor_message_sender>/g, "");
-  const notice = /<task-notification>[\s\S]*?<\/task-notification>/.exec(body);
-  if (notice) {
-    const field = (name) => new RegExp(`<${name}>([^<]*)</${name}>`).exec(notice[0])?.[1]?.trim();
+  let body = String(raw);
+  for (const name of ["system-reminder", "system_instruction", "local-command-stdout"]) body = removeBlocks(body, name).text;
+  const sender = removeBlocks(body, "conductor_message_sender");
+  body = sender.text;
+  const notice = removeBlocks(body, "task-notification").inner;
+  if (notice != null) {
+    const field = (name) => removeBlocks(notice, name).inner?.trim();
     return { kind: "notice", text: oneLine([field("status"), field("summary")].filter(Boolean).join(": "), LIMITS.notice) };
   }
   if (/^\s*(?:# AGENTS\.md instructions|<environment_context>|<user_instructions>|<INSTRUCTIONS>)/.test(body)) return null;
-  body = body.replace(/<\/?[a-z][a-z_-]*(?:\s[^>]*)?>/g, " ").trim();
+  body = stripTags(body).trim();
   if (!body) return null;
-  const kind = sender && /another agent/i.test(sender[1]) ? "peer" : "user";
+  const kind = sender.inner != null && /another agent/i.test(sender.inner) ? "peer" : "user";
   return { kind, text: oneLine(body, LIMITS[kind]) };
 }
 
@@ -442,11 +496,20 @@ function main(argv) {
     console.error("usage: node scripts/zstack/transcript.mjs digest <file.jsonl> [--json] [--max-chars <n ≥ 1000>]\n       node scripts/zstack/transcript.mjs locate [cwd]");
     return 2;
   }
-  if (statSync(file).size > MAX_FILE_BYTES) {
-    console.error("zstack_transcript_too_large");
-    return 2;
+  // Size and contents come from one held descriptor, so the file cannot be
+  // swapped between the check and the read.
+  const handle = openSync(file, "r");
+  let text;
+  try {
+    if (fstatSync(handle).size > MAX_FILE_BYTES) {
+      console.error("zstack_transcript_too_large");
+      return 2;
+    }
+    text = readFileSync(handle, "utf8");
+  } finally {
+    closeSync(handle);
   }
-  const digest = digestTranscript(readFileSync(file, "utf8"), { file, maxChars });
+  const digest = digestTranscript(text, { file, maxChars });
   process.stdout.write(json ? `${JSON.stringify(digest, null, 2)}\n` : renderDigest(digest));
   return 0;
 }
