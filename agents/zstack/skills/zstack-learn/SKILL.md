@@ -8,8 +8,8 @@ globs: "**"
 
 Run this at the end of every loop, and immediately after any surprise. For a
 whole long session, the user can ask for `zstack-reflect`, which mines the
-transcript instead of memory, or `zstack-correct`, which mines repository
-history and proves an enforcer against a real past mistake.
+transcript instead of memory. For recurring repository mistakes, the user can
+ask for `zstack-correct`, which proves an enforcer against a real past instance.
 
 ## Find the lessons
 

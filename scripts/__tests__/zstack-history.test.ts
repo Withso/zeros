@@ -142,7 +142,7 @@ describe("zstack history miner", () => {
     expect(out).not.toMatch(/[\p{Cc}\p{Cf}]/u);
   });
 
-  it.each(["PASSWORD=", "DATABASE_PASSWORD=", "API_KEY=", "FOO_TOKEN=", "--password ", "curl --user fixture:"])("omits short credential values introduced by %s in a subject", prefix => {
+  it.each(["PASSWORD=", "DATABASE_PASSWORD=", "API_KEY=", "FOO_TOKEN=", "--password ", "'--password' ", "\"--token\" ", "curl --user fixture:"])("omits short credential values introduced by %s in a subject", prefix => {
     const repo = repository(), secret = ["subject", "canary"].join("-");
     repo.commit(`fix: ${prefix}${secret} (#10)`, { "src/cache.ts": "one" });
     expect(JSON.stringify(mineHistory(repo.root))).not.toContain(secret);
@@ -221,6 +221,24 @@ describe("zstack history miner", () => {
     expect(report.totalClusters).toBe(1);
     expect(report.clusters.map((cluster: { id: string }) => cluster.id)).toEqual(["judgment:AGENTS.md#working-method"]);
     expect(report.clusters[0].evidence.ruleIds).toEqual(["A1", "A2"]);
+  });
+
+  it("excludes lesson records and generated skills from file-retouch clusters", () => {
+    const repo = repository();
+    const records = ["agents/zstack/changes/lesson.md", "agents/zstack/records/measurement.md", "agents/zstack/playbooks/bug-fix.md",
+      ".agents/skills/zstack/SKILL.md", ".claude/skills/zstack/SKILL.md", ".cursor/rules/zstack.mdc",
+      "CHANGELOG.md", "packages/fixture/CHANGELOG.v1.md"];
+    for (let step = 0; step < 3; step++) repo.commit(`fix: incident ${step} (#${10 + step})`, {
+      ...Object.fromEntries(records.map(file => [file, String(step)])),
+      [`src/unrelated-${step}.ts`]: String(step),
+      ...(step < 2 ? { "src/cache.ts": String(step) } : {}),
+    });
+    const report = mineHistory(repo.root, { limit: 100 });
+    expect(report.clusters.filter((cluster: { kind: string }) => cluster.kind === "history")
+      .map((cluster: { id: string }) => cluster.id)).toEqual(["history:src/cache.ts"]);
+    expect(report.coverage.ignoredRecordPaths).toBe(records.length);
+    for (const kind of ["area", "principle", "judgment"])
+      expect(report.clusters.some((cluster: { kind: string }) => cluster.kind === kind)).toBe(true);
   });
 
   it("recognizes a case's exact fixing SHA even without a fix-prefixed subject", () => {

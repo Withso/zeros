@@ -15,12 +15,14 @@ const PRINCIPLES = "agents/zstack/principles.md";
 const ENFORCEMENT = "agents/zstack/enforcement.md";
 const fail = code => { throw new Error(`zstack_history_${code}`); };
 const sorted = values => [...new Set(values)].sort();
+const recordPath = file => ["agents/zstack/", ".agents/", ".claude/", ".cursor/"].some(prefix => file.startsWith(prefix)) ||
+  /^changelog(?:[._-]|$)/i.test(file.split("/").at(-1));
 
 function displayText(value) {
   if (value.length > 4096) return "[text omitted: length]";
   // Omit credential-bearing subjects instead of guessing shell quoting around
   // short passwords, which an opaque-token redactor cannot recognize.
-  if (/(?:^|\s)(?:--(?:password|passwd|token|secret|api[-_]?key|access[-_]?key|client[-_]?secret|credential[s]?|user|authorization)(?:\s|=)|-[up])/.test(value)) return "[redacted]";
+  if (/(?:^|\s)["']?(?:--(?:password|passwd|token|secret|api[-_]?key|access[-_]?key|client[-_]?secret|credential[s]?|user|authorization)(?=[\s="']|$)|-[up])/i.test(value)) return "[redacted]";
   for (const word of value.matchAll(/[A-Za-z_][A-Za-z0-9_-]*/g)) {
     if (/(?:password|passwd|token|secret|key|credential)/i.test(word[0]) && /^[\\"']*\s*[=:]/.test(value.slice(word.index + word[0].length))) return "[redacted]";
   }
@@ -152,8 +154,8 @@ function historyAt(git, revision, maxCommits) {
 }
 
 function touchedFiles(git, commits) {
-  if (!commits.length) return { files: new Map(), ignoredPaths: 0 };
-  const known = new Set(commits.map(commit => commit.sha)), files = new Map();
+  if (!commits.length) return { files: new Map(), ignoredPaths: 0, ignoredRecordPaths: 0 };
+  const known = new Set(commits.map(commit => commit.sha)), files = new Map(), records = new Set();
   const fields = git(["diff-tree", "--stdin", "--root", "--no-renames", "--name-only", "-r", "-z", "--always",
     "--diff-merges=first-parent", "--format=%x00%H"], commits.map(commit => commit.sha).join("\n") + "\n").toString("utf8").split("\0");
   let at = 0, ignoredPaths = 0;
@@ -167,13 +169,14 @@ function touchedFiles(git, commits) {
       const file = first ? fields[at++].replace(/^\n/, "") : fields[at++];
       first = false;
       if (!file) continue;
-      if (repositoryPath(file)) paths.push(file);
-      else ignoredPaths++;
+      if (!repositoryPath(file)) ignoredPaths++;
+      else if (recordPath(file)) records.add(file);
+      else paths.push(file);
     }
     files.set(sha, sorted(paths));
   }
   if (files.size !== known.size) fail("git_unavailable");
-  return { files, ignoredPaths };
+  return { files, ignoredPaths, ignoredRecordPaths: records.size };
 }
 
 export function mineHistory(cwd, { revision = "HEAD", maxCommits = 500, limit = 10, kind = "all" } = {}) {
@@ -198,7 +201,7 @@ export function mineHistory(cwd, { revision = "HEAD", maxCommits = 500, limit = 
     kind: /^revert(?:\b|\()/i.test(commit.rawSubject) ? "revert" :
       /^(?:fix(?:\([^\n)]*\))?!?:|fix(?:es|ed|ing)?\s)/i.test(commit.rawSubject) || caseFixes.has(commit.sha) ? "fix" : "other" }));
   const relevant = commits.filter(commit => commit.kind !== "other");
-  const { files, ignoredPaths } = touchedFiles(git, relevant);
+  const { files, ignoredPaths, ignoredRecordPaths } = touchedFiles(git, relevant);
   const clusters = [];
   const add = (kind, id, label, cases = [], rules = [], evidenceCommits = [], paths = []) => {
     const caseIds = sorted(cases.map(entry => entry.id)), ruleIds = sorted(rules.map(rule => rule.id));
@@ -239,7 +242,7 @@ export function mineHistory(cwd, { revision = "HEAD", maxCommits = 500, limit = 
   return { schema: "zeros.zstack-history/v1", revision: sha,
     coverage: { maxCommits, historyCommits: history.length, historyTruncated: truncated, shallow: shallow === "true",
       cases: pack.cases.length, principles: pack.principles.length, uncitedCases: pack.cases.filter(entry => !cited.has(entry.id)).length,
-      judgmentRules: pack.rules.length, ignoredPaths, unresolvedFixRefs: sorted(pack.cases.map(entry => entry.fixedBy).filter(ref => !resolveRef(ref))) },
+      judgmentRules: pack.rules.length, ignoredPaths, ignoredRecordPaths, unresolvedFixRefs: sorted(pack.cases.map(entry => entry.fixedBy).filter(ref => !resolveRef(ref))) },
     selection: { kind, limit }, ranking: { case: 2, judgmentRule: 3, revert: 5, additionalFix: 4 }, totalClusters: selected.length,
     clusters: selected.slice(0, limit).map((cluster, index) => ({ rank: index + 1, ...cluster })) };
 }
@@ -249,6 +252,7 @@ export function formatHistory(report) {
   const sample = values => values.slice(0, 3).map(cell).join("; ") + (values.length > 3 ? `; +${values.length - 3} (--json)` : "");
   const lines = [`Revision: ${report.revision}`, `History: ${report.coverage.historyCommits}/${report.coverage.maxCommits} commits; truncated=${report.coverage.historyTruncated}; shallow=${report.coverage.shallow}`,
     `Pack: ${report.coverage.cases} cases; ${report.coverage.judgmentRules} judgment-only rules; ${report.coverage.uncitedCases} uncited cases; ${report.coverage.unresolvedFixRefs.length} unresolved fix references.`,
+    `File clusters exclude ${report.coverage.ignoredRecordPaths} unique record paths (pack, provider metadata, changelogs); docs/ remains eligible.`,
     `Clusters (${report.selection.kind}): ${report.clusters.length}/${report.totalClusters}. Evidence samples below; --json retains all evidence.`,
     "| Rank | Score | Cluster | Case IDs | Rule IDs | Commits (subject only) |", "| --- | --- | --- | --- | --- | --- |"];
   for (const cluster of report.clusters) lines.push(`| ${cluster.rank} | ${cluster.score} | ${cell(cluster.id + (cluster.kind === "principle" ? `: ${cluster.label}` : ""))} | ${sample(cluster.evidence.caseIds)} | ${sample(cluster.evidence.ruleIds)} | ${sample(cluster.evidence.commits.map(commit => `${commit.sha.slice(0, 12)} ${commit.subject}`))} |`);

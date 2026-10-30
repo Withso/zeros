@@ -27,6 +27,10 @@ revision. It groups evals by area and cited principle, groups `judgment only`
 rules by section, and finds reverts and fixes that touch a file repeatedly.
 Reports contain case IDs, rule IDs and fingerprints, commit SHAs and redacted
 subjects; never commit bodies or diffs. Dirty and untracked files are excluded.
+File history clusters exclude pack records (`agents/zstack/**`), provider
+metadata (`.agents/`, `.claude/`, `.cursor/`) and changelog files; coverage counts
+the unique excluded paths. `docs/` stays eligible because contracts can be
+correction targets. Recording a lesson alongside a fix is not itself recurrence.
 
 Default bounds are 500 commits and 10 clusters; `--max-commits` accepts 1–2000
 and `--limit` 1–100. Scores weight each case by 2, judgment rule by 3, revert by
