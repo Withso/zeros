@@ -34,6 +34,8 @@ branch, preferably with a test or check rather than more prose.
 | `zstack-review` | Independent review of a diff against Zeros invariants. |
 | `zstack-eval` | Run and extend the eval cases. Pack changes must not regress them. |
 | `zstack-learn` | End-of-loop retrospective that writes lessons back into the pack. |
+| `zstack-drive` | Launch, drive and capture Zeros user flows to verify a change in the real app. |
+| `zstack-reflect` | Only when the user asks: mine a whole session transcript for lessons. |
 
 ## Editing
 
@@ -79,5 +81,5 @@ parent is a miss, not a catch.
 
 The method draws on pstack, Cursor's plugin of Lauren Tan's engineering
 practices (github.com/cursor/plugins, MIT, researched at `e43c7ee` and
-revisited at `1ba91fc`). No pstack text is copied. Where they differ, Zeros'
+revisited at `1ba91fc` and `c742dd6`). No pstack text is copied. Where they differ, Zeros'
 own rules take precedence.

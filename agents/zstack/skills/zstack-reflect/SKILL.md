@@ -1,0 +1,89 @@
+---
+name: zstack-reflect
+description: "Only when the user asks: mine one whole Zeros session transcript (Claude Code or Codex) through three independent lenses — corrections, friction, misses — verify each finding against the pack, and land each lesson as a test, check, eval case or tightened sentence in an existing pack file."
+globs: "agents/zstack/**,scripts/zstack/**"
+invocation: user
+---
+
+# zstack-reflect
+
+Run this only when the user asks for it: `/zstack-reflect`, `$zstack-reflect`,
+`@zstack-reflect`, or a request to reflect on a session. Never start it
+unprompted. The routine end-of-loop retrospective is `zstack-learn`.
+
+Reflect reads the whole session rather than your memory of it, so it finds
+what a compacted context forgot.
+
+## 1. Get the evidence
+
+1. **Find the transcript.** `node scripts/zstack/transcript.mjs locate` lists
+   the newest Claude Code and Codex sessions for this checkout. The user may
+   name another. A co-master reflects on its own transcript, then the two
+   cross-check each other's findings.
+2. **Digest it.** Run `mkdir -p .context/zstack-reflect`, then
+   `node scripts/zstack/transcript.mjs digest <file> > .context/zstack-reflect/digest.md`.
+   - The digest is bounded and redacted.
+   - It holds user and peer messages, failed and declined calls with one
+     error line each, slow and repeated calls, and compactions.
+   - Every event carries its transcript line number.
+   - When it reports omitted events, rerun with a larger `--max-chars`.
+3. **Open the raw transcript only at the lines a finding cites.** Digests and
+   notes stay in `.context/`. Never commit them or paste raw transcript into a
+   PR.
+
+## 2. Three lenses, kept independent
+
+Run each lens as its own pass and write its findings to
+`.context/zstack-reflect/<lens>.md` before starting the next one. Don't revise
+an earlier lens after reading a later one. Give each lens its own subagent only
+when the user authorized subagents, and give that subagent only the digest path
+and the lens.
+
+| Lens | Looks for |
+|---|---|
+| Corrections | Where the user or a peer corrected, redirected or declined the agent, and what the agent believed instead |
+| Friction | Failed, retried, slow or repeated calls; environment surprises; work redone after a compaction or restart |
+| Misses | What CI, review or the user caught after the agent called the work done; claims the evidence did not support |
+
+Each finding records:
+- its transcript lines;
+- what happened;
+- its cost: time, retries or a wrong claim;
+- the rule that would have prevented it.
+
+## 3. Verify each finding against the pack
+
+Search `agents/zstack/`, `AGENTS.md` and `RULES.md` before routing anything.
+
+- **Covered and followed:** the finding was situational; drop it.
+- **Covered but missed:** don't restate the rule. Move it to the step or gotcha
+  the agent reads at that moment, or replace it with structure.
+- **Contradicted by the pack:** settle which is right with the user before
+  editing.
+- **Not covered:** route it (step 4).
+- **No support:** drop a finding that only one incident supports and that no
+  test, case or recurrence backs.
+
+## 4. Route each lesson to its strongest form
+
+Use `zstack-learn`'s order, strongest first:
+1. A test, lint, type or script check that fails on this session's mistake.
+2. An eval case.
+3. One or two sentences that replace a weaker sentence in an existing
+   principle, skill, playbook or `gotchas.md` entry.
+
+Where it lands:
+- Reflect never adds a skill, playbook or reference file.
+- From a feature branch, guidance goes in a `changes/<id>.md` fragment.
+- A dedicated pack branch edits the target directly, within its budget.
+- Safety rules, CI definitions and credential policy go to the owner as a
+  proposal.
+
+## 5. Report and land
+
+Show the user one table. Each row gives the lesson, its evidence lines, its
+lens, and its form and target. List the dropped findings and why.
+
+Land the lessons the user approves in one pack PR, through the normal loop
+(`zstack-verify`, `zstack-review`, `pnpm agent:merge`). Cite the digest's
+sha256 prefix as provenance.

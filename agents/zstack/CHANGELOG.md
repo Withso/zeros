@@ -3,6 +3,24 @@
 Each entry records the lesson behind the change as symptom → cause → rule →
 where it is encoded.
 
+## 0.3.0
+
+- **A long session's lessons were lost to compaction.** The co-master session
+  that delivered 0.2.0 compacted twice, so its end-of-loop retrospective saw
+  only summaries. `zstack-reflect` runs only when the user asks. It digests the
+  whole Claude Code or Codex transcript with `scripts/zstack/transcript.mjs`:
+  bounded, with line numbers, and redacted before truncation so a cut never
+  leaves part of a secret behind. Three independent lenses then look for
+  corrections, friction and misses, and each verified lesson is routed in
+  `zstack-learn`'s order.
+- **A skill could not say that only the user may start it.** Canonical
+  frontmatter gains `invocation: user`, and the renderer writes:
+  - `disable-model-invocation` for Claude;
+  - `agents/openai.yaml` with implicit invocation off for Codex (every skill now
+    states its policy, so switching one leaves no stale file);
+  - a manual Cursor rule.
+  Unknown frontmatter fields now refuse instead of silently doing nothing.
+
 ## 0.2.0
 
 - **Lessons were written but never read.** 427 fragments (about 165k tokens)
