@@ -17,30 +17,113 @@ const LIMITS = { user: 600, peer: 300, assistant: 240, command: 160, detail: 200
 
 // High recall, unlike check:secrets' high-precision rules: a digest only has
 // to keep credentials out of an agent's notes, so anything shaped like one
-// goes. Key blocks go first because their bodies span lines. Redaction runs
-// before truncation, so a cut never leaves part of a secret behind.
-const SECRETS = [
-  [/-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?(?:-----END [A-Z ]*PRIVATE KEY-----|$)/g, "[redacted private key]"],
-  [/\beyJ[A-Za-z0-9_-]{6,}\.[A-Za-z0-9_-]{6,}\.[A-Za-z0-9_-]{6,}/g, "[redacted jwt]"],
-  [/\b(?:AKIA|ASIA)[0-9A-Z]{16}\b/g, "[redacted key]"],
-  [/\b(?:(?:sk|rk|pk)_(?:live|test)_[A-Za-z0-9]{16,}|xox[abprs]-[A-Za-z0-9-]{10,}|glpat-[A-Za-z0-9_-]{16,}|(?:gh[pousr]|github_pat|npm|phx|sb_secret|lin_api|pscale_(?:tkn|pw|oauth))_[A-Za-z0-9_-]{16,}|sk-[A-Za-z0-9_-]{20,})/g, "[redacted key]"],
-  [/\b(Bearer|Basic)\s+[A-Za-z0-9._~+/=-]{12,}/gi, "$1 [redacted]"],
-  [/(:\/\/)[^\s/@:"'`]+:[^\s/@"'`]+@/g, "$1[redacted]@"],
-  [/\b([A-Z][A-Z0-9_]*(?:TOKEN|SECRET|PASSWORD|PASSWD|API_KEY|APIKEY|_KEY|CREDENTIALS?))("?\s*[=:]\s*)("[^"]*"|'[^']*'|[^\s"'`,;]+)/g, "$1$2[redacted]"],
-  [/\b(password|passwd|secret|token|api[_-]?key|access[_-]?key|client[_-]?secret)("?\s*[=:]\s*)("[^"]*"|'[^']*'|[^\s"'`,;]+)/gi, "$1$2[redacted]"],
-  // Short credentials passed as arguments have no recognizable shape.
-  [/(^|\s)(--?(?:password|passwd|pass|token|secret|api[-_]?key|access[-_]?key|client[-_]?secret|auth|auth-token|user)(?:=|\s+))("[^"]*"|'[^']*'|[^\s"'`]+)/gi, "$1$2[redacted]"],
-  [/(\bcurl\b[^\n|;&]*?\s-u\s*)("[^"]*"|'[^']*'|[^\s"'`]+)/g, "$1[redacted]"],
-  // Unknown vendors' keys: long runs mixing lower case, upper case and digits.
-  // Each run is tested once; lookaheads restarting inside a run are quadratic.
-  // Hex SHAs, UUIDs and identifiers without digits survive.
-  [/[A-Za-z0-9_-]{32,}/g, (run) => (/[a-z]/.test(run) && /[A-Z]/.test(run) && /\d/.test(run) ? "[redacted token]" : run)],
-];
+// goes. Redaction runs before truncation, so a cut never leaves part of a
+// secret behind. Every rule is a single forward scan with no backtracking
+// quantifier, so redaction stays linear in the input.
+const CREDENTIAL_FLAG = /(?:^|\s)--?(?:password|passwd|pass|token|secret|api[-_]?key|access[-_]?key|client[-_]?secret|auth|auth-token|user)(?=[=\s]|$)/i;
+const AUTH_SCHEME = /\b(?:Bearer|Basic)\s/i;
+const SENSITIVE_NAME = /(?:TOKEN|SECRET|PASSWORD|PASSWD|API_?KEY|_KEY|CREDENTIALS?)$/;
+const SENSITIVE_WORDS = new Set(["password", "passwd", "secret", "token", "apikey", "api_key", "api-key", "access_key",
+  "access-key", "accesskey", "client_secret", "client-secret", "clientsecret"]);
+const KEY_PREFIX = /(?:sk|rk|pk)_(?:live|test)_|xox[abprs]-|glpat-|gh[pousr]_|github_pat_|npm_|phx_|sb_secret_|lin_api_|pscale_(?:tkn|pw|oauth)_|sk-|AKIA|ASIA|eyJ/g;
+const BODY = /[A-Za-z0-9_.-]/;
+const NAME = /[A-Za-z0-9_-]/;
+const URL_STOP = /[\s/@"'`]/;
+
+// Earliest offset after which the rest of a line is a credential: a credential
+// flag, curl's -u, an auth scheme or a sensitive NAME=value / name: value. The
+// whole remainder goes, so no shell quoting rule has to be guessed.
+function credentialCut(line) {
+  const cuts = [];
+  const flag = CREDENTIAL_FLAG.exec(line);
+  if (flag) cuts.push(flag.index + flag[0].length);
+  const curl = line.search(/\bcurl\b/);
+  if (curl >= 0) {
+    const user = line.slice(curl).search(/\s-u/);
+    if (user >= 0) cuts.push(curl + user + 3);
+  }
+  const scheme = AUTH_SCHEME.exec(line);
+  if (scheme) cuts.push(scheme.index + scheme[0].length);
+  let keyStart = 0;
+  for (let at = 0; at < line.length; at++) {
+    const char = line[at];
+    if (char !== "=" && char !== ":") {
+      if (!NAME.test(char) && char !== " " && char !== "\"" && char !== "'") keyStart = at + 1;
+      continue;
+    }
+    const key = line.slice(keyStart, at).replace(/["' ]+$/, "").replace(/^.*[ "']/, "");
+    if (key && (SENSITIVE_NAME.test(key) || SENSITIVE_WORDS.has(key.toLowerCase()))) {
+      cuts.push(at + 1);
+      break;
+    }
+    keyStart = at + 1;
+  }
+  return cuts.length ? Math.min(...cuts) : -1;
+}
+
+// Vendor-prefixed keys and JWTs: find a prefix, then consume its body once.
+function redactKeys(line) {
+  let out = "";
+  let from = 0;
+  let scanned = 0;
+  KEY_PREFIX.lastIndex = 0;
+  for (let match; (match = KEY_PREFIX.exec(line));) {
+    const bodyStart = match.index + match[0].length;
+    let end = Math.max(bodyStart, scanned);
+    while (end < line.length && BODY.test(line[end])) end++;
+    scanned = end;
+    const body = line.slice(bodyStart, end);
+    const jwt = match[0] === "eyJ";
+    if (jwt ? body.split(".").length >= 3 && body.length >= 20 : body.length >= 16) {
+      out += `${line.slice(from, match.index)}[redacted ${jwt ? "jwt" : "key"}]`;
+      from = end;
+      KEY_PREFIX.lastIndex = end;
+    }
+  }
+  return out + line.slice(from);
+}
+
+// user:password@ in URLs, scanned from each "://" to the first delimiter.
+function redactUrlCredentials(line) {
+  let out = "";
+  let from = 0;
+  for (let at = line.indexOf("://"); at >= 0; at = line.indexOf("://", at + 3)) {
+    let end = at + 3;
+    let colon = false;
+    for (; end < line.length && !URL_STOP.test(line[end]); end++) if (line[end] === ":") colon = true;
+    if (line[end] === "@" && colon) {
+      out += `${line.slice(from, at + 3)}[redacted]`;
+      from = end;
+    }
+  }
+  return out + line.slice(from);
+}
+
+// Unknown vendors' keys: long runs mixing lower case, upper case and digits.
+// Hex SHAs, UUIDs and identifiers without digits survive.
+const redactTokens = (line) => line.replace(/[A-Za-z0-9_-]{32,}/g,
+  (run) => (/[a-z]/.test(run) && /[A-Z]/.test(run) && /\d/.test(run) ? "[redacted token]" : run));
+
+// A key block spans lines, so it is removed before the line rules run.
+function redactPrivateKeys(text) {
+  let out = "";
+  let from = 0;
+  for (let at = text.indexOf("-----BEGIN "); at >= 0; at = text.indexOf("-----BEGIN ", Math.max(from, at + 1))) {
+    if (!/^-----BEGIN [A-Z ]{0,32}PRIVATE KEY-----/.test(text.slice(at, at + 64))) continue;
+    const footer = text.indexOf("-----END ", at + 11);
+    const close = footer < 0 ? -1 : text.indexOf("-----", footer + 9);
+    out += `${text.slice(from, at)}[redacted private key]`;
+    from = close < 0 ? text.length : close + 5;
+  }
+  return out + text.slice(from);
+}
 
 export function redact(text) {
-  let out = String(text);
-  for (const [pattern, replacement] of SECRETS) out = out.replace(pattern, replacement);
-  return out;
+  return redactPrivateKeys(String(text)).split("\n").map((line) => {
+    const cut = credentialCut(line);
+    const kept = cut < 0 ? line : `${line.slice(0, cut)}${/\s$/.test(line.slice(0, cut)) ? "" : " "}[redacted]`;
+    return redactTokens(redactUrlCredentials(redactKeys(kept)));
+  }).join("\n");
 }
 
 const oneLine = (text, limit) => {
