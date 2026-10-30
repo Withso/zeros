@@ -99,9 +99,12 @@ revision in the same checkout and compare failing test names.
 
 ## Permissions
 
-- Run `pnpm test:git` under CI's `umask 022`. This sandbox defaults to 0002 and
-  the Dev environment suites then refuse group-writable state. An executable
-  checked out as 0775 stays wrong after changing the umask; restore 0755.
+- Create worktrees and run `pnpm test:git` under CI's `umask 022`. This sandbox
+  defaults to 0002. The Dev environment suites then refuse group-writable state,
+  and Dev dependency setup fails with "Development state requires private,
+  user-owned files and directories" when the checkout root, `.context/` or
+  `node_modules/` is group-writable. An executable checked out as 0775 stays
+  wrong after changing the umask; restore 0755.
 - This sandbox's user holds every capability, `CAP_DAC_OVERRIDE` included, so
   `chmod 000` does not make a file unreadable. Fail the reader itself (for
   example a `PATH` wrapper) or drop all capability sets.
@@ -171,6 +174,16 @@ revision in the same checkout and compare failing test names.
   `setsid nohup` under a shared slot and append results to a summary file.
 - Never list full process command lines or environments: agent launch arguments
   can carry session credentials. Use PIDs, names and working directories.
+- `pkill -f <pattern>` can kill the shell running it, because the pattern also
+  appears in that shell's own command line. Find the PID first and kill by PID.
+- `pnpm check:secrets` scans tracked files only: stage new files before
+  running it. Build credential-shaped test values at runtime, and give
+  credential URLs a `.test` host.
+- CI-definition paths need the owner's merge and include `scripts/check-*`,
+  `scripts/ci/**`, `package.json` and the lockfiles. The full list is in
+  `scripts/ci/ci-definition.mjs`. Check planned paths against that list
+  before planning a change to a shared script. Its CLI compares committed
+  history only (`--base origin/main`), so run it again after committing.
 - pnpm installs share blocks through the store: measure reclaimed disk with
   `df`, and prune only your own scratch.
 - Run merge tooling from a checkout at current `origin/main`. A held
