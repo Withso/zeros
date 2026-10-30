@@ -174,17 +174,16 @@ revision in the same checkout and compare failing test names.
   `setsid nohup` under a shared slot and append results to a summary file.
 - Never list full process command lines or environments: agent launch arguments
   can carry session credentials. Use PIDs, names and working directories.
-- `pkill -f <pattern>` also kills the shell running it whenever the pattern
-  appears in that shell's own command line (exit 144). Find the PID first and
-  kill by PID.
+- `pkill -f <pattern>` can kill the shell running it, because the pattern also
+  appears in that shell's own command line. Find the PID first and kill by PID.
 - `pnpm check:secrets` scans tracked files only: stage new files before
   running it. Build credential-shaped test values at runtime, and give
   credential URLs a `.test` host.
 - CI-definition paths need the owner's merge and include `scripts/check-*`,
   `scripts/ci/**`, `package.json` and the lockfiles. The full list is in
-  `scripts/ci/ci-definition.mjs`. Run
-  `node scripts/ci/ci-definition.mjs --base origin/main` before planning a
-  change to a shared script.
+  `scripts/ci/ci-definition.mjs`. Check planned paths against that list
+  before planning a change to a shared script. Its CLI compares committed
+  history only (`--base origin/main`), so run it again after committing.
 - pnpm installs share blocks through the store: measure reclaimed disk with
   `df`, and prune only your own scratch.
 - Run merge tooling from a checkout at current `origin/main`. A held
