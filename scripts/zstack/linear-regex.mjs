@@ -4,6 +4,7 @@
 // static regex analysis misses those whose slow part follows a literal prefix
 // ("eyJ", "curl"), so the inputs repeat the pattern's own literal words too.
 import { readFileSync } from "node:fs";
+import { performance } from "node:perf_hooks";
 import { fileURLToPath } from "node:url";
 import vm from "node:vm";
 import ts from "typescript";
