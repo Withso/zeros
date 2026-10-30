@@ -1,0 +1,5 @@
+{
+  "file": "scripts/zstack/transcript.mjs",
+  "before": "export function readBounded(file, limit = MAX_FILE_BYTES) {\n  const handle = openSync(file, \"r\");\n  try {\n    if (!fstatSync(handle).isFile() || fstatSync(handle).size > limit) return null;\n    const chunks = [];\n    let total = 0;\n    for (;;) {\n      const chunk = Buffer.alloc(Math.min(1024 * 1024, limit + 1 - total));\n      const read = readSync(handle, chunk, 0, chunk.length, null);\n      if (read === 0) break;\n      total += read;\n      if (total > limit) return null;\n      chunks.push(chunk.subarray(0, read));\n    }\n    return Buffer.concat(chunks).toString(\"utf8\");\n  } finally {\n    closeSync(handle);\n  }\n}\n",
+  "after": "import { readFileSync } from \"node:fs\";\n\nexport function readBounded(file, limit = MAX_FILE_BYTES) {\n  if (statSync(file).size > limit) return null;\n  return readFileSync(file, \"utf8\");\n}\n"
+}

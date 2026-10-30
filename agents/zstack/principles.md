@@ -171,7 +171,8 @@ number instead of repeating them.
     permission failures with capabilities dropped. A guard on a destructive
     tool validates the effective target, not its spelling.
     Cases: `seeded-computer-self-test-fresh-descriptor`, `computer-log-document-alias`,
-    `load-sim-url-guard-lookalike-host`, `zstack-private-receipt-fixtures`.
+    `load-sim-url-guard-lookalike-host`, `zstack-private-receipt-fixtures`,
+    `seeded-transcript-file-custody`.
 
 ## The pack itself
 
