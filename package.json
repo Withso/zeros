@@ -24,7 +24,7 @@
       "!**/*.db-wal"
     ]
   },
-  "codexProtocolVersion": "0.165.0",
+  "codexProtocolVersion": "0.166.0",
   "scripts": {
     "postinstall": "node scripts/fix-node-pty-helper.cjs",
     "codegen:codex": "node scripts/codegen-codex.mjs",
@@ -152,7 +152,7 @@
     "@lezer/highlight": "^1.2.3",
     "@modelcontextprotocol/sdk": "^1.32.0",
     "@octokit/rest": "^22.0.0",
-    "@openai/codex": "0.165.0",
+    "@openai/codex": "0.166.0",
     "@pierre/diffs": "1.4.1",
     "@pierre/trees": "1.0.0-beta.4",
     "@radix-ui/react-avatar": "^1.1.11",
