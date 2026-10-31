@@ -1065,6 +1065,9 @@ export const DesignCanvas = React.memo(function DesignCanvas({
   const nudgeLifetimeRef = useRef(0);
   const { session: savedEditingSession, state: savedEditingState, nativePixels } = useDesignSavedEditing();
   const canvasLifetimeRef = useRef(0);
+  // Copy pixels shown while their save is pending belong to this canvas
+  // lifetime; a page, directory or owner change retires them at once.
+  const provisionalCopiesRef = useRef(new Set<() => void>());
   const nudgeCommitRef = useRef<Promise<void> | null>(null);
   const [nudgeCommitVersion, setNudgeCommitVersion] = useState(0);
   const queuedNudgeRef = useRef<{
@@ -2294,7 +2297,10 @@ export const DesignCanvas = React.memo(function DesignCanvas({
         workspaceId, frame, article, geometry,
         current: () => isCurrentDesignPageOwner(owner) && canvasLifetimeRef.current === canvasLifetime,
       }) : null;
-      if (provisional) revealAgentRects([{ x: geometry.x, y: geometry.y, width: geometry.w, height: geometry.h }]);
+      if (provisional) {
+        provisionalCopiesRef.current.add(provisional.retire);
+        revealAgentRects([{ x: geometry.x, y: geometry.y, width: geometry.w, height: geometry.h }]);
+      }
       const save = duplicateDesignFrameCached(workspaceId, frame.file, owner.pageId);
       const pending = { owner, selectionEvent: selected.selectionEvent, frame: frame.file,
         result: save.then(result => result.snapshot.frames.find(candidate => candidate.file === result.frame.file) ?? null) };
@@ -2310,6 +2316,7 @@ export const DesignCanvas = React.memo(function DesignCanvas({
         provisional?.retire();
         toast.error(duplicateMode === "copy" ? "Couldn't copy the frame" : "Couldn't duplicate the frame", { description: errorMessage(error) });
       } finally {
+        if (provisional) provisionalCopiesRef.current.delete(provisional.retire);
         pendingFrameCopySlotsRef.current.delete(intent);
         frameActionPendingRef.current--;
         if (pendingFrameCopyRef.current === pending) pendingFrameCopyRef.current = null;
@@ -3067,6 +3074,10 @@ export const DesignCanvas = React.memo(function DesignCanvas({
           current: () => nudgeLifetimeRef.current === lifetime && canvasLifetimeRef.current === canvasLifetime,
           nest: showNestTarget, finished: () => { gestureCancelRef.current = null; },
           saving: save => savedEditingSession?.retain(save),
+          presenting: retire => {
+            provisionalCopiesRef.current.add(retire);
+            return () => provisionalCopiesRef.current.delete(retire);
+          },
           failed: error => toast.error("Couldn't copy the frame", { description: errorMessage(error) }),
         });
         return;
@@ -4127,9 +4138,10 @@ export const DesignCanvas = React.memo(function DesignCanvas({
           });
         },
         measured: (geometry) => {
-          // After a committed release only the release sample's answer arrives.
           paintOwnerGeometry(geometry);
-          if (ended) return;
+          // After a committed release only the release sample's answer
+          // arrives; the tools hold it, unpinned, as the outline does, until
+          // the owner's confirmed details replace it.
           publishDesignLayoutToolsLive(ownerKey, {
             geometry: {
               rect: geometry.rect,
@@ -4137,7 +4149,7 @@ export const DesignCanvas = React.memo(function DesignCanvas({
               styles: geometry.styles,
               children: geometry.children,
             },
-            pinned: true,
+            pinned: !ended,
           });
         },
       });
@@ -6259,6 +6271,8 @@ export const DesignCanvas = React.memo(function DesignCanvas({
         setViewport(workspaceId, settled, canvasPageOwner);
       hitStackGenerationRef.current += 1;
       canvasLifetimeRef.current += 1;
+      for (const retire of provisionalCopiesRef.current) retire();
+      provisionalCopiesRef.current.clear();
       nudgeLifetimeRef.current += 1;
       finishNodeNudge(true);
       setHitStackMenu(null);
@@ -7066,13 +7080,17 @@ export const DesignCanvas = React.memo(function DesignCanvas({
               ? runtimeFrame.snapshot.frame
               : null))
           : null;
+        // New text joins light content: a shadow root is restyled and
+        // retexted, never rebuilt.
+        const lightLayout = (details: DesignRuntimeNodeDetails | null) =>
+          layoutDisplay(details) && !details?.shadow;
         const selectedLayout =
-          layoutDisplay(selectedNodeDetails) &&
+          lightLayout(selectedNodeDetails) &&
           containsPoint(selectedNodeDetails)
             ? selectedNodeDetails
             : null;
         const parentDetails =
-          (layoutDisplay(hitDetails ?? null) ? hitDetails : null) ??
+          (lightLayout(hitDetails ?? null) ? hitDetails : null) ??
           selectedLayout ??
           rootDetails;
         const parentNodeId = parentDetails?.oid ?? rootNodeId;

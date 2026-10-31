@@ -80,8 +80,8 @@ export function createDesignGestureLoop<Measurement>(
   let stopped = false;
   let finishing = false;
   let inFlight = 0;
+  // Once finishing, nothing sends again, so the newest request is the last.
   let latest = 0;
-  let final = 0;
   let queued: Record<string, string> | null = null;
   let idle: (() => void) | null = null;
   const stats = { revisions: 0, requests: 0, coalesced: 0 };
@@ -93,9 +93,9 @@ export function createDesignGestureLoop<Measurement>(
     resolveIdle();
   };
   // After finish, an older sample's answer no longer describes the element.
-  const answers = (id: number) => !stopped && (!finishing || id === final);
+  const answers = (id: number) => !stopped && (!finishing || id === latest);
 
-  const send = (styles: Record<string, string>): number => {
+  const send = (styles: Record<string, string>): void => {
     const id = ++latest;
     inFlight += 1;
     stats.requests += 1;
@@ -112,14 +112,13 @@ export function createDesignGestureLoop<Measurement>(
       })
       .finally(() => {
         inFlight -= 1;
-        if (finishing && id === final) stopped = true;
+        if (finishing && id === latest) stopped = true;
         if (stopped) {
           settle();
           return;
         }
         dispatch();
       });
-    return id;
   };
 
   const dispatch = () => {
@@ -152,10 +151,8 @@ export function createDesignGestureLoop<Measurement>(
       if (queued) {
         const sent = queued;
         queued = null;
-        final = send(sent);
-      } else if (inFlight) {
-        final = latest;
-      } else {
+        send(sent);
+      } else if (!inFlight) {
         stopped = true;
         settle();
       }

@@ -299,4 +299,28 @@ async function runDesignCopyChecks({ page, check }) {
   await page.evaluate(() => { window.__zerosHarnessRejectFrameDuplicate = false; });
   await settled(page);
   check("a refused keyboard frame copy retracts its provisional pixels", true);
+
+  // Leaving the page while the copy is saving retires its pixels at once,
+  // rather than painting them over the next page until the save settles.
+  await load(page);
+  await home.locator('[data-design-frame-label]').click();
+  await page.evaluate(() => window.__zerosHarnessDesignSurface.measurement.hold("design.frame.duplicate"));
+  await viewport.focus();
+  await page.keyboard.press("Control+d");
+  await expect(page.locator("[data-design-frame-copy-preview]")).toBeVisible();
+  const pageBefore = await page.evaluate(async (id) => {
+    const { designWorkspaceView, useDesignWorkspaceUiStore } = await import("/apps/desktop/src/renderer/features/design-workspace/state/design-workspace-ui.ts");
+    const before = designWorkspaceView(id).activePageId;
+    useDesignWorkspaceUiStore.getState().setActivePage(id, "other-page");
+    return before;
+  }, workspaceId);
+  await expect(page.locator("[data-design-frame-copy-preview]")).toHaveCount(0);
+  await page.evaluate(() => window.__zerosHarnessDesignSurface.measurement.release("design.frame.duplicate"));
+  await page.evaluate(async ({ id, before }) => {
+    const { useDesignWorkspaceUiStore } = await import("/apps/desktop/src/renderer/features/design-workspace/state/design-workspace-ui.ts");
+    useDesignWorkspaceUiStore.getState().setActivePage(id, before);
+  }, { id: workspaceId, before: pageBefore });
+  await settled(page);
+  await expect(page.locator("[data-design-frame-copy-preview]")).toHaveCount(0);
+  check("leaving the page retires a pending keyboard frame copy's pixels", true);
 }

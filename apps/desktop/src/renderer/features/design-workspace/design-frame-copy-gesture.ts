@@ -112,6 +112,8 @@ export function startDesignFrameCopy(input: {
   nest(file: string | null): void;
   finished(): void;
   saving(save: Promise<void>): void;
+  /** Registers pixels shown while the save is pending; returns the release. */
+  presenting?(retire: () => void): () => void;
   failed(error: unknown): void;
 }): () => void {
   const { event, workspaceId, frame } = input;
@@ -179,6 +181,7 @@ export function startDesignFrameCopy(input: {
       if (!moved || !current()) { cancel(); return; }
       released = true;
       input.finished();
+      const releasePresentation = input.presenting?.(() => presentation?.remove()) ?? (() => {});
       const save = (async () => {
         if (!current()) return;
         if (destination) {
@@ -203,6 +206,7 @@ export function startDesignFrameCopy(input: {
       })();
       input.saving(save);
       void save.catch(error => { if (current()) input.failed(error); }).finally(() => {
+        releasePresentation();
         captures.abort();
         presentation?.remove();
         input.nest(null);
