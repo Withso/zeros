@@ -24,16 +24,21 @@ afterEach(() => { vi.unstubAllGlobals(); vi.restoreAllMocks(); });
 
 it("does not clear a new session when an earlier provider startup resync rejects", async () => {
   let fail!: (error: Error) => void;
-  io.invoke.mockImplementation(() => new Promise((_, reject) => { fail = reject; }));
+  const signedIn = { sub: "account-b", accountId: "account-b", email: "b@example.test", name: null, provider: "workos" };
+  let calls = 0;
+  io.invoke.mockImplementation((command: string) => ++calls === 1
+    ? new Promise((_, reject) => { fail = reject; })
+    : Promise.resolve(command === "auth_get_session_user" ? signedIn : { access_token: "fixture-b", account: "account-b" }));
   vi.spyOn(console, "warn").mockImplementation(() => {});
   const { AuthProvider } = await import("../auth-context");
-  const { markSignedIn } = await import("../auth-store");
+  const { resync } = await import("../auth-store");
   const { getAuthAccessToken } = await import("../auth-token");
   renderToStaticMarkup(createElement(AuthProvider, null, "shell"));
   expect(io.effects).toHaveLength(1);
   const off = io.effects[0]!();
   try {
-    markSignedIn({ sub: "account-b", email: "b@example.test", name: null, access_token: "fixture-b" });
+    // A newer sign-in completes while the startup read is still pending.
+    await resync();
     fail(new Error("Earlier IPC failed"));
     await new Promise(resolve => setTimeout(resolve, 0));
     expect(getAuthAccessToken()).toBe("fixture-b");

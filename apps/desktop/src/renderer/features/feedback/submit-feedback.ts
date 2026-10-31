@@ -12,8 +12,8 @@
 // or unscrubbed credentials.
 //
 // We do NOT send an address. The control plane takes the sender's identity from
-// its verified Auth0 session, so the address Intercom shows is one Auth0
-// verified. The modal used to have an "Email (optional)" field and trusted it,
+// its verified account session, so the address Intercom shows is one the
+// sign-in provider verified. The modal used to have an "Email (optional)" field and trusted it,
 // which meant anyone holding the old bundled shared secret could impersonate
 // an address.
 // ──────────────────────────────────────────────────────────

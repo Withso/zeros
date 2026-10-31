@@ -2,7 +2,7 @@
 // Control-plane client — the desktop app's door to organizations, membership, and
 // invitations in apps/control-plane/.
 //
-// Auth: every call carries the CURRENT Auth0 access token from the app's
+// Auth: every call carries the CURRENT WorkOS access token from the app's
 // existing session (main owns refresh/rotation via auth-session.ts — we read,
 // never manage). The backend verifies it against the JWKS and decides
 // authorization in Postgres; the client sends identity, nothing more.

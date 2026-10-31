@@ -12,7 +12,6 @@ import { workOSDesktopClientForMain } from "../../workos-desktop-runtime";
 import { requestWorkOSDesktopRevocation } from "../../workos-desktop-revocation";
 import { emitEvent } from "../events";
 import type { CommandHandler } from "../router";
-import { cancelLegacyAuthHandoff } from "./auth-handoff";
 import { persistWorkOSSession } from "./auth-session";
 import { WorkOSDevCallbackRelay } from "../../workos-dev-callback-relay";
 import { localDevCallbackStore } from "../../local-dev-callback-store";
@@ -78,16 +77,15 @@ export function acceptWorkOSDesktopCallback(input: {
   return relay?.deliver(input) || (flow?.acceptCallback(input) ?? false);
 }
 
-/** Unified entry point: WorkOS stays entirely in Electron main; Auth0 tells the
- * renderer to continue through the compatibility handoff until Phase 5. */
+/** Start the hosted WorkOS sign-in. PKCE and the callback stay in Electron
+ * main; a build without sign-in values reports itself unconfigured. */
 export const authStartSignIn: CommandHandler = async (args) => {
   let config: ReturnType<typeof desktopAuthConfig>;
   try {
     config = desktopAuthConfig();
   } catch (error) {
-    // A partial public-client profile is still a configuration failure, not a
-    // reason to fall through to the retired provider. Keep the renderer copy
-    // fixed so no identifiers or URLs cross IPC.
+    // A partial public-client profile is a configuration failure. Keep the
+    // renderer copy fixed so no identifiers or URLs cross IPC.
     if (channel() === "dev") return { mode: "unconfigured" };
     throw error;
   }
@@ -109,9 +107,7 @@ export const authStartSignIn: CommandHandler = async (args) => {
       return { mode: "unconfigured" };
     }
   }
-  // Only WorkOS sessions can be parked; an Auth0 sign-in would replace this one.
-  if (config.provider === "auth0") return { mode: args?.addAccount === true ? "unsupported" : "auth0" };
-  cancelLegacyAuthHandoff();
+  if (config.provider !== "workos") return { mode: "unconfigured" };
   // Adding an account never reuses the browser's existing sign-in.
   const attempt = await workOSFlow().start({ fresh: args?.addAccount === true });
   return { mode: "workos", expiresAt: attempt.expiresAt };
@@ -119,6 +115,5 @@ export const authStartSignIn: CommandHandler = async (args) => {
 
 export const authCancelSignIn: CommandHandler = () => {
   flow?.cancel();
-  cancelLegacyAuthHandoff();
   return true;
 };

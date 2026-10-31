@@ -15,7 +15,7 @@ export type AuthUser = {
   sub: string;
   email: string;
   name: string | null;
-  provider: "auth0" | "workos";
+  provider: "workos";
   accountId?: string;
   sessionId?: string;
   clientKind?: "desktop";
@@ -93,30 +93,6 @@ export async function getSession(): Promise<AuthSessionInfo | null> {
 export function onAuthStateChange(cb: Listener): () => void {
   listeners.add(cb);
   return () => listeners.delete(cb);
-}
-
-/** Reflect a freshly-redeemed session into the renderer mirror. Main already
- *  persisted the FULL token pair in the keychain inside auth_redeem_handoff — the
- *  renderer never receives (nor forwards) the refresh token, so this only mirrors
- *  the identity + short-lived access token and notifies subscribers. */
-export function markSignedIn(info: {
-  access_token: string;
-  sub: string;
-  email: string;
-  name: string | null;
-}): void {
-  generation++;
-  const session: AuthSessionInfo = {
-    access_token: info.access_token,
-    user: {
-      sub: info.sub,
-      email: info.email,
-      name: info.name,
-      provider: "auth0",
-    },
-  };
-  publishIdentity(session.user);
-  notify(session);
 }
 
 export async function signOut(scope: "local" | "global"): Promise<void> {
