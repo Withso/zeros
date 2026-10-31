@@ -2,7 +2,7 @@ import { parse, type DefaultTreeAdapterTypes } from "parse5";
 import postcss, { type AtRule, type Declaration, type Rule } from "postcss";
 import { DESIGN_DOCUMENT_BODY_ID } from "@zeros/design-core";
 import { designDocumentBody, withExplicitDesignBody } from "./document-body";
-import { identifyDesignHtmlNodes, isDeclarativeShadowTemplate } from "./html";
+import { designNodeElements, identifyDesignHtmlNodes } from "./html";
 import { isContainedDesignReference } from "./references";
 
 import type {
@@ -267,50 +267,6 @@ function styleAttributeContent(raw: string): {
   };
 }
 
-function designElements(
-  document: DefaultTreeAdapterTypes.Document,
-): DefaultTreeAdapterTypes.Element[] {
-  const result: DefaultTreeAdapterTypes.Element[] = [];
-  const plumbing = new Set([
-    "html",
-    "head",
-    "body",
-    "base",
-    "link",
-    "meta",
-    "title",
-    "style",
-    "script",
-    "template",
-  ]);
-  let body: DefaultTreeAdapterTypes.Element | null = null;
-  const findBody = (
-    node: DefaultTreeAdapterTypes.Document | DefaultTreeAdapterTypes.Element,
-  ) => {
-    for (const child of node.childNodes ?? []) {
-      if (!("tagName" in child)) continue;
-      if (child.tagName === "body") body = child;
-      else findBody(child);
-    }
-  };
-  findBody(document);
-  const visit = (
-    node: DefaultTreeAdapterTypes.Element | DefaultTreeAdapterTypes.DocumentFragment,
-  ) => {
-    for (const child of node.childNodes ?? []) {
-      if (!("tagName" in child)) continue;
-      if (!plumbing.has(child.tagName)) result.push(child);
-      if (child.tagName !== "template") visit(child);
-      // A declarative shadow root renders as the host's content, in the same
-      // document order as html.ts and the engine walk it.
-      else if (isDeclarativeShadowTemplate(child) && "content" in child)
-        visit((child as unknown as { content: DefaultTreeAdapterTypes.DocumentFragment }).content);
-    }
-  };
-  if (body) visit(body);
-  return result;
-}
-
 function inlineStyleForNode(
   file: string,
   source: string,
@@ -321,7 +277,7 @@ function inlineStyleForNode(
   const matches =
     nodeId === DESIGN_DOCUMENT_BODY_ID
       ? [designDocumentBody(document)]
-      : designElements(document).filter(
+      : designNodeElements(document).filter(
           (element) =>
             element.attrs
               .find((attribute) => attribute.name === "data-oid")
@@ -371,7 +327,7 @@ function mutateInlineStyles(
   const matches =
     nodeId === DESIGN_DOCUMENT_BODY_ID
       ? [designDocumentBody(document)]
-      : designElements(document).filter(
+      : designNodeElements(document).filter(
           (element) =>
             element.attrs
               .find((attribute) => attribute.name === "data-oid")

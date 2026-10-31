@@ -131,6 +131,8 @@ export interface DesignSourceSpan {
 export interface DesignElementOffset extends DesignSourceSpan {
   oid: string;
   tag: string;
+  /** Rendered inside a declarative shadow root. */
+  shadow?: true;
   startTag: DesignSourceSpan;
   endTag: DesignSourceSpan | null;
 }

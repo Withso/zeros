@@ -1,24 +1,11 @@
 import { createHash } from "node:crypto";
 import { parse, type DefaultTreeAdapterTypes } from "parse5";
+import { registerDesignTemplateContent } from "@zeros/design-web";
 import { DESIGN_RUNTIME_SOURCE } from "@zeros/protocol/design-runtime";
 
 export interface ElementRecord {
   element: DefaultTreeAdapterTypes.Element;
   oid: string | null;
-}
-
-const templateOwners = new WeakMap<
-  DefaultTreeAdapterTypes.DocumentFragment,
-  DefaultTreeAdapterTypes.Element
->();
-
-/** parse5 keeps template content in a detached fragment with no parent link.
- * Every walk through elementRecords remembers the template that owns each
- * fragment, so callers can follow declarative shadow content to its host. */
-export function templateOwningFragment(
-  fragment: DefaultTreeAdapterTypes.DocumentFragment,
-): DefaultTreeAdapterTypes.Element | null {
-  return templateOwners.get(fragment) ?? null;
 }
 
 export function elementRecords(
@@ -38,9 +25,10 @@ export function elementRecords(
         node.attrs.find((attribute) => attribute.name === "data-oid")?.value ??
         null;
       records.push({ element: node, oid });
+      // Template content is walked too: a declarative shadow root renders,
+      // and registering it lets its content reach the host.
       if (node.tagName === "template" && "content" in node) {
-        templateOwners.set(node.content, node);
-        pending.push(node.content);
+        pending.push(registerDesignTemplateContent(node));
       }
     }
   }

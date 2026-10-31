@@ -6,3 +6,4 @@ export * from "./model";
 export * from "./playwright";
 export * from "./revision";
 export * from "./references";
+export * from "./shadow";

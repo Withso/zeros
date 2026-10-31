@@ -15,6 +15,11 @@ import { designDocumentBody, withExplicitDesignBody } from "./document-body";
 
 import { normalizeDesignCssProperty, validateDesignCssValue } from "./css";
 import { designSrcsetReferences, isContainedDesignReference } from "./references";
+import {
+  designShadowHostOfContent,
+  isDeclarativeShadowTemplate,
+  registerDesignTemplateContent,
+} from "./shadow";
 
 import type {
   DesignSourceSpan,
@@ -69,38 +74,23 @@ function elements(document: Document): Element[] {
 }
 
 type DocumentFragment = DefaultTreeAdapterTypes.DocumentFragment;
+type Template = DefaultTreeAdapterTypes.Template;
 
-const shadowTemplateOwners = new WeakMap<DocumentFragment, Element>();
-
-/** `<template shadowrootmode>` content renders as its parent's shadow root. */
-export function isDeclarativeShadowTemplate(element: Element): boolean {
-  if (element.tagName !== "template") return false;
-  const mode = element.attrs
-    .find((attribute) => attribute.name === "shadowrootmode")
-    ?.value.trim()
-    .toLowerCase();
-  return mode === "open" || mode === "closed";
-}
-
-/** Document-order elements including declarative shadow root content, which
- * the browser renders as the host's layers. Matches the engine's
+/** Document-order elements including open declarative shadow root content,
+ * which the browser renders as the host's layers. Matches the engine's
  * elementRecords order, so derived identities agree on every node. Inert
  * templates stay opaque. */
-function designElements(document: Document): Element[] {
+function designElements(root: Document | DocumentFragment): Element[] {
   const result: Element[] = [];
   const visit = (node: Document | Element | DocumentFragment) => {
     for (const child of node.childNodes ?? []) {
       if (!("tagName" in child)) continue;
       result.push(child);
       visit(child);
-      if (isDeclarativeShadowTemplate(child) && "content" in child) {
-        const content = (child as unknown as { content: DocumentFragment }).content;
-        shadowTemplateOwners.set(content, child);
-        visit(content);
-      }
+      if (isDeclarativeShadowTemplate(child)) visit(registerDesignTemplateContent(child as Template));
     }
   };
-  visit(document);
+  visit(root);
   return result;
 }
 
@@ -109,7 +99,7 @@ function isBodyDescendant(element: Element): boolean {
   while (parent) {
     if ("tagName" in parent && parent.tagName === "body") return true;
     if (!("tagName" in parent) && parent.nodeName === "#document-fragment") {
-      parent = shadowTemplateOwners.get(parent as DocumentFragment)?.parentNode ?? null;
+      parent = designShadowHostOfContent(parent as DocumentFragment);
       continue;
     }
     parent = "parentNode" in parent ? parent.parentNode : null;
@@ -119,6 +109,11 @@ function isBodyDescendant(element: Element): boolean {
 
 function isDesignElement(element: Element): boolean {
   return isBodyDescendant(element) && !NON_DESIGN_TAGS.has(element.tagName);
+}
+
+/** Selectable design elements in document order, shadow content included. */
+export function designNodeElements(document: Document): Element[] {
+  return designElements(document).filter(isDesignElement);
 }
 
 function span(location: {
@@ -200,7 +195,7 @@ function nearestParentId(element: Element): string | null {
     if (!("tagName" in parent)) {
       if (parent.nodeName !== "#document-fragment") break;
       // A shadow root's top-level layers belong to the host.
-      parent = shadowTemplateOwners.get(parent as DocumentFragment)?.parentNode ?? null;
+      parent = designShadowHostOfContent(parent as DocumentFragment);
       continue;
     }
     if (isDesignElement(parent)) {
@@ -316,9 +311,7 @@ function elementForMutation(
     (element) => isDesignElement(element) && oid(element) === nodeId,
   );
   if (matches.length === 0 && !options.shadow && isShadowContent(source, nodeId)) {
-    throw new Error(
-      `Design element ${nodeId} is inside a shadow root: restyle or retext it here, and move, duplicate or delete it by editing the HTML.`,
-    );
+    throw shadowContentRefusal(nodeId);
   }
   if (matches.length !== 1 || !matches[0]) {
     throw new Error(
@@ -328,6 +321,12 @@ function elementForMutation(
     );
   }
   return matches[0];
+}
+
+function shadowContentRefusal(nodeId: string): Error {
+  return new Error(
+    `Design element ${nodeId} is inside a shadow root: restyle or retext it here, and move, duplicate or delete it by editing the HTML.`,
+  );
 }
 
 function isShadowContent(source: string, nodeId: string): boolean {
@@ -415,9 +414,11 @@ export function mutateDesignNodeDuplicateSource(
   rawDuplicateNodeId: string,
 ): string {
   const duplicateNodeId = designNodeIdSchema.parse(rawDuplicateNodeId);
-  const records = elements(parse(source, { sourceCodeLocationInfo: true }));
+  const document = parse(source, { sourceCodeLocationInfo: true });
+  const records = elements(document);
+  // Shadow content carries identities too, so the copy's must avoid them.
   const existingIds = new Set(
-    records
+    designElements(document)
       .map(oid)
       .filter((id): id is string => Boolean(id)),
   );
@@ -430,7 +431,9 @@ export function mutateDesignNodeDuplicateSource(
     throw new Error(`Design element has no authored span: ${nodeId}`);
   const cloneSource = source.slice(location.startOffset, location.endOffset);
   const fragment = parseFragment(cloneSource, { sourceCodeLocationInfo: true });
-  const cloneRecords = fragmentElements(fragment);
+  // A copied host's declarative shadow content is copied with it, so its
+  // identities are replaced as well.
+  const cloneRecords = designElements(fragment);
   if (cloneRecords.length === 0) {
     throw new Error(`Design element cannot be duplicated: ${nodeId}`);
   }
@@ -474,7 +477,10 @@ export function mutateDesignNodeMoveSource(
       id === DESIGN_DOCUMENT_BODY_ID
         ? designDocumentBody(document)
         : records.find((record) => oid(record) === id);
-    if (!element) throw new Error(`Design element not found: ${id}`);
+    if (!element) {
+      if (isShadowContent(source, id)) throw shadowContentRefusal(id);
+      throw new Error(`Design element not found: ${id}`);
+    }
     return element;
   };
   const element = find(nodeId);

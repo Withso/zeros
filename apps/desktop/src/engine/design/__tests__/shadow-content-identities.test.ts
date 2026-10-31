@@ -53,6 +53,40 @@ describe("declarative shadow content identities", () => {
     expect(pre?.parentId).toBe("host");
   });
 
+  it("renders slotted light children under their slot and fallback only when nothing is assigned", () => {
+    const source = `<!doctype html><html><body><main data-oid="sheet">
+<my-card data-oid="host"><template shadowrootmode="open"><div data-oid="frame"><slot name="header" data-oid="header-slot"></slot><slot data-oid="slot"><i data-oid="unused">fallback</i></slot></div></template><h2 slot="header" data-oid="title">Light</h2><p data-oid="body">Body</p></my-card>
+<x-bare data-oid="bare"><template shadowrootmode="open"><slot data-oid="bare-slot"><span data-oid="fallback">Fallback</span></slot></template></x-bare>
+<x-spaced data-oid="spaced">
+  <template shadowrootmode="open"><slot data-oid="spaced-slot"><span data-oid="hidden">Fallback</span></slot></template>
+</x-spaced>
+</main></body></html>`;
+    const records = designNodeRecords(parse(source, { sourceCodeLocationInfo: true }));
+    const children = (oid: string) =>
+      designRenderedChildElements(records.find((record) => record.oid === oid)!.element).map((child) =>
+        child.attrs.find((attribute) => attribute.name === "data-oid")?.value,
+      );
+    expect(children("host")).toEqual(["frame"]);
+    expect(children("header-slot")).toEqual(["title"]);
+    expect(children("slot")).toEqual(["body"]);
+    expect(children("bare-slot")).toEqual(["fallback"]);
+    // Whitespace around the template is assigned to the default slot.
+    expect(children("spaced-slot")).toEqual([]);
+  });
+
+  it("follows only the open shadow roots the HTML parser attaches", () => {
+    const source = `<!doctype html><html><body><main data-oid="sheet"><ul><li data-oid="row"><template shadowrootmode="open"><span>inert</span></template><a data-oid="link">Link</a></li></ul><div data-oid="twice"><template shadowrootmode="open"><b>first</b></template><template shadowrootmode="open"><i>second</i></template></div><x-closed data-oid="closed"><template shadowrootmode="closed"><button>Buy</button></template><em data-oid="unrendered">light</em></x-closed></main></body></html>`;
+    const document = parse(source, { sourceCodeLocationInfo: true });
+    const records = designNodeRecords(document);
+    expect(records.map(({ element }) => element.tagName)).toEqual(["main", "ul", "li", "a", "div", "b", "x-closed", "em"]);
+    const row = records.find(({ oid }) => oid === "row")!.element;
+    expect(designRenderedChildElements(row).map((child) => child.tagName)).toEqual(["a"]);
+    const healed = healDesignOids(source).html;
+    expect(healed).toContain("<span>inert</span>");
+    expect(healed).toContain("<i>second</i>");
+    expect(healed).toContain("<button>Buy</button>");
+  });
+
   it("gives a host its shadow root's children, as the browser renders them", () => {
     const document = parse(healDesignOids(SOURCE).html, { sourceCodeLocationInfo: true });
     const host = designNodeRecords(document).find(({ oid }) => oid === "host")!.element;

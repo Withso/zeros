@@ -12,6 +12,7 @@ import {
   designNodeRecords,
   designRenderedChildElements,
   isDesignNodeElement,
+  isShadowDesignNodeElement,
 } from "./node-identities";
 import {
   DesignRenderBudgetError,
@@ -734,7 +735,10 @@ export async function prepareDesignAssetInsertion(
     (candidate) => candidate.path === input.assetPath,
   );
   if (!asset) throw new Error(`Design asset not found: ${input.assetPath}`);
-  const offsets = await readDesignElementOffsetMap(workspacePath, input.frame);
+  // An asset joins light content: shadow roots are restyled, not rebuilt.
+  const offsets = (await readDesignElementOffsetMap(workspacePath, input.frame)).filter(
+    (element) => !element.shadow,
+  );
   const root =
     offsets.find((element) => element.tag === "main") ?? offsets[0] ?? null;
   if (!root) {
@@ -857,6 +861,7 @@ export async function readDesignElementOffsetMap(
     offsets.push({
       oid,
       tag: element.tagName,
+      ...(isShadowDesignNodeElement(element) ? { shadow: true as const } : {}),
       ...designSourceSpan(location),
       startTag: designSourceSpan(location.startTag),
       endTag: location.endTag ? designSourceSpan(location.endTag) : null,
@@ -1578,8 +1583,10 @@ async function lintFrame(
     file,
   );
   const usedComponents = new Set(componentExpansion.usedComponents);
-  const componentRecords = designNodeRecords(document).filter(({ element }) =>
-    element.tagName.startsWith("zd-"),
+  // Components expand in light content only; the expander never enters a
+  // shadow root, so a zd-* tag there is not an instance.
+  const componentRecords = designNodeRecords(document).filter(
+    ({ element }) => element.tagName.startsWith("zd-") && !isShadowDesignNodeElement(element),
   );
   for (const { element, oid } of componentRecords) {
     if (!element.tagName.startsWith("zd-")) continue;
