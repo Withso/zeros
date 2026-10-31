@@ -81,7 +81,7 @@ loads current entitlements transactionally from the control plane.
 | Plan       | Tenant model | Seat purchaser | Teams | Cloud workspace rule |
 | ---------- | ------------ | -------------- | ----- | -------------------- |
 | Free       | Personal only | none | none in product UI | local only |
-| Pro        | Personal plus an optional Pro organization | each collaborating account holds its own active Pro entitlement | one default team initially | cloud workspaces belong to that Pro organization; initial collaboration cap is five independently entitled Pro accounts |
+| Pro        | Personal plus an optional Pro organization | each account with Pro holds its own entitlement; up to five members join without Pro | one default team initially | cloud workspaces belong to that Pro organization; at most 10 members, and only members with Pro create cloud workspaces |
 | Business   | Business organization | organization buys centralized active-member seats | multiple child teams | cloud workspaces are organization-owned and team-scoped |
 | Enterprise | Business model plus enterprise policy | organization contract/central billing | multiple child teams | Business behavior plus SSO/SAML, SCIM/Directory Sync, policy, audit, and contractual controls |
 
@@ -92,12 +92,13 @@ If a customer needs separate purchasing, legal ownership, SSO policy, or data
 retention, create a separate organization instead of overloading a team.
 
 A Pro organization is still a real collaborative organization and therefore a
-separate WorkOS Organization. Its owner does not buy a shared seat pack: every
-active collaborator must independently qualify for Pro. The membership cap is
-a product entitlement enforced by Zeros before sending a WorkOS invitation or
-membership command. Upgrading that same tenant to Business changes billing and
-team capabilities; it does not change the organization ID or move workspace
-data.
+separate WorkOS Organization. Its owner does not buy a shared seat pack: each
+member either holds their own Pro entitlement or takes one of the
+organization's free seats (see [Pro organization seats](#pro-organization-seats)).
+The membership cap is a product entitlement enforced by Zeros before sending a
+WorkOS invitation or membership command. Upgrading that same tenant to Business
+changes billing and team capabilities; it does not change the organization ID
+or move workspace data.
 
 Recommended durable billing records are an organization subscription, account
 entitlements, organization seat assignments, and metered compute grants. Keep
@@ -111,26 +112,83 @@ A user-created organization can own local workspaces and is eligible to own
 cloud workspaces. Eligibility metadata is not an entitlement: provisioning
 must still enforce the current plan, quota, repository access, and actor role.
 
-### Initial-launch creation gate
+### Creating an organization
 
-Organization creation is not generally available during the local-only launch.
-Only accounts with the standing Zeros staff role `platform_owner` or
-`developer` may create an organization for internal dogfooding. A staff role
-does not create an organization automatically, and ordinary signed-in accounts
-continue to see only their device-local Personal collection.
+Creating an organization requires an active Pro entitlement
+(`account_pro_active`). Pro means what `account_pro_entitlement` grants,
+including a cancellation that keeps Pro until the end of its period, except
+that staff roles and the staff Pro benefit grant no Pro: a `platform_owner` or
+`developer` needs their own grant like any other account. Accounts without Pro
+continue to see only their device-local Personal collection and the
+organizations they were invited to.
 
 The control plane is the authorization boundary. `GET /v1/me` publishes the
-server-derived `capabilities.createOrganization` boolean for client rendering,
-and both `POST /v1/organizations` and the released-client alias
-`POST /v1/teams` enforce the same role check. Unauthorized creation returns the
-non-disclosing `not_found` response. The browser and desktop hide the creation
-surface when the capability is absent or false, including after a role is
-revoked and the account snapshot is refreshed.
+server-derived `capabilities.createOrganization` and `capabilities.pro`
+booleans for client rendering, and both `POST /v1/organizations` and the
+released-client alias `POST /v1/teams` check Pro inside the creating
+transaction. Creation without Pro returns `403 pro_required`. The browser and
+desktop hide the creation surface when the capability is absent or false,
+including after Pro lapses and the account snapshot is refreshed.
 
 PostHog flags may later stage the UI rollout, but they are neither an identity
 source nor an authorization control. Any future rollout flag is an additional
 presentation/eligibility condition; the server must still authorize the current
 account, role, plan, and resource on every mutation.
+
+### Pro organization seats
+
+Every collaborative organization admits at most 10 members, the owner
+included, and at most 5 of them without Pro (`organization-seats.ts`). Each
+member has one seat:
+
+- `pro`: the member holds an active Pro entitlement;
+- `free`: the member has no Pro and holds one of the five free seats;
+- `hold`: the member has no Pro and the free seats are taken, or directory sync
+  added them beyond the 10-member limit.
+
+A member on Hold stays in the organization, keeps their role and can see
+members and settings, but loses the organization's cloud workspaces and chats.
+Local work is unaffected. Seats are computed from memberships and
+entitlements on every read (migration `0216`), never stored, so a Pro grant, a
+lapse or a departure rebalances every path at once:
+
+- Members without Pro hold free seats in the order they became free: when
+  they joined, or when their Pro last ended, whichever is later. Pro ends where
+  its validity window closes by itself, or at the write that ended it (a
+  trigger records `account_entitlements.pro_ended_at`). A recorded end never
+  moves earlier, so neither a lapse nor a later write (a future-dated grant,
+  recording an expired grant, a backdated window) displaces a member who is
+  already free.
+- When a free seat opens (a free member leaves or gains Pro), the member who
+  has waited longest on Hold takes it automatically.
+- An owner whose Pro lapses is treated like any other member. Hold changes no
+  role: an owner or admin on Hold still manages the Cloud Computer, and its
+  automatic rebuilds continue.
+- A member whose account is pending deletion keeps their seat through the
+  grace period, so a restore never displaces anyone.
+
+Invite and accept lock the organization row, so concurrent requests cannot
+exceed either limit:
+
+- **Invite:** members plus pending, unexpired invitations cannot exceed 10.
+  Resending to the same address supersedes the earlier invitation, so it does
+  not take another seat (`409 organization_member_limit`).
+- **Accept:** a member without Pro can join only while a free seat is open
+  (`409 organization_free_member_limit`). Pro status is checked here, not at
+  invite time.
+- **Cloud:** creating a cloud workspace requires Pro (`403 pro_required`).
+  Members without Pro keep using the workspaces they created. The shared cloud
+  authority clause (`CLOUD_V2_LIVE_ACCESS`) excludes a creator on Hold on every
+  HTTP, prompt, proxy and worker path; the creator's own reads return
+  `403 organization_member_on_hold`, and everyone else still sees `404`.
+
+`GET /v1/me` includes the caller's `seat` on each collaborative organization,
+and `GET /v1/organizations/:id/members` includes each member's `seat`, visible
+to every member, plus `seats` usage (`members`, `pendingInvitations`, `freeMembers`,
+`heldMembers` and both limits). Seat functions read every member's
+entitlement, so they run only in a system transaction after the actor is
+authorized; elsewhere they raise `42501` rather than answer from a partial
+view.
 
 Organization roles are `owner`, `admin`, and `member`:
 
@@ -217,7 +275,7 @@ whose classification was already lost require explicit recovery evidence; do
 not broadly adopt every unmatched local organization into Personal.
 
 Cloud v2 creation rejects Personal and checks organization membership, the
-cloud entitlement and the creator on the server. See
+cloud entitlement, the creator's Pro and their seat on the server. See
 [Cloud workspaces](cloud-workspaces.md) for the current runtime boundary.
 
 ### Local and cloud are execution modes, not movable containers

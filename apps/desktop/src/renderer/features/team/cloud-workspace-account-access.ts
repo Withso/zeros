@@ -3,9 +3,10 @@ import { getTeamStoreState, useTeams } from "./team-store";
 import { isFeatureEnabled } from "../../config/release-channel";
 
 /** Account admission, independent of staff roles and retired preferences.
- * A known organization's Cloud entitlement must remain enabled. Guests can
- * have a server-granted workspace without organization membership; callers
- * still require its exact cloud target and confirmed document capabilities. */
+ * A known organization's Cloud entitlement must remain enabled and the member
+ * must not be on Hold. Guests can have a server-granted workspace without
+ * organization membership; callers still require its exact cloud target and
+ * confirmed document capabilities. */
 export function cloudWorkspaceAccountAccess(
   me: Me | null,
   organizationId?: string,
@@ -16,7 +17,8 @@ export function cloudWorkspaceAccountAccess(
     candidate => candidate.id === organizationId,
   );
   return !organization ||
-    !organization.isPersonal && organization.workspaceCapabilities.cloud;
+    !organization.isPersonal && organization.workspaceCapabilities.cloud &&
+    organization.seat !== "hold";
 }
 
 export function hasCloudWorkspaceAccountAccess(organizationId?: string): boolean {

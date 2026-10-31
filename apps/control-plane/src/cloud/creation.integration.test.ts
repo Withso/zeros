@@ -4,6 +4,7 @@ import { Hono } from "hono";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { HttpError } from "../authz.js";
 import { resetMigratedTestDatabase } from "../test-database.js";
+import { grantTestPro } from "../test-pro.js";
 import { CloudV2Computers } from "./computer.js";
 import { createCloudV2Routes } from "./routes.js";
 import { CloudV2Store } from "./store.js";
@@ -18,6 +19,7 @@ suite("durable cloud create requests", () => {
     store = new CloudV2Store(pool); computers = new CloudV2Computers(pool, pool, async (_org, _user, target) => ({ repository: target.repository, repositoryId: "42" }));
     org = randomUUID(); creator = randomUUID(); member = randomUUID();
     for (const id of [creator, member]) await pool.query("INSERT INTO users(id,email,display_name) VALUES($1,$2,'User')", [id, `${id}@example.test`]);
+    await grantTestPro(pool, creator, member);
     await pool.query(`INSERT INTO organizations(id,slug,name,created_by,is_personal,cloud_workspaces_allowed)
       VALUES($1,$2,'Org',$3,false,true)`, [org, `org-${org}`, creator]);
     await pool.query("INSERT INTO organization_members(org_id,user_id,role) VALUES($1,$2,'owner'),($1,$3,'member')", [org, creator, member]);

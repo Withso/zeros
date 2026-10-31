@@ -8,6 +8,7 @@ import { createDeletionLifecycleRoutes, DeletionLifecycleProcessor } from "../de
 import { resetMigratedTestDatabase } from "../test-database.js";
 import { applyWorkOSIdentityEvent } from "../workos-events.js";
 import { ingestWorkOSManagementEvent } from "../workos-sync-events.js";
+import { grantTestPro } from "../test-pro.js";
 import { CloudV2Store } from "./store.js";
 import { CloudV2Computers, CloudV2ComputerBuilder, cloudV2SnapshotName } from "./computer.js";
 import type { CloudV2Compute } from "./boat.js";
@@ -30,6 +31,7 @@ suite("v2 account and organization deletion", () => {
     app.route("/",createDeletionLifecycleRoutes(pool));
   });
   async function workspace(creator = actor.id) {
+    await grantTestPro(pool, creator);
     const row = await store.createWorkspace({id:randomUUID(),organizationId:org,creatorUserId:creator,name:"Test",repository:"o/r",branch:"topic",baseBranch:"main",computerBuildId:null});
     await store.transition(row.id,["creating"],"running",{boatSandboxId:`fixture-${row.id}`});
     return row.id;

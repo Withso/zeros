@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import pg from "pg";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { resetMigratedTestDatabase } from "../test-database.js";
+import { grantTestPro } from "../test-pro.js";
 import { CloudV2Store } from "./store.js";
 import { CloudGithubPrStore } from "./github-pr-store.js";
 
@@ -30,6 +31,7 @@ database("cloud GitHub checkout metadata", () => {
         "INSERT INTO users(id,email,display_name) VALUES($1,$2,'User')",
         [id, `${id}@example.test`],
       );
+    await grantTestPro(pool, creatorUserId, otherUserId);
     await pool.query(
       "INSERT INTO organizations(id,slug,name,created_by,is_personal,cloud_workspaces_allowed) VALUES($1,$2,'Org',$3,false,true)",
       [organizationId, `org-${organizationId}`, creatorUserId],

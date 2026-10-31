@@ -13,6 +13,7 @@ import { resetMigratedTestDatabase } from "../test-database.js";
 import { CloudV2Store } from "./store.js";
 import { createCloudGithubServices } from "./github-composition.js";
 import { HttpError } from "../authz.js";
+import { grantTestPro } from "../test-pro.js";
 import { CloudV2Computers } from "./computer.js";
 import { PostgresGithubVerificationStore } from "./github-verification-store.js";
 
@@ -104,6 +105,7 @@ database("cloud GitHub composition", () => {
       "INSERT INTO users(id,email,display_name) VALUES($1,$2,'User')",
       [userId, `${userId}@example.test`],
     );
+    await grantTestPro(pool, userId);
     await pool.query(
       "INSERT INTO organizations(id,slug,name,created_by,is_personal,cloud_workspaces_allowed) VALUES($1,$2,'Org',$3,false,true)",
       [organizationId, `org-${organizationId}`, userId],

@@ -66,6 +66,15 @@ describe("Cloud workspace account admission after rollout", () => {
     state.me = account([{ ...organization, isPersonal: true }]);
     expect(cloudWorkspaceAccountAccess(state.me, organization.id)).toBe(false);
   });
+  it("denies a member on Hold while Pro and free members keep access", () => {
+    state.me = account([{ ...organization, seat: "hold" }]);
+    expect(hasCloudWorkspaceAccountAccess(organization.id)).toBe(false);
+    expect(readHook()).toBe(false);
+    for (const seat of ["pro", "free"] as const) {
+      state.me = account([{ ...organization, seat }]);
+      expect(hasCloudWorkspaceAccountAccess(organization.id)).toBe(true);
+    }
+  });
   it("observes entitlement revocation and account replacement on the next read", () => {
     expect(readHook()).toBe(true);
     state.me = account([{ ...organization, workspaceCapabilities: { local: false, cloud: false } }]);

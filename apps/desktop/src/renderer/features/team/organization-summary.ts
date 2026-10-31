@@ -1,4 +1,6 @@
-import type { OrganizationSummary, TeamRole } from "./control-plane";
+import type { OrganizationSeat, OrganizationSummary, TeamRole } from "./control-plane";
+
+const SEATS: ReadonlySet<unknown> = new Set<OrganizationSeat>(["pro", "free", "hold"]);
 
 export type OrganizationSummaryWire = {
   id: string;
@@ -10,6 +12,7 @@ export type OrganizationSummaryWire = {
   defaultTeamId?: string | null;
   workspaceCapabilities?: { local?: boolean; cloud?: boolean };
   teamCapabilities?: { multiple?: boolean; canCreate?: boolean };
+  seat?: OrganizationSeat;
 };
 
 /**
@@ -44,5 +47,6 @@ export function normalizeOrganizationSummary(
       cloud: !isPersonal && (value.workspaceCapabilities?.cloud ?? true),
     },
     teamCapabilities: { multiple: false, canCreate: false },
+    ...(!isPersonal && value.seat && SEATS.has(value.seat) ? { seat: value.seat } : {}),
   };
 }

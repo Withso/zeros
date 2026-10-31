@@ -22,6 +22,17 @@ export function filterProjectsForOrganization<T extends { repoRoot: string }>(
 
 export type WorkspacePlacement = "local" | "cloud";
 
+export const ORGANIZATION_HOLD_MESSAGE =
+  "You're on Hold in this organization. Get Pro, or ask an owner to free a seat.";
+
+/** Why this member can't create in an organization that allows cloud. Members
+ * without Pro use existing cloud workspaces but never create them. */
+export function cloudCreateSeatReason(organization: OrganizationSummary | null): string | null {
+  if (organization?.seat === "hold") return ORGANIZATION_HOLD_MESSAGE;
+  if (organization?.seat === "free") return "Creating a cloud workspace requires Pro.";
+  return null;
+}
+
 /** One policy function for every create affordance. Server entitlements still
  * authorize provisioning; this prevents the desktop from offering an invalid
  * ownership/placement combination in the first place. */
@@ -34,7 +45,8 @@ export function canCreateWorkspaceIn(
     isFeatureEnabled("cloud-workspaces") &&
     organization &&
     !organization.isPersonal &&
-    organization.workspaceCapabilities.cloud,
+    organization.workspaceCapabilities.cloud &&
+    !cloudCreateSeatReason(organization),
   );
 }
 
