@@ -49,8 +49,14 @@ describe.each(["beta", "production"] as const)("%s Local release", channel => {
 
   it("keeps migration target and provider authority validation mandatory", () => {
     for (const patch of [{ PLANETSCALE_DATABASE: "foreign-database" }, { PLANETSCALE_SERVICE_TOKEN: "" },
-      { RELEASE_SHA: "c".repeat(40) }, { AUTH_PROVIDER: "unknown" }]) {
+      { RELEASE_SHA: "c".repeat(40) }, { AUTH_PROVIDER: "unknown" }, { AUTH_PROVIDER: "auth0" }]) {
       expect(() => promotionConfig({ ...environment(channel), ...patch })).toThrow();
+    }
+  });
+
+  it("accepts the WorkOS facade with or without an explicit AUTH_PROVIDER", () => {
+    for (const value of [undefined, "", "workos", " WorkOS "]) {
+      expect(() => promotionConfig({ ...environment(channel), AUTH_PROVIDER: value })).not.toThrow();
     }
   });
 

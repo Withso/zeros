@@ -11,13 +11,16 @@ const config = promotionConfig({ RELEASE_CHANNEL: "beta", RELEASE_SHA: sha, GITH
   RAILWAY_PROJECT_ID: "11111111-1111-4111-8111-111111111111", RAILWAY_ENVIRONMENT_ID: "22222222-2222-4222-8222-222222222222", RAILWAY_SERVICE_ID: "33333333-3333-4333-8333-333333333333",
   PLANETSCALE_ORG: "example", PLANETSCALE_DATABASE: "zeros-control-plane-beta", PLANETSCALE_BRANCH: "main", CLOUDFLARE_ACCOUNT_ID: "c".repeat(32), CF_PAGES_APP_PROJECT: "zeros-web-beta", AUTH_PROVIDER: "workos" });
 function fixture(railwayAuto = false, pagesAuto = false, staged: { unmergedChangesCount: number | null; stagedChanges: unknown } =
-  { unmergedChangesCount: 0, stagedChanges: { id: "<empty>", patch: {} } }, settleReads = 0) {
+  { unmergedChangesCount: 0, stagedChanges: { id: "<empty>", patch: {} } }, settleReads = 0, pagesVars: Record<string, string | null> = {}) {
   let branch = "release/1.2.2", webBranch = branch, triggers: string[] = [], settling = 0;
   const calls: any[] = [], commands: any[] = [];
   let selectedWorker = {};
   const project = () => ({ name: config.appProject, production_branch: webBranch, domains: ["app-beta.zeros.build"],
     source: { type: "github", config: { owner: "example", repo_name: "zeros", production_deployments_enabled: pagesAuto, preview_deployment_setting: "none" } },
-    deployment_configs: { production: { env_vars: Object.fromEntries(Object.entries(publicPagesEnvironment(config, "app", {})).map(([k,v]) => [k,{value:v}])) } },
+    deployment_configs: { production: { env_vars: Object.fromEntries([
+      ...Object.entries(publicPagesEnvironment(config, "app", {})).filter(([k]) => !(k in pagesVars)),
+      ...Object.entries(pagesVars).filter((entry): entry is [string, string] => entry[1] !== null),
+    ].map(([k,v]) => [k,{value:v}])) } },
     canonical_deployment: { id: "page1", environment: "production", latest_stage: { status: "success" }, deployment_trigger: { metadata: { commit_hash: sha, branch: config.branch } } } });
   const fetcher: typeof fetch = async (url, init) => {
     const request = init?.body ? JSON.parse(String(init.body)) : {};
@@ -50,6 +53,12 @@ describe("release provider adapters", () => {
   it.each([[true,false],[false,true]])("refuses independent autodeploy before mutations (%s/%s)", async (r,p) => {
     const f = fixture(r,p); await expect(f.providers.inspect()).rejects.toThrow("autodeploy");
     expect(f.calls.every(row => !row.query || row.query.startsWith("query"))).toBe(true);
+  });
+  it("accepts a Pages project that omits AUTH_PROVIDER, and refuses another provider", async () => {
+    await expect(fixture(false, false, undefined, 0, { AUTH_PROVIDER: null }).providers.inspect()).resolves.not.toThrow();
+    await expect(fixture(false, false, undefined, 0, { AUTH_PROVIDER: "" }).providers.inspect()).resolves.not.toThrow();
+    await expect(fixture(false, false, undefined, 0, { AUTH_PROVIDER: "auth0" }).providers.inspect())
+      .rejects.toThrow("Pages production runtime variables do not match the channel/surface");
   });
   it("accepts Railway's null unmerged count when the staged-change patch is empty", async () => {
     // The live shape on a clean base environment: no fork count, an empty staged patch.
