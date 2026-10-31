@@ -508,19 +508,26 @@ export async function runDesignSelectionSmoke({ page, waitFor, check }) {
   );
 
   await open("?emptyFrame");
-  await runtime.locator('[data-oid="home-main"]').evaluate((root) => {
+  // Three levels past the emitted Layers bound, whatever that bound is.
+  const fixtureDepth =
+    (await page.evaluate(
+      async () =>
+        (await import("/packages/protocol/src/design-runtime.ts"))
+          .DESIGN_RUNTIME_TREE_DEPTH_LIMIT,
+    )) + 3;
+  await runtime.locator('[data-oid="home-main"]').evaluate((root, levels) => {
     let parent = root;
-    for (let depth = 1; depth <= 35; depth += 1) {
+    for (let depth = 1; depth <= levels; depth += 1) {
       // Use a non-text leaf to exercise bounded container descent.
       const child = root.ownerDocument.createElement(
-        depth === 35 ? "canvas" : "div",
+        depth === levels ? "canvas" : "div",
       );
       child.dataset.oid = `bounded-depth-${depth}`;
       child.style.cssText = "display:block;width:100%;height:100%";
       parent.append(child);
       parent = child;
     }
-  });
+  }, fixtureDepth);
   check(
     "the nested selection fixture exceeds the runtime layer-tree depth limit",
     await waitFor(
