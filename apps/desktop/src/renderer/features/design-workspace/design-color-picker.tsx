@@ -1,7 +1,9 @@
 import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { Pipette } from "lucide-react";
+import { Check, Pipette } from "lucide-react";
 
 import {
+  Button,
+  Input,
   Popover,
   PopoverContent,
   PopoverTrigger,
@@ -15,10 +17,18 @@ import { cn } from "../../shared/ui/cn";
 import { beginDesignPointerGesture } from "./design-pointer-gesture";
 import {
   InspectorIconButton,
+  InspectorSegmented,
   keepDesignPopoverWhileEditing,
   focusDesignPopoverSurface,
   InspectorPopoverAnchor,
 } from "./design-inspector-kit";
+import { useDesignColorTokens } from "./design-color-token-context";
+import {
+  activeDesignColorToken,
+  designColorTokenValue,
+  filterDesignColorTokenGroups,
+  type DesignColorTokenGroup,
+} from "./design-color-tokens";
 import {
   designColorValueText,
   formatDesignColor,
@@ -45,6 +55,10 @@ interface DesignColorPickerProps extends DesignColorCallbacks {
   side?: "top" | "right" | "bottom" | "left";
   align?: "start" | "center" | "end";
   className?: string;
+  /** The token the winning declaration reads; marks its Theme swatch. */
+  tokenName?: string;
+  /** False keeps only Custom, for a color inside a composed value. */
+  tokenPicker?: boolean;
 }
 
 const FALLBACK_COLOR: DesignHsvaColor = { h: 0, s: 0, v: 0, a: 1 };
@@ -744,6 +758,215 @@ export function DesignColorPanel({
   );
 }
 
+// --- THEME TOKENS ---
+
+interface DesignColorTokenListProps {
+  groups: readonly DesignColorTokenGroup[];
+  /** The token the field's winning declaration reads, if listed. */
+  activeToken: string | null;
+  query: string;
+  disabled?: boolean;
+  onQueryChange: (query: string) => void;
+  onChoose: (name: string) => void;
+}
+
+/** The Theme tab: the frame's color tokens by declaring source, searchable.
+ * Arrow keys move between swatches; choosing one writes `var(--name)`. */
+export function DesignColorTokenList({
+  groups,
+  activeToken,
+  query,
+  disabled = false,
+  onQueryChange,
+  onChoose,
+}: DesignColorTokenListProps) {
+  const shown = useMemo(
+    () => filterDesignColorTokenGroups(groups, query),
+    [groups, query],
+  );
+  const moveFocus = (event: React.KeyboardEvent<HTMLDivElement>) => {
+    if (event.key !== "ArrowDown" && event.key !== "ArrowUp") return;
+    const options = [
+      ...event.currentTarget.querySelectorAll<HTMLButtonElement>(
+        "[data-design-color-token]:not(:disabled)",
+      ),
+    ];
+    if (options.length === 0) return;
+    event.preventDefault();
+    const index = options.indexOf(document.activeElement as HTMLButtonElement);
+    const step = event.key === "ArrowDown" ? 1 : -1;
+    const next =
+      index < 0
+        ? step > 0
+          ? 0
+          : options.length - 1
+        : Math.min(options.length - 1, Math.max(0, index + step));
+    options[next]?.focus();
+  };
+  return (
+    <div className="flex min-w-0 flex-col gap-2" onKeyDown={moveFocus}>
+      <Input
+        type="search"
+        value={query}
+        disabled={disabled}
+        spellCheck={false}
+        autoComplete="off"
+        placeholder="Search tokens"
+        aria-label="Search color tokens"
+        className="text-xs"
+        onChange={(event) => onQueryChange(event.currentTarget.value)}
+      />
+      <div
+        data-design-color-tokens=""
+        className="-mx-1 flex max-h-64 min-w-0 flex-col gap-1 overflow-y-auto px-1"
+      >
+        {shown.length === 0 ? (
+          <p className="text-fg3 px-1 py-2 text-xs">No color tokens match.</p>
+        ) : (
+          shown.map((group) => (
+            <div
+              key={group.key}
+              role="group"
+              aria-label={group.label}
+              className="flex min-w-0 flex-col"
+            >
+              <div className="text-muted-fg truncate px-1.5 pt-1 pb-0.5 text-2xxs">
+                {group.label}
+              </div>
+              {group.tokens.map((token) => {
+                const active = token.name === activeToken;
+                return (
+                  <Button
+                    key={token.name}
+                    type="button"
+                    variant="ghost"
+                    size="compact"
+                    disabled={disabled}
+                    aria-pressed={active}
+                    title={`${token.name}: ${token.declared}`}
+                    data-design-color-token={token.name}
+                    className="text-fg2 aria-pressed:bg-bg2-highlight aria-pressed:text-fg1 w-full justify-start font-normal"
+                    onClick={() => onChoose(token.name)}
+                  >
+                    <DesignColorSwatch
+                      value={token.color ?? "transparent"}
+                      className="size-3.5"
+                    />
+                    <span className="min-w-0 flex-1 truncate text-left">
+                      {token.name.replace(/^--/, "")}
+                    </span>
+                    {active ? (
+                      <Check className="text-fg1 size-3" aria-hidden="true" />
+                    ) : null}
+                  </Button>
+                );
+              })}
+            </div>
+          ))
+        )}
+      </div>
+    </div>
+  );
+}
+
+type DesignColorSource = "theme" | "custom";
+
+const DESIGN_COLOR_SOURCES = [
+  { value: "theme", label: "Theme" },
+  { value: "custom", label: "Custom" },
+] as const satisfies readonly { value: DesignColorSource; label: string }[];
+
+const NO_COLOR_TOKENS: readonly DesignColorTokenGroup[] = [];
+
+interface DesignColorPickerBodyProps extends DesignColorCallbacks {
+  value: string;
+  label: string;
+  disabled?: boolean;
+  tokenName?: string;
+  /** False keeps only Custom, for a color inside a composed value. */
+  tokenPicker?: boolean;
+  eyedropper?: boolean;
+  onSampled?: () => void;
+  panelRef: React.MutableRefObject<DesignColorPanelHandle | null>;
+}
+
+/** A picker popover's body: Theme | Custom when the inspector offers color
+ * tokens, else today's custom panel alone. A token value opens on Theme. */
+export function DesignColorPickerBody({
+  value,
+  label,
+  disabled = false,
+  tokenName,
+  tokenPicker = true,
+  eyedropper,
+  onSampled,
+  panelRef,
+  onPreview,
+  onCancelPreview,
+  onCommit,
+}: DesignColorPickerBodyProps) {
+  const offered = useDesignColorTokens();
+  const groups = tokenPicker ? offered : NO_COLOR_TOKENS;
+  const activeToken = activeDesignColorToken(groups, tokenName);
+  const [source, setSource] = useState<DesignColorSource>(() =>
+    activeToken ? "theme" : "custom",
+  );
+  const [query, setQuery] = useState("");
+  const shownSource: DesignColorSource = groups.length > 0 ? source : "custom";
+
+  const selectSource = (next: DesignColorSource) => {
+    if (next === shownSource) return;
+    // The custom panel unmounts: keep a typed draft, then drop its handle so
+    // closing or Escape on Theme never reaches a panel that is gone.
+    if (shownSource === "custom") {
+      panelRef.current?.flush();
+      panelRef.current = null;
+    }
+    setSource(next);
+  };
+  const choose = (name: string) => {
+    const next = designColorTokenValue(name);
+    void Promise.resolve(onPreview?.(next)).catch(() => {});
+    void Promise.resolve(onCommit(next)).catch(() => {});
+  };
+
+  return (
+    <>
+      {groups.length > 0 ? (
+        <InspectorSegmented
+          label="Color source"
+          value={shownSource}
+          options={DESIGN_COLOR_SOURCES}
+          disabled={disabled}
+          onChange={selectSource}
+        />
+      ) : null}
+      {shownSource === "theme" ? (
+        <DesignColorTokenList
+          groups={groups}
+          activeToken={activeToken}
+          query={query}
+          disabled={disabled}
+          onQueryChange={setQuery}
+          onChoose={choose}
+        />
+      ) : (
+        <DesignColorPanel
+          value={value}
+          label={label}
+          disabled={disabled}
+          eyedropper={eyedropper}
+          panelRef={panelRef}
+          onSampled={onSampled}
+          onPreview={onPreview}
+          onCancelPreview={onCancelPreview}
+          onCommit={onCommit}
+        />
+      )}
+    </>
+  );
+}
+
 // --- POPOVER ---
 
 /** A swatch (or custom trigger) that opens the picker panel. Closing by an
@@ -756,6 +979,8 @@ export function DesignColorPicker({
   side = "left",
   align = "start",
   className,
+  tokenName,
+  tokenPicker,
   onPreview,
   onCancelPreview,
   onCommit,
@@ -805,10 +1030,12 @@ export function DesignColorPicker({
           <div className="zd-popover-header">
             <span className="zd-popover-title">{label}</span>
           </div>
-          <DesignColorPanel
+          <DesignColorPickerBody
             value={value}
             label={label}
             disabled={disabled}
+            tokenName={tokenName}
+            tokenPicker={tokenPicker}
             panelRef={panelRef}
             onSampled={() => setOpen(false)}
             onPreview={onPreview}
@@ -866,6 +1093,8 @@ interface DesignColorFieldProps extends DesignColorCallbacks {
   tokenName?: string;
   /** Token, declaring source and resolved value, for hover and assistive tech. */
   tokenDescription?: string;
+  /** False keeps only Custom, for a color inside a composed value. */
+  tokenPicker?: boolean;
 }
 
 function colorInputKey(value: string): string {
@@ -1099,6 +1328,7 @@ export function DesignColorField({
   property,
   tokenName,
   tokenDescription,
+  tokenPicker,
   onPreview,
   onCancelPreview,
   onCommit,
@@ -1117,6 +1347,8 @@ export function DesignColorField({
           side={side}
           className="size-6 rounded-sm"
           trigger={<DesignColorSwatch value={value} className="size-4.5" />}
+          tokenName={tokenName}
+          tokenPicker={tokenPicker}
           onPreview={onPreview}
           onCancelPreview={onCancelPreview}
           onCommit={onCommit}
