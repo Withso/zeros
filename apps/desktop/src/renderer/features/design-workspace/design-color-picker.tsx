@@ -758,8 +758,6 @@ export function DesignColorPanel({
   );
 }
 
-// --- THEME TOKENS ---
-
 interface DesignColorTokenListProps {
   groups: readonly DesignColorTokenGroup[];
   /** The token the field's winning declaration reads, if listed. */

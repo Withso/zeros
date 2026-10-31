@@ -1,12 +1,3 @@
-// ============================================
-// COMPONENT: DesignAdvancedStyleSection
-// PURPOSE: Show every authored declaration no dedicated Style control covers
-//          as a name/value row, so CSS an agent writes natively (cursor,
-//          z-index, margins, custom properties…) is visible and editable,
-//          and let a person add any property by name.
-// USED IN: DesignStyleEditor, after the dedicated sections
-// ============================================
-
 import React, { useId, useMemo, useRef, useState } from "react";
 import { Plus, X } from "lucide-react";
 
@@ -41,6 +32,9 @@ const ORIGIN_LABELS = {
   source: "an imported style source",
 } as const;
 
+/** Lists the authored declarations no dedicated Style control covers, so CSS
+ * an agent writes natively stays visible and editable, and adds any property
+ * by name. */
 export function DesignAdvancedStyleSection({
   details,
   renderField,

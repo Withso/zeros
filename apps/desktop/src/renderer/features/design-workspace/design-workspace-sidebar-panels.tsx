@@ -501,8 +501,6 @@ function OwnedDesignWorkspaceSidebarPanels({
   const active = useDocumentActive(surfaceActive && isDesign);
   // Follow the shared snapshot whenever the panel shows, as the workspace
   // does: requests are shared per key, and connectivity only shapes recovery.
-  // Gating the subscription on it left this memoized panel on a stale catalog
-  // (an old frame title) while its folder reported a reconnect.
   const snapshot = useDesignWorkspaceSnapshot(workspaceId, folder, active);
   const recovery = useReadRecovery(`design-layers:${JSON.stringify([workspaceId, folder])}`, {
     error: snapshot.error, pending: snapshot.loading || snapshot.refreshing,
