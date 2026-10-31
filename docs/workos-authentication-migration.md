@@ -598,6 +598,45 @@ must register only its release channel's scheme and must pass the same hostile
 deep-link regression suite. Platform packaging checks remain mandatory; a
 successful macOS smoke test is not evidence for Windows or Linux registration.
 
+### Several accounts on one device
+
+The desktop keeps up to 12 signed-in WorkOS accounts. The active session stays
+in `auth-session:tokens`, so older builds and sibling Dev worktrees keep reading
+one record; the others wait in `auth-session:parked`. Both are written in one
+`updateSecretValues` transaction under the refresh lock, so a rotated refresh
+token never exists in two places.
+
+- **Add account** starts the normal flow with `fresh=1`. Pages forwards only
+  that fixed flag, and Railway asks AuthKit for `prompt=login`, so the browser's
+  existing sign-in is never reused silently. Checked against Alpha AuthKit on
+  2026-10-31: without it the browser session is reused; `prompt=login` shows an
+  empty sign-in form; `max_age=0` only re-confirms the signed-in user, and
+  `select_account`, `consent` and `screen_hint` reuse the session. Signing in a
+  different account parks the active one; the same account replaces its own
+  session and the replaced one is revoked. Builds still on Auth0 offer no
+  second account: Auth0 sessions cannot be parked, so main refuses the request.
+- **Switching** (`auth_switch_account`) refreshes an expiring target first. A
+  rejected refresh removes only that account; an unreachable provider leaves
+  both as they were. The renderer then re-reads identity like any session
+  change, signals the engine that the owner changed, and remounts the shell.
+- **Signing out** revokes the active session and continues with the most
+  recently used other account; `auth_clear_session({ accountId })` signs out one
+  parked account with its own bearer. Revocation reported by the security
+  monitor never promotes another account; the login screen offers them.
+- `auth_get_access_token` names the bearer's account, so a renderer read that
+  straddles a switch discards a token from the previous account. The security
+  monitor reruns a forced check that arrives while one is in flight, so its
+  event stream always follows the account that is active now.
+- An entry this device can no longer decrypt (for example after a Keychain
+  reset) reads as absent and is replaced on the next write, so it can never
+  block signing in.
+- Each account keeps its own GitHub App connection: the one in use stays in
+  `github.app` and the others wait in `github.app.parked`.
+
+Local workspaces, chats and terminals belong to the device and stay the same
+for every account. Cloud workspaces keep running on their VMs; a switch only
+changes which account the app shows. Accounts never share a bearer token.
+
 ## Environment and Application topology
 
 Authentication data is isolated by release channel. Never share a Production

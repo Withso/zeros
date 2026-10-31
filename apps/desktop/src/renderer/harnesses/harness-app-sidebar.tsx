@@ -580,6 +580,10 @@ const auth = {
   cancelPendingOAuth() {},
   signOut: async () => {},
   signOutEverywhere: async () => {},
+  accounts: [],
+  refreshAccounts: async () => {},
+  switchAccount: async () => "unavailable" as const,
+  signOutAccount: async () => {},
 } as AuthContextValue;
 
 if (params.has("organizations")) {

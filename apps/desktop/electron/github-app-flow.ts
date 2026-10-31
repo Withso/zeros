@@ -31,7 +31,9 @@ import {
   replaceSecretIfUnchanged,
   secretsFilePath,
   setSecret,
+  updateSecretValues,
 } from "./secret-store";
+import { selectGithubAppConnection } from "./github-app-accounts";
 import { pushGithubCredentialToEngine } from "./sidecar";
 import { IS_DEV } from "./runtime-mode";
 import { controlPlaneFetch } from "./control-plane-fetch";
@@ -219,8 +221,13 @@ function githubAppController(): GithubAppController {
         const credential = await githubCredentialStore.get("github-app");
         return credential?.method === "github-app" ? credential : null;
       },
-      set: (method, credential) =>
-        githubCredentialStore.set(method, credential),
+      set: async (method, credential) => {
+        // A connection for another account is parked, never overwritten.
+        if (credential.method === "github-app" && credential.ownerSub) {
+          selectGithubAppConnection({ update: updateSecretValues }, credential.ownerSub);
+        }
+        return githubCredentialStore.set(method, credential);
+      },
       clear: (method) => githubCredentialStore.clear(method),
       getSelectedMethod: () => githubCredentialStore.getSelectedMethod(),
       setSelectedMethod: (method) =>
@@ -388,6 +395,14 @@ export async function scheduleGithubAppRefresh(
     }
   }, delay);
   refreshTimer.unref?.();
+}
+
+/** After an account switch, put the active account's GitHub App connection in
+ * use and park the previous account's, serialized with refresh rotation. */
+export async function selectGithubAppConnectionForActiveAccount(): Promise<void> {
+  await withCredentialLock(async () => {
+    selectGithubAppConnection({ update: updateSecretValues }, getProductAccountIdForMain());
+  });
 }
 
 /** Boot hook. It never blocks engine startup on network; expired credentials

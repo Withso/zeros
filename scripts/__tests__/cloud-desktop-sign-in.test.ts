@@ -74,6 +74,13 @@ describe("electron:cloud private desktop sign-in", () => {
     expect(f.request).toHaveBeenCalledTimes(2); // accepted session survives supervisor shutdown
   });
 
+  it("fails the bootstrap, without reporting completion, when installing the session fails", async () => {
+    const f = await fixture();
+    f.options.persistSession = vi.fn(async () => { throw new Error("storage unavailable"); });
+    await expect(bootstrapCloudDesktopSession(f.options)).rejects.toThrow(/storage unavailable/);
+    await f.broker.close();
+  });
+
   it("reuses a valid saved fixture session and keeps persistent data paths across launches", async () => {
     const f = await fixture();
     f.options.getSession.mockResolvedValue({ provider: "workos", sub: "user_fixture", email: "fixture@example.test", accessToken: f.accessToken });

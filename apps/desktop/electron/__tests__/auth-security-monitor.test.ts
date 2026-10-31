@@ -29,6 +29,36 @@ describe("desktop WorkOS security lifecycle", () => {
     expect(emit).toHaveBeenCalledWith("auth-security-event",expect.objectContaining({kind:"snapshot.changed"}));
     await monitor.stop();
   });
+  it("re-reads the session after an account switch that lands during a check in flight", async () => {
+    let active = "account-b";
+    const read = vi.fn(async () => ({ provider: "workos" as const, accessToken: `token-${active}`, accountId: active, sessionId: `session-${active}` }));
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => { release = resolve; });
+    const seen: string[] = [];
+    const monitor = new WorkOSDesktopSecurityMonitor({
+      baseUrl: "https://api.example.test",
+      connectStreams: false,
+      getSession: read,
+      clearSession: () => false,
+      emit: vi.fn(),
+      fetch: (async (_url: string, init: RequestInit) => {
+        const bearer = String((init.headers as Record<string, string>).authorization).replace("Bearer token-", "");
+        seen.push(bearer);
+        if (seen.length === 1) await held;
+        return Response.json({ account: { id: bearer, status: "active", revision: 1 }, session: { id: `session-${bearer}`, status: "active" },
+          organizations: [], workspaces: [], workspacesTruncated: false, cursor: 1 });
+      }) as unknown as typeof fetch,
+    });
+    const first = monitor.revalidate("session_changed", true);
+    await vi.waitFor(() => expect(seen).toEqual(["account-b"]));
+    active = "account-a";
+    void monitor.revalidate("session_changed", true);
+    release();
+    await first;
+    await vi.waitFor(() => expect(seen).toEqual(["account-b", "account-a"]));
+    await monitor.stop();
+  });
+
   it("parses bounded SSE frames across arbitrary transport chunks", async () => {
     const frames: Array<{ event: string; id: string | null; data: string }> = [];
     await consumeSecurityEventStream(

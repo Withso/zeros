@@ -118,6 +118,7 @@ import {
   handleSharedGithubCredentialChange,
   initializeGithubAppFlow,
   scheduleGithubAppRefresh,
+  selectGithubAppConnectionForActiveAccount,
 } from "./github-app-flow";
 import {
   clearWorkOSSessionAfterServerRevocation,
@@ -1692,6 +1693,12 @@ app.whenReady().then(async () => {
     const disposeGithubSessionSync = onMainAuthSessionChanged(async () => {
       emitEvent("auth-store-changed", {});
       void authSecurityMonitor.revalidate("session_changed", true);
+      // Withdraw the previous account's App token at once; the swap below can
+      // wait behind a GitHub refresh before this account's connection is ready.
+      await pushGithubCredentialToEngine();
+      await selectGithubAppConnectionForActiveAccount().catch((error) => {
+        console.warn(`[github] account connection unavailable: ${(error as Error).message}`);
+      });
       await pushGithubCredentialToEngine();
       await scheduleGithubAppRefresh();
       emitEvent("github-credential-store-changed", {});

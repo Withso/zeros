@@ -6,7 +6,9 @@ import multiOrganizationFixture from "../../../../../../../scripts/__tests__/fix
 
 const io = vi.hoisted(() => ({
   fetch: vi.fn(), open: null as ((open: boolean) => void) | null,
-  auth: { status: "authenticated", storedUser: { sub: "account-a" }, email: "a@example.test", startBrowserSignIn: vi.fn(), signOut: vi.fn() },
+  auth: { status: "authenticated", storedUser: { sub: "account-a", provider: "workos" }, email: "a@example.test", startBrowserSignIn: vi.fn(), signOut: vi.fn(),
+    accounts: [] as { accountId: string; email: string; name: string | null; active: boolean }[],
+    refreshAccounts: vi.fn(async () => {}), switchAccount: vi.fn(), cancelPendingOAuth: vi.fn() },
 }));
 vi.mock("react", async original => ({
   ...await original<typeof import("react")>(),
@@ -34,6 +36,7 @@ const response = { user: { id: "account-a", email: "a@example.test", displayName
 beforeEach(() => {
   vi.resetModules(); vi.clearAllMocks();
   io.auth.status = "authenticated";
+  io.auth.accounts = [];
   vi.stubEnv("VITE_CONTROL_PLANE_URL", "https://api.example.test");
   const values = new Map<string, string>();
   vi.stubGlobal("localStorage", {
@@ -108,4 +111,41 @@ it("renders the full cached list and selected organization offline without grant
   expect(store.getTeamStoreState().me).toBeNull();
   expect(markup).not.toContain("Manage organization");
   expect(markup).not.toContain("Create organization");
+});
+
+it("lists other signed-in accounts to switch to and always offers to add one", async () => {
+  const { render } = await setup();
+  io.auth.accounts = [
+    { accountId: "account-a", email: "a@example.test", name: null, active: true },
+    { accountId: "account-b", email: "b@example.test", name: null, active: false },
+  ];
+  const markup = render(), names = menuRows(markup).map(row => row.name);
+  expect(markup).toContain("Switch account");
+  expect(names).toContain("b@example.test");
+  expect(names).not.toContain("a@example.test");
+  expect(names).toContain("Add account");
+  io.open!(true);
+  expect(io.auth.refreshAccounts).toHaveBeenCalled();
+
+  io.auth.accounts = [{ accountId: "account-a", email: "a@example.test", name: null, active: true }];
+  const alone = render();
+  expect(alone).not.toContain("Switch account");
+  expect(menuRows(alone).map(row => row.name)).toContain("Add account");
+});
+
+it("offers no second account to a session that cannot be kept side by side", async () => {
+  const { render } = await setup();
+  const previous = io.auth.storedUser;
+  io.auth.storedUser = { sub: "account-a", provider: "auth0" };
+  try {
+    io.auth.accounts = [
+      { accountId: "account-a", email: "a@example.test", name: null, active: true },
+      { accountId: "account-b", email: "b@example.test", name: null, active: false },
+    ];
+    const names = menuRows(render()).map(row => row.name);
+    expect(names).not.toContain("Add account");
+    expect(names).not.toContain("b@example.test");
+  } finally {
+    io.auth.storedUser = previous;
+  }
 });

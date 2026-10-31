@@ -29,6 +29,7 @@ import {
   CircleUser,
   CircleCheck,
   LogOut,
+  UserPlus,
   Lock,
   Globe2,
   MousePointerClick,
@@ -844,7 +845,36 @@ function SignInMethodRow({
 }
 
 function AccountPanel() {
-  const { email, session, status, signOut, signOutEverywhere } = useAuth();
+  const {
+    email,
+    session,
+    status,
+    signOut,
+    signOutEverywhere,
+    accounts = [],
+    switchAccount,
+    signOutAccount,
+    startBrowserSignIn,
+    cancelPendingOAuth,
+  } = useAuth();
+  const otherAccounts = accounts.filter((account) => !account.active);
+  const [accountAction, setAccountAction] = useState<string | null>(null);
+  const runAccountAction = async (key: string, action: () => Promise<unknown>) => {
+    if (accountAction) return;
+    setAccountAction(key);
+    try {
+      await action();
+    } finally {
+      setAccountAction(null);
+    }
+  };
+  const handleAddAccount = () => runAccountAction("add", async () => {
+    const result = await startBrowserSignIn({ addAccount: true });
+    if (!result.ok) toast.error(result.error ?? "Couldn't start sign-in.");
+    else toast.info("Continue in your browser to add an account.", {
+      action: { label: "Cancel", onClick: cancelPendingOAuth },
+    });
+  });
   const [signingOut, setSigningOut] = useState(false);
   const [signingOutAll, setSigningOutAll] = useState(false);
 
@@ -923,6 +953,58 @@ function AccountPanel() {
               connected={linked.has("google")}
             />
           </SettingsGroup>
+
+          {session?.user.provider === "workos" && (
+          <SettingsGroup
+            title="Accounts on this Mac"
+            description="Switch accounts without signing out. Local workspaces stay the same for every account."
+          >
+            {otherAccounts.map((account) => (
+              <SettingsRow
+                key={account.accountId}
+                label={account.email}
+                hint={account.name ?? undefined}
+              >
+                <div className="flex items-center gap-2">
+                  <Button
+                    variant="secondary"
+                    size="sm"
+                    loading={accountAction === `switch:${account.accountId}`}
+                    disabled={accountAction !== null}
+                    onClick={() => runAccountAction(`switch:${account.accountId}`, () => switchAccount(account.accountId))}
+                  >
+                    Switch
+                  </Button>
+                  <Button
+                    variant="secondary"
+                    size="sm"
+                    loading={accountAction === `sign-out:${account.accountId}`}
+                    disabled={accountAction !== null}
+                    onClick={() => runAccountAction(`sign-out:${account.accountId}`, () => signOutAccount(account.accountId))}
+                  >
+                    <LogOut size={14} />
+                    Sign out
+                  </Button>
+                </div>
+              </SettingsRow>
+            ))}
+            <SettingsRow
+              label="Add account"
+              hint="Sign in to another Zeros account in your browser."
+            >
+              <Button
+                variant="secondary"
+                size="sm"
+                loading={accountAction === "add"}
+                disabled={accountAction !== null}
+                onClick={handleAddAccount}
+              >
+                <UserPlus size={14} />
+                Add account
+              </Button>
+            </SettingsRow>
+          </SettingsGroup>
+          )}
 
           <SettingsGroup title="Sign out">
             <SettingsRow

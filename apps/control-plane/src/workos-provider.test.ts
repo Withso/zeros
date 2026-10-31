@@ -90,6 +90,21 @@ describe("WorkOS Hosted AuthKit authorization", () => {
       `${APP_ORIGIN}/auth/desktop/callback`,
     );
     expect(url.searchParams.has("client_secret")).toBe(false);
+    expect(url.searchParams.has("prompt")).toBe(false);
+  });
+
+  it("asks AuthKit for a new sign-in, not the browser's session, when adding an account", () => {
+    const url = new URL(
+      provider().desktopAuthorizationUrl({
+        state: `zeros-alpha.${STATE}`,
+        codeChallenge: CHALLENGE,
+        redirectUri: `${APP_ORIGIN}/auth/desktop/callback`,
+        fresh: true,
+      }),
+    );
+    expect(url.searchParams.get("prompt")).toBe("login");
+    expect(url.searchParams.has("max_age")).toBe(false);
+    expect(url.searchParams.get("client_id")).toBe("client_desktop_example");
   });
 });
 

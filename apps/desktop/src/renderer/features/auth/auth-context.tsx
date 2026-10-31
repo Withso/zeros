@@ -34,6 +34,11 @@ import {
   signOut as storeSignOut,
   type AuthSessionInfo,
   type AuthUser,
+  listSignedInAccounts,
+  switchAccount as storeSwitchAccount,
+  signOutAccount as storeSignOutAccount,
+  type SignedInAccount,
+  type SwitchAccountOutcome,
 } from "./auth-store";
 import { setAuthAccessToken } from "./auth-token";
 import {
@@ -76,8 +81,17 @@ export interface AuthContextValue {
   userId: string | null;
   email: string | null;
   /** Open the system browser. WorkOS PKCE/callback state lives entirely in
-   *  Electron main; Auth0 retains the legacy web-ticket path until Phase 5. */
-  startBrowserSignIn: () => Promise<AuthResult>;
+   *  Electron main; Auth0 retains the legacy web-ticket path until Phase 5.
+   *  `addAccount` signs in another account with a fresh browser sign-in. */
+  startBrowserSignIn: (options?: { addAccount?: boolean }) => Promise<AuthResult>;
+  /** Accounts signed in on this device, the active one first. */
+  accounts: SignedInAccount[];
+  /** Re-read the signed-in accounts, for example when a menu opens. */
+  refreshAccounts: () => Promise<void>;
+  /** Make another signed-in account active without signing anything out. */
+  switchAccount: (accountId: string) => Promise<SwitchAccountOutcome>;
+  /** Sign out one account that is not the active one. */
+  signOutAccount: (accountId: string) => Promise<void>;
   /** A LATER async failure of the desktop OAuth browser handoff (the browser
    *  round-trip completed but the returning deep link couldn't be redeemed), so
    *  the LoginScreen can show it instead of hanging on the "continue in your
@@ -126,6 +140,10 @@ const localDevelopmentAuth: AuthContextValue = {
     ok: false,
     error: "Zeros Local runs without a Zeros account. Use Zeros Dev to test sign-in.",
   }),
+  accounts: [],
+  refreshAccounts: async () => {},
+  switchAccount: async () => "unavailable",
+  signOutAccount: async () => {},
   oauthError: null,
   clearOAuthError: () => {},
   cancelPendingOAuth: () => {},
@@ -142,6 +160,16 @@ function AuthProviderInner({ children, onStoredIdentity }: {
   const [status, setStatus] = useState<AuthStatus>("loading");
   const [session, setSession] = useState<AuthSessionInfo | null>(null);
   const [storedUser, setStoredUser] = useState<AuthUser | null>(null);
+  const [accounts, setAccounts] = useState<SignedInAccount[]>([]);
+  const accountsReadRef = useRef(0);
+  const refreshAccounts = useCallback(async () => {
+    const read = ++accountsReadRef.current;
+    const next = await listSignedInAccounts().catch(() => null);
+    if (next && read === accountsReadRef.current) setAccounts(next);
+  }, []);
+  // The engine binds remote devices to the owner account; another account
+  // taking over must end that binding first, exactly as sign-out does.
+  const previousAccountRef = useRef<string | null>(null);
   // A LATER, asynchronous failure of the browser→desktop handoff: the browser
   // round-trip finished but the returning deep-link ticket couldn't be redeemed
   // (our nonce expired, or the redeem call failed). Surfaced to the LoginScreen so
@@ -175,9 +203,19 @@ function AuthProviderInner({ children, onStoredIdentity }: {
 
     const applyIdentity = (user: AuthUser | null) => {
       if (!active) return;
+      const account = user ? user.accountId ?? user.sub : null;
+      if (previousAccountRef.current && account && previousAccountRef.current !== account) {
+        try {
+          getActiveBridge()?.signalOwnerSignedOut();
+        } catch {
+          /* bridge already unavailable */
+        }
+      }
+      previousAccountRef.current = account;
       // Bind/restore caches before releasing the shell for this identity.
       onStoredIdentity?.(user);
       setStoredUser(user);
+      void refreshAccounts();
     };
     const offIdentity = onStoredIdentityChange(applyIdentity);
     const known = getStoredAuthUser();
@@ -347,7 +385,10 @@ function AuthProviderInner({ children, onStoredIdentity }: {
       ({ reason, recoveryCode }) => {
         if (!active) return;
         console.warn("[auth] WorkOS sign-in failed:", reason ?? "unknown");
-        setOAuthError(workOSSignInFailureMessage(reason ?? "", recoveryCode));
+        const message = workOSSignInFailureMessage(reason ?? "", recoveryCode);
+        setOAuthError(message);
+        // Adding an account happens while signed in, where no login screen shows it.
+        if (getStoredAuthUser()) toast.error(message);
       },
     ).then((off) => {
       if (active) offWorkOSError = off;
@@ -393,9 +434,9 @@ function AuthProviderInner({ children, onStoredIdentity }: {
       offSecurityRevoked?.();
       window.removeEventListener("online", onOnline);
     };
-  }, [onStoredIdentity]);
+  }, [onStoredIdentity, refreshAccounts]);
 
-  const startBrowserSignIn = useCallback(async (): Promise<AuthResult> => {
+  const startBrowserSignIn = useCallback(async (options?: { addAccount?: boolean }): Promise<AuthResult> => {
     // Clear any stale handoff error from a prior attempt before starting fresh.
     setOAuthError(null);
     try {
@@ -403,9 +444,12 @@ function AuthProviderInner({ children, onStoredIdentity }: {
       // retains state + verifier in Electron main, outside renderer JS. Auth0
       // mode returns a compatibility marker and continues below.
       const selected = await nativeInvoke<{
-        mode?: "auth0" | "workos" | "unconfigured";
+        mode?: "auth0" | "workos" | "unconfigured" | "unsupported";
         expiresAt?: number;
-      }>("auth_start_signin");
+      }>("auth_start_signin", options?.addAccount ? { addAccount: true } : undefined);
+      if (selected?.mode === "unsupported") {
+        return { ok: false, error: "This version of Zeros can't add another account yet." };
+      }
       if (selected?.mode === "unconfigured") {
         return {
           ok: false,
@@ -506,6 +550,11 @@ function AuthProviderInner({ children, onStoredIdentity }: {
     clearPendingNonce();
   }, []);
 
+  // Main continues with the most recently used other account, if one is left.
+  const adoptNextAccount = useCallback(() => {
+    void resync().catch(() => null);
+  }, []);
+
   const signOut = useCallback(async () => {
     try {
       // Local scope: sign out THIS device only — don't revoke the user's
@@ -519,7 +568,8 @@ function AuthProviderInner({ children, onStoredIdentity }: {
       );
     }
     finishLocalSignOut();
-  }, [finishLocalSignOut]);
+    adoptNextAccount();
+  }, [adoptNextAccount, finishLocalSignOut]);
 
   const signOutEverywhere = useCallback(async () => {
     try {
@@ -531,7 +581,26 @@ function AuthProviderInner({ children, onStoredIdentity }: {
       toast.error("Signed out on this device. Other devices could not be signed out. Sign in again to retry.");
     }
     finishLocalSignOut();
-  }, [finishLocalSignOut]);
+    adoptNextAccount();
+  }, [adoptNextAccount, finishLocalSignOut]);
+
+  const switchAccount = useCallback(async (accountId: string) => {
+    const outcome = await storeSwitchAccount(accountId).catch(() => "unavailable" as const);
+    if (outcome === "signed_out") {
+      toast.error("That account was signed out. Add it again to use it here.");
+    } else if (outcome === "unavailable") {
+      toast.error("Couldn't switch accounts. Check your connection and try again.");
+    }
+    await refreshAccounts();
+    return outcome;
+  }, [refreshAccounts]);
+
+  const signOutAccount = useCallback(async (accountId: string) => {
+    await storeSignOutAccount(accountId).catch((err) => {
+      console.warn("[auth] account sign-out failed:", (err as Error)?.message);
+    });
+    await refreshAccounts();
+  }, [refreshAccounts]);
 
   const value: AuthContextValue = {
     status,
@@ -540,6 +609,10 @@ function AuthProviderInner({ children, onStoredIdentity }: {
     userId: storedUser?.accountId ?? storedUser?.sub ?? null,
     email: storedUser?.email ?? null,
     startBrowserSignIn,
+    accounts,
+    refreshAccounts,
+    switchAccount,
+    signOutAccount,
     oauthError,
     clearOAuthError: () => setOAuthError(null),
     cancelPendingOAuth,
