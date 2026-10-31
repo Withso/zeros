@@ -429,7 +429,7 @@ const DesignLayerNodeRow = React.memo(function DesignLayerNodeRow({
   );
 });
 
-export function DesignWorkspaceSidebarPanels({
+export const DesignWorkspaceSidebarPanels = React.memo(function DesignWorkspaceSidebarPanels({
   surfaceActive,
   workspace: workspaceOverride,
   folder: folderOverride,
@@ -458,7 +458,7 @@ export function DesignWorkspaceSidebarPanels({
       onExpandedChange={onExpandedChange}
     />
   );
-}
+});
 
 function ActiveDesignWorkspaceSidebarPanels({
   surfaceActive,

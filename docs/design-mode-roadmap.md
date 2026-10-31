@@ -2095,7 +2095,11 @@ background through one bounded window (at most 12 nodes, one read at a time,
 fenced by owner, active runtime and source generation at completion), so a
 layer never read before shows its values as soon as it is chosen. Layers rows
 are memoized with stable handlers: a hover or selection repaints only the rows
-it changes. A warm
+it changes. The canvas, inspector and Layers panel are memo boundaries under
+the Design column with stable callbacks, so a publication re-renders only the
+panels whose inputs changed; the inspector's page picker receives file and
+frame-ID pairs that keep their identity while other frames prepare or move.
+A warm
 revalidation (a watcher echo after a save, a style build or a tab return)
 keeps the confirmed aggregate visible while the frames the surface demands are
 prepared through the same bounded lane, then publishes once.

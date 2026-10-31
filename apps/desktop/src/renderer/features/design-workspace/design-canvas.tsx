@@ -463,7 +463,7 @@ const DesignPreparingFrame = React.forwardRef<HTMLElement, React.ComponentPropsW
   return <article {...props} ref={ref} />;
 });
 
-export function DesignCanvas({
+export const DesignCanvas = React.memo(function DesignCanvas({
   workspaceId,
   folder,
   snapshot,
@@ -8726,4 +8726,4 @@ export function DesignCanvas({
       </div>
     </div>
   );
-}
+});

@@ -988,7 +988,7 @@ const InspectorStyleField = React.memo(function InspectorStyleField({
   );
 });
 
-export function DesignInspector({
+export const DesignInspector = React.memo(function DesignInspector({
   workspaceId,
   pages,
   activePageId,
@@ -2502,4 +2502,4 @@ export function DesignInspector({
       )}
     </aside>
   );
-}
+});

@@ -482,6 +482,80 @@ async function runDesignGestureReleasePreviewChecks({ page, check }) {
   await expect.poll(width).toBe("680px");
 }
 
+/** Count each component that rendered in a commit. An untouched subtree keeps
+ * its fiber objects (and stale flags), so only fresh fibers count. */
+function installDesignRenderCounter() {
+  const renders = {};
+  window.__zerosDesignRenders = renders;
+  let previous = new WeakSet();
+  window.__REACT_DEVTOOLS_GLOBAL_HOOK__ = {
+    supportsFiber: true, renderers: new Map(), isDisabled: false, checkDCE() {},
+    inject(renderer) { this.renderers.set(this.renderers.size + 1, renderer); return this.renderers.size; },
+    onScheduleFiberRoot() {}, onCommitFiberUnmount() {}, onPostCommitFiberRoot() {},
+    onCommitFiberRoot(_id, root) {
+      const seen = new WeakSet();
+      const pending = [root.current];
+      while (pending.length) {
+        const fiber = pending.pop();
+        seen.add(fiber);
+        const type = fiber.elementType ?? fiber.type;
+        const name = type && typeof type !== "string" ? type.displayName || type.name || type.type?.name : null;
+        if (name && !previous.has(fiber) && (fiber.flags & 1) === 1) renders[name] = (renders[name] ?? 0) + 1;
+        for (let child = fiber.child; child; child = child.sibling) pending.push(child);
+      }
+      previous = seen;
+    },
+  };
+}
+
+export async function runDesignUnrelatedPreparationRenderSmoke({ page: parent, check }) {
+  // Revalidating unchanged frames must not re-render the canvas, the selected
+  // layer's inspector or Layers: none of their inputs changed.
+  const page = await parent.context().browser().newPage({ viewport: { width: 1440, height: 900 } });
+  try {
+    await page.addInitScript(installDesignRenderCounter);
+    await page.goto(`${new URL(parent.url()).origin}/apps/desktop/src/renderer/harnesses/harness-design-workspace.html?layoutGestures&scopedMutations&measureContinuity&engineDelayMs=0`,
+      { waitUntil: "networkidle" });
+    await page.locator('[data-design-frame-row="home.html"]').click();
+    await page.locator('[data-design-frame="home.html"] iframe[data-design-document-buffer="displayed"][data-design-document-ready]').waitFor();
+    const row = page.locator('[data-design-sidebar-panel] [data-design-layer-id="home-hero"]');
+    for (let attempt = 0; attempt < 8 && !await row.isVisible(); attempt++) {
+      const folded = page.locator('[data-design-sidebar-panel] [role="treeitem"][aria-expanded="false"]:visible').first();
+      if (!await folded.count()) break;
+      await folded.locator("[data-layer-disclosure]").click();
+    }
+    await row.click();
+    await page.getByLabel("Rotation", { exact: true }).waitFor();
+    const quiet = async () => {
+      await page.waitForFunction(() => {
+        const surface = window.__zerosHarnessDesignSurface;
+        const cached = surface.snapshots.peekSnapshot("ws_design_harness");
+        return !surface.measurement.editing("ws_design_harness") && !cached.loading && !cached.refreshing;
+      });
+      await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+    };
+    await quiet();
+    await page.waitForTimeout(300);
+    await quiet();
+    const calls = await page.evaluate(() => window.__zerosHarnessDesignSurface.lazy.calls.length);
+    await page.evaluate(() => {
+      for (const key of Object.keys(window.__zerosDesignRenders)) delete window.__zerosDesignRenders[key];
+      window.__zerosHarnessDesignSurface.lazy.refresh();
+    });
+    await page.waitForFunction((before) => window.__zerosHarnessDesignSurface.lazy.calls.length > before, calls);
+    await quiet();
+    const renders = await page.evaluate(() => ({ ...window.__zerosDesignRenders }));
+    // The column observing the revalidation proves the counter saw it.
+    check("revalidating unchanged frames re-renders neither the canvas, the inspector nor Layers",
+      (renders.DesignWorkspaceColumn ?? 0) > 0 && (renders.DesignCanvas ?? 0) === 0 &&
+        (renders.DesignInspector ?? 0) === 0 && (renders.OwnedDesignWorkspaceSidebarPanels ?? 0) === 0,
+      JSON.stringify({ inspector: renders.DesignInspector ?? 0, layers: renders.OwnedDesignWorkspaceSidebarPanels ?? 0,
+        column: renders.DesignWorkspaceColumn ?? 0, canvas: renders.DesignCanvas ?? 0 }));
+  } finally {
+    await page.close();
+  }
+}
+
 export async function runDesignCompletedCanvasGesturesSmoke({ page, check }) {
   await openCanvasFixture(page);
   const frame = page.locator('[data-design-frame="home.html"]');
@@ -1035,6 +1109,7 @@ export async function runDesignCanvasRefinementsSmoke(options) {
   await runDesignDragOutPixelsSmoke(options);
   await runDesignGestureReleasePositionSmoke(options);
   await runDesignGestureReleasePreviewSmoke(options);
+  await runDesignUnrelatedPreparationRenderSmoke(options);
   await runDesignCompletedCanvasGesturesSmoke(options);
   await runDesignNoopCanvasResizeSmoke(options);
   await runDesignNoopFrameGestureSmoke(options);
