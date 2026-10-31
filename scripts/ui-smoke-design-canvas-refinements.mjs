@@ -553,6 +553,23 @@ export async function runDesignUnrelatedPreparationRenderSmoke({ page: parent, c
         (renders.DesignInspector ?? 0) === 0,
       JSON.stringify({ inspector: renders.DesignInspector ?? 0, layers: renders.OwnedDesignWorkspaceSidebarPanels ?? 0,
         column: renders.DesignWorkspaceColumn ?? 0, canvas: renders.DesignCanvas ?? 0 }));
+    // Another frame's move publishes a new snapshot whose token, style-source
+    // and theme catalogs keep their identity.
+    await page.evaluate(() => {
+      for (const key of Object.keys(window.__zerosDesignRenders)) delete window.__zerosDesignRenders[key];
+      const surface = window.__zerosHarnessDesignSurface;
+      const data = surface.snapshots.peekSnapshot("ws_design_harness").data;
+      const other = data.frames.find((frame) => frame.file !== "home.html");
+      surface.snapshots.setData("ws_design_harness", {
+        ...data,
+        frames: data.frames.map((frame) => (frame === other ? { ...frame, x: frame.x + 100 } : frame)),
+      });
+    });
+    await quiet();
+    const moved = await page.evaluate(() => ({ ...window.__zerosDesignRenders }));
+    check("another frame's move does not re-render the selected layer's inspector",
+      (moved.DesignWorkspaceColumn ?? 0) > 0 && (moved.DesignInspector ?? 0) === 0,
+      JSON.stringify({ inspector: moved.DesignInspector ?? 0, column: moved.DesignWorkspaceColumn ?? 0 }));
   } finally {
     await page.close();
   }

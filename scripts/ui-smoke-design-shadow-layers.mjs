@@ -66,6 +66,12 @@ export async function runDesignShadowLayersSmoke({ page, check }) {
     "Advanced refuses a property name that is not a CSS property",
     await advanced.getByRole("button", { name: "Add declaration" }).isDisabled(),
   );
+  await name.fill("colr");
+  await advanced.getByLabel("Property value").fill("red");
+  check(
+    "Advanced refuses a property the browser does not implement",
+    await advanced.getByRole("button", { name: "Add declaration" }).isDisabled(),
+  );
   await name.fill("z-index");
   await advanced.getByLabel("Property value").fill("3");
   check(

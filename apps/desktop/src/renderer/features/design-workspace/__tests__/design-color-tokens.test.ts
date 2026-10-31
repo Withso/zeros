@@ -108,6 +108,9 @@ describe("color token catalog", () => {
     expect(designColorTokenFamily("--red-500")).toBe("red");
     expect(designColorTokenFamily("--scrim")).toBe("scrim");
     expect(designColorTokenFamily("--9")).toBe("other");
+    expect(designColorTokenFamily("--color-red-500")).toBe("red");
+    expect(designColorTokenFamily("--color-bg")).toBe("bg");
+    expect(designColorTokenFamily("--color")).toBe("color");
   });
 });
 
@@ -145,5 +148,7 @@ describe("color token search and selection", () => {
     expect(designColorTokenGroupsKey(again)).toBe(designColorTokenGroupsKey(groups));
     const light = designColorTokenGroups({ manual: [], sources: [app], theme: "light" });
     expect(designColorTokenGroupsKey(light)).not.toBe(designColorTokenGroupsKey(groups));
+    const retitled = designColorTokenGroups({ manual: [], sources: [{ ...app, title: "Brand tokens" }], theme: null });
+    expect(designColorTokenGroupsKey(retitled)).not.toBe(designColorTokenGroupsKey(groups));
   });
 });

@@ -98,9 +98,12 @@ export function resolveDesignTokenReferences(
 }
 
 /** `bg1-hover` → "bg", `red-500` → "red", `scrim` → "scrim": the leading
- * letters of a name's first segment, so numbered steps share one family. */
+ * letters of a name's first segment, so numbered steps share one family.
+ * Tailwind's `color-red-500` namespace is skipped, so its palette groups by
+ * hue rather than as one "color" family. */
 export function designColorTokenFamily(name: string): string {
-  const first = name.replace(/^--/, "").split(/[-_]/).find(Boolean) ?? "";
+  const segments = name.replace(/^--/, "").split(/[-_]/).filter(Boolean);
+  const first = (segments[0]?.toLocaleLowerCase() === "color" && segments.length > 1 ? segments[1] : segments[0]) ?? "";
   const family = first.replace(/[\d.]+$/, "").toLocaleLowerCase();
   return family || "other";
 }
@@ -227,14 +230,14 @@ export function designColorTokenValue(name: string): string {
   return `var(${tokenNameOf(name)})`;
 }
 
-/** Changes whenever a listed name, value or grouping changes. */
+/** Changes whenever a listed name, value, grouping or label changes. */
 export function designColorTokenGroupsKey(
   groups: readonly DesignColorTokenGroup[],
 ): string {
   return groups
     .map(
       (group) =>
-        `${group.key}\u0001${group.tokens
+        `${group.key}\u0001${group.label}\u0001${group.tokens
           .map((token) => `${token.name}\u0002${token.declared}\u0002${token.color ?? ""}`)
           .join("\u0003")}`,
     )

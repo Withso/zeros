@@ -1,4 +1,4 @@
-import React, { useId, useMemo, useRef, useState } from "react";
+import React, { useContext, useId, useMemo, useRef, useState } from "react";
 import { Plus, X } from "lucide-react";
 
 import type { DesignRuntimeNodeDetails } from "@zeros/protocol/design-runtime";
@@ -9,9 +9,15 @@ import { designCssPropertySuggestions } from "./design-computed-css";
 import { InspectorIconButton, InspectorSection } from "./design-inspector-kit";
 import type { DesignLayoutFieldOptions } from "./design-layout-values";
 import {
+  designAdvancedDeclarationSupport,
   designAdvancedPropertyName,
   designAdvancedStyleRows,
+  type DesignAdvancedStyleRow,
 } from "./design-style-advanced";
+import {
+  DesignStyleOriginLabelContext,
+  type DesignStyleOriginLabel,
+} from "./design-style-provenance";
 
 interface DesignAdvancedStyleSectionProps {
   details: DesignRuntimeNodeDetails;
@@ -25,12 +31,14 @@ interface DesignAdvancedStyleSectionProps {
   disabled?: boolean;
 }
 
-const ORIGIN_LABELS = {
-  inline: "this layer's style attribute",
-  frame: "the frame's <style>",
-  linked: "a linked stylesheet",
-  source: "an imported style source",
-} as const;
+function provenanceTitle(
+  row: DesignAdvancedStyleRow,
+  label: DesignStyleOriginLabel | null,
+): string | undefined {
+  if (!row.authored) return undefined;
+  const where = [row.authored.selector, label?.(row.authored)].filter(Boolean).join(" in ");
+  return `${row.property}: ${row.value}${where ? ` — from ${where}` : ""}`;
+}
 
 /** Lists the authored declarations no dedicated Style control covers, so CSS
  * an agent writes natively stays visible and editable, and adds any property
@@ -51,7 +59,12 @@ export function DesignAdvancedStyleSection({
     () => (adding ? designCssPropertySuggestions() : []),
     [adding],
   );
+  const originLabel = useContext(DesignStyleOriginLabelContext);
   const property = designAdvancedPropertyName(name);
+  const support = property
+    ? designAdvancedDeclarationSupport(property, value)
+    : { name: false, value: true };
+  const ready = !!property && support.name && support.value && !!value.trim();
 
   const reset = () => {
     setAdding(false);
@@ -59,7 +72,7 @@ export function DesignAdvancedStyleSection({
     setValue("");
   };
   const add = () => {
-    if (!property || !value.trim()) return;
+    if (!ready || !property) return;
     onCommit({ [property]: value.trim() }, property);
     reset();
   };
@@ -97,11 +110,7 @@ export function DesignAdvancedStyleSection({
           key={row.property}
           className="flex items-center gap-1"
           data-design-advanced-property={row.property}
-          title={
-            row.authored
-              ? `${row.property}: ${row.value} — from ${row.authored.selector ? `${row.authored.selector} in ` : ""}${ORIGIN_LABELS[row.authored.origin]}`
-              : undefined
-          }
+          title={provenanceTitle(row, originLabel)}
         >
           <div className="min-w-0 flex-1">
             {renderField(row.property, row.property, row.value)}
@@ -146,7 +155,7 @@ export function DesignAdvancedStyleSection({
             autoComplete="off"
             className={cn(
               "h-7 min-w-0 flex-1 px-2 text-xs",
-              name && !property && "border-red-primary",
+              name && !(property && support.name) && "border-red-primary",
             )}
             onChange={(event) => setName(event.target.value)}
           />
@@ -162,14 +171,17 @@ export function DesignAdvancedStyleSection({
             disabled={disabled}
             spellCheck={false}
             autoComplete="off"
-            className="h-7 min-w-0 flex-1 px-2 text-xs"
+            className={cn(
+              "h-7 min-w-0 flex-1 px-2 text-xs",
+              property && support.name && !support.value && "border-red-primary",
+            )}
             onChange={(event) => setValue(event.target.value)}
           />
           <InspectorIconButton
             type="submit"
             label="Add declaration"
             size="row"
-            disabled={disabled || !property || !value.trim()}
+            disabled={disabled || !ready}
           >
             <Plus className="size-3" />
           </InspectorIconButton>

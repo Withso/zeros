@@ -72,6 +72,9 @@ describe("Advanced style rows", () => {
     expect(designAdvancedPropertyName("-webkit-line-clamp")).toBe("-webkit-line-clamp");
     expect(designAdvancedPropertyName("color: red")).toBeNull();
     expect(designAdvancedPropertyName("")).toBeNull();
+    expect(designAdvancedPropertyName("zIndex")).toBe("z-index");
+    expect(designAdvancedPropertyName("Z-Index")).toBe("z-index");
+    expect(designAdvancedPropertyName("WebkitLineClamp")).toBe("-webkit-line-clamp");
   });
 });
 

@@ -41,20 +41,26 @@ export function useDesignColorTokenGroups(
         : () => {},
     [workspaceId],
   );
-  const read = useCallback(
-    () =>
-      workspaceId
-        ? designWorkspaceSnapshotCache.peekSnapshot(workspaceId).data
-        : undefined,
+  // Each catalog keeps its identity across publications that change other
+  // frames, so reading them separately keeps the memoized inspector still.
+  const readTokens = useCallback(
+    () => (workspaceId ? designWorkspaceSnapshotCache.peekSnapshot(workspaceId).data?.tokens : undefined),
     [workspaceId],
   );
-  const snapshot = useSyncExternalStore(subscribe, read, read);
+  const readSources = useCallback(
+    () => (workspaceId ? designWorkspaceSnapshotCache.peekSnapshot(workspaceId).data?.styleSources : undefined),
+    [workspaceId],
+  );
+  const readThemes = useCallback(
+    () => (workspaceId ? designWorkspaceSnapshotCache.peekSnapshot(workspaceId).data?.themes : undefined),
+    [workspaceId],
+  );
+  const manual = useSyncExternalStore(subscribe, readTokens, readTokens);
+  const sources = useSyncExternalStore(subscribe, readSources, readSources);
+  const themes = useSyncExternalStore(subscribe, readThemes, readThemes);
   const activeTheme = useDesignWorkspaceUiStore((state) =>
     workspaceId ? (state.byWorkspace[workspaceId]?.activeTheme ?? null) : null,
   );
-  const manual = snapshot?.tokens;
-  const sources = snapshot?.styleSources;
-  const themes = snapshot?.themes;
   const previous = useRef<{ key: string; groups: readonly DesignColorTokenGroup[] }>({
     key: "",
     groups: NO_GROUPS,

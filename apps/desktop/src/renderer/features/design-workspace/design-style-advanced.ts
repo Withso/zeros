@@ -101,10 +101,33 @@ export function designAdvancedStyleRows(
 
 const CSS_PROPERTY_NAME = /^(?:--[A-Za-z0-9_-]{1,126}|-?[a-z][a-z0-9-]{0,63})$/;
 
-/** A property name a person typed into Advanced, normalized, or null. */
+/** A property name a person typed into Advanced, normalized, or null. The
+ * DOM spelling `zIndex` names `z-index`. */
 export function designAdvancedPropertyName(input: string): string | null {
-  const property = input.trim().startsWith("--")
-    ? input.trim()
-    : input.trim().toLowerCase();
+  const trimmed = input.trim();
+  const property = trimmed.startsWith("--")
+    ? trimmed
+    : trimmed.includes("-")
+      ? trimmed.toLowerCase()
+      : canonicalDesignCssProperty(trimmed.charAt(0).toLowerCase() + trimmed.slice(1));
   return CSS_PROPERTY_NAME.test(property) ? property : null;
+}
+
+/** Whether this browser implements a property and accepts a value for it, as
+ * the CSS panel checks before it writes. Custom properties take any value. */
+export function designAdvancedDeclarationSupport(
+  property: string,
+  value: string,
+): { name: boolean; value: boolean } {
+  if (
+    property.startsWith("--") ||
+    typeof CSS === "undefined" ||
+    typeof CSS.supports !== "function"
+  )
+    return { name: true, value: true };
+  const trimmed = value.trim();
+  return {
+    name: CSS.supports(property, "inherit"),
+    value: !trimmed || CSS.supports(property, trimmed),
+  };
 }
