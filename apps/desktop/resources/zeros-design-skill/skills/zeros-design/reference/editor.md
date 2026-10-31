@@ -4,7 +4,7 @@ People edit frames in the Design tab while agents work on the same files. This p
 
 ## Where edits land
 
-- Style tab and canvas edits (position, size, auto layout, fill, stroke, effects, typography, Advanced rows) write declarations into the selected element's `style` attribute in its frame source. Existing declarations keep their place and formatting; new ones are appended.
+- Style tab and canvas edits (position, size, auto layout, fill, stroke, effects, typography, Advanced rows) write each property where only the selected element owns it: its existing `style` declaration, or the one unconditional rule that targets exactly this element (`[data-oid="…"]`, or `body` in the frame's own `<style>`). Otherwise they write the element's `style` attribute. Existing declarations keep their place and formatting; new ones are appended.
 - These edits do not rewrite class rules, `<style>` blocks, `tokens.css` or imported style sources. A value that comes from a class is overridden by an inline declaration on the edited element, so other elements sharing the class keep theirs.
 - The theme editor writes Manual tokens in `tokens.css`. Imported style sources are read-only there; their repository files own them.
 - Renaming a layer writes `data-name`. Editing text replaces the element's text. Frame titles, geometry and page membership live in `meta/canvas.json`.
@@ -26,7 +26,7 @@ People edit frames in the Design tab while agents work on the same files. This p
 
 - Lists every authored declaration that no dedicated control shows, as an editable name/value row with the value as written. A row's tooltip reads "from `<selector>` in `<origin>`".
 - Omits base-only properties and an imported source's own custom properties, such as Tailwind's `--tw-*`.
-- Offers Remove only for inline winners. A class or stylesheet value is changed here by writing an inline value.
+- Offers Remove only for inline winners. A value from a class or shared rule is overridden with an inline declaration; a rule that targets only this element is edited in place.
 - Lists the layer's classes read-only, and adds any property the browser implements by name (`zIndex` is written as `z-index`).
 
 ## Layers

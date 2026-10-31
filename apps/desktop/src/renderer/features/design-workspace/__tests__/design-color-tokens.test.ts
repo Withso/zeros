@@ -95,6 +95,28 @@ describe("color token catalog", () => {
     expect(groups.at(-1)!.label).toBe("Manual › brand");
   });
 
+  it("lists a token only when its value paints as a color, whatever its name", () => {
+    const groups = designColorTokenGroups({
+      manual: [manual("--text-transform", "uppercase"), manual("--background-image", "none"), manual("--surface-overflow", "hidden"), manual("--text-muted", C.probe)],
+      sources: [],
+      theme: null,
+    });
+    expect(groups.flatMap((group) => group.tokens.map((token) => token.name))).toEqual(["--text-muted"]);
+  });
+
+  it("keeps an earlier declaration for themes a later declarer leaves unset", () => {
+    const base = source([
+      { name: "--bg", value: C.white, themeValues: {} },
+      { name: "--card-bg", value: "var(--bg)", themeValues: {} },
+    ]);
+    const contrast = manual("--bg", "", { "high-contrast": C.red });
+    const names = (theme: string | null) =>
+      designColorTokenGroups({ manual: [contrast], sources: [base], theme })
+        .flatMap((group) => group.tokens.map((token) => `${token.name}=${token.color}`));
+    expect(names(null)).toEqual([`--bg=${C.white}`, `--card-bg=${C.white}`]);
+    expect(names("high-contrast")).toEqual([`--card-bg=${C.red}`, `--bg=${C.red}`]);
+  });
+
   it("resolves fallbacks and refuses cycles and unbalanced references", () => {
     const lookup = (name: string) => ({ "--a": C.probe, "--self": "var(--self)" })[name];
     expect(resolveDesignTokenReferences("var(--missing, var(--a))", lookup)).toBe(C.probe);

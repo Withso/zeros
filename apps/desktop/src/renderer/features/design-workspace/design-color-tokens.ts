@@ -108,13 +108,16 @@ export function designColorTokenFamily(name: string): string {
   return family || "other";
 }
 
-// inferDesignTokenType reads syntax, hex, keywords and color names; the
-// legacy and composed color functions below also paint a swatch.
 const COLOR_FUNCTION = /^(?:rgba|hsla|color-mix|light-dark)\(/i;
 
-function isColorValue(name: string, value: string, syntax: string): boolean {
-  if (inferDesignTokenType(name, value, syntax) === "color") return true;
-  return COLOR_FUNCTION.test(value.trim());
+/** Whether a resolved value paints as a color. The browser decides where it
+ * can: a name such as `--text-transform` says nothing about its value.
+ * Without one, only syntax and explicit color notation count. */
+function isColorValue(value: string, syntax: string): boolean {
+  const trimmed = value.trim();
+  if (typeof CSS !== "undefined" && typeof CSS.supports === "function")
+    return CSS.supports("color", trimmed);
+  return inferDesignTokenType("", trimmed, syntax) === "color" || COLOR_FUNCTION.test(trimmed);
 }
 
 /** The color tokens a frame resolves, grouped by declaring source and family
@@ -130,6 +133,9 @@ export function designColorTokenGroups({
     source: string;
     order: number;
   }
+  const valueOf = (token: DesignTokenWire): string =>
+    (theme ? token.themeValues?.[theme] : undefined) ??
+    (token.value || token.initialValue || "");
   const winners = new Map<string, Declaration>();
   let order = 0;
   const declare = (
@@ -139,6 +145,9 @@ export function designColorTokenGroups({
   ) => {
     for (const token of tokens) {
       if (!TOKEN_NAME.test(token.name)) continue;
+      // A later declarer that sets the name only for other themes leaves the
+      // earlier declaration in force for this one.
+      if (!valueOf(token).trim()) continue;
       winners.set(token.name, { token, sourceKey, source, order: order++ });
     }
   };
@@ -151,9 +160,6 @@ export function designColorTokenGroups({
   }
   declare("manual", DESIGN_MANUAL_TOKEN_SOURCE, manual);
 
-  const valueOf = (token: DesignTokenWire): string =>
-    (theme ? token.themeValues?.[theme] : undefined) ??
-    (token.value || token.initialValue || "");
   const lookup = (name: string): string | undefined => {
     const winner = winners.get(name);
     return winner ? valueOf(winner.token) : undefined;
@@ -172,7 +178,7 @@ export function designColorTokenGroups({
       lookup,
       new Set([token.name]),
     );
-    if (!resolved || !isColorValue(token.name, resolved, token.syntax)) continue;
+    if (!resolved || !isColorValue(resolved, token.syntax)) continue;
     const family = designColorTokenFamily(token.name);
     const key = `${sourceKey}\u0000${family}`;
     let group = groups.get(key);
