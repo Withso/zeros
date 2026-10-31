@@ -1395,17 +1395,26 @@ or renderer owners.
   minimal source changes. A source offset is location metadata, never identity.
 - Layers follow the rendered (flat) tree. Content of a declarative shadow root
   (`<template shadowrootmode>`, common in markup serialized from web
-  components) renders as its host's layers, so the engine walk
-  (`elementRecords`/`isDesignNodeElement`), design-web (`designElements`) and
-  the runtime (`composedChildrenOf`, `deepElementsFromPoint`) all treat it as
-  design nodes with derived identities, in the same document order; inert
-  templates stay opaque source. The runtime marks such layers `shadow: true`,
-  hit tests through open shadow roots, and reads each element's cascade,
-  provenance and tokens from its own tree's stylesheets (tokens inherit across
-  the boundary). Style, text and attribute edits splice the element's span in
-  the template; delete, duplicate and move refuse shadow content with a plain
-  reason because the runtime's structural previews and relocation planner are
-  light-DOM only. Closed shadow roots stay opaque to the runtime.
+  components) renders as its host's layers. design-web's `shadow.ts` holds the
+  one model the engine walk (`elementRecords`/`isDesignNodeElement`),
+  design-web (`designElements`) and the runtime (`composedChildrenOf`) share:
+  as in the HTML parser, only the first such template on an element that can
+  host a root attaches, and only an open root counts (a closed root renders,
+  but the runtime cannot read it). A slot renders the host children assigned
+  to it, or its fallback only while nothing, not even whitespace, is
+  assigned; the engine's frame tree and Layers follow that, while the
+  design-web projection keeps source parents. Inert templates stay opaque
+  source. The runtime marks shadow layers `shadow: true`, hit tests through
+  open roots (the single topmost hit first), and reads each element's
+  cascade, provenance and tokens from its own tree's stylesheets (tokens
+  inherit across the boundary); `::part()` and `:host` rules from another
+  tree are not yet attributed. Style, text and attribute edits splice the
+  element's span in the template; delete, duplicate and move refuse shadow
+  content with a plain reason because the runtime's structural previews and
+  relocation planner are light-DOM only. Duplicating a host renames its
+  shadow identities with it, new text and inserted assets join light content,
+  and a slotted layer reports its host as its layout parent, where reorders
+  resolve.
 - Component internals use definition-local identity. A nested instance address
   combines its root instance with a bounded ordered path of component and
   definition-node IDs.
@@ -1417,17 +1426,20 @@ or renderer owners.
   responsive, and state-specific values remain distinguishable. The inspector
   must not present a computed value as authored source or invent cascade
   certainty.
-- Each winning declaration names its `selector` and a `scope`: `inline`, `element`
-  (the matching complex selector's last compound names the element by class,
-  id or attribute) or `base` (universal or type selectors: resets and imported
-  preflight). Node details list `baseStyleProperties`, which reach the layer
-  only through base selectors, classified across every declaring rule even
-  when the winner is ambiguous. The Style tab's Advanced section lists every
-  other authored declaration that no dedicated control shows as an editable
-  name/value row (value as written, selector in its tooltip), shows the
-  layer's classes, and adds any property by name; it omits an imported
-  source's own custom properties such as Tailwind's `--tw-*`. Removal is
-  offered only for inline winners.
+- Each winning declaration names its `selector` and a `scope`: `inline`,
+  `element` or `base`. A rule is `element` when any selector of its list that
+  matches names the element by class, id, attribute or state, by tag under
+  such a context (`.card > p`), or by tag in a shadow root's own stylesheet;
+  universal selectors, bare document tags and `:where()`-wrapped preflight
+  are `base`. Rules are classified once per generation. Node details list
+  `baseStyleProperties`, which reach the layer only through base rules,
+  classified across every declaring rule even when the winner is ambiguous.
+  The Style tab's Advanced section lists every other authored declaration that
+  no dedicated control shows as an editable name/value row (value as written,
+  selector and source in its tooltip), shows the layer's classes, and adds any
+  property the browser implements by name (`zIndex` is `z-index`); it omits
+  an imported source's own custom properties such as Tailwind's `--tw-*`.
+  Removal is offered only for inline winners.
 - Runtime authored-style provenance is optional evidence. Inline `var()`
   shorthands compete even when CSSOM cannot expand their longhands. Nested
   declarations and element-dependent container queries make affected winners
@@ -1990,7 +2002,8 @@ A keyboard frame copy paints the source's pixels at once in the grid slot the
 engine assigns it (the same rule as `nextFrameGeometry`, counting copies still
 saving) and brings that slot into view. The pixels are presentation only: they
 stay above the saved copy until it shows its own document or pixels (bounded
-to 2 s), and retire on failure, Undo, deletion or an owner change.
+to 2 s), and retire on failure, Undo, deletion or an owner change, including a
+page or directory change while the save is still pending.
 
 Runtime snapshots and hot collection references remain stable. Style writes
 retain the existing tree reference where structure permits; display/visibility
@@ -2096,12 +2109,14 @@ fenced by owner, active runtime and source generation at completion), so a
 layer never read before shows its values as soon as it is chosen. Layers rows
 are memoized with stable handlers: a hover or selection repaints only the rows
 it changes. The canvas, inspector and Layers panel are memo boundaries under
-the Design column with stable callbacks, so a publication re-renders only the
-panels whose inputs changed; the inspector's page picker receives file and
-frame-ID pairs that keep their identity while other frames prepare or move.
-Layers subscribes to the shared snapshot whenever it shows (connectivity only
-shapes its recovery), so it still follows every publication, including a frame
-rename that arrives while its folder reports a reconnect.
+the Design column with stable callbacks. The canvas and inspector re-render
+only when their inputs change: the inspector's page picker receives file and
+frame-ID pairs, and its color tokens read the token, style-source and theme
+catalogs, all of which keep their identity while other frames prepare or
+move. Layers subscribes to the shared snapshot whenever it shows
+(connectivity only shapes its recovery), so it follows every publication of
+that snapshot, including a frame rename that arrives while its folder reports
+a reconnect.
 A warm
 revalidation (a watcher echo after a save, a style build or a tab return)
 keeps the confirmed aggregate visible while the frames the surface demands are
@@ -2110,7 +2125,10 @@ prepared through the same bounded lane, then publishes once.
 Capable Local engines negotiate `design.mutation-snapshots.v1` for transaction,
 create, duplicate, delete, geometry, transfer, style, text, HTML and asset
 acknowledgements, and for Undo and Redo of those edits, which prepare the
-frames the step restored (page and theme steps keep the aggregate). Each reply
+frames the step restored (page and theme steps keep the aggregate). A write or
+step that reaches a stylesheet, tokens.css or a component reads the
+aggregate, since every linking frame renders it. Scoped replies carry no
+lint; the projection keeps other files' confirmed rows. Each reply
 contains complete validated page/frame metadata and prepared source for at most
 16 affected frames; a single-frame edit never re-prepares, lints or reads the
 HTML of unrelated frames (token names for its lint are read without usage

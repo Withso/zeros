@@ -15,9 +15,9 @@ People edit frames in the Design tab while agents work on the same files. This p
 - The frame runtime resolves the whole cascade (the `style` attribute, every stylesheet, cascade layers, specificity and `!important`) and reports each winning declaration as written, for example `background-color: var(--primary-button-bg)`, with the tokens it reads and their resolved values.
 - Each winner names its `selector` and a `scope`:
   - `inline`: the element's `style` attribute;
-  - `element`: the matching selector's last compound names the element by class, id or attribute;
-  - `base`: universal or type selectors, such as resets and imported preflight.
-- Properties that reach a layer only through base selectors are reported separately (`baseStyleProperties`), so a reset does not read as the layer's own styling.
+  - `element`: a matching selector in the rule's list names the element by class, id, attribute or state, by tag under such a context (`.card > p`), or by tag in a shadow root's own stylesheet;
+  - `base`: universal selectors, bare tags in the document and `:where()`-wrapped preflight, such as resets.
+- Properties that reach a layer only through base rules are reported separately (`baseStyleProperties`), so a reset does not read as the layer's own styling.
 - Fill, text and stroke colors, and value fields such as type size, line height and letter spacing, show a token's name while unfocused. For `var(--a, var(--b))` they show the first token that resolves. The hover text adds the declaring source and the resolved value.
 - The color picker has **Theme** and **Custom** tabs. Theme lists the color tokens the frame resolves, grouped by source and family and searchable: every imported style source, then Manual (`tokens.css`, which overrides an imported name), for the theme the canvas shows. Choosing one writes `var(--name)`; the token a field already reads is marked. Custom is the color field: hex, opacity, notation and eyedropper.
 - The CSS tab lists the element's authored declarations as written. After a line it shows the computed value when that differs, and the source when the winner comes from an imported source or a linked stylesheet.
@@ -27,12 +27,12 @@ People edit frames in the Design tab while agents work on the same files. This p
 - Lists every authored declaration that no dedicated control shows, as an editable name/value row with the value as written. A row's tooltip reads "from `<selector>` in `<origin>`".
 - Omits base-only properties and an imported source's own custom properties, such as Tailwind's `--tw-*`.
 - Offers Remove only for inline winners. A class or stylesheet value is changed here by writing an inline value.
-- Lists the layer's classes read-only, and adds any property by name.
+- Lists the layer's classes read-only, and adds any property the browser implements by name (`zIndex` is written as `z-index`).
 
 ## Layers
 
 - Rows are the frame's elements, named by `data-name`, then a readable runtime name, then a type label. Frame rows show the frame title from `meta/canvas.json`.
-- Content inside open declarative shadow roots (`<template shadowrootmode="open">`) and assigned slots appears in Layers and can be selected. Shadow layers accept style, text and attribute edits; delete, duplicate and move refuse them with a reason.
+- Content inside open declarative shadow roots (`<template shadowrootmode="open">`) and assigned slots appears in Layers and can be selected. As in the browser, only the first such template on a valid host attaches, closed roots stay opaque, and a slot shows its fallback only while nothing is assigned to it. Shadow layers accept style, text and attribute edits; delete, duplicate and move refuse them with a reason, so change their structure by editing the HTML.
 - Selection identities come from `data-oid`, which the canvas derives for ordinary HTML and saves when an edit needs one.
 
 ## Layout controls
