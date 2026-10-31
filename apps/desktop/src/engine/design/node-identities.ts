@@ -71,6 +71,26 @@ export function isDesignNodeElement(
   return false;
 }
 
+/** The design elements an element renders as children: a declarative shadow
+ * root's content replaces its light children, as in the browser's flat tree
+ * (slot assignment aside). Call after elementRecords has walked the document. */
+export function designRenderedChildElements(
+  element: DefaultTreeAdapterTypes.Element,
+): DefaultTreeAdapterTypes.Element[] {
+  const template = element.childNodes.find(
+    (node): node is DefaultTreeAdapterTypes.Element =>
+      "tagName" in node && isDeclarativeShadowTemplate(node),
+  );
+  const nodes =
+    template && "content" in template
+      ? (template as DefaultTreeAdapterTypes.Template).content.childNodes
+      : element.childNodes;
+  return nodes.filter(
+    (node): node is DefaultTreeAdapterTypes.Element =>
+      "tagName" in node && isDesignNodeElement(node),
+  );
+}
+
 /** True for a design node rendered inside a declarative shadow root. */
 export function isShadowDesignNodeElement(
   element: DefaultTreeAdapterTypes.Element,

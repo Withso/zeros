@@ -4,6 +4,7 @@ import { parseDesignWebProjection } from "@zeros/design-web";
 
 import {
   designNodeRecords,
+  designRenderedChildElements,
   healDesignOids,
   isShadowDesignNodeElement,
   stripNonDesignOidsForRender,
@@ -50,5 +51,14 @@ describe("declarative shadow content identities", () => {
     expect(projection.nodes.map((node) => node.id)).toEqual(engineIds);
     const pre = projection.nodes.find((node) => node.tag === "pre");
     expect(pre?.parentId).toBe("host");
+  });
+
+  it("gives a host its shadow root's children, as the browser renders them", () => {
+    const document = parse(healDesignOids(SOURCE).html, { sourceCodeLocationInfo: true });
+    const host = designNodeRecords(document).find(({ oid }) => oid === "host")!.element;
+    expect(designRenderedChildElements(host).map((child) => child.tagName)).toEqual(["pre"]);
+    const main = designNodeRecords(document).find(({ oid }) => oid === "sheet")!.element;
+    // An inert template renders nothing and is not a layer.
+    expect(designRenderedChildElements(main).map((child) => child.tagName)).toEqual(["diffs-container"]);
   });
 });

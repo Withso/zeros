@@ -10,6 +10,7 @@ import {
 import {
   designLayerCount,
   designNodeRecords,
+  designRenderedChildElements,
   isDesignNodeElement,
 } from "./node-identities";
 import {
@@ -801,12 +802,9 @@ function frameTree(
     text: textWithin(element),
     children:
       remaining > 0
-        ? element.childNodes
-            .filter(
-              (node): node is DefaultTreeAdapterTypes.Element =>
-                "tagName" in node && isDesignNodeElement(node),
-            )
-            .map((child) => visit(child, remaining - 1))
+        ? designRenderedChildElements(element).map((child) =>
+            visit(child, remaining - 1),
+          )
         : [],
   });
   const body = elementRecords(document).find(

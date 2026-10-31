@@ -142,8 +142,24 @@ const DESIGN_TOKENS_HOME_SOURCE = `<!doctype html>
     </main>
   </body>
 </html>`;
+// A frame serialized from a web component: its visible content renders from
+// a declarative shadow root, and a class rule authors properties no dedicated
+// Style control shows (Advanced) beside a universal reset (hidden there).
+const SHADOW_CONTENT_HOME_SOURCE = `<!doctype html><html><head><style>
+  * { box-sizing: border-box; margin: 0; }
+  body { font-family: system-ui; background: white; }
+  .card { cursor: pointer; user-select: none; --card-gap: 12px; padding: 16px; }
+</style></head><body><main data-oid="home-main" data-zeros-frame-root style="display:block;padding:40px">
+  <div data-oid="home-card" class="card" style="display:block;width:320px;background:white">
+    <diffs-container data-oid="home-diff" style="display:block;width:300px;background:firebrick">
+      <template shadowrootmode="open"><style>pre { margin: 0; padding: 12px; background: black; color: gainsboro; font: 12px ui-monospace; }</style><pre data-oid="home-diff-pre"><span data-oid="home-diff-line">const value = 1;</span></pre></template>
+    </diffs-container>
+  </div>
+</main></body></html>`;
 const homeSource = designTokensHarness
   ? DESIGN_TOKENS_HOME_SOURCE
+  : new URLSearchParams(window.location.search).has("shadowContent")
+  ? SHADOW_CONTENT_HOME_SOURCE
   : new URLSearchParams(window.location.search).has("layeredLayout")
   ? LAYERED_LAYOUT_SOURCE
   : new URLSearchParams(window.location.search).has("mixedParents")
