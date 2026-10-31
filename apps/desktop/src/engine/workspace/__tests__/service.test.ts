@@ -2990,6 +2990,28 @@ describe("WorkspaceService", () => {
     } finally { reads.mockRestore(); }
   });
 
+  // tokens.css and linked stylesheets render in every frame that links them,
+  // so a step that restores one reads the aggregate, as the token edit does.
+  it.each([null, "11111111-1111-4111-8111-111111111111"])("returns the aggregate for Undo and Redo of a token change for Local owner %s", async organizationId => {
+    execFileSync("git", ["-c", "user.email=t@t", "-c", "user.name=t", "commit", "--allow-empty", "-qm", "init"], { cwd: dir });
+    await initializeDesignDocument(dir);
+    const { workspaces } = await svc.handle("workspace.list") as { workspaces: Workspace[] };
+    insertWorkspace({ ...workspaces.find(row => row.id === LOCAL_MAIN_WORKSPACE_ID)!, organizationId, kind: "design", viewMode: "design" });
+    const target = { workspaceId: LOCAL_MAIN_WORKSPACE_ID, snapshotMode: "scoped" };
+    fs.writeFileSync(path.join(dir, designDirectoryNameFor(dir), "tokens.css"), ":root { --accent: rebeccapurple; }\n");
+    const owner = await createDesignFrame(dir, { title: "Owner" });
+    const linked = await createDesignFrame(dir, { title: "Linked" });
+    const changed = await svc.handle("design.token.update", { ...target, frame: owner.file, name: "--accent", theme: null,
+      value: "royalblue", sourceVersion: (await readDesignWorkspaceSnapshot(dir)).tokenSourceVersion }) as { mutation: { changed: boolean } };
+    expect(changed.mutation.changed).toBe(true);
+    type Reply = { snapshot: Awaited<ReturnType<typeof readDesignWorkspaceSnapshot>> };
+    for (const op of ["design.history.undo", "design.history.redo"]) {
+      const reply = await svc.handle(op, target) as Reply;
+      expect(reply.snapshot.mutationCatalog, op).toBeUndefined();
+      expect(new Set(reply.snapshot.frames.map(frame => frame.file)), op).toEqual(new Set([owner.file, linked.file]));
+    }
+  });
+
   it("serializes Design transactions, deduplicates retries, and rejects stale revisions", async () => {
     execFileSync("git", ["config", "user.email", "t@t"], { cwd: dir });
     execFileSync("git", ["config", "user.name", "t"], { cwd: dir });
