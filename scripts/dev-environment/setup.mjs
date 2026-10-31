@@ -8,7 +8,6 @@ import { developmentProfilePath, profileExists } from "./profile-path.mjs";
 import { hostedProfilePath } from "./hosted-profile.mjs";
 import { importDevelopmentProfile, inspectDevelopmentProfile } from "./setup-profile.mjs";
 import { developmentHome, privateDirectory, systemEnvironment, writePrivateFile } from "./state.mjs";
-import { ensureDevRailwayCli, RAILWAY_CLI_VERSION } from "./railway-tools.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 const args = process.argv.slice(2);
@@ -62,13 +61,12 @@ async function main() {
   if (check) {
     if (version("pnpm") !== pnpmVersion) issues.push(`Install ${packageManager}`);
     if (!version("bun")) issues.push("Install Bun");
-    if (version("railway") !== `railway ${RAILWAY_CLI_VERSION}`) issues.push(`Install Railway CLI ${RAILWAY_CLI_VERSION} using Zeros Dev setup`);
     if (!version("python3")) issues.push("Install Python 3 for native module builds");
     for (const [command, arguments_] of [["xcode-select", ["-p"]], ["xcrun", ["--find", "clang"]]]) {
       if (spawnSync(command, arguments_, { env, stdio: "pipe" }).status !== 0) issues.push("Install Xcode Command Line Tools");
     }
     if (issues.length) throw new Error([...new Set(issues)].join("\n"));
-    console.log("[zeros-dev] Tools and profile format are ready. Provider access and launch/archive still require live qualification.");
+    console.log("[zeros-dev] Tools and profile format are ready.");
     return;
   }
   if (issues.length) throw new Error(issues.join("\n"));
@@ -87,10 +85,9 @@ async function main() {
   if (packages.length) run("npm", ["install", "--global", "--prefix", prefix, ...packages], directory);
   if (version("pnpm") !== pnpmVersion || !version("bun")) throw new Error("Installed tools could not be verified; rerun setup after checking PATH");
   installShellPath(directory, toolsBin);
-  await ensureDevRailwayCli();
   run(process.execPath, ["scripts/dev-environment/dependencies.mjs", "--install"]);
   run(process.execPath, ["--import", "tsx", "scripts/dev-environment/setup-native.ts"]);
-  console.log("[zeros-dev] Setup complete. Open a new terminal, then run pnpm electron:dev in this checkout. No hosted resources were provisioned by setup.");
+  console.log("[zeros-dev] Setup complete. Open a new terminal, then run pnpm electron:dev in this checkout.");
 }
 
 try { await main(); }

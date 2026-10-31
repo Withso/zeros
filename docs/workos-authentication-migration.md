@@ -810,7 +810,7 @@ Pages receives only `AUTH_PROVIDER=workos`, `APP_ORIGIN`, and the matching
 `CONTROL_PLANE_URL`. Electron compiles only public verification/configuration
 values: provider, app origin, desktop client ID, issuer, JWKS URL, and audience.
 
-Local `pnpm electron:dev` is a fourth desktop scheme, not a fourth data
+`pnpm electron:alpha` is a fourth desktop scheme, not a fourth data
 environment. On first launch, Dev fetches the seven public-client fields from
 `https://api-alpha.zeros.build/auth/desktop/dev-config` and atomically caches
 them at `~/.zeros-dev/auth/alpha.env` with mode `0600`. The versioned endpoint

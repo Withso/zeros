@@ -16,6 +16,10 @@ if [ -f scripts/dev-environment/hook.sh ]; then exec sh scripts/dev-environment/
 ${legacyTools}
 exec pnpm electron:dev`;
 const archiveCommand = fs.readFileSync(new URL("./archive-hook.sh", import.meta.url), "utf8").trim();
+// Earlier setups stored older copies of the generated guard (or the retired
+// hosted command); replace them rather than treating them as user-authored.
+const generatedArchive = (value: string) => value === "pnpm dev:archive" ||
+  value.startsWith(archiveCommand.split("\n").slice(0, 3).join("\n"));
 
 /** Use the app's settings lifecycle so comments, private ownership, Git
  * exclusions and linked-worktree inheritance follow the normal contracts. */
@@ -23,8 +27,8 @@ export function installNativeDevScripts(root: string) {
   const current = opSettingsRead("repo-local", root);
   if (current.error) throw new Error("Native Zeros settings could not be read; existing settings were preserved");
   const scripts = (current.doc?.scripts ?? {}) as Record<string, unknown>;
-  if (typeof scripts.archive === "string" && scripts.archive.trim() && !["pnpm dev:archive", archiveCommand].includes(scripts.archive.trim())) {
-    throw new Error("An existing native Zeros archive command was preserved. Configure an idempotent command that includes pnpm dev:archive in Repository Settings before enabling required cleanup.");
+  if (typeof scripts.archive === "string" && scripts.archive.trim() && !generatedArchive(scripts.archive.trim())) {
+    throw new Error("An existing native Zeros archive command was preserved. Configure an idempotent cleanup command in Repository Settings before enabling required cleanup.");
   }
   const patch: Record<string, unknown> = {
     archive: archiveCommand, archive_required: true, archive_timeout_seconds: 1800,

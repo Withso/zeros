@@ -30,11 +30,12 @@ The shipping desktop target is macOS on Apple silicon (`dmg` and `zip`). Windows
 Linux, iOS, and Android applications are not present in this repository yet;
 their app directories will be added when implementation begins.
 
-The standard Dev launcher uses an isolated Railway backend and PlanetScale
-database per development checkout. It requires a private Dev infrastructure
-profile; it does not silently connect a new clone to Alpha. See the
-[development environment runbook](docs/development-environments.md) for provider
-setup and the remaining live qualification requirements.
+Two launchers cover development. [Zeros Local](docs/local-development.md)
+(`pnpm electron:local`) is account-free and Local-only.
+[Zeros Dev](docs/electron-cloud.md) (`pnpm electron:dev`) runs this branch's
+control plane, database and desktop app on your Mac, with real Boat VMs for
+cloud workspaces. It requires a private Dev profile and never silently connects
+a new clone to Alpha.
 
 ## Requirements
 
@@ -43,6 +44,8 @@ setup and the remaining live qualification requirements.
 - pnpm 10.28
 - [Bun](https://bun.sh) for the packaged engine sidecar
 - Xcode Command Line Tools for Electron native-module rebuilds
+- For Zeros Dev: PostgreSQL 18, `cloudflared`, and Docker (Docker Desktop or
+  OrbStack) to build worker runtimes
 
 ## Getting started
 
@@ -61,13 +64,14 @@ and the main checkout so future workspaces can copy it. It also configures nativ
 Zeros repository scripts with required, retryable Archive cleanup, preserving
 existing Setup/Run commands and reporting Archive conflicts. Start with
 [zeros-dev-env-example.json](zeros-dev-env-example.json) when configuring the
-shared Dev services for the first time; transfer the filled private file between
-your own devices, including its existing registry encryption key.
+profile for the first time; transfer the filled private file between your own
+devices.
 
-`pnpm dev:setup --check` checks local prerequisites and profile format without
-provisioning. `pnpm dev:archive` deletes this workspace's hosted resources; the
-next launch creates a fresh environment. Closing the desktop keeps the hosted
-environment running. On Linux, use `pnpm dev:backend`; the desktop requires macOS.
+`pnpm dev:setup --check` checks local prerequisites and profile format.
+`pnpm electron:dev --reset` deletes this checkout's Zeros Dev VMs and data; the
+next launch starts fresh. On Linux, `pnpm electron:dev --headless` runs the
+backend only; the desktop requires macOS. For an account-free app without a
+backend, use `pnpm electron:local`.
 
 Useful checks:
 

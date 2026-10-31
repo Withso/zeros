@@ -13,8 +13,8 @@ afterEach(() => {
 });
 
 /** A synced checkout has source and root dependencies, but neither independent
- * deployment's node_modules. Keep the real package entrypoint/bootstrap and use
- * local package-manager doubles, so this cannot allocate provider resources. */
+ * deployment's node_modules. Keep the real dependency preparer and use local
+ * package-manager doubles, so this cannot allocate provider resources. */
 function fixture() {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "zeros-dependencies-"));
   directories.push(directory);
@@ -36,20 +36,11 @@ function fixture() {
   write("apps/web/package-lock.json", { lockfileVersion: 3, packages: {} });
   write("apps/marketing/package.json", { devDependencies: { astro: "1.0.0" } });
   write("packages/protocol/package.json", { dependencies: { zod: "1.0.0" } });
-  for (const name of ["hosted-entry.mjs", "dependencies.mjs", "processes.mjs", "state.mjs", "provider-http.mjs"]) {
+  for (const name of ["dependencies.mjs", "processes.mjs", "state.mjs", "provider-http.mjs"]) {
     const source = path.join(repository, "scripts/dev-environment", name);
     if (fs.existsSync(source)) fs.copyFileSync(source, path.join(dev, name));
   }
   fs.copyFileSync(path.join(repository, "scripts/electron-local-process-group.mjs"), path.join(root, "scripts/electron-local-process-group.mjs"));
-  write("scripts/dev-environment/hosted-launcher.mjs", `
-    import 'esbuild';
-    import { createRequire } from 'node:module';
-    import fs from 'node:fs';
-    const require = createRequire(new URL('../../apps/control-plane/package.json', import.meta.url));
-    require('@aws-sdk/client-s3'); require('pg');
-    fs.statSync(new URL('../../apps/web/node_modules/wrangler/package.json', import.meta.url));
-    console.log('HOSTED_READY ' + process.argv.slice(2).join(' '));
-  `);
   const installer = path.join(directory, "install.cjs");
   fs.writeFileSync(installer, `
     const fs = require('node:fs'), path = require('node:path');
@@ -88,9 +79,10 @@ function fixture() {
   const env = { HOME: home, PATH: `${bin}:/usr/bin:/bin`, ZEROS_DEV_PROFILE_B64: "private-profile-sentinel", DATABASE_URL: "private-dsn-sentinel" };
   const installs = () => fs.existsSync(path.join(root, "installs.jsonl"))
     ? fs.readFileSync(path.join(root, "installs.jsonl"), "utf8").trim().split("\n").map(line => JSON.parse(line)) : [];
-  const run = (script = "electron:dev") => spawnSync("/bin/sh", ["-c", scripts[script]], { cwd: root, env, encoding: "utf8", timeout: 15000 });
-  const runAsync = (script = "electron:dev") => new Promise<{ status: number | null; output: string }>((resolve, reject) => {
-    const child = spawn("/bin/sh", ["-c", scripts[script]], { cwd: root, env });
+  const preparer = ["scripts/dev-environment/dependencies.mjs"];
+  const run = () => spawnSync(process.execPath, preparer, { cwd: root, env, encoding: "utf8", timeout: 15000 });
+  const runAsync = () => new Promise<{ status: number | null; output: string }>((resolve, reject) => {
+    const child = spawn(process.execPath, preparer, { cwd: root, env });
     let output = "";
     child.stdout.on("data", data => { output += data; }); child.stderr.on("data", data => { output += data; });
     child.on("error", reject); child.on("close", status => resolve({ status, output }));
@@ -98,15 +90,14 @@ function fixture() {
   // Reproduce the user's root-only installation without touching a real store.
   spawnSync(process.execPath, [installer, "pnpm", "install", "--frozen-lockfile"], { cwd: root, env: { HOME: home, PATH: env.PATH } });
   fs.unlinkSync(path.join(root, "installs.jsonl"));
-  const start = () => spawn(process.execPath, ["scripts/dev-environment/hosted-entry.mjs", "start"], { cwd: root, env });
+  const start = () => spawn(process.execPath, preparer, { cwd: root, env });
   return { root, write, run, runAsync, installs, start };
 }
 
-describe("hosted Dev dependency preparation", () => {
-  it("repairs a root-only synced checkout before loading the R2 client", () => {
+describe("Dev dependency preparation", () => {
+  it("repairs a root-only synced checkout", () => {
     const f = fixture(), result = f.run();
     expect(result.status, result.stderr).toBe(0);
-    expect(result.stdout).toContain("HOSTED_READY start");
     expect(f.installs()).toEqual(expect.arrayContaining([
       expect.objectContaining({ command: "pnpm", args: ["--dir", "apps/control-plane", "install", "--frozen-lockfile"] }),
       expect.objectContaining({ command: "npm", args: ["--prefix", "apps/web", "ci"] }),
@@ -123,13 +114,6 @@ describe("hosted Dev dependency preparation", () => {
     const second = f.run();
     expect(second.status, second.stderr).toBe(0);
     expect(f.installs()).toEqual(installed);
-  });
-
-  it.each(["dev:backend", "dev:archive", "dev:doctor", "dev:adopt", "dev:reconcile", "dev:agents", "dev:seed", "electron:run", "electron:dev:watch"])("prepares dependencies for %s, preserving its action", script => {
-    const f = fixture(), result = f.run(script);
-    expect(result.status, result.stderr).toBe(0);
-    const action = script === "electron:run" ? "start --run-only" : script.startsWith("electron:") ? "start" : script.slice(4);
-    expect(result.stdout).toContain(`HOSTED_READY ${action}`);
   });
 
   it("refreshes the changed lockfile's graph without reinstalling the other graphs", () => {
@@ -162,12 +146,11 @@ describe("hosted Dev dependency preparation", () => {
     expect(fs.statSync(path.join(target, "package.json")).isFile()).toBe(true);
   });
 
-  it("stops before hosted startup if installation fails and retries on the next Run", () => {
+  it("fails when installation fails and retries on the next Run", () => {
     const f = fixture();
     f.write("installer.json", { fail: "apps/control-plane" });
     const failed = f.run();
     expect(failed.status).not.toBe(0);
-    expect(failed.stdout).not.toContain("HOSTED_READY");
     expect(failed.stderr).toMatch(/dependenc|install/i);
     f.write("installer.json", {});
     const retried = f.run();
@@ -196,7 +179,6 @@ describe("hosted Dev dependency preparation", () => {
       child.kill("SIGTERM");
       expect(await closed).toBe(1);
       expect(output).toContain("interrupted");
-      expect(output).not.toContain("HOSTED_READY");
       f.write("installer.json", {});
       const result = f.run();
       expect(result.status, result.stderr).toBe(0);

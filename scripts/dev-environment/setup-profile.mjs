@@ -3,7 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { execFileSync } from "node:child_process";
 import { isDeepStrictEqual } from "node:util";
-import { hostedProfileIssues } from "./hosted-profile.mjs";
+import { portableProfileIssues } from "./profile.mjs";
 import { PROFILE_NAME, profileExists, assertIgnoredProfileDestination } from "./profile-path.mjs";
 import { developmentHome, readPrivateJson, systemEnvironment, writePrivateFile } from "./state.mjs";
 
@@ -27,7 +27,7 @@ function transferredProfile(file, restrict = false) {
     let profile;
     try { profile = JSON.parse(bytes.toString("utf8")); }
     catch { return { issues: ["Dev profile contains invalid JSON; contents withheld"] }; }
-    const issues = hostedProfileIssues(profile);
+    const issues = portableProfileIssues(profile);
     if (containsPlaceholder(profile)) issues.push("Dev profile still contains example placeholders; fill them before import");
     if (!issues.length && restrict) fs.fchmodSync(fd, 0o600);
     return { profile, bytes, issues };

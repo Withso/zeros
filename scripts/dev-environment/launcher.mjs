@@ -88,7 +88,7 @@ async function stop(workspace) {
     if (!response.ok) throw new Error();
   } catch {
     if (recoverLaunchAfterReboot(workspace)) { console.log(REBOOT_RECOVERED); await pauseStoppedWebhook(workspace); return; }
-    throw new Error("The Dev supervisor is unavailable; existing state was preserved. Inspect pnpm dev:doctor before recovering its processes.");
+    throw new Error("The Dev supervisor is unavailable; existing state was preserved. Inspect pnpm electron:cloud --doctor before recovering its processes.");
   }
   const deadline = Date.now() + 45_000;
   while (fs.existsSync(path.join(workspace.directory, "run.lock"))) {
