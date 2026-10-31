@@ -2099,6 +2099,9 @@ it changes. The canvas, inspector and Layers panel are memo boundaries under
 the Design column with stable callbacks, so a publication re-renders only the
 panels whose inputs changed; the inspector's page picker receives file and
 frame-ID pairs that keep their identity while other frames prepare or move.
+Layers subscribes to the shared snapshot whenever it shows (connectivity only
+shapes its recovery), so it still follows every publication, including a frame
+rename that arrives while its folder reports a reconnect.
 A warm
 revalidation (a watcher echo after a save, a style build or a tab return)
 keeps the confirmed aggregate visible while the frames the surface demands are
