@@ -19,7 +19,7 @@ export const DESIGN_RUNTIME_DOCUMENT_BODY_ID = "::zeros-document-body";
 export const DESIGN_SELECTION_NODE_LIMIT = 32;
 export const DESIGN_RUNTIME_AUDIT_WARNING_LIMIT = 128;
 export const DESIGN_RUNTIME_TREE_NODE_LIMIT = 20000;
-export const DESIGN_RUNTIME_TREE_DEPTH_LIMIT = 32;
+export const DESIGN_RUNTIME_TREE_DEPTH_LIMIT = 64;
 /** Reserve one operation for the container in a 256-operation transaction. */
 export const DESIGN_LAYOUT_CHILD_LIMIT = 255;
 /** Computed snapshots mirror a fixed, app-owned style catalog. Leave bounded
@@ -61,6 +61,9 @@ export interface DesignRuntimeTreeNode {
    * compatibility with snapshots produced before this metadata existed. */
   display?: string;
   flexDirection?: string;
+  /** Present on layers rendered inside an open shadow root (for example a
+   * declarative `<template shadowrootmode>`); omitted for ordinary layers. */
+  shadow?: true;
   children: DesignRuntimeTreeNode[];
 }
 
@@ -184,6 +187,11 @@ export interface DesignRuntimeNodeDetails {
    * (for example a shorthand partly overridden by a longhand); the inspector
    * then shows the computed value, as before. */
   authoredStyles?: Record<string, DesignRuntimeAuthoredStyle>;
+  /** Present when the node renders inside an open shadow root. */
+  shadow?: true;
+  /** The element's authored class attribute, bounded; omitted when absent and
+   * by older runtimes. */
+  classes?: string;
 }
 
 /** Where a winning declaration lives in the rendered frame document. */
@@ -810,6 +818,9 @@ function isRuntimeNodeDetails(
       (typeof value.text === "string" && value.text.length <= 10_000)) &&
     (value.textEditable === undefined ||
       typeof value.textEditable === "boolean") &&
+    (value.shadow === undefined || value.shadow === true) &&
+    (value.classes === undefined ||
+      (typeof value.classes === "string" && value.classes.length <= 1024)) &&
     (value.textSizing === undefined || isRuntimeTextSizing(value.textSizing)) &&
     typeof value.selector === "string" &&
     typeof value.visible === "boolean" &&
@@ -852,7 +863,7 @@ function isRuntimeTree(value: unknown): value is DesignRuntimeTreeNode[] {
   let count = 0;
   while (pending.length > 0) {
     const current = pending.pop()!;
-    if (!isRecord(current.value) || current.depth > 64) return false;
+    if (!isRecord(current.value) || current.depth > DESIGN_RUNTIME_TREE_DEPTH_LIMIT) return false;
     if (
       typeof current.value.oid !== "string" ||
       typeof current.value.tag !== "string" ||
@@ -867,12 +878,13 @@ function isRuntimeTree(value: unknown): value is DesignRuntimeTreeNode[] {
       (current.value.flexDirection !== undefined &&
         (typeof current.value.flexDirection !== "string" ||
           current.value.flexDirection.length > 64)) ||
+      (current.value.shadow !== undefined && current.value.shadow !== true) ||
       !Array.isArray(current.value.children)
     ) {
       return false;
     }
     count += 1;
-    if (count > 20_000) return false;
+    if (count > DESIGN_RUNTIME_TREE_NODE_LIMIT) return false;
     for (const child of current.value.children) {
       pending.push({ value: child, depth: current.depth + 1 });
     }
@@ -1304,6 +1316,77 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
     return element === document.body ? ${JSON.stringify(DESIGN_RUNTIME_DOCUMENT_BODY_ID)} : oidOf(element);
   }
 
+  // ── Rendered (flat) tree ──────────────────────────────────
+  // Frames may carry open shadow roots, for example a declarative
+  // <template shadowrootmode="open"> serialized from a web component. Layers,
+  // hit testing and inspection follow what the browser renders: a host's
+  // layers are its shadow root's children and a slot's layers are the
+  // elements assigned to it. Ordinary documents are unchanged.
+  function shadowRootOf(element) {
+    var root = element && element.shadowRoot;
+    return root && root.mode === "open" ? root : null;
+  }
+
+  function composedParentOf(node) {
+    if (!node) return null;
+    if (node.assignedSlot) return node.assignedSlot;
+    if (node.parentElement) return node.parentElement;
+    var parent = node.parentNode;
+    return parent && parent.nodeType === 11 && parent.host ? parent.host : null;
+  }
+
+  function composedChildrenOf(element) {
+    var root = shadowRootOf(element);
+    if (root) return root.children;
+    if (element.localName === "slot" && typeof element.assignedElements === "function") {
+      var assigned = element.assignedElements();
+      if (assigned.length > 0) return assigned;
+    }
+    return element.children;
+  }
+
+  /** The tree whose stylesheets style this element: its shadow root, or the
+   * document. */
+  function styleScopeOf(element) {
+    var root = element && typeof element.getRootNode === "function" ? element.getRootNode() : null;
+    return root && root.nodeType === 11 && root.host ? root : document;
+  }
+
+  function inShadowTree(element) {
+    return styleScopeOf(element) !== document;
+  }
+
+  /** The box an element lays out in: slots are display: contents by default,
+   * so assigned elements lay out in the slot's parent box. */
+  function layoutParentOf(element) {
+    var parent = composedParentOf(element);
+    while (parent && parent.localName === "slot" && getComputedStyle(parent).display === "contents") {
+      parent = composedParentOf(parent);
+    }
+    return parent;
+  }
+
+  /** document.elementsFromPoint retargets shadow content to its host. Expand
+   * each open host in place, deepest hits first, so a click selects what the
+   * person sees. */
+  function deepElementsFromPoint(x, y) {
+    var result = [];
+    var seen = new Set();
+    function expand(list, scope) {
+      for (var index = 0; index < list.length; index += 1) {
+        var element = list[index];
+        if (seen.has(element)) continue;
+        if (scope !== document && element.getRootNode() !== scope) continue;
+        seen.add(element);
+        var root = shadowRootOf(element);
+        if (root && typeof root.elementsFromPoint === "function") expand(root.elementsFromPoint(x, y), root);
+        result.push(element);
+      }
+    }
+    expand(document.elementsFromPoint(x, y), document);
+    return result;
+  }
+
   function directText(element) {
     var pieces = [];
     for (var index = 0; index < element.childNodes.length; index += 1) {
@@ -1317,7 +1400,7 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
   }
 
   function textEditableOf(element) {
-    return element.children.length === 0 &&
+    return element.children.length === 0 && !shadowRootOf(element) &&
       !NON_TEXT_EDITABLE_TAGS.has(element.tagName.toLowerCase());
   }
 
@@ -1348,7 +1431,7 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
       : widthValue === "auto" && inlineAutoDisplays.indexOf(computed.display) >= 0
         ? "auto"
         : "fixed";
-    var parent = element.parentElement;
+    var parent = layoutParentOf(element);
     var availableWidth = element.getBoundingClientRect().width;
     if (parent) {
       var parentStyle = getComputedStyle(parent);
@@ -1383,7 +1466,7 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
     for (
       var current = element;
       current && current instanceof Element;
-      current = current.parentElement
+      current = composedParentOf(current)
     ) {
       var style = current === element && elementStyle
         ? elementStyle
@@ -1541,7 +1624,7 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
     for (
       var node = element;
       node && node.nodeType === 1 && depth < MAX_TRANSFORM_CHAIN;
-      node = node.parentElement
+      node = composedParentOf(node)
     ) {
       depth += 1;
       var computed = getComputedStyle(node);
@@ -1689,8 +1772,11 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
     return declarations;
   }
 
-  function styleRuleMetadata() {
-    if (authoredStyleRuleMetadata !== null) return authoredStyleRuleMetadata;
+  function styleRuleMetadata(scope) {
+    scope = scope || document;
+    if (authoredStyleRuleMetadata === null) authoredStyleRuleMetadata = new Map();
+    var cachedMetadata = authoredStyleRuleMetadata.get(scope);
+    if (cachedMetadata) return cachedMetadata;
     var metadata = [];
     function visitRules(rules, active) {
       for (var ruleIndex = 0; ruleIndex < rules.length; ruleIndex += 1) {
@@ -1706,14 +1792,14 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
         }
       }
     }
-    for (var sheetIndex = 0; sheetIndex < document.styleSheets.length; sheetIndex += 1) {
+    for (var sheetIndex = 0; sheetIndex < scope.styleSheets.length; sheetIndex += 1) {
       try {
-        visitRules(document.styleSheets[sheetIndex].cssRules || [], true);
+        visitRules(scope.styleSheets[sheetIndex].cssRules || [], true);
       } catch (_error) {
         // Inaccessible sheets cannot provide trustworthy authored metadata.
       }
     }
-    authoredStyleRuleMetadata = metadata;
+    authoredStyleRuleMetadata.set(scope, metadata);
     return metadata;
   }
 
@@ -1753,7 +1839,8 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
    * containing block for fixed descendants (transform, filter, perspective,
    * containment), or the viewport when none does. */
   function fixedContainingBlockOf(element) {
-    for (var current = element.parentElement; current && current !== document.documentElement; current = current.parentElement) {
+    var containingParent = composedParentOf(element);
+    for (var current = containingParent; current && current !== document.documentElement; current = composedParentOf(current)) {
       var style = getComputedStyle(current);
       var contain = style.contain || "";
       var willChange = style.willChange || "";
@@ -1765,7 +1852,7 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
         /paint|layout|strict|content/.test(contain) ||
         /transform|filter|perspective/.test(willChange)
       ) {
-        return current === element.parentElement ? "parent" : "ancestor";
+        return current === containingParent ? "parent" : "ancestor";
       }
     }
     return "viewport";
@@ -1775,7 +1862,7 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
     var cached = authoredStylePropertiesCache.get(element);
     if (cached && cached.inline === element.style.cssText) return cached.properties.slice();
     var authored = new Set(declarationProperties(element.style));
-    var rules = styleRuleMetadata();
+    var rules = styleRuleMetadata(styleScopeOf(element));
     for (var ruleIndex = 0; ruleIndex < rules.length; ruleIndex += 1) {
       var rule = rules[ruleIndex];
       if (!rule.active || rule.declarations.length === 0) continue;
@@ -1937,8 +2024,11 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
   /** Every active style rule in document order with its layer position,
    * origin and declared property names. Custom-property declarations are
    * indexed by name so token lookups touch only the rules that set them. */
-  function cascadeRules() {
-    if (cascadeRuleIndex) return cascadeRuleIndex;
+  function cascadeRules(scope) {
+    scope = scope || document;
+    if (!cascadeRuleIndex) cascadeRuleIndex = new Map();
+    var cachedIndex = cascadeRuleIndex.get(scope);
+    if (cachedIndex) return cachedIndex;
     var rules = [];
     var customRules = new Map();
     var siblingsByParent = new Map();
@@ -1986,16 +2076,17 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
         }
       }
     }
-    for (var sheetIndex = 0; sheetIndex < document.styleSheets.length; sheetIndex += 1) {
-      var sheet = document.styleSheets[sheetIndex];
+    for (var sheetIndex = 0; sheetIndex < scope.styleSheets.length; sheetIndex += 1) {
+      var sheet = scope.styleSheets[sheetIndex];
       try {
         visit(sheet.cssRules || [], true, { key: "", path: [] }, styleOriginOf(sheet), false, false);
       } catch (_error) {
         // Inaccessible sheets cannot provide trustworthy provenance.
       }
     }
-    cascadeRuleIndex = { rules: rules, customRules: customRules };
-    return cascadeRuleIndex;
+    var built = { rules: rules, customRules: customRules };
+    cascadeRuleIndex.set(scope, built);
+    return built;
   }
 
   /** Positive when left's layer outranks right's for normal declarations.
@@ -2118,8 +2209,16 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
   /** The nearest element (this one or an ancestor) whose winning declaration
    * sets a custom property, and where that declaration lives. */
   function tokenOrigin(element, name, index) {
+    var scope = styleScopeOf(element);
     var entries = index.customRules.get(name) || [];
-    for (var current = element; current && current.nodeType === 1; current = current.parentElement) {
+    for (var current = element; current && current.nodeType === 1; current = composedParentOf(current)) {
+      // Custom properties inherit across shadow boundaries; each ancestor's
+      // own tree supplies the rules that can set them.
+      var currentScope = styleScopeOf(current);
+      if (currentScope !== scope) {
+        scope = currentScope;
+        entries = cascadeRules(scope).customRules.get(name) || [];
+      }
       var winner = winningDeclaration(current, name, matchingEntries(current, entries));
       // An uncertain local override also prevents attributing the token to an
       // ancestor. The computed token value is still available to the inspector.
@@ -2140,7 +2239,7 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
   }
 
   function authoredStylesUncached(element, properties) {
-    var index = cascadeRules();
+    var index = cascadeRules(styleScopeOf(element));
     var matches = matchingEntries(element, index.rules);
     var computed = getComputedStyle(element);
     var result = {};
@@ -2191,14 +2290,20 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
     elementMapStale = false;
     var next = new Map();
     var root = document.body || document.documentElement;
-    var walker = document.createTreeWalker(root, NodeFilter.SHOW_ELEMENT);
+    var scopes = [root];
     if (root instanceof Element) {
       var rootOid = oidOf(root);
       if (rootOid) next.set(rootOid, root);
+      if (shadowRootOf(root)) scopes.push(shadowRootOf(root));
     }
-    for (var node = walker.nextNode(); node; node = walker.nextNode()) {
-      var oid = oidOf(node);
-      if (oid && !next.has(oid)) next.set(oid, node);
+    for (var scopeIndex = 0; scopeIndex < scopes.length; scopeIndex += 1) {
+      var walker = document.createTreeWalker(scopes[scopeIndex], NodeFilter.SHOW_ELEMENT);
+      for (var node = walker.nextNode(); node; node = walker.nextNode()) {
+        var oid = oidOf(node);
+        if (oid && !next.has(oid)) next.set(oid, node);
+        var nodeShadow = shadowRootOf(node);
+        if (nodeShadow) scopes.push(nodeShadow);
+      }
     }
     if (document.body) next.set(${JSON.stringify(DESIGN_RUNTIME_DOCUMENT_BODY_ID)}, document.body);
     elementsByOid = next;
@@ -2222,17 +2327,18 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
     var oid = oidOf(element);
     var computed = getComputedStyle(element);
     var children = [];
+    var layerChildren = composedChildrenOf(element);
     if (depth >= MAX_TREE_DEPTH) {
-      if (element.children.length > 0) budget.truncated = true;
+      if (layerChildren.length > 0) budget.truncated = true;
     } else {
-      for (var index = 0; index < element.children.length; index += 1) {
-        var child = element.children[index];
+      for (var index = 0; index < layerChildren.length; index += 1) {
+        var child = layerChildren[index];
         if (!oidOf(child)) continue;
         var childNode = treeNode(child, depth + 1, budget);
         if (childNode) children.push(childNode);
       }
     }
-    return {
+    var node = {
       oid: oid,
       tag: element.tagName.toLowerCase(),
       name: nameOf(element),
@@ -2243,11 +2349,13 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
       flexDirection: computed.flexDirection || "",
       children: children
     };
+    if (inShadowTree(element)) node.shadow = true;
+    return node;
   }
 
   function breadcrumbOf(element) {
     var result = [];
-    for (var current = element; current && current instanceof Element; current = current.parentElement) {
+    for (var current = element; current && current instanceof Element; current = composedParentOf(current)) {
       var oid = oidOf(current);
       if (oid) {
         result.push(current.tagName.toLowerCase() + " · " + nameOf(current));
@@ -2272,7 +2380,7 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
   }
 
   function layoutOf(element, computed) {
-    var parent = element.parentElement;
+    var parent = layoutParentOf(element);
     var parentComputed = parent ? getComputedStyle(parent) : null;
     var own = layoutOriginOf(element);
     var parentOrigin = parent ? layoutOriginOf(parent) : { x: 0, y: 0 };
@@ -2324,10 +2432,10 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
   }
 
   function parentCoordinateSpaceOf(element) {
-    var parent = element.parentElement;
+    var parent = layoutParentOf(element);
     var position = getComputedStyle(element).position;
     if (position === "absolute" || position === "fixed") {
-      for (var candidate = parent; candidate; candidate = candidate.parentElement) {
+      for (var candidate = parent; candidate; candidate = layoutParentOf(candidate)) {
         var style = getComputedStyle(candidate);
         if ((position === "absolute" && style.position !== "static") ||
             (style.transform && style.transform !== "none") ||
@@ -2361,8 +2469,9 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
 
   function childrenLayoutOf(element, computed) {
     var children = [];
-    for (var index = 0; index < element.children.length; index += 1) {
-      var child = element.children[index];
+    var layoutChildren = composedChildrenOf(element);
+    for (var index = 0; index < layoutChildren.length; index += 1) {
+      var child = layoutChildren[index];
       if (oidOf(child)) children.push(child);
     }
     var result = { count: children.length, nodeIds: [], x: "start", y: "start", truncated: children.length > ${DESIGN_LAYOUT_CHILD_LIMIT} };
@@ -2467,6 +2576,9 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
       styles: layoutOnly ? Object.fromEntries(["display", "position", "left", "top", "width", "height", "boxSizing", "paddingTop", "paddingRight", "paddingBottom", "paddingLeft", "borderTopWidth", "borderRightWidth", "borderBottomWidth", "borderLeftWidth", "marginTop", "marginRight", "marginBottom", "marginLeft", "flexDirection", "flexWrap", "direction", "order", "gridColumnStart", "gridColumnEnd", "gridRowStart", "gridRowEnd"].map(function (key) { return [key, computed[key] || ""]; })) : stylesOf(computed, authoredStyleProperties),
       authoredStyleProperties: authoredStyleProperties
     };
+    if (inShadowTree(element)) result.shadow = true;
+    var classAttribute = element.getAttribute("class");
+    if (classAttribute && classAttribute.trim()) result.classes = classAttribute.replace(/\s+/g, " ").trim().slice(0, 1024);
     result.styles["--zeros-layout-origin-flow"] = element.style ? element.style.getPropertyValue("--zeros-layout-origin-flow").trim() : "";
     if (textEditable && !layoutOnly) result.textSizing = textSizingOf(element);
     if (relocation) result.relocationContext = relocationContextOf(element);
@@ -2760,7 +2872,7 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
     var current = element;
     while (current && current instanceof Element) {
       if (oidOf(current)) path.push(current);
-      current = current.parentElement;
+      current = composedParentOf(current);
     }
     path.reverse();
     // Legacy documents may put a frame oid on <body>. It is an ownership
@@ -2773,7 +2885,7 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
     if (!Number.isFinite(x) || !Number.isFinite(y)) {
       throw new Error("x and y must be finite frame coordinates.");
     }
-    var stack = document.elementsFromPoint(x, y);
+    var stack = deepElementsFromPoint(x, y);
     for (var index = 0; index < stack.length; index += 1) {
       var path = editableOidPath(stack[index]);
       if (path.length === 0) continue;
@@ -2820,8 +2932,9 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
     var right = x + width;
     var bottom = y + height;
     var result = [];
-    for (var index = 0; index < scope.children.length; index += 1) {
-      var element = scope.children[index];
+    var scopeChildren = composedChildrenOf(scope);
+    for (var index = 0; index < scopeChildren.length; index += 1) {
+      var element = scopeChildren[index];
       if (!oidOf(element) || !visibleOf(element)) continue;
       var rect = rectOf(element);
       if (rect.width <= 0 || rect.height <= 0) continue;
@@ -3094,9 +3207,10 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
     var transformed = box.rotation !== 0 || box.scaleX !== 1 || box.scaleY !== 1;
     var children = [];
     if (includeChildren) {
-      for (var index = 0; index < element.children.length; index += 1) {
+      var geometryChildren = composedChildrenOf(element);
+      for (var index = 0; index < geometryChildren.length; index += 1) {
         if (children.length >= GEOMETRY_CHILD_LIMIT || index >= ${DESIGN_LAYOUT_CHILD_LIMIT}) break;
-        var child = element.children[index];
+        var child = geometryChildren[index];
         var childOid = oidOf(child);
         if (!childOid || child.hidden) continue;
         var childComputed = getComputedStyle(child);
@@ -4466,8 +4580,9 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
         }
       }
     }
-    for (var sheetIndex = 0; sheetIndex < document.styleSheets.length; sheetIndex += 1) {
-      var sheet = document.styleSheets[sheetIndex];
+    var matchedScope = styleScopeOf(element);
+    for (var sheetIndex = 0; sheetIndex < matchedScope.styleSheets.length; sheetIndex += 1) {
+      var sheet = matchedScope.styleSheets[sheetIndex];
       try {
         visitRules(sheet.cssRules || [], stylesheetSource(sheet), true);
       } catch (_error) {
@@ -4488,9 +4603,9 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
     matchedDeclarationsForElement(element, property, false, matched);
     if (matched.length === 0) {
       for (
-        var parent = element.parentElement;
+        var parent = composedParentOf(element);
         parent && matched.length === 0;
-        parent = parent.parentElement
+        parent = composedParentOf(parent)
       ) {
         matchedDeclarationsForElement(parent, property, true, matched);
       }

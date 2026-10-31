@@ -7,6 +7,20 @@ export interface ElementRecord {
   oid: string | null;
 }
 
+const templateOwners = new WeakMap<
+  DefaultTreeAdapterTypes.DocumentFragment,
+  DefaultTreeAdapterTypes.Element
+>();
+
+/** parse5 keeps template content in a detached fragment with no parent link.
+ * Every walk through elementRecords remembers the template that owns each
+ * fragment, so callers can follow declarative shadow content to its host. */
+export function templateOwningFragment(
+  fragment: DefaultTreeAdapterTypes.DocumentFragment,
+): DefaultTreeAdapterTypes.Element | null {
+  return templateOwners.get(fragment) ?? null;
+}
+
 export function elementRecords(
   document: DefaultTreeAdapterTypes.Document,
 ): ElementRecord[] {
@@ -25,6 +39,7 @@ export function elementRecords(
         null;
       records.push({ element: node, oid });
       if (node.tagName === "template" && "content" in node) {
+        templateOwners.set(node.content, node);
         pending.push(node.content);
       }
     }

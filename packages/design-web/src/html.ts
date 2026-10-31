@@ -68,10 +68,50 @@ function elements(document: Document): Element[] {
   return result;
 }
 
+type DocumentFragment = DefaultTreeAdapterTypes.DocumentFragment;
+
+const shadowTemplateOwners = new WeakMap<DocumentFragment, Element>();
+
+/** `<template shadowrootmode>` content renders as its parent's shadow root. */
+export function isDeclarativeShadowTemplate(element: Element): boolean {
+  if (element.tagName !== "template") return false;
+  const mode = element.attrs
+    .find((attribute) => attribute.name === "shadowrootmode")
+    ?.value.trim()
+    .toLowerCase();
+  return mode === "open" || mode === "closed";
+}
+
+/** Document-order elements including declarative shadow root content, which
+ * the browser renders as the host's layers. Matches the engine's
+ * elementRecords order, so derived identities agree on every node. Inert
+ * templates stay opaque. */
+function designElements(document: Document): Element[] {
+  const result: Element[] = [];
+  const visit = (node: Document | Element | DocumentFragment) => {
+    for (const child of node.childNodes ?? []) {
+      if (!("tagName" in child)) continue;
+      result.push(child);
+      visit(child);
+      if (isDeclarativeShadowTemplate(child) && "content" in child) {
+        const content = (child as unknown as { content: DocumentFragment }).content;
+        shadowTemplateOwners.set(content, child);
+        visit(content);
+      }
+    }
+  };
+  visit(document);
+  return result;
+}
+
 function isBodyDescendant(element: Element): boolean {
-  let parent: Node | null = element.parentNode;
+  let parent: Node | DocumentFragment | null = element.parentNode;
   while (parent) {
     if ("tagName" in parent && parent.tagName === "body") return true;
+    if (!("tagName" in parent) && parent.nodeName === "#document-fragment") {
+      parent = shadowTemplateOwners.get(parent as DocumentFragment)?.parentNode ?? null;
+      continue;
+    }
     parent = "parentNode" in parent ? parent.parentNode : null;
   }
   return false;
@@ -138,7 +178,7 @@ export function nativeDesignIdentityBase(tag: string, offset: number, source: st
  * original file; explicit duplicates retain their validation errors. */
 export function identifyDesignHtmlNodes(document: Document, source: string): void {
   const used = new Set<string>();
-  for (const element of elements(document).filter(isDesignElement)) {
+  for (const element of designElements(document).filter(isDesignElement)) {
     const location = element.sourceCodeLocation;
     if (!location?.startTag) continue;
     const current = oid(element);
@@ -155,8 +195,14 @@ export function identifyDesignHtmlNodes(document: Document, source: string): voi
 }
 
 function nearestParentId(element: Element): string | null {
-  let parent = element.parentNode;
-  while (parent && "tagName" in parent) {
+  let parent: Node | DocumentFragment | null = element.parentNode;
+  while (parent) {
+    if (!("tagName" in parent)) {
+      if (parent.nodeName !== "#document-fragment") break;
+      // A shadow root's top-level layers belong to the host.
+      parent = shadowTemplateOwners.get(parent as DocumentFragment)?.parentNode ?? null;
+      continue;
+    }
     if (isDesignElement(parent)) {
       const id = oid(parent);
       if (id) return id;
@@ -193,7 +239,7 @@ export function parseDesignWebProjection(input: {
     file: input.entryFile,
     ...(parserErrorSpan(error) ? { span: parserErrorSpan(error) } : {}),
   }));
-  const records = elements(document).filter(isDesignElement);
+  const records = designElements(document).filter(isDesignElement);
   const counts = new Map<string, number>();
   for (const element of records) {
     const id = oid(element);
@@ -257,10 +303,23 @@ export function parseDesignWebProjection(input: {
   };
 }
 
-function elementForMutation(source: string, nodeId: string, records?: readonly Element[]): Element {
-  const matches = (records ?? elements(parse(source, { sourceCodeLocationInfo: true }))).filter(
+/** Text and attribute edits may target declarative shadow content; structural
+ * edits (delete, duplicate, move) pass light-DOM records and refuse it. */
+function elementForMutation(
+  source: string,
+  nodeId: string,
+  records?: readonly Element[],
+  options: { shadow?: boolean } = {},
+): Element {
+  const document = records ? null : parse(source, { sourceCodeLocationInfo: true });
+  const matches = (records ?? (options.shadow ? designElements(document!) : elements(document!))).filter(
     (element) => isDesignElement(element) && oid(element) === nodeId,
   );
+  if (matches.length === 0 && !options.shadow && isShadowContent(source, nodeId)) {
+    throw new Error(
+      `Design element ${nodeId} is inside a shadow root: restyle or retext it here, and move, duplicate or delete it by editing the HTML.`,
+    );
+  }
   if (matches.length !== 1 || !matches[0]) {
     throw new Error(
       matches.length > 1
@@ -269,6 +328,15 @@ function elementForMutation(source: string, nodeId: string, records?: readonly E
     );
   }
   return matches[0];
+}
+
+function isShadowContent(source: string, nodeId: string): boolean {
+  const document = parse(source, { sourceCodeLocationInfo: true });
+  identifyDesignHtmlNodes(document, source);
+  const light = new Set(elements(document));
+  return designElements(document).some(
+    (element) => !light.has(element) && isDesignElement(element) && oid(element) === nodeId,
+  );
 }
 
 function escapeText(value: string): string {
@@ -305,7 +373,7 @@ export function mutateDesignNodeTextSource(
   text: string,
 ): string {
   if (text.length > 100_000) throw new Error("Design text is too long.");
-  const element = elementForMutation(source, nodeId);
+  const element = elementForMutation(source, nodeId, undefined, { shadow: true });
   if (element.childNodes.some((node) => "tagName" in node)) {
     throw new Error(
       `Design element ${nodeId} contains element children; setting text would discard them.`,
@@ -727,7 +795,7 @@ export function mutateDesignNodeAttributeSource(
   if (value !== null && value.length > 100_000) {
     throw new Error(`Design attribute is too long: ${name}.`);
   }
-  const element = elementForMutation(source, nodeId);
+  const element = elementForMutation(source, nodeId, undefined, { shadow: true });
   const startTag = element.sourceCodeLocation?.startTag;
   if (!startTag)
     throw new Error(`Design element has no authored start tag: ${nodeId}`);
@@ -778,7 +846,7 @@ export function healDesignHtmlIdentities(source: string, identity = identityBase
   healed: number;
 } {
   const document = parse(source, { sourceCodeLocationInfo: true });
-  const records = elements(document).filter(isDesignElement);
+  const records = designElements(document).filter(isDesignElement);
   const used = new Set<string>();
   const edits: Array<{ start: number; end: number; text: string }> = [];
   for (const element of records) {

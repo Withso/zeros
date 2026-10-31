@@ -1393,6 +1393,19 @@ or renderer owners.
 - Plain HTML inspection derives missing/duplicate markers without writing source.
   An explicit visual or semantic edit persists required identity repairs with
   minimal source changes. A source offset is location metadata, never identity.
+- Layers follow the rendered (flat) tree. Content of a declarative shadow root
+  (`<template shadowrootmode>`, common in markup serialized from web
+  components) renders as its host's layers, so the engine walk
+  (`elementRecords`/`isDesignNodeElement`), design-web (`designElements`) and
+  the runtime (`composedChildrenOf`, `deepElementsFromPoint`) all treat it as
+  design nodes with derived identities, in the same document order; inert
+  templates stay opaque source. The runtime marks such layers `shadow: true`,
+  hit tests through open shadow roots, and reads each element's cascade,
+  provenance and tokens from its own tree's stylesheets (tokens inherit across
+  the boundary). Style, text and attribute edits splice the element's span in
+  the template; delete, duplicate and move refuse shadow content with a plain
+  reason because the runtime's structural previews and relocation planner are
+  light-DOM only. Closed shadow roots stay opaque to the runtime.
 - Component internals use definition-local identity. A nested instance address
   combines its root instance with a bounded ordered path of component and
   definition-node IDs.
@@ -2592,8 +2605,12 @@ boundaries, not targets to relax casually:
   total definition source, depth 8, and 2 MiB expanded output;
 - render preparation: 128 linked stylesheets, 12 MiB inline raster assets,
   15 MiB sanitized output, and 16 MiB runtime-enabled output;
-- live projection: 20,000 nodes across at most 32 emitted nesting levels and
-  5,000 audited elements, with explicit truncation advisories;
+- live projection: 20,000 nodes across at most 64 emitted nesting levels and
+  5,000 audited elements, with explicit truncation advisories. Markup
+  serialized from a real app routinely nests 40 levels deep; the earlier
+  32-level bound showed such containers as empty layers. Chromium's message
+  channel carries this nesting; Playwright's `evaluate` serializer does not,
+  so browser tests summarize deep snapshots inside the page;
 - structural previews: 32 pending previews, 256 operations and 4 MiB estimated
   retained subtree cost; copied documents also stay within the live node bound.
   In-place history retains at most 64 generations / 4 MiB estimated changes.

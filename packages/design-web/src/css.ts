@@ -2,7 +2,7 @@ import { parse, type DefaultTreeAdapterTypes } from "parse5";
 import postcss, { type AtRule, type Declaration, type Rule } from "postcss";
 import { DESIGN_DOCUMENT_BODY_ID } from "@zeros/design-core";
 import { designDocumentBody, withExplicitDesignBody } from "./document-body";
-import { identifyDesignHtmlNodes } from "./html";
+import { identifyDesignHtmlNodes, isDeclarativeShadowTemplate } from "./html";
 import { isContainedDesignReference } from "./references";
 
 import type {
@@ -294,11 +294,17 @@ function designElements(
     }
   };
   findBody(document);
-  const visit = (node: DefaultTreeAdapterTypes.Element) => {
+  const visit = (
+    node: DefaultTreeAdapterTypes.Element | DefaultTreeAdapterTypes.DocumentFragment,
+  ) => {
     for (const child of node.childNodes ?? []) {
       if (!("tagName" in child)) continue;
       if (!plumbing.has(child.tagName)) result.push(child);
       if (child.tagName !== "template") visit(child);
+      // A declarative shadow root renders as the host's content, in the same
+      // document order as html.ts and the engine walk it.
+      else if (isDeclarativeShadowTemplate(child) && "content" in child)
+        visit((child as unknown as { content: DefaultTreeAdapterTypes.DocumentFragment }).content);
     }
   };
   if (body) visit(body);

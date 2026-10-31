@@ -2,7 +2,7 @@
 // COMPONENT: DesignStyleEditor
 // PURPOSE: Figma-grade element styling over authored CSS: Layout,
 //          Appearance, Fill, Stroke, Effects, Typography, Transform,
-//          Transition and Motion as always-visible sections
+//          Transition, Motion and Advanced as always-visible sections
 // USED IN: DesignInspector for the exact selected data-oid
 // ============================================
 
@@ -27,6 +27,7 @@ import {
   DesignEffectsSection,
   DesignTransformSection,
 } from "./design-effect-editor";
+import { DesignAdvancedStyleSection } from "./design-advanced-style-section";
 import { DesignAutoLayoutControls } from "./design-auto-layout-controls";
 import { designFillIsEmpty, DesignFillEditor } from "./design-fill-editor";
 import {
@@ -702,6 +703,13 @@ export function DesignStyleEditor({
           </button>
         ) : null}
       </InspectorSection>
+
+      <DesignAdvancedStyleSection
+        details={details}
+        renderField={renderField}
+        onCommit={commit}
+        disabled={disabled}
+      />
     </div>
   );
 }
