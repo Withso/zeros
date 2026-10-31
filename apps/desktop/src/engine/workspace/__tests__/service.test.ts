@@ -2948,6 +2948,48 @@ describe("WorkspaceService", () => {
     } finally { reads.mockRestore(); }
   });
 
+  // Undo and Redo of a style edit, a canvas move and a frame copy prepare only
+  // the frames they restored, like the edits themselves.
+  it.each([null, "11111111-1111-4111-8111-111111111111"])("returns scoped Undo and Redo acknowledgements for Local owner %s", async organizationId => {
+    execFileSync("git", ["-c", "user.email=t@t", "-c", "user.name=t", "commit", "--allow-empty", "-qm", "init"], { cwd: dir });
+    await initializeDesignDocument(dir);
+    const { workspaces } = await svc.handle("workspace.list") as { workspaces: Workspace[] };
+    insertWorkspace({ ...workspaces.find(row => row.id === LOCAL_MAIN_WORKSPACE_ID)!, organizationId, kind: "design", viewMode: "design" });
+    const target = { workspaceId: LOCAL_MAIN_WORKSPACE_ID, snapshotMode: "scoped" };
+    const edited = await createDesignFrame(dir, { title: "Edited" });
+    const unused = await createDesignFrame(dir, { title: "Unrelated" });
+    const source = await readDesignFrame(dir, edited.file);
+    await svc.handle("design.node.styles", { ...target, frame: edited.file, sourceVersion: source.sourceVersion,
+      nodeId: source.tree[0]!.oid!, styles: { padding: "12px" } });
+    const placed = (await readDesignWorkspaceSnapshot(dir)).frames.find(frame => frame.file === edited.file)!;
+    const from = { x: placed.x, y: placed.y, w: placed.width, h: placed.height, z: placed.z };
+    await svc.handle("design.frames.move", { ...target, moves: [{ frame: edited.file, from, to: { ...from, x: from.x + 40 } }] });
+    const copy = (await svc.handle("design.frame.duplicate", { ...target, frame: edited.file }) as { frame: { file: string } }).frame.file;
+    type ScopedReply = { snapshot: Awaited<ReturnType<typeof readDesignWorkspaceSnapshot>>; historySelection?: string | null };
+    const all = [edited.file, unused.file];
+    const reads = vi.spyOn(designSafeFiles, "readSafeRegularFile");
+    try {
+      const step = async (op: string, frames: string[], catalog: string[]) => {
+        const reply = await svc.handle(op, target) as ScopedReply;
+        expect(reply.snapshot.frames.map(frame => frame.file), op).toEqual(frames);
+        expect(reply.snapshot.mutationCatalog?.frames.map(frame => frame.source).sort(), op).toEqual([...catalog].sort());
+        return reply;
+      };
+      // Removing the copy prepares nothing and still selects the page's first frame.
+      expect((await step("design.history.undo", [], all)).historySelection).toBe(edited.file);
+      await step("design.history.undo", [edited.file], all);
+      await step("design.history.undo", [edited.file], all);
+      await step("design.history.redo", [edited.file], all);
+      await step("design.history.redo", [edited.file], all);
+      await step("design.history.redo", [copy], [...all, copy]);
+      expect(reads.mock.calls.some(([, file]) => file.endsWith(unused.file))).toBe(false);
+      // Unscoped callers (older renderers) keep the full aggregate.
+      const full = await svc.handle("design.history.undo", { workspaceId: LOCAL_MAIN_WORKSPACE_ID }) as ScopedReply;
+      expect(full.snapshot.mutationCatalog).toBeUndefined();
+      expect(new Set(full.snapshot.frames.map(frame => frame.file))).toEqual(new Set(all));
+    } finally { reads.mockRestore(); }
+  });
+
   it("serializes Design transactions, deduplicates retries, and rejects stale revisions", async () => {
     execFileSync("git", ["config", "user.email", "t@t"], { cwd: dir });
     execFileSync("git", ["config", "user.name", "t"], { cwd: dir });

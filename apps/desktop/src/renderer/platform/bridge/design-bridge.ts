@@ -479,7 +479,7 @@ function designApiMutationReply(
       !designPageIdSchema.safeParse(reply.historyPageId).success) ||
     (requireSnapshot &&
       (!reply.snapshot ||
-        !validProtocolCapability(reply.snapshot) ||
+        !validMutationSnapshot(reply.snapshot) ||
         !Array.isArray(reply.snapshot.frames)))
   ) {
     throw new Error(`${operation}: malformed engine response`);
@@ -563,6 +563,7 @@ export async function bridgeDesignHistory(
       workspaceId,
       ...(frame ? { frame } : {}),
       ...(expectedSourceVersions ? { expectedSourceVersions } : {}),
+      ...scopedMutationSnapshot(bridge, workspaceId),
     }),
     `design.history.${direction}`,
     true,

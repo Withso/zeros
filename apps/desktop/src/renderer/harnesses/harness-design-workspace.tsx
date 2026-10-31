@@ -880,6 +880,7 @@ async function main() {
   type FixtureRequest = { type?: string; op?: string; params?: Record<string, unknown> };
   let mutationCatalogGeneration = 0;
   const withScopedMutationSnapshots = (request: (message: FixtureRequest) => Promise<unknown>) => async (message: FixtureRequest) => {
+    const before = currentWorkspaceSnapshot;
     const reply = await request(message) as { result?: { snapshot?: DesignWorkspaceSnapshotWire; frame?: string | { file: string } } };
     if (!scopedMutationsHarness || !reply.result?.snapshot || message.op === "design.navigation.read") return reply;
     const original = reply.result.snapshot;
@@ -891,7 +892,13 @@ async function main() {
     if (message.params?.snapshotMode !== "scoped") return { ...reply, result: { ...reply.result, snapshot } };
     lazyRevision = (++mutationCatalogGeneration).toString(16).padStart(64, "0");
     const resultFrame = reply.result.frame;
+    // Like the engine, Undo and Redo prepare every frame the step restored.
+    const restored = message.op?.startsWith("design.history.") ? frames.filter((frame) => {
+      const previous = before.frames.find((candidate) => candidate.file === frame.file);
+      return !previous || (["sourceVersion", "x", "y", "width", "height", "z"] as const).some((key) => previous[key] !== frame[key]);
+    }).map((frame) => frame.file) : [];
     const affected = new Set([
+      ...restored,
       ...(typeof message.params.frame === "string" ? [message.params.frame] : []),
       ...(typeof resultFrame === "string" ? [resultFrame] : resultFrame ? [resultFrame.file] : []),
       ...((message.params.moves ?? []) as Array<{ frame: string }>).map(move => move.frame),

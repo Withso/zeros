@@ -197,7 +197,8 @@ function fixture(workspace = PERSONAL, options: { scoped?: boolean } = {}) {
           revision: `revision-${next}`,
           receipt: { status: "applied", beforeRevision: `revision-${previous}`, afterRevision: `revision-${next}` },
         },
-        historyFrame: "home.html", snapshot: workspaceSnapshot(workspace, next),
+        historyFrame: "home.html",
+        snapshot: options.scoped ? registeredSnapshot(workspace, next, "scoped") : workspaceSnapshot(workspace, next),
       };
     },
     edit(n: number, held?: ReturnType<typeof gate>) {
@@ -249,6 +250,24 @@ describe("scoped style acknowledgements", () => {
     expect(f.painted).toBe(2);
     expect(f.runtime.restoreGeneration).toHaveBeenCalledWith(version(2), false);
     historyGate.release(); await undo;
+    expect(f.cached).toBe(2); expect(f.painted).toBe(2);
+  });
+
+  // Undo and Redo replies are scoped the same way; each must still confirm
+  // its prediction so the next step paints before the engine answers.
+  it.each([PERSONAL, ORG])("keeps Undo and Redo eager after scoped history replies in %s", async (workspace) => {
+    const f = fixture(workspace, { scoped: true });
+    await f.seed(3);
+    await f.history("undo");
+    expect(designWorkspaceSnapshotCache.peekSnapshot(workspace).data!.frames.map((frame) => frame.file)).toEqual(["home.html", "other.html"]);
+    const undoGate = gate(); f.holdHistory(undoGate);
+    const undo = f.history("undo"); await undoGate.entered;
+    expect(f.painted).toBe(1);
+    undoGate.release(); await undo;
+    const redoGate = gate(); f.holdHistory(redoGate);
+    const redo = f.history("redo"); await redoGate.entered;
+    expect(f.painted).toBe(2);
+    redoGate.release(); await redo;
     expect(f.cached).toBe(2); expect(f.painted).toBe(2);
   });
 });

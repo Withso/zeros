@@ -2644,8 +2644,12 @@ export async function applyDesignHistoryCached(
         []
       ).map((candidate) => [candidate.file, candidate.sourceVersion]),
     );
-    const result = await designHistory(workspaceId, frame, direction,
+    const reply = await designHistory(workspaceId, frame, direction,
       isCloudWorkspace(workspaceId) ? Object.fromEntries(previousSourceVersions) : undefined);
+    // A scoped reply carries only the restored frames. History keys the state
+    // the cache will publish, so project it onto the catalog first.
+    const result = reply.snapshot ? { ...reply, snapshot: projectDesignMutationSnapshot(
+      designWorkspaceSnapshotCache.peekSnapshot(workspaceId).data, reply.snapshot) } : reply;
     const prediction = predictionRef?.deref();
     assertDesignMutationOwner(workspaceId, owner);
     const historyFrame = result.historyFrame ?? (result.result ? frame : null);

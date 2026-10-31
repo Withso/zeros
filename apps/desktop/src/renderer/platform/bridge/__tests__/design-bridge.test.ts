@@ -69,6 +69,28 @@ describe("Design bridge read budgets", () => {
       sourceVersion: "a".repeat(24), styles: { padding: "4px" } })).rejects.toThrow("malformed");
   });
 
+  it.each([
+    ["personal-local", true, true], ["organization-local", true, true],
+    ["legacy-local", false, false], ["cloud://org/workspace", true, false],
+  ] as const)("negotiates scoped Undo and Redo acknowledgements only on capable Local engines: %s", async (workspaceId, capable, scoped) => {
+    const snapshot = scopedSnapshot();
+    const request = vi.fn(async () => ({ type: "WORKSPACE_RESPONSE", result: { result: null, snapshot } }));
+    const bridge = { request, supportsEngineCapability: (capability: string) => capable && capability === DESIGN_MUTATION_SNAPSHOTS_CAPABILITY } as unknown as RuntimeClient;
+    await bridgeDesignHistory(bridge, workspaceId, snapshot.frames[0]!.file, "undo");
+    await bridgeDesignHistory(bridge, workspaceId, null, "redo");
+    expect(request).toHaveBeenCalledTimes(2);
+    for (const [message] of request.mock.calls as unknown as Array<[{ params: Record<string, unknown> }]>) {
+      expect(message.params.snapshotMode).toBe(scoped ? "scoped" : undefined);
+    }
+  });
+
+  it("refuses an Undo acknowledgement whose scoped frame does not match its catalog", async () => {
+    const snapshot = scopedSnapshot();
+    snapshot.frames[0]!.width = 400;
+    const bridge = { request: vi.fn(async () => ({ type: "WORKSPACE_RESPONSE", result: { result: null, snapshot } })) } as unknown as RuntimeClient;
+    await expect(bridgeDesignHistory(bridge, "local", null, "undo")).rejects.toThrow("malformed");
+  });
+
   it("refuses a copy acknowledgement whose source does not match its catalog", async () => {
     const snapshot = scopedSnapshot();
     snapshot.frames[0]!.frameId = "unrelated";
