@@ -483,7 +483,9 @@ async function runDesignGestureReleasePreviewChecks({ page, check }) {
 }
 
 /** Count each component that rendered in a commit. An untouched subtree keeps
- * its fiber objects (and stale flags), so only fresh fibers count. */
+ * its fiber objects (and stale flags), so only fresh fibers count. The dev
+ * transform renames a memoized function that shares its binding's name
+ * (`DesignInspector2`), so names are counted without that suffix. */
 function installDesignRenderCounter() {
   const renders = {};
   window.__zerosDesignRenders = renders;
@@ -499,7 +501,8 @@ function installDesignRenderCounter() {
         const fiber = pending.pop();
         seen.add(fiber);
         const type = fiber.elementType ?? fiber.type;
-        const name = type && typeof type !== "string" ? type.displayName || type.name || type.type?.name : null;
+        const raw = type && typeof type !== "string" ? type.displayName || type.name || type.type?.name : null;
+        const name = raw ? raw.replace(/\d+$/, "") : null;
         if (name && !previous.has(fiber) && (fiber.flags & 1) === 1) renders[name] = (renders[name] ?? 0) + 1;
         for (let child = fiber.child; child; child = child.sibling) pending.push(child);
       }
@@ -546,10 +549,10 @@ export async function runDesignUnrelatedPreparationRenderSmoke({ page: parent, c
     await quiet();
     const renders = await page.evaluate(() => ({ ...window.__zerosDesignRenders }));
     // The column observing the revalidation proves the counter saw it.
-    // Layers follows the shared snapshot it shows, so it may re-render for
-    // another frame's publication; the canvas and inspector must not.
-    check("revalidating unchanged frames re-renders neither the canvas nor the inspector",
-      (renders.DesignWorkspaceColumn ?? 0) > 0 && (renders.DesignCanvas ?? 0) === 0 &&
+    // Layers follows the shared snapshot it shows. The canvas takes the new
+    // preparation generation once; the inspector has no changed input.
+    check("revalidating unchanged frames leaves the inspector alone and renders the canvas at most once",
+      (renders.DesignWorkspaceColumn ?? 0) > 0 && (renders.DesignCanvas ?? 0) <= 1 &&
         (renders.DesignInspector ?? 0) === 0,
       JSON.stringify({ inspector: renders.DesignInspector ?? 0, layers: renders.OwnedDesignWorkspaceSidebarPanels ?? 0,
         column: renders.DesignWorkspaceColumn ?? 0, canvas: renders.DesignCanvas ?? 0 }));

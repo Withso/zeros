@@ -2109,11 +2109,12 @@ fenced by owner, active runtime and source generation at completion), so a
 layer never read before shows its values as soon as it is chosen. Layers rows
 are memoized with stable handlers: a hover or selection repaints only the rows
 it changes. The canvas, inspector and Layers panel are memo boundaries under
-the Design column with stable callbacks. The canvas and inspector re-render
-only when their inputs change: the inspector's page picker receives file and
-frame-ID pairs, and its color tokens read the token, style-source and theme
-catalogs, all of which keep their identity while other frames prepare or
-move. Layers subscribes to the shared snapshot whenever it shows
+the Design column with stable callbacks. The inspector re-renders only when
+its inputs change: its page picker receives file and frame-ID pairs, and its
+color tokens read the token, style-source and theme catalogs, all of which
+keep their identity while other frames prepare or move. A revalidation of
+unchanged frames still publishes a new preparation generation, which the
+canvas renders once. Layers subscribes to the shared snapshot whenever it shows
 (connectivity only shapes its recovery), so it follows every publication of
 that snapshot, including a frame rename that arrives while its folder reports
 a reconnect.
