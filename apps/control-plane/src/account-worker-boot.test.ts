@@ -16,7 +16,10 @@ const f = vi.hoisted(() => ({
   loginChanges: { stop: vi.fn(async () => {}) }, relay: { close: vi.fn(), handleUpgrade: vi.fn() },
   promptChanges: { stop: vi.fn(async () => {}) }, promptSignals: { wakeAll: vi.fn() },
   routes: {}, proxy: {}, server: { on: vi.fn(), close: vi.fn() },
+  channels: { development: true, alpha: true, beta: true, production: true } as Record<string, boolean>,
 }));
+// Mutable so a case can pause one channel; the policy reads it per call.
+vi.mock("./cloud/channels.json", () => ({ default: f.channels }));
 vi.mock("./config.js", async original => {
   const actual = await original<typeof import("./config.js")>();
   const { workosTestEnv } = await import("./test-workos-env.js");
@@ -58,6 +61,7 @@ let oldTerm: ReturnType<typeof process.listeners>, oldInt: ReturnType<typeof pro
 beforeEach(() => {
   vi.resetModules(); vi.clearAllMocks(); vi.useFakeTimers();
   f.role = "combined"; f.channel = "alpha"; f.cloudEnabled = false; f.promptOutbox = false; f.workosEnabled = true; f.maintenance = false; f.migrationState = "current";
+  Object.assign(f.channels, { development: true, alpha: true, beta: true, production: true });
   oldTerm = process.listeners("SIGTERM"); oldInt = process.listeners("SIGINT");
   for (const pool of [f.apiPool, f.workerPool, f.listenerPool, f.lockPool]) {
     pool.query.mockImplementation(() => { throw new Error("unexpected database query"); });
@@ -115,13 +119,21 @@ describe("account workers and cloud v2 boot composition", () => {
     expect(f.apiPool.query).not.toHaveBeenCalled(); expect(f.apiPool.connect).not.toHaveBeenCalled();
   });
 
-  it.each(["beta", "production"])("preserves shared security while cloud is gated off on %s", async channel => {
-    f.channel = channel; f.cloudEnabled = true; f.workosEnabled = false;
+  it.each(["beta", "production"])("preserves shared security while cloud is paused on %s", async channel => {
+    f.channel = channel; f.cloudEnabled = true; f.workosEnabled = false; f.channels[channel] = false;
     await import("./index.js");
     expect(f.cloud).toHaveBeenCalledWith(expect.objectContaining({ cloudV2: null }), f.workerPool, expect.anything(), f.broker, f.listenerPool);
     expect(f.lifecycle.start).not.toHaveBeenCalled(); expect(f.securityStart).toHaveBeenCalledOnce();
     expect(Object.keys(f.notifications.mock.calls[0]![1])).toEqual(["security"]);
     expect(f.createApp.mock.calls[0]![3]).toMatchObject({ securityEventBroker: f.broker });
+  });
+
+  it.each(["beta", "production"])("runs the cloud v2 lifecycle on %s once its channel allows cloud", async channel => {
+    f.channel = channel; f.cloudEnabled = true;
+    await import("./index.js");
+    expect(f.cloud).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ cloudV2: expect.anything() }), f.workerPool,
+      { relay: true, lifecycle: true }, f.broker, f.listenerPool, f.lockPool);
+    expect(f.lifecycle.start).toHaveBeenCalledOnce();
   });
 
   it("pauses deletion and cloud runtime at a controlled migration boundary", async () => {

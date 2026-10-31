@@ -1,6 +1,6 @@
 import channels from "./channels.json" with { type: "json" };
 
-/** Cloud rollout remains limited to development and Alpha. */
+/** The checked-in cloud policy; a channel set to `false` is paused. */
 export function cloudWorkspaceChannelEnabled(channel: string): boolean {
   return Object.hasOwn(channels, channel) && channels[channel as keyof typeof channels];
 }

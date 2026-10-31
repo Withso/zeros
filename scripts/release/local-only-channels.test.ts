@@ -1,8 +1,13 @@
 import { readFileSync } from "node:fs";
 import { load } from "js-yaml";
-import { describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { promotionConfig } from "./contracts";
 import { releaseChannelEnvironment } from "./channel-policy.mjs";
+
+// Every channel allows cloud in the checked-in policy. A case pauses one
+// channel here; the shared policy reads this object on every call.
+const policy = vi.hoisted(() => ({ development: true, alpha: true, beta: true, production: true } as Record<string, boolean>));
+vi.mock("../../apps/control-plane/src/cloud/channels.json", () => ({ default: policy }));
 
 const sourceSha = "a".repeat(40);
 function environment(channel: "beta" | "production") {
@@ -32,20 +37,35 @@ describe("release channel environment", () => {
   });
 
   it("makes stale cloud-only settings inert while the channel is paused", () => {
-    expect(releaseChannelEnvironment("beta", { ZEROS_CLOUD_WORKSPACES_ENABLED: "obsolete" }))
+    expect(releaseChannelEnvironment("beta", { ZEROS_CLOUD_WORKSPACES_ENABLED: "obsolete" }, { ...policy, beta: false }))
       .toEqual({ ZEROS_CLOUD_WORKSPACES_ENABLED: "false" });
     expect(() => releaseChannelEnvironment("unknown", {})).toThrow("Unknown cloud release channel");
   });
+
+  it.each(["beta", "production"])("applies the %s release environment's exact decision", channel => {
+    expect(releaseChannelEnvironment(channel, {})).toEqual({ ZEROS_CLOUD_WORKSPACES_ENABLED: "false" });
+    expect(releaseChannelEnvironment(channel, { ZEROS_CLOUD_WORKSPACES_ENABLED: "true" }))
+      .toEqual({ ZEROS_CLOUD_WORKSPACES_ENABLED: "true" });
+    expect(() => releaseChannelEnvironment(channel, { ZEROS_CLOUD_WORKSPACES_ENABLED: "obsolete" }))
+      .toThrow("Invalid desktop cloud capability");
+  });
 });
 
-describe.each(["beta", "production"] as const)("%s Local release", channel => {
+describe.each(["beta", "production"] as const)("%s cloud release", channel => {
+  it("requires cloud exactly when the release environment opts in", () => {
+    expect(promotionConfig(environment(channel))).toMatchObject({ cloudRequired: true });
+    expect(promotionConfig({ ...environment(channel), ZEROS_CLOUD_WORKSPACES_ENABLED: "false" }))
+      .toMatchObject({ cloudRequired: false });
+  });
+});
+
+describe.each(["beta", "production"] as const)("%s release while its channel is paused", channel => {
+  beforeEach(() => { policy[channel] = false; });
+  afterEach(() => { policy[channel] = true; });
+
   it("disables cloud despite stale protected cloud settings", () => {
     expect(promotionConfig(environment(channel))).toMatchObject({ cloudRequired: false });
   });
-
-
-
-
 
   it("keeps migration target and provider authority validation mandatory", () => {
     for (const patch of [{ PLANETSCALE_DATABASE: "foreign-database" }, { PLANETSCALE_SERVICE_TOKEN: "" },
@@ -64,7 +84,7 @@ describe.each(["beta", "production"] as const)("%s Local release", channel => {
     const workflow = load(readFileSync(`.github/workflows/${channel === "beta" ? "release-beta" : "release"}.yml`, "utf8")) as {
       jobs: Record<string, { env?: Record<string, string>; needs?: string[]; steps?: { run?: string }[] }>;
     };
-    expect(releaseChannelEnvironment(channel, environment(channel))).toEqual({
+    expect(releaseChannelEnvironment(channel, environment(channel), policy)).toEqual({
       ZEROS_CLOUD_WORKSPACES_ENABLED: "false",
     });
     for (const job of [workflow.jobs.build, workflow.jobs.publish]) {

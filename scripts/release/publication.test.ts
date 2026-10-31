@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { assertBuildCapability, publicationGate } from "./publication";
 import { channelBaseline, migrationManifest } from "./source";
 
@@ -14,8 +14,16 @@ const receipt = { version: 1, status: "success", channel: "alpha", sourceSha: sh
 const deps = () => ({ receipt: async () => receipt, identity: async () => backend,
   page: async (surface: string) => ({ version: 1, commitSha: sha, surface }) });
 
+// Every channel allows cloud in the checked-in policy. A case pauses one
+// channel here; the shared policy reads this object on every call.
+const policy = vi.hoisted(() => ({ development: true, alpha: true, beta: true, production: true } as Record<string, boolean>));
+vi.mock("../../apps/control-plane/src/cloud/channels.json", () => ({ default: policy }));
+
 describe("V6 publication-time proof", () => {
+  afterEach(() => { Object.assign(policy, { beta: true, production: true }); });
+
   it.each(["beta", "production"] as const)("requires the %s control plane to honor its cloud pause before publication", async channel => {
+    policy[channel] = false;
     const config = { ...candidate, channel, branch: "release/1.2.3", cloudRequired: false };
     const paused = { ...backend, channel, cloud: { enabled: false, ready: true, state: "disabled" }, worker: null, workerQualified: false };
     const makeReceipt = (current: typeof paused | typeof backend) => ({ ...receipt, channel, branch: config.branch,
@@ -24,6 +32,17 @@ describe("V6 publication-time proof", () => {
     for (const current of [{ ...backend, channel }]) {
       await expect(publicationGate(config, { ...deps(), receipt: async () => makeReceipt(current), identity: async () => current }))
         .rejects.toThrow(/channel.*paused/i);
+    }
+  });
+
+  it.each(["beta", "production"] as const)("accepts the receipted %s cloud state once the channel allows cloud", async channel => {
+    const config = { ...candidate, channel, branch: "release/1.2.3", cloudRequired: false };
+    const paused = { ...backend, channel, cloud: { enabled: false, ready: true, state: "disabled" }, worker: null, workerQualified: false };
+    for (const current of [paused, { ...backend, channel }]) {
+      const currentReceipt = { ...receipt, channel, branch: config.branch, cloudRequired: false, backend: current,
+        pages: channel === "beta" ? [{ id: "app", surface: "app" }] : receipt.pages };
+      await expect(publicationGate(config, { ...deps(), receipt: async () => currentReceipt, identity: async () => current }))
+        .resolves.toBeUndefined();
     }
   });
 

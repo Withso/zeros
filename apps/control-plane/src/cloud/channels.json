@@ -1,6 +1,6 @@
 {
   "development": true,
   "alpha": true,
-  "beta": false,
-  "production": false
+  "beta": true,
+  "production": true
 }
