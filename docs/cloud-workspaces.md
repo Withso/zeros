@@ -881,9 +881,7 @@ legacy source-bearing shared image is not a safe rollback.
 ### GitHub connection and PR rollout
 
 This extension depends on the source-authority foundation above and its
-authentication cutover, including `0208_auth0_browser_session_authority.sql`
-where Auth0 compatibility sessions are enabled. Apply the additive migrations
-in order:
+authentication cutover. Apply the additive migrations in order:
 
 1. `0209_cloud_v2_github_metadata.sql` records checkout/PR metadata and operation
    leases.

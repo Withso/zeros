@@ -117,7 +117,7 @@ export async function runChatTitlesSmoke({
           if (command === "auth_get_session_user")
             return {
               sub: "title-smoke-user",
-              provider: "auth0",
+              provider: "workos",
               email: "title@example.test",
               name: null,
             };

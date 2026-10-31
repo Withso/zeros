@@ -32,8 +32,7 @@ for project/domain/branch mappings and the promotion runbook.
 
 ```text
 GET  /                         → signed-in management dashboard; signed-out hub
-GET  /launch                   → session-aware desktop handoff
-GET  /auth/start|callback|logout → WorkOS mode forwards to Railway unchanged
+GET  /auth/start|callback|logout → forwards to Railway unchanged
 GET  /auth/desktop             → bounded desktop PKCE redirect to Hosted AuthKit
 GET  /auth/desktop/start       → compatibility alias; provider selectors are inert
 GET  /auth/desktop/callback    → no-store exact-channel app handoff
@@ -41,7 +40,6 @@ POST /auth/workos-webhook      → compatibility pass-through to Railway
 POST /auth/desktop-revoke      → compatibility pass-through for older desktops
 GET  /github/connected         → GitHub App completion + Open Zeros handoff
 GET  /invite?token=[&mode=web|resume] → landing, web acceptance, or post-auth resume
-POST /handoff/{mint,redeem,refresh,revoke} → Auth0 compatibility only
 GET|POST|PATCH|DELETE /api/v1/* → allowlisted same-origin control-plane proxy
 ```
 
@@ -59,7 +57,7 @@ GET  /THIRD-PARTY-LICENSES.txt → generated exact-version license bundle
 GET  /robots.txt               → Allow: /  (middleware; not the app Disallow)
 ```
 
-App-only paths hit on a marketing host (`/auth/*`, `/handoff/*`, `/api/*`, `/github/connected`, `/launch`, `/invite`) **302 → `app.zeros.build`**.
+App-only paths hit on a marketing host (`/auth/*`, `/api/*`, `/github/connected`, `/invite`) **302 → `app.zeros.build`**.
 
 ### `ops.zeros.build`
 
@@ -97,11 +95,9 @@ npm run typecheck
 npm test               # web/session/auth regression tests
 ```
 
-The ordinary `dev` scripts select Auth0 compatibility. That mode now needs a
-local control plane, disposable Postgres and the shared server-only
-`AUTH0_SESSION_AUTHORITY_KEY`; KV is used only for abuse counters. For a local WorkOS
-end-to-end browser login, run the Railway control plane locally with a loopback
-`CONTROL_PLANE_URL` and its own disposable Postgres. WorkOS credentials stay in
+Signed-in pages need a control plane. For a local end-to-end browser login,
+run the Railway control plane locally with a loopback `CONTROL_PLANE_URL` and
+its own disposable Postgres. WorkOS credentials stay in
 that control-plane process; never copy them into local Pages bindings.
 
 ## Cloudflare Pages projects — shared settings
@@ -115,15 +111,14 @@ workspace install — [pnpm#8318](https://github.com/pnpm/pnpm/issues/8318)).
 After changing `apps/marketing/package.json`, regenerate that lockfile:
 `cd apps/marketing && pnpm install --ignore-workspace --lockfile-only`.
 
-| Setting                    | Value                                                               |
-| -------------------------- | ------------------------------------------------------------------- |
-| **Framework preset**       | `None`                                                              |
-| **Build command**          | `npm run build`                                                     |
-| **Build output directory** | `dist` ← change from `public`                                       |
-| **Root directory**         | `apps/web`                                                          |
-| **Production branch**      | Alpha: `main`; Beta/Production: selected `release/X.Y.Z`            |
-| **KV binding**             | `SESSIONS` — retained per project for best-effort abuse counters; never session authority |
-| **Custom domains**         | Channel app or Ops domain; only Production web owns marketing       |
+| Setting                    | Value                                                         |
+| -------------------------- | ------------------------------------------------------------- |
+| **Framework preset**       | `None`                                                        |
+| **Build command**          | `npm run build`                                               |
+| **Build output directory** | `dist` ← change from `public`                                 |
+| **Root directory**         | `apps/web`                                                    |
+| **Production branch**      | Alpha: `main`; Beta/Production: selected `release/X.Y.Z`      |
+| **Custom domains**         | Channel app or Ops domain; only Production web owns marketing |
 
 Disable Preview deployments on these release projects. Configure the following
 in each project's Production environment:
@@ -131,7 +126,7 @@ in each project's Production environment:
 | Name                          | Required | Notes                                                  |
 | ----------------------------- | -------- | ------------------------------------------------------ |
 | `ZEROS_DEPLOY_ENV`            | yes      | `alpha`, `beta`, or `production`; build fails on drift |
-| `AUTH_PROVIDER`               | yes      | `auth0` until coordinated cutover, then `workos`       |
+| `AUTH_PROVIDER`               | optional | `workos` or unset                                      |
 | `APP_ORIGIN`                  | yes      | matching channel app origin                            |
 | `APP_HOSTS`                   | optional | comma list; defaults to hostname of `APP_ORIGIN`       |
 | `MARKETING_ORIGIN`            | optional | defaults to `https://zeros.build`                      |
@@ -140,17 +135,13 @@ in each project's Production environment:
 | `ZEROS_SURFACE`               | Ops only | `ops` on the two Ops projects; omitted/`app` elsewhere |
 | `WORKOS_BROWSER_ROUTE_PREFIX` | Ops only | `/ops`; isolates the upstream auth namespace           |
 
-Provider-specific Pages configuration:
-
-| Mode                | Variables and runtime secrets                                                                                |
-| ------------------- | ------------------------------------------------------------------------------------------------------------ |
-| Auth0 compatibility | `AUTH0_DOMAIN`, `AUTH0_CLIENT_ID`, secret `AUTH0_CLIENT_SECRET`, channel `AUTH0_AUDIENCE`, and secret `AUTH0_SESSION_AUTHORITY_KEY` shared only with the matching control plane |
-| WorkOS              | No provider-specific Pages values. `APP_ORIGIN` and `CONTROL_PLANE_URL` select the matching Railway service. |
+Pages has no provider-specific values. `APP_ORIGIN` and `CONTROL_PLANE_URL`
+select the matching Railway service.
 
 `ASSETS` is provided automatically by Pages (static output). Do not add it manually.
 
-The Ops projects always use `AUTH_PROVIDER=workos`, set `APP_ORIGIN` to the
-exact Ops origin, and do not need a separate Railway service or database. The
+The Ops projects set `APP_ORIGIN` to the exact Ops origin and do not need a
+separate Railway service or database. The
 matching Railway environment must set `OPS_ORIGIN` to that exact origin. Never
 set either Ops variable in Beta.
 
@@ -161,29 +152,7 @@ JavaScript, permits only the organization-management route set, bounds request
 and upstream JSON bodies, and returns JSON with `no-store` caching. Mutations require a
 same-origin `Origin`, JSON content type, and `X-Zeros-Request: dashboard`.
 
-### Authentication modes
-
-Auth0 remains selectable only for the declared migration rollback window. Use a
-separate Regular Web Application per channel with that environment's callback
-and logout origin.
-
-Auth0 browser sessions and desktop handoff use the control plane's PostgreSQL
-authority. Apply `0208_auth0_browser_session_authority.sql` and configure the
-same random 32-byte key, encoded as 64 hex characters, in Pages and the matching
-control plane's `AUTH0_SESSION_AUTHORITY_KEY` before deploying the Pages change.
-Use a different key per channel; never put it in a `VITE_*` value or browser
-binding. Session token payloads are encrypted at rest, refreshes serialize with
-leases and revisions, tickets are consumed atomically, and sessions have an
-absolute 30-day lifetime. A delayed OAuth callback cannot undo global logout.
-
-The desktop receives an opaque `z0d_` refresh capability, not the provider's
-refresh token. Its revocation is independent of the browser and other devices,
-while refresh rotation is serialized against the underlying provider grant.
-Old KV sessions and raw Auth0 refresh handles require sign-in after cutover;
-there is no fallback to KV or raw handles. Drain old Pages versions during the
-coordinated rollout. Key replacement invalidates encrypted sessions and requires
-fresh sign-in. Retain the schema on rollback and do not restore an older version
-that treats KV or raw refresh tokens as authority.
+### Authentication
 
 WorkOS browser sessions use authorization code plus PKCE. The browser cookie
 contains only a random 256-bit lookup ID. Railway stores only its SHA-256
@@ -192,13 +161,14 @@ WorkOS sealed session live in the channel's PlanetScale Postgres database.
 Refreshes are serialized there across service replicas, and access tokens are
 never stored as database columns.
 
-Cloudflare Pages is deliberately stateless in WorkOS mode. It forwards the
+Cloudflare Pages is deliberately stateless. It forwards the
 app-host callback/cookie traffic to the exact `CONTROL_PLANE_URL`, which keeps
 the existing `https://app-*/auth/callback` contract and host-only cookies. Set
 `WORKOS_API_KEY`, `WORKOS_COOKIE_PASSWORD`, `WORKOS_WEBHOOK_SECRET`, public
 WorkOS client/verification values, and `APP_ORIGIN` only on the matching
-Railway service. Remove any retired `AUTH_SESSIONS` binding,
-`WORKOS_SESSION_WORKER`, or `AUTH_BROKER_SECRET` from Pages.
+Railway service. Remove any retired `SESSIONS` or `AUTH_SESSIONS` binding,
+`AUTH0_*` variable, `WORKOS_SESSION_WORKER`, or `AUTH_BROKER_SECRET` from
+Pages.
 
 The successful callback is a no-store, no-referrer `200` completion document,
 not another cross-site HTTP redirect. It sets the host-only
@@ -267,10 +237,9 @@ A custom AuthKit domain is optional for the initial cutover and should be
 evaluated independently for Production branding and anti-phishing. The
 qualified issuer/JWKS contract must change only through a reviewed migration.
 
-Do not switch `AUTH_PROVIDER=workos` until the WorkOS dashboard, Railway,
-Pages, and matching desktop build are configured from the same qualified
-commit. The control plane intentionally accepts one issuer at a time, so the
-provider switch and channel deployment are coordinated.
+The control plane intentionally accepts one issuer at a time. Change the WorkOS
+dashboard, Railway, Pages, and matching desktop build together, from the same
+qualified commit.
 
 ## Manual cutover checklist (dashboard)
 
@@ -288,7 +257,6 @@ automatic Production deployments disabled:
    hook for that branch (or the Pages deployment API). Confirm its commit is the
    exact Beta SHA, then confirm:
    - `https://app.zeros.build/` → sign in, then the organization dashboard
-   - `https://app.zeros.build/launch` → desktop Launch handoff
    - the deployment's `pages.dev` URL → hub (unknown hosts default to app)
 3. **Custom domains → Add `zeros.build`** (and `www` / `zeros.design` if used)
    - Keep the **old marketing Pages project** live until step 5
@@ -309,22 +277,19 @@ automatic Production deployments disabled:
 apps/web/
   functions/_middleware.ts     → host gate + per-host CSP/robots
   functions/index.ts           → /        (hub — app host only)
-  functions/launch.ts          → /launch
   functions/api/[[path]].ts    → same-origin management API proxy
   functions/invite.ts          → /invite
   functions/github/connected.ts → /github/connected
-  functions/auth/*             → selectable Auth0/WorkOS browser auth + webhook
+  functions/auth/*             → WorkOS browser auth + webhook pass-through
   functions/auth/desktop/*     → Hosted AuthKit desktop redirect/start/callback
   functions/auth/desktop-revoke.ts → older-desktop Railway pass-through
-  functions/handoff/*          → Auth0 desktop ticket compatibility APIs
   lib/hosts.ts                 → host classification + CSP
   lib/deployment-manifest.mjs  → exact, non-secret Pages source-revision proof
   lib/pages-routes.mjs         → surface-specific Pages invocation policy
   lib/hub.ts                   → hub HTML
   lib/dashboard.mjs            → token-based signed-in dashboard HTML
   lib/control-plane-proxy.ts   → server-side API/session boundary
-  lib/oauth.ts                 → legacy Auth0 + cookies (APP_ORIGIN-aware)
-  lib/session.ts               → provider-neutral browser-session facade
+  lib/session.ts               → browser-session facade
   lib/workos-browser.mjs       → stateless Railway auth/session facade
   lib/workos-desktop-authorization.mjs → branded desktop PKCE handoff
   lib/workos-railway.mjs       → exact control-plane origin boundary
@@ -354,7 +319,7 @@ apps/web/
 | Unknown path (either host)  | Static `404.html` with a real 404 status — without that file, Pages' implicit SPA mode would serve the marketing homepage with 200 on `app.zeros.build/<unknown>`                                                                  |
 | `*.pages.dev` / localhost   | Default to **app** (OAuth/hub); set `MARKETING_HOSTS` to preview marketing                                                                                                                                                         |
 | Session cookies             | Still host-only on app; never widened for marketing                                                                                                                                                                                |
-| Dashboard credentials       | Auth0 encrypted grants and WorkOS sealed/refresh state stay in PlanetScale behind the Railway control plane; browser boot data contains identity and organization summaries only                                      |
+| Dashboard credentials       | WorkOS sealed/refresh state stays in PlanetScale behind the Railway control plane; browser boot data contains identity and organization summaries only                                                                             |
 | WorkOS refresh outage       | Pre-rotation transient failures preserve the exact record; a post-rotation verification outage persists the replacement seal but withholds the bearer                                                                              |
 | WorkOS lifecycle event      | Pages preserves exact bytes; Railway verifies the signature before reducing the complete management event set; webhooks are idempotent and Events API repairs misses                                                               |
 | Account resolution          | Recovery/conflict/fresh-auth/inactive states have dedicated fixed UI; provider text and bearer/refresh material never render                                                                                                       |

@@ -2,6 +2,16 @@ import { describe, expect, it } from "vitest";
 
 import { releaseEnvironmentErrors } from "../release-environment";
 
+/** The public WorkOS desktop contract for the channel whose API is `api`. */
+function desktopAuth(api: string) {
+  return {
+    AUTH_DESKTOP_CLIENT_ID: "client_desktop_example",
+    AUTH_ISSUER: "https://api.workos.com/user_management/client_web_example",
+    AUTH_JWKS_URL: "https://api.workos.com/sso/jwks/client_web_example",
+    AUTH_AUDIENCE: api,
+  };
+}
+
 describe("desktop release environment routing", () => {
   it("accepts each channel's exact hosted origins", () => {
     for (const [environment, app, api, ref] of [
@@ -28,7 +38,7 @@ describe("desktop release environment routing", () => {
         releaseEnvironmentErrors(environment, {
           VITE_APP_BASE_URL: app,
           VITE_CONTROL_PLANE_URL: api,
-          AUTH_PROVIDER: "auth0",
+          ...desktopAuth(api),
           GITHUB_REF: ref,
         }),
       ).toEqual([]);
@@ -36,12 +46,19 @@ describe("desktop release environment routing", () => {
   });
 
   it("rejects missing, malformed, or cross-environment origins", () => {
-    expect(releaseEnvironmentErrors("alpha", {})).toHaveLength(3);
+    expect(releaseEnvironmentErrors("alpha", {})).toEqual([
+      "VITE_APP_BASE_URL must be https://app-alpha.zeros.build",
+      "VITE_CONTROL_PLANE_URL must be https://api-alpha.zeros.build",
+      "AUTH_DESKTOP_CLIENT_ID is required",
+      "AUTH_ISSUER must be an exact HTTPS URL",
+      "AUTH_JWKS_URL must be an exact HTTPS URL",
+      "AUTH_AUDIENCE must be https://api-alpha.zeros.build",
+    ]);
     expect(
       releaseEnvironmentErrors("beta", {
         VITE_APP_BASE_URL: "https://app.zeros.build",
         VITE_CONTROL_PLANE_URL: "https://api.zeros.build/path",
-        AUTH_PROVIDER: "auth0",
+        ...desktopAuth("https://api-beta.zeros.build"),
       }),
     ).toEqual([
       "VITE_APP_BASE_URL must be https://app-beta.zeros.build",
@@ -54,7 +71,7 @@ describe("desktop release environment routing", () => {
       releaseEnvironmentErrors("production", {
         VITE_APP_BASE_URL: "https://app.zeros.build",
         VITE_CONTROL_PLANE_URL: "https://api.zeros.build",
-        AUTH_PROVIDER: "auth0",
+        ...desktopAuth("https://api.zeros.build"),
         GITHUB_REF: "refs/heads/main",
       }),
     ).toEqual(["production releases must run from release/X.Y.Z"]);
@@ -62,24 +79,26 @@ describe("desktop release environment routing", () => {
       releaseEnvironmentErrors("alpha", {
         VITE_APP_BASE_URL: "https://app-alpha.zeros.build",
         VITE_CONTROL_PLANE_URL: "https://api-alpha.zeros.build",
-        AUTH_PROVIDER: "auth0",
+        ...desktopAuth("https://api-alpha.zeros.build"),
         GITHUB_REF: "refs/heads/release/1.2.3",
       }),
     ).toEqual(["alpha releases must run from main"]);
   });
 
-  it("requires the exact public WorkOS desktop contract in WorkOS mode", () => {
+  it("requires the exact public WorkOS desktop contract", () => {
     const valid = {
       VITE_APP_BASE_URL: "https://app-alpha.zeros.build",
       VITE_CONTROL_PLANE_URL: "https://api-alpha.zeros.build",
-      AUTH_PROVIDER: "workos",
-      AUTH_DESKTOP_CLIENT_ID: "client_desktop_example",
-      AUTH_ISSUER: "https://api.workos.com/user_management/client_web_example",
-      AUTH_JWKS_URL: "https://api.workos.com/sso/jwks/client_web_example",
-      AUTH_AUDIENCE: "https://api-alpha.zeros.build",
+      ...desktopAuth("https://api-alpha.zeros.build"),
       GITHUB_REF: "refs/heads/main",
     };
     expect(releaseEnvironmentErrors("alpha", valid)).toEqual([]);
+    expect(
+      releaseEnvironmentErrors("alpha", { ...valid, AUTH_PROVIDER: "workos" }),
+    ).toEqual([]);
+    expect(
+      releaseEnvironmentErrors("alpha", { ...valid, AUTH_PROVIDER: "auth0" }),
+    ).toEqual(["AUTH_PROVIDER must be workos or unset"]);
     expect(
       releaseEnvironmentErrors("alpha", {
         ...valid,
@@ -87,8 +106,8 @@ describe("desktop release environment routing", () => {
         AUTH_DESKTOP_CLIENT_ID: "",
       }),
     ).toEqual([
-      "AUTH_DESKTOP_CLIENT_ID is required in WorkOS mode",
-      "AUTH_AUDIENCE must be https://api-alpha.zeros.build in WorkOS mode",
+      "AUTH_DESKTOP_CLIENT_ID is required",
+      "AUTH_AUDIENCE must be https://api-alpha.zeros.build",
     ]);
   });
 
@@ -97,7 +116,7 @@ describe("desktop release environment routing", () => {
       releaseEnvironmentErrors("alpha", {
         VITE_APP_BASE_URL: "https://app-alpha.zeros.build",
         VITE_CONTROL_PLANE_URL: "https://api-alpha.zeros.build",
-        AUTH_PROVIDER: "auth0",
+        ...desktopAuth("https://api-alpha.zeros.build"),
         WORKOS_ALPHA_WEB_API_KEY: "server-only",
       }),
     ).toEqual([
@@ -109,7 +128,7 @@ describe("desktop release environment routing", () => {
     const base = {
       VITE_APP_BASE_URL: "https://app-alpha.zeros.build",
       VITE_CONTROL_PLANE_URL: "https://api-alpha.zeros.build",
-      AUTH_PROVIDER: "auth0",
+      ...desktopAuth("https://api-alpha.zeros.build"),
     };
 
     expect(
