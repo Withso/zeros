@@ -23,10 +23,10 @@ BEGIN
 END;
 $$;
 
--- Pro as account_pro_entitlement (0182) grants it, without the staff benefit:
--- staff accounts need their own grant. Account status is not consulted, so a
--- member keeps their seat through an account-deletion grace period and a
--- restore never displaces anyone.
+-- Pro as account_pro_entitlement (0182) grants it: an entitlement, or the staff
+-- benefit platform owners and developers receive automatically with their role
+-- (0101). Account status is not consulted, so a member keeps their seat through
+-- an account-deletion grace period and a restore never displaces anyone.
 CREATE FUNCTION account_entitlement_pro_at(e public.account_entitlements, at timestamptz)
 RETURNS boolean LANGUAGE sql IMMUTABLE AS $$
   SELECT e.plan = 'pro' AND e.cloud_workspaces_allowed
@@ -34,8 +34,15 @@ RETURNS boolean LANGUAGE sql IMMUTABLE AS $$
      AND e.valid_from <= at AND (e.valid_until IS NULL OR e.valid_until > at)
 $$;
 
--- When Pro last ended. A write that ends live Pro records its own time; a
--- window that closes by itself ends Pro at its close.
+CREATE FUNCTION staff_pro_live(b public.staff_pro_benefits, u public.users)
+RETURNS boolean LANGUAGE sql IMMUTABLE AS $$
+  SELECT coalesce(b.user_id IS NOT NULL AND b.revoked_at IS NULL
+    AND u.staff_role IN ('platform_owner', 'developer'), false)
+$$;
+
+-- When an entitlement last stopped granting Pro. A write that ends live Pro
+-- records its own time; a window that closes by itself ends Pro at its close.
+-- The staff benefit records its own end in revoked_at.
 ALTER TABLE account_entitlements ADD COLUMN pro_ended_at timestamptz;
 
 CREATE FUNCTION account_entitlement_pro_ended_at(e public.account_entitlements, at timestamptz)
@@ -76,10 +83,12 @@ CREATE TRIGGER account_entitlements_record_pro_end
 
 CREATE FUNCTION account_pro_active(target_user_id uuid) RETURNS boolean
 LANGUAGE sql STABLE AS $$
-  SELECT EXISTS (
-    SELECT 1 FROM public.account_entitlements e
-    WHERE e.user_id = target_user_id AND public.account_entitlement_pro_at(e, now())
-      AND (public.app_is_system() OR target_user_id = public.app_current_user()))
+  SELECT (public.app_is_system() OR target_user_id = public.app_current_user()) AND EXISTS (
+    SELECT 1 FROM public.users u
+    LEFT JOIN public.account_entitlements e ON e.user_id = u.id
+    LEFT JOIN public.staff_pro_benefits b ON b.user_id = u.id
+    WHERE u.id = target_user_id
+      AND (coalesce(public.account_entitlement_pro_at(e, now()), false) OR public.staff_pro_live(b, u)))
 $$;
 
 -- A member without Pro takes a free seat in the order they last became free:
@@ -94,11 +103,13 @@ CREATE FUNCTION organization_member_seats(
 LANGUAGE sql STABLE AS $$
   WITH members AS (
     SELECT m.user_id,
-           coalesce(public.account_entitlement_pro_at(e, now()), false) AS pro,
+           coalesce(public.account_entitlement_pro_at(e, now()), false) OR public.staff_pro_live(b, u) AS pro,
            row_number() OVER (ORDER BY m.created_at, m.user_id) <= member_limit AS admitted,
-           greatest(m.created_at, public.account_entitlement_pro_ended_at(e, now())) AS free_since
+           greatest(m.created_at, public.account_entitlement_pro_ended_at(e, now()), b.revoked_at) AS free_since
     FROM public.organization_members m
+    JOIN public.users u ON u.id = m.user_id
     LEFT JOIN public.account_entitlements e ON e.user_id = m.user_id
+    LEFT JOIN public.staff_pro_benefits b ON b.user_id = m.user_id
     WHERE m.org_id = target_org_id AND public.app_require_system()
   ), ranked AS (
     SELECT members.*, row_number() OVER (

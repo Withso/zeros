@@ -114,13 +114,13 @@ must still enforce the current plan, quota, repository access, and actor role.
 
 ### Creating an organization
 
-Creating an organization requires an active Pro entitlement
-(`account_pro_active`). Pro means what `account_pro_entitlement` grants,
-including a cancellation that keeps Pro until the end of its period, except
-that staff roles and the staff Pro benefit grant no Pro: a `platform_owner` or
-`developer` needs their own grant like any other account. Accounts without Pro
-continue to see only their device-local Personal collection and the
-organizations they were invited to.
+Creating an organization requires Pro (`account_pro_active`), as
+`account_pro_entitlement` grants it: an entitlement, including a cancellation
+that keeps Pro until the end of its period, or the staff Pro benefit that
+platform owners and developers receive automatically with their role (0101).
+Support staff get no Pro from their role. Accounts without Pro continue to see
+only their device-local Personal collection and the organizations they were
+invited to.
 
 The control plane is the authorization boundary. `GET /v1/me` publishes the
 server-derived `capabilities.createOrganization` and `capabilities.pro`
@@ -141,7 +141,7 @@ Every collaborative organization admits at most 10 members, the owner
 included, and at most 5 of them without Pro (`organization-seats.ts`). Each
 member has one seat:
 
-- `pro`: the member holds an active Pro entitlement;
+- `pro`: the member has Pro, from an entitlement or the staff benefit;
 - `free`: the member has no Pro and holds one of the five free seats;
 - `hold`: the member has no Pro and the free seats are taken, or directory sync
   added them beyond the 10-member limit.
@@ -155,7 +155,8 @@ lapse or a departure rebalances every path at once:
 - Members without Pro hold free seats in the order they became free: when
   they joined, or when their Pro last ended, whichever is later. Pro ends where
   its validity window closes by itself, or at the write that ended it (a
-  trigger records `account_entitlements.pro_ended_at`). A recorded end never
+  trigger records `account_entitlements.pro_ended_at`); a staff benefit ends
+  when the role does (`staff_pro_benefits.revoked_at`). A recorded end never
   moves earlier, so neither a lapse nor a later write (a future-dated grant,
   recording an expired grant, a backdated window) displaces a member who is
   already free.

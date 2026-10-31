@@ -266,6 +266,22 @@ d("Pro organization seats", () => {
     expect(own.rows).toEqual([{ pro: true }]);
   });
 
+  it("counts platform owners and developers as Pro and queues them when the role ends", async () => {
+    for (let n = 1; n <= 5; n++) await member(`free-${n}`, 100 - n);
+    await member("developer", 150);
+    await pool.query("UPDATE users SET staff_role = 'developer' WHERE id = $1", [id("developer")]);
+    // Support staff get no Pro; joining after five free members puts them on Hold.
+    await member("support", 50);
+    await pool.query("UPDATE users SET staff_role = 'support_admin' WHERE id = $1", [id("support")]);
+    expect(await seats()).toMatchObject({ developer: "pro", support: "hold", "free-5": "free" });
+
+    // Losing the role ends Pro then, behind members who were already free.
+    await pool.query("UPDATE users SET staff_role = NULL WHERE id = $1", [id("developer")]);
+    expect(await seats()).toMatchObject({ developer: "hold", support: "hold", "free-5": "free" });
+    await leave("free-1");
+    expect(await seats()).toMatchObject({ support: "free", developer: "hold" });
+  });
+
   it("holds members beyond ten, which only directory sync can add, even with Pro", async () => {
     for (let n = 1; n <= 10; n++) await member(`pro-${n}`, 100 - n, { pro: true });
     expect(await seats()).toMatchObject({ "pro-9": "pro", "pro-10": "hold" });

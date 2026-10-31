@@ -111,8 +111,9 @@ d("organization routes", () => {
     );
   });
 
-  it("requires Pro on both organization-create routes, whatever the staff role", async () => {
-    actor = { ...member, staffRole: "developer" };
+  it("requires Pro on both organization-create routes, where support staff get none", async () => {
+    await pool.query("UPDATE users SET staff_role = 'support_admin' WHERE id = $1", [member.id]);
+    actor = { ...member, staffRole: "support_admin" };
     try {
       const me = await request("/v1/me");
       await expect(me.json()).resolves.toMatchObject({
@@ -128,6 +129,29 @@ d("organization routes", () => {
           error: { code: "pro_required" },
         });
       }
+    } finally {
+      await pool.query("UPDATE users SET staff_role = NULL WHERE id = $1", [member.id]);
+      actor = owner;
+    }
+  });
+
+  it("gives platform owners and developers Pro with their role, and takes it away with it", async () => {
+    const staff = await signup("Staff");
+    actor = staff;
+    try {
+      for (const role of ["developer", "platform_owner"]) {
+        await pool.query("UPDATE users SET staff_role = $2 WHERE id = $1", [staff.id, role]);
+        const me = await request("/v1/me");
+        await expect(me.json(), role).resolves.toMatchObject({
+          capabilities: { createOrganization: true, pro: true },
+        });
+      }
+      const created = await request("/v1/organizations", { method: "POST", body: { name: "Staff Org" } });
+      expect(created.status).toBe(201);
+      await pool.query("UPDATE users SET staff_role = NULL WHERE id = $1", [staff.id]);
+      await expect((await request("/v1/me")).json()).resolves.toMatchObject({
+        capabilities: { createOrganization: false, pro: false },
+      });
     } finally {
       actor = owner;
     }
