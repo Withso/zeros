@@ -3627,11 +3627,16 @@ export function DesignCanvas({
         sourceVersion: frame.sourceVersion,
         nodeId: details.oid,
       };
-      // A rotation is a pure transform: the angle painted on the overlay is the
-      // angle authored, so nothing has to be measured back. What matters is that
-      // the element turns in the same frame the outline does, which is why this
-      // asks for geometry instead of the full node details — no animation frame
-      // between the write and the answer.
+      /** Until the runtime answers, and again if it stops, the pointer's angle
+       * paints. Once measurements arrive the outline turns with the element:
+       * painting the pointer's angle led the element's pixels by one frame. */
+      let measuring = false;
+      const paintPredicted = (rotation: number) => {
+        // The overlay is already anchored on the pivot, so turning it further
+        // about that same point needs no reflow and no repositioning.
+        overlay.style.transform = `rotate(${rotation}deg)`;
+        overlay.style.transformOrigin = `${overlayFrame.pivotX}px ${overlayFrame.pivotY}px`;
+      };
       const loop = createDesignGestureLoop<DesignRuntimeNodeGeometry>({
         request: (styles) => {
           publishDesignGestureLivePreview(
@@ -3646,6 +3651,17 @@ export function DesignCanvas({
             nodeId: details.oid,
             styles,
           });
+        },
+        failed: () => {
+          measuring = false;
+          paintPredicted(latestRotation);
+        },
+        measured: (geometry) => {
+          measuring = true;
+          paintDesignNodeOverlayGeometry(
+            overlay,
+            designSelectionOverlayFrame(designSelectionBox(geometry)),
+          );
         },
       });
       const move = (pointerEvent: PointerEvent) => {
@@ -3664,10 +3680,7 @@ export function DesignCanvas({
         // the element never disagree by a rounding step.
         latestRotation =
           overlayFrame.rotation + (rotate - base.rotate) * rotationDirection;
-        // The overlay is already anchored on the pivot, so turning it further
-        // about that same point needs no reflow and no repositioning.
-        overlay.style.transform = `rotate(${latestRotation}deg)`;
-        overlay.style.transformOrigin = `${overlayFrame.pivotX}px ${overlayFrame.pivotY}px`;
+        if (!measuring) paintPredicted(latestRotation);
         // The cursor keeps pointing the way the drag turns, but each distinct
         // value decodes an SVG image; only assign one the pointer earned.
         const cursor = designRotationCursor(latestRotation - 45);

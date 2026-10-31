@@ -502,15 +502,17 @@ describe("design workspace interaction wiring", () => {
   });
 
   it("turns the selection box with the element it outlines", () => {
-    // The overlay is anchored on the pivot, so a rotation gesture repaints
-    // nothing but its transform.
+    // The overlay is anchored on the pivot, so a predicted rotation repaints
+    // nothing but its transform; once the runtime answers, the outline paints
+    // what the element became instead of leading its pixels by a frame.
     expect(source).toContain("designSelectionOverlayStyle(overlayFrame)");
     expect(source).toContain(
-      "overlay.style.transform = `rotate(${latestRotation}deg)`",
+      "overlay.style.transform = `rotate(${rotation}deg)`",
     );
     expect(source).toContain(
       "overlay.style.transformOrigin = `${overlayFrame.pivotX}px ${overlayFrame.pivotY}px`",
     );
+    expect(source).toContain("if (!measuring) paintPredicted(latestRotation);");
     // Hover outlines and the inline text editor turn with their element too.
     expect(source).toContain(
       "designSelectionOverlayFrame(designSelectionBox(details)),",
