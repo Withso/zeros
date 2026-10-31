@@ -18,12 +18,21 @@ describe("Advanced style rows", () => {
         "margin-top",
         "--zeros-layout-origin-flow",
         "pointer-events",
+        "margin",
+        "box-sizing-reset-only",
+        "--tw-leading",
+        "user-select",
       ],
+      baseStyleProperties: ["box-sizing-reset-only"],
       authoredStyles: {
         "background-color": { origin: "source", sourceId: "app", value: "var(--bg2)" },
         cursor: { origin: "source", sourceId: "app", value: "pointer" },
         "z-index": { origin: "inline", value: "var(--z-panel)", tokens: [{ name: "--z-panel", value: "40" }] },
         "--card-gap": { origin: "linked", file: "tokens.css", value: "12px" },
+        // Imported preflight reaches every element; it is not this layer's design.
+        margin: { origin: "source", sourceId: "app", selector: "*, ::before, ::after", scope: "base", value: "0" },
+        "--tw-leading": { origin: "source", sourceId: "app", selector: ".leading-4", scope: "element", value: "1rem" },
+        "user-select": { origin: "source", sourceId: "app", selector: ".select-none", scope: "element", value: "none" },
       },
       styles: {
         cursor: "pointer",
@@ -43,6 +52,11 @@ describe("Advanced style rows", () => {
       // Provenance is optional evidence: an unresolved winner shows computed.
       { property: "margin-top", value: "8px" },
       { property: "pointer-events", value: "none" },
+      {
+        property: "user-select",
+        value: "none",
+        authored: { origin: "source", sourceId: "app", selector: ".select-none", scope: "element", value: "none" },
+      },
     ]);
   });
 

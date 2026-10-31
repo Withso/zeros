@@ -192,6 +192,9 @@ export interface DesignRuntimeNodeDetails {
   /** The element's authored class attribute, bounded; omitted when absent and
    * by older runtimes. */
   classes?: string;
+  /** Authored properties every declaration of which reaches this element only
+   * through universal or type selectors (resets, imported preflight). */
+  baseStyleProperties?: string[];
 }
 
 /** Where a winning declaration lives in the rendered frame document. */
@@ -217,6 +220,13 @@ export interface DesignRuntimeAuthoredStyle extends DesignRuntimeStyleOrigin {
   value: string;
   important?: boolean;
   tokens?: DesignRuntimeStyleToken[];
+  /** The winning rule's selector as written, bounded; absent for inline and
+   * nested winners and from older runtimes. */
+  selector?: string;
+  /** `inline`: the style attribute. `element`: the matching selector names
+   * this element by class, id or attribute. `base`: a universal or type
+   * selector, such as a reset or imported preflight. */
+  scope?: "inline" | "element" | "base";
 }
 
 export const DESIGN_RUNTIME_AUTHORED_STYLE_LIMITS = {
@@ -263,6 +273,10 @@ function isRuntimeAuthoredStyles(value: unknown): boolean {
       typeof style.value !== "string" ||
       style.value.length > DESIGN_RUNTIME_AUTHORED_STYLE_LIMITS.value ||
       (style.important !== undefined && typeof style.important !== "boolean") ||
+      (style.selector !== undefined &&
+        (typeof style.selector !== "string" || style.selector.length > 256)) ||
+      (style.scope !== undefined &&
+        style.scope !== "inline" && style.scope !== "element" && style.scope !== "base") ||
       !isRuntimeStyleOrigin(style, true)
     )
       return false;
@@ -821,6 +835,12 @@ function isRuntimeNodeDetails(
     (value.shadow === undefined || value.shadow === true) &&
     (value.classes === undefined ||
       (typeof value.classes === "string" && value.classes.length <= 1024)) &&
+    (value.baseStyleProperties === undefined ||
+      (Array.isArray(value.baseStyleProperties) &&
+        value.baseStyleProperties.length <= 128 &&
+        value.baseStyleProperties.every(
+          (property) => typeof property === "string" && property.length <= 64,
+        ))) &&
     (value.textSizing === undefined || isRuntimeTextSizing(value.textSizing)) &&
     typeof value.selector === "string" &&
     typeof value.visible === "boolean" &&
@@ -1859,9 +1879,20 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
   }
 
   function authoredStylePropertiesOf(element) {
+    return authoredStyleClassesOf(element).properties.slice();
+  }
+
+  /** Authored properties reaching this element only through universal or
+   * type selectors: shared resets rather than this layer's own design. */
+  function baseStylePropertiesOf(element) {
+    return authoredStyleClassesOf(element).base.slice();
+  }
+
+  function authoredStyleClassesOf(element) {
     var cached = authoredStylePropertiesCache.get(element);
-    if (cached && cached.inline === element.style.cssText) return cached.properties.slice();
+    if (cached && cached.inline === element.style.cssText) return cached;
     var authored = new Set(declarationProperties(element.style));
+    var targeted = new Set(authored);
     var rules = styleRuleMetadata(styleScopeOf(element));
     for (var ruleIndex = 0; ruleIndex < rules.length; ruleIndex += 1) {
       var rule = rules[ruleIndex];
@@ -1869,15 +1900,18 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
       var matches = false;
       try { matches = element.matches(rule.selector); } catch (_error) { matches = false; }
       if (!matches) continue;
+      var targets = selectorTargetsElement(element, rule.selector);
       for (var propertyIndex = 0; propertyIndex < rule.declarations.length; propertyIndex += 1) {
         authored.add(rule.declarations[propertyIndex]);
+        if (targets) targeted.add(rule.declarations[propertyIndex]);
       }
-
     }
     recordInsetPins(element, authored);
     var result = Array.from(authored).slice(0, 128);
-    authoredStylePropertiesCache.set(element, { inline: element.style.cssText, properties: result });
-    return result.slice();
+    var base = result.filter(function (property) { return !targeted.has(property); });
+    var entry = { inline: element.style.cssText, properties: result, base: base };
+    authoredStylePropertiesCache.set(element, entry);
+    return entry;
   }
 
   // ── Winning authored declarations ─────────────────────────
@@ -2200,6 +2234,33 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
     return result;
   }
 
+  /** The last compound of a complex selector: what names the element itself,
+   * after any ancestor or sibling context. */
+  function lastCompound(complex) {
+    var depth = 0;
+    for (var index = complex.length - 1; index >= 0; index -= 1) {
+      var character = complex[index];
+      if (character === ")" || character === "]") depth += 1;
+      else if (character === "(" || character === "[") depth = Math.max(0, depth - 1);
+      else if (depth === 0 && /[\s>+~]/.test(character) && complex[index - 1] !== "\\") return complex.slice(index + 1);
+    }
+    return complex;
+  }
+
+  /** Whether the matching selector targets this element by class, id or
+   * attribute, rather than universally or by tag (resets, preflight, element
+   * defaults), which every element of its kind shares. */
+  function selectorTargetsElement(element, selectorText) {
+    var complexes = splitTopLevel(selectorText, ",");
+    for (var index = 0; index < complexes.length; index += 1) {
+      var complex = complexes[index].trim();
+      var matched = false;
+      try { matched = !!complex && element.matches(complex); } catch (_error) { matched = false; }
+      if (matched) return /[.#[]/.test(lastCompound(complex));
+    }
+    return false;
+  }
+
   function sameWinner(left, right) {
     if (!left || !right) return false;
     if (left.inline || right.inline) return !!left.inline && !!right.inline;
@@ -2258,6 +2319,12 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
         return !sameWinner(winningDeclaration(element, longhand, matches), winner);
       })) continue;
       var style = originOfWinner(winner);
+      if (winner.inline) {
+        style.scope = "inline";
+      } else if (winner.match.entry.selector) {
+        style.selector = winner.match.entry.selector.slice(0, 256);
+        style.scope = selectorTargetsElement(element, winner.match.entry.selector) ? "element" : "base";
+      }
       style.value = winner.value;
       if (winner.important) style.important = true;
       var tokens = [];
@@ -2577,6 +2644,10 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
       authoredStyleProperties: authoredStyleProperties
     };
     if (inShadowTree(element)) result.shadow = true;
+    if (!layoutOnly) {
+      var baseProperties = baseStylePropertiesOf(element);
+      if (baseProperties.length > 0) result.baseStyleProperties = baseProperties;
+    }
     var classAttribute = element.getAttribute("class");
     if (classAttribute && classAttribute.trim()) result.classes = classAttribute.replace(/\s+/g, " ").trim().slice(0, 1024);
     result.styles["--zeros-layout-origin-flow"] = element.style ? element.style.getPropertyValue("--zeros-layout-origin-flow").trim() : "";

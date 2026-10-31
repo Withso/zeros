@@ -152,6 +152,8 @@ describe("declarative shadow roots in the design runtime", () => {
     expect(pre.authoredStyles?.["background-color"]).toEqual({
       origin: "linked",
       file: "page/shadow.css",
+      selector: "pre",
+      scope: "base",
       value: "var(--diff-bg)",
       tokens: [{ name: "--diff-bg", value: "rgb(23, 23, 23)", origin: "linked", file: "tokens.css" }],
     });

@@ -105,7 +105,7 @@ export function DesignAdvancedStyleSection({
           data-design-advanced-property={row.property}
           title={
             row.authored
-              ? `${row.property}: ${row.value} — from ${ORIGIN_LABELS[row.authored.origin]}`
+              ? `${row.property}: ${row.value} — from ${row.authored.selector ? `${row.authored.selector} in ` : ""}${ORIGIN_LABELS[row.authored.origin]}`
               : undefined
           }
         >

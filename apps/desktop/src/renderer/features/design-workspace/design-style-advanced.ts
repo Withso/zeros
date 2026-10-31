@@ -64,22 +64,33 @@ function internalProperty(property: string): boolean {
 }
 
 /** Authored declarations on this layer that no dedicated Style control shows,
- * in authored order, each with the value as written. */
+ * in authored order, each with the value as written. A winner from a shared
+ * reset (a universal or type selector such as imported preflight) is not
+ * this layer's design and stays out of the list. */
 export function designAdvancedStyleRows(
-  details: Pick<DesignRuntimeNodeDetails, "authoredStyleProperties" | "authoredStyles" | "styles">,
+  details: Pick<
+    DesignRuntimeNodeDetails,
+    "authoredStyleProperties" | "authoredStyles" | "styles" | "baseStyleProperties"
+  >,
 ): DesignAdvancedStyleRow[] {
   const rows: DesignAdvancedStyleRow[] = [];
   const seen = new Set<string>();
+  const base = new Set(details.baseStyleProperties ?? []);
   for (const raw of details.authoredStyleProperties ?? []) {
     const property = canonicalDesignCssProperty(raw);
     if (
       seen.has(property) ||
+      base.has(property) ||
       DESIGN_STYLE_FIELD_PROPERTIES.has(property) ||
       internalProperty(property)
     )
       continue;
     seen.add(property);
     const authored = details.authoredStyles?.[property];
+    if (authored?.scope === "base") continue;
+    // An imported framework's own variables (Tailwind's --tw-*) implement its
+    // utilities; custom properties authored in this directory stay listed.
+    if (property.startsWith("--") && authored?.origin === "source") continue;
     const value =
       authored?.value || readDesignComputedStyle(details.styles, property);
     if (!value) continue;
