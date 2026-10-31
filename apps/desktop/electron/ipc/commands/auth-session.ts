@@ -1,6 +1,6 @@
 // Main-process-owned desktop authentication session. The persisted account
-// name remains `auth-session:tokens` for compatibility; WorkOS adds provider,
-// internal-account, client-kind, and session identity fields without exposing
+// name remains `auth-session:tokens` for compatibility; it holds the WorkOS
+// session, internal account, client kind and session identity without exposing
 // refresh material to renderer IPC.
 
 import type { CommandHandler } from "../router";
@@ -15,7 +15,6 @@ import {
   updateSecretValues,
 } from "../../secret-store";
 import { withCrossProcessFileLock } from "../../cross-process-lock";
-import { appBaseUrl } from "../../app-base-url";
 import {
   mergeWorkOSRefresh,
   parseParkedSessions,
@@ -30,10 +29,6 @@ import type { WorkOSDesktopSession } from "../../workos-desktop-client";
 import { workOSDesktopClientForMain } from "../../workos-desktop-runtime";
 import { requestWorkOSDesktopRevocation } from "../../workos-desktop-revocation";
 import { controlPlaneFetch } from "../../control-plane-fetch";
-import { channel } from "../../../src/engine/runtime";
-import { desktopAuthConfig } from "../../workos-desktop-config";
-import { devWorkOSConfigurationIssue, workspaceDevAuthProfile } from "../../dev-workos-auth-policy";
-import { controlPlaneBaseUrl } from "../../workos-desktop-account";
 
 const TOKENS_KEY = "auth-session:tokens";
 // Other signed-in WorkOS accounts. The active account stays in TOKENS_KEY, so
@@ -42,7 +37,6 @@ const PARKED_KEY = "auth-session:parked";
 /** Signed-in accounts per device, the active one included. */
 export const MAX_SIGNED_IN_ACCOUNTS = 12;
 const REFRESH_SKEW_MS = 60_000;
-const AUTH_REQUEST_TIMEOUT_MS = 15_000;
 const SESSION_LOCK_OPTIONS = { staleAfterMs: 60_000, waitTimeoutMs: 65_000 };
 
 /** Park times order accounts by recent use, so they never tie. */
@@ -87,11 +81,11 @@ export interface MainAuthSession {
   sub: string;
   email: string;
   name: string | null;
-  provider: "auth0" | "workos";
-  accountId?: string;
-  sessionId?: string;
-  clientKind?: "desktop";
-  authenticationMethod?: string | null;
+  provider: "workos";
+  accountId: string;
+  sessionId: string;
+  clientKind: "desktop";
+  authenticationMethod: string | null;
 }
 
 type AuthSessionChangeListener = () => void | Promise<void>;
@@ -125,83 +119,14 @@ export function onMainAuthSessionChanged(
   return () => sessionChangeListeners.delete(listener);
 }
 
-function decodeJwtExp(token: string): number | null {
-  try {
-    const payload = token.split(".")[1] ?? "";
-    const json = Buffer.from(
-      payload.replace(/-/g, "+").replace(/_/g, "/"),
-      "base64",
-    ).toString("utf8");
-    const claims = JSON.parse(json) as { exp?: unknown };
-    return typeof claims.exp === "number" ? claims.exp * 1_000 : null;
-  } catch {
-    return null;
-  }
-}
-
-/** Enable the one-time Dev migration only after the full Alpha contract passes. */
-function devUsesWorkOS(): boolean {
-  if (channel() !== "dev") return false;
-  try {
-    return devWorkOSConfigurationIssue({
-      auth: desktopAuthConfig(),
-      appOrigin: appBaseUrl(),
-      controlPlaneOrigin: controlPlaneBaseUrl(),
-      localProfile: workspaceDevAuthProfile(),
-      isolated: process.env.ZEROS_ISOLATE === "1",
-    }) === null;
-  } catch {
-    return false;
-  }
-}
-
-/** Read shared credentials, retiring only a matching legacy Dev snapshot and
- * preserving a WorkOS session concurrently installed by another worktree. */
+/** Read the active session. A record no WorkOS sign-in wrote, such as one
+ * an earlier provider left behind, reads as signed out. */
 function readTokenSnapshot(): StoredTokenSnapshot | null {
-  const snapshot = parseStoredTokenSnapshot(getSecret(TOKENS_KEY));
-  if (snapshot?.tokens.provider !== "auth0" || !devUsesWorkOS()) return snapshot;
-  // Retire only Dev's old login after the new Alpha contract is complete.
-  // CAS preserves a WorkOS sign-in concurrently installed by another worktree.
-  if (replaceSecretIfUnchanged(TOKENS_KEY, snapshot.raw, null)) {
-    console.info(
-      "[auth] Legacy Dev session retired; sign in once with WorkOS for all Dev instances",
-    );
-    notifySessionChanged();
-  }
-  const latest = parseStoredTokenSnapshot(getSecret(TOKENS_KEY));
-  return latest?.tokens.provider === "workos" ? latest : null;
+  return parseStoredTokenSnapshot(getSecret(TOKENS_KEY));
 }
 
 function readTokens(): StoredTokens | null {
   return readTokenSnapshot()?.tokens ?? null;
-}
-
-function writeTokens(tokens: StoredTokens): void {
-  setSecret(TOKENS_KEY, JSON.stringify(tokens));
-}
-
-/** Auth0 compatibility install, called only by the main-owned handoff redeem. */
-export function persistSession(input: {
-  accessToken: string;
-  refreshToken: string;
-  sub: string;
-  email: string;
-  name: string | null;
-}): void {
-  if (devUsesWorkOS()) throw new Error("Zeros Dev now requires WorkOS sign-in");
-  if (!input.accessToken || !input.refreshToken || !input.sub || !input.email) {
-    throw new Error("persistSession: missing required field");
-  }
-  writeTokens({
-    provider: "auth0",
-    accessToken: input.accessToken,
-    refreshToken: input.refreshToken,
-    expiresAt: decodeJwtExp(input.accessToken) ?? Date.now() + 60_000,
-    sub: input.sub,
-    email: input.email,
-    name: input.name,
-  });
-  notifySessionChanged();
 }
 
 /** WorkOS install accepts only a session already verified in Electron main and
@@ -244,9 +169,9 @@ export async function persistWorkOSSession(
       const replaced = parked.get(next.accountId);
       if (replaced) retired.push(replaced.tokens);
       parked.delete(next.accountId);
-      if (active?.provider === "workos" && active.accountId !== next.accountId) {
+      if (active && active.accountId !== next.accountId) {
         parked.set(active.accountId, { tokens: active, parkedAt: nextParkedAt(parked) });
-      } else if (active?.provider === "workos" && active.sessionId !== next.sessionId) {
+      } else if (active && active.sessionId !== next.sessionId) {
         // Signing the same account in again leaves no device holding the old session.
         retired.push(active);
       }
@@ -289,66 +214,8 @@ function latestAfterLostCommit(
     : { status: "transient" };
 }
 
-async function refreshAuth0Tokens(
+async function refreshTokens(
   snapshot: StoredTokenSnapshot,
-): Promise<RefreshOutcome> {
-  const current = snapshot.tokens;
-  let response: Response;
-  try {
-    response = await fetch(`${appBaseUrl()}/handoff/refresh`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ refresh_token: current.refreshToken }),
-      signal: AbortSignal.timeout(AUTH_REQUEST_TIMEOUT_MS),
-    });
-  } catch (error) {
-    console.warn(
-      `[auth] refresh network error (keeping session): ${(error as Error).message}`,
-    );
-    return { status: "transient" };
-  }
-  if (!response.ok) {
-    if (response.status === 401 || response.status === 403) {
-      console.warn(
-        `[auth] refresh rejected as terminal: HTTP ${response.status}`,
-      );
-      return { status: "terminal", expectedRaw: snapshot.raw };
-    }
-    console.warn(
-      `[auth] refresh unavailable (keeping session): HTTP ${response.status}`,
-    );
-    return { status: "transient" };
-  }
-  let body: { access_token?: unknown; refresh_token?: unknown };
-  try {
-    body = (await response.json()) as typeof body;
-  } catch {
-    return { status: "transient" };
-  }
-  const accessToken =
-    typeof body.access_token === "string" ? body.access_token : "";
-  if (!accessToken) return { status: "transient" };
-  const refreshToken =
-    typeof body.refresh_token === "string"
-      ? body.refresh_token
-      : current.refreshToken;
-  const next: StoredTokens = {
-    ...current,
-    accessToken,
-    refreshToken,
-    expiresAt: decodeJwtExp(accessToken) ?? Date.now() + 60_000,
-  };
-  return replaceSecretIfUnchanged(
-    TOKENS_KEY,
-    snapshot.raw,
-    JSON.stringify(next),
-  )
-    ? { status: "ok", tokens: next }
-    : latestAfterLostCommit("ok");
-}
-
-async function refreshWorkOSTokens(
-  snapshot: StoredTokenSnapshot & { tokens: WorkOSStoredTokens },
 ): Promise<RefreshOutcome> {
   let providerOutcome;
   try {
@@ -391,16 +258,6 @@ async function refreshWorkOSTokens(
   return { status: "transient" };
 }
 
-async function refreshTokens(
-  snapshot: StoredTokenSnapshot,
-): Promise<RefreshOutcome> {
-  return snapshot.tokens.provider === "workos"
-    ? refreshWorkOSTokens(
-        snapshot as StoredTokenSnapshot & { tokens: WorkOSStoredTokens },
-      )
-    : refreshAuth0Tokens(snapshot);
-}
-
 let inFlightRefresh: Promise<RefreshOutcome> | null = null;
 
 function refreshOnce(): Promise<RefreshOutcome> {
@@ -430,14 +287,10 @@ function toMainSession(value: StoredTokens): MainAuthSession {
     email: value.email,
     name: value.name,
     provider: value.provider,
-    ...(value.accountId ? { accountId: value.accountId } : {}),
-    ...(value.provider === "workos"
-      ? {
-          sessionId: value.sessionId,
-          clientKind: value.clientKind,
-          authenticationMethod: value.authenticationMethod,
-        }
-      : {}),
+    accountId: value.accountId,
+    sessionId: value.sessionId,
+    clientKind: value.clientKind,
+    authenticationMethod: value.authenticationMethod,
   };
 }
 
@@ -482,11 +335,9 @@ export function getSessionUserForMain(): Omit<
   return user;
 }
 
-/** Durable product/integration owner. Auth0 compatibility records fall back to
- * their provider subject; WorkOS records always carry the `/v1/me` account UUID. */
+/** Durable product/integration owner: the `/v1/me` account UUID. */
 export function getProductAccountIdForMain(): string | null {
-  const user = getSessionUserForMain();
-  return user?.accountId ?? user?.sub ?? null;
+  return getSessionUserForMain()?.accountId ?? null;
 }
 
 /**
@@ -501,7 +352,7 @@ export function clearWorkOSSessionAfterServerRevocation(expected: {
 }): boolean {
   const snapshot = readTokenSnapshot();
   if (
-    snapshot?.tokens.provider !== "workos" ||
+    !snapshot ||
     snapshot.tokens.accountId !== expected.accountId ||
     snapshot.tokens.sessionId !== expected.sessionId
   ) {
@@ -525,7 +376,7 @@ export const authGetAccessToken: CommandHandler = async () => {
   const session = await getValidSessionFromTokens(tokens);
   return {
     access_token: session?.accessToken ?? null,
-    account: session ? session.accountId ?? session.sub : null,
+    account: session?.accountId ?? null,
   };
 };
 
@@ -537,10 +388,6 @@ export const authGetSessionUser: CommandHandler = () => {
     throw error;
   }
 };
-
-function sameAccount(left: StoredTokens, right: StoredTokens): boolean {
-  return (left.accountId || left.sub) === (right.accountId || right.sub);
-}
 
 function clearCapturedSession(
   rawAtStart: string | null,
@@ -556,12 +403,8 @@ function clearCapturedSession(
       latest &&
       snapshot &&
       (scope === "all"
-        ? sameAccount(latest.tokens, snapshot.tokens)
-        : (latest.tokens.provider === "auth0" && snapshot.tokens.provider === "auth0" &&
-           latest.tokens.refreshToken === snapshot.tokens.refreshToken) ||
-          latest.tokens.provider === "workos" &&
-          snapshot.tokens.provider === "workos" &&
-          latest.tokens.sessionId === snapshot.tokens.sessionId);
+        ? latest.tokens.accountId === snapshot.tokens.accountId
+        : latest.tokens.sessionId === snapshot.tokens.sessionId);
     if (sameTarget && latest) {
       removed = replaceSecretIfUnchanged(TOKENS_KEY, latest.raw, null);
     }
@@ -574,11 +417,7 @@ async function signOutWorkOS(scope: "current" | "all"): Promise<boolean> {
   const snapshot = parseStoredTokenSnapshot(rawAtStart);
   const session = await getValidSessionForMain().catch(() => null);
   let revoked = false;
-  if (
-    session?.provider === "workos" &&
-    snapshot?.tokens.provider === "workos" &&
-    session.sessionId === snapshot.tokens.sessionId
-  ) {
+  if (session && snapshot && session.sessionId === snapshot.tokens.sessionId) {
     revoked = await requestWorkOSDesktopRevocation(scope, session.accessToken, controlPlaneFetch).catch(() => false);
     if (!revoked) {
       console.warn("[auth] WorkOS revoke unavailable");
@@ -592,50 +431,21 @@ async function signOutWorkOS(scope: "current" | "all"): Promise<boolean> {
 export const authClearSession: CommandHandler = async (args) => {
   const accountId = typeof args?.accountId === "string" ? args.accountId : null;
   const snapshot = readTokenSnapshot();
-  if (
-    accountId !== null &&
-    !(snapshot?.tokens.provider === "workos" && snapshot.tokens.accountId === accountId)
-  ) {
+  if (accountId !== null && snapshot?.tokens.accountId !== accountId) {
     return signOutParkedAccount(accountId);
   }
-  if (snapshot?.tokens.provider === "workos") {
+  if (snapshot) {
     await signOutWorkOS("current");
     await promoteNextParkedAccount();
     return true;
   }
-  if (snapshot?.tokens.provider === "auth0" && snapshot.tokens.refreshToken.startsWith("z0d_")) {
-    return signOutAuth0("current");
-  }
+  // Nothing readable is signed in; clear whatever the entry holds.
   deleteSecret(TOKENS_KEY);
   notifySessionChanged();
   return true;
 };
 
-async function signOutAuth0(scope: "current" | "all"): Promise<boolean> {
-  const rawAtStart = getSecret(TOKENS_KEY);
-  const snapshot = parseStoredTokenSnapshot(rawAtStart);
-  let revoked = false;
-  if (snapshot) {
-    try {
-      const response = await fetch(`${appBaseUrl()}/handoff/revoke`, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ refresh_token: snapshot.tokens.refreshToken, scope }),
-        signal: AbortSignal.timeout(AUTH_REQUEST_TIMEOUT_MS),
-      });
-      revoked = response.ok;
-    } catch {
-      console.warn("[auth] revoke unavailable");
-    }
-  }
-  clearCapturedSession(rawAtStart, snapshot, scope);
-  if (scope === "all" && !revoked) throw new Error("Signed out on this device. Could not sign out other devices. Sign in again to retry.");
-  return true;
-}
-
 export const authSignOutEverywhere: CommandHandler = async () => {
-  const snapshot = readTokenSnapshot();
-  if (snapshot?.tokens.provider !== "workos") return signOutAuth0("all");
   try {
     return await signOutWorkOS("all");
   } finally {
@@ -718,8 +528,7 @@ export async function switchWorkOSAccount(
   const outcome = await withCrossProcessFileLock(sessionLockPath(), async (): Promise<SwitchAccountOutcome> => {
     const values = readSessionEntries();
     const active = parseStoredTokenSnapshot(values[TOKENS_KEY])?.tokens;
-    if (active?.provider === "workos" && active.accountId === accountId) return "current";
-    if (active?.provider === "auth0") return "unavailable";
+    if (active?.accountId === accountId) return "current";
     // A sign-in that finished meanwhile wins over continuing after sign-out.
     if (options.onlyIfSignedOut && active) return "current";
     let tokens = parseParkedSessions(values[PARKED_KEY]).get(accountId)?.tokens;
@@ -740,7 +549,7 @@ export async function switchWorkOSAccount(
       const nowActive = parseStoredTokenSnapshot(current[TOKENS_KEY])?.tokens;
       const parked = parseParkedSessions(current[PARKED_KEY]);
       parked.delete(accountId);
-      if (nowActive?.provider === "workos" && nowActive.accountId !== accountId) {
+      if (nowActive && nowActive.accountId !== accountId) {
         parked.set(nowActive.accountId, { tokens: nowActive, parkedAt: nextParkedAt(parked) });
       }
       return {

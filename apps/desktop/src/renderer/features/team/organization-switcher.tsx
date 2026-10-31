@@ -125,8 +125,7 @@ export function OrganizationSwitcher({
     me?.capabilities?.createOrganization === true,
   );
   const showMemberships = sessionActions.showManagement || !!storedUser;
-  // Only WorkOS sessions can be kept side by side.
-  const multipleAccounts = sessionActions.showManagement && storedUser?.provider === "workos";
+  const multipleAccounts = sessionActions.showManagement;
   const otherAccounts = multipleAccounts
     ? accounts.filter((account) => !account.active)
     : [];

@@ -56,7 +56,7 @@ function exactWorkOSClientPath(url: string, prefix: string): string | null {
  * client id is public, but the issuer/JWKS pair still has to identify the same
  * Alpha Web Application and the token audience/control-plane/app origins must
  * remain atomic. This prevents an ambient shell variable from silently aiming
- * a Dev build at Production or reviving the retired Auth0 handoff.
+ * a Dev build at Production.
  */
 export function devWorkOSConfigurationIssue({
   auth,

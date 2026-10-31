@@ -2,7 +2,7 @@
  * argument, provider name supplied by a caller, or raw URL as a dimension. */
 export const ADVISORY_LOCK_PURPOSES = [
   "agent-credential-owner", "auth-email", "auth-identity", "workos-authentication",
-  "workos-provider", "workos-user-event", "workos-organization-event", "browser-session-refresh", "auth0-session-authority",
+  "workos-provider", "workos-user-event", "workos-organization-event", "browser-session-refresh",
   "security-event-publish", "schema-migration", "zeros-dev-auth-rate",
   "dev-connection-outbox", "dev-connection-generation", "dev-connection-bootstrap", "dev-connection-migration",
   "object-storage", "runtime-qualification", "diagnostic-retention", "computer-image-retirement",

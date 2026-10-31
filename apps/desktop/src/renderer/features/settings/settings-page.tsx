@@ -881,7 +881,6 @@ function AccountPanel() {
   const authed = status === "authenticated" && !!email;
   const primaryProvider = accountAuthenticationProvider(
     session?.user.authenticationMethod,
-    session?.user.sub,
   );
   const primaryProviderLabel =
     accountAuthenticationProviderLabel(primaryProvider);
@@ -954,7 +953,6 @@ function AccountPanel() {
             />
           </SettingsGroup>
 
-          {session?.user.provider === "workos" && (
           <SettingsGroup
             title="Accounts on this Mac"
             description="Switch accounts without signing out. Local workspaces stay the same for every account."
@@ -1004,7 +1002,6 @@ function AccountPanel() {
               </Button>
             </SettingsRow>
           </SettingsGroup>
-          )}
 
           <SettingsGroup title="Sign out">
             <SettingsRow

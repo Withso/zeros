@@ -7,24 +7,21 @@ import {
 
 describe("account authentication provider", () => {
   it("identifies Magic Auth sessions as email-code authentication", () => {
-    const provider = accountAuthenticationProvider("MagicAuth", null);
+    const provider = accountAuthenticationProvider("MagicAuth");
 
     expect(provider).toBe("email-code");
     expect(accountAuthenticationProviderLabel(provider)).toBe("Email code");
   });
 
-  it("retains social-provider and legacy-subject detection", () => {
-    expect(accountAuthenticationProvider("GitHubOAuth", null)).toBe("github");
-    expect(accountAuthenticationProvider("GoogleOAuth", null)).toBe("google");
-    expect(accountAuthenticationProvider(null, "github|123")).toBe("github");
-    expect(accountAuthenticationProvider(null, "google-oauth2|123")).toBe(
-      "google",
-    );
+  it("identifies social sign-in methods", () => {
+    expect(accountAuthenticationProvider("GitHubOAuth")).toBe("github");
+    expect(accountAuthenticationProvider("GoogleOAuth")).toBe("google");
   });
 
   it("does not mislabel unrelated authentication methods", () => {
-    expect(accountAuthenticationProvider("Password", null)).toBeNull();
-    expect(accountAuthenticationProvider("Passkey", null)).toBeNull();
+    expect(accountAuthenticationProvider("Password")).toBeNull();
+    expect(accountAuthenticationProvider("Passkey")).toBeNull();
+    expect(accountAuthenticationProvider(null)).toBeNull();
     expect(accountAuthenticationProviderLabel(null)).toBeNull();
   });
 });

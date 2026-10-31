@@ -45,11 +45,6 @@ import {
   keychainSet,
 } from "./secrets";
 import {
-  authBeginHandoff,
-  authPeekHandoff,
-  authRedeemHandoff,
-} from "./auth-handoff";
-import {
   authClearSession,
   authGetAccessToken,
   authGetSessionUser,
@@ -174,36 +169,19 @@ export function registerAllCommands(): void {
 
   setCommand("cloud_workspace_capability", cloudWorkspaceCapability);
 
-  // Auth (browser sign-in flow via app.zeros.build/auth.zeros.build)
-  // Auth0 session @ rest — main owns the full token pair (auth-session.ts); the
-  // renderer only ever gets a live access token or decoded identity claims, NEVER
-  // the refresh token. The token pair is written straight to the keychain by
-  // auth_redeem_handoff (persistSession) — there is deliberately NO renderer
-  // "install session" command, so a renderer XSS can't plant forged tokens. (The
-  // legacy auth_storage_* adapter commands, and the older
-  // auth_open_signin/auth_get_session/auth_sign_out commands before that, were
-  // both removed in the Auth0 migration.)
+  // Auth: main owns the WorkOS token pair (auth-session.ts); the renderer only
+  // ever gets a live access token or identity claims, NEVER the refresh token.
+  // Main installs sessions after its own PKCE exchange; there is deliberately NO
+  // renderer "install session" command, so a renderer XSS can't plant tokens.
   setCommand("auth_get_access_token", authGetAccessToken);
   setCommand("auth_get_session_user", authGetSessionUser);
   setCommand("auth_clear_session", authClearSession);
   setCommand("auth_sign_out_everywhere", authSignOutEverywhere);
   setCommand("auth_list_accounts", authListAccounts);
   setCommand("auth_switch_account", authSwitchAccount);
-  // Provider-neutral start/cancel. In WorkOS mode Electron main binds the
-  // loopback listener and owns PKCE; Auth0 mode tells the renderer to continue
-  // through the compatibility web-ticket path below.
+  // Start/cancel the hosted WorkOS sign-in; Electron main owns PKCE.
   setCommand("auth_start_signin", authStartSignIn);
   setCommand("auth_cancel_signin", authCancelSignIn);
-
-  // Web sign-in handoff: begin (mint verifier → return its S256 challenge) +
-  // redeem (opaque ticket → independent Auth0 token pair + identity claims). The
-  // verifier never leaves the main process; redeem persists the token pair into
-  // the keychain itself and returns only the access token + identity claims.
-  setCommand("auth_begin_handoff", authBeginHandoff);
-  setCommand("auth_redeem_handoff", authRedeemHandoff);
-  // Lets whichever instance the OS hands the zeros-dev:// callback to recognise a
-  // handoff a SIBLING worktree started; verifier stays main-only (peek = nonce).
-  setCommand("auth_peek_handoff", authPeekHandoff);
 
   // Keychain, CSS, skills, and localhost
   setCommand("keychain_set", keychainSet);

@@ -5,8 +5,8 @@
 // Rendered by <AuthGate> when signed out. Electron main owns WorkOS PKCE, binds
 // the hosted exact-channel callback to the pending request, and stores the
 // resulting rotating token pair; this renderer only waits for a metadata-only
-// completion event. Packaged channels retain the explicit Auth0 rollback path,
-// while Dev fails closed when its Alpha WorkOS profile is incomplete.
+// completion event. Dev fails closed when its Alpha WorkOS profile is
+// incomplete.
 //
 // On click the button switches to "Opening browser…" (animated dots) and stays
 // there for the whole browser round-trip, with a Cancel affordance beneath it.
@@ -57,7 +57,7 @@ export function LoginScreen() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   // Desktop sign-in in flight: the system browser is open and we're waiting for
-  // either the main-owned WorkOS callback or legacy deep link to flip the gate.
+  // the main-owned WorkOS callback to flip the gate.
   const [waiting, setWaiting] = useState(false);
   const [signInExpiresAt, setSignInExpiresAt] = useState<number | null>(null);
   const [countdownNow, setCountdownNow] = useState(() => Date.now());

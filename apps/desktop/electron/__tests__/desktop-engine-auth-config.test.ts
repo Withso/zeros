@@ -34,20 +34,20 @@ describe("desktop engine account-token configuration", () => {
     });
   });
 
-  it("keeps legacy Auth0 derivation selectable during migration", () => {
+  it("passes only explicit verifier overrides when the build has no sign-in", () => {
     expect(
       resolveDesktopEngineAuthEnv(
-        { provider: "auth0" },
+        { provider: "none" },
         {
           AUTH0_DOMAIN: "tenant.example.com",
+          ZEROS_ACCOUNT_JWT_JWKS_URL: "https://keys.example.test/jwks.json",
           AUTH_AUDIENCE: "https://api.example.com",
         },
         false,
       ),
     ).toEqual({
-      ZEROS_ACCOUNT_JWT_JWKS_URL:
-        "https://tenant.example.com/.well-known/jwks.json",
-      ZEROS_ACCOUNT_JWT_ISS: "https://tenant.example.com/",
+      ZEROS_ACCOUNT_JWT_JWKS_URL: "https://keys.example.test/jwks.json",
+      ZEROS_ACCOUNT_JWT_ISS: "",
       ZEROS_ACCOUNT_JWT_AUD: "https://api.example.com",
       ZEROS_ACCOUNT_JWT_CONTRACT: "",
       ZEROS_ACCOUNT_JWT_CLIENT_ID: "",

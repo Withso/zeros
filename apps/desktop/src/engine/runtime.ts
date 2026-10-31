@@ -162,13 +162,13 @@ export function channel(): Channel {
 // (also packaged) registered the bare `zeros://` alongside Production, so a
 // sign-in started in Production could resolve to Beta — the "Open Zeros Beta?"
 // mis-route. Mirrors db/paths.ts's data-dir naming (stable → `zeros`, else
-// `zeros-<channel>`), and is consumed by BOTH the Electron main deep-link
-// handler (registers + validates) and the renderer (builds the /launch URL), so
-// the scheme the web deep-links back with always matches what main accepts.
+// `zeros-<channel>`), and is consumed by the Electron main deep-link handler
+// (registers + validates) and by every flow that sends a return scheme to the
+// web (sign-in, GitHub, engine links), so the scheme the web deep-links back
+// with always matches what main accepts.
 //
-// Pure (no process.env read) so it is import-safe from the renderer bundle — the
-// caller passes the channel it already resolved (main via channel(); renderer via
-// its own build-time CHANNEL / the app_info IPC).
+// Pure (no process.env read) so it is import-safe from any bundle — the caller
+// passes the channel it already resolved.
 export type DeepLinkScheme =
   | "zeros"
   | "zeros-alpha"

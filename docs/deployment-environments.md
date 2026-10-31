@@ -166,25 +166,24 @@ is still effective, and do not delete it merely because authoring tests pass.
 
 Set these independently in every environment:
 
-| Variable                     | Alpha                                                    | Beta                                                    | Production                                                    |
-| ---------------------------- | -------------------------------------------------------- | ------------------------------------------------------- | ------------------------------------------------------------- |
-| `DATABASE_URL`               | Alpha Postgres private reference                         | Beta Postgres private reference                         | Production Postgres private reference                         |
-| `AUTH_PROVIDER`              | `auth0` until cutover, then `workos`                     | `auth0` until cutover, then `workos`                    | `auth0` until cutover, then `workos`                          |
-| `AUTH_AUDIENCE`              | `https://api-alpha.zeros.build`                          | `https://api-beta.zeros.build`                          | `https://api.zeros.build`                                     |
-| `AUTH_ISSUER`                | exact Alpha WorkOS issuer; optional override for Auth0   | exact Beta WorkOS issuer; optional override for Auth0   | exact Production WorkOS issuer; optional override for Auth0   |
-| `AUTH_JWKS_URL`              | exact Alpha WorkOS JWKS URL; optional override for Auth0 | exact Beta WorkOS JWKS URL; optional override for Auth0 | exact Production WorkOS JWKS URL; optional override for Auth0 |
-| `AUTH_WEB_CLIENT_ID`         | Alpha Web Application in WorkOS mode                     | Beta Web Application in WorkOS mode                     | Production Web Application in WorkOS mode                     |
-| `AUTH_DESKTOP_CLIENT_ID`     | Alpha Desktop Application in WorkOS mode                 | Beta Desktop Application in WorkOS mode                 | Production Desktop Application in WorkOS mode                 |
-| `APP_ORIGIN`                 | `https://app-alpha.zeros.build` in WorkOS mode           | `https://app-beta.zeros.build` in WorkOS mode           | `https://app.zeros.build` in WorkOS mode                      |
-| `OPS_ORIGIN`                 | `https://ops-alpha.zeros.build`                          | unset; startup rejects Ops in Beta                      | `https://ops.zeros.build`                                     |
-| `WORKOS_API_KEY`             | Alpha server key in WorkOS mode                          | Beta server key in WorkOS mode                          | Production server key in WorkOS mode                          |
-| `WORKOS_COOKIE_PASSWORD`     | unique random Alpha 32+ character secret                 | unique random Beta 32+ character secret                 | unique random Production 32+ character secret                 |
-| `WORKOS_WEBHOOK_SECRET`      | Alpha endpoint signing secret                            | Beta endpoint signing secret                            | Production endpoint signing secret                            |
-| `AUTH0_DOMAIN`               | legacy fallback until Alpha cutover                      | legacy fallback until Beta cutover                      | legacy fallback until Production cutover                      |
-| `NODE_ENV`                   | `production`                                             | `production`                                            | `production`                                                  |
-| `INVITE_LINK_BASE`           | `https://app-alpha.zeros.build/invite`                   | `https://app-beta.zeros.build/invite`                   | `https://app.zeros.build/invite`                              |
-| `GITHUB_OAUTH_CALLBACK_URL`  | matching Alpha API callback                              | matching Beta API callback                              | matching Production API callback                              |
-| `GITHUB_COMPLETION_PAGE_URL` | matching Alpha app page                                  | matching Beta app page                                  | matching Production app page                                  |
+| Variable                     | Alpha                                    | Beta                                    | Production                                    |
+| ---------------------------- | ---------------------------------------- | --------------------------------------- | --------------------------------------------- |
+| `DATABASE_URL`               | Alpha Postgres private reference         | Beta Postgres private reference         | Production Postgres private reference         |
+| `AUTH_PROVIDER`              | optional; `workos` or unset              | optional; `workos` or unset             | optional; `workos` or unset                   |
+| `AUTH_AUDIENCE`              | `https://api-alpha.zeros.build`          | `https://api-beta.zeros.build`          | `https://api.zeros.build`                     |
+| `AUTH_ISSUER`                | exact Alpha WorkOS issuer                | exact Beta WorkOS issuer                | exact Production WorkOS issuer                |
+| `AUTH_JWKS_URL`              | exact Alpha WorkOS JWKS URL              | exact Beta WorkOS JWKS URL              | exact Production WorkOS JWKS URL              |
+| `AUTH_WEB_CLIENT_ID`         | Alpha Web Application                    | Beta Web Application                    | Production Web Application                    |
+| `AUTH_DESKTOP_CLIENT_ID`     | Alpha Desktop Application                | Beta Desktop Application                | Production Desktop Application                |
+| `APP_ORIGIN`                 | `https://app-alpha.zeros.build`          | `https://app-beta.zeros.build`          | `https://app.zeros.build`                     |
+| `OPS_ORIGIN`                 | `https://ops-alpha.zeros.build`          | unset; startup rejects Ops in Beta      | `https://ops.zeros.build`                     |
+| `WORKOS_API_KEY`             | Alpha server key                         | Beta server key                         | Production server key                         |
+| `WORKOS_COOKIE_PASSWORD`     | unique random Alpha 32+ character secret | unique random Beta 32+ character secret | unique random Production 32+ character secret |
+| `WORKOS_WEBHOOK_SECRET`      | Alpha endpoint signing secret            | Beta endpoint signing secret            | Production endpoint signing secret            |
+| `NODE_ENV`                   | `production`                             | `production`                            | `production`                                  |
+| `INVITE_LINK_BASE`           | `https://app-alpha.zeros.build/invite`   | `https://app-beta.zeros.build/invite`   | `https://app.zeros.build/invite`              |
+| `GITHUB_OAUTH_CALLBACK_URL`  | matching Alpha API callback              | matching Beta API callback              | matching Production API callback              |
+| `GITHUB_COMPLETION_PAGE_URL` | matching Alpha app page                  | matching Beta app page                  | matching Production app page                  |
 
 Use separate GitHub App registrations per environment. Keep OAuth secrets,
 refresh-binding secrets, database credentials, Intercom credentials, and Linear
@@ -243,30 +242,6 @@ verification, MFA, recovery, and account linking. The return page is again on
 pending verification credential, or refresh token enters Pages, the browser
 page, a deep link, or renderer code.
 
-## Legacy Auth0 setup during migration
-
-Use three Regular Web Applications and three API identifiers. A shared Auth0
-tenant is acceptable, but clients and audiences stay isolated:
-
-| Channel    | Callback                                      | Logout URL                       | API identifier                  |
-| ---------- | --------------------------------------------- | -------------------------------- | ------------------------------- |
-| Alpha      | `https://app-alpha.zeros.build/auth/callback` | `https://app-alpha.zeros.build/` | `https://api-alpha.zeros.build` |
-| Beta       | `https://app-beta.zeros.build/auth/callback`  | `https://app-beta.zeros.build/`  | `https://api-beta.zeros.build`  |
-| Production | `https://app.zeros.build/auth/callback`       | `https://app.zeros.build/`       | `https://api.zeros.build`       |
-
-Keep the Post-Login Action that stamps the namespaced email, email verification,
-name, and picture claims consistent across the three clients. Do not let an
-Alpha or Beta web project use the Production client secret or audience.
-
-Auth0 compatibility also requires migration
-`0208_auth0_browser_session_authority.sql` and a channel-specific
-`AUTH0_SESSION_AUTHORITY_KEY`: one random 32-byte key encoded as 64 hex
-characters, shared only by that channel's Pages server and control plane.
-Deploy the authority before the Pages facade and drain older Pages versions.
-Old KV sessions and raw desktop refresh handles require sign-in; changing the
-key also invalidates encrypted sessions. KV remains an abuse-counter store,
-never an authentication fallback. See [the web rollout contract](../apps/web/README.md#authentication-modes).
-
 ## Cloudflare Pages setup
 
 Create `zeros-web-alpha` and `zeros-web-beta` beside the existing `zeros-web`,
@@ -300,29 +275,18 @@ as well. Direct upload into an existing Git-connected project is supported; it
 does not require recreating the project. The build sets `CF_PAGES=1` so the
 existing hosted environment guards run in Actions too.
 
-Each project retains its own `SESSIONS` KV namespace for Auth0 rollback and
-legacy abuse controls. Set these common values in the project's Production
-variable/binding configuration:
+Set these common values in the project's Production variable configuration:
 
-| Variable            | Alpha                                            | Beta                                             | Production                                       |
-| ------------------- | ------------------------------------------------ | ------------------------------------------------ | ------------------------------------------------ |
-| `ZEROS_DEPLOY_ENV`  | `alpha`                                          | `beta`                                           | `production`                                     |
-| `AUTH_PROVIDER`     | `auth0` until coordinated cutover, then `workos` | `auth0` until coordinated cutover, then `workos` | `auth0` until coordinated cutover, then `workos` |
-| `APP_ORIGIN`        | `https://app-alpha.zeros.build`                  | `https://app-beta.zeros.build`                   | `https://app.zeros.build`                        |
-| `CONTROL_PLANE_URL` | `https://api-alpha.zeros.build`                  | `https://api-beta.zeros.build`                   | `https://api.zeros.build`                        |
+| Variable            | Alpha                           | Beta                           | Production                |
+| ------------------- | ------------------------------- | ------------------------------ | ------------------------- |
+| `ZEROS_DEPLOY_ENV`  | `alpha`                         | `beta`                         | `production`              |
+| `AUTH_PROVIDER`     | `workos` or unset               | `workos` or unset              | `workos` or unset         |
+| `APP_ORIGIN`        | `https://app-alpha.zeros.build` | `https://app-beta.zeros.build` | `https://app.zeros.build` |
+| `CONTROL_PLANE_URL` | `https://api-alpha.zeros.build` | `https://api-beta.zeros.build` | `https://api.zeros.build` |
 
-Auth0 compatibility mode additionally requires:
-
-| Variable              | Alpha                           | Beta                           | Production                |
-| --------------------- | ------------------------------- | ------------------------------ | ------------------------- |
-| `AUTH0_AUDIENCE`      | `https://api-alpha.zeros.build` | `https://api-beta.zeros.build` | `https://api.zeros.build` |
-| `AUTH0_DOMAIN`        | configured domain               | configured domain              | configured domain         |
-| `AUTH0_CLIENT_ID`     | Alpha client                    | Beta client                    | Production client         |
-| `AUTH0_CLIENT_SECRET` | Alpha secret                    | Beta secret                    | Production secret         |
-
-WorkOS mode adds no provider-specific Pages secret or binding. Pages remains a
-same-origin facade using only the common `APP_ORIGIN` and
-`CONTROL_PLANE_URL`. Remove any retired `AUTH_SESSIONS` binding,
+Pages has no provider-specific secret or binding. It remains a same-origin
+facade using only the common `APP_ORIGIN` and `CONTROL_PLANE_URL`. Remove any
+retired `SESSIONS` or `AUTH_SESSIONS` binding, `AUTH0_*` variable,
 `WORKOS_SESSION_WORKER`, `WORKOS_WEBHOOK_SECRET`, or `AUTH_BROKER_SECRET` from
 the Pages projects. Browser credentials are host-only random cookies; their
 digests, PKCE verifier, encrypted sealed session, and serialized refresh state
@@ -330,7 +294,7 @@ live in the channel's PlanetScale Postgres.
 
 For `zeros-ops-alpha` and `zeros-ops`, set `ZEROS_SURFACE=ops`,
 `WORKOS_BROWSER_ROUTE_PREFIX=/ops`, and the Ops hostname as `APP_ORIGIN`.
-Set `AUTH_PROVIDER=workos`; do not configure Auth0 fallback or marketing hosts.
+Do not configure marketing hosts.
 The corresponding Railway environment uses the same control-plane service and
 database as its customer app, with `OPS_ORIGIN` set to the exact Ops hostname.
 There is intentionally no `zeros-ops-beta` project.
@@ -366,7 +330,7 @@ order:
 2. Rotate any WorkOS API key that has appeared outside the secret store. Copy
    the replacement directly from WorkOS into Railway; never put it in Pages,
    GitHub, a terminal command, or this repository.
-3. In Railway's `alpha` environment, set `AUTH_PROVIDER=workos`, exact
+3. In Railway's `alpha` environment, set the exact
    `APP_ORIGIN`, `AUTH_AUDIENCE`, both Application client IDs, issuer, JWKS URL,
    replacement `WORKOS_API_KEY`, a unique cookie password, and the Alpha webhook
    signing secret. Capture issuer and JWKS from the qualified real token
@@ -379,7 +343,7 @@ order:
 5. Deploy Railway first. Confirm migrations complete and
    `https://api-alpha.zeros.build/healthz` succeeds before changing Pages.
 6. In Cloudflare Pages `zeros-web-alpha`, set `ZEROS_DEPLOY_ENV=alpha`,
-   `AUTH_PROVIDER=workos`, `APP_ORIGIN=https://app-alpha.zeros.build`, and
+   `APP_ORIGIN=https://app-alpha.zeros.build`, and
    `CONTROL_PLANE_URL=https://api-alpha.zeros.build`. Remove retired broker,
    session-worker, and WorkOS secret bindings, then deploy the same `main` SHA.
 7. In the GitHub `alpha` Environment, set the public WorkOS desktop release
@@ -387,14 +351,12 @@ order:
    API key to GitHub.
 8. Qualify private-browser web login/refresh/logout, webhook delivery, and a
    packaged macOS login/refresh/relaunch/current-device logout/all-device
-   revocation. Keep Auth0 and the previous database/deployments available until
-   Alpha passes the soak window.
+   revocation. Keep the previous database/deployments available until Alpha
+   passes the soak window.
 
-The repository prepares this topology but does not activate it. Railway accepts
-one issuer at a time, while released builds remain on Auth0 until the
-coordinated cutover. Switch the clean Alpha database, Railway `AUTH_PROVIDER`,
-Pages `AUTH_PROVIDER`, WorkOS webhook, and matching desktop build as one
-coordinated operation. Never switch only the browser or only the control plane.
+Railway accepts one issuer at a time. Change the database, Railway, Pages,
+WorkOS webhook, and matching desktop build as one coordinated operation. Never
+change only the browser or only the control plane.
 
 Only `zeros-web` owns `zeros.build`, `www.zeros.build`, and `zeros.design`.
 Those marketing domains must never be attached to Alpha or Beta.
@@ -412,21 +374,21 @@ backward-compatible fallback):
 | `production`       | `https://app.zeros.build`       | `https://api.zeros.build`       |
 
 The workflows validate these exact pairs. Both values are baked into the
-renderer, and both are now also available to Electron main for Auth0, hosted
-WorkOS desktop authorization, and GitHub handoffs. A missing Alpha/Beta value
+renderer, and both are now also available to Electron main for hosted WorkOS
+desktop authorization and GitHub handoffs. A missing Alpha/Beta value
 cannot silently fall back to Production.
 
 Desktop release environments recognize these environment-scoped Actions
 variables:
 
-| Variable                                     | Auth0 rollback build      | WorkOS build                                                                    |
-| -------------------------------------------- | ------------------------- | ------------------------------------------------------------------------------- |
-| `AUTH_PROVIDER`                              | `auth0`                   | `workos`                                                                        |
-| `AUTH_DESKTOP_CLIENT_ID`                     | unused                    | channel Desktop Application ID                                                  |
-| `AUTH_ISSUER`                                | unused                    | exact qualified issuer                                                          |
-| `AUTH_JWKS_URL`                              | unused                    | exact qualified JWKS URL                                                        |
-| `AUTH_AUDIENCE`                              | unused                    | matching channel API origin                                                     |
-| `ZEROS_CLOUD_WORKSPACES_ENABLED`             | `false`                   | `false` until that channel's desktop cloud client is release-approved           |
+| Variable                         | Value                                                                 |
+| -------------------------------- | --------------------------------------------------------------------- |
+| `AUTH_PROVIDER`                  | `workos` or unset                                                     |
+| `AUTH_DESKTOP_CLIENT_ID`         | channel Desktop Application ID                                        |
+| `AUTH_ISSUER`                    | exact qualified issuer                                                |
+| `AUTH_JWKS_URL`                  | exact qualified JWKS URL                                              |
+| `AUTH_AUDIENCE`                  | matching channel API origin                                           |
+| `ZEROS_CLOUD_WORKSPACES_ENABLED` | `false` until that channel's desktop cloud client is release-approved |
 
 The authentication entries are public verification values baked only into
 Electron main. Never add a WorkOS API key—generic, web, desktop, or channel-
@@ -1277,11 +1239,11 @@ Configure these GitHub **environment** variables independently in `alpha`,
 | `CLOUDFLARE_ACCOUNT_ID`                                              | account owning the channel's Pages projects                                                          |
 | `CF_PAGES_APP_PROJECT`                                               | `zeros-web-alpha`, `zeros-web-beta`, or `zeros-web`                                                  |
 | `CF_PAGES_OPS_PROJECT`                                               | `zeros-ops-alpha`, empty for Beta, or `zeros-ops`                                                    |
-| `AUTH_PROVIDER`                                                      | `workos` for the automated hosted lane                                                               |
+| `AUTH_PROVIDER`                                                      | `workos` or unset                                                                                    |
 | `AUTH_ISSUER`, `AUTH_JWKS_URL`                                       | channel's qualified public WorkOS issuer and signing-key URL; HTTPS only                             |
 | `AUTH_WEB_CLIENT_ID`, `AUTH_DESKTOP_CLIENT_ID`                       | distinct channel client IDs; public verification metadata, never client secrets                      |
 | `ZEROS_CLOUD_WORKSPACES_ENABLED`                                     | exact desktop capability decision; `true` only after qualification                                   |
-| Existing desktop auth/origin values                          | the exact channel values in the earlier tables                                                       |
+| Existing desktop auth/origin values                                  | the exact channel values in the earlier tables                                                       |
 
 The event supplies `RELEASE_SHA`, `RELEASE_BRANCH` and channel;
 they are not owner-overridable deployment variables. `GITHUB_SHA` must equal

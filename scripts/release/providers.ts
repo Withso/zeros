@@ -70,7 +70,9 @@ export function createProviders(config: PromotionConfig, env: NodeJS.ProcessEnv,
       "Disable independent Pages production and preview autodeploys before enabling hosted promotion");
     if (project.source) requireCheck(`${source.owner}/${source.repo_name}`.toLowerCase() === config.repository.toLowerCase(), "Pages repository mismatch");
     for (const name of ["ZEROS_DEPLOY_ENV", "AUTH_PROVIDER", "APP_ORIGIN", "CONTROL_PLANE_URL", "ZEROS_SURFACE", "WORKOS_BROWSER_ROUTE_PREFIX"] as const) {
-      const actual = vars?.[name]?.value ?? (name === "ZEROS_SURFACE" ? "app" : name === "WORKOS_BROWSER_ROUTE_PREFIX" ? "" : undefined);
+      // WorkOS is the only provider, so Pages may omit AUTH_PROVIDER entirely.
+      const actual = name === "AUTH_PROVIDER" ? (vars?.[name]?.value || "workos")
+        : vars?.[name]?.value ?? (name === "ZEROS_SURFACE" ? "app" : name === "WORKOS_BROWSER_ROUTE_PREFIX" ? "" : undefined);
       requireCheck(actual === expected[name], "Pages production runtime variables do not match the channel/surface");
     }
     requireCheck(!Object.keys(vars ?? {}).some(name => /^(?:WORKOS_.*(?:KEY|PASSWORD|SECRET)|AUTH_BROKER_SECRET|ZEROS_DEV_)/.test(name)), "Pages retains forbidden server or Dev configuration");

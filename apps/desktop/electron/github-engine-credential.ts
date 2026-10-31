@@ -1,6 +1,6 @@
 // Pure host→engine credential projection.
 //
-// Refresh tokens, Auth0 ownership, and installation metadata stay in Electron
+// Refresh tokens, account ownership, and installation metadata stay in Electron
 // main. The engine receives only the selected short-lived working credential,
 // and never receives an expired App token or one owned by another Zeros user.
 

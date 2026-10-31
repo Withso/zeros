@@ -1,7 +1,7 @@
 // Host-aware gate for the unified zeros-web Pages project.
 //
 // Runs before every Functions route. Marketing hosts (zeros.build, …) must
-// never execute hub/auth/handoff handlers — those stay on app.zeros.build.
+// never execute hub/auth handlers — those stay on app.zeros.build.
 //
 // CRITICAL: calling `next()` on a marketing request for `/` would still invoke
 // functions/index.ts (Pages Functions win over static). So marketing traffic

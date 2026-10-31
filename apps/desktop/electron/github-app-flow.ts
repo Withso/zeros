@@ -240,8 +240,8 @@ function githubAppController(): GithubAppController {
         ? {
             accessToken: session.accessToken,
             // Controller field name is serialized compatibility; its value is
-            // the stable Zeros account UUID in WorkOS mode.
-            sub: session.accountId ?? session.sub,
+            // the stable Zeros account UUID.
+            sub: session.accountId,
           }
         : null;
     },

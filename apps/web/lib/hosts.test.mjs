@@ -13,7 +13,6 @@ import {
   isAppOnlyPath,
   marketingOrigin,
   normalizeMarketingPath,
-  redirectUri,
 } from "./hosts.ts";
 
 describe("applyHostHeaders", () => {
@@ -127,12 +126,10 @@ describe("classifyHost", () => {
 });
 
 describe("isAppOnlyPath", () => {
-  it("flags auth/handoff/API/launch/invite/GitHub completion", () => {
+  it("flags auth/API/invite/GitHub completion", () => {
     assert.equal(isAppOnlyPath("/auth/start"), true);
-    assert.equal(isAppOnlyPath("/handoff/mint"), true);
     assert.equal(isAppOnlyPath("/api"), true);
     assert.equal(isAppOnlyPath("/api/v1/me"), true);
-    assert.equal(isAppOnlyPath("/launch"), true);
     assert.equal(isAppOnlyPath("/invite"), true);
     assert.equal(isAppOnlyPath("/github/connected"), true);
   });
@@ -152,7 +149,6 @@ describe("origins", () => {
       "https://app.zeros.build",
     );
     assert.equal(marketingOrigin({}), "https://zeros.build");
-    assert.equal(redirectUri({}), "https://app.zeros.build/auth/callback");
   });
 });
 

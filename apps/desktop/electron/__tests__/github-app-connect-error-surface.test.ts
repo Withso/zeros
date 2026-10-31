@@ -64,7 +64,7 @@ function controllerAgainst(response: {
       setSelectedMethod: async () => undefined,
     },
     compareAndSetCredential: async () => false,
-    getSession: async () => ({ accessToken: "zeros-access", sub: "auth0|one" }),
+    getSession: async () => ({ accessToken: "zeros-access", sub: "account-one" }),
     savePending: vi.fn(),
     consumePending: () => ({ status: "missing" }),
     discardPending: vi.fn(),

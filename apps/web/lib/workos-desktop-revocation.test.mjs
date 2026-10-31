@@ -39,18 +39,3 @@ test("Pages forwards only a bounded scope and bearer to Railway", async () => {
     scope: "all",
   });
 });
-
-test("the compatibility revocation facade is unavailable in Auth0 mode", async () => {
-  const response = await handleWorkOSDesktopRevocationRequest(
-    new Request("https://app.zeros.build/auth/desktop-revoke", {
-      method: "POST",
-      headers: {
-        authorization: "Bearer token",
-        "content-type": "application/json",
-      },
-      body: JSON.stringify({ scope: "current" }),
-    }),
-    { AUTH_PROVIDER: "auth0", CONTROL_PLANE_URL },
-  );
-  assert.equal(response.status, 404);
-});

@@ -132,20 +132,3 @@ it("lists other signed-in accounts to switch to and always offers to add one", a
   expect(alone).not.toContain("Switch account");
   expect(menuRows(alone).map(row => row.name)).toContain("Add account");
 });
-
-it("offers no second account to a session that cannot be kept side by side", async () => {
-  const { render } = await setup();
-  const previous = io.auth.storedUser;
-  io.auth.storedUser = { sub: "account-a", provider: "auth0" };
-  try {
-    io.auth.accounts = [
-      { accountId: "account-a", email: "a@example.test", name: null, active: true },
-      { accountId: "account-b", email: "b@example.test", name: null, active: false },
-    ];
-    const names = menuRows(render()).map(row => row.name);
-    expect(names).not.toContain("Add account");
-    expect(names).not.toContain("b@example.test");
-  } finally {
-    io.auth.storedUser = previous;
-  }
-});

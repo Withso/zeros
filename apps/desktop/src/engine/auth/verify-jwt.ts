@@ -806,7 +806,7 @@ export function buildAccountAuthFromEnv(
       // skips the aud check entirely when this is empty (`if (config.audience)`),
       // so a non-empty fallback is what stops a deployment that forgets to set
       // ZEROS_ACCOUNT_JWT_AUD from silently validating tokens for ANY audience.
-      // It fails closed — an Auth0 token is rejected — which is the safe
+      // It fails closed — a token minted for another audience is rejected — the safe
       // direction. Replace the sentinel only together with making aud required.
       audience: env.ZEROS_ACCOUNT_JWT_AUD || "authenticated",
       issuer: env.ZEROS_ACCOUNT_JWT_ISS || undefined,

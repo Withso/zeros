@@ -38,9 +38,9 @@ function organizationCreationDialog(allowed) {
     : "";
 }
 
-/** Preserve only dashboard navigation intent through a browser OAuth round
- * trip. Desktop handoff credentials and arbitrary query parameters must not be
- * copied into the post-login return URL. */
+/** Preserve only dashboard navigation intent through a browser sign-in round
+ * trip. Arbitrary query parameters must not be copied into the post-login
+ * return URL. */
 export function dashboardReturnUrl(appBase, requestUrl) {
   let source;
   try {
@@ -48,12 +48,7 @@ export function dashboardReturnUrl(appBase, requestUrl) {
   } catch {
     return new URL("/", appBase).toString();
   }
-  // `/launch` remains desktop guidance when it has no handoff credentials;
-  // do not turn an OAuth round trip from that explicit entry into Dashboard.
-  const destination = new URL(
-    source.pathname === "/launch" ? "/launch" : "/",
-    appBase,
-  );
+  const destination = new URL("/", appBase);
   const organization = source.searchParams.get("organization");
   if (organization && ORGANIZATION_ID_RE.test(organization)) {
     destination.searchParams.set("organization", organization);

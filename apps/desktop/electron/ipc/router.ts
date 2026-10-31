@@ -87,9 +87,9 @@ const commandTable: Record<string, CommandHandler> = {
   cloud_workspace_capability: notImpl("cloud_workspace_capability", 3),
 
   // ── WorkOS session at rest — main owns the full token pair; the renderer only
-  // ever gets a live access token or decoded identity claims. The pair is written
-  // to the keychain by auth_redeem_handoff itself (no renderer-reachable install
-  // command), so an XSS can't plant forged tokens. See
+  // ever gets a live access token or decoded identity claims. Main writes the
+  // pair after its own PKCE exchange (no renderer-reachable install command),
+  // so an XSS can't plant forged tokens. See
   // apps/desktop/electron/ipc/commands/auth-session.ts. (legacy auth_storage_*/
   // auth_open_signin/get_session/sign_out removed across the 2026-06 and
   // 2026-07 auth rebuilds.)
@@ -103,15 +103,6 @@ const commandTable: Record<string, CommandHandler> = {
   auth_start_signin: notImpl("auth_start_signin", 5),
   auth_cancel_signin: notImpl("auth_cancel_signin", 5),
   auth_security_revalidate: notImpl("auth_security_revalidate", 5),
-
-  // ── Web sign-in handoff — the website owns OAuth; the desktop redeems an
-  // opaque single-use ticket for a session. Verifier stays in main safeStorage.
-  // See apps/desktop/electron/ipc/commands/auth-handoff.ts.
-  auth_begin_handoff: notImpl("auth_begin_handoff", 5),
-  auth_redeem_handoff: notImpl("auth_redeem_handoff", 5),
-  // Nonce-only peek so a sibling dev worktree can complete a handoff another
-  // instance began (single shared zeros-dev:// scheme). Never returns the verifier.
-  auth_peek_handoff: notImpl("auth_peek_handoff", 5),
 
   // ── Keychain / CSS / skills / localhost ────────────
   keychain_set: notImpl("keychain_set", 5),

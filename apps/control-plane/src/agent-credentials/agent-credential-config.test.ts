@@ -3,8 +3,9 @@ import { describe, expect, it } from "vitest";
 import { loadConfig } from "../config.js";
 import { cloudAgentCredentialKeys } from "./agent-credentials.js";
 import { openCloudAgentCredential, sealCloudAgentCredential } from "./agent-credential-envelope.js";
+import { workosTestEnv } from "../test-workos-env.js";
 
-const env = { DATABASE_URL: "postgres://fixture@localhost/credential-config", AUTH0_DOMAIN: "tenant.example.test", AUTH_AUDIENCE: "test" };
+const env = { DATABASE_URL: "postgres://fixture@localhost/credential-config", ...workosTestEnv(), AUTH_AUDIENCE: "test" };
 describe("persisted credential encryption configuration", () => {
   it("loads Dev's V1 and Alpha's versioned keyring without a legacy cloud runtime", () => {
     const first = randomBytes(32).toString("base64url"), second = randomBytes(32).toString("base64url");

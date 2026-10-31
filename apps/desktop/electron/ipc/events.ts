@@ -19,7 +19,6 @@
 //   engine-restarted   { port: number }
 //   engine-crash       { ... } (watchdog could not respawn)
 //   gh:device-code     { ... } (GitHub device-flow verification code)
-//   auth-error / auth-handoff   (legacy deep-link OAuth handoff)
 //   auth-signin-complete / auth-signin-error (main-owned WorkOS hosted flow)
 //   updater-status     { ... } (auto-updater progress)
 //   main-process-error { ... }
@@ -80,15 +79,15 @@ export function suspendLocalNavigation(): void {
   localNavigationReady = false;
 }
 
-// COLD-LAUNCH BUFFER. When the app is launched BY a zeros:// deep link (e.g. an
-// OAuth handoff `zeros://auth/callback#code=…`), the URL is handled before the
+// COLD-LAUNCH BUFFER. When the app is launched BY a zeros:// deep link (e.g. a
+// sign-in callback `zeros://auth/callback#code=…`), the URL is handled before the
 // BrowserWindow exists, so a naive send would drop silently and the sign-in
 // would never complete. We buffer events emitted before the FIRST window binds
 // and flush them once the renderer has loaded (+ a short grace so its React
 // subscribers have mounted). Bounded, and only active until the first window —
 // a mid-session window close/reopen does NOT buffer (avoids replaying stale
-// agent/pty traffic). The auth-handoff payload is single-use (code + nonce), so
-// a slightly-late delivery is safe.
+// agent/pty traffic). Sign-in completion events carry no credential, so a
+// slightly-late delivery is safe.
 let everHadWindow = false;
 const preWindowBuffer: ZerosEventEnvelope[] = [];
 const MAX_PRE_WINDOW_EVENTS = 50;
@@ -129,7 +128,7 @@ export function setMainWindow(win: BrowserWindow): void {
     if (preWindowBuffer.length > 0) {
       const pending = preWindowBuffer.splice(0, preWindowBuffer.length);
       // Flush after the renderer document has loaded, plus a short grace so the
-      // renderer's event subscribers (e.g. AuthProvider's auth-handoff listener)
+      // renderer's event subscribers (e.g. AuthProvider's sign-in listeners)
       // have mounted before we send.
       win.webContents.once("did-finish-load", () => {
         setTimeout(() => {

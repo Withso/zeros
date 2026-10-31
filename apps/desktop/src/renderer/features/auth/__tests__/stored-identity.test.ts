@@ -4,6 +4,14 @@ const io = vi.hoisted(() => ({ invoke: vi.fn() }));
 vi.mock("../../../platform/runtime", () => ({ isLocalDevelopment: () => false, nativeInvoke: io.invoke }));
 const user = { sub: "account-a", email: "a@example.test", name: null, provider: "workos" as const };
 beforeEach(() => { vi.resetModules(); io.invoke.mockReset(); });
+
+/** Sign an identity in the way main does: resync reads it and its bearer. */
+async function signIn(auth: typeof import("../auth-store"), identity: typeof user, token: string) {
+  io.invoke.mockImplementation((command: string) => Promise.resolve(
+    command === "auth_get_session_user" ? identity : { access_token: token, account: identity.sub },
+  ));
+  await auth.resync();
+}
 afterEach(() => vi.restoreAllMocks());
 
 it("reads main's stored identity before waiting for token refresh", async () => {
@@ -44,7 +52,7 @@ it("refuses new bearer reads while native sign-out is still settling", async () 
 
 it("does not restore a retiring identity from a resync while native sign-out is pending", async () => {
   const auth = await import("../auth-store");
-  auth.markSignedIn({ ...user, access_token: "fixture-session" });
+  await signIn(auth, user, "fixture-session");
   let finish!: () => void;
   io.invoke.mockImplementation((command: string) => command === "auth_clear_session"
     ? new Promise<void>(resolve => { finish = resolve; })
@@ -59,23 +67,24 @@ it("does not restore a retiring identity from a resync while native sign-out is 
 
 it("does not republish an earlier account across A → B → A token refresh", async () => {
   const auth = await import("../auth-store");
-  let finish!: (value: { access_token: string }) => void;
+  let finish!: (value: { access_token: string; account: string }) => void;
   io.invoke.mockImplementation((command: string) => command === "auth_get_session_user" ? Promise.resolve(user)
     : new Promise(resolve => { finish = resolve; }));
   const observed: (string | null)[] = [];
   auth.onAuthStateChange(session => observed.push(session?.access_token ?? null));
   const pending = auth.resync();
-  await Promise.resolve();
-  auth.markSignedIn({ ...user, sub: "account-b", access_token: "fixture-b" });
-  auth.markSignedIn({ ...user, access_token: "fixture-new-a" });
-  finish({ access_token: "fixture-old-a" });
+  await vi.waitFor(() => expect(finish).toBeTypeOf("function"));
+  const held = finish;
+  await signIn(auth, { ...user, sub: "account-b" }, "fixture-b");
+  await signIn(auth, user, "fixture-new-a");
+  held({ access_token: "fixture-old-a", account: "account-a" });
   await pending;
   expect(observed.filter(value => value !== null)).toEqual(["fixture-b", "fixture-new-a"]);
 });
 
 it("retires the old bearer before publishing a replacement identity with refresh pending", async () => {
   const auth = await import("../auth-store");
-  auth.markSignedIn({ ...user, access_token: "fixture-a" });
+  await signIn(auth, user, "fixture-a");
   let finish!: (value: { access_token: string | null }) => void;
   io.invoke.mockImplementation((command: string) => command === "auth_get_session_user"
     ? Promise.resolve({ ...user, sub: "account-b" })

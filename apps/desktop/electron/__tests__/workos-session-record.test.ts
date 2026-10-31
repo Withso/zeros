@@ -21,7 +21,7 @@ const current: WorkOSStoredTokens = {
 };
 
 describe("desktop auth safe-storage record", () => {
-  it("reads the pre-WorkOS serialized shape as an Auth0 compatibility record", () => {
+  it("reads a record an earlier provider left behind as absent", () => {
     const legacy = {
       accessToken: "legacy-access",
       refreshToken: "legacy-refresh",
@@ -30,13 +30,11 @@ describe("desktop auth safe-storage record", () => {
       email: "person@example.com",
       name: null,
     };
-    expect(parseStoredTokenSnapshot(JSON.stringify(legacy))?.tokens).toEqual({
-      ...legacy,
-      provider: "auth0",
-    });
+    expect(parseStoredTokenSnapshot(JSON.stringify(legacy))).toBeNull();
+    expect(parseStoredTokenSnapshot(JSON.stringify({ ...legacy, provider: "auth0" }))).toBeNull();
   });
 
-  it("rejects an incomplete WorkOS record instead of treating it as Auth0", () => {
+  it("rejects an incomplete WorkOS record", () => {
     expect(
       parseStoredTokenSnapshot(
         JSON.stringify({ ...current, sessionId: undefined }),

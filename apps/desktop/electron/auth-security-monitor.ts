@@ -31,7 +31,7 @@ export type DesktopSecurityFrame = {
 };
 
 export type DesktopSecuritySession = {
-  provider: "auth0" | "workos";
+  provider: "workos";
   accessToken: string;
   accountId?: string;
   sessionId?: string;

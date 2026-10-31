@@ -23,8 +23,8 @@ import { readFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 
 // Required in EVERY production build — a missing one breaks the shipped app.
-// Auth has no entry here: the desktop never talks to Auth0 directly, only to
-// app.zeros.build (see apps/desktop/electron/ipc/commands/auth-session.ts).
+// Auth has no entry here: its public WorkOS desktop settings are main-process
+// build inputs, not VITE_ variables.
 const PROD_REQUIRED = [
   "VITE_POSTHOG_KEY_PROD",
   "VITE_APP_BASE_URL",
