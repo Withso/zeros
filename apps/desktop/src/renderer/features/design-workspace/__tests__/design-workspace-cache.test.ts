@@ -2313,6 +2313,31 @@ describe("design workspace cache", () => {
     expect(next.lint.violations).toEqual(violations);
   });
 
+  it("does not republish a lazy catalog whose frame audit is unchanged", async () => {
+    // Every saved edit settles its frame's audit; an identical one must not
+    // re-render each Design subscriber for the same aggregate.
+    const workspaceId = "ws_lazy_audit_unchanged";
+    const current = snapshot();
+    const frame = current.frames[0]!;
+    current.preparation = { epoch: 1, revision: "a".repeat(64), current: [frame.file], errors: {},
+      descriptions: [{ file: frame.file, title: frame.title, x: frame.x, y: frame.y,
+        width: frame.width, height: frame.height, z: frame.z, preparation: "unprepared" }] };
+    const violations = [{ ruleId: "spacing-scale", severity: "warning" as const, file: frame.file,
+      message: "Use a spacing token.", line: 2, column: 1, oid: "hero" }];
+    current.lint.violations = violations;
+    designWorkspaceSnapshotCache.setData(workspaceId, current);
+    const published = designWorkspaceSnapshotCache.peekSnapshot(workspaceId);
+    const listener = vi.fn();
+    const unsubscribe = designWorkspaceSnapshotCache.subscribe(workspaceId, listener);
+    platformMocks.setRuntimeAudit.mockResolvedValue({ sourceVersion: frame.sourceVersion, violations: violations.map((row) => ({ ...row })) });
+    try {
+      await reconcileDesignWorkspaceRuntimeAudit({ workspaceId, frame: frame.file, sourceVersion: frame.sourceVersion, warnings: [] });
+      expect(platformMocks.setRuntimeAudit).toHaveBeenCalledTimes(1);
+      expect(listener).not.toHaveBeenCalled();
+      expect(designWorkspaceSnapshotCache.peekSnapshot(workspaceId)).toBe(published);
+    } finally { unsubscribe(); }
+  });
+
   it.each(["audit-limit", "layer-tree-limit"] as const)("replaces and clears a lazy frame's %s warning without changing other lint", async (ruleId) => {
     const workspaceId = "ws_lazy_audit";
     const current = snapshot([{ file: "home.html" }, { file: "other.html" }]);

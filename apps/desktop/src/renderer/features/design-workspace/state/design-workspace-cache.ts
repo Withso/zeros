@@ -1377,9 +1377,11 @@ export function reconcileDesignWorkspaceRuntimeAudit(input: {
         !preparedDesignSnapshot(latest.data)?.frames.some((frame) => frame.file === input.frame && frame.sourceVersion === input.sourceVersion)) return;
       const current = latest.data;
       retainedRuntimeAuditByFrame.delete(key);
-      publishDesignWorkspaceSnapshot(input.workspaceId, { ...current, lint: { ...current.lint,
+      const next: DesignWorkspaceSnapshotWire = { ...current, lint: { ...current.lint,
         violations: [...current.lint.violations.filter((row) => row.file !== input.frame || !RUNTIME_AUDIT_RULE_IDS.has(row.ruleId)), ...persisted.violations],
-      } });
+      } };
+      // An unchanged audit would still notify every subscriber of the cache.
+      if (stabilizeDesignWorkspaceSnapshot(current, next) !== current) publishDesignWorkspaceSnapshot(input.workspaceId, next);
       return;
     }
     const authoritative = await designSnapshot(input.workspaceId);
