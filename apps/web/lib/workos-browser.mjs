@@ -131,34 +131,10 @@ async function proxyBrowserGet(request, env, pathname, options = {}) {
   }
 }
 
-export function configuredAuthProvider(env) {
-  const provider = (env.AUTH_PROVIDER || "auth0").trim().toLowerCase();
-  if (provider === "auth0" || provider === "workos") return provider;
-  throw new Error("AUTH_PROVIDER must be auth0 or workos");
-}
-
-/** Keep the legacy provider-pinned links only while Auth0 is the selected
- * rollback path. WorkOS has exactly one application-owned entry point because
- * Hosted AuthKit owns every authentication-method choice. */
-export function browserAuthStartOptions(env, returnTo) {
-  const returnQuery = `return=${encodeURIComponent(returnTo)}`;
-  if (configuredAuthProvider(env) === "workos") {
-    return [{ label: "Continue", href: `/auth/start?${returnQuery}` }];
-  }
-  return [
-    {
-      label: "Continue with Google",
-      href: `/auth/start?provider=google&${returnQuery}`,
-    },
-    {
-      label: "Continue with GitHub",
-      href: `/auth/start?provider=github&${returnQuery}`,
-    },
-  ];
-}
-
-export function legacyDesktopHandoffEnabled(env) {
-  return configuredAuthProvider(env) === "auth0";
+/** WorkOS has exactly one application-owned entry point because Hosted
+ * AuthKit owns every authentication-method choice. */
+export function browserAuthStartOptions(returnTo) {
+  return [{ label: "Continue", href: `/auth/start?return=${encodeURIComponent(returnTo)}` }];
 }
 
 /** Cloudflare Pages is a stateless same-origin facade. Railway creates PKCE

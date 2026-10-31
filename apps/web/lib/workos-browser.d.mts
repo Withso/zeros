@@ -33,17 +33,9 @@ export type WorkOSRefreshResult =
     }
   | { status: "terminal"; reason: string };
 
-export function configuredAuthProvider(
-  env: WorkOSBrowserEnv,
-): "auth0" | "workos";
 export function browserAuthStartOptions(
-  env: WorkOSBrowserEnv,
   returnTo: string,
-): Array<{
-  label: "Continue" | "Continue with Google" | "Continue with GitHub";
-  href: string;
-}>;
-export function legacyDesktopHandoffEnabled(env: WorkOSBrowserEnv): boolean;
+): Array<{ label: "Continue"; href: string }>;
 export function beginWorkOSBrowserAuth(
   request: Request,
   env: WorkOSBrowserEnv,

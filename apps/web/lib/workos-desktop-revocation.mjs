@@ -1,5 +1,4 @@
 import { readBoundedBody } from "./control-plane-policy.mjs";
-import { configuredAuthProvider } from "./workos-browser.mjs";
 import { fetchWorkOSRailway } from "./workos-railway.mjs";
 
 const MAX_REQUEST_BYTES = 1_024;
@@ -32,9 +31,6 @@ export async function handleWorkOSDesktopRevocationRequest(
   env,
   options = {},
 ) {
-  if (configuredAuthProvider(env) !== "workos") {
-    return json({ error: "not_found" }, 404);
-  }
   const authorization = bearerHeader(request);
   if (
     !authorization ||

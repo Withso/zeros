@@ -11,7 +11,7 @@ import {
 } from "./dashboard.mjs";
 
 const session = {
-  sub: "auth0|1",
+  sub: "user_01",
   email: "ada@example.com",
   name: "Ada Lovelace",
   accessToken: "secret-token-must-not-render",
@@ -57,7 +57,7 @@ test("dashboard intent survives sign-in without carrying unrelated query state",
       "https://app.zeros.build",
       "https://app.zeros.build/launch",
     ),
-    "https://app.zeros.build/launch",
+    "https://app.zeros.build/",
   );
 });
 

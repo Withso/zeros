@@ -172,7 +172,7 @@ async function start(workspace, profile) {
     writePrivateFile(path.join(webRoot, ".dev.vars"), "");
     processes.start("Auth web facade", process.execPath, [path.join(root, "apps/web/node_modules/wrangler/bin/wrangler.js"),
       "pages", "dev", path.join(root, "apps/web/dist"), "--ip", "127.0.0.1", "--port", String(ports.web),
-      "--inspector-port", "0", "--compatibility-date", "2026-07-10", "--kv", "SESSIONS",
+      "--inspector-port", "0", "--compatibility-date", "2026-07-10",
       "--persist-to", privateDirectory(webRoot, "state"), "--log-level", "error",
       ...Object.entries(webEnvironment(workspace, profile, ports.api)).flatMap(([key, value]) => ["--binding", `${key}=${value}`]),
     ], { cwd: webRoot, env: { ...env, WRANGLER_SEND_METRICS: "false" }, logFile: path.join(logs, "auth-web.log") });

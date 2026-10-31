@@ -2,7 +2,7 @@
 //
 // One deployment serves BOTH:
 //   • zeros.build (+ www / zeros.design)  → marketing SPA (static)
-//   • app.zeros.build                     → hub / auth / handoff / invite
+//   • app.zeros.build                     → hub / auth / invite
 //
 // Cloudflare attaches multiple custom domains to the SAME project, so every
 // request shares one Functions tree. We branch on hostname (never widen the
@@ -33,11 +33,6 @@ export function marketingOrigin(
 ): string {
   const raw = (env.MARKETING_ORIGIN || DEFAULT_MARKETING_ORIGIN).trim();
   return raw.replace(/\/$/, "") || DEFAULT_MARKETING_ORIGIN;
-}
-
-/** Auth0 callback URL — must stay listed in Auth0 Allowed Callback URLs. */
-export function redirectUri(env: Pick<Env, "APP_ORIGIN"> | Env): string {
-  return `${appOrigin(env)}/auth/callback`;
 }
 
 function splitHosts(raw: string | undefined, fallback: string[]): string[] {
@@ -101,14 +96,12 @@ export function normalizeMarketingPath(pathname: string): string {
 /** Paths that belong only on the app host — redirect away from marketing. */
 export function isAppOnlyPath(pathname: string): boolean {
   return (
-    pathname === "/launch" ||
     pathname === "/invite" ||
     pathname.startsWith("/workspace/") ||
     pathname === "/github/connected" ||
     pathname === "/api" ||
     pathname.startsWith("/api/") ||
-    pathname.startsWith("/auth/") ||
-    pathname.startsWith("/handoff/")
+    pathname.startsWith("/auth/")
   );
 }
 

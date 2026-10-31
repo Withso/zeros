@@ -7,7 +7,6 @@ import {
   beginWorkOSBrowserAuth,
   browserAuthStartOptions,
   finishWorkOSBrowserAuth,
-  legacyDesktopHandoffEnabled,
   logoutWorkOSBrowserSession,
   readWorkOSBrowserSession,
   refreshWorkOSBrowserSession,
@@ -18,39 +17,14 @@ const APP_ORIGIN = "https://app-alpha.zeros.build";
 const CONTROL_PLANE_URL = "https://api-alpha.zeros.build";
 const ENV = { APP_ORIGIN, CONTROL_PLANE_URL };
 
-test("the Auth0-era desktop ticket broker is disabled in WorkOS mode", () => {
-  assert.equal(legacyDesktopHandoffEnabled({ AUTH_PROVIDER: "auth0" }), true);
-  assert.equal(legacyDesktopHandoffEnabled({ AUTH_PROVIDER: "workos" }), false);
-  assert.throws(
-    () => legacyDesktopHandoffEnabled({ AUTH_PROVIDER: "invented" }),
-    /AUTH_PROVIDER/,
-  );
-});
-
-test("the signed-out hub preserves Auth0 rollback links but gives WorkOS one Hosted AuthKit entry", () => {
+test("the signed-out hub gives one Hosted AuthKit entry", () => {
   const returnTo = `${APP_ORIGIN}/after`;
-  assert.deepEqual(
-    browserAuthStartOptions({ AUTH_PROVIDER: "workos" }, returnTo),
-    [
-      {
-        label: "Continue",
-        href: `/auth/start?return=${encodeURIComponent(returnTo)}`,
-      },
-    ],
-  );
-  assert.deepEqual(
-    browserAuthStartOptions({ AUTH_PROVIDER: "auth0" }, returnTo),
-    [
-      {
-        label: "Continue with Google",
-        href: `/auth/start?provider=google&return=${encodeURIComponent(returnTo)}`,
-      },
-      {
-        label: "Continue with GitHub",
-        href: `/auth/start?provider=github&return=${encodeURIComponent(returnTo)}`,
-      },
-    ],
-  );
+  assert.deepEqual(browserAuthStartOptions(returnTo), [
+    {
+      label: "Continue",
+      href: `/auth/start?return=${encodeURIComponent(returnTo)}`,
+    },
+  ]);
 });
 
 test("auth start is a stateless facade for the matching Railway service", async () => {
