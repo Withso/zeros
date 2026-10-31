@@ -18,7 +18,7 @@
 // ──────────────────────────────────────────────────────────
 
 import React, { useEffect, useState } from "react";
-import { ArrowRight } from "lucide-react";
+import { ArrowRight, UserRound } from "lucide-react";
 import { Button } from "@/renderer/shared/ui";
 import { useAuth } from "./use-auth";
 import { isElectron, nativeInvoke } from "../../platform/runtime";
@@ -47,7 +47,13 @@ export function LoginScreen() {
     cancelPendingOAuth,
     oauthError,
     clearOAuthError,
+    accounts = [],
+    switchAccount,
   } = useAuth();
+  // Accounts still signed in on this Mac, for example after this one was
+  // signed out by the server. Choosing one switches without a browser.
+  const signedIn = accounts.filter((account) => !account.active);
+  const [switchingTo, setSwitchingTo] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   // Desktop sign-in in flight: the system browser is open and we're waiting for
@@ -194,6 +200,31 @@ export function LoginScreen() {
               </button>
             )}
           </div>
+          {signedIn.length > 0 && !waiting && (
+            <div className="flex w-full flex-col items-start gap-2">
+              <p className="text-muted-fg text-xs">Signed in on this Mac</p>
+              {signedIn.map((account) => (
+                <Button
+                  key={account.accountId}
+                  variant="secondary"
+                  className="max-w-full gap-2 text-sm"
+                  loading={switchingTo === account.accountId}
+                  disabled={switchingTo !== null}
+                  onClick={async () => {
+                    setSwitchingTo(account.accountId);
+                    try {
+                      await switchAccount(account.accountId);
+                    } finally {
+                      setSwitchingTo(null);
+                    }
+                  }}
+                >
+                  <UserRound className="size-4" />
+                  <span className="min-w-0 truncate">Continue as {account.email}</span>
+                </Button>
+              ))}
+            </div>
+          )}
         </div>
       </div>
       {/* Privacy + Terms — centered along the bottom. */}

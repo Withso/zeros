@@ -9,6 +9,8 @@ import {
   LogOut,
   Plus,
   Settings,
+  UserPlus,
+  UserRound,
 } from "lucide-react";
 import { Button } from "../../shared/ui/primitives/button";
 import {
@@ -20,6 +22,7 @@ import {
   DropdownMenuTrigger,
 } from "../../shared/ui/primitives/dropdown-menu";
 import { shellOpenUrl } from "../../platform/app";
+import { toast } from "../../shared/ui/primitives/elements";
 import { isLocalDevelopment } from "../../platform/runtime";
 import { useAuth, type AuthStatus } from "../auth";
 import { setActiveOrganizationSelection } from "./active-team";
@@ -106,12 +109,37 @@ export function OrganizationSwitcher({
     reload,
   } = useOrganizations();
   const selected = useActiveOrganization();
-  const { email, status: authStatus, storedUser, startBrowserSignIn, signOut } = useAuth();
+  const {
+    email,
+    status: authStatus,
+    storedUser,
+    startBrowserSignIn,
+    signOut,
+    accounts = [],
+    refreshAccounts,
+    switchAccount,
+    cancelPendingOAuth,
+  } = useAuth();
   const sessionActions = organizationSwitcherSessionActions(
     authStatus,
     me?.capabilities?.createOrganization === true,
   );
   const showMemberships = sessionActions.showManagement || !!storedUser;
+  // Only WorkOS sessions can be kept side by side.
+  const multipleAccounts = sessionActions.showManagement && storedUser?.provider === "workos";
+  const otherAccounts = multipleAccounts
+    ? accounts.filter((account) => !account.active)
+    : [];
+  const addAccount = async () => {
+    const result = await startBrowserSignIn({ addAccount: true });
+    if (!result.ok) {
+      toast.error(result.error ?? "Couldn't start sign-in.");
+      return;
+    }
+    toast.info("Continue in your browser to add an account.", {
+      action: { label: "Cancel", onClick: cancelPendingOAuth },
+    });
+  };
   const active = showMemberships
     ? selected
     : PERSONAL_ORGANIZATION;
@@ -142,6 +170,7 @@ export function OrganizationSwitcher({
       // provisioning. Open immediately with the account's retained snapshot;
       // the shared store deduplicates refreshes and fences account changes.
       if (next && showMemberships) void reload();
+      if (next && multipleAccounts) void refreshAccounts();
     }}>
       {/* Sized to its name, up to the sidebar's width; a long organization
           name truncates while the icon and trailing chevron stay whole. 4px
@@ -212,6 +241,32 @@ export function OrganizationSwitcher({
               </span>
               <ArrowUpRight className="text-muted-fg ml-auto" />
             </DropdownMenuItem>
+            {multipleAccounts && (
+              <>
+                <DropdownMenuSeparator />
+                {otherAccounts.length > 0 && (
+                  <DropdownMenuLabel className="text-muted-fg font-normal">
+                    Switch account
+                  </DropdownMenuLabel>
+                )}
+                {otherAccounts.map((account) => (
+                  <DropdownMenuItem
+                    key={account.accountId}
+                    className="gap-2"
+                    onSelect={() => {
+                      void switchAccount(account.accountId);
+                    }}
+                  >
+                    <UserRound />
+                    <span className="min-w-0 flex-1 truncate">{account.email}</span>
+                  </DropdownMenuItem>
+                ))}
+                <DropdownMenuItem onSelect={() => void addAccount()}>
+                  <UserPlus />
+                  <span>Add account</span>
+                </DropdownMenuItem>
+              </>
+            )}
           </>
         )}
         <DropdownMenuSeparator />

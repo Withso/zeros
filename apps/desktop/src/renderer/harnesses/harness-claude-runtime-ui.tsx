@@ -83,7 +83,7 @@ const sessions = {
   },
 } as unknown as SessionsActions;
 const auth: AuthContextValue = { status: "unauthenticated", session: null, userId: null, email: null, oauthError: null,
-  startBrowserSignIn: async () => ({ ok: false }), clearOAuthError() {}, cancelPendingOAuth() {}, signOut: async () => {}, signOutEverywhere: async () => {} };
+  startBrowserSignIn: async () => ({ ok: false }), clearOAuthError() {}, cancelPendingOAuth() {}, signOut: async () => {}, signOutEverywhere: async () => {}, accounts: [], refreshAccounts: async () => {}, switchAccount: async () => "unavailable" as const, signOutAccount: async () => {} };
 const openSettings = (section: string) => {
   requestUserSettingsSection(section);
   useWorkspaceStore.getState().dispatch({ type: "SET_ACTIVE_PAGE", page: "settings" });

@@ -398,6 +398,7 @@ export class WorkOSDesktopSecurityMonitor {
   private lastContactAt = 0;
   private cursor = 0;
   private lastSnapshotSignature: string | null = null;
+  private rerunRequested = false;
   private revalidation: Promise<
     "active" | "signed_out" | "transient" | "idle"
   > | null = null;
@@ -470,9 +471,18 @@ export class WorkOSDesktopSecurityMonitor {
     ) {
       return Promise.resolve("active");
     }
-    if (this.revalidation) return this.revalidation;
+    if (this.revalidation) {
+      // A forced request, such as an account switch, must bind the session that
+      // is active now; the check in flight already read an earlier one.
+      if (force) this.rerunRequested = true;
+      return this.revalidation;
+    }
     const task = this.revalidateNow().finally(() => {
       if (this.revalidation === task) this.revalidation = null;
+      if (this.rerunRequested && !this.stopped) {
+        this.rerunRequested = false;
+        void this.revalidate("rerun", true);
+      }
     });
     this.revalidation = task;
     return task;

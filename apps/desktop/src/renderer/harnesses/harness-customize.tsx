@@ -194,6 +194,10 @@ const auth: AuthContextValue = {
   cancelPendingOAuth: () => {},
   signOut: async () => {},
   signOutEverywhere: async () => {},
+  accounts: [],
+  refreshAccounts: async () => {},
+  switchAccount: async () => "unavailable" as const,
+  signOutAccount: async () => {},
 };
 function Harness() {
   const [surfaceActive, setSurfaceActive] = useState(true);

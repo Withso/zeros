@@ -97,6 +97,9 @@ const commandTable: Record<string, CommandHandler> = {
   auth_get_session_user: notImpl("auth_get_session_user", 5),
   auth_clear_session: notImpl("auth_clear_session", 5),
   auth_sign_out_everywhere: notImpl("auth_sign_out_everywhere", 5),
+  // Multi-account: list and switch signed-in accounts; tokens never cross IPC.
+  auth_list_accounts: notImpl("auth_list_accounts", 5),
+  auth_switch_account: notImpl("auth_switch_account", 5),
   auth_start_signin: notImpl("auth_start_signin", 5),
   auth_cancel_signin: notImpl("auth_cancel_signin", 5),
   auth_security_revalidate: notImpl("auth_security_revalidate", 5),

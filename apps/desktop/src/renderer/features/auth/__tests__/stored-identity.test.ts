@@ -89,3 +89,42 @@ it("retires the old bearer before publishing a replacement identity with refresh
   finish({ access_token: null });
   await pending;
 });
+
+it("discards a bearer that belongs to another account after a switch between reads", async () => {
+  const auth = await import("../auth-store");
+  const other = { ...user, sub: "account-b", accountId: "account-b", email: "b@example.test" };
+  io.invoke.mockImplementation((command: string) => Promise.resolve(
+    command === "auth_get_session_user" ? other : { access_token: "token-for-a", account: "account-a" },
+  ));
+  expect(await auth.getSession()).toBeNull();
+  io.invoke.mockImplementation((command: string) => Promise.resolve(
+    command === "auth_get_session_user" ? other : { access_token: "token-for-b", account: "account-b" },
+  ));
+  expect(await auth.getSession()).toEqual({ access_token: "token-for-b", user: other });
+});
+
+it("switches accounts through main and republishes the new identity", async () => {
+  const auth = await import("../auth-store");
+  const other = { ...user, sub: "account-b", accountId: "account-b", email: "b@example.test" };
+  let current: typeof user | typeof other = user;
+  io.invoke.mockImplementation((command: string, args?: { accountId?: string }) => {
+    if (command === "auth_switch_account") {
+      expect(args).toEqual({ accountId: "account-b" });
+      current = other;
+      return Promise.resolve({ status: "switched" });
+    }
+    if (command === "auth_get_session_user") return Promise.resolve(current);
+    return Promise.resolve({ access_token: `token-for-${current.sub}`, account: current.sub });
+  });
+  await auth.resync();
+  expect(auth.getStoredAuthUser()).toEqual(user);
+  await expect(auth.switchAccount("account-b")).resolves.toBe("switched");
+  expect(auth.getStoredAuthUser()).toEqual(other);
+  await expect(auth.getSession()).resolves.toEqual({ access_token: "token-for-account-b", user: other });
+
+  io.invoke.mockImplementation((command: string) => Promise.resolve(
+    command === "auth_switch_account" ? { status: "unavailable" } : command === "auth_get_session_user" ? other : { access_token: "x", account: "account-b" },
+  ));
+  await expect(auth.switchAccount("account-a")).resolves.toBe("unavailable");
+  expect(auth.getStoredAuthUser()).toEqual(other);
+});

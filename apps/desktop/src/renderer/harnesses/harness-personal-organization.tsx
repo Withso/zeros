@@ -155,6 +155,10 @@ function Harness() {
     cancelPendingOAuth: () => {},
     signOut: async () => selectAccount(null),
     signOutEverywhere: async () => selectAccount(null),
+    accounts: [],
+    refreshAccounts: async () => {},
+    switchAccount: async () => "unavailable" as const,
+    signOutAccount: async () => {},
   };
   return (
     <AuthContext.Provider value={auth}>

@@ -12,14 +12,18 @@ import {
   SecretStoreReadError,
   secretsFilePath,
   setSecret,
+  updateSecretValues,
 } from "../../secret-store";
 import { withCrossProcessFileLock } from "../../cross-process-lock";
 import { appBaseUrl } from "../../app-base-url";
 import {
   mergeWorkOSRefresh,
+  parseParkedSessions,
   parseStoredTokenSnapshot,
+  serializeParkedSessions,
   type StoredTokens,
   type StoredTokenSnapshot,
+  type WorkOSRefreshMerge,
   type WorkOSStoredTokens,
 } from "../../auth-session-record";
 import type { WorkOSDesktopSession } from "../../workos-desktop-client";
@@ -32,8 +36,51 @@ import { devWorkOSConfigurationIssue, workspaceDevAuthProfile } from "../../dev-
 import { controlPlaneBaseUrl } from "../../workos-desktop-account";
 
 const TOKENS_KEY = "auth-session:tokens";
+// Other signed-in WorkOS accounts. The active account stays in TOKENS_KEY, so
+// older builds and sibling Dev worktrees keep reading one session.
+const PARKED_KEY = "auth-session:parked";
+/** Signed-in accounts per device, the active one included. */
+export const MAX_SIGNED_IN_ACCOUNTS = 12;
 const REFRESH_SKEW_MS = 60_000;
 const AUTH_REQUEST_TIMEOUT_MS = 15_000;
+const SESSION_LOCK_OPTIONS = { staleAfterMs: 60_000, waitTimeoutMs: 65_000 };
+
+/** Park times order accounts by recent use, so they never tie. */
+function nextParkedAt(parked: ReadonlyMap<string, { parkedAt: number }>): number {
+  let latest = 0;
+  for (const entry of parked.values()) latest = Math.max(latest, entry.parkedAt);
+  return Math.max(Date.now(), latest + 1);
+}
+
+/** The active and parked entries. One this device can no longer decrypt (for
+ * example after a Keychain reset) reads as absent, as `getSecret` does. */
+function readSessionEntries(): Record<string, string | null> {
+  return { [TOKENS_KEY]: getSecret(TOKENS_KEY), [PARKED_KEY]: getSecret(PARKED_KEY) };
+}
+
+/** Write the active and parked entries in one transaction. An undecryptable
+ * entry would block that transaction forever; it is unrecoverable, so it is
+ * replaced entry by entry, as the single-session install always did. */
+function updateSessionEntries(
+  update: (values: Record<string, string | null>) => Record<string, string | null>,
+): void {
+  try {
+    updateSecretValues([TOKENS_KEY, PARKED_KEY], update);
+  } catch (error) {
+    if (!(error instanceof SecretStoreReadError)) throw error;
+    const next = update(readSessionEntries());
+    for (const key of [TOKENS_KEY, PARKED_KEY]) {
+      const value = next[key] ?? null;
+      if (value === null) deleteSecret(key);
+      else setSecret(key, value);
+    }
+  }
+}
+
+/** Serializes refresh rotation with every write that moves a session. */
+function sessionLockPath(): string {
+  return `${secretsFilePath()}.auth-session-refresh.lock`;
+}
 
 export interface MainAuthSession {
   accessToken: string;
@@ -158,10 +205,11 @@ export function persistSession(input: {
 }
 
 /** WorkOS install accepts only a session already verified in Electron main and
- * enriched by authenticated `/v1/me`. It is intentionally not an IPC command. */
-export function persistWorkOSSession(
+ * enriched by authenticated `/v1/me`. It is intentionally not an IPC command.
+ * Another account's active session is parked, not replaced. */
+export async function persistWorkOSSession(
   input: WorkOSDesktopSession & { accountId: string },
-): void {
+): Promise<void> {
   if (
     !input.accessToken ||
     !input.refreshToken ||
@@ -173,7 +221,7 @@ export function persistWorkOSSession(
   ) {
     throw new Error("persistWorkOSSession: missing required field");
   }
-  writeTokens({
+  const next: WorkOSStoredTokens = {
     provider: "workos",
     accessToken: input.accessToken,
     refreshToken: input.refreshToken,
@@ -185,8 +233,45 @@ export function persistWorkOSSession(
     sessionId: input.sessionId,
     clientKind: "desktop",
     authenticationMethod: input.authenticationMethod,
-  });
+  };
+  const retired: WorkOSStoredTokens[] = [];
+  await withCrossProcessFileLock(sessionLockPath(), async () => {
+    updateSessionEntries((values) => {
+      // The fallback for an undecryptable entry may run this a second time.
+      retired.length = 0;
+      const active = parseStoredTokenSnapshot(values[TOKENS_KEY])?.tokens;
+      const parked = parseParkedSessions(values[PARKED_KEY]);
+      const replaced = parked.get(next.accountId);
+      if (replaced) retired.push(replaced.tokens);
+      parked.delete(next.accountId);
+      if (active?.provider === "workos" && active.accountId !== next.accountId) {
+        parked.set(active.accountId, { tokens: active, parkedAt: nextParkedAt(parked) });
+      } else if (active?.provider === "workos" && active.sessionId !== next.sessionId) {
+        // Signing the same account in again leaves no device holding the old session.
+        retired.push(active);
+      }
+      // Keep the most recently used accounts within the device limit.
+      const oldest = [...parked.values()].sort((a, b) => b.parkedAt - a.parkedAt)
+        .slice(MAX_SIGNED_IN_ACCOUNTS - 1);
+      for (const entry of oldest) {
+        parked.delete(entry.tokens.accountId);
+        retired.push(entry.tokens);
+      }
+      return {
+        [TOKENS_KEY]: JSON.stringify(next),
+        [PARKED_KEY]: serializeParkedSessions(parked),
+      };
+    });
+  }, SESSION_LOCK_OPTIONS);
   notifySessionChanged();
+  for (const tokens of retired) void revokeRetiredSession(tokens);
+}
+
+/** Best effort: a retired session the device no longer holds is revoked while
+ * its bearer is live; otherwise provider policy ends it. */
+async function revokeRetiredSession(tokens: WorkOSStoredTokens): Promise<void> {
+  if (tokens.expiresAt <= Date.now()) return;
+  await requestWorkOSDesktopRevocation("current", tokens.accessToken, controlPlaneFetch).catch(() => false);
 }
 
 type RefreshOutcome =
@@ -321,7 +406,7 @@ let inFlightRefresh: Promise<RefreshOutcome> | null = null;
 function refreshOnce(): Promise<RefreshOutcome> {
   if (!inFlightRefresh) {
     inFlightRefresh = withCrossProcessFileLock(
-      `${secretsFilePath()}.auth-session-refresh.lock`,
+      sessionLockPath(),
       async (): Promise<RefreshOutcome> => {
         const snapshot = readTokenSnapshot();
         if (!snapshot) return { status: "terminal" };
@@ -330,7 +415,7 @@ function refreshOnce(): Promise<RefreshOutcome> {
         }
         return refreshTokens(snapshot);
       },
-      { staleAfterMs: 60_000, waitTimeoutMs: 65_000 },
+      SESSION_LOCK_OPTIONS,
     ).finally(() => {
       inFlightRefresh = null;
     });
@@ -427,17 +512,20 @@ export function clearWorkOSSessionAfterServerRevocation(expected: {
   return removed;
 }
 
+/** The bearer names its account, so a renderer read that straddles an
+ * account switch can discard a token that belongs to the previous account. */
 export const authGetAccessToken: CommandHandler = async () => {
   let tokens: StoredTokens | null;
   try {
     tokens = readTokens();
   } catch (error) {
-    if (error instanceof SecretStoreReadError) return { access_token: null };
+    if (error instanceof SecretStoreReadError) return { access_token: null, account: null };
     throw error;
   }
+  const session = await getValidSessionFromTokens(tokens);
   return {
-    access_token:
-      (await getValidSessionFromTokens(tokens))?.accessToken ?? null,
+    access_token: session?.accessToken ?? null,
+    account: session ? session.accountId ?? session.sub : null,
   };
 };
 
@@ -501,10 +589,19 @@ async function signOutWorkOS(scope: "current" | "all"): Promise<boolean> {
   return true;
 }
 
-export const authClearSession: CommandHandler = async () => {
+export const authClearSession: CommandHandler = async (args) => {
+  const accountId = typeof args?.accountId === "string" ? args.accountId : null;
   const snapshot = readTokenSnapshot();
+  if (
+    accountId !== null &&
+    !(snapshot?.tokens.provider === "workos" && snapshot.tokens.accountId === accountId)
+  ) {
+    return signOutParkedAccount(accountId);
+  }
   if (snapshot?.tokens.provider === "workos") {
-    return signOutWorkOS("current");
+    await signOutWorkOS("current");
+    await promoteNextParkedAccount();
+    return true;
   }
   if (snapshot?.tokens.provider === "auth0" && snapshot.tokens.refreshToken.startsWith("z0d_")) {
     return signOutAuth0("current");
@@ -538,7 +635,174 @@ async function signOutAuth0(scope: "current" | "all"): Promise<boolean> {
 
 export const authSignOutEverywhere: CommandHandler = async () => {
   const snapshot = readTokenSnapshot();
-  return snapshot?.tokens.provider === "workos"
-    ? signOutWorkOS("all")
-    : signOutAuth0("all");
+  if (snapshot?.tokens.provider !== "workos") return signOutAuth0("all");
+  try {
+    return await signOutWorkOS("all");
+  } finally {
+    await promoteNextParkedAccount();
+  }
+};
+
+export interface SignedInAccount {
+  accountId: string;
+  email: string;
+  name: string | null;
+  active: boolean;
+}
+
+/** Signed-in accounts for presentation: the active one first, then the most
+ * recently used. Never includes token material. */
+export function listSignedInAccountsForMain(): SignedInAccount[] {
+  if (IS_LOCAL_DEVELOPMENT) return [];
+  const values = readSessionEntries();
+  const active = parseStoredTokenSnapshot(values[TOKENS_KEY])?.tokens;
+  const activeId = active ? active.accountId ?? active.sub : null;
+  const accounts: SignedInAccount[] = active
+    ? [{ accountId: activeId!, email: active.email, name: active.name, active: true }]
+    : [];
+  const parked = [...parseParkedSessions(values[PARKED_KEY]).values()]
+    .sort((a, b) => b.parkedAt - a.parkedAt);
+  for (const { tokens } of parked) {
+    if (tokens.accountId === activeId) continue;
+    accounts.push({ accountId: tokens.accountId, email: tokens.email, name: tokens.name, active: false });
+  }
+  return accounts;
+}
+
+/** Store a parked account's tokens, or remove the account with null. */
+function writeParkedSession(accountId: string, tokens: WorkOSStoredTokens | null): void {
+  updateSessionEntries((values) => {
+    const parked = parseParkedSessions(values[PARKED_KEY]);
+    const current = parked.get(accountId);
+    if (!tokens) parked.delete(accountId);
+    else parked.set(accountId, { tokens, parkedAt: current?.parkedAt ?? nextParkedAt(parked) });
+    return { ...values, [PARKED_KEY]: serializeParkedSessions(parked) };
+  });
+}
+
+/** Refresh a parked session without touching the active record. */
+async function refreshParkedSession(tokens: WorkOSStoredTokens): Promise<WorkOSRefreshMerge> {
+  try {
+    const outcome = await workOSDesktopClientForMain().refresh({
+      refreshToken: tokens.refreshToken,
+      expectedSubject: tokens.sub,
+      expectedSessionId: tokens.sessionId,
+    });
+    return mergeWorkOSRefresh(tokens, outcome);
+  } catch (error) {
+    console.warn(
+      `[auth] WorkOS refresh unavailable for a parked account: ${(error as Error).message}`,
+    );
+    return { status: "transient", tokens };
+  }
+}
+
+export type SwitchAccountOutcome =
+  | "switched"
+  | "current"
+  | "missing"
+  | "signed_out"
+  | "unavailable";
+
+/**
+ * Make a parked account active and park the current one, in one write under
+ * the refresh lock. An expiring target is refreshed first; a rejected refresh
+ * removes only that account, and an unreachable provider leaves both as they
+ * were, so a failed switch never signs out the account in use.
+ */
+export async function switchWorkOSAccount(
+  accountId: string,
+  options: { onlyIfSignedOut?: boolean } = {},
+): Promise<SwitchAccountOutcome> {
+  if (IS_LOCAL_DEVELOPMENT) return "unavailable";
+  const outcome = await withCrossProcessFileLock(sessionLockPath(), async (): Promise<SwitchAccountOutcome> => {
+    const values = readSessionEntries();
+    const active = parseStoredTokenSnapshot(values[TOKENS_KEY])?.tokens;
+    if (active?.provider === "workos" && active.accountId === accountId) return "current";
+    if (active?.provider === "auth0") return "unavailable";
+    // A sign-in that finished meanwhile wins over continuing after sign-out.
+    if (options.onlyIfSignedOut && active) return "current";
+    let tokens = parseParkedSessions(values[PARKED_KEY]).get(accountId)?.tokens;
+    if (!tokens) return "missing";
+    if (tokens.expiresAt - Date.now() < REFRESH_SKEW_MS) {
+      const refreshed = await refreshParkedSession(tokens);
+      if (refreshed.status === "terminal") {
+        writeParkedSession(accountId, null);
+        return "signed_out";
+      }
+      // A rotated refresh token must survive even when the switch stops here.
+      if (refreshed.tokens !== tokens) writeParkedSession(accountId, refreshed.tokens);
+      tokens = refreshed.tokens;
+      if (refreshed.status === "transient" && tokens.expiresAt <= Date.now()) return "unavailable";
+    }
+    const target = tokens;
+    updateSessionEntries((current) => {
+      const nowActive = parseStoredTokenSnapshot(current[TOKENS_KEY])?.tokens;
+      const parked = parseParkedSessions(current[PARKED_KEY]);
+      parked.delete(accountId);
+      if (nowActive?.provider === "workos" && nowActive.accountId !== accountId) {
+        parked.set(nowActive.accountId, { tokens: nowActive, parkedAt: nextParkedAt(parked) });
+      }
+      return {
+        [TOKENS_KEY]: JSON.stringify(target),
+        [PARKED_KEY]: serializeParkedSessions(parked),
+      };
+    });
+    return "switched";
+  }, SESSION_LOCK_OPTIONS);
+  if (outcome === "switched" || outcome === "signed_out") notifySessionChanged();
+  return outcome;
+}
+
+/** After the active account signs out, continue with the most recently used
+ * parked account that can still sign in; otherwise stay signed out. */
+async function promoteNextParkedAccount(): Promise<void> {
+  try {
+    if (readTokens()) return;
+    const candidates = listSignedInAccountsForMain().filter((account) => !account.active);
+    for (const candidate of candidates) {
+      const outcome = await switchWorkOSAccount(candidate.accountId, { onlyIfSignedOut: true });
+      if (outcome !== "signed_out" && outcome !== "missing") return;
+    }
+  } catch (error) {
+    // Sign-out already succeeded; the login screen still offers these accounts.
+    console.warn(`[auth] next account unavailable after sign-out: ${(error as Error).message}`);
+  }
+}
+
+/** Remove a parked account on this device and revoke its session. */
+async function signOutParkedAccount(accountId: string): Promise<boolean> {
+  let revocable: WorkOSStoredTokens | null = null;
+  await withCrossProcessFileLock(sessionLockPath(), async () => {
+    let tokens = parseParkedSessions(readSessionEntries()[PARKED_KEY]).get(accountId)?.tokens;
+    if (!tokens) return;
+    // Revocation needs a live bearer; an already rejected session needs none.
+    if (tokens.expiresAt - Date.now() < REFRESH_SKEW_MS) {
+      const refreshed = await refreshParkedSession(tokens);
+      tokens = refreshed.status === "active" ? refreshed.tokens : undefined;
+    }
+    revocable = tokens ?? null;
+    writeParkedSession(accountId, null);
+  }, SESSION_LOCK_OPTIONS);
+  const tokens = revocable as WorkOSStoredTokens | null;
+  if (tokens) {
+    const revoked = await requestWorkOSDesktopRevocation("current", tokens.accessToken, controlPlaneFetch).catch(() => false);
+    if (!revoked) console.warn("[auth] WorkOS revoke unavailable for a parked account");
+  }
+  return true;
+}
+
+export const authListAccounts: CommandHandler = () => {
+  try {
+    return { accounts: listSignedInAccountsForMain() };
+  } catch (error) {
+    if (error instanceof SecretStoreReadError) return { accounts: [] };
+    throw error;
+  }
+};
+
+export const authSwitchAccount: CommandHandler = async (args) => {
+  const accountId = typeof args?.accountId === "string" ? args.accountId : "";
+  if (!accountId || accountId.length > 128) throw new Error("Choose a signed-in account");
+  return { status: await switchWorkOSAccount(accountId) };
 };

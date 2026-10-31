@@ -48,7 +48,7 @@ export async function bootstrapCloudDesktopSession(options: {
   getStoredUser: () => Omit<MainAuthSession, "accessToken"> | null;
   verify: (tokens: Tokens, descriptor: Descriptor) => Promise<WorkOSDesktopSession>;
   resolveAccountId: (accessToken: string) => Promise<string>;
-  persistSession: (session: WorkOSDesktopSession & { accountId: string }) => void;
+  persistSession: (session: WorkOSDesktopSession & { accountId: string }) => void | Promise<void>;
   request?: typeof fetch;
 }): Promise<"skipped" | "existing" | "signed-in"> {
   const { env } = options;
@@ -88,7 +88,7 @@ export async function bootstrapCloudDesktopSession(options: {
   const verified = await options.verify(tokens, d);
   const accountId = await options.resolveAccountId(verified.accessToken);
   if (options.getStoredUser()) throw new Error("Automatic sign-in preserved a concurrently installed saved session");
-  options.persistSession({ ...verified, accountId });
+  await options.persistSession({ ...verified, accountId });
   await call("/complete");
   return "signed-in";
 }

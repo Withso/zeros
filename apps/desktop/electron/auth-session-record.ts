@@ -147,3 +147,51 @@ export function mergeWorkOSRefresh(
     },
   };
 }
+
+/** A signed-in WorkOS account waiting behind the active session. */
+export interface ParkedWorkOSSession {
+  tokens: WorkOSStoredTokens;
+  parkedAt: number;
+}
+
+/** Parse parked sessions keyed by product account UUID. Malformed entries are
+ * dropped one by one, so one damaged record never signs out the others. */
+export function parseParkedSessions(
+  raw: string | null,
+): Map<string, ParkedWorkOSSession> {
+  const parked = new Map<string, ParkedWorkOSSession>();
+  if (!raw) return parked;
+  let value: unknown;
+  try {
+    value = JSON.parse(raw);
+  } catch {
+    return parked;
+  }
+  const accounts = (value as { version?: unknown; accounts?: unknown } | null);
+  if (accounts?.version !== 1 || !Array.isArray(accounts.accounts)) return parked;
+  for (const entry of accounts.accounts as unknown[]) {
+    const candidate = entry as { tokens?: unknown; parkedAt?: unknown } | null;
+    const snapshot = parseStoredTokenSnapshot(JSON.stringify(candidate?.tokens ?? null));
+    const parkedAt = candidate?.parkedAt;
+    if (
+      snapshot?.tokens.provider !== "workos" ||
+      typeof parkedAt !== "number" ||
+      !Number.isFinite(parkedAt)
+    ) {
+      continue;
+    }
+    parked.set(snapshot.tokens.accountId, { tokens: snapshot.tokens, parkedAt });
+  }
+  return parked;
+}
+
+/** Most recently parked first; null removes the entry when none are left. */
+export function serializeParkedSessions(
+  parked: ReadonlyMap<string, ParkedWorkOSSession>,
+): string | null {
+  if (!parked.size) return null;
+  return JSON.stringify({
+    version: 1,
+    accounts: [...parked.values()].sort((a, b) => b.parkedAt - a.parkedAt),
+  });
+}

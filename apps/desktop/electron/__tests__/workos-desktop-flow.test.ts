@@ -172,6 +172,29 @@ describe("WorkOS desktop hosted authorization", () => {
     ).toBe(false);
   });
 
+  it("asks for a fresh sign-in when adding an account, and reports completion only once the session is stored", async () => {
+    const stored = deferred<void>();
+    const harness = setup({ persistSession: vi.fn(() => stored.promise) });
+    await harness.flow.start({ fresh: true });
+    const opened = new URL(harness.openedUrl!);
+    expect(opened.searchParams.get("fresh")).toBe("1");
+
+    let completed = false;
+    void harness.completed.promise.then(() => {
+      completed = true;
+    });
+    harness.flow.acceptCallback({ state: callbackState(harness.openedUrl!), code: "authorization-code" });
+    await vi.waitFor(() => expect(harness.deps.persistSession).toHaveBeenCalled());
+    await Promise.resolve();
+    expect(completed).toBe(false);
+    stored.resolve();
+    await harness.completed.promise;
+
+    const ordinary = setup();
+    await ordinary.flow.start();
+    expect(new URL(ordinary.openedUrl!).searchParams.has("fresh")).toBe(false);
+  });
+
   it("does not strand the renderer when the OS browser launch never settles", async () => {
     const harness = setup({
       openExternal: () => new Promise<void>(() => {}),

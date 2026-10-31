@@ -54,6 +54,8 @@ import {
   authGetAccessToken,
   authGetSessionUser,
   authSignOutEverywhere,
+  authListAccounts,
+  authSwitchAccount,
 } from "./auth-session";
 import { authCancelSignIn, authStartSignIn } from "./workos-auth";
 import { agentContextFiles } from "./agent-context";
@@ -185,6 +187,8 @@ export function registerAllCommands(): void {
   setCommand("auth_get_session_user", authGetSessionUser);
   setCommand("auth_clear_session", authClearSession);
   setCommand("auth_sign_out_everywhere", authSignOutEverywhere);
+  setCommand("auth_list_accounts", authListAccounts);
+  setCommand("auth_switch_account", authSwitchAccount);
   // Provider-neutral start/cancel. In WorkOS mode Electron main binds the
   // loopback listener and owns PKCE; Auth0 mode tells the renderer to continue
   // through the compatibility web-ticket path below.

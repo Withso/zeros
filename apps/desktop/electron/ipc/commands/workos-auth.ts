@@ -80,7 +80,7 @@ export function acceptWorkOSDesktopCallback(input: {
 
 /** Unified entry point: WorkOS stays entirely in Electron main; Auth0 tells the
  * renderer to continue through the compatibility handoff until Phase 5. */
-export const authStartSignIn: CommandHandler = async () => {
+export const authStartSignIn: CommandHandler = async (args) => {
   let config: ReturnType<typeof desktopAuthConfig>;
   try {
     config = desktopAuthConfig();
@@ -109,9 +109,11 @@ export const authStartSignIn: CommandHandler = async () => {
       return { mode: "unconfigured" };
     }
   }
-  if (config.provider === "auth0") return { mode: "auth0" };
+  // Only WorkOS sessions can be parked; an Auth0 sign-in would replace this one.
+  if (config.provider === "auth0") return { mode: args?.addAccount === true ? "unsupported" : "auth0" };
   cancelLegacyAuthHandoff();
-  const attempt = await workOSFlow().start();
+  // Adding an account never reuses the browser's existing sign-in.
+  const attempt = await workOSFlow().start({ fresh: args?.addAccount === true });
   return { mode: "workos", expiresAt: attempt.expiresAt };
 };
 

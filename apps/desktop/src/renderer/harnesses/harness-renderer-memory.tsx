@@ -228,6 +228,10 @@ const auth = {
   startBrowserSignIn: async () => ({ ok: false }),
   signOut: async () => {},
   signOutEverywhere: async () => {},
+  accounts: [],
+  refreshAccounts: async () => {},
+  switchAccount: async () => "unavailable" as const,
+  signOutAccount: async () => {},
 } as AuthContextValue;
 function Harness() {
   const host = useRef<HTMLDivElement>(null);
