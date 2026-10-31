@@ -1704,11 +1704,15 @@ export async function updateDesignNodeStylesCached(
         const beforeState = historyStateKey(
           designWorkspaceSnapshotCache.peekSnapshot(workspaceId).data,
         );
-        const result = await designUpdateStyles(workspaceId, {
+        const reply = await designUpdateStyles(workspaceId, {
           ...input,
           sourceVersion,
         });
         assertOwner();
+        // A scoped acknowledgement carries only this frame. History keys the
+        // state the cache will publish, so project it onto the catalog first.
+        const result = { ...reply, snapshot: projectDesignMutationSnapshot(
+          designWorkspaceSnapshotCache.peekSnapshot(workspaceId).data, reply.snapshot) };
         const nextSourceVersion = result.snapshot.frames.find(
           (frame) => frame.file === input.frame,
         )?.sourceVersion;

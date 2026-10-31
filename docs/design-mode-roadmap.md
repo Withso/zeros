@@ -2093,9 +2093,13 @@ keeps the confirmed aggregate visible while the frames the surface demands are
 prepared through the same bounded lane, then publishes once.
 
 Capable Local engines negotiate `design.mutation-snapshots.v1` for transaction,
-create, duplicate, delete, geometry and transfer acknowledgements. Each reply
+create, duplicate, delete, geometry, transfer, style, text, HTML and asset
+acknowledgements. Each reply
 contains complete validated page/frame metadata and prepared source for at most
-16 affected frames. Unchecked same-owner frames remain visible covers until
+16 affected frames; a single-frame edit never re-prepares, lints or reads the
+HTML of unrelated frames (token names for its lint are read without usage
+counts). A style reply is projected onto the catalog before it keys Undo
+prediction. Unchecked same-owner frames remain visible covers until
 the active preparation lane validates them; their old source versions are not
 editing authority. Every projection advances its preparation epoch to fence
 late reads. Legacy layouts, larger affected sets and catalog races retain the

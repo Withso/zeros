@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 
-import { bridgeDesignHistory, bridgeDesignSnapshot, bridgeDesignTransferNode, bridgeDesignDuplicateFrame, bridgeDesignMoveFrames, bridgeDesignUpdateCanvas, bridgeDesignCreateFrame, bridgeDesignDeleteFrame, isDesignWorkspaceSnapshotWire, normalizeDesignWorkspaceSnapshotPages } from "../design-bridge";
+import { bridgeDesignHistory, bridgeDesignSnapshot, bridgeDesignTransferNode, bridgeDesignDuplicateFrame, bridgeDesignMoveFrames, bridgeDesignUpdateCanvas, bridgeDesignCreateFrame, bridgeDesignDeleteFrame, bridgeDesignUpdateStyles, bridgeDesignSetText, bridgeDesignWriteHtml, bridgeDesignInsertAsset, isDesignWorkspaceSnapshotWire, normalizeDesignWorkspaceSnapshotPages } from "../design-bridge";
 import type { RuntimeClient } from "../ws-client";
 import { DESIGN_MUTATION_SNAPSHOTS_CAPABILITY } from "@zeros/protocol/design-catalog";
 
@@ -38,7 +38,8 @@ describe("Design bridge read budgets", () => {
     const snapshot = scopedSnapshot();
     const request = vi.fn(async (message: { op: string }) => ({ type: "WORKSPACE_RESPONSE", result: {
       frame: message.op === "design.node.transfer" ? snapshot.frames[0]!.file : snapshot.frames[0], nodeId: "root", snapshot,
-      geometry: { x: 0, y: 0, w: 390, h: 844, z: 0 }, deleted: { file: snapshot.frames[0]!.file } } }));
+      geometry: { x: 0, y: 0, w: 390, h: 844, z: 0 }, deleted: { file: snapshot.frames[0]!.file },
+      mutation: { changed: true, frame: { file: snapshot.frames[0]!.file } } } }));
     const bridge = { request, supportsEngineCapability: (capability: string) => capable && capability === DESIGN_MUTATION_SNAPSHOTS_CAPABILITY } as unknown as RuntimeClient;
     await bridgeDesignDuplicateFrame(bridge, workspaceId, snapshot.frames[0]!.file);
     await bridgeDesignTransferNode(bridge, workspaceId, { frame: snapshot.frames[0]!.file, sourceVersion: "a".repeat(24),
@@ -48,9 +49,24 @@ describe("Design bridge read budgets", () => {
     await bridgeDesignMoveFrames(bridge, workspaceId, [{ frame: snapshot.frames[0]!.file, from: geometry, to: geometry }]);
     await bridgeDesignCreateFrame(bridge, workspaceId, "New");
     await bridgeDesignDeleteFrame(bridge, workspaceId, snapshot.frames[0]!.file);
+    const node = { frame: snapshot.frames[0]!.file, nodeId: "root", sourceVersion: "a".repeat(24) };
+    await bridgeDesignUpdateStyles(bridge, workspaceId, { ...node, styles: { padding: "4px" } });
+    await bridgeDesignSetText(bridge, workspaceId, { ...node, text: "Text" });
+    await bridgeDesignWriteHtml(bridge, workspaceId, { ...node, html: "<span></span>", mode: "append" });
+    await bridgeDesignInsertAsset(bridge, workspaceId, { frame: node.frame, sourceVersion: node.sourceVersion, assetPath: "assets/a.png", x: 0, y: 0 });
+    expect(request).toHaveBeenCalledTimes(10);
     for (const [message] of request.mock.calls as unknown as Array<[{ params: Record<string, unknown> }]>) {
       expect(message.params.snapshotMode).toBe(scoped ? "scoped" : undefined);
     }
+  });
+
+  it("refuses a style acknowledgement whose scoped frame does not match its catalog", async () => {
+    const snapshot = scopedSnapshot();
+    snapshot.frames[0]!.width = 400;
+    const bridge = { request: vi.fn(async () => ({ type: "WORKSPACE_RESPONSE", result: {
+      mutation: { changed: true, frame: { file: snapshot.frames[0]!.file } }, snapshot } })) } as unknown as RuntimeClient;
+    await expect(bridgeDesignUpdateStyles(bridge, "local", { frame: snapshot.frames[0]!.file, nodeId: "root",
+      sourceVersion: "a".repeat(24), styles: { padding: "4px" } })).rejects.toThrow("malformed");
   });
 
   it("refuses a copy acknowledgement whose source does not match its catalog", async () => {

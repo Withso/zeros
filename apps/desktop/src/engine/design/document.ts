@@ -1265,8 +1265,10 @@ async function knownTokenNames(
   workspacePath: string,
   context?: DesignCanvasReadContext,
 ): Promise<Set<string>> {
+  // Names only: usage counting reads every frame's HTML, and this runs on
+  // every single-frame mutation acknowledgement.
   const names = new Set(
-    (await readDesignTokensDocument(workspacePath, context)).tokens.map(
+    (await readDesignTokensDocument(workspacePath, context, { includeUsage: false })).tokens.map(
       (token) => token.name,
     ),
   );

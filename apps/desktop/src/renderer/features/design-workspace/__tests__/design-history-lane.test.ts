@@ -97,6 +97,25 @@ function workspaceSnapshot(workspace: string, n: number, directoryId = "design-a
   };
 }
 
+/** A registered two-frame page as a capable Local engine serves it: navigation
+ * prepares both frames; a scoped acknowledgement carries only the edited one. */
+function registeredSnapshot(workspace: string, n: number, mode: "navigation" | "scoped") {
+  const base = workspaceSnapshot(workspace, n);
+  const frames = [
+    { ...base.frames[0]!, frameId: "home", pageId: "page", kind: "frame" as const },
+    { ...base.frames[0]!, file: "other.html", title: "Other", frameId: "other", pageId: "page", kind: "frame" as const,
+      x: 1600, z: 1, sourceVersion: "f".repeat(24) },
+  ];
+  const descriptions = frames.map(({ file, frameId, pageId, title, kind, x, y, width, height, z }, order) =>
+    ({ file, source: file, id: frameId, frameId, pageId, title, kind, x, y, width, height, z, order, preparation: "unprepared" as const }));
+  const pages = [{ id: "page", title: "Page", folder: "", frameFiles: frames.map((frame) => frame.file), frameIds: frames.map((frame) => frame.frameId) }];
+  return mode === "navigation"
+    ? { ...base, frames, pages, preparation: { revision: "a".repeat(64), epoch: 1, current: frames.map((frame) => frame.file), errors: {},
+        descriptions: descriptions.map(({ source: _source, id: _id, order: _order, ...description }) => description) } }
+    : { ...base, frames: [frames[0]!], pages, mutationCatalog: { revision: "b".repeat(64),
+        frames: descriptions.map(({ file: _file, frameId: _frameId, ...description }) => ({ ...description, kind: "html" as const })) } };
+}
+
 function runtimePayload(confirmed: number, painted = confirmed) {
   const details = {
     sourceVersion: version(confirmed), oid: "hero", tag: "main", name: "Hero",
@@ -115,7 +134,7 @@ function runtimePayload(confirmed: number, painted = confirmed) {
 }
 
 const fixtures = new Map<string, ReturnType<typeof fixture>>();
-function fixture(workspace = PERSONAL) {
+function fixture(workspace = PERSONAL, options: { scoped?: boolean } = {}) {
   let painted = 0;
   let engineCursor = 0;
   const engineHistory = [0];
@@ -141,7 +160,7 @@ function fixture(workspace = PERSONAL) {
     }),
     getNodeDetails: vi.fn(async () => runtimePayload(generation(runtime.sourceVersion), painted).details[0]),
   };
-  const first = workspaceSnapshot(workspace, 0);
+  const first = options.scoped ? registeredSnapshot(workspace, 0, "navigation") : workspaceSnapshot(workspace, 0);
   designWorkspaceSnapshotCache.setData(workspace, first);
   observeDesignDirectory(workspace, first);
   useDesignRuntimeStore.getState().publishSnapshot(
@@ -160,7 +179,7 @@ function fixture(workspace = PERSONAL) {
       engineHistory.splice(engineCursor + 1);
       engineHistory.push(n);
       engineCursor = engineHistory.length - 1;
-      const snapshot = workspaceSnapshot(workspace, n);
+      const snapshot = options.scoped ? registeredSnapshot(workspace, n, "scoped") : workspaceSnapshot(workspace, n);
       return {
         mutation: { changed: true, frame: { ...snapshot.frames[0]!, source: "<main></main>", srcDoc: "<main></main>", tree: [] }, lint: snapshot.lint },
         snapshot,
@@ -216,6 +235,22 @@ afterEach(async () => {
   for (const held of allGates) held.release();
   await Promise.allSettled(pending);
   for (const workspace of fixtures.keys()) await waitForPendingDesignEdits(workspace);
+});
+
+describe("scoped style acknowledgements", () => {
+  // A scoped reply carries only the edited frame. History must key the state
+  // the cache publishes (every frame), or each edit restarts the Undo cursor.
+  it.each([PERSONAL, ORG])("keeps Undo eager after scoped style saves in %s", async (workspace) => {
+    const f = fixture(workspace, { scoped: true });
+    await f.seed(3);
+    expect(designWorkspaceSnapshotCache.peekSnapshot(workspace).data!.frames.map((frame) => frame.file)).toEqual(["home.html", "other.html"]);
+    const historyGate = gate(); f.holdHistory(historyGate);
+    const undo = f.history("undo"); await historyGate.entered;
+    expect(f.painted).toBe(2);
+    expect(f.runtime.restoreGeneration).toHaveBeenCalledWith(version(2), false);
+    historyGate.release(); await undo;
+    expect(f.cached).toBe(2); expect(f.painted).toBe(2);
+  });
 });
 
 describe("a432388d independent cache/lane review", () => {

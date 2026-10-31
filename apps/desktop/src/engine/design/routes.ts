@@ -1679,6 +1679,7 @@ export async function handleDesignWorkspaceRoute(
         snapshot: await host.readDesignSnapshot(workspace, remote, {
           hostLocalResources,
           fresh: true,
+          ...(params.snapshotMode === "scoped" ? { affectedFrames: [frame] } : {}),
         }),
         foundationRevision: {
           before: applied.receipt.beforeRevision,
@@ -1742,6 +1743,7 @@ export async function handleDesignWorkspaceRoute(
         snapshot: await host.readDesignSnapshot(workspace, remote, {
           hostLocalResources,
           fresh: true,
+          ...(params.snapshotMode === "scoped" ? { affectedFrames: [frame] } : {}),
         }),
         foundationRevision: {
           before: applied.receipt.beforeRevision,
@@ -1813,6 +1815,7 @@ export async function handleDesignWorkspaceRoute(
         snapshot: await host.readDesignSnapshot(workspace, remote, {
           hostLocalResources,
           fresh: true,
+          ...(params.snapshotMode === "scoped" ? { affectedFrames: [frame] } : {}),
         }),
         foundationRevision: {
           before: applied.receipt.beforeRevision,
@@ -1876,6 +1879,7 @@ export async function handleDesignWorkspaceRoute(
         snapshot: await host.readDesignSnapshot(workspace, remote, {
           hostLocalResources,
           fresh: true,
+          ...(params.snapshotMode === "scoped" ? { affectedFrames: [frame] } : {}),
         }),
         foundationRevision: {
           before: applied.receipt.beforeRevision,
