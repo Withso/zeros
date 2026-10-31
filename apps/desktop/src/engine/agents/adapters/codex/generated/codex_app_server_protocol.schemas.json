@@ -3657,6 +3657,30 @@
             },
             "method": {
               "enum": [
+                "account/gcp/setup"
+              ],
+              "title": "Account/gcp/setupRequestMethod",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/definitions/v2/GcpSetupParams"
+            }
+          },
+          "required": [
+            "id",
+            "method",
+            "params"
+          ],
+          "title": "Account/gcp/setupRequest",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "id": {
+              "$ref": "#/definitions/v2/RequestId"
+            },
+            "method": {
+              "enum": [
                 "account/bedrock/checkGovCloudRequirements"
               ],
               "title": "Account/bedrock/checkGovCloudRequirementsRequestMethod",
@@ -3696,6 +3720,54 @@
             "params"
           ],
           "title": "Account/login/cancelRequest",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "id": {
+              "$ref": "#/definitions/v2/RequestId"
+            },
+            "method": {
+              "enum": [
+                "accountSession/list"
+              ],
+              "title": "AccountSession/listRequestMethod",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/definitions/v2/AccountSessionsListParams"
+            }
+          },
+          "required": [
+            "id",
+            "method",
+            "params"
+          ],
+          "title": "AccountSession/listRequest",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "id": {
+              "$ref": "#/definitions/v2/RequestId"
+            },
+            "method": {
+              "enum": [
+                "accountSession/switch"
+              ],
+              "title": "AccountSession/switchRequestMethod",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/definitions/v2/AccountSessionsSwitchParams"
+            }
+          },
+          "required": [
+            "id",
+            "method",
+            "params"
+          ],
+          "title": "AccountSession/switchRequest",
           "type": "object"
         },
         {
@@ -8626,6 +8698,13 @@
                 ],
                 "title": "ChatgptAccountType",
                 "type": "string"
+              },
+              "workspaceName": {
+                "description": "Display name of the selected ChatGPT workspace, when available.",
+                "type": [
+                  "string",
+                  "null"
+                ]
               }
             },
             "required": [
@@ -8732,6 +8811,201 @@
           "us_cr"
         ],
         "type": "string"
+      },
+      "AccountSession": {
+        "properties": {
+          "displayName": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "email": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "imageUrl": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "isActive": {
+            "type": "boolean"
+          },
+          "lastUsedAt": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "selectedWorkspaceAccountId": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "sessionId": {
+            "type": "string"
+          },
+          "userId": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "workspaces": {
+            "items": {
+              "$ref": "#/definitions/v2/AccountSessionWorkspace"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "isActive",
+          "lastUsedAt",
+          "sessionId",
+          "workspaces"
+        ],
+        "type": "object"
+      },
+      "AccountSessionWorkspace": {
+        "properties": {
+          "accountId": {
+            "type": "string"
+          },
+          "imageUrl": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "kind": {
+            "anyOf": [
+              {
+                "$ref": "#/definitions/v2/AccountSessionWorkspaceKind"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "accountId"
+        ],
+        "type": "object"
+      },
+      "AccountSessionWorkspaceKind": {
+        "enum": [
+          "personal",
+          "workspace"
+        ],
+        "type": "string"
+      },
+      "AccountSessionsListParams": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "properties": {
+          "refreshWorkspaceMetadata": {
+            "type": "boolean"
+          }
+        },
+        "title": "AccountSessionsListParams",
+        "type": "object"
+      },
+      "AccountSessionsResponse": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "properties": {
+          "activeSessionId": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "sessions": {
+            "items": {
+              "$ref": "#/definitions/v2/AccountSession"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "sessions"
+        ],
+        "title": "AccountSessionsResponse",
+        "type": "object"
+      },
+      "AccountSessionsSwitchParams": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "properties": {
+          "accountId": {
+            "description": "Workspace to select within that login; this is not a user identifier.",
+            "type": "string"
+          },
+          "allowBrowserLogin": {
+            "description": "Allow Core to start browser sign-in if this session needs SSO for the workspace.",
+            "type": "boolean"
+          },
+          "sessionId": {
+            "description": "Opaque active-login identifier returned by accountSession/list.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "accountId",
+          "sessionId"
+        ],
+        "title": "AccountSessionsSwitchParams",
+        "type": "object"
+      },
+      "AccountSessionsSwitchResponse": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "anyOf": [
+          {
+            "properties": {
+              "activeSessionId": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "sessions": {
+                "items": {
+                  "$ref": "#/definitions/v2/AccountSession"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "sessions"
+            ],
+            "title": "Sessionsv2::AccountSessionsSwitchResponse",
+            "type": "object"
+          },
+          {
+            "description": "Open the URL and await account/login/completed for this login ID.",
+            "properties": {
+              "auth_url": {
+                "type": "string"
+              },
+              "login_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "auth_url",
+              "login_id"
+            ],
+            "type": "object"
+          }
+        ],
+        "title": "AccountSessionsSwitchResponse"
       },
       "AccountTokenUsageDailyBucket": {
         "properties": {
@@ -8854,6 +9128,13 @@
         "properties": {
           "kind": {
             "$ref": "#/definitions/v2/AdditionalContextKind"
+          },
+          "name": {
+            "description": "Optional name for untrusted context, used to label its tool output.",
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "value": {
             "type": "string"
@@ -10550,6 +10831,7 @@
               "flexUnavailable",
               "serverOverloaded",
               "modelNotFound",
+              "policyCapacityUnavailable",
               "cyberPolicy",
               "misalignmentPolicyViolation",
               "tooManyDenials",
@@ -12338,6 +12620,16 @@
             "anyOf": [
               {
                 "$ref": "#/definitions/v2/NetworkRequirements"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "otel": {
+            "anyOf": [
+              {
+                "$ref": "#/definitions/v2/OtelRequirements"
               },
               {
                 "type": "null"
@@ -15158,6 +15450,38 @@
         ],
         "type": "string"
       },
+      "GcpSetupParams": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "properties": {
+          "credentialFile": {
+            "description": "Absolute path to a credential file on the app-server host. Omit or pass `null` to clear the active user configuration's override and use ADC. If another configuration layer would still supply a credential file, setup fails without saving changes.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "location": {
+            "description": "Vertex AI location. Omission or null selects `global`.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "projectId": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "projectId"
+        ],
+        "title": "GcpSetupParams",
+        "type": "object"
+      },
+      "GcpSetupResponse": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "title": "GcpSetupResponse",
+        "type": "object"
+      },
       "GetAccountParams": {
         "$schema": "http://json-schema.org/draft-07/schema#",
         "properties": {
@@ -15856,6 +16180,13 @@
           "enabled": {
             "type": "boolean"
           },
+          "environmentId": {
+            "description": "The owning execution environment, if this hook came from its requirements.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "eventName": {
             "$ref": "#/definitions/v2/HookEventName"
           },
@@ -16023,7 +16354,7 @@
             "default": "unknown"
           },
           "sourcePath": {
-            "$ref": "#/definitions/v2/AbsolutePathBuf"
+            "$ref": "#/definitions/v2/LegacyAppPathString"
           },
           "startedAt": {
             "format": "int64",
@@ -16144,11 +16475,18 @@
         "$schema": "http://json-schema.org/draft-07/schema#",
         "properties": {
           "cwds": {
-            "description": "When empty, defaults to the current session working directory.",
+            "description": "Working directories to inspect when no thread is specified. An empty list uses the session cwd.",
             "items": {
               "type": "string"
             },
             "type": "array"
+          },
+          "threadId": {
+            "description": "List a loaded thread's hooks, including its selected environments. Omit `cwds` in this mode.",
+            "type": [
+              "string",
+              "null"
+            ]
           }
         },
         "title": "HooksListParams",
@@ -18338,6 +18676,81 @@
         "title": "ModelProviderCapabilitiesReadResponse",
         "type": "object"
       },
+      "ModelProviderError": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "description": "Structured JSON-RPC error data. Unknown errors must retain the client's normal fallback.",
+        "oneOf": [
+          {
+            "properties": {
+              "currentModelProvider": {
+                "type": "string"
+              },
+              "modelProvider": {
+                "type": "string"
+              },
+              "type": {
+                "enum": [
+                  "modelProviderMismatch"
+                ],
+                "title": "ModelProviderMismatchv2::ModelProviderErrorType",
+                "type": "string"
+              }
+            },
+            "required": [
+              "currentModelProvider",
+              "modelProvider",
+              "type"
+            ],
+            "title": "ModelProviderMismatchv2::ModelProviderError",
+            "type": "object"
+          },
+          {
+            "properties": {
+              "modelProvider": {
+                "type": "string"
+              },
+              "type": {
+                "enum": [
+                  "modelProviderNotConfigured"
+                ],
+                "title": "ModelProviderNotConfiguredv2::ModelProviderErrorType",
+                "type": "string"
+              }
+            },
+            "required": [
+              "modelProvider",
+              "type"
+            ],
+            "title": "ModelProviderNotConfiguredv2::ModelProviderError",
+            "type": "object"
+          },
+          {
+            "properties": {
+              "modelProvider": {
+                "type": "string"
+              },
+              "requiredModelProvider": {
+                "type": "string"
+              },
+              "type": {
+                "enum": [
+                  "modelProviderPolicyConflict"
+                ],
+                "title": "ModelProviderPolicyConflictv2::ModelProviderErrorType",
+                "type": "string"
+              }
+            },
+            "required": [
+              "modelProvider",
+              "requiredModelProvider",
+              "type"
+            ],
+            "title": "ModelProviderPolicyConflictv2::ModelProviderError",
+            "type": "object"
+          }
+        ],
+        "title": "ModelProviderError"
+      },
       "ModelRerouteReason": {
         "enum": [
           "highRiskCyberActivity"
@@ -18636,7 +19049,7 @@
             "additionalProperties": {
               "$ref": "#/definitions/v2/NetworkDomainPermission"
             },
-            "description": "Canonical network permission map for `experimental_network`.",
+            "description": "Canonical managed network permission map.",
             "type": [
               "object",
               "null"
@@ -18685,7 +19098,7 @@
             "additionalProperties": {
               "$ref": "#/definitions/v2/NetworkUnixSocketPermission"
             },
-            "description": "Canonical unix socket permission map for `experimental_network`.",
+            "description": "Canonical managed unix socket permission map.",
             "type": [
               "object",
               "null"
@@ -18782,6 +19195,232 @@
           }
         ],
         "title": "Nullable_RemoteControlEnableParams"
+      },
+      "OtelExporter": {
+        "oneOf": [
+          {
+            "enum": [
+              "none",
+              "statsig"
+            ],
+            "type": "string"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "otlp-http": {
+                "properties": {
+                  "endpoint": {
+                    "type": "string"
+                  },
+                  "headers": {
+                    "additionalProperties": {
+                      "type": "string"
+                    },
+                    "description": "Header names are retained; values are redacted by the server.",
+                    "type": "object"
+                  },
+                  "protocol": {
+                    "$ref": "#/definitions/v2/OtelHttpProtocol"
+                  },
+                  "tls": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/definitions/v2/OtelTlsConfig"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  }
+                },
+                "required": [
+                  "endpoint",
+                  "headers",
+                  "protocol"
+                ],
+                "type": "object"
+              }
+            },
+            "required": [
+              "otlp-http"
+            ],
+            "title": "OtlpHttpOtelExporter",
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "otlp-grpc": {
+                "properties": {
+                  "endpoint": {
+                    "type": "string"
+                  },
+                  "headers": {
+                    "additionalProperties": {
+                      "type": "string"
+                    },
+                    "description": "Header names are retained; values are redacted by the server.",
+                    "type": "object"
+                  },
+                  "tls": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/definitions/v2/OtelTlsConfig"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  }
+                },
+                "required": [
+                  "endpoint",
+                  "headers"
+                ],
+                "type": "object"
+              }
+            },
+            "required": [
+              "otlp-grpc"
+            ],
+            "title": "OtlpGrpcOtelExporter",
+            "type": "object"
+          }
+        ]
+      },
+      "OtelHttpProtocol": {
+        "enum": [
+          "binary",
+          "json"
+        ],
+        "type": "string"
+      },
+      "OtelRequirements": {
+        "properties": {
+          "environment": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "exporter": {
+            "anyOf": [
+              {
+                "$ref": "#/definitions/v2/OtelExporter"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "log_agent_responses": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "log_guardian_assessments": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "log_user_prompt": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "metrics_exporter": {
+            "anyOf": [
+              {
+                "$ref": "#/definitions/v2/OtelExporter"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "span_attributes": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "type": [
+              "object",
+              "null"
+            ]
+          },
+          "tool_result": {
+            "anyOf": [
+              {
+                "$ref": "#/definitions/v2/OtelToolResultLogConfig"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "trace_exporter": {
+            "anyOf": [
+              {
+                "$ref": "#/definitions/v2/OtelExporter"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "tracestate": {
+            "additionalProperties": {
+              "additionalProperties": {
+                "type": "string"
+              },
+              "type": "object"
+            },
+            "type": [
+              "object",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
+      },
+      "OtelTlsConfig": {
+        "properties": {
+          "ca-certificate": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "client-certificate": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "client-private-key": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
+      },
+      "OtelToolResultLogConfig": {
+        "properties": {
+          "max_bytes": {
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "max_bytes"
+        ],
+        "type": "object"
       },
       "OverriddenMetadata": {
         "properties": {
@@ -20445,6 +21084,13 @@
             "description": "Process exit code.",
             "format": "int32",
             "type": "integer"
+          },
+          "outputDrainTimedOut": {
+            "description": "Whether output collection hit its post-exit deadline before seeing EOF or reaching the requested byte cap on either stream. Older servers omit this field.",
+            "type": [
+              "boolean",
+              "null"
+            ]
           },
           "processHandle": {
             "description": "Client-supplied, connection-scoped `processHandle` from `process/spawn`.",
@@ -23104,8 +23750,7 @@
       },
       "ReviewDelivery": {
         "enum": [
-          "inline",
-          "detached"
+          "inline"
         ],
         "type": "string"
       },
@@ -23122,7 +23767,7 @@
               }
             ],
             "default": null,
-            "description": "Where to run the review: inline (default) on the current thread or detached on a new thread (returned in `reviewThreadId`). Detached delivery is deprecated and emits `deprecationNotice`. Use `thread/start` followed by an inline review for a separate review thread."
+            "description": "Reviews run inline on the supplied thread. Omit this field or pass `inline`. To review on a separate thread, start a thread first and use its id."
           },
           "target": {
             "$ref": "#/definitions/v2/ReviewTarget"
@@ -23142,7 +23787,7 @@
         "$schema": "http://json-schema.org/draft-07/schema#",
         "properties": {
           "reviewThreadId": {
-            "description": "Identifies the thread where the review runs.\n\nFor inline reviews, this is the original thread id. For detached reviews, this is the id of the new review thread.",
+            "description": "The thread id supplied to `review/start`.",
             "type": "string"
           },
           "turn": {
@@ -25257,7 +25902,7 @@
             "description": "Override where approval requests are routed for review on this thread and subsequent turns."
           },
           "attachToSource": {
-            "description": "Persist the fork as an attached thread of its resolved source, hidden from ordinary lists. The source cannot be deleted while attached threads exist. Requires local storage; incompatible with ephemeral and deferGoalContinuation. Omitted or false creates an ordinary fork.",
+            "description": "Persist the fork as an attached thread of its resolved source, hidden from ordinary lists. The source cannot be deleted while attached threads exist. Requires a paginated source and local storage; incompatible with ephemeral and deferGoalContinuation. Omitted or false creates an ordinary fork.",
             "type": "boolean"
           },
           "baseInstructions": {
@@ -25800,6 +26445,7 @@
         "type": "object"
       },
       "ThreadItem": {
+        "description": "A thread item and its recorded lifecycle times. The payload stays flat on the wire.",
         "oneOf": [
           {
             "properties": {
@@ -26582,6 +27228,14 @@
                 ],
                 "default": null
               },
+              "generationId": {
+                "default": null,
+                "description": "Image generation identifier for the generated image, when provided by the image backend.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
               "id": {
                 "type": "string"
               },
@@ -26702,7 +27356,28 @@
             "title": "ContextCompactionThreadItem",
             "type": "object"
           }
-        ]
+        ],
+        "properties": {
+          "completedAtMs": {
+            "default": null,
+            "description": "Unix timestamp in milliseconds when the item completed, if recorded.",
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "startedAtMs": {
+            "default": null,
+            "description": "Unix timestamp in milliseconds when the item started, if recorded.",
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
       },
       "ThreadItemEntry": {
         "properties": {
@@ -30844,6 +31519,14 @@
               "$ref": "#/definitions/v2/ThreadUsageBreakdownGroup"
             },
             "type": "array"
+          },
+          "nativeUsageUsdMicros": {
+            "description": "Native dollar usage, independent of credit estimates. None means unknown, not zero.",
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ]
           },
           "threadId": {
             "type": "string"
