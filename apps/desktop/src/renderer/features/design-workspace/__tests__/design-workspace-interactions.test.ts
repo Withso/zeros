@@ -543,9 +543,14 @@ describe("design workspace interaction wiring", () => {
     expect(source).toContain(
       "const settle = (rotation: number) => {\n        paintDesignNodeOverlayGeometry(overlay, { ...overlayFrame, rotation });",
     );
+    // A failed save retires the loop first, so a late preview answer cannot
+    // turn the restored outline again.
     expect(source).toContain(
-      "const restore = () => {\n        settle(overlayFrame.rotation);",
+      "const restore = () => {\n        loop.stop();\n        settle(overlayFrame.rotation);",
     );
+    // The release sample reaches the runtime before the save is adopted.
+    expect(source).toContain("cleanup(moved);");
+    expect(source).toContain("if (committing) loop.finish();");
   });
 
   it("keeps rotated direct manipulation on the element's own axes", () => {

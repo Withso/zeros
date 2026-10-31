@@ -1560,7 +1560,10 @@ Pointer handling uses Pointer Events and capture. High-frequency input is
 sampled at animation-frame cadence; layout reads are batched before writes.
 One pointer gesture publishes one semantic transaction on release. Cancel or
 Escape restores the exact baseline. The owning pointer's release position is
-included; unrelated pointers cannot move or finish the gesture. Lost capture,
+included, in the preview as well as the commit: a release that lands while the
+previous sample's preview is unanswered sends its own sample to the runtime
+before the save, and only that sample's answer repaints the outline. Unrelated
+pointers cannot move or finish the gesture. Lost capture,
 window blur and surface retirement cancel it. Moving or resizing back to the
 original unsnapped geometry writes nothing and preserves authored sizing.
 

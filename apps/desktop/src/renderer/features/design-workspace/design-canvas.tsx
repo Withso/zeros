@@ -3721,8 +3721,9 @@ export function DesignCanvas({
       const settle = (rotation: number) => {
         paintDesignNodeOverlayGeometry(overlay, { ...overlayFrame, rotation });
       };
-      const cleanup = () => {
-        loop.stop();
+      const cleanup = (committing = false) => {
+        if (committing) loop.finish();
+        else loop.stop();
         window.removeEventListener("pointermove", move);
         window.removeEventListener("pointerup", finish);
         window.removeEventListener("pointercancel", cancel);
@@ -3736,11 +3737,12 @@ export function DesignCanvas({
         gestureCancelRef.current = null;
       };
       const restore = () => {
+        loop.stop();
         settle(overlayFrame.rotation);
         void clearDesignNodeStylePreviewTransient(previewInput).catch(() => {});
       };
       const finish = () => {
-        cleanup();
+        cleanup(moved);
         if (!moved) {
           settle(overlayFrame.rotation);
           return;
@@ -3888,8 +3890,9 @@ export function DesignCanvas({
         paintOrigin(latest);
         loop.author(latestStyles);
       };
-      const cleanup = () => {
-        loop.stop();
+      const cleanup = (committing = false) => {
+        if (committing) loop.finish();
+        else loop.stop();
         window.removeEventListener("pointermove", move);
         window.removeEventListener("pointerup", finish);
         window.removeEventListener("pointercancel", cancel);
@@ -3908,11 +3911,12 @@ export function DesignCanvas({
         gestureCancelRef.current = null;
       };
       const restore = () => {
+        loop.stop();
         paintOrigin({ originX: box.originX, originY: box.originY });
         void clearDesignNodeStylePreviewTransient(previewInput).catch(() => {});
       };
       const finish = () => {
-        cleanup();
+        cleanup(moved);
         if (!moved) return;
         publishDesignGestureLivePreview(
           workspaceId,
@@ -4123,8 +4127,9 @@ export function DesignCanvas({
           });
         },
         measured: (geometry) => {
-          if (ended) return;
+          // After a committed release only the release sample's answer arrives.
           paintOwnerGeometry(geometry);
+          if (ended) return;
           publishDesignLayoutToolsLive(ownerKey, {
             geometry: {
               rect: geometry.rect,
@@ -4207,10 +4212,11 @@ export function DesignCanvas({
         };
         if (dragging) update();
       };
-      const cleanup = () => {
+      const cleanup = (committing = false) => {
         ended = true;
         spacingGestureRef.current = false;
-        loop.stop();
+        if (committing) loop.finish();
+        else loop.stop();
         window.removeEventListener("pointermove", move);
         window.removeEventListener("pointerup", finish);
         window.removeEventListener("pointercancel", cancel);
@@ -4225,10 +4231,20 @@ export function DesignCanvas({
         gestureCancelRef.current = null;
       };
       const restore = () => {
+        loop.stop();
         paintOwnerGeometry(originalGeometry);
         releaseDesignLayoutToolsLive(ownerKey);
         void clearDesignNodeStylePreviewTransient(previewInput).catch(() => {});
       };
+      // A drag that ends where it began changes nothing: no write, no
+      // history, and authored units and expressions stay untouched.
+      const changedSinceStart = () => Object.entries(latest.commit).some(([property, css]) =>
+        property.startsWith("padding-")
+          ? designPixelValue(css) !== paddingOriginal[property]
+          : property === control.property
+            ? latest.value !== baseline
+            : false,
+      );
       const finish = (pointerEvent?: PointerEvent) => {
         if (pointerEvent && pointerEvent.pointerId !== pointerId) return;
         if (pointerEvent) {
@@ -4239,7 +4255,8 @@ export function DesignCanvas({
           };
           if (dragging) update();
         }
-        cleanup();
+        const changed = dragging && changedSinceStart();
+        cleanup(changed);
         if (!dragging) {
           releaseDesignLayoutToolsLive(ownerKey);
           // A modifier-click selects through spacing chrome.
@@ -4268,15 +4285,6 @@ export function DesignCanvas({
           );
           return;
         }
-        // A drag that ends where it began changes nothing: no write, no
-        // history, and authored units and expressions stay untouched.
-        const changed = Object.entries(latest.commit).some(([property, css]) =>
-          property.startsWith("padding-")
-            ? designPixelValue(css) !== paddingOriginal[property]
-            : property === control.property
-              ? latest.value !== baseline
-              : false,
-        );
         if (!changed) {
           restore();
           return;
@@ -4569,6 +4577,7 @@ export function DesignCanvas({
         }
       };
       const restore = () => {
+        loop.stop();
         if (duplicate) void copyPreview?.finally(() => runtime.clearPreviewStructure?.(transactionId)).catch(() => {});
         if (nudgeLifetimeRef.current !== lifetime || runtime.sourceVersion !== frame.sourceVersion || designFrameRuntime(workspaceId, frame.file) !== runtime) return;
         for (const start of painted) {
@@ -4627,13 +4636,14 @@ export function DesignCanvas({
         paint();
         loop.author({});
       };
-      const cleanup = () => {
-        loop.stop();
+      const cleanup = (committing = false) => {
+        if (committing) loop.finish();
+        else loop.stop();
         paintGuides({});
         gestureCancelRef.current = null;
       };
       const finish = () => {
-        cleanup();
+        cleanup(moved && isCurrent() && !designGestureRectUnchanged(groupBounds, latestRawBounds));
         if (!isCurrent()) { restore(); return; }
         if (!moved) {
           if (clicked) { clicked(); return; }
@@ -5001,6 +5011,7 @@ export function DesignCanvas({
         }
       };
       const restore = () => {
+        loop.stop();
         latestBounds = startBounds;
         latestRects = new Map(
           starts.map(({ details }) => [details.oid, details.rect] as const),
@@ -5055,14 +5066,15 @@ export function DesignCanvas({
         paint();
         loop.author({});
       };
-      const cleanup = () => {
-        loop.stop();
+      const cleanup = (committing = false) => {
+        if (committing) loop.finish();
+        else loop.stop();
         paintGuides({});
         delete groupOverlay.dataset.designGesture;
         gestureCancelRef.current = null;
       };
       const finish = () => {
-        cleanup();
+        cleanup(moved && !designGestureRectUnchanged(startBounds, latestRawBounds));
         if (!moved) return;
         if (designGestureRectUnchanged(startBounds, latestRawBounds)) {
           restore();
@@ -5673,13 +5685,15 @@ export function DesignCanvas({
         loop.author(latestStyles);
       };
 
-      const cleanup = () => {
-        loop.stop();
+      const cleanup = (committing = false) => {
+        if (committing) loop.finish();
+        else loop.stop();
         paintGuides({});
         gestureCancelRef.current = null;
       };
 
       const restorePreview = () => {
+        loop.stop();
         paintDesignNodeOverlayGeometry(overlay, startOverlay);
         paintDesignConstraintGuides(
           constraintGuides,
@@ -5701,17 +5715,17 @@ export function DesignCanvas({
       };
 
       const finish = () => {
-        cleanup();
+        // Returning to the original authored geometry is a cancelled edit.
+        // Restore source sizing intent (Hug/Fill, %, auto), not fixed pixels.
+        const unchanged = !moved ||
+          designGestureRectUnchanged(start, latestRawRect) ||
+          sameDesignGestureStyles(latestStyles, authoredForRect(start).styles);
+        cleanup(!unchanged);
         if (!moved) {
           finishClickSelection();
           return;
         }
-        // Returning to the original authored geometry is a cancelled edit.
-        // Restore source sizing intent (Hug/Fill, %, auto), not fixed pixels.
-        if (
-          designGestureRectUnchanged(start, latestRawRect) ||
-          sameDesignGestureStyles(latestStyles, authoredForRect(start).styles)
-        ) {
+        if (unchanged) {
           restorePreview();
           return;
         }

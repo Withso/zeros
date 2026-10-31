@@ -402,6 +402,86 @@ export async function runDesignGestureReleasePositionSmoke({ page, check }) {
   );
 }
 
+export async function runDesignGestureReleasePreviewSmoke({ page: parent, check }) {
+  // Held measurement fixtures persist a catalog-shaped snapshot; keep that
+  // storage out of the shared page the legacy fixtures reuse.
+  const page = await parent.context().browser().newPage();
+  try {
+    const origin = `${new URL(parent.url()).origin}/ui-smoke-design-release-origin.html`;
+    await page.route(origin, (route) => route.fulfill({ contentType: "text/html", body: "<!doctype html><title>Release smoke origin</title>" }), { times: 1 });
+    await page.goto(origin);
+    await runDesignGestureReleasePreviewChecks({ page, check });
+  } finally {
+    await page.close();
+  }
+}
+
+async function runDesignGestureReleasePreviewChecks({ page, check }) {
+  // A release that lands while the previous sample's preview is unanswered
+  // must still show the released size, not one sample short of it until the
+  // save is adopted. The save stays held, so only the gesture can resize it.
+  await openCanvasFixture(page, "layoutGestures&measureManipulation&engineDelayMs=0");
+  await page.locator('[data-design-layer-id="home-hero"]').click();
+  const handle = page.locator(
+    '[data-design-element-overlay="home-hero"] [data-design-resize-edge="e"]',
+  );
+  const runtime = page.frameLocator(
+    '[data-design-frame="home.html"] iframe[data-design-document-buffer="displayed"][data-design-document-ready]',
+  );
+  const width = () => runtime.locator('[data-oid="home-hero"]').evaluate((element) => getComputedStyle(element).width);
+  const bounds = await handle.boundingBox();
+  const start = { x: bounds.x + bounds.width / 2, y: bounds.y + bounds.height / 2 };
+  const writesBefore = await styleWrites(page);
+  // Hold every runtime port post in order, as a busy frame document would.
+  await page.evaluate(() => {
+    const send = MessagePort.prototype.postMessage;
+    const held = [];
+    window.__zerosHeldRuntimePort = {
+      holding: false,
+      held,
+      release() {
+        this.holding = false;
+        for (const [port, args] of held.splice(0)) send.apply(port, args);
+      },
+    };
+    MessagePort.prototype.postMessage = function (...args) {
+      if (window.__zerosHeldRuntimePort.holding) {
+        held.push([this, args]);
+        return;
+      }
+      return send.apply(this, args);
+    };
+  });
+  await page.evaluate(() => window.__zerosHarnessDesignSurface.measurement.hold("design.node.styles"));
+  try {
+    await page.mouse.move(start.x, start.y);
+    await page.mouse.down();
+    await page.mouse.move(start.x + 10, start.y);
+    await expect.poll(width).toBe("620px");
+    await page.evaluate(() => { window.__zerosHeldRuntimePort.holding = true; });
+    await page.mouse.move(start.x + 30, start.y);
+    await page.waitForFunction(() => window.__zerosHeldRuntimePort.held.some(([, [message]]) => message?.method === "previewGeometry"));
+    await page.mouse.move(start.x + 40, start.y);
+    await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+    await page.mouse.up();
+    await page.waitForFunction(() => window.__zerosHarnessDesignSurface.measurement.requests
+      .some((request) => request.op === "design.node.styles" && request.released === null));
+    await page.evaluate(() => window.__zerosHeldRuntimePort.release());
+    await expect.poll(width).toBe("680px");
+    const outline = await page.locator('[data-design-element-overlay="home-hero"][data-design-selected-element]').boundingBox();
+    check(
+      "a release during an unanswered preview shows the released size before its save lands",
+      Math.abs(outline.width - 680 * 0.5) <= 1,
+      JSON.stringify(outline),
+    );
+  } finally {
+    await page.evaluate(() => window.__zerosHeldRuntimePort?.release());
+    await page.evaluate(() => window.__zerosHarnessDesignSurface.measurement.release("design.node.styles"));
+  }
+  await expect.poll(() => styleWrites(page)).toBe(writesBefore + 1);
+  await expect.poll(width).toBe("680px");
+}
+
 export async function runDesignCompletedCanvasGesturesSmoke({ page, check }) {
   await openCanvasFixture(page);
   const frame = page.locator('[data-design-frame="home.html"]');
@@ -954,6 +1034,7 @@ export async function runDesignCanvasRefinementsSmoke(options) {
   await runDesignDragPrepareOnPressSmoke(options);
   await runDesignDragOutPixelsSmoke(options);
   await runDesignGestureReleasePositionSmoke(options);
+  await runDesignGestureReleasePreviewSmoke(options);
   await runDesignCompletedCanvasGesturesSmoke(options);
   await runDesignNoopCanvasResizeSmoke(options);
   await runDesignNoopFrameGestureSmoke(options);
