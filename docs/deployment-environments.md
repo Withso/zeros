@@ -400,9 +400,9 @@ capability, not the Railway `CLOUD_V2_ENABLED` rollout flag and not an
 installed-app preference. The checked-in
 [`cloud/channels.json`](../apps/control-plane/src/cloud/channels.json)
 policy is an additional required gate shared by desktop builds, control-plane
-configuration and release jobs. Development/Alpha allow cloud; Beta/Production
-pause it. Desktop `dev` maps to `development`, and `stable` to `production`.
-Environment opt-ins cannot override a paused channel. On an allowed channel,
+configuration and release jobs. Every channel currently allows cloud; setting
+one to `false` pauses it. Desktop `dev` maps to `development`, and `stable` to
+`production`. Environment opt-ins cannot override a paused channel. On an allowed channel,
 the protected release environment supplies one value to both the packaged
 engine and Electron compile steps; each artifact bakes it, and Electron pins
 the child environment to the same decision. Leave it unset or set it to `false`
@@ -426,10 +426,69 @@ consent requirements.
 
 ### Cloud channel policy
 
-`apps/control-plane/src/cloud/channels.json` enables cloud for Development and
-Alpha and keeps Beta and Production paused. The desktop and release tools read
-the same policy. A pause disables cloud entry points and preserves existing
-resources; Local Personal and organization-local workspaces stay available.
+`apps/control-plane/src/cloud/channels.json` allows cloud on every channel. The
+desktop and release tools read the same policy. Setting a channel to `false`
+pauses it: cloud entry points close, existing resources are preserved, and Local
+Personal and organization-local workspaces stay available.
+
+Allowing a channel changes nothing by itself. The backend still needs
+`CLOUD_V2_ENABLED=true` and its provider configuration, and a desktop build
+needs `ZEROS_CLOUD_WORKSPACES_ENABLED=true`. Turn on Beta first, then
+Production from the same release commit. Every resource and key below is the
+channel's own; never reuse Alpha's.
+
+1. **Release.** Ship a `main` commit containing the allowing policy through
+   the normal ladder. The channel must reach migration 0215 or later; from 0166
+   that includes the controlled batches 0182 and 0191–0200, applied with the
+   [controlled cutover](#controlled-cutover-workflow). On an allowed channel the
+   control plane parses existing `CLOUD_WORKSPACE_SECRET_*` and
+   `CLOUD_CODEX_REFRESH_FINGERPRINT_*` values at boot, and a malformed one stops
+   it. Check them first from a checkout with the channel's Railway environment
+   linked; this prints `cloud keyrings ok` or names the bad variable, never a
+   value:
+
+   ```sh
+   railway run pnpm --dir apps/control-plane exec tsx -e 'import("./src/agent-credentials/agent-credential-config.ts").then(m => { m.loadCloudAgentCredentialConfig(process.env); console.log("cloud keyrings ok") }).catch(e => { console.error(e.message); process.exit(1) })'
+   ```
+2. **Cloudflare R2.** Create a bucket and an R2 API token with Object Read &
+   Write on that bucket only. The runtime publisher and the control plane both
+   use it.
+3. **Boat.** Create an API key for the channel's Boat account, plus its billing
+   organization if it pays from an organization wallet.
+4. **Railway.** On the channel's control-plane service, set the variables in
+   [Cloud workspaces → Configuration](cloud-workspaces.md#configuration):
+   `CLOUD_V2_API_URL` and `CLOUD_V2_REALTIME_URL` (the channel's API origin as
+   `https://` and `wss://`), a new `CLOUD_V2_WORKER_SIGNING_KEY` and the four
+   `CLOUD_V2_RUNTIME_STORE_*` values. Keep an existing `BOAT_API_KEY`,
+   `BOAT_BILLING_ORG`, agent vault keyring (`CLOUD_WORKSPACE_SECRET_*`) and
+   Codex fingerprint keyring; add them only where missing. Leave
+   `CLOUD_V2_ENABLED` unset until step 5. Back the keys up: credentials sealed
+   with a lost key cannot be read.
+5. **Runtime.** Publish the worker runtime to the channel's store with its
+   variables, set the returned `CLOUD_V2_RUNTIME_SHA256`, then set
+   `CLOUD_V2_ENABLED=true` and redeploy. `/v1/release-identity` must report
+   cloud enabled and healthy.
+6. **Desktop.** Set the GitHub environment's
+   `ZEROS_CLOUD_WORKSPACES_ENABLED=true` and release a desktop build.
+7. **Qualify.** With an account that has Pro (platform owners and developers
+   have it automatically), create an organization, build its Cloud Computer,
+   and create, stop, wake and delete a workspace. Members connect GitHub in
+   Settings → Integrations; the channel's GitHub App needs the same repository
+   permissions as Alpha's.
+8. **Clean up.** Once the release runs in the channel, delete settings nothing
+   reads any more, after saving any secret you may need for old backups: the
+   cloud v1 settings `BOAT_ACCOUNT_SCOPE`, `BOAT_COMPUTE_POLICY_ID`,
+   `BOAT_IMAGE_BUILD_SHA256`, `BOAT_SECONDS_PER_DOLLAR`, `BOAT_SNAPSHOT_ID`,
+   `BOAT_TTL_SECONDS`, `CLOUD_WORKSPACES_ENABLED`, every `CLOUD_WORKSPACE_*`
+   except `CLOUD_WORKSPACE_SECRET_*`, `RUNTIME_QUALIFICATION_ACTOR_USER_ID`,
+   `WORKER_ADMISSION_CONFIG_JSON`, `WORKER_CANARY_*`,
+   `ZEROS_CLOUD_IMAGE_ARCHITECTURE`, `ZEROS_CLOUD_SOURCE_COMMIT`,
+   `ZEROS_RELEASE_CANARIES_ENABLED` and `OPERATIONS_ALERT_EMAIL`, plus
+   `VAULT_MASTER_KEY` and the optional `AUTH_PROVIDER`. Older releases still
+   read some of these, and before the Auth0 removal an unset `AUTH_PROVIDER`
+   meant Auth0, so never delete them first.
+
+WorkOS needs no cloud-specific change.
 
 Cloud runtime publication and VM lifecycle are described in
 [Cloud workspaces](cloud-workspaces.md). Runtime delivery is independent of
