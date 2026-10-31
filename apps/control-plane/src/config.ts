@@ -1,8 +1,7 @@
 import type { CodexFingerprintKeys } from "./agent-credentials/codex-fingerprint-keys.js";
 import { CloudAgentCredentialEnvSchema, loadCloudAgentCredentialConfig, type CloudAgentCredentialConfig } from "./agent-credentials/agent-credential-config.js";
-// Authentication is selected explicitly. Legacy Auth0 deployments may still
-// derive their verification URLs from AUTH0_DOMAIN during the staged cutover;
-// WorkOS and future providers must supply the exact issuer/JWKS contract.
+// Authentication is WorkOS. Deployments supply the exact issuer/JWKS contract
+// and both Application client IDs.
 
 import { isIP } from "node:net";
 import path from "node:path";
@@ -44,23 +43,19 @@ const EnvSchema = z.object({
   OTEL_EXPORTER_OTLP_TRACES_ENDPOINT: z.string().optional(),
   CONTROL_PLANE_TRACE_SAMPLE_RATIO: z.coerce.number().min(0).max(1).default(0),
   DESKTOP_RELEASE_LEDGER_URL: z.string().optional(),
-  AUTH_PROVIDER: z.enum(["auth0", "workos"]).default("auth0"),
-  /** The Auth0 tenant domain, e.g. your-tenant.us.auth0.com (no scheme). */
-  AUTH0_DOMAIN: z.string().trim().min(1).optional(),
-  /** Server-to-server credential shared only with the Auth0 Pages facade. */
-  AUTH0_SESSION_AUTHORITY_KEY: z.string().regex(/^[a-f\d]{64}$/i).optional(),
-  /**
-   * Accepted `iss` claims, comma-separated; defaults to
-   * `https://${AUTH0_DOMAIN}/`. A custom Auth0 domain deployment lists BOTH
-   * the tenant's default `<tenant>.auth0.com` issuer and the custom one,
-   * since Auth0 can mint under either depending on config.
-   */
+  /** WorkOS is the only provider. Like the desktop and Pages checks, an
+   * omitted or empty value means WorkOS; case and surrounding space are ignored. */
+  AUTH_PROVIDER: z.preprocess(
+    (value) => typeof value === "string" ? value.trim().toLowerCase() || undefined : value,
+    z.literal("workos").optional(),
+  ),
+  /** Exact `iss` claim of WorkOS access tokens. */
   AUTH_ISSUER: z.string().optional(),
-  /** Override the JWKS URL; defaults to `https://${AUTH0_DOMAIN}/.well-known/jwks.json`. */
+  /** WorkOS JWKS URL for access-token signatures. */
   AUTH_JWKS_URL: z.string().url().optional(),
   /** Expected `aud` claim for this resource server. */
   AUTH_AUDIENCE: z.string().min(1),
-  /** Allowed WorkOS Applications. Required only in WorkOS mode. */
+  /** Allowed WorkOS Applications. */
   AUTH_WEB_CLIENT_ID: z.string().trim().min(1).optional(),
   AUTH_DESKTOP_CLIENT_ID: z.string().trim().min(1).optional(),
   /** Canonical browser application origin used for callbacks and cookies. */
@@ -161,21 +156,14 @@ export type FeedbackBackendConfig = {
   posthogProjectUrl: string | null;
 };
 
-export type AuthBackendConfig =
-  | {
-      provider: "auth0";
-      issuers: string[];
-      jwksUrl: string;
-      audience: string;
-    }
-  | {
-      provider: "workos";
-      issuer: string;
-      jwksUrl: string;
-      audience: string;
-      webClientId: string;
-      desktopClientId: string;
-    };
+export type AuthBackendConfig = {
+  provider: "workos";
+  issuer: string;
+  jwksUrl: string;
+  audience: string;
+  webClientId: string;
+  desktopClientId: string;
+};
 
 export type WorkOSBackendConfig = {
   appOrigin: string;
@@ -207,9 +195,9 @@ export type Config = {
   /** All application routes and background writers are disabled during cutover. */
   databaseMaintenanceMode?: boolean;
   auth: AuthBackendConfig;
-  /** Null in legacy Auth0 mode. WorkOS secrets live only on Railway. */
+  /** WorkOS secrets live only on Railway. Null only for embedders and tests
+   * that run without WorkOS management credentials. */
   workos: WorkOSBackendConfig | null;
-  auth0SessionAuthorityKey?: string | null;
   /** Fixed Alpha test identity; omitted/disabled everywhere else. No password. */
   zerosDevAuth?: ZerosDevAuthConfig | null;
   /** Exact, environment-bound invitation landing page (without a query). */
@@ -414,11 +402,10 @@ function validatedAppOrigin(
 
 function loadInviteLinkBase(
   raw: string | undefined,
-  appOrigin: string | null,
+  appOrigin: string,
   nodeEnv: string,
 ): string {
-  const candidate =
-    raw?.trim() || `${appOrigin ?? "https://app.zeros.build"}/invite`;
+  const candidate = raw?.trim() || `${appOrigin}/invite`;
   let url: URL;
   try {
     url = new URL(candidate);
@@ -445,7 +432,7 @@ function loadInviteLinkBase(
       "Invalid environment: INVITE_LINK_BASE must use HTTPS (or dev loopback HTTP) and be an exact, credential-free /invite URL with no query or fragment",
     );
   }
-  if (appOrigin !== null && url.origin !== appOrigin) {
+  if (url.origin !== appOrigin) {
     throw new Error(
       "Invalid environment: INVITE_LINK_BASE must use the exact APP_ORIGIN",
     );
@@ -456,8 +443,7 @@ function loadInviteLinkBase(
 function loadWorkOSBackendConfig(
   env: z.infer<typeof EnvSchema>,
   appOrigin: string | null,
-): WorkOSBackendConfig | null {
-  if (env.AUTH_PROVIDER !== "workos") return null;
+): WorkOSBackendConfig {
   if (appOrigin === null) {
     throw new Error("Invalid environment: APP_ORIGIN is required");
   }
@@ -479,7 +465,7 @@ function loadWorkOSBackendConfig(
 }
 
 function validateWorkOSOriginSeparation(
-  auth: Extract<AuthBackendConfig, { provider: "workos" }>,
+  auth: AuthBackendConfig,
   backend: WorkOSBackendConfig,
 ): void {
   let audienceOrigin: string | null = null;
@@ -507,67 +493,39 @@ function validateWorkOSOriginSeparation(
 }
 
 function loadAuthConfig(env: z.infer<typeof EnvSchema>): AuthBackendConfig {
-  if (env.AUTH_PROVIDER === "workos") {
-    const issuerValues = requiredAuthValue(env.AUTH_ISSUER, "AUTH_ISSUER")
-      .split(",")
-      .map((value) => value.trim())
-      .filter(Boolean);
-    if (issuerValues.length !== 1) {
-      throw new Error(
-        "Invalid environment: AUTH_ISSUER must contain exactly one issuer in WorkOS mode",
-      );
-    }
-    const webClientId = requiredAuthValue(
-      env.AUTH_WEB_CLIENT_ID,
-      "AUTH_WEB_CLIENT_ID",
-    );
-    const desktopClientId = requiredAuthValue(
-      env.AUTH_DESKTOP_CLIENT_ID,
-      "AUTH_DESKTOP_CLIENT_ID",
-    );
-    if (webClientId === desktopClientId) {
-      throw new Error(
-        "Invalid environment: AUTH_WEB_CLIENT_ID and AUTH_DESKTOP_CLIENT_ID must be different",
-      );
-    }
-    return {
-      provider: "workos",
-      issuer: validatedAuthUrl(issuerValues[0]!, "AUTH_ISSUER", env.NODE_ENV),
-      jwksUrl: validatedAuthUrl(
-        requiredAuthValue(env.AUTH_JWKS_URL, "AUTH_JWKS_URL"),
-        "AUTH_JWKS_URL",
-        env.NODE_ENV,
-      ),
-      audience: env.AUTH_AUDIENCE,
-      webClientId,
-      desktopClientId,
-    };
-  }
-
-  const domain = env.AUTH0_DOMAIN?.replace(/\/+$/, "") || null;
-  if (!domain && (!env.AUTH_ISSUER?.trim() || !env.AUTH_JWKS_URL?.trim())) {
-    throw new Error(
-      "Invalid environment: AUTH0_DOMAIN is required unless both AUTH_ISSUER and AUTH_JWKS_URL are configured",
-    );
-  }
-  const base = domain ? `https://${domain}` : null;
-  const issuers = (env.AUTH_ISSUER ?? `${base}/`)
+  const issuerValues = requiredAuthValue(env.AUTH_ISSUER, "AUTH_ISSUER")
     .split(",")
     .map((value) => value.trim())
-    .filter(Boolean)
-    .map((value) => validatedAuthUrl(value, "AUTH_ISSUER", env.NODE_ENV));
-  if (issuers.length === 0) {
-    throw new Error("Invalid environment: AUTH_ISSUER is required");
+    .filter(Boolean);
+  if (issuerValues.length !== 1) {
+    throw new Error(
+      "Invalid environment: AUTH_ISSUER must contain exactly one issuer",
+    );
+  }
+  const webClientId = requiredAuthValue(
+    env.AUTH_WEB_CLIENT_ID,
+    "AUTH_WEB_CLIENT_ID",
+  );
+  const desktopClientId = requiredAuthValue(
+    env.AUTH_DESKTOP_CLIENT_ID,
+    "AUTH_DESKTOP_CLIENT_ID",
+  );
+  if (webClientId === desktopClientId) {
+    throw new Error(
+      "Invalid environment: AUTH_WEB_CLIENT_ID and AUTH_DESKTOP_CLIENT_ID must be different",
+    );
   }
   return {
-    provider: "auth0",
-    issuers,
+    provider: "workos",
+    issuer: validatedAuthUrl(issuerValues[0]!, "AUTH_ISSUER", env.NODE_ENV),
     jwksUrl: validatedAuthUrl(
-      env.AUTH_JWKS_URL ?? `${base}/.well-known/jwks.json`,
+      requiredAuthValue(env.AUTH_JWKS_URL, "AUTH_JWKS_URL"),
       "AUTH_JWKS_URL",
       env.NODE_ENV,
     ),
     audience: env.AUTH_AUDIENCE,
+    webClientId,
+    desktopClientId,
   };
 }
 
@@ -773,7 +731,7 @@ const HOSTED_ENVIRONMENTS = {
 function validateRailwayEnvironment(
   env: NodeJS.ProcessEnv,
   audience: string,
-  appOrigin: string | null,
+  appOrigin: string,
   inviteLinkBase: string,
   opsOrigin: string | null,
   selfHosted: boolean,
@@ -804,12 +762,12 @@ function validateRailwayEnvironment(
       `Invalid environment: AUTH_AUDIENCE must be ${expected.audience} in Railway ${name}`,
     );
   }
-  if (appOrigin !== null && appOrigin !== expected.appOrigin) {
+  if (appOrigin !== expected.appOrigin) {
     throw new Error(
       `Invalid environment: APP_ORIGIN must be ${expected.appOrigin} in Railway ${name}`,
     );
   }
-  if (appOrigin !== null && opsOrigin !== expected.opsOrigin) {
+  if (opsOrigin !== expected.opsOrigin) {
     throw new Error(
       expected.opsOrigin
         ? `Invalid environment: OPS_ORIGIN must be ${expected.opsOrigin} in Railway ${name}`
@@ -872,18 +830,16 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env, diagnostics: Co
   const workos = loadWorkOSBackendConfig(e, appOrigin);
   const inviteLinkBase = loadInviteLinkBase(
     e.INVITE_LINK_BASE,
-    appOrigin,
+    workos.appOrigin,
     e.NODE_ENV,
   );
-  if (auth.provider === "workos" && workos) {
-    validateWorkOSOriginSeparation(auth, workos);
-  }
+  validateWorkOSOriginSeparation(auth, workos);
   validateRailwayEnvironment(
     env,
     e.AUTH_AUDIENCE,
-    appOrigin,
+    workos.appOrigin,
     inviteLinkBase,
-    workos?.opsOrigin ?? null,
+    workos.opsOrigin,
     e.ZEROS_SELF_HOSTED === "true",
   );
 
@@ -924,7 +880,6 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env, diagnostics: Co
     databaseMaintenanceMode: e.DATABASE_MAINTENANCE_MODE === "true",
     auth,
     workos,
-    auth0SessionAuthorityKey: auth.provider === "auth0" ? e.AUTH0_SESSION_AUTHORITY_KEY ?? null : null,
     zerosDevAuth: loadZerosDevAuthConfig(env, deploymentChannel, auth),
     inviteLinkBase,
     port: e.PORT,

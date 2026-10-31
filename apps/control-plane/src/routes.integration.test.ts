@@ -990,7 +990,7 @@ d("organization routes", () => {
     }
   });
 
-  it("revokes a pending local rejoin token when removing a member during Auth0 rollback", async () => {
+  it("revokes a pending local rejoin token when removing a member without WorkOS management", async () => {
     actor = owner;
     const created = await request("/v1/organizations", {
       method: "POST",

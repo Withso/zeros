@@ -19,9 +19,10 @@ const f = vi.hoisted(() => ({
 }));
 vi.mock("./config.js", async original => {
   const actual = await original<typeof import("./config.js")>();
+  const { workosTestEnv } = await import("./test-workos-env.js");
   return { ...actual, loadConfig: () => ({ ...actual.loadConfig({
     DATABASE_URL: "postgres://fixture@localhost/test_boot", DATABASE_MIGRATIONS_ON_BOOT: "false",
-    AUTH0_DOMAIN: "identity.example.test", AUTH_AUDIENCE: "https://api.example.test",
+    ...workosTestEnv(), AUTH_AUDIENCE: "https://api.example.test",
     CONTROL_PLANE_PROCESS_ROLE: f.role, RAILWAY_ENVIRONMENT_NAME: f.channel,
     CLOUD_V2_WORKER_SIGNING_KEY: generateKeyPairSync("ed25519").privateKey.export({ format: "der", type: "pkcs8" }).toString("base64"),
     CLOUD_V2_ENABLED: String(f.cloudEnabled), BOAT_API_KEY: "synthetic-never-used",
@@ -30,7 +31,7 @@ vi.mock("./config.js", async original => {
     CLOUD_V2_RUNTIME_SHA256: "a".repeat(64), CLOUD_V2_RUNTIME_STORE_ENDPOINT: "https://storage.example.test",
     CLOUD_V2_RUNTIME_STORE_BUCKET: "test", CLOUD_V2_RUNTIME_STORE_ACCESS_KEY_ID: "fixture", CLOUD_V2_RUNTIME_STORE_SECRET_ACCESS_KEY: "fixture",
   }), databaseMaintenanceMode: f.maintenance,
-  ...(f.workosEnabled ? { auth: { provider: "workos" }, workos: {} } : {}),
+  ...(f.workosEnabled ? {} : { workos: null }),
   workerPollIntervalsMs: { workos: 2_000, security: 3_000 },
   }) };
 });

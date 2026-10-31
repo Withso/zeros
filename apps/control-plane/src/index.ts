@@ -46,10 +46,9 @@ const listenerPool = createPool(config.databaseListenUrl ?? config.databaseUrl, 
   workload: "listener", maxConnections: 2, applicationName: "zeros-notifications", keepAlive: true,
 });
 const securityEventBroker = new PostgresSecurityEventBroker(listenerPool);
-const workosProvider =
-  config.auth.provider === "workos" && config.workos
-    ? new RailwayWorkOSProvider(config.auth, config.workos)
-    : undefined;
+const workosProvider = config.workos
+  ? new RailwayWorkOSProvider(config.auth, config.workos)
+  : undefined;
 const migrationResult = await (async (): Promise<ServiceBootMigrationResult> => {
   // Maintenance deliberately works against both sides of a schema cutover.
   // It does no DDL or ledger repair and never claims the schema is current.

@@ -29,7 +29,7 @@ d("schema + signup transaction", () => {
   const signup = async (displayName: string | null = null) => {
     const sub = randomUUID();
     return ensureUser(pool, {
-      provider: "auth0",
+      provider: "workos",
       providerSubject: sub,
       email: `t-${sub}@example.com`,
       displayName,
@@ -62,7 +62,7 @@ d("schema + signup transaction", () => {
       email: `original-${randomUUID()}@example.test`, displayName: "Recipient" };
     const user = await ensureUser(pool, input);
     const currentEmail = `verified-${randomUUID()}@example.test`;
-    const other = await ensureUser(pool, { provider: "auth0", providerSubject: randomUUID(), email: currentEmail, displayName: "Different Account" });
+    const other = await ensureUser(pool, { provider: "workos", providerSubject: randomUUID(), email: currentEmail, displayName: "Different Account" });
     const authed = await resolveAuthenticatedUser(pool, { ...input, email: currentEmail });
     expect(authed.id).toBe(user.id);
     expect(authed.id).not.toBe(other.id);
@@ -157,7 +157,7 @@ d("schema + signup transaction", () => {
     it("defaults to null and is picked up by the very next request once granted", async () => {
       const sub = randomUUID();
       const u = {
-        provider: "auth0",
+        provider: "workos",
         providerSubject: sub,
         email: `t-${sub}@example.com`,
         displayName: "Staffer",
@@ -251,7 +251,7 @@ d("schema + signup transaction", () => {
   it("signup is idempotent for the same identity", async () => {
     const sub = randomUUID();
     const u = {
-      provider: "auth0",
+      provider: "workos",
       providerSubject: sub,
       email: `t-${sub}@example.com`,
       displayName: "Twice",
@@ -374,7 +374,7 @@ d("schema + signup transaction", () => {
       `INSERT INTO user_identities (
          user_id, provider, provider_sub, email_at_link, email_verified_at,
          linked_via
-       ) VALUES ($1, 'auth0', $2, $3, now(), 'migration')`,
+       ) VALUES ($1, 'workos', $2, $3, now(), 'migration')`,
       [userId, sub, email],
     );
     await pool.query(
@@ -385,7 +385,7 @@ d("schema + signup transaction", () => {
 
     await expect(
       ensureUser(pool, {
-        provider: "auth0",
+        provider: "workos",
         providerSubject: sub,
         email,
         displayName: "Imported",
@@ -405,7 +405,7 @@ d("schema + signup transaction", () => {
   it("serializes concurrent first requests for the same identity", async () => {
     const sub = randomUUID();
     const input = {
-      provider: "auth0",
+      provider: "workos",
       providerSubject: sub,
       email: `parallel-${sub}@example.com`,
       displayName: "Parallel",

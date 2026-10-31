@@ -2,9 +2,9 @@
 // Outbound product email — Resend HTTPS API.
 //
 // Hosted AuthKit owns authentication and native organization-invitation
-// emails in WorkOS mode. This independent sender remains for Zeros-specific
-// security/account-lifecycle notifications and the Auth0 invitation rollback
-// path. Config:
+// emails. This independent sender remains for Zeros-specific
+// security/account-lifecycle notifications, and for invitations only when
+// WorkOS management is not configured. Config:
 //   RESEND_API_KEY  — environment-specific, sending-only Resend API key
 //   EMAIL_FROM      — verified sender, e.g.
 //                     "Zeros <notifications@updates.zeros.build>"

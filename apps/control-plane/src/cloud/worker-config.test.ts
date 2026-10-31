@@ -1,9 +1,10 @@
 import { generateKeyPairSync } from "node:crypto";
 import { expect, it } from "vitest";
 import { loadConfig } from "../config.js";
+import { workosTestEnv } from "../test-workos-env.js";
 const env = {
   DATABASE_URL: "postgres://fixture@localhost/test_worker", DATABASE_MIGRATIONS_ON_BOOT: "false",
-  AUTH0_DOMAIN: "identity.example.test", AUTH_AUDIENCE: "https://api.example.test", RAILWAY_ENVIRONMENT_NAME: "alpha",
+  ...workosTestEnv(), AUTH_AUDIENCE: "https://api.example.test", RAILWAY_ENVIRONMENT_NAME: "alpha",
   CLOUD_V2_ENABLED: "true", BOAT_API_KEY: "synthetic-unused-key",
   CLOUD_V2_API_URL: "https://api.example.test", CLOUD_V2_REALTIME_URL: "wss://realtime.example.test",
   CLOUD_V2_RUNTIME_SHA256: "a".repeat(64), CLOUD_V2_RUNTIME_STORE_ENDPOINT: "https://storage.example.test",
