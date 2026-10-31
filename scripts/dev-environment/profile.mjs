@@ -3,6 +3,7 @@ import { developmentProfilePath, profileExists } from "./profile-path.mjs";
 import { workspaceHostnames } from "./cloudflare.mjs";
 import { databaseUrl } from "./postgres.mjs";
 import { cloudCredentialKeyring, cloudV2RuntimeSha256, cloudV2WorkerSigningKey } from "./cloud-v2-keys.mjs";
+import { fixtureIssues } from "./hosted-fixtures.mjs";
 
 const CLIENT_ID = /^client_[A-Za-z0-9_-]{1,240}$/;
 /** A version 1 local profile is returned unchanged. A version 2 hosted profile
@@ -12,7 +13,7 @@ const LOCAL_SECTIONS = ["cloudflare", "workos", "github", "boat", "storage", "fi
 export function loadProfile(homeDir, { env = process.env, root } = {}) {
   const file = developmentProfilePath(root, { homeDir, env });
   if (!profileExists(file)) {
-    throw new Error("electron:cloud needs zeros-dev-env.json in the checkout or ~/.zeros-dev, or ZEROS_DEV_PROFILE_PATH. Use scripts/dev-environment/profile.example.json for the fields.");
+    throw new Error("electron:cloud needs zeros-dev-env.json in the checkout or ~/.zeros-dev, or ZEROS_DEV_PROFILE_PATH. Use zeros-dev-env-example.json for the fields.");
   }
   const profile = readPrivateJson(file);
   if (profile?.version === 1) return profile;
@@ -32,6 +33,13 @@ export function profileIssues(profile) {
     issues.push("workos: configure Web and Desktop applications and apiKey; select environment alpha explicitly to share Alpha identity");
   }
   return issues;
+}
+
+/** Setup and cloud injection accept either profile version; a version 2
+ * profile's retired hosted sections are ignored, never required. */
+export function portableProfileIssues(profile) {
+  if (profile?.version !== 1 && profile?.version !== 2) return ["Use a version 1 or 2 Zeros Dev profile"];
+  return [...profileIssues(profile), ...fixtureIssues(profile.fixture)];
 }
 
 export function publicDevProfile(workspace, profile) {

@@ -129,9 +129,9 @@ describe("secure portable Dev setup", () => {
     expect(fs.existsSync(path.join(f.root, "zeros-dev-env.json"))).toBe(false);
   });
 
-  it("rejects an incomplete legacy profile without silently upgrading it", () => {
+  it("rejects an incomplete version 1 profile without importing it", () => {
     const f = fixture(); fs.writeFileSync(f.source, '{"version":1}');
-    expect(() => importDevelopmentProfile({ ...f, homeDir: f.home })).toThrow(/version 2/);
+    expect(() => importDevelopmentProfile({ ...f, homeDir: f.home })).toThrow(/cloudflare/);
     expect(fs.existsSync(path.join(f.root, "zeros-dev-env.json"))).toBe(false);
   });
 

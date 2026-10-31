@@ -150,15 +150,11 @@ describe("Local launch ownership", () => {
     }
   });
 
-  it("adds a separate Mac Conductor entry while preserving hosted commands and defaults", () => {
+  it("adds a separate Mac Conductor entry beside the default Zeros Dev entries", () => {
     const scripts = JSON.parse(fs.readFileSync("package.json", "utf8")).scripts;
     expect(scripts["electron:local"]).toBe("node scripts/electron-local.mjs");
-    expect(scripts["electron:dev"]).toBe(
-      "node scripts/dev-environment/hosted-entry.mjs start",
-    );
-    expect(scripts["dev:backend"]).toBe(
-      "node scripts/dev-environment/hosted-entry.mjs backend",
-    );
+    expect(scripts["electron:dev"]).toBe("node scripts/electron-cloud.mjs");
+    expect(scripts["electron:cloud"]).toBe("node scripts/electron-cloud.mjs");
     const settings = parse(
       fs.readFileSync(".conductor/settings.toml", "utf8"),
     ) as {
@@ -177,8 +173,8 @@ describe("Local launch ownership", () => {
     expect(settings.scripts.run["Zeros Local"].command).toContain(
       "zeros_dev_select_tools",
     );
-    expect(settings.scripts.run.dev.default).toBe(true);
-    expect(settings.scripts.run.backend.default).toBe(true);
+    expect(settings.scripts.run["Zeros Dev"].default).toBe(true);
+    expect(settings.scripts.run["Zeros Dev backend"].default).toBe(true);
   });
 
   it("does not let a second launcher rebuild the same checkout", async () => {

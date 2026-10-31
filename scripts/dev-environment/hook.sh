@@ -1,6 +1,6 @@
 #!/bin/sh
 set -eu
-if [ "${1:-}" = archive ] && [ "${2:-}" != --receipt-known ]; then
+if [ "${1:-}" = archive ]; then
   exec sh scripts/dev-environment/archive-hook.sh
 fi
 . ./scripts/dev-environment/toolchain.sh
@@ -15,12 +15,7 @@ case "${1:-}" in
       node scripts/dev-environment/setup.mjs --profile-only
     fi
     node scripts/dev-environment/dependencies.mjs --install ;;
-  archive)
-    if ! node -e 'process.exit(typeof require("./package.json").scripts?.["dev:archive"] === "string" ? 0 : 1)'; then
-      echo 'Hosted Dev binding exists but this branch lacks dev:archive. Switch to a branch with dev:archive, then retry; cleanup is unconfirmed.' >&2; exit 1
-    fi
-    exec pnpm dev:archive ;;
-  dev) exec pnpm electron:dev ;;
-  backend) exec pnpm dev:backend ;;
+  dev) exec pnpm electron:cloud ;;
+  backend) exec pnpm electron:cloud --headless ;;
   *) echo 'Unknown Dev hook' >&2; exit 1 ;;
 esac

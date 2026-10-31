@@ -6,14 +6,7 @@ export const CONTROL_PLANE_INSTALL = "pnpm --dir apps/control-plane install --fr
 const messages = Object.freeze({
   control_plane_dependencies_missing: `Control-plane dependencies are missing. Run ${CONTROL_PLANE_INSTALL} from the checkout root.`,
   control_plane_dependencies_unavailable: `Control-plane dependencies could not load. Repair them with ${CONTROL_PLANE_INSTALL}.`,
-  gc_input_invalid: "Use dev:gc [--all | --owner OWNER [--generation UUID]] [--json] [--apply --expect-plan SHA256].",
-  gc_profile_invalid: "The private hosted Dev profile could not be validated; no cleanup was started.",
-  gc_inventory_unavailable: "The authenticated hosted Dev inventory could not be confirmed; receipts were preserved.",
-  gc_cleanup_unconfirmed: "Hosted Dev cleanup is unconfirmed; retain the receipts and review a fresh plan before retrying.",
-  gc_apply_requires_macos: "Hosted Dev cleanup must be executed on the owner's Mac; other hosts may only plan.",
-  gc_plan_confirmation_required: "Review the read-only plan, then pass its planSha256 with --apply --expect-plan SHA256 on the owner's Mac.",
-  gc_plan_changed: "The reviewed cleanup plan changed. No cleanup was started; review the fresh echoed plan.",
-  gc_unavailable: "Hosted Dev operation is unconfirmed; receipts and uncertain reservations were preserved.",
+  gc_unavailable: "Dev operation is unconfirmed; existing state was preserved.",
 });
 export class DevEnvironmentError extends Error {
   constructor(code) {
