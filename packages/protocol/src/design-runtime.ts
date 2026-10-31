@@ -1142,7 +1142,6 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
   var previewStylesheetTexts = new Map();
   var authoredStylePropertiesCache = new WeakMap();
   var authoredStylesCache = new WeakMap();
-  var authoredStyleRuleMetadata = null;
   var oidStyleRuleIndex = null;
   var elementMapStale = true;
   var mutationTimer = null;
@@ -1336,7 +1335,6 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
     return element === document.body ? ${JSON.stringify(DESIGN_RUNTIME_DOCUMENT_BODY_ID)} : oidOf(element);
   }
 
-  // ── Rendered (flat) tree ──────────────────────────────────
   // Frames may carry open shadow roots, for example a declarative
   // <template shadowrootmode="open"> serialized from a web component. Layers,
   // hit testing and inspection follow what the browser renders: a host's
@@ -1358,9 +1356,9 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
   function composedChildrenOf(element) {
     var root = shadowRootOf(element);
     if (root) return root.children;
-    if (element.localName === "slot" && typeof element.assignedElements === "function") {
-      var assigned = element.assignedElements();
-      if (assigned.length > 0) return assigned;
+    // Any assigned node, even whitespace text, replaces the fallback content.
+    if (element.localName === "slot" && typeof element.assignedNodes === "function" && element.assignedNodes().length > 0) {
+      return element.assignedElements();
     }
     return element.children;
   }
@@ -1386,25 +1384,37 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
     return parent;
   }
 
-  /** document.elementsFromPoint retargets shadow content to its host. Expand
-   * each open host in place, deepest hits first, so a click selects what the
-   * person sees. */
-  function deepElementsFromPoint(x, y) {
-    var result = [];
+  /** The topmost element at a point in the rendered tree. Hit testing
+   * retargets shadow content to its host, so descend through open roots. */
+  function deepElementFromPoint(x, y) {
+    var element = document.elementFromPoint(x, y);
+    for (var depth = 0; element && depth < MAX_TREE_DEPTH; depth += 1) {
+      var root = shadowRootOf(element);
+      var inner = root && typeof root.elementFromPoint === "function" ? root.elementFromPoint(x, y) : null;
+      if (!inner || inner === element || inner.getRootNode() !== root) break;
+      element = inner;
+    }
+    return element;
+  }
+
+  /** Visit the elements at a point, topmost first, expanding each open host
+   * in place, until visit returns true. A host's own hits are listed only
+   * when the walk reaches it. */
+  function visitElementsFromPoint(x, y, visit) {
     var seen = new Set();
-    function expand(list, scope) {
+    function walk(list, scope) {
       for (var index = 0; index < list.length; index += 1) {
         var element = list[index];
         if (seen.has(element)) continue;
         if (scope !== document && element.getRootNode() !== scope) continue;
         seen.add(element);
         var root = shadowRootOf(element);
-        if (root && typeof root.elementsFromPoint === "function") expand(root.elementsFromPoint(x, y), root);
-        result.push(element);
+        if (root && typeof root.elementsFromPoint === "function" && walk(root.elementsFromPoint(x, y), root)) return true;
+        if (visit(element)) return true;
       }
+      return false;
     }
-    expand(document.elementsFromPoint(x, y), document);
-    return result;
+    walk(document.elementsFromPoint(x, y), document);
   }
 
   function directText(element) {
@@ -1792,37 +1802,6 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
     return declarations;
   }
 
-  function styleRuleMetadata(scope) {
-    scope = scope || document;
-    if (authoredStyleRuleMetadata === null) authoredStyleRuleMetadata = new Map();
-    var cachedMetadata = authoredStyleRuleMetadata.get(scope);
-    if (cachedMetadata) return cachedMetadata;
-    var metadata = [];
-    function visitRules(rules, active) {
-      for (var ruleIndex = 0; ruleIndex < rules.length; ruleIndex += 1) {
-        var rule = rules[ruleIndex];
-        if (rule.type === CSSRule.STYLE_RULE && rule.selectorText && rule.style) {
-          metadata.push({
-            selector: rule.selectorText,
-            active: active,
-            declarations: declarationProperties(rule.style)
-          });
-        } else if (rule.cssRules) {
-          visitRules(rule.cssRules, active && conditionalRuleActive(rule));
-        }
-      }
-    }
-    for (var sheetIndex = 0; sheetIndex < scope.styleSheets.length; sheetIndex += 1) {
-      try {
-        visitRules(scope.styleSheets[sheetIndex].cssRules || [], true);
-      } catch (_error) {
-        // Inaccessible sheets cannot provide trustworthy authored metadata.
-      }
-    }
-    authoredStyleRuleMetadata.set(scope, metadata);
-    return metadata;
-  }
-
   /** Record exactly the physical sides a box's insets pin. The computed value
    * of an auto inset on a positioned box is its used length, and neither a
    * shorthand nor a losing rule says which side won, so constraint readers
@@ -1882,8 +1861,9 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
     return authoredStyleClassesOf(element).properties.slice();
   }
 
-  /** Authored properties reaching this element only through universal or
-   * type selectors: shared resets rather than this layer's own design. */
+  /** Authored properties reaching this element only through rules that do
+   * not name it (see complexTargetsElement): shared resets and element
+   * defaults rather than this layer's own design. */
   function baseStylePropertiesOf(element) {
     return authoredStyleClassesOf(element).base.slice();
   }
@@ -1893,22 +1873,28 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
     if (cached && cached.inline === element.style.cssText) return cached;
     var authored = new Set(declarationProperties(element.style));
     var targeted = new Set(authored);
-    var rules = styleRuleMetadata(styleScopeOf(element));
+    var rules = cascadeRules(styleScopeOf(element)).rules;
     for (var ruleIndex = 0; ruleIndex < rules.length; ruleIndex += 1) {
       var rule = rules[ruleIndex];
-      if (!rule.active || rule.declarations.length === 0) continue;
+      // A nested rule's selector is relative to its parent rule.
+      if (!rule.active || rule.selector === null || rule.declared.length === 0) continue;
       var matches = false;
       try { matches = element.matches(rule.selector); } catch (_error) { matches = false; }
       if (!matches) continue;
-      var targets = selectorTargetsElement(element, rule.selector);
-      for (var propertyIndex = 0; propertyIndex < rule.declarations.length; propertyIndex += 1) {
-        authored.add(rule.declarations[propertyIndex]);
-        if (targets) targeted.add(rule.declarations[propertyIndex]);
+      var targets = ruleTargetsElement(element, rule);
+      for (var propertyIndex = 0; propertyIndex < rule.declared.length; propertyIndex += 1) {
+        authored.add(rule.declared[propertyIndex]);
+        if (targets) targeted.add(rule.declared[propertyIndex]);
       }
     }
+    // Sides pinned through an inset shorthand belong to the declaration that
+    // named it.
+    var insetTargeted = targeted.has("inset") || targeted.has("inset-inline") || targeted.has("inset-block");
     recordInsetPins(element, authored);
     var result = Array.from(authored).slice(0, 128);
-    var base = result.filter(function (property) { return !targeted.has(property); });
+    var base = result.filter(function (property) {
+      return !targeted.has(property) && !(insetTargeted && /^(?:top|right|bottom|left)$/.test(property));
+    });
     var entry = { inline: element.style.cssText, properties: result, base: base };
     authoredStylePropertiesCache.set(element, entry);
     return entry;
@@ -2059,7 +2045,6 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
    * origin and declared property names. Custom-property declarations are
    * indexed by name so token lookups touch only the rules that set them. */
   function cascadeRules(scope) {
-    scope = scope || document;
     if (!cascadeRuleIndex) cascadeRuleIndex = new Map();
     var cachedIndex = cascadeRuleIndex.get(scope);
     if (cachedIndex) return cachedIndex;
@@ -2088,7 +2073,7 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
           // A nested selector is relative to its parent, so element.matches()
           // cannot establish applicability or specificity. Keep its property
           // footprint rather than silently selecting a losing outer rule.
-          var entry = { rule: rule, selector: nested ? null : rule.selectorText, uncertain: uncertain || nested, active: active, layer: layer.path, order: rules.length, origin: origin, declared: declared };
+          var entry = { rule: rule, selector: nested ? null : rule.selectorText, uncertain: uncertain || nested, active: active, layer: layer.path, order: rules.length, origin: origin, declared: declared, shadow: scope !== document };
           rules.push(entry);
           declared.forEach(function (property) {
             if (property.indexOf("--") !== 0) return;
@@ -2247,16 +2232,39 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
     return complex;
   }
 
-  /** Whether the matching selector targets this element by class, id or
-   * attribute, rather than universally or by tag (resets, preflight, element
-   * defaults), which every element of its kind shares. */
-  function selectorTargetsElement(element, selectorText) {
-    var complexes = splitTopLevel(selectorText, ",");
-    for (var index = 0; index < complexes.length; index += 1) {
-      var complex = complexes[index].trim();
-      var matched = false;
-      try { matched = !!complex && element.matches(complex); } catch (_error) { matched = false; }
-      if (matched) return /[.#[]/.test(lastCompound(complex));
+  /** Whether one complex selector names the element it matches: by class,
+   * id, attribute or state; by tag under such a context (.card > p); or by
+   * tag in a shadow root's own stylesheet, which styles only its component.
+   * Universal selectors and bare tags in the document are shared resets and
+   * element defaults. :where() contributes nothing, as in the cascade. */
+  function complexTargetsElement(complex, shadow) {
+    var subject = lastCompound(complex);
+    var own = selectorSpecificity(subject);
+    if (own[0] > 0 || own[1] > 0) return true;
+    if (own[2] === 0) return false;
+    if (shadow) return true;
+    var context = selectorSpecificity(complex.slice(0, complex.length - subject.length));
+    return context[0] > 0 || context[1] > 0;
+  }
+
+  /** Classified once per rule and generation: true or false when every
+   * selector in the list agrees, otherwise the selectors that name their
+   * element. */
+  function ruleTargets(entry) {
+    if (entry.targets !== undefined) return entry.targets;
+    var complexes = splitTopLevel(entry.selector, ",");
+    var naming = complexes.filter(function (complex) { return complexTargetsElement(complex, entry.shadow); });
+    entry.targets = naming.length === 0 ? false : naming.length === complexes.length ? true : naming;
+    return entry.targets;
+  }
+
+  /** Whether a matching rule names this element through any selector of its
+   * list, whatever their order. */
+  function ruleTargetsElement(element, entry) {
+    var targets = ruleTargets(entry);
+    if (typeof targets === "boolean") return targets;
+    for (var index = 0; index < targets.length; index += 1) {
+      try { if (element.matches(targets[index])) return true; } catch (_error) { /* An unsupported selector names nothing. */ }
     }
     return false;
   }
@@ -2323,7 +2331,7 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
         style.scope = "inline";
       } else if (winner.match.entry.selector) {
         style.selector = winner.match.entry.selector.slice(0, 256);
-        style.scope = selectorTargetsElement(element, winner.match.entry.selector) ? "element" : "base";
+        style.scope = ruleTargetsElement(element, winner.match.entry) ? "element" : "base";
       }
       style.value = winner.value;
       if (winner.important) style.important = true;
@@ -2462,7 +2470,11 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
     }
     return {
       x: x, y: y,
-      parentId: parent ? targetOidOf(parent) || null : null,
+      // A slotted element lays out in the shadow tree but belongs to its host
+      // in source, where reorders and moves resolve.
+      parentId: element.assignedSlot && element.parentElement
+        ? targetOidOf(element.parentElement) || null
+        : parent ? targetOidOf(parent) || null : null,
       parentWidth: Math.max(0, parentSize ? parentSize.width - computedEdgeTotal(parentComputed, ["borderLeftWidth", "borderRightWidth"]) : parent ? parent.clientWidth || 0 : window.innerWidth),
       parentHeight: Math.max(0, parentSize ? parentSize.height - computedEdgeTotal(parentComputed, ["borderTopWidth", "borderBottomWidth"]) : parent ? parent.clientHeight || 0 : window.innerHeight),
       parentDisplay: parentComputed ? parentComputed.display : "block",
@@ -2727,7 +2739,7 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
 
   function backgroundColorOf(element) {
     var layers = [];
-    for (var current = element; current && current instanceof Element; current = current.parentElement) {
+    for (var current = element; current && current instanceof Element; current = composedParentOf(current)) {
       var layer = parsedColor(getComputedStyle(current).backgroundColor);
       if (layer && layer.a > 0) layers.push(layer);
     }
@@ -2841,7 +2853,6 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
     // DOM/style mutations both arrive through this boundary.
     authoredStylePropertiesCache = new WeakMap();
     authoredStylesCache = new WeakMap();
-    authoredStyleRuleMetadata = null;
     cascadeRuleIndex = null;
     oidStyleRuleIndex = null;
     refreshElementMap();
@@ -2894,7 +2905,6 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
     if (!lastSnapshot) return snapshot();
     authoredStylePropertiesCache = new WeakMap();
     authoredStylesCache = new WeakMap();
-    authoredStyleRuleMetadata = null;
     cascadeRuleIndex = null;
     oidStyleRuleIndex = null;
     ensureElementMap();
@@ -2956,10 +2966,17 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
     if (!Number.isFinite(x) || !Number.isFinite(y)) {
       throw new Error("x and y must be finite frame coordinates.");
     }
-    var stack = deepElementsFromPoint(x, y);
-    for (var index = 0; index < stack.length; index += 1) {
-      var path = editableOidPath(stack[index]);
-      if (path.length === 0) continue;
+    // Hover samples this every frame: the single topmost hit usually has an
+    // editable path, and the full point list is walked only when it does not.
+    var top = deepElementFromPoint(x, y);
+    var path = top ? editableOidPath(top) : [];
+    if (path.length === 0) {
+      visitElementsFromPoint(x, y, function (element) {
+        path = editableOidPath(element);
+        return path.length > 0;
+      });
+    }
+    if (path.length > 0) {
       var hitMode = mode === "deepest" || mode === "top-level" ||
         mode === "preserve" || mode === "descend" ? mode : "deepest";
       var chosen = hitMode === "deepest" ? path[path.length - 1] : path[0];

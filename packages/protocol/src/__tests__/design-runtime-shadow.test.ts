@@ -149,11 +149,13 @@ describe("declarative shadow roots in the design runtime", () => {
     expect(isDesignRuntimeFrameMessage(message)).toBe(true);
     expect(pre.styles.backgroundColor).toBe("rgb(23, 23, 23)");
     expect(pre.authoredStyleProperties).toContain("background-color");
+    // A shadow root's own stylesheet styles only its component, so its tag
+    // rules are this layer's design rather than a shared reset.
     expect(pre.authoredStyles?.["background-color"]).toEqual({
       origin: "linked",
       file: "page/shadow.css",
       selector: "pre",
-      scope: "base",
+      scope: "element",
       value: "var(--diff-bg)",
       tokens: [{ name: "--diff-bg", value: "rgb(23, 23, 23)", origin: "linked", file: "tokens.css" }],
     });
@@ -163,6 +165,135 @@ describe("declarative shadow roots in the design runtime", () => {
     expect(host.styles.backgroundColor).toBe("rgb(157, 51, 51)");
     expect(host.textEditable).toBe(false);
     expect(host.childrenLayout?.nodeIds).toEqual(["pre"]);
+  });
+});
+
+const RULE_SCOPE_DOCUMENT = `<!doctype html><html><head><style>
+  h1, .title { cursor: pointer; }
+  .btn, button { user-select: none; }
+  .card > p { text-indent: 2px; }
+  .app * { tab-size: 4; }
+  p { word-spacing: 1px; }
+  input:where([type="button"]) { letter-spacing: 1px; }
+  .overlay { position: absolute; inset: 0; }
+</style></head><body><div class="app" data-oid="app">
+  <h1 class="title" data-oid="title">Title</h1>
+  <button class="btn" data-oid="btn">Go</button>
+  <div class="card" data-oid="card"><p data-oid="para">Text</p></div>
+  <input type="button" data-oid="input" value="Go">
+  <div class="overlay" data-oid="overlay"></div>
+  <x-panel data-oid="panel"><template shadowrootmode="open"><style>* { box-sizing: border-box; } pre { tab-size: 2; }</style><pre data-oid="code">x</pre></template></x-panel>
+</div></body></html>`;
+
+const SLOT_DOCUMENT = `<!doctype html><html><head></head><body>
+<x-list data-oid="list" style="display: block">
+  <template shadowrootmode="open"><div data-oid="inner"><slot data-oid="slot"><span data-oid="fallback">Fallback</span></slot></div><slot name="extra" data-oid="extra-slot"><span data-oid="extra-fallback">Extra</span></slot></template>
+  <button data-oid="a">A</button>
+  <button data-oid="b">B</button>
+</x-list>
+<x-spaced data-oid="spaced">
+  <template shadowrootmode="open"><slot data-oid="spaced-slot"><span data-oid="spaced-fallback">Fallback</span></slot></template>
+</x-spaced>
+<x-bare data-oid="bare"><template shadowrootmode="open"><slot data-oid="bare-slot"><span data-oid="bare-fallback">Fallback</span></slot></template></x-bare>
+</body></html>`;
+
+const DARK_SHADOW_DOCUMENT = `<!doctype html><html><head></head><body>
+<main data-oid="sheet" style="background-color: rgb(13, 13, 13); color: rgb(250, 250, 250)">
+  <x-badge data-oid="badge"><template shadowrootmode="open"><span data-oid="label">New release</span></template></x-badge>
+  <span data-oid="light-label">Light DOM</span>
+</main>
+</body></html>`;
+
+describe("which authored rules name a layer", () => {
+  let browser: Browser;
+  let page: Page;
+  beforeAll(async () => {
+    browser = await chromium.launch({ headless: true });
+    page = await fixture(browser, RULE_SCOPE_DOCUMENT);
+  });
+  afterAll(async () => {
+    await browser?.close();
+  });
+
+  async function scopes(nodeId: string, properties: readonly string[]) {
+    const { result } = await request<DesignRuntimeNodeDetails>(page, "getNodeDetails", { nodeId });
+    return {
+      scopes: Object.fromEntries(properties.map((property) => [property, result.authoredStyles?.[property]?.scope ?? null])),
+      base: result.baseStyleProperties ?? [],
+    };
+  }
+
+  it("counts every matching selector of a list, in either order", async () => {
+    expect(await scopes("title", ["cursor"])).toMatchObject({ scopes: { cursor: "element" } });
+    expect((await scopes("title", ["cursor"])).base).not.toContain("cursor");
+    expect(await scopes("btn", ["user-select"])).toMatchObject({ scopes: { "user-select": "element" } });
+  });
+
+  it("keeps contextual tag rules and leaves universal and bare tag rules as shared", async () => {
+    const paragraph = await scopes("para", ["text-indent", "word-spacing", "tab-size"]);
+    expect(paragraph.scopes).toEqual({ "text-indent": "element", "word-spacing": "base", "tab-size": "base" });
+    expect(paragraph.base).toEqual(expect.arrayContaining(["word-spacing", "tab-size"]));
+    expect(paragraph.base).not.toContain("text-indent");
+    expect((await scopes("input", ["letter-spacing"])).scopes).toEqual({ "letter-spacing": "base" });
+  });
+
+  it("keeps inset sides with the class rule that pins them", async () => {
+    const { result } = await request<DesignRuntimeNodeDetails>(page, "getNodeDetails", { nodeId: "overlay" });
+    const sides = ["top", "right", "bottom", "left"];
+    expect(result.authoredStyleProperties).toEqual(expect.arrayContaining(sides));
+    expect((result.baseStyleProperties ?? []).filter((property) => sides.includes(property))).toEqual([]);
+  });
+
+  it("treats a shadow stylesheet's tag rules as the component's own, but not its universal reset", async () => {
+    const code = await scopes("code", ["tab-size", "box-sizing"]);
+    expect(code.scopes).toEqual({ "tab-size": "element", "box-sizing": "base" });
+    expect(code.base).toEqual(["box-sizing"]);
+  });
+});
+
+describe("slots in the design runtime", () => {
+  let browser: Browser;
+  let page: Page;
+  beforeAll(async () => {
+    browser = await chromium.launch({ headless: true });
+    page = await fixture(browser, SLOT_DOCUMENT);
+  });
+  afterAll(async () => {
+    await browser?.close();
+  });
+
+  it("lists assigned elements under their slot and fallback only where it renders", async () => {
+    const { result: snapshot } = await request<DesignRuntimeSnapshot>(page, "getSnapshot", {});
+    const ids = (oid: string) => find(snapshot.tree, oid)?.children.map((child) => child.oid);
+    expect(ids("list")).toEqual(["inner", "extra-slot"]);
+    expect(ids("slot")).toEqual(["a", "b"]);
+    expect(ids("extra-slot")).toEqual(["extra-fallback"]);
+    // Whitespace around the template is assigned to the default slot.
+    expect(ids("spaced-slot")).toEqual([]);
+    expect(ids("bare-slot")).toEqual(["bare-fallback"]);
+  });
+
+  it("keeps a slotted layer's parent in source, where it is reordered", async () => {
+    const { result: button } = await request<DesignRuntimeNodeDetails>(page, "getNodeDetails", { nodeId: "b" });
+    expect(button.layout?.parentId).toBe("list");
+  });
+});
+
+describe("audits of shadow content", () => {
+  let browser: Browser;
+  beforeAll(async () => {
+    browser = await chromium.launch({ headless: true });
+  });
+  afterAll(async () => {
+    await browser?.close();
+  });
+
+  it("measures shadow text against the backgrounds it renders over", async () => {
+    const page = await fixture(browser, DARK_SHADOW_DOCUMENT);
+    const { result: snapshot } = await request<DesignRuntimeSnapshot>(page, "getSnapshot", {});
+    const contrast = snapshot.warnings.filter((warning) => warning.ruleId === "contrast").map((warning) => warning.oid);
+    expect(contrast).not.toContain("label");
+    expect(contrast).not.toContain("light-label");
   });
 });
 
