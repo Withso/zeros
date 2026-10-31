@@ -7,7 +7,7 @@ const ORGANIZATION_ID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const RECOVERY_CODE_RE = /^ZR-[A-Z2-9]{4}-[A-Z2-9]{4}$/;
 const DELETION_CODE_RE = /^ZD-[A-Z2-9]{4}-[A-Z2-9]{4}$/;
-const DASHBOARD_ASSET_REVISION = "2026-09-02.1";
+const DASHBOARD_ASSET_REVISION = "2026-10-31.1";
 const BRAND_MARK =
   '<span class="brand-mark" aria-hidden="true"><img src="/zeros-logo.svg" width="18" height="18" alt="" /></span>';
 
@@ -343,6 +343,19 @@ function navButton(id, label, glyph, selected, disabled = false) {
   </button>`;
 }
 
+const SEAT_BADGES = {
+  pro: '<span class="badge success">Pro</span>',
+  free: '<span class="badge">Free</span>',
+  hold: '<span class="badge warning">On Hold</span>',
+};
+const HOLD_NOTICE =
+  '<div class="notice"><strong>You\'re on Hold</strong><p>You\'re still a member, but this organization\'s cloud workspaces and chats are unavailable to you. Get Pro, or ask an owner to free a seat.</p></div>';
+
+function seatRow(seat) {
+  if (typeof seat !== "string" || !Object.hasOwn(SEAT_BADGES, seat)) return "";
+  return `<div class="settings-row"><span class="settings-copy"><strong>Your seat</strong><p>Pro, a free seat, or On Hold while the free seats are taken.</p></span><span class="settings-value">${SEAT_BADGES[seat]}</span></div>`;
+}
+
 function generalSection(org) {
   const editable = !org.isPersonal && ["owner", "admin"].includes(org.role);
   const logo = safeOrganizationLogo(org.logo);
@@ -358,7 +371,9 @@ function generalSection(org) {
       ${nameControl}
       <div class="settings-row"><span class="settings-copy"><strong>Organization ID</strong><p>Your stable tenant identifier.</p></span><span class="settings-value"><code class="id-code">${esc(org.id)}</code><button class="icon-button copy-button" type="button" data-copy-organization-id="${esc(org.id)}" aria-label="Copy organization ID">▣</button></span></div>
       <div class="settings-row"><span class="settings-copy"><strong>Your role</strong><p>What you can do in this organization.</p></span><span class="settings-value"><span class="badge">${esc(org.role)}</span></span></div>
+      ${seatRow(org.seat)}
     </div>
+    ${org.seat === "hold" ? HOLD_NOTICE : ""}
     <div class="card"><div class="card-title"><div><strong>Workspace access</strong><p>Capability metadata; cloud provisioning will still enforce plan and quota.</p></div></div><div class="capability-grid"><div class="capability"><span class="status-dot success"></span><div><strong>Local workspaces</strong><p>Available on your Mac</p></div></div><div class="capability ${org.workspaceCapabilities?.cloud ? "" : "disabled"}"><span class="status-dot ${org.workspaceCapabilities?.cloud ? "success" : ""}"></span><div><strong>Cloud workspaces</strong><p>${org.workspaceCapabilities?.cloud ? "Organization eligible" : "Not available in Personal"}</p></div></div></div></div>
     ${org.isPersonal ? '<div class="notice"><strong>Personal is permanent</strong><p>Personal cannot be removed. It cannot invite members and stores workspace configuration locally.</p></div>' : org.role === "owner" ? `<div class="subsection-label">Danger zone</div><div class="card danger-card"><div class="card-title"><div><strong>Delete organization</strong><p>Revokes access immediately and keeps the organization recoverable for 30 days. The organization and retained cloud data are deleted only after the grace period.</p></div><button class="button danger" type="button" data-action="delete-organization">Delete organization</button></div></div>` : ""}
   </section>`;

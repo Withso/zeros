@@ -10,6 +10,7 @@ import { createRoutes } from "../routes.js";
 import { PostgresSecurityEventBroker } from "../security-events.js";
 import { resetMigratedTestDatabase } from "../test-database.js";
 import { ingestWorkOSManagementEvent } from "../workos-sync-events.js";
+import { grantTestPro } from "../test-pro.js";
 import { CLOUD_V2_BRIDGE_PROTOCOL, CloudV2Relay } from "./relay.js";
 import { CloudV2Store, type CloudV2Workspace } from "./store.js";
 
@@ -30,6 +31,7 @@ d("cloud access through membership routes and security publication", () => {
       session: { id: `session_${id}`, clientKind: "desktop", authTime: 1, tokenExpiresAt: Math.floor(Date.now() / 1000) + 3600 },
     }); };
     [owner, creator] = await Promise.all([user(), user()]);
+    await grantTestPro(pool, owner.id, creator.id);
     for (const account of [owner, creator]) await pool.query(`INSERT INTO auth_sessions
       (provider_session_id, provider_sub, user_id, client_kind, last_token_expires_at)
       VALUES ($1, $2, $3, 'desktop', now() + interval '1 hour')`,

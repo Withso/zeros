@@ -6,6 +6,7 @@ import { ensureUser, type AuthedUser } from "./auth.js";
 import { HttpError } from "./authz.js";
 import { withSystemTx } from "./db.js";
 import { resetMigratedTestDatabase } from "./test-database.js";
+import { grantTestPro } from "./test-pro.js";
 import { createRoutes } from "./routes.js";
 import { createDeletionLifecycleRoutes } from "./deletion-lifecycle.js";
 import type { WorkOSInvitationRecord } from "./workos-provider.js";
@@ -50,6 +51,7 @@ d("organization routes", () => {
     pool = new pg.Pool({ connectionString: url, max: 3 });
     await resetMigratedTestDatabase(pool);
     owner = { ...(await signup("Ada")), staffRole: "platform_owner" };
+    await grantTestPro(pool, owner.id);
     member = await signup("Grace");
     actor = owner;
 
@@ -85,7 +87,7 @@ d("organization routes", () => {
     expect(response.status).toBe(200);
     const body = (await response.json()) as {
       user: Record<string, unknown>;
-      capabilities: { createOrganization: boolean };
+      capabilities: { createOrganization: boolean; pro: boolean };
       organizations: Array<{
         name: string;
         isPersonal: boolean;
@@ -98,7 +100,7 @@ d("organization routes", () => {
     expect(body.user).not.toHaveProperty("providerSub");
     expect(body.user).not.toHaveProperty("identity");
     expect(body.teams).toEqual(body.organizations);
-    expect(body.capabilities).toEqual({ createOrganization: true });
+    expect(body.capabilities).toEqual({ createOrganization: true, pro: true });
     expect(body.organizations[0]).toMatchObject({
       name: "Ada",
       isPersonal: true,
@@ -109,23 +111,47 @@ d("organization routes", () => {
     );
   });
 
-  it("fails closed for ordinary users on both organization-create routes", async () => {
-    actor = member;
+  it("requires Pro on both organization-create routes, where support staff get none", async () => {
+    await pool.query("UPDATE users SET staff_role = 'support_admin' WHERE id = $1", [member.id]);
+    actor = { ...member, staffRole: "support_admin" };
     try {
       const me = await request("/v1/me");
       await expect(me.json()).resolves.toMatchObject({
-        capabilities: { createOrganization: false },
+        capabilities: { createOrganization: false, pro: false },
       });
       for (const path of ["/v1/organizations", "/v1/teams"]) {
         const response = await request(path, {
           method: "POST",
           body: { name: "Must not exist" },
         });
-        expect(response.status, path).toBe(404);
+        expect(response.status, path).toBe(403);
         await expect(response.json()).resolves.toMatchObject({
-          error: { code: "not_found" },
+          error: { code: "pro_required" },
         });
       }
+    } finally {
+      await pool.query("UPDATE users SET staff_role = NULL WHERE id = $1", [member.id]);
+      actor = owner;
+    }
+  });
+
+  it("gives platform owners and developers Pro with their role, and takes it away with it", async () => {
+    const staff = await signup("Staff");
+    actor = staff;
+    try {
+      for (const role of ["developer", "platform_owner"]) {
+        await pool.query("UPDATE users SET staff_role = $2 WHERE id = $1", [staff.id, role]);
+        const me = await request("/v1/me");
+        await expect(me.json(), role).resolves.toMatchObject({
+          capabilities: { createOrganization: true, pro: true },
+        });
+      }
+      const created = await request("/v1/organizations", { method: "POST", body: { name: "Staff Org" } });
+      expect(created.status).toBe(201);
+      await pool.query("UPDATE users SET staff_role = NULL WHERE id = $1", [staff.id]);
+      await expect((await request("/v1/me")).json()).resolves.toMatchObject({
+        capabilities: { createOrganization: false, pro: false },
+      });
     } finally {
       actor = owner;
     }
@@ -146,6 +172,7 @@ d("organization routes", () => {
         isPersonal: false,
         defaultTeamId: `${prefix}-2222-4222-8222-222222222222`,
         workspaceCapabilities: { local: false, cloud: index !== 2 },
+        seat: "free",
         teamCapabilities: { multiple: false, canCreate: false },
       };
     });
@@ -367,6 +394,7 @@ d("organization routes", () => {
       })),
       staffRole: "developer" as const,
     };
+    await grantTestPro(pool, nativeOwner.id);
     const nativeMember = await ensureUser(pool, {
       provider: "workos",
       providerSubject: `user_native_member_${suffix}`,
@@ -662,6 +690,7 @@ d("organization routes", () => {
       })),
       staffRole: "developer" as const,
     };
+    await grantTestPro(pool, workosOwner.id);
     const workosMember = await ensureUser(pool, {
       provider: "workos",
       providerSubject: `user_member_${suffix}`,

@@ -14,6 +14,7 @@ const Organization = z.object({
   defaultTeamId: z.string().max(256).nullable(),
   workspaceCapabilities: z.object({ local: z.boolean(), cloud: z.boolean() }),
   teamCapabilities: z.object({ multiple: z.literal(false), canCreate: z.literal(false) }),
+  seat: z.enum(["pro", "free", "hold"]).optional(),
 });
 const Snapshot = z.object({
   organizations: z.array(Organization).max(1024),

@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   canCreateWorkspaceIn,
+  cloudCreateSeatReason,
   filterRowsForOrganization,
   filterProjectsForOrganization,
   localWorkspaceOwner,
@@ -51,6 +52,17 @@ describe("organization workspace capabilities", () => {
       ),
     ).toBe(true);
     expect(canCreateWorkspaceIn(organization(), "local")).toBe(false);
+  });
+
+  it("creates in cloud only with Pro, explaining a free seat and Hold", () => {
+    expect(canCreateWorkspaceIn(organization({ seat: "pro" }), "cloud")).toBe(true);
+    // An older control plane sends no seat; the server still enforces Pro.
+    expect(canCreateWorkspaceIn(organization(), "cloud")).toBe(true);
+    expect(cloudCreateSeatReason(organization())).toBeNull();
+    expect(canCreateWorkspaceIn(organization({ seat: "free" }), "cloud")).toBe(false);
+    expect(cloudCreateSeatReason(organization({ seat: "free" }))).toBe("Creating a cloud workspace requires Pro.");
+    expect(canCreateWorkspaceIn(organization({ seat: "hold" }), "cloud")).toBe(false);
+    expect(cloudCreateSeatReason(organization({ seat: "hold" }))).toMatch(/^You're on Hold/);
   });
 
   it("never allows Personal to create a cloud workspace", () => {

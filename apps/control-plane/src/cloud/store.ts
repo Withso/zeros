@@ -6,7 +6,8 @@ import { securityStreamAuthority } from "../security-events.js";
 import { HttpError } from "../authz.js";
 import type { CloudV2MessageRow } from "./contract.js";
 import { hashCloudV2Token, newCloudV2Token } from "./tokens.js";
-import { CLOUD_V2_LIVE_ACCESS as LIVE_ACCESS } from "./workspace-access.js";
+import { CLOUD_V2_CREATOR_ON_HOLD, CLOUD_V2_LIVE_ACCESS as LIVE_ACCESS } from "./workspace-access.js";
+import { memberOnHoldSql, organizationMemberOnHold } from "../organization-seats.js";
 import { CloudV2PromptOutbox } from "./prompt-outbox.js";
 import { computerSourceReviewRequired, readComputerSourceTargets } from "./computer-provenance.js";
 import { CloudSourceTargetSchema } from "./source-authority.js";
@@ -197,8 +198,14 @@ async function ownedRow(tx: Tx, id: string, userId: string, lock = false): Promi
      ${lock ? "FOR UPDATE OF w" : ""}`,
     [id, userId],
   );
-  if (!rows[0]) throw notFound();
-  return rows[0];
+  if (rows[0]) return rows[0];
+  // Tell a creator on Hold why their own workspace is unavailable.
+  const held = await tx.query(
+    `SELECT 1 FROM cloud_v2_workspaces w
+     WHERE w.id = $1 AND w.creator_user_id = $2 AND w.state <> 'deleted' AND ${CLOUD_V2_CREATOR_ON_HOLD}`,
+    [id, userId],
+  );
+  throw held.rowCount ? organizationMemberOnHold() : notFound();
 }
 
 export class CloudV2Store {
@@ -211,12 +218,15 @@ export class CloudV2Store {
 
   private async insertWorkspace(tx: Tx, input: CreateWorkspace): Promise<CloudV2Workspace> {
     let sourceRepositoryId = input.sourceRepositoryId;
-    const member = await tx.query(
-      `SELECT 1 FROM organization_members m JOIN organizations o ON o.id = m.org_id AND o.deleted_at IS NULL
+    const member = await tx.query<{ pro: boolean; held: boolean }>(
+      `SELECT account_pro_active(m.user_id) AS pro, ${memberOnHoldSql("m.org_id", "m.user_id")} AS held
+       FROM organization_members m JOIN organizations o ON o.id = m.org_id AND o.deleted_at IS NULL
        WHERE m.org_id = $1 AND m.user_id = $2 AND NOT o.is_personal AND o.cloud_workspaces_allowed FOR SHARE OF o,m`,
       [input.organizationId, input.creatorUserId],
     );
-    if (!member.rowCount) throw new HttpError(404, "not_found", "Organization not found");
+    if (!member.rows[0]) throw new HttpError(404, "not_found", "Organization not found");
+    if (member.rows[0].held) throw organizationMemberOnHold();
+    if (!member.rows[0].pro) throw new HttpError(403, "pro_required", "Creating a cloud workspace requires Pro");
     if (input.computerBuildId) {
       // Activation waits for this lock, so cleanup observes the new workspace
       // pin before it can retire an inactive source snapshot.
