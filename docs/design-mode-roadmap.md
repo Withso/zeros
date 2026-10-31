@@ -1393,6 +1393,19 @@ or renderer owners.
 - Plain HTML inspection derives missing/duplicate markers without writing source.
   An explicit visual or semantic edit persists required identity repairs with
   minimal source changes. A source offset is location metadata, never identity.
+- Layers follow the rendered (flat) tree. Content of a declarative shadow root
+  (`<template shadowrootmode>`, common in markup serialized from web
+  components) renders as its host's layers, so the engine walk
+  (`elementRecords`/`isDesignNodeElement`), design-web (`designElements`) and
+  the runtime (`composedChildrenOf`, `deepElementsFromPoint`) all treat it as
+  design nodes with derived identities, in the same document order; inert
+  templates stay opaque source. The runtime marks such layers `shadow: true`,
+  hit tests through open shadow roots, and reads each element's cascade,
+  provenance and tokens from its own tree's stylesheets (tokens inherit across
+  the boundary). Style, text and attribute edits splice the element's span in
+  the template; delete, duplicate and move refuse shadow content with a plain
+  reason because the runtime's structural previews and relocation planner are
+  light-DOM only. Closed shadow roots stay opaque to the runtime.
 - Component internals use definition-local identity. A nested instance address
   combines its root instance with a bounded ordered path of component and
   definition-node IDs.
@@ -1404,6 +1417,17 @@ or renderer owners.
   responsive, and state-specific values remain distinguishable. The inspector
   must not present a computed value as authored source or invent cascade
   certainty.
+- Each winning declaration names its `selector` and a `scope`: `inline`, `element`
+  (the matching complex selector's last compound names the element by class,
+  id or attribute) or `base` (universal or type selectors: resets and imported
+  preflight). Node details list `baseStyleProperties`, which reach the layer
+  only through base selectors, classified across every declaring rule even
+  when the winner is ambiguous. The Style tab's Advanced section lists every
+  other authored declaration that no dedicated control shows as an editable
+  name/value row (value as written, selector in its tooltip), shows the
+  layer's classes, and adds any property by name; it omits an imported
+  source's own custom properties such as Tailwind's `--tw-*`. Removal is
+  offered only for inline winners.
 - Runtime authored-style provenance is optional evidence. Inline `var()`
   shorthands compete even when CSSOM cannot expand their longhands. Nested
   declarations and element-dependent container queries make affected winners
@@ -1536,7 +1560,10 @@ Pointer handling uses Pointer Events and capture. High-frequency input is
 sampled at animation-frame cadence; layout reads are batched before writes.
 One pointer gesture publishes one semantic transaction on release. Cancel or
 Escape restores the exact baseline. The owning pointer's release position is
-included; unrelated pointers cannot move or finish the gesture. Lost capture,
+included, in the preview as well as the commit: a release that lands while the
+previous sample's preview is unanswered sends its own sample to the runtime
+before the save, and only that sample's answer repaints the outline. Unrelated
+pointers cannot move or finish the gesture. Lost capture,
 window blur and surface retirement cancel it. Moving or resizing back to the
 original unsnapped geometry writes nothing and preserves authored sizing.
 
@@ -1959,6 +1986,11 @@ dropped behind a busy flag. Delete immediately after a pending copy belongs to
 that copy, unless a newer explicit selection retires the follow intent; another
 Delete cannot fall through to the original. Keyboard copies follow selection
 after confirmation, while supported previews paint before the write completes.
+A keyboard frame copy paints the source's pixels at once in the grid slot the
+engine assigns it (the same rule as `nextFrameGeometry`, counting copies still
+saving) and brings that slot into view. The pixels are presentation only: they
+stay above the saved copy until it shows its own document or pixels (bounded
+to 2 s), and retire on failure, Undo, deletion or an owner change.
 
 Runtime snapshots and hot collection references remain stable. Style writes
 retain the existing tree reference where structure permits; display/visibility
@@ -2063,15 +2095,27 @@ background through one bounded window (at most 12 nodes, one read at a time,
 fenced by owner, active runtime and source generation at completion), so a
 layer never read before shows its values as soon as it is chosen. Layers rows
 are memoized with stable handlers: a hover or selection repaints only the rows
-it changes. A warm
+it changes. The canvas, inspector and Layers panel are memo boundaries under
+the Design column with stable callbacks, so a publication re-renders only the
+panels whose inputs changed; the inspector's page picker receives file and
+frame-ID pairs that keep their identity while other frames prepare or move.
+Layers subscribes to the shared snapshot whenever it shows (connectivity only
+shapes its recovery), so it still follows every publication, including a frame
+rename that arrives while its folder reports a reconnect.
+A warm
 revalidation (a watcher echo after a save, a style build or a tab return)
 keeps the confirmed aggregate visible while the frames the surface demands are
 prepared through the same bounded lane, then publishes once.
 
 Capable Local engines negotiate `design.mutation-snapshots.v1` for transaction,
-create, duplicate, delete, geometry and transfer acknowledgements. Each reply
+create, duplicate, delete, geometry, transfer, style, text, HTML and asset
+acknowledgements, and for Undo and Redo of those edits, which prepare the
+frames the step restored (page and theme steps keep the aggregate). Each reply
 contains complete validated page/frame metadata and prepared source for at most
-16 affected frames. Unchecked same-owner frames remain visible covers until
+16 affected frames; a single-frame edit never re-prepares, lints or reads the
+HTML of unrelated frames (token names for its lint are read without usage
+counts). A style or history reply is projected onto the catalog before it keys
+Undo prediction. Unchecked same-owner frames remain visible covers until
 the active preparation lane validates them; their old source versions are not
 editing authority. Every projection advances its preparation epoch to fence
 late reads. Legacy layouts, larger affected sets and catalog races retain the
@@ -2592,8 +2636,12 @@ boundaries, not targets to relax casually:
   total definition source, depth 8, and 2 MiB expanded output;
 - render preparation: 128 linked stylesheets, 12 MiB inline raster assets,
   15 MiB sanitized output, and 16 MiB runtime-enabled output;
-- live projection: 20,000 nodes across at most 32 emitted nesting levels and
-  5,000 audited elements, with explicit truncation advisories;
+- live projection: 20,000 nodes across at most 64 emitted nesting levels and
+  5,000 audited elements, with explicit truncation advisories. Markup
+  serialized from a real app routinely nests 40 levels deep; the earlier
+  32-level bound showed such containers as empty layers. Chromium's message
+  channel carries this nesting; Playwright's `evaluate` serializer does not,
+  so browser tests summarize deep snapshots inside the page;
 - structural previews: 32 pending previews, 256 operations and 4 MiB estimated
   retained subtree cost; copied documents also stay within the live node bound.
   In-place history retains at most 64 generations / 4 MiB estimated changes.

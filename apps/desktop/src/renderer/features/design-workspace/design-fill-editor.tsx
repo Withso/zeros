@@ -9,6 +9,7 @@ import {
 import { cn } from "../../shared/ui/cn";
 import {
   DesignColorPanel,
+  DesignColorPickerBody,
   DesignColorValueInputs,
   DesignColorSwatch,
   type DesignColorPanelHandle,
@@ -135,6 +136,7 @@ export function DesignFillEditor({
       size={size}
       repeat={repeat}
       disabled={disabled}
+      tokenName={tokenName}
       onPreview={onPreview}
       onCancelPreview={onCancelPreview}
       onCommit={onCommit}
@@ -189,6 +191,7 @@ function DesignFillPopover({
   size,
   repeat,
   disabled,
+  tokenName,
   trigger,
   onPreview,
   onCancelPreview,
@@ -365,10 +368,11 @@ function DesignFillPopover({
           />
 
           {type === "solid" ? (
-            <DesignColorPanel
+            <DesignColorPickerBody
               value={color}
               label="Fill"
               disabled={disabled}
+              tokenName={tokenName}
               panelRef={panelRef}
               onPreview={(next) => onPreview?.({ "background-color": next })}
               onCancelPreview={onCancelPreview}

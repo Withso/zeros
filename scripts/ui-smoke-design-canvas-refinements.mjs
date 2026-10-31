@@ -402,6 +402,162 @@ export async function runDesignGestureReleasePositionSmoke({ page, check }) {
   );
 }
 
+export async function runDesignGestureReleasePreviewSmoke({ page: parent, check }) {
+  // Held measurement fixtures persist a catalog-shaped snapshot; keep that
+  // storage out of the shared page the legacy fixtures reuse.
+  const page = await parent.context().browser().newPage();
+  try {
+    const origin = `${new URL(parent.url()).origin}/ui-smoke-design-release-origin.html`;
+    await page.route(origin, (route) => route.fulfill({ contentType: "text/html", body: "<!doctype html><title>Release smoke origin</title>" }), { times: 1 });
+    await page.goto(origin);
+    await runDesignGestureReleasePreviewChecks({ page, check });
+  } finally {
+    await page.close();
+  }
+}
+
+async function runDesignGestureReleasePreviewChecks({ page, check }) {
+  // A release that lands while the previous sample's preview is unanswered
+  // must still show the released size, not one sample short of it until the
+  // save is adopted. The save stays held, so only the gesture can resize it.
+  await openCanvasFixture(page, "layoutGestures&measureManipulation&engineDelayMs=0");
+  await page.locator('[data-design-layer-id="home-hero"]').click();
+  const handle = page.locator(
+    '[data-design-element-overlay="home-hero"] [data-design-resize-edge="e"]',
+  );
+  const runtime = page.frameLocator(
+    '[data-design-frame="home.html"] iframe[data-design-document-buffer="displayed"][data-design-document-ready]',
+  );
+  const width = () => runtime.locator('[data-oid="home-hero"]').evaluate((element) => getComputedStyle(element).width);
+  const bounds = await handle.boundingBox();
+  const start = { x: bounds.x + bounds.width / 2, y: bounds.y + bounds.height / 2 };
+  const writesBefore = await styleWrites(page);
+  // Hold every runtime port post in order, as a busy frame document would.
+  await page.evaluate(() => {
+    const send = MessagePort.prototype.postMessage;
+    const held = [];
+    window.__zerosHeldRuntimePort = {
+      holding: false,
+      held,
+      release() {
+        this.holding = false;
+        for (const [port, args] of held.splice(0)) send.apply(port, args);
+      },
+    };
+    MessagePort.prototype.postMessage = function (...args) {
+      if (window.__zerosHeldRuntimePort.holding) {
+        held.push([this, args]);
+        return;
+      }
+      return send.apply(this, args);
+    };
+  });
+  await page.evaluate(() => window.__zerosHarnessDesignSurface.measurement.hold("design.node.styles"));
+  try {
+    await page.mouse.move(start.x, start.y);
+    await page.mouse.down();
+    await page.mouse.move(start.x + 10, start.y);
+    await expect.poll(width).toBe("620px");
+    await page.evaluate(() => { window.__zerosHeldRuntimePort.holding = true; });
+    await page.mouse.move(start.x + 30, start.y);
+    await page.waitForFunction(() => window.__zerosHeldRuntimePort.held.some(([, [message]]) => message?.method === "previewGeometry"));
+    await page.mouse.move(start.x + 40, start.y);
+    await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+    await page.mouse.up();
+    await page.waitForFunction(() => window.__zerosHarnessDesignSurface.measurement.requests
+      .some((request) => request.op === "design.node.styles" && request.released === null));
+    await page.evaluate(() => window.__zerosHeldRuntimePort.release());
+    await expect.poll(width).toBe("680px");
+    const outline = await page.locator('[data-design-element-overlay="home-hero"][data-design-selected-element]').boundingBox();
+    check(
+      "a release during an unanswered preview shows the released size before its save lands",
+      Math.abs(outline.width - 680 * 0.5) <= 1,
+      JSON.stringify(outline),
+    );
+  } finally {
+    await page.evaluate(() => window.__zerosHeldRuntimePort?.release());
+    await page.evaluate(() => window.__zerosHarnessDesignSurface.measurement.release("design.node.styles"));
+  }
+  await expect.poll(() => styleWrites(page)).toBe(writesBefore + 1);
+  await expect.poll(width).toBe("680px");
+}
+
+/** Count each component that rendered in a commit. An untouched subtree keeps
+ * its fiber objects (and stale flags), so only fresh fibers count. */
+function installDesignRenderCounter() {
+  const renders = {};
+  window.__zerosDesignRenders = renders;
+  let previous = new WeakSet();
+  window.__REACT_DEVTOOLS_GLOBAL_HOOK__ = {
+    supportsFiber: true, renderers: new Map(), isDisabled: false, checkDCE() {},
+    inject(renderer) { this.renderers.set(this.renderers.size + 1, renderer); return this.renderers.size; },
+    onScheduleFiberRoot() {}, onCommitFiberUnmount() {}, onPostCommitFiberRoot() {},
+    onCommitFiberRoot(_id, root) {
+      const seen = new WeakSet();
+      const pending = [root.current];
+      while (pending.length) {
+        const fiber = pending.pop();
+        seen.add(fiber);
+        const type = fiber.elementType ?? fiber.type;
+        const name = type && typeof type !== "string" ? type.displayName || type.name || type.type?.name : null;
+        if (name && !previous.has(fiber) && (fiber.flags & 1) === 1) renders[name] = (renders[name] ?? 0) + 1;
+        for (let child = fiber.child; child; child = child.sibling) pending.push(child);
+      }
+      previous = seen;
+    },
+  };
+}
+
+export async function runDesignUnrelatedPreparationRenderSmoke({ page: parent, check }) {
+  // Revalidating unchanged frames must not re-render the canvas, the selected
+  // layer's inspector or Layers: none of their inputs changed.
+  const page = await parent.context().browser().newPage({ viewport: { width: 1440, height: 900 } });
+  try {
+    await page.addInitScript(installDesignRenderCounter);
+    await page.goto(`${new URL(parent.url()).origin}/apps/desktop/src/renderer/harnesses/harness-design-workspace.html?layoutGestures&scopedMutations&measureContinuity&engineDelayMs=0`,
+      { waitUntil: "networkidle" });
+    await page.locator('[data-design-frame-row="home.html"]').click();
+    await page.locator('[data-design-frame="home.html"] iframe[data-design-document-buffer="displayed"][data-design-document-ready]').waitFor();
+    const row = page.locator('[data-design-sidebar-panel] [data-design-layer-id="home-hero"]');
+    for (let attempt = 0; attempt < 8 && !await row.isVisible(); attempt++) {
+      const folded = page.locator('[data-design-sidebar-panel] [role="treeitem"][aria-expanded="false"]:visible').first();
+      if (!await folded.count()) break;
+      await folded.locator("[data-layer-disclosure]").click();
+    }
+    await row.click();
+    await page.getByLabel("Rotation", { exact: true }).waitFor();
+    const quiet = async () => {
+      await page.waitForFunction(() => {
+        const surface = window.__zerosHarnessDesignSurface;
+        const cached = surface.snapshots.peekSnapshot("ws_design_harness");
+        return !surface.measurement.editing("ws_design_harness") && !cached.loading && !cached.refreshing;
+      });
+      await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+    };
+    await quiet();
+    await page.waitForTimeout(300);
+    await quiet();
+    const calls = await page.evaluate(() => window.__zerosHarnessDesignSurface.lazy.calls.length);
+    await page.evaluate(() => {
+      for (const key of Object.keys(window.__zerosDesignRenders)) delete window.__zerosDesignRenders[key];
+      window.__zerosHarnessDesignSurface.lazy.refresh();
+    });
+    await page.waitForFunction((before) => window.__zerosHarnessDesignSurface.lazy.calls.length > before, calls);
+    await quiet();
+    const renders = await page.evaluate(() => ({ ...window.__zerosDesignRenders }));
+    // The column observing the revalidation proves the counter saw it.
+    // Layers follows the shared snapshot it shows, so it may re-render for
+    // another frame's publication; the canvas and inspector must not.
+    check("revalidating unchanged frames re-renders neither the canvas nor the inspector",
+      (renders.DesignWorkspaceColumn ?? 0) > 0 && (renders.DesignCanvas ?? 0) === 0 &&
+        (renders.DesignInspector ?? 0) === 0,
+      JSON.stringify({ inspector: renders.DesignInspector ?? 0, layers: renders.OwnedDesignWorkspaceSidebarPanels ?? 0,
+        column: renders.DesignWorkspaceColumn ?? 0, canvas: renders.DesignCanvas ?? 0 }));
+  } finally {
+    await page.close();
+  }
+}
+
 export async function runDesignCompletedCanvasGesturesSmoke({ page, check }) {
   await openCanvasFixture(page);
   const frame = page.locator('[data-design-frame="home.html"]');
@@ -954,6 +1110,8 @@ export async function runDesignCanvasRefinementsSmoke(options) {
   await runDesignDragPrepareOnPressSmoke(options);
   await runDesignDragOutPixelsSmoke(options);
   await runDesignGestureReleasePositionSmoke(options);
+  await runDesignGestureReleasePreviewSmoke(options);
+  await runDesignUnrelatedPreparationRenderSmoke(options);
   await runDesignCompletedCanvasGesturesSmoke(options);
   await runDesignNoopCanvasResizeSmoke(options);
   await runDesignNoopFrameGestureSmoke(options);

@@ -54,6 +54,11 @@ export interface DesignGestureLoop {
   author(styles: Record<string, string>): void;
   /** Release the loop. No request is dispatched and no callback fires after. */
   stop(): void;
+  /** End a gesture that commits: send the newest authored styles now if the
+   * runtime has not received them, deliver only that request's answer, then
+   * stop. Sending at once keeps the release sample ahead of the commit's
+   * adoption on the runtime port; stopping instead dropped it. */
+  finish(): void;
   readonly stats: DesignGestureLoopStats;
   /** Resolves once nothing is in flight and nothing is queued. Tests only. */
   settled(): Promise<void>;
@@ -73,7 +78,10 @@ export function createDesignGestureLoop<Measurement>(
   options: DesignGestureLoopOptions<Measurement>,
 ): DesignGestureLoop {
   let stopped = false;
-  let inFlight = false;
+  let finishing = false;
+  let inFlight = 0;
+  let latest = 0;
+  let final = 0;
   let queued: Record<string, string> | null = null;
   let idle: (() => void) | null = null;
   const stats = { revisions: 0, requests: 0, coalesced: 0 };
@@ -84,41 +92,49 @@ export function createDesignGestureLoop<Measurement>(
     idle = null;
     resolveIdle();
   };
+  // After finish, an older sample's answer no longer describes the element.
+  const answers = (id: number) => !stopped && (!finishing || id === final);
 
-  const dispatch = () => {
-    if (stopped || inFlight || !queued) {
-      settle();
-      return;
-    }
-    const sent = queued;
-    queued = null;
-    inFlight = true;
+  const send = (styles: Record<string, string>): number => {
+    const id = ++latest;
+    inFlight += 1;
     stats.requests += 1;
     options
-      .request(sent)
+      .request(styles)
       .then((measurement) => {
-        if (stopped) return;
         // Nothing else has written to the element since this request applied
         // its styles — single flight guarantees it — so this measurement is the
         // element as it stands, not a position the pointer has left behind.
-        options.measured?.(measurement);
+        if (answers(id)) options.measured?.(measurement);
       })
       .catch((error: unknown) => {
-        if (!stopped) options.failed?.(error);
+        if (answers(id)) options.failed?.(error);
       })
       .finally(() => {
-        inFlight = false;
+        inFlight -= 1;
+        if (finishing && id === final) stopped = true;
         if (stopped) {
           settle();
           return;
         }
         dispatch();
       });
+    return id;
+  };
+
+  const dispatch = () => {
+    if (stopped || finishing || inFlight || !queued) {
+      settle();
+      return;
+    }
+    const sent = queued;
+    queued = null;
+    send(sent);
   };
 
   return {
     author(styles) {
-      if (stopped) return;
+      if (stopped || finishing) return;
       stats.revisions += 1;
       if (queued) stats.coalesced += 1;
       queued = styles;
@@ -129,6 +145,20 @@ export function createDesignGestureLoop<Measurement>(
       stopped = true;
       queued = null;
       settle();
+    },
+    finish() {
+      if (stopped || finishing) return;
+      finishing = true;
+      if (queued) {
+        const sent = queued;
+        queued = null;
+        final = send(sent);
+      } else if (inFlight) {
+        final = latest;
+      } else {
+        stopped = true;
+        settle();
+      }
     },
     stats,
     settled() {

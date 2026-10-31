@@ -142,8 +142,24 @@ const DESIGN_TOKENS_HOME_SOURCE = `<!doctype html>
     </main>
   </body>
 </html>`;
+// A frame serialized from a web component: its visible content renders from
+// a declarative shadow root, and a class rule authors properties no dedicated
+// Style control shows (Advanced) beside a universal reset (hidden there).
+const SHADOW_CONTENT_HOME_SOURCE = `<!doctype html><html><head><style>
+  * { box-sizing: border-box; margin: 0; }
+  body { font-family: system-ui; background: white; }
+  .card { cursor: pointer; user-select: none; --card-gap: 12px; padding: 16px; }
+</style></head><body><main data-oid="home-main" data-zeros-frame-root style="display:block;padding:40px">
+  <div data-oid="home-card" class="card" style="display:block;width:320px;background:white">
+    <diffs-container data-oid="home-diff" style="display:block;width:300px;background:firebrick">
+      <template shadowrootmode="open"><style>pre { margin: 0; padding: 12px; background: black; color: gainsboro; font: 12px ui-monospace; }</style><pre data-oid="home-diff-pre"><span data-oid="home-diff-line">const value = 1;</span></pre></template>
+    </diffs-container>
+  </div>
+</main></body></html>`;
 const homeSource = designTokensHarness
   ? DESIGN_TOKENS_HOME_SOURCE
+  : new URLSearchParams(window.location.search).has("shadowContent")
+  ? SHADOW_CONTENT_HOME_SOURCE
   : new URLSearchParams(window.location.search).has("layeredLayout")
   ? LAYERED_LAYOUT_SOURCE
   : new URLSearchParams(window.location.search).has("mixedParents")
@@ -329,6 +345,8 @@ async function main() {
   } = await import("../features/design-workspace/state/design-workspace-cache");
   const { captureDesignRuntimeScreenshot } =
     await import("../features/design-workspace/state/design-selection");
+  const { designFrameCopyGeometry } =
+    await import("../features/design-workspace/design-frame-copy-gesture");
   const { useDesignWorkspaceUiStore } =
     await import("../features/design-workspace/state/design-workspace-ui");
   const { useDesignRuntimeStore } =
@@ -862,6 +880,7 @@ async function main() {
   type FixtureRequest = { type?: string; op?: string; params?: Record<string, unknown> };
   let mutationCatalogGeneration = 0;
   const withScopedMutationSnapshots = (request: (message: FixtureRequest) => Promise<unknown>) => async (message: FixtureRequest) => {
+    const before = currentWorkspaceSnapshot;
     const reply = await request(message) as { result?: { snapshot?: DesignWorkspaceSnapshotWire; frame?: string | { file: string } } };
     if (!scopedMutationsHarness || !reply.result?.snapshot || message.op === "design.navigation.read") return reply;
     const original = reply.result.snapshot;
@@ -873,7 +892,13 @@ async function main() {
     if (message.params?.snapshotMode !== "scoped") return { ...reply, result: { ...reply.result, snapshot } };
     lazyRevision = (++mutationCatalogGeneration).toString(16).padStart(64, "0");
     const resultFrame = reply.result.frame;
+    // Like the engine, Undo and Redo prepare every frame the step restored.
+    const restored = message.op?.startsWith("design.history.") ? frames.filter((frame) => {
+      const previous = before.frames.find((candidate) => candidate.file === frame.file);
+      return !previous || (["sourceVersion", "x", "y", "width", "height", "z"] as const).some((key) => previous[key] !== frame[key]);
+    }).map((frame) => frame.file) : [];
     const affected = new Set([
+      ...restored,
       ...(typeof message.params.frame === "string" ? [message.params.frame] : []),
       ...(typeof resultFrame === "string" ? [resultFrame] : resultFrame ? [resultFrame.file] : []),
       ...((message.params.moves ?? []) as Array<{ frame: string }>).map(move => move.frame),
@@ -1068,6 +1093,8 @@ async function main() {
         const params = message.params!;
         const original = currentWorkspaceSnapshot.frames.find(frame => frame.file === params.frame)!;
         if (params.sourceVersion && params.sourceVersion !== original.sourceVersion) throw new Error("The copied source changed.");
+        if ((window as Window & { __zerosHarnessRejectFrameDuplicate?: boolean }).__zerosHarnessRejectFrameDuplicate)
+          throw new Error("The copy was refused.");
         layoutUndo.push({ source: currentHomeSource, snapshot: currentWorkspaceSnapshot });
         layoutRedo.length = 0;
         const file = `copy-${++nestedFrameCounter}.html`;
@@ -1075,7 +1102,12 @@ async function main() {
         const source = original.file === "home.html" ? currentHomeSource : currentPricingSource;
         const geometry = params.geometry as { x: number; y: number; w: number; h: number; z: number } | undefined;
         const frame = { ...original, file, frameId: `copy_${nestedFrameCounter}`, title: `${original.title} copy`, sourceVersion,
-          ...(geometry ? { x: geometry.x, y: geometry.y, width: geometry.w, height: geometry.h, z: geometry.z } : { x: original.x + original.width + 120 }) };
+          ...(() => {
+            // Model the engine's automatic slot (nextFrameGeometry) on the original's page.
+            const placed = geometry ?? designFrameCopyGeometry(currentWorkspaceSnapshot.frames
+              .filter(candidate => (candidate.pageId ?? null) === (original.pageId ?? null)), original);
+            return { x: placed.x, y: placed.y, width: placed.w, height: placed.h, z: placed.z };
+          })() };
         performanceSources.set(file, source);
         currentWorkspaceSnapshot = { ...currentWorkspaceSnapshot, frames: [...currentWorkspaceSnapshot.frames, frame] };
         if (currentWorkspaceSnapshot.pages) currentWorkspaceSnapshot = { ...currentWorkspaceSnapshot,

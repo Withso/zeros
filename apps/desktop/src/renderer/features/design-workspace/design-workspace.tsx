@@ -264,6 +264,9 @@ export function DesignWorkspaceColumn({
 
   // A frame revalidating its source keeps its last confirmed generation in the
   // inspector instead of dropping to an empty panel; edits stay engine-checked.
+  // The page picker maps files to frame IDs; another frame's preparation or
+  // geometry must not re-render the whole inspector.
+  const pageFrameIdentities = useDesignFrameIdentities(designFrameViews(snapshot.data));
   const selectedFrame = useMemo(
     () => {
       const frames = designFrameViews(pageSnapshot);
@@ -385,6 +388,10 @@ export function DesignWorkspaceColumn({
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [surfaceActive, togglePanel, workspaceId]);
 
+  const handleMotionPropertyRequest = useCallback((id: number) => {
+    setMotionPropertyRequest((current) => (current?.id === id ? null : current));
+  }, []);
+
   const publishMotionProperties = useCallback(
     (properties: readonly string[]) => {
       setMotionProperties((current) =>
@@ -480,11 +487,7 @@ export function DesignWorkspaceColumn({
           motionTimelineOpen={motionTimelineOpen}
           motionPropertyRequest={motionPropertyRequest}
           onMotionTimelineOpenChange={setMotionTimelineOpen}
-          onMotionPropertyRequestHandled={(id) =>
-            setMotionPropertyRequest((current) =>
-              current?.id === id ? null : current,
-            )
-          }
+          onMotionPropertyRequestHandled={handleMotionPropertyRequest}
           onMotionPropertiesChange={publishMotionProperties}
           onDeleteFrame={deleteFrame}
           zoomActionsRef={zoomActionsRef}
@@ -514,7 +517,7 @@ export function DesignWorkspaceColumn({
               workspaceId={workspaceId}
               pages={pageSnapshot?.pages}
               activePageId={activePageId}
-              pageFrames={designFrameViews(snapshot.data)}
+              pageFrames={pageFrameIdentities}
               folder={folder}
               frame={selectedFrame}
               frameSelected={frameSelected}
@@ -539,3 +542,14 @@ export function DesignWorkspaceColumn({
   );
 }
 import { designFrameViews, designPresentedFrame } from "./state/design-frame-view";
+
+const NO_FRAME_IDENTITIES: readonly { file: string; frameId?: string }[] = Object.freeze([]);
+/** File and frame ID pairs, shared until membership or an ID changes. */
+function useDesignFrameIdentities(frames: readonly { file: string; frameId?: string }[]) {
+  const shared = useRef(NO_FRAME_IDENTITIES);
+  const previous = shared.current;
+  if (previous.length !== frames.length ||
+    frames.some((frame, index) => frame.file !== previous[index]!.file || frame.frameId !== previous[index]!.frameId))
+    shared.current = frames.length ? frames.map(({ file, frameId }) => ({ file, frameId })) : NO_FRAME_IDENTITIES;
+  return shared.current;
+}

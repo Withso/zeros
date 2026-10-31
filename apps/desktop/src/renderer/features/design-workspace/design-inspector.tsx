@@ -83,6 +83,10 @@ import { DesignPagePicker } from "./design-page-picker";
 import { restoreDesignPageHistorySelection } from "./state/design-page-history";
 import { DesignComputedCssEditor } from "./design-computed-css-editor";
 import {
+  DesignColorTokensContext,
+  useDesignColorTokenGroups,
+} from "./design-color-token-context";
+import {
   DesignStyleOriginLabelContext,
   designStyleTokenDescription,
   designStyleTokenDisplay,
@@ -984,7 +988,7 @@ const InspectorStyleField = React.memo(function InspectorStyleField({
   );
 });
 
-export function DesignInspector({
+export const DesignInspector = React.memo(function DesignInspector({
   workspaceId,
   pages,
   activePageId,
@@ -1006,6 +1010,7 @@ export function DesignInspector({
   zoomActionsRef,
 }: DesignInspectorProps) {
   const styleOriginLabel = useDesignStyleOriginLabel(workspaceId);
+  const colorTokens = useDesignColorTokenGroups(workspaceId);
   // Cloud workspaces have no Design preview; the control stays visible and inert.
   const previewAllowed = !isCloudWorkspace(workspaceId);
   const previewDirectoryId = useDesignWorkspaceUiStore(state =>
@@ -2392,32 +2397,34 @@ export function DesignInspector({
 
             {styleContext && elementDetails ? (
               <DesignStyleOriginLabelContext.Provider value={styleOriginLabel}>
-                <DesignStyleEditor
-                  key={styleOwner.key}
-                  details={elementDetails}
-                  livePreviewOwner={
-                    styleContext
-                      ? {
-                          workspaceId: styleContext.workspaceId,
-                          frame: styleContext.frame.file,
-                          nodeId: styleContext.nodeId,
-                        }
-                      : undefined
-                  }
-                  renderField={styleField}
-                  onLayoutAction={commitLayoutAction}
-                  frameSelected={
-                    frameStyleTarget || elementDetails.oid === layoutRootId
-                  }
-                  layoutParents={layoutParents}
-                  disabled={!active || pendingHistoryActions > 0}
-                  onPreviewStyles={previewSelectedStyles}
-                  onCancelStylePreview={clearSelectedStylePreview}
-                  onCommitStyles={commitSelectedStyles}
-                  motionTimelineOpen={motionTimelineOpen}
-                  motionProperties={motionProperties}
-                  onOpenMotionTimeline={onOpenMotionTimeline}
-                />
+                <DesignColorTokensContext.Provider value={colorTokens}>
+                  <DesignStyleEditor
+                    key={styleOwner.key}
+                    details={elementDetails}
+                    livePreviewOwner={
+                      styleContext
+                        ? {
+                            workspaceId: styleContext.workspaceId,
+                            frame: styleContext.frame.file,
+                            nodeId: styleContext.nodeId,
+                          }
+                        : undefined
+                    }
+                    renderField={styleField}
+                    onLayoutAction={commitLayoutAction}
+                    frameSelected={
+                      frameStyleTarget || elementDetails.oid === layoutRootId
+                    }
+                    layoutParents={layoutParents}
+                    disabled={!active || pendingHistoryActions > 0}
+                    onPreviewStyles={previewSelectedStyles}
+                    onCancelStylePreview={clearSelectedStylePreview}
+                    onCommitStyles={commitSelectedStyles}
+                    motionTimelineOpen={motionTimelineOpen}
+                    motionProperties={motionProperties}
+                    onOpenMotionTimeline={onOpenMotionTimeline}
+                  />
+                </DesignColorTokensContext.Provider>
               </DesignStyleOriginLabelContext.Provider>
             ) : workspaceId && !frameSelected && !selectedNodeId ? (
               <DesignCanvasBackgroundEditor
@@ -2495,4 +2502,4 @@ export function DesignInspector({
       )}
     </aside>
   );
-}
+});

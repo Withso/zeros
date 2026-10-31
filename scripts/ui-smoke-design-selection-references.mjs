@@ -312,14 +312,18 @@ export async function runDesignSelectionLimitSmoke({ page, check }) {
 
 export async function runDesignRuntimeCompletenessSmoke({ page, check }) {
   const result = await page.evaluate(async () => {
-    const { DESIGN_RUNTIME_SOURCE } = await import("/packages/protocol/src/design-runtime.ts");
+    const { DESIGN_RUNTIME_SOURCE, DESIGN_RUNTIME_TREE_DEPTH_LIMIT } = await import("/packages/protocol/src/design-runtime.ts");
     const { connectDesignFrameRuntime } = await import("/apps/desktop/src/renderer/platform/bridge/design-frame-runtime.ts");
     const { reconcileDesignRuntimeSnapshot } = await import("/apps/desktop/src/renderer/features/design-workspace/state/design-selection.ts");
     const { useDesignWorkspaceUiStore, designWorkspaceView } = await import("/apps/desktop/src/renderer/features/design-workspace/state/design-workspace-ui.ts");
     const workspaceId = "selection-completeness-smoke";
     const frame = { file: "deep.html", title: "Deep", width: 400, height: 400, x: 0, y: 0, z: 0, nodeCount: 180, modifiedAt: 1, sourceVersion: "d".repeat(24) };
     const warnings = Array.from({ length: 130 }, (_, index) => `<p data-oid="warning-${index}" style="padding:1px">${index}</p>`).join("");
-    const deep = Array.from({ length: 40 }, (_, index) => `<div data-oid="deep-${index}">`).join("") + "Target" + "</div>".repeat(40);
+    // Deeper than the emitted Layers bound, so the full bounded tree crosses
+    // the real sandboxed channel and the deepest node stays out of it.
+    const levels = DESIGN_RUNTIME_TREE_DEPTH_LIMIT + 8;
+    const target = `deep-${levels - 1}`;
+    const deep = Array.from({ length: levels }, (_, index) => `<div data-oid="deep-${index}">`).join("") + "Target" + "</div>".repeat(levels);
     const iframe = document.createElement("iframe");
     iframe.sandbox = "allow-scripts";
     iframe.style.cssText = "width:400px;height:400px";
@@ -333,18 +337,19 @@ export async function runDesignRuntimeCompletenessSmoke({ page, check }) {
     try {
       await didReady;
       const snapshot = await runtime.getSnapshot();
-      const actual = await runtime.getNodeDetails("deep-39");
-      const has = nodes => nodes.some(node => node.oid === "deep-39" || has(node.children));
+      const actual = await runtime.getNodeDetails(target);
+      const has = nodes => nodes.some(node => node.oid === target || has(node.children));
       const store = useDesignWorkspaceUiStore.getState();
       store.bindDirectory(workspaceId, "directory");
-      store.setSelectedTargets(workspaceId, [{ frame: frame.file, nodeId: "deep-39" }]);
+      store.setSelectedTargets(workspaceId, [{ frame: frame.file, nodeId: target }]);
       reconcileDesignRuntimeSnapshot({ workspaceId, folder: "/synthetic", frame, snapshot });
-      return { warningCount: snapshot.warnings.length, truncationWarning: snapshot.warnings.some(warning => warning.ruleId === "layer-tree-limit"), inTree: has(snapshot.tree), actual: actual.oid, selectedTargets: designWorkspaceView(workspaceId).selectedTargets };
+      return { warningCount: snapshot.warnings.length, truncationWarning: snapshot.warnings.some(warning => warning.ruleId === "layer-tree-limit"), inTree: has(snapshot.tree), target, actual: actual.oid, selectedTargets: designWorkspaceView(workspaceId).selectedTargets };
     } finally {
       runtime.destroy();
       iframe.remove();
     }
   });
-  expect(result).toEqual({ warningCount: 128, truncationWarning: true, inTree: false, actual: "deep-39", selectedTargets: [{ frame: "deep.html", nodeId: "deep-39" }] });
+  expect(result.target).toMatch(/^deep-\d+$/);
+  expect(result).toEqual({ warningCount: 128, truncationWarning: true, inTree: false, target: result.target, actual: result.target, selectedTargets: [{ frame: "deep.html", nodeId: result.target }] });
   check("the real opaque runtime retains its truncation warning under audit saturation and the reconciler preserves a live deep node", true);
 }

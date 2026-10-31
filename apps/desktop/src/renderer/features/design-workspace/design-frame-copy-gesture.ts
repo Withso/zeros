@@ -1,6 +1,7 @@
 import type React from "react";
+import { DESIGN_FRAME_COORDINATE_LIMIT } from "@zeros/design-core";
 import { DESIGN_RUNTIME_DOCUMENT_BODY_ID } from "@zeros/protocol/design-runtime";
-import type { DesignCanvasFrameWire } from "../../platform/git";
+import type { DesignCanvasFrameWire, DesignFrameGeometryWire } from "../../platform/git";
 import { designFrameRuntime, waitForDesignFrameRuntime } from "../../platform/bridge/design-frame-runtime";
 import { createDesignDragPresentation } from "./design-drag-presentation";
 import { beginDesignPointerGesture } from "./design-pointer-gesture";
@@ -11,6 +12,93 @@ import { captureDesignPageOwner, designWorkspaceView, isCurrentDesignPageOwner }
 import { selectDesignFrame } from "./state/design-selection";
 import { designBackgroundWork } from "./state/design-background-work";
 import { designRuntimeFrameState } from "./state/design-runtime-store";
+
+const FRAME_GRID_GAP = 120;
+const FRAME_GRID_COLUMNS = 3;
+const FRAME_COPY_HANDOFF_MS = 2_000;
+const PAINTED_FRAME_SELECTOR =
+  'iframe[data-design-document-buffer="displayed"][data-design-document-ready], [data-design-source-ready], [data-design-frame-pixels-ready]';
+
+/** The slot the engine gives a copy saved without a position
+ * (`nextFrameGeometry`): the next cell of its page's three-column grid. */
+export function designFrameCopyGeometry(
+  page: readonly { width: number; height: number }[],
+  source: { width: number; height: number },
+): DesignFrameGeometryWire {
+  const index = page.length;
+  const widest = Math.max(source.width, ...page.map((frame) => frame.width));
+  const tallest = Math.max(source.height, ...page.map((frame) => frame.height));
+  const rows = Math.floor(DESIGN_FRAME_COORDINATE_LIMIT / (tallest + FRAME_GRID_GAP)) + 1;
+  const columns = Math.max(FRAME_GRID_COLUMNS, Math.ceil((index + 1) / rows));
+  return {
+    x: Math.min(DESIGN_FRAME_COORDINATE_LIMIT, (index % columns) * (widest + FRAME_GRID_GAP)),
+    y: Math.min(DESIGN_FRAME_COORDINATE_LIMIT, Math.floor(index / columns) * (tallest + FRAME_GRID_GAP)),
+    w: source.width,
+    h: source.height,
+    z: index,
+  };
+}
+
+/** A keyboard frame copy paints the source's pixels at once, in the slot it
+ * will be saved to. They are presentation only, never catalog state: they
+ * retire when the saved copy paints its own, when the copy leaves (or never
+ * reaches) the confirmed catalog, or when the canvas owner changes. */
+export function presentDesignFrameCopy(input: {
+  workspaceId: string;
+  frame: DesignCanvasFrameWire;
+  article: HTMLElement;
+  geometry: DesignFrameGeometryWire;
+  current(): boolean;
+}) {
+  const { workspaceId, frame, geometry } = input;
+  const rootId = designRuntimeFrameState(workspaceId, frame.file)?.snapshot?.frame.oid ?? DESIGN_RUNTIME_DOCUMENT_BODY_ID;
+  const presentation = createDesignDragPresentation(workspaceId, frame, {
+    oid: rootId, rect: { x: 0, y: 0, width: frame.width, height: frame.height },
+  }, input.article);
+  if (!presentation) return null;
+  presentation.element.dataset.designFrameCopyPreview = "";
+  presentation.paint({ x: geometry.x - frame.x, y: geometry.y - frame.y });
+  const captures = new AbortController();
+  const runtime = designFrameRuntime(workspaceId, frame.file);
+  if (!presentation.hasPixels && runtime?.sourceVersion === frame.sourceVersion)
+    void runtime.captureScreenshot(null, 1, captures.signal, "explicit").then((capture) => {
+      if (input.current()) presentation.adopt({ ...capture, nodeId: rootId });
+    }).catch(() => {});
+  let retired = false;
+  const retire = () => {
+    if (retired) return;
+    retired = true;
+    captures.abort();
+    presentation.remove();
+  };
+  return {
+    retire,
+    /** Keep the pixels over the saved copy until it shows its own. */
+    handoff(copy: DesignCanvasFrameWire, articleOf: (file: string) => HTMLElement | undefined) {
+      if (retired) return;
+      // The confirmed place wins if anything moved the copy meanwhile.
+      if (copy.x !== geometry.x || copy.y !== geometry.y)
+        presentation.paint({ x: copy.x - frame.x, y: copy.y - frame.y });
+      const started = performance.now();
+      let mounted = false;
+      const tick = () => {
+        if (retired) return;
+        const article = articleOf(copy.file);
+        if (article?.isConnected) mounted = true;
+        const confirmed = designFrameViews(designWorkspaceSnapshotCache.peekSnapshot(workspaceId).data)
+          .some((candidate) => candidate.file === copy.file);
+        // An Undo can retire the copy's surface before its reply confirms.
+        if (!input.current() || !confirmed || (mounted && !article?.isConnected) ||
+          article?.querySelector(PAINTED_FRAME_SELECTOR) || performance.now() - started > FRAME_COPY_HANDOFF_MS) {
+          retire();
+          return;
+        }
+        window.requestAnimationFrame(tick);
+      };
+      window.requestAnimationFrame(tick);
+    },
+  };
+}
 
 /** The original stays in place throughout an Option drag. The temporary
  * pixels have one gesture owner and one bounded handoff to the saved copy. */

@@ -479,7 +479,7 @@ function designApiMutationReply(
       !designPageIdSchema.safeParse(reply.historyPageId).success) ||
     (requireSnapshot &&
       (!reply.snapshot ||
-        !validProtocolCapability(reply.snapshot) ||
+        !validMutationSnapshot(reply.snapshot) ||
         !Array.isArray(reply.snapshot.frames)))
   ) {
     throw new Error(`${operation}: malformed engine response`);
@@ -563,6 +563,7 @@ export async function bridgeDesignHistory(
       workspaceId,
       ...(frame ? { frame } : {}),
       ...(expectedSourceVersions ? { expectedSourceVersions } : {}),
+      ...scopedMutationSnapshot(bridge, workspaceId),
     }),
     `design.history.${direction}`,
     true,
@@ -623,7 +624,7 @@ function designMutationReply(
     typeof reply.mutation.changed !== "boolean" ||
     typeof reply.mutation.frame?.file !== "string" ||
     !reply.snapshot ||
-    !validProtocolCapability(reply.snapshot) ||
+    !validMutationSnapshot(reply.snapshot) ||
     !Array.isArray(reply.snapshot.frames) ||
     !Array.isArray(reply.snapshot.assets) ||
     typeof reply.snapshot.tokenSourceVersion !== "string" ||
@@ -1165,6 +1166,7 @@ export async function bridgeDesignUpdateStyles(
     await workspaceOp(bridge, "design.node.styles", {
       workspaceId,
       ...input,
+      ...scopedMutationSnapshot(bridge, workspaceId),
     }),
     "design.node.styles",
   );
@@ -1184,6 +1186,7 @@ export async function bridgeDesignSetText(
     await workspaceOp(bridge, "design.node.text", {
       workspaceId,
       ...input,
+      ...scopedMutationSnapshot(bridge, workspaceId),
     }),
     "design.node.text",
   );
@@ -1204,6 +1207,7 @@ export async function bridgeDesignWriteHtml(
     await workspaceOp(bridge, "design.node.html", {
       workspaceId,
       ...input,
+      ...scopedMutationSnapshot(bridge, workspaceId),
     }),
     "design.node.html",
   );
@@ -1224,6 +1228,7 @@ export async function bridgeDesignInsertAsset(
     await workspaceOp(bridge, "design.asset.insert", {
       workspaceId,
       ...input,
+      ...scopedMutationSnapshot(bridge, workspaceId),
     }),
     "design.asset.insert",
   );

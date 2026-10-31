@@ -143,6 +143,56 @@ describe("createDesignGestureLoop", () => {
     expect(loop.stats.requests).toBe(2);
   });
 
+  it("sends the release sample at once and measures only it when a gesture finishes", async () => {
+    // A release often lands while the previous sample's preview is still in
+    // flight. Stopping dropped the queued release sample, so the element sat
+    // one sample short of the committed value until the save was adopted.
+    const results: Array<ReturnType<typeof deferred<string>>> = [];
+    const requested: Array<Record<string, string>> = [];
+    const measured: string[] = [];
+    const loop = createDesignGestureLoop<string>({
+      request: (styles) => {
+        requested.push(styles);
+        const next = deferred<string>();
+        results.push(next);
+        return next.promise;
+      },
+      measured: (value) => measured.push(value),
+    });
+
+    loop.author({ width: "660px" });
+    loop.author({ width: "680px" });
+    loop.finish();
+    // Posted before the commit's adoption can be, behind the earlier sample.
+    expect(requested).toEqual([{ width: "660px" }, { width: "680px" }]);
+    loop.author({ width: "700px" });
+    results[0]!.resolve("660");
+    results[1]!.resolve("680");
+    await loop.settled();
+    expect(measured).toEqual(["680"]);
+    expect(requested).toHaveLength(2);
+  });
+
+  it("finishes on the in-flight request when it already carries the newest styles", async () => {
+    const pending = deferred<string>();
+    const measured: string[] = [];
+    const loop = createDesignGestureLoop<string>({
+      request: () => pending.promise,
+      measured: (value) => measured.push(value),
+    });
+    loop.author({ top: "4px" });
+    loop.finish();
+    pending.resolve("4");
+    await loop.settled();
+    expect(measured).toEqual(["4"]);
+    expect(loop.stats.requests).toBe(1);
+
+    const idle = createDesignGestureLoop<string>({ request: () => deferred<string>().promise });
+    idle.finish();
+    expect(idle.stats.requests).toBe(0);
+    await idle.settled();
+  });
+
   it("swallows a failure when the gesture asked for no failure handler", async () => {
     const rejected = deferred<string>();
     const loop = createDesignGestureLoop<string>({

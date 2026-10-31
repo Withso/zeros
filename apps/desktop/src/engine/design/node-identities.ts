@@ -1,6 +1,10 @@
 import { nativeDesignIdentityBase } from "@zeros/design-web";
 import { parse, type DefaultTreeAdapterTypes } from "parse5";
-import { elementRecords, type ElementRecord } from "./source";
+import {
+  elementRecords,
+  templateOwningFragment,
+  type ElementRecord,
+} from "./source";
 
 const NON_DESIGN_NODE_TAGS = new Set([
   "base",
@@ -21,9 +25,25 @@ type DesignAncestor =
   | DefaultTreeAdapterTypes.DocumentFragment
   | DefaultTreeAdapterTypes.Element;
 
+/** `<template shadowrootmode>` attaches its content as the parent's shadow
+ * root when the HTML is parsed, so that content renders as the host's layers.
+ * Ordinary templates stay inert source. */
+export function isDeclarativeShadowTemplate(
+  element: DefaultTreeAdapterTypes.Element,
+): boolean {
+  if (element.tagName !== "template") return false;
+  const mode = element.attrs
+    .find((attribute) => attribute.name === "shadowrootmode")
+    ?.value.trim()
+    .toLowerCase();
+  return mode === "open" || mode === "closed";
+}
+
 /** A selectable design node is authored visual content inside body, never
  * document plumbing. One predicate shared by healing, lint, mutations, and
- * rendering keeps metadata nodes out of the canvas contract. */
+ * rendering keeps metadata nodes out of the canvas contract. Content of a
+ * declarative shadow root belongs to its host; the owning template is known
+ * once elementRecords has walked the document. */
 export function isDesignNodeElement(
   element: DefaultTreeAdapterTypes.Element,
 ): boolean {
@@ -35,11 +55,53 @@ export function isDesignNodeElement(
         return false;
       }
       if (current.tagName === "body") return true;
+    } else if (current.nodeName === "#document-fragment") {
+      const template = templateOwningFragment(
+        current as DefaultTreeAdapterTypes.DocumentFragment,
+      );
+      if (!template || !isDeclarativeShadowTemplate(template)) return false;
+      current = template.parentNode as DesignAncestor | null;
+      continue;
     }
     current =
       "parentNode" in current
         ? (current.parentNode as DesignAncestor | null)
         : null;
+  }
+  return false;
+}
+
+/** The design elements an element renders as children: a declarative shadow
+ * root's content replaces its light children, as in the browser's flat tree
+ * (slot assignment aside). Call after elementRecords has walked the document. */
+export function designRenderedChildElements(
+  element: DefaultTreeAdapterTypes.Element,
+): DefaultTreeAdapterTypes.Element[] {
+  const template = element.childNodes.find(
+    (node): node is DefaultTreeAdapterTypes.Element =>
+      "tagName" in node && isDeclarativeShadowTemplate(node),
+  );
+  const nodes =
+    template && "content" in template
+      ? (template as DefaultTreeAdapterTypes.Template).content.childNodes
+      : element.childNodes;
+  return nodes.filter(
+    (node): node is DefaultTreeAdapterTypes.Element =>
+      "tagName" in node && isDesignNodeElement(node),
+  );
+}
+
+/** True for a design node rendered inside a declarative shadow root. */
+export function isShadowDesignNodeElement(
+  element: DefaultTreeAdapterTypes.Element,
+): boolean {
+  if (!isDesignNodeElement(element)) return false;
+  for (
+    let current = element.parentNode as DesignAncestor | null;
+    current;
+    current = "parentNode" in current ? (current.parentNode as DesignAncestor | null) : null
+  ) {
+    if (!("tagName" in current) && current.nodeName === "#document-fragment") return true;
   }
   return false;
 }

@@ -40,6 +40,7 @@ import {
   type DesignOperation,
 } from "@zeros/design-core";
 import type { DesignAuthoredKeyframes } from "@zeros/design-web";
+import { normalizeDesignPagesSnapshot } from "@zeros/protocol/design-pages";
 import {
   DESIGN_RUNTIME_DOCUMENT_BODY_ID,
   type DesignRuntimeNodeDetails,
@@ -149,7 +150,7 @@ import {
   flattenDesignLayerTree,
 } from "./design-layer-tree";
 import { startDesignLayoutDrag } from "./design-layout-drag-gesture";
-import { startDesignFrameCopy } from "./design-frame-copy-gesture";
+import { designFrameCopyGeometry, presentDesignFrameCopy, startDesignFrameCopy } from "./design-frame-copy-gesture";
 import { DESIGN_REPARENT_HYSTERESIS_PIXELS, designMovementDelta, designNodeMovementStyles, designNudgeStep } from "./design-movement-geometry";
 import { designSelectionMutationTargets } from "./design-selected-targets";
 import {
@@ -462,7 +463,7 @@ const DesignPreparingFrame = React.forwardRef<HTMLElement, React.ComponentPropsW
   return <article {...props} ref={ref} />;
 });
 
-export function DesignCanvas({
+export const DesignCanvas = React.memo(function DesignCanvas({
   workspaceId,
   folder,
   snapshot,
@@ -1008,6 +1009,8 @@ export function DesignCanvas({
     frame: string;
     result: Promise<DesignCanvasFrameWire | null>;
   } | null>(null);
+  /** Unsaved keyboard copies take the next grid slots in submission order. */
+  const pendingFrameCopySlotsRef = useRef(new Map<number, { pageId: string | undefined; width: number; height: number }>());
   const [selectionOverlaySuppressed, setSelectionOverlaySuppressed] =
     useState(false);
   const nudgeGestureRef = useRef<
@@ -2277,6 +2280,21 @@ export function DesignCanvas({
       const owner = captureDesignPageOwner(workspaceId);
       const intent = ++frameActionIntentRef.current;
       frameActionPendingRef.current++;
+      // Paint the copy where the engine will place it, before the save is
+      // answered: the page's frames plus earlier copies still saving.
+      const canvasLifetime = canvasLifetimeRef.current;
+      const catalog = normalizeDesignPagesSnapshot(designWorkspaceSnapshotCache.peekSnapshot(workspaceId).data!);
+      const pageId = owner.pageId ?? catalog.pages[0]?.id;
+      const page = designFrameViews(catalog).filter((candidate) => candidate.pageId === pageId);
+      const geometry = designFrameCopyGeometry([...page, ...[...pendingFrameCopySlotsRef.current.values()]
+        .filter((slot) => slot.pageId === pageId)], frame);
+      pendingFrameCopySlotsRef.current.set(intent, { pageId, width: frame.width, height: frame.height });
+      const article = frameElementsRef.current.get(frame.file);
+      const provisional = article && isPreparedDesignFrame(frame) ? presentDesignFrameCopy({
+        workspaceId, frame, article, geometry,
+        current: () => isCurrentDesignPageOwner(owner) && canvasLifetimeRef.current === canvasLifetime,
+      }) : null;
+      if (provisional) revealAgentRects([{ x: geometry.x, y: geometry.y, width: geometry.w, height: geometry.h }]);
       const save = duplicateDesignFrameCached(workspaceId, frame.file, owner.pageId);
       const pending = { owner, selectionEvent: selected.selectionEvent, frame: frame.file,
         result: save.then(result => result.snapshot.frames.find(candidate => candidate.file === result.frame.file) ?? null) };
@@ -2284,16 +2302,20 @@ export function DesignCanvas({
       try {
         savedEditingSession?.retain(save);
         const duplicate = await pending.result;
+        if (duplicate) provisional?.handoff(duplicate, (file) => frameElementsRef.current.get(file));
+        else provisional?.retire();
         if (frameActionIntentRef.current !== intent || !isCurrentDesignPageOwner(owner) || designWorkspaceView(workspaceId).selectionEvent !== selected.selectionEvent) return;
         if (duplicate) void selectDesignFrame(workspaceId, duplicate, { selected: true, reveal: true, owner }).catch(() => {});
       } catch (error) {
+        provisional?.retire();
         toast.error(duplicateMode === "copy" ? "Couldn't copy the frame" : "Couldn't duplicate the frame", { description: errorMessage(error) });
       } finally {
+        pendingFrameCopySlotsRef.current.delete(intent);
         frameActionPendingRef.current--;
         if (pendingFrameCopyRef.current === pending) pendingFrameCopyRef.current = null;
       }
     },
-    [workspaceId, savedEditingSession],
+    [workspaceId, savedEditingSession, revealAgentRects],
   );
 
   const deleteSelectedFrame = useCallback(async (frame: DesignCanvasFrameWire) => {
@@ -3627,11 +3649,16 @@ export function DesignCanvas({
         sourceVersion: frame.sourceVersion,
         nodeId: details.oid,
       };
-      // A rotation is a pure transform: the angle painted on the overlay is the
-      // angle authored, so nothing has to be measured back. What matters is that
-      // the element turns in the same frame the outline does, which is why this
-      // asks for geometry instead of the full node details — no animation frame
-      // between the write and the answer.
+      /** Until the runtime answers, and again if it stops, the pointer's angle
+       * paints. Once measurements arrive the outline turns with the element:
+       * painting the pointer's angle led the element's pixels by one frame. */
+      let measuring = false;
+      const paintPredicted = (rotation: number) => {
+        // The overlay is already anchored on the pivot, so turning it further
+        // about that same point needs no reflow and no repositioning.
+        overlay.style.transform = `rotate(${rotation}deg)`;
+        overlay.style.transformOrigin = `${overlayFrame.pivotX}px ${overlayFrame.pivotY}px`;
+      };
       const loop = createDesignGestureLoop<DesignRuntimeNodeGeometry>({
         request: (styles) => {
           publishDesignGestureLivePreview(
@@ -3646,6 +3673,17 @@ export function DesignCanvas({
             nodeId: details.oid,
             styles,
           });
+        },
+        failed: () => {
+          measuring = false;
+          paintPredicted(latestRotation);
+        },
+        measured: (geometry) => {
+          measuring = true;
+          paintDesignNodeOverlayGeometry(
+            overlay,
+            designSelectionOverlayFrame(designSelectionBox(geometry)),
+          );
         },
       });
       const move = (pointerEvent: PointerEvent) => {
@@ -3664,10 +3702,7 @@ export function DesignCanvas({
         // the element never disagree by a rounding step.
         latestRotation =
           overlayFrame.rotation + (rotate - base.rotate) * rotationDirection;
-        // The overlay is already anchored on the pivot, so turning it further
-        // about that same point needs no reflow and no repositioning.
-        overlay.style.transform = `rotate(${latestRotation}deg)`;
-        overlay.style.transformOrigin = `${overlayFrame.pivotX}px ${overlayFrame.pivotY}px`;
+        if (!measuring) paintPredicted(latestRotation);
         // The cursor keeps pointing the way the drag turns, but each distinct
         // value decodes an SVG image; only assign one the pointer earned.
         const cursor = designRotationCursor(latestRotation - 45);
@@ -3686,8 +3721,9 @@ export function DesignCanvas({
       const settle = (rotation: number) => {
         paintDesignNodeOverlayGeometry(overlay, { ...overlayFrame, rotation });
       };
-      const cleanup = () => {
-        loop.stop();
+      const cleanup = (committing = false) => {
+        if (committing) loop.finish();
+        else loop.stop();
         window.removeEventListener("pointermove", move);
         window.removeEventListener("pointerup", finish);
         window.removeEventListener("pointercancel", cancel);
@@ -3701,11 +3737,12 @@ export function DesignCanvas({
         gestureCancelRef.current = null;
       };
       const restore = () => {
+        loop.stop();
         settle(overlayFrame.rotation);
         void clearDesignNodeStylePreviewTransient(previewInput).catch(() => {});
       };
       const finish = () => {
-        cleanup();
+        cleanup(moved);
         if (!moved) {
           settle(overlayFrame.rotation);
           return;
@@ -3853,8 +3890,9 @@ export function DesignCanvas({
         paintOrigin(latest);
         loop.author(latestStyles);
       };
-      const cleanup = () => {
-        loop.stop();
+      const cleanup = (committing = false) => {
+        if (committing) loop.finish();
+        else loop.stop();
         window.removeEventListener("pointermove", move);
         window.removeEventListener("pointerup", finish);
         window.removeEventListener("pointercancel", cancel);
@@ -3873,11 +3911,12 @@ export function DesignCanvas({
         gestureCancelRef.current = null;
       };
       const restore = () => {
+        loop.stop();
         paintOrigin({ originX: box.originX, originY: box.originY });
         void clearDesignNodeStylePreviewTransient(previewInput).catch(() => {});
       };
       const finish = () => {
-        cleanup();
+        cleanup(moved);
         if (!moved) return;
         publishDesignGestureLivePreview(
           workspaceId,
@@ -4088,8 +4127,9 @@ export function DesignCanvas({
           });
         },
         measured: (geometry) => {
-          if (ended) return;
+          // After a committed release only the release sample's answer arrives.
           paintOwnerGeometry(geometry);
+          if (ended) return;
           publishDesignLayoutToolsLive(ownerKey, {
             geometry: {
               rect: geometry.rect,
@@ -4172,10 +4212,11 @@ export function DesignCanvas({
         };
         if (dragging) update();
       };
-      const cleanup = () => {
+      const cleanup = (committing = false) => {
         ended = true;
         spacingGestureRef.current = false;
-        loop.stop();
+        if (committing) loop.finish();
+        else loop.stop();
         window.removeEventListener("pointermove", move);
         window.removeEventListener("pointerup", finish);
         window.removeEventListener("pointercancel", cancel);
@@ -4190,10 +4231,20 @@ export function DesignCanvas({
         gestureCancelRef.current = null;
       };
       const restore = () => {
+        loop.stop();
         paintOwnerGeometry(originalGeometry);
         releaseDesignLayoutToolsLive(ownerKey);
         void clearDesignNodeStylePreviewTransient(previewInput).catch(() => {});
       };
+      // A drag that ends where it began changes nothing: no write, no
+      // history, and authored units and expressions stay untouched.
+      const changedSinceStart = () => Object.entries(latest.commit).some(([property, css]) =>
+        property.startsWith("padding-")
+          ? designPixelValue(css) !== paddingOriginal[property]
+          : property === control.property
+            ? latest.value !== baseline
+            : false,
+      );
       const finish = (pointerEvent?: PointerEvent) => {
         if (pointerEvent && pointerEvent.pointerId !== pointerId) return;
         if (pointerEvent) {
@@ -4204,7 +4255,8 @@ export function DesignCanvas({
           };
           if (dragging) update();
         }
-        cleanup();
+        const changed = dragging && changedSinceStart();
+        cleanup(changed);
         if (!dragging) {
           releaseDesignLayoutToolsLive(ownerKey);
           // A modifier-click selects through spacing chrome.
@@ -4233,15 +4285,6 @@ export function DesignCanvas({
           );
           return;
         }
-        // A drag that ends where it began changes nothing: no write, no
-        // history, and authored units and expressions stay untouched.
-        const changed = Object.entries(latest.commit).some(([property, css]) =>
-          property.startsWith("padding-")
-            ? designPixelValue(css) !== paddingOriginal[property]
-            : property === control.property
-              ? latest.value !== baseline
-              : false,
-        );
         if (!changed) {
           restore();
           return;
@@ -4534,6 +4577,7 @@ export function DesignCanvas({
         }
       };
       const restore = () => {
+        loop.stop();
         if (duplicate) void copyPreview?.finally(() => runtime.clearPreviewStructure?.(transactionId)).catch(() => {});
         if (nudgeLifetimeRef.current !== lifetime || runtime.sourceVersion !== frame.sourceVersion || designFrameRuntime(workspaceId, frame.file) !== runtime) return;
         for (const start of painted) {
@@ -4592,13 +4636,14 @@ export function DesignCanvas({
         paint();
         loop.author({});
       };
-      const cleanup = () => {
-        loop.stop();
+      const cleanup = (committing = false) => {
+        if (committing) loop.finish();
+        else loop.stop();
         paintGuides({});
         gestureCancelRef.current = null;
       };
       const finish = () => {
-        cleanup();
+        cleanup(moved && isCurrent() && !designGestureRectUnchanged(groupBounds, latestRawBounds));
         if (!isCurrent()) { restore(); return; }
         if (!moved) {
           if (clicked) { clicked(); return; }
@@ -4966,6 +5011,7 @@ export function DesignCanvas({
         }
       };
       const restore = () => {
+        loop.stop();
         latestBounds = startBounds;
         latestRects = new Map(
           starts.map(({ details }) => [details.oid, details.rect] as const),
@@ -5020,14 +5066,15 @@ export function DesignCanvas({
         paint();
         loop.author({});
       };
-      const cleanup = () => {
-        loop.stop();
+      const cleanup = (committing = false) => {
+        if (committing) loop.finish();
+        else loop.stop();
         paintGuides({});
         delete groupOverlay.dataset.designGesture;
         gestureCancelRef.current = null;
       };
       const finish = () => {
-        cleanup();
+        cleanup(moved && !designGestureRectUnchanged(startBounds, latestRawBounds));
         if (!moved) return;
         if (designGestureRectUnchanged(startBounds, latestRawBounds)) {
           restore();
@@ -5638,13 +5685,15 @@ export function DesignCanvas({
         loop.author(latestStyles);
       };
 
-      const cleanup = () => {
-        loop.stop();
+      const cleanup = (committing = false) => {
+        if (committing) loop.finish();
+        else loop.stop();
         paintGuides({});
         gestureCancelRef.current = null;
       };
 
       const restorePreview = () => {
+        loop.stop();
         paintDesignNodeOverlayGeometry(overlay, startOverlay);
         paintDesignConstraintGuides(
           constraintGuides,
@@ -5666,17 +5715,17 @@ export function DesignCanvas({
       };
 
       const finish = () => {
-        cleanup();
+        // Returning to the original authored geometry is a cancelled edit.
+        // Restore source sizing intent (Hug/Fill, %, auto), not fixed pixels.
+        const unchanged = !moved ||
+          designGestureRectUnchanged(start, latestRawRect) ||
+          sameDesignGestureStyles(latestStyles, authoredForRect(start).styles);
+        cleanup(!unchanged);
         if (!moved) {
           finishClickSelection();
           return;
         }
-        // Returning to the original authored geometry is a cancelled edit.
-        // Restore source sizing intent (Hug/Fill, %, auto), not fixed pixels.
-        if (
-          designGestureRectUnchanged(start, latestRawRect) ||
-          sameDesignGestureStyles(latestStyles, authoredForRect(start).styles)
-        ) {
+        if (unchanged) {
           restorePreview();
           return;
         }
@@ -8677,4 +8726,4 @@ export function DesignCanvas({
       </div>
     </div>
   );
-}
+});

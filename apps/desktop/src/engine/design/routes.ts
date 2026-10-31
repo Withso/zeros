@@ -584,6 +584,13 @@ export async function handleDesignWorkspaceRoute(
         remote,
       );
       const direction = op === "design.history.undo" ? "undo" : "redo";
+      // A scoped reply prepares only the frames this step restored. Page and
+      // theme steps keep the aggregate.
+      const restoredSnapshot = (frames: readonly string[]) => host.readDesignSnapshot(workspace, remote, {
+        hostLocalResources,
+        fresh: true,
+        ...(params.snapshotMode === "scoped" ? { affectedFrames: [...new Set(frames)] } : {}),
+      });
       const history = host.designHistoryState(workspace.path);
       const source = history?.[direction];
       const entry = source?.pop();
@@ -658,10 +665,10 @@ export async function handleDesignWorkspaceRoute(
           entry.bytes = bytes;
           destination.push(entry);
           pruneWorkspaceDesignHistory(history);
-          const snapshot = await host.readDesignSnapshot(workspace, remote, {
-            hostLocalResources,
-            fresh: true,
-          });
+          const snapshot = await restoredSnapshot(entry.changes.flatMap((change) => {
+            const point = direction === "undo" ? change.before : change.after;
+            return point ? [point.file] : [];
+          }));
           return {
             result: null,
             snapshot,
@@ -691,10 +698,7 @@ export async function handleDesignWorkspaceRoute(
           destination.push(entry);
           return {
             result: null,
-            snapshot: await host.readDesignSnapshot(workspace, remote, {
-              hostLocalResources,
-              fresh: true,
-            }),
+            snapshot: await restoredSnapshot(entry.moves.map((move) => move.file)),
             historySelection: entry.frame,
             historyFrame: entry.frame,
           };
@@ -723,16 +727,14 @@ export async function handleDesignWorkspaceRoute(
             throw error;
           }
           destination.push(entry);
-          const snapshot = await host.readDesignSnapshot(workspace, remote, {
-            hostLocalResources,
-            fresh: true,
-          });
+          const snapshot = await restoredSnapshot(replacement ? [replacement.file] : []);
           const affectedPage = snapshot.pages?.find(page => page.id === (replacement ?? expected)?.pageId);
           return {
             result: null,
             snapshot,
             historySelection:
-              replacement?.file ?? (affectedPage ? affectedPage.frameFiles[0] : snapshot.frames[0]?.file) ?? null,
+              replacement?.file ?? (affectedPage ? affectedPage.frameFiles[0]
+                : (snapshot.mutationCatalog?.frames[0]?.source ?? snapshot.frames[0]?.file)) ?? null,
             historyFrame: (replacement ?? expected)!.file,
           };
         }
@@ -755,10 +757,7 @@ export async function handleDesignWorkspaceRoute(
         else history.bytes = Math.max(0, history.bytes - entry.bytes);
         return {
           result,
-          snapshot: await host.readDesignSnapshot(workspace, remote, {
-            hostLocalResources,
-            fresh: true,
-          }),
+          snapshot: await restoredSnapshot([entry.frame]),
           ...(result ? { historyFrame: entry.frame } : {}),
         };
       }
@@ -770,10 +769,7 @@ export async function handleDesignWorkspaceRoute(
       if (!frame) {
         return {
           result: null,
-          snapshot: await host.readDesignSnapshot(workspace, remote, {
-            hostLocalResources,
-            fresh: true,
-          }),
+          snapshot: await restoredSnapshot([]),
         };
       }
       const documentId = designDocumentIdForFrame(frame);
@@ -784,10 +780,7 @@ export async function handleDesignWorkspaceRoute(
           : await api.redo(documentId);
       return {
         result,
-        snapshot: await host.readDesignSnapshot(workspace, remote, {
-          hostLocalResources,
-          fresh: true,
-        }),
+        snapshot: await restoredSnapshot([frame]),
         ...(result ? { historyFrame: frame } : {}),
       };
     }
@@ -1679,6 +1672,7 @@ export async function handleDesignWorkspaceRoute(
         snapshot: await host.readDesignSnapshot(workspace, remote, {
           hostLocalResources,
           fresh: true,
+          ...(params.snapshotMode === "scoped" ? { affectedFrames: [frame] } : {}),
         }),
         foundationRevision: {
           before: applied.receipt.beforeRevision,
@@ -1742,6 +1736,7 @@ export async function handleDesignWorkspaceRoute(
         snapshot: await host.readDesignSnapshot(workspace, remote, {
           hostLocalResources,
           fresh: true,
+          ...(params.snapshotMode === "scoped" ? { affectedFrames: [frame] } : {}),
         }),
         foundationRevision: {
           before: applied.receipt.beforeRevision,
@@ -1813,6 +1808,7 @@ export async function handleDesignWorkspaceRoute(
         snapshot: await host.readDesignSnapshot(workspace, remote, {
           hostLocalResources,
           fresh: true,
+          ...(params.snapshotMode === "scoped" ? { affectedFrames: [frame] } : {}),
         }),
         foundationRevision: {
           before: applied.receipt.beforeRevision,
@@ -1876,6 +1872,7 @@ export async function handleDesignWorkspaceRoute(
         snapshot: await host.readDesignSnapshot(workspace, remote, {
           hostLocalResources,
           fresh: true,
+          ...(params.snapshotMode === "scoped" ? { affectedFrames: [frame] } : {}),
         }),
         foundationRevision: {
           before: applied.receipt.beforeRevision,

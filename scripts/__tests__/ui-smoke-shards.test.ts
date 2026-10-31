@@ -48,6 +48,7 @@ const originalOrder = [
   "design-floating-chrome-edges",
   "design-workbench",
   "design-selection",
+  "design-shadow-layers",
   "design-auto-layout",
   "design-spacing",
   "design-layout-gestures",

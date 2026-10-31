@@ -1,4 +1,5 @@
 import {
+  DESIGN_RUNTIME_TREE_DEPTH_LIMIT,
   DESIGN_SELECTION_NODE_LIMIT,
   type DesignRuntimeNodeDetails,
   type DesignRuntimeTreeNode,
@@ -262,7 +263,7 @@ describe("design selection workflows", () => {
   it.each(["saturated warnings", "maximum depth", "maximum nodes"])("does not infer completeness from warning absence at %s", boundary => {
     const node: DesignRuntimeTreeNode = { oid: "root", tag: "div", name: "Root", text: null, visible: true, children: [] };
     let tree = [node];
-    if (boundary === "maximum depth") for (let depth = 31; depth >= 0; depth--) tree = [{ ...node, oid: `depth-${depth}`, children: tree }];
+    if (boundary === "maximum depth") for (let depth = DESIGN_RUNTIME_TREE_DEPTH_LIMIT - 1; depth >= 0; depth--) tree = [{ ...node, oid: `depth-${depth}`, children: tree }];
     if (boundary === "maximum nodes") tree = Array.from({ length: 20_000 }, (_, index) => ({ ...node, oid: `node-${index}` }));
     const warnings = boundary === "saturated warnings" ? Array.from({ length: 128 }, (_, index) => ({ ruleId: "spacing-scale" as const, oid: `warning-${index}`, message: "Spacing", fix: "Use a token" })) : [];
     useDesignWorkspaceUiStore.getState().setSelection("workspace-a", FRAME.file, "deep-node");

@@ -240,4 +240,63 @@ async function runDesignCopyChecks({ page, check }) {
   await expect(home).toHaveCount(1);
   await expect(page.locator('[data-design-frame="copy-1.html"]')).toHaveCount(0);
   check("Delete immediately after a pending canvas frame copy preserves the original", true);
+
+  // A keyboard frame copy paints before the engine answers, in the slot it is
+  // saved to, and hands its pixels to the saved frame without a gap or jump.
+  await load(page);
+  await home.locator('[data-design-frame-label]').click();
+  await page.evaluate(() => window.__zerosHarnessDesignSurface.measurement.hold("design.frame.duplicate"));
+  await page.evaluate(() => {
+    const samples = [];
+    const box = node => { const { x, y, width, height } = node.getBoundingClientRect(); return { x, y, width, height }; };
+    const tick = () => {
+      const preview = document.querySelector("[data-design-frame-copy-preview]");
+      const copy = document.querySelector('[data-design-frame^="copy-"]');
+      const painted = copy?.querySelector('iframe[data-design-document-buffer="displayed"][data-design-document-ready], [data-design-source-ready], [data-design-frame-pixels-ready]');
+      samples.push({ preview: preview && !preview.hidden ? box(preview) : null, copy: painted ? box(copy) : null });
+      if (samples.length < 900) window.__zerosFrameCopySampler = requestAnimationFrame(tick);
+    };
+    window.__zerosFrameCopySamples = samples;
+    window.__zerosFrameCopySampler = requestAnimationFrame(tick);
+  });
+  await viewport.focus();
+  await page.keyboard.press("Control+d");
+  await page.waitForFunction(() => window.__zerosHarnessDesignSurface.measurement.requests.some(request => request.op === "design.frame.duplicate" && request.released === null));
+  await expect(page.locator("[data-design-frame-copy-preview]")).toBeVisible();
+  check("a keyboard frame copy paints before its save is answered", true);
+  await page.evaluate(() => window.__zerosHarnessDesignSurface.measurement.release("design.frame.duplicate"));
+  await settled(page);
+  await expect(page.locator('[data-design-frame="copy-1.html"]')).toHaveCount(1);
+  await expect(page.locator("[data-design-frame-copy-preview]")).toHaveCount(0);
+  const samples = await page.evaluate(() => { cancelAnimationFrame(window.__zerosFrameCopySampler); return window.__zerosFrameCopySamples; });
+  const shown = samples.findIndex(sample => sample.preview || sample.copy);
+  const gaps = shown < 0 ? -1 : samples.slice(shown).filter(sample => !sample.preview && !sample.copy).length;
+  const lastPreview = samples.findLast(sample => sample.preview)?.preview;
+  const firstCopy = samples.find(sample => sample.copy)?.copy;
+  const sameBox = Boolean(lastPreview && firstCopy) && ["x", "y", "width", "height"].every(key => Math.abs(lastPreview[key] - firstCopy[key]) <= 1);
+  check("the provisional copy hands off to the saved frame without a gap or a jump", gaps === 0 && sameBox,
+    JSON.stringify({ gaps, lastPreview, firstCopy }));
+  await viewport.focus();
+  await page.keyboard.press("Control+z");
+  await expect(page.locator('[data-design-frame="copy-1.html"]')).toHaveCount(0);
+  await expect(page.locator("[data-design-frame-copy-preview]")).toHaveCount(0);
+  await settled(page);
+  check("Undo removes a keyboard frame copy without leaving provisional pixels", true);
+
+  await load(page);
+  await home.locator('[data-design-frame-label]').click();
+  await page.evaluate(() => {
+    window.__zerosHarnessRejectFrameDuplicate = true;
+    window.__zerosHarnessDesignSurface.measurement.hold("design.frame.duplicate");
+  });
+  await viewport.focus();
+  await page.keyboard.press("Control+d");
+  await expect(page.locator("[data-design-frame-copy-preview]")).toBeVisible();
+  await page.evaluate(() => window.__zerosHarnessDesignSurface.measurement.release("design.frame.duplicate"));
+  await expect(page.getByText("Couldn't duplicate the frame", { exact: true })).toBeVisible();
+  await expect(page.locator("[data-design-frame-copy-preview]")).toHaveCount(0);
+  await expect(page.locator('[data-design-frame^="copy-"]')).toHaveCount(0);
+  await page.evaluate(() => { window.__zerosHarnessRejectFrameDuplicate = false; });
+  await settled(page);
+  check("a refused keyboard frame copy retracts its provisional pixels", true);
 }
