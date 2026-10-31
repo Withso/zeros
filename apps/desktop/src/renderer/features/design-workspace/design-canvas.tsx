@@ -40,6 +40,7 @@ import {
   type DesignOperation,
 } from "@zeros/design-core";
 import type { DesignAuthoredKeyframes } from "@zeros/design-web";
+import { normalizeDesignPagesSnapshot } from "@zeros/protocol/design-pages";
 import {
   DESIGN_RUNTIME_DOCUMENT_BODY_ID,
   type DesignRuntimeNodeDetails,
@@ -149,7 +150,7 @@ import {
   flattenDesignLayerTree,
 } from "./design-layer-tree";
 import { startDesignLayoutDrag } from "./design-layout-drag-gesture";
-import { startDesignFrameCopy } from "./design-frame-copy-gesture";
+import { designFrameCopyGeometry, presentDesignFrameCopy, startDesignFrameCopy } from "./design-frame-copy-gesture";
 import { DESIGN_REPARENT_HYSTERESIS_PIXELS, designMovementDelta, designNodeMovementStyles, designNudgeStep } from "./design-movement-geometry";
 import { designSelectionMutationTargets } from "./design-selected-targets";
 import {
@@ -1008,6 +1009,8 @@ export function DesignCanvas({
     frame: string;
     result: Promise<DesignCanvasFrameWire | null>;
   } | null>(null);
+  /** Unsaved keyboard copies take the next grid slots in submission order. */
+  const pendingFrameCopySlotsRef = useRef(new Map<number, { pageId: string | undefined; width: number; height: number }>());
   const [selectionOverlaySuppressed, setSelectionOverlaySuppressed] =
     useState(false);
   const nudgeGestureRef = useRef<
@@ -2277,6 +2280,21 @@ export function DesignCanvas({
       const owner = captureDesignPageOwner(workspaceId);
       const intent = ++frameActionIntentRef.current;
       frameActionPendingRef.current++;
+      // Paint the copy where the engine will place it, before the save is
+      // answered: the page's frames plus earlier copies still saving.
+      const canvasLifetime = canvasLifetimeRef.current;
+      const catalog = normalizeDesignPagesSnapshot(designWorkspaceSnapshotCache.peekSnapshot(workspaceId).data!);
+      const pageId = owner.pageId ?? catalog.pages[0]?.id;
+      const page = designFrameViews(catalog).filter((candidate) => candidate.pageId === pageId);
+      const geometry = designFrameCopyGeometry([...page, ...[...pendingFrameCopySlotsRef.current.values()]
+        .filter((slot) => slot.pageId === pageId)], frame);
+      pendingFrameCopySlotsRef.current.set(intent, { pageId, width: frame.width, height: frame.height });
+      const article = frameElementsRef.current.get(frame.file);
+      const provisional = article && isPreparedDesignFrame(frame) ? presentDesignFrameCopy({
+        workspaceId, frame, article, geometry,
+        current: () => isCurrentDesignPageOwner(owner) && canvasLifetimeRef.current === canvasLifetime,
+      }) : null;
+      if (provisional) revealAgentRects([{ x: geometry.x, y: geometry.y, width: geometry.w, height: geometry.h }]);
       const save = duplicateDesignFrameCached(workspaceId, frame.file, owner.pageId);
       const pending = { owner, selectionEvent: selected.selectionEvent, frame: frame.file,
         result: save.then(result => result.snapshot.frames.find(candidate => candidate.file === result.frame.file) ?? null) };
@@ -2284,16 +2302,20 @@ export function DesignCanvas({
       try {
         savedEditingSession?.retain(save);
         const duplicate = await pending.result;
+        if (duplicate) provisional?.handoff(duplicate, (file) => frameElementsRef.current.get(file));
+        else provisional?.retire();
         if (frameActionIntentRef.current !== intent || !isCurrentDesignPageOwner(owner) || designWorkspaceView(workspaceId).selectionEvent !== selected.selectionEvent) return;
         if (duplicate) void selectDesignFrame(workspaceId, duplicate, { selected: true, reveal: true, owner }).catch(() => {});
       } catch (error) {
+        provisional?.retire();
         toast.error(duplicateMode === "copy" ? "Couldn't copy the frame" : "Couldn't duplicate the frame", { description: errorMessage(error) });
       } finally {
+        pendingFrameCopySlotsRef.current.delete(intent);
         frameActionPendingRef.current--;
         if (pendingFrameCopyRef.current === pending) pendingFrameCopyRef.current = null;
       }
     },
-    [workspaceId, savedEditingSession],
+    [workspaceId, savedEditingSession, revealAgentRects],
   );
 
   const deleteSelectedFrame = useCallback(async (frame: DesignCanvasFrameWire) => {

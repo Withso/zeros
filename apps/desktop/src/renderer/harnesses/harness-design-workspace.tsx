@@ -345,6 +345,8 @@ async function main() {
   } = await import("../features/design-workspace/state/design-workspace-cache");
   const { captureDesignRuntimeScreenshot } =
     await import("../features/design-workspace/state/design-selection");
+  const { designFrameCopyGeometry } =
+    await import("../features/design-workspace/design-frame-copy-gesture");
   const { useDesignWorkspaceUiStore } =
     await import("../features/design-workspace/state/design-workspace-ui");
   const { useDesignRuntimeStore } =
@@ -1084,6 +1086,8 @@ async function main() {
         const params = message.params!;
         const original = currentWorkspaceSnapshot.frames.find(frame => frame.file === params.frame)!;
         if (params.sourceVersion && params.sourceVersion !== original.sourceVersion) throw new Error("The copied source changed.");
+        if ((window as Window & { __zerosHarnessRejectFrameDuplicate?: boolean }).__zerosHarnessRejectFrameDuplicate)
+          throw new Error("The copy was refused.");
         layoutUndo.push({ source: currentHomeSource, snapshot: currentWorkspaceSnapshot });
         layoutRedo.length = 0;
         const file = `copy-${++nestedFrameCounter}.html`;
@@ -1091,7 +1095,12 @@ async function main() {
         const source = original.file === "home.html" ? currentHomeSource : currentPricingSource;
         const geometry = params.geometry as { x: number; y: number; w: number; h: number; z: number } | undefined;
         const frame = { ...original, file, frameId: `copy_${nestedFrameCounter}`, title: `${original.title} copy`, sourceVersion,
-          ...(geometry ? { x: geometry.x, y: geometry.y, width: geometry.w, height: geometry.h, z: geometry.z } : { x: original.x + original.width + 120 }) };
+          ...(() => {
+            // Model the engine's automatic slot (nextFrameGeometry) on the original's page.
+            const placed = geometry ?? designFrameCopyGeometry(currentWorkspaceSnapshot.frames
+              .filter(candidate => (candidate.pageId ?? null) === (original.pageId ?? null)), original);
+            return { x: placed.x, y: placed.y, width: placed.w, height: placed.h, z: placed.z };
+          })() };
         performanceSources.set(file, source);
         currentWorkspaceSnapshot = { ...currentWorkspaceSnapshot, frames: [...currentWorkspaceSnapshot.frames, frame] };
         if (currentWorkspaceSnapshot.pages) currentWorkspaceSnapshot = { ...currentWorkspaceSnapshot,

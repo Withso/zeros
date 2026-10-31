@@ -1983,6 +1983,11 @@ dropped behind a busy flag. Delete immediately after a pending copy belongs to
 that copy, unless a newer explicit selection retires the follow intent; another
 Delete cannot fall through to the original. Keyboard copies follow selection
 after confirmation, while supported previews paint before the write completes.
+A keyboard frame copy paints the source's pixels at once in the grid slot the
+engine assigns it (the same rule as `nextFrameGeometry`, counting copies still
+saving) and brings that slot into view. The pixels are presentation only: they
+stay above the saved copy until it shows its own document or pixels (bounded
+to 2 s), and retire on failure, Undo, deletion or an owner change.
 
 Runtime snapshots and hot collection references remain stable. Style writes
 retain the existing tree reference where structure permits; display/visibility
