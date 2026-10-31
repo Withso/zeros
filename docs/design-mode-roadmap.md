@@ -1417,6 +1417,17 @@ or renderer owners.
   responsive, and state-specific values remain distinguishable. The inspector
   must not present a computed value as authored source or invent cascade
   certainty.
+- Each winning declaration names its `selector` and a `scope`: `inline`, `element`
+  (the matching complex selector's last compound names the element by class,
+  id or attribute) or `base` (universal or type selectors: resets and imported
+  preflight). Node details list `baseStyleProperties`, which reach the layer
+  only through base selectors, classified across every declaring rule even
+  when the winner is ambiguous. The Style tab's Advanced section lists every
+  other authored declaration that no dedicated control shows as an editable
+  name/value row (value as written, selector in its tooltip), shows the
+  layer's classes, and adds any property by name; it omits an imported
+  source's own custom properties such as Tailwind's `--tw-*`. Removal is
+  offered only for inline winners.
 - Runtime authored-style provenance is optional evidence. Inline `var()`
   shorthands compete even when CSSOM cannot expand their longhands. Nested
   declarations and element-dependent container queries make affected winners
