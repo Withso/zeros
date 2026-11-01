@@ -720,6 +720,7 @@ describe("codex mid-turn reconnect + per-session crash signalling", () => {
     [{ httpConnectionFailed: { httpStatusCode: 403 } }, "The model `private-model` is not available.", "protocol-error"],
     [{ responseStreamDisconnected: { httpStatusCode: null } }, "Request interrupted.", "transport-closed"],
     ["cyberPolicy", "Sign-in required documentation was blocked.", "protocol-error"],
+    ["policyCapacityUnavailable", "server overloaded", "protocol-error"],
   ])("settles native completion errors without replacing their explanation: %j", async (info, message, kind) => {
     const { adapter } = makeAdapter();
     const { session } = await adapter.newSession({ cwd: "/tmp/proj" });

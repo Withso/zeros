@@ -21,6 +21,22 @@ function transcript() {
 
 describe("Codex transcript fidelity", () => {
   it.each([
+    {},
+    { startedAtMs: null, completedAtMs: null },
+    { startedAtMs: 1000, completedAtMs: 2000 },
+  ])("keeps flat timestamped items and older replay on the same tool identity: %j", times => {
+    const t = transcript();
+    const item = { type: "commandExecution", id: "timed-command", command: "pwd", ...times };
+    t.item(item, false);
+    const started = t.messages()[0];
+    t.item({ ...item, status: "completed", exitCode: 0, aggregatedOutput: "/repo" });
+    const settled = t.messages()[0];
+    expect(settled).toMatchObject({ id: started.id, nativeToolCallId: item.id, status: "completed", rawOutput: { output: "/repo", exitCode: 0 } });
+    t.item({ type: item.type, id: item.id, command: item.command, status: "completed", exitCode: 0, aggregatedOutput: "/repo" });
+    expect(t.messages()).toEqual([settled]);
+  });
+
+  it.each([
     { type: "hookPrompt", id: "hook", fragments: [{ text: "Hook context", hookRunId: "hook-run" }] },
     { type: "functionCallOutput", id: "output", name: "helper", namespace: null, output: "Native report" },
     { type: "futureItem", id: "future", output: "Future report" },
@@ -683,7 +699,7 @@ describe("Codex transcript fidelity", () => {
     ).not.toContain("aGVsbG8=");
   });
 
-  it("accepts attachment-store image completions without an inline result", () => {
+  it.each([null, "generation-image"])("accepts attachment-store image completions with generationId %s", generationId => {
     const t = transcript();
     const native = {
       id: "image-file",
@@ -692,6 +708,7 @@ describe("Codex transcript fidelity", () => {
       fileId: "file-generated-image",
       failure: null,
       savedPath: "/workspace/output.png",
+      generationId,
     } satisfies ImageGenerationItem;
     t.item({ type: "imageGeneration", ...native }, false);
     const id = t.messages()[0].id;

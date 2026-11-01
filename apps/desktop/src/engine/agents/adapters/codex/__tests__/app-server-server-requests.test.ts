@@ -148,6 +148,27 @@ describe("codex app-server initiated requests", () => {
     harness.proc = null;
   });
 
+  it.each([undefined, null, false, true])("forwards process exit drain status without losing older payloads: %s", async outputDrainTimedOut => {
+    const fake = createFakeProcess();
+    harness.proc = fake.proc;
+    const runtime = await bootCodexAppServerRuntime({
+      cwd: "/tmp/project",
+      clientInfo: { name: "Zeros-test", version: "0.0.0" },
+    });
+    type ProcessExit = CodexServerNotificationParams<"process/exited">;
+    const received: ProcessExit[] = [];
+    runtime.onNotificationTyped("process/exited", params => received.push(params));
+    const params = {
+      processHandle: "process-fixture", exitCode: 0, stdout: "output", stderr: "",
+      stdoutCapReached: false, stderrCapReached: false,
+      ...(outputDrainTimedOut === undefined ? {} : { outputDrainTimedOut }),
+    } satisfies ProcessExit;
+    try {
+      fake.send({ jsonrpc: "2.0", method: "process/exited", params });
+      await vi.waitFor(() => expect(received).toEqual([params]));
+    } finally { await runtime.dispose(); }
+  });
+
   it("advertises the extended MCP form capability during initialize", async () => {
     const fake = createFakeProcess();
     harness.proc = fake.proc;

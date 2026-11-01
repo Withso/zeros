@@ -2,6 +2,25 @@ import { describe, expect, it } from "vitest";
 import { normalizeProviderError, providerErrorFailure } from "../provider-error";
 
 describe("normalizeProviderError", () => {
+  it.each([
+    { data: { type: "modelProviderMismatch", modelProvider: "old-provider", currentModelProvider: "openai" },
+      message: "This chat uses old-provider, but your current provider is openai. Switch to old-provider to continue." },
+    { data: { type: "modelProviderNotConfigured", modelProvider: "unavailable" },
+      message: "This chat uses model provider “unavailable”, which is no longer configured. Restore this provider’s configuration to continue." },
+    { data: { type: "modelProviderPolicyConflict", modelProvider: "unavailable", requiredModelProvider: "openai" },
+      message: "This chat uses model provider “unavailable”, but your organization requires “openai”. Contact your administrator or start a new chat using the required provider." },
+  ])("retains a Codex provider admission failure before model recovery: $data.type", ({ data, message }) => {
+    const native = normalizeProviderError("codex", new Error(message, { cause: { code: -32600, data } }));
+    expect(native).toEqual({ category: "protocol-error", code: data.type, message });
+    expect(providerErrorFailure("codex", native, "loadSession").failure).toMatchObject({ kind: "protocol-error", message });
+  });
+
+  it("keeps unknown Codex RPC error types on the ordinary fallback", () => {
+    expect(normalizeProviderError("codex", {
+      message: "The model `gpt-6.1-terra` is unavailable.", data: { type: "futureProviderError" },
+    }).category).toBe("model-unavailable");
+  });
+
   it.each(["The model `gpt-6.1-terra` was not found.", "Request rejected for model `gpt-6.1-terra`."])("classifies Codex 0.165 modelNotFound as a terminal model refusal: %s", message => {
     const native = normalizeProviderError("codex", {
       message, codexErrorInfo: "modelNotFound",

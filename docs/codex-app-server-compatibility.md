@@ -37,7 +37,7 @@ worker dependency, the generated-schema pin and the compatibility manifest.
 A regenerated method or a Local/cloud version mismatch cannot pass silently.
 
 The control-plane authentication keeper is independently qualified at 0.154.0
-while the interactive runtime is 0.165.0. Its version participates in encrypted
+while the interactive runtime is 0.166.0. Its version participates in encrypted
 cache authentication and a database constraint. `check:codex-pin` checks that
 package against `CODEX_AUTH_RUNTIME_VERSION`, not the desktop protocol version;
 Renovate excludes it from routine agent upgrades. A keeper upgrade requires an
@@ -69,7 +69,7 @@ every classified method has a behavioral implementation or test.
 - Notification `forwarded`: generated typed subscription is available, but no
   canonical or product behavior is claimed.
 
-At the 0.165.0 pin this covers 275 methods: 177 client requests, 11 server
+At the 0.166.0 pin this covers 278 methods: 180 client requests, 11 server
 requests, and 87 server notifications. The five `userVerification/*` client
 methods are generated-only: Zeros does not expose native identity verification.
 Relative to 0.154.0, `userVerification/cancel`, the three `thread/attachment/*`
@@ -79,6 +79,8 @@ requests, `memory/status`, `rollout/compress`, and the three
 methods. `thread/attachment/updated` and `account/gatewayOAuth/changed` are
 available through typed engine subscriptions without a canonical renderer
 claim. Earlier generated-only product surfaces retain their classifications.
+The 0.166.0 additions `accountSession/list`, `accountSession/switch`, and
+`account/gcp/setup` are also generated-only.
 
 The 0.154.0 upgrade changed two existing server request shapes. Command-execution approvals
 distinguish terminal-input callbacks with `kind: "writeStdin"` and a separate
@@ -89,9 +91,51 @@ the same validated, fail-closed form path as `openai/form`. Run
 
 ## Transcript fidelity
 
+### 0.166.0 compatibility
+
+Local Personal, organization-local, and organization cloud workspaces use the
+same 0.166.0 interactive runtime. The cloud package, advertised version, launch
+guard and relocated-package smoke expectations move together. The upgrade
+does not change owner routing, saved provider bindings or authentication.
+
+`policyCapacityUnavailable` and the structured JSON-RPC data variants
+`modelProviderMismatch`, `modelProviderNotConfigured`, and
+`modelProviderPolicyConflict` are terminal protocol failures when native
+execution stops. Both error normalizers retain the provider's explanation
+instead of inferring rate-limit, network or model-selection recovery from its
+wording. Native `willRetry: true` still owns an in-progress retry; Zeros does
+not infer or add retries from these tags. Unknown error variants retain the
+ordinary fallback.
+
+Thread items remain flat on the wire. Optional nullable `startedAtMs` and
+`completedAtMs`, and nullable image `generationId`, do not replace existing
+item identity or completion/replay handling. Older image payloads without the
+new field remain readable. Zeros does not project these fields into new timing
+or image UI. Hook source paths remain strings and stay outside canonical hook
+rows; environment hook metadata and the optional `hooks/list.threadId` remain
+generated-only. `process/exited.outputDrainTimedOut` passes through typed
+engine subscriptions, including older payloads that omit it. Zeros already
+sends `review/start` with `delivery: "inline"`; the removed detached mode has
+no caller.
+
+Account/ChatGPT team-workspace switching, GCP setup and dollar-usage reporting
+are deferred. Their bindings remain available without adding Settings controls
+or changing existing UI. `Account.chatgpt.workspaceName` is not exposed as a new
+account selector. `ThreadUsage.nativeUsageUsdMicros` is thread-level native
+dollar usage, separate from estimated usage; absent or null means unknown,
+never zero. It is not per-turn cost. Future cost UI can use the existing turn
+details only when native per-turn cost exists, or conversation-level reporting
+when that is the available granularity. Managed OpenTelemetry requirements and
+the optional untrusted-context name also remain generated-only; they introduce
+no Zeros telemetry configuration or new context producer.
+
+All 29 changed schema fingerprints have decisions in
+`scripts/agent-runtime/reviews.json`. The shared GPT-6.1 Terra catalog entry was
+already added with 0.165.0 and needs no additional model or UI changes.
+
 ### 0.165.0 compatibility
 
-Local and the standalone cloud worker both pin Codex 0.165.0. The shared curated
+The 0.165.0 upgrade aligned Local and the standalone cloud worker. The shared curated
 catalog adds GPT-6.1 Terra after GPT-6.1 Sol, with Low, Medium, High, Extra High,
 Max and Ultra effort and Fast support. Native `model/list` advertises all six
 efforts, `additionalSpeedTiers: ["fast"]` and the `priority` service tier named
