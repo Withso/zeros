@@ -38,7 +38,9 @@ const RESERVED_CUSTOM_ELEMENT_NAMES = new Set([
   "font-face-uri",
   "missing-glyph",
 ]);
-const CUSTOM_ELEMENT_NAME = /^[a-z][-.0-9_a-z·À-￿]*-[-.0-9_a-z·À-￿]*$/;
+// A custom element name is a lowercase letter, then name characters, with a
+// hyphen somewhere after it. One character class keeps the test linear.
+const CUSTOM_ELEMENT_CHARACTERS = /^[a-z][-.0-9_a-z\u00b7\u00c0-\ufffd]*$/;
 
 const contentOwners = new WeakMap<DocumentFragment, Template>();
 const slotsByHost = new WeakMap<Element, Map<string, Element>>();
@@ -65,7 +67,11 @@ export function designTemplateOfContent(fragment: DocumentFragment): Template | 
 function canHostShadowRoot(element: Element): boolean {
   if (element.namespaceURI !== HTML_NAMESPACE) return false;
   if (SHADOW_HOST_TAGS.has(element.tagName)) return true;
-  return CUSTOM_ELEMENT_NAME.test(element.tagName) && !RESERVED_CUSTOM_ELEMENT_NAMES.has(element.tagName);
+  return (
+    element.tagName.includes("-") &&
+    CUSTOM_ELEMENT_CHARACTERS.test(element.tagName) &&
+    !RESERVED_CUSTOM_ELEMENT_NAMES.has(element.tagName)
+  );
 }
 
 /** The template the HTML parser attaches as this element's open shadow root:

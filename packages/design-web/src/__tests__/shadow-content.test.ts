@@ -1,6 +1,9 @@
 import { describe, expect, it } from "vitest";
 
+import { parse } from "parse5";
+
 import { createDesignWebDocumentState } from "../revision";
+import { isDeclarativeShadowTemplate } from "../shadow";
 import { mutateDesignNodeStyles } from "../css";
 import {
   healDesignHtmlIdentities,
@@ -92,6 +95,21 @@ describe("declarative shadow content", () => {
     expect(healed).toContain("<button>Buy</button>");
     expect(healed).toContain("<u>x</u>");
   });
+
+  it("attaches roots to custom elements by the name rule, in linear time", () => {
+    const attaches = (tag: string) => {
+      type Element = Parameters<typeof isDeclarativeShadowTemplate>[0];
+      const document = parse(`<!doctype html><body><${tag}><template shadowrootmode="open"><b>x</b></template></${tag}>`);
+      const html = document.childNodes[1] as Element;
+      const host = (html.childNodes[1] as Element).childNodes[0] as Element;
+      return isDeclarativeShadowTemplate(host.childNodes[0] as Element);
+    };
+    expect(["x-card", "a-", "my-\u00e9lan"].map(attaches)).toEqual([true, true, true]);
+    expect(["font-face", "xcard"].map(attaches)).toEqual([false, false]);
+    // A backtracking name pattern takes seconds on this input; a linear one,
+    // milliseconds. The test's own bound catches the former.
+    expect(attaches(`a-${"-".repeat(60_000)}!`)).toBe(false);
+  }, 2_000);
 
   it("heals identities inside rendered shadow roots only", () => {
     const healed = healDesignHtmlIdentities(SOURCE).source;
