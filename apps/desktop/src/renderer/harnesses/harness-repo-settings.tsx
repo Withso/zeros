@@ -150,6 +150,10 @@ const auth: AuthContextValue = {
   cancelPendingOAuth: () => {},
   signOut: async () => {},
   signOutEverywhere: async () => {},
+  accounts: [],
+  refreshAccounts: async () => {},
+  switchAccount: async () => "unavailable" as const,
+  signOutAccount: async () => {},
 };
 const state = useWorkspaceStore.getState();
 openProject(

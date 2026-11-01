@@ -30,10 +30,14 @@ import {
   onStoredIdentityChange,
   onAuthStateChange,
   resync,
-  markSignedIn,
   signOut as storeSignOut,
   type AuthSessionInfo,
   type AuthUser,
+  listSignedInAccounts,
+  switchAccount as storeSwitchAccount,
+  signOutAccount as storeSignOutAccount,
+  type SignedInAccount,
+  type SwitchAccountOutcome,
 } from "./auth-store";
 import { setAuthAccessToken } from "./auth-token";
 import {
@@ -43,18 +47,12 @@ import {
   nativeListen,
 } from "../../platform/runtime";
 import { getActiveBridge } from "../../platform/bridge/active-bridge";
-import { CHANNEL } from "../../config/release-channel";
 import { toast } from "../../shared/ui/primitives/elements";
 import { useDismissStartupLoader } from "../../shared/ui/startup-loader";
 import {
   safeBrowserSignInStartError,
   workOSSignInFailureMessage,
 } from "./auth-errors";
-import {
-  schemeForChannel,
-  type Channel,
-  type DeepLinkScheme,
-} from "../../../engine/runtime";
 
 export type AuthStatus = "loading" | "authenticated" | "unauthenticated";
 
@@ -76,19 +74,27 @@ export interface AuthContextValue {
   userId: string | null;
   email: string | null;
   /** Open the system browser. WorkOS PKCE/callback state lives entirely in
-   *  Electron main; Auth0 retains the legacy web-ticket path until Phase 5. */
-  startBrowserSignIn: () => Promise<AuthResult>;
-  /** A LATER async failure of the desktop OAuth browser handoff (the browser
-   *  round-trip completed but the returning deep link couldn't be redeemed), so
-   *  the LoginScreen can show it instead of hanging on the "continue in your
-   *  browser" hint. Null when there's no pending OAuth error. */
+   *  Electron main. `addAccount` signs in another account with a fresh browser
+   *  sign-in. */
+  startBrowserSignIn: (options?: { addAccount?: boolean }) => Promise<AuthResult>;
+  /** Accounts signed in on this device, the active one first. */
+  accounts: SignedInAccount[];
+  /** Re-read the signed-in accounts, for example when a menu opens. */
+  refreshAccounts: () => Promise<void>;
+  /** Make another signed-in account active without signing anything out. */
+  switchAccount: (accountId: string) => Promise<SwitchAccountOutcome>;
+  /** Sign out one account that is not the active one. */
+  signOutAccount: (accountId: string) => Promise<void>;
+  /** A LATER async failure of the browser sign-in (the browser round-trip
+   *  completed but main couldn't finish it), so the LoginScreen can show it
+   *  instead of hanging on the "continue in your browser" hint. Null when there
+   *  is no pending error. */
   oauthError: string | null;
   /** Dismiss the current oauthError (e.g. the user starts a different sign-in). */
   clearOAuthError: () => void;
-  /** Abort a pending desktop OAuth handoff: invalidate the one-time nonce so a
-   *  deep link arriving AFTER the user cancelled can't silently sign them in,
-   *  and clear any pending error. Used by the LoginScreen's "Cancel" affordance
-   *  on the "waiting for browser sign-in" state. */
+  /** Abort a pending browser sign-in so a callback arriving AFTER the user
+   *  cancelled can't silently sign them in, and clear any pending error. Used
+   *  by the "Cancel" affordance while waiting for the browser. */
   cancelPendingOAuth: () => void;
   /** Clear the session on THIS device (keychain + memory; web also unpairs). */
   signOut: () => Promise<void>;
@@ -126,6 +132,10 @@ const localDevelopmentAuth: AuthContextValue = {
     ok: false,
     error: "Zeros Local runs without a Zeros account. Use Zeros Dev to test sign-in.",
   }),
+  accounts: [],
+  refreshAccounts: async () => {},
+  switchAccount: async () => "unavailable",
+  signOutAccount: async () => {},
   oauthError: null,
   clearOAuthError: () => {},
   cancelPendingOAuth: () => {},
@@ -142,23 +152,24 @@ function AuthProviderInner({ children, onStoredIdentity }: {
   const [status, setStatus] = useState<AuthStatus>("loading");
   const [session, setSession] = useState<AuthSessionInfo | null>(null);
   const [storedUser, setStoredUser] = useState<AuthUser | null>(null);
-  // A LATER, asynchronous failure of the browser→desktop handoff: the browser
-  // round-trip finished but the returning deep-link ticket couldn't be redeemed
-  // (our nonce expired, or the redeem call failed). Surfaced to the LoginScreen so
-  // a failed sign-in shows a real error instead of hanging on the "continue in
-  // your browser" hint forever. Null when there's nothing wrong.
+  const [accounts, setAccounts] = useState<SignedInAccount[]>([]);
+  const accountsReadRef = useRef(0);
+  const refreshAccounts = useCallback(async () => {
+    const read = ++accountsReadRef.current;
+    const next = await listSignedInAccounts().catch(() => null);
+    if (next && read === accountsReadRef.current) setAccounts(next);
+  }, []);
+  // The engine binds remote devices to the owner account; another account
+  // taking over must end that binding first, exactly as sign-out does.
+  const previousAccountRef = useRef<string | null>(null);
+  // A LATER, asynchronous failure of the browser sign-in: the browser
+  // round-trip finished but main couldn't complete the exchange. Surfaced to
+  // the LoginScreen so a failed sign-in shows a real error instead of hanging
+  // on the "continue in your browser" hint forever. Null when nothing is wrong.
   const [oauthError, setOAuthError] = useState<string | null>(null);
-  // Nonce + expiry binding the OAuth deep-link handoff to THIS app instance — a
-  // leaked/unsolicited zeros://auth/callback can't be redeemed by another
-  // instance, and the 5-min expiry caps the replay window for a nonce that
-  // leaked via the browser URL.
-  const pendingNonceRef = useRef<{ value: string; expiresAt: number } | null>(
-    null,
-  );
 
   useEffect(() => {
     let active = true;
-    let offHandoff: (() => void) | undefined;
     let offStoreChanged: (() => void) | undefined;
     let offWorkOSComplete: (() => void) | undefined;
     let offWorkOSError: (() => void) | undefined;
@@ -175,9 +186,19 @@ function AuthProviderInner({ children, onStoredIdentity }: {
 
     const applyIdentity = (user: AuthUser | null) => {
       if (!active) return;
+      const account = user ? user.accountId ?? user.sub : null;
+      if (previousAccountRef.current && account && previousAccountRef.current !== account) {
+        try {
+          getActiveBridge()?.signalOwnerSignedOut();
+        } catch {
+          /* bridge already unavailable */
+        }
+      }
+      previousAccountRef.current = account;
       // Bind/restore caches before releasing the shell for this identity.
       onStoredIdentity?.(user);
       setStoredUser(user);
+      void refreshAccounts();
     };
     const offIdentity = onStoredIdentityChange(applyIdentity);
     const known = getStoredAuthUser();
@@ -187,120 +208,6 @@ function AuthProviderInner({ children, onStoredIdentity }: {
       .catch((err) => {
         console.warn("[auth] session restore failed:", (err as Error)?.message);
       });
-
-    // Desktop OAuth handoff: main forwards the result of the browser sign-in
-    // from the zeros://auth/callback deep link → redeem the ticket for our own
-    // session (the desktop holds the PKCE verifier in its keychain — the
-    // browser never had it).
-    void nativeListen<{ ticket?: string; nonce?: string }>(
-      "auth-handoff",
-      async ({ ticket, nonce }) => {
-        if (!active || !ticket) return;
-        // Fail CLOSED: only redeem a handoff that ONE OF OUR instances started.
-        // Two match sources, because dev worktrees share ONE login but all
-        // register the SAME zeros-dev:// scheme, so macOS hands the returning
-        // callback to a single instance — NOT necessarily the initiator:
-        //   • LOCAL  — this instance's own pendingNonce (in-memory ref, else the
-        //     persisted copy that survives a renderer reload / cold launch by
-        //     the deep link). This is the initiator's own completion.
-        //   • SHARED — the pending handoff in main's keychain (auth_peek_handoff),
-        //     which a SIBLING worktree wrote via auth_begin_handoff. Lets the
-        //     instance the OS happened to pick finish a sign-in another worktree
-        //     began; the initiator then picks up the session from the shared
-        //     store (see the auth-store-changed listener below).
-        // A nonce matching NEITHER is unsolicited/foreign (CSRF, cold-launch
-        // noise) and is rejected — blocking login-CSRF / session-fixation via a
-        // planted deep link. The verifier never leaves main, so peek is safe.
-        const localPending = pendingNonceRef.current ?? readPendingNonce();
-        let sharedPending: { value: string; expiresAt: number } | null = null;
-        try {
-          const peek = await nativeInvoke<{
-            nonce?: string | null;
-            expiresAt?: number | null;
-          }>("auth_peek_handoff");
-          if (peek?.nonce) {
-            sharedPending = {
-              value: peek.nonce,
-              expiresAt:
-                typeof peek.expiresAt === "number"
-                  ? peek.expiresAt
-                  : Date.now() + 60_000,
-            };
-          }
-        } catch {
-          /* peek unavailable — fall back to the local pending nonce only */
-        }
-        const matchedLocal = Boolean(
-          localPending && nonce && localPending.value === nonce,
-        );
-        const matchedShared = Boolean(
-          sharedPending && nonce && sharedPending.value === nonce,
-        );
-        const matched = matchedLocal
-          ? localPending
-          : matchedShared
-            ? sharedPending
-            : null;
-        if (!matched || Date.now() > matched.expiresAt) {
-          // Classify for ops logs without leaking which case to the user.
-          const why = !(localPending || sharedPending)
-            ? "no pending handoff"
-            : !nonce
-              ? "missing nonce"
-              : !matched
-                ? "nonce mismatch"
-                : "nonce expired";
-          console.warn(`[auth] sign-in handoff rejected — ${why}`);
-          // Surface the "expired" retry hint ONLY on the INITIATING instance (a
-          // local match) — a legit slow sign-in the user should retry. A sibling
-          // that merely received a shared handoff, and any missing/mismatched
-          // nonce (unsolicited / foreign deep link), stays SILENT — showing UI
-          // for a planted link would itself be a vector.
-          if (matchedLocal) {
-            pendingNonceRef.current = null;
-            clearPendingNonce();
-            setOAuthError(
-              "That browser sign-in expired before it finished. Click Sign in to try again.",
-            );
-          }
-          return;
-        }
-        pendingNonceRef.current = null;
-        clearPendingNonce();
-        // Redeem the OPAQUE ticket in the MAIN process (it holds the PKCE
-        // verifier). Main persists the token pair into the keychain itself and
-        // returns ONLY the access token + identity — the refresh token never
-        // enters this renderer heap. The browser never held our session:
-        // only the single-use ticket crossed zeros://, worthless without the
-        // verifier.
-        const redeemed = await nativeInvoke<{
-          access_token?: string;
-          sub?: string;
-          email?: string;
-          name?: string | null;
-          error?: string;
-        }>("auth_redeem_handoff", { ticket, nonce });
-        if (!redeemed?.access_token || !redeemed?.sub || !redeemed?.email) {
-          console.warn(
-            `[auth] sign-in handoff redeem failed: ${redeemed?.error ?? "unknown"}`,
-          );
-          setOAuthError(workOSSignInFailureMessage("exchange_failed", null));
-          return;
-        }
-        // Main already wrote the session; just mirror it into renderer state.
-        markSignedIn({
-          access_token: redeemed.access_token,
-          sub: redeemed.sub,
-          email: redeemed.email,
-          name: redeemed.name ?? null,
-        });
-        setOAuthError(null);
-        // Success → onAuthStateChange (via markSignedIn's notify) flips the gate.
-      },
-    ).then((off) => {
-      if (active) offHandoff = off;
-      else off();
-    });
 
     // Live cross-instance session propagation. All dev worktrees share ONE
     // secrets.json, but this store only reads it via IPC on demand — so a
@@ -328,8 +235,6 @@ function AuthProviderInner({ children, onStoredIdentity }: {
     // and stored the session; renderer only re-reads its bounded mirror.
     void nativeListen("auth-signin-complete", async () => {
       if (!active) return;
-      pendingNonceRef.current = null;
-      clearPendingNonce();
       try {
         const next = await resync();
         if (!next) throw new Error("session unavailable");
@@ -347,7 +252,10 @@ function AuthProviderInner({ children, onStoredIdentity }: {
       ({ reason, recoveryCode }) => {
         if (!active) return;
         console.warn("[auth] WorkOS sign-in failed:", reason ?? "unknown");
-        setOAuthError(workOSSignInFailureMessage(reason ?? "", recoveryCode));
+        const message = workOSSignInFailureMessage(reason ?? "", recoveryCode);
+        setOAuthError(message);
+        // Adding an account happens while signed in, where no login screen shows it.
+        if (getStoredAuthUser()) toast.error(message);
       },
     ).then((off) => {
       if (active) offWorkOSError = off;
@@ -386,26 +294,24 @@ function AuthProviderInner({ children, onStoredIdentity }: {
       active = false;
       offStateChange();
       offIdentity();
-      offHandoff?.();
       offStoreChanged?.();
       offWorkOSComplete?.();
       offWorkOSError?.();
       offSecurityRevoked?.();
       window.removeEventListener("online", onOnline);
     };
-  }, [onStoredIdentity]);
+  }, [onStoredIdentity, refreshAccounts]);
 
-  const startBrowserSignIn = useCallback(async (): Promise<AuthResult> => {
-    // Clear any stale handoff error from a prior attempt before starting fresh.
+  const startBrowserSignIn = useCallback(async (options?: { addAccount?: boolean }): Promise<AuthResult> => {
+    // Clear any stale error from a prior attempt before starting fresh.
     setOAuthError(null);
     try {
-      // In WorkOS mode this command opens the hosted Zeros provider page and
-      // retains state + verifier in Electron main, outside renderer JS. Auth0
-      // mode returns a compatibility marker and continues below.
+      // Opens the hosted Zeros sign-in page and keeps state + verifier in
+      // Electron main, outside renderer JS.
       const selected = await nativeInvoke<{
-        mode?: "auth0" | "workos" | "unconfigured";
+        mode?: "workos" | "unconfigured";
         expiresAt?: number;
-      }>("auth_start_signin");
+      }>("auth_start_signin", options?.addAccount ? { addAccount: true } : undefined);
       if (selected?.mode === "unconfigured") {
         return {
           ok: false,
@@ -413,65 +319,17 @@ function AuthProviderInner({ children, onStoredIdentity }: {
             "Zeros Dev could not load its sign-in settings. Check your connection and restart the Dev launcher to try again.",
         };
       }
-      if (selected?.mode === "workos") {
-        return {
-          ok: true,
-          expiresAt:
-            typeof selected.expiresAt === "number" &&
-            Number.isFinite(selected.expiresAt)
-              ? selected.expiresAt
-              : undefined,
-        };
-      }
-      if (selected?.mode !== "auth0") {
+      if (selected?.mode !== "workos") {
         return { ok: false, error: "Couldn't start sign-in." };
       }
-
-      // One-time nonce: the auth-handoff listener fails CLOSED on a missing/
-      // mismatched nonce (blocks login-CSRF via a planted deep link). Persisted so
-      // a renderer reload / cold launch BY the deep link still matches; valid
-      // 10 min for a slow first-time consent / 2FA.
-      const nonce =
-        globalThis.crypto?.randomUUID?.() ??
-        `${Date.now()}-${Math.random().toString(36).slice(2)}`;
-      const expiresAt = Date.now() + 10 * 60_000;
-      pendingNonceRef.current = { value: nonce, expiresAt };
-      savePendingNonce(nonce, expiresAt);
-
-      // The web hub owns all OAuth. Desktop + prod default to the deployed
-      // origin; VITE_APP_BASE_URL overrides for local / preview iteration.
-      const base = (
-        (import.meta.env.VITE_APP_BASE_URL as string | undefined) ||
-        "https://app.zeros.build"
-      ).replace(/\/+$/, "");
-
-      // The MAIN process mints the PKCE verifier (kept in safeStorage) and
-      // returns ONLY its S256 challenge — the renderer never sees the verifier.
-      // /handoff/mint binds the issued ticket to this challenge, so the opaque
-      // ticket that returns over zeros:// is useless to anyone without the
-      // verifier (handoff-PKCE).
-      const begin = await nativeInvoke<{ challenge?: string }>(
-        "auth_begin_handoff",
-        {
-          nonce,
-          // Persist the SAME expiry in main's shared pending record so a sibling
-          // worktree that completes this handoff enforces the identical window.
-          expiresAt,
-        },
-      );
-      if (!begin?.challenge)
-        return { ok: false, error: "Couldn't start sign-in." };
-      // stable = zeros://, beta = zeros-beta://, dev = zeros-dev:// — /launch
-      // builds the returning deep link from this scheme, so the OS routes it back
-      // to the SAME app (channel) that started the sign-in, never a sibling.
-      const scheme = await resolveDesktopScheme();
-      const url =
-        `${base}/launch` +
-        `?scheme=${encodeURIComponent(scheme)}` +
-        `&nonce=${encodeURIComponent(nonce)}` +
-        `&challenge=${encodeURIComponent(begin.challenge)}`;
-      await nativeInvoke("shell_open_url", { url });
-      return { ok: true, expiresAt };
+      return {
+        ok: true,
+        expiresAt:
+          typeof selected.expiresAt === "number" &&
+          Number.isFinite(selected.expiresAt)
+            ? selected.expiresAt
+            : undefined,
+      };
     } catch (err) {
       return {
         ok: false,
@@ -481,10 +339,6 @@ function AuthProviderInner({ children, onStoredIdentity }: {
   }, []);
 
   const cancelPendingOAuth = useCallback(() => {
-    // Invalidate the one-time nonce so a deep link arriving after cancel can't
-    // redeem (the handoff listener fails closed on a missing pending nonce).
-    pendingNonceRef.current = null;
-    clearPendingNonce();
     setOAuthError(null);
     void nativeInvoke("auth_cancel_signin").catch(() => undefined);
   }, []);
@@ -503,7 +357,11 @@ function AuthProviderInner({ children, onStoredIdentity }: {
     setStatus("unauthenticated");
     setAuthAccessToken(null);
     setOAuthError(null);
-    clearPendingNonce();
+  }, []);
+
+  // Main continues with the most recently used other account, if one is left.
+  const adoptNextAccount = useCallback(() => {
+    void resync().catch(() => null);
   }, []);
 
   const signOut = useCallback(async () => {
@@ -519,19 +377,39 @@ function AuthProviderInner({ children, onStoredIdentity }: {
       );
     }
     finishLocalSignOut();
-  }, [finishLocalSignOut]);
+    adoptNextAccount();
+  }, [adoptNextAccount, finishLocalSignOut]);
 
   const signOutEverywhere = useCallback(async () => {
     try {
       // Global scope asks the server-side broker to enumerate and revoke every
-      // active WorkOS session (or uses the Auth0 compatibility revoke path).
+      // active WorkOS session.
       await storeSignOut("global");
     } catch (err) {
       console.warn("[auth] global signOut failed:", (err as Error)?.message);
       toast.error("Signed out on this device. Other devices could not be signed out. Sign in again to retry.");
     }
     finishLocalSignOut();
-  }, [finishLocalSignOut]);
+    adoptNextAccount();
+  }, [adoptNextAccount, finishLocalSignOut]);
+
+  const switchAccount = useCallback(async (accountId: string) => {
+    const outcome = await storeSwitchAccount(accountId).catch(() => "unavailable" as const);
+    if (outcome === "signed_out") {
+      toast.error("That account was signed out. Add it again to use it here.");
+    } else if (outcome === "unavailable") {
+      toast.error("Couldn't switch accounts. Check your connection and try again.");
+    }
+    await refreshAccounts();
+    return outcome;
+  }, [refreshAccounts]);
+
+  const signOutAccount = useCallback(async (accountId: string) => {
+    await storeSignOutAccount(accountId).catch((err) => {
+      console.warn("[auth] account sign-out failed:", (err as Error)?.message);
+    });
+    await refreshAccounts();
+  }, [refreshAccounts]);
 
   const value: AuthContextValue = {
     status,
@@ -540,6 +418,10 @@ function AuthProviderInner({ children, onStoredIdentity }: {
     userId: storedUser?.accountId ?? storedUser?.sub ?? null,
     email: storedUser?.email ?? null,
     startBrowserSignIn,
+    accounts,
+    refreshAccounts,
+    switchAccount,
+    signOutAccount,
     oauthError,
     clearOAuthError: () => setOAuthError(null),
     cancelPendingOAuth,
@@ -570,72 +452,3 @@ function AuthConfigErrorScreen() {
 }
 
 export { AuthContext };
-
-// ── helpers ──────────────────────────────────────────────────────────────
-
-// OAuth handoff nonce, persisted so it survives a renderer reload OR a cold
-// launch (the desktop app may be relaunched BY the zeros:// deep link, after
-// which the in-memory pendingNonceRef is empty). It is NOT a secret — a
-// single-use, short-lived CSRF binding between THIS app instance's
-// startBrowserSignIn and the returning deep link — so plain localStorage is fine
-// (and it must NOT go in the keychain, which is the auth session's surface).
-const OAUTH_NONCE_KEY = "zeros.auth.oauth-nonce";
-
-function savePendingNonce(value: string, expiresAt: number): void {
-  try {
-    globalThis.localStorage?.setItem(
-      OAUTH_NONCE_KEY,
-      JSON.stringify({ value, expiresAt }),
-    );
-  } catch {
-    /* storage disabled — the in-memory ref still covers the same-session case */
-  }
-}
-
-function readPendingNonce(): { value: string; expiresAt: number } | null {
-  try {
-    const raw = globalThis.localStorage?.getItem(OAUTH_NONCE_KEY);
-    if (!raw) return null;
-    const p = JSON.parse(raw) as { value?: unknown; expiresAt?: unknown };
-    if (typeof p.value === "string" && typeof p.expiresAt === "number") {
-      return { value: p.value, expiresAt: p.expiresAt };
-    }
-  } catch {
-    /* corrupt / disabled storage → treat as absent */
-  }
-  return null;
-}
-
-function clearPendingNonce(): void {
-  try {
-    globalThis.localStorage?.removeItem(OAUTH_NONCE_KEY);
-  } catch {
-    /* ignore */
-  }
-}
-
-// The desktop deep-link scheme (zeros:// stable, zeros-beta:// beta, zeros-dev://
-// dev) is constant for the life of the process, so resolve it once and reuse it —
-// avoids an app_info IPC round-trip on every Hosted AuthKit sign-in click.
-let cachedScheme: DeepLinkScheme | null = null;
-
-async function resolveDesktopScheme(): Promise<DeepLinkScheme> {
-  if (cachedScheme) return cachedScheme;
-  // Derive from the CHANNEL, not runtimeMode: a Beta build is runtimeMode "prod"
-  // yet must return zeros-beta:// (else the returning link resolves to whichever
-  // app owns bare zeros:// — the prod/beta collision). Fall back to the renderer's
-  // OWN build-time channel (flags.ts CHANNEL, baked from VITE_ZEROS_CHANNEL) so a
-  // missing app_info still schemes correctly per channel.
-  let scheme: DeepLinkScheme = schemeForChannel(CHANNEL);
-  try {
-    // app_info.channel is the MAIN process's authoritative channel — the same
-    // value apps/desktop/electron/deep-link.ts registered + validates against, so the scheme
-    // we build the /launch URL with can never be one main rejects.
-    const info = await nativeInvoke<{ channel?: Channel }>("app_info");
-    if (info?.channel) scheme = schemeForChannel(info.channel);
-  } catch {
-    /* keep the build-channel default */
-  }
-  cachedScheme = scheme;
-  return scheme;
-}

@@ -1,5 +1,4 @@
 import { readBoundedBody } from "./control-plane-policy.mjs";
-import { configuredAuthProvider } from "./workos-browser.mjs";
 import { fetchWorkOSRailway } from "./workos-railway.mjs";
 
 const MAX_WEBHOOK_BYTES = 64 * 1024;
@@ -14,7 +13,7 @@ function json(value, status) {
 /** Compatibility facade for the existing WorkOS endpoint URL. Signature
  * verification and event reduction now happen only on Railway. */
 export async function handleWorkOSWebhook(request, env, options = {}) {
-  if (request.method !== "POST" || configuredAuthProvider(env) !== "workos") {
+  if (request.method !== "POST") {
     return json({ error: "not_found" }, 404);
   }
   const declaredLength = Number(request.headers.get("content-length") || 0);

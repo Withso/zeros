@@ -7,6 +7,7 @@ import { McpOAuth } from "./oauth.js";
 import { createMcpPublicRoutes } from "./routes.js";
 import { openMcpMaterial, sealMcpMaterial } from "./envelope.js";
 import { CloudV2Store } from "../cloud/store.js";
+import { grantTestPro } from "../test-pro.js";
 import type { FetchLike } from "@modelcontextprotocol/sdk/shared/transport.js";
 
 const d = process.env.TEST_DATABASE_URL ? describe : describe.skip;
@@ -272,6 +273,7 @@ d("durable organization MCP OAuth", () => {
     const id = randomUUID();
     await write(id, { repository: "org/repo" });
     await pool.query("UPDATE organizations SET cloud_workspaces_allowed=true WHERE id=$1", [org]);
+    await grantTestPro(pool, admin);
     const workspaces = new CloudV2Store(pool);
     const original = await workspaces.createWorkspace({ id: randomUUID(), organizationId: org, creatorUserId: admin,
       name: "original", repository: "org/repo", sourceRepositoryId: "42", branch: "work", baseBranch: "main", computerBuildId: null });

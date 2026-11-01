@@ -3,29 +3,23 @@ import type {
   WorkOSDesktopRefreshOutcome,
 } from "./workos-desktop-client";
 
-interface StoredTokenBase {
+export interface WorkOSStoredTokens {
+  provider: "workos";
   accessToken: string;
   refreshToken: string;
   expiresAt: number;
   sub: string;
   email: string;
   name: string | null;
-}
-
-export interface Auth0StoredTokens extends StoredTokenBase {
-  provider: "auth0";
-  accountId?: string;
-}
-
-export interface WorkOSStoredTokens extends StoredTokenBase {
-  provider: "workos";
   accountId: string;
   sessionId: string;
   clientKind: "desktop";
   authenticationMethod: WorkOSAuthenticationMethod;
 }
 
-export type StoredTokens = Auth0StoredTokens | WorkOSStoredTokens;
+/** Desktop sessions are WorkOS sessions. A record any earlier provider left
+ * behind parses as absent and is replaced by the next sign-in. */
+export type StoredTokens = WorkOSStoredTokens;
 
 export interface StoredTokenSnapshot {
   raw: string;
@@ -53,29 +47,6 @@ export function parseStoredTokenSnapshot(
     ) {
       return null;
     }
-    const base: StoredTokenBase = {
-      accessToken: value.accessToken,
-      refreshToken: value.refreshToken,
-      expiresAt: value.expiresAt,
-      sub: value.sub,
-      email: value.email,
-      name: value.name,
-    };
-    if (value.provider === undefined || value.provider === "auth0") {
-      if (value.accountId !== undefined && !requiredString(value.accountId)) {
-        return null;
-      }
-      return {
-        raw,
-        tokens: {
-          ...base,
-          provider: "auth0",
-          ...(typeof value.accountId === "string"
-            ? { accountId: value.accountId }
-            : {}),
-        },
-      };
-    }
     if (
       value.provider !== "workos" ||
       !requiredString(value.accountId) ||
@@ -90,7 +61,12 @@ export function parseStoredTokenSnapshot(
     return {
       raw,
       tokens: {
-        ...base,
+        accessToken: value.accessToken,
+        refreshToken: value.refreshToken,
+        expiresAt: value.expiresAt,
+        sub: value.sub,
+        email: value.email,
+        name: value.name,
         provider: "workos",
         accountId: value.accountId,
         sessionId: value.sessionId,
@@ -146,4 +122,52 @@ export function mergeWorkOSRefresh(
       authenticationMethod: session.authenticationMethod,
     },
   };
+}
+
+/** A signed-in WorkOS account waiting behind the active session. */
+export interface ParkedWorkOSSession {
+  tokens: WorkOSStoredTokens;
+  parkedAt: number;
+}
+
+/** Parse parked sessions keyed by product account UUID. Malformed entries are
+ * dropped one by one, so one damaged record never signs out the others. */
+export function parseParkedSessions(
+  raw: string | null,
+): Map<string, ParkedWorkOSSession> {
+  const parked = new Map<string, ParkedWorkOSSession>();
+  if (!raw) return parked;
+  let value: unknown;
+  try {
+    value = JSON.parse(raw);
+  } catch {
+    return parked;
+  }
+  const accounts = (value as { version?: unknown; accounts?: unknown } | null);
+  if (accounts?.version !== 1 || !Array.isArray(accounts.accounts)) return parked;
+  for (const entry of accounts.accounts as unknown[]) {
+    const candidate = entry as { tokens?: unknown; parkedAt?: unknown } | null;
+    const snapshot = parseStoredTokenSnapshot(JSON.stringify(candidate?.tokens ?? null));
+    const parkedAt = candidate?.parkedAt;
+    if (
+      snapshot?.tokens.provider !== "workos" ||
+      typeof parkedAt !== "number" ||
+      !Number.isFinite(parkedAt)
+    ) {
+      continue;
+    }
+    parked.set(snapshot.tokens.accountId, { tokens: snapshot.tokens, parkedAt });
+  }
+  return parked;
+}
+
+/** Most recently parked first; null removes the entry when none are left. */
+export function serializeParkedSessions(
+  parked: ReadonlyMap<string, ParkedWorkOSSession>,
+): string | null {
+  if (!parked.size) return null;
+  return JSON.stringify({
+    version: 1,
+    accounts: [...parked.values()].sort((a, b) => b.parkedAt - a.parkedAt),
+  });
 }

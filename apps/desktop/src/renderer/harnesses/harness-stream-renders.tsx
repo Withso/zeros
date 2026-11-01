@@ -132,6 +132,10 @@ const auth = {
   cancelPendingOAuth: noop,
   signOut: async () => {},
   signOutEverywhere: async () => {},
+  accounts: [],
+  refreshAccounts: async () => {},
+  switchAccount: async () => "unavailable" as const,
+  signOutAccount: async () => {},
 } as AuthContextValue;
 
 const commits: Record<string, number> = {};

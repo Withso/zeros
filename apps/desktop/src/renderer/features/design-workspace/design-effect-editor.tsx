@@ -716,6 +716,8 @@ function ShadowSettings({
         value={draft.color}
         label={`${label} color`}
         disabled={disabled}
+        // The shadow rows compose this color into one value they parse back.
+        tokenPicker={false}
         onPreview={(next) => preview({ ...draftRef.current, color: next })}
         onCancelPreview={onCancelPreview}
         onCommit={(next) => commit({ ...draftRef.current, color: next })}

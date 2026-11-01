@@ -11,7 +11,7 @@ import {
 } from "./dashboard.mjs";
 
 const session = {
-  sub: "auth0|1",
+  sub: "user_01",
   email: "ada@example.com",
   name: "Ada Lovelace",
   accessToken: "secret-token-must-not-render",
@@ -57,7 +57,7 @@ test("dashboard intent survives sign-in without carrying unrelated query state",
       "https://app.zeros.build",
       "https://app.zeros.build/launch",
     ),
-    "https://app.zeros.build/launch",
+    "https://app.zeros.build/",
   );
 });
 
@@ -257,6 +257,26 @@ test("server-rendered organization identity uses safe raster logos only", () => 
     signOutHref: "/auth/logout",
   });
   assert.doesNotMatch(unsafe, /data:image\/svg\+xml/);
+});
+
+test("server-rendered General shows the member's seat and explains Hold", () => {
+  const render = (seat) => dashboardPage({
+    session,
+    me: {
+      user: { id: "u1", email: session.email, displayName: session.name },
+      organizations: [personal, { ...org, ...(seat ? { seat } : {}) }],
+    },
+    requestUrl: `https://app.zeros.build/?organization=${org.id}&section=general`,
+    signOutHref: "/auth/logout",
+  });
+  assert.match(render("pro"), /Your seat[\s\S]*class="badge success">Pro</);
+  assert.doesNotMatch(render("pro"), /You're on Hold/);
+  const held = render("hold");
+  assert.match(held, /class="badge warning">On Hold</);
+  assert.match(held, /You're on Hold/);
+  // An older control plane sends no seat, and unknown values never render.
+  assert.doesNotMatch(render(null), /Your seat/);
+  assert.doesNotMatch(render("constructor"), /Your seat/);
 });
 
 test("reviewed account recovery is distinct from an organization outage", () => {

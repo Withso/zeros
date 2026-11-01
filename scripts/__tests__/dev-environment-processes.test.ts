@@ -53,7 +53,6 @@ it("allows the normal Dev shutdown handler to flush state on cancellation", asyn
 
 it("keeps ownership through delayed shutdown and escalates an ignoring descendant", async () => {
   const { acquireWorkspaceLock } = await import("../dev-environment/state.mjs");
-  const { cleanupHostedLocalState } = await import("../dev-environment/hosted-local.mjs");
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "dev-owned-shutdown-"));
   const state = { owner: "a".repeat(24), generation: "11111111-1111-4111-8111-111111111111" };
   const ready = path.join(directory, "ready"), flushed = path.join(directory, "flushed");
@@ -71,12 +70,10 @@ it("keeps ownership through delayed shutdown and escalates an ignoring descendan
     controller.abort(new Error("stopped"));
     await new Promise(resolve => setTimeout(resolve, 75));
     expect(finished).toBe(false);
-    expect(cleanupHostedLocalState(directory, state)).toBe(false);
     expect(() => acquireWorkspaceLock({ directory, state })).toThrow(/already running/);
     await result;
     expect(fs.existsSync(flushed)).toBe(true);
     expect(() => process.kill(Number(fs.readFileSync(ready, "utf8")), 0)).toThrow();
-    expect(cleanupHostedLocalState(directory, state)).toBe(true);
   } finally { controller.abort(); await result; release(); fs.rmSync(directory, { recursive: true, force: true }); }
 });
 

@@ -4,6 +4,7 @@ import pg from "pg";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { HttpError } from "../authz.js";
 import { resetMigratedTestDatabase } from "../test-database.js";
+import { grantTestPro } from "../test-pro.js";
 import { createCloudV2Routes, type CloudV2RouteDeps } from "./routes.js";
 import { createCloudV2WorkerRoutes, type CloudV2WorkerRouteDeps } from "./worker-routes.js";
 import { CloudV2Store, type CloudV2Workspace } from "./store.js";
@@ -19,6 +20,7 @@ suite("durable cloud prompt delivery", () => {
     await resetMigratedTestDatabase(pool);
     store = new CloudV2Store(pool); creator = randomUUID(); org = randomUUID(); boot = randomUUID();
     await pool.query("INSERT INTO users(id,email,display_name) VALUES($1,$2,'User')", [creator, `${creator}@example.test`]);
+    await grantTestPro(pool, creator);
     await pool.query(`INSERT INTO organizations(id,slug,name,created_by,is_personal,cloud_workspaces_allowed)
       VALUES($1,$2,'Org',$3,false,true)`, [org, `org-${org}`, creator]);
     await pool.query("INSERT INTO organization_members(org_id,user_id,role) VALUES($1,$2,'owner')", [org, creator]);

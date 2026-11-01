@@ -19,22 +19,12 @@ describe("staff capability boundaries", () => {
     }
   });
 
-  it("allows organization creation only for standing Zeros staff roles", () => {
-    expect(canCreateOrganization("platform_owner")).toBe(true);
-    expect(canCreateOrganization("developer")).toBe(true);
-    expect(canCreateOrganization("support_admin")).toBe(false);
-    expect(canCreateOrganization(null)).toBe(false);
-
-    expect(requireOrganizationCreationCapability("platform_owner")).toBe(
-      "platform_owner",
+  it("allows organization creation only with an active Pro entitlement", () => {
+    expect(canCreateOrganization(true)).toBe(true);
+    expect(canCreateOrganization(false)).toBe(false);
+    expect(() => requireOrganizationCreationCapability(true)).not.toThrow();
+    expect(() => requireOrganizationCreationCapability(false)).toThrow(
+      expect.objectContaining({ status: 403, code: "pro_required" }),
     );
-    expect(requireOrganizationCreationCapability("developer")).toBe(
-      "developer",
-    );
-    for (const role of [null, "support_admin"] as const) {
-      expect(() => requireOrganizationCreationCapability(role)).toThrow(
-        expect.objectContaining({ status: 404, code: "not_found" }),
-      );
-    }
   });
 });

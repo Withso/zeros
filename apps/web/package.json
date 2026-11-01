@@ -7,13 +7,13 @@
     "node": ">=22.18.0"
   },
   "type": "module",
-  "description": "Cloudflare Pages hub for authentication handoff, app launch, and host-routed marketing delivery.",
+  "description": "Cloudflare Pages hub for browser sign-in, organization management, and host-routed marketing delivery.",
   "scripts": {
     "build": "node scripts/verify-deployment-env.mjs && node scripts/assemble-marketing.mjs",
     "build:standalone": "node scripts/verify-deployment-env.mjs && node scripts/assemble-marketing.mjs --standalone-install",
     "assemble": "node scripts/assemble-marketing.mjs --skip-build",
-    "dev": "npm run build && wrangler pages dev dist --port 8788 --ip 127.0.0.1 --compatibility-date=2026-07-10 --kv SESSIONS --binding MARKETING_HOSTS=127.0.0.1,localhost",
-    "dev:app": "npm run build && wrangler pages dev dist --port 8788 --ip 127.0.0.1 --compatibility-date=2026-07-10 --kv SESSIONS",
+    "dev": "npm run build && wrangler pages dev dist --port 8788 --ip 127.0.0.1 --compatibility-date=2026-07-10 --binding MARKETING_HOSTS=127.0.0.1,localhost",
+    "dev:app": "npm run build && wrangler pages dev dist --port 8788 --ip 127.0.0.1 --compatibility-date=2026-07-10",
     "typecheck": "tsc --noEmit",
     "test": "npm run typecheck && node --test lib/*.test.mjs"
   },

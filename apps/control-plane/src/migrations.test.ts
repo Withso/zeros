@@ -1385,6 +1385,38 @@ d("migration ladder", { timeout: 30_000 }, () => {
       .toEqual([{ data_type: "timestamp with time zone", is_nullable: "YES" }]);
   });
 
+  it("dates existing lapses when 0216 adds the Pro end, and records later ones for older writers", async () => {
+    const file = "0216_pro_organization_seats.sql";
+    await applyThrough(LADDER.indexOf(file));
+    const [active, cancelled, free] = [randomUUID(), randomUUID(), randomUUID()];
+    for (const id of [active, cancelled, free])
+      await pool.query("INSERT INTO users(id,email,display_name) VALUES($1,$2,'U')", [id, `u-${id}@example.test`]);
+    await pool.query(`INSERT INTO account_entitlements(user_id,plan,status,cloud_workspaces_allowed,source,valid_from,updated_at)
+      VALUES ($1,'pro','active',true,'operator',now()-interval '10 days',now()-interval '10 days'),
+             ($2,'pro','cancelled',false,'operator',now()-interval '10 days',now()-interval '3 days'),
+             ($3,'free','active',false,'operator',now()-interval '10 days',now()-interval '10 days')`, [active, cancelled, free]);
+    const ended = async () => Object.fromEntries((await pool.query<{ user_id: string; ended: boolean; at_update: boolean }>(
+      `SELECT user_id, pro_ended_at IS NOT NULL AS ended, pro_ended_at = updated_at AS at_update
+       FROM account_entitlements WHERE user_id = ANY($1)`, [[active, cancelled, free]])).rows
+      .map((row) => [row.user_id, { ended: row.ended, atUpdate: row.at_update }]));
+    expect(await runMigrations(pool)).toContain(file);
+    expect(await ended()).toEqual({
+      [active]: { ended: false, atUpdate: null },
+      [cancelled]: { ended: true, atUpdate: true },
+      [free]: { ended: false, atUpdate: null },
+    });
+    expect((await pool.query(`SELECT data_type, is_nullable FROM information_schema.columns
+      WHERE table_schema = 'public' AND table_name = 'account_entitlements' AND column_name = 'pro_ended_at'`)).rows)
+      .toEqual([{ data_type: "timestamp with time zone", is_nullable: "YES" }]);
+    // A writer that predates the column, like the Pro operator, has the end
+    // recorded for it and cannot set one itself.
+    await pool.query(`UPDATE account_entitlements SET status = 'cancelled', cloud_workspaces_allowed = false,
+      pro_ended_at = now() - interval '1 year' WHERE user_id = $1`, [active]);
+    expect((await pool.query<{ recent: boolean }>(
+      "SELECT pro_ended_at > now() - interval '1 minute' AS recent FROM account_entitlements WHERE user_id = $1",
+      [active])).rows).toEqual([{ recent: true }]);
+  });
+
   it("applies the NEWEST migration to a database at the previous revision", async () => {
     // The actual production upgrade path, and the one a fresh-install test
     // cannot see: DDL that is fine against an empty schema can still fail

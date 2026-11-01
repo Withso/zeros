@@ -27,6 +27,7 @@ import {
   insertDesignAsset,
   lintDesignDocument,
   listDesignAssets,
+  prepareDesignAssetInsertion,
   listDesignFrames,
   readDesignElementOffsetMap,
   readDesignFrame,
@@ -670,6 +671,27 @@ describe("design document", () => {
         oid: "escape",
       }),
     );
+  });
+
+  it("lints zd-* tags as instances only in light content, where they expand", async () => {
+    await initializeDesignDocument(root);
+    const frame = await createDesignFrame(root, { title: "Shadow components" });
+    const target = path.join(root, DESIGN_DIRECTORY_NAME, frame.file);
+    await writeFile(
+      target,
+      (await readFile(target, "utf8")).replace(
+        "</main>",
+        '<x-panel data-oid="panel"><template shadowrootmode="open"><zd-missing data-oid="inside">x</zd-missing></template></x-panel><zd-absent data-oid="outside"></zd-absent></main>',
+      ),
+    );
+
+    const report = await lintDesignDocument(root, frame.file, { healOids: false });
+
+    expect(
+      report.violations
+        .filter((violation) => violation.ruleId === "component-undefined")
+        .map((violation) => violation.oid),
+    ).toEqual(["outside"]);
   });
 
   it("keeps legacy component definitions without data-zid saveable", async () => {
@@ -1539,6 +1561,29 @@ describe("design document", () => {
     await writeFile(assetFile, Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x01]));
     const afterAssetEdit = (await readDesignWorkspaceSnapshot(root)).frames[0]!;
     expect(afterAssetEdit.sourceVersion).not.toBe(versionBeforeAssetEdit);
+  });
+
+  it("inserts an asset into light content when a shadow root renders a main first", async () => {
+    await initializeDesignDocument(root);
+    const created = await createDesignFrame(root, { title: "Shell" });
+    const directory = path.join(root, DESIGN_DIRECTORY_NAME);
+    await writeFile(path.join(directory, "assets", "mark.png"), Buffer.from([0x89, 0x50, 0x4e, 0x47]));
+    await writeFile(
+      path.join(directory, created.file),
+      '<!doctype html><html><head></head><body><app-shell data-oid="shell"><template shadowrootmode="open"><main>Shadow</main></template></app-shell><main data-oid="light">Light</main></body></html>',
+    );
+
+    const offsets = await readDesignElementOffsetMap(root, created.file);
+    expect(offsets.filter((offset) => offset.shadow).map((offset) => offset.tag)).toEqual(["main"]);
+    const frame = (await readDesignWorkspaceSnapshot(root)).frames.find((item) => item.file === created.file)!;
+    const prepared = await prepareDesignAssetInsertion(root, {
+      frame: created.file,
+      sourceVersion: frame.sourceVersion,
+      assetPath: "assets/mark.png",
+      x: 0,
+      y: 0,
+    });
+    expect(prepared.nodeId).toBe("light");
   });
 
   it("bounds repeated asset expansion before it can exhaust renderer memory", async () => {

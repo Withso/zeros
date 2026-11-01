@@ -5216,6 +5216,70 @@ export async function runDesignWorkspaceCanvasSmoke({ page, waitFor, check }) {
       "design-rotation-overlay-turns",
     ),
   );
+  // The outline turns with the element's pixels, never ahead of them. Hold the
+  // next preview before it reaches the runtime: the element cannot have
+  // turned, so neither may its outline; releasing it turns both together.
+  const rotationOf = (transform) => {
+    const values = /^matrix\(([^)]+)\)$/.exec(transform ?? "")?.[1].split(",").map(Number);
+    return values ? (Math.atan2(values[1], values[0]) * 180) / Math.PI : 0;
+  };
+  const turnedAngles = async () => ({
+    outline: rotationOf(await headingOverlay.evaluate((element) => getComputedStyle(element).transform)),
+    element: rotationOf(await selectedHeading.evaluate((element) => getComputedStyle(element).transform)),
+  });
+  await page.evaluate(() => {
+    const send = MessagePort.prototype.postMessage;
+    const held = [];
+    window.__zerosHeldRotationPreview = {
+      held,
+      release() {
+        MessagePort.prototype.postMessage = send;
+        for (const [port, args] of held.splice(0)) send.apply(port, args);
+      },
+    };
+    MessagePort.prototype.postMessage = function (message, ...rest) {
+      if (message?.method === "previewGeometry") {
+        held.push([this, [message, ...rest]]);
+        return;
+      }
+      return send.call(this, message, ...rest);
+    };
+  });
+  let heldAngles = null;
+  try {
+    await page.mouse.move(
+      rotateBox.x + rotateBox.width / 2 + 70,
+      rotateBox.y + rotateBox.height / 2 + 80,
+    );
+    check(
+      "a rotation preview on its way to the runtime is held",
+      await waitFor(
+        () => page.evaluate(() => window.__zerosHeldRotationPreview.held.length > 0),
+        "design-rotation-preview-held",
+      ),
+    );
+    await page.evaluate(
+      () => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))),
+    );
+    heldAngles = await turnedAngles();
+    check(
+      "the rotation outline never turns ahead of the element's pixels",
+      Math.abs(heldAngles.outline - heldAngles.element) < 0.5,
+      JSON.stringify(heldAngles),
+    );
+  } finally {
+    await page.evaluate(() => window.__zerosHeldRotationPreview?.release());
+  }
+  let releasedAngles = null;
+  check(
+    "an answered rotation preview turns the outline and the element together",
+    await waitFor(async () => {
+      releasedAngles = await turnedAngles();
+      return Math.abs(releasedAngles.outline - releasedAngles.element) < 0.5 &&
+        Math.abs(releasedAngles.element - heldAngles.element) > 1;
+    }, "design-rotation-preview-released"),
+    JSON.stringify({ heldAngles, releasedAngles }),
+  );
   check(
     "canvas rotation streams the transform value into its inspector control",
     await waitFor(

@@ -167,7 +167,7 @@ function cacheAlphaProfile(filePath, env) {
 
 /** Bootstrap once per Mac, then refresh the public cache at most hourly. An
  * outage retains a validated cache. Invalid configuration never falls back to
- * a different channel or to Auth0, and shell overrides are never persisted. */
+ * a different channel, and shell overrides are never persisted. */
 export async function ensureDevAuthEnvironment({
   homeDir = os.homedir(),
   processEnv = process.env,

@@ -43,11 +43,11 @@ export type GithubCredential = GitHttpCredentialIdentity &
       method: "github-app";
       accessToken: string;
       refreshToken?: string;
-      /** Server-signed proof binding the refresh token to the Auth0 owner.
+      /** Server-signed proof binding the refresh token to the Zeros account.
        * Main-process only; it is never projected into the engine. */
       refreshBinding?: string;
       login?: string;
-      /** Auth0 subject that completed the backend-bound handoff. Main process
+      /** Account subject that completed the backend-bound handoff. Main process
        *  refuses to serve this credential to a different signed-in account. */
       ownerSub?: string;
       expiresAtMs?: number;

@@ -104,6 +104,27 @@ describe("WorkOS hosted desktop authorization", () => {
     }
   });
 
+  it("asks AuthKit for a fresh sign-in only when the desktop adds an account", async () => {
+    const { app, desktopAuthorizationUrl } = setup();
+    const response = await app.request(
+      `/auth/desktop/start?state=${STATE}&code_challenge=${CHALLENGE}&fresh=1`,
+    );
+    expect(response.status).toBe(303);
+    expect(desktopAuthorizationUrl).toHaveBeenCalledWith({
+      state: STATE,
+      codeChallenge: CHALLENGE,
+      redirectUri: `${APP_ORIGIN}/auth/desktop/callback`,
+      fresh: true,
+    });
+    for (const value of ["0", "true", "", "1&fresh=1"]) {
+      const rejected = await app.request(
+        `/auth/desktop/start?state=${STATE}&code_challenge=${CHALLENGE}&fresh=${value}`,
+      );
+      expect(rejected.status, value).toBe(400);
+    }
+    expect(desktopAuthorizationUrl).toHaveBeenCalledTimes(1);
+  });
+
   it("rejects foreign schemes and malformed PKCE before calling WorkOS", async () => {
     const { app, desktopAuthorizationUrl } = setup();
     for (const query of [

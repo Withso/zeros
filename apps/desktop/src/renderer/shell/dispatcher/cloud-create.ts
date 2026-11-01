@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef } from "react";
 import { KeyedAsyncCache } from "../../shared/lib/keyed-async-cache";
 import { useCachedRead } from "../../state/use-cached-read";
 import { getActiveOrganizationIdSnapshot, useActiveOrganization } from "../../features/team/team-store";
-import { canCreateWorkspaceIn } from "../../features/team/organization-capabilities";
+import { canCreateWorkspaceIn, cloudCreateSeatReason } from "../../features/team/organization-capabilities";
 import { cloudWorkspaceCapability } from "../../platform/cloud-capability";
 import { isCloudV2BaseBranch } from "../../platform/cloud-v2";
 import type { DispatcherBase } from "./dispatcher-source";
@@ -18,7 +18,7 @@ export function useCloudCreateAvailability(active: boolean) {
   const canCreateCloud = canCreateWorkspaceIn(organization, "cloud");
   const readCloud = active && canCreateCloud;
   const capability = useCachedRead(capabilityCache, readCloud ? "desktop" : null, cloudWorkspaceCapability, { maxAgeMs: Infinity });
-  const reason = !canCreateCloud ? "Select an organization with Cloud access."
+  const reason = !canCreateCloud ? cloudCreateSeatReason(organization) ?? "Select an organization with Cloud access."
     : !capability.data?.enabled ? capability.loading ? "Checking Cloud availability…" : "Cloud workspaces are not enabled in this desktop build."
     : null;
   const warm = () => {

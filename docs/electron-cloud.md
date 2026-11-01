@@ -1,11 +1,18 @@
-# Cloud workspaces on one machine: `pnpm electron:cloud`
+# Zeros Dev: `pnpm electron:dev`
 
-`pnpm electron:cloud` runs a branch's whole cloud v2 stack: this branch's
+Zeros Dev runs a branch's whole cloud v2 stack on one machine: this branch's
 control plane, its worker runtime on real Boat VMs, and the desktop app. Use it
-to test cloud workspace changes before they reach `main`. It is the cloud
-counterpart of [`pnpm electron:local`](local-development.md), which stays
+to test sign-in, organizations, backend, migration and cloud workspace changes
+before they reach `main`. It is the cloud counterpart of
+[Zeros Local](local-development.md) (`pnpm electron:local`), which stays
 account-free and Local-only. Nothing is created in Railway or PlanetScale.
 After merge, Alpha is the shared cloud environment.
+
+`pnpm electron:cloud` is the same launcher; scripts, archive hooks and agent
+checks keep using that name. In Conductor, the **Zeros Dev** entry starts it on
+a Mac and **Zeros Dev backend** starts it with `--headless` in a cloud
+workspace. The earlier per-checkout Railway/PlanetScale Dev environment has been
+retired.
 
 ## What runs
 
@@ -49,17 +56,91 @@ then confirm that a fork saves it and is deleted afterwards.
 - macOS: `brew install postgresql@18 cloudflared`, plus Docker (Docker Desktop or
   OrbStack) to build a worker runtime. Linux x64: PostgreSQL 18, Node 24 and a
   checksum-verified `cloudflared` on `PATH`.
-- The private profile `zeros-dev-env.json` in the checkout or `~/.zeros-dev`,
-  or `ZEROS_DEV_PROFILE_PATH`. `electron:cloud` reads only its `cloudflare`
-  (a Tunnel Edit and DNS Edit token), `workos` (Alpha), `github` (the Alpha
-  GitHub App), `boat`, `storage` and `fixture` sections. Railway, PlanetScale
-  and registry sections are ignored.
+- The private profile described below.
 - For seeding and agent checks, `.env.agent` entries: `ZEROS_DEV_REPOSITORY` and
   `ZEROS_DEV_GITHUB_INSTALLATION_ID` (the test repository and its Alpha GitHub App
   installation), `ZEROS_DEV_PASSWORD` (the fixture user's Alpha WorkOS password;
   required for headless seeding and gate0, optional when you sign in to the app),
   and test agent keys `ANTHROPIC_API_KEY` or `CLAUDE_CODE_OAUTH_TOKEN`,
   `OPENAI_API_KEY` and `CURSOR_API_KEY`.
+
+## Private profile
+
+Zeros Dev reads `zeros-dev-env.json` from the checkout, then `~/.zeros-dev`, or
+the file named by `ZEROS_DEV_PROFILE_PATH`. Start from
+[zeros-dev-env-example.json](../zeros-dev-env-example.json). The launcher reads
+only its `cloudflare` (a Tunnel Edit and DNS Edit token), `workos` (Alpha),
+`github` (the Alpha GitHub App), `boat`, `storage` and `fixture` sections.
+Profiles written for the retired hosted Dev environment still work; their
+Railway, PlanetScale and registry sections are ignored.
+
+On a new Mac, transfer the private file from your own device through a trusted
+encrypted channel, then from the clone run:
+
+```bash
+bash scripts/setup-zeros-dev.sh --profile "$HOME/Downloads/zeros-dev-env.json"
+```
+
+Setup installs Node 22, the pinned pnpm, Bun and the locked dependency roots,
+then imports the profile with mode `0600` into `~/.zeros-dev`, the main checkout
+and the calling worktree. Destinations must already ignore `zeros-dev-env.json`;
+a different existing profile is preserved, never replaced.
+`pnpm dev:setup --check` reads tool and profile status without changes.
+
+Cloud workspaces cannot read a Mac-only file. Put the base64 encoding of the
+same profile in the main checkout's private `.conductor/settings.local.toml`:
+
+```toml
+[environment_variables.cloud]
+ZEROS_DEV_PROFILE_B64 = "<one-line standard base64 of the complete profile JSON>"
+```
+
+Conductor Setup validates it and writes the ignored checkout copy with mode
+`0600`. An existing checkout, home or explicit profile keeps precedence.
+Malformed, oversized or placeholder profiles fail without echoing their
+contents. Never commit the profile or paste it into chat.
+
+### Shared Alpha sign-in and GitHub
+
+Zeros Dev reuses Alpha's WorkOS and GitHub registrations, so identities,
+organization management, repository installations and permissions are shared;
+the database, keys, object prefixes and desktop session are this checkout's own.
+Authorize these WorkOS callback patterns for the configured domain:
+
+- `https://app-dev-*.example.com/auth/callback` for the Web application.
+- `https://app-dev-*.example.com/auth/desktop/callback` for the Desktop application.
+
+The GitHub OAuth redirect is
+`https://api-dev-<owner>.example.com/v1/github/oauth/callback`. Configure exact
+callbacks, or enable GitHub's wildcard matching for a fully controlled domain.
+GitHub's “redirect_uri is not associated with this application” page means that
+registration is missing; retrying from the desktop cannot fix it.
+
+Unpackaged Dev desktops share the `zeros-dev` URL scheme. Starting GitHub or
+WorkOS sign-in reclaims that handler for the current instance, and a callback is
+relayed to the process that began that exact attempt.
+
+### Test fixture
+
+A fresh database has no organization cloud entitlement. The optional `fixture`
+section names the test user and Organization that seeding prepares:
+
+```json
+"fixture": {
+  "workosUserId": "user_YOUR_TEST_USER",
+  "workosOrganizationId": "org_YOUR_TEST_ORGANIZATION",
+  "expectedEmail": "developer@example.com",
+  "expectedOrganizationSlug": "test-organization",
+  "bootstrapOrganization": true,
+  "computeAllowance": "pro-monthly"
+}
+```
+
+The WorkOS Organization must have `metadata.purpose = "zeros-development"` and a
+UUID `external_id`, and the user must be its active owner. Seeding verifies that
+membership with WorkOS and imports only that Organization, its owner membership
+and default team into this checkout's database. It never creates users, invites
+anyone or modifies WorkOS. `computeAllowance` is a compatibility marker.
 
 ## Worker runtime
 
@@ -105,14 +186,17 @@ must include the packager's `BUILD.json` source hash to be indexed.
 ## Commands
 
 ```sh
-pnpm electron:cloud                              # start and open the app
-pnpm electron:cloud --headless                   # backend only, for agents
-pnpm electron:cloud --runtime <sha256>            # explicit runtime override
-pnpm electron:cloud --seed                         # seed a running stack's test organization
-pnpm electron:cloud --stop                         # stop a running stack
-pnpm electron:cloud --doctor                       # show state and profile issues
-pnpm electron:cloud --reset [--yes]                # delete this checkout's cloud resources and data
+pnpm electron:dev                                # start and open the app
+pnpm electron:dev --headless                     # backend only, for agents
+pnpm electron:dev --runtime <sha256>              # explicit runtime override
+pnpm electron:dev --seed                         # seed a running stack's test organization
+pnpm electron:dev --stop                         # stop a running stack
+pnpm electron:dev --doctor                       # show state and profile issues
+pnpm electron:dev --reset [--yes]                # delete this checkout's cloud resources and data
+pnpm electron:run                                # start without file watching
 ```
+
+Each also works as `pnpm electron:cloud …`.
 
 `ZEROS_CLOUD_V2_RUNTIME_SHA256` remains an explicit override like `--runtime`;
 leave both unset for source-based selection. `--run-only` disables file watching.
@@ -195,6 +279,6 @@ uncertain, everything is kept; run `--reset` again.
 
 Conductor's archive hook runs `pnpm electron:cloud --reset --yes` when this
 checkout has active local cloud state. Archive proceeds only after the same
-instance retains an `archived` receipt, then performs any hosted Dev cleanup.
+instance retains an `archived` receipt.
 An older branch with local cloud state must switch to a branch that supports
 the reset; branches without that state retain their existing archive behavior.

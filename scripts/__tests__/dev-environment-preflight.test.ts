@@ -17,13 +17,12 @@ vi.mock("node:module", async original => {
   } };
 });
 import { r2Registry } from "../dev-environment/hosted-state.mjs";
-import { devObjectStorage } from "../dev-environment/hosted-storage.mjs";
 import { startPostgres } from "../dev-environment/postgres.mjs";
 
 beforeEach(() => { injected.missing = true; injected.failure = "MODULE_NOT_FOUND"; injected.calls.length = 0; });
 afterEach(() => vi.restoreAllMocks());
 
-it.each([r2Registry, devObjectStorage])("classifies a missing CP SDK at the concrete loader without exposing its message", adapter => {
+it.each([r2Registry])("classifies a missing CP SDK at the concrete loader without exposing its message", adapter => {
   let failure: any;
   try { adapter({}); } catch (error) { failure = error; }
   expect(injected.calls).toContain("@aws-sdk/client-s3");
@@ -32,7 +31,7 @@ it.each([r2Registry, devObjectStorage])("classifies a missing CP SDK at the conc
   expect(failure.message).not.toContain("synthetic-private-provider-value");
 });
 
-it.each([r2Registry, devObjectStorage])("keeps non-missing module initialization failures closed and distinct", adapter => {
+it.each([r2Registry])("keeps non-missing module initialization failures closed and distinct", adapter => {
   injected.failure = "ERR_DLOPEN_FAILED";
   let failure: any;
   try { adapter({}); } catch (error) { failure = error; }

@@ -3,7 +3,7 @@ import type { DesktopAuthConfig } from "./workos-desktop-config";
 export const ZEROS_ACCESS_TOKEN_CONTRACT = "zeros-access-v1";
 
 /**
- * Translate the selected desktop provider into the provider-neutral engine
+ * Translate the desktop sign-in configuration into the provider-neutral engine
  * verifier environment. WorkOS values come from the same already-validated
  * desktop configuration used for code exchange and refresh, so the renderer
  * and engine cannot silently disagree about issuer, audience, or client.
@@ -32,21 +32,13 @@ export function resolveDesktopEngineAuthEnv(
     };
   }
 
-  const auth0Domain = env.AUTH0_DOMAIN?.trim() || "";
-  const jwksUrl =
-    env.ZEROS_ACCOUNT_JWT_JWKS_URL?.trim() ||
-    (auth0Domain ? `https://${auth0Domain}/.well-known/jwks.json` : "");
-  const issuer =
-    env.ZEROS_ACCOUNT_JWT_ISS?.trim() ||
-    (isDev || !auth0Domain ? "" : `https://${auth0Domain}/`);
-  const audience =
-    env.ZEROS_ACCOUNT_JWT_AUD?.trim() || env.AUTH_AUDIENCE?.trim() || "";
-
+  // Without sign-in only explicit verifier overrides (tests, self-hosting)
+  // reach the engine, and no WorkOS-only contract is inherited.
   return {
-    ZEROS_ACCOUNT_JWT_JWKS_URL: jwksUrl,
-    ZEROS_ACCOUNT_JWT_ISS: issuer,
-    ZEROS_ACCOUNT_JWT_AUD: audience,
-    // Clear a possibly inherited WorkOS-only profile during an Auth0 rollback.
+    ZEROS_ACCOUNT_JWT_JWKS_URL: env.ZEROS_ACCOUNT_JWT_JWKS_URL?.trim() || "",
+    ZEROS_ACCOUNT_JWT_ISS: env.ZEROS_ACCOUNT_JWT_ISS?.trim() || "",
+    ZEROS_ACCOUNT_JWT_AUD:
+      env.ZEROS_ACCOUNT_JWT_AUD?.trim() || env.AUTH_AUDIENCE?.trim() || "",
     ZEROS_ACCOUNT_JWT_CONTRACT: "",
     ZEROS_ACCOUNT_JWT_CLIENT_ID: "",
     ZEROS_REQUIRE_ACCOUNT: requireAccount,

@@ -3,7 +3,7 @@ import { cloudV2WorkerSigningKey } from "./cloud-v2-keys.mjs";
 import { isDeepStrictEqual } from "node:util";
 import { readPrivateJson, privateDirectory, writePrivateFile } from "./state.mjs";
 import { developmentProfilePath, profileExists, PROFILE_NAME, assertIgnoredProfileDestination } from "./profile-path.mjs";
-import { publicDevProfile } from "./profile.mjs";
+import { portableProfileIssues, publicDevProfile } from "./profile.mjs";
 
 export { cloudV2WorkerSigningKey };
 import { fixtureIssues } from "./hosted-fixtures.mjs";
@@ -27,7 +27,7 @@ export function hostedProfilePath(root, { env = process.env, homeDir } = {}) {
     if (!bytes.length || bytes.length > 128 * 1024 || bytes.toString("base64") !== encoded) throw new Error();
     profile = JSON.parse(bytes.toString("utf8"));
   } catch { throw new Error("ZEROS_DEV_PROFILE_B64 must encode valid portable JSON smaller than 128 KiB; contents withheld"); }
-  if (hostedProfileIssues(profile).length || /YOUR_|GENERATE_32_|"your-/i.test(JSON.stringify(profile))) throw new Error("ZEROS_DEV_PROFILE_B64 contains an invalid hosted profile or example placeholders; contents withheld");
+  if (portableProfileIssues(profile).length || /YOUR_|GENERATE_32_|"your-/i.test(JSON.stringify(profile))) throw new Error("ZEROS_DEV_PROFILE_B64 contains an invalid Zeros Dev profile or example placeholders; contents withheld");
   assertIgnoredProfileDestination(root);
   const destination = path.join(root, PROFILE_NAME);
   writePrivateFile(destination, bytes, { create: true });

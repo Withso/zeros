@@ -9,11 +9,10 @@ schema and is deployed independently from the desktop application.
 ## Runtime boundary
 
 - Node.js 22, Hono, PostgreSQL, `jose`, and plain SQL migrations.
-- The selected identity provider issues access tokens; this service verifies
-  JWT signatures, exact issuer, audience, expiry, and required claims locally
-  against JWKS. WorkOS mode additionally enforces the Web/Desktop Application
-  allowlist and session/token identifiers.
-- In WorkOS mode Railway also owns browser PKCE exchange, encrypted sealed
+- WorkOS issues access tokens; this service verifies JWT signatures, exact
+  issuer, audience, expiry, and required claims locally against JWKS, and
+  enforces the Web/Desktop Application allowlist and session/token identifiers.
+- Railway also owns browser PKCE exchange, encrypted sealed
   sessions, PostgreSQL-serialized refresh, Hosted AuthKit Desktop Application
   authorization, webhook verification, desktop current/all-session revocation,
   WorkOS management-command reconciliation, Events API repair, security-event
@@ -57,20 +56,19 @@ Core environment variables:
 | Variable                 | Purpose                                                                                                                                          |
 | ------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------ |
 | `DATABASE_URL`           | Restricted PostgreSQL application connection; hosted channels use PlanetScale with `sslmode=verify-full`                                         |
-| `AUTH_PROVIDER`          | `auth0` during compatibility rollout, or `workos` after client cutover                                                                           |
+| `AUTH_PROVIDER`          | Optional; the only accepted value is `workos`                                                                                                    |
 | `AUTH_AUDIENCE`          | Expected access-token audience                                                                                                                   |
-| `AUTH_ISSUER`            | Exact WorkOS environment/default-Application issuer; required in WorkOS mode, optionally comma-separated only for legacy Auth0                   |
-| `AUTH_JWKS_URL`          | Exact public signing JWKS for that WorkOS environment/default Application; required in WorkOS mode                                               |
+| `AUTH_ISSUER`            | Exact WorkOS environment/default-Application issuer                                                                                              |
+| `AUTH_JWKS_URL`          | Exact public signing JWKS for that WorkOS environment/default Application                                                                        |
 | `AUTH_WEB_CLIENT_ID`     | Allowed WorkOS Web Application client ID                                                                                                         |
 | `AUTH_DESKTOP_CLIENT_ID` | Allowed WorkOS Desktop Application client ID                                                                                                     |
-| `APP_ORIGIN`             | Exact channel app origin used for the browser callback and safe returns in WorkOS mode                                                           |
+| `APP_ORIGIN`             | Exact channel app origin used for the browser callback and safe returns                                                                          |
 | `WORKOS_API_KEY`         | WorkOS server API key; Railway-only                                                                                                              |
 | `WORKOS_COOKIE_PASSWORD` | Unique 32+ character key for WorkOS sealed sessions; Railway-only                                                                                |
 | `WORKOS_WEBHOOK_SECRET`  | Exact WorkOS endpoint signing secret; Railway-only                                                                                               |
-| `RESEND_API_KEY`         | Optional Railway-only, sending-only Resend key for Zeros product/security notifications and the Auth0 invitation rollback path                   |
+| `RESEND_API_KEY`         | Optional Railway-only, sending-only Resend key for Zeros product/security notifications                                                          |
 | `EMAIL_FROM`             | Optional verified Resend sender, for example `Zeros <notifications@updates.zeros.build>`                                                         |
 | `ZEROS_SELF_HOSTED`      | Public templates only: `true` allows installer-owned platform domains; frontend and API origins must differ; official deployments leave it unset |
-| `AUTH0_DOMAIN`           | Legacy Auth0 fallback used only when explicit issuer/JWKS values are absent                                                                      |
 | `PORT`                   | HTTP port, default `8080`                                                                                                                        |
 | `NODE_ENV`               | Use `production` for production-safe error responses                                                                                             |
 
@@ -265,10 +263,9 @@ Production autodeploy stays disabled; only Alpha tracks `main`.
 Before a production deployment:
 
 1. Provision PlanetScale Postgres with backups and a qualified supported major version.
-2. Set `DATABASE_URL`, the selected provider's complete `AUTH_*` block, and
-   `NODE_ENV=production` in Railway. WorkOS mode additionally requires
-   `APP_ORIGIN`, `WORKOS_API_KEY`, `WORKOS_COOKIE_PASSWORD`, and
-   `WORKOS_WEBHOOK_SECRET`. None belongs in Pages or a desktop build.
+2. Set `DATABASE_URL`, the complete WorkOS `AUTH_*` block, `APP_ORIGIN`,
+   `WORKOS_API_KEY`, `WORKOS_COOKIE_PASSWORD`, `WORKOS_WEBHOOK_SECRET`, and
+   `NODE_ENV=production` in Railway. None belongs in Pages or a desktop build.
 3. Use the channel's verified PlanetScale TLS endpoint and separate restricted
    application and migration-owner credentials. Keep `DATABASE_MIGRATIONS_ON_BOOT=false`.
 4. Run the verification commands below against the exact commit being
@@ -288,7 +285,7 @@ client migration.
 
 ### WorkOS browser/desktop authorization and account lifecycle
 
-In WorkOS mode, `GET /auth/start`, `GET /auth/callback`,
+`GET /auth/start`, `GET /auth/callback`,
 `GET /auth/browser/session`, `POST /auth/browser/refresh`, and
 `GET /auth/logout` are Railway-owned. Migration `0012` stores only SHA-256
 digests of random browser credentials and OAuth state. PKCE verifiers are

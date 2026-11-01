@@ -60,10 +60,10 @@ describe("Zeros Dev WorkOS policy", () => {
     ).toBeNull();
   });
 
-  it("rejects the legacy provider instead of silently opening its retired flow", () => {
+  it("rejects a build without sign-in values", () => {
     expect(
       devWorkOSConfigurationIssue({
-        auth: { provider: "auth0" },
+        auth: { provider: "none" },
         appOrigin: "https://app-alpha.zeros.build",
         controlPlaneOrigin: "https://api-alpha.zeros.build",
       }),

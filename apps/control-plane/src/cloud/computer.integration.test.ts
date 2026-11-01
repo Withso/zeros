@@ -7,6 +7,7 @@ import { promisify } from "node:util";
 import pg from "pg";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { resetMigratedTestDatabase } from "../test-database.js";
+import { grantTestPro } from "../test-pro.js";
 import type { CloudV2Compute } from "./boat.js";
 import { CloudV2ComputerBuilder, CloudV2Computers, cloudV2SnapshotName } from "./computer.js";
 import { CloudProviderError } from "./provider-error.js";
@@ -34,6 +35,7 @@ d("cloud v2 Cloud Computer builds", () => {
     computers = new CloudV2Computers(pool, pool, resolveRepository);
     [admin, member] = [randomUUID(), randomUUID()];
     for (const id of [admin, member]) await pool.query(`INSERT INTO users (id, email, display_name) VALUES ($1, $2, 'U')`, [id, `u-${id}@example.test`]);
+    await grantTestPro(pool, admin, member);
     org = randomUUID();
     await pool.query(`INSERT INTO organizations (id, slug, name, created_by, is_personal, cloud_workspaces_allowed) VALUES ($1, $2, 'Org', $3, false, true)`,
       [org, `org-${org}`, admin]);

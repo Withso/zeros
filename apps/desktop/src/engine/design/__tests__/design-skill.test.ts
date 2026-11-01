@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -70,6 +70,28 @@ describe("Zeros Design skill package", () => {
     const frontmatter = /^---\n([\s\S]*?)\n---\n/.exec(skill)?.[1] ?? "";
     for (const field of ["name: zeros-design", "description:", "license: MIT", "compatibility:"]) {
       expect(frontmatter).toContain(field);
+    }
+  });
+
+  it("keeps SKILL.md a short contract whose table links every shipped reference page", () => {
+    const skillFile = path.join(process.cwd(), DESIGN_SKILL_SOURCE, DESIGN_SKILL_FILE);
+    const skill = readFileSync(skillFile, "utf8");
+    const directory = path.join(path.dirname(skillFile), "reference");
+    const shipped = readdirSync(directory).filter((name) => name.endsWith(".md")).sort();
+    expect(shipped).toEqual(
+      ["craft.md", "editor.md", "format.md", "implement.md", "states.md", "styling.md", "verify.md"],
+    );
+    const linked = [...new Set([...skill.matchAll(/\]\(reference\/([a-z-]+\.md)\)/g)].map((match) => match[1]))];
+    expect(linked.sort()).toEqual(shipped);
+    expect(skill).toContain("## Which page to read first");
+    expect(skill.split("\n").length).toBeLessThan(80);
+    // Every page a reference names exists beside it.
+    for (const name of shipped) {
+      const page = readFileSync(path.join(directory, name), "utf8");
+      expect(page).toMatch(/^# \S/);
+      for (const [, target] of page.matchAll(/`reference\/([a-z-]+\.md)`/g)) {
+        expect(shipped).toContain(target);
+      }
     }
   });
 });

@@ -6,6 +6,8 @@ import { fileURLToPath } from "node:url";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import pg from "pg";
 
+import { workosTestEnv } from "./test-workos-env.js";
+
 const PACKAGE_ROOT = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
   "..",
@@ -104,8 +106,7 @@ databaseDescribe("compiled production migration entrypoint", () => {
         ...process.env,
         DATABASE_URL: databaseUrl,
         NODE_ENV: "production",
-        AUTH_PROVIDER: "auth0",
-        AUTH0_DOMAIN: "tenant.example.test",
+        ...workosTestEnv(),
         AUTH_AUDIENCE: "https://api.example.test",
         CONTROL_PLANE_MIGRATION_APPROVALS: "",
       },
@@ -126,8 +127,7 @@ databaseDescribe("compiled production migration entrypoint", () => {
         ...process.env,
         DATABASE_URL: databaseUrl,
         NODE_ENV: "production",
-        AUTH_PROVIDER: "auth0",
-        AUTH0_DOMAIN: "tenant.example.test",
+        ...workosTestEnv(),
         AUTH_AUDIENCE: "https://api.example.test",
         CONTROL_PLANE_MIGRATION_APPROVALS:
           "0025_cloud_workspace_engine_authority.sql",
@@ -149,8 +149,7 @@ databaseDescribe("compiled production migration entrypoint", () => {
         ...process.env,
         DATABASE_URL: databaseUrl,
         NODE_ENV: "production",
-        AUTH_PROVIDER: "auth0",
-        AUTH0_DOMAIN: "tenant.example.test",
+        ...workosTestEnv(),
         AUTH_AUDIENCE: "https://api.example.test",
         CONTROL_PLANE_MIGRATION_APPROVALS:
           "0025_cloud_workspace_engine_authority.sql,0060_cloud_workspace_pending_blob_deletions.sql",

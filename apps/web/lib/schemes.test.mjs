@@ -1,6 +1,7 @@
 /**
- * Unit tests for the desktop deep-link scheme allow-list used by the sign-in hub
- * (lib/hub.ts `valid()`) and the invite page (functions/invite.ts).
+ * Unit tests for the desktop deep-link scheme allow-list used by desktop sign-in
+ * (lib/workos-desktop-authorization.mjs), GitHub connection completion
+ * (lib/github-completion.mjs) and the invite page (functions/invite.ts).
  *
  * Run: node --test lib/schemes.test.mjs  (from apps/web)
  *
@@ -25,22 +26,9 @@ import {
   schemeOrDefault,
 } from "./schemes.mjs";
 
-const TOKENISH = /^[A-Za-z0-9_-]{1,512}$/; // lib/handoff-security.ts
-
-/** Mirror of hub.ts valid() — the SHAPE of the check, using the REAL allow-list. */
-function validHandoff(h) {
-  return (
-    !!h &&
-    SCHEMES.has(h.scheme) &&
-    TOKENISH.test(h.nonce) &&
-    TOKENISH.test(h.challenge)
-  );
-}
-
 // Every value schemeForChannel() can return. Kept honest against the desktop by
 // scripts/check-deep-link-schemes.mjs.
 const CHANNEL_SCHEMES = ["zeros", "zeros-alpha", "zeros-beta", "zeros-dev"];
-const OK_TOKEN = "abc123_-DEF";
 
 describe("scheme allow-list", () => {
   it("contains exactly the four channel schemes — no more, no fewer", () => {
@@ -52,60 +40,11 @@ describe("scheme allow-list", () => {
   });
 });
 
-describe("hub handoff scheme allow-list", () => {
-  it("accepts every per-channel scheme", () => {
-    for (const scheme of CHANNEL_SCHEMES) {
-      assert.equal(
-        validHandoff({ scheme, nonce: OK_TOKEN, challenge: OK_TOKEN }),
-        true,
-        `${scheme} should be accepted`,
-      );
+describe("foreign schemes", () => {
+  it("rejects every scheme no release channel registers", () => {
+    for (const scheme of ["zeros-evil", "javascript", "http", "", "ZEROS", "zeros-alpha-evil"]) {
+      assert.equal(SCHEMES.has(scheme), false, `${scheme} should be rejected`);
     }
-  });
-
-  // The regression this change fixes: without zeros-alpha the hub dropped the
-  // handoff, hasHandoff went false, and the page rendered the no-button variant.
-  it("accepts zeros-alpha (regression: Alpha had no Launch button)", () => {
-    assert.equal(
-      validHandoff({
-        scheme: "zeros-alpha",
-        nonce: OK_TOKEN,
-        challenge: OK_TOKEN,
-      }),
-      true,
-    );
-  });
-
-  it("rejects a foreign / unknown scheme even with valid tokens", () => {
-    for (const scheme of [
-      "zeros-evil",
-      "javascript",
-      "http",
-      "",
-      "ZEROS",
-      "zeros-alpha-evil",
-    ]) {
-      assert.equal(
-        validHandoff({ scheme, nonce: OK_TOKEN, challenge: OK_TOKEN }),
-        false,
-        `${scheme} should be rejected`,
-      );
-    }
-  });
-
-  it("rejects an allow-listed scheme with a non-tokenish nonce/challenge", () => {
-    assert.equal(
-      validHandoff({
-        scheme: "zeros-alpha",
-        nonce: "has space",
-        challenge: OK_TOKEN,
-      }),
-      false,
-    );
-    assert.equal(
-      validHandoff({ scheme: "zeros-beta", nonce: OK_TOKEN, challenge: "a/b" }),
-      false,
-    );
   });
 });
 

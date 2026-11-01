@@ -301,11 +301,9 @@ describe("repository layout contracts", () => {
     // Conductor's repository-local Dev action invokes `pnpm electron:dev`.
     // Renderer HMR without a matching main/preload restart creates a split
     // runtime where newly-rendered IPC calls fail as "unknown command".
-    expect(rootPackage.scripts["electron:dev"]).toContain(
-      "hosted-entry.mjs start",
-    );
-    expect(read("scripts/dev-environment/hosted-launcher.mjs")).toContain(
-      'process.argv.includes("--run-only") ? "--run-only" : "--watch"',
+    expect(rootPackage.scripts["electron:dev"]).toBe("node scripts/electron-cloud.mjs");
+    expect(read("scripts/dev-environment/launcher.mjs")).toContain(
+      'watch ? "--watch" : "--run-only"',
     );
     expect(launcher).toContain("useMainSupervisor");
     expect(supervisor).toContain('new Set(["main.cjs", "preload.cjs"])');

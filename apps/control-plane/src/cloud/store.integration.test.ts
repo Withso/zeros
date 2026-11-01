@@ -7,6 +7,7 @@ import { CloudV2Store } from "./store.js";
 import { createCloudV2Routes, type CloudV2RouteDeps } from "./routes.js";
 import { createCloudV2WorkerRoutes } from "./worker-routes.js";
 import { HttpError } from "../authz.js";
+import { grantTestPro } from "../test-pro.js";
 
 const d = process.env.TEST_DATABASE_URL ? describe : describe.skip;
 
@@ -20,6 +21,7 @@ d("cloud v2 store", () => {
   async function user(): Promise<string> {
     const id = randomUUID();
     await pool.query(`INSERT INTO users (id, email, display_name) VALUES ($1, $2, 'User')`, [id, `u-${id}@example.test`]);
+    await grantTestPro(pool, id);
     return id;
   }
 

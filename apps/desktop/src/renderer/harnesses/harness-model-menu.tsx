@@ -102,7 +102,7 @@ async function main() {
   const { AuthContext } = await import("../features/auth/auth-context");
   const { ActionsCtx } = await import("../features/agent/sessions-context");
   const auth: AuthContextValue = { status: "unauthenticated", session: null, userId: null, email: null, oauthError: null,
-    startBrowserSignIn: async () => ({ ok: false }), clearOAuthError() {}, cancelPendingOAuth() {}, signOut: async () => {}, signOutEverywhere: async () => {} };
+    startBrowserSignIn: async () => ({ ok: false }), clearOAuthError() {}, cancelPendingOAuth() {}, signOut: async () => {}, signOutEverywhere: async () => {}, accounts: [], refreshAccounts: async () => {}, switchAccount: async () => "unavailable" as const, signOutAccount: async () => {} };
   const sessions = { listAgents: async () => agents, updateConfig: () => {} } as unknown as SessionsActions;
   if (policyCase) {
     const { setActiveBridge } = await import("../platform/bridge/active-bridge");

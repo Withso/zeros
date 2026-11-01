@@ -9,6 +9,7 @@ import { loadConfig } from "./config.js";
 import type { Config } from "./config.js";
 import type pg from "pg";
 import { createApp } from "./app.js";
+import { workosTestAuth, workosTestEnv } from "./test-workos-env.js";
 
 const now = Date.parse("2026-09-30T12:00:00Z");
 const releases = [
@@ -340,7 +341,7 @@ describe("bounded channel ledger cache", () => {
 describe("release ledger override configuration", () => {
   const env = {
     DATABASE_URL: "postgres://user:pass@localhost:5432/zeros",
-    AUTH0_DOMAIN: "tenant.example.test",
+    ...workosTestEnv(),
     AUTH_AUDIENCE: "https://api.zeros.build",
   };
   it("uses defaults when unset and accepts a credential-free HTTPS override", () => {
@@ -366,12 +367,7 @@ describe("release ledger override configuration", () => {
 describe("control-plane middleware wiring", () => {
   const config: Config = {
     databaseUrl: "postgres://unused",
-    auth: {
-      provider: "auth0",
-      issuers: ["https://tenant.example.test/"],
-      jwksUrl: "https://tenant.example.test/jwks.json",
-      audience: "https://api.example.test",
-    },
+    auth: workosTestAuth(),
     workos: null,
     inviteLinkBase: "https://app.example.test/invite",
     port: 8080,

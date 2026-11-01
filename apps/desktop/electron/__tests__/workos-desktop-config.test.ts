@@ -11,10 +11,8 @@ const workosConfig = {
 } as const;
 
 describe("desktop authentication configuration", () => {
-  it("keeps Auth0 compatibility selectable without WorkOS values", () => {
-    expect(resolveDesktopAuthConfig({ provider: "auth0" })).toEqual({
-      provider: "auth0",
-    });
+  it("has no sign-in when a build carries no WorkOS values", () => {
+    expect(resolveDesktopAuthConfig({})).toEqual({ provider: "none" });
   });
 
   it("requires and returns the exact public WorkOS contract", () => {
@@ -59,9 +57,9 @@ describe("desktop authentication configuration", () => {
     ).toThrow(/query|fragment/i);
   });
 
-  it("rejects an unknown provider instead of silently falling back", () => {
-    expect(() => resolveDesktopAuthConfig({ provider: "other" })).toThrow(
-      /auth0 or workos/i,
-    );
+  it("rejects any provider but WorkOS, including the retired Auth0", () => {
+    for (const provider of ["auth0", "other"]) {
+      expect(() => resolveDesktopAuthConfig({ provider })).toThrow(/must be workos/i);
+    }
   });
 });

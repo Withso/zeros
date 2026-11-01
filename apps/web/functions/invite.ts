@@ -11,7 +11,7 @@
 // In WorkOS mode its native branded email uses the configured custom
 // invitation URL and appends `invitation_token`. Railway resolves that token
 // against the exact Zeros invitation before product access changes. The legacy
-// `token` parameter remains for Auth0 rollback and copyable-link compatibility.
+// `token` parameter remains for copyable-link compatibility.
 
 import { marketingOrigin } from "../lib/hosts";
 import {

@@ -568,7 +568,7 @@ The harness additionally provides typed callbacks for:
 - `attestation/generate`, advertised only when a provider exists.
 
 Ordinary Codex login remains Codex-managed. In particular, the external token
-callback must not reuse the unrelated Zeros/Auth0 application token. Response
+callback must not reuse the unrelated Zeros application token. Response
 validation happens before credentials or attestation are returned to Codex.
 
 ## Dynamic tools and canonical events

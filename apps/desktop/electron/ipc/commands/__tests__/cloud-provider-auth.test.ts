@@ -42,6 +42,10 @@ vi.mock("../auth-session", () => ({
 }));
 vi.mock("../cursor-subscription", () => ({ loginCursorSubscription: deps.cursorLogin }));
 vi.mock("../provider-subscription", () => ({ resolveRuntime: deps.runtime }));
+// The checked-in policy allows every channel; this suite exercises its pause.
+vi.mock("../../../../../control-plane/src/cloud/channels.json", () => ({
+  default: { development: true, alpha: true, beta: false, production: false },
+}));
 import { cloudProviderAuth, stopCloudProviderAuth } from "../cloud-provider-auth";
 
 const session = { sub: "fixture-member", accountId: "fixture-account", sessionId: "fixture-session", accessToken: "fixture-workos-access" };
@@ -112,7 +116,7 @@ afterEach(async () => {
 });
 
 describe("cloud account enrollment IPC without workspace execution", () => {
-  it.each(["beta", "stable"])("refuses %s enrollment before session or provider access", async channel => {
+  it.each(["beta", "stable"])("refuses %s enrollment while its channel is paused, before session or provider access", async channel => {
     vi.stubEnv("ZEROS_CHANNEL", channel);
     await expect(invoke(connection(), event())).rejects.toThrow(/not available.*channel/i);
     expect(deps.session).not.toHaveBeenCalled();

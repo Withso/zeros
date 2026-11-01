@@ -87,7 +87,7 @@ export async function designPromptContext(
     target = await resolveTarget();
     const skill = target ? designSkillFile() : null;
     const context = `${await nativeDesignContext(target, mode, assertCurrent)}${skill
-      ? `\nRead the Zeros Design skill before Design work: '${skill}'. It covers supported HTML and CSS, meta/canvas.json, tokens, themes and style sources, components, assets, verification and limits.`
+      ? `\nRead the Zeros Design skill before Design work: '${skill}'. Its table names the page under reference/ beside it to read first for each task: format, styling, editor, states, craft, verify and implement.`
       : ""}`;
     if (!nativeVerification || !target || !readDirectoryDesignManifest(target.workspacePath, target.directory)) return context;
     const verification = await openDesignVerification(target);

@@ -22,7 +22,8 @@ export type InvitationEmailInput = {
  * WorkOS sends the branded native invitation in the normal AuthKit path. The
  * custom WorkOS invitation URL enters Zeros' bounded landing page, whose
  * server-side acceptance still enforces exact local correlation and recipient
- * identity. Resend remains only for the Auth0 rollback path here.
+ * identity. Resend sends invitations only when WorkOS management is not
+ * configured.
  */
 export async function deliverInvitationEmail(
   input: InvitationEmailInput,

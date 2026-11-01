@@ -410,13 +410,13 @@ dbDescribe("GitHub App OAuth handoff", () => {
     pool = new pg.Pool({ connectionString: databaseUrl, max: 3 });
     await resetMigratedTestDatabase(pool);
     userA = await ensureUser(pool, {
-      provider: "auth0",
+      provider: "workos",
       providerSubject: randomUUID(),
       email: `github-a-${randomUUID()}@example.com`,
       displayName: "GitHub A",
     });
     userB = await ensureUser(pool, {
-      provider: "auth0",
+      provider: "workos",
       providerSubject: randomUUID(),
       email: `github-b-${randomUUID()}@example.com`,
       displayName: "GitHub B",
@@ -443,7 +443,7 @@ dbDescribe("GitHub App OAuth handoff", () => {
 
   it("uses direct OAuth when another device already recorded this account's installation", async () => {
     const crossDeviceUser = await ensureUser(pool, {
-      provider: "auth0",
+      provider: "workos",
       providerSubject: randomUUID(),
       email: `github-cross-device-${randomUUID()}@example.com`,
       displayName: "GitHub Cross Device",
@@ -485,7 +485,7 @@ dbDescribe("GitHub App OAuth handoff", () => {
 
   it("uses the install URL when a confirmed-empty desktop explicitly requests recovery", async () => {
     const authorizationOnlyUser = await ensureUser(pool, {
-      provider: "auth0",
+      provider: "workos",
       providerSubject: randomUUID(),
       email: `github-force-install-${randomUUID()}@example.com`,
       displayName: "GitHub Force Install",
@@ -1104,7 +1104,7 @@ dbDescribe("organization GitHub source authorization", () => {
   afterAll(async () => { await pool.end(); });
 
   async function fixture(options: { membership?: string; afterSource?: (user: AuthedUser) => Promise<void> } = {}) {
-    const user = await ensureUser(pool, { provider: "auth0", providerSubject: randomUUID(), email: `${randomUUID()}@example.test`, displayName: "Source owner" });
+    const user = await ensureUser(pool, { provider: "workos", providerSubject: randomUUID(), email: `${randomUUID()}@example.test`, displayName: "Source owner" });
     const org = randomUUID(), calls: FetchCall[] = [];
     await withSystemTx(pool, async tx => {
       await tx.query("INSERT INTO organizations(id,slug,name,created_by) VALUES($1,$2,'Source organization',$3)", [org, `source-${org}`, user.id]);

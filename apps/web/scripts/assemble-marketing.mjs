@@ -63,7 +63,7 @@ const LEGAL_FILES = [
  *  KEEP IN SYNC with apps/marketing/src/routes.tsx and MARKETING_SPA_PATHS
  *  in functions/_middleware.ts. */
 const SPA_REDIRECTS = `# Marketing SPA deep links (explicit — do not use /* here).
-# App Functions (/auth, /handoff, /launch, /invite, /) take precedence on
+# App Functions (/auth, /invite, /) take precedence on
 # app.zeros.build; marketing hosts are served via ASSETS in _middleware.ts.
 # KEEP IN SYNC with apps/marketing/src/routes.tsx.
 /changelog  /index.html  200

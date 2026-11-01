@@ -11,6 +11,8 @@ import {
   organizationDisplayName,
   organizationCreationAllowed,
   safeOrganizationLogo,
+  seatBadgeHtml,
+  seatSummary,
   sectionLoadErrorNeedsInlineRetry,
   sectionRequestStillCurrent,
   securityEventAction,
@@ -32,6 +34,22 @@ test("organization creation fails closed without an explicit server capability",
     false,
   );
   assert.equal(organizationCreationAllowed({ createOrganization: true }), true);
+});
+
+test("summarizes Pro organization seats and labels each member's seat", () => {
+  assert.equal(
+    seatSummary({ members: 8, pendingInvitations: 2, freeMembers: 5, heldMembers: 1, memberLimit: 10, freeMemberLimit: 5 }),
+    "8 of 10 members + 2 invited · 5 of 5 free seats · 1 on Hold",
+  );
+  assert.equal(
+    seatSummary({ members: 3, pendingInvitations: 0, freeMembers: 1, heldMembers: 0, memberLimit: 10, freeMemberLimit: 5 }),
+    "3 of 10 members · 1 of 5 free seats",
+  );
+  assert.equal(seatSummary(undefined), null);
+  assert.equal(seatBadgeHtml("pro"), '<span class="badge success">Pro</span>');
+  assert.equal(seatBadgeHtml("free"), '<span class="badge">Free</span>');
+  assert.equal(seatBadgeHtml("hold"), '<span class="badge warning">On Hold</span>');
+  for (const value of [undefined, null, "constructor", "<b>"]) assert.equal(seatBadgeHtml(value), "");
 });
 
 test("formats lifecycle dates deterministically and rejects invalid timestamps", () => {

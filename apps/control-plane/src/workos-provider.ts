@@ -76,11 +76,13 @@ export interface WorkOSDesktopProvider {
 }
 
 export interface WorkOSDesktopAuthorizationProvider {
-  /** Build the Hosted AuthKit URL for the public desktop Application. */
+  /** Build the Hosted AuthKit URL for the public desktop Application. `fresh`
+   * requires an active sign-in instead of the browser's existing session. */
   desktopAuthorizationUrl(options: {
     state: string;
     codeChallenge: string;
     redirectUri: string;
+    fresh?: boolean;
   }): string;
 }
 
@@ -243,6 +245,7 @@ export class RailwayWorkOSProvider
     state: string;
     codeChallenge: string;
     redirectUri: string;
+    fresh?: boolean;
   }): string {
     return this.client.userManagement.getAuthorizationUrl({
       clientId: this.auth.desktopClientId,
@@ -251,6 +254,9 @@ export class RailwayWorkOSProvider
       codeChallenge: options.codeChallenge,
       codeChallengeMethod: "S256",
       redirectUri: options.redirectUri,
+      // Measured in Alpha: only prompt=login offers a new account. max_age=0
+      // re-confirms the signed-in user; select_account and consent reuse it.
+      ...(options.fresh ? { prompt: "login" } : {}),
     });
   }
 

@@ -493,7 +493,7 @@ export function GitHubSection({
     // Cancel closes the card, so nothing is left on screen to explain why every
     // radio is still dead. connectApp's own `finally` only lands when the
     // control-plane round trip settles — up to the 15 s request timeout, longer
-    // if the Auth0 token refresh stalls — and its `attempt` guard already makes
+    // if the account token refresh stalls — and its `attempt` guard already makes
     // that late result a no-op. Releasing the chooser here is what makes Cancel
     // mean cancel rather than "wait, silently, for something you dismissed".
     setBusyMethod(null);

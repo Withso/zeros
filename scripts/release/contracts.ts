@@ -49,9 +49,7 @@ export function promotionConfig(env: NodeJS.ProcessEnv, options: { migrations?: 
   requireCheck(env.PLANETSCALE_DATABASE === `zeros-control-plane-${source.channel}` && env.PLANETSCALE_BRANCH === "main", "PlanetScale target does not belong to this channel");
   requireCheck(/^[a-f0-9]{32}$/.test(env.CLOUDFLARE_ACCOUNT_ID ?? ""), "Invalid CLOUDFLARE_ACCOUNT_ID");
   requireCheck(env.CF_PAGES_APP_PROJECT === expected.appProject && (env.CF_PAGES_OPS_PROJECT || null) === expected.opsProject, "Pages destination does not belong to this channel");
-  // The automated lane uses today's WorkOS facade; rollback builds retain
-  // their existing manual Auth0 process, without copying auth secrets to CI.
-  requireCheck(env.AUTH_PROVIDER === "workos", "Hosted promotion requires the WorkOS Pages facade");
+  requireCheck(["", "workos"].includes(env.AUTH_PROVIDER?.trim().toLowerCase() ?? ""), "Hosted promotion requires the WorkOS Pages facade");
   requireCheck([undefined, "", "false", "true"].includes(env.ZEROS_CLOUD_WORKSPACES_ENABLED), "Invalid desktop cloud capability");
   const cloudRequired = cloudWorkspaceChannelEnabled(source.channel) && env.ZEROS_CLOUD_WORKSPACES_ENABLED === "true";
   requireCheck(/^\d+$/.test(env.GITHUB_RUN_ID ?? "") && /^\d+$/.test(env.GITHUB_RUN_ATTEMPT ?? ""), "Run identity is required");

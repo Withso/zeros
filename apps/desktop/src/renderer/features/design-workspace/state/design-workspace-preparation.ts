@@ -18,15 +18,29 @@ export function projectDesignMutationSnapshot(previous: DesignWorkspaceSnapshotW
     file: frame.source, frameId: frame.id, pageId: frame.pageId, title: frame.title,
     kind: frame.kind === "text" ? "text" as const : "frame" as const,
     x: frame.x, y: frame.y, width: frame.width, height: frame.height, z: frame.z }));
-  const retained = previous && previous.directoryId === next.directoryId && previous.lint.workspacePath === next.lint.workspacePath &&
-    previous.protocolCapability === next.protocolCapability ? new Map(previous.frames.map(frame => [frame.file, frame])) : new Map();
+  const sameOwner = !!previous && previous.directoryId === next.directoryId && previous.lint.workspacePath === next.lint.workspacePath &&
+    previous.protocolCapability === next.protocolCapability;
+  const retained = sameOwner ? new Map(previous.frames.map(frame => [frame.file, frame])) : new Map();
   const prepared = new Map(next.frames.map(frame => [frame.file, frame]));
-  return { ...snapshot, frames: descriptions.flatMap(description => {
+  return { ...snapshot, lint: sameOwner ? scopedLint(previous, next.lint, new Set(descriptions.map(description => description.file))) : next.lint,
+    frames: descriptions.flatMap(description => {
     const frame = prepared.get(description.file) ?? retained.get(description.file);
     return frame?.frameId === description.frameId ? [frame] : [];
   }), preparation: { revision: mutationCatalog.revision, epoch: ++intent, descriptions,
     current: next.frames.map(frame => frame.file), errors: {} } };
 }
+/** A scoped reply lints only the files it names. Every other file keeps its
+ * confirmed rows, except a frame that left the catalog. */
+function scopedLint(previous: DesignWorkspaceSnapshotWire, lint: DesignWorkspaceSnapshotWire["lint"], catalog: ReadonlySet<string>): DesignWorkspaceSnapshotWire["lint"] {
+  const checked = new Set(lint.checkedFiles);
+  const frames = new Set([...(previous.preparation?.descriptions ?? []).map(description => description.file), ...previous.frames.map(frame => frame.file)]);
+  const keeps = (file: string) => !checked.has(file) && (!frames.has(file) || catalog.has(file));
+  const violations = previous.lint.violations.filter(violation => keeps(violation.file));
+  if (violations.length === 0) return lint;
+  return { ...lint, checkedFiles: [...new Set([...previous.lint.checkedFiles.filter(keeps), ...lint.checkedFiles])],
+    violations: [...violations, ...lint.violations] };
+}
+
 /** An unsupported/legacy layout gets one aggregate read through the ordinary
  * keyed snapshot cache. Transport/authority failures never cause a scan. */
 export async function readDesignNavigation(workspaceId: string, previous?: DesignWorkspaceSnapshotWire): Promise<DesignWorkspaceSnapshotWire | null> {

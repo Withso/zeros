@@ -5,7 +5,7 @@
 // The generic keychain_* IPC bridge (apps/desktop/electron/ipc/commands/secrets.ts) lets the
 // renderer read/write the OS keychain (safeStorage via secret-store.ts). Without
 // a guard it can touch ANY account in the store — including main-only secrets
-// (the GitHub OAuth token, and the Auth0 refresh token under "auth-session:" —
+// (the GitHub OAuth token, and the WorkOS refresh token under "auth-session:" —
 // apps/desktop/electron/ipc/commands/auth-session.ts — which the renderer never reads
 // directly; it only ever gets a live access token or decoded identity claims
 // back from that module's own dedicated auth_* commands). A renderer compromise

@@ -27,7 +27,7 @@ describe("invitation email ownership", () => {
     expect(send).not.toHaveBeenCalled();
   });
 
-  it("keeps the Zeros sender only for the Auth0 rollback path", async () => {
+  it("uses the Zeros sender when WorkOS management is not configured", async () => {
     const send = vi.fn(async () => undefined);
 
     const result = await deliverInvitationEmail(

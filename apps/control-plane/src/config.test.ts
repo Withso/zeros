@@ -8,8 +8,15 @@ import { openCloudAgentCredential, sealCloudAgentCredential } from "./agent-cred
 function baseEnv(): NodeJS.ProcessEnv {
   return {
     DATABASE_URL: "postgres://user:pass@localhost:5432/zeros",
-    AUTH0_DOMAIN: "tenant.example.com",
+    APP_ORIGIN: "https://app.zeros.build",
+    AUTH_ISSUER: "https://identity.example.com/user_management/client_web",
+    AUTH_JWKS_URL: "https://identity.example.com/sso/jwks/client_web",
     AUTH_AUDIENCE: "https://api.zeros.build",
+    AUTH_WEB_CLIENT_ID: "client_web",
+    AUTH_DESKTOP_CLIENT_ID: "client_desktop",
+    WORKOS_API_KEY: "workos-api-key-for-tests",
+    WORKOS_COOKIE_PASSWORD: "cookie-password-for-tests".repeat(2),
+    WORKOS_WEBHOOK_SECRET: "webhook-secret-for-tests",
   };
 }
 
@@ -167,25 +174,9 @@ function validEnv(): NodeJS.ProcessEnv {
   };
 }
 
-function workosEnv(): NodeJS.ProcessEnv {
-  return {
-    DATABASE_URL: "postgres://user:pass@localhost:5432/zeros",
-    AUTH_PROVIDER: "workos",
-    APP_ORIGIN: "https://app.zeros.build",
-    AUTH_ISSUER: "https://identity.example.com/user_management/client_web",
-    AUTH_JWKS_URL: "https://identity.example.com/sso/jwks/client_web",
-    AUTH_AUDIENCE: "https://api.zeros.build",
-    AUTH_WEB_CLIENT_ID: "client_web",
-    AUTH_DESKTOP_CLIENT_ID: "client_desktop",
-    WORKOS_API_KEY: "workos-api-key-for-tests",
-    WORKOS_COOKIE_PASSWORD: "cookie-password-for-tests".repeat(2),
-    WORKOS_WEBHOOK_SECRET: "webhook-secret-for-tests",
-  };
-}
-
-describe("provider-neutral authentication configuration", () => {
-  it("loads the explicit WorkOS resource-server contract without AUTH0_DOMAIN", () => {
-    const config = loadConfig(workosEnv());
+describe("WorkOS authentication configuration", () => {
+  it("loads the explicit WorkOS resource-server contract", () => {
+    const config = loadConfig(baseEnv());
     expect(config.auth).toEqual({
       provider: "workos",
       issuer: "https://identity.example.com/user_management/client_web",
@@ -206,13 +197,13 @@ describe("provider-neutral authentication configuration", () => {
 
   it("validates a separate Ops origin without making it an identity authority", () => {
     const config = loadConfig({
-      ...workosEnv(),
+      ...baseEnv(),
       OPS_ORIGIN: "https://ops.zeros.build",
     });
     expect(config.workos?.opsOrigin).toBe("https://ops.zeros.build");
     expect(() =>
       loadConfig({
-        ...workosEnv(),
+        ...baseEnv(),
         OPS_ORIGIN: "https://app.zeros.build",
       }),
     ).toThrow(/separate origins/);
@@ -221,7 +212,7 @@ describe("provider-neutral authentication configuration", () => {
   it("refuses to send WorkOS invitations through another app origin", () => {
     expect(() =>
       loadConfig({
-        ...workosEnv(),
+        ...baseEnv(),
         INVITE_LINK_BASE: "https://app-alpha.zeros.build/invite",
       }),
     ).toThrow(/INVITE_LINK_BASE.*APP_ORIGIN/);
@@ -236,50 +227,48 @@ describe("provider-neutral authentication configuration", () => {
   ])("rejects a non-canonical invitation endpoint: %s", (inviteLinkBase) => {
     expect(() =>
       loadConfig({
-        ...workosEnv(),
+        ...baseEnv(),
         INVITE_LINK_BASE: inviteLinkBase,
       }),
     ).toThrow(/INVITE_LINK_BASE/);
   });
 
   it("fails closed when WorkOS client IDs are missing or shared", () => {
-    const missingDesktop = workosEnv();
+    const missingDesktop = baseEnv();
     delete missingDesktop.AUTH_DESKTOP_CLIENT_ID;
     expect(() => loadConfig(missingDesktop)).toThrow(/AUTH_DESKTOP_CLIENT_ID/);
 
     expect(() =>
       loadConfig({
-        ...workosEnv(),
+        ...baseEnv(),
         AUTH_DESKTOP_CLIENT_ID: "client_web",
       }),
     ).toThrow(/must be different/);
   });
 
-  it("requires Railway-owned browser credentials only in WorkOS mode", () => {
+  it("requires Railway-owned browser credentials", () => {
     for (const name of [
       "APP_ORIGIN",
       "WORKOS_API_KEY",
       "WORKOS_COOKIE_PASSWORD",
       "WORKOS_WEBHOOK_SECRET",
     ] as const) {
-      const missing = workosEnv();
+      const missing = baseEnv();
       delete missing[name];
       expect(() => loadConfig(missing)).toThrow(new RegExp(name));
     }
-
-    expect(loadConfig(baseEnv()).workos).toBeNull();
   });
 
   it("checks WorkOS secret lengths after trimming environment whitespace", () => {
     expect(() =>
       loadConfig({
-        ...workosEnv(),
+        ...baseEnv(),
         WORKOS_COOKIE_PASSWORD: ` ${"x".repeat(30)} `,
       }),
     ).toThrow(/WORKOS_COOKIE_PASSWORD/);
     expect(() =>
       loadConfig({
-        ...workosEnv(),
+        ...baseEnv(),
         WORKOS_WEBHOOK_SECRET: ` ${"x".repeat(14)} `,
       }),
     ).toThrow(/WORKOS_WEBHOOK_SECRET/);
@@ -287,50 +276,22 @@ describe("provider-neutral authentication configuration", () => {
 
   it("rejects an unsafe or path-bearing WorkOS app origin", () => {
     expect(() =>
-      loadConfig({ ...workosEnv(), APP_ORIGIN: "http://app.zeros.build" }),
+      loadConfig({ ...baseEnv(), APP_ORIGIN: "http://app.zeros.build" }),
     ).toThrow(/APP_ORIGIN/);
     expect(() =>
       loadConfig({
-        ...workosEnv(),
+        ...baseEnv(),
         APP_ORIGIN: "https://app.zeros.build/path",
       }),
     ).toThrow(/APP_ORIGIN/);
   });
 
-  it("keeps the legacy Auth0 deployment bootable during the staged cutover", () => {
-    expect(loadConfig(baseEnv()).auth).toEqual({
-      provider: "auth0",
-      issuers: ["https://tenant.example.com/"],
-      jwksUrl: "https://tenant.example.com/.well-known/jwks.json",
-      audience: "https://api.zeros.build",
-    });
-  });
-
-  it("uses an explicitly configured Auth0 app origin for invitation links", () => {
-    expect(
-      loadConfig({
-        ...baseEnv(),
-        AUTH_PROVIDER: "auth0",
-        APP_ORIGIN: "https://app-alpha.zeros.build",
-      }).inviteLinkBase,
-    ).toBe("https://app-alpha.zeros.build/invite");
-  });
-
-  it("accepts explicit provider-neutral Auth0 verification URLs", () => {
-    expect(
-      loadConfig({
-        DATABASE_URL: "postgres://user:pass@localhost:5432/zeros",
-        AUTH_PROVIDER: "auth0",
-        AUTH_ISSUER: "https://legacy-issuer.example/",
-        AUTH_JWKS_URL: "https://legacy-issuer.example/jwks.json",
-        AUTH_AUDIENCE: "https://api.zeros.build",
-      }).auth,
-    ).toEqual({
-      provider: "auth0",
-      issuers: ["https://legacy-issuer.example/"],
-      jwksUrl: "https://legacy-issuer.example/jwks.json",
-      audience: "https://api.zeros.build",
-    });
+  it("accepts only WorkOS as the authentication provider", () => {
+    expect(loadConfig(baseEnv()).auth.provider).toBe("workos");
+    for (const value of ["", "workos", " WorkOS "]) {
+      expect(loadConfig({ ...baseEnv(), AUTH_PROVIDER: value }).auth.provider).toBe("workos");
+    }
+    expect(() => loadConfig({ ...baseEnv(), AUTH_PROVIDER: "auth0" })).toThrow(/AUTH_PROVIDER/);
   });
 });
 
@@ -604,21 +565,18 @@ describe("feedback backend configuration", () => {
 
 describe("Railway deployment environment isolation", () => {
   it("accepts the matching Alpha and release-branch Beta/Production wiring", () => {
-    for (const [name, audience, branch] of [
-      ["alpha", "https://api-alpha.zeros.build", "main"],
-      ["beta", "https://api-beta.zeros.build", "release/1.2.3"],
-      ["production", "https://api.zeros.build", "release/1.2.3"],
+    for (const [name, audience, appOrigin, opsOrigin, branch] of [
+      ["alpha", "https://api-alpha.zeros.build", "https://app-alpha.zeros.build", "https://ops-alpha.zeros.build", "main"],
+      ["beta", "https://api-beta.zeros.build", "https://app-beta.zeros.build", null, "release/1.2.3"],
+      ["production", "https://api.zeros.build", "https://app.zeros.build", "https://ops.zeros.build", "release/1.2.3"],
     ] as const) {
       expect(() =>
         loadConfig({
           ...baseEnv(),
           AUTH_AUDIENCE: audience,
-          INVITE_LINK_BASE:
-            name === "alpha"
-              ? "https://app-alpha.zeros.build/invite"
-              : name === "beta"
-                ? "https://app-beta.zeros.build/invite"
-                : "https://app.zeros.build/invite",
+          APP_ORIGIN: appOrigin,
+          ...(opsOrigin ? { OPS_ORIGIN: opsOrigin } : {}),
+          INVITE_LINK_BASE: `${appOrigin}/invite`,
           RAILWAY_PROJECT_ID: "project-1",
           RAILWAY_ENVIRONMENT_NAME: name,
           RAILWAY_GIT_BRANCH: branch,
@@ -648,7 +606,7 @@ describe("Railway deployment environment isolation", () => {
   it("rejects a WorkOS browser origin from another Railway channel", () => {
     expect(() =>
       loadConfig({
-        ...workosEnv(),
+        ...baseEnv(),
         AUTH_AUDIENCE: "https://api-alpha.zeros.build",
         APP_ORIGIN: "https://app.zeros.build",
         RAILWAY_PROJECT_ID: "project-1",
@@ -660,7 +618,7 @@ describe("Railway deployment environment isolation", () => {
 
   it("requires the isolated Ops origin in WorkOS Alpha and Production", () => {
     const alpha = {
-      ...workosEnv(),
+      ...baseEnv(),
       AUTH_AUDIENCE: "https://api-alpha.zeros.build",
       APP_ORIGIN: "https://app-alpha.zeros.build",
       INVITE_LINK_BASE: "https://app-alpha.zeros.build/invite",
@@ -676,25 +634,11 @@ describe("Railway deployment environment isolation", () => {
     ).not.toThrow();
   });
 
-  it("rejects a cross-channel invitation page during an Auth0 rollback", () => {
-    expect(() =>
-      loadConfig({
-        ...baseEnv(),
-        AUTH_AUDIENCE: "https://api-alpha.zeros.build",
-        INVITE_LINK_BASE: "https://app.zeros.build/invite",
-        RAILWAY_PROJECT_ID: "project-1",
-        RAILWAY_ENVIRONMENT_NAME: "alpha",
-        RAILWAY_GIT_BRANCH: "main",
-      }),
-    ).toThrow(
-      /INVITE_LINK_BASE must be https:\/\/app-alpha\.zeros\.build\/invite/,
-    );
-  });
-
   it("refuses a Git-connected production deployment directly from main", () => {
     expect(() =>
       loadConfig({
         ...baseEnv(),
+        OPS_ORIGIN: "https://ops.zeros.build",
         RAILWAY_PROJECT_ID: "project-1",
         RAILWAY_ENVIRONMENT_NAME: "production",
         RAILWAY_GIT_BRANCH: "main",
@@ -706,6 +650,7 @@ describe("Railway deployment environment isolation", () => {
     expect(() =>
       loadConfig({
         ...baseEnv(),
+        OPS_ORIGIN: "https://ops.zeros.build",
         RAILWAY_PROJECT_ID: "project-1",
         RAILWAY_ENVIRONMENT_NAME: "production",
       }),
@@ -715,7 +660,7 @@ describe("Railway deployment environment isolation", () => {
   it("allows an explicit self-hosted Railway template to use provided domains", () => {
     expect(() =>
       loadConfig({
-        ...workosEnv(),
+        ...baseEnv(),
         AUTH_AUDIENCE: "https://zeros-api-template.up.railway.app",
         APP_ORIGIN: "https://zeros-app-template.up.railway.app",
         RAILWAY_PROJECT_ID: "customer-project",
@@ -725,14 +670,14 @@ describe("Railway deployment environment isolation", () => {
       }),
     ).not.toThrow();
     expect(() =>
-      loadConfig({ ...workosEnv(), ZEROS_SELF_HOSTED: "yes" }),
+      loadConfig({ ...baseEnv(), ZEROS_SELF_HOSTED: "yes" }),
     ).toThrow(/ZEROS_SELF_HOSTED/);
   });
 
   it("keeps the WorkOS browser and public API on separate origins", () => {
     expect(() =>
       loadConfig({
-        ...workosEnv(),
+        ...baseEnv(),
         AUTH_AUDIENCE: "https://zeros-template.up.railway.app",
         APP_ORIGIN: "https://zeros-template.up.railway.app",
         ZEROS_SELF_HOSTED: "true",

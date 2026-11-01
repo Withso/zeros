@@ -21,7 +21,7 @@ function fixture() {
 it("installs private repository defaults inherited by future worktrees, idempotently", () => {
   const f = fixture(); installNativeDevScripts(f.root);
   const first = opSettingsRead("repo-local", f.root);
-  expect(first.doc?.scripts).toMatchObject({ archive: expect.stringContaining("hook.sh archive"), archive_required: true, archive_timeout_seconds: 1800 });
+  expect(first.doc?.scripts).toMatchObject({ archive: expect.stringContaining("pnpm electron:cloud --reset --yes"), archive_required: true, archive_timeout_seconds: 1800 });
   const before = fs.readFileSync(first.path, "utf8"); installNativeDevScripts(f.root);
   expect(fs.readFileSync(first.path, "utf8")).toBe(before);
   expect(f.git("status", "--porcelain")).toBe("");
@@ -45,6 +45,15 @@ it("refuses to silently replace or make a custom archive command retryable", () 
   const file = opSettingsRead("repo-local", f.root).path, before = fs.readFileSync(file);
   expect(() => installNativeDevScripts(f.root)).toThrow(/existing native Zeros archive command/i);
   expect(fs.readFileSync(file)).toEqual(before);
+});
+
+it("replaces an earlier generated archive guard that still ran hosted cleanup", () => {
+  const f = fixture();
+  const current = fs.readFileSync(path.join(import.meta.dirname, "../dev-environment/archive-hook.sh"), "utf8").trim();
+  const earlier = `${current.split("\n").slice(0, 3).join("\n")}\nexec sh scripts/dev-environment/hook.sh archive --receipt-known`;
+  opSettingsWrite("repo-local", { scripts: { archive: earlier } }, f.root);
+  installNativeDevScripts(f.root);
+  expect((opSettingsRead("repo-local", f.root).doc?.scripts as any).archive).toBe(current);
 });
 
 it("preserves old-branch Local run and setup without the hosted hook", () => {

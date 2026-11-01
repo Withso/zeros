@@ -37,7 +37,14 @@ export function createWorkOSDesktopAuthorizationRoutes(
     const url = new URL(c.req.url);
     const state = url.searchParams.get("state") ?? "";
     const codeChallenge = url.searchParams.get("code_challenge") ?? "";
-    if (!validDesktopState(state) || !PKCE_CHALLENGE.test(codeChallenge)) {
+    // Adding an account must not silently reuse the browser's AuthKit session.
+    const fresh = url.searchParams.getAll("fresh");
+    if (
+      !validDesktopState(state) ||
+      !PKCE_CHALLENGE.test(codeChallenge) ||
+      fresh.length > 1 ||
+      (fresh.length === 1 && fresh[0] !== "1")
+    ) {
       return invalidRequest();
     }
     try {
@@ -45,6 +52,7 @@ export function createWorkOSDesktopAuthorizationRoutes(
         state,
         codeChallenge,
         redirectUri: `${appOrigin}/auth/desktop/callback`,
+        ...(fresh.length ? { fresh: true } : {}),
       });
       const target = new URL(authorizationUrl);
       if (target.protocol !== "https:" || target.username || target.password) {

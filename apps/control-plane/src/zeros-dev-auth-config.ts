@@ -28,7 +28,7 @@ export function loadZerosDevAuthConfig(
   const parsed = Identity.safeParse({ subject: env.ZEROS_DEV_AUTH_SUBJECT,
     accountId: env.ZEROS_DEV_AUTH_ACCOUNT_ID, email: env.ZEROS_DEV_AUTH_EMAIL,
     organizationId: env.ZEROS_DEV_AUTH_ORGANIZATION_ID });
-  if (env.ZEROS_DEV_AUTH_ENABLED !== "true" || !parsed.success || auth.provider !== "workos" ||
+  if (env.ZEROS_DEV_AUTH_ENABLED !== "true" || !parsed.success ||
       auth.audience !== "https://api-alpha.zeros.build" ||
       auth.issuer !== `https://api.workos.com/user_management/${auth.webClientId}` ||
       auth.jwksUrl !== `https://api.workos.com/sso/jwks/${auth.webClientId}`) {

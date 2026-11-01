@@ -9,6 +9,7 @@ import { DatabaseAcquireTimeoutError } from "./db.js";
 import { createApp, type CreateAppDependencies } from "./app.js";
 import type { Config, GithubBackendConfig } from "./config.js";
 import { configureControlPlaneTracing, shutdownControlPlaneTracing } from "./tracing.js";
+import { workosTestAuth } from "./test-workos-env.js";
 
 // These assert POSITION in the middleware chain, which no per-router test can
 // see. `github.test.ts` proved `createGithubUnconfiguredRoutes()` answers 503
@@ -16,7 +17,7 @@ import { configureControlPlaneTracing, shutdownControlPlaneTracing } from "./tra
 // router was unreachable without a bearer token, so the real service answered
 // `401 Missing bearer token` instead. Two callers are hurt by that: GitHub's
 // browser callback, which never carries a token at all, and any desktop whose
-// Auth0 session lapsed, which then cannot tell "GitHub App sign-in is off on
+// session lapsed, which then cannot tell "GitHub App sign-in is off on
 // this control plane" from "sign in again".
 
 // createApp only stores the pool; the routes exercised here reject before any
@@ -63,12 +64,7 @@ const githubConfig: GithubBackendConfig = {
 function config(github: GithubBackendConfig | null): Config {
   return {
     databaseUrl: "postgres://unused",
-    auth: {
-      provider: "auth0",
-      issuers: ["https://tenant.example.test/"],
-      jwksUrl: "https://tenant.example.test/.well-known/jwks.json",
-      audience: "https://api.example.test",
-    },
+    auth: workosTestAuth(),
     workos: null,
     inviteLinkBase: "https://app.example.test/invite",
     port: 8080,
@@ -373,7 +369,7 @@ describe("app assembly — GitHub App registered", () => {
 
   it("serves the OAuth callback without a bearer token", async () => {
     // GitHub redirects the user's BROWSER here; it can never carry the
-    // desktop's Auth0 token. 422 is the malformed-state rejection, which
+    // desktop's access token. 422 is the malformed-state rejection, which
     // proves the route ran instead of being swallowed by the auth middleware.
     const response = await app.request("/v1/github/oauth/callback?state=abc");
     expect(response.status).toBe(422);
