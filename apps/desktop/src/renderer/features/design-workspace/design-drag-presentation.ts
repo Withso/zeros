@@ -71,6 +71,7 @@ export function createDesignDragPresentation(
     element.remove();
   };
   return {
+    element,
     get hasPixels() {
       return hasPixels;
     },

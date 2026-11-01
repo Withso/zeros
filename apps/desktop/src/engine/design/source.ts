@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { parse, type DefaultTreeAdapterTypes } from "parse5";
+import { registerDesignTemplateContent } from "@zeros/design-web";
 import { DESIGN_RUNTIME_SOURCE } from "@zeros/protocol/design-runtime";
 
 export interface ElementRecord {
@@ -24,8 +25,10 @@ export function elementRecords(
         node.attrs.find((attribute) => attribute.name === "data-oid")?.value ??
         null;
       records.push({ element: node, oid });
+      // Template content is walked too: a declarative shadow root renders,
+      // and registering it lets its content reach the host.
       if (node.tagName === "template" && "content" in node) {
-        pending.push(node.content);
+        pending.push(registerDesignTemplateContent(node));
       }
     }
   }

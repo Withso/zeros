@@ -4,6 +4,7 @@ import { chromium } from "@playwright/test";
 import {
   DESIGN_RUNTIME_PROTOCOL,
   DESIGN_RUNTIME_SOURCE,
+  DESIGN_RUNTIME_TREE_DEPTH_LIMIT,
   DESIGN_RUNTIME_VERSION,
   isDesignRuntimeFrameMessage,
   isRuntimeNodeLayout,
@@ -63,7 +64,7 @@ describe("design runtime protocol", () => {
     expect(DESIGN_RUNTIME_SOURCE).toContain("contrastRatio");
     expect(DESIGN_RUNTIME_SOURCE).toContain("spacing-scale");
     expect(DESIGN_RUNTIME_SOURCE).toContain("MAX_TREE_NODES = 20000");
-    expect(DESIGN_RUNTIME_SOURCE).toContain("MAX_TREE_DEPTH = 32");
+    expect(DESIGN_RUNTIME_SOURCE).toContain(`MAX_TREE_DEPTH = ${DESIGN_RUNTIME_TREE_DEPTH_LIMIT}`);
     expect(DESIGN_RUNTIME_SOURCE).toContain("__zerosDesignSourceVersion");
     expect(DESIGN_RUNTIME_SOURCE).toContain(
       "sourceVersion: SOURCE_VERSION,\n      oid: oid",
@@ -424,7 +425,7 @@ describe("design runtime protocol", () => {
     try {
       const page = await browser.newPage();
       const result = await page.evaluate(
-        ({ source }) =>
+        ({ source, depthLimit }) =>
           new Promise<{
             leakedBeforeHandshake: boolean;
             payload: Record<string, unknown>;
@@ -434,7 +435,7 @@ describe("design runtime protocol", () => {
             document.body.style.cssText =
               "display:grid;grid-auto-columns:37px;outline:2px solid;font-style:italic;text-indent:7px;overflow-wrap:anywhere;perspective-origin:25% 75%";
             let nested = document.querySelector('[data-oid="hero"]')!;
-            for (let index = 0; index < 33; index += 1) {
+            for (let index = 0; index <= depthLimit; index += 1) {
               const child = document.createElement("div");
               child.dataset.oid = `nested-${index}`;
               nested.append(child);
@@ -494,6 +495,16 @@ describe("design runtime protocol", () => {
                 return;
               }
               window.clearTimeout(timeout);
+              // Playwright's evaluate serializer cannot return the bounded
+              // 64-level tree; the assertions read only the top layers.
+              const prune = (nodes: Array<{ children: unknown[] }>, depth: number) => {
+                for (const node of nodes) {
+                  if (depth >= 2) node.children = [];
+                  else prune(node.children as Array<{ children: unknown[] }>, depth + 1);
+                }
+              };
+              const snapshot = message.payload.snapshot as { tree?: Array<{ children: unknown[] }> } | undefined;
+              if (snapshot?.tree) prune(snapshot.tree, 0);
               resolve({ leakedBeforeHandshake, payload: message.payload });
             };
             channel.port1.start();
@@ -519,7 +530,7 @@ describe("design runtime protocol", () => {
               });
             }, 0);
           }),
-        { source: DESIGN_RUNTIME_SOURCE },
+        { source: DESIGN_RUNTIME_SOURCE, depthLimit: DESIGN_RUNTIME_TREE_DEPTH_LIMIT },
       );
 
       expect(result.leakedBeforeHandshake).toBe(false);

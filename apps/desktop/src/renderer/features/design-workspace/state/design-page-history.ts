@@ -1,5 +1,6 @@
 import { normalizeDesignPagesSnapshot } from "@zeros/protocol/design-pages";
 import type { DesignApiMutationReplyWire } from "../../../platform/git";
+import { designFrameViews } from "./design-frame-view";
 import { selectDesignFrame } from "./design-selection";
 import {
   captureDesignPageOwner,
@@ -27,6 +28,9 @@ export async function restoreDesignPageHistorySelection(
     snapshot.directoryId !== owner.directoryId
   )
     return;
+  // A scoped reply prepares only the restored frames; the page's other
+  // frames are still described, and selection accepts either.
+  const frames = designFrameViews(snapshot);
   const affected = result.historyFrame ?? result.historySelection;
   const page = snapshot?.pages.find((page) => page.id === result.historyPageId) ?? (affected
     ? snapshot?.pages.find(
@@ -42,7 +46,7 @@ export async function restoreDesignPageHistorySelection(
       .getState()
       .setActivePage(workspaceId, page.id, owner.directoryId);
   if (result.historySelection === undefined) {
-    const frame = snapshot?.frames.find((frame) => frame.file === affected);
+    const frame = frames.find((frame) => frame.file === affected);
     if (
       page &&
       page.id !== owner.pageId &&
@@ -58,9 +62,7 @@ export async function restoreDesignPageHistorySelection(
     return;
   }
   const selected = result.historySelection
-    ? (snapshot?.frames.find(
-        (frame) => frame.file === result.historySelection,
-      ) ?? null)
+    ? (frames.find((frame) => frame.file === result.historySelection) ?? null)
     : null;
   const restoredFrame = direction === "undo" && selected !== null;
   await selectDesignFrame(workspaceId, selected, {

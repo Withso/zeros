@@ -24,7 +24,8 @@
     "design-preview",
     "native-tools",
     "workbench-status",
-    "file-prefetch"
+    "file-prefetch",
+    "design-shadow-layers"
   ],
   [
     "design-motion-refinements",

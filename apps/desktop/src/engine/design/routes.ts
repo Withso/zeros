@@ -159,6 +159,12 @@ import {
   type WorkspaceDesignHistoryEntry,
   type WorkspaceDesignHistoryState,
 } from "./workspace-history";
+/** Files every linking frame renders: stylesheets (tokens.css included) and
+ * component definitions. Frame metadata is design.toml and stays scoped. */
+function isSharedDesignSource(file: string): boolean {
+  return /\.css$/i.test(file) || file.startsWith("components/");
+}
+
 async function applyHumanDesignOperation(
   actor: DesignActor,
   workspacePath: string,
@@ -307,6 +313,21 @@ export async function handleDesignWorkspaceRoute(
 ): Promise<unknown> {
   const { remote, hostLocalResources } = options;
   const applyDesktopDesignOperation = applyHumanDesignOperation.bind(null, { kind: "human", id: "desktop" });
+  // A scoped acknowledgement prepares only the frames a write touched. A
+  // write to a stylesheet, tokens.css or a component changes every frame that
+  // links it, so it reads the aggregate, as the forward token edit does.
+  const mutationSnapshot = (
+    workspace: Parameters<DesignWorkspaceRouteHost["readDesignSnapshot"]>[0],
+    frames: readonly string[],
+    affectedFiles: readonly string[] = [],
+  ) =>
+    host.readDesignSnapshot(workspace, remote, {
+      hostLocalResources,
+      fresh: true,
+      ...(params.snapshotMode === "scoped" && !affectedFiles.some(isSharedDesignSource)
+        ? { affectedFrames: [...new Set(frames)] }
+        : {}),
+    });
   switch (op) {
     case "design.navigation.read": {
       if (remote || !hostLocalResources) throw new Error("Design navigation requires a Local workspace.");
@@ -570,11 +591,7 @@ export async function handleDesignWorkspaceRoute(
       }
       return {
         result,
-        snapshot: await host.readDesignSnapshot(workspace, remote, {
-          hostLocalResources,
-          fresh: true,
-          ...(params.snapshotMode === "scoped" ? { affectedFrames: [...new Set([reqStr(params, "frame"), ...transaction.operations.flatMap(operation => operation.type === "frame.set-geometry" ? [operation.frame] : [])])] } : {}),
-        }),
+        snapshot: await mutationSnapshot(workspace, [reqStr(params, "frame"), ...transaction.operations.flatMap(operation => operation.type === "frame.set-geometry" ? [operation.frame] : [])], result.affectedFiles),
       };
     }
     case "design.history.undo":
@@ -584,6 +601,10 @@ export async function handleDesignWorkspaceRoute(
         remote,
       );
       const direction = op === "design.history.undo" ? "undo" : "redo";
+      // A scoped reply prepares only the frames this step restored. Page and
+      // theme steps keep the aggregate.
+      const restoredSnapshot = (frames: readonly string[], affectedFiles?: readonly string[]) =>
+        mutationSnapshot(workspace, frames, affectedFiles);
       const history = host.designHistoryState(workspace.path);
       const source = history?.[direction];
       const entry = source?.pop();
@@ -658,10 +679,10 @@ export async function handleDesignWorkspaceRoute(
           entry.bytes = bytes;
           destination.push(entry);
           pruneWorkspaceDesignHistory(history);
-          const snapshot = await host.readDesignSnapshot(workspace, remote, {
-            hostLocalResources,
-            fresh: true,
-          });
+          const snapshot = await restoredSnapshot(entry.changes.flatMap((change) => {
+            const point = direction === "undo" ? change.before : change.after;
+            return point ? [point.file] : [];
+          }));
           return {
             result: null,
             snapshot,
@@ -691,10 +712,7 @@ export async function handleDesignWorkspaceRoute(
           destination.push(entry);
           return {
             result: null,
-            snapshot: await host.readDesignSnapshot(workspace, remote, {
-              hostLocalResources,
-              fresh: true,
-            }),
+            snapshot: await restoredSnapshot(entry.moves.map((move) => move.file)),
             historySelection: entry.frame,
             historyFrame: entry.frame,
           };
@@ -723,16 +741,14 @@ export async function handleDesignWorkspaceRoute(
             throw error;
           }
           destination.push(entry);
-          const snapshot = await host.readDesignSnapshot(workspace, remote, {
-            hostLocalResources,
-            fresh: true,
-          });
+          const snapshot = await restoredSnapshot(replacement ? [replacement.file] : []);
           const affectedPage = snapshot.pages?.find(page => page.id === (replacement ?? expected)?.pageId);
           return {
             result: null,
             snapshot,
             historySelection:
-              replacement?.file ?? (affectedPage ? affectedPage.frameFiles[0] : snapshot.frames[0]?.file) ?? null,
+              replacement?.file ?? (affectedPage ? affectedPage.frameFiles[0]
+                : (snapshot.mutationCatalog?.frames[0]?.source ?? snapshot.frames[0]?.file)) ?? null,
             historyFrame: (replacement ?? expected)!.file,
           };
         }
@@ -755,10 +771,7 @@ export async function handleDesignWorkspaceRoute(
         else history.bytes = Math.max(0, history.bytes - entry.bytes);
         return {
           result,
-          snapshot: await host.readDesignSnapshot(workspace, remote, {
-            hostLocalResources,
-            fresh: true,
-          }),
+          snapshot: await restoredSnapshot([entry.frame], result?.affectedFiles),
           ...(result ? { historyFrame: entry.frame } : {}),
         };
       }
@@ -770,10 +783,7 @@ export async function handleDesignWorkspaceRoute(
       if (!frame) {
         return {
           result: null,
-          snapshot: await host.readDesignSnapshot(workspace, remote, {
-            hostLocalResources,
-            fresh: true,
-          }),
+          snapshot: await restoredSnapshot([]),
         };
       }
       const documentId = designDocumentIdForFrame(frame);
@@ -784,10 +794,7 @@ export async function handleDesignWorkspaceRoute(
           : await api.redo(documentId);
       return {
         result,
-        snapshot: await host.readDesignSnapshot(workspace, remote, {
-          hostLocalResources,
-          fresh: true,
-        }),
+        snapshot: await restoredSnapshot([frame]),
         ...(result ? { historyFrame: frame } : {}),
       };
     }
@@ -1374,11 +1381,7 @@ export async function handleDesignWorkspaceRoute(
       );
       return {
         frame,
-        snapshot: await host.readDesignSnapshot(workspace, remote, {
-          hostLocalResources,
-          fresh: true,
-          ...(params.snapshotMode === "scoped" ? { affectedFrames: [frame.file] } : {}),
-        }),
+        snapshot: await mutationSnapshot(workspace, [frame.file]),
       };
     }
     case "design.frame.rename": {
@@ -1428,11 +1431,7 @@ export async function handleDesignWorkspaceRoute(
       );
       return {
         frame,
-        snapshot: await host.readDesignSnapshot(workspace, remote, {
-          hostLocalResources,
-          fresh: true,
-          ...(params.snapshotMode === "scoped" ? { affectedFrames: [frame.file, reqStr(params, "frame")] } : {}),
-        }),
+        snapshot: await mutationSnapshot(workspace, [frame.file, reqStr(params, "frame")]),
       };
     }
     case "design.frame.delete": {
@@ -1450,11 +1449,7 @@ export async function handleDesignWorkspaceRoute(
       );
       return {
         deleted: { file: restorePoint.file },
-        snapshot: await host.readDesignSnapshot(workspace, remote, {
-          hostLocalResources,
-          fresh: true,
-          ...(params.snapshotMode === "scoped" ? { affectedFrames: [] } : {}),
-        }),
+        snapshot: await mutationSnapshot(workspace, []),
       };
     }
     case "design.canvas.update": {
@@ -1498,11 +1493,7 @@ export async function handleDesignWorkspaceRoute(
       }
       return {
         geometry,
-        snapshot: await host.readDesignSnapshot(workspace, remote, {
-          hostLocalResources,
-          fresh: true,
-          ...(params.snapshotMode === "scoped" ? { affectedFrames: [frame] } : {}),
-        }),
+        snapshot: await mutationSnapshot(workspace, [frame]),
         foundationRevision: {
           before: applied.receipt.beforeRevision,
           after: applied.receipt.afterRevision,
@@ -1528,11 +1519,7 @@ export async function handleDesignWorkspaceRoute(
         ),
       );
       return {
-        snapshot: await host.readDesignSnapshot(workspace, remote, {
-          hostLocalResources,
-          fresh: true,
-          ...(params.snapshotMode === "scoped" ? { affectedFrames: moves.map(move => move.frame) } : {}),
-        }),
+        snapshot: await mutationSnapshot(workspace, moves.map(move => move.frame)),
       };
     }
     case "design.node.transfer": {
@@ -1617,11 +1604,7 @@ export async function handleDesignWorkspaceRoute(
       return {
         frame: result.frame,
         nodeId: result.nodeId,
-        snapshot: await host.readDesignSnapshot(workspace, remote, {
-          hostLocalResources,
-          fresh: true,
-          ...(params.snapshotMode === "scoped" ? { affectedFrames: [result.frame, frame] } : {}),
-        }),
+        snapshot: await mutationSnapshot(workspace, [result.frame, frame]),
       };
     }
     case "design.node.styles": {
@@ -1676,10 +1659,7 @@ export async function handleDesignWorkspaceRoute(
       }
       return {
         mutation,
-        snapshot: await host.readDesignSnapshot(workspace, remote, {
-          hostLocalResources,
-          fresh: true,
-        }),
+        snapshot: await mutationSnapshot(workspace, [frame], applied.affectedFiles),
         foundationRevision: {
           before: applied.receipt.beforeRevision,
           after: applied.receipt.afterRevision,
@@ -1739,10 +1719,7 @@ export async function handleDesignWorkspaceRoute(
       }
       return {
         mutation,
-        snapshot: await host.readDesignSnapshot(workspace, remote, {
-          hostLocalResources,
-          fresh: true,
-        }),
+        snapshot: await mutationSnapshot(workspace, [frame], applied.affectedFiles),
         foundationRevision: {
           before: applied.receipt.beforeRevision,
           after: applied.receipt.afterRevision,
@@ -1810,10 +1787,7 @@ export async function handleDesignWorkspaceRoute(
       }
       return {
         mutation,
-        snapshot: await host.readDesignSnapshot(workspace, remote, {
-          hostLocalResources,
-          fresh: true,
-        }),
+        snapshot: await mutationSnapshot(workspace, [frame], applied.affectedFiles),
         foundationRevision: {
           before: applied.receipt.beforeRevision,
           after: applied.receipt.afterRevision,
@@ -1873,10 +1847,7 @@ export async function handleDesignWorkspaceRoute(
       }
       return {
         mutation,
-        snapshot: await host.readDesignSnapshot(workspace, remote, {
-          hostLocalResources,
-          fresh: true,
-        }),
+        snapshot: await mutationSnapshot(workspace, [frame], applied.affectedFiles),
         foundationRevision: {
           before: applied.receipt.beforeRevision,
           after: applied.receipt.afterRevision,
