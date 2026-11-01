@@ -111,6 +111,10 @@ const NETWORK_CODES = codes([
   "APIConnectionTimeoutError",
 ]);
 const TERMINAL_CODES = codes([
+  "policyCapacityUnavailable",
+  "modelProviderMismatch",
+  "modelProviderNotConfigured",
+  "modelProviderPolicyConflict",
   "cyberPolicy",
   "misalignmentPolicyViolation",
   "contextWindowExceeded",

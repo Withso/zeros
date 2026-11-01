@@ -11,7 +11,7 @@ import { JsonRpcProcess, RpcError } from "../shared/json-rpc-process";
 import { agentEnvironment } from "../shared/agent-environment";
 import { CodexEventMapper } from "./event-mapper";
 
-export const CODEX_VERSION = "0.165.0";
+export const CODEX_VERSION = "0.166.0";
 
 interface CodexOptions {
   /** Offline fixtures may replace the executable; production uses the pinned package. */

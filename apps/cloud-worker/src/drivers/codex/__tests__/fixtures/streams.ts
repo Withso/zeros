@@ -18,6 +18,23 @@ const completed = (status = "completed", extra: Record<string, unknown> = {}): N
   notice("turn/completed", { turn: { id: "native-turn", status, ...extra } });
 
 export const streams: Array<{ name: string; frames: NativeFrame[] }> = [
+  ...[{}, { startedAtMs: null, completedAtMs: null }, { startedAtMs: 1000, completedAtMs: 2000 }].map(times => ({
+    name: `flat item lifecycle times survive completion and replay: ${JSON.stringify(times)}`,
+    frames: [
+      item("started", { type: "commandExecution", id: "timed-command", command: "pwd", ...times }),
+      item("completed", { type: "commandExecution", id: "timed-command", command: "pwd", status: "completed", exitCode: 0, aggregatedOutput: "/repo", ...times }),
+      completed(),
+      item("completed", { type: "commandExecution", id: "timed-command", command: "pwd", status: "completed", exitCode: 0, aggregatedOutput: "/repo" }),
+    ],
+  })),
+  {
+    name: "policy capacity retry remains native until subsequent progress and completion",
+    frames: [
+      notice("error", { error: { message: "server overloaded", codexErrorInfo: "policyCapacityUnavailable" }, willRetry: true }),
+      item("completed", { type: "agentMessage", id: "answer", text: "Recovered", phase: "final_answer" }),
+      completed(),
+    ],
+  },
   ...([
     { id: "inline-image", status: "completed", revisedPrompt: "A landscape", failure: null, result: "aGVsbG8=", savedPath: "/repo/output.png" },
     { id: "stored-image", status: "completed", revisedPrompt: "A landscape", failure: null, fileId: "file-generated-image", savedPath: "/repo/output.png" },

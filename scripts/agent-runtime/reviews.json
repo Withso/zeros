@@ -4820,6 +4820,318 @@
         "apps/cloud-worker/src/drivers/cursor/__tests__/fixtures/streams.ts",
         "apps/desktop/src/renderer/features/agent/renderers/compaction-card.tsx"
       ]
+    },
+    {
+      "provider": "codex",
+      "fingerprint": "50d73a233ead989dfa5213e3527b71f6ae560626b69bcd117d5287e9c29d63aa",
+      "disposition": "generated-only",
+      "rationale": "The three added RPCs are accountSession/list, accountSession/switch and account/gcp/setup. Their generated request types are available, but account/team switching and GCP setup are explicitly deferred; no Settings controls or new lifecycle calls are introduced.",
+      "evidence": [
+        "apps/desktop/src/engine/agents/adapters/codex/protocol-coverage.json",
+        "docs/codex-app-server-compatibility.md"
+      ]
+    },
+    {
+      "provider": "codex",
+      "fingerprint": "536e1575aabf2aeaf7b2c31cb5f94f30f759c6d534914d435f7fb0aa455f8273",
+      "disposition": "generated-only",
+      "rationale": "The aggregate v2 schema is regenerated from the exact 0.166.0 pin. Individual declaration decisions cover the runtime compatibility fixes and deferred features; the aggregate does not claim product support for every generated type.",
+      "evidence": [
+        "scripts/codegen-codex.mjs",
+        "apps/desktop/src/engine/agents/adapters/codex/protocol-coverage.json",
+        "docs/codex-app-server-compatibility.md"
+      ]
+    },
+    {
+      "provider": "codex",
+      "fingerprint": "858307d402055216a0cfe6c700b606defb217a433a931ca353602baa3295e093",
+      "disposition": "intentionally-deferred",
+      "rationale": "The new nullable ChatGPT workspaceName is display metadata. Existing account parsing still reads the account type, email and plan; choosing a ChatGPT account or team workspace and displaying this metadata are deferred.",
+      "evidence": [
+        "apps/desktop/src/engine/agents/adapters/codex/app-server-adapter.ts",
+        "docs/codex-app-server-compatibility.md"
+      ]
+    },
+    {
+      "provider": "codex",
+      "fingerprint": "1d52ea5fc95692f89cc4883cdc1c5c44652e4ad6c87b88c5af51458c651eb6f2",
+      "disposition": "generated-only",
+      "rationale": "These types support accountSession/list and accountSession/switch. Codex account and ChatGPT team-workspace selection are explicitly deferred for both placements. Zeros keeps its existing credential and provider-binding flows; generated availability alone does not enable switching.",
+      "evidence": [
+        "apps/desktop/src/engine/agents/adapters/codex/protocol-coverage.json",
+        "docs/codex-app-server-compatibility.md"
+      ]
+    },
+    {
+      "provider": "codex",
+      "fingerprint": "911ef8941a37f3343e9fd9df3a061e0254abd2f938791ead9f88944d2e0c2fa5",
+      "disposition": "generated-only",
+      "rationale": "These types support accountSession/list and accountSession/switch. Codex account and ChatGPT team-workspace selection are explicitly deferred for both placements. Zeros keeps its existing credential and provider-binding flows; generated availability alone does not enable switching.",
+      "evidence": [
+        "apps/desktop/src/engine/agents/adapters/codex/protocol-coverage.json",
+        "docs/codex-app-server-compatibility.md"
+      ]
+    },
+    {
+      "provider": "codex",
+      "fingerprint": "91a4bab21d852845a49c9d1aa07c76dee2a000f19c0e140b1d3ab573c48afafa",
+      "disposition": "generated-only",
+      "rationale": "These types support accountSession/list and accountSession/switch. Codex account and ChatGPT team-workspace selection are explicitly deferred for both placements. Zeros keeps its existing credential and provider-binding flows; generated availability alone does not enable switching.",
+      "evidence": [
+        "apps/desktop/src/engine/agents/adapters/codex/protocol-coverage.json",
+        "docs/codex-app-server-compatibility.md"
+      ]
+    },
+    {
+      "provider": "codex",
+      "fingerprint": "39fa55a0b43446cf644fe90854614c4c42d7f735492d81aaef2327a5de781687",
+      "disposition": "generated-only",
+      "rationale": "These types support accountSession/list and accountSession/switch. Codex account and ChatGPT team-workspace selection are explicitly deferred for both placements. Zeros keeps its existing credential and provider-binding flows; generated availability alone does not enable switching.",
+      "evidence": [
+        "apps/desktop/src/engine/agents/adapters/codex/protocol-coverage.json",
+        "docs/codex-app-server-compatibility.md"
+      ]
+    },
+    {
+      "provider": "codex",
+      "fingerprint": "b9250d0c45181fd30a9ce22234e2d19fa92c34afa8c4829011142c5d6798f6fc",
+      "disposition": "generated-only",
+      "rationale": "These types support accountSession/list and accountSession/switch. Codex account and ChatGPT team-workspace selection are explicitly deferred for both placements. Zeros keeps its existing credential and provider-binding flows; generated availability alone does not enable switching.",
+      "evidence": [
+        "apps/desktop/src/engine/agents/adapters/codex/protocol-coverage.json",
+        "docs/codex-app-server-compatibility.md"
+      ]
+    },
+    {
+      "provider": "codex",
+      "fingerprint": "282146321d2ee81bdf937e847d6041bab7fb4b0be797158471f91cbb390df5f5",
+      "disposition": "generated-only",
+      "rationale": "These types support accountSession/list and accountSession/switch. Codex account and ChatGPT team-workspace selection are explicitly deferred for both placements. Zeros keeps its existing credential and provider-binding flows; generated availability alone does not enable switching.",
+      "evidence": [
+        "apps/desktop/src/engine/agents/adapters/codex/protocol-coverage.json",
+        "docs/codex-app-server-compatibility.md"
+      ]
+    },
+    {
+      "provider": "codex",
+      "fingerprint": "e37f9b3b1b2168ad9bd2f4085498ffdd9508eb9be16c0bcadf221b843afa772e",
+      "disposition": "generated-only",
+      "rationale": "These types support accountSession/list and accountSession/switch. Codex account and ChatGPT team-workspace selection are explicitly deferred for both placements. Zeros keeps its existing credential and provider-binding flows; generated availability alone does not enable switching.",
+      "evidence": [
+        "apps/desktop/src/engine/agents/adapters/codex/protocol-coverage.json",
+        "docs/codex-app-server-compatibility.md"
+      ]
+    },
+    {
+      "provider": "codex",
+      "fingerprint": "6a903bd4d987c818ce6cf83fd2cf584ae783bb28debed53d5521035e36600a52",
+      "disposition": "generated-only",
+      "rationale": "The optional nullable name labels untrusted additional context. Existing turn requests remain valid without it; Zeros adds no context producer or trust elevation. The pinned typed request boundary carries it only for an explicit Codex engine caller.",
+      "evidence": [
+        "apps/desktop/src/engine/agents/adapters/codex/generated/v2/AdditionalContextEntry.ts",
+        "apps/desktop/src/engine/agents/adapters/codex/app-server.ts",
+        "docs/codex-app-server-compatibility.md"
+      ]
+    },
+    {
+      "provider": "codex",
+      "fingerprint": "3b6caef473abcbde8b5b4c64523f357d08830a255658f2f98ff212f926a2d827",
+      "disposition": "generated-only",
+      "rationale": "The three added RPCs are accountSession/list, accountSession/switch and account/gcp/setup. Their generated request types are available, but account/team switching and GCP setup are explicitly deferred; no Settings controls or new lifecycle calls are introduced.",
+      "evidence": [
+        "apps/desktop/src/engine/agents/adapters/codex/protocol-coverage.json",
+        "docs/codex-app-server-compatibility.md"
+      ]
+    },
+    {
+      "provider": "codex",
+      "fingerprint": "3b92a42f655d58a7e1c4d1f05fe2ecd6adc65c8b12cd9a285bc0c171376285ff",
+      "disposition": "implemented",
+      "rationale": "Both normalizers classify policyCapacityUnavailable as a terminal protocol failure when native execution stops, preserving the explanation instead of inferring rate-limit or network recovery from overload wording. Native willRetry=true still owns recovery and unknown variants retain the normal fallback.",
+      "evidence": [
+        "apps/desktop/src/engine/agents/adapters/shared/provider-error.ts",
+        "apps/cloud-worker/src/drivers/shared/provider-error.ts",
+        "apps/desktop/src/engine/agents/adapters/codex/__tests__/app-server-adapter-reconnect.test.ts",
+        "apps/cloud-worker/src/drivers/shared/provider-error.test.ts",
+        "apps/cloud-worker/src/drivers/codex/__tests__/fixtures/streams.ts"
+      ]
+    },
+    {
+      "provider": "codex",
+      "fingerprint": "04fb0589bd8d6976748f99f56862e07e6665e6d27c9056c972cc1c374941ed18",
+      "disposition": "generated-only",
+      "rationale": "The new managed OpenTelemetry requirement is a generated provider configuration surface. Zeros does not read configRequirements/read or introduce telemetry settings; native Codex remains responsible for applying its managed requirements.",
+      "evidence": [
+        "apps/desktop/src/engine/agents/adapters/codex/protocol-coverage.json",
+        "apps/desktop/src/engine/agents/adapters/codex/generated/v2/ConfigRequirements.ts",
+        "docs/codex-app-server-compatibility.md"
+      ]
+    },
+    {
+      "provider": "codex",
+      "fingerprint": "e52f185c2c683e53a8b123f3ae1df2ddedf851301ad3002adecfb4109b684005",
+      "disposition": "generated-only",
+      "rationale": "account/gcp/setup is explicitly deferred. The request and response remain generated for protocol completeness, without collecting GCP credentials or adding provider setup UI in either placement.",
+      "evidence": [
+        "apps/desktop/src/engine/agents/adapters/codex/protocol-coverage.json",
+        "docs/codex-app-server-compatibility.md"
+      ]
+    },
+    {
+      "provider": "codex",
+      "fingerprint": "c362fe9230731c198fab5f3ae6eb0700cf3031b71e6608ab7b79bbe3c6916329",
+      "disposition": "generated-only",
+      "rationale": "account/gcp/setup is explicitly deferred. The request and response remain generated for protocol completeness, without collecting GCP credentials or adding provider setup UI in either placement.",
+      "evidence": [
+        "apps/desktop/src/engine/agents/adapters/codex/protocol-coverage.json",
+        "docs/codex-app-server-compatibility.md"
+      ]
+    },
+    {
+      "provider": "codex",
+      "fingerprint": "039b9f492144ebf6e76e560ebce976e0b662849865cb423435d05847c622c51c",
+      "disposition": "generated-only",
+      "rationale": "The nullable environmentId identifies the owning native execution environment. Environment hook discovery and configuration remain behind generated hooks/list; this metadata is not a Zeros owner or workspace identity and creates no UI.",
+      "evidence": [
+        "apps/desktop/src/engine/agents/adapters/codex/protocol-coverage.json",
+        "apps/desktop/src/engine/agents/adapters/codex/generated/v2/HookMetadata.ts",
+        "docs/codex-app-server-compatibility.md"
+      ]
+    },
+    {
+      "provider": "codex",
+      "fingerprint": "dd7e896f72193395fe03be3455ea95e18eb26bc58178ab8c6a03d9cf199a7706",
+      "disposition": "implemented",
+      "rationale": "sourcePath changes from an absolute-path alias to the legacy string alias, retaining its JSON string wire representation. Both translators continue to project only hook lifecycle status and messages, excluding source paths and native bigint metadata.",
+      "evidence": [
+        "apps/desktop/src/engine/agents/adapters/codex/app-server-translator.ts",
+        "apps/desktop/src/engine/agents/adapters/codex/__tests__/app-server-translator.test.ts",
+        "apps/cloud-worker/src/drivers/codex/event-mapper.ts"
+      ]
+    },
+    {
+      "provider": "codex",
+      "fingerprint": "21db0cb4d64833de8d1d2174e42f60c3847372993e3575dad6108c056ee8dbaa",
+      "disposition": "generated-only",
+      "rationale": "Optional nullable threadId scopes native hook listings to a thread and its environment. hooks/list remains generated-only; Zeros introduces no environment hook picker or request that needs this parameter.",
+      "evidence": [
+        "apps/desktop/src/engine/agents/adapters/codex/protocol-coverage.json",
+        "apps/desktop/src/engine/agents/adapters/codex/generated/v2/HooksListParams.ts",
+        "docs/codex-app-server-compatibility.md"
+      ]
+    },
+    {
+      "provider": "codex",
+      "fingerprint": "3695d98297dd4e87b688c158ed06ea37dead7070d75b8b3b20656a68fcc358b2",
+      "disposition": "implemented",
+      "rationale": "Both normalizers recognize modelProviderMismatch, modelProviderNotConfigured and modelProviderPolicyConflict from JSON-RPC error data before prose heuristics. These failures preserve the native provider configuration explanation and do not trigger model fallback, login or transport recovery; unrecognized types keep the ordinary fallback.",
+      "evidence": [
+        "apps/desktop/src/engine/agents/adapters/shared/__tests__/provider-error.test.ts",
+        "apps/cloud-worker/src/drivers/codex/__tests__/driver.test.ts",
+        "apps/desktop/src/engine/agents/adapters/shared/provider-error.ts",
+        "apps/cloud-worker/src/drivers/shared/provider-error.ts"
+      ]
+    },
+    {
+      "provider": "codex",
+      "fingerprint": "e87d16fde7b98ed94fd9fa995fa66ba4ff22074c060cc4728c2f160e581ef293",
+      "disposition": "generated-only",
+      "rationale": "Managed OpenTelemetry exporter, transport, TLS and tool-result requirements are native configuration types only. Zeros adds no exporter, credential collection, telemetry UI or new logging of provider configuration; native managed configuration remains SDK-owned.",
+      "evidence": [
+        "apps/desktop/src/engine/agents/adapters/codex/protocol-coverage.json",
+        "apps/desktop/src/engine/agents/adapters/codex/generated/v2/ConfigRequirements.ts",
+        "docs/codex-app-server-compatibility.md"
+      ]
+    },
+    {
+      "provider": "codex",
+      "fingerprint": "efa9c9b8a886dd148149b871048d76d4042bd08ad3978ece6107436b88ba91fc",
+      "disposition": "generated-only",
+      "rationale": "Managed OpenTelemetry exporter, transport, TLS and tool-result requirements are native configuration types only. Zeros adds no exporter, credential collection, telemetry UI or new logging of provider configuration; native managed configuration remains SDK-owned.",
+      "evidence": [
+        "apps/desktop/src/engine/agents/adapters/codex/protocol-coverage.json",
+        "apps/desktop/src/engine/agents/adapters/codex/generated/v2/ConfigRequirements.ts",
+        "docs/codex-app-server-compatibility.md"
+      ]
+    },
+    {
+      "provider": "codex",
+      "fingerprint": "e7a458504d60e0c447b0bfbd8c3ac7c9f9fe21e6f4fa09e6ffd0ae623af47e6d",
+      "disposition": "generated-only",
+      "rationale": "Managed OpenTelemetry exporter, transport, TLS and tool-result requirements are native configuration types only. Zeros adds no exporter, credential collection, telemetry UI or new logging of provider configuration; native managed configuration remains SDK-owned.",
+      "evidence": [
+        "apps/desktop/src/engine/agents/adapters/codex/protocol-coverage.json",
+        "apps/desktop/src/engine/agents/adapters/codex/generated/v2/ConfigRequirements.ts",
+        "docs/codex-app-server-compatibility.md"
+      ]
+    },
+    {
+      "provider": "codex",
+      "fingerprint": "a5789c343571ba8d61b69e1ae3ff44fbde6c1bbc69a655b23f040c9bc7a3e961",
+      "disposition": "generated-only",
+      "rationale": "Managed OpenTelemetry exporter, transport, TLS and tool-result requirements are native configuration types only. Zeros adds no exporter, credential collection, telemetry UI or new logging of provider configuration; native managed configuration remains SDK-owned.",
+      "evidence": [
+        "apps/desktop/src/engine/agents/adapters/codex/protocol-coverage.json",
+        "apps/desktop/src/engine/agents/adapters/codex/generated/v2/ConfigRequirements.ts",
+        "docs/codex-app-server-compatibility.md"
+      ]
+    },
+    {
+      "provider": "codex",
+      "fingerprint": "cfeed05dce6ab18577d3c458c6a75f5dea9b61bfc43646e88a983688c0bae0c6",
+      "disposition": "generated-only",
+      "rationale": "Managed OpenTelemetry exporter, transport, TLS and tool-result requirements are native configuration types only. Zeros adds no exporter, credential collection, telemetry UI or new logging of provider configuration; native managed configuration remains SDK-owned.",
+      "evidence": [
+        "apps/desktop/src/engine/agents/adapters/codex/protocol-coverage.json",
+        "apps/desktop/src/engine/agents/adapters/codex/generated/v2/ConfigRequirements.ts",
+        "docs/codex-app-server-compatibility.md"
+      ]
+    },
+    {
+      "provider": "codex",
+      "fingerprint": "f4291b990e0511e77e28aa0933276c679452d3f706b9c3da375eabbbec8a9187",
+      "disposition": "preserved-generically",
+      "rationale": "The optional nullable outputDrainTimedOut flag passes unchanged through typed process/exited subscriptions, including missing, null, false and true values. process/spawn remains generated-only; the notification is not converted into a second tool completion or new UI.",
+      "evidence": [
+        "apps/desktop/src/engine/agents/adapters/codex/app-server.ts",
+        "apps/desktop/src/engine/agents/adapters/codex/__tests__/app-server-server-requests.test.ts",
+        "apps/desktop/src/engine/agents/adapters/codex/protocol-coverage.json"
+      ]
+    },
+    {
+      "provider": "codex",
+      "fingerprint": "d2ac3a0517045cfc063122e21c86ec672cb322807484d94571f6ea13b3c56ed8",
+      "disposition": "implemented",
+      "rationale": "Detached review delivery was removed upstream. The existing Local review wrapper already sends delivery=inline and retains review turn correlation; the standalone worker has no detached review/start caller. Existing inline review regressions cover the retained contract.",
+      "evidence": [
+        "apps/desktop/src/engine/agents/adapters/codex/app-server-adapter.ts",
+        "apps/desktop/src/engine/agents/adapters/codex/__tests__/app-server-adapter-review.test.ts",
+        "apps/desktop/src/engine/agents/adapters/codex/__tests__/app-server-translator-review.test.ts",
+        "apps/cloud-worker/src/drivers/codex/driver.ts"
+      ]
+    },
+    {
+      "provider": "codex",
+      "fingerprint": "b0bc837fb91d714d61f32081319b81826970ff53defe1e4cfff33e908745b3e9",
+      "disposition": "intentionally-deferred",
+      "rationale": "Flat items accept optional nullable lifecycle timestamps and nullable image generationId without changing existing item identity, completion or replay behavior. Using these fields for new timing or image UI is deferred. Local transcript and cloud driver/history parity tests cover populated, null and older payloads.",
+      "evidence": [
+        "apps/desktop/src/engine/agents/adapters/codex/__tests__/transcript-fidelity.test.ts",
+        "apps/cloud-worker/src/drivers/codex/__tests__/parity.test.ts",
+        "apps/cloud-worker/src/drivers/codex/__tests__/fixtures/streams.ts",
+        "docs/codex-app-server-compatibility.md"
+      ]
+    },
+    {
+      "provider": "codex",
+      "fingerprint": "33c1cee7dc14f3e75c1810ccccd224abf183288b31c14252be1526925495698a",
+      "disposition": "intentionally-deferred",
+      "rationale": "Native dollar reporting is explicitly deferred. nativeUsageUsdMicros is optional thread-level native spend, separate from credit estimates; absent or null is unknown, not zero. It is not mapped to per-turn cost and introduces no Settings, turn-details or conversation UI in this upgrade.",
+      "evidence": [
+        "apps/desktop/src/engine/agents/adapters/codex/generated/v2/ThreadUsage.ts",
+        "apps/desktop/src/engine/agents/adapters/codex/protocol-coverage.json",
+        "docs/codex-app-server-compatibility.md"
+      ]
     }
   ]
 }

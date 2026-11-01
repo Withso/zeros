@@ -2,6 +2,12 @@ import { expect, it } from "vitest";
 import { normalizeProviderError } from "./provider-error";
 import { codexModelUnavailableMessage } from "@zeros/protocol/model-rejection";
 
+it("keeps Codex policy capacity failures out of overload recovery", () => {
+  expect(normalizeProviderError("codex", { message: "server overloaded", codexErrorInfo: "policyCapacityUnavailable" })).toEqual({
+    category: "protocol-error", code: "policyCapacityUnavailable", message: "server overloaded",
+  });
+});
+
 it.each(["The model `gpt-6.1-terra` was not found.", "Request rejected for model `gpt-6.1-terra`."])("classifies Codex 0.165 modelNotFound with the same model recovery as Local: %s", message => {
   const native = normalizeProviderError("codex", {
     message, codexErrorInfo: "modelNotFound",
