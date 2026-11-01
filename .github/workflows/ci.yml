@@ -334,7 +334,7 @@ jobs:
     needs: scope
     if: ${{ !cancelled() && (needs.scope.result != 'success' || needs.scope.outputs.job-vitest == 'true') }}
     # Keep the browser host compatible with the lockfile-pinned Playwright.
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     strategy:
       # Every part reports, so one failure never hides another.
       fail-fast: false
@@ -1070,7 +1070,7 @@ jobs:
     needs: scope
     if: ${{ !cancelled() && (needs.scope.result != 'success' || needs.scope.outputs.job-ui-smoke == 'true') }}
     # Keep the browser host compatible with the lockfile-pinned Playwright.
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     strategy:
       fail-fast: false
       matrix:
