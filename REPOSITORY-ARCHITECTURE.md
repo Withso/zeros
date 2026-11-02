@@ -65,7 +65,8 @@ unit.
 
 Railway and Cloudflare configuration belongs beside the application it deploys:
 
-- `apps/control-plane/railway.json` and `Dockerfile`
+- `apps/control-plane/Dockerfile` (Railway's IaC file is `.railway/railway.ts`,
+  where Railway requires it)
 - `apps/web/functions/` and Cloudflare Pages build scripts
 - `electron-builder.yml` and `build/` for desktop releases
 
