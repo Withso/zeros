@@ -90,6 +90,13 @@
       "enabled": false
     },
     {
+      "description": "Ubuntu runner upgrades must be qualified with the pinned Playwright release. Keep Ubuntu 24.04 until browser installation and the test suites support a newer image.",
+      "matchManagers": ["github-actions"],
+      "matchDepTypes": ["github-runner"],
+      "matchDepNames": ["ubuntu"],
+      "enabled": false
+    },
+    {
       "description": "The gitleaks secret-scan container is pinned like an action SHA, so it needs the same monthly reviewed refresh. Bun's setup-bun pin is already a github-actions dependency in that group.",
       "matchManagers": ["custom.regex"],
       "matchDepNames": ["ghcr.io/gitleaks/gitleaks"],
