@@ -67,6 +67,58 @@ for (const scenario of scenarios) {
       "An unrelated advisory fix was suppressed.",
     );
 }
+const workflowScenarios = [
+  ...["ci.yml", "preflight.yml", "zstack-evals.yml"].map((file) => ({
+    file,
+    name: "ubuntu",
+    depType: "github-runner",
+    datasource: "github-runners",
+    enabled: false,
+  })),
+  ...["macos", "windows"].map((name) => ({
+    file: "ci.yml",
+    name,
+    depType: "github-runner",
+    datasource: "github-runners",
+    enabled: true,
+  })),
+  {
+    file: "ci.yml",
+    name: "actions/checkout",
+    depType: "action",
+    datasource: "github-tags",
+    enabled: true,
+  },
+  {
+    file: "ci.yml",
+    name: "ubuntu",
+    depType: "container",
+    datasource: "docker",
+    enabled: true,
+  },
+];
+for (const scenario of workflowScenarios) {
+  const result = await applyPackageRules(
+    {
+      ...config,
+      manager: "github-actions",
+      depName: scenario.name,
+      packageName: scenario.name,
+      packageFile: `.github/workflows/${scenario.file}`,
+      depType: scenario.depType,
+      datasource: scenario.datasource,
+    },
+    "pre-lookup",
+  );
+  invariant(
+    result.enabled === scenario.enabled,
+    `${scenario.file}: ${scenario.name} ${scenario.depType} update policy changed.`,
+  );
+  invariant(
+    result.groupName === "github actions" && result.automerge === false,
+    "GitHub Actions updates must remain grouped and require review.",
+  );
+}
 // This is the actual dependency-fetch early return, not a second implementation
 // of Renovate's precedence. Pinning the package makes a changed boundary explicit.
 const fetchSource = readFileSync(
@@ -80,5 +132,5 @@ invariant(
   "Renovate's hard-ignore boundary changed; requalify handoff.",
 );
 console.log(
-  `Renovate 44.151.3: ${scenarios.length} actual precedence/scope scenarios passed. No repository, branch or PR writes performed.`,
+  `Renovate 44.151.3: ${scenarios.length + workflowScenarios.length} actual precedence/scope scenarios passed. No repository, branch or PR writes performed.`,
 );

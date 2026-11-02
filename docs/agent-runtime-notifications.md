@@ -360,9 +360,11 @@ node scripts/agent-runtime/check-renovate-handoff.mjs
 ```
 
 The replay checks routine/advisory overrides, each owned root pin, the keeper,
-unrelated direct/transitive names and an unowned manifest. It performs no GitHub
-writes and adds no repository runtime dependency. Requalify when changing that
-pinned version or Renovate's precedence behavior.
+unrelated direct/transitive names and an unowned manifest. It also checks that
+Ubuntu runner upgrades stay disabled while other runners, actions and Ubuntu
+containers retain their update policy. It performs no GitHub writes and adds no
+repository runtime dependency. Requalify when changing that pinned version or
+Renovate's precedence behavior.
 
 ## Cost, health and recovery
 
