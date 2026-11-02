@@ -1417,6 +1417,18 @@ d("migration ladder", { timeout: 30_000 }, () => {
       [active])).rows).toEqual([{ recent: true }]);
   });
 
+  it("drops the unused Auth0 session tables in 0217, rows and references included", async () => {
+    const file = "0217_drop_auth0_tables.sql";
+    await applyThrough(LADDER.indexOf(file));
+    const [browser, desktop, ticket] = [1, 2, 3].map((fill) => Buffer.alloc(32, fill));
+    await pool.query("INSERT INTO auth0_browser_sessions(credential_hash,provider_sub,expires_at) VALUES($1,'auth0|example',now())", [browser]);
+    await pool.query("INSERT INTO auth0_desktop_sessions(credential_hash,source_hash,expires_at) VALUES($1,$2,now())", [desktop, browser]);
+    await pool.query("INSERT INTO auth0_handoff_tickets(ticket_hash,source_hash,challenge,expires_at) VALUES($1,$2,$3,now())", [ticket, browser, "c".repeat(43)]);
+    await pool.query("INSERT INTO auth0_session_revocations(provider_sub,revoked_before) VALUES('auth0|example',now())");
+    expect(await runMigrations(pool)).toContain(file);
+    expect((await pool.query("SELECT tablename FROM pg_tables WHERE schemaname = 'public' AND tablename LIKE 'auth0\\_%'")).rows).toEqual([]);
+  });
+
   it("applies the NEWEST migration to a database at the previous revision", async () => {
     // The actual production upgrade path, and the one a fresh-install test
     // cannot see: DDL that is fine against an empty schema can still fail

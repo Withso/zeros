@@ -1187,6 +1187,12 @@ service boot cannot approve or defer these contracts. Restore the paired
 backup for a v1 rollback, rather than attempting to run the old binary on a
 partially or fully retired schema.
 
+Auth0 removal is one contract file, `0217_drop_auth0_tables.sql`, which drops
+the four unused `auth0_*` tables from 0208 and may run from `2026-11-02`. Pass
+`approvals=0217_drop_auth0_tables.sql` to `controlled-cutover.yml`: Alpha from
+`main`, Beta and Production from the first release branch that ships it. Once
+it is applied, an API built before 0217 cannot boot against that database.
+
 The first rollout needs a compatible bridge: binaries released before this
 phase-aware verifier still reject every unknown row. Deploy/rehearse the
 tolerant verifier against the unchanged 0121 ledger before applying 0122, retain

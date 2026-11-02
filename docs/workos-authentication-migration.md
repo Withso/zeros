@@ -5,8 +5,8 @@ implementation, dashboard configuration, deployment, and real Alpha acceptance
 are separate release gates; this document never treats a local test pass as a
 production approval.
 
-Retention: Auth0 code and configuration are removed; only the unused `0208`
-tables remain until a separately reviewed contract migration. Keep this
+Retention: Auth0 code and configuration are removed, and contract migration
+`0217_drop_auth0_tables.sql` drops the unused `0208` tables. Keep this
 document until its durable contracts move into the permanent architecture and
 deployment guides, then delete it.
 
@@ -909,8 +909,8 @@ checkout; valid sibling records with larger deadlines or capacity are retained.
    events, then repeat in Beta from the exact promoted SHA.
 7. Promote the exact Beta SHA to Production with Production autodeploy still
    disabled. Do not recreate configuration ad hoc during promotion.
-8. Auth0 code and configuration are removed. A later, separately reviewed
-   contract migration drops the unused `0208` tables.
+8. Auth0 code and configuration are removed. Contract migration
+   `0217_drop_auth0_tables.sql` drops the unused `0208` tables.
 
 Rollback restores an earlier WorkOS release across Railway, Pages, and the
 desktop together; there is no Auth0 rollback. Do not restore the deleted
