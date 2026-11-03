@@ -2,7 +2,7 @@
   "id": "local-task-shell-path-recovery",
   "kind": "replay",
   "area": "desktop-engine",
-  "fixedBy": "pending",
+  "fixedBy": "pr:817",
   "symptom": "Local Setup and Run commands cannot find newly installed tools while the engine retains its boot-time shell PATH.",
   "rule": "Only a positive pre-execution command-not-found witness permits one shell PATH refresh and restart. Exit 127 by itself never proves absence of effects; compound commands, substitutions, started commands and cancelled or replaced terminals must not replay (principles 1, 4, 7 and 13).",
   "check": "pnpm exec vitest run --maxWorkers=2 apps/desktop/src/engine/pty/__tests__/path-recovery.test.ts"
