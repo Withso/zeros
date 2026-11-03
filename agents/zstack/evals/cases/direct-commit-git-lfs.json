@@ -1,0 +1,9 @@
+{
+  "id": "direct-commit-git-lfs",
+  "kind": "replay",
+  "area": "desktop-engine",
+  "fixedBy": "pr:815",
+  "symptom": "Engine Git neutralizes every filter, so new workspaces of Git LFS repositories held pointer files and a direct commit stored LFS-tracked binaries whole in history.",
+  "rule": "Principles 10 and 13: a hardening that disables a user's Git feature must say so where it matters; refuse a direct commit it would get wrong, and fetch LFS files through the user's own git-lfs in Setup, in Local and cloud.",
+  "check": "pnpm exec vitest run apps/desktop/src/engine/git/__tests__/commit-caveats.test.ts apps/desktop/src/engine/git/__tests__/setup-lfs-step.test.ts"
+}

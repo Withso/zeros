@@ -241,3 +241,8 @@ it("keeps an ambiguous commit timeout distinct from a failed PR", async () => {
   expect(fixture.create).not.toHaveBeenCalled();
   expect(fixture.toast).toHaveBeenCalledWith("Still committing", expect.any(Object));
 });
+
+it("says that Local direct commits skip repository hooks and signing, and stays quiet for cloud", () => {
+  expect(render("/repo/workspace")).toContain("Direct commits skip repository hooks and commit signing");
+  expect(render(cloudId)).not.toContain("Direct commits skip repository hooks");
+});

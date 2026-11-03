@@ -528,6 +528,13 @@ function GithubCreatePrButton({
             <ExternalLink className="text-fg2 size-3.5" />
             <span>Create PR manually</span>
           </DropdownMenuItem>
+          {/* Local direct commits run Zeros' hardened Git; the agent route and
+              cloud workspaces commit with a Git that runs hooks and signs. */}
+          {!isCloudWorkspace(workspace.id) && (
+            <p className="text-fg3 max-w-[260px] px-2 pt-1 pb-1.5 text-xs">
+              Direct commits skip repository hooks and commit signing.
+            </p>
+          )}
         </DropdownMenuContent>
       </DropdownMenu>
     </div>

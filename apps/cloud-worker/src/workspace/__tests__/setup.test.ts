@@ -65,3 +65,26 @@ it("treats an existing admission path as final without following or overwriting 
   expect(runner).not.toHaveBeenCalled();
   expect(await readFile(outside, "utf8")).toBe("unchanged");
 });
+
+it("fetches Git LFS files before the workspace setup script, and alone when none is configured", async () => {
+  const run = async (script: string) => {
+    let ran!: (command: string) => void;
+    const called = new Promise<string>(resolve => { ran = resolve; });
+    const f = await fixture(script, async (_file, args) => { ran(args.at(-1)!); return 0; });
+    await writeFile(join(f.directory, ".gitattributes"), "*.psd filter=lfs diff=lfs merge=lfs -text\n");
+    f.setup.start(true);
+    return called;
+  };
+  const withScript = await run("pnpm install");
+  expect(withScript).toMatch(/git lfs pull/);
+  expect(withScript.indexOf("git lfs pull")).toBeLessThan(withScript.indexOf("pnpm install"));
+  expect(await run("")).toMatch(/git lfs pull/);
+});
+
+it("runs nothing extra for a repository without Git LFS", async () => {
+  const runner = vi.fn(async () => 0);
+  const f = await fixture("", runner);
+  f.setup.start(true);
+  await f.setup.dispose();
+  expect(runner).not.toHaveBeenCalled();
+});
