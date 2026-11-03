@@ -2,7 +2,7 @@
   "id": "direct-commit-signing-required",
   "kind": "replay",
   "area": "desktop-engine",
-  "fixedBy": "pending",
+  "fixedBy": "pr:815",
   "symptom": "Direct commits forced commit.gpgSign=false, so a user whose Git config signs commits got unsigned commits that signed-commit rules rejected, with no warning.",
   "rule": "Principle 2: read the user's own setting, not the engine's override, and refuse the unsigned direct commit with a pointer to the agent route or the terminal.",
   "check": "pnpm exec vitest run apps/desktop/src/engine/git/__tests__/commit-caveats.test.ts -t \"signs commits\""
