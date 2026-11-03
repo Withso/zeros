@@ -95,3 +95,15 @@ describe("zstack principles", () => {
     expect(readFileSync(join(pack, "skills/zstack-verify/SKILL.md"), "utf8")).toContain("agents/zstack/gotchas.md");
   });
 });
+
+describe("zstack delivery guidance", () => {
+  it("names every PR section the merge wrapper requires", () => {
+    const wrapper = readFileSync(join(root, "scripts/agent-merge.mjs"), "utf8");
+    const list = /const PR_SECTIONS = \[([^\]]+)\]/.exec(wrapper)?.[1] ?? "";
+    const sections = [...list.matchAll(/"([^"]+)"/g)].map(match => match[1]!);
+    expect(sections.length).toBeGreaterThanOrEqual(6);
+    const flat = (file: string) => readFileSync(join(pack, file), "utf8").replace(/\s+/g, " ");
+    for (const file of ["skills/zstack/SKILL.md", "playbooks/integrate-pr.md", "enforcement.md"])
+      for (const section of sections) expect(flat(file), `${file} omits "${section}"`).toContain(section);
+  });
+});

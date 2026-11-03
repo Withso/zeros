@@ -23,9 +23,10 @@ session itself.
    frozen patch, first check that `git diff --cached | sha256sum` equals its
    hash; an earlier `git mv` or `git checkout <rev> -- <path>` leaves other
    work staged.
-5. **Open the PR** with Why, What changes, Tests and Rollout sections, ending
-   with the repository's PR footer. Add lane labels the paths need, for example
-   `ci:ui-smoke`. Check that all four sections are present before arming. Mark
+5. **Open the PR** with Why, What changes, Tests, Rollout, Local workspace
+   impact and Cloud workspace impact sections, ending with the repository's PR
+   footer. Add lane labels the paths need, for example `ci:ui-smoke`. Check
+   that all six sections are present before arming (`enforcement.md`). Mark
    a draft ready before waiting on CI: a draft runs only the merge gate.
 6. **Pin pending eval cases.** The PR number exists only once the PR is open.
    Replace any `"fixedBy": "pending"` in `agents/zstack/evals/cases/*.json` (or
