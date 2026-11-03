@@ -335,7 +335,7 @@ export class CloudV2Store {
    * the worker's credentials in the same transaction, only if it moved, so a
    * late step can never revoke a worker that a newer wake started. */
   async transition(id: string, from: readonly CloudV2WorkspaceState[], to: CloudV2WorkspaceState,
-    patch: { boatSandboxId?: string | null; errorCode?: string | null; stopGeneration?: string; revoke?: boolean } = {}): Promise<CloudV2Workspace | null> {
+    patch: { boatSandboxId?: string | null; errorCode?: string | null; stopGeneration?: string; revoke?: boolean; unarchived?: boolean } = {}): Promise<CloudV2Workspace | null> {
     return withSystemTx(this.pool, async tx => {
     const { rows } = await tx.query<Row>(
       `UPDATE cloud_v2_workspaces SET state = $3,
@@ -355,9 +355,10 @@ export class CloudV2Store {
          stopped_at = CASE WHEN $3 = 'stopped' THEN clock_timestamp() ELSE stopped_at END,
          restore_pending = restore_pending AND $3 <> 'deleted',
          attempts = 0, next_attempt_at = NULL, updated_at = clock_timestamp()
-       WHERE id = $1 AND state = ANY($2::text[]) AND ($8::bigint IS NULL OR stop_generation = $8::bigint) RETURNING ${COLUMNS}`,
+       WHERE id = $1 AND state = ANY($2::text[]) AND ($8::bigint IS NULL OR stop_generation = $8::bigint)
+         AND (NOT $9::boolean OR archived_at IS NULL) RETURNING ${COLUMNS}`,
       [id, from, to, patch.boatSandboxId !== undefined, patch.boatSandboxId ?? null,
-        patch.errorCode !== undefined, patch.errorCode ?? null, patch.stopGeneration ?? null],
+        patch.errorCode !== undefined, patch.errorCode ?? null, patch.stopGeneration ?? null, patch.unarchived ?? false],
     );
     if (!rows[0]) return null;
     if (patch.revoke) {

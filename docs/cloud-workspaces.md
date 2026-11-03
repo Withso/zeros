@@ -376,16 +376,50 @@ workspace's creation. Running VMs receive a 24-hour Boat
 lease; a bounded background scan renews it after about 12 hours.
 
 The lifecycle loop stops a running VM after ten minutes without activity
-reports. Turns, workspace setup and recent terminal input/output keep reports flowing; an
-untouched shell eventually becomes idle. Passive history reads do not wake
+reports. Turns, workspace setup, attachment transfers, recent terminal input/output,
+and explicit file/Git mutations keep reports flowing. File saves and Git mutations
+stay busy until completion and for the same ten-minute activity window as terminal
+input/output. Reads and polls do not renew it; an untouched shell eventually
+becomes idle. Passive history reads do not wake
 the VM, and neither do reconnects: `/connect` accepts `{ "wake": false }`, and
 the single-use ticket carries that intent through bridge admission. The app
-asks to wake only for an explicit open; a missing value still wakes, for older
-callers. Explicit work over the bridge, or Start, wakes it and reconnects the
-worker. Stop
-retains the VM disk and saves a checkpoint; Delete removes the VM, its
-checkpoints and its access. Account
-and organization deletion also enqueue their workspaces for cleanup.
+asks to wake for explicit navigation from the sidebar, Dashboard or repository
+rows, or a trusted pointer press or keystroke inside the active cloud workspace.
+This includes empty space, the composer and the Files editor. There is no wake
+notice; a save joins a pending wake before dispatch. Without a pending wake, a
+save against a stopped workspace rejects as a temporary transport failure so its
+draft can be retained and retried. Hover, metadata restoration, polling, hidden
+tabs and autosave retries do not create wake intents. Stop, archive and delete
+cancel earlier input intents; input cannot reverse a shutdown in progress or
+restore an archived workspace. Owner/account changes cancel the old surface's
+intent. Local workspaces keep their existing behavior.
+
+New desktops add `wakePolicy=explicit` to the connect URL and offer the
+`zeros.cloud.v2.explicit-wake` WebSocket subprotocol alongside the existing
+protocol and ticket. The HTTP request owns the stopped-to-starting transition;
+the opted-in relay only joins an existing start or running worker. A transient
+worker disconnect redials while the workspace is still running, keeping the app
+attached so output resumes. It closes the app socket with
+`4009 / workspace_not_running` when admission or redial confirms a stopped,
+stopping or archived workspace. Queued reads,
+saves and old wake tickets cannot start compute. The desktop rejects pending
+work as a transport failure and lets fresh user input acquire the next wake.
+The connect transition atomically requires an unarchived workspace, so an
+archive committed during source authorization cannot be undone by that request.
+
+Older callers retain the existing default when `wake` is absent, and their
+bridge traffic can still wake stopped compute. An older relay selects the base
+protocol when a new desktop offers both; it retains that legacy behavior.
+Start remains explicit. Stop retains the VM disk and saves a checkpoint;
+Delete removes the VM, its checkpoints and its access. Account and organization
+deletion also enqueue their workspaces for cleanup.
+
+Roll out the control-plane negotiation before the desktop to enforce the
+background-wake rule. The mutation-activity change also requires publishing and
+selecting the updated SHA-pinned worker runtime; create/wake installs it, so an
+already-running VM adopts it on its next wake. No schema migration is needed.
+Quitting the Mac app still leaves cloud agents and terminals running, while
+Local quit retains its existing stop behavior.
 
 A new workspace branch starts from the authorized checkout hydrated into its
 own VM before worker startup. At creation the control plane records GitHub's

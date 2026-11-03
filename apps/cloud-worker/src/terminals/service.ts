@@ -1,6 +1,7 @@
 import { realpath, type FileHandle } from "node:fs/promises";
 import { createMessage, type BridgeMessage, type PtyCreateMessage, type PtyTerminalInfo } from "@zeros/protocol/messages";
 import type { AppClient } from "../agents";
+import { RECENT_ACTIVITY_MS } from "../activity";
 import { workerChildEnvironment } from "../drivers/shared/agent-environment";
 import { CheckedFiles, descriptorPath } from "../workspace/checked-files";
 import type { WorkspaceScope } from "../workspace/scope";
@@ -69,7 +70,7 @@ export class Terminals {
   private disposed = false;
   constructor(private readonly scope: WorkspaceScope, private readonly options: Options = {}) { this.files = new CheckedFiles(scope); }
 
-  get busy(): boolean { return this.pending.size > 0 || [...this.sessions.values()].some(session => !session.exit && Date.now() - session.lastActivityAt < 10 * 60_000); }
+  get busy(): boolean { return this.pending.size > 0 || [...this.sessions.values()].some(session => !session.exit && Date.now() - session.lastActivityAt < RECENT_ACTIVITY_MS); }
 
   async handle(client: AppClient, frame: BridgeMessage): Promise<void> {
     if (this.disposed || this.retiredClients.has(client)) return;

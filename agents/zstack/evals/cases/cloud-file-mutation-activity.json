@@ -1,0 +1,9 @@
+{
+  "id": "cloud-file-mutation-activity",
+  "kind": "replay",
+  "area": "cloud-worker",
+  "fixedBy": "pr:812",
+  "symptom": "Saving Files edits or performing Git mutations left the worker idle, so idle stop could interrupt an actively edited cloud workspace.",
+  "rule": "Count actual mutation work at the dispatcher, including metadata-only writes and in-flight operations; expire activity without renewing it for passive reads (principles 9, 12, 13).",
+  "check": "pnpm --dir apps/cloud-worker test src/__tests__/worker-activity.test.ts"
+}

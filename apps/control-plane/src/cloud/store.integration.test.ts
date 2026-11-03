@@ -43,6 +43,32 @@ d("cloud v2 store", () => {
     computerBuildId: null,
   });
 
+  it("never restores an archive committed while explicit connect is awaiting source authorization", async () => {
+    const workspace = await create();
+    await store.transition(workspace.id, ["creating"], "stopped");
+    let release!: () => void, authorizing = false;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    await pool.query(`INSERT INTO user_identities (user_id, provider, provider_sub, email_at_link)
+      VALUES ($1::uuid, 'workos', ($1::uuid)::text, 'fixture@example.test')`, [creator]);
+    const app = new Hono();
+    app.use("*", async (c, next) => { c.set("user", { id: creator, accountRevision: 1,
+      identity: { provider: "workos", subject: creator }, authentication: { sessionId: null, tokenExpiresAt: null } } as never); await next(); });
+    app.onError((error, c) => error instanceof HttpError ? c.json({ error: { code: error.code } }, error.status) : c.json({ error: "internal" }, 500));
+    app.route("/", createCloudV2Routes({ store, bridgeBaseUrl: "wss://api.example.test",
+      authorizeSource: async () => { authorizing = true; await gate; },
+    } as CloudV2RouteDeps));
+    const connecting = app.request(`/v1/cloud-v2/workspaces/${workspace.id}/connect?wakePolicy=explicit`, {
+      method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ wake: true }),
+    });
+    try {
+      await vi.waitFor(() => expect(authorizing).toBe(true));
+      expect((await store.requestLifecycle(workspace.id, creator, "archive")).workspace.archivedAt).not.toBeNull();
+    } finally { release(); }
+    expect((await connecting).status).toBe(409);
+    expect(await store.get(workspace.id, creator)).toMatchObject({ state: "stopped", archivedAt: expect.any(String) });
+    expect((await pool.query("SELECT count(*)::int AS n FROM cloud_v2_tokens WHERE workspace_id=$1 AND kind='connect'", [workspace.id])).rows[0].n).toBe(0);
+  });
+
   it.each([false, true])("records real worker activity through a GitHub outage before an idle-stop race (outbox=%s)", async promptOutbox => {
     const w = await create(), token = await store.rotateWorkerToken(w.id), boot = randomUUID();
     await store.acceptWorkerHello(token, boot);

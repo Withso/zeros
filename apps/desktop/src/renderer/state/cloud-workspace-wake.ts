@@ -8,6 +8,7 @@ import {
   cloudWorkspaceDocument,
   cloudWorkspaceOwnerGeneration,
   cloudWorkspaceStopVersion,
+  cloudWorkspaceLifecycleTask,
   isCloudWorkspaceLifecyclePending,
   manageCloudWorkspace,
   refreshCloudWorkspace,
@@ -41,6 +42,16 @@ interface WakeIntentState {
 // State expires with the caller's intent, not an unbounded global ID cache.
 const wakeIntents = new WeakMap<CloudWorkspaceWakeIntent, WakeIntentState>();
 const WAKE_LIMIT_MS = 15 * 60_000;
+
+/** Input may join a start, but cannot restore archived work or reverse shutdown. */
+export function canOpenCloudWorkspace(target: CloudWorkspaceTarget): boolean {
+  const doc = cloudWorkspaceDocument(target);
+  return canReadCloudWorkspace(doc) && doc?.capabilities.canWrite === true &&
+    ["ready", "busy", "stopped", "waking", "provisioning", "setting_up"].includes(doc.status) &&
+    !cloudWorkspaceLifecycleTask(target, "stop") &&
+    !cloudWorkspaceLifecycleTask(target, "archive") &&
+    !cloudWorkspaceLifecycleTask(target, "delete");
+}
 
 /** Only explicit open/send/interaction callers may enter here. Catalog/history/hover reads
  * must not acquire compute. Cancellation ends the local intent, not an already

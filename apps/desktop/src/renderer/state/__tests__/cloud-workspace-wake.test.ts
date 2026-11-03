@@ -386,17 +386,17 @@ describe("explicit cloud wake readiness", () => {
     await vi.advanceTimersByTimeAsync(5_000);
     expect(api.read).toHaveBeenCalledTimes(2);
   });
-  it("ends an older wake as soon as Stop is requested, before its HTTP response", async () => {
+  it.each(["stop", "archive", "delete"] as const)("ends an older wake as soon as %s is requested, before its HTTP response", async operation => {
     acceptCloudWorkspaceDocument(doc(1));
     let finishWake!: (value: CloudWorkspaceDocument) => void, finishStop!: (value: CloudWorkspaceDocument) => void;
-    api.wake.mockImplementation((_target, operation) => new Promise(resolve => {
-      if (operation === "stop") finishStop = resolve; else finishWake = resolve;
+    api.wake.mockImplementation((_target, action) => new Promise(resolve => {
+      if (action === operation) finishStop = resolve; else finishWake = resolve;
     }));
     const pending = wakeCloudWorkspace(target, doc(1));
     const ended = expect(pending).rejects.toMatchObject({ name: "CloudWorkspaceWakeEndedError", message: expect.stringContaining("stopped") });
-    const stopping = manageCloudWorkspace(target, "stop");
-    finishWake(doc(2, "ready")); await ended;
-    finishStop(doc(3, "stopped")); await stopping;
+    const stopping = manageCloudWorkspace(target, operation);
+    try { finishWake(doc(2, "ready")); await ended; }
+    finally { finishStop(doc(3, { stop: "stopped", archive: "archived", delete: "deleted" }[operation])); await stopping; }
     expect(api.read).not.toHaveBeenCalled();
   });
 
