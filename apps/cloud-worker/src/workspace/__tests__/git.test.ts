@@ -148,9 +148,10 @@ it("refuses a commit of Git LFS files when this VM has no LFS clean filter, and 
   // Simulate a Cloud Computer without git-lfs even where the host configures it.
   for (const key of ["clean", "smudge", "process"]) await git("config", `filter.lfs.${key}`, "");
   await git("config", "filter.lfs.required", "false");
-  await writeFile(join(root, ".gitattributes"), "*.bin filter=lfs diff=lfs merge=lfs -text\n");
-  await writeFile(join(root, "model.bin"), "binary payload\n");
-  await service.handle("git.stage", { paths: [".gitattributes", "model.bin"] });
+  await writeFile(join(root, ".gitattributes"), "assets/model.bin filter=lfs diff=lfs merge=lfs -text\n");
+  await mkdir(join(root, "assets"));
+  await writeFile(join(root, "assets", "model.bin"), "binary payload\n");
+  await service.handle("git.stage", { paths: [".gitattributes", "assets/model.bin"] });
   const before = await git("rev-parse", "HEAD");
   await expect(service.handle("git.commit", { message: "add model" })).rejects.toMatchObject({
     code: "VALIDATION_FAILED", message: expect.stringMatching(/Git LFS/),

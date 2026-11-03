@@ -36,7 +36,7 @@ export class GitService {
     const staged = (await this.git(["diff", "--cached", "--name-only", "--diff-filter=d", "-z", ...(files.length ? ["--", ...this.literal(files)] : [])], { readOnly: true }))
       .split("\0").filter(Boolean);
     if (!staged.length) return;
-    const fields = (await this.git(["check-attr", "-z", "filter", "--", ...this.literal(staged)], { readOnly: true })).split("\0");
+    const fields = (await this.git(["check-attr", "-z", "filter", "--", ...staged], { readOnly: true })).split("\0");
     const lfs: string[] = [];
     for (let index = 0; index + 2 < fields.length; index += 3) if (fields[index + 2] === "lfs") lfs.push(fields[index]!);
     if (lfs.length)

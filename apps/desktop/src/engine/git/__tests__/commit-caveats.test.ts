@@ -52,9 +52,10 @@ describe("direct commit caveats", () => {
 
   it("refuses a direct commit that includes Git LFS-tracked files and creates no commit", async () => {
     const ws = getWorkspace(workspaceId);
-    await writeFile(path.join(ws.path, ".gitattributes"), "*.bin filter=lfs diff=lfs merge=lfs -text\n");
-    await writeFile(path.join(ws.path, "model.bin"), "binary payload\n");
-    await stagePaths({ workspaceId, paths: [".gitattributes", "model.bin"] });
+    await writeFile(path.join(ws.path, ".gitattributes"), "assets/model.bin filter=lfs diff=lfs merge=lfs -text\n");
+    await mkdir(path.join(ws.path, "assets"), { recursive: true });
+    await writeFile(path.join(ws.path, "assets", "model.bin"), "binary payload\n");
+    await stagePaths({ workspaceId, paths: [".gitattributes", "assets/model.bin"] });
     const before = await head(ws.path);
     await expect(commit({ workspaceId, message: "add model" })).rejects.toMatchObject({
       code: "VALIDATION_FAILED",

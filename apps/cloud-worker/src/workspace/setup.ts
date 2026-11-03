@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { constants, lstatSync, readFileSync } from "node:fs";
+import { closeSync, constants, fstatSync, openSync, readFileSync } from "node:fs";
 import { mkdir, open, type FileHandle } from "node:fs/promises";
 import { join } from "node:path";
 import { workerChildEnvironment } from "../drivers/shared/agent-environment";
@@ -55,13 +55,17 @@ const GIT_LFS_SETUP_STEP = [
 /** Only a small regular root `.gitattributes` is read, so a planted symlink or
  * device cannot redirect or stall setup admission. */
 function usesGitLfs(checkoutPath: string): boolean {
+  let fd: number | undefined;
   try {
-    const file = join(checkoutPath, ".gitattributes");
-    const info = lstatSync(file);
+    // One descriptor for check and read: no symlink, no blocking FIFO open.
+    fd = openSync(join(checkoutPath, ".gitattributes"), constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+    const info = fstatSync(fd);
     if (!info.isFile() || info.size > 1024 * 1024) return false;
-    return /\bfilter=lfs\b/.test(readFileSync(file, "utf8"));
+    return /\bfilter=lfs\b/.test(readFileSync(fd, "utf8"));
   } catch {
     return false;
+  } finally {
+    if (fd !== undefined) closeSync(fd);
   }
 }
 

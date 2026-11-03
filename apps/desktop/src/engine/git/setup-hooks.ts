@@ -22,7 +22,7 @@ import {
   readdir,
   readlink,
 } from "node:fs/promises";
-import { lstatSync, readFileSync } from "node:fs";
+import { closeSync, constants as fsConstants, fstatSync, lstatSync, openSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { GitError } from "./errors";
 // Reuse the engine's cached login-shell PATH resolver so an inline command
@@ -471,13 +471,17 @@ const GIT_LFS_SETUP_STEP = [
 /** Root `.gitattributes` marks LFS-tracked paths. Only a small regular file is
  * read, so a symlink or device planted there cannot redirect or stall it. */
 function usesGitLfs(root: string): boolean {
+  let fd: number | undefined;
   try {
-    const file = path.join(root, ".gitattributes");
-    const info = lstatSync(file);
+    // One descriptor for check and read: no symlink, no blocking FIFO open.
+    fd = openSync(path.join(root, ".gitattributes"), fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW | fsConstants.O_NONBLOCK);
+    const info = fstatSync(fd);
     if (!info.isFile() || info.size > 1024 * 1024) return false;
-    return /\bfilter=lfs\b/.test(readFileSync(file, "utf8"));
+    return /\bfilter=lfs\b/.test(readFileSync(fd, "utf8"));
   } catch {
     return false;
+  } finally {
+    if (fd !== undefined) closeSync(fd);
   }
 }
 
