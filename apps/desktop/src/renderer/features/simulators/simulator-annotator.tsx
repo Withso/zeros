@@ -103,8 +103,8 @@ const COLORS: Record<AnnotationColor, { label: string; swatch: string }> = {
   violet: { label: "Violet", swatch: "bg-violet-primary" },
 };
 
-/** Esc leaves; ⌘Z and ⇧⌘Z undo and redo. A key a menu or field already used
- * is theirs. */
+/** Esc leaves; ⌘Z undoes, ⇧⌘Z or Ctrl-Y redoes. A key a menu or field already
+ * used is theirs. */
 function onAnnotationKeyDown(tabId: string, event: KeyboardEvent<HTMLElement>): void {
   const native = event.nativeEvent;
   if (native.defaultPrevented || native.isComposing) return;

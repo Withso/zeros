@@ -27,6 +27,7 @@ export function isNativeEditHistoryTarget(target: Element): boolean {
   return target.matches("input, textarea") && !target.closest(".xterm");
 }
 
+/** Shadow editors expose their input inside the shadow root, not activeElement. */
 function focusedElement(doc: Document): Element | null {
   let target = doc.activeElement;
   while (target?.shadowRoot?.activeElement) target = target.shadowRoot.activeElement;
@@ -45,7 +46,6 @@ export function preventUnfocusedEditHistory(event: Event): void {
     input.preventDefault();
 }
 
-/** Shadow editors expose their input inside the shadow root, not activeElement. */
 export function dispatchFocusedEditHistory(
   direction: EditHistoryDirection,
   doc: Document = document,
