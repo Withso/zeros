@@ -514,6 +514,7 @@ export class SetupManager {
           sessionId,
           resolvedCwd: cwd,
           command: args.command,
+          recoverShellPath: boundary.status?.backend === "none",
           env,
           cols: 120,
           rows: 30,

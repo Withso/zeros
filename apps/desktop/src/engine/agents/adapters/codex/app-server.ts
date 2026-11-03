@@ -589,7 +589,7 @@ export async function bootCodexAppServerRuntime(
   const logTag = opts.logTag ?? "codex-app-server";
   const cwd = opts.cwd;
 
-  const binarySource = await resolveCodexBinary({ override: opts.cliBinary });
+  const binarySource = await resolveCodexBinary({ override: opts.cliBinary, pathValue: opts.env?.PATH });
   const env = await buildSpawnEnvWithLoginPath(opts.env);
 
   // The binary-resolver returns either an executable path or the

@@ -610,6 +610,7 @@ export class RunManager {
         sessionId: args.sessionId,
         resolvedCwd: args.cwd,
         command: args.command,
+        recoverShellPath: boundary.status?.backend === "none",
         env,
         // Behave exactly as if the command had been typed into the Terminal tab,
         // which means the user's ~/.zshrc toolchain — nvm/fnm/mise/volta all put

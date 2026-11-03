@@ -5,6 +5,7 @@
 // real installs (the dev machine has a real ~/.local/bin/claude).
 
 import { afterEach, describe, expect, it } from "vitest";
+import { spawnSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as fsp from "node:fs/promises";
 import * as os from "node:os";
@@ -79,6 +80,42 @@ describe("resolveClaudeBinary", () => {
     });
     expect(r).toEqual({ path: onPath, source: "path" });
   });
+
+  it.skipIf(process.platform === "win32")(
+    "skips a readable nonexecutable install and launches the PATH install",
+    async () => {
+      const dir = freshDir();
+      const stale = makeClaude(dir, "stale/claude");
+      fs.chmodSync(stale, 0o644);
+      const onPath = makeClaude(dir, "bin/claude");
+
+      const resolved = await resolveClaudeBinary({
+        candidates: [stale],
+        pathValue: path.dirname(onPath),
+      });
+
+      expect(resolved).toEqual({ path: onPath, source: "path" });
+      expect(spawnSync(resolved.path).status).toBe(0);
+    },
+  );
+
+  it.skipIf(process.platform === "win32")(
+    "continues after nonexecutable overrides and PATH entries",
+    async () => {
+      const dir = freshDir();
+      const stale = makeClaude(dir, "stale/claude");
+      fs.chmodSync(stale, 0o644);
+      const onPath = makeClaude(dir, "bin/claude");
+
+      const resolved = await resolveClaudeBinary({
+        override: stale,
+        candidates: [],
+        pathValue: [path.dirname(stale), path.dirname(onPath)].join(path.delimiter),
+      });
+
+      expect(resolved).toEqual({ path: onPath, source: "path" });
+    },
+  );
 
   it("falls back to the bare name when nothing resolves", async () => {
     const r = await resolveClaudeBinary({ candidates: [], pathValue: "" });

@@ -1,0 +1,9 @@
+{
+  "id": "claude-terminal-executable-access",
+  "kind": "replay",
+  "area": "desktop-agents",
+  "fixedBy": "pending",
+  "symptom": "A readable but nonexecutable Claude file at an earlier install location shadows a working PATH install, so embedded login and MCP terminal commands fail.",
+  "rule": "On POSIX, a resolver candidate needs executable access; an X_OK failure must continue discovery rather than fall back to existence. Test real file permissions and launch the selected binary (principles 10 and 13).",
+  "check": "pnpm exec vitest run --maxWorkers=2 apps/desktop/src/engine/agents/__tests__/claude-binary.test.ts"
+}

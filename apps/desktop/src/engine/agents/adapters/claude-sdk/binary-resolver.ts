@@ -84,6 +84,7 @@ import { createRequire } from "node:module";
 import * as path from "node:path";
 
 import { claudeWellKnownPaths } from "../../claude-binary";
+import { loginShellPathGeneration } from "../shared/login-shell-path";
 
 // tsup compiles the engine to CJS, so the ambient `require` is the resolver
 // (matches codex/binary-resolver.ts + registry.ts).
@@ -217,7 +218,7 @@ export interface ClaudeCliResolverDeps {
 /** The three tiers that walk the filesystem rather than reading a per-call
  *  input: bundled → well-known → PATH. Split out so the ambient result can be
  *  memoized as one value (see resolveClaudeCli). */
-function resolveDiscoveredCli(deps: ClaudeCliResolverDeps): ClaudeCliSource {
+function resolveDiscoveredCli(deps: ClaudeCliResolverDeps, pathValue?: string): ClaudeCliSource {
   const isExec = deps.isExecutable ?? isExecutableFileSync;
 
   // 3. Bundled platform package (dev / source / vitest).
@@ -230,22 +231,20 @@ function resolveDiscoveredCli(deps: ClaudeCliResolverDeps): ClaudeCliSource {
   }
 
   // 5. A `claude` on the engine's PATH.
-  const onPath = (deps.onPath ?? resolveClaudeOnPath)();
+  const onPath = deps.onPath ? deps.onPath() : resolveClaudeOnPath(pathValue);
   if (onPath) return { path: onPath, source: "path" };
 
   return { path: null, source: "none" };
 }
 
-// The discovered tiers stat the filesystem and are stable for the process
-// lifetime (installing Claude Code needs a restart to be picked up anyway),
-// while resolution runs on every query build — so memoize. ONLY the ambient
-// (dependency-free) result is cached, so an injected resolver in a test can
-// neither read nor poison this.
 let cachedDiscovered: ClaudeCliSource | undefined;
+let cachedPathValue: string | undefined;
+let cachedPathGeneration = -1;
 
-/** Reset the memoized tier. Test-only — production resolution is stable. */
 export function resetClaudeCliCacheForTests(): void {
   cachedDiscovered = undefined;
+  cachedPathValue = undefined;
+  cachedPathGeneration = -1;
 }
 
 /** Resolve the `claude` executable to hand the Agent SDK as
@@ -255,7 +254,7 @@ export function resetClaudeCliCacheForTests(): void {
  *  Never throws — an unresolvable binary comes back as
  *  `{ path: null, source: "none" }`. */
 export function resolveClaudeCli(
-  opts: { override?: string } = {},
+  opts: { override?: string; pathValue?: string } = {},
   deps: ClaudeCliResolverDeps = {},
 ): ClaudeCliSource {
   const env = deps.env ?? process.env;
@@ -283,8 +282,15 @@ export function resolveClaudeCli(
 
   // 3/4/5. Discovery. Memoized only when nothing is injected.
   const ambient = Object.keys(deps).length === 0;
-  if (!ambient) return resolveDiscoveredCli(deps);
-  cachedDiscovered ??= resolveDiscoveredCli(deps);
+  const pathValue = opts.pathValue ?? env.PATH;
+  if (!ambient) return resolveDiscoveredCli(deps, pathValue);
+  const generation = loginShellPathGeneration();
+  if (cachedPathValue !== pathValue || cachedPathGeneration !== generation) {
+    cachedDiscovered = undefined;
+    cachedPathValue = pathValue;
+    cachedPathGeneration = generation;
+  }
+  cachedDiscovered ??= resolveDiscoveredCli(deps, pathValue);
   return cachedDiscovered;
 }
 

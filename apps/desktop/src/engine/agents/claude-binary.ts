@@ -16,7 +16,7 @@
 //
 //   1. **override** — a user-set `cliBinary` (Settings → Providers → Advanced).
 //   2. **well-known** — the documented install locations (official local
-//      installer, Homebrew, common user bins), checked for existence.
+//      installer, Homebrew, common user bins), checked for executable access.
 //   3. **path** — a `claude` found by scanning `process.env.PATH`.
 //   4. **fallback** — the bare name `claude`. The PTY is a LOGIN shell with the
 //      user's full profile PATH, so the shell resolves it at exec even when the
@@ -62,9 +62,10 @@ async function isExecutableFile(p: string): Promise<boolean> {
   try {
     const st = await fsp.stat(p);
     if (!st.isFile()) return false;
-    // Best-effort exec check; on platforms without X_OK semantics access()
-    // still confirms the file is reachable.
-    await fsp.access(p, fsp.constants.X_OK).catch(() => fsp.access(p));
+    await fsp.access(
+      p,
+      process.platform === "win32" ? fsp.constants.F_OK : fsp.constants.X_OK,
+    );
     return true;
   } catch {
     return false;

@@ -716,14 +716,18 @@ function resolveRuntime(): { cmd: string; electron: boolean } {
   return { cmd: "node", electron: false };
 }
 
-function resolveExecutable(command: string): string | null {
+function resolveExecutable(command: string, pathValue = process.env.PATH): string | null {
   if (path.isAbsolute(command)) return existsSync(command) ? command : null;
-  for (const entry of (process.env.PATH ?? "").split(path.delimiter)) {
+  for (const entry of (pathValue ?? "").split(path.delimiter)) {
     if (!entry) continue;
     const candidate = path.join(entry, command);
     if (existsSync(candidate)) return candidate;
   }
   return null;
+}
+
+export function resolveCursorHostExecutable(env: Readonly<Record<string, string>>): string | null {
+  return resolveExecutable(resolveRuntime().cmd, env.PATH);
 }
 
 /**
@@ -791,7 +795,7 @@ export function spawnSubprocessTransport(
     return null;
   }
   const runtime = resolveRuntime();
-  const cmd = options ? resolveExecutable(runtime.cmd) : runtime.cmd;
+  const cmd = options ? resolveExecutable(runtime.cmd, options.env.PATH) : runtime.cmd;
   if (!cmd) {
     console.error(
       `[cursor-host] cannot resolve host runtime ${runtime.cmd} to an absolute executable`,
