@@ -5,5 +5,5 @@
   "fixedBy": "pr:814",
   "symptom": "After sixteen distinct cloud workspaces, retired chat snapshots consumed the live connection limit and the next open required an app restart. Pending first-history reads also counted twice.",
   "rule": "Count transport reservations separately from retained presentation; release the least recently used idle peer, protect visible and live work through exact-owner routing, and bound retired snapshots (zstack principles 1, 3, 8, 9, 13, 14).",
-  "check": "pnpm test:git apps/desktop/src/renderer/platform/bridge/__tests__/cloud-connection-capacity.test.ts apps/desktop/src/renderer/platform/bridge/__tests__/cloud-connection-retention.test.ts apps/desktop/src/renderer/platform/bridge/__tests__/bridge-provider-local-git-routing.test.ts"
+  "check": "pnpm test:git apps/desktop/src/renderer/platform/bridge/__tests__/cloud-connection-capacity.test.ts apps/desktop/src/renderer/platform/bridge/__tests__/cloud-connection-retention.test.ts apps/desktop/src/renderer/platform/bridge/__tests__/bridge-provider-local-git-routing.test.ts apps/desktop/src/renderer/platform/bridge/__tests__/bridge-provider-boot.test.ts"
 }

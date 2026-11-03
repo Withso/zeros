@@ -32,7 +32,7 @@ function providerRouting(open: WorkspaceRuntimeOptions["open"]) {
     openCloudV2Runtime: open, getCloudWorkspaceRows: () => [], cloudWorkspaceCatalogConfirmed: () => false,
     canReadCloudWorkspace: (doc: unknown) => !!doc, cloudWorkspaceDocument: document, cloudCatalogGeneration: () => 1,
     cloudWorkspaceStopVersion: () => 0, isCloudWorkspaceLifecyclePending: () => false, cloudWorkspaceOperation: vi.fn(),
-    cloudWorkspaceKey, useWorkspaceStore: { getState: () => selection }, selectActiveFolder: (state: typeof selection) => state.folder,
+    cloudWorkspaceKey, getActiveWorkspaceFolder: () => selection.folder,
     cloudWorkspaceLifecycleTask: (target: CloudWorkspaceTarget, operation: string) =>
       operation === "wake" && wake.target && cloudWorkspaceKey(target) === cloudWorkspaceKey(wake.target) ? Promise.resolve() : undefined,
     readCloudV2History: vi.fn(async () => ({ chats: [], chatDeletions: [] })),

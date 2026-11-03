@@ -10,6 +10,7 @@
 import "../../../../../styles/zeros-tokens.css";
 import "../../../../../styles/semantic-tokens.css";
 import "../../../../../styles/globals.css";
+import "./isolated-editor-drafts";
 
 import {
   DESIGN_RUNTIME_SOURCE,
@@ -264,7 +265,6 @@ const pricingSource = `<!doctype html>
 
 async function main() {
   if (new URLSearchParams(location.search).has("motionOwner")) {
-    await import("./isolated-editor-drafts");
     const { mountDesignMotionOwnerHarness } = await import("./harness-design-motion-owner");
     mountDesignMotionOwnerHarness();
     return;
@@ -312,7 +312,6 @@ async function main() {
     ]),
   );
 
-  await import("./isolated-editor-drafts");
   const React = await import("react");
   const WorkbenchPane = workbenchHarness ? (await import("../shell/workbench/workbench-pane")).WorkbenchPane : null;
   const ConversationPane = workbenchHarness ? (await import("../shell/conversation/conversation-pane")).ConversationPane : null;

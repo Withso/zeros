@@ -6,7 +6,7 @@ import { createBranchCatalogCache } from "../../../state/read-caches";
 import { PrStatusRow } from "../pr-status-row";
 
 const fixture = vi.hoisted(() => ({ ready: true, changes: true, notice: vi.fn(() => null), document: undefined as { status: string; capabilities: { githubPullRequests?: number }; githubUnavailableReason?: string } | undefined, changesProbe: vi.fn() }));
-vi.mock("../../../platform/runtime", () => ({ useNativeRuntime: () => ({ ready: fixture.ready }), onNativeBeforeQuit: () => () => {} }));
+vi.mock("../../../platform/runtime", () => ({ useNativeRuntime: () => ({ ready: fixture.ready }) }));
 vi.mock("../use-workspace-has-changes", () => ({ useWorkspaceHasChanges: (...args: unknown[]) => { fixture.changesProbe(...args); return fixture.changes; } }));
 vi.mock("../../../platform/use-cloud-github-pr", () => ({ useCloudGithubPrDocument: () => fixture.document }));
 vi.mock("../cloud-history-notice", () => ({ CloudHistoryNotice: fixture.notice }));

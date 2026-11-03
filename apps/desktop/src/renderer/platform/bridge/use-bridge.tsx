@@ -34,7 +34,7 @@ import { cloudWorkspaceKey } from "./cloud-workspace-key";
 import { openCloudV2Runtime } from "./open-cloud-v2-runtime";
 import { cloudV2CheckoutPath, readCloudV2History } from "../cloud-v2";
 import { canReadCloudWorkspace, cloudCatalogGeneration, cloudWorkspaceCatalogConfirmed, cloudWorkspaceDocument, cloudWorkspaceLifecycleTask, cloudWorkspaceOperation, cloudWorkspaceStopVersion, getCloudWorkspaceRows, isCloudWorkspaceLifecyclePending } from "../../state/cloud-workspace-catalog";
-import { selectActiveFolder, useWorkspaceStore } from "../../state/store";
+import { getActiveWorkspaceFolder } from "../../state/active-workspace-folder";
 import { wireWorkbenchConnectionRejection } from "../../state/workbench-availability";
 
 // ── Context ──────────────────────────────────────────────
@@ -61,7 +61,7 @@ export function BridgeProvider({ children }: { children: React.ReactNode }) {
         workspaces: () => getCloudWorkspaceRows() as unknown as Record<string, unknown>[],
         workspacesConfirmed: cloudWorkspaceCatalogConfirmed,
         canAccess: target => canReadCloudWorkspace(cloudWorkspaceDocument(target)),
-        liveWork: target => selectActiveFolder(useWorkspaceStore.getState()) === cloudWorkspaceKey(target) ||
+        liveWork: target => getActiveWorkspaceFolder() === cloudWorkspaceKey(target) ||
           cloudWorkspaceDocument(target)?.status === "busy" || !!cloudWorkspaceLifecycleTask(target, "wake"),
         canReuseForWork: target => {
           const doc = cloudWorkspaceDocument(target);

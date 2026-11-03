@@ -10,7 +10,6 @@ const mocks = vi.hoisted(() => ({
 
 vi.mock("../../../platform/runtime", () => ({
   nativeInvoke: mocks.nativeInvoke,
-  onNativeBeforeQuit: () => () => {},
 }));
 vi.mock("../../../platform/context-graph", () => ({
   notifyContextGraphChanged: mocks.notifyContextGraphChanged,

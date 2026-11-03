@@ -29,7 +29,7 @@ vi.mock("../../../platform/bridge/workspace-bridge", () => ({
   bridgeDbPull: vi.fn(),
   bridgeChatSummaries: vi.fn(),
 }));
-vi.mock("../../../platform/runtime", () => ({ nativeInvoke: vi.fn(), onNativeBeforeQuit: () => () => {} }));
+vi.mock("../../../platform/runtime", () => ({ nativeInvoke: vi.fn() }));
 
 import { loadFullTranscript } from "../agent-history-client";
 

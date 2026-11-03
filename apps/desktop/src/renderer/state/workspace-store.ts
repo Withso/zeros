@@ -1,4 +1,5 @@
 import { create } from "zustand";
+import { bindActiveWorkspaceFolder } from "./active-workspace-folder";
 import { buildDirectFileOpenAction } from "../shell/workbench/direct-file-open";
 import { isRunSessionId } from "../platform/workspace-run-identity";
 import {
@@ -2219,6 +2220,7 @@ export const useWorkspaceStore = create<WorkspaceStore>((set, get) => ({
     });
   },
 }));
+bindActiveWorkspaceFolder(() => selectActiveFolder(useWorkspaceStore.getState()));
 
 // Start reading the boot chat's Local transcript copy before React renders, so
 // the first frames after launch paint it while the engine is still starting.
