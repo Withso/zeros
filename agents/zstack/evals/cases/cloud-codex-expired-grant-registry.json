@@ -1,0 +1,9 @@
+{
+  "id": "cloud-codex-expired-grant-registry",
+  "kind": "replay",
+  "area": "cloud-worker",
+  "fixedBy": "pr:819",
+  "symptom": "An expired Codex proxy grant remained authenticated in the cloud registry and an idle reused driver could admit more input with it.",
+  "rule": "Principles 2, 3 and 13: registry selection and new native work use one credential-usability verdict; reattachment to an already running turn does not admit new work or stop that turn.",
+  "check": "pnpm --dir apps/cloud-worker test --maxWorkers=2 src/__tests__/cloud-failure-reasons.test.ts"
+}

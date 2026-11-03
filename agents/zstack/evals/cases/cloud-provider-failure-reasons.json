@@ -1,0 +1,9 @@
+{
+  "id": "cloud-provider-failure-reasons",
+  "kind": "replay",
+  "area": "cloud-worker",
+  "fixedBy": "pr:819",
+  "symptom": "Cloud provider authentication, rate, missing-session and model failures became a generic protocol error after the worker discarded the native category.",
+  "rule": "Principles 2, 5, 11 and 13: classify provider evidence before sanitizing, retain bounded metadata in receipts and durable history, preserve worker adoption misses as recoverable, and test old desktop decoders with real new worker records in both version directions.",
+  "check": "pnpm --dir apps/cloud-worker test --maxWorkers=2 src/__tests__/cloud-failure-reasons.test.ts"
+}
