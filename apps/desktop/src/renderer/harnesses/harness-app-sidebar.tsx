@@ -4,7 +4,6 @@
 import "../../../../../styles/zeros-tokens.css";
 import "../../../../../styles/semantic-tokens.css";
 import "../../../../../styles/globals.css";
-import "./isolated-editor-drafts";
 import { createRoot } from "react-dom/client";
 import type { RuntimeClient } from "../platform/bridge/ws-client";
 import type { Workspace } from "../platform/git";
@@ -435,6 +434,8 @@ const fixtureBridge = {
   },
 } as unknown as RuntimeClient;
 setActiveBridge(fixtureBridge);
+// Draft isolation imports persisted app stores, which must see the seeded storage.
+await import("./isolated-editor-drafts");
 // PR buttons and Dashboard recovery observe the provider's connection as well
 // as the request singleton. Give those scenarios the connected Local transport.
 const { BridgeProvider } = await import("../platform/bridge/use-bridge");

@@ -2,12 +2,10 @@
 import "../../../../../styles/zeros-tokens.css";
 import "../../../../../styles/semantic-tokens.css";
 import "../../../../../styles/globals.css";
-import "./isolated-editor-drafts";
 import React from "react";
 import { createRoot } from "react-dom/client";
 import { RuntimeClient } from "../platform/bridge/ws-client";
 import { WorkspaceRuntimeClient } from "../platform/bridge/workspace-runtime-client";
-import { BridgeProvider } from "../platform/bridge/use-bridge";
 import type { FilesToCopyPreviewWire } from "../platform/bridge/workspace-bridge";
 import type { StatusResult } from "../platform/git";
 import type { SessionsActions } from "../features/agent/sessions-context";
@@ -272,6 +270,8 @@ Object.defineProperty(RuntimeClient.prototype, "status", { get: () => "connected
 RuntimeClient.prototype.connect = () => Promise.resolve();
 WorkspaceRuntimeClient.prototype.request = fixtureBridge.request;
 setActiveBridge(fixtureBridge);
+await import("./isolated-editor-drafts");
+const { BridgeProvider } = await import("../platform/bridge/use-bridge");
 const { useWorkspaceStore, selectActiveFolder } =
   await import("../state/store");
 // This focused harness omits app-shell's chat persistence. Supply its first
