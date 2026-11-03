@@ -2,7 +2,7 @@
   "id": "editor-context-menu-history",
   "kind": "replay",
   "area": "desktop-native",
-  "fixedBy": "pending",
+  "fixedBy": "pr:810",
   "symptom": "Editable context menus had no Undo or Redo entries, and native roles cannot reach custom editor histories reliably.",
   "rule": "Principles 10, 12 and 13: application and context menus share one focused-surface dispatch route with the real Electron template tested against existing mocks.",
   "check": "pnpm exec vitest run apps/desktop/electron/__tests__/context-menu-history.test.ts"

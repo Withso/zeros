@@ -2,7 +2,7 @@
   "id": "edit-menu-custom-editor-history",
   "kind": "replay",
   "area": "renderer-ui",
-  "fixedBy": "pending",
+  "fixedBy": "pr:810",
   "symptom": "Edit-menu Undo/Redo delegated CodeMirror and TipTap transactions to Blink, whose empty native stack did not emit history beforeinput; macOS menu shortcuts therefore silently failed.",
   "rule": "Principles 10, 12 and 13: route history once to the focused editor's real command owner, preserve Design priority, and consume empty custom histories without falling through to another input.",
   "check": "pnpm exec vitest run apps/desktop/src/renderer/shell/__tests__/edit-history-menu.test.ts"

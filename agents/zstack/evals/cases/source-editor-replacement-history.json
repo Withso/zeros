@@ -2,7 +2,7 @@
   "id": "source-editor-replacement-history",
   "kind": "replay",
   "area": "renderer-state",
-  "fixedBy": "pending",
+  "fixedBy": "pr:810",
   "symptom": "Discarding a file draft or adopting an external disk revision added a normal CodeMirror transaction, allowing Undo to resurrect retired content.",
   "rule": "Principles 1, 10 and 13: explicit source replacements retire history, while save echoes, autosave and hidden view retention preserve it across Local and cloud owners.",
   "check": "pnpm exec vitest run apps/desktop/src/renderer/shell/workbench/tabs/code-editor/__tests__/code-editor-history.test.ts"
