@@ -51,6 +51,21 @@ app requests and security notifications recheck that session in the database,
 with the relay heartbeat repairing missed notifications. Account, organization
 and workspace authorization loss still revoke the whole workspace room.
 
+The desktop keeps at most 16 live cloud connections, including admissions still
+loading their first chat snapshot. When another workspace needs a connection,
+it releases the least recently used idle connection. The selected workspace,
+busy VMs and pending opens or wakes stay attached. If all 16 are in use, the
+request asks the user to retry after one finishes connecting or becomes idle;
+no app restart is needed. Releasing a desktop connection does not stop its VM,
+agents or terminals. Its next explicit open reconnects through normal admission.
+
+Released connections do not consume live capacity. The desktop retains up to
+64 recently used retired chat snapshots; older history remains available from
+the control-plane mirror without waking a VM. Account replacement and access
+revocation still clear or prune the exact owner's connections and snapshots.
+Local Personal and organization-local connections use the sidecar independently
+of these cloud limits.
+
 The worker keeps outbound HTTPS to the control plane under
 `/v2/cloud/worker/*` for work that continues without an attached app: `hello`
 and configuration, the history mirror, activity reports and GitHub
