@@ -78,9 +78,9 @@ describe("editable diff's real Pierre editor", () => {
       expect(await page.evaluate(() => window.diffHistoryFixture.command("undo"))).toBe("none");
       await page.evaluate(() => { const f = window.diffHistoryFixture; f.active = true; f.render(); });
       await editor.click();
-      await page.keyboard.press("Control+z");
+      await page.keyboard.press("ControlOrMeta+z");
       expect(await page.evaluate(() => window.diffHistoryFixture.value)).toBe("draft\n");
-      await page.keyboard.press("Control+Shift+z");
+      await page.keyboard.press("ControlOrMeta+Shift+z");
       expect(await page.evaluate(() => window.diffHistoryFixture.value)).toBe(edited);
       await page.evaluate(() => { const f = window.diffHistoryFixture; f.value = "reloaded\n"; f.revision++; f.render(); });
       await editor.click();

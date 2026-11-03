@@ -263,10 +263,10 @@ export function CodeEditor({
   // of a cold open) reads as the code theme rather than the app's chrome white.
   const baseFg = useCodeThemeFg(codeThemeOpt.shiki);
 
-  // Keep the latest onSave for the ⌘S keymap WITHOUT re-creating the
+  // Keep the latest value + onSave for the ⌘S keymap WITHOUT re-creating the
   // extension on every keystroke (that would churn the whole editor config).
-  const latest = useRef({ onSave, offscreen });
-  latest.current = { onSave, offscreen };
+  const latest = useRef({ value, onSave, offscreen });
+  latest.current = { value, onSave, offscreen };
 
   useEffect(() => {
     let cancelled = false;
@@ -287,8 +287,12 @@ export function CodeEditor({
             key: "Mod-s",
             preventDefault: true,
             run: (view) => {
-              if (!latest.current.offscreen)
-                latest.current.onSave?.(view.state.doc.toString());
+              const { value: controlled, onSave: save, offscreen: hidden } = latest.current;
+              // CodeMirror normalizes line endings. Save the controlled text while
+              // it is the same document, so an untouched CRLF file stays as is;
+              // the live document wins only when the parent has not caught up.
+              if (!hidden)
+                save?.(view.state.toText(controlled).eq(view.state.doc) ? controlled : view.state.doc.toString());
               return true;
             },
           },

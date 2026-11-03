@@ -162,6 +162,14 @@ describe.each(["/personal/a", "/organization/a", "cloud://organization/a"])("sou
     return EditorView.findFromDOM(host.querySelector(".cm-content")!)!;
   }
 
+  it("keeps an untouched CRLF file byte-identical and clean on Cmd/Ctrl+S", async () => {
+    const view = await renderSource("one\r\ntwo\r\n");
+    act(() => view.contentDOM.dispatchEvent(new KeyboardEvent("keydown", { key: "s", ctrlKey: true, bubbles: true, cancelable: true })));
+    await settle();
+    expect(writes.save).not.toHaveBeenCalled();
+    expect(controls!.dirty).toBe(false);
+  });
+
   it("resets history after explicit discard", async () => {
     const view = await renderSource("base");
     insert(view, " edit");

@@ -43,15 +43,15 @@ describe("native controlled-input history", () => {
       await page.locator("#a").click();
       await page.keyboard.type("commit message");
       await page.locator("#b").click();
-      await page.keyboard.press("Control+z");
+      await page.keyboard.press("ControlOrMeta+z");
       expect(await page.locator("#a").inputValue()).toBe("commit message");
       expect(await page.locator("#b").evaluate(node => node === document.activeElement)).toBe(true);
       await page.locator("#a").click();
-      await page.keyboard.press("Control+z");
+      await page.keyboard.press("ControlOrMeta+z");
       const undone = await page.locator("#a").inputValue();
       expect(undone).not.toBe("commit message");
       expect(await page.locator("output").textContent()).toBe(JSON.stringify({ a: undone, b: "" }));
-      await page.keyboard.press("Control+Shift+z");
+      await page.keyboard.press("ControlOrMeta+Shift+z");
       expect(await page.locator("#a").inputValue()).toBe("commit message");
       expect(await page.locator("output").textContent()).toBe(JSON.stringify({ a: "commit message", b: "" }));
     } finally { await page.close(); }
