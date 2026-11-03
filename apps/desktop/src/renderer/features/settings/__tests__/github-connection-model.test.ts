@@ -4,6 +4,7 @@ import type { GithubCredentialSummary } from "@zeros/protocol/github-auth";
 import {
   githubAppConnectOptions,
   githubAutomaticSetup,
+  githubHealthDetailCopy,
   githubMethodLabel,
   githubMethodStatusCopy,
   githubRefreshFailureSnapshot,
@@ -181,5 +182,23 @@ describe("GitHub settings row helpers", () => {
     });
     expect(next.methods["gh-cli"]).toBe(snapshot.methods["gh-cli"]);
     expect(next.methods.pat).toBe(snapshot.methods.pat);
+  });
+});
+
+describe("GitHub health diagnosis", () => {
+  it.each([
+    [{ health: "connected" }, null],
+    [{ health: "rate-limited" }, "GitHub is rate-limiting requests. This connection has not been removed."],
+    [{ health: "sso-required" }, "Your organization requires SAML authorization for this connection."],
+    [{ health: "not-installed" }, "The GitHub App isn’t installed on any account yet."],
+    [{ health: "not-installed", detail: "Your account is authorized, but the GitHub App is not installed anywhere." },
+      "Your account is authorized, but the GitHub App is not installed anywhere."],
+    [{ health: "suspended" }, "This installation was suspended by the account owner."],
+    [{ health: "invalid", detail: "ignored" }, "GitHub revoked this connection. Reconnect to continue."],
+    [{ health: "unavailable", detail: "This GitHub connection needs to be re-authorized." },
+      "This GitHub connection needs to be re-authorized."],
+    [{ health: "unavailable" }, "Couldn’t check this connection. You may be offline."],
+  ] as const)("describes %o", (patch, copy) => {
+    expect(githubHealthDetailCopy(summary({ method: "github-app", ...patch }))).toBe(copy);
   });
 });

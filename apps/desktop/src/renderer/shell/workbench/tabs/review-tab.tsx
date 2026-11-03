@@ -51,13 +51,17 @@ import {
   type ReviewMergeMethod,
   type ReviewProvider,
 } from "../../pr/review-provider";
-import { humanGitError, useReviewLiveData } from "./review-data";
+import {
+  humanGitError,
+  reviewReadFailure,
+  useReviewLiveData,
+} from "./review-data";
+import { useReviewGithubFailure } from "../../pr/review-github-failure";
 import { reviewActionBlockReason, summarizeChecks } from "./review-model";
 import {
   Centered,
   OutcomeGlyph,
   PrStateBadge,
-  ReviewEmptyState,
 } from "./review-shared-components";
 import { ReviewChangesSection } from "./review-changes";
 import {
@@ -71,6 +75,13 @@ import { ReviewTimelineSection } from "./review-timeline";
 import type { ReviewSubtab } from "../tab-model";
 
 let appendCounter = 0;
+
+/** The sign-in probe answers a boolean, not an error. Give the gate one stable
+ *  rejection so the banner names the connection like any refused read. */
+const GITHUB_SIGNED_OUT = Object.assign(
+  new Error("GitHub did not confirm a signed-in account."),
+  { code: "NOT_AUTHENTICATED" },
+);
 
 // Published PR diffs are bounded per-workspace snapshots. The provider-backed PR
 // model already uses stale-while-revalidate; matching that behavior here keeps
@@ -270,7 +281,7 @@ export function ReviewView({
     headSha?: string;
     baseSha?: string;
     loading: boolean;
-    error: string | null;
+    error: unknown;
   }>(() => ({
     key: filesKey,
     files: reviewFilesCache.get(filesKey)?.files ?? EMPTY_REVIEW_FILES,
@@ -417,7 +428,7 @@ export function ReviewView({
           return;
         setFilesSnapshot((current) =>
           current.key === filesKey
-            ? { ...current, loading: false, error: humanGitError(e) }
+            ? { ...current, loading: false, error: reviewReadFailure(e) }
             : current,
         );
       })
@@ -436,12 +447,27 @@ export function ReviewView({
   }, [active, provider, workspaceId, prNumber, baseBranch, filesKey, diffGeneration, filesReloadNonce, snap.pr?.headSha, reviewHeadSha, reviewBaseSha]);
 
   const pr = snap.pr;
+  // The sign-in gate is the review's failure even when the published diff
+  // was refused first: both are the same connection, named in the banner.
+  const signedOut = snap.authed === false;
+  const primaryError = useReviewGithubFailure(
+    signedOut ? GITHUB_SIGNED_OUT : snap.error ?? filesError,
+    { workspaceId, active },
+  );
+  const resourceError = useReviewGithubFailure(
+    snap.resourceErrors.checks ??
+      snap.resourceErrors.commits ??
+      snap.resourceErrors.timeline ??
+      (sub === "changes" ? githubReview.error : null),
+    { workspaceId, active },
+  );
   useWorkbenchStatusSource(
     {
-      error: snap.error ?? filesError,
-      pending: snap.refreshing || filesLoading,
+      error: primaryError,
+      pending: snap.refreshing || (!signedOut && filesLoading),
       primary: true,
       hasContent:
+        !signedOut &&
         !!pr &&
         (sub === "changes"
           ? cachedFiles !== undefined || files.length > 0
@@ -462,11 +488,7 @@ export function ReviewView({
   );
   useWorkbenchStatusSource(
     {
-      error:
-        snap.resourceErrors.checks ??
-        snap.resourceErrors.commits ??
-        snap.resourceErrors.timeline ??
-        (sub === "changes" ? githubReview.error : null),
+      error: resourceError,
       pending:
         snap.refreshing ||
         (sub === "changes" && !!githubReview.source?.loading),
@@ -512,14 +534,7 @@ export function ReviewView({
   }, [markReady, prNumber, repoSlug]);
 
   // ── top-level gates ──
-  if (snap.authed === false) {
-    return (
-      <ReviewEmptyState
-        title={`Connect ${provider.hostLabel}`}
-        subtitle={`Connect ${provider.hostLabel} in Settings → Integrations to open and review pull requests.`}
-      />
-    );
-  }
+  if (signedOut) return <WorkbenchEmptyState type="review" />;
   if (!pr) {
     if (snap.error) {
       return (

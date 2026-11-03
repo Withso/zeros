@@ -29,6 +29,7 @@ import { EmptyState, useSourceTarget } from "./changes-tab";
 import { ReviewView } from "./review-tab";
 import { isWorkspacePrSyncEligible, retryWorkspacePrDiscovery } from "../../pr/use-workspace-pr-sync";
 import { useWorkspacePrDiscoveryState } from "../../pr/workspace-pr-discovery-state";
+import { useReviewGithubFailure } from "../../pr/review-github-failure";
 import { isCloudWorkspace, parseCloudScopedId } from "../../../platform/bridge/cloud-workspace-key";
 import { WorkbenchEmptyState, useWorkbenchStatusSource } from "../tab-status";
 
@@ -66,8 +67,12 @@ export const ReviewSurface = React.memo(function ReviewSurface({
   const discovering = isWorkspacePrSyncEligible(workspace) &&
     !isCloudWorkspace(workspace?.path) && !isCloudWorkspace(workspace?.id) &&
     !parseCloudScopedId(workspace?.id);
+  const discoveryError = useReviewGithubFailure(
+    discovering ? discovery.error : null,
+    { workspaceId: workspace?.id, active: active && discovering },
+  );
   useWorkbenchStatusSource({
-    error: discovering ? discovery.error : null,
+    error: discoveryError,
     pending: discovering && discovery.pending,
     primary: true,
     hasContent: !discovering || discovery.checked,

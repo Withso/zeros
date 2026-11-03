@@ -18,6 +18,20 @@ describe("describePrAccessBlock", () => {
     });
   });
 
+  // A GitHub App that needs re-authorization reaches the engine as "no token",
+  // exactly like never connecting; Settings' diagnosis tells them apart.
+  it("repeats Settings' diagnosis for a connection that needs attention", () => {
+    const diagnosis = "This GitHub connection needs to be re-authorized.";
+    const expected = { title: "Your GitHub connection needs attention", description: diagnosis, openSettings: true };
+    expect(describePrAccessBlock({ code: "NOT_AUTHENTICATED", connected: false, diagnosis })).toEqual(expected);
+    expect(describePrCreateFailure({ code: "NOT_AUTHENTICATED", message: "Not signed in to GitHub", diagnosis }, { state: "unknown" }))
+      .toEqual(expected);
+    expect(describePrCreateFailure({ code: "NOT_AUTHENTICATED" }, { state: "blocked", code: "NOT_AUTHENTICATED", connected: false, diagnosis }))
+      .toEqual(expected);
+    // Other refusals keep their own explanation.
+    expect(describePrAccessBlock({ code: "GITHUB_SSO_REQUIRED", diagnosis }).title).toBe("This organization needs GitHub sign-in");
+  });
+
   // The reported bug: a connected GitHub App whose installation doesn't cover
   // this repository. GitHub answers with a 404, `git push` reports "Repository
   // not found", and the transport classifier has to call that

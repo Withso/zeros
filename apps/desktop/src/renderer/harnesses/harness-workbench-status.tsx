@@ -48,6 +48,7 @@ import { invalidateWorkspaceFileData } from "../shell/workspace-file-data-cache"
 import {
   designCheckoutStatusCache,
   designDirectoryTargetCache,
+  ghAuthStatusCache,
 } from "../state/read-caches";
 import { designDirectoryTargetKeyForWorkspace } from "../state/design-directory-target";
 import { prefetchReviewLiveData } from "../shell/workbench/tabs/review-data";
@@ -102,6 +103,8 @@ for (const target of Object.values(targets)) {
 }
 const reads: { folder: string; op: string }[] = [];
 const failures = new Map<string, string>();
+/** Engine GitError codes carried by a failure, e.g. a refused GitHub read. */
+const failureCodes = new Map<string, string>();
 const secondaryFailures = new Map<string, string>();
 const nextReadFailures = new Map<string, number>();
 const secondaryRetries = new Map<string, number>();
@@ -230,7 +233,8 @@ const provider: ReviewProvider = {
   authStatus: async () => ({ authenticated: true }),
   getPr: async () => {
     const failure = failures.get(config.folder);
-    if (failure) throw new Error(failure);
+    const code = failureCodes.get(config.folder);
+    if (failure) throw Object.assign(new Error(failure), code ? { code } : {});
     return {
       number: 42,
       url: "https://github.com/example/fixture/pull/42",
@@ -532,12 +536,32 @@ const fixture = {
       kind,
     );
   },
-  fail(message: string | null, secondary = false) {
+  fail(message: string | null, secondary = false, code?: string) {
     const map = secondary ? secondaryFailures : failures;
     if (message) map.set(config.folder, message);
     else map.delete(config.folder);
+    if (!secondary && message && code) failureCodes.set(config.folder, code);
+    else if (!secondary) failureCodes.delete(config.folder);
     if (secondary) secondaryRetries.set(config.folder, 0);
     publish();
+  },
+  /** Settings' GitHub snapshot in the reported state: the selected App row
+   * kept its login but needs re-authorization. */
+  githubNeedsReauthorization() {
+    ghAuthStatusCache.setData("auth", {
+      selectedMethod: "github-app",
+      methods: {
+        "gh-cli": { method: "gh-cli", health: "connected", configured: true, available: true, login: "fixture" },
+        "github-app": {
+          method: "github-app",
+          health: "unavailable",
+          configured: true,
+          login: "fixture",
+          detail: "This GitHub connection needs to be re-authorized.",
+        },
+        pat: { method: "pat", health: "not-connected", configured: false },
+      },
+    });
   },
   failNextReads(count: number) {
     nextReadFailures.set(config.folder, count);

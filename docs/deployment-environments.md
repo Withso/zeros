@@ -185,10 +185,42 @@ Set these independently in every environment:
 | `INVITE_LINK_BASE`           | `https://app-alpha.zeros.build/invite`   | `https://app-beta.zeros.build/invite`   | `https://app.zeros.build/invite`              |
 | `GITHUB_OAUTH_CALLBACK_URL`  | matching Alpha API callback              | matching Beta API callback              | matching Production API callback              |
 | `GITHUB_COMPLETION_PAGE_URL` | matching Alpha app page                  | matching Beta app page                  | matching Production app page                  |
+| `GITHUB_REFRESH_BINDING_SECRET` | unique Alpha binding key (required)   | unique Beta binding key (required)      | unique Production binding key (required)      |
 
 Use separate GitHub App registrations per environment. Keep OAuth secrets,
 refresh-binding secrets, database credentials, Intercom credentials, and Linear
 credentials in Railway only.
+
+#### GitHub secret rotation
+
+Desktop GitHub App connections refresh through a refresh binding that the
+control plane signs. Rotating the key that signed outstanding bindings makes
+every connected desktop reconnect, so these secrets rotate with overlap:
+
+- **First adoption.** Alpha, Beta and Production refuse to boot unless
+  `GITHUB_REFRESH_BINDING_SECRET` or `GITHUB_REFRESH_BINDING_KEYS_JSON` is set,
+  and `/healthz` keeps the previous deployment serving. Before deploying, set
+  `GITHUB_REFRESH_BINDING_SECRET` to the value that signs today's bindings:
+  its current value, or `GITHUB_APP_CLIENT_SECRET` when it was never set.
+  Never seed a new random value: that is the fleet-wide reconnect this
+  prevents.
+- **Binding key.** Add the new key as the next version in
+  `GITHUB_REFRESH_BINDING_KEYS_JSON` (keep `GITHUB_REFRESH_BINDING_SECRET` as
+  version 1), set `GITHUB_REFRESH_BINDING_CURRENT_KEY_VERSION` to it, and
+  deploy. Each desktop's next refresh, within about eight hours of use, moves
+  it to the new key. Remove an old version only after the log line
+  `refresh binding verified with retired key version` stops appearing for the
+  refresh-token lifetime (six months), since a desktop left closed still holds
+  its old binding. Rolling back across a rotation strands desktops that
+  already moved; roll forward instead.
+- **OAuth client secret.** Bindings no longer depend on it. Generate a new
+  client secret in the GitHub App settings, deploy it as
+  `GITHUB_APP_CLIENT_SECRET`, confirm a desktop refresh succeeds, then delete
+  the old secret on GitHub.
+- **App registration.** A different App or client ID always requires every
+  user to authorize again; change it only as a planned migration.
+- Change Alpha first, confirm `/healthz` and one desktop refresh, then Beta and
+  Production. Don't change these variables while a release workflow runs.
 
 The issuer, JWKS URL, audience, and client IDs are public verification values;
 they still remain environment-local configuration so channels cannot drift or

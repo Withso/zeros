@@ -15,7 +15,6 @@ import {
   CircleCheck,
   CircleSlash,
   CircleX,
-  GitMerge,
 } from "lucide-react";
 
 import type { PR, PrCheck } from "../../../platform/git";
@@ -174,27 +173,6 @@ export function ErrorCallout({
           Retry
         </button>
       )}
-    </div>
-  );
-}
-
-export function ReviewEmptyState({
-  title,
-  subtitle,
-  action,
-}: {
-  title: string;
-  subtitle: string;
-  action?: React.ReactNode;
-}) {
-  return (
-    <div className="flex h-full flex-col items-center justify-center gap-2 px-10 text-center">
-      <GitMerge className="text-fg2 size-7" />
-      <p className="text-fg1 m-0 text-sm font-medium">{title}</p>
-      <p className="text-fg2 m-0 max-w-[420px] text-xs leading-[1.55]">
-        {subtitle}
-      </p>
-      {action && <div className="mt-1">{action}</div>}
     </div>
   );
 }

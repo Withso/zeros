@@ -3,6 +3,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it, vi } from "vitest";
 import { TAB_TYPE_META, type WorkbenchTabType } from "../tab-model";
 import {
+  WorkbenchConditionError,
   describeWorkbenchFailure,
   describeWorkbenchEmptyState,
   describeWorkspaceAvailability,
@@ -76,6 +77,43 @@ describe("workbench status contract", () => {
         expect(message.split(/\s+/).length).toBeLessThanOrEqual(9);
     },
   );
+
+  it("shows a named condition as the banner copy and keeps its cause diagnostic", () => {
+    const cause = Object.assign(new Error("Bearer ghu_secretvalue123 rejected\n    at github.ts:1"), { code: "NOT_AUTHENTICATED" });
+    const status = describeWorkbenchFailure(
+      "review",
+      new WorkbenchConditionError("GitHub is rate-limiting requests. Retry in a moment.", { cause }),
+    );
+    expect(status).toMatchObject({
+      tone: "error",
+      action: "Retry",
+      message: "GitHub is rate-limiting requests. Retry in a moment.",
+    });
+    expect(status.diagnostic).toBe("Bearer [redacted] rejected");
+    expect(describeWorkbenchEmptyState("review", status)).toBe("Retry to load the review.");
+  });
+
+  it("offers a condition's destination instead of Retry when retrying cannot fix it", () => {
+    const run = vi.fn();
+    const status = describeWorkbenchFailure(
+      "review",
+      new WorkbenchConditionError("This GitHub connection needs to be re-authorized.", {
+        command: { label: "Open GitHub settings", run },
+      }),
+    );
+    expect(status).toMatchObject({ tone: "error", message: "This GitHub connection needs to be re-authorized." });
+    expect(status.action).toBeUndefined();
+    expect(status.command).toEqual({ label: "Open GitHub settings", run });
+    // The centre must not point at a Retry the banner no longer offers.
+    expect(describeWorkbenchEmptyState("review", status)).toBe("The review isn't available.");
+    const banner = renderToStaticMarkup(createElement(WorkbenchTabBanner, {
+      status, active: true, busy: false, retry: vi.fn(), type: "review",
+      noticeAction: { ...status.command!, busyLabel: status.command!.label, busy: false },
+    }));
+    expect(banner).toContain('aria-label="Open GitHub settings"');
+    expect(banner).toContain(">Open GitHub settings</button>");
+    expect(banner).not.toContain("Retry");
+  });
 
   it("presents human copy and sanitizes diagnostic secrets", () => {
     const status = describeWorkbenchFailure(
