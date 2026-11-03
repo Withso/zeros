@@ -1,0 +1,9 @@
+{
+  "id": "editable-diff-menu-history",
+  "kind": "replay",
+  "area": "renderer-ui",
+  "fixedBy": "pending",
+  "symptom": "The editable Pierre diff handled its keyboard history but the application Edit menu bypassed its shadow-root editor.",
+  "rule": "Principles 10, 12 and 13: register the editor's real undo/redo commands for its active focus root and test hidden/revealed sessions and external revision reset.",
+  "check": "pnpm exec vitest run apps/desktop/src/renderer/shell/workbench/tabs/code-editor/__tests__/editable-diff-history.test.ts"
+}

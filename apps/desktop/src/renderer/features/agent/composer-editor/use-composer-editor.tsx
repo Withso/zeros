@@ -53,6 +53,7 @@ import {
 } from "./attachment-keys";
 import { attachmentVideoFrames } from "../attachment-video-frames";
 import { attachmentNodeContent } from "./attachment-group";
+import { resetComposerHistory } from "./history";
 import { workspaceFileAccessKey } from "@/renderer/platform/workspace-file-scope";
 import { toast } from "@/renderer/shared/ui/primitives/elements";
 import {
@@ -1099,6 +1100,7 @@ export function useComposerEditor(
       graphSyncSuppressedRef.current = true;
       try {
         ed.commands.clearContent(true);
+        resetComposerHistory(ed);
       } finally {
         graphSyncSuppressedRef.current = false;
       }
@@ -1120,6 +1122,7 @@ export function useComposerEditor(
         // emitUpdate:false, so onUpdate won't run — sync explicitly or a
         // restored draft's transcript chips leave their pills unlit.
         ed.commands.setContent(content.json ?? "", { emitUpdate: false });
+        resetComposerHistory(ed);
         setIsEmpty(ed.isEmpty);
         syncSourceKeys(ed);
         // A seed swap, not a user gesture — record the new id set so the
@@ -1151,6 +1154,7 @@ export function useComposerEditor(
             : "",
           { emitUpdate: false },
         );
+        resetComposerHistory(ed);
         setIsEmpty(ed.isEmpty);
         syncSourceKeys(ed);
         resyncGraphIds(ed);

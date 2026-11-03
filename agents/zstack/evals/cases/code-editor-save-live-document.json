@@ -1,0 +1,9 @@
+{
+  "id": "code-editor-save-live-document",
+  "kind": "replay",
+  "area": "renderer-state",
+  "fixedBy": "pending",
+  "symptom": "Ctrl/Cmd-S immediately after an edit saved the lagging React value instead of the current CodeMirror document.",
+  "rule": "Principles 3, 13 and 14: read the live producer at save invocation and hold the parent render to prove the saved bytes are current.",
+  "check": "pnpm exec vitest run apps/desktop/src/renderer/shell/workbench/tabs/code-editor/__tests__/code-editor-history.test.ts"
+}
