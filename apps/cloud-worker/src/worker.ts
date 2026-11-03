@@ -8,6 +8,7 @@ import { createMessage, type BridgeMessage } from "@zeros/protocol/messages";
 import { safeParseClientBridgeMessage } from "@zeros/protocol/schemas";
 import { MIN_SUPPORTED_PROTOCOL, PROTOCOL_VERSION } from "@zeros/protocol/version";
 import { Agents, type AppClient, type DriverFactories } from "./agents";
+import { RECENT_ACTIVITY_MS } from "./activity";
 import type { TimingObserver } from "./agent-timings";
 import { CodexDriver } from "./drivers/codex/driver";
 import { ClaudeDriver } from "./drivers/claude/driver";
@@ -20,6 +21,7 @@ import { prepareCheckout, type CheckoutRefresh, type CheckoutResult } from "./wo
 import { WorkspaceSetup, type SetupRunner } from "./workspace/setup";
 import { WorkspaceError, WorkspaceScope, type WorkerConfig } from "./workspace/scope";
 import { WorkspaceService, type WorkspaceServiceOptions } from "./workspace/service";
+import { isGitMutation } from "./workspace/git";
 import { GithubBroker, GithubTokens, githubEnvironment } from "./credentials/github";
 import { commandRunner } from "./workspace/commands";
 import { Terminals } from "./terminals/service";
@@ -72,6 +74,8 @@ export class CloudWorker {
   private stopping?: Promise<void>;
   private configurationRevision?: bigint;
   private idle?: boolean;
+  private activeMutations = 0;
+  private lastMutationAt = -Infinity;
   private heartbeat?: ReturnType<typeof setInterval>;
   private unsubscribers: Array<() => void> = [];
 
@@ -85,7 +89,7 @@ export class CloudWorker {
   start(): void {
     if (this.started || this.disposed) return;
     this.started = true;
-    this.heartbeat = setInterval(() => { void this.reportIdle(Boolean(this.agents?.busy || this.terminals?.busy || this.setup?.busy || this.workspace?.uploading)); }, 55_000);
+    this.heartbeat = setInterval(() => { void this.reportIdle(this.busy); }, 55_000);
     this.heartbeat.unref?.();
     this.options.transport.start({
       open: async () => {
@@ -200,9 +204,16 @@ export class CloudWorker {
       return this.terminals!.handle(client, frame);
     }
     if (frame.type === "WORKSPACE_REQUEST") {
+      const mutation = frame.op === "file.write" || frame.op === "workspace.prepareGithub" || isGitMutation(frame.op);
+      let activeMutation = false;
       try {
-        // Target changes write metadata without going through the Git runner.
-        if (frame.op === "file.write" || frame.op === "git.changeTarget" || frame.op === "attachment.write") await this.touchCheckout();
+        if (mutation || frame.op === "attachment.write") await this.touchCheckout();
+        if (mutation) {
+          this.activeMutations++;
+          activeMutation = true;
+          this.lastMutationAt = Date.now();
+          await this.reportIdle();
+        }
         const service = /^(chats|messages|turns)\./.test(frame.op) ? this.chats! : this.workspace!;
         const result = await service.handle(frame.op, frame.params ?? {});
         if (frame.op === "attachment.write") await this.reportIdle();
@@ -210,6 +221,11 @@ export class CloudWorker {
       } catch (error) {
         await client.send(createMessage({ type: "WORKSPACE_ERROR", source: "engine", requestId: frame.id, op: frame.op,
           code: error instanceof WorkspaceError ? error.code : "WORKSPACE_ERROR", message: error instanceof WorkspaceError ? error.message : "The workspace request could not be completed." }));
+      } finally {
+        if (activeMutation) {
+          this.activeMutations--;
+          this.lastMutationAt = Date.now();
+        }
       }
     }
   }
@@ -327,15 +343,19 @@ export class CloudWorker {
     try { return await this.options.transport.send(frame); }
     catch { this.options.onError?.("transport"); return false; }
   }
+  private get busy(): boolean {
+    return Boolean(this.agents?.busy || this.terminals?.busy || this.setup?.busy || this.workspace?.uploading ||
+      this.activeMutations || Date.now() - this.lastMutationAt < RECENT_ACTIVITY_MS);
+  }
   private async reportIdle(force = false): Promise<void> {
     if (!this.online || !this.agents) return;
-    const idle = !this.agents.busy && !this.terminals?.busy && !this.setup?.busy && !this.workspace?.uploading;
+    const idle = !this.busy;
     if (force || this.idle !== idle) {
       if (idle) {
         try { await this.store?.flush(); await this.history?.flush(); }
         catch { this.options.onError?.("storage"); return; }
-        // A new prompt may have arrived while persistence was draining.
-        if (!this.online || this.agents.busy || this.terminals?.busy || this.setup?.busy || this.workspace?.uploading) return;
+        // New work may have arrived while persistence was draining.
+        if (!this.online || this.busy) return;
       }
       this.idle = idle; await this.send({ t: "idle", idle });
     }

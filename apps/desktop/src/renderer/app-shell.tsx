@@ -1022,6 +1022,7 @@ function MainShellBody({
               history keeps its tabs/transcript and unmounts workspace tools. */}
           {renderWorkspaceShell && (
             <div
+              data-cloud-workspace-surface={isCloudWorkspace(activeWorkspaceFolder) ? activeWorkspaceFolder : undefined}
               {...(isHome ? { inert: "" } : {})}
               className={[
                 "absolute inset-0 flex min-h-0 min-w-0 overflow-hidden",

@@ -5,6 +5,7 @@
 import type { CloudV2ConnectionTarget } from "@zeros/protocol/cloud-runtime-connection";
 import { connectCloudV2Workspace } from "../cloud-v2";
 import { acceptCloudEngineWorkspace, cloudCatalogGeneration, cloudWorkspaceDocument } from "../../state/cloud-workspace-catalog";
+import { canOpenCloudWorkspace } from "../../state/cloud-workspace-wake";
 import type { CloudWorkspaceTarget } from "./cloud-workspace-key";
 import { RuntimeClient } from "./ws-client";
 import type { CloudPeer } from "./workspace-runtime-client";
@@ -34,13 +35,18 @@ async function ticketTarget(target: CloudWorkspaceTarget, sequence: number, wake
 function connected(client: RuntimeClient, signal?: AbortSignal): Promise<void> {
   if (client.status === "connected") return Promise.resolve();
   return new Promise((resolve, reject) => {
-    const timer = setTimeout(() => { off(); reject(new Error("The cloud workspace did not start in time")); }, CONNECT_TIMEOUT_MS);
-    const abort = () => { off(); reject(new Error("Cloud connection cancelled")); };
+    const finish = (error?: Error) => {
+      clearTimeout(timer); signal?.removeEventListener("abort", abort); off();
+      if (error) reject(error); else resolve();
+    };
+    const timer = setTimeout(() => finish(new Error("The cloud workspace did not start in time")), CONNECT_TIMEOUT_MS);
+    const abort = () => finish(new Error("Cloud connection cancelled"));
     const off = client.onStatusChange(status => {
       if (status !== "connected") return;
-      clearTimeout(timer); signal?.removeEventListener("abort", abort); off(); resolve();
+      finish();
     });
     signal?.addEventListener("abort", abort, { once: true });
+    if (signal?.aborted) abort();
   });
 }
 
@@ -57,7 +63,9 @@ export async function openCloudV2Runtime(
   const assertAccount = () => {
     if (options?.signal?.aborted) throw new Error("Cloud connection cancelled");
     if (account !== cloudCatalogGeneration()) throw new Error("Cloud account changed while connecting");
+    if (options?.wake && !canOpenCloudWorkspace(target)) throw new Error("The cloud workspace is not available for new work");
   };
+  assertAccount();
   let sequence = 1;
   const client = new RuntimeClient(await ticketTarget(target, sequence, options?.wake === true), {
     // Each reconnect presents a fresh ticket. A reconnect after a laptop wake,

@@ -17,6 +17,7 @@ interface GitOptions {
   historyDiff?: (params: Record<string, unknown>) => Promise<unknown>;
 }
 const WRITE_OPS = new Set(["git.prepareGithub", "git.stage", "git.unstage", "git.discard", "git.clean", "git.commit", "git.push", "git.pull", "git.rebase", "git.fetch", "git.stashSave", "git.stashPop", "git.stashApply", "git.stashDrop", "git.checkoutBranch", "git.createBranch", "git.renameBranch", "git.changeTarget", "git.merge", "git.cherryPick", "git.revert", "git.continue", "git.abort", "git.deleteBranch", "git.tagCreate", "git.tagDelete"]);
+export const isGitMutation = (op: string): boolean => WRITE_OPS.has(op);
 export const DEFERRED_GIT_OPS = ["git.reset", "git.restore", "git.stageHunk", "git.unstageHunk", "git.discardHunk", "git.initInPlace", "git.repoBranchCatalog", "git.listAllBranches"] as const;
 
 /** One checkout-scoped writer queue. Ordinary reads never wait behind a
@@ -30,7 +31,7 @@ export class GitService {
   handle(op: string, params: Record<string, unknown>): Promise<unknown> {
     this.scope.assertId(params.workspaceId);
     for (const key of ["cwd", "folder", "repoRoot"]) if (params[key] !== undefined) this.scope.folder(params[key]);
-    if (!WRITE_OPS.has(op)) return this.read(op, params);
+    if (!isGitMutation(op)) return this.read(op, params);
     const pending = this.mutations.then(async () => {
       try { return await this.write(op, params); }
       finally { this.options.changed?.(); }

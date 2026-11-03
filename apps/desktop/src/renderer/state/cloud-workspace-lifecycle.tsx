@@ -4,9 +4,10 @@ import { isLocalDevelopment } from "../platform/runtime";
 import { cloudWorkspaceCapability } from "../platform/cloud-capability";
 import { getActiveBridge } from "../platform/bridge/active-bridge";
 import { WorkspaceRuntimeClient } from "../platform/bridge/workspace-runtime-client";
-import { cloudWorkspaceKey, parseCloudWorkspaceKey } from "../platform/bridge/cloud-workspace-key";
+import { cloudWorkspaceKey, parseCloudWorkspaceKey, type CloudWorkspaceTarget } from "../platform/bridge/cloud-workspace-key";
 import { hasCloudWorkspaceAccountAccess } from "../features/team/cloud-workspace-account-access";
-import { subscribeCloudWorkspaceOpens } from "./cloud-workspace-open-intent";
+import { requestCloudWorkspaceOpen, subscribeCloudWorkspaceOpens } from "./cloud-workspace-open-intent";
+import { canOpenCloudWorkspace } from "./cloud-workspace-wake";
 import { getSession, getStoredAuthUser, onAuthStateChange, onStoredIdentityChange, type AuthSessionInfo } from "../features/auth/auth-store";
 import { getTeamStoreState, subscribeOrganizationSnapshots } from "../features/team/team-store";
 import {
@@ -14,6 +15,9 @@ import {
   canReadCloudWorkspace,
   cloudCatalogNeedsFastRefresh,
   cloudWorkspaceDocument,
+  cloudCatalogGeneration,
+  cloudWorkspaceOwnerGeneration,
+  cloudWorkspaceStopVersion,
   refreshCloudWorkspaceCatalog,
   subscribeCloudWorkspaces,
   subscribeCloudWorkspaceRows,
@@ -170,30 +174,51 @@ function ActiveCloudWorkspaceLifecycle() {
     return () => { cancelled = true; off(); document.removeEventListener("visibilitychange", attach); };
   }, [folder]);
 
-  // An explicit open (click, keyboard, deep link) starts a stopped workspace.
+  // Navigation and trusted input share one intent before child editors handle
+  // the event, so a resulting save joins the wake already in progress.
   useEffect(() => {
-    let pending: { key: string; controller: AbortController } | undefined;
+    let pending: { key: string; target: CloudWorkspaceTarget; account: number; owner: number | undefined; stopVersion: number; controller: AbortController } | undefined;
     const cancel = () => { pending?.controller.abort(); pending = undefined; };
     const ownsView = (key: string) => {
       const state = useWorkspaceStore.getState();
       return document.visibilityState !== "hidden" && state.activePage === "workspace" && selectActiveFolder(state) === key;
     };
-    const off = subscribeCloudWorkspaceOpens((target, wakeIntent) => {
+    const changed = () => {
+      if (pending && (!ownsView(pending.key) || pending.account !== cloudCatalogGeneration() ||
+          pending.owner !== cloudWorkspaceOwnerGeneration(pending.target) ||
+          pending.stopVersion !== cloudWorkspaceStopVersion(pending.target) || !canOpenCloudWorkspace(pending.target))) cancel();
+    };
+    const off = subscribeCloudWorkspaceOpens((target, wakeIntent, reason) => {
+      changed();
       const key = cloudWorkspaceKey(target), bridge = runtime();
       if (!bridge || !ownsView(key) || pending?.key === key || !hasCloudWorkspaceAccountAccess(target.organizationId) ||
-          !cloudWorkspaceDocument(target)?.capabilities.canWrite) return;
+          !canOpenCloudWorkspace(target)) return;
       cancel();
-      const intent = { key, controller: new AbortController() };
+      const intent = { key, target, account: cloudCatalogGeneration(), owner: cloudWorkspaceOwnerGeneration(target),
+        stopVersion: cloudWorkspaceStopVersion(target), controller: new AbortController() };
       pending = intent;
-      void bridge.openWorkspace(target, { signal: intent.controller.signal, wakeIntent })
+      void bridge.openWorkspace(target, { signal: intent.controller.signal, wakeIntent, ...(reason ? { reason } : {}) })
         .then(() => { if (!intent.controller.signal.aborted && ownsView(key)) clearWorkbenchConnectionFailure(key); })
         .catch(error => { if (!intent.controller.signal.aborted && ownsView(key)) recordCloudOpenFailure(key, error); })
         .finally(() => { if (pending === intent) pending = undefined; });
     });
-    const changed = () => { if (pending && !ownsView(pending.key)) cancel(); };
+    const interact = (event: Event) => {
+      if (!event.isTrusted || !(event.target instanceof Element)) return;
+      if (event.target.closest('[inert], [hidden], [aria-hidden="true"]')) return;
+      const key = event.target.closest("[data-cloud-workspace-surface]")?.getAttribute("data-cloud-workspace-surface");
+      if (key && ownsView(key)) requestCloudWorkspaceOpen(key, "interaction");
+    };
     const offSelection = useWorkspaceStore.subscribe(changed);
+    const offCatalog = subscribeCloudWorkspaces(changed);
     document.addEventListener("visibilitychange", changed);
-    return () => { cancel(); off(); offSelection(); document.removeEventListener("visibilitychange", changed); };
+    document.addEventListener("pointerdown", interact, { capture: true, passive: true });
+    document.addEventListener("keydown", interact, { capture: true, passive: true });
+    return () => {
+      cancel(); off(); offSelection(); offCatalog();
+      document.removeEventListener("visibilitychange", changed);
+      document.removeEventListener("pointerdown", interact, true);
+      document.removeEventListener("keydown", interact, true);
+    };
   }, []);
   return null;
 }

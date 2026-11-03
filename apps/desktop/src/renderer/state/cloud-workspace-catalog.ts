@@ -59,7 +59,7 @@ export function cloudWorkspaceOwnerGeneration(target: CloudWorkspaceTarget): num
   return owner;
 }
 const listeners = new Set<() => void>();
-// Renderer-owned Stop intent wins over input captured before that request.
+// Renderer-owned shutdown wins over input captured before that request.
 // Engine idle stops do not enter this map and still consume recent input.
 const localStopVersions = new Map<string, number>();
 let nextLocalStopVersion = 0;
@@ -497,7 +497,7 @@ type LifecycleIntent = { id: string; task?: Promise<CloudWorkspaceDocument>; own
 const lifecycleIntents = new Map<string, LifecycleIntent>();
 export function cloudWorkspaceLifecycleTask(
   target: CloudWorkspaceTarget,
-  operation: "wake" | "stop",
+  operation: "wake" | "stop" | "archive" | "delete",
 ): Promise<CloudWorkspaceDocument> | undefined {
   return lifecycleIntents.get(`${epoch}:${cloudWorkspaceKey(target)}:${operation}`)?.task;
 }
@@ -623,7 +623,7 @@ export async function manageCloudWorkspace(
     const doc = await intent.task;
     return wait ? waitForCloudWorkspaceLifecycle(target, operation, doc) : doc;
   }
-  if (operation === "stop") {
+  if (operation !== "wake") {
     // A later explicit wake (including Restart) is a new intent. Do not reuse
     // the receipt for an upgrade that this Stop supersedes, even across N+1.
     fenceCloudWorkspaceInput(target);
