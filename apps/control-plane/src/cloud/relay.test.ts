@@ -648,12 +648,29 @@ describe("cloud v2 relay", () => {
     expect(connectedWorkers).toHaveLength(0);
   });
 
-  it("retires opted-in sockets on worker loss while leaving a legacy app attached", async () => {
+  it("keeps opted-in sockets attached and resumes output after a running worker redial", async () => {
+    const a = await app(true);
+    await vi.waitFor(() => expect(deps.config).toHaveBeenCalledOnce());
+    const received: unknown[] = [];
+    a.on("message", raw => received.push(JSON.parse(String(raw))));
+    workerServer.once("connection", ws => ws.on("message", raw => {
+      const frame = JSON.parse(String(raw));
+      if (frame.t === "open") ws.send(JSON.stringify({ t: "frame", clientId: frame.clientId, frame: { resumed: true } }));
+    }));
+    connectedWorkers[0]!.terminate();
+    await vi.waitFor(() => expect(a.readyState === WebSocket.CLOSED || received.length > 0).toBe(true));
+    expect(a.readyState).toBe(WebSocket.OPEN);
+    expect(received).toEqual([{ resumed: true }]);
+    expect(connectedWorkers).toHaveLength(2);
+    expect(deps.wake).not.toHaveBeenCalled();
+  });
+
+  it("retires opted-in sockets after Stop while leaving a legacy app attached", async () => {
     const a = await app(true), legacy = await app();
     await vi.waitFor(() => expect(deps.config).toHaveBeenCalledOnce());
     let closeCode: number | undefined;
     a.once("close", code => { closeCode = code; });
-    // The control-plane route can still say running when a worker disappears.
+    state = "stopped";
     connectedWorkers[0]!.terminate();
     await vi.waitFor(() => expect(closeCode !== undefined || connectedWorkers.length > 1).toBe(true));
     expect(closeCode).toBe(4009);

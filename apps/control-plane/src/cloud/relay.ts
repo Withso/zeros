@@ -340,7 +340,6 @@ export class CloudV2Relay {
       this.failDelivered(room, ws);
       if (room.worker !== ws) return;
       room.worker = null; room.ready = false; room.loginRevision = null;
-      this.closeExplicitClients(room);
       // A close during initial configuration is handled by connect's retry.
       if (!room.dialing) this.ensureConnected(room);
     });

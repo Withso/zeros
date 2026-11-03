@@ -397,9 +397,11 @@ intent. Local workspaces keep their existing behavior.
 New desktops add `wakePolicy=explicit` to the connect URL and offer the
 `zeros.cloud.v2.explicit-wake` WebSocket subprotocol alongside the existing
 protocol and ticket. The HTTP request owns the stopped-to-starting transition;
-the opted-in relay only joins an existing start or running worker. It closes
-the app socket with `4009 / workspace_not_running` when the worker disappears
-or admission finds a stopped, stopping or archived workspace. Queued reads,
+the opted-in relay only joins an existing start or running worker. A transient
+worker disconnect redials while the workspace is still running, keeping the app
+attached so output resumes. It closes the app socket with
+`4009 / workspace_not_running` when admission or redial confirms a stopped,
+stopping or archived workspace. Queued reads,
 saves and old wake tickets cannot start compute. The desktop rejects pending
 work as a transport failure and lets fresh user input acquire the next wake.
 The connect transition atomically requires an unarchived workspace, so an
