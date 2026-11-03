@@ -1,0 +1,9 @@
+{
+  "id": "code-editor-windows-shift-redo",
+  "kind": "replay",
+  "area": "renderer-ui",
+  "fixedBy": "pr:810",
+  "symptom": "The CodeMirror Windows keymap handled Ctrl-Y but silently ignored Ctrl-Shift-Z redo.",
+  "rule": "Principles 10 and 13: qualify platform key aliases before editor imports using the real mounted editor and keydown events.",
+  "check": "pnpm exec vitest run apps/desktop/src/renderer/shell/workbench/tabs/code-editor/__tests__/code-editor-windows-history.test.ts"
+}

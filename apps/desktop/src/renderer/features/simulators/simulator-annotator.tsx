@@ -8,6 +8,7 @@ import {
   useState,
   type KeyboardEvent,
   type PointerEvent,
+  type RefObject,
 } from "react";
 import {
   Circle,
@@ -72,6 +73,7 @@ import {
 import { simulatorAnnotations, type SimulatorAnnotation } from "./simulator-annotation-store";
 import { turnedArea, type QuarterTurns } from "./simulator-geometry";
 import { useElementSize } from "./simulator-hooks";
+import { editHistoryKey, isNativeEditHistoryTarget, registerEditHistory } from "../../shared/ui/edit-history";
 
 /** An annotation whose screen has frozen, ready to draw on. */
 export type FrozenSimulatorAnnotation = SimulatorAnnotation & {
@@ -101,8 +103,8 @@ const COLORS: Record<AnnotationColor, { label: string; swatch: string }> = {
   violet: { label: "Violet", swatch: "bg-violet-primary" },
 };
 
-/** Esc leaves; ⌘Z and ⇧⌘Z undo and redo. A key a menu or field already used
- * is theirs. */
+/** Esc leaves; ⌘Z undoes, ⇧⌘Z or Ctrl-Y redoes. A key a menu or field already
+ * used is theirs. */
 function onAnnotationKeyDown(tabId: string, event: KeyboardEvent<HTMLElement>): void {
   const native = event.nativeEvent;
   if (native.defaultPrevented || native.isComposing) return;
@@ -114,12 +116,23 @@ function onAnnotationKeyDown(tabId: string, event: KeyboardEvent<HTMLElement>): 
     leaveSimulatorAnnotation(tabId);
     return;
   }
-  if ((event.metaKey || event.ctrlKey) && !event.altKey && event.key.toLowerCase() === "z") {
+  const direction = editHistoryKey(native);
+  if (direction) {
     event.preventDefault();
     event.stopPropagation();
-    if (event.shiftKey) simulatorAnnotations.redo(tabId);
-    else simulatorAnnotations.undo(tabId);
+    simulatorAnnotations[direction](tabId);
   }
+}
+
+function useAnnotationHistory(root: RefObject<HTMLElement>, tabId: string, active = true): void {
+  useLayoutEffect(() => {
+    if (!active || !root.current) return;
+    return registerEditHistory(root.current, (direction, target) => {
+      if (isNativeEditHistoryTarget(target)) return false;
+      simulatorAnnotations[direction](tabId);
+      return true;
+    });
+  }, [root, tabId, active]);
 }
 
 function useObjectUrl(bytes: Uint8Array, type: string): string | null {
@@ -168,6 +181,7 @@ export function SimulatorAnnotator({
   const uprightWidth = upright?.width ?? 0;
   const uprightHeight = upright?.height ?? 0;
   const surface = useRef<HTMLDivElement>(null);
+  useAnnotationHistory(surface, tabId, active);
   const canvas = useRef<HTMLCanvasElement>(null);
   const imageUrl = useObjectUrl(snapshot.png, "image/png");
   const hintId = useId();
@@ -542,6 +556,7 @@ export function SimulatorAnnotateToolbar({
 }) {
   const { tabId, tool, color, adding, history, deviceName } = annotation;
   const toolbar = useRef<HTMLDivElement>(null);
+  useAnnotationHistory(toolbar, tabId);
   const add = () => {
     const themed = toolbar.current;
     if (!themed) return;

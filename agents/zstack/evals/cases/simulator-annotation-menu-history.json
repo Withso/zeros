@@ -1,0 +1,9 @@
+{
+  "id": "simulator-annotation-menu-history",
+  "kind": "replay",
+  "area": "renderer-ui",
+  "fixedBy": "pr:810",
+  "symptom": "Simulator annotation keyboard history was unreachable from the Edit menu and lacked Ctrl-Y redo.",
+  "rule": "Principles 9, 10 and 13: focus-owned canvas and toolbar history must share commands while native note inputs, including readonly fields, retain their own ownership.",
+  "check": "pnpm exec vitest run apps/desktop/src/renderer/features/simulators/__tests__/simulator-history-menu.test.ts"
+}

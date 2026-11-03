@@ -391,6 +391,7 @@ export function SourceEditor({
         <CodeEditor
           tokenCacheScope={cwd && !isCloudWorkspace(cwd) ? "local" : undefined}
           value={displayed}
+          historyRevision={editRevision}
           filePath={path}
           onChange={changeDraft}
           onSave={save}

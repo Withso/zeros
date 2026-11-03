@@ -1,6 +1,7 @@
 
-import { BrowserWindow, Menu, webContents, type MenuItemConstructorOptions } from "electron";
+import { BrowserWindow, Menu, type MenuItemConstructorOptions } from "electron";
 import { devToolsAccelerator, toggleDevTools } from "./devtools";
+import { editHistoryItem } from "./edit-history";
 import { emitEvent, getMainWindow } from "./ipc/events";
 import { IS_DEV } from "./runtime-mode";
 import {
@@ -30,25 +31,6 @@ export function updateMenuItemView(status: UpdaterStatusSnapshot): {
 }
 
 let menuInstalled = false;
-
-function editHistoryItem(direction: "undo" | "redo"): MenuItemConstructorOptions {
-  return {
-    // Electron's native roles ignore click handlers. Route app history through
-    // its focused surface, and keep DevTools/other contents' native stack.
-    label: direction === "undo" ? "Undo" : "Redo",
-    accelerator: direction === "undo" ? "CmdOrCtrl+Z"
-      : process.platform === "win32" ? "Ctrl+Y" : "CmdOrCtrl+Shift+Z",
-    click: () => {
-      const focused = webContents.getFocusedWebContents();
-      if (!focused || focused.isDestroyed()) return;
-      if (focused !== getMainWindow()?.webContents) {
-        focused[direction]();
-        return;
-      }
-      emitEvent("menu-edit-history", { direction });
-    },
-  };
-}
 
 export function installAppMenu(): void {
   // Idempotence guard: a second call would stack another status subscription
