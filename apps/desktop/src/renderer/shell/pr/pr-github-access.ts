@@ -26,6 +26,10 @@ export interface PrAccessFacts {
   /** Whether a GitHub credential is selected and readable. `undefined` means
    *  we never found out, which is treated as "don't claim they're signed in". */
   connected?: boolean;
+  /** Settings' diagnosis of a selected connection that is configured but
+   *  unusable, such as one that needs re-authorization. The engine sees no
+   *  token either way, so only this tells it apart from "not connected". */
+  diagnosis?: string;
 }
 
 export interface PrBlockMessage {
@@ -61,6 +65,12 @@ function detail(facts: PrAccessFacts, fallback: string): string {
 export function describePrAccessBlock(facts: PrAccessFacts): PrBlockMessage {
   const code = facts.code;
   if (code === "NOT_AUTHENTICATED") {
+    if (facts.diagnosis)
+      return {
+        title: "Your GitHub connection needs attention",
+        description: facts.diagnosis,
+        openSettings: true,
+      };
     // Only claim "not signed in" when we actually know nothing is connected.
     return facts.connected === true
       ? {

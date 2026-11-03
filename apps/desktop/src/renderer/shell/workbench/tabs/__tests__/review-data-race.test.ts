@@ -136,13 +136,15 @@ describe("Review live-data races", () => {
       force: true,
     });
     const confirmed = peekReviewLiveData(provider, "workspace-retained", 42).pr;
-    getPr.mockRejectedValueOnce(new Error("engine disconnected"));
+    const disconnected = new Error("engine disconnected");
+    getPr.mockRejectedValueOnce(disconnected);
     await prefetchReviewLiveData(provider, "workspace-retained", 42, {
       force: true,
     });
+    // The rejection is kept as thrown so the banner can read its code.
     expect(
       peekReviewLiveData(provider, "workspace-retained", 42),
-    ).toMatchObject({ pr: confirmed, error: "engine disconnected" });
+    ).toMatchObject({ pr: confirmed, error: disconnected });
     expect(
       peekReviewLiveData(provider, "other-workspace", 42).error,
     ).toBeNull();
@@ -152,6 +154,12 @@ describe("Review live-data races", () => {
     expect(
       peekReviewLiveData(provider, "workspace-retained", 42).error,
     ).toBeNull();
+  });
+  it("keeps a rejection without a reason as a failure", async () => {
+    const provider = cloudProvider("github:falsy-rejection", () => Promise.reject(undefined));
+    await prefetchReviewLiveData(provider, "workspace-falsy-rejection", 42);
+    expect(peekReviewLiveData(provider, "workspace-falsy-rejection", 42).error).toBeInstanceOf(Error);
+    forgetPrCachesForWorkspace("workspace-falsy-rejection");
   });
   it("keeps bounded external refreshes live for terminal review resources", () => {
     expect(shouldRefreshReviewSnapshot("merged", "interval")).toBe(true);

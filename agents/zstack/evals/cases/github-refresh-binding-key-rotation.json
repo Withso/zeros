@@ -1,0 +1,9 @@
+{
+  "id": "github-refresh-binding-key-rotation",
+  "kind": "replay",
+  "area": "control-plane",
+  "fixedBy": "pr:809",
+  "symptom": "Rotating the control plane's GitHub refresh-binding secret, or the OAuth client secret it fell back to, made every connected desktop show This GitHub connection needs to be re-authorized. Bindings were verified with one key, so every outstanding binding failed at once although GitHub still accepted the refresh tokens.",
+  "rule": "Sign refresh bindings with the current keyring version inside the unchanged zghrb_v1 envelope, verify with every listed version, accept unversioned bindings with any listed key, and refuse to boot Railway Alpha, Beta or Production without a dedicated key.",
+  "check": "pnpm --dir apps/control-plane exec vitest run src/config.test.ts src/github.test.ts"
+}

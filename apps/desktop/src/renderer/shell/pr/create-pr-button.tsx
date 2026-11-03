@@ -59,11 +59,12 @@ import { triggerGitRefresh } from "../use-git-refresh-key";
 import {
   describePrAccessBlock,
   describePrCreateFailure,
+  type PrAccessFacts,
   type PrBlockMessage,
 } from "./pr-github-access";
 import { notifyWorkspacesChanged } from "../../state/use-projects";
-import { useWorkspaceDispatch } from "../../state/store";
-import { requestUserSettingsSection } from "../../features/settings/settings-navigation";
+import { useOpenGithubSettings } from "../../features/settings/use-open-github-settings";
+import { localGithubDiagnosis } from "./review-github-failure";
 import {
   claimPrCreateAction,
   releasePrCreateAction,
@@ -124,7 +125,6 @@ function GithubCreatePrButton({
   active = true,
 }: CreatePrButtonProps) {
   const sendToChat = useSendToActiveChat(workspace.path, chatId);
-  const dispatch = useWorkspaceDispatch();
   const claimed = useWorkspaceGitActionClaim(workspace.id);
   const busy = claimed?.kind === "create-pr";
   const [menuOpen, setMenuOpen] = useState(false);
@@ -160,10 +160,16 @@ function GithubCreatePrButton({
     return claimPrCreateAction(workspace.id, behavior);
   }, [workspace.id]);
 
-  const openGithubSettings = useCallback(() => {
-    requestUserSettingsSection("integrations");
-    dispatch({ type: "SET_ACTIVE_PAGE", page: "settings" });
-  }, [dispatch]);
+  const openGithubSettings = useOpenGithubSettings();
+  // A Local sign-in refusal can't tell "never connected" from "needs
+  // re-authorization"; Settings can, and its diagnosis replaces "Connect GitHub".
+  const withDiagnosis = useCallback(
+    async <T extends PrAccessFacts>(facts: T): Promise<T> =>
+      facts.code === "NOT_AUTHENTICATED"
+        ? { ...facts, diagnosis: await localGithubDiagnosis(workspace.id) }
+        : facts,
+    [workspace.id],
+  );
 
   const showBlockToast = useCallback(
     (message: PrBlockMessage) => {
@@ -195,7 +201,7 @@ function GithubCreatePrButton({
         // has reviewed the diff and written a commit the user didn't ask for.
         const access = await ghRepoAccess(workspace.id);
         if (isPrAccessBlocked(access)) {
-          showBlockToast(describePrAccessBlock(access));
+          showBlockToast(describePrAccessBlock(await withDiagnosis(access)));
           return;
         }
         const cloud = cloudTargetForValue(workspace.id);
@@ -301,6 +307,7 @@ function GithubCreatePrButton({
     [
       claim,
       showBlockToast,
+      withDiagnosis,
       workspace.id,
       workspace.repoRoot,
       workspace.branch,
@@ -357,7 +364,7 @@ function GithubCreatePrButton({
           return;
         }
         if (err instanceof GithubAccessError) {
-          showBlockToast(describePrAccessBlock(err.access));
+          showBlockToast(describePrAccessBlock(await withDiagnosis(err.access)));
           return;
         }
         // Let the preflight explain the failure when it reached a verdict: a
@@ -371,7 +378,10 @@ function GithubCreatePrButton({
         const facts = isGitErrorShape(err)
           ? err
           : { message: err instanceof Error ? err.message : String(err) };
-        const copy = describePrCreateFailure(facts, access);
+        const copy = describePrCreateFailure(
+          await withDiagnosis(facts),
+          await withDiagnosis(access),
+        );
         showBlockToast(committed ? {
           ...copy,
           description: `${copy.description} Your changes were committed; retry will reuse that commit.`,
@@ -383,6 +393,7 @@ function GithubCreatePrButton({
     [
       claim,
       showBlockToast,
+      withDiagnosis,
       workspace.id,
       workspace.path,
       workspace.branch,

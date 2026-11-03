@@ -71,6 +71,7 @@ import { InlineLoginTerminal } from "./inline-login-terminal";
 import {
   githubAppConnectOptions,
   githubAutomaticSetup,
+  githubHealthDetailCopy,
   githubHealthNeedsAttention,
   githubMethodDescription,
   githubMethodLabel,
@@ -187,26 +188,8 @@ function IdentityBadge({ summary }: { summary: GithubCredentialSummary }) {
 }
 
 function HealthDetail({ summary }: { summary: GithubCredentialSummary }) {
-  if (summary.health === "connected") return null;
-
-  const copy =
-    summary.health === "rate-limited"
-      ? "GitHub is rate-limiting requests. This connection has not been removed."
-      : summary.health === "sso-required"
-        ? "Your organization requires SAML authorization for this connection."
-        : summary.health === "not-installed"
-          ? // Settings has no "current repository" — this row describes the
-            // connection. Naming one here read as a per-repo verdict the panel
-            // is not in a position to make.
-            summary.detail ||
-            "The GitHub App isn’t installed on any account yet."
-          : summary.health === "suspended"
-            ? summary.detail ||
-              "This installation was suspended by the account owner."
-            : summary.health === "invalid"
-              ? "GitHub revoked this connection. Reconnect to continue."
-              : summary.detail ||
-                "Couldn’t check this connection. You may be offline.";
+  const copy = githubHealthDetailCopy(summary);
+  if (copy === null) return null;
 
   return (
     <div className="bg-bg1-highlight text-fg2 flex items-start gap-2.5 rounded-md px-3 py-2.5 text-xs leading-relaxed">

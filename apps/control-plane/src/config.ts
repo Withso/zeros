@@ -107,9 +107,14 @@ const GithubEnvSchema = z.object({
     .string()
     .url()
     .default("https://app.zeros.build/github/connected"),
-  /** Separate this HMAC key from the OAuth secret before rotating that secret;
-   * the compatibility fallback otherwise invalidates all outstanding bindings. */
+  /** Refresh-binding HMAC key version 1. Required in Railway Alpha, Beta and
+   * Production, so rotating the OAuth client secret leaves bindings valid. */
   GITHUB_REFRESH_BINDING_SECRET: z.string().min(16).optional(),
+  /** Versioned refresh-binding keys, `{"<version>":"<secret>"}`. Bindings are
+   * signed with the current version and verified with every listed one, so a
+   * key rotates without asking anyone to reconnect. */
+  GITHUB_REFRESH_BINDING_KEYS_JSON: z.string().trim().min(2).max(16_384).optional(),
+  GITHUB_REFRESH_BINDING_CURRENT_KEY_VERSION: z.coerce.number().int().min(1).max(65_535).optional(),
   GITHUB_WEB_BASE_URL: z.string().url().default("https://github.com"),
   GITHUB_API_BASE_URL: z.string().url().default("https://api.github.com"),
   NODE_ENV: z.string().default("development"),
@@ -128,9 +133,13 @@ export type GithubBackendConfig = {
   clientId: string;
   clientSecret: string;
   privateKey?: string;
-  /** HMAC key for the refresh binding. Separate so rotating the OAuth client
-   *  secret does not invalidate every outstanding binding at once. */
-  refreshBindingSecret: string;
+  /** Refresh-binding HMAC keys by version. New bindings use the current
+   *  version; every listed version still verifies the bindings it signed. */
+  refreshBindingKeys: Readonly<Record<number, string>>;
+  currentRefreshBindingKeyVersion: number;
+  /** False only where development and self-hosted deployments still borrow
+   *  the OAuth client secret, which rotates every binding with it. */
+  refreshBindingKeysDedicated: boolean;
   appSlug: string;
   oauthCallbackUrl: string;
   completionPageUrl: string;
@@ -529,18 +538,80 @@ function loadAuthConfig(env: z.infer<typeof EnvSchema>): AuthBackendConfig {
   };
 }
 
-/** Resolve the optional GitHub App block. Throws only so `loadConfig` can turn
- *  the reason into a warning — never into a failed boot. */
-function parseGithubConfig(env: NodeJS.ProcessEnv): GithubBackendConfig {
+/** A refresh-binding key problem in an official deployment. It fails the boot
+ *  so `/healthz` keeps the previous deployment serving; disabling GitHub
+ *  instead would strand every connected desktop. */
+class RefreshBindingKeyError extends Error {}
+
+function parseRefreshBindingKeys(
+  e: z.infer<typeof GithubEnvSchema>,
+): Pick<GithubBackendConfig, "refreshBindingKeys" | "currentRefreshBindingKeyVersion" | "refreshBindingKeysDedicated"> {
+  const keys: Record<number, string> = {};
+  const add = (version: number, secret: unknown, name: string) => {
+    // The same rule GITHUB_REFRESH_BINDING_SECRET always had, so a key that
+    // signs today's bindings can never newly fail to load.
+    if (typeof secret !== "string" || secret.length < 16)
+      throw new RefreshBindingKeyError(`${name} must be at least 16 characters`);
+    if (keys[version] !== undefined && keys[version] !== secret)
+      throw new RefreshBindingKeyError(`conflicting refresh-binding key version ${version}`);
+    keys[version] = secret;
+  };
+  if (e.GITHUB_REFRESH_BINDING_KEYS_JSON) {
+    let document: unknown;
+    try { document = JSON.parse(e.GITHUB_REFRESH_BINDING_KEYS_JSON); }
+    catch { throw new RefreshBindingKeyError("GITHUB_REFRESH_BINDING_KEYS_JSON must be a JSON object"); }
+    if (!document || typeof document !== "object" || Array.isArray(document) ||
+      Object.keys(document).length < 1 || Object.keys(document).length > 32)
+      throw new RefreshBindingKeyError("GITHUB_REFRESH_BINDING_KEYS_JSON must contain 1-32 key versions");
+    for (const [version, secret] of Object.entries(document)) {
+      if (!/^[1-9][0-9]{0,4}$/.test(version) || Number(version) > 65_535)
+        throw new RefreshBindingKeyError("refresh-binding key versions must be integers from 1 through 65535");
+      add(Number(version), secret, `GITHUB_REFRESH_BINDING_KEYS_JSON.${version}`);
+    }
+  }
+  if (e.GITHUB_REFRESH_BINDING_SECRET) add(1, e.GITHUB_REFRESH_BINDING_SECRET, "GITHUB_REFRESH_BINDING_SECRET");
+  const versions = Object.keys(keys).map(Number);
+  if (versions.length === 0)
+    return { refreshBindingKeys: { 1: e.GITHUB_APP_CLIENT_SECRET }, currentRefreshBindingKeyVersion: 1, refreshBindingKeysDedicated: false };
+  const current = e.GITHUB_REFRESH_BINDING_CURRENT_KEY_VERSION ?? (versions.length === 1 ? versions[0]! : null);
+  if (current === null)
+    throw new RefreshBindingKeyError("GITHUB_REFRESH_BINDING_CURRENT_KEY_VERSION is required for a multi-version keyring");
+  if (keys[current] === undefined)
+    throw new RefreshBindingKeyError("GITHUB_REFRESH_BINDING_CURRENT_KEY_VERSION is not present in the keyring");
+  return { refreshBindingKeys: keys, currentRefreshBindingKeyVersion: current, refreshBindingKeysDedicated: true };
+}
+
+/** Resolve the optional GitHub App block. Throws so `loadConfig` can turn the
+ *  reason into a warning; only an official deployment's refresh-binding key
+ *  problem fails the boot. */
+function parseGithubConfig(
+  env: NodeJS.ProcessEnv,
+  options: { official: boolean },
+): GithubBackendConfig {
   const parsed = GithubEnvSchema.safeParse(env);
   if (!parsed.success) {
-    throw new Error(
-      parsed.error.issues
-        .map((i) => `${i.path.join(".")}: ${i.message}`)
-        .join("; "),
-    );
+    const message = parsed.error.issues
+      .map((i) => `${i.path.join(".")}: ${i.message}`)
+      .join("; ");
+    const bindingKeyIssue = parsed.error.issues.some((i) =>
+      String(i.path[0]).startsWith("GITHUB_REFRESH_BINDING_"));
+    throw options.official && bindingKeyIssue
+      ? new RefreshBindingKeyError(message)
+      : new Error(message);
   }
   const e = parsed.data;
+  let bindingKeys: ReturnType<typeof parseRefreshBindingKeys>;
+  try {
+    bindingKeys = parseRefreshBindingKeys(e);
+  } catch (error) {
+    if (options.official && error instanceof RefreshBindingKeyError) throw error;
+    throw new Error(error instanceof Error ? error.message : String(error));
+  }
+  if (options.official && !bindingKeys.refreshBindingKeysDedicated)
+    throw new RefreshBindingKeyError(
+      "GITHUB_REFRESH_BINDING_SECRET or GITHUB_REFRESH_BINDING_KEYS_JSON is required; " +
+        "seed it with the value that signs today's bindings (GITHUB_APP_CLIENT_SECRET when no binding key was set)",
+    );
   const privateKey = e.GITHUB_APP_PRIVATE_KEY?.includes("\\n")
     ? e.GITHUB_APP_PRIVATE_KEY.replaceAll("\\n", "\n").trim()
     : e.GITHUB_APP_PRIVATE_KEY?.trim();
@@ -549,8 +620,7 @@ function parseGithubConfig(env: NodeJS.ProcessEnv): GithubBackendConfig {
     clientId: e.GITHUB_APP_CLIENT_ID,
     clientSecret: e.GITHUB_APP_CLIENT_SECRET,
     ...(privateKey ? { privateKey } : {}),
-    refreshBindingSecret:
-      e.GITHUB_REFRESH_BINDING_SECRET ?? e.GITHUB_APP_CLIENT_SECRET,
+    ...bindingKeys,
     appSlug: e.GITHUB_APP_SLUG,
     oauthCallbackUrl: validatedBrowserUrl(
       e.GITHUB_OAUTH_CALLBACK_URL,
@@ -848,11 +918,16 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env, diagnostics: Co
   const supplied = GITHUB_REQUIRED_KEYS.filter(
     (key) => (env[key] ?? "").trim().length > 0,
   );
+  // Same scope as validateRailwayEnvironment's channel assertions.
+  const officialRailway = Boolean(env.RAILWAY_PROJECT_ID) &&
+    env.ZEROS_DEV_ENVIRONMENT !== "hosted" && e.ZEROS_SELF_HOSTED !== "true";
   let github: GithubBackendConfig | null = null;
   if (supplied.length > 0) {
     try {
-      github = parseGithubConfig(env);
+      github = parseGithubConfig(env, { official: officialRailway });
     } catch (error) {
+      if (error instanceof RefreshBindingKeyError)
+        throw new Error(`Invalid environment: Railway ${channel} GitHub App: ${error.message}`);
       diagnostics.error(
         "[config] GitHub App sign-in is DISABLED — its configuration is " +
           `incomplete or invalid: ${
@@ -861,6 +936,12 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env, diagnostics: Co
           "routes will answer github_not_configured.",
       );
     }
+    if (github && !github.refreshBindingKeysDedicated && env.RAILWAY_PROJECT_ID)
+      diagnostics.warn(
+        "[config] GitHub refresh bindings are signed with GITHUB_APP_CLIENT_SECRET. " +
+          "Set GITHUB_REFRESH_BINDING_SECRET to that value before rotating the client secret, " +
+          "or every connected desktop must reconnect.",
+      );
   }
 
   const tracesUrl = traceExportUrl(e.OTEL_EXPORTER_OTLP_TRACES_ENDPOINT);

@@ -142,9 +142,6 @@
       },
       "apps/desktop/src/renderer/shell/workbench/tabs/file-viewer.tsx": {
         "text-[0.85em]": 1
-      },
-      "apps/desktop/src/renderer/shell/workbench/tabs/review-shared-components.tsx": {
-        "leading-[1.55]": 1
       }
     },
     "ignore-directive": {

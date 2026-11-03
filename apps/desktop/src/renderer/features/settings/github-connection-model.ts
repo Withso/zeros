@@ -53,6 +53,37 @@ export function githubMethodStatusCopy(
   return "Validated for API and Git operations.";
 }
 
+/** Settings' diagnosis of a method that is not connected. Surfaces that fail
+ * because of the connection repeat it, so users read one explanation. */
+export function githubHealthDetailCopy(
+  summary: GithubCredentialSummary,
+): string | null {
+  if (summary.health === "connected") return null;
+  if (summary.health === "rate-limited")
+    return "GitHub is rate-limiting requests. This connection has not been removed.";
+  if (summary.health === "sso-required")
+    return "Your organization requires SAML authorization for this connection.";
+  // Settings has no "current repository" — this row describes the connection.
+  // Naming one here read as a per-repo verdict the panel cannot make.
+  if (summary.health === "not-installed")
+    return summary.detail || "The GitHub App isn’t installed on any account yet.";
+  if (summary.health === "suspended")
+    return summary.detail || "This installation was suspended by the account owner.";
+  if (summary.health === "invalid")
+    return "GitHub revoked this connection. Reconnect to continue.";
+  return summary.detail || "Couldn’t check this connection. You may be offline.";
+}
+
+/** The diagnosis for a selected connection that is configured but unusable,
+ *  or undefined when it is healthy or simply not set up. */
+export function githubConnectionAttentionCopy(
+  summary: GithubCredentialSummary | undefined,
+): string | undefined {
+  if (!summary || summary.health === "connected") return undefined;
+  if (!summary.configured && summary.health === "not-connected") return undefined;
+  return githubHealthDetailCopy(summary) ?? undefined;
+}
+
 export function githubHealthNeedsAttention(
   summary: GithubCredentialSummary,
 ): boolean {

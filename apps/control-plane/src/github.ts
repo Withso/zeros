@@ -258,6 +258,10 @@ function openHandoffToken(nonce: string, sealed: Buffer): string {
 
 interface RefreshBindingPayload {
   v: 1;
+  /** Signing key version. Inside the signed payload because shipped desktops
+   *  accept only the three-part `zghrb_v1` envelope. Absent on bindings that
+   *  predate the keyring. */
+  k?: number;
   ownerUserId: string;
   appVariant: string;
   refreshTokenHash: string;
@@ -265,12 +269,8 @@ interface RefreshBindingPayload {
   expiresAtMs: number;
 }
 
-function refreshBindingSignature(
-  config: GithubBackendConfig,
-  encodedPayload: string,
-): Buffer {
-  // Keep this key separate: routine OAuth client-secret rotation must not invalidate live bindings.
-  return createHmac("sha256", config.refreshBindingSecret)
+function refreshBindingSignature(secret: string, encodedPayload: string): Buffer {
+  return createHmac("sha256", secret)
     .update("zeros-github-refresh-binding.v1\0", "utf8")
     .update(encodedPayload, "utf8")
     .digest();
@@ -288,6 +288,7 @@ function createRefreshBinding(
 ): string {
   const payload: RefreshBindingPayload = {
     v: 1,
+    k: config.currentRefreshBindingKeyVersion,
     ownerUserId: input.ownerUserId,
     appVariant: input.appVariant,
     refreshTokenHash: base64url(sha256(input.refreshToken)),
@@ -297,8 +298,9 @@ function createRefreshBinding(
   const encodedPayload = Buffer.from(JSON.stringify(payload), "utf8").toString(
     "base64url",
   );
+  const secret = config.refreshBindingKeys[config.currentRefreshBindingKeyVersion]!;
   return `zghrb_v1.${encodedPayload}.${base64url(
-    refreshBindingSignature(config, encodedPayload),
+    refreshBindingSignature(secret, encodedPayload),
   )}`;
 }
 
@@ -340,10 +342,20 @@ function assertRefreshBinding(
       "The GitHub refresh authorization is invalid. Reconnect the GitHub App.",
     );
   }
-  const expectedSignature = refreshBindingSignature(config, encodedPayload);
-  const validSignature =
-    signature.length === expectedSignature.length &&
-    timingSafeEqual(signature, expectedSignature);
+  // A binding from before the keyring carries no version; it was signed with
+  // the key that is now version 1, or with the OAuth client secret a seeded
+  // keyring copied. Any configured key may verify it.
+  const version = payload?.k;
+  const candidates =
+    version === undefined
+      ? Object.values(config.refreshBindingKeys)
+      : Number.isSafeInteger(version) && config.refreshBindingKeys[version as number]
+        ? [config.refreshBindingKeys[version as number]!]
+        : [];
+  const validSignature = candidates.some((secret) => {
+    const expected = refreshBindingSignature(secret, encodedPayload);
+    return signature.length === expected.length && timingSafeEqual(signature, expected);
+  });
   const validPayload =
     payload?.v === 1 &&
     payload.ownerUserId === input.ownerUserId &&
@@ -359,6 +371,12 @@ function assertRefreshBinding(
       "The GitHub refresh authorization is invalid. Reconnect the GitHub App.",
     );
   }
+  // At most once per desktop per rotation: its refresh returns a binding signed
+  // with the current key. A retired key is removable once this stops appearing.
+  if (version !== config.currentRefreshBindingKeyVersion)
+    console.info(
+      `[github] refresh binding verified with retired key version ${version ?? "legacy"}; current is ${config.currentRefreshBindingKeyVersion}`,
+    );
   return payload;
 }
 

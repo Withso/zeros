@@ -425,9 +425,17 @@ values are:
 - `GITHUB_APP_SLUG`
 - `GITHUB_OAUTH_CALLBACK_URL`
 
-Set `GITHUB_REFRESH_BINDING_SECRET` independently so rotating the OAuth client
-secret does not invalidate every outstanding refresh binding. Keep the client
-and binding secrets server-side. Callback URLs must return to the matching web
+Refresh bindings are signed with a separate key so rotating the OAuth client
+secret never invalidates them. Railway Alpha, Beta and Production refuse to
+boot without `GITHUB_REFRESH_BINDING_SECRET` (key version 1) or
+`GITHUB_REFRESH_BINDING_KEYS_JSON` (`{"<version>":"<secret>"}`, 1–32 versions,
+with `GITHUB_REFRESH_BINDING_CURRENT_KEY_VERSION` when there is more than one).
+New bindings are signed with the current version; every listed version still
+verifies the bindings it signed, and each refresh re-signs with the current
+one. Development and self-hosted deployments may still fall back to the client
+secret, with a warning on Railway. Rotation steps are in
+`docs/deployment-environments.md`. Keep the client and binding secrets
+server-side. Callback URLs must return to the matching web
 and desktop release channel; the supported schemes are `zeros`, `zeros-alpha`,
 `zeros-beta`, and `zeros-dev`.
 

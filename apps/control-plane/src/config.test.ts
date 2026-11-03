@@ -440,15 +440,97 @@ describe("GitHub backend configuration", () => {
   // refresh-binding key, every outstanding binding stops verifying at once and
   // the desktop prompts the whole fleet to reconnect.
   it("lets the refresh-binding key be set independently of the client secret", () => {
-    expect(loadConfig(validEnv()).github?.refreshBindingSecret).toBe(
-      "client-secret-for-tests",
-    );
+    expect(loadConfig(validEnv()).github).toMatchObject({
+      refreshBindingKeys: { 1: "client-secret-for-tests" },
+      currentRefreshBindingKeyVersion: 1,
+      refreshBindingKeysDedicated: false,
+    });
     expect(
       loadConfig({
         ...validEnv(),
         GITHUB_REFRESH_BINDING_SECRET: "a-separate-binding-key-value",
-      }).github?.refreshBindingSecret,
-    ).toBe("a-separate-binding-key-value");
+      }).github,
+    ).toMatchObject({
+      refreshBindingKeys: { 1: "a-separate-binding-key-value" },
+      currentRefreshBindingKeyVersion: 1,
+      refreshBindingKeysDedicated: true,
+    });
+  });
+
+  it("signs with the current keyring version and keeps earlier versions for verification", () => {
+    const github = loadConfig({
+      ...validEnv(),
+      GITHUB_REFRESH_BINDING_SECRET: "today-binding-key-value",
+      GITHUB_REFRESH_BINDING_KEYS_JSON: JSON.stringify({ 2: "next-binding-key-value" }),
+      GITHUB_REFRESH_BINDING_CURRENT_KEY_VERSION: "2",
+    }).github;
+    expect(github).toMatchObject({
+      refreshBindingKeys: { 1: "today-binding-key-value", 2: "next-binding-key-value" },
+      currentRefreshBindingKeyVersion: 2,
+    });
+    expect(Object.values(github!.refreshBindingKeys)).not.toContain("client-secret-for-tests");
+  });
+
+  it.each([
+    [{ GITHUB_REFRESH_BINDING_KEYS_JSON: JSON.stringify({ 1: "first-binding-key", 2: "second-binding-key" }) }, /CURRENT_KEY_VERSION is required/],
+    [{ GITHUB_REFRESH_BINDING_KEYS_JSON: JSON.stringify({ 1: "first-binding-key" }), GITHUB_REFRESH_BINDING_CURRENT_KEY_VERSION: "2" }, /not present in the keyring/],
+    [{ GITHUB_REFRESH_BINDING_KEYS_JSON: JSON.stringify({ 1: "first-binding-key" }), GITHUB_REFRESH_BINDING_SECRET: "a-different-binding-key" }, /conflicting refresh-binding key version 1/],
+    [{ GITHUB_REFRESH_BINDING_KEYS_JSON: "[]" }, /1-32 key versions/],
+    [{ GITHUB_REFRESH_BINDING_KEYS_JSON: JSON.stringify({ 0: "first-binding-key" }) }, /integers from 1 through 65535/],
+    [{ GITHUB_REFRESH_BINDING_KEYS_JSON: JSON.stringify({ 1: "short" }) }, /at least 16 characters/],
+    [{ GITHUB_REFRESH_BINDING_KEYS_JSON: JSON.stringify({ 1: 12345678901234567 }) }, /at least 16 characters/],
+  ])("disables GitHub outside official deployments for an invalid keyring %#", (patch, reason) => {
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    expect(loadConfig({ ...validEnv(), ...patch }).github).toBeNull();
+    expect(error).toHaveBeenCalledWith(expect.stringMatching(reason));
+    error.mockRestore();
+  });
+});
+
+describe("refresh-binding keys in official Railway deployments", () => {
+  const official = (name: "alpha" | "beta" | "production") => {
+    const host = name === "production" ? "" : `-${name}`;
+    return {
+      ...validEnv(),
+      AUTH_AUDIENCE: `https://api${host}.zeros.build`,
+      APP_ORIGIN: `https://app${host}.zeros.build`,
+      INVITE_LINK_BASE: `https://app${host}.zeros.build/invite`,
+      ...(name === "beta" ? {} : { OPS_ORIGIN: `https://ops${host}.zeros.build` }),
+      RAILWAY_PROJECT_ID: "project-1",
+      RAILWAY_ENVIRONMENT_NAME: name,
+      RAILWAY_GIT_BRANCH: name === "alpha" ? "main" : "release/1.2.3",
+    };
+  };
+
+  // Disabling GitHub here would strand every connected desktop; a failed boot
+  // keeps the previous deployment serving behind /healthz instead.
+  it.each(["alpha", "beta", "production"] as const)("refuses to boot %s without a dedicated binding key", (name) => {
+    expect(() => loadConfig(official(name))).toThrow(
+      new RegExp(`Railway ${name} GitHub App: GITHUB_REFRESH_BINDING_SECRET or GITHUB_REFRESH_BINDING_KEYS_JSON is required`),
+    );
+    expect(loadConfig({ ...official(name), GITHUB_REFRESH_BINDING_SECRET: "client-secret-for-tests" }).github)
+      .toMatchObject({ refreshBindingKeys: { 1: "client-secret-for-tests" }, refreshBindingKeysDedicated: true });
+  });
+
+  it("refuses to boot with an invalid keyring instead of disabling GitHub", () => {
+    expect(() => loadConfig({ ...official("production"), GITHUB_REFRESH_BINDING_KEYS_JSON: "not json" }))
+      .toThrow(/Railway production GitHub App: GITHUB_REFRESH_BINDING_KEYS_JSON must be a JSON object/);
+    expect(() => loadConfig({ ...official("beta"), GITHUB_REFRESH_BINDING_SECRET: "short" }))
+      .toThrow(/Railway beta GitHub App: GITHUB_REFRESH_BINDING_SECRET/);
+  });
+
+  it("keeps an absent GitHub App block optional", () => {
+    const { GITHUB_APP_ID: _id, GITHUB_APP_CLIENT_ID: _client, GITHUB_APP_CLIENT_SECRET: _secret,
+      GITHUB_APP_SLUG: _slug, GITHUB_OAUTH_CALLBACK_URL: _callback, ...withoutGithub } = official("alpha");
+    expect(loadConfig(withoutGithub).github).toBeNull();
+  });
+
+  it("lets a self-hosted Railway template keep the client-secret fallback with a warning", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    expect(loadConfig({ ...validEnv(), RAILWAY_PROJECT_ID: "project-1", ZEROS_SELF_HOSTED: "true" }).github)
+      .toMatchObject({ refreshBindingKeysDedicated: false });
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining("Set GITHUB_REFRESH_BINDING_SECRET"));
+    warn.mockRestore();
   });
 });
 
