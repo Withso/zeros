@@ -1,0 +1,9 @@
+{
+  "id": "review-github-connection-banner",
+  "kind": "replay",
+  "area": "renderer-state",
+  "fixedBy": "pr:809",
+  "symptom": "With the Local GitHub App needing re-authorization, GitHub not connected or the repository out of reach, the Review tab's banner said Couldn't load the review. and the Create PR toast said Connect GitHub, although Settings showed This GitHub connection needs to be re-authorized. The Review stringified its PR, diff and discovery rejections, and the refused diff read hid the sign-in placeholder behind the generic banner.",
+  "rule": "Keep a read's rejection as thrown until the tab names it. A GitHub connection refusal is a named condition: Local sign-in refusals repeat the selected method's Settings diagnosis and offer Settings instead of Retry, while cloud names its cloud connection and never reads the Mac's methods.",
+  "check": "pnpm test:git apps/desktop/src/renderer/shell/workbench/__tests__/review-github-connection.test.ts apps/desktop/src/renderer/shell/pr/__tests__/review-github-failure.test.ts apps/desktop/src/renderer/shell/pr/__tests__/create-pr-button.test.ts"
+}
