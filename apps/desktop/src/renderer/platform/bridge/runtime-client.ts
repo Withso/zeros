@@ -481,7 +481,7 @@ export class RuntimeClient {
       }
       // The one-use ticket is offered as a subprotocol, never in the URL.
       wsUrl = target.url;
-      protocols = [...target.protocols];
+      protocols = [...target.protocols, "zeros.cloud.v2.explicit-wake"];
     } else {
       let port: number;
       let token: string;
@@ -560,6 +560,12 @@ export class RuntimeClient {
       const reconnectImmediately = this.connectionTarget.kind === "cloud" && this.handshakeReady &&
         event?.code !== 1000 && event?.code !== 4001;
       if (this.ws === ws) this.ws = null;
+      if (this.connectionTarget.kind === "cloud" && event?.code === 4009) {
+        const failure = new CloudRuntimeAccessError({ code: "cloud_workspace_not_running", status: 409 });
+        this.rejectCloudConnection(failure);
+        for (const request of this.queuedRequests) request.reject(failure);
+        this.queuedRequests = [];
+      }
       // Each reconnect mints a fresh ticket; only a VM that never becomes
       // reachable ends the attempt.
       if (this.connectionTarget.kind === "cloud" && !this.handshakeReady && ++this.cloudConnectFailures >= 5)

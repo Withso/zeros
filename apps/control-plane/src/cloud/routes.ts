@@ -188,8 +188,18 @@ export function createCloudV2Routes(deps: CloudV2RouteDeps): Hono {
     const userId = c.get("user").id;
     const workspace = await deps.store.get(id.data, userId);
     await deps.authorizeSource?.(workspace);
+    const explicitWake = c.req.query("wakePolicy") === "explicit";
+    if (explicitWake && (workspace.archivedAt || workspace.state === "stopping" || (!wake && workspace.state === "stopped")))
+      throw new HttpError(409, "cloud_workspace_not_running", "This cloud workspace is not ready for a connection");
     if (workspace.state === "deleting" || workspace.state === "failed") throw new HttpError(409, "workspace_unavailable", "This cloud workspace is unavailable");
-    if (wake && workspace.state === "stopped") await deps.store.transition(workspace.id, ["stopped"], "starting");
+    if (wake && workspace.state === "stopped") {
+      if (!explicitWake) await deps.store.transition(workspace.id, ["stopped"], "starting");
+      else if (!await deps.store.transition(workspace.id, ["stopped"], "starting", { unarchived: true })) {
+        const current = await deps.store.get(workspace.id, userId);
+        if (current.archivedAt || !["creating", "starting", "running"].includes(current.state))
+          throw new HttpError(409, "cloud_workspace_not_running", "This cloud workspace is not ready for a connection");
+      }
+    }
     const ticket = await deps.store.issueToken({ workspaceId: workspace.id, kind: "connect", userId, ttlMs: CONNECT_TICKET_TTL_MS, authority: c.get("user"), wake });
     return c.json({
       url: `${deps.bridgeBaseUrl.replace(/\/+$/, "")}/v2/cloud/workspaces/${workspace.id}/bridge`,

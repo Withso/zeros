@@ -4,7 +4,7 @@ const mocks = vi.hoisted(() => ({
   status: "ready",
   connect: vi.fn(async () => ({ url: "wss://api.example.test/v2/cloud/workspaces/w/bridge",
     protocols: ["zeros.cloud.v2", "ticket.fixture"], expiresAt: new Date(Date.now() + 60_000).toISOString() })),
-  clients: [] as Array<{ refresh?: () => Promise<unknown> }>,
+  clients: [] as Array<{ refresh?: () => Promise<unknown>; reject: () => void }>,
 }));
 vi.mock("../../cloud-v2", () => ({ connectCloudV2Workspace: mocks.connect }));
 vi.mock("../../../state/cloud-workspace-catalog", () => ({
@@ -17,11 +17,16 @@ vi.mock("../../../state/cloud-workspace-catalog", () => ({
 vi.mock("../ws-client", () => ({
   RuntimeClient: class {
     status = "connecting";
+    lastRejection: { code: string; message: string } | null = null;
+    listeners = new Set<(status: string) => void>();
     constructor(_target: unknown, options: { refreshCloudConnectionTarget?: () => Promise<unknown> }) {
-      mocks.clients.push({ refresh: options.refreshCloudConnectionTarget });
+      mocks.clients.push({ refresh: options.refreshCloudConnectionTarget, reject: () => {
+        this.lastRejection = { code: "cloud_workspace_not_running", message: "The cloud workspace is not ready for a connection." };
+        this.status = "disconnected"; for (const cb of this.listeners) cb(this.status);
+      } });
     }
     connect() { return Promise.resolve(); }
-    onStatusChange() { return () => {}; }
+    onStatusChange(cb: (status: string) => void) { this.listeners.add(cb); return () => this.listeners.delete(cb); }
     dispose() {}
   },
 }));
@@ -39,6 +44,18 @@ async function openThenCancel(options: { wake?: boolean }) {
 }
 
 describe("cloud v2 connection tickets", () => {
+  it("settles the open immediately when the relay refuses the stopped worker", async () => {
+    vi.useFakeTimers();
+    const { controller, opening } = await openThenCancel({ wake: true });
+    let failure: unknown;
+    const result = opening.catch(error => { failure = error; });
+    try {
+      mocks.clients[0]!.reject();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(failure).toBeInstanceOf(Error);
+      expect(vi.getTimerCount()).toBe(0);
+    } finally { controller.abort(); await result; }
+  });
   it("releases the readiness timeout when navigation cancels an interaction wake", async () => {
     vi.useFakeTimers();
     const { controller, opening } = await openThenCancel({ wake: true });

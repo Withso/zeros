@@ -33,6 +33,7 @@ async function ticketTarget(target: CloudWorkspaceTarget, sequence: number, wake
 }
 
 function connected(client: RuntimeClient, signal?: AbortSignal): Promise<void> {
+  if (client.lastRejection) return Promise.reject(new Error(client.lastRejection.message));
   if (client.status === "connected") return Promise.resolve();
   return new Promise((resolve, reject) => {
     const finish = (error?: Error) => {
@@ -42,6 +43,7 @@ function connected(client: RuntimeClient, signal?: AbortSignal): Promise<void> {
     const timer = setTimeout(() => finish(new Error("The cloud workspace did not start in time")), CONNECT_TIMEOUT_MS);
     const abort = () => finish(new Error("Cloud connection cancelled"));
     const off = client.onStatusChange(status => {
+      if (client.lastRejection) { finish(new Error(client.lastRejection.message)); return; }
       if (status !== "connected") return;
       finish();
     });
@@ -70,7 +72,7 @@ export async function openCloudV2Runtime(
   const client = new RuntimeClient(await ticketTarget(target, sequence, options?.wake === true), {
     // Each reconnect presents a fresh ticket. A reconnect after a laptop wake,
     // network drop or control-plane deploy is not explicit work, so it never
-    // restarts a VM that stopped meanwhile; queued work over the bridge does.
+    // restarts a VM that stopped meanwhile. Fresh user input owns the next wake.
     refreshCloudConnectionTarget: async () => {
       assertAccount();
       return ticketTarget(target, ++sequence, false);

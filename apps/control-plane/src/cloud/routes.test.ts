@@ -208,7 +208,7 @@ describe("cloud v2 connect wake intent", () => {
   const path = `/v1/cloud-v2/workspaces/${id}/connect`;
   function setup() {
     const store = {
-      get: vi.fn(async () => ({ id, state: "stopped" })),
+      get: vi.fn(async () => ({ id, state: "stopped", archivedAt: null as string | null })),
       transition: vi.fn(async () => null),
       issueToken: vi.fn(async () => ({ token: "synthetic-connect-ticket", expiresAt: new Date(60_000) })),
     };
@@ -243,6 +243,29 @@ describe("cloud v2 connect wake intent", () => {
     expect(response.status).toBe(400);
     expect(store.transition).not.toHaveBeenCalled();
     expect(store.issueToken).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["stopped", false, null], ["stopping", false, null], ["stopping", true, null],
+    ["stopped", true, "2026-11-03T00:00:00Z"], ["running", false, "2026-11-03T00:00:00Z"],
+  ] as const)("refuses opted-in %s admission (wake=%s, archived=%s) before minting a ticket", async (state, wake, archivedAt) => {
+    const { app, store } = setup();
+    store.get.mockResolvedValue({ id, state, archivedAt });
+    const response = await app.request(`${path}?wakePolicy=explicit`, { method: "POST",
+      headers: { "content-type": "application/json" }, body: JSON.stringify({ wake }) });
+    expect(response.status).toBe(409);
+    expect(await response.json()).toEqual({ error: { code: "cloud_workspace_not_running" } });
+    expect(store.issueToken).not.toHaveBeenCalled();
+    expect(store.transition).not.toHaveBeenCalled();
+  });
+
+  it.each(["creating", "starting", "running"])("allows opted-in passive traffic to join %s without starting compute", async state => {
+    const { app, store } = setup(); store.get.mockResolvedValue({ id, state, archivedAt: null });
+    const response = await app.request(`${path}?wakePolicy=explicit`, { method: "POST",
+      headers: { "content-type": "application/json" }, body: JSON.stringify({ wake: false }) });
+    expect(response.status).toBe(200);
+    expect(store.issueToken).toHaveBeenCalledOnce();
+    expect(store.transition).not.toHaveBeenCalled();
   });
 });
 

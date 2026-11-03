@@ -394,15 +394,30 @@ cancel earlier input intents; input cannot reverse a shutdown in progress or
 restore an archived workspace. Owner/account changes cancel the old surface's
 intent. Local workspaces keep their existing behavior.
 
-A missing `wake` value still wakes for older callers. Explicit work over the
-bridge, or Start, wakes it and reconnects the worker. Stop
-retains the VM disk and saves a checkpoint; Delete removes the VM, its
-checkpoints and its access. Account
-and organization deletion also enqueue their workspaces for cleanup.
+New desktops add `wakePolicy=explicit` to the connect URL and offer the
+`zeros.cloud.v2.explicit-wake` WebSocket subprotocol alongside the existing
+protocol and ticket. The HTTP request owns the stopped-to-starting transition;
+the opted-in relay only joins an existing start or running worker. It closes
+the app socket with `4009 / workspace_not_running` when the worker disappears
+or admission finds a stopped, stopping or archived workspace. Queued reads,
+saves and old wake tickets cannot start compute. The desktop rejects pending
+work as a transport failure and lets fresh user input acquire the next wake.
+The connect transition atomically requires an unarchived workspace, so an
+archive committed during source authorization cannot be undone by that request.
 
-The mutation-activity change requires an updated SHA-pinned worker runtime;
-create/wake installs it. Quitting the Mac app still leaves cloud agents and
-terminals running, while Local quit retains its existing stop behavior.
+Older callers retain the existing default when `wake` is absent, and their
+bridge traffic can still wake stopped compute. An older relay selects the base
+protocol when a new desktop offers both; it retains that legacy behavior.
+Start remains explicit. Stop retains the VM disk and saves a checkpoint;
+Delete removes the VM, its checkpoints and its access. Account and organization
+deletion also enqueue their workspaces for cleanup.
+
+Roll out the control-plane negotiation before the desktop to enforce the
+background-wake rule. The mutation-activity change also requires publishing and
+selecting the updated SHA-pinned worker runtime; create/wake installs it, so an
+already-running VM adopts it on its next wake. No schema migration is needed.
+Quitting the Mac app still leaves cloud agents and terminals running, while
+Local quit retains its existing stop behavior.
 
 A new workspace branch starts from the authorized checkout hydrated into its
 own VM before worker startup. At creation the control plane records GitHub's
