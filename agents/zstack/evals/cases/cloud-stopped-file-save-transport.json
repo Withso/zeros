@@ -1,0 +1,9 @@
+{
+  "id": "cloud-stopped-file-save-transport",
+  "kind": "replay",
+  "area": "renderer-state",
+  "fixedBy": "pr:812",
+  "symptom": "An autosave retry reused a connected relay socket after the worker stopped, allowing background work to acquire compute; cancelled wake waits also retained their timeout.",
+  "rule": "A relay socket is not worker readiness. A save joins an explicit wake or rejects temporarily, and cancellation releases readiness resources (principles 3, 9, 13).",
+  "check": "pnpm test:git apps/desktop/src/renderer/platform/bridge/__tests__/cloud-file-wake.test.ts apps/desktop/src/renderer/platform/bridge/__tests__/cloud-v2-passive-tickets.test.ts"
+}
