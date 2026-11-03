@@ -86,8 +86,9 @@ Guard the context window. Read the feature area you are changing and the docs
    full diff yourself; no other reviewer replaces that.
 7. **Fix** what the review found, in bounded rounds, then re-verify the files
    you touched.
-8. **Deliver** a PR with Why, What changes, Tests and Rollout sections, merged
-   only through `pnpm agent:merge` (`integrate-pr.md`).
+8. **Deliver** a PR with Why, What changes, Tests, Rollout, Local workspace
+   impact and Cloud workspace impact sections, merged only through
+   `pnpm agent:merge` (`integrate-pr.md`), which refuses a PR missing any.
 9. **Learn** with `zstack-learn`. Write any lesson back into the pack in the
    same branch.
 
