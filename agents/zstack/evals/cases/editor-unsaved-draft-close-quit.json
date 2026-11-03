@@ -1,0 +1,9 @@
+{
+  "id": "editor-unsaved-draft-close-quit",
+  "kind": "replay",
+  "area": "renderer-ui",
+  "fixedBy": "pr:811",
+  "symptom": "Unsaved Files edits lived only in renderer memory, so closing the File tab or window, quitting, Restart to Update, switching workspaces or archiving discarded them without a prompt, in Local and cloud workspaces.",
+  "rule": "Principles 2 and 4: journal every unsaved draft outside the renderer before it can be lost, make quit wait for that write, restore it only onto the exact content it was edited from, and retire it on discard.",
+  "check": "pnpm exec vitest run apps/desktop/src/renderer/shell/workbench/tabs/code-editor/__tests__/source-editor-drafts.test.ts -t \"keeps unsaved edits through a close\""
+}

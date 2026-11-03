@@ -10,6 +10,7 @@
 import "../../../../../styles/zeros-tokens.css";
 import "../../../../../styles/semantic-tokens.css";
 import "../../../../../styles/globals.css";
+import "./isolated-editor-drafts";
 
 import {
   DESIGN_RUNTIME_SOURCE,

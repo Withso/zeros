@@ -44,8 +44,21 @@ export function useWorkbenchDirtyEditorIds(): ReadonlySet<string> {
   return useSyncExternalStore(subscribe, snapshot, () => EMPTY_DIRTY_EDITORS);
 }
 
+const closingEditorIds = new Set<string>();
+
+/** The tab strip marks a File tab the user is closing, so its editor can tell
+ * that unmount apart from a workspace switch or a hidden-surface eviction. */
+export function markWorkbenchEditorClosing(editorId: string): void {
+  if (editorId) closingEditorIds.add(editorId);
+}
+
+export function takeWorkbenchEditorClosing(editorId: string): boolean {
+  return closingEditorIds.delete(editorId);
+}
+
 /** Test-only reset for the module singleton. */
 export function resetWorkbenchEditorDirtyForTests(): void {
+  closingEditorIds.clear();
   if (dirtyEditorIds.size === 0) return;
   dirtyEditorIds = EMPTY_DIRTY_EDITORS;
   for (const listener of listeners) listener();

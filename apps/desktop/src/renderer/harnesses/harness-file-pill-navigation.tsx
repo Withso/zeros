@@ -3,6 +3,7 @@
 import "../../../../../styles/zeros-tokens.css";
 import "../../../../../styles/semantic-tokens.css";
 import "../../../../../styles/globals.css";
+import "./isolated-editor-drafts";
 import { createRoot } from "react-dom/client";
 import { WorkspaceRuntimeClient } from "../platform/bridge/workspace-runtime-client";
 import { setActiveBridge } from "../platform/bridge/active-bridge";

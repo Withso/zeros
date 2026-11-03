@@ -568,8 +568,17 @@ editable caret, and old/deleted comparison lines never become writable source.
 
 Auto save defaults on and saves after the typing debounce or leaving the editor.
 File options also provides Save file and Discard changes; discard restores the
-last saved source draft. Save failures retain the dirty draft and wait for a new
-edit or explicit save. A pending save cannot clear newer typing, and old save
+last saved source draft. A write that never reached the engine or cloud VM
+(unreachable, stopped, reconnecting) retries quietly with backoff (1, 2, 5, 10,
+then 30 s; at once after a new edit); a write the engine refused keeps the dirty
+draft, reports once and waits for a new edit or explicit save. Every unsaved
+draft is also kept in a per-file IndexedDB journal (cloud entries scoped to the
+signed-in account), so closing the tab or window, quitting, Restart to Update
+(which waits for the write), switching workspaces or archiving never discards
+it: reopening the file restores the draft when the file still holds the content
+it was edited from, and otherwise keeps the disk content and offers Restore.
+Discarding the draft or the file retires its entry; there is no quit prompt.
+Closing an unsaved File tab notes that its changes are kept. A pending save cannot clear newer typing, and old save
 echoes cannot undo a newer write. External disk updates keep their established
 authority after acknowledgement. Unsaved tabs show a neutral dot. One keyed Git
 status snapshot supplies status letters for file rows and tabs; tree filenames
