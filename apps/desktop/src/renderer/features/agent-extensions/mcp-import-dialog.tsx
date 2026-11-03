@@ -1,20 +1,8 @@
-// ──────────────────────────────────────────────────────────
-// Customize → MCP — "Import from other tools" (the adopt wizard)
-// ──────────────────────────────────────────────────────────
-//
-// Detect-then-offer (never silent): scans the user's home MCP configs (Cursor /
-// Claude / Codex / Factory) via the engine, lists what each declares grouped by
-// source, and imports the selected servers into the Zeros user-level config.
-// Servers already in Zeros are shown but not selectable (dedup by name). On
-// import, a secret-shaped env value is moved into the Keychain (sentinel in
-// settings) so tokens don't land in the file in plain text.
-// ──────────────────────────────────────────────────────────
-
 import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { AlertTriangle, Check } from "lucide-react";
 
 import { Button } from "../../shared/ui";
-import { Tooltip } from "@/renderer/shared/ui/primitives";
+import { Input, Tooltip } from "@/renderer/shared/ui/primitives";
 import {
   Dialog,
   DialogContent,
@@ -31,124 +19,79 @@ import { useReadRecovery } from "../../state/use-read-recovery";
 import { useDocumentActive } from "../../state/use-document-active";
 import { useProjects } from "../../state/use-projects";
 import {
-  bridgeMcpGatewaySetHeaderSecret,
   bridgeMcpResolveComposed,
   bridgeMcpScanNative,
+  bridgeSettingsRead,
+  workspaceOp,
   type DiscoveredMcpServerWire,
   type DiscoveredMcpSourceWire,
+  type SettingsReadWire,
 } from "../../platform/bridge/workspace-bridge";
-import { useSettingsLayer } from "../settings/use-settings";
-import { MCP_SECRET_SENTINEL, looksSecretEnvName, setMcpSecret } from "../agent/mcp-secrets";
+import { runtimeExecutionKey } from "../../platform/bridge/ws-client";
+import { primeSettingsLayer, useSettingsLayer } from "../settings/use-settings";
+import { mcpDraftError, secretChangesFromDraft, type McpSecretChanges } from "./mcp-form-save";
 import {
   asString,
   endpointSummary,
   readRawServers,
+  secureDraftFromServer,
+  serverFromDraft,
   type RawServer,
 } from "./mcp-server-model";
 import { ZerosSpinner } from "@/renderer/shared/ui/loading";
 
 const keyOf = (source: string, name: string) => `${source}::${name}`;
 
-/** Does an HTTP header VALUE look like a credential, regardless of its name? A
- *  header named e.g. `X-Custom` can still carry a bearer token; matching by name
- *  alone (looksSecretEnvName) would copy it into settings.toml in plain text. */
-function looksSecretHeaderValue(v: string): boolean {
-  const s = v.trim();
-  if (!s) return false;
-  if (/^bearer\s+\S/i.test(s)) return true; // "Bearer <token>"
-  if (/^(sk|pk|rk|ghp|gho|ghs|github_pat|xox[baprs]|AKIA)[-_]/i.test(s)) return true; // common token prefixes
-  // A long, single-token opaque value with no spaces = very likely a secret.
-  if (s.length >= 20 && !/\s/.test(s) && /^[A-Za-z0-9._~+/=:-]+$/.test(s)) return true;
-  return false;
-}
-
-/** A header is treated as secret if its NAME or its VALUE looks secret.
- *  Exported for the form's paste-JSON import, which must apply the same
- *  never-write-a-secret-to-TOML rule this wizard does. */
-export function isSecretHeader(name: string, value: string): boolean {
-  return !!value && (looksSecretEnvName(name) || looksSecretHeaderValue(value));
-}
-
 interface ImportResult {
   entry: RawServer;
-  /** A secret-shaped header to store in the engine gateway vault (auth:"header"),
-   *  set by the caller over the local bridge AFTER the settings write. */
-  headerSecret?: { url: string; headerName: string; value: string };
-  /** Secret-shaped headers we could NOT import (the gateway brokers only one
-   *  static header) — surfaced to the user so a dropped credential isn't silent. */
-  droppedSecretHeaders?: string[];
+  secrets: McpSecretChanges;
 }
 
-/** Map a discovered server to a settings entry. A secret-shaped stdio env value
- *  moves to the Keychain (sentinel in settings); a secret-shaped HTTP header is
- *  brokered through the gateway (auth:"header" — its value goes to the engine
- *  vault, NEVER settings). Non-secret env/headers are copied as-is. */
-async function importToSettings(srv: DiscoveredMcpServerWire): Promise<ImportResult> {
-  if (srv.transport === "stdio") {
-    const env: Record<string, string> = {};
-    for (const [k, v] of Object.entries(srv.env ?? {})) {
-      if (v && looksSecretEnvName(k)) {
-        await setMcpSecret(k, v);
-        env[k] = MCP_SECRET_SENTINEL;
-      } else {
-        env[k] = v;
-      }
-    }
-    return {
-      entry: {
-        name: srv.name,
-        transport: "stdio",
-        command: srv.command,
-        ...(srv.cwd ? { cwd: srv.cwd } : {}),
-        ...(srv.args && srv.args.length ? { args: srv.args } : {}),
-        ...(Object.keys(env).length ? { env } : {}),
-      },
-    };
-  }
-  // http — broker the FIRST secret header (by name OR value shape) through the
-  // gateway; keep non-secret headers plain. A SECOND secret header can't be
-  // brokered (the gateway holds one static header), so it's dropped + reported
-  // rather than written to settings.toml in plain text.
-  const plain: Record<string, string> = {};
-  let headerSecret: ImportResult["headerSecret"];
-  const droppedSecretHeaders: string[] = [];
-  for (const [k, v] of Object.entries(srv.headers ?? {})) {
-    if (isSecretHeader(k, v)) {
-      if (!headerSecret) headerSecret = { url: srv.url, headerName: k, value: v };
-      else droppedSecretHeaders.push(k);
-    } else {
-      plain[k] = v;
-    }
-  }
-  if (srv.oauth) {
-    return {
-      entry: { name: srv.name, transport: srv.transport, url: srv.url, auth: "oauth",
-        ...(srv.oauth.clientId ? { oauth_client_id: srv.oauth.clientId } : {}),
-        ...(srv.oauth.scopes?.length ? { oauth_scopes: srv.oauth.scopes } : {}),
-      },
-      ...(headerSecret || droppedSecretHeaders.length ? { droppedSecretHeaders: [...(headerSecret ? [headerSecret.headerName] : []), ...droppedSecretHeaders] } : {}),
-    };
-  }
-  const entry: RawServer = headerSecret
-    ? {
-        name: srv.name,
-        transport: srv.transport,
-        url: srv.url,
-        auth: "header",
-        header_name: headerSecret.headerName,
-        ...(Object.keys(plain).length ? { headers: plain } : {}),
-      }
-    : {
-        name: srv.name,
-        transport: srv.transport,
-        url: srv.url,
-        ...(Object.keys(plain).length ? { headers: plain } : {}),
-      };
+function importToSettings(srv: DiscoveredMcpServerWire, credentialId: string = crypto.randomUUID()): ImportResult {
+  const oauth = srv.transport !== "stdio" ? srv.oauth : undefined;
+  const draft = secureDraftFromServer({
+    ...srv,
+    ...(oauth ? {
+      auth: "oauth",
+      ...(oauth.clientId ? { oauth_client_id: oauth.clientId } : {}),
+      ...(oauth.scopes?.length ? { oauth_scopes: oauth.scopes } : {}),
+    } : {}),
+  });
+  const error = mcpDraftError(draft);
+  if (error) throw new Error(error);
   return {
-    entry,
-    ...(headerSecret ? { headerSecret } : {}),
-    ...(droppedSecretHeaders.length ? { droppedSecretHeaders } : {}),
+    entry: { ...serverFromDraft(draft, null), credential_id: credentialId },
+    secrets: secretChangesFromDraft(draft),
   };
+}
+
+function selectedImports(sources: DiscoveredMcpSourceWire[], selected: Set<string>, names: Record<string, string>) {
+  return sources.flatMap(src => src.servers.flatMap(srv => {
+    const key = keyOf(src.source, srv.name);
+    return selected.has(key) ? [{ key, server: { ...srv, name: (names[key] ?? srv.name).trim() } }] : [];
+  }));
+}
+
+function importNameErrors(picked: ReturnType<typeof selectedImports>, taken: Set<string>, existing: RawServer[], credentialIds: Map<string, string>): Map<string, string> {
+  const counts = new Map<string, number>();
+  for (const { server } of picked) counts.set(server.name, (counts.get(server.name) ?? 0) + 1);
+  const errors = new Map<string, string>();
+  for (const { key, server } of picked) {
+    if (!server.name) errors.set(key, "Enter an import name.");
+    else if ((counts.get(server.name) ?? 0) > 1 ||
+      (taken.has(server.name) && !existing.some(row => row.name === server.name && row.credential_id === credentialIds.get(key) && row.credential_id))) {
+      errors.set(key, "This name is already used. Choose a different import name.");
+    }
+  }
+  return errors;
+}
+
+function sameImportEntry(saved: RawServer, entry: RawServer): boolean {
+  const signature = (server: RawServer) => JSON.stringify(server, (_key, value) =>
+    value && typeof value === "object" && !Array.isArray(value)
+      ? Object.fromEntries(Object.entries(value).sort(([a], [b]) => a.localeCompare(b)))
+      : value);
+  return signature(saved) === signature(entry);
 }
 
 function TransportPill({ transport }: { transport: "stdio" | "http" | "sse" }) {
@@ -164,12 +107,9 @@ export function McpImportDialog({ open, onClose }: { open: boolean; onClose: () 
   const { projects } = useProjects();
   const {
     layer, loading: settingsLoading, error: settingsError,
-    readError: settingsReadError, refresh: refreshSettings, write,
+    readError: settingsReadError, refresh: refreshSettings,
   } = useSettingsLayer("user");
   const existing = useMemo(() => readRawServers(layer?.doc), [layer?.doc]);
-  // Names already configured in Zeros (user + managed — the only MCP layers),
-  // so an already-configured server shows as "Already added" instead of
-  // re-importing a redundant dupe.
   const [composedNames, setComposedNames] = useState<Set<string>>(new Set());
   const existingNames = useMemo(() => {
     const s = new Set(existing.map((x) => asString(x.name)).filter(Boolean) as string[]);
@@ -187,11 +127,25 @@ export function McpImportDialog({ open, onClose }: { open: boolean; onClose: () 
   const active = useDocumentActive(open);
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [busy, setBusy] = useState(false);
+  const [names, setNames] = useState<Record<string, string>>({});
+  const [imported, setImported] = useState<Set<string>>(new Set());
+  const credentialIds = useRef(new Map<string, string>());
+  const importGeneration = useRef(0);
+  const importPending = useRef(false);
   const retry = useCallback(() => new Promise<void>(resolve => {
     retryWaiters.current.push(resolve);
     setLoading(true);
     setScanAttempt(value => value + 1);
   }), []);
+  useLayoutEffect(() => {
+    const generation = importGeneration.current;
+    if (!open) {
+      setNames({});
+      setImported(new Set());
+      credentialIds.current.clear();
+    }
+    return () => { importGeneration.current = generation + 1; };
+  }, [open, active, bridge, connected]);
 
   // Scan each time the dialog opens.
   useEffect(() => {
@@ -209,8 +163,6 @@ export function McpImportDialog({ open, onClose }: { open: boolean; onClose: () 
     let live = true;
     setLoading(true);
     setScanError(null);
-    // Names already in Zeros (user + managed), so an already-configured server
-    // shows as "Already added".
     void bridgeMcpResolveComposed(bridge)
       .catch(() => [])
       .then((list) => {
@@ -276,74 +228,78 @@ export function McpImportDialog({ open, onClose }: { open: boolean; onClose: () 
   const found = sources?.flatMap((s) => s.servers) ?? [];
   const hasAny = found.length > 0;
   const importError = recovery.error?.message ?? settingsError ?? layer?.error;
+  const nameErrors = importNameErrors(selectedImports(sources ?? [], selected, names), existingNames, existing, credentialIds.current);
 
   const handleImport = async () => {
     if (!sources || !connected || scanError || loading || busy ||
-        !layer || settingsLoading || settingsReadError || layer.error) return;
+        !layer || settingsLoading || settingsReadError || layer.error || !bridge || importPending.current) return;
+    importPending.current = true;
     setBusy(true);
+    const generation = importGeneration.current;
+    const execution = runtimeExecutionKey(bridge.executionIdentity);
+    const current = () => generation === importGeneration.current && bridge.status === "connected" &&
+      runtimeExecutionKey(bridge.executionIdentity) === execution;
+    let completed = 0;
     try {
-      // Collect the selected servers, dedup by name (vs existing + each other).
-      const seen = new Set<string>([...existingNames] as string[]);
-      const picked: DiscoveredMcpServerWire[] = [];
-      for (const src of sources) {
-        for (const srv of src.servers) {
-          if (!selected.has(keyOf(src.source, srv.name))) continue;
-          if (seen.has(srv.name)) continue;
-          seen.add(srv.name);
-          picked.push(srv);
-        }
-      }
-      if (picked.length === 0) {
-        onClose();
+      const picked = selectedImports(sources, selected, names);
+      if (!picked.length) return;
+      const latest = await bridgeSettingsRead(bridge, "user");
+      if (!current()) return;
+      if (latest.error) throw new Error("MCP settings are unavailable.");
+      primeSettingsLayer("user", undefined, latest);
+      let savedServers = readRawServers(latest.doc);
+      const taken = new Set([...existingNames, ...savedServers.map(row => String(row.name))]);
+      if (importNameErrors(picked, taken, savedServers, credentialIds.current).size) {
+        toast.error("Choose a different import name for each selected server.");
         return;
       }
-      const results: ImportResult[] = [];
-      for (const srv of picked) results.push(await importToSettings(srv));
-      await write({ mcp: { servers: [...existing, ...results.map((r) => r.entry)] } });
-      // Store any brokered header secrets in the engine vault over the LOCAL
-      // bridge AFTER the settings write, so the gateway reload connects the
-      // backend with the key present (and the key never lands in settings).
-      if (bridge) {
-        for (const r of results) {
-          if (!r.headerSecret) continue;
-          try {
-            await bridgeMcpGatewaySetHeaderSecret(
-              bridge,
-              r.headerSecret.url,
-              r.headerSecret.headerName,
-              r.headerSecret.value,
-            );
-          } catch {
-            toast.error("Couldn't store an imported API key in the secret vault");
-          }
+      const results = picked.map(({ key, server }) => {
+        const id = credentialIds.current.get(key) ?? crypto.randomUUID();
+        credentialIds.current.set(key, id);
+        return { key, ...importToSettings(server, id) };
+      });
+      for (const { key, entry, secrets } of results) {
+        // Settings publish only after the vault acknowledgement. A confirmed
+        // matching entry completes a lost reply without repeating the mutation.
+        const previous = savedServers.find(row => row.credential_id === entry.credential_id) ?? null;
+        if (previous) {
+          if (!sameImportEntry(previous, entry)) throw new Error("An imported server changed. Review it before importing again.");
+        } else {
+          const saved = await workspaceOp(bridge, "mcp.saveServer", {
+            layer: "user", previous: null, server: entry, secrets,
+          }) as Pick<SettingsReadWire, "path" | "doc">;
+          if (!current()) return;
+          savedServers = readRawServers(saved.doc);
+          primeSettingsLayer("user", undefined, saved);
         }
+        completed++;
+        setImported(prior => new Set([...prior, key]));
+        setSelected(prior => { const next = new Set(prior); next.delete(key); return next; });
       }
-      const dropped = results.flatMap((r) => r.droppedSecretHeaders ?? []);
-      if (dropped.length) {
-        toast.warning(
-          `The Zeros gateway brokers one secret header per server, so these extra secret-shaped header(s) were not imported and must be set manually: ${dropped.join(", ")}`,
-        );
-      }
-      toast.success(`Imported ${picked.length} MCP server${picked.length === 1 ? "" : "s"}`);
+      toast.success(`Imported ${completed} MCP server${completed === 1 ? "" : "s"}`);
       onClose();
     } catch {
-      toast.error("Couldn't import MCP servers");
+      if (current()) {
+        refreshSettings();
+        toast.error(completed
+          ? `Imported ${completed} MCP server${completed === 1 ? "" : "s"}. The remaining servers are still selected; retry to finish.`
+          : "Couldn't import MCP servers. Your selections are kept; retry to finish.");
+      }
     } finally {
+      importPending.current = false;
       setBusy(false);
     }
   };
 
   return (
-    <Dialog open={open} onOpenChange={(o) => { if (!o) onClose(); }}>
+    <Dialog open={open} onOpenChange={(o) => { if (!o && !busy) onClose(); }}>
       <DialogContent className="max-w-lg">
         <DialogHeader>
           <DialogTitle>Import MCP servers</DialogTitle>
           <DialogDescription>
             Choose local MCP configurations to copy into Zeros. Imported
-            servers are available to Claude, Codex, and Cursor. Token-shaped env
-            values
-            move to your Keychain; secret HTTP headers move to the gateway’s
-            encrypted vault.
+            servers are available to Claude, Codex, and Cursor. Environment
+            values and HTTP headers are saved in the encrypted vault for each server.
           </DialogDescription>
         </DialogHeader>
         <DialogBody>
@@ -384,39 +340,57 @@ export function McpImportDialog({ open, onClose }: { open: boolean; onClose: () 
                         const already = existingNames.has(srv.name);
                         const key = keyOf(src.source, srv.name);
                         const isSel = selected.has(key);
+                        const done = imported.has(key);
+                        const nameError = nameErrors.get(key);
                         return (
-                          <button
-                            key={key}
-                            type="button"
-                            disabled={already || busy}
-                            onClick={() => toggle(key)}
-                            className={cn(
-                              "flex items-center gap-2.5 rounded-sm px-1.5 py-2 text-left",
-                              already ? "opacity-50" : "hover:bg-bg2",
-                            )}
-                          >
-                            <span
+                          <div key={key} className="flex flex-col gap-1">
+                            <Button
+                              type="button"
+                              variant="ghost"
+                              disabled={done || busy}
+                              aria-pressed={isSel}
+                              onClick={() => toggle(key)}
                               className={cn(
-                                "flex size-4 shrink-0 items-center justify-center rounded-sm border",
-                                isSel && !already
-                                  ? "border-primary-button-bg bg-primary-button-bg text-primary-button-fg"
-                                  : "border-border2",
+                                "h-auto w-full justify-start gap-2.5 rounded-sm px-1.5 py-2 text-left",
+                                !done && "hover:bg-bg1-hover",
                               )}
-                              aria-hidden="true"
                             >
-                              {isSel && !already && <Check className="size-3" />}
-                            </span>
-                            <TransportPill transport={srv.transport} />
-                            <div className="min-w-0 flex-1">
-                              <div className="truncate text-sm text-fg1">{srv.name}</div>
-                              <div className="truncate font-mono text-xs text-fg2">
-                                {endpointSummary(srv as RawServer)}
+                              <span
+                                className={cn(
+                                  "flex size-4 shrink-0 items-center justify-center rounded-sm border",
+                                  isSel || done
+                                    ? "border-primary-button-bg bg-primary-button-bg text-primary-button-fg"
+                                    : "border-border2",
+                                )}
+                                aria-hidden="true"
+                              >
+                                {(isSel || done) && <Check className="size-3" />}
+                              </span>
+                              <TransportPill transport={srv.transport} />
+                              <div className="min-w-0 flex-1">
+                                <div className="truncate text-sm text-fg1">{srv.name}</div>
+                                <div className="truncate font-mono text-xs text-fg2">
+                                  {endpointSummary(srv as RawServer)}
+                                </div>
                               </div>
-                            </div>
-                            {already && (
-                              <span className="shrink-0 text-xs text-fg2">Already added</span>
+                              {(done || already) && (
+                                <span className="shrink-0 text-xs text-fg2">{done ? "Imported" : "Name in use"}</span>
+                              )}
+                            </Button>
+                            {isSel && (nameError || names[key] !== undefined) && (
+                              <label className="flex flex-col gap-1 px-1.5 pb-2 text-xs text-fg2">
+                                Import name
+                                <Input
+                                  aria-label={`Import name for ${srv.name} from ${src.label}`}
+                                  aria-invalid={!!nameError}
+                                  value={names[key] ?? srv.name}
+                                  disabled={busy}
+                                  onChange={event => setNames(prior => ({ ...prior, [key]: event.target.value }))}
+                                />
+                                {nameError && <span className="text-red-primary">{nameError}</span>}
+                              </label>
                             )}
-                          </button>
+                          </div>
                         );
                       })}
                     </div>
@@ -439,7 +413,7 @@ export function McpImportDialog({ open, onClose }: { open: boolean; onClose: () 
           <Button
             variant="default"
             size="sm"
-            disabled={busy || loading || !connected || !!scanError || !layer || settingsLoading || !!settingsReadError || !!layer.error || selectedCount === 0}
+            disabled={busy || loading || !connected || !!scanError || !layer || settingsLoading || !!settingsReadError || !!layer.error || selectedCount === 0 || nameErrors.size > 0}
             onClick={() => void handleImport()}
           >
             {busy && <ZerosSpinner size={16} tone="inverted" />}

@@ -327,9 +327,6 @@
       "apps/desktop/src/renderer/features/agent-extensions/customize-page.tsx": {
         "button": 1
       },
-      "apps/desktop/src/renderer/features/agent-extensions/mcp-import-dialog.tsx": {
-        "button": 1
-      },
       "apps/desktop/src/renderer/features/agent/agent-chat.tsx": {
         "button": 1
       },
