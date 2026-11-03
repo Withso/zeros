@@ -251,9 +251,10 @@ available until Alpha acceptance is complete.
 ## Railway deployment
 
 Configure the Railway service root as `apps/control-plane`. The colocated
-[`Dockerfile`](Dockerfile) builds the service and
-[`railway.json`](railway.json) configures `/healthz`, restart behavior, and the
-Dockerfile builder.
+[`Dockerfile`](Dockerfile) builds the service. Each environment's Railway
+service settings select that Dockerfile and set the `/healthz` health check and
+restart behavior; [`.railway/railway.ts`](../../.railway/railway.ts) records
+the same settings for Railway's Infrastructure as Code.
 
 Use one Railway project with persistent `alpha`, `beta`, and `production`
 environments. Each environment has its own control-plane instance, PlanetScale Postgres database,

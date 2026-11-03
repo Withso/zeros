@@ -105,58 +105,59 @@ workflow would create a dependency cycle. Source retargets commit an explicit me
 with `skipDeploys:true`, then re-read the source and autodeploy state before
 migration. Never commit unrelated staged dashboard changes during a promotion.
 
-### Railway IaC migration (owner-operated Phase 2)
+### Railway service settings and IaC
 
-Railway's official [Infrastructure as Code contract](https://docs.railway.com/infrastructure-as-code)
-replaces per-service Config as Code; existing `railway.json`/`railway.toml` files
-stop being read on **December 1, 2026**. `.railway/railway.ts` is authored with the
+Railway stops reading Config as Code files (`railway.json`/`railway.toml`) on
+**December 1, 2026**. On November 2, 2026 each environment's `zeros` service
+settings took the exact values the retired `apps/control-plane/railway.json`
+enforced: Dockerfile build (`Dockerfile`), `/healthz` with a 60-second
+healthcheck timeout, and `ON_FAILURE` restart with five retries. An environment
+patch committed them with `skipDeploys: true`, so no deployment changed, and the
+file was then removed. Release branches cut earlier still contain it; until
+December 1 Railway reads the same values from that file. Railway's
+`serviceInstance.builder` enum has no Dockerfile member, so check `build.builder`
+in the environment config or a deployment's `meta.serviceManifest` instead.
+
+[Railway's Infrastructure as Code](https://docs.railway.com/infrastructure-as-code)
+replaces Config as Code. `.railway/railway.ts` records the same settings with the
 official `railway/iac` TypeScript DSL, checked against SDK `3.12.0`, and is **not
-applied by this change or by a release workflow**. Keep
-`apps/control-plane/railway.json` until the reviewed migration is complete.
+applied by a release workflow**. Its named `zeros-control-plane` partial
+describes the existing `zeros` service, not a new project, database, or secret
+inventory. It takes the linked project name, allows only Alpha/Beta/Production,
+keeps Alpha on `main`, and requires `RELEASE_BRANCH=release/X.Y.Z` for
+Beta/Production. Its repository-root watch pattern `/apps/control-plane/**`
+differs from Production's promotion-hold pattern, and it omits domains, limits
+and region.
 
-The named `zeros-control-plane` partial describes the existing `zeros` service,
-not a new project, database, or secret inventory. It takes the linked project
-name, allows only Alpha/Beta/Production, keeps Alpha on `main`, and requires
-`RELEASE_BRANCH=release/X.Y.Z` for Beta/Production. Desired settings are Dockerfile
-build (`Dockerfile`), root `apps/control-plane`, repository-root watch pattern
-`/apps/control-plane/**`, `/healthz` with a 60-second healthcheck timeout, and
-`ON_FAILURE` restart with five retries. Those explicit file-controlled settings,
-not potentially stale dashboard defaults, are the migration target.
+Adopting IaC ownership is optional. For each channel, the owner:
 
-For each channel, the owner must:
-
-1. Install SDK `railway@3.12.0` and Railway CLI `5.42.1` or newer in an isolated
-   operator tool directory. Copy the candidate authoring file into that
-   directory's `.railway/` so its SDK resolves without changing application
-   dependencies or lockfiles. Authenticate without putting token values in
-   command arguments, then `railway link` to the **existing** project/environment.
-2. Hold competing deploys, disable independent Git autodeploy and Wait for CI,
-   and record the current source/configuration/rollback identity. Use
-   `railway config partials list` to inspect ownership and confirm the existing
-   service is named `zeros`. Do not rename a different existing service to fit
-   the candidate or take ownership from another partial implicitly.
-3. Back up the candidate file, then `railway config pull --force` in the private
-   tool directory to import current configuration. Never use
-   `--include-variables` or `--show-values`. Retain imported `preserve()` variable
-   references, domains and unrelated live configuration; merge only this
-   candidate's source/build/deploy settings and stable partial name. Review any
-   ownership transfer separately. A partial protects unrelated resources, but
-   does not justify deleting variables from the service it owns.
-4. Preview `railway config migrate --service zeros`. Under separate explicit
-   owner approval, migrate/clear the legacy Config File setting (the CLI's
-   `--apply` is a provider mutation), and remove the legacy repository file in
-   the coordinated Phase 2 change. Railway deliberately refuses IaC planning
-   while that service is still managed by Config as Code; do not bypass it.
-5. Run `railway config plan`, inspect the redacted diff, and stop on unexpected
-   resource/variable/domain deletion or unrelated changes. Only after approving
-   the exact channel/diff run interactive `railway config apply`. No automatic
-   apply action, blanket destructive confirmation, or unreviewed saved plan is
-   part of the release pipeline.
-6. Require `railway config plan --detailed-exit-code` to return 0, inspect the
-   effective source/root/watch/build/health/restart settings, then use the
-   ordered controller's explicit exact-SHA deployment and verify anonymous
-   `/healthz` and `/v1/release-identity`. Repeat independently for Beta and
-   Production; an Alpha plan does not certify either other environment.
+1. Installs SDK `railway@3.12.0` and Railway CLI `5.42.1` or newer in an isolated
+   operator tool directory and copies the authoring file into that directory's
+   `.railway/`, so the SDK resolves without changing application dependencies
+   or lockfiles. Authenticates without putting token values in command
+   arguments, then runs `railway link` to the **existing** project/environment.
+2. Holds competing deploys, keeps independent Git autodeploy and Wait for CI
+   disabled, and records the current source/configuration/rollback identity.
+   `railway config partials list` must show the existing service named `zeros`.
+   Do not rename a different service to fit the file or take ownership from
+   another partial implicitly.
+3. Backs up the authoring file, then runs `railway config pull --force` in the
+   tool directory to import the current configuration. Never use
+   `--include-variables` or `--show-values`. Keep the imported `preserve()`
+   variable references, domains, limits, region, watch pattern and other live
+   configuration; merge only the source/build/deploy settings and stable partial
+   name. A partial protects unrelated resources, but does not justify deleting
+   variables from the service it owns.
+4. Runs `railway config plan`, inspects the redacted diff, and stops on any
+   resource, variable or domain deletion or unrelated change. Only after
+   approving that exact channel's diff, runs interactive `railway config apply`.
+   No automatic apply, blanket destructive confirmation or unreviewed saved
+   plan is part of the release pipeline.
+5. Requires `railway config plan --detailed-exit-code` to return 0, inspects the
+   effective source/root/watch/build/health/restart settings, then uses the
+   ordered controller's explicit exact-SHA deployment and verifies anonymous
+   `/healthz` and `/v1/release-identity`. Each environment is planned
+   independently; an Alpha plan does not certify Beta or Production.
 
 IaC settings application does not replace CI, migrations, source-bound
 readiness, or protected Production approval. Do not apply while the legacy file

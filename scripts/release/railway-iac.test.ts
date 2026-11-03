@@ -17,16 +17,20 @@ function configuration(channel: string, branch?: string) {
   } };
 }
 
+// The settings every environment's Railway service holds since the legacy
+// apps/control-plane/railway.json was retired.
+const BUILD = { builder: "DOCKERFILE", dockerfilePath: "Dockerfile" };
+const DEPLOY = { healthcheckPath: "/healthz", healthcheckTimeout: 60, restartPolicyType: "ON_FAILURE", restartPolicyMaxRetries: 5 };
+
 describe("Railway control-plane IaC authoring", () => {
-  it.each(["alpha", "beta", "production"])("preserves the %s service's effective legacy settings without applying", channel => {
-    const current = JSON.parse(readFileSync("apps/control-plane/railway.json", "utf8"));
+  it.each(["alpha", "beta", "production"])("keeps the %s service's Dockerfile, health check and restart settings", channel => {
     const result = configuration(channel, "release/0.1.20"), resource = result.project.resources[0];
     expect(result.partial).toBe("zeros-control-plane"); expect(result.project.name).toBe("existing-project");
     expect(result.project.resources).toHaveLength(1); expect(resource.name).toBe("zeros");
     expect(resource.config.rootDirectory).toBe("apps/control-plane");
     expect(resource.config.source).toEqual({ repo: "Withso/zeros", branch: channel === "alpha" ? "main" : "release/0.1.20" });
-    expect(resource.config.build).toEqual({ ...current.build, watchPatterns: ["/apps/control-plane/**"] });
-    expect(resource.config.deploy).toEqual(current.deploy);
+    expect(resource.config.build).toEqual({ ...BUILD, watchPatterns: ["/apps/control-plane/**"] });
+    expect(resource.config.deploy).toEqual(DEPLOY);
     expect(resource.config).not.toHaveProperty("env"); expect(resource.config).not.toHaveProperty("variables");
   });
   it("rejects unreviewed environments and release-branch selections", () => {
