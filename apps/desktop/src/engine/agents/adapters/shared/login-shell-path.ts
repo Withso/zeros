@@ -7,6 +7,8 @@ import {
   sanitizeProbedPath,
 } from "../../../env/launcher-env";
 
+// Electron started by launchd inherits a minimal PATH without user-installed CLIs.
+// A login shell loads the user's configured toolchain directories for native launches.
 const RESOLVE_TIMEOUT_MS = 3_000;
 
 /** `printf '%s\n'` prints PATH exactly. `echo` does not: zsh, dash and macOS
@@ -174,8 +176,8 @@ async function resolveOnce(): Promise<ProbeResult> {
     const child = spawn(shell, PROBE_ARGS, {
       env: withoutLocalDevelopment(process.env),
       stdio: ["ignore", "pipe", "pipe"],
-      // Detached so a misbehaving init can't keep the parent waiting
-      // past our timer (we kill it explicitly on timeout).
+      // Shell init can leave descendants holding probe pipes open; isolate their
+      // process group so settling the probe can reap them together.
       detached: true,
     });
     child.stdout.setEncoding("utf-8");
