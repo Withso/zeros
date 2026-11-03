@@ -1779,10 +1779,6 @@ export function isGitLockContention(stderr: string): boolean {
 const sleep = (ms: number): Promise<void> =>
   new Promise((resolve) => setTimeout(resolve, ms));
 
-/** Run `git <args>` in `cwd`. Throws GitError on unexpected failures;
- *  returns `{ expectedError }` if the failure matches one of the
- *  caller-allowed categories. Transient `.git` lock contention is retried
- *  with backoff (see `GIT_LOCK_RETRY_BACKOFF_MS`). */
 /** The user's own boolean Git setting, read without the engine's overrides
  * (which always force signing off), so callers can say what the hardened
  * engine Git skips. Reading config runs no configured program. */
@@ -1802,6 +1798,10 @@ export async function userGitIdentityConfigured(cwd: string): Promise<boolean> {
   return name && email;
 }
 
+/** Run `git <args>` in `cwd`. Throws GitError on unexpected failures;
+ *  returns `{ expectedError }` if the failure matches one of the
+ *  caller-allowed categories. Transient `.git` lock contention is retried
+ *  with backoff (see `GIT_LOCK_RETRY_BACKOFF_MS`). */
 export async function runGit(
   cwd: string,
   args: string[],

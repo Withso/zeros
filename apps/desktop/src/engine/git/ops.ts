@@ -554,7 +554,9 @@ export async function commit(opts: CommitOptions): Promise<CommitResult> {
     });
   }
   await assertGitCheckpointReady(ws.path);
-  if (authority === "code") await assertDirectCommitSupported(ws.path, files);
+  // Design checkpoints stay scoped to their own lane; every other direct
+  // commit (Create PR directly / draft directly) uses this hardened Git.
+  if (authority !== "design") await assertDirectCommitSupported(ws.path, files);
   const expectedHead = await currentHead(ws.path);
   let protectedDesignDirs: string[] = [activeDesignDir];
   if (authority === "code") {
