@@ -121,14 +121,15 @@ export function SourceEditor({
   // The baseline is a ref; a confirmed save bumps this so effects that depend
   // on "is the draft saved" re-run even when React batches saving true/false.
   const [savedRevision, setSavedRevision] = useState(0);
-  const explicitRetry = useRef<{ attempt: number; timer: ReturnType<typeof setTimeout> | null }>({ attempt: 0, timer: null });
+  const explicitRetry = useRef<{ attempt: number; timer: ReturnType<typeof setTimeout> | null; generation: number }>({ attempt: 0, timer: null, generation: 0 });
   // A retry must never write text the user discarded or an adopted disk
-  // update replaced.
+  // update replaced, including a save still in flight when that happened.
   const cancelExplicitRetry = useCallback(() => {
     const retry = explicitRetry.current;
     if (retry.timer) clearTimeout(retry.timer);
     retry.timer = null;
     retry.attempt = 0;
+    retry.generation += 1;
   }, []);
   const autoSaveRef = useRef(autoSave);
   autoSaveRef.current = autoSave;
@@ -312,6 +313,7 @@ export function SourceEditor({
       // different workspace; ordinary typing remains passive.
       recordWorkspaceActivity(cwd);
       const retry = explicitRetry.current;
+      const generation = retry.generation;
       if (retry.timer) { clearTimeout(retry.timer); retry.timer = null; }
       // writeWorkspaceFile rejects on transport absence (engine bridge down,
       // still connecting, cloud VM stopped or waking) instead of resolving.
@@ -330,7 +332,7 @@ export function SourceEditor({
         if (pendingSaveRef.current === text) pendingSaveRef.current = null;
         if (mountedRef.current) {
           if (autoSaveRef.current) setRetryAttempt(attempt => attempt + 1);
-          else {
+          else if (generation === retry.generation) {
             retry.attempt += 1;
             retry.timer = setTimeout(() => {
               retry.timer = null;

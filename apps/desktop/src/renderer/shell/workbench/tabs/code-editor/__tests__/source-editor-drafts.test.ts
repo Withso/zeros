@@ -197,6 +197,24 @@ describe.each(["/personal/a", "/organization/a", "cloud://organization/a"])("uns
     expect(mocks.toast.error).not.toHaveBeenCalled();
   });
 
+  it("never retries a held explicit save over an outside change adopted meanwhile", async () => {
+    let reject!: (error: Error) => void;
+    mocks.save.mockImplementationOnce(() => new Promise((_resolve, fail) => { reject = fail; }));
+    const view = await open("base");
+    insert(view, " saved");
+    act(() => controls!.save());
+    await act(async () => root.render(createElement(SourceEditor, {
+      editorId: "tab-a", cwd, path: "file.ts", content: "outside", review: {} as never,
+      autoSave: false, onControlsChange: value => { controls = value; },
+    })));
+    await settle(0);
+    expect(view.state.doc.toString()).toBe("outside");
+    await act(async () => { reject(new Error("Cloud connection lost")); });
+    await settle(35_000);
+    expect(mocks.save).toHaveBeenCalledTimes(1);
+    expect(view.state.doc.toString()).toBe("outside");
+  });
+
   it("tells the user their changes are kept when they close an unsaved file", async () => {
     const view = await open("base");
     insert(view, " edit");

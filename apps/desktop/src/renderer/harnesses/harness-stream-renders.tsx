@@ -3,6 +3,7 @@ import "./stream-render-observer";
 import "../../../../../styles/zeros-tokens.css";
 import "../../../../../styles/semantic-tokens.css";
 import "../../../../../styles/globals.css";
+import "./isolated-editor-drafts";
 import { Profiler, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { flushSync } from "react-dom";
