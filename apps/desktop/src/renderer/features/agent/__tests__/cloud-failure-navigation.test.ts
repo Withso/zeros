@@ -39,6 +39,8 @@ let actions: ReturnType<typeof useCloudFailureRecovery>;
 let props: Parameters<typeof useCloudFailureRecovery>[0];
 const navigate = vi.fn();
 const chooseModel = vi.fn();
+const startNewSession = vi.fn();
+const retryPreparation = vi.fn();
 function Surface() {
   actions = useCloudFailureRecovery(props);
   return createElement("div", null,
@@ -47,6 +49,11 @@ function Surface() {
       onReconnect: id => { if (id) actions.openProvider(id); } }),
     createElement(TurnFailureCard, { failure: turnFailureForCard({ events: notice({ ...provider, reason: "model-unavailable" }), turnId: "prompt" })!,
       onChooseModel: actions.openModelPicker }),
+    createElement(TurnFailureCard, { failure: turnFailureForCard({ events: notice({ ...provider, reason: "session-expired" }), turnId: "prompt",
+      fallback: { kind: "session-expired", stage: "loadSession", agentId: "claude", message: "Session missing" } })!,
+      onStartNewSession: actions.startNewSession }),
+    createElement(TurnFailureCard, { failure: turnFailureForCard({ events: notice({ ...provider, reason: "provider-unavailable" }), turnId: "prompt" })!,
+      onRetry: actions.retryPreparation }),
   );
 }
 const render = () => act(async () => root.render(createElement(Surface)));
@@ -56,7 +63,8 @@ beforeEach(() => {
   fixture.account = "account-a"; fixture.organization = organization; fixture.generation++;
   for (const listener of fixture.accounts) listener();
   navigate.mockReset(); fixture.provider.mockReset(); chooseModel.mockReset();
-  props = { folder, chatId: "chat", executionId: "execution", active: true, navigate, chooseModel };
+  startNewSession.mockReset(); retryPreparation.mockReset();
+  props = { folder, chatId: "chat", executionId: "execution", active: true, navigate, chooseModel, startNewSession, retryPreparation };
   container = document.createElement("div"); document.body.append(container); root = createRoot(container);
 });
 afterEach(async () => { await act(async () => root.unmount()); container.remove(); vi.unstubAllGlobals(); });
@@ -85,15 +93,49 @@ it("opens the owning model picker without retrying or navigating away", async ()
   expect(navigate).not.toHaveBeenCalled();
 });
 
+it("starts fresh or retries preparation only for the owning cloud session", async () => {
+  await render();
+  await act(async () => button("Start a new session").click());
+  expect(startNewSession).toHaveBeenCalledOnce();
+  expect(retryPreparation).not.toHaveBeenCalled();
+  await act(async () => button("Retry").click());
+  expect(retryPreparation).toHaveBeenCalledOnce();
+  expect(navigate).not.toHaveBeenCalled();
+});
+
 it.each(["hidden", "workspace", "execution"])("invalidates a captured action when its %s changes", async change => {
   await render(); const previous = actions;
   props = { ...props, ...(change === "hidden" ? { active: false } : change === "workspace"
     ? { folder: folder.replace("22222222", "44444444") } : { executionId: "replacement" }) };
   await render();
   previous.openMcpConnection!(mcp); previous.openProvider("claude"); previous.openModelPicker!();
+  previous.startNewSession?.(); previous.retryPreparation?.();
   expect(navigate).not.toHaveBeenCalled(); expect(fixture.provider).not.toHaveBeenCalled();
   expect(chooseModel).not.toHaveBeenCalled();
+  expect(startNewSession).not.toHaveBeenCalled(); expect(retryPreparation).not.toHaveBeenCalled();
   if (change === "hidden") expect(button("Connect")).toBeUndefined();
+});
+
+it.each(["hidden", "workspace", "execution"])("does not revive a captured action after its %s returns", async change => {
+  await render(); const previous = actions, original = props;
+  props = { ...props, ...(change === "hidden" ? { active: false } : change === "workspace"
+    ? { folder: folder.replace("22222222", "44444444") } : { executionId: "replacement" }) };
+  await render(); props = original; await render();
+  previous.openMcpConnection!(mcp); previous.openProvider("claude"); previous.openModelPicker!();
+  previous.startNewSession?.(); previous.retryPreparation?.();
+  expect(navigate).not.toHaveBeenCalled(); expect(fixture.provider).not.toHaveBeenCalled();
+  expect(chooseModel).not.toHaveBeenCalled();
+  expect(startNewSession).not.toHaveBeenCalled(); expect(retryPreparation).not.toHaveBeenCalled();
+});
+
+it("retires actions when their chat surface unmounts", async () => {
+  await render(); const previous = actions;
+  await act(async () => root.unmount());
+  previous.openMcpConnection!(mcp); previous.openProvider("claude"); previous.openModelPicker!();
+  previous.startNewSession?.(); previous.retryPreparation?.();
+  expect(navigate).not.toHaveBeenCalled(); expect(fixture.provider).not.toHaveBeenCalled();
+  expect(chooseModel).not.toHaveBeenCalled();
+  expect(startNewSession).not.toHaveBeenCalled(); expect(retryPreparation).not.toHaveBeenCalled();
 });
 
 it.each(["account", "organization"])("does not revive an action after %s A → B → A", async owner => {
@@ -103,15 +145,19 @@ it.each(["account", "organization"])("does not revive an action after %s A → B
     else { fixture.organization = value === "a" ? organization : "55555555-5555-4555-8555-555555555555"; for (const listener of fixture.selections) listener(); }
   }
   previous.openMcpConnection!(mcp); previous.openProvider("claude"); previous.openModelPicker!();
+  previous.startNewSession?.(); previous.retryPreparation?.();
   expect(cloudMcpRecoverySnapshot(organization)).toBeNull();
   expect(navigate).not.toHaveBeenCalled(); expect(fixture.provider).not.toHaveBeenCalled();
   expect(chooseModel).not.toHaveBeenCalled();
+  expect(startNewSession).not.toHaveBeenCalled(); expect(retryPreparation).not.toHaveBeenCalled();
 });
 
 it.each(["/local/personal", "/local/organization"])("does not route Local %s to cloud recovery", async local => {
   props = { ...props, folder: local }; await render();
   expect(button("Connect")).toBeUndefined();
   expect(button("Choose another model")).toBeUndefined();
+  expect(button("Start a new session")).toBeUndefined();
+  expect(button("Retry")).toBeUndefined();
   actions.openProvider("claude");
   expect(navigate).not.toHaveBeenCalled(); expect(fixture.provider).not.toHaveBeenCalled();
 });

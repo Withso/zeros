@@ -426,10 +426,16 @@ function AgentChatBody({
     trigger.focus();
     if (trigger.getAttribute("aria-expanded") !== "true") trigger.click();
   }, []);
-  const { openProvider: openCloudProvider, openMcpConnection, openModelPicker } = useCloudFailureRecovery({
+  const startFreshSession = useCallback(() => {
+    if (chatThread) dispatch({ type: "ADD_CHAT", chat: createForkedChat(chatThread) });
+  }, [chatThread, dispatch]);
+  const retrySessionPreparation = useLatestCallback(() => prepareSessionTools());
+  const { openProvider: openCloudProvider, openMcpConnection, openModelPicker,
+    startNewSession, retryPreparation } = useCloudFailureRecovery({
     folder: chatThread?.folder ?? session.cwd, chatId,
     executionId: session.executionId ?? session.sessionId,
     active: interactive && !transcriptReadOnly, navigate: navigateFailureRecovery, chooseModel,
+    startNewSession: chatThread ? startFreshSession : undefined, retryPreparation: retrySessionPreparation,
   });
   // activeTurnStartedAt is the last user message's createdAt; turn-scoped
   // chrome compares against it.
@@ -2914,11 +2920,15 @@ function AgentChatBody({
       }) : null;
   // Keep terminal startup failures in this chat exactly once, while normal
   // reconnects and superseded preparation stay quiet.
-  const preparationFailure = !readOnly && session.status === "failed" &&
+  const cloudPreparationAuth = isCloudWorkspace(chatThread?.folder ?? session.cwd) &&
+    session.failure?.cloud?.source === "provider" && session.failure.cloud.reason === "auth-required" &&
+    !preparationTurn?.userPrompt;
+  const preparationFailure = !readOnly && (session.status === "failed" ||
+      session.status === "auth-required" && cloudPreparationAuth) &&
     session.failure && session.failure.stage !== "prompt" &&
     !preparationTurnFailure &&
     !(cloudComputerV2 && isCloudWorkspace(chatThread?.folder) && session.cloudSendWait) &&
-    session.failure.kind !== "auth-required" &&
+    (session.failure.kind !== "auth-required" || cloudPreparationAuth) &&
     (session.failure.kind !== "cloud-credentials-unavailable" || session.failure.cloud) &&
     session.failure.kind !== "lifecycle-superseded" &&
     !isRecoverable(session.failure) && (session.failure.cloud || !isTransportShaped(session.failure.message))
@@ -4419,7 +4429,8 @@ function AgentChatBody({
             )}
             {preparationFailure && (
               cloudPreparationFailure ? <TurnFailureCard failure={cloudPreparationFailure}
-                readOnly={!interactive} onReconnect={handleSignIn} onChooseModel={openModelPicker} /> : <AgentNotice
+                readOnly={!interactive || transcriptReadOnly} onReconnect={handleSignIn} onChooseModel={openModelPicker}
+                onStartNewSession={startNewSession} onRetry={retryPreparation} /> : <AgentNotice
                 data-agent-preparation-notice
                 message={preparationFailure.advice ?? preparationFailure.message}
               />

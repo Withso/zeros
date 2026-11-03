@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { expect, it, vi } from "vitest";
@@ -10,8 +11,8 @@ import { authenticationFailureMessage } from "../auth-prompt-recovery";
 import { EventRowRenderer } from "../renderers/event-row-renderer";
 import type { RendererContext } from "../renderers/types";
 
-const buttons = (html: string) => [...html.matchAll(/<button\b[^>]*>([\s\S]*?)<\/button>/g)]
-  .map(match => match[1].replace(/<[^>]*>/g, "").trim());
+const buttons = (html: string) => [...new DOMParser().parseFromString(html, "text/html").querySelectorAll("button")]
+  .map(button => button.textContent?.trim());
 
 vi.mock("../renderers/highlighted-code", () => ({ HighlightedCode: ({ code }: { code: string }) => code, CodeWithGutter: ({ code }: { code: string }) => code }));
 vi.mock("../markdown", () => ({ renderMarkdown: (text: string) => text }));
@@ -25,8 +26,8 @@ function messages(cloud: CloudProviderFailure | CloudMcpFailure) {
 it.each([
   ["auth-required", "Reconnect provider account"],
   ["credentials-unavailable", "Check provider connection"],
-  ["rate-limited", "Retry later"],
-  ["provider-unavailable", "Retry later"],
+  ["rate-limited", "Retry"],
+  ["provider-unavailable", "Retry"],
   ["session-expired", "Start a new session"],
   ["model-unavailable", "Choose another model"],
 ] as const)("offers the confirmed %s recovery after transcript replay", (reason, action) => {

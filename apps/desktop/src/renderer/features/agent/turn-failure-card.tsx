@@ -85,7 +85,7 @@ export function TurnFailureCard({
               onClick={() => void retry(retryAction)}
               className={AGENT_NOTICE_ACTION}
             >
-              {reason === "rate-limited" || reason === "provider-unavailable" ? "Retry later" : "Retry"} <ArrowRight className="size-3.5" aria-hidden="true" />
+              Retry <ArrowRight className="size-3.5" aria-hidden="true" />
             </Button>
           )}
           {newChatAction && (
