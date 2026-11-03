@@ -2,7 +2,7 @@
   "id": "mcp-native-import-oauth-resource-headers",
   "kind": "replay",
   "area": "renderer-settings",
-  "fixedBy": "pending",
+  "fixedBy": "pr:816",
   "symptom": "Native OAuth import silently discards non-secret resource headers such as X-Tenant even though the gateway requires them after authorization.",
   "rule": "Map native OAuth configurations through the same secure draft and configuration mapper as the editor, preserving resource headers for HTTP and SSE while keeping their values outside settings (principles 10, 12 and 13).",
   "check": "pnpm exec vitest run --maxWorkers=2 apps/desktop/src/renderer/features/agent-extensions/__tests__/mcp-import-transaction.test.ts -t 'preserves OAuth resource headers'"
