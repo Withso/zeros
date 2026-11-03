@@ -13,6 +13,9 @@
 // pass on any dev machine and prove nothing.
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
 
 import {
   CLAUDE_CLI_PATH_ENV,
@@ -76,6 +79,19 @@ afterEach(() => {
 });
 
 describe("resolveClaudeCli — the packaged shape (the actual bug)", () => {
+  it("resolves a newly installed CLI from the recovered session PATH", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "claude-refreshed-path-"));
+    try {
+      const cli = path.join(root, "claude");
+      await writeFile(cli, "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+      const resolved = resolveClaudeCli({ pathValue: root }, {
+        env: {}, bundled: () => null, wellKnown: () => [],
+      });
+      expect(resolved).toEqual({ path: cli, source: "path" });
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
   it("resolves the staged binary when module resolution cannot work", () => {
     // THE regression: bundled === null (bun-compiled, no node_modules) and no
     // global claude. Before the fix there was no staged tier at all, the adapter

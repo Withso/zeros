@@ -1,31 +1,3 @@
-// ──────────────────────────────────────────────────────────
-// Login-shell PATH resolution.
-// ──────────────────────────────────────────────────────────
-//
-// Why this exists:
-//   Electron starts with a "minimal" PATH inherited from launchctl.
-//   It contains /usr/bin, /bin, /usr/sbin, /sbin and not much else.
-//   When the user installs an agent CLI via Homebrew (/opt/homebrew/bin
-//   on Apple Silicon), nvm (~/.nvm/versions/...), mise (~/.local/share/
-//   mise/...), or asdf (~/.asdf/shims), Electron's PATH won't include
-//   it — and `spawn(<cli>, …)` fails with ENOENT.
-//
-// The fix (athas pattern): once per process, ask the user's login
-// shell to print its PATH (via `$SHELL -ilc 'printf "%s\n" "$PATH"'`). Cache
-// the result. Inject it into spawn env for spawned agents.
-//
-// Caveats:
-//   * `$SHELL -ilc` runs the user's shell init files (.zshrc / .bashrc).
-//     Misbehaved init files (sleep loops, infinite prompts) hang the
-//     resolution. We cap at 3 seconds — if it doesn't finish, we fall
-//     back to the inherited PATH and log a stderr line.
-//   * Cache is process-lifetime. If the user installs a new CLI after
-//     Zeros boots, they'll need a restart. Acceptable.
-//   * On Windows, the inherited PATH is already correct (no shell-init
-//     drift). We short-circuit and return the inherited value.
-//
-// ──────────────────────────────────────────────────────────
-
 import { spawn } from "node:child_process";
 
 import { stripEngineAuthorityEnv } from "./config-isolation";
@@ -35,6 +7,8 @@ import {
   sanitizeProbedPath,
 } from "../../../env/launcher-env";
 
+// Electron started by launchd inherits a minimal PATH without user-installed CLIs.
+// A login shell loads the user's configured toolchain directories for native launches.
 const RESOLVE_TIMEOUT_MS = 3_000;
 
 /** `printf '%s\n'` prints PATH exactly. `echo` does not: zsh, dash and macOS
@@ -43,14 +17,16 @@ const RESOLVE_TIMEOUT_MS = 3_000;
  *  the whole PATH. */
 const PROBE_ARGS = ["-ilc", `printf '%s\\n' "$PATH"`] as const;
 
-/** How many times a FAILED probe may be retried by a later caller before we give
- *  up and cache the fallback for good. Small, because each retry costs up to
- *  RESOLVE_TIMEOUT_MS on the path of whatever asked. */
+// Ordinary reads stop probing after cold-boot failures; a missing executable
+// explicitly revalidates even a cached fallback.
 const MAX_PROBE_ATTEMPTS = 3;
 
 let cached: string | null = null;
 let resolving: Promise<string> | null = null;
 let failedAttempts = 0;
+let generation = 0;
+let consecutiveTimeouts = 0;
+let lastConfirmed: string | null = null;
 let configuredRunner: LoginShellPathRunner | null = null;
 
 export interface LoginShellPathRunner {
@@ -79,51 +55,80 @@ export function configureLoginShellPathRunner(
     configuredRunner = runner;
     return;
   }
+  resetProbeState();
   configuredRunner = runner;
-  cached = null;
-  resolving = null;
-  failedAttempts = 0;
 }
 
-/** Get the user's login-shell PATH, with caching. Returns the
- *  inherited PATH on Windows or on resolution failure.
- *
- *  A FAILED probe is NOT cached until we've retried a couple of times. The result
- *  is cached for the whole process lifetime, and the engine now warms it at boot
- *  — the single most contended moment of process start, with cold dotfiles. A
- *  packaged app launched from Finder with a heavy ~/.zshrc (omz + nvm + p10k) can
- *  exceed the 3s cap there, and caching that outcome froze launchd's bare
- *  `/usr/bin:/bin:/usr/sbin:/sbin` in for the session: every later agent spawn,
- *  Setup script and Run action lost the user's toolchain until they restarted the
- *  app. Retrying gives the next caller — by then on a warm machine — a real
- *  chance, while the attempt cap stops a genuinely wedged rc from charging 3s to
- *  every spawn forever. */
-export async function getLoginShellPath(): Promise<string> {
-  if (cached !== null) return cached;
-  if (resolving) return resolving;
+export class LoginShellPathUnavailableError extends Error {
+  readonly code = "LOGIN_SHELL_PATH_TIMEOUT";
 
+  constructor() {
+    super("Zeros couldn't load your shell PATH. Check your shell startup files, then Retry.");
+    this.name = "LoginShellPathUnavailableError";
+  }
+}
+
+export function loginShellPathGeneration(): number {
+  return generation;
+}
+
+export function cachedLoginShellPath(): string | undefined {
+  return cached ?? lastConfirmed ?? undefined;
+}
+
+/** Missing-executable recovery revalidates once, sharing an in-flight probe.
+ * The generation prevents concurrent failed starts from repeating that probe. */
+export async function getLoginShellPath(options: {
+  refresh?: boolean;
+  ifGeneration?: number;
+} = {}): Promise<string> {
+  if (options.refresh && !resolving &&
+      (options.ifGeneration === undefined || options.ifGeneration === generation)) {
+    cached = null;
+    failedAttempts = 0;
+    generation += 1;
+  }
+  if (cached !== null) {
+    if (options.refresh && consecutiveTimeouts > 1) throw new LoginShellPathUnavailableError();
+    return cached;
+  }
   if (process.platform === "win32") {
     cached = process.env.PATH ?? "";
     return cached;
   }
 
-  resolving = resolveOnce()
-    .then(({ value, ok }) => {
-      if (ok || failedAttempts + 1 >= MAX_PROBE_ATTEMPTS) cached = value;
-      if (!ok) failedAttempts += 1;
+  if (!resolving) {
+    const observedGeneration = generation;
+    const pending = resolveOnce().then(({ value, ok, timedOut }) => {
+      if (observedGeneration !== generation) return value;
+      consecutiveTimeouts = timedOut ? consecutiveTimeouts + 1 : 0;
+      failedAttempts = ok ? 0 : failedAttempts + 1;
+      if (ok) lastConfirmed = value;
+      if (options.refresh || ok || failedAttempts >= MAX_PROBE_ATTEMPTS) cached = value;
       return value;
-    })
-    .finally(() => {
-      resolving = null;
+    }).finally(() => {
+      if (resolving === pending) resolving = null;
     });
-  return resolving;
+    resolving = pending;
+  }
+  const value = await resolving;
+  if (options.refresh && consecutiveTimeouts > 1) {
+    throw new LoginShellPathUnavailableError();
+  }
+  return value;
 }
 
-/** Reset the cache. Tests only — the probe is process-wide state. */
-export function resetLoginShellPathForTests(): void {
+function resetProbeState(): void {
+  generation += 1;
   cached = null;
   resolving = null;
   failedAttempts = 0;
+  consecutiveTimeouts = 0;
+  lastConfirmed = null;
+}
+
+export function resetLoginShellPathForTests(): void {
+  resetProbeState();
   configuredRunner = null;
 }
 
@@ -131,6 +136,7 @@ interface ProbeResult {
   value: string;
   /** False when we fell back to the inherited PATH instead of the shell's. */
   ok: boolean;
+  timedOut?: boolean;
 }
 
 function pathFromProbeOutput(stdout: string): string | null {
@@ -147,7 +153,7 @@ function pathFromProbeOutput(stdout: string): string | null {
 
 async function resolveOnce(): Promise<ProbeResult> {
   const shell = process.env.SHELL || "/bin/zsh";
-  const fallback = process.env.PATH ?? "";
+  const fallback = lastConfirmed ?? process.env.PATH ?? "";
   if (configuredRunner) {
     try {
       const result = await configuredRunner.run(shell, PROBE_ARGS, {
@@ -155,8 +161,12 @@ async function resolveOnce(): Promise<ProbeResult> {
       });
       const value = pathFromProbeOutput(result.stdout);
       return value ? { value, ok: true } : { value: fallback, ok: false };
-    } catch {
-      return { value: fallback, ok: false };
+    } catch (error) {
+      return {
+        value: fallback,
+        ok: false,
+        timedOut: (error as NodeJS.ErrnoException | null)?.code === "ETIMEDOUT",
+      };
     }
   }
   return new Promise((resolve) => {
@@ -166,8 +176,8 @@ async function resolveOnce(): Promise<ProbeResult> {
     const child = spawn(shell, PROBE_ARGS, {
       env: withoutLocalDevelopment(process.env),
       stdio: ["ignore", "pipe", "pipe"],
-      // Detached so a misbehaving init can't keep the parent waiting
-      // past our timer (we kill it explicitly on timeout).
+      // Shell init can leave descendants holding probe pipes open; isolate their
+      // process group so settling the probe can reap them together.
       detached: true,
     });
     child.stdout.setEncoding("utf-8");
@@ -175,32 +185,29 @@ async function resolveOnce(): Promise<ProbeResult> {
       stdout += chunk;
     });
 
-    const settle = (value: string, ok: boolean) => {
+    child.stderr.resume();
+
+    const settle = (value: string, ok: boolean, timedOut = false) => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
       try {
-        child.kill();
+        if (child.pid) process.kill(-child.pid, "SIGKILL");
       } catch {
         /* already dead */
       }
-      resolve({ value, ok });
+      resolve({ value, ok, timedOut });
     };
 
     const timer = setTimeout(() => {
-      // Login shell hung — fall back. Log to stderr so the next
-      // ENOENT is at least diagnosable.
-      console.warn(
-        `[login-shell-path] ${shell} -ilc PATH probe timed out after ${RESOLVE_TIMEOUT_MS}ms; using inherited PATH`,
-      );
-      settle(fallback, false);
+      settle(fallback, false, true);
     }, RESOLVE_TIMEOUT_MS);
 
     child.on("error", () => settle(fallback, false));
-    child.on("close", () => {
+    child.on("close", (code) => {
       const value = pathFromProbeOutput(stdout);
       // Extra defensive: ensure we got *something* PATH-shaped.
-      if (value) settle(value, true);
+      if (code === 0 && value) settle(value, true);
       else settle(fallback, false);
     });
   });

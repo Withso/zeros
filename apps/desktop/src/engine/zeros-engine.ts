@@ -1044,7 +1044,7 @@ export class ZerosEngine {
               child.wait(),
               new Promise<never>((_resolve, reject) => {
                 timer = setTimeout(
-                  () => reject(new Error("login shell PATH probe timed out")),
+                  () => reject(Object.assign(new Error("login shell PATH probe timed out"), { code: "ETIMEDOUT" })),
                   timeoutMs,
                 );
                 timer.unref?.();

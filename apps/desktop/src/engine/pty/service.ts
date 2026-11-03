@@ -33,6 +33,8 @@ import {
   type PtyExitReason,
 } from "@zeros/protocol/messages";
 import type { CloudWorkerIdentity } from "../agents/containment/types";
+import { LoginShellPathUnavailableError } from "../agents/adapters/shared/login-shell-path";
+import { createShellPathRecovery } from "./shell-path-recovery";
 
 export interface PtyHandle {
   readonly pid: number;
@@ -119,6 +121,8 @@ export interface PtyCreateOptions {
   env?: Record<string, string>;
   /** Interactive one-shot shell (see PtySpawnRequest.interactive). */
   interactive?: boolean;
+  /** Local Setup/Run only; retry a positively unstarted command once. */
+  recoverShellPath?: boolean;
   /** Prepared owned-process wrapper for repository-controlled commands. */
   wrapSpawn?: PtySpawnWrapper;
   /** Observe the actual wrapper pid reported by the asynchronous PTY host so
@@ -167,6 +171,8 @@ export interface PtyServiceOptions {
 }
 
 interface Session {
+  cancelPathRecovery?: () => void;
+  stopped?: boolean;
   lastInputAt?: number;
   proc: PtyHandle;
   cwd: string;
@@ -404,38 +410,36 @@ export class PtyService {
     const cwd = opts.resolvedCwd ?? this.resolveCwd(opts.cwd);
     const cols = coerceDim(opts.cols, 80);
     const rows = coerceDim(opts.rows, 24);
-    const proc = this.spawnFn({
+    const recovery = opts.recoverShellPath && opts.command && opts.env
+      ? createShellPathRecovery(opts.command, opts.env) : null;
+    const request: PtySpawnRequest = {
       cwd,
       cols,
       rows,
       scrubEnv: opts.scrubEnv === true,
-      command: opts.command,
+      command: recovery?.command ?? opts.command,
       env: opts.env,
       interactive: opts.interactive === true,
       wrapSpawn: opts.wrapSpawn,
-    });
+    };
+    const proc = this.spawnFn(request);
     const mirror = this.mirrorFactory?.(cols, rows);
     const session: Session = { proc, cwd, cols, rows, mirror };
     this.sessions.set(opts.sessionId, session);
-
-    let leaderExited = false;
-    if (opts.onSpawned) {
-      proc.onSpawned((pid) => opts.onSpawned?.(pid, () => leaderExited));
-    }
-
-    proc.onData((data) => {
-      // Feed the mirror the EXACT bytes clients get so its resolved grid stays
-      // in lockstep — that grid is what we serialize on reattach.
+    let finished = false;
+    const publishData = (data: string) => {
+      if (!data || this.sessions.get(opts.sessionId) !== session) return;
       session.mirror?.write(data);
       this.onDataCb?.(opts.sessionId, data);
-    });
-    proc.onExit((exitCode, signal, reason) => {
-      leaderExited = true;
-      // Lifecycle owners retain their failed proof separately. A callback
-      // failure must not swallow the native exit witness or strand UI waiters.
-      try { if (!proc.pid && (reason === "spawn-failed" || reason === "host-unavailable")) opts.onSpawnFailed?.(reason); } catch { /* Owner retains the original pending launch. */ }
-      try { opts.onExit?.(); } catch { /* Owner retains the original retirement. */ }
+    };
+    const finish = (exitCode: number | null, signal: number | null, reason?: PtyExitReason) => {
+      if (finished) return;
+      finished = true;
+      session.cancelPathRecovery = undefined;
+      publishData(recovery?.flush() ?? "");
       session.mirror?.dispose();
+      const current = this.sessions.get(opts.sessionId);
+      if (current && current !== session) return;
       this.sessions.delete(opts.sessionId);
       const waiters = this.exitWaiters.get(opts.sessionId);
       if (waiters) {
@@ -443,7 +447,39 @@ export class PtyService {
         for (const settle of waiters) settle(true);
       }
       this.onExitCb?.(opts.sessionId, exitCode, signal, reason);
-    });
+    };
+    const bind = (attempt: PtyHandle) => {
+      let leaderExited = false;
+      if (opts.onSpawned) attempt.onSpawned((pid) => opts.onSpawned?.(pid, () => leaderExited));
+      attempt.onData((data) => {
+        if (session.proc === attempt && !finished)
+          publishData(recovery ? recovery.filterData(data) : data);
+      });
+      attempt.onExit((exitCode, signal, reason) => {
+        if (leaderExited) return;
+        leaderExited = true;
+        // Each attempt retains its own native exit witness for process cleanup.
+        try { if (!attempt.pid && (reason === "spawn-failed" || reason === "host-unavailable")) opts.onSpawnFailed?.(reason); } catch { /* Owner retains the original pending launch. */ }
+        try { opts.onExit?.(); } catch { /* Owner retains the original retirement. */ }
+        if (session.stopped || this.sessions.get(opts.sessionId) !== session || !recovery?.canRetry(exitCode, signal)) {
+          finish(exitCode, signal, reason);
+          return;
+        }
+        session.cancelPathRecovery = () => finish(exitCode, signal, reason);
+        void recovery.retry().then((retry) => {
+          if (finished || session.stopped || this.sessions.get(opts.sessionId) !== session) return;
+          session.cancelPathRecovery = undefined;
+          session.proc = this.spawnFn({ ...request, ...retry, cols: session.cols, rows: session.rows });
+          bind(session.proc);
+        }).catch((error: unknown) => {
+          if (finished || session.stopped || this.sessions.get(opts.sessionId) !== session) return;
+          if (error instanceof LoginShellPathUnavailableError)
+            publishData(`\r\n${error.message}\r\n`);
+          finish(exitCode, signal, reason);
+        });
+      });
+    };
+    bind(proc);
 
     return {
       sessionId: opts.sessionId,
@@ -506,6 +542,8 @@ export class PtyService {
   kill(sessionId: string): void {
     const s = this.sessions.get(sessionId);
     if (!s) return;
+    s.stopped = true;
+    s.cancelPathRecovery?.();
     try {
       s.proc.kill();
     } catch {
@@ -554,6 +592,8 @@ export class PtyService {
 
   killAll(): void {
     for (const s of this.sessions.values()) {
+      s.stopped = true;
+      s.cancelPathRecovery?.();
       try {
         s.proc.kill();
       } catch {

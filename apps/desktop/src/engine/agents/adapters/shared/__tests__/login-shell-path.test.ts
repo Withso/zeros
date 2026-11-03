@@ -1,5 +1,8 @@
 import { execFile } from "node:child_process";
 import { existsSync } from "node:fs";
+import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import { promisify } from "node:util";
 
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -7,11 +10,13 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   configureLoginShellPathRunner,
   getLoginShellPath,
+  loginShellPathGeneration,
   resetLoginShellPathForTests,
 } from "../login-shell-path";
 
 afterEach(() => {
   resetLoginShellPathForTests();
+  vi.unstubAllEnvs();
 });
 
 describe("login-shell PATH execution boundary", () => {
@@ -48,6 +53,88 @@ describe("login-shell PATH execution boundary", () => {
 });
 
 const execFileAsync = promisify(execFile);
+
+describe("login-shell PATH recovery", () => {
+  it("re-probes a changed shell profile after the cached PATH misses a command", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "zeros-shell-path-"));
+    try {
+      const shell = path.join(root, "shell");
+      const profile = path.join(root, "profile-path");
+      await writeFile(shell, '#!/bin/sh\n/bin/cat "$0.path"\n');
+      await chmod(shell, 0o755);
+      await writeFile(`${shell}.path`, "/old/toolchain:/usr/bin\n");
+      vi.stubEnv("SHELL", shell);
+      expect(await getLoginShellPath()).toBe("/old/toolchain:/usr/bin");
+      await writeFile(`${shell}.path`, `${profile}:/usr/bin\n`);
+      expect(await getLoginShellPath()).toBe("/old/toolchain:/usr/bin");
+
+      expect(await getLoginShellPath({ refresh: true })).toBe(`${profile}:/usr/bin`);
+      expect(await getLoginShellPath()).toBe(`${profile}:/usr/bin`);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("recovers after the cold-boot probe budget cached the inherited PATH", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "zeros-shell-path-"));
+    try {
+      const shell = path.join(root, "shell");
+      await writeFile(shell, '#!/bin/sh\n/bin/cat "$0.path" 2>/dev/null\n');
+      await chmod(shell, 0o755);
+      vi.stubEnv("SHELL", shell);
+      vi.stubEnv("PATH", "/inherited/path");
+      for (let attempt = 0; attempt < 3; attempt++) {
+        expect(await getLoginShellPath()).toBe("/inherited/path");
+      }
+      await writeFile(`${shell}.path`, "/installed/toolchain:/usr/bin\n");
+      expect(await getLoginShellPath()).toBe("/inherited/path");
+
+      expect(await getLoginShellPath({ refresh: true })).toBe("/installed/toolchain:/usr/bin");
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("coalesces concurrent refreshes without letting a retired runner overwrite the new cache", async () => {
+    let finishOld!: (result: { stdout: string }) => void;
+    configureLoginShellPathRunner({
+      cacheKey: "old-engine",
+      run: () => new Promise((resolve) => { finishOld = resolve; }),
+    });
+    const old = getLoginShellPath();
+    const run = vi.fn(async () => ({ stdout: "/new/engine/bin\n" }));
+    configureLoginShellPathRunner({ cacheKey: "new-engine", run });
+    await Promise.all([getLoginShellPath({ refresh: true }), getLoginShellPath({ refresh: true })]);
+    expect(run).toHaveBeenCalledTimes(1);
+    finishOld({ stdout: "/old/engine/bin\n" });
+    await old;
+    expect(await getLoginShellPath()).toBe("/new/engine/bin");
+  });
+
+  it("offers Retry after repeated probe timeouts and recovers on the next request", async () => {
+    const run = vi.fn().mockRejectedValue(Object.assign(new Error("timeout"), { code: "ETIMEDOUT" }));
+    configureLoginShellPathRunner({ cacheKey: "slow-shell", run });
+    await getLoginShellPath();
+
+    await expect(getLoginShellPath({ refresh: true })).rejects.toThrow("Zeros couldn't load your shell PATH");
+    run.mockResolvedValue({ stdout: "/recovered/bin:/usr/bin\n" });
+    expect(await getLoginShellPath({ refresh: true })).toBe("/recovered/bin:/usr/bin");
+  });
+
+  it("shares a failed refresh across stale starts and retains the last confirmed PATH", async () => {
+    const run = vi.fn()
+      .mockResolvedValueOnce({ stdout: "/confirmed/bin:/usr/bin\n" })
+      .mockRejectedValue(Object.assign(new Error("timeout"), { code: "ETIMEDOUT" }));
+    configureLoginShellPathRunner({ cacheKey: "confirmed-before-timeout", run });
+    await getLoginShellPath();
+    const generation = loginShellPathGeneration();
+    expect(await getLoginShellPath({ refresh: true, ifGeneration: generation })).toBe("/confirmed/bin:/usr/bin");
+    expect(await getLoginShellPath({ refresh: true, ifGeneration: generation })).toBe("/confirmed/bin:/usr/bin");
+    expect(run).toHaveBeenCalledTimes(2);
+    await expect(getLoginShellPath({ refresh: true })).rejects.toThrow("Zeros couldn't load your shell PATH");
+    expect(await getLoginShellPath()).toBe("/confirmed/bin:/usr/bin");
+  });
+});
 
 describe("login-shell PATH probe output", () => {
   // `echo '/opt/homebrew/bin\n/opt/homebrew/sbin' | sudo tee /etc/paths.d/homebrew`

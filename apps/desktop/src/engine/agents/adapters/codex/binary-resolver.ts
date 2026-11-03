@@ -170,6 +170,7 @@ export async function resolveExecutableFromPath(
 export async function resolveCodexBinary(
   opts: {
     override?: string;
+    pathValue?: string;
   } = {},
 ): Promise<CodexBinarySource> {
   // 1. Explicit override (per-session cliBinary).
@@ -250,15 +251,17 @@ export async function resolveCodexBinary(
   //    NOTE this is a genuinely DIFFERENT CLI from the pinned bundled one —
   //    `check:codex-pin` guards the bundled version, not this. Say so, because a
   //    silent arrival here is what made packaged Codex drift from dev.
-  const spawnEnv = await buildSpawnEnvWithLoginPath({});
+  const spawnEnv = await buildSpawnEnvWithLoginPath(
+    opts.pathValue === undefined ? {} : { PATH: opts.pathValue },
+  );
   const fallback = await resolveExecutableFromPath(
     "codex",
     spawnEnv.PATH ?? "",
   );
   if (!fallback) {
-    throw new Error(
+    throw Object.assign(new Error(
       "Codex CLI is unavailable on the sanitized login-shell PATH. Install Codex or configure an absolute executable path.",
-    );
+    ), { code: "ENOENT", syscall: "spawn codex", path: "codex" });
   }
   console.warn(
     `[codex/binary-resolver] no bundled codex resolved (no ZEROS_CODEX_CLI_PATH, ` +
