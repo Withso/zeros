@@ -52,6 +52,10 @@ export function OrganizationMcpPage({ organization, surfaceActive }: { organizat
   const recoveryRow = recovery ? read.data?.find(row => row.id === recovery.serverId) : undefined;
   useEffect(() => {
     if (!surfaceActive || !recovery || !read.data || cloudMcpRecoverySnapshot(organization.id) !== recovery) return;
+    // The read hook can start revalidation earlier in this same effect flush.
+    const currentRead = cloudMcpCache.getSnapshot(key);
+    if (currentRead.data !== read.data || !recoveryRow &&
+        (currentRead.loading || currentRead.refreshing || currentRead.error)) return;
     if (view.requestId !== recovery.id || githubPlacement !== "cloud") {
       setGithubPlacement("cloud");
       setMissingServer(!recoveryRow);
@@ -61,7 +65,7 @@ export function OrganizationMcpPage({ organization, surfaceActive }: { organizat
     // External-store publication is synchronous; retain the request until its
     // destination is committed so the editor cannot remount and sign in twice.
     consumeCloudMcpRecovery(recovery);
-  }, [surfaceActive, recovery, recoveryRow, read.data, organization.id, view.requestId, githubPlacement]);
+  }, [surfaceActive, recovery, recoveryRow, read.data, read.loading, read.refreshing, read.readError, key, organization.id, view.requestId, githubPlacement]);
   const shownView = recovery && recoveryRow ? { kind: "editor" as const, initial: recoveryRow, connect: true, requestId: recovery.id } : view;
   const [busy, setBusy] = useState<string | null>(null);
   const mutating = useRef(false);

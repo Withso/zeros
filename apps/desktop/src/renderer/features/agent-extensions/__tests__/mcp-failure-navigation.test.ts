@@ -4,9 +4,9 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import type { CloudMcpFailure } from "@zeros/protocol/cloud-v2-relay";
 import { OrganizationMcpPage } from "../mcp-organization-page";
-import { cloudMcpCache, type CloudMcpExtension } from "../mcp-cloud-api";
+import { cloudMcpCache, cloudMcpKey, type CloudMcpExtension } from "../mcp-cloud-api";
 import { mcpConnectionCache } from "../mcp-connection-status";
-import { captureCloudFailureOwner, requestCloudMcpRecovery } from "../../agent/cloud-failure-navigation";
+import { captureCloudFailureOwner, cloudMcpRecoverySnapshot, requestCloudMcpRecovery } from "../../agent/cloud-failure-navigation";
 import type { OrganizationSummary } from "../../team/control-plane";
 
 const fixture = vi.hoisted(() => ({
@@ -78,6 +78,47 @@ it("does not connect a similarly named server when the requested id was removed"
   expect(container.textContent).toContain("no longer available in this organization");
   expect(fixture.openUrl).not.toHaveBeenCalled();
   expect(fixture.request.mock.calls.some(([path]) => path.endsWith("/start"))).toBe(false);
+});
+
+it.each(["present", "removed", "failed"])("retains recovery until the refreshing server list is confirmed: %s", async outcome => {
+  const key = cloudMcpKey(organization.id, "cloud");
+  const previous = rows.filter(row => row.id !== serverId);
+  cloudMcpCache.setData(key, previous);
+  cloudMcpCache.invalidate(key);
+  let release!: () => void;
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  const original = fixture.request.getMockImplementation()!;
+  fixture.request.mockImplementation((path, schema, options) => path.endsWith("?kind=mcp")
+    ? gate.then(() => {
+      if (outcome === "failed") throw new Error("The organization server list is temporarily unavailable.");
+      return schema.parse({ extensions: outcome === "present" ? rows : previous });
+    }) : original(path, schema, options));
+  request(); await render();
+  const held = {
+    pending: cloudMcpRecoverySnapshot(organization.id) !== null,
+    refreshing: cloudMcpCache.getSnapshot(key).refreshing,
+    missing: container.textContent?.includes("no longer available in this organization"),
+  };
+  await act(async () => { release(); await gate; });
+  expect(held).toEqual({ pending: true, refreshing: true, missing: false });
+  const starts = fixture.request.mock.calls.filter(([path]) => path.endsWith("/start"));
+  if (outcome === "present") {
+    expect(container.textContent).toContain("Edit MCP server");
+    expect(starts).toHaveLength(1);
+    expect(starts[0][2].body.extensionId).toBe(serverId);
+    expect(cloudMcpRecoverySnapshot(organization.id)).toBeNull();
+  } else {
+    expect(starts).toHaveLength(0);
+    expect(fixture.openUrl).not.toHaveBeenCalled();
+    if (outcome === "removed") {
+      expect(container.textContent).toContain("no longer available in this organization");
+      expect(cloudMcpRecoverySnapshot(organization.id)).toBeNull();
+    } else {
+      expect(cloudMcpCache.getSnapshot(key).error).toBeInstanceOf(Error);
+      expect(cloudMcpRecoverySnapshot(organization.id)).not.toBeNull();
+      expect(container.textContent).not.toContain("no longer available in this organization");
+    }
+  }
 });
 
 it("drops pending navigation after account A → B → A while the page is hidden", async () => {
