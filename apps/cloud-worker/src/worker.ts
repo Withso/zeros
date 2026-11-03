@@ -267,13 +267,14 @@ export class CloudWorker {
         publish: (frame) => { void this.broadcast(frame); },
       });
       this.scope = scope; this.store = store;
-      this.mcp = new McpGateway({ workspaceRoot: scope.root, authorization: this.options.transport.mcpAuthorization?.bind(this.options.transport) });
+      this.mcp = new McpGateway({ workspaceRoot: scope.root, authorization: this.options.transport.mcpAuthorization?.bind(this.options.transport),
+        onFailure: (executionId, failure) => this.agents?.mcpFailure(executionId, failure) });
       await this.mcp.configure(config.mcpServers ?? [], config.loginRevision);
       this.agents = new Agents(store, scope, this.options.drivers ?? {
         codex: () => new CodexDriver({ gitEnvironment: this.gitEnvironment }), claude: () => new ClaudeDriver({ gitEnvironment: this.gitEnvironment }),
         cursor: () => new CursorDriver({ gitEnvironment: this.gitEnvironment }),
       }, config,
-        (frame) => this.broadcast(frame), () => { void this.reportIdle(); }, this.options.onTiming, this.options.modelDiscovery, () => this.mcp!.providers());
+        (frame) => this.broadcast(frame), () => { void this.reportIdle(); }, this.options.onTiming, this.options.modelDiscovery, executionId => this.mcp!.providers(executionId));
       this.terminals = new Terminals(scope, { gitEnvironment: this.gitEnvironment, broadcast: frame => this.broadcast(frame), activity: () => { void this.reportIdle(); } });
       this.chats = new ChatService(store, scope, (chatId) => this.agents!.closeChat(chatId), this.agents.turns);
       this.history = new HistoryMirror(store, this.options.transport);

@@ -4,8 +4,9 @@ import type { ContentBlock, PromptResponse, SessionNotification } from "@zeros/p
 import type { SteerOutcome } from "@zeros/protocol/messages";
 import { codexModelUnavailableMessage } from "@zeros/protocol/model-rejection";
 import { redactDriverMessage, type Driver, type DriverOpen } from "../driver";
-import { WorkspaceError } from "../../workspace/scope";
 import { normalizeProviderError } from "../shared/provider-error";
+import { retainProviderFailure } from "../../provider-failure";
+import { unsupportedInputNotice } from "../shared/unsupported-input";
 import { driverTiming } from "../../agent-timings";
 import { JsonRpcProcess, RpcError } from "../shared/json-rpc-process";
 import { agentEnvironment } from "../shared/agent-environment";
@@ -95,7 +96,7 @@ export class CodexDriver implements Driver {
       env: agentEnvironment({ agent: "codex", token: input.proxy.token }, this.options.environment, this.options.gitEnvironment),
       requestTimeoutMs: this.options.requestTimeoutMs ?? 30_000,
       onNotification: (method, params) => this.notification(method, params),
-      onRequest: (method) => this.nativeRequest(method),
+      onRequest: (method, params) => this.nativeRequest(method, params),
       onClose: (error) => { this.state = "closed"; this.mapper?.endAgentActivity(); this.settle(error); },
       redact: (message) => this.redact(message),
     });
@@ -313,17 +314,24 @@ export class CodexDriver implements Driver {
     else turn.resolve({ stopReason: this.mapper!.stopReason, ...(this.mapper!.turnUsage ? { usage: this.mapper!.turnUsage } : {}), ...(turn.model ? { effectiveModel: turn.model } : {}) });
   }
 
-  private nativeRequest(method: string): unknown {
+  private nativeRequest(method: string, params: unknown): unknown {
     switch (method) {
       case "item/commandExecution/requestApproval":
       case "item/fileChange/requestApproval": return { decision: "decline" };
-      case "item/tool/requestUserInput": return { answers: {} };
-      case "mcpServer/elicitation/request": return { action: "cancel", content: null, _meta: null };
+      case "item/tool/requestUserInput": this.unsupportedInput("question", params); return { answers: {} };
+      case "mcpServer/elicitation/request": this.unsupportedInput("elicitation", params); return { action: "cancel", content: null, _meta: null };
       case "item/permissions/requestApproval": return { permissions: {}, scope: "turn" };
       case "applyPatchApproval":
       case "execCommandApproval": return { decision: "denied" };
       default: throw new RpcError("Unsupported worker request.", -32601);
     }
+  }
+
+  private unsupportedInput(kind: "question" | "elicitation", params: unknown): void {
+    const threadId = params && typeof params === "object" && "threadId" in params ? params.threadId : undefined;
+    if (!this.input || this.state !== "ready" || (threadId !== undefined && threadId !== this.nativeSessionId)) return;
+    const event = unsupportedInputNotice(this.input.sessionId, kind);
+    for (const emit of this.listeners) emit(event);
   }
 
   private assertReady(): void {
@@ -334,9 +342,8 @@ export class CodexDriver implements Driver {
   }
   private error(error: unknown): Error {
     const native = normalizeProviderError("codex", error);
-    return native.category === "model-unavailable"
-      ? new WorkspaceError("model-unavailable", codexModelUnavailableMessage(native.message))
-      : new Error(this.redact(native.message));
+    return retainProviderFailure("codex", error, native.category === "model-unavailable"
+      ? codexModelUnavailableMessage(native.message) : this.redact(native.message));
   }
   private pinnedEntry(): string {
     const require = createRequire(import.meta.url);

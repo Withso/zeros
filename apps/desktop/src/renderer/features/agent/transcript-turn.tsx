@@ -14,6 +14,7 @@
 
 import React, { memo, useCallback, useMemo } from "react";
 import type { CloudV2PromptState } from "@zeros/protocol/cloud-v2-prompts";
+import { isCloudWorkspace } from "../../platform/bridge/cloud-workspace-key";
 import { promptTerminal } from "./cloud-prompt-channel";
 import type { CloudTurnEnding } from "./cloud-turn-presentation";
 import type { AgentFailure } from "../../platform/bridge/failure";
@@ -21,6 +22,7 @@ import type { BackgroundTask, WorkflowProgress } from "../../platform/bridge/age
 import { AuthenticationNotice } from "./authentication-notice";
 import {
   authenticationFailureMessage,
+  cloudAuthenticationFailure,
   authenticationTurnOutput,
   authenticationTurnState,
 } from "./auth-prompt-recovery";
@@ -50,7 +52,8 @@ export interface TranscriptTurnActions {
   continueTurn: () => void;
   forkToNewTab: (messageId: string, text: string) => void;
   warmForkToNewTab: (messageId: string, text: string) => void;
-  signIn: () => void;
+  signIn: (provider?: string) => void;
+  chooseModel?: () => void;
   stopWorkflow?: (taskId: string) => void;
 }
 
@@ -295,6 +298,9 @@ export const TranscriptTurn = memo(function TranscriptTurn({
                     onRetryNewChatIntent={retryable && shared.hasChatThread ? warmRetry : undefined}
                     onRetry={retryable && (isVisualTail || durablePrompt) ? retry : undefined}
                     onRetryNewChat={retryable && isVisualTail && !shared.designRole && !durablePrompt ? retryNewChat : undefined}
+                    onReconnect={shared.interactive ? actions.signIn : undefined}
+                    onStartNewSession={retryable && isVisualTail && isCloudWorkspace(shared.folder) ? fork : undefined}
+                    onChooseModel={shared.interactive ? actions.chooseModel : undefined}
                     events={turn.providerEvents}
                     startedAt={turn.recordedStartedAt}
                     live={isActivityTail && turnInFlight}
@@ -319,6 +325,7 @@ export const TranscriptTurn = memo(function TranscriptTurn({
               historical={authStopped}
               resolved={authState === "signed-in"}
               message={authenticationFailureMessage(turn.events, tail?.failure ?? null)}
+              cloud={isCloudWorkspace(shared.folder) ? cloudAuthenticationFailure(turn.events, tail?.failure) : undefined}
               name={shared.agentDisplayName}
               onSignIn={actions.signIn}
             />

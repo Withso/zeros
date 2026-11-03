@@ -3,6 +3,7 @@ import { Check, LogIn } from "lucide-react";
 import { Button, cn } from "../../shared/ui";
 import { Badge } from "../../shared/ui/primitives/badge";
 import { AGENT_NOTICE_ACTION, AgentNotice } from "./agent-notice";
+import { cloudFailureMessage, type CloudProviderFailure } from "@zeros/protocol/cloud-v2-relay";
 
 /** Product state beside the prompt, outside agent output/tool groups/footers. */
 export function AuthenticationNotice({
@@ -11,12 +12,14 @@ export function AuthenticationNotice({
   onSignIn,
   resolved = false,
   historical = false,
+  cloud,
 }: {
   name: string;
   message?: string;
-  onSignIn: () => void;
+  onSignIn: (provider?: string) => void;
   resolved?: boolean;
   historical?: boolean;
+  cloud?: CloudProviderFailure;
 }) {
   if (resolved || historical) {
     const Icon = resolved ? Check : LogIn;
@@ -28,17 +31,17 @@ export function AuthenticationNotice({
   }
   return (
     <AgentNotice
-      message={message ?? `Sign in to ${name} in Settings, then send a new message or type “Continue” to resume.`}
+      message={message ?? (cloud ? cloudFailureMessage(cloud) : `Sign in to ${name} in Settings, then send a new message or type “Continue” to resume.`)}
       data-authentication-notice
     >
       <Button
         variant="ghost"
         size="sm"
-        onClick={onSignIn}
+        onClick={cloud ? () => onSignIn(cloud.provider) : () => onSignIn()}
         className={cn(AGENT_NOTICE_ACTION, "mt-1")}
       >
         <LogIn className="size-4" aria-hidden="true" />
-        Sign in
+        {cloud ? "Reconnect provider account" : "Sign in"}
       </Button>
     </AgentNotice>
   );

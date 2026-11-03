@@ -6,6 +6,7 @@ import { readWorkerToken, WORKER_TOKEN_FILE } from "./worker-token";
 import type { PromptOperation, Transport, TransportHandlers } from "./transport";
 import type { McpAuthorization } from "./mcp/gateway";
 import { CloudGithubCheckoutSchema, type CloudGithubCheckout } from "@zeros/protocol/cloud-github-pr";
+import { mcpFailure, mcpFailureError } from "./mcp/failure";
 
 type ConfigFrame = Extract<CloudV2ControlFrame, { t: "config" }>;
 export type HybridStatus = "connected" | "disconnected" | "credential-unavailable" | "unauthorized" | "stopped" | "protocol-error";
@@ -14,7 +15,7 @@ interface Options {
   publicKeys?: readonly string[]; publicKeysFile?: string; port?: number; fetch?: typeof fetch;
   retryBaseMs?: number; retryMaxMs?: number; onStatus?: (status: HybridStatus) => void;
 }
-class HttpFailure extends Error { constructor(readonly status: number) { super("Worker control request failed."); } }
+class HttpFailure extends Error { constructor(readonly status: number, readonly code?: "mcp_auth_required") { super("Worker control request failed."); } }
 
 /** Live frames use authenticated loopback sockets. Durable control traffic
  * uses HTTPS independently, so it survives the final app disconnect. */
@@ -130,7 +131,16 @@ export class HybridTransport implements Transport {
   }
   async mcpAuthorization(id: string, force = false, signal?: AbortSignal): Promise<McpAuthorization> {
     if (!/^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/i.test(id)) throw new Error("Invalid MCP server identity.");
-    const reply = await this.request(`mcp/${id}/authorization`, { force }, signal, 35_000);
+    let reply: Record<string, unknown>;
+    try { reply = await this.request(`mcp/${id}/authorization`, { force }, signal, 35_000); }
+    catch (error) {
+      // This 401 authenticates the worker, not the user's MCP account.
+      if (error instanceof HttpFailure && error.status === 401) {
+        this.failed(error);
+        throw mcpFailureError({ source: "mcp", serverId: id, reason: "unreachable" });
+      }
+      throw mcpFailureError(mcpFailure(id, error));
+    }
     if (!reply.headers || typeof reply.headers !== "object" || Array.isArray(reply.headers) ||
       Object.keys(reply.headers).length > 128 || Object.entries(reply.headers).some(([key, value]) =>
         !/^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/.test(key) || typeof value !== "string" || value.length > 16384 || /[\r\n\0]/.test(value)) ||
@@ -248,7 +258,23 @@ export class HybridTransport implements Transport {
           "X-Zeros-Worker-Features": "prompt-outbox-v1,mcp-v1,workspace-setup-v1,checkout-v2,github-pr-v1" },
         ...(payload === undefined ? {} : { body: payload }), redirect: "error", signal: controller.signal,
       });
-      if (!response.ok) { await response.body?.cancel(); throw new HttpFailure(response.status); }
+      if (!response.ok) {
+        let code: "mcp_auth_required" | undefined;
+        if (path.startsWith("mcp/") && response.status === 409) {
+          const reader = response.body?.getReader();
+          const chunks: Uint8Array[] = []; let bytes = 0;
+          try {
+            while (reader) {
+              const chunk = await reader.read(); if (chunk.done) break;
+              bytes += chunk.value.byteLength; if (bytes > 8192) break;
+              chunks.push(chunk.value);
+            }
+            if (bytes <= 8192 && JSON.parse(Buffer.concat(chunks).toString("utf8"))?.error?.code === "mcp_auth_required") code = "mcp_auth_required";
+          } catch { /* Only the confirmed code can name a provider sign-in problem. */ }
+          finally { await reader?.cancel(); }
+        } else await response.body?.cancel();
+        throw new HttpFailure(response.status, code);
+      }
       const reader = response.body?.getReader();
       if (!reader) throw new Error("Empty worker control response.");
       const chunks: Uint8Array[] = []; let bytes = 0;

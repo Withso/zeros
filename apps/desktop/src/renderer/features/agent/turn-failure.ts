@@ -1,10 +1,12 @@
 import type { AgentMessage } from "@zeros/protocol/agent-messages";
+import { CloudFailureSchema, cloudFailureMessage, type CloudFailure } from "@zeros/protocol/cloud-v2-relay";
 import { redactLogSecrets } from "@zeros/protocol/scrub";
 import { claudeOrganizationStartupCode, claudeOrganizationStartupMessage } from "@zeros/protocol/claude-startup-notice";
 import type { AgentFailure } from "../../platform/bridge/failure";
 import { isProviderWorkEvent } from "./transcript-notices";
 
 export interface TurnFailure {
+  cloud?: CloudFailure;
   message: string;
   kind: string;
   newChatAllowed: boolean;
@@ -77,6 +79,8 @@ export function turnFailureForCard(input: {
     notice?.code === "claude-background-transport-closed";
   if (input.status === "completed" && !backgroundFailure) return null;
   const fallback = input.fallback ?? input.recoveryFailure;
+  const parsedCloud = CloudFailureSchema.safeParse(notice?.cloud ?? input.fallback?.cloud);
+  const cloud = parsedCloud.success ? parsedCloud.data : undefined;
   const organizationMessage = claudeOrganizationStartupMessage(notice?.code) ??
     claudeOrganizationStartupMessage(claudeOrganizationStartupCode(input.fallback?.advice));
   const message =
@@ -99,7 +103,8 @@ export function turnFailureForCard(input: {
     "auth-required", "verification-required", "cloud-credentials-unavailable",
   ].includes(kind);
   return {
-    message: redactLogSecrets(message).slice(0, 8000),
+    ...(cloud ? { cloud } : {}),
+    message: cloud ? cloudFailureMessage(cloud) : redactLogSecrets(message).slice(0, 8000),
     kind,
     newChatAllowed,
   };

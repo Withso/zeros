@@ -75,6 +75,21 @@ it("registers its process boot and rereads the worker credential on every HTTP c
   await expect.poll(() => f.incoming.some(frame => frame.t === "reply" && frame.id === id)).toBe(true);
   expect(f.requests.every(request => request.authorized)).toBe(true);
 });
+it.each([
+  { status: 409, code: "mcp_auth_required", reason: "sign-in-required" },
+  { status: 403, code: "mcp_access_denied", reason: "sign-in-refused" },
+  { status: 503, code: "upstream_unavailable", reason: "server-error" },
+  { status: 401, code: "unauthorized", reason: "unreachable" },
+  { status: 409, code: "unrecognized_failure", reason: "server-error" },
+])("retains only the confirmed MCP $reason category from HTTP $status/$code", async ({ status, code, reason }) => {
+  const f = await fixture(), serverId = randomUUID();
+  vi.mocked(f.fetcher).mockImplementationOnce(async () => Response.json({ error: { code,
+    message: "PRIVATE_CONTROL_PLANE_DIAGNOSTIC" }, debug: { secret: "PRIVATE_CONTROL_PLANE_DIAGNOSTIC" } }, { status }));
+  const failure = await f.transport.mcpAuthorization(serverId).catch(error => error);
+  expect(failure).toMatchObject({ cloud: { source: "mcp", serverId, reason } });
+  expect(failure.message).not.toContain("PRIVATE_CONTROL_PLANE_DIAGNOSTIC");
+  expect(JSON.stringify(failure)).not.toContain("PRIVATE_CONTROL_PLANE_DIAGNOSTIC");
+});
 it("bounds optional timing reports per phase and ignores an older control plane's missing endpoint", async () => {
   const f = await fixture();
   for (let i = 0; i < 20; i++) f.transport.reportTiming({ phase: "worker_checkout", durationMs: 10 });

@@ -1,0 +1,9 @@
+{
+  "id": "cloud-mcp-actionable-failure",
+  "kind": "replay",
+  "area": "cloud-worker",
+  "fixedBy": "pr:819",
+  "symptom": "Cloud MCP authentication and server failures all said to check the connection without naming the server or providing a useful recovery action.",
+  "rule": "Principles 1, 2, 5, 13 and 14: keep a bounded reason and server identity, deliver only to the requesting execution, recheck ownership inside persistence, and preserve optional GET/DELETE 405 handling. Retain recovery through exact-key list refreshes and read failures; only a confirmed absence means the server was removed.",
+  "check": "pnpm --dir apps/cloud-worker test --maxWorkers=2 src/mcp/failure-reasons.test.ts src/__tests__/cloud-mcp-failures.test.ts src/__tests__/hybrid-transport.test.ts && pnpm exec vitest run --maxWorkers=2 apps/desktop/src/renderer/features/agent-extensions/__tests__/mcp-failure-navigation.test.ts"
+}

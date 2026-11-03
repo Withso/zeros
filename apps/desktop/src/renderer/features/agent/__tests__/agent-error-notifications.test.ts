@@ -17,7 +17,7 @@ let effectSource = "", noticeSource = "", legacyLabelSource = "";
 function visit(node: ts.Node) {
   if (ts.isFunctionDeclaration(node) && node.name?.text === "labelForFailure") legacyLabelSource = node.getText(source);
   if (ts.isVariableStatement(node) && node.declarationList.declarations.some(declaration =>
-    ["preparationTurn", "preparationTurnRead", "preparationTurnFailure", "preparationFailure"].includes(declaration.name.getText(source))))
+    ["preparationTurn", "preparationTurnRead", "preparationTurnFailure", "cloudPreparationAuth", "preparationFailure"].includes(declaration.name.getText(source))))
     noticeSource += node.getText(source) + "\n";
   if (ts.isBlock(node)) {
     const index = node.statements.findIndex(statement => ts.isVariableStatement(statement) &&

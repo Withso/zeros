@@ -89,7 +89,13 @@ describe("worker bridge routing through a fake relay", () => {
     await relay.request(CLIENT_A, prompt(sessionId));
     await expect.poll(() => drivers.length).toBe(2);
     if (change === "configuration") expect(drivers[1].opened?.mcpServers).toEqual({});
-    else expect(drivers[1].opened?.mcpServers).toEqual(drivers[0].opened?.mcpServers);
+    else {
+      const oldServer = Object.values(drivers[0].opened!.mcpServers!)[0];
+      const newServer = Object.values(drivers[1].opened!.mcpServers!)[0];
+      expect(newServer.url).toBe(oldServer.url);
+      expect(newServer.headers.Authorization === oldServer.headers.Authorization).toBe(true);
+      expect(newServer.headers["X-Zeros-Mcp-Execution"]).not.toBe(oldServer.headers["X-Zeros-Mcp-Execution"]);
+    }
     expect(drivers[0].disposed).toBe(true);
     drivers[1].complete(); await worker.flush();
   });

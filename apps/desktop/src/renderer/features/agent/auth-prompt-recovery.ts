@@ -2,6 +2,7 @@ import type { AgentMessage, AgentTextMessage } from "./use-agent-session";
 import type { SessionsActions } from "./sessions-context";
 import { claudeOrganizationStartupCode, claudeOrganizationStartupMessage } from "@zeros/protocol/claude-startup-notice";
 import { isAuthenticationFailureText, isLegacyAuthenticationNotice, isProviderWorkEvent } from "./transcript-notices";
+import { CloudProviderFailureSchema, cloudFailureMessage, type CloudFailure, type CloudProviderFailure } from "@zeros/protocol/cloud-v2-relay";
 
 type PromptArgs = Parameters<SessionsActions["sendPrompt"]>;
 export class AuthPromptRecovery {
@@ -91,12 +92,25 @@ export function authenticationTurnOutput(
   );
 }
 
+export function cloudAuthenticationFailure(events: readonly AgentMessage[], failure?: { cloud?: CloudFailure } | null): CloudProviderFailure | undefined {
+  const current = CloudProviderFailureSchema.safeParse(failure?.cloud);
+  if (current.success && current.data.reason === "auth-required") return current.data;
+  for (let index = events.length - 1; index >= 0; index--) {
+    const event = events[index];
+    if (event.kind !== "error_notice" || event.parentToolId || event.recoverable) continue;
+    const cloud = CloudProviderFailureSchema.safeParse(event.cloud);
+    if (cloud.success && cloud.data.reason === "auth-required") return cloud.data;
+  }
+}
+
 /** The product Sign in notice owns this explanation outside the activity feed.
  * Legacy and other providers retain their existing generic sign-in copy. */
 export function authenticationFailureMessage(
   events: readonly AgentMessage[],
-  failure?: { advice?: string } | null,
+  failure?: { advice?: string; cloud?: CloudFailure } | null,
 ): string | undefined {
+  const cloud = cloudAuthenticationFailure(events, failure);
+  if (cloud) return cloudFailureMessage(cloud);
   for (let index = events.length - 1; index >= 0; index--) {
     const event = events[index];
     if (event.kind === "error_notice" && !event.parentToolId && !event.recoverable && event.code === "org_config_refused")

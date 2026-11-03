@@ -16,6 +16,7 @@ import type { BridgeRegistryAgent } from "../../platform/bridge/messages";
 import { isApiKeyOnly } from "../settings/provider-prefs";
 
 export function isRunnableAgent(a: BridgeRegistryAgent): boolean {
+  if (a.cloud) return false;
   if (a.authenticated === true) return true;
   // An unavailable auth probe is infrastructure uncertainty, not a negative
   // credential verdict. Keep an installed provider sendable so the real

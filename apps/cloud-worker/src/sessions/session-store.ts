@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { z } from "zod";
 import { applyUpdate, type AgentMessage, type AgentTextMessage } from "@zeros/protocol/agent-messages";
 import type { ContentBlock, PromptResponse, SessionNotification } from "@zeros/protocol/agent-events";
-import type { AgentPromptBubble, SteerOutcome } from "@zeros/protocol/messages";
+import type { AgentPromptBubble, BridgeAgentFailure, SteerOutcome } from "@zeros/protocol/messages";
 import { CloudV2MessageRowSchema, type CloudV2MessageRow } from "@zeros/protocol/cloud-v2-relay";
 import { providerBindingForResume } from "@zeros/protocol/identities";
 import { coerceChat, messageWindow, upsertRows, type ChatRow, type MessageWindow } from "./chat-history";
@@ -40,6 +40,7 @@ export interface InboxEntry extends PromptInput {
   state: "queued" | "running" | "completed" | "cancelled" | "failed" | "interrupted";
   response?: PromptResponse;
   error?: string;
+  failure?: BridgeAgentFailure;
   cancelRequested?: boolean;
 }
 export interface SteerReceipt extends Omit<PromptInput, "startedAt"> {
@@ -407,8 +408,9 @@ export class SessionStore {
     return rows.length;
   }
 
-  async fold(chatId: string, notification: SessionNotification): Promise<void> {
+  async fold(chatId: string, notification: SessionNotification, currentOwner?: () => boolean): Promise<void> {
     await this.serialize(chatId, () => {
+      if (currentOwner && !currentOwner()) return;
       const current = this.sessions.get(chatId);
       if (!current) throw new Error("Unknown chat.");
       if (!current.chat) throw new Error("Cloud conversation was deleted.");
@@ -475,7 +477,7 @@ export class SessionStore {
     });
   }
 
-  async finish(chatId: string, requestId: string, response?: PromptResponse, error?: string, failureNotice?: SessionNotification): Promise<void> {
+  async finish(chatId: string, requestId: string, response?: PromptResponse, error?: string, failureNotice?: SessionNotification, failure?: BridgeAgentFailure): Promise<void> {
     await this.update(chatId, (draft) => {
       const entry = draft.inbox.find((entry) => entry.requestId === requestId);
       if (!entry || (entry.state !== "running" && !(entry.outbox && entry.state === "queued"))) return;
@@ -483,7 +485,8 @@ export class SessionStore {
       entry.state = entry.cancelRequested || response?.stopReason === "cancelled" ? "cancelled" : error ? "failed" : "completed";
       entry.response = entry.state === "cancelled" ? { ...response, stopReason: "cancelled" } : response;
       entry.error = error;
-      if (failureNotice) {
+      if (entry.state === "failed" && failure) entry.failure = failure;
+      if (entry.state === "failed" && failureNotice) {
         // The reporter observes this terminal state as soon as change() saves
         // it. Commit the user row and notice in that same durable snapshot.
         const previous = new Set(draft.messages);

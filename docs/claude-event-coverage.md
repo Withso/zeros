@@ -227,9 +227,14 @@ order are documented in [the harness capability boundary](agent-harness-capabili
 - Control requests/responses/cancellations and keep-alives are consumed by the
   public wrapper. Keep-alive is transport health, not user activity. Do not
   bypass the wrapper or forward raw control payloads into the transcript.
-- `canUseTool`, `onUserDialog` and `onElicitation` already use existing blocking
-  approval/question controls and cancellation lifetimes. Elicitation completion
-  notifications do not substitute for those callback receipts.
+- Local `canUseTool`, `onUserDialog` and `onElicitation` use the existing blocking
+  approval/question controls and cancellation lifetimes. Cloud Claude continues
+  to cancel `onUserDialog` and `onElicitation`; it now records a nonblocking
+  notice that the request needs a Local workspace. The notice contains no
+  question or elicitation payload, is persisted with that execution's
+  transcript, and ignores callbacks from a disposed/replaced query. Cloud Codex
+  follows the same policy for native questions and MCP elicitations. Elicitation
+  completion notifications never substitute for callback receipts.
 - Native hooks remain SDK-owned. Local registers passive `Stop` and
   `UserPromptSubmit` callbacks for scheduled wakeups, status and activity; the
   cloud worker registers only `UserPromptSubmit` for wake-up status. Both guard

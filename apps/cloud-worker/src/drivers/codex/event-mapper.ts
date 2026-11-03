@@ -1719,6 +1719,7 @@ export class CodexEventMapper {
         sessionUpdate: "error_notice",
         noticeId: `${this.turnPrefix}-error-${this.noticeSeq++}`,
         severity: "error",
+        failureKind: this.turnNativeFailure.category,
         message: this.turnNativeFailure.category === "model-unavailable"
           ? codexModelUnavailableMessage(message) : `Codex: ${message}`,
       } as never,
