@@ -7,6 +7,8 @@
 // The control plane mirrors these schemas (it deploys independently, on zod 3).
 import { z } from "zod";
 import { MAX_BRIDGE_FRAME_BYTES } from "./schemas";
+export { CloudFailureSchema, CloudProviderFailureSchema, CloudMcpFailureSchema, cloudFailureMessage } from "./cloud-failure";
+export type { CloudFailure, CloudProviderFailure, CloudMcpFailure } from "./cloud-failure";
 
 export const CLOUD_V2_RELAY_PROTOCOL = 2;
 export const CLOUD_V2_WORKER_PORT = 41783;

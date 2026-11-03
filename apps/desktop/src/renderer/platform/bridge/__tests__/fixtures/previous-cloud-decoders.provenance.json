@@ -1,0 +1,49 @@
+{
+  "repository": "https://github.com/Withso/zeros",
+  "revision": "b3f7105390ff9339f55a245646a2bcff51e0f49d",
+  "license": "MIT",
+  "exports": "export { CloudV2WorkerFrameSchema, CloudV2WorkerHistorySchema, CloudV2ControlFrameSchema } from './packages/protocol/src/cloud-v2-relay.ts';\nexport { CloudV2PromptOutcomeSchema, CloudV2PromptStatusSchema } from './packages/protocol/src/cloud-v2-prompts.ts';\nexport { applyUpdate } from './packages/protocol/src/agent-messages.ts';\nexport { parseInboundBridgeWebSocketFrame } from './apps/desktop/src/renderer/platform/bridge/runtime-client.ts';\nexport { cloudIncoming } from './apps/desktop/src/renderer/platform/bridge/cloud-runtime-wire.ts';\nexport { fromPersistedMessage } from './apps/desktop/src/renderer/features/agent/agent-history-client.ts';",
+  "sha256": "e57f51dd7a9cb2be085b78a15e1b929a90b0219dd164cd75409c1333298292a2",
+  "sources": [
+    {
+      "path": "apps/desktop/src/renderer/features/agent/agent-history-client.ts",
+      "sha256": "8a99c7fedc40a65bd5bfeb11f7a6656158e55b42e488c1c063b39fc1c162394c"
+    },
+    {
+      "path": "apps/desktop/src/renderer/platform/bridge/cloud-runtime-wire.ts",
+      "sha256": "394bc92baad66bef2ec0064e2d3be3fe0491bcd9e6630b34b12ce2ae6c7a457b"
+    },
+    {
+      "path": "apps/desktop/src/renderer/platform/bridge/cloud-workspace-key.ts",
+      "sha256": "de3fa260ab2bceceabc0a51e82c1ef47c9254c2943c3f9ebefd01a298f756f75"
+    },
+    {
+      "path": "apps/desktop/src/renderer/platform/bridge/runtime-client.ts",
+      "sha256": "23aee2be85bd6339f1b707e0cd873f27097b6f79f8269b5f84aa3c6d1ba7bfa0"
+    },
+    {
+      "path": "packages/protocol/src/agent-messages.ts",
+      "sha256": "9d573c12c5e0f29c36d210faea1c37cbd7d8568ff134196f9a46f1dc526551ab"
+    },
+    {
+      "path": "packages/protocol/src/changes-history.ts",
+      "sha256": "3c73a6639223bce784077bde9877baf20378164b5fc1de249ac17f2983bd9b27"
+    },
+    {
+      "path": "packages/protocol/src/cloud-v2-prompts.ts",
+      "sha256": "724ff8a98915da13389d628e9b554602f27c37ccbef2605799ff83e9a9f39b4a"
+    },
+    {
+      "path": "packages/protocol/src/cloud-v2-relay.ts",
+      "sha256": "7b600ef8216c11d1aada4a9b82e5df91e163ba9d1931088324a0ed8afd9cbfad"
+    },
+    {
+      "path": "packages/protocol/src/run-actions.ts",
+      "sha256": "9a5bc55b0b0f2287f487e882cd64c24c0797e5e8ecfb50a5a70e99c5b4644735"
+    },
+    {
+      "path": "packages/protocol/src/schemas.ts",
+      "sha256": "d1c6970acc2d8533439a124c4c6be7bf72e5e6b60121f2a4c7eb8a396771f6a1"
+    }
+  ]
+}

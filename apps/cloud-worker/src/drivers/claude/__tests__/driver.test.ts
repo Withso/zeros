@@ -146,13 +146,24 @@ const logins = [
 ];
 
 it.each(logins)("allows only $name and cancels unsupported native questions immediately", async ({ login, name }) => {
-  const { driver, queries } = setup(); await driver.open({ ...input, oauthToken: undefined, ...login }); const prompt = driver.prompt(text("hello"));
+  const { driver, queries } = setup(), events: SessionNotification[] = [];
+  driver.onEvent(event => events.push(event));
+  await driver.open({ ...input, oauthToken: undefined, ...login }); const prompt = driver.prompt(text("hello"));
   const query = queries[0], sent = await query.read(), options = query.args.options;
   expect(Object.keys(options.env!).sort()).toEqual([name, "GIT_ASKPASS", "HOME", "PATH"].sort());
   expect(options.env![name] === (login.oauthToken ?? login.apiKey)).toBe(true);
   expect(await options.onUserDialog!({ dialogKind: "unknown", payload: {} } as never, {} as never)).toEqual({ behavior: "cancelled" });
   expect(await options.onElicitation!({} as never, {} as never)).toEqual({ action: "cancel" });
+  expect(events.filter(event => event.update.sessionUpdate === "error_notice").map(event => event.update)).toMatchObject([
+    { sessionUpdate: "error_notice", code: "cloud-question-unsupported", severity: "warning", recoverable: true,
+      message: expect.stringMatching(/cloud workspaces.*Local workspace/i) },
+    { sessionUpdate: "error_notice", code: "cloud-mcp-elicitation-unsupported", severity: "warning", recoverable: true,
+      message: expect.stringMatching(/cloud workspaces.*Local workspace/i) },
+  ]);
   query.push(result(sent.uuid)); await prompt;
+  await driver.dispose();
+  await options.onUserDialog!({ dialogKind: "unknown", payload: {} } as never, {} as never);
+  expect(events.filter(event => event.update.sessionUpdate === "error_notice")).toHaveLength(2);
 });
 
 it("does not finish the active prompt on a child, autonomous, or old correlated result", async () => {

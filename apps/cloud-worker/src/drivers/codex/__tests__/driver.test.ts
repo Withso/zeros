@@ -248,6 +248,12 @@ describe("Codex driver with an offline app-server process", () => {
     expect(responses[2]).toEqual({ answers: {} });
     expect(responses[3]).toMatchObject({ action: "cancel" });
     expect(responses[4]).toMatchObject({ code: -32601 });
+    expect(events.filter(event => event.update.sessionUpdate === "error_notice").map(event => event.update)).toMatchObject([
+      { sessionUpdate: "error_notice", code: "cloud-question-unsupported", severity: "warning", recoverable: true,
+        message: expect.stringMatching(/cloud workspaces.*Local workspace/i) },
+      { sessionUpdate: "error_notice", code: "cloud-mcp-elicitation-unsupported", severity: "warning", recoverable: true,
+        message: expect.stringMatching(/cloud workspaces.*Local workspace/i) },
+    ]);
   });
 
   it.each(["crash", "malformed", "no-ack"])("settles a prompt on %s without leaking process output", async (mode) => {

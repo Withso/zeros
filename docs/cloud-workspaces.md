@@ -218,6 +218,13 @@ token nor its encoded header belongs in command arguments, remote URLs,
 transcripts or logs. This protects command metadata, not other processes
 already running with the same VM permissions.
 
+Provider readiness and new-turn admission use the same worker verdict. An
+expired Codex proxy grant makes the provider unavailable until renewed config
+arrives; it does not prove the upstream account needs a new sign-in. Reattaching
+to a turn already running keeps that turn and its original credentials. The
+next native turn is refused until usable credentials arrive. Local provider probes and
+their recovery behavior are unchanged.
+
 Customize stores organization MCP definitions separately from provider logins.
 Definitions can be organization-shared or private to one member and can target
 all repositories or one admitted GitHub `owner/repo`. The control plane
@@ -244,6 +251,14 @@ client stops that client's wait without cancelling another live client.
 Definition/login revisions invalidate cached authorization and provider reuse.
 Runtime removal or shutdown closes the gateway and its owned processes.
 
+An MCP failure retains its server ID and a bounded reason: sign-in required,
+access refused, server error or unreachable. Only the native execution that
+requested it receives the durable warning; repeated handshakes share one
+warning per reason until the driver is replaced. The transcript's Connect or
+Retry action opens that server in the owning organization's Customize page.
+Account, owner and execution changes retire stale actions and late failures.
+An optional Streamable HTTP GET/DELETE returning 405 leaves POST calls usable.
+
 Organization-owned Local workspaces resolve the same definitions through
 Electron's private account-bound broker. Native GitHub admission refreshes on
 demand; generation and exact-child checks reject late credentials after account
@@ -263,6 +278,30 @@ unknown, not an empty account list. ChatGPT discovery stays unchanged.
 Model-access refusals show the selected model and an action to choose another;
 provider project IDs, proxy URLs and request IDs remain diagnostic-only. Neither
 discovery nor a refusal automatically changes the saved model or retries a turn.
+
+Provider failures retain a bounded category through startup replies, prompt
+receipts and mirrored transcript notices: rejected credentials, account
+verification, unavailable cloud credentials, usage/rate limit, missing native
+session, unavailable model or unavailable provider. Public text comes from the
+category, never raw provider diagnostics. A confirmed Retry-After deadline is
+retained without its headers. The transcript offers the corresponding account,
+model, later retry or new-session action, with no automatic prompt resend.
+An absent worker execution remains an ordinary adoption miss; it cannot claim
+that a native provider conversation was deleted.
+
+Cloud Claude and Codex still cancel agent questions and MCP elicitations. Each
+cancellation now leaves a nonblocking transcript notice explaining that cloud
+workspaces cannot answer it yet and directing the user to a Local workspace.
+Question bodies and elicitation payloads are not copied into that notice.
+
+These changes ship in the SHA-pinned worker runtime and desktop. Optional
+`cloud` metadata is nested inside the existing bridge failure/notice payloads
+and serialized history rows; strict relay and HTTPS outbox envelopes are
+unchanged. Old desktops accept new worker messages and keep the sanitized
+fallback text, while new desktops accept old records without metadata. No
+protocol bump or database migration is required. The outbox's control-plane
+receipt still reports delivery state only; the durable transcript supplies the
+provider reason.
 
 The worker folds native streams through the shared `applyUpdate` reducer and
 persists chat/session state under `/home/user/.local/share/zeros/cloud-worker`.

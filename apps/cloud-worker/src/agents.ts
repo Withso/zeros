@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type { BackgroundTasksUpdate, InitializeResponse, PromptResponse, SessionNotification } from "@zeros/protocol/agent-events";
-import { createMessage, type AgentLoadSessionMessage, type AgentNewSessionMessage, type AgentPromptMessage, type AgentSteerMessage, type BridgeMessage, type SteerOutcome } from "@zeros/protocol/messages";
-import type { CloudV2Agent } from "@zeros/protocol/cloud-v2-relay";
+import { createMessage, type AgentLoadSessionMessage, type AgentNewSessionMessage, type AgentPromptMessage, type AgentSteerMessage, type BridgeAgentFailure, type BridgeMessage, type SteerOutcome } from "@zeros/protocol/messages";
+import { cloudFailureMessage, type CloudMcpFailure, type CloudV2Agent } from "@zeros/protocol/cloud-v2-relay";
 import type { CloudV2PromptDelivery } from "@zeros/protocol/cloud-v2-prompts";
 import type { Driver } from "./drivers/driver";
 import { agentTiming, type TimingObserver, type TimingSpan } from "./agent-timings";
@@ -12,6 +12,7 @@ import { preparePromptFiles } from "./prompt-files";
 import type { DriverMcpServers } from "./mcp/gateway";
 import { TurnService } from "./workspace/turns";
 import type { AgentTextMessage } from "@zeros/protocol/agent-messages";
+import { providerAvailability, providerFailure } from "./provider-failure";
 
 export type DriverFactories = Partial<Record<CloudV2Agent, () => Driver>>;
 export interface AppClient { id: string; send(frame: BridgeMessage): Promise<void> }
@@ -28,9 +29,11 @@ interface Runtime {
   settling?: Promise<void>; steers: Map<string, Promise<SteerReceipt>>;
   waiters: Map<string, Waiter[]>;
   turnTiming?: TimingSpan;
-  turnFailureNotice?: boolean;
+  turnFailureNotice?: BridgeAgentFailure;
   outboxSteering?: Promise<void>;
   checkpointTurnId?: string;
+  mcpExecutionId?: string;
+  mcpFailures?: Set<string>;
 }
 
 const VERSIONS = { codex: "0.166.0", claude: "0.3.311", cursor: "1.2.0" };
@@ -40,9 +43,6 @@ const initialized = (agentId: CloudV2Agent): InitializeResponse => ({
   protocolVersion: 1, agentInfo: { name: NAMES[agentId], version: VERSIONS[agentId] },
   authMethods: [], agentCapabilities: { loadSession: true, steering: true, promptCapabilities: { image: true } },
 });
-const publicError = (error: unknown): string => error instanceof WorkspaceError ? error.message
-  : error instanceof Error && /\b401\b|unauthori[sz]ed|authentication/i.test(error.message)
-    ? "Agent authentication expired. Reconnect the provider before sending again." : "The agent could not complete this request.";
 
 /** Executions are worker-owned routes; provider resume ids never select a
  * live process. Client disconnects do not change a conversation's lifetime. */
@@ -64,10 +64,26 @@ export class Agents {
     private readonly activity: () => void,
     private readonly onTiming?: TimingObserver,
     modelDiscovery?: ModelDiscoveryOptions,
-    private readonly mcpProviders?: () => Promise<DriverMcpServers>,
+    private readonly mcpProviders?: (executionId: string) => Promise<DriverMcpServers>,
   ) { this.config = config; this.models = new CodexModelAvailability(modelDiscovery); this.models.configure(config); this.turns = new TurnService(store, scope); }
 
   configure(config: WorkerConfig): void { this.config = config; this.models.configure(config); }
+  mcpFailure(executionId: string, cloud: CloudMcpFailure): void {
+    const route = [...this.routes.values()].find(value => value.mcpExecutionId === executionId);
+    if (!route || route.closed || this.chats.get(route.chatId) !== route) return;
+    const ownsFailure = () => !route.closed && route.mcpExecutionId === executionId && this.chats.get(route.chatId) === route;
+    const key = `${cloud.serverId}:${cloud.reason}`;
+    route.mcpFailures ??= new Set();
+    if (route.mcpFailures.has(key)) return;
+    route.mcpFailures.add(key);
+    const notification: SessionNotification = { sessionId: route.id, update: { sessionUpdate: "error_notice", noticeId: `mcp:${randomUUID()}`,
+      severity: "warning", recoverable: true, message: cloudFailureMessage(cloud), cloud, at: Date.now() } };
+    route.events = route.events.then(async () => {
+      if (!ownsFailure()) return;
+      await this.store.fold(route.chatId, notification, ownsFailure);
+      if (ownsFailure()) await this.update(route, notification);
+    }).catch(async () => { if (ownsFailure()) await this.stop(route); });
+  }
   private initialized(agentId: CloudV2Agent): InitializeResponse {
     return { ...initialized(agentId), _meta: this.models.metadata(agentId === "codex") };
   }
@@ -147,8 +163,12 @@ export class Agents {
       switch (message.type) {
         case "AGENT_LIST_AGENTS":
           await client.send(createMessage({ type: "AGENT_AGENTS_LIST", source: "engine", requestId: message.id,
-            agents: (Object.keys(VERSIONS) as CloudV2Agent[]).map((id) => ({ id, name: NAMES[id], version: VERSIONS[id], description: `${NAMES[id]} cloud agent`, distribution: {},
-              installed: !!this.factories[id], launchKind: this.factories[id] ? "binary" as const : "unavailable" as const, installedVersion: VERSIONS[id], versionCompatible: true, authenticated: !!this.config.agents[id] && !!this.factories[id] })) }));
+            agents: (Object.keys(VERSIONS) as CloudV2Agent[]).map((id) => {
+              const cloud = providerAvailability(id, this.config, !!this.factories[id]);
+              return { id, name: NAMES[id], version: VERSIONS[id], description: `${NAMES[id]} cloud agent`, distribution: {},
+                installed: !!this.factories[id], launchKind: this.factories[id] ? "binary" as const : "unavailable" as const,
+                installedVersion: VERSIONS[id], versionCompatible: true, authenticated: !cloud, ...(cloud ? { cloud } : {}) };
+            }) }));
           return;
         case "AGENT_INIT_AGENT":
           await this.models.refresh();
@@ -231,8 +251,13 @@ export class Agents {
         default: throw new WorkspaceError("CLOUD_V2_UNSUPPORTED", "This agent operation is not available in cloud workspaces yet.");
       }
     } catch (error) {
+      const agentId = "agentId" in message && (message.agentId === "claude" || message.agentId === "codex" || message.agentId === "cursor") ? message.agentId : undefined;
+      const stage = message.type === "AGENT_NEW_SESSION" ? "newSession" : message.type === "AGENT_LOAD_SESSION" ? "loadSession"
+        : message.type === "AGENT_PROMPT" ? "prompt" : message.type === "AGENT_INIT_AGENT" ? "initialize" : undefined;
+      const failure = agentId ? providerFailure(agentId, error, stage) : undefined;
       await client.send(createMessage({ type: "AGENT_ERROR", source: "engine", requestId: message.id,
-        ...("agentId" in message ? { agentId: message.agentId } : {}), code: error instanceof WorkspaceError ? error.code : "AGENT_ERROR", message: publicError(error) }));
+        ...("agentId" in message ? { agentId: message.agentId } : {}), code: error instanceof WorkspaceError ? error.code : "AGENT_ERROR",
+        message: error instanceof WorkspaceError && !failure?.cloud ? error.message : failure?.message ?? "The agent could not complete this request.", ...(failure ? { failure } : {}) }));
     }
   }
 
@@ -374,21 +399,26 @@ export class Agents {
 
   private async ensureDriver(route: Runtime, openingTiming?: TimingSpan): Promise<void> {
     this.assertCurrent(route);
+    if (route.driver && (route.nativeRunning || this.hasBackground(route))) return;
+    const unavailable = providerAvailability(route.agentId, this.config, !!this.factories[route.agentId]);
+    if (unavailable) throw Object.assign(new Error(cloudFailureMessage(unavailable)), { cloud: unavailable });
     if (route.opening) return route.opening;
     const login = this.config.agents[route.agentId];
     // Personal MCP sign-in changes readiness without changing the shared
     // server definition. Reopen between turns after that pushed revision.
     const key = JSON.stringify([login, this.config.mcpServers ?? [], this.config.mcpServers?.length ? this.config.loginRevision : undefined]);
-    if (route.driver && (route.login === key || route.nativeRunning || this.hasBackground(route))) return;
-    if (!login || ("expiresAt" in login && login.expiresAt <= Date.now())) throw new WorkspaceError("auth-required", "Connect this agent before sending a message.");
+    if (route.driver && route.login === key) return;
+    if (!login) throw new WorkspaceError("auth-required", "Connect this agent before sending a message.");
     const factory = this.factories[route.agentId];
     if (!factory) throw new WorkspaceError("agent-unavailable", "This agent is not installed in the worker.");
     route.opening = (async () => {
       route.unsubscribe?.();
+      route.mcpExecutionId = undefined;
       await route.driver?.dispose();
       this.assertCurrent(route);
       const driver = factory();
       route.driver = driver; route.login = key; route.pendingNative = undefined;
+      route.mcpExecutionId = randomUUID(); route.mcpFailures = new Set();
       route.unsubscribe = driver.onEvent((event) => {
         if (route.closed || route.driver !== driver) return;
         const active = route.active;
@@ -402,10 +432,19 @@ export class Agents {
           void this.store.acceptOutbox(route.chatId, active.requestId).catch(() => this.stop(route));
         }
         const notification = { ...event, sessionId: route.id };
+        if (notification.update.sessionUpdate === "error_notice" && notification.update.severity === "error" && !notification.update.recoverable) {
+          const update = notification.update;
+          const failure = providerFailure(route.agentId, { code: update.code, message: update.message, cloud: update.cloud }, "prompt", update.turnFailure?.kind ?? update.failureKind);
+          const code = update.code === "claude-background-failed" || update.code === "claude-background-transport-closed" ? update.code : failure.kind;
+          notification.update = { ...update, message: failure.message, code, failureKind: failure.kind,
+            ...(failure.cloud ? { cloud: failure.cloud } : {}),
+            ...(active && !update.parentToolId && !update.turnFailure ? { turnFailure: { turnId: active.userMessageId, kind: failure.kind } } : {}) };
+        }
         const hadBackground = this.hasBackground(route);
         if (active && notification.update.sessionUpdate === "error_notice" && !notification.update.parentToolId &&
             !notification.update.recoverable && notification.update.severity === "error" &&
-            (!notification.update.turnFailure || notification.update.turnFailure.turnId === active.userMessageId)) route.turnFailureNotice = true;
+            (!notification.update.turnFailure || notification.update.turnFailure.turnId === active.userMessageId)) route.turnFailureNotice = providerFailure(route.agentId,
+              { cloud: notification.update.cloud }, "prompt", notification.update.failureKind);
         if (notification.update.sessionUpdate === "background_tasks_update") {
           route.background = notification.update; this.activity();
         }
@@ -431,7 +470,7 @@ export class Agents {
         if (!this.hasBackground(route) && !route.active) this.pump(route);
       });
       try {
-        const mcpServers = await this.mcpProviders?.();
+        const mcpServers = await this.mcpProviders?.(route.mcpExecutionId);
         this.assertCurrent(route);
         const native = await driver.open({ sessionId: route.id, cwd: this.scope.root, model: route.model, effort: route.effort, fast: route.fast,
           ...(mcpServers ? { mcpServers } : {}),
@@ -449,7 +488,7 @@ export class Agents {
           if (this.store.canRebind(route.chatId)) route.pendingNative = native.nativeSessionId;
           else await this.store.bind(route.chatId, route.agentId, native.nativeSessionId);
         }
-      } catch (error) { route.unsubscribe?.(); await driver.dispose(); route.driver = undefined; throw error; }
+      } catch (error) { route.mcpExecutionId = undefined; route.unsubscribe?.(); await driver.dispose(); route.driver = undefined; throw error; }
     })();
     try { await route.opening; } finally { route.opening = undefined; }
   }
@@ -490,12 +529,12 @@ export class Agents {
         let entry = await this.store.claim(route.chatId);
         if (!entry) break;
         route.turnTiming = agentTiming(route.agentId, route.chatId, "turn", this.onTiming, route.waiters.get(entry.requestId)?.[0]?.receivedAt);
-        route.active = entry; route.turnFailureNotice = false; this.activity();
+        route.active = entry; route.turnFailureNotice = undefined; this.activity();
         if (!entry.outbox) {
           await this.update(route, { sessionId: route.id, update: { sessionUpdate: "user_message_recorded", message: userMessage(entry) } });
           await this.turnState(route, entry, "running");
         }
-        let response: PromptResponse | undefined, error: string | undefined;
+        let response: PromptResponse | undefined, failure: BridgeAgentFailure | undefined;
         try {
           const content = entry.outbox ? await preparePromptFiles(this.scope, entry.prompt) : entry.prompt;
           if (entry.outbox && (route.model !== entry.outbox.model || route.effort !== entry.outbox.effort)) {
@@ -532,24 +571,27 @@ export class Agents {
               else { route.nativeRunning = true; response = await route.driver!.prompt(content); }
             }
           }
-        } catch (failure) { error = publicError(failure); }
+        } catch (error) { failure = providerFailure(route.agentId, error, "prompt"); }
         finally { route.nativeRunning = false; }
         route.settling = (async () => {
           await route.events;
           await Promise.all([...route.steers.values()]);
           await route.outboxSteering;
-          const notice: SessionNotification | undefined = entry.outbox && error && !route.turnFailureNotice
-            ? { sessionId: route.id, update: { sessionUpdate: "error_notice", noticeId: `outbox:${entry.userMessageId}`,
-                severity: "error", message: error, turnFailure: { turnId: entry.userMessageId, kind: "protocol-error" }, at: Date.now() } }
+          failure = route.turnFailureNotice ?? failure;
+          const error = failure?.message;
+          const notice: SessionNotification | undefined = failure && !route.turnFailureNotice && !entry.cancelRequested && response?.stopReason !== "cancelled"
+            ? { sessionId: route.id, update: { sessionUpdate: "error_notice", noticeId: `failure:${entry.userMessageId}`,
+                severity: "error", message: failure.message, ...(failure.cloud ? { cloud: failure.cloud } : {}),
+                turnFailure: { turnId: entry.userMessageId, kind: failure.kind }, at: Date.now() } }
             : undefined;
-          await this.store.finish(route.chatId, entry.requestId, response ? { ...response, userMessageId: entry.userMessageId } : undefined, error, notice);
+          await this.store.finish(route.chatId, entry.requestId, response ? { ...response, userMessageId: entry.userMessageId } : undefined, error, notice, failure);
           const receipt = this.store.receipt(route.chatId, entry.requestId)!;
           const recordedPrompt = await this.turns.finish(route.chatId, entry.userMessageId, {
             status: receipt.state === "cancelled" ? "cancelled" : receipt.state === "failed" ? "failed" : "completed",
             stopReason: receipt.response?.stopReason ?? null,
           });
           await this.publishRecordedTurn(route, recordedPrompt);
-          if (notice && receipt.error) await this.update(route, notice);
+          if (notice && receipt.state === "failed") await this.update(route, notice);
           route.turnTiming?.mark("turn_done"); route.turnTiming = undefined;
           await this.turnState(route, entry, receipt.state === "cancelled" ? "cancelled" : receipt.state === "failed" ? "failed" : "completed", receipt.response?.stopReason);
           for (const waiter of route.waiters.get(entry.requestId) ?? []) await this.receipt(route, receipt, waiter);
@@ -578,7 +620,7 @@ export class Agents {
 
   private async receipt(route: Runtime, entry: InboxEntry, waiter: Waiter): Promise<void> {
     const common = { source: "engine" as const, requestId: waiter.requestId, agentId: route.agentId, sessionId: route.id, executionId: route.id };
-    if (entry.state === "failed" || entry.state === "interrupted") await waiter.client.send(createMessage({ type: "AGENT_PROMPT_FAILED", ...common, error: entry.error ?? "The turn was interrupted before completion." }));
+    if (entry.state === "failed" || entry.state === "interrupted") await waiter.client.send(createMessage({ type: "AGENT_PROMPT_FAILED", ...common, error: entry.error ?? "The turn was interrupted before completion.", ...(entry.failure ? { failure: entry.failure } : {}) }));
     else {
       const response = entry.response ?? { stopReason: "cancelled" as const };
       await waiter.client.send(createMessage({ type: "AGENT_PROMPT_COMPLETE", ...common, stopReason: response.stopReason, response }));

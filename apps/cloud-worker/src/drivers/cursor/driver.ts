@@ -7,6 +7,7 @@ import { redactDriverMessage, type Driver, type DriverOpen } from "../driver";
 import { driverTiming } from "../../agent-timings";
 import { agentEnvironment } from "../shared/agent-environment";
 import { normalizeProviderError } from "../shared/provider-error";
+import { retainProviderFailure } from "../../provider-failure";
 import { CursorProcess } from "./host-process";
 import { CURSOR_VERSION, type CursorAgentUsage, type HostEvent } from "./native-types";
 import { CursorSdkTranslator } from "./translator";
@@ -238,7 +239,7 @@ export class CursorDriver implements Driver {
   private ready(): void { if (!this.input || this.disposed) throw new Error("Cursor driver is not ready."); }
   private error(error: unknown): Error {
     const native = normalizeProviderError("cursor", error);
-    return Object.assign(new Error(this.redact(native.message)), { code: native.category });
+    return retainProviderFailure("cursor", error, this.redact(native.message));
   }
   private redact(message: string): string { return redactDriverMessage(message, this.input); }
   private emit(event: SessionNotification): void {

@@ -16,6 +16,7 @@ import type { RawServer } from "./mcp-server-model";
 import { mcpConnectionView } from "./mcp-connection-view";
 import { SETTINGS_CARD_LIST_CLS, SETTINGS_GROUP_RADIUS } from "../settings/settings-ui";
 import { readCloudMcpRepositories, cancelCloudMcpAuth, cloudMcpAuthStatus, cloudMcpCache, cloudMcpKey, probeCloudMcp, readCloudMcp, removeCloudMcp, saveCloudMcp, startCloudMcpAuth, type CloudMcpExtension } from "./mcp-cloud-api";
+import { cloudMcpRecoverySnapshot, consumeCloudMcpRecovery, subscribeCloudMcpRecovery } from "../agent/cloud-failure-navigation";
 
 const repositoriesCache = new KeyedAsyncCache<McpProjectOption[]>(24);
 
@@ -41,11 +42,27 @@ function OrganizationMcpRow({ row, ownerKey, observedAt, busy, onEdit, onConnect
 
 export function OrganizationMcpPage({ organization, surfaceActive }: { organization: OrganizationSummary; surfaceActive: boolean }) {
   const cloudEnabled = isFeatureEnabled("cloud-workspaces");
+  const recovery = useSyncExternalStore(subscribeCloudMcpRecovery, useCallback(() => cloudMcpRecoverySnapshot(organization.id), [organization.id]));
   const [githubPlacement, setGithubPlacement] = useState<"local" | "cloud">("local");
-  const key = cloudMcpKey(organization.id, githubPlacement);
+  const key = cloudMcpKey(organization.id, recovery ? "cloud" : githubPlacement);
   const read = useRecoveringRead(cloudMcpCache, key, readCloudMcp, { enabled: surfaceActive, maxAgeMs: 30_000 });
   const repositories = useRecoveringRead(repositoriesCache, key, readCloudMcpRepositories, { enabled: surfaceActive, maxAgeMs: 30_000 });
-  const [view, setView] = useState<{ kind: "list" } | { kind: "editor"; initial: CloudMcpExtension | null; connect?: boolean }>({ kind: "list" });
+  const [view, setView] = useState<{ kind: "list"; requestId?: string } | { kind: "editor"; initial: CloudMcpExtension | null; connect?: boolean; requestId?: string }>({ kind: "list" });
+  const [missingServer, setMissingServer] = useState(false);
+  const recoveryRow = recovery ? read.data?.find(row => row.id === recovery.serverId) : undefined;
+  useEffect(() => {
+    if (!surfaceActive || !recovery || !read.data || cloudMcpRecoverySnapshot(organization.id) !== recovery) return;
+    if (view.requestId !== recovery.id || githubPlacement !== "cloud") {
+      setGithubPlacement("cloud");
+      setMissingServer(!recoveryRow);
+      setView(recoveryRow ? { kind: "editor", initial: recoveryRow, connect: true, requestId: recovery.id } : { kind: "list", requestId: recovery.id });
+      return;
+    }
+    // External-store publication is synchronous; retain the request until its
+    // destination is committed so the editor cannot remount and sign in twice.
+    consumeCloudMcpRecovery(recovery);
+  }, [surfaceActive, recovery, recoveryRow, read.data, organization.id, view.requestId, githubPlacement]);
+  const shownView = recovery && recoveryRow ? { kind: "editor" as const, initial: recoveryRow, connect: true, requestId: recovery.id } : view;
   const [busy, setBusy] = useState<string | null>(null);
   const mutating = useRef(false);
   const mounted = useRef(true);
@@ -71,15 +88,17 @@ export function OrganizationMcpPage({ organization, surfaceActive }: { organizat
   };
   return <div className="bg-bg1 flex h-full min-h-0 w-full flex-col overflow-y-auto" {...(!surfaceActive ? { inert: "" } : {})}>
     <div className="mx-auto flex w-full max-w-4xl flex-col gap-6 px-6 pt-10 pb-12">
-      {view.kind === "editor" ? <OrganizationMcpEditor key={view.initial?.id ?? "new"} initial={view.initial} organization={organization}
+      {recovery && !recoveryRow ? <p className="text-fg2 m-0 text-sm" role="status">{read.error ? "Could not load this MCP server. Reopen this page to try again." : "Opening MCP server…"}</p>
+        : shownView.kind === "editor" ? <OrganizationMcpEditor key={`${key}:${shownView.requestId ?? shownView.initial?.id ?? "new"}`} initial={shownView.initial} organization={organization}
         ownerKey={key} projects={repositories.data ?? []} projectsLoading={!repositories.data && !repositories.error}
-        servers={read.data ?? []} surfaceActive={surfaceActive} connectOnOpen={view.connect ?? false} onBack={() => { setView({ kind: "list" }); read.refresh(); }} />
+        servers={read.data ?? []} surfaceActive={surfaceActive} connectOnOpen={shownView.connect ?? false} onBack={() => { setView({ kind: "list" }); read.refresh(); }} />
         : <>
           <div className="flex items-start justify-between gap-4"><div className="flex flex-col gap-1">
             <h1 className="text-fg1 m-0 text-lg font-medium">MCP servers</h1>
             <p className="text-fg2 m-0 text-xs">Connect tools and services for {organization.name}.</p>
           </div><Button variant="default" onClick={() => setView({ kind: "editor", initial: null })}><Plus aria-hidden="true" />Add server</Button></div>
           {!read.data && <p className="text-fg3 m-0 text-sm" role="status">{read.error ? "Could not load MCP servers. Reopen this page to try again." : "Loading MCP servers…"}</p>}
+          {missingServer && <p className="text-fg2 m-0 text-sm" role="status">This MCP server is no longer available in this organization.</p>}
           {cloudEnabled && <div className="flex flex-wrap items-center gap-2" role="group" aria-label="GitHub connection for repository selection">
             <span className="text-fg2 text-xs">Repository connection</span>
             <Button variant={githubPlacement === "local" ? "secondary" : "ghost"} aria-pressed={githubPlacement === "local"} onClick={() => setGithubPlacement("local")}>On this Mac</Button>
