@@ -1,0 +1,9 @@
+{
+  "id": "mcp-native-import-durable-completion",
+  "kind": "replay",
+  "area": "renderer-settings",
+  "fixedBy": "pending",
+  "symptom": "An imported HTTP configuration is saved before its secret; a failed vault write still produces a success notification and closes the import dialog.",
+  "rule": "Complete each import only after the native credential/configuration transaction succeeds. Keep incomplete rows selected after a partial batch, retain their credential identities for retry, and reconcile a matching committed entry after a lost reply (principles 1, 4, 5 and 13).",
+  "check": "pnpm exec vitest run --maxWorkers=2 apps/desktop/src/renderer/features/agent-extensions/__tests__/mcp-import-transaction.test.ts -t 'native MCP import completion'"
+}

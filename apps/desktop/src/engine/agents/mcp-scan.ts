@@ -142,7 +142,7 @@ function serversFromMap(map: unknown): DiscoveredMcpServer[] {
   return out;
 }
 
-function scanSource(baseDir: string, def: SourceDef): DiscoveredMcpSource {
+function scanSource(baseDir: string, def: SourceDef, projects?: DiscoveredMcpSource[]): DiscoveredMcpSource {
   const filePath = path.join(baseDir, def.rel);
   const out: DiscoveredMcpSource = {
     source: def.source,
@@ -165,18 +165,20 @@ function scanSource(baseDir: string, def: SourceDef): DiscoveredMcpSource {
     // JSON tools nest under `mcpServers`; Codex TOML under `mcp_servers`.
     out.servers = serversFromMap(def.format === "json" ? doc.mcpServers : doc.mcp_servers);
     if (out.servers.some((s) => s.oauth?.requiresClientSecret)) out.warning = "An OAuth client secret was not imported. Add it in the server's OAuth settings.";
-    // Claude Code (~/.claude.json) ALSO nests LOCAL-scoped servers under
-    // projects["<abs path>"].mcpServers — surface those too (top-level wins on a
-    // name clash) so a user's project-local Claude MCP servers are importable.
-    if (def.source === "claude" && typeof doc.projects === "object" && doc.projects !== null) {
-      const seen = new Set(out.servers.map((s) => s.name));
-      for (const proj of Object.values(doc.projects as Record<string, unknown>)) {
-        const nested = (proj as { mcpServers?: unknown } | null)?.mcpServers;
-        for (const s of serversFromMap(nested)) {
-          if (seen.has(s.name)) continue;
-          seen.add(s.name);
-          out.servers.push(s);
-        }
+    // Claude's project declarations share a file, not a namespace.
+    if (def.source === "claude" && typeof doc.projects === "object" && doc.projects !== null && !Array.isArray(doc.projects)) {
+      for (const [root, project] of Object.entries(doc.projects as Record<string, unknown>)) {
+        const servers = serversFromMap((project as { mcpServers?: unknown } | null)?.mcpServers);
+        if (!servers.length) continue;
+        projects?.push({
+          source: `claude-project:${root}`,
+          label: `Claude Code (project) · ${root}`,
+          path: filePath,
+          exists: true,
+          servers,
+          ...(servers.some(server => server.oauth?.requiresClientSecret)
+            ? { warning: "An OAuth client secret was not imported. Add it in the server's OAuth settings." } : {}),
+        });
       }
     }
   } catch (err) {
@@ -213,10 +215,11 @@ export function scanNativeMcpConfigs(
   homeDir: string = os.homedir(),
   repoRoots: readonly string[] = [],
 ): DiscoveredMcpSource[] {
+  const claudeProjects: DiscoveredMcpSource[] = [];
   const home = SOURCES.map((def) =>
     def.source === "codex" && process.env.CODEX_HOME?.trim()
       ? scanSource(process.env.CODEX_HOME.trim(), { ...def, rel: "config.toml" })
-      : scanSource(homeDir, def),
+      : scanSource(homeDir, def, claudeProjects),
   );
   const codexPlugins = scanCodexPluginMcp(homeDir);
   if (codexPlugins.servers.length > 0) home.push(codexPlugins);
@@ -232,7 +235,7 @@ export function scanNativeMcpConfigs(
       if (s.exists) perRepo.push(s);
     }
   }
-  return [...home, ...perRepo];
+  return [...home, ...claudeProjects, ...perRepo];
 }
 
 /** Discover the MCP servers Codex plugins declare. One aggregated source

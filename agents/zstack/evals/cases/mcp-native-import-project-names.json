@@ -1,0 +1,9 @@
+{
+  "id": "mcp-native-import-project-names",
+  "kind": "replay",
+  "area": "desktop-agents",
+  "fixedBy": "pending",
+  "symptom": "Same-named MCP servers from different Claude projects collapse into the first discovered declaration, and selected same-named imports are silently skipped.",
+  "rule": "Discovery identity includes its project source. Keep each project declaration with a distinct label, and require an explicit unique destination name before importing conflicting selections (principles 3, 10 and 13).",
+  "check": "pnpm exec vitest run --maxWorkers=2 apps/desktop/src/engine/agents/__tests__/mcp-scan.test.ts apps/desktop/src/renderer/features/agent-extensions/__tests__/mcp-import-transaction.test.ts -t 'Claude Code project declarations|same-named Claude project servers|asks for distinct names'"
+}

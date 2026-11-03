@@ -156,7 +156,7 @@ describe("scanNativeMcpConfigs", () => {
     ]);
   });
 
-  it("surfaces Claude Code project-scoped servers (projects['<path>'].mcpServers), top-level wins", () => {
+  it("keeps Claude Code project declarations separate from the home configuration", () => {
     write(
       ".claude.json",
       JSON.stringify({
@@ -167,13 +167,38 @@ describe("scanNativeMcpConfigs", () => {
         },
       }),
     );
-    const servers = bySource(scanNativeMcpConfigs(home), "claude").servers;
-    expect(servers).toContainEqual({ name: "top", transport: "stdio", command: "top-cmd" });
-    expect(servers).toContainEqual({ name: "local", transport: "http", url: "https://local/mcp" });
-    expect(servers).toContainEqual({ name: "another", transport: "stdio", command: "b-cmd" });
-    // top-level "top" wins over the project-scoped "shadowed" (dedup by name).
-    expect(servers.filter((s) => s.name === "top")).toHaveLength(1);
-    expect(servers.find((s) => s.name === "top")).toMatchObject({ command: "top-cmd" });
+    const sources = scanNativeMcpConfigs(home);
+    expect(bySource(sources, "claude").servers).toEqual([{ name: "top", transport: "stdio", command: "top-cmd" }]);
+    expect(bySource(sources, "claude-project:/Users/x/repoA")).toMatchObject({
+      label: "Claude Code (project) · /Users/x/repoA",
+      path: path.join(home, ".claude.json"),
+      exists: true,
+      servers: [
+        { name: "local", transport: "http", url: "https://local/mcp" },
+        { name: "top", transport: "stdio", command: "shadowed" },
+      ],
+    });
+    expect(bySource(sources, "claude-project:/Users/x/repoB").servers).toEqual([{ name: "another", transport: "stdio", command: "b-cmd" }]);
+  });
+
+  it("offers same-named Claude project servers with distinct source identities and project labels", () => {
+    write(".claude.json", JSON.stringify({ projects: {
+      "/personal/repo": { mcpServers: { database: { url: "https://personal.invalid/mcp" } } },
+      "/organization/repo": { mcpServers: { database: { url: "https://organization.invalid/mcp", auth: { CLIENT_ID: "public", CLIENT_SECRET: "fixture-private" } } } },
+    } }));
+    const sources = scanNativeMcpConfigs(home, ["/organization/repo"]);
+    const projects = sources.filter(source => source.source.startsWith("claude-project:"));
+    expect(projects).toHaveLength(2);
+    expect(new Set(projects.map(source => `${source.source}::${source.servers[0].name}`)).size).toBe(2);
+    expect(projects.map(source => source.label)).toEqual([
+      "Claude Code (project) · /personal/repo", "Claude Code (project) · /organization/repo",
+    ]);
+    expect(projects.map(source => source.servers[0])).toMatchObject([
+      { name: "database", url: "https://personal.invalid/mcp" },
+      { name: "database", url: "https://organization.invalid/mcp" },
+    ]);
+    expect(projects[1].warning).toMatch(/client secret/i);
+    expect(JSON.stringify(sources)).not.toContain("fixture-private");
   });
 
   it("drops a server with neither command nor url; tolerates a missing mcpServers key", () => {
