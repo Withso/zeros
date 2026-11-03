@@ -1109,7 +1109,7 @@ printf ran > '${sentinel}'
           { cwd: repoRoot },
         )
       ).stdout.trim(),
-    ).toBe("Zeros <zeros@localhost>");
+    ).toBe("test <test@test>");
   });
 
   it.each([".zeros/design-dir.toml", ".zeros/design/design-dir.toml"])(

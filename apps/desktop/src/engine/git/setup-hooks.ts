@@ -22,7 +22,7 @@ import {
   readdir,
   readlink,
 } from "node:fs/promises";
-import { lstatSync } from "node:fs";
+import { lstatSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { GitError } from "./errors";
 // Reuse the engine's cached login-shell PATH resolver so an inline command
@@ -433,6 +433,17 @@ export async function resolveSetupCommand(opts: {
   inlineCommand?: string;
   allowAutoSetup?: boolean;
 }): Promise<string | null> {
+  const command = await resolveRepositorySetupCommand(opts);
+  if (!usesGitLfs(opts.repoRoot)) return command;
+  return command ? `${GIT_LFS_SETUP_STEP}\n${command}` : GIT_LFS_SETUP_STEP;
+}
+
+async function resolveRepositorySetupCommand(opts: {
+  repoRoot: string;
+  setupScript?: string;
+  inlineCommand?: string;
+  allowAutoSetup?: boolean;
+}): Promise<string | null> {
   if (opts.setupScript && opts.setupScript.trim()) {
     return shellQuote(path.join(opts.repoRoot, opts.setupScript));
   }
@@ -444,6 +455,30 @@ export async function resolveSetupCommand(opts: {
     if (auto) return shellQuote(path.join(opts.repoRoot, auto));
   }
   return null;
+}
+
+/** Engine Git never runs LFS filters, so a new checkout holds pointer files.
+ * Setup runs in the user's shell with their own Git and credential helpers,
+ * like a terminal; a failure or a missing git-lfs is reported, never fatal. */
+const GIT_LFS_SETUP_STEP = [
+  "if command -v git-lfs >/dev/null 2>&1; then",
+  "  git lfs pull || echo \"Zeros: git lfs pull failed. Run it in the terminal to download this repository's Git LFS files.\" >&2",
+  "else",
+  "  echo \"Zeros: this repository uses Git LFS, but git-lfs isn't installed, so large files are placeholders. Install git-lfs (for example: brew install git-lfs), then run: git lfs pull\" >&2",
+  "fi",
+].join("\n");
+
+/** Root `.gitattributes` marks LFS-tracked paths. Only a small regular file is
+ * read, so a symlink or device planted there cannot redirect or stall it. */
+function usesGitLfs(root: string): boolean {
+  try {
+    const file = path.join(root, ".gitattributes");
+    const info = lstatSync(file);
+    if (!info.isFile() || info.size > 1024 * 1024) return false;
+    return /\bfilter=lfs\b/.test(readFileSync(file, "utf8"));
+  } catch {
+    return false;
+  }
 }
 
 /** Does anything at all occupy `p`? `lstat`, NOT `existsSync`: existsSync

@@ -142,3 +142,20 @@ it("treats metacharacters as literal filenames during scoped clean", async () =>
   expect(await service.handle("git.clean", { paths: ["*.txt"], confirm: true })).toEqual({ removed: ["*.txt"] });
   expect(await readFile(join(root, "keep.txt"), "utf8")).toBe("keep");
 });
+
+it("refuses a commit of Git LFS files when this VM has no LFS clean filter, and allows it when it does", async () => {
+  const { root, scope, git } = await repositoryFixture(); const service = new GitService(scope);
+  // Simulate a Cloud Computer without git-lfs even where the host configures it.
+  for (const key of ["clean", "smudge", "process"]) await git("config", `filter.lfs.${key}`, "");
+  await git("config", "filter.lfs.required", "false");
+  await writeFile(join(root, ".gitattributes"), "*.bin filter=lfs diff=lfs merge=lfs -text\n");
+  await writeFile(join(root, "model.bin"), "binary payload\n");
+  await service.handle("git.stage", { paths: [".gitattributes", "model.bin"] });
+  const before = await git("rev-parse", "HEAD");
+  await expect(service.handle("git.commit", { message: "add model" })).rejects.toMatchObject({
+    code: "VALIDATION_FAILED", message: expect.stringMatching(/Git LFS/),
+  });
+  expect(await git("rev-parse", "HEAD")).toBe(before);
+  await git("config", "filter.lfs.clean", "cat");
+  await expect(service.handle("git.commit", { message: "add model" })).resolves.toMatchObject({ sha: expect.stringMatching(/^[a-f0-9]{40}$/) });
+});

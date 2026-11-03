@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { constants } from "node:fs";
+import { constants, lstatSync, readFileSync } from "node:fs";
 import { mkdir, open, type FileHandle } from "node:fs/promises";
 import { join } from "node:path";
 import { workerChildEnvironment } from "../drivers/shared/agent-environment";
@@ -42,6 +42,29 @@ interface SetupOptions {
   onAdmitted?(): Promise<void>;
 }
 
+/** A clone made without git-lfs holds pointer files. Fetch the real files
+ * with the VM's git-lfs when the recipe installs it; otherwise say how. */
+const GIT_LFS_SETUP_STEP = [
+  "if command -v git-lfs >/dev/null 2>&1; then",
+  "  git lfs pull || echo \"Zeros: git lfs pull failed. Run it in the terminal to download this repository's Git LFS files.\" >&2",
+  "else",
+  "  echo \"Zeros: this repository uses Git LFS, but git-lfs isn't installed on this Cloud Computer, so large files are placeholders. Add git-lfs to the Cloud Computer recipe, then run: git lfs pull\" >&2",
+  "fi",
+].join("\n");
+
+/** Only a small regular root `.gitattributes` is read, so a planted symlink or
+ * device cannot redirect or stall setup admission. */
+function usesGitLfs(checkoutPath: string): boolean {
+  try {
+    const file = join(checkoutPath, ".gitattributes");
+    const info = lstatSync(file);
+    if (!info.isFile() || info.size > 1024 * 1024) return false;
+    return /\bfilter=lfs\b/.test(readFileSync(file, "utf8"));
+  } catch {
+    return false;
+  }
+}
+
 /** Admission is durable before execution. An interrupted or failed script is
  * left for the user to inspect; worker restarts never execute it again. */
 export class WorkspaceSetup {
@@ -52,8 +75,14 @@ export class WorkspaceSetup {
 
   constructor(private readonly options: SetupOptions) {}
 
+  private script?: string;
+
   start(createdBranch: boolean): void {
-    if (this.operation || this.controller.signal.aborted || !createdBranch || !this.options.workspace.setup?.trim()) return;
+    if (this.operation || this.controller.signal.aborted || !createdBranch) return;
+    const setup = this.options.workspace.setup?.trim();
+    const lfs = usesGitLfs(this.options.workspace.checkoutPath);
+    this.script = lfs ? (setup ? `${GIT_LFS_SETUP_STEP}\n${setup}` : GIT_LFS_SETUP_STEP) : setup;
+    if (!this.script) return;
     this.running = true; this.options.activity();
     this.operation = this.execute().finally(() => { this.running = false; this.options.activity(); });
   }
@@ -93,7 +122,7 @@ export class WorkspaceSetup {
         }, SETUP_TIMEOUT_MS);
         deadline.unref();
         try {
-          code = await (this.options.runner ?? runSetup)("bash", ["-lc", workspace.setup!], {
+          code = await (this.options.runner ?? runSetup)("bash", ["-lc", this.script!], {
             cwd: workspace.checkoutPath, env: workerChildEnvironment(undefined, this.options.gitEnvironment), signal: this.controller.signal,
             output: chunk => {
               if (bytes >= MAX_LOG_BYTES) return;

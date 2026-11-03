@@ -28,6 +28,21 @@ export class GitService {
   constructor(readonly scope: WorkspaceScope, private readonly options: GitOptions = {}) { this.run = options.run ?? commandRunner(scope.root); }
   get baseBranch(): string { return this.options.baseBranch?.() ?? this.scope.workspace.baseBranch; }
 
+  /** Without git-lfs configured, Git stores LFS-tracked files whole instead
+   * of as pointers. Refuse that commit rather than bloat history; a VM whose
+   * recipe installs git-lfs commits them normally. Deletions carry no content. */
+  private async assertLfsCommitSupported(files: string[]): Promise<void> {
+    if (await this.probe(["config", "--get", "filter.lfs.clean"]) || await this.probe(["config", "--get", "filter.lfs.process"])) return;
+    const staged = (await this.git(["diff", "--cached", "--name-only", "--diff-filter=d", "-z", ...(files.length ? ["--", ...this.literal(files)] : [])], { readOnly: true }))
+      .split("\0").filter(Boolean);
+    if (!staged.length) return;
+    const fields = (await this.git(["check-attr", "-z", "filter", "--", ...this.literal(staged)], { readOnly: true })).split("\0");
+    const lfs: string[] = [];
+    for (let index = 0; index + 2 < fields.length; index += 3) if (fields[index + 2] === "lfs") lfs.push(fields[index]!);
+    if (lfs.length)
+      throw new WorkspaceError("VALIDATION_FAILED", `This commit includes Git LFS files (${lfs.slice(0, 3).join(", ")}${lfs.length > 3 ? ` and ${lfs.length - 3} more` : ""}), but git-lfs isn't set up on this Cloud Computer, so they would be stored whole. Add git-lfs to the Cloud Computer recipe, or commit them from a Local workspace.`);
+  }
+
   handle(op: string, params: Record<string, unknown>): Promise<unknown> {
     this.scope.assertId(params.workspaceId);
     for (const key of ["cwd", "folder", "repoRoot"]) if (params[key] !== undefined) this.scope.folder(params[key]);
@@ -287,6 +302,7 @@ export class GitService {
       case "git.commit": {
         const message = reqString(params, "message"), files = params.files === undefined ? [] : this.paths(params.files);
         if (files.length) await this.git(["add", "-A", "--", ...this.literal(files)]);
+        await this.assertLfsCommitSupported(files);
         await this.git(["commit", ...(params.amend === true ? ["--amend"] : []), "-F", "-", ...(files.length ? ["--only", "--", ...this.literal(files)] : [])], { input: message + "\n", timeout: 120_000 });
         return { sha: await this.head(), branch: await this.branch() };
       }
