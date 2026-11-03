@@ -16,7 +16,7 @@ afterEach(() => {
   state.refreshing = false;
 });
 
-vi.mock("../../../platform/runtime", () => ({ useNativeRuntime: () => ({ ready: true }) }));
+vi.mock("../../../platform/runtime", () => ({ useNativeRuntime: () => ({ ready: true }), onNativeBeforeQuit: () => () => {} }));
 vi.mock("../../../platform/git", () => ({ gitPush: vi.fn(), gitPull: vi.fn(), ghPrMarkReady: vi.fn(), gitErrorDescription: vi.fn() }));
 vi.mock("../../use-git-refresh-key", () => ({ triggerGitRefresh: vi.fn() }));
 vi.mock("../../../features/settings/use-git-remote", () => ({ useGitRemote: () => "origin" }));
