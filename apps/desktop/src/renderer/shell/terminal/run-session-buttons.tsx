@@ -15,6 +15,7 @@ export function RunSessionButtons({
   folderKey,
   previewUrl,
   showLabels = false,
+  compact = false,
   onOpenPreview,
   onStop,
 }: {
@@ -22,6 +23,9 @@ export function RunSessionButtons({
   folderKey?: string;
   previewUrl?: string | null;
   showLabels?: boolean;
+  /** Row actions in a session list: the 24px size of a row's trailing action
+   *  instead of the header's 28px. */
+  compact?: boolean;
   onOpenPreview(): void;
   onStop(): void;
 }) {
@@ -60,7 +64,7 @@ export function RunSessionButtons({
         <span className="inline-flex">
           <Button
             variant="secondary"
-            size="icon-sm"
+            size={compact ? "icon-compact" : "icon-sm"}
             aria-label={`Open ${title} in Browser`}
             disabled={!previewUrl}
             onClick={onOpenPreview}
@@ -85,7 +89,7 @@ export function RunSessionButtons({
       <Tooltip label={`Stop ${title}`}>
         <Button
           variant="secondary"
-          size="icon-sm"
+          size={compact ? "icon-compact" : "icon-sm"}
           aria-label={`Stop ${title}`}
           onClick={onStop}
           className={buttonClass}

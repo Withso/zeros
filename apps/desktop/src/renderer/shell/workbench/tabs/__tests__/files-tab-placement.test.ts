@@ -121,6 +121,20 @@ describe("Files tab explorer placement", () => {
     );
   });
 
+  it("shows Viewed only beside a diff and keeps a File tab on the file", () => {
+    expect(fileViewer).toMatch(
+      /hasDiff && \(diffShown \|\| \(fileEditor && editorPreferences\.diffView\)\) && \(\s*<Checkbox\b/,
+    );
+    // Only the Changes host walks on; a File tab has no onOpenPath.
+    expect(fileViewer).toMatch(/if \(onOpenPath\) advance\(\);/);
+  });
+
+  it("switches the view and the diff layout with the shared segmented control", () => {
+    expect(fileViewer).toContain('<TabsList aria-label="View">');
+    expect(fileViewer).toContain('<TabsList aria-label="Diff layout">');
+    expect(fileViewer).not.toMatch(/rounded-md p-0\.5|shadow-sm/);
+  });
+
   it("places Copy in the path cluster instead of the far-right controls", () => {
     const pathActionsStart = fileViewer.indexOf(
       'data-testid="file-path-actions"',

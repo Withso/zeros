@@ -70,11 +70,11 @@ const TREE_PADDING_INLINE = 10;
  *  switches with no re-computation. Set on the component root so they
  *  inherit into the tree's shadow root. */
 const TREE_THEME_VARS = {
-  // Folder column = workbench's --bg1 surface; hover/selected follow the
-  // bg1-surface recipes (hover → bg1-hover, selected chip → bg2-hover).
+  // Folder column = workbench's --bg1 surface; a hovered row takes bg1-hover
+  // and the selected row fills bg2-highlight, the one selected-row fill.
   "--trees-bg-override": "var(--bg1)",
   "--trees-bg-muted-override": "var(--bg1-hover)", // hovered row
-  "--trees-selected-bg-override": "var(--bg2-hover)", // selected row
+  "--trees-selected-bg-override": "var(--bg2-highlight)", // selected row
   // Symmetric 8px inset on both column edges. The lib's scroll container pads
   // `padding-inline − item-margin-x` on the left and subtracts the scrollbar
   // gutter again on the right, so the default (16 − 2 = 14px left, −6px gutter
@@ -106,6 +106,11 @@ const TREE_THEME_VARS = {
   "--trees-level-gap-override": "2px",
 } as React.CSSProperties;
 
+/** Every tree row is the standard 28px row. Passed as the library's
+ *  `itemHeight`, which keeps its default density factor (gaps and type) and
+ *  only changes the row pitch the virtualizer measures with. */
+const TREE_ITEM_HEIGHT = 28;
+
 /** Rendered size of a row's glyph — file type icons and the folder masks
  *  alike. The slot stays at the library's 16px (see the svg rule in
  *  TREE_SHADOW_CSS for why). */
@@ -123,8 +128,8 @@ const FOLDER_OPEN_MASK = `${FOLDER_OPEN_MASK_URL} center / ${FILE_ICON_SIZE}px n
 // row (padding there shortens the flex input). Both sides read these numbers:
 // TREE_SHADOW_CSS inside the shadow root and the overlay outside it.
 const SEARCH_ROW_TOP_PAD = 8;
-/** The library's default item height, pinned so the overlay can rely on it. */
-const SEARCH_ROW_INPUT_HEIGHT = 30;
+/** The row height, pinned so the overlay can rely on it. */
+const SEARCH_ROW_INPUT_HEIGHT = TREE_ITEM_HEIGHT;
 /** The input's own `margin-block`, from the shipped stylesheet. */
 const SEARCH_ROW_INPUT_MARGIN = 1;
 const SEARCH_ROW_ACCESSORY_SIZE = 24;
@@ -238,7 +243,7 @@ const TREE_SHADOW_CSS = `
      outside the shadow root, and a shadow-scoped custom property can't be read
      from out there — so both sides derive from the same constants instead, and
      a change to the library's density default can't silently drift the control
-     off the row. 30px is the library's own default item height. */
+     off the row. It is the tree's own row height. */
   [data-file-tree-search-input] {
     box-sizing: border-box;
     height: ${SEARCH_ROW_INPUT_HEIGHT}px;
@@ -493,6 +498,7 @@ export const WorkspaceFileTree = React.forwardRef<
         // the imperative bridge below.
         search: searchRef.current,
         initialExpansion: "closed" as const,
+        itemHeight: TREE_ITEM_HEIGHT,
         // One row per directory: flattening single-child chains produced rows like
         // ".context-graph » local/attachments" that read as a nonexistent directory.
         flattenEmptyDirectories: false,
@@ -920,9 +926,8 @@ export const WorkspaceFileTree = React.forwardRef<
 });
 
 // The tree owns selection and dismissal; the shared menu owns the portal,
-// keyboard navigation, live row anchor and viewport collisions.
-const TREE_MENU_ITEM_CLASS =
-  "hover:bg-bg2-hover focus:bg-bg2-hover cursor-pointer rounded-sm px-2.5";
+// keyboard navigation, live row anchor, viewport collisions and its look.
+const TREE_MENU_ITEM_CLASS = "cursor-pointer";
 
 function TreeMenu({
   active,
@@ -980,7 +985,7 @@ function TreeMenu({
       <ContextMenuContent
         data-file-tree-context-menu-root="true"
         aria-label="File actions"
-        className="border-border1 bg-bg2 min-w-[min(180px,var(--radix-context-menu-content-available-width))] rounded-lg p-1"
+        className="min-w-[min(180px,var(--radix-context-menu-content-available-width))]"
         onCloseAutoFocus={(event) => {
           event.preventDefault();
           if (open) context.restoreFocus();

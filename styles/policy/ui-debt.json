@@ -429,9 +429,6 @@
       "apps/desktop/src/renderer/shell/workbench/tabs/design-files-pane.tsx": {
         "button": 1
       },
-      "apps/desktop/src/renderer/shell/workbench/tabs/file-viewer.tsx": {
-        "button": 4
-      },
       "apps/desktop/src/renderer/shell/workbench/tabs/files-search-sidebar.tsx": {
         "input": 1
       },
@@ -449,12 +446,6 @@
       },
       "apps/desktop/src/renderer/shell/workbench/tabs/review-timeline.tsx": {
         "button": 1
-      },
-      "apps/desktop/src/renderer/shell/workbench/tabs/terminal-tab.tsx": {
-        "button": 1
-      },
-      "apps/desktop/src/renderer/shell/workbench/tabs/working-directories-panel.tsx": {
-        "button": 2
       },
       "apps/desktop/src/renderer/shell/worktree-missing-panel.tsx": {
         "button": 1
@@ -481,9 +472,6 @@
       "apps/desktop/src/renderer/shell/workbench/tabs/browser-tab.tsx": {
         "shadow-lg": 1,
         "shadow-sm": 3
-      },
-      "apps/desktop/src/renderer/shell/workbench/tabs/file-viewer.tsx": {
-        "shadow-sm": 2
       }
     },
     "text-alpha": {
@@ -506,8 +494,7 @@
         "text-fg1/70": 1
       },
       "apps/desktop/src/renderer/shell/workbench/tabs/file-viewer.tsx": {
-        "text-fg2/50": 1,
-        "text-fg2/60": 1
+        "text-fg2/50": 1
       },
       "apps/desktop/src/renderer/shell/workspace-glyph.tsx": {
         "text-fg3/25": 1

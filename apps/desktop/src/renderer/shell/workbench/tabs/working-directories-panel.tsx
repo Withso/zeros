@@ -238,30 +238,27 @@ export function WorkingDirectoriesPanel({
         {!unsupported && dirs.length > 0 && (
           <div
             data-testid="working-directories-actions"
-            className="border-border2 flex shrink-0 items-center gap-3 border-b px-3 py-2"
+            className="border-border2 flex h-9 shrink-0 items-center gap-1 border-b px-2"
           >
             {/* Frozen while a save is in flight, for the same reason `toggle`
                 is: the response overwrites `draft`, so a click here would be
                 silently discarded and then confirmed with a success toast. */}
-            <button
-              type="button"
-              className="text-fg2 hover:text-fg1 text-xs disabled:opacity-40"
+            <Button
+              variant="ghost"
               disabled={saving || draft.length === dirs.length}
               onClick={() => setDraft(dirs)}
             >
               Select all
-            </button>
-            <button
-              type="button"
-              className="text-fg2 hover:text-fg1 text-xs disabled:opacity-40"
+            </Button>
+            <Button
+              variant="ghost"
               disabled={saving || draft.every((dir) => locked.has(dir))}
               onClick={() => setDraft(dirs.filter((dir) => locked.has(dir)))}
             >
               Deselect all
-            </button>
+            </Button>
             <div className="flex-1" />
             <Button
-              size="sm"
               disabled={!dirty || saving}
               onClick={() => void save()}
             >

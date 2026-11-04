@@ -35,8 +35,9 @@ async function expectCompactRunButtons(surface, openButton, stopButton) {
     await expect(openButton.getByText("Open", { exact: true })).toBeHidden();
     await expect(openButton.getByText(":5173", { exact: true })).toBeHidden();
     await expect(stopButton.getByText("Stop", { exact: true })).toBeHidden();
-    await expect(openButton).toHaveCSS("width", "24px");
-    await expect(stopButton).toHaveCSS("width", "24px");
+    // Header and panel run controls are the header's 28px tools.
+    await expect(openButton).toHaveCSS("width", "28px");
+    await expect(stopButton).toHaveCSS("width", "28px");
     await expect(openButton).toBeEnabled();
     const surfaceBox = await surface.boundingBox();
     const openBox = await openButton.boundingBox();
@@ -131,8 +132,10 @@ export async function runTerminalWorkbenchSmoke({ page, check }) {
   const titleChip = header
     .locator("[data-terminal-title-actions] > div")
     .first();
-  await expect(titleChip).toHaveCSS("border-top-width", "1px");
-  await expect(titleChip).toHaveCSS("padding-left", "8px");
+  // The name sits on the bar as plain text, as in Files: no edge, no inset.
+  await expect(titleChip).toHaveCSS("border-top-width", "0px");
+  await expect(titleChip).toHaveCSS("padding-left", "0px");
+  await expect(titleChip).toHaveCSS("height", "28px");
   const dockBox = await header
     .getByRole("button", { name: "Move terminal to bottom panel" })
     .boundingBox();
@@ -165,7 +168,7 @@ export async function runTerminalWorkbenchSmoke({ page, check }) {
             .boundingBox()
         ).width,
     )
-    .toBe(24);
+    .toBe(28);
   await expect
     .poll(
       async () =>
@@ -175,7 +178,7 @@ export async function runTerminalWorkbenchSmoke({ page, check }) {
             .boundingBox()
         ).width,
     )
-    .toBe(24);
+    .toBe(28);
   check(
     "long terminal titles truncate without shrinking header controls",
     true,
@@ -676,10 +679,10 @@ export async function runTerminalWorkbenchSmoke({ page, check }) {
     "running header buttons follow the title with Open and Stop labels and bg1 backgrounds",
     globeBox.x - runningTitleBox.x - runningTitleBox.width === 4 &&
       stopBox.x - globeBox.x - globeBox.width === 4 &&
-      globeBox.width > 24 &&
-      stopBox.width > 24 &&
-      globeBox.height === 24 &&
-      stopBox.height === 24,
+      globeBox.width > 28 &&
+      stopBox.width > 28 &&
+      globeBox.height === 28 &&
+      stopBox.height === 28,
   );
   await page.evaluate(() =>
     window.__zerosTerminalSmoke.output(

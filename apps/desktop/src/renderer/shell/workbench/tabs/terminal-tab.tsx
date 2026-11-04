@@ -1559,16 +1559,17 @@ function SubTab({
       data-active={active}
       data-terminal-tab="true"
       className={cn(
-        "group/subtab gap-0 px-2.5",
+        // The workbench pill: 8px sides and gap, the label capped at 180px.
+        "group/subtab max-w-[180px] gap-2 px-2",
         WORKBENCH_TAB_PILL_BASE_CLS,
         active
           ? WORKBENCH_TAB_PILL_ACTIVE_CLS
           : WORKBENCH_TAB_PILL_INACTIVE_CLS,
       )}
     >
-      <CloudTerminalIndicator folder={folderKey} className="mr-1.5" />
-      {running && <RunStream size={12} className="mr-1.5" />}
-      <span className="max-w-[140px] truncate">
+      <CloudTerminalIndicator folder={folderKey} />
+      {running && <RunStream size={12} />}
+      <span className="min-w-0 truncate">
         {label}
         {exited && <span className="ml-1 opacity-70">(exited)</span>}
       </span>
@@ -1576,7 +1577,7 @@ function SubTab({
         <span
           aria-hidden
           className={cn(
-            "ml-1.5 size-1.5 shrink-0 rounded-full",
+            "size-1.5 shrink-0 rounded-full",
             dot === "running" &&
               "bg-yellow-icon ring-yellow-icon/20 ring-[3px]",
             dot === "passed" && "bg-green-primary",
@@ -1584,36 +1585,23 @@ function SubTab({
           )}
         />
       )}
+      {/* The workbench close: a 20px ✕ over a 40px fade in the pill's own
+          fill. An absolute overlay, so hover causes no layout shift; it keys
+          off the strip-driven data-hovered, not :hover (sticky-strip rule),
+          and focus-within keeps it visible for keyboard users. */}
       {onClose && (
-        <>
-          {/* Fades the label's trailing edge under the close button. An absolute
-              overlay, so hover causes no layout shift; it keys off the strip-driven
-              data-hovered, not :hover (sticky-strip rule). */}
-          <span
-            aria-hidden
-            className="from-bg2 pointer-events-none absolute inset-y-0 right-0 w-8 bg-gradient-to-l from-50% to-transparent opacity-0 transition-none group-data-[hovered=true]/subtab:opacity-100"
-          />
-          <button
-            type="button"
-            aria-label={`Close ${label}`}
+        <div className="from-bg2 pointer-events-none absolute inset-y-0 right-0 flex w-10 items-center justify-end bg-gradient-to-l from-50% to-transparent pr-1 pl-4 opacity-0 transition-none group-data-[hovered=true]/subtab:opacity-100 focus-within:opacity-100">
+          <IconButton
+            label={`Close ${label}`}
             onClick={(e) => {
               e.stopPropagation();
               onClose();
             }}
-            className={cn(
-              "absolute top-1/2 right-1 inline-flex size-4 -translate-y-1/2 items-center justify-center",
-              // Solid backing matches the selected/hovered pill so the X is never read
-              // against the label underneath; hover bumps to bg-bg2-hover for feedback.
-              "bg-bg2 text-fg2 hover:bg-bg2-hover hover:text-fg1 rounded-sm",
-              "opacity-0 transition-none group-data-[hovered=true]/subtab:opacity-100",
-              // Keyboard focus visibility — the absolute button is otherwise
-              // invisible to tab-key users since opacity:0 kills paint + a11y.
-              "focus-visible:ring-highlighted-bright focus-visible:opacity-100 focus-visible:ring-1 focus-visible:outline-none",
-            )}
+            className="pointer-events-auto shrink-0"
           >
-            <X size={10} />
-          </button>
-        </>
+            <X className="size-3.5" />
+          </IconButton>
+        </div>
       )}
     </div>
   );

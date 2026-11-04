@@ -84,7 +84,7 @@ export async function runFileEditorSmoke({ page, check = () => {} }) {
       await toggle("Diff view");
       await expect(diff()).toBeVisible();
       await expect(
-        fixture.getByRole("button", { name: "Split view", exact: true }),
+        fixture.getByRole("tab", { name: "Split view", exact: true }),
       ).toHaveCount(0);
       await expect(
         fixture.locator("[data-diffs-type=split]:visible"),
@@ -248,14 +248,14 @@ export async function runFileEditorSmoke({ page, check = () => {} }) {
         )
         .toBe("replacement\n");
       await fixture.evaluate(() => window.__fileEditor.open("notes.md"));
-      await fixture.getByRole("button", { name: "edit", exact: true }).click();
+      await fixture.getByRole("tab", { name: "Edit", exact: true }).click();
       await expect(diff()).toBeVisible();
       await prepend(diff(), "Draft notes\n");
       await fixture
-        .getByRole("button", { name: "preview", exact: true })
+        .getByRole("tab", { name: "Preview", exact: true })
         .click();
       await expect(diff()).toHaveCount(0);
-      await fixture.getByRole("button", { name: "edit", exact: true }).click();
+      await fixture.getByRole("tab", { name: "Edit", exact: true }).click();
       await expect(diff()).toContainText("Draft notes");
       await toggle("Diff view");
       await expect(source()).toContainText("Draft notes");

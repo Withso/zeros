@@ -159,13 +159,17 @@ function CommandList({
   );
 }
 
+/** A list's one message line: no results, or a source that could not load. */
+export const COMMAND_EMPTY_CLS =
+  "text-fg2 px-3 py-6 text-center text-xs leading-4.5";
+
 function CommandEmpty({
   ...props
 }: React.ComponentProps<typeof CommandPrimitive.Empty>) {
   return (
     <CommandPrimitive.Empty
       data-slot="command-empty"
-      className="py-6 text-center text-xs"
+      className={COMMAND_EMPTY_CLS}
       {...props}
     />
   );

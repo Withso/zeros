@@ -244,7 +244,7 @@ export function FileWordPreview({
             {source.media ? (
               <IconButton
                 label="Download document"
-                size="compact"
+                size="standard"
                 className={WORKBENCH_TITLE_ACTION_CLS}
                 onClick={() =>
                   void download().catch(() =>
@@ -257,7 +257,7 @@ export function FileWordPreview({
             ) : (
               <IconButton
                 label="Download document"
-                size="compact"
+                size="standard"
                 className={WORKBENCH_TITLE_ACTION_CLS}
                 asChild
                 disabled={!source.dataUrl}

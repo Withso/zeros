@@ -450,3 +450,32 @@ Each landed step appends one line: date, workstream, what landed, evidence.
   Decisions: the sent prompt keeps the board's absolute action row with a
   2px gap; the 16px working loader hangs 2px into the gutter to centre on
   the icon column; budget and Continue copy follow the boards.
+- 2026-11-04 · 4, 5 · Files (tab strip, header, tree, menus, empty
+  states): workbench and terminal pills share one recipe (8px sides and
+  gap, a 180px label cap, a 14px glyph slot, the 20px ✕ under a 40px fade);
+  only the status letter is coloured. The file title is plain text on a
+  28px row and every title action is a 28px tool, in Files, PDF, Word,
+  media and the terminal header; row actions in the terminal session list
+  stay 24px. Panel headers start text 12px in and end 4px from the edge,
+  so the 32px banner lines up beneath them; a header too narrow for one row
+  wraps its controls under the name instead of clipping. The open side
+  column's toggle is a fill with no edge. Tree rows are 28px and the
+  selected row fills bg2-highlight; the tree's menu is the shared menu.
+  Every Files empty state is the one EmptyState block. File options is one
+  28px row recipe behind an ellipsis. Viewed is the shared Checkbox and
+  shows only beside a diff; in a File tab checking it keeps the file open,
+  and the Changes host still walks to the next change. The view switch and
+  the diff layout use the shared segmented control, Discard is a 28px icon
+  button, and Copy is a 28px tool. Grouped files keep one 36px bar: the
+  stepper and side toggle ride in the file header and the group name heads
+  the side list. New-tab results are single 28px rows whose folder trims at
+  its start (TruncateStart), the menu's search row is the 36px command
+  input, and its load failure uses the list's one message line. Working
+  folders' action bar is a 36px row with Ghost Select all and Deselect all.
+  Markdown preview centres its column. Decisions: empty states keep the
+  foundation's 32px icon (the boards show 24); the working folders bar keeps
+  border2 to match the search row above it, as the board shows; the
+  new-tab menu keeps its 280px width; Markdown keeps the 14px reading size
+  of chat prose. The standalone Changes smoke cannot load its fixture here
+  (outside Vite's serving boundary on this branch too) and is not in the
+  ui-smoke registry.

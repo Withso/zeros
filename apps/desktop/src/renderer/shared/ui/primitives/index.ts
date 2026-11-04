@@ -16,6 +16,7 @@ export {
 } from "./panel-header";
 export { ListRow, type ListRowProps } from "./list-row";
 export { Pill, type PillProps } from "./pill";
+export { TruncateStart } from "./truncate-start";
 export {
   Card,
   CardHeader,

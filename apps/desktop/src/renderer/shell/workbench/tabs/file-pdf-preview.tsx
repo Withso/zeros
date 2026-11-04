@@ -145,7 +145,7 @@ export function FilePdfPreview({
               <IconButton
                 label="Toggle page thumbnails"
                 aria-pressed={sidebar}
-                size="compact"
+                size="standard"
                 className={WORKBENCH_TITLE_ACTION_CLS}
                 disabled={!document}
                 onClick={() => setSidebar((value) => !value)}
@@ -156,7 +156,7 @@ export function FilePdfPreview({
             <Tooltip label="Rotate page">
               <IconButton
                 label="Rotate page"
-                size="compact"
+                size="standard"
                 className={WORKBENCH_TITLE_ACTION_CLS}
                 disabled={!document}
                 onClick={() => setRotation((value) => (value + 90) % 360)}
@@ -168,7 +168,7 @@ export function FilePdfPreview({
               {source.media ? (
                 <IconButton
                   label="Download PDF"
-                  size="compact"
+                  size="standard"
                   className={WORKBENCH_TITLE_ACTION_CLS}
                   onClick={() =>
                     void download().catch(() =>
@@ -181,7 +181,7 @@ export function FilePdfPreview({
               ) : (
                 <IconButton
                   label="Download PDF"
-                  size="compact"
+                  size="standard"
                   className={WORKBENCH_TITLE_ACTION_CLS}
                   asChild
                   disabled={!dataUrl}

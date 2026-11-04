@@ -20,8 +20,9 @@ export interface IconButtonProps extends Omit<
    * standard inside a Toolbar or PanelHeader and inline elsewhere. */
   size?: IconButtonSize;
   /** What `aria-pressed` looks like: a neutral toggle (bg2-highlight +
-   * border4), or the active tool of a toolbar in the selection blue. */
-  pressedTone?: "toggle" | "tool";
+   * border4), a fill with no edge for the toggle of an open side column, or
+   * the active tool of a toolbar in the selection blue. */
+  pressedTone?: "toggle" | "fill" | "tool";
   asChild?: boolean;
 }
 
@@ -40,6 +41,7 @@ const SIZE_CLASSES = {
 const PRESSED_CLASSES = {
   toggle:
     "aria-pressed:border-border4 aria-pressed:bg-bg2-highlight aria-pressed:text-fg1",
+  fill: "aria-pressed:bg-bg2-highlight aria-pressed:text-fg1",
   tool: "aria-pressed:bg-(--design-selection-label-bg) aria-pressed:text-(--design-selection-label-fg) aria-pressed:hover:bg-(--design-selection-label-bg) aria-pressed:hover:text-(--design-selection-label-fg)",
 } as const;
 

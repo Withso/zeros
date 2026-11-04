@@ -30,7 +30,6 @@ import React, {
 import { createPortal } from "react-dom";
 import {
   AlignJustify,
-  Check,
   Columns2,
   FileQuestion,
   FileX2,
@@ -60,7 +59,15 @@ import { FileEditorOptions, type FileEditorControls } from "./code-editor/file-e
 import { useFileEditorPreferences } from "./code-editor/editor-preferences";
 import { parseContextAttachmentPath } from "@zeros/protocol/attachment-policy";
 import { useScrollMemory, useScrollMemoryRef } from "../../scroll-memory";
-import { Button, Tooltip } from "@/renderer/shared/ui/primitives";
+import {
+  Button,
+  Checkbox,
+  IconButton,
+  Tabs,
+  TabsList,
+  TabsTrigger,
+  Tooltip,
+} from "@/renderer/shared/ui/primitives";
 import { CodeBlockCopyButton } from "@/renderer/shared/ui/primitives/elements/code-block";
 import { toast } from "@/renderer/shared/ui/primitives/elements";
 import {
@@ -71,6 +78,7 @@ import {
 } from "../tab-status";
 import { cn } from "@/renderer/shared/ui/cn";
 import { useInstantViewSwitch } from "@/renderer/shared/ui/use-instant-view-switch";
+import { EmptyState } from "@/renderer/shared/ui/layout/empty-state";
 import { useWorkspaceDispatch } from "@/renderer/state/workspace-store";
 import { useOpenFileInWorkbench, type OpenFileOpts } from "../use-open-file";
 import type { ViewerMode } from "../tab-model";
@@ -196,6 +204,14 @@ interface FileViewerProps {
 
 const MARKDOWN_EXT = new Set(["md", "markdown", "mdx"]);
 
+/** The view switch's labels; a skill or attachment calls its source Code. */
+const VIEWER_MODE_LABEL = {
+  preview: "Preview",
+  edit: "Edit",
+  diff: "Diff",
+  code: "Code",
+} as const;
+
 function extOf(p: string): string {
   const dot = p.lastIndexOf(".");
   const slash = p.lastIndexOf("/");
@@ -225,7 +241,7 @@ function PathBreadcrumbs({ path, truncateFilename = false }: { path: string; tru
   return (
     <Tooltip label={path}>
       <div className={WORKBENCH_TITLE_CHIP_CLS}>
-        <FileTypeIcon name={path} size={13} />
+        <FileTypeIcon name={path} size={14} />
         <div className="flex min-w-0 items-center text-xs">
           {dir && (
             <>
@@ -543,10 +559,10 @@ export function FileViewer({
 
   // ── Viewed + Discard (header review actions) ──
   const viewed = !!workspaceId && !!path && isFileViewed(workspaceId, path);
-  // After marking viewed or discarding, open the next change (directional
-  // sweep). Follows the active tab in Diff mode — since the viewer IS the active
-  // File tab, the current file is "closed" by being swapped out; null → stay
-  // (nothing left to review).
+  // After discarding, or marking viewed in the Changes host, open the next
+  // change (directional sweep). Follows the active tab in Diff mode — since
+  // the viewer IS the active File tab, the current file is "closed" by being
+  // swapped out; null → stay (nothing left to review).
   const advance = useCallback(() => {
     if (!workspaceId || !path) return;
     const next = nextUnviewedPath(workspaceId, path);
@@ -586,9 +602,11 @@ export function FileViewer({
         true,
         currentFileHash(workspaceId, path),
       );
-      advance();
+      // The Changes host walks on to the next change; a File tab stays on the
+      // file it was asked to show, as unchecking already does.
+      if (onOpenPath) advance();
     }
-  }, [workspaceId, path, advance]);
+  }, [workspaceId, path, advance, onOpenPath]);
   const onDiscardConfirm = useCallback(() => {
     // A retained Changes viewer can switch paths while a dialog is open. The
     // dialog is rendered only for its captured path, and a late confirm can
@@ -695,8 +713,10 @@ export function FileViewer({
     <div
       data-testid="files-viewer-header"
       className={cn(
-        "bg-bg1 flex h-9 shrink-0 items-center justify-between gap-2 px-2",
-        headerContainer && "h-full",
+        "bg-bg1 flex min-h-9 shrink-0 items-center justify-between gap-x-2 gap-y-1 py-0.5 pr-1 pl-3",
+        // In a pane too narrow for one row the controls wrap under the name
+        // instead of clipping; a host's fixed toolbar keeps one row.
+        headerContainer ? "h-full" : "flex-wrap",
         headerBorder && "border-border1 border-b",
       )}
     >
@@ -716,32 +736,22 @@ export function FileViewer({
           )}
         </div>
       </Inline>
-      <Inline gap={1} align="center" className="shrink-0">
+      <Inline gap={1} align="center" className="ml-auto shrink-0">
         {isGitConflict && !sourceShown && (
           <Button variant="ghost" onClick={() => onViewerModeChange?.("edit")}>
             Resolve conflicts
           </Button>
         )}
-        {/* Viewed — when the file has changes. Dims its Changes-list row and
-          auto-advances to the next change (D3). */}
-        {hasDiff && (
-          <Tooltip label={viewed ? "Mark unviewed" : "Mark viewed"}>
-            <button
-              type="button"
-              onClick={toggleViewed}
-              className="text-fg2 hover:text-fg1 flex items-center gap-1.5 rounded-sm px-1.5 py-0.5 text-xs transition-colors"
-            >
-              <span
-                className={cn(
-                  "flex size-3.5 items-center justify-center rounded-sm border transition-colors",
-                  viewed ? "border-fg2 bg-fg2 text-bg1" : "border-border3",
-                )}
-              >
-                {viewed && <Check className="size-2.5" strokeWidth={3} />}
-              </span>
-              Viewed
-            </button>
-          </Tooltip>
+        {/* Viewed — only while a diff is on screen, the one place a file is
+          reviewed. Dims its Changes-list row; the Changes host then moves on
+          to the next change, a File tab stays on the file. */}
+        {hasDiff && (diffShown || (fileEditor && editorPreferences.diffView)) && (
+          <Checkbox
+            checked={viewed}
+            onChange={toggleViewed}
+            label="Viewed"
+            className="text-fg2 hover:text-fg1 h-7 shrink-0 items-center rounded-md px-1.5 [&>span[aria-hidden]]:mt-0"
+          />
         )}
         {/* Discard — ONLY when opened from the All-changes filter on a file
           with uncommitted work (discardable) and a writable target. */}
@@ -749,64 +759,54 @@ export function FileViewer({
           <Tooltip
             label={isNewFile ? "Delete file" : "Discard changes"}
           >
-            <button
-              type="button"
+            <IconButton
+              size="standard"
+              label={isNewFile ? "Delete file" : "Discard changes"}
               onClick={() => setDiscardTarget(path)}
               disabled={discardingPath === path}
               aria-busy={discardingPath === path}
-              className="text-fg2 hover:bg-bg2-hover hover:text-fg1 flex size-6 items-center justify-center rounded-sm transition-colors disabled:cursor-wait disabled:opacity-50"
             >
-              <Undo2 className="size-3.5" />
-            </button>
+              <Undo2 />
+            </IconButton>
           </Tooltip>
         )}
         {/* Unified ⇄ split — only in Diff mode. */}
         {diffShown && !fileEditor && (
-          <div className="bg-bg2 flex items-center rounded-md p-0.5">
-            {(
-              [
-                ["unified", AlignJustify],
-                ["split", Columns2],
-              ] as const
-            ).map(([s, Icon]) => (
-              <Tooltip
-                key={s}
-                label={s === "unified" ? "Unified view" : "Split view"}
-              >
-                <button
-                  type="button"
-                  onClick={() => setDiffStyle(s)}
-                  className={cn(
-                    "flex items-center rounded-sm p-1 transition-colors",
-                    diffStyle === s
-                      ? "bg-bg1 text-fg1 shadow-sm"
-                      : "text-fg2 hover:text-fg1",
-                  )}
-                >
-                  <Icon className="size-3.5" />
-                </button>
-              </Tooltip>
-            ))}
-          </div>
+          <Tabs
+            value={diffStyle}
+            onValueChange={(value) => setDiffStyle(value as typeof diffStyle)}
+          >
+            <TabsList aria-label="Diff layout">
+              {(
+                [
+                  ["unified", AlignJustify, "Unified view"],
+                  ["split", Columns2, "Split view"],
+                ] as const
+              ).map(([style, Icon, label]) => (
+                <Tooltip key={style} label={label}>
+                  <TabsTrigger value={style} aria-label={label} className="w-6 px-0">
+                    <Icon />
+                  </TabsTrigger>
+                </Tooltip>
+              ))}
+            </TabsList>
+          </Tabs>
         )}
         {showToggle && (
-          <div className="bg-bg2 flex items-center rounded-md p-0.5 text-xs">
-            {modeOptions.map((v) => (
-              <button
-                key={v}
-                type="button"
-                onClick={() => onViewerModeChange?.(v)}
-                className={cn(
-                  "rounded-sm px-2 py-0.5 capitalize transition-colors",
-                  mode === v
-                    ? "bg-bg1 text-fg1 shadow-sm"
-                    : "text-fg2 hover:text-fg1",
-                )}
-              >
-                {v === "edit" && (skillSource || parseContextAttachmentPath(path)) ? "Code" : v}
-              </button>
-            ))}
-          </div>
+          <Tabs
+            value={mode}
+            onValueChange={(value) => onViewerModeChange?.(value as ViewerMode)}
+          >
+            <TabsList aria-label="View">
+              {modeOptions.map((v) => (
+                <TabsTrigger key={v} value={v}>
+                  {VIEWER_MODE_LABEL[
+                    v === "edit" && (skillSource || parseContextAttachmentPath(path)) ? "code" : v
+                  ]}
+                </TabsTrigger>
+              ))}
+            </TabsList>
+          </Tabs>
         )}
         {fileEditor && isText && !sourceReadOnly && (
           <FileEditorOptions key={editorKey} active={active}
@@ -1054,11 +1054,12 @@ function ReadOnlySource({
 
 // ── Markdown preview ───────────────────────────────────────
 
+/** A centred reading column; prose keeps the chat's 14px reading size. */
 export function MarkdownPreview({ html }: { html: string }) {
   return (
     <div
       className={cn(
-        "text-fg1 max-w-3xl min-w-0 select-text text-sm leading-relaxed wrap-anywhere",
+        "text-fg1 mx-auto max-w-3xl min-w-0 select-text text-sm leading-relaxed wrap-anywhere",
         "[&_h1]:mt-6 [&_h1]:mb-3 [&_h1]:text-xl [&_h1]:font-semibold first:[&_h1]:mt-0",
         "[&_h2]:mt-6 [&_h2]:mb-2 [&_h2]:text-lg [&_h2]:font-semibold",
         "[&_h3]:mt-4 [&_h3]:mb-2 [&_h3]:text-base [&_h3]:font-semibold",
@@ -1084,6 +1085,7 @@ export function MarkdownPreview({ html }: { html: string }) {
 
 // ── Shared placeholder ─────────────────────────────────────
 
+/** Couldn't load, No preview and the rest: the one shared empty state. */
 function Placeholder({
   Icon,
   text,
@@ -1091,10 +1093,5 @@ function Placeholder({
   Icon: React.ComponentType<{ className?: string }>;
   text: string;
 }) {
-  return (
-    <div className="flex h-full flex-col items-center justify-center gap-2 px-8 text-center">
-      <Icon className="text-fg2/60 size-6" />
-      <p className="text-fg2 m-0 text-xs">{text}</p>
-    </div>
-  );
+  return <EmptyState icon={Icon}>{text}</EmptyState>;
 }

@@ -57,6 +57,12 @@ describe("IconButton states", () => {
     expect(tool).toContain("aria-pressed:text-(--design-selection-label-fg)");
   });
 
+  it("fills an open side column's toggle without an edge", () => {
+    const fill = classes(render({ pressedTone: "fill" }));
+    expect(fill).toContain("aria-pressed:bg-bg2-highlight");
+    expect([...fill].some((cls) => cls.startsWith("aria-pressed:border"))).toBe(false);
+  });
+
   it("holds the hover look while its menu is open", () => {
     expect(classes(render({}))).toContain("data-[state=open]:bg-bg2-highlight");
   });

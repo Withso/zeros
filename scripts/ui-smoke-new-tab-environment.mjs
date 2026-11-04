@@ -27,7 +27,7 @@ export async function runNewTabEnvironmentSmoke({ page, check }) {
   await expect(menu).toHaveCSS("border-top-left-radius", "12px");
   await expect(menu.locator('[data-slot="command-input-wrapper"]')).toHaveCSS(
     "height",
-    "40px",
+    "36px",
   );
   await expect
     .poll(async () => {

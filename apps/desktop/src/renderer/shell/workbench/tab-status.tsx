@@ -1,3 +1,4 @@
+import { EmptyState } from "@/renderer/shared/ui/layout/empty-state";
 import React, {
   createContext,
   useCallback,
@@ -54,17 +55,10 @@ function WorkbenchEmptyStateContent({
   message?: string;
 }) {
   const adapter = WORKBENCH_STATUS_ADAPTERS[type];
-  const Icon = adapter.icon;
   return (
-    <div
-      data-workbench-empty=""
-      className="flex h-full min-h-0 flex-1 flex-col items-center justify-center gap-2 px-6 text-center"
-    >
-      <Icon className="text-fg3 size-8" strokeWidth={1.25} aria-hidden />
-      <p className="text-fg2 m-0 text-xs leading-4.5">
-        {message ?? adapter.empty.retryable}
-      </p>
-    </div>
+    <EmptyState icon={adapter.icon} data-workbench-empty="">
+      {message ?? adapter.empty.retryable}
+    </EmptyState>
   );
 }
 

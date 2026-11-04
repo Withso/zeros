@@ -171,11 +171,9 @@ export function TerminalWorkbenchLayout({
                   : "Show terminal sidebar"
               }
               aria-pressed={sidebarVisible}
+              pressedTone="fill"
               onClick={onToggleSidebar}
-              className={cn(
-                WORKBENCH_TITLE_ACTION_CLS,
-                sidebarVisible && "bg-bg2 text-fg1",
-              )}
+              className={WORKBENCH_TITLE_ACTION_CLS}
             >
               <ListTree
                 className={cn(
@@ -342,6 +340,7 @@ export function TerminalWorkbenchLayout({
                         >
                           {entry.runActionId && entry.running ? (
                             <RunSessionButtons
+                              compact
                               folderKey={folder}
                               title={entry.title}
                               previewUrl={entry.previewUrl}
@@ -379,11 +378,13 @@ export function TerminalWorkbenchLayout({
                       )}
                       {entry.closable && (
                         <IconButton
-                          size="standard"
+                          size="compact"
                           label={`Close ${entry.title}`}
                           onClick={() => onClose(entry.id)}
                           className={cn(
-                            WORKBENCH_TITLE_ACTION_CLS,
+                            // A 14px glyph, so it takes the dock marker's
+                            // exact slot when the row is hovered.
+                            "[&_svg]:size-3.5",
                             "pointer-events-none absolute top-0.5 right-1 opacity-0 group-hover/terminal:pointer-events-auto group-hover/terminal:opacity-100 group-has-focus-visible/terminal:pointer-events-auto group-has-focus-visible/terminal:opacity-100",
                           )}
                         >

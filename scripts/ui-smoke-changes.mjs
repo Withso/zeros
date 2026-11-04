@@ -253,13 +253,13 @@ try {
     node.scrollTop = 0;
   });
   await expect(
-    page.getByRole("button", { name: "Diff", exact: true }),
+    page.getByRole("tab", { name: "Diff", exact: true }),
   ).toHaveCount(0);
   await expect(
-    page.getByRole("button", { name: "Preview", exact: true }),
+    page.getByRole("tab", { name: "Preview", exact: true }),
   ).toHaveCount(0);
   await expect(
-    page.getByRole("button", { name: "Edit", exact: true }),
+    page.getByRole("tab", { name: "Edit", exact: true }),
   ).toHaveCount(0);
   const hiddenContext = page.getByText(/unmodified lines/).first();
   await expect(hiddenContext).toBeVisible();

@@ -177,7 +177,7 @@ export function FileMediaPreview({
             <Tooltip label={copyLabel}>
               <IconButton
                 label={copyLabel}
-                size="compact"
+                size="standard"
                 className={WORKBENCH_TITLE_ACTION_CLS}
                 disabled={
                   !ready || (!!copying && !copying.signal.aborted) || !visible
@@ -188,7 +188,7 @@ export function FileMediaPreview({
               </IconButton>
             </Tooltip>
             {kind === "video" ? <DropdownMenu>
-              <DropdownMenuTrigger asChild><IconButton label="Video actions" size="compact" className={WORKBENCH_TITLE_ACTION_CLS}><MoreHorizontal className="size-3.5" /></IconButton></DropdownMenuTrigger>
+              <DropdownMenuTrigger asChild><IconButton label="Video actions" size="standard" className={WORKBENCH_TITLE_ACTION_CLS}><MoreHorizontal className="size-3.5" /></IconButton></DropdownMenuTrigger>
               <DropdownMenuContent align="start">
                 {lease ? <DropdownMenuItem onSelect={() => { void lease.download(path.split("/").pop() ?? path).catch(() => toast.error("Couldn't download this file.")); }}><Download className="size-3.5" />Download</DropdownMenuItem>
                   : <DropdownMenuItem asChild disabled={!source}><a href={source} download={path.split("/").pop()}><Download className="size-3.5" />Download</a></DropdownMenuItem>}
@@ -197,12 +197,12 @@ export function FileMediaPreview({
             </DropdownMenu> : <Tooltip label={downloadLabel}>
               {lease ? <IconButton
                 label={downloadLabel}
-                size="compact"
+                size="standard"
                 className={WORKBENCH_TITLE_ACTION_CLS}
                 onClick={() => { void lease.download(path.split("/").pop() ?? path).catch(() => toast.error("Couldn't download this file.")); }}
               ><Download className="size-3.5" /></IconButton> : <IconButton
                 label={downloadLabel}
-                size="compact"
+                size="standard"
                 className={WORKBENCH_TITLE_ACTION_CLS}
                 asChild
                 disabled={!source}

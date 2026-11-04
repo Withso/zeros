@@ -1,5 +1,5 @@
 import { useEffect, useId, useState } from "react";
-import { Save, SlidersHorizontal, Undo2 } from "lucide-react";
+import { Ellipsis, Save, Undo2 } from "lucide-react";
 import {
   Button,
   Kbd,
@@ -44,18 +44,20 @@ export function FileEditorOptions({
   return (
     <Popover open={active && open} onOpenChange={setOpen}>
       <PopoverTrigger asChild>
-        <IconButton label="File options" size="compact" disabled={!active}>
-          <SlidersHorizontal className="size-3.5" />
+        <IconButton label="File options" size="standard" disabled={!active}>
+          <Ellipsis />
         </IconButton>
       </PopoverTrigger>
+      {/* The menu recipe: a 4px inset and 28px rows with 8px corners, the
+          actions and the switches on one left edge. */}
       <PopoverContent
         align="end"
-        className="w-60 p-1.5"
+        className="w-60 p-1"
         aria-label="File options"
       >
         <Button
           variant="ghost"
-          className="w-full justify-start font-normal"
+          className="h-auto min-h-7 w-full justify-start gap-2 rounded-lg px-2 font-normal"
           disabled={!controls?.canSave}
           onClick={() => {
             controls?.save();
@@ -68,7 +70,7 @@ export function FileEditorOptions({
         </Button>
         <Button
           variant="ghost"
-          className="w-full justify-start font-normal"
+          className="h-auto min-h-7 w-full justify-start gap-2 rounded-lg px-2 font-normal"
           disabled={!controls?.canDiscard}
           onClick={() => {
             controls?.discard();
@@ -78,10 +80,10 @@ export function FileEditorOptions({
           <Undo2 className="size-3.5" />
           Discard changes
         </Button>
-        <Separator className="my-1.5" />
+        <Separator className="-mx-1 my-1 w-auto" />
         <label
           htmlFor={`${id}-diff`}
-          className="text-fg2 flex min-h-8 cursor-pointer items-center justify-between gap-4 px-2 py-1 text-xs"
+          className="text-fg1 flex min-h-7 cursor-pointer items-center justify-between gap-4 rounded-lg px-2 py-1 text-xs leading-4.5"
         >
           Diff view
           <Switch
@@ -96,7 +98,7 @@ export function FileEditorOptions({
         </label>
         <label
           htmlFor={`${id}-auto`}
-          className="text-fg2 flex min-h-8 cursor-pointer items-center justify-between gap-4 px-2 py-1 text-xs"
+          className="text-fg1 flex min-h-7 cursor-pointer items-center justify-between gap-4 rounded-lg px-2 py-1 text-xs leading-4.5"
         >
           Auto save
           <Switch
