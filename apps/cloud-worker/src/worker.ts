@@ -261,6 +261,13 @@ export class CloudWorker {
     if (this.options.workspaceId && config.workspace.id !== this.options.workspaceId) throw new Error("Workspace identity changed.");
     const scope = new WorkspaceScope(config.workspace);
     if (this.scope && (this.scope.key !== scope.key || this.scope.root !== scope.root || this.scope.workspace.repository !== scope.workspace.repository)) throw new Error("Workspace identity changed.");
+    if (this.reviews && !this.stopping) {
+      this.reviews.validateConfiguration(config.codeReview);
+      if (this.agents!.fenceReviewConfiguration(config.codeReview)) {
+        this.reviews.suspend();
+        this.workspaceMcp.revoke();
+      }
+    }
     if (this.configurationRevision !== revision) { this.tokens.invalidate(); this.githubCredentials.invalidate(); }
     await configureGitIdentity(this.options.homeDirectory ?? homedir(), config.gitIdentity);
     if (!this.scope) {

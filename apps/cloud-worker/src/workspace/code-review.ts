@@ -59,11 +59,17 @@ export class WorkerCodeReview {
 
   get enabled(): boolean { return !this.closed && !!this.actor && !!this.store; }
 
-  async configure(user?: ReviewUser): Promise<void> {
+  validateConfiguration(user?: ReviewUser): void {
     if (this.closed) throw new WorkspaceError("WORKSPACE_UNAVAILABLE", "The workspace is stopping.");
-    if (!user) { this.actor = undefined; return; }
-    if (this.userId && this.userId !== user.userId)
+    if (user && this.userId && this.userId !== user.userId)
       throw new CodeReviewError("CODE_REVIEW_AUTHORITY_REJECTED", "The review workspace identity changed.");
+  }
+
+  suspend(): void { this.actor = undefined; }
+
+  async configure(user?: ReviewUser): Promise<void> {
+    this.validateConfiguration(user);
+    if (!user) { this.suspend(); return; }
     const actor = codeReviewHumanActorCore(user.userId, hash, user.userName);
     if (!this.db) {
       await mkdir(this.directory, { recursive: true, mode: 0o700 });

@@ -59,6 +59,7 @@ export class Agents {
   private readonly routes = new Map<string, Runtime>();
   private readonly chats = new Map<string, Runtime>();
   private config: WorkerConfig;
+  private reviewConfig: WorkerConfig["codeReview"];
   private reviewConfiguration = 0;
   private readonly models: CodexModelAvailability;
   private outboxDispatch?: (entry: InboxEntry) => Promise<boolean>;
@@ -75,13 +76,17 @@ export class Agents {
     modelDiscovery?: ModelDiscoveryOptions,
     private readonly mcpProviders?: (executionId: string) => Promise<DriverMcpServers>,
     private readonly workspaceToolFactory?: WorkspaceToolFactory,
-  ) { this.config = config; this.models = new CodexModelAvailability(modelDiscovery); this.models.configure(config); this.turns = new TurnService(store, scope); }
+  ) { this.config = config; this.reviewConfig = config.codeReview; this.models = new CodexModelAvailability(modelDiscovery); this.models.configure(config); this.turns = new TurnService(store, scope); }
 
+  fenceReviewConfiguration(review: WorkerConfig["codeReview"]): boolean {
+    if (JSON.stringify(this.reviewConfig) === JSON.stringify(review)) return false;
+    this.reviewConfig = review;
+    this.reviewConfiguration++;
+    for (const route of this.routes.values()) void this.retireWorkspaceTools(route);
+    return true;
+  }
   configure(config: WorkerConfig): void {
-    if (JSON.stringify(this.config.codeReview) !== JSON.stringify(config.codeReview)) {
-      this.reviewConfiguration++;
-      for (const route of this.routes.values()) void this.retireWorkspaceTools(route);
-    }
+    this.fenceReviewConfiguration(config.codeReview);
     this.config = config; this.models.configure(config);
   }
   mcpFailure(executionId: string, cloud: CloudMcpFailure): void {

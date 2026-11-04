@@ -126,6 +126,31 @@ describe("cloud private review comments", () => {
     } finally { release(); await opening; }
   });
 
+  it("fences pending review admission before a disabling configuration waits on other services", async () => {
+    const f = await fixture();
+    let releaseAdmission!: () => void, releaseConfig!: () => void, waiting = false, configuring = false, admitted = false;
+    const admission = new Promise<void>(resolve => { releaseAdmission = resolve; });
+    const configuration = new Promise<void>(resolve => { releaseConfig = resolve; });
+    const admit = WorkspaceToolsMcp.prototype.admit, configure = WorkspaceService.prototype.configure;
+    vi.spyOn(WorkspaceToolsMcp.prototype, "admit").mockImplementationOnce(async function (this: WorkspaceToolsMcp, ...args) {
+      waiting = true; await admission; const grant = await admit.apply(this, args); admitted = true; return grant;
+    });
+    vi.spyOn(WorkspaceService.prototype, "configure").mockImplementationOnce(async function (this: WorkspaceService, ...args) {
+      configuring = true; await configuration; return configure.apply(this, args);
+    });
+    const message = browserFrame("AGENT_NEW_SESSION", { agentId: "codex", chatId: "review-config-pending", cwd: f.root, workspaceId: WORKSPACE_ID });
+    const opening = f.relay.request(CLIENT_A, message);
+    await expect.poll(() => waiting).toBe(true);
+    const { codeReview: _review, ...disabled } = f.configuration;
+    const changing = f.relay.receive({ ...disabled, loginRevision: "1" });
+    try {
+      await expect.poll(() => configuring).toBe(true);
+      releaseAdmission(); await opening;
+      expect(admitted).toBe(false);
+      expect(f.relay.response(message.id)?.type).toBe("AGENT_ERROR");
+    } finally { releaseAdmission(); releaseConfig(); await Promise.allSettled([opening, changing]); }
+  });
+
   it("closes the store before Stop acknowledgement and restores anchors, replies, versions and receipts through the real encrypted checkpoint", async () => {
     const f = await fixture(), closed = vi.spyOn(WorkerCodeReview.prototype, "close");
     await execute("git", ["add", "example.ts"], { cwd: f.root });
