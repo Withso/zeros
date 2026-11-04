@@ -1,0 +1,9 @@
+{
+  "id": "cloud-legacy-computer-fresh-admission",
+  "kind": "replay",
+  "area": "control-plane",
+  "fixedBy": "pr:821",
+  "symptom": "Organizations with an unverified legacy Cloud Computer could neither create workspaces nor save or build their recipe, despite fresh builds using a clean stock snapshot.",
+  "rule": "zstack principles 3, 10 and 13: treat legacy provenance only as an editable draft for explicit current-authority admission into a new build; active-build targets count as verified only under source policy v2. Retain verified IDs and refuse all historical log, workspace and automatic-refresh backfills. Exercise every manual entry point through the real database and the desktop admission gate.",
+  "check": "pnpm test:control-plane src/cloud/computer-source-provenance.integration.test.ts src/cloud/creation.integration.test.ts src/cloud/routes.test.ts --maxWorkers=2"
+}

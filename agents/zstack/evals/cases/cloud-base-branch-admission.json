@@ -1,0 +1,9 @@
+{
+  "id": "cloud-base-branch-admission",
+  "kind": "replay",
+  "area": "control-plane",
+  "fixedBy": "pr:821",
+  "symptom": "A nonexistent workspace base branch was accepted and allocated a VM that never became usable; commit lookup could also accept a tag as a branch.",
+  "rule": "zstack principles 1, 2 and 13: verify the exact branch using the creator’s current connection and pinned repository ID before workspace persistence; recheck credential generation after I/O and preserve transient errors rather than reporting a missing branch.",
+  "check": "pnpm test:control-plane src/cloud/routes.test.ts src/cloud/creation.integration.test.ts src/cloud/github-composition.integration.test.ts --maxWorkers=2"
+}

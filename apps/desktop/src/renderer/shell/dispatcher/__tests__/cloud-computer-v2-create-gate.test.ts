@@ -3,6 +3,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { CloudComputerRepository } from "../../../features/settings/cloud-computer-v2-create-gate";
 import { computerOrg, computerRepository, computerUser } from "./cloud-computer-fixtures";
+import { ControlPlaneError } from "../../../features/team/control-plane";
 
 vi.mock("react", async original => ({ ...await original<typeof import("react")>(), useLayoutEffect: () => {} }));
 
@@ -89,6 +90,24 @@ describe("cloud create admission", () => {
     expect(gate.required).toBe(true);
     const html = renderToStaticMarkup(createElement(CloudComputerV2CreateNotice, { required: true, canManage: gate.canManage, warm: gate.warm }));
     expect(html).toContain("Open Cloud Computer settings");
+  });
+  it.each(["admin", "member"])("shows the server's legacy rebuild guidance to %s while retaining the exact-key snapshot", role => {
+    state.organizationRole = role;
+    const message = role === "admin" ? "Rebuild the Cloud Computer in Settings → Cloud Computer before creating a workspace."
+      : "Ask an organization admin to rebuild the Cloud Computer in Settings → Cloud Computer before creating a workspace.";
+    state.error = new ControlPlaneError(409, "cloud_computer_rebuild_required", message);
+    for (const repositories of [undefined, null, [computerRepository("example", "project")]]) {
+      state.repositories = repositories;
+      const gate = readGate();
+      expect(gate).toMatchObject({ reason: message, required: true, checking: false });
+      expect(gate.repositories).toBe(repositories);
+      const html = renderToStaticMarkup(createElement(CloudComputerV2CreateNotice, { ...gate, reason: gate.reason }));
+      expect(html).toContain(message);
+      expect(html).not.toContain("Build your Cloud Computer first");
+      expect(html.includes("Open Cloud Computer settings")).toBe(role === "admin");
+    }
+    state.personal = true;
+    expect(readGate()).toMatchObject({ required: false, reason: null, enabled: false });
   });
   it("directs members to an admin and follows a current demotion", () => {
     expect(readGate().canManage).toBe(true);

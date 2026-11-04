@@ -1,0 +1,9 @@
+{
+  "id": "cloud-checkout-failure-after-hello",
+  "kind": "replay",
+  "area": "control-plane",
+  "fixedBy": "pr:821",
+  "symptom": "Worker hello marked a workspace running before checkout, so a checkout failure left the catalog healthy while ENGINE_READY never arrived.",
+  "rule": "zstack principles 1, 5, 11 and 13: report the bounded checkout failure through the worker’s current boot credential, atomically fence it against newer lifecycle work, retain the first failure across lost-response retries and preserve files. Keep the report compatible with older control planes.",
+  "check": "pnpm --dir apps/cloud-worker test src/workspace/__tests__/wire.test.ts src/__tests__/hybrid-transport.test.ts --maxWorkers=2 && pnpm test:control-plane src/cloud/worker-routes.test.ts src/cloud/store.integration.test.ts src/cloud/lifecycle.test.ts --maxWorkers=2"
+}

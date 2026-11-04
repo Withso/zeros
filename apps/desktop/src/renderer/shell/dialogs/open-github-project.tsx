@@ -222,7 +222,7 @@ function ScopedOpenGithubProjectDialog({
         </DialogHeader>
         <DialogBody className="gap-5">
           {cloudReason && (computer.required
-            ? <CloudComputerV2CreateNotice required canManage={computer.canManage} warm={computer.warm} onOpenSettings={() => onOpenChange(false)} />
+            ? <CloudComputerV2CreateNotice required reason={computer.reason} canManage={computer.canManage} warm={computer.warm} onOpenSettings={() => onOpenChange(false)} />
             : <p className="text-fg2 text-xs" role="status">{cloudReason}</p>)}
           {cloud && me && organization && <CloudRepositoryPicker userId={me.user.id} organizationId={organization.id}
             active={open} disabled={busy} value={repositories} onManageConnections={() => onOpenChange(false)} onChange={selected => {

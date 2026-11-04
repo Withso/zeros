@@ -29,6 +29,7 @@ export class HybridTransport implements Transport {
   private recovering?: Promise<void>;
   private recoverRequested = false;
   private bootstrapped = false;
+  private checkoutFailed = false;
   private initialControls = 0;
   private releaseInitial!: () => void;
   private readonly initial = new Promise<void>(resolve => { this.releaseInitial = resolve; });
@@ -120,6 +121,17 @@ export class HybridTransport implements Transport {
     const reply = await this.request("github-checkout", input);
     if (reply.sequence !== input.sequence) throw new Error("Invalid GitHub checkout acknowledgement.");
   }
+  async reportCheckoutFailure(): Promise<void> {
+    this.checkoutFailed = true;
+    try {
+      const reply = await this.request("checkout-failed", {});
+      if (reply.ok !== true) throw new Error("Invalid checkout failure acknowledgement.");
+    } catch (error) {
+      if (error instanceof HttpFailure && error.status === 404) { this.checkoutFailed = false; return; }
+      throw error;
+    }
+    this.options.onStatus?.("stopped");
+  }
   reportTiming(record: CloudV2WorkerTiming): void {
     if (this.stopped || !this.registered || this.reportedTimings.has(record.phase)) return;
     const parsed = CloudV2WorkerTimingSchema.safeParse(record);
@@ -152,6 +164,10 @@ export class HybridTransport implements Transport {
     if (this.stopped) return;
     if (this.recovering) { this.recoverRequested = true; return; }
     this.recovering = (async () => {
+      if (this.checkoutFailed) {
+        await this.reportCheckoutFailure();
+        if (this.checkoutFailed) return;
+      }
       if (!this.listening) {
         await this.listener.start(async frame => {
           // Hello marks the VM running before its HTTP response reaches us.

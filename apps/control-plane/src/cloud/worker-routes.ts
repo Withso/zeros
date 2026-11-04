@@ -13,7 +13,7 @@ import type { CloudSourceContinuation, CloudSourceProof } from "./source-authori
 export const CLOUD_V2_WORKER_API = "/v2/cloud/worker";
 type ConfigFrame = Extract<CloudV2ControlFrame, { t: "config" }>;
 export type CloudV2WorkerRouteDeps = {
-  store: Pick<CloudV2Store, "acceptWorkerHello" | "workerSession" | "accessEpoch" | "loginRevision" | "markActive" | "writeWorkerHistory"> & Partial<Pick<CloudV2Store, "prompts">>;
+  store: Pick<CloudV2Store, "acceptWorkerHello" | "workerSession" | "accessEpoch" | "loginRevision" | "markActive" | "writeWorkerHistory" | "failWorkerCheckout"> & Partial<Pick<CloudV2Store, "prompts">>;
   runtimeSha256: string;
   promptOutbox?: boolean;
   timing?: (record: CloudV2TimingRecord) => void;
@@ -105,6 +105,12 @@ export function createCloudV2WorkerRoutes(deps: CloudV2WorkerRouteDeps): Hono {
     if (phases.has(record.phase)) return c.json({ ok: true });
     phases.add(record.phase);
     emitCloudV2Timing(deps.timing, { workspaceId: auth.workspace.id.slice(0, 8), ...record });
+    return c.json({ ok: true });
+  });
+  app.post(`${CLOUD_V2_WORKER_API}/checkout-failed`, async c => {
+    const auth = await session(c, deps, false);
+    await body(c, z.object({}).strict());
+    if (!await deps.store.failWorkerCheckout(auth.token, auth.bootId)) throw unauthorized();
     return c.json({ ok: true });
   });
   app.post(`${CLOUD_V2_WORKER_API}/history`, async c => {

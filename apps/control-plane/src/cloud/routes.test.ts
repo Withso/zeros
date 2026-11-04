@@ -17,6 +17,8 @@ function fixture(repositories: { repository: string; defaultBranch: string | nul
   const authorizeBuildRepository = vi.fn(async (_org: string, _user: string, _build: string, repository: string) => ({ repository, repositoryId: "42" }));
   const sourceRepositoryId = vi.fn(async () => "99");
   const requireAdmin = vi.fn(async (): Promise<void> => { throw new HttpError(403, "forbidden", "Requires an owner or admin"); });
+  const overview = vi.fn(async () => ({ activeBuildId: null as string | null }));
+  const remoteHead = vi.fn<NonNullable<CloudV2RouteDeps["remoteHead"]>>(async () => "a".repeat(40));
   const log = vi.fn(async () => "source-derived-log-canary");
   const logRepositories = vi.fn(async () => [{ repository: "example/project", repositoryId: "42" }, { repository: "example/private", repositoryId: "43" }]);
   const installedRepositories = vi.fn(async () => repositories);
@@ -30,20 +32,65 @@ function fixture(repositories: { repository: string; defaultBranch: string | nul
   const app = new Hono();
   app.use("*", async (c, next) => { c.set("user", { id: member } as never); await next(); });
   app.onError((error, c) => error instanceof HttpError
-    ? c.json({ error: { code: error.code } }, error.status)
+    ? c.json({ error: { code: error.code, message: error.message } }, error.status)
     : c.json({ error: { code: "internal" } }, 500));
   app.route("/", createCloudV2Routes({
-    store: { createWorkspace, activeComputer, get, readCreateReceipt, createWorkspaceOnce }, computers: { requireMember, requireAdmin, log, logRepositories }, installedRepositories, authorizeRepository, authorizeSourceTargets, authorizeBuildRepository, authorizeSource,
+    store: { createWorkspace, activeComputer, get, readCreateReceipt, createWorkspaceOnce }, computers: { requireMember, requireAdmin, overview, log, logRepositories }, installedRepositories, authorizeRepository, authorizeSourceTargets, authorizeBuildRepository, authorizeSource, remoteHead,
     sourceRepositoryId, bridgeBaseUrl: "wss://dev.example.test",
   } as unknown as CloudV2RouteDeps));
   const create = (body: Record<string, unknown> = {}, key?: string) => app.request("/v1/cloud-v2/workspaces", {
     method: "POST", headers: { "content-type": "application/json", ...(key ? { "Idempotency-Key": key } : {}) },
     body: JSON.stringify({ organizationId: org, repository: "example/project", ...body }),
   });
-  return { app, create, requireMember, requireAdmin, installedRepositories, authorizeRepository, authorizeSourceTargets, authorizeBuildRepository, sourceRepositoryId, authorizeSource, readCreateReceipt, createWorkspaceOnce, get, activeComputer, buildId, createWorkspace, log, logRepositories };
+  return { app, create, requireMember, requireAdmin, overview, remoteHead, installedRepositories, authorizeRepository, authorizeSourceTargets, authorizeBuildRepository, sourceRepositoryId, authorizeSource, readCreateReceipt, createWorkspaceOnce, get, activeComputer, buildId, createWorkspace, log, logRepositories };
 }
 
 describe("cloud v2 creation", () => {
+  it.each([false, true])("directs a legacy Computer's %s admin to the rebuild path", async admin => {
+    const f = fixture(null);
+    f.overview.mockResolvedValue({ activeBuildId: f.buildId });
+    if (admin) f.requireAdmin.mockResolvedValue(undefined);
+    const response = await f.create();
+    expect(response.status).toBe(409);
+    expect(await response.json()).toEqual({ error: { code: "cloud_computer_rebuild_required", message: admin
+      ? "Rebuild the Cloud Computer in Settings → Cloud Computer before creating a workspace."
+      : "Ask an organization admin to rebuild the Cloud Computer in Settings → Cloud Computer before creating a workspace." } });
+    expect(f.createWorkspace).not.toHaveBeenCalled();
+  });
+
+  it("explains a legacy Computer in the repository list before the desktop can submit Create", async () => {
+    const f = fixture(null); f.overview.mockResolvedValue({ activeBuildId: f.buildId });
+    const response = await f.app.request(`${computerPath}/repositories`);
+    expect(response.status).toBe(409);
+    expect(await response.json()).toMatchObject({ error: { code: "cloud_computer_rebuild_required", message: expect.stringContaining("Ask an organization admin to rebuild") } });
+    expect(f.authorizeBuildRepository).not.toHaveBeenCalled();
+  });
+
+  it.each([undefined, "missing/topic"])("refuses a missing selected or default branch before allocation (%s)", async selected => {
+    const f = fixture(); f.remoteHead.mockResolvedValue(null);
+    const response = await f.create(selected ? { baseBranch: selected } : {}, "missing-base");
+    expect(response.status).toBe(404);
+    expect(await response.json()).toEqual({ error: { code: "repository_branch_not_found", message: `Branch ${selected ?? "master"} does not exist in example/project.` } });
+    expect(f.remoteHead).toHaveBeenCalledWith(org, member, { repository: "example/project", repositoryId: "42" }, selected ?? "master");
+    expect(f.createWorkspace).not.toHaveBeenCalled();
+    expect(f.createWorkspaceOnce).not.toHaveBeenCalled();
+  });
+
+  it("preserves transient branch lookup failures and does not allocate a workspace", async () => {
+    const f = fixture(); f.remoteHead.mockRejectedValue(new HttpError(503, "github_unavailable", "GitHub is temporarily unavailable."));
+    const response = await f.create();
+    expect(response.status).toBe(503);
+    expect(await response.json()).toMatchObject({ error: { code: "github_unavailable" } });
+    expect(f.createWorkspace).not.toHaveBeenCalled();
+  });
+
+  it("looks up the base in the admitted immutable repository before creating", async () => {
+    const f = fixture(); f.authorizeBuildRepository.mockResolvedValue({ repository: "current/project", repositoryId: "42" });
+    expect((await f.create({ baseBranch: "release/stable" })).status).toBe(201);
+    expect(f.remoteHead).toHaveBeenCalledWith(org, member, { repository: "current/project", repositoryId: "42" }, "release/stable");
+    expect(f.remoteHead.mock.invocationCallOrder[0]).toBeLessThan(f.createWorkspace.mock.invocationCallOrder[0]!);
+  });
+
   it.each(["initial read", "creation lock"])("reauthorizes the stored workspace before releasing a receipt found at the %s", async stage => {
     const f = fixture();
     const receipt = { status: 201 as const, response: { workspace: { id: "55555555-5555-4555-8555-555555555555", name: "original-source-receipt" } } };
@@ -81,7 +128,7 @@ describe("cloud v2 creation", () => {
       body: JSON.stringify({ repositories: [{ repository: "example/project", repositoryId: "42" }], ...(endpoint === "recipe" ? { revision: 0 } : {}) }),
     });
     expect(response.status).toBe(400);
-    expect(await response.json()).toEqual({ error: { code: "invalid_request" } });
+    expect(await response.json()).toMatchObject({ error: { code: "invalid_request" } });
   });
   it("does not release repository 42's old log to a reader of replacement repository 99", async () => {
     const f = fixture(); f.requireAdmin.mockResolvedValue(undefined);
@@ -186,7 +233,7 @@ describe("cloud v2 creation", () => {
     const f = fixture([{ repository: "example/project", defaultBranch: null }]);
     const response = await f.create();
     expect(response.status).toBe(409);
-    expect(await response.json()).toEqual({ error: { code: "repository_branch_required" } });
+    expect(await response.json()).toMatchObject({ error: { code: "repository_branch_required" } });
     expect(f.createWorkspace).not.toHaveBeenCalled();
   });
 
@@ -197,7 +244,7 @@ describe("cloud v2 creation", () => {
     const f = fixture(repositories as null | []);
     const response = await f.create();
     expect(response.status).toBe(409);
-    expect(await response.json()).toEqual({ error: { code } });
+    expect(await response.json()).toMatchObject({ error: { code } });
     expect(f.requireMember).toHaveBeenCalledWith(org, member);
     expect(f.createWorkspace).not.toHaveBeenCalled();
   });
