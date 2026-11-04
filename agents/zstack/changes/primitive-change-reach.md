@@ -23,6 +23,13 @@ buttons past their row, because that list reused the constant. List every
 importer before changing one, and size each call by its context: header tools
 28px, row actions 24px.
 
+A change in how a primitive is named reaches its callers too. When
+`DialogCloseButton` moved onto `IconButton`, which takes its name from
+`label`, the theme editor's `aria-label="Close theme editor"` still
+typechecked, because JSX accepts any undeclared dashed attribute, and the
+button was renamed "Close". A component named by a prop declares
+`aria-label?: never`, so the mistake fails typecheck.
+
 **Encoded in.** `playbooks/ui-design.md` step 6; eval cases
-`button-aschild-single-child`, `listrow-focus-edge-layout` and
-`shared-class-constant-reach`.
+`button-aschild-single-child`, `listrow-focus-edge-layout`,
+`shared-class-constant-reach` and `name-prop-aria-label`.

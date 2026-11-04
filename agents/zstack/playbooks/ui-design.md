@@ -49,8 +49,9 @@ them.
    (asChild, loading, inside a Tooltip), runs the ui-smoke scenarios that
    mount it at their registry viewport, and updates any smoke that pins the
    old computed look in the same commit. A shared class constant counts as a
-   primitive: list its importers first and size each by its context. Focus
-   edges never take layout space.
+   primitive: list its importers first and size each by its context. A
+   component named by a prop declares `aria-label?: never`. Focus edges
+   never take layout space.
 7. **Look at the result** in the running app or a ui-smoke harness, in both
    themes; a green check is not visual review. Put screenshot paths in the
    receipt.
