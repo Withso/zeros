@@ -16,6 +16,7 @@ import React, {
   useState,
   type ReactNode,
 } from "react";
+import { IconButton } from "@/renderer/shared/ui/primitives/icon-button";
 import {
   PanelTop,
   ChevronDown,
@@ -764,11 +765,10 @@ export function TerminalPanel({
           onClose={handleClose}
           onAdd={handleAddTerminal}
           leading={
-            <Button
-              variant="ghost"
-              size="icon-sm"
+            <IconButton
+              size="standard"
               className="text-fg2 hover:text-fg1 size-7 shrink-0"
-              aria-label={expanded ? "Collapse panel" : "Expand panel"}
+              label={expanded ? "Collapse panel" : "Expand panel"}
               onClick={() => setExpanded(!expanded)}
             >
               {expanded ? (
@@ -776,7 +776,7 @@ export function TerminalPanel({
               ) : (
                 <ChevronUp className="text-fg2" size={14} />
               )}
-            </Button>
+            </IconButton>
           }
           trailing={
             <>
@@ -796,10 +796,9 @@ export function TerminalPanel({
                   />
                 )}
               <Tooltip label="Undock terminal">
-                <Button
-                  variant="ghost"
-                  size="icon-sm"
-                  aria-label="Move terminal to tab bar"
+                <IconButton
+                  size="standard"
+                  label="Move terminal to tab bar"
                   onClick={() => {
                     if (panelTab?.terminalId)
                       openWorkbenchTerminal(
@@ -814,7 +813,7 @@ export function TerminalPanel({
                   }}
                 >
                   <PanelTop className="text-fg2 size-3.5" />
-                </Button>
+                </IconButton>
               </Tooltip>
             </>
           }
@@ -1504,15 +1503,14 @@ function TerminalSubTabStrip({
         {/* The "+" sits OUTSIDE the scroll lane: it hugs the last tab while
             they fit, then stays put while only the tabs scroll. */}
         <div className="flex h-full shrink-0 items-center">
-          <Button
-            variant="ghost"
-            size="icon-sm"
+          <IconButton
+            size="standard"
             className="text-fg2 hover:text-fg1 size-7 shrink-0"
-            aria-label="New terminal"
+            label="New terminal"
             onClick={onAdd}
           >
             <Plus className="text-fg2" size={14} />
-          </Button>
+          </IconButton>
         </div>
         <div className="min-w-0 flex-1" aria-hidden="true" />
       </div>

@@ -1,8 +1,9 @@
 import React, { useEffect, useState } from "react";
+import { IconButton } from "@/renderer/shared/ui/primitives/icon-button";
 import type { AgentGoal } from "@zeros/protocol/agent-events";
 import { Check, Pause, Pencil, Play, Target, Trash2, X } from "lucide-react";
 
-import { Button, Textarea } from "../../shared/ui";
+import { Textarea } from "../../shared/ui";
 
 interface GoalCardProps {
   goal: AgentGoal | null;
@@ -89,27 +90,25 @@ export function GoalCard({
             aria-label="Goal objective"
             className="min-h-16 min-w-0 flex-1 resize-none text-sm"
           />
-          <Button
+          <IconButton
             type="submit"
-            size="icon-sm"
-            variant="ghost"
+            size="standard"
             disabled={busy || draft.trim().length === 0}
-            aria-label="Save goal"
+            label="Save goal"
             title="Save goal"
           >
             <Check className="size-4" />
-          </Button>
-          <Button
+          </IconButton>
+          <IconButton
             type="button"
-            size="icon-sm"
-            variant="ghost"
+            size="standard"
             disabled={busy}
             onClick={() => onEditingChange(false)}
-            aria-label="Cancel goal edit"
+            label="Cancel goal edit"
             title="Cancel"
           >
             <X className="size-4" />
-          </Button>
+          </IconButton>
         </form>
       ) : (
         currentGoal && (
@@ -128,10 +127,9 @@ export function GoalCard({
                 </span>
               ) : null}
             </div>
-            <Button
+            <IconButton
               type="button"
-              size="icon-sm"
-              variant="ghost"
+              size="standard"
               disabled={busy}
               onClick={() =>
                 void run(() =>
@@ -140,7 +138,7 @@ export function GoalCard({
                   ),
                 )
               }
-              aria-label={
+              label={
                 currentGoal.status === "active" ? "Pause goal" : "Resume goal"
               }
               title={
@@ -152,29 +150,27 @@ export function GoalCard({
               ) : (
                 <Play className="size-4" />
               )}
-            </Button>
-            <Button
+            </IconButton>
+            <IconButton
               type="button"
-              size="icon-sm"
-              variant="ghost"
+              size="standard"
               disabled={busy}
               onClick={() => onEditingChange(true)}
-              aria-label="Edit goal"
+              label="Edit goal"
               title="Edit goal"
             >
               <Pencil className="size-4" />
-            </Button>
-            <Button
+            </IconButton>
+            <IconButton
               type="button"
-              size="icon-sm"
-              variant="ghost"
+              size="standard"
               disabled={busy}
               onClick={() => void run(onDelete)}
-              aria-label="Delete goal"
+              label="Delete goal"
               title="Delete goal"
             >
               <Trash2 className="size-4" />
-            </Button>
+            </IconButton>
           </>
         )
       )}

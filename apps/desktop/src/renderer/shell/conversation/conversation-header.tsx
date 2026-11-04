@@ -431,14 +431,13 @@ function OpenInDropdown({ path }: OpenInDropdownProps) {
       <DropdownMenu>
         <Tooltip label="Open in…" delayDuration={1500}>
           <DropdownMenuTrigger asChild>
-            <Button
-              variant="ghost"
-              size="icon-sm"
+            <IconButton
+              size="standard"
               className={OPEN_IN_CHEVRON_BTN_CLS}
-              aria-label="Open path in another app"
+              label="Open path in another app"
             >
               <ChevronDown className="size-3" />
-            </Button>
+            </IconButton>
           </DropdownMenuTrigger>
         </Tooltip>
         <DropdownMenuContent
@@ -492,13 +491,13 @@ export function OpenInPathButton({ path }: OpenInDropdownProps) {
   const menu = useOpenInMenu(path);
   return <div className="flex min-w-0 items-center">
     <Tooltip label={`Open ${path} in ${menu.defaultApp.name}`}>
-      <Button variant="outline" className="min-w-0 flex-1 justify-start rounded-r-none" disabled={!menu.canOpenLocally}
+      <Button variant="secondary" className="min-w-0 flex-1 justify-start rounded-r-none" disabled={!menu.canOpenLocally}
         aria-label={`Open sync directory in ${menu.defaultApp.name}`} onClick={() => { void menu.openWith(menu.defaultApp); }}>
         <OpenAppIcon app={menu.defaultApp} /><span className="min-w-0 truncate">{path}</span>
       </Button>
     </Tooltip>
     <DropdownMenu><DropdownMenuTrigger asChild>
-      <Button variant="outline" size="icon-sm" className="-ml-px rounded-l-none" aria-label="Sync directory options"><ChevronDown /></Button>
+      <Button variant="secondary" size="icon-sm" className="-ml-px rounded-l-none" aria-label="Sync directory options"><ChevronDown /></Button>
     </DropdownMenuTrigger><DropdownMenuContent align="start"><OpenInMenuRows menu={menu} shortcuts={false} /></DropdownMenuContent></DropdownMenu>
   </div>;
 }

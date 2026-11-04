@@ -1,4 +1,5 @@
 import { LocalLinksProvider } from "./local-links/provider";
+import { IconButton } from "@/renderer/shared/ui/primitives/icon-button";
 import { AGENT_NOTICE_ACTION, AgentNotice } from "./agent-notice";
 import { getFollowUpBehavior, type FollowUpBehavior } from "../settings/follow-up-behavior";
 import { notifyAgentSendFailure } from "./agent-send-failure-toast";
@@ -4221,15 +4222,14 @@ function AgentChatBody({
       {headerActions === undefined && (
         <header className="border-border1 flex h-11 shrink-0 items-center gap-2 border-b px-3">
           <Tooltip label="Back to agents">
-            <Button
-              variant="ghost"
-              size="icon-sm"
+            <IconButton
+              size="standard"
               type="button"
               onClick={onBack}
-              aria-label="Back to agents"
+              label="Back to agents"
             >
               <ArrowLeft className="size-3.5" />
-            </Button>
+            </IconButton>
           </Tooltip>
           <Bot className="text-fg2 size-4 shrink-0" />
           <div className="flex min-w-0 flex-1 items-baseline gap-2">

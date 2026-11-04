@@ -28,6 +28,7 @@ import React, {
   useState,
   useSyncExternalStore,
 } from "react";
+import { IconButton } from "@/renderer/shared/ui/primitives/icon-button";
 import {
   AlertTriangle,
   ChevronDown,
@@ -225,7 +226,7 @@ export function HeadlessAuthModal({
             Cancel
           </Button>
           <Button
-            variant="default"
+            variant="primary"
             size="sm"
             disabled={!code.trim() || busy}
             onClick={() => onComplete(code.trim())}
@@ -397,25 +398,23 @@ function ServerRow({
             aria-label={enabled ? "Disable server" : "Enable server"}
             className="mr-1"
           />
-          <Button
-            variant="ghost"
-            size="icon-sm"
+          <IconButton
+            size="standard"
             onClick={onEdit}
             disabled={busy || gateway?.signInBlocked}
-            aria-label="Edit server"
+            label="Edit server"
           >
             <Pencil className="size-3.5" aria-hidden="true" />
-          </Button>
-          <Button
-            variant="ghost"
-            size="icon-sm"
+          </IconButton>
+          <IconButton
+            size="standard"
             onClick={onRemove}
             disabled={busy || gateway?.signInBlocked}
             className="text-fg2 hover:bg-red-primary/10 hover:text-red-primary"
-            aria-label="Remove server"
+            label="Remove server"
           >
             <Trash2 className="size-3.5" aria-hidden="true" />
-          </Button>
+          </IconButton>
         </div>
       </div>
       {showTools && canExpand && (

@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from "react";
+import { IconButton } from "@/renderer/shared/ui/primitives/icon-button";
 import { ChevronRight, Plus, Trash2 } from "lucide-react";
 import { Button } from "../../shared/ui/primitives/button";
 import { Switch } from "../../shared/ui/primitives/switch";
@@ -35,7 +36,7 @@ function OrganizationMcpRow({ row, ownerKey, observedAt, busy, onEdit, onConnect
     <span className={view.tone === "success" ? "text-green-primary text-xs" : view.tone === "error" ? "text-red-primary text-xs" : "text-fg2 text-xs"}>{view.label}</span>
     {view.action && view.label !== "Connected" && <Button variant="secondary" disabled={busy} onClick={onConnect}>{view.tone === "error" ? "Retry" : "Connect"}</Button>}
     {row.canEdit && <><Switch aria-label={`Enable ${String(row.config.name)}`} checked={row.config.enabled !== false} disabled={busy} onCheckedChange={onToggle} />
-      <Button variant="ghost" size="icon" aria-label={`Remove ${String(row.config.name)}`} disabled={busy} onClick={onRemove}><Trash2 aria-hidden="true" /></Button></>}
+      <IconButton size="standard" label={`Remove ${String(row.config.name)}`} disabled={busy} onClick={onRemove}><Trash2 aria-hidden="true" /></IconButton></>}
   </div>;
 }
 
@@ -78,7 +79,7 @@ export function OrganizationMcpPage({ organization, surfaceActive }: { organizat
           <div className="flex items-start justify-between gap-4"><div className="flex flex-col gap-1">
             <h1 className="text-fg1 m-0 text-lg font-medium">MCP servers</h1>
             <p className="text-fg2 m-0 text-xs">Connect tools and services for {organization.name}.</p>
-          </div><Button variant="default" onClick={() => setView({ kind: "editor", initial: null })}><Plus aria-hidden="true" />Add server</Button></div>
+          </div><Button variant="primary" onClick={() => setView({ kind: "editor", initial: null })}><Plus aria-hidden="true" />Add server</Button></div>
           {!read.data && <p className="text-fg3 m-0 text-sm" role="status">{read.error ? "Could not load MCP servers. Reopen this page to try again." : "Loading MCP servers…"}</p>}
           {cloudEnabled && <div className="flex flex-wrap items-center gap-2" role="group" aria-label="GitHub connection for repository selection">
             <span className="text-fg2 text-xs">Repository connection</span>

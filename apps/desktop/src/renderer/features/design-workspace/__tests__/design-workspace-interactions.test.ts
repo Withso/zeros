@@ -852,7 +852,7 @@ describe("design workspace interaction wiring", () => {
     expect(motionTimelineSource).toContain("zd-motion-grid");
     expect(motionStyles).toContain("grid-template-columns: subgrid");
     expect(motionTimelineSource).toContain("designMotionPlaybackStartOffset(");
-    expect(motionTimelineSource).toContain('aria-label="More motion settings"');
+    expect(motionTimelineSource).toContain('label="More motion settings"');
   });
 
   it("retains an unsaved motion draft by exact layer across selection changes", () => {

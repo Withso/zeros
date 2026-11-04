@@ -5,6 +5,7 @@ import React, {
   useRef,
   useState,
 } from "react";
+import { IconButton } from "@/renderer/shared/ui/primitives/icon-button";
 import type {
   GithubAuthMethod,
   GithubAuthSnapshot,
@@ -734,18 +735,17 @@ export function GitHubSection({
                   {summary.configured ? (
                     <DropdownMenu>
                       <DropdownMenuTrigger asChild>
-                        <Button
+                        <IconButton
                           ref={method === "github-app" ? disconnectAppTriggerRef : undefined}
                           type="button"
-                          variant="ghost"
-                          size="icon-sm"
-                          aria-label={`More actions for ${githubMethodLabel(method)}`}
+                          size="standard"
+                          label={`More actions for ${githubMethodLabel(method)}`}
                         >
                           <MoreHorizontal
                             className="size-4"
                             aria-hidden="true"
                           />
-                        </Button>
+                        </IconButton>
                       </DropdownMenuTrigger>
                       <DropdownMenuContent align="end">
                         {method === "github-app" &&

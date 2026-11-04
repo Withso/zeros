@@ -595,7 +595,7 @@ function StructuredQuestionCard({ request, onRespond }: QuestionCardProps) {
               <Button
                 type="button"
                 size="icon"
-                variant="default"
+                variant="primary"
                 onMouseDown={suppressFocusOnClick}
                 onClick={submit}
                 disabled={!allAnswered}
@@ -776,7 +776,7 @@ function OneClickApprovalCard({
             <Button
               type="button"
               size="sm"
-              variant="default"
+              variant="primary"
               disabled={responded}
               onMouseDown={suppressFocusOnClick}
               onClick={() => answer(allowOnce.id)}

@@ -31,9 +31,6 @@ const buttonVariants = cva(
         // Reserve for the single main action on a view. Flat: no shadow.
         primary:
           "bg-primary-button-bg text-primary-button-fg hover:bg-primary-button-hover",
-        // The pre-rename name of Primary, kept until every caller says primary.
-        default:
-          "bg-primary-button-bg text-primary-button-fg hover:bg-primary-button-hover",
         // SECONDARY — the everyday button, wearing the dropdown trigger's
         // exact chrome: TRANSPARENT fill so it blends with whatever surface it
         // sits on (bg1 / bg2 / bg3 alike) + border3 → hover/open bg2-highlight
@@ -98,7 +95,6 @@ export interface ButtonProps
 
 const SPINNER_TONE = {
   primary: "inverted",
-  default: "inverted",
   destructive: "inherit",
 } as const;
 

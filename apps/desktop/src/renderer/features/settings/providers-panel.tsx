@@ -11,6 +11,7 @@ import React, {
   useRef,
   useState,
 } from "react";
+import { IconButton } from "@/renderer/shared/ui/primitives/icon-button";
 import { isFeatureEnabled } from "../../config/release-channel";
 import {
   ArrowUpRight,
@@ -1015,10 +1016,9 @@ function ProviderCard({
                     >
                       Open terminal
                     </Button>
-                    <Button
-                      variant="ghost"
-                      size="icon-sm"
-                      aria-label={`Refresh ${agent.id === "claude" ? "Claude" : agent.name} subscription`}
+                    <IconButton
+                      size="standard"
+                      label={`Refresh ${agent.id === "claude" ? "Claude" : agent.name} subscription`}
                       disabled={subscription.refreshing}
                       onClick={() => {
                         subscription.refresh();
@@ -1026,7 +1026,7 @@ function ProviderCard({
                       }}
                     >
                       <RefreshCw className="size-3.5" aria-hidden="true" />
-                    </Button>
+                    </IconButton>
                   </div>
                 )}
               </>

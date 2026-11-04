@@ -3,6 +3,7 @@
 // ──────────────────────────────────────────────────────────
 
 import React, { useEffect, useMemo, useRef, useState } from "react";
+import { IconButton } from "@/renderer/shared/ui/primitives/icon-button";
 import { File, Globe, Plus, Smartphone, Terminal } from "lucide-react";
 import { addWorkbenchTerminal, openWorkbenchTerminal } from "./open-terminal";
 import { useActiveWorkspace } from "../../state/use-active-workspace";
@@ -24,7 +25,6 @@ import {
   useWorkspaceDispatch,
 } from "@/renderer/state/store";
 import { FileTypeIcon } from "@/renderer/features/agent/composer-editor/file-type-icon";
-import { Button } from "@/renderer/shared/ui/primitives/button";
 import {
   Command,
   CommandGroup,
@@ -230,16 +230,15 @@ export function WorkbenchNewTabMenu({
       }}
     >
       <PopoverTrigger asChild>
-        <Button
-          variant="ghost"
-          size="icon-sm"
+        <IconButton
+          size="standard"
           className="shrink-0"
-          aria-label="New File, Browser, or Terminal tab"
+          label="New File, Browser, or Terminal tab"
           onPointerEnter={warm}
           onFocus={warm}
         >
           <Plus className="text-fg2 size-3.5" />
-        </Button>
+        </IconButton>
       </PopoverTrigger>
       <PopoverContent
         ref={menuRef}

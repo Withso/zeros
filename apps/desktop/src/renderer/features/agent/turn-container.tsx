@@ -4,6 +4,7 @@
 // turn with a null prompt.
 
 import React, { memo, useCallback, useEffect, useRef, useState } from "react";
+import { IconButton } from "@/renderer/shared/ui/primitives/icon-button";
 import type { LocalMessageChatRef } from "@zeros/protocol/agent-messages";
 import { Plus, Pencil, Copy, Check } from "lucide-react";
 import type {
@@ -13,7 +14,6 @@ import type {
 import { formatCompactAge } from "./format-age";
 import { autoActionIcon } from "./auto-action";
 import { cn } from "@/renderer/shared/ui/cn";
-import { Button } from "../../shared/ui";
 import { Tooltip } from "@/renderer/shared/ui/primitives";
 import type { ComposerAttachment } from "./composer-attachments";
 import { PROMPT_SURFACE_RADIUS } from "./composer-shell";
@@ -666,17 +666,16 @@ function TurnPromptEditor({
               className="min-w-0 flex-nowrap gap-1.5 pt-1 pr-0 pb-1 pl-0"
             >
               <PromptInputTools className="min-w-0 flex-nowrap gap-0.5">
-                <Button
-                  variant="ghost"
-                  size="icon-sm"
+                <IconButton
+                  size="standard"
                   type="button"
                   onClick={() => fileInputRef.current?.click()}
-                  aria-label="Attach file"
+                  label="Attach file"
                   disabled={submitting}
                   className="rounded-sm"
                 >
                   <Plus size={14} />
-                </Button>
+                </IconButton>
                 <input
                   ref={fileInputRef}
                   type="file"

@@ -1,4 +1,5 @@
 import { memo, useMemo, useRef, useState } from "react";
+import { IconButton } from "@/renderer/shared/ui/primitives/icon-button";
 import {
   Check,
   ChevronDown,
@@ -164,11 +165,10 @@ export const InlineReviewThread = memo(function InlineReviewThread({
                 : "Open check source"
             }
           >
-            <Button
-              variant="ghost"
-              size="icon-sm"
+            <IconButton
+              size="standard"
               className="size-6"
-              aria-label={
+              label={
                 thread.source === "github"
                   ? "Open discussion on GitHub"
                   : "Open check source"
@@ -180,7 +180,7 @@ export const InlineReviewThread = memo(function InlineReviewThread({
               }}
             >
               <ExternalLink className="size-3" />
-            </Button>
+            </IconButton>
           </Tooltip>
         )}
         {thread.canResolve && (

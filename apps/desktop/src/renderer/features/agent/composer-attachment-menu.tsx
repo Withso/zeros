@@ -1,7 +1,7 @@
 import { memo, useEffect, useState } from "react";
+import { IconButton } from "@/renderer/shared/ui/primitives/icon-button";
 import { FolderInput, MessageSquareText, Paperclip, Plus, PenTool } from "lucide-react";
 
-import { Button } from "../../shared/ui";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -58,17 +58,16 @@ export const ComposerAttachmentMenu = memo(function ComposerAttachmentMenu({
   return (
     <DropdownMenu open={open && !concealed} onOpenChange={setOpen}>
       <DropdownMenuTrigger asChild>
-        <Button
-          variant="ghost"
-          size="icon-sm"
+        <IconButton
+          size="standard"
           type="button"
-          aria-label="Add attachment or link a workspace"
+          label="Add attachment or link a workspace"
           className="rounded-sm"
           onPointerEnter={onIntent}
           onFocus={onIntent}
         >
           <Plus size={14} />
-        </Button>
+        </IconButton>
       </DropdownMenuTrigger>
       <DropdownMenuContent
         data-composer-attachment-menu=""

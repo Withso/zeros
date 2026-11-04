@@ -22,6 +22,7 @@
 // ──────────────────────────────────────────────────────────
 
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { IconButton } from "@/renderer/shared/ui/primitives/icon-button";
 import {
   CornerDownLeft,
   FolderInput,
@@ -557,16 +558,15 @@ export function DispatcherComposer({
                   don't fight Radix's focus-restore. */}
               <DropdownMenu>
                 <DropdownMenuTrigger asChild>
-                  <Button
-                    variant="ghost"
-                    size="icon-sm"
+                  <IconButton
+                    size="standard"
                     type="button"
-                    aria-label={allowAdditionalDirectories ? "Add attachment or link a workspace" : "Add attachment"}
+                    label={allowAdditionalDirectories ? "Add attachment or link a workspace" : "Add attachment"}
                     disabled={busy || !active || draftKey === null}
                     className="rounded-sm"
                   >
                     <Plus size={14} />
-                  </Button>
+                  </IconButton>
                 </DropdownMenuTrigger>
                 <DropdownMenuContent align="start" side="top">
                   <DropdownMenuItem
@@ -623,7 +623,7 @@ export function DispatcherComposer({
               )}
             </PromptInputTools>
             <Button
-              variant="default"
+              variant="primary"
               size="sm"
               type="submit"
               data-create-submit=""

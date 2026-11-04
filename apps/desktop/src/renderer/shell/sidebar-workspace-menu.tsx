@@ -1,9 +1,9 @@
 import { useCallback, useMemo, useRef, useState } from "react";
+import { IconButton } from "@/renderer/shared/ui/primitives/icon-button";
 import { ListFilter, Search } from "lucide-react";
 import type { Project } from "../state/projects-store";
 import type { SidebarWorkspaceSort } from "../state/sidebar-list-preferences";
 import { cn } from "../shared/ui/cn";
-import { Button } from "../shared/ui/primitives/button";
 import { Input } from "../shared/ui/primitives/input";
 import {
   DropdownMenu,
@@ -101,10 +101,9 @@ export function SidebarWorkspaceMenu({
     >
       <Tooltip label="Filter workspaces" side="bottom" delayDuration={1500} disabled={open}>
         <DropdownMenuTrigger asChild>
-          <Button
+          <IconButton
             type="button"
-            variant="ghost"
-            size="icon-compact"
+            size="compact"
             className={cn(
               SIDEBAR_ROW_ACTION_CLS,
               "relative",
@@ -112,7 +111,7 @@ export function SidebarWorkspaceMenu({
                 !filtered &&
                 "opacity-0 group-hover/section:opacity-100 focus-visible:opacity-100",
             )}
-            aria-label="Filter workspaces"
+            label="Filter workspaces"
             aria-description={filtered ? "Repository filter active" : undefined}
             data-filtered={filtered || undefined}
           >
@@ -124,7 +123,7 @@ export function SidebarWorkspaceMenu({
                 className="bg-blue-primary absolute top-0.5 right-0.5 size-1.5 rounded-full"
               />
             )}
-          </Button>
+          </IconButton>
         </DropdownMenuTrigger>
       </Tooltip>
       <DropdownMenuContent

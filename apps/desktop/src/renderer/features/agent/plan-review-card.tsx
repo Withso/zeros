@@ -126,7 +126,7 @@ export function PlanReviewCard({
       <Tooltip label="Approve plan" shortcut="⌘⇧↵">
         <Button
           type="button"
-          variant="default"
+          variant="primary"
           size="sm"
           onClick={onApprove}
           className="shrink-0"

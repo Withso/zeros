@@ -207,7 +207,7 @@ export function AddLocalProjectDialog({
             Cancel
           </Button>
           <Button
-            variant="default"
+            variant="primary"
             size="sm"
             onClick={handleAdd}
             disabled={busy}

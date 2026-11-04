@@ -1,4 +1,5 @@
 import { memo } from "react";
+import { IconButton } from "@/renderer/shared/ui/primitives/icon-button";
 import { Square, Workflow } from "lucide-react";
 
 import { cn } from "@/renderer/shared/ui/cn";
@@ -155,16 +156,15 @@ export const WorkflowProgressPanel = memo(function WorkflowProgressPanel({
             stoppable ? "Stop workflow" : workflowStatusLabel(workflow.status)
           }
         >
-          <Button
+          <IconButton
             type="button"
-            size="icon-sm"
-            variant="ghost"
+            size="standard"
             disabled={!stoppable}
-            aria-label={`Stop ${workflow.name}`}
+            label={`Stop ${workflow.name}`}
             onClick={() => onStop(workflow.taskId)}
           >
             <Square className="size-3" aria-hidden="true" />
-          </Button>
+          </IconButton>
         </Tooltip>
       </div>
       <div className="flex max-h-[min(360px,calc(100vh-96px))] flex-col overflow-y-auto px-3 py-2">

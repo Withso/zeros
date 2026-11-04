@@ -6,6 +6,7 @@
 // Older builds stay in the history and can be made active again, which
 // rebuilds them at the same commits.
 import { useCallback, useEffect, useRef, useState } from "react";
+import { IconButton } from "@/renderer/shared/ui/primitives/icon-button";
 import { ChevronDown, ChevronUp, CircleCheck, CircleMinus, CircleX, LoaderCircle, TriangleAlert, X } from "lucide-react";
 import { Button, GithubIcon, Input } from "../../shared/ui";
 import { Badge, CodeTextarea } from "../../shared/ui/primitives";
@@ -177,7 +178,7 @@ function CloudComputerScope({ userId, organizationId, canManage, active }: {
             {status.kind === "unbuilt" && (
               <Button variant="ghost" onClick={() => void discard()} disabled={locked}>Discard</Button>
             )}
-            <Button variant={status.kind === "unbuilt" ? "default" : "secondary"} onClick={() => void build()}
+            <Button variant={status.kind === "unbuilt" ? "primary" : "secondary"} onClick={() => void build()}
               disabled={locked || configured.length === 0 || data === undefined}>
               {running ? "Building…" : "Build computer"}
             </Button>
@@ -210,10 +211,10 @@ function CloudComputerScope({ userId, organizationId, canManage, active }: {
                 <GithubIcon className="size-3.5 shrink-0" aria-hidden />
                 <span className="truncate">{row.repository}</span>
               </span>
-              <Button variant="ghost" size="icon-sm" aria-label={`Remove ${row.repository}`}
+              <IconButton size="standard" label={`Remove ${row.repository}`}
                 onClick={() => remove(row.repository)} disabled={locked}>
                 <X aria-hidden />
-              </Button>
+              </IconButton>
             </div>
             <Input aria-label={`${row.repository} branch`} placeholder={`Branch or tag (default: ${liveBranch(row.repository) ?? "the repository's default"})`}
               value={row.ref ?? ""} onChange={event => update(row.repository, { ref: event.target.value })} disabled={locked} />

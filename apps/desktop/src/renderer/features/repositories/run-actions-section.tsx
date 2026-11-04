@@ -17,6 +17,7 @@
 // ──────────────────────────────────────────────────────────
 
 import { useEffect, useMemo, useRef, useState } from "react";
+import { IconButton } from "@/renderer/shared/ui/primitives/icon-button";
 import { Plus, Trash2 } from "lucide-react";
 import { parseRunActions, type RunAction } from "@zeros/protocol/run-actions";
 
@@ -425,16 +426,15 @@ function ActionCard({
             </label>
           </div>
           <Inline gap={1} align="center" className="shrink-0">
-            <Button
-              variant="ghost"
-              size="icon-sm"
-              aria-label={`Delete ${draft.name || "action"}`}
+            <IconButton
+              size="standard"
+              label={`Delete ${draft.name || "action"}`}
               onClick={onDelete}
               disabled={busy}
               className="text-fg2 hover:text-red-primary"
             >
               <Trash2 strokeWidth={1} />
-            </Button>
+            </IconButton>
             <Button
               variant="secondary"
               size="sm"

@@ -1,4 +1,5 @@
 import { useOrganizationProjects } from "../state/use-organization-projects";
+import { IconButton } from "@/renderer/shared/ui/primitives/icon-button";
 // ============================================
 // COMPONENT: AppSidebar
 // PURPOSE: The app's single left navigation — window chrome, organization,
@@ -985,11 +986,10 @@ export function AppSidebar({ hidden = false }: { hidden?: boolean }) {
               <span className="text-muted-fg truncate text-xs">{email}</span>
             )}
           </span>
-          <Button
+          <IconButton
             type="button"
-            variant="ghost"
-            size="icon-sm"
-            aria-label="Open settings"
+            size="standard"
+            label="Open settings"
             data-state={activePage === "settings" ? "active" : "inactive"}
             className="text-fg2 hover:text-fg1 data-[state=active]:text-fg1 shrink-0"
             onClick={() =>
@@ -997,7 +997,7 @@ export function AppSidebar({ hidden = false }: { hidden?: boolean }) {
             }
           >
             <Settings size={16} strokeWidth={1.5} />
-          </Button>
+          </IconButton>
         </div>
       </Surface>
       {/* Right-edge resize seam — a 1px border line with a wider invisible

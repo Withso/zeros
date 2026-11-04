@@ -296,7 +296,7 @@ function ScopedOpenGithubProjectDialog({
             Cancel
           </Button>
           <Button
-            variant="default"
+            variant="primary"
             size="sm"
             onClick={handleClone}
             disabled={!canSubmit}

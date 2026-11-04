@@ -47,15 +47,16 @@ describe("Button control sizes", () => {
 
 describe("Button states", () => {
   it("draws Primary and Destructive flat, without a stock shadow", () => {
-    for (const variant of ["primary", "default", "destructive"] as const) {
+    for (const variant of ["primary", "destructive"] as const) {
       const classes = classesFor({ variant });
       expect(classes.some((cls) => /^shadow(-|$)/.test(cls)), variant).toBe(false);
     }
   });
 
-  it("names Primary for what it is and keeps the old name as an alias", () => {
-    expect(classesFor({ variant: "primary" })).toEqual(classesFor({ variant: "default" }));
+  it("names Primary for what it is", () => {
     expect(classesFor({ variant: "primary" })).toContain("bg-primary-button-bg");
+    // `default` was Primary's pre-rename name; one name per look now.
+    expect(classesFor({ variant: "default" as never }).join(" ")).not.toContain("bg-primary-button-bg");
   });
 
   it("holds the hover look while a Ghost button's menu is open", () => {

@@ -1,5 +1,6 @@
 // Development-only coverage of the production tooltip and inspector controls.
 import "../../../../../styles/zeros-tokens.css";
+import { IconButton } from "@/renderer/shared/ui/primitives/icon-button";
 import "../../../../../styles/semantic-tokens.css";
 import "../../../../../styles/globals.css";
 import React, { useState } from "react";
@@ -23,14 +24,14 @@ function Harness() {
         </Button>
         <div key={revision} className="flex items-center gap-4">
           <Tooltip label="Target branch">
-            <Button aria-label="Target branch" variant="ghost" size="icon">
+            <IconButton label="Target branch" size="standard">
               <GitBranch />
-            </Button>
+            </IconButton>
           </Tooltip>
           <Tooltip label="Split diff">
-            <Button aria-label="Split diff" variant="ghost" size="icon">
+            <IconButton label="Split diff" size="standard">
               <Columns2 />
-            </Button>
+            </IconButton>
           </Tooltip>
         </div>
         <div className="w-64">

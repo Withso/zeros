@@ -305,7 +305,7 @@ export function PublishToGithubDialog({
             Cancel
           </Button>
           <Button
-            variant="default"
+            variant="primary"
             size="sm"
             onClick={handlePublish}
             disabled={!canSubmit}

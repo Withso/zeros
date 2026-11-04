@@ -12,6 +12,7 @@ import React, {
   useRef,
   useState,
 } from "react";
+import { IconButton } from "@/renderer/shared/ui/primitives/icon-button";
 import * as DialogPrimitive from "@radix-ui/react-dialog";
 import { publishNativeSurfaceOverlayIntent } from "@/renderer/shared/ui/native-surface-overlay";
 import {
@@ -1025,33 +1026,31 @@ export const DesignThemeEditor = React.memo(function DesignThemeEditor({
                 {readOnly ? null : (
                   <>
                     <Tooltip className="zd-theme-tooltip" label="Paste CSS">
-                      <Button
+                      <IconButton
                         ref={pasteTriggerRef}
                         type="button"
-                        variant="ghost"
-                        size="icon"
+                        size="standard"
                         className="zd-icon-button"
                         data-size="row"
-                        aria-label="Paste CSS"
+                        label="Paste CSS"
                         aria-expanded={pasteOpen}
                         onClick={togglePaste}
                       >
                         <ClipboardPaste />
-                      </Button>
+                      </IconButton>
                     </Tooltip>
-                    <Button
+                    <IconButton
                       ref={newVariableTriggerRef}
                       type="button"
-                      variant="ghost"
-                      size="icon"
+                      size="standard"
                       className="zd-icon-button"
                       data-size="row"
-                      aria-label="New variable"
+                      label="New variable"
                       aria-expanded={newVariableOpen}
                       onClick={toggleNewVariable}
                     >
                       <Plus />
-                    </Button>
+                    </IconButton>
                   </>
                 )}
               </div>
@@ -1248,19 +1247,18 @@ export const DesignThemeEditor = React.memo(function DesignThemeEditor({
                             className="zd-theme-add-mode-trigger"
                             tabIndex={!canAddTheme ? 0 : undefined}
                           >
-                            <Button
+                            <IconButton
                               ref={newThemeTriggerRef}
                               type="button"
-                              variant="ghost"
-                              size="icon"
+                              size="standard"
                               className="zd-icon-button"
                               data-size="row"
-                              aria-label="Add theme"
+                              label="Add theme"
                               disabled={!canAddTheme}
                               onClick={() => setNewThemeOpen(true)}
                             >
                               <Plus />
-                            </Button>
+                            </IconButton>
                           </span>
                         </Tooltip>
                       )}

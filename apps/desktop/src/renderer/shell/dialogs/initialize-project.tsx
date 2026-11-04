@@ -32,7 +32,7 @@ export function InitializeProjectDialog({
         </DialogBody>
         <DialogFooter>
           <Button
-            variant="default"
+            variant="primary"
             size="sm"
             onClick={() => folder && onConfirm(folder)}
           >

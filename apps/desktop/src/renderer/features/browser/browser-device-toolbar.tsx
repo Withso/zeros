@@ -7,6 +7,7 @@
 // shared with Canvas mode so both modes resume at the same size).
 
 import { useRef, useState } from "react";
+import { IconButton } from "@/renderer/shared/ui/primitives/icon-button";
 import { ChevronDown, RotateCwSquare, X } from "lucide-react";
 
 import type { CanvasKnobAxis } from "./canvas-knob-handles";
@@ -406,15 +407,14 @@ export function BrowserDeviceToolbar({
       />
 
       <Tooltip label="Rotate">
-        <Button
-          variant="ghost"
-          size="icon-compact"
+        <IconButton
+          size="compact"
           className="text-fg2 hover:text-fg1 shrink-0"
           onClick={onRotate}
-          aria-label="Rotate viewport"
+          label="Rotate viewport"
         >
           <RotateCwSquare aria-hidden="true" />
-        </Button>
+        </IconButton>
       </Tooltip>
 
       <DropdownMenu>
@@ -462,15 +462,14 @@ export function BrowserDeviceToolbar({
       </DropdownMenu>
 
       <div className="min-w-0 flex-1" />
-      <Button
-        variant="ghost"
-        size="icon-compact"
+      <IconButton
+        size="compact"
         className="text-fg2 hover:text-fg1 shrink-0"
         onClick={onClose}
-        aria-label="Close device toolbar"
+        label="Close device toolbar"
       >
         <X aria-hidden="true" />
-      </Button>
+      </IconButton>
     </div>
   );
 }

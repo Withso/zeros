@@ -25,8 +25,8 @@
 // ──────────────────────────────────────────────────────────
 
 import React from "react";
+import { IconButton } from "@/renderer/shared/ui/primitives/icon-button";
 import { PanelRight } from "lucide-react";
-import { Button } from "../../shared/ui";
 import { Tooltip } from "@/renderer/shared/ui/primitives";
 
 // 2026-05-28 — chrome icon recipe: 24 × 24 container, 16 × 16 icon
@@ -45,15 +45,14 @@ export function WorkbenchToggleButton({
 }: WorkbenchToggleButtonProps) {
   return (
     <Tooltip label={workbenchCollapsed ? "Show panel" : "Hide panel"} shortcut="⌥⌘B">
-      <Button
-        variant="ghost"
-        size="icon-sm"
+      <IconButton
+        size="standard"
         className={TOGGLE_BTN_CLS}
         onClick={onToggle}
-        aria-label={workbenchCollapsed ? "Show design panel" : "Hide design panel"}
+        label={workbenchCollapsed ? "Show design panel" : "Hide design panel"}
       >
         <PanelRight strokeWidth={1} />
-      </Button>
+      </IconButton>
     </Tooltip>
   );
 }

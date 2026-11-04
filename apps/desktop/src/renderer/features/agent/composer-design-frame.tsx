@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
+import { IconButton } from "@/renderer/shared/ui/primitives/icon-button";
 import { Camera, Frame, X } from "lucide-react";
 import type { ComposerMode } from "@zeros/protocol/composer-mode";
 import { peekWorkspacesFor, useProjectForFolder, useWorkspacesFor } from "../../state/use-projects";
@@ -180,9 +181,9 @@ export function ComposerDesignFrame({ selection, onRemove, onToggleScreenshot }:
         </Button>
       </Tooltip>
       <Tooltip label="Attach image">
-        <Button type="button" variant="ghost" size="icon-sm" aria-label="Include frame image" aria-pressed={first.includeScreenshot === true} onClick={onToggleScreenshot} onMouseDown={event => event.preventDefault()}>
+        <IconButton type="button" size="standard" label="Include frame image" aria-pressed={first.includeScreenshot === true} onClick={onToggleScreenshot} onMouseDown={event => event.preventDefault()}>
           <Camera size={14} />
-        </Button>
+        </IconButton>
       </Tooltip>
     </div>
   );

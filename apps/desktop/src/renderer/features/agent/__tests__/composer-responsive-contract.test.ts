@@ -85,7 +85,7 @@ describe("chat composer responsive contract", () => {
   });
 
   it("renders the send action as a borderless primary circle", () => {
-    expect(promptInput).toContain('variant="default"');
+    expect(promptInput).toContain('variant="primary"');
     expect(promptInput).toMatch(/size-7 rounded-full border-0/);
   });
 });

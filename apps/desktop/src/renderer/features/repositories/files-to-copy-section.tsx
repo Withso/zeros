@@ -6,6 +6,7 @@
 // never invisible. Pattern, row and tree logic lives in files-to-copy-model.ts.
 
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { IconButton } from "@/renderer/shared/ui/primitives/icon-button";
 import { ChevronRight, Folder, Info, RotateCw } from "lucide-react";
 
 import type { Project } from "../../state/projects-store";
@@ -469,13 +470,12 @@ export function FilesToCopySection({
           {/* Icon only. The label said "Rescan" beside an icon that already
               says it, in a row whose job is the sentence to its left. */}
           <Tooltip label="Rescan">
-            <Button
-              variant="ghost"
-              size="icon-sm"
+            <IconButton
+              size="standard"
               className="ml-auto"
               onClick={read.refresh}
               disabled={!connected || read.refreshing}
-              aria-label="Rescan"
+              label="Rescan"
             >
               <RotateCw
                 className={cn(
@@ -489,7 +489,7 @@ export function FilesToCopySection({
                 )}
                 aria-hidden
               />
-            </Button>
+            </IconButton>
           </Tooltip>
         </div>
       )}

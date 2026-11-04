@@ -1,4 +1,5 @@
 import { ChangesScopeMenu } from "./changes-scope-menu";
+import { IconButton } from "@/renderer/shared/ui/primitives/icon-button";
 import { scopeIdentity } from "./changes-scope";
 import { WorkbenchTabToolbar, useWorkbenchStatusSource } from "../tab-status";
 import {
@@ -48,7 +49,7 @@ import { useGithubReview } from "@/renderer/features/code-review/use-github-revi
 import type { CodeReviewExternalSource } from "@/renderer/features/code-review/review-thread-model";
 import { parseRemote } from "../../pr/github-url";
 import { resolveReviewProvider } from "../../pr/review-provider";
-import { Button, Input, Tooltip } from "@/renderer/shared/ui/primitives";
+import { Input, Tooltip } from "@/renderer/shared/ui/primitives";
 import { cn } from "@/renderer/shared/ui/cn";
 import { useChatCwd } from "../../use-chat-cwd";
 import { triggerGitRefresh, useGitRefreshKey } from "../../use-git-refresh-key";
@@ -833,10 +834,9 @@ export function ChangesSurface({
 
   const sidebarToggle = (
     <Tooltip label={sidebarVisible ? "Hide changes" : "Show changes"}>
-      <Button
-        variant="ghost"
-        size="icon-sm"
-        aria-label={sidebarVisible ? "Hide changes list" : "Show changes list"}
+      <IconButton
+        size="standard"
+        label={sidebarVisible ? "Hide changes list" : "Show changes list"}
         aria-pressed={sidebarVisible}
         onClick={() => setChangesSidebarVisible(!sidebarVisible)}
         className={cn(
@@ -845,7 +845,7 @@ export function ChangesSurface({
         )}
       >
         <Folders className="size-3.5" />
-      </Button>
+      </IconButton>
     </Tooltip>
   );
 

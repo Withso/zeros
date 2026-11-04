@@ -22,7 +22,7 @@
 
 import { PanelLeft } from "lucide-react";
 
-import { Button } from "../shared/ui/primitives/button";
+import { IconButton } from "@/renderer/shared/ui/primitives/icon-button";
 import { Tooltip } from "../shared/ui/primitives/tooltip";
 import { toggleSidebarCollapsed } from "./sidebar-collapsed";
 
@@ -39,18 +39,17 @@ export function SidebarToggleButton({ collapsed }: { collapsed: boolean }) {
   const label = collapsed ? "Show sidebar" : "Hide sidebar";
   return (
     <Tooltip label={label} side="bottom">
-      <Button
+      <IconButton
         type="button"
-        variant="ghost"
-        size="icon"
+        size="standard"
         className={TOGGLE_CLS}
-        aria-label={label}
+        label={label}
         aria-expanded={!collapsed}
         aria-controls={APP_SIDEBAR_ID}
         onClick={toggleSidebarCollapsed}
       >
         <PanelLeft className="size-4" strokeWidth={1.5} />
-      </Button>
+      </IconButton>
     </Tooltip>
   );
 }

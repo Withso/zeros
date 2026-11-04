@@ -15,6 +15,7 @@ import React, {
   useRef,
   useState,
 } from "react";
+import { IconButton } from "@/renderer/shared/ui/primitives/icon-button";
 import {
   ChevronDown,
   ChevronRight,
@@ -409,10 +410,9 @@ const DesignLayerNodeRow = React.memo(function DesignLayerNodeRow({
           <DesignLayerRowName rename={rename} name={displayName} actions={actions} />
         </div>
       </Button>
-      <Button
+      <IconButton
         type="button"
-        variant="ghost"
-        size="icon-sm"
+        size="standard"
         className={cn(
           "absolute top-1/2 right-1 z-[2] size-6 -translate-y-1/2 [&_svg]:size-3.5",
           layer.node.visible
@@ -420,11 +420,11 @@ const DesignLayerNodeRow = React.memo(function DesignLayerNodeRow({
             : "text-muted-fg",
         )}
         tabIndex={-1}
-        aria-label={`${layer.node.visible ? "Hide" : "Show"} ${displayName}`}
+        label={`${layer.node.visible ? "Hide" : "Show"} ${displayName}`}
         onClick={() => actions.toggleVisibility(frame, layer)}
       >
         {layer.node.visible ? <Eye /> : <EyeClosed />}
-      </Button>
+      </IconButton>
     </div>
   );
 });
@@ -1356,12 +1356,11 @@ function OwnedDesignWorkspaceSidebarPanels({
           </span>
         ) : null}
         {expanded ? (
-          <Button
+          <IconButton
             type="button"
-            variant="ghost"
-            size="icon-sm"
+            size="standard"
             className="ml-auto size-6"
-            aria-label="Collapse all layers"
+            label="Collapse all layers"
             // Anything open anywhere counts, including containers inside a
             // frame the user has since folded — one click closes the whole
             // workspace.
@@ -1372,7 +1371,7 @@ function OwnedDesignWorkspaceSidebarPanels({
             }}
           >
             <ListCollapse />
-          </Button>
+          </IconButton>
         ) : null}
       </div>
 

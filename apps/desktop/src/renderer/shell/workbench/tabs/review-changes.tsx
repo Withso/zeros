@@ -10,9 +10,10 @@
 // the sub-nav's file count and this list always agree.
 
 import React, { useEffect, useMemo, useRef, useState } from "react";
+import { IconButton } from "@/renderer/shared/ui/primitives/icon-button";
 import { ChevronsDownUp, ChevronsUpDown } from "lucide-react";
 
-import { Button, Tooltip } from "@/renderer/shared/ui/primitives";
+import { Tooltip } from "@/renderer/shared/ui/primitives";
 import { cn } from "@/renderer/shared/ui/cn";
 import { ReviewPatchDiff } from "@/renderer/features/code-review/review-code-view";
 import { ReviewFeedback } from "@/renderer/features/code-review/review-feedback";
@@ -182,9 +183,9 @@ export function ReviewChangesSection({
         <Tooltip
           label={allCollapsed ? "Expand all" : "Collapse all"}
         >
-          <Button
-            variant="ghost"
-            size="icon-sm"
+          <IconButton
+            size="standard"
+            label={allCollapsed ? "Expand all" : "Collapse all"}
             onClick={() =>
               setCollapsed(
                 allCollapsed ? new Set() : new Set(files.map((f) => f.path)),
@@ -196,7 +197,7 @@ export function ReviewChangesSection({
             ) : (
               <ChevronsDownUp className="size-3.5" />
             )}
-          </Button>
+          </IconButton>
         </Tooltip>
       </div>
       {error && <ErrorCallout text={error} onRetry={onRetry} />}

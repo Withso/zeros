@@ -127,7 +127,7 @@ export function SidebarWorkspaceHoverCard({
         ) : action === "commit-push" ? (
           <Tooltip label={working ? AGENT_WORKING_REASON : undefined}>
             <span className="inline-flex">
-              <Button variant="default" disabled={working} onClick={commitAndPush}>
+              <Button variant="primary" disabled={working} onClick={commitAndPush}>
                 <GitCommitVertical />Commit and push
               </Button>
             </span>

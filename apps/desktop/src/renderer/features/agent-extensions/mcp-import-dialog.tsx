@@ -437,7 +437,7 @@ export function McpImportDialog({ open, onClose }: { open: boolean; onClose: () 
             Cancel
           </Button>
           <Button
-            variant="default"
+            variant="primary"
             size="sm"
             disabled={busy || loading || !connected || !!scanError || !layer || settingsLoading || !!settingsReadError || !!layer.error || selectedCount === 0}
             onClick={() => void handleImport()}

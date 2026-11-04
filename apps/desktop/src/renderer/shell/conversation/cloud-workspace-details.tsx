@@ -1,4 +1,5 @@
 import { useCallback, useState, useSyncExternalStore } from "react";
+import { IconButton } from "@/renderer/shared/ui/primitives/icon-button";
 import { Activity, ArrowUpRight, Clock, Cloud, FolderGit2 } from "lucide-react";
 import { Button, Tooltip } from "../../shared/ui/primitives";
 import { Popover, PopoverContent, PopoverTrigger } from "../../shared/ui/primitives/popover";
@@ -41,8 +42,8 @@ export function CloudWorkspaceDetails({ folder }: { folder: string }) {
   const rows = workspace ? [
     { Icon: FolderGit2, label: "Repository", value: <span className="inline-flex min-w-0 items-center justify-end gap-1">
       <Tooltip label={repositoryName}><span className="min-w-0 truncate">{repositoryName}</span></Tooltip>
-      {repositoryUrl && <Tooltip label="Open repository"><Button variant="ghost" size="icon-compact" aria-label="Open repository"
-        onClick={() => { void shellOpenUrl(repositoryUrl).catch(() => toast.error("Couldn't open repository")); }}><ArrowUpRight /></Button></Tooltip>}
+      {repositoryUrl && <Tooltip label="Open repository"><IconButton size="compact" label="Open repository"
+        onClick={() => { void shellOpenUrl(repositoryUrl).catch(() => toast.error("Couldn't open repository")); }}><ArrowUpRight /></IconButton></Tooltip>}
     </span> },
     { Icon: Clock, label: "Created", value: <Tooltip label={new Date(workspace.createdAt).toLocaleString()}>
       <span>{createdAge === "now" ? "Just now" : `${createdAge} ago`}</span></Tooltip> },
@@ -52,9 +53,9 @@ export function CloudWorkspaceDetails({ folder }: { folder: string }) {
     <Popover open={open && surfaceActive} onOpenChange={setOpen}>
       <Tooltip label="Workspace details" delayDuration={1500} disabled={open}>
         <PopoverTrigger asChild>
-          <Button type="button" variant="ghost" size="icon" aria-label="Cloud workspace details" className="text-fg2 size-7 shrink-0">
+          <IconButton type="button" size="standard" label="Cloud workspace details" className="text-fg2 size-7 shrink-0">
             <Cloud size={16} strokeWidth={1.5} />
-          </Button>
+          </IconButton>
         </PopoverTrigger>
       </Tooltip>
       <PopoverContent align="start" sideOffset={6} className="w-[320px]" aria-label="Cloud workspace details">

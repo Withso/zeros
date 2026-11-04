@@ -13,6 +13,7 @@ import React, {
   useRef,
   useState,
 } from "react";
+import { IconButton } from "@/renderer/shared/ui/primitives/icon-button";
 import {
   Check,
   ChevronsUpDown,
@@ -341,7 +342,6 @@ export function RawTomlEditor({
         </div>
         <Button
           variant="secondary"
-          size="md"
           onClick={() => void handleSave()}
           disabled={loading || saving || !dirty}
         >
@@ -551,12 +551,11 @@ function EnvVarRow({
       {value !== undefined ? (
         <div className="flex min-w-0 flex-1 items-center gap-1">
           <Tooltip label={revealed ? "Hide value" : "Reveal value"}>
-            <Button
-              variant="ghost"
-              size="icon-sm"
+            <IconButton
+              size="standard"
               onClick={() => setRevealed((v) => !v)}
               aria-pressed={revealed}
-              aria-label={
+              label={
                 revealed ? `Hide value of ${name}` : `Reveal value of ${name}`
               }
               className="text-fg2 hover:text-fg1 shrink-0"
@@ -570,7 +569,7 @@ function EnvVarRow({
               ) : (
                 <Eye className="size-3.5" strokeWidth={1} aria-hidden="true" />
               )}
-            </Button>
+            </IconButton>
           </Tooltip>
           <Tooltip label="Copy">
             <button
@@ -599,12 +598,11 @@ function EnvVarRow({
       {(onEdit || onRemove) && (
         <div className="flex shrink-0 items-center gap-0.5">
           {onEdit && (
-            <Button
-              variant="ghost"
-              size="icon-sm"
+            <IconButton
+              size="standard"
               onClick={onEdit}
               disabled={disabled}
-              aria-label={`Edit ${name}`}
+              label={`Edit ${name}`}
               className="text-fg2 hover:text-fg1"
             >
               <Pencil
@@ -612,15 +610,14 @@ function EnvVarRow({
                 strokeWidth={1}
                 aria-hidden="true"
               />
-            </Button>
+            </IconButton>
           )}
           {onRemove && (
-            <Button
-              variant="ghost"
-              size="icon-sm"
+            <IconButton
+              size="standard"
               onClick={onRemove}
               disabled={disabled}
-              aria-label={`Remove ${name}`}
+              label={`Remove ${name}`}
               className="text-fg2 hover:bg-red-primary/10 hover:text-red-primary"
             >
               <Trash2
@@ -628,7 +625,7 @@ function EnvVarRow({
                 strokeWidth={1}
                 aria-hidden="true"
               />
-            </Button>
+            </IconButton>
           )}
         </div>
       )}
@@ -1641,7 +1638,6 @@ function ActionsSection({
       <SettingsActions>
         <Button
           variant="secondary"
-          size="md"
           onClick={() => void handleSave()}
           disabled={repo.loading || !dirty}
         >
@@ -1800,7 +1796,6 @@ function RemoveRepositorySection({ project }: { project: Project }) {
       <div>
         <Button
           variant="destructive-secondary"
-          size="md"
           onClick={() => setConfirmOpen(true)}
         >
           <Trash2 className="size-3.5" aria-hidden="true" />

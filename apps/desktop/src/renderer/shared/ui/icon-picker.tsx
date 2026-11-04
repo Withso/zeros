@@ -11,8 +11,8 @@
 
 import { useMemo, useState } from "react";
 
+import { IconButton } from "@/renderer/shared/ui/primitives/icon-button";
 import { cn } from "./cn";
-import { Button } from "./primitives/button";
 import { Command, CommandInput, CommandList } from "./primitives/command";
 import { Popover, PopoverContent, PopoverTrigger } from "./primitives/popover";
 import { Tooltip } from "./primitives/tooltip";
@@ -51,9 +51,9 @@ export function IconPicker({
     >
       <Tooltip label={label} delayDuration={1500} disabled={open}>
         <PopoverTrigger asChild>
-          <Button variant="ghost" size="icon-sm" aria-label={label}>
+          <IconButton size="standard" label={label}>
             <DynamicIcon name={selected} className="size-4" />
-          </Button>
+          </IconButton>
         </PopoverTrigger>
       </Tooltip>
       <PopoverContent align="start" className="w-56 overflow-hidden p-0">

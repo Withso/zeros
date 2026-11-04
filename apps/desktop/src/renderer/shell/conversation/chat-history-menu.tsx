@@ -3,6 +3,7 @@
 // ──────────────────────────────────────────────────────────
 
 import React, { useState } from "react";
+import { IconButton } from "@/renderer/shared/ui/primitives/icon-button";
 import {
   MessageCircle,
   RotateCcw,
@@ -11,7 +12,6 @@ import {
 
 import { AgentIcon } from "../../features/agent/agent-icon";
 import type { ChatThread } from "../../state/store";
-import { Button } from "../../shared/ui/primitives/button";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -49,14 +49,13 @@ export function ChatHistoryMenu({
     >
       <Tooltip label="Chat history" delayDuration={1500}>
         <DropdownMenuTrigger asChild>
-          <Button
-            variant="ghost"
-            size="icon-sm"
+          <IconButton
+            size="standard"
             className={HISTORY_BUTTON_CLS}
-            aria-label="Chat history"
+            label="Chat history"
           >
             <MessageCircle />
-          </Button>
+          </IconButton>
         </DropdownMenuTrigger>
       </Tooltip>
       <DropdownMenuContent

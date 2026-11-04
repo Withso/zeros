@@ -1,4 +1,5 @@
 import { useEffect, useId, useMemo, useRef, useState, type ReactNode } from "react";
+import { IconButton } from "@/renderer/shared/ui/primitives/icon-button";
 import { Check, ChevronDown, ChevronRight, FileUp, Plus, Trash2, X } from "lucide-react";
 import { Input, Textarea } from "../../shared/ui";
 import { Button } from "../../shared/ui/primitives/button";
@@ -72,9 +73,9 @@ function KeyValueFields({ kind, rows, onChange }: { kind: "variable" | "header";
       <Input aria-label={`${kind === "variable" ? "Variable" : "Header"} value ${index + 1}`} type="password" autoComplete="new-password" spellCheck={false}
         placeholder={row.stored ? "Saved value" : "Value"} value={row.value} className="text-fg1 min-w-0 flex-1 font-sans text-xs"
         onChange={event => onChange(rows.map(entry => entry.id === row.id ? { ...entry, value: event.target.value } : entry))} />
-      <Button variant="ghost" size="icon" aria-label={`Remove ${kind} ${index + 1}`} onClick={() => onChange(rows.filter(entry => entry.id !== row.id))}>
+      <IconButton size="standard" label={`Remove ${kind} ${index + 1}`} onClick={() => onChange(rows.filter(entry => entry.id !== row.id))}>
         <Trash2 aria-hidden="true" />
-      </Button>
+      </IconButton>
     </div>)}
     <Button variant="secondary" onClick={() => onChange([...rows, { id: nextKvId(), key: "", value: "", secret: true, stored: false }])}>
       <Plus aria-hidden="true" />Add {kind}
@@ -270,7 +271,7 @@ export function McpServerEditor({ initial, target, onSave, onBack, onSaved = onB
     <div className="bg-bg1 sticky top-0 z-1 flex flex-wrap items-start justify-between gap-3 py-3">
       <div className="flex flex-col gap-1"><h1 className="text-fg1 m-0 text-lg font-medium">{initial ? "Edit MCP server" : "Add MCP server"}</h1>
         <p className="text-fg2 m-0 text-xs">Connect tools and services your agents can use.</p></div>
-      {!readOnly && <Button variant="default" onClick={() => void save()} disabled={busy || target.loading || savedConnection?.connecting}>
+      {!readOnly && <Button variant="primary" onClick={() => void save()} disabled={busy || target.loading || savedConnection?.connecting}>
         {busy && <ZerosSpinner className="size-3.5" />}{initial ? "Save changes" : "Add server"}</Button>}
     </div>
     {(initial || canProbe) && <Section title="Connection">
@@ -311,7 +312,7 @@ export function McpServerEditor({ initial, target, onSave, onBack, onSaved = onB
           <Field label="Command to launch" htmlFor={`${id}-command`}><Input id={`${id}-command`} value={draft.command} onChange={event => set("command", event.target.value)} placeholder="npx" className="text-fg1 font-sans text-xs" spellCheck={false} /></Field>
           <Field label="Arguments"><div className="flex flex-col gap-2">{args.map((row, index) => <div className="flex items-center gap-2" key={row.id}>
             <Input aria-label={`Argument ${index + 1}`} value={row.value} onChange={event => setArgs(current => current.map(entry => entry.id === row.id ? { ...entry, value: event.target.value } : entry))} placeholder={index === 0 ? "--yes" : "Argument"} className="text-fg1 min-w-0 font-sans text-xs" spellCheck={false} />
-            <Button variant="ghost" size="icon" aria-label={`Remove argument ${index + 1}`} onClick={() => setArgs(current => current.filter(entry => entry.id !== row.id))}><Trash2 aria-hidden="true" /></Button>
+            <IconButton size="standard" label={`Remove argument ${index + 1}`} onClick={() => setArgs(current => current.filter(entry => entry.id !== row.id))}><Trash2 aria-hidden="true" /></IconButton>
           </div>)}<Button variant="secondary" onClick={() => setArgs(current => [...current, { id: nextKvId(), value: "" }])}><Plus aria-hidden="true" />Add argument</Button></div></Field>
           <Field label="Working directory" htmlFor={`${id}-cwd`} hint="Optional. Relative paths start at the workspace folder."><Input id={`${id}-cwd`} value={draft.cwd} onChange={event => set("cwd", event.target.value)} placeholder="Workspace folder" className="text-fg1 font-sans text-xs" spellCheck={false} /></Field>
           <Field label="Also listens on" htmlFor={`${id}-listen`} hint="Optional. Use this local HTTP endpoint after launching the command."><Input id={`${id}-listen`} value={draft.listenUrl ?? ""} onChange={event => set("listenUrl", event.target.value)} placeholder="http://127.0.0.1:8080/mcp" className="text-fg1 font-sans text-xs" spellCheck={false} /></Field>
