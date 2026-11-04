@@ -1,4 +1,4 @@
-import type { ContentBlock, PromptResponse, SessionNotification } from "@zeros/protocol/agent-events";
+import type { ContentBlock, PromptResponse, SessionNotification, QuestionRequest, QuestionResponse, RequestPermissionRequest, RequestPermissionResponse } from "@zeros/protocol/agent-events";
 import type { SteerOutcome } from "@zeros/protocol/messages";
 import type { DriverTimingStage } from "../agent-timings";
 import type { DriverMcpServers } from "../mcp/gateway";
@@ -13,6 +13,9 @@ interface DriverSession {
   nativeSessionId?: string;
   onTiming?: (stage: DriverTimingStage) => void;
   mcpServers?: DriverMcpServers;
+  modeId?: string;
+  onQuestion?: (request: QuestionRequest, signal?: AbortSignal) => Promise<QuestionResponse>;
+  onPermission?: (request: RequestPermissionRequest, signal?: AbortSignal) => Promise<RequestPermissionResponse>;
 }
 
 export type DriverOpen = DriverSession & (
@@ -37,6 +40,7 @@ export interface Driver {
   prompt(content: ContentBlock[]): Promise<PromptResponse>;
   steer(content: ContentBlock[]): Promise<SteerOutcome>;
   setModel(model: string): Promise<void>;
+  setMode?(modeId: string): Promise<void>;
   /** Optional native live settings; credentials never enter this courier. */
   updateConfig?(config: { model?: string; effort?: string; fast: boolean }): Promise<void>;
   interrupt(): Promise<void>;

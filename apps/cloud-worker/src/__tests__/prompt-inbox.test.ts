@@ -5,8 +5,10 @@ import { join } from "node:path";
 import { afterEach, expect, it, vi } from "vitest";
 import type { SessionUpdate } from "@zeros/protocol/agent-events";
 import { CloudWorker } from "../worker";
+import type { Agents } from "../agents";
 import type { CheckoutRefresh } from "../workspace/checkout";
 import { SessionStore, type SessionData } from "../sessions/session-store";
+import { TurnService } from "../workspace/turns";
 import { CLIENT_A, FakeDriver, FakeRelay, WORKSPACE_ID, WORKSPACE_KEY, browserFrame, config } from "./worker-fixtures";
 
 const directories: string[] = [], workers: CloudWorker[] = [];
@@ -33,6 +35,7 @@ class PullRelay extends FakeRelay {
   onAck?: (body: any, signal?: AbortSignal) => Promise<unknown>;
   onBegin?: (body: any, signal?: AbortSignal) => Promise<unknown>;
   onOutcome?: (body: any) => Promise<unknown>;
+  onStop?: (body: any) => Promise<unknown>;
   enqueue(batch: Batch): void {
     if (this.waiting) { const resolve = this.waiting; this.waiting = undefined; resolve(batch); }
     else this.queued.push(batch);
@@ -41,6 +44,7 @@ class PullRelay extends FakeRelay {
     this.calls.push({ op, body });
     if (op === "pull") {
       if (this.queued.length) return this.queued.shift();
+      if (body.waitMs === 0) return { prompts: [], stops: [] };
       return new Promise<Batch>((resolve, reject) => {
         const abort = () => { this.waiting = undefined; reject(new DOMException("Aborted", "AbortError")); };
         this.waiting = batch => { signal?.removeEventListener("abort", abort); resolve(batch); };
@@ -50,19 +54,19 @@ class PullRelay extends FakeRelay {
     if (op === "ack") return this.onAck ? this.onAck(body, signal) : { state: "inboxed" };
     if (op === "begin") return this.onBegin ? this.onBegin(body, signal) : { dispatch: true, state: "dispatching" };
     if (op === "outcome") return this.onOutcome ? this.onOutcome(body) : { state: body.state };
-    if (op === "stop") return { chatId: body.chatId, epoch: (BigInt(body.throughEpoch) + 1n).toString() };
+    if (op === "stop") return this.onStop ? this.onStop(body) : { chatId: body.chatId, epoch: (BigInt(body.throughEpoch) + 1n).toString() };
     return { ok: true };
   }
 }
 
-async function setup(options: { relay?: PullRelay; driver?: FakeDriver; createDriver?: () => FakeDriver; directory?: string; enabled?: boolean; agent?: "codex" | "claude"; refresh?: CheckoutRefresh } = {}) {
+async function setup(options: { relay?: PullRelay; driver?: FakeDriver; createDriver?: () => FakeDriver; directory?: string; enabled?: boolean; interactions?: boolean; agent?: "codex" | "claude"; refresh?: CheckoutRefresh } = {}) {
   const directory = options.directory ?? await mkdtemp(join(tmpdir(), "zeros-outbox-"));
   if (!options.directory) directories.push(directory);
   const relay = options.relay ?? new PullRelay(), driver = options.driver ?? new FakeDriver();
   const worker = new CloudWorker({ directory, transport: relay, workspaceId: WORKSPACE_ID,
     prepareCheckout: async () => ({ createdBranch: true, refresh: options.refresh }), drivers: { [options.agent ?? "codex"]: options.createDriver ?? (() => driver) } });
   workers.push(worker); worker.start();
-  await relay.receive({ ...config,
+  await relay.receive({ ...config, ...(options.interactions ? { agentInteractions: 1 } : {}),
     ...(options.agent === "claude" ? { agents: { claude: { apiKey: "fixture-claude-token" } } } : {}),
     ...(options.enabled === false ? {} : { promptOutbox: 1 }) });
   return { worker, relay, driver, directory };
@@ -75,6 +79,7 @@ const until = (read: () => unknown) => expect.poll(read, { timeout: 1500, interv
 afterEach(async () => {
   await Promise.all(workers.splice(0).map(worker => worker.dispose()));
   await Promise.all(directories.splice(0).map(directory => rm(directory, { recursive: true, force: true })));
+  vi.restoreAllMocks();
 });
 
 it("fences outbox delivery before driver startup without treating empty polls as activity", async () => {
@@ -402,6 +407,28 @@ it("does not acknowledge a Stop whose native interrupt failed, and retries the s
   await until(async () => (await persisted(f.directory))[0].inbox[0].state).toBe("cancelled");
 });
 
+it.each(["outbox revocation", "HTTP Stop batch"])("interrupts all affected chats before held persistence during %s", async boundary => {
+  const relay = new PullRelay(), drivers: FakeDriver[] = [], held = defer(), entered = defer();
+  const f = await setup({ relay, createDriver: () => { const driver = new FakeDriver(); drivers.push(driver); return driver; } });
+  relay.enqueue({ prompts: [delivery(randomUUID(), "first"), delivery(randomUUID(), "first", "0", "2"), delivery(randomUUID(), "second")], stops: [] });
+  await until(() => drivers.map(driver => driver.prompts.length)).toEqual([1, 1]);
+  const stop = SessionStore.prototype.stopOutbox;
+  vi.spyOn(SessionStore.prototype, "stopOutbox").mockImplementation(async function (this: SessionStore, chatId, epoch) {
+    if (chatId === "first") { entered.resolve(); await held.promise; }
+    return stop.call(this, chatId, epoch);
+  });
+  let stopping: Promise<void> | undefined;
+  try {
+    if (boundary === "outbox revocation") stopping = (f.worker as unknown as { agents: Agents }).agents.fenceOutbox();
+    else relay.enqueue({ prompts: [], stops: [{ chatId: "first", epoch: "1" }, { chatId: "second", epoch: "1" }] });
+    await entered.promise;
+    expect(drivers.map(driver => driver.interrupts)).toEqual([1, 1]);
+  } finally {
+    held.resolve(); await stopping;
+    if (boundary === "HTTP Stop batch") await until(() => relay.calls.filter(call => call.op === "stop-ack").length).toBe(2);
+  }
+});
+
 it("fences control-plane follow-ups when an older desktop sends Stop over the bridge", async () => {
   const f = await setup(), item = delivery();
   f.relay.enqueue({ prompts: [item], stops: [] });
@@ -462,4 +489,193 @@ it.each(["delivered", "queued"] as const)("durably steers an active turn, retain
     f.driver.complete();
   }
   expect(f.driver.steers).toHaveLength(1);
+});
+
+
+it("dispatches a first HTTP Plan prompt with its frozen mode before opening a native driver", async () => {
+  const relay = new PullRelay(), item = delivery();
+  Object.assign(item.payload, { permissionMode: "plan" }); relay.enqueue({ prompts: [item], stops: [] });
+  const f = await setup({ relay, interactions: true });
+  await until(() => f.driver.prompts.length).toBe(1);
+  expect(f.driver.opened).toMatchObject({ modeId: "read-only" });
+  expect((await persisted(f.directory))[0].inbox[0].outbox).toMatchObject({ permissionMode: "plan" });
+  f.driver.complete();
+});
+
+it("preserves a frozen first-send Plan mode when selection changes during dispatch approval", async () => {
+  const relay = new PullRelay(), item = delivery(), begin = defer<unknown>(), driver = new FakeDriver();
+  Object.assign(item.payload, { permissionMode: "plan" });
+  relay.enqueue({ prompts: [item], stops: [] }); relay.onBegin = () => begin.promise;
+  const dispatched: Array<string | undefined> = [], prompt = driver.prompt.bind(driver);
+  vi.spyOn(driver, "prompt").mockImplementation(content => {
+    dispatched.push(driver.modes.at(-1) ?? driver.opened?.modeId); return prompt(content);
+  });
+  const f = await setup({ relay, driver, interactions: true });
+  try {
+    await until(() => relay.calls.some(call => call.op === "begin")).toBe(true);
+    const executionId = (await persisted(f.directory))[0].executionId;
+    await relay.receive({ t: "open", clientId: CLIENT_A });
+    const mode = browserFrame("AGENT_SET_MODE", { agentId: "codex", chatId: "chat", executionId, sessionId: executionId, modeId: "full-access" });
+    await relay.request(CLIENT_A, mode);
+    expect(relay.response(mode.id)).toMatchObject({ type: "AGENT_MODE_CHANGED", modeId: "full-access" });
+    expect(driver.prompts).toHaveLength(0);
+    begin.resolve({ dispatch: true, state: "dispatching" });
+    await until(() => driver.prompts.length).toBe(1);
+    expect(dispatched).toEqual(["read-only"]);
+    driver.complete();
+  } finally { begin.resolve({ dispatch: false, state: "cancelled" }); }
+});
+
+it("refuses an explicit persisted Plan prompt when interactions were not negotiated", async () => {
+  const relay = new PullRelay(), item = delivery();
+  Object.assign(item.payload, { permissionMode: "plan" }); relay.enqueue({ prompts: [item], stops: [] });
+  const f = await setup({ relay });
+  await until(() => relay.calls.some(call => call.op === "outcome" && call.body.state === "failed")).toBe(true);
+  expect(f.driver.opened).toBeUndefined(); expect(f.driver.prompts).toHaveLength(0);
+  expect((await persisted(f.directory))[0].inbox[0].error).toContain("Plan mode");
+});
+
+it("waits for an older mode change before admitting the frozen Plan turn", async () => {
+  const relay = new PullRelay(), item = delivery(), begin = defer<unknown>(), modeGate = defer(), snapshotted = defer(), driver = new FakeDriver();
+  Object.assign(item.payload, { permissionMode: "plan" }); relay.enqueue({ prompts: [item], stops: [] }); relay.onBegin = () => begin.promise;
+  let modeEntered = false;
+  vi.spyOn(driver, "setMode").mockImplementation(async mode => {
+    if (mode === "full-access") { modeEntered = true; await modeGate.promise; }
+    driver.modes.push(mode);
+  });
+  const capture = TurnService.prototype.begin;
+  vi.spyOn(TurnService.prototype, "begin").mockImplementation(async function (this: TurnService, ...args) {
+    const result = await capture.apply(this, args); snapshotted.resolve(); return result;
+  });
+  const f = await setup({ relay, driver, interactions: true });
+  try {
+    await until(() => relay.calls.some(call => call.op === "begin")).toBe(true);
+    const executionId = (await persisted(f.directory))[0].executionId;
+    await relay.receive({ t: "open", clientId: CLIENT_A });
+    const change = relay.request(CLIENT_A, browserFrame("AGENT_SET_MODE", { agentId: "codex", chatId: "chat", executionId, sessionId: executionId, modeId: "full-access" }));
+    await until(() => modeEntered).toBe(true);
+    begin.resolve({ dispatch: true, state: "dispatching" }); await snapshotted.promise;
+    expect(driver.prompts).toHaveLength(0);
+    modeGate.resolve(); await change;
+    await until(() => driver.prompts.length).toBe(1);
+    expect(driver.modes).toEqual(["full-access", "read-only"]); driver.complete();
+  } finally { modeGate.resolve(); begin.resolve({ dispatch: false, state: "cancelled" }); }
+});
+
+it("does not dispatch after Stop wins while the final native mode is applying", async () => {
+  const relay = new PullRelay(), item = delivery(), modeGate = defer(), driver = new FakeDriver();
+  Object.assign(item.payload, { permissionMode: "plan" }); relay.enqueue({ prompts: [item], stops: [] });
+  let entered = false;
+  vi.spyOn(driver, "setMode").mockImplementation(async () => { entered = true; await modeGate.promise; });
+  const f = await setup({ relay, driver, interactions: true });
+  try {
+    await until(() => entered).toBe(true);
+    relay.enqueue({ prompts: [], stops: [{ chatId: "chat", epoch: "1" }] });
+    await relay.receive({ t: "prompts" });
+    await until(async () => (await persisted(f.directory))[0].deliveryEpoch).toBe("1");
+    modeGate.resolve();
+    await until(() => relay.calls.some(call => call.op === "outcome" && call.body.state === "cancelled")).toBe(true);
+    expect(driver.prompts).toHaveLength(0);
+  } finally { modeGate.resolve(); }
+});
+
+it("queues a differing-mode HTTP steer without changing the running turn's mode", async () => {
+  const relay = new PullRelay(), first = delivery(), second = delivery(randomUUID(), "chat", "0", "2");
+  Object.assign(first.payload, { permissionMode: "bypass" });
+  Object.assign(second.payload, { permissionMode: "plan", mode: "steer" });
+  relay.enqueue({ prompts: [first], stops: [] });
+  const f = await setup({ relay, interactions: true });
+  await until(() => f.driver.prompts.length).toBe(1);
+  relay.enqueue({ prompts: [second], stops: [] });
+  await until(() => relay.calls.filter(call => call.op === "ack").length).toBe(2);
+  expect(f.driver.opened).toMatchObject({ modeId: "full-access" }); expect(f.driver.modes).toEqual(["full-access"]); expect(f.driver.steers).toHaveLength(0);
+  f.driver.complete(); await until(() => f.driver.prompts.length).toBe(2);
+  expect(f.driver.modes).toEqual(["full-access", "read-only"]); f.driver.complete();
+});
+
+it.each(["explicit", "native"])("queues a frozen Plan steer after a %s switch changed the running mode", async source => {
+  const relay = new PullRelay(), first = delivery(), second = delivery(randomUUID(), "chat", "0", "2");
+  Object.assign(first.payload, { permissionMode: "plan" });
+  Object.assign(second.payload, { permissionMode: "plan", mode: "steer" });
+  relay.enqueue({ prompts: [first], stops: [] });
+  const f = await setup({ relay, interactions: true });
+  await until(() => f.driver.prompts.length).toBe(1);
+  if (source === "explicit") {
+    await relay.receive({ t: "open", clientId: CLIENT_A });
+    await relay.request(CLIENT_A, browserFrame("AGENT_SET_MODE", { agentId: "codex", chatId: "chat", sessionId: f.driver.opened!.sessionId,
+      executionId: f.driver.opened!.sessionId, modeId: "full-access" }));
+  } else f.driver.emit({ sessionUpdate: "current_mode_update", currentModeId: "full-access" });
+  await until(async () => (await persisted(f.directory))[0].chat.permissionMode).toBe("danger");
+  relay.enqueue({ prompts: [second], stops: [] });
+  await until(async () => (await persisted(f.directory))[0].inbox[1]?.outbox?.acknowledged).toBe(true);
+  await until(() => !!relay.waiting).toBe(true);
+  expect(f.driver.steers).toHaveLength(0);
+  f.driver.complete(); await until(() => f.driver.prompts.length).toBe(2);
+  expect(f.driver.modes.at(-1)).toBe("read-only"); f.driver.complete();
+});
+
+it("rechecks a frozen Plan steer after a held dispatch approval", async () => {
+  const relay = new PullRelay(), first = delivery(), second = delivery(randomUUID(), "chat", "0", "2"), gate = defer<unknown>();
+  Object.assign(first.payload, { permissionMode: "plan" });
+  Object.assign(second.payload, { permissionMode: "plan", mode: "steer" });
+  relay.enqueue({ prompts: [first], stops: [] });
+  const f = await setup({ relay, interactions: true });
+  await until(() => f.driver.prompts.length).toBe(1);
+  relay.onBegin = () => gate.promise;
+  try {
+    relay.enqueue({ prompts: [second], stops: [] });
+    await until(() => relay.calls.filter(call => call.op === "begin").length).toBe(2);
+    f.driver.emit({ sessionUpdate: "current_mode_update", currentModeId: "full-access" });
+    gate.resolve({ dispatch: true, state: "dispatching" });
+    await until(async () => (await persisted(f.directory))[0].inbox[1].state).toBe("queued");
+    expect(f.driver.steers).toHaveLength(0);
+    f.driver.complete(); await until(() => f.driver.prompts.length).toBe(2);
+    expect(f.driver.modes.at(-1)).toBe("read-only"); f.driver.complete();
+  } finally { gate.resolve({ dispatch: true, state: "dispatching" }); }
+});
+
+it("expires pending HTTP input through Stop so queued successors never dispatch", async () => {
+  const timers = vi.spyOn(globalThis, "setTimeout"), relay = new PullRelay(), first = delivery(), second = delivery(randomUUID(), "chat", "0", "2");
+  relay.enqueue({ prompts: [first], stops: [] });
+  const f = await setup({ relay, interactions: true });
+  await until(() => f.driver.prompts.length).toBe(1);
+  const response = f.driver.opened!.onQuestion!({ sessionId: f.driver.opened!.sessionId, questionId: "http-question", nativeRequestId: "http-native", toolCallId: "http-tool",
+    source: "native_rpc", blocking: true, questions: [{ id: "ask", prompt: "Continue?", options: [], allowOther: true }] });
+  await until(async () => (await persisted(f.directory))[0].pendingInteractions?.length).toBe(1);
+  relay.enqueue({ prompts: [second], stops: [] });
+  await until(() => relay.calls.filter(call => call.op === "ack").length).toBe(2);
+  const timeout = timers.mock.calls.find(([, ms]) => typeof ms === "number" && ms > 899_000 && ms <= 900_000)?.[0] as () => void;
+  expect(timeout).toBeTypeOf("function"); timeout();
+  await expect(response).resolves.toMatchObject({ outcome: { outcome: "dismissed" } });
+  await until(async () => (await persisted(f.directory))[0].inbox.map((entry: { state: string }) => entry.state)).toEqual(["cancelled", "cancelled"]);
+  await until(() => relay.calls.filter(call => call.op === "outcome" && call.body.state === "cancelled").length).toBe(2);
+  expect(relay.calls.some(call => call.op === "stop")).toBe(true);
+  expect(f.driver.prompts).toHaveLength(1); expect(f.driver.interrupts).toBe(1);
+  timers.mockRestore();
+});
+
+it("interrupts unanswered native input before a held control-plane Stop can release queued work", async () => {
+  const timers = vi.spyOn(globalThis, "setTimeout"), relay = new PullRelay(), stop = defer<unknown>();
+  relay.onStop = () => stop.promise;
+  const first = delivery(), second = delivery(randomUUID(), "chat", "0", "2");
+  relay.enqueue({ prompts: [first], stops: [] });
+  const f = await setup({ relay, interactions: true });
+  try {
+    await until(() => f.driver.prompts.length).toBe(1);
+    const response = f.driver.opened!.onQuestion!({ sessionId: f.driver.opened!.sessionId, questionId: "held", nativeRequestId: "held", toolCallId: "held",
+      source: "native_rpc", blocking: true, questions: [{ id: "ask", prompt: "Continue?", options: [], allowOther: true }] });
+    await until(async () => (await persisted(f.directory))[0].pendingInteractions?.length).toBe(1);
+    relay.enqueue({ prompts: [second], stops: [] });
+    await until(async () => (await persisted(f.directory))[0].inbox[1]?.outbox?.acknowledged).toBe(true);
+    const busyReports = relay.frames.filter(frame => frame.t === "idle" && !frame.idle).length;
+    const timeout = timers.mock.calls.find(([, ms]) => typeof ms === "number" && ms > 899_000 && ms <= 900_000)![0] as () => void;
+    timeout(); await response;
+    await until(() => relay.calls.some(call => call.op === "stop")).toBe(true);
+    await until(async () => (await persisted(f.directory))[0].inbox[0].state).toBe("cancelled");
+    expect(f.driver.interrupts).toBe(1); expect(f.driver.prompts).toHaveLength(1);
+    expect(relay.frames.filter(frame => frame.t === "idle" && !frame.idle)).toHaveLength(busyReports);
+    stop.resolve({ chatId: "chat", epoch: "1" });
+    await until(async () => (await persisted(f.directory))[0].inbox[1].state).toBe("cancelled");
+    expect(f.driver.prompts).toHaveLength(1);
+  } finally { stop.resolve({ chatId: "chat", epoch: "1" }); }
 });

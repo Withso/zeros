@@ -126,6 +126,7 @@ export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boo
       gitIdentity,
       githubPullRequests: 1,
       githubUserTokens: 1,
+      agentInteractions: 1,
       ...(v2.promptOutbox ? { promptOutbox: 1 as const } : {}),
       loginRevision: await store.loginRevision(workspace.id) ?? "0",
       workspace: {

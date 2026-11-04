@@ -6,7 +6,7 @@ import { CLOUD_V2_MAX_FRAME_BYTES, CloudV2WorkerActivitySchema, CloudV2WorkerHel
 import { emitCloudV2Timing, type CloudV2TimingRecord } from "./lifecycle.js";
 import type { CloudV2Store, CloudV2WorkerSession, CloudV2Workspace } from "./store.js";
 import { isCloudV2Token } from "./tokens.js";
-import { CloudV2PromptAckSchema, CloudV2PromptBeginSchema, CloudV2PromptOutcomeSchema, CloudV2PromptPullSchema, CloudV2PromptStopReplySchema, CloudV2PromptStopSchema } from "./prompt-contract.js";
+import { CloudV2PromptAckSchema, CloudV2PromptBeginSchema, CloudV2PromptOutcomeSchema, CloudV2PromptPullSchema, CloudV2PromptStopReplySchema, CloudV2PromptStopSchema, type CloudV2PromptPullReply } from "./prompt-contract.js";
 import { CloudGithubCheckoutSchema, type CloudGithubCheckout } from "./github-pr-contract.js";
 import type { CloudSourceContinuation, CloudSourceProof } from "./source-authority.js";
 import { cloudGithubFailure } from "./github-failure.js";
@@ -64,12 +64,13 @@ async function configuration(deps: CloudV2WorkerRouteDeps, workspace: CloudV2Wor
     const config = await deps.config(workspace, mode);
     if (!await deps.store.workerSession(token, bootId)) throw unauthorized();
     if (revision === await deps.store.loginRevision(workspace.id)) {
-      const { mcpServers, githubPullRequests, githubUserTokens, gitIdentity, ...legacy } = config;
+      const { mcpServers, githubPullRequests, githubUserTokens, gitIdentity, agentInteractions, ...legacy } = config;
       const { setup, baseCommit, github, ...workspaceConfig } = config.workspace;
       return { ...legacy, workspace: { ...workspaceConfig,
         ...(features.has("github-pr-v1") && github ? { github } : {}),
         ...(features.has("workspace-setup-v1") && setup !== undefined ? { setup } : {}),
         ...(features.has("checkout-v2") && baseCommit !== undefined ? { baseCommit } : {}) },
+        ...(features.has("agent-interactions-v1") && agentInteractions === 1 ? { agentInteractions } : {}),
         loginRevision: revision, ...(features.has("git-identity-v1") && gitIdentity !== undefined ? { gitIdentity } : {}),
         ...(features.has("github-user-token-v1") && githubUserTokens === 1 ? { githubUserTokens } : {}),
         ...(features.has("github-pr-v1") && githubPullRequests === 1 ? { githubPullRequests } : {}), ...(features.has("mcp-v1") && mcpServers ? { mcpServers } : {}),
@@ -182,14 +183,29 @@ export function createCloudV2WorkerRoutes(deps: CloudV2WorkerRouteDeps): Hono {
     app.post(`${CLOUD_V2_WORKER_API}/prompts/pull`, async c => {
       const auth = await session(c, deps);
       const { waitMs, held } = await body(c, CloudV2PromptPullSchema);
+      const forWorker = async (batch: CloudV2PromptPullReply): Promise<CloudV2PromptPullReply> => {
+        if (workerFeatures(c).has("agent-interactions-v1")) return batch;
+        const prompts: CloudV2PromptPullReply["prompts"] = [];
+        for (const item of batch.prompts) {
+          // Older workers reject unknown payload fields. Explicit Plan can
+          // never be stripped into a full-access dispatch.
+          if (item.payload.permissionMode === "plan") {
+            await outbox.outcome(auth.token, auth.bootId, { userMessageId: item.payload.userMessageId, deliveryId: item.deliveryId, state: "failed" });
+          } else {
+            const { permissionMode: _mode, ...payload } = item.payload;
+            prompts.push({ ...item, payload });
+          }
+        }
+        return { ...batch, prompts };
+      };
       const waiter = waitMs ? deps.waitForPrompts?.(auth.workspace.id, waitMs, c.req.raw.signal) : undefined;
       try {
         const first = await outbox.pull(auth.token, auth.bootId, held);
-        if (!waiter || first.prompts.length || first.stops.length) return c.json(first);
+        if (!waiter || first.prompts.length || first.stops.length) return c.json(await forWorker(first));
         await waiter.wait;
         if (c.req.raw.signal.aborted) throw new HttpError(503, "request_cancelled", "Delivery poll ended");
         await session(c, deps);
-        return c.json(await outbox.pull(auth.token, auth.bootId, held));
+        return c.json(await forWorker(await outbox.pull(auth.token, auth.bootId, held)));
       } finally { waiter?.dispose(); }
     });
     app.post(`${CLOUD_V2_WORKER_API}/prompts/ack`, async c => {

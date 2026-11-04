@@ -54,6 +54,87 @@ it("saves the frozen selection without a live execution, accepts only after the 
   expect(useSessionsStore.getState().pendingLocalTurns[chatId]).toBe("one");
   expect(useSessionsStore.getState().sessions[chatId]?.cloudOutbox?.states.one).toBe("queued");
 });
+it("freezes Plan on the first durable send before a live execution or metadata mirror exists", async () => {
+  f.workspace.chats[0] = { ...f.workspace.chats[0], permissionMode: "plan", lastModeId: "read-only" };
+  const runtime = new CloudPromptRuntime(), preparing = deferred<void>();
+  const sending = runtime.send(chatId, { text: "Plan the change", cloudQueue: {
+    prepareDurable: async () => { await preparing.promise; return { text: "Plan the change" }; },
+  } as never }, { id: "plan-first", deferDelivery: true });
+  await vi.advanceTimersByTimeAsync(0);
+  f.workspace.chats[0] = { ...f.workspace.chats[0], permissionMode: "danger", lastModeId: "full-access" };
+  preparing.resolve(); await sending;
+  expect(useSessionsStore.getState().sessions[chatId]?.sessionId).toBeNull();
+  const saved = await f.journal.read(owner);
+  expect(saved.entries[0]?.payload).toMatchObject({ userMessageId: "plan-first", permissionMode: "plan" });
+  expect(f.api.enqueue).not.toHaveBeenCalled();
+});
+it("omits the optional mode on legacy full-access sends and freezes it when the exact session advertises modes", async () => {
+  const runtime = new CloudPromptRuntime();
+  await runtime.send(chatId, { text: "Legacy send" }, { id: "legacy", deferDelivery: true });
+  expect((await f.journal.read(owner)).entries[0]?.payload).not.toHaveProperty("permissionMode");
+  useSessionsStore.getState().patchSession(chatId, { availableModes: [{ id: "read-only", name: "Plan" }, { id: "full-access", name: "Full access" }] });
+  await runtime.send(chatId, { text: "Full access" }, { id: "full", deferDelivery: true });
+  expect((await f.journal.read(owner)).entries[1]?.payload).toHaveProperty("permissionMode", "bypass");
+});
+it("freezes the displayed native mode while its chat metadata mirror is delayed", async () => {
+  const runtime = new CloudPromptRuntime();
+  const availableModes = [{ id: "read-only", name: "Plan" }, { id: "full-access", name: "Full access" }];
+  f.workspace.chats[0] = { ...f.workspace.chats[0], permissionMode: "danger", lastModeId: "full-access" };
+  useSessionsStore.getState().patchSession(chatId, { availableModes, currentModeId: "read-only" });
+  await runtime.send(chatId, { text: "Continue planning" }, { id: "native-plan", deferDelivery: true });
+  expect((await f.journal.read(owner)).entries[0]?.payload).toHaveProperty("permissionMode", "plan");
+  f.workspace.chats[0] = { ...f.workspace.chats[0], permissionMode: "plan", lastModeId: "read-only" };
+  useSessionsStore.getState().patchSession(chatId, { currentModeId: "full-access" });
+  await runtime.send(chatId, { text: "Implement" }, { id: "native-full", deferDelivery: true });
+  expect((await f.journal.read(owner)).entries[1]?.payload).toHaveProperty("permissionMode", "bypass");
+});
+it("preserves an exact saved Plan mode while a warming session still reports its default", async () => {
+  const runtime = new CloudPromptRuntime();
+  f.workspace.chats[0] = { ...f.workspace.chats[0], permissionMode: "auto", lastModeId: "read-only" };
+  useSessionsStore.getState().patchSession(chatId, { status: "warming", currentModeId: "full-access",
+    availableModes: [{ id: "read-only", name: "Plan" }, { id: "full-access", name: "Full access" }] });
+  await runtime.send(chatId, { text: "Plan" }, { id: "warming-plan", deferDelivery: true });
+  expect((await f.journal.read(owner)).entries[0]?.payload).toHaveProperty("permissionMode", "plan");
+});
+it("retries a failed Plan send with the user's current full-access selection", async () => {
+  f.workspace.chats[0] = { ...f.workspace.chats[0], permissionMode: "plan", lastModeId: "read-only" };
+  const runtime = new CloudPromptRuntime(); cleanup = runtime.start();
+  await runtime.send(chatId, { text: "Plan" }, { id: "plan" });
+  const page = await f.api.list(); page.items[0].state = "failed";
+  f.workspace.chats[0] = { ...f.workspace.chats[0], permissionMode: "danger", lastModeId: "full-access" };
+  useSessionsStore.getState().patchSession(chatId, { availableModes: [{ id: "read-only", name: "Plan" }, { id: "full-access", name: "Full access" }] });
+  expect(await runtime.recover(chatId, "plan", true)).toBe(true);
+  await vi.advanceTimersByTimeAsync(1);
+  expect(f.api.enqueue.mock.calls[1]?.[0]).toMatchObject({ permissionMode: "bypass" });
+});
+it("freezes the retry's mode before refreshing the failed receipt", async () => {
+  f.workspace.chats[0] = { ...f.workspace.chats[0], permissionMode: "plan", lastModeId: "read-only" };
+  const runtime = new CloudPromptRuntime();
+  await runtime.send(chatId, { text: "Plan" }, { id: "plan" });
+  await vi.advanceTimersByTimeAsync(1);
+  const page = await f.api.list(); page.items[0].state = "failed";
+  const gate = deferred<typeof page>(); let reading = false;
+  f.api.list.mockImplementationOnce(() => { reading = true; return gate.promise; });
+  useSessionsStore.getState().patchSession(chatId, { availableModes: [{ id: "read-only", name: "Plan" }, { id: "full-access", name: "Full access" }] });
+  f.workspace.chats[0] = { ...f.workspace.chats[0], permissionMode: "danger", lastModeId: "full-access" };
+  const recovering = runtime.recover(chatId, "plan", true);
+  await vi.advanceTimersByTimeAsync(0);
+  expect(reading).toBe(true);
+  f.workspace.chats[0] = { ...f.workspace.chats[0], permissionMode: "plan", lastModeId: "read-only" };
+  gate.resolve(page); expect(await recovering).toBe(true);
+  await vi.advanceTimersByTimeAsync(1);
+  expect(f.api.enqueue.mock.calls[1]?.[0]).toMatchObject({ permissionMode: "bypass" });
+});
+it("does not borrow mode support from another agent or a replaced workspace", async () => {
+  const runtime = new CloudPromptRuntime();
+  const availableModes = [{ id: "plan", name: "Plan" }, { id: "bypass", name: "Full access" }];
+  useSessionsStore.getState().patchSession(chatId, { agentId: "claude", availableModes, currentModeId: "plan" });
+  await runtime.send(chatId, { text: "Codex" }, { id: "agent", deferDelivery: true });
+  expect((await f.journal.read(owner)).entries[0]?.payload).not.toHaveProperty("permissionMode");
+  useSessionsStore.getState().patchSession(chatId, { agentId: "codex", cwd: "/local", availableModes, currentModeId: "read-only" });
+  await runtime.send(chatId, { text: "Cloud" }, { id: "owner", deferDelivery: true });
+  expect((await f.journal.read(owner)).entries[1]?.payload).not.toHaveProperty("permissionMode");
+});
 it("resumes privately saved work when a cold capability catalog arrives under the same account generation", async () => {
   await f.journal.change(owner, record => ({ ...record, nextOrder: 1, entries: [{ order: 0, phase: "pending", updatedAt: 1,
     payload: { chatId: "chat", userMessageId: "one", agentId: "codex", prompt: [{ type: "text", text: "ok" }], startedAt: 1 } }] }));

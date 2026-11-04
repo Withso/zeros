@@ -122,10 +122,10 @@ export class PromptInbox {
         try { batch = CloudV2PromptPullReplySchema.parse(await this.request("pull", { waitMs, held: [...this.held] }, signal)); }
         catch (error) { hintAbortedPoll = controller.signal.aborted; throw error; }
         finally { this.polling = undefined; }
-        for (const stop of batch.stops) {
+        await Promise.all(batch.stops.map(async stop => {
           await this.agents.stopOutbox(stop.chatId, stop.epoch);
           await this.call("stop-ack", stop);
-        }
+        }));
         for (const item of batch.prompts) await this.receive(item);
         attempt = 0;
         // A proxy that prematurely ends an empty poll cannot create a hot loop.

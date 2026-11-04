@@ -1,6 +1,6 @@
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { SessionNotification } from "@zeros/protocol/agent-events";
+import type { QuestionRequest, QuestionResponse, RequestPermissionRequest, RequestPermissionResponse, SessionNotification } from "@zeros/protocol/agent-events";
 import { CodexDriver } from "../driver";
 
 const drivers: CodexDriver[] = [];
@@ -281,4 +281,113 @@ describe("Codex driver with an offline app-server process", () => {
     expect(await pending).toBeInstanceOf(Error);
     await expect(driver.prompt(content("after disposal"))).rejects.toThrow();
   });
+});
+
+
+it("enables Local's native question feature only when the interaction callback is negotiated", async () => {
+  for (const enabled of [false, true]) {
+    const { driver, events } = setup();
+    await driver.open({ ...openInput, ...(enabled ? { onQuestion: async () => ({ outcome: { outcome: "dismissed" as const } }) } : {}) });
+    await driver.prompt(content("question-feature"));
+    expect(JSON.parse(prose(events))).toEqual({ enabled, quiet: enabled });
+  }
+});
+
+it("holds a string-id native question while streaming notifications and returns the same-turn answer", async () => {
+  const { driver, events } = setup();
+  let answer!: (response: QuestionResponse) => void;
+  const onQuestion = vi.fn((_request: QuestionRequest) => new Promise<QuestionResponse>(resolve => { answer = resolve; }));
+  await driver.open({ ...openInput, onQuestion });
+  let settled = false;
+  const turn = driver.prompt(content("question-roundtrip")).then(result => { settled = true; return result; });
+  await expect.poll(() => prose(events)).toContain("waiting");
+  expect(onQuestion).toHaveBeenCalledOnce(); expect(settled).toBe(false);
+  expect(onQuestion.mock.calls[0]![0]).toMatchObject({ nativeRequestId: "native-question", blocking: true,
+    questions: [{ id: "route", options: [{ id: "A", label: "A" }, { id: "B", label: "B" }] }] });
+  answer({ outcome: { outcome: "answered", answers: [{ questionId: "route", selectedOptionIds: ["B"], freeText: "custom" }] } });
+  await turn;
+  expect(prose(events)).toBe('waiting{"answers":{"route":{"answers":["B","custom"]}}}');
+});
+
+it("uses Local's read-only native policy for a Plan thread and each turn", async () => {
+  const { driver, events } = setup();
+  await driver.open({ ...openInput, modeId: "read-only" });
+  await driver.prompt(content("mode-configuration"));
+  expect(JSON.parse(prose(events))).toEqual({ thread: { approvalPolicy: "on-request", sandbox: "read-only" },
+    turn: { approvalPolicy: "on-request", sandboxPolicy: { type: "readOnly", networkAccess: false } } });
+});
+
+it("holds native Plan approvals and accepts only the offered once-only choice", async () => {
+  const { driver, events } = setup();
+  let answer!: (response: RequestPermissionResponse) => void;
+  const onPermission = vi.fn((_request: RequestPermissionRequest) => new Promise<RequestPermissionResponse>(resolve => { answer = resolve; }));
+  await driver.open({ ...openInput, modeId: "read-only", onPermission });
+  const turn = driver.prompt(content("approval-roundtrip"));
+  await expect.poll(() => prose(events)).toContain("waiting");
+  expect(onPermission).toHaveBeenCalledOnce();
+  expect(onPermission.mock.calls[0]![0].options).toContainEqual(expect.objectContaining({ optionId: "accept", kind: "allow_once" }));
+  answer({ outcome: { outcome: "selected", optionId: "accept" } });
+  await turn;
+  expect(prose(events)).toBe('waiting{"decision":"accept"}');
+});
+
+it.each([
+  { policy: { acceptWithExecpolicyAmendment: { execpolicy_amendment: ["git", "status"] } }, id: "acceptWithExecpolicyAmendment:1", kind: "allow_always" },
+  { policy: { applyNetworkPolicyAmendment: { network_policy_amendment: { host: "example.test", action: "deny" } } }, id: "applyNetworkPolicyAmendment:1", kind: "reject_always" },
+])("preserves native command decision order and original policy objects: $id", async ({ policy, id, kind }) => {
+  const { driver, events } = setup();
+  const onPermission = vi.fn(async (_request: RequestPermissionRequest): Promise<RequestPermissionResponse> => ({ outcome: { outcome: "selected", optionId: id } }));
+  await driver.open({ ...openInput, modeId: "read-only", onPermission });
+  await driver.prompt(content(`approval-fixture:${JSON.stringify({ method: "item/commandExecution/requestApproval", params: {
+    itemId: "command", command: ["git", "status"], availableDecisions: ["decline", policy, "accept"],
+  } })}`));
+  expect(onPermission.mock.calls[0]![0]).toMatchObject({ useOptionNames: true, allowLocalPolicies: false,
+    options: [{ optionId: "decline" }, { optionId: id, kind }, { optionId: "accept" }], toolCall: { title: "Run: git status", kind: "execute" } });
+  expect(JSON.parse(prose(events))).toEqual({ decision: policy });
+});
+
+it.each(["execCommandApproval", "applyPatchApproval"])("uses the provider's structured v1 decline shape for %s", async method => {
+  const { driver, events } = setup();
+  await driver.open({ ...openInput, modeId: "read-only", onPermission: async () => ({ outcome: { outcome: "selected", optionId: "decline" } }) });
+  await driver.prompt(content(`approval-fixture:${JSON.stringify({ method, params: { callId: "legacy", command: "git status" } })}`));
+  expect(JSON.parse(prose(events))).toEqual({ decision: { denied: { rejection: "User declined this action." } } });
+});
+
+it("mirrors only the native requested permission profile and selected session scope", async () => {
+  const { driver, events } = setup();
+  const permissions = { network: { enabled: false }, fileSystem: { entries: [{ access: "write", path: { type: "path", path: "/tmp/requested" } }] } };
+  const onPermission = vi.fn(async (_request: RequestPermissionRequest): Promise<RequestPermissionResponse> => ({ outcome: { outcome: "selected", optionId: "acceptForSession" } }));
+  await driver.open({ ...openInput, modeId: "read-only", onPermission });
+  await driver.prompt(content(`approval-fixture:${JSON.stringify({ method: "item/permissions/requestApproval", params: { itemId: "permissions", permissions, reason: "Write the selected file" } })}`));
+  expect(onPermission.mock.calls[0]![0]).toMatchObject({ toolCall: { kind: "switch_mode", rawInput: { permissions } } });
+  expect(JSON.parse(prose(events))).toEqual({ permissions, scope: "session" });
+});
+
+it("correlates a native file approval with its streamed file paths", async () => {
+  const { driver, events } = setup();
+  const onPermission = vi.fn(async (_request: RequestPermissionRequest): Promise<RequestPermissionResponse> => ({ outcome: { outcome: "cancelled" } }));
+  await driver.open({ ...openInput, modeId: "read-only", onPermission });
+  await driver.prompt(content(`approval-fixture:${JSON.stringify({ method: "item/fileChange/requestApproval", params: { itemId: "patch" }, events: [
+    { method: "item/started", params: { item: { type: "fileChange", id: "patch", status: "inProgress", changes: [{ path: "/workspace/a.txt", kind: { type: "update" }, diff: "" }] } } },
+  ] })}`));
+  expect(onPermission.mock.calls[0]![0]).toMatchObject({ toolCall: { kind: "edit", nativeToolCallId: "patch", rawInput: { filePaths: ["/workspace/a.txt"] } } });
+  expect(JSON.parse(prose(events))).toEqual({ decision: "cancel" });
+});
+
+it("does not turn an unoffered renderer choice into a native command grant", async () => {
+  const { driver, events } = setup();
+  await driver.open({ ...openInput, modeId: "read-only", onPermission: async () => ({ outcome: { outcome: "selected", optionId: "accept" } }) });
+  await driver.prompt(content(`approval-fixture:${JSON.stringify({ method: "item/commandExecution/requestApproval", params: { itemId: "unsupported", availableDecisions: ["future-grant"] } })}`));
+  expect(JSON.parse(prose(events))).toEqual({ decision: "cancel" });
+});
+
+it("shows the same concrete outside-workspace write scope as Local", async () => {
+  const { driver } = setup();
+  const onPermission = vi.fn(async (_request: RequestPermissionRequest): Promise<RequestPermissionResponse> => ({ outcome: { outcome: "cancelled" } }));
+  await driver.open({ ...openInput, modeId: "read-only", onPermission });
+  await driver.prompt(content(`approval-fixture:${JSON.stringify({ method: "item/commandExecution/requestApproval", params: {
+    itemId: "outside-write", cwd: "/workspace/repo", command: "write fixture", additionalPermissions: { fileSystem: { write: ["../one.txt"] } },
+  } })}`));
+  expect(onPermission.mock.calls[0]![0]).toMatchObject({ title: "Do you want to allow write access outside the workspace?",
+    contextItems: ["Write · ../one.txt"], toolCall: { rawInput: { codexWriteAccessPath: "../one.txt" } } });
 });

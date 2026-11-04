@@ -20,6 +20,7 @@ interface Options {
 }
 interface Turn {
   observed?: boolean;
+  modeId: "agent" | "plan";
   id: string; runId?: string; model: string; effort?: string; fast: boolean; stopped: boolean; closing: boolean;
   mapper: CursorSdkTranslator; transcripts: CursorSubagentTranscriptReader;
   callbackUsage?: TurnUsage; streamedUsage?: TurnUsage;
@@ -35,6 +36,7 @@ export class CursorDriver implements Driver {
   private readonly listeners = new Set<(event: SessionNotification) => void>();
   private input?: DriverOpen;
   private nativeSessionId?: string;
+  private modeId: "agent" | "plan" = "agent";
   private model = "composer-2.5";
   private effort?: string;
   private fast = false;
@@ -50,6 +52,8 @@ export class CursorDriver implements Driver {
     if (this.input || this.disposed) throw new Error("Cursor driver has already been opened.");
     if (!input.apiKey) throw new Error("Missing Cursor API key.");
     this.input = input; this.nativeSessionId = input.nativeSessionId;
+    if (input.modeId !== undefined && input.modeId !== "agent" && input.modeId !== "plan") throw new Error("Invalid Cursor mode.");
+    this.modeId = input.modeId ?? "agent";
     if (input.model) this.model = validModel(input.model);
     this.effort = input.effort; this.fast = input.fast === true;
     await this.ensureProcess();
@@ -65,7 +69,7 @@ export class CursorDriver implements Driver {
     let resolve!: Turn["resolve"], reject!: Turn["reject"], finish!: () => void;
     const result = new Promise<PromptResponse>((yes, no) => { resolve = yes; reject = no; });
     const done = new Promise<void>(yes => { finish = yes; });
-    const turn: Turn = { id, model: this.model, effort: this.effort, fast: this.fast, stopped: false, closing: false, resolve, reject, done, finish, transcripts,
+    const turn: Turn = { id, modeId: this.modeId, model: this.model, effort: this.effort, fast: this.fast, stopped: false, closing: false, resolve, reject, done, finish, transcripts,
       controls: new AbortController(), mapper: new CursorSdkTranslator({ sessionId: this.input!.sessionId,
         emit: event => { if (this.active === turn && !this.disposed) this.emit(event); },
         readSubagentTranscript: (child, final) => transcripts.read(child, final) }) };
@@ -86,6 +90,14 @@ export class CursorDriver implements Driver {
   }
 
   async setModel(model: string): Promise<void> { this.ready(); this.model = validModel(model); }
+
+  async setMode(modeId: string): Promise<void> {
+    this.ready();
+    if (modeId !== "agent" && modeId !== "plan") throw new Error("Invalid Cursor mode.");
+    this.modeId = modeId;
+    for (const emit of this.listeners) emit({ sessionId: this.input!.sessionId,
+      update: { sessionUpdate: "current_mode_update", currentModeId: modeId } });
+  }
 
   async updateConfig(config: { model?: string; effort?: string; fast: boolean }): Promise<void> {
     this.ready();
@@ -133,7 +145,7 @@ export class CursorDriver implements Driver {
     const opening = (async () => {
       try {
         const result = await host.request<{ nativeSessionId: string; version: string }>("open", {
-          cwd: input.cwd, nativeSessionId: this.nativeSessionId, model: this.model, effort: this.effort, fast: this.fast,
+          cwd: input.cwd, modeId: this.modeId, nativeSessionId: this.nativeSessionId, model: this.model, effort: this.effort, fast: this.fast,
           ...(input.mcpServers ? { mcpServers: input.mcpServers } : {}) });
         if (this.disposed || this.process !== host || result.version !== CURSOR_VERSION || typeof result.nativeSessionId !== "string" || !result.nativeSessionId ||
             (this.nativeSessionId && result.nativeSessionId !== this.nativeSessionId)) throw new Error("Cursor returned a different or closed native session.");
@@ -156,7 +168,7 @@ export class CursorDriver implements Driver {
       }, 1200);
       turn.poll.unref();
       driverTiming(this.input, "turn_sent");
-      const result = await this.process!.request<{ runId: string }>("prompt", { turnId: turn.id, content: message, model: turn.model, effort: turn.effort, fast: turn.fast });
+      const result = await this.process!.request<{ runId: string }>("prompt", { turnId: turn.id, modeId: turn.modeId, content: message, model: turn.model, effort: turn.effort, fast: turn.fast });
       if (this.active === turn && (!result.runId || result.runId !== turn.runId)) throw new Error("Cursor returned a different native run.");
     } catch (error) {
       if (this.active === turn) {

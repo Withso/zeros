@@ -760,7 +760,9 @@ export function permissionMenuItems(
   agentId: string | null,
   model: string | null = null,
   boundary: ExecutionBoundaryStatus | null = null,
+  availableModes?: readonly SessionMode[],
 ): PermissionMenuItem[] {
+  if (availableModes !== undefined) return availableModes.map(mode => ({ modeId: mode.id, label: mode.name }));
   const fam = agentFamily(agentId);
   const order = PERMISSION_MODE_ORDER[fam];
   const labels = PERMISSION_MODE_LABELS[fam];
@@ -789,8 +791,9 @@ export function permissionMenuItems(
 export function agentHasPermissionMenu(
   agentId: string | null,
   model: string | null = null,
+  availableModes?: readonly SessionMode[],
 ): boolean {
-  return permissionMenuItems(agentId, model).length > 0;
+  return permissionMenuItems(agentId, model, null, availableModes).length > 0;
 }
 
 // Modes where the agent proposes instead of acting (Claude Plan, Codex Ask and
@@ -820,11 +823,21 @@ export function coerceModeIdForModel(
   model: string | null,
   modeId: string | null,
   boundary: ExecutionBoundaryStatus | null = null,
+  availableModes?: readonly SessionMode[],
 ): string | null {
+  if (!modeId && availableModes !== undefined) {
+    const defaultId = nativeModeIdForPosture(agentId, "danger");
+    return availableModes.some(mode => mode.id === defaultId) ? defaultId : modeId;
+  }
   if (!modeId) return modeId;
-  const items = permissionMenuItems(agentId, model, boundary);
+  const items = permissionMenuItems(agentId, model, boundary, availableModes);
   if (items.length === 0) return modeId;
   if (items.some((i) => i.modeId === modeId)) return modeId;
+  if (availableModes !== undefined) {
+    const posture = permissionForAgentMode(modeId, agentId);
+    const target = nativeModeIdForPosture(agentId, posture === "plan" ? "plan" : "danger");
+    return items.find(item => item.modeId === target)?.modeId ?? modeId;
+  }
   return (items.find((i) => i.modeId === "accept-edits") ?? items[0]).modeId;
 }
 

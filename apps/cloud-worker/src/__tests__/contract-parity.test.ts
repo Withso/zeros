@@ -164,3 +164,20 @@ it("preserves optional attachment groups through both durable prompt contracts w
       expect(schemas.CloudV2PromptSchema.safeParse({ ...payload, bubble: { segments: [{ ...segment, group }] } }).success).toBe(false);
   }
 });
+
+it("keeps optional interaction negotiation and frozen prompt modes identical and closed", () => {
+  for (const contract of [shared, control]) {
+    for (const agentInteractions of [undefined, 1]) expect(contract.CloudV2ControlFrameSchema.safeParse({ ...config, agentInteractions }).success).toBe(true);
+    for (const agentInteractions of [null, 0, 2, true, "1"]) expect(contract.CloudV2ControlFrameSchema.safeParse({ ...config, agentInteractions }).success).toBe(false);
+  }
+  const prompt = { chatId: "chat", userMessageId: "prompt", agentId: "codex", prompt: [{ type: "text", text: "Plan it" }], startedAt: 1 };
+  for (const permissionMode of [undefined, "plan", "bypass"]) {
+    const value = { ...prompt, permissionMode };
+    expect(controlPrompts.CloudV2PromptSchema.parse(value)).toEqual(sharedPrompts.CloudV2PromptSchema.parse(value));
+  }
+  for (const permissionMode of [null, "auto", "read-only", 1]) {
+    expect(controlPrompts.CloudV2PromptSchema.safeParse({ ...prompt, permissionMode }).success).toBe(false);
+    expect(sharedPrompts.CloudV2PromptSchema.safeParse({ ...prompt, permissionMode }).success).toBe(false);
+  }
+  expect(legacyWorkerFrame.safeParse({ ...config, agentInteractions: 1 }).success).toBe(false);
+});

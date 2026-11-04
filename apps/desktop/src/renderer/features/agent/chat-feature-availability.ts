@@ -1,9 +1,10 @@
 import { isCloudWorkspace, parseCloudScopedId } from "../../platform/bridge/cloud-workspace-key";
+import type { SessionMode } from "../../platform/bridge/agent-events";
 
-/** Cloud v2 agents run with full permissions and accept no mode changes yet,
- * so Plan and the other native permission modes are Local-only for now. */
-export function permissionModesAvailable(folder: string | null | undefined): boolean {
-  return !isCloudWorkspace(folder);
+/** Older cloud workers have no mode vocabulary; Local keeps its pre-bind menu. */
+export function permissionModesAvailable(folder: string | null | undefined, modes: readonly SessionMode[] = []): boolean {
+  return !isCloudWorkspace(folder) || modes.some(mode => mode.id === "plan" || mode.id === "read-only") &&
+    modes.some(mode => mode.id === "bypass" || mode.id === "full-access" || mode.id === "agent");
 }
 
 /** Reset/undo and native footer reads remain Local-only. Cloud footers use

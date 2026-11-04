@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef } from "react";
-import { CloudV2PromptSchema } from "@zeros/protocol/cloud-v2-prompts";
+import { CloudV2PromptSchema, type CloudV2Prompt } from "@zeros/protocol/cloud-v2-prompts";
 import { cloudPromptApi } from "../../platform/cloud-prompt-api";
 import { subscribeCloudPromptErasure } from "../../platform/cloud-prompt-erasure";
 import { cloudScopedId, cloudWorkspaceKey, parseCloudScopedId, parseCloudWorkspaceKey, type CloudWorkspaceTarget } from "../../platform/bridge/cloud-workspace-key";
@@ -18,6 +18,8 @@ import type { QueuedEditPayload } from "./sessions-context";
 import type { BridgeMessage } from "../../platform/bridge/messages";
 import { accountPresentationOwner, getAccountPresentationOwner } from "../../platform/account-presentation-cache";
 import { noteLocalChatPrompt } from "./chat-transcript-summaries-cache";
+import { permissionModesAvailable } from "./chat-feature-availability";
+import { permissionModeIdForDisplay } from "./permission-mode-display";
 
 /** Process-owned delivery, independent of React's retained chat surfaces and
  * the current bridge. Hooks only subscribe it to exact account/catalog changes. */
@@ -95,6 +97,16 @@ export class CloudPromptRuntime {
       state.setCancelling(chatId, false);
     }
   }
+  private permissionMode(chatId: string, owner: CloudPromptOwner): CloudV2Prompt["permissionMode"] {
+    const chat = useWorkspaceStore.getState().chats.find(chat => chat.id === chatId), slot = useSessionsStore.getState().sessions[chatId];
+    const exact = slot?.cwd === cloudWorkspaceKey(owner) && slot.agentId === (chat?.agentId ?? slot.agentId);
+    const modeId = permissionModeIdForDisplay({ status: exact ? slot.status : "idle", liveModeId: exact ? slot.currentModeId : null,
+      persistedModeId: chat?.lastModeId ?? null, fallbackModeId: chat?.permissionMode === "plan" ? "plan" : null });
+    if (modeId === "plan" || modeId === "read-only") return "plan";
+    // Old control planes strictly decode prompts. Only explicit Plan must
+    // survive unknown support and be refused rather than silently broadened.
+    return exact && permissionModesAvailable(slot.cwd, slot.availableModes) ? "bypass" : undefined;
+  }
   async send(chatId: string, input: QueuedEditPayload, options: { id?: string; autoAction?: string; mode?: "prompt" | "steer"; accepted?: () => void; committed?: () => void; deferDelivery?: boolean } = {}): Promise<void> {
     const owner = this.context(chatId); if (!owner) throw new Error("Cloud message delivery is unavailable for this conversation.");
     const chat = useWorkspaceStore.getState().chats.find(chat => chat.id === chatId), state = useSessionsStore.getState();
@@ -103,7 +115,8 @@ export class CloudPromptRuntime {
     if (!slot) state.setSession(chatId, { ...BLANK, cwd: cloudWorkspaceKey(owner), agentId, transcriptState: "resident" });
     const channel = this.channel(owner), id = options.id ?? crypto.randomUUID(), startedAt = Date.now();
     // Freeze selection and rich input before any attachment read or network yield.
-    const selection = { agentId, ...(chat?.model ? { model: chat.model } : {}), ...(chat?.effort ? { effort: chat.effort } : {}) };
+    const permissionMode = this.permissionMode(chatId, owner);
+    const selection = { agentId, ...(permissionMode ? { permissionMode } : {}), ...(chat?.model ? { model: chat.model } : {}), ...(chat?.effort ? { effort: chat.effort } : {}) };
     const frozen = structuredClone({ text: input.text, displayText: input.displayText, attachments: input.attachments,
       bubbleAttachments: input.bubbleAttachments, segments: input.segments });
     await channel.enqueue(async () => {
@@ -184,6 +197,8 @@ export class CloudPromptRuntime {
   }
   async recover(chatId: string, messageId: string, retry = false): Promise<boolean> {
     const owner = this.context(chatId); if (!owner) return false;
+    const chat = useWorkspaceStore.getState().chats.find(chat => chat.id === chatId), permissionMode = this.permissionMode(chatId, owner);
+    const selection = { model: chat?.model, effort: chat?.effort || undefined, ...(permissionMode ? { permissionMode } : {}) };
     const channel = this.channel(owner); await channel.refresh();
     const entry = channel.snapshot.entries.find(entry => entry.payload.userMessageId === messageId);
     if (!entry) return false;
@@ -192,9 +207,9 @@ export class CloudPromptRuntime {
     }
     if (entry.state === "completed") return true;
     if (!retry) return false;
-    const chat = useWorkspaceStore.getState().chats.find(chat => chat.id === chatId);
-    await channel.enqueue(async () => ({ ...entry.payload, userMessageId: crypto.randomUUID(), startedAt: Date.now(), mode: "prompt",
-      model: chat?.model ?? entry.payload.model, effort: chat?.effort || undefined }));
+    const { permissionMode: _previousMode, ...payload } = entry.payload;
+    await channel.enqueue(async () => ({ ...payload, ...selection, userMessageId: crypto.randomUUID(), startedAt: Date.now(), mode: "prompt",
+      model: selection.model ?? payload.model }));
     this.coordinator.wake(channel); return true;
   }
   refresh(chatId: string): void { const owner = this.context(chatId); if (owner) this.coordinator.wake(this.channel(owner), true); }

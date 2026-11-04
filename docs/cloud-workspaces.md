@@ -415,17 +415,44 @@ model, later retry or new-session action, with no automatic prompt resend.
 An absent worker execution remains an ordinary adoption miss; it cannot claim
 that a native provider conversation was deleted.
 
-Cloud Claude and Codex still cancel agent questions and MCP elicitations. Each
-cancellation now leaves a nonblocking transcript notice explaining that cloud
-workspaces cannot answer it yet and directing the user to a Local workspace.
-Question bodies and elicitation payloads are not copied into that notice.
+Cloud Claude and Codex questions use the same cards and native answer mappings
+as Local. Pending questions and Plan approvals belong to the worker execution:
+closing or reconnecting the app does not dismiss them. The worker saves the
+request before showing it, replays it on reconnect, and retains the answer or
+dismissal in mirrored history. Secret answers reach the native agent but are
+hidden in the saved answer and settlement broadcast. A worker restart retains
+the dismissal, without restoring a native resolver or replaying the turn.
 
-These changes ship in the SHA-pinned worker runtime and desktop. Optional
-`cloud` metadata is nested inside the existing bridge failure/notice payloads
-and serialized history rows; strict relay and HTTPS outbox envelopes are
-unchanged. Old desktops accept new worker messages and keep the sanitized
-fallback text, while new desktops accept old records without metadata. No
-protocol bump or database migration is required. The outbox's control-plane
+Plan and Full access use each agent's native modes. Cloud exposes the existing
+controls only when the session advertises them, after both carriers negotiate
+`agent-interactions-v1` and `agentInteractions: 1`. Claude supports native plan
+approval; Codex uses Local's read-only policy and native permission requests.
+Cursor supports its native Plan mode and keeps Local's current lack of question
+response support. MCP elicitations remain unsupported in cloud. Older peers
+retain cancellation notices and do not advertise Plan controls.
+
+When only a question or approval is blocking the turn, the worker reports idle;
+independent tools, background tasks, terminals, setup and file transfers still
+count as work. An unanswered cloud input expires 15 minutes after it was asked
+(Local keeps its 30-minute response timeout). A blocking expiry stops the turn
+and cancels queued durable prompts through the existing conversation Stop epoch,
+so the pending outbox cannot keep the VM awake indefinitely. History records
+“dismissed after 15 minutes without an answer”; workspace shutdown records
+“dismissed when the workspace stopped”. A nonblocking question expiry dismisses
+only that question.
+
+Durable HTTP prompts freeze optional `permissionMode: "plan" | "bypass"` with
+model and effort before attachment or network I/O. The worker applies it only
+when dispatching that prompt; a steer with a different mode queues. Explicit
+Plan requests fail on unsupported peers instead of running with full access.
+Legacy full-access sends omit the optional field until support is known.
+
+Provider failure categories ship in the SHA-pinned worker runtime and desktop.
+Their optional `cloud` metadata is nested inside the existing bridge
+failure/notice payloads and serialized history rows. Old desktops accept these
+messages and keep the sanitized fallback text, while new desktops accept old
+records without metadata. No protocol bump or database migration is required.
+The outbox's control-plane
 receipt still reports delivery state only; the durable transcript supplies the
 provider reason.
 

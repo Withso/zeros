@@ -103,3 +103,15 @@ it("fences late native callbacks once the result is known, while billing is stil
   expect(f.events.some(event => event.kind === "delta")).toBe(false);
   billing.resolve({ runs: [] }); await tick(); await f.host.dispose();
 });
+
+
+it("passes Plan through create/resume and send without changing native question support", async () => {
+  for (const nativeSessionId of [undefined, "native-agent"]) {
+    const f = fixture();
+    await f.host.open({ cwd: "/fixture", model: "composer-2.5", nativeSessionId, modeId: "plan" });
+    expect(f.calls[0]).toMatchObject({ options: { mode: "plan", disallowedTools: ["askQuestion"], local: { autoReview: false } } });
+    await f.host.prompt({ turnId: "plan", content: { text: "plan it" }, model: "composer-2.5", modeId: "plan" });
+    expect(f.calls[1]).toMatchObject({ options: { mode: "plan" } });
+    await f.host.dispose();
+  }
+});

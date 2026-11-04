@@ -1,4 +1,6 @@
+import type { CodexApprovalMethod } from "@zeros/protocol/agent-events";
 import { buildMcpServerOverrides } from "./mcp-overrides";
+import { codexQuestionFeatureArgs } from "@zeros/protocol/agent-events";
 export { buildMcpServerOverrides } from "./mcp-overrides";
 import { mcpWorkingDirectory } from "../../mcp-working-directory";
 // ──────────────────────────────────────────────────────────
@@ -307,14 +309,7 @@ export interface CodexApprovalRequest {
   params: Record<string, unknown>;
 }
 
-export type CodexApprovalMethod =
-  | "item/commandExecution/requestApproval"
-  | "item/fileChange/requestApproval"
-  | "item/permissions/requestApproval"
-  /** Deprecated v1 request names remain in the pinned generated schema and
-   * can still surface from migrated sessions / compatibility feature flags. */
-  | "execCommandApproval"
-  | "applyPatchApproval";
+export type { CodexApprovalMethod } from "@zeros/protocol/agent-events";
 
 export type CodexUserInputMethod =
   | "item/tool/requestUserInput"
@@ -560,10 +555,7 @@ const APPROVAL_TIMEOUT_MS = PERMISSION_RESPONSE_TIMEOUT_MS;
  * generation-private CODEX_HOME owned for that contained session. */
 export function codexAppServerFeatureArgs(fileAuthStorage: boolean): string[] {
   return [
-    "-c",
-    "features.default_mode_request_user_input=true",
-    "-c",
-    "suppress_unstable_features_warning=true",
+    ...codexQuestionFeatureArgs(),
     ...(fileAuthStorage
       ? [
           "-c",
