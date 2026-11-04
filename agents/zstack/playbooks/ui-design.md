@@ -45,7 +45,10 @@ them.
    `pnpm check:ui --prune-debt`. Overlay, focus, popover or composer work runs
    `pnpm test:ui-smoke` (label `ci:ui-smoke`); cascade, entrypoint or
    performance work runs `pnpm build:ui`; token or contrast changes run
-   `pnpm design:docs`.
+   `pnpm design:docs`. A primitive change tests every call shape it supports
+   (asChild, loading, inside a Tooltip), runs the ui-smoke scenarios that
+   mount it at their registry viewport, and updates any smoke that pins the
+   old computed look in the same commit. Focus edges never take layout space.
 7. **Look at the result** in the running app or a ui-smoke harness, in both
    themes; a green check is not visual review. Put screenshot paths in the
    receipt.

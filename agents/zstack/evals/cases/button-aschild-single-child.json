@@ -1,0 +1,9 @@
+{
+  "id": "button-aschild-single-child",
+  "kind": "replay",
+  "area": "renderer-ui",
+  "fixedBy": "7b02723a39660c97c2fb9fa7a7fd78ab8f43956c",
+  "symptom": "Button rendered its loading slot (null) beside the child, so asChild handed Radix Slot two children; the Design layer rows and the provider API key link threw React.Children.only while the renderer suite stayed green because no test rendered Button asChild.",
+  "rule": "A Slot-backed primitive passes exactly one child under asChild and keeps its own decorations on the plain element; every such primitive has an asChild render test, and a primitive change renders a harness that mounts each call-site shape.",
+  "check": "pnpm exec vitest run apps/desktop/src/renderer/shared/ui/primitives/__tests__/button.test.ts"
+}
