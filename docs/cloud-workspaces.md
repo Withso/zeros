@@ -96,11 +96,13 @@ workspaces until a build succeeds. Older apps that send the repositories with
 the build still work, and their selection becomes the configured recipe.
 
 A build always starts from Boat's stock image. It installs the pinned runtime
-and waits for Boat to finish capturing a clean snapshot **before** delivering
+and git-lfs (configured system-wide; a build that can't install it still goes
+live and says so in its log), then waits for Boat to finish capturing a clean
+snapshot **before** delivering
 any repository credential, cloning source or running recipe scripts. It then
 validates the repositories and setup scripts on the disposable builder,
 recording each branch and commit. Only a successful validation makes that
-snapshot active. The shared image caches the runtime; it contains no project
+snapshot active. The shared image caches the runtime and git-lfs; it contains no project
 checkouts, dependency trees or setup outputs. Deleting a checkout after setup
 would not establish this boundary, because setup can copy source elsewhere.
 

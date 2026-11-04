@@ -17,6 +17,16 @@ import { computerSourceReviewRequired, readComputerSourceTargets, type CloudV2Co
 export { cloudV2SnapshotName } from "./resource-names.js";
 
 const MAX_LOG_BYTES = 1024 * 1024;
+/** Installed before the shared snapshot, so every workspace from the image has it.
+ * `--system` configures the LFS filters for every user and checkout on the VM. */
+export const GIT_LFS_INSTALL_COMMAND = [
+  "set -eu",
+  "if ! command -v git-lfs >/dev/null 2>&1; then",
+  "  sudo -n env DEBIAN_FRONTEND=noninteractive apt-get update -qq",
+  "  sudo -n env DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends git-lfs",
+  "fi",
+  "sudo -n git lfs install --system --skip-repo",
+].join("\n");
 const HEARTBEAT_MS = 60_000;
 /** A build whose server stopped (a deploy, a crash) is failed after this. */
 const INTERRUPTED_AFTER = "5 minutes";
@@ -904,6 +914,11 @@ export class CloudV2ComputerBuilder {
     if (installed.exitCode !== 0 || installed.timedOut) throw Object.assign(new Error("runtime install failed"), { code: "worker_runtime_install_failed" });
     await computers.setRuntime(job.id, sha256);
     await log(`[zeros] runtime ${sha256.slice(0, 12)} installed\n`);
+    // Boat's stock image has no git-lfs. A build that can't add it still goes
+    // live; the worker then tells LFS repositories how to fetch their files.
+    const lfs = await compute.exec(sandboxId, GIT_LFS_INSTALL_COMMAND, 300);
+    await log(lfs.exitCode === 0 && !lfs.timedOut ? "[zeros] git-lfs installed\n"
+      : "[zeros] git-lfs could not be installed; Git LFS files stay placeholders until a later build adds it\n");
     // Capture before clone, credentials or setup. Cleanup after clone is not
     // a confidentiality boundary: scripts can copy source anywhere on disk.
     await compute.exec(sandboxId, "sync", 120);
