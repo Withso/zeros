@@ -167,7 +167,7 @@ export async function runClaudeRuntimeUiSmoke({ page, check, harnessBase }) {
     const toggle = page.getByRole("switch", { name: "Claude idle compaction", exact: true });
     await expect(toggle).toHaveAttribute("aria-checked", "false");
     const row = page.locator("div").filter({ has: page.locator('label[for="claude-idle-compaction"]') }).last().locator("..");
-    await expect(row).toContainText("Compact long conversations while the session is idle");
+    await expect(row).toContainText("While the session is idle");
     await toggle.click();
     await expect(toggle).toHaveAttribute("aria-checked", "true");
     const state = await page.evaluate(() => ({ updates: window.claudeRuntimeUi.updates, preferences: window.claudeRuntimeUi.preferences(), folder: window.claudeRuntimeUi.folder }));

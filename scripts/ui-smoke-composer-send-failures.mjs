@@ -70,7 +70,7 @@ export async function runFollowUpBehaviorSmoke({ page, check, harnessBase }) {
   await select("Steer");
   await page.reload();
   await expect(setting).toHaveText("Steer");
-  await expect(page.locator("[data-follow-up-setting]")).toContainText("Use Cmd/Ctrl+Enter to queue.");
+  await expect(page.locator("[data-follow-up-setting]")).toContainText("Steer mid-turn, or queue messages with ⌘↵.");
   for (const theme of ["dark", "light"]) {
     await page.evaluate(theme => document.documentElement.dataset.theme = theme, theme);
     await page.locator("[data-follow-up-setting]").screenshot({ path: `.context/follow-up-settings-${theme}.png` });

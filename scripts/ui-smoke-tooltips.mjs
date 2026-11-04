@@ -42,10 +42,10 @@ export async function runTooltipSmoke({ page, harnessBase, check }) {
         css.borderRadius,
       ];
     });
-    expect(style).toEqual(["12px", "4px", "8px", "4px", "8px", "4px"]);
+    expect(style).toEqual(["12px", "3px", "8px", "3px", "8px", "6px"]);
     await leave();
     check(
-      `${theme}: hints wait one second and use 12px type, 4/8px padding and 4px corners`,
+      `${theme}: hints wait one second and use 12px type, 3/8px padding and 6px corners`,
       true,
     );
   }

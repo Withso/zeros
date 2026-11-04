@@ -180,7 +180,7 @@ export async function runConversationSummarySmoke({
         };
       });
       expect(appearance).toEqual({
-        radius: "16px",
+        radius: "12px",
         border: "0px",
         matchesBackground: true,
         overflow: false,
@@ -640,21 +640,26 @@ export async function runConversationSummarySmoke({
     expect(await git.textContent()).not.toMatch(/No PR (created|open)/);
     for (const theme of ["dark", "light"]) {
       await page.evaluate(theme => { document.documentElement.dataset.theme = theme; }, theme);
-      const colors = await create.evaluate(node => {
+      // Sample the resting fill, not the previous pass's hover, once the
+      // half's colour transition into the new theme has finished.
+      await page.mouse.move(0, 0);
+      const expected = await create.evaluate(() => {
         const probe = document.createElement("span");
         probe.style.backgroundColor = "var(--primary-button-bg)";
         document.body.appendChild(probe);
-        const expected = getComputedStyle(probe).backgroundColor;
+        const value = getComputedStyle(probe).backgroundColor;
         probe.remove();
-        return { shell: getComputedStyle(node.closest("div")).backgroundColor, expected };
+        return value;
       });
-      expect(colors.shell).toBe(colors.expected);
+      // The split control fills each half; the shell has no fill of its own.
+      await expect.poll(() => create.evaluate(node => getComputedStyle(node).backgroundColor)).toBe(expected);
       await create.hover();
       await expect.poll(() => create.evaluate(node => getComputedStyle(node).backgroundColor)).not.toBe("rgba(0, 0, 0, 0)");
       await create.focus();
       await page.keyboard.press("Tab");
       await expect(more).toBeFocused();
-      expect(await more.evaluate(node => getComputedStyle(node).outlineStyle)).toBe("solid");
+      // The keyboard ring is the shared highlighted edge plus its halo.
+      expect(await more.evaluate(node => getComputedStyle(node).boxShadow)).not.toBe("none");
       await page.keyboard.press("Enter");
       await expect(page.getByRole("menuitem", { name: "Create draft PR", exact: true })).toBeVisible();
       await expect(page.getByRole("menuitem", { name: "Create PR directly", exact: true })).toBeVisible();
@@ -680,8 +685,9 @@ export async function runConversationSummarySmoke({
     await expect(git.getByText("21 uncommitted changes", { exact: true })).toBeVisible();
     for (const theme of ["dark", "light"]) {
       await page.evaluate(theme => { document.documentElement.dataset.theme = theme; }, theme);
+      // Each half is its own bordered 24px control in a shell of the same height.
       for (const control of [create, more]) {
-        expect((await control.boundingBox()).height).toBe(22);
+        expect((await control.boundingBox()).height).toBe(24);
         expect(await control.evaluate(node => node.closest("div").getBoundingClientRect().height)).toBe(24);
       }
       const rows = git.locator("[data-git-status-row]");
