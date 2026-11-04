@@ -117,6 +117,7 @@ import { prepareDesignFrameAttachments } from "./design-frame-attachment";
 import { hasDesignFrameAttachmentSelection } from "./design-frame-selection";
 import { setComposerMode } from "./composer-mode";
 import { permissionModesAvailable, turnCheckpointsAvailable } from "./chat-feature-availability";
+import { trackCloudChatMutation } from "./cloud-chat-mutation";
 import {
   Conversation,
   ConversationContent,
@@ -617,68 +618,38 @@ function AgentChatBody({
       if (trimmed.length === 0 && attachments.length === 0) {
         return;
       }
-      // The edit is accepted now; record before cancellation/attachment/SQLite
-      // awaits so a slow resubmit cannot later leapfrog another workspace.
-      if (chatThread?.folder) recordWorkspaceActivity(chatThread.folder);
-      // Cancel a streaming turn before truncating, or its response keeps arriving
-      // after the edited prompt is gone.
-      if (session.status === "streaming") {
-        try {
-          await session.cancel?.();
-        } catch {
-          /* cancel best-effort; carry on with truncate */
-        }
-      }
-      // Every harness receives confirmed file references, including resends of
-      // older text/image attachments. Resolve them before changing history.
-      const {
-        blocks: newBlocks,
-        bubbleAttachments: newBubbleMeta,
-        bubbleAttachmentById,
-        skipped: skippedOnEdit,
-      } = await encodeAttachments(attachments, {
-        supportsImage:
-          session.initialize?.agentCapabilities?.promptCapabilities?.image !==
-          false,
-        cwd: session.cwd || null,
-        chatId,
-        agentId: session.agentId,
-      });
-      // A reconstructed chip has no bytes of its own. When its recovery read fails,
-      // report it instead of silently dropping the attachment.
-      reportSkippedAttachments(skippedOnEdit, toast.warning);
-      if (skippedOnEdit.length > 0) return false;
-      const mergedBubble = newBubbleMeta;
-      const messageSegments = toMessageSegments(
-        segments ?? [],
-        attachments,
-        bubbleAttachmentById,
-      );
-      // Truncate in-memory FIRST so the UI reflects the edit immediately.
-      useSessionsStore
-        .getState()
-        .truncateMessagesFromInMemory(chatId, messageId);
-      // Await the SQLite truncate before sendPrompt, or the first persist write
-      // coalesces with the flush and rows past the cut survive a reload.
+      const folder = chatThread?.folder ?? session.cwd;
+      const cloud = isCloudWorkspace(folder), action = trackCloudChatMutation(chatId, folder);
       try {
-        await ipcTruncateMessagesFrom(chatId, messageId);
-      } catch {
-        /* SQLite unavailable in browser harness; in-memory is fine */
-      }
-      // The resubmitted prompt gets a fresh id, so the last-checkpoint effect
-      // scrolls it into view even when the count is unchanged.
-      pendingSendScrollCountRef.current += 1;
-      session
-        .sendPrompt(
-          trimmed,
-          trimmed,
-          newBlocks.length > 0 ? newBlocks : undefined,
-          mergedBubble.length > 0 ? mergedBubble : undefined,
-          messageSegments.length > 0 ? messageSegments : undefined,
-        )
-        .catch(() => {
-          /* error surfaces via session.error */
+        if (!action.isCurrent()) return false;
+        if (chatThread?.folder) recordWorkspaceActivity(chatThread.folder);
+        if (!cloud && session.status === "streaming") {
+          try { await session.cancel?.(); } catch { /* Local cancellation remains best-effort. */ }
+        }
+        const { blocks: newBlocks, bubbleAttachments: newBubbleMeta, bubbleAttachmentById, skipped: skippedOnEdit } = await encodeAttachments(attachments, {
+          supportsImage: session.initialize?.agentCapabilities?.promptCapabilities?.image !== false,
+          cwd: session.cwd || null, chatId, agentId: session.agentId,
         });
+        if (!action.isCurrent()) return false;
+        reportSkippedAttachments(skippedOnEdit, toast.warning);
+        if (skippedOnEdit.length > 0) return false;
+        const messageSegments = toMessageSegments(segments ?? [], attachments, bubbleAttachmentById);
+        if (!cloud) useSessionsStore.getState().truncateMessagesFromInMemory(chatId, messageId);
+        try { await ipcTruncateMessagesFrom(chatId, messageId); }
+        catch {
+          if (cloud) {
+            if (action.isCurrent()) toast.error("Couldn’t edit the message", { description: "The history change could not be confirmed. Your edit has been kept." });
+            return false;
+          }
+          // The Local browser fixture has no persistence transport.
+        }
+        if (!action.isCurrent()) return false;
+        if (cloud) useSessionsStore.getState().truncateMessagesFromInMemory(chatId, messageId);
+        pendingSendScrollCountRef.current += 1;
+        session.sendPrompt(trimmed, trimmed, newBlocks.length > 0 ? newBlocks : undefined,
+          newBubbleMeta.length > 0 ? newBubbleMeta : undefined, messageSegments.length > 0 ? messageSegments : undefined)
+          .catch(() => { /* The session surfaces send failures. */ });
+      } finally { action.dispose(); }
     },
     [chatId, chatThread?.folder, session, transcriptReadOnly],
   );

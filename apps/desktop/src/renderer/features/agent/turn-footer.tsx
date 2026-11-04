@@ -74,6 +74,7 @@ import {
 } from "@/renderer/shell/workspace-file-data-cache";
 import { IconButton } from "@/renderer/shared/ui/primitives/icon-button";
 import { turnCheckpointsAvailable } from "./chat-feature-availability";
+import { trackCloudChatMutation } from "./cloud-chat-mutation";
 import { cloudWorkspaceKey, parseCloudScopedId } from "@/renderer/platform/bridge/cloud-workspace-key";
 import type { TurnSummary } from "@zeros/protocol/turns";
 
@@ -569,8 +570,11 @@ export const TurnFooter = memo(function TurnFooter({
   // back, re-window the chat so it renders here immediately.
   const doUndo = useCallback(
     async (resetId: string) => {
+      const action = trackCloudChatMutation(chatId, folder);
       try {
+        if (!action.isCurrent()) return;
         const res = await turnUndoReset({ resetId });
+        if (!action.isCurrent()) return;
         // Rows come back (and the target's status changes) — every cached row
         // for this chat is now suspect.
         invalidateTurnRows();
@@ -603,12 +607,13 @@ export const TurnFooter = memo(function TurnFooter({
           );
         }
       } catch (err) {
+        if (!action.isCurrent()) return;
         toast.error("Couldn’t undo the reset", {
           description: err instanceof Error ? err.message : String(err),
         });
-      }
+      } finally { action.dispose(); }
     },
-    [chatId, sessions],
+    [chatId, folder, sessions],
   );
 
   // Run the reset (only reached AFTER the confirm dialog). Reports the outcome
@@ -619,13 +624,15 @@ export const TurnFooter = memo(function TurnFooter({
     setConfirmOpen(false);
     if (resetting || readOnly) return;
     setResetting(true);
+    const action = trackCloudChatMutation(chatId, folder);
     try {
+      if (!action.isCurrent()) return;
       // If a LATER turn is still streaming, this reset truncates it too — abort
       // the in-flight turn FIRST so the agent stops emitting into a timeline
       // we're about to delete (otherwise its trailing chunks re-persist as
       // zombie rows). Mirrors the edit-&-resubmit guard; a no-op when idle.
       if (
-        useSessionsStore.getState().sessions[chatId]?.status === "streaming"
+        !parseCloudScopedId(chatId) && useSessionsStore.getState().sessions[chatId]?.status === "streaming"
       ) {
         try {
           await sessions.cancel(chatId);
@@ -634,6 +641,7 @@ export const TurnFooter = memo(function TurnFooter({
         }
       }
       const res = await turnReset({ chatId, turnId });
+      if (!action.isCurrent()) return;
       if (!res) {
         toast.error("Couldn’t reset — engine unavailable.");
         return;
@@ -678,13 +686,15 @@ export const TurnFooter = memo(function TurnFooter({
         );
       }
     } catch (err) {
+      if (!action.isCurrent()) return;
       toast.error("Couldn’t reset changes", {
         description: err instanceof Error ? err.message : String(err),
       });
     } finally {
+      action.dispose();
       setResetting(false);
     }
-  }, [chatId, turnId, resetting, readOnly, doUndo, sessions]);
+  }, [chatId, turnId, folder, resetting, readOnly, doUndo, sessions]);
 
   // While the turn is still streaming, render nothing: the working group's
   // ActivityShimmer already shows the live elapsed timer (grey, text-fg2) at the
@@ -765,7 +775,7 @@ export const TurnFooter = memo(function TurnFooter({
             )}
           </IconButton>
         </Tooltip>
-        {!readOnly && (onFork || checkpoints) && (
+        {!readOnly && (onFork || turnId) && (
           <DropdownMenu>
             <DropdownMenuTrigger asChild>
               <IconButton
@@ -803,7 +813,7 @@ export const TurnFooter = memo(function TurnFooter({
                   Fork to new tab
                 </DropdownMenuItem>
               )}
-              {checkpoints && (
+              {turnId && (
                 <DropdownMenuItem
                   disabled={resetting}
                   onSelect={() => {

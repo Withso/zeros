@@ -13,6 +13,7 @@ import { answerCloudV2Offline } from "./composition.js";
 import { createCloudV2Routes, type CloudV2RouteDeps } from "./routes.js";
 import { CloudV2Store, type CloudV2Workspace } from "./store.js";
 import { mirrorMessageSearch } from "./history-search.js";
+import { mirrorMessageWindow } from "./history.js";
 
 const suite = process.env.TEST_DATABASE_URL ? describe : describe.skip;
 suite("offline native history paging", () => {
@@ -180,4 +181,52 @@ suite("offline native history paging", () => {
     }, { consistentRead: true })).rejects.toMatchObject({ code: "SEARCH_LIMIT" });
     expect((await store.get(workspace.id, creator)).state).toBe("stopped");
   });
+  it("atomically replaces mirrored rows with the sequence, retains retries and fences old boots", async () => {
+    await store.transition(workspace.id, ["stopped"], "starting");
+    const token = await store.rotateWorkerToken(workspace.id), bootId = randomUUID();
+    await store.acceptWorkerHello(token, bootId);
+    const first = { chats: [{ id: "native-chat" }], messages: { chatId: "native-chat", rows: [row("kept"), row("removed")] } };
+    await store.writeWorkerHistory(token, bootId, 1, first);
+    await mirror("unrelated-chat", [row("untouched")]);
+    const replacement = { messages: { chatId: "native-chat", replace: true as const, rows: [row("kept")] } };
+    await store.writeWorkerHistory(token, bootId, 2, replacement);
+    await store.writeWorkerHistory(token, bootId, 2, replacement);
+    await store.writeWorkerHistory(token, bootId, 1, first);
+    expect(await (await read("messages.window", { chatId: "native-chat" })).json()).toEqual({ result: { messages: [row("kept")] } });
+    expect(await (await read("messages.window", { chatId: "unrelated-chat" })).json()).toEqual({ result: { messages: [row("untouched")] } });
+    await expect(store.writeWorkerHistory(token, bootId, 3, { messages: { chatId: "native-chat", replace: true, rows: [{ ...row("invalid"), createdAt: -1 }] } }))
+      .rejects.toBeDefined();
+    expect(await (await read("messages.window", { chatId: "native-chat" })).json()).toEqual({ result: { messages: [row("kept")] } });
+    const empty = { messages: { chatId: "native-chat", replace: true as const, rows: [] } };
+    await store.writeWorkerHistory(token, bootId, 3, empty);
+    await expect(store.writeWorkerHistory(token, bootId, 3, replacement)).rejects.toMatchObject({ code: "history_sequence_conflict" });
+    expect(await (await read("messages.window", { chatId: "native-chat" })).json()).toEqual({ result: { messages: [] } });
+    await store.acceptWorkerHello(token, randomUUID());
+    await expect(store.writeWorkerHistory(token, bootId, 4, first)).rejects.toMatchObject({ code: "worker_boot_changed" });
+    expect(await (await read("messages.window", { chatId: "native-chat" })).json()).toEqual({ result: { messages: [] } });
+  });
+
+  it("keeps replacement state and rows in one snapshot across metadata upserts, empty cuts and rollback", async () => {
+    const historyState = { revision: 1, beforeEpoch: "7" };
+    await mirror("native-chat", [row("old")]);
+    await store.writeHistory(workspace.id, { messages: { chatId: "native-chat", replace: true, rows: [row("kept")], historyState } });
+    await store.writeHistory(workspace.id, { chats: [{ id: "native-chat", title: "Renamed", historyState: { revision: 99 } } as { id: string }] });
+    expect(await store.messageWindow(workspace.id, "native-chat")).toEqual({ messages: [row("kept")], historyState });
+    await expect(store.writeHistory(workspace.id, { messages: { chatId: "native-chat", replace: true,
+      rows: [{ ...row("bad"), createdAt: -1 }], historyState: { revision: 2, beforeEpoch: "8" } } })).rejects.toBeDefined();
+    expect(await store.messageWindow(workspace.id, "native-chat")).toEqual({ messages: [row("kept")], historyState });
+    let changed = false;
+    const old = await withSystemTx(pool, tx => mirrorMessageWindow({ query: async (...args: Parameters<typeof tx.query>) => {
+      const result = await tx.query(...args);
+      if (!changed) {
+        changed = true;
+        await store.writeHistory(workspace.id, { messages: { chatId: "native-chat", replace: true, rows: [], historyState: { revision: 2, beforeEpoch: "8" } } });
+      }
+      return result;
+    } } as typeof tx, workspace.id, "native-chat", {}), { consistentRead: true });
+    expect(old).toEqual({ messages: [row("kept")], historyState });
+    expect(await (await read("messages.window", { chatId: "native-chat" })).json())
+      .toEqual({ result: { messages: [], historyState: { revision: 2, beforeEpoch: "8" } } });
+  });
+
 });

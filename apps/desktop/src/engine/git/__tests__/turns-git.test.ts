@@ -72,6 +72,17 @@ describe("turns-git", () => {
     await rm(root, { recursive: true, force: true });
   });
 
+  it("skips an authored path when its recorded snapshot object no longer exists", async () => {
+    await writeFile(path.join(root, "a.txt"), "current file\n");
+    const post = await snapshotWorkingTree(root, snapshotRef("missing", "turn", "post"));
+    const result = await applyTurnSpanReset(root, "missing", [{ paths: ["a.txt"], preSnapshot: "a".repeat(40), postSnapshot: post }]);
+    expect(result).toMatchObject({ applied: [], conflicts: [], skipped: [{ path: "a.txt", result: "skipped", reason: "no snapshot available" }] });
+    expect(await read(root, "a.txt")).toBe("current file\n");
+    expect(await undoTurnReset(root, "b".repeat(40), ["a.txt"]))
+      .toEqual([{ path: "a.txt", result: "skipped", reason: "no snapshot available" }]);
+    expect(await read(root, "a.txt")).toBe("current file\n");
+  });
+
   it("never reads or merges a tracked file through an exchanged ancestor", async () => {
     await mkdir(path.join(root, "nested"));
     await writeFile(path.join(root, "nested/file.txt"), "L1\nL2\nL3\n");

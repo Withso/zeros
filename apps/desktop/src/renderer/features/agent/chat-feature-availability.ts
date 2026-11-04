@@ -7,14 +7,8 @@ export function permissionModesAvailable(folder: string | null | undefined, mode
     modes.some(mode => mode.id === "bypass" || mode.id === "full-access" || mode.id === "agent");
 }
 
-/** Reset/undo and native footer reads remain Local-only. Cloud footers use
- * mirrored summaries; explicit Review reads the worker's recorded diffs. */
+/** Cloud footers use mirrored summaries without waking the VM. Explicit
+ * Review and Reset actions reach the worker separately. */
 export function turnCheckpointsAvailable(chatId: string): boolean {
   return !parseCloudScopedId(chatId);
-}
-
-/** Edit-and-resend rewinds the transcript (`messages.truncateFrom`), which the
- * cloud v2 worker does not serve yet. */
-export function messageEditAvailable(folder: string | null | undefined): boolean {
-  return !isCloudWorkspace(folder);
 }

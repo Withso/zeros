@@ -4,7 +4,7 @@ import { withSystemTx, type Tx } from "../db.js";
 import type { AuthedUser } from "../auth.js";
 import { securityStreamAuthority } from "../security-events.js";
 import { HttpError } from "../authz.js";
-import type { CloudV2MessageRow } from "./contract.js";
+import type { CloudV2HistoryState, CloudV2MessageRow } from "./contract.js";
 import { hashCloudV2Token, newCloudV2Token } from "./tokens.js";
 import { CLOUD_V2_CREATOR_ON_HOLD, CLOUD_V2_LIVE_ACCESS as LIVE_ACCESS } from "./workspace-access.js";
 import { memberOnHoldSql, organizationMemberOnHold } from "../organization-seats.js";
@@ -28,7 +28,7 @@ type CreateWorkspace = {
 type CreateReceipt = { status: 201; response: Record<string, unknown> };
 type HistoryInput = {
   chats?: readonly { id: string }[] | undefined; chatDeletions?: readonly string[] | undefined;
-  messages?: { chatId: string; rows: readonly CloudV2MessageRow[] } | undefined;
+  messages?: { chatId: string; rows: readonly CloudV2MessageRow[]; replace?: true | undefined; historyState?: CloudV2HistoryState | undefined } | undefined;
 };
 export type CloudV2WorkerSession = CloudV2Workspace & {
   accessEpoch: string; loginRevision: string;
@@ -940,8 +940,10 @@ export class CloudV2Store {
   private async mirrorHistory(tx: Tx, workspaceId: string, input: HistoryInput): Promise<void> {
       for (const chat of input.chats ?? []) {
         await tx.query(
-          `INSERT INTO cloud_v2_chats (workspace_id, chat_id, row) VALUES ($1, $2, $3)
-           ON CONFLICT (workspace_id, chat_id) DO UPDATE SET row = EXCLUDED.row, deleted_at = NULL, updated_at = clock_timestamp()`,
+          `INSERT INTO cloud_v2_chats (workspace_id, chat_id, row) VALUES ($1, $2, $3::jsonb - 'historyState')
+           ON CONFLICT (workspace_id, chat_id) DO UPDATE SET row = EXCLUDED.row ||
+             CASE WHEN cloud_v2_chats.row ? 'historyState' THEN jsonb_build_object('historyState', cloud_v2_chats.row->'historyState') ELSE '{}'::jsonb END,
+             deleted_at = NULL, updated_at = clock_timestamp()`,
           [workspaceId, chat.id, JSON.stringify(chat)],
         );
       }
@@ -954,6 +956,12 @@ export class CloudV2Store {
         );
       }
       const batch = input.messages;
+      if (batch?.replace) await tx.query(`DELETE FROM cloud_v2_messages WHERE workspace_id=$1 AND chat_id=$2`, [workspaceId, batch.chatId]);
+      if (batch?.historyState) await tx.query(
+        `INSERT INTO cloud_v2_chats (workspace_id, chat_id, row) VALUES ($1, $2, jsonb_build_object('id', $2::text, 'historyState', $3::jsonb))
+         ON CONFLICT (workspace_id, chat_id) DO UPDATE SET row = jsonb_set(cloud_v2_chats.row, '{historyState}', $3::jsonb), updated_at = clock_timestamp()`,
+        [workspaceId, batch.chatId, JSON.stringify(batch.historyState)],
+      );
       if (batch?.rows.length) {
         await tx.query(
           `INSERT INTO cloud_v2_messages (workspace_id, chat_id, msg_id, kind, payload, created_at_ms)

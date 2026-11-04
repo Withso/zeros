@@ -49,6 +49,37 @@ async function setup(driverSetup?: (driver: FakeDriver) => void, agentId: "codex
 }
 
 describe("worker bridge routing through a fake relay", () => {
+  it("does not enable history replacement from a rejected foreign workspace configuration", async () => {
+    const { relay, chat, op } = await setup();
+    await relay.receive({ ...config, loginRevision: "2" });
+    await chat();
+    const message = { msgId: "one", kind: "text", createdAt: 1,
+      payload: JSON.stringify({ id: "one", kind: "text", role: "user", text: "fixture", createdAt: 1 }) };
+    await op("messages.import", { chatId: "chat", messages: [message] });
+    await expect(relay.receive({ ...config, loginRevision: "3", historyReplacement: 1,
+      workspace: { ...config.workspace, id: randomUUID() } })).rejects.toThrow("Workspace identity changed");
+    await relay.receive({ ...config, loginRevision: "1" });
+    expect(await op("messages.truncateFrom", { chatId: "chat", fromMsgId: "one" }))
+      .toMatchObject({ type: "WORKSPACE_ERROR", code: "CLOUD_V2_UNSUPPORTED" });
+    expect(await op("messages.window", { chatId: "chat" })).toMatchObject({ result: { messages: [message] } });
+  });
+
+  it("broadcasts an empty transcript replacement to all clients before returning the cut", async () => {
+    const { relay, chat, op, worker } = await setup();
+    await relay.receive({ ...config, historyReplacement: 1 });
+    await chat();
+    await op("messages.import", { chatId: "chat", messages: [{ msgId: "one", kind: "text", createdAt: 1,
+      payload: JSON.stringify({ id: "one", kind: "text", role: "user", text: "fixture", createdAt: 1 }) }] });
+    await worker.flush(); relay.frames.length = 0;
+    expect(await op("messages.truncateFrom", { chatId: "chat", fromMsgId: "one" })).toMatchObject({ type: "WORKSPACE_RESPONSE", result: { removed: 1 } });
+    await worker.flush();
+    expect(relay.bridge("DB_CHANGED")).toContainEqual(expect.objectContaining({ clientId: "*", frame: expect.objectContaining({
+      kinds: expect.arrayContaining(["messages", "conversationContext"]), chatIds: ["chat"],
+    }) }));
+    expect(relay.frames).toContainEqual({ t: "history", messages: { chatId: "chat", rows: [], replace: true, historyState: { revision: 1 } } });
+    expect(await op("messages.window", { chatId: "chat" }, CLIENT_B)).toMatchObject({ result: { messages: [], historyState: { revision: 1 } } });
+  });
+
   it.each(["claude", "codex", "cursor"] as const)("keeps manual compaction unavailable for cloud %s", async provider => {
     const { relay, chat, drivers } = await setup(undefined, provider);
     const sessionId = await chat();
@@ -594,9 +625,7 @@ describe("worker bridge routing through a fake relay", () => {
 
   it("exposes the deferred chat operations as explicit unsupported errors", async () => {
     const { op } = await setup();
-    expect(UNSUPPORTED_CHAT_OPS).toEqual([
-      "messages.clear", "messages.truncateFrom", "turns.reset", "turns.undoReset",
-    ]);
+    expect(UNSUPPORTED_CHAT_OPS).toEqual(["messages.clear"]);
     for (const name of UNSUPPORTED_CHAT_OPS) expect(await op(name)).toMatchObject({ type: "WORKSPACE_ERROR", code: "CLOUD_V2_UNSUPPORTED", op: name });
   });
 });

@@ -44,6 +44,13 @@ beforeEach(() => {
 afterEach(() => { cloudTranscriptCache.resetForTesting(); vi.restoreAllMocks(); vi.unstubAllGlobals(); });
 
 describe("cloud transcript storage", () => {
+  it.each([[], [row("retained")]].map(messages => ({ messages })))("retains the exact cut state across restart, including an empty cut: $messages", async ({ messages }) => {
+    const store = new Store(), transcript = cache(store), id = cloudScopedId(a, "chat");
+    const saved = { messages, leadingPrompt: null, source: "worker" as const, historyState: { revision: 2, beforeEpoch: "7" } };
+    transcript.remember(id, cloudWorkspaceKey(a), saved); await transcript.flush();
+    expect(await cache(store).read(id)).toEqual(saved);
+    expect(await cache(store, ownerB).read(id)).toBeNull();
+  });
   it("gives cloud its own eight memory windows without evicting Local windows", () => {
     const local = new LocalTranscriptCache({ store: null, schedule: () => () => {} });
     cloudTranscriptCache.bindOwner(ownerA, false);

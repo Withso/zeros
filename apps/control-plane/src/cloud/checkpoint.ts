@@ -365,6 +365,16 @@ function archiveSteps(input: ArchiveInput, revision: string): string[] {
     "  step=refs",
     "  git for-each-ref --format='branch %(objectname) %(refname)' refs/heads >> \"$m\"",
     "  git for-each-ref --format='tag %(objectname) %(refname)' refs/tags >> \"$m\"",
+    // Git bundles walk commits, not private tree refs. Temporary anchors
+    // carry their objects; only stable tree/ref pairs enter the fingerprint.
+    "  step=turns; n=0",
+    "  while read -r object type name; do",
+    "    [[ \"$name\" =~ ^refs/zeros/(turns/[0-9a-f]{64}/[0-9a-f]{64}|resets/[0-9a-f]{64}/[0-9]{1,16}-[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})/(pre|post)$ ]] || continue",
+    "    [ \"$type\" = tree ] || fail checkpoint_failed",
+    "    anchor=$(git commit-tree --no-gpg-sign -m zeros-checkpoint-turn \"$object\")",
+    "    git update-ref --no-deref \"refs/zeros-checkpoint/turn-$n\" \"$anchor\"; n=$((n + 1))",
+    "    printf 'turn-tree %s %s\\n' \"$object\" \"$name\" >> \"$m\"",
+    "  done < <(git for-each-ref --format='%(objectname) %(objecttype) %(refname)' refs/zeros/turns/ refs/zeros/resets/)",
     // Remotes other than origin (which the Cloud Computer has): every URL, push
     // URL and fetch setting, without credentials.
     "  strip() { printf %s \"$1\" | sed -E 's#^([A-Za-z][A-Za-z0-9+.-]*://)[^/@]*@#\\1#' | base64 -w0; }",
@@ -547,6 +557,13 @@ export function checkpointRestoreSteps(input: RestoreInput, fetch: readonly stri
     "    hex \"$sha\"; [[ \"$name\" == refs/tags/* ]] && git check-ref-format \"$name\" || fail checkpoint_corrupt",
     "    need \"$sha\" object; git update-ref \"$name\" \"$sha\"",
     "  done < <(grep '^tag ' \"$m\" || true)",
+    // A recipe's symbolic ref must not redirect restoration into a branch
+    // or another namespace. Replace only the validated private ref itself.
+    "  while read -r _ tree name extra; do",
+    "    hex \"$tree\"; [ -z \"$extra\" ] && [[ \"$name\" =~ ^refs/zeros/(turns/[0-9a-f]{64}/[0-9a-f]{64}|resets/[0-9a-f]{64}/[0-9]{1,16}-[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})/(pre|post)$ ]] || fail checkpoint_corrupt",
+    "    [ \"$(git cat-file -t \"$tree\")\" = tree ] || fail checkpoint_corrupt",
+    "    git update-ref --no-deref \"$name\" \"$tree\"",
+    "  done < <(grep '^turn-tree ' \"$m\" || true)",
     "  line=$(grep '^head ' \"$m\" || true)",
     "  case \"$line\" in",
     // An unborn branch stays unborn even where the Cloud Computer has it.

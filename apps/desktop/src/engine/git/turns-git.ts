@@ -29,6 +29,10 @@
 // live turn is never disturbed.
 // ──────────────────────────────────────────────────────────
 
+import { applyTurnReset as applySharedTurnReset, applyTurnSpanReset as applySharedTurnSpanReset,
+  undoTurnReset as undoSharedTurnReset, type TurnResetHost, type TurnResetStep } from "@zeros/protocol/turns";
+export type { ResetFileOutcome, TurnResetResult, TurnResetStep } from "@zeros/protocol/turns";
+
 import { constants, promises as fs } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { openLocalFile, openLocalDirectory } from "../local-orchestration/filesystem";
@@ -888,347 +892,53 @@ async function mergeText(
 
 // ── Reset (per-path restore) ─────────────────────────────
 
-export interface ResetFileOutcome {
-  path: string;
-  result: "restored" | "deleted" | "merged" | "conflict" | "skipped";
-  reason?: string;
-}
-
-/** Restore one authored path toward its pre-turn state.
- *   - `target` = state before the reverted span (turn T's pre snapshot).
- *   - `base`   = what this chat last wrote (its latest turn's post snapshot).
- *   - current  = on-disk now.
- *  Fast path (current === base, by OID): nobody changed it since → set it to
- *  target exactly (binary-safe). Diverged: 3-way text merge (conflict reported,
- *  never silently overwrites the other chat's lines). */
-async function resetPath(
-  cwd: string,
-  path: string,
-  targetCommit: string | null,
-  baseCommit: string | null,
-): Promise<ResetFileOutcome> {
-  if (!targetCommit || !baseCommit) {
-    return { path, result: "skipped", reason: "no snapshot available" };
-  }
-  const targetOid = await blobOid(cwd, targetCommit, path);
-  const baseOid = await blobOid(cwd, baseCommit, path);
-  const currentOid = await diskBlobOid(cwd, path);
-
-  // Fast path: file is exactly as this chat last left it → no concurrent edit.
-  if (currentOid === baseOid) {
-    // If the INDEX also holds the exact blob being reverted (the agent's edit
-    // was staged verbatim), sync it too — a worktree-only restore would leave
-    // the reverted content staged, and a later commit would resurrect it. Any
-    // OTHER staged content (the user's own partial staging) is left alone.
-    const stagedSameBlob =
-      currentOid != null && (await indexBlobOid(cwd, path)) === currentOid;
-    if (targetOid) {
-      await restoreTurnPath(cwd, path, targetCommit, currentOid);
-      if (stagedSameBlob) await runGit(cwd, ["restore", `--source=${targetCommit}`, "--staged", "--", path]);
-      return { path, result: "restored" };
-    }
-    // Target absent → the file didn't exist before the span → remove it (and
-    // its staged copy, when that copy is the reverted blob).
-    if (currentOid) {
-      if (stagedSameBlob) {
-        await runGit(cwd, ["update-index", "--force-remove", "--", path]).catch(
-          () => {},
-        );
-      }
-      await restoreTurnPath(cwd, path, null, currentOid);
-      return { path, result: "deleted" };
-    }
-    return { path, result: "skipped", reason: "nothing to do" };
-  }
-
-  // Diverged (a concurrent chat or manual edit changed it) → 3-way merge.
-  const cur = await readDiskText(cwd, path);
-  const base = baseOid
-    ? await showText(cwd, baseCommit, path)
-    : { text: "", isBinary: false };
-  const tgt = targetOid
-    ? await showText(cwd, targetCommit, path)
-    : { text: "", isBinary: false };
-  if (!cur || cur.isBinary || base?.isBinary || tgt?.isBinary) {
-    return {
-      path,
-      result: "conflict",
-      reason: "binary or unreadable; not auto-merged",
-    };
-  }
-  const { merged, conflict } = await mergeText(
-    cwd,
-    cur.text,
-    base?.text ?? "",
-    tgt?.text ?? "",
-  );
-  if (conflict) {
-    return { path, result: "conflict", reason: "overlapping concurrent edit" };
-  }
-  const target = turnPath(cwd, path);
-  const directory = await openLocalDirectory(nodePath.dirname(target));
-  const pinned = nodePath.join(directory.path, nodePath.basename(target));
-  const temporary = `${pinned}.${randomUUID()}.merge`;
-  try {
-    const previous = await fs.lstat(pinned);
-    await fs.writeFile(temporary, merged, { flag: "wx", mode: previous.mode & 0o777 });
-    const latest = await readDiskText(cwd, path);
-    if (!latest || latest.text !== cur.text) return { path, result: "conflict", reason: "file changed during merge" };
-    await fs.rename(temporary, pinned);
-  } finally {
-    await fs.unlink(temporary).catch(() => {});
-    await directory.handle.close();
-  }
-  return { path, result: "merged" };
-}
-
-export interface TurnResetResult {
-  /** Files actually changed on disk (restored / merged / deleted). */
-  applied: ResetFileOutcome[];
-  /** Files a concurrent/overlapping edit blocked — left as-is, not clobbered. */
-  conflicts: ResetFileOutcome[];
-  /** Files we could NOT restore (no snapshot available, binary, unreadable).
-   *  Surfaced separately so the caller can warn instead of pretending the reset
-   *  fully applied — otherwise a snapshot-less reset silently rolls back only
-   *  the transcript while files stay put. */
-  skipped: ResetFileOutcome[];
-  preResetSnapshot: string | null;
-  /** Whole-tree state right AFTER the reset applied — undo's merge base. Undo
-   *  compares disk against this to detect (and 3-way merge around) edits made
-   *  between the reset and the undo, instead of blindly overwriting them. */
-  postResetSnapshot: string | null;
-}
-
-/** Restore `paths` to their pre-turn state (target = `targetCommit`), using
- *  `baseCommit` (this chat's latest post snapshot) as the merge ancestor. Takes
- *  a snapshot-before-reset escape hatch first. */
-export async function applyTurnReset(
-  cwd: string,
-  chatId: string,
-  paths: string[],
-  targetCommit: string | null,
-  baseCommit: string | null,
-): Promise<TurnResetResult> {
-  // Escape hatch: snapshot the current tree so the reset itself is undoable.
-  const preResetSnapshot = await snapshotWorkingTree(
-    cwd,
-    resetRef(chatId, resetStamp("pre")),
-  );
-  // Cap the chat's reset snapshots — this one is the newest, so it survives.
-  await pruneResetSnapshots(cwd, chatId, RESET_SNAPSHOT_KEEP).catch(() => {});
-  const outcomes: ResetFileOutcome[] = [];
-  for (const path of paths) {
-    try {
-      outcomes.push(await resetPath(cwd, path, targetCommit, baseCommit));
-    } catch (err) {
-      outcomes.push({
-        path,
-        result: "skipped",
-        reason: err instanceof Error ? err.message : String(err),
-      });
-    }
-  }
-  const postResetSnapshot = await snapshotWorkingTree(
-    cwd,
-    resetRef(chatId, resetStamp("post")),
-  );
+function resetHost(cwd: string, chatId: string): TurnResetHost {
+  const available = new Map<string, Promise<boolean>>();
   return {
-    applied: outcomes.filter(
-      (o) =>
-        o.result === "restored" ||
-        o.result === "merged" ||
-        o.result === "deleted",
-    ),
-    conflicts: outcomes.filter((o) => o.result === "conflict"),
-    skipped: outcomes.filter((o) => o.result === "skipped"),
-    preResetSnapshot,
-    postResetSnapshot,
+    snapshotAvailable: revision => {
+      let checking = available.get(revision);
+      if (!checking) { checking = runGit(cwd, ["cat-file", "-e", `${revision}^{tree}`]).then(() => true, () => false); available.set(revision, checking); }
+      return checking;
+    },
+    blobOid: (revision, path) => blobOid(cwd, revision, path),
+    diskBlobOid: path => diskBlobOid(cwd, path),
+    indexBlobOid: path => indexBlobOid(cwd, path),
+    restore: (path, revision, expected) => restoreTurnPath(cwd, path, revision, expected),
+    restoreIndex: (path, revision) => runGit(cwd, ["restore", `--source=${revision}`, "--staged", "--", path]),
+    removeIndex: path => runGit(cwd, ["update-index", "--force-remove", "--", path]),
+    readDiskText: path => readDiskText(cwd, path),
+    showText: (revision, path) => showText(cwd, revision, path),
+    mergeText: (ours, base, theirs) => mergeText(cwd, ours, base, theirs),
+    publishMerge: async (path, merged, expected) => {
+      const target = turnPath(cwd, path);
+      const directory = await openLocalDirectory(nodePath.dirname(target));
+      const pinned = nodePath.join(directory.path, nodePath.basename(target));
+      const temporary = `${pinned}.${randomUUID()}.merge`;
+      try {
+        const previous = await fs.lstat(pinned);
+        await fs.writeFile(temporary, merged, { flag: "wx", mode: previous.mode & 0o777 });
+        const latest = await readDiskText(cwd, path);
+        if (!latest || latest.text !== expected) return false;
+        await fs.rename(temporary, pinned);
+      } finally {
+        await fs.unlink(temporary).catch(() => {});
+        await directory.handle.close();
+      }
+      return true;
+    },
+    snapshot: phase => snapshotWorkingTree(cwd, resetRef(chatId, resetStamp(phase))),
+    prune: () => pruneResetSnapshots(cwd, chatId, RESET_SNAPSHOT_KEEP),
   };
 }
 
-export interface TurnResetStep {
-  /** Authored paths for exactly one turn. */
-  paths: string[];
-  /** Whole-tree state immediately before/after that same turn. */
-  preSnapshot: string | null;
-  postSnapshot: string | null;
+export function applyTurnReset(cwd: string, chatId: string, paths: string[], targetCommit: string | null, baseCommit: string | null) {
+  return applySharedTurnReset(resetHost(cwd, chatId), paths, targetCommit, baseCommit);
 }
 
-/**
- * Reset a span of turns without using a later unrelated whole-tree snapshot as
- * every file's merge base. Steps are supplied oldest-first and unwound newest-
- * first. This matters when another agent edits the same file between two turns:
- * each inverse uses only the pre/post pair for the turn that actually authored
- * that path, preserving the interleaved edit wherever a 3-way merge can.
- *
- * A path with any pruned/missing snapshot is pre-blocked before mutation, so a
- * long reset never half-reverts that path and then discovers it cannot finish.
- */
-export async function applyTurnSpanReset(
-  cwd: string,
-  chatId: string,
-  steps: TurnResetStep[],
-): Promise<TurnResetResult> {
-  const preResetSnapshot = await snapshotWorkingTree(
-    cwd,
-    resetRef(chatId, resetStamp("pre")),
-  );
-  await pruneResetSnapshots(cwd, chatId, RESET_SNAPSHOT_KEEP).catch(() => {});
-
-  const orderedPaths = [...new Set(steps.flatMap((step) => step.paths))];
-  if (!preResetSnapshot && orderedPaths.length > 0) {
-    return {
-      applied: [],
-      conflicts: [],
-      skipped: orderedPaths.map((path) => ({
-        path,
-        result: "skipped" as const,
-        reason: "could not create pre-reset safety snapshot",
-      })),
-      preResetSnapshot: null,
-      postResetSnapshot: null,
-    };
-  }
-  const outcomes = new Map<string, ResetFileOutcome>();
-  const blocked = new Set<string>();
-  const touched = new Set<string>();
-
-  // Validate the whole per-path chain before changing disk. Snapshot retention
-  // may have pruned an old turn; in that case leave the path untouched.
-  for (const step of steps) {
-    if (step.preSnapshot && step.postSnapshot) continue;
-    for (const path of step.paths) {
-      blocked.add(path);
-      outcomes.set(path, {
-        path,
-        result: "skipped",
-        reason: "no snapshot available",
-      });
-    }
-  }
-
-  for (const step of [...steps].reverse()) {
-    for (const path of new Set(step.paths)) {
-      if (blocked.has(path)) continue;
-      let outcome: ResetFileOutcome;
-      try {
-        outcome = await resetPath(
-          cwd,
-          path,
-          step.preSnapshot,
-          step.postSnapshot,
-        );
-      } catch (err) {
-        outcome = {
-          path,
-          result: "skipped",
-          reason: err instanceof Error ? err.message : String(err),
-        };
-      }
-      outcomes.set(path, outcome);
-      // Once an inverse cannot be applied safely, earlier inverses for the same
-      // path no longer have a trustworthy current state. If a newer inverse for
-      // this path already landed, restore the pre-reset escape snapshot first —
-      // a conflict must never leave a file only half-reset.
-      if (outcome.result === "conflict" || outcome.result === "skipped") {
-        if (touched.has(path) && preResetSnapshot) {
-          const [rollback] = await undoTurnReset(cwd, preResetSnapshot, [path]);
-          if (rollback?.result === "skipped") {
-            outcome = {
-              path,
-              result: "skipped",
-              reason: `reset conflicted and rollback failed: ${rollback.reason ?? "unknown error"}`,
-            };
-            outcomes.set(path, outcome);
-          }
-        }
-        touched.delete(path);
-        blocked.add(path);
-      } else {
-        touched.add(path);
-      }
-    }
-  }
-
-  const final = orderedPaths.map(
-    (path) =>
-      outcomes.get(path) ?? {
-        path,
-        result: "skipped" as const,
-        reason: "nothing to do",
-      },
-  );
-  // Capture the tree the reset LEFT — undo's merge base (see TurnResetResult).
-  const postResetSnapshot = await snapshotWorkingTree(
-    cwd,
-    resetRef(chatId, resetStamp("post")),
-  );
-  return {
-    applied: final.filter(
-      (o) =>
-        o.result === "restored" ||
-        o.result === "merged" ||
-        o.result === "deleted",
-    ),
-    conflicts: final.filter((o) => o.result === "conflict"),
-    skipped: final.filter((o) => o.result === "skipped"),
-    preResetSnapshot,
-    postResetSnapshot,
-  };
+export function applyTurnSpanReset(cwd: string, chatId: string, steps: TurnResetStep[]) {
+  return applySharedTurnSpanReset(resetHost(cwd, chatId), steps);
 }
 
-/** Undo a prior reset: restore `paths` from the pre-reset snapshot (best-effort,
- *  binary-safe). Files only — the truncated transcript is not restored.
- *
- *  `mergeBase` is the post-reset snapshot (the tree the reset LEFT). When
- *  present, undo gets the same never-clobber rule as reset itself: a path the
- *  user (or another chat) edited AFTER the reset is 3-way merged — an
- *  overlapping edit conflicts and is left as-is instead of being silently
- *  overwritten. Without it (legacy undo records, or the mid-reset rollback
- *  where forcing back to the escape snapshot is exactly the point) the
- *  original blind restore applies. */
-export async function undoTurnReset(
-  cwd: string,
-  snapshot: string,
-  paths: string[],
-  mergeBase?: string | null,
-): Promise<ResetFileOutcome[]> {
-  if (mergeBase) {
-    const out: ResetFileOutcome[] = [];
-    for (const path of paths) {
-      try {
-        // target = pre-reset state (what undo restores toward); base = what the
-        // reset left on disk. Undisturbed paths take resetPath's exact fast
-        // path; diverged ones merge, overlaps conflict.
-        out.push(await resetPath(cwd, path, snapshot, mergeBase));
-      } catch (err) {
-        out.push({
-          path,
-          result: "skipped",
-          reason: err instanceof Error ? err.message : String(err),
-        });
-      }
-    }
-    return out;
-  }
-  const out: ResetFileOutcome[] = [];
-  for (const path of paths) {
-    try {
-      const oid = await blobOid(cwd, snapshot, path);
-      if (oid) {
-        await restoreTurnPath(cwd, path, snapshot);
-        out.push({ path, result: "restored" });
-      } else {
-        await restoreTurnPath(cwd, path, null);
-        out.push({ path, result: "deleted" });
-      }
-    } catch (err) {
-      out.push({
-        path,
-        result: "skipped",
-        reason: err instanceof Error ? err.message : String(err),
-      });
-    }
-  }
-  return out;
+export function undoTurnReset(cwd: string, snapshot: string, paths: string[], mergeBase?: string | null) {
+  return undoSharedTurnReset(resetHost(cwd, ""), snapshot, paths, mergeBase);
 }

@@ -948,6 +948,8 @@ describe("cloud v2 checkpoint reuse", () => {
     ["a deleted branch", w => { w.git(w.oldRepo, "switch", "-q", "main"); w.git(w.oldRepo, "branch", "-q", "-D", "zeros/work"); }],
     ["a switched branch", w => w.git(w.oldRepo, "switch", "-q", "-c", "elsewhere")],
     ["a tag", w => w.git(w.oldRepo, "tag", "v1")],
+    ["a private turn tree", w => w.git(w.oldRepo, "update-ref", `refs/zeros/turns/${"a".repeat(64)}/${"b".repeat(64)}/pre`, w.git(w.oldRepo, "rev-parse", "HEAD^{tree}"))],
+    ["a private reset tree", w => w.git(w.oldRepo, "update-ref", `refs/zeros/resets/${"a".repeat(64)}/1-12345678-1234-4234-8234-123456789abc/pre`, w.git(w.oldRepo, "rev-parse", "HEAD^{tree}"))],
     ["a stash", w => w.git(w.oldRepo, "stash", "push", "-q", "-m", "idea")],
     ["another remote", w => w.git(w.oldRepo, "remote", "add", "fork", "https://example.test/fork.git")],
     ["an upstream", w => { w.git(w.oldRepo, "config", "branch.zeros/work.remote", "origin"); w.git(w.oldRepo, "config", "branch.zeros/work.merge", "refs/heads/zeros/work"); }],
@@ -1028,4 +1030,57 @@ describe("cloud v2 checkpoint reuse", () => {
     for (const reuse of [{ fingerprint: "x".repeat(64), base: null }, { fingerprint: f, base: "'; rm -rf / #" }, { fingerprint: `${f}'`, base: null }])
       expect(() => command(reuse)).toThrow("Invalid checkpoint fingerprint");
   });
+});
+
+it.each([
+  `refs/zeros/turns/${"a".repeat(64)}/${"b".repeat(64)}/post`,
+  `refs/zeros/resets/${"a".repeat(64)}/1234567890-${"12345678-1234-4234-8234-123456789abc"}/pre`,
+])("preserves private snapshot %s with session state through VM loss and Git GC", turnRef => {
+  const w = workspaces();
+  w.write(join(w.oldRepo, "a.txt"), "only present in the old turn snapshot\n");
+  w.git(w.oldRepo, "add", "a.txt");
+  const tree = w.git(w.oldRepo, "write-tree");
+  w.git(w.oldRepo, "update-ref", turnRef, tree);
+  w.git(w.oldRepo, "restore", "--source=HEAD", "--staged", "--worktree", "a.txt");
+  const relative = ".local/share/zeros/cloud-worker/sessions/turn-fixture.json";
+  w.write(join(w.oldHome, relative), JSON.stringify({ version: 1, postSnapshot: tree }));
+  const key = randomBytes(32), archive = join(w.root, "checkpoint.zck");
+  expect(checkpoint({ home: w.oldHome, repo: w.oldRepo, key, out: archive }, w.env).parsed.ok).toBe(true);
+  w.git(w.root, "clone", "-q", w.origin, w.newRepo);
+  const main = w.git(w.newRepo, "rev-parse", "refs/heads/main");
+  w.git(w.newRepo, "symbolic-ref", turnRef, "refs/heads/main");
+  expect(restore({ home: w.newHome, repo: w.newRepo, key, sha256: sha(archive), from: archive }, w.env).parsed).toEqual({ ok: true });
+  expect(w.git(w.newRepo, "rev-parse", "refs/heads/main")).toBe(main);
+  expect(spawnSync("git", ["symbolic-ref", "-q", turnRef], { cwd: w.newRepo, env: w.env }).status).toBe(1);
+  expect(JSON.parse(readFileSync(join(w.newHome, relative), "utf8")).postSnapshot).toBe(tree);
+  const ref = spawnSync("git", ["rev-parse", "--verify", turnRef], { cwd: w.newRepo, env: w.env, encoding: "utf8" });
+  w.git(w.newRepo, "reflog", "expire", "--expire=now", "--all");
+  w.git(w.newRepo, "gc", "--prune=now");
+  const object = spawnSync("git", ["cat-file", "-t", tree], { cwd: w.newRepo, env: w.env, encoding: "utf8" });
+  expect.soft(ref.status).toBe(0);
+  expect.soft(ref.stdout.trim()).toBe(tree);
+  expect.soft(object.status).toBe(0);
+  expect.soft(object.stdout.trim()).toBe("tree");
+});
+
+it("refuses a valid private snapshot ref that names a commit instead of a tree", () => {
+  const w = workspaces(), turnRef = `refs/zeros/turns/${"a".repeat(64)}/${"b".repeat(64)}/post`;
+  w.git(w.oldRepo, "update-ref", turnRef, "HEAD");
+  expect(checkpoint({ home: w.oldHome, repo: w.oldRepo, key: randomBytes(32), out: join(w.root, "checkpoint.zck") }, w.env).parsed)
+    .toEqual({ ok: false, code: "checkpoint_failed", step: "turns" });
+});
+
+it.each(["namespace", "type", "extra-field"])("refuses a corrupted private snapshot %s record during restore", corruption => {
+  const w = workspaces(), key = randomBytes(32), archive = join(w.root, "checkpoint.zck");
+  expect(checkpoint({ home: w.oldHome, repo: w.oldRepo, key, out: archive }, w.env).parsed.ok).toBe(true);
+  w.git(w.root, "clone", "-q", w.origin, w.newRepo);
+  const tree = w.git(w.oldRepo, "rev-parse", corruption === "type" ? "HEAD" : "HEAD^{tree}");
+  const reference = corruption === "namespace" ? "refs/heads/escaped" : `refs/zeros/turns/${"a".repeat(64)}/${"b".repeat(64)}/post`;
+  const steps = checkpointRestoreSteps({ checkoutPath: w.newRepo, home: w.newHome, key, sha256: sha(archive) }, [`cp '${archive}' "$work/checkpoint.zck"`]);
+  const boundary = steps.indexOf('rm -f "$work/plain"; m="$c/manifest"');
+  expect(boundary).toBeGreaterThan(0);
+  steps.splice(boundary + 1, 0, `printf 'turn-tree ${tree} ${reference}${corruption === "extra-field" ? " extra" : ""}\\n' >> "$m"`);
+  const result = run([...steps, "report zeros-checkpoint-restored"], w.env);
+  expect(parseRestoreResult(result.stdout)).toEqual({ ok: false, code: "checkpoint_corrupt" });
+  expect(spawnSync("git", ["show-ref", "--verify", reference], { cwd: w.newRepo, env: w.env }).status).not.toBe(0);
 });

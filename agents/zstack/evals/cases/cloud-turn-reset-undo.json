@@ -1,0 +1,9 @@
+{
+  "id": "cloud-turn-reset-undo",
+  "kind": "replay",
+  "area": "cloud-worker",
+  "fixedBy": "pr:835",
+  "symptom": "Cloud turn records had authored snapshots but the worker refused reset and Undo, so the existing controls could not restore files or restart a conversation from an earlier turn.",
+  "rule": "Reuse the Local reset algorithm, retire native execution before a transcript cut, retain exact revision and Stop-epoch history fences, and carry Undo state plus private trees through checkpoint restore. See agents/zstack/playbooks/feature.md and docs/cloud-workspaces.md.",
+  "check": "pnpm --dir apps/cloud-worker exec vitest run src/workspace/__tests__/turn-reset.test.ts -t 'resets the authored turn span|can undo a file reset|replaces the full transcript'"
+}

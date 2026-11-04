@@ -194,17 +194,11 @@ describe("conversation context reset", () => {
     expect(slot("chat-1")?.messages.map(message => message.id)).toEqual(["kept"]);
   });
 
-  it("leaves cloud and evicted chats unloaded", () => {
-    const cloud = cloudScopedId({ organizationId: "11111111-1111-4111-8111-111111111111", workspaceId: "22222222-2222-4222-8222-222222222222" }, "chat");
-    const store = useSessionsStore.getState();
-    store.setSession(cloud, { ...BLANK, cwd: "cloud://11111111-1111-4111-8111-111111111111/22222222-2222-4222-8222-222222222222", sessionId: "cloud-native" });
-    store.setSession("chat-1", { ...BLANK, cwd: "/repo", transcriptState: "cold", sessionId: "old" });
-    const cloudBefore = slot(cloud);
+  it("leaves evicted chats unloaded", () => {
+    useSessionsStore.getState().setSession("chat-1", { ...BLANK, cwd: "/repo", transcriptState: "cold", sessionId: "old" });
     const h = harness();
-    h.resetContext(cloud);
     h.resetContext("chat-1");
     expect(h.read).not.toHaveBeenCalled();
-    expect(slot(cloud)).toBe(cloudBefore);
     expect(slot("chat-1")).toMatchObject({ transcriptState: "cold", sessionId: null });
   });
 });

@@ -8,7 +8,7 @@ import { z } from "zod";
 import { applyUpdate, readQuestionStamp, type AgentMessage, type AgentTextMessage } from "@zeros/protocol/agent-messages";
 import type { ContentBlock, PromptResponse, SessionNotification } from "@zeros/protocol/agent-events";
 import type { AgentPromptBubble, BridgeAgentFailure, SteerOutcome } from "@zeros/protocol/messages";
-import { CloudV2MessageRowSchema, type CloudV2MessageRow } from "@zeros/protocol/cloud-v2-relay";
+import { CloudV2MessageRowSchema, type CloudV2MessageRow, type CloudV2HistoryState } from "@zeros/protocol/cloud-v2-relay";
 import { providerBindingForResume } from "@zeros/protocol/identities";
 import { coerceChat, messageWindow, upsertRows, type ChatRow, type MessageWindow } from "./chat-history";
 import { WorkspaceError } from "../workspace/scope";
@@ -48,6 +48,7 @@ export interface InboxEntry extends PromptInput {
   error?: string;
   failure?: BridgeAgentFailure;
   cancelRequested?: boolean;
+  historyRemoved?: true;
 }
 export interface SteerReceipt extends Omit<PromptInput, "startedAt"> {
   attemptId: string;
@@ -55,6 +56,17 @@ export interface SteerReceipt extends Omit<PromptInput, "startedAt"> {
   turnId?: string;
   createdAt: number;
   outcome: SteerOutcome | "pending";
+  historyRemoved?: true;
+}
+export interface ResetUndo {
+  resetId: string;
+  snapshot: string | null;
+  postSnapshot: string | null;
+  paths: string[];
+  rows: CloudV2MessageRow[];
+  turns: TurnInfo[];
+  cutRevision?: number;
+  continuation?: number;
 }
 export interface SessionData {
   version: 1;
@@ -77,12 +89,17 @@ export interface SessionData {
   /** Worker-owned Git authority; imported transcript rows cannot replace it. */
   turns?: TurnInfo[];
   pendingInteractions?: SavedInteraction[];
+  resets?: ResetUndo[];
+  historyRevision?: number;
+  historyBeforeEpoch?: string;
+  continuation?: number;
 }
 export interface SessionChange {
   chatId: string;
   chat?: ChatRow;
   deleted?: true;
   rows: CloudV2MessageRow[];
+  replace?: true;
   /** A durable control/turn boundary must flush any pending mirrored rows. */
   flush?: true;
 }
@@ -130,6 +147,7 @@ function recordedPrompt(message: AgentTextMessage, turn?: TurnInfo, previous?: A
 }
 
 export function recordUser(draft: SessionData, input: PromptInput, steeredTurnId?: string): void {
+  if ([...draft.inbox, ...draft.steers].some(entry => entry.userMessageId === input.userMessageId && entry.historyRemoved)) return;
   const message = recordedPrompt(userMessage(input, steeredTurnId), draft.turns?.find(turn => turn.turnId === input.userMessageId),
     draft.messages.find(message => message.id === input.userMessageId));
   draft.messages = applyUpdate(draft.messages, { sessionId: "", update: { sessionUpdate: "user_message_recorded", message } });
@@ -185,6 +203,11 @@ export class SessionStore {
           !Array.isArray(value.rows) || !Array.isArray(value.inbox) || !Array.isArray(value.steers) ||
           (value.executionId !== undefined && typeof value.executionId !== "string") ||
           (value.deliveryEpoch !== undefined && !CloudV2PromptCounterSchema.safeParse(value.deliveryEpoch).success) ||
+          (value.historyRevision !== undefined && (!Number.isSafeInteger(value.historyRevision) || value.historyRevision < 0)) ||
+          (value.historyBeforeEpoch !== undefined && !CloudV2PromptCounterSchema.safeParse(value.historyBeforeEpoch).success) ||
+          (value.continuation !== undefined && (!Number.isSafeInteger(value.continuation) || value.continuation < 0)) ||
+          (value.resets !== undefined && (!Array.isArray(value.resets) || value.resets.length > 5 || value.resets.some(reset =>
+            typeof reset.resetId !== "string" || !Array.isArray(reset.paths) || !Array.isArray(reset.rows) || !Array.isArray(reset.turns)))) ||
           value.inbox.some(entry => entry.outbox !== undefined && !outboxInputSchema.safeParse(entry.outbox).success) ||
           (value.chat !== null && (!coerceChat(value.chat) || value.chat.id !== value.chatId))) throw new Error("Invalid persisted chat.");
       if (value.pendingInteractions !== undefined && (!Array.isArray(value.pendingInteractions) || value.pendingInteractions.some(item =>
@@ -237,6 +260,11 @@ export class SessionStore {
   }
 
   history(chatId: string): readonly CloudV2MessageRow[] { return this.sessions.get(chatId)?.rows ?? []; }
+  historyRevision(chatId: string): number { return this.sessions.get(chatId)?.historyRevision ?? 0; }
+  historyState(chatId: string): CloudV2HistoryState {
+    const value = this.sessions.get(chatId);
+    return { revision: value?.historyRevision ?? 0, ...(value?.historyBeforeEpoch !== undefined ? { beforeEpoch: value.historyBeforeEpoch } : {}) };
+  }
 
   search(query: unknown, limit?: unknown, chatId?: string): { hits: MessageSearchHit[] } {
     try {
@@ -269,6 +297,65 @@ export class SessionStore {
     return session?.chat ? structuredClone(session.turns?.find(turn => turn.turnId === turnId)) : undefined;
   }
 
+  resetRecord(resetId: string): { chatId: string; record: ResetUndo } | undefined {
+    for (const session of this.sessions.values()) {
+      const record = session.chat && session.resets?.find(reset => reset.resetId === resetId);
+      if (record) return structuredClone({ chatId: session.chatId, record });
+    }
+    return undefined;
+  }
+
+  async saveReset(chatId: string, reset: ResetUndo, fromMsgId?: string): Promise<number> {
+    return this.change(chatId, draft => {
+      const removed = fromMsgId === undefined ? 0 : this.cut(draft, fromMsgId, reset);
+      draft.resets = [...(draft.resets ?? []), reset].slice(-5);
+      return removed;
+    });
+  }
+
+  async truncateMessages(chatId: string, fromMsgId: string): Promise<number> {
+    return this.change(chatId, draft => this.cut(draft, fromMsgId));
+  }
+
+  private cut(draft: SessionData, fromMsgId: string, reset?: ResetUndo): number {
+    const index = draft.rows.findIndex(row => row.msgId === fromMsgId);
+    if (index < 0) return 0;
+    const removed = draft.rows.slice(index), ids = new Set(removed.map(row => row.msgId));
+    if (reset) {
+      reset.rows = removed;
+      reset.turns = draft.turns?.filter(turn => ids.has(turn.turnId)) ?? [];
+    }
+    draft.turns = draft.turns?.filter(turn => !ids.has(turn.turnId));
+    for (const entry of [...draft.inbox, ...draft.steers]) if (ids.has(entry.userMessageId)) entry.historyRemoved = true;
+    this.replaceTranscript(draft, draft.rows.slice(0, index));
+    if (reset) { reset.cutRevision = draft.historyRevision; reset.continuation = draft.continuation ?? 0; }
+    return removed.length;
+  }
+
+  private replaceTranscript(draft: SessionData, rows: CloudV2MessageRow[]): void {
+    draft.rows = rows; draft.messages = transcript(rows);
+    draft.historyRevision = (draft.historyRevision ?? 0) + 1;
+    draft.historyBeforeEpoch = draft.deliveryEpoch;
+    draft.nativeSessionId = undefined; draft.executionId = undefined;
+    draft.chat!.sessionId = null; draft.chat!.providerBinding = null; draft.chat!.providerMetadata = null;
+    draft.chat!.updatedAt = Math.max(Date.now(), (draft.chat!.updatedAt ?? 0) + 1);
+  }
+
+  async undoReset(chatId: string, resetId: string): Promise<{ transcriptRestored: boolean; messagesRestored: number }> {
+    return this.change(chatId, draft => {
+      const reset = draft.resets?.find(record => record.resetId === resetId);
+      const restore = !!reset?.rows.length && reset.cutRevision === draft.historyRevision && reset.continuation === (draft.continuation ?? 0);
+      if (restore) {
+        this.replaceTranscript(draft, [...draft.rows, ...reset.rows]);
+        draft.turns = [...(draft.turns ?? []), ...reset.turns];
+        const ids = new Set(reset.rows.map(row => row.msgId));
+        for (const entry of [...draft.inbox, ...draft.steers]) if (ids.has(entry.userMessageId)) delete entry.historyRemoved;
+      }
+      draft.resets = draft.resets?.filter(record => record.resetId !== resetId);
+      return { transcriptRestored: restore, messagesRestored: restore ? reset.rows.length : 0 };
+    });
+  }
+
   messagesForTurn(chatId: string, turnId: string): AgentMessage[] {
     const messages = this.sessions.get(chatId)?.messages ?? [];
     const start = messages.findIndex(message => message.id === turnId);
@@ -280,6 +367,7 @@ export class SessionStore {
   async saveTurn(turn: TurnInfo): Promise<AgentTextMessage | undefined> {
     let prompt: AgentTextMessage | undefined;
     await this.update(turn.chatId, draft => {
+      if (draft.historyRevision && !draft.messages.some(message => message.id === turn.turnId)) return;
       const turns = draft.turns ??= [];
       const index = turns.findIndex(value => value.turnId === turn.turnId);
       if (index < 0) turns.push(turn); else turns[index] = turn;
@@ -416,7 +504,7 @@ export class SessionStore {
     // Tombstones also cover an unknown id, so a delayed renderer upsert cannot
     // resurrect a conversation after a deletion races its initial creation.
     await this.change(chatId, (draft) => {
-      draft.chat = null; draft.rows = []; draft.messages = []; draft.inbox = []; draft.steers = []; draft.turns = []; draft.pendingInteractions = [];
+      draft.chat = null; draft.rows = []; draft.messages = []; draft.inbox = []; draft.steers = []; draft.turns = []; draft.pendingInteractions = []; draft.resets = [];
       draft.nativeSessionId = undefined; draft.executionId = undefined; draft.paused = true;
     }, null, true);
   }
@@ -440,7 +528,13 @@ export class SessionStore {
       if (!parsed.success) return [];
       try { JSON.parse(parsed.data.payload); return [parsed.data]; } catch { return []; }
     });
+    let imported = 0;
     await this.update(chatId, (draft) => {
+      // Legacy imports carry no cut revision. After a worker-owned cut, none
+      // can prove they precede its retained history rather than resurrect it.
+      if (draft.historyRevision) return;
+      imported = rows.length;
+      if (rows.some(row => !draft.rows.some(existing => existing.msgId === row.msgId))) draft.continuation = (draft.continuation ?? 0) + 1;
       const turns = new Map(draft.turns?.map(turn => [turn.turnId, turn]));
       const current = new Map(draft.messages.map((message) => [message.id, message]));
       // Another device can import an older prompt. Reapply the worker's own
@@ -464,7 +558,7 @@ export class SessionStore {
         return message ? [message] : [];
       });
     });
-    return rows.length;
+    return imported;
   }
 
   async saveInteraction(chatId: string, value: SavedInteraction, notification: SessionNotification): Promise<void> {
@@ -506,7 +600,8 @@ export class SessionStore {
       // must not clone or JSON-encode all earlier turns in a long conversation.
       const rows = current.rows.slice();
       upsertRows(rows, changed);
-      this.sessions.set(chatId, { ...current, messages: folded, rows });
+      const continuation = (current.continuation ?? 0) + (changed.some(row => !current.rows.some(existing => existing.msgId === row.msgId)) ? 1 : 0);
+      this.sessions.set(chatId, { ...current, continuation, messages: folded, rows });
       this.dirty.add(chatId);
       if (!this.timers.has(chatId)) {
         // Crash window: 500 ms of streamed transcript plus in-flight disk I/O.
@@ -538,6 +633,7 @@ export class SessionStore {
         return { entry: existing, duplicate: true };
       }
       const entry: InboxEntry = { ...input, state: "queued" };
+      draft.continuation = (draft.continuation ?? 0) + 1;
       // A new explicit Send resumes Stop's pause and takes precedence over
       // retained follow-ups; a duplicate receipt lookup never releases it.
       const firstQueued = draft.inbox.findIndex((item) => item.state === "queued");
@@ -587,11 +683,11 @@ export class SessionStore {
       .flatMap(value => value.inbox.filter(entry => entry.outbox).map(entry => ({ chatId: value.chatId, entry }))));
   }
 
-  async receiveOutbox(item: CloudV2PromptDelivery): Promise<InboxEntry> {
+  async receiveOutbox(item: CloudV2PromptDelivery, admit?: () => void): Promise<InboxEntry> {
     const { payload, receipt, deliveryId } = item;
     const { entry } = await this.enqueue(payload.chatId, { requestId: `outbox:${payload.userMessageId}`,
       userMessageId: payload.userMessageId, prompt: payload.prompt, bubble: payload.bubble, startedAt: payload.startedAt,
-      outbox: { deliveryId, epoch: receipt.epoch, sequence: receipt.sequence, model: payload.model, effort: payload.effort, mode: payload.mode, permissionMode: payload.permissionMode, acknowledged: false } });
+      outbox: { deliveryId, epoch: receipt.epoch, sequence: receipt.sequence, model: payload.model, effort: payload.effort, mode: payload.mode, permissionMode: payload.permissionMode, acknowledged: false } }, admit);
     return entry;
   }
 
@@ -708,10 +804,11 @@ export class SessionStore {
       this.writeFailures.delete(chatId);
       this.sessions.set(chatId, draft);
       const oldRows = new Map(previous?.rows.map((row) => [row.msgId, row]));
-      const changed = draft.rows.filter((row) => JSON.stringify(oldRows.get(row.msgId)) !== JSON.stringify(row));
+      const replace = (draft.historyRevision ?? 0) !== (previous?.historyRevision ?? 0);
+      const changed = replace ? draft.rows : draft.rows.filter((row) => JSON.stringify(oldRows.get(row.msgId)) !== JSON.stringify(row));
       const chatChanged = JSON.stringify(previous?.chat) !== JSON.stringify(draft.chat);
       for (const listener of this.listeners) listener(structuredClone({
-        chatId, rows: changed, flush: true as const, ...(chatChanged ? draft.chat ? { chat: draft.chat } : { deleted: true as const } : {}),
+        chatId, rows: changed, flush: true as const, ...(replace ? { replace: true as const } : {}), ...(chatChanged ? draft.chat ? { chat: draft.chat } : { deleted: true as const } : {}),
       }));
       return structuredClone(result);
     });

@@ -48,12 +48,41 @@ it("does not recreate completed prompt-only history before the native resident w
   ], cloudOutbox: cloudPromptView(record, "ready") };
   expect(projectCloudPromptSession(slot).messages.map(row => row.id)).toEqual(["two"]);
 });
+it.each(["completed", "cancelled", "accepted"] as const)("keeps pre-cut %s receipts durable without resurrecting their bubbles or activity", state => {
+  const record = journal();
+  for (const [index, entry] of record.entries.entries()) {
+    entry.receipt = { chatId: "chat", userMessageId: entry.payload.userMessageId, workspaceId: "22222222-2222-4222-8222-222222222222",
+      epoch: index === 0 ? "1" : "2", sequence: String(index + 1), acceptedAt: new Date(1).toISOString(), workspaceState: "running" };
+  }
+  record.entries[0]!.state = state;
+  const slot = { ...BLANK, cwd, transcriptHistoryState: { revision: 1, beforeEpoch: "2" } };
+  const view = cloudPromptView(record, "ready"), patched = { ...slot, ...cloudPromptSessionPatch(slot, view) };
+  expect(projectCloudPromptSession(patched).messages.map(row => row.id)).toEqual(["two"]);
+  expect(patched.foregroundTurnId).toBe("two");
+  expect(record.entries).toHaveLength(2);
+  const restored = { ...slot, messages: [view.rows[0]!], ...cloudPromptSessionPatch({ ...slot, messages: [view.rows[0]!] }, view) };
+  expect(projectCloudPromptSession(restored).messages.map(row => row.id)).toEqual(["one", "two"]);
+});
 it("settles an interrupted receipt after a mid-turn restart and preserves the failed prompt for retry", () => {
   const record = journal(); record.entries[0]!.state = "interrupted"; record.entries.splice(1);
   const slot = { ...BLANK, cwd, agentId: "codex", status: "streaming" as const, foregroundTurnId: "one", activeTurnStartedAt: 1 };
   const view = projectCloudPromptSession({ ...slot, ...cloudPromptSessionPatch(slot, cloudPromptView(record, "ready")) });
   expect(view).toMatchObject({ status: "ready", activeTurnStartedAt: null, cloudPromptPending: false });
   expect(view.messages[0]).toMatchObject({ id: "one", recoveryFailure: { message: "The worker restarted before this turn finished", kind: "transport-closed" } });
+});
+
+it.each(["refused", "cancel-requested", "pending"] as const)("keeps a new %s send's original pending semantics after filtering old receipts", phase => {
+  const record = journal();
+  record.entries[0]!.state = "accepted";
+  record.entries[0]!.receipt = { chatId: "chat", userMessageId: "one", workspaceId: "22222222-2222-4222-8222-222222222222",
+    epoch: "1", sequence: "1", acceptedAt: new Date(1).toISOString(), workspaceState: "running" };
+  if (phase === "refused") record.entries[1]!.phase = "refused";
+  if (phase === "cancel-requested") record.entries[1]!.cancelRequested = true;
+  const slot = { ...BLANK, cwd, transcriptHistoryState: { revision: 1, beforeEpoch: "2" } };
+  const patch = cloudPromptSessionPatch(slot, cloudPromptView(record, "ready"));
+  expect(patch.cloudOutbox?.pendingCount).toBe(phase === "refused" ? 0 : 1);
+  expect(patch.cloudOutbox?.pendingId).toBe(phase === "pending" ? "two" : undefined);
+  expect(projectCloudPromptSession({ ...slot, ...patch }).messages.map(row => row.id)).toEqual(["two"]);
 });
 it("settles idle Stop without an error or duplicate banner and preserves Local Personal and organization-local by identity", () => {
   const record = journal(); record.entries = [];

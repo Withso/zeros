@@ -347,3 +347,13 @@ it.each([false, true])("keeps durable mode payloads compatible with interaction 
     }
   }
 });
+
+it("negotiates history replacement only with supporting workers on both config carriers", async () => {
+  const f = fixture();
+  for (const [path, body] of [["hello", { bootId: f.bootId, protocol: 2, runtimeSha256: "a".repeat(64) }], ["config", undefined]] as const) {
+    const legacy = (await (await f.request(path, body)).json()).config;
+    expect(legacy).not.toHaveProperty("historyReplacement");
+    expect(legacyWorkerFrame.safeParse(legacy).success).toBe(true);
+    expect((await (await f.request(path, body, { "x-zeros-worker-features": "history-replace-v1" })).json()).config.historyReplacement).toBe(1);
+  }
+});

@@ -7,6 +7,7 @@
 // The control plane mirrors these schemas (it deploys independently, on zod 3).
 import { z } from "zod";
 import { MAX_BRIDGE_FRAME_BYTES } from "./schemas";
+import { CloudV2PromptCounterSchema } from "./cloud-v2-prompts";
 export { CloudFailureSchema, CloudProviderFailureSchema, CloudMcpFailureSchema, cloudFailureMessage } from "./cloud-failure";
 export type { CloudFailure, CloudProviderFailure, CloudMcpFailure } from "./cloud-failure";
 
@@ -54,6 +55,13 @@ export type CloudV2MessageRow = z.infer<typeof CloudV2MessageRowSchema>;
 /** A chat row as `chats.list` returns it; validated by its readers. */
 const chatRow = z.object({ id: z.string().min(1).max(256) }).loose();
 
+/** A transcript cut retires older delivery bubbles, not their receipts. */
+export const CloudV2HistoryStateSchema = z.object({
+  revision: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+  beforeEpoch: CloudV2PromptCounterSchema.refine(value => !/[^0-9]/.test(value)).optional(),
+}).strict();
+export type CloudV2HistoryState = z.infer<typeof CloudV2HistoryStateSchema>;
+
 /** Durable mirror so the app can read history while the VM sleeps. */
 export const CloudV2HistoryFrameSchema = z.object({
     t: z.literal("history"),
@@ -62,7 +70,9 @@ export const CloudV2HistoryFrameSchema = z.object({
     messages: z.object({
       chatId: z.string().min(1).max(256),
       rows: z.array(CloudV2MessageRowSchema).max(CLOUD_V2_MAX_HISTORY_ROWS),
-    }).strict().optional(),
+      replace: z.literal(true).optional(),
+      historyState: CloudV2HistoryStateSchema.optional(),
+    }).strict().refine(value => !value.historyState || value.replace === true, "History state requires replacement").optional(),
   }).strict();
 
 export const CloudV2WorkerFrameSchema = z.discriminatedUnion("t", [
@@ -118,6 +128,7 @@ export const CloudV2ControlFrameSchema = z.discriminatedUnion("t", [
       userId: z.uuid(),
       userName: z.string().min(1).max(256).refine(value => !!value.trim() && !/[\u0000-\u001f\u007f]/.test(value)).optional(),
     }).strict().optional(),
+    historyReplacement: z.literal(1).optional(),
     gitIdentity: z.object({
       name: z.string().trim().min(1).max(256).refine(value => !/[<>\p{Cc}]/u.test(value)),
       email: z.string().regex(/^[1-9][0-9]{0,15}\+[A-Za-z0-9_.-]{1,100}@users\.noreply\.github\.com$/),

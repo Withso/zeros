@@ -1,9 +1,9 @@
-import { CLOUD_V2_MAX_FRAME_BYTES, CLOUD_V2_MAX_HISTORY_ROWS, type CloudV2MessageRow, type CloudV2WorkerFrame } from "@zeros/protocol/cloud-v2-relay";
+import { CLOUD_V2_MAX_FRAME_BYTES, CLOUD_V2_MAX_HISTORY_ROWS, type CloudV2HistoryState, type CloudV2MessageRow, type CloudV2WorkerFrame } from "@zeros/protocol/cloud-v2-relay";
 import type { Transport } from "../transport";
 import type { ChatRow } from "./chat-history";
 import type { SessionChange, SessionStore } from "./session-store";
 
-interface Pending { chat?: ChatRow; deleted?: true; rows: Map<string, CloudV2MessageRow>; due: number }
+interface Pending { chat?: ChatRow; deleted?: true; replace?: true; revision: number; historyState?: CloudV2HistoryState; rows: Map<string, CloudV2MessageRow>; due: number }
 
 /** Live viewers use bridge frames. The sleeping-VM mirror batches streamed
  * rows on a one-second trailing edge; durable changes and turn end flush it.
@@ -16,20 +16,22 @@ export class HistoryMirror {
   private timer?: ReturnType<typeof setTimeout>;
   private unsubscribe: () => void;
 
-  constructor(private readonly store: SessionStore, private readonly transport: Transport) {
+  constructor(private readonly store: SessionStore, private readonly transport: Transport, private readonly replacement = () => false) {
     this.unsubscribe = store.onChange((change) => this.change(change));
   }
 
   connect(): void {
+    const { chats, chatDeletions } = this.store.list();
+    if (!this.replacement() && chats.some(chat => this.store.historyRevision(chat.id) > 0)) { this.disconnect(); return; }
     // Replica attaches and login pushes do not reconnect the HTTPS mirror.
     // Backfill only after an actual loss of its durable delivery channel.
     if (this.online) return;
     this.online = true;
     this.epoch++;
     this.pending.clear();
-    const { chats, chatDeletions } = this.store.list();
-    for (const chatId of chatDeletions) this.pending.set(chatId, { deleted: true, rows: new Map(), due: 0 });
-    for (const chat of chats) this.pending.set(chat.id, { chat, rows: new Map(this.store.history(chat.id).map((row) => [row.msgId, row])), due: 0 });
+    for (const chatId of chatDeletions) this.pending.set(chatId, { deleted: true, revision: 0, rows: new Map(), due: 0 });
+    for (const chat of chats) this.pending.set(chat.id, { chat, ...(this.replacement() ? { replace: true, historyState: this.store.historyState(chat.id) } : {}),
+      revision: this.store.historyRevision(chat.id), rows: new Map(this.store.history(chat.id).map((row) => [row.msgId, row])), due: 0 });
     this.drain();
   }
 
@@ -46,10 +48,12 @@ export class HistoryMirror {
 
   private change(change: SessionChange): void {
     if (!this.online) return;
-    const pending: Pending = this.pending.get(change.chatId) ?? { rows: new Map(), due: Date.now() + 1000 };
+    if (change.replace && !this.replacement()) { this.disconnect(); return; }
+    const pending: Pending = this.pending.get(change.chatId) ?? { rows: new Map(), revision: this.store.historyRevision(change.chatId), due: Date.now() + 1000 };
     if (change.flush || change.chat || change.deleted) pending.due = 0;
     if (change.deleted) { pending.deleted = true; pending.chat = undefined; pending.rows.clear(); }
     else {
+      if (change.replace) { pending.replace = true; pending.rows.clear(); pending.revision = this.store.historyRevision(change.chatId); pending.historyState = this.store.historyState(change.chatId); }
       if (change.chat) pending.chat = change.chat;
       for (const row of change.rows) pending.rows.set(row.msgId, row);
     }
@@ -81,17 +85,23 @@ export class HistoryMirror {
         else {
           if (pending.chat) frames.push({ t: "history", chats: [{ ...pending.chat }] });
           let rows: CloudV2MessageRow[] = [], size = 1024;
+          let replace = pending.replace;
+          const batch = () => { frames.push({ t: "history", messages: { chatId, rows, ...(replace ? { replace, historyState: pending.historyState } : {}) } }); replace = undefined; };
           for (const row of pending.rows.values()) {
             const bytes = Buffer.byteLength(JSON.stringify(row)) + 1;
             if (rows.length && (rows.length === CLOUD_V2_MAX_HISTORY_ROWS || size + bytes > CLOUD_V2_MAX_FRAME_BYTES)) {
-              frames.push({ t: "history", messages: { chatId, rows } }); rows = []; size = 1024;
+              batch(); rows = []; size = 1024;
             }
             rows.push(row); size += bytes;
           }
-          if (rows.length) frames.push({ t: "history", messages: { chatId, rows } });
+          if (rows.length || replace) batch();
         }
         for (const frame of frames) {
           if (!this.online || epoch !== this.epoch) break;
+          // A cut supersedes every unsent chunk of an older backfill. The
+          // in-flight chunk precedes its replacement on the ordered carrier.
+          if (!pending.deleted && (this.store.historyRevision(chatId) !== pending.revision || !this.store.metadata(chatId)?.chat)) break;
+          if (frame.t === "history" && frame.messages?.replace && !this.replacement()) { this.disconnect(); break; }
           if (!await this.transport.send(frame)) { if (epoch === this.epoch) this.disconnect(); break; }
         }
       }

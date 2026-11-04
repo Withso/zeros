@@ -3,7 +3,7 @@ import { workerChildEnvironment } from "../drivers/shared/agent-environment";
 import { WorkspaceError } from "./scope";
 
 export interface CommandOptions {
-  input?: string;
+  input?: string | Uint8Array;
   readOnly?: boolean;
   maxBuffer?: number;
   timeout?: number;

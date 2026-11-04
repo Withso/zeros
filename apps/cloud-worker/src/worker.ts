@@ -77,6 +77,7 @@ export class CloudWorker {
   private readonly tokens: GithubTokens;
   private readonly githubCredentials: GithubCredentialRecovery;
   private githubUserTokensEnabled = false;
+  private historyReplacementEnabled = false;
   private readonly github: GithubBroker;
   private readonly gitEnvironment: NodeJS.ProcessEnv;
   private configuring: Promise<void> = Promise.resolve();
@@ -140,12 +141,14 @@ export class CloudWorker {
     if (this.disposed) return;
     this.disposed = true; clearInterval(this.heartbeat); this.tokens.dispose(); this.githubCredentials.invalidate();
     const workspaceTools = this.workspaceMcp.dispose();
+    const agentsClosing = this.agents?.dispose();
+    void agentsClosing?.catch(() => {});
     await this.configuring.catch(() => {});
     await this.stopCheckout();
     await this.promptInbox?.dispose();
     await this.terminals?.dispose();
     await this.workspace?.dispose();
-    await this.agents?.dispose();
+    await agentsClosing;
     await this.mcp?.dispose();
     await workspaceTools;
     this.reviews?.close();
@@ -225,7 +228,7 @@ export class CloudWorker {
     }
     if (frame.type === "WORKSPACE_REQUEST") {
       const mutation = frame.op === "file.write" || frame.op === "workspace.prepareGithub" ||
-        ["codeReview.create", "codeReview.reply", "codeReview.setResolved"].includes(frame.op) || isGitMutation(frame.op, frame.params ?? {});
+        ["codeReview.create", "codeReview.reply", "codeReview.setResolved", "turns.reset", "turns.undoReset", "messages.truncateFrom"].includes(frame.op) || isGitMutation(frame.op, frame.params ?? {});
       let activeMutation = false;
       try {
         if (mutation || frame.op === "attachment.write") await this.touchCheckout();
@@ -269,6 +272,7 @@ export class CloudWorker {
       this.reviews.suspend();
       this.workspaceMcp.revoke();
     }
+    this.historyReplacementEnabled = config.historyReplacement === 1;
     if (this.configurationRevision !== revision) { this.tokens.invalidate(); this.githubCredentials.invalidate(); }
     await configureGitIdentity(this.options.homeDirectory ?? homedir(), config.gitIdentity);
     if (!this.scope) {
@@ -362,13 +366,17 @@ export class CloudWorker {
         (frame) => this.broadcast(frame), () => { void this.reportIdle(); }, this.options.onTiming, this.options.modelDiscovery, executionId => mcp!.providers(executionId),
         async input => reviews!.enabled ? this.workspaceMcp.admit(input.executionId, reviews!.tools(input)) : undefined);
       terminals = new Terminals(scope, { gitEnvironment: this.gitEnvironment, broadcast: frame => this.broadcast(frame), activity: () => { void this.reportIdle(); } });
-      const chats = new ChatService(store, scope, (chatId) => agents!.closeChat(chatId), agents.turns);
-      history = new HistoryMirror(store, this.options.transport);
+      const chats = new ChatService(store, scope, (chatId) => agents!.closeChat(chatId), agents.turns, {
+        historyReplacement: () => this.historyReplacementEnabled,
+        mutate: agents.mutateChat.bind(agents),
+        files: action => workspace!.git.mutate(action),
+      });
+      history = new HistoryMirror(store, this.options.transport, () => this.historyReplacementEnabled);
       unsubscribers.push(store.onChange((change) => {
-        if (!change.chat && !change.deleted && !change.rows.length) return;
-        void this.broadcast(createMessage({ type: "DB_CHANGED", source: "engine", kinds: [...(change.chat || change.deleted ? ["chats"] : []), ...(change.rows.length ? ["messages"] : []), ...(change.deleted ? ["workspaces"] : [])],
+        if (!change.chat && !change.deleted && !change.rows.length && !change.replace) return;
+        void this.broadcast(createMessage({ type: "DB_CHANGED", source: "engine", kinds: [...(change.chat || change.deleted ? ["chats"] : []), ...(change.rows.length || change.replace ? ["messages"] : []), ...(change.replace ? ["conversationContext"] : []), ...(change.deleted ? ["workspaces"] : [])],
           ...(change.deleted ? { workspaceIds: [scope.workspace.id] } : {}),
-          ...(change.rows.length ? { chatIds: [change.chatId] } : {}) }));
+          ...(change.rows.length || change.replace ? { chatIds: [change.chatId] } : {}) }));
       }), store.onError((chatId) => {
         this.options.onError?.("storage"); void agents!.closeChat(chatId).catch(() => {});
       }));
@@ -420,11 +428,15 @@ export class CloudWorker {
   private async prepareStop(): Promise<void> {
     clearInterval(this.heartbeat);
     const workspaceTools = this.workspaceMcp.dispose();
+    // A delivery waiting behind a mutation can hold inbox/configuration drain.
+    // Retire native inputs before either wait permits a late approval.
+    const agentsClosing = this.agents?.dispose();
+    void agentsClosing?.catch(() => {});
     await this.configuring.catch(() => {});
     await this.stopCheckout();
     await this.workspace?.stopAttachmentTransfers();
     await this.promptInbox?.dispose();
-    await this.agents?.dispose();
+    await agentsClosing;
     await this.terminals?.dispose();
     await this.mcp?.dispose();
     await workspaceTools;

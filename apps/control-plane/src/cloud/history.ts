@@ -3,11 +3,11 @@
 import { z } from "zod";
 import { HttpError } from "../authz.js";
 import type { Tx } from "../db.js";
-import type { CloudV2MessageRow } from "./contract.js";
+import { CloudV2HistoryStateSchema, type CloudV2HistoryState, type CloudV2MessageRow } from "./contract.js";
 import type { CloudV2Store } from "./store.js";
 import { MessageSearchError } from "./message-search.js";
 
-export type MessageWindow = { messages: CloudV2MessageRow[]; turnOpening?: CloudV2MessageRow };
+export type MessageWindow = { messages: CloudV2MessageRow[]; turnOpening?: CloudV2MessageRow; historyState?: CloudV2HistoryState };
 export type WindowOptions = { limit?: number; before?: number; beforeMsgId?: string };
 type Row = { ord: string; msg_id: string; kind: string; payload: string; created_at_ms: string };
 const columns = "ord, msg_id, kind, payload, created_at_ms";
@@ -19,6 +19,13 @@ const user = (row: Row, openingOnly = false): boolean => {
 };
 
 export async function mirrorMessageWindow(tx: Tx, workspaceId: string, chatId: string, options: WindowOptions): Promise<MessageWindow> {
+  const saved = await tx.query<{ state: unknown }>("SELECT row->'historyState' AS state FROM cloud_v2_chats WHERE workspace_id=$1 AND chat_id=$2 AND deleted_at IS NULL", [workspaceId, chatId]);
+  const parsed = CloudV2HistoryStateSchema.safeParse(saved.rows[0]?.state);
+  const state = parsed.success ? { historyState: parsed.data } : {};
+  return { ...await mirrorMessageRows(tx, workspaceId, chatId, options), ...state };
+}
+
+async function mirrorMessageRows(tx: Tx, workspaceId: string, chatId: string, options: WindowOptions): Promise<MessageWindow> {
   const limit = options.limit ?? 200;
   const cap = Number.isFinite(limit) ? limit < 0 ? 1000 : Math.min(1000, Math.floor(limit)) : 200;
   if (!cap) return { messages: [] };

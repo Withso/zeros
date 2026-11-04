@@ -5340,20 +5340,22 @@ export function AgentSessionsProvider({
           }
           if (cloud && !canReplaceCloudTranscript(fresh, page)) return;
           const cur = fresh.messages;
+          const historyReplaced = cloud && (fresh.transcriptReplacementPending || (page.historyState?.revision ?? 0) > (fresh.transcriptHistoryState?.revision ?? 0));
           // Merge the engine's authoritative window into the local slot: keep
           // scrolled-up history, drop a remotely-truncated tail, and don't let a
           // transient empty read wipe the slot. See mergeWindowedTail.
-          const next: AgentMessage[] = cloud && page.complete
+          const next: AgentMessage[] = cloud && (page.complete || historyReplaced)
             ? retainMessageReferences(cur, windowed) : mergeWindowedTail(cur, windowed);
           const hasTranscript = next.some(message => message.kind !== "text" || !message.queued);
           const leadingPrompt = next[0]?.id === windowed[0]?.id ? page.leadingPrompt ?? null : fresh.leadingPrompt;
           const leadingChanged = !messageSnapshotsEqual(fresh.leadingPrompt ? [fresh.leadingPrompt] : [], leadingPrompt ? [leadingPrompt] : []);
           if (messageSnapshotsEqual(cur, next)) {
             if (fresh.transcriptDirty || leadingChanged || cloud && (page.source !== fresh.transcriptSource ||
-                page.complete && fresh.hasTranscript !== hasTranscript)) {
+                page.complete && fresh.hasTranscript !== hasTranscript || historyReplaced)) {
               getStore().patchSession(chatId, { transcriptDirty: false, transcriptState: "resident", transcriptPresentation: null,
                 ...(leadingChanged ? { leadingPrompt } : {}), transcriptContentSignatures: undefined,
-                ...(cloud && page.complete ? { hasTranscript } : {}),
+                ...(cloud ? { transcriptHistoryState: page.historyState ?? fresh.transcriptHistoryState, transcriptReplacementPending: false } : {}),
+                ...(cloud && (page.complete || historyReplaced) ? { hasTranscript } : {}),
                 ...(page.source === "worker" || page.source === "control-plane" ? { transcriptSource: page.source } : {}) });
             }
             return;
@@ -5368,7 +5370,7 @@ export function AgentSessionsProvider({
             transcriptPresentation: null,
             transcriptContentSignatures: undefined,
             transcriptDirty: false,
-            ...(cloud ? { hasTranscript } : {}),
+            ...(cloud ? { hasTranscript, transcriptHistoryState: page.historyState ?? fresh.transcriptHistoryState, transcriptReplacementPending: false } : {}),
             ...(page.source === "worker" || page.source === "control-plane" ? { transcriptSource: page.source } : {}),
           });
         } catch (err) {
@@ -5495,13 +5497,15 @@ export function AgentSessionsProvider({
           }
           if (fresh.transcriptState !== "loading") return;
           if (!localChat && (!canReplaceCloudTranscript(fresh, page) ||
+              !fresh.transcriptReplacementPending && (page.historyState?.revision ?? 0) <= (fresh.transcriptHistoryState?.revision ?? 0) &&
               page.complete === false && deduped.length === 0 && fresh.messages.length > 0)) {
             pendingHydratesRef.current.add(chatId);
             return;
           }
           pendingHydratesRef.current.delete(chatId);
           const changedWhileLoading = fresh.transcriptDirty;
-          const history = !localChat && page.complete === false ? mergeWindowedTail(
+          const historyReplaced = !localChat && (fresh.transcriptReplacementPending || (page.historyState?.revision ?? 0) > (fresh.transcriptHistoryState?.revision ?? 0));
+          const history = !localChat && page.complete === false && !historyReplaced ? mergeWindowedTail(
             fresh.messages.filter(message => message.kind !== "text" || !message.queued), deduped,
           ) : deduped;
           const next = cloudComputerV2 && isCloudWorkspace(fresh.cwd)
@@ -5523,6 +5527,7 @@ export function AgentSessionsProvider({
             transcriptPresentation: null,
             transcriptContentSignatures: undefined,
             ...(page.source === "worker" || page.source === "control-plane" ? { transcriptSource: page.source } : {}),
+            ...(!localChat ? { transcriptHistoryState: page.historyState ?? fresh.transcriptHistoryState, transcriptReplacementPending: false } : {}),
             // A connected authoritative empty read is the one place allowed
             // to clear the conservative hint retained across eviction.
             hasTranscript: deduped.some(
@@ -5567,7 +5572,9 @@ export function AgentSessionsProvider({
 
   const resetConversationContext = useCallback((chatId: string): void => {
     const slot = getStore().sessions[chatId];
-    if (!slot || parseCloudScopedId(chatId) || isCloudWorkspace(slot.cwd)) return;
+    if (!slot) return;
+    const cloud = parseCloudScopedId(chatId);
+    if (cloud ? !canBackgroundSyncCloudWorkspace(cloud) : isCloudWorkspace(slot.cwd)) return;
     // A reset is an explicit cancellation boundary, including pending bind,
     // queued-send, and history reads. All cleanup is scoped to this chat.
     bumpCancelGeneration(cancelGenerationsRef.current, chatId);
@@ -5590,8 +5597,8 @@ export function AgentSessionsProvider({
     turnProducedOutputRef.current.delete(chatId);
     announcedDirsRef.current.delete(chatId);
     promptActivityRef.current.delete(chatId);
-    localTranscriptCache.forget(chatId);
-    forgetFreshLocalChat(chatId);
+    transcriptCacheFor(chatId, slot.cwd)?.forget(chatId);
+    if (!cloud) forgetFreshLocalChat(chatId);
     getStore().setCancelling(chatId, false);
     getStore().setPendingLocalTurn(chatId, null);
     useWorkspaceStore.getState().dispatch({ type: "UPDATE_CHAT_SETTINGS", id: chatId,
@@ -5613,14 +5620,15 @@ export function AgentSessionsProvider({
       // with no overlapping rows. Tail merging deliberately cannot do either.
       transcriptState: "cold",
       transcriptDirty: true,
+      ...(cloud ? { transcriptSource: slot.transcriptSource, transcriptHistoryState: slot.transcriptHistoryState, transcriptReplacementPending: true } : {}),
     });
     // Evicted views stay bounded; they'll hydrate when retained again.
     if (slot.transcriptState === "cold") return;
-    const flight = hydrateChat(chatId).finally(() => {
+    const flight = hydrateChat(chatId).then(() => { if (cloud) cloudPrompts.refresh(chatId); }).finally(() => {
       if (conversationResetFlightsRef.current.get(chatId) === flight) conversationResetFlightsRef.current.delete(chatId);
     });
     conversationResetFlightsRef.current.set(chatId, flight);
-  }, [getStore, hydrateChat]);
+  }, [getStore, hydrateChat, cloudPrompts]);
 
   retryHydrateRef.current = async (chatId, isCurrent) => {
     // A disconnect can reject the old request AFTER the replacement socket
@@ -5646,7 +5654,7 @@ export function AgentSessionsProvider({
       for (const id of targets) {
         const cloud = parseCloudScopedId(id);
         if (cloud && !canBackgroundSyncCloudWorkspace(cloud)) continue;
-        if (!cloud && raw.type === "DB_CHANGED" && raw.kinds.includes("conversationContext")) {
+        if (raw.type === "DB_CHANGED" && raw.kinds.includes("conversationContext")) {
           resetConversationContext(id);
           continue;
         }
