@@ -24,6 +24,7 @@ import { WorkspaceError, WorkspaceScope, type WorkerConfig } from "./workspace/s
 import { WorkspaceService, type WorkspaceServiceOptions } from "./workspace/service";
 import { isGitMutation } from "./workspace/git";
 import { GithubBroker, GithubTokens, githubEnvironment } from "./credentials/github";
+import { GithubCredentialRecovery } from "./credentials/github-recovery";
 import { configureGitIdentity } from "./credentials/git-identity";
 import { commandRunner } from "./workspace/commands";
 import { Terminals } from "./terminals/service";
@@ -41,6 +42,7 @@ interface WorkerOptions {
   prepareCheckout?: (workspace: WorkerConfig["workspace"], gitEnvironment: NodeJS.ProcessEnv, timing?: StartupTimingObserver) => Promise<CheckoutResult | void>;
   setupRunner?: SetupRunner;
   gitAskpassPath?: string;
+  githubFetch?: typeof fetch;
   workspaceServices?: WorkspaceServiceOptions;
   onError?: (code: "configuration" | "storage" | "transport") => void;
   onTiming?: TimingObserver;
@@ -66,7 +68,7 @@ export class CloudWorker {
   private setup?: WorkspaceSetup;
   private checkoutRefresh?: CheckoutRefresh;
   private readonly tokens: GithubTokens;
-  private readonly userTokens: GithubTokens;
+  private readonly githubCredentials: GithubCredentialRecovery;
   private githubUserTokensEnabled = false;
   private readonly github: GithubBroker;
   private readonly gitEnvironment: NodeJS.ProcessEnv;
@@ -84,8 +86,8 @@ export class CloudWorker {
 
   constructor(private readonly options: WorkerOptions) {
     this.tokens = new GithubTokens((frame, timeoutMs) => this.send(frame, timeoutMs));
-    this.userTokens = new GithubTokens((frame, timeoutMs) => this.send(frame, timeoutMs), { purpose: "gh" });
-    this.github = new GithubBroker(`/tmp/zeros-github-${this.instanceId}/github.sock`, purpose => purpose === "gh" && this.githubUserTokensEnabled ? this.userTokens.get() : this.tokens.get(), () => this.workspace?.githubChanged());
+    this.githubCredentials = new GithubCredentialRecovery(this.tokens, { fetch: options.githubFetch, supportsRecovery: () => this.githubUserTokensEnabled });
+    this.github = new GithubBroker(`/tmp/zeros-github-${this.instanceId}/github.sock`, (purpose, failed) => this.githubCredentials.get(purpose, failed), () => this.workspace?.githubChanged());
     this.gitEnvironment = githubEnvironment(this.github.socketPath, options.gitAskpassPath ?? fileURLToPath(new URL("../bin/git-askpass", import.meta.url)));
   }
 
@@ -97,7 +99,7 @@ export class CloudWorker {
     this.options.transport.start({
       open: async () => {
         if (this.disposed) return;
-        this.online = true; this.idle = undefined; this.tokens.connect(); this.userTokens.connect();
+        this.online = true; this.idle = undefined; this.tokens.connect();
         await this.send({ t: "hello", protocol: CLOUD_V2_RELAY_PROTOCOL, workerVersion: "0.0.0",
           capabilities: { design: false, browser: false, simulators: false, terminal: true, files: true, git: true, agents: ["codex", "claude", "cursor"], mcp: 1 } });
       },
@@ -105,7 +107,7 @@ export class CloudWorker {
       close: () => {
         this.online = false;
         for (const client of this.clients.values()) this.terminals?.detach(client);
-        this.clients.clear(); this.history?.disconnect(); this.tokens.disconnect(); this.userTokens.disconnect();
+        this.clients.clear(); this.history?.disconnect(); this.tokens.disconnect(); this.githubCredentials.disconnect();
       },
     });
   }
@@ -123,7 +125,7 @@ export class CloudWorker {
 
   async dispose(): Promise<void> {
     if (this.disposed) return;
-    this.disposed = true; clearInterval(this.heartbeat); this.tokens.dispose(); this.userTokens.dispose();
+    this.disposed = true; clearInterval(this.heartbeat); this.tokens.dispose(); this.githubCredentials.invalidate();
     await this.configuring.catch(() => {});
     await this.stopCheckout();
     await this.promptInbox?.dispose();
@@ -151,7 +153,7 @@ export class CloudWorker {
     }
     // Checkout preparation can be waiting for this reply. Never queue control
     // replies behind configuration or behind ordinary app work.
-    if (message.t === "reply" || message.t === "refusal") { this.tokens.receive(message); this.userTokens.receive(message); return; }
+    if (message.t === "reply" || message.t === "refusal") { this.tokens.receive(message); return; }
     if (message.t === "prompts") { this.promptInbox?.hint(); return; }
     if (message.t === "stop") {
       // The VM can stop only after the native turn's final rows reach the HTTP
@@ -238,11 +240,11 @@ export class CloudWorker {
     const timing = this.options.transport.reportTiming?.bind(this.options.transport);
     const revision = BigInt(config.loginRevision);
     if (this.configurationRevision !== undefined && revision < this.configurationRevision) return;
-    this.githubUserTokensEnabled = config.githubPullRequests === 1;
+    this.githubUserTokensEnabled = config.githubUserTokens === 1;
     if (this.options.workspaceId && config.workspace.id !== this.options.workspaceId) throw new Error("Workspace identity changed.");
     const scope = new WorkspaceScope(config.workspace);
     if (this.scope && (this.scope.key !== scope.key || this.scope.root !== scope.root || this.scope.workspace.repository !== scope.workspace.repository)) throw new Error("Workspace identity changed.");
-    if (this.configurationRevision !== revision) { this.tokens.invalidate(); this.userTokens.invalidate(); }
+    if (this.configurationRevision !== revision) { this.tokens.invalidate(); this.githubCredentials.invalidate(); }
     await configureGitIdentity(this.options.homeDirectory ?? homedir(), config.gitIdentity);
     if (!this.scope) {
       await this.github.start();

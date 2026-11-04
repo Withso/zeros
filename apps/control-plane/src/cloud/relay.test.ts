@@ -278,6 +278,22 @@ describe("cloud v2 relay", () => {
     }
   });
 
+  it.each([false, true])("gates user-token recovery on WebSocket upgrade support=%s", async supported => {
+    workerServer.on("headers", headers => { headers.push(`X-Zeros-Worker-Features: mcp-v1${supported ? ",github-user-token-v1" : ""}`); });
+    const original = deps.config;
+    deps.config = async ws => ({ ...await original(ws), githubUserTokens: 1 });
+    const frames: any[] = [];
+    workerServer.on("connection", ws => ws.on("message", raw => frames.push(JSON.parse(String(raw)))));
+    await app();
+    await vi.waitFor(() => expect(frames.filter(frame => frame.t === "config")).toHaveLength(1));
+    loginRevision = "1"; await relay.refreshLogins();
+    await vi.waitFor(() => expect(frames.filter(frame => frame.t === "config")).toHaveLength(2));
+    for (const frame of frames.filter(frame => frame.t === "config")) {
+      if (supported) expect(frame.githubUserTokens).toBe(1);
+      else expect(frame).not.toHaveProperty("githubUserTokens");
+    }
+  });
+
   it.each([false, true])("gates setup on WebSocket upgrade support=%s for initial and refreshed config", async supported => {
     workerServer.on("headers", headers => { headers.push(`X-Zeros-Worker-Features: mcp-v1${supported ? ",workspace-setup-v1" : ""}`); });
     const original = deps.config;

@@ -1,0 +1,9 @@
+{
+  "id": "cloud-vm-human-github-token",
+  "kind": "replay",
+  "area": "control-plane",
+  "fixedBy": "pending",
+  "symptom": "Git in a workspace VM received a repository installation token instead of the creator's user token, and a token rejected before its nominal expiry remained reusable.",
+  "rule": "Trace every VM credential producer through composition and token selection, keep shared Computer automation separate, and recover only the rejected credential through its existing refresh lease. Authentication reads may retry once; commands with possible effects must not replay. See agents/zstack/principles.md principles 4, 7, 10, 11 and 13.",
+  "check": "pnpm test:control-plane github-selected-tokens.test.ts"
+}

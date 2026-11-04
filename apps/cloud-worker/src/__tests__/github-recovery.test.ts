@@ -31,7 +31,7 @@ it("finishes a broker request held across failed activity and same-revision HTTP
   const transport = new HybridTransport({ apiUrl: "https://api.example.test", workspaceId: config.workspace.id, runtimeSha256: "a".repeat(64),
     tokenFile, publicKeys: [publicKey.export({ type: "spki", format: "pem" }).toString()], port: 0, fetch: fetcher, retryBaseMs: 1 });
   let socketPath = "";
-  const worker = new CloudWorker({ directory: join(directory, "state"), transport,
+  const worker = new CloudWorker({ githubFetch: async () => new Response(null, { status: 200 }), directory: join(directory, "state"), transport,
     prepareCheckout: async (_workspace, environment) => { socketPath = environment.GH_ZEROS_BROKER_SOCKET!; }, drivers: {} });
   try {
     worker.start();
@@ -57,7 +57,7 @@ it.each(["claude", "codex"] as const)("serves new Git and gh broker clients afte
   await mkdir(checkoutPath);
   await writeFile(tokenFile, "synthetic-worker-token", { mode: 0o600 });
   const keys = generateKeyPairSync("ed25519"), driver = new FakeDriver();
-  const configuration = { ...config, githubPullRequests: 1 as const, workspace: { ...config.workspace, checkoutPath },
+  const configuration = { ...config, githubPullRequests: 1 as const, githubUserTokens: 1 as const, workspace: { ...config.workspace, checkoutPath },
     agents: { ...config.agents, claude: { oauthToken: "fixture-claude-token" } } };
   const tokenRequests: string[] = [], replies: BridgeMessage[] = [];
   let port = 0, connected = false;
@@ -73,14 +73,14 @@ it.each(["claude", "codex"] as const)("serves new Git and gh broker clients afte
     if (path === "github-token") {
       const purpose = body.purpose ?? "git";
       tokenRequests.push(purpose);
-      return Response.json({ token: `fixture-${purpose}`, expiresAt: Date.now() + 120_000 });
+      return Response.json({ token: "fixture-human", expiresAt: Date.now() + 120_000 });
     }
     return Response.json({ sequence: body.sequence });
   };
   const transport = new HybridTransport({ apiUrl: "https://api.example.test", workspaceId: config.workspace.id, runtimeSha256: "a".repeat(64),
     tokenFile, publicKeys: [keys.publicKey.export({ type: "spki", format: "pem" }).toString()], port: 0, fetch: fetcher,
     onStatus: status => { connected = status === "connected"; } });
-  const worker = new CloudWorker({ directory: state, transport,
+  const worker = new CloudWorker({ githubFetch: async () => new Response(null, { status: 200 }), directory: state, transport,
     prepareCheckout: async (_workspace, environment) => { socketPath = environment.GH_ZEROS_BROKER_SOCKET!; }, drivers: { [agentId]: () => driver } });
   let socket: WebSocket | undefined;
   try {
@@ -103,7 +103,7 @@ it.each(["claude", "codex"] as const)("serves new Git and gh broker clients afte
     const prompt = browserFrame("AGENT_PROMPT", { agentId, sessionId, userMessageId: randomUUID(), prompt: [{ type: "text", text: "Fixture turn" }] });
     send(prompt);
     await expect.poll(() => driver.prompts.length).toBe(1);
-    expect(await askpass("Password for 'https://x-access-token@github.com': ", socketPath)).toBe("fixture-git");
+    expect(await askpass("Password for 'https://x-access-token@github.com': ", socketPath)).toBe("fixture-human");
     expect(tokenRequests).toEqual(["git"]);
     driver.complete();
     await expect.poll(() => response(prompt.id)?.type).toBe("AGENT_PROMPT_COMPLETE");
@@ -111,14 +111,14 @@ it.each(["claude", "codex"] as const)("serves new Git and gh broker clients afte
     socket.send(JSON.stringify(configuration));
     const pong = new Promise(resolve => socket!.once("pong", resolve)); socket.ping(); await pong;
     await worker.flush();
-    expect(await askpass("Password for 'https://x-access-token@github.com': ", socketPath)).toBe("fixture-git");
+    expect(await askpass("Password for 'https://x-access-token@github.com': ", socketPath)).toBe("fixture-human");
     expect(tokenRequests).toEqual(["git"]);
     vi.setSystemTime(Date.now() + 121_000);
-    expect(await askpass("Password for 'https://x-access-token@github.com': ", socketPath)).toBe("fixture-git");
+    expect(await askpass("Password for 'https://x-access-token@github.com': ", socketPath)).toBe("fixture-human");
     expect(await runGh(["pr", "list"], { GH_ZEROS_BROKER_SOCKET: socketPath }, async (_args, env) => {
-      expect(env.GH_TOKEN).toBe("fixture-gh"); return 0;
+      expect(env.GH_TOKEN).toBe("fixture-human"); return 0;
     })).toBe(0);
-    expect(tokenRequests).toEqual(["git", "git", "gh"]);
+    expect(tokenRequests).toEqual(["git", "git"]);
   } finally {
     socket?.terminate(); await worker.dispose(); listener.mockRestore(); vi.useRealTimers();
     await rm(directory, { recursive: true, force: true });

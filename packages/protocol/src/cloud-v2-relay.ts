@@ -77,7 +77,7 @@ export const CloudV2WorkerFrameSchema = z.discriminatedUnion("t", [
   CloudV2HistoryFrameSchema,
   /** Idle means no running agent turn or recent terminal activity. */
   z.object({ t: z.literal("idle"), idle: z.boolean() }).strict(),
-  z.object({ t: z.literal("request"), id: z.uuid(), kind: z.literal("github-token"), purpose: z.enum(["git", "gh"]).optional() }).strict(),
+  z.object({ t: z.literal("request"), id: z.uuid(), kind: z.literal("github-token"), purpose: z.enum(["git", "gh"]).optional(), failedTokenSha256: z.string().length(64).regex(/^[a-f0-9]{64}$/).optional() }).strict(),
   z.object({ t: z.literal("stop-ack"), id: z.uuid() }).strict(),
 ]);
 export type CloudV2WorkerFrame = z.infer<typeof CloudV2WorkerFrameSchema>;
@@ -118,6 +118,7 @@ export const CloudV2ControlFrameSchema = z.discriminatedUnion("t", [
       email: z.string().regex(/^[1-9][0-9]{0,15}\+[A-Za-z0-9_.-]{1,100}@users\.noreply\.github\.com$/),
     }).strict().nullable().optional(),
   githubPullRequests: z.literal(1).optional(),
+    githubUserTokens: z.literal(1).optional(),
     loginRevision: z.string().regex(/^(0|[1-9][0-9]{0,19})$/),
     mcpServers: z.array(RuntimeMcpServerSchema).max(128).optional(),
     workspace: z.object({

@@ -413,6 +413,7 @@ export class CloudGithubConnectionStore {
   async credential(
     scope: CloudGithubConnectionScope,
     refresh?: RefreshCloudGithub,
+    failedTokenSha256?: string,
   ): Promise<CloudGithubCredentialSnapshot> {
     const value = await this.read(scope),
       row = value.rows.find(
@@ -429,9 +430,19 @@ export class CloudGithubConnectionStore {
     } catch {
       throw expired();
     }
+    if (failedTokenSha256 === createHash("sha256").update(material.accessToken).digest("hex")) {
+      const marked = await this.edit(scope, value.generation, async tx => (await tx.query(
+        "UPDATE cloud_github_credentials SET expires_at=LEAST(expires_at,now()),updated_at=now() WHERE id=$1 AND version=$2 RETURNING id",
+        [row.id, row.version],
+      )).rowCount);
+      // A late report must not expire a concurrently rotated credential.
+      if (!marked) return this.credential(scope, refresh);
+      row.expires_at = new Date(0);
+    }
     if (
-      material.expiresAt !== null &&
-      material.expiresAt <= Date.now() + 60_000
+      (material.expiresAt !== null && material.expiresAt <= Date.now() + 60_000) ||
+      (row.expires_at !== null && row.expires_at.getTime() <= Date.now() + 60_000) ||
+      row.refresh_lease !== null
     ) {
       if (
         material.method !== "github-app" ||

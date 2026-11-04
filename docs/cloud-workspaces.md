@@ -183,10 +183,11 @@ continue to refresh automatically. The transition from legacy source-bearing
 images requires the coordinated rebuild described below.
 
 Repository authorization uses the immutable GitHub user ID and the exact
-connection generation, verifies read or write permission as needed, and
-mints installation tokens for explicit repositories and permissions only.
-Additional repositories need separate authorization; a shared recipe is not a
-credential grant. New connections, create/wake/restore, GitHub credentials and
+connection generation and verifies read or write permission as needed.
+Cloud Computer builds use installation tokens for explicit repositories and
+permissions when the App is selected. Workspace VMs use the creator's user token
+as described below. Every configured source still needs separate authorization;
+a shared recipe is not a credential grant. New connections, create/wake/restore, GitHub credentials and
 PR actions require source verification no older than 30 seconds, measured
 before remote I/O. Running workspaces reuse exact-source permission evidence
 for ten minutes, then refresh it on actual work in the background. During a
@@ -247,20 +248,32 @@ Each child receives only its own login through a shared environment allowlist.
 Config refreshes replace the entire configuration; idle drivers reopen as
 needed, while active turns keep their spawn-time credentials. Git and `gh`
 request credentials from the creator's selected cloud GitHub connection through
-the worker's broker. With the GitHub App selected, Git receives an installation
-token narrowed to the pinned repository and the human's current read/write
-permission; `gh` receives the human's App user token. With PAT selected, both
-receive that PAT. Broker caching is bounded to two minutes, but does not shorten
-a credential's GitHub lifetime or reduce a PAT's scopes. A user token delivered
-to the VM can be used by any process there, including other agent sessions.
+the worker's broker. With the GitHub App selected, both receive the creator's
+user-to-server token. It can reach **every repository the user and the App can
+access**, beyond the workspace's pinned repository. With PAT selected, both
+receive that PAT with its existing scopes. Create-time hydration and checkpoint
+restore use the same human credential; the shared Cloud Computer builder keeps
+its installation credential. The **VM is the isolation boundary**: every process
+there, including other agent sessions, can use a delivered token. Broker caching
+is bounded to two minutes; it does not shorten the credential's GitHub lifetime
+or reduce its scopes.
 The broker shares concurrent requests and keeps a successful token until ten
 seconds before that two-minute lease expires. An unchanged configuration
 refresh preserves both the cache and any active request. A changed login
 revision, transport disconnect or refusal withdraws cached material. Recovery
 and one delayed retry of a transient credential failure share the caller's
 original twenty-second deadline; each HTTP attempt gets at most fifteen
-seconds of the remaining budget. Git commands and `gh` mutations are never
-replayed. Connection, installation, SSO, access, source-review and rate-limit
+seconds of the remaining budget. A fixed `GET /user` validates a new token and
+then at most once per three minutes for that same token; concurrent callers
+share the validation. Each validation uses at most three seconds of the remaining
+budget. A 401 reports only the used token's SHA-256, expires that exact credential
+version, joins the existing refresh lease and retries the authentication read
+once. A late report cannot expire a replacement token. PAT rejection requires
+reconnection. Git's credential-helper `erase` and `gh`'s HTTP 401 report repair a
+rejection between validations. If a command already ran, its original exit code
+is retained and the repaired token serves the next invocation: Git and `gh`
+commands are never replayed, even if a later step failed after a successful write.
+Connection, installation, SSO, access, source-review and rate-limit
 refusals reach Git/`gh` stderr as bounded recovery guidance; control-plane logs
 record only a closed reason and cause class, never provider text or credentials.
 
@@ -278,6 +291,14 @@ native close cannot unlink a replacement at the published path. Helpers retry
 a missing or refused socket connection once after 250 ms, only before sending
 the request; both dials and response reading share one 21-second deadline.
 Clean Cloud Computer snapshots are captured before any configured broker starts.
+
+Deploy the control plane before publishing the new pinned runtime. Older workers
+receive user credentials even when they omit `purpose`. The `github-user-token-v1`
+feature gates the optional recovery configuration and rejected-token digest.
+Against the previous control plane a new worker requests its existing human
+`gh` purpose for both tools and sends no unsupported fields. It refuses an
+unchanged rejected token when forced refresh is unavailable. Pre-worker hydration
+and restore adopt the user-token policy when the control plane is upgraded.
 
 Before checkout setup, agents, terminals or Changes commits are admitted, the
 worker installs the creator's Git identity from the selected organization
