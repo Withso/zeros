@@ -79,7 +79,8 @@ import { useActiveWorkspace } from "../../state/use-active-workspace";
 import { isLocalMainWorkspace } from "../../state/local-main-workspace";
 import { useWorkspaceReviewStatus } from "../../features/code-review/use-workspace-review-status";
 import { statusForGeneration } from "../git-status-reads";
-import { fileStatusesForFolder, FILE_STATUS_PRESENTATION } from "./tabs/file-status";
+import { fileStatusesForFolder } from "./tabs/file-status";
+import { TabFileMarks } from "./tab-file-marks";
 import type { FileChangeStatus } from "../../platform/git";
 import { useWorkbenchDirtyEditorIds } from "./tabs/code-editor/editor-state";
 
@@ -267,7 +268,6 @@ function TabPill({
   const meta = TAB_TYPE_META[tab.type];
   const Icon = meta.icon;
   const showLabel = tabShowsLabel(tab);
-  const statusPresentation = fileStatus ? FILE_STATUS_PRESENTATION[fileStatus] : undefined;
   // A File tab wears its file's own colored type glyph (same sprite as the tree
   // and the viewer breadcrumb); everything else keeps its type's lucide glyph.
   const iconPath = workbenchTabIconPath(tab);
@@ -385,14 +385,7 @@ function TabPill({
           )}
         </span>
       )}
-      {statusPresentation && (
-        <span role="img" aria-label={statusPresentation.label} className={cn("text-3xxs leading-4 shrink-0 font-medium", statusPresentation.className)}>
-          {statusPresentation.letter}
-        </span>
-      )}
-      {dirty && (
-        <span role="img" aria-label="Unsaved changes" className="bg-fg3 size-1.5 shrink-0 rounded-full" />
-      )}
+      <TabFileMarks fileStatus={fileStatus} dirty={dirty} />
       {terminalIndicator?.dot && (
         <span
           aria-hidden
