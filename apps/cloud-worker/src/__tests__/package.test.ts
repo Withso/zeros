@@ -14,6 +14,7 @@ import { afterAll, beforeAll, expect, it } from "vitest";
 import { workerChildEnvironment } from "../drivers/shared/agent-environment";
 import { CLIENT_A, WORKSPACE_ID, browserFrame, config } from "./worker-fixtures";
 import { GithubBroker, githubEnvironment } from "../credentials/github";
+import { brokerRequest } from "../credentials/client";
 import { githubAuthenticationError } from "../credentials/github-failure";
 import { repositoryFixture } from "../workspace/__tests__/repository-fixture";
 
@@ -207,7 +208,7 @@ it("boots through the runtime symlink, waits for a token, serves a dial-in PTY a
       const message = JSON.parse(raw.toString()); messages.push(message);
       if (message.t === "frame" && message.frame.type === "ENGINE_READY")
         socket!.send(JSON.stringify({ t: "frame", clientId: CLIENT_A, frame: browserFrame("PTY_CREATE", { sessionId: "package-shell" }) }));
-      if (message.t === "frame" && message.frame.type === "PTY_CREATED")
+      if (message.t === "frame" && message.frame.type === "PTY_CREATED" && message.frame.sessionId === "package-shell")
         socket!.send(JSON.stringify({ t: "frame", clientId: CLIENT_A, frame: browserFrame("PTY_WRITE", { sessionId: "package-shell", data: "printf 'BUNDLED_PTY_OK\\n'\n" }) }));
     });
     await once(socket, "open");
@@ -215,6 +216,25 @@ it("boots through the runtime symlink, waits for a token, serves a dial-in PTY a
     await expect.poll(() => messages.some(message => message.t === "frame" && message.frame.type === "PTY_DATA"
       && message.frame.data.includes("BUNDLED_PTY_OK")), { timeout: 5000 }).toBe(true);
     expect(requests.some(request => request.path === "hello" && request.generation === "initial")).toBe(true);
+    const brokerSocket = join(state, "github.sock"), askpassPath = join(dist, "bin/git-askpass");
+    expect(await brokerRequest(brokerSocket, "token")).toMatchObject({ token: "fixture-package-github" });
+    for (let i = 0; i < 3; i++) {
+      const sessionId = `credential-shell-${i}`;
+      socket.send(JSON.stringify({ t: "frame", clientId: CLIENT_A, frame: browserFrame("PTY_CREATE", { sessionId }) }));
+      await expect.poll(() => messages.some(message => message.t === "frame" && message.frame.type === "PTY_CREATED" && message.frame.sessionId === sessionId)).toBe(true);
+      socket.send(JSON.stringify({ t: "frame", clientId: CLIENT_A, frame: browserFrame("PTY_WRITE", { sessionId,
+        data: `"$GIT_ASKPASS" "Password for 'https://x-access-token@github.com': " >/dev/null; printf 'BROKER_HELPER_%s_%s\\n' ${i} "$?"; exit\n`,
+      }) }));
+      await expect.poll(() => messages.filter(message => message.t === "frame" && message.frame.type === "PTY_DATA" && message.frame.sessionId === sessionId)
+        .map(message => message.frame.data).join("")).toContain(`BROKER_HELPER_${i}_0`);
+      await expect.poll(() => messages.some(message => message.t === "frame" && message.frame.type === "PTY_EXIT" && message.frame.sessionId === sessionId)).toBe(true);
+      const result = await exec(askpassPath, ["Password for 'https://x-access-token@github.com': "], {
+        cwd: root, env: workerChildEnvironment(undefined, githubEnvironment(brokerSocket, askpassPath)), timeout: 10_000,
+      });
+      expect(result.stdout === "fixture-package-github\n").toBe(true);
+      expect(result.stderr).toBe("");
+    }
+    expect(requests.filter(request => request.path === "github-token")).toHaveLength(1);
     await writeFile(`${tokenFile}.next`, rotatedToken, { mode: 0o600 });
     await rename(`${tokenFile}.next`, tokenFile);
     socket.send(JSON.stringify({ t: "frame", clientId: CLIENT_A, frame: browserFrame("WORKSPACE_REQUEST", { op: "chats.upsert", params: {
