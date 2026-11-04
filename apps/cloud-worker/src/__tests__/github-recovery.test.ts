@@ -30,11 +30,13 @@ it("finishes a broker request held across failed activity and same-revision HTTP
   };
   const transport = new HybridTransport({ apiUrl: "https://api.example.test", workspaceId: config.workspace.id, runtimeSha256: "a".repeat(64),
     tokenFile, publicKeys: [publicKey.export({ type: "spki", format: "pem" }).toString()], port: 0, fetch: fetcher, retryBaseMs: 1 });
-  const worker = new CloudWorker({ directory: join(directory, "state"), transport, prepareCheckout: async () => {}, drivers: {} });
+  let socketPath = "";
+  const worker = new CloudWorker({ directory: join(directory, "state"), transport,
+    prepareCheckout: async (_workspace, environment) => { socketPath = environment.GH_ZEROS_BROKER_SOCKET!; }, drivers: {} });
   try {
     worker.start();
     await expect.poll(() => activityCalls).toBeGreaterThan(0);
-    const pending = brokerRequest(join(directory, "state", "github.sock"), "token").then(value => ({ value }), error => ({ error }));
+    const pending = brokerRequest(socketPath, "token").then(value => ({ value }), error => ({ error }));
     await expect.poll(() => tokenRequests).toBe(1);
     failActivity = true;
     await transport.send({ t: "idle", idle: false });
@@ -42,7 +44,7 @@ it("finishes a broker request held across failed activity and same-revision HTTP
     await worker.flush();
     release();
     expect(await pending).toMatchObject({ value: { token: "fixture-recovered-token" } });
-    expect(await brokerRequest(join(directory, "state", "github.sock"), "token")).toMatchObject({ token: "fixture-recovered-token" });
+    expect(await brokerRequest(socketPath, "token")).toMatchObject({ token: "fixture-recovered-token" });
     expect(tokenRequests).toBe(1);
   } finally { release(); await worker.dispose(); await rm(directory, { recursive: true, force: true }); }
 });
@@ -50,7 +52,8 @@ it("finishes a broker request held across failed activity and same-revision HTTP
 it.each(["claude", "codex"] as const)("serves new Git and gh broker clients after a %s turn and cache expiry", async agentId => {
   vi.useFakeTimers({ toFake: ["Date"] });
   const directory = await mkdtemp(join(tmpdir(), "github-turn-complete-")), tokenFile = join(directory, "worker-token");
-  const checkoutPath = join(directory, "checkout"), state = join(directory, "state"), socketPath = join(state, "github.sock");
+  const checkoutPath = join(directory, "checkout"), state = join(directory, "state");
+  let socketPath = "";
   await mkdir(checkoutPath);
   await writeFile(tokenFile, "synthetic-worker-token", { mode: 0o600 });
   const keys = generateKeyPairSync("ed25519"), driver = new FakeDriver();
@@ -77,7 +80,8 @@ it.each(["claude", "codex"] as const)("serves new Git and gh broker clients afte
   const transport = new HybridTransport({ apiUrl: "https://api.example.test", workspaceId: config.workspace.id, runtimeSha256: "a".repeat(64),
     tokenFile, publicKeys: [keys.publicKey.export({ type: "spki", format: "pem" }).toString()], port: 0, fetch: fetcher,
     onStatus: status => { connected = status === "connected"; } });
-  const worker = new CloudWorker({ directory: state, transport, prepareCheckout: async () => {}, drivers: { [agentId]: () => driver } });
+  const worker = new CloudWorker({ directory: state, transport,
+    prepareCheckout: async (_workspace, environment) => { socketPath = environment.GH_ZEROS_BROKER_SOCKET!; }, drivers: { [agentId]: () => driver } });
   let socket: WebSocket | undefined;
   try {
     worker.start();

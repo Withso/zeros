@@ -85,7 +85,7 @@ export class CloudWorker {
   constructor(private readonly options: WorkerOptions) {
     this.tokens = new GithubTokens((frame, timeoutMs) => this.send(frame, timeoutMs));
     this.userTokens = new GithubTokens((frame, timeoutMs) => this.send(frame, timeoutMs), { purpose: "gh" });
-    this.github = new GithubBroker(join(options.directory, "github.sock"), purpose => purpose === "gh" && this.githubUserTokensEnabled ? this.userTokens.get() : this.tokens.get(), () => this.workspace?.githubChanged());
+    this.github = new GithubBroker(`/tmp/zeros-github-${this.instanceId}/github.sock`, purpose => purpose === "gh" && this.githubUserTokensEnabled ? this.userTokens.get() : this.tokens.get(), () => this.workspace?.githubChanged());
     this.gitEnvironment = githubEnvironment(this.github.socketPath, options.gitAskpassPath ?? fileURLToPath(new URL("../bin/git-askpass", import.meta.url)));
   }
 

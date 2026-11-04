@@ -1,8 +1,8 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { afterEach, expect, it } from "vitest";
 import type { CloudV2WorkerFrame } from "@zeros/protocol/cloud-v2-relay";
 import { CloudWorker } from "../worker";
@@ -23,9 +23,12 @@ async function fixture() {
   const git = async (...args: string[]) => (await execute("git", args, { cwd: root, env })).stdout.trim();
   await git("init", "-b", "main");
   const relay = new FakeRelay();
-  let preparing = false, preparedEmail: string | undefined;
+  let preparing = false, preparedEmail: string | undefined, socketPath = "";
   const worker = new CloudWorker({ directory: state, transport: relay, homeDirectory: home, drivers: {},
-    prepareCheckout: async () => { preparing = true; preparedEmail = await git("config", "user.email").catch(() => undefined); },
+    prepareCheckout: async (_workspace, environment) => {
+      socketPath = environment.GH_ZEROS_BROKER_SOCKET!;
+      preparing = true; preparedEmail = await git("config", "user.email").catch(() => undefined);
+    },
     workspaceServices: { run: commandRunner(root, { GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: env.GIT_CONFIG_GLOBAL }) } });
   cleanups.push(async () => { await worker.dispose(); await rm(directory, { recursive: true, force: true }); });
   const configuration = { ...config, workspace: { ...config.workspace, checkoutPath: root }, agents: {} };
@@ -34,7 +37,7 @@ async function fixture() {
   };
   worker.start();
   return { directory, state, root, home, relay, worker, git, configure, configuration,
-    preparing: () => preparing, preparedEmail: () => preparedEmail };
+    preparing: () => preparing, preparedEmail: () => preparedEmail, socketPath: () => socketPath };
 }
 
 it("configures the creator before admission for Changes, terminal and agent commits", async () => {
@@ -97,13 +100,39 @@ it("keeps the existing Git configuration when an older control plane omits ident
 it("keeps an in-flight token and its cache across a same-revision recovery configuration", async () => {
   const f = await fixture();
   await f.configure(undefined);
-  const pending = brokerRequest(join(f.state, "github.sock"), "token");
+  const pending = brokerRequest(f.socketPath(), "token");
   const outcome = pending.then(value => ({ value }), error => ({ error }));
   const requests = () => f.relay.frames.filter((frame): frame is Extract<CloudV2WorkerFrame, { t: "request" }> => frame.t === "request");
   await expect.poll(() => requests().length).toBe(1);
   await f.configure(undefined);
   await f.relay.receive({ t: "reply", id: requests()[0].id, token: "fixture-current-token", expiresAt: Date.now() + 120_000 });
   expect(await outcome).toMatchObject({ value: { token: "fixture-current-token" } });
-  expect(await brokerRequest(join(f.state, "github.sock"), "token")).toMatchObject({ token: "fixture-current-token" });
+  expect(await brokerRequest(f.socketPath(), "token")).toMatchObject({ token: "fixture-current-token" });
   expect(requests()).toHaveLength(1);
+});
+
+it("keeps serving credentials when another process replaces the old shared broker path", async () => {
+  const f = await fixture(); await f.configure(undefined);
+  const first = brokerRequest(f.socketPath(), "token");
+  const requests = () => f.relay.frames.filter((frame): frame is Extract<CloudV2WorkerFrame, { t: "request" }> => frame.t === "request");
+  await expect.poll(() => requests().length).toBe(1);
+  await f.relay.receive({ t: "reply", id: requests()[0].id, token: "fixture-own-token", expiresAt: Date.now() + 120_000 });
+  expect(await first).toMatchObject({ token: "fixture-own-token" });
+  const legacy = join(f.state, "github.sock");
+  await execute(process.execPath, ["--input-type=module", "-e", `
+    import { unlinkSync } from 'node:fs';
+    import { createServer } from 'node:net';
+    const path = process.argv[1];
+    try { unlinkSync(path); } catch (error) { if (error.code !== 'ENOENT') throw error; }
+    createServer().listen(path, () => process.exit(0));
+  `, legacy], { env: { PATH: process.env.PATH }, timeout: 10_000 });
+  expect((await stat(legacy)).isSocket()).toBe(true);
+  const foreignInode = (await stat(legacy)).ino;
+  expect(await brokerRequest(f.socketPath(), "token")).toMatchObject({ token: "fixture-own-token" });
+  expect(f.socketPath()).not.toBe(legacy);
+  expect((await stat(dirname(f.socketPath()))).mode & 0o777).toBe(0o700);
+  expect((await stat(f.socketPath())).mode & 0o777).toBe(0o600);
+  expect(requests()).toHaveLength(1);
+  await f.worker.dispose();
+  expect((await stat(legacy)).ino).toBe(foreignInode);
 });

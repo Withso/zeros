@@ -1,4 +1,4 @@
-import { connect } from "node:net";
+import { Socket } from "node:net";
 import { spawn } from "node:child_process";
 import { workerChildEnvironment } from "../drivers/shared/agent-environment";
 import { githubEnvironment } from "./github";
@@ -8,21 +8,42 @@ const unavailable = () => githubAuthenticationError();
 export function brokerRequest(socketPath: string, kind: "token" | "user-token" | "changed"): Promise<Record<string, unknown>> {
   return new Promise((resolve, reject) => {
     if (!socketPath || !socketPath.startsWith("/")) { reject(unavailable()); return; }
-    const socket = connect(socketPath); let buffer = "", settled = false;
-    const finish = (result?: Record<string, unknown>, error?: GithubAuthenticationError) => { if (settled) return; settled = true; socket.destroy(); if (result) resolve(result); else reject(error ?? unavailable()); };
-    socket.setTimeout(GITHUB_SOCKET_TIMEOUT_MS, () => finish()); socket.setEncoding("utf8");
-    socket.once("error", () => finish()); socket.once("close", () => finish());
-    socket.once("connect", () => socket.write(JSON.stringify({ kind }) + "\n"));
-    socket.on("data", (data: string) => {
-      buffer += data; if (Buffer.byteLength(buffer) > 16_384) { finish(); return; }
-      if (!buffer.includes("\n")) return;
-      try {
-        const result: unknown = JSON.parse(buffer.trim());
-        if (!result || typeof result !== "object") { finish(); return; }
-        if ("error" in result) { finish(undefined, githubAuthenticationError(result.error)); return; }
-        finish(result as Record<string, unknown>);
-      } catch { finish(); }
-    });
+    let socket: Socket | undefined, settled = false, retried = false, retry: ReturnType<typeof setTimeout> | undefined;
+    const finish = (result?: Record<string, unknown>, error?: GithubAuthenticationError) => {
+      if (settled) return;
+      settled = true; clearTimeout(deadline); clearTimeout(retry); socket?.destroy();
+      if (result) resolve(result); else reject(error ?? unavailable());
+    };
+    const deadline = setTimeout(() => finish(), GITHUB_SOCKET_TIMEOUT_MS);
+    const dial = () => {
+      if (settled) return;
+      const attempt = socket = new Socket(); let buffer = "", connected = false;
+      attempt.setEncoding("utf8");
+      attempt.once("error", (error: NodeJS.ErrnoException) => {
+        if (settled || socket !== attempt) return;
+        if (!connected && !retried && (error.code === "ECONNREFUSED" || error.code === "ENOENT")) {
+          retried = true; socket = undefined; attempt.destroy(); retry = setTimeout(dial, 250);
+        } else finish();
+      });
+      attempt.once("close", () => { if (socket === attempt) finish(); });
+      attempt.once("connect", () => {
+        if (settled || socket !== attempt) return;
+        connected = true; attempt.write(JSON.stringify({ kind }) + "\n");
+      });
+      attempt.on("data", (data: string) => {
+        if (settled || socket !== attempt) return;
+        buffer += data; if (Buffer.byteLength(buffer) > 16_384) { finish(); return; }
+        if (!buffer.includes("\n")) return;
+        try {
+          const result: unknown = JSON.parse(buffer.trim());
+          if (!result || typeof result !== "object") { finish(); return; }
+          if ("error" in result) { finish(undefined, githubAuthenticationError(result.error)); return; }
+          finish(result as Record<string, unknown>);
+        } catch { finish(); }
+      });
+      try { attempt.connect(socketPath); } catch { finish(); }
+    };
+    dial();
   });
 }
 

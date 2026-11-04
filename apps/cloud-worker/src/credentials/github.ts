@@ -1,7 +1,8 @@
 import { randomUUID } from "node:crypto";
-import { connect, createServer, type Server, type Socket } from "node:net";
-import { chmod, lstat, mkdir, unlink } from "node:fs/promises";
-import { dirname } from "node:path";
+import { createServer, type Server, type Socket } from "node:net";
+import type { Stats } from "node:fs";
+import { chmod, link, lstat, mkdir, mkdtemp, rmdir, unlink } from "node:fs/promises";
+import { dirname, join } from "node:path";
 import type { CloudV2ControlFrame, CloudV2WorkerFrame } from "@zeros/protocol/cloud-v2-relay";
 import { GithubAuthenticationError, githubAuthenticationError, GITHUB_REQUEST_TIMEOUT_MS, GITHUB_SOCKET_TIMEOUT_MS } from "./github-failure";
 
@@ -95,32 +96,68 @@ export function githubEnvironment(socketPath: string, askpassPath: string): Node
  * agents and terminals intentionally share that workspace trust domain. */
 export class GithubBroker {
   private server?: Server;
+  private starting?: Promise<void>;
+  private stopping?: Promise<void>;
+  private disposed = false;
+  private ownedSocket?: Stats;
+  private ownedDirectory?: Stats;
   private readonly sockets = new Set<Socket>();
   constructor(readonly socketPath: string, private readonly token: (purpose: "git" | "gh") => Promise<GithubToken>, private readonly changed: () => void = () => {}) {}
-  async start(): Promise<void> {
-    if (this.server) return;
-    await mkdir(dirname(this.socketPath), { recursive: true, mode: 0o700 });
-    const existing = await lstat(this.socketPath).catch((error: NodeJS.ErrnoException) => { if (error.code === "ENOENT") return undefined; throw error; });
-    if (existing) {
-      if (!existing.isSocket() || existing.uid !== process.getuid?.() || await this.listening()) throw new Error("The GitHub broker socket is already in use.");
-      await unlink(this.socketPath);
-    }
-    const server = createServer(socket => this.accept(socket)); server.maxConnections = 64;
-    await new Promise<void>((resolve, reject) => { server.once("error", reject); server.listen(this.socketPath, () => { server.removeListener("error", reject); resolve(); }); });
-    server.on("error", () => {}); this.server = server;
-    await chmod(this.socketPath, 0o600);
+  start(): Promise<void> {
+    if (this.disposed) return Promise.reject(new Error("The GitHub broker is disposed."));
+    if (this.server) return Promise.resolve();
+    return this.starting ??= this.listen().finally(() => { this.starting = undefined; });
   }
-  async dispose(): Promise<void> {
+  dispose(): Promise<void> {
+    this.disposed = true;
+    return this.stopping ??= this.stop();
+  }
+  private async listen(): Promise<void> {
+    const directory = dirname(this.socketPath);
+    let staging: string | undefined, bound: string | undefined, server: Server | undefined, owned: Stats | undefined;
+    try {
+      const created = await mkdir(directory, { recursive: true, mode: 0o700 });
+      const parent = await lstat(directory);
+      if (created) this.ownedDirectory = parent;
+      if (!parent.isDirectory() || parent.uid !== process.getuid?.() || (parent.mode & 0o777) !== 0o700) throw new Error("The GitHub broker directory must be private.");
+      if (await inspect(this.socketPath)) throw new Error("The GitHub broker socket is already in use.");
+      staging = await mkdtemp(join(directory, ".bind-"));
+      const binding = bound = join(staging, "socket");
+      const listener = server = createServer(socket => this.accept(socket)); listener.maxConnections = 64;
+      await new Promise<void>((resolve, reject) => { listener.once("error", reject); listener.listen(binding, () => { listener.removeListener("error", reject); resolve(); }); });
+      listener.on("error", () => {});
+      owned = await lstat(bound);
+      await chmod(bound, 0o600);
+      await link(bound, this.socketPath); this.ownedSocket = owned;
+      // libuv unlinks its original bind path on close, even if a foreign socket
+      // replaced it. Publish a hard link and retire that private binding name.
+      await unlinkOwnedSocket(bound, owned); await rmdir(staging); staging = undefined;
+      this.server = listener;
+    } catch (error) {
+      if (bound) await unlinkOwnedSocket(bound, owned).catch(() => {});
+      for (const socket of this.sockets) socket.destroy(); this.sockets.clear();
+      if (server) await new Promise<void>(resolve => server!.close(() => resolve()));
+      throw error;
+    } finally {
+      if (staging) await rmdir(staging).catch(() => {});
+      if (!this.server) await this.cleanup().catch(() => {});
+    }
+  }
+  private async stop(): Promise<void> {
+    await this.starting?.catch(() => {});
     for (const socket of this.sockets) socket.destroy(); this.sockets.clear();
     const server = this.server; this.server = undefined;
-    if (server) { await new Promise<void>(resolve => server.close(() => resolve())); await unlink(this.socketPath).catch(() => {}); }
+    if (server) await new Promise<void>(resolve => server.close(() => resolve()));
+    await this.cleanup();
   }
-  private listening(): Promise<boolean> {
-    return new Promise(resolve => {
-      const socket = connect(this.socketPath); let settled = false;
-      const finish = (value: boolean) => { if (!settled) { settled = true; socket.destroy(); resolve(value); } };
-      socket.once("connect", () => finish(true)); socket.once("error", () => finish(false)); socket.setTimeout(500, () => finish(true));
+  private async cleanup(): Promise<void> {
+    await unlinkOwnedSocket(this.socketPath, this.ownedSocket); this.ownedSocket = undefined;
+    if (!this.ownedDirectory) return;
+    const directory = dirname(this.socketPath), current = await inspect(directory);
+    if (current?.isDirectory() && sameInode(current, this.ownedDirectory)) await rmdir(directory).catch((error: NodeJS.ErrnoException) => {
+      if (error.code !== "ENOENT" && error.code !== "ENOTEMPTY") throw error;
     });
+    this.ownedDirectory = undefined;
   }
   private accept(socket: Socket): void {
     this.sockets.add(socket); socket.setTimeout(GITHUB_SOCKET_TIMEOUT_MS, () => socket.destroy());
@@ -144,4 +181,16 @@ export class GithubBroker {
       });
     });
   }
+}
+
+async function inspect(path: string): Promise<Stats | undefined> {
+  return lstat(path).catch((error: NodeJS.ErrnoException) => { if (error.code === "ENOENT") return undefined; throw error; });
+}
+function sameInode(current: Stats, owned?: Stats): boolean {
+  return !!owned && current.dev === owned.dev && current.ino === owned.ino && current.uid === owned.uid;
+}
+async function unlinkOwnedSocket(path: string, owned?: Stats): Promise<void> {
+  if (!owned) return;
+  const current = await inspect(path);
+  if (current?.isSocket() && sameInode(current, owned)) await unlink(path).catch((error: NodeJS.ErrnoException) => { if (error.code !== "ENOENT") throw error; });
 }

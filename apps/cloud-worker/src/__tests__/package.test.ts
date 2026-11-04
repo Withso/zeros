@@ -209,14 +209,19 @@ it("boots through the runtime symlink, waits for a token, serves a dial-in PTY a
       if (message.t === "frame" && message.frame.type === "ENGINE_READY")
         socket!.send(JSON.stringify({ t: "frame", clientId: CLIENT_A, frame: browserFrame("PTY_CREATE", { sessionId: "package-shell" }) }));
       if (message.t === "frame" && message.frame.type === "PTY_CREATED" && message.frame.sessionId === "package-shell")
-        socket!.send(JSON.stringify({ t: "frame", clientId: CLIENT_A, frame: browserFrame("PTY_WRITE", { sessionId: "package-shell", data: "printf 'BUNDLED_PTY_OK\\n'\n" }) }));
+        socket!.send(JSON.stringify({ t: "frame", clientId: CLIENT_A, frame: browserFrame("PTY_WRITE", { sessionId: "package-shell",
+          data: "printf 'BUNDLED_PTY_OK\\nBUNDLED_BROKER_PATH=%s\\n' \"$GH_ZEROS_BROKER_SOCKET\"\n" }) }));
     });
     await once(socket, "open");
     socket.send(JSON.stringify({ t: "open", clientId: CLIENT_A }));
     await expect.poll(() => messages.some(message => message.t === "frame" && message.frame.type === "PTY_DATA"
       && message.frame.data.includes("BUNDLED_PTY_OK")), { timeout: 5000 }).toBe(true);
     expect(requests.some(request => request.path === "hello" && request.generation === "initial")).toBe(true);
-    const brokerSocket = join(state, "github.sock"), askpassPath = join(dist, "bin/git-askpass");
+    const publishedSocket = () => /BUNDLED_BROKER_PATH=(\/[^\r\n]+)/.exec(messages
+      .filter(message => message.t === "frame" && message.frame.type === "PTY_DATA" && message.frame.sessionId === "package-shell")
+      .map(message => message.frame.data).join(""))?.[1];
+    await expect.poll(publishedSocket).toBeDefined();
+    const brokerSocket = publishedSocket()!, askpassPath = join(dist, "bin/git-askpass");
     expect(await brokerRequest(brokerSocket, "token")).toMatchObject({ token: "fixture-package-github" });
     for (let i = 0; i < 3; i++) {
       const sessionId = `credential-shell-${i}`;
