@@ -6,8 +6,9 @@ import { publishWorkspacePrDiscovery } from "../../pr/workspace-pr-discovery-sta
 import { forgetPrCachesForWorkspace } from "../../pr/pr-cache-forget";
 import { ReviewSurface } from "../tabs/review-surface";
 
-const fixture = vi.hoisted(() => ({ workspace: null as Workspace | null, status: vi.fn() }));
-vi.mock("../../../state/use-active-workspace", () => ({ useActiveWorkspace: () => ({ project: { originUrl: "https://github.com/fixture/repo.git" } }) }));
+const GITHUB_ORIGIN = "https://github.com/fixture/repo.git";
+const fixture = vi.hoisted(() => ({ workspace: null as Workspace | null, status: vi.fn(), origin: "https://github.com/fixture/repo.git" }));
+vi.mock("../../../state/use-active-workspace", () => ({ useActiveWorkspace: () => ({ project: { originUrl: fixture.origin } }) }));
 vi.mock("../../../state/store", () => ({ useWorkspaceDispatch: () => () => {} }));
 vi.mock("../../use-git-refresh-key", () => ({ useGitRefreshKey: () => 1 }));
 vi.mock("../../pr/use-agent-working", () => ({ useWorkspaceAgentWorking: () => false }));
@@ -26,7 +27,16 @@ function render() {
 }
 afterEach(() => {
   if (fixture.workspace) forgetPrCachesForWorkspace(fixture.workspace.id);
-  fixture.workspace = null; fixture.status.mockClear();
+  fixture.workspace = null; fixture.status.mockClear(); fixture.origin = GITHUB_ORIGIN;
+});
+
+describe("Review on another Git host", () => {
+  it("says why it is unavailable instead of a bare dead end", () => {
+    fixture.origin = "https://gitlab.com/fixture/repo.git";
+    fixture.workspace = { id: "ws-review-host", path: "/workspace", repoSlug: "fixture", prNumber: 7, placement: "local", organizationId: null } as Workspace;
+    publishWorkspacePrDiscovery("ws-review-host", { pending: false, checked: true, error: null });
+    expect(render()).toContain("Review needs a github.com remote");
+  });
 });
 
 describe.each([null, "organization"])("PR discovery for Local owner %s", organizationId => {

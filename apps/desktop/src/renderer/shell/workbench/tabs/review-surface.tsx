@@ -85,9 +85,8 @@ export const ReviewSurface = React.memo(function ReviewSurface({
         title="No pull request"
       />
     ) : !provider ? (
-      <EmptyState
-        title="Review unavailable"
-      />
+      // The one line says why, so the state is not a dead end.
+      <EmptyState title="Review needs a github.com remote" />
     ) : (
       <ReviewView
         // Per-workspace remount — don't carry a prior workspace's PR / auth
