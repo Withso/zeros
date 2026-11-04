@@ -2262,8 +2262,11 @@ export async function runGithubSettingsSmoke({
     ),
   );
   check(
-    "GitHub disconnect consequences are itemized",
-    (await disconnectDialog.locator("li").count()) === 3,
+    "GitHub disconnect says what changes in one line",
+    (await disconnectDialog.locator("li").count()) === 0 &&
+      (await disconnectDialog
+        .getByText("Zeros will use gh CLI instead.", { exact: false })
+        .count()) === 1,
   );
   check(
     "Cancel owns initial dialog focus",
