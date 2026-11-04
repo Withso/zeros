@@ -2,7 +2,7 @@
   "id": "turn-reset-missing-snapshot",
   "kind": "replay",
   "area": "desktop-engine",
-  "fixedBy": "pending",
+  "fixedBy": "pr:835",
   "symptom": "A recorded turn whose snapshot object had been pruned was treated as if the authored path had never existed, allowing reset or Undo to delete the current file.",
   "rule": "Validate the full snapshot chain before mutating an authored path; a missing snapshot is a skipped reset, not evidence of a deleted file. Keep Local and cloud on the shared inverse algorithm. See agents/zstack/playbooks/bug-fix.md.",
   "check": "pnpm test:git apps/desktop/src/engine/git/__tests__/turns-git.test.ts -t 'skips an authored path when its recorded snapshot object no longer exists'"
