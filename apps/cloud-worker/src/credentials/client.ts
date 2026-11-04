@@ -1,4 +1,4 @@
-import { Socket } from "node:net";
+import { connect, type Socket } from "node:net";
 import { spawn } from "node:child_process";
 import { workerChildEnvironment } from "../drivers/shared/agent-environment";
 import { githubEnvironment } from "./github";
@@ -19,7 +19,9 @@ export function brokerRequest(socketPath: string, kind: "token" | "user-token" |
     const deadline = setTimeout(() => finish(), GITHUB_SOCKET_TIMEOUT_MS);
     const dial = () => {
       if (settled) return;
-      const attempt = socket = new Socket(); let buffer = "", connected = false;
+      let attempt: Socket;
+      try { attempt = socket = connect(validatedPath); } catch { finish(); return; }
+      let buffer = "", connected = false;
       attempt.setEncoding("utf8");
       attempt.once("error", (error: NodeJS.ErrnoException) => {
         if (settled || socket !== attempt) return;
@@ -43,7 +45,6 @@ export function brokerRequest(socketPath: string, kind: "token" | "user-token" |
           finish(result as Record<string, unknown>);
         } catch { finish(); }
       });
-      try { attempt.connect(validatedPath); } catch { finish(); }
     };
     dial();
   });

@@ -1,9 +1,10 @@
 import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import fs from "node:fs/promises";
-import { mkdir, readFile, rm, stat, unlink, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, stat, unlink, writeFile } from "node:fs/promises";
 import { syncBuiltinESMExports } from "node:module";
 import { createServer, Socket, type Server } from "node:net";
+import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { promisify } from "node:util";
 import { afterEach, expect, it, vi } from "vitest";
@@ -20,6 +21,11 @@ async function fixture() {
   await mkdir(directory, { mode: 0o700 });
   cleanups.push(() => rm(directory, { recursive: true, force: true }));
   return join(directory, "github.sock");
+}
+async function ownedFixture() {
+  const directory = await mkdtemp(join(tmpdir(), "broker-owned-"));
+  cleanups.push(() => rm(directory, { recursive: true, force: true }));
+  return join(directory, "owned", "github.sock");
 }
 function close(server: Server): Promise<void> { return new Promise(resolve => server.close(() => resolve())); }
 async function staleSocket(path: string): Promise<void> {
@@ -123,7 +129,7 @@ it("shares a single listener across concurrent starts", async () => {
 });
 
 it("joins disposal with an in-progress start and retires its private directory", async () => {
-  const path = join(dirname(await fixture()), "owned", "github.sock");
+  const path = await ownedFixture();
   const broker = new GithubBroker(path, async () => ({ token: "fixture-own", expiresAt: Date.now() + 120_000 }));
   cleanups.push(() => broker.dispose());
   const starting = broker.start(), stopping = broker.dispose();
@@ -133,7 +139,7 @@ it("joins disposal with an in-progress start and retires its private directory",
 });
 
 it("preserves foreign contents in an owned directory during disposal", async () => {
-  const path = join(dirname(await fixture()), "owned", "github.sock");
+  const path = await ownedFixture();
   const broker = new GithubBroker(path, async () => ({ token: "fixture-own", expiresAt: Date.now() + 120_000 }));
   cleanups.push(() => broker.dispose());
   await broker.start();
