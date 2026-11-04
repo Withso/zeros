@@ -22,14 +22,14 @@ export function mcpConnectionView(server: RawServer, result?: McpProbeResult, st
   const auth = server.auth ?? secureDraftFromServer(server).auth;
   if (result?.status === "needs-auth" || (!result && status === "needs-auth")) return auth === "header"
     ? { label: "Check API key", hint: "The server rejected the credentials. Check your API key headers and try again.", tone: "error", action: "check" }
-    : { label: "Sign-in required", hint: "Connect your account to use this server. You can also choose API key in Authentication.", tone: "warning", action: "connect" };
+    : { label: "Sign-in required", hint: "Connect your account to use this server.", tone: "warning", action: "connect" };
   if (result?.status === "failed" || (!result && status === "error")) {
     const stage = result?.stages.find(row => row.status === "failed")?.stage;
     return { label: "Connection failed", tone: "error", action: "check", hint:
       stage === "validation" ? "Check the server details and credentials, then try again."
         : stage === "tools" ? "The server connected, but its tools could not be loaded. Try again."
           : stage === "initialize" ? "The server did not accept the MCP connection. Check its URL and try again."
-            : "Could not reach the server. Check its URL and your connection, then try again.",
+            : "Couldn’t reach the server. Check the URL.",
     };
   }
   return { label: "Needs connection", tone: "neutral", action: server.auth === "oauth" ? "connect" : "check",

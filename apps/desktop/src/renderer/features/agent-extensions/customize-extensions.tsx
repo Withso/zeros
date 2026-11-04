@@ -4,8 +4,25 @@ import type {
   ExtensionQuery,
 } from "@zeros/protocol/agent-extensions";
 import { zerosSkillSchema } from "@zeros/protocol/agent-extensions";
-import { ArrowLeft, Plus } from "lucide-react";
+import { ChevronRight, Ellipsis } from "lucide-react";
 import { Button, Input, Textarea } from "../../shared/ui";
+import { Badge } from "../../shared/ui/primitives/badge";
+import { Field } from "../../shared/ui/primitives/field";
+import { IconButton } from "../../shared/ui/primitives/icon-button";
+import { MessageRow } from "../../shared/ui/primitives/message-row";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "../../shared/ui/primitives/dropdown-menu";
+import {
+  SettingsAddRow,
+  SettingsEmpty,
+  SettingsGroup,
+  SettingsList,
+  SettingsRow,
+} from "../settings/settings-ui";
 import { useBridge, useBridgeStatus } from "../../platform/bridge/use-bridge";
 import { workspaceOp } from "../../platform/bridge/workspace-bridge";
 import { useRecoveringRead } from "../../state/use-recovering-read";
@@ -53,15 +70,23 @@ function SkillForm({
   const [body, setBody] = useState(entry?.body ?? "");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [fieldError, setFieldError] = useState<{ field: "name" | "description" | "body"; message: string } | null>(null);
   const save = async () => {
     if (!bridge || bridge.executionIdentity.kind !== "local" || busy) return;
     const parsed = zerosSkillSchema.safeParse({ name, description, body });
     if (!parsed.success) {
-      setError(parsed.error.issues[0]?.message ?? "Check the skill fields.");
+      const issue = parsed.error.issues[0];
+      const field = issue?.path[0];
+      const message = issue?.message ?? "Check the skill fields.";
+      if (field === "name" || field === "description" || field === "body") {
+        setFieldError({ field, message });
+        setError(null);
+      } else setError(message);
       return;
     }
     setBusy(true);
     setError(null);
+    setFieldError(null);
     try {
       await workspaceOp(bridge, "skills.saveZeros", {
         ...parsed.data,
@@ -75,79 +100,77 @@ function SkillForm({
       setBusy(false);
     }
   };
+  const heading = entry ? "Edit skill" : "New skill";
+  const errorFor = (field: "name" | "description" | "body") =>
+    fieldError?.field === field ? fieldError.message : undefined;
   return (
     <form
-      className="flex max-w-2xl flex-col gap-5"
+      className="flex min-w-0 flex-col gap-8"
       onSubmit={(event) => {
         event.preventDefault();
         void save();
       }}
     >
-      <div>
-        <Button type="button" variant="ghost" size="sm" onClick={onBack}>
-          <ArrowLeft className="size-4" /> Skills
-        </Button>
+      {/* The MCP editor's layout: a breadcrumb back, the title with its one
+          action, then one card of fields. */}
+      <div className="flex flex-col gap-3">
+        <nav aria-label="Breadcrumb" className="text-fg3 flex items-center gap-1 text-xs leading-4.5">
+          <Button type="button" variant="ghost" size="compact" onClick={onBack} disabled={busy}>
+            Skills
+          </Button>
+          <ChevronRight className="size-3.5" aria-hidden="true" />
+          <span>{heading}</span>
+        </nav>
+        <div className="flex items-start justify-between gap-3">
+          <h1 className="text-fg1 m-0 text-lg leading-6 font-medium">{heading}</h1>
+          <Button type="submit" variant="primary" loading={busy} disabled={!bridge}>
+            {busy ? "Saving…" : "Save skill"}
+          </Button>
+        </div>
       </div>
-      <h2 className="text-fg1 text-base font-medium">
-        {entry ? "Edit skill" : "New skill"}
-      </h2>
-      <label className="text-fg1 flex flex-col gap-2 text-sm">
-        Name
-        <Input
-          value={name}
-          disabled={Boolean(entry) || busy}
-          onChange={(event) => setName(event.target.value)}
-          placeholder="review-changes"
-          maxLength={64}
-          required
-        />
-      </label>
-      <label className="text-fg1 flex flex-col gap-2 text-sm">
-        When to use it
-        <Input
-          value={description}
-          onChange={(event) => setDescription(event.target.value)}
-          placeholder="Review changes for correctness and missing tests"
-          maxLength={1000}
-          required
-        />
-      </label>
-      <div className="text-fg1 flex flex-col gap-2 text-sm">
-        <label htmlFor={`${formId}-instructions`}>Instructions</label>
-        <Textarea
-          id={`${formId}-instructions`}
-          value={body}
-          onChange={(event) => setBody(event.target.value)}
-          rows={14}
-          maxLength={65536}
-          required
-        />
-      </div>
-      <p className="text-fg2 text-xs">
-        {query.repoRoot
-          ? "Saved privately for this repository and its local workspaces."
-          : "Available to agents in all your local repositories."}{" "}
-        Skills guide the agent using its available tools and permissions. New
-        sessions discover saved skills automatically.
-      </p>
       {error && (
-        <p role="alert" className="text-red-primary text-sm">
+        <MessageRow tone="error" role="alert" flush>
           {error}
-        </p>
+        </MessageRow>
       )}
-      <div className="flex gap-2">
-        <Button type="submit" disabled={!bridge || busy}>
-          {busy ? "Saving…" : "Save skill"}
-        </Button>
-        <Button
-          type="button"
-          variant="secondary"
-          disabled={busy}
-          onClick={onBack}
-        >
-          Cancel
-        </Button>
-      </div>
+      <SettingsGroup
+        title="Skill"
+        description={
+          query.repoRoot
+            ? "For this repository and its local workspaces."
+            : "Available in all your local repositories."
+        }
+      >
+        <Field label="Name" error={errorFor("name")}>
+          <Input
+            value={name}
+            disabled={Boolean(entry) || busy}
+            onChange={(event) => setName(event.target.value)}
+            placeholder="review-changes"
+            maxLength={64}
+            required
+          />
+        </Field>
+        <Field label="When to use it" error={errorFor("description")}>
+          <Input
+            value={description}
+            onChange={(event) => setDescription(event.target.value)}
+            placeholder="Review changes for correctness and missing tests"
+            maxLength={1000}
+            required
+          />
+        </Field>
+        <Field label="Instructions" error={errorFor("body")}>
+          <Textarea
+            id={`${formId}-instructions`}
+            value={body}
+            onChange={(event) => setBody(event.target.value)}
+            rows={14}
+            maxLength={65536}
+            required
+          />
+        </Field>
+      </SettingsGroup>
     </form>
   );
 }
@@ -231,9 +254,10 @@ export function CustomizeExtensionsSection({
   };
   if (!isLocal)
     return (
-      <p className="text-fg2 text-sm">
-        Personal customization is available in a local workspace.
-      </p>
+      <SettingsEmpty
+        title="Skills live in local workspaces"
+        hint="Open a local workspace to edit them."
+      />
     );
   if (editable && editing)
     return (
@@ -244,33 +268,36 @@ export function CustomizeExtensionsSection({
         onSaved={changed}
       />
     );
+  const label = LABELS[query.category];
+  const loadingFirst = read.loading && !read.data;
   return (
     <section
-      className="flex flex-col gap-4"
-      aria-label={`${query.provider} ${LABELS[query.category]}`}
+      className="flex flex-col gap-2"
+      aria-label={`${query.provider} ${label}`}
     >
-      <div className="flex items-center justify-between gap-3">
-        <h2 className="text-fg1 text-sm font-medium">
-          {LABELS[query.category]}
-        </h2>
+      <div className="flex items-end justify-between gap-4 px-0.5">
+        <p className="text-fg3 m-0 text-3xxs leading-4">
+          {editable ? "Agents use these in new chats." : label}
+        </p>
         <Button
           variant="ghost"
-          size="sm"
+          size="compact"
+          className="text-fg2 shrink-0"
           onClick={read.refresh}
           disabled={status !== "connected" || read.loading || read.refreshing}
         >
           {read.refreshing ? "Refreshing…" : "Refresh"}
         </Button>
       </div>
-      {read.data?.note && <p className="text-fg2 text-sm">{read.data.note}</p>}
+      {read.data?.note && <p className="text-fg3 m-0 px-0.5 text-3xxs leading-4">{read.data.note}</p>}
       {read.data?.account && (
-        <p className="text-fg2 text-xs">
+        <p className="text-fg3 m-0 px-0.5 text-3xxs leading-4">
           {query.provider === "codex" ? "Codex" : "Claude"} account:{" "}
           {read.data.account.label}
         </p>
       )}
       {read.data?.sources?.map((source) => (
-        <p key={source.id} className="text-fg2 text-xs">
+        <p key={source.id} className="text-fg3 m-0 px-0.5 text-3xxs leading-4">
           {source.kind === "local"
             ? "This machine"
             : source.kind === "account"
@@ -289,117 +316,92 @@ export function CustomizeExtensionsSection({
           .{source.detail ? ` ${source.detail}` : ""}
         </p>
       ))}
-      {(error || read.error) && (
-        <p role="alert" className="text-red-primary text-sm">
-          {error || read.error?.message}
-        </p>
-      )}
-      {read.data?.warnings.map((warning) => (
-        <p key={warning} className="text-fg2 text-sm">
-          {warning}
-        </p>
-      ))}
-      {status !== "connected" && (
-        <p className="text-fg2 text-sm">
-          Connect to the local engine to load customization.
-        </p>
-      )}
-      {read.loading && !read.data && (
-        <p className="text-fg2 text-sm" role="status">
-          Reading {LABELS[query.category].toLowerCase()}…
-        </p>
-      )}
-      {read.data?.entries.map((entry) => (
-        <div
-          key={entry.id}
-          className="border-border2 flex flex-col gap-2 rounded-md border p-4"
-        >
-          <div className="flex items-start justify-between gap-3">
-            <h3 className="text-fg1 min-w-0 text-sm font-medium break-words">
-              {entry.name}
-            </h3>
-            <span className="text-fg2 shrink-0 text-xs">
-              {STATUS[entry.status]}
-            </span>
-          </div>
-          {entry.description && (
-            <p className="text-fg2 text-sm">{entry.description}</p>
-          )}
-          {entry.statusDetail && (
-            <p className="text-fg2 text-xs">{entry.statusDetail}</p>
-          )}
-          {entry.components?.length ? (
-            <p className="text-fg2 text-xs">
-              Includes {entry.components.join(", ")}
-            </p>
-          ) : null}
-          <p className="text-fg3 text-xs break-all">{entry.sourcePath}</p>
-          {entry.sourceId && (
-            <p className="text-fg3 text-xs">
-              {entry.sourceId === "local"
-                ? "This machine"
-                : "Reported by the provider"}
-            </p>
-          )}
-          {editable && (
-            <div className="flex items-center gap-2">
-              {removing === entry.id ? (
-                <>
-                  <span className="text-fg2 text-xs">Remove this skill?</span>
-                  <Button
-                    size="sm"
-                    variant="secondary"
-                    disabled={busy}
-                    onClick={() => void remove(entry)}
-                  >
-                    Remove
-                  </Button>
-                  <Button
-                    size="sm"
-                    variant="ghost"
-                    onClick={() => setRemoving(null)}
-                  >
-                    Cancel
-                  </Button>
-                </>
-              ) : (
-                <>
-                  <Button
-                    size="sm"
-                    variant="ghost"
-                    onClick={() => setEditing({ entry })}
-                  >
-                    Edit
-                  </Button>
-                  <Button
-                    size="sm"
-                    variant="ghost"
-                    onClick={() => setRemoving(entry.id)}
-                  >
-                    Remove
-                  </Button>
-                </>
+      <SettingsList aria-busy={loadingFirst || undefined}>
+        {status !== "connected" ? (
+          <MessageRow tone="warning" flush>
+            Can’t reach the local engine.
+          </MessageRow>
+        ) : null}
+        {(error || read.error) && (
+          <MessageRow
+            tone="error"
+            role="alert"
+            flush
+            actions={
+              read.error && !error ? (
+                <Button variant="ghost" size="compact" onClick={read.refresh}>
+                  Retry
+                </Button>
+              ) : undefined
+            }
+          >
+            {error || read.error?.message}
+          </MessageRow>
+        )}
+        {read.data?.warnings.map((warning) => (
+          <MessageRow key={warning} tone="warning" flush>
+            {warning}
+          </MessageRow>
+        ))}
+        {loadingFirst && status === "connected" && (
+          <MessageRow tone="pending" role="status" flush>
+            {`Loading ${label.toLowerCase()}…`}
+          </MessageRow>
+        )}
+        {read.data?.entries.map((entry) =>
+          removing === entry.id ? (
+            <SettingsRow key={entry.id} label={entry.name} hint="Remove this skill?">
+              <Button variant="ghost" size="compact" onClick={() => setRemoving(null)}>
+                Cancel
+              </Button>
+              <Button
+                variant="destructive-secondary"
+                size="compact"
+                loading={busy}
+                onClick={() => void remove(entry)}
+              >
+                Remove
+              </Button>
+            </SettingsRow>
+          ) : (
+            <SettingsRow
+              key={entry.id}
+              label={<span className="block truncate">{entry.name}</span>}
+              hint={entry.description ? <span className="line-clamp-1">{entry.description}</span> : undefined}
+            >
+              {/* Status shows only when the skill needs the person. */}
+              {entry.status !== "available" && (
+                <Badge variant={entry.status === "needs-auth" ? "warning" : "neutral"}>
+                  {STATUS[entry.status]}
+                </Badge>
               )}
-            </div>
-          )}
-        </div>
-      ))}
-      {read.data && !read.data.entries.length && (
-        <p className="text-fg2 py-3 text-sm">
-          {editable
-            ? "No Zeros skills in this scope yet."
-            : "No entries reported for this scope."}
-        </p>
-      )}
-      {editable && (
-        <button
-          type="button"
-          onClick={() => setEditing({ entry: null })}
-          className="border-border2 text-fg2 hover:bg-bg2 flex h-24 items-center justify-center gap-2 rounded-md border border-dashed text-sm"
-        >
-          <Plus className="size-4" /> New skill
-        </button>
-      )}
+              {editable && (
+                <DropdownMenu>
+                  <DropdownMenuTrigger asChild>
+                    <IconButton size="compact" label={`More actions for ${entry.name}`} disabled={busy}>
+                      <Ellipsis />
+                    </IconButton>
+                  </DropdownMenuTrigger>
+                  <DropdownMenuContent align="end">
+                    <DropdownMenuItem onSelect={() => setEditing({ entry })}>Edit</DropdownMenuItem>
+                    <DropdownMenuItem variant="destructive" onSelect={() => setRemoving(entry.id)}>
+                      Remove
+                    </DropdownMenuItem>
+                  </DropdownMenuContent>
+                </DropdownMenu>
+              )}
+            </SettingsRow>
+          ),
+        )}
+        {read.data && !read.data.entries.length && (
+          <p className="text-fg2 m-0 text-xs leading-4.5">
+            {editable ? "No skills yet." : "No entries reported for this scope."}
+          </p>
+        )}
+        {editable && (
+          <SettingsAddRow label="New skill" onClick={() => setEditing({ entry: null })} />
+        )}
+      </SettingsList>
     </section>
   );
 }

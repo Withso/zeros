@@ -83,8 +83,8 @@ any new surface, and the rules that can be checked move into
 | 1 | Canvas audit | Every frame renders without breakage in both themes; notes are clear. | Done |
 | 2 | Foundation tokens | The proposed palette and the new feature tokens ship through `styles/tokens`, the contrast contract passes, hand-written copies follow. | Palette done; diff and canvas-label tokens land with their first callers |
 | 3 | Primitives | Every shared component matches its UI components board, with tests. | Done |
-| 4 | Shared patterns | Banner row, message row, empty state, settings group and row, list card row, canvas chip. | Banner, message row, empty state and settings group and row done; the rest land with their pages |
-| 5 | Pages | Each page matches its boards, functional changes included, Local and cloud covered. | Settings done; the rest in order |
+| 4 | Shared patterns | Banner row, message row, empty state, settings group and row, list card row, canvas chip. | All but the canvas chip done; it lands with Design |
+| 5 | Pages | Each page matches its boards, functional changes included, Local and cloud covered. | Settings and Customize done; the rest in order |
 | 6 | Automation | The direction lives in `docs/design-system.md`, checks enforce what structure can, and zstack carries a UI loop that learns from every approved change. | Done; it grows with each page |
 | 7 | Verification | Gates green; harness renders compared with every board in both themes. | Pending |
 | 8 | Canvas final | Every board shows one final UI: the implemented one. | Pending |
@@ -168,7 +168,7 @@ migrated, then the retired names go in the same branch. The specs are in
 | Message row | `shared/ui/primitives/message-row.tsx` | A message inside content: setup checks, card warnings, section errors. |
 | Empty state | `WorkbenchEmptyState` and a shared block | Tab bodies, lists, panels. |
 | Settings group and row | `features/settings/settings-ui.tsx` | Settings, Customize, the web dashboard (CSS twin). |
-| List card row | the settings kit | MCP servers, skills, organization servers, any list of configured things. |
+| List card row | `SettingsRow`, `SettingsAddRow` and `features/agent-extensions/mcp-server-row.tsx` | MCP servers, skills, organization servers, any list of configured things. |
 | Canvas chip | `features/design-workspace` | Every Design canvas readout. |
 
 ## 5. Pages
@@ -269,3 +269,23 @@ Each landed step appends one line: date, workstream, what landed, evidence.
   disconnect"; organization copy says "this organization" rather than the
   sample name; the cloud browser note keeps the shared sentence; the
   simulator setup hint keeps its Xcode path, shared with the Simulators tab.
+- 2026-11-04 · 4, 5 · Customize: the Settings shell (one 640px column, the
+  title with the fixed scope select, MCP servers and Skills as a segmented
+  control), server rows on one shared row (`McpServerRow`: a 48px transport
+  column, status only when a server needs the person, one action, the
+  switch and ⋯ for Edit and Remove), tool lists under the server name,
+  message rows for errors and the tool cap, two skeleton rows while
+  loading, and Add server as the card's last row. Skills are rows in one
+  card with an inline Remove confirm; the Skill form and the MCP editor
+  share a breadcrumb, a title with the primary action and cards of fields.
+  The import and device-login dialogs say one line each. The organization
+  page uses the same shell and rows. `SkeletonLine`, `SettingsAddRow` and
+  `Badge mono` join the kit. The Customize ui-smoke run (form, tools,
+  organization and connection flows) passes against the harness.
+  Decisions: the server name still opens the editor (Edit is also in ⋯),
+  which keeps one-click editing; "No browser?" reads "Sign in without a
+  browser" as a menu item; row controls are one 24px height; the
+  organization subtitle names the organization rather than "Shared with
+  everyone", because the page also holds your own servers, whose add row
+  reads "Add your own server" beside the header's Add server; columns end
+  48px down (the 64px board value is off the spacing scale).

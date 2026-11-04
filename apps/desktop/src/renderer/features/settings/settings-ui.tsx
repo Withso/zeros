@@ -13,7 +13,7 @@
 // ──────────────────────────────────────────────────────────
 
 import React from "react";
-import { Lock } from "lucide-react";
+import { Lock, Plus } from "lucide-react";
 import { cn } from "@/renderer/shared/ui/cn";
 import { badgeVariants } from "@/renderer/shared/ui/primitives/badge";
 import { Button } from "@/renderer/shared/ui/primitives/button";
@@ -106,12 +106,12 @@ export function SettingsGroup({
 export function SettingsList({
   children,
   className,
-}: {
+  ...props
+}: React.HTMLAttributes<HTMLDivElement> & {
   children: React.ReactNode;
-  className?: string;
 }) {
   return (
-    <div className={cn("flex flex-col divide-y", SETTINGS_CARD_LIST_CLS, className)}>
+    <div {...props} className={cn("flex flex-col divide-y", SETTINGS_CARD_LIST_CLS, className)}>
       {children}
     </div>
   );
@@ -207,6 +207,31 @@ export function SettingsField({
 export function SettingsActions({ children }: { children: React.ReactNode }) {
   return (
     <div className="flex items-center justify-end gap-2 pt-1">{children}</div>
+  );
+}
+
+/** The last row of a list card, adding an item: the whole 44px row is the
+ *  target (the card's `[&>*]:py-3` and the button's border make 44), a 14px
+ *  `fg3` plus and 13/18 `fg2` text that lifts to `fg1` on hover. */
+export function SettingsAddRow({
+  label,
+  onClick,
+  disabled,
+}: {
+  label: string;
+  onClick: () => void;
+  disabled?: boolean;
+}) {
+  return (
+    <Button
+      variant="ghost"
+      className="text-fg2 [&_svg]:text-fg3 w-full justify-start gap-2 px-0 hover:bg-transparent"
+      onClick={onClick}
+      disabled={disabled}
+    >
+      <Plus aria-hidden />
+      {label}
+    </Button>
   );
 }
 

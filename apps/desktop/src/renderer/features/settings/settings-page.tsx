@@ -699,7 +699,7 @@ function ScopedSettingsPage({ owner }: { owner: string }) {
                 at the 13px every Settings line uses. */}
             <div
               {...popoverBoundaryProps}
-              className="settings-type-scale mx-auto w-full max-w-160 pb-16"
+              className="settings-type-scale mx-auto w-full max-w-160 pb-12"
             >
               {/* A transient repo-scope selection (legacy deep link) renders
                   nothing for one frame — the redirect effect above re-routes

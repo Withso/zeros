@@ -9,7 +9,8 @@ import { ZerosSpinner } from "../../shared/ui/loading";
 import { MCP_IMPORT_MAX_BYTES, parseMcpConfiguration } from "./mcp-configuration-import";
 import { mcpUrlError, nextKvId, secureDraftFromServer, type Draft, type KV, type OAuthClientMode, type RawServer } from "./mcp-server-model";
 import { McpToolsSection } from "./mcp-tools-section";
-import { SettingsField, SettingsGroup, SettingsRow } from "../settings/settings-ui";
+import { SettingsField, SettingsGroup, SettingsList, SettingsRow } from "../settings/settings-ui";
+import { Badge } from "../../shared/ui/primitives/badge";
 import { mcpDraftError } from "./mcp-form-save";
 import { mcpConnectionView } from "./mcp-connection-view";
 
@@ -49,11 +50,11 @@ export interface McpEditorTarget {
   canShare?: boolean;
 }
 
-const OAUTH_CLIENTS: { value: OAuthClientMode; label: string; description: string }[] = [
-  { value: "auto", label: "Automatic", description: "Use Zeros’ published identity when supported, or register a client automatically." },
-  { value: "metadata", label: "Zeros’ published identity", description: "The server reads Zeros’ public client information. No client credentials to enter." },
-  { value: "dynamic", label: "Register automatically", description: "Register a client with the service when you sign in." },
-  { value: "custom", label: "Your own client", description: "Use an OAuth client you registered with the service." },
+const OAUTH_CLIENTS: { value: OAuthClientMode; label: string }[] = [
+  { value: "auto", label: "Automatic" },
+  { value: "metadata", label: "Zeros’ published identity" },
+  { value: "dynamic", label: "Register automatically" },
+  { value: "custom", label: "Your own client" },
 ];
 
 function Section({ title, description, children }: { title: string; description?: string; children: ReactNode }) {
@@ -77,7 +78,7 @@ function KeyValueFields({ kind, rows, onChange }: { kind: "variable" | "header";
         <Trash2 aria-hidden="true" />
       </IconButton>
     </div>)}
-    <Button variant="secondary" onClick={() => onChange([...rows, { id: nextKvId(), key: "", value: "", secret: true, stored: false }])}>
+    <Button variant="secondary" className="self-center" onClick={() => onChange([...rows, { id: nextKvId(), key: "", value: "", secret: true, stored: false }])}>
       <Plus aria-hidden="true" />Add {kind}
     </Button>
   </div>;
@@ -210,7 +211,6 @@ export function McpServerEditor({ initial, target, onSave, onBack, onSaved = onB
   const checking = connection?.key === probeKey && Boolean(connection.checking);
   const view = mcpConnectionView({ ...initial, transport: draft.transport, auth: draft.auth }, result,
     !connectionChanged ? savedConnection?.status : undefined);
-  const selectedClient = OAUTH_CLIENTS.find(row => row.value === draft.oauthMode) ?? OAUTH_CLIENTS[0];
   const needsSaveToConnect = hasChanges || effectiveDraft.auth !== "oauth";
   const canAuthorize = Boolean(savedConnection?.onConnect && (!readOnly || (!needsSaveToConnect && draft.auth === "oauth")));
 
@@ -262,38 +262,44 @@ export function McpServerEditor({ initial, target, onSave, onBack, onSaved = onB
   }, [connectOnOpen, surfaceActive, target.loading, initial]);
   const connectLabel = view.action === "connect" ? needsSaveToConnect && (hasChanges || !initial) ? "Save & connect" : "Connect"
     : view.label === "Connected" ? "Check connection" : view.tone === "error" ? "Retry" : "Connect";
-  const statusClass = view.tone === "success" ? "text-green-primary" : view.tone === "error" ? "text-red-primary" : view.tone === "warning" ? "text-yellow-primary" : "text-fg1";
-  return <div className="flex min-w-0 flex-col gap-6" {...(!surfaceActive ? { inert: "" } : {})}>
-    <nav aria-label="Breadcrumb" className="text-fg3 flex items-center gap-1 text-xs">
-      <Button variant="ghost" size="compact" onClick={onBack} disabled={busy}>MCP</Button><ChevronRight className="size-3.5" aria-hidden="true" />
-      <span>{initial ? "Edit server" : "Add server"}</span>
-    </nav>
-    <div className="bg-bg1 sticky top-0 z-1 flex flex-wrap items-start justify-between gap-3 py-3">
-      <div className="flex flex-col gap-1"><h1 className="text-fg1 m-0 text-lg font-medium">{initial ? "Edit MCP server" : "Add MCP server"}</h1>
-        <p className="text-fg2 m-0 text-xs">Connect tools and services your agents can use.</p></div>
-      {!readOnly && <Button variant="primary" onClick={() => void save()} disabled={busy || target.loading || savedConnection?.connecting}>
-        {busy && <ZerosSpinner className="size-3.5" />}{initial ? "Save changes" : "Add server"}</Button>}
+  // The server list's badges: Sign-in required, Signing in…, Connected,
+  // Connection failed; neutral otherwise.
+  const statusBadge = savedConnection?.connecting
+    ? <Badge variant="neutral"><ZerosSpinner size={12} label="Signing in" />Signing in…</Badge>
+    : <Badge variant={view.tone === "success" ? "success" : view.tone === "error" ? "failure" : view.tone === "warning" ? "warning" : "neutral"}>{view.label}</Badge>;
+  return <div className="flex min-w-0 flex-col gap-8" {...(!surfaceActive ? { inert: "" } : {})}>
+    <div className="flex flex-col gap-3">
+      <nav aria-label="Breadcrumb" className="text-fg3 flex items-center gap-1 text-xs leading-4.5">
+        <Button variant="ghost" size="compact" onClick={onBack} disabled={busy}>MCP</Button><ChevronRight className="size-3.5" aria-hidden="true" />
+        <span>{initial ? "Edit server" : "Add server"}</span>
+      </nav>
+      <div className="bg-bg1 sticky top-0 z-1 flex flex-wrap items-start justify-between gap-3">
+        <h1 className="text-fg1 m-0 text-lg leading-6 font-medium">{initial ? "Edit MCP server" : "Add MCP server"}</h1>
+        {!readOnly && <Button variant="primary" onClick={() => void save()} loading={busy} disabled={target.loading || savedConnection?.connecting}>
+          {initial ? "Save changes" : "Add server"}</Button>}
+      </div>
     </div>
     {(initial || canProbe) && <Section title="Connection">
-      <SelectRow label={<span className={statusClass} role="status" aria-live="polite">{savedConnection?.connecting ? "Connecting…" : view.label}</span>}
-        hint={savedConnection?.connecting ? "Finish signing in in your browser. You can cancel and try again."
-          : checking ? <span className="flex items-center gap-2"><ZerosSpinner className="size-3.5" />Checking connection…</span>
-            : view.action === "connect" && !canAuthorize ? "Ask the server’s owner to enable sign-in for this connection." : view.hint}>
-        {savedConnection?.connecting ? <Button variant="secondary" onClick={savedConnection.onCancel}>Cancel</Button>
-          : view.action && (view.action !== "connect" || canAuthorize) && <Button variant="secondary" disabled={busy || checking || !canProbe || Boolean(target.loading && !initial)} onClick={runConnection}>{connectLabel}</Button>}
+      <SelectRow label="Status"
+        hint={<span role="status" aria-live="polite">{savedConnection?.connecting ? "Finish signing in in your browser."
+          : checking ? "Checking connection…"
+            : view.action === "connect" && !canAuthorize ? "Ask the server’s owner to enable sign-in for this connection." : view.hint}</span>}>
+        {statusBadge}
+        {savedConnection?.connecting ? <Button variant="secondary" size="compact" onClick={savedConnection.onCancel}>Cancel</Button>
+          : view.action && (view.action !== "connect" || canAuthorize) && <Button variant="secondary" size="compact" loading={checking} disabled={busy || !canProbe || Boolean(target.loading && !initial)} onClick={runConnection}>{connectLabel}</Button>}
       </SelectRow>
       {result && <div><ConnectionDetails result={result} /></div>}
     </Section>}
     <fieldset disabled={busy || readOnly || savedConnection?.connecting} className="m-0 flex min-w-0 flex-col gap-6 border-0 p-0">
       <Section title="Server">
         <Field label="Name" htmlFor={`${id}-name`}><Input id={`${id}-name`} autoFocus value={draft.name} onChange={event => set("name", event.target.value)} placeholder="e.g. context7" className="text-fg1 font-sans text-xs" autoComplete="off" /></Field>
-        <SelectRow label="Owner" hint={target.organization ? target.owner === "organization" ? "Shared with members of this organisation." : "Only you can use this server in this organisation." : "Available to you on this device."}>
+        <SelectRow label="Owner" hint={target.organization ? target.owner === "organization" ? "Shared with members of this organisation." : "Only you can use this server in this organisation." : undefined}>
           {target.organization && target.onOwnerChange ? <Select value={target.owner} onValueChange={value => target.onOwnerChange?.(value as "organization" | "user")}>
             <SelectTrigger aria-label="Owner" className="min-w-40"><SelectValue /></SelectTrigger><SelectContent>
               <SelectItem value="organization" disabled={!target.canShare}>Organisation</SelectItem><SelectItem value="user">You</SelectItem>
             </SelectContent></Select> : <span className="text-fg2 text-xs">{target.organization && target.owner === "organization" ? "Organisation" : "You"}</span>}
         </SelectRow>
-        <SelectRow label="Project" hint="Use in all projects, or only one.">
+        <SelectRow label="Project">
           {target.onProjectChange ? <Select value={target.project} onValueChange={target.onProjectChange} disabled={target.loading}>
             <SelectTrigger aria-label="Project" className="min-w-40 max-w-full"><SelectValue /></SelectTrigger><SelectContent>
               <SelectItem value="all">All projects</SelectItem>{target.projects.map(project => <SelectItem value={project.value} key={project.value}>{project.label}</SelectItem>)}
@@ -302,7 +308,7 @@ export function McpServerEditor({ initial, target, onSave, onBack, onSaved = onB
         </SelectRow>
       </Section>
       <Section title="Runtime">
-        <SelectRow label="Transport" hint={draft.transport === "stdio" ? "Run a command where the agent runs." : "Connect to a remote MCP server."}>
+        <SelectRow label="Transport">
           <Select value={draft.transport} onValueChange={value => set("transport", value as "stdio" | "http")}>
             <SelectTrigger aria-label="Transport" className="min-w-40"><SelectValue>{draft.transport === "sse" ? "Legacy SSE" : undefined}</SelectValue></SelectTrigger>
             <SelectContent><SelectItem value="stdio">STDIO</SelectItem><SelectItem value="http">Streamable HTTP</SelectItem></SelectContent>
@@ -313,25 +319,25 @@ export function McpServerEditor({ initial, target, onSave, onBack, onSaved = onB
           <Field label="Arguments"><div className="flex flex-col gap-2">{args.map((row, index) => <div className="flex items-center gap-2" key={row.id}>
             <Input aria-label={`Argument ${index + 1}`} value={row.value} onChange={event => setArgs(current => current.map(entry => entry.id === row.id ? { ...entry, value: event.target.value } : entry))} placeholder={index === 0 ? "--yes" : "Argument"} className="text-fg1 min-w-0 font-sans text-xs" spellCheck={false} />
             <IconButton size="standard" label={`Remove argument ${index + 1}`} onClick={() => setArgs(current => current.filter(entry => entry.id !== row.id))}><Trash2 aria-hidden="true" /></IconButton>
-          </div>)}<Button variant="secondary" onClick={() => setArgs(current => [...current, { id: nextKvId(), value: "" }])}><Plus aria-hidden="true" />Add argument</Button></div></Field>
-          <Field label="Working directory" htmlFor={`${id}-cwd`} hint="Optional. Relative paths start at the workspace folder."><Input id={`${id}-cwd`} value={draft.cwd} onChange={event => set("cwd", event.target.value)} placeholder="Workspace folder" className="text-fg1 font-sans text-xs" spellCheck={false} /></Field>
-          <Field label="Also listens on" htmlFor={`${id}-listen`} hint="Optional. Use this local HTTP endpoint after launching the command."><Input id={`${id}-listen`} value={draft.listenUrl ?? ""} onChange={event => set("listenUrl", event.target.value)} placeholder="http://127.0.0.1:8080/mcp" className="text-fg1 font-sans text-xs" spellCheck={false} /></Field>
+          </div>)}<Button variant="secondary" className="self-center" onClick={() => setArgs(current => [...current, { id: nextKvId(), value: "" }])}><Plus aria-hidden="true" />Add argument</Button></div></Field>
+          <Field label="Working directory" htmlFor={`${id}-cwd`} hint="Optional. Relative to the workspace."><Input id={`${id}-cwd`} value={draft.cwd} onChange={event => set("cwd", event.target.value)} placeholder="Workspace folder" className="text-fg1 font-sans text-xs" spellCheck={false} /></Field>
+          <Field label="Also listens on" htmlFor={`${id}-listen`} hint="Optional local HTTP endpoint."><Input id={`${id}-listen`} value={draft.listenUrl ?? ""} onChange={event => set("listenUrl", event.target.value)} placeholder="http://127.0.0.1:8080/mcp" className="text-fg1 font-sans text-xs" spellCheck={false} /></Field>
         </> : <Field label="URL" htmlFor={`${id}-url`}><Input id={`${id}-url`} value={draft.url} onChange={event => set("url", event.target.value)} placeholder="https://mcp.example.com/mcp" className="text-fg1 font-sans text-xs" spellCheck={false} autoComplete="off" /></Field>}
       </Section>
       {draft.transport !== "stdio" && <Section title="Authentication">
-        <SelectRow label="Method" hint={draft.auth === "oauth" ? "Connect your account through the service’s sign-in page." : draft.auth === "header" ? "Send an API key or token in request headers." : "Connect without credentials."}>
+        <SelectRow label="Method">
           <Select value={draft.auth} onValueChange={value => set("auth", value as Draft["auth"])}>
             <SelectTrigger aria-label="Authentication" className="min-w-40"><SelectValue /></SelectTrigger>
             <SelectContent><SelectItem value="oauth">Sign in</SelectItem><SelectItem value="header">API key</SelectItem><SelectItem value="none">No sign-in</SelectItem></SelectContent>
           </Select>
         </SelectRow>
-        {(draft.auth === "header" || (draft.auth === "oauth" && draft.headers.length > 0)) && <Field label="Headers" hint="Values are stored securely. Use ${NAME} to reference a variable.">
+        {(draft.auth === "header" || (draft.auth === "oauth" && draft.headers.length > 0)) && <Field label="Headers" hint="Stored securely. Use ${NAME} for a variable.">
           <KeyValueFields kind="header" rows={draft.headers} onChange={rows => set("headers", rows)} />
         </Field>}
         {draft.auth === "oauth" && <Collapsible open={clientExpanded} onOpenChange={setClientExpanded}>
           <CollapsibleTrigger asChild><Button variant="ghost" className="text-fg2 group px-0">Advanced sign-in options<ChevronRight className="group-data-[state=open]:rotate-90" aria-hidden="true" /></Button></CollapsibleTrigger>
           <CollapsibleContent className="pt-3"><div className="flex flex-col gap-3">
-            <SelectRow label="OAuth client" hint={selectedClient.description}>
+            <SelectRow label="OAuth client">
               <Select value={draft.oauthMode ?? "auto"} onValueChange={value => set("oauthMode", value as OAuthClientMode)}>
                 <SelectTrigger aria-label="OAuth client" className="min-w-40"><SelectValue /></SelectTrigger>
                 <SelectContent>{OAUTH_CLIENTS.map(client => <SelectItem value={client.value} key={client.value}>{client.label}</SelectItem>)}</SelectContent>
@@ -342,17 +348,17 @@ export function McpServerEditor({ initial, target, onSave, onBack, onSaved = onB
               <Field label="Client secret" htmlFor={`${id}-secret`}><Input id={`${id}-secret`} type="password" autoComplete="new-password" value={draft.oauthClientSecret} onChange={event => { set("oauthClientSecret", event.target.value); set("clearOAuthClientSecret", false); }} placeholder={initial ? "Leave blank to keep saved value" : "Optional"} className="text-fg1 font-sans text-xs" /></Field>
               {initial && <Button variant="ghost" onClick={() => { set("clearOAuthClientSecret", !draft.clearOAuthClientSecret); set("oauthClientSecret", ""); }}>{draft.clearOAuthClientSecret ? "Keep saved client secret" : "Remove saved client secret"}</Button>}
             </>}
-            <Field label="Scopes" htmlFor={`${id}-scopes`} hint="Optional permissions, separated by spaces."><Input id={`${id}-scopes`} value={draft.oauthScopes} onChange={event => set("oauthScopes", event.target.value)} placeholder="Service defaults" className="text-fg1 font-sans text-xs" spellCheck={false} /></Field>
+            <Field label="Scopes" htmlFor={`${id}-scopes`} hint="Optional, space-separated."><Input id={`${id}-scopes`} value={draft.oauthScopes} onChange={event => set("oauthScopes", event.target.value)} placeholder="Service defaults" className="text-fg1 font-sans text-xs" spellCheck={false} /></Field>
           </div></CollapsibleContent>
         </Collapsible>}
       </Section>}
-      <Section title="Variables" description={draft.transport === "stdio" ? "Environment variables for this process. Values are stored securely." : "Optional values you can reference in headers with ${NAME}."}>
+      <Section title="Variables" description={draft.transport === "stdio" ? "Stored securely." : "Use in headers as ${NAME}."}>
         <div><KeyValueFields kind="variable" rows={draft.env} onChange={rows => set("env", rows)} /></div>
       </Section>
       <Collapsible open={importOpen} onOpenChange={setImportOpen}>
         <CollapsibleTrigger asChild><Button variant="ghost" className="text-fg2 px-0"><span>Import a configuration</span>{importOpen ? <ChevronDown aria-hidden="true" /> : <ChevronRight aria-hidden="true" />}</Button></CollapsibleTrigger>
-        <CollapsibleContent className="pt-3"><Section title="Import">
-          <Field label="Configuration" htmlFor={`${id}-import`} hint="Paste MCP JSON, Codex TOML, a URL, or a command. You can also drop a configuration file.">
+        <CollapsibleContent className="pt-3"><SettingsList>
+          <Field label="Configuration" htmlFor={`${id}-import`} hint="MCP JSON, Codex TOML, a URL or a command. Or drop a file.">
             <Textarea id={`${id}-import`} rows={6} value={importText} onChange={event => { importGeneration.current++; setImportText(event.target.value); }}
               placeholder={'{ "mcpServers": { … } } or npx -y my-mcp-server'} className="text-fg1 font-sans text-xs" spellCheck={false}
               onDragOver={event => { if (event.dataTransfer.types.includes("Files")) event.preventDefault(); }}
@@ -361,10 +367,10 @@ export function McpServerEditor({ initial, target, onSave, onBack, onSaved = onB
           {candidates.length > 1 && <div><Select value={candidateIndex} onValueChange={value => { setCandidateIndex(value); fill(candidates[Number(value)]); }}>
             <SelectTrigger aria-label="Server to import"><SelectValue /></SelectTrigger><SelectContent>{candidates.map((server, index) => <SelectItem value={String(index)} key={index}>{String(server.name)}</SelectItem>)}</SelectContent>
           </Select></div>}
-          <div className="flex items-center justify-between gap-3"><Input ref={fileInput} type="file" className="sr-only" tabIndex={-1} accept=".json,.toml,.txt" aria-label="Configuration file" onChange={event => { const file = event.target.files?.[0]; if (file) void readFile(file); event.target.value = ""; }} />
+          <div className="flex items-center justify-end gap-2"><Input ref={fileInput} type="file" className="sr-only" tabIndex={-1} accept=".json,.toml,.txt" aria-label="Configuration file" onChange={event => { const file = event.target.files?.[0]; if (file) void readFile(file); event.target.value = ""; }} />
             <Button variant="ghost" onClick={() => fileInput.current?.click()}><FileUp aria-hidden="true" />Choose file</Button>
             <Button variant="secondary" disabled={!importText.trim()} onClick={parse}>Parse</Button></div>
-        </Section></CollapsibleContent>
+        </SettingsList></CollapsibleContent>
       </Collapsible>
     </fieldset>
     {(initial || tools !== undefined) && <McpToolsSection key={configurationKey} tools={tools} disabledTools={draft.disabledTools ?? []}

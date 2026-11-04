@@ -3,9 +3,6 @@
   "exceptions": [],
   "debt": {
     "arbitrary-value": {
-      "apps/desktop/src/renderer/features/agent-extensions/customize-page.tsx": {
-        "pl-[clamp(1.5rem,5vw,6.25rem)]": 1
-      },
       "apps/desktop/src/renderer/features/agent/agent-chat.tsx": {
         "z-[5]": 1,
         "z-[6]": 1
@@ -247,12 +244,6 @@
       }
     },
     "off-scale-spacing": {
-      "apps/desktop/src/renderer/features/agent-extensions/customize-mcp.tsx": {
-        "ml-9": 1
-      },
-      "apps/desktop/src/renderer/features/agent-extensions/customize-page.tsx": {
-        "pb-16": 1
-      },
       "apps/desktop/src/renderer/features/repositories/repo-page.tsx": {
         "pb-16": 1,
         "py-16": 1
@@ -267,8 +258,7 @@
         "pr-9": 1
       },
       "apps/desktop/src/renderer/features/settings/settings-page.tsx": {
-        "gap-9": 1,
-        "pb-16": 1
+        "gap-9": 1
       },
       "apps/desktop/src/renderer/shell/dialogs/add-local-project.tsx": {
         "pl-5.5": 2
@@ -284,16 +274,10 @@
       }
     },
     "raw-control": {
-      "apps/desktop/src/renderer/features/agent-extensions/customize-extensions.tsx": {
-        "button": 1
-      },
       "apps/desktop/src/renderer/features/agent-extensions/customize-mcp.tsx": {
-        "button": 2
+        "button": 1
       },
       "apps/desktop/src/renderer/features/agent-extensions/customize-page.tsx": {
-        "button": 1
-      },
-      "apps/desktop/src/renderer/features/agent-extensions/mcp-import-dialog.tsx": {
         "button": 1
       },
       "apps/desktop/src/renderer/features/agent/agent-chat.tsx": {
@@ -516,9 +500,6 @@
       }
     },
     "stock-shadow": {
-      "apps/desktop/src/renderer/features/agent-extensions/customize-page.tsx": {
-        "shadow-xs": 1
-      },
       "apps/desktop/src/renderer/features/agent/agent-chat.tsx": {
         "shadow-xs": 1
       },

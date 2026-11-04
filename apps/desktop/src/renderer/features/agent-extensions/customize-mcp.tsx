@@ -28,21 +28,11 @@ import React, {
   useState,
   useSyncExternalStore,
 } from "react";
-import { IconButton } from "@/renderer/shared/ui/primitives/icon-button";
-import {
-  AlertTriangle,
-  ChevronDown,
-  Download,
-  LogIn,
-  Pencil,
-  Plus,
-  Trash2,
-} from "lucide-react";
-
 import { Button, Input } from "../../shared/ui";
-import { Switch } from "../../shared/ui/primitives/switch";
+import { Badge } from "../../shared/ui/primitives/badge";
+import { MessageRow } from "../../shared/ui/primitives/message-row";
+import { SkeletonLine } from "../../shared/ui/primitives/skeleton";
 import { Tooltip } from "@/renderer/shared/ui/primitives";
-import { cn } from "@/renderer/shared/ui/cn";
 import { toast } from "../../shared/ui/primitives/elements";
 import {
   Dialog,
@@ -71,7 +61,7 @@ import {
   type GatewayBackendStatusWire,
 } from "../../platform/bridge/workspace-bridge";
 import { primeSettingsLayer, useSettingsLayer } from "../settings/use-settings";
-import { SettingsSection, SETTINGS_CARD_LIST_CLS, SETTINGS_GROUP_RADIUS } from "../settings/settings-ui";
+import { SettingsAddRow, SettingsGroup, SettingsList } from "../settings/settings-ui";
 import {
   asString,
   disabledToolsOf,
@@ -90,11 +80,7 @@ import { useCachedRead } from "../../state/use-cached-read";
 import { mcpGatewayStatusCache, mcpGatewayStatusKey } from "../../state/read-caches";
 import { shouldUseHeadlessMcpAuth } from "./mcp-auth-flow";
 import { mcpConnectionView } from "./mcp-connection-view";
-
-// The filled-card recipe the Models settings page uses — rows separated by
-// hairline dividers inside one rounded `--bg1-highlight` surface.
-export const MCP_CARD_CLS =
-  `${SETTINGS_CARD_LIST_CLS} ${SETTINGS_GROUP_RADIUS} flex flex-col divide-y`;
+import { McpServerRow, McpToolCount, McpToolList } from "./mcp-server-row";
 
 /** Friendly label for a settings layer (the source badge). */
 const LAYER_LABEL: Record<string, string> = {
@@ -160,14 +146,13 @@ export function HeadlessAuthModal({
         <DialogHeader>
           <DialogTitle>Sign in to {state?.server}</DialogTitle>
           <DialogDescription>
-            Open the sign-in URL in a browser, authorize access, then paste
-            the code or redirect URL below.
+            Authorize in your browser, then paste the code or redirect URL.
           </DialogDescription>
         </DialogHeader>
         <DialogBody>
           <div className="flex flex-col gap-4">
             <div className="flex flex-col gap-1.5">
-              <label htmlFor={`${id}-url`} className="text-fg1 text-xs font-medium">
+              <label htmlFor={`${id}-url`} className="text-fg1 text-xs leading-4.5 font-medium">
                 Authorization URL
               </label>
               <div className="flex gap-2">
@@ -175,7 +160,6 @@ export function HeadlessAuthModal({
                   id={`${id}-url`}
                   readOnly
                   value={state?.url ?? ""}
-                  className="font-sans text-xs"
                   onFocus={(e) => e.currentTarget.select()}
                 />
                 <Button
@@ -195,7 +179,7 @@ export function HeadlessAuthModal({
               </div>
             </div>
             <div className="flex flex-col gap-1.5">
-              <label htmlFor={`${id}-code`} className="text-fg1 text-xs font-medium">
+              <label htmlFor={`${id}-code`} className="text-fg1 text-xs leading-4.5 font-medium">
                 Code or redirect URL
               </label>
               <Input
@@ -212,26 +196,21 @@ export function HeadlessAuthModal({
                   }
                 }}
                 placeholder="code=… or the full …/callback?code=… URL"
-                className="font-sans text-xs"
                 autoFocus
               />
-              <p className="text-fg2 text-xs">
-                Paste what the browser shows after you authorize.
-              </p>
             </div>
           </div>
         </DialogBody>
         <DialogFooter>
-          <Button variant="ghost" size="sm" onClick={onCancel}>
+          <Button variant="ghost" onClick={onCancel}>
             Cancel
           </Button>
           <Button
             variant="primary"
-            size="sm"
-            disabled={!code.trim() || busy}
+            loading={busy}
+            disabled={!code.trim()}
             onClick={() => onComplete(code.trim())}
           >
-            {busy && <ZerosSpinner size={16} tone="inverted" />}
             Finish sign-in
           </Button>
         </DialogFooter>
@@ -289,155 +268,95 @@ function ServerRow({
   const canExpand =
     st === "connected" && allTools.length > 0 && !!gateway?.onToolToggle;
   const [showTools, setShowTools] = useState(false);
-  const chipCls = cn(
-    "inline-flex select-none items-center gap-1 text-xs",
-    view.tone === "error" ? "text-red-primary" : view.tone === "success" ? "text-green-primary" : "text-fg2",
-  );
-  const chipText = view.label;
+  const blocked = busy || !!gateway?.signInBlocked;
+  const detail = gwDown ? gateway?.error ?? undefined : gateway?.status?.detail;
+  // Status shows only when the server needs the person: Connected, Starts
+  // with agent and Disabled are normal states and the switch says Disabled.
+  const tone = gateway?.signingIn ? null
+    : view.tone === "warning" ? "warning" as const
+      : view.tone === "error" ? "failure" as const
+        : view.label === "Needs connection" ? "neutral" as const : null;
+  const status = gateway?.signingIn ? (
+    <Badge variant="neutral">
+      <ZerosSpinner size={12} label="Signing in" />
+      Signing in…
+    </Badge>
+  ) : tone ? (
+    <Tooltip label={detail}>
+      <Badge variant={tone}>{view.label}</Badge>
+    </Tooltip>
+  ) : null;
+  // One action. A sign-in server connects in the browser; others open the
+  // editor to check the connection. While signing in, only Cancel.
+  const action = gateway?.signingIn ? (
+    <Button variant="secondary" size="compact" onClick={gateway.onCancel}>
+      Cancel
+    </Button>
+  ) : view.action && view.label !== "Connected" ? (
+    isOauth && gateway && view.action === "connect" ? (
+      <Button
+        variant="secondary"
+        size="compact"
+        onClick={gateway.onSignIn}
+        disabled={blocked}
+      >
+        Connect
+      </Button>
+    ) : (
+      <Button
+        variant="secondary"
+        size="compact"
+        disabled={blocked}
+        onClick={gateway && view.tone === "error" ? gateway.onReconnect : onConnect}
+      >
+        {view.tone === "error" ? "Retry" : "Connect"}
+      </Button>
+    )
+  ) : null;
+  const headless =
+    isOauth && enabled && gateway?.onBeginHeadless && !gwDown && st === "needs-auth"
+      ? gateway.onBeginHeadless
+      : undefined;
   return (
-    <div className="flex flex-col gap-2 py-3.5">
-      <div className="flex flex-wrap items-center justify-between gap-3">
-        <Button
-          variant="ghost"
-          onClick={onEdit}
-          disabled={busy}
-          className="h-auto min-w-0 flex-1 justify-start gap-2.5 px-0 py-1 text-left"
-          aria-label={`Edit ${name}`}
-        >
-          <span className="border-border1 text-fg2 shrink-0 rounded-sm border px-1.5 py-px text-xs font-medium select-none">
-            {transportOf(server)}
-          </span>
-          <span className="min-w-0">
-            <span className="flex items-center gap-1.5">
-              <span className="text-fg1 truncate text-xs font-medium">
-                {name}
-              </span>
-
-            </span>
-            <span className="text-fg2 block truncate text-xs">
-              {description || (
-                <span className="font-mono">{endpointSummary(server)}</span>
-              )}
-            </span>
-          </span>
-        </Button>
-        <div className="flex shrink-0 items-center gap-1.5">
-          {
-            (canExpand ? (
-              <Tooltip label="Show tools">
-                <Button
-                  variant="ghost"
-                  onClick={() => setShowTools((v) => !v)}
-                  className={cn(chipCls, "hover:text-fg1")}
-                  aria-expanded={showTools}
-                >
-                  {chipText}
-                  <ChevronDown
-                    className={cn(
-                      "size-3 transition-transform",
-                      showTools && "rotate-180",
-                    )}
-                    aria-hidden="true"
-                  />
-                </Button>
-              </Tooltip>
-            ) : (
-              <Tooltip
-                label={
-                  gwDown
-                    ? (gateway?.error ?? undefined)
-                    : gateway?.status?.detail
-                }
-              >
-                <span className={chipCls}>{chipText}</span>
-              </Tooltip>
-            ))}
-          {isOauth && gateway && view.action === "connect" && (
-            <Button
-              variant="secondary"
-              size="sm"
-              onClick={gateway.onSignIn}
-              disabled={gateway.signInBlocked || busy}
-            >
-              {gateway.signingIn ? (
-                <ZerosSpinner size={16} />
-              ) : (
-                <LogIn className="size-3.5" aria-hidden="true" />
-              )}
-              Connect
-            </Button>
-          )}
-          {
-            isOauth &&
-            enabled &&
-            gateway?.onBeginHeadless &&
-            !gwDown &&
-            st === "needs-auth" && (
-              <Tooltip label="Device login">
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  className="text-fg2 hover:text-fg1 px-1.5 text-xs"
-                  onClick={gateway.onBeginHeadless}
-                  disabled={gateway.signInBlocked || busy}
-                >
-                  No browser?
-                </Button>
-              </Tooltip>
-            )}
-          { gateway?.signingIn && <Button variant="ghost" size="sm" onClick={gateway.onCancel}>Cancel</Button>}
-          {view.action && view.label !== "Connected" && !(isOauth && gateway && view.action === "connect") && (
-            <Button variant="secondary" disabled={busy || gateway?.signInBlocked} onClick={gateway && view.tone === "error" ? gateway.onReconnect : onConnect}>
-              {view.tone === "error" ? "Retry" : "Connect"}
-            </Button>
-          )}
-          <Switch
-            checked={enabled}
-            onCheckedChange={onToggle}
-            disabled={busy || gateway?.signInBlocked}
-            aria-label={enabled ? "Disable server" : "Enable server"}
-            className="mr-1"
+    <McpServerRow
+      transport={transportOf(server)}
+      name={name}
+      hint={description || endpointSummary(server)}
+      hintMono={!description}
+      status={status}
+      action={action}
+      tools={
+        canExpand ? (
+          <McpToolCount
+            count={allTools.length}
+            open={showTools}
+            onToggle={() => setShowTools((value) => !value)}
           />
-          <IconButton
-            size="standard"
-            onClick={onEdit}
-            disabled={busy || gateway?.signInBlocked}
-            label="Edit server"
-          >
-            <Pencil className="size-3.5" aria-hidden="true" />
-          </IconButton>
-          <IconButton
-            size="standard"
-            onClick={onRemove}
-            disabled={busy || gateway?.signInBlocked}
-            className="text-fg2 hover:bg-red-primary/10 hover:text-red-primary"
-            label="Remove server"
-          >
-            <Trash2 className="size-3.5" aria-hidden="true" />
-          </IconButton>
-        </div>
-      </div>
-      {showTools && canExpand && (
-        <div className="border-border1 ml-9 flex max-h-64 flex-col gap-1 overflow-y-auto rounded-md border p-2">
-          {allTools.map((t) => (
-            <label
-              key={t}
-              className="flex items-center justify-between gap-3 py-0.5"
-            >
-              <span className="text-fg1 truncate font-mono text-xs">{t}</span>
-              <Switch
-                checked={!disabledSet.has(t)}
-                onCheckedChange={(on) => gateway?.onToolToggle?.(t, !on)}
-                disabled={busy}
-                aria-label={
-                  disabledSet.has(t) ? `Enable tool ${t}` : `Disable tool ${t}`
-                }
-              />
-            </label>
-          ))}
-        </div>
-      )}
-    </div>
+        ) : undefined
+      }
+      toggle={{ checked: enabled, onCheckedChange: onToggle, disabled: blocked }}
+      onOpen={{ label: `Edit ${name}`, onClick: onEdit, disabled: busy }}
+      menu={{
+        disabled: blocked,
+        items: [
+          { label: "Edit", onSelect: onEdit },
+          ...(headless
+            ? [{ label: "Sign in without a browser", onSelect: headless }]
+            : []),
+          { label: "Remove", onSelect: onRemove, destructive: true },
+        ],
+      }}
+    >
+      {showTools && canExpand ? (
+        <McpToolList
+          server={name}
+          tools={allTools}
+          isOn={(tool) => !disabledSet.has(tool)}
+          onToggle={(tool, on) => gateway?.onToolToggle?.(tool, !on)}
+          disabled={busy}
+        />
+      ) : null}
+    </McpServerRow>
   );
 }
 
@@ -459,61 +378,37 @@ function InheritedServerRow({
       : `${composed.command ?? ""} ${(composed.args ?? []).join(" ")}`.trim() ||
         "(no command)";
   return (
-    <div className="flex items-center justify-between gap-4 py-3 opacity-80">
-      <div className="flex min-w-0 items-center gap-2.5">
-        <span className="border-border1 text-fg2 rounded-sm border px-1.5 py-px text-xs font-medium select-none">
-          {composed.transport}
-        </span>
-        <div className="min-w-0">
-          <div className="flex items-center gap-1.5">
-            <span className="text-fg1 truncate text-sm">{composed.name}</span>
-            <span className="border-border1 text-xxs text-fg2 shrink-0 rounded-sm border px-1 py-px font-medium select-none">
-              {layerLabel(composed.source)}
-            </span>
-          </div>
-          <div className="text-fg2 truncate font-mono text-xs">{endpoint}</div>
-        </div>
-      </div>
-      <Tooltip label="Copy server">
+    <McpServerRow
+      transport={composed.transport}
+      name={composed.name}
+      hint={endpoint}
+      hintMono
+      dimmed
+      status={<Badge variant="neutral">{layerLabel(composed.source)}</Badge>}
+      trailing={
         <Button
           variant="secondary"
-          size="sm"
+          size="compact"
           onClick={onOverride}
           disabled={busy}
         >
           Override here
         </Button>
-      </Tooltip>
-    </div>
+      }
+    />
   );
 }
 
-/** The always-present creation affordance — doubles as the empty state. */
-function NewServerCard({
-  onClick,
-  disabled,
-}: {
-  onClick: () => void;
-  disabled: boolean;
-}) {
+/** Two quiet rows while the list first loads. */
+function SkeletonRows() {
   return (
-    <button
-      type="button"
-      onClick={onClick}
-      disabled={disabled}
-      className="bg-bg1-highlight hover:bg-bg2 flex w-full items-center gap-3 rounded-lg px-4 py-3.5 text-left transition-colors disabled:pointer-events-none disabled:opacity-50"
-    >
-      <span
-        className="bg-bg2-hover text-fg2 flex size-8 shrink-0 items-center justify-center rounded-md"
-        aria-hidden="true"
-      >
-        <Plus className="size-4" />
-      </span>
-      <span className="flex min-w-0 flex-col">
-        <span className="text-fg1 text-sm font-medium">New MCP server</span>
-        <span className="text-fg2 text-xs">Add a custom MCP server</span>
-      </span>
-    </button>
+    <>
+      {["46%", "34%"].map((width) => (
+        <div key={width} aria-hidden className="flex h-5 items-center">
+          <SkeletonLine style={{ width }} />
+        </div>
+      ))}
+    </>
   );
 }
 
@@ -811,128 +706,108 @@ export function CustomizeMcpSection({
     );
 
   const scopeBlurb = isUser
-    ? "Connect tools and services across your local projects. Changes apply to new chats."
-    : `MCP servers for ${scope.kind === "repo" ? scope.project.name : "this repo"} and its local workspaces. Saved privately on this device; changes apply to new chats here.`;
+    ? "Changes apply to new chats."
+    : `For ${scope.kind === "repo" ? scope.project.name : "this repository"} only. Changes apply to new chats.`;
+
+  const toolLine = `${gwToolTotal} ${gwToolTotal === 1 ? "tool" : "tools"} on · Cursor allows about 40.`;
 
   return (
-    <div className="flex flex-col gap-4" {...(!surfaceActive ? { inert: "" } : {})}>
-      <SettingsSection
-        title="MCP servers"
-        description={scopeBlurb}
-        action={
-          isUser ? (
-            <Tooltip label="Import servers">
-              <Button
-                variant="secondary"
-                size="sm"
-                className="shrink-0"
-                onClick={() => setImporting(true)}
-              >
-                <Download className="size-3.5" aria-hidden="true" />
-                Import
-              </Button>
-            </Tooltip>
-          ) : undefined
-        }
-      >
-        {gwToolTotal > 0 && (
-          <p
-            className={cn(
-              "text-xs",
-              gwToolTotal > 40 ? "text-red-primary" : "text-fg2",
-            )}
-          >
-            {gwToolTotal} gateway tool{gwToolTotal === 1 ? "" : "s"} enabled
-            {gwToolTotal > 40
-              ? " — over Cursor's ~40-tool cap; expand a server below and turn some off."
-              : " · Cursor caps total MCP tools at ~40."}
-          </p>
+    <div className="flex flex-col gap-8" {...(!surfaceActive ? { inert: "" } : {})}>
+      <section aria-label="MCP servers" className="flex flex-col gap-2">
+        <div className="flex items-end justify-between gap-4 px-0.5">
+          <p className="text-fg3 m-0 text-3xxs leading-4">{scopeBlurb}</p>
+          {isUser && (
+            <Button
+              variant="secondary"
+              size="compact"
+              className="shrink-0"
+              onClick={() => setImporting(true)}
+            >
+              Import
+            </Button>
+          )}
+        </div>
+        <SettingsList aria-busy={(loading && servers.length === 0) || undefined}>
+          {gwToolTotal > 40 && (
+            <MessageRow tone="warning" flush>
+              {`${toolLine} Turn some off.`}
+            </MessageRow>
+          )}
+          {error && (
+            <MessageRow tone="error" role="alert" flush>
+              {error}
+            </MessageRow>
+          )}
+          {loading && servers.length === 0 ? (
+            <SkeletonRows />
+          ) : servers.length === 0 ? (
+            <p className="text-fg2 m-0 text-xs leading-4.5">No servers yet.</p>
+          ) : (
+            servers.map((server, index) => (
+              <ServerRow
+                key={rowKeys[index]}
+                server={server}
+                verificationOwner={statusKey ?? "unavailable-local"}
+                busy={busy}
+                gateway={
+                  (server.auth === "oauth" || server.auth === "header")
+                    ? {
+                        status: gwStatus.get(asString(server.name))?.url === server.url ? gwStatus.get(asString(server.name)) : undefined,
+                        observedAt: gatewayRead.updatedAt,
+                        error: gwHealth.error,
+                        signingIn: signingIn === asString(server.name),
+                        signInBlocked: signingIn !== null || headlessAuth !== null,
+                        onCancel: () => { void cancelSignIn(asString(server.name)).catch(() => toast.error("Couldn't cancel sign-in.")); },
+                        onReconnect: () => { if (bridge) void bridgeMcpGatewayReconnect(bridge, repoRoot).then(refreshGateway).catch(() => toast.error("Couldn't reconnect MCP servers.")); },
+                        onSignIn: () =>
+                          void handleSignIn(asString(server.name)),
+                        onToolToggle: (tool, disabled) =>
+                          handleToolToggle(index, tool, disabled),
+                        onBeginHeadless: () =>
+                          void handleBeginHeadless(asString(server.name)),
+                      }
+                    : undefined
+                }
+                onToggle={(enabled) => handleToggle(index, enabled)}
+                onEdit={() => onEdit(server)}
+                onConnect={() => onEdit(server, true)}
+                onRemove={() => handleRemove(index)}
+              />
+            ))
+          )}
+          <SettingsAddRow label="Add server" onClick={onNew} disabled={loading || busy} />
+        </SettingsList>
+        {gwToolTotal > 0 && gwToolTotal <= 40 && (
+          <p className="text-fg3 m-0 px-0.5 text-3xxs leading-4">{toolLine}</p>
         )}
-
-        {error && (
-          <p className="text-red-primary flex items-center gap-1.5 text-sm">
-            <AlertTriangle className="size-4 shrink-0" aria-hidden="true" />
-            {error}
-          </p>
-        )}
-
-        {loading && servers.length === 0 ? (
-          <div className="min-h-24" aria-busy="true" />
-        ) : (
-          <div className="flex flex-col gap-3">
-            {servers.length > 0 && (
-              <div className={MCP_CARD_CLS}>
-                {servers.map((server, index) => (
-                  <ServerRow
-                    key={rowKeys[index]}
-                    server={server}
-                    verificationOwner={statusKey ?? "unavailable-local"}
-                    busy={busy}
-                    gateway={
-                      (server.auth === "oauth" || server.auth === "header")
-                        ? {
-                            status: gwStatus.get(asString(server.name))?.url === server.url ? gwStatus.get(asString(server.name)) : undefined,
-                            observedAt: gatewayRead.updatedAt,
-                            error: gwHealth.error,
-                            signingIn: signingIn === asString(server.name),
-                            signInBlocked: signingIn !== null || headlessAuth !== null,
-                            onCancel: () => { void cancelSignIn(asString(server.name)).catch(() => toast.error("Couldn't cancel sign-in.")); },
-                            onReconnect: () => { if (bridge) void bridgeMcpGatewayReconnect(bridge, repoRoot).then(refreshGateway).catch(() => toast.error("Couldn't reconnect MCP servers.")); },
-                            onSignIn: () =>
-                              void handleSignIn(asString(server.name)),
-                            onToolToggle: (tool, disabled) =>
-                              handleToolToggle(index, tool, disabled),
-                            onBeginHeadless: () =>
-                              void handleBeginHeadless(asString(server.name)),
-                          }
-                        : undefined
-                    }
-                    onToggle={(enabled) => handleToggle(index, enabled)}
-                    onEdit={() => onEdit(server)}
-                    onConnect={() => onEdit(server, true)}
-                    onRemove={() => handleRemove(index)}
-                  />
-                ))}
-              </div>
-            )}
-
-            <NewServerCard onClick={onNew} disabled={loading || busy} />
-          </div>
-        )}
-
-        {inherited.length > 0 && (
-          <div className="flex flex-col gap-1 pt-2">
-            {/* Layer-neutral on purpose: `inherited` is every non-user
-                source (team, managed, repo…), so naming one of them here
-                would misattribute the others. Each row carries its own
-                source badge — that's where attribution belongs. */}
-            <div className="text-fg2 text-xs font-medium">Inherited</div>
-            <div className={MCP_CARD_CLS}>
-              {inherited.map((c) => (
-                <InheritedServerRow
-                  key={`${c.source}:${c.name}`}
-                  composed={c}
-                  busy={busy}
-                  onOverride={() => handleOverride(c)}
-                />
-              ))}
-            </div>
-          </div>
-        )}
-
         {!isUser && (
-          <p className="text-fg2 text-xs">
-            Your User MCP servers apply here automatically.{" "}
+          <p className="text-fg3 m-0 px-0.5 text-3xxs leading-4">
+            Your User servers apply here too.{" "}
             <button
               type="button"
               onClick={onSwitchToUser}
-              className="text-fg2 hover:text-fg1 font-medium underline-offset-2 transition-colors hover:underline"
+              className="text-fg1 hover:text-fg1 font-medium underline-offset-2 hover:underline"
             >
               Manage User servers
             </button>
           </p>
         )}
-      </SettingsSection>
+      </section>
+
+      {inherited.length > 0 && (
+        // Layer-neutral on purpose: `inherited` is every non-user source
+        // (team, managed, repo…); each row's badge names its own layer.
+        <SettingsGroup title="Inherited" description="From your team, admin or repository.">
+          {inherited.map((c) => (
+            <InheritedServerRow
+              key={`${c.source}:${c.name}`}
+              composed={c}
+              busy={busy}
+              onOverride={() => handleOverride(c)}
+            />
+          ))}
+        </SettingsGroup>
+      )}
 
       {isUser && (
         <McpImportDialog

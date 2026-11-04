@@ -80,6 +80,7 @@ vi.mock("../../../shared/ui/primitives/elements", () => ({ toast: { success: f.s
 
 import { Button } from "../../../shared/ui";
 import { DropdownMenuItem } from "../../../shared/ui/primitives/dropdown-menu";
+import { SettingsAddRow } from "../settings-ui";
 import { Checkbox } from "../../../shared/ui/primitives/checkbox";
 import { CloudProviderConnections } from "../cloud-provider-connections";
 import { ProviderConnectionDialog } from "../provider-connection-dialog";
@@ -124,8 +125,9 @@ function tree(): ReactNode {
   return (inner.type as (props: unknown) => ReactNode)(inner.props);
 }
 function action(label: string): Element {
-  return elements(tree()).find(element => (element.type === Button || element.type === DropdownMenuItem) &&
-    text(element.props.children) === label)!;
+  return elements(tree()).find(element => ((element.type === Button || element.type === DropdownMenuItem) &&
+    text(element.props.children) === label) ||
+    (element.type === SettingsAddRow && (element.props as { label?: string }).label === label))!;
 }
 function dialog(): Element {
   return elements(tree()).find(element => element.type === ProviderConnectionDialog)!;

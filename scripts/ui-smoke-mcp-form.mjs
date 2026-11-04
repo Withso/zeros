@@ -11,12 +11,12 @@ export async function runMcpFormSmoke({ page, check }) {
   await page.goto(`${new URL(page.url()).origin}/apps/desktop/src/renderer/harnesses/harness-customize.html`);
   await page.getByRole("button", { name: "Customize scope" }).click();
   await page.getByRole("menuitem").filter({ hasText: "User" }).click();
-  await page.getByRole("tab", { name: "MCP", exact: true }).click();
+  await page.getByRole("tab", { name: "MCP servers", exact: true }).click();
   const button = name => page.getByRole("button", { name, exact: true });
   const field = name => page.getByLabel(name, { exact: true });
   const select = name => page.getByRole("combobox", { name, exact: true });
   const section = name => page.getByRole("region", { name, exact: true });
-  const add = () => page.getByRole("button", { name: /New MCP server/ }).click();
+  const add = () => page.getByRole("button", { name: "Add server", exact: true }).click();
 
   const beforeLegacyProbe = await page.evaluate(() => window.mcpFormFixture.probeCount);
   await button("Edit gateway-error").click();
@@ -56,7 +56,8 @@ export async function runMcpFormSmoke({ page, check }) {
   await page.getByRole("option", { name: "Repo A", exact: true }).click();
   await button("Add server").click();
   await expect(button("Edit literal-tools")).toBeVisible();
-  await expect(button("Edit literal-tools").locator("..").locator("..")).toContainText("Starts with agent");
+  // A command server starting with the agent is the normal state: no status.
+  await expect(button("Edit literal-tools").locator("..").locator("..")).not.toContainText("Starts with agent");
   await expect(button("Edit literal-tools").locator("..").getByRole("button", { name: "Connect", exact: true })).toHaveCount(0);
   await expect(button("Customize scope")).toContainText("Repo A");
   const stored = JSON.parse(await page.locator("#last-write").textContent());

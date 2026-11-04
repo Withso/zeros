@@ -11,10 +11,10 @@
 // ──────────────────────────────────────────────────────────
 
 import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { AlertTriangle, Check } from "lucide-react";
-
 import { Button } from "../../shared/ui";
-import { Tooltip } from "@/renderer/shared/ui/primitives";
+import { Badge } from "../../shared/ui/primitives/badge";
+import { Checkbox } from "../../shared/ui/primitives/checkbox";
+import { MessageRow } from "../../shared/ui/primitives/message-row";
 import {
   Dialog,
   DialogContent,
@@ -25,7 +25,6 @@ import {
   DialogTitle,
 } from "../../shared/ui/primitives/dialog";
 import { toast } from "../../shared/ui/primitives/elements";
-import { cn } from "@/renderer/shared/ui/cn";
 import { useBridge, useBridgeStatus } from "../../platform/bridge/use-bridge";
 import { useReadRecovery } from "../../state/use-read-recovery";
 import { useDocumentActive } from "../../state/use-document-active";
@@ -45,7 +44,6 @@ import {
   readRawServers,
   type RawServer,
 } from "./mcp-server-model";
-import { ZerosSpinner } from "@/renderer/shared/ui/loading";
 
 const keyOf = (source: string, name: string) => `${source}::${name}`;
 
@@ -149,14 +147,6 @@ async function importToSettings(srv: DiscoveredMcpServerWire): Promise<ImportRes
     ...(headerSecret ? { headerSecret } : {}),
     ...(droppedSecretHeaders.length ? { droppedSecretHeaders } : {}),
   };
-}
-
-function TransportPill({ transport }: { transport: "stdio" | "http" | "sse" }) {
-  return (
-    <span className="select-none rounded-sm border border-border1 px-1.5 py-px text-xs font-medium text-fg2">
-      {transport}
-    </span>
-  );
 }
 
 export function McpImportDialog({ open, onClose }: { open: boolean; onClose: () => void }) {
@@ -339,84 +329,73 @@ export function McpImportDialog({ open, onClose }: { open: boolean; onClose: () 
         <DialogHeader>
           <DialogTitle>Import MCP servers</DialogTitle>
           <DialogDescription>
-            Choose local MCP configurations to copy into Zeros. Imported
-            servers are available to Claude, Codex, and Cursor. Token-shaped env
-            values
-            move to your Keychain; secret HTTP headers move to the gateway’s
-            encrypted vault.
+            Copy MCP servers from your other tools. Secrets move to your Keychain.
           </DialogDescription>
         </DialogHeader>
         <DialogBody>
           <div className="flex max-h-[50vh] flex-col gap-4 overflow-y-auto">
             {importError && (
-              <div className="flex items-center gap-2 py-4 text-sm text-red-primary">
-                <AlertTriangle className="size-4 shrink-0" aria-hidden="true" />
-                <p>{importError}</p>
-                <Button variant="ghost" size="sm" onClick={() => void (recovery.error ? retry() : refreshSettings())}>Retry</Button>
-              </div>
+              <MessageRow
+                tone="error"
+                role="alert"
+                flush
+                actions={
+                  <Button variant="ghost" size="compact" onClick={() => void (recovery.error ? retry() : refreshSettings())}>
+                    Retry
+                  </Button>
+                }
+              >
+                {importError}
+              </MessageRow>
             )}
             {!sources && !importError ? (
-              <div className="flex items-center gap-2 py-8 text-sm text-fg2">
-                <ZerosSpinner size={16} />
+              <MessageRow tone="pending" role="status" flush>
                 Scanning…
-              </div>
+              </MessageRow>
             ) : !sources ? null : !hasAny ? (
-              <p className="py-8 text-center text-sm text-fg2">
-                No MCP servers found in Cursor, Claude, Codex, or Factory configs.
+              <p className="text-fg2 m-0 py-6 text-center text-xs leading-4.5">
+                No MCP servers found.
               </p>
             ) : (
               (sources ?? [])
                 .filter((src) => src.servers.length > 0 || src.warning)
                 .map((src) => (
-                  <section key={src.source} className="flex flex-col gap-1.5">
-                    <div className="flex items-baseline justify-between gap-2">
-                      <h3 className="text-xs font-medium text-fg2">{src.label}</h3>
-                      {src.warning && (
-                        <Tooltip label={src.warning}>
-                          <span className="truncate text-xs text-fg2">
-                            {src.warning}
-                          </span>
-                        </Tooltip>
-                      )}
-                    </div>
+                  <section key={src.source} className="flex flex-col gap-1">
+                    <h3 className="text-fg3 m-0 text-3xxs leading-4 font-medium">{src.label}</h3>
+                    {src.warning && (
+                      <MessageRow tone="warning" flush>
+                        {src.warning}
+                      </MessageRow>
+                    )}
                     <div className="flex flex-col">
                       {src.servers.map((srv) => {
                         const already = existingNames.has(srv.name);
                         const key = keyOf(src.source, srv.name);
                         const isSel = selected.has(key);
+                        // The server list's anatomy behind a checkbox: transport,
+                        // name, endpoint; Already added is a badge.
                         return (
-                          <button
+                          <Checkbox
                             key={key}
-                            type="button"
+                            checked={isSel && !already}
+                            onChange={() => toggle(key)}
                             disabled={already || busy}
-                            onClick={() => toggle(key)}
-                            className={cn(
-                              "flex items-center gap-2.5 rounded-sm px-1.5 py-2 text-left",
-                              already ? "opacity-50" : "hover:bg-bg2",
-                            )}
-                          >
-                            <span
-                              className={cn(
-                                "flex size-4 shrink-0 items-center justify-center rounded-sm border",
-                                isSel && !already
-                                  ? "border-primary-button-bg bg-primary-button-bg text-primary-button-fg"
-                                  : "border-border2",
-                              )}
-                              aria-hidden="true"
-                            >
-                              {isSel && !already && <Check className="size-3" />}
-                            </span>
-                            <TransportPill transport={srv.transport} />
-                            <div className="min-w-0 flex-1">
-                              <div className="truncate text-sm text-fg1">{srv.name}</div>
-                              <div className="truncate font-mono text-xs text-fg2">
-                                {endpointSummary(srv as RawServer)}
-                              </div>
-                            </div>
-                            {already && (
-                              <span className="shrink-0 text-xs text-fg2">Already added</span>
-                            )}
-                          </button>
+                            className="w-full py-2 [&>span[aria-hidden]]:mt-0.5"
+                            label={
+                              <span className="flex min-w-0 items-center gap-3">
+                                <span className="flex w-12 shrink-0">
+                                  <Badge variant="outline" mono>{srv.transport}</Badge>
+                                </span>
+                                <span className="flex min-w-0 flex-1 flex-col gap-0.5">
+                                  <span className="text-fg1 truncate text-xs leading-4.5">{srv.name}</span>
+                                  <span className="text-fg3 truncate font-mono text-3xxs leading-4">
+                                    {endpointSummary(srv as RawServer)}
+                                  </span>
+                                </span>
+                                {already && <Badge variant="neutral">Already added</Badge>}
+                              </span>
+                            }
+                          />
                         );
                       })}
                     </div>
@@ -425,24 +404,22 @@ export function McpImportDialog({ open, onClose }: { open: boolean; onClose: () 
             )}
 
             {hasAny && (
-              <p className="text-xs text-fg2">
-                Tip: Cursor caps the total number of MCP tools at ~40 across all servers —
-                importing many at once may exceed that.
+              <p className="text-fg3 m-0 text-3xxs leading-4">
+                Cursor allows about 40 tools in total.
               </p>
             )}
           </div>
         </DialogBody>
         <DialogFooter>
-          <Button variant="ghost" size="sm" onClick={onClose} disabled={busy}>
+          <Button variant="ghost" onClick={onClose} disabled={busy}>
             Cancel
           </Button>
           <Button
             variant="primary"
-            size="sm"
-            disabled={busy || loading || !connected || !!scanError || !layer || settingsLoading || !!settingsReadError || !!layer.error || selectedCount === 0}
+            loading={busy}
+            disabled={loading || !connected || !!scanError || !layer || settingsLoading || !!settingsReadError || !!layer.error || selectedCount === 0}
             onClick={() => void handleImport()}
           >
-            {busy && <ZerosSpinner size={16} tone="inverted" />}
             {selectedCount > 0 ? `Import ${selectedCount}` : "Import"}
           </Button>
         </DialogFooter>

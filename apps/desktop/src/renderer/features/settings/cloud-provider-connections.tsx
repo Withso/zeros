@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Ellipsis, Plus } from "lucide-react";
+import { Ellipsis } from "lucide-react";
 import { Button, Input } from "../../shared/ui";
 import { toast } from "../../shared/ui/primitives/elements";
 import { Avatar, AvatarFallback } from "../../shared/ui/primitives/avatar";
@@ -14,7 +14,7 @@ import { MessageRow } from "../../shared/ui/primitives/message-row";
 import { useTeams } from "../team/team-store";
 import { modelsForAgent } from "../agent/model-catalog";
 import { NATIVE_BROWSER_UNAVAILABLE } from "../agent/native-browser-availability";
-import { SettingsGroup, SettingsRow } from "./settings-ui";
+import { SettingsAddRow, SettingsGroup, SettingsRow } from "./settings-ui";
 import { invalidateCloudOrganizationAgentRegistry } from "../agent/workspace-agent-registry";
 import { useRecoveringRead } from "../../state/use-recovering-read";
 import { ProviderConnectionDialog } from "./provider-connection-dialog";
@@ -434,16 +434,11 @@ function CloudProviderConnection({
             </Button>
           </SettingsRow>
         ) : (
-          // The whole 44px row is the target; only its text lifts on hover.
-          <Button
-            variant="ghost"
-            className="text-fg2 [&_svg]:text-fg3 w-full justify-start gap-2 px-0 hover:bg-transparent"
+          <SettingsAddRow
+            label="Add account"
             onClick={() => configure(null)}
             disabled={!snapshot.data || busy}
-          >
-            <Plus aria-hidden />
-            Add account
-          </Button>
+          />
         )}
       </SettingsGroup>
       <CloudCredentialRemovalDialog state={removal.state} active={surfaceActive && removal.current()}

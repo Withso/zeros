@@ -27,10 +27,15 @@ const badgeVariants = cva(
   },
 );
 
+/** A literal (a transport, a command name) in mono at 11px; same box. */
+const BADGE_MONO = "font-mono text-2xxs";
+
 export interface BadgeProps
   extends
     React.HTMLAttributes<HTMLDivElement>,
-    VariantProps<typeof badgeVariants> {}
+    VariantProps<typeof badgeVariants> {
+  mono?: boolean;
+}
 
 /** forwardRef is load-bearing, not boilerplate: a Badge is used as an `asChild`
  *  trigger (Radix DropdownMenu / Tooltip clone the child and attach a ref to
@@ -38,10 +43,10 @@ export interface BadgeProps
  *  given refs", the anchor ref stays null, and the menu has nothing to position
  *  against — see OpenInBadgeMenu in shell/conversation/conversation-header.tsx. */
 const Badge = React.forwardRef<HTMLDivElement, BadgeProps>(
-  ({ className, variant, ...props }, ref) => (
+  ({ className, variant, mono = false, ...props }, ref) => (
     <div
       ref={ref}
-      className={cn(badgeVariants({ variant }), className)}
+      className={cn(badgeVariants({ variant }), mono && BADGE_MONO, className)}
       {...props}
     />
   ),
