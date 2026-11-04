@@ -4,8 +4,8 @@ For renderer UI, styling, tokens and mockups of Zeros itself. The `zeros-ui`
 skill holds the design-system rules; this playbook is the procedure around
 them.
 
-1. **Frame the change.** Read `docs/design-system.md` §0 (the direction) and,
-   when the page has one, its `docs/design-implementation/<page>.md`. Name the
+1. **Frame the change.** Read `docs/design-system.md` §0 (the direction) and
+   the page's `docs/design-implementation/<page>.md`, if any. Name the
    surface and its owning component, and list the states it must show:
    default, hover, selected, focus-visible, disabled, loading, empty, error,
    and long or missing content. Cover Dark and Light, and how Local and cloud
@@ -34,30 +34,25 @@ them.
 5. **Implement with the system.** Compose the shared primitives and layout
    blocks, and map frame values to utilities (`var(--bg2)` is `bg-bg2`; a
    `--space-<step>` value is that Tailwind step) instead of copying frame
-   CSS. Never restyle a primitive from a caller: extend it, with a test.
-   Fix drift from the direction in the files you touch and list the rest in
-   the receipt. When an approved board breaks a system rule (two control
-   heights in a row, an off-scale size, a repeated label), build the rule and
-   log the decision in the page's status line. Lists, selection, navigation, tabs, panels and loading follow
+   CSS. Extend a primitive, with a test; never restyle it from a caller. Fix
+   drift in the files you touch and list the rest in the receipt. Where an
+   approved board breaks a system rule, keep the rule and log the decision.
+   Lists, selection, navigation, tabs, panels and loading follow
    `docs/ui-interaction-performance.md`.
 6. **Gates** (`zstack-verify`). Never get `pnpm check:ui` green by raising
    `styles/policy/ui-debt.json` or adding an ignore; prune paid debt with
    `pnpm check:ui --prune-debt`. Overlay, focus, popover or composer work runs
    `pnpm test:ui-smoke` (label `ci:ui-smoke`); cascade, entrypoint or
    performance work runs `pnpm build:ui`; token or contrast changes run
-   `pnpm design:docs`. A primitive change tests every call shape it supports
-   (asChild, loading, inside a Tooltip), runs the ui-smoke scenarios that
-   mount it at their registry viewport (grep the smoke scripts for its
-   `data-slot` names and old values), recomputes the offsets that
-   compensated for an old size, and updates any smoke that pins the old
-   computed look in the same commit. A shared class constant counts as a
-   primitive: list its importers first and size each by its context. A
-   component named by a prop declares `aria-label?: never`. A glyph that
-   stands for a word (a status letter, a dot) keeps the word as its name
-   and as its hover title. Focus edges never take layout space. Run the registry shards that mount a page step's
-   surfaces before committing the step, not only at handoff, and compare
-   computed geometry with a tolerance: a quotient such as zoom × pixels moves
-   by a rounding error when unrelated chrome changes size.
+   `pnpm design:docs`. A primitive change (a shared class constant is one)
+   tests every call shape (asChild, loading, inside a Tooltip), sizes each
+   importer by its context, recomputes offsets made for an old size, and
+   updates in the same commit every smoke that pins it, found by its
+   `data-slot` names and old values. A component named by a prop declares
+   `aria-label?: never`; a glyph standing for a word keeps it as name and
+   hover title; focus edges take no layout space. Run the registry shards for
+   a page step's surfaces before committing it; compare geometry with a
+   tolerance.
 7. **Look at the result** in the running app or a ui-smoke harness, in both
    themes; a green check is not visual review. Put screenshot paths in the
    receipt.
@@ -66,15 +61,11 @@ them.
    chat/question/queue content, read-only editors, shadow-DOM diffs and explicit
    drag-and-drop, including Local and cloud owner switches.
 8. **Deliver and learn** (`integrate-pr.md`, `zstack-learn`). State the Local
-   and cloud impact. A look the user corrects or approves is a direction:
-   follow design-system.md §0, "How the direction changes". Move its owner
-   (token, primitive or pattern) and migrate callers, add the check that
-   holds it (a `ui-policy.mjs` rule, contrast pairing, primitive test or
-   ui-smoke assertion), record it in §0 and the page spec, and run
-   `pnpm design:docs` so the `zeros-ui` skills carry it. Retire what it
-   replaces; two directions never coexist. A mistake that escaped gets an eval
-   case. Close a shipped design round on the canvas too: each board shows the
-   UI as it ships (no Current and Proposed halves), a logged decision that
-   differs from a board updates the board, and an approved design that is not
-   built yet keeps its board with a Planned line that names its `plans.md`
-   section. The page specs stay as the record of what was approved.
+   and cloud impact. A look the user corrects or approves is a direction
+   (design-system.md §0, "How the direction changes"): move its owner and
+   migrate callers, add the check that holds it, record it in §0 and the page
+   spec, run `pnpm design:docs`, and retire what it replaces; two directions
+   never coexist. An escaped mistake gets an eval case. Close a shipped round
+   on the canvas: every board shows the UI as it ships, a logged decision
+   updates its board, and an approved design not built yet keeps a Planned
+   line naming its `plans.md` section.
