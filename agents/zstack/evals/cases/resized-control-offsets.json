@@ -1,0 +1,9 @@
+{
+  "id": "resized-control-offsets",
+  "kind": "replay",
+  "area": "renderer-ui",
+  "fixedBy": "5b7c30d180fc02025a0e0f9671acf3f481252b54",
+  "symptom": "DialogCloseButton grew from a 20px round button to the 24px compact IconButton but kept its -4px block margins, so in every dialog title row the close sat 2px above the title's centre. The dialog-chrome ui-smoke measured exactly that, but crashes earlier in its shard kept it from running until the final registry pass, where it also still pinned the old header, body, close and footer.",
+  "rule": "When a control's size changes, recompute the margins that compensated for the old size, and find every smoke that pins the primitive by grepping the smoke scripts for its data-slot names and old values.",
+  "check": "pnpm test:ui-smoke --shard=2/3"
+}

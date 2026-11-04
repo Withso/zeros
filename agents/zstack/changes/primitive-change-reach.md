@@ -30,6 +30,18 @@ typechecked, because JSX accepts any undeclared dashed attribute, and the
 button was renamed "Close". A component named by a prop declares
 `aria-label?: never`, so the mistake fails typecheck.
 
+Resizing a control means recomputing the offsets that compensated for its
+old size. The close grew from 20px to 24px but kept `-my-1`, which had held
+the old button inside a 20px title line; the new one sat 2px above the
+title's centre (`-my-0.5` centres it). Find the smokes that pin a primitive
+by grepping `scripts/ui-smoke*.mjs` for its `data-slot` names, role and old
+values, not only the scenarios named after a page: the dialog-chrome
+scenario still pinned the old header, body, close and footer, and the
+keyboard-focus smoke it imports pinned the radio's outline and the field's
+click-focus edge, but crashes earlier in its shard hid it until the last
+registry run.
+
 **Encoded in.** `playbooks/ui-design.md` step 6; eval cases
 `button-aschild-single-child`, `listrow-focus-edge-layout`,
-`shared-class-constant-reach` and `name-prop-aria-label`.
+`shared-class-constant-reach`, `name-prop-aria-label` and
+`resized-control-offsets`.

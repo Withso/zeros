@@ -47,8 +47,10 @@ them.
    performance work runs `pnpm build:ui`; token or contrast changes run
    `pnpm design:docs`. A primitive change tests every call shape it supports
    (asChild, loading, inside a Tooltip), runs the ui-smoke scenarios that
-   mount it at their registry viewport, and updates any smoke that pins the
-   old computed look in the same commit. A shared class constant counts as a
+   mount it at their registry viewport (grep the smoke scripts for its
+   `data-slot` names and old values), recomputes the offsets that
+   compensated for an old size, and updates any smoke that pins the old
+   computed look in the same commit. A shared class constant counts as a
    primitive: list its importers first and size each by its context. A
    component named by a prop declares `aria-label?: never`. A glyph that
    stands for a word (a status letter, a dot) keeps the word as its name
