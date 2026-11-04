@@ -19,8 +19,8 @@ const CONCURRENCY = 4;
  * someone is waiting for, always keep the remaining slots. */
 const STOPPING_SLOTS = 2;
 const LEASE_MS = 2 * 60_000;
-/** The worker's hello moves the workspace to running at once; this poll only
- * re-delivers a credential to a worker that has not connected. */
+/** Configured hello publishes readiness; a poll only re-delivers the credential
+ * while no worker boot has bound it. */
 const HELLO_POLL_MS = 30_000;
 const BOOT_DEADLINE_MS = 10 * 60_000;
 /** A restore also creates a VM and applies a checkpoint of up to 4 GiB. */

@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { generateKeyPairSync, randomUUID } from "node:crypto";
 import pg from "pg";
 import { Hono } from "hono";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
@@ -6,6 +6,8 @@ import { resetMigratedTestDatabase } from "../test-database.js";
 import { CloudV2Store } from "./store.js";
 import { createCloudV2Routes, type CloudV2RouteDeps } from "./routes.js";
 import { createCloudV2WorkerRoutes } from "./worker-routes.js";
+import { CloudV2Lifecycle } from "./lifecycle.js";
+import type { CloudV2Compute } from "./boat.js";
 import { CloudV2SourceAuthority } from "./source-authority.js";
 import { PostgresGithubVerificationStore } from "./github-verification-store.js";
 import { HttpError } from "../authz.js";
@@ -84,6 +86,54 @@ d("cloud v2 store", () => {
     hello.release();
     expect((await response).status).toBe(200);
     expect(pending.state).toBe(state);
+    expect((await store.get(w.id, creator)).state).toBe("running");
+  });
+
+  it("keeps a restarted worker's bound boot and route while lifecycle polls its held configuration", async () => {
+    const w = await create(), sandboxId = "bx_fixture";
+    const routeUrl = "https://fixture-41783.on.boat.dev", portToken = { encrypted: "synthetic-port-material" };
+    await store.defer(w.id, "creating", 0, { boatSandboxId: sandboxId });
+    await store.setWorkerRoute(w.id, sandboxId, routeUrl, portToken);
+    const token = await store.rotateWorkerToken(w.id), oldBoot = randomUUID();
+    await store.acceptWorkerHello(token, oldBoot);
+    const boot = randomUUID(), hello = heldHello(w), response = hello.request(token, boot);
+    await hello.configuring;
+    const rotate = vi.spyOn(store, "rotateWorkerToken"), routes = vi.spyOn(store, "setWorkerRoute");
+    const claims = vi.spyOn(store, "claimPending");
+    const unexpected = async (): Promise<never> => { throw new Error("Unexpected VM mutation"); };
+    const compute: CloudV2Compute = {
+      create: vi.fn(unexpected), fork: vi.fn(unexpected), inspect: vi.fn(unexpected), findSandbox: vi.fn(unexpected),
+      resume: vi.fn(async () => {}), extendLease: vi.fn(unexpected), stop: vi.fn(unexpected), delete: vi.fn(unexpected),
+      exec: vi.fn(async () => ({ exitCode: 0, stdout: "", timedOut: false })), execLong: vi.fn(unexpected),
+      saveSnapshot: vi.fn(unexpected), deleteSnapshot: vi.fn(unexpected),
+      hostPort: vi.fn(async () => ({ url: routeUrl, token: "synthetic-port-token" })),
+    };
+    const sealPortToken = vi.fn(() => portToken);
+    try {
+      expect((await store.get(w.id, creator)).state).toBe("starting");
+      await new CloudV2Lifecycle({ store, compute, sealPortToken, stopWorker: vi.fn(unexpected),
+        publicKeys: [generateKeyPairSync("ed25519").publicKey.export({ type: "spki", format: "pem" }).toString()],
+        runtime: { sha256: "a".repeat(64), url: async () => "https://fixture.example.test/runtime.tar.gz" },
+        bootEnv: () => ({}), sandboxName: () => "fixture" }).tick();
+      const claimed = (await claims.mock.results[0]!.value).find(row => row.id === w.id);
+      expect(claimed?.state).toBe("starting");
+      expect(compute.resume).toHaveBeenCalledExactlyOnceWith(sandboxId);
+      expect(compute.hostPort).toHaveBeenCalledExactlyOnceWith(sandboxId, { port: 41783, localhost: true, title: "Zeros worker" });
+      expect(sealPortToken).toHaveBeenCalledExactlyOnceWith("synthetic-port-token", w.id);
+      expect(routes).toHaveBeenCalledExactlyOnceWith(w.id, sandboxId, routeUrl, portToken);
+      expect(rotate).toHaveBeenCalledExactlyOnceWith(w.id, { state: "starting", sandboxId, stopGeneration: "0" });
+      expect(await rotate.mock.results[0]!.value === null).toBe(true);
+      // Only the same-runtime installer ran; no token-delivery command can restart this boot.
+      expect(compute.exec).toHaveBeenCalledTimes(1);
+      expect(vi.mocked(compute.exec).mock.calls[0]![1]).toContain(`/opt/zeros/runtime/${"a".repeat(64)}`);
+      expect(vi.mocked(compute.exec).mock.calls[0]![1]).not.toContain("/home/user/.config/zeros/worker-token.next");
+      expect(await store.workerRoute(w.id)).toMatchObject({ url: routeUrl, portToken, bootId: boot, workspace: { state: "starting" } });
+      expect(await store.workerSession(token, boot) !== null).toBe(true);
+      expect(await store.workerSession(token, oldBoot)).toBeNull();
+      expect(compute.create).not.toHaveBeenCalled();
+      expect(compute.stop).not.toHaveBeenCalled();
+    } finally { hello.release(); }
+    expect((await response).status).toBe(200);
     expect((await store.get(w.id, creator)).state).toBe("running");
   });
 

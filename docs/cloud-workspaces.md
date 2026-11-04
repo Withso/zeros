@@ -51,6 +51,10 @@ for that exact boot, access epoch and login revision. The relay waits for
 allocation and stop generation, with no bound boot; a late step cannot rotate
 the credential or restart a worker already configuring. Stop and checkout
 failure can end a bound first boot before readiness is published.
+A new boot on a running VM temporarily returns it to `starting`. Lifecycle
+polling can resume that same VM and re-establish its idempotent protected route;
+the matching runtime installer does not restart it, and the bound boot prevents
+token rotation. A configured hello returns the workspace to `running`.
 
 The desktop retries only transient ticket failures: HTTP 5xx, network failures
 and request timeouts. It makes at most five attempts with 250, 500, 1000 and
@@ -202,8 +206,11 @@ short compare-and-set claims and actor cooldowns coalesce replicas. Admissions
 join an existing local verification or wait for the exact durable
 claim, sharing one five-second wait budget across repositories and authority
 reads. A fresh successful result can satisfy the waiter; a refusal or changed
-authorization ends it. This budget leaves room inside the worker's ten-second
-HTTP request timeout. Waiters neither steal a live claim nor extend source grace.
+authorization ends it. The worker's hello HTTP timeout is ten seconds. The
+five-second verification budget leaves room for other configuration work, but
+slow credential/configuration I/O can still exceed the hello timeout; the worker
+retries that hello automatically. Waiters neither steal a live claim nor extend
+source grace.
 Transient failures back off from one to fifteen minutes, with bounded jitter, and respect
 GitHub's longer retry delay. An idle workspace does not refresh GitHub access.
 
