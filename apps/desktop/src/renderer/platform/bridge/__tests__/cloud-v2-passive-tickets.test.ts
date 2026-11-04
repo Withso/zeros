@@ -10,6 +10,9 @@ vi.mock("../../cloud-v2", () => ({ connectCloudV2Workspace: mocks.connect }));
 vi.mock("../../../state/cloud-workspace-catalog", () => ({
   acceptCloudEngineWorkspace: vi.fn(),
   cloudCatalogGeneration: () => 1,
+  cloudWorkspaceOwnerGeneration: () => 1,
+  cloudWorkspaceStopVersion: () => 0,
+  subscribeCloudWorkspaces: () => () => {},
   cloudWorkspaceDocument: () => ({ status: mocks.status, capabilities: { canWrite: true }, deletedAt: null }),
   canReadCloudWorkspace: () => true,
   cloudWorkspaceLifecycleTask: () => undefined,
@@ -68,11 +71,11 @@ describe("cloud v2 connection tickets", () => {
     for (const wake of [true, undefined]) {
       mocks.connect.mockClear(); mocks.clients.length = 0;
       const { controller, opening, refresh } = await openThenCancel(wake ? { wake } : {});
-      expect(mocks.connect).toHaveBeenLastCalledWith(target, { wake: wake === true });
+      expect(mocks.connect).toHaveBeenLastCalledWith(target, { wake: wake === true, signal: expect.any(AbortSignal) });
       // A laptop wake, network drop or control-plane deploy reconnects with a
       // fresh ticket; that must not restart a VM that idled to a stop.
       await refresh();
-      expect(mocks.connect).toHaveBeenLastCalledWith(target, { wake: false });
+      expect(mocks.connect).toHaveBeenLastCalledWith(target, { wake: false, signal: expect.any(AbortSignal) });
       controller.abort();
       await expect(opening).rejects.toThrow("cancelled");
     }

@@ -651,6 +651,17 @@ describe("cloud v2 lifecycle", () => {
     }
   });
 
+  it.each(["creating", "starting"] as const)("leaves a %s worker alone when hello already owns token delivery", async state => {
+    const w = workspace(state, { boatSandboxId: "bx_test" }), f = setup([w]);
+    vi.mocked(f.store.rotateWorkerToken).mockResolvedValueOnce(null);
+    await f.lifecycle.tick();
+    expect(f.store.rotateWorkerToken).toHaveBeenCalledWith(w.id, { state, sandboxId: "bx_test", stopGeneration: w.stopGeneration });
+    expect(f.compute.exec).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(f.compute.exec).mock.calls[0]![1]).toContain("worker-auth.json");
+    expect(f.store.defer).toHaveBeenLastCalledWith(w.id, state, 30_000);
+    expect(f.store.transition).not.toHaveBeenCalled();
+  });
+
   it("waits for the worker's final history acknowledgement before stopping Boat", async () => {
     const f = setup([workspace("stopping", { boatSandboxId: "bx_test" })]);
     let release!: (value: boolean) => void;

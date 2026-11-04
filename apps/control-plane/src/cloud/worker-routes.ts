@@ -14,7 +14,7 @@ import { cloudGithubFailure } from "./github-failure.js";
 export const CLOUD_V2_WORKER_API = "/v2/cloud/worker";
 type ConfigFrame = Extract<CloudV2ControlFrame, { t: "config" }>;
 export type CloudV2WorkerRouteDeps = {
-  store: Pick<CloudV2Store, "acceptWorkerHello" | "workerSession" | "accessEpoch" | "loginRevision" | "markActive" | "writeWorkerHistory" | "failWorkerCheckout"> & Partial<Pick<CloudV2Store, "prompts">>;
+  store: Pick<CloudV2Store, "beginWorkerHello" | "acceptWorkerHello" | "workerSession" | "accessEpoch" | "loginRevision" | "markActive" | "writeWorkerHistory" | "failWorkerCheckout"> & Partial<Pick<CloudV2Store, "prompts">>;
   runtimeSha256: string;
   promptOutbox?: boolean;
   timing?: (record: CloudV2TimingRecord) => void;
@@ -92,10 +92,15 @@ export function createCloudV2WorkerRoutes(deps: CloudV2WorkerRouteDeps): Hono {
     if (input.runtimeSha256 !== deps.runtimeSha256) throw new HttpError(409, "worker_runtime_mismatch", "Worker runtime requires an update");
     if (deps.promptOutbox && !(c.req.header("x-zeros-worker-features") ?? "").split(",").map(value => value.trim()).includes("prompt-outbox-v1"))
       throw new HttpError(409, "worker_runtime_mismatch", "Worker runtime requires an update");
-    const workspace = await deps.store.acceptWorkerHello(bearer(c), input.bootId);
+    const token = bearer(c), workspace = await deps.store.beginWorkerHello(token, input.bootId);
     if (!workspace) throw unauthorized();
-    if (workspace.helloTiming) emitCloudV2Timing(deps.timing, { workspaceId: workspace.id.slice(0, 8), phase: "worker_hello", ...workspace.helloTiming });
-    return c.json({ config: await configuration(deps, workspace, bearer(c), input.bootId, workerFeatures(c)) });
+    const config = await configuration(deps, workspace, token, input.bootId, workerFeatures(c));
+    const ready = await deps.store.acceptWorkerHello(token, input.bootId, {
+      accessEpoch: workspace.accessEpoch, loginRevision: config.loginRevision ?? workspace.loginRevision,
+    });
+    if (!ready) throw unauthorized();
+    if (ready.helloTiming) emitCloudV2Timing(deps.timing, { workspaceId: ready.id.slice(0, 8), phase: "worker_hello", ...ready.helloTiming });
+    return c.json({ config });
   });
   app.post(`${CLOUD_V2_WORKER_API}/timing`, async c => {
     const auth = await session(c, deps), record = await body(c, CloudV2WorkerTimingSchema);

@@ -307,9 +307,13 @@ export class CloudV2Store {
       const current = await ownedRow(tx, id, userId, true);
       if (action === "archive" && (current.state === "creating" || current.state === "deleting"))
         throw new HttpError(409, "workspace_unavailable", "This cloud workspace cannot be archived yet");
+      // A bound first boot already owns its VM, even while configuration keeps
+      // it in creating. Stop must win without racing an unassigned allocation.
+      const configuring = action === "stop" && current.state === "creating" && current.boat_sandbox_id !== null &&
+        (await tx.query("SELECT 1 FROM cloud_v2_workspaces WHERE id=$1 AND worker_boot_id IS NOT NULL", [id])).rowCount === 1;
       const state = action === "start"
         ? current.state === "stopped" || current.state === "failed" ? "starting" : current.state
-        : current.state === "running" || current.state === "starting" ? "stopping" : current.state;
+        : current.state === "running" || current.state === "starting" || configuring ? "stopping" : current.state;
       const moved = state !== current.state;
       const archived = action === "archive" || (action === "stop" && current.archived_at !== null);
       if (!moved && archived === (current.archived_at !== null)) return { workspace: workspace(current), moved };
@@ -419,11 +423,28 @@ export class CloudV2Store {
     return Boolean(result.rowCount);
   }
 
-  async acceptWorkerHello(token: string, bootId: string): Promise<CloudV2WorkerSession | null> {
+  /** Bind the boot before configuration I/O, without publishing readiness.
+   * Lifecycle delivery must not replace a credential once this boot claims it. */
+  async beginWorkerHello(token: string, bootId: string): Promise<CloudV2WorkerSession | null> {
+    const { rows } = await withSystemTx(this.pool, tx => tx.query<Row & { access_epoch: string; login_revision: string }>(
+      `UPDATE cloud_v2_workspaces w SET
+         worker_history_sequence=CASE WHEN worker_boot_id=$2 THEN worker_history_sequence ELSE 0 END,
+         worker_history_digest=CASE WHEN worker_boot_id=$2 THEN worker_history_digest ELSE NULL END,
+         state=CASE WHEN state='running' AND worker_boot_id IS DISTINCT FROM $2 THEN 'starting' ELSE state END,
+         updated_at=CASE WHEN state='running' AND worker_boot_id IS DISTINCT FROM $2 THEN clock_timestamp() ELSE updated_at END,
+         worker_boot_id=$2
+       WHERE worker_token_hash=$1 AND state IN ('creating','starting','running') AND ${LIVE_ACCESS}
+       RETURNING ${COLUMNS}, access_epoch::text, login_revision::text`, [hashCloudV2Token(token), bootId]));
+    const row = rows[0];
+    return row ? { ...workspace(row), accessEpoch: row.access_epoch, loginRevision: row.login_revision } : null;
+  }
+
+  async acceptWorkerHello(token: string, bootId: string, proof?: { accessEpoch: string; loginRevision: string }): Promise<CloudV2WorkerSession | null> {
     const { rows } = await withSystemTx(this.pool, tx => tx.query<Row & { access_epoch: string; login_revision: string; prior_state: "creating" | "starting" | "running"; hello_ms: number }>(
       `WITH prior AS MATERIALIZED (
          SELECT id AS prior_id, state AS prior_state, updated_at AS prior_updated_at FROM cloud_v2_workspaces w
-         WHERE worker_token_hash=$1 AND state IN ('creating','starting','running') AND ${LIVE_ACCESS} FOR UPDATE)
+         WHERE worker_token_hash=$1 AND state IN ('creating','starting','running') AND ${LIVE_ACCESS}
+           AND ($3::bigint IS NULL OR (worker_boot_id=$2 AND access_epoch=$3 AND login_revision=$4::bigint)) FOR UPDATE)
        UPDATE cloud_v2_workspaces w SET
          worker_history_sequence=CASE WHEN worker_boot_id=$2 THEN worker_history_sequence ELSE 0 END,
          worker_history_digest=CASE WHEN worker_boot_id=$2 THEN worker_history_digest ELSE NULL END,
@@ -432,7 +453,8 @@ export class CloudV2Store {
          updated_at=CASE WHEN state='running' THEN updated_at ELSE clock_timestamp() END
        FROM prior WHERE w.id=prior.prior_id
        RETURNING ${COLUMNS.replace(/\b(\w+)\b/g, "w.$1")}, access_epoch::text, login_revision::text, prior.prior_state,
-         greatest(0, extract(epoch FROM (clock_timestamp()-prior.prior_updated_at))*1000)::float8 AS hello_ms`, [hashCloudV2Token(token), bootId]));
+         greatest(0, extract(epoch FROM (clock_timestamp()-prior.prior_updated_at))*1000)::float8 AS hello_ms`,
+      [hashCloudV2Token(token), bootId, proof?.accessEpoch ?? null, proof?.loginRevision ?? null]));
     const row = rows[0];
     return row ? { ...workspace(row), accessEpoch: row.access_epoch, loginRevision: row.login_revision,
       ...(row.prior_state === "running" ? {} : { helloTiming: { state: row.prior_state, durationMs: Math.round(row.hello_ms) } }) } : null;
@@ -456,7 +478,7 @@ export class CloudV2Store {
         `UPDATE cloud_v2_workspaces w SET state='failed', error_code='cloud_source_checkout_failed',
            access_epoch=access_epoch+1, worker_route_url=NULL, worker_port_token=NULL,
            attempts=0, next_attempt_at=NULL, updated_at=clock_timestamp()
-         WHERE worker_token_hash=$1 AND worker_boot_id=$2 AND state='running' AND ${LIVE_ACCESS}`, proof);
+         WHERE worker_token_hash=$1 AND worker_boot_id=$2 AND state IN ('creating','starting','running') AND ${LIVE_ACCESS}`, proof);
       if (changed.rowCount) return true;
       const previous = await tx.query(
         `SELECT 1 FROM cloud_v2_workspaces w WHERE worker_token_hash=$1 AND worker_boot_id=$2
@@ -604,12 +626,11 @@ export class CloudV2Store {
       `UPDATE cloud_v2_workspaces SET base_commit=$2 WHERE id=$1 AND state='creating' AND base_commit IS NULL`, [id, commit]));
   }
 
-  /** Offered through the first run, while the worker may still create the
-   * branch. The hello makes the row running before configuration is built.
-   * A restored branch already exists, so a checkpoint ends the offer. */
+  /** Offered during initial configuration and retries until a checkpoint
+   * confirms that the workspace branch already exists. */
   async baseCommit(id: string): Promise<string | null> {
     const { rows } = await withSystemTx(this.pool, tx => tx.query<{ base_commit: string | null }>(
-      `SELECT base_commit FROM cloud_v2_workspaces WHERE id=$1 AND state IN ('creating','running') AND checkpoint_object IS NULL`, [id]));
+      `SELECT base_commit FROM cloud_v2_workspaces WHERE id=$1 AND state IN ('creating','starting','running') AND checkpoint_object IS NULL`, [id]));
     return rows[0]?.base_commit ?? null;
   }
 
@@ -808,14 +829,18 @@ export class CloudV2Store {
   }
 
   /** Replaces the worker credential; the plaintext goes only to the VM. */
-  async rotateWorkerToken(id: string): Promise<string> {
+  async rotateWorkerToken(id: string): Promise<string>;
+  async rotateWorkerToken(id: string, delivery: { state: CloudV2WorkspaceState; sandboxId: string; stopGeneration: string }): Promise<string | null>;
+  async rotateWorkerToken(id: string, delivery?: { state: CloudV2WorkspaceState; sandboxId: string; stopGeneration: string }): Promise<string | null> {
     const worker = newCloudV2Token("worker");
     const changed = await withSystemTx(this.pool, tx => tx.query(
       `UPDATE cloud_v2_workspaces w SET worker_token_hash = $2, worker_boot_id = NULL
-       WHERE id = $1 AND state IN ('creating','starting','running') AND ${LIVE_ACCESS}`,
-      [id, worker.hash],
+       WHERE id = $1 AND state IN ('creating','starting','running') AND ${LIVE_ACCESS}
+         AND ($3::text IS NULL OR (state=$3 AND state IN ('creating','starting') AND boat_sandbox_id=$4
+           AND stop_generation=$5::bigint AND worker_boot_id IS NULL))`,
+      [id, worker.hash, delivery?.state ?? null, delivery?.sandboxId ?? null, delivery?.stopGeneration ?? null],
     ));
-    if (!changed.rowCount) throw notFound();
+    if (!changed.rowCount) { if (delivery) return null; throw notFound(); }
     return worker.token;
   }
 

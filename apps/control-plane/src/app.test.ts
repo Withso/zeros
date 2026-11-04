@@ -175,6 +175,27 @@ describe("unexpected error privacy", () => {
     expect(response.status).toBe(503);
     expect(await response.json()).toEqual({error:{code:'cloud_workspace_unavailable',message:'The cloud workspace is temporarily unavailable'}});
   });
+  it.each(["github_verification_busy", "github_verification_expired", "github_unavailable", "configuration_changing", "boat_credit_limit", "private_code_sentinel"])(
+    "logs only a closed cause and status before masking cloud 5xx (%s)", async code => {
+      const app = createApp(config(null), pool, emailConfig as never);
+      const sentinel = "private_diagnostic_sentinel";
+      const context = new Context(new Request(`https://api.example.test/v1/cloud-v2/workspaces/${sentinel}/connect`, {
+        method: "POST", headers: { authorization: `Bearer ${sentinel}` }, body: sentinel,
+      }), { path: `/v1/cloud-v2/workspaces/${sentinel}/connect` });
+      const log = vi.spyOn(console, "error").mockImplementation(() => {});
+      try {
+        const error = Object.assign(new HttpError(503, code, sentinel, { target: sentinel }), { query: sentinel, cause: new Error(sentinel) });
+        const response = await app.errorHandler(error, context);
+        expect(response.status).toBe(503);
+        expect(await response.json()).toEqual({ error: { code: "cloud_workspace_unavailable", message: "The cloud workspace is temporarily unavailable" } });
+        expect(log).toHaveBeenCalledExactlyOnceWith("[cloud-v2] request failed", {
+          code: code === "private_code_sentinel" ? "unclassified" : code, status: 503,
+        });
+        expect(JSON.stringify(log.mock.calls)).not.toContain(sentinel);
+        expect(JSON.stringify(log.mock.calls)).not.toContain("private_code_sentinel");
+      } finally { log.mockRestore(); }
+    },
+  );
   it.each([true, false])("omits driver details from logs and HTTP responses (production=%s)", async (isProduction) => {
     const app = createApp({ ...config(null), isProduction }, pool, emailConfig as never);
     const sentinel = "private-value-that-must-never-be-logged";

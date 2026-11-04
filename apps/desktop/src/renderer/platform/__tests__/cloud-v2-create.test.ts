@@ -38,6 +38,25 @@ it.each([true, false])("negotiates explicit waking without changing the N-1 conn
   expect(body(fetch)).toEqual({ wake });
 });
 
+it("forwards ticket cancellation to the account fetch", async () => {
+  const controller = new AbortController();
+  let started!: (signal: AbortSignal) => void;
+  const fetching = new Promise<AbortSignal>(resolve => { started = resolve; });
+  vi.stubGlobal("fetch", vi.fn(async (_url: string, init: RequestInit) => {
+    const signal = init.signal!;
+    started(signal);
+    return new Promise<Response>((_resolve, reject) => {
+      signal.addEventListener("abort", () => reject(signal.reason), { once: true });
+    });
+  }));
+  const request = connectCloudV2Workspace({ organizationId, workspaceId: workspace("main").id }, { wake: true, signal: controller.signal });
+  const result = request.catch(error => error);
+  const signal = await fetching;
+  controller.abort();
+  expect(signal.aborted).toBe(true);
+  expect(await result).toMatchObject({ name: "AbortError" });
+});
+
 describe("cloud v2 create", () => {
   it.each([
     [404, "repository_branch_not_found", "Branch missing/topic does not exist in Example/Fixture."],

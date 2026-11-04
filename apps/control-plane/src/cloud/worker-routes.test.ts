@@ -21,6 +21,7 @@ function fixture(prompts = false) {
     waitForPrompts: vi.fn(() => ({ wait: notified, dispose: cancelWait })),
     store: {
       prompts: { pull } as unknown as CloudV2Store["prompts"],
+      beginWorkerHello: vi.fn(async value => allowed && value === token ? w : null),
       acceptWorkerHello: vi.fn(async value => allowed && value === token ? w : null),
       workerSession: vi.fn(async (value, boot) => allowed && value === token && boot === bootId ? { ...w, loginRevision: revision } : null),
       accessEpoch: vi.fn(async () => allowed ? "0" : null),
