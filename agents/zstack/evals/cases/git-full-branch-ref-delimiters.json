@@ -1,0 +1,9 @@
+{
+  "id": "git-full-branch-ref-delimiters",
+  "kind": "replay",
+  "area": "desktop-git",
+  "fixedBy": "pr:829",
+  "symptom": "A valid topic|review branch disappeared from full branch discovery in Local and cloud because the shared parser treated the pipe in its name as a field separator, corrupting its commit identity and checked-out path lookup.",
+  "rule": "Parse Git records using delimiters excluded from the variable field or fixed trailing fields. Test real refs containing delimiter characters through both Local and cloud consumers. Principles 10, 12 and 13.",
+  "check": "pnpm test:git apps/desktop/src/engine/git/__tests__/cross-tool.test.ts --maxWorkers=2"
+}

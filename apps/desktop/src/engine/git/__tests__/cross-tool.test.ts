@@ -68,6 +68,17 @@ describe("cross-tool interop", () => {
   });
 
   describe("listAllBranches", () => {
+    it.each(["topic|review", "topic||review|"])("keeps the full %s name, tip and checked-out worktree", async (name) => {
+      await execFileAsync("git", ["-C", repoRoot, "switch", "-c", name]);
+      const { stdout: tip } = await execFileAsync("git", ["-C", repoRoot, "rev-parse", "HEAD"]);
+      const { stdout: date } = await execFileAsync("git", ["-C", repoRoot, "log", "-1", "--format=%ct"]);
+      const branches = await listAllBranches({ repoSlug: "acme-example", repoRoot });
+      expect(branches.find((branch) => branch.name === name)).toMatchObject({
+        name, tipSha: tip.trim(), lastCommitDate: Number(date.trim()) * 1000,
+        isCheckedOut: true, worktreePath: repoRoot,
+      });
+    });
+
     it("keeps plain local branch names when a tag has the same name", async () => {
       await execFileAsync("git", ["-C", repoRoot, "tag", "main"]);
       const branches = await listAllBranches({ repoSlug: "acme-example", repoRoot });

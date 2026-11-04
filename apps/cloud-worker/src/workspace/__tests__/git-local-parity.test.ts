@@ -66,6 +66,16 @@ it("lists full local refs without tag collisions or foreign worktree paths", asy
   expect(result.every(row => row.worktreePath === null || row.worktreePath === root)).toBe(true);
 });
 
+it("retains a valid pipe-containing branch name and commit identity in the full branch list", async () => {
+  const { scope, git } = await repositoryFixture();
+  const name = "topic|review";
+  await git("branch", name);
+  const sha = await git("rev-parse", `refs/heads/${name}`), service = new GitService(scope);
+  expect(await service.handle("git.repoBranchCatalog", {})).toMatchObject({ branches: expect.arrayContaining([{ name, lastCommitDate: expect.any(Number) }]) });
+  const rows = await service.handle("git.listAllBranches", {}) as Array<Record<string, unknown>>;
+  expect(rows.find(row => row.name === name)).toMatchObject({ name, tipSha: sha, isCheckedOut: false, worktreePath: null });
+});
+
 it("keeps a local catalog instant, falls back before fetch, and refreshes spaced remote paths explicitly", async () => {
   const { directory, root, scope, git } = await repositoryFixture();
   const remote = join(directory, "remote with spaces.git"); await git("init", "--bare", "--initial-branch=main", remote);

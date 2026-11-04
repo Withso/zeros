@@ -30,7 +30,9 @@ export function parseGitCatalogRefs(output: string, prefix: string): GitCatalogB
 export function parseGitBranchRefs(output: string): GitBranchRef[] {
   const result: GitBranchRef[] = [], prefix = "refs/heads/";
   for (const line of output.split("\n")) {
-    const [ref, tipSha, date] = line.split("|");
+    const dateSeparator = line.lastIndexOf("|"), shaSeparator = line.lastIndexOf("|", dateSeparator - 1);
+    if (dateSeparator < 0 || shaSeparator < 0) continue;
+    const ref = line.slice(0, shaSeparator), tipSha = line.slice(shaSeparator + 1, dateSeparator), date = line.slice(dateSeparator + 1);
     if (ref.startsWith(prefix)) result.push({ name: ref.slice(prefix.length), tipSha, lastCommitDate: (parseInt(date, 10) || 0) * 1000 });
   }
   return result.sort((a, b) => b.lastCommitDate - a.lastCommitDate);
