@@ -179,7 +179,7 @@ export class GithubBroker {
     socket.setEncoding("utf8");
     socket.on("data", (data: string) => {
       if (answered) return;
-      buffer += data; if (Buffer.byteLength(buffer) > 1024) { answered = true; socket.destroy(); return; }
+      buffer += data; if (Buffer.byteLength(buffer) > 16_384) { answered = true; socket.destroy(); return; }
       if (!buffer.includes("\n")) return;
       answered = true;
       const reply = async () => {
@@ -187,9 +187,16 @@ export class GithubBroker {
         if (!request || typeof request !== "object" || !("kind" in request)) throw unavailable();
         if (request.kind === "changed") { this.changed(); return { ok: true }; }
         if (request.kind === "token" || request.kind === "user-token") return this.token(request.kind === "user-token" ? "gh" : "git");
-        if (request.kind === "report-failure" && "purpose" in request && (request.purpose === "git" || request.purpose === "gh") &&
-          "failedTokenSha256" in request && typeof request.failedTokenSha256 === "string" && request.failedTokenSha256.length === 64 && /^[a-f0-9]{64}$/.test(request.failedTokenSha256))
-          return this.token(request.purpose, request.failedTokenSha256);
+        if (request.kind === "report-failure" && "purpose" in request && (request.purpose === "git" || request.purpose === "gh")) {
+          if ("rejectedToken" in request) {
+            if (typeof request.rejectedToken !== "string" || !request.rejectedToken || request.rejectedToken.length > 8192 || /[\0\r\n]/.test(request.rejectedToken) || "failedTokenSha256" in request) throw unavailable();
+            // The credential stays within this VM's private socket. Only its
+            // equality fingerprint crosses the control-plane boundary.
+            return this.token(request.purpose, githubTokenHash(request.rejectedToken));
+          }
+          if ("failedTokenSha256" in request && typeof request.failedTokenSha256 === "string" && request.failedTokenSha256.length === 64 && /^[a-f0-9]{64}$/.test(request.failedTokenSha256))
+            return this.token(request.purpose, request.failedTokenSha256);
+        }
         throw unavailable();
       };
       void reply().then(value => { if (!socket.destroyed) socket.end(JSON.stringify(value) + "\n"); }, error => {

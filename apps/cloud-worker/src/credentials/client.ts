@@ -1,12 +1,12 @@
 import { connect, type Socket } from "node:net";
 import { spawn } from "node:child_process";
 import { workerChildEnvironment } from "../drivers/shared/agent-environment";
-import { githubEnvironment, githubTokenHash } from "./github";
+import { githubEnvironment } from "./github";
 import { githubAuthenticationError, githubAuthenticationMessage, GITHUB_SOCKET_TIMEOUT_MS, type GithubAuthenticationError } from "./github-failure";
 
 const unavailable = () => githubAuthenticationError();
 export function brokerRequest(socketPath: string, kind: "token" | "user-token" | "changed" | "report-failure",
-  failure?: { purpose: "git" | "gh"; failedTokenSha256: string }): Promise<Record<string, unknown>> {
+  failure?: { purpose: "git" | "gh"; rejectedToken: string }): Promise<Record<string, unknown>> {
   return new Promise((resolve, reject) => {
     const validatedPath = /^\/tmp\/zeros-github-[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\/github\.sock$/.exec(socketPath)?.[0];
     // A JavaScript end anchor can match before a final newline.
@@ -90,7 +90,7 @@ export async function runGh(args: string[], source: NodeJS.ProcessEnv = process.
   const env = { ...workerChildEnvironment(source, wiring), GH_TOKEN: login, GH_HOST: "github.com", GH_PROMPT_DISABLED: "1" };
   const result = await execute(args, env), code = typeof result === "number" ? result : result.code;
   if (code !== 0 && typeof result !== "number" && result.unauthorized)
-    await brokerRequest(socketPath, "report-failure", { purpose: "gh", failedTokenSha256: githubTokenHash(login) }).catch(error => { process.stderr.write(githubAuthenticationMessage(error) + "\n"); });
+    await brokerRequest(socketPath, "report-failure", { purpose: "gh", rejectedToken: login }).catch(error => { process.stderr.write(githubAuthenticationMessage(error) + "\n"); });
   const pr = args.indexOf("pr"), api = args.indexOf("api");
   const mutation = (pr >= 0 && ["create", "edit", "ready", "merge", "close", "reopen", "review", "comment"].includes(args[pr + 1])) || (api >= 0 && args.some(arg => /^(POST|PATCH|PUT|DELETE)$/.test(arg)));
   if (code === 0 && mutation) await brokerRequest(socketPath, "changed").catch(() => {});
@@ -113,7 +113,7 @@ export async function gitCredential(operation: string, input: string, socketPath
   if (operation === "get") return `username=x-access-token\npassword=${await token(socketPath)}\n\n`;
   if (operation === "erase") {
     const rejected = fields.get("password");
-    if (rejected) await brokerRequest(socketPath, "report-failure", { purpose: "git", failedTokenSha256: githubTokenHash(rejected) });
+    if (rejected) await brokerRequest(socketPath, "report-failure", { purpose: "git", rejectedToken: rejected });
   } else if (operation !== "store") throw unavailable();
   return "";
 }
