@@ -533,8 +533,10 @@ function NativeAgentBrowserTab({ tab, active, scope }: BrowserTabProps) {
   const placeholder = blockingOverlayOpen
     ? null
     : surfaceError
-      ? managed
-        ? "Retry to load the preview."
+      ? // In a tab the failure is the one row under the toolbar, with its
+        // Retry; the page area doesn't repeat it.
+        managed
+        ? null
         : surfaceError
       : closed
         ? "This browser session has closed. The agent can open it again."
@@ -550,7 +552,6 @@ function NativeAgentBrowserTab({ tab, active, scope }: BrowserTabProps) {
         <PanelHeader size="window" className="h-9 px-1.5">
           <IconButton
             size="standard"
-            className="text-fg2 hover:text-fg1 size-6 disabled:opacity-40"
             disabled={
               !browserSessionId ||
               browserLocked ||
@@ -563,7 +564,6 @@ function NativeAgentBrowserTab({ tab, active, scope }: BrowserTabProps) {
           </IconButton>
           <IconButton
             size="standard"
-            className="text-fg2 hover:text-fg1 size-6 disabled:opacity-40"
             disabled={
               !browserSessionId ||
               browserLocked ||
@@ -576,7 +576,6 @@ function NativeAgentBrowserTab({ tab, active, scope }: BrowserTabProps) {
           </IconButton>
           <IconButton
             size="standard"
-            className="text-fg2 hover:text-fg1 size-6 disabled:opacity-40"
             disabled={!browserSessionId || browserLocked}
             onClick={() => void control("reload")}
             label="Reload"
@@ -594,7 +593,7 @@ function NativeAgentBrowserTab({ tab, active, scope }: BrowserTabProps) {
               navigate();
             }}
           >
-            <div className="bg-bg2 focus-within:border-highlighted-bright flex h-6 items-center rounded-sm border border-transparent px-2">
+            <div className="bg-bg2 focus-within:border-highlighted-bright flex h-7 items-center rounded-md border border-transparent px-2">
               {activity?.faviconDataUrl ? (
                 <img
                   src={activity.faviconDataUrl}
@@ -622,7 +621,7 @@ function NativeAgentBrowserTab({ tab, active, scope }: BrowserTabProps) {
                 autoCorrect="off"
                 autoCapitalize="off"
                 placeholder="Search or enter URL"
-                className="text-fg1 placeholder:text-fg3 min-w-0 flex-1 border-0 bg-transparent p-0 text-sm outline-none disabled:cursor-not-allowed"
+                className="text-fg1 placeholder:text-fg3 min-w-0 flex-1 border-0 bg-transparent p-0 text-xs leading-4.5 outline-none disabled:cursor-not-allowed"
               />
             </div>
           </form>
@@ -632,7 +631,6 @@ function NativeAgentBrowserTab({ tab, active, scope }: BrowserTabProps) {
             <DropdownMenuTrigger asChild>
               <IconButton
                 size="standard"
-                className="text-fg2 hover:text-fg1 data-[state=open]:bg-bg2-hover data-[state=open]:text-fg1 size-6"
                 label="More browser actions"
               >
                 <MoreHorizontal size={14} />
@@ -2244,7 +2242,6 @@ function BrowserChrome({
     <PanelHeader size="window" className="h-9 px-1.5">
       <IconButton
         size="standard"
-        className="text-fg2 hover:text-fg1 size-6 disabled:opacity-40"
         disabled={!state.canGoBack}
         onClick={back}
         label="Back"
@@ -2253,7 +2250,6 @@ function BrowserChrome({
       </IconButton>
       <IconButton
         size="standard"
-        className="text-fg2 hover:text-fg1 size-6 disabled:opacity-40"
         disabled={!state.canGoForward}
         onClick={forward}
         label="Forward"
@@ -2262,7 +2258,6 @@ function BrowserChrome({
       </IconButton>
       <IconButton
         size="standard"
-        className="text-fg2 hover:text-fg1 size-6"
         onClick={reload}
         label="Reload"
       >
@@ -2277,7 +2272,7 @@ function BrowserChrome({
       <form onSubmit={handleSubmit} className="min-w-0 flex-1">
         <div
           className={[
-            "bg-bg2 flex h-6 w-full items-center rounded-sm border border-transparent px-2 transition-colors",
+            "bg-bg2 flex h-7 w-full items-center rounded-md border border-transparent px-2 transition-colors",
             electron ? "focus-within:border-highlighted-bright" : "opacity-60",
           ].join(" ")}
           onMouseDown={(e) => {
@@ -2318,7 +2313,7 @@ function BrowserChrome({
             autoCorrect="off"
             autoCapitalize="off"
             aria-label="Browser URL"
-            className="text-fg1 placeholder:text-fg3 min-w-0 flex-1 border-0 bg-transparent p-0 text-sm outline-none disabled:cursor-not-allowed"
+            className="text-fg1 placeholder:text-fg3 min-w-0 flex-1 border-0 bg-transparent p-0 text-xs leading-4.5 outline-none disabled:cursor-not-allowed"
           />
         </div>
       </form>
@@ -2329,15 +2324,10 @@ function BrowserChrome({
         <Tooltip label="Design mode" shortcut="⌘⇧D">
           <IconButton
             size="standard"
-            className={[
-              "size-6",
-              designModeActive
-                ? "bg-bg2-hover text-fg1"
-                : "text-fg2 hover:text-fg1",
-              // Design/Canvas are plain toggles over the live iframe. Avoid a
-              // focus-visible carry-over when focus bounces through the page.
-              "focus-visible:border-transparent focus-visible:ring-0",
-            ].join(" ")}
+            // Design/Canvas are plain toggles over the live iframe (pressed is
+            // the shared toggle look). Avoid a focus-visible carry-over when
+            // focus bounces through the page.
+            className="focus-visible:border-transparent focus-visible:ring-0"
             onClick={() => setDesignMode(!designModeActive)}
             disabled={!electron || floating}
             aria-pressed={designModeActive}
@@ -2351,13 +2341,7 @@ function BrowserChrome({
         <Tooltip label="Canvas mode" shortcut={"⌘\\"}>
           <IconButton
             size="standard"
-            className={[
-              "size-6",
-              canvasMode
-                ? "bg-bg2-hover text-fg1"
-                : "text-fg2 hover:text-fg1",
-              "focus-visible:border-transparent focus-visible:ring-0",
-            ].join(" ")}
+            className="focus-visible:border-transparent focus-visible:ring-0"
             onClick={onToggleCanvasMode}
             disabled={floating}
             aria-pressed={canvasMode}
@@ -2370,10 +2354,6 @@ function BrowserChrome({
       <Tooltip label={floating ? "Stop floating" : "Float preview"}>
         <IconButton
           size="standard"
-          className={[
-            "size-6",
-            floating ? "bg-bg2-hover text-fg1" : "text-fg2 hover:text-fg1",
-          ].join(" ")}
           onClick={onToggleFloat}
           disabled={!canFloat}
           aria-pressed={floating}
@@ -2387,10 +2367,6 @@ function BrowserChrome({
         <DropdownMenuTrigger asChild>
           <IconButton
             size="standard"
-            className={[
-              "text-fg2 hover:text-fg1 size-6",
-              "data-[state=open]:bg-bg2-hover data-[state=open]:text-fg1",
-            ].join(" ")}
             disabled={!electron}
             label="More browser actions"
           >

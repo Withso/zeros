@@ -22,6 +22,14 @@ describe("EmptyState", () => {
     expect(markup).toContain('data-slot="empty-state"');
   });
 
+  it("puts an optional title between the icon and the line", () => {
+    const markup = render({ title: "Setup" });
+    expect(markup).toMatch(
+      /<p class="text-fg1 m-0 -mb-1\.5 text-xs leading-4\.5 font-medium">Setup<\/p><p class="text-fg2/,
+    );
+    expect(render()).not.toContain("font-medium");
+  });
+
   it("adds an action only when one is given and keeps caller hooks", () => {
     expect(render()).not.toContain('class="mt-1"');
     const withAction = render({

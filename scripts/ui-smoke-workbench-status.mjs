@@ -638,9 +638,11 @@ export async function runWorkbenchStatusSmoke({ page, check, harnessBase }) {
   await expect(narrowRetry).toBeVisible();
   const retryBox = await narrowRetry.boundingBox();
   expect(retryBox.x + retryBox.width).toBeLessThanOrEqual(240);
-  await expect(banner().locator(".line-clamp-2")).toHaveCSS(
-    "-webkit-line-clamp",
-    "2",
+  // One 32px banner row: a long message truncates to one line.
+  await expect(banner()).toHaveCSS("height", "32px");
+  await expect(banner().locator("[role=status] .truncate")).toHaveCSS(
+    "text-overflow",
+    "ellipsis",
   );
   await page.emulateMedia({ reducedMotion: "reduce" });
   await page.evaluate(() => {
@@ -652,7 +654,7 @@ export async function runWorkbenchStatusSmoke({ page, check, harnessBase }) {
   await screenshot("files", "setting-up-narrow", "light");
   await page.emulateMedia({ reducedMotion: "no-preference" });
   check(
-    "Narrow Light layout keeps the action visible, clamps copy, and respects reduced motion",
+    "Narrow Light layout keeps the action visible, keeps copy to one row, and respects reduced motion",
     true,
   );
 

@@ -544,3 +544,15 @@ Each landed step appends one line: date, workstream, what landed, evidence.
   Changes before the Changes sub-tab can go, so it has a code-level plan in
   `plans.md` with the other larger changes (Changes cards, hunk review,
   conflicts in place, diff gutter signs, comment author marks).
+- 2026-11-04 · 4, 5 · Terminal, Browser, Simulators: the shared EmptyState
+  takes an optional title (icon, title, one line, then the action), and the
+  Setup and Run states use it ("Setup", or the action's name with its
+  command or last outcome, then Start); the outcome badge that repeated the
+  line is gone. A blocked terminal start is the tab's one banner row and
+  the terminal stays empty; without a banner it still prints. The Browser
+  toolbar holds 28px tools and a 28px omnibox with 6px corners and 13px
+  text, its toggles use the shared pressed look, and a failure in a tab is
+  only the banner row. The simulator check is one 32px status row (icon,
+  what it found with the detail in fg3, the fix, then a refresh icon for
+  Check again) instead of a filled card. The workbench-status smoke now
+  pins the one-row banner.

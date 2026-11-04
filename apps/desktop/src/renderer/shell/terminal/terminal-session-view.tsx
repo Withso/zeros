@@ -191,6 +191,9 @@ export const TerminalSessionView = React.memo(function TerminalSessionView({
     },
     sessionId,
   );
+  // Read from the exit listener, which outlives the render it was made in.
+  const managedRef = useRef(managed);
+  managedRef.current = managed;
   const attachInFlightRef = useRef(false);
   const reconnectPendingRef = useRef(false);
   const launchTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -731,6 +734,16 @@ export const TerminalSessionView = React.memo(function TerminalSessionView({
       if (term) {
         const code = evt.exitCode ?? evt.signal;
         if (exitPolicy.restartBlocked) {
+          // In a tab, what failed is the one row under the toolbar and the
+          // terminal stays empty; without a banner it prints here.
+          if (managedRef.current) {
+            setReadFailure(
+              new Error(
+                `Terminal failed to start: ${exitPolicy.detail}. ${exitPolicy.recovery}`,
+              ),
+            );
+            return;
+          }
           term.writeln(
             `\r\n\x1b[31m[terminal failed to start — ${exitPolicy.detail}]\x1b[0m`,
           );

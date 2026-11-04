@@ -17,6 +17,7 @@ import React, {
   type ReactNode,
 } from "react";
 import { IconButton } from "@/renderer/shared/ui/primitives/icon-button";
+import { EmptyState } from "@/renderer/shared/ui/layout/empty-state";
 import {
   PanelTop,
   ChevronDown,
@@ -1261,19 +1262,15 @@ function RunActionOverlay({
             <div className="text-fg2 text-xs">Starting {action.name}…</div>
           </Stack>
         ) : (
-          <>
-            <Stack
-              gap={3}
-              align="center"
-              justify="center"
-              className="h-full min-h-0 px-6 text-center"
-            >
-              <DynamicIcon
-                name={action.icon}
-                className="text-muted-fg size-10"
-                strokeWidth={1}
-                aria-hidden
-              />
+          // The titled empty state: the action's icon and name, the command
+          // or the last outcome, then Start. The line is the outcome, so no
+          // badge repeats it.
+          <EmptyState
+            icon={(props: { className?: string }) => (
+              <DynamicIcon name={action.icon} {...props} />
+            )}
+            title={action.name}
+            action={
               <Tooltip label={action.command}>
                 <Button variant="secondary" size="sm" onClick={onStart}>
                   {outcome && <RotateCw />}
@@ -1282,16 +1279,14 @@ function RunActionOverlay({
                     : `Start ${action.name}`}
                 </Button>
               </Tooltip>
-              <div className="text-muted-fg max-w-sm truncate font-mono text-xs">
-                {outcome ? RUN_LAST_RUN_COPY[outcome] : action.command}
-              </div>
-            </Stack>
-            {outcome && (
-              <div className="absolute right-3 bottom-3">
-                <RunStatusBadge outcome={outcome} />
-              </div>
+            }
+          >
+            {outcome ? (
+              RUN_LAST_RUN_COPY[outcome]
+            ) : (
+              <span className="block truncate font-mono">{action.command}</span>
             )}
-          </>
+          </EmptyState>
         )}
       </div>
     );
@@ -1325,20 +1320,17 @@ function RunActionOverlay({
 function RunAddEmpty() {
   const openRunActions = useOpenScriptsSettings("run-actions");
   return (
-    <Stack
-      gap={3}
-      align="center"
-      justify="center"
-      className="h-full min-h-0 px-6 text-center"
+    <EmptyState
+      icon={Play}
+      title="Run"
+      action={
+        <Button variant="secondary" size="sm" onClick={() => openRunActions()}>
+          Add run script
+        </Button>
+      }
     >
-      <Play className="text-muted-fg size-10" strokeWidth={1} aria-hidden />
-      <Button variant="secondary" size="sm" onClick={() => openRunActions()}>
-        Add run script
-      </Button>
-      <div className="text-fg2 max-w-sm text-xs">
-        Run a dev server or test command in this workspace.
-      </div>
-    </Stack>
+      Run a dev server or test command in this workspace.
+    </EmptyState>
   );
 }
 
