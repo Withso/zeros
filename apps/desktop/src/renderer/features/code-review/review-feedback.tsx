@@ -12,7 +12,7 @@ function OwnerFeedback({ review }: { review: CodeReviewController }) {
   const message =
     review.error?.message ??
     (externalError instanceof Error ? externalError.message : externalError);
-  const notice = review.external?.notice;
+  const notice = review.notice ?? review.external?.notice;
   const loading = review.loading || review.external?.loading;
   const [moreBusy, setMoreBusy] = useState(false);
   const [moreError, setMoreError] = useState<string | null>(null);

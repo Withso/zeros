@@ -48,7 +48,7 @@ import {
 } from "./review-thread-model";
 
 const EMPTY_THREADS: readonly CodeReviewThread[] = Object.freeze([]);
-const CLOUD_UNAVAILABLE = new Error("Open the cloud workspace to view review comments.");
+const CLOUD_UNAVAILABLE = "Open the cloud workspace to view review comments.";
 const IDLE: AsyncCacheSnapshot<CodeReviewCollection> = Object.freeze({
   data: undefined,
   loading: false,
@@ -242,6 +242,7 @@ export interface CodeReviewController {
   external?: CodeReviewExternalSource;
   loading: boolean;
   error: Error | null;
+  notice?: string;
   refresh: () => void | Promise<void>;
   partial?: boolean;
   nextCursor?: string;
@@ -445,7 +446,8 @@ export function useCodeReview({
     drafts,
     external,
     loading: workspaceCommentsAvailable && snapshot.loading,
-    error: cloudTarget && !workspaceCommentsAvailable ? CLOUD_UNAVAILABLE : snapshot.error,
+    error: cloudTarget && !workspaceCommentsAvailable ? null : snapshot.error,
+    notice: cloudTarget && !workspaceCommentsAvailable ? CLOUD_UNAVAILABLE : undefined,
     refresh,
     partial: snapshot.data?.partial,
     nextCursor: snapshot.data?.nextCursor,

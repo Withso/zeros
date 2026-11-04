@@ -84,7 +84,9 @@ export class CloudWorker {
   private disposed = false;
   private started = false;
   private stopping?: Promise<void>;
+  private acceptedConfigurationRevision?: bigint;
   private configurationRevision?: bigint;
+  private configuredReviewAvailable = false;
   private idle?: boolean;
   private activeMutations = 0;
   private lastMutationAt = -Infinity;
@@ -253,20 +255,19 @@ export class CloudWorker {
   private async configure(config: WorkerConfig): Promise<void> {
     if (this.disposed || (!this.scope && this.stopping)) return;
     const started = performance.now(), initial = !this.scope;
-    const reviewAvailable = this.reviews?.enabled === true;
+    const reviewAvailable = this.configuredReviewAvailable;
     const timing = this.options.transport.reportTiming?.bind(this.options.transport);
     const revision = BigInt(config.loginRevision);
-    if (this.configurationRevision !== undefined && revision < this.configurationRevision) return;
+    if (this.acceptedConfigurationRevision !== undefined && revision < this.acceptedConfigurationRevision) return;
     this.githubUserTokensEnabled = config.githubUserTokens === 1;
     if (this.options.workspaceId && config.workspace.id !== this.options.workspaceId) throw new Error("Workspace identity changed.");
     const scope = new WorkspaceScope(config.workspace);
     if (this.scope && (this.scope.key !== scope.key || this.scope.root !== scope.root || this.scope.workspace.repository !== scope.workspace.repository)) throw new Error("Workspace identity changed.");
-    if (this.reviews && !this.stopping) {
-      this.reviews.validateConfiguration(config.codeReview);
-      if (this.agents!.fenceReviewConfiguration(config.codeReview)) {
-        this.reviews.suspend();
-        this.workspaceMcp.revoke();
-      }
+    if (this.reviews && !this.stopping) this.reviews.validateConfiguration(config.codeReview);
+    this.acceptedConfigurationRevision = revision;
+    if (this.reviews && !this.stopping && this.agents!.fenceReviewConfiguration(config.codeReview)) {
+      this.reviews.suspend();
+      this.workspaceMcp.revoke();
     }
     if (this.configurationRevision !== revision) { this.tokens.invalidate(); this.githubCredentials.invalidate(); }
     await configureGitIdentity(this.options.homeDirectory ?? homedir(), config.gitIdentity);
@@ -294,6 +295,7 @@ export class CloudWorker {
     } else if (this.promptInbox) { await this.promptInbox.dispose(); this.promptInbox = undefined; }
     this.configurationRevision = revision;
     if (!initial && reviewAvailable !== this.reviews?.enabled) await this.broadcast(this.readyFrame());
+    this.configuredReviewAvailable = this.reviews?.enabled === true;
     await this.reportIdle(true);
     if (initial) recordStartupTiming("worker_configure", started, timing);
   }

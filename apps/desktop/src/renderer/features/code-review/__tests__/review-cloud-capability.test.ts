@@ -38,7 +38,8 @@ it("reacts to capability changes without waking, retains the same owner's snapsh
   for (const subscribe of f.subscriptions.splice(0)) cleanups.push(subscribe(changed));
   effects(); await unavailable.refresh();
   expect(f.list).not.toHaveBeenCalled();
-  expect(unavailable.error?.message).toMatch(/Open.*workspace/);
+  expect(unavailable.error).toBeNull();
+  expect(unavailable.notice).toMatch(/Open.*workspace/);
   f.available = true; emit("ENGINE_READY"); expect(changed).toHaveBeenCalled();
   useCodeReview(input); effects(); await vi.waitFor(() => expect(f.list).toHaveBeenCalledOnce());
   await vi.waitFor(() => expect(useCodeReview(input).threads).toHaveLength(1));
@@ -48,7 +49,8 @@ it("reacts to capability changes without waking, retains the same owner's snapsh
   expect(stopped.ownerKey).toBe(connected.ownerKey);
   expect(stopped.threads[0].comments).toEqual(thread.comments);
   expect(stopped.threads[0]).toMatchObject({ canReply: false, canResolve: false });
-  expect(stopped.workspaceCommentsAvailable).toBe(false); expect(stopped.error?.message).toMatch(/Open.*workspace/);
+  expect(stopped.workspaceCommentsAvailable).toBe(false); expect(stopped.error).toBeNull();
+  expect(stopped.notice).toMatch(/Open.*workspace/);
   await stopped.refresh(); await stopped.loadMore?.();
   expect(f.list).toHaveBeenCalledOnce();
 });

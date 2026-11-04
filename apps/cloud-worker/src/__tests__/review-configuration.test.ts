@@ -9,6 +9,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { CloudWorker } from "../worker";
 import { WorkspaceService } from "../workspace/service";
 import { WorkerCodeReview } from "../workspace/code-review";
+import { Agents } from "../agents";
 import { commandRunner } from "../workspace/commands";
 import { CLIENT_A, WORKSPACE_ID, FakeDriver, FakeRelay, browserFrame, config } from "./worker-fixtures";
 
@@ -90,4 +91,52 @@ describe("exact snapshot review configuration revocation", () => {
     if (boundary === "stale") await receive; else await expect(receive).rejects.toThrow(/identity changed/);
     expect((await f.client.listTools()).tools).toHaveLength(4);
   });
+});
+
+it("does not restore revoked review authority from an older config after a newer configuration fails in unrelated I/O", async () => {
+  const f = await fixture(), { codeReview: _review, ...disabled } = f.configuration;
+  vi.spyOn(WorkspaceService.prototype, "configure").mockRejectedValueOnce(new Error("held service I/O failed"));
+  await expect(f.relay.receive({ ...disabled, loginRevision: "2" })).rejects.toThrow("held service I/O failed");
+  expect((f.worker as unknown as { reviews: WorkerCodeReview }).reviews.enabled).toBe(false);
+  await f.relay.receive({ ...f.configuration, loginRevision: "1" });
+  const request = browserFrame("WORKSPACE_REQUEST", { op: "codeReview.create", params: {
+    workspaceId: WORKSPACE_ID, anchor: { path: "example.ts", side: "new", startLine: 1, endLine: 1, revision: "base" }, body: "older config write",
+  } });
+  await f.relay.request(CLIENT_A, request);
+  expect(f.relay.response(request.id)?.type).toBe("WORKSPACE_ERROR");
+});
+
+it("retries an accepted revision and publishes its capability only after required services succeed", async () => {
+  const f = await fixture(), { codeReview: _review, ...disabled } = f.configuration;
+  expect(f.relay.bridge("ENGINE_READY").at(-1)?.frame).toMatchObject({ capabilities: expect.arrayContaining(["code-review-v1"]) });
+  const services = vi.spyOn(WorkspaceService.prototype, "configure").mockRejectedValueOnce(new Error("service unavailable"));
+  const agents = vi.spyOn(Agents.prototype, "configure");
+  await expect(f.relay.receive({ ...disabled, loginRevision: "2" })).rejects.toThrow("service unavailable");
+  expect(agents.mock.calls.length).toBe(0);
+  expect((f.worker as unknown as { configurationRevision: bigint }).configurationRevision).toBe(0n);
+  await f.relay.receive({ ...disabled, loginRevision: "2" });
+  expect(services.mock.calls.length).toBe(2);
+  expect(agents.mock.calls.length).toBe(1);
+  expect((f.worker as unknown as { configurationRevision: bigint }).configurationRevision).toBe(2n);
+  expect((f.worker as unknown as { reviews: WorkerCodeReview }).reviews.enabled).toBe(false);
+  expect(f.relay.bridge("ENGINE_READY").at(-1)?.frame).not.toHaveProperty("capabilities", expect.arrayContaining(["code-review-v1"]));
+  await expect(f.client.listTools()).rejects.toThrow();
+  await f.relay.receive({ ...f.configuration, loginRevision: "3" });
+  expect(f.relay.bridge("ENGINE_READY").at(-1)?.frame).toMatchObject({ capabilities: expect.arrayContaining(["code-review-v1"]) });
+  const request = browserFrame("WORKSPACE_REQUEST", { op: "codeReview.create", params: {
+    workspaceId: WORKSPACE_ID, anchor: { path: "example.ts", side: "new", startLine: 1, endLine: 1, revision: "base" }, body: "new configuration write",
+  } });
+  await f.relay.request(CLIENT_A, request);
+  expect(f.relay.response(request.id)?.type).toBe("WORKSPACE_RESPONSE");
+});
+
+it.each(["workspace", "creator"])("does not let a rejected %s identity fence a valid lower configuration revision", async boundary => {
+  const f = await fixture(), { codeReview: _review, ...disabled } = f.configuration;
+  const rejected = boundary === "workspace"
+    ? { ...disabled, loginRevision: "9", workspace: { ...disabled.workspace, id: CLIENT_A } }
+    : { ...f.configuration, loginRevision: "9", codeReview: { userId: CLIENT_A } };
+  await expect(f.relay.receive(rejected)).rejects.toThrow(/identity changed/);
+  await f.relay.receive({ ...disabled, loginRevision: "1" });
+  expect((f.worker as unknown as { reviews: WorkerCodeReview }).reviews.enabled).toBe(false);
+  await expect(f.client.listTools()).rejects.toThrow();
 });
