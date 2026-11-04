@@ -4,6 +4,14 @@
 // root, as markup serialized from a web component does, and authors a class
 // rule beside a universal reset.
 
+async function waitForScroll(input) {
+  for (let attempt = 0; attempt < 40; attempt += 1) {
+    if ((await input.evaluate((element) => element.scrollLeft)) > 0) return true;
+    await input.page().waitForTimeout(50);
+  }
+  return false;
+}
+
 export async function runDesignShadowLayersSmoke({ page, check }) {
   const origin = new URL(page.url()).origin;
   await page.goto(
@@ -54,9 +62,26 @@ export async function runDesignShadowLayersSmoke({ page, check }) {
     "Advanced lists authored properties without dedicated controls and hides shared resets",
     JSON.stringify(rows) === JSON.stringify(["cursor", "user-select", "--card-gap"]),
   );
+  const classes = advanced.locator("[data-design-advanced-classes]");
+  const classValue = classes.getByLabel("class");
   check(
-    "Advanced names the layer's classes",
-    (await advanced.locator("[data-design-advanced-classes]").textContent())?.includes("card") === true,
+    "Advanced names the layer's classes in a read-only field",
+    (await classValue.inputValue()).includes("card") && (await classValue.getAttribute("readonly")) !== null,
+  );
+  const restingFill = await classes.evaluate((element) => getComputedStyle(element).backgroundColor);
+  await classes.hover();
+  check(
+    "The read-only class field does not react to the pointer",
+    (await classes.evaluate((element) => getComputedStyle(element).backgroundColor)) === restingFill,
+  );
+  // A long class list stays whole: the field scrolls instead of truncating.
+  await page.mouse.wheel(400, 0);
+  check(
+    "The read-only class field scrolls to reveal its whole value",
+    await classValue.evaluate(
+      (input) => input.scrollWidth > input.clientWidth,
+    ) &&
+      (await waitForScroll(classValue)),
   );
 
   await advanced.getByRole("button", { name: "Add property" }).click();

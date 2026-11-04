@@ -39,6 +39,7 @@ export interface DesignLintViolation {
     | "oid-missing"
     | "oid-duplicate"
     | "unknown-token"
+    | "unknown-class"
     | "no-external-url"
     | "component-undefined"
     | "component-invalid"

@@ -109,7 +109,13 @@ describe("Advanced section presentation", () => {
         onCommit: () => {},
       }),
     );
-    expect(markup).toContain("card  card--raised");
+    // The classes are a read-only field like the other rows: the whole value,
+    // labelled, scrollable rather than truncated, and never editable.
+    const classes = markup.match(/<div[^>]*data-design-advanced-classes=""[^>]*>.*?<\/div>/s)?.[0] ?? "";
+    expect(classes).toContain('data-design-field-readonly=""');
+    expect(classes).toMatch(/<label[^>]*for="([^"]+)"[^>]*>class<\/label>.*<input[^>]*id="\1"/s);
+    expect(classes).toMatch(/<input[^>]*readonly=""[^>]*value="card {2}card--raised"/);
+    expect(classes).not.toContain("truncate");
     expect(markup).toContain('<output data-field="cursor">pointer</output>');
     expect(markup).toContain('<output data-field="z-index">3</output>');
     expect(markup).not.toContain('data-field="padding"');

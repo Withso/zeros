@@ -124,6 +124,7 @@ import {
   readDesignStyleSources,
 } from "./style-sources";
 import { readDesignFontCatalog } from "./style-fonts";
+import { designKnownClasses, type DesignKnownClasses } from "./style-classes";
 import { mergeDesignThemes, readDesignThemeCatalog } from "./themes";
 
 export { listDesignAssets,type DesignAssetSummary } from "./assets";
@@ -418,11 +419,13 @@ async function mutationResultUnlocked(
     height: geometry.h,
   }, file);
   const knownTokens = (await designKnownTokens(workspacePath))(file);
+  const knownClasses = await designKnownClasses(workspacePath);
   const linted = await lintFrame(
     workspacePath,
     file,
     { healOids: false },
     knownTokens,
+    knownClasses,
     source,
   );
   const violations = linted.violations.sort(
@@ -512,12 +515,14 @@ async function mutateDesignFrameSource(
     const changed = updated !== source;
     if (changed) {
       const knownTokens = (await designKnownTokens(workspacePath))(file);
+      const knownClasses = await designKnownClasses(workspacePath);
       const [baseline, linted] = await Promise.all([
         lintFrame(
           workspacePath,
           file,
           { healOids: false },
           knownTokens,
+          knownClasses,
           source,
         ),
         lintFrame(
@@ -525,6 +530,7 @@ async function mutateDesignFrameSource(
           file,
           { healOids: false },
           knownTokens,
+          knownClasses,
           healed,
         ),
       ]);
@@ -1391,6 +1397,7 @@ async function lintFrame(
   file: string,
   options: { healOids: boolean },
   knownTokens: Set<string>,
+  knownClasses: DesignKnownClasses,
   sourceOverride?: string,
 ): Promise<{ violations: DesignLintViolation[]; healedOids: number }> {
   const target = path.join(
@@ -1582,6 +1589,39 @@ async function lintFrame(
     undefined,
     file,
   );
+  const availableClasses = componentExpansion.errors.length === 0
+    ? await knownClasses(file, componentExpansion.html, componentExpansion.html === source ? document : undefined)
+    : null;
+  if (availableClasses) {
+    const unknown = new Map<string, (typeof records)[number]>();
+    const checked = new Set<string>();
+    for (const record of records) {
+      const value = record.element.attrs.find((attribute) => attribute.name === "class")?.value;
+      if (!value) continue;
+      for (const name of value.split(/[\t\n\f\r ]+/)) {
+        if (!name || checked.has(name)) continue;
+        checked.add(name);
+        if (!availableClasses.has(name)) unknown.set(name, record);
+      }
+    }
+    for (const [index, [name, { element, oid }]] of [...unknown].entries()) {
+      const remainder = unknown.size > 50 && index === 49;
+      violations.push(violationAt(
+        file,
+        "unknown-class",
+        remainder ? `${unknown.size - 49} more classes have no CSS in this frame.` : `Class "${name}" has no CSS in this frame's styles.`,
+        element.sourceCodeLocation?.attrs?.class ?? element.sourceCodeLocation?.startTag,
+        {
+          severity: "warning",
+          oid: oid ?? undefined,
+          fix: remainder
+            ? "Use existing classes or utilities from the application's styles, define them in the frame's <style> or a Design stylesheet, or remove them."
+            : `Use an existing class or utility from the application's styles, define .${name} in the frame's <style> or a Design stylesheet, or remove it.`,
+        },
+      ));
+      if (remainder) break;
+    }
+  }
   const usedComponents = new Set(componentExpansion.usedComponents);
   // Components expand in light content only; the expander never enters a
   // shadow root, so a zd-* tag there is not an instance.
@@ -1638,6 +1678,7 @@ async function lintDesignDocumentUnlocked(
     ? [(await designFrameTarget(workspacePath, frame)).file]
     : await discoverFrameFiles(workspacePath, context);
   const knownTokens = await designKnownTokens(workspacePath, context);
+  const knownClasses = await designKnownClasses(workspacePath, context);
   const violations: DesignLintViolation[] = [];
   let healedOids = 0;
   for (const file of files) {
@@ -1648,6 +1689,7 @@ async function lintDesignDocumentUnlocked(
         file,
         { healOids: options.healOids !== false },
         knownTokens(file),
+        knownClasses,
       );
     } catch (error) {
       if (!(error instanceof DesignRenderBudgetError)) throw error;

@@ -73,6 +73,7 @@ import { scrubDesignNumericValue } from "./design-style-values";
 import {
   DesignThemeSourceRail,
   DesignThemeSourceStatus,
+  designStyleSourceStylesNote,
   designStyleSourceTokens,
 } from "./design-theme-sources";
 import { designSourceFixBrief, designSyncBrief } from "./design-agent-brief";
@@ -498,6 +499,7 @@ export const DesignThemeEditor = React.memo(function DesignThemeEditor({
     [selectedSource],
   );
   const visibleTokens = sourceTokens ?? tokens;
+  const stylesNote = selectedSource ? designStyleSourceStylesNote(selectedSource) : null;
   // Sources always show, so an unsynced directory offers "Ask agent to sync".
   const showSources = Boolean(workspaceId);
   const askAgent = useAskDesignAgent(workspaceFolder);
@@ -946,6 +948,8 @@ export const DesignThemeEditor = React.memo(function DesignThemeEditor({
                     selectedId={selectedSource?.id ?? null}
                     onSelect={(id) => {
                       setSourceId(id);
+                      // A type chosen for another source could hide every row.
+                      setTypeFilter("all");
                       if (id !== null) {
                         setPasteOpen(false);
                         setNewVariableOpen(false);
@@ -966,7 +970,8 @@ export const DesignThemeEditor = React.memo(function DesignThemeEditor({
                     type === "all"
                       ? visibleTokens.length
                       : (tokenTypeCounts.get(type) ?? 0);
-                  if (type !== "all" && count === 0) return null;
+                  // The chosen type stays visible, so an emptied filter can be undone.
+                  if (type !== "all" && count === 0 && type !== typeFilter) return null;
                   return (
                     <button
                       key={type}
@@ -1497,6 +1502,9 @@ export const DesignThemeEditor = React.memo(function DesignThemeEditor({
                   <div className="zd-theme-empty">
                     <Palette aria-hidden="true" className="size-3.5" />
                     <span>No variables</span>
+                    {stylesNote ? (
+                      <span className="zd-theme-empty-note">{stylesNote}</span>
+                    ) : null}
                     {!readOnly && tokens.length === 0 ? (
                       <div className="zd-theme-empty-actions">
                         <Button

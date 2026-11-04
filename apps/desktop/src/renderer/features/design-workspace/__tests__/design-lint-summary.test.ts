@@ -46,6 +46,13 @@ describe("design lint review summary", () => {
     expect(lintReviewBadgeLabel(groups)).toBe("Review 2 rules");
   });
 
+  it("labels unknown-class warnings without promoting their severity", () => {
+    const first = { ruleId: "unknown-class", severity: "warning" as const, message: "Unknown class", file: "home.html", line: 2, column: 5 };
+    expect(groupDesignLintViolations([first, { ...first, line: 3 }])).toEqual([
+      { ruleId: "unknown-class", label: "Unknown classes", count: 2, first },
+    ]);
+  });
+
   it("names the exact first blocking file, line, and rule", () => {
     expect(
       blockingDesignLintReason({
