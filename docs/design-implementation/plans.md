@@ -124,3 +124,28 @@ it there with the layer-panel tests and the Design smokes. Long computed
 and theme values end in an ellipsis inside their field. A failed Git init
 is one red line under the text; the conflict pause lists its files in one
 quiet card that opens them in Changes.
+
+## 8. Web app: the dashboard, account pages and Ops
+
+Boards: `web-app.md`. The centred pages now share one shell
+(`apps/web/lib/page.ts`). What remains is per page and in the dashboard:
+
+- **Copy.** Each reason one line under 70 characters; titles that name the
+  state (Go to Zeros, Sign-in didn't finish); no dead ends (Open Zeros or Try
+  again on every failure, the GitHub expired button stays).
+- **Sign-in.** One page for WorkOS and the Auth0 rollback: Continue with
+  Google and Continue with GitHub, both primary with their logos, 260px wide.
+- **Dashboard** (`public/dashboard.css`, `public/dashboard.js`,
+  `lib/dashboard.mjs`): the mac Settings anatomy (256px sidebar, 32px rows
+  with 14px icons, 12px group labels, a 640px column, grouped cards with 12px
+  corners), cloud organizations only (Local is gone from the web), the
+  switcher as the first nav row, Sign out in Profile, Delete account as a
+  destructive-secondary in a normal group, the 400px dialog recipe, toasts
+  in the floating family.
+- **Account pages** become centred pages with one primary; **Ops**
+  (`public/ops.css`, `lib/ops.ts`) uses the dashboard shell with an Ops
+  badge beside the logo.
+
+Verify with `node --test apps/web/lib/*.test.mjs` and renders of each board
+in both themes; `check:web-deploy` checks the live Pages deployments and
+needs network access.

@@ -563,3 +563,9 @@ Each landed step appends one line: date, workstream, what landed, evidence.
   workspace and an unavailable directory use the shared empty state. The
   pages menu already puts the check at the end of the chosen row. The
   inspector, layer rows and the remaining Design states are in `plans.md`.
+- 2026-11-04 · 5 · Web app: every centred page shares one shell on the
+  app's tokens, so Light works: the Zeros logo top-left (16px mark, 12px
+  gap), a 32px mark centred with no container, an 18/24 title, one 13/18
+  line up to 560px, fit-width 28px actions that never underline, and quiet
+  12px lines; the GitHub hero comes down to the same scale. The dashboard,
+  account pages, Ops and the per-page copy are in `plans.md`.

@@ -117,7 +117,8 @@ function signOutUrl(env: Env): string {
 }
 
 function signOutLink(env: Env): string {
-  return `<a class="msg" href="${signOutUrl(env)}" style="display:inline-block;margin-top:1rem;color:#a1a1aa;text-decoration:underline;">Sign out</a>`;
+  // A quiet 12px line, never underlined.
+  return `<a class="msg" href="${signOutUrl(env)}" style="display:inline-block">Sign out</a>`;
 }
 
 async function dashboard(
