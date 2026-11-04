@@ -431,6 +431,18 @@ Cursor supports its native Plan mode and keeps Local's current lack of question
 response support. MCP elicitations remain unsupported in cloud. Older peers
 retain cancellation notices and do not advertise Plan controls.
 
+Claude can ask questions in Full access in both Local and cloud workspaces.
+The headless runtime receives a stdio permission-prompt channel and an
+`AskUserQuestion`-only hook; ordinary Full access tools still run without
+permission prompts. Human answers use the existing question cards. Dismissal,
+failed delivery, expiry or execution retirement denies the native question.
+Older cloud peers without interaction support receive neither the channel nor
+the hook. Gated modes retain their existing permission callbacks.
+
+Approving a Claude plan is `allow_once` for `ExitPlanMode`, as in Local. It does
+not approve subsequent tool calls in that native run: Claude exits Plan into
+its default permission mode, and the next Write can ask for a separate approval.
+
 When only a question or approval is blocking the turn, the worker reports idle;
 independent tools, background tasks, terminals, setup and file transfers still
 count as work. An unanswered cloud input expires 15 minutes after it was asked

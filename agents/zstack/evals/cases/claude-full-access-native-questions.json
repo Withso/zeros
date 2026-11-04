@@ -1,0 +1,9 @@
+{
+  "id": "claude-full-access-native-questions",
+  "kind": "replay",
+  "area": "cloud-worker",
+  "fixedBy": "pending",
+  "symptom": "Claude could not ask a user question in Full access because the headless CLI omitted AskUserQuestion when the permission-prompt channel was absent.",
+  "rule": "Verify tool availability and same-turn answers through the pinned SDK and native CLI using a loopback fixture API; option-shape and injected dialog tests cannot establish native routing. Preserve unrelated Full access tools and deny retired callbacks (zstack-verify, principle 16).",
+  "check": "pnpm --dir apps/cloud-worker exec vitest run src/drivers/claude/__tests__/native-question.test.ts src/drivers/claude/__tests__/question-hook.test.ts src/drivers/claude/__tests__/question-wire.test.ts"
+}
