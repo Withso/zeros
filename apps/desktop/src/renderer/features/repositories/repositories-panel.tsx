@@ -35,6 +35,7 @@ import {
 
 import { Button, Input, Textarea } from "../../shared/ui";
 import { CodeTextarea, Tooltip } from "@/renderer/shared/ui/primitives";
+import { MessageRow } from "@/renderer/shared/ui/primitives/message-row";
 import { HighlightedCode } from "../agent/renderers/highlighted-code";
 import { toast } from "../../shared/ui/primitives/elements";
 import { cn } from "@/renderer/shared/ui/cn";
@@ -134,7 +135,6 @@ import {
   isInheritedSource,
   ResetToInherited,
   SettingsActions,
-  SettingsEmpty,
   SettingsEmptyCard,
   SettingsField,
   SettingsList,
@@ -331,7 +331,7 @@ export function RawTomlEditor({
     <div className="flex min-w-0 flex-col gap-3">
       <div className="flex items-start justify-between gap-3">
         <div className="flex min-w-0 flex-col">
-          <p className="text-fg1 truncate text-[14px] font-medium">
+          <p className="text-fg1 truncate text-xs leading-4.5 font-medium">
             {settingsFileName(read?.path)}
           </p>
           <Tooltip label={read?.path}>
@@ -673,6 +673,8 @@ export function EnvironmentSection({
    *  stays disabled: every save writes the whole scope map, so editing on
    *  top of a failed read would wipe the stored variables. */
   const [vaultUnreadable, setVaultUnreadable] = useState(false);
+  /** Retry re-runs the same guarded read; nothing else changes the scope. */
+  const [readAttempt, setReadAttempt] = useState(0);
 
   useEffect(() => {
     let cancelled = false;
@@ -706,7 +708,7 @@ export function EnvironmentSection({
     return () => {
       cancelled = true;
     };
-  }, [scope]);
+  }, [scope, readAttempt]);
 
   // Provider API keys that agents receive at spawn, shown read-only and
   // presence-only so this panel truthfully shows agent env. A row shows iff a key
@@ -850,7 +852,7 @@ export function EnvironmentSection({
       title={layer === "user" ? undefined : "Secrets"}
       description={
         layer === "user"
-          ? "These secrets are passed to every agent on this Mac. Stored encrypted in your Keychain."
+          ? "Passed to every agent on this Mac. Stored in your Keychain."
           : project?.isGitRepository === false
             ? "These secrets are passed to agents working in this folder"
             : "These secrets are passed to agents in this repo, for all workspaces"
@@ -879,7 +881,22 @@ export function EnvironmentSection({
         onSave={handleDialogSave}
       />
       {vaultUnreadable ? (
-        <SettingsEmpty title="Couldn't read the Keychain — close and reopen Settings to retry" />
+        <MessageRow
+          tone="error"
+          role="alert"
+          className="min-h-11"
+          actions={
+            <Button
+              variant="ghost"
+              size="compact"
+              onClick={() => setReadAttempt((attempt) => attempt + 1)}
+            >
+              Retry
+            </Button>
+          }
+        >
+          Couldn’t read the Keychain.
+        </MessageRow>
       ) : names.length === 0 ? (
         !vaultLoading && (
           <SettingsEmptyCard

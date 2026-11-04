@@ -241,7 +241,7 @@ function LocalSimulatorsPanel({ surfaceActive }: { surfaceActive: boolean }) {
                 updateSetting("idle_shutdown", value as SimulatorIdleShutdown)
               }
             >
-              <SelectTrigger aria-label={idleRow.label}>
+              <SelectTrigger width="fixed" aria-label={idleRow.label}>
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>

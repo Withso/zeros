@@ -1,7 +1,7 @@
-/* Settings uses an 18 / 14 / 13px hierarchy: page heading, field names, then
-   descriptions and control chrome. Labels opt out with text-[14px], while
-   text-sm controls become 13px. The wrapper keeps this override feature-local.
-   Selector specificity beats Tailwind's utility without !important. */
+/* Settings uses an 18 / 13 / 12px hierarchy: page title, names and control
+   chrome, then hints. Stray text-sm inside a panel renders at the same 13px.
+   The wrapper keeps this override feature-local; selector specificity beats
+   Tailwind's utility without !important. */
 .settings-type-scale .text-sm {
   font-size: 0.8125rem;
 }

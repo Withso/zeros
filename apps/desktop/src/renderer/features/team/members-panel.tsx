@@ -436,7 +436,7 @@ function MemberRow({
           {initial}
         </div>
         <div className="flex min-w-0 flex-col">
-          <span className="text-fg1 truncate text-[14px] font-medium">
+          <span className="text-fg1 truncate text-xs leading-4.5 font-medium">
             {name}
             {isSelf && <span className="text-fg2 font-normal"> (you)</span>}
           </span>

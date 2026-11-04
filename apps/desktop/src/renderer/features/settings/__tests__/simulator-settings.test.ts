@@ -48,7 +48,7 @@ describe("Simulator settings", () => {
 
   it("keeps row copy short", () => {
     for (const row of Object.values(SIMULATOR_SETTINGS_ROWS)) {
-      expect(row.hint.length).toBeLessThanOrEqual(96);
+      expect((row.hint ?? "").length).toBeLessThanOrEqual(96);
     }
     expect(SIMULATOR_SETTINGS_ROWS.enabled.label).toBe("Let agents use simulators");
     expect(SIMULATOR_SETTINGS_ROWS.idle_shutdown.label).toBe("Shut down idle simulators after");

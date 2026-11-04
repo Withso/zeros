@@ -56,7 +56,7 @@ export const BROWSER_SETTINGS_ROWS = {
     {
       key: "in_app_enabled",
       label: "Allow Claude and Cursor to use the in-app browser",
-      hint: "Claude uses Chrome instead when Claude Code with Chrome is on.",
+      hint: "Claude uses Chrome when that’s on.",
     },
     {
       key: "claude_enabled",
@@ -68,17 +68,17 @@ export const BROWSER_SETTINGS_ROWS = {
     {
       key: "auto_open",
       label: "Open the Browser tab automatically",
-      hint: "Show the Browser tab when an agent starts browsing.",
+      hint: undefined,
     },
     {
       key: "navigation_approval",
       label: "Approval for opening websites",
-      hint: "Choose whether agents ask before opening websites.",
+      hint: undefined,
     },
     {
       key: "show_agent_cursor",
       label: "Show agent cursor",
-      hint: "Show where the agent points and clicks on the page.",
+      hint: undefined,
     },
   ],
 } as const;

@@ -15,7 +15,8 @@ surface kept the old one.
 (token, primitive or shared pattern) and migrate the callers, add the check
 that holds it, record it in `docs/design-system.md` §0 and the page spec, run
 `pnpm design:docs` so the `zeros-ui` skills carry it, and retire the variant it
-replaces. Fix drift from the direction in the files you touch.
+replaces. Fix drift from the direction in the files you touch. A board that
+breaks a system rule is built to the rule, with the decision logged.
 
 **Encoded in.** `playbooks/ui-design.md` steps 1, 5 and 8;
 `docs/design-system.md` §0 (the direction and "How the direction changes") and

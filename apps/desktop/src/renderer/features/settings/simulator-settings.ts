@@ -22,15 +22,15 @@ export type SimulatorBooleanSetting = "enabled" | "show_agent_touches";
 export const SIMULATOR_SETTINGS_ROWS = {
   enabled: {
     label: "Let agents use simulators",
-    hint: "Agents can install apps, tap and type on simulators. Each chat asks before it uses a device.",
+    hint: "Each chat asks before it uses a device.",
   },
   idle_shutdown: {
     label: "Shut down idle simulators after",
-    hint: "Only for simulators Zeros started. Ones you started yourself keep running.",
+    hint: "Only simulators Zeros started.",
   },
   show_agent_touches: {
     label: "Show agent touches",
-    hint: "Show where the agent taps and swipes.",
+    hint: undefined,
   },
 } as const;
 

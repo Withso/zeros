@@ -64,7 +64,7 @@ export function FullDiskAccessRow({
   return (
     <SettingsRow
       label="Full Disk Access"
-      hint="Let local agents work without repeated macOS folder prompts."
+      hint="Fewer macOS folder prompts."
     >
       <div className="flex items-center gap-3">
         <span

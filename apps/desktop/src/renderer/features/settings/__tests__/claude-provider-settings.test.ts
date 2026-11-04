@@ -22,7 +22,7 @@ describe("Claude provider settings", () => {
     const html = renderToStaticMarkup(createElement(ClaudeProviderSettings, { onChange: vi.fn() }));
     expect(html.indexOf("Auto memory")).toBeLessThan(html.indexOf("Keep sessions active"));
     expect(html.indexOf("Keep sessions active")).toBeLessThan(html.indexOf("Idle compaction"));
-    expect(html).toContain("Compact long conversations while the session is idle");
+    expect(html).toContain("While the session is idle");
     expect(idleSwitch(html)).toContain('aria-checked="false"');
     expect(html).toContain('for="claude-idle-compaction"');
   });

@@ -65,9 +65,11 @@ export function OpenSettingsFileButton({
 
   return (
     <Tooltip label={tooltip}>
+      {/* A quiet title-row action: Ghost at the compact size. */}
       <Button
-        variant="secondary"
-        size="sm"
+        variant="ghost"
+        size="compact"
+        className="text-fg2"
         disabled={!bridge || busy}
         onClick={() => void handleOpen()}
       >

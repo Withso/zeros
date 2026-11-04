@@ -72,41 +72,17 @@
       "apps/desktop/src/renderer/features/design-workspace/design-workspace-overlays.tsx": {
         "rounded-[1px]": 1
       },
-      "apps/desktop/src/renderer/features/repositories/files-to-copy-section.tsx": {
-        "text-[14px]": 2
-      },
       "apps/desktop/src/renderer/features/repositories/repo-page.tsx": {
         "pl-[clamp(1.5rem,5vw,6.25rem)]": 1
       },
       "apps/desktop/src/renderer/features/repositories/repositories-panel.tsx": {
         "leading-[1.6]": 3,
-        "text-[14px]": 1,
         "tracking-[0.25em]": 1
       },
       "apps/desktop/src/renderer/features/settings/code-theme-preview.tsx": {
         "leading-[1.6]": 4
       },
-      "apps/desktop/src/renderer/features/settings/github-section.tsx": {
-        "text-[14px]": 2
-      },
-      "apps/desktop/src/renderer/features/settings/provider-information.tsx": {
-        "text-[14px]": 1
-      },
-      "apps/desktop/src/renderer/features/settings/providers-panel.tsx": {
-        "text-[14px]": 2
-      },
-      "apps/desktop/src/renderer/features/settings/settings-page.tsx": {
-        "text-[13px]": 3
-      },
-      "apps/desktop/src/renderer/features/settings/settings-ui.tsx": {
-        "text-[13px]": 1,
-        "text-[14px]": 4
-      },
-      "apps/desktop/src/renderer/features/team/members-panel.tsx": {
-        "text-[14px]": 1
-      },
       "apps/desktop/src/renderer/features/team/team-panel.tsx": {
-        "text-[14px]": 1,
         "text-[15px]": 1
       },
       "apps/desktop/src/renderer/shared/ui/primitives/input-group.tsx": {
@@ -448,13 +424,7 @@
         "input": 1
       },
       "apps/desktop/src/renderer/features/settings/providers-panel.tsx": {
-        "button": 2
-      },
-      "apps/desktop/src/renderer/features/settings/settings-ui.tsx": {
-        "button": 2
-      },
-      "apps/desktop/src/renderer/features/settings/terminal-agents-section.tsx": {
-        "button": 2
+        "button": 1
       },
       "apps/desktop/src/renderer/features/team/create-team-dialog.tsx": {
         "button": 3
@@ -467,9 +437,6 @@
       },
       "apps/desktop/src/renderer/shell/conversation/conversation-header.tsx": {
         "button": 1,
-        "input": 1
-      },
-      "apps/desktop/src/renderer/shell/dialogs/feedback-dialog.tsx": {
         "input": 1
       },
       "apps/desktop/src/renderer/shell/dispatcher/agent-model-picker.tsx": {

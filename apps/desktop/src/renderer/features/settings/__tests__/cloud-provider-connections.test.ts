@@ -71,13 +71,15 @@ vi.mock("../../agent/model-catalog", () => ({ modelsForAgent: () => [
   { value: "supported-second", label: "Second model" },
 ] }));
 vi.mock("../../agent/workspace-agent-registry", () => ({ invalidateCloudOrganizationAgentRegistry: vi.fn() }));
-vi.mock("../../agent/native-browser-availability", () => ({ NativeBrowserAvailability: () => null }));
+vi.mock("../../agent/native-browser-availability", () => ({ NativeBrowserAvailability: () => null,
+  NATIVE_BROWSER_UNAVAILABLE: "Native browser is unavailable in cloud workspaces." }));
 vi.mock("../../../platform/cloud-workspaces", () => ({ cloudAccountRequest: f.request }));
 vi.mock("../../../platform/app", () => ({ shellOpenUrl: vi.fn() }));
 vi.mock("../cloud-provider-sign-in", () => ({ connectCloudProviderSignIn: f.signIn }));
 vi.mock("../../../shared/ui/primitives/elements", () => ({ toast: { success: f.success, error: f.error } }));
 
 import { Button } from "../../../shared/ui";
+import { DropdownMenuItem } from "../../../shared/ui/primitives/dropdown-menu";
 import { Checkbox } from "../../../shared/ui/primitives/checkbox";
 import { CloudProviderConnections } from "../cloud-provider-connections";
 import { ProviderConnectionDialog } from "../provider-connection-dialog";
@@ -102,21 +104,28 @@ function elements(node: ReactNode): Element[] {
   });
   return found;
 }
+// A settings row carries its name and status as props, not children.
 function text(node: ReactNode): string {
-  return Children.toArray(node).map(child => isValidElement(child)
-    ? text((child as Element).props.children) : String(child)).join("");
+  return Children.toArray(node).map(child => {
+    if (!isValidElement(child)) return String(child);
+    const props = (child as Element).props as { label?: ReactNode; hint?: ReactNode; children?: ReactNode };
+    return text(props.label) + text(props.hint) + text(props.children);
+  }).join("");
 }
 function tree(): ReactNode {
   f.scope = "outer";
   f.cursor = 0;
-  const outer = CloudProviderConnections({ organizationId: f.organizationId, surfaceActive: f.active, Tabs: () => null });
-  const inner = elements(outer).find(element => typeof element.type === "function" && element.type.name === "CloudProviderConnection")!;
+  const outer = CloudProviderConnections({ organizationId: f.organizationId, surfaceActive: f.active });
+  // Every agent is on the page; drive the one the case names.
+  const inner = elements(outer).find(element => typeof element.type === "function" &&
+    element.type.name === "CloudProviderConnection" && (element.props as { agent?: { id: string } }).agent?.id === f.provider)!;
   f.scope = String(inner.key);
   f.cursor = 0;
   return (inner.type as (props: unknown) => ReactNode)(inner.props);
 }
 function action(label: string): Element {
-  return elements(tree()).find(element => element.type === Button && element.props.children === label)!;
+  return elements(tree()).find(element => (element.type === Button || element.type === DropdownMenuItem) &&
+    text(element.props.children) === label)!;
 }
 function dialog(): Element {
   return elements(tree()).find(element => element.type === ProviderConnectionDialog)!;
@@ -433,7 +442,7 @@ describe("one-step organization provider connection", () => {
     const form = dialog();
     expect(form.props.open).toBe(true);
     expect(elements(form.props.children).filter(element => element.type === "p").map(element => text(element.props.children)))
-      .toContain("Connecting stores this account encrypted in the cloud for your sessions on Zeros-managed computers in this organization, until you disconnect.");
+      .toContain("Stored encrypted for your cloud sessions in this organization until you disconnect.");
     expect(text(form.props.children)).not.toMatch(/Allow all models|Allowed models|Includes future models/);
     expect(elements(form.props.children).some(element => element.type === Checkbox)).toBe(false);
     expect(submit().props.children).toBe("Connect");

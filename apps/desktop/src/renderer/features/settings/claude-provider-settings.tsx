@@ -26,7 +26,7 @@ export function ClaudeProviderSettings({ onChange }: { onChange: () => void }) {
     <>
       <SettingsRow
         label="Auto memory"
-        hint="Let Claude remember useful project context for future chats"
+        hint="Remembers project context across chats"
       >
         <Switch
           checked={autoMemoryEnabled}
@@ -59,7 +59,7 @@ export function ClaudeProviderSettings({ onChange }: { onChange: () => void }) {
             onChange();
           }}
         >
-          <SelectTrigger><SelectValue /></SelectTrigger>
+          <SelectTrigger width="fixed"><SelectValue /></SelectTrigger>
           <SelectContent>
             {CLAUDE_IDLE_TIMEOUT_OPTIONS.map((option) => (
               <SelectItem key={option.minutes} value={String(option.minutes)}>
@@ -71,7 +71,7 @@ export function ClaudeProviderSettings({ onChange }: { onChange: () => void }) {
       </SettingsRow>
       <SettingsRow
         label="Idle compaction"
-        hint="Compact long conversations while the session is idle"
+        hint="While the session is idle"
         htmlFor="claude-idle-compaction"
       >
         <Switch

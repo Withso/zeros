@@ -98,7 +98,7 @@ describe("Cloud Computer settings panel", () => {
   it("keeps Computer administration to owners and admins", () => {
     state.role = "member";
     const html = text(render());
-    expect(html).toContain("Only organization owners and admins manage the Cloud Computer.");
+    expect(html).toContain("Only owners and admins manage it.");
     expect(html).not.toContain("Build computer");
   });
 });

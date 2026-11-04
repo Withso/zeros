@@ -83,8 +83,8 @@ any new surface, and the rules that can be checked move into
 | 1 | Canvas audit | Every frame renders without breakage in both themes; notes are clear. | Done |
 | 2 | Foundation tokens | The proposed palette and the new feature tokens ship through `styles/tokens`, the contrast contract passes, hand-written copies follow. | Palette done; diff and canvas-label tokens land with their first callers |
 | 3 | Primitives | Every shared component matches its UI components board, with tests. | Done |
-| 4 | Shared patterns | Banner row, message row, empty state, settings group and row, list card row, canvas chip. | Banner and empty state done; the rest land with their pages |
-| 5 | Pages | Each page matches its boards, functional changes included, Local and cloud covered. | Pending |
+| 4 | Shared patterns | Banner row, message row, empty state, settings group and row, list card row, canvas chip. | Banner, message row, empty state and settings group and row done; the rest land with their pages |
+| 5 | Pages | Each page matches its boards, functional changes included, Local and cloud covered. | Settings done; the rest in order |
 | 6 | Automation | The direction lives in `docs/design-system.md`, checks enforce what structure can, and zstack carries a UI loop that learns from every approved change. | Done; it grows with each page |
 | 7 | Verification | Gates green; harness renders compared with every board in both themes. | Pending |
 | 8 | Canvas final | Every board shows one final UI: the implemented one. | Pending |
@@ -165,7 +165,7 @@ migrated, then the retired names go in the same branch. The specs are in
 | Pattern | Owner | Use |
 | --- | --- | --- |
 | Banner row | `shell/workbench/tab-status.tsx` | Every tab's persistent status. |
-| Message row | new shared block | A message inside content: setup checks, card warnings, section errors. |
+| Message row | `shared/ui/primitives/message-row.tsx` | A message inside content: setup checks, card warnings, section errors. |
 | Empty state | `WorkbenchEmptyState` and a shared block | Tab bodies, lists, panels. |
 | Settings group and row | `features/settings/settings-ui.tsx` | Settings, Customize, the web dashboard (CSS twin). |
 | List card row | the settings kit | MCP servers, skills, organization servers, any list of configured things. |
@@ -250,3 +250,22 @@ Each landed step appends one line: date, workstream, what landed, evidence.
   carries it, `playbooks/ui-design.md` routes every corrected look to its
   owner and a check, `ui/icon-only-button` joins the policy, and four eval
   cases hold this round's escaped mistakes.
+- 2026-11-04 · 4, 5 · Settings: the shared shell (40px title bars, 32px nav
+  rows on one icon column, a hairline for the first and any one-item group,
+  the 640px column, Open settings.toml in the title row), every panel on the
+  grouped card, the shortened copy from the boards, Profile, Integrations,
+  Agents, Models, Terminal Agents, Cloud Computer, Environment and Files to
+  copy. Organization Agents is one titled card per agent with ⋯ for
+  Disconnect and Remove, its load error said once and the browser note once.
+  `MessageRow` joins the primitives; a Dialog footer straight under its header
+  keeps the 16px inset. Renderer suite 904 files pass; harness renders in
+  Dark and Light for Local and an organization.
+  Decisions where a board was odd: method cards hover to `bg1-hover` like the
+  RadioGroup card (a `bg2-highlight` hover read brighter than the chosen
+  card); account rows use one 24px control height and the 32px avatar from
+  the Avatar scale (the board mixed 24 and 28 and drew a 28 avatar); the
+  first nav group has no label because the switcher above names it (the
+  board said Local twice); the cloud credential notice keeps "until you
+  disconnect"; organization copy says "this organization" rather than the
+  sample name; the cloud browser note keeps the shared sentence; the
+  simulator setup hint keeps its Xcode path, shared with the Simulators tab.

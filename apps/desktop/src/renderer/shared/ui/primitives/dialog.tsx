@@ -245,7 +245,8 @@ const DialogFooter = ({
   <div
     data-slot="dialog-footer"
     className={cn(
-      "flex shrink-0 flex-wrap items-center justify-end gap-2 px-4 pb-4",
+      // A footer straight under the header (no body) keeps the 16px inset.
+      "flex shrink-0 flex-wrap items-center justify-end gap-2 px-4 pb-4 [[data-slot=dialog-header]+&]:pt-4",
       className,
     )}
     {...props}

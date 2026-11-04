@@ -52,6 +52,7 @@ import { isLocalDevelopment } from "../../platform/runtime";
 import { toast } from "@/renderer/shared/ui/primitives/elements";
 import { cn } from "@/renderer/shared/ui/cn";
 import { Switch } from "../../shared/ui/primitives/switch";
+import { Avatar, AvatarFallback } from "../../shared/ui/primitives/avatar";
 import {
   Tabs,
   TabsContent,
@@ -134,6 +135,7 @@ import { useBridge, useBridgeStatus } from "../../platform/bridge/use-bridge";
 import { ensureSettingsTomlMigrated } from "./migrate-legacy";
 import { subscribeUserSettingsSection } from "./settings-navigation";
 import {
+  SETTINGS_CARD_LIST_CLS,
   SettingsGroup,
   SettingsList,
   SettingsRow,
@@ -396,9 +398,9 @@ function parseSelection(active: string): Selection {
   return { scope: "user", section: isStaticSection(bare) ? bare : "general" };
 }
 
-const PAGE_HEADING_CLS = "m-0 text-lg font-medium leading-tight text-fg1";
+const PAGE_HEADING_CLS = "m-0 text-lg leading-6 font-medium text-fg1";
 
-const HINT_CLS = "text-sm text-fg2";
+const HINT_CLS = "m-0 text-3xxs leading-4 text-fg3";
 
 // Derived from SECTIONS so a newly-registered section is automatically a
 // valid persisted target. A hardcoded list silently dropped any new section:
@@ -425,16 +427,22 @@ function loadInitialSection(owner: string): string {
     : repoSelection(sel.repoId, sel.section);
 }
 
-// Shared by static sections and per-repo rows. Selection is color only (fg2 →
-// fg1 plus the lifted background), so rows keep their width. `hover:text-fg2`
-// cancels the ghost Button's `hover:text-fg1` (twMerge keeps the later class).
-// Icons are sized by `[&_svg]:size-3.5`, the primitive's own selector, because
-// CSS size beats the attributes lucide's `size` prop emits.
+// The shared 32px nav row (the web dashboard's too): 13/18 fg2 with a 14px fg3
+// icon; hover is the sidebar's, and the selected row is its own bg2-highlight
+// step with fg1, so it never reads as hover. Rows keep their width. Icons are
+// sized by `[&_svg]:size-3.5` because CSS size beats lucide's `size` prop.
 const SIDEBAR_ENTRY_CLS =
-  "flex h-auto w-full min-w-0 items-center justify-start gap-2.5 rounded-md border-0 bg-transparent px-2.5 py-1.5 text-left text-sm font-normal text-fg2 transition-colors duration-150 ease-out hover:bg-sidebar-bg-hover hover:text-fg2 data-[state=active]:bg-sidebar-bg-hover data-[state=active]:text-fg1 data-[state=active]:hover:text-fg1 [&_svg]:size-3.5 [&>svg]:shrink-0 [&>svg]:text-fg2 data-[state=active]:[&>svg]:text-fg1";
+  "flex h-8 w-full min-w-0 items-center justify-start gap-2 rounded-md bg-transparent px-2 py-0 text-left text-xs leading-4.5 font-normal text-fg2 transition-colors duration-120 ease-out hover:bg-sidebar-bg-hover hover:text-fg1 data-[state=active]:bg-bg2-highlight data-[state=active]:text-fg1 data-[state=active]:hover:bg-bg2-highlight [&_svg]:size-3.5 [&>svg]:shrink-0 [&>svg]:text-fg3 data-[state=active]:[&>svg]:text-fg2";
 
 const SETTINGS_GROUP_HEADER_CLS =
-  "select-none px-2.5 pb-1.5 pt-5 text-xs font-normal text-muted-fg";
+  "select-none px-2 pt-4 pb-1 text-3xxs leading-4 font-medium text-fg3";
+
+const SETTINGS_GROUP_RULE_CLS = "bg-border1 mx-2 my-2 h-px shrink-0";
+
+/** One line under an organization page's title, said once for the page. */
+const ORGANIZATION_SECTION_DESCRIPTIONS: Partial<Record<SectionId, string>> = {
+  providers: "Your accounts are private to you.",
+};
 
 export function SettingsPage() {
   const organization = useActiveOrganization();
@@ -619,6 +627,7 @@ function ScopedSettingsPage({ owner }: { owner: string }) {
             <div className={TRAFFIC_LIGHT_RESERVE_CLS} aria-hidden="true" />
             <Button
               variant="ghost"
+              size="compact"
               className="text-fg2 hover:bg-sidebar-bg-hover hover:text-fg1"
               onClick={handleBack}
             >
@@ -627,7 +636,7 @@ function ScopedSettingsPage({ owner }: { owner: string }) {
             </Button>
           </div>
           <nav
-            className="flex min-h-0 flex-1 flex-col overflow-y-auto px-3 pt-4 pb-2"
+            className="flex min-h-0 flex-1 flex-col overflow-y-auto px-3 pt-2 pb-2"
             role="tablist"
             aria-label="Settings sections"
           >
@@ -640,15 +649,14 @@ function ScopedSettingsPage({ owner }: { owner: string }) {
               if (sections.length === 0) return null;
               return (
                 <React.Fragment key={group.label}>
-                  <div
-                    className={cn(
-                      SETTINGS_GROUP_HEADER_CLS,
-                      groupIndex === 0 && "pt-1",
-                    )}
-                  >
-                    {group.label === "Personal" ? local ? "Local" : "Organization" : group.label}
-                  </div>
-                  <div className="flex flex-col gap-1">
+                  {/* The switcher names the first group, and a one-item
+                      group needs no 44px label: a hairline separates both. */}
+                  {groupIndex === 0 || sections.length === 1 ? (
+                    <div className={SETTINGS_GROUP_RULE_CLS} aria-hidden="true" />
+                  ) : (
+                    <div className={SETTINGS_GROUP_HEADER_CLS}>{group.label}</div>
+                  )}
+                  <div className="flex flex-col gap-0.5">
                     {sections.map((section) => (
                       <SectionNavButton
                         key={section.id}
@@ -678,26 +686,20 @@ function ScopedSettingsPage({ owner }: { owner: string }) {
 
         {/* Native overflow, because macOS overlay scrollbars auto-hide. */}
         <div className="border-border1 bg-bg1 relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden border-l">
-          {/* "Open settings.toml" floats at the top right, mirroring the repo
-              page — a transparent drag strip; the button opts out of drag. */}
-          <div
-            className="flex shrink-0 items-center justify-end px-6 pt-4"
-            data-tauri-drag-region
-          >
-            {fileScopeControls}
-          </div>
+          {/* The 40px title bar, level with the sidebar's: a drag strip. */}
+          <div className="h-10 shrink-0" data-tauri-drag-region aria-hidden="true" />
           {/* The 24px side gutter lives on the SCROLLER, not the column, so
-              the column's 680px max is the content width (no inner padding
-              eating into it) and it still shrinks below 728px windows. */}
+              the column's 640px max is the content width (no inner padding
+              eating into it) and it still shrinks below 688px windows. */}
           <div
             ref={detailScrollRef}
             className="min-h-0 flex-1 overflow-y-auto px-6"
           >
-            {/* `settings-type-scale` (settings-page.css) sets names to 14px and everything
-                else to 13px; names carry `text-[14px]` to opt out of the shrink. */}
+            {/* `settings-type-scale` (settings-page.css) keeps stray text-sm
+                at the 13px every Settings line uses. */}
             <div
               {...popoverBoundaryProps}
-              className="settings-type-scale mx-auto w-full max-w-[680px] pt-10 pb-16"
+              className="settings-type-scale mx-auto w-full max-w-160 pb-16"
             >
               {/* A transient repo-scope selection (legacy deep link) renders
                   nothing for one frame — the redirect effect above re-routes
@@ -715,10 +717,22 @@ function ScopedSettingsPage({ owner }: { owner: string }) {
                   <div
                     key={section.id}
                     {...(!isActive ? { inert: "" } : {})}
-                    className={isActive ? "flex flex-col gap-6" : "hidden"}
+                    className={isActive ? "flex flex-col gap-8" : "hidden"}
                     aria-hidden={!isActive}
                   >
-                    <h1 className={PAGE_HEADING_CLS}>{section.label}</h1>
+                    {/* The title row: Open settings.toml sits on the column's
+                        right edge, level with the title. */}
+                    <header className="flex items-start justify-between gap-4">
+                      <div className="flex min-w-0 flex-col gap-1">
+                        <h1 className={PAGE_HEADING_CLS}>{section.label}</h1>
+                        {!local && cloudEnabled && ORGANIZATION_SECTION_DESCRIPTIONS[section.id] && (
+                          <p className="text-fg2 m-0 text-xs leading-4.5">
+                            {ORGANIZATION_SECTION_DESCRIPTIONS[section.id]}
+                          </p>
+                        )}
+                      </div>
+                      {fileScopeControls}
+                    </header>
                     {!local && !cloudEnabled && <CloudWorkspacePausedNotice />}
                     <Panel surfaceActive={pageActive && isActive} />
                   </div>
@@ -783,13 +797,13 @@ function GeneralPanel({ surfaceActive = true }: { surfaceActive?: boolean }) {
   const showHidden = useShowHiddenWorkspaces();
   const restartAutomatically = useRestartAutomaticallyOnUpdate();
   return (
-    <div className="flex flex-col gap-6">
+    <div className="flex flex-col gap-8">
       <SettingsGroup>
         <FollowUpBehaviorSetting />
         <KeepAwakeSetting />
         <SettingsRow
           label="Show hidden workspaces in dashboard"
-          hint="Includes hidden workspaces in the Archived list."
+          hint="In the Archived list."
         >
           <Switch
             checked={showHidden}
@@ -799,7 +813,7 @@ function GeneralPanel({ surfaceActive = true }: { surfaceActive?: boolean }) {
         </SettingsRow>
         <SettingsRow
           label="Restart automatically on update"
-          hint="Automatically restart Zeros when idle to install downloaded updates."
+          hint="Restarts when idle to install updates."
           htmlFor="restart-automatically-on-update"
         >
           <Switch
@@ -829,15 +843,15 @@ function SignInMethodRow({
   return (
     <SettingsRow label={label} hint={desc}>
       {connected ? (
-        <span className="text-green-primary flex shrink-0 items-center gap-1.5 text-xs font-medium">
-          <CircleCheck className="size-3.5" />
+        <span className="text-green-primary flex shrink-0 items-center gap-1.5 text-xs leading-4.5 font-medium">
+          <CircleCheck className="size-3.5" aria-hidden />
           Connected
         </span>
       ) : (
         // Linking isn't implemented yet (no linkIdentity flow), so we show a
         // plain status label rather than an inert, permanently-disabled
         // "Connect" button that implies an action the user can't take.
-        <span className="text-muted-fg shrink-0 text-xs">Not linked</span>
+        <span className="text-fg3 shrink-0 text-3xxs leading-4">Not linked</span>
       )}
     </SettingsRow>
   );
@@ -874,7 +888,7 @@ function AccountPanel() {
   };
 
   return (
-    <div className="flex flex-col gap-6">
+    <div className="flex flex-col gap-8">
       {authed ? (
         <>
           {/* Identity card. Initials only: we don't load remote provider
@@ -882,25 +896,25 @@ function AccountPanel() {
               Google/GitHub on every Settings open). */}
           <SettingsGroup>
             <div className="flex items-center gap-3">
-              <div className="bg-bg2-hover text-fg1 flex size-10 shrink-0 items-center justify-center rounded-full text-sm font-medium">
-                {initial}
-              </div>
-              <div className="flex min-w-0 flex-col gap-0.5">
+              <Avatar size="lg" aria-hidden>
+                <AvatarFallback>{initial}</AvatarFallback>
+              </Avatar>
+              <div className="flex min-w-0 flex-col gap-0.5 text-xs leading-4.5">
                 {displayName && (
-                  <div className="text-fg1 truncate text-[13px] font-medium">
+                  <div className="text-fg1 truncate font-medium">
                     {displayName}
                   </div>
                 )}
                 <div
                   className={cn(
-                    "truncate text-[13px]",
+                    "truncate",
                     displayName ? "text-fg2" : "text-fg1 font-medium",
                   )}
                 >
                   {email}
                 </div>
                 {primaryProviderLabel && (
-                  <div className="text-fg2 text-[13px]">
+                  <div className="text-fg2">
                     Signed in with {primaryProviderLabel}
                   </div>
                 )}
@@ -910,7 +924,7 @@ function AccountPanel() {
 
           <SettingsGroup
             title="Sign-in methods"
-            description="Linking a second provider arrives in a later update."
+            description="More providers later."
           >
             <SignInMethodRow
               label="GitHub"
@@ -942,18 +956,16 @@ function AccountPanel() {
             </SettingsRow>
             <SettingsRow
               label="Sign out everywhere"
-              hint="Revoke every active session on all devices."
+              hint="Signs out every device."
             >
-              {/* Cautionary (destructive-tinted) styling so this global,
-                  hard-to-undo action reads differently from the routine
-                  this-device "Sign out" directly above it. */}
+              {/* Destructive-secondary: this global, hard-to-undo action reads
+                  differently from the this-device Sign out above it. */}
               <Button
-                variant="secondary"
+                variant="destructive-secondary"
                 size="sm"
                 loading={signingOutAll}
                 disabled={signingOut}
                 onClick={handleSignOutEverywhere}
-                className="border-red-primary/40 text-red-primary hover:bg-red-primary/10 hover:text-red-primary"
               >
                 <LogOut size={14} />
                 Sign out everywhere
@@ -989,7 +1001,7 @@ function PrivacyGroup({ surfaceActive }: { surfaceActive: boolean }) {
       <FullDiskAccessRow surfaceActive={surfaceActive} />
       <SettingsRow
         label="Share anonymous usage data"
-        hint="Anonymous feature and performance metadata. Never your code, prompts, or keys."
+        hint="Never your code, prompts or keys."
       >
         <Switch
           checked={!optedOut}
@@ -1019,11 +1031,8 @@ function IntegrationsPanel({ surfaceActive = true }: { surfaceActive?: boolean }
 // With no choice, connected providers resolve Codex → Claude → Cursor. Effort
 // and Fast are remembered per exact model in the model menu.
 
-/** Filled card with `--border1` hairlines. The fill is `--bg1-bright`, not
- *  `--bg3`: light bg3 equals bg1 (white), so the card would vanish (check:ui
- *  guards this). Rows carry the 12px vertical padding; the box has none. */
-const MODELS_SECTION_CLS =
-  "bg-bg1-bright divide-border1 rounded-lg px-3 [&>*]:py-3";
+/** The settings card (`SETTINGS_CARD_LIST_CLS`), named for the Models panel. */
+const MODELS_SECTION_CLS = SETTINGS_CARD_LIST_CLS;
 
 function ModelsPanel({ surfaceActive = false }: { surfaceActive?: boolean }) {
   const sessions = useAgentSessions();
@@ -1165,7 +1174,7 @@ function ModelsPanel({ surfaceActive = false }: { surfaceActive?: boolean }) {
         <SettingsRow label="Default agent" hint="Agent for new chats">
           <div className="flex items-center gap-2">
             <Select value={effectiveAgentId ?? ""} onValueChange={pickAgent}>
-              <SelectTrigger aria-label="Default agent" data-default-agent-picker>
+              <SelectTrigger width="fixed" aria-label="Default agent" data-default-agent-picker>
                 <SelectValue placeholder="Select an agent">{effectiveAgent?.name}</SelectValue>
               </SelectTrigger>
               <SelectContent className="min-w-[180px]">
@@ -1191,7 +1200,7 @@ function ModelsPanel({ surfaceActive = false }: { surfaceActive?: boolean }) {
                   starFavoriteModel(effectiveAgentId, model)
                 }
               >
-                <SelectTrigger aria-label="Default model" data-default-model-picker>
+                <SelectTrigger width="fixed" aria-label="Default model" data-default-model-picker>
                   <SelectValue>{currentModelLabel}</SelectValue>
                 </SelectTrigger>
                 <SelectContent className="min-w-[180px]">
@@ -1207,7 +1216,7 @@ function ModelsPanel({ surfaceActive = false }: { surfaceActive?: boolean }) {
         </SettingsRow>
         <SettingsRow
           label="Chat titles"
-          hint="Up to 500 characters of your first message are sent to OpenAI"
+          hint="Sends your first 500 characters to OpenAI"
         >
           <span className="text-fg2 text-xs">Automatic</span>
         </SettingsRow>
@@ -1243,10 +1252,8 @@ function ModelsPanel({ surfaceActive = false }: { surfaceActive?: boolean }) {
             </SettingsList>
           </TabsContent>
           <TabsContent value="codex" className="mt-0">
-            <p className="text-muted-fg text-xs">
-              These controls save to Codex’s native configuration on this device
-              and also affect Codex outside Zeros. Memories remain in Codex’s
-              own storage.
+            <p className="text-fg3 mt-0 mb-2 text-3xxs leading-4">
+              These also change Codex outside Zeros.
             </p>
             <SettingsList className={MODELS_SECTION_CLS}>
               {memoryRead.error && (
@@ -1258,7 +1265,7 @@ function ModelsPanel({ surfaceActive = false }: { surfaceActive?: boolean }) {
               )}
               <SettingsRow
                 label="Local memories"
-                hint="Let Codex learn reusable project context on this device"
+                hint="Learns project context on this device"
               >
                 <Switch
                   checked={codexMemory?.localMemoriesEnabled ?? false}
@@ -1275,7 +1282,7 @@ function ModelsPanel({ surfaceActive = false }: { surfaceActive?: boolean }) {
               </SettingsRow>
               <SettingsRow
                 label="Learn from tool-assisted chats"
-                hint="Allow chats that use tools to contribute local memories"
+                hint="Chats that use tools add memories"
               >
                 <Switch
                   checked={codexMemory?.toolAssistedGenerationEnabled ?? false}
@@ -1295,7 +1302,7 @@ function ModelsPanel({ surfaceActive = false }: { surfaceActive?: boolean }) {
               </SettingsRow>
               <SettingsRow
                 label="Delete local memories"
-                hint="Remove memories Codex has learned on this device"
+                hint="Removes Codex’s local memories"
               >
                 <Button
                   variant="ghost"
@@ -1325,10 +1332,7 @@ function ModelsPanel({ surfaceActive = false }: { surfaceActive?: boolean }) {
             <DialogTitle>Delete Codex memories?</DialogTitle>
           </DialogHeader>
           <DialogBody>
-            <DialogDescription>
-              This removes the local memories Codex has learned on this device.
-              It does not delete your Zeros chats.
-            </DialogDescription>
+            <DialogDescription>Your Zeros chats aren’t affected.</DialogDescription>
           </DialogBody>
           <DialogFooter>
             <Button
@@ -1376,15 +1380,12 @@ function ExperimentalPanel() {
   );
   const [gibberishThinking, setGibberishThinking] = useExperimentalFeature("gibberishAgentThinking");
   return (
-    <div className="flex flex-col gap-6">
-      <p className={HINT_CLS}>
-        Experimental features that are under development.{" "}
-        <span className="text-fg1 font-medium">Expect breaking changes.</span>
-      </p>
+    <div className="flex flex-col gap-8">
+      <p className={HINT_CLS}>Still in development; may change.</p>
       <SettingsGroup>
         <SettingsRow
           label="Terminal Agents"
-          hint="Adds a Terminal Agents tab for configuring coding CLIs in the terminal panel."
+          hint="Set up coding CLIs for the terminal."
         >
           <Switch
             checked={terminalAgents}
@@ -1394,7 +1395,7 @@ function ExperimentalPanel() {
         </SettingsRow>
         <SettingsRow
           label="Hide archived workspaces after 15 days"
-          hint="Hides workspaces archived for 15 days. Chats and snapshots are kept."
+          hint="After 15 days. Chats and snapshots stay."
         >
           <Switch
             checked={hideArchived}
@@ -1404,7 +1405,7 @@ function ExperimentalPanel() {
         </SettingsRow>
         <SettingsRow
           label="Gibberish agent thinking"
-          hint="While the agent works, a shimmering, misspelled word like “Thenkeng” sits beside its timer."
+          hint="A playful word beside the timer while the agent works."
         >
           <Switch
             checked={gibberishThinking}
@@ -1453,7 +1454,7 @@ function InternalPanel() {
   const [resourceSummary, setResourceSummary] = useInternalFeature("resourceSummary");
   const agentControlFeatures = agentControlFeaturesAt("internal");
   return (
-    <div className="flex flex-col gap-6">
+    <div className="flex flex-col gap-8">
       <SettingsGroup>
         <SettingsRow
           label="Copy logs"
@@ -1505,17 +1506,17 @@ function AppearancePanel() {
   const codeThemes = codeThemesForVariant(variant);
 
   return (
-    <div className="flex flex-col gap-6">
+    <div className="flex flex-col gap-8">
       <SettingsGroup>
         <SettingsRow
           label="Theme"
-          hint="Choose the app color theme. System follows macOS."
+          hint="System follows macOS."
         >
           <Select
             value={prefs.mode}
             onValueChange={(v) => setPrefs({ mode: v as ThemeMode })}
           >
-            <SelectTrigger>
+            <SelectTrigger width="fixed">
               <SelectValue />
             </SelectTrigger>
             <SelectContent>
@@ -1532,13 +1533,13 @@ function AppearancePanel() {
       <SettingsGroup title="Code">
         <SettingsRow
           label="Code theme"
-          hint="Syntax colors for code blocks, diffs, the editor, and terminal."
+          hint="For code, diffs and the terminal."
         >
           <Select
             value={prefs.codeTheme}
             onValueChange={(v) => setPrefs({ codeTheme: v })}
           >
-            <SelectTrigger>
+            <SelectTrigger width="fixed">
               <SelectValue />
             </SelectTrigger>
             <SelectContent>

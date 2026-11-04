@@ -353,14 +353,14 @@ export function FilesToCopySection({
   return (
     <SettingsSection
       title="Files to copy"
-      description={`New workspaces only contain files Git tracks. Pick the ignored files to copy in from ${project.name} so a new workspace runs straight away.`}
+      description="Ignored files to copy into each new workspace."
     >
       {readOnly && (
         <div className="text-blue-fg bg-blue-bg flex items-center gap-2 rounded-md px-3 py-2 text-xs">
           <Info className="size-3.5 shrink-0" aria-hidden />
           <span className="min-w-0">
-            <code className="font-mono">.worktreeinclude</code> is committed to
-            the repo — it decides this list.
+            <code className="font-mono">.worktreeinclude</code> in the repo decides
+            this list.
           </span>
           {preview?.sourcePath && (
             <button
@@ -384,7 +384,7 @@ export function FilesToCopySection({
         // already complete would be a claim we have no evidence for, and it is
         // the one message that makes a user stop investigating.
         <div className="border-border2 bg-bg1-highlight flex flex-col items-center gap-2 rounded-lg border border-dashed px-4 py-6 text-center">
-          <div className="text-fg1 text-[14px] font-medium">
+          <div className="text-fg1 text-xs leading-4.5 font-medium">
             Couldn&rsquo;t check this project
           </div>
           <div className="text-fg2 max-w-[44ch] text-xs">
@@ -392,7 +392,7 @@ export function FilesToCopySection({
               (connected
                 ? "The scan didn't finish."
                 : "Not connected to the Zeros engine yet.")}{" "}
-            Your saved list is untouched and still applies to new workspaces.
+            Your saved list still applies.
           </div>
           <Button variant="secondary" size="sm" onClick={read.refresh}>
             <RotateCw className="size-3" aria-hidden />
@@ -401,12 +401,11 @@ export function FilesToCopySection({
         </div>
       ) : confirmedEmpty ? (
         <div className="border-border2 bg-bg1-highlight flex flex-col items-center gap-2 rounded-lg border border-dashed px-4 py-6 text-center">
-          <div className="text-fg1 text-[14px] font-medium">
+          <div className="text-fg1 text-xs leading-4.5 font-medium">
             Nothing needs copying
           </div>
           <div className="text-fg2 max-w-[44ch] text-xs">
-            Zeros found no ignored files in this project. New workspaces will
-            already be complete.
+            No ignored files found. New workspaces are complete.
           </div>
         </div>
       ) : liveRows.length > 0 ? (
@@ -512,7 +511,7 @@ export function FilesToCopySection({
             aria-label="Files to copy patterns"
             value={draft}
             onChange={setDraft}
-            description="One pattern per line, .gitignore syntax. Use ! to take something back out."
+            description="One .gitignore pattern per line; ! excludes."
           />
           {patternStats.length > 0 && (
             <div className="flex flex-col gap-1">

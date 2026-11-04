@@ -104,32 +104,6 @@ const cases = [
     },
   },
   {
-    file: "features/settings/settings-ui.tsx",
-    site: 110,
-    component: "ClassAlias",
-    tag: "h2",
-    original: "text-fg2 m-0 text-[12px] font-medium",
-    className: "text-fg2 m-0 text-3xxs font-medium",
-    literal: "text-fg2 m-0 text-3xxs font-medium",
-    alias: {
-      before: "text-[12px]",
-      after: "text-3xxs",
-    },
-  },
-  {
-    file: "features/settings/settings-ui.tsx",
-    site: 113,
-    component: "ClassAlias",
-    tag: "p",
-    original: "text-muted-fg m-0 text-[12px]",
-    className: "text-muted-fg m-0 text-3xxs",
-    literal: "text-muted-fg m-0 text-3xxs",
-    alias: {
-      before: "text-[12px]",
-      after: "text-3xxs",
-    },
-  },
-  {
     file: "features/team/team-panel.tsx",
     site: 109,
     component: "ClassAlias",

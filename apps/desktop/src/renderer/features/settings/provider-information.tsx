@@ -145,7 +145,7 @@ export function ProviderInformation({
       </dl>
       <div className="border-border1 flex flex-col gap-4 border-t p-4">
         <div className="flex items-center justify-between gap-3">
-          <h3 className="text-fg1 text-[14px] font-medium">Usage limits</h3>
+          <h3 className="text-fg1 text-xs leading-4.5 font-medium">Usage limits</h3>
           <Tooltip label="Refresh usage">
             <IconButton
               size="standard"

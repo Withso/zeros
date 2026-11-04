@@ -373,7 +373,7 @@ describe("sidebar typography and colour", () => {
     expect(classConstant(ROW, "GLYPH_BOX_CLS")).toMatch(/\btext-fg2\b/);
   });
 
-  it("presents device Personal as Local, sized to its name", () => {
+  it("presents device Personal as Local in a full-width nav row", () => {
     const switcher = source(
       "apps/desktop/src/renderer/features/team/organization-switcher.tsx",
     );
@@ -381,12 +381,13 @@ describe("sidebar typography and colour", () => {
       'export const LOCAL_ORGANIZATION_LABEL = "Local";',
     );
     expect(switcher).toContain("<LaptopMinimal strokeWidth={1.5} />");
-    expect(switcher).toMatch(/\bw-fit max-w-full min-w-0\b/);
+    // A full-width 32px row, the same height and inset as the nav rows.
+    expect(switcher).toMatch(/\bh-8 w-full min-w-0\b/);
     expect(switcher).toContain(
       '<span className="min-w-0 truncate text-left">{label}</span>',
     );
     expect(switcher).toContain(
-      '<ChevronDown className="size-3" strokeWidth={1.5} />',
+      '<ChevronDown className="ml-auto size-3!" strokeWidth={1.5} />',
     );
     expect(switcher).not.toContain("ExternalLink");
     expect(

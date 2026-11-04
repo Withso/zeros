@@ -36,7 +36,9 @@ them.
    `--space-<step>` value is that Tailwind step) instead of copying frame
    CSS. Never restyle a primitive from a caller: extend it, with a test.
    Fix drift from the direction in the files you touch and list the rest in
-   the receipt. Lists, selection, navigation, tabs, panels and loading follow
+   the receipt. When an approved board breaks a system rule (two control
+   heights in a row, an off-scale size, a repeated label), build the rule and
+   log the decision in the page's status line. Lists, selection, navigation, tabs, panels and loading follow
    `docs/ui-interaction-performance.md`.
 6. **Gates** (`zstack-verify`). Never get `pnpm check:ui` green by raising
    `styles/policy/ui-debt.json` or adding an ignore; prune paid debt with

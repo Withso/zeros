@@ -28,10 +28,10 @@ import {
 
 import { Button, GithubIcon, Input } from "../../shared/ui";
 import { Tooltip } from "@/renderer/shared/ui/primitives";
+import { badgeVariants } from "@/renderer/shared/ui/primitives/badge";
 import {
   Dialog,
   DialogContent,
-  DialogBody,
   DialogDescription,
   DialogFooter,
   DialogHeader,
@@ -169,16 +169,13 @@ function IdentityBadge({ summary }: { summary: GithubCredentialSummary }) {
   const warning = summary.health !== "connected";
   return (
     <span
-      className={cn(
-        "inline-flex min-h-6 items-center gap-1.5 rounded-sm px-2.5 py-0.5 text-xs",
-        warning ? "bg-yellow-bg text-yellow-fg" : "bg-green-bg text-green-fg",
-      )}
+      className={badgeVariants({ variant: warning ? "warning" : "success" })}
     >
       {/* An icon, not only the amber fill: for an UNSELECTED row the detail
           block is not rendered, so colour alone was the entire signal that a
           connection needs attention (WCAG 1.4.1). The design's borderless,
           dotless, username-only badge is otherwise unchanged. */}
-      {warning ? <TriangleAlert className="size-3" aria-hidden="true" /> : null}
+      {warning ? <TriangleAlert aria-hidden="true" /> : null}
       {summary.login}
       {warning ? (
         <span className="sr-only">{` — ${GITHUB_HEALTH_LABEL[summary.health]}`}</span>
@@ -209,10 +206,11 @@ function HealthDetail({ summary }: { summary: GithubCredentialSummary }) {
               : summary.detail ||
                 "Couldn’t check this connection. You may be offline.";
 
+  // One 32px row in the card: a tone icon and the line, no filled box.
   return (
-    <div className="bg-bg1-highlight text-fg2 flex items-start gap-2.5 rounded-md px-3 py-2.5 text-xs leading-relaxed">
+    <div className="text-fg2 flex min-h-8 items-center gap-2 text-xs leading-4.5">
       <TriangleAlert
-        className="text-yellow-fg mt-0.5 size-3.5 shrink-0"
+        className="text-yellow-primary size-4 shrink-0"
         aria-hidden="true"
       />
       <span>{copy}</span>
@@ -635,9 +633,9 @@ export function GitHubSection({
     <>
       <section className="flex flex-col gap-3">
         <div>
-          <h2 className="text-fg1 m-0 text-[14px] font-medium">GitHub</h2>
+          <h2 className="text-fg1 m-0 text-xs leading-4.5 font-medium">GitHub</h2>
           <p className="text-fg2 mt-0.5 text-xs">
-            Choose how Zeros authenticates GitHub operations on this Mac.
+            How Zeros signs in to GitHub on this Mac.
           </p>
         </div>
 
@@ -665,16 +663,20 @@ export function GitHubSection({
               <div
                 key={method}
                 className={cn(
-                  "relative grid min-h-[66px] grid-cols-[20px_minmax(0,1fr)_auto] items-start gap-2.5 rounded-md border px-3.5 py-3.5 transition-colors",
+                  // A selectable card: 12px corners, the RadioGroup card
+                  // fills (bg1-hover), border3 on hover and border4 chosen.
+                  "relative grid grid-cols-[20px_minmax(0,1fr)_auto] items-start gap-2.5 rounded-[calc(var(--radius-lg)*1.5)] border p-3.5 transition-colors duration-120 ease-out",
                   selected
-                    ? "border-border4 bg-bg1-highlight"
-                    : "border-border2 bg-bg1 hover:border-border3",
+                    ? "border-border4 bg-bg1-hover"
+                    : "border-border2 bg-bg1 hover:border-border3 hover:bg-bg1-hover",
                   githubHealthNeedsAttention(summary) &&
                     "border-yellow-icon/30",
                 )}
               >
                 <input
-                  className="border-border4 checked:border-fg1 checked:bg-fg1 mt-0.5 size-4 appearance-none rounded-full border-[1.5px] checked:shadow-[inset_0_0_0_3px_var(--bg1-highlight)]"
+                  // The RadioGroup look: border4 at rest; chosen fills
+                  // inverted-bg around a 6px inverted-fg dot.
+                  className="border-border4 hover:border-fg3 checked:border-inverted-bg checked:bg-inverted-fg focus-visible:border-highlighted-bright focus-visible:ring-highlighted-bright/50 mt-px size-4 appearance-none rounded-full border transition-[background-color,border-color,box-shadow] duration-120 ease-out checked:shadow-[inset_0_0_0_4px_var(--inverted-bg)] focus-visible:ring-[3px] focus-visible:outline-none"
                   type="radio"
                   name="github-auth-method"
                   value={method}
@@ -696,7 +698,7 @@ export function GitHubSection({
                   onClick={() => void selectMethod(method)}
                   disabled={busyMethod !== null || !hasConfirmedSnapshot}
                 >
-                  <span className="text-fg1 flex items-center gap-2 text-[14px] font-medium">
+                  <span className="text-fg1 flex items-center gap-2 text-xs leading-4.5 font-medium">
                     <MethodIcon method={method} />
                     {githubMethodLabel(method)}
                   </span>
@@ -705,7 +707,7 @@ export function GitHubSection({
                       <IdentityBadge summary={summary} />
                     </span>
                   ) : (
-                    <span className="text-muted-fg mt-0.5 block text-xs">
+                    <span className="text-fg3 mt-0.5 block text-3xxs leading-4">
                       {!hasConfirmedSnapshot
                         ? githubMethodDescription(method)
                         : method === "gh-cli" && summary.available
@@ -834,8 +836,7 @@ export function GitHubSection({
                             Sign in with GitHub CLI
                           </h3>
                           <p className="text-fg2 m-0 text-xs">
-                            Run the GitHub CLI login inside Zeros using the same
-                            inline terminal experience as Claude and Codex.
+                            Run gh auth login here.
                           </p>
                           <div className="flex flex-wrap items-center gap-2">
                             <Button
@@ -885,8 +886,8 @@ export function GitHubSection({
                         </h3>
                         <p className="text-fg2 m-0 text-xs">
                           {appWaiting
-                            ? "Finish on GitHub, then select Open Zeros on the confirmation page."
-                            : "GitHub opens in your browser to authorize Zeros and, when needed, choose repository access."}
+                            ? "Finish on GitHub, then choose Open Zeros."
+                            : "Authorize Zeros in your browser."}
                         </p>
                         <div className="flex flex-wrap items-center gap-2">
                           {appWaiting ? (
@@ -965,8 +966,7 @@ export function GitHubSection({
                           </Button>
                         </div>
                         <p className="text-fg2 m-0 text-xs">
-                          Create a fine-grained token for the repositories you
-                          use. Local operations also accept a classic token.
+                          Use a fine-grained token for your repositories.
                         </p>
                         <div className="flex items-center gap-2">
                           <div className="relative min-w-0 flex-1">
@@ -1098,9 +1098,8 @@ export function GitHubSection({
           })}
         </div>
 
-        <p className="text-muted-fg m-0 text-xs">
-          Inactive credentials remain saved. Switching methods never deletes
-          another method’s connection.
+        <p className="text-fg3 m-0 text-3xxs leading-4">
+          Switching keeps your other credentials.
         </p>
 
         {connection.error && !connection.data ? (
@@ -1142,22 +1141,9 @@ export function GitHubSection({
           <DialogHeader>
             <DialogTitle>Disconnect GitHub App?</DialogTitle>
             <DialogDescription>
-              This changes how Zeros connects to GitHub.
+              Zeros will use gh CLI instead. The app stays installed on GitHub.
             </DialogDescription>
           </DialogHeader>
-          <DialogBody>
-            <ul className="text-fg2 m-0 list-disc space-y-2 pl-5 text-sm">
-              <li>
-                Zeros will stop using this connection for pull requests, pushes,
-                and other GitHub actions.
-              </li>
-              <li>gh CLI auth becomes the selected authentication method.</li>
-              <li>
-                The GitHub App installation and its repository access stay on
-                GitHub until you change them in GitHub settings.
-              </li>
-            </ul>
-          </DialogBody>
           <DialogFooter>
             <Button
               ref={disconnectCancelRef}
