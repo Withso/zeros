@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
+import { setTimeout as delay } from "node:timers/promises";
 import type pg from "pg";
 import { HttpError } from "../authz.js";
 import { withSystemTx, type Tx } from "../db.js";
@@ -15,7 +16,7 @@ export type CloudGithubConnectionScope = {
   organizationId: string;
   userId: string;
 };
-export type CloudGithubAccount = { id: string; login: string };
+export type CloudGithubAccount = { id: string; login: string; name?: string };
 export interface CloudGithubCredentialSnapshot {
   material: CloudGithubCredential;
   identity: CloudGithubAccount;
@@ -156,6 +157,19 @@ export class CloudGithubConnectionStore {
   }
   private read(scope: CloudGithubConnectionScope) {
     return withSystemTx(this.pool, (tx) => this.snapshot(tx, scope));
+  }
+  async selectedIdentity(scope: CloudGithubConnectionScope) {
+    const value = await this.read(scope);
+    const row = value.rows.find(
+      (row) => row.method === value.actor.selected_method,
+    );
+    if (!row) return null;
+    const assertCurrent = () => this.assertCurrent(value.scope, value.generation);
+    await assertCurrent();
+    return {
+      identity: { id: row.github_user_id, login: row.github_login },
+      assertCurrent,
+    };
   }
   async fingerprint(scope: CloudGithubConnectionScope): Promise<string> {
     return (await this.read(scope)).generation;
@@ -479,17 +493,19 @@ export class CloudGithubConnectionStore {
         ).rowCount,
     );
     if (!claimed) {
-      const live = (await this.read(scope)).rows.find(
-        (value) => value.id === row.id,
-      );
-      if (live && live.version > row.version) return;
-      // A timed-out refresh may already have consumed its rotating token. Do
-      // not replay it merely because a process died or a lease expired.
-      if (
-        live?.refresh_lease_until &&
-        live.refresh_lease_until.getTime() <= Date.now()
-      )
-        throw new HttpError(503, "github_refresh_uncertain", "GitHub connection refresh could not be verified. Reconnect GitHub to restore new access.");
+      const deadline = Date.now() + 10_000;
+      for (;;) {
+        const current = await this.read(scope), live = current.rows.find(value => value.id === row.id);
+        if (current.generation !== generation || !live) throw changed();
+        if (live.version > row.version) return;
+        // An expired lease may already have consumed its rotating token. Join
+        // the existing owner only; never reclaim and replay its exchange.
+        if (live.refresh_lease_until && live.refresh_lease_until.getTime() <= Date.now())
+          throw new HttpError(503, "github_refresh_uncertain", "GitHub connection refresh could not be verified. Reconnect GitHub to restore new access.");
+        const remaining = deadline - Date.now();
+        if (!live.refresh_lease || remaining <= 0) break;
+        await delay(Math.min(250, remaining));
+      }
       throw new HttpError(
         503,
         "github_refresh_pending",

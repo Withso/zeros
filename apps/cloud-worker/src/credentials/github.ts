@@ -3,53 +3,85 @@ import { connect, createServer, type Server, type Socket } from "node:net";
 import { chmod, lstat, mkdir, unlink } from "node:fs/promises";
 import { dirname } from "node:path";
 import type { CloudV2ControlFrame, CloudV2WorkerFrame } from "@zeros/protocol/cloud-v2-relay";
+import { GithubAuthenticationError, githubAuthenticationError, GITHUB_REQUEST_TIMEOUT_MS, GITHUB_SOCKET_TIMEOUT_MS } from "./github-failure";
 
 export interface GithubToken { token: string; expiresAt: number }
-const unavailable = () => new Error("GitHub authentication is unavailable. Reconnect GitHub and try again.");
-interface Pending { id: string; resolve: (token: GithubToken) => void; reject: (error: Error) => void; timer: ReturnType<typeof setTimeout> }
+const unavailable = () => githubAuthenticationError();
+interface Pending {
+  id?: string; promise: Promise<GithubToken>; resolve: (token: GithubToken) => void; reject: (error: Error) => void;
+  deadline: number; attempts: number; failure?: GithubAuthenticationError;
+  timer: ReturnType<typeof setTimeout>; retry?: ReturnType<typeof setTimeout>;
+}
 
 /** One request flight per worker. Credentials exist only in process memory;
  * disconnection, refusal and expiry never replay the caller's Git command. */
 export class GithubTokens {
   private online = false;
+  private disposed = false;
   private cached?: GithubToken;
   private pending?: Pending;
-  private flight?: Promise<GithubToken>;
   private readonly now: () => number;
-  constructor(private readonly send: (frame: CloudV2WorkerFrame) => Promise<boolean>, private readonly options: { now?: () => number; timeoutMs?: number; purpose?: "git" | "gh" } = {}) { this.now = options.now ?? Date.now; }
-  connect(): void { this.disconnect(); this.online = true; }
+  constructor(private readonly send: (frame: CloudV2WorkerFrame, timeoutMs: number) => Promise<boolean>, private readonly options: { now?: () => number; timeoutMs?: number; purpose?: "git" | "gh" } = {}) { this.now = options.now ?? Date.now; }
+  connect(): void {
+    if (this.disposed) return;
+    this.online = true;
+    if (this.pending) this.dispatch(this.pending);
+  }
   invalidate(): void {
     this.cached = undefined;
-    if (this.pending) this.refuse(this.pending.id);
-    this.flight = undefined;
+    if (this.pending) this.finish(this.pending, githubAuthenticationError("connection-changed"));
   }
   disconnect(): void {
     this.online = false; this.cached = undefined;
-    if (this.pending) { clearTimeout(this.pending.timer); this.pending.reject(unavailable()); this.pending = undefined; }
-    this.flight = undefined;
+    if (this.pending?.id) this.failed(this.pending, unavailable());
+  }
+  dispose(): void {
+    this.disposed = true; this.online = false; this.cached = undefined;
+    if (this.pending) this.finish(this.pending, unavailable());
   }
   get(): Promise<GithubToken> {
-    if (!this.online) return Promise.reject(unavailable());
-    if (this.cached && this.cached.expiresAt > this.now() + 60_000) return Promise.resolve(this.cached);
-    if (this.flight) return this.flight;
-    const id = randomUUID();
-    const pending = new Promise<GithubToken>((resolve, reject) => {
-      const timer = setTimeout(() => this.refuse(id), this.options.timeoutMs ?? 15_000); timer.unref?.();
-      this.pending = { id, resolve, reject, timer };
-      void this.send({ t: "request", id, kind: "github-token", ...(this.options.purpose ? { purpose: this.options.purpose } : {}) }).then(sent => { if (!sent) this.refuse(id); }, () => this.refuse(id));
-    });
-    const flight = pending.finally(() => { if (this.flight === flight) this.flight = undefined; }); this.flight = flight;
-    return flight;
+    if (this.disposed) return Promise.reject(unavailable());
+    if (this.online && this.cached && this.cached.expiresAt > this.now() + 10_000) return Promise.resolve(this.cached);
+    if (this.pending) return this.pending.promise;
+    let resolve!: Pending["resolve"], reject!: Pending["reject"];
+    const promise = new Promise<GithubToken>((yes, no) => { resolve = yes; reject = no; });
+    const timeout = this.options.timeoutMs ?? GITHUB_REQUEST_TIMEOUT_MS;
+    const pending: Pending = { promise, resolve, reject, attempts: 0, deadline: this.now() + timeout,
+      timer: setTimeout(() => this.finish(pending, pending.failure ?? unavailable()), timeout) };
+    pending.timer.unref?.(); this.pending = pending;
+    this.dispatch(pending);
+    return promise;
   }
   receive(frame: Extract<CloudV2ControlFrame, { t: "reply" | "refusal" }>): void {
-    if (!this.pending || this.pending.id !== frame.id) return;
-    if (frame.t === "refusal" || frame.expiresAt <= this.now() + 1000 || !frame.token || frame.token.length > 8192 || /[\0\r\n]/.test(frame.token)) { this.refuse(frame.id); return; }
-    const pending = this.pending; this.pending = undefined; clearTimeout(pending.timer);
-    this.cached = { token: frame.token, expiresAt: frame.expiresAt }; pending.resolve(this.cached);
+    const pending = this.pending;
+    if (!pending || pending.id !== frame.id) return;
+    if (this.now() >= pending.deadline) { this.finish(pending, pending.failure ?? unavailable()); return; }
+    if (frame.t === "refusal") { this.failed(pending, githubAuthenticationError(frame.code)); return; }
+    if (frame.expiresAt <= this.now() + 1000 || !frame.token || frame.token.length > 8192 || /[\0\r\n]/.test(frame.token)) { this.failed(pending, unavailable()); return; }
+    this.finish(pending, { token: frame.token, expiresAt: frame.expiresAt });
   }
-  private refuse(id: string): void {
-    if (this.pending?.id !== id) return;
-    const pending = this.pending; this.pending = undefined; clearTimeout(pending.timer); pending.reject(unavailable());
+  private dispatch(pending: Pending): void {
+    if (this.pending !== pending || pending.id || pending.retry || !this.online) return;
+    const remaining = pending.deadline - this.now();
+    if (remaining <= 0 || pending.attempts >= 2) { this.finish(pending, pending.failure ?? unavailable()); return; }
+    const id = randomUUID(); pending.id = id; pending.attempts++;
+    const failed = () => { if (this.pending === pending && pending.id === id) this.failed(pending, unavailable()); };
+    void this.send({ t: "request", id, kind: "github-token", ...(this.options.purpose ? { purpose: this.options.purpose } : {}) }, remaining)
+      .then(sent => { if (!sent) failed(); }, failed);
+  }
+  private failed(pending: Pending, error: GithubAuthenticationError): void {
+    pending.id = undefined; this.cached = undefined;
+    if (error.reason !== "unavailable" || pending.attempts >= 2) { this.finish(pending, error); return; }
+    pending.failure ??= error;
+    if (pending.deadline - this.now() <= 250) return;
+    pending.retry = setTimeout(() => { pending.retry = undefined; this.dispatch(pending); }, 250);
+    pending.retry.unref?.();
+  }
+  private finish(pending: Pending, result: GithubToken | GithubAuthenticationError): void {
+    if (this.pending !== pending) return;
+    this.pending = undefined; clearTimeout(pending.timer); clearTimeout(pending.retry);
+    if (result instanceof GithubAuthenticationError) { this.cached = undefined; pending.reject(result); }
+    else { this.cached = result; pending.resolve(result); }
   }
 }
 
@@ -91,7 +123,7 @@ export class GithubBroker {
     });
   }
   private accept(socket: Socket): void {
-    this.sockets.add(socket); socket.setTimeout(20_000, () => socket.destroy());
+    this.sockets.add(socket); socket.setTimeout(GITHUB_SOCKET_TIMEOUT_MS, () => socket.destroy());
     socket.on("error", () => {}); socket.once("close", () => this.sockets.delete(socket));
     let buffer = "", answered = false;
     socket.setEncoding("utf8");
@@ -107,7 +139,9 @@ export class GithubBroker {
         if (request.kind === "token" || request.kind === "user-token") return this.token(request.kind === "user-token" ? "gh" : "git");
         throw unavailable();
       };
-      void reply().then(value => { if (!socket.destroyed) socket.end(JSON.stringify(value) + "\n"); }, () => { if (!socket.destroyed) socket.end('{"error":"unavailable"}\n'); });
+      void reply().then(value => { if (!socket.destroyed) socket.end(JSON.stringify(value) + "\n"); }, error => {
+        if (!socket.destroyed) socket.end(JSON.stringify({ error: error instanceof GithubAuthenticationError ? error.reason : "unavailable" }) + "\n");
+      });
     });
   }
 }

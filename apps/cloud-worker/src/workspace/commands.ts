@@ -20,9 +20,11 @@ export function commandRunner(cwd: string, wiring: NodeJS.ProcessEnv = {}): Comm
     env.GIT_TERMINAL_PROMPT = "0"; env.GIT_EDITOR = "true";
     if (options.readOnly) env.GIT_OPTIONAL_LOCKS = "0";
     const child = execFile(program, args, { cwd, env, encoding: "utf8", timeout: options.timeout ?? 30_000,
-      maxBuffer: options.maxBuffer ?? 8 * 1024 * 1024 }, (error, stdout) => {
+      maxBuffer: options.maxBuffer ?? 8 * 1024 * 1024 }, (error, stdout, stderr) => {
       const code = error && typeof error.code === "number" ? error.code : error ? -1 : 0;
       if (!error || options.allowExitCodes?.includes(code)) resolve({ stdout, code });
+      else if (program === "git" && /^(?:Author|Committer) identity unknown$|^fatal: (?:empty ident name|no email was given|unable to auto-detect email address)/m.test(stderr))
+        reject(new WorkspaceError("GIT_IDENTITY_REQUIRED", "Reconnect GitHub in Zeros to configure your commit identity, or set a repository-local Git identity."));
       else reject(new WorkspaceError(error?.code === "ERR_CHILD_PROCESS_STDIO_MAXBUFFER" ? "GIT_OUTPUT_TOO_LARGE" : "GIT_COMMAND_FAILED",
         error?.code === "ERR_CHILD_PROCESS_STDIO_MAXBUFFER" ? "This result is too large. Select a file to view its changes." : "The Git command could not be completed. Check the repository state and try again."));
     });

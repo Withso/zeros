@@ -14,6 +14,7 @@ import { afterAll, beforeAll, expect, it } from "vitest";
 import { workerChildEnvironment } from "../drivers/shared/agent-environment";
 import { CLIENT_A, WORKSPACE_ID, browserFrame, config } from "./worker-fixtures";
 import { GithubBroker, githubEnvironment } from "../credentials/github";
+import { githubAuthenticationError } from "../credentials/github-failure";
 import { repositoryFixture } from "../workspace/__tests__/repository-fixture";
 
 const exec = promisify(execFile);
@@ -138,6 +139,19 @@ it("resolves askpass and gh wrappers through a runtime symlink, including spaces
         NODE_OPTIONS: `--import=${new URL("./fixtures/gh-launch.mjs", import.meta.url).href}` }, timeout: 10_000,
     });
     expect(gh.stdout.startsWith("gh version ")).toBe(true); expect(gh.stderr).toBe(""); expect(requests).toBe(3);
+  } finally { await broker.dispose(); }
+});
+
+it.each(["git-askpass", "gh"])("prints the broker's safe recovery guidance from the packaged %s entrypoint", async name => {
+  const broker = new GithubBroker(join(directory, `${name}-refused.sock`), async () => { throw githubAuthenticationError("connection-expired"); });
+  await broker.start();
+  try {
+    const args = name === "git-askpass" ? ["Password for 'https://x-access-token@github.com': "] : ["pr", "list"];
+    const result = await exec(join(dist, "bin", name), args, { cwd: directory,
+      env: workerChildEnvironment(undefined, githubEnvironment(broker.socketPath, join(dist, "bin/git-askpass"))), timeout: 10_000 }).catch(error => error);
+    expect(result.code).toBe(1);
+    expect(result.stdout).toBe("");
+    expect(result.stderr).toBe("Reconnect GitHub in Zeros: your connection has expired.\n");
   } finally { await broker.dispose(); }
 });
 

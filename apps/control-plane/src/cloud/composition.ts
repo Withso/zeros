@@ -109,19 +109,21 @@ export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boo
       const issued = await store.issueToken({ workspaceId: workspace.id, kind: "proxy", userId: null, ttlMs: PROXY_TOKEN_TTL_MS });
       return { token: issued.token, expiresAt: issued.expiresAt.getTime() };
     };
-    const [codex, claude, cursor, setup, baseCommit, repositoryBinding] = await Promise.all([
+    const [codex, claude, cursor, setup, baseCommit, repositoryBinding, gitIdentity] = await Promise.all([
       logins(workspace.creatorUserId, workspace.organizationId, "codex"),
       logins(workspace.creatorUserId, workspace.organizationId, "claude"),
       logins(workspace.creatorUserId, workspace.organizationId, "cursor"),
       github.workspaceSetup(workspace, computers),
       store.baseCommit(workspace.id),
       github.binding(workspace, mode),
+      github.connections.gitIdentity({ organizationId: workspace.organizationId, userId: workspace.creatorUserId }),
     ]);
     const agents = await cloudV2AgentConfig({ codex, claude, cursor }, proxyBase, proxy);
     const mcpServers = mcp ? await mcp.store.resolve(workspace.organizationId, workspace.creatorUserId, workspace.repository, repositoryBinding) : undefined;
     await authorize();
     return {
       t: "config",
+      gitIdentity,
       githubPullRequests: 1,
       ...(v2.promptOutbox ? { promptOutbox: 1 as const } : {}),
       loginRevision: await store.loginRevision(workspace.id) ?? "0",
@@ -163,7 +165,7 @@ export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boo
   }) : null;
   const relay = roles.relay ? connections : null;
   const promptSignals = new CloudV2PromptSignals();
-  const workers: CloudV2WorkerRouteDeps = { store, timing, authorizeSource, continueSource, config: workerConfig, githubToken, runtimeSha256: v2.runtime.sha256,
+  const workers: CloudV2WorkerRouteDeps = { store, timing, logger: console, authorizeSource, continueSource, config: workerConfig, githubToken, runtimeSha256: v2.runtime.sha256,
     githubCheckout: (token,bootId,value) => github.metadata.checkout(token,bootId,value),
     ...(mcp ? { mcpAuthorization: async (workspace, id, force) =>
       mcp.oauth.authorizationForRepository(workspace.organizationId, workspace.creatorUserId, workspace.repository, id, force,

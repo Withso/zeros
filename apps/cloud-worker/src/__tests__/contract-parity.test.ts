@@ -5,6 +5,20 @@ import * as control from "../../../control-plane/src/cloud/contract";
 import * as sharedPrompts from "@zeros/protocol/cloud-v2-prompts";
 import * as controlPrompts from "../../../control-plane/src/cloud/prompt-contract";
 import { CLIENT_A, WORKSPACE_ID, config } from "./worker-fixtures";
+import { CloudV2ControlFrameSchema as legacyWorkerFrame } from "../../../control-plane/src/cloud/__fixtures__/worker-contract-before-identity";
+
+it("keeps optional managed Git identity bounded and identical across the independently deployed contracts", () => {
+  const identity = { name: "Fixture Contributor", email: "123+contributor@users.noreply.github.com" };
+  for (const contract of [shared, control]) {
+    for (const gitIdentity of [undefined, null, identity])
+      expect(contract.CloudV2ControlFrameSchema.safeParse({ ...config, ...(gitIdentity === undefined ? {} : { gitIdentity }) }).success).toBe(true);
+    for (const gitIdentity of [{ ...identity, name: "" }, { ...identity, name: "x".repeat(257) },
+      { ...identity, name: "bad\nname" }, { ...identity, email: "123+name@evil.test" }, { ...identity, token: "private" }])
+      expect(contract.CloudV2ControlFrameSchema.safeParse({ ...config, gitIdentity }).success).toBe(false);
+  }
+  expect(shared.CloudV2ControlFrameSchema.parse(legacyWorkerFrame.parse(config))).toEqual(config);
+  expect(legacyWorkerFrame.safeParse({ ...config, gitIdentity: identity }).success).toBe(false);
+});
 
 it("keeps the standalone control-plane constants identical to the worker contract", () => {
   for (const name of ["CLOUD_V2_RELAY_PROTOCOL", "CLOUD_V2_WORKER_PORT", "CLOUD_V2_WORKER_BRIDGE_PATH", "CLOUD_V2_WORKER_BRIDGE_PROTOCOL", "CLOUD_V2_MAX_FRAME_BYTES", "CLOUD_V2_MAX_HISTORY_ROWS"] as const)

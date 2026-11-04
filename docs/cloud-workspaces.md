@@ -222,6 +222,36 @@ permission; `gh` receives the human's App user token. With PAT selected, both
 receive that PAT. Broker caching is bounded to two minutes, but does not shorten
 a credential's GitHub lifetime or reduce a PAT's scopes. A user token delivered
 to the VM can be used by any process there, including other agent sessions.
+The broker shares concurrent requests and keeps a successful token until ten
+seconds before that two-minute lease expires. An unchanged configuration
+refresh preserves both the cache and any active request. A changed login
+revision, transport disconnect or refusal withdraws cached material. Recovery
+and one delayed retry of a transient credential failure share the caller's
+original twenty-second deadline; each HTTP attempt gets at most fifteen
+seconds of the remaining budget. Git commands and `gh` mutations are never
+replayed. Connection, installation, SSO, access, source-review and rate-limit
+refusals reach Git/`gh` stderr as bounded recovery guidance; control-plane logs
+record only a closed reason and cause class, never provider text or credentials.
+
+Before checkout setup, agents, terminals or Changes commits are admitted, the
+worker installs the creator's Git identity from the selected organization
+connection. The name is the GitHub profile name, falling back to the verified
+login; the email is `<github_user_id>+<github_login>@users.noreply.github.com`.
+During a temporary profile lookup outage, the selected connection's stored
+login is used after rechecking its authorization generation.
+The VM user's global Git config includes the worker-owned
+`~/.config/zeros/git-identity`, which also sets `user.useConfigOnly=true`.
+Confirmed configuration changes atomically replace that file, so existing
+shells see the new default. An explicit disconnected configuration clears the
+managed name/email; commits without an explicit identity fail and Changes
+offers reconnect guidance. Deliberate repository-local identities, including
+those on restored checkpoints, retain Git's normal precedence and are never
+rewritten or cleared. Wake, restore and reconnect reapply the managed default
+before new work. Both HTTPS and relay configuration negotiate `git-identity-v1`:
+older workers receive no extra field, and an older control plane's omitted
+field leaves the existing Git configuration alone. Local Git identity and
+credential behavior are unchanged.
+
 Control-plane clone commands receive their one-command authorization header
 through a private Boat file upload, opened and unlinked before execution, then
 passed on stdin. Git reads it through an environment reference. Neither the
@@ -368,7 +398,10 @@ repository and one the caller cannot access; Zeros does not infer which it is.
 The control plane encrypts credentials with its versioned vault keyring.
 OAuth uses a single-use, ten-minute state and PKCE. App-token renewal uses a
 durable lease: an ambiguous refresh is not replayed with a potentially consumed
-refresh token. Reconnect starts a new generation. Every operation checks the
+refresh token. Another control-plane replica waits up to ten seconds for the
+current lease owner to finish, rechecking the connection generation on every
+read; it never steals or replays an expired lease. Reconnect starts a new
+generation. Every operation checks the
 selected connection, account and organization membership; late callbacks,
 credential requests and responses cannot restore an earlier generation.
 Renderer snapshots contain connection health and the GitHub login, never

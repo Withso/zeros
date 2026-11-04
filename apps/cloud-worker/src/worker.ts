@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { access, rm } from "node:fs/promises";
 import { join } from "node:path";
+import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { CloudV2ControlFrameSchema, CLOUD_V2_RELAY_PROTOCOL, type CloudV2WorkerFrame } from "@zeros/protocol/cloud-v2-relay";
 import { CloudV2PromptPullReplySchema } from "@zeros/protocol/cloud-v2-prompts";
@@ -23,6 +24,7 @@ import { WorkspaceError, WorkspaceScope, type WorkerConfig } from "./workspace/s
 import { WorkspaceService, type WorkspaceServiceOptions } from "./workspace/service";
 import { isGitMutation } from "./workspace/git";
 import { GithubBroker, GithubTokens, githubEnvironment } from "./credentials/github";
+import { configureGitIdentity } from "./credentials/git-identity";
 import { commandRunner } from "./workspace/commands";
 import { Terminals } from "./terminals/service";
 import type { ModelDiscoveryOptions } from "./credentials/model-availability";
@@ -32,6 +34,7 @@ import { measureStartup, recordStartupTiming, type StartupTimingObserver } from 
 
 interface WorkerOptions {
   directory: string;
+  homeDirectory?: string;
   workspaceId?: string;
   transport: Transport;
   drivers?: DriverFactories;
@@ -80,8 +83,8 @@ export class CloudWorker {
   private unsubscribers: Array<() => void> = [];
 
   constructor(private readonly options: WorkerOptions) {
-    this.tokens = new GithubTokens(frame => this.send(frame));
-    this.userTokens = new GithubTokens(frame => this.send(frame), { purpose: "gh" });
+    this.tokens = new GithubTokens((frame, timeoutMs) => this.send(frame, timeoutMs));
+    this.userTokens = new GithubTokens((frame, timeoutMs) => this.send(frame, timeoutMs), { purpose: "gh" });
     this.github = new GithubBroker(join(options.directory, "github.sock"), purpose => purpose === "gh" && this.githubUserTokensEnabled ? this.userTokens.get() : this.tokens.get(), () => this.workspace?.githubChanged());
     this.gitEnvironment = githubEnvironment(this.github.socketPath, options.gitAskpassPath ?? fileURLToPath(new URL("../bin/git-askpass", import.meta.url)));
   }
@@ -120,7 +123,7 @@ export class CloudWorker {
 
   async dispose(): Promise<void> {
     if (this.disposed) return;
-    this.disposed = true; clearInterval(this.heartbeat); this.tokens.disconnect(); this.userTokens.disconnect();
+    this.disposed = true; clearInterval(this.heartbeat); this.tokens.dispose(); this.userTokens.dispose();
     await this.configuring.catch(() => {});
     await this.stopCheckout();
     await this.promptInbox?.dispose();
@@ -236,12 +239,13 @@ export class CloudWorker {
     const revision = BigInt(config.loginRevision);
     if (this.configurationRevision !== undefined && revision < this.configurationRevision) return;
     this.githubUserTokensEnabled = config.githubPullRequests === 1;
-    this.userTokens.invalidate();
     if (this.options.workspaceId && config.workspace.id !== this.options.workspaceId) throw new Error("Workspace identity changed.");
     const scope = new WorkspaceScope(config.workspace);
     if (this.scope && (this.scope.key !== scope.key || this.scope.root !== scope.root || this.scope.workspace.repository !== scope.workspace.repository)) throw new Error("Workspace identity changed.");
+    if (this.configurationRevision !== revision) { this.tokens.invalidate(); this.userTokens.invalidate(); }
+    await configureGitIdentity(this.options.homeDirectory ?? homedir(), config.gitIdentity);
     if (!this.scope) {
-      await this.github.start(); this.tokens.invalidate();
+      await this.github.start();
       const checkout = await measureStartup("worker_checkout", () => (this.options.prepareCheckout ?? prepareCheckout)(config.workspace, this.gitEnvironment, timing), timing)
         .catch(async error => {
           await this.options.transport.reportCheckoutFailure?.().catch(() => {});
@@ -301,7 +305,7 @@ export class CloudWorker {
         onAdmitted: () => rm(restoreMarker, { force: true }).catch(() => {}),
       });
       this.setup.start(checkout?.createdBranch === true || restored);
-    } else { this.tokens.invalidate(); await this.workspace!.configure(config.workspace); await this.mcp!.configure(config.mcpServers ?? [], config.loginRevision); this.agents!.configure(config); }
+    } else { await this.workspace!.configure(config.workspace); await this.mcp!.configure(config.mcpServers ?? [], config.loginRevision); this.agents!.configure(config); }
     this.history!.connect();
     if (config.promptOutbox === 1 && this.options.transport.promptRequest) {
       this.promptInbox ??= new PromptInbox(this.store!, this.agents!, async (op, body, signal) => {
@@ -343,9 +347,9 @@ export class CloudWorker {
     await this.terminals?.dispose();
     await this.mcp?.dispose();
   }
-  private async send(frame: CloudV2WorkerFrame): Promise<boolean> {
+  private async send(frame: CloudV2WorkerFrame, timeoutMs?: number): Promise<boolean> {
     if (!this.online) return false;
-    try { return await this.options.transport.send(frame); }
+    try { return await this.options.transport.send(frame, timeoutMs === undefined ? undefined : { timeoutMs }); }
     catch { this.options.onError?.("transport"); return false; }
   }
   private get busy(): boolean {

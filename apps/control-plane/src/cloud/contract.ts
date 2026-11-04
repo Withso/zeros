@@ -105,6 +105,10 @@ export const CloudV2ControlFrameSchema = z.discriminatedUnion("t", [
   z.object({
     t: z.literal("config"),
     promptOutbox: z.literal(1).optional(),
+    gitIdentity: z.object({
+      name: z.string().trim().min(1).max(256).refine(value => !/[<>\p{Cc}]/u.test(value)),
+      email: z.string().regex(/^[1-9][0-9]{0,15}\+[A-Za-z0-9_.-]{1,100}@users\.noreply\.github\.com$/),
+    }).strict().nullable().optional(),
   githubPullRequests: z.literal(1).optional(),
     loginRevision: z.string().regex(/^(0|[1-9][0-9]{0,19})$/),
     mcpServers: z.array(RuntimeMcpServerSchema).max(128).optional(),

@@ -2,14 +2,15 @@ import { connect } from "node:net";
 import { spawn } from "node:child_process";
 import { workerChildEnvironment } from "../drivers/shared/agent-environment";
 import { githubEnvironment } from "./github";
+import { githubAuthenticationError, GITHUB_SOCKET_TIMEOUT_MS, type GithubAuthenticationError } from "./github-failure";
 
-const unavailable = () => new Error("GitHub authentication is unavailable.");
+const unavailable = () => githubAuthenticationError();
 export function brokerRequest(socketPath: string, kind: "token" | "user-token" | "changed"): Promise<Record<string, unknown>> {
   return new Promise((resolve, reject) => {
     if (!socketPath || !socketPath.startsWith("/")) { reject(unavailable()); return; }
     const socket = connect(socketPath); let buffer = "", settled = false;
-    const finish = (result?: Record<string, unknown>) => { if (settled) return; settled = true; socket.destroy(); if (result) resolve(result); else reject(unavailable()); };
-    socket.setTimeout(20_000, () => finish()); socket.setEncoding("utf8");
+    const finish = (result?: Record<string, unknown>, error?: GithubAuthenticationError) => { if (settled) return; settled = true; socket.destroy(); if (result) resolve(result); else reject(error ?? unavailable()); };
+    socket.setTimeout(GITHUB_SOCKET_TIMEOUT_MS, () => finish()); socket.setEncoding("utf8");
     socket.once("error", () => finish()); socket.once("close", () => finish());
     socket.once("connect", () => socket.write(JSON.stringify({ kind }) + "\n"));
     socket.on("data", (data: string) => {
@@ -17,7 +18,8 @@ export function brokerRequest(socketPath: string, kind: "token" | "user-token" |
       if (!buffer.includes("\n")) return;
       try {
         const result: unknown = JSON.parse(buffer.trim());
-        if (!result || typeof result !== "object" || "error" in result) { finish(); return; }
+        if (!result || typeof result !== "object") { finish(); return; }
+        if ("error" in result) { finish(undefined, githubAuthenticationError(result.error)); return; }
         finish(result as Record<string, unknown>);
       } catch { finish(); }
     });

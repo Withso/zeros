@@ -239,6 +239,23 @@ describe("cloud v2 relay", () => {
     else expect(frames.find(frame => frame.t === "config")).not.toHaveProperty("mcpServers");
   });
 
+  it.each([false, true])("gates managed identity on WebSocket upgrade support=%s for initial and refreshed config", async supported => {
+    workerServer.on("headers", headers => { headers.push(`X-Zeros-Worker-Features: mcp-v1${supported ? ",git-identity-v1" : ""}`); });
+    const original = deps.config, gitIdentity = { name: "Fixture Contributor", email: "123+contributor@users.noreply.github.com" };
+    deps.config = async ws => ({ ...await original(ws), gitIdentity });
+    const frames: any[] = [];
+    workerServer.on("connection", ws => ws.on("message", raw => frames.push(JSON.parse(String(raw)))));
+    await app();
+    await vi.waitFor(() => expect(frames.filter(frame => frame.t === "config")).toHaveLength(1));
+    loginRevision = "1";
+    await relay.refreshLogins();
+    await vi.waitFor(() => expect(frames.filter(frame => frame.t === "config")).toHaveLength(2));
+    for (const frame of frames.filter(frame => frame.t === "config")) {
+      if (supported) expect(frame.gitIdentity).toEqual(gitIdentity);
+      else expect(frame).not.toHaveProperty("gitIdentity");
+    }
+  });
+
   it.each([false, true])("gates setup on WebSocket upgrade support=%s for initial and refreshed config", async supported => {
     workerServer.on("headers", headers => { headers.push(`X-Zeros-Worker-Features: mcp-v1${supported ? ",workspace-setup-v1" : ""}`); });
     const original = deps.config;

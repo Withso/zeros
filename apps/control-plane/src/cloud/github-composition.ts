@@ -18,25 +18,7 @@ import type { CloudGithubUnavailableReason } from "./github-connection-contract.
 import type { CloudV2ComputerSourceResolver } from "./computer-provenance.js";
 import type { CloudV2Computers } from "./computer.js";
 import { z } from "zod";
-
-function unavailableReason(error: unknown): CloudGithubUnavailableReason {
-  const reasons: Record<string, CloudGithubUnavailableReason> = {
-    github_connection_required: "connection-required",
-    github_authorization_required: "connection-required",
-    github_authorization_expired: "connection-expired",
-    github_authorization_changed: "connection-changed",
-    github_installation_required: "installation-required",
-    github_installation_suspended: "installation-suspended",
-    github_cloud_access_denied: "access-denied",
-    github_repository_unavailable: "access-denied",
-    github_sso_required: "sso-required",
-    cloud_source_review_required: "source-review-required",
-    github_rate_limited: "rate-limited",
-  };
-  return error instanceof HttpError
-    ? (reasons[error.code] ?? "unavailable")
-    : "unavailable";
-}
+import { cloudGithubUnavailableReason as unavailableReason } from "./github-failure.js";
 
 export function createCloudGithubServices(
   pool: pg.Pool,

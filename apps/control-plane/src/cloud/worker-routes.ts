@@ -9,6 +9,7 @@ import { isCloudV2Token } from "./tokens.js";
 import { CloudV2PromptAckSchema, CloudV2PromptBeginSchema, CloudV2PromptOutcomeSchema, CloudV2PromptPullSchema, CloudV2PromptStopReplySchema, CloudV2PromptStopSchema } from "./prompt-contract.js";
 import { CloudGithubCheckoutSchema, type CloudGithubCheckout } from "./github-pr-contract.js";
 import type { CloudSourceContinuation, CloudSourceProof } from "./source-authority.js";
+import { cloudGithubFailure } from "./github-failure.js";
 
 export const CLOUD_V2_WORKER_API = "/v2/cloud/worker";
 type ConfigFrame = Extract<CloudV2ControlFrame, { t: "config" }>;
@@ -17,6 +18,7 @@ export type CloudV2WorkerRouteDeps = {
   runtimeSha256: string;
   promptOutbox?: boolean;
   timing?: (record: CloudV2TimingRecord) => void;
+  logger?: Pick<Console, "warn">;
   waitForPrompts?(workspaceId: string, waitMs: number, signal: AbortSignal): { wait: Promise<void>; dispose(): void };
   config(workspace: CloudV2Workspace, mode?: "admission" | "continuation"): Promise<ConfigFrame>;
   authorizeSource?(workspace: CloudV2Workspace): Promise<void>;
@@ -62,13 +64,14 @@ async function configuration(deps: CloudV2WorkerRouteDeps, workspace: CloudV2Wor
     const config = await deps.config(workspace, mode);
     if (!await deps.store.workerSession(token, bootId)) throw unauthorized();
     if (revision === await deps.store.loginRevision(workspace.id)) {
-      const { mcpServers, githubPullRequests, ...legacy } = config;
+      const { mcpServers, githubPullRequests, gitIdentity, ...legacy } = config;
       const { setup, baseCommit, github, ...workspaceConfig } = config.workspace;
       return { ...legacy, workspace: { ...workspaceConfig,
         ...(features.has("github-pr-v1") && github ? { github } : {}),
         ...(features.has("workspace-setup-v1") && setup !== undefined ? { setup } : {}),
         ...(features.has("checkout-v2") && baseCommit !== undefined ? { baseCommit } : {}) },
-        loginRevision: revision, ...(features.has("github-pr-v1") && githubPullRequests === 1 ? { githubPullRequests } : {}), ...(features.has("mcp-v1") && mcpServers ? { mcpServers } : {}),
+        loginRevision: revision, ...(features.has("git-identity-v1") && gitIdentity !== undefined ? { gitIdentity } : {}),
+        ...(features.has("github-pr-v1") && githubPullRequests === 1 ? { githubPullRequests } : {}), ...(features.has("mcp-v1") && mcpServers ? { mcpServers } : {}),
         ...(deps.promptOutbox ? { promptOutbox: 1 } : {}) };
     }
   }
@@ -143,11 +146,20 @@ export function createCloudV2WorkerRoutes(deps: CloudV2WorkerRouteDeps): Hono {
     return c.json(result);
   });
   app.post(`${CLOUD_V2_WORKER_API}/github-token`, async c => {
-    const auth = await session(c, deps);
+    const auth = await session(c, deps, false);
     const input = await body(c, z.object({ purpose: z.enum(["git", "gh"]).optional() }).strict());
     let granted: { token: string; expiresAt: number };
-    try { granted = await deps.githubToken(auth.workspace, input.purpose ?? "git"); }
-    catch { throw new HttpError(409, "github_token_unavailable", "GitHub token unavailable"); }
+    try {
+      if (auth.workspace.state !== "stopping") {
+        if (deps.continueSource) await deps.continueSource(auth.workspace, auth.workspace);
+        else await deps.authorizeSource?.(auth.workspace);
+      }
+      granted = await deps.githubToken(auth.workspace, input.purpose ?? "git");
+    } catch (error) {
+      const failure = cloudGithubFailure(error);
+      deps.logger?.warn("[cloud-v2] GitHub credential unavailable", failure);
+      return c.json({ error: { code: "github_token_unavailable", reason: failure.reason } }, 409);
+    }
     if (!await deps.store.workerSession(auth.token, auth.bootId)) throw unauthorized();
     return c.json(granted);
   });

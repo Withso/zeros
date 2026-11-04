@@ -11,7 +11,7 @@ import { CLOUD_V2_MAX_FRAME_BYTES, CloudV2WorkerFrameSchema, type CloudV2Control
 import type { PostgresSecurityEventBroker } from "../security-events.js";
 import type { CloudV2Store, CloudV2Workspace } from "./store.js";
 import { isCloudV2Token } from "./tokens.js";
-import { dialWorker, workerSupportsCheckout, workerSupportsMcp, workerSupportsSetup, workerSupportsGithub, type WorkerRoute } from "./worker-connection.js";
+import { dialWorker, workerSupportsCheckout, workerSupportsMcp, workerSupportsSetup, workerSupportsGithub, workerSupportsGitIdentity, type WorkerRoute } from "./worker-connection.js";
 import { emitCloudV2Timing, type CloudV2TimingRecord } from "./lifecycle.js";
 import { isGithubAccessRevoked } from "../github-availability.js";
 import { CLOUD_SOURCE_REFRESH_MS, type CloudSourceContinuation, type CloudSourceProof } from "./source-authority.js";
@@ -405,13 +405,14 @@ export class CloudV2Relay {
       if (await this.authorized(room) !== "allowed" || room.worker !== ws) return false;
       if (revision !== await this.deps.store.loginRevision(room.workspace.id)) { flight.requested = true; flight.force = true; continue; }
       if (room.worker !== ws || room.revoked) return false;
-      const { mcpServers, githubPullRequests, ...legacy } = config;
+      const { mcpServers, githubPullRequests, gitIdentity, ...legacy } = config;
       const { setup, baseCommit, github, ...workspaceConfig } = config.workspace;
       send(ws, { ...legacy, workspace: { ...workspaceConfig,
         ...(workerSupportsGithub(ws) && github ? { github } : {}),
         ...(workerSupportsSetup(ws) && setup !== undefined ? { setup } : {}),
         ...(workerSupportsCheckout(ws) && baseCommit !== undefined ? { baseCommit } : {}) },
         ...(workerSupportsMcp(ws) && mcpServers ? { mcpServers } : {}),
+        ...(workerSupportsGitIdentity(ws) && gitIdentity !== undefined ? { gitIdentity } : {}),
         ...(workerSupportsGithub(ws) && githubPullRequests === 1 ? { githubPullRequests } : {}), loginRevision: revision }); room.loginRevision = revision; room.configAt = Date.now();
     } while (flight.requested);
     return true;
