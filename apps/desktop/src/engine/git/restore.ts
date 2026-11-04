@@ -4,34 +4,13 @@
 // can't wipe work silently — the IPC layer surfaces the confirmation.
 
 import { resolveRepoForGitOp } from "./worktree";
-import { assertSafeGitRef, runGit } from "./git-exec";
+import { runGit } from "./git-exec";
+import { requireGitPaths, validateGitReset, gitResetArgs, gitRestoreArgs } from "@zeros/protocol/git-review-actions";
 import { GitError } from "./errors";
 import { prepareDesignSafeIntegration } from "./design-draft-guard";
 
-function requirePaths(paths: unknown, context: string): string[] {
-  if (!Array.isArray(paths) || paths.length === 0) {
-    throw new GitError({
-      code: "VALIDATION_FAILED",
-      message: `${context}: 'paths' must be a non-empty array of strings`,
-    });
-  }
-  for (let i = 0; i < paths.length; i++) {
-    const p = paths[i];
-    if (typeof p !== "string" || p.length === 0) {
-      throw new GitError({
-        code: "VALIDATION_FAILED",
-        message: `${context}: paths[${i}] must be a non-empty string`,
-      });
-    }
-    if (p.startsWith("-")) {
-      throw new GitError({
-        code: "VALIDATION_FAILED",
-        message: `${context}: paths[${i}] starts with "-" (looks like a flag)`,
-      });
-    }
-  }
-  return paths as string[];
-}
+const invalid = (message: string) => new GitError({ code: "VALIDATION_FAILED", message });
+const requirePaths = (paths: unknown, context: string) => requireGitPaths(paths, context, invalid);
 
 // ── reset ────────────────────────────────────────────────
 
@@ -49,27 +28,9 @@ export interface ResetOptions {
 
 export async function reset(opts: ResetOptions): Promise<void> {
   const ws = await resolveRepoForGitOp(opts.workspaceId);
-  // Validate the mode against the union before building the git flag. A caller
-  // can pass an arbitrary string past the TS type (the IPC handler casts a raw
-  // `requireString`), and an unguarded value would be interpolated as
-  // `--<value>` AND bypass the hard-confirm gate below (which only fires on
-  // exactly "hard") — e.g. `--merge`/`--keep` could mutate the working tree
-  // with no confirm. Mirrors the git.diff `mode` validation.
-  if (opts.mode !== "soft" && opts.mode !== "mixed" && opts.mode !== "hard") {
-    throw new GitError({
-      code: "VALIDATION_FAILED",
-      message: `reset: invalid mode '${String(opts.mode)}' (expected soft|mixed|hard)`,
-    });
-  }
-  if (opts.mode === "hard" && opts.confirm !== true) {
-    throw new GitError({
-      code: "VALIDATION_FAILED",
-      message: "reset --hard discards working-tree changes; pass confirm:true",
-    });
-  }
-  const ref = assertSafeGitRef(opts.ref ?? "HEAD", "reset.ref");
+  const { mode, ref } = validateGitReset(opts, invalid);
   const target =
-    opts.mode === "hard"
+    mode === "hard"
       ? await prepareDesignSafeIntegration({
           workspaceId: opts.workspaceId,
           path: ws.path,
@@ -80,7 +41,7 @@ export async function reset(opts: ResetOptions): Promise<void> {
           rejectAnyDirtyDesign: true,
         })
       : ref;
-  await runGit(ws.path, ["reset", `--${opts.mode}`, target]);
+  await runGit(ws.path, gitResetArgs(mode, target));
 }
 
 // ── discard (restore working tree) ───────────────────────
@@ -121,12 +82,7 @@ export interface RestoreFromOptions {
 
 export async function restoreFrom(opts: RestoreFromOptions): Promise<void> {
   const ws = await resolveRepoForGitOp(opts.workspaceId);
-  const paths = requirePaths(opts.paths, "restoreFrom");
-  assertSafeGitRef(opts.source, "restoreFrom.source");
-  const args = ["restore", "--source", opts.source, "--worktree"];
-  if (opts.staged !== false) args.push("--staged");
-  args.push("--", ...paths.map((candidate) => `:(literal)${candidate}`));
-  await runGit(ws.path, args);
+  await runGit(ws.path, gitRestoreArgs(opts, invalid));
 }
 
 // ── clean ────────────────────────────────────────────────

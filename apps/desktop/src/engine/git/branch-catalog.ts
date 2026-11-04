@@ -17,6 +17,7 @@
 // ──────────────────────────────────────────────────────────
 
 import { GitError } from "./errors";
+import { parseGitRemotes, parseGitCatalogRefs } from "@zeros/protocol/git-review-actions";
 import { assertSafeGitRef, runGit } from "./git-exec";
 import { isRepo } from "./repo";
 import { parseGitHubRemote } from "./github";
@@ -79,68 +80,16 @@ export interface RepoBranchCatalogOptions {
   fetch?: boolean;
 }
 
-/** Parse `git remote -v` into unique remotes with their FETCH urls. Splits on
- *  the first tab and the LAST " (" so a URL containing spaces (a local path
- *  remote) survives — a `\S+` capture would silently drop the whole remote. */
 async function listRemotes(repoRoot: string): Promise<RepoRemote[]> {
   const { stdout } = await runGit(repoRoot, ["remote", "-v"]);
-  const byName = new Map<string, string>();
-  for (const line of stdout.split("\n")) {
-    if (!line.trim()) continue;
-    // "origin\thttps://github.com/x/y.git (fetch)"
-    const tab = line.indexOf("\t");
-    const kindStart = line.lastIndexOf(" (");
-    if (tab <= 0 || kindStart <= tab || !line.endsWith(")")) continue;
-    const name = line.slice(0, tab);
-    const url = line.slice(tab + 1, kindStart);
-    const kind = line.slice(kindStart + 2, -1);
-    if (!url) continue;
-    // Prefer the fetch URL; only fall back to push when fetch never appears.
-    if (kind === "fetch" || !byName.has(name)) byName.set(name, url);
-  }
-  return [...byName.entries()].map(([name, url]) => {
-    let isGitHub = false;
-    try {
-      parseGitHubRemote(url);
-      isGitHub = true;
-    } catch {
-      /* non-GitHub host (or unparseable) — fine */
-    }
-    return { name, url, isGitHub };
+  return parseGitRemotes(stdout, url => {
+    try { parseGitHubRemote(url); return true; } catch { return false; }
   });
 }
 
-/** List branches under a full ref prefix (e.g. "refs/remotes/origin/" or
- *  "refs/heads/"), skipping the HEAD symref. Uses %(refname) — NOT
- *  %(refname:short) — because "short" disambiguates against same-named local
- *  branches (a local branch literally named "origin/main" makes the remote's
- *  ref shorten to "remotes/origin/main", silently corrupting the list). */
-async function listRefs(
-  repoRoot: string,
-  refPrefix: string,
-): Promise<CatalogBranch[]> {
-  const { stdout } = await runGit(repoRoot, [
-    "for-each-ref",
-    "--format=%(refname)|%(committerdate:unix)",
-    refPrefix,
-  ]);
-  const out: CatalogBranch[] = [];
-  for (const line of stdout.split("\n")) {
-    if (!line) continue;
-    const sep = line.lastIndexOf("|");
-    if (sep < 0) continue;
-    const ref = line.slice(0, sep);
-    if (!ref.startsWith(refPrefix)) continue;
-    const name = ref.slice(refPrefix.length);
-    if (!name || name === "HEAD") continue;
-    out.push({
-      name,
-      lastCommitDate: (parseInt(line.slice(sep + 1), 10) || 0) * 1000,
-    });
-  }
-  // Newest first — matches every other branch list in the app.
-  out.sort((a, b) => b.lastCommitDate - a.lastCommitDate);
-  return out;
+async function listRefs(repoRoot: string, refPrefix: string): Promise<CatalogBranch[]> {
+  const { stdout } = await runGit(repoRoot, ["for-each-ref", "--format=%(refname)|%(committerdate:unix)", refPrefix]);
+  return parseGitCatalogRefs(stdout, refPrefix);
 }
 
 export async function repoBranchCatalog(

@@ -5,6 +5,7 @@ import { HttpError } from "../authz.js";
 import type { Tx } from "../db.js";
 import type { CloudV2MessageRow } from "./contract.js";
 import type { CloudV2Store } from "./store.js";
+import { MessageSearchError } from "./message-search.js";
 
 export type MessageWindow = { messages: CloudV2MessageRow[]; turnOpening?: CloudV2MessageRow };
 export type WindowOptions = { limit?: number; before?: number; beforeMsgId?: string };
@@ -67,11 +68,19 @@ export async function mirrorMessageWindow(tx: Tx, workspaceId: string, chatId: s
 export const HISTORY_OPS = ["chats.list", "messages.window", "messages.windowOlder", "messages.search"] as const;
 const HistorySchema = z.object({ op: z.enum(HISTORY_OPS), params: z.record(z.string(), z.unknown()).default({}) }).strict();
 const id = z.string().min(1).max(256);
-export async function readCloudV2History(store: Pick<CloudV2Store, "listChats" | "messageWindow">, workspaceId: string, request: unknown): Promise<unknown> {
+export async function readCloudV2History(store: Pick<CloudV2Store, "listChats" | "messageWindow" | "searchMessages">, workspaceId: string, request: unknown): Promise<unknown> {
   const parsed = HistorySchema.safeParse(request);
   if (!parsed.success) throw new HttpError(400, "invalid_request", "Unsupported history read");
   const { op, params } = parsed.data;
-  if (op === "messages.search") throw new HttpError(409, "CLOUD_V2_UNSUPPORTED", "Search is not available in cloud workspaces");
+  if (op === "messages.search") {
+    const scope = z.object({ chatId: id.optional(), folder: z.string().min(1).max(4096).optional() }).safeParse(params);
+    if (!scope.success) throw new HttpError(400, "invalid_request", "Invalid search scope");
+    try { return await store.searchMessages(workspaceId, { query: params.query, limit: params.limit, ...scope.data }); }
+    catch (error) {
+      if (error instanceof MessageSearchError) throw new HttpError(error.code === "SEARCH_LIMIT" ? 413 : 400, error.code, error.message);
+      throw error;
+    }
+  }
   if (op === "chats.list") return store.listChats(workspaceId);
   const chatId = id.safeParse(params.chatId);
   if (!chatId.success) throw new HttpError(400, "invalid_request", "chatId is required");

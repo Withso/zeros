@@ -209,7 +209,7 @@ export class CloudWorker {
       return this.terminals!.handle(client, frame);
     }
     if (frame.type === "WORKSPACE_REQUEST") {
-      const mutation = frame.op === "file.write" || frame.op === "workspace.prepareGithub" || isGitMutation(frame.op);
+      const mutation = frame.op === "file.write" || frame.op === "workspace.prepareGithub" || isGitMutation(frame.op, frame.params ?? {});
       let activeMutation = false;
       try {
         if (mutation || frame.op === "attachment.write") await this.touchCheckout();

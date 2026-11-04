@@ -5,12 +5,14 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 // Test-only oracle: the shipped CP remains independent of the worker/protocol.
 import { messageWindow } from "../../../cloud-worker/src/sessions/chat-history.js";
 import { HttpError } from "../authz.js";
+import { withSystemTx } from "../db.js";
 import { resetMigratedTestDatabase } from "../test-database.js";
 import { grantTestPro } from "../test-pro.js";
 import type { CloudV2MessageRow } from "./contract.js";
 import { answerCloudV2Offline } from "./composition.js";
 import { createCloudV2Routes, type CloudV2RouteDeps } from "./routes.js";
 import { CloudV2Store, type CloudV2Workspace } from "./store.js";
+import { mirrorMessageSearch } from "./history-search.js";
 
 const suite = process.env.TEST_DATABASE_URL ? describe : describe.skip;
 suite("offline native history paging", () => {
@@ -94,12 +96,88 @@ suite("offline native history paging", () => {
     expect((await read("messages.window", { chatId: "native-chat" }, randomUUID())).status).toBe(404);
   });
 
-  it("refuses search with a typed unavailable error and never wakes the workspace", async () => {
-    const response = await read("messages.search", { chatId: "native-chat", query: "text" });
-    expect(response.status).toBe(409);
-    expect(await response.json()).toEqual({ error: { code: "CLOUD_V2_UNSUPPORTED" } });
-    expect(await answerCloudV2Offline(store, workspace, { type: "WORKSPACE_REQUEST", id: "search", op: "messages.search", params: { query: "text" } }))
-      .toMatchObject({ type: "WORKSPACE_ERROR", requestId: "search", code: "CLOUD_V2_UNSUPPORTED" });
+  it("searches native history through HTTP and offline relay without waking", async () => {
+    const saved = row("message", "user", { text: "The relay-core reducer uses ciphertext. Café." });
+    await mirror("native-chat", [saved, row("apart", "assistant", { text: "relay without a core" })]);
+    await mirror("other-chat", [{ msgId: "tool", kind: "tool", payload: JSON.stringify({ title: "Read relay/server.ts" }), createdAt: 1 }]);
+    for (const query of ["relay-core", "ciphertext", "cafe", "\"ciphertext\""]) {
+      const params = { query, folder: "/home/user/Owner/Project" };
+      const expected = { hits: [{ chatId: "native-chat", msgId: saved.msgId, payload: saved.payload, createdAt: saved.createdAt }] };
+      const response = await read("messages.search", params);
+      expect(response.status).toBe(200);
+      expect(await response.json()).toEqual({ result: expected });
+      expect(await answerCloudV2Offline(store, workspace, { type: "WORKSPACE_REQUEST", id: "search", op: "messages.search", params }))
+        .toMatchObject({ type: "WORKSPACE_RESPONSE", requestId: "search", result: expected });
+    }
+    expect(await (await read("messages.search", { query: "relay", chatId: "other-chat" })).json()).toMatchObject({ result: { hits: [{ chatId: "other-chat", msgId: "tool" }] } });
+    expect((await store.get(workspace.id, creator)).state).toBe("stopped");
+  });
+
+  it("keeps literal query operators, malformed payloads, deletion and creator scopes inert", async () => {
+    await mirror("native-chat", [row("literal", "user", { text: "literal OR expression" }), row("other", "user", { text: "literal expression" }),
+      { msgId: "bad", kind: "text", payload: "{invalid", createdAt: 1 }, { msgId: "null", kind: "text", payload: "null", createdAt: 1 }]);
+    const request = { query: "literal OR expression" };
+    expect(await (await read("messages.search", request)).json()).toMatchObject({ result: { hits: [{ msgId: "literal" }] } });
+    expect(await (await read("messages.search", { query: "lit" })).json()).toEqual({ result: { hits: [] } });
+    expect(await (await read("messages.search", { query: "literal", chatId: "foreign" })).json()).toEqual({ result: { hits: [] } });
+    expect((await read("messages.search", request, randomUUID())).status).toBe(404);
+    const other = await store.createWorkspace({ id: randomUUID(), organizationId: workspace.organizationId, creatorUserId: creator,
+      repository: "Owner/Other", branch: "zeros/other", baseBranch: "main", name: "Other", computerBuildId: null });
+    await store.writeHistory(other.id, { chats: [{ id: "foreign" }], messages: { chatId: "foreign", rows: [row("leak", "user", { text: "literal" })] } });
+    expect(await (await read("messages.search", { query: "literal", chatId: "foreign" })).json()).toEqual({ result: { hits: [] } });
+    await store.writeHistory(workspace.id, { chatDeletions: ["native-chat"] });
+    expect(await (await read("messages.search", request)).json()).toEqual({ result: { hits: [] } });
+    expect((await store.get(workspace.id, creator)).state).toBe("stopped");
+  });
+
+  it.each(["streaming update", "deletion"])("uses one snapshot across a held scan and a concurrent %s", async change => {
+    const saved = row("message", "user", { text: "original needle" });
+    await mirror("native-chat", [saved]);
+    let changed = false;
+    const result = await withSystemTx(pool, async tx => {
+      const query = tx.query.bind(tx);
+      tx.query = (async (sql: string, values: unknown[]) => {
+        const result = await query(sql, values);
+        if (!changed && sql.includes("octet_length")) {
+          changed = true;
+          if (change === "deletion") await store.writeHistory(workspace.id, { chatDeletions: ["native-chat"] });
+          else await store.writeHistory(workspace.id, { messages: { chatId: "native-chat", rows: [row("message", "user", { text: "replacement needle" })] } });
+        }
+        return result;
+      }) as typeof tx.query;
+      try { return await mirrorMessageSearch(tx, workspace.id, { query: "original" }); }
+      finally { tx.query = query; }
+    }, { consistentRead: true });
+    expect(changed).toBe(true);
+    expect(result.hits).toEqual([{ chatId: "native-chat", msgId: "message", payload: saved.payload, createdAt: saved.createdAt }]);
+    expect(await (await read("messages.search", { query: "original" })).json()).toEqual({ result: { hits: [] } });
+    const next = await (await read("messages.search", { query: "replacement" })).json();
+    expect(next).toMatchObject({ result: { hits: change === "deletion" ? [] : [{ chatId: "native-chat", msgId: "message" }] } });
+    expect((await store.get(workspace.id, creator)).state).toBe("stopped");
+  });
+
+  it("returns typed input and corpus refusals without a partial result", async () => {
+    await mirror("native-chat", Array.from({ length: 20 }, (_, i) => row(`large-${i}`, "user", { text: "needle " + "x".repeat(900_000) })));
+    const result = await read("messages.search", { query: "needle" });
+    expect(result.status).toBe(413);
+    expect(await result.json()).toEqual({ error: { code: "SEARCH_LIMIT" } });
+    for (const query of [null, 1, "word\0word", "q".repeat(4097)])
+      expect((await read("messages.search", { query })).status).toBe(400);
+    expect((await store.get(workspace.id, creator)).state).toBe("stopped");
+  });
+
+  it("turns a real PostgreSQL statement deadline into a typed search refusal", async () => {
+    await mirror("native-chat", [row("message", "user", { text: "needle" })]);
+    await expect(withSystemTx(pool, async tx => {
+      const query = tx.query.bind(tx);
+      tx.query = (async (sql: string, values: unknown[]) => {
+        if (sql.includes("set_config")) return query("SELECT set_config('statement_timeout','10',true)");
+        if (sql.includes("octet_length")) await query("SELECT pg_sleep(0.1)");
+        return query(sql, values);
+      }) as typeof tx.query;
+      try { return await mirrorMessageSearch(tx, workspace.id, { query: "needle" }); }
+      finally { tx.query = query; }
+    }, { consistentRead: true })).rejects.toMatchObject({ code: "SEARCH_LIMIT" });
     expect((await store.get(workspace.id, creator)).state).toBe("stopped");
   });
 });

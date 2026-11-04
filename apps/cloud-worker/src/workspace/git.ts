@@ -6,6 +6,7 @@ import { bucketPorcelain, parseNameStatus, parseNumstat, parseUnifiedDiff, type 
 import { reqString, unsupported, WorkspaceError, type WorkspaceScope } from "./scope";
 import { CheckedFiles } from "./checked-files";
 import { githubRemoteRepository } from "./github-remote";
+import { validateGitReset, requireGitPaths, gitResetArgs, gitRestoreArgs, parseGitRemotes, parseGitCatalogRefs, parseGitBranchRefs, parseGitWorktrees } from "@zeros/protocol/git-review-actions";
 
 type ConflictState = "merge" | "rebase" | "cherry-pick" | "revert" | null;
 interface GitOptions {
@@ -17,8 +18,9 @@ interface GitOptions {
   historyDiff?: (params: Record<string, unknown>) => Promise<unknown>;
 }
 const WRITE_OPS = new Set(["git.prepareGithub", "git.stage", "git.unstage", "git.discard", "git.clean", "git.commit", "git.push", "git.pull", "git.rebase", "git.fetch", "git.stashSave", "git.stashPop", "git.stashApply", "git.stashDrop", "git.checkoutBranch", "git.createBranch", "git.renameBranch", "git.changeTarget", "git.merge", "git.cherryPick", "git.revert", "git.continue", "git.abort", "git.deleteBranch", "git.tagCreate", "git.tagDelete"]);
-export const isGitMutation = (op: string): boolean => WRITE_OPS.has(op);
-export const DEFERRED_GIT_OPS = ["git.reset", "git.restore", "git.stageHunk", "git.unstageHunk", "git.discardHunk", "git.initInPlace", "git.repoBranchCatalog", "git.listAllBranches"] as const;
+export const isGitMutation = (op: string, params: Record<string, unknown> = {}): boolean => WRITE_OPS.has(op) || op === "git.reset" || op === "git.restore" || op === "git.repoBranchCatalog" && params.fetch === true;
+export const DEFERRED_GIT_OPS = ["git.stageHunk", "git.unstageHunk", "git.discardHunk", "git.initInPlace"] as const;
+const invalid = (message: string) => new WorkspaceError("VALIDATION_FAILED", message);
 
 /** One checkout-scoped writer queue. Ordinary reads never wait behind a
  * fetch, push or editor operation; every comparison has its own Git baseline. */
@@ -46,7 +48,7 @@ export class GitService {
   handle(op: string, params: Record<string, unknown>): Promise<unknown> {
     this.scope.assertId(params.workspaceId);
     for (const key of ["cwd", "folder", "repoRoot"]) if (params[key] !== undefined) this.scope.folder(params[key]);
-    if (!isGitMutation(op)) return this.read(op, params);
+    if (!isGitMutation(op, params)) return this.read(op, params);
     const pending = this.mutations.then(async () => {
       try { return await this.write(op, params); }
       finally { this.options.changed?.(); }
@@ -207,10 +209,47 @@ export class GitService {
       }
       case "git.branches": return { branches: await this.branches(false) };
       case "git.remoteBranches": return { branches: await this.branches(true) };
+      case "git.listAllBranches": return this.allBranches();
+      case "git.repoBranchCatalog": return this.branchCatalog(params);
       case "git.stashList": return this.stashes();
       case "git.tagList": return (await this.git(["tag", "--list"], { readOnly: true })).split("\n").filter(Boolean);
       default: return unsupported();
     }
+  }
+
+  private async allBranches() {
+    const [worktreeOutput, refs] = await Promise.all([
+      this.git(["worktree", "list", "--porcelain"], { readOnly: true }),
+      this.git(["for-each-ref", "--format=%(refname)|%(objectname)|%(committerdate:unix)", "refs/heads/"], { readOnly: true }),
+    ]);
+    const worktrees = new Map(parseGitWorktrees(worktreeOutput).filter(row => row.branch).map(row => [row.branch, row]));
+    return parseGitBranchRefs(refs).map(branch => {
+      const checkout = worktrees.get(branch.name), current = checkout?.path === this.scope.root;
+      // Only this checkout has a cloud route; a linked VM worktree has none.
+      return { ...branch, isCheckedOut: !!checkout, worktreePath: current ? this.scope.root : null, origin: current ? "zeros" : "unknown", prUrl: null };
+    });
+  }
+
+  private async branchCatalog(params: Record<string, unknown>) {
+    const remote = safeRef(params.remote === undefined ? "origin" : reqString(params, "remote").trim());
+    const remotes = parseGitRemotes(await this.git(["remote", "-v"], { readOnly: true }), url => githubRemoteRepository(url) !== null);
+    const remoteExists = remotes.some(row => row.name === remote);
+    const list = async (prefix: string) => parseGitCatalogRefs(await this.git(["for-each-ref", "--format=%(refname)|%(committerdate:unix)", prefix], { readOnly: true }), prefix);
+    let branches: ReturnType<typeof parseGitCatalogRefs> = [], detectedDefault: string | null = null, listedRemote: string | null = null;
+    if (remoteExists) {
+      if (params.fetch === true) await this.git(["fetch", remote], { timeout: 8000 }).catch(() => {});
+      branches = await list(`refs/remotes/${remote}/`);
+      const prefix = `refs/remotes/${remote}/`, head = await this.probe(["symbolic-ref", "--quiet", `${prefix}HEAD`]);
+      if (head?.startsWith(prefix)) detectedDefault = head.slice(prefix.length);
+      if (!detectedDefault && params.fetch === true) {
+        const output = await this.git(["ls-remote", "--symref", remote, "HEAD"], { readOnly: true, timeout: 5000 }).catch(() => "");
+        detectedDefault = /ref:\s+refs\/heads\/(\S+)\s+HEAD/.exec(output)?.[1] ?? null;
+      }
+      if (branches.length) listedRemote = remote;
+    }
+    if (!listedRemote) branches = await list("refs/heads/");
+    return { remotes, effectiveRemote: "origin", remoteExists, baseExplicit: true, effectiveBase: this.baseBranch,
+      detectedDefault, listedRemote, branchSource: listedRemote ? "remote" : "local", branches };
   }
 
   private async branches(remote: boolean) {
@@ -251,6 +290,15 @@ export class GitService {
 
   private async write(op: string, params: Record<string, unknown>): Promise<unknown> {
     switch (op) {
+      case "git.reset": {
+        const { mode, ref } = validateGitReset({ mode: params.mode, ref: params.ref, confirm: params.confirm }, invalid);
+        await this.git(gitResetArgs(mode, safeRef(ref))); return { ok: true };
+      }
+      case "git.restore": {
+        const paths = this.paths(requireGitPaths(params.paths, "restoreFrom", invalid));
+        await this.git(gitRestoreArgs({ paths, source: safeRef(params.source), staged: params.staged }, invalid)); return { ok: true };
+      }
+      case "git.repoBranchCatalog": return this.branchCatalog(params);
       case "git.prepareGithub": {
         const branch = await this.requireBranch(), headSha = await this.head(), baseBranch = this.baseBranch;
         const repository = this.options.githubRepository?.() ?? this.scope.workspace.repository;

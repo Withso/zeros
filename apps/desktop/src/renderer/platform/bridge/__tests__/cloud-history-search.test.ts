@@ -9,14 +9,36 @@ describe("cloud workspace search", () => {
   it.each([
     ["folder", { folder: cloudWorkspaceKey(target), query: "saved" }],
     ["chat", { chatId: cloudScopedId(target, "chat"), query: "saved" }],
-  ])("is unavailable for a %s-scoped cloud search without opening, waking or reading the mirror", async (_scope, params) => {
+  ])("reads a %s-scoped cloud search from the mirror without opening or waking", async (_scope, params) => {
     const open = vi.fn(async () => { throw new Error("VM must stay stopped"); });
-    const readHistory = vi.fn(async () => ({ hits: [] }));
+    const hit = { chatId: "chat", msgId: "native-message", payload: '{"text":"saved"}', createdAt: 1 };
+    const readHistory = vi.fn(async () => ({ hits: [hit] }));
     const client = new WorkspaceRuntimeClient({ open, readHistory, historyRoot: () => "/home/user/Owner/repo", workspaces: () => [] });
     try {
-      await expect(client.request({ type: "WORKSPACE_REQUEST", op: "messages.search", params })).rejects
-        .toMatchObject({ code: "CLOUD_V2_UNSUPPORTED", message: expect.stringMatching(/isn't available in cloud/) });
-      expect(readHistory).not.toHaveBeenCalled();
+      expect(await client.request({ type: "WORKSPACE_REQUEST", op: "messages.search", params })).toMatchObject({ result: { hits: [{ ...hit, chatId: cloudScopedId(target, "chat") }] } });
+      expect(readHistory).toHaveBeenCalledExactlyOnceWith(expect.objectContaining(target), "messages.search", _scope === "folder"
+        ? { folder: "/home/user/Owner/repo", query: "saved" } : { chatId: "chat", query: "saved" });
+      expect(open).not.toHaveBeenCalled();
+    } finally { client.dispose(); }
+  });
+
+  it("shares exact query flights and fences account A → B → A responses", async () => {
+    let release!: (value: { hits: unknown[] }) => void;
+    const pending = new Promise<{ hits: unknown[] }>(resolve => { release = resolve; });
+    const readHistory = vi.fn().mockReturnValueOnce(pending).mockResolvedValue({ hits: [] }), open = vi.fn();
+    let account = "A";
+    const client = new WorkspaceRuntimeClient({ open, readHistory, identity: () => account, historyRoot: () => "/home/user/Owner/repo", workspaces: () => [] });
+    const request = { type: "WORKSPACE_REQUEST" as const, op: "messages.search", params: { folder: cloudWorkspaceKey(target), query: "same" } };
+    try {
+      const old = Promise.allSettled([client.request(request), client.request(request)]);
+      await vi.waitFor(() => expect(readHistory).toHaveBeenCalledOnce());
+      account = "B"; client.clearCloudConnections();
+      expect(await client.request(request)).toMatchObject({ result: { hits: [] } });
+      account = "A"; client.clearCloudConnections();
+      expect(await client.request(request)).toMatchObject({ result: { hits: [] } });
+      release({ hits: [{ chatId: "old", msgId: "m", payload: "old account", createdAt: 1 }] });
+      expect((await old).every(result => result.status === "rejected")).toBe(true);
+      expect(readHistory).toHaveBeenCalledTimes(3);
       expect(open).not.toHaveBeenCalled();
     } finally { client.dispose(); }
   });

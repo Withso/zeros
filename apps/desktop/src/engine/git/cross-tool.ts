@@ -21,6 +21,7 @@
 //   3. User-level marker files are checked independently for integrations
 //      that do not write state inside the worktree.
 
+import { parseGitWorktrees as parseWorktreeList, parseGitBranchRefs } from "@zeros/protocol/git-review-actions";
 import { initializeWorkspaceSettings } from "../settings/personal-repo";
 import { existsSync } from "node:fs";
 import { realpath } from "node:fs/promises";
@@ -146,74 +147,6 @@ const CITY_NAME_HEURISTIC = new Set([
   "salvador",
 ]);
 
-interface ParsedWorktreeEntry {
-  path: string;
-  head: string;
-  branch: string | null;
-  isBare: boolean;
-  isDetached: boolean;
-  isLocked: boolean;
-}
-
-/** Parse the output of `git worktree list --porcelain`. The format is
- *  blank-line-separated records, each like:
- *
- *    worktree /path/to/main
- *    HEAD 0000abcdef0123...
- *    branch refs/heads/main
- *
- *    worktree /path/to/linked
- *    HEAD 1111abcdef0123...
- *    branch refs/heads/feature-x
- *
- *  Bare and detached worktrees use slightly different fields; we
- *  preserve the metadata so callers can decide what to surface. */
-function parseWorktreeList(out: string): ParsedWorktreeEntry[] {
-  const entries: ParsedWorktreeEntry[] = [];
-  let current: Partial<ParsedWorktreeEntry> | null = null;
-  for (const line of out.split("\n")) {
-    if (line === "") {
-      if (current && current.path) {
-        entries.push({
-          path: current.path,
-          head: current.head ?? "",
-          branch: current.branch ?? null,
-          isBare: current.isBare ?? false,
-          isDetached: current.isDetached ?? false,
-          isLocked: current.isLocked ?? false,
-        });
-      }
-      current = null;
-      continue;
-    }
-    if (line.startsWith("worktree ")) {
-      current = { path: line.slice("worktree ".length) };
-    } else if (current && line.startsWith("HEAD ")) {
-      current.head = line.slice("HEAD ".length);
-    } else if (current && line.startsWith("branch ")) {
-      // Strip "refs/heads/" prefix.
-      current.branch = line.slice("branch refs/heads/".length);
-    } else if (current && line === "bare") {
-      current.isBare = true;
-    } else if (current && line === "detached") {
-      current.isDetached = true;
-    } else if (current && line === "locked") {
-      current.isLocked = true;
-    }
-  }
-  if (current && current.path) {
-    entries.push({
-      path: current.path,
-      head: current.head ?? "",
-      branch: current.branch ?? null,
-      isBare: current.isBare ?? false,
-      isDetached: current.isDetached ?? false,
-      isLocked: current.isLocked ?? false,
-    });
-  }
-  return entries;
-}
-
 /** Detect which tool owns a worktree. Zeros comes FIRST so our own worktrees are
  *  never misclassified: identified from the registry (a registered workspace
  *  path) OR structurally (the worktree lives under the Zeros-managed worktrees
@@ -300,14 +233,7 @@ export async function listAllBranches(
   ]);
 
   const out: Branch[] = [];
-  for (const line of branchOut.split("\n")) {
-    if (!line) continue;
-    const [ref, tipSha, commitDateStr] = line.split("|");
-    // Short refs become heads/main when a tag also names main. Preserve the
-    // plain branch identity and let callers qualify it for source selection.
-    if (!ref.startsWith("refs/heads/")) continue;
-    const name = ref.slice("refs/heads/".length);
-    const lastCommitDate = (parseInt(commitDateStr, 10) || 0) * 1000;
+  for (const { name, tipSha, lastCommitDate } of parseGitBranchRefs(branchOut)) {
     const knownWt = byBranch.get(name);
 
     // If this branch is checked out in one of our Zeros workspaces,

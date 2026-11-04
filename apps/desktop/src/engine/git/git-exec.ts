@@ -1,3 +1,4 @@
+import { validateGitReference } from "@zeros/protocol/git-review-actions";
 // Shared execFile wrapper for `git` calls. Centralised so every write
 // path uses the same error shape, the same buffer cap, and the same
 // "args array, never a concatenated string" guarantee against shell
@@ -455,25 +456,7 @@ export type ExpectedCategory =
  *  real ref. Mirrors the path guard in stage.ts / restore.ts so refs and
  *  paths share one validation posture. Returns the value for inline use. */
 export function assertSafeGitRef(value: unknown, label: string): string {
-  if (typeof value !== "string" || value.length === 0) {
-    throw new GitError({
-      code: "VALIDATION_FAILED",
-      message: `${label}: must be a non-empty string`,
-    });
-  }
-  if (value.startsWith("-")) {
-    throw new GitError({
-      code: "VALIDATION_FAILED",
-      message: `${label}: "${value}" starts with "-" (looks like a flag)`,
-    });
-  }
-  if (value.includes("\0")) {
-    throw new GitError({
-      code: "VALIDATION_FAILED",
-      message: `${label}: contains a NUL byte`,
-    });
-  }
-  return value;
+  return validateGitReference(value, label, message => new GitError({ code: "VALIDATION_FAILED", message }));
 }
 
 export interface RunGitResult {

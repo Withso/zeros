@@ -51,7 +51,7 @@ export async function cloudV2AgentConfig(logins: { codex?: Login; claude?: Login
 }
 
 /** Bridge history reads answered from the mirror while the VM is stopped. */
-export async function answerCloudV2Offline(store: Pick<CloudV2Store, "listChats" | "messageWindow">,
+export async function answerCloudV2Offline(store: Pick<CloudV2Store, "listChats" | "messageWindow" | "searchMessages">,
   workspace: CloudV2Workspace, frame: unknown): Promise<unknown | null> {
   const request = frame as { type?: unknown; id?: unknown; op?: unknown; params?: Record<string, unknown> } | null;
   if (request?.type !== "WORKSPACE_REQUEST" || typeof request.id !== "string" || typeof request.op !== "string") return null;

@@ -287,6 +287,16 @@ it("boots through the runtime symlink, waits for a token, serves a dial-in PTY a
       chat: { id: "package-chat", folder: root, agentId: "codex", title: "Fixture", createdAt: 100 },
     } }) }));
     await expect.poll(() => requests.find(request => request.path === "history" && request.chatIds.includes("package-chat"))?.generation).toBe("rotated");
+    const imported = browserFrame("WORKSPACE_REQUEST", { op: "messages.import", params: { chatId: "package-chat",
+      messages: [{ msgId: "package-message", kind: "text", payload: '{"text":"Bundled relay-core Café"}', createdAt: 100 }],
+    } });
+    socket.send(JSON.stringify({ t: "frame", clientId: CLIENT_A, frame: imported }));
+    await expect.poll(() => messages.find(message => message.t === "frame" && message.frame.requestId === imported.id)?.frame.type)
+      .toBe("WORKSPACE_RESPONSE");
+    const searched = browserFrame("WORKSPACE_REQUEST", { op: "messages.search", params: { query: "relay-core cafe", chatId: "package-chat" } });
+    socket.send(JSON.stringify({ t: "frame", clientId: CLIENT_A, frame: searched }));
+    await expect.poll(() => messages.find(message => message.t === "frame" && message.frame.requestId === searched.id)?.frame.result)
+      .toEqual({ hits: [{ chatId: "package-chat", msgId: "package-message", payload: '{"text":"Bundled relay-core Café"}', createdAt: 100 }] });
     expect(requests.every(request => request.generation !== null)).toBe(true);
     const exited = once(child, "exit"); child.kill("SIGTERM"); await exited;
     expect(child.exitCode).toBe(0);

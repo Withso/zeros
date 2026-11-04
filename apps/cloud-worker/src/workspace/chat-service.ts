@@ -6,7 +6,7 @@ import { reqString, unsupported, WorkspaceError, type WorkspaceScope } from "./s
 import { TurnService } from "./turns";
 
 export const UNSUPPORTED_CHAT_OPS = [
-  "messages.clear", "messages.truncateFrom", "turns.reset", "turns.undoReset", "messages.search",
+  "messages.clear", "messages.truncateFrom", "turns.reset", "turns.undoReset",
 ] as const;
 
 export class ChatService {
@@ -44,6 +44,7 @@ export class ChatService {
         return { ok: true };
       }
       case "messages.window": return this.store.window(chatId(), number("limit"), number("before"));
+      case "messages.search": return this.store.search(params.query, params.limit, params.chatId === undefined ? undefined : chatId());
       case "messages.windowOlder": return this.store.older(chatId(), reqString(params, "beforeMsgId"), number("limit"));
       case "messages.import": {
         const id = chatId();
