@@ -4,6 +4,7 @@ import { HttpError } from "../authz.js";
 import type { GithubBackendConfig } from "../config.js";
 import type { Tx } from "../db.js";
 import { exchangeGithubToken } from "../github.js";
+import { isGithubTemporary } from "../github-availability.js";
 import type { RepositoryRequest } from "../github-repository-authority.js";
 import { CloudGithubApi } from "./github-api.js";
 import {
@@ -30,7 +31,7 @@ const changed = () =>
     "github_authorization_changed",
     "Your cloud GitHub connection changed. Refresh before continuing.",
   );
-const profile = z.object({ id: githubId, login: githubName });
+const profile = z.object({ id: githubId, login: githubName, name: z.unknown().optional() });
 type AppCredential = Extract<CloudGithubCredential, { method: "github-app" }>;
 export type CloudGithubConnectionHealth =
   | "connected"
@@ -71,7 +72,9 @@ export class CloudGithubConnections {
     assertCurrent: () => Promise<void>,
   ): Promise<CloudGithubAccount> {
     const user = await this.http(token, assertCurrent).json("/user", profile);
-    return { id: String(user.id), login: user.login };
+    const name = typeof user.name === "string" ? user.name.trim() : "";
+    return { id: String(user.id), login: user.login,
+      ...(name && name.length <= 256 && !/[<>\p{Cc}]/u.test(name) ? { name } : {}) };
   }
   private async refresh(
     credential: AppCredential,
@@ -119,6 +122,31 @@ export class CloudGithubConnections {
         fetch: this.fetchImpl,
       }),
     };
+  }
+  async gitIdentity(
+    scope: CloudGithubConnectionScope,
+  ): Promise<{ name: string; email: string } | null> {
+    try {
+      const access = await this.access(scope);
+      await access.assertCurrent();
+      return {
+        name: access.identity.name ?? access.identity.login,
+        email: `${access.identity.id}+${access.identity.login}@users.noreply.github.com`,
+      };
+    } catch (error) {
+      if (error instanceof HttpError &&
+          ["github_connection_required", "github_authorization_expired"].includes(error.code)) return null;
+      if (isGithubTemporary(error)) {
+        const selected = await this.store.selectedIdentity(scope);
+        if (!selected) return null;
+        await selected.assertCurrent();
+        return {
+          name: selected.identity.login,
+          email: `${selected.identity.id}+${selected.identity.login}@users.noreply.github.com`,
+        };
+      }
+      throw error;
+    }
   }
   async connectPat(
     scope: CloudGithubConnectionScope,

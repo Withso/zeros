@@ -472,6 +472,28 @@ database("cloud GitHub composition", () => {
       "source-review-required",
     );
   });
+  it("withholds an in-flight workspace token when deletion retires its source scope", async () => {
+    const f = await fixture(), workspace = await workspaces.get(f.workspace.id, userId);
+    await services.authorizeSource(workspace);
+    const original = fetcher.getMockImplementation()!;
+    let reached!: () => void, release!: () => void;
+    const reading = new Promise<void>(resolve => { reached = resolve; });
+    const held = new Promise<void>(resolve => { release = resolve; });
+    fetcher.mockImplementation(async (value, init) => {
+      if (new URL(String(value)).pathname.endsWith("/branches")) { reached(); await held; }
+      return original(value, init);
+    });
+    const pending = services.workspaceToken(workspace).then(value => ({ value }), error => ({ error }));
+    try {
+      await reading;
+      expect(await workspaces.transition(workspace.id, ["running"], "deleting")).toMatchObject({ state: "deleting" });
+      release();
+      expect(await pending).toMatchObject({ error: { code: "cloud_source_review_required" } });
+      const sources = await pool.query("SELECT repository_id FROM cloud_v2_github_sources WHERE workspace_id=$1", [workspace.id]);
+      expect(sources.rows).toHaveLength(1);
+      expect(await workspaces.get(workspace.id, userId)).toMatchObject({ state: "deleting" });
+    } finally { release(); await pending; fetcher.mockImplementation(original); }
+  });
   it.each([
     ["github_authorization_expired", "connection-expired"],
     ["github_installation_required", "installation-required"],

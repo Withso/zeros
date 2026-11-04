@@ -1,0 +1,9 @@
+{
+  "id": "cloud-github-broker-recovery",
+  "kind": "replay",
+  "area": "cloud-worker",
+  "fixedBy": "pr:822",
+  "symptom": "Cloud Git credential requests fail during unchanged configuration recovery and the latter half of a two-minute lease, while generic errors hide actionable connection failures.",
+  "rule": "Preserve exact-generation token flights through revalidation, cache only successful unexpired leases, and share one original deadline across readiness and a single delayed transient retry. Exercise actual token lifetimes and the native broker boundary. Principles 1, 5, 6, 7, 13 and 14.",
+  "check": "pnpm --dir apps/cloud-worker test src/credentials/__tests__/github.test.ts src/__tests__/github-recovery.test.ts src/__tests__/hybrid-transport.test.ts"
+}

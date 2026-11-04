@@ -1,0 +1,9 @@
+{
+  "id": "cloud-github-refresh-lease-join",
+  "kind": "replay",
+  "area": "control-plane-data",
+  "fixedBy": "pr:822",
+  "symptom": "Concurrent cloud credential requests on separate control-plane replicas immediately fail while another replica refreshes the selected GitHub App user token.",
+  "rule": "Wait within a bounded deadline for the existing rotating-token lease owner, recheck exact connection generation after each read, and never reclaim or replay an uncertain exchange. Preserve typed refusal reasons without provider text. Principles 1, 5, 6, 7 and 14.",
+  "check": "pnpm test:control-plane src/cloud/github-connections-store.integration.test.ts src/cloud/worker-routes.test.ts"
+}

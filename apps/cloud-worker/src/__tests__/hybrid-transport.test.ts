@@ -7,6 +7,7 @@ import WebSocket from "ws";
 import { HybridTransport } from "../hybrid-transport";
 import { InboundBridge } from "../inbound-bridge";
 import { config } from "./worker-fixtures";
+import * as workerToken from "../worker-token";
 
 const cleanups: Array<() => Promise<void>> = [];
 afterEach(async () => { for (const cleanup of cleanups.splice(0).reverse()) await cleanup(); vi.useRealTimers(); });
@@ -128,6 +129,51 @@ it("registers its process boot and rereads the worker credential on every HTTP c
   await expect.poll(() => f.incoming.some(frame => frame.t === "reply" && frame.id === id)).toBe(true);
   expect(f.requests.every(request => request.authorized)).toBe(true);
 });
+it("allows a credential response slower than ten seconds and retains its typed refusal", async () => {
+  const f = await fixture();
+  vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
+  let release!: () => void, observed = false;
+  const held = new Promise<void>(resolve => { release = resolve; });
+  vi.mocked(f.fetcher).mockImplementationOnce(async (_url, init) => {
+    observed = true;
+    await new Promise<void>((resolve, reject) => {
+      init?.signal?.addEventListener("abort", () => reject(new Error("request timeout")), { once: true });
+      void held.then(resolve);
+    });
+    return Response.json({ token: "fixture-slow", expiresAt: Date.now() + 120_000 });
+  });
+  const id = randomUUID();
+  await f.transport.send({ t: "request", id, kind: "github-token" });
+  await expect.poll(() => observed).toBe(true);
+  await vi.advanceTimersByTimeAsync(11_000);
+  expect(f.incoming.filter(frame => frame.id === id)).toEqual([]);
+  release();
+  await expect.poll(() => f.incoming.some(frame => frame.t === "reply" && frame.id === id)).toBe(true);
+  vi.mocked(f.fetcher).mockImplementationOnce(async () => Response.json({ error: {
+    code: "github_token_unavailable", reason: "connection-expired", message: "PRIVATE_DETAIL" }, debug: "PRIVATE_DETAIL" }, { status: 409 }));
+  const refused = randomUUID();
+  await f.transport.send({ t: "request", id: refused, kind: "github-token" });
+  await expect.poll(() => f.incoming.some(frame => frame.id === refused)).toBe(true);
+  expect(f.incoming.find(frame => frame.id === refused)).toEqual({ t: "refusal", id: refused, code: "connection-expired" });
+});
+it("includes worker credential reads in the remaining HTTP request budget", async () => {
+  const f = await fixture();
+  vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
+  let release!: () => void, reading = false, fetching = false;
+  const held = new Promise<void>(resolve => { release = resolve; });
+  vi.spyOn(workerToken, "readWorkerToken").mockImplementationOnce(async () => { reading = true; await held; return "synthetic-worker-token"; });
+  vi.mocked(f.fetcher).mockImplementationOnce(async (_url, init) => {
+    fetching = true;
+    return new Promise<Response>((_resolve, reject) => { init?.signal?.addEventListener("abort", () => reject(new Error("timeout")), { once: true }); });
+  });
+  const id = randomUUID();
+  await f.transport.send({ t: "request", id, kind: "github-token" }, { timeoutMs: 3000 });
+  await expect.poll(() => reading).toBe(true);
+  await vi.advanceTimersByTimeAsync(2000); release();
+  await expect.poll(() => fetching).toBe(true);
+  await vi.advanceTimersByTimeAsync(1000);
+  expect(f.incoming.find(frame => frame.id === id)).toEqual({ t: "refusal", id, code: "unavailable" });
+});
 it.each([
   { status: 409, code: "mcp_auth_required", reason: "sign-in-required" },
   { status: 403, code: "mcp_access_denied", reason: "sign-in-refused" },
@@ -154,7 +200,7 @@ it("bounds optional timing reports per phase and ignores an older control plane'
 });
 it("advertises outbox support without changing the strict hello body, and rereads credentials on pull", async () => {
   const f = await fixture();
-  expect(new Headers(vi.mocked(f.fetcher).mock.calls[0]![1]?.headers).get("x-zeros-worker-features")).toBe("prompt-outbox-v1,mcp-v1,workspace-setup-v1,checkout-v2,github-pr-v1");
+  expect(new Headers(vi.mocked(f.fetcher).mock.calls[0]![1]?.headers).get("x-zeros-worker-features")).toBe("prompt-outbox-v1,mcp-v1,workspace-setup-v1,checkout-v2,github-pr-v1,git-identity-v1");
   expect(Object.keys(f.requests[0]!.body).sort()).toEqual(["bootId", "protocol", "runtimeSha256"]);
   await f.rotate();
   vi.mocked(f.fetcher).mockImplementationOnce(async (_url, init) => {

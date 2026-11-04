@@ -5,6 +5,7 @@ import type {
   CloudGithubCredentialSnapshot,
 } from "./github-connections-store.js";
 import type { GithubBackendConfig } from "../config.js";
+import { HttpError } from "../authz.js";
 
 const scope = {
   organizationId: "00000000-0000-4000-8000-000000000001",
@@ -47,6 +48,7 @@ function fixture(method: "pat" | "github-app" = "pat") {
   };
   const store = {
     credential: vi.fn(async () => snapshot),
+    selectedIdentity: vi.fn(async () => ({ identity, assertCurrent })),
     assertCurrent: vi.fn(async () => {}),
     save: vi.fn(async () => {}),
     fingerprint: vi.fn(async () => "g1"),
@@ -74,6 +76,35 @@ function fixture(method: "pat" | "github-app" = "pat") {
   return { service, store, fetcher, snapshot, assertCurrent };
 }
 describe("selected cloud GitHub credentials", () => {
+  it.each(["pat", "github-app"] as const)("derives Git identity from the selected %s profile without new scopes", async method => {
+    const f = fixture(method);
+    f.fetcher.mockResolvedValue(Response.json({ id: 12, login: "renamed", name: "Fixture Contributor" }));
+    expect(await f.service.gitIdentity(scope)).toEqual({ name: "Fixture Contributor", email: "12+renamed@users.noreply.github.com" });
+    expect(f.fetcher.mock.calls.map(([url]) => new URL(String(url)).pathname)).toEqual(["/user"]);
+    expect(f.assertCurrent).toHaveBeenCalled();
+  });
+  it.each([null, "", "bad\nname", "x".repeat(257)])("falls back to the verified login for an unusable profile name", async name => {
+    const f = fixture();
+    f.fetcher.mockResolvedValue(Response.json({ id: 12, login: "contributor", name }));
+    expect(await f.service.gitIdentity(scope)).toEqual({ name: "contributor", email: "12+contributor@users.noreply.github.com" });
+  });
+  it("retains the selected identity during a profile outage so configuration can still withdraw provider credentials", async () => {
+    const f = fixture();
+    f.fetcher.mockResolvedValue(new Response(null, { status: 503 }));
+    expect(await f.service.gitIdentity(scope)).toEqual({ name: "contributor", email: "12+contributor@users.noreply.github.com" });
+    expect(f.store.selectedIdentity).toHaveBeenCalledWith(scope);
+    f.assertCurrent.mockRejectedValue(new HttpError(409, "github_authorization_changed", "changed"));
+    await expect(f.service.gitIdentity(scope)).rejects.toMatchObject({ code: "github_authorization_changed" });
+  });
+  it("distinguishes no connection from an unknown or replaced identity", async () => {
+    const f = fixture();
+    f.store.credential.mockRejectedValueOnce(new HttpError(403, "github_connection_required", "required"));
+    expect(await f.service.gitIdentity(scope)).toBeNull();
+    f.store.credential.mockRejectedValueOnce(new Error("private"));
+    await expect(f.service.gitIdentity(scope)).rejects.toThrow("private");
+    f.fetcher.mockResolvedValue(Response.json({ id: 77, login: "contributor" }));
+    await expect(f.service.gitIdentity(scope)).rejects.toMatchObject({ code: "github_authorization_changed" });
+  });
   it.each(["pat", "github-app"] as const)(
     "uses only the selected %s for user-attributed APIs",
     async (method) => {

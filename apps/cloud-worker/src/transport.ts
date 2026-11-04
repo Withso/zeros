@@ -15,7 +15,7 @@ export interface TransportHandlers {
  * connection backfills history. Replaying opaque prompt frames is unsafe. */
 export interface Transport {
   start(handlers: TransportHandlers): void;
-  send(frame: CloudV2WorkerFrame): Promise<boolean>;
+  send(frame: CloudV2WorkerFrame, options?: { timeoutMs: number }): Promise<boolean>;
   dispose(): Promise<void>;
   /** Durable explicit work has its own typed/idempotent HTTPS channel. */
   promptRequest?: PromptRequest;
