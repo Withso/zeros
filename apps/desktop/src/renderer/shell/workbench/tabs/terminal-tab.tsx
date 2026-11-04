@@ -54,7 +54,7 @@ import { cn } from "../../../shared/ui/cn";
 import { Button } from "../../../shared/ui";
 import { Badge, Tooltip } from "../../../shared/ui/primitives";
 import { RunStream } from "../../../shared/ui/loading";
-import { DynamicIcon } from "../../../shared/ui/icon-registry";
+import { resolveIcon } from "../../../shared/ui/icon-registry";
 import { useWorkspaceStore } from "../../../state/store";
 import { useActiveWorkspace } from "../../../state/use-active-workspace";
 import {
@@ -1266,9 +1266,7 @@ function RunActionOverlay({
           // or the last outcome, then Start. The line is the outcome, so no
           // badge repeats it.
           <EmptyState
-            icon={(props: { className?: string }) => (
-              <DynamicIcon name={action.icon} {...props} />
-            )}
+            icon={resolveIcon(action.icon)}
             title={action.name}
             action={
               <Tooltip label={action.command}>
