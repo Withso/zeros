@@ -51,7 +51,10 @@ them.
    old computed look in the same commit. A shared class constant counts as a
    primitive: list its importers first and size each by its context. A
    component named by a prop declares `aria-label?: never`. Focus edges
-   never take layout space.
+   never take layout space. Run the registry shards that mount a page step's
+   surfaces before committing the step, not only at handoff, and compare
+   computed geometry with a tolerance: a quotient such as zoom × pixels moves
+   by a rounding error when unrelated chrome changes size.
 7. **Look at the result** in the running app or a ui-smoke harness, in both
    themes; a green check is not visual review. Put screenshot paths in the
    receipt.
@@ -67,4 +70,8 @@ them.
    ui-smoke assertion), record it in §0 and the page spec, and run
    `pnpm design:docs` so the `zeros-ui` skills carry it. Retire what it
    replaces; two directions never coexist. A mistake that escaped gets an eval
-   case.
+   case. Close a shipped design round on the canvas too: each board shows the
+   UI as it ships (no Current and Proposed halves), a logged decision that
+   differs from a board updates the board, and an approved design that is not
+   built yet keeps its board with a Planned line that names its `plans.md`
+   section. The page specs stay as the record of what was approved.
