@@ -94,8 +94,9 @@ export class PromptInbox {
 
   private async receive(item: CloudV2PromptDelivery): Promise<void> {
     let entry: InboxEntry;
-    try { entry = await this.agents.receiveOutbox(item); }
+    try { entry = await this.agents.receiveOutbox(item, this.lifetime.signal); }
     catch (error) {
+      if (this.lifetime.signal.aborted) return;
       if (!(error instanceof WorkspaceError)) throw error;
       // A refused provider/chat selection must unblock later messages, while
       // the CP retains this exact payload for a visible failure and explicit retry.

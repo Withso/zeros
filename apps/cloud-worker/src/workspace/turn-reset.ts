@@ -7,6 +7,7 @@ import type { TurnResetHost } from "@zeros/protocol/turns";
 import { CheckedFiles, descriptorPath } from "./checked-files";
 import { commandRunner, type CommandOptions } from "./commands";
 import { WorkspaceError, type WorkspaceScope } from "./scope";
+import { withResetIndex } from "./turn-reset-index";
 
 const LIMIT = 64 * 1024 * 1024;
 const oid = (value: string) => /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/.test(value) ? value : null;
@@ -84,26 +85,12 @@ export function turnResetHost(scope: WorkspaceScope, snapshot: TurnResetHost["sn
       return data ? { text: data.toString("utf8"), isBinary: data.includes(0) } : null;
     } catch { return null; }
   };
-  return {
-    snapshotAvailable: rev => {
-      let checking = available.get(rev);
-      if (!checking) { checking = git(["cat-file", "-e", `${revision(rev)}^{tree}`]).then(() => true, () => false); available.set(rev, checking); }
-      return checking;
-    },
-    blobOid: async (rev, path) => oid((await git(["rev-parse", `${revision(rev)}:${scope.relative(path)}`]).catch(() => "")).trim()),
-    indexBlobOid: async path => oid((await git(["rev-parse", `:0:${scope.relative(path)}`]).catch(() => "")).trim()),
-    diskBlobOid, readDiskText,
-    showText: async (rev, path) => {
-      try { const text = await git(["show", `${revision(rev)}:${scope.relative(path)}`]); return { text, isBinary: text.includes("\0") }; }
-      catch { return null; }
-    },
-    restoreIndex: (path, rev) => git(["restore", `--source=${revision(rev)}`, "--staged", "--", `:(literal)${scope.relative(path)}`]),
-    removeIndex: path => git(["update-index", "--force-remove", "--", scope.relative(path)]),
-    restore: async (path, rev, expected) => {
-      const relative = scope.relative(path), { parent } = await checked.writeParent(relative);
-      const target = join(descriptorPath(parent), basename(relative)), temporary = `${target}.${randomUUID()}.reset`;
-      let scratch: string | undefined;
-      try {
+  const restore = async (path: string, rev: string | null, expected?: string | null, stagedOid?: string) => {
+    const relative = scope.relative(path), { parent } = await checked.writeParent(relative);
+    const target = join(descriptorPath(parent), basename(relative)), temporary = `${target}.${randomUUID()}.reset`;
+    let scratch: string | undefined;
+    try {
+      const publishFile = async () => {
         if (rev) {
           scratch = await mkdtemp(join(tmpdir(), "zeros-turn-restore-"));
           const isolated = commandRunner(scope.root, { GIT_INDEX_FILE: join(scratch, "index") });
@@ -119,11 +106,31 @@ export function turnResetHost(scope: WorkspaceScope, snapshot: TurnResetHost["sn
           throw new WorkspaceError("FILE_CHANGED", "The file changed during turn reset.");
         await publish(parent, target, rev ? temporary : undefined,
           async captured => await contentOid(relative, await capturedContents(captured)) === current);
-      } finally {
-        await unlink(temporary).catch(() => {}); await parent.close();
-        if (scratch) await rm(scratch, { recursive: true, force: true });
-      }
+      };
+      if (stagedOid) await withResetIndex(scope.root, relative, rev ? revision(rev) : null, stagedOid, publishFile);
+      else await publishFile();
+    } finally {
+      await unlink(temporary).catch(() => {}); await parent.close();
+      if (scratch) await rm(scratch, { recursive: true, force: true });
+    }
+  };
+  return {
+    snapshotAvailable: rev => {
+      let checking = available.get(rev);
+      if (!checking) { checking = git(["cat-file", "-e", `${revision(rev)}^{tree}`]).then(() => true, () => false); available.set(rev, checking); }
+      return checking;
     },
+    blobOid: async (rev, path) => oid((await git(["rev-parse", `${revision(rev)}:${scope.relative(path)}`]).catch(() => "")).trim()),
+    indexBlobOid: async path => oid((await git(["rev-parse", `:0:${scope.relative(path)}`]).catch(() => "")).trim()),
+    diskBlobOid, readDiskText,
+    showText: async (rev, path) => {
+      try { const text = await git(["show", `${revision(rev)}:${scope.relative(path)}`]); return { text, isBinary: text.includes("\0") }; }
+      catch { return null; }
+    },
+    restoreIndex: (path, rev) => git(["restore", `--source=${revision(rev)}`, "--staged", "--", `:(literal)${scope.relative(path)}`]),
+    removeIndex: path => git(["update-index", "--force-remove", "--", scope.relative(path)]),
+    restore,
+    restoreStaged: (path, rev, expected) => restore(path, rev, expected, expected),
     mergeText: async (ours, base, theirs) => {
       const scratch = await mkdtemp(join(tmpdir(), "zeros-turn-merge-"));
       try {

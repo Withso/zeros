@@ -126,7 +126,7 @@ it.each(["bridge", "HTTP"] as const)("does not reopen a queued native session af
   const message = browserFrame("AGENT_NEW_SESSION", { agentId: "codex", chatId: "chat", cwd: f.root }) as BridgeMessage;
   const waiting = vi.spyOn(f.agents as unknown as { afterMutation(chatId: string): Promise<void> }, "afterMutation");
   const opening = f.agents.handle(f.client, message);
-  expect(waiting).toHaveBeenCalledWith("chat");
+  expect(waiting.mock.calls.some(([chatId]) => chatId === "chat")).toBe(true);
   try {
     if (mode === "HTTP") await f.agents.stopOutbox("chat", "1");
     else await f.agents.handle(f.client, browserFrame("AGENT_CLOSE_SESSION", { agentId: "codex", chatId: "chat", userStop: true }) as BridgeMessage);
@@ -135,4 +135,25 @@ it.each(["bridge", "HTTP"] as const)("does not reopen a queued native session af
   expect(f.drivers).toHaveLength(1);
   await f.agents.handle(f.client, browserFrame("AGENT_NEW_SESSION", { agentId: "codex", chatId: "chat", cwd: f.root }) as BridgeMessage);
   expect(f.drivers).toHaveLength(2);
+});
+
+it.each(["inbox", "worker"] as const)("cancels admission behind a held mutation when the %s stops", async boundary => {
+  const f = await setup(), held = gate(), entered = gate(), controller = new AbortController();
+  const mutation = f.agents.mutateChat("chat", false, async () => { entered.release(); await held.promise; });
+  await entered.promise;
+  let outcome: unknown, stopped = false;
+  const pending = f.agents.receiveOutbox(delivery(f.scope.workspace.id, "waiting"), controller.signal)
+    .then(value => { outcome = value; }, error => { outcome = error; });
+  const shutdown = boundary === "worker" ? f.agents.dispose().then(() => { stopped = true; }) : undefined;
+  if (boundary === "inbox") controller.abort();
+  try {
+    await expect.poll(() => outcome).toMatchObject({ code: "WORKSPACE_UNAVAILABLE" });
+    expect(stopped).toBe(false);
+    expect(f.store.receipt("chat", "waiting")).toBeUndefined();
+  } finally { held.release(); await Promise.allSettled([mutation, pending, shutdown]); }
+  expect(f.store.receipt("chat", "waiting")).toBeUndefined();
+  if (boundary === "inbox") {
+    const next = await f.agents.receiveOutbox(delivery(f.scope.workspace.id, "fresh"));
+    expect(next.userMessageId).toBe("fresh");
+  } else expect(stopped).toBe(true);
 });

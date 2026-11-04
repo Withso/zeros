@@ -144,8 +144,10 @@ export class TurnService {
     ].filter(Boolean));
     const refs = (await this.git(["for-each-ref", "--format=%(objectname) %(refname)", refPrefix(chatId), `refs/zeros/resets/${hash(chatId)}/`]))
       .split("\n").filter(Boolean).map(line => line.split(" "));
-    const removed = refs.filter(([object, name]) => !keep.has(object) &&
-      /^refs\/zeros\/(?:turns\/[a-f0-9]{64}\/[a-f0-9]{64}|resets\/[a-f0-9]{64}\/[0-9]{1,16}-[a-f0-9-]{36})\/(?:pre|post)$/.test(name!));
+    // Records address trees by object ID. One owned pin per retained tree is
+    // enough; repeated resets must not retain every alias of the same object.
+    const removed = refs.filter(([object, name]) =>
+      /^refs\/zeros\/(?:turns\/[a-f0-9]{64}\/[a-f0-9]{64}|resets\/[a-f0-9]{64}\/[0-9]{1,16}-[a-f0-9-]{36})\/(?:pre|post)$/.test(name!) && !keep.delete(object));
     if (removed.length) await this.git(["update-ref", "--no-deref", "--stdin"], { input: removed.map(([object, name]) => `delete ${name} ${object}\n`).join("") });
   }
 

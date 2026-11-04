@@ -141,12 +141,14 @@ export class CloudWorker {
     if (this.disposed) return;
     this.disposed = true; clearInterval(this.heartbeat); this.tokens.dispose(); this.githubCredentials.invalidate();
     const workspaceTools = this.workspaceMcp.dispose();
+    const agentsClosing = this.agents?.dispose();
+    void agentsClosing?.catch(() => {});
     await this.configuring.catch(() => {});
     await this.stopCheckout();
     await this.promptInbox?.dispose();
     await this.terminals?.dispose();
     await this.workspace?.dispose();
-    await this.agents?.dispose();
+    await agentsClosing;
     await this.mcp?.dispose();
     await workspaceTools;
     this.reviews?.close();
@@ -426,11 +428,15 @@ export class CloudWorker {
   private async prepareStop(): Promise<void> {
     clearInterval(this.heartbeat);
     const workspaceTools = this.workspaceMcp.dispose();
+    // A delivery waiting behind a mutation can hold inbox/configuration drain.
+    // Retire native inputs before either wait permits a late approval.
+    const agentsClosing = this.agents?.dispose();
+    void agentsClosing?.catch(() => {});
     await this.configuring.catch(() => {});
     await this.stopCheckout();
     await this.workspace?.stopAttachmentTransfers();
     await this.promptInbox?.dispose();
-    await this.agents?.dispose();
+    await agentsClosing;
     await this.terminals?.dispose();
     await this.mcp?.dispose();
     await workspaceTools;

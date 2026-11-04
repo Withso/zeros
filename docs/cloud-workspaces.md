@@ -518,12 +518,16 @@ which the renderer treats as unavailable history.
 Reset uses the same authored-path inverse and conflict rules as Local. It can
 restore files, cut the transcript, or do both. It preserves unrelated edits and
 staging; overlapping edits and unavailable snapshots are reported without
-overwriting those files. Reset first retires the conversation's native execution
+overwriting those files. Cloud holds Git's index lock through file and matching
+staged-entry publication: newer staging stays intact, and a refused file change
+does not change the index. Reset first retires the conversation's native execution
 and confirms its HTTP Stop epoch, then waits for receipts before applying the
 cut. New prompts wait outside the mutation. A transcript cut clears the saved
 provider continuation, so the next prompt starts with the retained history.
 Cloud Edit and send submits nothing if the cut is refused or its outcome is
 uncertain. Account, owner, peer and Stop changes cancel the pending action.
+Inbox shutdown cancels waiting admission; workspace Stop retires all native
+executions before waiting for those deliveries or mutations to settle.
 
 Transcript changes require the negotiated `history-replace-v1` feature and
 `historyReplacement: 1` configuration. The worker sends an ordered replacement,
@@ -539,7 +543,8 @@ additive mirroring after a capability downgrade.
 The last five resets retain Undo records. Undo merges file restoration around
 later edits and restores the transcript only while its cut revision and
 continuation are unchanged. Turn trees and retained reset trees are pinned by
-private Git refs. Encrypted checkpoints carry those trees alongside worker
+one private Git ref per retained tree, including trees reused across resets.
+Encrypted checkpoints carry those trees alongside worker
 session state, so recorded diffs and an eligible Undo survive replacement of
 the VM. Restoring private refs never follows a symbolic ref into a user branch.
 Local Personal and organization-local reset entry points, storage and permission

@@ -4,6 +4,8 @@ export interface TurnResetHost {
   diskBlobOid(path: string): Promise<string | null>;
   indexBlobOid(path: string): Promise<string | null>;
   restore(path: string, revision: string | null, expectedOid?: string | null): Promise<void>;
+  /** A host may publish the file and matching staged entry under one Git lock. */
+  restoreStaged?(path: string, revision: string | null, expectedOid: string): Promise<void>;
   restoreIndex(path: string, revision: string): Promise<unknown>;
   removeIndex(path: string): Promise<unknown>;
   readDiskText(path: string): Promise<{ text: string; isBinary: boolean } | null>;
@@ -39,6 +41,10 @@ async function resetPath(
     // staged bytes belong to the user's partial staging and remain untouched.
     const stagedSameBlob =
       currentOid != null && (await host.indexBlobOid(path)) === currentOid;
+    if (stagedSameBlob && host.restoreStaged) {
+      await host.restoreStaged(path, targetOid ? targetCommit : null, currentOid);
+      return { path, result: targetOid ? "restored" : "deleted" };
+    }
     if (targetOid) {
       await host.restore(path, targetCommit, currentOid);
       if (stagedSameBlob) await host.restoreIndex(path, targetCommit);

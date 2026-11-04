@@ -624,7 +624,7 @@ function AgentChatBody({
         if (!action.isCurrent()) return false;
         if (chatThread?.folder) recordWorkspaceActivity(chatThread.folder);
         if (!cloud && session.status === "streaming") {
-          try { await session.cancel?.(); } catch { /* The engine's truncate also fences native work. */ }
+          try { await session.cancel?.(); } catch { /* Local cancellation remains best-effort. */ }
         }
         const { blocks: newBlocks, bubbleAttachments: newBubbleMeta, bubbleAttachmentById, skipped: skippedOnEdit } = await encodeAttachments(attachments, {
           supportsImage: session.initialize?.agentCapabilities?.promptCapabilities?.image !== false,

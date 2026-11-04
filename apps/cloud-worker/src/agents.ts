@@ -68,7 +68,9 @@ export class Agents {
   private readonly mutationEpochs = new Map<string, number>();
   private readonly outboxOpenings = new Map<string, Promise<void>>();
   private readonly waitingOpens = new Map<string, Set<{ cancelled: boolean }>>();
+  private readonly lifetime = new AbortController();
   private disposed = false;
+  private disposal?: Promise<void>;
 
   constructor(
     private readonly store: SessionStore,
@@ -119,17 +121,31 @@ export class Agents {
     this.outboxDispatch = dispatch; this.outboxStop = stop;
   }
 
-  private async afterMutation(chatId: string): Promise<void> {
-    while (this.chatMutations.has(chatId)) await this.chatMutations.get(chatId)!.catch(() => {});
-    if (this.disposed) throw new WorkspaceError("WORKSPACE_UNAVAILABLE", "The workspace is stopping.");
+  private assertAdmission(signal?: AbortSignal): void {
+    if (this.disposed || signal?.aborted) throw new WorkspaceError("WORKSPACE_UNAVAILABLE", "The workspace is stopping.");
   }
 
-  private async waitToOpen(chatId: string): Promise<void> {
+  private async afterMutation(chatId: string, cancelled?: AbortSignal): Promise<void> {
+    const signal = cancelled ? AbortSignal.any([this.lifetime.signal, cancelled]) : this.lifetime.signal;
+    this.assertAdmission(signal);
+    while (this.chatMutations.has(chatId)) {
+      const pending = this.chatMutations.get(chatId)!;
+      await new Promise<void>((resolve, reject) => {
+        const abort = () => { signal.removeEventListener("abort", abort); reject(new WorkspaceError("WORKSPACE_UNAVAILABLE", "The workspace is stopping.")); };
+        const settled = () => { signal.removeEventListener("abort", abort); resolve(); };
+        if (signal.aborted) abort(); else signal.addEventListener("abort", abort, { once: true });
+        void pending.then(settled, settled);
+      });
+      this.assertAdmission(signal);
+    }
+  }
+
+  private async waitToOpen(chatId: string, signal?: AbortSignal): Promise<void> {
     const waiting = this.waitingOpens.get(chatId) ?? new Set<{ cancelled: boolean }>();
     const admission = { cancelled: false };
     waiting.add(admission); this.waitingOpens.set(chatId, waiting);
     try {
-      await this.afterMutation(chatId);
+      await this.afterMutation(chatId, signal);
       if (admission.cancelled) throw new WorkspaceError("session-expired", "This session was stopped before it could open.");
     } finally {
       waiting.delete(admission);
@@ -173,21 +189,21 @@ export class Agents {
     return operation;
   }
 
-  async receiveOutbox(item: CloudV2PromptDelivery): Promise<InboxEntry> {
+  async receiveOutbox(item: CloudV2PromptDelivery, signal?: AbortSignal): Promise<InboxEntry> {
     const { payload, receipt } = item;
     if (receipt.workspaceId !== this.scope.workspace.id || receipt.chatId !== payload.chatId || receipt.userMessageId !== payload.userMessageId)
       throw new WorkspaceError("WORKSPACE_NOT_FOUND", "This message belongs to another workspace.");
     for (;;) {
-      await this.afterMutation(payload.chatId);
+      await this.afterMutation(payload.chatId, signal);
       const epoch = this.mutationEpochs.get(payload.chatId) ?? 0;
-      try { return await this.admitOutbox(item); }
+      try { this.assertAdmission(signal); return await this.admitOutbox(item, signal); }
       catch (error) {
         if (epoch === (this.mutationEpochs.get(payload.chatId) ?? 0)) throw error;
       }
     }
   }
 
-  private async admitOutbox(item: CloudV2PromptDelivery): Promise<InboxEntry> {
+  private async admitOutbox(item: CloudV2PromptDelivery, signal?: AbortSignal): Promise<InboxEntry> {
     const { payload } = item;
     // Waking preserves the execution the app holds, as well as its native
     // conversation. Re-adopt only the current persisted execution (M069).
@@ -196,10 +212,11 @@ export class Agents {
     await this.open({ id: "outbox", send: async () => {} }, createMessage({ type: "AGENT_NEW_SESSION", source: "browser",
       chatId: payload.chatId, agentId: payload.agentId, cwd: this.scope.root, workspaceId: this.scope.workspace.id,
       env: { ...(payload.model ? { [MODEL_ENV[payload.agentId]]: payload.model } : {}), ...(payload.effort ? { ZEROS_THINKING_EFFORT: payload.effort } : {}) },
-    }), true);
+    }), true, signal);
     const route = this.chats.get(payload.chatId)!;
     route.admitting++;
-    try { await route.cancelling; this.assertCurrent(route); return await this.store.receiveOutbox(item, () => this.assertCurrent(route)); }
+    const ownsAdmission = () => { this.assertAdmission(signal); this.assertCurrent(route); };
+    try { await route.cancelling; ownsAdmission(); return await this.store.receiveOutbox(item, ownsAdmission); }
     finally { route.admitting--; }
   }
 
@@ -464,12 +481,15 @@ export class Agents {
     await Promise.allSettled([...this.chatMutations.values(), ...this.outboxOpenings.values()]);
     await Promise.all([...this.routes.values()].map(async (route) => { await route.events; await route.settling; }));
   }
-  async dispose(): Promise<void> {
-    this.disposed = true; this.models.dispose();
+  dispose(): Promise<void> {
+    if (this.disposal) return this.disposal;
+    this.disposed = true; this.lifetime.abort(); this.models.dispose();
     const tools = [...this.chats.values()].map(route => this.retireWorkspaceTools(route));
-    await Promise.all([...this.chats.keys()].map(id => this.closeChat(id, true)));
-    await Promise.all(tools);
-    await Promise.allSettled([...this.chatMutations.values(), ...this.outboxOpenings.values()]);
+    return this.disposal = (async () => {
+      await Promise.all([...this.chats.keys()].map(id => this.closeChat(id, true)));
+      await Promise.all(tools);
+      await Promise.allSettled([...this.chatMutations.values(), ...this.outboxOpenings.values()]);
+    })();
   }
 
   private agent(id: string): CloudV2Agent {
@@ -506,7 +526,7 @@ export class Agents {
     if (route.closed || this.chats.get(route.chatId) !== route) throw new WorkspaceError("session-expired", "This execution has ended. Reopen the conversation to continue.");
   }
 
-  private async open(client: AppClient, message: AgentNewSessionMessage | AgentLoadSessionMessage, deferDriver = false): Promise<void> {
+  private async open(client: AppClient, message: AgentNewSessionMessage | AgentLoadSessionMessage, deferDriver = false, signal?: AbortSignal): Promise<void> {
     this.scope.folder(message.cwd, true); this.scope.assertId(message.workspaceId);
     if (message.type === "AGENT_NEW_SESSION" && message.agentRole === "design") throw new WorkspaceError("CLOUD_V2_UNSUPPORTED", "Design is not available in cloud workspaces.");
     const agentId = this.agent(message.agentId);
@@ -515,8 +535,8 @@ export class Agents {
     const found = requested ? this.routes.get(requested) ?? (message.type === "AGENT_LOAD_SESSION" && !message.adoptOnly ? this.readopt(requested, agentId, message.chatId) : undefined) : undefined;
     const chatId = message.chatId ?? found?.chatId;
     if (!chatId) throw new WorkspaceError("WORKSPACE_NOT_FOUND", "A conversation is required.");
-    if (this.chatMutations.has(chatId)) await this.waitToOpen(chatId);
-    if (this.disposed) throw new WorkspaceError("WORKSPACE_UNAVAILABLE", "The workspace is stopping.");
+    if (this.chatMutations.has(chatId)) await this.waitToOpen(chatId, signal);
+    this.assertAdmission(signal);
     const timing = agentTiming(agentId, chatId, "open", this.onTiming);
     if (found && found.chatId !== chatId) throw new WorkspaceError("session-expired", "The execution belongs to a different conversation.");
     let route = this.chats.get(chatId);
