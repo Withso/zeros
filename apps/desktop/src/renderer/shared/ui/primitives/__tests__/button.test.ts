@@ -94,3 +94,20 @@ describe("Button states", () => {
     expect(markup).toContain("Save</button>");
   });
 });
+
+describe("Button asChild", () => {
+  // Regression: the loading slot rendered `null` beside the child, so Slot
+  // received two children and threw (Design layer rows, the API key link).
+  it("renders its one child as the button with the recipe classes", () => {
+    const html = renderToStaticMarkup(
+      createElement(
+        Button,
+        { asChild: true, variant: "secondary", size: "sm" },
+        createElement("a", { href: "#console" }, "Open console"),
+      ),
+    );
+    expect(html).toMatch(/^<a [^>]*href="#console"/);
+    expect(html).toContain("rounded-md");
+    expect(html).toContain("Open console");
+  });
+});

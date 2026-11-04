@@ -122,18 +122,25 @@ const Button = React.forwardRef<HTMLButtonElement, ButtonProps>(
         disabled={disabled || loading}
         aria-busy={loading || props["aria-busy"] || undefined}
       >
-        {loading && !asChild ? (
-          <ZerosSpinner
-            size={compact ? 16 : 18}
-            tone={
-              (variant &&
-                SPINNER_TONE[variant as keyof typeof SPINNER_TONE]) ??
-              "default"
-            }
-            label="Working"
-          />
-        ) : null}
-        {children}
+        {/* Slot takes exactly one child, so asChild passes it alone. */}
+        {asChild ? (
+          children
+        ) : (
+          <>
+            {loading ? (
+              <ZerosSpinner
+                size={compact ? 16 : 18}
+                tone={
+                  (variant &&
+                    SPINNER_TONE[variant as keyof typeof SPINNER_TONE]) ??
+                  "default"
+                }
+                label="Working"
+              />
+            ) : null}
+            {children}
+          </>
+        )}
       </Comp>
     );
   },
