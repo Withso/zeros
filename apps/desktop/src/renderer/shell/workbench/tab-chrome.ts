@@ -12,14 +12,16 @@
 //     bg-bg2 fill is what lets it float above scrolling neighbors (z-20 sits
 //     above the strip's fades at z-10).
 
+// The Zeros Design tab: 6px corners like every tab, a bg1-hover hover that is
+// not the active fill, and medium text only on the active tab.
 export const WORKBENCH_TAB_PILL_BASE_CLS =
-  "relative flex h-7 shrink-0 cursor-pointer items-center overflow-hidden rounded-lg text-xs font-medium transition-none";
+  "relative flex h-7 shrink-0 cursor-pointer items-center overflow-hidden rounded-md text-xs transition-none";
 
 export const WORKBENCH_TAB_PILL_ACTIVE_CLS =
-  "bg-bg2 text-fg1 sticky left-1 right-1 z-20";
+  "bg-bg2 text-fg1 font-medium sticky left-1 right-1 z-20";
 
 export const WORKBENCH_TAB_PILL_INACTIVE_CLS =
-  "text-fg2 data-[hovered=true]:bg-bg2 data-[hovered=true]:text-fg1";
+  "text-fg2 data-[hovered=true]:bg-bg1-hover data-[hovered=true]:text-fg1";
 
 /** Files and terminals share the same title chip and adjacent icon geometry. */
 export const WORKBENCH_TITLE_CHIP_CLS =

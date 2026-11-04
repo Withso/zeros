@@ -276,7 +276,7 @@ function HistoryRow({ build, active, disabled, onActivate }: {
         </span>
       </span>
       {active
-        ? <Badge variant="outline" className="font-mono uppercase">Active</Badge>
+        ? <Badge variant="success">Active</Badge>
         : build.state === "succeeded" && (
           <Button variant="ghost" onClick={onActivate} disabled={disabled}
             title="Builds this version again at the same commits and makes it live">Activate</Button>

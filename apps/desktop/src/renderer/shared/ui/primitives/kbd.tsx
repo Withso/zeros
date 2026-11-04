@@ -4,13 +4,10 @@ import { ArrowBigUp, ArrowDown, ArrowDownRight, ArrowLeft, ArrowRight, ArrowUp, 
 import { cn } from "@/renderer/shared/ui/cn";
 
 /**
- * Kbd — the canonical keyboard-shortcut chip for dropdown / menu rows.
- *
- * One consistent style everywhere a menu row shows a shortcut (⌘T, ⌘R, ⌘1…):
- * a bordered chip in `--border1` with `--fg2` text at 11px. Right-align it in
- * a flex menu row with `className="ml-auto"`. It sits on the bg3 popover
- * surface, where `border1` reads as a subtle-but-visible outline (the design
- * rule lives in docs/design-system.md — border1 / fg2 / 11px, app-wide).
+ * Kbd — the one keyboard-shortcut chip, in menus, tooltips and the command
+ * palette alike: 18px tall, border2 on bg2 so it reads on a bg3 menu (border1
+ * was faint there), fg2 text at 11px. Right-align it in a flex row with
+ * `className="ml-auto"`. A combination is one chip per key: use KbdKeys.
  */
 const SYMBOL_KEYS = {
   "←": ArrowLeft, "→": ArrowRight, "↑": ArrowUp, "↓": ArrowDown,
@@ -18,17 +15,19 @@ const SYMBOL_KEYS = {
   "⌘": Command, "⌥": Option, "⇧": ArrowBigUp, "⌃": ChevronUp, "↵": CornerDownLeft,
 };
 
+const SYMBOL_SPLIT = /([⌘⌥⇧⌃↵←→↑↓↖↘])/;
+
 function Kbd({ className, children, ...props }: React.ComponentProps<"span">) {
   return (
     <span
       data-slot="kbd"
       className={cn(
-        "inline-flex shrink-0 select-none items-center gap-0.5 rounded-sm border border-border1 px-1 py-px text-2xxs font-medium tabular-nums text-fg2",
+        "inline-flex h-4.5 min-w-4.5 shrink-0 select-none items-center justify-center gap-0.5 whitespace-nowrap rounded-sm border border-border2 bg-bg2 px-1 text-2xxs leading-4 font-medium tabular-nums text-fg2",
         className,
       )}
       {...props}
     >
-      {typeof children === "string" ? children.split(/([⌘⌥⇧⌃↵←→↑↓↖↘])/).map((part, index) => {
+      {typeof children === "string" ? children.split(SYMBOL_SPLIT).map((part, index) => {
         const Icon = Object.hasOwn(SYMBOL_KEYS, part) ? SYMBOL_KEYS[part as keyof typeof SYMBOL_KEYS] : null;
         return Icon ? <React.Fragment key={index}>
           <span className="sr-only">{part}</span>
@@ -39,4 +38,25 @@ function Kbd({ className, children, ...props }: React.ComponentProps<"span">) {
   );
 }
 
-export { Kbd };
+/** The keys of a combination, so each gets its own chip: "⌘⇧T" → ⌘ · ⇧ · T,
+ *  "⌘\" → ⌘ · \, "F2" and "esc" stay whole. */
+export function shortcutKeys(shortcut: string): string[] {
+  return shortcut.split(SYMBOL_SPLIT).filter((part) => part.trim() !== "");
+}
+
+/** One chip per key of a shortcut, 2px apart. */
+function KbdKeys({
+  keys,
+  className,
+  ...props
+}: Omit<React.ComponentProps<"span">, "children"> & { keys: string }) {
+  return (
+    <span data-slot="kbd-keys" className={cn("inline-flex shrink-0 items-center gap-0.5", className)} {...props}>
+      {shortcutKeys(keys).map((key, index) => (
+        <Kbd key={`${index}-${key}`}>{key}</Kbd>
+      ))}
+    </span>
+  );
+}
+
+export { Kbd, KbdKeys };

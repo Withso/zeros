@@ -219,28 +219,27 @@
   /* ── RADII — fixed 3-step scale ──
    * The whole app uses exactly three corner radii; pick by use case,
    * never by taste:
-   *   --radius-sm 4px — ALL buttons + icon buttons, pills/chips/badges,
-   *                     kbd, checkboxes, menu items, inputs
-   *   --radius-md 6px — tabs + segmented pills, model/composer pills,
-   *                     sidebar + settings nav rows (workspace rows,
-   *                     Dashboard/Create, settings entries), small
-   *                     cards/rows, markdown img/table, tooltips
-   *   --radius-lg 8px — dialogs, cards, code blocks, toasts, panels
-   * Dropdown surfaces (Popover, DropdownMenu, ContextMenu, Select) use
-   * 2 × --radius-lg = 16px via shared/ui/menu-surface.ts; the grouped
-   * settings cards use 1.5 × --radius-lg = 12px via
-   * features/settings/settings-ui.tsx (SETTINGS_GROUP_RADIUS); and the
+   *   --radius-sm 4px — the 20px inline icon button, inline pills, badges,
+   *                     kbd chips, checkboxes, the inline-rename field
+   *   --radius-md 6px — buttons, icon buttons, fields and the Select
+   *                     trigger, tabs and segmented controls, tooltips,
+   *                     toolbar tools, sidebar and settings rows
+   *   --radius-lg 8px — menu rows, code blocks, small cards and rows
+   * Floating surfaces (menus, Select lists, Command, popovers, hover
+   * cards, toasts, dialogs) use 1.5 × --radius-lg = 12px via
+   * shared/ui/menu-surface.ts, as do the grouped settings cards
+   * (features/settings/settings-ui.tsx, SETTINGS_GROUP_RADIUS) and the
    * prompt surfaces — composer card, inline edit composer, sent user
-   * message — use the same 12px via features/agent/composer-shell.tsx
-   * (PROMPT_SURFACE_RADIUS), so a prompt keeps its shape from typed to
-   * sent. All derived from the scale, not a fourth token.
+   * message — via features/agent/composer-shell.tsx (PROMPT_SURFACE_RADIUS),
+   * so a prompt keeps its shape from typed to sent. Toolbars use
+   * --radius-md + 4px = 10px (shared/ui/primitives/toolbar.tsx). All
+   * derived from the scale, not a fourth token.
    * Plus rounded-full (circles/scrollbars/switch) and rounded-none
    * (nested resets). xs/xl/2xl/3xl/4xl are reset to `initial` below
    * ON PURPOSE so `rounded-xl` etc. no longer exist —
    * a class that won't compile beats a fourth radius sneaking in.
-   * Nesting rule: inner radius = outer radius − inset (8px menu with
-   * 4px padding → 4px items). Dropdown rows are the documented exception:
-   * 16px surfaces carry 8px row fills (see shared/ui/menu-surface.ts). */
+   * Nesting rule: inner radius = outer radius − inset (a 12px menu with a
+   * 4px inset → 8px rows; a 10px toolbar with a 4px inset → 6px tools). */
   --radius-*: initial;
   --radius-sm: 4px;
   --radius-md: 6px;
@@ -546,7 +545,6 @@
   /* Shared modal chrome and overlay veil in both themes. */
   /* @generated tokens:base-dialog-title-size:start */
   --dialog-title-size: 0.9375rem; /* 0.9375rem — 15px shared popup heading */
-  --dialog-close-radius: 999px; /* 999px — circular popup close button */
   --scrim: rgba(0, 0, 0, 0.5); /* #00000080 — modal overlay veil */
   /* @generated tokens:base-dialog-title-size:end */
 

@@ -64,7 +64,10 @@ describe("workbench status contract", () => {
       );
       expect(banner.match(/data-workbench-banner=/g)).toHaveLength(1);
       expect(banner).toContain('aria-label="Retry loading');
-      expect(banner).toContain("line-clamp-2");
+      // One 32px row that ends in an ellipsis; the icon alone carries the tone.
+      expect(banner).toContain("h-8");
+      expect(banner).toContain("block truncate");
+      expect(banner).not.toContain("bg-red-bg");
       expect(status.message).not.toContain("WORKSPACE_REQUEST");
       expect(empty).toContain("text-fg2");
       expect(empty).toContain("size-10");

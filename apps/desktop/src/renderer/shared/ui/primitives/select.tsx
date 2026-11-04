@@ -15,6 +15,7 @@ import {
 import { suppressPointerRefocus } from "@/renderer/shared/ui/overlay-focus"
 import { useNativeSurfaceOverlayIntent } from "@/renderer/shared/ui/native-surface-overlay"
 import { resolvePopoverBoundary } from "@/renderer/shared/ui/popover-boundary"
+import { FIELD_FOCUS, FIELD_INVALID } from "./field"
 
 /** Shared between the trigger and the (portaled) content so the content can
  *  find the layout column its trigger lives in — see popover-boundary.ts.
@@ -88,13 +89,20 @@ const SELECT_TRIGGER_WIDTH: Record<SelectTriggerWidth, string> = {
   fixed: "w-40",
 }
 
-// Geometry: 6px corners (--radius-md), 6px left / 4px right / 4px vertical
-// padding, 4px gap between the 13px label (text-xs, on an 18px line) and the
-// 14px chevron → 28px tall, the same box as every Button. No fill at rest —
-// the border alone outlines it; hover/open paint the bg2-highlight token
-// (18% in dark, = bg5 in light).
-const SELECT_TRIGGER_BASE =
-  "flex items-center justify-between gap-1 rounded-md border border-border3 bg-transparent py-1 pr-1 pl-1.5 text-xs leading-4.5 whitespace-nowrap transition-[color,background-color,border-color,box-shadow] outline-none hover:border-border4 hover:bg-bg2-highlight data-[state=open]:border-border4 data-[state=open]:bg-bg2-highlight focus-visible:border-highlighted-bright disabled:cursor-not-allowed disabled:opacity-50 aria-invalid:border-red-primary aria-invalid:ring-red-primary/30 data-[placeholder]:text-fg2 *:data-[slot=select-value]:line-clamp-1 *:data-[slot=select-value]:flex *:data-[slot=select-value]:items-center *:data-[slot=select-value]:gap-2 [&_svg]:pointer-events-none [&_svg]:shrink-0 [&_svg:not([class*='size-'])]:size-3.5 [&_svg:not([class*='text-'])]:text-fg2"
+// The Input field box as a trigger: 8px left padding so a value lines up
+// with Input text above or below it, 6px right, 4px vertical, a 4px gap to
+// the 14px chevron → 28px tall, the same box as every Button. No fill at
+// rest; hover and open paint bg2-highlight. Compact keeps the line box and
+// drops to 24px.
+const SELECT_TRIGGER_BASE = cn(
+  "group/select-trigger flex items-center justify-between gap-1 rounded-md border border-border3 bg-transparent py-1 pr-1.5 pl-2 text-xs leading-4.5 whitespace-nowrap transition-[color,background-color,border-color,box-shadow] duration-120 ease-out outline-none hover:border-border4 hover:bg-bg2-highlight data-[state=open]:border-border4 data-[state=open]:bg-bg2-highlight data-[size=compact]:py-0.5 disabled:cursor-not-allowed disabled:opacity-50 data-[placeholder]:text-fg3 *:data-[slot=select-value]:line-clamp-1 *:data-[slot=select-value]:flex *:data-[slot=select-value]:items-center *:data-[slot=select-value]:gap-2 [&_svg]:pointer-events-none [&_svg]:shrink-0 [&_svg:not([class*='size-'])]:size-3.5 [&_svg:not([class*='text-'])]:text-fg2",
+  FIELD_FOCUS,
+  FIELD_INVALID,
+)
+
+/** The trigger's chevron: muted-fg at rest, fg2 on hover and while open. */
+const SELECT_CHEVRON =
+  "text-muted-fg group-hover/select-trigger:text-fg2 group-data-[state=open]/select-trigger:text-fg2 size-3.5 transition-colors duration-120 ease-out"
 
 /** The dropdown-trigger chrome as a class string, for the rare menu whose
  *  trigger should look like a Select (an action menu such as "Open in ▾")
@@ -110,7 +118,9 @@ function selectTriggerClassName(
 const SelectTrigger = React.forwardRef<
   HTMLButtonElement,
   React.ComponentPropsWithoutRef<typeof SelectPrimitive.Trigger> & {
-    size?: "sm" | "default"
+    /** compact is the 24px trigger for dense rows; sm is the former name of
+     *  the standard 28px size. */
+    size?: "sm" | "default" | "compact"
     width?: SelectTriggerWidth
   }
 >(function SelectTrigger(
@@ -137,7 +147,7 @@ const SelectTrigger = React.forwardRef<
     >
       {children}
       <SelectPrimitive.Icon asChild>
-        <ChevronDownIcon className="size-3.5 opacity-50" />
+        <ChevronDownIcon data-slot="select-chevron" className={SELECT_CHEVRON} />
       </SelectPrimitive.Icon>
     </SelectPrimitive.Trigger>
   )
@@ -324,5 +334,6 @@ export {
   SelectSeparator,
   SelectTrigger,
   SelectValue,
+  SELECT_CHEVRON,
   selectTriggerClassName,
 }

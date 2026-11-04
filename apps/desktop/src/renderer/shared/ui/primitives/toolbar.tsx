@@ -1,9 +1,7 @@
 import * as React from "react";
 
 import { cn } from "@/renderer/shared/ui/cn";
-
-/** True inside a Toolbar, so its icon buttons default to the 28px tool size. */
-export const ToolbarContext = React.createContext(false);
+import { IconButtonSizeContext } from "./icon-button";
 
 // One size for every toolbar and island: 28px tools in a 36px bar. The 3px
 // inset plus the 1px border puts the 6px tool corners on the bar's 10px ones.
@@ -166,7 +164,7 @@ const Toolbar = React.forwardRef<HTMLDivElement, ToolbarProps>(
     };
 
     return (
-      <ToolbarContext.Provider value>
+      <IconButtonSizeContext.Provider value="standard">
         <div
           ref={setRef}
           role={role}
@@ -183,7 +181,7 @@ const Toolbar = React.forwardRef<HTMLDivElement, ToolbarProps>(
           onKeyDown={handleKeyDown}
           {...props}
         />
-      </ToolbarContext.Provider>
+      </IconButtonSizeContext.Provider>
     );
   },
 );

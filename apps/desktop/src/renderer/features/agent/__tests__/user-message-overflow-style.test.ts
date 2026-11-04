@@ -46,12 +46,12 @@ describe("narrow transcript message overflow", () => {
     expect(turnContainer).not.toContain("group/more");
   });
 
-  it("keeps checkpoint rows on the hover token for their bg2 surface", () => {
+  it("keeps checkpoint rows on the hover their floating surface binds", () => {
     const checkpointRail = code("../checkpoint-rail.tsx");
     const hoverCard = code("../../../shared/ui/primitives/hover-card.tsx");
 
-    expect(hoverCard).toContain("border-border2 bg-bg2 text-fg1");
-    expect(checkpointRail).toContain('? "bg-bg2-hover text-fg1"');
-    expect(checkpointRail).toContain(': "text-fg2 hover:bg-bg2-hover"');
+    expect(hoverCard).toContain("FLOATING_SURFACE");
+    expect(checkpointRail).toContain('? "bg-(--surface-hover) text-fg1"');
+    expect(checkpointRail).toContain(': "text-fg2 hover:bg-(--surface-hover)"');
   });
 });

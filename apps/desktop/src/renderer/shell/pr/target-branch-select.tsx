@@ -30,7 +30,7 @@ import React, {
 } from "react";
 import { ArrowRight, Check, ChevronsUpDown } from "lucide-react";
 
-import { Tooltip, selectTriggerClassName } from "@/renderer/shared/ui/primitives";
+import { SELECT_CHEVRON, Tooltip, selectTriggerClassName } from "@/renderer/shared/ui/primitives";
 import { toast } from "../../shared/ui/primitives/elements";
 import {
   Popover,
@@ -265,7 +265,7 @@ export function TargetBranchButton({
           <span className="text-fg1 min-w-0 truncate font-medium tabular-nums">
             {remote}/{workspace.baseBranch}
           </span>
-          <ChevronsUpDown className="size-3.5 shrink-0 opacity-50" />
+          <ChevronsUpDown className={SELECT_CHEVRON} />
         </button>
       </TargetBranchPopover>
     </Inline>

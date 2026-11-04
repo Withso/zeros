@@ -568,11 +568,11 @@ export const CheckpointRail = memo(function CheckpointRail({
             // Only the selected row's text is fg1; hover changes the background only.
             className={cn(
               "flex h-8 w-full flex-none cursor-pointer items-center gap-2.5 rounded-md px-2 text-left transition-colors",
-              // The selected row keeps bg2-hover, the hover fill of its siblings.
-              // --highlighted-bg is the user-bubble surface and would sit darker.
+              // The hover card binds the floating surface's row hover; the
+              // selected row keeps it.
               i === activeIndex
-                ? "bg-bg2-hover text-fg1"
-                : "text-fg2 hover:bg-bg2-hover",
+                ? "bg-(--surface-hover) text-fg1"
+                : "text-fg2 hover:bg-(--surface-hover)",
             )}
           >
             <span

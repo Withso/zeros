@@ -81,7 +81,7 @@ export const SETTINGS_CARD_LIST_CLS =
  *  card + `[&>*]:py-3` on every row, which overrides the rows' own
  *  `py-3.5`). Groups are spaced 24px apart by the panel (`gap-6`). */
 /** 12px corners for the grouped card, DERIVED from the radius scale like
- *  menu-surface.ts's 16px dropdown surface (1.5 × --radius-lg). Not
+ *  menu-surface.ts's floating surfaces (1.5 × --radius-lg). Not
  *  `rounded-xl`: zeros-tokens.css resets `--radius-xl` to `initial` on
  *  purpose, so that class compiles to nothing (the card rendered with
  *  square corners, 2026-09-14). The grouped card is a larger surface than

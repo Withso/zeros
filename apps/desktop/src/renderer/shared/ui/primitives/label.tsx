@@ -5,7 +5,8 @@ import { cva, type VariantProps } from "class-variance-authority";
 import { cn } from "@/renderer/shared/ui/cn";
 
 const labelVariants = cva(
-  "text-sm font-medium leading-none peer-disabled:cursor-not-allowed peer-disabled:opacity-70",
+  // Every control label is 13/18 medium fg1; disabled is 50%, like controls.
+  "text-xs leading-4.5 font-medium text-fg1 peer-disabled:cursor-not-allowed peer-disabled:opacity-50",
 );
 
 const Label = React.forwardRef<

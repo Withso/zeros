@@ -113,14 +113,15 @@ describe("Surface markup equivalence", () => {
         "flex h-7.5 w-full min-w-0 items-center justify-start gap-2.5 rounded-md border-0 bg-transparent px-2.5 py-0 text-left text-xs font-normal text-fg2 transition-colors duration-150 ease-out hover:bg-sidebar-bg-hover hover:text-fg2 data-[state=active]:bg-sidebar-bg-hover data-[state=active]:text-fg1 data-[state=active]:hover:text-fg1 [&_svg]:size-3.5 [&>svg]:shrink-0 [&>svg]:text-fg2 data-[state=active]:[&>svg]:text-fg1",
       icon: false,
     },
-    // shell/sidebar-workspace-row.tsx workspace
+    // shell/sidebar-workspace-row.tsx workspace — the Zeros Design row: its
+    // own bg2-highlight selected fill and the keyboard ring.
     {
       site: "shell/sidebar-workspace-row.tsx workspace",
       file: "shell/sidebar-workspace-row.tsx",
       constant: "SIDEBAR_WORKSPACE_ROW_CLS",
       tag: "div",
       original:
-        "group/workspace relative flex h-8 w-full min-w-0 shrink-0 select-none items-center overflow-hidden rounded-md pr-2 text-left text-xs font-normal text-fg2 transition-none hover:bg-sidebar-bg-hover focus-within:bg-sidebar-bg-hover data-[active=true]:bg-sidebar-bg-hover data-[active=true]:text-fg1",
+        "group/workspace relative flex h-8 w-full min-w-0 shrink-0 select-none items-center overflow-hidden rounded-md border border-transparent pr-2 text-left text-xs font-normal text-fg2 transition-none [--row-fill:var(--surface-hover)] hover:bg-sidebar-bg-hover focus-within:bg-sidebar-bg-hover data-[active=true]:bg-bg2-highlight data-[active=true]:text-fg1 data-[active=true]:[--row-fill:var(--bg2-highlight)] data-[active=true]:hover:bg-bg2-highlight data-[active=true]:focus-within:bg-bg2-highlight has-[>button:focus-visible]:border-highlighted-bright has-[>button:focus-visible]:ring-[3px] has-[>button:focus-visible]:ring-highlighted-bright/50",
       icon: false,
     },
     // shell/sidebar-workspace-row.tsx pending workspace
@@ -130,7 +131,7 @@ describe("Surface markup equivalence", () => {
       constant: "SIDEBAR_WORKSPACE_ROW_CLS",
       tag: "div",
       original:
-        "group/workspace relative flex h-8 w-full min-w-0 shrink-0 select-none items-center overflow-hidden rounded-md pr-2 text-left text-xs font-normal text-fg2 transition-none hover:bg-sidebar-bg-hover focus-within:bg-sidebar-bg-hover data-[active=true]:bg-sidebar-bg-hover data-[active=true]:text-fg1",
+        "group/workspace relative flex h-8 w-full min-w-0 shrink-0 select-none items-center overflow-hidden rounded-md border border-transparent pr-2 text-left text-xs font-normal text-fg2 transition-none [--row-fill:var(--surface-hover)] hover:bg-sidebar-bg-hover focus-within:bg-sidebar-bg-hover data-[active=true]:bg-bg2-highlight data-[active=true]:text-fg1 data-[active=true]:[--row-fill:var(--bg2-highlight)] data-[active=true]:hover:bg-bg2-highlight data-[active=true]:focus-within:bg-bg2-highlight has-[>button:focus-visible]:border-highlighted-bright has-[>button:focus-visible]:ring-[3px] has-[>button:focus-visible]:ring-highlighted-bright/50",
       icon: false,
     },
     // shell/sidebar-repository-header.tsx repository header

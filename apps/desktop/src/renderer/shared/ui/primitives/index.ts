@@ -2,8 +2,18 @@
 // this entrypoint over deep imports when they need several primitives.
 
 export { Button, buttonVariants, type ButtonProps } from "./button";
-export { IconButton, type IconButtonProps } from "./icon-button";
-export { PanelHeader, type PanelHeaderProps } from "./panel-header";
+export {
+  IconButton,
+  IconButtonSizeContext,
+  type IconButtonProps,
+  type IconButtonSize,
+} from "./icon-button";
+export {
+  PanelHeader,
+  PanelHeaderActions,
+  PanelHeaderTitle,
+  type PanelHeaderProps,
+} from "./panel-header";
 export { ListRow, type ListRowProps } from "./list-row";
 export { Pill, type PillProps } from "./pill";
 export {
@@ -14,7 +24,7 @@ export {
   CardDescription,
   CardContent,
 } from "./card";
-export { Input } from "./input";
+export { Input, inputVariants, type InputProps } from "./input";
 export { Textarea } from "./textarea";
 export { CodeTextarea, type CodeTextareaProps } from "./code-textarea";
 export { Label } from "./label";
@@ -116,8 +126,16 @@ export {
   SelectSeparator,
   SelectTrigger,
   SelectValue,
+  SELECT_CHEVRON,
   selectTriggerClassName,
 } from "./select";
+export {
+  FIELD_BOX,
+  FIELD_FOCUS,
+  FIELD_INVALID,
+  Field,
+  type FieldProps,
+} from "./field";
 export {
   InputGroup,
   InputGroupAddon,

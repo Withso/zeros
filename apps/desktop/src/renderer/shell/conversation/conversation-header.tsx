@@ -15,7 +15,7 @@ import { ChevronDown, Copy, Pencil } from "lucide-react";
 import { Button } from "../../shared/ui";
 import { cn } from "../../shared/ui/cn";
 import { toast } from "../../shared/ui/primitives/elements";
-import { Badge, Kbd, Tooltip } from "@/renderer/shared/ui/primitives";
+import { Kbd, Pill, Tooltip } from "@/renderer/shared/ui/primitives";
 import { branchDisplayName } from "../../shared/lib/branch-name";
 import { WorkbenchToggleButton } from "../workbench/toggle-button";
 import {
@@ -469,18 +469,10 @@ export function OpenInBadgeMenu({
     <DropdownMenu>
       <Tooltip label="Open in…" delayDuration={1500}>
         <DropdownMenuTrigger asChild>
-          <Badge
-            variant="accent"
-            role="button"
-            tabIndex={0}
-            aria-label={`Open ${label} in…`}
-            // Only the cursor: the chip's size, weight and colour live in the
-            // `accent` variant (typography and color come
-            // from the primitive, not from a call site's className).
-            className="cursor-pointer"
-          >
-            {label}
-          </Badge>
+          {/* A workspace link is the neutral inline pill, with no blue. */}
+          <Pill aria-label={`Open ${label} in…`}>
+            <span>{label}</span>
+          </Pill>
         </DropdownMenuTrigger>
       </Tooltip>
       <DropdownMenuContent

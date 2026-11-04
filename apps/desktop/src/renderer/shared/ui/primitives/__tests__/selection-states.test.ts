@@ -22,8 +22,8 @@ describe("selected menu rows step metadata up a tier", () => {
   });
 });
 
-describe("RadioGroup focus", () => {
-  it("draws an opaque focus outline that a checked border cannot override", () => {
+describe("RadioGroup states", () => {
+  it("shares Checkbox's box and keeps the focus border over the checked fill", () => {
     const markup = renderToStaticMarkup(
       createElement(
         RadioGroup,
@@ -31,13 +31,15 @@ describe("RadioGroup focus", () => {
         createElement(RadioGroupItem, { value: "a", label: "A" }),
       ),
     );
-    expect(markup).toContain("border-border3");
-    expect(markup).toContain("group-hover:border-border4");
-    expect(markup).toContain("group-data-[state=checked]:border-fg1");
-    expect(markup).toContain("group-focus-visible:outline-2");
-    expect(markup).toContain("group-focus-visible:outline-offset-2");
-    expect(markup).toContain("group-focus-visible:outline-highlighted-bright");
-    // The focus cue is an outline, not a border swap the checked state wins.
-    expect(markup).not.toContain("group-focus-visible:border-highlighted-bright");
+    expect(markup).toContain("size-4");
+    expect(markup).toContain("border-border4");
+    expect(markup).toContain("group-hover:border-fg3");
+    expect(markup).toContain("group-data-[state=checked]:bg-inverted-bg");
+    expect(markup).toContain("bg-inverted-fg");
+    // The standard halo, and a compound rule so the checked border cannot win.
+    expect(markup).toContain("group-focus-visible:ring-[3px]");
+    expect(markup).toContain("group-data-[state=checked]:group-focus-visible:border-highlighted-bright");
+    expect(markup).not.toContain("outline-offset-2");
+    expect(markup).toContain("text-xs leading-4.5");
   });
 });

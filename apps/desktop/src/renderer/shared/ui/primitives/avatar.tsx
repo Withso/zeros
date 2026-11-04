@@ -15,7 +15,9 @@ function Avatar({
       data-slot="avatar"
       data-size={size}
       className={cn(
-        "group/avatar relative flex size-8 shrink-0 overflow-hidden rounded-full select-none data-[size=lg]:size-10 data-[size=sm]:size-6",
+        // No clip on the root, so the presence badge stays a full circle; the
+        // image and initials clip themselves.
+        "group/avatar relative flex size-8 shrink-0 rounded-full select-none data-[size=lg]:size-10 data-[size=sm]:size-6",
         className
       )}
       {...props}
@@ -30,7 +32,7 @@ function AvatarImage({
   return (
     <AvatarPrimitive.Image
       data-slot="avatar-image"
-      className={cn("aspect-square size-full", className)}
+      className={cn("aspect-square size-full overflow-hidden rounded-full object-cover", className)}
       {...props}
     />
   )
@@ -44,7 +46,7 @@ function AvatarFallback({
     <AvatarPrimitive.Fallback
       data-slot="avatar-fallback"
       className={cn(
-        "flex size-full items-center justify-center rounded-full bg-bg2-hover text-sm text-fg2 group-data-[size=sm]/avatar:text-xs",
+        "bg-bg2-highlight text-fg1 text-3xxs flex size-full items-center justify-center overflow-hidden rounded-full font-medium group-data-[size=lg]/avatar:text-sm group-data-[size=sm]/avatar:text-2xxs",
         className
       )}
       {...props}
@@ -57,7 +59,7 @@ function AvatarBadge({ className, ...props }: React.ComponentProps<"span">) {
     <span
       data-slot="avatar-badge"
       className={cn(
-        "absolute right-0 bottom-0 z-10 inline-flex items-center justify-center rounded-full bg-primary-button-bg text-primary-button-fg ring-2 ring-bg1 select-none",
+        "bg-green-primary text-primary-button-fg ring-bg1 absolute -right-px -bottom-px z-1 inline-flex items-center justify-center rounded-full ring-2 select-none",
         "group-data-[size=sm]/avatar:size-2 group-data-[size=sm]/avatar:[&>svg]:hidden",
         "group-data-[size=default]/avatar:size-2.5 group-data-[size=default]/avatar:[&>svg]:size-2",
         "group-data-[size=lg]/avatar:size-3 group-data-[size=lg]/avatar:[&>svg]:size-2",
@@ -73,7 +75,8 @@ function AvatarGroup({ className, ...props }: React.ComponentProps<"div">) {
     <div
       data-slot="avatar-group"
       className={cn(
-        "group/avatar-group flex -space-x-2 *:data-[slot=avatar]:ring-2 *:data-[slot=avatar]:ring-bg1",
+        // Overlap by 6 with a 2px ring of the surface between faces.
+        "group/avatar-group flex -space-x-1.5 *:data-[slot=avatar]:ring-2 *:data-[slot=avatar]:ring-bg1",
         className
       )}
       {...props}

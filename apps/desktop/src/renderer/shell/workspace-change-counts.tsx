@@ -49,7 +49,7 @@ export function WorkspaceChangeCounts({
   const removedCls = active ? "text-red-primary" : undefined;
   return (
     <span
-      className="text-fg2 text-2xxs shrink-0 tabular-nums"
+      className="text-fg2 text-3xxs shrink-0 tabular-nums"
       data-workspace-change-counts=""
       aria-hidden="true"
     >

@@ -19,10 +19,11 @@ const Tile = React.forwardRef<
     ref={ref}
     type={type}
     className={cn(
-      "border-border1 bg-bg2 text-fg1 rounded-lg border p-4 text-left",
+      "border-border1 bg-bg2 text-fg1 rounded-[calc(var(--radius-lg)*1.5)] border p-4 text-left",
       "transition-colors duration-120 ease-out",
-      "hover:border-border2 hover:bg-bg2-hover",
-      "focus-visible:ring-border2 focus-visible:ring-1 focus-visible:outline-none",
+      // bg2-highlight + border3 reads on bg2, where bg2-hover was 1.06:1.
+      "hover:border-border3 hover:bg-bg2-highlight",
+      "focus-visible:border-highlighted-bright focus-visible:ring-highlighted-bright/50 focus-visible:ring-[3px] focus-visible:outline-none",
       className,
     )}
     {...props}

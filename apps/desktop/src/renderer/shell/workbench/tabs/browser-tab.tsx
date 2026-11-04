@@ -2429,7 +2429,6 @@ function BrowserChrome({
             </DropdownMenuLabel>
           )}
           <DropdownMenuCheckboxItem
-            indicatorSide="end"
             checked={deviceToolbar}
             disabled={!canShowDeviceToolbar}
             onCheckedChange={(checked) => onToggleDeviceToolbar(checked === true)}

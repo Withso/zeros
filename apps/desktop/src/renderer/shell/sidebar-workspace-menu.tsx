@@ -147,8 +147,6 @@ export function SidebarWorkspaceMenu({
             <DropdownMenuRadioItem
               key={value}
               value={value}
-              indicator="check"
-              indicatorSide="end"
             >
               {GROUP_LABELS[value]}
             </DropdownMenuRadioItem>
@@ -220,7 +218,6 @@ export function SidebarWorkspaceMenu({
                   <DropdownMenuCheckboxItem
                     key={project.id}
                     checked={selected.has(project.id)}
-                    indicatorSide="end"
                     onSelect={(event) => event.preventDefault()}
                     onCheckedChange={(checked) =>
                       onRepositoryIdsChange(
@@ -265,15 +262,11 @@ export function SidebarWorkspaceMenu({
             >
               <DropdownMenuRadioItem
                 value="updated"
-                indicator="check"
-                indicatorSide="end"
               >
                 Updated
               </DropdownMenuRadioItem>
               <DropdownMenuRadioItem
                 value="created"
-                indicator="check"
-                indicatorSide="end"
               >
                 Created
               </DropdownMenuRadioItem>

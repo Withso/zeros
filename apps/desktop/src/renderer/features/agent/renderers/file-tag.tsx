@@ -35,14 +35,10 @@ export const FileTag = forwardRef<HTMLButtonElement, {
     <Pill
       ref={ref}
       {...props}
-      className={cn(
-        // Unified pill recipe: 20px tall, 4px radius —
-        // shared with the turn-footer file pills and the composer pills.
-        "inline-flex h-5 min-w-0 max-w-[440px] items-center gap-1.5 rounded-sm border border-border3 bg-bg1 px-1.5 text-xs font-medium text-fg3 transition-colors hover:bg-bg2-hover",
-        className,
-      )}
+      // The neutral inline pill: 20px, 12/16, 4px corners.
+      className={cn("min-w-0 max-w-[440px]", className)}
     >
-      <FileTypeIcon name={name} kind={kind} size={13} className="shrink-0" />
+      <FileTypeIcon name={name} kind={kind} size={12} className="shrink-0" />
       <span className="min-w-0 truncate">{baseName(name)}</span>
     </Pill>
   );

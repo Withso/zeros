@@ -173,7 +173,6 @@ function HistoryItems({
   return (
     <>
       <DropdownMenuCheckboxItem
-        indicatorSide="end"
         checked={allSelected}
         disabled={!rows.length}
         onSelect={(event) => {
@@ -190,7 +189,6 @@ function HistoryItems({
         return (
           <DropdownMenuCheckboxItem
             key={row.id}
-            indicatorSide="end"
             checked={checked}
             title={row.detail ?? row.label}
             onPointerDown={(event) => {

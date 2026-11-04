@@ -2,6 +2,10 @@
 // keypress and carries that state through script focus. Track navigation intent
 // separately from typing/shortcuts; never blur controls or cancel their keys.
 const FOCUS_ATTRIBUTE = "data-zeros-focus-visible";
+// Text entry always counts as focus-visible above, because typing is keyboard
+// work. This marks only focus that keyboard navigation brought, so a field can
+// ring on Tab and stay quiet on a click, where the caret is the cue.
+const KEYBOARD_FOCUS_ATTRIBUTE = "data-zeros-keyboard-focus";
 const WIDGET_SELECTOR =
   '[role="tablist"], [role="menu"], [role="menubar"], [role="listbox"], [role="tree"], [role="grid"], [role="radiogroup"], [role="slider"], [role="spinbutton"], [role="separator"], select, input[type="radio"], input[type="range"]';
 const NAVIGATION_KEYS = new Set([
@@ -23,10 +27,15 @@ function isTextEntry(element: Element): boolean {
 }
 
 function paintFocus(element: Element | null) {
-  if (focused !== element) focused?.removeAttribute(FOCUS_ATTRIBUTE);
+  if (focused !== element) {
+    focused?.removeAttribute(FOCUS_ATTRIBUTE);
+    focused?.removeAttribute(KEYBOARD_FOCUS_ATTRIBUTE);
+  }
   focused = element;
   if (!element || element === document.body || element === document.documentElement) return;
   element.setAttribute(FOCUS_ATTRIBUTE, String(keyboardNavigation || isTextEntry(element)));
+  if (keyboardNavigation) element.setAttribute(KEYBOARD_FOCUS_ATTRIBUTE, "");
+  else element.removeAttribute(KEYBOARD_FOCUS_ATTRIBUTE);
 }
 
 /** Tooltips use navigation intent, not the last key typed into a search box. */

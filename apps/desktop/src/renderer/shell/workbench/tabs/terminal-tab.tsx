@@ -1153,13 +1153,13 @@ const RUN_LAST_RUN_COPY: Record<RunOutcome, string> = {
   stopped: "Last run was stopped before it finished.",
 };
 
-/** Filled outcome badge — 24px, token bg/fg pair, no icon (identical rule to
+/** Outcome badge — the tinted status pair, no icon (identical rule to
  *  Setup's; green = finished, red = failed AND stopped per the catalog). */
 function RunStatusBadge({ outcome }: { outcome: RunOutcome }) {
   return (
     <Badge
       variant={outcome === "finished" ? "success" : "failure"}
-      className="h-6 font-medium select-none"
+      className="select-none"
     >
       {RUN_BADGE_LABEL[outcome]}
     </Badge>

@@ -26,7 +26,7 @@ export const COMPOSER_SURFACE_RADIUS = "rounded-[18px]";
  *  chat error/warning/sign-in notices (agent-notice.tsx) that share their shape.
  *
  *  DERIVED from the radius scale (1.5 × --radius-lg) exactly like
- *  menu-surface.ts's 16px dropdown surface and settings-ui.tsx's
+ *  menu-surface.ts's floating surfaces and settings-ui.tsx's
  *  SETTINGS_GROUP_RADIUS — not a fourth token. NOT `rounded-xl`:
  *  zeros-tokens.css resets `--radius-xl` to `initial` on purpose, so that
  *  class compiles to nothing. */

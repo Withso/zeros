@@ -469,20 +469,6 @@
         }
       }
     },
-    "dialog-close-radius": {
-      "$type": "dimension",
-      "$value": {
-        "value": 999.0,
-        "unit": "px"
-      },
-      "$description": "circular popup close button",
-      "$extensions": {
-        "org.zeros": {
-          "cssName": "--dialog-close-radius",
-          "section": "base-dialog-title-size"
-        }
-      }
-    },
     "scrim": {
       "$type": "color",
       "$value": {

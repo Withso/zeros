@@ -190,14 +190,18 @@ describe("sidebar workspace list presentations", () => {
 });
 
 describe("sidebar workspace rows", () => {
-  it("fill the sidebar width with the shared hover and selection fill", () => {
+  it("fill the sidebar width with the shared hover and their own selected fill", () => {
     const cls = classConstant(ROW, "SIDEBAR_WORKSPACE_ROW_CLS");
     expect(cls).toMatch(/\bw-full\b/);
     expect(cls).toMatch(/\bh-8\b/);
     expect(cls).toContain("hover:bg-(--surface-hover)");
     expect(cls).toContain("focus-within:bg-(--surface-hover)");
-    expect(cls).toContain("data-[active=true]:bg-(--surface-hover)");
+    // Selected is not hover: bg2-highlight, kept while hovered or focused.
+    expect(cls).toContain("data-[active=true]:bg-bg2-highlight");
+    expect(cls).toContain("data-[active=true]:hover:bg-bg2-highlight");
+    expect(cls).not.toContain("data-[active=true]:bg-(--surface-hover)");
     expect(cls).toMatch(/data-\[active=true\]:text-fg1\b/);
+    expect(cls).toContain("has-[>button:focus-visible]:ring-[3px]");
     expect(SIDEBAR).toMatch(/<Surface\s+as="nav"\s+kind="sidebar"/);
     expect(classConstant(HEADER, "REPOSITORY_HEADER_CLS")).toMatch(/\bh-8\b/);
     const surface = source(

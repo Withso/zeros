@@ -370,7 +370,7 @@ export function BrowserDeviceToolbar({
               onPresetChange(normalizeBrowserDevicePreset(value))
             }
           >
-            <DropdownMenuRadioItem value="custom" indicator="check">
+            <DropdownMenuRadioItem value="custom">
               Custom
             </DropdownMenuRadioItem>
             <DropdownMenuSeparator />
@@ -378,7 +378,6 @@ export function BrowserDeviceToolbar({
               <DropdownMenuRadioItem
                 key={preset.id}
                 value={preset.id}
-                indicator="check"
               >
                 <span className="min-w-0 flex-1 truncate">{preset.label}</span>
                 <span className="text-muted-fg pl-4 tabular-nums">
@@ -446,7 +445,7 @@ export function BrowserDeviceToolbar({
               if (next) onZoomChange(next);
             }}
           >
-            <DropdownMenuRadioItem value="fit" indicator="check">
+            <DropdownMenuRadioItem value="fit">
               Fit to panel
             </DropdownMenuRadioItem>
             <DropdownMenuSeparator />
@@ -454,7 +453,6 @@ export function BrowserDeviceToolbar({
               <DropdownMenuRadioItem
                 key={candidate}
                 value={String(candidate)}
-                indicator="check"
               >
                 {Math.round(candidate * 100)}%
               </DropdownMenuRadioItem>

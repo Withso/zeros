@@ -48,7 +48,6 @@ export function BrowserAppearanceMenu({
             <DropdownMenuRadioItem
               key={option.value}
               value={option.value}
-              indicator="check"
             >
               {option.label}
             </DropdownMenuRadioItem>

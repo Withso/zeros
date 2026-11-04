@@ -1,9 +1,10 @@
 import * as React from "react";
 import * as DialogPrimitive from "@radix-ui/react-dialog";
 import { X } from "lucide-react";
-import { Button } from "./button";
+import { IconButton } from "./icon-button";
 
 import { cn } from "@/renderer/shared/ui/cn";
+import { MENU_SURFACE_RADIUS } from "@/renderer/shared/ui/menu-surface";
 import { useNativeSurfaceOverlayIntent } from "@/renderer/shared/ui/native-surface-overlay";
 
 import { popoverBoundaryProps } from "@/renderer/shared/ui/popover-boundary";
@@ -29,30 +30,26 @@ const DialogPortal = DialogPrimitive.Portal;
 
 const DialogClose = DialogPrimitive.Close;
 
-/** Shared compact close control for dialog titles and custom dialog headers. */
+/** Shared close control for dialog titles and custom dialog headers: a 24px
+ * IconButton. */
 const DialogCloseButton = React.forwardRef<
   HTMLButtonElement,
   Omit<
-    React.ComponentPropsWithoutRef<typeof Button>,
-    "asChild" | "children" | "size" | "variant"
-  >
->(({ className, ...props }, ref) => (
+    React.ComponentPropsWithoutRef<typeof IconButton>,
+    "asChild" | "children" | "size" | "label"
+  > & { label?: string }
+>(({ className, label = "Close", ...props }, ref) => (
   <DialogPrimitive.Close asChild>
-    <Button
+    <IconButton
       ref={ref}
-      type="button"
-      variant="ghost"
-      size="icon-sm"
-      aria-label="Close"
+      size="compact"
+      label={label}
       data-slot="dialog-close"
       {...props}
-      className={cn(
-        "text-fg2 size-5 shrink-0 rounded-[var(--dialog-close-radius)]",
-        className,
-      )}
+      className={cn("-my-1 -mr-1.5", className)}
     >
-      <X className="size-3" />
-    </Button>
+      <X />
+    </IconButton>
   </DialogPrimitive.Close>
 ));
 DialogCloseButton.displayName = "DialogCloseButton";
@@ -77,6 +74,12 @@ const DialogOverlay = React.forwardRef<
 ));
 DialogOverlay.displayName = DialogPrimitive.Overlay.displayName;
 
+const DIALOG_WIDTH = {
+  sm: "max-w-100",
+  md: "max-w-130",
+  lg: "max-w-160",
+} as const;
+
 const DialogContent = React.forwardRef<
   React.ComponentRef<typeof DialogPrimitive.Content>,
   React.ComponentPropsWithoutRef<typeof DialogPrimitive.Content> & {
@@ -85,6 +88,9 @@ const DialogContent = React.forwardRef<
     showCloseButton?: boolean;
     /** Keep modal focus and scroll isolation without dimming the background. */
     backdrop?: "dimmed" | "clear";
+    /** sm 400 (confirmations), md 520 (the default), lg 640 (forms and
+     *  pickers). */
+    size?: "sm" | "md" | "lg";
     /** Allow dismissing by clicking the overlay / interacting outside the
      *  content. Default FALSE — a modal should only close via an explicit
      *  Cancel / close button / Escape, so an accidental backdrop click can't
@@ -100,6 +106,7 @@ const DialogContent = React.forwardRef<
       children,
       showCloseButton = true,
       backdrop = "dimmed",
+      size = "md",
       dismissable = false,
       onPointerDownOutside,
       onInteractOutside,
@@ -166,13 +173,14 @@ const DialogContent = React.forwardRef<
             // center and scales symmetrically. (This is a v3→v4 migration trap: v3
             // composed translate INTO `transform`, so the slide helpers were
             // required there.)
-            "bg-bg1 fixed top-[50%] left-[50%] z-modal grid w-full max-w-lg translate-x-[-50%] translate-y-[-50%] gap-0 border p-0 shadow-[var(--shadow-dropdown)]",
+            "bg-bg1 border-border2 fixed top-[50%] left-[50%] z-modal grid w-full translate-x-[-50%] translate-y-[-50%] gap-0 border p-0 shadow-[var(--shadow-dropdown)]",
+            DIALOG_WIDTH[size],
+            MENU_SURFACE_RADIUS,
             // Smooth, subtle motion: 3% scale, decelerate in / accelerate out.
             "origin-center duration-200 ease-out data-[state=closed]:duration-150 data-[state=closed]:ease-in",
             "data-[state=open]:animate-in data-[state=closed]:animate-out",
             "data-[state=open]:fade-in-0 data-[state=closed]:fade-out-0",
             "data-[state=open]:zoom-in-97 data-[state=closed]:zoom-out-97",
-            "sm:rounded-lg",
             className,
           )}
           onPointerDownOutside={(e) => {
@@ -210,20 +218,21 @@ const DialogHeader = ({
 }: React.HTMLAttributes<HTMLDivElement>) => (
   <div
     data-slot="dialog-header"
-    className={cn("flex shrink-0 flex-col gap-1.5 px-4 pt-3 pb-0 text-left", className)}
+    className={cn("flex shrink-0 flex-col gap-1 px-4 pt-4 pb-0 text-left", className)}
     {...props}
   />
 );
 DialogHeader.displayName = "DialogHeader";
 
-/** The middle section owns its spacing, including in scrollable dialogs. */
+/** The middle section owns its spacing, including in scrollable dialogs. One
+ * 16px inset runs through header, body and footer. */
 const DialogBody = ({
   className,
   ...props
 }: React.HTMLAttributes<HTMLDivElement>) => (
   <div
     data-slot="dialog-body"
-    className={cn("flex min-h-0 min-w-0 flex-col gap-4 px-4 py-6", className)}
+    className={cn("flex min-h-0 min-w-0 flex-col gap-4 p-4", className)}
     {...props}
   />
 );
@@ -236,7 +245,7 @@ const DialogFooter = ({
   <div
     data-slot="dialog-footer"
     className={cn(
-      "border-border1 flex shrink-0 flex-wrap items-center justify-end gap-2 border-t p-2.5",
+      "flex shrink-0 flex-wrap items-center justify-end gap-2 px-4 pb-4",
       className,
     )}
     {...props}

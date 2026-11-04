@@ -93,11 +93,13 @@ import { useSidebarWorkspacePreview } from "./use-sidebar-workspace-preview";
 
 // --- CONSTANTS ---
 
-// Full-width 32px row on the sidebar's hover/selection fill. Selection is
-// colour-only (fg1 on sidebar-bg-hover); rows never shift. `transition-none`
-// keeps a switch from cross-fading the old and new selection.
+// Full-width 32px row. Hover is the sidebar's hover fill; the selected row has
+// its own, bg2-highlight with fg1, so it never reads as hover. Rows never
+// shift. --row-fill carries the current fill so the Archive fade matches it.
+// Keyboard focus is the standard ring on the row. `transition-none` keeps a
+// switch from cross-fading the old and new selection.
 const SIDEBAR_WORKSPACE_ROW_CLS =
-  "group/workspace relative flex h-8 w-full min-w-0 shrink-0 select-none items-center overflow-hidden rounded-md pr-2 text-left text-xs font-normal text-fg2 transition-none hover:bg-(--surface-hover) focus-within:bg-(--surface-hover) data-[active=true]:bg-(--surface-hover) data-[active=true]:text-fg1";
+  "group/workspace relative flex h-8 w-full min-w-0 shrink-0 select-none items-center overflow-hidden rounded-md border border-transparent pr-2 text-left text-xs font-normal text-fg2 transition-none [--row-fill:var(--surface-hover)] hover:bg-(--surface-hover) focus-within:bg-(--surface-hover) data-[active=true]:bg-bg2-highlight data-[active=true]:text-fg1 data-[active=true]:[--row-fill:var(--bg2-highlight)] data-[active=true]:hover:bg-bg2-highlight data-[active=true]:focus-within:bg-bg2-highlight has-[>button:focus-visible]:border-highlighted-bright has-[>button:focus-visible]:ring-[3px] has-[>button:focus-visible]:ring-highlighted-bright/50";
 // Grouped rows sit under their repository header: the state glyph centres on
 // the header's name column. Ungrouped rows (repository icon first) and
 // standalone folder rows align with the headers' own icon column instead.
@@ -108,18 +110,18 @@ const SIDEBAR_WORKSPACE_GUTTER_CLS =
   "pointer-events-none absolute inset-y-0 left-0 flex w-6 items-center justify-center text-fg2";
 const SIDEBAR_WORKSPACE_FLAT_INSET_CLS = "pl-2";
 const SIDEBAR_WORKSPACE_OPEN_BUTTON_CLS =
-  "absolute inset-0 size-full rounded-md border-0 bg-transparent p-0 text-inherit shadow-none transition-none hover:bg-transparent hover:text-inherit";
+  "absolute inset-0 size-full rounded-md border-0 bg-transparent p-0 text-inherit shadow-none transition-none hover:bg-transparent hover:text-inherit focus-visible:ring-0";
 const SIDEBAR_WORKSPACE_CONTENT_CLS =
   "pointer-events-none relative flex h-full min-w-0 flex-1 items-center gap-2 whitespace-nowrap text-inherit [&_svg]:shrink-0 [&_svg:not([data-draft-icon])]:size-3.5";
 const SIDEBAR_WORKSPACE_TRAILING_CLS = "flex shrink-0 items-center gap-1.5";
 // Hover and focus reveal Archive at the row's end over a fade of the same
 // hover fill, so the trailing counts/stream slide under it instead of reflowing.
 const SIDEBAR_WORKSPACE_ACTION_OVERLAY_CLS =
-  "pointer-events-none absolute inset-y-0 right-0 z-10 flex w-12 items-center justify-end rounded-r-md bg-gradient-to-l from-sidebar-bg-hover from-50% to-transparent pr-1.5 opacity-0 transition-none group-hover/workspace:opacity-100 focus-within:opacity-100";
+  "pointer-events-none absolute inset-y-0 right-0 z-10 flex w-12 items-center justify-end rounded-r-md bg-gradient-to-l from-(--row-fill) from-50% to-transparent pr-1.5 opacity-0 transition-none group-hover/workspace:opacity-100 focus-within:opacity-100";
 // A drafted (or, in a flat row, awaiting) row's Archive covers that mark in
 // its own slot.
 const SIDEBAR_WORKSPACE_DRAFT_ACTION_OVERLAY_CLS =
-  "pointer-events-none absolute -inset-1 flex items-center justify-center rounded-sm bg-sidebar-bg-hover opacity-0 transition-none group-hover/workspace:opacity-100 focus-within:opacity-100";
+  "pointer-events-none absolute -inset-1 flex items-center justify-center rounded-sm bg-(--row-fill) opacity-0 transition-none group-hover/workspace:opacity-100 focus-within:opacity-100";
 // State glyphs stay on fg2 even in the selected row (only the name lifts to
 // fg1); the workspace square sets its own rest, working and PR colours.
 const GLYPH_BOX_CLS =

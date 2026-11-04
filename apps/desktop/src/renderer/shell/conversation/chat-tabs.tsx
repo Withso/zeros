@@ -57,6 +57,7 @@ import {
 } from "lucide-react";
 
 import { cn } from "../../shared/ui/cn";
+import { inputVariants } from "../../shared/ui/primitives/input";
 import {
   ContextMenu,
   ContextMenuContent,
@@ -174,34 +175,38 @@ const TAB_NAV_CLS =
  *  tab gap match the workspace strip; History and "+" stay outside it. */
 const TAB_ROW_CLS = "relative flex h-full w-max items-center gap-1 px-1";
 
-/** Chrome-style pill — content-sized from 70px through a 140px cap (then
+/** The one Zeros tab — content-sized from 70px through a 140px cap (then
  *  truncates), no divider, and doesn't shrink (the strip scrolls instead).
- *  `relative` + `overflow-hidden` pin the affordance overlay and its fade to
- *  the rounded right edge. Surface progression on the --pane-bg window fill: an INACTIVE tab
- *  has no resting fill; hover and the ACTIVE tab both fill bg-bg2. Selection
- *  reads from the persistent fill + fg1 text. */
+ *  `relative` + `overflow-hidden` pin the close overlay and its fade to the
+ *  rounded right edge. On the --pane-bg window fill an inactive tab has no
+ *  resting fill, hover is bg1-hover, and the active tab is bg2 with medium
+ *  fg1 text. --tab-fill carries the current fill so the fade matches it. */
 const TAB_BASE_CLS =
-  "group/tab relative flex h-7 min-w-[70px] max-w-[140px] shrink-0 cursor-pointer select-none items-center gap-2 overflow-hidden rounded-lg px-2 text-left text-xs font-medium text-fg2 transition-none focus-within:bg-bg2 focus-within:text-fg2 data-[hovered=true]:bg-bg2 data-[hovered=true]:text-fg2 data-[active=true]:sticky data-[active=true]:left-1 data-[active=true]:right-1 data-[active=true]:z-20 data-[active=true]:bg-bg2 data-[active=true]:text-fg1 data-[active=true]:focus-within:text-fg1 data-[active=true]:data-[hovered=true]:text-fg1";
+  "group/tab relative flex h-7 min-w-[70px] max-w-[140px] shrink-0 cursor-pointer select-none items-center gap-2 overflow-hidden rounded-md px-2 text-left text-xs text-fg2 transition-none [--tab-fill:transparent] not-data-[active=true]:focus-within:bg-bg1-hover not-data-[active=true]:focus-within:text-fg1 not-data-[active=true]:focus-within:[--tab-fill:var(--bg1-hover)] not-data-[active=true]:data-[hovered=true]:bg-bg1-hover not-data-[active=true]:data-[hovered=true]:text-fg1 not-data-[active=true]:data-[hovered=true]:[--tab-fill:var(--bg1-hover)] data-[active=true]:sticky data-[active=true]:left-1 data-[active=true]:right-1 data-[active=true]:z-20 data-[active=true]:bg-bg2 data-[active=true]:font-medium data-[active=true]:text-fg1 data-[active=true]:[--tab-fill:var(--bg2)]";
 
-const TAB_LABEL_CLS = "min-w-0 truncate text-xs font-medium leading-none";
+const TAB_LABEL_CLS = "min-w-0 truncate text-xs leading-none";
 
-/** Overlay containing the close button. See the original notes: the
- *  gradient matches the tab's bg2 fill so long titles fade behind it. */
+/** Overlay containing the close button: drawn over the end of the tab on a
+ *  fade in the tab's own fill, so the tab keeps its width and the title runs
+ *  under it. */
 const TAB_HOVER_OVERLAY_CLS =
-  "pointer-events-none absolute inset-y-0 right-0 flex w-10 items-center justify-end bg-gradient-to-l from-bg2 from-50% to-transparent pr-1.5 pl-4 opacity-0 transition-none group-data-[hovered=true]/tab:opacity-100 focus-within:opacity-100";
+  "pointer-events-none absolute inset-y-0 right-0 flex w-10 items-center justify-end bg-gradient-to-l from-(--tab-fill) from-50% to-transparent pr-1.5 pl-4 opacity-0 transition-none group-data-[hovered=true]/tab:opacity-100 focus-within:opacity-100";
 // A drafted or awaiting tab already has a trailing slot. Cover its mark in
 // place, with the same 20px close target, without reserving another column or
 // fading text.
 const TAB_DRAFT_ACTION_OVERLAY_CLS =
-  "pointer-events-none absolute -inset-1 flex items-center justify-center rounded-sm bg-bg2 opacity-0 transition-none group-data-[hovered=true]/tab:opacity-100 focus-within:opacity-100";
+  "pointer-events-none absolute -inset-1 flex items-center justify-center rounded-sm bg-(--tab-fill) opacity-0 transition-none group-data-[hovered=true]/tab:opacity-100 focus-within:opacity-100";
 
-const TITLE_INPUT_CLS =
-  "flex-1 min-w-0 h-5 px-1.5 text-xs font-medium text-fg1 bg-transparent border border-border1 rounded-sm outline-none focus-visible:border-highlighted-bright focus-visible:ring-2 focus-visible:ring-highlighted-bright/30";
+/** Rename uses the shared inline-rename field at the compact 24px size. */
+const TITLE_INPUT_CLS = cn(
+  inputVariants({ size: "compact", appearance: "inline" }),
+  "min-w-0 flex-1 font-medium",
+);
 
 /** Synthetic "Untitled" tab — rendered while the workspace has zero
  *  visible chats (the selection keeper is mid-spawn). */
 const TAB_UNTITLED_CLS =
-  "group/tab relative flex h-7 min-w-[70px] max-w-[140px] shrink-0 cursor-default select-none items-center gap-2 overflow-hidden rounded-lg bg-bg2 px-2 text-xs font-medium text-fg1";
+  "group/tab relative flex h-7 min-w-[70px] max-w-[140px] shrink-0 cursor-default select-none items-center gap-2 overflow-hidden rounded-md bg-bg2 px-2 text-xs font-medium text-fg1";
 
 const CHAT_CONTENT_INSET_PX = 4;
 const CHAT_STICKY_EDGE_INSET_PX = 4;

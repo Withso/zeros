@@ -638,14 +638,14 @@ const BADGE_LABEL: Record<SetupOutcome, string> = {
   stopped: "Setup stopped",
 };
 
-/** Filled outcome badge — 24px (button height), token bg/fg pair, no icon.
- *  Green for a pass; red for failed AND stopped (per the state-catalog
- *  reference — a neutral yellow for "stopped" is a one-variant change here). */
+/** Outcome badge — the tinted status pair, no icon. Green for a pass; red
+ *  for failed AND stopped (per the state-catalog reference — a neutral yellow
+ *  for "stopped" is a one-variant change here). */
 export function SetupStatusBadge({ outcome }: { outcome: SetupOutcome }) {
   return (
     <Badge
       variant={outcome === "passed" ? "success" : "failure"}
-      className="h-6 font-medium select-none"
+      className="select-none"
     >
       {BADGE_LABEL[outcome]}
     </Badge>

@@ -23,8 +23,8 @@ const TabsList = React.forwardRef<
     className={cn(
       "text-fg2 inline-flex items-center",
       variant === "chrome"
-        ? "h-10 justify-start gap-1 bg-transparent p-1"
-        : "bg-bg2 h-9 justify-center rounded-lg p-1",
+        ? "h-10 justify-start gap-0.5 bg-transparent p-1"
+        : "bg-bg2 justify-center gap-0.5 rounded-lg p-0.5",
       className,
     )}
     {...props}
@@ -46,10 +46,12 @@ const TabsTrigger = React.forwardRef<
   <TabsPrimitive.Trigger
     ref={ref}
     className={cn(
-      "focus-visible:ring-highlighted-bright/50 data-[state=active]:text-fg1 inline-flex items-center justify-center rounded-md font-medium whitespace-nowrap focus-visible:ring-[3px] focus-visible:outline-none disabled:pointer-events-none disabled:opacity-50",
+      // One tab recipe for every strip and one segmented control: 13px, flat,
+      // 6px corners, the keyboard ring; active is medium fg1.
+      "focus-visible:ring-highlighted-bright/50 focus-visible:border-highlighted-bright data-[state=active]:text-fg1 inline-flex items-center justify-center gap-1.5 rounded-md border border-transparent px-2.5 text-xs leading-4.5 whitespace-nowrap focus-visible:ring-[3px] focus-visible:outline-none disabled:pointer-events-none disabled:opacity-50 data-[state=active]:font-medium [&_svg]:size-3.5 [&_svg]:shrink-0",
       variant === "chrome"
-        ? "data-[state=active]:bg-bg2 h-7 px-2.5 text-xs transition-none"
-        : "data-[state=active]:bg-bg1 px-3 py-1 text-sm transition-colors data-[state=active]:shadow",
+        ? "hover:bg-bg1-hover hover:text-fg1 data-[state=active]:bg-bg2 data-[state=active]:hover:bg-bg2 h-7 transition-none"
+        : "hover:text-fg1 data-[state=active]:border-(--segment-active-border) data-[state=active]:bg-(--segment-active-bg) h-6 transition-colors",
       className,
     )}
     {...props}

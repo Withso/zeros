@@ -23,7 +23,7 @@ import {
 } from "lucide-react";
 import { Button, Input } from "../../shared/ui";
 import { Tooltip } from "@/renderer/shared/ui/primitives";
-import { selectTriggerClassName } from "../../shared/ui/primitives/select";
+import { SELECT_CHEVRON, selectTriggerClassName } from "../../shared/ui/primitives/select";
 import { OpenAppIcon } from "../agent/open-app-icon";
 import {
   FINDER_APP_ID,
@@ -212,7 +212,7 @@ function AgentConfigCard({ agentId }: { agentId: string }) {
           className={selectTriggerClassName("fit", "text-fg1")}
         >
           Open in
-          <ChevronDown className="size-3.5 opacity-50" aria-hidden="true" />
+          <ChevronDown className={SELECT_CHEVRON} aria-hidden="true" />
         </DropdownMenuTrigger>
         <DropdownMenuContent
           align="end"

@@ -173,25 +173,18 @@ describe("previewFor", () => {
 // the class attribute's ORDER, which is why this asserts on the resolved set.
 describe("the neutral badge chip", () => {
   const sizes = (cls: string) =>
-    cls.split(/\s+/).filter((c) => /^text-(xs|sm|base|lg)$/.test(c));
+    cls.split(/\s+/).filter((c) => /^text-(3xxs|2xxs|xxs|xs|sm|base|lg)$/.test(c));
   const weights = (cls: string) =>
     cls
       .split(/\s+/)
       .filter((c) => /^font-(normal|medium|semibold|bold)$/.test(c));
 
-  it("resolves to exactly one type size and weight once merged", () => {
-    const merged = cn(badgeVariants({ variant: "neutral" }));
-    expect(sizes(merged)).toEqual(["text-sm"]);
-    expect(weights(merged)).toEqual(["font-normal"]);
-  });
-
-  it("is why the raw cva call cannot be used at a call site", () => {
-    // Pins the hazard itself. If a future base/variant change ever made the
-    // raw call unambiguous, this failing is the signal to revisit the note at
-    // the call site — not a bug.
-    const raw = badgeVariants({ variant: "neutral" });
-    expect(sizes(raw).length).toBeGreaterThan(1);
-    expect(weights(raw).length).toBeGreaterThan(1);
+  it("is the one badge size: 12px medium, merged or raw", () => {
+    // Variants carry colour only, so the raw cva call is unambiguous too.
+    for (const cls of [cn(badgeVariants({ variant: "neutral" })), badgeVariants({ variant: "neutral" })]) {
+      expect(sizes(cls)).toEqual(["text-3xxs"]);
+      expect(weights(cls)).toEqual(["font-medium"]);
+    }
   });
 });
 

@@ -50,11 +50,20 @@ const PopoverAnchor = PopoverPrimitive.Anchor;
 export interface PopoverContentProps extends React.ComponentPropsWithoutRef<
   typeof PopoverPrimitive.Content
 > {
-  /** Width recipe owned by the primitive. */
-  size?: "default" | "wide";
+  /** Width owned by the primitive: sm 240, md 320 (the default), lg 400.
+   *  wide fills up to 34rem for full-width feature pickers. */
+  size?: "sm" | "md" | "lg" | "default" | "wide";
   /** Edge-to-edge feature surfaces use their own section primitives. */
   padding?: "default" | "none";
 }
+
+const POPOVER_WIDTH = {
+  sm: "w-60",
+  md: "w-80",
+  default: "w-80",
+  lg: "w-100",
+  wide: "w-[min(34rem,calc(100vw-1rem))]",
+} as const;
 
 const PopoverContent = React.forwardRef<
   React.ComponentRef<typeof PopoverPrimitive.Content>,
@@ -98,8 +107,8 @@ const PopoverContent = React.forwardRef<
             ANCHORED_OVERLAY_MOTION,
             "border-border2 bg-bg3 text-fg1 z-dropdown max-w-(--radix-popover-content-available-width) max-h-(--radix-popover-content-available-height) overflow-x-hidden overflow-y-auto overscroll-contain border shadow-[var(--shadow-dropdown)] outline-none",
             MENU_SURFACE_RADIUS,
-            size === "default" ? "w-72" : "w-[min(34rem,calc(100vw-1rem))]",
-            padding === "default" ? "p-4" : "p-0",
+            POPOVER_WIDTH[size],
+            padding === "default" ? "p-3" : "p-0",
             className,
           )}
           {...props}

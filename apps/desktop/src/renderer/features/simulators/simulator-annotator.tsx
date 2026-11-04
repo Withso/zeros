@@ -515,7 +515,7 @@ function AnnotationColorMenu({
           }}
         >
           {ANNOTATION_COLORS.map((entry) => (
-            <DropdownMenuRadioItem key={entry} value={entry} indicator="check" className="gap-2">
+            <DropdownMenuRadioItem key={entry} value={entry} className="gap-2">
               <span aria-hidden className={cn("size-3 rounded-full", COLORS[entry].swatch)} />
               {COLORS[entry].label}
             </DropdownMenuRadioItem>

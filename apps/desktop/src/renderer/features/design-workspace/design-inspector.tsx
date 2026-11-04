@@ -2340,7 +2340,7 @@ export function DesignInspector({
                 onSelect={() => zoomActionsRef.current?.zoomIn()}
               >
                 <span>Zoom in</span>
-                <DropdownMenuShortcut className="tracking-normal">
+                <DropdownMenuShortcut>
                   +
                 </DropdownMenuShortcut>
               </DropdownMenuItem>
@@ -2350,7 +2350,7 @@ export function DesignInspector({
                 onSelect={() => zoomActionsRef.current?.zoomOut()}
               >
                 <span>Zoom out</span>
-                <DropdownMenuShortcut className="tracking-normal">
+                <DropdownMenuShortcut>
                   −
                 </DropdownMenuShortcut>
               </DropdownMenuItem>

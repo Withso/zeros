@@ -49,8 +49,8 @@ function LocalHeader({ folder, ...props }: Parameters<typeof WorkspaceHeader>[0]
   const { localOnly } = useRepositoryRemote(project?.repoRoot, project?.originUrl ?? null, active && git);
   const unpublished = git && project && localOnly;
   const icon = unpublished ? (
-    <Badge variant="outline" className="border-border2 text-fg3 h-6 gap-1 px-2 font-normal">
-      <HardDrive className="size-3.5" aria-hidden="true" />
+    <Badge variant="outline">
+      <HardDrive aria-hidden="true" />
       Local
     </Badge>
   ) : props.branch ? <GitBranch className="size-4" /> : <Folder className="size-4" />;

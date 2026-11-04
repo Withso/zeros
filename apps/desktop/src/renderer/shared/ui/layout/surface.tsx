@@ -19,6 +19,10 @@ const SURFACE_CLASSES = {
     "bg-sidebar-bg [--surface-hover:var(--sidebar-bg-hover)] [--surface-border:var(--border2)]",
 } as const;
 
+/** The floating fill and its bindings as a class string, for the floating
+ * family that renders its own element (tooltips, hover cards, toasts). */
+export const FLOATING_SURFACE = SURFACE_CLASSES.floating;
+
 /** Paints a surface and binds its descendants' hover/selected fill and border.
  * Use hover:bg-(--surface-hover) and border-(--surface-border) within it. */
 const Surface = React.forwardRef<HTMLElement, SurfaceProps>(

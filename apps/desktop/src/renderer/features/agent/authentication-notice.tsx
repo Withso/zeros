@@ -20,9 +20,9 @@ export function AuthenticationNotice({
 }) {
   if (resolved || historical) {
     const Icon = resolved ? Check : LogIn;
-    return <Badge variant="neutral" role="status" className="h-7 w-fit gap-2"
+    return <Badge variant="neutral" role="status" className="w-fit"
       data-authentication-status={resolved ? "signed-in" : "required"}>
-      <Icon className="size-3.5" aria-hidden="true" />
+      <Icon aria-hidden="true" />
       {resolved ? "Signed in" : "Sign-in required"}
     </Badge>;
   }

@@ -2,7 +2,12 @@ import * as React from "react";
 import { Slot } from "@radix-ui/react-slot";
 
 import { cn } from "@/renderer/shared/ui/cn";
-import { ToolbarContext } from "./toolbar";
+
+export type IconButtonSize = "inline" | "compact" | "standard";
+
+/** The size icon buttons take when they name none: Toolbar and PanelHeader
+ *  provide the 28px tool size. */
+export const IconButtonSizeContext = React.createContext<IconButtonSize | undefined>(undefined);
 
 export interface IconButtonProps extends Omit<
   React.ButtonHTMLAttributes<HTMLButtonElement>,
@@ -12,8 +17,8 @@ export interface IconButtonProps extends Omit<
   /** inline = 20px action embedded in rows and tabs (12px glyph, 4px corners);
    * compact = 24px action in a dense toolbar or section header (12px glyph);
    * standard = 28px chrome and toolbar action (14px glyph). Defaults to
-   * standard inside a Toolbar and inline elsewhere. */
-  size?: "inline" | "compact" | "standard";
+   * standard inside a Toolbar or PanelHeader and inline elsewhere. */
+  size?: IconButtonSize;
   /** What `aria-pressed` looks like: a neutral toggle (bg2-highlight +
    * border4), or the active tool of a toolbar in the selection blue. */
   pressedTone?: "toggle" | "tool";
@@ -54,8 +59,8 @@ const IconButton = React.forwardRef<HTMLButtonElement, IconButtonProps>(
     ref,
   ) => {
     const Comp = asChild ? Slot : "button";
-    const inToolbar = React.useContext(ToolbarContext);
-    const resolvedSize = size ?? (inToolbar ? "standard" : "inline");
+    const contextSize = React.useContext(IconButtonSizeContext);
+    const resolvedSize = size ?? contextSize ?? "inline";
     return (
       <Comp
         {...props}
