@@ -84,10 +84,10 @@ any new surface, and the rules that can be checked move into
 | 2 | Foundation tokens | The proposed palette and the new feature tokens ship through `styles/tokens`, the contrast contract passes, hand-written copies follow. | Palette done; diff and canvas-label tokens land with their first callers |
 | 3 | Primitives | Every shared component matches its UI components board, with tests. | Done |
 | 4 | Shared patterns | Banner row, message row, empty state, settings group and row, list card row, canvas chip. | All but the canvas chip done; it lands with Design |
-| 5 | Pages | Each page matches its boards, functional changes included, Local and cloud covered. | Settings and Customize done; the rest in order |
+| 5 | Pages | Each page matches its boards, functional changes included, Local and cloud covered. | Every page done; the larger functional changes are scheduled in `plans.md` §1–8 |
 | 6 | Automation | The direction lives in `docs/design-system.md`, checks enforce what structure can, and zstack carries a UI loop that learns from every approved change. | Done; it grows with each page |
-| 7 | Verification | Gates green; harness renders compared with every board in both themes. | Pending |
-| 8 | Canvas final | Every board shows one final UI: the implemented one. | Pending |
+| 7 | Verification | Gates green; harness renders compared with every board in both themes. | Gates and the ui-smoke registry pass; macOS-only checks not run here |
+| 8 | Canvas final | Every board shows one final UI: the implemented one. | Done (canvas versions 358–359) |
 
 Pages land in this order, simplest shared patterns first: Settings, Customize,
 Sidebar, Home, Agent chat, Files, Changes, Review, Design, Terminal, Browser,
@@ -569,3 +569,22 @@ Each landed step appends one line: date, workstream, what landed, evidence.
   line up to 560px, fit-width 28px actions that never underline, and quiet
   12px lines; the GitHub hero comes down to the same scale. The dashboard,
   account pages, Ops and the per-page copy are in `plans.md`.
+- 2026-11-04 · 5 · Files: the video seek bar is the shared Slider (border3
+  track, fg1 range and thumb) instead of a native range input. Slider takes
+  `label` and `valueText` for its thumb, so the bar is named Seek video and
+  reads its time in words ("0:12 of 1:30"), with a test.
+- 2026-11-04 · 8 · Canvas (versions 358–359): every board now shows one UI,
+  drawn as it ships. Current halves, Proposed dividers, change lists and
+  proposal notes are gone; sheets keep their variants and specs; the five
+  split All states composites fold into one board each. Where the build
+  settled a board differently, the board follows the build (Settings and
+  Customize copy and compact actions, Home's no-repositories sidebar, the
+  Design setup states, the Changes and Review empty states). 108 boards whose
+  approved design is still scheduled carry one Planned line naming their
+  `plans.md` section: Review §1, Changes §2–6, the Files diff §5, Design §7
+  and the Web app §8. Component sheets give usage as JSX elements outside
+  tests, counted 2026-11-04. Boards take their natural height, so the canvas
+  shrinks from 842,229 to 400,672 px of boards. Checked as plain local
+  renders of every state in both themes (not the real viewer): 459 boards,
+  no unfilled template text, no overflow, no leftover Current or Proposed
+  tag.

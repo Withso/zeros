@@ -122,8 +122,16 @@ Layer rows move to 28px with the bg2-highlight selection: the row height is
 part of `design-layer-layout.ts`, which the canvas tools measure, so change
 it there with the layer-panel tests and the Design smokes. Long computed
 and theme values end in an ellipsis inside their field. A failed Git init
-is one red line under the text; the conflict pause lists its files in one
-quiet card that opens them in Changes.
+is one red line under the text, in Design (`design-git-setup.tsx`) and in
+the Changes tab's Initialize Git (`NotAGitRepo` in `changes-tab.tsx`), which
+still show a filled red box; change both together. The conflict pause lists
+its files in one quiet card that opens them in Changes. Canvas readouts
+(selection size, rotation, spacing, the agent on the canvas) become one
+canvas chip, 18px with 4px corners and no edge (the Badge and
+MotionTimeline boards): today each overlay draws its own
+`zd-design-selection-label` box, 20px with mixed padding, in
+`design-canvas.tsx` and `design-workspace-overlays.tsx`; run the Design
+smokes that measure them.
 
 ## 8. Web app: the dashboard, account pages and Ops
 
