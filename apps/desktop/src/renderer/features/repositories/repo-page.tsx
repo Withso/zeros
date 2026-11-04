@@ -34,9 +34,12 @@
 
 import React, { useCallback, useLayoutEffect, useMemo, useRef } from "react";
 import { useWarmWorkspaceHistory } from "../../state/use-warm-workspace-history";
-import { Archive, ExternalLink, Folder, FolderX } from "lucide-react";
+import { Archive, Folder, FolderX } from "lucide-react";
 
-import { Switch, Tooltip } from "@/renderer/shared/ui/primitives";
+import { Switch } from "@/renderer/shared/ui/primitives";
+import { PrPill } from "../../shell/pr/pr-pill";
+import { usePrIslandKind } from "../../shell/pr/pr-island-state-store";
+import { workspacePrTone } from "../../shell/workspace-glyph";
 import { branchDisplayName } from "../../shared/lib/branch-name";
 import { Tabs, TabsList, TabsTrigger } from "../../shared/ui/primitives/tabs";
 import { StatusIcon } from "../../shared/ui/primitives/status-icon";
@@ -182,9 +185,9 @@ function RepoWorkspaceRow({
 }) {
   const warmHistory = useWarmWorkspaceHistory();
   const w = row.workspace;
+  const prTone = workspacePrTone(w, usePrIslandKind(w.id, w.prNumber));
   const archiveWorkspace = useArchiveWorkspace();
   const archiving = useWorkspaceArchiving(w.id);
-  const stop = (e: React.MouseEvent) => e.stopPropagation();
   const historyOnly = workspaceIsReadOnly(w);
   const content = (
     <div
@@ -228,18 +231,7 @@ function RepoWorkspaceRow({
           <span>{w.archivedAt == null ? "Folder missing" : "Archived"}</span>
         )}
         {!historyOnly && w.prNumber != null && w.prUrl && (
-          <Tooltip label="Open PR">
-            <a
-              href={w.prUrl}
-              target="_blank"
-              rel="noreferrer"
-              onClick={stop}
-              className="hover:text-fg1 inline-flex items-center gap-0.5"
-            >
-              #{w.prNumber}
-              <ExternalLink className="size-3" />
-            </a>
-          </Tooltip>
+          <PrPill number={w.prNumber} url={w.prUrl} tone={prTone ?? "open"} />
         )}
         <span>{formatCompactAge(w.lastActiveAt ?? w.createdAt)}</span>
       </span>
@@ -590,15 +582,9 @@ export function RepoPage({ project }: { project: Project }) {
                 onValueChange={(v) => setView(v as RepoPageView)}
                 className="min-w-0 overflow-x-auto"
               >
-                <TabsList
-                  className="h-7"
-                  aria-label="Repository settings"
-                >
+                <TabsList aria-label="Repository settings">
                   {isRepoPageViewAvailable(project, "workspaces") && (
-                    <TabsTrigger
-                      value="workspaces"
-                      className="py-0.5 text-xs"
-                    >
+                    <TabsTrigger value="workspaces">
                       Workspaces
                     </TabsTrigger>
                   )}
@@ -606,7 +592,6 @@ export function RepoPage({ project }: { project: Project }) {
                     <TabsTrigger
                       key={s.id}
                       value={s.id}
-                      className="py-0.5 text-xs"
                       // Warm on intent: the Files tab's scan is the only repo-page
                       // read the boot/hover settings prefetch doesn't already
                       // cover, so opening it would otherwise land on a spinner.

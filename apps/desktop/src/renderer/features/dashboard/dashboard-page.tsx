@@ -13,7 +13,6 @@ import { useWarmWorkspaceHistory } from "../../state/use-warm-workspace-history"
 import {
   Archive as ArchiveIcon,
   ArrowUp,
-  ExternalLink,
   Eye,
   EyeOff,
   Ellipsis,
@@ -97,6 +96,11 @@ import {
   filterDashboardPending,
   type DashboardRow as BoardRow,
 } from "./dashboard-model";
+import { PrPill } from "../../shell/pr/pr-pill";
+import { useSidebarCollapsed } from "../../shell/sidebar-collapsed";
+import { COLLAPSED_CONTROLS_RESERVE_CLS } from "../../shell/sidebar-toggle";
+import { usePrIslandKind } from "../../shell/pr/pr-island-state-store";
+import { workspacePrTone } from "../../shell/workspace-glyph";
 import { DashboardToolbar, DashboardViewToggle } from "./dashboard-toolbar";
 import {
   DashboardList,
@@ -139,7 +143,22 @@ import {
  *  render (the pending placeholders only ever appear under Backlog). */
 const EMPTY_PENDING_ROWS: PendingWorkspaceCreate[] = [];
 
+// Board columns: a 16px status icon, a 13 medium label and a 12px fg3 count,
+// 12px above the first card.
+const COLUMN_HEAD_CLS = "mb-3 flex shrink-0 items-center gap-2";
+const COLUMN_COUNT_CLS = "text-fg3 text-3xxs leading-4 tabular-nums";
+// A workspace card: 12px corners on bg2 with a border1 edge; hover lifts to
+// border3 + bg2-highlight. Content stacks 4 / 8 / 8 under the 20px top row.
+const CARD_CLS =
+  "border-border1 bg-bg2 hover:border-border3 hover:bg-bg2-highlight focus-visible:outline-highlighted-bright flex cursor-pointer flex-col rounded-[calc(var(--radius-lg)*1.5)] border p-3 text-left transition-colors duration-120 ease-out select-none focus-visible:outline-2 focus-visible:-outline-offset-2";
+const CARD_TOP_CLS = "flex h-5 items-center gap-2";
+const CARD_BRANCH_CLS = "text-fg2 min-w-0 flex-1 truncate text-xs leading-4.5";
+const CARD_TITLE_CLS = "text-fg1 mt-1 truncate text-xs leading-4.5 font-medium";
+const CARD_ACTIONS_CLS = "mt-2 flex min-h-4 items-center gap-2";
+const CARD_END_CLS = "text-fg3 ml-auto flex items-center gap-2 text-3xxs leading-4 tabular-nums";
+
 export function DashboardPage() {
+  const sidebarCollapsed = useSidebarCollapsed();
   const { projects } = useOrganizationProjects();
   const chats = useChats();
   const { workspaces: liveWorkspaces, loading } = useLiveWorkspaces();
@@ -386,17 +405,30 @@ export function DashboardPage() {
   return (
     <div className="bg-bg1 flex h-full min-h-0 w-full min-w-0 flex-1 flex-col overflow-hidden">
       <div
-        className="flex shrink-0 items-center gap-3 px-6 pt-4 pb-3"
+        className={cn(
+          "flex shrink-0 items-center gap-3 px-6 pt-4 pb-3",
+          // With the sidebar collapsed its controls float in this corner: the
+          // title row centres on their 40px band and the toolbar stays put.
+          sidebarCollapsed && "mb-3 h-10 py-0 pl-0",
+        )}
         data-tauri-drag-region
       >
+        {sidebarCollapsed && (
+          <span
+            className={COLLAPSED_CONTROLS_RESERVE_CLS}
+            aria-hidden="true"
+            data-window-controls-reserve=""
+          />
+        )}
         <h1 className="text-fg1 text-base font-medium">Dashboard</h1>
+        {/* The title carries no visible count; filtering still announces it. */}
         {!loadingVisibleWorkspaces && (
           <span
-            className="text-muted-fg text-sm tabular-nums"
-            data-dashboard-count
-            aria-label={`${count} workspaces`}
+            className="sr-only"
+            data-dashboard-count={count}
+            role="status"
           >
-            {count}
+            {`${count} ${count === 1 ? "workspace" : "workspaces"}`}
           </span>
         )}
         <DashboardViewToggle view={preferences.view} />
@@ -425,7 +457,7 @@ export function DashboardPage() {
             active={repoFilter === p.repoSlug}
             onClick={() => setRepoFilter(p.repoSlug)}
           >
-            <DashboardRepositoryIcon project={p} name={p.name} />
+            <DashboardRepositoryIcon project={p} name={p.name} pill />
             <span className="max-w-48 truncate">{p.name}</span>
           </FilterTab>
         ))}
@@ -452,11 +484,11 @@ export function DashboardPage() {
           role="status"
         >
           <Folder
-            className="text-muted-fg size-8"
+            className="text-fg3 size-8"
             strokeWidth={1.5}
             aria-hidden="true"
           />
-          <p className="text-fg2 text-sm">
+          <p className="text-fg2 text-xs">
             {loadingVisibleWorkspaces
               ? "Loading workspaces…"
               : archiveError
@@ -527,16 +559,16 @@ export function DashboardPage() {
                 return (
                   <div
                     key={status.value}
-                    className="flex h-full min-h-0 w-72 shrink-0 flex-col px-3"
+                    className="flex h-full min-h-0 w-72 shrink-0 flex-col"
                     role="group"
                     aria-label={`${status.label} workspaces`}
                   >
-                    <div className="mb-3 flex shrink-0 items-center gap-2">
+                    <div className={COLUMN_HEAD_CLS}>
                       <StatusIcon status={status.value} className="size-4" />
-                      <span className="text-fg1 text-sm font-medium">
+                      <span className="text-fg1 text-xs leading-4.5 font-medium">
                         {status.label}
                       </span>
-                      <span className="text-muted-fg text-xs tabular-nums">
+                      <span className={COLUMN_COUNT_CLS}>
                         {items.length + pendingHere.length}
                       </span>
                     </div>
@@ -581,11 +613,13 @@ function FilterTab({
       variant="ghost"
       aria-pressed={active}
       onClick={onClick}
+      // A 28px pill; a repository icon pulls the label 4px from the edge. The
+      // selected pill keeps its bg2-hover under the pointer.
       className={cn(
-        "shrink-0 gap-1.5 px-2",
+        "h-7 shrink-0 gap-1.5 rounded-full px-3 has-[[data-repository-pill]]:pl-1",
         active
-          ? "bg-bg2-hover text-fg1"
-          : "text-fg2 hover:bg-bg1-hover hover:text-fg1",
+          ? "bg-bg2-hover text-fg1 hover:bg-bg2-hover hover:text-fg1 font-medium"
+          : "text-fg2 hover:bg-bg1-hover hover:text-fg1 font-normal",
       )}
     >
       {children}
@@ -613,13 +647,13 @@ function ArchivedColumn({
   // Same layout as the live columns (no column frame) — Archived is set apart by
   // its outlined, unfilled cards + the Archive header, not a border.
   return (
-    <div className="flex h-full min-h-0 w-72 shrink-0 flex-col px-3">
-      <div className="mb-3 flex shrink-0 items-center gap-2">
-        <ArchiveIcon className="text-muted-fg size-4" />
-        <span className="text-fg1 text-sm font-medium">Archived</span>
-        <span className="text-fg2 text-xs tabular-nums">{rows.length}</span>
+    <div className="flex h-full min-h-0 w-72 shrink-0 flex-col">
+      <div className={COLUMN_HEAD_CLS}>
+        <ArchiveIcon className="text-fg3 size-4" />
+        <span className="text-fg1 text-xs leading-4.5 font-medium">Archived</span>
+        <span className={COLUMN_COUNT_CLS}>{rows.length}</span>
       </div>
-      <div className="flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto pb-1 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
+      <div className="flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto pb-2 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
         {rows.map((row) => (
           <ArchivedCard
             key={row.workspace.id}
@@ -718,11 +752,7 @@ function ArchivedCard({
               onClick={unarchive}
               disabled={restoring || deletingSnapshot}
             >
-              {restoring ? (
-                <ZerosSpinner size={14} />
-              ) : (
-                <RotateCcw className="size-3.5" />
-              )}
+              {restoring ? <ZerosSpinner size={12} /> : <RotateCcw />}
             </IconButton>
           </Tooltip>
         ) : (
@@ -732,7 +762,7 @@ function ArchivedCard({
             onClick={unarchive}
             disabled={restoring || deletingSnapshot}
           >
-            {restoring && <ZerosSpinner size={14} />}
+            {restoring && <ZerosSpinner size={12} />}
             <span>{restoring ? "Restoring…" : "Unarchive"}</span>
           </Button>
         ))}
@@ -743,7 +773,7 @@ function ArchivedCard({
             role="img"
             aria-label="Hidden workspace"
           >
-            <EyeOff size={14} aria-hidden="true" />
+            <EyeOff className="size-3" aria-hidden="true" />
           </span>
         </Tooltip>
       )}
@@ -755,7 +785,7 @@ function ArchivedCard({
               label={`Options for ${row.title}`}
               disabled={restoring || deletingSnapshot}
             >
-              <Ellipsis size={14} aria-hidden="true" />
+              <Ellipsis aria-hidden="true" />
             </IconButton>
           </DropdownMenuTrigger>
           <DropdownMenuContent align="end">
@@ -766,7 +796,7 @@ function ArchivedCard({
               {row.hidden ? "Unhide" : "Hide"}
             </DropdownMenuItem>
             <DropdownMenuItem
-              className="text-red-primary focus:text-red-primary"
+              variant="destructive"
               disabled={!w.archiveSnapshot}
               onSelect={() => {
                 if (w.archiveSnapshot && w.archivedAt != null)
@@ -820,24 +850,21 @@ function ArchivedCard({
               openWorkspace(w);
             }
           }}
-          className="border-border1 hover:bg-bg1-hover focus-visible:outline-highlighted-bright flex cursor-pointer flex-col rounded-lg border p-3 text-left select-none focus-visible:outline-2 focus-visible:-outline-offset-2"
+          // Archived cards are outlined only: no fill until hover.
+          className={cn(CARD_CLS, "bg-transparent")}
         >
-          <div className="flex items-center gap-2">
+          <div className={CARD_TOP_CLS}>
             {showRepoChip && (
               <DashboardRepositoryIcon
                 project={row.project}
                 name={row.repoName}
               />
             )}
-            <span className="text-fg2 min-w-0 flex-1 truncate text-xs">
-              {row.branch}
-            </span>
+            <span className={CARD_BRANCH_CLS}>{row.branch}</span>
             <StatusIcon status={w.status} className="size-3.5" />
           </div>
-          <div className="text-fg1 mt-1.5 truncate text-sm font-medium">
-            {row.title}
-          </div>
-          <div className="text-fg3 mt-1 text-xs">
+          <div className={CARD_TITLE_CLS}>{row.title}</div>
+          <div className="text-fg3 mt-1 text-xs leading-4.5">
             {w.archivedAt == null ? "Folder missing" : "Archived"}
           </div>
           <DashboardCardMetadata
@@ -847,12 +874,12 @@ function ArchivedCard({
             active={active}
           />
           <div
-            className="mt-2.5 flex items-center gap-2"
+            className={CARD_ACTIONS_CLS}
             onClick={(event) => event.stopPropagation()}
           >
             {actions}
             {display.lastActive && (
-              <span className="text-muted-fg ml-auto text-xs tabular-nums">
+              <span className={CARD_END_CLS}>
                 {formatCompactAge(row.lastActiveAt)}
               </span>
             )}
@@ -922,7 +949,7 @@ function DashboardCardMetadata({
   )
     return null;
   return (
-    <div className="text-fg3 text-3xxs mt-2 flex flex-wrap items-center gap-x-2 gap-y-1">
+    <div className="text-fg3 text-3xxs mt-2 flex flex-wrap items-center gap-x-2 gap-y-1 leading-4.5">
       {display.repository && (
         <span className="max-w-24 truncate" title={row.repoName}>
           {row.repoName}
@@ -958,22 +985,18 @@ function PendingDashboardCard({
 }) {
   return (
     <div
-      className="border-border1 bg-bg2 flex flex-col rounded-lg border p-3 text-left opacity-80 select-none"
+      className="border-border1 bg-bg2 flex flex-col rounded-[calc(var(--radius-lg)*1.5)] border p-3 text-left opacity-80 select-none"
       role="status"
       aria-live="polite"
     >
-      <div className="flex items-center gap-2">
+      <div className={CARD_TOP_CLS}>
         {showRepoChip && (
           <DashboardRepositoryIcon project={project} name={repoName} />
         )}
-        <span className="text-fg2 min-w-0 flex-1 truncate text-xs">
-          {label}
-        </span>
+        <span className={CARD_BRANCH_CLS}>{label}</span>
         <ZerosSpinner size={14} />
       </div>
-      <div className="text-fg1 mt-1.5 truncate text-sm font-medium">
-        Setting up workspace…
-      </div>
+      <div className={CARD_TITLE_CLS}>Setting up workspace…</div>
     </div>
   );
 }
@@ -1002,6 +1025,7 @@ function DashboardCard({
   const w = row.workspace;
   const archiveWorkspace = useArchiveWorkspace();
   const mutating = useWorkspaceArchiving(w.id);
+  const prTone = workspacePrTone(w, usePrIslandKind(w.id, w.prNumber));
   const [busy, setBusy] = useState<null | "merge">(null);
   // Lazy, tri-state dirtiness probe (replaces the removed heavy withChanges list
   // column). `undefined` until the first probe resolves → resolveCardActionKind
@@ -1122,18 +1146,7 @@ function DashboardCard({
   };
   const prLink =
     w.prNumber != null && w.prUrl ? (
-      <Tooltip label="Open PR">
-        <a
-          href={w.prUrl}
-          target="_blank"
-          rel="noreferrer"
-          onClick={stop}
-          className="text-fg3 hover:text-fg1 inline-flex items-center gap-0.5 text-xs"
-        >
-          #{w.prNumber}
-          <ExternalLink className="size-3" />
-        </a>
-      </Tooltip>
+      <PrPill number={w.prNumber} url={w.prUrl} tone={prTone ?? "open"} />
     ) : null;
   const content =
     view === "list" ? (
@@ -1148,7 +1161,6 @@ function DashboardCard({
         busy={mutating}
         actions={
           <>
-            {prLink}
             {!localFolder && (
               <Tooltip label="Archive">
                 <IconButton
@@ -1157,11 +1169,7 @@ function DashboardCard({
                   disabled={mutating}
                   onClick={() => void archive()}
                 >
-                  {mutating ? (
-                    <ZerosSpinner size={14} />
-                  ) : (
-                    <ArchiveIcon className="size-3.5" />
-                  )}
+                  {mutating ? <ZerosSpinner size={12} /> : <ArchiveIcon />}
                 </IconButton>
               </Tooltip>
             )}
@@ -1187,18 +1195,16 @@ function DashboardCard({
           }
         }}
         aria-busy={mutating || undefined}
-        className="border-border1 bg-bg2 hover:border-border3 focus-visible:outline-highlighted-bright flex cursor-pointer flex-col rounded-lg border p-3 text-left transition-colors select-none focus-visible:outline-2 focus-visible:-outline-offset-2"
+        className={CARD_CLS}
       >
-        <div className="flex items-center gap-2">
+        <div className={CARD_TOP_CLS}>
           {showRepoChip && (
             <DashboardRepositoryIcon
               project={row.project}
               name={row.repoName}
             />
           )}
-          <span className="text-fg2 min-w-0 flex-1 truncate text-xs">
-            {row.branch}
-          </span>
+          <span className={CARD_BRANCH_CLS}>{row.branch}</span>
           <DashboardPlacement workspace={w} active={active} />
           {localFolder ? (
             <Folder className="text-fg2 size-3.5" strokeWidth={1.5} />
@@ -1211,11 +1217,9 @@ function DashboardCard({
             <StatusIcon status={w.status} className="size-3.5" />
           )}
         </div>
-        <div className="text-fg1 mt-1.5 truncate text-sm font-medium">
-          {row.title}
-        </div>
+        <div className={CARD_TITLE_CLS}>{row.title}</div>
         {missing && (
-          <div className="text-red-primary mt-1 text-xs">Worktree missing</div>
+          <div className="text-red-primary mt-1 text-xs leading-4.5">Worktree missing</div>
         )}
         <DashboardCardMetadata
           row={row}
@@ -1223,7 +1227,7 @@ function DashboardCard({
           ownerName={ownerName}
           active={active}
         />
-        <div className="mt-2.5 flex items-center gap-2">
+        <div className={CARD_ACTIONS_CLS}>
           {action && ActionIcon && (
             <Button
               variant="secondary"
@@ -1234,11 +1238,7 @@ function DashboardCard({
               }}
               disabled={busy !== null || mutating}
             >
-              {spinning ? (
-                <ZerosSpinner size={14} />
-              ) : (
-                <ActionIcon className="size-3.5" />
-              )}
+              {spinning ? <ZerosSpinner size={12} /> : <ActionIcon />}
               <span>
                 {mutating && action.busyKey === "archive"
                   ? "Archiving…"
@@ -1246,7 +1246,7 @@ function DashboardCard({
               </span>
             </Button>
           )}
-          <div className="text-muted-fg ml-auto flex items-center gap-2 text-xs tabular-nums">
+          <div className={CARD_END_CLS}>
             {prLink}
             {display.lastActive && (
               <span>{formatCompactAge(row.lastActiveAt)}</span>

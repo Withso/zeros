@@ -311,3 +311,29 @@ Each landed step appends one line: date, workstream, what landed, evidence.
   destinations; the Internal memory pill keeps its 280px sidebar floor,
   since at 256px it cannot sit beside the arrows (the board clipped the
   forward arrow).
+- 2026-11-04 · 4, 5 · Home (board and list): the title drops its count
+  (an announced status keeps it for search feedback), the view toggle is
+  the segmented control on the shared segment tokens with lucide
+  text-align-justify, search is 280px and leads the toolbar, repository
+  filters are 28px pills that keep their fill under the pointer, columns
+  sit on the 24px page edge 16px apart, and cards round to 12 with a
+  border3 + bg2-highlight hover and a 4 / 8 / 8 rhythm. PR numbers are one
+  `PrPill` (24px, the island's chip colours, no link icon) on cards, list
+  rows, the repository page and the workspace hover card. The list is
+  plain 40px rows 2px apart with a bg1-hover fill: title and branch on one
+  line, then PR, a status tag, a repository chip, changes, a 20px owner
+  avatar and the age, each sized to its content on shared columns; column
+  names stay for screen readers without a drawn header row, and narrow
+  windows drop labels, then Changes and Cost, then Owner. With the sidebar
+  collapsed the Dashboard title row reserves the controls' corner instead
+  of sitting under a 40px band. Compact controls carry 12px glyphs; line
+  changes show only the side that changed, in sans with one 4px gap; the
+  empty state is a 32 fg3 icon and one 13px line; dialog titles wrap long
+  names; repository tabs use the segmented primitive's own sizes. The
+  dashboard ui-smoke run (14 checks) passes against the harness.
+  Decisions: the list keeps table semantics (rows are aligned columns, and
+  the smoke and screen readers rely on them) rather than a list on a CSS
+  subgrid; repository chips stay `bg2-hover` on cards (the board drew
+  `bg2`, which vanishes on the `bg2` card); a measured 0 / 0 still reads
+  +0 where an unknown count reads —; the owner avatar uses the profile
+  initials rule.

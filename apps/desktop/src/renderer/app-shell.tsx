@@ -1070,8 +1070,11 @@ function MainShellBody({
                 {...popoverBoundaryProps}
                 className={[
                   "relative flex min-h-0 min-w-0 flex-1 overflow-hidden",
-                  // Home pages start below the collapsed window controls.
-                  collapsedControlsVisible ? "mt-10" : "",
+                  // The Dashboard header reserves the collapsed controls'
+                  // corner in its own row; Customize and repository pages
+                  // already start below it. The Create page's column still
+                  // starts below the controls.
+                  collapsedControlsVisible && activeHomePageId === "create" ? "mt-10" : "",
                 ].join(" ")}
               >
                 {homePageIdsToRender.includes("dashboard") && (

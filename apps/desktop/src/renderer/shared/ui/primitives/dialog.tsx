@@ -264,7 +264,8 @@ const DialogTitle = React.forwardRef<
       ref={ref}
       data-slot="dialog-title"
       className={cn(
-        "text-dialog-title min-w-0 leading-5 font-medium",
+        // Long unbroken names wrap instead of running under the close button.
+        "text-dialog-title min-w-0 flex-1 leading-5 font-medium break-words",
         className,
       )}
       {...props}
@@ -275,7 +276,7 @@ const DialogTitle = React.forwardRef<
   return (
     <div
       data-slot="dialog-title-row"
-      className="flex w-full min-w-0 items-center gap-2"
+      className="flex w-full min-w-0 items-start gap-2"
     >
       {title}
       {showCloseButton && <DialogCloseButton className="ml-auto" />}

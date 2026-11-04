@@ -24,23 +24,36 @@ import {
   projectInitial,
   RepositoryIcon,
 } from "../repositories/repository-icon";
+import { cn } from "../../shared/ui/cn";
 import { Tooltip } from "../../shared/ui/primitives/tooltip";
 import { dashboardLineChanges } from "./dashboard-model";
 
 export function DashboardRepositoryIcon({
   project,
   name,
+  pill = false,
+  round = false,
 }: {
   project: Project | null;
   name: string;
+  /** Inside a 28px filter pill the chip rounds to 6px and sets the pill's
+   *  4px leading inset. */
+  pill?: boolean;
+  /** Inside a list row's 24px repository tag: an 18px circle. */
+  round?: boolean;
 }) {
   return (
     <span
-      className="bg-bg2-hover text-fg2 text-xxs inline-flex size-5 shrink-0 items-center justify-center rounded-sm leading-none font-medium"
+      className={cn(
+        "bg-bg2-hover text-fg2 text-xxs inline-flex shrink-0 items-center justify-center overflow-hidden leading-none font-medium",
+        round ? "size-4.5 rounded-full" : "size-5",
+        !round && (pill ? "rounded-md" : "rounded-sm"),
+      )}
+      data-repository-pill={pill || undefined}
       aria-hidden="true"
     >
       {project ? (
-        <RepositoryIcon project={project} className="size-full rounded-sm" />
+        <RepositoryIcon project={project} className="size-full" />
       ) : (
         projectInitial(name)
       )}
@@ -105,15 +118,21 @@ export function DashboardLineChanges({
       label={`${totals.additions.toLocaleString()} additions, ${totals.deletions.toLocaleString()} deletions · Last known branch changes`}
     >
       <span
-        className="text-3xxs inline-flex items-center gap-1.5 font-mono tabular-nums"
+        className="text-3xxs inline-flex items-center gap-1 tabular-nums"
         aria-label={`${totals.additions} additions, ${totals.deletions} deletions`}
       >
-        <span className="text-green-primary">
-          +{countFormat.format(totals.additions)}
-        </span>
-        <span className="text-red-primary">
-          −{countFormat.format(totals.deletions)}
-        </span>
+        {/* Only the side that changed, in sans with one 4px gap — the same
+            pair the sidebar and the hover card show. */}
+        {(totals.additions > 0 || totals.deletions === 0) && (
+          <span className="text-green-primary">
+            +{countFormat.format(totals.additions)}
+          </span>
+        )}
+        {totals.deletions > 0 && (
+          <span className="text-red-primary">
+            −{countFormat.format(totals.deletions)}
+          </span>
+        )}
       </span>
     </Tooltip>
   );

@@ -1,5 +1,8 @@
 import { useEffect } from "react";
-import { Archive, ArrowUpRight, Cloud, FolderOpen, GitPullRequest, GitPullRequestClosed, GitMerge, GitCommitVertical } from "lucide-react";
+import { Archive, Cloud, FolderOpen, GitCommitVertical } from "lucide-react";
+import { PrPill } from "./pr/pr-pill";
+import { usePrIslandKind } from "./pr/pr-island-state-store";
+import { workspacePrTone } from "./workspace-glyph";
 import { REPOSITORY_ICON_CHIP_CLS, RepositoryIcon } from "../features/repositories/repository-icon";
 import { useRepositoryRemote } from "../features/repositories/use-repository-remote";
 import { formatCompactAge } from "../features/agent/format-age";
@@ -74,8 +77,7 @@ export function SidebarWorkspaceHoverCard({
   const age = formatCompactAge(at);
   const prUrl = workspace.prUrl && parsePrUrl(workspace.prUrl)?.number === workspace.prNumber
     ? workspace.prUrl : null;
-  const PrIcon = workspace.prState === "merged" ? GitMerge
-    : workspace.prState === "closed" ? GitPullRequestClosed : GitPullRequest;
+  const prTone = workspacePrTone(workspace, usePrIslandKind(workspace.id, workspace.prNumber));
   const commitAndPush = () => {
     const bubble = promptActionBubble("commit-and-push")!;
     const sent = sendToChat(chat?.id ?? null, {
@@ -136,11 +138,7 @@ export function SidebarWorkspaceHoverCard({
           <Button onClick={onSelect}><FolderOpen />Open workspace</Button>
         )}
         {workspace.prNumber != null && prUrl && (
-          <Button asChild variant="ghost" className="text-fg3 gap-0.5 px-0" aria-label={`Open PR #${workspace.prNumber}`}>
-            <a href={prUrl} target="_blank" rel="noreferrer">
-              <PrIcon />#{workspace.prNumber}<ArrowUpRight className="size-3" />
-            </a>
-          </Button>
+          <PrPill number={workspace.prNumber} url={prUrl} tone={prTone ?? "open"} />
         )}
         {age && <time className="text-fg3 ml-auto shrink-0 text-xs tabular-nums" dateTime={new Date(at).toISOString()} title={new Date(at).toLocaleString()}>
           {age === "now" ? age : `${age} ago`}

@@ -318,7 +318,12 @@ describe("sidebar collapse and geometry", () => {
     expect(SHELL).toContain(
       "{collapsedControlsVisible && <CollapsedSidebarControls />}",
     );
-    expect(SHELL).toContain('collapsedControlsVisible ? "mt-10" : ""');
+    // Home reserves the corner in the Dashboard's own title row instead of
+    // dropping every page below a 40px band; only Create still starts below.
+    expect(SHELL).toContain('collapsedControlsVisible && activeHomePageId === "create" ? "mt-10" : ""');
+    const DASHBOARD = source("apps/desktop/src/renderer/features/dashboard/dashboard-page.tsx");
+    expect(DASHBOARD).toMatch(/sidebarCollapsed && \(\s*<span\s+className=\{COLLAPSED_CONTROLS_RESERVE_CLS\}/);
+    expect(TOGGLE).toContain('export const COLLAPSED_CONTROLS_RESERVE_CLS = "h-full w-29 shrink-0";');
     expect(SHELL).toContain("windowControlsInset={sidebarCollapsed}");
     // The reserve belongs to the single column header, above all split panes.
     expect(PANE).toMatch(

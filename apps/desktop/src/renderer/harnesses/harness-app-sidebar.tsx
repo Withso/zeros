@@ -707,10 +707,9 @@ function Harness() {
       <main
         className={[
           "relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden",
-          // The real chat strip reserves the corner itself.
-          controlsVisible && !(page === "workspace" && ConversationPane)
-            ? "mt-10"
-            : "",
+          // Mirrors app-shell: the chat strip and the Dashboard header reserve
+          // the corner themselves; only Create still starts below it.
+          controlsVisible && page === "create" ? "mt-10" : "",
         ].join(" ")}
         data-harness-page={page}
       >

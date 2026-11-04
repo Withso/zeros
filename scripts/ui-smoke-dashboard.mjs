@@ -14,7 +14,8 @@ export async function runDashboardSmoke({ page: originPage, check }) {
   const root = () => page.locator('main[data-harness-page="dashboard"]');
   const row = id => root().locator(`[data-dashboard-workspace="${id}"]`);
   const search = () => root().getByRole("searchbox", { name: "Search workspaces" });
-  const count = value => expect(root().locator("[data-dashboard-count]")).toHaveText(String(value));
+  // The title shows no count; the announced status carries it.
+  const count = value => expect(root().locator("[data-dashboard-count]")).toHaveAttribute("data-dashboard-count", String(value));
   const goHome = () => page.evaluate(() => window.appSidebarNavigate("dashboard"));
   const view = name => root().getByRole("button", { name: `${name} view`, exact: true }).click();
   const choose = async (menu, value) => {
@@ -134,7 +135,8 @@ export async function runDashboardSmoke({ page: originPage, check }) {
     // deliberately so these checks exercise the table, not the modal boundary.
     const column = name => root().getByRole("columnheader", { name, exact: true, includeHidden: true });
     await expect(column("Repository")).toHaveCount(0);
-    await expect(row("ws-atlanta").locator("td").nth(1).locator('span[aria-hidden="true"]').first()).toBeVisible();
+    // Cells: workspace, PR, status, repository, ….
+    await expect(row("ws-atlanta").locator("td").nth(3).locator('span[aria-hidden="true"]').first()).toBeVisible();
     await page.getByRole("menuitemcheckbox", { name: "Repository icon", exact: true }).click();
     await expect(column("Repository icon")).toHaveCount(0);
     await page.getByRole("menuitemcheckbox", { name: "Line changes", exact: true }).click();
@@ -143,9 +145,11 @@ export async function runDashboardSmoke({ page: originPage, check }) {
     await expect(column("Owner")).toHaveCount(0);
     await page.getByRole("menuitemcheckbox", { name: "Last active", exact: true }).click();
     await expect(column("Active")).toHaveCount(0);
-    await expect(root().locator("thead th")).toHaveCount(2);
+    // Workspace, PR, status and actions are always present.
+    await expect(root().locator("thead th")).toHaveCount(4);
     await page.getByRole("menuitemcheckbox", { name: "Cost", exact: true }).click();
-    await expect(column("Cost")).toBeVisible();
+    // Column names are announced, not drawn: the header row has no height.
+    await expect(column("Cost")).toHaveCount(1);
     await expect(row("ws-atlanta").getByLabel("Cost unavailable", { exact: true })).toBeVisible();
     for (const name of ["Repository icon", "Line changes", "Last active"])
       await page.getByRole("menuitemcheckbox", { name, exact: true }).click();
@@ -155,8 +159,8 @@ export async function runDashboardSmoke({ page: originPage, check }) {
     await expect(root().getByRole("button", { name: "List view", exact: true })).toHaveAttribute("aria-pressed", "true");
     await expect(root().getByRole("columnheader", { name: "Repository", exact: true })).toHaveCount(0);
     await expect(root().getByRole("columnheader", { name: "Owner", exact: true })).toHaveCount(0);
-    await expect(root().getByRole("columnheader", { name: "Cost", exact: true })).toBeVisible();
-    await expect(row("ws-atlanta").getByRole("cell").nth(1)).toHaveAccessibleName("Zeros");
+    await expect(root().getByRole("columnheader", { name: "Cost", exact: true })).toHaveCount(1);
+    await expect(row("ws-atlanta").getByRole("cell").nth(3)).toHaveAccessibleName("Zeros");
     expect(await page.evaluate(() => window.appSidebarRequests.filter(request => request.op === "git.hasChanges"))).toEqual([]);
     await root().getByRole("button", { name: "Display", exact: true }).click();
     for (const name of ["Repository", "Owner", "Cost"])

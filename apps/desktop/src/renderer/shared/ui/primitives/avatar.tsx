@@ -8,7 +8,8 @@ function Avatar({
   size = "default",
   ...props
 }: React.ComponentProps<typeof AvatarPrimitive.Root> & {
-  size?: "default" | "sm" | "lg"
+  /** xs = 20px, for an owner in a dense list row. */
+  size?: "default" | "xs" | "sm" | "lg"
 }) {
   return (
     <AvatarPrimitive.Root
@@ -17,7 +18,7 @@ function Avatar({
       className={cn(
         // No clip on the root, so the presence badge stays a full circle; the
         // image and initials clip themselves.
-        "group/avatar relative flex size-8 shrink-0 rounded-full select-none data-[size=lg]:size-10 data-[size=sm]:size-6",
+        "group/avatar relative flex size-8 shrink-0 rounded-full select-none data-[size=lg]:size-10 data-[size=sm]:size-6 data-[size=xs]:size-5",
         className
       )}
       {...props}
@@ -46,7 +47,7 @@ function AvatarFallback({
     <AvatarPrimitive.Fallback
       data-slot="avatar-fallback"
       className={cn(
-        "bg-bg2-highlight text-fg1 text-3xxs flex size-full items-center justify-center overflow-hidden rounded-full font-medium group-data-[size=lg]/avatar:text-sm group-data-[size=sm]/avatar:text-2xxs",
+        "bg-bg2-highlight text-fg1 text-3xxs flex size-full items-center justify-center overflow-hidden rounded-full font-medium group-data-[size=lg]/avatar:text-sm group-data-[size=sm]/avatar:text-2xxs group-data-[size=xs]/avatar:text-xxs",
         className
       )}
       {...props}
