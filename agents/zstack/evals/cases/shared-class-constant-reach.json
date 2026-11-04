@@ -1,0 +1,9 @@
+{
+  "id": "shared-class-constant-reach",
+  "kind": "replay",
+  "area": "renderer-ui",
+  "fixedBy": "90c046fc6846876bfcf5650418893d6910f9fee6",
+  "symptom": "WORKBENCH_TITLE_ACTION_CLS dropped its 24px override so Files title actions became 28px tools; the terminal session list reused the constant for a row's close and run buttons, which grew past their 28px row, and only the terminal-workbench ui-smoke noticed.",
+  "rule": "A shared class constant is a primitive: before changing it, list every importer and size each by its context (header tools 28px, row actions 24px), then run the smokes that mount them.",
+  "check": "pnpm test:ui-smoke --shard=2/3"
+}

@@ -48,7 +48,9 @@ them.
    `pnpm design:docs`. A primitive change tests every call shape it supports
    (asChild, loading, inside a Tooltip), runs the ui-smoke scenarios that
    mount it at their registry viewport, and updates any smoke that pins the
-   old computed look in the same commit. Focus edges never take layout space.
+   old computed look in the same commit. A shared class constant counts as a
+   primitive: list its importers first and size each by its context. Focus
+   edges never take layout space.
 7. **Look at the result** in the running app or a ui-smoke harness, in both
    themes; a green check is not visual review. Put screenshot paths in the
    receipt.

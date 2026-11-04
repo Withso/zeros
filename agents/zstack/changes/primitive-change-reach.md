@@ -17,5 +17,12 @@ it at the viewport `scripts/ui-smoke/scenarios.mjs` gives them, and update
 every smoke that pins the old computed look in the same commit. A row's focus
 edge is an inset ring plus the halo, never a border that takes layout space.
 
+A shared class constant is a primitive too. Making `WORKBENCH_TITLE_ACTION_CLS`
+the 28px header tool also grew the terminal session list's row close and run
+buttons past their row, because that list reused the constant. List every
+importer before changing one, and size each call by its context: header tools
+28px, row actions 24px.
+
 **Encoded in.** `playbooks/ui-design.md` step 6; eval cases
-`button-aschild-single-child` and `listrow-focus-edge-layout`.
+`button-aschild-single-child`, `listrow-focus-edge-layout` and
+`shared-class-constant-reach`.
