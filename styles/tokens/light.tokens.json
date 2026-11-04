@@ -6,7 +6,7 @@
       "$type": "color",
       "$value": {
         "colorSpace": "hsl",
-        "components": [0.0, 0.0, 98.0]
+        "components": [30.0, 20.0, 98.039]
       },
       "$description": "INACTIVE chat window fill (below bg1)",
       "$extensions": {
@@ -41,7 +41,7 @@
       "$type": "color",
       "$value": {
         "colorSpace": "hsl",
-        "components": [0.0, 4.0, 95.0]
+        "components": [30.0, 15.385, 94.902]
       },
       "$description": "hover on bg1 (tool calls, tabs)",
       "$extensions": {
@@ -58,7 +58,7 @@
       "$type": "color",
       "$value": {
         "colorSpace": "hsl",
-        "components": [0.0, 0.0, 97.0]
+        "components": [40.0, 17.647, 96.667]
       },
       "$description": "highlighted content above bg1",
       "$extensions": {
@@ -89,7 +89,7 @@
       "$type": "color",
       "$value": {
         "colorSpace": "hsl",
-        "components": [60.0, 4.0, 95.0]
+        "components": [36.0, 20.0, 95.098]
       },
       "$description": "composer surface",
       "$extensions": {
@@ -106,7 +106,7 @@
       "$type": "color",
       "$value": {
         "colorSpace": "hsl",
-        "components": [60.0, 4.0, 91.0]
+        "components": [30.0, 13.043, 90.98]
       },
       "$description": "hover on bg2",
       "$extensions": {
@@ -165,7 +165,7 @@
       "$type": "color",
       "$value": {
         "colorSpace": "hsl",
-        "components": [0.0, 0.0, 94.0]
+        "components": [40.0, 9.677, 93.922]
       },
       "$description": "rare (deepest chip grey)",
       "$extensions": {
@@ -182,7 +182,7 @@
       "$type": "color",
       "$value": {
         "colorSpace": "hsl",
-        "components": [0.0, 0.0, 88.0]
+        "components": [36.0, 7.937, 87.647]
       },
       "$description": "rare (one step past bg4)",
       "$extensions": {
@@ -199,7 +199,7 @@
       "$type": "color",
       "$value": {
         "colorSpace": "hsl",
-        "components": [20.0, 7.0, 16.0]
+        "components": [30.0, 10.0, 15.686]
       },
       "$description": "selected/highlighted text + icons",
       "$extensions": {
@@ -216,7 +216,7 @@
       "$type": "color",
       "$value": {
         "colorSpace": "hsl",
-        "components": [20.0, 4.0, 30.5]
+        "components": [30.0, 5.195, 30.196]
       },
       "$description": "default text + icon; 8.4:1 on white",
       "$extensions": {
@@ -233,7 +233,7 @@
       "$type": "color",
       "$value": {
         "colorSpace": "hsl",
-        "components": [20.0, 4.0, 36.0]
+        "components": [30.0, 4.396, 35.686]
       },
       "$description": "middle tier (one step below fg2)",
       "$extensions": {
@@ -250,7 +250,7 @@
       "$type": "color",
       "$value": {
         "colorSpace": "hsl",
-        "components": [0.0, 0.0, 42.0]
+        "components": [40.0, 2.83, 41.569]
       },
       "$description": "supplemental metadata; 3:1 floor, fg3 on hover/selection",
       "$extensions": {
@@ -267,7 +267,7 @@
       "$type": "color",
       "$value": {
         "colorSpace": "hsl",
-        "components": [60.0, 9.0, 98.0]
+        "components": [40.0, 27.273, 97.843]
       },
       "$description": "repository sidebar background",
       "$extensions": {
@@ -284,7 +284,7 @@
       "$type": "color",
       "$value": {
         "colorSpace": "hsl",
-        "components": [60.0, 2.0, 92.0]
+        "components": [36.0, 12.195, 91.961]
       },
       "$description": "sidebar row hover and selected state",
       "$extensions": {
@@ -301,7 +301,7 @@
       "$type": "color",
       "$value": {
         "colorSpace": "hsl",
-        "components": [30.0, 9.0, 91.0]
+        "components": [34.29, 14.894, 90.784]
       },
       "$description": "default for bg1 surfaces",
       "$extensions": {
@@ -318,7 +318,7 @@
       "$type": "color",
       "$value": {
         "colorSpace": "hsl",
-        "components": [30.0, 9.0, 88.0]
+        "components": [30.0, 12.903, 87.843]
       },
       "$description": "sidebar / composer focus / bg2",
       "$extensions": {
@@ -335,7 +335,7 @@
       "$type": "color",
       "$value": {
         "colorSpace": "hsl",
-        "components": [60.0, 3.0, 78.0]
+        "components": [33.33, 8.108, 78.235]
       },
       "$description": "control outline at rest",
       "$extensions": {
@@ -352,7 +352,7 @@
       "$type": "color",
       "$value": {
         "colorSpace": "hsl",
-        "components": [60.0, 3.0, 72.0]
+        "components": [36.0, 7.042, 72.157]
       },
       "$description": "control outline on hover/open",
       "$extensions": {
@@ -420,7 +420,7 @@
       "$type": "color",
       "$value": {
         "colorSpace": "hsl",
-        "components": [30.0, 5.0, 92.0]
+        "components": [30.0, 15.0, 92.157]
       },
       "$description": "user msg bg (text on it: fg1/fg2)",
       "$extensions": {
@@ -438,7 +438,7 @@
       "$type": "color",
       "$value": {
         "colorSpace": "hsl",
-        "components": [25.0, 5.0, 45.0]
+        "components": [32.73, 7.801, 27.647]
       },
       "$description": "input focus border, brighter accents",
       "$extensions": {
@@ -456,7 +456,7 @@
       "$type": "color",
       "$value": {
         "colorSpace": "hsl",
-        "components": [20.0, 7.0, 16.0]
+        "components": [30.0, 10.0, 15.686]
       },
       "$description": "warm near-black",
       "$extensions": {
@@ -490,7 +490,7 @@
       "$type": "color",
       "$value": {
         "colorSpace": "hsl",
-        "components": [22.0, 6.0, 25.0]
+        "components": [30.0, 7.937, 24.706]
       },
       "$description": "lifted primary button fill",
       "$extensions": {
@@ -559,7 +559,7 @@
       "$type": "color",
       "$value": {
         "colorSpace": "hsl",
-        "components": [18.0, 87.0, 91.0]
+        "components": [2.5, 100.0, 95.294]
       },
       "$description": "error container surface",
       "$extensions": {
@@ -576,7 +576,7 @@
       "$type": "color",
       "$value": {
         "colorSpace": "hsl",
-        "components": [18.0, 89.0, 37.5]
+        "components": [358.21, 63.81, 41.176]
       },
       "$description": "text/icon on --red-bg",
       "$extensions": {
@@ -778,11 +778,7 @@
       "$type": "color",
       "$value": {
         "colorSpace": "hsl",
-        "components": [
-          214,
-          100,
-          87
-        ]
+        "components": [214, 100, 87]
       },
       "$description": "Workspace link pill fill; Light separates it from the composer surface",
       "$extensions": {
@@ -799,11 +795,7 @@
       "$type": "color",
       "$value": {
         "colorSpace": "hsl",
-        "components": [
-          214,
-          100,
-          86.5
-        ]
+        "components": [214, 100, 86.5]
       },
       "$description": "Workspace link pill hover fill",
       "$extensions": {

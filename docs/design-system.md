@@ -208,7 +208,7 @@ All, editing, portals and vendor surfaces across owners, placements and themes.
 | Text on that container | `text-<family>-fg` | Never `-primary` on `-bg` |
 | Solid destructive | `bg-red-secondary` + `text-red-secondary-fg`, hover `bg-red-secondary-hover` | Delete buttons, destructive badges |
 | Yellow graphics | `bg-yellow-icon`, `border-yellow-icon/40` | Dots, icons, tints — in Light `--yellow-primary` is ochre text |
-| Highlight wash | `--yellow-wash` at 35% / 55% | Code-editor search matches |
+| Highlight wash | `--yellow-wash` at 35% / 54% | Code-editor search matches |
 
 - Color is never the only signal: pair it with an icon, a sign (+/−), or text.
 - Diffs have their own inputs (`--diff-addition`, `--diff-deletion`,

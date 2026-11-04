@@ -86,7 +86,7 @@ const chrome = (dark: boolean, baseFg: string | null): Extension =>
       },
       ".cm-searchMatch.cm-searchMatch-selected": {
         backgroundColor:
-          "color-mix(in srgb, var(--yellow-wash) 55%, transparent)",
+          "color-mix(in srgb, var(--yellow-wash) 54%, transparent)",
       },
       ".cm-panels": { backgroundColor: "var(--bg2)", color: "var(--fg1)" },
       ".cm-panel.cm-search input, .cm-panel.cm-search button": {

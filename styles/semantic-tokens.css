@@ -94,12 +94,12 @@
 
   /* Switch (apps/desktop/src/renderer/shared/ui/primitives/switch.tsx) — the
      ON track is the brown accent in every theme (--brown-fg already flips:
-     salmon on dark, mauve in Light). The knob is white-ish in both themes but
-     no single primitive is: near-white --inverted-bg on dark, pure-white
-     --inverted-fg in Light. The knob keeps one color across ON/OFF so it never
-     recolors mid-slide; the OFF track stays border3/border4 in the component. */
+     salmon on dark, mauve in Light). The knob is near-black on Dark's salmon
+     track (8.5:1; a near-white knob was 1.9:1) and pure white on Light's mauve
+     track. The knob keeps one color across ON/OFF so it never recolors
+     mid-slide; the OFF track stays border3/border4 in the component. */
   --switch-on-bg: var(--brown-fg);
-  --switch-thumb: var(--inverted-bg); /* #EBEBEB near-white knob */
+  --switch-thumb: #0D0D0D; /* near-black knob on the salmon track */
 
   /* Selected-state fill on GLASS surfaces (frosted overlays — first caller:
      the shortcuts palette's tabs + category/Kbd chips). A translucent wash
@@ -115,7 +115,9 @@
   --design-selection-stroke: #0C8CE9;
   --design-hover-stroke: #0C8CE9;
   --design-selection-handle-fill: #FFFFFF;
-  --design-selection-label-bg: #0C8CE9;
+  /* Text sits on the darker label fill, never on a stroke: white on #0A6FC2
+     is 5.2:1 (3.5:1 on the stroke blue). */
+  --design-selection-label-bg: #0A6FC2;
   --design-selection-label-fg: #FFFFFF;
   /* Host-side text creation mirrors the generated white canvas document
      before an authored frame exists to provide computed typography. */
@@ -126,16 +128,6 @@
   --design-selection-soft: color-mix(
     in oklab,
     var(--design-selection-stroke) 12%,
-    transparent
-  );
-  --design-padding-soft: color-mix(
-    in oklab,
-    var(--design-padding-stroke) 14%,
-    transparent
-  );
-  --design-gap-soft: color-mix(
-    in oklab,
-    var(--design-gap-stroke) 14%,
     transparent
   );
 }

@@ -7,16 +7,15 @@ export const APPEARANCE_MODES = ["system", "light", "dark"] as const;
 
 export type AppearanceMode = (typeof APPEARANCE_MODES)[number];
 
-export const NEUTRAL_DARK_WINDOW_BACKGROUND = "#121212";
+export const NEUTRAL_DARK_WINDOW_BACKGROUND = "#141414";
 export const LIGHT_WINDOW_BACKGROUND = "#ffffff";
 
 // Every dark first-frame color this app has ever persisted, so a value left in
 // userData by an earlier launch is RE-RESOLVED against the active mode instead
 // of painting a stale frame before the renderer reports its palette:
-// `#121212` is neutral Dark's bg1 (maps to itself); `#131111` was the retired
-// Orka black palette's bg1; `#0e0c0c` was the older hard-coded BrowserWindow
-// fallback; `#141414` was neutral Dark during the brief window when its bg1
-// sat at L8.
+// `#141414` is neutral Dark's bg1 (maps to itself); `#121212` was its bg1
+// before the Zeros Design palette; `#131111` was the retired Orka black
+// palette's bg1; `#0e0c0c` was the older hard-coded BrowserWindow fallback.
 const LEGACY_DARK_WINDOW_BACKGROUNDS = new Set([
   "#121212",
   "#131111",

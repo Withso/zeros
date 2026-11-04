@@ -24,9 +24,8 @@ const Switch = React.forwardRef<
   >
     <SwitchPrimitive.Thumb
       className={cn(
-        // --switch-thumb: a white-ish knob in every theme (near-white
-        // --inverted-bg on dark, pure-white --inverted-fg in Light) so it reads
-        // against both the brown ON track and the border3 OFF track. The stock
+        // --switch-thumb: near-black on Dark's salmon ON track (8.5:1) and
+        // pure white on Light's mauve one; one colour across ON/OFF. The stock
         // shadow is intentional: --shadow-dropdown's 24px blur is wrong for a
         // 16px thumb.
         // check:ui ignore-next (stock shadow on the 16px thumb — see above)
