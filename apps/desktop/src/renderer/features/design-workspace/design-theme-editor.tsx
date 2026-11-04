@@ -925,7 +925,7 @@ export const DesignThemeEditor = React.memo(function DesignThemeEditor({
                 Theme editor
               </DialogPrimitive.Title>
             </div>
-            <DialogCloseButton aria-label="Close theme editor" />
+            <DialogCloseButton label="Close theme editor" />
             <DialogPrimitive.Description className="sr-only">
               Edit CSS variables and preview themes on the canvas.
             </DialogPrimitive.Description>

@@ -123,4 +123,11 @@ describe("IconButton semantics", () => {
       .toHaveProperty("label")
       .toEqualTypeOf<string>();
   });
+
+  it("takes its name only from label, so wrappers cannot pass an aria-label it would replace", () => {
+    // JSX accepts any undeclared dashed attribute, so without this an
+    // aria-label reaching IconButton through a wrapper's props typechecks and
+    // is silently renamed to the wrapper's default label.
+    expectTypeOf<IconButtonProps["aria-label"]>().toEqualTypeOf<undefined>();
+  });
 });

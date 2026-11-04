@@ -14,6 +14,10 @@ export interface IconButtonProps extends Omit<
   "aria-label"
 > {
   label: string;
+  /** The name is `label`. Declared so a dashed attribute that JSX would
+   * otherwise accept unchecked (directly or through a wrapper's props) is a
+   * type error instead of being replaced by `label`. */
+  "aria-label"?: never;
   /** inline = 20px action embedded in rows and tabs (12px glyph, 4px corners);
    * compact = 24px action in a dense toolbar or section header (12px glyph);
    * standard = 28px chrome and toolbar action (14px glyph). Defaults to
