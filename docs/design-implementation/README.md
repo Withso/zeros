@@ -496,3 +496,11 @@ Each landed step appends one line: date, workstream, what landed, evidence.
   The save failure stays the floating toast, as the board shows. Follow-ups
   inside the diff library's shadow DOM: a + or − in the gutter padding with
   a 2px bar, no row wash for a new file, and the caret line's fg1 5% lift.
+- 2026-11-04 · 5 · Files (comments in the editor): comments start as in
+  Changes. The 24px comment column is gone, so code starts at the plain
+  editor's edge; hovering a line puts a + on its number (the marker
+  replaces the number, so nothing moves). A number click opens the
+  composer on that line, a drag or Shift-click selects lines and opens it
+  on release, and selecting code text stays a plain selection with no
+  comment toolbar. ⌘⇧M still comments from the keyboard. The code-review
+  and code-focus smokes hover the line before using its +.

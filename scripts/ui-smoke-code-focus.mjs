@@ -9,6 +9,9 @@ export async function runCodeReviewFocusSmoke({ page, check, harnessBase }) {
       : page.locator("[data-utility-button]").first();
     if (mode === "preview") {
       await page.locator('[data-gutter] [data-column-number="2"]').first().hover();
+    } else {
+      // The comment + replaces the number of the line under the pointer.
+      await page.locator(".cm-line").nth(1).hover();
     }
     // Overlay focus returns are script focus after a pointer gesture. Native
     // CodeMirror DOM and Pierre's shadow root must share the app's policy.
