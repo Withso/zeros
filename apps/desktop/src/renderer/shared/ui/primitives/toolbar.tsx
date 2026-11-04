@@ -26,10 +26,13 @@ const ITEM_SELECTOR = [
   '[role="combobox"]',
 ].join(",");
 
-/** The toolbar's own controls, not those of a nested toolbar. */
+/** The toolbar's own roving controls, not those of a nested toolbar. A text
+ * field keeps its own Tab stop and stays out of the arrow order: its arrow
+ * keys move the caret, so once used it would be the only stop and every other
+ * tool would be out of keyboard reach. */
 function toolbarControls(toolbar: HTMLElement): HTMLElement[] {
   return Array.from(toolbar.querySelectorAll<HTMLElement>(ITEM_SELECTOR)).filter(
-    (item) => item.closest('[role="toolbar"]') === toolbar,
+    (item) => item.closest('[role="toolbar"]') === toolbar && !isTextEntry(item),
   );
 }
 

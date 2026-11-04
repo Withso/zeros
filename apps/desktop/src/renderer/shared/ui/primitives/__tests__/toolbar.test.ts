@@ -96,6 +96,20 @@ const script = buildSync({
             </>,
           ));
         },
+        renderWithField() {
+          flushSync(() => root.render(
+            <>
+              <button id="before">Before</button>
+              <Toolbar aria-label="Pages">
+                <IconButton id="previous" label="Previous page">P</IconButton>
+                <input id="page" aria-label="Page number" defaultValue="1" />
+                <IconButton id="next" label="Next page">N</IconButton>
+                <IconButton id="fit" label="Fit page" aria-pressed>F</IconButton>
+              </Toolbar>
+              <button id="after">After</button>
+            </>,
+          ));
+        },
       };
     `,
   },
@@ -148,6 +162,43 @@ describe("Toolbar keyboard", () => {
         [...document.querySelectorAll('[role="toolbar"] button')].map((b) => (b as HTMLElement).tabIndex),
       );
       expect(stops.filter((value) => value === 0)).toHaveLength(1);
+    } finally {
+      await browser.close();
+    }
+  });
+
+  it("keeps a text field as its own Tab stop that the arrow keys skip", async () => {
+    // Arrow keys edit a field's text, so a field in the roving order would
+    // become the only stop once used and strand every other tool.
+    const browser = await chromium.launch();
+    try {
+      const page = await browser.newPage();
+      await page.setContent('<div id="app"></div>');
+      await page.addScriptTag({ content: script });
+      await page.evaluate(() => (window as any).toolbar.renderWithField());
+      const focused = () => page.evaluate(() => document.activeElement?.id);
+
+      await page.focus("#before");
+      await page.keyboard.press("Tab");
+      expect(await focused()).toBe("page");
+      await page.keyboard.type("3");
+      await page.keyboard.press("ArrowLeft");
+      expect(await focused()).toBe("page");
+      await page.keyboard.press("Tab");
+      expect(await focused()).toBe("fit");
+      await page.keyboard.press("ArrowLeft");
+      expect(await focused()).toBe("next");
+      await page.keyboard.press("ArrowLeft");
+      expect(await focused()).toBe("previous");
+
+      // From the field the toolbar's one stop is still a key away, and the
+      // arrows go on past the field from there.
+      await page.focus("#page");
+      await page.keyboard.press("Shift+Tab");
+      expect(await focused()).toBe("previous");
+      await page.keyboard.press("ArrowRight");
+      expect(await focused()).toBe("next");
+      expect(await page.evaluate(() => (document.querySelector("#page") as HTMLElement).tabIndex)).toBe(0);
     } finally {
       await browser.close();
     }
