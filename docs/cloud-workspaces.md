@@ -626,6 +626,16 @@ Start remains explicit. Stop retains the VM disk and saves a checkpoint;
 Delete removes the VM, its checkpoints and its access. Account and organization
 deletion also enqueue their workspaces for cleanup.
 
+An initial create response that arrives after deletion still records its exact
+VM for cleanup, before any runtime installation, repository hydration, protected
+route or credential delivery. A completed deletion returns to `deleting` for
+that VM; provider failures retain it for retry. Cleanup completion and errors
+are fenced by the observed VM, so an earlier deletion that saw no VM cannot
+discard the late cleanup. A newer stop, restore or assigned VM fences out an
+old initial response. Lost create replies and process exits before recording
+the response still require reconciliation; this path does not rediscover VMs
+by their short display names.
+
 Roll out the control-plane negotiation before the desktop to enforce the
 background-wake rule. The mutation-activity change also requires publishing and
 selecting the updated SHA-pinned worker runtime; create/wake installs it, so an

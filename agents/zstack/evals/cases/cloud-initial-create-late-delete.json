@@ -1,0 +1,9 @@
+{
+  "id": "cloud-initial-create-late-delete",
+  "kind": "replay",
+  "area": "control-plane",
+  "fixedBy": "pr:832",
+  "symptom": "Deleting a workspace while Boat create was in flight left its VM allocated when the delayed response arrived after deletion. An older cleanup step could also discard the newly recorded cleanup when it completed or exhausted its retry budget.",
+  "rule": "The bug-fix and review playbooks require exact ownership checks after provider I/O. Record a returned allocation without overwriting a newer slot, stop provisioning when deletion wins, and fence cleanup completion and failure by the observed allocation identity. Retain late allocations for deletion retries without inheriting the obsolete cleanup's exhausted budget.",
+  "check": "pnpm --dir apps/control-plane exec vitest run src/cloud/lifecycle-create.integration.test.ts src/cloud/lifecycle.test.ts src/cloud/store.integration.test.ts"
+}
