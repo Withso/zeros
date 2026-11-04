@@ -124,6 +124,7 @@ export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boo
     return {
       t: "config",
       gitIdentity,
+      codeReview: { userId: workspace.creatorUserId, ...(gitIdentity?.name ? { userName: gitIdentity.name } : {}) },
       githubPullRequests: 1,
       githubUserTokens: 1,
       agentInteractions: 1,

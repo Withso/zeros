@@ -4,6 +4,7 @@ import { CloudWorker } from "../worker";
 import { McpGateway } from "../mcp/gateway";
 import { WorkspaceService } from "../workspace/service";
 import { CheckoutWatch } from "../workspace/watch";
+import { WorkerCodeReview } from "../workspace/code-review";
 import { CLIENT_A, FakeRelay, browserFrame, config } from "./worker-fixtures";
 import { repositoryFixture } from "../workspace/__tests__/repository-fixture";
 
@@ -15,30 +16,38 @@ const gate = () => {
 };
 const refresh = () => ({ mayFastForward: false, start: vi.fn(async () => {}), touch: vi.fn(async () => {}), dispose: vi.fn(async () => {}) });
 
-it("unwinds failed initial services before accepting a corrected configuration", async () => {
+it.each([false, true])("unwinds failed initial services before accepting a corrected configuration (review=%s)", async review => {
   const fixture = await repositoryFixture(), relay = new FakeRelay(), firstRefresh = refresh(), secondRefresh = refresh();
   const open = vi.spyOn(WorkspaceService, "open"), close = vi.spyOn(WorkspaceService.prototype, "dispose"), watches = vi.spyOn(CheckoutWatch.prototype, "dispose");
   const gateways = vi.spyOn(McpGateway.prototype, "dispose");
+  const reviewClose = vi.spyOn(WorkerCodeReview.prototype, "close");
+  const reviewConfig = review ? { codeReview: { userId: CLIENT_A } } : {};
   const prepare = vi.fn().mockResolvedValueOnce({ createdBranch: false, refresh: firstRefresh }).mockResolvedValue({ createdBranch: false, refresh: secondRefresh });
   const worker = new CloudWorker({ transport: relay, directory: fixture.state, homeDirectory: fixture.directory,
     prepareCheckout: prepare, drivers: {} });
   worker.start();
   try {
-    await expect(relay.receive({ ...config, workspace: fixture.scope.workspace, agents: {},
+    await expect(relay.receive({ ...config, ...reviewConfig, workspace: fixture.scope.workspace, agents: {},
       mcpServers: [{ id: randomUUID(), name: "invalid-endpoint", transport: "http", url: "ftp://example.invalid/" }] }))
       .rejects.toThrow("Invalid MCP endpoint");
     expect(close).toHaveBeenCalledOnce();
     expect(watches).toHaveBeenCalledOnce();
     expect(gateways).toHaveBeenCalledOnce();
+    expect(reviewClose).toHaveBeenCalledOnce();
     expect(firstRefresh.dispose).toHaveBeenCalledOnce();
     expect(firstRefresh.start).not.toHaveBeenCalled();
-    await relay.receive({ ...config, workspace: fixture.scope.workspace, agents: {}, mcpServers: [] });
+    await relay.receive({ ...config, ...reviewConfig, workspace: fixture.scope.workspace, agents: {}, mcpServers: [] });
     expect(open).toHaveBeenCalledTimes(2);
     expect(secondRefresh.start).toHaveBeenCalledOnce();
     await relay.receive({ t: "open", clientId: CLIENT_A });
     const request = browserFrame("WORKSPACE_REQUEST", { op: "workspace.list", params: {} });
     await relay.request(CLIENT_A, request);
     expect(relay.response(request.id)?.type).toBe("WORKSPACE_RESPONSE");
+    if (review) {
+      const list = browserFrame("WORKSPACE_REQUEST", { op: "codeReview.list", params: { workspaceId: fixture.scope.workspace.id } });
+      await relay.request(CLIENT_A, list);
+      expect(relay.response(list.id)).toMatchObject({ type: "WORKSPACE_RESPONSE", result: { threads: [] } });
+    }
   } finally { await worker.dispose(); }
 });
 

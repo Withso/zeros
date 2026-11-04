@@ -74,6 +74,19 @@ it("negotiates user-token recovery for hello and refreshed configuration without
     expect((await (await f.request(path, body, { "x-zeros-worker-features": "github-user-token-v1" })).json()).config.githubUserTokens).toBe(1);
   }
 });
+it("delivers the trusted review identity only after exact feature negotiation on hello and refresh", async () => {
+  const f = fixture(), original = await f.deps.config({} as CloudV2Workspace);
+  const codeReview = { userId: randomUUID(), userName: "Fixture reviewer" };
+  vi.mocked(f.deps.config).mockResolvedValue({ ...original, codeReview });
+  for (const [path, body] of [["hello", { bootId: f.bootId, protocol: 2, runtimeSha256: "a".repeat(64) }], ["config", undefined]] as const) {
+    for (const features of ["", "mcp-v1", "code-review-v10"]) {
+      const frame = (await (await f.request(path, body, { "x-zeros-worker-features": features })).json()).config;
+      expect(frame).not.toHaveProperty("codeReview");
+      expect(legacyWorkerFrame.safeParse(frame).success).toBe(true);
+    }
+    expect((await (await f.request(path, body, { "x-zeros-worker-features": "mcp-v1, code-review-v1" })).json()).config.codeReview).toEqual(codeReview);
+  }
+});
 it("reports checkout failure using only worker identity even during a GitHub outage", async () => {
   const f = fixture();
   f.deps.authorizeSource = vi.fn(async () => { throw new HttpError(503, "github_unavailable", "Unavailable"); });

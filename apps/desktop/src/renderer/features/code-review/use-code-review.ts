@@ -16,7 +16,7 @@ import {
   setCodeReviewThreadResolved,
 } from "@/renderer/platform/bridge/code-review-bridge";
 import { useCloudGithubPrScope } from "../../platform/cloud-github-pr-scope";
-import { codeReviewAvailable, githubReviewAvailable } from "@/renderer/platform/bridge/code-review-availability";
+import { codeReviewAvailable, codeReviewTarget, githubReviewAvailable, useCodeReviewAvailable } from "@/renderer/platform/bridge/code-review-availability";
 import {
   getActiveBridge,
   onActiveBridgeChange,
@@ -48,6 +48,7 @@ import {
 } from "./review-thread-model";
 
 const EMPTY_THREADS: readonly CodeReviewThread[] = Object.freeze([]);
+const CLOUD_UNAVAILABLE = new Error("Open the cloud workspace to view review comments.");
 const IDLE: AsyncCacheSnapshot<CodeReviewCollection> = Object.freeze({
   data: undefined,
   loading: false,
@@ -130,6 +131,8 @@ export async function loadCodeReview(
   force = false,
 ): Promise<CodeReviewCollection> {
   const { cwd, workspaceId } = codeReviewTargetFromKey(key);
+  const assertOwner = () => { if (codeReviewCacheKey(cwd, workspaceId) !== key) throw new Error("The review owner changed. Open the workspace again."); };
+  assertOwner();
   if (!codeReviewAvailable({ cwd, workspaceId }))
     throw new Error("Review comments are unavailable for cloud workspaces.");
   const request = beginReviewCacheRequest(cwd);
@@ -139,6 +142,7 @@ export async function loadCodeReview(
       key,
       async () => {
         request.assertCurrent();
+        assertOwner();
         listingId = ++nextListingId;
         pendingListings.set(key, listingId);
         const listingInvalidationVersion =
@@ -149,6 +153,7 @@ export async function loadCodeReview(
           includeResolved: true,
         });
         request.assertCurrent();
+        assertOwner();
         aliases.set(key, result.workspaceId);
         const retained = new Set(codeReviewCache.keys());
         for (const alias of aliases.keys())
@@ -163,6 +168,7 @@ export async function loadCodeReview(
       { force, maxAgeMs: 15_000 },
     );
     request.assertCurrent();
+    assertOwner();
     return collection;
   } finally {
     if (listingId !== undefined && pendingListings.get(key) === listingId)
@@ -176,6 +182,7 @@ export async function loadCodeReviewPage(
   request: { cursor?: string; threadId?: string },
 ): Promise<void> {
   const { cwd, workspaceId } = codeReviewTargetFromKey(key);
+  if (codeReviewCacheKey(cwd, workspaceId) !== key) return;
   if (!codeReviewAvailable({ cwd, workspaceId })) return;
   const lifetime = beginReviewCacheRequest(cwd);
   const listingId = codeReviewCache.peekSnapshot(key).data?.listingId;
@@ -213,7 +220,7 @@ export async function loadCodeReviewPage(
       { force: true },
     );
     lifetime.assertCurrent();
-    if (isCurrentListing())
+    if (codeReviewCacheKey(cwd, workspaceId) === key && isCurrentListing())
       publishCodeReviewPage(codeReviewCache, key, page, {
         ...request,
         listingId,
@@ -256,7 +263,8 @@ export function useCodeReview({
   external?: CodeReviewExternalSource;
 }): CodeReviewController {
   const inheritedExternal = useCodeReviewExternal();
-  const workspaceCommentsAvailable = codeReviewAvailable({ cwd, workspaceId });
+  const workspaceCommentsAvailable = useCodeReviewAvailable({ cwd, workspaceId }, active);
+  const cloudTarget = codeReviewTarget({ cwd, workspaceId });
   const commentsAvailable = workspaceCommentsAvailable || githubReviewAvailable({ cwd, workspaceId });
   const external = commentsAvailable
     ? suppliedExternal ?? inheritedExternal
@@ -264,7 +272,7 @@ export function useCodeReview({
   const target = workspaceId || cwd || "";
   const scope = useCloudGithubPrScope(target);
   const ownerKey = keyForReviewOwner(target, scope);
-  const key = workspaceCommentsAvailable && cwd && target ? codeReviewCacheKey(cwd, target) : null;
+  const key = cloudTarget !== false && cwd && target ? codeReviewCacheKey(cwd, target) : null;
   const subscribe = useCallback(
     (listener: () => void) =>
       key ? codeReviewCache.subscribe(key, listener) : () => {},
@@ -285,17 +293,17 @@ export function useCodeReview({
     [key, ownerKey],
   );
   useEffect(() => {
-    if (!active || !key) return;
+    if (!active || !key || !workspaceCommentsAvailable) return;
     startReviewEvents();
     void loadCodeReview(key).catch(() => {});
-  }, [active, key, refreshKey, snapshot.invalidationVersion]);
+  }, [active, key, refreshKey, snapshot.invalidationVersion, workspaceCommentsAvailable]);
   useEffect(() => {
-    if (!active || !key || !cwd) return;
+    if (!active || !key || !cwd || !workspaceCommentsAvailable) return;
     return onActiveBridgeConnected((_bridge, { initial }) => {
       if (!initial) codeReviewCache.invalidate(key);
       return loadCodeReview(key).catch(() => {});
     }, cwd);
-  }, [active, key, cwd]);
+  }, [active, key, cwd, workspaceCommentsAvailable]);
 
   const local = useMemo(
     () =>
@@ -310,9 +318,9 @@ export function useCodeReview({
           };
           normalized.set(thread, item);
         }
-        return item;
+        return workspaceCommentsAvailable ? item : { ...item, canReply: false, canResolve: false };
       }),
-    [snapshot.data?.threads],
+    [snapshot.data?.threads, workspaceCommentsAvailable],
   );
   const threads = useMemo(() => {
     const remote = external?.threads ?? EMPTY_REVIEW_THREADS;
@@ -415,19 +423,19 @@ export function useCodeReview({
     [key, target, cwd],
   );
   const refresh = useCallback(() => {
-    if (key && active) {
+    if (key && active && workspaceCommentsAvailable) {
       codeReviewCache.invalidate(key);
       void loadCodeReview(key).catch(() => {});
     }
-  }, [key, active]);
+  }, [key, active, workspaceCommentsAvailable]);
   const loadMore = useCallback(async () => {
-    if (!key || activeRef.current.key !== key || !activeRef.current.active)
+    if (!key || !workspaceCommentsAvailable || activeRef.current.key !== key || !activeRef.current.active)
       return;
     const current = codeReviewCache.getSnapshot(key).data;
     if (current?.nextCursor)
       await loadCodeReviewPage(key, { cursor: current.nextCursor });
     else if (current?.partial) await loadCodeReview(key, true);
-  }, [key]);
+  }, [key, workspaceCommentsAvailable]);
   return {
     ownerKey: key ?? ownerKey,
     commentsAvailable,
@@ -436,8 +444,8 @@ export function useCodeReview({
     operations,
     drafts,
     external,
-    loading: snapshot.loading,
-    error: snapshot.error,
+    loading: workspaceCommentsAvailable && snapshot.loading,
+    error: cloudTarget && !workspaceCommentsAvailable ? CLOUD_UNAVAILABLE : snapshot.error,
     refresh,
     partial: snapshot.data?.partial,
     nextCursor: snapshot.data?.nextCursor,

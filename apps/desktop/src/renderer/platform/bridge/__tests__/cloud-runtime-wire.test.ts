@@ -16,6 +16,22 @@ const scope: CloudRuntimeScope = {
 };
 const key = cloudWorkspaceKey(scope);
 
+describe("cloud private review identities", () => {
+  it("maps only the exact worker owner, leaving comment ids and content opaque", () => {
+    const thread = { workspaceId: scope.engineWorkspaceId, id: "thread", comments: [{ id: "comment", body: "cloud://not-a-route" }] };
+    expect(cloudIncoming(scope, { type: "WORKSPACE_RESPONSE", op: "codeReview.list", result: { workspaceId: scope.engineWorkspaceId, threads: [thread] } }).result)
+      .toEqual({ workspaceId: key, threads: [{ ...thread, workspaceId: key }] });
+    expect(cloudOutgoing(scope, { type: "WORKSPACE_REQUEST", op: "codeReview.reply", params: { workspaceId: key, threadId: "thread", body: "cloud://not-a-route" } }).params)
+      .toEqual({ workspaceId: scope.engineWorkspaceId, threadId: "thread", body: "cloud://not-a-route" });
+  });
+  it.each(["list", "create", "reply", "setResolved"])("does not mask a foreign native owner in codeReview.%s", operation => {
+    const thread = { workspaceId: "foreign-native-owner" };
+    expect(() => cloudIncoming(scope, { type: "WORKSPACE_RESPONSE", op: `codeReview.${operation}`, result: thread })).toThrow(/review.*owner/);
+    if (operation === "list") expect(() => cloudIncoming(scope, { type: "WORKSPACE_RESPONSE", op: "codeReview.list", result: { workspaceId: scope.engineWorkspaceId, threads: [thread] } }))
+      .toThrow(/review.*owner/);
+  });
+});
+
 describe("cloud branch navigation identities", () => {
   it("scopes the checked out branch in a raw branch-list response", () => {
     const rows = [{ name: "work", worktreePath: scope.root, isCheckedOut: true },

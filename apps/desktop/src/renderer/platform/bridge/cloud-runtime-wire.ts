@@ -244,6 +244,12 @@ export function cloudIncoming(
     }) };
   }
   if (message.result && typeof message.result === "object") {
+    if (["codeReview.list", "codeReview.create", "codeReview.reply", "codeReview.setResolved"].includes(String(message.op))) {
+      const native = record(message.result);
+      if (native.workspaceId !== scope.engineWorkspaceId ||
+          message.op === "codeReview.list" && Array.isArray(native.threads) && native.threads.some(thread => record(thread).workspaceId !== scope.engineWorkspaceId))
+        throw new Error("Invalid cloud review owner.");
+    }
     const result = mapFields(scope, record(message.result), "in");
     if (message.op === "chats.titleSeeds" && Array.isArray(result.seeds))
       result.seeds = result.seeds.map((seed) => mapFields(scope, record(seed), "in"));

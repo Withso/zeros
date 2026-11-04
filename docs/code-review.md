@@ -1,22 +1,39 @@
 # Workspace code review
 
-The Local engine owns durable workspace discussions in SQLite. Migration 40 adds
-threads, immutable comments and retry receipts; legacy `diff_comments` remain
-unchanged. The same `WORKSPACE_REQUEST` API serves local desktop and authorized
-remote clients. Renderer storage is not the discussion's source of truth.
+The owning runtime stores durable workspace discussions in SQLite. Local uses
+migration 40's threads, immutable comments and retry receipts; legacy
+`diff_comments` remain unchanged. The cloud worker uses the same shared store,
+routes, path policy, actor normalization and tool definitions with Node SQLite
+bindings. The existing `WORKSPACE_REQUEST` API serves both placements.
+Renderer storage is not the discussion's source of truth.
 
-Persistence follows the owning Local engine database and survives database
-reopen or engine restart. Cloud v2 does not implement `codeReview.*`; it returns
-`CLOUD_V2_UNSUPPORTED`. The retired cloud record-capture and restore mechanism
-has been removed.
+Local persistence follows its engine database. Cloud persistence lives in
+`review.sqlite` under the worker state directory, keyed by the canonical cloud
+workspace. Stop closes the database before acknowledgement; the existing
+encrypted checkpoint captures it and restores anchors, comments, versions and
+retry receipts after VM replacement. There is no control-plane comment mirror.
 
-The renderer's shared `codeReviewAvailable` predicate disables comments when
-either the cwd or workspace ID names cloud, including malformed cloud IDs.
-The hook starts no reads, reconnect observers or timers, and the bridge rejects
-all `codeReview.*` calls before workspace resolution or dispatch. Files preview,
-the editor and Changes omit comment selection, gutters, shortcuts and composers;
-Git hunk actions remain available. Local Personal and organization-local
-comments use the existing event-driven `DB_CHANGED` refresh, with no polling.
+Cloud support requires exact `code-review-v1` negotiation on the worker's HTTP
+and inbound WebSocket feature headers. Optional config `codeReview` carries the
+creator's user ID and verified Git identity name, with the shared fallback name
+when unavailable. The worker advertises `ENGINE_READY.capabilities` only after
+the store and trusted attribution are ready. Older peers remain unavailable.
+
+The shared renderer capability check requires consistent owner identities and
+an already-connected capable peer. Cloud operations use `requestConnected`;
+passive reads never wake a workspace. Stopped workspaces show the existing
+open-to-view error, retain any confirmed same-owner snapshot, and disable private
+comment writes. Account/owner changes retire cached data and held responses.
+Hidden surfaces do no I/O, and capability/status events enable an active surface
+without polling. Local Personal and organization-local behavior is unchanged.
+
+The cloud database is bounded to 64 MiB, 10,000 threads, 100,000 comments and
+100,000 retry receipts. Each body also has an 80,000-byte UTF-8 limit in addition
+to the shared 20,000-character limit. At capacity, new writes fail with
+`CODE_REVIEW_CAPACITY`; prior comments and identical retry receipts remain
+readable. No comments or receipts are silently pruned. SQLite rollback journals
+are transient and bounded by the database; the combined checkpoint budget still
+applies.
 
 `@zeros/protocol/code-review` defines the public schemas. An anchor contains a
 normalized workspace-relative `path`, `side` (`old`, `new`, or `file`), inclusive
@@ -99,7 +116,8 @@ Preserve loaded history when applying a preview. No durable comments are pruned
 to satisfy a response limit.
 
 Public inputs reject actor/profile fields. Human identity derives from verified
-transport admission or the verified local owner. Signed account profile names
+transport admission, the verified Local owner, or the cloud creator config.
+Signed account profile names
 are used when available; an admitted actor without a profile receives a stable
 Reviewer label. The
 list's `viewerActorId` lets the UI display You for matching authors. Anonymous
@@ -108,20 +126,30 @@ that device cannot be distinguished. Profile changes do not rewrite old author
 snapshots. These APIs do not add presence or a new collaboration service.
 
 Claude, Codex and Cursor receive `code_review_list`, `code_review_create`,
-`code_review_reply` and `code_review_set_resolved` through the existing
-authenticated per-execution product MCP admission. Tool arguments omit workspace
+`code_review_reply` and `code_review_set_resolved` through authenticated
+per-execution product MCP admission. Tool arguments omit workspace
 and author selection. The gateway supplies the registered provider and stable
 conversation/execution identity; the handler pins its registered physical owner
 and rejects cancellation, removal, relocation or a newly nested owner. This
 catalog works without a selected Design directory and does not grant source
 authoring permission.
 
+Cloud registers these tools as `zeros_workspace` on a loopback-only HTTP MCP
+server. Each native execution gets an independent bearer grant, with at most
+64 grants and eight MCP sessions per grant. Requests recheck ownership after
+body reads. Replacement and Stop revoke grants before any persistence wait;
+workspace Stop also closes admission so an in-flight open cannot mint a new
+grant. Tokens stay in process memory and the admitted driver's configuration,
+never logs or checkpoints. This enforces dispatch lifetime, not isolation
+between processes: the VM remains the trust boundary.
+
 Successful human and agent writes publish `DB_CHANGED` with
 `kinds: ["codeReview"]` and exact `workspaceIds`, including the originator. The
 renderer bridge validates response ownership and rejects a connection change
-during dispatch. It uses the existing Local bridge workspace resolver;
-no native/preload fallback is added. UI caches must retain the last confirmed
+during dispatch. Local uses its existing bridge workspace resolver; cloud
+routes directly to its exact connected peer. No native/preload fallback is
+added. UI caches must retain the last confirmed
 exact-owner snapshot on refresh or failure and expose remaining history.
 
 Scoped agent tools commit to the same SQLite tables and publish the same change
-event as human comments. Their success acknowledges the Local engine write.
+event as human comments. Their success acknowledges the owning runtime's write.

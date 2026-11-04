@@ -6,10 +6,11 @@ import {
 } from "@zeros/protocol/code-review";
 import type { z } from "zod";
 import { getActiveBridge } from "./active-bridge";
-import { workspaceOp } from "./workspace-bridge";
+import { workspaceOp, WorkspaceOpError } from "./workspace-bridge";
 import { resolveBridgeWorkspaceIdForCwd } from "./workspace-id-resolver";
 import { runtimeExecutionKey } from "./ws-client";
-import { codeReviewAvailable } from "./code-review-availability";
+import { codeReviewAvailable, codeReviewTarget } from "./code-review-availability";
+import { cloudWorkspaceKey } from "./cloud-workspace-key";
 
 export { mergeCodeReviewThreads } from "@zeros/protocol/code-review";
 
@@ -24,6 +25,7 @@ async function reviewOperation<Input extends { workspaceId: string }, Output ext
   if (!codeReviewAvailable({ cwd, workspaceId: raw.workspaceId }))
     throw new Error("Review comments are unavailable for cloud workspaces.");
   const input = schema.parse(wire);
+  const target = codeReviewTarget({ cwd, workspaceId: input.workspaceId });
   const bridge = getActiveBridge();
   if (!bridge) throw new Error("Connect to the workspace to read or write review comments.");
   const identity = runtimeExecutionKey(bridge.executionIdentity);
@@ -31,11 +33,21 @@ async function reviewOperation<Input extends { workspaceId: string }, Output ext
     if (getActiveBridge() !== bridge || runtimeExecutionKey(bridge.executionIdentity) !== identity)
       throw new Error("The workspace connection changed. Retry the review operation.");
   };
-  const workspaceId = await resolveBridgeWorkspaceIdForCwd(bridge, input.workspaceId) ?? input.workspaceId;
+  const workspaceId = target ? cloudWorkspaceKey(target) : await resolveBridgeWorkspaceIdForCwd(bridge, input.workspaceId) ?? input.workspaceId;
   assertCurrent();
   if (!codeReviewAvailable({ workspaceId }))
     throw new Error("Review comments are unavailable for cloud workspaces.");
-  const result = resultSchema.parse(await workspaceOp(bridge, op, { ...input, workspaceId }));
+  const params = { ...input, workspaceId };
+  let value: unknown;
+  if (target) {
+    // A passive comment read must not reopen a peer after a Stop/status race.
+    const response = await bridge.requestConnected({ type: "WORKSPACE_REQUEST", op, params }, 10_000);
+    assertCurrent();
+    if (response.type === "WORKSPACE_ERROR") throw new WorkspaceOpError(response);
+    if (response.type !== "WORKSPACE_RESPONSE" || response.op !== op) throw new Error("Invalid review response.");
+    value = response.result;
+  } else value = await workspaceOp(bridge, op, params);
+  const result = resultSchema.parse(value);
   assertCurrent();
   if (result.workspaceId !== workspaceId || ("threads" in result && result.threads.some((thread) => thread.workspaceId !== workspaceId)))
     throw new Error("The review response belongs to another workspace.");
