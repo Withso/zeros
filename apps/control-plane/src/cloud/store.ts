@@ -337,9 +337,10 @@ export class CloudV2Store {
   /** Compare-and-set. Returns null when the workspace was not in `from`, or,
    * with `stopGeneration`, when another stop has begun since. `revoke` drops
    * the worker's credentials in the same transaction, only if it moved, so a
-   * late step can never revoke a worker that a newer wake started. */
+   * late step can never revoke a worker that a newer wake started.
+   * `expectedSandboxId: null` fences an observed empty allocation slot. */
   async transition(id: string, from: readonly CloudV2WorkspaceState[], to: CloudV2WorkspaceState,
-    patch: { boatSandboxId?: string | null; errorCode?: string | null; stopGeneration?: string; revoke?: boolean; unarchived?: boolean } = {}): Promise<CloudV2Workspace | null> {
+    patch: { boatSandboxId?: string | null; expectedSandboxId?: string | null; errorCode?: string | null; stopGeneration?: string; revoke?: boolean; unarchived?: boolean } = {}): Promise<CloudV2Workspace | null> {
     return withSystemTx(this.pool, async tx => {
     const { rows } = await tx.query<Row>(
       `UPDATE cloud_v2_workspaces SET state = $3,
@@ -360,9 +361,11 @@ export class CloudV2Store {
          restore_pending = restore_pending AND $3 <> 'deleted',
          attempts = 0, next_attempt_at = NULL, updated_at = clock_timestamp()
        WHERE id = $1 AND state = ANY($2::text[]) AND ($8::bigint IS NULL OR stop_generation = $8::bigint)
-         AND (NOT $9::boolean OR archived_at IS NULL) RETURNING ${COLUMNS}`,
+         AND (NOT $9::boolean OR archived_at IS NULL)
+         AND (NOT $10::boolean OR boat_sandbox_id IS NOT DISTINCT FROM $11::text) RETURNING ${COLUMNS}`,
       [id, from, to, patch.boatSandboxId !== undefined, patch.boatSandboxId ?? null,
-        patch.errorCode !== undefined, patch.errorCode ?? null, patch.stopGeneration ?? null, patch.unarchived ?? false],
+        patch.errorCode !== undefined, patch.errorCode ?? null, patch.stopGeneration ?? null, patch.unarchived ?? false,
+        patch.expectedSandboxId !== undefined, patch.expectedSandboxId ?? null],
     );
     if (!rows[0]) return null;
     if (patch.revoke) {
@@ -611,6 +614,21 @@ export class CloudV2Store {
     return rows.map(workspace);
   }
 
+  /** A create reply can outlive deletion. Keep its exact VM for cleanup,
+   * without replacing a later restore or an already assigned VM. */
+  async recordInitialSandbox(id: string, generation: string, sandboxId: string, renewedAt: Date): Promise<(CloudV2LifecycleWorkspace & { attempts: number }) | null> {
+    const { rows } = await withSystemTx(this.pool, tx => tx.query<LifecycleRow & { attempts: number }>(
+      `UPDATE cloud_v2_workspaces SET boat_sandbox_id=$3, lease_renewed_at=greatest(lease_renewed_at,$4::timestamptz),
+         state=CASE WHEN state='deleted' THEN 'deleting' ELSE state END,
+         attempts=CASE WHEN state IN ('creating','deleted') OR (state='deleting' AND boat_sandbox_id IS NULL) THEN 0 ELSE attempts END,
+         next_attempt_at=CASE WHEN state IN ('creating','deleted') OR (state='deleting' AND boat_sandbox_id IS NULL) THEN clock_timestamp() ELSE next_attempt_at END,
+         updated_at=CASE WHEN state='deleted' THEN clock_timestamp() ELSE updated_at END
+       WHERE id=$1 AND stop_generation=$2::bigint AND NOT restore_pending AND restore_attempt IS NULL
+         AND (boat_sandbox_id IS NULL OR boat_sandbox_id=$3)
+       RETURNING ${LIFECYCLE_COLUMNS}, attempts`, [id, generation, sandboxId, renewedAt]));
+    return rows[0] ? { ...lifecycleWorkspace(rows[0]), attempts: rows[0].attempts } : null;
+  }
+
   /** A late renewal cannot advance the lease of a replacement or stopped VM. */
   async markLeaseRenewed(id: string, sandboxId: string, renewedAt: Date): Promise<boolean> {
     const result = await withSystemTx(this.pool, tx => tx.query(
@@ -819,12 +837,14 @@ export class CloudV2Store {
   /** Schedules the next step. Waiting for an outside event (the worker's
    * hello) clears the failure count; a failure keeps it. `updated_at` stays
    * the time the state was entered. */
-  async defer(id: string, state: CloudV2WorkspaceState, ms: number, patch: { boatSandboxId?: string; failure?: boolean; stopGeneration?: string } = {}): Promise<void> {
+  async defer(id: string, state: CloudV2WorkspaceState, ms: number, patch: { boatSandboxId?: string; expectedSandboxId?: string | null; failure?: boolean; stopGeneration?: string } = {}): Promise<void> {
     await withSystemTx(this.pool, tx => tx.query(
       `UPDATE cloud_v2_workspaces SET next_attempt_at = clock_timestamp() + make_interval(secs => $3::double precision / 1000),
          boat_sandbox_id = coalesce($4, boat_sandbox_id), attempts = CASE WHEN $5::boolean THEN attempts ELSE 0 END
-       WHERE id = $1 AND state = $2 AND ($6::bigint IS NULL OR stop_generation = $6::bigint)`,
-      [id, state, ms, patch.boatSandboxId ?? null, patch.failure === true, patch.stopGeneration ?? null],
+       WHERE id = $1 AND state = $2 AND ($6::bigint IS NULL OR stop_generation = $6::bigint)
+         AND (NOT $7::boolean OR boat_sandbox_id IS NOT DISTINCT FROM $8::text)`,
+      [id, state, ms, patch.boatSandboxId ?? null, patch.failure === true, patch.stopGeneration ?? null,
+        patch.expectedSandboxId !== undefined, patch.expectedSandboxId ?? null],
     ));
   }
 
