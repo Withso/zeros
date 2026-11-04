@@ -9,6 +9,9 @@ vi.mock("../../cloud-v2", () => ({ connectCloudV2Workspace: mocks.connect }));
 vi.mock("../../../state/cloud-workspace-catalog", () => ({
   acceptCloudEngineWorkspace: vi.fn(),
   cloudCatalogGeneration: () => 1,
+  cloudWorkspaceOwnerGeneration: () => 1,
+  cloudWorkspaceStopVersion: () => 0,
+  subscribeCloudWorkspaces: () => () => {},
   cloudWorkspaceDocument: () => ({ status: mocks.status, capabilities: { canWrite: true }, deletedAt: null }),
   canReadCloudWorkspace: () => !["deleting", "deleted"].includes(mocks.status),
   cloudWorkspaceLifecycleTask: (_target: unknown, operation: string) => mocks.operation === operation ? new Promise(() => {}) : undefined,

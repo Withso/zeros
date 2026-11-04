@@ -129,6 +129,28 @@ describe("cloud v2 relay", () => {
     expect(deps.workerRoute).toHaveBeenCalledTimes(2);
   });
 
+  it.each(["creating", "starting"] as const)("does not dial a bound boot until its %s configuration is ready", async pendingState => {
+    state = pendingState;
+    const read = vi.mocked(deps.workerRoute).getMockImplementation()!;
+    let entered!: () => void, release!: () => void;
+    const observed = new Promise<void>(resolve => { entered = resolve; });
+    const held = new Promise<void>(resolve => { release = resolve; });
+    let reads = 0;
+    vi.mocked(deps.workerRoute).mockImplementation(async id => {
+      const route = await read(id);
+      if (++reads === 2) { entered(); await held; }
+      return route;
+    });
+    await app(); await observed;
+    try {
+      expect(connectedWorkers).toHaveLength(0); expect(deps.config).not.toHaveBeenCalled();
+      state = "running";
+    } finally { release(); }
+    await vi.waitFor(() => expect(deps.config).toHaveBeenCalledTimes(1));
+    expect(connectedWorkers).toHaveLength(1);
+    expect(deps.wake).not.toHaveBeenCalled();
+  });
+
   it("keeps the socket heartbeat free of permission, login and database polling", async () => {
     deps.authorizeSource = vi.fn(async () => {});
     await worker();

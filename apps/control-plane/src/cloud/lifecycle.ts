@@ -665,9 +665,10 @@ export class CloudV2Lifecycle {
     } catch { return null; } finally { clearTimeout(timer); }
   }
 
-  private async deliverToken(workspace: CloudV2Workspace, sandboxId: string): Promise<void> {
+  private async deliverToken(workspace: CloudV2LifecycleWorkspace, sandboxId: string): Promise<void> {
     await this.deps.authorizeSource?.(workspace);
-    const token = await this.deps.store.rotateWorkerToken(workspace.id);
+    const token = await this.deps.store.rotateWorkerToken(workspace.id, { state: workspace.state, sandboxId, stopGeneration: workspace.stopGeneration });
+    if (!token) return;
     const result = await this.execWhenReady(sandboxId, deliverWorkerTokenCommand(token, this.deps.bootEnv(workspace)), 30);
     if (result.exitCode !== 0 || result.timedOut) throw Object.assign(new Error("token delivery failed"), { code: "worker_token_delivery_failed" });
   }

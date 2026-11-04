@@ -273,8 +273,8 @@ export class CloudV2Relay {
           this.wake(room);
         }
         else room.wakeRequested = false;
-        // A stopped Boat route hangs instead of refusing; never dial it. Hello
-        // stores the new boot id and marks running before an app can dial.
+        // A stopped Boat route hangs instead of refusing; never dial it. A
+        // bound boot becomes dialable only after hello configuration succeeds.
         if (route.url && route.token && route.bootId && (route.workspace.state === "running" || (route.workspace.state === "stopping" && room.stops.size))) {
           ws = await dialWorker(route, this.deps.mintWorkerToken(room.workspace.id, route.bootId));
           if (!this.wanted(room) || await this.authorized(room) !== "allowed") { ws.terminate(); return; }

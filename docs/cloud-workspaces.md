@@ -44,6 +44,23 @@ role needs no app affinity. Multiple app connections can attach, and losing
 one does not stop a turn. The control plane never dials a stopped workspace;
 Boat's route hangs rather than refusing while the VM sleeps.
 
+Hello binds the worker boot before building configuration, but keeps a new
+create or wake in `creating` or `starting` until the configuration is authorized
+for that exact boot, access epoch and login revision. The relay waits for
+`running` before dialing. A lifecycle token-delivery step must still own the
+allocation and stop generation, with no bound boot; a late step cannot rotate
+the credential or restart a worker already configuring. Stop and checkout
+failure can end a bound first boot before readiness is published.
+
+The desktop retries only transient ticket failures: HTTP 5xx, network failures
+and request timeouts. It makes at most five attempts with 250, 500, 1000 and
+2000 ms delays, within one 30-second ticket budget. Ticket acquisition counts
+against the original three-minute open deadline. Abort, account or workspace
+owner replacement, and an explicit Stop cancel pending requests and prevent
+late checkout publication. Reconnect tickets always use `wake: false`.
+Terminal refusals end the attempt immediately. The API keeps masking cloud
+5xx responses, while logging only a known cause code and status server-side.
+
 App tickets and open clients retain the creator's verified WorkOS session ID.
 Signing out closes only that session's clients and expires its unused tickets;
 other devices, running turns and worker credentials remain live. Admission,
@@ -181,8 +198,13 @@ poll GitHub, login revisions or per-workspace database authority. Security and
 login notifications invalidate observations, and actual traffic repairs missed
 notifications and checks session expiry. Permission refreshes share a bounded
 cache and one in-flight check per actor within a replica. Durable observations,
-short compare-and-set claims and actor cooldowns coalesce replicas. Transient
-failures back off from one to fifteen minutes, with bounded jitter, and respect
+short compare-and-set claims and actor cooldowns coalesce replicas. Admissions
+join an existing local verification or wait for the exact durable
+claim, sharing one five-second wait budget across repositories and authority
+reads. A fresh successful result can satisfy the waiter; a refusal or changed
+authorization ends it. This budget leaves room inside the worker's ten-second
+HTTP request timeout. Waiters neither steal a live claim nor extend source grace.
+Transient failures back off from one to fifteen minutes, with bounded jitter, and respect
 GitHub's longer retry delay. An idle workspace does not refresh GitHub access.
 
 Current authenticated worker activity records independently of GitHub, even
