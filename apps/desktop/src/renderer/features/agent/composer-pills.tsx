@@ -50,18 +50,18 @@ import type { BridgeRegistryAgent } from "../../platform/bridge/messages";
 
 // The one canonical composer-toolbar pill chrome. Density variants pass an
 // override through cn(TOOLBAR_PILL, …) so tailwind-merge resolves the px delta.
-// Labels are text-xs, one step under the textarea's text-sm, so chrome reads
-// quieter than the text being written; rounded-md is the 6px radius
-// (styles/zeros-tokens.css).
+// Every toolbar control is 28px with 6px corners and the shared icon-button
+// hover (bg2-highlight). Labels are text-xs, one step under the textarea's
+// text-sm, so chrome reads quieter than the text being written.
 export const TOOLBAR_PILL =
-  "inline-flex items-center gap-1 rounded-md border-0 bg-transparent px-2 py-1 text-xs font-medium text-fg2 cursor-pointer transition-[background-color,color] duration-150 ease-out hover:bg-bg2-hover hover:text-fg1";
+  "inline-flex h-7 items-center gap-1 rounded-md border-0 bg-transparent px-2 py-0 text-xs font-medium text-fg2 cursor-pointer transition-[background-color,color] duration-150 ease-out hover:bg-bg2-highlight hover:text-fg1";
 
 // The model pill is just logo + label, with no caret.
 
 // The engaged pill chrome, used only by the Fast pill when on: --bg3-hover fill
 // and --yellow-fg text, hugging its content.
 export const TOOLBAR_PILL_ACTIVE =
-  "inline-flex items-center gap-1.5 rounded-md border-0 bg-bg2-hover px-2 py-1 text-xs font-medium text-yellow-fg cursor-pointer transition-[background-color,color] duration-150 ease-out";
+  "inline-flex h-7 items-center gap-1.5 rounded-md border-0 bg-bg2-highlight px-2 py-0 text-xs font-medium text-yellow-fg cursor-pointer transition-[background-color,color] duration-150 ease-out";
 
 // True while a permission or question card has taken the composer's slot and
 // the composer card is display:none (not unmounted, so the draft survives).
@@ -253,7 +253,7 @@ export function EffortPill({
           onChange(next);
         }}
         aria-label={`Reasoning effort: ${label}`}
-        className="text-fg2 hover:bg-bg2-hover hover:text-fg1 inline-flex cursor-pointer items-center overflow-hidden rounded-md border-0 px-2 py-1 text-xs font-medium transition-[background-color,color] duration-150 ease-out"
+        className="text-fg2 hover:bg-bg2-highlight hover:text-fg1 inline-flex h-7 cursor-pointer items-center overflow-hidden rounded-md border-0 px-2 py-0 text-xs font-medium transition-[background-color,color] duration-150 ease-out"
       >
         {/* Label — drops in gently from the top, but ONLY on a user toggle. The
             key is bumped solely by the click path (labelAnimKey), so a remount
@@ -501,7 +501,7 @@ export function PermissionToggle({
             onSelectMode(next.modeId);
           }}
           aria-label={`Permission mode: ${current.label}`}
-          className="text-fg2 hover:bg-bg2-hover hover:text-fg1 inline-flex cursor-pointer items-center overflow-hidden rounded-md border-0 px-2 py-1 text-xs font-medium transition-[background-color,color] duration-150 ease-out"
+          className="text-fg2 hover:bg-bg2-highlight hover:text-fg1 inline-flex h-7 cursor-pointer items-center overflow-hidden rounded-md border-0 px-2 py-0 text-xs font-medium transition-[background-color,color] duration-150 ease-out"
         >
           {/* Icon — drops in gently from the top, but ONLY on a user toggle
               (keyed remount; key 0 = no animation class, same as EffortPill). */}

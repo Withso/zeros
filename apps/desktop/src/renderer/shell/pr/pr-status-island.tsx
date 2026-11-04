@@ -811,7 +811,7 @@ export function PrStatusIsland({
       className={cn(
         // One-pixel hairlines above and below the tinted flush row frame it
         // against the tab bar and the Changes surface.
-        "flex h-10 shrink-0 items-center gap-2.5 border-y px-2",
+        "flex h-10 shrink-0 items-center gap-2.5 border-y pr-1.5 pl-3",
         CARD_TONE[tone],
       )}
       aria-busy={!island || undefined}

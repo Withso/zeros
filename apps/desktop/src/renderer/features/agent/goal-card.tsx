@@ -1,4 +1,6 @@
 import React, { useEffect, useState } from "react";
+import { cn } from "../../shared/ui/cn";
+import { DOCK_CARD_CLS } from "./composer-shell";
 import { IconButton } from "@/renderer/shared/ui/primitives/icon-button";
 import type { AgentGoal } from "@zeros/protocol/agent-events";
 import { Check, Pause, Pencil, Play, Target, Trash2, X } from "lucide-react";
@@ -65,8 +67,8 @@ export function GoalCard({
   const currentGoal = goal;
 
   return (
-    <div className="border-border1 bg-bg1 flex min-h-11 items-center gap-2 rounded-lg border px-3 py-2 shadow-xs">
-      <Target className="text-fg2 size-4 shrink-0" aria-hidden="true" />
+    <div className={cn(DOCK_CARD_CLS, "flex min-h-11 items-center gap-2 py-1.5 pr-2 pl-3.5")}>
+      <Target className="text-fg2 size-3.5 shrink-0" aria-hidden="true" />
       {editing ? (
         <form
           className="flex min-w-0 flex-1 items-start gap-2"
@@ -88,14 +90,13 @@ export function GoalCard({
             onChange={(event) => setDraft(event.target.value)}
             placeholder="What should Codex pursue?"
             aria-label="Goal objective"
-            className="min-h-16 min-w-0 flex-1 resize-none text-sm"
+            className="min-h-16 min-w-0 flex-1 resize-none"
           />
           <IconButton
             type="submit"
             size="standard"
             disabled={busy || draft.trim().length === 0}
             label="Save goal"
-            title="Save goal"
           >
             <Check className="size-4" />
           </IconButton>
@@ -105,7 +106,6 @@ export function GoalCard({
             disabled={busy}
             onClick={() => onEditingChange(false)}
             label="Cancel goal edit"
-            title="Cancel"
           >
             <X className="size-4" />
           </IconButton>
@@ -114,14 +114,14 @@ export function GoalCard({
         currentGoal && (
           <>
             <div className="flex min-w-0 flex-1 items-baseline gap-1.5">
-              <span className="text-fg1 shrink-0 text-sm font-medium">
+              <span className="text-fg1 shrink-0 text-xs leading-4.5 font-medium">
                 {statusLabel(currentGoal.status)}
               </span>
-              <span className="text-fg2 min-w-0 flex-1 truncate text-sm">
+              <span className="text-fg2 min-w-0 flex-1 truncate text-xs leading-4.5">
                 {currentGoal.objective}
               </span>
               {currentGoal.tokenBudget != null ? (
-                <span className="text-muted-fg shrink-0 text-xs tabular-nums">
+                <span className="text-muted-fg shrink-0 text-xs leading-4.5 tabular-nums">
                   {currentGoal.tokensUsed.toLocaleString()} /{" "}
                   {currentGoal.tokenBudget.toLocaleString()} tokens
                 </span>
@@ -141,9 +141,6 @@ export function GoalCard({
               label={
                 currentGoal.status === "active" ? "Pause goal" : "Resume goal"
               }
-              title={
-                currentGoal.status === "active" ? "Pause goal" : "Resume goal"
-              }
             >
               {currentGoal.status === "active" ? (
                 <Pause className="size-4" />
@@ -157,7 +154,6 @@ export function GoalCard({
               disabled={busy}
               onClick={() => onEditingChange(true)}
               label="Edit goal"
-              title="Edit goal"
             >
               <Pencil className="size-4" />
             </IconButton>
@@ -167,7 +163,6 @@ export function GoalCard({
               disabled={busy}
               onClick={() => void run(onDelete)}
               label="Delete goal"
-              title="Delete goal"
             >
               <Trash2 className="size-4" />
             </IconButton>

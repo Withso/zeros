@@ -32,7 +32,7 @@ export { Checkbox, type CheckboxProps, type CheckedState } from "./checkbox";
 export { Badge, badgeVariants, type BadgeProps } from "./badge";
 export { RadioGroup, RadioGroupItem } from "./radio-group";
 export { Separator } from "./separator";
-export { Kbd } from "./kbd";
+export { ButtonShortcut, Kbd } from "./kbd";
 export { Tile } from "./tile";
 export { Alert, AlertTitle, AlertDescription } from "./alert";
 export {

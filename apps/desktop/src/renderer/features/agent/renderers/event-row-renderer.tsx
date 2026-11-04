@@ -453,7 +453,7 @@ function ToolDetail({ tool, ctx }: { tool: AgentToolMessage; ctx: RendererContex
         <HighlightedCode
           code={tool.toolKind === "execute" ? `$ ${asDisplayString(input)}` : input}
           lang={tool.toolKind === "execute" ? "shellscript" : "text"}
-          className={`${OUTPUT_CLASS} ${body ? "border-border2 border-b" : ""}`}
+          className={`${OUTPUT_CLASS} ${body ? "border-border1 border-b" : ""}`}
         />
       )}
       {unreported && <div className="text-fg2 px-3 py-2 text-xs">Completion not reported. The provider did not report whether this tool completed.</div>}

@@ -18,22 +18,6 @@ const floatingRowHover = ["hover:bg", "bg3-hover"].join("-");
 const cases = [
   {
     file: "features/agent/context-gauge.tsx",
-    site: 141,
-    component: "ClassAlias",
-    tag: "button",
-    original:
-      "hover:bg-bg2-hover text-fg2 hover:text-fg1 flex size-8 shrink-0 cursor-pointer items-center justify-center rounded-[6px] border-0 bg-transparent p-0 transition-colors",
-    className:
-      "hover:bg-bg2-hover text-fg2 hover:text-fg1 flex size-8 shrink-0 cursor-pointer items-center justify-center rounded-md border-0 bg-transparent p-0 transition-colors",
-    literal:
-      "hover:bg-bg2-hover text-fg2 hover:text-fg1 flex size-8 shrink-0 cursor-pointer items-center justify-center rounded-md border-0 bg-transparent p-0 transition-colors",
-    alias: {
-      before: "rounded-[6px]",
-      after: "rounded-md",
-    },
-  },
-  {
-    file: "features/agent/context-gauge.tsx",
     site: 190,
     component: "ClassAlias",
     tag: "button",

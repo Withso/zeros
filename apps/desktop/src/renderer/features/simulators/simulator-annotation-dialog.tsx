@@ -2,6 +2,7 @@ import { useEffect, useRef } from "react";
 
 import {
   Button,
+  ButtonShortcut,
   Dialog,
   DialogBody,
   DialogContent,
@@ -69,15 +70,20 @@ export function SimulatorAnnotationLeaveDialog() {
         <DialogFooter>
           <Button
             ref={cancel}
-            variant="secondary"
+            variant="ghost"
             size="sm"
             onClick={() => simulatorAnnotations.cancelLeave()}
           >
             Cancel
           </Button>
-          <Button variant="destructive" size="sm" onClick={() => simulatorAnnotations.confirmLeave()}>
+          <Button
+            variant="destructive"
+            size="sm"
+            onClick={() => simulatorAnnotations.confirmLeave()}
+            aria-keyshortcuts="Meta+Enter Control+Enter"
+          >
             Discard
-            <span className="text-xxs ml-1 opacity-70">⌘↵</span>
+            <ButtonShortcut keys="⌘↵" />
           </Button>
         </DialogFooter>
       </DialogContent>

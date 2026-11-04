@@ -16,7 +16,7 @@ import { autoActionIcon } from "./auto-action";
 import { cn } from "@/renderer/shared/ui/cn";
 import { Tooltip } from "@/renderer/shared/ui/primitives";
 import type { ComposerAttachment } from "./composer-attachments";
-import { PROMPT_SURFACE_RADIUS } from "./composer-shell";
+import { COMPOSER_SURFACE_CLS, PROMPT_SURFACE_RADIUS } from "./composer-shell";
 import {
   useComposerEditor,
   messageToEditorContent,
@@ -287,7 +287,9 @@ export const TurnPromptHeader = memo(function TurnPromptHeader({
         autoAction
           ?
             "bg-brown-bg text-brown-fg border-transparent font-medium"
-          : "border-border1 bg-highlighted-bg",
+          // The composer's own surface: a sent message reads as the prompt
+          // it was.
+          : COMPOSER_SURFACE_CLS,
       )}
     >
       {/* Two block wrappers keep the fit-content width geometry unchanged. */}

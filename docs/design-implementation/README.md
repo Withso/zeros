@@ -358,3 +358,36 @@ Each landed step appends one line: date, workstream, what landed, evidence.
   repository on the Create page instead of opening a workspace at once,
   as the menu entry already did; "nothing chosen" means no workspace
   folder at all, so a cloud or still-resolving workspace never reroutes.
+- 2026-11-04 · 4, 5 · Agent chat (composer, dock cards, pickers, headers):
+  the composer, sent prompts and every card above the composer (permission,
+  question, approval, plan review, queued messages, goal) share
+  `sidebar-bg` + `border2` with 12px corners, no shadow and no focus change,
+  8px apart; the queued card is its own card rather than tucking under the
+  composer. Cards pad 12 / 14 with a 10px rhythm and 13/18 titles; plan
+  review and goal are 44px bars with a 14px icon. Answers are 32px
+  borderless rows with 8px corners that fill `sidebar-bg-hover` (the Enter
+  default rests filled), shortcuts are the 18px Kbd, and the command a
+  permission asks about sits in a 36px `bg1` well with a `border1` edge, as
+  does expanded tool output. The composer toolbar is one 28px height with
+  4px gaps. The @, / and # pickers share one recipe (4px inset, 12px `fg3`
+  header, 32px rows, 24px tabs, 232px cap) and the PR picker moves into the
+  shared floating popover. Window headers are 40px with 12 / 6 padding and
+  panel headers 36 with 12 / 4. Chat tab glyphs sit in a 16px slot, so titles
+  no longer shift when a run starts, and labels are 13/18. The question
+  card's dismiss and carousel controls are 24px icon buttons. Fixed on the
+  way: `Button asChild` threw (Design layer rows, the API key link), a
+  ListRow focus border moved rows off the subagent rail, and four smokes
+  pinned replaced looks. Renderer suite 907 files pass; the chat ui-smoke
+  runs pass against the harness at their registry viewports (composer
+  editor 99, codex transcript 115, overlay positioning with tooltips 151,
+  send failures 62, Codex runtime 36, Claude runtime 29, PR actions 28,
+  summary 27, suggestions 24, sticky bottom 18, attachments 15, tools 9,
+  activity 9, mentions 9, native tools 4, plus permission hints and the
+  context gauge); chat titles needs the control-plane install and did not
+  run here.
+  Decisions: Close anyway, Discard and Approve keep their visible shortcut
+  as one `ButtonShortcut` chip tinted from the button's text, with
+  `aria-keyshortcuts`, replacing three hand-built hints; tooltips that only
+  repeated a visible label (Copy, Reject, Approve) and the goal card's native
+  `title` hints retire; every dialog Cancel is Ghost; Submit stays the 28px
+  square primary from the board beside the round Send.

@@ -62,7 +62,6 @@ export const ComposerAttachmentMenu = memo(function ComposerAttachmentMenu({
           size="standard"
           type="button"
           label="Add attachment or link a workspace"
-          className="rounded-sm"
           onPointerEnter={onIntent}
           onFocus={onIntent}
         >

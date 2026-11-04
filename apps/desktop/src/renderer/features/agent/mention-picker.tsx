@@ -7,6 +7,7 @@
 // the chosen item; parent handles text splicing.
 // ──────────────────────────────────────────────────────────
 
+import { PICKER_EMPTY_CLS, PICKER_HEADER_CLS, PICKER_LIST_CLS, PICKER_ROW_CLS, PICKER_WRAP_CLS } from "./picker-recipe";
 import React, { useEffect, useRef } from "react";
 import type { MentionItem, MentionKind } from "./mentions";
 import type { SuggestionStatus } from "./composer-editor/suggestion";
@@ -48,7 +49,7 @@ export function MentionPicker({
     }
   }, [highlightIndex]);
 
-  const menuWrap = "flex min-h-0 flex-col overflow-hidden";
+  const menuWrap = PICKER_WRAP_CLS;
 
   if (items.length === 0) {
     if (status === "loading") {
@@ -62,17 +63,17 @@ export function MentionPicker({
       status === "error" ? "Couldn't load files." : "No matches.";
     return (
       <div className={menuWrap}>
-        <div className="text-fg2 p-3 text-xs">{emptyLabel}</div>
+        <div className={PICKER_EMPTY_CLS}>{emptyLabel}</div>
       </div>
     );
   }
 
   return (
     <div className={menuWrap}>
-      <div className="border-border1 text-fg2 border-b px-3 py-1.5 text-xs">
+      <div className={PICKER_HEADER_CLS}>
         Mention · {items.length} result{items.length === 1 ? "" : "s"}
       </div>
-      <div ref={listRef} className="min-h-0 max-h-[220px] overflow-y-auto overscroll-contain">
+      <div ref={listRef} className={PICKER_LIST_CLS}>
         {items.map((item, i) => {
           const active = i === highlightIndex;
           return (
@@ -87,9 +88,7 @@ export function MentionPicker({
                 e.preventDefault();
                 onPick(item);
               }}
-              className={`text-fg1 hover:bg-(--surface-hover) flex w-full cursor-pointer items-center gap-2 border-0 bg-transparent px-3 py-1.5 text-left transition-colors ${
-                active ? "bg-(--surface-hover)" : ""
-              }`}
+              className={PICKER_ROW_CLS}
             >
               {/* Single-line row like the slash picker: the Files-tab colored
                   file-type glyph, name, dir hint inline, kind label trailing. */}

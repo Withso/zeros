@@ -31,9 +31,6 @@
       "apps/desktop/src/renderer/features/agent/context-gauge.tsx": {
         "text-[12.5px]": 2
       },
-      "apps/desktop/src/renderer/features/agent/pr-picker.tsx": {
-        "z-[25]": 1
-      },
       "apps/desktop/src/renderer/features/agent/question-card.tsx": {
         "rounded-[3px]": 1
       },
@@ -317,7 +314,7 @@
         "button": 2
       },
       "apps/desktop/src/renderer/features/agent/question-card.tsx": {
-        "button": 6,
+        "button": 3,
         "textarea": 1
       },
       "apps/desktop/src/renderer/features/agent/queued-messages-card.tsx": {
@@ -500,15 +497,6 @@
       }
     },
     "stock-shadow": {
-      "apps/desktop/src/renderer/features/agent/agent-chat.tsx": {
-        "shadow-xs": 1
-      },
-      "apps/desktop/src/renderer/features/agent/goal-card.tsx": {
-        "shadow-xs": 1
-      },
-      "apps/desktop/src/renderer/features/agent/pr-picker.tsx": {
-        "shadow-lg": 1
-      },
       "apps/desktop/src/renderer/features/browser/browser-variant-frame.tsx": {
         "shadow-md": 1
       },

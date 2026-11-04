@@ -30,6 +30,8 @@
 // virtual, so typing any character drops back into the draft.
 // ──────────────────────────────────────────────────────────
 
+import { Kbd } from "../../shared/ui/primitives/kbd";
+import { DOCK_CARD_CLS } from "./composer-shell";
 import { memo, type ReactNode } from "react";
 import {
   ArrowUp,
@@ -119,12 +121,10 @@ export const QueuedMessagesCard = memo(function QueuedMessagesCard({
     : "Send now";
 
   return (
-    // -mb-2.5 tucks the card's bottom edge under the composer card that
-    // follows it in the dock (both are positioned, so DOM order paints the
-    // composer on top) — the "attached" look. pb-1.5 keeps the footer clear
+    // A separate dock card above the composer; pb-1.5 keeps the footer clear
     // of the hidden strip.
     <TooltipProvider>
-      <div data-queued-messages data-turn-failure-card={notSent || undefined} className="border-border1 bg-bg1 relative -mb-2.5 flex flex-col rounded-lg border pb-1.5">
+      <div data-queued-messages data-turn-failure-card={notSent || undefined} className={cn(DOCK_CARD_CLS, "relative flex flex-col pb-1.5")}>
         <div className="flex items-center gap-2 pr-3.5">
         <button
           type="button"
@@ -239,28 +239,28 @@ export const QueuedMessagesCard = memo(function QueuedMessagesCard({
               {editing ? (
                 <>
                   <span className="flex items-center gap-1.5">
-                    <Keycap>↵</Keycap> save
+                    <Kbd>↵</Kbd> save
                   </span>
                   <span className="flex items-center gap-1.5">
-                    <Keycap>Esc</Keycap> cancel
+                    <Kbd>Esc</Kbd> cancel
                   </span>
                 </>
               ) : (
                 <>
                   <span className="flex items-center gap-1.5">
-                    <Keycap>↑↓</Keycap> navigate
+                    <Kbd>↑↓</Kbd> navigate
                   </span>
                   {selectedId != null && (
                     <>
                       <span className="flex items-center gap-1.5">
-                        <Keycap>↵</Keycap> edit
+                        <Kbd>↵</Kbd> edit
                       </span>
                       <span className="flex items-center gap-1.5">
-                        <Keycap>⌫</Keycap> delete
+                        <Kbd>⌫</Kbd> delete
                       </span>
                       {!sendBlocked && (
                         <span className="flex items-center gap-1.5">
-                          <Keycap>⌘↵</Keycap> send now
+                          <Kbd>⌘↵</Kbd> send now
                         </span>
                       )}
                     </>
@@ -315,13 +315,5 @@ function RowAction({
         {children}
       </button>
     </Tooltip>
-  );
-}
-
-function Keycap({ children }: { children: ReactNode }) {
-  return (
-    <kbd className="border-border2 bg-bg2 text-fg2 text-xxs rounded-sm border px-1 py-0.5 font-sans leading-none">
-      {children}
-    </kbd>
   );
 }

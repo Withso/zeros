@@ -208,7 +208,7 @@ export const ContextGauge = memo(function ContextGauge({
             type="button"
             aria-label={tooltip}
             className={cn(
-              "hover:bg-bg2-hover text-fg2 hover:text-fg1 flex size-8 shrink-0 cursor-pointer items-center justify-center rounded-md border-0 bg-transparent p-0 transition-colors",
+              "hover:bg-bg2-highlight text-fg2 hover:text-fg1 flex size-7 shrink-0 cursor-pointer items-center justify-center rounded-md border-0 bg-transparent p-0 transition-colors",
               !data && "text-muted-fg",
             )}
           >

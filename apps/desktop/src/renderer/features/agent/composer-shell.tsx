@@ -28,6 +28,12 @@ export const COMPOSER_SURFACE_RADIUS = "rounded-[18px]";
  *  drag or a mode outline restyles it. */
 export const COMPOSER_SURFACE_CLS = "border-border2 bg-sidebar-bg";
 
+/** A card docked above the composer (goal, queued messages, permission,
+ *  question, plan review): the composer's surface with 12px corners and no
+ *  shadow; the dock spaces them 8px apart. */
+export const DOCK_CARD_CLS =
+  "border-border2 bg-sidebar-bg rounded-[calc(var(--radius-lg)*1.5)] border";
+
 /** 12px corners for sent user messages, their inline edit composer, and the
  *  chat error/warning/sign-in notices (agent-notice.tsx) that share their shape.
  *

@@ -547,7 +547,7 @@ function NativeAgentBrowserTab({ tab, active, scope }: BrowserTabProps) {
   return (
     <div className="bg-bg1 flex min-h-0 flex-1 flex-col overflow-hidden">
       <WorkbenchTabToolbar>
-        <PanelHeader size="window" className="h-9">
+        <PanelHeader size="window" className="h-9 px-1.5">
           <IconButton
             size="standard"
             className="text-fg2 hover:text-fg1 size-6 disabled:opacity-40"
@@ -2241,7 +2241,7 @@ function BrowserChrome({
   );
 
   return (
-    <PanelHeader size="window" className="h-9">
+    <PanelHeader size="window" className="h-9 px-1.5">
       <IconButton
         size="standard"
         className="text-fg2 hover:text-fg1 size-6 disabled:opacity-40"

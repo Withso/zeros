@@ -179,9 +179,10 @@ export const EventRow = memo(function EventRow({
       // (`max-w-full`): the hover tint then wraps exactly the row's content
       // instead of painting the empty space out to the right edge.
       className={cn(
-        "-ml-2 flex w-fit max-w-full min-w-0 items-center gap-2 rounded-md px-2 py-1 text-left transition-colors",
+        // A 28px row with 6px corners and the bg1-hover fill.
+        "-ml-2 flex min-h-7 w-fit max-w-full min-w-0 items-center gap-2 rounded-md px-2 py-1 text-left transition-colors",
         !separateTargets && "group/event-row",
-        expandable ? "hover:bg-bg2-hover/40 cursor-pointer" : "cursor-default",
+        expandable ? "hover:bg-bg1-hover cursor-pointer" : "cursor-default",
         separateTargets && "m-0 min-w-0 shrink-0 gap-2 rounded-sm p-0",
         rowTint,
       )}

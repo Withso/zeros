@@ -11,26 +11,27 @@ describe("PanelHeader markup equivalence", () => {
     original: string;
     props: PanelHeaderProps;
   }> = [
-    // Original recipes from every migrated header, including near clusters.
+    // Every migrated header on the shared geometry (window 12 / 6, panel 12 / 4;
+    // the browser chrome keeps 6px on both sides).
     {
       site: "design-inspector window header",
       tag: "div",
       original:
-        "border-border1 bg-bg1 flex h-10 shrink-0 items-center gap-1 border-b px-2",
+        "border-border1 bg-bg1 flex h-10 shrink-0 items-center gap-1 border-b pr-1.5 pl-3",
       props: { size: "window" },
     },
     {
       site: "design-inspector error section",
       tag: "section",
       original:
-        "text-red-primary border-border1 flex h-9 items-center gap-2 border-b px-3",
+        "text-red-primary border-border1 flex h-9 items-center gap-2 border-b pr-1 pl-3",
       props: { size: "panel", as: "section", className: "text-red-primary" },
     },
     {
       site: "pr-status-row window row",
       tag: "div",
       original:
-        "border-border1 bg-bg1 flex h-10 shrink-0 items-center gap-2 border-b px-2",
+        "border-border1 bg-bg1 flex h-10 shrink-0 items-center gap-2 border-b pr-1.5 pl-3",
       props: { size: "window", className: "gap-2" },
     },
     ...["browser-tab native Browser", "browser-tab fallback Browser"].map(
@@ -38,21 +39,21 @@ describe("PanelHeader markup equivalence", () => {
         site,
         tag: "div",
         original:
-          "border-border1 bg-bg1 flex h-9 shrink-0 items-center gap-1 border-b px-2",
-        props: { size: "window" as const, className: "h-9" },
+          "border-border1 bg-bg1 flex h-9 shrink-0 items-center gap-1 border-b px-1.5",
+        props: { size: "window" as const, className: "h-9 px-1.5" },
       }),
     ),
     {
       site: "files-search-sidebar search",
       tag: "div",
       original:
-        "border-border1 flex h-9 shrink-0 items-center gap-2 border-b px-3",
+        "border-border1 flex h-9 shrink-0 items-center gap-2 border-b pr-1 pl-3",
       props: { size: "panel", className: "shrink-0" },
     },
     {
       site: "review-checks summary",
       tag: "div",
-      original: "border-border1 flex h-9 items-center gap-2 border-b px-3",
+      original: "border-border1 flex h-9 items-center gap-2 border-b pr-1 pl-3",
       props: { size: "panel" },
     },
   ];

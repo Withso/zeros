@@ -10,12 +10,14 @@ export interface PanelHeaderProps extends React.HTMLAttributes<HTMLElement> {
 
 const HEADER_CLASSES = {
   window:
-    "border-border1 bg-bg1 flex h-10 shrink-0 items-center gap-1 border-b px-2",
-  panel: "border-border1 flex h-9 items-center gap-2 border-b px-3",
+    "border-border1 bg-bg1 flex h-10 shrink-0 items-center gap-1 border-b pr-1.5 pl-3",
+  panel: "border-border1 flex h-9 items-center gap-2 border-b pr-1 pl-3",
 } as const;
 
-/** Window chrome (40px) and panel headings (36px) share their own geometry.
- * Icon buttons inside default to 28px; group them in PanelHeaderActions.
+/** Window chrome (40px) and panel headings (36px) share their own geometry:
+ * text starts 12px in, and a trailing 28px icon button ends as far from the
+ * edge as from the top (6px in a window, 4px in a panel). Icon buttons inside
+ * default to 28px; group them in PanelHeaderActions.
  * Legacy geometry overrides in className (window h-9 or gap-2) are
  * `@deprecated`: preserves a pre-existing recipe; unify during the UI iteration. */
 const PanelHeader = React.forwardRef<HTMLElement, PanelHeaderProps>(

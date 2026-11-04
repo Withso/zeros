@@ -107,6 +107,7 @@ import { isSubmittedComposerDocument } from "./composer-submission";
 import { useCloudWorkspaceAccountAccess } from "../team/cloud-workspace-account-access";
 import {
   COMPOSER_FILE_ACCEPT,
+  COMPOSER_SURFACE_CLS,
   COMPOSER_SURFACE_RADIUS,
 } from "./composer-shell";
 import { ComposerAttachmentMenu } from "./composer-attachment-menu";
@@ -4438,7 +4439,9 @@ function AgentChatBody({
         />
         {/* max-w-[856px] stays in lock-step with the transcript band above. */}
         {readOnly ? composerReplacement : (
-        <div className="mx-auto box-border flex w-full max-w-[856px] min-w-0 shrink-0 flex-col gap-0.5 border-t-0 bg-transparent px-7 pt-0 pb-4">
+        <div className="mx-auto box-border flex w-full max-w-[856px] min-w-0 shrink-0 flex-col gap-2 border-t-0 bg-transparent px-7 pt-0 pb-4">
+          {/* Docked cards and the composer stand 8px apart; queued messages
+              are a card of their own rather than tucked under the composer. */}
           {/* Embedded-terminal command (Claude /mcp, /login, …): a banner →
             inline ephemeral PTY mounted directly above the composer. Only
             present while a terminal command is active; requires a cwd. */}
@@ -4531,11 +4534,13 @@ function AgentChatBody({
             <div
               ref={composerCardRef}
               className={cn(
-                "border-border1 bg-bg2 focus-within:border-border2 relative flex w-full min-w-0 flex-col border px-3.5 py-3 shadow-xs transition-[border-color,background,box-shadow] duration-150 ease-out",
+                "relative flex w-full min-w-0 flex-col border px-3.5 py-3 transition-[border-color,background,box-shadow] duration-150 ease-out",
+                // sidebar-bg + border2, shared with Create, user messages and
+                // the cards docked above; focusing or typing changes nothing.
+                COMPOSER_SURFACE_CLS,
                 COMPOSER_SURFACE_RADIUS,
-                // Drag border: subtle (border2), not near-white --highlighted-bright; `!`
-                // beats the higher-specificity focus-within:border-border2 so the drag
-                // state looks identical whether or not the composer is focused.
+                // Drag: the same border2 edge, dashed, with a soft ring; `!`
+                // keeps it identical whether or not the composer is focused.
                 dragActive &&
                   "!border-border2 ring-highlighted-bright/30 border-dashed ring-2",
                 // Guarded modes (Claude Plan / Codex Ask / Cursor Ask): hide the
@@ -4623,7 +4628,8 @@ function AgentChatBody({
                     data-permission-feedback-boundary=""
                     className="min-w-0 flex-nowrap gap-1.5 pt-1 pr-0 pb-1 pl-0"
                   >
-                    <PromptInputTools className="min-w-0 flex-nowrap gap-0.5">
+                    {/* Every control is 28px, 4px apart. */}
+                    <PromptInputTools className="min-w-0 flex-nowrap gap-1">
                       {/* The locally stateful menu opens without re-rendering
                       AgentChat. Modal/file actions remain deferred past Radix
                       focus restoration inside the island. */}
@@ -4654,7 +4660,7 @@ function AgentChatBody({
                     </PromptInputTools>
                     <div
                       data-composer-toolbar-actions=""
-                      className="flex shrink-0 items-center gap-1.5"
+                      className="flex shrink-0 items-center gap-1"
                     >
                       {/* Always present: an empty ring before the first turn, and a disabled ring
                           for Cursor, whose SDK reports no context fill. */}
@@ -4720,7 +4726,8 @@ function AgentChatBody({
                                 ? !queuedEditHasContent
                                 : !canSend
                         }
-                        className="disabled:bg-bg2-hover disabled:text-fg2 aria-disabled:bg-bg2-hover aria-disabled:text-fg2 size-8 disabled:opacity-100"
+                        // 28px like every toolbar control; Send is the only circle.
+                        className="disabled:bg-bg2-hover disabled:text-fg2 aria-disabled:bg-bg2-hover aria-disabled:text-fg2 size-7 disabled:opacity-100"
                       >
                         {composerStreaming ? (
                           <Square className="size-3" />

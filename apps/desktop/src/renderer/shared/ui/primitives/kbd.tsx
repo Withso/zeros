@@ -59,4 +59,23 @@ function KbdKeys({
   );
 }
 
-export { Kbd, KbdKeys };
+/** A shortcut inside a filled button (Approve ⌘⇧↵, Close anyway ⌘↵): one 16px
+ *  chip tinted from the button's own text colour, so it reads on primary and
+ *  destructive fills alike. It is hidden from assistive tech; put the shortcut
+ *  on the button with `aria-keyshortcuts`. */
+function ButtonShortcut({ keys, className }: { keys: string; className?: string }) {
+  return (
+    <kbd
+      aria-hidden="true"
+      data-slot="button-shortcut"
+      className={cn(
+        "ml-1 inline-flex h-4 shrink-0 items-center rounded-sm bg-current/15 px-1 font-mono text-2xxs leading-4",
+        className,
+      )}
+    >
+      {keys}
+    </kbd>
+  );
+}
+
+export { ButtonShortcut, Kbd, KbdKeys };

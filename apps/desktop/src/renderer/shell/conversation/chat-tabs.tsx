@@ -184,7 +184,8 @@ const TAB_ROW_CLS = "relative flex h-full w-max items-center gap-1 px-1";
 const TAB_BASE_CLS =
   "group/tab relative flex h-7 min-w-[70px] max-w-[140px] shrink-0 cursor-pointer select-none items-center gap-2 overflow-hidden rounded-md px-2 text-left text-xs text-fg2 transition-none [--tab-fill:transparent] not-data-[active=true]:focus-within:bg-bg1-hover not-data-[active=true]:focus-within:text-fg1 not-data-[active=true]:focus-within:[--tab-fill:var(--bg1-hover)] not-data-[active=true]:data-[hovered=true]:bg-bg1-hover not-data-[active=true]:data-[hovered=true]:text-fg1 not-data-[active=true]:data-[hovered=true]:[--tab-fill:var(--bg1-hover)] data-[active=true]:sticky data-[active=true]:left-1 data-[active=true]:right-1 data-[active=true]:z-20 data-[active=true]:bg-bg2 data-[active=true]:font-medium data-[active=true]:text-fg1 data-[active=true]:[--tab-fill:var(--bg2)]";
 
-const TAB_LABEL_CLS = "min-w-0 truncate text-xs leading-none";
+// 13/18 so descenders are never clipped.
+const TAB_LABEL_CLS = "min-w-0 truncate text-xs leading-4.5";
 
 /** Overlay containing the close button: drawn over the end of the tab on a
  *  fade in the tab's own fill, so the tab keeps its width and the title runs
@@ -896,6 +897,9 @@ function TabRow({
           data-chat-id={chat.id}
         >
           {isTerminal && <CloudTerminalIndicator folder={chat.folder} />}
+          {/* One 16px glyph slot at rest, working, unread or busy, so the
+              title never shifts when a turn starts or stops. */}
+          <span className="inline-flex size-4 shrink-0 items-center justify-center">
           {isTerminal ? (
             isTerminalBusy ? (
               <ZerosSpinner
@@ -930,6 +934,7 @@ function TabRow({
               monochrome={!isActive}
             />
           )}
+          </span>
           {renaming ? (
             <input
               ref={inputRef}

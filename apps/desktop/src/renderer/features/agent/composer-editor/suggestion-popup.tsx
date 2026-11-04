@@ -41,11 +41,6 @@ export function ComposerSuggestionPopup({
 
   const onHover = (i: number) => store.setIndex(i);
 
-  if (state.trigger === "#") return (
-    <PrPicker items={state.items as PrPickerItem[]} status={state.status}
-      highlightIndex={state.selectedIndex} onHover={onHover}
-      onPick={pr => store.chooseItem(pr)} />
-  );
   return (
     <Popover open onOpenChange={open => { if (!open) store.dismiss(); }}>
       {placement === "caret" ? <PopoverAnchor virtualRef={anchor} /> : (
@@ -53,7 +48,7 @@ export function ComposerSuggestionPopup({
       )}
       <PopoverContent
         data-composer-suggestions={state.trigger}
-        aria-label={state.trigger === "@" ? "Mention files" : "Commands and skills"}
+        aria-label={state.trigger === "@" ? "Mention files" : state.trigger === "#" ? "Pull requests" : "Commands and skills"}
         side={placement === "caret" ? "bottom" : "top"} align="start" sideOffset={6} size="wide" padding="none"
         className={placement === "composer" ? "w-(--radix-popover-trigger-width)" : undefined}
         updatePositionStrategy="always"
@@ -64,7 +59,11 @@ export function ComposerSuggestionPopup({
         }}
       >
       <Surface kind="floating">
-      {state.trigger === "@" ? (
+      {state.trigger === "#" ? (
+      <PrPicker items={state.items as PrPickerItem[]} status={state.status}
+        highlightIndex={state.selectedIndex} onHover={onHover}
+        onPick={pr => store.chooseItem(pr)} />
+      ) : state.trigger === "@" ? (
       <MentionPicker
         items={state.items as MentionItem[]}
         status={state.status}
