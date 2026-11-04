@@ -70,7 +70,8 @@ describe("workbench status contract", () => {
       expect(banner).not.toContain("bg-red-bg");
       expect(status.message).not.toContain("WORKSPACE_REQUEST");
       expect(empty).toContain("text-fg2");
-      expect(empty).toContain("size-10");
+      expect(empty).toContain("size-8");
+      expect(empty).toContain("text-fg3");
       expect(empty).not.toContain("<button");
       expect(empty).not.toContain("text-red");
       for (const message of Object.values(

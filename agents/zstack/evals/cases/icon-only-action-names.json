@@ -1,0 +1,9 @@
+{
+  "id": "icon-only-action-names",
+  "kind": "replay",
+  "area": "renderer-ui",
+  "fixedBy": "7df2e0358c24e7afe15541055b82b0ab6215cb5a",
+  "symptom": "The Changes 'Collapse all' toggle was a ghost Button at an icon size with only a tooltip, so it had no accessible name, and hand-built icon buttons each chose their own hover and glyph size.",
+  "rule": "A quiet icon-only action is IconButton with its required label; ui/icon-only-button flags a ghost Button at an icon size outside shared/ui (scripts/design-system/ui-policy.mjs).",
+  "check": "pnpm exec vitest run scripts/__tests__/design-system-policy.test.ts && pnpm check:ui"
+}

@@ -82,10 +82,10 @@ any new surface, and the rules that can be checked move into
 | --- | --- | --- | --- |
 | 1 | Canvas audit | Every frame renders without breakage in both themes; notes are clear. | Done |
 | 2 | Foundation tokens | The proposed palette and the new feature tokens ship through `styles/tokens`, the contrast contract passes, hand-written copies follow. | Palette done; diff and canvas-label tokens land with their first callers |
-| 3 | Primitives | Every shared component matches its UI components board, with tests. | Pending |
-| 4 | Shared patterns | Banner row, message row, empty state, settings group and row, list card row, canvas chip. | Pending |
+| 3 | Primitives | Every shared component matches its UI components board, with tests. | Done |
+| 4 | Shared patterns | Banner row, message row, empty state, settings group and row, list card row, canvas chip. | Banner and empty state done; the rest land with their pages |
 | 5 | Pages | Each page matches its boards, functional changes included, Local and cloud covered. | Pending |
-| 6 | Automation | The direction lives in `docs/design-system.md`, checks enforce what structure can, and zstack carries a UI loop that learns from every approved change. | Pending |
+| 6 | Automation | The direction lives in `docs/design-system.md`, checks enforce what structure can, and zstack carries a UI loop that learns from every approved change. | Done; it grows with each page |
 | 7 | Verification | Gates green; harness renders compared with every board in both themes. | Pending |
 | 8 | Canvas final | Every board shows one final UI: the implemented one. | Pending |
 
@@ -236,3 +236,17 @@ Each landed step appends one line: date, workstream, what landed, evidence.
   contract and the palette pins pass; the boot screen, Electron window and
   marketing theme colour follow. Unused `design-padding-soft` and
   `design-gap-soft` retire.
+- 2026-11-04 · 3 · Primitives (commits `420f5dc`, `5059d93`, `7df2e03`): the
+  action set (Button, IconButton, SplitButton, Toolbar), the field box and
+  Field, choice controls, the floating family (menus, Command, Popover,
+  Tooltip, Dialog, toasts, Kbd), the two tab styles, PanelHeader, ListRow, the
+  sidebar row, Badge, Pill, Avatar, ProgressBar, Card, Tile and the workbench
+  banner. 107 icon-only ghost Buttons moved to IconButton, `default` became
+  `primary` and the legacy Button wrapper retired. Renderer suite 905 files
+  pass; the 14 files that fail without ssh or a control-plane install fail
+  identically on the base commit.
+- 2026-11-04 · 6 · Automation: `docs/design-system.md` §0 holds the direction
+  and how it changes, the agent brief that renders the `zeros-ui` skills
+  carries it, `playbooks/ui-design.md` routes every corrected look to its
+  owner and a check, `ui/icon-only-button` joins the policy, and four eval
+  cases hold this round's escaped mistakes.

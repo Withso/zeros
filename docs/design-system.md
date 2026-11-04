@@ -19,71 +19,153 @@ own mockups use it; see §11.
 
 You are changing Zeros renderer UI (`apps/desktop/src/renderer/`) or `styles/`.
 The full guide is `docs/design-system.md`; token values are in
-`docs/design-tokens.md`.
+`docs/design-tokens.md`; the current direction is its §0.
 
-1. **Compose, don't restyle.** Use the shared primitives in
+1. **Follow the direction (§0).** Few, quiet words: a title and at most one
+   line of description, sentence case. Rows in grouped cards, not boxes in
+   boxes. One banner, one message row and one empty state. One height per
+   row. Color only for meaning. Keyboard focus only for the keyboard. Each
+   page's approved boards are exported to `docs/design-implementation/`; read
+   the page's file before changing it.
+2. **Compose, don't restyle.** Use the shared primitives in
    `apps/desktop/src/renderer/shared/ui/primitives/` (Button, IconButton,
-   Input, Textarea, Select, Checkbox, Switch, Tabs, DropdownMenu, Popover,
-   Dialog, Tooltip, Kbd, Badge, Pill, PanelHeader, ListRow, …) and the layout
-   blocks in `shared/ui/layout/` (`Inline`, `Stack`, `Surface`). Missing a
-   variant? Extend the primitive in `shared/ui/` — never hand-build a
-   `<button>`, `<input>`, `<select>`, or `<textarea>` in feature code.
-2. **Tokens only.** Color comes from token utilities (`bg-bg1`, `text-fg2`,
+   SplitButton, Toolbar, Field, Input, Textarea, Select, Checkbox, RadioGroup,
+   Switch, Slider, Tabs, DropdownMenu, ContextMenu, Command, Popover, Dialog,
+   Tooltip, Kbd, Badge, Pill, PanelHeader, ListRow, Card, …), the layout blocks
+   in `shared/ui/layout/` (`Inline`, `Stack`, `Surface`) and `WorkbenchTabFrame`
+   for every tab body. Missing a variant? Extend the primitive in `shared/ui/`
+   with a test; never hand-build a `<button>`, `<input>`, `<select>` or
+   `<textarea>` in feature code, and never restyle a primitive from a caller.
+3. **Tokens only.** Color comes from token utilities (`bg-bg1`, `text-fg2`,
    `border-border1`, `text-red-primary`, …). No hex/rgb/hsl, no Tailwind palette
    colors (they do not compile), no arbitrary values such as `text-[14px]`,
-   `z-[1000]`, or `rounded-[18px]`. Token values live in
+   `z-[1000]` or `rounded-[18px]`; a derived value is written from a token
+   (`rounded-[calc(var(--radius-lg)*1.5)]`). Token values live in
    `styles/tokens/*.tokens.json`; the CSS token blocks are generated.
-3. **Surfaces decide hovers.** On `bg-bg1` hover with `hover:bg-bg1-hover`, on
-   `bg-bg2` with `hover:bg-bg2-hover`, in a menu with `hover:bg-bg3-hover`, in
-   the sidebar with `hover:bg-sidebar-bg-hover`. Inside a `Surface`, use
-   `hover:bg-(--surface-hover)` and the surface picks the right one. `bg-bg3`
-   is only for floating menus and popovers. Selected = the hover state that
-   stays.
-4. **Text tiers:** `text-fg1` emphasis/selected, `text-fg2` default, `text-fg3`
+4. **Surfaces decide hovers.** On `bg-bg1` hover with `hover:bg-bg1-hover`, on
+   `bg-bg2` with `hover:bg-bg2-hover`, in the sidebar with
+   `hover:bg-sidebar-bg-hover`; inside a `Surface`, `hover:bg-(--surface-hover)`.
+   Floating surfaces (menus, popovers, tooltips, hover cards, toasts) are
+   `bg-bg3` + `border-border2`, 12px corners, the dropdown shadow, a 4px inset
+   and 28px rows with 8px corners; only they use `bg-bg3`. Navigation
+   selection (sidebar, trees, layers) is `bg-bg2-highlight` with `text-fg1`, a
+   step above hover.
+5. **Text tiers:** `text-fg1` emphasis/selected, `text-fg2` default, `text-fg3`
    secondary and placeholders, `text-muted-fg` metadata. Never fake a tier with
    opacity (`text-fg2/60`). On a tinted `bg-<family>-bg`, text is
    `text-<family>-fg`.
-5. **Scales:** text `text-xxs` 10 · `text-2xxs` 11 · `text-3xxs` 12 · `text-xs`
-   13/18 · `text-sm` 14/20. Controls are 28px (standard) or 24px (Button
-   `size="compact"` / `"icon-compact"`) — never mix heights in one row. Radius
-   `rounded-sm` 4 · `rounded-md` 6 · `rounded-lg` 8. Spacing steps 0–12 (half
-   steps belong inside controls). Global layers `z-panel` · `z-chrome` ·
-   `z-dropdown` · `z-modal` · `z-toast`; only `z-0`…`z-2` locally.
-6. **Never** use `dark:` variants, `transition-all`, stock shadows such as
-   `shadow-lg` (floating surfaces use `shadow-[var(--shadow-dropdown)]`), or a
-   color as the only signal (pair status color with an icon or text). Don't
-   build class names at runtime (`text-${tone}`): the checks can't see them —
-   map states to complete class strings instead.
-   Persistent workbench content load failures use `WorkbenchTabFrame`'s
-   single persistent banner and neutral icon/line empty state. Action outcomes
-   use toasts. Cloud lifecycle and connection messages never enter the banner;
-   cloud connect/open failures keep their existing app toast. Local engine
-   failures use the banner, falling back to a toast when no frame is visible.
-   Report each read with
-   `useWorkbenchStatusSource`; one failed read gets a silent retry after 1.5
-   seconds. Local startup/reconnection has no pending banner; a Local gap
-   lasting 45 seconds exposes actionable failure.
-   Retain confirmed exact-key content and never add a second error paragraph or
-   Retry button.
-7. **Verify:** run `pnpm check:ui` (compiles every class, enforces the policy
+6. **Scales:** text `text-xxs` 10 · `text-2xxs` 11 · `text-3xxs` 12 · `text-xs`
+   13/18 · `text-sm` 14/20. Controls are 28 standard, 24 compact or 20 inline
+   (IconButton), with 14, 12 and 12px glyphs; never mix heights in one row.
+   Radius `rounded-sm` 4 (inline controls, pills, badges, kbd, checkboxes) ·
+   `rounded-md` 6 (buttons, fields, tabs, tooltips, tools) · `rounded-lg` 8
+   (menu rows, code blocks) · 12 derived (floating surfaces, dialogs, cards) ·
+   10 derived (toolbars). Spacing steps 0–12 (half steps belong inside
+   controls). Global layers `z-panel` · `z-chrome` · `z-dropdown` · `z-modal` ·
+   `z-toast`; only `z-0`…`z-2` locally.
+7. **States are the primitive's.** Hover, open, pressed (`aria-pressed`),
+   keyboard focus (`highlighted-bright` with the 3px halo; fields ring only on
+   keyboard focus), disabled (50%; `aria-disabled` keeps the reason tooltip)
+   and loading (`loading` on Button and SplitButton). One choice in a menu is
+   a check at the row's end, several a left check column; destructive rows
+   are red and last; shortcuts are Kbd chips.
+8. **Never** use `dark:` variants, `transition-all`, stock shadows such as
+   `shadow-lg`, or a color as the only signal. Don't build class names at
+   runtime (`text-${tone}`): map states to complete class strings. Persistent
+   workbench failures use `WorkbenchTabFrame`'s one 32px banner; action
+   outcomes use toasts; cloud lifecycle and connection messages never enter
+   the banner (§7, Feedback).
+9. **Verify:** run `pnpm check:ui` (compiles every class, enforces the policy
    ratchet) plus `pnpm typecheck`, `pnpm lint`, and the nearby tests. Fix
    findings; never raise `styles/policy/ui-debt.json`, add a `check:ui ignore`
    comment, or loosen `styles/policy/contrast-contract.json` to get green.
-   Token or contract changes: run `pnpm design:docs` and say so in the handoff.
-   Interaction, overlay, focus or popover work also runs `pnpm test:ui-smoke`
-   and `pnpm build:ui`. State, navigation, loading, tab, panel or list work
-   follows `docs/ui-interaction-performance.md`.
-8. **Local and cloud:** every surface renders correctly for Local and
-   organization workspaces with local and cloud placement, including each cloud
-   VM state (setting up, starting, sleeping, stopped, failed, archived). Follow
-   RULES.md §8 (the `zeros-workspaces` skill) and state both impacts in the PR.
-9. **Mockups:** design Zeros screens in `Zeros - Design/` (the Design tab),
-   whose frames import the app's own stylesheets live; never hand-copy
-   token values into a standalone HTML file. To implement a frame, map its
-   values to utilities (`var(--bg2)` is `bg-bg2`; a `--space-<step>` value is
-   that Tailwind step, such as `p-3`) and its controls to the shared
-   primitives instead of copying its CSS.
+   Token or contract changes: run `pnpm design:docs`. Interaction, overlay,
+   focus or popover work also runs `pnpm test:ui-smoke` and `pnpm build:ui`.
+   State, navigation, loading, tab, panel or list work follows
+   `docs/ui-interaction-performance.md`. Look at the result in both themes.
+10. **Local and cloud:** every surface renders correctly for Local and
+    organization workspaces with local and cloud placement, including each
+    cloud VM state. Follow RULES.md §8 (the `zeros-workspaces` skill) and state
+    both impacts in the PR.
+11. **Learn the direction.** When the user corrects or decides a look, it is a
+    direction, not a one-off: change the primitive or token that owns it,
+    record it in §0 with a check where one can enforce it, and route the
+    lesson through `zstack-learn` (§10). Mockups of Zeros live in
+    `Zeros - Design/`; implement a frame by mapping its values to utilities
+    and its controls to the shared primitives, never by copying its CSS.
 <!-- agent-brief:end -->
+
+## 0. Direction
+
+The decisions the Zeros Design rounds converged on. They are the bar for every
+new surface; the ones a check can enforce say so below, the rest are
+**judgment**. The approved boards live in the Zeros Design canvas and are
+exported page by page to [design-implementation/](design-implementation/README.md).
+
+1. **Few, quiet words.** A title and at most one line of description. A hint
+   only when it adds something the label and value don't. Sentence case,
+   tabular numbers, no `Error:` prefixes or transport detail.
+2. **Rows in cards, not boxes in boxes.** Lists are grouped cards: `bg1-bright`,
+   `border1`, 12px corners, 12 × 14 rows, 13/18 medium names, 12/16 `fg3` hints,
+   28px controls right-aligned, one ⋯ menu for secondary actions. Status shows
+   only when something needs the person.
+3. **One banner, one message row, one empty state.** A banner is a 32px row on
+   the panel's own background with a `border1` rule below; its 16px icon
+   carries the tone (red error, yellow warning, a spinner or `fg3`); one line
+   that ends in an ellipsis; 24px Ghost actions. A message inside content uses
+   the same anatomy. An empty state is a 32px `fg3` icon and one 13/18 `fg2`
+   line, plus one action only when it creates or configures something.
+4. **One surface language.** Canvas `bg1`; raised `bg2` or `sidebar-bg`;
+   floating menus, popovers, tooltips, hover cards and toasts share `bg3` with
+   `border2`, 12px corners, the dropdown shadow, a 4px inset and 28px rows with
+   8px corners (`shared/ui/menu-surface.ts`, `Surface kind="floating"`).
+5. **One height per row.** 28 standard, 24 compact, 20 inline; glyphs 14, 12
+   and 12. Controls in one row share a height; toolbars are 36px bars of 28px
+   tools.
+6. **Color carries meaning, never decoration.** Status families keep one
+   meaning each; errors are a true red; the selection blue belongs to the
+   Design canvas and a toolbar's active tool; everything else is neutral.
+   Color is never the only signal.
+7. **Keyboard focus is opaque and only for the keyboard.** Tab shows
+   `highlighted-bright` with the 3px halo; a click or typing shows the caret
+   (`FIELD_FOCUS` reads the focus tracker's `data-zeros-keyboard-focus`).
+8. **Hover belongs to the surface; selected is a step above it.** Rows use
+   their surface's hover; sidebar, tree and layer selection is `bg2-highlight`
+   with `fg1`.
+9. **Two tab styles.** A segmented control switches a view; one strip tab
+   serves chrome, workbench and chat. A closable tab shows ✕ on hover or focus
+   over a fade in its own fill, so it never changes width.
+10. **Menus say what kind of choice they are.** One choice: a check at the end
+    of the chosen row. Several: a check column on the left. Destructive items
+    last, in `red-primary`. Shortcuts are Kbd chips, one per key.
+11. **Motion is color, opacity and transform**, 120ms ease-out, with reduced
+    motion respected.
+12. **Local and cloud are both first class.** Every surface states its Local
+    and cloud behavior; cloud lifecycle never enters a tab banner.
+
+### How the direction changes
+
+The direction is expected to move. A change lands once, at its owner, so the
+next agent inherits it instead of rediscovering it:
+
+1. **Source.** An approved board in the Zeros Design canvas, or an explicit
+   correction from the user. A one-off request for one screen is still a
+   direction when it would look wrong anywhere else.
+2. **Owner.** Change the token (`styles/tokens/`), the primitive
+   (`shared/ui/primitives/`, with a test) or the shared pattern that owns the
+   look, then migrate its callers. Never encode a direction as a caller
+   override.
+3. **Check.** Make it enforceable where possible: a `scripts/design-system/ui-policy.mjs`
+   rule, a contrast pairing, a primitive test or a ui-smoke assertion.
+   Otherwise mark it **judgment** in this guide.
+4. **Record.** Update this section, the rule's own section, and the page's
+   spec in `docs/design-implementation/` when it changes a page.
+5. **Teach.** Run `pnpm design:docs`, which regenerates the `zeros-ui` skills
+   from the agent brief above, and route the lesson through `zstack-learn`
+   (an `agents/zstack/changes/` fragment for guidance, an eval case when an
+   escaped mistake has a check).
+6. **Retire.** Remove the superseded variant or prop and prune paid debt with
+   `pnpm check:ui --prune-debt`, so two directions never coexist.
 
 ## 1. Workflow
 
@@ -117,6 +199,7 @@ The full guide is `docs/design-system.md`; token values are in
 | No `transition-all`; no `dark:` in components | `ui/transition-all`, `ui/dark-variant` |
 | `-fg` on `-bg` for tinted containers | `ui/status-pairing` |
 | No raw `<button>` / `<input>` / `<select>` / `<textarea>` outside `shared/ui/` | `ui/raw-control` |
+| A quiet icon-only action is `IconButton` (a ghost `Button` at an icon size is not) | `ui/icon-only-button` |
 | `bg-bg3` only on floating panels | `check:ui` (`BG3_SURFACE_FILES`) |
 | Every declared pairing meets its role's contrast floor in both themes (AA text, focus, and reviewed supplemental/boundary floors) | `shared/theme/__tests__/contrast-contract.test.ts` · `styles/policy/contrast-contract.json` |
 | No new `check:ui ignore` directives | `ui/ignore-directive` |
@@ -137,14 +220,16 @@ imports, following property paths such as `chip.cls`). The ledger counts
 | --- | --- | --- | --- | --- |
 | Canvas, active chat, dialogs, sheets | `bg-bg1` | `bg-bg1-hover` | `border-border1` | Dialogs sit on `bg-scrim` |
 | Inactive chat pane | `bg-(--pane-bg)` (= `bg0`) | — | — | Dims the fill only; text keeps full contrast |
-| Raised: composer, cards, hover cards | `bg-bg2` | `bg-bg2-hover` | `border-border2` | `bg-bg1-bright` for settings groups |
-| Floating: menus, popovers, selects, command | `bg-bg3` | `bg-bg3-hover` | `border-border2` | Lift = `shadow-[var(--shadow-dropdown)]` |
+| Raised: composer, tiles | `bg-bg2` | `bg-bg2-hover` | `border-border2` | `bg-bg1-bright` for cards and settings groups |
+| Floating: menus, selects, command, popovers, tooltips, hover cards, toasts | `bg-bg3` | `bg-bg3-hover` | `border-border2` | 12px corners, 4px inset, lift = `shadow-[var(--shadow-dropdown)]`; feature panels take the fill from `FLOATING_SURFACE` |
 | Repository sidebar | `bg-sidebar-bg` | `bg-sidebar-bg-hover` | `border-border2` | Settings navigation uses the default surfaces |
 | Grouped content on canvas | `bg-bg1-highlight` | — | — | A wash, never the only boundary |
 | Primary action | `bg-primary-button-bg` | `bg-primary-button-hover` | — | Text `text-primary-button-fg`; one per view |
 
 - Hover is **surface-scoped**: use the hover of the surface the element sits on.
-- **Selected = hover that stays** (sidebar rows, tabs, tool rows).
+- **Selected is a step above hover** for navigation: sidebar, tree and layer
+  rows use `bg-bg2-highlight` with `text-fg1`; the active tab is `bg-bg2`;
+  a menu's focused row keeps its hover.
 - `bg-bg3` is never a fill, chip, or selected state: it equals `bg1` in Light and
   the sidebar fill in Dark, so it vanishes or inverts on other surfaces.
 - `--inverted-bg` always pairs with `--inverted-fg`.
@@ -236,8 +321,11 @@ All, editing, portals and vendor surfaces across owners, placements and themes.
   focus, never hover.
   Desktop chrome shows this cue for deliberate Tab/Shift-Tab or a composite
   widget's navigation keys. Ordinary typing, modifiers, shortcuts and pointer
-  focus do not promote a button into keyboard-navigation styling. Text inputs
-  retain their editing cues. Use the shared `focus-visible:` variant (including
+  focus do not promote a button into keyboard-navigation styling. Fields
+  (Input, Textarea, InputGroup, the Select trigger) ring only when focus
+  arrived by keyboard: the tracker marks that focus `data-zeros-keyboard-focus`
+  and `FIELD_FOCUS` (`shared/ui/primitives/field.tsx`) reads it, so a click
+  or typing shows only the caret. Use the shared `focus-visible:` variant (including
   `group-has-focus-visible`); raw and shadow-root selectors must respect
   `data-zeros-focus-visible="false"`. The renderer's
   `apps/desktop/src/renderer/shared/ui/focus-navigation.ts` observes intent
@@ -260,21 +348,26 @@ All, editing, portals and vendor surfaces across owners, placements and themes.
 
 | Control height | Use | How |
 | --- | --- | --- |
-| 28px standard | Buttons, Select triggers, inputs, tabs | `Button` default (`sm`/`default`/`lg` are the same control); `size="icon"` for icon-only |
-| 24px compact | Dense rows: inline toolbars, trailing row actions, chips | `Button size="compact"` / `size="icon-compact"` |
+| 28px standard | Buttons, Select triggers, inputs, tabs, toolbar tools | `Button` default (`sm`/`default`/`lg` are the same control); `IconButton size="standard"` |
+| 24px compact | Dense rows: section actions, trailing row actions, dialog close | `Button size="compact"`, `IconButton size="compact"`, `Input size="compact"`, `SelectTrigger size="compact"` |
+| 20px inline | Actions embedded in rows and tabs, inline pills, badges | `IconButton` default, `Pill`, `Badge` |
 
 - One height per row (**judgment**, enforced by component APIs where possible).
-- Icons are 14px in standard controls and 12px in compact ones (Button sizes
-  them); empty states use `size-10`.
-- Primary (`variant="default"`) is the single focal action of a view; Secondary
-  is the default button; Ghost for icon-only and toolbar actions.
+- Icons are 14px in standard controls and 12px in compact and inline ones (the
+  primitive sizes them); empty states use a 32px `fg3` icon.
+- Primary (`variant="primary"`) is the single focal action of a view; Secondary
+  is the default button; Ghost for quiet text actions and a dialog's Cancel;
+  icon-only actions are `IconButton`. Toggles use `aria-pressed` on Secondary,
+  Ghost or IconButton; a toolbar's active tool is `pressedTone="tool"`.
 
-**Radius:** `rounded-sm` 4px (chips, badges, kbd, checkboxes) · `rounded-md` 6px
-(buttons, inputs, tabs, rows) · `rounded-lg` 8px (cards, dialogs, code blocks,
-toasts) · `rounded-full` (true circles). Derived surface recipes:
-`MENU_SURFACE_RADIUS` 16px (`shared/ui/menu-surface.ts`),
-`SETTINGS_GROUP_RADIUS` and `PROMPT_SURFACE_RADIUS` 12px,
-`COMPOSER_SURFACE_RADIUS` 18px. Inner radius = outer radius − inset.
+**Radius:** `rounded-sm` 4px (inline icon buttons, pills, badges, kbd,
+checkboxes, the inline-rename field) · `rounded-md` 6px (buttons, fields, tabs,
+tooltips, toolbar tools, rows) · `rounded-lg` 8px (menu rows, code blocks) ·
+`rounded-full` (true circles). Derived surface recipes: `MENU_SURFACE_RADIUS`
+12px (`shared/ui/menu-surface.ts`) for every floating surface and dialog, the
+same 12px for cards, tiles, `SETTINGS_GROUP_RADIUS` and `PROMPT_SURFACE_RADIUS`,
+`TOOLBAR_RADIUS` 10px, `COMPOSER_SURFACE_RADIUS` 18px. Inner radius = outer
+radius − inset.
 
 **Spacing** steps (×4px): 0 · 0.5 · 1 · 1.5 · 2 · 2.5 · 3 · 3.5 · 4 · 5 · 6 · 7 ·
 8 · 10 · 12, plus `px`. Half steps (2/6/10/14px) belong inside controls and dense
@@ -288,8 +381,9 @@ navigation stay quiet. Keep accessible names and keyboard shortcuts on controls
 even when removing their hover hint. Inspector icon buttons opt in with
 `tooltip`; a `label` alone supplies their accessible name.
 
-Tooltip text uses `text-3xxs` (12px), `px-2 py-1` (8px horizontal / 4px vertical)
-and `rounded-sm` (4px). Ordinary hints wait 1000ms; retained menu/popover hints
+A tooltip is a solid floating chip: `bg-bg3`, `border-border2`, the dropdown
+shadow, `rounded-md` (6px), 8 × 3 padding and `text-3xxs` (12/16) in `fg1`; a
+`shortcut` renders as Kbd chips. Ordinary hints wait 1000ms; retained menu/popover hints
 wait 1500ms and are suppressed while the popup is open. Each hint owns its hover
 delay so moving between neighbors never warms an instant-open group. Keyboard
 focus still exposes help, Escape dismisses it, and pointer-driven focus does
@@ -321,9 +415,9 @@ error. Cloud lifecycle remains in workspace details; failed connect/open actions
 use their existing toast. Feature notices such as shallow history and unsupported
 features remain eligible for the banner.
 Confirmed content for the exact workspace/target stays visible during refresh
-and failure. Without confirmed content and with a persistent status, show the tab icon (`size-10`,
-`strokeWidth={1}`, `text-muted-fg`) and one neutral sentence of about eight words
-or fewer (`text-fg2 text-xs`), centred with no buttons or repeated error text.
+and failure. Without confirmed content and with a persistent status, show the tab icon (`size-8`,
+`text-fg3`) and one neutral sentence of about eight words or fewer
+(`text-fg2 text-xs`), centred with no buttons or repeated error text.
 Legitimate non-error empty states may retain their creation/configuration action.
 Every tab's adapter defines pending, retryable and unavailable empty copy.
 Pending copy explains that content appears when the workspace is ready; Retry
@@ -365,16 +459,16 @@ failed retries remain visible until recovery. Hidden tabs and hidden documents
 run no status/retry timers; activation uses the original timestamp. Passive
 reads and connection admission never wake a cloud computer.
 
-Failures use `bg-red-bg text-red-fg` and a leading error icon. Self-resolving
-Local availability uses `bg-yellow-bg text-yellow-fg`
-and a calm spinner with reduced-motion support. Informational notices use a neutral
-info tone. Visible copy is short, human and sentence case; enum values, stack
+The banner is one 32px row on the panel's own background with a `border1`
+rule below. Its 16px icon alone carries the tone: a `red-primary` error icon
+for failures, the shared spinner for self-resolving Local availability (with
+reduced-motion support), and an `fg3` info icon for informational notices. Visible copy is short, human and sentence case; enum values, stack
 traces, `Error:` prefixes and transport details belong only in sanitised title
 diagnostics. Copy describes the workspace condition or “Couldn't load files” /
 “Files took too long to load”, never a false unconfigured/empty result.
 
-The banner message wraps to two lines with full copy in its title. A single
-compact ghost action stays visible at narrow widths; Retry has a tab-specific
+The banner message is one line that ends in an ellipsis, with full copy in its
+title. A single 24px Ghost action stays visible at narrow widths; Retry has a tab-specific
 accessible name, shares one flight across failed sources, and says “Retrying…”
 until settled, bounded to 30 seconds even if a source never settles. Keep the
 banner element/live region stable through retry and tone changes; announce
@@ -394,9 +488,15 @@ state, `aria-*`, `data-*` hooks) at the caller.
 | A surface that owns its descendants' hover/selected fill | `Surface` (`shared/ui/layout/surface.tsx`) | `kind="canvas" \| "raised" \| "floating" \| "sidebar"`, optional semantic `as`. Paints the surface fill and binds `--surface-hover` / `--surface-border` for descendants. `floating` is for real menus and popovers. |
 | Horizontal layout on the spacing scale | `Inline` (`shared/ui/layout/inline.tsx`) | `gap`, `align`, `justify`, `wrap`, `as`; flex with no implicit constraints. |
 | Vertical layout on the spacing scale | `Stack` (`shared/ui/layout/stack.tsx`) | Same props; adds `flex-col`. |
-| An icon-only action | `IconButton` | Required `label` (its accessible name); `size="inline"` = 20px action inside a row or tab, `size="compact"` = 24px action in a dense toolbar (Button `icon-compact` geometry), `size="standard"` = 28px chrome action (Button `icon-sm` geometry). Defaults: raised hover, 120ms color motion, `type="button"`; `asChild` keeps link semantics. |
-| Window chrome or a panel heading | `PanelHeader` | Required `size="window"` (40px, gap-1, px-2, `bg-bg1`) or `size="panel"` (36px, gap-2, px-3); border1 bottom divider; optional `div` / `section` / `header`. |
-| A compact tool disclosure or hover trigger | `ListRow` | Width-fit button row; the caller owns `aria-expanded`, `aria-controls`, labels, state, and events. |
+| An icon-only action | `IconButton` | Required `label` (its accessible name); `size="inline"` 20px (4px corners) inside a row or tab, `"compact"` 24px, `"standard"` 28px; the glyph size belongs to the size. One `bg2-highlight` hover, the keyboard ring at every size, `aria-pressed` as a neutral toggle or `pressedTone="tool"` for a toolbar's active tool; `asChild` keeps link semantics. Inside a `Toolbar` or `PanelHeader` the default size is standard (`IconButtonSizeContext`). |
+| A group of tools | `Toolbar` (+ `ToolbarSeparator`, `ToolbarText`) | One 36px bar of 28px tools: `bg2`, `border2`, 10px corners, `elevation="floating"` (dropdown shadow) or `"docked"`, `orientation`. One Tab stop: arrow keys, Home and End move between enabled tools. |
+| An action with related choices | `SplitButton` / `splitButtonClasses` | Two bordered halves, each with Button's focus ring; `variant="primary" \| "secondary"`, `size`, `loading` (the menu waits). |
+| A form field | `Field` around `Input`, `Textarea` or a Select trigger | One label (13/18 medium), one hint (12/16 `fg3`) that an error replaces (12/16 `red-primary`); wires `id`, `aria-describedby` and `aria-invalid`. `Input` has `size="compact"`, `appearance="inline"` (rename) and `mono`. |
+| A reference chip or a status tag | `Pill` · `Badge` | `Pill` is an interactive reference: `size="inline"` 20px or `"control"` 24px, `tone` neutral / failed / mode / gone / invalid. `Badge` is inert state: one 20px size, tinted `neutral` / `outline` / `success` / `failure` / `warning` / `info` / `merged`. |
+| A shortcut | `Kbd` · `KbdKeys` | An 18px `border2` chip on `bg2`; `KbdKeys keys="⌘⇧T"` draws one chip per key. Menus, tooltips and the command palette all use it. |
+| Window chrome or a panel heading | `PanelHeader` (+ `PanelHeaderTitle`, `PanelHeaderActions`) | Required `size="window"` (40px, gap-1, px-2, `bg-bg1`) or `size="panel"` (36px, gap-2, px-3); border1 bottom divider; a 13 medium `fg1` title that truncates; actions 2px apart. |
+| A compact tool disclosure or hover trigger | `ListRow` | 28px button row on `bg1-hover` with the keyboard ring; expanded adds no fill. The caller owns `aria-expanded`, `aria-controls`, labels, state, and events. |
+| A card or a tile | `Card` · `Tile` | `bg1-bright` / `bg2`, `border1`, 12px corners, 16 padding; a Tile's hover is `bg2-highlight` with `border3`. |
 | Every workbench tab body | `WorkbenchTabFrame` + `WorkbenchTabToolbar` (`shell/workbench/tab-status.tsx`) | Structural single status slot under portalled toolbar rows; preserves confirmed content. Supplies `WorkbenchEmptyState` only for a persistent condition without confirmed content; raw child fallbacks follow that same decision. The exhaustive `WorkbenchTabType` adapter requires copy/icon for future tabs. |
 | A tab's persistent read status | `useWorkbenchStatusSource` + `describeWorkbenchFailure` | Exact-owner primary/secondary errors get one silent automatic retry before feeding `WorkbenchTabBanner`; Local availability has priority and cloud connection/lifecycle errors are excluded. Action outcomes remain toasts. |
 
@@ -408,11 +508,8 @@ state, `aria-*`, `data-*` hooks) at the caller.
   standalone preview of a sidebar row needs the same Surface. Settings
   navigation keeps its own surface. Don't override a Surface's fill while its
   contextual tokens still describe another surface.
-- New callers use the defaults. `IconButton` `hover="subtle"`, its
-  `motion="colors" | "colors-hover" | "none"` options, window-header `h-9` /
-  `gap-2` overrides, and `ListRow` `transition-colors` overrides exist only to
-  keep migrated recipes identical; they are deprecated until the UI iteration
-  unifies them.
+- New callers use the defaults. Window-header `h-9` / `gap-2` overrides exist
+  only on pages not yet moved to the Zeros Design and are deprecated.
 - Don't add wrapper elements just to adopt a block. A new pattern component
   needs a real caller and a permanent markup contract; migrations prove the
   rendered tag and complete class set are unchanged (see
@@ -460,7 +557,10 @@ Design directory imports the app's stylesheets as style sources and previews
   `styles/tokens/zeros.resolver.json` defines the base set followed by the
   appearance modifier; CSS names and cascade order remain compatibility contracts.
 - **Primitive change:** in `shared/ui/primitives/` with a test in
-  `shared/ui/primitives/__tests__/`; keep the API compatible.
+  `shared/ui/primitives/__tests__/`; keep the API compatible, or migrate every
+  caller in the same change and retire the old name.
+- **Direction change:** follow §0, "How the direction changes": owner first,
+  then a check, the record, `pnpm design:docs` and `zstack-learn`.
 - **Paying debt:** fix the finding, then `pnpm check:ui --prune-debt`.
 - Owner review (`.github/CODEOWNERS`): `styles/`, `shared/ui/`,
   `scripts/design-system/`, and the docs in this family.

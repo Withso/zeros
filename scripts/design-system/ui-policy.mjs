@@ -173,6 +173,7 @@ export const KNOWN_RULES = new Set([
   ...CLASS_RULES.map((rule) => rule.id),
   ...GROUP_RULES.map((rule) => rule.id),
   "raw-control",
+  "icon-only-button",
   "ignore-directive",
 ]);
 
@@ -183,6 +184,47 @@ export const RAW_CONTROL_RULE = {
   message: (key) =>
     `Raw <${key}> outside shared/ui. Use the shared primitive (Button, Input, Select, Textarea, Checkbox, …) so size, focus, and states stay consistent; extend the primitive if it lacks a variant.`,
 };
+
+export const ICON_ONLY_BUTTON_RULE = {
+  id: "icon-only-button",
+  message: () =>
+    "A quiet icon-only action is an IconButton: its required `label` is the accessible name, and it owns the hover, focus ring and glyph size. Filled or bordered icon buttons stay Buttons.",
+};
+
+const ICON_SIZES = /^icon(?:-sm|-lg|-compact)?$/;
+
+/** `<Button variant="ghost" size="icon…">`: the IconButton job done by hand. */
+export function findIconOnlyButtons(file, source) {
+  const sourceFile = ts.createSourceFile(file, source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+  const findings = [];
+  const literal = (node, name) => {
+    for (const attribute of node.attributes.properties) {
+      if (
+        ts.isJsxAttribute(attribute) &&
+        attribute.name.getText(sourceFile) === name &&
+        attribute.initializer &&
+        ts.isStringLiteral(attribute.initializer)
+      ) {
+        return attribute.initializer.text;
+      }
+    }
+    return null;
+  };
+  const visit = (node) => {
+    if (
+      (ts.isJsxOpeningElement(node) || ts.isJsxSelfClosingElement(node)) &&
+      node.tagName.getText(sourceFile) === "Button" &&
+      literal(node, "variant") === "ghost" &&
+      ICON_SIZES.test(literal(node, "size") ?? "")
+    ) {
+      const { line } = sourceFile.getLineAndCharacterOfPosition(node.getStart(sourceFile));
+      findings.push({ key: "Button size=icon", line: line + 1 });
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(sourceFile);
+  return findings;
+}
 
 function toRel(root, abs) {
   return relative(root, abs).split(sep).join("/");
@@ -289,13 +331,23 @@ export function collectFindings({ root, files, contexts }) {
     if (!file.endsWith(".tsx")) continue;
     const rel = toRel(root, file);
     if (rel.startsWith("apps/desktop/src/renderer/shared/ui/")) continue;
-    for (const finding of findRawControls(file, readFileSync(file, "utf8"))) {
+    const source = readFileSync(file, "utf8");
+    for (const finding of findRawControls(file, source)) {
       findings.push({
         rule: RAW_CONTROL_RULE.id,
         file: rel,
         key: finding.key,
         line: finding.line,
         message: RAW_CONTROL_RULE.message(finding.key),
+      });
+    }
+    for (const finding of findIconOnlyButtons(file, source)) {
+      findings.push({
+        rule: ICON_ONLY_BUTTON_RULE.id,
+        file: rel,
+        key: finding.key,
+        line: finding.line,
+        message: ICON_ONLY_BUTTON_RULE.message(),
       });
     }
   }

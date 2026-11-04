@@ -9,67 +9,77 @@ description: "Zeros design system for renderer UI: use when building or changing
 
 You are changing Zeros renderer UI (`apps/desktop/src/renderer/`) or `styles/`.
 The full guide is `docs/design-system.md`; token values are in
-`docs/design-tokens.md`.
+`docs/design-tokens.md`; the current direction is its §0.
 
-1. **Compose, don't restyle.** Use the shared primitives in
+1. **Follow the direction (§0).** Few, quiet words: a title and at most one
+   line of description, sentence case. Rows in grouped cards, not boxes in
+   boxes. One banner, one message row and one empty state. One height per
+   row. Color only for meaning. Keyboard focus only for the keyboard. Each
+   page's approved boards are exported to `docs/design-implementation/`; read
+   the page's file before changing it.
+2. **Compose, don't restyle.** Use the shared primitives in
    `apps/desktop/src/renderer/shared/ui/primitives/` (Button, IconButton,
-   Input, Textarea, Select, Checkbox, Switch, Tabs, DropdownMenu, Popover,
-   Dialog, Tooltip, Kbd, Badge, Pill, PanelHeader, ListRow, …) and the layout
-   blocks in `shared/ui/layout/` (`Inline`, `Stack`, `Surface`). Missing a
-   variant? Extend the primitive in `shared/ui/` — never hand-build a
-   `<button>`, `<input>`, `<select>`, or `<textarea>` in feature code.
-2. **Tokens only.** Color comes from token utilities (`bg-bg1`, `text-fg2`,
+   SplitButton, Toolbar, Field, Input, Textarea, Select, Checkbox, RadioGroup,
+   Switch, Slider, Tabs, DropdownMenu, ContextMenu, Command, Popover, Dialog,
+   Tooltip, Kbd, Badge, Pill, PanelHeader, ListRow, Card, …), the layout blocks
+   in `shared/ui/layout/` (`Inline`, `Stack`, `Surface`) and `WorkbenchTabFrame`
+   for every tab body. Missing a variant? Extend the primitive in `shared/ui/`
+   with a test; never hand-build a `<button>`, `<input>`, `<select>` or
+   `<textarea>` in feature code, and never restyle a primitive from a caller.
+3. **Tokens only.** Color comes from token utilities (`bg-bg1`, `text-fg2`,
    `border-border1`, `text-red-primary`, …). No hex/rgb/hsl, no Tailwind palette
    colors (they do not compile), no arbitrary values such as `text-[14px]`,
-   `z-[1000]`, or `rounded-[18px]`. Token values live in
+   `z-[1000]` or `rounded-[18px]`; a derived value is written from a token
+   (`rounded-[calc(var(--radius-lg)*1.5)]`). Token values live in
    `styles/tokens/*.tokens.json`; the CSS token blocks are generated.
-3. **Surfaces decide hovers.** On `bg-bg1` hover with `hover:bg-bg1-hover`, on
-   `bg-bg2` with `hover:bg-bg2-hover`, in a menu with `hover:bg-bg3-hover`, in
-   the sidebar with `hover:bg-sidebar-bg-hover`. Inside a `Surface`, use
-   `hover:bg-(--surface-hover)` and the surface picks the right one. `bg-bg3`
-   is only for floating menus and popovers. Selected = the hover state that
-   stays.
-4. **Text tiers:** `text-fg1` emphasis/selected, `text-fg2` default, `text-fg3`
+4. **Surfaces decide hovers.** On `bg-bg1` hover with `hover:bg-bg1-hover`, on
+   `bg-bg2` with `hover:bg-bg2-hover`, in the sidebar with
+   `hover:bg-sidebar-bg-hover`; inside a `Surface`, `hover:bg-(--surface-hover)`.
+   Floating surfaces (menus, popovers, tooltips, hover cards, toasts) are
+   `bg-bg3` + `border-border2`, 12px corners, the dropdown shadow, a 4px inset
+   and 28px rows with 8px corners; only they use `bg-bg3`. Navigation
+   selection (sidebar, trees, layers) is `bg-bg2-highlight` with `text-fg1`, a
+   step above hover.
+5. **Text tiers:** `text-fg1` emphasis/selected, `text-fg2` default, `text-fg3`
    secondary and placeholders, `text-muted-fg` metadata. Never fake a tier with
    opacity (`text-fg2/60`). On a tinted `bg-<family>-bg`, text is
    `text-<family>-fg`.
-5. **Scales:** text `text-xxs` 10 · `text-2xxs` 11 · `text-3xxs` 12 · `text-xs`
-   13/18 · `text-sm` 14/20. Controls are 28px (standard) or 24px (Button
-   `size="compact"` / `"icon-compact"`) — never mix heights in one row. Radius
-   `rounded-sm` 4 · `rounded-md` 6 · `rounded-lg` 8. Spacing steps 0–12 (half
-   steps belong inside controls). Global layers `z-panel` · `z-chrome` ·
-   `z-dropdown` · `z-modal` · `z-toast`; only `z-0`…`z-2` locally.
-6. **Never** use `dark:` variants, `transition-all`, stock shadows such as
-   `shadow-lg` (floating surfaces use `shadow-[var(--shadow-dropdown)]`), or a
-   color as the only signal (pair status color with an icon or text). Don't
-   build class names at runtime (`text-${tone}`): the checks can't see them —
-   map states to complete class strings instead.
-   Persistent workbench content load failures use `WorkbenchTabFrame`'s
-   single persistent banner and neutral icon/line empty state. Action outcomes
-   use toasts. Cloud lifecycle and connection messages never enter the banner;
-   cloud connect/open failures keep their existing app toast. Local engine
-   failures use the banner, falling back to a toast when no frame is visible.
-   Report each read with
-   `useWorkbenchStatusSource`; one failed read gets a silent retry after 1.5
-   seconds. Local startup/reconnection has no pending banner; a Local gap
-   lasting 45 seconds exposes actionable failure.
-   Retain confirmed exact-key content and never add a second error paragraph or
-   Retry button.
-7. **Verify:** run `pnpm check:ui` (compiles every class, enforces the policy
+6. **Scales:** text `text-xxs` 10 · `text-2xxs` 11 · `text-3xxs` 12 · `text-xs`
+   13/18 · `text-sm` 14/20. Controls are 28 standard, 24 compact or 20 inline
+   (IconButton), with 14, 12 and 12px glyphs; never mix heights in one row.
+   Radius `rounded-sm` 4 (inline controls, pills, badges, kbd, checkboxes) ·
+   `rounded-md` 6 (buttons, fields, tabs, tooltips, tools) · `rounded-lg` 8
+   (menu rows, code blocks) · 12 derived (floating surfaces, dialogs, cards) ·
+   10 derived (toolbars). Spacing steps 0–12 (half steps belong inside
+   controls). Global layers `z-panel` · `z-chrome` · `z-dropdown` · `z-modal` ·
+   `z-toast`; only `z-0`…`z-2` locally.
+7. **States are the primitive's.** Hover, open, pressed (`aria-pressed`),
+   keyboard focus (`highlighted-bright` with the 3px halo; fields ring only on
+   keyboard focus), disabled (50%; `aria-disabled` keeps the reason tooltip)
+   and loading (`loading` on Button and SplitButton). One choice in a menu is
+   a check at the row's end, several a left check column; destructive rows
+   are red and last; shortcuts are Kbd chips.
+8. **Never** use `dark:` variants, `transition-all`, stock shadows such as
+   `shadow-lg`, or a color as the only signal. Don't build class names at
+   runtime (`text-${tone}`): map states to complete class strings. Persistent
+   workbench failures use `WorkbenchTabFrame`'s one 32px banner; action
+   outcomes use toasts; cloud lifecycle and connection messages never enter
+   the banner (§7, Feedback).
+9. **Verify:** run `pnpm check:ui` (compiles every class, enforces the policy
    ratchet) plus `pnpm typecheck`, `pnpm lint`, and the nearby tests. Fix
    findings; never raise `styles/policy/ui-debt.json`, add a `check:ui ignore`
    comment, or loosen `styles/policy/contrast-contract.json` to get green.
-   Token or contract changes: run `pnpm design:docs` and say so in the handoff.
-   Interaction, overlay, focus or popover work also runs `pnpm test:ui-smoke`
-   and `pnpm build:ui`. State, navigation, loading, tab, panel or list work
-   follows `docs/ui-interaction-performance.md`.
-8. **Local and cloud:** every surface renders correctly for Local and
-   organization workspaces with local and cloud placement, including each cloud
-   VM state (setting up, starting, sleeping, stopped, failed, archived). Follow
-   RULES.md §8 (the `zeros-workspaces` skill) and state both impacts in the PR.
-9. **Mockups:** design Zeros screens in `Zeros - Design/` (the Design tab),
-   whose frames import the app's own stylesheets live; never hand-copy
-   token values into a standalone HTML file. To implement a frame, map its
-   values to utilities (`var(--bg2)` is `bg-bg2`; a `--space-<step>` value is
-   that Tailwind step, such as `p-3`) and its controls to the shared
-   primitives instead of copying its CSS.
+   Token or contract changes: run `pnpm design:docs`. Interaction, overlay,
+   focus or popover work also runs `pnpm test:ui-smoke` and `pnpm build:ui`.
+   State, navigation, loading, tab, panel or list work follows
+   `docs/ui-interaction-performance.md`. Look at the result in both themes.
+10. **Local and cloud:** every surface renders correctly for Local and
+    organization workspaces with local and cloud placement, including each
+    cloud VM state. Follow RULES.md §8 (the `zeros-workspaces` skill) and state
+    both impacts in the PR.
+11. **Learn the direction.** When the user corrects or decides a look, it is a
+    direction, not a one-off: change the primitive or token that owns it,
+    record it in §0 with a check where one can enforce it, and route the
+    lesson through `zstack-learn` (§10). Mockups of Zeros live in
+    `Zeros - Design/`; implement a frame by mapping its values to utilities
+    and its controls to the shared primitives, never by copying its CSS.

@@ -4,11 +4,12 @@ For renderer UI, styling, tokens and mockups of Zeros itself. The `zeros-ui`
 skill holds the design-system rules; this playbook is the procedure around
 them.
 
-1. **Frame the change.** Name the surface and its owning component, and list
-   the states it must show: default, hover, selected, focus-visible, disabled,
-   loading, empty, error, and long or missing content. Cover Dark and Light,
-   and how Local and cloud workspaces differ, including each cloud VM state
-   (RULES.md §8).
+1. **Frame the change.** Read `docs/design-system.md` §0 (the direction) and,
+   when the page has one, its `docs/design-implementation/<page>.md`. Name the
+   surface and its owning component, and list the states it must show:
+   default, hover, selected, focus-visible, disabled, loading, empty, error,
+   and long or missing content. Cover Dark and Light, and how Local and cloud
+   workspaces differ, including each cloud VM state (RULES.md §8).
 2. **Design first when the look changes.** Mock it in `Zeros - Design/` (the
    Design tab) and follow its `rules.md`. Frames import the app's own
    stylesheets live as style sources and link `../tokens.css` for Design-only
@@ -33,7 +34,9 @@ them.
 5. **Implement with the system.** Compose the shared primitives and layout
    blocks, and map frame values to utilities (`var(--bg2)` is `bg-bg2`; a
    `--space-<step>` value is that Tailwind step) instead of copying frame
-   CSS. Lists, selection, navigation, tabs, panels and loading follow
+   CSS. Never restyle a primitive from a caller: extend it, with a test.
+   Fix drift from the direction in the files you touch and list the rest in
+   the receipt. Lists, selection, navigation, tabs, panels and loading follow
    `docs/ui-interaction-performance.md`.
 6. **Gates** (`zstack-verify`). Never get `pnpm check:ui` green by raising
    `styles/policy/ui-debt.json` or adding an ignore; prune paid debt with
@@ -49,4 +52,11 @@ them.
    chat/question/queue content, read-only editors, shadow-DOM diffs and explicit
    drag-and-drop, including Local and cloud owner switches.
 8. **Deliver and learn** (`integrate-pr.md`, `zstack-learn`). State the Local
-   and cloud impact. When a mockup, token or check drifted, encode the lesson.
+   and cloud impact. A look the user corrects or approves is a direction:
+   follow design-system.md §0, "How the direction changes". Move its owner
+   (token, primitive or pattern) and migrate callers, add the check that
+   holds it (a `ui-policy.mjs` rule, contrast pairing, primitive test or
+   ui-smoke assertion), record it in §0 and the page spec, and run
+   `pnpm design:docs` so the `zeros-ui` skills carry it. Retire what it
+   replaces; two directions never coexist. A mistake that escaped gets an eval
+   case.

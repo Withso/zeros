@@ -60,8 +60,8 @@ function WorkbenchEmptyStateContent({
       data-workbench-empty=""
       className="flex h-full min-h-0 flex-1 flex-col items-center justify-center gap-2 px-6 text-center"
     >
-      <Icon className="text-muted-fg size-10" strokeWidth={1} aria-hidden />
-      <p className="text-fg2 m-0 text-xs">
+      <Icon className="text-fg3 size-8" strokeWidth={1.25} aria-hidden />
+      <p className="text-fg2 m-0 text-xs leading-4.5">
         {message ?? adapter.empty.retryable}
       </p>
     </div>

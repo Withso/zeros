@@ -1,0 +1,9 @@
+{
+  "id": "toolbar-one-tab-stop",
+  "kind": "replay",
+  "area": "renderer-ui",
+  "fixedBy": "5059d93e0437d6c457a029b39574c8ab05d9478a",
+  "symptom": "Each toolbar tool was its own Tab stop with no arrow-key movement, and a disabled tool kept the default tabIndex, so enabling it would have added a second stop.",
+  "rule": "Toolbar is one Tab stop: arrow keys, Home and End move between enabled tools, and every unreachable tool carries tabIndex -1 (shared/ui/primitives/toolbar.tsx; docs/design-system.md §8).",
+  "check": "pnpm exec vitest run apps/desktop/src/renderer/shared/ui/primitives/__tests__/toolbar.test.ts"
+}
