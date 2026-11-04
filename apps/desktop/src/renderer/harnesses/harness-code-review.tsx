@@ -559,7 +559,8 @@ function Harness() {
           {(["preview", "edit", "diff", "conflict"] as const).map((item) => (
             <Button
               key={item}
-              variant={mode === item ? "secondary-on" : "ghost"}
+              variant="ghost"
+              aria-pressed={mode === item}
               data-testid={`review-mode-${item}`}
               onClick={() => setMode(item)}
             >

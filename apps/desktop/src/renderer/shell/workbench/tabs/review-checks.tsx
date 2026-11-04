@@ -124,7 +124,6 @@ export function ReviewChecksSection({
           <IconButton
             asChild
             label="Open logs"
-            motion="colors-hover"
             className="flex shrink-0"
           >
             <a href={c.detailsUrl} target="_blank" rel="noreferrer">

@@ -11,7 +11,6 @@ import {
 } from "react";
 import {
   Circle,
-  LoaderCircle,
   MessageSquarePlus,
   MoveUpRight,
   Pencil,
@@ -40,8 +39,7 @@ import { toast } from "../../shared/ui/primitives/elements";
 import { IconButton } from "../../shared/ui/primitives/icon-button";
 import { Input } from "../../shared/ui/primitives/input";
 import { Popover, PopoverAnchor, PopoverContent } from "../../shared/ui/primitives/popover";
-import { Separator } from "../../shared/ui/primitives/separator";
-import { Toolbar } from "../../shared/ui/primitives/toolbar";
+import { Toolbar, ToolbarSeparator } from "../../shared/ui/primitives/toolbar";
 import { Tooltip } from "../../shared/ui/primitives/tooltip";
 import { useWorkspaceStore } from "../../state/workspace-store";
 import { addAnnotationToChat, leaveSimulatorAnnotation } from "./simulator-annotation-actions";
@@ -503,12 +501,7 @@ function AnnotationColorMenu({
     <DropdownMenu>
       <Tooltip label="Color" delayDuration={1500}>
         <DropdownMenuTrigger asChild>
-          <IconButton
-            size="compact"
-            label={`Color: ${COLORS[color].label}`}
-            disabled={disabled}
-            className="data-[state=open]:bg-bg2-hover"
-          >
+          <IconButton label={`Color: ${COLORS[color].label}`} disabled={disabled}>
             <span aria-hidden className={cn("size-3 rounded-full", COLORS[color].swatch)} />
           </IconButton>
         </DropdownMenuTrigger>
@@ -561,11 +554,10 @@ export function SimulatorAnnotateToolbar({
         return (
           <Tooltip key={entry} label={label}>
             <IconButton
-              size="compact"
               label={label}
               aria-pressed={pressed}
+              pressedTone="tool"
               disabled={adding}
-              className={cn(pressed && "bg-bg2-hover text-fg1")}
               onClick={() => simulatorAnnotations.setTool(tabId, entry)}
             >
               <Icon aria-hidden />
@@ -574,10 +566,9 @@ export function SimulatorAnnotateToolbar({
         );
       })}
       <AnnotationColorMenu tabId={tabId} color={color} disabled={adding} />
-      <Separator orientation="vertical" className="mx-0.5 h-4" />
+      <ToolbarSeparator />
       <Tooltip label="Undo" shortcut="⌘Z">
         <IconButton
-          size="compact"
           label="Undo"
           disabled={adding || history.past.length === 0}
           onClick={() => simulatorAnnotations.undo(tabId)}
@@ -587,7 +578,6 @@ export function SimulatorAnnotateToolbar({
       </Tooltip>
       <Tooltip label="Redo" shortcut="⇧⌘Z">
         <IconButton
-          size="compact"
           label="Redo"
           disabled={adding || history.future.length === 0}
           onClick={() => simulatorAnnotations.redo(tabId)}
@@ -597,7 +587,6 @@ export function SimulatorAnnotateToolbar({
       </Tooltip>
       <Tooltip label="Clear">
         <IconButton
-          size="compact"
           label="Clear"
           disabled={adding || history.marks.length === 0}
           onClick={() => simulatorAnnotations.clear(tabId)}
@@ -605,23 +594,12 @@ export function SimulatorAnnotateToolbar({
           <Trash2 aria-hidden />
         </IconButton>
       </Tooltip>
-      <Separator orientation="vertical" className="mx-0.5 h-4" />
-      <Button
-        size="compact"
-        variant="default"
-        aria-busy={adding || undefined}
-        disabled={adding}
-        onClick={add}
-      >
-        {adding ? (
-          <LoaderCircle aria-hidden className="motion-safe:animate-spin" />
-        ) : (
-          <MessageSquarePlus aria-hidden />
-        )}
+      <ToolbarSeparator />
+      <Button variant="primary" loading={adding} onClick={add}>
+        <MessageSquarePlus aria-hidden />
         Add to chat
       </Button>
       <IconButton
-        size="compact"
         label="Close"
         disabled={adding}
         onClick={() => leaveSimulatorAnnotation(tabId)}

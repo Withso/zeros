@@ -70,8 +70,20 @@ export {
   TooltipProvider,
 } from "./tooltip";
 export { Tabs, TabsList, TabsTrigger, TabsContent } from "./tabs";
-export { Toolbar } from "./toolbar";
-export { SplitButton, type SplitButtonProps } from "./split-button";
+export {
+  TOOLBAR_SURFACE,
+  Toolbar,
+  ToolbarSeparator,
+  ToolbarText,
+  type ToolbarProps,
+} from "./toolbar";
+export {
+  SplitButton,
+  splitButtonClasses,
+  type SplitButtonProps,
+  type SplitButtonSize,
+  type SplitButtonVariant,
+} from "./split-button";
 export { ScrollArea, ScrollBar } from "./scroll-area";
 export { Switch } from "./switch";
 export { Slider } from "./slider";
@@ -105,8 +117,6 @@ export {
   SelectTrigger,
   SelectValue,
   selectTriggerClassName,
-  splitTriggerClassNames,
-  splitTriggerClasses,
 } from "./select";
 export {
   InputGroup,

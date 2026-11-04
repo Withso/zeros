@@ -107,42 +107,6 @@ function selectTriggerClassName(
   return cn(SELECT_TRIGGER_BASE, SELECT_TRIGGER_WIDTH[width], className)
 }
 
-/** The same dropdown chrome, split into a primary ACTION segment and a
- *  chevron MENU segment ("⑃ Create PR │ ▾"). The shell carries the border,
- *  6px corners and the hover/open border lift; each segment paints its own
- *  bg2-highlight hover so the two halves read as separate targets. Text,
- *  padding and icon sizes are the single trigger's, so a split control sits
- *  beside a Select at identical height. */
-const splitTriggerClassNames = {
-  shell:
-    "inline-flex w-fit shrink-0 items-stretch overflow-hidden rounded-md border border-border3 bg-transparent transition-[border-color] hover:border-border4 has-[[data-state=open]]:border-border4 has-[:disabled]:hover:border-border3",
-  main: "inline-flex items-center gap-1 py-1 pr-1.5 pl-1.5 text-xs leading-4.5 whitespace-nowrap text-fg1 outline-none transition-[color,background-color] enabled:hover:bg-bg2-highlight focus-visible:bg-bg2-highlight disabled:cursor-not-allowed disabled:opacity-50 [&_svg]:pointer-events-none [&_svg]:shrink-0 [&_svg:not([class*='size-'])]:size-3.5",
-  chevron:
-    "inline-flex items-center justify-center border-l border-border3 px-1 text-fg2 outline-none transition-[color,background-color] enabled:hover:bg-bg2-highlight focus-visible:bg-bg2-highlight data-[state=open]:bg-bg2-highlight disabled:cursor-not-allowed disabled:opacity-50 [&_svg]:pointer-events-none [&_svg]:size-3.5 [&_svg]:shrink-0 [&_svg]:opacity-50",
-} as const
-
-/** Primary keeps the split geometry and independent segment hovers. Its
- * opaque inset focus outline remains visible inside the clipped shell. */
-function splitTriggerClasses(
-  appearance: "secondary" | "primary" = "secondary",
-  size: "default" | "compact" = "default",
-) {
-  const classes = size === "compact"
-    ? {
-        ...splitTriggerClassNames,
-        shell: cn(splitTriggerClassNames.shell, "h-6"),
-        main: cn(splitTriggerClassNames.main, "py-0"),
-      }
-    : splitTriggerClassNames
-  if (appearance === "secondary") return classes
-  const focus = "focus-visible:outline-solid focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-highlighted-bright"
-  return {
-    shell: cn(classes.shell, "border-primary-button-bg bg-primary-button-bg hover:border-primary-button-bg has-[[data-state=open]]:border-primary-button-bg has-[:disabled]:hover:border-primary-button-bg"),
-    main: cn(classes.main, "text-primary-button-fg enabled:hover:bg-primary-button-hover focus-visible:bg-primary-button-hover", focus),
-    chevron: cn(classes.chevron, "text-primary-button-fg enabled:hover:bg-primary-button-hover focus-visible:bg-primary-button-hover data-[state=open]:bg-primary-button-hover", focus),
-  }
-}
-
 const SelectTrigger = React.forwardRef<
   HTMLButtonElement,
   React.ComponentPropsWithoutRef<typeof SelectPrimitive.Trigger> & {
@@ -361,6 +325,4 @@ export {
   SelectTrigger,
   SelectValue,
   selectTriggerClassName,
-  splitTriggerClassNames,
-  splitTriggerClasses,
 }

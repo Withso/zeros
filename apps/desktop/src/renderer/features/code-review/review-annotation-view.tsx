@@ -108,7 +108,7 @@ export function ReviewAnnotationView({
                 <div className="text-fg2 flex items-center gap-1">
                   {workspaceCommentsAvailable && <Button
                     type="button"
-                    variant={selection.postToPr ? "ghost" : "secondary-on"}
+                    variant="ghost"
                     aria-pressed={!selection.postToPr}
                     onClick={() => onSelect({ ...selection, postToPr: false })}
                   >
@@ -116,7 +116,7 @@ export function ReviewAnnotationView({
                   </Button>}
                   <Button
                     type="button"
-                    variant={selection.postToPr ? "secondary-on" : "ghost"}
+                    variant="ghost"
                     disabled={!postComment}
                     aria-pressed={!!selection.postToPr}
                     onClick={() => onSelect({ ...selection, postToPr: true })}

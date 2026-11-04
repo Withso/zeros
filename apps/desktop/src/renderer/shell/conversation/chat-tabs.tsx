@@ -620,7 +620,6 @@ export function ChatTabs({
           <DropdownMenuTrigger asChild>
             <IconButton
               size="standard"
-              hover="subtle"
               className="shrink-0"
               label="Pane options"
             >

@@ -420,7 +420,6 @@ function OpenInDropdown({ path }: OpenInDropdownProps) {
       <Tooltip label={`Open in ${defaultApp.name} (⌘O)`}>
         <IconButton
           size="standard"
-          hover="subtle"
           className="shrink-0"
           disabled={!menu.canOpenLocally}
           onClick={() => void openWith(defaultApp)}

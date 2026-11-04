@@ -207,7 +207,7 @@ function TranscriptPill({
     <Button
       ref={pillRef}
       type="button"
-      variant={attached ? "secondary-on" : "secondary"}
+      variant="secondary"
       size="sm"
       aria-pressed={attached}
       aria-haspopup="menu"

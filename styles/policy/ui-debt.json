@@ -583,9 +583,6 @@
       "apps/desktop/src/renderer/shared/ui/primitives/badge.tsx": {
         "shadow": 2
       },
-      "apps/desktop/src/renderer/shared/ui/primitives/button.tsx": {
-        "shadow": 2
-      },
       "apps/desktop/src/renderer/shared/ui/primitives/card.tsx": {
         "shadow": 1
       },

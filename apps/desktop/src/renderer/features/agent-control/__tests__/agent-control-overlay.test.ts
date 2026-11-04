@@ -97,7 +97,7 @@ describe("AgentControlOverlayFrame", () => {
       /^<div class="flex h-screen items-end justify-center px-6 pb-4">/,
     );
     expect(markup).toContain('role="toolbar"');
-    expect(markup).toContain(">Codex</span>");
+    expect(markup).toContain(">Codex</strong>");
     expect(markup).toContain(">Typing…</span>");
     expect(markup).toContain('aria-label="Stop Codex"');
     expect(markup).toContain('aria-keyshortcuts="Escape"');

@@ -741,7 +741,6 @@ export const TurnFooter = memo(function TurnFooter({
             onClick={onCopy}
             disabled={!outputText}
             label={copied ? "Copied" : "Copy output"}
-            motion="colors"
             className={cn("flex shrink-0", !outputText && "cursor-default")}
           >
             {copied ? (
@@ -757,7 +756,6 @@ export const TurnFooter = memo(function TurnFooter({
               <IconButton
                 type="button"
                 label="Turn actions"
-                motion="colors"
                 className="flex shrink-0"
               >
                 <MoreHorizontal className="size-4" strokeWidth={2} />

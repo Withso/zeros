@@ -19,8 +19,7 @@ import { cn } from "../../shared/ui/cn";
 import { Button } from "../../shared/ui/primitives/button";
 import { toast } from "../../shared/ui/primitives/elements";
 import { IconButton } from "../../shared/ui/primitives/icon-button";
-import { Separator } from "../../shared/ui/primitives/separator";
-import { Toolbar } from "../../shared/ui/primitives/toolbar";
+import { Toolbar, ToolbarSeparator } from "../../shared/ui/primitives/toolbar";
 import { Tooltip } from "../../shared/ui/primitives/tooltip";
 import {
   readSimulatorAppearance,
@@ -174,7 +173,6 @@ export function SimulatorIsland({
       {device.platform === "android" && (
         <Tooltip label="Back">
           <IconButton
-            size="compact"
             label="Back"
             disabled={!usable}
             onClick={() => push({ kind: "button", button: "back" })}
@@ -185,7 +183,6 @@ export function SimulatorIsland({
       )}
       <Tooltip label="Home">
         <IconButton
-          size="compact"
           label="Home"
           disabled={!usable}
           onClick={() => push({ kind: "button", button: "home" })}
@@ -195,7 +192,6 @@ export function SimulatorIsland({
       </Tooltip>
       <Tooltip label="Rotate">
         <IconButton
-          size="compact"
           label="Rotate"
           aria-busy={turning || undefined}
           disabled={!usable || turning}
@@ -208,10 +204,9 @@ export function SimulatorIsland({
           )}
         </IconButton>
       </Tooltip>
-      <Separator orientation="vertical" className="mx-0.5 h-4" />
+      <ToolbarSeparator />
       <Tooltip label="Screenshot">
         <IconButton
-          size="compact"
           label="Screenshot"
           aria-busy={shooting || undefined}
           disabled={!booted || shooting}
@@ -223,7 +218,6 @@ export function SimulatorIsland({
       {record.recording ? (
         <Tooltip label="Stop recording">
           <Button
-            size="compact"
             variant="ghost"
             aria-label={`Stop recording ${formatRecordingElapsed(record.elapsed)}`}
             data-simulator-recording=""
@@ -237,7 +231,6 @@ export function SimulatorIsland({
       ) : (
         <Tooltip label={record.busy === "saving" ? "Saving recording" : "Record"}>
           <IconButton
-            size="compact"
             label={record.busy === "saving" ? "Saving recording" : "Record"}
             aria-busy={record.busy !== null || undefined}
             disabled={!booted || record.busy !== null}
@@ -253,7 +246,6 @@ export function SimulatorIsland({
       )}
       <Tooltip label="Annotate">
         <IconButton
-          size="compact"
           label="Annotate"
           data-simulator-annotate-start=""
           aria-busy={freezing || undefined}
@@ -267,14 +259,12 @@ export function SimulatorIsland({
           )}
         </IconButton>
       </Tooltip>
-      <Separator orientation="vertical" className="mx-0.5 h-4" />
+      <ToolbarSeparator />
       <Tooltip label="Dark appearance">
         <IconButton
-          size="compact"
           label="Dark appearance"
           aria-pressed={dark}
           disabled={!usable}
-          className={cn(dark && "bg-bg2-hover text-fg1")}
           onClick={() => change(dark ? "light" : "dark")}
         >
           <Moon aria-hidden />

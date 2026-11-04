@@ -1598,7 +1598,6 @@ function RowBtn({
           e.stopPropagation();
           onClick();
         }}
-        motion="colors"
         className={cn("flex disabled:opacity-30", className)}
       >
         {children}

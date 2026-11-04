@@ -783,7 +783,7 @@ export const ResourceMonitor = memo(function ResourceMonitor() {
               >
                 <Button
                   type="button"
-                  variant={includesTerminal ? "secondary-on" : "ghost"}
+                  variant="ghost"
                   size="icon-sm"
                   aria-label={terminalControlLabel}
                   aria-pressed={includesTerminal}
@@ -803,7 +803,7 @@ export const ResourceMonitor = memo(function ResourceMonitor() {
               >
                 <Button
                   type="button"
-                  variant={stack ? "secondary-on" : "ghost"}
+                  variant="ghost"
                   size="icon-sm"
                   aria-label={
                     stack
@@ -822,7 +822,7 @@ export const ResourceMonitor = memo(function ResourceMonitor() {
               >
                 <Button
                   type="button"
-                  variant={tree ? "secondary-on" : "ghost"}
+                  variant="ghost"
                   size="icon-sm"
                   aria-label={tree ? "Use flat view" : "Use tree view"}
                   aria-pressed={tree}

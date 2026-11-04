@@ -164,27 +164,28 @@ describe("the menu is reachable without a pointer", () => {
   });
 });
 
-describe("the added state is a Button variant, not an override", () => {
-  it("selects a variant rather than restyling with className", () => {
-    expect(pills()).toContain(
-      'variant={attached ? "secondary-on" : "secondary"}',
-    );
+describe("the added state is the Button's pressed state, not an override", () => {
+  it("presses a Secondary button rather than restyling with className", () => {
+    expect(pills()).toContain('variant="secondary"');
+    expect(pills()).toContain("aria-pressed={attached}");
   });
 
-  it("the variant exists and lifts BOTH fill and border", () => {
+  it("the pressed state lifts BOTH fill and border", () => {
     // Three independent signals (fill, border, the brand glyph) so it survives
     // the light theme and does not depend on colour alone.
     const src = button();
-    expect(src).toContain('"secondary-on":');
-    expect(src).toContain("border-border4");
-    expect(src).toContain("bg-bg2-highlight");
+    expect(src).toContain("aria-pressed:border-border4");
+    expect(src).toContain("aria-pressed:bg-bg2-highlight");
   });
 
   it("does not overload the focus ring token for the pressed state", () => {
     // highlighted-bright IS the focus signal. Using it here would make a
     // focused-but-off pill and an on-but-unfocused pill look identical.
-    const variant = button().split('"secondary-on":')[1]?.split("},")[0] ?? "";
-    expect(variant).not.toContain("highlighted-bright");
+    const pressed = button()
+      .split(/\s+/)
+      .filter((token) => token.includes("aria-pressed:"));
+    expect(pressed.length).toBeGreaterThan(0);
+    expect(pressed.join(" ")).not.toContain("highlighted-bright");
   });
 
   it("never fills a pill with the Primary surface", () => {
