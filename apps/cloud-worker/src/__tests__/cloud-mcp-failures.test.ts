@@ -5,6 +5,7 @@ import { afterEach, expect, it, vi } from "vitest";
 import type { AgentMessage } from "@zeros/protocol/agent-messages";
 import { CloudWorker } from "../worker";
 import { SessionStore } from "../sessions/session-store";
+import { AgentInteractions } from "../interactions";
 import { CLIENT_A, FakeDriver, FakeRelay, WORKSPACE_KEY, browserFrame, config } from "./worker-fixtures";
 
 const cleanups: Array<() => Promise<void>> = [];
@@ -115,4 +116,30 @@ it("drops an in-flight failure after the requesting execution is stopped and rep
   reject(Object.assign(new Error("late"), { status: 403 }));
   await failure;
   expect(f.notices()).toEqual([]);
+});
+
+it("does not await input cancellation from the failed history event's own queue", async () => {
+  const f = await setup();
+  await f.relay.receive({ ...f.configuration, agentInteractions: 1, loginRevision: "1" });
+  const opened = await f.open("a");
+  if (opened.type !== "AGENT_SESSION_CREATED") throw new Error("Expected session");
+  const id = opened.session.sessionId, driver = f.drivers[0];
+  await f.request("AGENT_PROMPT", { chatId: "a", executionId: id, sessionId: id, prompt: [{ type: "text", text: "ask" }] });
+  await expect.poll(() => driver.prompts.length).toBe(1);
+  const pending = driver.opened!.onQuestion!({ sessionId: id, questionId: "ask", nativeRequestId: "ask", source: "native_rpc", blocking: true,
+    questions: [{ id: "ask", prompt: "Continue?", options: [], allowOther: true }] });
+  await expect.poll(() => f.relay.bridge("AGENT_QUESTION_REQUEST").length).toBe(1);
+  let release!: () => void;
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  const dismiss = vi.spyOn(AgentInteractions.prototype, "dismiss").mockImplementationOnce(() => gate);
+  const fold = vi.spyOn(SessionStore.prototype, "fold").mockRejectedValueOnce(new Error("fixture history write failure"));
+  let drained = false;
+  const failure = f.fail(driver).then(() => { drained = true; });
+  try {
+    await expect.poll(() => fold.mock.calls.length).toBe(1);
+    await expect.poll(() => drained).toBe(true);
+  } finally {
+    release(); await failure; dismiss.mockRestore(); fold.mockRestore(); await pending;
+  }
+  expect(driver.interrupts).toBe(1);
 });

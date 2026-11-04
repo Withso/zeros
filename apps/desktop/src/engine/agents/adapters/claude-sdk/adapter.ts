@@ -1,3 +1,5 @@
+import { claudePermissionMode as toSdkPermissionMode, claudeRequiresExplicitApproval } from "@zeros/protocol/agent-events";
+import { buildClaudeQuestionRequest, buildAskUserQuestionOutput, formatAnswerForClaude } from "@zeros/protocol/agent-events";
 import { TurnUsageLedger } from "../shared/turn-usage";
 import type { SteerOutcome } from "@zeros/protocol/messages";
 import { FallbackModelSelection } from "../shared/fallback-model-selection";
@@ -67,7 +69,6 @@ import {
   type ElicitationResult,
   type EffortLevel,
   type Options,
-  type PermissionMode,
   type PermissionResult,
   type PermissionUpdate,
   type Query,
@@ -110,10 +111,8 @@ import {
   type NewSessionResponse,
   type PromptResponse,
   type ProviderCredentialUpdate,
-  type QuestionAnswer,
   type QuestionRequest,
   type QuestionResponse,
-  type QuestionSpec,
   type RequestPermissionRequest,
   type RequestPermissionResponse,
   type StopReason,
@@ -223,23 +222,6 @@ function hasExplicitClaudeCredential(env: Record<string, string> | undefined) {
 }
 
 type ClaudeMode = "default" | "plan" | "accept-edits" | "auto" | "bypass";
-
-/** Our kebab mode ids → the SDK's PermissionMode tokens. */
-function toSdkPermissionMode(mode: ClaudeMode): PermissionMode {
-  switch (mode) {
-    case "accept-edits":
-      return "acceptEdits";
-    case "bypass":
-      return "bypassPermissions";
-    case "plan":
-      return "plan";
-    case "auto":
-      // SDK 'auto' — a model classifier approves/denies each permission prompt.
-      return "auto";
-    default:
-      return "default";
-  }
-}
 
 /** File-modification tools. For these, the SDK's only "always allow" suggestion
  *  is `setMode:"acceptEdits"` (no scoped rule), so "Allow for this project"
@@ -385,101 +367,6 @@ interface PendingElicitation {
   detach: () => void;
 }
 
-/** AskUserQuestionInput / dialog payload → the canonical QuestionRequest. */
-function buildClaudeQuestionRequest(
-  sessionId: string,
-  questionId: string,
-  toolUseID: string | undefined,
-  input: Record<string, unknown>,
-): QuestionRequest {
-  const rawQuestions = Array.isArray(input?.questions)
-    ? (input.questions as Array<Record<string, unknown>>)
-    : [];
-  const questions: QuestionSpec[] = rawQuestions.map((q, qi) => ({
-    id: `q${qi}`,
-    prompt: typeof q?.question === "string" ? q.question : "",
-    header: typeof q?.header === "string" ? q.header : undefined,
-    multiSelect:
-      typeof q?.multiSelect === "boolean" ? q.multiSelect : undefined,
-    options: (Array.isArray(q?.options)
-      ? (q.options as Array<Record<string, unknown>>)
-      : []
-    ).map((o, oi) => ({
-      id: `o${oi}`,
-      label: typeof o?.label === "string" ? o.label : String(o?.label ?? ""),
-      description:
-        typeof o?.description === "string" ? o.description : undefined,
-      preview: typeof o?.preview === "string" ? o.preview : undefined,
-    })),
-    // Claude auto-provides an "Other" free-text option (per the tool schema).
-    allowOther: true,
-  }));
-  return {
-    sessionId: sessionId as never,
-    questionId,
-    nativeRequestId: toolUseID ?? questionId,
-    toolCallId: toolUseID,
-    source: "native_dialog",
-    blocking: true,
-    // raiseQuestion arms its auto-skip timer right after building this, so
-    // "now + timeout" is the moment settleQuestion(dismissed) will fire.
-    expiresAt: Date.now() + PERMISSION_RESPONSE_TIMEOUT_MS,
-    questions,
-  };
-}
-
-/** Map a canonical answer for `q${i}` back to the original option labels. */
-function claudeAnswerLabels(
-  rawQuestion: Record<string, unknown> | undefined,
-  answer: QuestionAnswer | undefined,
-): string[] {
-  const options = Array.isArray(rawQuestion?.options)
-    ? (rawQuestion!.options as Array<Record<string, unknown>>)
-    : [];
-  const labels = (answer?.selectedOptionIds ?? []).map((id) => {
-    const oi = Number(String(id).replace(/^o/, ""));
-    const label = options[oi]?.label;
-    return typeof label === "string" ? label : String(id);
-  });
-  if (answer?.freeText) labels.push(answer.freeText);
-  return labels;
-}
-
-/** Reconstruct the SDK's AskUserQuestionOutput (echo questions + keyed answers)
- *  for the onUserDialog `{completed, result}` path. */
-function buildAskUserQuestionOutput(
-  input: Record<string, unknown>,
-  answers: QuestionAnswer[],
-): Record<string, unknown> {
-  const rawQuestions = Array.isArray(input?.questions)
-    ? (input.questions as Array<Record<string, unknown>>)
-    : [];
-  const answerMap: Record<string, string> = {};
-  rawQuestions.forEach((q, qi) => {
-    const a = answers.find((x) => x.questionId === `q${qi}`);
-    answerMap[typeof q?.question === "string" ? q.question : `q${qi}`] =
-      claudeAnswerLabels(q, a).join(", ");
-  });
-  return { questions: rawQuestions, answers: answerMap };
-}
-
-/** Human-readable answer string for the canUseTool deny-message (B) path. */
-function formatAnswerForClaude(
-  input: Record<string, unknown>,
-  answers: QuestionAnswer[],
-): string {
-  const rawQuestions = Array.isArray(input?.questions)
-    ? (input.questions as Array<Record<string, unknown>>)
-    : [];
-  const lines = rawQuestions.map((q, qi) => {
-    const a = answers.find((x) => x.questionId === `q${qi}`);
-    const prompt =
-      typeof q?.question === "string" ? q.question : `Question ${qi + 1}`;
-    const value = claudeAnswerLabels(q, a).join(", ") || "(no selection)";
-    return `- ${prompt} → ${value}`;
-  });
-  return `The user answered your question(s):\n${lines.join("\n")}`;
-}
 
 interface WorkflowApprovalPhase {
   title: string;
@@ -3341,14 +3228,11 @@ export class ClaudeSdkAdapter implements AgentAdapter {
         isZerosControlTool(toolName, zerosControlServers, options.mcpServer) &&
         // Explicit user and SDK approval requirements win for every control
         // namespace, including browser and computer actions.
-        !(
-          (options.matchedAskRule != null || options.defaultToNo === true || options.suppressAlwaysAllowRule === true)
-        )
+        !claudeRequiresExplicitApproval(options)
       ) {
         return Promise.resolve({ behavior: "allow", updatedInput: input });
       }
-      const requiresExplicitApproval =
-        options.matchedAskRule != null || options.defaultToNo === true || options.suppressAlwaysAllowRule === true;
+      const requiresExplicitApproval = claudeRequiresExplicitApproval(options);
       const permissionId = randomUUID();
       const toolCallId = options.toolUseID ?? `${Date.now()}`;
       // "Allow for this project" persists an ALLOW RULE to localSettings
@@ -3890,6 +3774,7 @@ export class ClaudeSdkAdapter implements AgentAdapter {
       questionId,
       toolUseID,
       input,
+      Date.now() + PERMISSION_RESPONSE_TIMEOUT_MS,
     );
     const timer = setTimeout(() => {
       this.settleQuestion(state, questionId, { outcome: "dismissed" });

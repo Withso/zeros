@@ -330,6 +330,21 @@ describe("cloud v2 relay", () => {
       }
     });
 
+  it.each(["", "agent-interactions-v10", "mcp-v1, agent-interactions-v1"])("gates interaction config on the actual worker handshake: %s", async features => {
+    workerServer.on("headers", headers => { headers.push(`X-Zeros-Worker-Features: ${features}`); });
+    const original = deps.config;
+    deps.config = async workspace => ({ ...await original(workspace), agentInteractions: 1 });
+    const frames: any[] = [];
+    workerServer.on("connection", ws => ws.on("message", raw => frames.push(JSON.parse(String(raw)))));
+    await app(); await vi.waitFor(() => expect(frames.filter(frame => frame.t === "config")).toHaveLength(1));
+    loginRevision = "1"; await relay.refreshLogins();
+    await vi.waitFor(() => expect(frames.filter(frame => frame.t === "config")).toHaveLength(2));
+    for (const frame of frames.filter(frame => frame.t === "config")) {
+      if (features.split(",").some(feature => feature.trim() === "agent-interactions-v1")) expect(frame.agentInteractions).toBe(1);
+      else expect(frame).not.toHaveProperty("agentInteractions");
+    }
+  });
+
   it("settles only prompts forwarded to a lost worker and preserves prompts queued for its successor", async () => {
     const forwarded: any[][] = [];
     workerServer.on("connection", ws => { const frames: any[] = []; forwarded.push(frames); ws.on("message", raw => frames.push(JSON.parse(String(raw)))); });

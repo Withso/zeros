@@ -15,6 +15,8 @@ export class Channel<T> implements AsyncIterable<T> {
 export class FakeQuery extends Channel<unknown> {
   closed = false; interrupts = 0; models: string[] = [];
   flagSettings: Record<string, unknown>[] = [];
+  modes: string[] = [];
+  async setPermissionMode(mode: string): Promise<void> { this.modes.push(mode); }
   private readonly input: AsyncIterator<SDKUserMessage>;
   constructor(readonly args: { prompt: AsyncIterable<SDKUserMessage>; options: Options }) { super(); this.input = args.prompt[Symbol.asyncIterator](); }
   async read(): Promise<SDKUserMessage> { const next = await this.input.next(); if (next.done) throw new Error("Input ended"); return next.value; }

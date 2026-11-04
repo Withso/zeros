@@ -1042,16 +1042,17 @@ function AgentChatBody({
   // none.
   const [editingMessageId, setEditingMessageId] = useState<string | null>(null);
 
-  // Plan maps to the agent's own plan-shaped mode (Claude "plan", Codex
-  // "read-only"). Before the live session advertises modes, use the selected
-  // agent's static modes so the menu shows its real vocabulary; the live modes
-  // reconcile by id on bind.
+  // Cloud modes require the exact session's acknowledgement. Local retains
+  // its static vocabulary before binding.
+  const cloudModes = isCloudWorkspace(chatThread?.folder ?? session.cwd);
   const effectiveModes = useMemo(
     () =>
-      session.availableModes.length > 0
+      cloudModes && chatThread?.agentId && session.agentId !== chatThread.agentId
+        ? []
+        : cloudModes || session.availableModes.length > 0
         ? session.availableModes
         : staticModesForAgent(session.agentId ?? chatThread?.agentId ?? null),
-    [session.availableModes, session.agentId, chatThread?.agentId],
+    [cloudModes, session.availableModes, session.agentId, chatThread?.agentId],
   );
 
   const chatAgentId = chatThread?.agentId ?? session.agentId ?? null;
@@ -1066,7 +1067,7 @@ function AgentChatBody({
   // The agent's own default/ask mode id — where we land when EXITING plan with
   // nothing remembered, or when a posture resolves to "no explicit target".
   const defaultAgentModeId =
-    effectiveModes.find((m) => /default|^ask$/i.test(m.id))?.id ?? "default";
+    effectiveModes.find((m) => cloudModes ? /^(bypass|full-access|agent)$/.test(m.id) : /default|^ask$/i.test(m.id))?.id ?? "default";
 
   // The "Auto" (safe default) native mode id for this agent — where a chat that
   // leaves Plan with nothing remembered lands (e.g. a born-in-plan chat), so it
@@ -1083,7 +1084,7 @@ function AgentChatBody({
   // mode (e.g. Auto), then switch to the agent's plan/read-only mode.
   const enterPlan = useCallback(
     () => {
-      if (!chatThread) return;
+      if (!chatThread || cloudModes && !effectiveModes.some(mode => mode.id === planAgentModeId)) return;
       const currentId =
         session.currentModeId ?? chatThread.lastModeId ?? autoAgentModeId;
       void session.setMode?.(planAgentModeId);
@@ -1091,7 +1092,7 @@ function AgentChatBody({
       updateChatSettings({
         lastModeId: planAgentModeId,
         permissionMode: "plan",
-        ...(currentId && !PLAN_MODE_RX.test(currentId)
+        ...(currentId && !PLAN_MODE_RX.test(currentId) && (!cloudModes || effectiveModes.some(mode => mode.id === currentId))
           ? { prePlanModeId: currentId }
           : {}),
       });
@@ -1103,6 +1104,8 @@ function AgentChatBody({
       session.currentModeId,
       planAgentModeId,
       autoAgentModeId,
+      cloudModes,
+      effectiveModes,
       updateChatSettings,
     ],
   );
@@ -1112,7 +1115,9 @@ function AgentChatBody({
   // re-plans.
   const exitPlanMode = useCallback(() => {
     if (!chatThread || !isPlanMode) return;
-    const backId = chatThread.prePlanModeId ?? autoAgentModeId;
+    const backId = chatThread.prePlanModeId && (!cloudModes || effectiveModes.some(mode => mode.id === chatThread.prePlanModeId))
+      ? chatThread.prePlanModeId : autoAgentModeId;
+    if (cloudModes && !effectiveModes.some(mode => mode.id === backId)) return;
     void session.setMode?.(backId);
     rememberPermissionMode(chatAgentId, backId);
     updateChatSettings({
@@ -1125,6 +1130,8 @@ function AgentChatBody({
     chatThread,
     isPlanMode,
     autoAgentModeId,
+    cloudModes,
+    effectiveModes,
     session.setMode,
     chatAgentId,
     updateChatSettings,
@@ -1134,6 +1141,7 @@ function AgentChatBody({
   // any other mode is set live and persisted.
   const selectNativeMode = useCallback(
     (modeId: string) => {
+      if (cloudModes && !effectiveModes.some(mode => mode.id === modeId)) return;
       if (PLAN_MODE_RX.test(modeId)) {
         if (!isPlanMode) enterPlan();
         return;
@@ -1147,7 +1155,7 @@ function AgentChatBody({
       });
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [isPlanMode, enterPlan, session.setMode, chatAgentId, updateChatSettings],
+    [isPlanMode, enterPlan, session.setMode, chatAgentId, updateChatSettings, cloudModes, effectiveModes],
   );
 
   // Prefer the live mode, then the persisted id, then the posture default,
@@ -1169,12 +1177,14 @@ function AgentChatBody({
       fallbackModeId: fallbackPermissionModeId,
     }),
     session.boundary,
+    cloudModes ? effectiveModes : undefined,
   );
 
-  const permissionModes = permissionModesAvailable(chatThread?.folder);
+  const permissionModes = permissionModesAvailable(chatThread?.folder ?? session.cwd, effectiveModes);
   const showPermissionToggle = permissionModes && agentHasPermissionMenu(
     chatAgentId,
     chatThread?.model ?? null,
+    cloudModes ? effectiveModes : undefined,
   );
 
   // Dashed composer frame for the guarded "propose, don't act" modes — Claude
@@ -1361,6 +1371,7 @@ function AgentChatBody({
             agentId={chatAgentId}
             model={chatThread.model}
             boundary={session.boundary}
+            availableModes={cloudModes ? effectiveModes : undefined}
             currentModeId={currentPermissionModeId}
             onSelectMode={selectNativeMode}
           />
@@ -1381,6 +1392,8 @@ function AgentChatBody({
     conversationStarted,
     chatAgentId,
     showPermissionToggle,
+    cloudModes,
+    effectiveModes,
     currentPermissionModeId,
     selectNativeMode,
     maybeShowCostBumpToast,

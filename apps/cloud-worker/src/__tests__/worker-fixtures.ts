@@ -38,6 +38,8 @@ export class FakeDriver implements Driver {
   prompts: ContentBlock[][] = [];
   steers: ContentBlock[][] = [];
   model?: string;
+  modes: string[] = [];
+  async setMode(mode: string): Promise<void> { this.modes.push(mode); }
   configs: Array<{ model?: string; effort?: string; fast: boolean }> = [];
   disposed = false;
   interrupts = 0;

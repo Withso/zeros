@@ -1,5 +1,7 @@
+import { AgentInteractions } from "./interactions";
+import { INPUT_CANCELLED, INPUT_STOPPED, INPUT_TIMEOUT } from "./sessions/interaction-history";
 import { randomUUID } from "node:crypto";
-import type { BackgroundTasksUpdate, InitializeResponse, PromptResponse, SessionNotification } from "@zeros/protocol/agent-events";
+import { cloudModeId, cloudPermissionMode, cloudSessionModes, type CloudPermissionMode, type BackgroundTasksUpdate, type InitializeResponse, type PromptResponse, type SessionNotification } from "@zeros/protocol/agent-events";
 import { createMessage, type AgentLoadSessionMessage, type AgentNewSessionMessage, type AgentPromptMessage, type AgentSteerMessage, type BridgeAgentFailure, type BridgeMessage, type SteerOutcome } from "@zeros/protocol/messages";
 import { cloudFailureMessage, type CloudMcpFailure, type CloudV2Agent } from "@zeros/protocol/cloud-v2-relay";
 import type { CloudV2PromptDelivery } from "@zeros/protocol/cloud-v2-prompts";
@@ -21,6 +23,10 @@ interface Runtime {
   id: string; chatId: string; agentId: CloudV2Agent; model?: string; effort?: string; fast?: boolean;
   driver?: Driver; unsubscribe?: () => void; login?: string; opening?: Promise<void>;
   configRevision?: number;
+  stopInFlight?: number; idleInputStop?: boolean; blockedInputTools?: Set<string>;
+  permissionMode?: CloudPermissionMode; activePermissionMode?: CloudPermissionMode; modeRevision?: number;
+  modeChanges?: Promise<void>;
+  interactions?: AgentInteractions; tools?: Map<string, { nativeId?: string; parentId?: string; active: boolean }>;
   preparing?: Promise<void>;
   retiring?: Promise<void>; pendingNative?: string; admitting: number;
   cancelling?: Promise<"succeeded" | "failed" | "cancelled">;
@@ -82,12 +88,12 @@ export class Agents {
       if (!ownsFailure()) return;
       await this.store.fold(route.chatId, notification, ownsFailure);
       if (ownsFailure()) await this.update(route, notification);
-    }).catch(async () => { if (ownsFailure()) await this.stop(route); });
+    }).catch(() => { if (ownsFailure()) this.cancelForInput(route, INPUT_CANCELLED); });
   }
   private initialized(agentId: CloudV2Agent): InitializeResponse {
     return { ...initialized(agentId), _meta: this.models.metadata(agentId === "codex") };
   }
-  get busy(): boolean { return [...this.routes.values()].some((route) => !!route.active || this.hasBackground(route)); }
+  get busy(): boolean { return [...this.routes.values()].some(route => (this.waitingForInput(route) ? this.hasIndependentWork(route) : !!route.active || this.hasBackground(route))); }
 
   setOutboxDispatch(dispatch?: (entry: InboxEntry) => Promise<boolean>, stop?: (chatId: string, throughEpoch: string) => Promise<string>): void {
     this.outboxDispatch = dispatch; this.outboxStop = stop;
@@ -113,10 +119,12 @@ export class Agents {
 
   resumeOutbox(chatId: string): void {
     const route = this.chats.get(chatId);
-    if (!route || route.closed || route.outboxSteering) return;
+    if (!route || route.closed || route.cancelling || route.stopInFlight || route.outboxSteering) return;
     const next = this.store.outboxEntries(chatId).find(({ entry }) => entry.state === "queued" && entry.outbox?.acknowledged)?.entry;
+    const matchesActiveMode = () => next?.outbox?.permissionMode === undefined || next.outbox.permissionMode === route.activePermissionMode;
     if (route.active && route.nativeRunning && next?.outbox?.mode === "steer" && !next.outbox.steerDeclined &&
-        next.outbox.model === route.model && next.outbox.effort === route.effort) {
+        next.outbox.model === route.model && next.outbox.effort === route.effort &&
+        matchesActiveMode() && !route.interactions?.blocking) {
       const active = route.active, stopping = route.stopping;
       route.outboxSteering = (async () => {
         const content = await preparePromptFiles(this.scope, next.prompt);
@@ -125,7 +133,7 @@ export class Agents {
         let outcome: SteerOutcome = "interrupted";
         if (await this.outboxDispatch?.(entry)) {
           if (route.closed || stopping !== route.stopping) outcome = "interrupted";
-          else if (route.active !== active || !route.nativeRunning) outcome = "queued";
+          else if (route.active !== active || !route.nativeRunning || !matchesActiveMode() || route.interactions?.blocking) outcome = "queued";
           else outcome = await route.driver!.steer(content);
         }
         await this.store.finishOutboxSteer(chatId, entry.requestId, outcome, active.userMessageId);
@@ -144,18 +152,27 @@ export class Agents {
       ? BigInt(active.outbox.epoch) < BigInt(epoch)
       : active.cancelRequested || freshEpoch) : this.hasBackground(route) && freshEpoch);
     const running = !!route?.nativeRunning;
-    if (interrupt && route) { route.stopping++; if (active) active.cancelRequested = true; }
-    await this.store.stopOutbox(chatId, epoch);
-    if (interrupt && route) {
+    if (!interrupt || !route) { await this.store.stopOutbox(chatId, epoch); return; }
+    route.stopping++; route.stopInFlight = (route.stopInFlight ?? 0) + 1;
+    if (active) active.cancelRequested = true;
+    const stopped = Promise.all([route.interactions?.dismiss(INPUT_CANCELLED), route.driver?.interrupt()]);
+    void stopped.catch(() => {});
+    try {
+      await this.store.stopOutbox(chatId, epoch);
       if (!active?.outbox) await this.store.stop(chatId);
-      await route.driver?.interrupt();
+      await stopped;
       if (running) await route.pumping;
-    }
+    } finally { route.stopInFlight--; }
+    this.resumeOutbox(chatId);
   }
 
   async fenceOutbox(): Promise<void> {
-    for (const { chatId, entry } of this.store.outboxEntries())
-      await this.stopOutbox(chatId, (BigInt(entry.outbox!.epoch) + 1n).toString());
+    const epochs = new Map<string, bigint>();
+    for (const { chatId, entry } of this.store.outboxEntries()) {
+      const epoch = BigInt(entry.outbox!.epoch) + 1n;
+      if (epoch > (epochs.get(chatId) ?? -1n)) epochs.set(chatId, epoch);
+    }
+    await Promise.all([...epochs].map(([chatId, epoch]) => this.stopOutbox(chatId, epoch.toString())));
   }
 
   async handle(client: AppClient, message: BridgeMessage): Promise<void> {
@@ -186,6 +203,36 @@ export class Agents {
               op: "AGENT_CANCEL", result: { conversationId: message.chatId ?? route.chatId, state } }));
           } finally { route.cancelling = undefined; }
           return;
+        }
+        case "AGENT_QUESTION_RESPONSE": case "AGENT_PERMISSION_RESPONSE": {
+          const route = message.executionId ? this.routes.get(message.executionId) : undefined;
+          if (!route || route.closed || !message.chatId || route.chatId !== message.chatId || this.chats.get(message.chatId) !== route)
+            throw new WorkspaceError("session-expired", "This question belongs to an expired execution.");
+          if (message.type === "AGENT_QUESTION_RESPONSE") await route.interactions?.reply("question", message.questionId, message.response, message.nativeRequestId);
+          else await route.interactions?.reply("permission", message.permissionId, message.response);
+          return;
+        }
+        case "AGENT_SET_MODE": {
+          const route = this.route(message);
+          if (this.config.agentInteractions !== 1) throw new WorkspaceError("CLOUD_V2_UNSUPPORTED", "This cloud worker does not support Plan mode yet.");
+          const mode = cloudPermissionMode(route.agentId, message.modeId);
+          if (!mode) throw new WorkspaceError("invalid-params", "Choose Plan or Full access for a cloud workspace.");
+          // Some providers apply modes on the next turn. A changed selection
+          // invalidates the running turn's match instead of relabelling it.
+          if (route.activePermissionMode !== mode) route.activePermissionMode = undefined;
+          const revision = route.modeRevision = (route.modeRevision ?? 0) + 1;
+          return this.withModeChange(route, async () => {
+            await this.ensureDriver(route); this.assertCurrent(route);
+            if (route.modeRevision !== revision) return;
+            if (!route.driver!.setMode) throw new WorkspaceError("CLOUD_V2_UNSUPPORTED", "This agent cannot change mode.");
+            await route.driver!.setMode(message.modeId); this.assertCurrent(route);
+            if (route.modeRevision !== revision) return;
+            await this.saveMode(route, mode);
+            if (mode === "bypass") await route.interactions?.allowPending();
+            await this.update(route, { sessionId: route.id, update: { sessionUpdate: "current_mode_update", currentModeId: message.modeId } });
+            await client.send(createMessage({ type: "AGENT_MODE_CHANGED", source: "engine", requestId: message.id, agentId: route.agentId,
+              sessionId: route.id, executionId: route.id, modeId: message.modeId }));
+          });
         }
         case "AGENT_SET_MODEL": {
           const route = this.route(message);
@@ -266,19 +313,20 @@ export class Agents {
     const route = this.chats.get(chatId);
     if (!route) return;
     if (!shutdown && this.outboxStop) await this.stop(route);
-    await this.retire(route);
+    await this.retire(route, shutdown ? INPUT_STOPPED : INPUT_CANCELLED);
     if (!shutdown) await this.store.retireExecution(chatId, route.id);
     if (this.store.metadata(chatId)?.chat) await this.store.stop(chatId, () => this.chats.get(chatId) === route);
     if (this.chats.get(chatId) === route) this.chats.delete(chatId);
     this.activity();
   }
 
-  private retire(route: Runtime): Promise<void> {
+  private retire(route: Runtime, reason = INPUT_CANCELLED): Promise<void> {
     if (route.retiring) return route.retiring;
     route.closed = true; route.stopping++; route.unsubscribe?.();
     this.routes.delete(route.id);
     return route.retiring = (async () => {
-      await route.driver?.dispose();
+      // Native abort cannot wait for a held input receipt to become durable.
+      await Promise.all([route.interactions?.dismiss(reason), route.driver?.dispose()]);
       await route.preparing?.catch(() => {});
       await route.opening?.catch(() => {});
       await route.pumping;
@@ -289,7 +337,7 @@ export class Agents {
   async flush(): Promise<void> {
     await Promise.all([...this.routes.values()].map(async (route) => { await route.events; await route.settling; }));
   }
-  async dispose(): Promise<void> { this.models.dispose(); for (const id of [...this.chats.keys()]) await this.closeChat(id, true); }
+  async dispose(): Promise<void> { this.models.dispose(); await Promise.all([...this.chats.keys()].map(id => this.closeChat(id, true))); }
 
   private agent(id: string): CloudV2Agent {
     if (id !== "codex" && id !== "claude" && id !== "cursor") throw new WorkspaceError("agent-not-found", "Unknown cloud agent.");
@@ -314,6 +362,7 @@ export class Agents {
     this.scope.folder(metadata.chat.folder);
     const route: Runtime = { id, chatId, agentId: this.agent(agentId), model: metadata.chat.model ?? undefined, effort: metadata.chat.effort || undefined, fast: metadata.chat.fast,
       admitting: 0, events: Promise.resolve(), stopping: 0, closed: false, waiters: new Map(), steers: new Map() };
+    route.permissionMode = metadata.chat.permissionMode === "plan" ? "plan" : "bypass";
     this.chats.set(chatId, route); this.routes.set(id, route);
     return route;
   }
@@ -375,6 +424,7 @@ export class Agents {
           ...(message.env?.ZEROS_FAST_MODE !== undefined ? { fast: message.env.ZEROS_FAST_MODE === "1" } : {}),
         }, () => this.assertCurrent(selected));
         selected.model = chat.model ?? undefined; selected.effort = chat.effort || undefined; selected.fast = chat.fast;
+        selected.permissionMode = (message.env?.ZEROS_PERMISSION_MODE ?? chat.permissionMode) === "plan" ? "plan" : "bypass";
       })();
     }
     try { await route.preparing; }
@@ -389,16 +439,19 @@ export class Agents {
     this.assertCurrent(route);
     timing.mark("driver_ready");
     const chat = this.store.metadata(chatId)!.chat!;
-    const session = { sessionId: route.id, executionId: route.id, ...(chat.providerBinding ? { providerBinding: chat.providerBinding } : {}), ...(route.background ? { backgroundTasks: route.background } : {}) };
+    const session = { sessionId: route.id, executionId: route.id, ...(this.config.agentInteractions === 1 ? { modes: cloudSessionModes(agentId, route.permissionMode ?? "bypass") } : {}), ...(chat.providerBinding ? { providerBinding: chat.providerBinding } : {}), ...(route.background ? { backgroundTasks: route.background } : {}) };
     if (message.type === "AGENT_NEW_SESSION") await client.send(createMessage({ type: "AGENT_SESSION_CREATED", source: "engine", requestId: message.id, agentId, session, initialize: this.initialized(agentId) }));
     else await client.send(createMessage({ type: "AGENT_SESSION_LOADED", source: "engine", requestId: message.id, agentId,
       sessionId: route.id, executionId: route.id, response: session, promptActive: !!route.active,
       ...(route.active ? { activeTurnStartedAt: route.active.startedAt, promptId: route.active.promptId } : {}) }));
+    await route.interactions?.replay(frame => client.send(frame));
     if (route.active) await this.turnState(route, route.active, "running");
   }
 
   private async ensureDriver(route: Runtime, openingTiming?: TimingSpan): Promise<void> {
     this.assertCurrent(route);
+    if (route.permissionMode === "plan" && this.config.agentInteractions !== 1)
+      throw new WorkspaceError("CLOUD_V2_UNSUPPORTED", "This cloud worker does not support Plan mode yet. Update it before sending this Plan request.");
     if (route.driver && (route.nativeRunning || this.hasBackground(route))) return;
     const unavailable = providerAvailability(route.agentId, this.config, !!this.factories[route.agentId]);
     if (unavailable) throw Object.assign(new Error(cloudFailureMessage(unavailable)), { cloud: unavailable });
@@ -406,21 +459,36 @@ export class Agents {
     const login = this.config.agents[route.agentId];
     // Personal MCP sign-in changes readiness without changing the shared
     // server definition. Reopen between turns after that pushed revision.
-    const key = JSON.stringify([login, this.config.mcpServers ?? [], this.config.mcpServers?.length ? this.config.loginRevision : undefined]);
+    const key = JSON.stringify([login, this.config.mcpServers ?? [], this.config.mcpServers?.length ? this.config.loginRevision : undefined, this.config.agentInteractions]);
     if (route.driver && route.login === key) return;
     if (!login) throw new WorkspaceError("auth-required", "Connect this agent before sending a message.");
     const factory = this.factories[route.agentId];
     if (!factory) throw new WorkspaceError("agent-unavailable", "This agent is not installed in the worker.");
     route.opening = (async () => {
+      await route.interactions?.dismiss(INPUT_CANCELLED);
       route.unsubscribe?.();
       route.mcpExecutionId = undefined;
       await route.driver?.dispose();
       this.assertCurrent(route);
       const driver = factory();
       route.driver = driver; route.login = key; route.pendingNative = undefined;
+      route.tools = new Map();
+      route.interactions = this.config.agentInteractions === 1 ? new AgentInteractions(this.store, {
+        chatId: route.chatId, executionId: route.id, agentId: route.agentId,
+        current: () => !route.closed && this.chats.get(route.chatId) === route && route.driver === driver,
+        enqueue: work => {
+          const task = route.events.then(work);
+          route.events = task.catch(() => { this.cancelForInput(route, INPUT_CANCELLED); });
+          return task;
+        },
+        publish: frame => this.broadcast(frame), update: event => this.update(route, event), activity: () => this.activity(),
+        timeout: reason => this.cancelForInput(route, reason),
+      }) : undefined;
       route.mcpExecutionId = randomUUID(); route.mcpFailures = new Set();
       route.unsubscribe = driver.onEvent((event) => {
         if (route.closed || route.driver !== driver) return;
+        if (event.update.sessionUpdate === "current_mode_update" &&
+            cloudPermissionMode(route.agentId, event.update.currentModeId) !== route.activePermissionMode) route.activePermissionMode = undefined;
         const active = route.active;
         // Controls and automatic wake-ups can arrive after a user prompt
         // starts. Neither proves that prompt was accepted; native size hints
@@ -439,6 +507,12 @@ export class Agents {
           notification.update = { ...update, message: failure.message, code, failureKind: failure.kind,
             ...(failure.cloud ? { cloud: failure.cloud } : {}),
             ...(active && !update.parentToolId && !update.turnFailure ? { turnFailure: { turnId: active.userMessageId, kind: failure.kind } } : {}) };
+        }
+        if (notification.update.sessionUpdate === "tool_call" || notification.update.sessionUpdate === "tool_call_update") {
+          const tool = notification.update, prior = route.tools?.get(tool.toolCallId);
+          route.tools?.set(tool.toolCallId, { nativeId: tool.nativeToolCallId ?? prior?.nativeId, parentId: ("parentToolId" in tool ? tool.parentToolId : undefined) ?? prior?.parentId,
+            active: tool.status ? tool.status === "pending" || tool.status === "in_progress" : prior?.active ?? true });
+          this.activity();
         }
         const hadBackground = this.hasBackground(route);
         if (active && notification.update.sessionUpdate === "error_notice" && !notification.update.parentToolId &&
@@ -460,20 +534,28 @@ export class Agents {
             if (this.store.canRebind(route.chatId)) { route.pendingNative = binding.resumeId; return; }
             await this.store.bind(route.chatId, route.agentId, binding.resumeId);
           }
+          if (notification.update.sessionUpdate === "current_mode_update") {
+            const mode = cloudPermissionMode(route.agentId, notification.update.currentModeId);
+            if (mode) await this.saveMode(route, mode);
+          }
           await this.store.fold(route.chatId, notification);
           await this.update(route, notification);
           if (backgroundTurnId) {
             const prompt = await this.turns.finish(route.chatId, backgroundTurnId);
             await this.publishRecordedTurn(route, prompt);
           }
-        }).catch(async () => { if (!route.closed) await this.stop(route); });
+        }).catch(() => { if (!route.closed) this.cancelForInput(route, INPUT_CANCELLED); });
         if (!this.hasBackground(route) && !route.active) this.pump(route);
       });
       try {
         const mcpServers = await this.mcpProviders?.(route.mcpExecutionId);
         this.assertCurrent(route);
+        const interactions = route.interactions;
         const native = await driver.open({ sessionId: route.id, cwd: this.scope.root, model: route.model, effort: route.effort, fast: route.fast,
           ...(mcpServers ? { mcpServers } : {}),
+          ...(this.config.agentInteractions === 1 ? { modeId: cloudModeId(route.agentId, route.permissionMode ?? "bypass"),
+            onQuestion: (request, signal) => interactions!.question(request, signal),
+            onPermission: (request, signal) => interactions!.permission(request, signal) } : {}),
           onTiming: stage => {
             if (!route.closed && this.chats.get(route.chatId) === route && route.driver === driver)
               (route.turnTiming ?? openingTiming)?.mark(stage);
@@ -520,15 +602,16 @@ export class Agents {
   }
 
   private pump(route: Runtime): void {
-    if (route.pumping || route.closed || route.outboxSteering || this.hasBackground(route)) return;
+    if (route.pumping || route.closed || route.cancelling || route.stopInFlight || route.outboxSteering || this.hasBackground(route)) return;
     route.pumping = (async () => {
-      while (!route.closed && !route.cancelling && !this.hasBackground(route)) {
+      while (!route.closed && !route.cancelling && !route.stopInFlight && !this.hasBackground(route)) {
         await route.events;
-        if (route.closed || route.cancelling || this.hasBackground(route)) break;
+        if (route.closed || route.cancelling || route.stopInFlight || this.hasBackground(route)) break;
         const stopping = route.stopping;
         let entry = await this.store.claim(route.chatId);
         if (!entry) break;
         route.turnTiming = agentTiming(route.agentId, route.chatId, "turn", this.onTiming, route.waiters.get(entry.requestId)?.[0]?.receivedAt);
+        route.idleInputStop = false; route.blockedInputTools = undefined;
         route.active = entry; route.turnFailureNotice = undefined; this.activity();
         if (!entry.outbox) {
           await this.update(route, { sessionId: route.id, update: { sessionUpdate: "user_message_recorded", message: userMessage(entry) } });
@@ -540,6 +623,11 @@ export class Agents {
           if (entry.outbox && (route.model !== entry.outbox.model || route.effort !== entry.outbox.effort)) {
             route.model = entry.outbox.model; route.effort = entry.outbox.effort; route.login = undefined;
             await this.store.update(route.chatId, draft => { draft.chat!.model = route.model ?? null; draft.chat!.effort = route.effort ?? ""; });
+          }
+          if (entry.outbox?.permissionMode !== undefined) {
+            const mode = entry.outbox.permissionMode;
+            if (mode === "plan" && this.config.agentInteractions !== 1) throw new WorkspaceError("CLOUD_V2_UNSUPPORTED", "This cloud worker does not support Plan mode yet. Update it before sending this Plan request.");
+            await this.withModeChange(route, async () => { if (mode !== route.permissionMode) await this.saveMode(route, mode); });
           }
           await this.ensureDriver(route);
           route.turnTiming.mark("driver_ready");
@@ -568,12 +656,30 @@ export class Agents {
               route.checkpointTurnId = entry.userMessageId;
               // Stop can arrive while the pre-turn snapshot is being captured.
               if (route.closed || stopping !== route.stopping) response = { stopReason: "cancelled" };
-              else { route.nativeRunning = true; response = await route.driver!.prompt(content); }
+              else {
+                const mode = entry.outbox?.permissionMode;
+                const admission = await this.withModeChange(route, async () => {
+                  if (!route.closed && stopping === route.stopping && mode !== undefined) {
+                    if (mode === "plan" && this.config.agentInteractions !== 1) throw new WorkspaceError("CLOUD_V2_UNSUPPORTED", "This cloud worker does not support Plan mode yet.");
+                    if (!route.driver!.setMode) throw new WorkspaceError("CLOUD_V2_UNSUPPORTED", "This agent cannot change mode.");
+                    await route.driver!.setMode(cloudModeId(route.agentId, mode));
+                    this.assertCurrent(route);
+                    await this.saveMode(route, mode);
+                  }
+                  if (route.closed || stopping !== route.stopping) return { completion: Promise.resolve<PromptResponse>({ stopReason: "cancelled" }) };
+                  route.nativeRunning = true; route.activePermissionMode = route.permissionMode ?? "bypass";
+                  const completion = route.driver!.prompt(content); void completion.catch(() => {});
+                  // Release mode admission immediately; a live turn still accepts mode controls.
+                  return { completion };
+                });
+                response = await admission.completion;
+              }
             }
           }
         } catch (error) { failure = providerFailure(route.agentId, error, "prompt"); }
         finally { route.nativeRunning = false; }
         route.settling = (async () => {
+          if (route.interactions?.blocking) await route.interactions.dismiss(INPUT_CANCELLED);
           await route.events;
           await Promise.all([...route.steers.values()]);
           await route.outboxSteering;
@@ -627,10 +733,10 @@ export class Agents {
     }
   }
 
-  private async cancel(route: Runtime): Promise<"succeeded" | "failed" | "cancelled"> {
+  private async cancel(route: Runtime, reason = INPUT_CANCELLED): Promise<"succeeded" | "failed" | "cancelled"> {
     const pumping = route.pumping;
     const running = !!route.nativeRunning || this.hasBackground(route);
-    await this.stop(route);
+    await this.stop(route, reason);
     // Preparation is fenced by stopping/paused; no native turn was admitted.
     // A live turn, however, must retire and persist before its Stop is confirmed.
     if (running) { await pumping; await route.events; }
@@ -639,16 +745,24 @@ export class Agents {
       : receipt?.state === "failed" || receipt?.state === "interrupted" ? "failed" : "cancelled";
   }
 
-  private async stop(route: Runtime): Promise<void> {
-    route.stopping++;
-    await route.preparing;
-    this.assertCurrent(route);
-    if (this.outboxStop) {
-      const epoch = await this.outboxStop(route.chatId, this.store.deliveryEpoch(route.chatId));
-      await this.store.stopOutbox(route.chatId, epoch);
-    }
-    await this.store.stop(route.chatId, () => !route.closed && this.chats.get(route.chatId) === route);
-    await route.driver?.interrupt();
+  private async stop(route: Runtime, reason = INPUT_CANCELLED): Promise<void> {
+    route.stopping++; route.stopInFlight = (route.stopInFlight ?? 0) + 1;
+    if (route.active) route.active.cancelRequested = true;
+    // Claim the dismissal first, then interrupt before any provider callback
+    // can continue while the control-plane Stop receipt is in flight.
+    const dismissed = route.interactions?.dismiss(reason);
+    const interrupted = route.driver?.interrupt();
+    void interrupted?.catch(() => {});
+    try {
+      await dismissed;
+      await route.preparing; this.assertCurrent(route);
+      await this.store.stop(route.chatId, () => !route.closed && this.chats.get(route.chatId) === route);
+      if (this.outboxStop) {
+        const epoch = await this.outboxStop(route.chatId, this.store.deliveryEpoch(route.chatId));
+        await this.store.stopOutbox(route.chatId, epoch);
+      }
+      await interrupted;
+    } finally { route.stopInFlight--; }
   }
 
   private async steer(client: AppClient, message: AgentSteerMessage): Promise<void> {
@@ -694,6 +808,47 @@ export class Agents {
     await client.send(createMessage({ type: "AGENT_STEERED", source: "engine", requestId: message.id, agentId: message.agentId,
       sessionId: message.sessionId, executionId: message.executionId ?? message.sessionId, outcome: receipt.outcome as SteerOutcome,
       ...(receipt.turnId ? { turnId: receipt.turnId } : {}) }));
+  }
+
+  private withModeChange<T>(route: Runtime, work: () => Promise<T>): Promise<T> {
+    const pending = (route.modeChanges ?? Promise.resolve()).then(work);
+    route.modeChanges = pending.then(() => {}, () => {});
+    return pending;
+  }
+
+  private async saveMode(route: Runtime, mode: CloudPermissionMode): Promise<void> {
+    route.permissionMode = mode;
+    await this.store.update(route.chatId, draft => {
+      this.assertCurrent(route);
+      draft.chat!.permissionMode = mode === "plan" ? "plan" : "danger";
+      draft.chat!.lastModeId = cloudModeId(route.agentId, mode);
+    });
+  }
+
+  private cancelForInput(route: Runtime, reason: string): void {
+    if (route.closed || route.cancelling) return;
+    // Publish the Stop fence before releasing callbacks: a completed native
+    // question must not admit a queued HTTP successor in the same microtask.
+    if (reason === INPUT_TIMEOUT) { route.idleInputStop = true; route.blockedInputTools = route.interactions?.toolIds; }
+    route.cancelling = this.cancel(route, reason);
+    const pending = route.cancelling;
+    void pending.finally(() => { if (route.cancelling === pending) route.cancelling = undefined; }).catch(() => {});
+  }
+
+  private waitingForInput(route: Runtime): boolean { return !!route.interactions?.blocking || !!route.idleInputStop && !!route.active; }
+  private hasIndependentWork(route: Runtime): boolean {
+    if (route.background?.tasks.length) return true;
+    const blocked = new Set([...(route.interactions?.toolIds ?? []), ...(route.blockedInputTools ?? [])]);
+    const tools = route.tools ?? new Map();
+    // Ancestor agent tools wait for their child too. Sibling tools and native
+    // background tasks continue to count as activity.
+    for (let changed = true; changed;) {
+      changed = false;
+      for (const [id, tool] of tools) if ((blocked.has(id) || !!tool.nativeId && blocked.has(tool.nativeId)) && tool.parentId && !blocked.has(tool.parentId)) {
+        blocked.add(tool.parentId); changed = true;
+      }
+    }
+    return [...tools].some(([id, tool]) => tool.active && !blocked.has(id) && (!tool.nativeId || !blocked.has(tool.nativeId)));
   }
 
   private hasBackground(route: Runtime): boolean { return !!route.background && (route.background.tasks.length > 0 || (!!route.background.activity && route.background.activity.state !== "idle")); }

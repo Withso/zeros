@@ -8,13 +8,13 @@ const notify = (method, params) => output({ method, params });
 let threadId = "native-chat";
 let threadEffort;
 let threadConfig;
+let threadPermissions;
 let turnId;
 let nextTurn = 0;
 let mode;
 let nextRequest = 1000;
 const pending = new Map();
-const ask = (method, params) => new Promise((resolve) => {
-  const id = ++nextRequest;
+const ask = (method, params, id = ++nextRequest) => new Promise((resolve) => {
   pending.set(id, resolve);
   output({ id, method, params });
 });
@@ -38,7 +38,8 @@ input.on("line", async (line) => {
     case "thread/resume":
       threadId = params.threadId ?? threadId;
       threadConfig = params.config;
-      if (params.approvalPolicy !== "never" || params.sandbox !== "danger-full-access") {
+      threadPermissions = { approvalPolicy: params.approvalPolicy, sandbox: params.sandbox };
+      if (!(params.approvalPolicy === "never" && params.sandbox === "danger-full-access") && !(params.approvalPolicy === "on-request" && params.sandbox === "read-only")) {
         output({ id: frame.id, error: { code: -32602, message: "Expected full VM permissions" } });
         return;
       }
@@ -73,6 +74,34 @@ input.on("line", async (line) => {
           notify(frame.method, params);
         }
         return;
+      }
+      if (mode === "mode-configuration") {
+        text(JSON.stringify({ thread: threadPermissions, turn: { approvalPolicy: params.approvalPolicy, sandboxPolicy: params.sandboxPolicy } }));
+        complete(); return;
+      }
+      if (mode === "question-feature") {
+        text(JSON.stringify({ enabled: process.argv.includes("features.default_mode_request_user_input=true"),
+          quiet: process.argv.includes("suppress_unstable_features_warning=true") }));
+        complete(); return;
+      }
+      if (mode === "question-roundtrip") {
+        if (!process.argv.includes("features.default_mode_request_user_input=true")) {
+          text("request_user_input is unavailable in this mode"); complete(); return;
+        }
+        const response = ask("item/tool/requestUserInput", { threadId, turnId, itemId: "native-question",
+          questions: [{ id: "route", question: "Which route?", options: [{ label: "A" }, { label: "B" }], isOther: true }] }, "request-question");
+        text("waiting");
+        text(JSON.stringify(await response)); complete(); return;
+      }
+      if (mode === "approval-roundtrip") {
+        const response = ask("item/commandExecution/requestApproval", { threadId, turnId, itemId: "native-approval", command: "git status" });
+        text("waiting"); text(JSON.stringify(await response)); complete(); return;
+      }
+      if (mode.startsWith("approval-fixture:")) {
+        const spec = JSON.parse(mode.slice("approval-fixture:".length));
+        for (const event of spec.events ?? []) notify(event.method, { ...event.params, threadId, turnId });
+        text(JSON.stringify(await ask(spec.method, { ...spec.params, threadId, turnId }, "approval-fixture")));
+        complete(); return;
       }
       if (mode === "configuration") {
         text(JSON.stringify({ worker: "ZEROS_WORKER_TOKEN" in process.env, cursor: "CURSOR_API_KEY" in process.env, claude: "ANTHROPIC_AUTH_TOKEN" in process.env, own: !!process.env.ZEROS_CLOUD_PROXY_TOKEN, tokenInArgs: process.argv.some((arg) => arg.includes(process.env.ZEROS_CLOUD_PROXY_TOKEN)) }));

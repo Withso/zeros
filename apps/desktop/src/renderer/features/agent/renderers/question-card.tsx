@@ -113,6 +113,9 @@ export const QuestionRecordCard: Renderer<AgentToolMessage> = memo(
     // expanded views (Bash output / raw input): rounded, bg-bg2/60, 14px.
     const detail = (
       <div className="bg-bg2/60 flex flex-col gap-3 rounded-md p-2.5 text-sm leading-relaxed">
+        {stamp?.outcome === "skipped" && stamp.summary ? (
+          <div className="text-fg3 text-xs">{stamp.summary}</div>
+        ) : null}
         {stamp?.outcome === "answered" ? (
           // Question ↔ answer pairs only — no scope tags, no option list.
           (stamp.answers && stamp.answers.length > 0

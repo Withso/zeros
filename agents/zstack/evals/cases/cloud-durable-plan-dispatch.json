@@ -1,0 +1,9 @@
+{
+  "id": "cloud-durable-plan-dispatch",
+  "kind": "scenario",
+  "area": "cloud-worker",
+  "fixedBy": "pr:833",
+  "symptom": "A first durable cloud prompt could reach an empty worker before its separate Plan metadata, or start in Full access after a selector change during held dispatch approval. A frozen Plan steer could also enter a turn whose mode had changed.",
+  "rule": "Freeze permission mode before I/O and carry it in the durable prompt. After dispatch approval and snapshot capture, serialize final native mode application with selector changes, recheck Stop, and release admission when prompt starts. Refuse explicit Plan on unsupported peers. Recheck the running mode after held steering preparation and queue a mismatch. See agents/zstack/playbooks/feature.md and docs/cloud-workspaces.md.",
+  "check": "pnpm --dir apps/cloud-worker test src/__tests__/prompt-inbox.test.ts --maxWorkers=2"
+}
