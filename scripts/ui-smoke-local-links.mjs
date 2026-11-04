@@ -45,9 +45,9 @@ export async function runLocalLinksSmoke({ page, harnessBase, check }) {
       border: "1px",
       padding: "6px",
       radius: "4px",
-      font: "13px",
+      font: "12px",
       weight: "400",
-      gap: "8px",
+      gap: "4px",
       icon: 13,
     });
     const attachment = await specimens.locator("[data-attachment-pill]").evaluate((element) => {

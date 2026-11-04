@@ -7,11 +7,12 @@ import { PROMPT_SURFACE_RADIUS } from "./composer-shell";
 
 /** Ghost-button text actions on the notice surface (Retry, Sign in). Hover
  *  drops the ghost fill and pops the label + icon instead (lighter on dark,
- *  deeper in Light — semantic-tokens.css). The button keeps its 6px side
- *  padding for the focus ring and hit area; -mx-1.5 cancels it in layout,
- *  keeping the label aligned with the message text. */
+ *  deeper in Light — semantic-tokens.css). The button keeps its 6px side and
+ *  4px bottom padding for the focus ring and hit area; -mx-1.5 -mb-1 cancels
+ *  them in layout, so the label aligns with the message text and the notice
+ *  keeps even space above and below. */
 export const AGENT_NOTICE_ACTION =
-  "text-brown-fg hover:bg-transparent hover:text-(--agent-notice-action-hover) -mx-1.5";
+  "text-brown-fg hover:bg-transparent hover:text-(--agent-notice-action-hover) -mx-1.5 -mb-1";
 
 /** Provider prose is plain text; only explicit web URLs become links. */
 export function AgentNoticeText({ message }: { message: string }) {

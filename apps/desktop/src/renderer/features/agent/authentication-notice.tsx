@@ -37,7 +37,7 @@ export function AuthenticationNotice({
         onClick={onSignIn}
         className={cn(AGENT_NOTICE_ACTION, "mt-1")}
       >
-        <LogIn className="size-4" aria-hidden="true" />
+        <LogIn className="size-3.5" aria-hidden="true" />
         Sign in
       </Button>
     </AgentNotice>

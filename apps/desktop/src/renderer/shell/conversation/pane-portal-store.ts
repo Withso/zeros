@@ -22,7 +22,9 @@ export const CHAT_TAB_DRAG_MIME = "application/x-zeros-chat-tab";
  *  and seam clamping both consume this value, so a new or resized split cannot
  *  make either chat narrower than the composer breakpoints are designed for. */
 export const MIN_PANE_WIDTH = 360;
-export const MIN_PANE_HEIGHT = 160;
+/** 40px strip + the 118px resting dock + about three transcript lines; at
+ *  160 a split-down pane collapsed the transcript and clipped Send. */
+export const MIN_PANE_HEIGHT = 240;
 /** The rendered `w-1.5` / `h-1.5` divider occupies six layout pixels. */
 export const PANE_SPLITTER_PX = 6;
 

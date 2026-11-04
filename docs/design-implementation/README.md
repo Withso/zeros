@@ -421,3 +421,32 @@ Each landed step appends one line: date, workstream, what landed, evidence.
   Decisions: workspace links keep their blue pill and chat links take the
   neutral one, as the board draws; the 230px model popover and the sent
   prompt's absolute action row follow in the next step.
+- 2026-11-04 · 4, 5 · Agent chat (menus, messages, transcript, cards,
+  footer): the model menu is the shared menu (28px rows with no gap, 12px
+  medium fg3 labels, every text 12px in, 20px row actions, the 240px small
+  popover width); sent prompts' Edit and Copy are 20px inline icon buttons;
+  message content clips without a scroll box and leaves 4px for focus
+  rings. One code style everywhere in chat: 13/20 mono in markdown blocks,
+  tool output and Read, inside the detail card with 8px corners at 13px.
+  Every feed row (tools, agents, browser activity, the working timer, the
+  thinking body) puts its label on one 20px column after a 12px icon
+  column, nested bodies share the agent rail, and a group's list sits one
+  8px gap under its header. The checkpoint rail spans 4–24px, clear of the
+  lane's text. Task, compaction, budget, question and unknown records draw
+  no card or scroller of their own inside the detail card, and their chips
+  are Badges; the plan body gets the card's 12px sides. The composer's
+  context chips (/add-dir, Design frame, Design tag) are the 24px control
+  Pill, and at the 360px pane floor the Design tag keeps its mark so Design
+  mode's toolbar fits one row. Continue is a 24px secondary button with the
+  board's short hints; footer status is an outline Badge; the usage
+  trigger is a 20px inline control. Notice actions keep even space above
+  and below. Jump to your prompt now stays visible while the transcript
+  scrolls (it lived inside the scroller) and sits on the column's edge. A
+  split-down pane's floor is 240px, so the dock and a slice of transcript
+  always fit. The transcript scroller is isolated, so code gutters and copy
+  buttons no longer paint over the top fade, which now ends where the
+  column starts instead of washing over the first prompt. The chat ui-smoke
+  runs (20 scenarios, local links included) pass against the harness.
+  Decisions: the sent prompt keeps the board's absolute action row with a
+  2px gap; the 16px working loader hangs 2px into the gutter to centre on
+  the icon column; budget and Continue copy follow the boards.

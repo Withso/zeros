@@ -91,7 +91,7 @@ export const BrowserActivityCard = memo(function BrowserActivityCard({
         aria-expanded={open}
         aria-label={statusLabel}
       >
-        <span className="relative inline-flex size-4 shrink-0 items-center justify-center">
+        <span className="relative inline-flex size-3 shrink-0 items-center justify-center">
           <ToolIdentityIcon
             appId={latest?.appId}
             faviconUrl={
@@ -110,7 +110,7 @@ export const BrowserActivityCard = memo(function BrowserActivityCard({
             }
             active={ctx.attachmentImagesActive !== false}
             className={
-              failed ? "text-red-primary size-3.5" : "text-fg2 size-3.5"
+              failed ? "text-red-primary size-3" : "text-fg2 size-3"
             }
           />
         </span>
@@ -121,7 +121,8 @@ export const BrowserActivityCard = memo(function BrowserActivityCard({
         <Chevron className="text-fg3 size-3 shrink-0" aria-hidden="true" />
       </ListRow>
       {open ? (
-        <div className="border-border1 mt-1 ml-2 flex max-w-[680px] flex-col border-l pl-3">
+        // The agent body's nesting: a rail on the icon column's centre.
+        <div className="border-border2 mt-2 ml-1.5 flex flex-col border-l pl-4">
           {omitted > 0 ? (
             <div className="text-fg3 py-1 text-xs">
               {omitted} earlier {surface} actions condensed

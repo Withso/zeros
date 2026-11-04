@@ -45,7 +45,10 @@ const MessageContent = React.forwardRef<HTMLDivElement, MessageContentProps>(
     <div
       ref={ref}
       className={cn(
-        "flex select-text flex-col gap-2 overflow-hidden text-sm leading-relaxed",
+        // Clip without a scroll box, and leave 4px so focus rings on pills and
+        // paths at a line start still show. `clip` is not a scroll container,
+        // so min-w-0 keeps the column shrinkable and long labels truncating.
+        "flex min-w-0 select-text flex-col gap-2 overflow-clip [overflow-clip-margin:4px] text-sm leading-relaxed",
         // User bubbles use a calm raised surface instead of the inverted
         // primary-action colors, which would be too bright in dark mode.
         variant === "default" &&

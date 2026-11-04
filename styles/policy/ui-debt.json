@@ -4,14 +4,10 @@
   "debt": {
     "arbitrary-value": {
       "apps/desktop/src/renderer/features/agent/agent-chat.tsx": {
-        "z-[5]": 1,
-        "z-[6]": 1
+        "z-[5]": 1
       },
       "apps/desktop/src/renderer/features/agent/chat-transcript-pills.tsx": {
         "ml-[22px]": 1
-      },
-      "apps/desktop/src/renderer/features/agent/checkpoint-rail.tsx": {
-        "z-[8]": 1
       },
       "apps/desktop/src/renderer/features/agent/composer-attachments.tsx": {
         "py-[3px]": 1
@@ -30,15 +26,6 @@
       },
       "apps/desktop/src/renderer/features/agent/question-card.tsx": {
         "rounded-[3px]": 1
-      },
-      "apps/desktop/src/renderer/features/agent/renderers/budget-stop-card.tsx": {
-        "text-[11.5px]": 1
-      },
-      "apps/desktop/src/renderer/features/agent/renderers/highlighted-code.tsx": {
-        "leading-[1.6]": 4
-      },
-      "apps/desktop/src/renderer/features/agent/renderers/markdown-code-block.tsx": {
-        "leading-[1.6]": 1
       },
       "apps/desktop/src/renderer/features/browser/browser-agent-picture-in-picture.tsx": {
         "rounded-[2px]": 1,
@@ -157,7 +144,7 @@
         "z-20": 1
       },
       "apps/desktop/src/renderer/features/agent/jump-pills.tsx": {
-        "z-10": 2
+        "z-10": 1
       },
       "apps/desktop/src/renderer/features/agent/renderers/highlighted-code.tsx": {
         "z-10": 1
@@ -315,12 +302,6 @@
         "button": 1
       },
       "apps/desktop/src/renderer/features/agent/renderers/tool-resource-link.tsx": {
-        "button": 1
-      },
-      "apps/desktop/src/renderer/features/agent/turn-container.tsx": {
-        "button": 2
-      },
-      "apps/desktop/src/renderer/features/agent/turn-footer.tsx": {
         "button": 1
       },
       "apps/desktop/src/renderer/features/agent/turn-usage-card.tsx": {

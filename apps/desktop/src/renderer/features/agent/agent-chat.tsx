@@ -4259,7 +4259,9 @@ function AgentChatBody({
         <Conversation
           ref={setScrollContainer}
           data-agent-diff-collision-boundary=""
-          className="zeros-agent-body zeros-agent-scrollbar min-h-0 flex-1 overflow-x-hidden overflow-y-auto bg-transparent"
+          // `isolate` keeps everything layered inside the transcript (code
+          // gutters, copy buttons) under the top fade, the rail and the pill.
+          className="zeros-agent-body zeros-agent-scrollbar isolate min-h-0 flex-1 overflow-x-hidden overflow-y-auto bg-transparent"
           style={{ position: "relative" }}
         >
           <ConversationContent
@@ -4412,17 +4414,22 @@ function AgentChatBody({
               />
             )}
           </ConversationContent>
-          <JumpToPromptPill scrollEl={scrollEl} promptEl={activePromptEl} />
         </Conversation>
+        {/* Outside the scroller, so it stays put while the transcript scrolls,
+            and on the 856px column's right edge rather than the pane's. */}
+        <div className="pointer-events-none absolute inset-x-0 top-3 z-2 mx-auto flex w-full max-w-[856px] justify-end px-7">
+          <JumpToPromptPill scrollEl={scrollEl} promptEl={activePromptEl} />
+        </div>
         {/* Stable top fade under the chat strip, present from the first paint so a
             restore never pops it in; it never takes clicks. */}
         <div
           aria-hidden="true"
-          // h-6 (24px) keeps it subtle — about one line. The via stop feathers
-          // the lower edge so it dissolves without a visible seam.
-          className="pointer-events-none absolute inset-x-0 top-0 z-[6] h-6 bg-gradient-to-b from-(--pane-bg) via-(--pane-bg)/40 to-transparent"
+          // h-3 (12px) ends where the transcript column starts (pt-3), so the
+          // first prompt never sits under the wash while scrolled content
+          // still fades under the strip. The via stop feathers the edge.
+          className="pointer-events-none absolute inset-x-0 top-0 z-1 h-3 bg-gradient-to-b from-(--pane-bg) via-(--pane-bg)/40 to-transparent"
         />
-        {/* A sibling of the scroller so the rail stays pinned; z-[8] paints above
+        {/* A sibling of the scroller so the rail stays pinned; z-2 paints above
             the top mask. */}
         <CheckpointRail
           active={surfaceActive}

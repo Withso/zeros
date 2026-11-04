@@ -34,7 +34,7 @@ import { resolveCodeTheme } from "@/renderer/shared/theme/code-themes";
 
 // Locked line-height shared by the gutter column and the code column so the
 // numbers line up 1:1 with the code rows (matches the Files-tab viewer).
-const CODE_LEADING = "leading-[1.6]";
+const CODE_LEADING = "leading-5";
 
 interface HighlightedCodeProps {
   code: string;
@@ -191,7 +191,7 @@ export const CodeWithGutter = memo(function CodeWithGutter({
   return (
     <div
       className={cn(
-        "flex min-w-0 font-mono text-sm",
+        "flex min-w-0 font-mono text-xs",
         CODE_LEADING,
         className,
       )}
@@ -210,7 +210,7 @@ export const CodeWithGutter = memo(function CodeWithGutter({
       <HighlightedCode
         code={code}
         lang={lang}
-        className="min-w-0 flex-1 px-3 py-2 text-fg1 [&_pre]:!p-0 [&_pre]:!leading-[1.6] [&_code]:!leading-[1.6] [&_.line]:!leading-[1.6]"
+        className="min-w-0 flex-1 px-3 py-2 text-fg1 [&_pre]:!p-0 [&_pre]:!leading-5 [&_code]:!leading-5 [&_.line]:!leading-5"
       />
     </div>
   );

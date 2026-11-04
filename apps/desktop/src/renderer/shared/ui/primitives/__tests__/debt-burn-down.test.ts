@@ -40,22 +40,6 @@ const cases = [
     },
   },
   {
-    file: "features/agent/agent-model-menu.tsx",
-    site: 877,
-    component: "ClassAlias",
-    tag: "button",
-    original:
-      "text-fg2 hover:text-fg1 focus-visible:text-fg1 mr-1 flex h-[18px] shrink-0 items-center justify-center rounded-sm px-1.5 text-[12px] outline-none",
-    className:
-      "text-fg2 hover:text-fg1 focus-visible:text-fg1 mr-1 flex h-[18px] shrink-0 items-center justify-center rounded-sm px-1.5 text-3xxs outline-none",
-    literal:
-      "text-fg2 hover:text-fg1 focus-visible:text-fg1 mr-1 flex h-[18px] shrink-0 items-center justify-center rounded-sm px-1.5 text-3xxs outline-none",
-    alias: {
-      before: "text-[12px]",
-      after: "text-3xxs",
-    },
-  },
-  {
     file: "features/design-workspace/design-inspector.tsx",
     site: 678,
     component: "ClassAlias",
@@ -222,11 +206,12 @@ const cases = [
     site: 148,
     component: "ListRow",
     tag: "button",
-    // The Zeros Design ListRow: a bg1-hover hover, 28px, the keyboard ring.
+    // The Zeros Design ListRow: a bg1-hover hover, 28px, the keyboard ring,
+    // pulled 8px into the gutter like every feed row.
     original:
-      "group/event-stripe hover:bg-bg1-hover focus-visible:inset-ring focus-visible:inset-ring-highlighted-bright focus-visible:ring-highlighted-bright/50 -ml-1 flex min-h-7 w-fit max-w-full min-w-0 items-center gap-2 rounded-md px-1 py-1 text-left transition-colors duration-120 ease-out focus-visible:ring-[3px] focus-visible:outline-none",
-    className: "group/event-stripe -ml-1 min-w-0 px-1 transition-colors",
-    literal: "group/event-stripe -ml-1 min-w-0 px-1 transition-colors",
+      "group/event-stripe hover:bg-bg1-hover focus-visible:inset-ring focus-visible:inset-ring-highlighted-bright focus-visible:ring-highlighted-bright/50 -ml-2 flex min-h-7 w-fit max-w-full min-w-0 items-center gap-2 rounded-md px-2 py-1 text-left transition-colors duration-120 ease-out focus-visible:ring-[3px] focus-visible:outline-none",
+    className: "group/event-stripe min-w-0 transition-colors",
+    literal: "group/event-stripe min-w-0 transition-colors",
   },
 ];
 

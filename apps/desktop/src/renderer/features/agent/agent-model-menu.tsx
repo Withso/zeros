@@ -105,16 +105,19 @@ const FAMILY_TITLES: Record<string, string> = {
   codex: "Codex",
   cursor: "Cursor",
 };
-/** Section labels ("Reasoning", "Options", "Model", each agent group) share one
- *  12px muted line; 28px tall so they keep the control scale's rhythm. */
-const MODEL_SECTION_HEADING = "text-fg2 flex h-7 items-center text-3xxs";
-const MODEL_POPOVER_WIDTH = "w-[230px] max-w-[calc(100vw-1rem)]";
+/** Section labels ("Reasoning", "Options", "Model", each agent group) are the
+ *  menu label (12px medium fg3); 28px tall so they keep the row rhythm. Every
+ *  label and row text starts 12px in: a 4px inset plus 8px row padding. */
+const MODEL_SECTION_HEADING = "text-fg3 flex h-7 items-center text-3xxs leading-4 font-medium";
+/** The small popover width (240px). */
+const MODEL_POPOVER_WIDTH = "w-60 max-w-[calc(100vw-1rem)]";
 const MODEL_ROW_ACTION_VISIBILITY =
   "pointer-events-none opacity-0 group-hover/mi:pointer-events-auto group-hover/mi:opacity-100 group-focus-within/mi:pointer-events-auto group-focus-within/mi:opacity-100 focus-visible:pointer-events-auto focus-visible:opacity-100";
-const MODEL_ROW_HEIGHT = "h-[26px] py-1";
-const MODEL_ITEM_STACK = "flex flex-col gap-px";
+/** The 28px menu row. */
+const MODEL_ROW_HEIGHT = "min-h-7 py-1";
+const MODEL_ITEM_STACK = "flex flex-col";
 const MODEL_COMMAND_ITEM_STACK =
-  "[&_[cmdk-list-sizer]]:flex [&_[cmdk-list-sizer]]:flex-col [&_[cmdk-list-sizer]]:gap-px";
+  "[&_[cmdk-list-sizer]]:flex [&_[cmdk-list-sizer]]:flex-col";
 
 interface AgentGroup {
   agent: BridgeRegistryAgent;
@@ -495,7 +498,7 @@ export function AgentModelMenu({
         // composer without painting an unrelated ring on the trigger pill.
         onCloseAutoFocus={(e) => e.preventDefault()}
       >
-        {selectionTiming === "next-message" && <p className="text-fg3 px-3 py-2 text-xs" role="note">Model, effort and Fast apply to the next message.</p>}
+        {selectionTiming === "next-message" && <p className="text-fg3 px-3 py-2 text-xs leading-4.5" role="note">Model, effort and Fast apply to the next message.</p>}
         {/* Active-model configuration stays inline. The Model section below is
             collapsed until search or selected-row hover/focus asks for more. */}
         {canConfigureActive &&
@@ -528,7 +531,7 @@ export function AgentModelMenu({
         >
           <div
             data-model-section-heading="model"
-            className={cn(MODEL_SECTION_HEADING, "px-3.5")}
+            className={cn(MODEL_SECTION_HEADING, "px-3")}
           >
             Model
           </div>
@@ -608,9 +611,9 @@ export function AgentModelMenu({
                   }
                   aria-expanded={catalogOpen}
                   className={cn(
-                    "hover:bg-bg3-hover focus-visible:bg-bg3-hover text-fg1 mx-1.5 my-1.5 flex w-[calc(100%_-_0.75rem)] items-center gap-2 px-2 text-left outline-none",
+                    "hover:bg-bg3-hover focus-visible:bg-bg3-hover text-fg1 mx-1 my-1 flex w-[calc(100%_-_0.5rem)] items-center gap-2 px-2 text-left outline-none",
                     MENU_ITEM_RADIUS,
-                    activeRow?.unavailable ? "min-h-7 py-1" : MODEL_ROW_HEIGHT,
+                    MODEL_ROW_HEIGHT,
                   )}
                   onPointerEnter={() => {
                     cancelCatalogClose();
@@ -851,7 +854,7 @@ function FavoriteModelButton({
       }
       aria-pressed={isFavorite}
       className={cn(
-        "text-fg2 hover:text-fg1 focus-visible:text-fg1 relative z-10 ml-1 flex size-[18px] shrink-0 items-center justify-center rounded-sm outline-none",
+        "text-fg2 hover:text-fg1 focus-visible:text-fg1 relative z-10 ml-1 flex size-5 shrink-0 items-center justify-center rounded-sm outline-none",
         !isFavorite && MODEL_ROW_ACTION_VISIBILITY,
       )}
       onPointerDown={(event) => {
@@ -919,7 +922,7 @@ function ModelConfigurationPopover({
           aria-label={`Edit settings for ${label}`}
           data-model-row-end-action
           className={cn(
-            "text-fg2 hover:text-fg1 focus-visible:text-fg1 mr-1 flex h-[18px] shrink-0 items-center justify-center rounded-sm px-1.5 text-3xxs outline-none",
+            "text-fg2 hover:text-fg1 focus-visible:text-fg1 mr-1 flex h-5 shrink-0 items-center justify-center rounded-sm px-1.5 text-3xxs outline-none",
             MODEL_ROW_ACTION_VISIBILITY,
           )}
           onPointerDown={(event) => {
@@ -1153,7 +1156,7 @@ function SearchModelRow({
       }
       className={cn(
         "group/mi bg-bg3 hover:bg-bg3-hover focus-within:bg-bg3-hover mx-1 gap-0",
-        row.unavailable ? "min-h-7 py-1" : MODEL_ROW_HEIGHT,
+        MODEL_ROW_HEIGHT,
         !showCmdkSelection && "data-[selected=true]:bg-bg3",
         showCmdkSelection &&
           highlightMode === "pointer" &&
@@ -1236,7 +1239,7 @@ function CatalogModelRow({
       className={cn(
         "group/mi bg-bg3 hover:bg-bg3-hover focus-within:bg-bg3-hover relative flex items-center",
         MENU_ITEM_RADIUS,
-        row.unavailable ? "min-h-7 py-1" : MODEL_ROW_HEIGHT,
+        MODEL_ROW_HEIGHT,
       )}
     >
       <button

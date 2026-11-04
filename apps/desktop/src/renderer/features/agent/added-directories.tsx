@@ -17,8 +17,7 @@
 
 import { Folder, X } from "lucide-react";
 
-import { Button, cn } from "../../shared/ui";
-import { Tooltip } from "@/renderer/shared/ui/primitives";
+import { IconButton, Tooltip } from "@/renderer/shared/ui/primitives";
 
 export interface AddedDirectoriesProps {
   /** Absolute paths Claude can additionally access (ChatThread.additionalDirectories). */
@@ -45,24 +44,18 @@ export function AddedDirectories({ dirs, onRemove }: AddedDirectoriesProps) {
       {dirs.map((dir) => (
         <Tooltip key={dir} label={dir}>
           <span
-            // Inside the composer card (bg-bg2) the chip sits on --bg1 so it reads
-            // as a recessed token, not another raised surface.
-            className="inline-flex max-w-[260px] items-center gap-1.5 rounded-sm border border-border1 bg-bg1 py-1 pl-2 pr-1 text-xs text-fg2"
+            // The 24px control Pill's look, holding its own 20px remove button.
+            className="border-border2 bg-bg2 text-fg1 inline-flex h-6 max-w-[260px] items-center gap-1 rounded-md border pr-0.5 pl-2 text-xs leading-4.5"
           >
-            <Folder size={13} className="shrink-0 text-fg2" />
-            <span className="min-w-0 truncate text-fg1">{baseName(dir)}</span>
-            <Button
-              type="button"
-              variant="ghost"
-              aria-label={`Remove directory access: ${dir}`}
+            <Folder size={14} className="text-fg2 shrink-0" />
+            <span className="min-w-0 truncate">{baseName(dir)}</span>
+            <IconButton
+              size="inline"
+              label={`Remove directory access: ${dir}`}
               onClick={() => onRemove(dir)}
-              className={cn(
-                "flex size-4 shrink-0 items-center justify-center rounded-sm border-0 bg-transparent p-0 text-fg2",
-                "hover:bg-bg1-hover hover:text-fg1",
-              )}
             >
-              <X size={12} />
-            </Button>
+              <X />
+            </IconButton>
           </span>
         </Tooltip>
       ))}

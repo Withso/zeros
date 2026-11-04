@@ -369,42 +369,27 @@ function UserMessageActions({
     }
   }, [text]);
 
-  const btn =
-    "inline-flex size-4 items-center justify-center rounded-sm text-fg2 transition-colors hover:bg-bg1-hover hover:text-fg1 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-highlighted-bright";
-
+  // 20px inline icon buttons 2px under the bubble, so the row hangs no
+  // further into the turn gap than the old 16px marks did.
   return (
-    <div className="pointer-events-none absolute top-full right-0 z-[2] flex items-center gap-0.5 pt-1 opacity-0 transition-opacity duration-150 ease-out group-focus-within/usermsg:pointer-events-auto group-focus-within/usermsg:opacity-100 group-hover/usermsg:pointer-events-auto group-hover/usermsg:opacity-100">
+    <div className="pointer-events-none absolute top-full right-0 z-[2] flex items-center gap-0.5 pt-0.5 opacity-0 transition-opacity duration-150 ease-out group-focus-within/usermsg:pointer-events-auto group-focus-within/usermsg:opacity-100 group-hover/usermsg:pointer-events-auto group-hover/usermsg:opacity-100">
       {canEdit && (
         <Tooltip label="Edit message">
-          <button
-            type="button"
-            onClick={onEdit}
-            className={btn}
-            aria-label="Edit message"
-          >
-            <Pencil className="size-3" strokeWidth={2} />
-          </button>
+          <IconButton size="inline" onClick={onEdit} label="Edit message">
+            <Pencil strokeWidth={2} />
+          </IconButton>
         </Tooltip>
       )}
       <Tooltip label={copied ? "Copied" : "Copy message"}>
-        <button
-          type="button"
-          onClick={copy}
-          className={btn}
-          aria-label={copied ? "Copied" : "Copy message"}
-        >
-          {copied ? (
-            <Check className="size-3" strokeWidth={2} />
-          ) : (
-            <Copy className="size-3" strokeWidth={2} />
-          )}
-        </button>
+        <IconButton size="inline" onClick={copy} label={copied ? "Copied" : "Copy message"}>
+          {copied ? <Check strokeWidth={2} /> : <Copy strokeWidth={2} />}
+        </IconButton>
       </Tooltip>
       {age && (
         <Tooltip
           label={createdAt ? new Date(createdAt).toLocaleString() : undefined}
         >
-          <span className="text-muted-fg px-1 text-xs tabular-nums select-none">
+          <span className="text-muted-fg px-1 text-3xxs leading-4 tabular-nums select-none">
             {age}
           </span>
         </Tooltip>

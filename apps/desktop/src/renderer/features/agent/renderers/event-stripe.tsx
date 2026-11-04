@@ -151,7 +151,7 @@ export const EventStripe = memo(function EventStripe({
           // Content-width chip (`w-fit`, lane-capped via `max-w-full`) so the
           // hover tint wraps the summary + icons, not the empty lane to the
           // right; hover should fit the content.
-          className="group/event-stripe -ml-1 min-w-0 px-1 transition-colors"
+          className="group/event-stripe min-w-0 transition-colors"
           onClick={() => setUserExpanded((v) => !v)}
           aria-expanded={expanded}
         >
@@ -188,7 +188,8 @@ export const EventStripe = memo(function EventStripe({
           className={cn(
             "zeros-working-feed flex flex-col",
             WORKING_FEED_GAP,
-            showHeader && "py-1",
+            // The first entry sits one feed gap (8px) under the group header.
+            showHeader && "pt-2 pb-1",
           )}
         >
           {displayEvents.map((item) => {
