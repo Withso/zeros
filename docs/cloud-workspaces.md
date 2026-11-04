@@ -56,6 +56,20 @@ polling can resume that same VM and re-establish its idempotent protected route;
 the matching runtime installer does not restart it, and the bound boot prevents
 token rotation. A configured hello returns the workspace to `running`.
 
+The worker serializes HTTP and relay configuration. Its first configuration
+constructs the required checkout, session, MCP, agent and terminal services
+before publishing its scope or admitting app requests. A failed or cancelled
+initialization closes its owned resources; a corrected snapshot can retry
+without leaving duplicate watchers or listeners. Stop and disposal prevent
+a late initialization from publishing readiness. Stop still drains durable
+history after an earlier configuration failure.
+
+The initial GitHub checkout report runs outside this readiness wait. Reports
+remain ordered within the worker boot, including a retry of initial services,
+and outstanding report work is joined during flush and disposal.
+`workspace.prepareGithub` still waits for a fresh post-publication checkout
+confirmation before returning its result.
+
 The desktop retries only transient ticket failures: HTTP 5xx, network failures
 and request timeouts. It makes at most five attempts with 250, 500, 1000 and
 2000 ms delays, within one 30-second ticket budget. Ticket acquisition counts

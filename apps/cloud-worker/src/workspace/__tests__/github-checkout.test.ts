@@ -52,3 +52,20 @@ it("reads again after a held pre-push observation before acknowledging preparati
   finish();
   await expect(fresh).resolves.toMatchObject({ headSha: "b".repeat(40) });
 });
+
+it("joins a read held during disposal without publishing or admitting another report", async () => {
+  let release!: (value: typeof initial) => void;
+  const held = new Promise<typeof initial>(resolve => { release = resolve; });
+  const send = vi.fn(async () => {}), reporter = new GithubCheckoutReporter(() => held, send);
+  const observing = reporter.report();
+  const observed = Promise.allSettled([observing]);
+  let disposed = false;
+  const closing = reporter.dispose().then(() => { disposed = true; });
+  await new Promise<void>(resolve => setImmediate(resolve));
+  expect(disposed).toBe(false);
+  release(initial);
+  expect((await observed)[0].status).toBe("rejected");
+  await closing;
+  await expect(reporter.fresh()).rejects.toMatchObject({ code: "WORKSPACE_UNAVAILABLE" });
+  expect(send).not.toHaveBeenCalled();
+});

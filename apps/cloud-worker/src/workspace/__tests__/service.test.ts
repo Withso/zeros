@@ -28,6 +28,29 @@ it("returns one native workspace row with live HEAD and cached branch PR metadat
   await expect(service.handle("workspace.get", { workspaceId: "foreign" })).rejects.toMatchObject({ code: "WORKSPACE_NOT_FOUND" });
 });
 
+it("serves reads during the initial report and joins that owned work on flush and disposal", async () => {
+  const { scope, state } = await repositoryFixture();
+  let release!: () => void;
+  const held = new Promise<void>(resolve => { release = resolve; });
+  const send = vi.fn(async () => { await held; });
+  const service = await WorkspaceService.open(scope, state, { watch: false, reportGithubCheckout: send });
+  services.push(service);
+  let flushing: Promise<void> | undefined, closing: Promise<void> | undefined;
+  try {
+    await expect.poll(() => send.mock.calls.length).toBe(1);
+    expect(await service.handle("workspace.get", {})).toMatchObject({ branch: "workspace/fixture" });
+    let flushed = false, closed = false;
+    flushing = service.flush().then(() => { flushed = true; });
+    closing = service.dispose().then(() => { closed = true; });
+    await new Promise<void>(resolve => setImmediate(resolve));
+    expect(flushed).toBe(false); expect(closed).toBe(false);
+    release(); await Promise.all([flushing, closing]);
+    expect(flushed).toBe(true); expect(closed).toBe(true);
+    await service.poll(true);
+    expect(send).toHaveBeenCalledOnce();
+  } finally { release(); await Promise.allSettled([flushing, closing]); }
+});
+
 it("keeps cloud discovery on an unqualified branch when gh resolves a transferred repository", async () => {
   const { scope, state, root, git } = await repositoryFixture();
   await git("remote", "add", "origin", "https://github.com/fixture/repo.git");
@@ -99,6 +122,7 @@ it("reports terminal branch changes and target metadata without running gh in th
   const service = await WorkspaceService.open(scope, state, { watch: false, reportGithubCheckout: send,
     run: (program, args, options) => { if (program === "gh") gh(); return run(program, args, options); } });
   services.push(service);
+  await service.flush();
   expect(send).toHaveBeenLastCalledWith({ sequence: 1, branch: "workspace/fixture", baseBranch: "main", headSha: await git("rev-parse", "HEAD") });
   await service.handle("workspace.get", {}); expect(gh).not.toHaveBeenCalled();
   await git("switch", "-c", "topic/new"); await service.poll();
