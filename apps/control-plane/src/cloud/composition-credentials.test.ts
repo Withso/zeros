@@ -14,12 +14,15 @@ const github = vi.hoisted(() => ({
   workspaceToken: vi.fn(async () => ({ token: "synthetic-user-token", expiresAt: Date.now() + 120_000 })),
   token: vi.fn(async () => ({ token: "synthetic-installation-token", expiresAt: Date.now() + 120_000 })),
   authorizeSource: vi.fn(async () => {}), continueSource: vi.fn(async () => {}),
-  connections: { authorizeRepositoryConfiguration: vi.fn() },
+  connections: { authorizeRepositoryConfiguration: vi.fn(), gitIdentity: vi.fn<() => Promise<{ name: string; email: string } | null>>(async () => null) },
+  workspaceSetup: vi.fn(async () => null),
   source: { invalidate: vi.fn(), targets: vi.fn(async () => {}) },
   binding: vi.fn(async () => ({ repository: "owner/project" })),
 }));
 vi.mock("./github-composition.js", () => ({ createCloudGithubServices: () => github }));
 vi.mock("../postgres-notifications.js", () => ({ postgresNotificationSubscription: () => null }));
+vi.mock("./agent-logins.js", async original => ({ ...await original<typeof import("./agent-logins.js")>(), createCloudV2AgentLogins: () => async () => null }));
+vi.mock("../mcp/composition.js", () => ({ createMcpServices: () => null }));
 vi.mock("./lifecycle.js", async original => ({ ...await original<typeof import("./lifecycle.js")>(),
   CloudV2Lifecycle: class { constructor(readonly deps: CloudV2LifecycleDeps) {} },
 }));
@@ -54,4 +57,12 @@ it("wires workspace git, gh, legacy, hydration and restore credentials to the cr
   const target = { repository: workspace.repository, repositoryId: "42" };
   expect(await (builder as unknown as { deps: ConstructorParameters<typeof CloudV2ComputerBuilder>[0] }).deps.cloneToken(workspace.organizationId, workspace.creatorUserId, target)).toBe("synthetic-installation-token");
   expect(github.token).toHaveBeenCalledExactlyOnceWith({ organizationId: workspace.organizationId, userId: workspace.creatorUserId }, target, "read", "computer", expect.any(Function));
+  vi.spyOn(assembled.store, "baseCommit").mockResolvedValue(null);
+  vi.spyOn(assembled.store, "loginRevision").mockResolvedValue("0");
+  for (const identity of [null, { name: "Verified GitHub reviewer", email: "123+fixture@users.noreply.github.com" }]) {
+    github.connections.gitIdentity.mockResolvedValueOnce(identity);
+    const configuration = await assembled.workers.config(workspace);
+    expect(configuration.codeReview).toEqual({ userId: workspace.creatorUserId, ...(identity ? { userName: identity.name } : {}) });
+    expect(github.connections.gitIdentity).toHaveBeenLastCalledWith({ organizationId: workspace.organizationId, userId: workspace.creatorUserId });
+  }
 });

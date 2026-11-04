@@ -11,6 +11,7 @@ import { CheckoutWatch } from "./watch";
 import { listWorkspaceSkills } from "./skills";
 import { GithubCheckoutReporter, type ReportGithubCheckout } from "./github-checkout";
 import { reconcileGithubRemote } from "./github-remote";
+import type { WorkerCodeReview } from "./code-review";
 
 export interface PrSummary { prNumber: number | null; prState: "draft" | "ready" | "merged" | "closed" | null; prUrl: string | null }
 const EMPTY_PR: PrSummary = { prNumber: null, prState: null, prUrl: null };
@@ -23,6 +24,7 @@ export interface WorkspaceServiceOptions {
   historyDiff?: (params: Record<string, unknown>) => Promise<unknown>;
   reportGithubCheckout?: ReportGithubCheckout;
   nextCheckoutSequence?: () => number;
+  codeReview?: WorkerCodeReview;
 }
 
 /** Native wire contract from engine/workspace/service.ts and git/types.ts,
@@ -95,6 +97,7 @@ export class WorkspaceService {
   async handle(op: string, params: Record<string, unknown>): Promise<unknown> {
     this.scope.assertId(params.workspaceId);
     for (const key of ["cwd", "folder", "repoRoot"]) if (params[key] !== undefined) this.scope.folder(params[key]);
+    if (op.startsWith("codeReview.")) return this.options.codeReview ? this.options.codeReview.handle(op, params) : unsupported();
     if (op.startsWith("git.")) return this.git.handle(op, params);
     if (op.startsWith("file.") || op.startsWith("fs.")) return this.files.handle(op, params);
     switch (op) {

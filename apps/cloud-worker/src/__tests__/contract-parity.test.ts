@@ -7,6 +7,21 @@ import * as controlPrompts from "../../../control-plane/src/cloud/prompt-contrac
 import { CLIENT_A, WORKSPACE_ID, config } from "./worker-fixtures";
 import { CloudV2ControlFrameSchema as legacyWorkerFrame } from "../../../control-plane/src/cloud/__fixtures__/worker-contract-before-identity";
 
+it("keeps private review identity optional, bounded and strict across independently deployed peers", () => {
+  const codeReview = { userId: CLIENT_A, userName: "Fixture reviewer" };
+  for (const contract of [shared, control]) {
+    for (const value of [undefined, { userId: CLIENT_A }, codeReview]) {
+      const frame = { ...config, ...(value ? { codeReview: value } : {}) };
+      expect(contract.CloudV2ControlFrameSchema.parse(frame)).toEqual(frame);
+    }
+    for (const value of [null, {}, { userId: "foreign" }, { ...codeReview, userName: "" }, { ...codeReview, userName: "  " },
+      { ...codeReview, userName: "x".repeat(257) }, { ...codeReview, userName: "line\nbreak" }, { ...codeReview, actor: "chosen" }])
+      expect(contract.CloudV2ControlFrameSchema.safeParse({ ...config, codeReview: value }).success).toBe(false);
+  }
+  expect(shared.CloudV2ControlFrameSchema.parse(legacyWorkerFrame.parse(config))).toEqual(config);
+  expect(legacyWorkerFrame.safeParse({ ...config, codeReview }).success).toBe(false);
+});
+
 it("keeps optional managed Git identity bounded and identical across the independently deployed contracts", () => {
   const identity = { name: "Fixture Contributor", email: "123+contributor@users.noreply.github.com" };
   for (const contract of [shared, control]) {

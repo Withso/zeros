@@ -571,8 +571,13 @@ Once the worker has reported its checkout and the source scope is authorized,
 the workspace advertises `githubPullRequests: 1`. Published PR discovery,
 status, checks, commits, reviews, diff and inline discussions use authenticated
 HTTPS to the control plane. These reads also work while the VM is stopped.
-Private workspace comments remain unavailable in cloud; a GitHub reply or
-line comment is explicitly posted to the PR and never written to Local SQLite.
+Private workspace comments use the VM's bounded `review.sqlite` store after
+`code-review-v1` negotiation. They share Local's comment API and four agent MCP
+tools, persist through encrypted checkpoint restore, and never publish to
+GitHub. A stopped VM shows the existing open-to-view state without a passive
+wake. See [Workspace code review](code-review.md) for limits, attribution and
+grant lifetime. A GitHub reply or line comment is explicitly posted to the PR
+and never written to Local SQLite.
 
 Create PR requires a running checkout. The primary action gives the agent a
 branch-specific instruction using the selected cloud connection, and refreshes

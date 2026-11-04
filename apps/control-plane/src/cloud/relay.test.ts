@@ -294,6 +294,22 @@ describe("cloud v2 relay", () => {
     }
   });
 
+  it.each(["", "code-review-v10", "code-review-v1"])("gates trusted review identity on initial and refreshed WebSocket config: %s", async features => {
+    workerServer.on("headers", headers => { headers.push(`X-Zeros-Worker-Features: mcp-v1,${features}`); });
+    const original = deps.config, codeReview = { userId: workspaceId, userName: "Fixture reviewer" };
+    deps.config = async ws => ({ ...await original(ws), codeReview });
+    const frames: any[] = [];
+    workerServer.on("connection", ws => ws.on("message", raw => frames.push(JSON.parse(String(raw)))));
+    await app();
+    await vi.waitFor(() => expect(frames.filter(frame => frame.t === "config")).toHaveLength(1));
+    loginRevision = "1"; await relay.refreshLogins();
+    await vi.waitFor(() => expect(frames.filter(frame => frame.t === "config")).toHaveLength(2));
+    for (const frame of frames.filter(frame => frame.t === "config")) {
+      if (features === "code-review-v1") expect(frame.codeReview).toEqual(codeReview);
+      else expect(frame).not.toHaveProperty("codeReview");
+    }
+  });
+
   it.each([false, true])("gates setup on WebSocket upgrade support=%s for initial and refreshed config", async supported => {
     workerServer.on("headers", headers => { headers.push(`X-Zeros-Worker-Features: mcp-v1${supported ? ",workspace-setup-v1" : ""}`); });
     const original = deps.config;

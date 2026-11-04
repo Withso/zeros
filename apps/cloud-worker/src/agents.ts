@@ -12,6 +12,7 @@ import { WorkspaceError, type WorkerConfig, type WorkspaceScope } from "./worksp
 import { CodexModelAvailability, type ModelDiscoveryOptions } from "./credentials/model-availability";
 import { preparePromptFiles } from "./prompt-files";
 import type { DriverMcpServers } from "./mcp/gateway";
+import type { WorkspaceToolFactory, WorkspaceToolGrant } from "./mcp/workspace-tools";
 import { TurnService } from "./workspace/turns";
 import type { AgentTextMessage } from "@zeros/protocol/agent-messages";
 import { providerAvailability, providerFailure } from "./provider-failure";
@@ -40,6 +41,7 @@ interface Runtime {
   checkpointTurnId?: string;
   mcpExecutionId?: string;
   mcpFailures?: Set<string>;
+  workspaceTools?: WorkspaceToolGrant;
 }
 
 const VERSIONS = { codex: "0.166.0", claude: "0.3.311", cursor: "1.2.0" };
@@ -57,6 +59,8 @@ export class Agents {
   private readonly routes = new Map<string, Runtime>();
   private readonly chats = new Map<string, Runtime>();
   private config: WorkerConfig;
+  private reviewConfig: WorkerConfig["codeReview"];
+  private reviewConfiguration = 0;
   private readonly models: CodexModelAvailability;
   private outboxDispatch?: (entry: InboxEntry) => Promise<boolean>;
   private outboxStop?: (chatId: string, throughEpoch: string) => Promise<string>;
@@ -71,9 +75,20 @@ export class Agents {
     private readonly onTiming?: TimingObserver,
     modelDiscovery?: ModelDiscoveryOptions,
     private readonly mcpProviders?: (executionId: string) => Promise<DriverMcpServers>,
-  ) { this.config = config; this.models = new CodexModelAvailability(modelDiscovery); this.models.configure(config); this.turns = new TurnService(store, scope); }
+    private readonly workspaceToolFactory?: WorkspaceToolFactory,
+  ) { this.config = config; this.reviewConfig = config.codeReview; this.models = new CodexModelAvailability(modelDiscovery); this.models.configure(config); this.turns = new TurnService(store, scope); }
 
-  configure(config: WorkerConfig): void { this.config = config; this.models.configure(config); }
+  fenceReviewConfiguration(review: WorkerConfig["codeReview"]): boolean {
+    if (JSON.stringify(this.reviewConfig) === JSON.stringify(review)) return false;
+    this.reviewConfig = review;
+    this.reviewConfiguration++;
+    for (const route of this.routes.values()) void this.retireWorkspaceTools(route);
+    return true;
+  }
+  configure(config: WorkerConfig): void {
+    this.fenceReviewConfiguration(config.codeReview);
+    this.config = config; this.models.configure(config);
+  }
   mcpFailure(executionId: string, cloud: CloudMcpFailure): void {
     const route = [...this.routes.values()].find(value => value.mcpExecutionId === executionId);
     if (!route || route.closed || this.chats.get(route.chatId) !== route) return;
@@ -152,10 +167,20 @@ export class Agents {
       ? BigInt(active.outbox.epoch) < BigInt(epoch)
       : active.cancelRequested || freshEpoch) : this.hasBackground(route) && freshEpoch);
     const running = !!route?.nativeRunning;
-    if (!interrupt || !route) { await this.store.stopOutbox(chatId, epoch); return; }
+    if (!interrupt || !route) {
+      let tools: Promise<void> | undefined;
+      if (route && freshEpoch && !active && this.workspaceToolFactory) {
+        route.stopping++;
+        tools = this.retireWorkspaceTools(route);
+      }
+      await this.store.stopOutbox(chatId, epoch);
+      await tools;
+      return;
+    }
     route.stopping++; route.stopInFlight = (route.stopInFlight ?? 0) + 1;
     if (active) active.cancelRequested = true;
-    const stopped = Promise.all([route.interactions?.dismiss(INPUT_CANCELLED), route.driver?.interrupt()]);
+    const tools = this.retireWorkspaceTools(route);
+    const stopped = Promise.all([route.interactions?.dismiss(INPUT_CANCELLED), route.driver?.interrupt(), tools]);
     void stopped.catch(() => {});
     try {
       await this.store.stopOutbox(chatId, epoch);
@@ -312,17 +337,28 @@ export class Agents {
   async closeChat(chatId: string, shutdown = false): Promise<void> {
     const route = this.chats.get(chatId);
     if (!route) return;
+    const tools = this.retireWorkspaceTools(route);
     if (!shutdown && this.outboxStop) await this.stop(route);
     await this.retire(route, shutdown ? INPUT_STOPPED : INPUT_CANCELLED);
     if (!shutdown) await this.store.retireExecution(chatId, route.id);
     if (this.store.metadata(chatId)?.chat) await this.store.stop(chatId, () => this.chats.get(chatId) === route);
     if (this.chats.get(chatId) === route) this.chats.delete(chatId);
+    await tools;
     this.activity();
+  }
+
+  private retireWorkspaceTools(route: Runtime): Promise<void> {
+    const tools = route.workspaceTools;
+    route.workspaceTools = undefined;
+    if (tools) route.login = undefined;
+    tools?.revoke();
+    return tools?.dispose() ?? Promise.resolve();
   }
 
   private retire(route: Runtime, reason = INPUT_CANCELLED): Promise<void> {
     if (route.retiring) return route.retiring;
     route.closed = true; route.stopping++; route.unsubscribe?.();
+    const tools = this.retireWorkspaceTools(route);
     this.routes.delete(route.id);
     return route.retiring = (async () => {
       // Native abort cannot wait for a held input receipt to become durable.
@@ -331,13 +367,19 @@ export class Agents {
       await route.opening?.catch(() => {});
       await route.pumping;
       await route.events;
+      await tools;
     })();
   }
 
   async flush(): Promise<void> {
     await Promise.all([...this.routes.values()].map(async (route) => { await route.events; await route.settling; }));
   }
-  async dispose(): Promise<void> { this.models.dispose(); await Promise.all([...this.chats.keys()].map(id => this.closeChat(id, true))); }
+  async dispose(): Promise<void> {
+    this.models.dispose();
+    const tools = [...this.chats.values()].map(route => this.retireWorkspaceTools(route));
+    await Promise.all([...this.chats.keys()].map(id => this.closeChat(id, true)));
+    await Promise.all(tools);
+  }
 
   private agent(id: string): CloudV2Agent {
     if (id !== "codex" && id !== "claude" && id !== "cursor") throw new WorkspaceError("agent-not-found", "Unknown cloud agent.");
@@ -459,13 +501,17 @@ export class Agents {
     const login = this.config.agents[route.agentId];
     // Personal MCP sign-in changes readiness without changing the shared
     // server definition. Reopen between turns after that pushed revision.
-    const key = JSON.stringify([login, this.config.mcpServers ?? [], this.config.mcpServers?.length ? this.config.loginRevision : undefined, this.config.agentInteractions]);
+    const key = JSON.stringify([login, this.config.mcpServers ?? [], this.config.mcpServers?.length ? this.config.loginRevision : undefined, this.config.agentInteractions, this.config.codeReview]);
     if (route.driver && route.login === key) return;
     if (!login) throw new WorkspaceError("auth-required", "Connect this agent before sending a message.");
     const factory = this.factories[route.agentId];
     if (!factory) throw new WorkspaceError("agent-unavailable", "This agent is not installed in the worker.");
     route.opening = (async () => {
+      const openingStop = route.stopping;
+      const openingReview = this.reviewConfiguration;
+      const tools = this.retireWorkspaceTools(route);
       await route.interactions?.dismiss(INPUT_CANCELLED);
+      await tools;
       route.unsubscribe?.();
       route.mcpExecutionId = undefined;
       await route.driver?.dispose();
@@ -549,10 +595,18 @@ export class Agents {
       });
       try {
         const mcpServers = await this.mcpProviders?.(route.mcpExecutionId);
+        const executionId = route.mcpExecutionId;
+        const assertToolsCurrent = () => {
+          this.assertCurrent(route);
+          if (route.driver !== driver || route.mcpExecutionId !== executionId || route.stopping !== openingStop || this.reviewConfiguration !== openingReview)
+            throw new WorkspaceError("session-expired", "This execution's tools have been retired.");
+        };
+        route.workspaceTools = await this.workspaceToolFactory?.({ agentId: route.agentId, conversationId: route.chatId, executionId, assertCurrent: assertToolsCurrent });
+        assertToolsCurrent();
         this.assertCurrent(route);
         const interactions = route.interactions;
         const native = await driver.open({ sessionId: route.id, cwd: this.scope.root, model: route.model, effort: route.effort, fast: route.fast,
-          ...(mcpServers ? { mcpServers } : {}),
+          ...(mcpServers || route.workspaceTools ? { mcpServers: { ...mcpServers, ...route.workspaceTools?.servers } } : {}),
           ...(this.config.agentInteractions === 1 ? { modeId: cloudModeId(route.agentId, route.permissionMode ?? "bypass"),
             onQuestion: (request, signal) => interactions!.question(request, signal),
             onPermission: (request, signal) => interactions!.permission(request, signal) } : {}),
@@ -570,7 +624,7 @@ export class Agents {
           if (this.store.canRebind(route.chatId)) route.pendingNative = native.nativeSessionId;
           else await this.store.bind(route.chatId, route.agentId, native.nativeSessionId);
         }
-      } catch (error) { route.mcpExecutionId = undefined; route.unsubscribe?.(); await driver.dispose(); route.driver = undefined; throw error; }
+      } catch (error) { const tools = this.retireWorkspaceTools(route); route.mcpExecutionId = undefined; route.unsubscribe?.(); await driver.dispose(); await tools; route.driver = undefined; throw error; }
     })();
     try { await route.opening; } finally { route.opening = undefined; }
   }
@@ -710,7 +764,9 @@ export class Agents {
       // A failed durable write must stop dispatch; never continue a queue that
       // cannot establish whether the provider consumed the last input.
       route.unsubscribe?.();
+      const tools = this.retireWorkspaceTools(route);
       await route.driver?.dispose().catch(() => {});
+      await tools;
       if (route.active) await this.turnState(route, route.active, "failed");
       for (const waiters of route.waiters.values()) for (const waiter of waiters) {
         await waiter.client.send(createMessage({ type: "AGENT_PROMPT_FAILED", source: "engine", requestId: waiter.requestId,
@@ -748,6 +804,7 @@ export class Agents {
   private async stop(route: Runtime, reason = INPUT_CANCELLED): Promise<void> {
     route.stopping++; route.stopInFlight = (route.stopInFlight ?? 0) + 1;
     if (route.active) route.active.cancelRequested = true;
+    const tools = this.retireWorkspaceTools(route);
     // Claim the dismissal first, then interrupt before any provider callback
     // can continue while the control-plane Stop receipt is in flight.
     const dismissed = route.interactions?.dismiss(reason);
@@ -762,6 +819,7 @@ export class Agents {
         await this.store.stopOutbox(route.chatId, epoch);
       }
       await interrupted;
+      await tools;
     } finally { route.stopInFlight--; }
   }
 

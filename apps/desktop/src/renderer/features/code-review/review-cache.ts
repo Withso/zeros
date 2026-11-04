@@ -4,13 +4,15 @@ import {
   type CodeReviewListResult,
 } from "@zeros/protocol/code-review";
 import { KeyedAsyncCache } from "@/renderer/shared/lib/keyed-async-cache";
+import { cloudGithubPrScope } from "../../platform/cloud-github-pr-scope";
 import {
   registerReviewCacheForget,
   type ReviewCacheRequest,
 } from "./review-cache-forget";
 
 export function codeReviewCacheKey(cwd: string, workspaceId: string): string {
-  return JSON.stringify([cwd.replace(/[\\/]+$/, "") || "/", workspaceId]);
+  const scope = cloudGithubPrScope(workspaceId);
+  return JSON.stringify([cwd.replace(/[\\/]+$/, "") || "/", workspaceId, ...(scope === "local" ? [] : [scope])]);
 }
 
 export function codeReviewTargetFromKey(key: string): {
