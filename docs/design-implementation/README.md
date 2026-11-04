@@ -556,3 +556,10 @@ Each landed step appends one line: date, workstream, what landed, evidence.
   what it found with the detail in fg3, the fix, then a refresh icon for
   Check again) instead of a filled card. The workbench-status smoke now
   pins the one-row banner.
+- 2026-11-04 · 4, 5 · Design (states): no Design directory is the titled
+  empty state (Design, Start designing) with Create design directory as
+  the one primary action, which keeps its place and shows the spinner
+  while it runs; checking is one quiet line with the spinner; a local main
+  workspace and an unavailable directory use the shared empty state. The
+  pages menu already puts the check at the end of the chosen row. The
+  inspector, layer rows and the remaining Design states are in `plans.md`.

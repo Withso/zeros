@@ -110,3 +110,17 @@ Board: `ChgThread`. Agents get their mark (Claude, Codex, Cursor) on a
 rounded square with an Agent badge; GitHub authors show their avatar, review
 apps their logo with a Bot badge; initials until an image loads. The thread
 model needs the avatar URL and the agent provider for each comment.
+
+## 7. Design: inspector and layers
+
+Boards: `DsnWindow`, `DsnInspectorFrame`, `DsnInspectorText`,
+`DsnInspectorCss`, `DsnThemeEditor`, `DsnInitGit`, `DsnConflicts`.
+Inspector fields become filled 28px controls with no resting edge (labels
+12 medium fg3, computed values fg2); only the sections in use show, and Add
+property adds Stroke, Effects, Typography, Transform, Transition or Motion.
+Layer rows move to 28px with the bg2-highlight selection: the row height is
+part of `design-layer-layout.ts`, which the canvas tools measure, so change
+it there with the layer-panel tests and the Design smokes. Long computed
+and theme values end in an ellipsis inside their field. A failed Git init
+is one red line under the text; the conflict pause lists its files in one
+quiet card that opens them in Changes.
