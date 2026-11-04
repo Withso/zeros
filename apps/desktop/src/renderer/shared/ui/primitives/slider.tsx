@@ -11,8 +11,13 @@ const THUMB =
 
 const Slider = React.forwardRef<
   React.ComponentRef<typeof SliderPrimitive.Root>,
-  React.ComponentPropsWithoutRef<typeof SliderPrimitive.Root>
->(({ className, ...props }, ref) => (
+  React.ComponentPropsWithoutRef<typeof SliderPrimitive.Root> & {
+    /** The thumb's accessible name; the thumb is what assistive tech reads. */
+    label?: string;
+    /** The value in words, e.g. "0:12 of 1:30", for values a number misreads. */
+    valueText?: string;
+  }
+>(({ className, label, valueText, ...props }, ref) => (
   <SliderPrimitive.Root
     ref={ref}
     className={cn(
@@ -25,7 +30,7 @@ const Slider = React.forwardRef<
       <SliderPrimitive.Range className="bg-fg1 absolute h-full rounded-full" />
     </SliderPrimitive.Track>
     {(props.value ?? props.defaultValue ?? [0]).map((_, index) => (
-      <SliderPrimitive.Thumb key={index} className={THUMB} />
+      <SliderPrimitive.Thumb key={index} className={THUMB} aria-label={label} aria-valuetext={valueText} />
     ))}
   </SliderPrimitive.Root>
 ));

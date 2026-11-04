@@ -13,7 +13,7 @@ import {
   MoreHorizontal,
   Film,
 } from "lucide-react";
-import { IconButton, Input, Tooltip, DropdownMenu, DropdownMenuTrigger, DropdownMenuContent, DropdownMenuItem, Toolbar, ToolbarSeparator, ToolbarText } from "@/renderer/shared/ui/primitives";
+import { IconButton, Tooltip, DropdownMenu, DropdownMenuTrigger, DropdownMenuContent, DropdownMenuItem, Toolbar, ToolbarSeparator, ToolbarText, Slider } from "@/renderer/shared/ui/primitives";
 import { toast } from "@/renderer/shared/ui/primitives/elements";
 import { useDocumentActive } from "@/renderer/state/use-document-active";
 import { WorkbenchEmptyState } from "../tab-status";
@@ -422,21 +422,19 @@ function FileVideoControls({
           {state.playing ? <Pause /> : <Play />}
         </IconButton>
       </Tooltip>
-      <Input
-        type="range"
+      <Slider
         min={0}
         max={duration || 1}
         step={0.1}
-        value={Math.min(state.time, duration)}
+        value={[Math.min(state.time, duration)]}
         disabled={!active || !ready || !duration}
-        aria-label="Seek video"
-        aria-valuetext={`${videoTime(state.time)} of ${videoTime(duration)}`}
-        className="accent-fg1 focus-visible:outline-highlighted-bright h-6 min-w-12 flex-1 cursor-pointer border-0 px-0 py-0 shadow-none focus-visible:outline-2"
-        onChange={(event) => {
-          const time = Number(event.currentTarget.value);
+        label="Seek video"
+        valueText={`${videoTime(state.time)} of ${videoTime(duration)}`}
+        className="mx-1.5 min-w-12 flex-1"
+        onValueChange={([time = 0]) => {
           video.currentTime = time;
-          // A controlled range must publish its input synchronously. Waiting
-          // for timeupdate lets React restore the old value between input/change.
+          // A controlled slider must publish its value synchronously. Waiting
+          // for timeupdate lets React restore the old value mid-drag.
           setState((current) => ({ ...current, time }));
         }}
       />

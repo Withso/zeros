@@ -17,9 +17,9 @@ as the direction changes.
 
 | Source | Holds |
 | --- | --- |
-| The Zeros Design canvas | One board per state. Its Proposed half is the approved design; its change lines are the spec; its notes record today's code. |
-| `docs/design-implementation/<page>.md` | The canvas exported board by board (generated). Read the page's file before implementing any of its boards. |
-| `styles/tokens/*.tokens.json` | Token values. The canvas's proposed palette lands here. |
+| The Zeros Design canvas | One board per state, drawn as it ships. A board whose approved design is still scheduled carries a Planned line that names its section in `plans.md`. |
+| `docs/design-implementation/<page>.md` | The approved changes and code notes, exported board by board from canvas version `1793762476-d72a`, before the canvas showed only the shipped UI (generated). Read the page's file before implementing any of its boards. |
+| `styles/tokens/*.tokens.json` | Token values. The canvas palette lands here. |
 | `apps/desktop/src/renderer/shared/ui/` | Primitives and layout blocks. Every page change composes them. |
 
 Page specs: [Foundations](foundations.md) · [UI components](ui-components.md) ·
