@@ -25,6 +25,20 @@ it("keeps the standalone control-plane constants identical to the worker contrac
     expect(control[name]).toBe(shared[name]);
 });
 
+it("keeps user-token recovery optional and validates the digest identically on both deployments", () => {
+  const request = { t: "request", id: CLIENT_A, kind: "github-token", purpose: "gh" };
+  for (const contract of [shared, control]) {
+    expect(contract.CloudV2ControlFrameSchema.safeParse(config).success).toBe(true);
+    expect(contract.CloudV2ControlFrameSchema.safeParse({ ...config, githubUserTokens: 1 }).success).toBe(true);
+    expect(contract.CloudV2ControlFrameSchema.safeParse({ ...config, githubUserTokens: 2 }).success).toBe(false);
+    expect(contract.CloudV2WorkerFrameSchema.safeParse(request).success).toBe(true);
+    expect(contract.CloudV2WorkerFrameSchema.safeParse({ ...request, failedTokenSha256: "a".repeat(64) }).success).toBe(true);
+    for (const failedTokenSha256 of ["", "A".repeat(64), "a".repeat(63), "a".repeat(64) + "\n", null])
+      expect(contract.CloudV2WorkerFrameSchema.safeParse({ ...request, failedTokenSha256 }).success).toBe(false);
+  }
+  expect(legacyWorkerFrame.safeParse({ ...config, githubUserTokens: 1 }).success).toBe(false);
+});
+
 const history = { t: "history", messages: { chatId: "native-chat", rows: [{ msgId: "native-row", kind: "user", payload: "{}", createdAt: 1 }] } };
 const cases = {
   CloudV2WorkerFrameSchema: [

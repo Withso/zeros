@@ -6,6 +6,7 @@ import type {
 } from "./github-connections-store.js";
 import type { GithubBackendConfig } from "../config.js";
 import { HttpError } from "../authz.js";
+import { createHash } from "node:crypto";
 
 const scope = {
   organizationId: "00000000-0000-4000-8000-000000000001",
@@ -76,6 +77,22 @@ function fixture(method: "pat" | "github-app" = "pat") {
   return { service, store, fetcher, snapshot, assertCurrent };
 }
 describe("selected cloud GitHub credentials", () => {
+  it("recovers one typed identity 401 through the selected credential lease", async () => {
+    const f = fixture("github-app"), fresh = { ...f.snapshot, material: { ...f.snapshot.material, accessToken: "synthetic-fresh-user" } };
+    f.store.credential.mockResolvedValueOnce(f.snapshot).mockResolvedValueOnce(fresh);
+    f.fetcher.mockResolvedValueOnce(new Response(null, { status: 401 }));
+    expect((await f.service.access(scope)).material.accessToken).toBe("synthetic-fresh-user");
+    expect(f.store.credential).toHaveBeenCalledTimes(2);
+    expect(f.store.credential).toHaveBeenLastCalledWith(scope, expect.any(Function), createHash("sha256").update(f.snapshot.material.accessToken).digest("hex"));
+    expect(f.fetcher).toHaveBeenCalledTimes(2);
+  });
+  it.each([401, 403])("bounds identity recovery without replaying a mutation on HTTP %s", async status => {
+    const f = fixture("github-app");
+    f.fetcher.mockImplementation(async () => new Response(null, { status }));
+    await expect(f.service.access(scope)).rejects.toMatchObject({ code: status === 401 ? "github_authorization_expired" : "github_cloud_access_denied" });
+    expect(f.store.credential).toHaveBeenCalledTimes(status === 401 ? 2 : 1);
+    expect(f.fetcher.mock.calls.every(([url]) => new URL(String(url)).pathname === "/user")).toBe(true);
+  });
   it.each(["pat", "github-app"] as const)("derives Git identity from the selected %s profile without new scopes", async method => {
     const f = fixture(method);
     f.fetcher.mockResolvedValue(Response.json({ id: 12, login: "renamed", name: "Fixture Contributor" }));

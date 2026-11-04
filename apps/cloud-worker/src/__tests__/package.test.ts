@@ -53,7 +53,7 @@ it("ships a relocatable dependency graph and a complete SHA-256 inventory", asyn
     }
   }
   await walk(); expect(Object.keys(manifest.files).sort()).toEqual(files.sort());
-  for (const name of ["worker.mjs", "cursor-host.mjs", "git-askpass.mjs", "gh.mjs", "bin/gh", "bin/git-askpass"])
+  for (const name of ["worker.mjs", "cursor-host.mjs", "git-askpass.mjs", "git-credential.mjs", "gh.mjs", "bin/gh", "bin/git-askpass", "bin/git-credential"])
     expect(files).toContain(name);
   // Hash the native executables too, not only their package manifests.
   for (const name of files) {
@@ -116,7 +116,8 @@ it("boots the relocated Cursor host with its real pinned SDK over IPC without co
 
 it("resolves askpass and gh wrappers through a runtime symlink, including spaces", async () => {
   let requests = 0;
-  const broker = new GithubBroker(`/tmp/zeros-github-${randomUUID()}/github.sock`, async () => { requests++; return { token: "fixture-package-github", expiresAt: Date.now() + 60_000 }; });
+  const failures: string[] = [];
+  const broker = new GithubBroker(`/tmp/zeros-github-${randomUUID()}/github.sock`, async (_purpose, failed) => { requests++; if (failed) failures.push(failed); return { token: "fixture-package-github", expiresAt: Date.now() + 60_000 }; });
   await broker.start();
   try {
     const executable = join(dist, "bin/git-askpass");
@@ -133,13 +134,37 @@ it("resolves askpass and gh wrappers through a runtime symlink, including spaces
     expect(code).toBe(0); expect(errors).toBe("");
     expect(credentials.includes("password=fixture-package-github\n")).toBe(true);
     expect(credentials.includes("username=x-access-token\n")).toBe(true);
+    const reject = spawn("git", ["credential", "reject"], { cwd: directory,
+      env: { ...workerChildEnvironment(undefined, githubEnvironment(broker.socketPath, executable)), HOME: directory }, stdio: ["pipe", "pipe", "pipe"] });
+    const rejected = once(reject, "close");
+    reject.stdin.end("protocol=https\nhost=github.com\nusername=x-access-token\npassword=fixture-package-github\n\n");
+    expect((await rejected)[0]).toBe(0);
+    expect(failures).toEqual([createHash("sha256").update("fixture-package-github").digest("hex")]);
     // Only the final OS gh process is substituted: test hosts need not install
     // Boat's /usr/bin/gh, and this smoke must never contact GitHub.
     const gh = await exec(join(dist, "bin/gh"), ["--version"], {
       cwd: directory, env: { ...workerChildEnvironment(undefined, githubEnvironment(broker.socketPath, executable)),
         NODE_OPTIONS: `--import=${new URL("./fixtures/gh-launch.mjs", import.meta.url).href}` }, timeout: 10_000,
     });
-    expect(gh.stdout.startsWith("gh version ")).toBe(true); expect(gh.stderr).toBe(""); expect(requests).toBe(3);
+    expect(gh.stdout.startsWith("gh version ")).toBe(true); expect(gh.stderr).toBe(""); expect(requests).toBe(4);
+  } finally { await broker.dispose(); }
+});
+
+it("observes a packaged gh 401 after output, reports its token once and does not repeat a completed write", async () => {
+  const failures: string[] = [];
+  const broker = new GithubBroker(`/tmp/zeros-github-${randomUUID()}/github.sock`, async (_purpose, failed) => {
+    if (failed) failures.push(failed);
+    return { token: failed ? "fixture-fresh-user" : "fixture-rejected-user", expiresAt: Date.now() + 120_000 };
+  });
+  await broker.start();
+  try {
+    const result = await exec(join(dist, "bin/gh"), ["pr", "create"], { cwd: directory,
+      env: { ...workerChildEnvironment(undefined, githubEnvironment(broker.socketPath, join(dist, "bin/git-askpass"))),
+        NODE_OPTIONS: `--import=${new URL("./fixtures/gh-rejection-launch.mjs", import.meta.url).href}` }, timeout: 10_000 }).catch(error => error);
+    expect(result.code).toBe(1);
+    expect(result.stdout).toBe("fixture-write-completed\n");
+    expect(result.stderr).toBe("gh: Bad credentials (HTTP 401)\n");
+    expect(failures).toEqual([createHash("sha256").update("fixture-rejected-user").digest("hex")]);
   } finally { await broker.dispose(); }
 });
 
@@ -206,7 +231,7 @@ it("boots through the runtime symlink, waits for a token, serves a dial-in PTY a
   await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
   const address = server.address() as AddressInfo;
   const harness = join(dist, "boot-smoke.mjs");
-  await writeFile(harness, `import { startWorker, readBootEnvironment } from './worker.mjs';\nstartWorker({...readBootEnvironment(),tokenFile:${JSON.stringify(tokenFile)},directory:${JSON.stringify(state)},publicKeys:${JSON.stringify(publicKeys)},port:${port}});\n`);
+  await writeFile(harness, `import { startWorker, readBootEnvironment } from './worker.mjs';\nconst network = globalThis.fetch; globalThis.fetch = (url, options) => String(url) === 'https://api.github.com/user' ? Promise.resolve(new Response(null, { status: 200 })) : network(url, options);\nstartWorker({...readBootEnvironment(),tokenFile:${JSON.stringify(tokenFile)},directory:${JSON.stringify(state)},publicKeys:${JSON.stringify(publicKeys)},port:${port}});\n`);
   let child: ChildProcess | undefined, socket: WebSocket | undefined; let output = "";
   try {
     child = spawn(process.execPath, [harness], { cwd: directory, env: { ...workerChildEnvironment(), HOME: root,

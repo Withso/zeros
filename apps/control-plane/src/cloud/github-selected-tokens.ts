@@ -27,9 +27,8 @@ const installations = z.object({
     .max(100),
 });
 
-/** Git App credentials retain the foundation's repository-scoped installation
- * mint. gh and HTTPS PR actions use the selected human. A PAT cannot be
- * narrowed by this broker; its GitHub scopes remain the VM trust boundary. */
+/** Workspace credentials keep the selected human's scope. Only the shared
+ * Computer builder uses repository-scoped installation credentials. */
 export function createSelectedCloudGithubTokens(
   pool: pg.Pool,
   connections: CloudGithubConnections,
@@ -39,10 +38,11 @@ export function createSelectedCloudGithubTokens(
     scope: CloudGithubConnectionScope,
     target: CloudGithubRepositoryTarget,
     access: "read" | "write" | "user" = "read",
-    purpose: "git" | "gh" = "git",
+    purpose: "git" | "gh" | "computer" = "git",
     beforeRelease: () => Promise<void> = async () => {},
+    failedTokenSha256?: string,
   ) => {
-    const grant = await connections.access(scope),
+    const grant = await connections.access(scope, failedTokenSha256),
       repository = await grant.api.repository(target);
     if (access === "write" && !repository.canPush)
       throw new HttpError(
@@ -55,7 +55,7 @@ export function createSelectedCloudGithubTokens(
       `/repositories/${repository.repositoryId}/branches?per_page=1`,
       z.array(z.unknown()).max(1),
     );
-    if (grant.material.method === "pat" || purpose === "gh") {
+    if (grant.material.method === "pat" || purpose !== "computer") {
       await beforeRelease();
       await grant.assertCurrent();
       // This is a broker cache deadline, not a claimed GitHub token lifetime.

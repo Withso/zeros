@@ -98,7 +98,7 @@ async function inventory(directory, prefix = "", files = {}) {
 }
 
 try {
-  await build({ absWorkingDir: root, entryPoints: { worker: "src/main.ts", "cursor-host": "src/drivers/cursor/host-entry.ts", "git-askpass": "src/credentials/askpass-entry.ts", gh: "src/credentials/gh-entry.ts" },
+  await build({ absWorkingDir: root, entryPoints: { worker: "src/main.ts", "cursor-host": "src/drivers/cursor/host-entry.ts", "git-askpass": "src/credentials/askpass-entry.ts", "git-credential": "src/credentials/git-credential-entry.ts", gh: "src/credentials/gh-entry.ts" },
     outdir: staging, outExtension: { ".js": ".mjs" }, bundle: true, platform: "node", target: "node24", format: "esm", external,
     banner: { js: 'import { createRequire as createRuntimeRequire } from "node:module"; const require = createRuntimeRequire(import.meta.url);' },
     legalComments: "linked", sourcemap: false, logLevel: "warning",
@@ -114,7 +114,7 @@ try {
   for (const name of [`@openai/codex-linux-${process.arch}`, `@anthropic-ai/claude-agent-sdk-linux-${process.arch}`, `@cursor/sdk-linux-${process.arch}`])
     if (!Object.values(packages).some(pkg => pkg.name === name)) throw new Error(`Missing platform runtime ${name}.`);
   await cp(join(root, "bin"), join(staging, "bin"), { recursive: true, dereference: true });
-  await chmod(join(staging, "bin/gh"), 0o755); await chmod(join(staging, "bin/git-askpass"), 0o755);
+  await chmod(join(staging, "bin/gh"), 0o755); await chmod(join(staging, "bin/git-askpass"), 0o755); await chmod(join(staging, "bin/git-credential"), 0o755);
   for (const name of ["LICENSE", "THIRD-PARTY-NOTICES.md", "THIRD-PARTY-LICENSES.txt"])
     await copyFile(join(repository, name), join(staging, name));
   await writeFile(join(staging, "package.json"), JSON.stringify({ name: sourcePackage.name, version: sourcePackage.version, private: true, type: "module", license: sourcePackage.license, engines: sourcePackage.engines }, null, 2) + "\n");

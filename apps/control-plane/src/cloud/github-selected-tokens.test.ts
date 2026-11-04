@@ -111,9 +111,18 @@ function fixture(method: "github-app" | "pat" = "github-app") {
 }
 
 describe("cloud Git and gh actors", () => {
-  it("narrows App Git to the pinned repository while gh keeps the selected human", async () => {
+  it.each(["read", "write", "user"] as const)("delivers the selected App user for every VM %s credential, including legacy requests", async access => {
     const f = fixture();
-    expect(await f.token(scope, target, "user", "git")).toMatchObject({
+    for (const purpose of [undefined, "git", "gh"] as const) {
+      const result = await f.token(scope, target, access, purpose);
+      expect(result.token).toBe("fixture-human-app");
+      expect(result.expiresAt).toBeLessThanOrEqual(Date.now() + 120_000);
+    }
+    expect(f.issued).toEqual([]);
+  });
+  it("narrows shared Computer builds to the pinned repository while workspaces keep the selected human", async () => {
+    const f = fixture();
+    expect(await f.token(scope, target, "user", "computer")).toMatchObject({
       token: "fixture-installation-2",
     });
     expect(f.issued).toEqual([
@@ -152,7 +161,7 @@ describe("cloud Git and gh actors", () => {
       if (new URL(String(input)).pathname === "/installation/token") f.move();
       return response;
     });
-    await expect(f.token(scope, target)).rejects.toMatchObject({
+    await expect(f.token(scope, target, "read", "computer")).rejects.toMatchObject({
       code: "github_cloud_access_denied",
     });
     expect(f.revoked).toContain("Bearer fixture-installation-2");
@@ -166,7 +175,7 @@ describe("cloud Git and gh actors", () => {
         f.assertCurrent.mockRejectedValue(new Error("disconnected"));
       return response;
     });
-    await expect(f.token(scope, target)).rejects.toThrow("disconnected");
+    await expect(f.token(scope, target, "read", "computer")).rejects.toThrow("disconnected");
     expect(f.revoked).toContain("Bearer fixture-installation-2");
   });
   it("requires the installation to remain visible to the exact human after mint cleanup", async () => {
@@ -181,7 +190,7 @@ describe("cloud Git and gh actors", () => {
       if (path === "/installation/token") removed = true;
       return result;
     });
-    await expect(f.token(scope, target)).rejects.toMatchObject({
+    await expect(f.token(scope, target, "read", "computer")).rejects.toMatchObject({
       code: "github_app_access_required",
     });
     expect(f.revoked).toContain("Bearer fixture-installation-2");
@@ -189,7 +198,7 @@ describe("cloud Git and gh actors", () => {
   it("rechecks the full workspace source scope before releasing a newly minted credential", async () => {
     const f = fixture();
     await expect(
-      f.token(scope, target, "read", "git", async () => {
+      f.token(scope, target, "read", "computer", async () => {
         throw new Error("another source was revoked");
       }),
     ).rejects.toThrow("another source was revoked");

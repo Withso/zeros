@@ -23,7 +23,7 @@ export type CloudV2WorkerRouteDeps = {
   config(workspace: CloudV2Workspace, mode?: "admission" | "continuation"): Promise<ConfigFrame>;
   authorizeSource?(workspace: CloudV2Workspace): Promise<void>;
   continueSource?(workspace: CloudV2Workspace, proof?: CloudSourceProof): Promise<CloudSourceContinuation>;
-  githubToken(workspace: CloudV2Workspace, purpose?: "git" | "gh"): Promise<{ token: string; expiresAt: number }>;
+  githubToken(workspace: CloudV2Workspace, purpose?: "git" | "gh", failedTokenSha256?: string): Promise<{ token: string; expiresAt: number }>;
   githubCheckout?(token: string, bootId: string, value: CloudGithubCheckout): Promise<void>;
   mcpAuthorization?(workspace: CloudV2Workspace, id: string, force: boolean): Promise<{ headers: Record<string, string>; expiresAt?: number }>;
 };
@@ -64,13 +64,14 @@ async function configuration(deps: CloudV2WorkerRouteDeps, workspace: CloudV2Wor
     const config = await deps.config(workspace, mode);
     if (!await deps.store.workerSession(token, bootId)) throw unauthorized();
     if (revision === await deps.store.loginRevision(workspace.id)) {
-      const { mcpServers, githubPullRequests, gitIdentity, ...legacy } = config;
+      const { mcpServers, githubPullRequests, githubUserTokens, gitIdentity, ...legacy } = config;
       const { setup, baseCommit, github, ...workspaceConfig } = config.workspace;
       return { ...legacy, workspace: { ...workspaceConfig,
         ...(features.has("github-pr-v1") && github ? { github } : {}),
         ...(features.has("workspace-setup-v1") && setup !== undefined ? { setup } : {}),
         ...(features.has("checkout-v2") && baseCommit !== undefined ? { baseCommit } : {}) },
         loginRevision: revision, ...(features.has("git-identity-v1") && gitIdentity !== undefined ? { gitIdentity } : {}),
+        ...(features.has("github-user-token-v1") && githubUserTokens === 1 ? { githubUserTokens } : {}),
         ...(features.has("github-pr-v1") && githubPullRequests === 1 ? { githubPullRequests } : {}), ...(features.has("mcp-v1") && mcpServers ? { mcpServers } : {}),
         ...(deps.promptOutbox ? { promptOutbox: 1 } : {}) };
     }
@@ -152,14 +153,14 @@ export function createCloudV2WorkerRoutes(deps: CloudV2WorkerRouteDeps): Hono {
   });
   app.post(`${CLOUD_V2_WORKER_API}/github-token`, async c => {
     const auth = await session(c, deps, false);
-    const input = await body(c, z.object({ purpose: z.enum(["git", "gh"]).optional() }).strict());
+    const input = await body(c, z.object({ purpose: z.enum(["git", "gh"]).optional(), failedTokenSha256: z.string().length(64).regex(/^[a-f0-9]{64}$/).optional() }).strict());
     let granted: { token: string; expiresAt: number };
     try {
       if (auth.workspace.state !== "stopping") {
         if (deps.continueSource) await deps.continueSource(auth.workspace, auth.workspace);
         else await deps.authorizeSource?.(auth.workspace);
       }
-      granted = await deps.githubToken(auth.workspace, input.purpose ?? "git");
+      granted = await deps.githubToken(auth.workspace, input.purpose ?? "git", ...(input.failedTokenSha256 ? [input.failedTokenSha256] : []));
     } catch (error) {
       const failure = cloudGithubFailure(error);
       deps.logger?.warn("[cloud-v2] GitHub credential unavailable", failure);

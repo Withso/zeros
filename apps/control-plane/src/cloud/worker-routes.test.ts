@@ -52,6 +52,26 @@ it("accepts outbound hello and returns configuration, refusing stale runtimes", 
   expect(await response.json()).toMatchObject({ config: { t: "config", loginRevision: "0" } });
   expect((await f.request("hello", { ...body, runtimeSha256: "b".repeat(64) })).status).toBe(409);
 });
+it("carries a bounded rejected-token digest and purpose from the authenticated worker to the token source", async () => {
+  const f = fixture(), failedTokenSha256 = "a".repeat(64);
+  for (const purpose of ["git", "gh"] as const) {
+    const response = await f.request("github-token", { purpose, failedTokenSha256 });
+    expect(response.status).toBe(200);
+    expect(f.deps.githubToken).toHaveBeenLastCalledWith(expect.objectContaining({ creatorUserId: expect.any(String) }), purpose, failedTokenSha256);
+  }
+  for (const hash of ["", "a".repeat(63), "a".repeat(65), "A".repeat(64), "a".repeat(64) + "\n"])
+    expect((await f.request("github-token", { failedTokenSha256: hash })).status).toBe(400);
+});
+it("negotiates user-token recovery for hello and refreshed configuration without breaking legacy workers", async () => {
+  const f = fixture(), original = await f.deps.config({} as CloudV2Workspace);
+  vi.mocked(f.deps.config).mockResolvedValue({ ...original, githubUserTokens: 1 });
+  for (const [path, body] of [["hello", { bootId: f.bootId, protocol: 2, runtimeSha256: "a".repeat(64) }], ["config", undefined]] as const) {
+    const old = (await (await f.request(path, body)).json()).config;
+    expect(old).not.toHaveProperty("githubUserTokens");
+    expect(legacyWorkerFrame.safeParse(old).success).toBe(true);
+    expect((await (await f.request(path, body, { "x-zeros-worker-features": "github-user-token-v1" })).json()).config.githubUserTokens).toBe(1);
+  }
+});
 it("reports checkout failure using only worker identity even during a GitHub outage", async () => {
   const f = fixture();
   f.deps.authorizeSource = vi.fn(async () => { throw new HttpError(503, "github_unavailable", "Unavailable"); });
