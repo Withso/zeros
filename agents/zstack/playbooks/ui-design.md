@@ -50,8 +50,9 @@ them.
    mount it at their registry viewport, and updates any smoke that pins the
    old computed look in the same commit. A shared class constant counts as a
    primitive: list its importers first and size each by its context. A
-   component named by a prop declares `aria-label?: never`. Focus edges
-   never take layout space. Run the registry shards that mount a page step's
+   component named by a prop declares `aria-label?: never`. A glyph that
+   stands for a word (a status letter, a dot) keeps the word as its name
+   and as its hover title. Focus edges never take layout space. Run the registry shards that mount a page step's
    surfaces before committing the step, not only at handoff, and compare
    computed geometry with a tolerance: a quotient such as zoom × pixels moves
    by a rounding error when unrelated chrome changes size.

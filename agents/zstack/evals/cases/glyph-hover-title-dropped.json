@@ -1,0 +1,9 @@
+{
+  "id": "glyph-hover-title-dropped",
+  "kind": "replay",
+  "area": "renderer-ui",
+  "fixedBy": "012c3c8c335e3affcc37340847d346682b0e5ae4",
+  "symptom": "A tab-strip restyle replaced the status letter's title with role=\"img\" and aria-label, and the unsaved dot's title too, so hovering \"M\" no longer said Modified as the file tree's letters do. Targeted smokes passed; only the registry shard run reached the file-editor assertion inside codex-transcript, where the crash hid the rest of the shard.",
+  "rule": "A glyph that stands for a word (a status letter, a dot) keeps the word as its accessible name and as its hover title; naming it for assistive tech never replaces the title.",
+  "check": "pnpm test:ui-smoke --shard=2/3"
+}
