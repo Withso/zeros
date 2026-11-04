@@ -37,7 +37,7 @@ const CREATE_KEY_MS = 23 * 60 * 60_000;
 const MAX_ATTEMPTS = 8;
 const LEASE_RENEW_MS = 12 * 60 * 60_000;
 const MAINTENANCE_SCAN_MS = 60_000;
-export const CLOUD_V2_IDLE_STOP_MS = 10 * 60_000;
+export const CLOUD_V2_IDLE_STOP_MS = 15 * 60_000;
 /** A failed stop checkpoint is retried on a fork of the stopped VM: first
  * after whatever failed has had time to pass, then less often. */
 const RETRY_FIRST_MS = 10 * 60_000;
