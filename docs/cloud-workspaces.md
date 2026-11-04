@@ -236,6 +236,8 @@ record only a closed reason and cause class, never provider text or credentials.
 Each worker instance publishes its own Unix socket through
 `GH_ZEROS_BROKER_SOCKET`, in a private temporary directory outside checkpointed
 session state. The directory is mode `0700` and the socket is mode `0600`.
+Helpers accept only `/tmp/zeros-github-<lowercase UUID v4>/github.sock` and reject
+all other environment-supplied paths before dialing, including trailing newlines.
 Startup refuses an existing pathname, and disposal removes only the socket
 inode that instance created. Cleanup captures the directory entry under a
 private name before rechecking ownership; a foreign capture is restored without

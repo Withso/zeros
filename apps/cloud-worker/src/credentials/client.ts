@@ -7,7 +7,9 @@ import { githubAuthenticationError, GITHUB_SOCKET_TIMEOUT_MS, type GithubAuthent
 const unavailable = () => githubAuthenticationError();
 export function brokerRequest(socketPath: string, kind: "token" | "user-token" | "changed"): Promise<Record<string, unknown>> {
   return new Promise((resolve, reject) => {
-    if (!socketPath || !socketPath.startsWith("/")) { reject(unavailable()); return; }
+    const validatedPath = /^\/tmp\/zeros-github-[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\/github\.sock$/.exec(socketPath)?.[0];
+    // A JavaScript end anchor can match before a final newline.
+    if (!validatedPath || validatedPath !== socketPath) { reject(unavailable()); return; }
     let socket: Socket | undefined, settled = false, retried = false, retry: ReturnType<typeof setTimeout> | undefined;
     const finish = (result?: Record<string, unknown>, error?: GithubAuthenticationError) => {
       if (settled) return;
@@ -41,7 +43,7 @@ export function brokerRequest(socketPath: string, kind: "token" | "user-token" |
           finish(result as Record<string, unknown>);
         } catch { finish(); }
       });
-      try { attempt.connect(socketPath); } catch { finish(); }
+      try { attempt.connect(validatedPath); } catch { finish(); }
     };
     dial();
   });

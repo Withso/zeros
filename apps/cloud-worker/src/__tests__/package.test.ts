@@ -116,7 +116,7 @@ it("boots the relocated Cursor host with its real pinned SDK over IPC without co
 
 it("resolves askpass and gh wrappers through a runtime symlink, including spaces", async () => {
   let requests = 0;
-  const broker = new GithubBroker(join(directory, "askpass.sock"), async () => { requests++; return { token: "fixture-package-github", expiresAt: Date.now() + 60_000 }; });
+  const broker = new GithubBroker(`/tmp/zeros-github-${randomUUID()}/github.sock`, async () => { requests++; return { token: "fixture-package-github", expiresAt: Date.now() + 60_000 }; });
   await broker.start();
   try {
     const executable = join(dist, "bin/git-askpass");
@@ -144,7 +144,7 @@ it("resolves askpass and gh wrappers through a runtime symlink, including spaces
 });
 
 it.each(["git-askpass", "gh"])("prints the broker's safe recovery guidance from the packaged %s entrypoint", async name => {
-  const broker = new GithubBroker(join(directory, `${name}-refused.sock`), async () => { throw githubAuthenticationError("connection-expired"); });
+  const broker = new GithubBroker(`/tmp/zeros-github-${randomUUID()}/github.sock`, async () => { throw githubAuthenticationError("connection-expired"); });
   await broker.start();
   try {
     const args = name === "git-askpass" ? ["Password for 'https://x-access-token@github.com': "] : ["pr", "list"];
@@ -153,6 +153,22 @@ it.each(["git-askpass", "gh"])("prints the broker's safe recovery guidance from 
     expect(result.code).toBe(1);
     expect(result.stdout).toBe("");
     expect(result.stderr).toBe("Reconnect GitHub in Zeros: your connection has expired.\n");
+  } finally { await broker.dispose(); }
+});
+
+it.each(["git-askpass", "gh"])("rejects an unrelated socket from the packaged %s entrypoint", async name => {
+  let requests = 0;
+  const broker = new GithubBroker(join(directory, `${name}-unrelated.sock`), async () => {
+    requests++; return { token: "fixture-unrelated", expiresAt: Date.now() + 60_000 };
+  });
+  await broker.start();
+  try {
+    const args = name === "git-askpass" ? ["Password for 'https://github.com': "] : ["pr", "list"];
+    const result = await exec(join(dist, "bin", name), args, { cwd: directory,
+      env: workerChildEnvironment(undefined, githubEnvironment(broker.socketPath, join(dist, "bin/git-askpass"))), timeout: 10_000 }).catch(error => error);
+    expect(result.code).toBe(1); expect(result.stdout).toBe("");
+    expect(result.stderr).toBe("GitHub authentication is unavailable. Try again shortly.\n");
+    expect(requests).toBe(0);
   } finally { await broker.dispose(); }
 });
 

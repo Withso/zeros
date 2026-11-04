@@ -1,6 +1,6 @@
-import { mkdtemp, readdir, rm, stat } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
+import { mkdir, readdir, rm, stat } from "node:fs/promises";
 import { join } from "node:path";
-import { tmpdir } from "node:os";
 import { afterEach, expect, it, vi } from "vitest";
 import type { CloudV2WorkerFrame } from "@zeros/protocol/cloud-v2-relay";
 import { GithubTokens, GithubBroker } from "../github";
@@ -8,6 +8,12 @@ import { askpass, brokerRequest, runGh } from "../client";
 
 const cleanup: Array<() => Promise<void>> = [];
 afterEach(async () => { for (const dispose of cleanup.splice(0).reverse()) await dispose(); vi.useRealTimers(); });
+async function brokerDirectory(): Promise<string> {
+  const directory = `/tmp/zeros-github-${randomUUID()}`;
+  await mkdir(directory, { mode: 0o700 });
+  cleanup.push(() => rm(directory, { recursive: true, force: true }));
+  return directory;
+}
 
 it("coalesces token requests, expires cached credentials and rejects stale replies", async () => {
   let now = 1000; const frames: CloudV2WorkerFrame[] = [];
@@ -84,8 +90,7 @@ it("retries a transient credential refusal once, coalesces the second caller and
 });
 
 it("passes a permanent typed refusal through the Unix broker and askpass without retrying or provider prose", async () => {
-  const directory = await mkdtemp(join(tmpdir(), "worker-refusal-"));
-  cleanup.push(() => rm(directory, { recursive: true, force: true }));
+  const directory = await brokerDirectory();
   const frames: CloudV2WorkerFrame[] = [];
   const tokens = new GithubTokens(async frame => { frames.push(frame); return true; });
   cleanup.push(async () => tokens.disconnect()); tokens.connect();
@@ -153,8 +158,7 @@ it("bounds recovery and both attempts by the caller's original twenty-second dea
 });
 
 it("uses the Git credential for askpass and the human credential for gh", async () => {
-  const directory = await mkdtemp(join(tmpdir(), "worker-github-actor-"));
-  cleanup.push(() => rm(directory, { recursive: true, force: true }));
+  const directory = await brokerDirectory();
   const broker = new GithubBroker(join(directory, "github.sock"), async purpose => ({ token: purpose === "git" ? "fixture-installation" : "fixture-human", expiresAt: Date.now() + 120_000 }));
   await broker.start(); cleanup.push(() => broker.dispose());
   expect(await askpass("Password for 'https://x-access-token@github.com': ", broker.socketPath)).toBe("fixture-installation");
@@ -164,7 +168,7 @@ it("uses the Git credential for askpass and the human credential for gh", async 
 });
 
 it("serves a private Unix socket without persisting token material", async () => {
-  const directory = await mkdtemp(join(tmpdir(), "worker-broker-")); cleanup.push(() => rm(directory, { recursive: true, force: true }));
+  const directory = await brokerDirectory();
   let changes = 0;
   const broker = new GithubBroker(join(directory, "github.sock"), async () => ({ token: "fixture-private-token", expiresAt: Date.now() + 120_000 }), () => { changes++; });
   await broker.start(); cleanup.push(() => broker.dispose());
@@ -178,7 +182,7 @@ it("serves a private Unix socket without persisting token material", async () =>
 });
 
 it("provides askpass only to HTTPS GitHub and keeps other credentials out of gh", async () => {
-  const directory = await mkdtemp(join(tmpdir(), "worker-askpass-")); cleanup.push(() => rm(directory, { recursive: true, force: true }));
+  const directory = await brokerDirectory();
   let requests = 0, changes = 0;
   const broker = new GithubBroker(join(directory, "github.sock"), async () => { requests++; return { token: "fixture-own-github", expiresAt: Date.now() + 120_000 }; }, () => { changes++; });
   await broker.start(); cleanup.push(() => broker.dispose());

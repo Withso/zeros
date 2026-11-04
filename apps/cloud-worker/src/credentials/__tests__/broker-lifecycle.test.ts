@@ -1,9 +1,9 @@
 import { execFile } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import fs from "node:fs/promises";
-import { mkdtemp, readFile, rm, stat, unlink, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rm, stat, unlink, writeFile } from "node:fs/promises";
 import { syncBuiltinESMExports } from "node:module";
 import { createServer, Socket, type Server } from "node:net";
-import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { promisify } from "node:util";
 import { afterEach, expect, it, vi } from "vitest";
@@ -16,7 +16,8 @@ afterEach(async () => {
   vi.restoreAllMocks(); syncBuiltinESMExports(); vi.useRealTimers();
 });
 async function fixture() {
-  const directory = await mkdtemp(join(tmpdir(), "broker-lifecycle-"));
+  const directory = `/tmp/zeros-github-${randomUUID()}`;
+  await mkdir(directory, { mode: 0o700 });
   cleanups.push(() => rm(directory, { recursive: true, force: true }));
   return join(directory, "github.sock");
 }
@@ -95,7 +96,12 @@ it.each([
   expect(await brokerRequest(path, "token")).toMatchObject({ token: publishedToken });
   if (republish) {
     expect((await stat(captured)).ino).toBe(inode);
-    expect(await brokerRequest(captured, "token")).toMatchObject({ token: "fixture-foreign" });
+    const socket = new Socket();
+    try {
+      socket.connect(captured); socket.end('{"kind":"token"}\n');
+      let reply = ""; for await (const chunk of socket) reply += chunk.toString();
+      expect(JSON.parse(reply)).toMatchObject({ token: "fixture-foreign" });
+    } finally { socket.destroy(); }
   }
 });
 
