@@ -432,7 +432,7 @@ function loadInitialSection(owner: string): string {
 // step with fg1, so it never reads as hover. Rows keep their width. Icons are
 // sized by `[&_svg]:size-3.5` because CSS size beats lucide's `size` prop.
 const SIDEBAR_ENTRY_CLS =
-  "flex h-8 w-full min-w-0 items-center justify-start gap-2 rounded-md bg-transparent px-2 py-0 text-left text-xs leading-4.5 font-normal text-fg2 transition-colors duration-120 ease-out hover:bg-sidebar-bg-hover hover:text-fg1 data-[state=active]:bg-bg2-highlight data-[state=active]:text-fg1 data-[state=active]:hover:bg-bg2-highlight [&_svg]:size-3.5 [&>svg]:shrink-0 [&>svg]:text-fg3 data-[state=active]:[&>svg]:text-fg2";
+  "flex h-8 w-full min-w-0 items-center justify-start gap-2 rounded-md border-0 bg-transparent px-2 py-0 text-left text-xs leading-4.5 font-normal text-fg2 transition-colors duration-120 ease-out hover:bg-sidebar-bg-hover hover:text-fg1 data-[state=active]:bg-bg2-highlight data-[state=active]:text-fg1 data-[state=active]:hover:bg-bg2-highlight [&_svg]:size-3.5 [&>svg]:shrink-0 [&>svg]:text-fg3 data-[state=active]:[&>svg]:text-fg2";
 
 const SETTINGS_GROUP_HEADER_CLS =
   "select-none px-2 pt-4 pb-1 text-3xxs leading-4 font-medium text-fg3";

@@ -181,7 +181,7 @@ zstack) and their Local and cloud behavior stated.
 | --- | --- |
 | Settings | One 640px column of grouped cards; status rows instead of filled callouts; GitHub method and agent rows on the list-card anatomy. |
 | Customize | MCP servers and Skills as one segmented page; server rows with status badges only when needed, a ⋯ menu for Edit and Remove; gateway tool lists; the MCP editor and the Skill form share one layout (breadcrumb, title with the primary action, cards); Skill form Save is primary, Cancel retires. |
-| Sidebar | Selected row `bg2-highlight`; counts 12px; the resource pill fits the 256px band. |
+| Sidebar | Selected row `bg2-highlight`; counts 12px; one 16px icon column; repository actions appear over the name without reflow; every trailing mark in one 16px slot. |
 | Home | List view as plain right-aligned rows on one subgrid with PR pills and status tags; the Create page for no repositories; the Island Z boot loader. |
 | Agent chat | Composer and dock cards on `sidebar-bg` + `border2`; expanded tool output on `bg1` + `border1`; neutral chat and workspace link pills. |
 | Files | Neutral tab names (only the status letter is tinted); File options uses the ellipsis; 24px empty-state icons; centered media islands; comments work like Changes. |
@@ -289,3 +289,25 @@ Each landed step appends one line: date, workstream, what landed, evidence.
   everyone", because the page also holds your own servers, whose add row
   reads "Add your own server" beside the header's Add server; columns end
   48px down (the 64px board value is off the spacing scale).
+- 2026-11-04 · 4, 5 · Sidebar: 32px destination, folder and status rows on
+  one 16px icon column (no layout border; the focus ring is drawn as an
+  inset edge plus the 3px halo), section label 12/16 medium `fg3`, trailing
+  controls 12px in, a fixed 48px profile row on the Avatar primitive with a
+  12px `fg3` email. Repository settings and ⋯ appear over the end of the
+  name on a fade instead of reflowing it; an open repository page fills
+  its header `bg2-highlight`. Every trailing mark (stream, agent state,
+  draft, unread, awaiting) takes one 16px slot, so Archive is one 24px
+  button at one position; ± counts use one 4px gap; the repository chip
+  is shared by headers, ungrouped and pending rows and the hover card,
+  which now uses the floating recipe. The filter menu keeps 28px rows and
+  two widths; the Set status check matches menu checks; repository menus
+  are 208px.
+  Decisions: grouped rows start their square on the header's 40px name
+  column and centre the gutter mark on its 24px icon column (the board
+  drew 38 and 20); the list keeps a 4px top inset so the first header's
+  focus ring is whole; the filter button stays the 24px section-header
+  size (the board drew 28); the organization switcher stays the
+  full-width row from the Settings board with a 14px icon like the
+  destinations; the Internal memory pill keeps its 280px sidebar floor,
+  since at 256px it cannot sit beside the arrows (the board clipped the
+  forward arrow).

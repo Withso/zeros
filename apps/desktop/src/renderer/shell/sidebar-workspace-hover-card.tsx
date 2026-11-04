@@ -1,6 +1,6 @@
 import { useEffect } from "react";
 import { Archive, ArrowUpRight, Cloud, FolderOpen, GitPullRequest, GitPullRequestClosed, GitMerge, GitCommitVertical } from "lucide-react";
-import { RepositoryIcon } from "../features/repositories/repository-icon";
+import { REPOSITORY_ICON_CHIP_CLS, RepositoryIcon } from "../features/repositories/repository-icon";
 import { useRepositoryRemote } from "../features/repositories/use-repository-remote";
 import { formatCompactAge } from "../features/agent/format-age";
 import { useOptionalAgentSessions } from "../features/agent/sessions-hooks";
@@ -100,7 +100,7 @@ export function SidebarWorkspaceHoverCard({
         )}
         <span className="ml-auto flex min-w-0 items-center gap-1.5" title={repoName}>
           {cloud && <Cloud className="size-3.5 shrink-0" aria-label="Cloud workspace" />}
-          {project && <RepositoryIcon project={project} className="size-4 shrink-0 rounded-sm" />}
+          {project && <RepositoryIcon project={project} className={REPOSITORY_ICON_CHIP_CLS} />}
           <span className="truncate">{repoName}</span>
         </span>
       </div>
@@ -108,7 +108,7 @@ export function SidebarWorkspaceHoverCard({
       <div className="text-fg3 truncate text-xs" title={preview || workspace.branch}>
         {preview || workspace.branch}
       </div>
-      <div className="mt-4 flex min-w-0 flex-wrap items-center gap-2">
+      <div className="mt-2 flex min-w-0 flex-wrap items-center gap-2">
         {action === "archive" ? (
           <Button onClick={onArchive} className="bg-violet-bg text-violet-fg hover:bg-violet-bg border-transparent">
             <Archive />Archive

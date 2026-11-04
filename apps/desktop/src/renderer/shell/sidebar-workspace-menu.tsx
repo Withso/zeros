@@ -128,7 +128,6 @@ export function SidebarWorkspaceMenu({
       </Tooltip>
       <DropdownMenuContent
         align="start"
-        sideOffset={5}
         className="w-52"
         aria-label="Workspace display options"
       >
@@ -155,7 +154,7 @@ export function SidebarWorkspaceMenu({
         <DropdownMenuSub>
           <DropdownMenuSubTrigger>Filter</DropdownMenuSubTrigger>
           <DropdownMenuSubContent
-            className="w-44"
+            className="w-40"
             aria-label="Workspace filters"
           >
             <DropdownMenuSub
@@ -170,12 +169,12 @@ export function SidebarWorkspaceMenu({
               </DropdownMenuSubTrigger>
               <DropdownMenuSubContent
                 ref={setRepoContent}
-                className="w-64"
+                className="w-52"
                 aria-label="Filter by repository"
               >
-                <div className="flex h-9 items-center gap-2 px-2">
+                <div className="flex h-7 items-center gap-2 px-2">
                   <Search
-                    className="text-fg3 size-4 shrink-0"
+                    className="text-fg3 size-3.5 shrink-0"
                     aria-hidden="true"
                   />
                   <Input
@@ -241,7 +240,7 @@ export function SidebarWorkspaceMenu({
                   </DropdownMenuCheckboxItem>
                 ))}
                 {matching.length === 0 && (
-                  <div className="text-fg3 px-2 py-2 text-xs" role="status">
+                  <div className="text-fg3 flex h-7 items-center px-2 text-xs" role="status">
                     No repositories found
                   </div>
                 )}

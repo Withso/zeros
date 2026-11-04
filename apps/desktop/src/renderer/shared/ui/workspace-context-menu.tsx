@@ -147,7 +147,7 @@ export function WorkspaceContextMenu({
                 <StatusIcon status={s.value} className="size-3.5" />
                 <span>{s.label}</span>
                 {workspace.status === s.value && (
-                  <Check className="text-fg2 ml-auto size-4" />
+                  <Check className="text-fg1 ml-auto size-3.5" />
                 )}
               </ContextMenuItem>
             ))}

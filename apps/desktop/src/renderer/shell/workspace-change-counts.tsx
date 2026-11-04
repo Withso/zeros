@@ -49,14 +49,13 @@ export function WorkspaceChangeCounts({
   const removedCls = active ? "text-red-primary" : undefined;
   return (
     <span
-      className="text-fg2 text-3xxs shrink-0 tabular-nums"
+      className="text-fg2 text-3xxs inline-flex shrink-0 gap-1 tabular-nums"
       data-workspace-change-counts=""
       aria-hidden="true"
     >
       {additions > 0 && (
         <span className={addedCls}>+{formatChangeCount(additions)}</span>
       )}
-      {additions > 0 && deletions > 0 && <span> </span>}
       {deletions > 0 && (
         <span className={removedCls}>−{formatChangeCount(deletions)}</span>
       )}

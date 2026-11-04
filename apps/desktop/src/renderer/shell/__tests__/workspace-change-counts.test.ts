@@ -45,12 +45,14 @@ describe("workspace tab change counts", () => {
   it("shows only the side that actually changed", () => {
     expect(text(12, 0)).toBe("+12");
     expect(text(0, 4)).toBe("−4");
-    expect(text(12, 4)).toBe("+12 −4");
+    expect(text(12, 4)).toBe("+12−4");
+    // One 4px gap separates the halves, as in the hover card and on Home.
+    expect(render(12, 4)).toMatch(/class="[^"]*\binline-flex\b[^"]*\bgap-1\b/);
   });
 
   it("compacts long totals so the branch name keeps its width", () => {
-    expect(text(1_500, 240)).toBe("+1.5k −240");
-    expect(text(120_000, 99_949)).toBe("+N −99.9k");
+    expect(text(1_500, 240)).toBe("+1.5k−240");
+    expect(text(120_000, 99_949)).toBe("+N−99.9k");
   });
 
   it("spends the semantic diff colours only on the active tab", () => {

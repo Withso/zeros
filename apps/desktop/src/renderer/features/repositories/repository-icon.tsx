@@ -314,6 +314,12 @@ export function RepositoryIconGraphic({
   );
 }
 
+/** The 16px repository chip shared by sidebar headers, ungrouped rows, pending
+ * rows and the workspace hover card: a bg2-hover square whose letter fallback
+ * is 10px medium fg2 rather than the surrounding 13px text. */
+export const REPOSITORY_ICON_CHIP_CLS =
+  "size-4 rounded-sm bg-bg2-hover text-xxs font-medium text-fg2";
+
 export function RepositoryIcon({
   project,
   className,

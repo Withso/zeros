@@ -7,7 +7,7 @@ const shell = "apps/desktop/src/renderer/shell/";
 
 describe("native window header wiring", () => {
   it.each([
-    ["app-sidebar.tsx", /<div\s[^>]*className="flex h-10 shrink-0 items-center gap-1 pr-2"[^>]*>/],
+    ["app-sidebar.tsx", /<div\s[^>]*className="flex h-10 shrink-0 items-center gap-1 pr-3"[^>]*>/],
     ["sidebar-toggle.tsx", /<div\s[^>]*data-collapsed-sidebar-controls=""[^>]*>/],
     ["workbench/workbench-pane.tsx", /<div\s[^>]*data-testid="workbench-header"[^>]*>/],
     ["conversation/conversation-header.tsx", /<div\s[^>]*className=\{TOPBAR_CLS\}[^>]*>/g],

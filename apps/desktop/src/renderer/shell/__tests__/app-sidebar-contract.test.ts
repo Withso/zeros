@@ -331,9 +331,12 @@ describe("sidebar collapse and geometry", () => {
     expect(WORKSPACE_HEADER.match(/data-window-controls-reserve/g)).toHaveLength(1);
   });
 
-  it("uses 32px repository rows and 2px gaps, with a quiet section header", () => {
+  it("uses 32px rows and 2px gaps on one 16px icon column, with a quiet section header", () => {
     const entry = classConstant(SIDEBAR, "SIDEBAR_ENTRY_CLS");
-    expect(entry).toMatch(/\bh-7\.5\b/);
+    // 8px list inset + 8px padding and no border put every icon at 16px.
+    for (const cls of ["h-8", "px-2", "gap-2", "border-0", "data-[state=active]:bg-bg2-highlight", "[&>svg]:text-fg3"]) {
+      expect(entry.split(/\s+/), cls).toContain(cls);
+    }
     expect(classConstant(HEADER, "REPOSITORY_HEADER_CLS")).toMatch(
       /\bh-8\b/,
     );
@@ -347,9 +350,10 @@ describe("sidebar collapse and geometry", () => {
       ),
     );
     expect(section).not.toContain("hover:bg-");
-    expect(classConstant(SIDEBAR, "SECTION_LABEL_CLS")).toMatch(
-      /\btext-3xxs\b[^"]*\btext-fg2\b|\btext-fg2\b[^"]*\btext-3xxs\b/,
-    );
+    const label = classConstant(SIDEBAR, "SECTION_LABEL_CLS").split(/\s+/);
+    for (const cls of ["text-3xxs", "leading-4", "font-medium", "text-fg3"]) expect(label, cls).toContain(cls);
+    // The scroller's 4px top inset keeps the first header's focus ring whole.
+    expect(SIDEBAR).toContain('className="min-h-0 flex-1 overflow-y-auto px-2 pt-1 pb-2"');
   });
 });
 
@@ -370,6 +374,8 @@ describe("sidebar typography and colour", () => {
     expect(header).toMatch(/\btext-fg2\b/);
     expect(header).not.toMatch(/\btext-fg1\b/);
     expect(header).not.toContain("has-[:focus-visible]:bg-");
+    // An open repository page fills its header like a selected row.
+    expect(header.split(/\s+/)).toContain("data-[active=true]:bg-bg2-highlight");
     expect(classConstant(ROW, "GLYPH_BOX_CLS")).toMatch(/\btext-fg2\b/);
   });
 
@@ -407,11 +413,17 @@ describe("sidebar repository headers", () => {
     expect(HEADER).toContain("aria-expanded={!collapsed}");
   });
 
-  it("keep + visible and reveal settings and ⋯ on hover or while the menu is open", () => {
-    expect(HEADER).toMatch(
-      /menuOpen\s*\?\s*"flex"\s*:\s*"hidden group-hover\/repo:flex group-has-focus-visible\/repo:flex"/,
+  it("keep + visible and reveal settings and ⋯ over the name on hover or while the menu is open", () => {
+    // Overlaid on a fade instead of toggling display, so the name never
+    // re-truncates under the pointer; the fade stays click-through.
+    expect(classConstant(HEADER, "REPOSITORY_HOVER_ACTIONS_CLS")).toMatch(
+      /^pointer-events-none absolute inset-y-0 right-full\b[^"]*\bopacity-0\b/,
     );
-    const actions = HEADER.slice(HEADER.indexOf('"items-center gap-0.5"'));
+    expect(HEADER).toMatch(
+      /menuOpen\s*\?\s*"opacity-100 \[&_button\]:pointer-events-auto"\s*:\s*"group-hover\/repo:opacity-100 group-hover\/repo:\[&_button\]:pointer-events-auto group-has-focus-visible\/repo:opacity-100 group-has-focus-visible\/repo:\[&_button\]:pointer-events-auto"/,
+    );
+    expect(HEADER).not.toContain("hidden group-hover/repo:flex");
+    const actions = HEADER.slice(HEADER.indexOf("REPOSITORY_HOVER_ACTIONS_CLS,"));
     const plus = actions.indexOf(
       "aria-label={`Create workspace in ${project.name}`}",
     );
@@ -436,9 +448,8 @@ describe("sidebar repository headers", () => {
     ]);
     expect(HEADER).not.toMatch(/Hide repository/);
     expect(menu).toContain("requestCreateFromSource(project.id);");
-    expect(menu).toContain(
-      'className="text-red-primary focus:text-red-primary"',
-    );
+    expect(menu).toContain('variant="destructive"');
+    expect(menu).not.toContain("text-red-primary");
   });
 
   it("share the Paths section's removal flow instead of duplicating it", () => {
