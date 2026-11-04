@@ -45,7 +45,7 @@ export type CloudGithubConnectionHealth =
 
 /** Direct user-token requests let GitHub enforce the intersection of the human,
  * App/PAT permissions, SSO, and repository selection. Installation tokens are
- * used separately for narrowed VM Git; they never author a user's PR action. */
+ * used separately for shared Computer builds; they never author a user's PR action. */
 export class CloudGithubConnections {
   constructor(
     readonly store: CloudGithubConnectionStore,

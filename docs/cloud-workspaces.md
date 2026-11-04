@@ -263,10 +263,14 @@ refresh preserves both the cache and any active request. A changed login
 revision, transport disconnect or refusal withdraws cached material. Recovery
 and one delayed retry of a transient credential failure share the caller's
 original twenty-second deadline; each HTTP attempt gets at most fifteen
-seconds of the remaining budget. A fixed `GET /user` validates a new token and
-then at most once per three minutes for that same token; concurrent callers
-share the validation. Each validation uses at most three seconds of the remaining
-budget. A 401 reports only the used token's SHA-256, expires that exact credential
+seconds of the remaining budget. A fixed `GET /user` checks a new token and,
+after success, checks that same token at most once per three minutes; concurrent
+callers share the check. Each check uses at most three seconds while reserving
+time for handoff. Only a definitive 401 blocks the credential. Network failures,
+timeouts and other HTTP responses hand it through unverified and defer another
+check of that hash for one minute, so REST availability and quota do not block
+Git. Control-plane/source refusals, token expiry and connection changes still
+prevent handoff. A 401 reports only the used token's SHA-256, expires that exact credential
 version, joins the existing refresh lease and retries the authentication read
 once. A late report cannot expire a replacement token. PAT rejection requires
 reconnection. Git's credential-helper `erase` and `gh`'s HTTP 401 report repair a
