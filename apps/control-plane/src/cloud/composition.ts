@@ -142,6 +142,7 @@ export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boo
     computers,
     installedRepositories: organizationId => store.installedRepositories(organizationId),
     authorizeRepository, authorizeRepositories, authorizeSourceTargets, authorizeBuildRepository, authorizeSource, continueSource,
+    remoteHead: (org, user, target, branch) => github.remoteHead(org, user, target.repository, branch, target.repositoryId),
     github: { service: github.service, documents: github.documents },
     githubConnections: github.connections,
     bridgeBaseUrl: v2.realtimeUrl,

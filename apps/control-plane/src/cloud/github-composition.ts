@@ -295,10 +295,11 @@ export function createCloudGithubServices(
     });
     try {
       const result = await access.api.http.json(
-        `/repositories/${identity.repositoryId}/commits/${encodeURIComponent(branch)}`,
-        z.object({ sha: z.string().regex(/^[a-f0-9]{40}$/) }),
+        `/repositories/${identity.repositoryId}/branches/${encodeURIComponent(branch)}`,
+        z.object({ commit: z.object({ sha: z.string().regex(/^[a-f0-9]{40}$/) }) }),
       );
-      return result.sha;
+      await access.assertCurrent();
+      return result.commit.sha;
     } catch (error) {
       if (!(error instanceof HttpError) || error.status !== 404) throw error;
       await access.assertCurrent();

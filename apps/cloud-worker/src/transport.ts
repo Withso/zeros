@@ -21,6 +21,7 @@ export interface Transport {
   promptRequest?: PromptRequest;
   mcpAuthorization?: McpAuthorizationRequest;
   reportGithubCheckout?: ReportGithubCheckout;
+  reportCheckoutFailure?: () => Promise<void>;
   /** Best-effort diagnostics, independent of strict authority/history frames. */
   reportTiming?: (record: CloudV2WorkerTiming) => void;
 }

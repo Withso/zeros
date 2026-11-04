@@ -89,6 +89,7 @@ export function useCloudCreate(
     isCurrentComputerSource: (owner: string | null) => owner !== null && owner === recoverySurface.current.owner,
     warm: () => { availability.warm(); computer.warm(); },
     computerRequired: computer.required,
+    computerReason: computer.reason,
     canManageComputer: computer.canManage,
     warmComputer: computer.warm,
   };

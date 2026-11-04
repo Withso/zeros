@@ -278,6 +278,8 @@ export class CloudV2Lifecycle {
       // checkpoint the next attempt restores instead.
       if ((workspace.state === "starting" || workspace.state === "stopping") && workspace.boatSandboxId && sandboxLost(error) && !workspace.checkpoint) {
         await this.deps.store.transition(workspace.id, [workspace.state], "failed", { errorCode: "sandbox_missing", revoke: true, ...fence });
+      } else if (code === "cloud_source_checkout_failed" && (workspace.state === "creating" || workspace.state === "starting")) {
+        await this.deps.store.transition(workspace.id, [workspace.state], "failed", { errorCode: code });
       } else if (workspace.attempts >= MAX_ATTEMPTS) {
         // A restore that gives up keeps its checkpoint; Start tries again.
         const restore = workspace.state === "starting" && workspace.restorePending && !(CLOUD_V2_CHECKPOINT_ERRORS as readonly string[]).includes(code);

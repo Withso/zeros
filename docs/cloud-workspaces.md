@@ -120,6 +120,16 @@ The clone uses the verified current canonical remote while its directory and
 recipe path stay unchanged. Unknown legacy provenance blocks log access,
 reactivation and automatic refresh; the logs and recipes remain stored.
 
+An unverified legacy Computer recipe is an editable draft for a **fresh manual
+build**, not evidence about any old source. An admin can save it or build the
+configured revision with their current GitHub access; new immutable IDs are
+recorded only on the new configuration and build. Already-recorded IDs remain
+pinned, and malformed provenance still fails closed. This recovery starts from
+stock and never reuses the legacy snapshot. Creation and the repository picker
+return `cloud_computer_rebuild_required` while that old build is active, directing
+admins to Settings → Cloud Computer and other members to an organization admin.
+Rebuilding does not verify or unlock historical logs, workspaces or checkpoints.
+
 The builder also refreshes the snapshot without being asked. A new runtime pin
 queues another clean image and validates the recipe on its disposable builder,
 including Git and setup. A snapshot whose build recorded no runtime is
@@ -476,7 +486,12 @@ Quitting the Mac app still leaves cloud agents and terminals running, while
 Local quit retains its existing stop behavior.
 
 A new workspace branch starts from the authorized checkout hydrated into its
-own VM before worker startup. At creation the control plane records GitHub's
+own VM before worker startup. Before persisting a new workspace or allocating a
+VM, creation checks the requested branch (or the build's recorded default)
+with the creator's selected GitHub connection against the admitted repository
+ID. A tag or commit with the same spelling is not a branch. A confirmed miss
+returns `repository_branch_not_found`; rate limits, outages and connection
+changes retain their own errors. At creation the control plane records GitHub's
 head of the base branch. Workers advertising
 `checkout-v2` receive it as `baseCommit` and start the branch there when the
 VM has that commit; otherwise the branch starts from the cached
@@ -486,6 +501,19 @@ base fast-forwards once, but only while it still points at its first commit,
 its tracked files are clean, and no agent, terminal, file edit, Git mutation or
 setup has started. Existing branches and branches started at `baseCommit`
 never move automatically.
+
+Hello publishes `running` before the worker prepares its checkout. If that
+preparation fails, the worker posts an empty `checkout-failed` report over its
+authenticated HTTPS transport. The control plane atomically checks the current
+worker token, boot ID, membership and running state, then records `failed` with
+`cloud_source_checkout_failed`. A lost report response can be retried without
+changing the original failure; a newer boot, wake, stop or revocation fences
+the old report. Clone failures before hello use the same terminal reason instead
+of retrying into a boot timeout. Neither path deletes files or checkpoints, and
+the desktop displays checkout guidance through its existing failure surface.
+Older workers retain their existing hello behavior; newer workers tolerate an
+older control plane returning 404 for the report. Deploy the API and matching
+SHA-pinned worker together to get the full failure handling.
 
 Creation pins the active Cloud Computer build. The worker receives that
 build's repository setup script, at most 8,000 characters, only when it
@@ -1004,6 +1032,16 @@ There is no end-user or automatic name-based backfill endpoint. Without this
 evidence, keep `cloud_source_review_required`, the disk and the checkpoint;
 do not clear source scope, change the ID to a new name's occupant, or delete
 user work to make admission pass.
+
+A legacy organization's **Cloud Computer** can be recovered without that
+historical backfill: an admin reviews its current repositories in Settings →
+Cloud Computer and saves or starts a fresh build. Manual admission resolves
+current access and records new IDs, while the builder captures a clean stock
+snapshot before any source or credential reaches it. Keep the old build rows
+and logs unverified; automatic refresh and reactivation cannot perform this
+admission. Existing legacy workspaces still require the operator evidence
+above and remain under `cloud_source_review_required` after the new Computer
+becomes active. No database migration is needed for this manual rebuild path.
 
 Roll out the compatible database and API/relay/lifecycle code together with
 the security cutover. Publish a matching SHA-pinned worker, verify new creation

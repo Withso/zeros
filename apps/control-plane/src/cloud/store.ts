@@ -447,6 +447,24 @@ export class CloudV2Store {
     return row ? { ...workspace(row), accessEpoch: row.access_epoch, loginRevision: row.login_revision } : null;
   }
 
+  /** Hello precedes checkout. Only that same live boot can fail its admission;
+   * a lost reply is replayable without changing the first failure or its time. */
+  async failWorkerCheckout(token: string, bootId: string): Promise<boolean> {
+    return withSystemTx(this.pool, async tx => {
+      const proof = [hashCloudV2Token(token), bootId];
+      const changed = await tx.query(
+        `UPDATE cloud_v2_workspaces w SET state='failed', error_code='cloud_source_checkout_failed',
+           access_epoch=access_epoch+1, worker_route_url=NULL, worker_port_token=NULL,
+           attempts=0, next_attempt_at=NULL, updated_at=clock_timestamp()
+         WHERE worker_token_hash=$1 AND worker_boot_id=$2 AND state='running' AND ${LIVE_ACCESS}`, proof);
+      if (changed.rowCount) return true;
+      const previous = await tx.query(
+        `SELECT 1 FROM cloud_v2_workspaces w WHERE worker_token_hash=$1 AND worker_boot_id=$2
+         AND state='failed' AND error_code='cloud_source_checkout_failed' AND ${LIVE_ACCESS}`, proof);
+      return Boolean(previous.rowCount);
+    });
+  }
+
   /** Sequence and rows commit together. A retry after a lost HTTP response is
    * a no-op, while a gap or a conflicting reuse cannot overwrite newer rows. */
   async writeWorkerHistory(token: string, bootId: string, sequence: number, input: HistoryInput): Promise<void> {

@@ -26,6 +26,7 @@ function fixture(prompts = false) {
       loginRevision: vi.fn(async () => revision),
       markActive: vi.fn(async () => {}),
       writeWorkerHistory: vi.fn(async () => {}),
+      failWorkerCheckout: vi.fn(async () => true),
     },
     config: vi.fn(async () => ({ t: "config", loginRevision: revision,
       workspace: { id: w.id, organizationId: w.organizationId, repository: w.repository, branch: w.branch, baseBranch: w.baseBranch, checkoutPath: "/home/user/o/r" }, agents: {} })),
@@ -48,6 +49,23 @@ it("accepts outbound hello and returns configuration, refusing stale runtimes", 
   expect(response.status).toBe(200);
   expect(await response.json()).toMatchObject({ config: { t: "config", loginRevision: "0" } });
   expect((await f.request("hello", { ...body, runtimeSha256: "b".repeat(64) })).status).toBe(409);
+});
+it("reports checkout failure using only worker identity even during a GitHub outage", async () => {
+  const f = fixture();
+  f.deps.authorizeSource = vi.fn(async () => { throw new HttpError(503, "github_unavailable", "Unavailable"); });
+  expect((await f.request("checkout-failed", {})).status).toBe(200);
+  expect(f.deps.store.failWorkerCheckout).toHaveBeenCalledExactlyOnceWith(f.token, f.bootId);
+  expect(f.deps.authorizeSource).not.toHaveBeenCalled();
+  expect(f.deps.store.markActive).not.toHaveBeenCalled();
+});
+it("refuses a stale boot at the atomic failure write and rejects arbitrary error payloads", async () => {
+  const f = fixture();
+  expect((await f.request("checkout-failed", { code: "arbitrary", message: "private-output" })).status).toBe(400);
+  expect(f.deps.store.failWorkerCheckout).not.toHaveBeenCalled();
+  expect((await f.request("checkout-failed", {}, { "x-zeros-worker-boot": randomUUID() })).status).toBe(401);
+  expect(f.deps.store.failWorkerCheckout).not.toHaveBeenCalled();
+  vi.mocked(f.deps.store.failWorkerCheckout).mockResolvedValue(false);
+  expect((await f.request("checkout-failed", {})).status).toBe(401);
 });
 it("reports the first hello from its prior lifecycle state and accepts bounded optional timings without activity", async () => {
   const f = fixture(), original = await f.deps.store.acceptWorkerHello(f.token, f.bootId);

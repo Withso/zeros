@@ -45,6 +45,59 @@ async function fixture(options: { hello?: Promise<void> } = {}) {
     rotate: async () => { expected = "synthetic-rotated-worker-token"; await writeFile(tokenFile, expected, { mode: 0o600 }); },
     failHistory: (value: boolean) => { failHistory = value; }, loseReply: () => { lostReply = true; } };
 }
+it("authenticates a checkout failure with the current worker token and boot, without source or error text", async () => {
+  const f = await fixture();
+  const original = vi.mocked(f.fetcher).getMockImplementation()!;
+  vi.mocked(f.fetcher).mockImplementation(async (url, init) => {
+    if (new URL(String(url)).pathname.endsWith("/checkout-failed")) {
+      expect(new Headers(init?.headers).get("x-zeros-worker-boot")).toBe(f.transport.bootId);
+      expect(new Headers(init?.headers).get("authorization")).toBe("Bearer synthetic-rotated-worker-token");
+      expect(JSON.parse(String(init?.body))).toEqual({});
+      return Response.json({ ok: true });
+    }
+    return original(url, init);
+  });
+  await f.rotate();
+  await expect(f.transport.reportCheckoutFailure()).resolves.toBeUndefined();
+  expect(vi.mocked(f.fetcher).mock.calls.some(([url]) => new URL(String(url)).pathname.endsWith("/checkout-failed"))).toBe(true);
+});
+
+it("tolerates an old control plane without the checkout failure endpoint", async () => {
+  const f = await fixture();
+  await expect(f.transport.reportCheckoutFailure()).resolves.toBeUndefined();
+  expect(f.requests.find(request => request.path === "checkout-failed")).toEqual({ path: "checkout-failed", body: {}, authorized: true });
+});
+
+it("retries an unacknowledged checkout failure before requesting another configuration", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "hybrid-checkout-failure-")), tokenFile = join(directory, "token");
+  await writeFile(tokenFile, "synthetic-worker-token", { mode: 0o600 });
+  let reports = 0, configurations = 0, configReads = 0, finish!: () => void;
+  const stopped = new Promise<void>(resolve => { finish = resolve; });
+  const keys = generateKeyPairSync("ed25519");
+  const publicKeys = [keys.publicKey.export({ type: "spki", format: "pem" }).toString()];
+  const transport = new HybridTransport({ apiUrl: "https://api.example.test", workspaceId: config.workspace.id,
+    runtimeSha256: "a".repeat(64), tokenFile, publicKeys, port: 0, retryBaseMs: 10, retryMaxMs: 10,
+    onStatus: status => { if (status === "stopped") finish(); },
+    fetch: async url => {
+      const path = new URL(String(url)).pathname.split("/").at(-1);
+      if (path === "checkout-failed") return ++reports === 1 ? new Response(null, { status: 503 }) : Response.json({ ok: true });
+      if (path === "config") configReads++;
+      return Response.json({ config });
+    },
+  });
+  cleanups.push(async () => { await transport.dispose(); await rm(directory, { recursive: true, force: true }); });
+  transport.start({ open: async () => {}, close: () => {}, frame: async frame => {
+    if ((frame as { t: string }).t !== "config") return;
+    configurations++;
+    await transport.reportCheckoutFailure().catch(() => {});
+    throw new Error("Checkout failed");
+  } });
+  await stopped;
+  expect(reports).toBe(2);
+  expect(configurations).toBe(1);
+  expect(configReads).toBe(0);
+});
+
 it("holds dial-in config and app admission until the initial HTTPS hello has been applied", async () => {
   let release!: () => void;
   const hello = new Promise<void>(resolve => { release = resolve; });

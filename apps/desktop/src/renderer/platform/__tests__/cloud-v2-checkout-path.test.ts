@@ -42,5 +42,10 @@ describe("cloud v2 checkout path", () => {
     const damaged = cloudV2Document(failed("checkpoint_corrupt"));
     expect(damaged.capabilities).toMatchObject({ canStart: false, startUnavailableReason: "This workspace failed. Create a new one." });
     expect(damaged.error?.message).toBe("This workspace's last checkpoint is damaged and cannot be restored.");
+    const checkout = cloudV2Document(failed("cloud_source_checkout_failed"));
+    expect(checkout.status).toBe("failed");
+    expect(checkout.capabilities).toMatchObject({ canStart: false });
+    expect(checkout.error).toEqual({ code: "cloud_source_checkout_failed",
+      message: "The repository or base branch could not be checked out. Existing files were retained. Check repository access and the base branch before creating a new workspace." });
   });
 });

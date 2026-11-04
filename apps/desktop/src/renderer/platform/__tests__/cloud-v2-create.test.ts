@@ -39,6 +39,15 @@ it.each([true, false])("negotiates explicit waking without changing the N-1 conn
 });
 
 describe("cloud v2 create", () => {
+  it.each([
+    [404, "repository_branch_not_found", "Branch missing/topic does not exist in Example/Fixture."],
+    [409, "cloud_computer_rebuild_required", "Rebuild the Cloud Computer in Settings → Cloud Computer before creating a workspace."],
+    [409, "cloud_computer_rebuild_required", "Ask an organization admin to rebuild the Cloud Computer in Settings → Cloud Computer before creating a workspace."],
+  ] as const)("preserves the server's %s %s message for the existing Create error surface", async (status, code, message) => {
+    vi.stubGlobal("fetch", vi.fn(async () => Response.json({ error: { code, message } }, { status })));
+    await expect(createCloudWorkspaceDocument({ organizationId, idempotencyKey: "rejected-intent",
+      repository: { owner: "Example", name: "Fixture" }, baseBranch: "missing/topic" })).rejects.toMatchObject({ status, code, message });
+  });
   // The worker runs `git switch -c <branch> origin/<baseBranch>`, so a full
   // ref such as refs/heads/main can never be checked out.
   it("sends the repository slug and a plain base branch with the caller's idempotency key", async () => {

@@ -43,6 +43,52 @@ d("cloud v2 store", () => {
     computerBuildId: null,
   });
 
+  function checkoutFailureApi() {
+    const app = new Hono();
+    app.onError((error, c) => error instanceof HttpError ? c.json({ error: { code: error.code } }, error.status) : c.json({ error: "internal" }, 500));
+    app.route("/", createCloudV2WorkerRoutes({ store, runtimeSha256: "a".repeat(64),
+      config: async () => { throw new Error("Unexpected config read"); },
+      githubToken: async () => { throw new Error("Unexpected credential read"); } }));
+    return (token: string, boot: string) => app.request("/v2/cloud/worker/checkout-failed", { method: "POST",
+      headers: { authorization: `Bearer ${token}`, "x-zeros-worker-boot": boot, "content-type": "application/json" }, body: "{}" });
+  }
+
+  it("records a checkout failure after hello and preserves the first failure on an HTTP retry", async () => {
+    const w = await create(), token = await store.rotateWorkerToken(w.id), boot = randomUUID();
+    await store.acceptWorkerHello(token, boot);
+    const report = checkoutFailureApi();
+    expect((await report(token, boot)).status).toBe(200);
+    const failed = await store.get(w.id, creator);
+    expect(failed).toMatchObject({ state: "failed", errorCode: "cloud_source_checkout_failed", repository: w.repository });
+    expect(await store.acceptWorkerHello(token, boot)).toBeNull();
+    expect((await report(token, boot)).status).toBe(200);
+    expect(await store.get(w.id, creator)).toEqual(failed);
+  });
+
+  it.each(["new boot", "new wake", "stop", "membership"] as const)("fences checkout failure when %s changes during its session read", async change => {
+    const w = await create(), token = await store.rotateWorkerToken(w.id), boot = randomUUID();
+    await store.acceptWorkerHello(token, boot);
+    const original = store.workerSession.bind(store);
+    let changed = false;
+    vi.spyOn(store, "workerSession").mockImplementationOnce(async (...args) => {
+      const session = await original(...args);
+      expect(session).not.toBeNull();
+      if (change === "new boot") expect(await store.acceptWorkerHello(token, randomUUID())).not.toBeNull();
+      else if (change === "new wake") {
+        await store.transition(w.id, ["running"], "stopped");
+        expect((await store.requestLifecycle(w.id, creator, "start")).workspace.state).toBe("starting");
+      } else if (change === "stop") expect((await store.requestLifecycle(w.id, creator, "stop")).workspace.state).toBe("stopping");
+      else await pool.query("DELETE FROM organization_members WHERE org_id=$1 AND user_id=$2", [org, creator]);
+      changed = true;
+      return session;
+    });
+    expect((await checkoutFailureApi()(token, boot)).status).toBe(401);
+    expect(changed).toBe(true);
+    const current = (await pool.query("SELECT state,error_code FROM cloud_v2_workspaces WHERE id=$1", [w.id])).rows[0];
+    expect(current.state).not.toBe("failed");
+    expect(current.error_code).toBeNull();
+  });
+
   it("never restores an archive committed while explicit connect is awaiting source authorization", async () => {
     const workspace = await create();
     await store.transition(workspace.id, ["creating"], "stopped");

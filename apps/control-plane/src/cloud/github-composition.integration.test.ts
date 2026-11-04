@@ -84,6 +84,7 @@ database("cloud GitHub composition", () => {
       throw new Error(`Unexpected synthetic request ${url.pathname}`);
     },
   );
+  const defaultFetch = fetcher.getMockImplementation()!;
   beforeAll(() => {
     pool = new pg.Pool({
       connectionString: process.env.TEST_DATABASE_URL,
@@ -96,6 +97,7 @@ database("cloud GitHub composition", () => {
   beforeEach(async () => {
     await resetMigratedTestDatabase(pool);
     vi.clearAllMocks();
+    fetcher.mockImplementation(defaultFetch);
     owner = "current";
     created = false;
     writeCalls = 0;
@@ -498,7 +500,7 @@ database("cloud GitHub composition", () => {
   it("reports a missing remote branch as unknown without masking failed repository authorization", async () => {
     const original = fetcher.getMockImplementation()!;
     fetcher.mockImplementation(async (input, init) =>
-      new URL(String(input)).pathname.endsWith("/commits/missing")
+      new URL(String(input)).pathname.endsWith("/branches/missing")
         ? new Response(null, { status: 404 })
         : original(input, init),
     );
@@ -521,5 +523,49 @@ database("cloud GitHub composition", () => {
         "42",
       ),
     ).rejects.toMatchObject({ code: "github_authorization_expired" });
+  });
+  it("looks up an exact branch by the admitted repository ID, never a tag or commit", async () => {
+    const original = fetcher.getMockImplementation()!;
+    const paths: string[] = [];
+    fetcher.mockImplementation(async (input, init) => {
+      const path = new URL(String(input)).pathname; paths.push(path);
+      if (path === "/repositories/42/branches/release%2Fstable") return Response.json({ name: "release/stable", commit: { sha: head } });
+      if (path === "/repositories/42/branches/tag-only") return new Response(null, { status: 404 });
+      if (path.endsWith("/commits/tag-only")) return Response.json({ sha: head });
+      return original(input, init);
+    });
+    try {
+      await expect(services.remoteHead(organizationId, userId, "former/project", "release/stable", "42")).resolves.toBe(head);
+      await expect(services.remoteHead(organizationId, userId, "former/project", "tag-only", "42")).resolves.toBeNull();
+      expect(paths).toContain("/repositories/42/branches/release%2Fstable");
+      expect(paths.some(path => path.includes("/commits/"))).toBe(false);
+      expect(paths.some(path => path.startsWith("/repos/former/"))).toBe(false);
+    } finally { fetcher.mockImplementation(original); }
+  });
+
+  it.each([503, 429])("does not report a GitHub %s branch lookup as missing", async status => {
+    const original = fetcher.getMockImplementation()!;
+    fetcher.mockImplementation(async (input, init) => new URL(String(input)).pathname.includes("/branches/")
+      ? new Response(null, { status, headers: { "retry-after": "60" } }) : original(input, init));
+    try {
+      await expect(services.remoteHead(organizationId, userId, "former/project", "main", "42"))
+        .rejects.toMatchObject({ code: status === 429 ? "github_rate_limited" : "github_unavailable" });
+    } finally { fetcher.mockImplementation(original); }
+  });
+
+  it.each([200, 404])("fences a selected-connection change during a branch lookup returning %s", async status => {
+    const original = fetcher.getMockImplementation()!;
+    let changed = false;
+    fetcher.mockImplementation(async (input, init) => {
+      if (!new URL(String(input)).pathname.includes("/branches/")) return original(input, init);
+      const scope = { organizationId, userId };
+      await services.connections.store.disconnect(scope, await services.connections.store.fingerprint(scope), "pat");
+      changed = true;
+      return status === 200 ? Response.json({ name: "main", commit: { sha: head } }) : new Response(null, { status });
+    });
+    try {
+      await expect(services.remoteHead(organizationId, userId, "former/project", "main", "42")).rejects.toMatchObject({ code: "github_authorization_changed" });
+      expect(changed).toBe(true);
+    } finally { fetcher.mockImplementation(original); }
   });
 });

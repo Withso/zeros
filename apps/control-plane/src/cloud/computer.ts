@@ -171,9 +171,9 @@ export class CloudV2Computers {
     const row = (await tx.query<ComputerConfiguration>(
       `SELECT recipe,recipe_source_targets,active_build_id,snapshot_name,recipe_revision::text FROM cloud_v2_computers WHERE org_id=$1`, [organizationId])).rows[0];
     const repositories = await this.configured(tx, organizationId, row?.recipe ?? null, row?.active_build_id ?? null);
-    const active = !row?.recipe && row?.active_build_id ? (await tx.query<{ source_targets: unknown; source_policy_version: number }>(
-      `SELECT source_targets,source_policy_version FROM cloud_v2_computer_builds WHERE org_id=$1 AND id=$2`, [organizationId, row.active_build_id])).rows[0] : undefined;
-    return { repositories, sources: row?.recipe ? row.recipe_source_targets : active?.source_policy_version === 2 ? active.source_targets : null,
+    const active = !row?.recipe && row?.active_build_id ? (await tx.query<{ source_targets: unknown }>(
+      `SELECT source_targets FROM cloud_v2_computer_builds WHERE org_id=$1 AND id=$2`, [organizationId, row.active_build_id])).rows[0] : undefined;
+    return { repositories, sources: row?.recipe ? row.recipe_source_targets : active?.source_targets ?? null,
       revision: Number(row?.recipe_revision ?? 0), key: configurationKey(row) };
   }
 
@@ -181,7 +181,9 @@ export class CloudV2Computers {
    * IDs; explicitly added entries acquire a new server observation. */
   private async admitSources(organizationId: string, userId: string, repositories: readonly CloudV2RepositoryDraft[], previous: ConfiguredSources): Promise<CloudSourceTarget[]> {
     const retained = repositories.some(entry => previous.repositories.some(old => old.repository.toLowerCase() === entry.repository.toLowerCase()));
-    const known = retained ? readComputerSourceTargets(previous.repositories, previous.sources) : [];
+    // A legacy draft can authorize only a fresh manual build from stock. Never
+    // attach today's identities to its old build, logs, disk or checkpoints.
+    const known = retained && previous.sources !== null ? readComputerSourceTargets(previous.repositories, previous.sources) : [];
     const targets: CloudSourceTarget[] = [];
     for (const entry of repositories) {
       const pinned = known.find(target => target.repository.toLowerCase() === entry.repository.toLowerCase());
@@ -309,10 +311,9 @@ export class CloudV2Computers {
     const previous = await withSystemTx(this.pool, tx => this.configuredSources(tx, organizationId));
     if (previous.revision !== revision) throw recipeChanged();
     if (!previous.repositories.length) throw new HttpError(409, "computer_recipe_empty", "Add a repository to the Cloud Computer first");
-    const sources = readComputerSourceTargets(previous.repositories, previous.sources);
-    await this.resolveSourceTargets(organizationId, userId, sources);
+    const sources = await this.admitSources(organizationId, userId, previous.repositories, previous);
     return withSystemTx(this.pool, tx => this.insertBuild(tx, organizationId, userId,
-      CloudV2RecipeSchema.parse({ repositories: previous.repositories }), sources, { revision }, previous.key));
+      CloudV2RecipeSchema.parse({ repositories: previous.repositories }), sources, { revision, configure: previous.sources === null }, previous.key));
   }
 
   /** Re-activating an older build rebuilds its recipe at the commits it used. */

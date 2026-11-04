@@ -242,7 +242,11 @@ export class CloudWorker {
     if (this.scope && (this.scope.key !== scope.key || this.scope.root !== scope.root || this.scope.workspace.repository !== scope.workspace.repository)) throw new Error("Workspace identity changed.");
     if (!this.scope) {
       await this.github.start(); this.tokens.invalidate();
-      const checkout = await measureStartup("worker_checkout", () => (this.options.prepareCheckout ?? prepareCheckout)(config.workspace, this.gitEnvironment, timing), timing);
+      const checkout = await measureStartup("worker_checkout", () => (this.options.prepareCheckout ?? prepareCheckout)(config.workspace, this.gitEnvironment, timing), timing)
+        .catch(async error => {
+          await this.options.transport.reportCheckoutFailure?.().catch(() => {});
+          throw error;
+        });
       this.checkoutRefresh = checkout?.refresh;
       const restoreMarker = join(this.options.directory, "restored-from-checkpoint");
       const restored = await access(restoreMarker).then(() => true, (error: NodeJS.ErrnoException) => {
