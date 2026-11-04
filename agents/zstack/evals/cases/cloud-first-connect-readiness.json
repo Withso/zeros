@@ -2,7 +2,7 @@
   "id": "cloud-first-connect-readiness",
   "kind": "replay",
   "area": "control-plane",
-  "fixedBy": "pending",
+  "fixedBy": "pr:828",
   "symptom": "First connects after cloud create or wake intermittently returned a masked 503. Concurrent source verification returned busy, hello published running before configuration, and stale lifecycle token delivery could invalidate a configuring boot with 401. The desktop attempted the ticket only once.",
   "rule": "bug-fix.md and principles 1, 6, 7, 10, 14: hold concurrent admission and configuration boundaries; join exact-scope verification under the original request budget; publish readiness only for the current boot and authority; fence stale token delivery and every readiness consumer; retry only typed transient tickets with nonzero backoff and persistent account, owner and Stop cancellation.",
   "check": "pnpm --dir apps/control-plane exec vitest run src/cloud/source-verification-wait.test.ts src/cloud/store.integration.test.ts src/cloud/worker-routes.test.ts src/cloud/lifecycle.test.ts src/cloud/relay.test.ts src/app.test.ts"

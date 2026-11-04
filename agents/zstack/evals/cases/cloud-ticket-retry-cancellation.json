@@ -2,7 +2,7 @@
   "id": "cloud-ticket-retry-cancellation",
   "kind": "replay",
   "area": "renderer-state",
-  "fixedBy": "pending",
+  "fixedBy": "pr:828",
   "symptom": "The first cloud ticket failure ended an explicit open even when a short retry succeeded. Cancellation was not forwarded to ticket fetch, ticket time extended the open deadline, late checkout replies could publish after Stop, and a failed reconnect ticket consumed a sequence so the next success was rejected.",
   "rule": "bug-fix.md and principles 1, 6, 7: retry only transient ticket acquisition with a bounded attempt count and nonzero backoff; carry one original open deadline; observe account generation, owner tombstones and persistent Stop versions throughout requests, waits and final publication; keep reconnects passive and advance their sequence only when acquisition succeeds.",
   "check": "pnpm exec vitest run --config vitest.config.ts apps/desktop/src/renderer/platform/bridge/__tests__/cloud-v2-connect-retry.test.ts apps/desktop/src/renderer/platform/bridge/__tests__/cloud-v2-passive-tickets.test.ts apps/desktop/src/renderer/platform/bridge/__tests__/open-cloud-v2-runtime.test.ts apps/desktop/src/renderer/platform/__tests__/cloud-v2-create.test.ts"
