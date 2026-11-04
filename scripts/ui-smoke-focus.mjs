@@ -71,7 +71,9 @@ export async function runKeyboardFocusSmoke({ page, check }) {
       await page.keyboard.press("ArrowRight");
       const nextRadio = surface.getByRole("radio", { name: "Choice B", exact: true });
       await expect(nextRadio).toBeFocused();
-      expect((await focusChrome(nextRadio.locator("span").first())).outline).not.toBe("none");
+      // The radio's keyboard focus is the standard halo on its box (a ring),
+      // which the pointer-focused box never shows.
+      expect((await focusChrome(nextRadio.locator("span").first())).shadow).not.toBe(pointerDot.shadow);
 
       const tabA = surface.getByRole("tab", { name: "Tab A" });
       await tabA.click();
@@ -91,15 +93,22 @@ export async function runKeyboardFocusSmoke({ page, check }) {
       await page.keyboard.type("typing stays here");
       await expect(field).toBeFocused();
       await expect(field).toHaveValue("typing stays here");
-      expect(await field.evaluate((element) => getComputedStyle(element).borderColor))
-        .toBe(await field.evaluate((element) => {
-          const probe = document.createElement("span");
-          probe.style.color = "var(--highlighted-bright)";
-          element.parentElement.append(probe);
-          const color = getComputedStyle(probe).color;
-          probe.remove();
-          return color;
-        }));
+      // A click or typing shows only the caret; Tab brings the
+      // highlighted-bright edge (docs/design-system.md, rule 7).
+      const highlighted = await field.evaluate((element) => {
+        const probe = document.createElement("span");
+        probe.style.color = "var(--highlighted-bright)";
+        element.parentElement.append(probe);
+        const color = getComputedStyle(probe).color;
+        probe.remove();
+        return color;
+      });
+      const fieldBorder = () => field.evaluate((element) => getComputedStyle(element).borderColor);
+      expect(await fieldBorder(), "a clicked field shows only the caret").not.toBe(highlighted);
+      await page.keyboard.press("Shift+Tab");
+      await page.keyboard.press("Tab");
+      await expect(field).toBeFocused();
+      expect(await fieldBorder(), "Tab shows the field's focus edge").toBe(highlighted);
       const editor = surface.getByRole("textbox", { name: "Editable document" });
       await editor.click();
       await page.keyboard.type(" text");

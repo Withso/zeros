@@ -31,7 +31,8 @@ const DialogPortal = DialogPrimitive.Portal;
 const DialogClose = DialogPrimitive.Close;
 
 /** Shared close control for dialog titles and custom dialog headers: a 24px
- * IconButton. */
+ * IconButton. Its -2px block margins centre it on a 20px title line without
+ * growing the row; the right margin puts its glyph on the 16px inset. */
 const DialogCloseButton = React.forwardRef<
   HTMLButtonElement,
   Omit<
@@ -46,7 +47,7 @@ const DialogCloseButton = React.forwardRef<
       label={label}
       data-slot="dialog-close"
       {...props}
-      className={cn("-my-1 -mr-1.5", className)}
+      className={cn("-my-0.5 -mr-1.5", className)}
     >
       <X />
     </IconButton>
