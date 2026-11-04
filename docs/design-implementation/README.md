@@ -588,3 +588,25 @@ Each landed step appends one line: date, workstream, what landed, evidence.
   renders of every state in both themes (not the real viewer): 459 boards,
   no unfilled template text, no overflow, no leftover Current or Proposed
   tag.
+- 2026-11-04 · 5, 6 · Review: a full review of the branch fixed nine issues,
+  each with a test. A skill or connector that needs you shows its remedy
+  again. One `initialsOf` helper replaces four. A text field in a Toolbar
+  keeps its own Tab stop. Review on another Git host says it needs a
+  github.com remote. The terminal's run action passes its registry icon.
+  The import dialog's line says where values are saved. The organization MCP
+  page says loading or a failed read once, without an empty shared card. A
+  test pins the web pages' palette to the app tokens. The comment gutter
+  looks up its line once per frame.
+- 2026-11-04 · 5, 8 · Merge of main: its MCP import naming and recovery
+  navigation render in the new layouts. Import rows stay checkboxes, with
+  Imported and Name in use badges and an Import name field, and main's
+  import test finds them by the checkbox role. The organization page opens
+  a recovered server, says when it is gone, and keeps one status row.
+  Canvas version 360 draws those states on the import dialog and
+  organization page boards.
+- 2026-11-04 · 7 · Verification: the full smoke registry passed on the
+  branch head before the merge: shard 1 had 25 scenarios and 602 checks,
+  shard 2 had 28 and 1,149, and shard 3 had 31 steps and 1,019, for 2,770
+  in all. It caught two regressions, each fixed with a test and an eval
+  case. The tab status letter and unsaved dot had lost their hover titles,
+  and the Dialog close button sat 2px off the title line.

@@ -193,7 +193,8 @@ Owner today: `features/agent-extensions/mcp-import-dialog.tsx · engine/agents/m
 
 Changes:
 - One line says what Import does; a failed scan is one error row with Retry.
-- Rows use the server list’s anatomy: checkbox, transport, name and endpoint; Already added is a badge.
+- Rows use the server list’s anatomy: checkbox, transport, name and endpoint; Imported and Name in use are badges.
+- A selected server whose name is taken gets an Import name field under its row; Import stays off until every name is free.
 
 Code notes:
 - A nested scroller inside the dialog body; rows inset 6px past the header edge, a custom 16px checkbox, and Retry right after the error text. (`features/agent-extensions/mcp-import-dialog.tsx:350-418 · shared/ui/primitives/checkbox.tsx:69`)
