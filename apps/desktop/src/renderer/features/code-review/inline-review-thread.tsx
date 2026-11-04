@@ -1,14 +1,8 @@
 import { memo, useMemo, useRef, useState } from "react";
 import { IconButton } from "@/renderer/shared/ui/primitives/icon-button";
-import {
-  Check,
-  ChevronDown,
-  ExternalLink,
-  MessageSquare,
-  RotateCcw,
-} from "lucide-react";
+import { ArrowUpRight, ChevronDown, MessageSquare } from "lucide-react";
 import { shellOpenUrl } from "@/renderer/platform/app";
-import { Button, Tooltip } from "@/renderer/shared/ui/primitives";
+import { Badge, Button, Tooltip } from "@/renderer/shared/ui/primitives";
 import { cn } from "@/renderer/shared/ui/cn";
 import { renderMarkdown } from "@/renderer/features/agent/markdown";
 import { ReviewComposer } from "./review-composer";
@@ -21,17 +15,36 @@ import {
   type CodeReviewThreadItem,
 } from "./review-thread-model";
 
+/** A non-person author's badge; people carry none (the Human label goes). */
 function actorKind(
   thread: CodeReviewThreadItem,
   kind: CodeReviewThreadItem["comments"][number]["author"]["kind"],
-): string {
+): string | null {
   if (thread.source === "check") return "Check";
   if (thread.source === "github" && kind === "integration") return "Bot";
   return kind === "agent"
     ? "Agent"
     : kind === "integration"
       ? "Integration"
-      : "Human";
+      : null;
+}
+
+/** A round initials avatar beside each author. */
+function AuthorAvatar({ name }: { name: string }) {
+  const initials = name
+    .split(/\s+/)
+    .filter(Boolean)
+    .slice(0, 2)
+    .map((part) => part[0]!.toUpperCase())
+    .join("");
+  return (
+    <span
+      aria-hidden
+      className="bg-bg2-hover text-fg2 inline-flex size-5 shrink-0 items-center justify-center rounded-full text-2xxs leading-4 font-medium"
+    >
+      {initials || "?"}
+    </span>
+  );
 }
 
 const ReviewCommentBody = memo(function ReviewCommentBody({
@@ -113,48 +126,57 @@ export const InlineReviewThread = memo(function InlineReviewThread({
       data-review-anchor-state={state}
       aria-label={`${thread.source === "check" ? "Check annotation" : "Discussion"} on ${range}`}
       {...(!active ? { inert: "" } : {})}
-      className="border-border2 bg-bg1 min-w-0 rounded-md border font-sans text-xs"
+      // A posted discussion sits on bg2 with a border2 edge, apart from the
+      // code; its 36px head sits over a border2 rule while open.
+      className="border-border2 bg-bg2 min-w-0 rounded-lg border font-sans text-xs leading-4.5"
     >
-      <div className="text-fg2 flex min-h-8 flex-wrap items-center gap-1.5 px-2 py-1">
+      <div
+        className={cn(
+          "text-fg2 flex min-h-9 flex-wrap items-center gap-2 px-3 py-1",
+          open && "border-border2 border-b",
+        )}
+      >
         {thread.resolved ? (
           <Button
             variant="ghost"
-            className="min-w-0 gap-1 px-0.5"
+            size="compact"
+            className="-ml-1.5 min-w-0 gap-1.5 px-1.5"
             aria-expanded={open}
             aria-label={`${open ? "Collapse" : "Expand"} resolved discussion`}
             onClick={() => setExpandedResolved(!open)}
           >
             <ChevronDown className={cn("size-3", !open && "-rotate-90")} />
-            <Check className="size-3" /> Resolved
+            <Badge variant="success">Resolved</Badge>
           </Button>
         ) : (
-          <MessageSquare className="size-3 shrink-0" />
+          <MessageSquare className="text-fg3 size-3.5 shrink-0" />
         )}
         {!open && first && (
-          <span className="text-fg2 min-w-0 truncate">{first.author.name}</span>
+          <span className="text-fg2 min-w-0 truncate">
+            {first.author.name}
+            {thread.comments.length > 1 ? ` · ${thread.comments.length}` : ""}
+          </span>
         )}
-        <span className="text-fg3 min-w-0 truncate">{range}</span>
+        <span className="text-fg2 min-w-0 truncate">{range}</span>
         {thread.source === "github" && <span className="text-fg3">GitHub</span>}
         {thread.severity && (
-          <span
-            className={cn(
-              "capitalize",
+          <Badge
+            variant={
               thread.severity === "failure"
-                ? "text-red-primary"
+                ? "failure"
                 : thread.severity === "warning"
-                  ? "text-yellow-primary"
-                  : "text-fg2",
-            )}
+                  ? "warning"
+                  : "neutral"
+            }
+            className="capitalize"
           >
             {thread.severity}
-          </span>
+          </Badge>
         )}
         {state !== "current" && (
-          <span className="text-fg3">
-            {state === "outdated"
-              ? "Outdated · code changed"
-              : "Original range unavailable"}
-          </span>
+          <Badge variant="outline">
+            {state === "outdated" ? "Outdated" : "Original range unavailable"}
+          </Badge>
         )}
         <div className="flex-1" />
         {thread.url && (
@@ -166,8 +188,7 @@ export const InlineReviewThread = memo(function InlineReviewThread({
             }
           >
             <IconButton
-              size="standard"
-              className="size-6"
+              size="compact"
               label={
                 thread.source === "github"
                   ? "Open discussion on GitHub"
@@ -179,28 +200,23 @@ export const InlineReviewThread = memo(function InlineReviewThread({
                 );
               }}
             >
-              <ExternalLink className="size-3" />
+              <ArrowUpRight />
             </IconButton>
           </Tooltip>
         )}
         {thread.canResolve && (
           <Button
-            variant="ghost"
-            disabled={busy || !active}
-            aria-busy={busy || undefined}
+            size="compact"
+            loading={busy}
+            disabled={!active}
             onClick={setResolved}
           >
-            {thread.resolved ? (
-              <RotateCcw className="size-3" />
-            ) : (
-              <Check className="size-3" />
-            )}
             {busy ? "Updating…" : thread.resolved ? "Reopen" : "Resolve"}
           </Button>
         )}
       </div>
       {open && (
-        <div className="flex min-w-0 flex-col gap-2 px-2 pb-2">
+        <div className="flex min-w-0 flex-col gap-4 p-3">
           {state !== "current" && thread.anchor.context && (
             <details className="text-fg3">
               <summary className="cursor-pointer">Original code</summary>
@@ -209,15 +225,10 @@ export const InlineReviewThread = memo(function InlineReviewThread({
               </pre>
             </details>
           )}
-          {thread.comments.map((comment, index) => (
-            <div
-              key={comment.id}
-              className={cn(
-                "min-w-0",
-                index > 0 && "border-border1 border-t pt-2",
-              )}
-            >
-              <div className="mb-1 flex min-w-0 items-center gap-1.5">
+          {thread.comments.map((comment) => (
+            <div key={comment.id} className="min-w-0">
+              <div className="mb-1 flex min-w-0 items-center gap-2">
+                <AuthorAvatar name={comment.author.name} />
                 <span
                   className="text-fg1 truncate font-medium"
                   title={comment.author.name}
@@ -228,16 +239,18 @@ export const InlineReviewThread = memo(function InlineReviewThread({
                     ? "You"
                     : comment.author.name}
                 </span>
-                <span className="text-fg3">
-                  {actorKind(thread, comment.author.kind)}
-                  {comment.author.provider
-                    ? ` · ${comment.author.provider}`
-                    : ""}
-                </span>
+                {actorKind(thread, comment.author.kind) && (
+                  <Badge>
+                    {actorKind(thread, comment.author.kind)}
+                    {comment.author.provider
+                      ? ` · ${comment.author.provider}`
+                      : ""}
+                  </Badge>
+                )}
                 {comment.createdAt > 0 && (
                   <time
                     dateTime={new Date(comment.createdAt).toISOString()}
-                    className="text-fg3 ml-auto shrink-0"
+                    className="text-fg3 shrink-0"
                     title={new Date(comment.createdAt).toLocaleString()}
                   >
                     {new Date(comment.createdAt).toLocaleDateString(undefined, {
@@ -295,6 +308,7 @@ export const InlineReviewThread = memo(function InlineReviewThread({
               store={drafts}
               draftKey={draftKey}
               label={`Reply to ${first?.author.name ?? "discussion"}`}
+              showLabel={false}
               submitLabel={
                 thread.source === "github" ? "Post reply to PR" : "Reply"
               }

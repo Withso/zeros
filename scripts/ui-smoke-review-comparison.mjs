@@ -43,8 +43,9 @@ export async function runReviewComparisonSmoke({
       .click();
     await expect(input).toBeFocused();
   };
-  const publicTarget = composer.getByRole("button", {
-    name: "Post to PR",
+  // The composer's destination: the Pull request segment.
+  const publicTarget = composer.getByRole("tab", {
+    name: "Pull request",
     exact: true,
   });
   try {

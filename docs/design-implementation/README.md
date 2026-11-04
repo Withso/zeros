@@ -521,3 +521,18 @@ Each landed step appends one line: date, workstream, what landed, evidence.
   engine op, protocol schemas and the registered git-review-actions smoke,
   so it needs its own change; inline conflict blocks replace Resolve
   conflicts then.
+- 2026-11-04 · 5 · Comments (Changes, Files, Review): the composer takes
+  the agent composer's look, sidebar-bg with a border2 edge that stays put
+  on focus, the range as its title and a borderless 13/20 field. One
+  footer: where it goes (Workspace comment, or a Workspace / Pull request
+  segmented control), ghost Cancel and the primary submit with its ⌘↵
+  chip; the ⌘/Ctrl + Enter caption is gone, sending shows the spinner, and
+  a moved PR diff is a yellow line above the footer. A reply keeps "Reply
+  to …" as its name without printing it. A posted discussion is a bg2 card
+  with a border2 edge whose 36px head sits over a border2 rule; Resolve and
+  Reopen are compact secondary buttons, severity, Outdated and Original
+  range unavailable are Badges, ↗ opens the source, a folded resolved
+  thread shows a green Resolved pill with the author and comment count,
+  and comments sit 16px apart with an initials avatar and the date beside
+  the name; the Human label is gone and other authors carry a Badge.
+  Follow-up: agent and review-app marks and GitHub photos in the avatar.

@@ -316,7 +316,7 @@ export async function runCodeReviewSmoke({
   await commentOnRange(9, 11, "deletions");
   await expect(composer()).toHaveAccessibleName("Comment on Old lines 9–11");
   await expect(
-    composer().getByRole("button", { name: "Post to PR", exact: true }),
+    composer().getByRole("tab", { name: "Pull request", exact: true }),
   ).toHaveCount(0);
   await input().fill("Review the original range.");
   await input().press("Control+Enter");
@@ -324,7 +324,7 @@ export async function runCodeReviewSmoke({
   await page.getByTestId("review-toggle-confirmed").click();
   await commentOnRange(11, 11, "additions");
   await composer()
-    .getByRole("button", { name: "Post to PR", exact: true })
+    .getByRole("tab", { name: "Pull request", exact: true })
     .click();
   await input().fill("Publish this exact added line.");
   await input().press("Control+Enter");
@@ -341,7 +341,7 @@ export async function runCodeReviewSmoke({
     await page.getByTestId("review-toggle-confirmed").click();
     await commentOnRange(11, 11, "deletions");
     await composer()
-      .getByRole("button", { name: "Post to PR", exact: true })
+      .getByRole("tab", { name: "Pull request", exact: true })
       .click();
     await input().fill("Keep this draft on its original PR revision.");
     await page.getByTestId(change).click();
