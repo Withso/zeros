@@ -337,3 +337,24 @@ Each landed step appends one line: date, workstream, what landed, evidence.
   `bg2`, which vanishes on the `bg2` card); a measured 0 / 0 still reads
   +0 where an unknown count reads —; the owner avatar uses the profile
   initials rule.
+- 2026-11-04 · 4, 5 · Home (start and boot): with no repositories, Home and
+  the workspace page open the Create page beside the sidebar instead of the
+  full-window welcome, and so does the workspace page with nothing chosen
+  (routing only; the saved page is unchanged). Three start banners (Open
+  project, Open GitHub project, Start from scratch) sit under the composer
+  while no repository is chosen, one row as wide as it and one column when
+  narrow, running the same flows as the Choose project menu; the branch
+  picker waits for a repository. The Create composer is the shared
+  `COMPOSER_SURFACE_CLS` (sidebar-bg + border2, no shadow, no focus
+  change). The boot loader is the Island Z at 64px running the Weave in the
+  fg1 → fg3 gradient on bg1; its colours are the token names with boot
+  fallbacks a test holds equal to bg1, fg1 and fg3, and reduced motion
+  rests on the Z. The welcome view and its PNG mask retire. The Create,
+  folder-create, start-from-scratch and Create composer ui-smoke runs (40
+  checks) pass against the harness.
+  Decisions: Create stays an action, so with no repositories the sidebar
+  keeps Home selected rather than drawing Create as a destination (the
+  board drew Create selected); Start from scratch now chooses the new
+  repository on the Create page instead of opening a workspace at once,
+  as the menu entry already did; "nothing chosen" means no workspace
+  folder at all, so a cloud or still-resolving workspace never reroutes.

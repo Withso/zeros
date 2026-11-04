@@ -368,11 +368,10 @@ const WorkbenchPane = new URLSearchParams(location.search).has("workbench")
 const SummaryContents = new URLSearchParams(location.search).has("summary")
   ? (await import("../shell/conversation/summary-contents")).SummaryContents
   : null;
-const DispatcherPage = createFixture
+const DispatcherPage = createFixture || scratchFixture
   ? (await import("../shell/dispatcher/dispatcher-modal")).DispatcherPage
   : null;
 const { AppSidebar } = await import("../shell/app-sidebar");
-const { NoProjectsView } = await import("../shell/no-projects-view");
 const { useProjectCapabilitiesRefresh } =
   await import("../shell/use-project-capabilities-refresh");
 const { RepoPage } = await import("../features/repositories/repo-page");
@@ -473,9 +472,9 @@ function Harness() {
       <div data-folder-workspace-surface className="flex h-[600px]">
         <AppSidebar />
         <main className="flex min-h-0 min-w-0 flex-1 flex-col">
-          {scratchFixture && !project ? (
-            <NoProjectsView />
-          ) : page === "create" && DispatcherPage ? (
+          {/* With no repository the app opens Create, whose start banners
+              add the first one. */}
+          {(page === "create" || (scratchFixture && !project)) && DispatcherPage ? (
             <DispatcherPage
               active
               initialProjectId={createProjectId}

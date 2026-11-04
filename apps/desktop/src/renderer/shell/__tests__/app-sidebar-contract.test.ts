@@ -311,6 +311,19 @@ describe("sidebar collapse and geometry", () => {
     );
   });
 
+  it("opens Create beside the sidebar with no repositories or nothing chosen", () => {
+    expect(SHELL).toContain('const nothingSelected = activePage === "workspace" && !activeWorkspaceFolder;');
+    expect(SHELL).toMatch(
+      /const opensCreate =\s*\(showWelcome && \(activePage === "dashboard" \|\| activePage === "workspace"\)\) \|\|\s*nothingSelected;/,
+    );
+    expect(SHELL).toContain('activePage === "create" || opensCreate');
+    // The full-window welcome is gone; Create's start banners replace it.
+    expect(SHELL).not.toContain("NoProjectsView");
+    const CREATE = source("apps/desktop/src/renderer/shell/dispatcher/dispatcher-modal.tsx");
+    expect(CREATE).toMatch(/\{!cloud\.computerMode && !selectedProject && \(\s*<CreateStartBanners/);
+    expect(CREATE).toContain("!needsGitSetup && selectedProject && (");
+  });
+
   it("keeps the corner the collapsed controls float over clear", () => {
     expect(SHELL).toContain(
       "const collapsedControlsVisible = sidebarCollapsed && !settingsActive;",

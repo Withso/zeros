@@ -4,10 +4,9 @@
 //
 // The three ways to add a project (Open project / Open GitHub project /
 // Quick start) plus their modals used to live entirely inside Repository panel.
-// They now sit here so BOTH surfaces that offer them — the global Dispatcher
-// and the full-window no-projects welcome screen
-// (NoProjectsView) — drive the exact same flows through one source of
-// truth, with the dialogs mounted once.
+// They now sit here so every surface that offers them — the Create page's
+// Choose project menu and its start banners — drives the exact same flows
+// through one source of truth, with the dialogs mounted once.
 //
 // Mounted around MainShellBody and Settings. All the hooks it needs are stores or
 // providers that live above the main shell, so it can sit at that level.
@@ -466,8 +465,8 @@ export function AddProjectProvider({
   return (
     <AddProjectContext.Provider value={value}>
       {children}
-      {/* Modals mount once so the Dispatcher and no-projects welcome screen
-          share a single dialog instance. */}
+      {/* Modals mount once so every Create entry point shares a single
+          dialog instance. */}
       <InitializeProjectDialog
         folder={initializeFolder}
         onClose={() => setInitializeFolder(null)}

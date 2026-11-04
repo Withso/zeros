@@ -63,6 +63,7 @@ import { resolveModelConfiguration } from "../../features/agent/model-preference
 import { pickAgentForNewChat } from "../../features/settings/default-agent";
 import {
   COMPOSER_FILE_ACCEPT,
+  COMPOSER_SURFACE_CLS,
   COMPOSER_SURFACE_RADIUS,
 } from "../../features/agent/composer-shell";
 import { cn } from "../../shared/ui/cn";
@@ -473,7 +474,8 @@ export function DispatcherComposer({
     <div
       data-dispatcher-composer=""
       className={cn(
-        "border-border1 bg-bg2 focus-within:border-border2 relative flex w-full min-w-0 flex-col border px-3.5 py-3 shadow-xs",
+        "relative flex w-full min-w-0 flex-col border px-3.5 py-3",
+        COMPOSER_SURFACE_CLS,
         COMPOSER_SURFACE_RADIUS,
       )}
       {...(designMode ? {} : (dragHandlers ?? {}))}
@@ -633,7 +635,7 @@ export function DispatcherComposer({
               }
             >
               {busy || readingAttachments ? (
-                <ZerosSpinner size={16} tone="inverted" />
+                <ZerosSpinner size={14} tone="inverted" />
               ) : (
                 <>
                   <span>Create</span>

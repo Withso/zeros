@@ -4,8 +4,8 @@ import { cn } from "@/renderer/shared/ui/cn";
 
 /**
  * Tile — a large, low-emphasis surface button for "pick one of a few actions"
- * layouts: the no-projects welcome screen (Open project / GitHub / Quick start)
- * and any future onboarding / empty-state choosers.
+ * layouts: the Create page's start banners (Open project / GitHub / Start from
+ * scratch) and any future onboarding / empty-state choosers.
  *
  * Owns the surface lane — border + bg + hover + focus ring + radius +
  * transition — so call sites stay layout-only (size + internal arrangement via

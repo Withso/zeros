@@ -593,12 +593,14 @@ export async function runStartFromScratchSmoke({ page, check }) {
   await dialog.getByRole("textbox", { name: "Parent folder", exact: true }).fill("/fixture");
   await dialog.getByRole("switch").click();
   await dialog.getByRole("button", { name: "Create", exact: true }).click();
-  await expect.poll(async () => (await snapshot(page)).activeFolder).toBe("/fixture/zeros/workspaces/to-do-app/ws_fixture_1");
-  await expect(page.getByRole("dialog", { name: "Create a workspace ?", exact: true })).toHaveCount(0);
+  // The new repository becomes Create's choice; the start banners give way to
+  // the plain Create page, where the task is written before any workspace.
+  await expect(page.getByRole("button", { name: "Choose project", exact: true })).toContainText("To-do app");
+  await expect(page.locator("[data-create-start-banners]")).toHaveCount(0);
   const requests = await page.evaluate(() => window.folderWorkspaceRequests);
   expect(requests.filter(r => r.op === "workspace_init_repo")).toHaveLength(1);
   expect(requests.find(r => r.op === "workspace_init_repo").params).toMatchObject({ name: "To-do app", parentFolder: "/fixture", template: "empty" });
   expect(requests.filter(r => r.op === "git.initInPlace")).toHaveLength(0);
-  expect(requests.filter(r => r.op === "workspace.create")).toHaveLength(1);
-  check("Start from scratch uses a plus icon and simplified dialog, initializes Git and opens a workspace without another confirmation", true);
+  expect(requests.filter(r => r.op === "workspace.create")).toHaveLength(0);
+  check("Start from scratch uses a plus icon and simplified dialog, initializes Git and chooses the new repository on the Create page", true);
 }

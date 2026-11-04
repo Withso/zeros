@@ -518,9 +518,6 @@
       "apps/desktop/src/renderer/shared/ui/primitives/sidebar.tsx": {
         "shadow-sm": 2
       },
-      "apps/desktop/src/renderer/shell/dispatcher/dispatcher-composer.tsx": {
-        "shadow-xs": 1
-      },
       "apps/desktop/src/renderer/shell/workbench/tabs/browser-tab.tsx": {
         "shadow-lg": 1,
         "shadow-sm": 3

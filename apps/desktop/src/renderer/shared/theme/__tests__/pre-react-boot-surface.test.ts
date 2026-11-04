@@ -6,6 +6,7 @@ import { describe, expect, it } from "vitest";
 import {
   dismissStartupLoader,
   isStartupLoaderMounted,
+  STARTUP_LOGO_WEAVE_ROWS,
   StartupLogoLoader,
 } from "../../ui/startup-loader";
 
@@ -37,13 +38,18 @@ const visibleText = (markup: string) => {
   parseFragment(markup).childNodes.forEach(visit);
   return text.join("").trim();
 };
-const halftoneLayers = (markup: string) =>
+/** The Island Z's mask rows, as `class|path` pairs in document order. */
+const weaveRows = (markup: string) =>
   Array.from(
-    markup.matchAll(
-      /class=(?:"|')(zeros-boot-halftone-layer zeros-boot-halftone--[^"']+)(?:"|')/g,
-    ),
-    ([, className]) => className,
+    markup.matchAll(/<path\b[^>]*\bclass="(zeros-boot-row-[^"]+)"[^>]*\bd="([^"]+)"/g),
+    ([, className, d]) => `${className}|${d}`,
   );
+const tokenValue = (theme: "dark" | "light", name: string) => {
+  const css = readFileSync("styles/zeros-tokens.css", "utf8");
+  const start = theme === "dark" ? css.indexOf(":root {") : css.indexOf('\n[data-theme="light"] {');
+  const block = css.slice(start);
+  return block.match(new RegExp(`--${name}:\\s*hsl\\([^)]*\\);\\s*/\\*\\s*(#[0-9A-Fa-f]{6})`))?.[1]?.toLowerCase();
+};
 const authGate = readFileSync(
   "apps/desktop/src/renderer/features/auth/auth-gate.tsx",
   "utf8",
@@ -62,7 +68,7 @@ const errorBoundary = readFileSync(
 );
 
 describe("pre-React boot surface", () => {
-  it("paints a halftone real Zeros silhouette before the renderer executes", () => {
+  it("paints the Island Z before the renderer executes", () => {
     expect(rootOffset).toBeGreaterThan(-1);
     expect(moduleEntryOffset).toBeGreaterThan(rootOffset);
     expect(bootOffset).toBeGreaterThan(-1);
@@ -70,41 +76,43 @@ describe("pre-React boot surface", () => {
     expect(bootMarkup).toContain('role="status"');
     expect(bootMarkup).toContain('aria-live="polite"');
     expect(bootMarkup).toContain('aria-label="Loading Zeros"');
-    expect(html).toContain('href="/apps/desktop/src/assets/zeros-logo.png"');
-    expect(bootMarkup).toContain('class="zeros-boot-logo"');
-    expect(bootMarkup).toContain('class="zeros-boot-halftone"');
-    expect(bootMarkup).toContain('aria-hidden="true"');
+    expect(bootMarkup).toMatch(/<svg class="zeros-boot-mark" viewBox="0 0 4 4" aria-hidden="true">/);
+    expect(bootMarkup).toContain('mask="url(#zeros-boot-weave)" fill="url(#zeros-boot-fade)"');
+    expect(weaveRows(bootMarkup)).toEqual(STARTUP_LOGO_WEAVE_ROWS.map((row) => `${row.className}|${row.d}`));
+    // The old four-blob PNG mask and its halftone layers are gone.
+    expect(html).not.toContain("zeros-logo.png");
+    expect(bootMarkup).not.toContain("halftone");
     expect(bootMarkup).not.toContain("<img");
-    expect(bootMarkup).not.toContain("zeros-boot-ascii");
-    expect(halftoneLayers(bootMarkup)).toHaveLength(5);
     expect(visibleText(bootMarkup)).toBe("");
     expect(beforeRenderer).not.toContain("Starting Zeros");
     expect(beforeRenderer).toContain('<div id="root"></div>');
   });
 
-  it("carries dependency-free critical styles for every boot theme", () => {
+  it("colours the boot from token names whose fallbacks equal bg1, fg1 and fg3", () => {
     expect(bootStyles).not.toBe("");
     expect(bootStyles).toContain("#zeros-boot");
-    expect(bootStyles).toContain('[data-theme="light"]');
     expect(bootStyles).not.toContain("data-theme-palette");
-    expect(bootStyles).toContain("--zeros-boot-ink-strong");
-    expect(bootStyles).toContain("--zeros-boot-ink-mid");
-    expect(bootStyles).toContain("--zeros-boot-ink-soft");
-    expect(bootStyles).toContain(
-      'url("/apps/desktop/src/assets/zeros-logo.png")',
-    );
-    expect(bootStyles).toContain("radial-gradient(");
-    expect(bootStyles).toContain("conic-gradient(");
-    expect(bootStyles).toContain("repeating-linear-gradient(");
-    expect(bootStyles).toContain("@keyframes zeros-boot-halftone-drift");
-    expect(bootStyles).toContain("translate3d(-0.45px, 0.15px, 0)");
-    expect(bootStyles).not.toContain("zeros-boot-ascii");
-    expect(bootStyles).not.toContain("scale(");
-    expect(bootStyles).toContain("@media (prefers-reduced-motion: reduce)");
-    expect(bootStyles).toMatch(/\.zeros-boot-logo\s*\{[^}]*width:\s*80px;/s);
-    expect(bootStyles).toMatch(/\.zeros-boot-logo\s*\{[^}]*height:\s*80px;/s);
+    const dark = bootStyles.slice(bootStyles.indexOf(":root {"), bootStyles.indexOf(":root[data-theme=\"light\"]"));
+    const light = bootStyles.slice(bootStyles.indexOf(":root[data-theme=\"light\"]"));
+    for (const [block, theme] of [[dark, "dark"], [light, "light"]] as const) {
+      expect(block).toContain(`--zeros-boot-bg: var(--bg1, ${tokenValue(theme, "bg1")})`);
+      expect(block).toContain(`--zeros-boot-top: var(--fg1, ${tokenValue(theme, "fg1")})`);
+      expect(block).toContain(`--zeros-boot-bottom: var(--fg3, ${tokenValue(theme, "fg3")})`);
+    }
+  });
+
+  it("runs the Weave on a 72 ms beat in one 1.8 s loop and rests under reduced motion", () => {
+    expect(bootStyles).toMatch(/\.zeros-boot-mark\s*\{[^}]*width:\s*64px;[^}]*height:\s*64px;/s);
+    expect(bootStyles).toMatch(/\.zeros-boot-row-r\s*\{\s*animation:\s*zeros-boot-weave-r 1\.8s infinite;/);
+    expect(bootStyles).toMatch(/\.zeros-boot-row-l\s*\{\s*animation:\s*zeros-boot-weave-l 1\.8s infinite;/);
+    for (const [beat, delay] of [[1, "72ms"], [2, "144ms"], [3, "216ms"]] as const)
+      expect(bootStyles).toMatch(new RegExp(`\\.zeros-boot-beat-${beat}\\s*\\{\\s*animation-delay:\\s*${delay};`));
+    expect(bootStyles).toContain("@keyframes zeros-boot-weave-r");
+    expect(bootStyles).toContain("@keyframes zeros-boot-weave-l");
+    expect(bootStyles).toMatch(/100% \{ transform: translateX\(4px\); \}/);
+    expect(bootStyles).toMatch(/100% \{ transform: translateX\(-4px\); \}/);
     expect(bootStyles).toMatch(
-      /prefers-reduced-motion:[^)]+\)[\s\S]*?\.zeros-boot-halftone-layer\s*\{[^}]*animation:\s*none;/,
+      /prefers-reduced-motion:[^)]+\)[\s\S]*?\.zeros-boot-row-r,\s*\.zeros-boot-row-l\s*\{[^}]*animation:\s*none;/,
     );
   });
 
@@ -120,19 +128,17 @@ describe("pre-React boot surface", () => {
     expect(errorBoundary).toContain("dismissStartupLoader");
   });
 
-  it("renders the React-only recovery fallback with the same halftone mark", () => {
+  it("renders the React-only recovery fallback with the same Island Z", () => {
     const markup = renderToStaticMarkup(createElement(StartupLogoLoader));
 
     expect(markup).toContain('id="zeros-boot"');
-    expect(markup).toContain('class="zeros-boot-logo"');
-    expect(markup).toContain('class="zeros-boot-halftone"');
+    expect(markup).toContain('class="zeros-boot-mark"');
     expect(markup).toContain('aria-hidden="true"');
     expect(markup).toContain('aria-label="Loading Zeros"');
     expect(markup).not.toContain("<img");
-    expect(markup).not.toContain("zeros-boot-ascii");
     expect(markup).not.toContain("Starting Zeros");
     expect(visibleText(markup)).toBe("");
-    expect(halftoneLayers(markup)).toEqual(halftoneLayers(bootMarkup));
+    expect(weaveRows(markup)).toEqual(weaveRows(bootMarkup));
   });
 
   it("dismisses only the exact startup-loader node", () => {
