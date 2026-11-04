@@ -138,18 +138,35 @@ const commentLineTracker = ViewPlugin.define((view) => {
     if (view.state.field(commentLineField, false) !== line)
       view.dispatch({ effects: setCommentLine.of(line) });
   };
-  const move = (event: MouseEvent) => {
+  // One layout read per frame, however fast the pointer moves.
+  let frame = 0;
+  let pointerY = 0;
+  const locate = () => {
+    frame = 0;
     const position = view.posAtCoords(
-      { x: view.contentDOM.getBoundingClientRect().left + 8, y: event.clientY },
+      { x: view.contentDOM.getBoundingClientRect().left + 8, y: pointerY },
       false,
     );
     show(view.state.doc.lineAt(position).number);
   };
-  const leave = () => show(null);
+  const move = (event: MouseEvent) => {
+    pointerY = event.clientY;
+    if (!frame) frame = requestAnimationFrame(locate);
+  };
+  // A frame still pending when the pointer leaves must not bring the + back.
+  const cancel = () => {
+    if (frame) cancelAnimationFrame(frame);
+    frame = 0;
+  };
+  const leave = () => {
+    cancel();
+    show(null);
+  };
   view.dom.addEventListener("mousemove", move);
   view.dom.addEventListener("mouseleave", leave);
   return {
     destroy: () => {
+      cancel();
       view.dom.removeEventListener("mousemove", move);
       view.dom.removeEventListener("mouseleave", leave);
     },
@@ -220,9 +237,19 @@ const reviewGutterAccessibility = ViewPlugin.define((view) => {
   };
   schedule();
   return {
-    // The + moves with the pointer, so every update can change which number
-    // element holds it.
-    update: () => schedule(),
+    // The gutter's elements change with the document, viewport, geometry or
+    // configuration, and the + moves with the pointer between lines.
+    update: (update) => {
+      if (
+        update.docChanged ||
+        update.viewportChanged ||
+        update.geometryChanged ||
+        update.transactions.some((transaction) => transaction.reconfigured) ||
+        update.startState.field(commentLineField, false) !==
+          update.state.field(commentLineField, false)
+      )
+        schedule();
+    },
     destroy: () => {
       live = false;
     },
