@@ -536,3 +536,11 @@ Each landed step appends one line: date, workstream, what landed, evidence.
   and comments sit 16px apart with an initials avatar and the date beside
   the name; the Human label is gone and other authors carry a Badge.
   Follow-up: agent and review-app marks and GitHub photos in the avatar.
+- 2026-11-04 · 5 · Review: merge methods use GitHub's names (Squash and
+  merge, Create a merge commit, Rebase and merge) with the check at the end
+  of the chosen row. The rest of Review is a rebuild with new reads (header
+  rows, Overview with Git status, PR status and Findings, Description,
+  Activity, Checks, Commits, the rail) and it must move Post to PR into
+  Changes before the Changes sub-tab can go, so it has a code-level plan in
+  `plans.md` with the other larger changes (Changes cards, hunk review,
+  conflicts in place, diff gutter signs, comment author marks).

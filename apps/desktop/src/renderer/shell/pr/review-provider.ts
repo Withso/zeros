@@ -119,9 +119,10 @@ const githubProvider: ReviewProvider = {
   capabilities: {
     reviewNoun: "pull request",
     mergeMethods: [
-      { id: "squash", label: "Squash & merge" },
-      { id: "merge", label: "Merge" },
-      { id: "rebase", label: "Rebase & merge" },
+      // GitHub's own names for its three methods.
+      { id: "squash", label: "Squash and merge" },
+      { id: "merge", label: "Create a merge commit" },
+      { id: "rebase", label: "Rebase and merge" },
     ],
   },
   authStatus: (workspaceId) => ghAuthStatus(workspaceId),
