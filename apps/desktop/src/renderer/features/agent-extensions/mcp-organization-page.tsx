@@ -62,6 +62,7 @@ export function OrganizationMcpPage({ organization, surfaceActive }: { organizat
   const repositories = useRecoveringRead(repositoriesCache, key, readCloudMcpRepositories, { enabled: surfaceActive, maxAgeMs: 30_000 });
   const [view, setView] = useState<{ kind: "list" } | { kind: "editor"; initial: CloudMcpExtension | null; connect?: boolean; owner?: "organization" | "user" }>({ kind: "list" });
   const canShare = organization.role === "owner" || organization.role === "admin";
+  const servers = read.data;
   const [busy, setBusy] = useState<string | null>(null);
   const mutating = useRef(false);
   const mounted = useRef(true);
@@ -110,20 +111,25 @@ export function OrganizationMcpPage({ organization, surfaceActive }: { organizat
             </SettingsRow>
           </SettingsList>}
           {repositories.error && <MessageRow tone="warning" flush>{repositories.error.message}</MessageRow>}
-          {(["organization", "user"] as const).map(owner => {
-            const rows = (read.data ?? []).filter(row => row.owner === owner);
+          {/* Until the first read lands, one row says so for the whole page. */}
+          {!servers ? <SettingsList>
+            {read.error ? <MessageRow tone="error" role="alert" flush
+              actions={<Button variant="ghost" size="compact" onClick={read.refresh}>Retry</Button>}>Couldn’t load MCP servers.</MessageRow>
+              : <MessageRow tone="pending" role="status" flush>Loading MCP servers…</MessageRow>}
+          </SettingsList> : (["organization", "user"] as const).map(owner => {
+            const rows = servers.filter(row => row.owner === owner);
             const shared = owner === "organization";
+            // An empty group says so, unless its one action (the add row) does.
+            const addRow = shared ? rows.length === 0 && canShare : true;
             return <SettingsGroup key={owner} aria-label={shared ? "Shared servers" : "Your servers"}
               title={shared ? "Shared by your organization" : "Your servers"}
               description={shared ? "Members sign in with their own account." : `Only you can use these in ${organization.name}.`}>
-              {!read.data && !read.error && <MessageRow tone="pending" role="status" flush>Loading MCP servers…</MessageRow>}
-              {!read.data && read.error && <MessageRow tone="error" role="alert" flush
-                actions={<Button variant="ghost" size="compact" onClick={read.refresh}>Retry</Button>}>Couldn’t load MCP servers.</MessageRow>}
-              {read.data && rows.length === 0 && !shared && <p className="text-fg2 m-0 text-xs leading-4.5">No servers of your own yet.</p>}
+              {rows.length === 0 && !(shared && canShare) && <p className="text-fg2 m-0 text-xs leading-4.5">
+                {shared ? "No shared servers yet." : "No servers of your own yet."}</p>}
               {rows.map(row => <OrganizationMcpRow key={row.id} row={row} ownerKey={key} observedAt={read.updatedAt} busy={busy !== null}
                 onEdit={() => setView({ kind: "editor", initial: row })} onConnect={() => setView({ kind: "editor", initial: row, connect: true })}
                 onToggle={enabled => void mutate(row, false, enabled)} onRemove={() => void mutate(row, true)} />)}
-              {read.data && (shared ? rows.length === 0 && canShare : true) && <SettingsAddRow label={shared ? "Add a shared server" : "Add your own server"}
+              {addRow && <SettingsAddRow label={shared ? "Add a shared server" : "Add your own server"}
                 onClick={() => setView({ kind: "editor", initial: null, owner })} />}
             </SettingsGroup>;
           })}
