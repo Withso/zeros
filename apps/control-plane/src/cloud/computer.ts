@@ -171,13 +171,13 @@ export class CloudV2Computers {
     const row = (await tx.query<ComputerConfiguration>(
       `SELECT recipe,recipe_source_targets,active_build_id,snapshot_name,recipe_revision::text FROM cloud_v2_computers WHERE org_id=$1`, [organizationId])).rows[0];
     const repositories = await this.configured(tx, organizationId, row?.recipe ?? null, row?.active_build_id ?? null);
-    const active = !row?.recipe && row?.active_build_id ? (await tx.query<{ source_targets: unknown }>(
-      `SELECT source_targets FROM cloud_v2_computer_builds WHERE org_id=$1 AND id=$2`, [organizationId, row.active_build_id])).rows[0] : undefined;
-    return { repositories, sources: row?.recipe ? row.recipe_source_targets : active?.source_targets ?? null,
+    const active = !row?.recipe && row?.active_build_id ? (await tx.query<{ source_targets: unknown; source_policy_version: number }>(
+      `SELECT source_targets,source_policy_version FROM cloud_v2_computer_builds WHERE org_id=$1 AND id=$2`, [organizationId, row.active_build_id])).rows[0] : undefined;
+    return { repositories, sources: row?.recipe ? row.recipe_source_targets : active?.source_policy_version === 2 ? active.source_targets : null,
       revision: Number(row?.recipe_revision ?? 0), key: configurationKey(row) };
   }
 
-  /** Resolve outside database locks. Retained entries always carry their old
+  /** Resolve outside database locks. Retained, verified entries carry their old
    * IDs; explicitly added entries acquire a new server observation. */
   private async admitSources(organizationId: string, userId: string, repositories: readonly CloudV2RepositoryDraft[], previous: ConfiguredSources): Promise<CloudSourceTarget[]> {
     const retained = repositories.some(entry => previous.repositories.some(old => old.repository.toLowerCase() === entry.repository.toLowerCase()));

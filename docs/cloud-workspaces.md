@@ -123,9 +123,10 @@ reactivation and automatic refresh; the logs and recipes remain stored.
 An unverified legacy Computer recipe is an editable draft for a **fresh manual
 build**, not evidence about any old source. An admin can save it or build the
 configured revision with their current GitHub access; new immutable IDs are
-recorded only on the new configuration and build. Already-recorded IDs remain
-pinned, and malformed provenance still fails closed. This recovery starts from
-stock and never reuses the legacy snapshot. Creation and the repository picker
+recorded only on the new configuration and build. Active-build IDs are trusted
+only under source policy v2; v1 targets never establish provenance. Verified IDs
+remain pinned, and malformed verified provenance still fails closed. Recovery
+starts from stock and never reuses the legacy snapshot. Creation and the repository picker
 return `cloud_computer_rebuild_required` while that old build is active, directing
 admins to Settings → Cloud Computer and other members to an organization admin.
 Rebuilding does not verify or unlock historical logs, workspaces or checkpoints.
