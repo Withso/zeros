@@ -1,4 +1,8 @@
-import { nativeDesignIdentityBase } from "@zeros/design-web";
+import {
+  designComposedChildElements,
+  designShadowHostOfContent,
+  nativeDesignIdentityBase,
+} from "@zeros/design-web";
 import { parse, type DefaultTreeAdapterTypes } from "parse5";
 import { elementRecords, type ElementRecord } from "./source";
 
@@ -23,7 +27,9 @@ type DesignAncestor =
 
 /** A selectable design node is authored visual content inside body, never
  * document plumbing. One predicate shared by healing, lint, mutations, and
- * rendering keeps metadata nodes out of the canvas contract. */
+ * rendering keeps metadata nodes out of the canvas contract. Content of a
+ * declarative shadow root belongs to its host; the owning template is known
+ * once elementRecords has walked the document. */
 export function isDesignNodeElement(
   element: DefaultTreeAdapterTypes.Element,
 ): boolean {
@@ -35,11 +41,40 @@ export function isDesignNodeElement(
         return false;
       }
       if (current.tagName === "body") return true;
+    } else if (current.nodeName === "#document-fragment") {
+      current = designShadowHostOfContent(
+        current as DefaultTreeAdapterTypes.DocumentFragment,
+      );
+      continue;
     }
     current =
       "parentNode" in current
         ? (current.parentNode as DesignAncestor | null)
         : null;
+  }
+  return false;
+}
+
+/** The design elements an element renders as children, as in the browser's
+ * flat tree: a declarative shadow root's content replaces its host's
+ * children, and a slot renders the host children assigned to it. */
+export function designRenderedChildElements(
+  element: DefaultTreeAdapterTypes.Element,
+): DefaultTreeAdapterTypes.Element[] {
+  return designComposedChildElements(element).filter(isDesignNodeElement);
+}
+
+/** True for a design node rendered inside a declarative shadow root. */
+export function isShadowDesignNodeElement(
+  element: DefaultTreeAdapterTypes.Element,
+): boolean {
+  if (!isDesignNodeElement(element)) return false;
+  for (
+    let current = element.parentNode as DesignAncestor | null;
+    current;
+    current = "parentNode" in current ? (current.parentNode as DesignAncestor | null) : null
+  ) {
+    if (!("tagName" in current) && current.nodeName === "#document-fragment") return true;
   }
   return false;
 }

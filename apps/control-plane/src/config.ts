@@ -1,8 +1,7 @@
 import type { CodexFingerprintKeys } from "./agent-credentials/codex-fingerprint-keys.js";
 import { CloudAgentCredentialEnvSchema, loadCloudAgentCredentialConfig, type CloudAgentCredentialConfig } from "./agent-credentials/agent-credential-config.js";
-// Authentication is selected explicitly. Legacy Auth0 deployments may still
-// derive their verification URLs from AUTH0_DOMAIN during the staged cutover;
-// WorkOS and future providers must supply the exact issuer/JWKS contract.
+// Authentication is WorkOS. Deployments supply the exact issuer/JWKS contract
+// and both Application client IDs.
 
 import { isIP } from "node:net";
 import path from "node:path";
@@ -44,23 +43,19 @@ const EnvSchema = z.object({
   OTEL_EXPORTER_OTLP_TRACES_ENDPOINT: z.string().optional(),
   CONTROL_PLANE_TRACE_SAMPLE_RATIO: z.coerce.number().min(0).max(1).default(0),
   DESKTOP_RELEASE_LEDGER_URL: z.string().optional(),
-  AUTH_PROVIDER: z.enum(["auth0", "workos"]).default("auth0"),
-  /** The Auth0 tenant domain, e.g. your-tenant.us.auth0.com (no scheme). */
-  AUTH0_DOMAIN: z.string().trim().min(1).optional(),
-  /** Server-to-server credential shared only with the Auth0 Pages facade. */
-  AUTH0_SESSION_AUTHORITY_KEY: z.string().regex(/^[a-f\d]{64}$/i).optional(),
-  /**
-   * Accepted `iss` claims, comma-separated; defaults to
-   * `https://${AUTH0_DOMAIN}/`. A custom Auth0 domain deployment lists BOTH
-   * the tenant's default `<tenant>.auth0.com` issuer and the custom one,
-   * since Auth0 can mint under either depending on config.
-   */
+  /** WorkOS is the only provider. Like the desktop and Pages checks, an
+   * omitted or empty value means WorkOS; case and surrounding space are ignored. */
+  AUTH_PROVIDER: z.preprocess(
+    (value) => typeof value === "string" ? value.trim().toLowerCase() || undefined : value,
+    z.literal("workos").optional(),
+  ),
+  /** Exact `iss` claim of WorkOS access tokens. */
   AUTH_ISSUER: z.string().optional(),
-  /** Override the JWKS URL; defaults to `https://${AUTH0_DOMAIN}/.well-known/jwks.json`. */
+  /** WorkOS JWKS URL for access-token signatures. */
   AUTH_JWKS_URL: z.string().url().optional(),
   /** Expected `aud` claim for this resource server. */
   AUTH_AUDIENCE: z.string().min(1),
-  /** Allowed WorkOS Applications. Required only in WorkOS mode. */
+  /** Allowed WorkOS Applications. */
   AUTH_WEB_CLIENT_ID: z.string().trim().min(1).optional(),
   AUTH_DESKTOP_CLIENT_ID: z.string().trim().min(1).optional(),
   /** Canonical browser application origin used for callbacks and cookies. */
@@ -112,9 +107,14 @@ const GithubEnvSchema = z.object({
     .string()
     .url()
     .default("https://app.zeros.build/github/connected"),
-  /** Separate this HMAC key from the OAuth secret before rotating that secret;
-   * the compatibility fallback otherwise invalidates all outstanding bindings. */
+  /** Refresh-binding HMAC key version 1. Required in Railway Alpha, Beta and
+   * Production, so rotating the OAuth client secret leaves bindings valid. */
   GITHUB_REFRESH_BINDING_SECRET: z.string().min(16).optional(),
+  /** Versioned refresh-binding keys, `{"<version>":"<secret>"}`. Bindings are
+   * signed with the current version and verified with every listed one, so a
+   * key rotates without asking anyone to reconnect. */
+  GITHUB_REFRESH_BINDING_KEYS_JSON: z.string().trim().min(2).max(16_384).optional(),
+  GITHUB_REFRESH_BINDING_CURRENT_KEY_VERSION: z.coerce.number().int().min(1).max(65_535).optional(),
   GITHUB_WEB_BASE_URL: z.string().url().default("https://github.com"),
   GITHUB_API_BASE_URL: z.string().url().default("https://api.github.com"),
   NODE_ENV: z.string().default("development"),
@@ -133,9 +133,13 @@ export type GithubBackendConfig = {
   clientId: string;
   clientSecret: string;
   privateKey?: string;
-  /** HMAC key for the refresh binding. Separate so rotating the OAuth client
-   *  secret does not invalidate every outstanding binding at once. */
-  refreshBindingSecret: string;
+  /** Refresh-binding HMAC keys by version. New bindings use the current
+   *  version; every listed version still verifies the bindings it signed. */
+  refreshBindingKeys: Readonly<Record<number, string>>;
+  currentRefreshBindingKeyVersion: number;
+  /** False only where development and self-hosted deployments still borrow
+   *  the OAuth client secret, which rotates every binding with it. */
+  refreshBindingKeysDedicated: boolean;
   appSlug: string;
   oauthCallbackUrl: string;
   completionPageUrl: string;
@@ -161,21 +165,14 @@ export type FeedbackBackendConfig = {
   posthogProjectUrl: string | null;
 };
 
-export type AuthBackendConfig =
-  | {
-      provider: "auth0";
-      issuers: string[];
-      jwksUrl: string;
-      audience: string;
-    }
-  | {
-      provider: "workos";
-      issuer: string;
-      jwksUrl: string;
-      audience: string;
-      webClientId: string;
-      desktopClientId: string;
-    };
+export type AuthBackendConfig = {
+  provider: "workos";
+  issuer: string;
+  jwksUrl: string;
+  audience: string;
+  webClientId: string;
+  desktopClientId: string;
+};
 
 export type WorkOSBackendConfig = {
   appOrigin: string;
@@ -207,9 +204,9 @@ export type Config = {
   /** All application routes and background writers are disabled during cutover. */
   databaseMaintenanceMode?: boolean;
   auth: AuthBackendConfig;
-  /** Null in legacy Auth0 mode. WorkOS secrets live only on Railway. */
+  /** WorkOS secrets live only on Railway. Null only for embedders and tests
+   * that run without WorkOS management credentials. */
   workos: WorkOSBackendConfig | null;
-  auth0SessionAuthorityKey?: string | null;
   /** Fixed Alpha test identity; omitted/disabled everywhere else. No password. */
   zerosDevAuth?: ZerosDevAuthConfig | null;
   /** Exact, environment-bound invitation landing page (without a query). */
@@ -414,11 +411,10 @@ function validatedAppOrigin(
 
 function loadInviteLinkBase(
   raw: string | undefined,
-  appOrigin: string | null,
+  appOrigin: string,
   nodeEnv: string,
 ): string {
-  const candidate =
-    raw?.trim() || `${appOrigin ?? "https://app.zeros.build"}/invite`;
+  const candidate = raw?.trim() || `${appOrigin}/invite`;
   let url: URL;
   try {
     url = new URL(candidate);
@@ -445,7 +441,7 @@ function loadInviteLinkBase(
       "Invalid environment: INVITE_LINK_BASE must use HTTPS (or dev loopback HTTP) and be an exact, credential-free /invite URL with no query or fragment",
     );
   }
-  if (appOrigin !== null && url.origin !== appOrigin) {
+  if (url.origin !== appOrigin) {
     throw new Error(
       "Invalid environment: INVITE_LINK_BASE must use the exact APP_ORIGIN",
     );
@@ -456,8 +452,7 @@ function loadInviteLinkBase(
 function loadWorkOSBackendConfig(
   env: z.infer<typeof EnvSchema>,
   appOrigin: string | null,
-): WorkOSBackendConfig | null {
-  if (env.AUTH_PROVIDER !== "workos") return null;
+): WorkOSBackendConfig {
   if (appOrigin === null) {
     throw new Error("Invalid environment: APP_ORIGIN is required");
   }
@@ -479,7 +474,7 @@ function loadWorkOSBackendConfig(
 }
 
 function validateWorkOSOriginSeparation(
-  auth: Extract<AuthBackendConfig, { provider: "workos" }>,
+  auth: AuthBackendConfig,
   backend: WorkOSBackendConfig,
 ): void {
   let audienceOrigin: string | null = null;
@@ -507,82 +502,116 @@ function validateWorkOSOriginSeparation(
 }
 
 function loadAuthConfig(env: z.infer<typeof EnvSchema>): AuthBackendConfig {
-  if (env.AUTH_PROVIDER === "workos") {
-    const issuerValues = requiredAuthValue(env.AUTH_ISSUER, "AUTH_ISSUER")
-      .split(",")
-      .map((value) => value.trim())
-      .filter(Boolean);
-    if (issuerValues.length !== 1) {
-      throw new Error(
-        "Invalid environment: AUTH_ISSUER must contain exactly one issuer in WorkOS mode",
-      );
-    }
-    const webClientId = requiredAuthValue(
-      env.AUTH_WEB_CLIENT_ID,
-      "AUTH_WEB_CLIENT_ID",
-    );
-    const desktopClientId = requiredAuthValue(
-      env.AUTH_DESKTOP_CLIENT_ID,
-      "AUTH_DESKTOP_CLIENT_ID",
-    );
-    if (webClientId === desktopClientId) {
-      throw new Error(
-        "Invalid environment: AUTH_WEB_CLIENT_ID and AUTH_DESKTOP_CLIENT_ID must be different",
-      );
-    }
-    return {
-      provider: "workos",
-      issuer: validatedAuthUrl(issuerValues[0]!, "AUTH_ISSUER", env.NODE_ENV),
-      jwksUrl: validatedAuthUrl(
-        requiredAuthValue(env.AUTH_JWKS_URL, "AUTH_JWKS_URL"),
-        "AUTH_JWKS_URL",
-        env.NODE_ENV,
-      ),
-      audience: env.AUTH_AUDIENCE,
-      webClientId,
-      desktopClientId,
-    };
-  }
-
-  const domain = env.AUTH0_DOMAIN?.replace(/\/+$/, "") || null;
-  if (!domain && (!env.AUTH_ISSUER?.trim() || !env.AUTH_JWKS_URL?.trim())) {
-    throw new Error(
-      "Invalid environment: AUTH0_DOMAIN is required unless both AUTH_ISSUER and AUTH_JWKS_URL are configured",
-    );
-  }
-  const base = domain ? `https://${domain}` : null;
-  const issuers = (env.AUTH_ISSUER ?? `${base}/`)
+  const issuerValues = requiredAuthValue(env.AUTH_ISSUER, "AUTH_ISSUER")
     .split(",")
     .map((value) => value.trim())
-    .filter(Boolean)
-    .map((value) => validatedAuthUrl(value, "AUTH_ISSUER", env.NODE_ENV));
-  if (issuers.length === 0) {
-    throw new Error("Invalid environment: AUTH_ISSUER is required");
+    .filter(Boolean);
+  if (issuerValues.length !== 1) {
+    throw new Error(
+      "Invalid environment: AUTH_ISSUER must contain exactly one issuer",
+    );
+  }
+  const webClientId = requiredAuthValue(
+    env.AUTH_WEB_CLIENT_ID,
+    "AUTH_WEB_CLIENT_ID",
+  );
+  const desktopClientId = requiredAuthValue(
+    env.AUTH_DESKTOP_CLIENT_ID,
+    "AUTH_DESKTOP_CLIENT_ID",
+  );
+  if (webClientId === desktopClientId) {
+    throw new Error(
+      "Invalid environment: AUTH_WEB_CLIENT_ID and AUTH_DESKTOP_CLIENT_ID must be different",
+    );
   }
   return {
-    provider: "auth0",
-    issuers,
+    provider: "workos",
+    issuer: validatedAuthUrl(issuerValues[0]!, "AUTH_ISSUER", env.NODE_ENV),
     jwksUrl: validatedAuthUrl(
-      env.AUTH_JWKS_URL ?? `${base}/.well-known/jwks.json`,
+      requiredAuthValue(env.AUTH_JWKS_URL, "AUTH_JWKS_URL"),
       "AUTH_JWKS_URL",
       env.NODE_ENV,
     ),
     audience: env.AUTH_AUDIENCE,
+    webClientId,
+    desktopClientId,
   };
 }
 
-/** Resolve the optional GitHub App block. Throws only so `loadConfig` can turn
- *  the reason into a warning — never into a failed boot. */
-function parseGithubConfig(env: NodeJS.ProcessEnv): GithubBackendConfig {
+/** A refresh-binding key problem in an official deployment. It fails the boot
+ *  so `/healthz` keeps the previous deployment serving; disabling GitHub
+ *  instead would strand every connected desktop. */
+class RefreshBindingKeyError extends Error {}
+
+function parseRefreshBindingKeys(
+  e: z.infer<typeof GithubEnvSchema>,
+): Pick<GithubBackendConfig, "refreshBindingKeys" | "currentRefreshBindingKeyVersion" | "refreshBindingKeysDedicated"> {
+  const keys: Record<number, string> = {};
+  const add = (version: number, secret: unknown, name: string) => {
+    // The same rule GITHUB_REFRESH_BINDING_SECRET always had, so a key that
+    // signs today's bindings can never newly fail to load.
+    if (typeof secret !== "string" || secret.length < 16)
+      throw new RefreshBindingKeyError(`${name} must be at least 16 characters`);
+    if (keys[version] !== undefined && keys[version] !== secret)
+      throw new RefreshBindingKeyError(`conflicting refresh-binding key version ${version}`);
+    keys[version] = secret;
+  };
+  if (e.GITHUB_REFRESH_BINDING_KEYS_JSON) {
+    let document: unknown;
+    try { document = JSON.parse(e.GITHUB_REFRESH_BINDING_KEYS_JSON); }
+    catch { throw new RefreshBindingKeyError("GITHUB_REFRESH_BINDING_KEYS_JSON must be a JSON object"); }
+    if (!document || typeof document !== "object" || Array.isArray(document) ||
+      Object.keys(document).length < 1 || Object.keys(document).length > 32)
+      throw new RefreshBindingKeyError("GITHUB_REFRESH_BINDING_KEYS_JSON must contain 1-32 key versions");
+    for (const [version, secret] of Object.entries(document)) {
+      if (!/^[1-9][0-9]{0,4}$/.test(version) || Number(version) > 65_535)
+        throw new RefreshBindingKeyError("refresh-binding key versions must be integers from 1 through 65535");
+      add(Number(version), secret, `GITHUB_REFRESH_BINDING_KEYS_JSON.${version}`);
+    }
+  }
+  if (e.GITHUB_REFRESH_BINDING_SECRET) add(1, e.GITHUB_REFRESH_BINDING_SECRET, "GITHUB_REFRESH_BINDING_SECRET");
+  const versions = Object.keys(keys).map(Number);
+  if (versions.length === 0)
+    return { refreshBindingKeys: { 1: e.GITHUB_APP_CLIENT_SECRET }, currentRefreshBindingKeyVersion: 1, refreshBindingKeysDedicated: false };
+  const current = e.GITHUB_REFRESH_BINDING_CURRENT_KEY_VERSION ?? (versions.length === 1 ? versions[0]! : null);
+  if (current === null)
+    throw new RefreshBindingKeyError("GITHUB_REFRESH_BINDING_CURRENT_KEY_VERSION is required for a multi-version keyring");
+  if (keys[current] === undefined)
+    throw new RefreshBindingKeyError("GITHUB_REFRESH_BINDING_CURRENT_KEY_VERSION is not present in the keyring");
+  return { refreshBindingKeys: keys, currentRefreshBindingKeyVersion: current, refreshBindingKeysDedicated: true };
+}
+
+/** Resolve the optional GitHub App block. Throws so `loadConfig` can turn the
+ *  reason into a warning; only an official deployment's refresh-binding key
+ *  problem fails the boot. */
+function parseGithubConfig(
+  env: NodeJS.ProcessEnv,
+  options: { official: boolean },
+): GithubBackendConfig {
   const parsed = GithubEnvSchema.safeParse(env);
   if (!parsed.success) {
-    throw new Error(
-      parsed.error.issues
-        .map((i) => `${i.path.join(".")}: ${i.message}`)
-        .join("; "),
-    );
+    const message = parsed.error.issues
+      .map((i) => `${i.path.join(".")}: ${i.message}`)
+      .join("; ");
+    const bindingKeyIssue = parsed.error.issues.some((i) =>
+      String(i.path[0]).startsWith("GITHUB_REFRESH_BINDING_"));
+    throw options.official && bindingKeyIssue
+      ? new RefreshBindingKeyError(message)
+      : new Error(message);
   }
   const e = parsed.data;
+  let bindingKeys: ReturnType<typeof parseRefreshBindingKeys>;
+  try {
+    bindingKeys = parseRefreshBindingKeys(e);
+  } catch (error) {
+    if (options.official && error instanceof RefreshBindingKeyError) throw error;
+    throw new Error(error instanceof Error ? error.message : String(error));
+  }
+  if (options.official && !bindingKeys.refreshBindingKeysDedicated)
+    throw new RefreshBindingKeyError(
+      "GITHUB_REFRESH_BINDING_SECRET or GITHUB_REFRESH_BINDING_KEYS_JSON is required; " +
+        "seed it with the value that signs today's bindings (GITHUB_APP_CLIENT_SECRET when no binding key was set)",
+    );
   const privateKey = e.GITHUB_APP_PRIVATE_KEY?.includes("\\n")
     ? e.GITHUB_APP_PRIVATE_KEY.replaceAll("\\n", "\n").trim()
     : e.GITHUB_APP_PRIVATE_KEY?.trim();
@@ -591,8 +620,7 @@ function parseGithubConfig(env: NodeJS.ProcessEnv): GithubBackendConfig {
     clientId: e.GITHUB_APP_CLIENT_ID,
     clientSecret: e.GITHUB_APP_CLIENT_SECRET,
     ...(privateKey ? { privateKey } : {}),
-    refreshBindingSecret:
-      e.GITHUB_REFRESH_BINDING_SECRET ?? e.GITHUB_APP_CLIENT_SECRET,
+    ...bindingKeys,
     appSlug: e.GITHUB_APP_SLUG,
     oauthCallbackUrl: validatedBrowserUrl(
       e.GITHUB_OAUTH_CALLBACK_URL,
@@ -773,7 +801,7 @@ const HOSTED_ENVIRONMENTS = {
 function validateRailwayEnvironment(
   env: NodeJS.ProcessEnv,
   audience: string,
-  appOrigin: string | null,
+  appOrigin: string,
   inviteLinkBase: string,
   opsOrigin: string | null,
   selfHosted: boolean,
@@ -804,12 +832,12 @@ function validateRailwayEnvironment(
       `Invalid environment: AUTH_AUDIENCE must be ${expected.audience} in Railway ${name}`,
     );
   }
-  if (appOrigin !== null && appOrigin !== expected.appOrigin) {
+  if (appOrigin !== expected.appOrigin) {
     throw new Error(
       `Invalid environment: APP_ORIGIN must be ${expected.appOrigin} in Railway ${name}`,
     );
   }
-  if (appOrigin !== null && opsOrigin !== expected.opsOrigin) {
+  if (opsOrigin !== expected.opsOrigin) {
     throw new Error(
       expected.opsOrigin
         ? `Invalid environment: OPS_ORIGIN must be ${expected.opsOrigin} in Railway ${name}`
@@ -872,18 +900,16 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env, diagnostics: Co
   const workos = loadWorkOSBackendConfig(e, appOrigin);
   const inviteLinkBase = loadInviteLinkBase(
     e.INVITE_LINK_BASE,
-    appOrigin,
+    workos.appOrigin,
     e.NODE_ENV,
   );
-  if (auth.provider === "workos" && workos) {
-    validateWorkOSOriginSeparation(auth, workos);
-  }
+  validateWorkOSOriginSeparation(auth, workos);
   validateRailwayEnvironment(
     env,
     e.AUTH_AUDIENCE,
-    appOrigin,
+    workos.appOrigin,
     inviteLinkBase,
-    workos?.opsOrigin ?? null,
+    workos.opsOrigin,
     e.ZEROS_SELF_HOSTED === "true",
   );
 
@@ -892,11 +918,16 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env, diagnostics: Co
   const supplied = GITHUB_REQUIRED_KEYS.filter(
     (key) => (env[key] ?? "").trim().length > 0,
   );
+  // Same scope as validateRailwayEnvironment's channel assertions.
+  const officialRailway = Boolean(env.RAILWAY_PROJECT_ID) &&
+    env.ZEROS_DEV_ENVIRONMENT !== "hosted" && e.ZEROS_SELF_HOSTED !== "true";
   let github: GithubBackendConfig | null = null;
   if (supplied.length > 0) {
     try {
-      github = parseGithubConfig(env);
+      github = parseGithubConfig(env, { official: officialRailway });
     } catch (error) {
+      if (error instanceof RefreshBindingKeyError)
+        throw new Error(`Invalid environment: Railway ${channel} GitHub App: ${error.message}`);
       diagnostics.error(
         "[config] GitHub App sign-in is DISABLED — its configuration is " +
           `incomplete or invalid: ${
@@ -905,6 +936,12 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env, diagnostics: Co
           "routes will answer github_not_configured.",
       );
     }
+    if (github && !github.refreshBindingKeysDedicated && env.RAILWAY_PROJECT_ID)
+      diagnostics.warn(
+        "[config] GitHub refresh bindings are signed with GITHUB_APP_CLIENT_SECRET. " +
+          "Set GITHUB_REFRESH_BINDING_SECRET to that value before rotating the client secret, " +
+          "or every connected desktop must reconnect.",
+      );
   }
 
   const tracesUrl = traceExportUrl(e.OTEL_EXPORTER_OTLP_TRACES_ENDPOINT);
@@ -924,7 +961,6 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env, diagnostics: Co
     databaseMaintenanceMode: e.DATABASE_MAINTENANCE_MODE === "true",
     auth,
     workos,
-    auth0SessionAuthorityKey: auth.provider === "auth0" ? e.AUTH0_SESSION_AUTHORITY_KEY ?? null : null,
     zerosDevAuth: loadZerosDevAuthConfig(env, deploymentChannel, auth),
     inviteLinkBase,
     port: e.PORT,

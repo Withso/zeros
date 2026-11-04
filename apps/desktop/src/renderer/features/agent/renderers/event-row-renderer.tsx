@@ -1,4 +1,5 @@
 import { ToolResourceLink } from "./tool-resource-link";
+import { CloudMcpFailureSchema } from "@zeros/protocol/cloud-v2-relay";
 import { modelRejectionDisplayText } from "@zeros/protocol/model-rejection";
 import { generatedImageInputPaths, generatedImagePath, isCodexImageGenerationTool, isImageGenerationTool, structuredToolOutput } from "./tool-artifacts";
 import { FileTag } from "./file-tag";
@@ -139,6 +140,7 @@ export const EventRowRenderer: Renderer<AgentMessage> = memo(
     if (message.kind === "error_notice" && !isTransientConnectionNotice(message)) {
       const usage = message.code?.startsWith("claude-rate-limit:");
       const chromeSetup = message.code === "claude-chrome-setup";
+      const mcp = CloudMcpFailureSchema.safeParse(message.cloud);
       // A provider can pause a recoverable turn for an explicit review.
       // Keep that gate and terminal root failures prominent; optional setup,
       // automatic recovery and child notices remain plain status everywhere.
@@ -152,6 +154,10 @@ export const EventRowRenderer: Renderer<AgentMessage> = memo(
           <AgentNoticeText message={message.message} />
           {chromeSetup && ctx.openBrowserSettings ? <Button type="button" variant="ghost" size="sm" className="-mx-1.5 mt-1" onClick={ctx.openBrowserSettings}>
             <Settings className="size-3.5" aria-hidden="true" /> Open Settings
+          </Button> : null}
+          {mcp.success && ctx.openMcpConnection && !ctx.transcriptReadOnly ? <Button type="button" variant="ghost" size="sm" className="-mx-1.5 mt-1"
+            onClick={() => ctx.openMcpConnection?.(mcp.data)}>
+            {mcp.data.reason === "sign-in-required" || mcp.data.reason === "sign-in-refused" ? "Connect" : "Retry"}
           </Button> : null}
         </div>;
       return <AgentNotice message={message.message} />;

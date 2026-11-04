@@ -44,6 +44,7 @@ vi.mock("../../../shared/ui/primitives/dropdown-menu", () => {
 });
 
 import { CreatePrButton } from "../create-pr-button";
+import { ghAuthStatusCache } from "../../../state/read-caches";
 
 const cloudId = "cloud://22222222-2222-4222-8222-222222222222/33333333-3333-4333-8333-333333333333";
 const workspace = (id: string): Workspace => ({ id, path: id, repoRoot: id, repoSlug: "fixture/repo", branch: "feature", baseBranch: "main" } as Workspace);
@@ -87,6 +88,46 @@ it.each(["personal-local", "organization-local"])("retains the configured remote
   expect(fixture.send.mock.calls[0][0].text).toContain("gh pr create --repo 'personal/fork'");
   expect(fixture.send.mock.calls[0][0].text).toContain("git push -u 'origin' HEAD:'feature'");
   expect(fixture.authority).not.toHaveBeenCalled();
+});
+
+// Settings shows "needs to be re-authorized" while the engine only sees no
+// token; the toast must not tell a connected user to connect GitHub.
+it.each(["personal-local", "organization-local"])("repeats Settings' re-authorization diagnosis for %s", async id => {
+  ghAuthStatusCache.setData("auth", {
+    selectedMethod: "github-app",
+    methods: {
+      "gh-cli": { method: "gh-cli", health: "not-connected", configured: false },
+      "github-app": { method: "github-app", health: "unavailable", configured: true, login: "octocat", detail: "This GitHub connection needs to be re-authorized." },
+      pat: { method: "pat", health: "not-connected", configured: false },
+    },
+  });
+  fixture.access.mockResolvedValue({ state: "blocked", connected: false, code: "NOT_AUTHENTICATED", message: "Not signed in to GitHub" });
+  render(id);
+  fixture.menu.get("Create draft PR")!();
+  await vi.waitFor(() => expect(fixture.toast).toHaveBeenCalledOnce());
+  expect(fixture.toast).toHaveBeenCalledWith("Your GitHub connection needs attention", expect.objectContaining({
+    description: "This GitHub connection needs to be re-authorized.",
+    action: expect.objectContaining({ label: "Open GitHub settings" }),
+  }));
+  expect(fixture.send).not.toHaveBeenCalled();
+  ghAuthStatusCache.clear();
+});
+
+it("keeps cloud sign-in refusals on the cloud connection's copy", async () => {
+  ghAuthStatusCache.setData("auth", {
+    selectedMethod: "github-app",
+    methods: {
+      "gh-cli": { method: "gh-cli", health: "not-connected", configured: false },
+      "github-app": { method: "github-app", health: "unavailable", configured: true, detail: "This GitHub connection needs to be re-authorized." },
+      pat: { method: "pat", health: "not-connected", configured: false },
+    },
+  });
+  fixture.access.mockResolvedValue({ state: "blocked", connected: false, code: "NOT_AUTHENTICATED", message: "Connect GitHub for this repository first." });
+  render(cloudId);
+  fixture.menu.get("Create draft PR")!();
+  await vi.waitFor(() => expect(fixture.toast).toHaveBeenCalledOnce());
+  expect(fixture.toast).toHaveBeenCalledWith("Connect GitHub to create this pull request", expect.any(Object));
+  ghAuthStatusCache.clear();
 });
 
 it.each(["unknown access", "missing identity", "different branch"])("does not send a cloud PR brief with %s", async reason => {
@@ -199,4 +240,9 @@ it("keeps an ambiguous commit timeout distinct from a failed PR", async () => {
   await vi.waitFor(() => expect(fixture.release).toHaveBeenCalledOnce());
   expect(fixture.create).not.toHaveBeenCalled();
   expect(fixture.toast).toHaveBeenCalledWith("Still committing", expect.any(Object));
+});
+
+it("says that Local direct commits skip repository hooks and signing, and stays quiet for cloud", () => {
+  expect(render("/repo/workspace")).toContain("Direct commits skip repository hooks and commit signing");
+  expect(render(cloudId)).not.toContain("Direct commits skip repository hooks");
 });

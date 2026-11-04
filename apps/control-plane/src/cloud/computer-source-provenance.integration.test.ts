@@ -206,19 +206,68 @@ suite("Cloud Computer immutable source provenance", () => {
     expect(await computers.logRepositories(org, next.id)).toEqual([{ repository: "former/project", repositoryId: "42" }]);
   });
 
-  it("never repairs a legacy recipe by name; an explicit remove/save and fresh addition creates new provenance only", async () => {
+  it.each(["save", "configured build", "explicit build"] as const)("admits a fresh %s for a legacy Computer without reauthorizing its historical source", async action => {
+    const legacy = randomUUID();
+    await pool.query("INSERT INTO cloud_v2_computer_builds(id,org_id,version,recipe,state,created_by,snapshot_id,log) VALUES($1,$2,1,$3,'succeeded',$4,'legacy-snapshot','legacy-source-canary')", [legacy, org, JSON.stringify(recipe), admin]);
+    await pool.query("INSERT INTO cloud_v2_computers(org_id,active_build_id,snapshot_name,recipe_revision) VALUES($1,$2,'legacy-snapshot',1)", [org, legacy]);
+    transfer(); allowed.delete("42");
+    expect(await computers.enqueueAutomatic(org, legacy, "runtime", "a".repeat(64))).toBeNull();
+    if (action === "save") await computers.saveRecipe(org, admin, recipe.repositories, 1);
+    const current = action === "explicit build"
+      ? await computers.enqueue(org, admin, recipe, { configure: true })
+      : await computers.buildConfigured(org, admin, action === "save" ? 2 : 1);
+    expect(await computers.logRepositories(org, current.id)).toEqual([{ repository: "former/project", repositoryId: "99" }]);
+    expect(resolve).toHaveBeenCalledWith(org, admin, { repository: "former/project" });
+    const f = builder(); await f.service.tick();
+    expect(f.compute.create).toHaveBeenCalledWith(expect.objectContaining({ key: current.id, env: {} }));
+    expect(vi.mocked(f.compute.create).mock.calls[0]![0]).not.toHaveProperty("from");
+    expect(vi.mocked(f.compute.saveSnapshot).mock.invocationCallOrder[0]).toBeLessThan(f.cloneToken.mock.invocationCallOrder[0]!);
+    expect((await computers.overview(org)).activeBuildId).toBe(current.id);
+    expect((await pool.query("SELECT source_policy_version,source_targets,log FROM cloud_v2_computer_builds WHERE id=$1", [legacy])).rows)
+      .toEqual([{ source_policy_version: 1, source_targets: null, log: "legacy-source-canary" }]);
+    await expect(computers.logRepositories(org, legacy)).rejects.toMatchObject({ code: "cloud_source_review_required" });
+    await expect(computers.reactivate(org, admin, legacy)).rejects.toMatchObject({ code: "cloud_source_review_required" });
+    repositories.set("99", "later/project"); repositories.set("100", "former/project"); allowed.add("100"); allowed.delete("99");
+    await expect(computers.buildConfigured(org, admin, (await computers.overview(org)).recipeRevision)).rejects.toMatchObject({ code: "github_cloud_access_denied" });
+  });
+
+  it.each(["save", "configured build", "explicit build"] as const)("ignores a v1 active build's recorded targets during a fresh %s", async action => {
+    const legacy = randomUUID(), legacyTargets = [{ repository: "former/project", repositoryId: "42" }];
+    await pool.query("INSERT INTO cloud_v2_computer_builds(id,org_id,version,recipe,state,created_by,source_policy_version,source_targets,log) VALUES($1,$2,1,$3,'succeeded',$4,1,$5,'legacy-source-canary')",
+      [legacy, org, JSON.stringify(recipe), admin, JSON.stringify(legacyTargets)]);
+    await pool.query("INSERT INTO cloud_v2_computers(org_id,active_build_id,snapshot_name,recipe_revision) VALUES($1,$2,'legacy-snapshot',1)", [org, legacy]);
+    transfer();
+    if (action === "save") await computers.saveRecipe(org, admin, recipe.repositories, 1);
+    const current = action === "explicit build"
+      ? await computers.enqueue(org, admin, recipe, { configure: true })
+      : await computers.buildConfigured(org, admin, action === "save" ? 2 : 1);
+    const admitted = [{ repository: "former/project", repositoryId: "99" }];
+    expect(await computers.logRepositories(org, current.id)).toEqual(admitted);
+    expect(resolve).toHaveBeenCalledWith(org, admin, { repository: "former/project" });
+    expect((await pool.query("SELECT recipe_source_targets FROM cloud_v2_computers WHERE org_id=$1", [org])).rows[0].recipe_source_targets).toEqual(admitted);
+    expect((await pool.query("SELECT source_policy_version,source_targets,log FROM cloud_v2_computer_builds WHERE id=$1", [legacy])).rows)
+      .toEqual([{ source_policy_version: 1, source_targets: legacyTargets, log: "legacy-source-canary" }]);
+    await expect(computers.logRepositories(org, legacy)).rejects.toMatchObject({ code: "cloud_source_review_required" });
+    await expect(computers.reactivate(org, admin, legacy)).rejects.toMatchObject({ code: "cloud_source_review_required" });
+  });
+
+  it("admits an unverified stored draft as new source, keeping the historical build unverified", async () => {
     const legacy = randomUUID();
     await pool.query("INSERT INTO cloud_v2_computer_builds(id,org_id,version,recipe,state,created_by) VALUES($1,$2,1,$3,'succeeded',$4)", [legacy, org, JSON.stringify(recipe), admin]);
     await pool.query("INSERT INTO cloud_v2_computers(org_id,recipe,recipe_revision) VALUES($1,$2,1)", [org, JSON.stringify(recipe)]);
     transfer(); allowed.delete("42");
+    const current = await computers.buildConfigured(org, admin, 1);
+    expect(await computers.logRepositories(org, current.id)).toEqual([{ repository: "former/project", repositoryId: "99" }]);
+    expect((await pool.query("SELECT recipe_source_targets FROM cloud_v2_computers WHERE org_id=$1", [org])).rows[0].recipe_source_targets)
+      .toEqual([{ repository: "former/project", repositoryId: "99" }]);
+    await expect(computers.logRepositories(org, legacy)).rejects.toMatchObject({ code: "cloud_source_review_required" });
+  });
+
+  it("refuses malformed recorded provenance instead of treating it as a legacy draft", async () => {
+    await pool.query("INSERT INTO cloud_v2_computers(org_id,recipe,recipe_revision,recipe_source_targets) VALUES($1,$2,1,'[]')", [org, JSON.stringify(recipe)]);
     await expect(computers.saveRecipe(org, admin, recipe.repositories, 1)).rejects.toMatchObject({ code: "cloud_source_review_required" });
     await expect(computers.buildConfigured(org, admin, 1)).rejects.toMatchObject({ code: "cloud_source_review_required" });
     expect(resolve).not.toHaveBeenCalled();
-    await computers.saveRecipe(org, admin, [], 1);
-    await computers.saveRecipe(org, admin, recipe.repositories, 2);
-    const current = await computers.buildConfigured(org, admin, 3);
-    expect(await computers.logRepositories(org, current.id)).toEqual([{ repository: "former/project", repositoryId: "99" }]);
-    await expect(computers.logRepositories(org, legacy)).rejects.toMatchObject({ code: "cloud_source_review_required" });
   });
 
   it("does not overwrite a concurrent recipe edit after waiting for a provider identity", async () => {

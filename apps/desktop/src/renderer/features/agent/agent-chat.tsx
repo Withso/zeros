@@ -60,6 +60,8 @@ import {
 import { newChatId } from "../../state/chat-id";
 import { retryAgentTurn, warmRetryTranscript } from "./retry-agent-turn";
 import { cloudPromptTurnActivity } from "./cloud-prompt-presentation";
+import { useCloudFailureRecovery } from "./use-cloud-failure-recovery";
+import { TurnFailureCard } from "./turn-failure-card";
 import { expandMentionsInText } from "./mentions";
 import {
   useComposerEditor,
@@ -416,6 +418,28 @@ function AgentChatBody({
   const updateLiveDraftRef = useRef<() => void>(() => {});
   const composerFocusRef = useRef<() => void>(() => {});
   const composerCardRef = useRef<HTMLDivElement>(null);
+  const navigateFailureRecovery = useCallback((page: "settings" | "customize") => {
+    dispatch({ type: "SET_ACTIVE_PAGE", page });
+  }, [dispatch]);
+  const chooseModel = useCallback(() => {
+    const composer = composerCardRef.current;
+    if (!composer || composer.closest("[inert], [hidden]") || getComputedStyle(composer).display === "none") return;
+    const trigger = composer.querySelector("[data-model-pill-label]")?.closest("button");
+    if (!trigger || trigger.disabled) return;
+    trigger.focus();
+    if (trigger.getAttribute("aria-expanded") !== "true") trigger.click();
+  }, []);
+  const startFreshSession = useCallback(() => {
+    if (chatThread) dispatch({ type: "ADD_CHAT", chat: createForkedChat(chatThread) });
+  }, [chatThread, dispatch]);
+  const retrySessionPreparation = useLatestCallback(() => prepareSessionTools());
+  const { openProvider: openCloudProvider, openMcpConnection, openModelPicker,
+    startNewSession, retryPreparation } = useCloudFailureRecovery({
+    folder: chatThread?.folder ?? session.cwd, chatId,
+    executionId: session.executionId ?? session.sessionId,
+    active: interactive && !transcriptReadOnly, navigate: navigateFailureRecovery, chooseModel,
+    startNewSession: chatThread ? startFreshSession : undefined, retryPreparation: retrySessionPreparation,
+  });
   // activeTurnStartedAt is the last user message's createdAt; turn-scoped
   // chrome compares against it.
   const activeTurnStartedAt = useMemo(() => {
@@ -794,9 +818,11 @@ function AgentChatBody({
       openPrUrl: readOnly ? undefined : openPrUrlThroughRef,
       openPreviewUrl: readOnly ? undefined : openPreviewUrlThroughRef,
       openBrowserSettings: interactive ? openBrowserSettings : undefined,
+      openMcpConnection,
     }),
     [
       openBrowserSettings,
+      openMcpConnection,
       interactive,
       activeTurnStartedAt,
       stableSubagentChildren,
@@ -972,11 +998,12 @@ function AgentChatBody({
   }, [agentSessions, chatId, chatThread?.folder, session.agentId, session.status, interactive]);
 
   const signInAgentId = session.agentId ?? chatThread?.agentId ?? null;
-  const handleSignIn = useCallback(() => {
-    if (!interactive || !isSubscriptionProvider(signInAgentId)) return;
-    requestProviderSettings(signInAgentId);
+  const handleSignIn = useCallback((provider = signInAgentId) => {
+    if (!interactive || !isSubscriptionProvider(provider)) return;
+    if (isCloudWorkspace(chatThread?.folder ?? session.cwd)) { openCloudProvider(provider); return; }
+    requestProviderSettings(provider);
     dispatch({ type: "SET_ACTIVE_PAGE", page: "settings" });
-  }, [dispatch, signInAgentId, interactive]);
+  }, [dispatch, signInAgentId, interactive, chatThread?.folder, session.cwd, openCloudProvider]);
   // Keep the ref the chat file-open closure reads in sync with the chat's
   // workspace owner. The session cwd is only a pre-hydration fallback: if an
   // engine ever reports a nested cwd, its file link still belongs to the
@@ -2896,15 +2923,22 @@ function AgentChatBody({
       }) : null;
   // Keep terminal startup failures in this chat exactly once, while normal
   // reconnects and superseded preparation stay quiet.
-  const preparationFailure = !readOnly && session.status === "failed" &&
+  const cloudPreparationAuth = isCloudWorkspace(chatThread?.folder ?? session.cwd) &&
+    session.failure?.cloud?.source === "provider" && session.failure.cloud.reason === "auth-required" &&
+    !preparationTurn?.userPrompt;
+  const preparationFailure = !readOnly && (session.status === "failed" ||
+      session.status === "auth-required" && cloudPreparationAuth) &&
     session.failure && session.failure.stage !== "prompt" &&
     !preparationTurnFailure &&
     !(cloudComputerV2 && isCloudWorkspace(chatThread?.folder) && session.cloudSendWait) &&
-    session.failure.kind !== "auth-required" &&
-    session.failure.kind !== "cloud-credentials-unavailable" &&
+    (session.failure.kind !== "auth-required" || cloudPreparationAuth) &&
+    (session.failure.kind !== "cloud-credentials-unavailable" || session.failure.cloud) &&
     session.failure.kind !== "lifecycle-superseded" &&
-    !isRecoverable(session.failure) && !isTransportShaped(session.failure.message)
+    !isRecoverable(session.failure) && (session.failure.cloud || !isTransportShaped(session.failure.message))
       ? session.failure : null;
+  const cloudPreparationFailure = preparationFailure?.cloud ? turnFailureForCard({
+    events: [], turnId: "", fallback: preparationFailure, status: "failed",
+  }) : null;
   // Plan review is not a permission gate: the user can approve, copy, or type a
   // follow-up to refine it. isPlanReviewRequest (plan-body.ts) detects it from
   // the ExitPlanMode title or a plan body, not the kind; Codex's bodiless
@@ -4117,6 +4151,7 @@ function AgentChatBody({
   const forkToNewTabThroughRef = useLatestCallback(forkToNewTab);
   const warmForkToNewTabThroughRef = useLatestCallback(warmForkToNewTab);
   const signInThroughRef = useLatestCallback(handleSignIn);
+  const chooseModelThroughRef = useLatestCallback(() => openModelPicker?.());
   const stopWorkflow = session.stopBackgroundTask;
   const transcriptActions = useMemo<TranscriptTurnActions>(
     () => ({
@@ -4127,6 +4162,7 @@ function AgentChatBody({
       forkToNewTab: forkToNewTabThroughRef,
       warmForkToNewTab: warmForkToNewTabThroughRef,
       signIn: signInThroughRef,
+      chooseModel: chooseModelThroughRef,
       stopWorkflow,
     }),
     [
@@ -4137,6 +4173,7 @@ function AgentChatBody({
       forkToNewTabThroughRef,
       warmForkToNewTabThroughRef,
       signInThroughRef,
+      chooseModelThroughRef,
       stopWorkflow,
     ],
   );
@@ -4399,7 +4436,9 @@ function AgentChatBody({
               </AgentNotice>
             )}
             {preparationFailure && (
-              <AgentNotice
+              cloudPreparationFailure ? <TurnFailureCard failure={cloudPreparationFailure}
+                readOnly={!interactive || transcriptReadOnly} onReconnect={handleSignIn} onChooseModel={openModelPicker}
+                onStartNewSession={startNewSession} onRetry={retryPreparation} /> : <AgentNotice
                 data-agent-preparation-notice
                 message={preparationFailure.advice ?? preparationFailure.message}
               />

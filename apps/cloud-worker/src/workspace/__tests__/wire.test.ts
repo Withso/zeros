@@ -1,4 +1,6 @@
-import { afterEach, expect, it } from "vitest";
+import { readFile, writeFile } from "node:fs/promises";
+import { join } from "node:path";
+import { afterEach, expect, it, vi } from "vitest";
 import { CloudWorker } from "../../worker";
 import { CLIENT_A, FakeRelay, browserFrame, config } from "../../__tests__/worker-fixtures";
 import { repositoryFixture } from "./repository-fixture";
@@ -33,6 +35,32 @@ it("recovers from a failed first config when a later replacement can prepare the
   await relay.receive({ ...config, workspace: scope.workspace });
   await relay.receive({ t: "open", clientId: CLIENT_A });
   expect(attempts).toBe(2); expect(relay.bridge("ENGINE_READY")).toHaveLength(1);
+});
+
+it("reports a real checkout failure before app admission, retaining the checkout and its uncommitted files", async () => {
+  const { root, scope, state, git } = await repositoryFixture();
+  await git("switch", "main"); await git("branch", "-D", scope.workspace.branch);
+  await writeFile(join(root, "local.txt"), "retained work\n");
+  const head = await git("rev-parse", "HEAD"), reportCheckoutFailure = vi.fn(async () => {});
+  const relay = Object.assign(new FakeRelay(), { reportCheckoutFailure });
+  const worker = new CloudWorker({ directory: state, transport: relay }); workers.push(worker); worker.start();
+  await expect(relay.receive({ ...config, workspace: { ...scope.workspace, baseBranch: "deleted-after-admission" } }))
+    .rejects.toThrow("Could not prepare the workspace branch");
+  expect(reportCheckoutFailure).toHaveBeenCalledExactlyOnceWith();
+  expect(relay.bridge("ENGINE_READY")).toHaveLength(0);
+  expect(await git("rev-parse", "HEAD")).toBe(head);
+  expect(await readFile(join(root, "local.txt"), "utf8")).toBe("retained work\n");
+});
+
+it("keeps the checkout failure when its report fails without sending raw error output", async () => {
+  const { scope, state } = await repositoryFixture();
+  const reportCheckoutFailure = vi.fn(async () => { throw new Error("report unavailable"); });
+  const relay = Object.assign(new FakeRelay(), { reportCheckoutFailure });
+  const worker = new CloudWorker({ directory: state, transport: relay, prepareCheckout: async () => { throw new Error("private-checkout-canary"); } });
+  workers.push(worker); worker.start();
+  await expect(relay.receive({ ...config, workspace: scope.workspace })).rejects.toThrow("private-checkout-canary");
+  expect(reportCheckoutFailure).toHaveBeenCalledExactlyOnceWith();
+  expect(JSON.stringify(relay.frames)).not.toContain("private-checkout-canary");
 });
 
 it("answers broker replies while the first private checkout is waiting on its token", async () => {

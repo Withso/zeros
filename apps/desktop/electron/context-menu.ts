@@ -20,6 +20,7 @@
 // ──────────────────────────────────────────────────────────
 
 import { Menu, type BrowserWindow, type MenuItemConstructorOptions } from "electron";
+import { editHistoryItem } from "./edit-history";
 
 export function setupContextMenu(win: BrowserWindow): void {
   win.webContents.on("context-menu", (_event, params) => {
@@ -27,6 +28,9 @@ export function setupContextMenu(win: BrowserWindow): void {
 
     if (params.isEditable) {
       items.push(
+        editHistoryItem("undo", win.webContents),
+        editHistoryItem("redo", win.webContents),
+        { type: "separator" },
         { role: "cut", enabled: params.editFlags.canCut },
         { role: "copy", enabled: params.editFlags.canCopy },
         { role: "paste", enabled: params.editFlags.canPaste },

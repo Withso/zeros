@@ -113,6 +113,10 @@ export function turnFooterFailureLabel(
   failure: AgentFailure | null,
 ): string | null {
   if (!failure || failure.stage !== "prompt") return null;
+  if (failure.cloud?.source === "provider") {
+    if (failure.cloud.reason === "model-unavailable") return "MODEL UNAVAILABLE";
+    if (failure.cloud.reason === "provider-unavailable") return "PROVIDER UNAVAILABLE";
+  }
   if (
     failure.kind === "protocol-error" &&
     /agent response failure/i.test(failure.message)
@@ -159,6 +163,7 @@ export function settledTurnFailurePresentation(
     kind: failure.kind as AgentFailure["kind"],
     stage: "prompt",
     message: failure.message,
+    ...(failure.cloud ? { cloud: failure.cloud } : {}),
   });
   return { card: null, label: label ?? "AGENT STOPPED" };
 }
@@ -438,6 +443,9 @@ interface TurnFooterProps {
   onRetry?: () => Promise<void>;
   onRetryNewChat?: () => Promise<void>;
   onRetryNewChatIntent?: () => void;
+  onReconnect?: (provider?: string) => void;
+  onStartNewSession?: () => void;
+  onChooseModel?: () => void;
   /** True while an auto-rebuild is re-running this chat's last turn — hides
    *  the "AGENT STOPPED" pill for a failed row that's about to be retried. */
   retrying?: boolean;
@@ -475,6 +483,9 @@ export const TurnFooter = memo(function TurnFooter({
   onRetry,
   onRetryNewChat,
   onRetryNewChatIntent,
+  onReconnect,
+  onStartNewSession,
+  onChooseModel,
   retrying,
   isLastTurn,
   onContinue,
@@ -723,6 +734,9 @@ export const TurnFooter = memo(function TurnFooter({
           onRetry={!readOnly && (isLastTurn || durablePrompt) ? onRetry : undefined}
           onRetryNewChat={!readOnly && isLastTurn ? onRetryNewChat : undefined}
           onRetryNewChatIntent={onRetryNewChatIntent}
+          onReconnect={!readOnly && isLastTurn ? onReconnect : undefined}
+          onStartNewSession={!readOnly && isLastTurn ? onStartNewSession : undefined}
+          onChooseModel={!readOnly && isLastTurn ? onChooseModel : undefined}
         />
       )}
       <div className="mt-1 flex flex-wrap items-center gap-1.5 text-xs">

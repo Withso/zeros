@@ -7,12 +7,12 @@ merge, or replace the release controller's exact-SHA deployment authority.
 Beta/Production planning requires a reviewed `RELEASE_BRANCH=release/X.Y.Z`;
 Alpha keeps `main`. Unknown environments and an unlinked project fail closed.
 
-Phase 1 leaves `apps/control-plane/railway.json` intact. **Do not apply this file
-while the service still uses Config as Code.** Phase 2's owner imports the live
-configuration without plaintext variables, preserves its variable/domain and
-resource ownership, clears the legacy Config File setting under an approved
-deployment hold, reviews the diff, then applies and verifies each channel.
-See `docs/deployment-environments.md` for the exact migration ceremony.
+The legacy `apps/control-plane/railway.json` is retired: each environment's
+service settings now hold its Dockerfile, health-check and restart values.
+Applying this file is optional and owner-operated. Import the live configuration
+first so its variables, domains, limits, region and Production's promotion-hold
+watch pattern survive, then review each environment's diff. See
+`docs/deployment-environments.md`.
 
 The authoring source is checked against Railway SDK `3.12.0` (MIT). The SDK and
 Railway CLI are operator tools, not application dependencies; install them in an

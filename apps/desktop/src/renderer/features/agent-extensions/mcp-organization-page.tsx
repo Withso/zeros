@@ -19,6 +19,7 @@ import { mcpConnectionView } from "./mcp-connection-view";
 import { SettingsAddRow, SettingsGroup, SettingsList, SettingsRow } from "../settings/settings-ui";
 import { McpServerRow } from "./mcp-server-row";
 import { readCloudMcpRepositories, cancelCloudMcpAuth, cloudMcpAuthStatus, cloudMcpCache, cloudMcpKey, probeCloudMcp, readCloudMcp, removeCloudMcp, saveCloudMcp, startCloudMcpAuth, type CloudMcpExtension } from "./mcp-cloud-api";
+import { cloudMcpRecoverySnapshot, consumeCloudMcpRecovery, subscribeCloudMcpRecovery } from "../agent/cloud-failure-navigation";
 
 const repositoriesCache = new KeyedAsyncCache<McpProjectOption[]>(24);
 
@@ -56,13 +57,33 @@ function OrganizationMcpRow({ row, ownerKey, observedAt, busy, onEdit, onConnect
 
 export function OrganizationMcpPage({ organization, surfaceActive }: { organization: OrganizationSummary; surfaceActive: boolean }) {
   const cloudEnabled = isFeatureEnabled("cloud-workspaces");
+  const recovery = useSyncExternalStore(subscribeCloudMcpRecovery, useCallback(() => cloudMcpRecoverySnapshot(organization.id), [organization.id]));
   const [githubPlacement, setGithubPlacement] = useState<"local" | "cloud">("local");
-  const key = cloudMcpKey(organization.id, githubPlacement);
+  const key = cloudMcpKey(organization.id, recovery ? "cloud" : githubPlacement);
   const read = useRecoveringRead(cloudMcpCache, key, readCloudMcp, { enabled: surfaceActive, maxAgeMs: 30_000 });
   const repositories = useRecoveringRead(repositoriesCache, key, readCloudMcpRepositories, { enabled: surfaceActive, maxAgeMs: 30_000 });
-  const [view, setView] = useState<{ kind: "list" } | { kind: "editor"; initial: CloudMcpExtension | null; connect?: boolean; owner?: "organization" | "user" }>({ kind: "list" });
+  const [view, setView] = useState<{ kind: "list"; requestId?: string } | { kind: "editor"; initial: CloudMcpExtension | null; connect?: boolean; owner?: "organization" | "user"; requestId?: string }>({ kind: "list" });
   const canShare = organization.role === "owner" || organization.role === "admin";
   const servers = read.data;
+  const [missingServer, setMissingServer] = useState(false);
+  const recoveryRow = recovery ? read.data?.find(row => row.id === recovery.serverId) : undefined;
+  useEffect(() => {
+    if (!surfaceActive || !recovery || !read.data || cloudMcpRecoverySnapshot(organization.id) !== recovery) return;
+    // The read hook can start revalidation earlier in this same effect flush.
+    const currentRead = cloudMcpCache.getSnapshot(key);
+    if (currentRead.data !== read.data || !recoveryRow &&
+        (currentRead.loading || currentRead.refreshing || currentRead.error)) return;
+    if (view.requestId !== recovery.id || githubPlacement !== "cloud") {
+      setGithubPlacement("cloud");
+      setMissingServer(!recoveryRow);
+      setView(recoveryRow ? { kind: "editor", initial: recoveryRow, connect: true, requestId: recovery.id } : { kind: "list", requestId: recovery.id });
+      return;
+    }
+    // External-store publication is synchronous; retain the request until its
+    // destination is committed so the editor cannot remount and sign in twice.
+    consumeCloudMcpRecovery(recovery);
+  }, [surfaceActive, recovery, recoveryRow, read.data, read.loading, read.refreshing, read.readError, key, organization.id, view.requestId, githubPlacement]);
+  const shownView: typeof view = recovery && recoveryRow ? { kind: "editor", initial: recoveryRow, connect: true, requestId: recovery.id } : view;
   const [busy, setBusy] = useState<string | null>(null);
   const mutating = useRef(false);
   const mounted = useRef(true);
@@ -89,9 +110,15 @@ export function OrganizationMcpPage({ organization, surfaceActive }: { organizat
   return <div className="bg-bg1 flex h-full min-h-0 w-full flex-col overflow-y-auto px-6" {...(!surfaceActive ? { inert: "" } : {})}>
     {/* The Settings shell: one centered 640px column, one title. */}
     <div className="mx-auto flex w-full max-w-160 flex-col gap-8 pt-10 pb-12">
-      {view.kind === "editor" ? <OrganizationMcpEditor key={view.initial?.id ?? `new:${view.owner ?? ""}`} initial={view.initial} organization={organization}
-        defaultOwner={view.owner} ownerKey={key} projects={repositories.data ?? []} projectsLoading={!repositories.data && !repositories.error}
-        servers={read.data ?? []} surfaceActive={surfaceActive} connectOnOpen={view.connect ?? false} onBack={() => { setView({ kind: "list" }); read.refresh(); }} />
+      {recovery && !recoveryRow ? <SettingsList>
+        {read.error ? <MessageRow tone="error" role="alert" flush
+          actions={<Button variant="ghost" size="compact" onClick={read.refresh}>Retry</Button>}>Couldn’t load this MCP server.</MessageRow>
+          : <MessageRow tone="pending" role="status" flush>Opening MCP server…</MessageRow>}
+      </SettingsList>
+        : shownView.kind === "editor" ? <OrganizationMcpEditor key={`${key}:${shownView.requestId ?? shownView.initial?.id ?? `new:${shownView.owner ?? ""}`}`}
+        initial={shownView.initial} organization={organization} defaultOwner={shownView.owner} ownerKey={key}
+        projects={repositories.data ?? []} projectsLoading={!repositories.data && !repositories.error}
+        servers={read.data ?? []} surfaceActive={surfaceActive} connectOnOpen={shownView.connect ?? false} onBack={() => { setView({ kind: "list" }); read.refresh(); }} />
         : <>
           <header className="flex items-start justify-between gap-4">
             <div className="flex min-w-0 flex-col gap-1">
@@ -100,6 +127,7 @@ export function OrganizationMcpPage({ organization, surfaceActive }: { organizat
             </div>
             <Button variant="primary" size="compact" className="shrink-0" onClick={() => setView({ kind: "editor", initial: null })}><Plus aria-hidden="true" />Add server</Button>
           </header>
+          {missingServer && <MessageRow tone="warning" role="status" flush>This MCP server is no longer available in this organization.</MessageRow>}
           {cloudEnabled && <SettingsList>
             <SettingsRow label="Repository connection" hint="Where repository servers run.">
               <Tabs value={githubPlacement} onValueChange={value => setGithubPlacement(value === "cloud" ? "cloud" : "local")}>

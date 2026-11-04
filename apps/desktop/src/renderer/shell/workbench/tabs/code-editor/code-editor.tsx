@@ -12,8 +12,8 @@
 // Shared by the standalone editor and file-viewer.tsx Edit mode.
 // ──────────────────────────────────────────────────────────
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import CodeMirror from "@uiw/react-codemirror";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import CodeMirror, { ExternalChange } from "@uiw/react-codemirror";
 import {
   EditorView,
   lineNumbers,
@@ -24,14 +24,16 @@ import {
   rectangularSelection,
   crosshairCursor,
   keymap,
+  type ViewUpdate,
 } from "@codemirror/view";
-import { EditorState, Prec, type Extension } from "@codemirror/state";
+import { Compartment, EditorSelection, EditorState, Prec, Transaction, type Extension, type Text } from "@codemirror/state";
 import { indentOnInput, bracketMatching } from "@codemirror/language";
 import {
   history,
   defaultKeymap,
   historyKeymap,
   indentWithTab,
+  redo,
 } from "@codemirror/commands";
 import { highlightSelectionMatches, searchKeymap } from "@codemirror/search";
 import { closeBrackets, closeBracketsKeymap } from "@codemirror/autocomplete";
@@ -52,6 +54,8 @@ export interface CodeEditorProps {
   tokenCacheScope?: "local";
   /** Current file contents (controlled). */
   value: string;
+  /** An explicit discard/reload also retires history when the text is equal. */
+  historyRevision?: number;
   /** File path — drives lazy language detection. */
   filePath?: string;
   /** Read-only "preview" mode (still selectable; no edits). */
@@ -81,6 +85,8 @@ export interface CodeEditorProps {
   onCreateView?: (view: EditorView) => void;
   className?: string;
 }
+
+const editorHistory = new Compartment();
 
 // Editor essentials only — the curated set (NOT basicSetup, so no autocompletion
 // popups). Stable module-level array → no extension churn across renders.
@@ -117,7 +123,7 @@ const BASE_EXTENSIONS: Extension[] = [
   indentGuideClickSnap(),
   closeBrackets(),
   highlightSelectionMatches(),
-  history(),
+  editorHistory.of(history()),
   rectangularSelection(),
   crosshairCursor(),
   keymap.of([
@@ -125,6 +131,7 @@ const BASE_EXTENSIONS: Extension[] = [
     ...defaultKeymap,
     ...searchKeymap,
     ...historyKeymap,
+    { key: "Mod-Shift-z", run: redo, preventDefault: true },
     indentWithTab,
   ]),
   // zerosEditorTheme is NOT here — its `dark` flag tracks the code theme's
@@ -183,6 +190,7 @@ const FILE_LINE_WRAP_EXTENSIONS: Extension[] = [
 export function CodeEditor({
   tokenCacheScope,
   value,
+  historyRevision = 0,
   filePath,
   readOnly = false,
   onChange,
@@ -197,18 +205,55 @@ export function CodeEditor({
   className,
 }: CodeEditorProps) {
   const [langExt, setLangExt] = useState<Extension[]>([]);
+  const viewRef = useRef<EditorView | null>(null);
+  const initialValue = useRef(value.replace(/\r\n?/g, "\n"));
+  const received = useRef({ value, historyRevision, filePath });
+  const pendingChanges = useRef<Text[]>([]);
 
   // CodeMirror owns its scroll container (.cm-scroller); capture it once the
   // view exists so the keyed memory can save/restore the reading offset.
   const [scrollDom, setScrollDom] = useState<HTMLElement | null>(null);
   const handleCreateEditor = useCallback(
     (view: EditorView) => {
+      viewRef.current = view;
       setScrollDom(view.scrollDOM);
       onCreateView?.(view);
     },
     [onCreateView],
   );
   useScrollMemory(scrollDom, scrollMemoryKey ?? null);
+
+  // UIW queues controlled writes while typing, and a newer matching value does
+  // not cancel that queue. Own reconciliation so a late echo cannot overwrite
+  // the document or enter its undo stack. Explicit replacements start history.
+  useLayoutEffect(() => {
+    const view = viewRef.current;
+    if (!view) return;
+    const previous = received.current;
+    const reset = previous.historyRevision !== historyRevision || previous.filePath !== filePath;
+    if (!reset && previous.value === value) return;
+    received.current = { value, historyRevision, filePath };
+    const incoming = view.state.toText(value);
+    if (!reset && view.state.doc.eq(incoming)) {
+      pendingChanges.current = [];
+      return;
+    }
+    const acknowledged = pendingChanges.current.findIndex(doc => doc.eq(incoming));
+    if (!reset && acknowledged !== -1) {
+      pendingChanges.current.splice(0, acknowledged + 1);
+      return;
+    }
+    pendingChanges.current = [];
+    const selection = EditorSelection.create(view.state.selection.ranges.map(range =>
+      EditorSelection.range(Math.min(range.anchor, incoming.length), Math.min(range.head, incoming.length))), view.state.selection.mainIndex);
+    view.dispatch({
+      changes: { from: 0, to: view.state.doc.length, insert: incoming },
+      selection,
+      annotations: [ExternalChange.of(true), Transaction.addToHistory.of(false)],
+      effects: editorHistory.reconfigure([]),
+    });
+    view.dispatch({ effects: editorHistory.reconfigure(history()) });
+  }, [value, historyRevision, filePath, scrollDom]);
 
   // Unified code theme → exact Shiki color parity with diffs + code blocks. The
   // Lezer language (langExt) stays for structure; Shiki only paints color.
@@ -241,9 +286,13 @@ export function CodeEditor({
           {
             key: "Mod-s",
             preventDefault: true,
-            run: () => {
-              if (!latest.current.offscreen)
-                latest.current.onSave?.(latest.current.value);
+            run: (view) => {
+              const { value: controlled, onSave: save, offscreen: hidden } = latest.current;
+              // CodeMirror normalizes line endings. Save the controlled text while
+              // it is the same document, so an untouched CRLF file stays as is;
+              // the live document wins only when the parent has not caught up.
+              if (!hidden)
+                save?.(view.state.toText(controlled).eq(view.state.doc) ? controlled : view.state.doc.toString());
               return true;
             },
           },
@@ -310,15 +359,20 @@ export function CodeEditor({
   );
 
   const handleChange = useCallback(
-    (next: string) => onChange?.(next),
+    (next: string, update: ViewUpdate) => {
+      if (onChange) {
+        pendingChanges.current = [...pendingChanges.current.slice(-63), update.state.doc];
+        onChange(next);
+      }
+    },
     [onChange],
   );
 
   return (
     <CodeMirror
-      value={value}
-      editable={!readOnly}
-      readOnly={readOnly}
+      value={initialValue.current}
+      editable={!readOnly && !offscreen}
+      readOnly={readOnly || offscreen}
       onChange={handleChange}
       onCreateEditor={handleCreateEditor}
       basicSetup={false}

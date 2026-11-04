@@ -104,11 +104,19 @@ export const WORKBENCH_STATUS_ADAPTERS = {
   }
 >;
 
+/** A banner action that leads to where a named condition is fixed. */
+export interface WorkbenchCommand {
+  label: string;
+  run: () => void;
+}
+
 export interface WorkbenchStatus {
   tone: "error" | "pending" | "neutral";
   message: string;
   diagnostic?: string;
   action?: "Retry";
+  /** Replaces Retry when retrying cannot fix the condition. */
+  command?: WorkbenchCommand;
   connectionPhase?: "connecting" | "reconnecting";
 }
 
@@ -265,12 +273,34 @@ export function workbenchFailureDiagnostic(error: unknown): string {
     .slice(0, 1024);
 }
 
+/** A read failure whose owner can name the condition the user has to fix, such
+ * as a refused GitHub connection. Its message is the banner copy; the cause
+ * stays diagnostic. */
+export class WorkbenchConditionError extends Error {
+  readonly command?: WorkbenchCommand;
+  constructor(
+    message: string,
+    options?: { cause?: unknown; command?: WorkbenchCommand },
+  ) {
+    super(message, options);
+    this.name = "WorkbenchConditionError";
+    if (options?.command) this.command = options.command;
+  }
+}
+
 /** Raw transport text is diagnostic only; visible copy belongs to the tab. */
 export function describeWorkbenchFailure(
   type: WorkbenchTabType,
   error: unknown,
   singleFile = false,
 ): WorkbenchStatus {
+  if (error instanceof WorkbenchConditionError)
+    return {
+      tone: "error",
+      message: error.message,
+      diagnostic: workbenchFailureDiagnostic(error.cause ?? error),
+      ...(error.command ? { command: error.command } : { action: "Retry" as const }),
+    };
   const diagnostic = workbenchFailureDiagnostic(error);
   const state =
     /(?:cloud workspace|Zeros engine) (?:is )?(creating|setting_up|starting|waking|stopping|stopped|sleeping|archived)\b/i

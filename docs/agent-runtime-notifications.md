@@ -141,6 +141,27 @@ Schema annotation removal applies only to schema objects. Property/definition
 names and literal `const`, `default`, and `enum` data remain part of the contract,
 including fields named `description`, `title`, or `examples`.
 
+### Codex 0.166.0 review
+
+All 29 changed/added schema fingerprints have individual decisions. Local and
+the standalone cloud worker pin 0.166.0, including the cloud launch guard and
+relocated-package smoke. The independently qualified auth keeper stays on
+0.154.0.
+
+Regression coverage preserves flat thread items, nullable image generation
+IDs, older payloads, inline reviews and native error explanations. Policy
+capacity and provider-configuration failures no longer enter heuristic
+rate-limit or model-selection recovery. Optional process-exit drain status
+passes through typed subscriptions. Existing hook lifecycle handling accepts
+the source-path alias without exposing paths.
+
+Account/ChatGPT team-workspace switching, GCP setup and dollar-usage reporting
+are explicitly deferred, with no Settings or renderer changes. Managed OTEL,
+environment hook discovery and named untrusted context remain generated-only.
+Native dollar usage is thread-level and unknown when absent/null; this upgrade
+does not map it to per-turn cost. See the
+[0.166.0 harness review](codex-app-server-compatibility.md#01660-compatibility).
+
 ### Codex 0.165.0 review
 
 All 11 changed/added schema fingerprints have individual decisions. Memory
@@ -339,9 +360,11 @@ node scripts/agent-runtime/check-renovate-handoff.mjs
 ```
 
 The replay checks routine/advisory overrides, each owned root pin, the keeper,
-unrelated direct/transitive names and an unowned manifest. It performs no GitHub
-writes and adds no repository runtime dependency. Requalify when changing that
-pinned version or Renovate's precedence behavior.
+unrelated direct/transitive names and an unowned manifest. It also checks that
+Ubuntu runner upgrades stay disabled while other runners, actions and Ubuntu
+containers retain their update policy. It performs no GitHub writes and adds no
+repository runtime dependency. Requalify when changing that pinned version or
+Renovate's precedence behavior.
 
 ## Cost, health and recovery
 

@@ -4,8 +4,8 @@
 // the checks (it reaches the DB layer, which is stubbed to throw a sentinel —
 // the success path itself is covered by integration.test.ts with a real DB).
 //
-// No network, no Auth0: a throwaway RSA key pair is served from a local HTTP
-// JWKS endpoint, and tokens are signed here with jose — same library, real
+// No network: a throwaway RSA key pair is served from a local HTTP JWKS
+// endpoint, and tokens are signed here with jose — same library, real
 // signatures, real verification.
 
 import http from "node:http";
@@ -17,18 +17,15 @@ import { createAuthMiddleware } from "./auth.js";
 import type { Config } from "./config.js";
 
 const AUDIENCE = "https://api.zeros.build";
-const ISSUER = "https://test-tenant.auth0.local/";
-const WORKOS_ISSUER = "https://identity.test/user_management/client_web";
-const WORKOS_WEB_CLIENT_ID = "client_web";
-const WORKOS_DESKTOP_CLIENT_ID = "client_desktop";
+const ISSUER = "https://identity.test/user_management/client_web";
+const WEB_CLIENT_ID = "client_web";
+const DESKTOP_CLIENT_ID = "client_desktop";
 const NS = "https://zeros.build/";
 
 let privateKey: CryptoKey;
 let wrongKey: CryptoKey;
 let jwksServer: http.Server;
-let config: Config;
 let app: Hono;
-let workosApp: Hono;
 
 /** A pool stub whose first touch throws a sentinel — reaching it proves the
  *  token cleared every auth check. */
@@ -49,6 +46,8 @@ function b64url(input: string): string {
 /** Base claims for a token that would be fully valid. */
 function validClaims(): Record<string, unknown> {
   return {
+    sid: "session_example",
+    client_id: WEB_CLIENT_ID,
     [`${NS}email`]: "user@example.com",
     [`${NS}email_verified`]: true,
     [`${NS}name`]: "Test User",
@@ -59,17 +58,18 @@ async function sign(
   claims: Record<string, unknown>,
   opts: {
     key?: CryptoKey;
-    issuer?: string | false;
-    audience?: string | false;
+    issuer?: string;
+    audience?: string;
     expiresIn?: string | false;
   } = {},
 ): Promise<string> {
   let jwt = new SignJWT(claims)
     .setProtectedHeader({ alg: "RS256", kid: "test-key" })
-    .setIssuedAt()
-    .setSubject("github|12345");
-  if (opts.issuer !== false) jwt = jwt.setIssuer(opts.issuer ?? ISSUER);
-  if (opts.audience !== false) jwt = jwt.setAudience(opts.audience ?? AUDIENCE);
+    .setIssuer(opts.issuer ?? ISSUER)
+    .setAudience(opts.audience ?? AUDIENCE)
+    .setSubject("user_example")
+    .setJti("token_example")
+    .setIssuedAt();
   if (opts.expiresIn !== false) jwt = jwt.setExpirationTime(opts.expiresIn ?? "1h");
   return jwt.sign(opts.key ?? privateKey);
 }
@@ -77,31 +77,6 @@ async function sign(
 async function request(token?: string): Promise<Response> {
   return app.request("/v1/me", {
     headers: token ? { authorization: `Bearer ${token}` } : {},
-  });
-}
-
-async function signWorkos(
-  overrides: Record<string, unknown> = {},
-): Promise<string> {
-  return new SignJWT({
-    sid: "session_example",
-    client_id: WORKOS_WEB_CLIENT_ID,
-    ...validClaims(),
-    ...overrides,
-  })
-    .setProtectedHeader({ alg: "RS256", kid: "test-key" })
-    .setIssuer(WORKOS_ISSUER)
-    .setAudience(AUDIENCE)
-    .setSubject("user_example")
-    .setJti("token_example")
-    .setIssuedAt()
-    .setExpirationTime("1h")
-    .sign(privateKey);
-}
-
-async function workosRequest(token: string): Promise<Response> {
-  return workosApp.request("/v1/me", {
-    headers: { authorization: `Bearer ${token}` },
   });
 }
 
@@ -120,13 +95,15 @@ beforeAll(async () => {
   const address = jwksServer.address();
   const port = typeof address === "object" && address ? address.port : 0;
 
-  config = {
+  const config: Config = {
     databaseUrl: "postgres://unused",
     auth: {
-      provider: "auth0",
-      issuers: [ISSUER],
+      provider: "workos",
+      issuer: ISSUER,
       jwksUrl: `http://127.0.0.1:${port}/jwks.json`,
       audience: AUDIENCE,
+      webClientId: WEB_CLIENT_ID,
+      desktopClientId: DESKTOP_CLIENT_ID,
     },
     workos: null,
     port: 0,
@@ -155,29 +132,6 @@ beforeAll(async () => {
   app.get("/v1/me", (c) => c.json({ ok: true }));
   // Surface the sentinel so the "valid token reaches the DB" case is assertable.
   app.onError((err, c) => c.json({ error: { message: err.message } }, 500));
-
-  workosApp = new Hono();
-  workosApp.use(
-    "/v1/*",
-    createAuthMiddleware(
-      {
-        ...config,
-        auth: {
-          provider: "workos",
-          issuer: WORKOS_ISSUER,
-          jwksUrl: config.auth.jwksUrl,
-          audience: AUDIENCE,
-          webClientId: WORKOS_WEB_CLIENT_ID,
-          desktopClientId: WORKOS_DESKTOP_CLIENT_ID,
-        },
-      },
-      poolStub,
-    ),
-  );
-  workosApp.get("/v1/me", (c) => c.json({ ok: true }));
-  workosApp.onError((err, c) =>
-    c.json({ error: { message: err.message } }, 500),
-  );
 });
 
 afterAll(async () => {
@@ -216,7 +170,9 @@ describe("createAuthMiddleware — rejects", () => {
   });
 
   it("a token from the wrong issuer", async () => {
-    const token = await sign(validClaims(), { issuer: "https://evil-tenant.auth0.local/" });
+    const token = await sign(validClaims(), {
+      issuer: "https://identity.test/user_management/client_other",
+    });
     const res = await request(token);
     expect(res.status).toBe(401);
   });
@@ -234,7 +190,9 @@ describe("createAuthMiddleware — rejects", () => {
         ...validClaims(),
         iss: ISSUER,
         aud: AUDIENCE,
-        sub: "github|12345",
+        sub: "user_example",
+        jti: "token_example",
+        iat: Math.floor(Date.now() / 1000),
         exp: Math.floor(Date.now() / 1000) + 3600,
       }),
     );
@@ -267,47 +225,35 @@ describe("createAuthMiddleware — rejects", () => {
   });
 });
 
-describe("createAuthMiddleware — accepts", () => {
-  it("a fully valid token (clears every check and reaches the DB layer)", async () => {
-    const res = await request(await sign(validClaims()));
-    // The pool stub throws the sentinel — a 500 carrying it means every auth
-    // check passed and the middleware moved on to user provisioning.
-    expect(res.status).toBe(500);
-    const body = (await res.json()) as { error: { message: string } };
-    expect(body.error.message).toContain(REACHED_DB);
-  });
-
-  it("a valid token with TOP-LEVEL claims (namespaced-fallback path)", async () => {
-    const res = await request(
-      await sign({ email: "user@example.com", email_verified: true, name: "Test User" }),
-    );
-    expect(res.status).toBe(500); // sentinel again — token accepted
-  });
-});
-
 describe("createAuthMiddleware — WorkOS contract", () => {
-  it("accepts a fully verified token from an allowed Application", async () => {
-    const res = await workosRequest(await signWorkos());
-    expect(res.status).toBe(500);
-    const body = (await res.json()) as { error: { message: string } };
-    expect(body.error.message).toContain(REACHED_DB);
-  });
+  it.each([WEB_CLIENT_ID, DESKTOP_CLIENT_ID])(
+    "accepts a fully verified token from the allowed Application %s",
+    async (clientId) => {
+      const res = await request(await sign({ ...validClaims(), client_id: clientId }));
+      // The pool stub throws the sentinel — a 500 carrying it means every auth
+      // check passed and the middleware moved on to user provisioning.
+      expect(res.status).toBe(500);
+      const body = (await res.json()) as { error: { message: string } };
+      expect(body.error.message).toContain(REACHED_DB);
+    },
+  );
 
   it("rejects a correctly signed token from another Application", async () => {
-    const res = await workosRequest(
-      await signWorkos({ client_id: "client_untrusted" }),
+    const res = await request(
+      await sign({ ...validClaims(), client_id: "client_untrusted" }),
     );
     expect(res.status).toBe(401);
   });
 
   it("requires the WorkOS session and token identifiers", async () => {
-    const res = await workosRequest(await signWorkos({ sid: undefined }));
+    const res = await request(await sign({ ...validClaims(), sid: undefined }));
     expect(res.status).toBe(401);
   });
 
   it("does not accept top-level profile claims in place of the saved JWT template", async () => {
-    const res = await workosRequest(
-      await signWorkos({
+    const res = await request(
+      await sign({
+        ...validClaims(),
         [`${NS}email`]: undefined,
         [`${NS}email_verified`]: undefined,
         [`${NS}name`]: undefined,

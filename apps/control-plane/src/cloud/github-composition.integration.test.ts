@@ -13,6 +13,7 @@ import { resetMigratedTestDatabase } from "../test-database.js";
 import { CloudV2Store } from "./store.js";
 import { createCloudGithubServices } from "./github-composition.js";
 import { HttpError } from "../authz.js";
+import { grantTestPro } from "../test-pro.js";
 import { CloudV2Computers } from "./computer.js";
 import { PostgresGithubVerificationStore } from "./github-verification-store.js";
 
@@ -83,6 +84,7 @@ database("cloud GitHub composition", () => {
       throw new Error(`Unexpected synthetic request ${url.pathname}`);
     },
   );
+  const defaultFetch = fetcher.getMockImplementation()!;
   beforeAll(() => {
     pool = new pg.Pool({
       connectionString: process.env.TEST_DATABASE_URL,
@@ -95,6 +97,7 @@ database("cloud GitHub composition", () => {
   beforeEach(async () => {
     await resetMigratedTestDatabase(pool);
     vi.clearAllMocks();
+    fetcher.mockImplementation(defaultFetch);
     owner = "current";
     created = false;
     writeCalls = 0;
@@ -104,6 +107,7 @@ database("cloud GitHub composition", () => {
       "INSERT INTO users(id,email,display_name) VALUES($1,$2,'User')",
       [userId, `${userId}@example.test`],
     );
+    await grantTestPro(pool, userId);
     await pool.query(
       "INSERT INTO organizations(id,slug,name,created_by,is_personal,cloud_workspaces_allowed) VALUES($1,$2,'Org',$3,false,true)",
       [organizationId, `org-${organizationId}`, userId],
@@ -468,6 +472,28 @@ database("cloud GitHub composition", () => {
       "source-review-required",
     );
   });
+  it("withholds an in-flight workspace token when deletion retires its source scope", async () => {
+    const f = await fixture(), workspace = await workspaces.get(f.workspace.id, userId);
+    await services.authorizeSource(workspace);
+    const original = fetcher.getMockImplementation()!;
+    let reached!: () => void, release!: () => void;
+    const reading = new Promise<void>(resolve => { reached = resolve; });
+    const held = new Promise<void>(resolve => { release = resolve; });
+    fetcher.mockImplementation(async (value, init) => {
+      if (new URL(String(value)).pathname.endsWith("/branches")) { reached(); await held; }
+      return original(value, init);
+    });
+    const pending = services.workspaceToken(workspace).then(value => ({ value }), error => ({ error }));
+    try {
+      await reading;
+      expect(await workspaces.transition(workspace.id, ["running"], "deleting")).toMatchObject({ state: "deleting" });
+      release();
+      expect(await pending).toMatchObject({ error: { code: "cloud_source_review_required" } });
+      const sources = await pool.query("SELECT repository_id FROM cloud_v2_github_sources WHERE workspace_id=$1", [workspace.id]);
+      expect(sources.rows).toHaveLength(1);
+      expect(await workspaces.get(workspace.id, userId)).toMatchObject({ state: "deleting" });
+    } finally { release(); await pending; fetcher.mockImplementation(original); }
+  });
   it.each([
     ["github_authorization_expired", "connection-expired"],
     ["github_installation_required", "installation-required"],
@@ -496,7 +522,7 @@ database("cloud GitHub composition", () => {
   it("reports a missing remote branch as unknown without masking failed repository authorization", async () => {
     const original = fetcher.getMockImplementation()!;
     fetcher.mockImplementation(async (input, init) =>
-      new URL(String(input)).pathname.endsWith("/commits/missing")
+      new URL(String(input)).pathname.endsWith("/branches/missing")
         ? new Response(null, { status: 404 })
         : original(input, init),
     );
@@ -519,5 +545,49 @@ database("cloud GitHub composition", () => {
         "42",
       ),
     ).rejects.toMatchObject({ code: "github_authorization_expired" });
+  });
+  it("looks up an exact branch by the admitted repository ID, never a tag or commit", async () => {
+    const original = fetcher.getMockImplementation()!;
+    const paths: string[] = [];
+    fetcher.mockImplementation(async (input, init) => {
+      const path = new URL(String(input)).pathname; paths.push(path);
+      if (path === "/repositories/42/branches/release%2Fstable") return Response.json({ name: "release/stable", commit: { sha: head } });
+      if (path === "/repositories/42/branches/tag-only") return new Response(null, { status: 404 });
+      if (path.endsWith("/commits/tag-only")) return Response.json({ sha: head });
+      return original(input, init);
+    });
+    try {
+      await expect(services.remoteHead(organizationId, userId, "former/project", "release/stable", "42")).resolves.toBe(head);
+      await expect(services.remoteHead(organizationId, userId, "former/project", "tag-only", "42")).resolves.toBeNull();
+      expect(paths).toContain("/repositories/42/branches/release%2Fstable");
+      expect(paths.some(path => path.includes("/commits/"))).toBe(false);
+      expect(paths.some(path => path.startsWith("/repos/former/"))).toBe(false);
+    } finally { fetcher.mockImplementation(original); }
+  });
+
+  it.each([503, 429])("does not report a GitHub %s branch lookup as missing", async status => {
+    const original = fetcher.getMockImplementation()!;
+    fetcher.mockImplementation(async (input, init) => new URL(String(input)).pathname.includes("/branches/")
+      ? new Response(null, { status, headers: { "retry-after": "60" } }) : original(input, init));
+    try {
+      await expect(services.remoteHead(organizationId, userId, "former/project", "main", "42"))
+        .rejects.toMatchObject({ code: status === 429 ? "github_rate_limited" : "github_unavailable" });
+    } finally { fetcher.mockImplementation(original); }
+  });
+
+  it.each([200, 404])("fences a selected-connection change during a branch lookup returning %s", async status => {
+    const original = fetcher.getMockImplementation()!;
+    let changed = false;
+    fetcher.mockImplementation(async (input, init) => {
+      if (!new URL(String(input)).pathname.includes("/branches/")) return original(input, init);
+      const scope = { organizationId, userId };
+      await services.connections.store.disconnect(scope, await services.connections.store.fingerprint(scope), "pat");
+      changed = true;
+      return status === 200 ? Response.json({ name: "main", commit: { sha: head } }) : new Response(null, { status });
+    });
+    try {
+      await expect(services.remoteHead(organizationId, userId, "former/project", "main", "42")).rejects.toMatchObject({ code: "github_authorization_changed" });
+      expect(changed).toBe(true);
+    } finally { fetcher.mockImplementation(original); }
   });
 });

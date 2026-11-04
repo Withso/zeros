@@ -100,28 +100,15 @@ export function requireStaffRole(
   return staffRole;
 }
 
-export type OrganizationCreationStaffRole = Extract<
-  StaffRole,
-  "platform_owner" | "developer"
->;
-
-/** Initial-launch organization creation is a standing-staff dogfood
- * capability. It is deliberately independent from tenant membership and from
- * the deprecated support-only compatibility role. */
-export function canCreateOrganization(
-  staffRole: StaffRole | null,
-): staffRole is OrganizationCreationStaffRole {
-  return staffRole === "platform_owner" || staffRole === "developer";
+/** Creating a collaborative organization requires an active Pro entitlement.
+ * Staff roles grant no Pro; staff accounts need their own grant. */
+export function canCreateOrganization(pro: boolean): boolean {
+  return pro;
 }
 
-/** Authoritative API boundary for collaborative organization creation. Use a
- * 404 so an ordinary account cannot discover an unavailable staff surface by
- * probing the legacy or current route. */
-export function requireOrganizationCreationCapability(
-  staffRole: StaffRole | null,
-): OrganizationCreationStaffRole {
-  if (!canCreateOrganization(staffRole)) {
-    throw new HttpError(404, "not_found", "Not found");
+/** Authoritative API boundary for collaborative organization creation. */
+export function requireOrganizationCreationCapability(pro: boolean): void {
+  if (!canCreateOrganization(pro)) {
+    throw new HttpError(403, "pro_required", "Creating an organization requires Pro");
   }
-  return staffRole;
 }

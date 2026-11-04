@@ -1,6 +1,6 @@
 // Small same-user advisory file lock for operations that must span an async
 // network request. The encrypted secret store's own lock protects one atomic
-// read/modify/write; this lock serializes GitHub/Auth0 refresh-token rotation
+// read/modify/write; this lock serializes GitHub/WorkOS refresh-token rotation
 // across dev worktrees that share that store.
 
 import { randomBytes } from "node:crypto";

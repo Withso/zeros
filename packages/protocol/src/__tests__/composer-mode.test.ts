@@ -11,6 +11,16 @@ describe("native Design authoring instructions", () => {
     expect(instruction).toContain("data-name");
     expect(instruction).toContain("data-oid");
   });
+  it.each(["code", "design"] as const)("points %s intent at the skill and rules.md for details", mode => {
+    const instruction = composerModeInstruction(mode, 2);
+    expect(instruction).toContain("read the Zeros Design skill named in context");
+    expect(instruction).toContain("root rules.md and meta/canvas.json");
+    expect(instruction).toContain("Registration at meta/design.toml changes only through Zeros lifecycle operations");
+    // Token links, legacy layouts and Git live in the skill and rules.md.
+    expect(instruction).not.toContain("Link ../tokens.css");
+    expect(instruction).not.toContain("Legacy root design.toml");
+    expect(instruction.length).toBeLessThan(2200);
+  });
   it("requires an API pageId for multi-page frame creation and duplication", () => {
     const instruction = composerModeInstruction("design", undefined, "api");
     expect(instruction).toContain("pageId");

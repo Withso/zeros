@@ -1,0 +1,9 @@
+{
+  "id": "composer-draft-history-baseline",
+  "kind": "replay",
+  "area": "renderer-agents",
+  "fixedBy": "pr:810",
+  "symptom": "Sending, recalling or replacing a chat draft left ProseMirror history alive after clearing the attachment side store, allowing Undo to restore another draft or pills with missing bytes.",
+  "rule": "Principles 1, 10 and 13: retire history with a programmatically replaced draft and its attachment store; ordinary user attachment removal stays undoable.",
+  "check": "pnpm exec vitest run apps/desktop/src/renderer/features/agent/__tests__/composer-history.test.ts"
+}

@@ -6,7 +6,7 @@ import { Button } from "../../shared/ui";
 import { useActiveOrganization, useTeams } from "../team/team-store";
 import { requestUserSettingsSection } from "./settings-navigation";
 import { isFeatureEnabled } from "../../config/release-channel";
-import { CONTROL_PLANE_URL } from "../team/control-plane";
+import { CONTROL_PLANE_URL, ControlPlaneError } from "../team/control-plane";
 import { CloudComputerRepositorySnapshots } from "./cloud-computer-repository-snapshots";
 import {
   getCloudV2InstalledRepositories,
@@ -51,10 +51,14 @@ function subscribeVisibility(listener: () => void) {
 }
 
 export const cloudComputerV2BuildRequired = "Build your Cloud Computer first";
+function rebuildRequired(error: Error | null): error is ControlPlaneError {
+  return error instanceof ControlPlaneError && error.status === 409 && error.code === "cloud_computer_rebuild_required";
+}
 export function cloudComputerV2CreateReason(
   repositories: Installed | undefined,
   error: Error | null = null,
 ): string | null {
+  if (rebuildRequired(error)) return error.message;
   if (repositories === undefined)
     return error
       ? "Cloud Computer could not be checked. Open Settings to retry."
@@ -71,11 +75,12 @@ export function useCloudComputerV2CreateGate(active: boolean) {
   const key = enabled ? cloudComputerRepositoriesKey(me!.user.id, organization!.id) : null;
   const read = useRecoveringRead(cloudComputerRepositoriesCache, key, readInstalled,
     { enabled: enabled && active && shown, maxAgeMs: MAX_AGE_MS });
-  const reason = enabled ? cloudComputerV2CreateReason(read.data, read.error) : null;
+  const error = rebuildRequired(read.readError) ? read.readError : read.error;
+  const reason = enabled ? cloudComputerV2CreateReason(read.data, error) : null;
   useEffect(() => {
     if (key && enabled) persistRepositories(key);
   }, [key, enabled, read.data, read.updatedAt]);
-  const required = reason === cloudComputerV2BuildRequired;
+  const required = enabled && (reason === cloudComputerV2BuildRequired || rebuildRequired(error));
   const refresh = read.refresh;
   useEffect(() => {
     // An admin can finish the first build elsewhere; observe slowly while the
@@ -86,7 +91,7 @@ export function useCloudComputerV2CreateGate(active: boolean) {
   }, [enabled, active, shown, required, refresh]);
   return {
     reason,
-    checking: enabled && read.data === undefined && !read.error,
+    checking: enabled && read.data === undefined && !error,
     enabled,
     key,
     repositories: enabled ? read.data : undefined,
@@ -101,11 +106,13 @@ export function useCloudComputerV2CreateGate(active: boolean) {
 
 export function CloudComputerV2CreateNotice({
   required,
+  reason,
   canManage,
   warm,
   onOpenSettings,
 }: {
   required: boolean;
+  reason?: string | null;
   canManage: boolean;
   warm: () => void;
   onOpenSettings?: () => void;
@@ -119,8 +126,8 @@ export function CloudComputerV2CreateNotice({
       onFocus={warm}
     >
       <p className="text-fg2 text-xs" role="status">
-        {cloudComputerV2BuildRequired}
-        {canManage ? "." : ". Ask an organization admin to build it."}
+        {reason && reason !== cloudComputerV2BuildRequired ? reason
+          : `${cloudComputerV2BuildRequired}${canManage ? "." : ". Ask an organization admin to build it."}`}
       </p>
       {canManage && (
         <Button

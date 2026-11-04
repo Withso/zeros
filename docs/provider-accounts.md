@@ -27,7 +27,7 @@ saved-key presence. An inherited key is labeled with its environment variable
 key saved in the current secret store; the input never displays an existing key.
 Pending or failed storage reads are not reported as a missing key. This also
 applies to organization-local workspaces. Cloud connections retain their own
-credential selection. Local, hosted Dev, Alpha, Beta and production stores stay
+credential selection. Local, Zeros Dev, Alpha, Beta and production stores stay
 isolated; checkouts in the same development mode keep their existing shared store.
 Returning to Settings revalidates the engine registry so a credential change in
 another instance cannot remain hidden behind a recently cached connection status.

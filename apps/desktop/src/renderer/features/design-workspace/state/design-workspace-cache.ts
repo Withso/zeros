@@ -1377,9 +1377,11 @@ export function reconcileDesignWorkspaceRuntimeAudit(input: {
         !preparedDesignSnapshot(latest.data)?.frames.some((frame) => frame.file === input.frame && frame.sourceVersion === input.sourceVersion)) return;
       const current = latest.data;
       retainedRuntimeAuditByFrame.delete(key);
-      publishDesignWorkspaceSnapshot(input.workspaceId, { ...current, lint: { ...current.lint,
+      const next: DesignWorkspaceSnapshotWire = { ...current, lint: { ...current.lint,
         violations: [...current.lint.violations.filter((row) => row.file !== input.frame || !RUNTIME_AUDIT_RULE_IDS.has(row.ruleId)), ...persisted.violations],
-      } });
+      } };
+      // An unchanged audit would still notify every subscriber of the cache.
+      if (stabilizeDesignWorkspaceSnapshot(current, next) !== current) publishDesignWorkspaceSnapshot(input.workspaceId, next);
       return;
     }
     const authoritative = await designSnapshot(input.workspaceId);
@@ -1704,11 +1706,15 @@ export async function updateDesignNodeStylesCached(
         const beforeState = historyStateKey(
           designWorkspaceSnapshotCache.peekSnapshot(workspaceId).data,
         );
-        const result = await designUpdateStyles(workspaceId, {
+        const reply = await designUpdateStyles(workspaceId, {
           ...input,
           sourceVersion,
         });
         assertOwner();
+        // A scoped acknowledgement carries only this frame. History keys the
+        // state the cache will publish, so project it onto the catalog first.
+        const result = { ...reply, snapshot: projectDesignMutationSnapshot(
+          designWorkspaceSnapshotCache.peekSnapshot(workspaceId).data, reply.snapshot) };
         const nextSourceVersion = result.snapshot.frames.find(
           (frame) => frame.file === input.frame,
         )?.sourceVersion;
@@ -2638,8 +2644,12 @@ export async function applyDesignHistoryCached(
         []
       ).map((candidate) => [candidate.file, candidate.sourceVersion]),
     );
-    const result = await designHistory(workspaceId, frame, direction,
+    const reply = await designHistory(workspaceId, frame, direction,
       isCloudWorkspace(workspaceId) ? Object.fromEntries(previousSourceVersions) : undefined);
+    // A scoped reply carries only the restored frames. History keys the state
+    // the cache will publish, so project it onto the catalog first.
+    const result = reply.snapshot ? { ...reply, snapshot: projectDesignMutationSnapshot(
+      designWorkspaceSnapshotCache.peekSnapshot(workspaceId).data, reply.snapshot) } : reply;
     const prediction = predictionRef?.deref();
     assertDesignMutationOwner(workspaceId, owner);
     const historyFrame = result.historyFrame ?? (result.result ? frame : null);

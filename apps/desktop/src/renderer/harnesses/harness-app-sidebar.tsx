@@ -4,6 +4,7 @@
 import "../../../../../styles/zeros-tokens.css";
 import "../../../../../styles/semantic-tokens.css";
 import "../../../../../styles/globals.css";
+import "./isolated-editor-drafts";
 import { createRoot } from "react-dom/client";
 import type { RuntimeClient } from "../platform/bridge/ws-client";
 import type { Workspace } from "../platform/git";
@@ -584,6 +585,10 @@ const auth = {
   cancelPendingOAuth() {},
   signOut: async () => {},
   signOutEverywhere: async () => {},
+  accounts: [],
+  refreshAccounts: async () => {},
+  switchAccount: async () => "unavailable" as const,
+  signOutAccount: async () => {},
 } as AuthContextValue;
 
 if (params.has("organizations")) {

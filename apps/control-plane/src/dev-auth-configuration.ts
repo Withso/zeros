@@ -15,7 +15,6 @@ export function createDevAuthConfigurationRoutes(config: Config): Hono {
     const apiOrigin = "https://api-alpha.zeros.build";
     const clientId = /^client_[A-Za-z0-9_-]{1,240}$/;
     if (
-      auth.provider !== "workos" ||
       config.workos?.appOrigin !== appOrigin ||
       auth.audience !== apiOrigin ||
       !clientId.test(auth.desktopClientId) ||

@@ -31,6 +31,8 @@ const placements = [folder, "/fixture/personal/local", "/fixture/organization/lo
 const agents = [{ id: "codex", name: "Codex", installed: true, authenticated: true, version: "1.0.0", description: "", distribution: {} }];
 let sends = 0;
 let reconnects = 0;
+let preparations = 0;
+let modelRefreshes = 0;
 const followUpFixture = new URLSearchParams(location.search).has("follow-up");
 const cloudFeedback = new URLSearchParams(location.search).has("cloud-feedback");
 const followUps: Array<{ chatId: string; behavior: string | undefined }> = [];
@@ -80,7 +82,8 @@ const actions = {
   prepareForSend: () => null,
   listAgents: async () => agents,
   hydrateChat: async () => {},
-  ensureSession: async () => {},
+  ensureSession: async () => { preparations++; },
+  refreshModelCatalog: () => { modelRefreshes++; },
   updateConfig: () => {},
   holdQueue: () => {}, releaseQueue: () => {},
   cancel: async chatId => { await cloudRuntime?.stop(chatId); },
@@ -102,6 +105,8 @@ const actions = {
 } satisfies Partial<SessionsActions>;
 Object.assign(window, { composerSendFailureFixture: {
   get sends() { return sends; },
+  get preparations() { return preparations; },
+  get modelRefreshes() { return modelRefreshes; },
   get followUps() { return followUps; },
   get reconnects() { return reconnects; },
   get document() { return document; },

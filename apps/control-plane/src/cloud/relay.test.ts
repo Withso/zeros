@@ -14,6 +14,7 @@ import { HttpError } from "../authz.js";
 
 const workspaceId = "6f2b7c1e-3b0a-4f7e-9d43-8a0b2b9c6d11";
 const ticket = newCloudV2Token("connect").token;
+const explicitWakeProtocol = "zeros.cloud.v2.explicit-wake";
 
 
 function workspace(state: CloudV2Workspace["state"]): CloudV2Workspace {
@@ -109,8 +110,8 @@ describe("cloud v2 relay", () => {
     await vi.waitFor(() => expect(connectedWorkers).toHaveLength(1));
     return connectedWorkers[0]!;
   };
-  const app = async () => {
-    const ws = new WebSocket(`${url}/v2/cloud/workspaces/${workspaceId}/bridge`, [CLOUD_V2_BRIDGE_PROTOCOL, `ticket.${ticket}`]);
+  const app = async (explicit = false) => {
+    const ws = new WebSocket(`${url}/v2/cloud/workspaces/${workspaceId}/bridge`, [CLOUD_V2_BRIDGE_PROTOCOL, `ticket.${ticket}`, ...(explicit ? [explicitWakeProtocol] : [])]);
     sockets.push(ws);
     await opened(ws);
     return ws;
@@ -236,6 +237,23 @@ describe("cloud v2 relay", () => {
     await vi.waitFor(() => expect(frames.some(frame => frame.t === "config")).toBe(true));
     if (supported) expect(frames.find(frame => frame.t === "config").mcpServers).toEqual(mcpServers);
     else expect(frames.find(frame => frame.t === "config")).not.toHaveProperty("mcpServers");
+  });
+
+  it.each([false, true])("gates managed identity on WebSocket upgrade support=%s for initial and refreshed config", async supported => {
+    workerServer.on("headers", headers => { headers.push(`X-Zeros-Worker-Features: mcp-v1${supported ? ",git-identity-v1" : ""}`); });
+    const original = deps.config, gitIdentity = { name: "Fixture Contributor", email: "123+contributor@users.noreply.github.com" };
+    deps.config = async ws => ({ ...await original(ws), gitIdentity });
+    const frames: any[] = [];
+    workerServer.on("connection", ws => ws.on("message", raw => frames.push(JSON.parse(String(raw)))));
+    await app();
+    await vi.waitFor(() => expect(frames.filter(frame => frame.t === "config")).toHaveLength(1));
+    loginRevision = "1";
+    await relay.refreshLogins();
+    await vi.waitFor(() => expect(frames.filter(frame => frame.t === "config")).toHaveLength(2));
+    for (const frame of frames.filter(frame => frame.t === "config")) {
+      if (supported) expect(frame.gitIdentity).toEqual(gitIdentity);
+      else expect(frame).not.toHaveProperty("gitIdentity");
+    }
   });
 
   it.each([false, true])("gates setup on WebSocket upgrade support=%s for initial and refreshed config", async supported => {
@@ -619,6 +637,58 @@ describe("cloud v2 relay", () => {
     ticketWake = false;
     const w = await worker();
     expect(w.readyState).toBe(WebSocket.OPEN);
+    expect(deps.wake).not.toHaveBeenCalled();
+  });
+
+  it.each(["workspace.list", "file.read", "file.write"])("rejects opted-in stopped %s traffic without treating it as a wake", async op => {
+    state = "stopped"; ticketWake = false;
+    const a = await app(true);
+    let closeCode: number | undefined;
+    a.once("close", code => { closeCode = code; });
+    a.send(JSON.stringify({ type: "WORKSPACE_REQUEST", id: "background", op, params: { path: "draft.txt", content: "draft" } }));
+    await vi.waitFor(() => expect(closeCode !== undefined || vi.mocked(deps.wake).mock.calls.length > 0).toBe(true));
+    expect(deps.wake).not.toHaveBeenCalled();
+    expect(closeCode).toBe(4009);
+    expect(connectedWorkers).toHaveLength(0);
+    expect(a.protocol).toBe(explicitWakeProtocol);
+  });
+
+  it("does not reuse an opted-in wake ticket after Stop has already completed", async () => {
+    state = "stopped"; ticketWake = true;
+    const a = await app(true);
+    await vi.waitFor(() => expect(a.readyState === WebSocket.CLOSED || vi.mocked(deps.wake).mock.calls.length > 0).toBe(true));
+    expect(deps.wake).not.toHaveBeenCalled();
+    expect(a.readyState).toBe(WebSocket.CLOSED);
+    expect(connectedWorkers).toHaveLength(0);
+  });
+
+  it("keeps opted-in sockets attached and resumes output after a running worker redial", async () => {
+    const a = await app(true);
+    await vi.waitFor(() => expect(deps.config).toHaveBeenCalledOnce());
+    const received: unknown[] = [];
+    a.on("message", raw => received.push(JSON.parse(String(raw))));
+    workerServer.once("connection", ws => ws.on("message", raw => {
+      const frame = JSON.parse(String(raw));
+      if (frame.t === "open") ws.send(JSON.stringify({ t: "frame", clientId: frame.clientId, frame: { resumed: true } }));
+    }));
+    connectedWorkers[0]!.terminate();
+    await vi.waitFor(() => expect(a.readyState === WebSocket.CLOSED || received.length > 0).toBe(true));
+    expect(a.readyState).toBe(WebSocket.OPEN);
+    expect(received).toEqual([{ resumed: true }]);
+    expect(connectedWorkers).toHaveLength(2);
+    expect(deps.wake).not.toHaveBeenCalled();
+  });
+
+  it("retires opted-in sockets after Stop while leaving a legacy app attached", async () => {
+    const a = await app(true), legacy = await app();
+    await vi.waitFor(() => expect(deps.config).toHaveBeenCalledOnce());
+    let closeCode: number | undefined;
+    a.once("close", code => { closeCode = code; });
+    state = "stopped";
+    connectedWorkers[0]!.terminate();
+    await vi.waitFor(() => expect(closeCode !== undefined || connectedWorkers.length > 1).toBe(true));
+    expect(closeCode).toBe(4009);
+    expect(legacy.readyState).toBe(WebSocket.OPEN);
     expect(deps.wake).not.toHaveBeenCalled();
   });
 

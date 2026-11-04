@@ -711,7 +711,7 @@ function ActiveDispatcherPage({
             <p className="text-fg3 mb-2 px-2 text-xs" role="status">{computerCreateNotice.message}</p>
           )}
           {placementReason && !cloud.checking && (cloud.computerRequired
-            ? <CloudComputerV2CreateNotice required canManage={cloud.canManageComputer} warm={cloud.warmComputer} />
+            ? <CloudComputerV2CreateNotice required reason={cloud.computerReason} canManage={cloud.canManageComputer} warm={cloud.warmComputer} />
             : <p className="text-fg3 mb-2 px-2 text-xs" role="status">{placementReason}</p>)}
           <section aria-label="Workspace prompt" onPointerEnter={cloud.warm} onFocus={cloud.warm}>
             <DispatcherComposer

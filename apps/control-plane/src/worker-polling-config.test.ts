@@ -1,8 +1,9 @@
 import { describe, expect, it } from "vitest";
 import { loadConfig } from "./config.js";
 import { loadWorkerPollIntervals } from "./worker-polling-config.js";
+import { workosTestEnv } from "./test-workos-env.js";
 
-const env = { DATABASE_URL: "postgres://fixture@localhost/worker-config-test", AUTH0_DOMAIN: "test.auth0.com", AUTH_AUDIENCE: "test" };
+const env = { DATABASE_URL: "postgres://fixture@localhost/worker-config-test", ...workosTestEnv(), AUTH_AUDIENCE: "test" };
 describe("per-worker polling rollback", () => {
   it("defaults to scheduler deadlines and allows only the selected worker's interval to change", () => {
     expect(loadConfig(env).workerPollIntervalsMs).toEqual({});

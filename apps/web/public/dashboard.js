@@ -6,6 +6,31 @@ export function organizationCreationAllowed(capabilities) {
   return capabilities?.createOrganization === true;
 }
 
+const SEAT_BADGES = {
+  pro: '<span class="badge success">Pro</span>',
+  free: '<span class="badge">Free</span>',
+  hold: '<span class="badge warning">On Hold</span>',
+};
+
+/** A member's seat; an older control plane sends none. */
+export function seatBadgeHtml(seat) {
+  return typeof seat === "string" && Object.hasOwn(SEAT_BADGES, seat)
+    ? SEAT_BADGES[seat]
+    : "";
+}
+
+export const HOLD_NOTICE_HTML =
+  '<div class="notice"><strong>You\'re on Hold</strong><p>You\'re still a member, but this organization\'s cloud workspaces and chats are unavailable to you. Get Pro, or ask an owner to free a seat.</p></div>';
+
+/** Seat usage for the member list, or null from an older control plane. */
+export function seatSummary(seats) {
+  if (!seats || typeof seats !== "object") return null;
+  const count = (value) => (Number.isSafeInteger(value) && value > 0 ? value : 0);
+  const pending = count(seats.pendingInvitations);
+  const held = count(seats.heldMembers);
+  return `${count(seats.members)} of ${count(seats.memberLimit)} members${pending ? ` + ${pending} invited` : ""} · ${count(seats.freeMembers)} of ${count(seats.freeMemberLimit)} free seats${held ? ` · ${held} on Hold` : ""}`;
+}
+
 export function formatLifecycleDate(value) {
   const timestamp = typeof value === "string" ? Date.parse(value) : Number.NaN;
   if (!Number.isFinite(timestamp)) return "the scheduled date";
@@ -268,8 +293,14 @@ function bootDashboard() {
     logo: safeOrganizationLogo(organization?.logo),
   });
   const replaceOrganization = (organization) => {
-    const next = normalizeOrganization(organization);
-    const index = state.organizations.findIndex((item) => item.id === next.id);
+    const index = state.organizations.findIndex(
+      (item) => item.id === organization?.id,
+    );
+    // Rename and logo responses carry no seat, and neither edit changes it.
+    const seat = organization?.seat ?? state.organizations[index]?.seat;
+    const next = normalizeOrganization(
+      seat ? { ...organization, seat } : organization,
+    );
     if (index >= 0) state.organizations[index] = next;
     return next;
   };
@@ -513,7 +544,9 @@ function bootDashboard() {
         ${nameControl}
         <div class="settings-row"><span class="settings-copy"><strong>Organization ID</strong><p>Your stable tenant identifier.</p></span><span class="settings-value"><code class="id-code">${escapeHtml(organization.id)}</code><button class="icon-button copy-button" type="button" data-copy-organization-id="${escapeHtml(organization.id)}" aria-label="Copy organization ID">▣</button></span></div>
         <div class="settings-row"><span class="settings-copy"><strong>Your role</strong><p>What you can do in this organization.</p></span><span class="settings-value"><span class="badge">${escapeHtml(organization.role)}</span></span></div>
+        ${seatBadgeHtml(organization.seat) ? `<div class="settings-row"><span class="settings-copy"><strong>Your seat</strong><p>Pro, a free seat, or On Hold while the free seats are taken.</p></span><span class="settings-value">${seatBadgeHtml(organization.seat)}</span></div>` : ""}
       </div>
+      ${organization.seat === "hold" ? HOLD_NOTICE_HTML : ""}
       <div class="card"><div class="card-title"><div><strong>Workspace access</strong><p>Capability metadata; cloud provisioning will still enforce plan and quota.</p></div></div><div class="capability-grid"><div class="capability"><span class="status-dot success"></span><div><strong>Local workspaces</strong><p>Available on your Mac</p></div></div><div class="capability ${organization.workspaceCapabilities?.cloud ? "" : "disabled"}"><span class="status-dot ${organization.workspaceCapabilities?.cloud ? "success" : ""}"></span><div><strong>Cloud workspaces</strong><p>${organization.workspaceCapabilities?.cloud ? "Organization eligible" : "Not available in Personal"}</p></div></div></div></div>
       ${organization.isPersonal ? `<div class="notice"><strong>Personal is permanent</strong><p>Personal cannot be removed. It cannot invite members and stores workspace configuration locally.</p></div>` : canOwn(organization) ? `<div class="subsection-label">Danger zone</div><div class="card danger-card"><div class="card-title"><div><strong>Delete organization</strong><p>Revokes access immediately and keeps the organization recoverable for 30 days. Provider deletion begins only after the grace period.</p></div><button class="button danger" type="button" data-action="delete-organization">Delete organization</button></div></div>` : ""}
     </section>`;
@@ -545,10 +578,11 @@ function bootDashboard() {
         const roleControl = permissions.canChangeRole
           ? `<select aria-label="Role for ${escapeHtml(name)}" data-member-role="${escapeHtml(member.id)}">${permissions.availableRoles.map((role) => `<option value="${role}" ${member.role === role ? "selected" : ""}>${role[0].toUpperCase() + role.slice(1)}</option>`).join("")}</select>`
           : `<span class="badge">${escapeHtml(member.role)}</span>`;
+        const seatBadge = seatBadgeHtml(member.seat);
         const removeControl = permissions.canRemove
           ? `<button class="icon-button" type="button" data-remove-member="${escapeHtml(member.id)}" aria-label="${member.id === state.user.id ? "Leave organization" : `Remove ${escapeHtml(name)}`}">×</button>`
           : "";
-        return `<div class="member-row"><span class="avatar">${escapeHtml(initials(name))}</span><span class="member-copy"><strong>${escapeHtml(name)}${member.id === state.user.id ? " (you)" : ""}</strong><small>${escapeHtml(member.email)}${member.directory_managed === true ? " · Directory managed" : ""}</small></span><span class="row-actions">${roleControl}${removeControl}</span></div>`;
+        return `<div class="member-row"><span class="avatar">${escapeHtml(initials(name))}</span><span class="member-copy"><strong>${escapeHtml(name)}${member.id === state.user.id ? " (you)" : ""}</strong><small>${escapeHtml(member.email)}${member.directory_managed === true ? " · Directory managed" : ""}</small></span><span class="row-actions">${seatBadge}${roleControl}${removeControl}</span></div>`;
       })
       .join("");
   }
@@ -563,10 +597,15 @@ function bootDashboard() {
           `<div class="member-row"><span class="avatar">✉</span><span class="member-copy"><strong>${escapeHtml(invite.email)}</strong><small>Pending · expires ${escapeHtml(new Date(invite.expires_at).toLocaleDateString())}</small></span><span class="row-actions"><span class="badge">${escapeHtml(invite.role)}</span>${canAdmin(organization) ? `<button class="icon-button" type="button" data-revoke-invite="${escapeHtml(invite.id)}" aria-label="Revoke invitation">×</button>` : ""}</span></div>`,
       )
       .join("");
+    const seats = seatSummary(data.seats);
+    const held = data.members.some(
+      (member) => member.id === state.user.id && member.seat === "hold",
+    );
     return `<section class="section-stack">${heading("Members", "Organization members are automatically included in the default team.")}
-      <div class="card"><div class="card-title"><div><strong>Invite member</strong><p>The recipient must sign in with this exact email address.</p></div></div>${inviteForm || `<div class="notice" style="margin-top:18px">Only organization admins can invite members.</div>`}</div>
-      <div class="card"><div class="card-title"><div><strong>Members</strong><p>${data.members.length} ${data.members.length === 1 ? "member" : "members"}</p></div></div><div class="member-list">${memberRows(data.members, organization)}</div></div>
-      ${invitations ? `<div class="card"><div class="card-title"><div><strong>Pending invitations</strong><p>Unused invitations expire automatically.</p></div></div><div class="member-list">${invitations}</div></div>` : ""}
+      ${held ? HOLD_NOTICE_HTML : ""}
+      <div class="card"><div class="card-title"><div><strong>Invite member</strong><p>The recipient must sign in with this exact email address.${seats ? " Members and pending invitations share the member limit, and members without Pro can join only while a free seat is open." : ""}</p></div></div>${inviteForm || `<div class="notice" style="margin-top:18px">Only organization admins can invite members.</div>`}</div>
+      <div class="card"><div class="card-title"><div><strong>Members</strong><p>${seats ?? `${data.members.length} ${data.members.length === 1 ? "member" : "members"}`}</p></div></div><div class="member-list">${memberRows(data.members, organization)}</div></div>
+      ${invitations ? `<div class="card"><div class="card-title"><div><strong>Pending invitations</strong><p>Unused invitations expire automatically.${seats ? " Each one holds a seat until then." : ""}</p></div></div><div class="member-list">${invitations}</div></div>` : ""}
     </section>`;
   }
 
@@ -647,6 +686,7 @@ function bootDashboard() {
           ]);
           return {
             members: members.members,
+            seats: members.seats,
             invitations: invitations.invitations,
           };
         });

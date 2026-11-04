@@ -1,0 +1,9 @@
+{
+  "id": "editor-save-unreachable-retry",
+  "kind": "replay",
+  "area": "renderer-ui",
+  "fixedBy": "pr:811",
+  "symptom": "One save that never reached the engine or cloud VM (stopped, reconnecting, offline) set an error that stopped autosave until the next edit, leaving a dirty draft that a later close discarded.",
+  "rule": "Principles 2 and 7: an unreachable write is unknown, not refused; retry it with bounded backoff and keep the draft journaled, and stop only on a typed refusal from the engine.",
+  "check": "pnpm exec vitest run apps/desktop/src/renderer/shell/workbench/tabs/code-editor/__tests__/source-editor-drafts.test.ts -t \"retries a temporary save failure\""
+}

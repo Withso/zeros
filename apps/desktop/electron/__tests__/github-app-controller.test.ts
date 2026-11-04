@@ -110,7 +110,7 @@ function harness(options?: {
     },
     getSession: async () =>
       options?.session === undefined
-        ? { accessToken: "zeros-access", sub: "auth0|one" }
+        ? { accessToken: "zeros-access", sub: "account-one" }
         : options.session,
     savePending: (next) => {
       pending = next;
@@ -158,7 +158,7 @@ function harness(options?: {
 describe("GitHub App desktop controller", () => {
   it("stores only a Dev reference, never exchanges or refreshes the old rotating pair",async()=>{
     const h=harness(),result={reference:{mode:'dev-reference' as const,bindingId:'11111111-1111-4111-8111-111111111111',connectionId:'22222222-2222-4222-8222-222222222222',
-      generationId:'33333333-3333-4333-8333-333333333333',issuer:'https://identity.example.test',subject:'auth0|one',organization:'org_dev',accountId:'1234',appScope:'42:client_dev',backendOrigin:'https://api.example.test'},
+      generationId:'33333333-3333-4333-8333-333333333333',issuer:'https://identity.example.test',subject:'account-one',organization:'org_dev',accountId:'1234',appScope:'42:client_dev',backendOrigin:'https://api.example.test'},
       login:'octocat',variantKey:'github.com',installationCount:1};
     h.deps.devReference={exchange:vi.fn(async()=>result),save:vi.fn(async()=>{}),disconnect:vi.fn(async()=>true)};
     await h.controller.begin({scheme:'zeros-dev',installFlow:false});await h.controller.complete({nonce:'n'.repeat(43)});
@@ -178,7 +178,7 @@ describe("GitHub App desktop controller", () => {
     const completion = h.controller.complete({ nonce: "n".repeat(43) });
     await entered.promise;
     if (change === "disconnect") await h.controller.disconnect();
-    else h.deps.getSession = async () => ({ accessToken: "different", sub: "auth0|two" });
+    else h.deps.getSession = async () => ({ accessToken: "different", sub: "account-two" });
     delivery.resolve(); await completion;
     expect(h.events.some(event => event.name === "connected")).toBe(false);
     if (change === "disconnect") expect(h.credential()).toBeNull();
@@ -220,7 +220,7 @@ describe("GitHub App desktop controller", () => {
   it("does not exchange an old account's browser attempt after account switching", async () => {
     const h = harness();
     await h.controller.begin({ scheme: "zeros-dev", installFlow: false });
-    h.deps.getSession = async () => ({ accessToken: "other-session", sub: "auth0|two" });
+    h.deps.getSession = async () => ({ accessToken: "other-session", sub: "account-two" });
     await h.controller.complete({ nonce: "n".repeat(43) });
     expect(h.client.exchange).not.toHaveBeenCalled();
     expect(h.credential()).toBeNull();
@@ -235,7 +235,7 @@ describe("GitHub App desktop controller", () => {
     const completing = h.controller.complete({ nonce: "n".repeat(43) });
     await vi.waitFor(() => expect(h.client.exchange).toHaveBeenCalledTimes(2));
     if (cause === "cancel") h.controller.cancel();
-    else h.deps.getSession = async () => ({ accessToken: "other-session", sub: "auth0|two" });
+    else h.deps.getSession = async () => ({ accessToken: "other-session", sub: "account-two" });
     exchange.resolve(response);
     await completing;
     expect(h.credential()).toBeNull();
@@ -263,7 +263,7 @@ describe("GitHub App desktop controller", () => {
       expect(h.pending()).toEqual({
         nonce: "n".repeat(43),
         expiresAtMs: 2_000_000,
-        ownerSub: "auth0|one",
+        ownerSub: "account-one",
       });
     });
     const controller = new GithubAppController(h.deps);
@@ -394,7 +394,7 @@ describe("GitHub App desktop controller", () => {
         refreshBinding: binding("a"),
         expiresAtMs: 1_000_500,
         refreshTokenExpiresAtMs: 30_000_000,
-        ownerSub: "auth0|one",
+        ownerSub: "account-one",
         login: "octocat",
         ...gitIdentity,
       },
@@ -432,7 +432,7 @@ describe("GitHub App desktop controller", () => {
         refreshBinding: binding("a"),
         expiresAtMs: 1_000_500,
         refreshTokenExpiresAtMs: 30_000_000,
-        ownerSub: "auth0|one",
+        ownerSub: "account-one",
         login: "octocat",
         ...gitIdentity,
       },
@@ -459,7 +459,7 @@ describe("GitHub App desktop controller", () => {
       refreshBinding: binding("a"),
       expiresAtMs: 1_030_000, // due: within 60s of the harness clock
       refreshTokenExpiresAtMs: 30_000_000,
-      ownerSub: "auth0|one",
+      ownerSub: "account-one",
       login: "octocat",
       ...gitIdentity,
     };
@@ -499,7 +499,7 @@ describe("GitHub App desktop controller", () => {
         refreshBinding: binding("a"),
         expiresAtMs: 1_030_000,
         refreshTokenExpiresAtMs: 30_000_000,
-        ownerSub: "auth0|one",
+        ownerSub: "account-one",
         login: "octocat",
         ...gitIdentity,
       },
@@ -523,7 +523,7 @@ describe("GitHub App desktop controller", () => {
     expect(h.client.refresh).toHaveBeenCalledTimes(1);
   });
 
-  it("binds the exchanged credential to the current Auth0 subject", async () => {
+  it("binds the exchanged credential to the current account", async () => {
     const h = harness();
     await h.controller.begin({ scheme: "zeros", installFlow: true });
 
@@ -531,7 +531,7 @@ describe("GitHub App desktop controller", () => {
 
     expect(h.credential()).toMatchObject({
       method: "github-app",
-      ownerSub: "auth0|one",
+      ownerSub: "account-one",
       login: "octocat",
       installationCount: 1,
     });
@@ -553,7 +553,7 @@ describe("GitHub App desktop controller", () => {
       accessToken: "old-access",
       refreshToken: "old-refresh",
       refreshBinding: binding("c"),
-      ownerSub: "auth0|one",
+      ownerSub: "account-one",
       login: "old-user",
     };
     const h = harness({ credential: previous });
@@ -588,7 +588,7 @@ describe("GitHub App desktop controller", () => {
         refreshBinding: binding("c"),
         expiresAtMs: 1_030_000,
         refreshTokenExpiresAtMs: 9_000_000,
-        ownerSub: "auth0|one",
+        ownerSub: "account-one",
       },
     });
     h.client.refresh.mockImplementation(async () => gate.promise);
@@ -622,7 +622,7 @@ describe("GitHub App desktop controller", () => {
         refreshToken: "legacy-refresh",
         refreshBinding: binding("c"),
         refreshTokenExpiresAtMs: 9_000_000,
-        ownerSub: "auth0|one",
+        ownerSub: "account-one",
       },
     });
 
@@ -642,7 +642,7 @@ describe("GitHub App desktop controller", () => {
       refreshBinding: binding("c"),
       expiresAtMs: 1_030_000,
       refreshTokenExpiresAtMs: 9_000_000,
-      ownerSub: "auth0|one",
+      ownerSub: "account-one",
     };
     const h = harness({ credential: original });
     h.client.refresh.mockRejectedValueOnce(
@@ -678,7 +678,7 @@ describe("GitHub App desktop controller", () => {
         refreshBinding: binding("c"),
         expiresAtMs: 8_000_000,
         refreshTokenExpiresAtMs: 9_000_000,
-        ownerSub: "auth0|one",
+        ownerSub: "account-one",
         login: "octocat",
         repositoryCount: 2,
       },
@@ -702,9 +702,9 @@ describe("GitHub App desktop controller", () => {
         accessToken: "old-access",
         refreshToken: "old-refresh",
         refreshBinding: binding("c"),
-        ownerSub: "auth0|one",
+        ownerSub: "account-one",
       },
-      session: { accessToken: "zeros-two", sub: "auth0|two" },
+      session: { accessToken: "zeros-two", sub: "account-two" },
     });
 
     await expect(h.controller.refresh()).rejects.toBeInstanceOf(
@@ -721,7 +721,7 @@ describe("GitHub App desktop controller", () => {
         accessToken: "old-access",
         refreshToken: "old-refresh",
         refreshBinding: binding("c"),
-        ownerSub: "auth0|one",
+        ownerSub: "account-one",
       },
     });
     h.client.revoke.mockRejectedValueOnce(new Error("offline"));

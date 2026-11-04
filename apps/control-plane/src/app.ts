@@ -56,7 +56,6 @@ import { DEFAULT_SLOW_REQUEST_LOG_MS, requestTiming, type RequestCostObserverSta
 import { createDatabaseTimingReporter } from "./database-timing.js";
 import { observeDatabaseTiming, tracingMiddleware } from "./tracing.js";
 import { cloudAgentCredentialKeys } from "./agent-credentials/agent-credentials.js";
-import { Auth0BrowserSessionAuthority, createAuth0BrowserSessionRoutes } from "./auth0-browser-sessions.js";
 
 export type CreateAppDependencies = {
   /** Cloud workspace v2: creator routes under /v1 and the worker model proxy. */
@@ -177,11 +176,10 @@ export function createApp(
       c => cloudTokenBucket(c.req.header("authorization") ?? c.req.header("x-api-key") ?? "")));
     app.route("/", createCloudV2ProxyRoutes(dependencies.cloudV2.proxy));
   }
-  const workosProvider =
-    config.auth.provider === "workos" && config.workos
-      ? (dependencies.workosProvider ??
-        new RailwayWorkOSProvider(config.auth, config.workos))
-      : undefined;
+  const workosProvider = config.workos
+    ? (dependencies.workosProvider ??
+      new RailwayWorkOSProvider(config.auth, config.workos))
+    : undefined;
 
   // Health: no auth (Railway healthcheck), proves DB reachability.
   app.get("/healthz", async (c) => {
@@ -202,10 +200,7 @@ export function createApp(
 
   // Dev discovery exposes only the anonymous public-client configuration.
   app.route("/", createDevAuthConfigurationRoutes(config));
-  if (!pendingMigration && config.auth.provider === "auth0" && config.auth0SessionAuthorityKey) {
-    app.route("/", createAuth0BrowserSessionRoutes(new Auth0BrowserSessionAuthority(pool, config.auth0SessionAuthorityKey), config.auth0SessionAuthorityKey));
-  }
-  if (!pendingMigration && zerosDevAuthEnabled(config) && config.auth.provider === "workos" && config.workos) {
+  if (!pendingMigration && zerosDevAuthEnabled(config) && config.workos) {
     app.route("/", createZerosDevAuthRoutes(config, dependencies.zerosDevAuth ?? {
       repository: new DatabaseZerosDevAuthRepository(pool),
       provider: new ZerosDevWorkOSPasswordProvider(config.auth, config.workos),
@@ -215,7 +210,7 @@ export function createApp(
   // WorkOS browser/desktop auth precedes /v1 bearer middleware: these routes
   // authenticate with PKCE state, opaque HttpOnly cookies, webhook signatures
   // or a verified Desktop Application bearer.
-  if (config.auth.provider === "workos" && config.workos && workosProvider) {
+  if (config.workos && workosProvider) {
     const sessions = new WorkOSBrowserSessions(
       new PostgresWorkOSBrowserSessionRepository(pool),
       workosProvider,
@@ -348,7 +343,7 @@ export function createApp(
     await defaultBodyLimit(c, next);
   });
 
-  // Everything under /v1 requires a verified JWT from the selected provider.
+  // Everything under /v1 requires a verified WorkOS access token.
   app.use("/v1/*", createAuthMiddleware(config, pool));
 
   // Key the blanket mutation limit by verified user identity, after auth.
@@ -390,7 +385,7 @@ export function createApp(
     "/",
     createRoutes(pool, emailConfig, {
       cloudAgentCredentialKeys: cloudAgentCredentialKeys(config.cloudAgentCredentials ?? null),
-      workosEnabled: config.auth.provider === "workos",
+      workosEnabled: config.workos !== null,
       ...(workosProvider ? { workosProvider } : {}),
       inviteLinkBase: config.inviteLinkBase,
     }),

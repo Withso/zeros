@@ -244,7 +244,11 @@ export function WorkbenchTabFrame({
           status={status ?? (notice ? { tone: notice.tone, message: notice.message } : null)}
           active={visible}
           busy={snapshot.busy || notice?.action?.busy === true}
-          noticeAction={notice?.action}
+          noticeAction={
+            status?.command
+              ? { ...status.command, busyLabel: status.command.label, busy: false }
+              : notice?.action
+          }
           retry={retry}
           type={tab.type}
           singleFile={!!tab.filePath}

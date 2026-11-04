@@ -4,11 +4,12 @@ import { pathToFileURL } from "node:url";
 const channels = JSON.parse(readFileSync(new URL("../../apps/control-plane/src/cloud/channels.json", import.meta.url), "utf8"));
 
 /** Apply the checked-in pause before any cloud release decisions.
- * Existing environment opt-outs remain valid on channels that allow cloud. */
-export function releaseChannelEnvironment(channel, environment) {
-  if (!Object.hasOwn(channels, channel) || typeof channels[channel] !== "boolean")
+ * Existing environment opt-outs remain valid on channels that allow cloud.
+ * Tests pass `policy` to exercise a pause the checked-in file does not set. */
+export function releaseChannelEnvironment(channel, environment, policy = channels) {
+  if (!Object.hasOwn(policy, channel) || typeof policy[channel] !== "boolean")
     throw new Error("Unknown cloud release channel");
-  const allowed = channels[channel];
+  const allowed = policy[channel];
   if (allowed && ![undefined, "", "false", "true"].includes(environment.ZEROS_CLOUD_WORKSPACES_ENABLED))
     throw new Error("Invalid desktop cloud capability");
   return {

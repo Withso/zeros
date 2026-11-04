@@ -6,6 +6,9 @@ import { readWorkerToken, WORKER_TOKEN_FILE } from "./worker-token";
 import type { PromptOperation, Transport, TransportHandlers } from "./transport";
 import type { McpAuthorization } from "./mcp/gateway";
 import { CloudGithubCheckoutSchema, type CloudGithubCheckout } from "@zeros/protocol/cloud-github-pr";
+import { mcpFailure, mcpFailureError } from "./mcp/failure";
+import { CloudGithubUnavailableReasonSchema, type CloudGithubUnavailableReason } from "@zeros/protocol/cloud-github-connection";
+import { GITHUB_HTTP_TIMEOUT_MS } from "./credentials/github-failure";
 
 type ConfigFrame = Extract<CloudV2ControlFrame, { t: "config" }>;
 export type HybridStatus = "connected" | "disconnected" | "credential-unavailable" | "unauthorized" | "stopped" | "protocol-error";
@@ -14,7 +17,9 @@ interface Options {
   publicKeys?: readonly string[]; publicKeysFile?: string; port?: number; fetch?: typeof fetch;
   retryBaseMs?: number; retryMaxMs?: number; onStatus?: (status: HybridStatus) => void;
 }
-class HttpFailure extends Error { constructor(readonly status: number) { super("Worker control request failed."); } }
+class HttpFailure extends Error {
+  constructor(readonly status: number, readonly code?: "mcp_auth_required", readonly githubReason?: CloudGithubUnavailableReason) { super("Worker control request failed."); }
+}
 
 /** Live frames use authenticated loopback sockets. Durable control traffic
  * uses HTTPS independently, so it survives the final app disconnect. */
@@ -28,6 +33,7 @@ export class HybridTransport implements Transport {
   private recovering?: Promise<void>;
   private recoverRequested = false;
   private bootstrapped = false;
+  private checkoutFailed = false;
   private initialControls = 0;
   private releaseInitial!: () => void;
   private readonly initial = new Promise<void>(resolve => { this.releaseInitial = resolve; });
@@ -62,7 +68,7 @@ export class HybridTransport implements Transport {
     if (this.handlers || this.stopped) return;
     this.handlers = handlers; this.recover();
   }
-  async send(frame: CloudV2WorkerFrame): Promise<boolean> {
+  async send(frame: CloudV2WorkerFrame, options?: { timeoutMs: number }): Promise<boolean> {
     if (this.stopped || !this.registered || !CloudV2WorkerFrameSchema.safeParse(frame).success) return false;
     if (frame.t === "frame" || frame.t === "stop-ack") return this.listener.send(frame);
     // CloudWorker's internal hello hook carries capabilities for its fake
@@ -90,12 +96,13 @@ export class HybridTransport implements Transport {
     if (frame.t === "request") {
       // Do not await delivery into a configuring worker: checkout preparation
       // may already be waiting on this very credential request.
-      void this.request("github-token", frame.purpose ? { purpose: frame.purpose } : {}).then(value => {
+      void this.request("github-token", frame.purpose ? { purpose: frame.purpose } : {}, undefined,
+        Math.min(GITHUB_HTTP_TIMEOUT_MS, options?.timeoutMs ?? GITHUB_HTTP_TIMEOUT_MS)).then(value => {
         const reply = CloudV2ControlFrameSchema.safeParse({ t: "reply", id: frame.id, ...value });
         return this.handlers!.frame(reply.success ? reply.data : { t: "refusal", id: frame.id, code: "github_token_unavailable" });
       }).catch(async error => {
         if (error instanceof HttpFailure && error.status === 401) this.failed(error);
-        await this.handlers!.frame({ t: "refusal", id: frame.id, code: "github_token_unavailable" });
+        await this.handlers!.frame({ t: "refusal", id: frame.id, code: error instanceof HttpFailure ? error.githubReason ?? "unavailable" : "unavailable" });
       });
       return true;
     }
@@ -119,6 +126,17 @@ export class HybridTransport implements Transport {
     const reply = await this.request("github-checkout", input);
     if (reply.sequence !== input.sequence) throw new Error("Invalid GitHub checkout acknowledgement.");
   }
+  async reportCheckoutFailure(): Promise<void> {
+    this.checkoutFailed = true;
+    try {
+      const reply = await this.request("checkout-failed", {});
+      if (reply.ok !== true) throw new Error("Invalid checkout failure acknowledgement.");
+    } catch (error) {
+      if (error instanceof HttpFailure && error.status === 404) { this.checkoutFailed = false; return; }
+      throw error;
+    }
+    this.options.onStatus?.("stopped");
+  }
   reportTiming(record: CloudV2WorkerTiming): void {
     if (this.stopped || !this.registered || this.reportedTimings.has(record.phase)) return;
     const parsed = CloudV2WorkerTimingSchema.safeParse(record);
@@ -130,7 +148,16 @@ export class HybridTransport implements Transport {
   }
   async mcpAuthorization(id: string, force = false, signal?: AbortSignal): Promise<McpAuthorization> {
     if (!/^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/i.test(id)) throw new Error("Invalid MCP server identity.");
-    const reply = await this.request(`mcp/${id}/authorization`, { force }, signal, 35_000);
+    let reply: Record<string, unknown>;
+    try { reply = await this.request(`mcp/${id}/authorization`, { force }, signal, 35_000); }
+    catch (error) {
+      // This 401 authenticates the worker, not the user's MCP account.
+      if (error instanceof HttpFailure && error.status === 401) {
+        this.failed(error);
+        throw mcpFailureError({ source: "mcp", serverId: id, reason: "unreachable" });
+      }
+      throw mcpFailureError(mcpFailure(id, error));
+    }
     if (!reply.headers || typeof reply.headers !== "object" || Array.isArray(reply.headers) ||
       Object.keys(reply.headers).length > 128 || Object.entries(reply.headers).some(([key, value]) =>
         !/^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/.test(key) || typeof value !== "string" || value.length > 16384 || /[\r\n\0]/.test(value)) ||
@@ -142,6 +169,10 @@ export class HybridTransport implements Transport {
     if (this.stopped) return;
     if (this.recovering) { this.recoverRequested = true; return; }
     this.recovering = (async () => {
+      if (this.checkoutFailed) {
+        await this.reportCheckoutFailure();
+        if (this.checkoutFailed) return;
+      }
       if (!this.listening) {
         await this.listener.start(async frame => {
           // Hello marks the VM running before its HTTP response reaches us.
@@ -232,12 +263,15 @@ export class HybridTransport implements Transport {
     this.retry.unref();
   }
   private async request(path: string, body?: unknown, signal?: AbortSignal, timeoutMs = 10_000): Promise<Record<string, unknown>> {
+    const deadline = Date.now() + timeoutMs;
     const token = await readWorkerToken(this.options.tokenFile ?? WORKER_TOKEN_FILE);
     if (this.stopped) throw new Error("Worker stopped.");
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) throw new Error("Worker request timed out.");
     const controller = new AbortController(); this.requests.add(controller);
     const abort = () => controller.abort();
     if (signal?.aborted) abort(); else signal?.addEventListener("abort", abort, { once: true });
-    const timer = setTimeout(abort, timeoutMs); timer.unref();
+    const timer = setTimeout(abort, remaining); timer.unref();
     try {
       const payload = body === undefined ? undefined : JSON.stringify(body);
       if (payload && Buffer.byteLength(payload) > CLOUD_V2_MAX_FRAME_BYTES) throw new Error("Worker payload too large.");
@@ -245,10 +279,33 @@ export class HybridTransport implements Transport {
         method: payload === undefined ? "GET" : "POST", headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json", "X-Zeros-Worker-Boot": this.bootId,
           // An HTTP header is ignored by older control planes; adding a JSON
           // field would break their strict hello schema before configuration.
-          "X-Zeros-Worker-Features": "prompt-outbox-v1,mcp-v1,workspace-setup-v1,checkout-v2,github-pr-v1" },
+          "X-Zeros-Worker-Features": "prompt-outbox-v1,mcp-v1,workspace-setup-v1,checkout-v2,github-pr-v1,git-identity-v1" },
         ...(payload === undefined ? {} : { body: payload }), redirect: "error", signal: controller.signal,
       });
-      if (!response.ok) { await response.body?.cancel(); throw new HttpFailure(response.status); }
+      if (!response.ok) {
+        let code: "mcp_auth_required" | undefined, githubReason: CloudGithubUnavailableReason | undefined;
+        if ((path.startsWith("mcp/") && response.status === 409) || path === "github-token") {
+          const reader = response.body?.getReader();
+          const chunks: Uint8Array[] = []; let bytes = 0;
+          try {
+            while (reader) {
+              const chunk = await reader.read(); if (chunk.done) break;
+              bytes += chunk.value.byteLength; if (bytes > 8192) break;
+              chunks.push(chunk.value);
+            }
+            if (bytes <= 8192) {
+              const error = JSON.parse(Buffer.concat(chunks).toString("utf8"))?.error;
+              if (path.startsWith("mcp/") && error?.code === "mcp_auth_required") code = "mcp_auth_required";
+              if (path === "github-token" && error?.code === "github_token_unavailable") {
+                const reason = CloudGithubUnavailableReasonSchema.safeParse(error.reason);
+                if (reason.success) githubReason = reason.data;
+              }
+            }
+          } catch { /* Only the confirmed code can name a provider sign-in problem. */ }
+          finally { await reader?.cancel(); }
+        } else await response.body?.cancel();
+        throw new HttpFailure(response.status, code, githubReason);
+      }
       const reader = response.body?.getReader();
       if (!reader) throw new Error("Empty worker control response.");
       const chunks: Uint8Array[] = []; let bytes = 0;

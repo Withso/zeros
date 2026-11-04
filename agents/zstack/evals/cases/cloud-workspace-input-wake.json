@@ -1,0 +1,9 @@
+{
+  "id": "cloud-workspace-input-wake",
+  "kind": "replay",
+  "area": "renderer-state",
+  "fixedBy": "pr:812",
+  "symptom": "Typing into a stopped cloud workspace did not start its VM, while navigation could reverse a pending shutdown or restore an archived workspace.",
+  "rule": "Capture trusted input once at the active surface, share explicit wake intent with navigation and saves, and fence it by exact owner and lifecycle (principles 1, 9, 12, 15).",
+  "check": "pnpm test:git apps/desktop/src/renderer/state/__tests__/cloud-workspace-interaction.test.ts apps/desktop/src/renderer/state/__tests__/cloud-workspace-wake.test.ts apps/desktop/src/renderer/platform/bridge/__tests__/open-cloud-v2-runtime.test.ts"
+}

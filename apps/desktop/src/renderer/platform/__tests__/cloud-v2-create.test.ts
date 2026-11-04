@@ -10,7 +10,7 @@ vi.mock("../../features/team/control-plane", () => ({
 }));
 import { createCloudWorkspaceDocument } from "../cloud-workspaces";
 import { subscribeCloudPromptErasure } from "../cloud-prompt-erasure";
-import { changeCloudV2Workspace, getCloudV2InstalledRepositories } from "../cloud-v2";
+import { changeCloudV2Workspace, connectCloudV2Workspace, getCloudV2InstalledRepositories } from "../cloud-v2";
 
 const organizationId = "11111111-1111-4111-8111-111111111111";
 const session = { access_token: "synthetic-session", user: { sub: "provider-subject", accountId: "55555555-5555-4555-8555-555555555555" } };
@@ -28,7 +28,26 @@ function body(fetch: { mock: { calls: unknown[][] } }, call = 0) {
 beforeEach(() => { state.generation = 0; state.session.mockReset().mockResolvedValue(session); });
 afterEach(() => vi.unstubAllGlobals());
 
+it.each([true, false])("negotiates explicit waking without changing the N-1 connect body (wake=%s)", async wake => {
+  const target = { organizationId, workspaceId: workspace("main").id };
+  const ticket = { url: `wss://api.example.test/v2/cloud/workspaces/${target.workspaceId}/bridge`,
+    protocols: ["zeros.cloud.v2", `ticket.zw2c_${"a".repeat(43)}`], expiresAt: new Date(Date.now() + 60_000).toISOString() };
+  const fetch = vi.fn(async (_url: string, _init?: RequestInit) => Response.json(ticket)); vi.stubGlobal("fetch", fetch);
+  await expect(connectCloudV2Workspace(target, { wake })).resolves.toEqual(ticket);
+  expect(fetch.mock.calls[0]![0]).toBe(`https://api.example.test/v1/cloud-v2/workspaces/${target.workspaceId}/connect?wakePolicy=explicit`);
+  expect(body(fetch)).toEqual({ wake });
+});
+
 describe("cloud v2 create", () => {
+  it.each([
+    [404, "repository_branch_not_found", "Branch missing/topic does not exist in Example/Fixture."],
+    [409, "cloud_computer_rebuild_required", "Rebuild the Cloud Computer in Settings → Cloud Computer before creating a workspace."],
+    [409, "cloud_computer_rebuild_required", "Ask an organization admin to rebuild the Cloud Computer in Settings → Cloud Computer before creating a workspace."],
+  ] as const)("preserves the server's %s %s message for the existing Create error surface", async (status, code, message) => {
+    vi.stubGlobal("fetch", vi.fn(async () => Response.json({ error: { code, message } }, { status })));
+    await expect(createCloudWorkspaceDocument({ organizationId, idempotencyKey: "rejected-intent",
+      repository: { owner: "Example", name: "Fixture" }, baseBranch: "missing/topic" })).rejects.toMatchObject({ status, code, message });
+  });
   // The worker runs `git switch -c <branch> origin/<baseBranch>`, so a full
   // ref such as refs/heads/main can never be checked out.
   it("sends the repository slug and a plain base branch with the caller's idempotency key", async () => {

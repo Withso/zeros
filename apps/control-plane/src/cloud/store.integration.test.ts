@@ -7,6 +7,7 @@ import { CloudV2Store } from "./store.js";
 import { createCloudV2Routes, type CloudV2RouteDeps } from "./routes.js";
 import { createCloudV2WorkerRoutes } from "./worker-routes.js";
 import { HttpError } from "../authz.js";
+import { grantTestPro } from "../test-pro.js";
 
 const d = process.env.TEST_DATABASE_URL ? describe : describe.skip;
 
@@ -20,6 +21,7 @@ d("cloud v2 store", () => {
   async function user(): Promise<string> {
     const id = randomUUID();
     await pool.query(`INSERT INTO users (id, email, display_name) VALUES ($1, $2, 'User')`, [id, `u-${id}@example.test`]);
+    await grantTestPro(pool, id);
     return id;
   }
 
@@ -39,6 +41,78 @@ d("cloud v2 store", () => {
   const create = () => store.createWorkspace({
     id: randomUUID(), organizationId: org, creatorUserId: creator, name: "zeros", repository: "withso/zeros", branch: "zeros/w", baseBranch: "main",
     computerBuildId: null,
+  });
+
+  function checkoutFailureApi() {
+    const app = new Hono();
+    app.onError((error, c) => error instanceof HttpError ? c.json({ error: { code: error.code } }, error.status) : c.json({ error: "internal" }, 500));
+    app.route("/", createCloudV2WorkerRoutes({ store, runtimeSha256: "a".repeat(64),
+      config: async () => { throw new Error("Unexpected config read"); },
+      githubToken: async () => { throw new Error("Unexpected credential read"); } }));
+    return (token: string, boot: string) => app.request("/v2/cloud/worker/checkout-failed", { method: "POST",
+      headers: { authorization: `Bearer ${token}`, "x-zeros-worker-boot": boot, "content-type": "application/json" }, body: "{}" });
+  }
+
+  it("records a checkout failure after hello and preserves the first failure on an HTTP retry", async () => {
+    const w = await create(), token = await store.rotateWorkerToken(w.id), boot = randomUUID();
+    await store.acceptWorkerHello(token, boot);
+    const report = checkoutFailureApi();
+    expect((await report(token, boot)).status).toBe(200);
+    const failed = await store.get(w.id, creator);
+    expect(failed).toMatchObject({ state: "failed", errorCode: "cloud_source_checkout_failed", repository: w.repository });
+    expect(await store.acceptWorkerHello(token, boot)).toBeNull();
+    expect((await report(token, boot)).status).toBe(200);
+    expect(await store.get(w.id, creator)).toEqual(failed);
+  });
+
+  it.each(["new boot", "new wake", "stop", "membership"] as const)("fences checkout failure when %s changes during its session read", async change => {
+    const w = await create(), token = await store.rotateWorkerToken(w.id), boot = randomUUID();
+    await store.acceptWorkerHello(token, boot);
+    const original = store.workerSession.bind(store);
+    let changed = false;
+    vi.spyOn(store, "workerSession").mockImplementationOnce(async (...args) => {
+      const session = await original(...args);
+      expect(session).not.toBeNull();
+      if (change === "new boot") expect(await store.acceptWorkerHello(token, randomUUID())).not.toBeNull();
+      else if (change === "new wake") {
+        await store.transition(w.id, ["running"], "stopped");
+        expect((await store.requestLifecycle(w.id, creator, "start")).workspace.state).toBe("starting");
+      } else if (change === "stop") expect((await store.requestLifecycle(w.id, creator, "stop")).workspace.state).toBe("stopping");
+      else await pool.query("DELETE FROM organization_members WHERE org_id=$1 AND user_id=$2", [org, creator]);
+      changed = true;
+      return session;
+    });
+    expect((await checkoutFailureApi()(token, boot)).status).toBe(401);
+    expect(changed).toBe(true);
+    const current = (await pool.query("SELECT state,error_code FROM cloud_v2_workspaces WHERE id=$1", [w.id])).rows[0];
+    expect(current.state).not.toBe("failed");
+    expect(current.error_code).toBeNull();
+  });
+
+  it("never restores an archive committed while explicit connect is awaiting source authorization", async () => {
+    const workspace = await create();
+    await store.transition(workspace.id, ["creating"], "stopped");
+    let release!: () => void, authorizing = false;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    await pool.query(`INSERT INTO user_identities (user_id, provider, provider_sub, email_at_link)
+      VALUES ($1::uuid, 'workos', ($1::uuid)::text, 'fixture@example.test')`, [creator]);
+    const app = new Hono();
+    app.use("*", async (c, next) => { c.set("user", { id: creator, accountRevision: 1,
+      identity: { provider: "workos", subject: creator }, authentication: { sessionId: null, tokenExpiresAt: null } } as never); await next(); });
+    app.onError((error, c) => error instanceof HttpError ? c.json({ error: { code: error.code } }, error.status) : c.json({ error: "internal" }, 500));
+    app.route("/", createCloudV2Routes({ store, bridgeBaseUrl: "wss://api.example.test",
+      authorizeSource: async () => { authorizing = true; await gate; },
+    } as CloudV2RouteDeps));
+    const connecting = app.request(`/v1/cloud-v2/workspaces/${workspace.id}/connect?wakePolicy=explicit`, {
+      method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ wake: true }),
+    });
+    try {
+      await vi.waitFor(() => expect(authorizing).toBe(true));
+      expect((await store.requestLifecycle(workspace.id, creator, "archive")).workspace.archivedAt).not.toBeNull();
+    } finally { release(); }
+    expect((await connecting).status).toBe(409);
+    expect(await store.get(workspace.id, creator)).toMatchObject({ state: "stopped", archivedAt: expect.any(String) });
+    expect((await pool.query("SELECT count(*)::int AS n FROM cloud_v2_tokens WHERE workspace_id=$1 AND kind='connect'", [workspace.id])).rows[0].n).toBe(0);
   });
 
   it.each([false, true])("records real worker activity through a GitHub outage before an idle-stop race (outbox=%s)", async promptOutbox => {

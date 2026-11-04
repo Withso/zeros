@@ -31,6 +31,21 @@ it("retains exact-owner covers after a scoped mutation without promoting uncheck
   expect(projectDesignMutationSnapshot(previous, next).preparation!.epoch).not.toBe(projected.preparation!.epoch);
 });
 
+it("keeps other frames' confirmed lint across a scoped mutation", () => {
+  const violation = (file: string) => ({ ruleId: "local-refs-only", severity: "error" as const, message: "Outside reference.", file, line: 1, column: 1 });
+  const previous = { ...snapshot(), frames: [frame("f0.html"), frame("f1.html")],
+    lint: { workspacePath: "/fixture", checkedFiles: ["f1.html", "f2.html"], violations: [violation("f1.html"), violation("f2.html"), violation("tokens.css")], healedOids: 0 } };
+  const edited = { ...frame("f0.html"), sourceVersion: "b".repeat(24) };
+  const next = { ...snapshot(), preparation: undefined, frames: [edited], mutationCatalog: { revision: "b".repeat(64),
+    frames: [edited, frame("f1.html")].map((frame, order) => ({ ...frame, id: frame.frameId!, pageId: frame.pageId!, source: frame.file,
+      kind: "html" as const, order, preparation: "unprepared" as const })) } };
+  const projected = projectDesignMutationSnapshot(previous, next);
+  // f2.html left the catalog; f1.html and the shared stylesheet keep their rows.
+  expect(projected.lint.violations.map((row) => row.file)).toEqual(["f1.html", "tokens.css"]);
+  expect(projected.lint.checkedFiles).toEqual(["f1.html"]);
+  expect(projectDesignMutationSnapshot({ ...previous, directoryId: "design_other" }, next).lint.violations).toEqual([]);
+});
+
 it("does not fabricate a prepared generation from metadata or a previous matching hash", () => {
   const value = snapshot(); value.frames = [frame("f0.html")];
   const views = designFrameViews(value);

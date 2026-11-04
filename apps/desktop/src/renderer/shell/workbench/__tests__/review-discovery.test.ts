@@ -5,6 +5,8 @@ import type { Workspace } from "../../../platform/git";
 import { publishWorkspacePrDiscovery } from "../../pr/workspace-pr-discovery-state";
 import { forgetPrCachesForWorkspace } from "../../pr/pr-cache-forget";
 import { ReviewSurface } from "../tabs/review-surface";
+import { ghAuthStatusCache } from "../../../state/read-caches";
+import { describeWorkbenchFailure } from "../tab-status-model";
 
 const GITHUB_ORIGIN = "https://github.com/fixture/repo.git";
 const fixture = vi.hoisted(() => ({ workspace: null as Workspace | null, status: vi.fn(), origin: "https://github.com/fixture/repo.git" }));
@@ -28,6 +30,7 @@ function render() {
 afterEach(() => {
   if (fixture.workspace) forgetPrCachesForWorkspace(fixture.workspace.id);
   fixture.workspace = null; fixture.status.mockClear(); fixture.origin = GITHUB_ORIGIN;
+  ghAuthStatusCache.clear();
 });
 
 describe("Review on another Git host", () => {
@@ -52,6 +55,24 @@ describe.each([null, "organization"])("PR discovery for Local owner %s", organiz
     publishWorkspacePrDiscovery("ws-review", { pending: false, checked: false, error });
     expect(render()).not.toContain("No pull request");
     expect(fixture.status).toHaveBeenCalledWith(expect.objectContaining({ error, retry: expect.any(Function) }), expect.any(String));
+  });
+
+  it("names the GitHub connection Settings reports when discovery is refused", () => {
+    fixture.workspace = { id: "ws-review", path: "/workspace", repoSlug: "fixture", prNumber: null, placement: "local", organizationId } as Workspace;
+    ghAuthStatusCache.setData("auth", {
+      selectedMethod: "github-app",
+      methods: {
+        "gh-cli": { method: "gh-cli", health: "not-connected", configured: false },
+        "github-app": { method: "github-app", health: "unavailable", configured: true, login: "octocat", detail: "This GitHub connection needs to be re-authorized." },
+        pat: { method: "pat", health: "not-connected", configured: false },
+      },
+    });
+    const error = Object.assign(new Error("Not signed in to GitHub"), { code: "NOT_AUTHENTICATED" });
+    publishWorkspacePrDiscovery("ws-review", { pending: false, checked: false, error });
+    render();
+    const [source] = fixture.status.mock.calls.at(-1)!;
+    expect(describeWorkbenchFailure("review", source.error).message)
+      .toBe("This GitHub connection needs to be re-authorized.");
   });
 
   it("shows the empty state only after a successful lookup found no PR", () => {

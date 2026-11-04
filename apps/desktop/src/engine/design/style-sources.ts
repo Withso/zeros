@@ -34,6 +34,7 @@ import { designStyleCache, designStyleCacheKey } from "./style-cache";
 import { designDependencyFingerprint, isDesignDependencyCaptureActive, observeDesignDependencyCheck, observeDesignFileDependency } from "./dependency-read-set";
 import {
   concatDesignCssIndexes,
+  designCssRuleCount,
   designFrameFeatures,
   indexDesignCss,
   measureDesignFrameSources,
@@ -111,6 +112,9 @@ export interface DesignStyleSourceStatus {
   messages: DesignStyleSourceMessage[];
   themes: string[];
   tokens: DesignStyleSourceToken[];
+  /** Style rules, font faces and keyframes in the imported CSS. Absent for
+   * Tailwind, whose utilities depend on each frame, and from older engines. */
+  rules?: number;
   bytes: number;
   /** Content hash of the imported CSS; null when nothing can be imported. */
   revision: string | null;
@@ -805,6 +809,7 @@ async function importCssSource(
     status: statusLevel(messages),
     messages,
     tokens: imported.tokens,
+    rules: designCssRuleCount(index),
     bytes: Buffer.byteLength(css, "utf8"),
     revision: createHash("sha256").update(css).digest("hex").slice(0, 24),
     css,
@@ -1134,6 +1139,7 @@ async function loadSassGeneration(root: string, declaration: DesignStyleSourceDe
     status: statusLevel(messages),
     messages,
     tokens: imported.tokens,
+    rules: designCssRuleCount(index),
     bytes: Buffer.byteLength(css, "utf8"),
     revision: createHash("sha256").update(css).digest("hex").slice(0, 24),
     css,
@@ -1447,6 +1453,7 @@ async function appFontsSource(
       value: `"${font.family}", ${font.fallback ?? "sans-serif"}`,
       themeValues: {},
     })),
+    rules: designCssRuleCount(index),
     bytes: Buffer.byteLength(css, "utf8"),
     revision: css ? createHash("sha256").update(css).digest("hex").slice(0, 24) : null,
     css: css || null,
@@ -1592,4 +1599,61 @@ export async function frameStyleSources(
     if (entry.tailwind) assertTailwindFrameBudget(css);
     return { id: entry.id, css, revision: revisions[at]! };
   });
+}
+
+/** Unpruned base rules and independent utility output from the render
+ * generation. Missing imports make its class vocabulary unknown, not empty. */
+export async function designTailwindClassSource(
+  workspacePath: string,
+  declaration: DesignStyleSourceDeclaration,
+): Promise<{
+  revision: string;
+  css: string;
+  candidatesToCss: Awaited<ReturnType<typeof compileDesignTailwind>>["candidatesToCss"];
+} | null> {
+  if (designStyleSourcePathError(declaration.path)) return null;
+  const generation = await tailwindGeneration(workspacePath, declaration);
+  const revision = generation.result.revision;
+  if (!revision || generation.result.status === "error" || generation.entryProblem || generation.skippedImports.length) return null;
+  const key = designStyleCacheKey(path.resolve(workspacePath), "tailwind-classes", `${JSON.stringify(declaration)}\0${revision}`);
+  let pending = designStyleCache.get<Promise<{
+    revision: string;
+    css: string;
+    candidatesToCss: Awaited<ReturnType<typeof compileDesignTailwind>>["candidatesToCss"];
+  }>>(key);
+  if (!pending) {
+    pending = compileDesignTailwind(
+      { file: declaration.path, content: generation.files.get(declaration.path) ?? "" },
+      async (file) => generation.files.get(file) ?? null,
+    ).then((compiler) => ({ revision, css: compiler.build([]), candidatesToCss: compiler.candidatesToCss }));
+    // Reserve room for Tailwind's bounded internal candidate/AST memoization,
+    // in addition to the input strings retained by its stylesheet loader.
+    designStyleCache.set(key, pending, generationBytes(generation) * 4 + 4 * 1024 * 1024);
+  }
+  try {
+    return await pending;
+  } catch {
+    designStyleCache.delete(key);
+    return null;
+  }
+}
+
+/** App fonts depend on the selected sources' imports. Partial or pending
+ * font stylesheets cannot establish a complete class vocabulary for lint. */
+export async function designFrameClassFonts(
+  workspacePath: string,
+  canvas: object,
+  fontImports: readonly string[],
+): Promise<{ source: ResolvedDesignStyleSource | null; complete: boolean }> {
+  const generation = designFontsGeneration();
+  const source = await appFontsSource(workspacePath, canvas, fontImports);
+  if (!source) return { source, complete: true };
+  if (source.status !== "ready" || source.revision === null) return { source, complete: false };
+  const catalog = readDesignFontCatalog(canvas);
+  const states = await Promise.all([
+    ...catalog.fonts.filter((font) => font.provider === "google").map((font) =>
+      googleFontsCss(googleFontsCssUrl(font), workspacePath, font.subsets ?? ["latin"])),
+    ...[...new Set(fontImports)].map((url) => googleFontsCss(url, workspacePath)),
+  ]);
+  return { source, complete: generation === designFontsGeneration() && states.every((state) => state.state === "ready") };
 }

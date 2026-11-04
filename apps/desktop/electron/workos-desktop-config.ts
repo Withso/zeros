@@ -1,6 +1,6 @@
-// Provider-neutral desktop authentication configuration. Public WorkOS values
-// are baked into Electron main at release compile time; secrets are neither
-// accepted nor represented by this module.
+// Desktop authentication configuration. Public WorkOS values are baked into
+// Electron main at release compile time; secrets are neither accepted nor
+// represented by this module. A build without them has no sign-in.
 
 declare const __ZEROS_AUTH_PROVIDER_BAKED__: string | undefined;
 declare const __ZEROS_AUTH_DESKTOP_CLIENT_ID_BAKED__: string | undefined;
@@ -9,7 +9,7 @@ declare const __ZEROS_AUTH_JWKS_URL_BAKED__: string | undefined;
 declare const __ZEROS_AUTH_AUDIENCE_BAKED__: string | undefined;
 
 export type DesktopAuthConfig =
-  | { provider: "auth0" }
+  | { provider: "none" }
   | {
       provider: "workos";
       desktopClientId: string;
@@ -55,11 +55,11 @@ function exactHttpsUrl(value: string | undefined, name: string): string {
 export function resolveDesktopAuthConfig(
   input: DesktopAuthConfigInput,
 ): DesktopAuthConfig {
-  const provider = (input.provider ?? "auth0").trim().toLowerCase();
-  if (provider === "auth0") return { provider };
-  if (provider !== "workos") {
-    throw new Error("Desktop authentication provider must be auth0 or workos");
+  const provider = (input.provider ?? "").trim().toLowerCase();
+  if (provider !== "" && provider !== "workos") {
+    throw new Error("Desktop authentication provider must be workos");
   }
+  if (!provider && !input.desktopClientId?.trim()) return { provider: "none" };
   const desktopClientId = required(
     input.desktopClientId,
     "AUTH_DESKTOP_CLIENT_ID",
@@ -68,7 +68,7 @@ export function resolveDesktopAuthConfig(
     throw new Error("AUTH_DESKTOP_CLIENT_ID must be a WorkOS client ID");
   }
   return {
-    provider,
+    provider: "workos",
     desktopClientId,
     issuer: exactHttpsUrl(input.issuer, "AUTH_ISSUER"),
     jwksUrl: exactHttpsUrl(input.jwksUrl, "AUTH_JWKS_URL"),
@@ -89,8 +89,7 @@ export function desktopAuthConfig(): DesktopAuthConfig {
         typeof __ZEROS_AUTH_PROVIDER_BAKED__ === "string"
           ? __ZEROS_AUTH_PROVIDER_BAKED__
           : "",
-      ) ||
-      "auth0",
+      ),
     desktopClientId:
       process.env.AUTH_DESKTOP_CLIENT_ID?.trim() ||
       baked(

@@ -1,6 +1,8 @@
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { RuntimeClient, type RuntimeClientEnvironment, type RuntimeTransportSocket } from "../runtime-client";
 import { classifyRpcError } from "../failure";
+import WebSocket, { WebSocketServer } from "ws";
+import type { AddressInfo } from "node:net";
 
 class Socket implements RuntimeTransportSocket {
   readyState = 0;
@@ -22,6 +24,7 @@ beforeEach(() => vi.useFakeTimers());
 afterEach(() => { for (const client of clients.splice(0)) client.dispose(); vi.useRealTimers(); });
 function fixture(local = false) {
   const sockets: Socket[] = [];
+  const offers: Array<string[] | undefined> = [];
   const target = {
     kind: "cloud" as const, channel: "v2-websocket" as const,
     runtimeId: "11111111-1111-4111-8111-111111111111", organizationId: "22222222-2222-4222-8222-222222222222",
@@ -32,7 +35,7 @@ function fixture(local = false) {
   };
   const environment: RuntimeClientEnvironment = {
     controlPlaneOrigin: "https://api.example.test", allowHttpLoopback: false,
-    createWebSocket: () => { const socket = new Socket(); sockets.push(socket); return socket as unknown as WebSocket; },
+    createWebSocket: (_url, protocols) => { offers.push(protocols); const socket = new Socket(); sockets.push(socket); return socket as unknown as globalThis.WebSocket; },
     resolveEnginePort: async () => 29920, resolveEngineToken: async () => "synthetic",
     invalidateEnginePort() {}, invalidateEngineToken() {}, getAuthAccessToken: () => null,
     logger: { warn: vi.fn(), error: vi.fn() },
@@ -46,8 +49,64 @@ function fixture(local = false) {
     await vi.advanceTimersByTimeAsync(0);
     expect(client.status).toBe("connected");
   };
-  return { client, sockets, refresh, ready };
+  return { client, sockets, refresh, ready, offers, target, environment };
 }
+
+it.each([true, false])("rejects stopped-worker admission and queued writes promptly (handshake completed: %s)", async ready => {
+  const h = fixture(); await h.client.connect();
+  if (ready) await h.ready(h.sockets[0]);
+  else h.sockets[0].open();
+  let readyFailure: unknown, writeFailure: unknown;
+  const waiting = h.client.waitUntilReady().catch(error => { readyFailure = error; });
+  const writing = h.client.request({ type: "WORKSPACE_REQUEST", op: "file.write", params: { path: "draft.txt", content: "draft" } })
+    .catch(error => { writeFailure = error; });
+  h.sockets[0].close(4009);
+  await vi.advanceTimersByTimeAsync(0);
+  expect(h.client.lastRejection).toMatchObject({ reason: "cloud-transient", code: "cloud_workspace_not_running" });
+  if (!ready) expect(readyFailure).toBeInstanceOf(Error);
+  expect(writeFailure).toBeInstanceOf(Error);
+  expect(h.refresh).not.toHaveBeenCalled();
+  await waiting; await writing;
+  await vi.advanceTimersByTimeAsync(60_000);
+  expect(h.sockets).toHaveLength(1);
+});
+
+it.each([true, false])("offers explicit-wake negotiation only for cloud (local: %s)", async local => {
+  const h = fixture(local); await h.client.connect();
+  expect(h.offers[0]).toEqual(local ? undefined : [...h.target.protocols, "zeros.cloud.v2.explicit-wake"]);
+});
+
+it("connects a new client to an N-1 server that selects the original bridge protocol", async () => {
+  vi.useRealTimers();
+  const server = new WebSocketServer({ port: 0, host: "127.0.0.1", handleProtocols: () => "zeros.cloud.v2" });
+  await new Promise<void>(resolve => server.once("listening", resolve));
+  const origin = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+  const h = fixture();
+  let offered = "", selected = "";
+  server.on("connection", (ws, request) => {
+    offered = String(request.headers["sec-websocket-protocol"]); selected = ws.protocol;
+    ws.on("message", raw => {
+      const frame = JSON.parse(String(raw));
+      if (frame.type === "WORKSPACE_REQUEST") ws.send(JSON.stringify({ type: "WORKSPACE_RESPONSE", id: "reply", timestamp: Date.now(),
+        source: "engine", requestId: frame.id, op: frame.op, result: frame.op === "workspace.list" ? { workspaces: [] } : { kind: "success" } }));
+    });
+  });
+  const client = new RuntimeClient({ ...h.target, url: `${origin.replace("http:", "ws:")}/v2/cloud/workspaces/${h.target.workspaceId}/bridge` }, {
+    environment: { ...h.environment, allowHttpLoopback: true, controlPlaneOrigin: origin,
+      createWebSocket: (url, protocols) => new WebSocket(url, protocols) as unknown as globalThis.WebSocket },
+  });
+  clients.push(client);
+  try {
+    await client.connect(); await client.waitUntilReady();
+    expect(offered.split(/, */)).toContain("zeros.cloud.v2.explicit-wake");
+    expect(selected).toBe("zeros.cloud.v2");
+    await expect(client.request({ type: "WORKSPACE_REQUEST", op: "file.write", params: { path: "draft.txt", content: "draft" } }))
+      .resolves.toMatchObject({ result: { kind: "success" } });
+  } finally {
+    client.dispose(); for (const ws of server.clients) ws.terminate();
+    await new Promise<void>(resolve => server.close(() => resolve()));
+  }
+});
 
 it("refreshes a dropped cloud bridge immediately and flushes only unsent work after the handshake", async () => {
   const h = fixture(); await h.client.connect(); await h.ready(h.sockets[0]);

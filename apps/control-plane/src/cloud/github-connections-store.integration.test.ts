@@ -81,6 +81,25 @@ database("cloud GitHub connection ownership and rotation", () => {
     await expect(store.credential(scope(), refresh)).rejects.toMatchObject({ status: 503, code: "github_refresh_uncertain" });
     expect(refresh).toHaveBeenCalledTimes(1);
   });
+  it("joins another replica's active refresh lease without reusing the rotating refresh token", async () => {
+    await store.save(scope(), await store.fingerprint(scope()), identity, { ...app, expiresAt: Date.now() - 1 });
+    let finish!: (value: typeof app) => void;
+    const refresh = vi.fn(() => new Promise<typeof app>(resolve => { finish = resolve; }));
+    const first = store.credential(scope(), refresh);
+    await vi.waitFor(() => expect(refresh).toHaveBeenCalledOnce());
+    const other = new CloudGithubConnectionStore(pool, keys);
+    const reads = vi.spyOn(other as unknown as { read: (value: ReturnType<typeof scope>) => Promise<unknown> }, "read");
+    const second = other.credential(scope(), refresh).then(value => ({ value }), error => ({ error }));
+    try {
+      await vi.waitFor(() => expect(reads.mock.calls.length).toBeGreaterThanOrEqual(2));
+      await reads.mock.results[1]!.value;
+    } finally {
+      finish({ ...app, accessToken: "synthetic-renewed-by-first-replica" });
+    }
+    expect((await first).material.accessToken).toBe("synthetic-renewed-by-first-replica");
+    expect(await second).toMatchObject({ value: { material: { accessToken: "synthetic-renewed-by-first-replica" } } });
+    expect(refresh).toHaveBeenCalledOnce();
+  });
   it("fingerprints the confirmed database identity across equivalent UUID spellings", async () => {
     await save();
     const canonical = await store.fingerprint(scope());
@@ -176,6 +195,21 @@ database("cloud GitHub connection ownership and rotation", () => {
     await expect(
       store.credential({ userId: otherUserId, organizationId }),
     ).rejects.toMatchObject({ code: "github_connection_required" });
+  });
+  it("fences stored author metadata to the selected member and connection generation", async () => {
+    await save();
+    const selected = await store.selectedIdentity(scope());
+    expect(selected?.identity).toEqual(identity);
+    expect(Object.keys(selected!).sort()).toEqual(["assertCurrent", "identity"]);
+    expect(await store.selectedIdentity({ userId: otherUserId, organizationId })).toBeNull();
+    await store.disconnect(scope(), await store.fingerprint(scope()), "pat");
+    expect(await store.selectedIdentity(scope())).toBeNull();
+    await expect(selected!.assertCurrent()).rejects.toMatchObject({ code: "github_authorization_changed" });
+    await save();
+    const reconnected = await store.selectedIdentity(scope());
+    await pool.query("DELETE FROM organization_members WHERE org_id=$1 AND user_id=$2", [organizationId, userId]);
+    await expect(reconnected!.assertCurrent()).rejects.toMatchObject({ code: "not_found" });
+    await expect(store.selectedIdentity(scope())).rejects.toMatchObject({ code: "not_found" });
   });
   it("preserves inactive methods while selecting the explicit connection", async () => {
     await store.save(

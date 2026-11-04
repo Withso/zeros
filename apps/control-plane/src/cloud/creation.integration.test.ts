@@ -4,26 +4,55 @@ import { Hono } from "hono";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { HttpError } from "../authz.js";
 import { resetMigratedTestDatabase } from "../test-database.js";
+import { grantTestPro } from "../test-pro.js";
 import { CloudV2Computers } from "./computer.js";
-import { createCloudV2Routes } from "./routes.js";
+import { createCloudV2Routes, type CloudV2RouteDeps } from "./routes.js";
 import { CloudV2Store } from "./store.js";
 
 const suite = process.env.TEST_DATABASE_URL ? describe : describe.skip;
 suite("durable cloud create requests", () => {
   let pool: pg.Pool, store: CloudV2Store, computers: CloudV2Computers, org: string, creator: string, member: string, buildId: string;
+  let remoteHead: ReturnType<typeof vi.fn<CloudV2RouteDeps["remoteHead"]>>;
   beforeAll(() => { pool = new pg.Pool({ connectionString: process.env.TEST_DATABASE_URL, max: 4 }); });
   afterAll(async () => pool.end());
   beforeEach(async () => {
     await resetMigratedTestDatabase(pool);
+    remoteHead = vi.fn(async () => "a".repeat(40));
     store = new CloudV2Store(pool); computers = new CloudV2Computers(pool, pool, async (_org, _user, target) => ({ repository: target.repository, repositoryId: "42" }));
     org = randomUUID(); creator = randomUUID(); member = randomUUID();
     for (const id of [creator, member]) await pool.query("INSERT INTO users(id,email,display_name) VALUES($1,$2,'User')", [id, `${id}@example.test`]);
+    await grantTestPro(pool, creator, member);
     await pool.query(`INSERT INTO organizations(id,slug,name,created_by,is_personal,cloud_workspaces_allowed)
       VALUES($1,$2,'Org',$3,false,true)`, [org, `org-${org}`, creator]);
     await pool.query("INSERT INTO organization_members(org_id,user_id,role) VALUES($1,$2,'owner'),($1,$3,'member')", [org, creator, member]);
     const build = await computers.enqueue(org, creator, { repositories: [{ repository: "example/project", branch: "master", setup: "pnpm install" }] });
     buildId = build.id;
     await computers.claim(); await computers.activate(build.id, "test-snapshot");
+  });
+
+  it.each(["missing", "unavailable"])("refuses a %s base before persisting a workspace or its creation receipt", async outcome => {
+    if (outcome === "missing") remoteHead.mockResolvedValue(null);
+    else remoteHead.mockRejectedValue(new HttpError(503, "github_unavailable", "GitHub is unavailable"));
+    const response = await api()("invalid-base", { baseBranch: "missing/topic" });
+    expect(response.status).toBe(outcome === "missing" ? 404 : 503);
+    expect(await response.json()).toEqual({ error: { code: outcome === "missing" ? "repository_branch_not_found" : "github_unavailable" } });
+    expect(remoteHead).toHaveBeenCalledWith(org, creator, { repository: "example/project", repositoryId: "42" }, "missing/topic");
+    expect(await store.list(org, creator)).toEqual([]);
+    expect((await pool.query("SELECT count(*)::int AS n FROM cloud_v2_create_requests WHERE creator_user_id=$1", [creator])).rows[0].n).toBe(0);
+  });
+
+  it("refuses legacy Computer creation until a fresh manual build becomes active", async () => {
+    await pool.query("UPDATE cloud_v2_computer_builds SET source_policy_version=1 WHERE id=$1", [buildId]);
+    expect(await store.activeComputer(org)).toBeNull();
+    const before = await api(member)("legacy");
+    expect(before.status).toBe(409);
+    expect(await before.json()).toEqual({ error: { code: "cloud_computer_rebuild_required" } });
+    const queued = await computers.buildConfigured(org, creator, 0);
+    await computers.claim();
+    await computers.update(queued.id, { recipe: { repositories: queued.recipe.repositories.map(entry => ({ ...entry, branch: "master", commit: "a".repeat(40) })) } });
+    await computers.activate(queued.id, "fresh-snapshot");
+    expect((await api(member)("legacy")).status).toBe(201);
+    expect((await pool.query("SELECT source_policy_version FROM cloud_v2_computer_builds WHERE id=$1", [buildId])).rows[0].source_policy_version).toBe(1);
   });
 
   it("pins the snapshot and repository setup to one active build across later activations", async () => {
@@ -76,6 +105,7 @@ suite("durable cloud create requests", () => {
     app.onError((error, c) => error instanceof HttpError ? c.json({ error: { code: error.code } }, error.status) : c.json({ error: { code: "internal" } }, 500));
     app.route("/", createCloudV2Routes({ store: storage, computers, installedRepositories: id => storage.installedRepositories(id),
       authorizeBuildRepository: (org, user, build, repository) => computers.resolveBuildRepository(org, user, build, repository),
+      remoteHead,
       authorizeSource: async () => {}, bridgeBaseUrl: "wss://example.test" }));
     return (key: string, body: object = {}) => app.request("/v1/cloud-v2/workspaces", { method: "POST",
       headers: { "content-type": "application/json", "Idempotency-Key": key },

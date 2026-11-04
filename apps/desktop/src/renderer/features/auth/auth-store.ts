@@ -15,13 +15,26 @@ export type AuthUser = {
   sub: string;
   email: string;
   name: string | null;
-  provider: "auth0" | "workos";
+  provider: "workos";
   accountId?: string;
   sessionId?: string;
   clientKind?: "desktop";
   authenticationMethod?: string | null;
 };
 export type AuthSessionInfo = { access_token: string; user: AuthUser };
+/** Another account signed in on this device. Main never sends its tokens. */
+export type SignedInAccount = {
+  accountId: string;
+  email: string;
+  name: string | null;
+  active: boolean;
+};
+export type SwitchAccountOutcome =
+  | "switched"
+  | "current"
+  | "missing"
+  | "signed_out"
+  | "unavailable";
 
 type Listener = (session: AuthSessionInfo | null) => void;
 
@@ -60,11 +73,16 @@ export async function getSession(): Promise<AuthSessionInfo | null> {
   const version = generation;
   // Token refresh can atomically update identity metadata. Read the user only
   // after main settles that refresh so both values describe one stored record.
-  const tokenRes = await nativeInvoke<{ access_token: string | null }>(
+  const tokenRes = await nativeInvoke<{ access_token: string | null; account?: string | null }>(
     "auth_get_access_token",
   );
   if (version !== generation || !tokenRes?.access_token) return null;
   const user = await nativeInvoke<AuthUser | null>("auth_get_session_user");
+  // An account switch between the two reads would pair one account's bearer
+  // with another's identity. Older main processes send no account.
+  if (user && typeof tokenRes.account === "string" && tokenRes.account !== (user.accountId ?? user.sub)) {
+    return null;
+  }
   return version === generation && user
     ? { access_token: tokenRes.access_token, user }
     : null;
@@ -75,30 +93,6 @@ export async function getSession(): Promise<AuthSessionInfo | null> {
 export function onAuthStateChange(cb: Listener): () => void {
   listeners.add(cb);
   return () => listeners.delete(cb);
-}
-
-/** Reflect a freshly-redeemed session into the renderer mirror. Main already
- *  persisted the FULL token pair in the keychain inside auth_redeem_handoff — the
- *  renderer never receives (nor forwards) the refresh token, so this only mirrors
- *  the identity + short-lived access token and notifies subscribers. */
-export function markSignedIn(info: {
-  access_token: string;
-  sub: string;
-  email: string;
-  name: string | null;
-}): void {
-  generation++;
-  const session: AuthSessionInfo = {
-    access_token: info.access_token,
-    user: {
-      sub: info.sub,
-      email: info.email,
-      name: info.name,
-      provider: "auth0",
-    },
-  };
-  publishIdentity(session.user);
-  notify(session);
 }
 
 export async function signOut(scope: "local" | "global"): Promise<void> {
@@ -133,4 +127,28 @@ export async function resync(): Promise<AuthSessionInfo | null> {
     if (version === generation) notify(null);
     throw error;
   }
+}
+
+/** Every account signed in on this device, the active one first. */
+export async function listSignedInAccounts(): Promise<SignedInAccount[]> {
+  if (isLocalDevelopment()) return [];
+  const result = await nativeInvoke<{ accounts?: SignedInAccount[] }>("auth_list_accounts");
+  return Array.isArray(result?.accounts) ? result.accounts : [];
+}
+
+/** Make another signed-in account active. Main swaps the sessions atomically;
+ * the mirror then re-reads identity like any other session change. */
+export async function switchAccount(accountId: string): Promise<SwitchAccountOutcome> {
+  const result = await nativeInvoke<{ status?: SwitchAccountOutcome }>(
+    "auth_switch_account",
+    { accountId },
+  );
+  const status = result?.status ?? "unavailable";
+  if (status === "switched" || status === "signed_out") await resync();
+  return status;
+}
+
+/** Sign out an account that is not the active one. */
+export async function signOutAccount(accountId: string): Promise<void> {
+  await nativeInvoke("auth_clear_session", { accountId });
 }

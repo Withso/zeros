@@ -11,12 +11,13 @@ import { CLOUD_V2_MAX_FRAME_BYTES, CloudV2WorkerFrameSchema, type CloudV2Control
 import type { PostgresSecurityEventBroker } from "../security-events.js";
 import type { CloudV2Store, CloudV2Workspace } from "./store.js";
 import { isCloudV2Token } from "./tokens.js";
-import { dialWorker, workerSupportsCheckout, workerSupportsMcp, workerSupportsSetup, workerSupportsGithub, type WorkerRoute } from "./worker-connection.js";
+import { dialWorker, workerSupportsCheckout, workerSupportsMcp, workerSupportsSetup, workerSupportsGithub, workerSupportsGitIdentity, type WorkerRoute } from "./worker-connection.js";
 import { emitCloudV2Timing, type CloudV2TimingRecord } from "./lifecycle.js";
 import { isGithubAccessRevoked } from "../github-availability.js";
 import { CLOUD_SOURCE_REFRESH_MS, type CloudSourceContinuation, type CloudSourceProof } from "./source-authority.js";
 
 export const CLOUD_V2_BRIDGE_PROTOCOL = "zeros.cloud.v2";
+export const CLOUD_V2_EXPLICIT_WAKE_PROTOCOL = "zeros.cloud.v2.explicit-wake";
 const BRIDGE_PATH = /^\/v2\/cloud\/workspaces\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\/bridge$/;
 const CONFIG_REFRESH_MS = 12 * 60 * 60_000;
 const MAX_QUEUED_FRAMES = 64;
@@ -63,10 +64,14 @@ function send(socket: WebSocket | null, value: unknown): void {
   if (Buffer.byteLength(payload) > CLOUD_V2_MAX_FRAME_BYTES || socket.bufferedAmount > 4 * 1024 * 1024) { socket.terminate(); return; }
   socket.send(payload, error => { if (error) socket.terminate(); });
 }
+function acceptsWork(workspace: CloudV2Workspace): boolean {
+  return !workspace.archivedAt && ["creating", "starting", "running"].includes(workspace.state);
+}
 
 export class CloudV2Relay {
   private readonly server = new WebSocketServer({ noServer: true, maxPayload: CLOUD_V2_MAX_FRAME_BYTES, perMessageDeflate: false,
-    handleProtocols: protocols => protocols.has(CLOUD_V2_BRIDGE_PROTOCOL) ? CLOUD_V2_BRIDGE_PROTOCOL : false });
+    handleProtocols: protocols => protocols.has(CLOUD_V2_BRIDGE_PROTOCOL)
+      ? protocols.has(CLOUD_V2_EXPLICIT_WAKE_PROTOCOL) ? CLOUD_V2_EXPLICIT_WAKE_PROTOCOL : CLOUD_V2_BRIDGE_PROTOCOL : false });
   private readonly rooms = new Map<string, Room>();
   private readonly ping = setInterval(() => this.heartbeat(), 30_000);
   private securityRevision = 0;
@@ -259,6 +264,8 @@ export class CloudV2Relay {
         const route = await this.deps.workerRoute(room.workspace.id);
         if (!route || route.accessEpoch !== room.accessEpoch) { this.revoke(room); return; }
         room.workspace = route.workspace;
+        if (!acceptsWork(route.workspace)) this.closeExplicitClients(room);
+        if (!this.wanted(room)) return;
         if (route.workspace.state === "stopped") {
           // Losing a socket during idle Stop must not wake the VM again just
           // because an app stayed attached. Explicit opens or work may wake it.
@@ -398,13 +405,14 @@ export class CloudV2Relay {
       if (await this.authorized(room) !== "allowed" || room.worker !== ws) return false;
       if (revision !== await this.deps.store.loginRevision(room.workspace.id)) { flight.requested = true; flight.force = true; continue; }
       if (room.worker !== ws || room.revoked) return false;
-      const { mcpServers, githubPullRequests, ...legacy } = config;
+      const { mcpServers, githubPullRequests, gitIdentity, ...legacy } = config;
       const { setup, baseCommit, github, ...workspaceConfig } = config.workspace;
       send(ws, { ...legacy, workspace: { ...workspaceConfig,
         ...(workerSupportsGithub(ws) && github ? { github } : {}),
         ...(workerSupportsSetup(ws) && setup !== undefined ? { setup } : {}),
         ...(workerSupportsCheckout(ws) && baseCommit !== undefined ? { baseCommit } : {}) },
         ...(workerSupportsMcp(ws) && mcpServers ? { mcpServers } : {}),
+        ...(workerSupportsGitIdentity(ws) && gitIdentity !== undefined ? { gitIdentity } : {}),
         ...(workerSupportsGithub(ws) && githubPullRequests === 1 ? { githubPullRequests } : {}), loginRevision: revision }); room.loginRevision = revision; room.configAt = Date.now();
     } while (flight.requested);
     return true;
@@ -433,13 +441,16 @@ export class CloudV2Relay {
       if (allowed !== "allowed" || ws.readyState !== WebSocket.OPEN) {
         ws.close(allowed === "unavailable" ? 1013 : 4001, allowed === "unavailable" ? "github_unavailable" : "access_revoked"); return;
       }
+      if (ws.protocol === CLOUD_V2_EXPLICIT_WAKE_PROTOCOL && !acceptsWork(workspace)) {
+        ws.close(4009, "workspace_not_running"); this.idle(room); return;
+      }
       clearTimeout(room.idleTimer); delete room.idleTimer;
       if (room.worker && workspace.state !== "running") { room.worker.terminate(); room.worker = null; room.ready = false; }
       if (!room.worker) room.workspace = workspace;
       room.clients.set(clientId, { ws, sessionId });
       if (room.ready) send(room.worker, { t: "open", clientId });
       else {
-        if (wake) { room.wakeAllowed = true; this.wake(room); }
+        if (wake && ws.protocol !== CLOUD_V2_EXPLICIT_WAKE_PROTOCOL) { room.wakeAllowed = true; this.wake(room); }
         this.ensureConnected(room);
       }
     });
@@ -454,6 +465,14 @@ export class CloudV2Relay {
     const attached = room.clients.delete(clientId); room.queued.delete(clientId); room.delivered.delete(clientId);
     if (attached && room.ready) send(room.worker, { t: "close", clientId });
     this.idle(room);
+  }
+  private closeExplicitClients(room: Room): void {
+    // A live app socket must not conceal worker loss. New input acquires a
+    // fresh HTTP wake; an old ticket or background frame cannot reverse Stop.
+    for (const [id, { ws }] of room.clients) if (ws.protocol === CLOUD_V2_EXPLICIT_WAKE_PROTOCOL) {
+      this.detachApp(room, id);
+      ws.close(4009, "workspace_not_running");
+    }
   }
   private async fromApp(room: Room, clientId: string, ws: WebSocket, data: RawData): Promise<void> {
     let frame: unknown;
@@ -474,7 +493,10 @@ export class CloudV2Relay {
     const queue = room.queued.get(clientId) ?? [];
     if (queue.length >= MAX_QUEUED_FRAMES) { ws.close(1013, "workspace_starting"); return; }
     queue.push(frame); room.queued.set(clientId, queue);
-    room.wakeAllowed = true;
-    this.wake(room); this.ensureConnected(room);
+    if (ws.protocol !== CLOUD_V2_EXPLICIT_WAKE_PROTOCOL) {
+      room.wakeAllowed = true;
+      this.wake(room);
+    }
+    this.ensureConnected(room);
   }
 }

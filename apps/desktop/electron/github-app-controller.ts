@@ -2,7 +2,7 @@ import type { DevGithubConnection } from "./dev-github-reference";
 // Main-process GitHub App state machine with all host dependencies injected.
 //
 // Keeping the orchestration pure makes the security contracts executable:
-// nonce consumption precedes exchange, Auth0 subjects bind stored credentials,
+// nonce consumption precedes exchange, account owners bind stored credentials,
 // refresh rotation is single-flight + cross-process serialized, and failed
 // replacement never displaces a previously working App credential.
 

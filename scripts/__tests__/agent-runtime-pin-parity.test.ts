@@ -43,4 +43,9 @@ describe("agent runtime pin parity", () => {
     const manifest = JSON.parse(readFileSync(join(root, "package.json"), "utf8")) as { codexProtocolVersion?: string };
     expect(manifest.codexProtocolVersion).toBe(local[RUNTIMES.codex]);
   });
+
+  it("keeps the cloud Codex driver's launch guard on the installed runtime pin", () => {
+    const driver = readFileSync(join(root, "apps/cloud-worker/src/drivers/codex/driver.ts"), "utf8");
+    expect(/const CODEX_VERSION = "([^"]+)"/.exec(driver)?.[1]).toBe(local[RUNTIMES.codex]);
+  });
 });

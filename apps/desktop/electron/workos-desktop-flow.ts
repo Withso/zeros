@@ -214,7 +214,7 @@ export interface WorkOSDesktopAuthorizationFlowDeps {
   resolveAccountId: (accessToken: string) => Promise<string>;
   persistSession: (
     session: WorkOSDesktopSession & { accountId: string },
-  ) => void;
+  ) => void | Promise<void>;
   /** Revoke a provider session that was minted but could not be installed. */
   revokeSession: (accessToken: string) => Promise<void>;
   onComplete: () => void;
@@ -251,6 +251,7 @@ function authorizationPageUrl(
   appOrigin: string,
   state: string,
   codeChallenge: string,
+  fresh: boolean,
 ): string {
   const origin = new URL(appOrigin);
   const loopback =
@@ -269,6 +270,7 @@ function authorizationPageUrl(
   const url = new URL("/auth/desktop", origin);
   url.searchParams.set("state", state);
   url.searchParams.set("code_challenge", codeChallenge);
+  if (fresh) url.searchParams.set("fresh", "1");
   return url.toString();
 }
 
@@ -278,8 +280,9 @@ export class WorkOSDesktopAuthorizationFlow {
   constructor(private readonly deps: WorkOSDesktopAuthorizationFlowDeps) {}
 
   /** Replace the previous attempt, register PKCE callback routing, and open the
-   * browser with a bounded launch acknowledgement; return the main-owned expiry. */
-  async start(): Promise<{ expiresAt: number }> {
+   * browser with a bounded launch acknowledgement; return the main-owned expiry.
+   * `fresh` asks AuthKit for an active sign-in, for adding another account. */
+  async start(options: { fresh?: boolean } = {}): Promise<{ expiresAt: number }> {
     this.cancel();
     if (!DESKTOP_SCHEME.test(this.deps.deepLinkScheme)) {
       throw new Error("Desktop sign-in scheme is invalid");
@@ -293,6 +296,7 @@ export class WorkOSDesktopAuthorizationFlow {
       this.deps.appOrigin,
       state,
       challenge,
+      options.fresh === true,
     );
     const timeoutMs = this.deps.timeoutMs ?? DEFAULT_TIMEOUT_MS;
     const expiresAt = Date.now() + timeoutMs;
@@ -397,7 +401,7 @@ export class WorkOSDesktopAuthorizationFlow {
         return;
       }
       try {
-        this.deps.persistSession({ ...session, accountId });
+        await this.deps.persistSession({ ...session, accountId });
         persisted = true;
       } catch (error) {
         logSignInFailure("session storage", error);

@@ -52,7 +52,7 @@ const vmCommand = (f: { compute: CloudV2Compute }, marker: string) => vi.mocked(
 
 function setup(claimed: (CloudV2LifecycleWorkspace & { attempts: number })[], options: { snapshot?: string | null; idle?: CloudV2Workspace[]; stopIdle?: CloudV2LifecycleDeps["stopIdle"]; timing?: CloudV2LifecycleDeps["timing"]; now?: () => number;
   checkpoints?: ReturnType<typeof checkpointsFake>; remoteHead?: CloudV2LifecycleDeps["remoteHead"]; githubToken?: CloudV2LifecycleDeps["githubToken"]; uploadHorizon?: string;
-  checkpointRetry?: boolean; retries?: RetryRow[] } = {}) {
+  checkpointRetry?: boolean; retries?: RetryRow[]; prepareRepository?: CloudV2LifecycleDeps["prepareRepository"] } = {}) {
   const retries = [...options.retries ?? []];
   const compute: CloudV2Compute = {
     create: vi.fn(async () => ({ sandboxId: "bx_new1" })),
@@ -115,10 +115,24 @@ function setup(claimed: (CloudV2LifecycleWorkspace & { attempts: number })[], op
     sandboxName: ws => `zeros-alpha-${ws.id.slice(0, 8)}`,
     ...(options.checkpoints ? { checkpoints: options.checkpoints } : {}),
     ...(options.remoteHead ? { remoteHead: options.remoteHead } : {}),
+    ...(options.prepareRepository ? { prepareRepository: options.prepareRepository } : {}),
     ...(options.githubToken ? { githubToken: options.githubToken } : {}),
   });
   return { lifecycle, compute, store, stopWorker, logs };
 }
+
+it("ends a clone failure with its typed cause before worker hello instead of retrying into a boot timeout", async () => {
+  const w = workspace("creating"), prepareRepository = vi.fn(async () => {
+    throw Object.assign(new Error("private-provider-output"), { code: "cloud_source_checkout_failed" });
+  });
+  const f = setup([w], { prepareRepository });
+  await f.lifecycle.tick();
+  expect(prepareRepository).toHaveBeenCalledOnce();
+  expect(f.store.transition).toHaveBeenCalledWith(w.id, ["creating"], "failed", { errorCode: "cloud_source_checkout_failed" });
+  expect(f.store.rotateWorkerToken).not.toHaveBeenCalled();
+  expect(f.store.defer).not.toHaveBeenCalledWith(w.id, "creating", expect.any(Number), expect.objectContaining({ failure: true }));
+  expect(f.compute.delete).not.toHaveBeenCalled();
+});
 
 type RetryRow = CloudV2LifecycleWorkspace & { retry: CloudV2CheckpointRetry };
 /** A stopped workspace whose latest stop (2) has no checkpoint; stop 1's is kept. */
@@ -620,7 +634,9 @@ describe("cloud v2 lifecycle", () => {
     const idle = workspace("running"), stopIdle = vi.fn(async () => {});
     const f = setup([], { idle: [idle], stopIdle });
     await f.lifecycle.tick();
-    expect(stopIdle).toHaveBeenCalledWith(idle.id, new Date(NOW - CLOUD_V2_IDLE_STOP_MS));
+    // Product decision: a running VM stops after 15 minutes without activity.
+    expect(stopIdle).toHaveBeenCalledWith(idle.id, new Date(NOW - 15 * 60_000));
+    expect(CLOUD_V2_IDLE_STOP_MS).toBe(15 * 60_000);
     expect(f.store.revoke).not.toHaveBeenCalled();
     expect(f.store.transition).not.toHaveBeenCalled();
   });

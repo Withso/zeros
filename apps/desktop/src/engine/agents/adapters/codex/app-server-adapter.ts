@@ -2557,6 +2557,7 @@ export class CodexAppServerAdapter implements AgentAdapter {
         try {
           const codexBinary = await resolveCodexBinary({
             override: opts.cliBinary,
+            pathValue: opts.env?.PATH,
           });
           nativeBrowser = await resolveCodexNativeBrowserRuntime({
             codexCliPath: codexBinary.path,

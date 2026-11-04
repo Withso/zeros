@@ -51,6 +51,21 @@ app requests and security notifications recheck that session in the database,
 with the relay heartbeat repairing missed notifications. Account, organization
 and workspace authorization loss still revoke the whole workspace room.
 
+The desktop keeps at most 16 live cloud connections, including admissions still
+loading their first chat snapshot. When another workspace needs a connection,
+it releases the least recently used idle connection. The selected workspace,
+busy VMs and pending opens or wakes stay attached. If all 16 are in use, the
+request asks the user to retry after one finishes connecting or becomes idle;
+no app restart is needed. Releasing a desktop connection does not stop its VM,
+agents or terminals. Its next explicit open reconnects through normal admission.
+
+Released connections do not consume live capacity. The desktop retains up to
+64 recently used retired chat snapshots; older history remains available from
+the control-plane mirror without waking a VM. Account replacement and access
+revocation still clear or prune the exact owner's connections and snapshots.
+Local Personal and organization-local connections use the sidecar independently
+of these cloud limits.
+
 The worker keeps outbound HTTPS to the control plane under
 `/v2/cloud/worker/*` for work that continues without an attached app: `hello`
 and configuration, the history mirror, activity reports and GitHub
@@ -81,11 +96,13 @@ workspaces until a build succeeds. Older apps that send the repositories with
 the build still work, and their selection becomes the configured recipe.
 
 A build always starts from Boat's stock image. It installs the pinned runtime
-and waits for Boat to finish capturing a clean snapshot **before** delivering
+and git-lfs (configured system-wide; a build that can't install it still goes
+live and says so in its log), then waits for Boat to finish capturing a clean
+snapshot **before** delivering
 any repository credential, cloning source or running recipe scripts. It then
 validates the repositories and setup scripts on the disposable builder,
 recording each branch and commit. Only a successful validation makes that
-snapshot active. The shared image caches the runtime; it contains no project
+snapshot active. The shared image caches the runtime and git-lfs; it contains no project
 checkouts, dependency trees or setup outputs. Deleting a checkout after setup
 would not establish this boundary, because setup can copy source elsewhere.
 
@@ -104,6 +121,17 @@ Reactivation and refresh carry the original IDs and pinned setup selection.
 The clone uses the verified current canonical remote while its directory and
 recipe path stay unchanged. Unknown legacy provenance blocks log access,
 reactivation and automatic refresh; the logs and recipes remain stored.
+
+An unverified legacy Computer recipe is an editable draft for a **fresh manual
+build**, not evidence about any old source. An admin can save it or build the
+configured revision with their current GitHub access; new immutable IDs are
+recorded only on the new configuration and build. Active-build IDs are trusted
+only under source policy v2; v1 targets never establish provenance. Verified IDs
+remain pinned, and malformed verified provenance still fails closed. Recovery
+starts from stock and never reuses the legacy snapshot. Creation and the repository picker
+return `cloud_computer_rebuild_required` while that old build is active, directing
+admins to Settings → Cloud Computer and other members to an organization admin.
+Rebuilding does not verify or unlock historical logs, workspaces or checkpoints.
 
 The builder also refreshes the snapshot without being asked. A new runtime pin
 queues another clean image and validates the recipe on its disposable builder,
@@ -196,12 +224,64 @@ permission; `gh` receives the human's App user token. With PAT selected, both
 receive that PAT. Broker caching is bounded to two minutes, but does not shorten
 a credential's GitHub lifetime or reduce a PAT's scopes. A user token delivered
 to the VM can be used by any process there, including other agent sessions.
+The broker shares concurrent requests and keeps a successful token until ten
+seconds before that two-minute lease expires. An unchanged configuration
+refresh preserves both the cache and any active request. A changed login
+revision, transport disconnect or refusal withdraws cached material. Recovery
+and one delayed retry of a transient credential failure share the caller's
+original twenty-second deadline; each HTTP attempt gets at most fifteen
+seconds of the remaining budget. Git commands and `gh` mutations are never
+replayed. Connection, installation, SSO, access, source-review and rate-limit
+refusals reach Git/`gh` stderr as bounded recovery guidance; control-plane logs
+record only a closed reason and cause class, never provider text or credentials.
+
+Each worker instance publishes its own Unix socket through
+`GH_ZEROS_BROKER_SOCKET`, in a private temporary directory outside checkpointed
+session state. The directory is mode `0700` and the socket is mode `0600`.
+Helpers accept only `/tmp/zeros-github-<lowercase UUID v4>/github.sock` and reject
+all other environment-supplied paths before dialing, including trailing newlines.
+Startup refuses an existing pathname, and disposal removes only the socket
+inode that instance created. Cleanup captures the directory entry under a
+private name before rechecking ownership; a foreign capture is restored without
+overwriting any newer publication, and its private alias is retained.
+The listener binds through a temporary name so
+native close cannot unlink a replacement at the published path. Helpers retry
+a missing or refused socket connection once after 250 ms, only before sending
+the request; both dials and response reading share one 21-second deadline.
+Clean Cloud Computer snapshots are captured before any configured broker starts.
+
+Before checkout setup, agents, terminals or Changes commits are admitted, the
+worker installs the creator's Git identity from the selected organization
+connection. The name is the GitHub profile name, falling back to the verified
+login; the email is `<github_user_id>+<github_login>@users.noreply.github.com`.
+During a temporary profile lookup outage, the selected connection's stored
+login is used after rechecking its authorization generation.
+The VM user's global Git config includes the worker-owned
+`~/.config/zeros/git-identity`, which also sets `user.useConfigOnly=true`.
+Confirmed configuration changes atomically replace that file, so existing
+shells see the new default. An explicit disconnected configuration clears the
+managed name/email; commits without an explicit identity fail and Changes
+offers reconnect guidance. Deliberate repository-local identities, including
+those on restored checkpoints, retain Git's normal precedence and are never
+rewritten or cleared. Wake, restore and reconnect reapply the managed default
+before new work. Both HTTPS and relay configuration negotiate `git-identity-v1`:
+older workers receive no extra field, and an older control plane's omitted
+field leaves the existing Git configuration alone. Local Git identity and
+credential behavior are unchanged.
+
 Control-plane clone commands receive their one-command authorization header
 through a private Boat file upload, opened and unlinked before execution, then
 passed on stdin. Git reads it through an environment reference. Neither the
 token nor its encoded header belongs in command arguments, remote URLs,
 transcripts or logs. This protects command metadata, not other processes
 already running with the same VM permissions.
+
+Provider readiness and new-turn admission use the same worker verdict. An
+expired Codex proxy grant makes the provider unavailable until renewed config
+arrives; it does not prove the upstream account needs a new sign-in. Reattaching
+to a turn already running keeps that turn and its original credentials. The
+next native turn is refused until usable credentials arrive. Local provider probes and
+their recovery behavior are unchanged.
 
 Customize stores organization MCP definitions separately from provider logins.
 Definitions can be organization-shared or private to one member and can target
@@ -229,6 +309,14 @@ client stops that client's wait without cancelling another live client.
 Definition/login revisions invalidate cached authorization and provider reuse.
 Runtime removal or shutdown closes the gateway and its owned processes.
 
+An MCP failure retains its server ID and a bounded reason: sign-in required,
+access refused, server error or unreachable. Only the native execution that
+requested it receives the durable warning; repeated handshakes share one
+warning per reason until the driver is replaced. The transcript's Connect or
+Retry action opens that server in the owning organization's Customize page.
+Account, owner and execution changes retire stale actions and late failures.
+An optional Streamable HTTP GET/DELETE returning 405 leaves POST calls usable.
+
 Organization-owned Local workspaces resolve the same definitions through
 Electron's private account-bound broker. Native GitHub admission refreshes on
 demand; generation and exact-child checks reject late credentials after account
@@ -248,6 +336,30 @@ unknown, not an empty account list. ChatGPT discovery stays unchanged.
 Model-access refusals show the selected model and an action to choose another;
 provider project IDs, proxy URLs and request IDs remain diagnostic-only. Neither
 discovery nor a refusal automatically changes the saved model or retries a turn.
+
+Provider failures retain a bounded category through startup replies, prompt
+receipts and mirrored transcript notices: rejected credentials, account
+verification, unavailable cloud credentials, usage/rate limit, missing native
+session, unavailable model or unavailable provider. Public text comes from the
+category, never raw provider diagnostics. A confirmed Retry-After deadline is
+retained without its headers. The transcript offers the corresponding account,
+model, later retry or new-session action, with no automatic prompt resend.
+An absent worker execution remains an ordinary adoption miss; it cannot claim
+that a native provider conversation was deleted.
+
+Cloud Claude and Codex still cancel agent questions and MCP elicitations. Each
+cancellation now leaves a nonblocking transcript notice explaining that cloud
+workspaces cannot answer it yet and directing the user to a Local workspace.
+Question bodies and elicitation payloads are not copied into that notice.
+
+These changes ship in the SHA-pinned worker runtime and desktop. Optional
+`cloud` metadata is nested inside the existing bridge failure/notice payloads
+and serialized history rows; strict relay and HTTPS outbox envelopes are
+unchanged. Old desktops accept new worker messages and keep the sanitized
+fallback text, while new desktops accept old records without metadata. No
+protocol bump or database migration is required. The outbox's control-plane
+receipt still reports delivery state only; the durable transcript supplies the
+provider reason.
 
 The worker folds native streams through the shared `applyUpdate` reducer and
 persists chat/session state under `/home/user/.local/share/zeros/cloud-worker`.
@@ -303,7 +415,10 @@ repository and one the caller cannot access; Zeros does not infer which it is.
 The control plane encrypts credentials with its versioned vault keyring.
 OAuth uses a single-use, ten-minute state and PKCE. App-token renewal uses a
 durable lease: an ambiguous refresh is not replayed with a potentially consumed
-refresh token. Reconnect starts a new generation. Every operation checks the
+refresh token. Another control-plane replica waits up to ten seconds for the
+current lease owner to finish, rechecking the connection generation on every
+read; it never steals or replays an expired lease. Reconnect starts a new
+generation. Every operation checks the
 selected connection, account and organization membership; late callbacks,
 credential requests and responses cannot restore an earlier generation.
 Renderer snapshots contain connection health and the GitHub login, never
@@ -375,20 +490,61 @@ they use at most two of the slots, and a slow stop never holds up another
 workspace's creation. Running VMs receive a 24-hour Boat
 lease; a bounded background scan renews it after about 12 hours.
 
-The lifecycle loop stops a running VM after ten minutes without activity
-reports. Turns, workspace setup and recent terminal input/output keep reports flowing; an
-untouched shell eventually becomes idle. Passive history reads do not wake
+The lifecycle loop stops a running VM after 15 minutes without activity
+reports (`CLOUD_V2_IDLE_STOP_MS`). Turns, workspace setup, attachment transfers,
+recent terminal input/output, and explicit file/Git mutations keep reports
+flowing. The worker counts terminal input/output, file saves and Git mutations
+as activity until completion and for ten minutes afterwards
+(`RECENT_ACTIVITY_MS`), so a VM stops about 15 minutes after a turn ends and
+about 25 minutes after the last terminal input/output or save. Reads and polls
+do not renew it; an untouched shell eventually becomes idle. Passive history reads do not wake
 the VM, and neither do reconnects: `/connect` accepts `{ "wake": false }`, and
 the single-use ticket carries that intent through bridge admission. The app
-asks to wake only for an explicit open; a missing value still wakes, for older
-callers. Explicit work over the bridge, or Start, wakes it and reconnects the
-worker. Stop
-retains the VM disk and saves a checkpoint; Delete removes the VM, its
-checkpoints and its access. Account
-and organization deletion also enqueue their workspaces for cleanup.
+asks to wake for explicit navigation from the sidebar, Dashboard or repository
+rows, or a trusted pointer press or keystroke inside the active cloud workspace.
+This includes empty space, the composer and the Files editor. There is no wake
+notice; a save joins a pending wake before dispatch. Without a pending wake, a
+save against a stopped workspace rejects as a temporary transport failure so its
+draft can be retained and retried. Hover, metadata restoration, polling, hidden
+tabs and autosave retries do not create wake intents. Stop, archive and delete
+cancel earlier input intents; input cannot reverse a shutdown in progress or
+restore an archived workspace. Owner/account changes cancel the old surface's
+intent. Local workspaces keep their existing behavior.
+
+New desktops add `wakePolicy=explicit` to the connect URL and offer the
+`zeros.cloud.v2.explicit-wake` WebSocket subprotocol alongside the existing
+protocol and ticket. The HTTP request owns the stopped-to-starting transition;
+the opted-in relay only joins an existing start or running worker. A transient
+worker disconnect redials while the workspace is still running, keeping the app
+attached so output resumes. It closes the app socket with
+`4009 / workspace_not_running` when admission or redial confirms a stopped,
+stopping or archived workspace. Queued reads,
+saves and old wake tickets cannot start compute. The desktop rejects pending
+work as a transport failure and lets fresh user input acquire the next wake.
+The connect transition atomically requires an unarchived workspace, so an
+archive committed during source authorization cannot be undone by that request.
+
+Older callers retain the existing default when `wake` is absent, and their
+bridge traffic can still wake stopped compute. An older relay selects the base
+protocol when a new desktop offers both; it retains that legacy behavior.
+Start remains explicit. Stop retains the VM disk and saves a checkpoint;
+Delete removes the VM, its checkpoints and its access. Account and organization
+deletion also enqueue their workspaces for cleanup.
+
+Roll out the control-plane negotiation before the desktop to enforce the
+background-wake rule. The mutation-activity change also requires publishing and
+selecting the updated SHA-pinned worker runtime; create/wake installs it, so an
+already-running VM adopts it on its next wake. No schema migration is needed.
+Quitting the Mac app still leaves cloud agents and terminals running, while
+Local quit retains its existing stop behavior.
 
 A new workspace branch starts from the authorized checkout hydrated into its
-own VM before worker startup. At creation the control plane records GitHub's
+own VM before worker startup. Before persisting a new workspace or allocating a
+VM, creation checks the requested branch (or the build's recorded default)
+with the creator's selected GitHub connection against the admitted repository
+ID. A tag or commit with the same spelling is not a branch. A confirmed miss
+returns `repository_branch_not_found`; rate limits, outages and connection
+changes retain their own errors. At creation the control plane records GitHub's
 head of the base branch. Workers advertising
 `checkout-v2` receive it as `baseCommit` and start the branch there when the
 VM has that commit; otherwise the branch starts from the cached
@@ -398,6 +554,19 @@ base fast-forwards once, but only while it still points at its first commit,
 its tracked files are clean, and no agent, terminal, file edit, Git mutation or
 setup has started. Existing branches and branches started at `baseCommit`
 never move automatically.
+
+Hello publishes `running` before the worker prepares its checkout. If that
+preparation fails, the worker posts an empty `checkout-failed` report over its
+authenticated HTTPS transport. The control plane atomically checks the current
+worker token, boot ID, membership and running state, then records `failed` with
+`cloud_source_checkout_failed`. A lost report response can be retried without
+changing the original failure; a newer boot, wake, stop or revocation fences
+the old report. Clone failures before hello use the same terminal reason instead
+of retrying into a boot timeout. Neither path deletes files or checkpoints, and
+the desktop displays checkout guidance through its existing failure surface.
+Older workers retain their existing hello behavior; newer workers tolerate an
+older control plane returning 404 for the report. Deploy the API and matching
+SHA-pinned worker together to get the full failure handling.
 
 Creation pins the active Cloud Computer build. The worker receives that
 build's repository setup script, at most 8,000 characters, only when it
@@ -881,9 +1050,7 @@ legacy source-bearing shared image is not a safe rollback.
 ### GitHub connection and PR rollout
 
 This extension depends on the source-authority foundation above and its
-authentication cutover, including `0208_auth0_browser_session_authority.sql`
-where Auth0 compatibility sessions are enabled. Apply the additive migrations
-in order:
+authentication cutover. Apply the additive migrations in order:
 
 1. `0209_cloud_v2_github_metadata.sql` records checkout/PR metadata and operation
    leases.
@@ -918,6 +1085,16 @@ There is no end-user or automatic name-based backfill endpoint. Without this
 evidence, keep `cloud_source_review_required`, the disk and the checkpoint;
 do not clear source scope, change the ID to a new name's occupant, or delete
 user work to make admission pass.
+
+A legacy organization's **Cloud Computer** can be recovered without that
+historical backfill: an admin reviews its current repositories in Settings →
+Cloud Computer and saves or starts a fresh build. Manual admission resolves
+current access and records new IDs, while the builder captures a clean stock
+snapshot before any source or credential reaches it. Keep the old build rows
+and logs unverified; automatic refresh and reactivation cannot perform this
+admission. Existing legacy workspaces still require the operator evidence
+above and remain under `cloud_source_review_required` after the new Computer
+becomes active. No database migration is needed for this manual rebuild path.
 
 Roll out the compatible database and API/relay/lifecycle code together with
 the security cutover. Publish a matching SHA-pinned worker, verify new creation

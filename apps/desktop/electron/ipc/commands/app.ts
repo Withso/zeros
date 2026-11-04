@@ -26,10 +26,8 @@ export interface AppInfo {
   runtimeMode: "dev" | "prod";
   localDevelopment: boolean;
   /** Release channel — the authoritative value from the main process (keyed off
-   *  the seeded ZEROS_CHANNEL). The renderer derives the deep-link scheme from
-   *  this (schemeForChannel) so the /launch URL it builds always matches the
-   *  scheme apps/desktop/electron/deep-link.ts registered + validates. `runtimeMode` can't
-   *  carry it: a Beta build is runtimeMode "prod" yet channel "beta". */
+   *  the seeded ZEROS_CHANNEL). `runtimeMode` can't carry it: a Beta build is
+   *  runtimeMode "prod" yet channel "beta". */
   channel: Channel;
   version: string;
   platform: NodeJS.Platform;

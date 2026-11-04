@@ -85,6 +85,7 @@ import { claimShortcutPriority } from "./shortcut-priority";
 import { AgentIcon } from "./agent-icon";
 import { useAgentsSnapshot } from "./agents-cache";
 import { isSelectableAgent } from "./agent-runnable";
+import { cloudFailureMessage } from "@zeros/protocol/cloud-v2-relay";
 import { useEnabledAgents } from "./enabled-agents";
 import { pickDefaultAgent } from "../settings/default-agent";
 import type { BridgeRegistryAgent } from "../../platform/bridge/messages";
@@ -827,7 +828,7 @@ function ModelRowDetails({
       </span>
       {row.unavailable && (
         <span data-model-unavailable-reason className="text-fg3 text-xxs">
-          {!isSelectableAgent(row.agent) ? "Connect this agent to use this model." : "Unavailable for this account."}
+          {row.agent.cloud ? cloudFailureMessage(row.agent.cloud) : !isSelectableAgent(row.agent) ? "Connect this agent to use this model." : "Unavailable for this account."}
         </span>
       )}
     </span>

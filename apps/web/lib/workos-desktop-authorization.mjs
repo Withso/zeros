@@ -28,10 +28,6 @@ function noStorePage(body, status, scriptNonce = null) {
   return response;
 }
 
-function configuredForWorkOS(env) {
-  return (env.AUTH_PROVIDER || "auth0").trim().toLowerCase() === "workos";
-}
-
 function desktopState(raw, env) {
   if (typeof raw !== "string" || raw.length > 256) return null;
   const separator = raw.indexOf(".");
@@ -81,17 +77,24 @@ export async function beginWorkOSDesktopAuthorization(
   env,
   options = {},
 ) {
-  if (!configuredForWorkOS(env)) return invalidPage();
   const url = new URL(request.url);
   const state = desktopState(url.searchParams.get("state"), env);
   const codeChallenge = challenge(url.searchParams.get("code_challenge"));
-  if (!state || !codeChallenge) {
+  // Adding an account asks for a fresh sign-in; only the fixed flag passes on.
+  const fresh = url.searchParams.getAll("fresh");
+  if (
+    !state ||
+    !codeChallenge ||
+    fresh.length > 1 ||
+    (fresh.length === 1 && fresh[0] !== "1")
+  ) {
     return invalidPage();
   }
   const query = new URLSearchParams({
     state: state.value,
     code_challenge: codeChallenge,
   });
+  if (fresh.length) query.set("fresh", "1");
   try {
     const response = await fetchWorkOSRailway(
       env,
@@ -116,7 +119,6 @@ export async function beginWorkOSDesktopAuthorization(
 }
 
 export function renderWorkOSDesktopCallback(request, env) {
-  if (!configuredForWorkOS(env)) return invalidPage();
   const url = new URL(request.url);
   const state = desktopState(url.searchParams.get("state"), env);
   const code = callbackValue(url.searchParams.get("code"));

@@ -1,4 +1,5 @@
 import {
+  createHmac,
   createPublicKey,
   generateKeyPairSync,
   randomUUID,
@@ -206,7 +207,9 @@ const githubConfig: GithubBackendConfig = {
   privateKey: generateKeyPairSync("rsa", { modulusLength: 2048 })
     .privateKey.export({ type: "pkcs8", format: "pem" })
     .toString(),
-  refreshBindingSecret: "test-binding-secret",
+  refreshBindingKeys: { 1: "test-binding-secret" },
+  currentRefreshBindingKeyVersion: 1,
+  refreshBindingKeysDedicated: true,
   appSlug: "zeros-test",
   oauthCallbackUrl: "https://api.example.test/v1/github/oauth/callback",
   completionPageUrl: "https://app.example.test/github/connected",
@@ -324,14 +327,15 @@ function testApp(
   pool: pg.Pool,
   user: AuthedUser,
   dependencies: GithubRouteDependencies,
+  config: GithubBackendConfig = githubConfig,
 ): Hono {
   const app = new Hono();
-  app.route("/", createGithubPublicRoutes(pool, githubConfig, dependencies));
+  app.route("/", createGithubPublicRoutes(pool, config, dependencies));
   app.use("/v1/*", async (c, next) => {
     c.set("user", user);
     await next();
   });
-  app.route("/", createGithubRoutes(pool, githubConfig, dependencies));
+  app.route("/", createGithubRoutes(pool, config, dependencies));
   app.onError((error, c) => {
     if (error instanceof HttpError) {
       return c.json(
@@ -410,13 +414,13 @@ dbDescribe("GitHub App OAuth handoff", () => {
     pool = new pg.Pool({ connectionString: databaseUrl, max: 3 });
     await resetMigratedTestDatabase(pool);
     userA = await ensureUser(pool, {
-      provider: "auth0",
+      provider: "workos",
       providerSubject: randomUUID(),
       email: `github-a-${randomUUID()}@example.com`,
       displayName: "GitHub A",
     });
     userB = await ensureUser(pool, {
-      provider: "auth0",
+      provider: "workos",
       providerSubject: randomUUID(),
       email: `github-b-${randomUUID()}@example.com`,
       displayName: "GitHub B",
@@ -443,7 +447,7 @@ dbDescribe("GitHub App OAuth handoff", () => {
 
   it("uses direct OAuth when another device already recorded this account's installation", async () => {
     const crossDeviceUser = await ensureUser(pool, {
-      provider: "auth0",
+      provider: "workos",
       providerSubject: randomUUID(),
       email: `github-cross-device-${randomUUID()}@example.com`,
       displayName: "GitHub Cross Device",
@@ -485,7 +489,7 @@ dbDescribe("GitHub App OAuth handoff", () => {
 
   it("uses the install URL when a confirmed-empty desktop explicitly requests recovery", async () => {
     const authorizationOnlyUser = await ensureUser(pool, {
-      provider: "auth0",
+      provider: "workos",
       providerSubject: randomUUID(),
       email: `github-force-install-${randomUUID()}@example.com`,
       displayName: "GitHub Force Install",
@@ -863,6 +867,57 @@ dbDescribe("GitHub App OAuth handoff", () => {
     ).toHaveLength(revokeCallsAfterFirst);
   });
 
+  // Rotating either secret must not ask anyone to reconnect: a binding keeps
+  // verifying under the key that signed it, and its next refresh moves it to
+  // the current key. Only removing that key retires the bindings it signed.
+  it("rotates the refresh-binding key and the client secret without invalidating bindings", async () => {
+    const connected = await connectCredential(appA, "rotation".repeat(6));
+    const payloadOf = (binding: unknown) => JSON.parse(
+      Buffer.from(String(binding).split(".")[1]!, "base64url").toString("utf8"),
+    ) as Record<string, unknown>;
+    const sign = (payload: Record<string, unknown>, secret: string) => {
+      const encoded = Buffer.from(JSON.stringify(payload), "utf8").toString("base64url");
+      const signature = createHmac("sha256", secret)
+        .update("zeros-github-refresh-binding.v1\0", "utf8").update(encoded, "utf8").digest("base64url");
+      return `zghrb_v1.${encoded}.${signature}`;
+    };
+    const refresh = (config: GithubBackendConfig, refreshToken: unknown, refreshBinding: unknown) =>
+      testApp(pool, userA, { fetch: githubFetch(calls) }, config).request("/v1/github/oauth/refresh", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ refreshToken, refreshBinding }),
+      });
+    expect(payloadOf(connected.refreshBinding)).toMatchObject({ k: 1 });
+    // Bindings issued before the keyring carry no version.
+    const { k: _version, ...unversioned } = payloadOf(connected.refreshBinding);
+    const legacy = sign(unversioned, "test-binding-secret");
+
+    const newClientSecret = { ...githubConfig, clientSecret: "rotated-client-secret" };
+    expect((await refresh(newClientSecret, connected.refreshToken, connected.refreshBinding)).status).toBe(200);
+
+    const rotated: GithubBackendConfig = {
+      ...githubConfig,
+      refreshBindingKeys: { 1: "test-binding-secret", 2: "rotated-binding-secret" },
+      currentRefreshBindingKeyVersion: 2,
+    };
+    expect((await refresh(rotated, connected.refreshToken, legacy)).status).toBe(200);
+    // A version selects exactly one key; it cannot borrow another's signature.
+    expect((await refresh(rotated, connected.refreshToken, sign({ ...unversioned, k: 2 }, "test-binding-secret"))).status).toBe(401);
+    expect((await refresh(rotated, connected.refreshToken, sign({ ...unversioned, k: 3 }, "test-binding-secret"))).status).toBe(401);
+    const moved = await refresh(rotated, connected.refreshToken, connected.refreshBinding);
+    expect(moved.status).toBe(200);
+    const next = (await moved.json()) as Record<string, unknown>;
+    expect(payloadOf(next.refreshBinding)).toMatchObject({ k: 2 });
+
+    const retired = { ...rotated, refreshBindingKeys: { 2: "rotated-binding-secret" } };
+    expect((await refresh(retired, next.refreshToken, next.refreshBinding)).status).toBe(200);
+    for (const binding of [connected.refreshBinding, legacy]) {
+      const stale = await refresh(retired, connected.refreshToken, binding);
+      expect(stale.status).toBe(401);
+      expect(await stale.json()).toMatchObject({ error: { code: "github_binding_invalid" } });
+    }
+  });
+
   // The refresh binding is stateless, so without a row check a leaked or
   // backed-up (refreshToken, refreshBinding) pair would keep minting fresh
   // access tokens for months after the user clicked Disconnect — GitHub's
@@ -1104,7 +1159,7 @@ dbDescribe("organization GitHub source authorization", () => {
   afterAll(async () => { await pool.end(); });
 
   async function fixture(options: { membership?: string; afterSource?: (user: AuthedUser) => Promise<void> } = {}) {
-    const user = await ensureUser(pool, { provider: "auth0", providerSubject: randomUUID(), email: `${randomUUID()}@example.test`, displayName: "Source owner" });
+    const user = await ensureUser(pool, { provider: "workos", providerSubject: randomUUID(), email: `${randomUUID()}@example.test`, displayName: "Source owner" });
     const org = randomUUID(), calls: FetchCall[] = [];
     await withSystemTx(pool, async tx => {
       await tx.query("INSERT INTO organizations(id,slug,name,created_by) VALUES($1,$2,'Source organization',$3)", [org, `source-${org}`, user.id]);

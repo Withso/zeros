@@ -103,6 +103,10 @@ import {
 import { removeSessionDir, sessionsRoot } from "./session-paths";
 import { resolveClaudeCli } from "./adapters/claude-sdk/binary-resolver";
 import { resolveCodexBinary } from "./adapters/codex/binary-resolver";
+import { resolveCursorHostExecutable } from "./adapters/cursor-sdk/host/host-client";
+import { LocalLaunchPathRecovery, missingExecutableError } from "./local-launch-path";
+import { cachedLoginShellPath, getLoginShellPath } from "./adapters/shared/login-shell-path";
+import { sanitizeProbedPath } from "../env/launcher-env";
 import {
   buildCodeAgentDesignTerritoryNotice,
   buildDesignAgentNotice,
@@ -5016,6 +5020,50 @@ export class AgentGateway {
     return this.startNewSession(agentId, opts);
   }
 
+  private startProviderWithPathRecovery<T>(
+    agentId: string,
+    stage: "newSession" | "loadSession" | "forkSession",
+    launch: {
+      cwd: string;
+      env: Record<string, string>;
+      cliBinary?: string;
+      executionBoundary: PreparedBoundary;
+      originalPath: string | undefined;
+      assertCurrent: () => void;
+    },
+    start: (boundary: PreparedBoundary) => Promise<T>,
+  ): Promise<T> {
+    if (!this.isNativeCodeActor("agent-code")) return start(launch.executionBoundary);
+    const recovery = new LocalLaunchPathRecovery(
+      launch.env, launch.cwd, stage, launch.assertCurrent, launch.originalPath,
+    );
+    const observedBoundary = recovery.observeBoundary(launch.executionBoundary);
+    return recovery.run(async () => {
+      // Claude defers its process until the first prompt; resolve its runtime
+      // before admission succeeds so recovery never has to resend that prompt.
+      if (agentId === "claude") {
+        const selected = resolveClaudeCli({ override: launch.cliBinary, pathValue: launch.env.PATH });
+        if (!selected.path || !resolveProviderExecutable(selected.path, launch.env))
+          throw missingExecutableError("claude");
+      } else if (agentId === "codex") {
+        const selected = await resolveCodexBinary({ override: launch.cliBinary, pathValue: launch.env.PATH });
+        if (!resolveProviderExecutable(selected.path, launch.env))
+          throw missingExecutableError(selected.path);
+      } else if (agentId === "cursor") {
+        if (!resolveCursorHostExecutable(launch.env)) throw missingExecutableError("node");
+      }
+      launch.assertCurrent();
+      return start(observedBoundary);
+    });
+  }
+
+  private async completeSessionSpawnEnv(overrides?: Record<string, string>): Promise<Record<string, string>> {
+    const env = completeAgentSpawnEnv(overrides);
+    if (this.isNativeCodeActor("agent-code") && overrides?.PATH === undefined)
+      env.PATH = sanitizeProbedPath(await getLoginShellPath());
+    return env;
+  }
+
   /** Retire scoped product authority while the native Code process stays live. */
   revokeSessionTools(workspaceId?: string): Promise<void> {
     return this.sessionTools.revoke(workspaceId);
@@ -5069,7 +5117,7 @@ export class AgentGateway {
     const canonicalWorkspaceRoot = managedWorkspace?.path;
     const merged = await withTargetBranchEnv(
       withWorktreeEnv(
-        mergeSpawnEnv(cwd, completeAgentSpawnEnv(opts.env), mainRepoRoot),
+        mergeSpawnEnv(cwd, await this.completeSessionSpawnEnv(opts.env), mainRepoRoot),
         cwd,
       ),
       opts.workspaceId,
@@ -5109,6 +5157,8 @@ export class AgentGateway {
     this.reportNativeContextDiagnostics(adapter, territorySet);
     const territory = territorySet.territory;
     const providerEnv = this.sanitizeProviderEnv(sessionEnv) ?? {};
+    const originalPath = this.isNativeCodeActor("agent-code")
+      ? cachedLoginShellPath() ?? providerEnv.PATH : providerEnv.PATH;
     // Native-instruction adapters (Codex and Claude) take the first-turn orientation on
     // their protocol's own channel at thread creation; everyone else gets it
     // prepended in-band on the first prompt (withSystemInstruction).
@@ -5238,7 +5288,16 @@ export class AgentGateway {
     let session: NewSessionResponse;
     const providerStartedAt = Date.now();
     try {
-      const startup = adapter.newSession({
+      const startup = this.startProviderWithPathRecovery(agentId, "newSession", {
+        cwd, env: providerEnv, cliBinary: spawn.cliBinary,
+        executionBoundary: preparedBoundary, originalPath,
+        assertCurrent: () => {
+          opts.admissionSignal?.throwIfAborted();
+          this.adapterStartupFlights.get(executionId)?.controller.signal.throwIfAborted();
+          if (this.executionBoundaries.get(executionId) !== preparedBoundary)
+            throw new Error("Agent startup was cancelled.");
+        },
+      }, (executionBoundary) => adapter.newSession({
         authenticationContext: authFingerprint,
         executionId,
         cwd,
@@ -5249,8 +5308,8 @@ export class AgentGateway {
         ...(computerUse ? { computerUse } : {}),
         ...(systemInstruction ? { systemInstruction } : {}),
         ...(territory && actor === "agent-code" ? { territory } : {}),
-        executionBoundary: preparedBoundary,
-      });
+        executionBoundary,
+      }));
       const startupSignal = this.trackAdapterStartup(
         executionId,
         startup,
@@ -5402,7 +5461,7 @@ export class AgentGateway {
     const canonicalWorkspaceRoot = managedWorkspace?.path;
     const merged = await withTargetBranchEnv(
       withWorktreeEnv(
-        mergeSpawnEnv(cwd, completeAgentSpawnEnv(opts.env), mainRepoRoot),
+        mergeSpawnEnv(cwd, await this.completeSessionSpawnEnv(opts.env), mainRepoRoot),
         cwd,
       ),
       opts.workspaceId,
@@ -5437,6 +5496,8 @@ export class AgentGateway {
     this.reportNativeContextDiagnostics(adapter, territorySet);
     const territory = territorySet.territory;
     const providerEnv = this.sanitizeProviderEnv(sessionEnv) ?? {};
+    const originalPath = this.isNativeCodeActor("agent-code")
+      ? cachedLoginShellPath() ?? providerEnv.PATH : providerEnv.PATH;
     const instructionCtx = this.parseInstructionCtx(
       providerEnv,
       territory?.designDirectory,
@@ -5566,7 +5627,16 @@ export class AgentGateway {
         ...(territory ? { territory } : {}),
         executionBoundary: preparedBoundary,
       };
-      const startup = adapter.loadSession(loadOptions);
+      const startup = this.startProviderWithPathRecovery(agentId, "loadSession", {
+        cwd, env: providerEnv, cliBinary: spawn.cliBinary,
+        executionBoundary: preparedBoundary, originalPath,
+        assertCurrent: () => {
+          opts.admissionSignal?.throwIfAborted();
+          this.adapterStartupFlights.get(executionId)?.controller.signal.throwIfAborted();
+          if (this.executionBoundaries.get(executionId) !== preparedBoundary)
+            throw new Error("Agent startup was cancelled.");
+        },
+      }, (executionBoundary) => adapter.loadSession({ ...loadOptions, executionBoundary }));
       const startupSignal = this.trackAdapterStartup(
         executionId,
         startup,
@@ -5738,7 +5808,7 @@ export class AgentGateway {
     const canonicalWorkspaceRoot = managedWorkspace?.path;
     const merged = await withTargetBranchEnv(
       withWorktreeEnv(
-        mergeSpawnEnv(cwd, completeAgentSpawnEnv(opts.env), mainRepoRoot),
+        mergeSpawnEnv(cwd, await this.completeSessionSpawnEnv(opts.env), mainRepoRoot),
         cwd,
       ),
       opts.workspaceId,
@@ -5773,6 +5843,8 @@ export class AgentGateway {
     this.reportNativeContextDiagnostics(adapter, territorySet);
     const territory = territorySet.territory;
     const providerEnv = this.sanitizeProviderEnv(sessionEnv) ?? {};
+    const originalPath = this.isNativeCodeActor("agent-code")
+      ? cachedLoginShellPath() ?? providerEnv.PATH : providerEnv.PATH;
     const instructionCtx = this.parseInstructionCtx(
       providerEnv,
       territory?.designDirectory,
@@ -5837,11 +5909,20 @@ export class AgentGateway {
           );
         }
         let result: { providerBinding: ProviderBinding };
+        let retired = false;
         try {
           result = await awaitAdapterStartup({
             agentId,
             stage: "forkSession",
-            operation: forkProviderBinding({
+            signal: opts.admissionSignal,
+            operation: this.startProviderWithPathRecovery(agentId, "forkSession", {
+              cwd, env: providerEnv, cliBinary: spawn.cliBinary,
+              executionBoundary: preparedBoundary, originalPath,
+              assertCurrent: () => {
+                opts.admissionSignal?.throwIfAborted();
+                if (retired) throw new Error("Agent startup was cancelled.");
+              },
+            }, (executionBoundary) => forkProviderBinding({
               providerBinding,
               cwd,
               env: providerEnv,
@@ -5849,12 +5930,13 @@ export class AgentGateway {
               mcpServers,
               ...(systemInstruction ? { systemInstruction } : {}),
               ...(territory ? { territory } : {}),
-              executionBoundary: preparedBoundary,
-            }),
+              executionBoundary,
+            })),
             onLateSettlement: () =>
               this.retirePreparedBoundary(forkExecutionId, preparedBoundary),
           });
         } finally {
+          retired = true;
           await this.retirePreparedBoundary(forkExecutionId, preparedBoundary);
         }
         const forkedBinding = coerceProviderBinding(result.providerBinding);

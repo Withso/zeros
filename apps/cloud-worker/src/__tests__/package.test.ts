@@ -14,6 +14,8 @@ import { afterAll, beforeAll, expect, it } from "vitest";
 import { workerChildEnvironment } from "../drivers/shared/agent-environment";
 import { CLIENT_A, WORKSPACE_ID, browserFrame, config } from "./worker-fixtures";
 import { GithubBroker, githubEnvironment } from "../credentials/github";
+import { brokerRequest } from "../credentials/client";
+import { githubAuthenticationError } from "../credentials/github-failure";
 import { repositoryFixture } from "../workspace/__tests__/repository-fixture";
 
 const exec = promisify(execFile);
@@ -41,7 +43,7 @@ it("ships a relocatable dependency graph and a complete SHA-256 inventory", asyn
   expect((await lstat(dist)).isSymbolicLink()).toBe(true); expect(await realpath(dist)).toBe(runtime);
   const manifest = JSON.parse(await readFile(join(dist, "runtime-manifest.json"), "utf8"));
   expect(manifest).toMatchObject({ node: "24", platform: process.platform, arch: process.arch,
-    pins: { "@openai/codex": "0.165.0", "@anthropic-ai/claude-agent-sdk": "0.3.311", "@cursor/sdk": "1.2.0", "node-pty": "1.1.0" } });
+    pins: { "@openai/codex": "0.166.0", "@anthropic-ai/claude-agent-sdk": "0.3.311", "@cursor/sdk": "1.2.0", "node-pty": "1.1.0" } });
   const files: string[] = [];
   async function walk(relative = ""): Promise<void> {
     for (const entry of await readdir(join(dist, relative), { withFileTypes: true })) {
@@ -81,10 +83,10 @@ it("loads pinned binaries and SDKs through the runtime symlink without the check
     const claudeSdk = require.resolve('@anthropic-ai/claude-agent-sdk');
     const claude = createRequire(claudeSdk).resolve('@anthropic-ai/claude-agent-sdk-' + process.platform + '-' + process.arch + '/claude');
     for (const path of [codex, claude, require.resolve('@cursor/sdk')]) assert(realpathSync(path).startsWith(root + '/node_modules/'));
-    assert.equal(require(codexManifest).version, '0.165.0');
+    assert.equal(require(codexManifest).version, '0.166.0');
     assert.equal(require(join(dirname(claudeSdk), 'package.json')).version, '0.3.311');
     assert.equal(require(join(dirname(claude), 'package.json')).version, '0.3.311');
-    assert.match(execFileSync(process.execPath, [codex, '--version'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 10000 }), /0\\.165\\.0/);
+    assert.match(execFileSync(process.execPath, [codex, '--version'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 10000 }), /0\\.166\\.0/);
     assert.match(execFileSync(claude, ['--version'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 10000 }), /2\\.1\\.311 \\(Claude Code\\)/);
     const pty = require('node-pty').spawn('/bin/sh', ['-c', 'printf WORKER_NATIVE_OK'], {cwd:process.cwd(),env:{PATH:'/usr/bin:/bin'}});
     let output=''; pty.onData(data=>{output+=data});
@@ -114,7 +116,7 @@ it("boots the relocated Cursor host with its real pinned SDK over IPC without co
 
 it("resolves askpass and gh wrappers through a runtime symlink, including spaces", async () => {
   let requests = 0;
-  const broker = new GithubBroker(join(directory, "askpass.sock"), async () => { requests++; return { token: "fixture-package-github", expiresAt: Date.now() + 60_000 }; });
+  const broker = new GithubBroker(`/tmp/zeros-github-${randomUUID()}/github.sock`, async () => { requests++; return { token: "fixture-package-github", expiresAt: Date.now() + 60_000 }; });
   await broker.start();
   try {
     const executable = join(dist, "bin/git-askpass");
@@ -138,6 +140,35 @@ it("resolves askpass and gh wrappers through a runtime symlink, including spaces
         NODE_OPTIONS: `--import=${new URL("./fixtures/gh-launch.mjs", import.meta.url).href}` }, timeout: 10_000,
     });
     expect(gh.stdout.startsWith("gh version ")).toBe(true); expect(gh.stderr).toBe(""); expect(requests).toBe(3);
+  } finally { await broker.dispose(); }
+});
+
+it.each(["git-askpass", "gh"])("prints the broker's safe recovery guidance from the packaged %s entrypoint", async name => {
+  const broker = new GithubBroker(`/tmp/zeros-github-${randomUUID()}/github.sock`, async () => { throw githubAuthenticationError("connection-expired"); });
+  await broker.start();
+  try {
+    const args = name === "git-askpass" ? ["Password for 'https://x-access-token@github.com': "] : ["pr", "list"];
+    const result = await exec(join(dist, "bin", name), args, { cwd: directory,
+      env: workerChildEnvironment(undefined, githubEnvironment(broker.socketPath, join(dist, "bin/git-askpass"))), timeout: 10_000 }).catch(error => error);
+    expect(result.code).toBe(1);
+    expect(result.stdout).toBe("");
+    expect(result.stderr).toBe("Reconnect GitHub in Zeros: your connection has expired.\n");
+  } finally { await broker.dispose(); }
+});
+
+it.each(["git-askpass", "gh"])("rejects an unrelated socket from the packaged %s entrypoint", async name => {
+  let requests = 0;
+  const broker = new GithubBroker(join(directory, `${name}-unrelated.sock`), async () => {
+    requests++; return { token: "fixture-unrelated", expiresAt: Date.now() + 60_000 };
+  });
+  await broker.start();
+  try {
+    const args = name === "git-askpass" ? ["Password for 'https://github.com': "] : ["pr", "list"];
+    const result = await exec(join(dist, "bin", name), args, { cwd: directory,
+      env: workerChildEnvironment(undefined, githubEnvironment(broker.socketPath, join(dist, "bin/git-askpass"))), timeout: 10_000 }).catch(error => error);
+    expect(result.code).toBe(1); expect(result.stdout).toBe("");
+    expect(result.stderr).toBe("GitHub authentication is unavailable. Try again shortly.\n");
+    expect(requests).toBe(0);
   } finally { await broker.dispose(); }
 });
 
@@ -193,14 +224,38 @@ it("boots through the runtime symlink, waits for a token, serves a dial-in PTY a
       const message = JSON.parse(raw.toString()); messages.push(message);
       if (message.t === "frame" && message.frame.type === "ENGINE_READY")
         socket!.send(JSON.stringify({ t: "frame", clientId: CLIENT_A, frame: browserFrame("PTY_CREATE", { sessionId: "package-shell" }) }));
-      if (message.t === "frame" && message.frame.type === "PTY_CREATED")
-        socket!.send(JSON.stringify({ t: "frame", clientId: CLIENT_A, frame: browserFrame("PTY_WRITE", { sessionId: "package-shell", data: "printf 'BUNDLED_PTY_OK\\n'\n" }) }));
+      if (message.t === "frame" && message.frame.type === "PTY_CREATED" && message.frame.sessionId === "package-shell")
+        socket!.send(JSON.stringify({ t: "frame", clientId: CLIENT_A, frame: browserFrame("PTY_WRITE", { sessionId: "package-shell",
+          data: "printf 'BUNDLED_PTY_OK\\nBUNDLED_BROKER_PATH=%s\\n' \"$GH_ZEROS_BROKER_SOCKET\"\n" }) }));
     });
     await once(socket, "open");
     socket.send(JSON.stringify({ t: "open", clientId: CLIENT_A }));
     await expect.poll(() => messages.some(message => message.t === "frame" && message.frame.type === "PTY_DATA"
       && message.frame.data.includes("BUNDLED_PTY_OK")), { timeout: 5000 }).toBe(true);
     expect(requests.some(request => request.path === "hello" && request.generation === "initial")).toBe(true);
+    const publishedSocket = () => /BUNDLED_BROKER_PATH=(\/[^\r\n]+)/.exec(messages
+      .filter(message => message.t === "frame" && message.frame.type === "PTY_DATA" && message.frame.sessionId === "package-shell")
+      .map(message => message.frame.data).join(""))?.[1];
+    await expect.poll(publishedSocket).toBeDefined();
+    const brokerSocket = publishedSocket()!, askpassPath = join(dist, "bin/git-askpass");
+    expect(await brokerRequest(brokerSocket, "token")).toMatchObject({ token: "fixture-package-github" });
+    for (let i = 0; i < 3; i++) {
+      const sessionId = `credential-shell-${i}`;
+      socket.send(JSON.stringify({ t: "frame", clientId: CLIENT_A, frame: browserFrame("PTY_CREATE", { sessionId }) }));
+      await expect.poll(() => messages.some(message => message.t === "frame" && message.frame.type === "PTY_CREATED" && message.frame.sessionId === sessionId)).toBe(true);
+      socket.send(JSON.stringify({ t: "frame", clientId: CLIENT_A, frame: browserFrame("PTY_WRITE", { sessionId,
+        data: `"$GIT_ASKPASS" "Password for 'https://x-access-token@github.com': " >/dev/null; printf 'BROKER_HELPER_%s_%s\\n' ${i} "$?"; exit\n`,
+      }) }));
+      await expect.poll(() => messages.filter(message => message.t === "frame" && message.frame.type === "PTY_DATA" && message.frame.sessionId === sessionId)
+        .map(message => message.frame.data).join("")).toContain(`BROKER_HELPER_${i}_0`);
+      await expect.poll(() => messages.some(message => message.t === "frame" && message.frame.type === "PTY_EXIT" && message.frame.sessionId === sessionId)).toBe(true);
+      const result = await exec(askpassPath, ["Password for 'https://x-access-token@github.com': "], {
+        cwd: root, env: workerChildEnvironment(undefined, githubEnvironment(brokerSocket, askpassPath)), timeout: 10_000,
+      });
+      expect(result.stdout === "fixture-package-github\n").toBe(true);
+      expect(result.stderr).toBe("");
+    }
+    expect(requests.filter(request => request.path === "github-token")).toHaveLength(1);
     await writeFile(`${tokenFile}.next`, rotatedToken, { mode: 0o600 });
     await rename(`${tokenFile}.next`, tokenFile);
     socket.send(JSON.stringify({ t: "frame", clientId: CLIENT_A, frame: browserFrame("WORKSPACE_REQUEST", { op: "chats.upsert", params: {

@@ -17,7 +17,6 @@ import type { MiddlewareHandler } from "hono";
 import type pg from "pg";
 import type { Config } from "./config.js";
 import { withSystemTx, type Tx } from "./db.js";
-import { auth0TokenIsRevoked } from "./auth0-browser-sessions.js";
 import { HttpError, type StaffRole } from "./authz.js";
 import {
   AuthTokenContractError,
@@ -37,7 +36,9 @@ import {
   workOSUserProviderLockKey,
 } from "./workos-provider-locks.js";
 
-export type IdentityProvider = "auth0" | "workos";
+/** Every account signs in with WorkOS. `user_identities` rows another
+ * provider left are history and never authenticate. */
+export type IdentityProvider = "workos";
 
 export type AuthenticatedSessionInput = {
   id: string;
@@ -93,28 +94,6 @@ export type AuthedUser = {
   staffRole: StaffRole | null;
 };
 
-// Auth0 access tokens carry NO profile claims by default. A Post-Login Action
-// stamps email/email_verified/name onto the token, but Auth0 requires custom
-// claims to be NAMESPACED (it silently drops plain `email`), so they arrive
-// under this prefix. We read the namespaced claim first and fall back to a
-// top-level one so a differently-shaped token (e.g. an id-token, or a future
-// non-namespaced setup) still resolves. Keep this NS in sync with the Action.
-const CLAIM_NS = "https://zeros.build/";
-
-function claimString(payload: JWTPayload, key: string): string | null {
-  const ns = payload[CLAIM_NS + key];
-  if (typeof ns === "string") return ns;
-  const top = payload[key];
-  return typeof top === "string" ? top : null;
-}
-
-function claimBool(payload: JWTPayload, key: string): boolean | undefined {
-  const ns = payload[CLAIM_NS + key];
-  if (typeof ns === "boolean") return ns;
-  const top = payload[key];
-  return typeof top === "boolean" ? top : undefined;
-}
-
 declare module "hono" {
   interface ContextVariableMap {
     user: AuthedUser;
@@ -126,25 +105,13 @@ export function createAuthMiddleware(
   pool: pg.Pool,
 ): MiddlewareHandler {
   const jwks = createRemoteJWKSet(new URL(config.auth.jwksUrl));
-  const workosContract: AuthTokenContractConfig | null =
-    config.auth.provider === "workos"
-      ? {
-          issuer: config.auth.issuer,
-          audience: config.auth.audience,
-          webClientId: config.auth.webClientId,
-          desktopClientId: config.auth.desktopClientId,
-        }
-      : null;
-  const verifyOptions: JWTVerifyOptions =
-    config.auth.provider === "workos"
-      ? authTokenVerifyOptions(workosContract!)
-      : {
-          issuer: config.auth.issuers,
-          audience: config.auth.audience,
-          // Preserve the released Auth0 contract until its clients move.
-          algorithms: ["RS256"],
-          requiredClaims: ["exp", "sub"],
-        };
+  const workosContract: AuthTokenContractConfig = {
+    issuer: config.auth.issuer,
+    audience: config.auth.audience,
+    webClientId: config.auth.webClientId,
+    desktopClientId: config.auth.desktopClientId,
+  };
+  const verifyOptions: JWTVerifyOptions = authTokenVerifyOptions(workosContract);
 
   return async (c, next) => {
     const header = c.req.header("authorization") ?? "";
@@ -187,73 +154,33 @@ export function createAuthMiddleware(
       email: string;
       displayName: string | null;
       avatarUrl: string | null;
-      session?: AuthenticatedSessionInput;
+      session: AuthenticatedSessionInput;
     };
-    if (workosContract) {
-      try {
-        const claims = validateAuthTokenClaims(payload, workosContract);
-        identity = {
-          provider: "workos",
-          providerSubject: claims.providerSubject,
-          email: claims.email,
-          displayName: claims.displayName,
-          avatarUrl: claims.avatarUrl,
-          session: {
-            id: claims.sessionId,
-            clientKind: claims.clientKind,
-            authTime: claims.authTime,
-            tokenExpiresAt: claims.expiresAt,
-          },
-        };
-      } catch (error) {
-        const code =
-          error instanceof AuthTokenContractError
-            ? error.code
-            : "AUTH_CONTRACT_INVALID";
-        console.warn(`[auth] 401 WorkOS token contract rejected [${code}]`);
-        if (
-          error instanceof AuthTokenContractError &&
-          error.code === "AUTH_EMAIL_UNVERIFIED"
-        ) {
-          return c.json(
-            {
-              error: {
-                code: "email_unverified",
-                message: "Verify your email to continue",
-              },
-            },
-            401,
-          );
-        }
-        return c.json(
-          {
-            error: {
-              code: "unauthorized",
-              message: `Invalid access token contract [${code}]`,
-            },
-          },
-          401,
-        );
-      }
-    } else {
-      const sub = typeof payload.sub === "string" ? payload.sub : null;
-      const email = claimString(payload, "email");
-      if (!sub || !email) {
-        console.warn("[auth] 401 Auth0 token missing required profile claims");
-        return c.json(
-          {
-            error: {
-              code: "unauthorized",
-              message: "Token missing sub/email",
-            },
-          },
-          401,
-        );
-      }
-      // Invitation acceptance binds on verified email, so a missing or false
-      // assertion must fail closed for the legacy provider too.
-      if (claimBool(payload, "email_verified") !== true) {
-        console.warn("[auth] 401 Auth0 token email is unverified");
+    try {
+      const claims = validateAuthTokenClaims(payload, workosContract);
+      identity = {
+        provider: "workos",
+        providerSubject: claims.providerSubject,
+        email: claims.email,
+        displayName: claims.displayName,
+        avatarUrl: claims.avatarUrl,
+        session: {
+          id: claims.sessionId,
+          clientKind: claims.clientKind,
+          authTime: claims.authTime,
+          tokenExpiresAt: claims.expiresAt,
+        },
+      };
+    } catch (error) {
+      const code =
+        error instanceof AuthTokenContractError
+          ? error.code
+          : "AUTH_CONTRACT_INVALID";
+      console.warn(`[auth] 401 WorkOS token contract rejected [${code}]`);
+      if (
+        error instanceof AuthTokenContractError &&
+        error.code === "AUTH_EMAIL_UNVERIFIED"
+      ) {
         return c.json(
           {
             error: {
@@ -264,38 +191,17 @@ export function createAuthMiddleware(
           401,
         );
       }
-      const displayName =
-        claimString(payload, "name") ||
-        claimString(payload, "nickname") ||
-        null;
-      const picture = claimString(payload, "picture");
-      let avatarUrl: string | null = null;
-      if (picture && picture.length <= 2_048) {
-        try {
-          const parsed = new URL(picture);
-          if (
-            parsed.protocol === "https:" &&
-            !parsed.username &&
-            !parsed.password
-          ) {
-            avatarUrl = parsed.toString();
-          }
-        } catch {
-          // Invalid provider claim: omit it; identity still authenticates.
-        }
-      }
-      identity = {
-        provider: "auth0",
-        providerSubject: sub,
-        email,
-        displayName,
-        avatarUrl,
-      };
+      return c.json(
+        {
+          error: {
+            code: "unauthorized",
+            message: `Invalid access token contract [${code}]`,
+          },
+        },
+        401,
+      );
     }
 
-    if (identity.provider === "auth0" && config.auth0SessionAuthorityKey && await auth0TokenIsRevoked(pool, identity.providerSubject, payload.iat)) {
-      return c.json({ error: { code: "unauthorized", message: "Session revoked" } }, 401);
-    }
     const user = await resolveAuthenticatedUser(
       pool,
       { ...identity },
@@ -307,13 +213,11 @@ export function createAuthMiddleware(
       },
     );
     c.set("user", user);
-    if (identity.provider === "workos" && identity.session && config.auth.provider === "workos") {
-      const connections = devConnectionRuntime(pool);
-      if (connections) {
-        try { await connections.signedIn({userId:user.id,issuer:config.auth.issuer,subject:identity.providerSubject,
-          token,expiresAt:identity.session.tokenExpiresAt}); }
-        catch { /* Sign-in remains available; new Dev grants fail closed. */ }
-      }
+    const connections = devConnectionRuntime(pool);
+    if (connections) {
+      try { await connections.signedIn({userId:user.id,issuer:config.auth.issuer,subject:identity.providerSubject,
+        token,expiresAt:identity.session.tokenExpiresAt}); }
+      catch { /* Sign-in remains available; new Dev grants fail closed. */ }
     }
     await next();
   };
@@ -444,7 +348,6 @@ async function requireUnfencedWorkOSIdentity(
   tx: Tx,
   input: AuthenticatedIdentityInput,
 ): Promise<void> {
-  if (input.provider !== "workos") return;
   const status = await workOSProviderErasureFenceStatus(tx, [
     { kind: "user", id: input.providerSubject },
   ]);
@@ -624,7 +527,6 @@ async function withWorkOSAuthenticationTx<T>(
   input: AuthenticatedIdentityInput,
   work: (tx: Tx) => Promise<T>,
 ): Promise<T> {
-  if (input.provider !== "workos") return withSystemTx(pool, work);
   const subjectKey = workOSProviderSubjectLockKey({
     kind: "user",
     id: input.providerSubject,
@@ -724,7 +626,7 @@ async function registerAuthenticatedSession(
   user: AuthedUser,
   input: AuthenticatedIdentityInput,
 ): Promise<void> {
-  const session = input.provider === "workos" ? input.session : undefined;
+  const session = input.session;
   if (!session) return;
 
   const loadCurrent = () => tx.query<{
@@ -968,28 +870,17 @@ async function ensureUserWithoutProviderLock(
       // address. Return an actionable conflict instead of a unique-constraint failure.
       const emailOwner = await tx.query<{
         id: string;
-        auth_status: AccountAuthStatus;
         recovery_identity_id: string | null;
-        recovery_identity_provider: IdentityProvider | null;
       }>(
-        `SELECT u.id, u.auth_status,
-                recovery_identity.id AS recovery_identity_id,
-                recovery_identity.provider AS recovery_identity_provider
+        `SELECT u.id, recovery_identity.id AS recovery_identity_id
          FROM users u
          LEFT JOIN LATERAL (
-           SELECT ui.id, ui.provider
+           SELECT ui.id
            FROM user_identities ui
-           WHERE ui.user_id = u.id AND (
-             (
-               u.auth_status IN ('identity_disabled', 'deletion_pending')
-               AND ui.provider = 'workos'
-               AND ui.status = 'provider_deleted'
-             ) OR (
-               u.auth_status = 'active'
-               AND ui.provider = 'auth0'
-               AND ui.status = 'active'
-             )
-           )
+           WHERE ui.user_id = u.id
+             AND u.auth_status IN ('identity_disabled', 'deletion_pending')
+             AND ui.provider = 'workos'
+             AND ui.status = 'provider_deleted'
              AND NOT EXISTS (
                SELECT 1
                FROM user_identities active_workos
@@ -1005,18 +896,7 @@ async function ensureUserWithoutProviderLock(
       );
       if (emailOwner.rows[0]) {
         const owner = emailOwner.rows[0];
-        const providerRecovery =
-          owner.recovery_identity_provider === "workos" &&
-          (owner.auth_status === "identity_disabled" ||
-            owner.auth_status === "deletion_pending");
-        const legacyMigration =
-          owner.recovery_identity_provider === "auth0" &&
-          owner.auth_status === "active";
-        if (
-          input.provider === "workos" &&
-          owner.recovery_identity_id &&
-          (providerRecovery || legacyMigration)
-        ) {
+        if (owner.recovery_identity_id) {
           if (!input.session) {
             return { kind: "recovery_required", publicCode: null };
           }
@@ -1087,13 +967,11 @@ async function ensureUserWithoutProviderLock(
          ON CONFLICT (provider, provider_sub) DO NOTHING`,
         [row.id, input.provider, input.providerSubject, input.email],
       );
-      if (input.provider === "workos") {
-        await materializeProjectedMemberships(
-          tx,
-          row.id,
-          input.providerSubject,
-        );
-      }
+      await materializeProjectedMemberships(
+        tx,
+        row.id,
+        input.providerSubject,
+      );
     }
 
     await ensurePersonalOrganization(tx, row);

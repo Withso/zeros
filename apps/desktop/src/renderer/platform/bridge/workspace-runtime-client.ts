@@ -21,6 +21,8 @@ import {
 } from "./cloud-runtime-wire";
 
 type Message = Partial<BridgeMessage> & { type: string };
+const MAX_CLOUD_CONNECTIONS = 16;
+const MAX_RETIRED_SNAPSHOTS = 64;
 /** Renderer-only refresh ownership; never sent to an engine. */
 export type ChatSnapshotRefresh = "all" | "local" | "retained" | readonly string[];
 type RequestOptions = Exclude<
@@ -47,9 +49,12 @@ export interface WorkspaceRuntimeOptions {
   /** Complete catalog confirmation includes an authoritative empty list. */
   workspacesConfirmed?: () => boolean;
   canAccess?: (target: CloudWorkspaceTarget) => boolean;
-  /** A running v2 worker needs no new ticket for each preparation of a send.
-   * Lifecycle progress or Stop must still take the ordinary explicit wake. */
+  /** A relay socket can outlive its worker. Reuse it only while the worker is
+   * running; background requests must not wake it through that old socket. */
   canReuseForWork?: (target: CloudWorkspaceTarget) => boolean;
+  /** Protect connections needed by visible or live work; opening peers are
+   * always protected independently of this optional routing policy. */
+  liveWork?: (target: CloudWorkspaceTarget) => boolean;
   manage?: (target: CloudWorkspaceTarget, op: string, params?: WireRecord) => Promise<WireRecord>;
   /** Authorized database reads that do not require a worker connection. The
    * mirror stores the worker's native rows, so they are scoped like its replies. */
@@ -76,6 +81,8 @@ interface PeerEntry extends CloudPeer {
   snapshot: WireRecord;
   hasChatSnapshot: boolean;
   retired: boolean;
+  opening: boolean;
+  lastUsed: number;
   epoch: number;
   identity: string;
   snapshotRevision: number;
@@ -115,6 +122,7 @@ export class WorkspaceRuntimeClient extends RuntimeClient {
   private readonly refusedAdmissions = new Map<string, RefusedAdmission>();
   private readonly speculative = new Map<string, ReturnType<typeof setTimeout>>();
   private ongoingOpens = 0;
+  private peerUseSequence = 0;
   private readonly historyIntents = new Map<string, number>();
   private readonly routedHandlers = new Map<
     string,
@@ -574,8 +582,10 @@ export class WorkspaceRuntimeClient extends RuntimeClient {
 
   hasChatSnapshot(folder: string): boolean {
     const target = parseCloudWorkspaceKey(folder);
+    const entry = target ? this.peers.get(cloudWorkspaceKey(target)) : undefined;
+    if (entry?.hasChatSnapshot) entry.lastUsed = ++this.peerUseSequence;
     return !!target && (this.history.peekSnapshot(this.historyKey(target, "chats.list", {})).data !== undefined ||
-      this.peers.get(cloudWorkspaceKey(target))?.hasChatSnapshot === true);
+      entry?.hasChatSnapshot === true);
   }
 
   /** Existing current peer only. CP mirror revisions and disk cache cannot
@@ -671,7 +681,7 @@ export class WorkspaceRuntimeClient extends RuntimeClient {
   }
 
   private attach(entry: PeerEntry, type: string): void {
-    if (entry.unsubscribers.has(type)) return;
+    if (entry.retired || entry.unsubscribers.has(type)) return;
     entry.unsubscribers.set(
       type,
       entry.client.on(type, (message) => {
@@ -721,8 +731,10 @@ export class WorkspaceRuntimeClient extends RuntimeClient {
     }
     const existing = this.peers.get(key);
     const connected = existing && existing.identity === identity && !existing.retired && existing.client.status === "connected";
-    if (connected && (!wake || this.routing.canReuseForWork?.(target) === true))
+    if (connected && (this.routing.canReuseForWork ? this.routing.canReuseForWork(target) : !wake)) {
+      existing.lastUsed = ++this.peerUseSequence;
       return Promise.resolve(existing);
+    }
     if (this.closed)
       return Promise.reject(new Error("Workspace connections are closed"));
     // A new passive consumer is not new authority. Retain typed terminal
@@ -731,14 +743,20 @@ export class WorkspaceRuntimeClient extends RuntimeClient {
     const refused = this.refusedAdmissions.get(key);
     if (refused?.identity !== identity) this.refusedAdmissions.delete(key);
     else if (!wake) return Promise.reject(refused.error);
-    // Bound sockets and their replay buffers; never evict a potentially live
-    // conversation merely because another workspace gained focus.
-    if (this.ongoingOpens >= 16 || (!existing && this.peers.size + this.ongoingOpens >= 16))
+    // An opening owns one reservation through hydration, even after native
+    // admission returns a peer or its caller cancels before IPC settles.
+    const live = [...this.peers.values()].filter(entry => !entry.retired && !entry.opening && entry !== existing);
+    const atCapacity = live.length + this.ongoingOpens >= MAX_CLOUD_CONNECTIONS;
+    const evicted = atCapacity ? live.filter(entry => !this.routing.liveWork?.(entry.scope))
+      .sort((a, b) => a.lastUsed - b.lastUsed)[0] : undefined;
+    if (this.ongoingOpens >= MAX_CLOUD_CONNECTIONS || atCapacity && !evicted)
       return Promise.reject(
         new Error(
-          "Too many cloud workspace connections are open. Reopen Zeros to reconnect the workspaces you need.",
+          "All 16 cloud workspace connections are in use. Wait for one to finish connecting or become idle, then try again.",
         ),
       );
+    this.ongoingOpens++;
+    if (evicted) this.retirePeer(evicted);
     // A stopped/replaced engine can leave its old admission reconnecting.
     // New work obtains fresh authority once per exact workspace. Preserve the
     // confirmed snapshot while retiring its transport; never replay a request
@@ -759,14 +777,17 @@ export class WorkspaceRuntimeClient extends RuntimeClient {
     // is slow. Keep this exact read for initial hydration even after its TTL.
     const history = this.routing.readHistory ? this.warmHistorySnapshot(target) : undefined;
     void history?.catch(() => {});
-    // Cancelled native IPC can still be awaiting its reply. Count it until it
-    // settles so sweeping the pointer cannot grow an unbounded admission queue.
-    this.ongoingOpens++;
     let opening: Promise<CloudPeer>;
+    let admitted: PeerEntry | undefined;
     try {
       opening = this.routing.open(target, { signal: controller.signal, ...(wake ? { wake: true, wakeIntent, ...(reason ? { reason } : {}) } : {}) });
     }
-    catch (error) { this.ongoingOpens--; rememberRefusal(error); return Promise.reject(error); }
+    catch (error) {
+      this.ongoingOpens--;
+      if (evicted) this.workspaceStatusChanged(cloudWorkspaceKey(evicted.scope));
+      rememberRefusal(error);
+      return Promise.reject(error);
+    }
     const flight = opening
       .catch(error => {
         if (this.opening.get(key)?.promise === flight) rememberRefusal(error);
@@ -802,7 +823,10 @@ export class WorkspaceRuntimeClient extends RuntimeClient {
           snapshot: existing?.snapshot ?? { chats: [], chatDeletions: [] },
           hasChatSnapshot: existing?.hasChatSnapshot ?? false,
           retired: false,
+          opening: true,
+          lastUsed: ++this.peerUseSequence,
         };
+        admitted = entry;
         this.peers.set(key, entry);
         this.confirmedRoots.delete(key);
         this.confirmedRoots.set(key, entry.scope.root);
@@ -840,10 +864,12 @@ export class WorkspaceRuntimeClient extends RuntimeClient {
       })
       .finally(() => {
         this.ongoingOpens--;
+        if (admitted) admitted.opening = false;
         if (this.opening.get(key)?.promise === flight) this.opening.delete(key);
         this.workspaceStatusChanged(key);
       });
     this.opening.set(key, { promise: flight, identity, target, controller, wake, consumers: 0, owner });
+    if (evicted) this.workspaceStatusChanged(cloudWorkspaceKey(evicted.scope));
     this.workspaceStatusChanged(key);
     return flight;
   }
@@ -1107,6 +1133,9 @@ export class WorkspaceRuntimeClient extends RuntimeClient {
     for (const off of entry.unsubscribers.values()) off();
     entry.unsubscribers.clear();
     entry.release();
+    const retired = [...this.peers].filter(([, peer]) => peer.retired)
+      .sort(([, a], [, b]) => a.lastUsed - b.lastUsed);
+    for (const [key] of retired.slice(0, Math.max(0, retired.length - MAX_RETIRED_SNAPSHOTS))) this.peers.delete(key);
   }
 
   private removePeer(key: string, entry: PeerEntry): void {

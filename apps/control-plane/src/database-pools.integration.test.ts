@@ -5,6 +5,7 @@ import { createApp } from "./app.js";
 import { loadConfig } from "./config.js";
 import { createPool, createMigrationPool, withSystemTx } from "./db.js";
 import { withWorkOSProviderLocks } from "./workos-provider-locks.js";
+import { workosTestEnv } from "./test-workos-env.js";
 
 const url = process.env.TEST_DATABASE_URL;
 const database = url ? describe : describe.skip;
@@ -64,7 +65,7 @@ database("database workload bulkheads", () => {
   it("returns a bounded retry response when even a public health request cannot acquire", async () => {
     const api = createPool(url!, { workload: "api", maxConnections: 2 });
     const held = [await api.connect(), await api.connect()];
-    const config = loadConfig({ DATABASE_URL: url!, AUTH0_DOMAIN: "identity.example.test", AUTH_AUDIENCE: "https://api.example.test" });
+    const config = loadConfig({ DATABASE_URL: url!, ...workosTestEnv(), AUTH_AUDIENCE: "https://api.example.test" });
     const app = createApp(config, api, { from: null, apiKey: null } as never);
     vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
     let response: Response | undefined;

@@ -223,6 +223,35 @@ describe("resolving a source in the workspace", () => {
     }
   });
 
+  it("counts a stylesheet's rules, so one without variables still says what it holds", async () => {
+    const root = workspace({
+      "styles/app.css": [
+        "@layer base, components;",
+        "@property --spin { syntax: '<angle>'; inherits: false; initial-value: 0deg; }",
+        ".card { padding: 4px; }",
+        "@media (min-width: 600px) { .card { padding: 8px; } .card > p { margin: 0; } }",
+        "@keyframes pulse { from { opacity: 0; } to { opacity: 1; } }",
+        '@font-face { font-family: "Brand"; src: local("Brand"); }',
+      ].join("\n"),
+      "styles/tailwind.css": '@import "tailwindcss" source(none);\n.brand { order: 1; }',
+      ".zeros/design-styles/app.css": ".hero { order: 1; } .hero > p { order: 2; }",
+    });
+    const css = await resolveDesignStyleSource(root, declaration());
+    expect(css).toMatchObject({ status: "ready", tokens: [], rules: 5 });
+    // A build source reports the rules of the output it imports, once there is one.
+    const build = (output: string) => resolveDesignStyleSource(root, declaration({ kind: "build", path: `.zeros/design-styles/${output}` }));
+    expect((await build("app.css")).rules).toBe(2);
+    const unbuilt = await build("gone.css");
+    expect(unbuilt.revision).toBeNull();
+    expect(unbuilt.rules).toBeUndefined();
+    // Tailwind's utilities depend on each frame, so it reports no count.
+    const tailwind = await resolveDesignStyleSource(root, declaration({ kind: "tailwind", path: "styles/tailwind.css" }));
+    expect(tailwind.status).toBe("ready");
+    expect(tailwind.rules).toBeUndefined();
+    // A failed import holds nothing it could count.
+    expect((await resolveDesignStyleSource(root, declaration({ path: "styles/gone.css" }))).rules).toBeUndefined();
+  });
+
   it("lists a frame's importable sources in order and skips failed ones", async () => {
     const root = workspace({
       "styles/app.css": ":root { --bg1: black; }",

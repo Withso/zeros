@@ -22,14 +22,15 @@ const localMapperPath = fileURLToPath(new URL("../../../../../desktop/src/engine
 const { CodexAppServerTranslator } = await import(localMapperPath);
 
 describe("Codex native → canonical event parity", () => {
-  it("persists a recovered VM image and edit sources through the real driver and history reload", async () => {
+  it.each([undefined, null, "generation-image"])("persists a recovered VM image with generationId %s through the driver and history reload", async generationId => {
     const directory = await realpath(await mkdtemp(join(tmpdir(), "zeros-worker-image-parity-")));
     const savedPath = join(directory, "sunset-poster.png");
     const bytes = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4P9MFAAR3Ad0FpxN3AAAAAElFTkSuQmCC", "base64");
     const inputImages = [{ path: join(directory, "beach.jpg"), sha256: "a".repeat(64) }];
     await writeFile(savedPath, bytes);
     const frames = [
-      { method: "item/completed", params: { item: { type: "imageGeneration", id: "generated-image", status: "completed", revisedPrompt: null, failure: null, fileId: "opaque-file", savedPath, inputImages } } },
+      { method: "item/completed", params: { item: { type: "imageGeneration", id: "generated-image", status: "completed", revisedPrompt: null, failure: null, fileId: "opaque-file", savedPath, inputImages,
+        ...(generationId === undefined ? {} : { generationId }), startedAtMs: 1000, completedAtMs: 2000 } } },
       { method: "turn/completed", params: { turn: { status: "completed" } } },
     ];
     ids.next = 0;

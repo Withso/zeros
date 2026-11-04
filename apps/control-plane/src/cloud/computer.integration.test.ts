@@ -7,6 +7,7 @@ import { promisify } from "node:util";
 import pg from "pg";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { resetMigratedTestDatabase } from "../test-database.js";
+import { grantTestPro } from "../test-pro.js";
 import type { CloudV2Compute } from "./boat.js";
 import { CloudV2ComputerBuilder, CloudV2Computers, cloudV2SnapshotName } from "./computer.js";
 import { CloudProviderError } from "./provider-error.js";
@@ -34,6 +35,7 @@ d("cloud v2 Cloud Computer builds", () => {
     computers = new CloudV2Computers(pool, pool, resolveRepository);
     [admin, member] = [randomUUID(), randomUUID()];
     for (const id of [admin, member]) await pool.query(`INSERT INTO users (id, email, display_name) VALUES ($1, $2, 'U')`, [id, `u-${id}@example.test`]);
+    await grantTestPro(pool, admin, member);
     org = randomUUID();
     await pool.query(`INSERT INTO organizations (id, slug, name, created_by, is_personal, cloud_workspaces_allowed) VALUES ($1, $2, 'Org', $3, false, true)`,
       [org, `org-${org}`, admin]);
@@ -176,6 +178,13 @@ d("cloud v2 Cloud Computer builds", () => {
     const cloneCommand = vi.mocked(boat.execLong).mock.calls[0]![1];
     expect(cloneCommand).not.toContain("ghs_token");
     expect(cloneCommand).not.toContain(Buffer.from("x-access-token:ghs_token").toString("base64"));
+    // Like the Conductor sandbox, every image ships git-lfs, configured system-wide,
+    // installed after the runtime and before the shared snapshot is captured.
+    const lfsCall = vi.mocked(boat.exec).mock.calls.findIndex(([, command]) => command.includes("git lfs install --system"));
+    expect(lfsCall).toBeGreaterThan(0);
+    expect(vi.mocked(boat.exec).mock.calls[lfsCall]![1]).toMatch(/apt-get .*install -y/);
+    expect(vi.mocked(boat.exec).mock.invocationCallOrder[lfsCall]).toBeLessThan(vi.mocked(boat.saveSnapshot).mock.invocationCallOrder[0]!);
+    expect(await computers.log(org, first.id)).toContain("[zeros] git-lfs installed");
     // A named snapshot is an independent copy: the builder goes as soon as it is ready.
     expect(boat.saveSnapshot).toHaveBeenCalledWith("bx_build1", cloudV2SnapshotName("alpha", org, 1));
     // Shared images must be captured before any repository or setup script can
@@ -265,6 +274,18 @@ d("cloud v2 Cloud Computer builds", () => {
       // The disposable builder verifies that the recorded branch can be used.
       await run("git", ["-C", join(root, "checkouts/example/project"), "switch", "-c", "zeros/created", "origin/master"]);
     } finally { await rm(root, { recursive: true, force: true }); }
+  });
+
+  it("still goes live when git-lfs can't be installed, and says so in the build log", async () => {
+    const boat = compute();
+    const exec = vi.mocked(boat.exec).getMockImplementation()!;
+    vi.mocked(boat.exec).mockImplementation(async (id, command, timeout) =>
+      command.includes("git lfs install --system") ? { exitCode: 100, stdout: "E: Unable to locate package git-lfs", timedOut: false } : exec(id, command, timeout));
+    const builder = new CloudV2ComputerBuilder({ computers, compute: boat, channel: "alpha", runtime, cloneToken: async () => "ghs_token" });
+    const build = await computers.enqueue(org, admin, recipe);
+    await builder.tick();
+    expect((await computers.overview(org)).builds[0]).toMatchObject({ state: "succeeded", version: 1 });
+    expect(await computers.log(org, build.id)).toContain("[zeros] git-lfs could not be installed");
   });
 
   it("records a failed setup without touching the live snapshot", async () => {

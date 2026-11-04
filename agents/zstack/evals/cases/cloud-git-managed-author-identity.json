@@ -1,0 +1,9 @@
+{
+  "id": "cloud-git-managed-author-identity",
+  "kind": "replay",
+  "area": "cloud-worker",
+  "fixedBy": "pr:822",
+  "symptom": "Cloud Changes, terminal and agent commits fail without an author, causing an agent to copy another contributor's identity from repository history.",
+  "rule": "Derive the VM default from the creator's selected organization GitHub account and apply a managed global include before work; preserve explicit repository identities, refresh only confirmed account changes, and negotiate optional strict wire fields. Principles 1, 10, 11 and 13.",
+  "check": "pnpm --dir apps/cloud-worker test src/__tests__/worker-github.test.ts src/__tests__/contract-parity.test.ts"
+}

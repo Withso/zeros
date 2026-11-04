@@ -1,0 +1,9 @@
+{
+  "id": "cloud-relay-background-wake",
+  "kind": "replay",
+  "area": "control-plane",
+  "fixedBy": "pr:812",
+  "symptom": "A retained relay socket hid worker loss and treated bootstrap, polling and autosave frames as wake intent; an old connect request could also restore a concurrently archived VM.",
+  "rule": "Explicit user intent owns compute acquisition. Negotiate new wake policy, reject unavailable transport promptly, and enforce lifecycle fences at the atomic mutation (principles 4, 9, 11, 14).",
+  "check": "pnpm --dir apps/control-plane test src/cloud/relay.test.ts src/cloud/routes.test.ts src/cloud/store.integration.test.ts"
+}

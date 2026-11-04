@@ -98,6 +98,17 @@ describe("native Design verification", () => {
     expect(document).not.toContain("onclick"); expect(document).not.toContain("<script");
   });
 
+  it("reports unknown classes as warnings without failing design validate", async () => {
+    await writeFile(path.join(root, directory, frame), '<!doctype html><html><head></head><body><main class="invented">Phone</main></body></html>');
+    const lines: string[] = [];
+    expect(await runDesignVerificationCli(["validate", "--url", url, "--frame", frame], (line) => lines.push(line))).toBe(0);
+    const report = JSON.parse(lines[0]!).report;
+    expect(report.violations).toEqual(expect.arrayContaining([
+      expect.objectContaining({ ruleId: "unknown-class", severity: "warning" }),
+    ]));
+    expect(report.violations.some((issue: { severity: string }) => issue.severity === "error")).toBe(false);
+  });
+
   it("writes an ordinary PNG with exact source and viewport metadata", async () => {
     const output = path.join(root, ".context", "phone.png");
     const lines: string[] = [];

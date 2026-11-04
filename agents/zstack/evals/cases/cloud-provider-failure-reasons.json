@@ -1,0 +1,9 @@
+{
+  "id": "cloud-provider-failure-reasons",
+  "kind": "replay",
+  "area": "cloud-worker",
+  "fixedBy": "pr:819",
+  "symptom": "Cloud provider authentication, rate, missing-session and model failures became a generic protocol error after the worker discarded the native category; preparation failures before a turn also lacked recovery actions.",
+  "rule": "Principles 1, 2, 5, 11 and 13: classify before sanitizing, retain bounded metadata in receipts/history, preserve recoverable adoption misses, and test real old/new decoders plus recovery before a turn exists. Retire actions across unmount and owner/workspace/execution visits, even A to B to A; keep unsent drafts in their original chat.",
+  "check": "pnpm --dir apps/cloud-worker test --maxWorkers=2 src/__tests__/cloud-failure-reasons.test.ts && pnpm exec vitest run --maxWorkers=2 apps/desktop/src/renderer/features/agent/__tests__/cloud-preparation-recovery.test.ts apps/desktop/src/renderer/features/agent/__tests__/cloud-failure-navigation.test.ts"
+}

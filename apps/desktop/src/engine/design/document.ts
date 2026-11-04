@@ -10,7 +10,9 @@ import {
 import {
   designLayerCount,
   designNodeRecords,
+  designRenderedChildElements,
   isDesignNodeElement,
+  isShadowDesignNodeElement,
 } from "./node-identities";
 import {
   DesignRenderBudgetError,
@@ -122,6 +124,7 @@ import {
   readDesignStyleSources,
 } from "./style-sources";
 import { readDesignFontCatalog } from "./style-fonts";
+import { designKnownClasses, type DesignKnownClasses } from "./style-classes";
 import { mergeDesignThemes, readDesignThemeCatalog } from "./themes";
 
 export { listDesignAssets,type DesignAssetSummary } from "./assets";
@@ -416,11 +419,13 @@ async function mutationResultUnlocked(
     height: geometry.h,
   }, file);
   const knownTokens = (await designKnownTokens(workspacePath))(file);
+  const knownClasses = await designKnownClasses(workspacePath);
   const linted = await lintFrame(
     workspacePath,
     file,
     { healOids: false },
     knownTokens,
+    knownClasses,
     source,
   );
   const violations = linted.violations.sort(
@@ -510,12 +515,14 @@ async function mutateDesignFrameSource(
     const changed = updated !== source;
     if (changed) {
       const knownTokens = (await designKnownTokens(workspacePath))(file);
+      const knownClasses = await designKnownClasses(workspacePath);
       const [baseline, linted] = await Promise.all([
         lintFrame(
           workspacePath,
           file,
           { healOids: false },
           knownTokens,
+          knownClasses,
           source,
         ),
         lintFrame(
@@ -523,6 +530,7 @@ async function mutateDesignFrameSource(
           file,
           { healOids: false },
           knownTokens,
+          knownClasses,
           healed,
         ),
       ]);
@@ -733,7 +741,10 @@ export async function prepareDesignAssetInsertion(
     (candidate) => candidate.path === input.assetPath,
   );
   if (!asset) throw new Error(`Design asset not found: ${input.assetPath}`);
-  const offsets = await readDesignElementOffsetMap(workspacePath, input.frame);
+  // An asset joins light content: shadow roots are restyled, not rebuilt.
+  const offsets = (await readDesignElementOffsetMap(workspacePath, input.frame)).filter(
+    (element) => !element.shadow,
+  );
   const root =
     offsets.find((element) => element.tag === "main") ?? offsets[0] ?? null;
   if (!root) {
@@ -801,12 +812,9 @@ function frameTree(
     text: textWithin(element),
     children:
       remaining > 0
-        ? element.childNodes
-            .filter(
-              (node): node is DefaultTreeAdapterTypes.Element =>
-                "tagName" in node && isDesignNodeElement(node),
-            )
-            .map((child) => visit(child, remaining - 1))
+        ? designRenderedChildElements(element).map((child) =>
+            visit(child, remaining - 1),
+          )
         : [],
   });
   const body = elementRecords(document).find(
@@ -859,6 +867,7 @@ export async function readDesignElementOffsetMap(
     offsets.push({
       oid,
       tag: element.tagName,
+      ...(isShadowDesignNodeElement(element) ? { shadow: true as const } : {}),
       ...designSourceSpan(location),
       startTag: designSourceSpan(location.startTag),
       endTag: location.endTag ? designSourceSpan(location.endTag) : null,
@@ -1267,8 +1276,10 @@ async function knownTokenNames(
   workspacePath: string,
   context?: DesignCanvasReadContext,
 ): Promise<Set<string>> {
+  // Names only: usage counting reads every frame's HTML, and this runs on
+  // every single-frame mutation acknowledgement.
   const names = new Set(
-    (await readDesignTokensDocument(workspacePath, context)).tokens.map(
+    (await readDesignTokensDocument(workspacePath, context, { includeUsage: false })).tokens.map(
       (token) => token.name,
     ),
   );
@@ -1386,6 +1397,7 @@ async function lintFrame(
   file: string,
   options: { healOids: boolean },
   knownTokens: Set<string>,
+  knownClasses: DesignKnownClasses,
   sourceOverride?: string,
 ): Promise<{ violations: DesignLintViolation[]; healedOids: number }> {
   const target = path.join(
@@ -1577,9 +1589,44 @@ async function lintFrame(
     undefined,
     file,
   );
+  const availableClasses = componentExpansion.errors.length === 0
+    ? await knownClasses(file, componentExpansion.html, componentExpansion.html === source ? document : undefined)
+    : null;
+  if (availableClasses) {
+    const unknown = new Map<string, (typeof records)[number]>();
+    const checked = new Set<string>();
+    for (const record of records) {
+      const value = record.element.attrs.find((attribute) => attribute.name === "class")?.value;
+      if (!value) continue;
+      for (const name of value.split(/[\t\n\f\r ]+/)) {
+        if (!name || checked.has(name)) continue;
+        checked.add(name);
+        if (!availableClasses.has(name)) unknown.set(name, record);
+      }
+    }
+    for (const [index, [name, { element, oid }]] of [...unknown].entries()) {
+      const remainder = unknown.size > 50 && index === 49;
+      violations.push(violationAt(
+        file,
+        "unknown-class",
+        remainder ? `${unknown.size - 49} more classes have no CSS in this frame.` : `Class "${name}" has no CSS in this frame's styles.`,
+        element.sourceCodeLocation?.attrs?.class ?? element.sourceCodeLocation?.startTag,
+        {
+          severity: "warning",
+          oid: oid ?? undefined,
+          fix: remainder
+            ? "Use existing classes or utilities from the application's styles, define them in the frame's <style> or a Design stylesheet, or remove them."
+            : `Use an existing class or utility from the application's styles, define .${name} in the frame's <style> or a Design stylesheet, or remove it.`,
+        },
+      ));
+      if (remainder) break;
+    }
+  }
   const usedComponents = new Set(componentExpansion.usedComponents);
-  const componentRecords = designNodeRecords(document).filter(({ element }) =>
-    element.tagName.startsWith("zd-"),
+  // Components expand in light content only; the expander never enters a
+  // shadow root, so a zd-* tag there is not an instance.
+  const componentRecords = designNodeRecords(document).filter(
+    ({ element }) => element.tagName.startsWith("zd-") && !isShadowDesignNodeElement(element),
   );
   for (const { element, oid } of componentRecords) {
     if (!element.tagName.startsWith("zd-")) continue;
@@ -1631,6 +1678,7 @@ async function lintDesignDocumentUnlocked(
     ? [(await designFrameTarget(workspacePath, frame)).file]
     : await discoverFrameFiles(workspacePath, context);
   const knownTokens = await designKnownTokens(workspacePath, context);
+  const knownClasses = await designKnownClasses(workspacePath, context);
   const violations: DesignLintViolation[] = [];
   let healedOids = 0;
   for (const file of files) {
@@ -1641,6 +1689,7 @@ async function lintDesignDocumentUnlocked(
         file,
         { healOids: options.healOids !== false },
         knownTokens(file),
+        knownClasses,
       );
     } catch (error) {
       if (!(error instanceof DesignRenderBudgetError)) throw error;

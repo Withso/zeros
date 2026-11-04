@@ -1,0 +1,9 @@
+{
+  "id": "direct-commit-workspace-authority",
+  "kind": "replay",
+  "area": "desktop-engine",
+  "fixedBy": "pr:818",
+  "symptom": "The direct-commit LFS and signing refusal ran only for code authority, while the app's Create PR directly route commits with workspace authority, so tests calling commit() passed and the real route still committed LFS payloads whole and unsigned.",
+  "rule": "Principle 1: drive the regression through the route the app actually calls (WorkspaceService git.stage/git.commit), not the helper's default arguments.",
+  "check": "pnpm exec vitest run apps/desktop/src/engine/workspace/__tests__/direct-commit-caveats.test.ts"
+}

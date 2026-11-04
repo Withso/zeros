@@ -5,6 +5,7 @@ import { HttpError } from "../authz.js";
 import { createCloudV2WorkerRoutes, type CloudV2WorkerRouteDeps } from "./worker-routes.js";
 import { newCloudV2Token } from "./tokens.js";
 import type { CloudV2Store, CloudV2Workspace } from "./store.js";
+import { CloudV2ControlFrameSchema as legacyWorkerFrame } from "./__fixtures__/worker-contract-before-identity.js";
 
 function fixture(prompts = false) {
   const bootId = randomUUID(), token = newCloudV2Token("worker").token;
@@ -26,6 +27,7 @@ function fixture(prompts = false) {
       loginRevision: vi.fn(async () => revision),
       markActive: vi.fn(async () => {}),
       writeWorkerHistory: vi.fn(async () => {}),
+      failWorkerCheckout: vi.fn(async () => true),
     },
     config: vi.fn(async () => ({ t: "config", loginRevision: revision,
       workspace: { id: w.id, organizationId: w.organizationId, repository: w.repository, branch: w.branch, baseBranch: w.baseBranch, checkoutPath: "/home/user/o/r" }, agents: {} })),
@@ -48,6 +50,23 @@ it("accepts outbound hello and returns configuration, refusing stale runtimes", 
   expect(response.status).toBe(200);
   expect(await response.json()).toMatchObject({ config: { t: "config", loginRevision: "0" } });
   expect((await f.request("hello", { ...body, runtimeSha256: "b".repeat(64) })).status).toBe(409);
+});
+it("reports checkout failure using only worker identity even during a GitHub outage", async () => {
+  const f = fixture();
+  f.deps.authorizeSource = vi.fn(async () => { throw new HttpError(503, "github_unavailable", "Unavailable"); });
+  expect((await f.request("checkout-failed", {})).status).toBe(200);
+  expect(f.deps.store.failWorkerCheckout).toHaveBeenCalledExactlyOnceWith(f.token, f.bootId);
+  expect(f.deps.authorizeSource).not.toHaveBeenCalled();
+  expect(f.deps.store.markActive).not.toHaveBeenCalled();
+});
+it("refuses a stale boot at the atomic failure write and rejects arbitrary error payloads", async () => {
+  const f = fixture();
+  expect((await f.request("checkout-failed", { code: "arbitrary", message: "private-output" })).status).toBe(400);
+  expect(f.deps.store.failWorkerCheckout).not.toHaveBeenCalled();
+  expect((await f.request("checkout-failed", {}, { "x-zeros-worker-boot": randomUUID() })).status).toBe(401);
+  expect(f.deps.store.failWorkerCheckout).not.toHaveBeenCalled();
+  vi.mocked(f.deps.store.failWorkerCheckout).mockResolvedValue(false);
+  expect((await f.request("checkout-failed", {})).status).toBe(401);
 });
 it("reports the first hello from its prior lifecycle state and accepts bounded optional timings without activity", async () => {
   const f = fixture(), original = await f.deps.store.acceptWorkerHello(f.token, f.bootId);
@@ -126,6 +145,51 @@ it("rechecks authority after a slow token provider and returns a typed refusal",
   const response = await f.request("github-token", {});
   expect(response.status).toBe(401);
   expect(await response.text()).not.toContain("never-disclose");
+});
+
+it.each([
+  ["github_connection_required", "connection-required"],
+  ["github_authorization_expired", "connection-expired"],
+  ["github_authorization_changed", "connection-changed"],
+  ["github_installation_required", "installation-required"],
+  ["github_installation_suspended", "installation-suspended"],
+  ["github_cloud_write_denied", "access-denied"],
+  ["github_sso_required", "sso-required"],
+  ["cloud_source_review_required", "source-review-required"],
+  ["github_rate_limited", "rate-limited"],
+  ["github_refresh_pending", "unavailable"],
+  ["github_refresh_uncertain", "connection-expired"],
+])("returns the closed GitHub reason for %s and logs only a safe cause", async (code, reason) => {
+  const f = fixture(), logger = { warn: vi.fn() };
+  f.deps.logger = logger;
+  vi.mocked(f.deps.githubToken).mockRejectedValue(new HttpError(409, code, "PRIVATE_PROVIDER_DETAIL"));
+  const response = await f.request("github-token", {});
+  expect(response.status).toBe(409);
+  expect(await response.json()).toEqual({ error: { code: "github_token_unavailable", reason } });
+  expect(logger.warn).toHaveBeenCalledOnce();
+  expect(JSON.stringify(logger.warn.mock.calls)).not.toContain("PRIVATE_PROVIDER_DETAIL");
+  expect(JSON.stringify(logger.warn.mock.calls)).toContain(code);
+});
+
+it("keeps source-authorization failures typed at the GitHub credential boundary", async () => {
+  const f = fixture();
+  f.deps.authorizeSource = vi.fn(async () => { throw new HttpError(409, "cloud_source_review_required", "PRIVATE_SOURCE_DETAIL"); });
+  expect(await (await f.request("github-token", {})).json()).toEqual({ error: { code: "github_token_unavailable", reason: "source-review-required" } });
+  expect(f.deps.githubToken).not.toHaveBeenCalled();
+});
+
+it("delivers managed identity only to workers negotiating it on both config carriers", async () => {
+  const f = fixture(), original = await f.deps.config({} as CloudV2Workspace);
+  const gitIdentity = { name: "Fixture Contributor", email: "123+contributor@users.noreply.github.com" };
+  vi.mocked(f.deps.config).mockResolvedValue({ ...original, gitIdentity });
+  for (const [path, body] of [["hello", { bootId: f.bootId, protocol: 2, runtimeSha256: "a".repeat(64) }], ["config", undefined]] as const) {
+    for (const features of ["", "github-pr-v1", "git-identity-v10"]) {
+      const frame = (await (await f.request(path, body, { "x-zeros-worker-features": features })).json()).config;
+      expect(frame).not.toHaveProperty("gitIdentity");
+      expect(legacyWorkerFrame.safeParse(frame).success).toBe(true);
+    }
+    expect((await (await f.request(path, body, { "x-zeros-worker-features": "git-identity-v1" })).json()).config.gitIdentity).toEqual(gitIdentity);
+  }
 });
 
 it("delivers MCP only to feature-advertising workers over both HTTP config carriers", async () => {

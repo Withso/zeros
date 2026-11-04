@@ -1779,6 +1779,25 @@ export function isGitLockContention(stderr: string): boolean {
 const sleep = (ms: number): Promise<void> =>
   new Promise((resolve) => setTimeout(resolve, ms));
 
+/** The user's own boolean Git setting, read without the engine's overrides
+ * (which always force signing off), so callers can say what the hardened
+ * engine Git skips. Reading config runs no configured program. */
+export async function userGitConfigBool(cwd: string, key: string): Promise<boolean> {
+  const result = await runFile("git", ["config", "--includes", "--type=bool", "--get", key], {
+    cwd, env: gitChildEnv(), timeoutMs: 5_000, maxBufferBytes: 64 * 1024,
+  }).catch(() => null);
+  return result?.stdout.trim() === "true";
+}
+
+/** Whether the user has a Git author identity of their own configured. */
+export async function userGitIdentityConfigured(cwd: string): Promise<boolean> {
+  const read = (key: string) => runFile("git", ["config", "--includes", "--get", key], {
+    cwd, env: gitChildEnv(), timeoutMs: 5_000, maxBufferBytes: 64 * 1024,
+  }).then(result => result.stdout.trim() !== "", () => false);
+  const [name, email] = await Promise.all([read("user.name"), read("user.email")]);
+  return name && email;
+}
+
 /** Run `git <args>` in `cwd`. Throws GitError on unexpected failures;
  *  returns `{ expectedError }` if the failure matches one of the
  *  caller-allowed categories. Transient `.git` lock contention is retried

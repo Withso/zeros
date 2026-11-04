@@ -337,7 +337,8 @@ it("keeps the provider's actionable failure instead of replacing it with a gener
     frame.notification.update.sessionUpdate === "turn_state" && frame.notification.update.state === "failed")).toBe(true);
   const rows = (await persisted(f.directory))[0].rows.map((row: { payload: string }) => JSON.parse(row.payload));
   expect(rows.filter((row: { kind: string }) => row.kind === "error_notice")).toMatchObject([
-    { message: "Pick another model.", turnFailure: { kind: "model-unavailable" } },
+    { message: "This model is unavailable for the provider account. Choose another model.",
+      cloud: { source: "provider", reason: "model-unavailable" }, turnFailure: { kind: "model-unavailable" } },
   ]);
 });
 

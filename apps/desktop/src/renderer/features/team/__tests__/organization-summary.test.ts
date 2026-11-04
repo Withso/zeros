@@ -44,6 +44,14 @@ describe("normalizeOrganizationSummary", () => {
     }).workspaceCapabilities).toEqual({ local: false, cloud: true });
   });
 
+  it("keeps a known organization seat and drops it for Personal or unknown values", () => {
+    const wire = { id: "org-1", slug: "team", name: "Team", role: "member" as const, isPersonal: false };
+    expect(normalizeOrganizationSummary({ ...wire, seat: "hold" }).seat).toBe("hold");
+    expect(normalizeOrganizationSummary(wire)).not.toHaveProperty("seat");
+    expect(normalizeOrganizationSummary({ ...wire, seat: "vip" as never })).not.toHaveProperty("seat");
+    expect(normalizeOrganizationSummary({ ...wire, isPersonal: true, seat: "free" })).not.toHaveProperty("seat");
+  });
+
   it("marks a pre-hierarchy flat Team for legacy local-row compatibility", () => {
     const normalized = normalizeOrganizationSummary({
       id: "legacy_team_1",

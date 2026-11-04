@@ -9,11 +9,7 @@ function cloudflareEnv(channel) {
     CF_PAGES: "1",
     CF_PAGES_BRANCH: channel === "alpha" ? "main" : "release/1.2.3",
     ZEROS_DEPLOY_ENV: channel,
-    AUTH_PROVIDER: "auth0",
-    AUTH0_DOMAIN: "login.zeros.build",
-    AUTH0_CLIENT_ID: "public-client-id",
-    AUTH0_CLIENT_SECRET: "test-secret",
-    AUTH0_AUDIENCE: `https://api${suffix}.zeros.build`,
+    AUTH_PROVIDER: "workos",
     APP_ORIGIN: `https://app${suffix}.zeros.build`,
     CONTROL_PLANE_URL: `https://api${suffix}.zeros.build`,
   };
@@ -29,32 +25,30 @@ test("accepts the exact Alpha, Beta, and Production channel wiring", () => {
   }
 });
 
-test("accepts stateless WorkOS Pages wiring with Railway as the authority", () => {
+test("accepts WorkOS Pages wiring whether or not AUTH_PROVIDER is set, and only WorkOS", () => {
   for (const channel of ["alpha", "beta", "production"]) {
     const env = cloudflareEnv(channel);
-    env.AUTH_PROVIDER = "workos";
-    delete env.AUTH0_DOMAIN;
-    delete env.AUTH0_CLIENT_ID;
-    delete env.AUTH0_CLIENT_SECRET;
-    delete env.AUTH0_AUDIENCE;
+    delete env.AUTH_PROVIDER;
     assert.deepEqual(deploymentEnvironmentErrors(env), []);
+  }
+  for (const provider of ["auth0", "invented"]) {
+    assert.ok(
+      deploymentEnvironmentErrors({ ...cloudflareEnv("alpha"), AUTH_PROVIDER: provider }).includes(
+        "AUTH_PROVIDER must be workos or unset",
+      ),
+    );
   }
 });
 
 test("accepts isolated Alpha and Production Ops projects and rejects Beta Ops", () => {
   for (const channel of ["alpha", "production"]) {
     const env = cloudflareEnv(channel);
-    env.AUTH_PROVIDER = "workos";
     env.ZEROS_SURFACE = "ops";
     env.WORKOS_BROWSER_ROUTE_PREFIX = "/ops";
     env.APP_ORIGIN =
       channel === "alpha"
         ? "https://ops-alpha.zeros.build"
         : "https://ops.zeros.build";
-    delete env.AUTH0_DOMAIN;
-    delete env.AUTH0_CLIENT_ID;
-    delete env.AUTH0_CLIENT_SECRET;
-    delete env.AUTH0_AUDIENCE;
     assert.deepEqual(deploymentEnvironmentErrors(env), []);
   }
 
@@ -78,18 +72,13 @@ test("rejects noncanonical surface values instead of normalizing deployment drif
   );
 });
 
-test("WorkOS Pages rejects retired bindings and misplaced Railway secrets", () => {
+test("Pages rejects retired bindings and misplaced Railway secrets", () => {
   const env = cloudflareEnv("alpha");
-  env.AUTH_PROVIDER = "workos";
   env.WORKOS_SESSION_WORKER = "zeros-auth-sessions-production";
   env.WORKOS_API_KEY = "must-not-be-reported";
   env.WORKOS_COOKIE_PASSWORD = "also-must-not-be-reported";
   env.WORKOS_WEBHOOK_SECRET = "webhook-must-not-be-reported";
   env.AUTH_SESSIONS = {};
-  delete env.AUTH0_DOMAIN;
-  delete env.AUTH0_CLIENT_ID;
-  delete env.AUTH0_CLIENT_SECRET;
-  delete env.AUTH0_AUDIENCE;
 
   const errors = deploymentEnvironmentErrors(env);
   assert.ok(errors.some((error) => error.includes("WORKOS_SESSION_WORKER")));
@@ -98,16 +87,6 @@ test("WorkOS Pages rejects retired bindings and misplaced Railway secrets", () =
   assert.ok(errors.some((error) => error.includes("WORKOS_WEBHOOK_SECRET")));
   assert.ok(errors.some((error) => error.includes("AUTH_SESSIONS")));
   assert.ok(errors.every((error) => !error.includes("must-not-be-reported")));
-});
-
-test("hosted builds require an explicit auth provider selector", () => {
-  const env = cloudflareEnv("alpha");
-  delete env.AUTH_PROVIDER;
-  assert.ok(
-    deploymentEnvironmentErrors(env).includes(
-      "AUTH_PROVIDER must be auth0 or workos",
-    ),
-  );
 });
 
 test("rejects a Pages build with no named deployment environment", () => {
@@ -121,21 +100,17 @@ test("rejects cross-environment frontend, backend, audience, and branch wiring",
     ...cloudflareEnv("alpha"),
     APP_ORIGIN: "https://app.zeros.build",
     CONTROL_PLANE_URL: "https://api.zeros.build",
-    AUTH0_AUDIENCE: "https://api.zeros.build",
     CF_PAGES_BRANCH: "release/1.2.3",
   };
   const errors = deploymentEnvironmentErrors(env);
-  assert.equal(errors.length, 4);
-  assert.ok(errors.every((error) => !error.includes("test-secret")));
+  assert.equal(errors.length, 3);
 });
 
-test("requires every hosted auth and routing variable", () => {
+test("requires every hosted routing variable", () => {
   const env = cloudflareEnv("production");
-  delete env.AUTH0_CLIENT_SECRET;
   delete env.CONTROL_PLANE_URL;
   delete env.CF_PAGES_BRANCH;
   const errors = deploymentEnvironmentErrors(env);
-  assert.ok(errors.includes("AUTH0_CLIENT_SECRET is required"));
   assert.ok(errors.includes("CONTROL_PLANE_URL is required"));
   assert.ok(errors.includes("CF_PAGES_BRANCH is required"));
 });

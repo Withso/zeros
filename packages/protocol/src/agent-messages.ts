@@ -360,6 +360,7 @@ export interface AgentSubagentMessage {
  *  level errors (Codex API rejections, transport hiccups, etc.)
  *  that don't belong inside a tool card. */
 export interface AgentErrorNoticeMessage {
+  cloud?: import("./cloud-failure").CloudFailure;
   parentToolId?: string;
   id: string;
   kind: "error_notice";
@@ -760,6 +761,7 @@ export function applyUpdate(
         message: n.message,
         ...(n.turnFailure ? { turnFailure: n.turnFailure } : {}),
         ...(n.failureKind ? { failureKind: n.failureKind } : {}),
+        ...(n.cloud ? { cloud: n.cloud } : {}),
         recoverable: n.recoverable === true,
         code: n.code,
         ...(n.parentToolId ? { parentToolId: n.parentToolId } : {}),

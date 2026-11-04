@@ -1,26 +1,52 @@
-import { connect } from "node:net";
+import { connect, type Socket } from "node:net";
 import { spawn } from "node:child_process";
 import { workerChildEnvironment } from "../drivers/shared/agent-environment";
 import { githubEnvironment } from "./github";
+import { githubAuthenticationError, GITHUB_SOCKET_TIMEOUT_MS, type GithubAuthenticationError } from "./github-failure";
 
-const unavailable = () => new Error("GitHub authentication is unavailable.");
+const unavailable = () => githubAuthenticationError();
 export function brokerRequest(socketPath: string, kind: "token" | "user-token" | "changed"): Promise<Record<string, unknown>> {
   return new Promise((resolve, reject) => {
-    if (!socketPath || !socketPath.startsWith("/")) { reject(unavailable()); return; }
-    const socket = connect(socketPath); let buffer = "", settled = false;
-    const finish = (result?: Record<string, unknown>) => { if (settled) return; settled = true; socket.destroy(); if (result) resolve(result); else reject(unavailable()); };
-    socket.setTimeout(20_000, () => finish()); socket.setEncoding("utf8");
-    socket.once("error", () => finish()); socket.once("close", () => finish());
-    socket.once("connect", () => socket.write(JSON.stringify({ kind }) + "\n"));
-    socket.on("data", (data: string) => {
-      buffer += data; if (Buffer.byteLength(buffer) > 16_384) { finish(); return; }
-      if (!buffer.includes("\n")) return;
-      try {
-        const result: unknown = JSON.parse(buffer.trim());
-        if (!result || typeof result !== "object" || "error" in result) { finish(); return; }
-        finish(result as Record<string, unknown>);
-      } catch { finish(); }
-    });
+    const validatedPath = /^\/tmp\/zeros-github-[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\/github\.sock$/.exec(socketPath)?.[0];
+    // A JavaScript end anchor can match before a final newline.
+    if (!validatedPath || validatedPath !== socketPath) { reject(unavailable()); return; }
+    let socket: Socket | undefined, settled = false, retried = false, retry: ReturnType<typeof setTimeout> | undefined;
+    const finish = (result?: Record<string, unknown>, error?: GithubAuthenticationError) => {
+      if (settled) return;
+      settled = true; clearTimeout(deadline); clearTimeout(retry); socket?.destroy();
+      if (result) resolve(result); else reject(error ?? unavailable());
+    };
+    const deadline = setTimeout(() => finish(), GITHUB_SOCKET_TIMEOUT_MS);
+    const dial = () => {
+      if (settled) return;
+      let attempt: Socket;
+      try { attempt = socket = connect(validatedPath); } catch { finish(); return; }
+      let buffer = "", connected = false;
+      attempt.setEncoding("utf8");
+      attempt.once("error", (error: NodeJS.ErrnoException) => {
+        if (settled || socket !== attempt) return;
+        if (!connected && !retried && (error.code === "ECONNREFUSED" || error.code === "ENOENT")) {
+          retried = true; socket = undefined; attempt.destroy(); retry = setTimeout(dial, 250);
+        } else finish();
+      });
+      attempt.once("close", () => { if (socket === attempt) finish(); });
+      attempt.once("connect", () => {
+        if (settled || socket !== attempt) return;
+        connected = true; attempt.write(JSON.stringify({ kind }) + "\n");
+      });
+      attempt.on("data", (data: string) => {
+        if (settled || socket !== attempt) return;
+        buffer += data; if (Buffer.byteLength(buffer) > 16_384) { finish(); return; }
+        if (!buffer.includes("\n")) return;
+        try {
+          const result: unknown = JSON.parse(buffer.trim());
+          if (!result || typeof result !== "object") { finish(); return; }
+          if ("error" in result) { finish(undefined, githubAuthenticationError(result.error)); return; }
+          finish(result as Record<string, unknown>);
+        } catch { finish(); }
+      });
+    };
+    dial();
   });
 }
 

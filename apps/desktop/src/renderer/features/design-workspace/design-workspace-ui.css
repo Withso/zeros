@@ -40,6 +40,11 @@
   background-color: var(--bg2-hover);
 }
 
+/* A read-only field has nothing to edit, so the pointer changes nothing. */
+.zd-field[data-design-field-readonly]:hover {
+  background-color: var(--bg2);
+}
+
 .zd-field:focus-within,
 .zd-field:focus-visible:where(:not([data-zeros-focus-visible="false"])),
 .zd-field[data-state="open"] {

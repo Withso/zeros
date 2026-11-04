@@ -9,7 +9,7 @@ export type CloudV2ComputerSourceResolver = (organizationId: string, userId: str
   target: { repository: string; repositoryId?: string }) => Promise<CloudSourceTarget>;
 
 export const computerSourceReviewRequired = () => new HttpError(409, "cloud_source_review_required",
-  "The original repository identities for this Cloud Computer need verification. Existing logs and workspaces have been retained.");
+  "The original repository identities need verification. An organization admin can configure a fresh Cloud Computer in Settings → Cloud Computer. Historical logs and workspaces require operator verification and have been retained.");
 
 /** Position and original path bind each recipe/setup to its admitted source.
  * This never consults GitHub to fill missing historical provenance. */

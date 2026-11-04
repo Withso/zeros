@@ -9,8 +9,8 @@ import { createFeedbackRoutes } from "./feedback.js";
 const sender: AuthedUser = {
   id: "00000000-0000-0000-0000-000000000001",
   identity: {
-    provider: "auth0",
-    subject: "auth0|000000000000000000000001",
+    provider: "workos",
+    subject: "user_000000000000000000000001",
   },
   email: "real-sender@example.test",
   displayName: "Real Sender",

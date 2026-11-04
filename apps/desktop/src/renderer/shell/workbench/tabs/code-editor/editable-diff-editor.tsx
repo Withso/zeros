@@ -1,6 +1,7 @@
 import {
   useEffect,
   useId,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -16,7 +17,8 @@ import {
   EditStateManager,
   type EditorFactory,
 } from "@pierre/diffs/edit";
-import { CodeView, EditProvider } from "@pierre/diffs/react";
+import { CodeView, EditProvider, type CodeViewHandle } from "@pierre/diffs/react";
+import { isNativeEditHistoryTarget, registerEditHistory } from "@/renderer/shared/ui/edit-history";
 import { useCodeTheme } from "@/renderer/shared/theme/use-code-theme";
 import { zerosCodeViewOptions } from "@/renderer/shared/theme/diff-theme";
 import { useWorkbenchStatusSource } from "../../tab-status";
@@ -168,6 +170,16 @@ function EditableDiffSession({
   scrollMemoryKey,
 }: EditableDiffEditorProps & { oldFile: FileContents | null }) {
   const sessionKey = useId();
+  const historyRoot = useRef<HTMLDivElement>(null);
+  const codeView = useRef<CodeViewHandle<undefined, undefined>>(null);
+  useLayoutEffect(() => {
+    if (!active || !historyRoot.current) return;
+    return registerEditHistory(historyRoot.current, (direction, target) => {
+      if (isNativeEditHistoryTarget(target)) return false;
+      codeView.current?.getEditor(query.path)?.[direction]();
+      return true;
+    });
+  }, [active, query.path]);
   // A native edit can be followed by Save before React commits its draft prop.
   const currentValue = useRef(value);
   const theme = useCodeTheme();
@@ -214,6 +226,7 @@ function EditableDiffSession({
   );
   return (
     <div
+      ref={historyRoot}
       data-editable-diff
       className="h-full min-h-0 select-text"
       aria-label={`Editable diff for ${query.path}`}
@@ -235,6 +248,7 @@ function EditableDiffSession({
             Keep the document/session here; mount its viewport only when shown. */}
         {active && (
           <CodeView
+            ref={codeView}
             items={items}
             options={options}
             containerRef={setScroller}

@@ -153,6 +153,7 @@ export interface RendererContext {
   warmFile?: (path: string) => void;
   /** Navigate to the owning account's Settings → Browser use. */
   openBrowserSettings?: () => void;
+  openMcpConnection?: (failure: import("@zeros/protocol/cloud-v2-relay").CloudMcpFailure) => void;
 }
 
 export type Renderer<M extends AgentMessage> = ComponentType<{

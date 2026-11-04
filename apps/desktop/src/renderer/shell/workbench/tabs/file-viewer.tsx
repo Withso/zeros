@@ -55,6 +55,7 @@ import {
 import { useWorkspaceReviewStatus } from "@/renderer/features/code-review/use-workspace-review-status";
 import { MergeConflictActions } from "@/renderer/features/code-review/merge-conflict-actions";
 import { SourceEditor } from "./code-editor/source-editor";
+import { forgetEditorDraft } from "./code-editor/draft-journal";
 import { FileEditorOptions, type FileEditorControls } from "./code-editor/file-editor-options";
 import { useFileEditorPreferences } from "./code-editor/editor-preferences";
 import { parseContextAttachmentPath } from "@zeros/protocol/attachment-policy";
@@ -624,6 +625,7 @@ export function FileViewer({
       expectedNew: isNewFile === true,
     })
       .then((outcome) => {
+        forgetEditorDraft(targetScope, targetPath);
         dispatch({
           type: "RECONCILE_WORKBENCH_FILE_DISCARD",
           scope: targetScope,

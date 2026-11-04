@@ -169,6 +169,7 @@ export function isTransportShaped(message: string | undefined | null): boolean {
  *  from the prior conversation. Acceptable trade-off given how rare
  *  this case is in practice (mostly resuming after weeks). */
 export function isRecoverable(failure: AgentFailure): boolean {
+  if (failure.cloud) return false;
   return (
     failure.kind === "timeout" ||
     failure.kind === "transport-closed" ||

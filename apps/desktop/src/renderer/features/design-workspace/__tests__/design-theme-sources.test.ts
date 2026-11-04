@@ -6,6 +6,8 @@ import { TooltipProvider } from "../../../shared/ui/primitives";
 import {
   DesignThemeSourceRail,
   DesignThemeSourceStatus,
+  designStyleSourceStylesNote,
+  designStyleSourceSummary,
   designStyleSourceTokens,
 } from "../design-theme-sources";
 
@@ -86,6 +88,52 @@ describe("theme editor sources", () => {
     expect(render(createElement(DesignThemeSourceStatus, {
       source: source({ status: "error", tokens: [], revision: null, messages: [{ level: "error", text: "missing" }] }),
     }))).toContain("Not imported");
+  });
+
+  it("folds stylesheets without variables into one group that carries their worst status", () => {
+    const html = render(createElement(DesignThemeSourceRail, {
+      sources: [
+        source(),
+        source({ id: "runtime", title: "Runtime content", tokens: [], rules: 74 }),
+        source({ id: "motion", title: "Animations", tokens: [], rules: 13, status: "warning" }),
+        source({ id: "gone", title: "Gone", tokens: [], status: "error", revision: null }),
+        source({ id: "unbuilt", title: "Unbuilt", kind: "build", tokens: [], status: "warning", revision: null }),
+      ],
+      errors: [],
+      manualCount: 0,
+      selectedId: null,
+      onSelect: () => {},
+    }));
+    // Sources with variables, and those whose content is unknown, stay listed.
+    for (const label of ["App tokens, Ready", "Gone, Error", "Unbuilt, Warning"]) {
+      expect(html).toContain(`aria-label="${label}"`);
+    }
+    expect(html).not.toContain("Runtime content");
+    expect(html).not.toContain("Animations");
+    expect(html).toMatch(
+      /data-design-theme-styles-only="" aria-expanded="false" aria-label="Styles only, 2 sources, Warning"[^>]*>.*lucide-chevron-right.*Styles only.*lucide-triangle-alert.*zd-theme-filter-count">2</s,
+    );
+  });
+
+  it("says what a styles-only source holds instead of zero variables", () => {
+    const summary = (overrides: Partial<DesignStyleSourceWire>) => designStyleSourceSummary(source(overrides));
+    expect(summary({})).toBe("1 variable · read-only");
+    expect(summary({ tokens: [], rules: 74 })).toBe("74 rules · read-only");
+    expect(summary({ tokens: [], rules: 1 })).toBe("1 rule · read-only");
+    expect(summary({ tokens: [], kind: "tailwind" })).toBe("Utilities · read-only");
+    // Older engines report no rule count.
+    expect(summary({ tokens: [] })).toBe("Styles only · read-only");
+    expect(summary({ tokens: [], status: "warning", revision: null })).toBe("Not imported");
+    expect(summary({ status: "error", tokens: [], revision: null })).toBe("Not imported");
+
+    const note = (overrides: Partial<DesignStyleSourceWire>) => designStyleSourceStylesNote(source(overrides));
+    expect(note({})).toBeNull();
+    expect(note({ tokens: [], rules: 74 })).toBe("Its 74 rules style frames that use its classes.");
+    expect(note({ tokens: [], rules: 1 })).toBe("Its 1 rule styles frames that use its classes.");
+    expect(note({ tokens: [], kind: "tailwind" })).toBe("Its utilities style frames that use them.");
+    expect(note({ tokens: [], kind: "fonts", rules: 2 })).toBe("Its fonts reach frames that name them.");
+    expect(note({ tokens: [] })).toBe("Its styles reach frames that use its classes.");
+    expect(note({ tokens: [], revision: null })).toBeNull();
   });
 
   it("maps imported tokens into editor rows so search and type filters apply", () => {

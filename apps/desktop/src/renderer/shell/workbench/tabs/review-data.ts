@@ -61,6 +61,12 @@ export function humanGitError(e: unknown): string {
   return e instanceof Error ? e.message : String(e);
 }
 
+/** Keep a rejection as thrown for the tab's banner. A falsy reason is still a
+ *  failure, never an empty result. */
+export function reviewReadFailure(reason: unknown): unknown {
+  return reason || new Error(String(reason));
+}
+
 /** A revoked/expired token surfaces as NOT_AUTHENTICATED from any read — flip
  *  the snapshot back to the sign-in gate instead of a generic error. */
 function isAuthFailure(e: unknown): boolean {
@@ -80,15 +86,16 @@ export interface ReviewSnapshot {
   checks: PrChecksResult | null;
   commits: PrCommitSummary[] | null;
   timeline: ReviewTimelineEntry[] | null;
-  /** Fatal load error — set when the PR itself can't be fetched AND there is
-   *  no prior data to keep showing. Per-resource hiccups don't set this. */
-  error: string | null;
+  /** The PR row's latest refresh rejection, kept as thrown so its GitHub code
+   *  can name the condition in the tab's banner. Per-resource hiccups don't
+   *  set this. */
+  error: unknown;
   /** Per-resource fetch failures (the PR row loaded but a sibling read
    *  didn't) — sections surface these instead of a misleading empty state. */
   resourceErrors: {
-    checks: string | null;
-    commits: string | null;
-    timeline: string | null;
+    checks: unknown;
+    commits: unknown;
+    timeline: unknown;
   };
   /** True while ANY fetch for this snapshot is in flight. */
   refreshing: boolean;
@@ -332,23 +339,14 @@ async function refreshFull(
             if (commits.status === "fulfilled") next.commits = commits.value;
             if (timeline.status === "fulfilled") next.timeline = timeline.value;
             next.resourceErrors = {
-              checks:
-                checks.status === "rejected"
-                  ? humanGitError(checks.reason)
-                  : null,
-              commits:
-                commits.status === "rejected"
-                  ? humanGitError(commits.reason)
-                  : null,
-              timeline:
-                timeline.status === "rejected"
-                  ? humanGitError(timeline.reason)
-                  : null,
+              checks: checks.status === "rejected" ? reviewReadFailure(checks.reason) : null,
+              commits: commits.status === "rejected" ? reviewReadFailure(commits.reason) : null,
+              timeline: timeline.status === "rejected" ? reviewReadFailure(timeline.reason) : null,
             };
             if (pr.status === "rejected") {
               // Retain the confirmed PR and expose revalidation failure to the
               // tab's banner, even when there is still useful content.
-              next.error = humanGitError(pr.reason);
+              next.error = reviewReadFailure(pr.reason);
             } else if (pr.status === "fulfilled") {
               next.error = null;
             }
@@ -362,7 +360,7 @@ async function refreshFull(
       // and expose the persistent failure to the tab's banner.
       if (!currentReviewEntry(provider, target, key, e)) return;
       if (e.generation !== generation) superseded = true;
-      else patch(key, { error: humanGitError(err) });
+      else patch(key, { error: reviewReadFailure(err) });
     } finally {
       e.inflightFull = null;
       if (currentReviewEntry(provider, target, key, e)) patch(key, { refreshing: false });
@@ -494,6 +492,7 @@ export function useReviewLiveData(args: {
   const key = reviewCacheKey(provider, workspaceId, prNumber, scope);
   const target = targetForReview(provider, workspaceId, prNumber);
 
+  const read = () => entryFor(key).snap;
   const snap = useSyncExternalStore(
     useCallback(
       (cb: () => void) => {
@@ -505,7 +504,8 @@ export function useReviewLiveData(args: {
       },
       [key],
     ),
-    () => entryFor(key).snap,
+    read,
+    read,
   );
 
   const refresh = useCallback(

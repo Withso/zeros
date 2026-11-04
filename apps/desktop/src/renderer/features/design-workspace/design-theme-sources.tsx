@@ -2,7 +2,16 @@
 // manual tokens (tokens.css) and each imported style source declared in
 // meta/canvas.json; the status strip explains what a source imported.
 // Imported tokens are read-only here: their repository file owns them.
-import { CircleCheck, CircleX, MessageSquarePlus, RefreshCw, TriangleAlert } from "lucide-react";
+import { useId, useState } from "react";
+import {
+  ChevronDown,
+  ChevronRight,
+  CircleCheck,
+  CircleX,
+  MessageSquarePlus,
+  RefreshCw,
+  TriangleAlert,
+} from "lucide-react";
 import { IconButton } from "@/renderer/shared/ui/primitives/icon-button";
 
 import type {
@@ -25,6 +34,34 @@ const STATUS = {
 /** A newer cloud engine may report a status this build does not know yet. */
 function sourceStatus(status: string): (typeof STATUS)[keyof typeof STATUS] {
   return STATUS[status as keyof typeof STATUS] ?? STATUS.warning;
+}
+
+function counted(count: number, word: string): string {
+  return `${count} ${count === 1 ? word : `${word}s`}`;
+}
+
+/** An imported stylesheet that declares no variables: it only styles frames.
+ * A failed source is not known to be empty, so it stays in the main list. */
+export function designStyleSourceStylesOnly(source: DesignStyleSourceWire): boolean {
+  return source.status !== "error" && source.revision !== null && source.tokens.length === 0;
+}
+
+export function designStyleSourceSummary(source: DesignStyleSourceWire): string {
+  if (source.status === "error" || source.revision === null) return "Not imported";
+  if (source.tokens.length > 0) return `${counted(source.tokens.length, "variable")} · read-only`;
+  if (typeof source.rules === "number") return `${counted(source.rules, "rule")} · read-only`;
+  return `${source.kind === "tailwind" ? "Utilities" : "Styles only"} · read-only`;
+}
+
+/** Why a styles-only source lists no variables, for the empty table. */
+export function designStyleSourceStylesNote(source: DesignStyleSourceWire): string | null {
+  if (!designStyleSourceStylesOnly(source)) return null;
+  if (source.kind === "fonts") return "Its fonts reach frames that name them.";
+  if (source.kind === "tailwind") return "Its utilities style frames that use them.";
+  if (typeof source.rules === "number") {
+    return `Its ${source.rules} ${source.rules === 1 ? "rule styles" : "rules style"} frames that use its classes.`;
+  }
+  return "Its styles reach frames that use its classes.";
 }
 
 /** Imported tokens in the editor's row shape, so search and type filters apply. */
@@ -70,6 +107,49 @@ export function DesignThemeSourceRail({
   onUpdate?: () => void;
   updating?: boolean;
 }) {
+  const groupId = useId();
+  const [stylesOnlyOpen, setStylesOnlyOpen] = useState(false);
+  const stylesOnly = sources.filter(designStyleSourceStylesOnly);
+  const listed = sources.filter((source) => !designStyleSourceStylesOnly(source));
+  // The group carries its members' worst problem, so folding hides none.
+  const groupStatus = stylesOnly
+    .map((source) => sourceStatus(source.status))
+    .reduce<(typeof STATUS)[keyof typeof STATUS] | null>(
+      (worst, status) =>
+        status === STATUS.error || (status === STATUS.warning && worst !== STATUS.error)
+          ? status
+          : worst,
+      null,
+    );
+  const sourceRow = (source: DesignStyleSourceWire, count: number | undefined) => {
+    const status = sourceStatus(source.status);
+    return (
+      <Tooltip
+        key={source.id}
+        className="zd-theme-tooltip"
+        label={`${source.path} · ${status.label}`}
+      >
+        <Button
+          type="button"
+          variant="ghost"
+          className="zd-theme-filter w-full"
+          aria-pressed={selectedId === source.id}
+          aria-label={`${source.title}, ${status.label}`}
+          onClick={() => onSelect(source.id)}
+        >
+          <span className="zd-theme-source-name">
+            <status.Icon
+              aria-hidden="true"
+              className={cn("size-3.5 shrink-0", status.className)}
+            />
+            <span className="truncate">{source.title}</span>
+          </span>
+          <span className="zd-theme-filter-count">{count}</span>
+        </Button>
+      </Tooltip>
+    );
+  };
+  const GroupChevron = stylesOnlyOpen ? ChevronDown : ChevronRight;
   return (
     <div role="group" aria-label="Theme sources" className="zd-theme-sources">
       <div className="zd-theme-rail-heading">
@@ -106,36 +186,51 @@ export function DesignThemeSourceRail({
         <span className="truncate">Manual</span>
         <span className="zd-theme-filter-count">{manualCount}</span>
       </Button>
-      {sources.map((source) => {
-        const status = sourceStatus(source.status);
-        return (
+      {listed.map((source) => sourceRow(source, source.tokens.length))}
+      {stylesOnly.length > 0 ? (
+        <>
           <Tooltip
-            key={source.id}
             className="zd-theme-tooltip"
-            label={`${source.path} · ${status.label}`}
+            label="Stylesheets without variables. Frames still get their styles."
           >
             <Button
               type="button"
               variant="ghost"
               className="zd-theme-filter w-full"
-              aria-pressed={selectedId === source.id}
-              aria-label={`${source.title}, ${status.label}`}
-              onClick={() => onSelect(source.id)}
+              data-design-theme-styles-only=""
+              aria-expanded={stylesOnlyOpen}
+              aria-controls={stylesOnlyOpen ? groupId : undefined}
+              aria-label={`Styles only, ${counted(stylesOnly.length, "source")}${groupStatus ? `, ${groupStatus.label}` : ""}`}
+              onClick={() => setStylesOnlyOpen((open) => !open)}
             >
               <span className="zd-theme-source-name">
-                <status.Icon
+                <GroupChevron
                   aria-hidden="true"
-                  className={cn("size-3.5 shrink-0", status.className)}
+                  className="text-muted-fg size-3.5 shrink-0"
                 />
-                <span className="truncate">{source.title}</span>
+                <span className="truncate">Styles only</span>
+                {groupStatus ? (
+                  <groupStatus.Icon
+                    aria-hidden="true"
+                    className={cn("size-3.5 shrink-0", groupStatus.className)}
+                  />
+                ) : null}
               </span>
-              <span className="zd-theme-filter-count">
-                {source.tokens.length}
-              </span>
+              <span className="zd-theme-filter-count">{stylesOnly.length}</span>
             </Button>
           </Tooltip>
-        );
-      })}
+          {stylesOnlyOpen ? (
+            <div
+              id={groupId}
+              role="group"
+              aria-label="Styles only"
+              className="zd-theme-source-group"
+            >
+              {stylesOnly.map((source) => sourceRow(source, source.rules))}
+            </div>
+          ) : null}
+        </>
+      ) : null}
       {errors.length > 0 ? (
         <Tooltip className="zd-theme-tooltip" label={errors.join("\n")}>
           <p role="status" tabIndex={0} className="zd-theme-source-errors">
@@ -192,7 +287,6 @@ export function DesignThemeSourceStatus({
   onAskAgentToFix?: () => void;
 }) {
   const status = sourceStatus(source.status);
-  const count = source.tokens.length;
   return (
     <div
       role="status"
@@ -207,9 +301,7 @@ export function DesignThemeSourceStatus({
         <span className="zd-theme-source-title">{source.title}</span>
         <code className="zd-theme-source-path">{source.path}</code>
         <span className="zd-theme-source-summary">
-          {source.status === "error"
-            ? "Not imported"
-            : `${count} ${count === 1 ? "variable" : "variables"} · read-only`}
+          {designStyleSourceSummary(source)}
         </span>
         {onAskAgentToFix && designStyleSourceNeedsAgent(source) ? (
           <Button

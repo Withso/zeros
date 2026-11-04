@@ -58,3 +58,21 @@ patch/conflict helpers. The workspace operations are `git.reviewHunks`,
 admission, lifecycle serialization, cloud policy, Design guards, and workspace
 change events. Engine and renderer clients never infer a historical patch is a
 live mutation target.
+
+## Direct commits and your Git setup
+
+Create PR directly and Create draft directly commit through the engine's
+hardened Git: repository hooks do not run, commits are not signed and Git LFS
+filters do not run. The PR menu says so in Local workspaces. A direct commit is
+refused, with nothing written, when it would add or change Git LFS-tracked files
+or when the user's Git config sets `commit.gpgSign`; Create PR (the agent commits
+with the user's own Git) or the terminal handles those. Cloud workspaces commit
+with the Cloud Computer's Git, which runs hooks; there a commit of LFS-tracked
+files is refused unless the recipe configures git-lfs.
+
+A new workspace of a repository whose root `.gitattributes` uses `filter=lfs`
+starts Setup with `git lfs pull` (Local: the user's git-lfs and credential
+helpers; cloud: the VM's), then the repository's own setup command. Without
+git-lfs it prints how to install it; neither case fails Setup. Automatic Design
+folder rename and removal commits use the user's Git identity, and Zeros'
+identity only when none is configured.

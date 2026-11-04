@@ -29,6 +29,8 @@ import {
   assertSafeGitRef,
   classifyGitTransportError,
   runGit,
+  userGitConfigBool,
+  userGitIdentityConfigured,
   type ExpectedCategory,
 } from "./git-exec";
 import { refExists } from "./default-branch";
@@ -345,8 +347,11 @@ async function updateHeadFromSnapshot(opts: {
       parents = [opts.expectedHead];
     }
   }
+  // Automatic Design commits land on the user's branch, so they carry the
+  // user's identity; Zeros' own identity is only the fallback without one.
+  const fallbackIdentity = opts.identity === "zeros" && !(await userGitIdentityConfigured(opts.cwd));
   const commitArgs = [
-    ...(opts.identity === "zeros"
+    ...(fallbackIdentity
       ? ["-c", "user.name=Zeros", "-c", "user.email=zeros@localhost"]
       : []),
     "commit-tree",
@@ -486,6 +491,36 @@ export async function commitDesignMetadataRemoval(
   }
 }
 
+/** Direct commits run the engine's hardened Git: LFS filters never run and
+ * commits are never signed. Refuse a commit that would be wrong for this
+ * repository and point to the agent route or the terminal, which use the
+ * user's own Git. Deleted paths carry no content and stay allowed. */
+async function assertDirectCommitSupported(cwd: string, files: string[] | undefined): Promise<void> {
+  const candidates = files ??
+    (await runGit(cwd, ["diff", "--cached", "--name-only", "--diff-filter=d", "-z"], { readOnly: true }))
+      .stdout.split("\0").filter(Boolean);
+  const present = candidates.filter(file => existsSync(path.join(cwd, file)));
+  if (present.length) {
+    const fields = (await runGit(cwd, ["check-attr", "-z", "filter", "--", ...present], { readOnly: true }))
+      .stdout.split("\0");
+    const lfs: string[] = [];
+    for (let index = 0; index + 2 < fields.length; index += 3)
+      if (fields[index + 2] === "lfs") lfs.push(fields[index]!);
+    if (lfs.length)
+      throw new GitError({
+        code: "VALIDATION_FAILED",
+        message: `This commit includes Git LFS files (${lfs.slice(0, 3).join(", ")}${lfs.length > 3 ? ` and ${lfs.length - 3} more` : ""}), which commits made directly by Zeros can't store correctly.`,
+        remediation: "Use Create PR, where the agent commits with your own Git, or commit these files from the terminal.",
+      });
+  }
+  if (await userGitConfigBool(cwd, "commit.gpgSign"))
+    throw new GitError({
+      code: "VALIDATION_FAILED",
+      message: "Your Git config signs commits, and commits made directly by Zeros are unsigned.",
+      remediation: "Use Create PR, where the agent commits with your own Git, or commit from the terminal to sign it.",
+    });
+}
+
 export async function commit(opts: CommitOptions): Promise<CommitResult> {
   const ws = await resolveRepoForGitOp(opts.workspaceId);
   const authority = opts.authority ?? "code";
@@ -519,6 +554,9 @@ export async function commit(opts: CommitOptions): Promise<CommitResult> {
     });
   }
   await assertGitCheckpointReady(ws.path);
+  // Design checkpoints stay scoped to their own lane; every other direct
+  // commit (Create PR directly / draft directly) uses this hardened Git.
+  if (authority !== "design") await assertDirectCommitSupported(ws.path, files);
   const expectedHead = await currentHead(ws.path);
   let protectedDesignDirs: string[] = [activeDesignDir];
   if (authority === "code") {

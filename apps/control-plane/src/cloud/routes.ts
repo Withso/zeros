@@ -52,6 +52,7 @@ export type CloudV2RouteDeps = {
   authorizeRepositories?(organizationId: string, userId: string, repositories: readonly string[]): Promise<void>;
   authorizeSourceTargets?(organizationId: string, userId: string, targets: readonly CloudSourceTarget[]): Promise<void>;
   authorizeBuildRepository?(organizationId: string, userId: string, buildId: string, repository: string): Promise<CloudSourceTarget>;
+  remoteHead(organizationId: string, userId: string, target: CloudSourceTarget, branch: string): Promise<string | null>;
   authorizeSource?(workspace: CloudV2Workspace): Promise<void>;
   continueSource?(workspace: CloudV2Workspace): Promise<CloudSourceContinuation>;
   /** Public wss:// base of the realtime service, e.g. wss://realtime.example.com. */
@@ -100,6 +101,17 @@ export function createCloudV2Routes(deps: CloudV2RouteDeps): Hono {
     if (!target.success) throw new HttpError(409, "cloud_source_review_required", "The original repository identity needs verification.");
     return { entry, target: target.data };
   };
+  const computerUnavailable = async (organizationId: string, userId: string) => {
+    if ((await deps.computers.overview(organizationId)).activeBuildId) {
+      let admin = true;
+      try { await deps.computers.requireAdmin(organizationId, userId); }
+      catch (error) { if (!(error instanceof HttpError) || error.status !== 403) throw error; admin = false; }
+      return new HttpError(409, "cloud_computer_rebuild_required", admin
+        ? "Rebuild the Cloud Computer in Settings → Cloud Computer before creating a workspace."
+        : "Ask an organization admin to rebuild the Cloud Computer in Settings → Cloud Computer before creating a workspace.");
+    }
+    return new HttpError(409, "cloud_computer_build_required", "Build this organization's Cloud Computer first");
+  };
 
   app.post("/v1/cloud-v2/workspaces/:id/github", bodyLimit({ maxSize: 72 * 1024 }), async c => {
     const id = uuid.safeParse(c.req.param("id"));
@@ -124,7 +136,7 @@ export function createCloudV2Routes(deps: CloudV2RouteDeps): Hono {
       }
     }
     const computer = await deps.store.activeComputer(input.organizationId);
-    if (!computer) throw new HttpError(409, "cloud_computer_build_required", "Build this organization's Cloud Computer first");
+    if (!computer) throw await computerUnavailable(input.organizationId, c.get("user").id);
     // Display names can move. Select among the build's authorized ID bindings,
     // retaining the original recipe entry for checkout, setup and branch pins.
     const candidates: Awaited<ReturnType<typeof buildRepository>>[] = [];
@@ -145,6 +157,8 @@ export function createCloudV2Routes(deps: CloudV2RouteDeps): Hono {
     const { entry: repository, target } = selected;
     const baseBranch = input.baseBranch ?? repository.defaultBranch;
     if (!baseBranch) throw new HttpError(409, "repository_branch_required", "Select a branch or rebuild the Cloud Computer to record its default branch");
+    if (await deps.remoteHead(input.organizationId, c.get("user").id, target, baseBranch) === null)
+      throw new HttpError(404, "repository_branch_not_found", `Branch ${baseBranch} does not exist in ${target.repository}.`);
     const id = randomUUID();
     const name = input.name ?? input.repository.split("/")[1]!;
     const create = {
@@ -188,8 +202,18 @@ export function createCloudV2Routes(deps: CloudV2RouteDeps): Hono {
     const userId = c.get("user").id;
     const workspace = await deps.store.get(id.data, userId);
     await deps.authorizeSource?.(workspace);
+    const explicitWake = c.req.query("wakePolicy") === "explicit";
+    if (explicitWake && (workspace.archivedAt || workspace.state === "stopping" || (!wake && workspace.state === "stopped")))
+      throw new HttpError(409, "cloud_workspace_not_running", "This cloud workspace is not ready for a connection");
     if (workspace.state === "deleting" || workspace.state === "failed") throw new HttpError(409, "workspace_unavailable", "This cloud workspace is unavailable");
-    if (wake && workspace.state === "stopped") await deps.store.transition(workspace.id, ["stopped"], "starting");
+    if (wake && workspace.state === "stopped") {
+      if (!explicitWake) await deps.store.transition(workspace.id, ["stopped"], "starting");
+      else if (!await deps.store.transition(workspace.id, ["stopped"], "starting", { unarchived: true })) {
+        const current = await deps.store.get(workspace.id, userId);
+        if (current.archivedAt || !["creating", "starting", "running"].includes(current.state))
+          throw new HttpError(409, "cloud_workspace_not_running", "This cloud workspace is not ready for a connection");
+      }
+    }
     const ticket = await deps.store.issueToken({ workspaceId: workspace.id, kind: "connect", userId, ttlMs: CONNECT_TICKET_TTL_MS, authority: c.get("user"), wake });
     return c.json({
       url: `${deps.bridgeBaseUrl.replace(/\/+$/, "")}/v2/cloud/workspaces/${workspace.id}/bridge`,
@@ -244,6 +268,10 @@ export function createCloudV2Routes(deps: CloudV2RouteDeps): Hono {
     const organizationId = org(c.req.param("org"));
     await deps.computers.requireMember(organizationId, c.get("user").id);
     const computer = await deps.store.activeComputer(organizationId);
+    if (!computer) {
+      const error = await computerUnavailable(organizationId, c.get("user").id);
+      if (error.code === "cloud_computer_rebuild_required") throw error;
+    }
     const repositories = computer?.repositories ?? null;
     const allowed: CloudV2InstalledRepository[] = [];
     for (const entry of repositories ?? []) {

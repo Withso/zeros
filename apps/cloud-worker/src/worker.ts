@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { access, rm } from "node:fs/promises";
 import { join } from "node:path";
+import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { CloudV2ControlFrameSchema, CLOUD_V2_RELAY_PROTOCOL, type CloudV2WorkerFrame } from "@zeros/protocol/cloud-v2-relay";
 import { CloudV2PromptPullReplySchema } from "@zeros/protocol/cloud-v2-prompts";
@@ -8,6 +9,7 @@ import { createMessage, type BridgeMessage } from "@zeros/protocol/messages";
 import { safeParseClientBridgeMessage } from "@zeros/protocol/schemas";
 import { MIN_SUPPORTED_PROTOCOL, PROTOCOL_VERSION } from "@zeros/protocol/version";
 import { Agents, type AppClient, type DriverFactories } from "./agents";
+import { RECENT_ACTIVITY_MS } from "./activity";
 import type { TimingObserver } from "./agent-timings";
 import { CodexDriver } from "./drivers/codex/driver";
 import { ClaudeDriver } from "./drivers/claude/driver";
@@ -20,7 +22,9 @@ import { prepareCheckout, type CheckoutRefresh, type CheckoutResult } from "./wo
 import { WorkspaceSetup, type SetupRunner } from "./workspace/setup";
 import { WorkspaceError, WorkspaceScope, type WorkerConfig } from "./workspace/scope";
 import { WorkspaceService, type WorkspaceServiceOptions } from "./workspace/service";
+import { isGitMutation } from "./workspace/git";
 import { GithubBroker, GithubTokens, githubEnvironment } from "./credentials/github";
+import { configureGitIdentity } from "./credentials/git-identity";
 import { commandRunner } from "./workspace/commands";
 import { Terminals } from "./terminals/service";
 import type { ModelDiscoveryOptions } from "./credentials/model-availability";
@@ -30,6 +34,7 @@ import { measureStartup, recordStartupTiming, type StartupTimingObserver } from 
 
 interface WorkerOptions {
   directory: string;
+  homeDirectory?: string;
   workspaceId?: string;
   transport: Transport;
   drivers?: DriverFactories;
@@ -72,20 +77,22 @@ export class CloudWorker {
   private stopping?: Promise<void>;
   private configurationRevision?: bigint;
   private idle?: boolean;
+  private activeMutations = 0;
+  private lastMutationAt = -Infinity;
   private heartbeat?: ReturnType<typeof setInterval>;
   private unsubscribers: Array<() => void> = [];
 
   constructor(private readonly options: WorkerOptions) {
-    this.tokens = new GithubTokens(frame => this.send(frame));
-    this.userTokens = new GithubTokens(frame => this.send(frame), { purpose: "gh" });
-    this.github = new GithubBroker(join(options.directory, "github.sock"), purpose => purpose === "gh" && this.githubUserTokensEnabled ? this.userTokens.get() : this.tokens.get(), () => this.workspace?.githubChanged());
+    this.tokens = new GithubTokens((frame, timeoutMs) => this.send(frame, timeoutMs));
+    this.userTokens = new GithubTokens((frame, timeoutMs) => this.send(frame, timeoutMs), { purpose: "gh" });
+    this.github = new GithubBroker(`/tmp/zeros-github-${this.instanceId}/github.sock`, purpose => purpose === "gh" && this.githubUserTokensEnabled ? this.userTokens.get() : this.tokens.get(), () => this.workspace?.githubChanged());
     this.gitEnvironment = githubEnvironment(this.github.socketPath, options.gitAskpassPath ?? fileURLToPath(new URL("../bin/git-askpass", import.meta.url)));
   }
 
   start(): void {
     if (this.started || this.disposed) return;
     this.started = true;
-    this.heartbeat = setInterval(() => { void this.reportIdle(Boolean(this.agents?.busy || this.terminals?.busy || this.setup?.busy || this.workspace?.uploading)); }, 55_000);
+    this.heartbeat = setInterval(() => { void this.reportIdle(this.busy); }, 55_000);
     this.heartbeat.unref?.();
     this.options.transport.start({
       open: async () => {
@@ -116,7 +123,7 @@ export class CloudWorker {
 
   async dispose(): Promise<void> {
     if (this.disposed) return;
-    this.disposed = true; clearInterval(this.heartbeat); this.tokens.disconnect(); this.userTokens.disconnect();
+    this.disposed = true; clearInterval(this.heartbeat); this.tokens.dispose(); this.userTokens.dispose();
     await this.configuring.catch(() => {});
     await this.stopCheckout();
     await this.promptInbox?.dispose();
@@ -200,9 +207,16 @@ export class CloudWorker {
       return this.terminals!.handle(client, frame);
     }
     if (frame.type === "WORKSPACE_REQUEST") {
+      const mutation = frame.op === "file.write" || frame.op === "workspace.prepareGithub" || isGitMutation(frame.op);
+      let activeMutation = false;
       try {
-        // Target changes write metadata without going through the Git runner.
-        if (frame.op === "file.write" || frame.op === "git.changeTarget" || frame.op === "attachment.write") await this.touchCheckout();
+        if (mutation || frame.op === "attachment.write") await this.touchCheckout();
+        if (mutation) {
+          this.activeMutations++;
+          activeMutation = true;
+          this.lastMutationAt = Date.now();
+          await this.reportIdle();
+        }
         const service = /^(chats|messages|turns)\./.test(frame.op) ? this.chats! : this.workspace!;
         const result = await service.handle(frame.op, frame.params ?? {});
         if (frame.op === "attachment.write") await this.reportIdle();
@@ -210,6 +224,11 @@ export class CloudWorker {
       } catch (error) {
         await client.send(createMessage({ type: "WORKSPACE_ERROR", source: "engine", requestId: frame.id, op: frame.op,
           code: error instanceof WorkspaceError ? error.code : "WORKSPACE_ERROR", message: error instanceof WorkspaceError ? error.message : "The workspace request could not be completed." }));
+      } finally {
+        if (activeMutation) {
+          this.activeMutations--;
+          this.lastMutationAt = Date.now();
+        }
       }
     }
   }
@@ -220,13 +239,18 @@ export class CloudWorker {
     const revision = BigInt(config.loginRevision);
     if (this.configurationRevision !== undefined && revision < this.configurationRevision) return;
     this.githubUserTokensEnabled = config.githubPullRequests === 1;
-    this.userTokens.invalidate();
     if (this.options.workspaceId && config.workspace.id !== this.options.workspaceId) throw new Error("Workspace identity changed.");
     const scope = new WorkspaceScope(config.workspace);
     if (this.scope && (this.scope.key !== scope.key || this.scope.root !== scope.root || this.scope.workspace.repository !== scope.workspace.repository)) throw new Error("Workspace identity changed.");
+    if (this.configurationRevision !== revision) { this.tokens.invalidate(); this.userTokens.invalidate(); }
+    await configureGitIdentity(this.options.homeDirectory ?? homedir(), config.gitIdentity);
     if (!this.scope) {
-      await this.github.start(); this.tokens.invalidate();
-      const checkout = await measureStartup("worker_checkout", () => (this.options.prepareCheckout ?? prepareCheckout)(config.workspace, this.gitEnvironment, timing), timing);
+      await this.github.start();
+      const checkout = await measureStartup("worker_checkout", () => (this.options.prepareCheckout ?? prepareCheckout)(config.workspace, this.gitEnvironment, timing), timing)
+        .catch(async error => {
+          await this.options.transport.reportCheckoutFailure?.().catch(() => {});
+          throw error;
+        });
       this.checkoutRefresh = checkout?.refresh;
       const restoreMarker = join(this.options.directory, "restored-from-checkpoint");
       const restored = await access(restoreMarker).then(() => true, (error: NodeJS.ErrnoException) => {
@@ -251,13 +275,14 @@ export class CloudWorker {
         publish: (frame) => { void this.broadcast(frame); },
       });
       this.scope = scope; this.store = store;
-      this.mcp = new McpGateway({ workspaceRoot: scope.root, authorization: this.options.transport.mcpAuthorization?.bind(this.options.transport) });
+      this.mcp = new McpGateway({ workspaceRoot: scope.root, authorization: this.options.transport.mcpAuthorization?.bind(this.options.transport),
+        onFailure: (executionId, failure) => this.agents?.mcpFailure(executionId, failure) });
       await this.mcp.configure(config.mcpServers ?? [], config.loginRevision);
       this.agents = new Agents(store, scope, this.options.drivers ?? {
         codex: () => new CodexDriver({ gitEnvironment: this.gitEnvironment }), claude: () => new ClaudeDriver({ gitEnvironment: this.gitEnvironment }),
         cursor: () => new CursorDriver({ gitEnvironment: this.gitEnvironment }),
       }, config,
-        (frame) => this.broadcast(frame), () => { void this.reportIdle(); }, this.options.onTiming, this.options.modelDiscovery, () => this.mcp!.providers());
+        (frame) => this.broadcast(frame), () => { void this.reportIdle(); }, this.options.onTiming, this.options.modelDiscovery, executionId => this.mcp!.providers(executionId));
       this.terminals = new Terminals(scope, { gitEnvironment: this.gitEnvironment, broadcast: frame => this.broadcast(frame), activity: () => { void this.reportIdle(); } });
       this.chats = new ChatService(store, scope, (chatId) => this.agents!.closeChat(chatId), this.agents.turns);
       this.history = new HistoryMirror(store, this.options.transport);
@@ -280,7 +305,7 @@ export class CloudWorker {
         onAdmitted: () => rm(restoreMarker, { force: true }).catch(() => {}),
       });
       this.setup.start(checkout?.createdBranch === true || restored);
-    } else { this.tokens.invalidate(); await this.workspace!.configure(config.workspace); await this.mcp!.configure(config.mcpServers ?? [], config.loginRevision); this.agents!.configure(config); }
+    } else { await this.workspace!.configure(config.workspace); await this.mcp!.configure(config.mcpServers ?? [], config.loginRevision); this.agents!.configure(config); }
     this.history!.connect();
     if (config.promptOutbox === 1 && this.options.transport.promptRequest) {
       this.promptInbox ??= new PromptInbox(this.store!, this.agents!, async (op, body, signal) => {
@@ -322,20 +347,24 @@ export class CloudWorker {
     await this.terminals?.dispose();
     await this.mcp?.dispose();
   }
-  private async send(frame: CloudV2WorkerFrame): Promise<boolean> {
+  private async send(frame: CloudV2WorkerFrame, timeoutMs?: number): Promise<boolean> {
     if (!this.online) return false;
-    try { return await this.options.transport.send(frame); }
+    try { return await this.options.transport.send(frame, timeoutMs === undefined ? undefined : { timeoutMs }); }
     catch { this.options.onError?.("transport"); return false; }
+  }
+  private get busy(): boolean {
+    return Boolean(this.agents?.busy || this.terminals?.busy || this.setup?.busy || this.workspace?.uploading ||
+      this.activeMutations || Date.now() - this.lastMutationAt < RECENT_ACTIVITY_MS);
   }
   private async reportIdle(force = false): Promise<void> {
     if (!this.online || !this.agents) return;
-    const idle = !this.agents.busy && !this.terminals?.busy && !this.setup?.busy && !this.workspace?.uploading;
+    const idle = !this.busy;
     if (force || this.idle !== idle) {
       if (idle) {
         try { await this.store?.flush(); await this.history?.flush(); }
         catch { this.options.onError?.("storage"); return; }
-        // A new prompt may have arrived while persistence was draining.
-        if (!this.online || this.agents.busy || this.terminals?.busy || this.setup?.busy || this.workspace?.uploading) return;
+        // New work may have arrived while persistence was draining.
+        if (!this.online || this.busy) return;
       }
       this.idle = idle; await this.send({ t: "idle", idle });
     }

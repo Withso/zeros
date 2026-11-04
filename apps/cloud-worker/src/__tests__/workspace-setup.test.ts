@@ -1,5 +1,5 @@
 import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { randomUUID } from "node:crypto";
 import { afterEach, expect, it, vi } from "vitest";
@@ -35,16 +35,18 @@ async function fixture(runner: SetupRunner, options: {
 it("runs admitted setup in the checkout without delaying readiness, keeps it busy and bounds its private log", async () => {
   vi.stubEnv("CLOUD_V2_WORKER_TOKEN", "fixture-worker-token");
   vi.stubEnv("ANTHROPIC_API_KEY", "fixture-provider-key");
+  const directory = await mkdtemp(join(tmpdir(), "zeros-workspace-setup-"));
+  cleanups.push(() => rm(directory, { recursive: true, force: true }));
   let finish!: (code: number) => void;
   const completed = new Promise<number>(resolve => { finish = resolve; });
   const runner = vi.fn<SetupRunner>(async (_file, _args, options) => {
-    const status = JSON.parse(await readFile(join(dirname(options.env.GH_ZEROS_BROKER_SOCKET!), "workspace-setup", `${WORKSPACE_ID}.json`), "utf8"));
+    const status = JSON.parse(await readFile(join(directory, "workspace-setup", `${WORKSPACE_ID}.json`), "utf8"));
     expect(status.state).toBe("running");
     options.output(Buffer.alloc(300 * 1024, "x")); options.output(Buffer.from("discarded"));
     return completed;
   });
   // The fake can always finish during cleanup, even when an assertion fails.
-  const f = await fixture(runner);
+  const f = await fixture(runner, { directory });
   cleanups.push(async () => { finish(0); });
   expect(f.relay.bridge("ENGINE_READY")).toHaveLength(1);
   expect(f.idle()).toEqual({ t: "idle", idle: false });

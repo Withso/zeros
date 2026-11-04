@@ -72,6 +72,7 @@ import { InlineLoginTerminal } from "./inline-login-terminal";
 import {
   githubAppConnectOptions,
   githubAutomaticSetup,
+  githubHealthDetailCopy,
   githubHealthNeedsAttention,
   githubMethodDescription,
   githubMethodLabel,
@@ -185,26 +186,8 @@ function IdentityBadge({ summary }: { summary: GithubCredentialSummary }) {
 }
 
 function HealthDetail({ summary }: { summary: GithubCredentialSummary }) {
-  if (summary.health === "connected") return null;
-
-  const copy =
-    summary.health === "rate-limited"
-      ? "GitHub is rate-limiting requests. This connection has not been removed."
-      : summary.health === "sso-required"
-        ? "Your organization requires SAML authorization for this connection."
-        : summary.health === "not-installed"
-          ? // Settings has no "current repository" — this row describes the
-            // connection. Naming one here read as a per-repo verdict the panel
-            // is not in a position to make.
-            summary.detail ||
-            "The GitHub App isn’t installed on any account yet."
-          : summary.health === "suspended"
-            ? summary.detail ||
-              "This installation was suspended by the account owner."
-            : summary.health === "invalid"
-              ? "GitHub revoked this connection. Reconnect to continue."
-              : summary.detail ||
-                "Couldn’t check this connection. You may be offline.";
+  const copy = githubHealthDetailCopy(summary);
+  if (copy === null) return null;
 
   // One 32px row in the card: a tone icon and the line, no filled box.
   return (
@@ -492,7 +475,7 @@ export function GitHubSection({
     // Cancel closes the card, so nothing is left on screen to explain why every
     // radio is still dead. connectApp's own `finally` only lands when the
     // control-plane round trip settles — up to the 15 s request timeout, longer
-    // if the Auth0 token refresh stalls — and its `attempt` guard already makes
+    // if the account token refresh stalls — and its `attempt` guard already makes
     // that late result a no-op. Releasing the chooser here is what makes Cancel
     // mean cancel rather than "wait, silently, for something you dismissed".
     setBusyMethod(null);

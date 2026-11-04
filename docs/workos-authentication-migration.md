@@ -5,10 +5,10 @@ implementation, dashboard configuration, deployment, and real Alpha acceptance
 are separate release gates; this document never treats a local test pass as a
 production approval.
 
-Retention: keep this document while Auth0 compatibility exists. After every
-supported release uses WorkOS, move the durable contracts into the permanent
-architecture and deployment guides, remove Auth0 code/configuration in a
-separate rollout, then delete this migration document.
+Retention: Auth0 code and configuration are removed, and contract migration
+`0217_drop_auth0_tables.sql` drops the unused `0208` tables. Keep this
+document until its durable contracts move into the permanent architecture and
+deployment guides, then delete it.
 
 ## Decision
 
@@ -226,14 +226,10 @@ User with the same email is therefore a fresh signup once all historical purge
 evidence is reconciled. The exact old WorkOS subject remains fenced and can
 never sign up again, even if a stale token or provider replay presents it.
 
-During the declared Auth0-to-WorkOS cutover, an active account whose eligible
-sign-in identity is still an active Auth0 mapping uses the same reviewed
-ceremony. A fresh WorkOS authentication creates the bounded `ZR-…` request;
-email alone still cannot transfer ownership. Exact owner approval supersedes
-the reviewed Auth0 identity, preserves the Zeros UUID and active account state,
-and projects retained Zeros-managed collaborative memberships to the new
-WorkOS subject through the durable command outbox. Directory-managed SCIM
-memberships remain authoritative and are never converted by this migration.
+Auth0 identities are retired. An account whose only identity is an Auth0
+mapping can neither sign in nor be migrated: a WorkOS sign-in with its email
+returns `account_exists`, and reviewed recovery refuses a request that targets
+it.
 
 An active account reached through a different WorkOS subject returns
 `account_exists`; email alone is never enough to merge it. Browser and desktop
@@ -598,6 +594,44 @@ must register only its release channel's scheme and must pass the same hostile
 deep-link regression suite. Platform packaging checks remain mandatory; a
 successful macOS smoke test is not evidence for Windows or Linux registration.
 
+### Several accounts on one device
+
+The desktop keeps up to 12 signed-in WorkOS accounts. The active session stays
+in `auth-session:tokens`, so older builds and sibling Dev worktrees keep reading
+one record; the others wait in `auth-session:parked`. Both are written in one
+`updateSecretValues` transaction under the refresh lock, so a rotated refresh
+token never exists in two places.
+
+- **Add account** starts the normal flow with `fresh=1`. Pages forwards only
+  that fixed flag, and Railway asks AuthKit for `prompt=login`, so the browser's
+  existing sign-in is never reused silently. Checked against Alpha AuthKit on
+  2026-10-31: without it the browser session is reused; `prompt=login` shows an
+  empty sign-in form; `max_age=0` only re-confirms the signed-in user, and
+  `select_account`, `consent` and `screen_hint` reuse the session. Signing in a
+  different account parks the active one; the same account replaces its own
+  session and the replaced one is revoked.
+- **Switching** (`auth_switch_account`) refreshes an expiring target first. A
+  rejected refresh removes only that account; an unreachable provider leaves
+  both as they were. The renderer then re-reads identity like any session
+  change, signals the engine that the owner changed, and remounts the shell.
+- **Signing out** revokes the active session and continues with the most
+  recently used other account; `auth_clear_session({ accountId })` signs out one
+  parked account with its own bearer. Revocation reported by the security
+  monitor never promotes another account; the login screen offers them.
+- `auth_get_access_token` names the bearer's account, so a renderer read that
+  straddles a switch discards a token from the previous account. The security
+  monitor reruns a forced check that arrives while one is in flight, so its
+  event stream always follows the account that is active now.
+- An entry this device can no longer decrypt (for example after a Keychain
+  reset) reads as absent and is replaced on the next write, so it can never
+  block signing in.
+- Each account keeps its own GitHub App connection: the one in use stays in
+  `github.app` and the others wait in `github.app.parked`.
+
+Local workspaces, chats and terminals belong to the device and stay the same
+for every account. Cloud workspaces keep running on their VMs; a switch only
+changes which account the app shows. Accounts never share a bearer token.
+
 ## Environment and Application topology
 
 Authentication data is isolated by release channel. Never share a Production
@@ -787,10 +821,9 @@ Railway-only secrets. Rotate each independently per channel. A cookie-password
 rotation invalidates outstanding browser sealed sessions, so schedule and
 communicate it as a forced browser sign-in.
 
-WorkOS mode does not require `RESEND_API_KEY` or `EMAIL_FROM` for organization
-invitations; the WorkOS invitation command owns the one delivery. Those
-variables remain optional for Zeros-specific recovery/account-lifecycle
-security notifications and the Auth0 rollback path. WorkOS custom email
+Organization invitations do not require `RESEND_API_KEY` or `EMAIL_FROM`; the
+WorkOS invitation command owns the one delivery. Those variables remain
+optional for Zeros-specific recovery/account-lifecycle security notifications. WorkOS custom email
 branding/domain configuration is not a generic transactional email API, so a
 separate provider is still required if those product notifications must be
 delivered. Zeros uses a Railway-only, sending-only, domain-restricted Resend key
@@ -810,7 +843,7 @@ Pages receives only `AUTH_PROVIDER=workos`, `APP_ORIGIN`, and the matching
 `CONTROL_PLANE_URL`. Electron compiles only public verification/configuration
 values: provider, app origin, desktop client ID, issuer, JWKS URL, and audience.
 
-Local `pnpm electron:dev` is a fourth desktop scheme, not a fourth data
+`pnpm electron:alpha` is a fourth desktop scheme, not a fourth data
 environment. On first launch, Dev fetches the seven public-client fields from
 `https://api-alpha.zeros.build/auth/desktop/dev-config` and atomically caches
 them at `~/.zeros-dev/auth/alpha.env` with mode `0600`. The versioned endpoint
@@ -840,18 +873,14 @@ The launcher validates that boundary before starting the stack and Electron
 main validates it again before any browser handoff. Alpha Pages alone accepts
 both `zeros-alpha://` and `zeros-dev://` returns; Beta and Production continue
 to accept only their exact release scheme. First use provisions the profile;
-a partial, legacy-Auth0, or non-Alpha profile is rejected and never falls back
-to the retired ticket handoff. Never place `WORKOS_API_KEY` or any WorkOS
+a partial, non-WorkOS, or non-Alpha profile is rejected. Never place `WORKOS_API_KEY` or any WorkOS
 management credential in the profile or a desktop launch environment.
 
 Dev instances share the channel's encrypted session store and coordinate token
 rotation with a cross-process lock. Signing in once makes the session available
 to existing worktrees through file notifications and to future launches through
-durable storage. Once a complete Alpha WorkOS configuration is active, a legacy
-Auth0 Dev session is removed with compare-and-swap and requires one WorkOS
-sign-in. A concurrent WorkOS replacement, unrelated credentials, local data,
-and packaged Auth0 rollback sessions are preserved. A late legacy handoff cannot
-overwrite a migrated Dev session.
+durable storage. A stored Auth0-era session reads as signed out and requires
+one WorkOS sign-in.
 
 The OS may deliver a `zeros-dev://` callback to a sibling worktree. Matching
 callbacks are relayed through a bounded, expiring encrypted mailbox; only the
@@ -873,19 +902,19 @@ checkout; valid sibling records with larger deadlines or capacity are retained.
    parameters remain accepted but inert; the old verification endpoint is
    absent.
 4. Deploy Alpha Pages, then an Alpha desktop build from the same qualified
-   commit. Set `AUTH_PROVIDER=workos` only when all three surfaces have their
-   complete configuration.
+   commit. Activate WorkOS only when all three surfaces have their complete
+   configuration.
 5. Run automated repository/emulator checks and the manual Alpha matrix below.
 6. Hold an observation window, audit provider and Zeros session/revocation
    events, then repeat in Beta from the exact promoted SHA.
 7. Promote the exact Beta SHA to Production with Production autodeploy still
    disabled. Do not recreate configuration ad hoc during promotion.
-8. Retain Auth0 code/configuration only for the declared rollback window. Its
-   removal is a later, separately reviewed change.
+8. Auth0 code and configuration are removed. Contract migration
+   `0217_drop_auth0_tables.sql` drops the unused `0208` tables.
 
-Rollback is an atomic provider/configuration rollback across Railway, Pages,
-and the desktop release. Do not restore the deleted verification bypass or mix
-WorkOS-issued sessions with Auth0 verification. Existing WorkOS sessions may
+Rollback restores an earlier WorkOS release across Railway, Pages, and the
+desktop together; there is no Auth0 rollback. Do not restore the deleted
+verification bypass. Existing WorkOS sessions may
 be revoked during rollback; internal product ownership remains safe because it
 uses Zeros account UUIDs.
 

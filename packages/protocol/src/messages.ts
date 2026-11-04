@@ -36,6 +36,7 @@ import type {
   ExecutionBoundaryPortsSnapshot,
   ExecutionBoundaryStatus,
 } from "./containment";
+import type { CloudFailure, CloudProviderFailure } from "./cloud-failure";
 
 export type MessageSource = "browser" | "engine";
 
@@ -110,6 +111,8 @@ export interface BridgeRegistryAgent {
    *  build missing its bundled Claude Code binary once showed "Connected" while
    *  every send failed. */
   authenticated?: boolean;
+  /** Confirmed cloud credential/runtime failure; absent on Local registries. */
+  cloud?: CloudProviderFailure;
   apiKeySource?: ProviderApiKeySource;
   /** Present when Zeros could not execute the authentication probe. This is an
    * infrastructure result, not proof that the provider rejected credentials;
@@ -1124,6 +1127,7 @@ export interface AgentAgentExitedMessage extends BaseMessage {
  *  `message`. The string `message` field stays populated as a
  *  fallback / log-friendly description. */
 export interface BridgeAgentFailure {
+  cloud?: CloudFailure;
   kind:
     | "timeout"
     | "auth-required"

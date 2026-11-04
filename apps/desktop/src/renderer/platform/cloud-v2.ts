@@ -49,6 +49,7 @@ const STATUS: Record<CloudV2Workspace["state"], string> = {
 const ERRORS: Record<string, string> = {
   cloud_computer_build_required: "Build this organization's Cloud Computer first.",
   cloud_computer_changed: "The Cloud Computer was just rebuilt. Create the workspace again.",
+  cloud_source_checkout_failed: "The repository or base branch could not be checked out. Existing files were retained. Check repository access and the base branch before creating a new workspace.",
   worker_boot_timeout: "The workspace computer did not start in time. Delete it and create a new one.",
   sandbox_missing: "This workspace's computer no longer exists. Delete it and create a new one.",
   checkpoint_restore_failed: "This workspace could not be restored from its last checkpoint. Start it to try again.",
@@ -161,10 +162,10 @@ export const CloudV2ConnectSchema = z.object({
   protocols: z.tuple([z.literal("zeros.cloud.v2"), z.string().regex(/^ticket\.zw2c_[A-Za-z0-9_-]{43}$/)]),
   expiresAt: z.string(),
 });
-/** `wake: false` asks for a ticket that leaves a stopped VM stopped. Explicit
- * work sent over the bridge still starts it. */
+/** Only an explicit open/input starts compute. The additive query keeps the
+ * strict connect body readable by older control planes. */
 export async function connectCloudV2Workspace(target: CloudWorkspaceTarget, options: { wake: boolean }) {
-  return cloudAccountRequest(`/v1/cloud-v2/workspaces/${uuid.parse(target.workspaceId)}/connect`, CloudV2ConnectSchema,
+  return cloudAccountRequest(`/v1/cloud-v2/workspaces/${uuid.parse(target.workspaceId)}/connect?wakePolicy=explicit`, CloudV2ConnectSchema,
     { body: { wake: options.wake }, idempotencyKey: key() });
 }
 

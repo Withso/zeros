@@ -9,6 +9,8 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import os from "node:os";
+import path from "node:path";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import type { ChildProcess } from "node:child_process";
 
@@ -89,6 +91,22 @@ describe("spawnSubprocessTransport — host cwd safety", () => {
     expect(opts.cwd).toBe(resolveHostCwd());
     // The exact regression: the host must not inherit the engine repo root.
     expect(opts.cwd).not.toBe(process.cwd());
+  });
+
+  it("resolves the host executable from the recovered session PATH", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "cursor-refreshed-path-"));
+    try {
+      const runtime = path.join(root, "recovered-node");
+      await writeFile(runtime, "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+      vi.stubEnv("PATH", "/absent/runtime");
+      vi.stubEnv("ZEROS_PTY_HOST_RUNTIME", "recovered-node");
+      const boundary = { wrapSpawn: (request: unknown) => request, trackProcess: vi.fn() } as unknown as PreparedBoundary;
+      spawnSubprocessTransport({ executionBoundary: boundary, cwd: root, env: { PATH: root } });
+      expect(spawnSpy).toHaveBeenCalledWith(runtime, expect.any(Array), expect.objectContaining({ env: { PATH: root } }));
+    } finally {
+      vi.unstubAllEnvs();
+      await rm(root, { recursive: true, force: true });
+    }
   });
 
   it.each(["personal", "organization"])("preserves %s Local launch args/env/cwd byte for byte", owner => {

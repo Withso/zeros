@@ -85,13 +85,12 @@ export async function handleUrl(rawUrl: string): Promise<void> {
   }
   if (IS_LOCAL_DEVELOPMENT) return;
 
-  // Query and fragment can carry handoff or pairing secrets; log only scheme and action.
+  // Query and fragment can carry callback or pairing secrets; log only scheme and action.
   console.log(`[Zeros] deep-link: ${parsed.protocol}//${action}`);
 
   if (action === "auth") {
-    // Handoff tickets are short-lived, single-use codes redeemed over HTTPS with
-    // main's PKCE verifier; raw tokens never enter OS URLs. Prefer fragment values
-    // to keep them out of redirect observers, retaining the query fallback.
+    // Prefer fragment values to keep them out of redirect observers, retaining
+    // the query fallback.
     const subPath = parsed.pathname.replace(/^\/+/, "");
     if (subPath !== "callback") {
       console.warn(`[Zeros] deep-link: unknown auth sub-action ${subPath}`);
@@ -101,13 +100,6 @@ export async function handleUrl(rawUrl: string): Promise<void> {
       ? parsed.hash.slice(1)
       : parsed.hash;
     const fragParams = new URLSearchParams(frag);
-    const ticket =
-      fragParams.get("ticket") ?? parsed.searchParams.get("ticket");
-    const nonce = fragParams.get("nonce") ?? parsed.searchParams.get("nonce");
-    if (ticket) {
-      emitEvent("auth-handoff", { ticket, nonce });
-      return;
-    }
 
     // WorkOS's Desktop Application returns to the hosted Zeros callback first.
     // That no-store page then hands only the short-lived, PKCE-bound code and
@@ -145,8 +137,7 @@ export async function handleUrl(rawUrl: string): Promise<void> {
       return;
     }
 
-    console.warn("[Zeros] deep-link auth/callback: missing ticket");
-    emitEvent("auth-error", { reason: "missing_ticket" });
+    console.warn("[Zeros] deep-link auth/callback: missing code or state");
     return;
   }
 
@@ -169,7 +160,7 @@ export async function handleUrl(rawUrl: string): Promise<void> {
       fragmentParams.get("error") ?? parsed.searchParams.get("error");
     try {
       // macOS can deliver open-url before ready; safeStorage and the
-      // main-process Auth0 session are not safe to touch until then.
+      // main-process account session are not safe to touch until then.
       await app.whenReady();
       const { completeGithubAppConnection, relayGithubAppCallback } = await import("./github-app-flow");
       // A cold-launched sibling Dev window may never load its renderer (its

@@ -729,6 +729,39 @@ export async function runWorkbenchStatusSmoke({ page, check, harnessBase }) {
     );
   }
 
+  // A refused GitHub connection names its condition in the Review banner, with
+  // Settings' own diagnosis for Local and the cloud connection for cloud, and
+  // offers Settings instead of a Retry that cannot fix it.
+  for (const workspace of ["local", "organization-local", "a"]) {
+    await page.goto(`${harnessBase}/harness-workbench-status.html`);
+    await page.waitForFunction(() => !!window.workbenchStatusFixture);
+    await page.evaluate((workspace) => {
+      const fixture = window.workbenchStatusFixture;
+      fixture.githubNeedsReauthorization();
+      fixture.render("review", { workspace, target: `github-${workspace}`, surface: "feature" });
+      fixture.fail("Not signed in to GitHub", false, "NOT_AUTHENTICATED");
+      return fixture.refreshFeature();
+    }, workspace);
+    await page.clock.runFor(1_600);
+    await expect(banner()).toHaveCount(1);
+    await expect(banner()).toContainText(workspace === "a"
+      ? "Reconnect your cloud GitHub connection to load this pull request."
+      : "This GitHub connection needs to be re-authorized.");
+    await expect(banner()).not.toContainText("Couldn't load the review.");
+    await expect(banner().getByRole("button", { name: "Retry loading the review" })).toHaveCount(0);
+    await expect(empty()).toHaveText(unavailableCopy.review);
+    await noToast();
+    await screenshot("review", `github-connection-${workspace}`);
+    await page.evaluate(() => {
+      window.githubSettingsRequests = [];
+      window.addEventListener("zeros:settings-section-requested", (event) =>
+        window.githubSettingsRequests.push(event.detail.section));
+    });
+    await banner().getByRole("button", { name: "Open GitHub settings", exact: true }).click();
+    expect(await page.evaluate(() => window.githubSettingsRequests)).toEqual(["integrations"]);
+  }
+  check("review: a refused GitHub connection names its condition and opens GitHub settings for Local, organization-local and cloud", true);
+
   // The real iframe source owns content confirmation, rather than admission.
   await page.goto(`${harnessBase}/harness-workbench-status.html`);
   await page.waitForFunction(() => !!window.workbenchStatusFixture);

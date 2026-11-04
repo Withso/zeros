@@ -1,0 +1,9 @@
+{
+  "id": "code-editor-stale-controlled-value",
+  "kind": "replay",
+  "area": "renderer-state",
+  "fixedBy": "pr:810",
+  "symptom": "UIW retained a queued older controlled value after a newer prop matched the live document, so pausing after typing base12 replaced it with base1.",
+  "rule": "Principles 1, 3, 13 and 14: acknowledge local editor snapshots without rewriting the live document; hold parent echoes out of sync in the regression.",
+  "check": "pnpm exec vitest run apps/desktop/src/renderer/shell/workbench/tabs/code-editor/__tests__/code-editor-history.test.ts"
+}

@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "codexProtocolVersion": "0.165.0",
+  "codexProtocolVersion": "0.166.0",
   "threadItems": {
     "handled": [
       "userMessage",
@@ -149,6 +149,9 @@
       "windowsSandbox/setupStart",
       "windowsSandbox/readiness",
       "account/logout",
+      "accountSession/list",
+      "accountSession/switch",
+      "account/gcp/setup",
       "account/gatewayOAuth/read",
       "account/gatewayOAuth/login",
       "account/gatewayOAuth/cancel",

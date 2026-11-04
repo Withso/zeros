@@ -3,6 +3,7 @@
 import "../../../../../styles/zeros-tokens.css";
 import "../../../../../styles/semantic-tokens.css";
 import "../../../../../styles/globals.css";
+import "./isolated-editor-drafts";
 import { useCallback, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import {

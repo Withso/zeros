@@ -470,7 +470,10 @@ diagnostics. Copy describes the workspace condition or “Couldn't load files”
 The banner message is one line that ends in an ellipsis, with full copy in its
 title. A single 24px Ghost action stays visible at narrow widths; Retry has a tab-specific
 accessible name, shares one flight across failed sources, and says “Retrying…”
-until settled, bounded to 30 seconds even if a source never settles. Keep the
+until settled, bounded to 30 seconds even if a source never settles. When
+retrying cannot fix a named condition (a refused GitHub connection), the action
+opens where it is fixed instead, such as “Open GitHub settings”, and the centre
+says the content isn't available; the tab still reloads when it is shown again. Keep the
 banner element/live region stable through retry and tone changes; announce
 message changes once without moving focus. Hidden retained tabs
 are inert and do not announce, animate, poll or run status timers.

@@ -1,7 +1,7 @@
 // ──────────────────────────────────────────────────────────
 // Team context — the engine-side slot for the team settings layer.
 //
-// The RENDERER owns the control-plane session (Auth0 JWT), fetches the
+// The RENDERER owns the control-plane session (WorkOS JWT), fetches the
 // active team's settings doc, and couriers it here over the LOCAL bridge
 // (`team.setContext` — never remote-callable). The engine holds it IN
 // MEMORY ONLY: the doc joins the resolve chain as the `team` layer

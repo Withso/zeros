@@ -82,7 +82,7 @@ import { statusForGeneration } from "../git-status-reads";
 import { fileStatusesForFolder } from "./tabs/file-status";
 import { TabFileMarks } from "./tab-file-marks";
 import type { FileChangeStatus } from "../../platform/git";
-import { useWorkbenchDirtyEditorIds } from "./tabs/code-editor/editor-state";
+import { markWorkbenchEditorClosing, useWorkbenchDirtyEditorIds } from "./tabs/code-editor/editor-state";
 
 interface WorkbenchTabStripProps {
   /** The persisted workbench home + open-File tab list — see Workbench. */
@@ -155,6 +155,7 @@ export function WorkbenchTabStrip({
       );
       return;
     }
+    if (tab.type === "files") markWorkbenchEditorClosing(tab.id);
     dispatch({ type: "REMOVE_WORKBENCH_TAB", id: tab.id });
   };
 

@@ -5,16 +5,14 @@ Zeros account. It opens the real desktop shell in the device-local organization
 using the existing engine, SQLite database, Git, worktree, terminal, browser and
 provider integrations. Renderer edits retain Vite HMR; engine and native edits
 use the existing development watchers and main supervisor. To test a branch's
-cloud workspaces before merge, use [`pnpm electron:cloud`](electron-cloud.md).
+cloud workspaces before merge, use [Zeros Dev](electron-cloud.md) (`pnpm electron:dev`).
 
-`pnpm electron:dev` remains the complete hosted application for sign-in,
-organizations, billing, cloud workspaces and integration testing. Its launcher,
-provisioning, errors, Setup and Archive behavior are unchanged. Local never
-invokes that hosted lifecycle or reads its portable profile, registry receipts,
-credentials or deployment state.
+Zeros Dev is the complete application for sign-in, organizations, cloud
+workspaces and integration testing. Local never invokes the Zeros Dev lifecycle
+or reads its private profile, credentials or launcher state.
 
-Run only one launcher from a checkout at a time: Local and hosted Dev (including
-Alpha Dev) share `dist-electron` and `dist-engine`. Local refuses to build while
+Run only one launcher from a checkout at a time: Local and Zeros Dev (including
+`electron:alpha`) share `dist-electron` and `dist-engine`. Local refuses to build while
 a Dev launcher from the same canonical checkout is running. Native main also
 checks its baked build mode before initializing data or account services; a
 rebuild from the other mode exits with an instruction to stop the other launcher
@@ -92,7 +90,7 @@ variables and renderer/process arguments cannot enable Local admission.
 
 Account/organization/cloud requests, account security monitoring, cloud catalog
 refresh, hosted GitHub App refresh, OAuth deep links and product analytics are
-disabled. Local does not claim any hosted Dev or packaged callback scheme. The
+disabled. Local does not claim the Zeros Dev or packaged callback schemes. The
 normal loopback host, origin and per-boot token checks remain in force, as does
 the existing remote account authentication policy. Local does not start a relay
 or cloud transport.
@@ -131,14 +129,14 @@ suffix so identically named folders can be distinguished.
 | Native development bundle and version marker                   | `~/.zeros-local/instances/<identity>/bundle/`                              |
 | Product worktrees                                               | `~/zeros-local-<identity>/workspaces/` and sibling `design workspaces/`   |
 
-Local never migrates hosted Dev/packaged secrets or Chromium state into its
+Local never migrates Zeros Dev/packaged secrets or Chromium state into its
 profile. It also starts with its own user settings instead of seeding them from
 the installed app. Stopping the command does not remove SQLite or workspace
-data. Local profiles are not pruned by the hosted Dev launcher.
+data. Local profiles are not pruned by the Zeros Dev launcher.
 
 Local provider authentication is shared across checkouts by default. API keys,
 saved subscription accounts and the selected method persist independently of
-each checkout's database and renderer preferences. Hosted Dev similarly shares
+each checkout's database and renderer preferences. Zeros Dev similarly shares
 its own `com.zeros.dev` store; Local, Dev and packaged channels remain separate.
 `ZEROS_ISOLATE=1 pnpm electron:local` explicitly keeps a checkout's secrets private.
 

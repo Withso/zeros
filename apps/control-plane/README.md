@@ -9,11 +9,10 @@ schema and is deployed independently from the desktop application.
 ## Runtime boundary
 
 - Node.js 22, Hono, PostgreSQL, `jose`, and plain SQL migrations.
-- The selected identity provider issues access tokens; this service verifies
-  JWT signatures, exact issuer, audience, expiry, and required claims locally
-  against JWKS. WorkOS mode additionally enforces the Web/Desktop Application
-  allowlist and session/token identifiers.
-- In WorkOS mode Railway also owns browser PKCE exchange, encrypted sealed
+- WorkOS issues access tokens; this service verifies JWT signatures, exact
+  issuer, audience, expiry, and required claims locally against JWKS, and
+  enforces the Web/Desktop Application allowlist and session/token identifiers.
+- Railway also owns browser PKCE exchange, encrypted sealed
   sessions, PostgreSQL-serialized refresh, Hosted AuthKit Desktop Application
   authorization, webhook verification, desktop current/all-session revocation,
   WorkOS management-command reconciliation, Events API repair, security-event
@@ -57,20 +56,19 @@ Core environment variables:
 | Variable                 | Purpose                                                                                                                                          |
 | ------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------ |
 | `DATABASE_URL`           | Restricted PostgreSQL application connection; hosted channels use PlanetScale with `sslmode=verify-full`                                         |
-| `AUTH_PROVIDER`          | `auth0` during compatibility rollout, or `workos` after client cutover                                                                           |
+| `AUTH_PROVIDER`          | Optional; the only accepted value is `workos`                                                                                                    |
 | `AUTH_AUDIENCE`          | Expected access-token audience                                                                                                                   |
-| `AUTH_ISSUER`            | Exact WorkOS environment/default-Application issuer; required in WorkOS mode, optionally comma-separated only for legacy Auth0                   |
-| `AUTH_JWKS_URL`          | Exact public signing JWKS for that WorkOS environment/default Application; required in WorkOS mode                                               |
+| `AUTH_ISSUER`            | Exact WorkOS environment/default-Application issuer                                                                                              |
+| `AUTH_JWKS_URL`          | Exact public signing JWKS for that WorkOS environment/default Application                                                                        |
 | `AUTH_WEB_CLIENT_ID`     | Allowed WorkOS Web Application client ID                                                                                                         |
 | `AUTH_DESKTOP_CLIENT_ID` | Allowed WorkOS Desktop Application client ID                                                                                                     |
-| `APP_ORIGIN`             | Exact channel app origin used for the browser callback and safe returns in WorkOS mode                                                           |
+| `APP_ORIGIN`             | Exact channel app origin used for the browser callback and safe returns                                                                          |
 | `WORKOS_API_KEY`         | WorkOS server API key; Railway-only                                                                                                              |
 | `WORKOS_COOKIE_PASSWORD` | Unique 32+ character key for WorkOS sealed sessions; Railway-only                                                                                |
 | `WORKOS_WEBHOOK_SECRET`  | Exact WorkOS endpoint signing secret; Railway-only                                                                                               |
-| `RESEND_API_KEY`         | Optional Railway-only, sending-only Resend key for Zeros product/security notifications and the Auth0 invitation rollback path                   |
+| `RESEND_API_KEY`         | Optional Railway-only, sending-only Resend key for Zeros product/security notifications                                                          |
 | `EMAIL_FROM`             | Optional verified Resend sender, for example `Zeros <notifications@updates.zeros.build>`                                                         |
 | `ZEROS_SELF_HOSTED`      | Public templates only: `true` allows installer-owned platform domains; frontend and API origins must differ; official deployments leave it unset |
-| `AUTH0_DOMAIN`           | Legacy Auth0 fallback used only when explicit issuer/JWKS values are absent                                                                      |
 | `PORT`                   | HTTP port, default `8080`                                                                                                                        |
 | `NODE_ENV`               | Use `production` for production-safe error responses                                                                                             |
 
@@ -253,9 +251,10 @@ available until Alpha acceptance is complete.
 ## Railway deployment
 
 Configure the Railway service root as `apps/control-plane`. The colocated
-[`Dockerfile`](Dockerfile) builds the service and
-[`railway.json`](railway.json) configures `/healthz`, restart behavior, and the
-Dockerfile builder.
+[`Dockerfile`](Dockerfile) builds the service. Each environment's Railway
+service settings select that Dockerfile and set the `/healthz` health check and
+restart behavior; [`.railway/railway.ts`](../../.railway/railway.ts) records
+the same settings for Railway's Infrastructure as Code.
 
 Use one Railway project with persistent `alpha`, `beta`, and `production`
 environments. Each environment has its own control-plane instance, PlanetScale Postgres database,
@@ -265,10 +264,9 @@ Production autodeploy stays disabled; only Alpha tracks `main`.
 Before a production deployment:
 
 1. Provision PlanetScale Postgres with backups and a qualified supported major version.
-2. Set `DATABASE_URL`, the selected provider's complete `AUTH_*` block, and
-   `NODE_ENV=production` in Railway. WorkOS mode additionally requires
-   `APP_ORIGIN`, `WORKOS_API_KEY`, `WORKOS_COOKIE_PASSWORD`, and
-   `WORKOS_WEBHOOK_SECRET`. None belongs in Pages or a desktop build.
+2. Set `DATABASE_URL`, the complete WorkOS `AUTH_*` block, `APP_ORIGIN`,
+   `WORKOS_API_KEY`, `WORKOS_COOKIE_PASSWORD`, `WORKOS_WEBHOOK_SECRET`, and
+   `NODE_ENV=production` in Railway. None belongs in Pages or a desktop build.
 3. Use the channel's verified PlanetScale TLS endpoint and separate restricted
    application and migration-owner credentials. Keep `DATABASE_MIGRATIONS_ON_BOOT=false`.
 4. Run the verification commands below against the exact commit being
@@ -288,7 +286,7 @@ client migration.
 
 ### WorkOS browser/desktop authorization and account lifecycle
 
-In WorkOS mode, `GET /auth/start`, `GET /auth/callback`,
+`GET /auth/start`, `GET /auth/callback`,
 `GET /auth/browser/session`, `POST /auth/browser/refresh`, and
 `GET /auth/logout` are Railway-owned. Migration `0012` stores only SHA-256
 digests of random browser credentials and OAuth state. PKCE verifiers are
@@ -427,9 +425,17 @@ values are:
 - `GITHUB_APP_SLUG`
 - `GITHUB_OAUTH_CALLBACK_URL`
 
-Set `GITHUB_REFRESH_BINDING_SECRET` independently so rotating the OAuth client
-secret does not invalidate every outstanding refresh binding. Keep the client
-and binding secrets server-side. Callback URLs must return to the matching web
+Refresh bindings are signed with a separate key so rotating the OAuth client
+secret never invalidates them. Railway Alpha, Beta and Production refuse to
+boot without `GITHUB_REFRESH_BINDING_SECRET` (key version 1) or
+`GITHUB_REFRESH_BINDING_KEYS_JSON` (`{"<version>":"<secret>"}`, 1–32 versions,
+with `GITHUB_REFRESH_BINDING_CURRENT_KEY_VERSION` when there is more than one).
+New bindings are signed with the current version; every listed version still
+verifies the bindings it signed, and each refresh re-signs with the current
+one. Development and self-hosted deployments may still fall back to the client
+secret, with a warning on Railway. Rotation steps are in
+`docs/deployment-environments.md`. Keep the client and binding secrets
+server-side. Callback URLs must return to the matching web
 and desktop release channel; the supported schemes are `zeros`, `zeros-alpha`,
 `zeros-beta`, and `zeros-dev`.
 

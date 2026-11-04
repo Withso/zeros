@@ -2,6 +2,7 @@
 import "../../../../../styles/zeros-tokens.css";
 import "../../../../../styles/semantic-tokens.css";
 import "../../../../../styles/globals.css";
+import "./isolated-editor-drafts";
 import React from "react";
 import { createRoot } from "react-dom/client";
 import { RuntimeClient } from "../platform/bridge/ws-client";

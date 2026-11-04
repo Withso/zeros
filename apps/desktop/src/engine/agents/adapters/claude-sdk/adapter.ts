@@ -1001,7 +1001,7 @@ export class ClaudeSdkAdapter implements AgentAdapter {
     let query: Query | undefined;
     let timer: ReturnType<typeof setTimeout> | undefined;
     try {
-      const cli = resolveClaudeCli({ override: opts.cliBinary });
+      const cli = resolveClaudeCli({ override: opts.cliBinary, pathValue: opts.env?.PATH });
       if (!cli.path) throw new Error("Claude runtime unavailable");
       query = this.queryFn({
         prompt: input,
@@ -4481,7 +4481,7 @@ export class ClaudeSdkAdapter implements AgentAdapter {
     // node_modules sits next to sdk.mjs, which is true in dev and false in every
     // packaged build. Failing HERE (before query()) turns an opaque
     // "AGENT RESPONSE FAILURE" into a message that names the fix.
-    const cli = resolveClaudeCli({ override: state.cliBinary });
+    const cli = resolveClaudeCli({ override: state.cliBinary, pathValue: state.env?.PATH });
     if (!cli.path) {
       throw new AgentFailureError({
         kind: "auth-required",

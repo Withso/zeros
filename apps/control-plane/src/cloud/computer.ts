@@ -17,6 +17,16 @@ import { computerSourceReviewRequired, readComputerSourceTargets, type CloudV2Co
 export { cloudV2SnapshotName } from "./resource-names.js";
 
 const MAX_LOG_BYTES = 1024 * 1024;
+/** Installed before the shared snapshot, so every workspace from the image has it.
+ * `--system` configures the LFS filters for every user and checkout on the VM. */
+export const GIT_LFS_INSTALL_COMMAND = [
+  "set -eu",
+  "if ! command -v git-lfs >/dev/null 2>&1; then",
+  "  sudo -n env DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=120 update -qq",
+  "  sudo -n env DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=120 install -y -qq --no-install-recommends git-lfs",
+  "fi",
+  "sudo -n git lfs install --system --skip-repo",
+].join("\n");
 const HEARTBEAT_MS = 60_000;
 /** A build whose server stopped (a deploy, a crash) is failed after this. */
 const INTERRUPTED_AFTER = "5 minutes";
@@ -177,11 +187,13 @@ export class CloudV2Computers {
       revision: Number(row?.recipe_revision ?? 0), key: configurationKey(row) };
   }
 
-  /** Resolve outside database locks. Retained entries always carry their old
+  /** Resolve outside database locks. Retained, verified entries carry their old
    * IDs; explicitly added entries acquire a new server observation. */
   private async admitSources(organizationId: string, userId: string, repositories: readonly CloudV2RepositoryDraft[], previous: ConfiguredSources): Promise<CloudSourceTarget[]> {
     const retained = repositories.some(entry => previous.repositories.some(old => old.repository.toLowerCase() === entry.repository.toLowerCase()));
-    const known = retained ? readComputerSourceTargets(previous.repositories, previous.sources) : [];
+    // A legacy draft can authorize only a fresh manual build from stock. Never
+    // attach today's identities to its old build, logs, disk or checkpoints.
+    const known = retained && previous.sources !== null ? readComputerSourceTargets(previous.repositories, previous.sources) : [];
     const targets: CloudSourceTarget[] = [];
     for (const entry of repositories) {
       const pinned = known.find(target => target.repository.toLowerCase() === entry.repository.toLowerCase());
@@ -309,10 +321,9 @@ export class CloudV2Computers {
     const previous = await withSystemTx(this.pool, tx => this.configuredSources(tx, organizationId));
     if (previous.revision !== revision) throw recipeChanged();
     if (!previous.repositories.length) throw new HttpError(409, "computer_recipe_empty", "Add a repository to the Cloud Computer first");
-    const sources = readComputerSourceTargets(previous.repositories, previous.sources);
-    await this.resolveSourceTargets(organizationId, userId, sources);
+    const sources = await this.admitSources(organizationId, userId, previous.repositories, previous);
     return withSystemTx(this.pool, tx => this.insertBuild(tx, organizationId, userId,
-      CloudV2RecipeSchema.parse({ repositories: previous.repositories }), sources, { revision }, previous.key));
+      CloudV2RecipeSchema.parse({ repositories: previous.repositories }), sources, { revision, configure: previous.sources === null }, previous.key));
   }
 
   /** Re-activating an older build rebuilds its recipe at the commits it used. */
@@ -903,6 +914,11 @@ export class CloudV2ComputerBuilder {
     if (installed.exitCode !== 0 || installed.timedOut) throw Object.assign(new Error("runtime install failed"), { code: "worker_runtime_install_failed" });
     await computers.setRuntime(job.id, sha256);
     await log(`[zeros] runtime ${sha256.slice(0, 12)} installed\n`);
+    // Boat's stock image has no git-lfs. A build that can't add it still goes
+    // live; the worker then tells LFS repositories how to fetch their files.
+    const lfs = await compute.exec(sandboxId, GIT_LFS_INSTALL_COMMAND, 300);
+    await log(lfs.exitCode === 0 && !lfs.timedOut ? "[zeros] git-lfs installed\n"
+      : "[zeros] git-lfs could not be installed; Git LFS files stay placeholders until a later build adds it\n");
     // Capture before clone, credentials or setup. Cleanup after clone is not
     // a confidentiality boundary: scripts can copy source anywhere on disk.
     await compute.exec(sandboxId, "sync", 120);

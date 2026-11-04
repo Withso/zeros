@@ -419,6 +419,16 @@ export function parseAndIndexDesignCss(css: string): DesignCssIndex {
   return indexDesignCss(postcss.parse(css));
 }
 
+/** The rules a source holds as the theme editor counts them: style rules,
+ * font faces and keyframes, not layer order or other statements. */
+export function designCssRuleCount(index: DesignCssIndex): number {
+  let count = 0;
+  for (const kind of index.kind) {
+    if (kind === UNIT_RULE || kind === UNIT_FONT_FACE || kind === UNIT_KEYFRAMES) count += 1;
+  }
+  return count;
+}
+
 /** One index for CSS indexed in pieces, joined by newlines. */
 export function concatDesignCssIndexes(pieces: readonly DesignCssIndex[]): DesignCssIndex {
   if (pieces.length === 1) return pieces[0]!;

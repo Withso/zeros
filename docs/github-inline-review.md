@@ -103,6 +103,13 @@ A signed-out or refused GitHub connection (`NOT_AUTHENTICATED`, SSO, scope,
 installation or repository access) is not a failure of the File, Changes or
 Review tab hosting the comments: it is a neutral notice naming Settings →
 Integrations, and only other read failures reach the tab's error banner.
+When the Review tab's own pull request, diff or discovery read is refused that
+way (or rate-limited, or GitHub is unreachable), its banner names the condition
+instead of "Couldn't load the review.". A Local sign-in refusal repeats the
+selected method's Settings diagnosis, such as "This GitHub connection needs to
+be re-authorized."; a cloud workspace names its cloud GitHub connection and
+never reads the Mac's methods. Refusals fixed in Settings offer "Open GitHub
+settings" instead of Retry, and the Create PR toast repeats the same diagnosis.
 
 Aggregate reads cap thread pages, per-thread comment bytes, total discussion
 bytes, annotated check runs and annotation pages/bytes. Partial results carry

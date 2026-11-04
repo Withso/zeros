@@ -9,7 +9,7 @@ describe("host-to-engine GitHub credential projection", () => {
     gitHttpUsername: "x-access-token",
     accessToken: "short-lived-access",
     refreshToken: "main-only-refresh",
-    ownerSub: "auth0|owner",
+    ownerSub: "account-owner",
     login: "octocat",
     expiresAtMs: 2_000_000,
     refreshTokenExpiresAtMs: 20_000_000,
@@ -19,7 +19,7 @@ describe("host-to-engine GitHub credential projection", () => {
   it("serves only the short-lived App working copy to its owner", () => {
     const projected = githubCredentialForEngine(
       appCredential,
-      "auth0|owner",
+      "account-owner",
       1_000_000,
     );
     expect(projected).toEqual({
@@ -31,19 +31,19 @@ describe("host-to-engine GitHub credential projection", () => {
       expiresAtMs: 2_000_000,
     });
     expect(JSON.stringify(projected)).not.toContain("main-only-refresh");
-    expect(JSON.stringify(projected)).not.toContain("auth0|owner");
+    expect(JSON.stringify(projected)).not.toContain("account-owner");
   });
 
   it("refuses cross-account, expired, and unbounded App credentials", () => {
     expect(
-      githubCredentialForEngine(appCredential, "auth0|another", 1_000_000),
+      githubCredentialForEngine(appCredential, "account-another", 1_000_000),
     ).toBeNull();
     expect(
-      githubCredentialForEngine(appCredential, "auth0|owner", 2_000_000),
+      githubCredentialForEngine(appCredential, "account-owner", 2_000_000),
     ).toBeNull();
     const { expiresAtMs: _missing, ...withoutExpiry } = appCredential;
     expect(
-      githubCredentialForEngine(withoutExpiry, "auth0|owner", 1_000_000),
+      githubCredentialForEngine(withoutExpiry, "account-owner", 1_000_000),
     ).toBeNull();
   });
 

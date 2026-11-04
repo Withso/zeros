@@ -8,16 +8,17 @@ import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { InitializeRequestSchema, ListToolsResultSchema, McpError, ResultSchema, type Notification, type Request as McpRequest, type Result } from "@modelcontextprotocol/sdk/types.js";
 import type { FetchLike } from "@modelcontextprotocol/sdk/shared/transport.js";
-import { RuntimeMcpServerSchema, type RuntimeMcpServer } from "@zeros/protocol/cloud-v2-relay";
+import { RuntimeMcpServerSchema, cloudFailureMessage, type CloudMcpFailure, type RuntimeMcpServer } from "@zeros/protocol/cloud-v2-relay";
 import { McpHttpLauncher, resolveMcpCwd } from "./launcher";
 import { limitMcpResponse, MAX_MCP_RESPONSE_BYTES } from "./response-limit";
+import { mcpFailure, mcpFailureError } from "./failure";
 
 export interface McpAuthorization { headers: Record<string, string>; expiresAt?: number }
 export type McpAuthorizationRequest = (id: string, force?: boolean, signal?: AbortSignal) => Promise<McpAuthorization>;
 /** Native providers receive only a worker-local capability, never upstream
  * OAuth refresh tokens, API headers or environment secrets. */
 export type DriverMcpServers = Record<string, { type: "http"; url: string; headers: Record<string, string> }>;
-interface Options { workspaceRoot: string; authorization?: McpAuthorizationRequest; fetch?: FetchLike }
+interface Options { workspaceRoot: string; authorization?: McpAuthorizationRequest; fetch?: FetchLike; onFailure?: (executionId: string, failure: CloudMcpFailure) => void }
 interface Entry {
   config: RuntimeMcpServer; signature: string; credential: string; controller: AbortController;
   authorizationEpoch: number;
@@ -26,6 +27,7 @@ interface Entry {
   sessions: Set<Session>;
 }
 interface Session {
+  executionId?: string;
   entry: Entry; client: Client<McpRequest, Notification, Result>; server?: Server<McpRequest, Notification, Result>;
   transport?: StreamableHTTPServerTransport; controller: AbortController; closed?: Promise<void>;
 }
@@ -90,7 +92,8 @@ export class McpGateway {
     await Promise.all(removed.map(entry => this.closeEntry(entry)));
   }
 
-  async providers(): Promise<DriverMcpServers> {
+  async providers(executionId?: string): Promise<DriverMcpServers> {
+    if (executionId !== undefined && !/^[a-f0-9-]{36}$/.test(executionId)) throw new Error("Invalid MCP execution identity.");
     if (this.disposed) throw new Error("MCP gateway is closed.");
     if (!this.entries.size) return {};
     this.listening ??= new Promise<void>((resolve, reject) => {
@@ -105,7 +108,8 @@ export class McpGateway {
     if (this.disposed) throw new Error("MCP gateway is closed.");
     return Object.fromEntries([...this.entries.values()].map(entry => [
       `${entry.config.name.replace(/[^A-Za-z0-9_-]/g, "_").slice(0,80)}_${entry.config.id.replaceAll("-", "")}`,
-      { type: "http" as const, url: `${this.origin}/mcp/${entry.config.id}`, headers: { Authorization: `Bearer ${entry.credential}` } },
+      { type: "http" as const, url: `${this.origin}/mcp/${entry.config.id}`, headers: { Authorization: `Bearer ${entry.credential}`,
+        ...(executionId ? { "X-Zeros-Mcp-Execution": executionId } : {}) } },
     ]));
   }
 
@@ -116,11 +120,13 @@ export class McpGateway {
     const id = /^\/mcp\/([a-f0-9-]{36})$/.exec(req.url ?? "")?.[1], entry = id ? this.entries.get(id) : undefined;
     if (!entry) { res.writeHead(404).end(); return; }
     if (!equal(req.headers.authorization ?? "", `Bearer ${entry.credential}`)) { res.writeHead(401).end(); return; }
+    const executionId = req.headers["x-zeros-mcp-execution"];
+    if (executionId !== undefined && (typeof executionId !== "string" || !/^[a-f0-9-]{36}$/.test(executionId))) { res.writeHead(400).end(); return; }
     if (!["GET", "POST", "DELETE"].includes(req.method ?? "")) { res.writeHead(405).end(); return; }
     const sessionId = req.headers["mcp-session-id"];
     if (sessionId !== undefined) {
       const session = typeof sessionId === "string" ? this.sessions.get(sessionId) : undefined;
-      if (!session || session.entry !== entry || session.closed) { res.writeHead(404).end(); return; }
+      if (!session || session.entry !== entry || session.closed || session.executionId !== executionId) { res.writeHead(404).end(); return; }
       await session.transport!.handleRequest(req, res, req.method === "POST" ? await this.body(req) : undefined);
       return;
     }
@@ -128,7 +134,7 @@ export class McpGateway {
     const body = await this.body(req), initialize = InitializeRequestSchema.safeParse(body);
     if (!initialize.success) { res.writeHead(400).end(); return; }
     if (this.sessions.size + this.pending.size >= 256 || entry.sessions.size >= 16) { res.writeHead(503).end(); return; }
-    const session: Session = { entry, controller: new AbortController(), client: new Client({ name: "zeros-worker", version: "1.0.0" }, { capabilities: initialize.data.params.capabilities }) };
+    const session: Session = { entry, executionId, controller: new AbortController(), client: new Client({ name: "zeros-worker", version: "1.0.0" }, { capabilities: initialize.data.params.capabilities }) };
     this.pending.add(session); entry.sessions.add(session);
     const deadline = setTimeout(() => session.controller.abort(), 20_000); deadline.unref();
     const abort = () => { if (!res.writableEnded) session.controller.abort(); };
@@ -160,11 +166,11 @@ export class McpGateway {
             return this.redact(entry, { ...list, tools: list.tools.filter(tool => !disabled.has(tool.name)) });
           }
           return this.redact(entry, result);
-        } catch { throw failed(); }
+        } catch (error) { throw this.failure(session, error); }
       };
       session.client.fallbackRequestHandler = async (request, extra) => {
         try { return await server.request(request, ResultSchema, { signal: extra.signal, timeout: 120_000 }); }
-        catch { throw failed(); }
+        catch (error) { throw this.failure(session, error); }
       };
       server.fallbackNotificationHandler = notification => session.client.notification(notification).catch(() => {});
       session.client.fallbackNotificationHandler = notification => server.notification(this.redact(entry, notification)).catch(() => {});
@@ -180,11 +186,20 @@ export class McpGateway {
       await server.connect(transport);
       await transport.handleRequest(req, res, body);
       if (!transport.sessionId) await this.closeSession(session);
-    } catch {
+    } catch (error) {
+      const failure = this.failure(session, error);
       await this.closeSession(session);
-      if (!res.headersSent) res.writeHead(502);
-      res.end("MCP connection failed. Check the server connection.");
+      if (!res.headersSent) res.writeHead(502, { "Content-Type": "application/json" });
+      const id = body && typeof body === "object" && "id" in body && (typeof body.id === "string" || typeof body.id === "number") ? body.id : null;
+      res.end(JSON.stringify({ jsonrpc: "2.0", id, error: { code: failure.code, message: failure.message, data: failure.data } }));
     } finally { clearTimeout(deadline); res.off("close", abort); }
+  }
+
+  private failure(session: Session, error: unknown): McpError {
+    const cloud = mcpFailure(session.entry.config.id, error);
+    if (!this.disposed && !session.entry.controller.signal.aborted && this.entries.get(cloud.serverId) === session.entry && session.executionId)
+      this.options.onFailure?.(session.executionId, cloud);
+    return new McpError(-32603, cloudFailureMessage(cloud), { cloud });
   }
 
   private async body(req: IncomingMessage): Promise<unknown> {
@@ -248,6 +263,12 @@ export class McpGateway {
         await response.body?.cancel();
         authorization = entry.authorization !== authorization ? await this.authorization(entry, false, signal) : await this.authorization(entry, true, signal);
         response = await send();
+      }
+      // GET streams and DELETE are optional in Streamable HTTP; the SDK owns
+      // their 405 responses and must keep the ordinary POST session usable.
+      if (!response.ok && !(response.status === 405 && (request.method === "GET" || request.method === "DELETE"))) {
+        await response.body?.cancel();
+        throw mcpFailureError(mcpFailure(config.id, { status: response.status }));
       }
       return response;
     };

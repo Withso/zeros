@@ -77,6 +77,32 @@ describe("Codex driver with an offline app-server process", () => {
     expect(JSON.stringify(events)).not.toContain("proj_fixture");
   });
 
+  it.each([
+    { data: { type: "modelProviderMismatch", modelProvider: "old-provider", currentModelProvider: "openai" },
+      message: "This chat uses old-provider, but your current provider is openai. Switch to old-provider to continue." },
+    { data: { type: "modelProviderNotConfigured", modelProvider: "unavailable" },
+      message: "This chat uses model provider “unavailable”, which is no longer configured. Restore this provider’s configuration to continue." },
+    { data: { type: "modelProviderPolicyConflict", modelProvider: "unavailable", requiredModelProvider: "openai" },
+      message: "This chat uses model provider “unavailable”, but your organization requires “openai”. Contact your administrator or start a new chat using the required provider." },
+  ])("preserves Codex provider admission errors without changing models: $data.type", async ({ data, message }) => {
+    const { driver } = setup();
+    await driver.open(openInput);
+    const failure = await driver.prompt(content(`refusal:${JSON.stringify({ code: -32600, message, data })}`)).catch((error: unknown) => error);
+    expect(failure).toBeInstanceOf(Error);
+    expect(failure).toMatchObject({ message });
+    expect(failure).not.toHaveProperty("code", "model-unavailable");
+  });
+
+  it.each(["error", "turn/completed"])("keeps policy capacity errors distinct from overload recovery through %s", async method => {
+    const { driver, events } = setup();
+    await driver.open(openInput);
+    const error = { message: "server overloaded", codexErrorInfo: "policyCapacityUnavailable" };
+    const frames = [{ method, params: method === "error" ? { error, willRetry: false } : { turn: { status: "failed", error } } }];
+    await expect(driver.prompt(content(`fixture:${JSON.stringify(frames)}`))).rejects.toThrow(error.message);
+    expect(events.some(({ update }) => update.sessionUpdate === "error_notice" && update.message.includes("Retrying"))).toBe(false);
+    await expect(driver.prompt(content("complete"))).resolves.toMatchObject({ stopReason: "end_turn" });
+  });
+
   it.each(["error", "turn/completed", "rpc"])("keeps model refusal diagnostics out of %s replies and transcript rows", async method => {
     const { driver, events } = setup();
     const message = "unexpected status 403 Forbidden: Project `proj_fixture` does not have access to model `gpt-6.1-sol`, url: https://proxy.example.test/v2/cloud/proxy/openai/responses, cf-ray: fixture-ray, request id: fixture-request";
@@ -222,6 +248,12 @@ describe("Codex driver with an offline app-server process", () => {
     expect(responses[2]).toEqual({ answers: {} });
     expect(responses[3]).toMatchObject({ action: "cancel" });
     expect(responses[4]).toMatchObject({ code: -32601 });
+    expect(events.filter(event => event.update.sessionUpdate === "error_notice").map(event => event.update)).toMatchObject([
+      { sessionUpdate: "error_notice", code: "cloud-question-unsupported", severity: "warning", recoverable: true,
+        message: expect.stringMatching(/cloud workspaces.*Local workspace/i) },
+      { sessionUpdate: "error_notice", code: "cloud-mcp-elicitation-unsupported", severity: "warning", recoverable: true,
+        message: expect.stringMatching(/cloud workspaces.*Local workspace/i) },
+    ]);
   });
 
   it.each(["crash", "malformed", "no-ack"])("settles a prompt on %s without leaking process output", async (mode) => {

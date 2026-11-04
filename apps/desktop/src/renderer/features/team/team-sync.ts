@@ -257,7 +257,7 @@ export function useTeamEngineSync(): void {
         // changes and sign-out clear before the request, so stale settings can
         // never leak across organizations or accounts.
         // But never swallow SILENTLY: a permanent rejection (e.g. every call
-        // 401ing after the Auth0 migration, 2026-07-07) hid for days because
+        // 401ing after a sign-in provider migration, 2026-07-07) hid for days because
         // this catch was empty. The Team panel shows its own error UI
         // when opened; this log is the only trace for the background path.
         console.warn(

@@ -1,7 +1,7 @@
 // Help → Feedback modal (also ⌥⌘F). Collects a typed message and posts it to
 // the Railway control plane via submitFeedback(). There is deliberately no
-// address field: the backend reads the sender from the verified Auth0 session,
-// so the address support replies to is one Auth0 verified
+// address field: the backend reads the sender from the verified account
+// session, so the address support replies to is one the sign-in provider verified
 // rather than whatever was typed here. With
 // the "Include recent app logs" checkbox ticked, the secret-scrubbed recent
 // log tail (app.jsonl — main + engine + renderer, see apps/desktop/electron/log-store.ts)

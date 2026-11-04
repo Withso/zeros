@@ -2,7 +2,7 @@
 // Control-plane client — the desktop app's door to organizations, membership, and
 // invitations in apps/control-plane/.
 //
-// Auth: every call carries the CURRENT Auth0 access token from the app's
+// Auth: every call carries the CURRENT WorkOS access token from the app's
 // existing session (main owns refresh/rotation via auth-session.ts — we read,
 // never manage). The backend verifies it against the JWKS and decides
 // authorization in Postgres; the client sends identity, nothing more.
@@ -25,6 +25,10 @@ export const CONTROL_PLANE_URL: string | null =
   ) || null;
 
 export type OrganizationRole = "owner" | "admin" | "member";
+/** The member's seat in a collaborative organization. A member without Pro
+ * beyond the free allowance is on Hold: still a member, without the
+ * organization's cloud workspaces and chats. */
+export type OrganizationSeat = "pro" | "free" | "hold";
 /** Compatibility name used by the pre-hierarchy Administration components. */
 export type TeamRole = OrganizationRole;
 
@@ -44,6 +48,8 @@ export type OrganizationSummary = {
   defaultTeamId: string | null;
   workspaceCapabilities: { local: boolean; cloud: boolean };
   teamCapabilities: { multiple: false; canCreate: false };
+  /** Absent for Personal and from an older control plane. */
+  seat?: OrganizationSeat;
 };
 export type TeamSummary = OrganizationSummary;
 
@@ -66,6 +72,7 @@ export type Me = {
    * with an older control plane; absence always means disabled. */
   capabilities?: {
     createOrganization: boolean;
+    pro?: boolean;
   };
   organizations?: OrganizationSummary[];
   /** Compatibility mirror returned by the control plane. */
@@ -78,6 +85,7 @@ export type TeamMember = {
   display_name: string | null;
   role: TeamRole;
   created_at: string;
+  seat?: OrganizationSeat;
 };
 
 export type TeamInvitation = {

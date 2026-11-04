@@ -5,6 +5,7 @@ import {createServer} from "node:net";
 import {fileURLToPath} from "node:url";
 import pg from "pg";
 import {describe,expect,it} from "vitest";
+import {workosTestEnv} from "./test-workos-env.js";
 
 const d=process.env.TEST_DATABASE_URL?describe:describe.skip;
 d("controlled migration service boot",()=>{
@@ -20,11 +21,7 @@ d("controlled migration service boot",()=>{
       env:{PATH:process.env.PATH,NODE_ENV:"test",PORT:String(port),DATABASE_URL:process.env.TEST_DATABASE_URL,
         DATABASE_MIGRATIONS_ON_BOOT:String(install),
         DATABASE_MAINTENANCE_MODE:String(maintenance),
-        AUTH0_DOMAIN:"tenant.example.test",AUTH_AUDIENCE:"https://api.example.test",
-        ...(maintenance?{AUTH_PROVIDER:"workos",APP_ORIGIN:"https://app.example.test",
-          AUTH_ISSUER:"https://identity.example.test/user_management/client_web",AUTH_JWKS_URL:"https://identity.example.test/sso/jwks/client_web",
-          AUTH_WEB_CLIENT_ID:"client_web",AUTH_DESKTOP_CLIENT_ID:"client_desktop",WORKOS_API_KEY:"not-a-live-key-for-tests",
-          WORKOS_COOKIE_PASSWORD:"test-cookie-password".repeat(3),WORKOS_WEBHOOK_SECRET:"test-webhook-secret"}:{}),
+        ...workosTestEnv(),AUTH_AUDIENCE:"https://api.example.test",
         GITHUB_APP_ID:"123456",GITHUB_APP_CLIENT_ID:"Iv1.test",GITHUB_APP_CLIENT_SECRET:"test-client-secret",
         GITHUB_APP_SLUG:"zeros-test",GITHUB_OAUTH_CALLBACK_URL:"https://api.example.test/v1/github/oauth/callback",GITHUB_APP_PRIVATE_KEY:privateKey,
         CONTROL_PLANE_PROCESS_ROLE:background?"combined":"api",

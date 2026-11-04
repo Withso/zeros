@@ -1,0 +1,9 @@
+{
+  "id": "cloud-github-broker-path-allowlist",
+  "kind": "replay",
+  "area": "cloud-worker",
+  "fixedBy": "pr:822",
+  "symptom": "GitHub credential helpers could dial an unrelated reachable Unix socket supplied through their broker environment variable.",
+  "rule": "Validate the complete broker path against the worker's exact private socket format before dialing. Reject malformed paths and trailing newlines with the existing typed error; both packaged helpers must use the same guard. zstack-review checks credential boundaries and zstack-verify checks the packaged producer-consumer path.",
+  "check": "pnpm --dir apps/cloud-worker test src/credentials/__tests__/client-path.test.ts src/__tests__/package.test.ts"
+}

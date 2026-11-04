@@ -6,6 +6,7 @@ import { withUserTx } from "../db.js";
 import { McpStore } from "./store.js";
 import { SECRET_REF } from "./model.js";
 import { CloudV2Store } from "../cloud/store.js";
+import { grantTestPro } from "../test-pro.js";
 import { sealMcpMaterial } from "./envelope.js";
 
 const d = process.env.TEST_DATABASE_URL ? describe : describe.skip;
@@ -113,6 +114,7 @@ d("organization MCP store", () => {
 
   it("refreshes only the original workspace after a transferred repository's definition changes", async () => {
     await pool.query("UPDATE organizations SET cloud_workspaces_allowed=true WHERE id=$1", [org]);
+    await grantTestPro(pool, member);
     const workspaces = new CloudV2Store(pool);
     const original = await workspaces.createWorkspace({ id: randomUUID(), organizationId: org, creatorUserId: member,
       name: "original", repository: "org/repo", sourceRepositoryId: "42", branch: "work", baseBranch: "main", computerBuildId: null });

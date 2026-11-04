@@ -15,6 +15,8 @@ import { ClaudeStreamTranslator } from "./translator";
 import { isClaudeParentProgress } from "./event-feedback";
 import { hasClaudeModelContent } from "./first-content";
 import { normalizeProviderError } from "../shared/provider-error";
+import { retainProviderFailure } from "../../provider-failure";
+import { unsupportedInputNotice } from "../shared/unsupported-input";
 
 export const CLAUDE_VERSION = "0.3.311";
 interface NativeQuery extends AsyncIterable<unknown> {
@@ -190,7 +192,14 @@ export class ClaudeDriver implements Driver {
       permissionMode: "bypassPermissions", allowDangerouslySkipPermissions: true,
       includePartialMessages: true, persistSession: true, settingSources: ["user", "project", "local"],
       systemPrompt: { type: "preset", preset: "claude_code" },
-      onUserDialog: async () => ({ behavior: "cancelled" }), onElicitation: async () => ({ action: "cancel" }),
+      onUserDialog: async () => {
+        if (process && this.process === process && !this.disposed) this.emit(unsupportedInputNotice(session.sessionId, "question"));
+        return { behavior: "cancelled" };
+      },
+      onElicitation: async () => {
+        if (process && this.process === process && !this.disposed) this.emit(unsupportedInputNotice(session.sessionId, "elicitation"));
+        return { action: "cancel" };
+      },
       supportedDialogKinds: [],
       hooks: {
         UserPromptSubmit: [{ hooks: [async (hook) => {
@@ -362,7 +371,7 @@ export class ClaudeDriver implements Driver {
   private redact(message: string): string {
     return redactDriverMessage(message, this.input);
   }
-  private error(error: unknown): Error { return new Error(this.redact(error instanceof Error ? error.message : typeof error === "string" ? error : "Claude request failed.")); }
+  private error(error: unknown): Error { return retainProviderFailure("claude", error, this.redact(error instanceof Error ? error.message : typeof error === "string" ? error : "Claude request failed.")); }
 }
 
 // Local's effort mapping, without importing the desktop runtime. The SDK's

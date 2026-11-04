@@ -1,55 +1,88 @@
 import { randomUUID } from "node:crypto";
-import { connect, createServer, type Server, type Socket } from "node:net";
-import { chmod, lstat, mkdir, unlink } from "node:fs/promises";
-import { dirname } from "node:path";
+import { createServer, type Server, type Socket } from "node:net";
+import type { Stats } from "node:fs";
+import { chmod, link, lstat, mkdir, mkdtemp, rename, rmdir, unlink } from "node:fs/promises";
+import { dirname, join } from "node:path";
 import type { CloudV2ControlFrame, CloudV2WorkerFrame } from "@zeros/protocol/cloud-v2-relay";
+import { GithubAuthenticationError, githubAuthenticationError, GITHUB_REQUEST_TIMEOUT_MS, GITHUB_SOCKET_TIMEOUT_MS } from "./github-failure";
 
 export interface GithubToken { token: string; expiresAt: number }
-const unavailable = () => new Error("GitHub authentication is unavailable. Reconnect GitHub and try again.");
-interface Pending { id: string; resolve: (token: GithubToken) => void; reject: (error: Error) => void; timer: ReturnType<typeof setTimeout> }
+const unavailable = () => githubAuthenticationError();
+interface Pending {
+  id?: string; promise: Promise<GithubToken>; resolve: (token: GithubToken) => void; reject: (error: Error) => void;
+  deadline: number; attempts: number; failure?: GithubAuthenticationError;
+  timer: ReturnType<typeof setTimeout>; retry?: ReturnType<typeof setTimeout>;
+}
 
 /** One request flight per worker. Credentials exist only in process memory;
  * disconnection, refusal and expiry never replay the caller's Git command. */
 export class GithubTokens {
   private online = false;
+  private disposed = false;
   private cached?: GithubToken;
   private pending?: Pending;
-  private flight?: Promise<GithubToken>;
   private readonly now: () => number;
-  constructor(private readonly send: (frame: CloudV2WorkerFrame) => Promise<boolean>, private readonly options: { now?: () => number; timeoutMs?: number; purpose?: "git" | "gh" } = {}) { this.now = options.now ?? Date.now; }
-  connect(): void { this.disconnect(); this.online = true; }
+  constructor(private readonly send: (frame: CloudV2WorkerFrame, timeoutMs: number) => Promise<boolean>, private readonly options: { now?: () => number; timeoutMs?: number; purpose?: "git" | "gh" } = {}) { this.now = options.now ?? Date.now; }
+  connect(): void {
+    if (this.disposed) return;
+    this.online = true;
+    if (this.pending) this.dispatch(this.pending);
+  }
   invalidate(): void {
     this.cached = undefined;
-    if (this.pending) this.refuse(this.pending.id);
-    this.flight = undefined;
+    if (this.pending) this.finish(this.pending, githubAuthenticationError("connection-changed"));
   }
   disconnect(): void {
     this.online = false; this.cached = undefined;
-    if (this.pending) { clearTimeout(this.pending.timer); this.pending.reject(unavailable()); this.pending = undefined; }
-    this.flight = undefined;
+    if (this.pending?.id) this.failed(this.pending, unavailable());
+  }
+  dispose(): void {
+    this.disposed = true; this.online = false; this.cached = undefined;
+    if (this.pending) this.finish(this.pending, unavailable());
   }
   get(): Promise<GithubToken> {
-    if (!this.online) return Promise.reject(unavailable());
-    if (this.cached && this.cached.expiresAt > this.now() + 60_000) return Promise.resolve(this.cached);
-    if (this.flight) return this.flight;
-    const id = randomUUID();
-    const pending = new Promise<GithubToken>((resolve, reject) => {
-      const timer = setTimeout(() => this.refuse(id), this.options.timeoutMs ?? 15_000); timer.unref?.();
-      this.pending = { id, resolve, reject, timer };
-      void this.send({ t: "request", id, kind: "github-token", ...(this.options.purpose ? { purpose: this.options.purpose } : {}) }).then(sent => { if (!sent) this.refuse(id); }, () => this.refuse(id));
-    });
-    const flight = pending.finally(() => { if (this.flight === flight) this.flight = undefined; }); this.flight = flight;
-    return flight;
+    if (this.disposed) return Promise.reject(unavailable());
+    if (this.online && this.cached && this.cached.expiresAt > this.now() + 10_000) return Promise.resolve(this.cached);
+    if (this.pending) return this.pending.promise;
+    let resolve!: Pending["resolve"], reject!: Pending["reject"];
+    const promise = new Promise<GithubToken>((yes, no) => { resolve = yes; reject = no; });
+    const timeout = this.options.timeoutMs ?? GITHUB_REQUEST_TIMEOUT_MS;
+    const pending: Pending = { promise, resolve, reject, attempts: 0, deadline: this.now() + timeout,
+      timer: setTimeout(() => this.finish(pending, pending.failure ?? unavailable()), timeout) };
+    pending.timer.unref?.(); this.pending = pending;
+    this.dispatch(pending);
+    return promise;
   }
   receive(frame: Extract<CloudV2ControlFrame, { t: "reply" | "refusal" }>): void {
-    if (!this.pending || this.pending.id !== frame.id) return;
-    if (frame.t === "refusal" || frame.expiresAt <= this.now() + 1000 || !frame.token || frame.token.length > 8192 || /[\0\r\n]/.test(frame.token)) { this.refuse(frame.id); return; }
-    const pending = this.pending; this.pending = undefined; clearTimeout(pending.timer);
-    this.cached = { token: frame.token, expiresAt: frame.expiresAt }; pending.resolve(this.cached);
+    const pending = this.pending;
+    if (!pending || pending.id !== frame.id) return;
+    if (this.now() >= pending.deadline) { this.finish(pending, pending.failure ?? unavailable()); return; }
+    if (frame.t === "refusal") { this.failed(pending, githubAuthenticationError(frame.code)); return; }
+    if (frame.expiresAt <= this.now() + 1000 || !frame.token || frame.token.length > 8192 || /[\0\r\n]/.test(frame.token)) { this.failed(pending, unavailable()); return; }
+    this.finish(pending, { token: frame.token, expiresAt: frame.expiresAt });
   }
-  private refuse(id: string): void {
-    if (this.pending?.id !== id) return;
-    const pending = this.pending; this.pending = undefined; clearTimeout(pending.timer); pending.reject(unavailable());
+  private dispatch(pending: Pending): void {
+    if (this.pending !== pending || pending.id || pending.retry || !this.online) return;
+    const remaining = pending.deadline - this.now();
+    if (remaining <= 0 || pending.attempts >= 2) { this.finish(pending, pending.failure ?? unavailable()); return; }
+    const id = randomUUID(); pending.id = id; pending.attempts++;
+    const failed = () => { if (this.pending === pending && pending.id === id) this.failed(pending, unavailable()); };
+    void this.send({ t: "request", id, kind: "github-token", ...(this.options.purpose ? { purpose: this.options.purpose } : {}) }, remaining)
+      .then(sent => { if (!sent) failed(); }, failed);
+  }
+  private failed(pending: Pending, error: GithubAuthenticationError): void {
+    pending.id = undefined; this.cached = undefined;
+    if (error.reason !== "unavailable" || pending.attempts >= 2) { this.finish(pending, error); return; }
+    pending.failure ??= error;
+    if (pending.deadline - this.now() <= 250) return;
+    pending.retry = setTimeout(() => { pending.retry = undefined; this.dispatch(pending); }, 250);
+    pending.retry.unref?.();
+  }
+  private finish(pending: Pending, result: GithubToken | GithubAuthenticationError): void {
+    if (this.pending !== pending) return;
+    this.pending = undefined; clearTimeout(pending.timer); clearTimeout(pending.retry);
+    if (result instanceof GithubAuthenticationError) { this.cached = undefined; pending.reject(result); }
+    else { this.cached = result; pending.resolve(result); }
   }
 }
 
@@ -63,35 +96,71 @@ export function githubEnvironment(socketPath: string, askpassPath: string): Node
  * agents and terminals intentionally share that workspace trust domain. */
 export class GithubBroker {
   private server?: Server;
+  private starting?: Promise<void>;
+  private stopping?: Promise<void>;
+  private disposed = false;
+  private ownedSocket?: Stats;
+  private ownedDirectory?: Stats;
   private readonly sockets = new Set<Socket>();
   constructor(readonly socketPath: string, private readonly token: (purpose: "git" | "gh") => Promise<GithubToken>, private readonly changed: () => void = () => {}) {}
-  async start(): Promise<void> {
-    if (this.server) return;
-    await mkdir(dirname(this.socketPath), { recursive: true, mode: 0o700 });
-    const existing = await lstat(this.socketPath).catch((error: NodeJS.ErrnoException) => { if (error.code === "ENOENT") return undefined; throw error; });
-    if (existing) {
-      if (!existing.isSocket() || existing.uid !== process.getuid?.() || await this.listening()) throw new Error("The GitHub broker socket is already in use.");
-      await unlink(this.socketPath);
-    }
-    const server = createServer(socket => this.accept(socket)); server.maxConnections = 64;
-    await new Promise<void>((resolve, reject) => { server.once("error", reject); server.listen(this.socketPath, () => { server.removeListener("error", reject); resolve(); }); });
-    server.on("error", () => {}); this.server = server;
-    await chmod(this.socketPath, 0o600);
+  start(): Promise<void> {
+    if (this.disposed) return Promise.reject(new Error("The GitHub broker is disposed."));
+    if (this.server) return Promise.resolve();
+    return this.starting ??= this.listen().finally(() => { this.starting = undefined; });
   }
-  async dispose(): Promise<void> {
+  dispose(): Promise<void> {
+    this.disposed = true;
+    return this.stopping ??= this.stop();
+  }
+  private async listen(): Promise<void> {
+    const directory = dirname(this.socketPath);
+    let staging: string | undefined, bound: string | undefined, server: Server | undefined, owned: Stats | undefined;
+    try {
+      const created = await mkdir(directory, { recursive: true, mode: 0o700 });
+      const parent = await lstat(directory);
+      if (created) this.ownedDirectory = parent;
+      if (!parent.isDirectory() || parent.uid !== process.getuid?.() || (parent.mode & 0o777) !== 0o700) throw new Error("The GitHub broker directory must be private.");
+      if (await inspect(this.socketPath)) throw new Error("The GitHub broker socket is already in use.");
+      staging = await mkdtemp(join(directory, ".bind-"));
+      const binding = bound = join(staging, "socket");
+      const listener = server = createServer(socket => this.accept(socket)); listener.maxConnections = 64;
+      await new Promise<void>((resolve, reject) => { listener.once("error", reject); listener.listen(binding, () => { listener.removeListener("error", reject); resolve(); }); });
+      listener.on("error", () => {});
+      owned = await lstat(bound);
+      await chmod(bound, 0o600);
+      await link(bound, this.socketPath); this.ownedSocket = owned;
+      // libuv unlinks its original bind path on close, even if a foreign socket
+      // replaced it. Publish a hard link and retire that private binding name.
+      await unlinkOwnedSocket(bound, owned); await rmdir(staging); staging = undefined;
+      this.server = listener;
+    } catch (error) {
+      if (bound) await unlinkOwnedSocket(bound, owned).catch(() => {});
+      for (const socket of this.sockets) socket.destroy(); this.sockets.clear();
+      if (server) await new Promise<void>(resolve => server!.close(() => resolve()));
+      throw error;
+    } finally {
+      if (staging) await rmdir(staging).catch(() => {});
+      if (!this.server) await this.cleanup().catch(() => {});
+    }
+  }
+  private async stop(): Promise<void> {
+    await this.starting?.catch(() => {});
     for (const socket of this.sockets) socket.destroy(); this.sockets.clear();
     const server = this.server; this.server = undefined;
-    if (server) { await new Promise<void>(resolve => server.close(() => resolve())); await unlink(this.socketPath).catch(() => {}); }
+    if (server) await new Promise<void>(resolve => server.close(() => resolve()));
+    await this.cleanup();
   }
-  private listening(): Promise<boolean> {
-    return new Promise(resolve => {
-      const socket = connect(this.socketPath); let settled = false;
-      const finish = (value: boolean) => { if (!settled) { settled = true; socket.destroy(); resolve(value); } };
-      socket.once("connect", () => finish(true)); socket.once("error", () => finish(false)); socket.setTimeout(500, () => finish(true));
+  private async cleanup(): Promise<void> {
+    await unlinkOwnedSocket(this.socketPath, this.ownedSocket); this.ownedSocket = undefined;
+    if (!this.ownedDirectory) return;
+    const directory = dirname(this.socketPath), current = await inspect(directory);
+    if (current?.isDirectory() && sameInode(current, this.ownedDirectory)) await rmdir(directory).catch((error: NodeJS.ErrnoException) => {
+      if (error.code !== "ENOENT" && error.code !== "ENOTEMPTY") throw error;
     });
+    this.ownedDirectory = undefined;
   }
   private accept(socket: Socket): void {
-    this.sockets.add(socket); socket.setTimeout(20_000, () => socket.destroy());
+    this.sockets.add(socket); socket.setTimeout(GITHUB_SOCKET_TIMEOUT_MS, () => socket.destroy());
     socket.on("error", () => {}); socket.once("close", () => this.sockets.delete(socket));
     let buffer = "", answered = false;
     socket.setEncoding("utf8");
@@ -107,7 +176,34 @@ export class GithubBroker {
         if (request.kind === "token" || request.kind === "user-token") return this.token(request.kind === "user-token" ? "gh" : "git");
         throw unavailable();
       };
-      void reply().then(value => { if (!socket.destroyed) socket.end(JSON.stringify(value) + "\n"); }, () => { if (!socket.destroyed) socket.end('{"error":"unavailable"}\n'); });
+      void reply().then(value => { if (!socket.destroyed) socket.end(JSON.stringify(value) + "\n"); }, error => {
+        if (!socket.destroyed) socket.end(JSON.stringify({ error: error instanceof GithubAuthenticationError ? error.reason : "unavailable" }) + "\n");
+      });
     });
+  }
+}
+
+async function inspect(path: string): Promise<Stats | undefined> {
+  return lstat(path).catch((error: NodeJS.ErrnoException) => { if (error.code === "ENOENT") return undefined; throw error; });
+}
+function sameInode(current: Stats, owned?: Stats): boolean {
+  return !!owned && current.dev === owned.dev && current.ino === owned.ino && current.uid === owned.uid;
+}
+async function unlinkOwnedSocket(path: string, owned?: Stats): Promise<void> {
+  if (!owned) return;
+  const current = await inspect(path);
+  if (!current?.isSocket() || !sameInode(current, owned)) return;
+  const retirement = await mkdtemp(join(dirname(path), ".retire-")), captured = join(retirement, "socket");
+  try {
+    const moved = await rename(path, captured).then(() => true, (error: NodeJS.ErrnoException) => { if (error.code === "ENOENT") return false; throw error; });
+    if (!moved) return;
+    const entry = await lstat(captured);
+    // Inspect the captured name: another broker can replace the public name
+    // after its ownership read. Restore foreign captures without overwriting
+    // a newer publication, and retain their private alias instead of deleting it.
+    if (entry.isSocket() && sameInode(entry, owned)) await unlink(captured);
+    else await link(captured, path).catch((error: NodeJS.ErrnoException) => { if (error.code !== "EEXIST") throw error; });
+  } finally {
+    await rmdir(retirement).catch((error: NodeJS.ErrnoException) => { if (error.code !== "ENOENT" && error.code !== "ENOTEMPTY") throw error; });
   }
 }

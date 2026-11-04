@@ -731,6 +731,7 @@ export interface ModeSwitchUpdate {
  *  never as prose glued into the agent's answer. `noticeId` keys the message
  *  so replay/persist stays deterministic; adapters mint one per event. */
 export interface ErrorNoticeUpdate {
+  cloud?: import("./cloud-failure").CloudFailure;
   sessionUpdate: "error_notice";
   noticeId: string;
   parentToolId?: string;

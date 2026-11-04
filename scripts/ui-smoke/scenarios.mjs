@@ -161,6 +161,7 @@ export const scenarioRegistry = [
   ),
   shared("design-workbench", "design-workbench", "runDesignWorkbenchSmoke"),
   shared("design-selection", "design-selection", "runDesignSelectionSmoke"),
+  shared("design-shadow-layers", "design-shadow-layers", "runDesignShadowLayersSmoke"),
   shared(
     "design-auto-layout",
     "design-auto-layout",

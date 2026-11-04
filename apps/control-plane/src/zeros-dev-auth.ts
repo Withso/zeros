@@ -45,7 +45,7 @@ export class ZerosDevAuthLimiter {
 
 export function zerosDevAuthEnabled(config: Config): boolean {
   return config.deploymentChannel === "alpha" && cloudWorkspaceChannelEnabled(config.deploymentChannel) &&
-    !!config.zerosDevAuth && config.auth.provider === "workos" && !!config.workos;
+    !!config.zerosDevAuth && !!config.workos;
 }
 
 export type ZerosDevAuthDependencies = {
@@ -75,7 +75,7 @@ export function createZerosDevAuthRoutes(config: Config, dependencies: ZerosDevA
     return results.every(result=>result.status==="fulfilled") ? "retired" as const : "pending" as const;
   };
   const assertClaims = (claims: AuthTokenClaims) => {
-    if (config.auth.provider !== "workos" || claims.clientKind !== "web" || claims.clientId !== config.auth.webClientId ||
+    if (claims.clientKind !== "web" || claims.clientId !== config.auth.webClientId ||
         claims.providerSubject !== identity.subject || claims.email !== identity.email || claims.emailVerified !== true)
       throw new ZerosDevAuthError("denied");
   };

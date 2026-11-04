@@ -86,15 +86,12 @@ describe("zeros-alpha:// WorkOS desktop callback", () => {
     expect(acceptWorkOSDesktopCallback).not.toHaveBeenCalled();
   });
 
-  it("preserves the opaque Auth0 ticket handoff for mixed-version rollback", async () => {
+  it("ignores a retired ticket hand-over link", async () => {
     await handleUrl(
       "zeros-alpha://auth/callback#ticket=opaque-ticket&nonce=opaque-nonce",
     );
 
     expect(acceptWorkOSDesktopCallback).not.toHaveBeenCalled();
-    expect(emitEvent).toHaveBeenCalledWith("auth-handoff", {
-      ticket: "opaque-ticket",
-      nonce: "opaque-nonce",
-    });
+    expect(emitEvent).not.toHaveBeenCalled();
   });
 });

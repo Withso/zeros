@@ -123,6 +123,8 @@ describe("winning authored declarations in Chromium", () => {
     expect(button.authoredStyles?.["background-color"]).toEqual({
       origin: "source",
       sourceId: "app",
+      selector: ".bg-primary-button-bg",
+      scope: "element",
       value: "var(--primary-button-bg)",
       tokens: [
         {
@@ -146,10 +148,23 @@ describe("winning authored declarations in Chromium", () => {
     expect(isDesignRuntimeAuthoredStyles(button.authoredStyles)).toBe(true);
   });
 
+  it("separates rules that target a layer from shared resets", async () => {
+    const button = await details(page, "button");
+    // The reset layer's type selector reaches every button; the utility
+    // classes name this one.
+    expect(button.authoredStyles?.font).toMatchObject({ selector: "button", scope: "base" });
+    expect(button.authoredStyles?.color).toMatchObject({ selector: ".text-white", scope: "element" });
+    const card = await details(page, "card");
+    expect(card.authoredStyles?.color).toMatchObject({ scope: "inline" });
+    expect(card.authoredStyles?.color?.selector).toBeUndefined();
+  });
+
   it("chooses by specificity before order, and !important before specificity", async () => {
     const title = await details(page, "title");
     expect(title.authoredStyles?.color).toEqual({
       origin: "frame",
+      selector: "main .title",
+      scope: "element",
       value: "var(--brand)",
       tokens: [
         { name: "--brand", value: "rebeccapurple", origin: "source", sourceId: "semantic" },
@@ -163,7 +178,7 @@ describe("winning authored declarations in Chromium", () => {
       important: true,
     });
     // The style attribute wins at the same importance.
-    expect(card.authoredStyles?.color).toEqual({ origin: "inline", value: "green" });
+    expect(card.authoredStyles?.color).toEqual({ origin: "inline", scope: "inline", value: "green" });
   });
 
   it("omits a shorthand partly overridden by a longhand, and :where() has no specificity", async () => {

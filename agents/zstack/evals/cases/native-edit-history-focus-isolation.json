@@ -1,0 +1,9 @@
+{
+  "id": "native-edit-history-focus-isolation",
+  "kind": "replay",
+  "area": "renderer-ui",
+  "fixedBy": "pr:810",
+  "symptom": "Native Undo in an empty search field changed a different controlled commit-message field and moved focus because Blink history belongs to the document.",
+  "rule": "Principles 1, 9 and 13: reject history beforeinput that targets an inactive field and verify the real browser's controlled Input/Textarea roundtrip.",
+  "check": "pnpm exec vitest run apps/desktop/src/renderer/shell/__tests__/native-edit-history-focus.test.ts"
+}

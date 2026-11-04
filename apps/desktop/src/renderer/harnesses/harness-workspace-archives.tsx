@@ -397,6 +397,10 @@ const auth: AuthContextValue = {
   cancelPendingOAuth() {},
   signOut: async () => {},
   signOutEverywhere: async () => {},
+  accounts: [],
+  refreshAccounts: async () => {},
+  switchAccount: async () => "unavailable" as const,
+  signOutAccount: async () => {},
 };
 
 /** Both reference and history use the actual conversation pane, tabs, retained

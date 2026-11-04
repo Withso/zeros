@@ -1,0 +1,9 @@
+{
+  "id": "cloud-unsupported-input-notice",
+  "kind": "replay",
+  "area": "cloud-worker",
+  "fixedBy": "pr:819",
+  "symptom": "Cloud Claude and Codex silently cancelled agent questions and MCP elicitations, leaving users unable to tell why the requested input was never shown.",
+  "rule": "Principles 2, 5 and 13: retain the cancellation policy but persist a nonblocking explanation and the Local-workspace action without copying private question payloads; stale provider callbacks cannot publish.",
+  "check": "pnpm --dir apps/cloud-worker test --maxWorkers=2 src/__tests__/cloud-failure-reasons.test.ts src/drivers/claude/__tests__/driver.test.ts src/drivers/codex/__tests__/driver.test.ts"
+}

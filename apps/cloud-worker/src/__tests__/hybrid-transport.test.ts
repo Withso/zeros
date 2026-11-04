@@ -7,6 +7,7 @@ import WebSocket from "ws";
 import { HybridTransport } from "../hybrid-transport";
 import { InboundBridge } from "../inbound-bridge";
 import { config } from "./worker-fixtures";
+import * as workerToken from "../worker-token";
 
 const cleanups: Array<() => Promise<void>> = [];
 afterEach(async () => { for (const cleanup of cleanups.splice(0).reverse()) await cleanup(); vi.useRealTimers(); });
@@ -45,6 +46,59 @@ async function fixture(options: { hello?: Promise<void> } = {}) {
     rotate: async () => { expected = "synthetic-rotated-worker-token"; await writeFile(tokenFile, expected, { mode: 0o600 }); },
     failHistory: (value: boolean) => { failHistory = value; }, loseReply: () => { lostReply = true; } };
 }
+it("authenticates a checkout failure with the current worker token and boot, without source or error text", async () => {
+  const f = await fixture();
+  const original = vi.mocked(f.fetcher).getMockImplementation()!;
+  vi.mocked(f.fetcher).mockImplementation(async (url, init) => {
+    if (new URL(String(url)).pathname.endsWith("/checkout-failed")) {
+      expect(new Headers(init?.headers).get("x-zeros-worker-boot")).toBe(f.transport.bootId);
+      expect(new Headers(init?.headers).get("authorization")).toBe("Bearer synthetic-rotated-worker-token");
+      expect(JSON.parse(String(init?.body))).toEqual({});
+      return Response.json({ ok: true });
+    }
+    return original(url, init);
+  });
+  await f.rotate();
+  await expect(f.transport.reportCheckoutFailure()).resolves.toBeUndefined();
+  expect(vi.mocked(f.fetcher).mock.calls.some(([url]) => new URL(String(url)).pathname.endsWith("/checkout-failed"))).toBe(true);
+});
+
+it("tolerates an old control plane without the checkout failure endpoint", async () => {
+  const f = await fixture();
+  await expect(f.transport.reportCheckoutFailure()).resolves.toBeUndefined();
+  expect(f.requests.find(request => request.path === "checkout-failed")).toEqual({ path: "checkout-failed", body: {}, authorized: true });
+});
+
+it("retries an unacknowledged checkout failure before requesting another configuration", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "hybrid-checkout-failure-")), tokenFile = join(directory, "token");
+  await writeFile(tokenFile, "synthetic-worker-token", { mode: 0o600 });
+  let reports = 0, configurations = 0, configReads = 0, finish!: () => void;
+  const stopped = new Promise<void>(resolve => { finish = resolve; });
+  const keys = generateKeyPairSync("ed25519");
+  const publicKeys = [keys.publicKey.export({ type: "spki", format: "pem" }).toString()];
+  const transport = new HybridTransport({ apiUrl: "https://api.example.test", workspaceId: config.workspace.id,
+    runtimeSha256: "a".repeat(64), tokenFile, publicKeys, port: 0, retryBaseMs: 10, retryMaxMs: 10,
+    onStatus: status => { if (status === "stopped") finish(); },
+    fetch: async url => {
+      const path = new URL(String(url)).pathname.split("/").at(-1);
+      if (path === "checkout-failed") return ++reports === 1 ? new Response(null, { status: 503 }) : Response.json({ ok: true });
+      if (path === "config") configReads++;
+      return Response.json({ config });
+    },
+  });
+  cleanups.push(async () => { await transport.dispose(); await rm(directory, { recursive: true, force: true }); });
+  transport.start({ open: async () => {}, close: () => {}, frame: async frame => {
+    if ((frame as { t: string }).t !== "config") return;
+    configurations++;
+    await transport.reportCheckoutFailure().catch(() => {});
+    throw new Error("Checkout failed");
+  } });
+  await stopped;
+  expect(reports).toBe(2);
+  expect(configurations).toBe(1);
+  expect(configReads).toBe(0);
+});
+
 it("holds dial-in config and app admission until the initial HTTPS hello has been applied", async () => {
   let release!: () => void;
   const hello = new Promise<void>(resolve => { release = resolve; });
@@ -75,6 +129,66 @@ it("registers its process boot and rereads the worker credential on every HTTP c
   await expect.poll(() => f.incoming.some(frame => frame.t === "reply" && frame.id === id)).toBe(true);
   expect(f.requests.every(request => request.authorized)).toBe(true);
 });
+it("allows a credential response slower than ten seconds and retains its typed refusal", async () => {
+  const f = await fixture();
+  vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
+  let release!: () => void, observed = false;
+  const held = new Promise<void>(resolve => { release = resolve; });
+  vi.mocked(f.fetcher).mockImplementationOnce(async (_url, init) => {
+    observed = true;
+    await new Promise<void>((resolve, reject) => {
+      init?.signal?.addEventListener("abort", () => reject(new Error("request timeout")), { once: true });
+      void held.then(resolve);
+    });
+    return Response.json({ token: "fixture-slow", expiresAt: Date.now() + 120_000 });
+  });
+  const id = randomUUID();
+  await f.transport.send({ t: "request", id, kind: "github-token" });
+  await expect.poll(() => observed).toBe(true);
+  await vi.advanceTimersByTimeAsync(11_000);
+  expect(f.incoming.filter(frame => frame.id === id)).toEqual([]);
+  release();
+  await expect.poll(() => f.incoming.some(frame => frame.t === "reply" && frame.id === id)).toBe(true);
+  vi.mocked(f.fetcher).mockImplementationOnce(async () => Response.json({ error: {
+    code: "github_token_unavailable", reason: "connection-expired", message: "PRIVATE_DETAIL" }, debug: "PRIVATE_DETAIL" }, { status: 409 }));
+  const refused = randomUUID();
+  await f.transport.send({ t: "request", id: refused, kind: "github-token" });
+  await expect.poll(() => f.incoming.some(frame => frame.id === refused)).toBe(true);
+  expect(f.incoming.find(frame => frame.id === refused)).toEqual({ t: "refusal", id: refused, code: "connection-expired" });
+});
+it("includes worker credential reads in the remaining HTTP request budget", async () => {
+  const f = await fixture();
+  vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
+  let release!: () => void, reading = false, fetching = false;
+  const held = new Promise<void>(resolve => { release = resolve; });
+  vi.spyOn(workerToken, "readWorkerToken").mockImplementationOnce(async () => { reading = true; await held; return "synthetic-worker-token"; });
+  vi.mocked(f.fetcher).mockImplementationOnce(async (_url, init) => {
+    fetching = true;
+    return new Promise<Response>((_resolve, reject) => { init?.signal?.addEventListener("abort", () => reject(new Error("timeout")), { once: true }); });
+  });
+  const id = randomUUID();
+  await f.transport.send({ t: "request", id, kind: "github-token" }, { timeoutMs: 3000 });
+  await expect.poll(() => reading).toBe(true);
+  await vi.advanceTimersByTimeAsync(2000); release();
+  await expect.poll(() => fetching).toBe(true);
+  await vi.advanceTimersByTimeAsync(1000);
+  expect(f.incoming.find(frame => frame.id === id)).toEqual({ t: "refusal", id, code: "unavailable" });
+});
+it.each([
+  { status: 409, code: "mcp_auth_required", reason: "sign-in-required" },
+  { status: 403, code: "mcp_access_denied", reason: "sign-in-refused" },
+  { status: 503, code: "upstream_unavailable", reason: "server-error" },
+  { status: 401, code: "unauthorized", reason: "unreachable" },
+  { status: 409, code: "unrecognized_failure", reason: "server-error" },
+])("retains only the confirmed MCP $reason category from HTTP $status/$code", async ({ status, code, reason }) => {
+  const f = await fixture(), serverId = randomUUID();
+  vi.mocked(f.fetcher).mockImplementationOnce(async () => Response.json({ error: { code,
+    message: "PRIVATE_CONTROL_PLANE_DIAGNOSTIC" }, debug: { secret: "PRIVATE_CONTROL_PLANE_DIAGNOSTIC" } }, { status }));
+  const failure = await f.transport.mcpAuthorization(serverId).catch(error => error);
+  expect(failure).toMatchObject({ cloud: { source: "mcp", serverId, reason } });
+  expect(failure.message).not.toContain("PRIVATE_CONTROL_PLANE_DIAGNOSTIC");
+  expect(JSON.stringify(failure)).not.toContain("PRIVATE_CONTROL_PLANE_DIAGNOSTIC");
+});
 it("bounds optional timing reports per phase and ignores an older control plane's missing endpoint", async () => {
   const f = await fixture();
   for (let i = 0; i < 20; i++) f.transport.reportTiming({ phase: "worker_checkout", durationMs: 10 });
@@ -86,7 +200,7 @@ it("bounds optional timing reports per phase and ignores an older control plane'
 });
 it("advertises outbox support without changing the strict hello body, and rereads credentials on pull", async () => {
   const f = await fixture();
-  expect(new Headers(vi.mocked(f.fetcher).mock.calls[0]![1]?.headers).get("x-zeros-worker-features")).toBe("prompt-outbox-v1,mcp-v1,workspace-setup-v1,checkout-v2,github-pr-v1");
+  expect(new Headers(vi.mocked(f.fetcher).mock.calls[0]![1]?.headers).get("x-zeros-worker-features")).toBe("prompt-outbox-v1,mcp-v1,workspace-setup-v1,checkout-v2,github-pr-v1,git-identity-v1");
   expect(Object.keys(f.requests[0]!.body).sort()).toEqual(["bootId", "protocol", "runtimeSha256"]);
   await f.rotate();
   vi.mocked(f.fetcher).mockImplementationOnce(async (_url, init) => {

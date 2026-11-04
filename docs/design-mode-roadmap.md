@@ -1178,10 +1178,38 @@ records pass unknown fields through:
   source's tokens are the custom properties its own files declare, Tailwind
   `@theme` included; Tailwind's stock theme and package defaults are not the
   application's tokens and still warn (`document.ts`, `designKnownTokens`).
+- Lint's `unknown-class` warning reports each distinct class on the frame's
+  own elements that none of its available styles defines. Recognition is
+  case-sensitive, decodes CSS escapes, and includes selectors inside
+  functional pseudo-classes, the frame's and expanded components' `<style>`
+  elements, linked Design CSS, and the full unpruned imported sources that
+  frame selects. Tailwind utilities count only when its generation emits
+  CSS for the frame's candidates. Per-generation candidate results and
+  parsed class catalogs share the 64 MiB style cache; Tailwind's independent
+  `candidatesToCss` API avoids cumulative builds or one compile per frame.
+  Class attribute selectors count too: prefix, suffix, substring and dash
+  operators are approximated against each used class name on its own.
+  The sole marker allowlist is `group`, `peer`, `group/<name>`, `peer/<name>`,
+  `lucide` and `lucide-<name>` (`style-classes.ts`, `DESIGN_CLASS_MARKERS`).
+  An unreadable or unclassifiable stylesheet, failed source, missing build
+  output, unavailable Tailwind dependency or a frame whose Tailwind
+  candidates reach the 4,096 cap skips this check for that frame;
+  other lint rules still run. Findings point to the first `class` attribute
+  using each name, at most 50 per frame; past 50 classes, the 50th warning
+  counts the rest. They never change `design validate`'s exit status. No persisted keys
+  change; the wire rule ID remains a string, and cloud v2 has no Design path.
 - The workspace snapshot adds optional `styleSources` (status, messages,
-  themes and tokens, without CSS) and `styleSourceErrors`. The theme editor
-  lists Manual (`tokens.css`, editable) and each source with its status; an
-  imported source is read-only there. Older engines omit both fields.
+  themes, tokens and an optional `rules` count, without CSS) and
+  `styleSourceErrors`. The theme editor lists Manual (`tokens.css`, editable)
+  and each source with its status; an imported source is read-only there.
+  Sources whose imported CSS declares no variables fold into one collapsed
+  **Styles only** row that carries its members' worst status and lists them
+  with their rule counts (style rules, font faces and keyframes; Tailwind
+  reports none because its utilities depend on each frame). A failed source,
+  or one that imported nothing, stays in the main list: its content is
+  unknown, not empty. Choosing a source resets the type filter to All, and an
+  emptied active type stays visible so it can be undone. Older engines omit
+  `styleSources`, `styleSourceErrors` and `rules`.
 - `kind: "tailwind"` compiles the application's Tailwind v4 entry with the
   engine's own bundled Tailwind (`tailwindcss` is a production dependency; the
   stylesheets behind `@import "tailwindcss"` are generated into
@@ -1393,6 +1421,28 @@ or renderer owners.
 - Plain HTML inspection derives missing/duplicate markers without writing source.
   An explicit visual or semantic edit persists required identity repairs with
   minimal source changes. A source offset is location metadata, never identity.
+- Layers follow the rendered (flat) tree. Content of a declarative shadow root
+  (`<template shadowrootmode>`, common in markup serialized from web
+  components) renders as its host's layers. design-web's `shadow.ts` holds the
+  one model the engine walk (`elementRecords`/`isDesignNodeElement`),
+  design-web (`designElements`) and the runtime (`composedChildrenOf`) share:
+  as in the HTML parser, only the first such template on an element that can
+  host a root attaches, and only an open root counts (a closed root renders,
+  but the runtime cannot read it). A slot renders the host children assigned
+  to it, or its fallback only while nothing, not even whitespace, is
+  assigned; the engine's frame tree and Layers follow that, while the
+  design-web projection keeps source parents. Inert templates stay opaque
+  source. The runtime marks shadow layers `shadow: true`, hit tests through
+  open roots (the single topmost hit first), and reads each element's
+  cascade, provenance and tokens from its own tree's stylesheets (tokens
+  inherit across the boundary); `::part()` and `:host` rules from another
+  tree are not yet attributed. Style, text and attribute edits splice the
+  element's span in the template; delete, duplicate and move refuse shadow
+  content with a plain reason because the runtime's structural previews and
+  relocation planner are light-DOM only. Duplicating a host renames its
+  shadow identities with it, new text and inserted assets join light content,
+  and a slotted layer reports its host as its layout parent, where reorders
+  resolve.
 - Component internals use definition-local identity. A nested instance address
   combines its root instance with a bounded ordered path of component and
   definition-node IDs.
@@ -1404,6 +1454,21 @@ or renderer owners.
   responsive, and state-specific values remain distinguishable. The inspector
   must not present a computed value as authored source or invent cascade
   certainty.
+- Each winning declaration names its `selector` and a `scope`: `inline`,
+  `element` or `base`. A rule is `element` when any selector of its list that
+  matches names the element by class, id, attribute or state, by tag under
+  such a context (`.card > p`), or by tag in a shadow root's own stylesheet;
+  universal selectors, bare document tags and `:where()`-wrapped preflight
+  are `base`. Rules are classified once per generation. Node details list
+  `baseStyleProperties`, which reach the layer only through base rules,
+  classified across every declaring rule even when the winner is ambiguous.
+  The Style tab's Advanced section lists every other authored declaration that
+  no dedicated control shows as an editable name/value row (value as written,
+  selector and source in its tooltip), shows the layer's classes as a
+  read-only `class` row whose field scrolls to the full value, and adds any
+  property the browser implements by name (`zIndex` is `z-index`); it omits
+  an imported source's own custom properties such as Tailwind's `--tw-*`.
+  Removal is offered only for inline winners.
 - Runtime authored-style provenance is optional evidence. Inline `var()`
   shorthands compete even when CSSOM cannot expand their longhands. Nested
   declarations and element-dependent container queries make affected winners
@@ -1536,7 +1601,10 @@ Pointer handling uses Pointer Events and capture. High-frequency input is
 sampled at animation-frame cadence; layout reads are batched before writes.
 One pointer gesture publishes one semantic transaction on release. Cancel or
 Escape restores the exact baseline. The owning pointer's release position is
-included; unrelated pointers cannot move or finish the gesture. Lost capture,
+included, in the preview as well as the commit: a release that lands while the
+previous sample's preview is unanswered sends its own sample to the runtime
+before the save, and only that sample's answer repaints the outline. Unrelated
+pointers cannot move or finish the gesture. Lost capture,
 window blur and surface retirement cancel it. Moving or resizing back to the
 original unsnapped geometry writes nothing and preserves authored sizing.
 
@@ -1959,6 +2027,12 @@ dropped behind a busy flag. Delete immediately after a pending copy belongs to
 that copy, unless a newer explicit selection retires the follow intent; another
 Delete cannot fall through to the original. Keyboard copies follow selection
 after confirmation, while supported previews paint before the write completes.
+A keyboard frame copy paints the source's pixels at once in the grid slot the
+engine assigns it (the same rule as `nextFrameGeometry`, counting copies still
+saving) and brings that slot into view. The pixels are presentation only: they
+stay above the saved copy until it shows its own document or pixels (bounded
+to 2 s), and retire on failure, Undo, deletion or an owner change, including a
+page or directory change while the save is still pending.
 
 Runtime snapshots and hot collection references remain stable. Style writes
 retain the existing tree reference where structure permits; display/visibility
@@ -2063,15 +2137,33 @@ background through one bounded window (at most 12 nodes, one read at a time,
 fenced by owner, active runtime and source generation at completion), so a
 layer never read before shows its values as soon as it is chosen. Layers rows
 are memoized with stable handlers: a hover or selection repaints only the rows
-it changes. A warm
+it changes. The canvas, inspector and Layers panel are memo boundaries under
+the Design column with stable callbacks. The inspector re-renders only when
+its inputs change: its page picker receives file and frame-ID pairs, and its
+color tokens read the token, style-source and theme catalogs, all of which
+keep their identity while other frames prepare or move. A revalidation of
+unchanged frames still publishes a new preparation generation, which the
+canvas renders once. Layers subscribes to the shared snapshot whenever it shows
+(connectivity only shapes its recovery), so it follows every publication of
+that snapshot, including a frame rename that arrives while its folder reports
+a reconnect.
+A warm
 revalidation (a watcher echo after a save, a style build or a tab return)
 keeps the confirmed aggregate visible while the frames the surface demands are
 prepared through the same bounded lane, then publishes once.
 
 Capable Local engines negotiate `design.mutation-snapshots.v1` for transaction,
-create, duplicate, delete, geometry and transfer acknowledgements. Each reply
+create, duplicate, delete, geometry, transfer, style, text, HTML and asset
+acknowledgements, and for Undo and Redo of those edits, which prepare the
+frames the step restored (page and theme steps keep the aggregate). A write or
+step that reaches a stylesheet, tokens.css or a component reads the
+aggregate, since every linking frame renders it. Scoped replies carry no
+lint; the projection keeps other files' confirmed rows. Each reply
 contains complete validated page/frame metadata and prepared source for at most
-16 affected frames. Unchecked same-owner frames remain visible covers until
+16 affected frames; a single-frame edit never re-prepares, lints or reads the
+HTML of unrelated frames (token names for its lint are read without usage
+counts). A style or history reply is projected onto the catalog before it keys
+Undo prediction. Unchecked same-owner frames remain visible covers until
 the active preparation lane validates them; their old source versions are not
 editing authority. Every projection advances its preparation epoch to fence
 late reads. Legacy layouts, larger affected sets and catalog races retain the
@@ -2592,8 +2684,12 @@ boundaries, not targets to relax casually:
   total definition source, depth 8, and 2 MiB expanded output;
 - render preparation: 128 linked stylesheets, 12 MiB inline raster assets,
   15 MiB sanitized output, and 16 MiB runtime-enabled output;
-- live projection: 20,000 nodes across at most 32 emitted nesting levels and
-  5,000 audited elements, with explicit truncation advisories;
+- live projection: 20,000 nodes across at most 64 emitted nesting levels and
+  5,000 audited elements, with explicit truncation advisories. Markup
+  serialized from a real app routinely nests 40 levels deep; the earlier
+  32-level bound showed such containers as empty layers. Chromium's message
+  channel carries this nesting; Playwright's `evaluate` serializer does not,
+  so browser tests summarize deep snapshots inside the page;
 - structural previews: 32 pending previews, 256 operations and 4 MiB estimated
   retained subtree cost; copied documents also stay within the live node bound.
   In-place history retains at most 64 generations / 4 MiB estimated changes.

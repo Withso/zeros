@@ -22,6 +22,14 @@ import {
   type OrganizationRole,
 } from "./authz.js";
 import { audit } from "./audit.js";
+import {
+  accountProActive,
+  assertInvitationCapacity,
+  assertJoinCapacity,
+  memberSeatsAcross,
+  organizationSeats,
+  type OrganizationSeat,
+} from "./organization-seats.js";
 import { generateInviteToken, hashInviteToken } from "./invites.js";
 import { randomSuffix, slugify } from "./auth.js";
 import type { EmailConfig } from "./email.js";
@@ -357,6 +365,8 @@ export type OrganizationSummary = {
   defaultTeamId: string | null;
   workspaceCapabilities: { local: boolean; cloud: boolean };
   teamCapabilities: { multiple: false; canCreate: false };
+  /** The signed-in member's Pro organization seat; absent for Personal. */
+  seat?: OrganizationSeat;
 };
 
 function organizationSummary(row: OrganizationRow): OrganizationSummary {
@@ -418,7 +428,15 @@ export function createRoutes(
         [user.id],
       ),
     );
-    const organizations = result.rows.map(organizationSummary);
+    const collaborative = result.rows.filter((row) => !row.is_personal).map((row) => row.id);
+    const { pro, seats } = await withSystemTx(pool, async (tx) => ({
+      pro: await accountProActive(tx, user.id),
+      seats: await memberSeatsAcross(tx, user.id, collaborative),
+    }));
+    const organizations = result.rows.map((row) => {
+      const seat = seats.get(row.id);
+      return seat ? { ...organizationSummary(row), seat } : organizationSummary(row);
+    });
     // Compatibility: old clients treat these tenant roots as flat Teams. The
     // provider binding is server-only and never enters the account wire shape.
     const publicUser = {
@@ -431,7 +449,8 @@ export function createRoutes(
     return c.json({
       user: publicUser,
       capabilities: {
-        createOrganization: canCreateOrganization(user.staffRole),
+        createOrganization: canCreateOrganization(pro),
+        pro,
       },
       organizations,
       teams: organizations,
@@ -548,6 +567,13 @@ export function createRoutes(
         );
       }
 
+      const existingMembership = await tx.query(
+        `SELECT 1 FROM organization_members WHERE org_id = $1 AND user_id = $2`,
+        [invitation.org_id, user.id],
+      );
+      if (!existingMembership.rowCount) {
+        await assertJoinCapacity(tx, invitation.org_id, user.id);
+      }
       const membershipAggregateKey = `membership:${invitation.org_id}:${user.id}`;
       const insertedMembership = await tx.query(
         `INSERT INTO organization_members (
@@ -693,7 +719,6 @@ function createOrganizationRouter(
 
   app.post("/", async (c) => {
     const user = c.get("user");
-    requireOrganizationCreationCapability(user.staffRole);
     const body = (await c.req.json().catch(() => ({}))) as Record<
       string,
       unknown
@@ -701,6 +726,7 @@ function createOrganizationRouter(
     const name = parse(NameSchema, body.name);
     const logo = body.logo == null ? null : parse(LogoSchema, body.logo);
     const organization = await withSystemTx(pool, async (tx) => {
+      requireOrganizationCreationCapability(await accountProActive(tx, user.id));
       let created: { rows: OrganizationRow[] } | null = null;
       let slug = slugify(name);
       for (let attempt = 0; attempt < 5 && !created?.rows[0]; attempt++) {
@@ -773,11 +799,15 @@ function createOrganizationRouter(
         });
       }
       await audit(tx, root.id, user.id, "organization.created", {});
-      return organizationSummary({
-        ...root,
-        role: "owner",
-        default_team_id: team.rows[0]!.id,
-      });
+      // The creator has Pro and is the only member.
+      return {
+        ...organizationSummary({
+          ...root,
+          role: "owner",
+          default_team_id: team.rows[0]!.id,
+        }),
+        seat: "pro" as const,
+      };
     });
     return legacy
       ? c.json({ team: organization }, 201)
@@ -891,7 +921,11 @@ function createOrganizationRouter(
       );
       return result.rows;
     });
-    return c.json({ members });
+    const { seats, usage } = await withSystemTx(pool, (tx) => organizationSeats(tx, orgId));
+    return c.json({
+      members: members.map((member) => ({ ...member, seat: seats.get(member.id) ?? "free" })),
+      seats: usage,
+    });
   });
 
   app.patch("/:organization/members/:user", async (c) => {
@@ -1215,6 +1249,7 @@ function createOrganizationRouter(
           });
         }
       }
+      await assertInvitationCapacity(tx, orgId);
       const { raw, hash } = generateInviteToken();
       const created = await tx.query<{
         id: string;

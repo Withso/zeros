@@ -108,6 +108,35 @@ test("legacy provider selectors are dropped before bounded PKCE inputs reach Rai
   assert.equal(response.status, 303);
 });
 
+test("an add-account sign-in carries only a fixed fresh flag to Railway", async () => {
+  const calls = [];
+  const fetchMock = async (url) => {
+    calls.push(url);
+    return new Response(null, {
+      status: 303,
+      headers: { location: "https://api.workos.com/user_management/authorize" },
+    });
+  };
+  const start = (query) =>
+    beginWorkOSDesktopAuthorization(
+      new Request(
+        `https://app-alpha.zeros.build/auth/desktop?state=${STATE}&code_challenge=${CHALLENGE}${query}`,
+      ),
+      ENV,
+      { fetch: fetchMock },
+    );
+
+  assert.equal((await start("&fresh=1")).status, 303);
+  assert.equal(
+    calls[0],
+    `https://api-alpha.zeros.build/auth/desktop/start?state=${STATE}&code_challenge=${CHALLENGE}&fresh=1`,
+  );
+  for (const query of ["&fresh=0", "&fresh=true", "&fresh=", "&fresh=1&fresh=1"]) {
+    assert.equal((await start(query)).status, 400, query);
+  }
+  assert.equal(calls.length, 1);
+});
+
 test("hosted desktop routes reject a callback intended for another release channel", async () => {
   const response = await renderWorkOSDesktopAuthorizationPage(
     new Request(
