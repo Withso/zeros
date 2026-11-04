@@ -634,7 +634,9 @@ describe("cloud v2 lifecycle", () => {
     const idle = workspace("running"), stopIdle = vi.fn(async () => {});
     const f = setup([], { idle: [idle], stopIdle });
     await f.lifecycle.tick();
-    expect(stopIdle).toHaveBeenCalledWith(idle.id, new Date(NOW - CLOUD_V2_IDLE_STOP_MS));
+    // Product decision: a running VM stops after 15 minutes without activity.
+    expect(stopIdle).toHaveBeenCalledWith(idle.id, new Date(NOW - 15 * 60_000));
+    expect(CLOUD_V2_IDLE_STOP_MS).toBe(15 * 60_000);
     expect(f.store.revoke).not.toHaveBeenCalled();
     expect(f.store.transition).not.toHaveBeenCalled();
   });

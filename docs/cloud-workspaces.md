@@ -488,12 +488,14 @@ they use at most two of the slots, and a slow stop never holds up another
 workspace's creation. Running VMs receive a 24-hour Boat
 lease; a bounded background scan renews it after about 12 hours.
 
-The lifecycle loop stops a running VM after ten minutes without activity
-reports. Turns, workspace setup, attachment transfers, recent terminal input/output,
-and explicit file/Git mutations keep reports flowing. File saves and Git mutations
-stay busy until completion and for the same ten-minute activity window as terminal
-input/output. Reads and polls do not renew it; an untouched shell eventually
-becomes idle. Passive history reads do not wake
+The lifecycle loop stops a running VM after 15 minutes without activity
+reports (`CLOUD_V2_IDLE_STOP_MS`). Turns, workspace setup, attachment transfers,
+recent terminal input/output, and explicit file/Git mutations keep reports
+flowing. The worker counts terminal input/output, file saves and Git mutations
+as activity until completion and for ten minutes afterwards
+(`RECENT_ACTIVITY_MS`), so a VM stops about 15 minutes after a turn ends and
+about 25 minutes after the last terminal input/output or save. Reads and polls
+do not renew it; an untouched shell eventually becomes idle. Passive history reads do not wake
 the VM, and neither do reconnects: `/connect` accepts `{ "wake": false }`, and
 the single-use ticket carries that intent through bridge admission. The app
 asks to wake for explicit navigation from the sidebar, Dashboard or repository
