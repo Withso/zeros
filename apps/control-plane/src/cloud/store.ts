@@ -13,6 +13,8 @@ import { computerSourceReviewRequired, readComputerSourceTargets } from "./compu
 import { CloudSourceTargetSchema } from "./source-authority.js";
 
 import { mirrorMessageWindow, type MessageWindow, type WindowOptions } from "./history.js";
+import { mirrorMessageSearch, type SearchOptions } from "./history-search.js";
+import { MESSAGE_SEARCH_DEADLINE_MS } from "./message-search.js";
 
 export type CloudV2WorkspaceState =
   | "creating" | "running" | "stopping" | "stopped" | "starting" | "deleting" | "deleted" | "failed";
@@ -959,6 +961,11 @@ export class CloudV2Store {
 
   messageWindow(workspaceId: string, chatId: string, options: WindowOptions = {}): Promise<MessageWindow> {
     return withSystemTx(this.pool, tx => mirrorMessageWindow(tx, workspaceId, chatId, options), { consistentRead: true });
+  }
+
+  searchMessages(workspaceId: string, options: SearchOptions) {
+    const deadline = Date.now() + MESSAGE_SEARCH_DEADLINE_MS;
+    return withSystemTx(this.pool, tx => mirrorMessageSearch(tx, workspaceId, options, deadline), { consistentRead: true });
   }
 
   /** Rows-only compatibility for internal callers; HTTP also returns turnOpening. */

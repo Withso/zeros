@@ -235,6 +235,14 @@ export function cloudIncoming(
     out.workspaceIds = [cloudWorkspaceKey(scope)];
     out.cloudWorkspace = cloudWorkspaceKey(scope);
   }
+  if (message.type === "WORKSPACE_RESPONSE" && message.op === "git.listAllBranches" && Array.isArray(message.result)) {
+    return { ...out, result: message.result.map(value => {
+      const branch = record(value);
+      if (branch.worktreePath == null) return branch;
+      if (branch.worktreePath !== scope.root) throw new Error("Invalid cloud branch worktree identity");
+      return { ...branch, worktreePath: cloudWorkspaceKey(scope) };
+    }) };
+  }
   if (message.result && typeof message.result === "object") {
     const result = mapFields(scope, record(message.result), "in");
     if (message.op === "chats.titleSeeds" && Array.isArray(result.seeds))

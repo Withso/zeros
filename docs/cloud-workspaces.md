@@ -421,6 +421,33 @@ It mirrors chat metadata, deletions and message rows to the control plane.
 The app can read that history while the VM sleeps. This history mirror is
 separate from repository files; there is no Mac checkout synchronization.
 
+Chat search uses the connected worker when available and the HTTP history
+mirror while the VM sleeps, without waking it. Search is scoped to the selected
+workspace or conversation. Local, the worker and the mirror share literal
+whitespace-separated AND terms, text-before-tool-title extraction and SQLite
+FTS5 matching, including punctuation phrases and accent folding. The worker
+and control plane build disposable in-memory indexes with Node's built-in
+SQLite; no index or search state is persisted. Current Node 24 worker and
+Node 22 control-plane images supply that runtime module.
+
+Cloud search allows at most 4,096 query characters, 64 terms, 50,000 history
+rows and 16 MiB of payloads under one five-second budget. It returns up to 50
+ranked hits by default (500 maximum), bounded to 8 MiB of serialized results.
+An oversized corpus or unreturnable single result produces `SEARCH_LIMIT`
+instead of an empty or partially searched corpus. Narrow the search to a
+conversation. Mirror reads hold one repeatable-read snapshot across scan and
+payload fetches, exclude deleted chats and retain creator authorization.
+
+Cloud Git supports soft, mixed and confirmed hard reset, plus literal-path
+restore from a ref (including the index unless `staged: false`). Local retains
+its Design guards and uses the same validators and argument builders. Full
+branch lists and repository catalogs preserve full ref names, including names
+that collide with tags. Only the worker's own checkout maps to a cloud
+navigation destination; another VM worktree has no app route. Ordinary catalog
+reads remain passive. An explicit catalog fetch uses the checkout mutation
+queue, counts as activity and has an eight-second fetch budget plus at most
+five seconds to resolve the remote default branch.
+
 For new Git-backed turns, the worker captures pre/post trees through a scratch
 index and hidden `refs/zeros/turns/` refs. It intersects the native tool paths
 with that disk comparison, so denied edits, unchanged files and unrelated
@@ -445,7 +472,7 @@ the recorded diff through `turns.diff`. Cloud hover/focus does not prefetch a
 diff or wake the VM. These reads require a worker runtime containing turn
 recording, installed on create or wake; older turns without snapshots do not
 gain a reconstructed comparison. Older workers may still refuse `turns.list`,
-which the renderer treats as unavailable history. Reset/undo remain Local-only.
+which the renderer treats as unavailable history. Turn reset/undo remain Local-only.
 
 ## Cloud GitHub connections and pull requests
 

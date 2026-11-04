@@ -16,6 +16,28 @@ const scope: CloudRuntimeScope = {
 };
 const key = cloudWorkspaceKey(scope);
 
+describe("cloud branch navigation identities", () => {
+  it("scopes the checked out branch in a raw branch-list response", () => {
+    const rows = [{ name: "work", worktreePath: scope.root, isCheckedOut: true },
+      { name: "main", worktreePath: null, isCheckedOut: false }];
+    expect(cloudIncoming(scope, { type: "WORKSPACE_RESPONSE", op: "git.listAllBranches", result: rows }).result)
+      .toEqual([{ ...rows[0], worktreePath: key }, rows[1]]);
+    expect(rows[0].worktreePath).toBe(scope.root);
+  });
+
+  it.each(["/workspace/other", `${scope.root}/child`, `${scope.root}-lookalike`,
+    cloudWorkspaceKey({ ...scope, workspaceId: "33333333-3333-4333-8333-333333333333" }),
+  ])("refuses foreign branch navigation to %s", worktreePath => {
+    expect(() => cloudIncoming(scope, { type: "WORKSPACE_RESPONSE", op: "git.listAllBranches",
+      result: [{ name: "foreign", worktreePath }] })).toThrow(/worktree/);
+  });
+
+  it("leaves unrelated file arrays opaque", () => {
+    const rows = [{ worktreePath: "/arbitrary/file/content" }];
+    expect(cloudIncoming(scope, { type: "WORKSPACE_RESPONSE", op: "file.list", result: rows }).result).toBe(rows);
+  });
+});
+
 describe("cloud runtime wire routing", () => {
   it("scopes the preview response envelope", () => {
     const target = { executionId: "execution-native", portId: "A".repeat(32) };

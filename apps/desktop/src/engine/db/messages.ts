@@ -1,3 +1,4 @@
+import { searchableMessageText as extractContent, literalMessageSearch } from "@zeros/protocol/agent-messages";
 // ──────────────────────────────────────────────────────────
 // Chat transcripts — chat_messages in the unified Zeros DB
 // ──────────────────────────────────────────────────────────
@@ -94,19 +95,6 @@ function annotateLegacySteers(chatId: string, rows: MsgDbRow[]): MsgDbRow[] {
     }
     return row;
   });
-}
-
-/** The searchable text for a message in FTS: a text message's `text`,
- *  else a tool's `title`, else "". Kept in the `content` column + FTS index. */
-function extractContent(payload: string): string {
-  try {
-    const o = JSON.parse(payload) as { text?: unknown; title?: unknown };
-    if (typeof o.text === "string") return o.text;
-    if (typeof o.title === "string") return o.title;
-    return "";
-  } catch {
-    return "";
-  }
 }
 
 /** Upsert one message by (chat_id, msg_id). New messages append at MAX(ord)+1;
@@ -674,13 +662,8 @@ export function searchMessages(
   scope?: { chatId?: string; folder?: string },
 ): MessageSearchHit[] {
   flushStreamingChatMessages();
-  const tokens = query
-    .trim()
-    .split(/\s+/)
-    .filter(Boolean)
-    .map((t) => `"${t.replace(/"/g, '""')}"`);
-  if (tokens.length === 0) return [];
-  const match = tokens.join(" ");
+  const match = literalMessageSearch(query);
+  if (!match) return [];
   const db = openZerosDb();
   const params: unknown[] = [match];
   const byFolder = !scope?.chatId && !!scope?.folder;

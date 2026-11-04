@@ -2,6 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { constants } from "node:fs";
 import { mkdir, open, readdir, rename, rm } from "node:fs/promises";
 import { join } from "node:path";
+import { createRequire } from "node:module";
 import { z } from "zod";
 import { applyUpdate, type AgentMessage, type AgentTextMessage } from "@zeros/protocol/agent-messages";
 import type { ContentBlock, PromptResponse, SessionNotification } from "@zeros/protocol/agent-events";
@@ -12,6 +13,9 @@ import { coerceChat, messageWindow, upsertRows, type ChatRow, type MessageWindow
 import { WorkspaceError } from "../workspace/scope";
 import { CloudV2PromptCounterSchema, CloudV2PromptStateSchema, type CloudV2PromptDelivery, type CloudV2PromptState } from "@zeros/protocol/cloud-v2-prompts";
 import type { TurnInfo } from "@zeros/protocol/turns";
+import { messageSearchInput, MessageSearchIndex, MessageSearchError, boundMessageSearchHits, type MessageSearchDatabase, type MessageSearchHit } from "@zeros/protocol/agent-messages";
+
+const require = createRequire(import.meta.url);
 
 const outboxInputSchema = z.object({ deliveryId: z.string().uuid(), epoch: CloudV2PromptCounterSchema, sequence: CloudV2PromptCounterSchema,
   model: z.string().max(256).optional(), effort: z.string().max(64).optional(), mode: z.enum(["prompt", "steer"]).optional(),
@@ -205,6 +209,27 @@ export class SessionStore {
   }
 
   history(chatId: string): readonly CloudV2MessageRow[] { return this.sessions.get(chatId)?.rows ?? []; }
+
+  search(query: unknown, limit?: unknown, chatId?: string): { hits: MessageSearchHit[] } {
+    try {
+      const input = messageSearchInput(query, limit);
+      if (!input.match || !input.limit) return { hits: [] };
+      const { DatabaseSync } = require("node:sqlite") as { DatabaseSync: new (path: string) => MessageSearchDatabase };
+      const index = new MessageSearchIndex<MessageSearchHit>(new DatabaseSync(":memory:"));
+      try {
+        for (const session of [...this.sessions.values()].sort((a, b) => (a.ordinal ?? 0) - (b.ordinal ?? 0))) {
+          if (!session.chat || chatId !== undefined && session.chatId !== chatId) continue;
+          for (const row of session.rows) index.add({ chatId: session.chatId, msgId: row.msgId, payload: row.payload, createdAt: row.createdAt }, row.payload);
+        }
+        const hits = boundMessageSearchHits(index.search(input));
+        index.remaining();
+        return { hits };
+      } finally { index.close(); }
+    } catch (error) {
+      if (error instanceof MessageSearchError) throw new WorkspaceError(error.code, error.message);
+      throw error;
+    }
+  }
 
   turnRecords(chatId?: string): TurnInfo[] {
     return structuredClone([...this.sessions.values()].filter(session => session.chat && (!chatId || session.chatId === chatId))

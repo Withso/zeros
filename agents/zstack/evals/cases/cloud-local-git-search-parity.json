@@ -1,0 +1,9 @@
+{
+  "id": "cloud-local-git-search-parity",
+  "kind": "replay",
+  "area": "cloud-worker",
+  "fixedBy": "pr:829",
+  "symptom": "Cloud workspaces refused reset, restore, the full branch catalog and transcript search even though the same operations worked in Local. Sleeping transcript search could not use the durable history mirror.",
+  "rule": "Reuse Local validation, literal Git paths, full-ref parsers and FTS semantics at the cloud boundary. Scope typed navigation identities, keep reads passive, count explicit fetch as mutation activity, and bound one coherent history snapshot. Principles 1, 6, 8, 10, 12 and 13.",
+  "check": "pnpm --dir apps/cloud-worker test src/workspace/__tests__/git-local-parity.test.ts src/workspace/__tests__/chat-search.test.ts src/__tests__/git-activity.test.ts"
+}
