@@ -81,9 +81,6 @@
       "apps/desktop/src/renderer/shell/workbench/tabs/browser-tab.tsx": {
         "rounded-[2px]": 2
       },
-      "apps/desktop/src/renderer/shell/workbench/tabs/changes-tab.tsx": {
-        "leading-[1.55]": 1
-      },
       "apps/desktop/src/renderer/shell/workbench/tabs/file-viewer.tsx": {
         "text-[0.85em]": 1
       },

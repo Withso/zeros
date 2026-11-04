@@ -19,11 +19,14 @@ import React, {
 import {
   ChevronDown,
   ChevronRight,
+  FileDiff,
   Folder,
   GitBranch,
-  Undo2,
   type LucideIcon,
+  SearchX,
+  Undo2,
 } from "lucide-react";
+import { EmptyState as SharedEmptyState } from "@/renderer/shared/ui/layout/empty-state";
 
 import {
   gitDiff,
@@ -1258,9 +1261,9 @@ export function ChangesList({
       )}
       {loading && !turnFilterActive && sections.length === 0 ? null : error &&
         sections.length === 0 ? null : sections.length === 0 ? (
-        <div className="text-fg2 px-3 py-4 text-xs">
-          {searchQuery ? "No files match your search." : "No changes."}
-        </div>
+        <SharedEmptyState icon={searchQuery ? SearchX : FileDiff} className="py-6">
+          {searchQuery ? "No files match your search" : "No changes"}
+        </SharedEmptyState>
       ) : virtualizeFlat ? (
         <VirtualizedFlatFiles
           sections={sections}
@@ -1501,31 +1504,36 @@ const FileRow = React.memo(function FileRow({
       onPointerEnter={() => onPrefetch?.(file)}
       onFocus={() => onPrefetch?.(file)}
       className={cn(
-        "group/change-row flex cursor-pointer items-center gap-2 py-1 pr-3 text-xs transition-colors",
-        isSelected ? "bg-bg2-hover" : "hover:bg-bg2-hover/40",
-        // Viewed → dimmed (the user has reviewed this change).
-        viewed && "opacity-45",
+        "group/change-row flex min-h-7 cursor-pointer items-center gap-2 py-1 pr-3 text-xs leading-4.5 transition-colors",
+        // Selection is a step above the surface's hover.
+        isSelected ? "bg-bg2-highlight" : "hover:bg-bg1-hover",
       )}
       style={{ paddingLeft: 4 + depth * 14 }} // check:ui ignore-line (18px left at depth 1 (flat Changes list); 12px right via pr-3)
     >
-      {!showDir && <FileTypeIcon name={file.path} />}
+      {/* Viewed dims only the icon and the name; counts and the square keep
+          their full strength. */}
+      {!showDir && (
+        <span className={cn("inline-flex shrink-0", viewed && "opacity-50")}>
+          <FileTypeIcon name={file.path} />
+        </span>
+      )}
       {isRename ? (
         // Moved file → "old/path → new/path" (both dirs dimmed, names bright).
         <Tooltip label={`${file.oldPath} → ${file.path}`}>
-          <span className="flex min-w-0 flex-1 items-center text-sm">
+          <span className="flex min-w-0 flex-1 items-center">
             <span className="min-w-0 truncate">
-              <PathLabel path={file.oldPath!} showDir={showDir} />
+              <PathLabel path={file.oldPath!} showDir={showDir} viewed={viewed} />
             </span>
             <span className="text-fg2 shrink-0 px-1.5">→</span>
             <span className="min-w-0 truncate">
-              <PathLabel path={file.path} showDir={showDir} />
+              <PathLabel path={file.path} showDir={showDir} viewed={viewed} />
             </span>
           </span>
         </Tooltip>
       ) : (
         <Tooltip label={file.path}>
-          <span className="min-w-0 flex-1 truncate text-sm">
-            <PathLabel path={file.path} showDir={showDir} />
+          <span className="min-w-0 flex-1 truncate">
+            <PathLabel path={file.path} showDir={showDir} viewed={viewed} />
           </span>
         </Tooltip>
       )}
@@ -1677,14 +1685,23 @@ function StatusSquare({
 
 /** A file path as a dimmed directory prefix + a bright basename (flat list);
  *  tree rows pass showDir=false to show just the basename. */
-function PathLabel({ path, showDir }: { path: string; showDir?: boolean }) {
+function PathLabel({
+  path,
+  showDir,
+  viewed = false,
+}: {
+  path: string;
+  showDir?: boolean;
+  /** A viewed file's name steps back to fg2. */
+  viewed?: boolean;
+}) {
   const slash = path.lastIndexOf("/");
   const dir = slash >= 0 ? path.slice(0, slash + 1) : "";
   const name = slash >= 0 ? path.slice(slash + 1) : path;
   return (
     <>
       {showDir && dir && <span className="text-fg2">{dir}</span>}
-      <span className="text-fg1">{name}</span>
+      <span className={viewed ? "text-fg2" : "text-fg1"}>{name}</span>
     </>
   );
 }
@@ -1820,25 +1837,14 @@ function countLines(content: string): number {
   return body.length === 0 ? 0 : body.split("\n").length;
 }
 
+/** The tab's empty state: the shared block, one line under the branch mark. */
 export function EmptyState({
   title,
-  subtitle,
-  icon: Icon = GitBranch,
+  icon = GitBranch,
 }: {
   title: string;
-  subtitle?: string;
-  /** Glyph above the title — defaults to the source-view branch mark. */
+  /** Glyph above the line — defaults to the source-view branch mark. */
   icon?: LucideIcon;
 }) {
-  return (
-    <div className="flex h-full flex-col items-center justify-center gap-2 px-10 text-center">
-      <Icon className="text-fg2 size-7" />
-      <p className="text-fg1 m-0 text-sm font-medium">{title}</p>
-      {subtitle && (
-        <p className="text-fg2 m-0 max-w-[420px] text-xs leading-[1.55]">
-          {subtitle}
-        </p>
-      )}
-    </div>
-  );
+  return <SharedEmptyState icon={icon}>{title}</SharedEmptyState>;
 }

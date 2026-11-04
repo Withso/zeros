@@ -217,12 +217,14 @@ export function useInlineReview(
     // eslint-disable-next-line react-hooks/exhaustive-deps -- callback identity publishes the current control state to retained native slots
     [review, active, setSelection, cancel],
   );
+  // No selection toolbar: releasing a number click or drag opens the
+  // composer under the range, as the + does for one line.
   const onLineSelected = useCallback(
     (
       range: SelectedLineRange | null,
       context: { item: CodeViewItem<ReviewAnnotationPayload> },
     ) => {
-      select(context.item.id, range);
+      select(context.item.id, range, range ? "composer" : "selection");
     },
     [select],
   );

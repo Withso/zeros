@@ -130,12 +130,11 @@ export async function runCodeReviewSmoke({
         `${side ? `[data-${side}] ` : ""}[data-gutter] [data-column-number="${number}"]`,
       )
       .first();
+  // A number click opens the composer; Shift extends it to a range.
   const commentOnRange = async (start, end = start, side) => {
     await line(start, side).click();
     if (end !== start) await line(end, side).click({ modifiers: ["Shift"] });
-    await toolbar()
-      .getByRole("button", { name: "Comment", exact: true })
-      .click();
+    await expect(toolbar()).toHaveCount(0);
     await expect(input()).toBeFocused();
   };
 

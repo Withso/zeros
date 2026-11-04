@@ -36,13 +36,10 @@ export async function runReviewComparisonSmoke({
   const composer = page.locator("[data-review-composer]");
   const input = composer.locator("textarea");
   const comment = async (line = 2) => {
+    // A number click opens the composer straight away.
     await page
       .locator(`[data-gutter] [data-column-number="${line}"]`)
       .first()
-      .click();
-    await page
-      .locator("[data-review-selection-toolbar]")
-      .getByRole("button", { name: "Comment", exact: true })
       .click();
     await expect(input).toBeFocused();
   };

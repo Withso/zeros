@@ -319,8 +319,10 @@ function ReviewedPatch({
       enableLineSelection: active,
       enableGutterUtility: active,
       lineHoverHighlight: "both" as const,
+      // No selection toolbar: releasing a number click or drag opens the
+      // composer under the range.
       onLineSelected: (range: SelectedLineRange | null) =>
-        select(snapshot.path, range),
+        select(snapshot.path, range, range ? "composer" : "selection"),
       onGutterUtilityClick: (range: SelectedLineRange) =>
         select(snapshot.path, range, "composer"),
       unsafeCSS: `${shared.unsafeCSS}\n${REVIEW_GUTTER_CSS}`,

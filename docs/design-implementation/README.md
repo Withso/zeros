@@ -504,3 +504,20 @@ Each landed step appends one line: date, workstream, what landed, evidence.
   on release, and selecting code text stays a plain selection with no
   comment toolbar. ⌘⇧M still comments from the keyboard. The code-review
   and code-focus smokes hover the line before using its +.
+- 2026-11-04 · 4, 5 · Changes (headers, states, list, comments): Retry
+  diff is the file header's one action, a compact secondary button after
+  the counts with the error in its tooltip. A status tag precedes the
+  Viewed box (New green, Deleted and Conflicted red, Renamed grey; modified
+  carries none), and Viewed is the checkbox alone with a Mark viewed
+  tooltip. Every empty state is the shared EmptyState with one line, and
+  the first load draws skeleton cards (the shared SkeletonLine, which has
+  no shimmer) with Loading changes kept for screen readers. A viewed list
+  row dims only its icon and name; rows are 28px, hover is the surface's
+  and selection bg2-highlight. On every diff surface the + is a 16px blue
+  chip, and releasing a number click or drag opens the composer: there is
+  no selection toolbar. Follow-ups: per-file cards (border1, 8px corners,
+  12px apart) need the virtualizer's item layout and the Changes smoke,
+  which can't load its fixture here; retiring hunk review reaches the
+  engine op, protocol schemas and the registered git-review-actions smoke,
+  so it needs its own change; inline conflict blocks replace Resolve
+  conflicts then.

@@ -83,12 +83,10 @@ export const ReviewSurface = React.memo(function ReviewSurface({
     ) : !workspace || isLocalMain || workspace.prNumber == null ? (
       <EmptyState
         title="No pull request"
-        subtitle="This workspace has no open pull request yet. Pick a target branch and create one above — its status and this review surface light up together."
       />
     ) : !provider ? (
       <EmptyState
         title="Review unavailable"
-        subtitle="Zeros can review pull requests from github.com remotes today. This repository uses a different Git host."
       />
     ) : (
       <ReviewView
