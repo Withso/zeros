@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import pg from "pg";
 import {
   afterAll,
@@ -73,6 +73,60 @@ database("cloud GitHub connection ownership and rotation", () => {
       material,
     );
   }
+  it("refreshes a rejected but unexpired App token once and ignores late reports for its replacement", async () => {
+    await store.save(scope(), await store.fingerprint(scope()), identity, app);
+    const failedTokenSha256 = createHash("sha256").update(app.accessToken).digest("hex");
+    const refresh = vi.fn(async () => ({ ...app, accessToken: "synthetic-renewed-user" }));
+    const result = await store.credential(scope(), refresh, failedTokenSha256);
+    expect(result.material.accessToken).toBe("synthetic-renewed-user");
+    expect(refresh).toHaveBeenCalledOnce();
+    expect((await store.credential(scope(), refresh, failedTokenSha256)).material.accessToken).toBe("synthetic-renewed-user");
+    expect(refresh).toHaveBeenCalledOnce();
+  });
+  it("keeps a rejected PAT expired until the user reconnects without substituting an App credential", async () => {
+    await save();
+    const hash = createHash("sha256").update(pat.accessToken).digest("hex");
+    const refresh = vi.fn(async () => app);
+    await expect(store.credential(scope(), refresh, hash)).rejects.toMatchObject({ code: "github_authorization_expired" });
+    await expect(store.credential(scope(), refresh)).rejects.toMatchObject({ code: "github_authorization_expired" });
+    expect(refresh).not.toHaveBeenCalled();
+  });
+  it("joins a rejected-token refresh across replicas and withholds the still-unexpired old token from ordinary reads", async () => {
+    await store.save(scope(), await store.fingerprint(scope()), identity, app);
+    const failed = createHash("sha256").update(app.accessToken).digest("hex");
+    let finish!: (value: typeof app) => void;
+    const refresh = vi.fn(() => new Promise<typeof app>(resolve => { finish = resolve; }));
+    const first = store.credential(scope(), refresh, failed);
+    await vi.waitFor(() => expect(refresh).toHaveBeenCalledOnce());
+    const other = new CloudGithubConnectionStore(pool, keys);
+    const reads = vi.spyOn(other as unknown as { read: (value: ReturnType<typeof scope>) => Promise<unknown> }, "read");
+    let settled = false;
+    const joined = other.credential(scope(), refresh).finally(() => { settled = true; });
+    try {
+      await vi.waitFor(() => expect(reads.mock.calls.length).toBeGreaterThanOrEqual(2));
+      await reads.mock.results[1]!.value;
+      expect(settled).toBe(false);
+    } finally { finish({ ...app, accessToken: "synthetic-joined-rotation" }); }
+    expect((await first).material.accessToken).toBe("synthetic-joined-rotation");
+    expect((await joined).material.accessToken).toBe("synthetic-joined-rotation");
+    expect(refresh).toHaveBeenCalledOnce();
+  });
+  it("never releases a rejected token after an uncertain refresh or replays its rotating secret", async () => {
+    await store.save(scope(), await store.fingerprint(scope()), identity, app);
+    const failed = createHash("sha256").update(app.accessToken).digest("hex");
+    const refresh = vi.fn(async () => { throw new HttpError(503, "github_unavailable", "unavailable"); });
+    await expect(store.credential(scope(), refresh, failed)).rejects.toMatchObject({ code: "github_unavailable" });
+    await pool.query("UPDATE cloud_github_credentials SET refresh_lease_until=clock_timestamp()-interval '1 second' WHERE org_id=$1", [organizationId]);
+    await expect(store.credential(scope(), refresh)).rejects.toMatchObject({ code: "github_refresh_uncertain" });
+    expect(refresh).toHaveBeenCalledOnce();
+  });
+  it("does not let a report for a retired connection expire a replacement PAT", async () => {
+    await save();
+    const failed = createHash("sha256").update(pat.accessToken).digest("hex");
+    await save({ ...pat, accessToken: "synthetic-reconnected-personal" });
+    expect((await store.credential(scope(), undefined, failed)).material.accessToken).toBe("synthetic-reconnected-personal");
+    expect((await store.status(scope())).methods.pat.health).toBe("connected");
+  });
   it("does not turn an uncertain token rotation into a confirmed access revocation or replay it", async () => {
     await store.save(scope(), await store.fingerprint(scope()), identity, { ...app, expiresAt: Date.now() - 1 });
     const refresh = vi.fn(async () => { throw new HttpError(503, "github_unavailable", "unavailable"); });

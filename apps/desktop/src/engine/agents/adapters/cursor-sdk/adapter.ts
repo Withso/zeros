@@ -1,3 +1,4 @@
+import { cursorSdkMode as sdkModeFor, cursorAutoReview as autoReviewFor } from "@zeros/protocol/agent-events";
 import { CursorUsageReconciler, cursorTokenUsage, sumCursorUsage } from "./usage-accounting";
 // ──────────────────────────────────────────────────────────
 // Cursor adapter — @cursor/sdk backend (the SOLE Cursor backend)
@@ -335,16 +336,6 @@ const CURSOR_SDK_MODES: SessionMode[] = [
   },
 ];
 type CursorSdkModeId = "agent" | "plan" | "auto";
-
-/** Zeros modeId → the @cursor/sdk `mode` (only "plan" | "agent"). Auto and Full
- *  access both run as "agent"; they differ only by autoReview. */
-function sdkModeFor(modeId: CursorSdkModeId): "agent" | "plan" {
-  return modeId === "plan" ? "plan" : "agent";
-}
-/** Whether this Zeros mode requests Cursor's Auto-review classifier. */
-function autoReviewFor(modeId: CursorSdkModeId): boolean {
-  return modeId === "auto";
-}
 
 /** Born default for a fresh Cursor session: the classifier-gated "Auto" — the
  *  safe middle of the Ask→Auto→Full-access ladder, and consistent with the

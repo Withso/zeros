@@ -1174,6 +1174,14 @@ describe("permissionMenuItems (native permission modes shown in the '+' menu)", 
 });
 
 describe("coerceModeIdForModel (mark a menu row the model actually offers)", () => {
+  it.each([
+    ["claude", "plan", "bypass"], ["codex", "read-only", "full-access"], ["cursor", "plan", "agent"],
+  ])("shows the cloud default for %s before a live or persisted mode exists", (agentId, plan, full) => {
+    const modes = [{ id: plan, name: "Plan" }, { id: full, name: "Full access" }];
+    expect(coerceModeIdForModel(agentId, null, null, null, modes)).toBe(full);
+    expect(coerceModeIdForModel(agentId, null, plan, null, modes)).toBe(plan);
+  });
+
   it("leaves a mode the model's menu offers unchanged", () => {
     expect(coerceModeIdForModel("claude", "claude-opus-4-8[1m]", "auto")).toBe(
       "auto",
@@ -1538,4 +1546,13 @@ describe("a null ChatThread.model means ONE model everywhere", () => {
       })[EFFORT_ENV_VAR],
     ).toBe("turbo");
   });
+});
+
+
+it("uses only cloud-advertised modes and preserves Codex's read-only Plan selection", () => {
+  const modes = [{ id: "read-only", name: "Plan" }, { id: "full-access", name: "Full access" }];
+  expect(permissionMenuItems("codex", null, null, modes)).toEqual([{ modeId: "read-only", label: "Plan" }, { modeId: "full-access", label: "Full access" }]);
+  expect(coerceModeIdForModel("codex", null, "read-only", null, modes)).toBe("read-only");
+  expect(permissionMenuItems("codex", null, null, [])).toEqual([]);
+  expect(permissionMenuItems("codex").map(item => item.modeId)).toEqual(["ask", "auto-edit", "full-access"]);
 });

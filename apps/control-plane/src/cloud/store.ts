@@ -13,6 +13,8 @@ import { computerSourceReviewRequired, readComputerSourceTargets } from "./compu
 import { CloudSourceTargetSchema } from "./source-authority.js";
 
 import { mirrorMessageWindow, type MessageWindow, type WindowOptions } from "./history.js";
+import { mirrorMessageSearch, type SearchOptions } from "./history-search.js";
+import { MESSAGE_SEARCH_DEADLINE_MS } from "./message-search.js";
 
 export type CloudV2WorkspaceState =
   | "creating" | "running" | "stopping" | "stopped" | "starting" | "deleting" | "deleted" | "failed";
@@ -307,9 +309,13 @@ export class CloudV2Store {
       const current = await ownedRow(tx, id, userId, true);
       if (action === "archive" && (current.state === "creating" || current.state === "deleting"))
         throw new HttpError(409, "workspace_unavailable", "This cloud workspace cannot be archived yet");
+      // A bound first boot already owns its VM, even while configuration keeps
+      // it in creating. Stop must win without racing an unassigned allocation.
+      const configuring = action === "stop" && current.state === "creating" && current.boat_sandbox_id !== null &&
+        (await tx.query("SELECT 1 FROM cloud_v2_workspaces WHERE id=$1 AND worker_boot_id IS NOT NULL", [id])).rowCount === 1;
       const state = action === "start"
         ? current.state === "stopped" || current.state === "failed" ? "starting" : current.state
-        : current.state === "running" || current.state === "starting" ? "stopping" : current.state;
+        : current.state === "running" || current.state === "starting" || configuring ? "stopping" : current.state;
       const moved = state !== current.state;
       const archived = action === "archive" || (action === "stop" && current.archived_at !== null);
       if (!moved && archived === (current.archived_at !== null)) return { workspace: workspace(current), moved };
@@ -333,9 +339,10 @@ export class CloudV2Store {
   /** Compare-and-set. Returns null when the workspace was not in `from`, or,
    * with `stopGeneration`, when another stop has begun since. `revoke` drops
    * the worker's credentials in the same transaction, only if it moved, so a
-   * late step can never revoke a worker that a newer wake started. */
+   * late step can never revoke a worker that a newer wake started.
+   * `expectedSandboxId: null` fences an observed empty allocation slot. */
   async transition(id: string, from: readonly CloudV2WorkspaceState[], to: CloudV2WorkspaceState,
-    patch: { boatSandboxId?: string | null; errorCode?: string | null; stopGeneration?: string; revoke?: boolean; unarchived?: boolean } = {}): Promise<CloudV2Workspace | null> {
+    patch: { boatSandboxId?: string | null; expectedSandboxId?: string | null; errorCode?: string | null; stopGeneration?: string; revoke?: boolean; unarchived?: boolean } = {}): Promise<CloudV2Workspace | null> {
     return withSystemTx(this.pool, async tx => {
     const { rows } = await tx.query<Row>(
       `UPDATE cloud_v2_workspaces SET state = $3,
@@ -356,9 +363,11 @@ export class CloudV2Store {
          restore_pending = restore_pending AND $3 <> 'deleted',
          attempts = 0, next_attempt_at = NULL, updated_at = clock_timestamp()
        WHERE id = $1 AND state = ANY($2::text[]) AND ($8::bigint IS NULL OR stop_generation = $8::bigint)
-         AND (NOT $9::boolean OR archived_at IS NULL) RETURNING ${COLUMNS}`,
+         AND (NOT $9::boolean OR archived_at IS NULL)
+         AND (NOT $10::boolean OR boat_sandbox_id IS NOT DISTINCT FROM $11::text) RETURNING ${COLUMNS}`,
       [id, from, to, patch.boatSandboxId !== undefined, patch.boatSandboxId ?? null,
-        patch.errorCode !== undefined, patch.errorCode ?? null, patch.stopGeneration ?? null, patch.unarchived ?? false],
+        patch.errorCode !== undefined, patch.errorCode ?? null, patch.stopGeneration ?? null, patch.unarchived ?? false,
+        patch.expectedSandboxId !== undefined, patch.expectedSandboxId ?? null],
     );
     if (!rows[0]) return null;
     if (patch.revoke) {
@@ -419,11 +428,28 @@ export class CloudV2Store {
     return Boolean(result.rowCount);
   }
 
-  async acceptWorkerHello(token: string, bootId: string): Promise<CloudV2WorkerSession | null> {
+  /** Bind the boot before configuration I/O, without publishing readiness.
+   * Lifecycle delivery must not replace a credential once this boot claims it. */
+  async beginWorkerHello(token: string, bootId: string): Promise<CloudV2WorkerSession | null> {
+    const { rows } = await withSystemTx(this.pool, tx => tx.query<Row & { access_epoch: string; login_revision: string }>(
+      `UPDATE cloud_v2_workspaces w SET
+         worker_history_sequence=CASE WHEN worker_boot_id=$2 THEN worker_history_sequence ELSE 0 END,
+         worker_history_digest=CASE WHEN worker_boot_id=$2 THEN worker_history_digest ELSE NULL END,
+         state=CASE WHEN state='running' AND worker_boot_id IS DISTINCT FROM $2 THEN 'starting' ELSE state END,
+         updated_at=CASE WHEN state='running' AND worker_boot_id IS DISTINCT FROM $2 THEN clock_timestamp() ELSE updated_at END,
+         worker_boot_id=$2
+       WHERE worker_token_hash=$1 AND state IN ('creating','starting','running') AND ${LIVE_ACCESS}
+       RETURNING ${COLUMNS}, access_epoch::text, login_revision::text`, [hashCloudV2Token(token), bootId]));
+    const row = rows[0];
+    return row ? { ...workspace(row), accessEpoch: row.access_epoch, loginRevision: row.login_revision } : null;
+  }
+
+  async acceptWorkerHello(token: string, bootId: string, proof?: { accessEpoch: string; loginRevision: string }): Promise<CloudV2WorkerSession | null> {
     const { rows } = await withSystemTx(this.pool, tx => tx.query<Row & { access_epoch: string; login_revision: string; prior_state: "creating" | "starting" | "running"; hello_ms: number }>(
       `WITH prior AS MATERIALIZED (
          SELECT id AS prior_id, state AS prior_state, updated_at AS prior_updated_at FROM cloud_v2_workspaces w
-         WHERE worker_token_hash=$1 AND state IN ('creating','starting','running') AND ${LIVE_ACCESS} FOR UPDATE)
+         WHERE worker_token_hash=$1 AND state IN ('creating','starting','running') AND ${LIVE_ACCESS}
+           AND ($3::bigint IS NULL OR (worker_boot_id=$2 AND access_epoch=$3 AND login_revision=$4::bigint)) FOR UPDATE)
        UPDATE cloud_v2_workspaces w SET
          worker_history_sequence=CASE WHEN worker_boot_id=$2 THEN worker_history_sequence ELSE 0 END,
          worker_history_digest=CASE WHEN worker_boot_id=$2 THEN worker_history_digest ELSE NULL END,
@@ -432,7 +458,8 @@ export class CloudV2Store {
          updated_at=CASE WHEN state='running' THEN updated_at ELSE clock_timestamp() END
        FROM prior WHERE w.id=prior.prior_id
        RETURNING ${COLUMNS.replace(/\b(\w+)\b/g, "w.$1")}, access_epoch::text, login_revision::text, prior.prior_state,
-         greatest(0, extract(epoch FROM (clock_timestamp()-prior.prior_updated_at))*1000)::float8 AS hello_ms`, [hashCloudV2Token(token), bootId]));
+         greatest(0, extract(epoch FROM (clock_timestamp()-prior.prior_updated_at))*1000)::float8 AS hello_ms`,
+      [hashCloudV2Token(token), bootId, proof?.accessEpoch ?? null, proof?.loginRevision ?? null]));
     const row = rows[0];
     return row ? { ...workspace(row), accessEpoch: row.access_epoch, loginRevision: row.login_revision,
       ...(row.prior_state === "running" ? {} : { helloTiming: { state: row.prior_state, durationMs: Math.round(row.hello_ms) } }) } : null;
@@ -456,7 +483,7 @@ export class CloudV2Store {
         `UPDATE cloud_v2_workspaces w SET state='failed', error_code='cloud_source_checkout_failed',
            access_epoch=access_epoch+1, worker_route_url=NULL, worker_port_token=NULL,
            attempts=0, next_attempt_at=NULL, updated_at=clock_timestamp()
-         WHERE worker_token_hash=$1 AND worker_boot_id=$2 AND state='running' AND ${LIVE_ACCESS}`, proof);
+         WHERE worker_token_hash=$1 AND worker_boot_id=$2 AND state IN ('creating','starting','running') AND ${LIVE_ACCESS}`, proof);
       if (changed.rowCount) return true;
       const previous = await tx.query(
         `SELECT 1 FROM cloud_v2_workspaces w WHERE worker_token_hash=$1 AND worker_boot_id=$2
@@ -589,6 +616,21 @@ export class CloudV2Store {
     return rows.map(workspace);
   }
 
+  /** A create reply can outlive deletion. Keep its exact VM for cleanup,
+   * without replacing a later restore or an already assigned VM. */
+  async recordInitialSandbox(id: string, generation: string, sandboxId: string, renewedAt: Date): Promise<(CloudV2LifecycleWorkspace & { attempts: number }) | null> {
+    const { rows } = await withSystemTx(this.pool, tx => tx.query<LifecycleRow & { attempts: number }>(
+      `UPDATE cloud_v2_workspaces SET boat_sandbox_id=$3, lease_renewed_at=greatest(lease_renewed_at,$4::timestamptz),
+         state=CASE WHEN state='deleted' THEN 'deleting' ELSE state END,
+         attempts=CASE WHEN state IN ('creating','deleted') OR (state='deleting' AND boat_sandbox_id IS NULL) THEN 0 ELSE attempts END,
+         next_attempt_at=CASE WHEN state IN ('creating','deleted') OR (state='deleting' AND boat_sandbox_id IS NULL) THEN clock_timestamp() ELSE next_attempt_at END,
+         updated_at=CASE WHEN state='deleted' THEN clock_timestamp() ELSE updated_at END
+       WHERE id=$1 AND stop_generation=$2::bigint AND NOT restore_pending AND restore_attempt IS NULL
+         AND (boat_sandbox_id IS NULL OR boat_sandbox_id=$3)
+       RETURNING ${LIFECYCLE_COLUMNS}, attempts`, [id, generation, sandboxId, renewedAt]));
+    return rows[0] ? { ...lifecycleWorkspace(rows[0]), attempts: rows[0].attempts } : null;
+  }
+
   /** A late renewal cannot advance the lease of a replacement or stopped VM. */
   async markLeaseRenewed(id: string, sandboxId: string, renewedAt: Date): Promise<boolean> {
     const result = await withSystemTx(this.pool, tx => tx.query(
@@ -604,12 +646,11 @@ export class CloudV2Store {
       `UPDATE cloud_v2_workspaces SET base_commit=$2 WHERE id=$1 AND state='creating' AND base_commit IS NULL`, [id, commit]));
   }
 
-  /** Offered through the first run, while the worker may still create the
-   * branch. The hello makes the row running before configuration is built.
-   * A restored branch already exists, so a checkpoint ends the offer. */
+  /** Offered during initial configuration and retries until a checkpoint
+   * confirms that the workspace branch already exists. */
   async baseCommit(id: string): Promise<string | null> {
     const { rows } = await withSystemTx(this.pool, tx => tx.query<{ base_commit: string | null }>(
-      `SELECT base_commit FROM cloud_v2_workspaces WHERE id=$1 AND state IN ('creating','running') AND checkpoint_object IS NULL`, [id]));
+      `SELECT base_commit FROM cloud_v2_workspaces WHERE id=$1 AND state IN ('creating','starting','running') AND checkpoint_object IS NULL`, [id]));
     return rows[0]?.base_commit ?? null;
   }
 
@@ -798,24 +839,30 @@ export class CloudV2Store {
   /** Schedules the next step. Waiting for an outside event (the worker's
    * hello) clears the failure count; a failure keeps it. `updated_at` stays
    * the time the state was entered. */
-  async defer(id: string, state: CloudV2WorkspaceState, ms: number, patch: { boatSandboxId?: string; failure?: boolean; stopGeneration?: string } = {}): Promise<void> {
+  async defer(id: string, state: CloudV2WorkspaceState, ms: number, patch: { boatSandboxId?: string; expectedSandboxId?: string | null; failure?: boolean; stopGeneration?: string } = {}): Promise<void> {
     await withSystemTx(this.pool, tx => tx.query(
       `UPDATE cloud_v2_workspaces SET next_attempt_at = clock_timestamp() + make_interval(secs => $3::double precision / 1000),
          boat_sandbox_id = coalesce($4, boat_sandbox_id), attempts = CASE WHEN $5::boolean THEN attempts ELSE 0 END
-       WHERE id = $1 AND state = $2 AND ($6::bigint IS NULL OR stop_generation = $6::bigint)`,
-      [id, state, ms, patch.boatSandboxId ?? null, patch.failure === true, patch.stopGeneration ?? null],
+       WHERE id = $1 AND state = $2 AND ($6::bigint IS NULL OR stop_generation = $6::bigint)
+         AND (NOT $7::boolean OR boat_sandbox_id IS NOT DISTINCT FROM $8::text)`,
+      [id, state, ms, patch.boatSandboxId ?? null, patch.failure === true, patch.stopGeneration ?? null,
+        patch.expectedSandboxId !== undefined, patch.expectedSandboxId ?? null],
     ));
   }
 
   /** Replaces the worker credential; the plaintext goes only to the VM. */
-  async rotateWorkerToken(id: string): Promise<string> {
+  async rotateWorkerToken(id: string): Promise<string>;
+  async rotateWorkerToken(id: string, delivery: { state: CloudV2WorkspaceState; sandboxId: string; stopGeneration: string }): Promise<string | null>;
+  async rotateWorkerToken(id: string, delivery?: { state: CloudV2WorkspaceState; sandboxId: string; stopGeneration: string }): Promise<string | null> {
     const worker = newCloudV2Token("worker");
     const changed = await withSystemTx(this.pool, tx => tx.query(
       `UPDATE cloud_v2_workspaces w SET worker_token_hash = $2, worker_boot_id = NULL
-       WHERE id = $1 AND state IN ('creating','starting','running') AND ${LIVE_ACCESS}`,
-      [id, worker.hash],
+       WHERE id = $1 AND state IN ('creating','starting','running') AND ${LIVE_ACCESS}
+         AND ($3::text IS NULL OR (state=$3 AND state IN ('creating','starting') AND boat_sandbox_id=$4
+           AND stop_generation=$5::bigint AND worker_boot_id IS NULL))`,
+      [id, worker.hash, delivery?.state ?? null, delivery?.sandboxId ?? null, delivery?.stopGeneration ?? null],
     ));
-    if (!changed.rowCount) throw notFound();
+    if (!changed.rowCount) { if (delivery) return null; throw notFound(); }
     return worker.token;
   }
 
@@ -934,6 +981,11 @@ export class CloudV2Store {
 
   messageWindow(workspaceId: string, chatId: string, options: WindowOptions = {}): Promise<MessageWindow> {
     return withSystemTx(this.pool, tx => mirrorMessageWindow(tx, workspaceId, chatId, options), { consistentRead: true });
+  }
+
+  searchMessages(workspaceId: string, options: SearchOptions) {
+    const deadline = Date.now() + MESSAGE_SEARCH_DEADLINE_MS;
+    return withSystemTx(this.pool, tx => mirrorMessageSearch(tx, workspaceId, options, deadline), { consistentRead: true });
   }
 
   /** Rows-only compatibility for internal callers; HTTP also returns turnOpening. */

@@ -39,6 +39,7 @@ export const CloudV2PromptSchema = z.object({
   chatId: CloudV2PromptIdSchema, userMessageId: CloudV2PromptIdSchema,
   agentId: z.enum(["codex", "claude", "cursor"]), model: z.string().max(256).optional(), effort: z.string().max(64).optional(),
   mode: z.enum(["prompt", "steer"]).optional(),
+  permissionMode: z.enum(["plan", "bypass"]).optional(),
   prompt: z.array(content).min(1).max(256), startedAt: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
   bubble: z.object({ retryText: text.optional(), displayText: text.optional(), autoAction: z.string().max(256).optional(),
     attachments: z.array(attachment).max(100).optional(), segments: z.array(z.discriminatedUnion("type", [

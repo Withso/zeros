@@ -24,7 +24,7 @@ async function fixture() {
   await git("init", "-b", "main");
   const relay = new FakeRelay();
   let preparing = false, preparedEmail: string | undefined, socketPath = "";
-  const worker = new CloudWorker({ directory: state, transport: relay, homeDirectory: home, drivers: {},
+  const worker = new CloudWorker({ directory: state, transport: relay, homeDirectory: home, drivers: {}, githubFetch: async () => new Response(null, { status: 200 }),
     prepareCheckout: async (_workspace, environment) => {
       socketPath = environment.GH_ZEROS_BROKER_SOCKET!;
       preparing = true; preparedEmail = await git("config", "user.email").catch(() => undefined);
@@ -109,6 +109,19 @@ it("keeps an in-flight token and its cache across a same-revision recovery confi
   expect(await outcome).toMatchObject({ value: { token: "fixture-current-token" } });
   expect(await brokerRequest(f.socketPath(), "token")).toMatchObject({ token: "fixture-current-token" });
   expect(requests()).toHaveLength(1);
+});
+
+it("keeps gh on the human token path when a legacy relay configuration omits the HTTP PR capability", async () => {
+  const f = await fixture();
+  await f.relay.receive({ ...f.configuration, githubPullRequests: 1 });
+  await f.configure(undefined);
+  const pending = brokerRequest(f.socketPath(), "user-token");
+  const requests = () => f.relay.frames.filter((frame): frame is Extract<CloudV2WorkerFrame, { t: "request" }> => frame.t === "request");
+  await expect.poll(() => requests().length).toBe(1);
+  expect(requests()[0]).toMatchObject({ purpose: "gh" });
+  expect(requests()[0]).not.toHaveProperty("failedTokenSha256");
+  await f.relay.receive({ t: "reply", id: requests()[0].id, token: "fixture-human", expiresAt: Date.now() + 120_000 });
+  expect(await pending).toMatchObject({ token: "fixture-human" });
 });
 
 it("keeps serving credentials when another process replaces the old shared broker path", async () => {

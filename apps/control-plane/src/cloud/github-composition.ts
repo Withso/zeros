@@ -250,6 +250,7 @@ export function createCloudGithubServices(
     workspace: CloudV2Workspace,
     access: "read" | "write" | "user" = "read",
     purpose: "git" | "gh" = "git",
+    failedTokenSha256?: string,
   ) => {
     await authorizeSource(workspace);
     return token(
@@ -261,6 +262,7 @@ export function createCloudGithubServices(
       access,
       purpose,
       () => authorizeSource(workspace),
+      failedTokenSha256,
     );
   };
   const remoteHead = async (

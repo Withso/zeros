@@ -65,7 +65,7 @@ it("keeps the checkout failure when its report fails without sending raw error o
 
 it("answers broker replies while the first private checkout is waiting on its token", async () => {
   const { scope, state } = await repositoryFixture(), relay = new FakeRelay(); let prepared = false;
-  const worker = new CloudWorker({ directory: state, transport: relay, prepareCheckout: async (_workspace, environment) => {
+  const worker = new CloudWorker({ directory: state, transport: relay, githubFetch: async () => new Response(null, { status: 200 }), prepareCheckout: async (_workspace, environment) => {
     expect(environment.GIT_TERMINAL_PROMPT).toBe("0");
     const result = await brokerRequest(environment.GH_ZEROS_BROKER_SOCKET!, "token");
     expect(result.token).toBe("fixture-checkout-token"); prepared = true;

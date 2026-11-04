@@ -82,6 +82,10 @@ function setup(claimed: (CloudV2LifecycleWorkspace & { attempts: number })[], op
     setWorkerRoute: vi.fn(async () => true),
     leasesDue: vi.fn(async () => []),
     markLeaseRenewed: vi.fn(async () => true),
+    recordInitialSandbox: vi.fn(async (id, _generation, sandboxId, renewedAt) => {
+      const row = claimed.find(workspace => workspace.id === id);
+      return row ? { ...row, boatSandboxId: sandboxId, leaseRenewedAt: renewedAt.toISOString() } : null;
+    }),
     setBaseCommit: vi.fn(async () => {}),
     saveCheckpoint: vi.fn(async (): Promise<{ replaced: string | null } | false> => ({ replaced: SAVED.object })),
     checkpointFailed: vi.fn(async () => {}),
@@ -359,7 +363,7 @@ describe("cloud v2 lifecycle", () => {
         expect(f.compute.delete).toHaveBeenCalledWith("bx_new1");
         expect(checkpoints.storage.prune).toHaveBeenCalledWith(WS);
       }
-      expect(f.store.transition).toHaveBeenCalledWith(WS, [state], ...(state === "stopping" ? ["stopped", { stopGeneration: "2", revoke: true }] : ["deleted"]));
+      expect(f.store.transition).toHaveBeenCalledWith(WS, [state], ...(state === "stopping" ? ["stopped", { stopGeneration: "2", revoke: true }] : ["deleted", { expectedSandboxId: "bx_new1" }]));
     }
   });
 
@@ -378,7 +382,7 @@ describe("cloud v2 lifecycle", () => {
       const none = setup([workspace(state, { restorePending: true, restoreAttempt: PENDING, restoreCreate: old, checkpoint: SAVED })], { checkpoints: checkpointsFake() });
       await none.lifecycle.tick();
       expect(none.compute.create).not.toHaveBeenCalled();
-      expect(none.store.transition).toHaveBeenCalledWith(WS, [state], ...(state === "stopping" ? ["stopped", { stopGeneration: "2", revoke: true }] : ["deleted"]));
+      expect(none.store.transition).toHaveBeenCalledWith(WS, [state], ...(state === "stopping" ? ["stopped", { stopGeneration: "2", revoke: true }] : ["deleted", { expectedSandboxId: null }]));
     }
     // A wake whose attempt made nothing starts a new attempt instead.
     const wake = setup([workspace("starting", { restorePending: true, restoreAttempt: PENDING, restoreCreate: old, checkpoint: SAVED })], { checkpoints: checkpointsFake() });
@@ -403,7 +407,7 @@ describe("cloud v2 lifecycle", () => {
     const later = setup([pending], { checkpoints, uploadHorizon: new Date(NOW - 1).toISOString() });
     await later.lifecycle.tick();
     expect(checkpoints.storage.prune).toHaveBeenCalledTimes(2);
-    expect(later.store.transition).toHaveBeenCalledWith(WS, ["deleting"], "deleted");
+    expect(later.store.transition).toHaveBeenCalledWith(WS, ["deleting"], "deleted", { expectedSandboxId: "bx_abc1" });
   });
 
   it("keeps a workspace whose VM is gone restorable: a stop finishes, and a restore that gives up can be retried", async () => {
@@ -441,7 +445,7 @@ describe("cloud v2 lifecycle", () => {
     await retry.lifecycle.tick();
     expect(retry.store.transition).not.toHaveBeenCalled();
     expect(retry.store.revoke).not.toHaveBeenCalled();
-    expect(retry.store.defer).toHaveBeenCalledWith(WS, "deleting", 10_000, { failure: true });
+    expect(retry.store.defer).toHaveBeenCalledWith(WS, "deleting", 10_000, { failure: true, expectedSandboxId: "bx_abc1" });
   });
 
   it("records the base branch's GitHub head before delivering the token, and never waits on GitHub for long", async () => {
@@ -474,7 +478,8 @@ describe("cloud v2 lifecycle", () => {
     for (const state of ["creating", "starting"] as const) {
       const f = setup([workspace(state, { boatSandboxId: state === "starting" ? "bx_test" : null })]);
       await f.lifecycle.tick();
-      expect(f.store.markLeaseRenewed).toHaveBeenCalledWith(expect.any(String), state === "creating" ? "bx_new1" : "bx_test", new Date(NOW));
+      if (state === "creating") expect(f.store.recordInitialSandbox).toHaveBeenCalledWith(WS, "2", "bx_new1", new Date(NOW));
+      else expect(f.store.markLeaseRenewed).toHaveBeenCalledWith(WS, "bx_test", new Date(NOW));
     }
   });
 
@@ -649,6 +654,17 @@ describe("cloud v2 lifecycle", () => {
       expect(vi.mocked(f.store.setWorkerRoute).mock.invocationCallOrder[0]).toBeLessThan(vi.mocked(f.store.rotateWorkerToken).mock.invocationCallOrder[0]!);
       expect(vi.mocked(f.compute.exec).mock.calls[0]![1]).toContain("worker-auth.json");
     }
+  });
+
+  it.each(["creating", "starting"] as const)("leaves a %s worker alone when hello already owns token delivery", async state => {
+    const w = workspace(state, { boatSandboxId: "bx_test" }), f = setup([w]);
+    vi.mocked(f.store.rotateWorkerToken).mockResolvedValueOnce(null);
+    await f.lifecycle.tick();
+    expect(f.store.rotateWorkerToken).toHaveBeenCalledWith(w.id, { state, sandboxId: "bx_test", stopGeneration: w.stopGeneration });
+    expect(f.compute.exec).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(f.compute.exec).mock.calls[0]![1]).toContain("worker-auth.json");
+    expect(f.store.defer).toHaveBeenLastCalledWith(w.id, state, 30_000);
+    expect(f.store.transition).not.toHaveBeenCalled();
   });
 
   it("waits for the worker's final history acknowledgement before stopping Boat", async () => {
@@ -1085,7 +1101,7 @@ describe("cloud v2 checkpoint retries", () => {
     expect(f.compute.fork).toHaveBeenCalledWith("bx_abc1", { key: `checkpoint:${WS}:${PENDING}`, name: lost.name, ttlSeconds: 3600 });
     expect(vi.mocked(f.compute.delete).mock.calls).toEqual([["bx_fork1"], ["bx_abc1"]]);
     expect(f.store.checkpointForkGone).toHaveBeenCalledWith(WS, PENDING);
-    expect(f.store.transition).toHaveBeenCalledWith(WS, ["deleting"], "deleted");
+    expect(f.store.transition).toHaveBeenCalledWith(WS, ["deleting"], "deleted", { expectedSandboxId: "bx_abc1" });
     // Past Boat's key lifetime the fork is found by its name instead.
     const old = setup([workspace("deleting", { boatSandboxId: "bx_abc1", checkpointRetryFork: { ...lost, requestedAt: new Date(NOW - 86_400_000).toISOString() } })], { checkpoints: checkpointsFake() });
     vi.mocked(old.compute.findSandbox).mockResolvedValueOnce("bx_fork7");

@@ -11,6 +11,7 @@ import { CheckoutWatch } from "./watch";
 import { listWorkspaceSkills } from "./skills";
 import { GithubCheckoutReporter, type ReportGithubCheckout } from "./github-checkout";
 import { reconcileGithubRemote } from "./github-remote";
+import type { WorkerCodeReview } from "./code-review";
 
 export interface PrSummary { prNumber: number | null; prState: "draft" | "ready" | "merged" | "closed" | null; prUrl: string | null }
 const EMPTY_PR: PrSummary = { prNumber: null, prState: null, prUrl: null };
@@ -22,6 +23,8 @@ export interface WorkspaceServiceOptions {
   watch?: boolean;
   historyDiff?: (params: Record<string, unknown>) => Promise<unknown>;
   reportGithubCheckout?: ReportGithubCheckout;
+  nextCheckoutSequence?: () => number;
+  codeReview?: WorkerCodeReview;
 }
 
 /** Native wire contract from engine/workspace/service.ts and git/types.ts,
@@ -57,26 +60,31 @@ export class WorkspaceService {
           return { branch: branch === "HEAD" ? null : branch, headSha, baseBranch };
       }
       throw new WorkspaceError("GIT_STATE_CHANGED", "The checkout changed while confirming its branch.");
-    }, options.reportGithubCheckout);
+    }, options.reportGithubCheckout, options.nextCheckoutSequence);
     if (options.watch !== false) this.watcher = new CheckoutWatch(scope, this.run, content => this.poll(content));
   }
 
   static async open(scope: WorkspaceScope, directory: string, options: WorkspaceServiceOptions = {}): Promise<WorkspaceService> {
     const service = new WorkspaceService(scope, directory, options);
-    await mkdir(directory, { recursive: true, mode: 0o700 });
     try {
-      const state = JSON.parse(await readFile(join(directory, "workspace.json"), "utf8")) as State;
-      if (state.workspaceId !== scope.workspace.id || state.root !== scope.root || typeof state.baseBranch !== "string" || typeof state.configuredBase !== "string" || !Number.isSafeInteger(state.createdAt)) throw new Error("Invalid workspace state.");
-      service.state = state;
+      await mkdir(directory, { recursive: true, mode: 0o700 });
+      try {
+        const state = JSON.parse(await readFile(join(directory, "workspace.json"), "utf8")) as State;
+        if (state.workspaceId !== scope.workspace.id || state.root !== scope.root || typeof state.baseBranch !== "string" || typeof state.configuredBase !== "string" || !Number.isSafeInteger(state.createdAt)) throw new Error("Invalid workspace state.");
+        service.state = state;
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw new WorkspaceError("WORKSPACE_UNAVAILABLE", "The saved workspace identity could not be loaded.");
+        service.state = { workspaceId: scope.workspace.id, root: scope.root, baseBranch: scope.workspace.baseBranch, configuredBase: scope.workspace.baseBranch, createdAt: Date.now() };
+        await service.update(state => state);
+      }
+      await service.configure(scope.workspace);
+      await service.poll(false, { waitForCheckoutReport: false });
+      await service.watcher?.start();
+      return service;
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw new WorkspaceError("WORKSPACE_UNAVAILABLE", "The saved workspace identity could not be loaded.");
-      service.state = { workspaceId: scope.workspace.id, root: scope.root, baseBranch: scope.workspace.baseBranch, configuredBase: scope.workspace.baseBranch, createdAt: Date.now() };
-      await service.update(state => state);
+      await service.dispose().catch(() => {});
+      throw error;
     }
-    await service.configure(scope.workspace);
-    await service.poll();
-    await service.watcher?.start();
-    return service;
   }
 
   async configure(workspace: WorkerConfig["workspace"]): Promise<void> {
@@ -89,6 +97,7 @@ export class WorkspaceService {
   async handle(op: string, params: Record<string, unknown>): Promise<unknown> {
     this.scope.assertId(params.workspaceId);
     for (const key of ["cwd", "folder", "repoRoot"]) if (params[key] !== undefined) this.scope.folder(params[key]);
+    if (op.startsWith("codeReview.")) return this.options.codeReview ? this.options.codeReview.handle(op, params) : unsupported();
     if (op.startsWith("git.")) return this.git.handle(op, params);
     if (op.startsWith("file.") || op.startsWith("fs.")) return this.files.handle(op, params);
     switch (op) {
@@ -111,22 +120,29 @@ export class WorkspaceService {
     }
   }
 
-  async poll(content = false): Promise<void> {
+  async poll(content = false, options: { waitForCheckoutReport?: boolean } = {}): Promise<void> {
     if (this.disposed) return;
     const [branch, head, refs] = await Promise.all([this.git.branch(), this.git.head(),
       this.run("git", ["for-each-ref", "--format=%(refname)%00%(objectname)", "refs/heads/", "refs/remotes/"], { readOnly: true }).then(result => result.stdout, () => ""),
     ]);
+    if (this.disposed) return;
     const signature = JSON.stringify([branch, head, refs]), refsChanged = this.signature !== undefined && signature !== this.signature;
     this.signature = signature;
     if (refsChanged) { this.prEpoch++; this.prs.clear(); }
     if (refsChanged || content) this.publish(refsChanged);
-    await this.githubCheckout?.report().catch(() => {});
+    const reporting = this.githubCheckout?.report().catch(() => {});
+    if (options.waitForCheckoutReport !== false) await reporting;
   }
-  async flush(): Promise<void> { await this.git.flush(); await this.metadataQueue; await this.watcher?.flush(); }
+  async flush(): Promise<void> { await this.git.flush(); await this.metadataQueue; await this.watcher?.flush(); await this.githubCheckout?.flush(); }
   get uploading(): boolean { return this.attachments.busy; }
   stopAttachmentTransfers(): Promise<void> { return this.attachments.dispose(); }
   githubChanged(): void { this.invalidate(true); }
-  async dispose(): Promise<void> { if (this.disposed) return; this.disposed = true; await this.watcher?.dispose(); await this.attachments.dispose(); await this.git.flush(); await this.metadataQueue; }
+  async dispose(): Promise<void> {
+    if (this.disposed) return;
+    this.disposed = true;
+    const closed = await Promise.allSettled([this.watcher?.dispose(), this.attachments.dispose(), this.git.flush(), this.metadataQueue, this.githubCheckout?.dispose()]);
+    for (const result of closed) if (result.status === "rejected") throw result.reason;
+  }
 
   private invalidate(refs: boolean): void {
     if (refs) { this.prEpoch++; this.prs.clear(); }

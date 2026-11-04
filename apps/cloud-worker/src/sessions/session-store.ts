@@ -1,9 +1,11 @@
+import { cancelledInteraction, INPUT_STOPPED, interactionSettled, type SavedInteraction } from "./interaction-history";
 import { createHash, randomUUID } from "node:crypto";
 import { constants } from "node:fs";
 import { mkdir, open, readdir, rename, rm } from "node:fs/promises";
 import { join } from "node:path";
+import { createRequire } from "node:module";
 import { z } from "zod";
-import { applyUpdate, type AgentMessage, type AgentTextMessage } from "@zeros/protocol/agent-messages";
+import { applyUpdate, readQuestionStamp, type AgentMessage, type AgentTextMessage } from "@zeros/protocol/agent-messages";
 import type { ContentBlock, PromptResponse, SessionNotification } from "@zeros/protocol/agent-events";
 import type { AgentPromptBubble, BridgeAgentFailure, SteerOutcome } from "@zeros/protocol/messages";
 import { CloudV2MessageRowSchema, type CloudV2MessageRow } from "@zeros/protocol/cloud-v2-relay";
@@ -12,15 +14,19 @@ import { coerceChat, messageWindow, upsertRows, type ChatRow, type MessageWindow
 import { WorkspaceError } from "../workspace/scope";
 import { CloudV2PromptCounterSchema, CloudV2PromptStateSchema, type CloudV2PromptDelivery, type CloudV2PromptState } from "@zeros/protocol/cloud-v2-prompts";
 import type { TurnInfo } from "@zeros/protocol/turns";
+import { messageSearchInput, MessageSearchIndex, MessageSearchError, boundMessageSearchHits, type MessageSearchDatabase, type MessageSearchHit } from "@zeros/protocol/agent-messages";
+
+const require = createRequire(import.meta.url);
 
 const outboxInputSchema = z.object({ deliveryId: z.string().uuid(), epoch: CloudV2PromptCounterSchema, sequence: CloudV2PromptCounterSchema,
   model: z.string().max(256).optional(), effort: z.string().max(64).optional(), mode: z.enum(["prompt", "steer"]).optional(),
+  permissionMode: z.enum(["plan", "bypass"]).optional(),
   acknowledged: z.boolean(), dispatchId: z.string().uuid().optional(), accepted: z.boolean().optional(),
   steerDeclined: z.boolean().optional(), reported: CloudV2PromptStateSchema.optional() }).strict();
 
 export interface OutboxInput {
   deliveryId: string; epoch: string; sequence: string;
-  model?: string; effort?: string; mode?: "prompt" | "steer";
+  model?: string; effort?: string; mode?: "prompt" | "steer"; permissionMode?: "plan" | "bypass";
   acknowledged: boolean; dispatchId?: string; accepted?: boolean;
   steerDeclined?: boolean;
   reported?: CloudV2PromptState;
@@ -70,6 +76,7 @@ export interface SessionData {
   steers: SteerReceipt[];
   /** Worker-owned Git authority; imported transcript rows cannot replace it. */
   turns?: TurnInfo[];
+  pendingInteractions?: SavedInteraction[];
 }
 export interface SessionChange {
   chatId: string;
@@ -129,6 +136,24 @@ export function recordUser(draft: SessionData, input: PromptInput, steeredTurnId
   upsertRows(draft.rows, [persisted(draft.messages.find((entry) => entry.id === message.id)!)]);
 }
 
+function dismissal(message: AgentMessage | undefined): string | undefined {
+  if (message?.kind !== "tool" || !message.rawOutput || typeof message.rawOutput !== "object") return undefined;
+  const reason = (message.rawOutput as { zerosInputDismissal?: unknown }).zerosInputDismissal;
+  return typeof reason === "string" ? reason : undefined;
+}
+
+function retainInteractionResult(previous: AgentMessage | undefined, incoming: AgentMessage): AgentMessage {
+  if (previous?.kind !== "tool" || incoming.kind !== "tool" || previous.toolCallId !== incoming.toolCallId) return incoming;
+  if (dismissal(previous) || readQuestionStamp(previous.rawOutput)) return { ...incoming, status: previous.status, rawOutput: previous.rawOutput, updatedAt: previous.updatedAt };
+  return incoming;
+}
+
+function recordNotification(draft: SessionData, notification: SessionNotification): void {
+  const previous = new Set(draft.messages);
+  draft.messages = applyUpdate(draft.messages, notification);
+  upsertRows(draft.rows, draft.messages.filter(message => !previous.has(message)).map(persisted));
+}
+
 /** One atomic JSON snapshot per chat. The VM disk owns the inbox and native
  * identity; changed canonical rows are also mirrored to the control plane. */
 export class SessionStore {
@@ -162,9 +187,16 @@ export class SessionStore {
           (value.deliveryEpoch !== undefined && !CloudV2PromptCounterSchema.safeParse(value.deliveryEpoch).success) ||
           value.inbox.some(entry => entry.outbox !== undefined && !outboxInputSchema.safeParse(entry.outbox).success) ||
           (value.chat !== null && (!coerceChat(value.chat) || value.chat.id !== value.chatId))) throw new Error("Invalid persisted chat.");
+      if (value.pendingInteractions !== undefined && (!Array.isArray(value.pendingInteractions) || value.pendingInteractions.some(item =>
+        !item || (item.kind !== "question" && item.kind !== "permission") || typeof item.id !== "string" || !Number.isFinite(item.expiresAt) || !item.request)))
+        throw new Error("Invalid persisted interaction.");
       value.messages = transcript(value.rows);
       if (Number.isSafeInteger(value.ordinal) && value.ordinal! > store.nextOrdinal) store.nextOrdinal = value.ordinal!;
       store.sessions.set(value.chatId, value);
+      if (value.pendingInteractions?.length) await store.update(value.chatId, draft => {
+        for (const interaction of draft.pendingInteractions ?? []) recordNotification(draft, interactionSettled(interaction, cancelledInteraction(interaction), INPUT_STOPPED));
+        draft.pendingInteractions = [];
+      });
       // Mark native dispatch BEFORE calling the driver. After a crash there is
       // no evidence that it was unconsumed, so only a fresh explicit send resumes.
       if (value.inbox.some((entry) => entry.state === "running" || entry.state === "queued" && (entry.outbox?.acknowledged || !!entry.outbox?.dispatchId)) || value.steers.some((entry) => entry.outcome === "pending")) {
@@ -205,6 +237,27 @@ export class SessionStore {
   }
 
   history(chatId: string): readonly CloudV2MessageRow[] { return this.sessions.get(chatId)?.rows ?? []; }
+
+  search(query: unknown, limit?: unknown, chatId?: string): { hits: MessageSearchHit[] } {
+    try {
+      const input = messageSearchInput(query, limit);
+      if (!input.match || !input.limit) return { hits: [] };
+      const { DatabaseSync } = require("node:sqlite") as { DatabaseSync: new (path: string) => MessageSearchDatabase };
+      const index = new MessageSearchIndex<MessageSearchHit>(new DatabaseSync(":memory:"));
+      try {
+        for (const session of [...this.sessions.values()].sort((a, b) => (a.ordinal ?? 0) - (b.ordinal ?? 0))) {
+          if (!session.chat || chatId !== undefined && session.chatId !== chatId) continue;
+          for (const row of session.rows) index.add({ chatId: session.chatId, msgId: row.msgId, payload: row.payload, createdAt: row.createdAt }, row.payload);
+        }
+        const hits = boundMessageSearchHits(index.search(input));
+        index.remaining();
+        return { hits };
+      } finally { index.close(); }
+    } catch (error) {
+      if (error instanceof MessageSearchError) throw new WorkspaceError(error.code, error.message);
+      throw error;
+    }
+  }
 
   turnRecords(chatId?: string): TurnInfo[] {
     return structuredClone([...this.sessions.values()].filter(session => session.chat && (!chatId || session.chatId === chatId))
@@ -363,7 +416,7 @@ export class SessionStore {
     // Tombstones also cover an unknown id, so a delayed renderer upsert cannot
     // resurrect a conversation after a deletion races its initial creation.
     await this.change(chatId, (draft) => {
-      draft.chat = null; draft.rows = []; draft.messages = []; draft.inbox = []; draft.steers = []; draft.turns = [];
+      draft.chat = null; draft.rows = []; draft.messages = []; draft.inbox = []; draft.steers = []; draft.turns = []; draft.pendingInteractions = [];
       draft.nativeSessionId = undefined; draft.executionId = undefined; draft.paused = true;
     }, null, true);
   }
@@ -394,9 +447,15 @@ export class SessionStore {
       // summary, and never accept a snapshot claim for an unrecorded turn.
       const canonicalRows = rows.map(row => {
         const message = JSON.parse(row.payload);
-        return message?.kind === "text" && message.role === "user"
-          ? { ...row, payload: JSON.stringify(recordedPrompt(message, message.id === row.msgId ? turns.get(row.msgId) : undefined, current.get(row.msgId))) }
-          : row;
+        if (message?.kind === "text" && message.role === "user")
+          return { ...row, payload: JSON.stringify(recordedPrompt(message, message.id === row.msgId ? turns.get(row.msgId) : undefined, current.get(row.msgId))) };
+        if (message?.kind === "tool") {
+          const previous = current.get(row.msgId);
+          const pending = draft.pendingInteractions?.some(value => (value.kind === "question" ? value.request.toolCallId : value.request.toolCall.toolCallId) === message.toolCallId);
+          const kept = pending && previous?.kind === "tool" ? previous : retainInteractionResult(previous, message);
+          return { ...row, payload: JSON.stringify(kept) };
+        }
+        return row;
       });
       upsertRows(draft.rows, canonicalRows);
       const incoming = new Map(transcript(canonicalRows).map((message) => [message.id, message]));
@@ -408,6 +467,22 @@ export class SessionStore {
     return rows.length;
   }
 
+  async saveInteraction(chatId: string, value: SavedInteraction, notification: SessionNotification): Promise<void> {
+    await this.update(chatId, draft => {
+      if (draft.executionId !== value.request.executionId) throw new WorkspaceError("session-expired", "This execution has ended.");
+      (draft.pendingInteractions ??= []).push(value);
+      recordNotification(draft, notification);
+    });
+  }
+
+  async finishInteraction(chatId: string, value: SavedInteraction, notification: SessionNotification): Promise<void> {
+    await this.update(chatId, draft => {
+      if (draft.executionId !== value.request.executionId) return;
+      draft.pendingInteractions = (draft.pendingInteractions ?? []).filter(item => item.id !== value.id);
+      recordNotification(draft, notification);
+    });
+  }
+
   async fold(chatId: string, notification: SessionNotification, currentOwner?: () => boolean): Promise<void> {
     await this.serialize(chatId, () => {
       if (currentOwner && !currentOwner()) return;
@@ -416,6 +491,12 @@ export class SessionStore {
       if (!current.chat) throw new Error("Cloud conversation was deleted.");
       if (this.writeFailures.has(chatId)) throw new Error("Cannot save this conversation.");
       const previous = current.messages;
+      if (notification.update.sessionUpdate === "tool_call_update" || notification.update.sessionUpdate === "tool_call") {
+        const update = notification.update;
+        const saved = previous.find(message => message.kind === "tool" && message.toolCallId === update.toolCallId);
+        if (dismissal(saved) && saved?.kind === "tool") notification = { ...notification,
+          update: { ...update, status: "failed", rawOutput: saved.rawOutput } };
+      }
       const folded = applyUpdate(previous, notification);
       if (folded === previous) return;
       const unchanged = new Set(previous);
@@ -510,7 +591,7 @@ export class SessionStore {
     const { payload, receipt, deliveryId } = item;
     const { entry } = await this.enqueue(payload.chatId, { requestId: `outbox:${payload.userMessageId}`,
       userMessageId: payload.userMessageId, prompt: payload.prompt, bubble: payload.bubble, startedAt: payload.startedAt,
-      outbox: { deliveryId, epoch: receipt.epoch, sequence: receipt.sequence, model: payload.model, effort: payload.effort, mode: payload.mode, acknowledged: false } });
+      outbox: { deliveryId, epoch: receipt.epoch, sequence: receipt.sequence, model: payload.model, effort: payload.effort, mode: payload.mode, permissionMode: payload.permissionMode, acknowledged: false } });
     return entry;
   }
 

@@ -21,7 +21,7 @@ import {
   type LucideIcon,
 } from "lucide-react";
 import type { ChatEffort } from "../../state/store";
-import type { InitializeResponse } from "../../platform/bridge/agent-events";
+import type { InitializeResponse, SessionMode } from "../../platform/bridge/agent-events";
 import {
   agentFamily,
   modelsForAgent as catalogModelsForAgent,
@@ -343,6 +343,7 @@ export function PermissionToggle({
   agentId,
   model,
   boundary = null,
+  availableModes,
   currentModeId,
   onSelectMode,
 }: {
@@ -350,6 +351,7 @@ export function PermissionToggle({
   /** The picked model — Claude Haiku drops "auto" from the cycle. */
   model: string | null;
   boundary?: ExecutionBoundaryStatus | null;
+  availableModes?: readonly SessionMode[];
   /** The active native mode id (already coerced to one this model offers —
    *  see coerceModeIdForModel). null pre-bind ⇒ the first mode shows. */
   currentModeId: string | null;
@@ -456,7 +458,7 @@ export function PermissionToggle({
     };
   }, [labelVisible, measureFeedbackPlacement]);
 
-  const items = permissionMenuItems(agentId, model, boundary);
+  const items = permissionMenuItems(agentId, model, boundary, availableModes);
   // No native-mode vocabulary for this agent → no toggle. This check stays
   // below every hook because a chat can switch between supported agents.
   if (items.length === 0) return null;

@@ -6,6 +6,7 @@ import { createCloudV2WorkerRoutes, type CloudV2WorkerRouteDeps } from "./worker
 import { newCloudV2Token } from "./tokens.js";
 import type { CloudV2Store, CloudV2Workspace } from "./store.js";
 import { CloudV2ControlFrameSchema as legacyWorkerFrame } from "./__fixtures__/worker-contract-before-identity.js";
+import { CloudV2PromptSchema, type CloudV2PromptPullReply } from "./prompt-contract.js";
 
 function fixture(prompts = false) {
   const bootId = randomUUID(), token = newCloudV2Token("worker").token;
@@ -14,13 +15,15 @@ function fixture(prompts = false) {
   let notify!: () => void;
   const notified = new Promise<void>(resolve => { notify = resolve; });
   const cancelWait = vi.fn();
-  const pull = vi.fn(async () => ({ prompts: [], stops: [] as { chatId: string; epoch: string }[] }));
+  const pull = vi.fn(async (): Promise<CloudV2PromptPullReply> => ({ prompts: [], stops: [] }));
+  const outcome = vi.fn(async () => ({ state: "failed" as const }));
   const deps: CloudV2WorkerRouteDeps = {
     runtimeSha256: "a".repeat(64),
     promptOutbox: prompts,
     waitForPrompts: vi.fn(() => ({ wait: notified, dispose: cancelWait })),
     store: {
-      prompts: { pull } as unknown as CloudV2Store["prompts"],
+      prompts: { pull, outcome } as unknown as CloudV2Store["prompts"],
+      beginWorkerHello: vi.fn(async value => allowed && value === token ? w : null),
       acceptWorkerHello: vi.fn(async value => allowed && value === token ? w : null),
       workerSession: vi.fn(async (value, boot) => allowed && value === token && boot === bootId ? { ...w, loginRevision: revision } : null),
       accessEpoch: vi.fn(async () => allowed ? "0" : null),
@@ -40,7 +43,7 @@ function fixture(prompts = false) {
     method: body === undefined ? "GET" : "POST", headers: { authorization: `Bearer ${token}`, "x-zeros-worker-boot": bootId, "content-type": "application/json", ...headers },
     ...(body === undefined ? {} : { body: JSON.stringify(body) }),
   });
-  return { bootId, token, deps, request, notify, cancelWait, pull,
+  return { bootId, token, deps, request, notify, cancelWait, pull, outcome,
     revoke: () => { allowed = false; }, revise: (value: string) => { revision = value; } };
 }
 it("accepts outbound hello and returns configuration, refusing stale runtimes", async () => {
@@ -50,6 +53,39 @@ it("accepts outbound hello and returns configuration, refusing stale runtimes", 
   expect(response.status).toBe(200);
   expect(await response.json()).toMatchObject({ config: { t: "config", loginRevision: "0" } });
   expect((await f.request("hello", { ...body, runtimeSha256: "b".repeat(64) })).status).toBe(409);
+});
+it("carries a bounded rejected-token digest and purpose from the authenticated worker to the token source", async () => {
+  const f = fixture(), failedTokenSha256 = "a".repeat(64);
+  for (const purpose of ["git", "gh"] as const) {
+    const response = await f.request("github-token", { purpose, failedTokenSha256 });
+    expect(response.status).toBe(200);
+    expect(f.deps.githubToken).toHaveBeenLastCalledWith(expect.objectContaining({ creatorUserId: expect.any(String) }), purpose, failedTokenSha256);
+  }
+  for (const hash of ["", "a".repeat(63), "a".repeat(65), "A".repeat(64), "a".repeat(64) + "\n"])
+    expect((await f.request("github-token", { failedTokenSha256: hash })).status).toBe(400);
+});
+it("negotiates user-token recovery for hello and refreshed configuration without breaking legacy workers", async () => {
+  const f = fixture(), original = await f.deps.config({} as CloudV2Workspace);
+  vi.mocked(f.deps.config).mockResolvedValue({ ...original, githubUserTokens: 1 });
+  for (const [path, body] of [["hello", { bootId: f.bootId, protocol: 2, runtimeSha256: "a".repeat(64) }], ["config", undefined]] as const) {
+    const old = (await (await f.request(path, body)).json()).config;
+    expect(old).not.toHaveProperty("githubUserTokens");
+    expect(legacyWorkerFrame.safeParse(old).success).toBe(true);
+    expect((await (await f.request(path, body, { "x-zeros-worker-features": "github-user-token-v1" })).json()).config.githubUserTokens).toBe(1);
+  }
+});
+it("delivers the trusted review identity only after exact feature negotiation on hello and refresh", async () => {
+  const f = fixture(), original = await f.deps.config({} as CloudV2Workspace);
+  const codeReview = { userId: randomUUID(), userName: "Fixture reviewer" };
+  vi.mocked(f.deps.config).mockResolvedValue({ ...original, codeReview });
+  for (const [path, body] of [["hello", { bootId: f.bootId, protocol: 2, runtimeSha256: "a".repeat(64) }], ["config", undefined]] as const) {
+    for (const features of ["", "mcp-v1", "code-review-v10"]) {
+      const frame = (await (await f.request(path, body, { "x-zeros-worker-features": features })).json()).config;
+      expect(frame).not.toHaveProperty("codeReview");
+      expect(legacyWorkerFrame.safeParse(frame).success).toBe(true);
+    }
+    expect((await (await f.request(path, body, { "x-zeros-worker-features": "mcp-v1, code-review-v1" })).json()).config.codeReview).toEqual(codeReview);
+  }
 });
 it("reports checkout failure using only worker identity even during a GitHub outage", async () => {
   const f = fixture();
@@ -269,4 +305,45 @@ it("rechecks worker authority when a long poll wakes", async () => {
   expect((await response).status).toBe(401);
   expect(f.pull).toHaveBeenCalledTimes(1);
   expect(f.cancelWait).toHaveBeenCalledTimes(1);
+});
+
+it("negotiates questions and Plan only with the exact feature on hello and refresh", async () => {
+  const f = fixture(), original = await f.deps.config({} as CloudV2Workspace);
+  vi.mocked(f.deps.config).mockResolvedValue({ ...original, agentInteractions: 1 });
+  for (const [path, body] of [["hello", { bootId: f.bootId, protocol: 2, runtimeSha256: "a".repeat(64) }], ["config", undefined]] as const) {
+    for (const features of ["", "mcp-v1", "agent-interactions-v10"]) {
+      const config = (await (await f.request(path, body, { "x-zeros-worker-features": features })).json()).config;
+      expect(config).not.toHaveProperty("agentInteractions"); expect(legacyWorkerFrame.safeParse(config).success).toBe(true);
+    }
+    expect((await (await f.request(path, body, { "x-zeros-worker-features": "mcp-v1, agent-interactions-v1" })).json()).config.agentInteractions).toBe(1);
+  }
+});
+
+it.each([false, true])("keeps durable mode payloads compatible with interaction support=%s", async supported => {
+  const f = fixture(true), workspaceId = randomUUID();
+  const prompts = (["plan", "bypass"] as const).map(permissionMode => ({
+    payload: { chatId: permissionMode, userMessageId: permissionMode, agentId: "codex" as const, permissionMode,
+      prompt: [{ type: "text" as const, text: "task" }], startedAt: 1 },
+    receipt: { workspaceId, chatId: permissionMode, userMessageId: permissionMode, epoch: "0", sequence: "1", acceptedAt: new Date(1).toISOString(), workspaceState: "running" as const },
+    deliveryId: randomUUID(),
+  }));
+  for (const waited of [false, true]) {
+    f.pull.mockClear(); f.outcome.mockClear();
+    if (waited) f.pull.mockResolvedValueOnce({ prompts: [], stops: [] });
+    f.pull.mockResolvedValueOnce({ prompts, stops: [{ chatId: "stopped", epoch: "1" }] });
+    const reply = f.request("prompts/pull", { waitMs: waited ? 25_000 : 0 }, {
+      "x-zeros-worker-features": supported ? "prompt-outbox-v1,agent-interactions-v1" : "prompt-outbox-v1,agent-interactions-v10",
+    });
+    if (waited) { await expect.poll(() => f.pull.mock.calls.length).toBe(1); f.notify(); }
+    const batch = await (await reply).json() as CloudV2PromptPullReply;
+    expect(batch.stops).toEqual([{ chatId: "stopped", epoch: "1" }]);
+    if (supported) { expect(batch.prompts).toEqual(prompts); expect(f.outcome).not.toHaveBeenCalled(); }
+    else {
+      expect(batch.prompts).toHaveLength(1);
+      expect(batch.prompts[0].payload).not.toHaveProperty("permissionMode");
+      expect(CloudV2PromptSchema.omit({ permissionMode: true }).safeParse(batch.prompts[0].payload).success).toBe(true);
+      expect(f.outcome).toHaveBeenCalledOnce();
+      expect(vi.mocked(f.deps.store.prompts!.outcome).mock.calls[0][2]).toEqual({ userMessageId: "plan", deliveryId: prompts[0].deliveryId, state: "failed" });
+    }
+  }
 });

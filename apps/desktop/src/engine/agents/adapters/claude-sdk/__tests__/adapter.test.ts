@@ -25,6 +25,8 @@ import {
 } from "../../../types";
 import type { AvailableCommand, RequestPermissionRequest } from "@zeros/protocol/agent-events";
 import { applyUpdate } from "@zeros/protocol/agent-messages";
+import type { HookCallback, Options } from "@anthropic-ai/claude-agent-sdk";
+import { PERMISSION_RESPONSE_TIMEOUT_MS } from "../../shared/constants";
 
 const TMP_DATA = path.join(os.tmpdir(), `zeros-sdk-test-${process.pid}`);
 let prevDataDir: string | undefined;
@@ -40,6 +42,150 @@ afterAll(async () => {
 });
 
 const tick = () => new Promise((r) => setTimeout(r, 0));
+
+describe("Full access native questions", () => {
+  const payload = { questions: [{ question: "Which route?", header: "Route", multiSelect: false,
+    options: [{ label: "A", description: "First" }, { label: "B", description: "Second" }] }] };
+  const event = (tool = "AskUserQuestion") => ({ hook_event_name: "PreToolUse", session_id: "sdk-question",
+    transcript_path: "/fixture/transcript", cwd: "/tmp", tool_name: tool, tool_input: payload, tool_use_id: "native-ask" } as const);
+  const response = { outcome: { outcome: "answered" as const, answers: [{ questionId: "q0", selectedOptionIds: ["o1"] }] } };
+
+  async function setup() {
+    const live = makePushableQuery(), questions: QuestionCapture[] = [], perms: PermCapture[] = [];
+    const ctx = makeCtx([], perms, { questions });
+    const adapter = new ClaudeSdkAdapter(ctx, { queryFn: live.queryFn });
+    const { session } = await adapter.newSession({ cwd: "/tmp" });
+    await adapter.setMode({ sessionId: session.sessionId, modeId: "bypass" });
+    const turn = adapter.prompt({ sessionId: session.sessionId, prompt: [textBlock("ask")] });
+    await vi.waitFor(() => expect(live.inputsSeen).toHaveLength(1));
+    return { adapter, live, session, questions, perms, turn, ctx };
+  }
+
+  function hook(t: Awaited<ReturnType<typeof setup>>): HookCallback {
+    const options = t.live.captured[0] as Options;
+    expect(options).toMatchObject({ permissionMode: "bypassPermissions", allowDangerouslySkipPermissions: true, permissionPromptToolName: "stdio" });
+    expect(options.canUseTool).toBeUndefined();
+    expect(options.hooks?.PreToolUse?.[0]).toMatchObject({ matcher: "^AskUserQuestion$" });
+    expect(options.hooks!.PreToolUse![0].timeout).toBeGreaterThan(PERMISSION_RESPONSE_TIMEOUT_MS / 1_000);
+    return options.hooks!.PreToolUse![0].hooks[0];
+  }
+
+  it("returns canonical human answers through the native tool without a permission prompt", async () => {
+    const t = await setup();
+    try {
+      const pending = hook(t)(event(), "native-ask", { signal: new AbortController().signal });
+      await tick(); expect(t.questions).toHaveLength(1);
+      expect(t.adapter.respondToQuestion({ questionId: t.questions[0].id, response })).toBe(true);
+      expect(await pending).toEqual({ hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: "allow",
+        updatedInput: { ...payload, answers: { "Which route?": "B" } } } });
+      expect(t.perms).toEqual([]);
+    } finally { await t.adapter.dispose(); await t.turn; }
+  });
+
+  it("never handles or prompts for another tool in Full access", async () => {
+    const t = await setup();
+    try {
+      const callback = hook(t), matcher = new RegExp((t.live.captured[0] as Options).hooks!.PreToolUse![0].matcher!);
+      for (const tool of ["Read", "Write", "Edit", "Bash", "ExitPlanMode", "mcp__fixture__AskUserQuestion", "AskUserQuestionExtra", "askuserquestion"]) {
+        expect(matcher.test(tool)).toBe(false);
+        expect(await callback(event(tool), "other", { signal: new AbortController().signal })).toEqual({});
+      }
+      expect(t.questions).toEqual([]); expect(t.perms).toEqual([]);
+    } finally { await t.adapter.dispose(); await t.turn; }
+  });
+
+  it.each(["dismiss", "failure", "cancel", "dispose", "native-abort"])("denies on %s and never accepts a late answer", async reason => {
+    const t = await setup(), abort = new AbortController();
+    try {
+      if (reason === "failure") t.ctx.emit.onQuestionRequest = () => { throw new Error("fixture delivery failure"); };
+      const callback = hook(t), pending = callback(event(), "native-ask", { signal: abort.signal });
+      await tick();
+      if (reason === "dismiss") t.adapter.respondToQuestion({ questionId: t.questions[0].id, response: { outcome: { outcome: "dismissed" } } });
+      if (reason === "cancel") await t.adapter.cancel({ sessionId: t.session.sessionId });
+      if (reason === "dispose") await t.adapter.dispose();
+      if (reason === "native-abort") abort.abort();
+      await expect(pending).resolves.toMatchObject({ hookSpecificOutput: { permissionDecision: "deny" } });
+      if (t.questions[0]) expect(t.adapter.respondToQuestion({ questionId: t.questions[0].id, response })).toBe(false);
+      if (reason === "cancel" || reason === "dispose" || reason === "native-abort") {
+        await expect(callback(event(), "late", { signal: abort.signal })).resolves.toMatchObject({ hookSpecificOutput: { permissionDecision: "deny" } });
+        expect(t.questions).toHaveLength(1);
+      }
+    } finally { await t.adapter.dispose(); await t.turn; }
+  });
+
+  it("denies an answer when cancellation retires the query before the hook can return", async () => {
+    const t = await setup();
+    try {
+      const pending = hook(t)(event(), "native-ask", { signal: new AbortController().signal });
+      await tick();
+      t.adapter.respondToQuestion({ questionId: t.questions[0].id, response });
+      const cancelled = t.adapter.cancel({ sessionId: t.session.sessionId });
+      await expect(pending).resolves.toMatchObject({ hookSpecificOutput: { permissionDecision: "deny" } });
+      await cancelled;
+    } finally { await t.adapter.dispose(); await t.turn; }
+  });
+
+  it("uses Local's existing 30-minute question timeout", async () => {
+    const t = await setup();
+    try {
+      vi.useFakeTimers();
+      const pending = hook(t)(event(), "native-ask", { signal: new AbortController().signal });
+      await vi.advanceTimersByTimeAsync(PERMISSION_RESPONSE_TIMEOUT_MS);
+      await expect(pending).resolves.toMatchObject({ hookSpecificOutput: { permissionDecision: "deny" } });
+    } finally { vi.useRealTimers(); await t.adapter.dispose(); await t.turn; }
+  });
+
+  it("captures a synchronous human response before publishing the question", async () => {
+    const t = await setup();
+    try {
+      t.ctx.emit.onQuestionRequest = (_agent, questionId) => { t.adapter.respondToQuestion({ questionId, response }); };
+      await expect(hook(t)(event(), "native-ask", { signal: new AbortController().signal }))
+        .resolves.toMatchObject({ hookSpecificOutput: { permissionDecision: "allow", updatedInput: { answers: { "Which route?": "B" } } } });
+    } finally { await t.adapter.dispose(); await t.turn; }
+  });
+
+  it("denies even when question publication and error reporting both fail", async () => {
+    const t = await setup();
+    try {
+      t.ctx.emit.onQuestionRequest = () => { throw new Error("fixture publication failure"); };
+      t.ctx.emit.onQuestionSettled = () => { throw new Error("fixture settlement failure"); };
+      t.ctx.emit.onAgentStderr = () => { throw new Error("fixture logging failure"); };
+      await expect(hook(t)(event(), "native-ask", { signal: new AbortController().signal }))
+        .resolves.toMatchObject({ hookSpecificOutput: { permissionDecision: "deny" } });
+    } finally { await t.adapter.dispose(); await t.turn; }
+  });
+
+  it("refuses a hook captured before a native query replacement", async () => {
+    const questions: QuestionCapture[] = [];
+    const live = makeScriptedQuery([[initMsg("sdk-hooks"), resultOk("sdk-hooks")], [initMsg("sdk-hooks"), resultOk("sdk-hooks")]], { keepAliveAfterResult: true });
+    const adapter = new ClaudeSdkAdapter(makeCtx([], [], { questions }), { queryFn: live.queryFn });
+    try {
+      const { session } = await adapter.newSession({ cwd: "/tmp" });
+      await adapter.setMode({ sessionId: session.sessionId, modeId: "bypass" });
+      await adapter.prompt({ sessionId: session.sessionId, prompt: [textBlock("first")] });
+      const callback = (live.captured[0] as Options).hooks!.PreToolUse![0].hooks[0];
+      await adapter.setMode({ sessionId: session.sessionId, modeId: "plan" });
+      await adapter.prompt({ sessionId: session.sessionId, prompt: [textBlock("second")] });
+      expect((live.captured[1] as Options).hooks?.PreToolUse).toBeUndefined();
+      await expect(callback(event(), "late", { signal: new AbortController().signal }))
+        .resolves.toMatchObject({ hookSpecificOutput: { permissionDecision: "deny" } });
+      expect(questions).toEqual([]);
+    } finally { await adapter.dispose(); }
+  });
+
+  it("keeps the permission channel absent for a host without question support", async () => {
+    const live = makeScriptedQuery([[initMsg("sdk-legacy"), resultOk("sdk-legacy")]]), ctx = makeCtx([], []);
+    delete (ctx.emit as Partial<AgentAdapterContext["emit"]>).onQuestionRequest;
+    const adapter = new ClaudeSdkAdapter(ctx, { queryFn: live.queryFn });
+    try {
+      const { session } = await adapter.newSession({ cwd: "/tmp" });
+      await adapter.setMode({ sessionId: session.sessionId, modeId: "bypass" });
+      await adapter.prompt({ sessionId: session.sessionId, prompt: [textBlock("first")] });
+      expect((live.captured[0] as Options).permissionPromptToolName).toBeUndefined();
+      expect((live.captured[0] as Options).hooks?.PreToolUse).toBeUndefined();
+    } finally { await adapter.dispose(); }
+  });
+});
 
 describe("Claude native launch policy",()=>{
 

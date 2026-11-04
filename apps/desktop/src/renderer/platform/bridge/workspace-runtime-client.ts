@@ -955,12 +955,9 @@ export class WorkspaceRuntimeClient extends RuntimeClient {
     message: Message,
     options: number | RequestOptions,
   ): Promise<BridgeMessage> {
-    // Search is not part of cloud v2 yet; never open, wake or read the mirror for it.
-    if (message.type === "WORKSPACE_REQUEST" && (message as unknown as WireRecord).op === "messages.search")
-      throw Object.assign(new Error("Search isn't available in cloud workspaces yet."), { code: "CLOUD_V2_UNSUPPORTED" });
     if (this.routing.readHistory && message.type === "WORKSPACE_REQUEST") {
       const wire = message as unknown as WireRecord;
-      if (["chats.list", "messages.window", "messages.windowOlder"].includes(String(wire.op)))
+      if (["chats.list", "messages.window", "messages.windowOlder", "messages.search"].includes(String(wire.op)))
         return { type: "WORKSPACE_RESPONSE", op: wire.op,
           result: await this.readHistory(target, String(wire.op), wire.op === "chats.list" ? {} : record(wire.params)),
         } as unknown as BridgeMessage;

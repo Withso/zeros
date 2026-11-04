@@ -69,7 +69,7 @@ interface WorkspaceErrorLike {
 
 /** Carries the engine's `code` and `remediation`, so `isGitErrorShape()` (keyed
  *  on a string `code`) matches and `humanError()` can render the hint. */
-class WorkspaceOpError extends Error {
+export class WorkspaceOpError extends Error {
   readonly code: string;
   readonly remediation?: string;
   constructor(resp: WorkspaceErrorLike) {

@@ -1,12 +1,16 @@
+import { randomUUID } from "node:crypto";
 import { createRequire } from "node:module";
-import { dirname, join } from "node:path";
-import type { ContentBlock, PromptResponse, SessionNotification } from "@zeros/protocol/agent-events";
+import path, { dirname, join } from "node:path";
+import { codexModePolicy, codexQuestionFeatureArgs, mapCodexUserInputToQuestion, mapNativeQuestionAnswerToCodex, isCodexApprovalMethod,
+  mapCodexApprovalToPermission, mapCodexPermissionResponse, defaultCodexApprovalResponse, codexFileChangePaths,
+  type ContentBlock, type PromptResponse, type SessionNotification, type QuestionResponse, type RequestPermissionResponse } from "@zeros/protocol/agent-events";
 import type { SteerOutcome } from "@zeros/protocol/messages";
 import { codexModelUnavailableMessage } from "@zeros/protocol/model-rejection";
 import { redactDriverMessage, type Driver, type DriverOpen } from "../driver";
 import { normalizeProviderError } from "../shared/provider-error";
 import { retainProviderFailure } from "../../provider-failure";
 import { unsupportedInputNotice } from "../shared/unsupported-input";
+import { CLOUD_INPUT_TIMEOUT_MS, cleanInteraction, nativeInputResponse } from "../shared/native-input";
 import { driverTiming } from "../../agent-timings";
 import { JsonRpcProcess, RpcError } from "../shared/json-rpc-process";
 import { agentEnvironment } from "../shared/agent-environment";
@@ -26,6 +30,7 @@ interface CodexOptions {
 
 interface Turn {
   observed?: boolean;
+  abort: AbortController;
   id?: string;
   model?: string;
   effort: ReturnType<typeof codexEffort>;
@@ -54,6 +59,9 @@ export class CodexDriver implements Driver {
   private input?: DriverOpen;
   private nativeSessionId?: string;
   private model?: string;
+  private modeId: "read-only" | "full-access" = "full-access";
+  private readonly lifetime = new AbortController();
+  private readonly fileEditPathsByItemId = new Map<string, string[]>();
   private effort?: ReturnType<typeof codexEffort>;
   private fast = false;
   private active?: Turn;
@@ -72,9 +80,14 @@ export class CodexDriver implements Driver {
     this.state = "opening";
     this.input = input;
     this.model = input.model;
+    if (input.modeId !== undefined && input.modeId !== "read-only" && input.modeId !== "full-access") throw new Error("Invalid Codex mode.");
+    this.modeId = input.modeId ?? "full-access";
     this.effort = codexEffort(input.effort);
     this.fast = input.fast === true;
-    this.mapper = new CodexEventMapper({ sessionId: input.sessionId, resumed: !!input.nativeSessionId, emit: (event) => {
+    this.mapper = new CodexEventMapper({ onAsyncQuestion: request => {
+      if (this.state !== "ready" || !input.onQuestion) return;
+      void input.onQuestion(cleanInteraction({ ...request, expiresAt: Date.now() + CLOUD_INPUT_TIMEOUT_MS }, input), this.lifetime.signal).catch(() => {});
+    }, sessionId: input.sessionId, resumed: !!input.nativeSessionId, emit: (event) => {
       // A configured proxy token must never escape through provider error text
       // or transcript metadata. Native stderr is not observed at all.
       const clean = JSON.parse(this.redact(JSON.stringify(event))) as SessionNotification;
@@ -91,12 +104,13 @@ export class CodexDriver implements Driver {
       "model_providers.zeros_proxy.requires_openai_auth": false,
     };
     this.rpc = new JsonRpcProcess({
-      command, args: [...args, "app-server", ...Object.entries(config).flatMap(([key, value]) => ["-c", `${key}=${JSON.stringify(value)}`])],
+      command, args: [...args, "app-server", ...(input.onQuestion ? codexQuestionFeatureArgs() : []),
+        ...Object.entries(config).flatMap(([key, value]) => ["-c", `${key}=${JSON.stringify(value)}`])],
       cwd: input.cwd,
       env: agentEnvironment({ agent: "codex", token: input.proxy.token }, this.options.environment, this.options.gitEnvironment),
       requestTimeoutMs: this.options.requestTimeoutMs ?? 30_000,
       onNotification: (method, params) => this.notification(method, params),
-      onRequest: (method, params) => this.nativeRequest(method, params),
+      onRequest: (method, params, id) => this.nativeRequest(method, params, id),
       onClose: (error) => { this.state = "closed"; this.mapper?.endAgentActivity(); this.settle(error); },
       redact: (message) => this.redact(message),
     });
@@ -106,7 +120,7 @@ export class CodexDriver implements Driver {
       const response = await this.rpc.request<{ thread: { id: string }; model?: string }>(input.nativeSessionId ? "thread/resume" : "thread/start", {
         ...(input.nativeSessionId ? { threadId: input.nativeSessionId, excludeTurns: true } : {}),
         cwd: input.cwd, ...(input.model ? { model: input.model } : {}),
-        modelProvider: "zeros_proxy", approvalPolicy: "never", sandbox: "danger-full-access",
+        modelProvider: "zeros_proxy", approvalPolicy: codexModePolicy(this.modeId).approvalPolicy, sandbox: codexModePolicy(this.modeId).sandboxMode,
         ...(input.mcpServers ? { config: { mcp_servers: Object.fromEntries(Object.entries(input.mcpServers).map(([name, server]) => [name, { url: server.url, http_headers: server.headers }])) } } : {}),
       });
       if (this.state !== "opening" || typeof response?.thread?.id !== "string" || !response.thread.id)
@@ -134,8 +148,9 @@ export class CodexDriver implements Driver {
     const promise = new Promise<PromptResponse>((yes, no) => { resolve = yes; reject = no; });
     const ack = new Promise<void>((yes) => { acknowledge = yes; });
     const done = new Promise<void>((yes) => { finish = yes; });
-    const turn: Turn = { model: this.model, effort: this.effort, fast: this.fast, stopping: false, promise, resolve, reject, ack, acknowledge, done, finish, buffered: [] };
+    const turn: Turn = { abort: new AbortController(), model: this.model, effort: this.effort, fast: this.fast, stopping: false, promise, resolve, reject, ack, acknowledge, done, finish, buffered: [] };
     this.active = turn;
+    this.fileEditPathsByItemId.clear();
     this.mapper!.startTurn();
     driverTiming(this.input, "turn_sent");
     void this.rpc!.request<{ turn: { id: string; status?: string } }>("turn/start", {
@@ -147,7 +162,7 @@ export class CodexDriver implements Driver {
       ...(turn.model ? { collaborationMode: { mode: "default", settings: {
         model: turn.model, reasoning_effort: this.effort ?? null, developer_instructions: null,
       } } } : {}),
-      approvalPolicy: "never", sandboxPolicy: { type: "dangerFullAccess" },
+      approvalPolicy: codexModePolicy(this.modeId).approvalPolicy, sandboxPolicy: codexModePolicy(this.modeId).sandboxPolicy,
     }).then((response) => {
       if (this.active !== turn) return;
       if (typeof response?.turn?.id !== "string" || !response.turn.id) throw new Error("Codex returned an invalid turn.");
@@ -187,6 +202,14 @@ export class CodexDriver implements Driver {
     // turn/start owns model changes. A currently running turn keeps its model.
     if (this.model !== model) this.effort = undefined;
     this.model = model;
+  }
+
+  async setMode(modeId: string): Promise<void> {
+    this.assertReady();
+    if (modeId !== "read-only" && modeId !== "full-access") throw new Error("Invalid Codex mode.");
+    this.modeId = modeId;
+    for (const emit of this.listeners) emit({ sessionId: this.input!.sessionId,
+      update: { sessionUpdate: "current_mode_update", currentModeId: modeId } });
   }
 
   async updateConfig(config: { model?: string; effort?: string; fast: boolean }): Promise<void> {
@@ -231,7 +254,7 @@ export class CodexDriver implements Driver {
   async interrupt(): Promise<void> {
     const turn = this.active;
     if (!turn) return;
-    turn.stopping = true;
+    turn.stopping = true; turn.abort.abort();
     turn.interrupt ??= this.stop(turn);
     return turn.interrupt;
   }
@@ -264,7 +287,8 @@ export class CodexDriver implements Driver {
   }
 
   async dispose(): Promise<void> {
-    this.state = "closed";
+    this.state = "closed"; this.lifetime.abort();
+    this.fileEditPathsByItemId.clear();
     this.mapper?.endAgentActivity();
     this.settle(new Error("Codex driver was disposed."));
     await this.rpc?.dispose();
@@ -290,6 +314,10 @@ export class CodexDriver implements Driver {
       return;
     }
     if (nativeTurn !== undefined && nativeTurn !== turn.id) return;
+    if (method === "item/started" || method === "item/completed") {
+      const item = record(p.item), paths = codexFileChangePaths(item);
+      if (item.type === "fileChange" && typeof item.id === "string" && paths.length) this.fileEditPathsByItemId.set(item.id, paths);
+    }
     this.observe(turn);
     this.mapper!.handle(method, params);
     if (this.mapper!.sawTurnTerminal) {
@@ -306,7 +334,7 @@ export class CodexDriver implements Driver {
   private settle(error?: Error): void {
     const turn = this.active;
     if (!turn) return;
-    this.active = undefined;
+    this.active = undefined; turn.abort.abort();
     turn.buffered.length = 0;
     turn.acknowledge();
     turn.finish();
@@ -314,17 +342,41 @@ export class CodexDriver implements Driver {
     else turn.resolve({ stopReason: this.mapper!.stopReason, ...(this.mapper!.turnUsage ? { usage: this.mapper!.turnUsage } : {}), ...(turn.model ? { effectiveModel: turn.model } : {}) });
   }
 
-  private nativeRequest(method: string, params: unknown): unknown {
-    switch (method) {
-      case "item/commandExecution/requestApproval":
-      case "item/fileChange/requestApproval": return { decision: "decline" };
-      case "item/tool/requestUserInput": this.unsupportedInput("question", params); return { answers: {} };
-      case "mcpServer/elicitation/request": this.unsupportedInput("elicitation", params); return { action: "cancel", content: null, _meta: null };
-      case "item/permissions/requestApproval": return { permissions: {}, scope: "turn" };
-      case "applyPatchApproval":
-      case "execCommandApproval": return { decision: "denied" };
-      default: throw new RpcError("Unsupported worker request.", -32601);
+  private async nativeRequest(method: string, params: unknown, id: string | number): Promise<unknown> {
+    const input = this.input, turn = this.active, p = record(params);
+    const sameThread = p.threadId === undefined || p.threadId === this.nativeSessionId;
+    if (sameThread && turn && !turn.id && p.turnId !== undefined &&
+        (method === "item/tool/requestUserInput" || isCodexApprovalMethod(method))) {
+      // Input can precede turn/start's bounded ACK; its ID must match before publication.
+      await nativeInputResponse(() => turn.ack, turn.abort.signal, undefined);
     }
+    const current = !!input && this.state === "ready" && !!turn && this.active === turn && !turn.stopping &&
+      !turn.abort.signal.aborted && sameThread && (p.turnId === undefined || p.turnId === turn.id);
+    if (method === "item/tool/requestUserInput") {
+      if (!current) return { answers: {} };
+      if (!input.onQuestion) { this.unsupportedInput("question", params); return { answers: {} }; }
+      const request = mapCodexUserInputToQuestion(input.sessionId, randomUUID(), String(id), p, Date.now() + CLOUD_INPUT_TIMEOUT_MS);
+      request.toolCallId = this.mapper!.emitUserInputToolCall(p) ?? request.toolCallId;
+      const response = await nativeInputResponse(() => input.onQuestion!(cleanInteraction(request, input), turn.abort.signal), turn.abort.signal,
+        { outcome: { outcome: "dismissed" } } as QuestionResponse);
+      return mapNativeQuestionAnswerToCodex(request, response);
+    }
+    if (isCodexApprovalMethod(method)) {
+      if (!current || !input.onPermission) return defaultCodexApprovalResponse(method, current ? "decline" : "cancel");
+      const native = { method, params: p };
+      const canonical = mapCodexApprovalToPermission({ zerosSessionId: input.sessionId, cwd: input.cwd, fileEditPathsByItemId: this.fileEditPathsByItemId }, native,
+        { path, newId: () => String(id) });
+      const nativeId = canonical.toolCall.toolCallId;
+      const request = { ...canonical, nativeRequestId: String(id), allowLocalPolicies: false,
+        toolCall: { ...canonical.toolCall, toolCallId: this.mapper!.toolCallIdFor(nativeId) ?? nativeId, nativeToolCallId: nativeId } };
+      const response = await nativeInputResponse(() => input.onPermission!(cleanInteraction(request, input), turn.abort.signal), turn.abort.signal,
+        { outcome: { outcome: "cancelled" } } as RequestPermissionResponse);
+      return mapCodexPermissionResponse(native, response);
+    }
+    if (method === "mcpServer/elicitation/request") {
+      this.unsupportedInput("elicitation", params); return { action: "cancel", content: null, _meta: null };
+    }
+    throw new RpcError("Unsupported worker request.", -32601);
   }
 
   private unsupportedInput(kind: "question" | "elicitation", params: unknown): void {

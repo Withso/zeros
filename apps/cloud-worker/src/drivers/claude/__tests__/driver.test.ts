@@ -1,6 +1,6 @@
 import { afterEach, expect, it, vi } from "vitest";
 import { access } from "node:fs/promises";
-import type { SessionNotification } from "@zeros/protocol/agent-events";
+import type { QuestionRequest, QuestionResponse, SessionNotification } from "@zeros/protocol/agent-events";
 import { ClaudeDriver } from "../driver";
 import { harness, input, nativeId, result, text, tick } from "./fake-query";
 
@@ -235,4 +235,120 @@ it("reports background failure and recovery after a completed prompt, and marks 
   expect(events.some(event => event.update.sessionUpdate === "error_notice" && event.update.code === "claude-background-recovered")).toBe(true);
   query.push({ type: "system", subtype: "task_started", task_id: "unfinished", description: "Background task", is_backgrounded: true }); await tick(); query.end(); await tick();
   expect(events.some(event => event.update.sessionUpdate === "error_notice" && event.update.code === "claude-background-transport-closed")).toBe(true);
+});
+
+
+it("waits for a cloud answer and returns native question labels through the dialog", async () => {
+  const { driver, queries } = setup();
+  let answer!: (response: QuestionResponse) => void;
+  const onQuestion = vi.fn((_request: QuestionRequest) => new Promise<QuestionResponse>(resolve => { answer = resolve; }));
+  await driver.open({ ...input, onQuestion });
+  const turn = driver.prompt(text("hello")), query = queries[0], sent = await query.read();
+  const payload = { questions: [{ question: "Which route?", header: "Route", options: [{ label: "A", description: "First" }, { label: "B" }] }] };
+  let settled = false;
+  const dialog = query.args.options.onUserDialog!({ dialogKind: "ask_user_question", toolUseID: "native-question", payload } as never,
+    { signal: new AbortController().signal } as never).then(value => { settled = true; return value; });
+  await tick();
+  expect(onQuestion).toHaveBeenCalledOnce(); expect(settled).toBe(false);
+  expect(onQuestion.mock.calls[0]![0]).toMatchObject({ nativeRequestId: "native-question", blocking: true,
+    questions: [{ id: "q0", options: [{ id: "o0", label: "A" }, { id: "o1", label: "B" }], allowOther: true }] });
+  answer({ outcome: { outcome: "answered", answers: [{ questionId: "q0", selectedOptionIds: ["o1"], freeText: "because" }] } });
+  expect(await dialog).toEqual({ behavior: "completed", result: { questions: payload.questions, answers: { "Which route?": "B, because" } } });
+  query.push(result(sent.uuid)); await turn;
+});
+
+it("starts a Plan query with its native approval hook and without bypass permission", async () => {
+  const { driver, queries } = setup();
+  const selected = { ...input, modeId: "plan", onQuestion: vi.fn(async () => ({ outcome: { outcome: "dismissed" as const } })),
+    onPermission: vi.fn(async () => ({ outcome: { outcome: "cancelled" as const } })) };
+  await driver.open(selected);
+  const turn = driver.prompt(text("plan only")), query = queries[0], sent = await query.read();
+  expect(query.args.options.permissionMode).toBe("plan");
+  expect(query.args.options).not.toHaveProperty("allowDangerouslySkipPermissions");
+  expect(query.args.options.canUseTool).toBeTypeOf("function");
+  query.push(result(sent.uuid)); await turn;
+});
+
+it.each([
+  { defaultToNo: true },
+  { suppressAlwaysAllowRule: true },
+  { matchedAskRule: { source: "projectSettings", toolName: "Bash" } },
+])("preserves native explicit-approval requirements through the cloud callback: %j", async flags => {
+  const { driver, queries } = setup();
+  const onPermission = vi.fn(async () => ({ outcome: { outcome: "cancelled" as const } }));
+  await driver.open({ ...input, modeId: "plan", onPermission });
+  const turn = driver.prompt(text("plan")), query = queries[0], sent = await query.read();
+  try {
+    await query.args.options.canUseTool!("Bash", { command: "git status" }, {
+      signal: new AbortController().signal, toolUseID: "explicit", ...flags,
+    } as never);
+    expect(onPermission).toHaveBeenCalledWith(expect.objectContaining({ requiresExplicitApproval: true, allowLocalPolicies: false }), expect.any(AbortSignal));
+  } finally { query.push(result(sent.uuid)); await turn; }
+});
+
+it("deduplicates Claude tool/dialog questions and uses only the tool's answer channel", async () => {
+  const { driver, queries } = setup();
+  let answer!: (response: QuestionResponse) => void;
+  const onQuestion = vi.fn((_request: QuestionRequest) => new Promise<QuestionResponse>(resolve => { answer = resolve; }));
+  await driver.open({ ...input, modeId: "plan", onQuestion });
+  const turn = driver.prompt(text("ask")), query = queries[0], sent = await query.read(), signal = new AbortController().signal;
+  const payload = { questions: [{ question: "Route?", options: [{ label: "A" }, { label: "B" }] }] };
+  const dialog = query.args.options.onUserDialog!({ dialogKind: "ask_user_question", toolUseID: "native-ask", payload } as never, { signal } as never);
+  const tool = query.args.options.canUseTool!("AskUserQuestion", payload, { signal, toolUseID: "native-ask" } as never);
+  await tick(); expect(onQuestion).toHaveBeenCalledOnce();
+  answer({ outcome: { outcome: "answered", answers: [{ questionId: "q0", selectedOptionIds: ["o1"] }] } });
+  expect(await dialog).toEqual({ behavior: "cancelled" });
+  expect(await tool).toEqual({ behavior: "deny", message: "The user answered your question(s):\n- Route? → B" });
+  query.push(result(sent.uuid)); await turn;
+});
+
+it("keeps a denied plan in Plan and rebuilds creation-only permission options on the next explicit send", async () => {
+  const { driver, queries } = setup();
+  const onPermission = vi.fn(async () => ({ outcome: { outcome: "selected" as const, optionId: "reject_once" } }));
+  await driver.open({ ...input, modeId: "plan", onPermission });
+  const turn = driver.prompt(text("plan")), query = queries[0], sent = await query.read();
+  const approval = await query.args.options.canUseTool!("ExitPlanMode", { plan: "Write a test" }, { signal: new AbortController().signal, toolUseID: "plan" } as never);
+  expect(approval).toEqual({ behavior: "deny", message: "User denied this tool call." });
+  expect(query.modes).toEqual([]); expect(query.closed).toBe(false);
+  query.push(result(sent.uuid)); await turn;
+  await driver.setMode("bypass");
+  const next = driver.prompt(text("execute")), rebuilt = queries[1], message = await rebuilt.read();
+  expect(query.closed).toBe(true); expect(rebuilt.args.options).toMatchObject({ permissionMode: "bypassPermissions", allowDangerouslySkipPermissions: true });
+  expect(rebuilt.args.options.canUseTool).toBeUndefined(); rebuilt.push(result(message.uuid)); await next;
+});
+
+it("fails an explicit Plan turn if the native runtime announces bypass without approval", async () => {
+  const { driver, queries } = setup(); await driver.open({ ...input, modeId: "plan" });
+  const turn = driver.prompt(text("plan")), query = queries[0]; void turn.catch(() => {}); await query.read();
+  query.push({ type: "system", subtype: "init", session_id: nativeId, permissionMode: "bypassPermissions" }); await tick();
+  expect(query.closed).toBe(true);
+  await expect(turn).rejects.toThrow(/Plan mode/);
+});
+
+it("accepts an approved native Plan exit, but requires a new approval after explicitly returning to Plan", async () => {
+  const { driver, queries } = setup();
+  await driver.open({ ...input, modeId: "plan", onPermission: async () => ({ outcome: { outcome: "selected", optionId: "allow_once" } }) });
+  const turn = driver.prompt(text("plan")); void turn.catch(() => {});
+  const query = queries[0]; await query.read();
+  const approved = await query.args.options.canUseTool!("ExitPlanMode", { plan: "Write a test" }, { signal: new AbortController().signal, toolUseID: "plan" } as never);
+  expect(approved).toMatchObject({ behavior: "allow" });
+  query.push({ type: "system", subtype: "status", permissionMode: "bypassPermissions" }); await tick();
+  expect(query.closed).toBe(false);
+  await driver.setMode("plan");
+  query.push({ type: "system", subtype: "status", permissionMode: "bypassPermissions" }); await tick();
+  expect(query.closed).toBe(true);
+  await expect(turn).rejects.toThrow(/Plan mode/);
+});
+
+it("does not publish an older live mode reply over the user's later selection", async () => {
+  const { driver, queries } = setup(), events: SessionNotification[] = [];
+  driver.onEvent(event => events.push(event)); await driver.open(input);
+  const turn = driver.prompt(text("continue")), query = queries[0], sent = await query.read();
+  let release!: () => void;
+  query.setPermissionMode = mode => mode === "plan" ? new Promise<void>(resolve => { release = resolve; }) : Promise.resolve();
+  const older = driver.setMode("plan"); await tick();
+  await driver.setMode("bypass"); release(); await older;
+  const modes = events.flatMap(event => event.update.sessionUpdate === "current_mode_update" ? [event.update.currentModeId] : []);
+  expect(modes.at(-1)).toBe("bypass");
+  query.push(result(sent.uuid)); await turn;
 });

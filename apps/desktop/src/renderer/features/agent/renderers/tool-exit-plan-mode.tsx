@@ -38,11 +38,13 @@ import { LocalLinkHtml } from "../local-links/text";
 import { readPlan } from "./plan-body";
 import { EventRow, type EventMeta } from "./event-row";
 
-type ExitPlanStatus = "pending" | "approved" | "rejected";
+type ExitPlanStatus = "pending" | "approved" | "rejected" | "dismissed";
 
 export const ExitPlanModeCard: Renderer<AgentToolMessage> = memo(
   function ExitPlanModeCard({ message, ctx }) {
     const tool = message;
+    const dismissal = tool.rawOutput && typeof tool.rawOutput === "object" && "zerosInputDismissal" in tool.rawOutput &&
+      typeof tool.rawOutput.zerosInputDismissal === "string" ? tool.rawOutput.zerosInputDismissal : undefined;
     const planText = readPlan(tool.rawInput);
     const planHtml = useMemo(
       () => (planText ? renderMarkdown(planText) : null),
@@ -59,7 +61,7 @@ export const ExitPlanModeCard: Renderer<AgentToolMessage> = memo(
       !!permId &&
       (permId === tool.toolCallId || permId === tool.nativeToolCallId);
 
-    const status: ExitPlanStatus = pending
+    const status: ExitPlanStatus = dismissal ? "dismissed" : pending
       ? "pending"
       : tool.status === "completed"
         ? "approved"
@@ -74,7 +76,7 @@ export const ExitPlanModeCard: Renderer<AgentToolMessage> = memo(
           ? "Plan ready for review"
           : status === "approved"
             ? "Plan approved"
-            : "Plan rejected",
+            : status === "dismissed" ? "Plan dismissed" : "Plan rejected",
       expandable: true,
     };
 
@@ -87,10 +89,10 @@ export const ExitPlanModeCard: Renderer<AgentToolMessage> = memo(
           label="Awaiting review"
           className="shrink-0"
         />
-      ) : status === "rejected" ? (
+      ) : status === "rejected" || status === "dismissed" ? (
         <CircleX
-          aria-label="Rejected"
-          className="size-3 shrink-0 text-red-primary"
+          aria-label={status === "dismissed" ? "Dismissed" : "Rejected"}
+          className={status === "dismissed" ? "size-3 shrink-0 text-fg3" : "size-3 shrink-0 text-red-primary"}
         />
       ) : undefined;
 
@@ -114,7 +116,7 @@ export const ExitPlanModeCard: Renderer<AgentToolMessage> = memo(
         message={message}
         ctx={ctx}
         meta={meta}
-        detail={detail}
+        detail={<>{dismissal ? <div className="text-fg3 mb-2 text-xs">{dismissal}</div> : null}{detail}</>}
         trailingNode={trailing}
         // Rejection is DELIVERED via a deny tool_result (a transport detail,
         // same as the question record) — never tint the plan row red.

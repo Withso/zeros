@@ -115,6 +115,9 @@ export const QuestionRecordCard: Renderer<AgentToolMessage> = memo(
     // The detail body — the shared plain body inside the one detail card.
     const detail = (
       <div className={cn(DETAIL_BODY_CLS, "gap-3")}>
+        {stamp?.outcome === "skipped" && stamp.summary ? (
+          <div className="text-fg3 text-xs">{stamp.summary}</div>
+        ) : null}
         {stamp?.outcome === "answered" ? (
           // Question ↔ answer pairs only — no scope tags, no option list.
           (stamp.answers && stamp.answers.length > 0

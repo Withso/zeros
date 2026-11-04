@@ -490,6 +490,7 @@ export function useEditorCodeReview({
   const hasFooter = !!(
     unplaced.length ||
     review.error ||
+    review.notice ||
     review.loading ||
     review.partial ||
     review.nextCursor ||

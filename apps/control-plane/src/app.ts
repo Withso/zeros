@@ -73,6 +73,16 @@ export type ControlPlaneApp = Hono & {
 };
 
 const cloudTokenBucket = createPrivateRateLimitKey();
+// HttpError codes are strings, so even a syntactically valid code can contain
+// upstream or request data. Diagnostics admit only known causes.
+const CLOUD_DIAGNOSTIC_CODES = new Set([
+  "auth_unavailable", "authentication_temporarily_unavailable", "boat_credit_limit",
+  "cloud_agent_credential_busy", "cloud_github_unavailable", "configuration_changing",
+  "github_bad_response", "github_cloud_not_configured", "github_invalid_response", "github_not_configured",
+  "github_oauth_failed", "github_refresh_pending", "github_refresh_uncertain", "github_repository_invalid",
+  "github_timeout", "github_unavailable", "github_verification_busy", "github_verification_expired",
+  "github_verification_failed", "mcp_auth_busy", "request_cancelled",
+]);
 
 function isCloudWorkspaceApiPath(path: string): boolean {
   return path === "/v1/auth/snapshot" || path === "/v1/auth/events" || path.startsWith("/v1/cloud-v2/") || path.startsWith("/v2/cloud/") ||
@@ -402,6 +412,7 @@ export function createApp(
     if (err instanceof HTTPException) return err.getResponse();
     if (err instanceof HttpError) {
       if (c.req.path.startsWith("/v1/cloud-v2/") && err.status >= 500) {
+        console.error("[cloud-v2] request failed", { code: CLOUD_DIAGNOSTIC_CODES.has(err.code) ? err.code : "unclassified", status: err.status });
         return c.json({ error: { code: "cloud_workspace_unavailable", message: "The cloud workspace is temporarily unavailable" } }, err.status);
       }
       return c.json(

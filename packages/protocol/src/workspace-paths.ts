@@ -335,3 +335,5 @@ export class WorkspacePathIndex {
     return finish();
   }
 }
+
+export { isSensitiveWorkspacePath } from "./workspace-sensitive-paths";

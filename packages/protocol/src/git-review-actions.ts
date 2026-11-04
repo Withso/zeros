@@ -2,6 +2,9 @@ import { z } from "zod";
 import { sha256 } from "@noble/hashes/sha2.js";
 import { bytesToHex } from "@noble/hashes/utils.js";
 import { codeReviewPathSchema } from "./code-review";
+export { validateGitReference, requireGitPaths, validateGitReset, gitResetArgs, gitRestoreArgs } from "./git-operations";
+export type { GitResetMode } from "./git-operations";
+export { parseGitRemotes, parseGitCatalogRefs, parseGitBranchRefs, parseGitWorktrees } from "./git-branches";
 export { parseMergeConflicts, applyConflictChoices } from "./merge-conflicts";
 export type {
   MergeConflict,

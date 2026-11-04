@@ -1,0 +1,9 @@
+{
+  "id": "cloud-native-input-roundtrip",
+  "kind": "scenario",
+  "area": "cloud-worker",
+  "fixedBy": "pr:833",
+  "symptom": "Cloud agents cancelled supported native questions and could not wait for a Plan approval, even though Local used the same provider runtimes and cards.",
+  "rule": "Reuse Local question, native approval and mode policies, negotiate support, persist the request before publication and keep its resolver owned by the exact execution and acknowledged native turn. Preserve explicit approval flags, ordered native choices and grant scopes. Disconnect preserves pending input; Stop, restart and the 15-minute cloud deadline dismiss it durably. Fence and interrupt every affected execution before awaiting any held shutdown or HTTP Stop receipt. See agents/zstack/playbooks/feature.md and docs/cloud-workspaces.md.",
+  "check": "pnpm --dir apps/cloud-worker test src/__tests__/agent-interactions.test.ts src/__tests__/agent-shutdown-interactions.test.ts src/__tests__/prompt-inbox.test.ts src/drivers/claude/__tests__/driver.test.ts src/drivers/codex/__tests__ --maxWorkers=2"
+}

@@ -129,6 +129,28 @@ describe("cloud v2 relay", () => {
     expect(deps.workerRoute).toHaveBeenCalledTimes(2);
   });
 
+  it.each(["creating", "starting"] as const)("does not dial a bound boot until its %s configuration is ready", async pendingState => {
+    state = pendingState;
+    const read = vi.mocked(deps.workerRoute).getMockImplementation()!;
+    let entered!: () => void, release!: () => void;
+    const observed = new Promise<void>(resolve => { entered = resolve; });
+    const held = new Promise<void>(resolve => { release = resolve; });
+    let reads = 0;
+    vi.mocked(deps.workerRoute).mockImplementation(async id => {
+      const route = await read(id);
+      if (++reads === 2) { entered(); await held; }
+      return route;
+    });
+    await app(); await observed;
+    try {
+      expect(connectedWorkers).toHaveLength(0); expect(deps.config).not.toHaveBeenCalled();
+      state = "running";
+    } finally { release(); }
+    await vi.waitFor(() => expect(deps.config).toHaveBeenCalledTimes(1));
+    expect(connectedWorkers).toHaveLength(1);
+    expect(deps.wake).not.toHaveBeenCalled();
+  });
+
   it("keeps the socket heartbeat free of permission, login and database polling", async () => {
     deps.authorizeSource = vi.fn(async () => {});
     await worker();
@@ -256,6 +278,38 @@ describe("cloud v2 relay", () => {
     }
   });
 
+  it.each([false, true])("gates user-token recovery on WebSocket upgrade support=%s", async supported => {
+    workerServer.on("headers", headers => { headers.push(`X-Zeros-Worker-Features: mcp-v1${supported ? ",github-user-token-v1" : ""}`); });
+    const original = deps.config;
+    deps.config = async ws => ({ ...await original(ws), githubUserTokens: 1 });
+    const frames: any[] = [];
+    workerServer.on("connection", ws => ws.on("message", raw => frames.push(JSON.parse(String(raw)))));
+    await app();
+    await vi.waitFor(() => expect(frames.filter(frame => frame.t === "config")).toHaveLength(1));
+    loginRevision = "1"; await relay.refreshLogins();
+    await vi.waitFor(() => expect(frames.filter(frame => frame.t === "config")).toHaveLength(2));
+    for (const frame of frames.filter(frame => frame.t === "config")) {
+      if (supported) expect(frame.githubUserTokens).toBe(1);
+      else expect(frame).not.toHaveProperty("githubUserTokens");
+    }
+  });
+
+  it.each(["", "code-review-v10", "code-review-v1"])("gates trusted review identity on initial and refreshed WebSocket config: %s", async features => {
+    workerServer.on("headers", headers => { headers.push(`X-Zeros-Worker-Features: mcp-v1,${features}`); });
+    const original = deps.config, codeReview = { userId: workspaceId, userName: "Fixture reviewer" };
+    deps.config = async ws => ({ ...await original(ws), codeReview });
+    const frames: any[] = [];
+    workerServer.on("connection", ws => ws.on("message", raw => frames.push(JSON.parse(String(raw)))));
+    await app();
+    await vi.waitFor(() => expect(frames.filter(frame => frame.t === "config")).toHaveLength(1));
+    loginRevision = "1"; await relay.refreshLogins();
+    await vi.waitFor(() => expect(frames.filter(frame => frame.t === "config")).toHaveLength(2));
+    for (const frame of frames.filter(frame => frame.t === "config")) {
+      if (features === "code-review-v1") expect(frame.codeReview).toEqual(codeReview);
+      else expect(frame).not.toHaveProperty("codeReview");
+    }
+  });
+
   it.each([false, true])("gates setup on WebSocket upgrade support=%s for initial and refreshed config", async supported => {
     workerServer.on("headers", headers => { headers.push(`X-Zeros-Worker-Features: mcp-v1${supported ? ",workspace-setup-v1" : ""}`); });
     const original = deps.config;
@@ -291,6 +345,21 @@ describe("cloud v2 relay", () => {
         else expect(frame.workspace).not.toHaveProperty("setup");
       }
     });
+
+  it.each(["", "agent-interactions-v10", "mcp-v1, agent-interactions-v1"])("gates interaction config on the actual worker handshake: %s", async features => {
+    workerServer.on("headers", headers => { headers.push(`X-Zeros-Worker-Features: ${features}`); });
+    const original = deps.config;
+    deps.config = async workspace => ({ ...await original(workspace), agentInteractions: 1 });
+    const frames: any[] = [];
+    workerServer.on("connection", ws => ws.on("message", raw => frames.push(JSON.parse(String(raw)))));
+    await app(); await vi.waitFor(() => expect(frames.filter(frame => frame.t === "config")).toHaveLength(1));
+    loginRevision = "1"; await relay.refreshLogins();
+    await vi.waitFor(() => expect(frames.filter(frame => frame.t === "config")).toHaveLength(2));
+    for (const frame of frames.filter(frame => frame.t === "config")) {
+      if (features.split(",").some(feature => feature.trim() === "agent-interactions-v1")) expect(frame.agentInteractions).toBe(1);
+      else expect(frame).not.toHaveProperty("agentInteractions");
+    }
+  });
 
   it("settles only prompts forwarded to a lost worker and preserves prompts queued for its successor", async () => {
     const forwarded: any[][] = [];

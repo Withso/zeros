@@ -1,3 +1,4 @@
+import { cursorSdkMode, cursorAutoReview } from "@zeros/protocol/agent-events";
 import type { HostEvent, NativeAgent, NativeRun, NativeSDK, OpenParams, PromptParams } from "./native-types";
 import { CURSOR_VERSION } from "./native-types";
 import { CursorModelCatalog, type CursorModelRecord } from "./model-selection";
@@ -28,9 +29,9 @@ export class CursorHost {
     this.opening = true;
     const models = new CursorModelCatalog(await this.listModels({ apiKey: this.apiKey }));
     if (this.disposed) throw new Error("Cursor host closed during model discovery.");
-    const options = { cwd: params.cwd, model: models.selection(params.model, params.effort, params.fast === true), apiKey: this.apiKey, mode: "agent" as const,
+    const options = { cwd: params.cwd, model: models.selection(params.model, params.effort, params.fast === true), apiKey: this.apiKey, mode: cursorSdkMode(params.modeId ?? "agent"),
       ...(params.mcpServers ? { mcpServers: params.mcpServers } : {}),
-      disallowedTools: ["askQuestion"], local: { cwd: params.cwd, autoReview: false, sandboxOptions: { enabled: false },
+      disallowedTools: ["askQuestion"], local: { cwd: params.cwd, autoReview: cursorAutoReview(params.modeId ?? "agent"), sandboxOptions: { enabled: false },
         enableAgentRetries: false, settingSources: ["project", "user"] as Array<"project" | "user">, subagentInherit: {} } };
     const agent = params.nativeSessionId ? await this.sdk.resume(params.nativeSessionId, options) : await this.sdk.create(options);
     if (this.disposed || !agent.agentId || (params.nativeSessionId && agent.agentId !== params.nativeSessionId)) {
@@ -55,7 +56,7 @@ export class CursorHost {
       await this.publish({ t: "event", turnId: turn.id, kind, value });
     };
     try {
-      turn.run = await this.agent.send(params.content, { mode: "agent", model: this.models!.selection(params.model, params.effort, params.fast === true), local: { force: true },
+      turn.run = await this.agent.send(params.content, { mode: cursorSdkMode(params.modeId ?? "agent"), model: this.models!.selection(params.model, params.effort, params.fast === true), local: { force: true },
         idempotencyKey: `zeros-${turn.id}`, onDelta: ({ update }) => emit("delta", update), onStep: ({ step }) => emit("step", step) });
       if (this.disposed || this.turn !== turn) { await this.cancel(turn); throw new Error("Cursor turn was closed during send."); }
       await this.publish({ t: "event", turnId: turn.id, kind: "started", value: { agentId: this.agent.agentId, runId: turn.run.id } });

@@ -235,7 +235,21 @@ export function cloudIncoming(
     out.workspaceIds = [cloudWorkspaceKey(scope)];
     out.cloudWorkspace = cloudWorkspaceKey(scope);
   }
+  if (message.type === "WORKSPACE_RESPONSE" && message.op === "git.listAllBranches" && Array.isArray(message.result)) {
+    return { ...out, result: message.result.map(value => {
+      const branch = record(value);
+      if (branch.worktreePath == null) return branch;
+      if (branch.worktreePath !== scope.root) throw new Error("Invalid cloud branch worktree identity");
+      return { ...branch, worktreePath: cloudWorkspaceKey(scope) };
+    }) };
+  }
   if (message.result && typeof message.result === "object") {
+    if (["codeReview.list", "codeReview.create", "codeReview.reply", "codeReview.setResolved"].includes(String(message.op))) {
+      const native = record(message.result);
+      if (native.workspaceId !== scope.engineWorkspaceId ||
+          message.op === "codeReview.list" && Array.isArray(native.threads) && native.threads.some(thread => record(thread).workspaceId !== scope.engineWorkspaceId))
+        throw new Error("Invalid cloud review owner.");
+    }
     const result = mapFields(scope, record(message.result), "in");
     if (message.op === "chats.titleSeeds" && Array.isArray(result.seeds))
       result.seeds = result.seeds.map((seed) => mapFields(scope, record(seed), "in"));

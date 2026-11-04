@@ -966,3 +966,5 @@ function sameMessageId(a: string | undefined, b: string | undefined): boolean {
   if (a === undefined && b === undefined) return true;
   return a === b;
 }
+export { searchableMessageText, literalMessageSearch, messageSearchInput, MessageSearchIndex, MessageSearchError, boundMessageSearchHits } from "./message-search";
+export type { MessageSearchDatabase, MessageSearchHit } from "./message-search";

@@ -9,7 +9,11 @@ export const workerSupportsMcp = (socket: WebSocket): boolean => peerFeatures.ge
 export const workerSupportsSetup = (socket: WebSocket): boolean => peerFeatures.get(socket)?.has("workspace-setup-v1") ?? false;
 export const workerSupportsCheckout = (socket: WebSocket): boolean => peerFeatures.get(socket)?.has("checkout-v2") ?? false;
 export const workerSupportsGithub = (socket: WebSocket): boolean => peerFeatures.get(socket)?.has("github-pr-v1") ?? false;
+export const workerSupportsGithubUserTokens = (socket: WebSocket): boolean => peerFeatures.get(socket)?.has("github-user-token-v1") ?? false;
 export const workerSupportsGitIdentity = (socket: WebSocket): boolean => peerFeatures.get(socket)?.has("git-identity-v1") ?? false;
+export const workerSupportsCodeReview = (socket: WebSocket): boolean => peerFeatures.get(socket)?.has("code-review-v1") ?? false;
+
+export const workerSupportsAgentInteractions = (socket: WebSocket): boolean => peerFeatures.get(socket)?.has("agent-interactions-v1") ?? false;
 
 export function dialWorker(route: WorkerRoute, grant: string): Promise<WebSocket> {
   if (!route.url || !route.token) throw new Error("Worker route unavailable.");

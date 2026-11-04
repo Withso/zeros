@@ -7,6 +7,7 @@ import { CloudV2ControlFrameSchema, CLOUD_V2_RELAY_PROTOCOL, type CloudV2WorkerF
 import { CloudV2PromptPullReplySchema } from "@zeros/protocol/cloud-v2-prompts";
 import { createMessage, type BridgeMessage } from "@zeros/protocol/messages";
 import { safeParseClientBridgeMessage } from "@zeros/protocol/schemas";
+import { CodeReviewError } from "@zeros/protocol/code-review";
 import { MIN_SUPPORTED_PROTOCOL, PROTOCOL_VERSION } from "@zeros/protocol/version";
 import { Agents, type AppClient, type DriverFactories } from "./agents";
 import { RECENT_ACTIVITY_MS } from "./activity";
@@ -24,12 +25,15 @@ import { WorkspaceError, WorkspaceScope, type WorkerConfig } from "./workspace/s
 import { WorkspaceService, type WorkspaceServiceOptions } from "./workspace/service";
 import { isGitMutation } from "./workspace/git";
 import { GithubBroker, GithubTokens, githubEnvironment } from "./credentials/github";
+import { GithubCredentialRecovery } from "./credentials/github-recovery";
 import { configureGitIdentity } from "./credentials/git-identity";
 import { commandRunner } from "./workspace/commands";
 import { Terminals } from "./terminals/service";
 import type { ModelDiscoveryOptions } from "./credentials/model-availability";
 import { PromptInbox } from "./prompt-inbox";
 import { McpGateway } from "./mcp/gateway";
+import { WorkspaceToolsMcp } from "./mcp/workspace-tools";
+import { WorkerCodeReview } from "./workspace/code-review";
 import { measureStartup, recordStartupTiming, type StartupTimingObserver } from "./startup-timings";
 
 interface WorkerOptions {
@@ -41,6 +45,7 @@ interface WorkerOptions {
   prepareCheckout?: (workspace: WorkerConfig["workspace"], gitEnvironment: NodeJS.ProcessEnv, timing?: StartupTimingObserver) => Promise<CheckoutResult | void>;
   setupRunner?: SetupRunner;
   gitAskpassPath?: string;
+  githubFetch?: typeof fetch;
   workspaceServices?: WorkspaceServiceOptions;
   onError?: (code: "configuration" | "storage" | "transport") => void;
   onTiming?: TimingObserver;
@@ -58,6 +63,8 @@ export class CloudWorker {
   private store?: SessionStore;
   private agents?: Agents;
   private mcp?: McpGateway;
+  private readonly workspaceMcp = new WorkspaceToolsMcp();
+  private reviews?: WorkerCodeReview;
   private chats?: ChatService;
   private history?: HistoryMirror;
   private promptInbox?: PromptInbox;
@@ -65,8 +72,10 @@ export class CloudWorker {
   private terminals?: Terminals;
   private setup?: WorkspaceSetup;
   private checkoutRefresh?: CheckoutRefresh;
+  private initialSetupNeeded = false;
+  private checkoutSequence = 0;
   private readonly tokens: GithubTokens;
-  private readonly userTokens: GithubTokens;
+  private readonly githubCredentials: GithubCredentialRecovery;
   private githubUserTokensEnabled = false;
   private readonly github: GithubBroker;
   private readonly gitEnvironment: NodeJS.ProcessEnv;
@@ -75,7 +84,9 @@ export class CloudWorker {
   private disposed = false;
   private started = false;
   private stopping?: Promise<void>;
+  private acceptedConfigurationRevision?: bigint;
   private configurationRevision?: bigint;
+  private configuredReviewAvailable = false;
   private idle?: boolean;
   private activeMutations = 0;
   private lastMutationAt = -Infinity;
@@ -84,8 +95,8 @@ export class CloudWorker {
 
   constructor(private readonly options: WorkerOptions) {
     this.tokens = new GithubTokens((frame, timeoutMs) => this.send(frame, timeoutMs));
-    this.userTokens = new GithubTokens((frame, timeoutMs) => this.send(frame, timeoutMs), { purpose: "gh" });
-    this.github = new GithubBroker(`/tmp/zeros-github-${this.instanceId}/github.sock`, purpose => purpose === "gh" && this.githubUserTokensEnabled ? this.userTokens.get() : this.tokens.get(), () => this.workspace?.githubChanged());
+    this.githubCredentials = new GithubCredentialRecovery(this.tokens, { fetch: options.githubFetch, supportsRecovery: () => this.githubUserTokensEnabled });
+    this.github = new GithubBroker(`/tmp/zeros-github-${this.instanceId}/github.sock`, (purpose, failed) => this.githubCredentials.get(purpose, failed), () => this.workspace?.githubChanged());
     this.gitEnvironment = githubEnvironment(this.github.socketPath, options.gitAskpassPath ?? fileURLToPath(new URL("../bin/git-askpass", import.meta.url)));
   }
 
@@ -97,7 +108,7 @@ export class CloudWorker {
     this.options.transport.start({
       open: async () => {
         if (this.disposed) return;
-        this.online = true; this.idle = undefined; this.tokens.connect(); this.userTokens.connect();
+        this.online = true; this.idle = undefined; this.tokens.connect();
         await this.send({ t: "hello", protocol: CLOUD_V2_RELAY_PROTOCOL, workerVersion: "0.0.0",
           capabilities: { design: false, browser: false, simulators: false, terminal: true, files: true, git: true, agents: ["codex", "claude", "cursor"], mcp: 1 } });
       },
@@ -105,13 +116,17 @@ export class CloudWorker {
       close: () => {
         this.online = false;
         for (const client of this.clients.values()) this.terminals?.detach(client);
-        this.clients.clear(); this.history?.disconnect(); this.tokens.disconnect(); this.userTokens.disconnect();
+        this.clients.clear(); this.history?.disconnect(); this.tokens.disconnect(); this.githubCredentials.disconnect();
       },
     });
   }
 
   async flush(): Promise<void> {
     await this.configuring;
+    await this.flushServices();
+  }
+
+  private async flushServices(): Promise<void> {
     // Let resolved native promises enter their durable turn-end section.
     await new Promise<void>((resolve) => setImmediate(resolve));
     await this.agents?.flush();
@@ -123,7 +138,8 @@ export class CloudWorker {
 
   async dispose(): Promise<void> {
     if (this.disposed) return;
-    this.disposed = true; clearInterval(this.heartbeat); this.tokens.dispose(); this.userTokens.dispose();
+    this.disposed = true; clearInterval(this.heartbeat); this.tokens.dispose(); this.githubCredentials.invalidate();
+    const workspaceTools = this.workspaceMcp.dispose();
     await this.configuring.catch(() => {});
     await this.stopCheckout();
     await this.promptInbox?.dispose();
@@ -131,6 +147,8 @@ export class CloudWorker {
     await this.workspace?.dispose();
     await this.agents?.dispose();
     await this.mcp?.dispose();
+    await workspaceTools;
+    this.reviews?.close();
     await this.store?.flush();
     await this.history?.flush();
     for (const unsubscribe of this.unsubscribers) unsubscribe();
@@ -151,7 +169,7 @@ export class CloudWorker {
     }
     // Checkout preparation can be waiting for this reply. Never queue control
     // replies behind configuration or behind ordinary app work.
-    if (message.t === "reply" || message.t === "refusal") { this.tokens.receive(message); this.userTokens.receive(message); return; }
+    if (message.t === "reply" || message.t === "refusal") { this.tokens.receive(message); return; }
     if (message.t === "prompts") { this.promptInbox?.hint(); return; }
     if (message.t === "stop") {
       // The VM can stop only after the native turn's final rows reach the HTTP
@@ -160,7 +178,7 @@ export class CloudWorker {
       await this.stopping;
       // A lost HTTPS response may need a retry after quiescing. Do not cache a
       // mirror failure in the promise that prevents new work from starting.
-      await this.flush();
+      await this.flushServices();
       if (this.history && !await this.history.flush()) throw new Error("History mirror is unavailable.");
       await this.send({ t: "stop-ack", id: message.id });
       return;
@@ -177,15 +195,14 @@ export class CloudWorker {
       } };
       this.clients.set(client.id, client);
       await this.configuring;
-      if (!this.scope || !this.online || this.clients.get(client.id) !== client) return;
-      await client.send(createMessage({ type: "ENGINE_READY", source: "engine", version: "0.0.0", root: "", framework: "cloud", port: 0,
-        protocolVersion: PROTOCOL_VERSION, minProtocolVersion: MIN_SUPPORTED_PROTOCOL, instanceId: this.instanceId }));
+      if (!this.scope || !this.online || this.disposed || this.stopping || this.clients.get(client.id) !== client) return;
+      await client.send(this.readyFrame());
       return;
     }
     const client = this.clients.get(message.clientId);
     if (!client || client.rejected) return;
     await this.configuring;
-    if (!this.scope || !this.online || this.clients.get(client.id) !== client) return;
+    if (!this.scope || !this.online || this.disposed || this.stopping || this.clients.get(client.id) !== client) return;
     const frame = safeParseClientBridgeMessage(message.frame);
     if (!frame) return;
     if (frame.type === "CONNECTED") {
@@ -207,7 +224,8 @@ export class CloudWorker {
       return this.terminals!.handle(client, frame);
     }
     if (frame.type === "WORKSPACE_REQUEST") {
-      const mutation = frame.op === "file.write" || frame.op === "workspace.prepareGithub" || isGitMutation(frame.op);
+      const mutation = frame.op === "file.write" || frame.op === "workspace.prepareGithub" ||
+        ["codeReview.create", "codeReview.reply", "codeReview.setResolved"].includes(frame.op) || isGitMutation(frame.op, frame.params ?? {});
       let activeMutation = false;
       try {
         if (mutation || frame.op === "attachment.write") await this.touchCheckout();
@@ -223,7 +241,8 @@ export class CloudWorker {
         await client.send(createMessage({ type: "WORKSPACE_RESPONSE", source: "engine", requestId: frame.id, op: frame.op, result }));
       } catch (error) {
         await client.send(createMessage({ type: "WORKSPACE_ERROR", source: "engine", requestId: frame.id, op: frame.op,
-          code: error instanceof WorkspaceError ? error.code : "WORKSPACE_ERROR", message: error instanceof WorkspaceError ? error.message : "The workspace request could not be completed." }));
+          code: error instanceof WorkspaceError || error instanceof CodeReviewError ? error.code : "WORKSPACE_ERROR",
+          message: error instanceof WorkspaceError || error instanceof CodeReviewError ? error.message : "The workspace request could not be completed." }));
       } finally {
         if (activeMutation) {
           this.activeMutations--;
@@ -234,78 +253,32 @@ export class CloudWorker {
   }
 
   private async configure(config: WorkerConfig): Promise<void> {
+    if (this.disposed || (!this.scope && this.stopping)) return;
     const started = performance.now(), initial = !this.scope;
+    const reviewAvailable = this.configuredReviewAvailable;
     const timing = this.options.transport.reportTiming?.bind(this.options.transport);
     const revision = BigInt(config.loginRevision);
-    if (this.configurationRevision !== undefined && revision < this.configurationRevision) return;
-    this.githubUserTokensEnabled = config.githubPullRequests === 1;
+    if (this.acceptedConfigurationRevision !== undefined && revision < this.acceptedConfigurationRevision) return;
+    this.githubUserTokensEnabled = config.githubUserTokens === 1;
     if (this.options.workspaceId && config.workspace.id !== this.options.workspaceId) throw new Error("Workspace identity changed.");
     const scope = new WorkspaceScope(config.workspace);
     if (this.scope && (this.scope.key !== scope.key || this.scope.root !== scope.root || this.scope.workspace.repository !== scope.workspace.repository)) throw new Error("Workspace identity changed.");
-    if (this.configurationRevision !== revision) { this.tokens.invalidate(); this.userTokens.invalidate(); }
+    if (this.reviews && !this.stopping) this.reviews.validateConfiguration(config.codeReview);
+    this.acceptedConfigurationRevision = revision;
+    if (this.reviews && !this.stopping && this.agents!.fenceReviewConfiguration(config.codeReview)) {
+      this.reviews.suspend();
+      this.workspaceMcp.revoke();
+    }
+    if (this.configurationRevision !== revision) { this.tokens.invalidate(); this.githubCredentials.invalidate(); }
     await configureGitIdentity(this.options.homeDirectory ?? homedir(), config.gitIdentity);
     if (!this.scope) {
-      await this.github.start();
-      const checkout = await measureStartup("worker_checkout", () => (this.options.prepareCheckout ?? prepareCheckout)(config.workspace, this.gitEnvironment, timing), timing)
-        .catch(async error => {
-          await this.options.transport.reportCheckoutFailure?.().catch(() => {});
-          throw error;
-        });
-      this.checkoutRefresh = checkout?.refresh;
-      const restoreMarker = join(this.options.directory, "restored-from-checkpoint");
-      const restored = await access(restoreMarker).then(() => true, (error: NodeJS.ErrnoException) => {
-        if (error.code !== "ENOENT") throw error;
-        return false;
-      });
-      const store = await measureStartup("worker_session_store", () => SessionStore.open(join(this.options.directory, "sessions"), scope.key), timing);
-      const servicesStarted = performance.now();
-      // Earlier worker snapshots stored a cloud key in chat metadata. Native
-      // bridge rows must round-trip through the renderer's existing mapper.
-      for (const chat of store.list().chats) if (chat.folder !== scope.folder(chat.folder)) await store.upsert({ ...chat, folder: scope.root });
-      const run = this.options.workspaceServices?.run ?? commandRunner(scope.root, this.gitEnvironment);
-      this.workspace = await WorkspaceService.open(scope, this.options.directory, {
-        historyDiff: params => this.agents!.turns.historyDiff(params),
-        ...this.options.workspaceServices,
-        ...(config.githubPullRequests === 1 && this.options.transport.reportGithubCheckout
-          ? { reportGithubCheckout: this.options.transport.reportGithubCheckout.bind(this.options.transport) } : {}),
-        run: async (program, args, options) => {
-          if (options?.readOnly !== true) await this.touchCheckout();
-          return run(program, args, options);
-        },
-        publish: (frame) => { void this.broadcast(frame); },
-      });
-      this.scope = scope; this.store = store;
-      this.mcp = new McpGateway({ workspaceRoot: scope.root, authorization: this.options.transport.mcpAuthorization?.bind(this.options.transport),
-        onFailure: (executionId, failure) => this.agents?.mcpFailure(executionId, failure) });
-      await this.mcp.configure(config.mcpServers ?? [], config.loginRevision);
-      this.agents = new Agents(store, scope, this.options.drivers ?? {
-        codex: () => new CodexDriver({ gitEnvironment: this.gitEnvironment }), claude: () => new ClaudeDriver({ gitEnvironment: this.gitEnvironment }),
-        cursor: () => new CursorDriver({ gitEnvironment: this.gitEnvironment }),
-      }, config,
-        (frame) => this.broadcast(frame), () => { void this.reportIdle(); }, this.options.onTiming, this.options.modelDiscovery, executionId => this.mcp!.providers(executionId));
-      this.terminals = new Terminals(scope, { gitEnvironment: this.gitEnvironment, broadcast: frame => this.broadcast(frame), activity: () => { void this.reportIdle(); } });
-      this.chats = new ChatService(store, scope, (chatId) => this.agents!.closeChat(chatId), this.agents.turns);
-      this.history = new HistoryMirror(store, this.options.transport);
-      this.unsubscribers.push(store.onChange((change) => {
-        if (!change.chat && !change.deleted && !change.rows.length) return;
-        void this.broadcast(createMessage({ type: "DB_CHANGED", source: "engine", kinds: [...(change.chat || change.deleted ? ["chats"] : []), ...(change.rows.length ? ["messages"] : []), ...(change.deleted ? ["workspaces"] : [])],
-          ...(change.deleted ? { workspaceIds: [scope.workspace.id] } : {}),
-          ...(change.rows.length ? { chatIds: [change.chatId] } : {}) }));
-      }), store.onError((chatId) => {
-        this.options.onError?.("storage"); void this.agents!.closeChat(chatId).catch(() => {});
-      }));
-      recordStartupTiming("worker_services", servicesStarted, timing);
-      const refresh = this.checkoutRefresh, refreshing = refresh?.start();
-      this.setup = new WorkspaceSetup({ directory: this.options.directory, workspace: config.workspace, gitEnvironment: this.gitEnvironment,
-        runner: this.options.setupRunner, activity: () => { void this.reportIdle(); }, onStorageError: () => this.options.onError?.("storage"),
-        beforeRun: async () => {
-          if (refresh?.mayFastForward) await refreshing;
-          await refresh?.touch();
-        },
-        onAdmitted: () => rm(restoreMarker, { force: true }).catch(() => {}),
-      });
-      this.setup.start(checkout?.createdBranch === true || restored);
-    } else { await this.workspace!.configure(config.workspace); await this.mcp!.configure(config.mcpServers ?? [], config.loginRevision); this.agents!.configure(config); }
+      if (!await this.initialize(scope, config, timing)) return;
+    } else {
+      await this.workspace!.configure(config.workspace); await this.mcp!.configure(config.mcpServers ?? [], config.loginRevision);
+      if (!this.stopping) await this.reviews!.configure(config.codeReview);
+      if (!this.reviews!.enabled) this.workspaceMcp.revoke();
+      this.agents!.configure(config);
+    }
     this.history!.connect();
     if (config.promptOutbox === 1 && this.options.transport.promptRequest) {
       this.promptInbox ??= new PromptInbox(this.store!, this.agents!, async (op, body, signal) => {
@@ -321,13 +294,120 @@ export class CloudWorker {
       this.promptInbox.start();
     } else if (this.promptInbox) { await this.promptInbox.dispose(); this.promptInbox = undefined; }
     this.configurationRevision = revision;
+    if (!initial && reviewAvailable !== this.reviews?.enabled) await this.broadcast(this.readyFrame());
+    this.configuredReviewAvailable = this.reviews?.enabled === true;
     await this.reportIdle(true);
     if (initial) recordStartupTiming("worker_configure", started, timing);
   }
 
+  private async initialize(scope: WorkspaceScope, config: WorkerConfig, timing?: StartupTimingObserver): Promise<boolean> {
+    if (this.disposed || this.stopping) return false;
+    let refresh: CheckoutRefresh | undefined, store: SessionStore | undefined, workspace: WorkspaceService | undefined;
+    let mcp: McpGateway | undefined, agents: Agents | undefined, terminals: Terminals | undefined, history: HistoryMirror | undefined, setup: WorkspaceSetup | undefined;
+    let reviews: WorkerCodeReview | undefined;
+    const unsubscribers: Array<() => void> = [];
+    let published = false;
+    try {
+      await this.github.start();
+      if (this.disposed || this.stopping) return false;
+      const checkout = await measureStartup("worker_checkout", () => (this.options.prepareCheckout ?? prepareCheckout)(config.workspace, this.gitEnvironment, timing), timing)
+        .catch(async error => {
+          await this.options.transport.reportCheckoutFailure?.().catch(() => {});
+          throw error;
+        });
+      refresh = checkout?.refresh;
+      this.initialSetupNeeded ||= checkout?.createdBranch === true;
+      if (this.disposed || this.stopping) return false;
+      const restoreMarker = join(this.options.directory, "restored-from-checkpoint");
+      const restored = await access(restoreMarker).then(() => true, (error: NodeJS.ErrnoException) => {
+        if (error.code !== "ENOENT") throw error;
+        return false;
+      });
+      store = await measureStartup("worker_session_store", () => SessionStore.open(join(this.options.directory, "sessions"), scope.key), timing);
+      const servicesStarted = performance.now();
+      // Earlier worker snapshots stored a cloud key in chat metadata. Native
+      // bridge rows must round-trip through the renderer's existing mapper.
+      for (const chat of store.list().chats) if (chat.folder !== scope.folder(chat.folder)) await store.upsert({ ...chat, folder: scope.root });
+      if (this.disposed || this.stopping) return false;
+      const run = this.options.workspaceServices?.run ?? commandRunner(scope.root, this.gitEnvironment);
+      reviews = new WorkerCodeReview(scope, this.options.directory, () => {
+        if (this.reviews !== reviews) return;
+        this.lastMutationAt = Date.now(); void this.reportIdle();
+        void this.broadcast(createMessage({ type: "DB_CHANGED", source: "engine", kinds: ["codeReview"], workspaceIds: [scope.workspace.id] }));
+      });
+      await reviews.configure(config.codeReview);
+      if (this.disposed || this.stopping) return false;
+      workspace = await WorkspaceService.open(scope, this.options.directory, {
+        historyDiff: params => agents!.turns.historyDiff(params),
+        ...this.options.workspaceServices,
+        codeReview: reviews,
+        ...(config.githubPullRequests === 1 && this.options.transport.reportGithubCheckout
+          ? { reportGithubCheckout: this.options.transport.reportGithubCheckout.bind(this.options.transport) } : {}),
+        nextCheckoutSequence: () => ++this.checkoutSequence,
+        run: async (program, args, options) => {
+          if (options?.readOnly !== true) { await refresh?.touch(); this.assertCheckoutActive(); }
+          return run(program, args, options);
+        },
+        publish: (frame) => { if (workspace && this.workspace === workspace) void this.broadcast(frame); },
+      });
+      if (this.disposed || this.stopping) return false;
+      mcp = new McpGateway({ workspaceRoot: scope.root, authorization: this.options.transport.mcpAuthorization?.bind(this.options.transport),
+        onFailure: (executionId, failure) => agents?.mcpFailure(executionId, failure) });
+      await mcp.configure(config.mcpServers ?? [], config.loginRevision);
+      if (this.disposed || this.stopping) return false;
+      agents = new Agents(store, scope, this.options.drivers ?? {
+        codex: () => new CodexDriver({ gitEnvironment: this.gitEnvironment }), claude: () => new ClaudeDriver({ gitEnvironment: this.gitEnvironment }),
+        cursor: () => new CursorDriver({ gitEnvironment: this.gitEnvironment }),
+      }, config,
+        (frame) => this.broadcast(frame), () => { void this.reportIdle(); }, this.options.onTiming, this.options.modelDiscovery, executionId => mcp!.providers(executionId),
+        async input => reviews!.enabled ? this.workspaceMcp.admit(input.executionId, reviews!.tools(input)) : undefined);
+      terminals = new Terminals(scope, { gitEnvironment: this.gitEnvironment, broadcast: frame => this.broadcast(frame), activity: () => { void this.reportIdle(); } });
+      const chats = new ChatService(store, scope, (chatId) => agents!.closeChat(chatId), agents.turns);
+      history = new HistoryMirror(store, this.options.transport);
+      unsubscribers.push(store.onChange((change) => {
+        if (!change.chat && !change.deleted && !change.rows.length) return;
+        void this.broadcast(createMessage({ type: "DB_CHANGED", source: "engine", kinds: [...(change.chat || change.deleted ? ["chats"] : []), ...(change.rows.length ? ["messages"] : []), ...(change.deleted ? ["workspaces"] : [])],
+          ...(change.deleted ? { workspaceIds: [scope.workspace.id] } : {}),
+          ...(change.rows.length ? { chatIds: [change.chatId] } : {}) }));
+      }), store.onError((chatId) => {
+        this.options.onError?.("storage"); void agents!.closeChat(chatId).catch(() => {});
+      }));
+      setup = new WorkspaceSetup({ directory: this.options.directory, workspace: config.workspace, gitEnvironment: this.gitEnvironment,
+        runner: this.options.setupRunner, activity: () => { void this.reportIdle(); }, onStorageError: () => this.options.onError?.("storage"),
+        beforeRun: async () => {
+          if (refresh?.mayFastForward) await refreshing;
+          await refresh?.touch();
+        },
+        onAdmitted: async () => { this.initialSetupNeeded = false; await rm(restoreMarker, { force: true }).catch(() => {}); },
+      });
+      this.store = store; this.workspace = workspace; this.mcp = mcp; this.agents = agents; this.reviews = reviews;
+      this.terminals = terminals; this.chats = chats; this.history = history; this.setup = setup; this.checkoutRefresh = refresh;
+      this.unsubscribers.push(...unsubscribers); this.scope = scope; published = true;
+      recordStartupTiming("worker_services", servicesStarted, timing);
+      const refreshing = refresh?.start();
+      setup.start(this.initialSetupNeeded || restored);
+      return true;
+    } finally {
+      if (!published) {
+        for (const unsubscribe of unsubscribers) unsubscribe();
+        const closed = await Promise.allSettled([setup?.dispose(), refresh?.dispose(), terminals?.dispose(), workspace?.dispose(),
+          agents?.dispose(), mcp?.dispose(), store?.flush(), history?.dispose(), Promise.resolve().then(() => reviews?.close())]);
+        if (closed.some(result => result.status === "rejected")) this.options.onError?.("storage");
+      }
+    }
+  }
+
   private broadcast(frame: BridgeMessage): Promise<void> { return this.send({ t: "frame", clientId: "*", frame }).then(() => {}); }
+  private readyFrame(): BridgeMessage {
+    return createMessage({ type: "ENGINE_READY", source: "engine", version: "0.0.0", root: "", framework: "cloud", port: 0,
+      protocolVersion: PROTOCOL_VERSION, minProtocolVersion: MIN_SUPPORTED_PROTOCOL, instanceId: this.instanceId,
+      ...(this.reviews?.enabled ? { capabilities: ["code-review-v1"] } : {}) });
+  }
   private async touchCheckout(): Promise<void> {
     await this.checkoutRefresh?.touch();
+    this.assertCheckoutActive();
+  }
+  private assertCheckoutActive(): void {
     if (this.disposed || this.stopping) throw new WorkspaceError("WORKSPACE_UNAVAILABLE", "The workspace is stopping.");
   }
   private async stopCheckout(): Promise<void> {
@@ -339,13 +419,16 @@ export class CloudWorker {
   }
   private async prepareStop(): Promise<void> {
     clearInterval(this.heartbeat);
-    await this.configuring;
+    const workspaceTools = this.workspaceMcp.dispose();
+    await this.configuring.catch(() => {});
     await this.stopCheckout();
     await this.workspace?.stopAttachmentTransfers();
     await this.promptInbox?.dispose();
     await this.agents?.dispose();
     await this.terminals?.dispose();
     await this.mcp?.dispose();
+    await workspaceTools;
+    this.reviews?.close();
   }
   private async send(frame: CloudV2WorkerFrame, timeoutMs?: number): Promise<boolean> {
     if (!this.online) return false;

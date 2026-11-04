@@ -13,6 +13,8 @@ const repositoryIdSchema = z.string().regex(/^[1-9][0-9]{0,15}$/).refine(value =
 export const CloudSourceTargetSchema = z.object({ repository: repositorySchema, repositoryId: repositoryIdSchema }).strict();
 export type CloudSourceTarget = z.infer<typeof CloudSourceTargetSchema>;
 const ADMISSION_LEASE_MS = 30_000;
+// Worker HTTP requests allow ten seconds, including configuration after admission.
+const VERIFICATION_WAIT_MS = 5_000;
 export const CLOUD_SOURCE_REFRESH_MS = 10 * 60_000;
 export const CLOUD_SOURCE_GRACE_MS = 60 * 60_000;
 const MAX_LEASES = 1024;
@@ -87,14 +89,15 @@ export class CloudV2SourceAuthority {
     if (!sources.success || ids && (ids.length !== repositories.length || !z.array(repositoryIdSchema).safeParse(ids).success))
       throw new HttpError(403, "github_repository_invalid", "Repository access could not be verified.");
     const observations: SourceObservation[] = [];
-    for (const [index, repository] of sources.data.entries()) observations.push(await this.observeRepository(organizationId, userId, repository, ids?.[index], continuation));
+    const deadline = this.now() + VERIFICATION_WAIT_MS;
+    for (const [index, repository] of sources.data.entries()) observations.push(await this.observeRepository(organizationId, userId, repository, ids?.[index], continuation, deadline));
     const requireFresh = () => {
       if (observations.some(observation => observation.until <= this.now()))
         throw new HttpError(503, "github_verification_expired", "Repository verification took too long. Try again.");
     };
     requireFresh();
     for (const observation of observations) {
-      if (await this.fingerprint(observation.scope) !== observation.fingerprint)
+      if (await this.waitFor(this.fingerprint(observation.scope), deadline) !== observation.fingerprint)
         throw new HttpError(409, "github_authorization_changed", "GitHub authorization changed. Try again.");
     }
     for (const observation of observations) this.assertRevision(observation.scope, observation.revision);
@@ -113,7 +116,19 @@ export class CloudV2SourceAuthority {
     this.backoffs.set(actor, value);
   }
 
-  private refresh(key: string, scope: RepositoryRequest, fingerprint: string, previous: GithubVerification | undefined, revision: SourceRevision): Promise<GithubVerification> {
+  private waitFor<T>(pending: Promise<T>, deadline: number): Promise<T> {
+    const remaining = deadline - this.now();
+    if (remaining <= 0) {
+      void pending.catch(() => {});
+      return Promise.reject(new GithubTemporaryError("github_verification_busy"));
+    }
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => reject(new GithubTemporaryError("github_verification_busy")), remaining);
+      pending.then(resolve, reject).finally(() => clearTimeout(timer));
+    });
+  }
+
+  private refresh(key: string, scope: RepositoryRequest, fingerprint: string, previous: GithubVerification | undefined, revision: SourceRevision, deadline: number): Promise<GithubVerification> {
     const flightKey = JSON.stringify([key, revision.id]);
     const pending = this.flights.get(flightKey);
     if (pending) return pending;
@@ -126,7 +141,7 @@ export class CloudV2SourceAuthority {
     const flight = (async () => {
       // One provider verification per actor at a time. A first outage response
       // backs off queued repositories too, instead of producing a request storm.
-      await predecessor?.catch(() => {});
+      if (predecessor) await this.waitFor(predecessor.catch(() => {}), deadline);
       this.assertRevision(scope, revision);
       let blocked = this.backoffs.get(actor);
       if ((!blocked || blocked.until <= this.now()) && persistent) {
@@ -140,14 +155,27 @@ export class CloudV2SourceAuthority {
           retryAt: blocked.until, failures: previous?.failures ?? 0, claimId: null, claimUntil: 0, claimStartedAt: 0 });
         throw blocked.error;
       }
-      const claim = persistent ? await this.verificationStore!.claim(persistent) : null;
-      if (persistent && !claim?.claimId) {
-        const other = await this.verificationStore!.read(persistent);
-        this.assertRevision(scope, revision);
-        if (other) this.remember(key, other);
-        if (other?.verifiedAt != null && !other.failure && other.verifiedAt + ADMISSION_LEASE_MS > this.now()) return other;
-        if (other?.failure && other.retryAt > this.now()) throw other.failure;
-        throw new GithubTemporaryError("github_verification_busy");
+      let claim: GithubVerification | null = null;
+      if (persistent) {
+        let other = previous;
+        for (let attempt = 0; ; attempt++) {
+          this.assertRevision(scope, revision);
+          if (this.now() >= deadline) throw new GithubTemporaryError("github_verification_busy");
+          if (other?.verifiedAt != null && !other.failure && other.verifiedAt + ADMISSION_LEASE_MS > this.now()) return other;
+          if (other?.failure && other.retryAt > this.now()) throw other.failure;
+          if (!other?.claimId || other.claimUntil <= this.now()) {
+            claim = await this.verificationStore!.claim(persistent);
+            this.assertRevision(scope, revision);
+            if (claim?.claimId) break;
+          }
+          // Poll the durable exact-generation claim, without holding a DB
+          // connection or treating another replica's in-flight work as denial.
+          if (attempt || other?.claimId) await new Promise<void>(resolve => setTimeout(resolve,
+            Math.max(0, Math.min(1000, 250 * 2 ** Math.min(attempt, 2), deadline - this.now()))));
+          other = await this.verificationStore!.read(persistent) ?? undefined;
+          this.assertRevision(scope, revision);
+          if (other) this.remember(key, other);
+        }
       }
       const started = claim?.claimStartedAt ?? this.now();
       let verified: string;
@@ -202,13 +230,13 @@ export class CloudV2SourceAuthority {
     return flight;
   }
 
-  private async observeRepository(organizationId: string, userId: string, repository: string, repositoryId?: string, continuation = false): Promise<SourceObservation> {
+  private async observeRepository(organizationId: string, userId: string, repository: string, repositoryId?: string, continuation = false, deadline = this.now() + VERIFICATION_WAIT_MS): Promise<SourceObservation> {
     const parsed = repositorySchema.safeParse(repository);
     if (!parsed.success) throw new HttpError(403, "github_repository_invalid", "Repository access could not be verified.");
     const [owner, name] = parsed.data.toLowerCase().split("/") as [string, string];
     const scope = { organizationId, userId, owner, repositories: [name], access: "read" as const, ...(repositoryId ? { repositoryIds: [repositoryId] } : {}) };
     const revision = this.revision(scope);
-    const fingerprint = await this.fingerprint(scope);
+    const fingerprint = await this.waitFor(this.fingerprint(scope), deadline);
     this.assertRevision(scope, revision);
     const key = JSON.stringify([organizationId, userId, owner, name, repositoryId ?? null, fingerprint]);
     const freshness = continuation ? CLOUD_SOURCE_REFRESH_MS : ADMISSION_LEASE_MS;
@@ -218,7 +246,7 @@ export class CloudV2SourceAuthority {
     // Without that proof, also observe a denial recorded by another replica
     // whose notification may have been lost; a local positive is not enough.
     if (this.verificationStore && repositoryId) {
-      const stored = await this.verificationStore.read({ organizationId, userId, repositoryId, fingerprint });
+      const stored = await this.waitFor(this.verificationStore.read({ organizationId, userId, repositoryId, fingerprint }), deadline);
       this.assertRevision(scope, revision);
       if (stored) value = this.remember(key, stored);
       else { this.observations.delete(key); value = undefined; }
@@ -242,15 +270,14 @@ export class CloudV2SourceAuthority {
     }
     if (value?.claimId && value.claimUntil > this.now()) {
       if (grace) return observation(value, value.claimUntil);
-      throw new GithubTemporaryError("github_verification_busy", Math.max(1000, value.claimUntil - this.now()));
     }
-    const refresh = this.refresh(key, scope, fingerprint, value, revision);
+    const refresh = this.refresh(key, scope, fingerprint, value, revision, deadline);
     if (grace) {
       const result = observation(value!, this.now() + 60_000, refresh);
       void result.refresh!.catch(() => {});
       return result;
     }
-    value = await refresh;
+    value = await this.waitFor(refresh, deadline);
     if (value.verifiedAt === null || value.verifiedAt + freshness <= this.now())
       throw new HttpError(503, "github_verification_expired", "Repository verification took too long. Try again.");
     return observation(value, value.verifiedAt + freshness);

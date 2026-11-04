@@ -68,7 +68,7 @@ export const CloudV2WorkerFrameSchema = z.discriminatedUnion("t", [
   CloudV2HistoryFrameSchema,
   /** Idle means no running agent turn or recent terminal activity. */
   z.object({ t: z.literal("idle"), idle: z.boolean() }).strict(),
-  z.object({ t: z.literal("request"), id: z.string().uuid(), kind: z.literal("github-token"), purpose: z.enum(["git", "gh"]).optional() }).strict(),
+  z.object({ t: z.literal("request"), id: z.string().uuid(), kind: z.literal("github-token"), purpose: z.enum(["git", "gh"]).optional(), failedTokenSha256: z.string().length(64).regex(/^[a-f0-9]{64}$/).optional() }).strict(),
   z.object({ t: z.literal("stop-ack"), id: z.string().uuid() }).strict(),
 ]);
 export type CloudV2WorkerFrame = z.infer<typeof CloudV2WorkerFrameSchema>;
@@ -105,11 +105,17 @@ export const CloudV2ControlFrameSchema = z.discriminatedUnion("t", [
   z.object({
     t: z.literal("config"),
     promptOutbox: z.literal(1).optional(),
+    agentInteractions: z.literal(1).optional(),
+    codeReview: z.object({
+      userId: z.uuid(),
+      userName: z.string().min(1).max(256).refine(value => !!value.trim() && !/[\u0000-\u001f\u007f]/.test(value)).optional(),
+    }).strict().optional(),
     gitIdentity: z.object({
       name: z.string().trim().min(1).max(256).refine(value => !/[<>\p{Cc}]/u.test(value)),
       email: z.string().regex(/^[1-9][0-9]{0,15}\+[A-Za-z0-9_.-]{1,100}@users\.noreply\.github\.com$/),
     }).strict().nullable().optional(),
   githubPullRequests: z.literal(1).optional(),
+    githubUserTokens: z.literal(1).optional(),
     loginRevision: z.string().regex(/^(0|[1-9][0-9]{0,19})$/),
     mcpServers: z.array(RuntimeMcpServerSchema).max(128).optional(),
     workspace: z.object({

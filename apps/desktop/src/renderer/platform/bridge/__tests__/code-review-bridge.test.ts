@@ -5,6 +5,7 @@ import type { RuntimeClient } from "../ws-client";
 import { cloudScopedId, cloudWorkspaceKey } from "../cloud-workspace-key";
 import { WorkspaceRuntimeClient } from "../workspace-runtime-client";
 import type { CodeReviewThread } from "@zeros/protocol/code-review";
+import { codeReviewAvailable } from "../code-review-availability";
 
 const thread: CodeReviewThread = {
   id: "thread-one", workspaceId: "A",
@@ -23,6 +24,32 @@ function bridgeFixture(result: unknown = thread) {
 }
 afterEach(() => setActiveBridge(null));
 describe("review bridge exact-workspace contract", () => {
+  it("uses only the connected exact cloud peer after it advertises private review support", async () => {
+    const target = { organizationId: "11111111-1111-4111-8111-111111111111", workspaceId: "22222222-2222-4222-8222-222222222222" };
+    const key = cloudWorkspaceKey(target), cloudThread = { ...thread, workspaceId: key };
+    const request = vi.fn(), requestConnected = vi.fn(async (message: { op: string }) => ({ type: "WORKSPACE_RESPONSE", op: message.op,
+      result: message.op === "codeReview.list" ? { workspaceId: key, threads: [cloudThread] } : cloudThread }));
+    const supportsEngineCapability = vi.fn((capability: string, workspace: string) => capability === "code-review-v1" && workspace === key);
+    setActiveBridge({ request, requestConnected, supportsEngineCapability, executionIdentity: { kind: "local", sidecar: "active" } } as unknown as RuntimeClient);
+    expect(codeReviewAvailable({ cwd: key, workspaceId: key })).toBe(true);
+    expect(await listCodeReviewThreads({ cwd: key, workspaceId: key })).toEqual({ workspaceId: key, threads: [cloudThread] });
+    expect(await createCodeReviewThread({ cwd: key, workspaceId: key, anchor: thread.anchor, body: "Comment" })).toEqual(cloudThread);
+    expect(request).not.toHaveBeenCalled();
+    expect(requestConnected.mock.calls.map(([message]) => message.op)).toEqual(["codeReview.list", "codeReview.create"]);
+    supportsEngineCapability.mockReturnValue(false);
+    await expect(listCodeReviewThreads({ cwd: key, workspaceId: key })).rejects.toThrow(/unavailable|Open/);
+    expect(requestConnected).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not accept another cloud owner or a Local-looking identity beside a capable cloud folder", () => {
+    const target = { organizationId: "11111111-1111-4111-8111-111111111111", workspaceId: "22222222-2222-4222-8222-222222222222" };
+    const key = cloudWorkspaceKey(target), other = cloudWorkspaceKey({ ...target, workspaceId: "33333333-3333-4333-8333-333333333333" });
+    setActiveBridge({ supportsEngineCapability: () => true } as unknown as RuntimeClient);
+    expect(codeReviewAvailable({ cwd: key, workspaceId: other })).toBe(false);
+    expect(codeReviewAvailable({ cwd: key, workspaceId: "Local-owner" })).toBe(false);
+    expect(codeReviewAvailable({ cwd: "/Local", workspaceId: key })).toBe(false);
+  });
+
   it.each(["/personal/A", "/organization/A"])("keeps renderer placement context out of strict Local wires (%s)", async cwd => {
     const { request } = bridgeFixture();
     await listCodeReviewThreads({ cwd, workspaceId: "A" });

@@ -6,11 +6,15 @@ import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { CodeReviewStore } from "../code-review";
 import { MIGRATIONS, runMigrations } from "../migrations";
-import { mergeCodeReviewThreads, type CodeReviewActor } from "@zeros/protocol/code-review";
+import { CODE_REVIEW_SCHEMA, mergeCodeReviewThreads, type CodeReviewActor } from "@zeros/protocol/code-review";
 
 const human: CodeReviewActor = { id: "human:one", name: "Reviewer", kind: "human" };
 const agent: CodeReviewActor = { id: "agent:codex:conversation", name: "Codex", kind: "agent", provider: "codex" };
 const create = { workspaceId: "A", anchor: { path: "src/example.ts", side: "new" as const, startLine: 2, endLine: 4, revision: "sha256:original", context: "example" }, body: "Please review" };
+
+it("keeps the VM review schema identical to the immutable Local migration", () => {
+  expect(CODE_REVIEW_SCHEMA.trim()).toBe(MIGRATIONS.find(migration => migration.version === 40)!.up.trim());
+});
 
 describe("durable workspace code review store", () => {
   let db: Database.Database;

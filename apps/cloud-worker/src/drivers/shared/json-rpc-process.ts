@@ -11,7 +11,7 @@ export interface RpcProcessOptions {
   env: NodeJS.ProcessEnv;
   requestTimeoutMs: number;
   onNotification: (method: string, params: unknown) => void;
-  onRequest: (method: string, params: unknown) => unknown;
+  onRequest: (method: string, params: unknown, id: string | number) => unknown | Promise<unknown>;
   onClose: (error: Error) => void;
   redact: (message: string) => string;
 }
@@ -86,8 +86,12 @@ export class JsonRpcProcess {
         const value = frame as Record<string, unknown>;
         if (typeof value.method === "string") {
           if (typeof value.id === "number" || typeof value.id === "string") {
-            try { this.write({ id: value.id, result: this.options.onRequest(value.method, value.params) }); }
-            catch (error) { this.write({ id: value.id, error: { code: error instanceof RpcError ? error.code ?? -32603 : -32603, message: "Unsupported worker request." } }); }
+            // A parked approval must not stop notifications or other RPCs.
+            const id = value.id, method = value.method;
+            void Promise.resolve().then(() => this.options.onRequest(method, value.params, id)).then(
+              result => this.write({ id, result }),
+              error => this.write({ id, error: { code: error instanceof RpcError ? error.code ?? -32603 : -32603, message: "Unsupported worker request." } }),
+            );
           } else this.options.onNotification(value.method, value.params);
         } else if (typeof value.id === "number") {
           const pending = this.pending.get(value.id);

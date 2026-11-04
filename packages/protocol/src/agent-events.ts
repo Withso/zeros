@@ -1328,3 +1328,11 @@ export interface InitializeResponse {
    *      a runtime boots; the gateway re-polls `initialize` until it lands. */
   _meta?: AgentInitializeMetadata | null;
 }
+
+export { buildClaudeQuestionRequest, buildAskUserQuestionOutput, claudeQuestionHookOutput, formatAnswerForClaude, mapCodexUserInputToQuestion, mapNativeQuestionAnswerToCodex } from "./agent-questions";
+
+export { cloudModeId, cloudPermissionMode, cloudSessionModes, claudePermissionMode, claudeRequiresExplicitApproval, codexModePolicy, codexQuestionFeatureArgs, cursorSdkMode, cursorAutoReview } from "./agent-modes";
+export type { CloudPermissionMode } from "./agent-modes";
+
+export { isCodexApprovalMethod, mapCodexApprovalToPermission, mapCodexPermissionResponse, defaultCodexApprovalResponse, codexFileChangePaths } from "./agent-approvals";
+export type { CodexApprovalMethod } from "./agent-approvals";

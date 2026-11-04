@@ -7,6 +7,21 @@ import * as controlPrompts from "../../../control-plane/src/cloud/prompt-contrac
 import { CLIENT_A, WORKSPACE_ID, config } from "./worker-fixtures";
 import { CloudV2ControlFrameSchema as legacyWorkerFrame } from "../../../control-plane/src/cloud/__fixtures__/worker-contract-before-identity";
 
+it("keeps private review identity optional, bounded and strict across independently deployed peers", () => {
+  const codeReview = { userId: CLIENT_A, userName: "Fixture reviewer" };
+  for (const contract of [shared, control]) {
+    for (const value of [undefined, { userId: CLIENT_A }, codeReview]) {
+      const frame = { ...config, ...(value ? { codeReview: value } : {}) };
+      expect(contract.CloudV2ControlFrameSchema.parse(frame)).toEqual(frame);
+    }
+    for (const value of [null, {}, { userId: "foreign" }, { ...codeReview, userName: "" }, { ...codeReview, userName: "  " },
+      { ...codeReview, userName: "x".repeat(257) }, { ...codeReview, userName: "line\nbreak" }, { ...codeReview, actor: "chosen" }])
+      expect(contract.CloudV2ControlFrameSchema.safeParse({ ...config, codeReview: value }).success).toBe(false);
+  }
+  expect(shared.CloudV2ControlFrameSchema.parse(legacyWorkerFrame.parse(config))).toEqual(config);
+  expect(legacyWorkerFrame.safeParse({ ...config, codeReview }).success).toBe(false);
+});
+
 it("keeps optional managed Git identity bounded and identical across the independently deployed contracts", () => {
   const identity = { name: "Fixture Contributor", email: "123+contributor@users.noreply.github.com" };
   for (const contract of [shared, control]) {
@@ -23,6 +38,20 @@ it("keeps optional managed Git identity bounded and identical across the indepen
 it("keeps the standalone control-plane constants identical to the worker contract", () => {
   for (const name of ["CLOUD_V2_RELAY_PROTOCOL", "CLOUD_V2_WORKER_PORT", "CLOUD_V2_WORKER_BRIDGE_PATH", "CLOUD_V2_WORKER_BRIDGE_PROTOCOL", "CLOUD_V2_MAX_FRAME_BYTES", "CLOUD_V2_MAX_HISTORY_ROWS"] as const)
     expect(control[name]).toBe(shared[name]);
+});
+
+it("keeps user-token recovery optional and validates the digest identically on both deployments", () => {
+  const request = { t: "request", id: CLIENT_A, kind: "github-token", purpose: "gh" };
+  for (const contract of [shared, control]) {
+    expect(contract.CloudV2ControlFrameSchema.safeParse(config).success).toBe(true);
+    expect(contract.CloudV2ControlFrameSchema.safeParse({ ...config, githubUserTokens: 1 }).success).toBe(true);
+    expect(contract.CloudV2ControlFrameSchema.safeParse({ ...config, githubUserTokens: 2 }).success).toBe(false);
+    expect(contract.CloudV2WorkerFrameSchema.safeParse(request).success).toBe(true);
+    expect(contract.CloudV2WorkerFrameSchema.safeParse({ ...request, failedTokenSha256: "a".repeat(64) }).success).toBe(true);
+    for (const failedTokenSha256 of ["", "A".repeat(64), "a".repeat(63), "a".repeat(64) + "\n", null])
+      expect(contract.CloudV2WorkerFrameSchema.safeParse({ ...request, failedTokenSha256 }).success).toBe(false);
+  }
+  expect(legacyWorkerFrame.safeParse({ ...config, githubUserTokens: 1 }).success).toBe(false);
 });
 
 const history = { t: "history", messages: { chatId: "native-chat", rows: [{ msgId: "native-row", kind: "user", payload: "{}", createdAt: 1 }] } };
@@ -149,4 +178,21 @@ it("preserves optional attachment groups through both durable prompt contracts w
       { id: "g", name: "" }, { id: "g", name: "n".repeat(513) }, { id: "g", name: "frames", unrelated: true }])
       expect(schemas.CloudV2PromptSchema.safeParse({ ...payload, bubble: { segments: [{ ...segment, group }] } }).success).toBe(false);
   }
+});
+
+it("keeps optional interaction negotiation and frozen prompt modes identical and closed", () => {
+  for (const contract of [shared, control]) {
+    for (const agentInteractions of [undefined, 1]) expect(contract.CloudV2ControlFrameSchema.safeParse({ ...config, agentInteractions }).success).toBe(true);
+    for (const agentInteractions of [null, 0, 2, true, "1"]) expect(contract.CloudV2ControlFrameSchema.safeParse({ ...config, agentInteractions }).success).toBe(false);
+  }
+  const prompt = { chatId: "chat", userMessageId: "prompt", agentId: "codex", prompt: [{ type: "text", text: "Plan it" }], startedAt: 1 };
+  for (const permissionMode of [undefined, "plan", "bypass"]) {
+    const value = { ...prompt, permissionMode };
+    expect(controlPrompts.CloudV2PromptSchema.parse(value)).toEqual(sharedPrompts.CloudV2PromptSchema.parse(value));
+  }
+  for (const permissionMode of [null, "auto", "read-only", 1]) {
+    expect(controlPrompts.CloudV2PromptSchema.safeParse({ ...prompt, permissionMode }).success).toBe(false);
+    expect(sharedPrompts.CloudV2PromptSchema.safeParse({ ...prompt, permissionMode }).success).toBe(false);
+  }
+  expect(legacyWorkerFrame.safeParse({ ...config, agentInteractions: 1 }).success).toBe(false);
 });

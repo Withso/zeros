@@ -7,7 +7,7 @@ describe("permission mode availability", () => {
     expect(permissionModesAvailable(null)).toBe(true);
     expect(permissionModesAvailable(undefined)).toBe(true);
   });
-  it("hides them for cloud workspaces, whose agents run with full permissions", () => {
+  it("hides them for unacknowledged cloud workers", () => {
     expect(permissionModesAvailable("cloud://11111111-1111-4111-8111-111111111111/22222222-2222-4222-8222-222222222222")).toBe(false);
     expect(permissionModesAvailable("cloud://11111111-1111-4111-8111-111111111111/22222222-2222-4222-8222-222222222222/packages/app")).toBe(false);
   });
@@ -20,4 +20,13 @@ describe("permission mode availability", () => {
     expect(messageEditAvailable(null)).toBe(true);
     expect(messageEditAvailable("cloud://11111111-1111-4111-8111-111111111111/22222222-2222-4222-8222-222222222222")).toBe(false);
   });
+});
+
+
+it("uses existing mode controls only after the exact cloud session advertises support", () => {
+  const folder = "cloud://11111111-1111-4111-8111-111111111111/22222222-2222-4222-8222-222222222222";
+  const modes = [{ id: "read-only", name: "Plan" }, { id: "full-access", name: "Full access" }];
+  expect(permissionModesAvailable(folder, modes)).toBe(true);
+  expect(permissionModesAvailable(folder, [])).toBe(false);
+  expect(permissionModesAvailable("/local/org/project", [])).toBe(true);
 });

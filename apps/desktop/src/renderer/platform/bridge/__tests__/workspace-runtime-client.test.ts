@@ -1053,6 +1053,35 @@ describe("workspace runtime routing", () => {
 });
 
 describe("cloud v2 history ownership", () => {
+  it("replaces a held sleeping search with current worker results and follows streamed edits", async () => {
+    const peer = fakePeer(a), pending = deferred<Record<string, unknown>>();
+    let payload = '{"text":"live needle"}';
+    peer.request.mockImplementation(async message => ({ type: "WORKSPACE_RESPONSE", op: message.op,
+      result: message.op === "messages.search"
+        ? { hits: [{ chatId: "chat", msgId: "message", payload, createdAt: 1 }] }
+        : { chats: [], chatDeletions: [] } }));
+    const readHistory = vi.fn(async (_target: unknown, op: string) => op === "messages.search"
+      ? pending.promise : { chats: [], chatDeletions: [] });
+    const open = vi.fn(async () => peer.peer);
+    const client = new WorkspaceRuntimeClient({ open, readHistory, historyRoot: () => MIRROR_ROOT, workspaces: () => [] });
+    const request = { type: "WORKSPACE_REQUEST", op: "messages.search", params: { folder: cloudWorkspaceKey(a), query: "needle" } } as const;
+    const changed = vi.fn(); client.on("DB_CHANGED", changed);
+    try {
+      const cold = client.request(request);
+      await vi.waitFor(() => expect(readHistory).toHaveBeenCalledWith(expect.anything(), "messages.search", { folder: MIRROR_ROOT, query: "needle" }));
+      expect(open).not.toHaveBeenCalled();
+      await client.warmWorkspace(a);
+      pending.resolve({ hits: [{ chatId: "chat", msgId: "message", payload: '{"text":"stale needle"}', createdAt: 1 }] });
+      expect(await cold).toMatchObject({ result: { hits: [{ chatId: cloudScopedId(a, "chat"), payload }] } });
+      expect(peer.request).toHaveBeenCalledWith(expect.objectContaining({ op: "messages.search", params: { folder: peer.peer.scope.root, query: "needle" } }), expect.anything());
+      payload = '{"text":"streamed needle"}';
+      changed.mockClear();
+      peer.emit("DB_CHANGED", { kinds: ["messages"], chatIds: ["chat"] });
+      expect(changed).toHaveBeenCalledWith(expect.objectContaining({ chatIds: [cloudScopedId(a, "chat")] }));
+      expect(await client.request(request)).toMatchObject({ result: { hits: [{ payload }] } });
+    } finally { client.dispose(); }
+  });
+
   it("reads a connected worker's chat list natively and the control plane's mirror while it is away", async () => {
     const peer = fakePeer(a);
     peer.request.mockImplementation(async (message: Record<string, unknown>) => ({ type: "WORKSPACE_RESPONSE", op: message.op,

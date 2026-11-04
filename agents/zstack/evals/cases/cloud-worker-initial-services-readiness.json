@@ -1,0 +1,9 @@
+{
+  "id": "cloud-worker-initial-services-readiness",
+  "kind": "replay",
+  "area": "cloud-worker",
+  "fixedBy": "pr:831",
+  "symptom": "The first cloud bridge request waited for optional checkout metadata reporting. A rejected initial MCP configuration left a published scope with missing services, preventing a corrected configuration from recovering; Stop or disposal during required setup could still publish readiness.",
+  "rule": "Publish initial services atomically after required setup, unwind every unpublished resource, and recheck Stop/disposal after awaits. Keep optional observations outside readiness while preserving ordered, boot-scoped reports and explicit fresh confirmation. zstack bug-fix and review playbooks; principles 1, 5, 9, 12, 13 and 14.",
+  "check": "pnpm --dir apps/cloud-worker test src/__tests__/startup-readiness.test.ts src/__tests__/startup-lifetime.test.ts src/__tests__/startup-transport.test.ts --maxWorkers=2"
+}

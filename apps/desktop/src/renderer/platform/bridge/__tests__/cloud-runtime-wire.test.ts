@@ -16,6 +16,44 @@ const scope: CloudRuntimeScope = {
 };
 const key = cloudWorkspaceKey(scope);
 
+describe("cloud private review identities", () => {
+  it("maps only the exact worker owner, leaving comment ids and content opaque", () => {
+    const thread = { workspaceId: scope.engineWorkspaceId, id: "thread", comments: [{ id: "comment", body: "cloud://not-a-route" }] };
+    expect(cloudIncoming(scope, { type: "WORKSPACE_RESPONSE", op: "codeReview.list", result: { workspaceId: scope.engineWorkspaceId, threads: [thread] } }).result)
+      .toEqual({ workspaceId: key, threads: [{ ...thread, workspaceId: key }] });
+    expect(cloudOutgoing(scope, { type: "WORKSPACE_REQUEST", op: "codeReview.reply", params: { workspaceId: key, threadId: "thread", body: "cloud://not-a-route" } }).params)
+      .toEqual({ workspaceId: scope.engineWorkspaceId, threadId: "thread", body: "cloud://not-a-route" });
+  });
+  it.each(["list", "create", "reply", "setResolved"])("does not mask a foreign native owner in codeReview.%s", operation => {
+    const thread = { workspaceId: "foreign-native-owner" };
+    expect(() => cloudIncoming(scope, { type: "WORKSPACE_RESPONSE", op: `codeReview.${operation}`, result: thread })).toThrow(/review.*owner/);
+    if (operation === "list") expect(() => cloudIncoming(scope, { type: "WORKSPACE_RESPONSE", op: "codeReview.list", result: { workspaceId: scope.engineWorkspaceId, threads: [thread] } }))
+      .toThrow(/review.*owner/);
+  });
+});
+
+describe("cloud branch navigation identities", () => {
+  it("scopes the checked out branch in a raw branch-list response", () => {
+    const rows = [{ name: "work", worktreePath: scope.root, isCheckedOut: true },
+      { name: "main", worktreePath: null, isCheckedOut: false }];
+    expect(cloudIncoming(scope, { type: "WORKSPACE_RESPONSE", op: "git.listAllBranches", result: rows }).result)
+      .toEqual([{ ...rows[0], worktreePath: key }, rows[1]]);
+    expect(rows[0].worktreePath).toBe(scope.root);
+  });
+
+  it.each(["/workspace/other", `${scope.root}/child`, `${scope.root}-lookalike`,
+    cloudWorkspaceKey({ ...scope, workspaceId: "33333333-3333-4333-8333-333333333333" }),
+  ])("refuses foreign branch navigation to %s", worktreePath => {
+    expect(() => cloudIncoming(scope, { type: "WORKSPACE_RESPONSE", op: "git.listAllBranches",
+      result: [{ name: "foreign", worktreePath }] })).toThrow(/worktree/);
+  });
+
+  it("leaves unrelated file arrays opaque", () => {
+    const rows = [{ worktreePath: "/arbitrary/file/content" }];
+    expect(cloudIncoming(scope, { type: "WORKSPACE_RESPONSE", op: "file.list", result: rows }).result).toBe(rows);
+  });
+});
+
 describe("cloud runtime wire routing", () => {
   it("scopes the preview response envelope", () => {
     const target = { executionId: "execution-native", portId: "A".repeat(32) };

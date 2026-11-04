@@ -19,8 +19,8 @@ const CONCURRENCY = 4;
  * someone is waiting for, always keep the remaining slots. */
 const STOPPING_SLOTS = 2;
 const LEASE_MS = 2 * 60_000;
-/** The worker's hello moves the workspace to running at once; this poll only
- * re-delivers a credential to a worker that has not connected. */
+/** Configured hello publishes readiness; a poll only re-delivers the credential
+ * while no worker boot has bound it. */
 const HELLO_POLL_MS = 30_000;
 const BOOT_DEADLINE_MS = 10 * 60_000;
 /** A restore also creates a VM and applies a checkpoint of up to 4 GiB. */
@@ -76,7 +76,7 @@ export function emitCloudV2Timing(observer: ((record: CloudV2TimingRecord) => vo
 }
 
 export type CloudV2LifecycleDeps = {
-  store: Pick<CloudV2Store, "claimPending" | "defer" | "transition" | "rotateWorkerToken" | "computerSnapshot" | "revoke" | "idleSince" | "setWorkerRoute" | "leasesDue" | "markLeaseRenewed"
+  store: Pick<CloudV2Store, "claimPending" | "defer" | "transition" | "rotateWorkerToken" | "computerSnapshot" | "revoke" | "idleSince" | "setWorkerRoute" | "leasesDue" | "markLeaseRenewed" | "recordInitialSandbox"
     | "setBaseCommit" | "saveCheckpoint" | "checkpointFailed" | "checkpointUpload" | "checkpointUploadDone" | "checkpointUploadHorizon" | "stopCurrent"
     | "beginRestore" | "replaceSandbox" | "finishRestore" | "checkpointUnchanged" | "claimCheckpointRetry" | "beginCheckpointFork"
     | "checkpointForkCreated" | "checkpointForkGone" | "checkpointRetryNext">;
@@ -272,8 +272,9 @@ export class CloudV2Lifecycle {
     } catch (error) {
       const code = errorCode(error);
       this.deps.logger?.warn(`[cloud-v2] ${workspace.state} step failed (${code})`);
-      // A stop's outcome belongs to that stop alone, never to a newer one.
-      const fence = workspace.state === "stopping" ? { stopGeneration: workspace.stopGeneration } : {};
+      // A late step cannot finalize a newer stop or a newly recorded VM.
+      const fence = workspace.state === "stopping" ? { stopGeneration: workspace.stopGeneration }
+        : workspace.state === "deleting" ? { expectedSandboxId: workspace.boatSandboxId } : {};
       // Retrying cannot wake or stop a VM that is gone; say so at once. With a
       // checkpoint the next attempt restores instead.
       if ((workspace.state === "starting" || workspace.state === "stopping") && workspace.boatSandboxId && sandboxLost(error) && !workspace.checkpoint) {
@@ -310,8 +311,11 @@ export class CloudV2Lifecycle {
           ({ sandboxId } = await this.measure(workspace, "boat_create", () => compute.create({
             key: workspace.id, from, name: this.deps.sandboxName(workspace), env: this.deps.bootEnv(workspace),
           })));
-          await store.defer(workspace.id, "creating", 0, { boatSandboxId: sandboxId });
-          await store.markLeaseRenewed(workspace.id, sandboxId, renewedAt);
+          const recorded = await store.recordInitialSandbox(workspace.id, workspace.stopGeneration, sandboxId, renewedAt);
+          if (!recorded || recorded.state !== "creating") {
+            if (recorded?.state === "deleting") await this.runStep(recorded, now);
+            return;
+          }
         }
         await this.measure(workspace, "runtime_install", () => this.ensureRuntime(sandboxId), runtimeChanged => ({ runtimeChanged }));
         if (this.deps.prepareRepository) {
@@ -405,7 +409,7 @@ export class CloudV2Lifecycle {
           return;
         }
         await store.revoke(workspace.id, true);
-        await store.transition(workspace.id, ["deleting"], "deleted");
+        await store.transition(workspace.id, ["deleting"], "deleted", { expectedSandboxId: sandboxId });
         return;
       }
       default:
@@ -665,9 +669,10 @@ export class CloudV2Lifecycle {
     } catch { return null; } finally { clearTimeout(timer); }
   }
 
-  private async deliverToken(workspace: CloudV2Workspace, sandboxId: string): Promise<void> {
+  private async deliverToken(workspace: CloudV2LifecycleWorkspace, sandboxId: string): Promise<void> {
     await this.deps.authorizeSource?.(workspace);
-    const token = await this.deps.store.rotateWorkerToken(workspace.id);
+    const token = await this.deps.store.rotateWorkerToken(workspace.id, { state: workspace.state, sandboxId, stopGeneration: workspace.stopGeneration });
+    if (!token) return;
     const result = await this.execWhenReady(sandboxId, deliverWorkerTokenCommand(token, this.deps.bootEnv(workspace)), 30);
     if (result.exitCode !== 0 || result.timedOut) throw Object.assign(new Error("token delivery failed"), { code: "worker_token_delivery_failed" });
   }

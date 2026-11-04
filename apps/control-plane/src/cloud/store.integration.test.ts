@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { generateKeyPairSync, randomUUID } from "node:crypto";
 import pg from "pg";
 import { Hono } from "hono";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
@@ -6,6 +6,10 @@ import { resetMigratedTestDatabase } from "../test-database.js";
 import { CloudV2Store } from "./store.js";
 import { createCloudV2Routes, type CloudV2RouteDeps } from "./routes.js";
 import { createCloudV2WorkerRoutes } from "./worker-routes.js";
+import { CloudV2Lifecycle } from "./lifecycle.js";
+import type { CloudV2Compute } from "./boat.js";
+import { CloudV2SourceAuthority } from "./source-authority.js";
+import { PostgresGithubVerificationStore } from "./github-verification-store.js";
 import { HttpError } from "../authz.js";
 import { grantTestPro } from "../test-pro.js";
 
@@ -52,6 +56,214 @@ d("cloud v2 store", () => {
     return (token: string, boot: string) => app.request("/v2/cloud/worker/checkout-failed", { method: "POST",
       headers: { authorization: `Bearer ${token}`, "x-zeros-worker-boot": boot, "content-type": "application/json" }, body: "{}" });
   }
+
+  function heldHello(w: Awaited<ReturnType<typeof create>>, authorizeSource = async () => {}) {
+    let entered!: () => void, release!: () => void;
+    const configuring = new Promise<void>(resolve => { entered = resolve; });
+    const hold = new Promise<void>(resolve => { release = resolve; });
+    const app = new Hono();
+    app.onError((error, c) => error instanceof HttpError ? c.json({ error: { code: error.code } }, error.status) : c.json({ error: "internal" }, 500));
+    app.route("/", createCloudV2WorkerRoutes({ store, runtimeSha256: "a".repeat(64),
+      authorizeSource,
+      config: async () => {
+        entered(); await hold;
+        return { t: "config", workspace: { id: w.id, organizationId: w.organizationId, repository: w.repository,
+          branch: w.branch, baseBranch: w.baseBranch, checkoutPath: "/home/user/withso/zeros" }, agents: {} };
+      }, githubToken: async () => { throw new Error("Unexpected credential read"); } }));
+    return { configuring, release, request: (token: string, bootId: string) => app.request("/v2/cloud/worker/hello", {
+      method: "POST", headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+      body: JSON.stringify({ bootId, protocol: 2, runtimeSha256: "a".repeat(64) }),
+    }) };
+  }
+
+  it.each(["creating", "starting"] as const)("keeps %s private until the exact boot configuration completes", async state => {
+    const w = await create();
+    if (state === "starting") await store.transition(w.id, ["creating"], "starting");
+    const token = await store.rotateWorkerToken(w.id), boot = randomUUID(), hello = heldHello(w);
+    const response = hello.request(token, boot);
+    await hello.configuring;
+    const pending = await store.get(w.id, creator);
+    hello.release();
+    expect((await response).status).toBe(200);
+    expect(pending.state).toBe(state);
+    expect((await store.get(w.id, creator)).state).toBe("running");
+  });
+
+  it("keeps a restarted worker's bound boot and route while lifecycle polls its held configuration", async () => {
+    const w = await create(), sandboxId = "bx_fixture";
+    const routeUrl = "https://fixture-41783.on.boat.dev", portToken = { encrypted: "synthetic-port-material" };
+    await store.defer(w.id, "creating", 0, { boatSandboxId: sandboxId });
+    await store.setWorkerRoute(w.id, sandboxId, routeUrl, portToken);
+    const token = await store.rotateWorkerToken(w.id), oldBoot = randomUUID();
+    await store.acceptWorkerHello(token, oldBoot);
+    const boot = randomUUID(), hello = heldHello(w), response = hello.request(token, boot);
+    await hello.configuring;
+    const rotate = vi.spyOn(store, "rotateWorkerToken"), routes = vi.spyOn(store, "setWorkerRoute");
+    const claims = vi.spyOn(store, "claimPending");
+    const unexpected = async (): Promise<never> => { throw new Error("Unexpected VM mutation"); };
+    const compute: CloudV2Compute = {
+      create: vi.fn(unexpected), fork: vi.fn(unexpected), inspect: vi.fn(unexpected), findSandbox: vi.fn(unexpected),
+      resume: vi.fn(async () => {}), extendLease: vi.fn(unexpected), stop: vi.fn(unexpected), delete: vi.fn(unexpected),
+      exec: vi.fn(async () => ({ exitCode: 0, stdout: "", timedOut: false })), execLong: vi.fn(unexpected),
+      saveSnapshot: vi.fn(unexpected), deleteSnapshot: vi.fn(unexpected),
+      hostPort: vi.fn(async () => ({ url: routeUrl, token: "synthetic-port-token" })),
+    };
+    const sealPortToken = vi.fn(() => portToken);
+    try {
+      expect((await store.get(w.id, creator)).state).toBe("starting");
+      await new CloudV2Lifecycle({ store, compute, sealPortToken, stopWorker: vi.fn(unexpected),
+        publicKeys: [generateKeyPairSync("ed25519").publicKey.export({ type: "spki", format: "pem" }).toString()],
+        runtime: { sha256: "a".repeat(64), url: async () => "https://fixture.example.test/runtime.tar.gz" },
+        bootEnv: () => ({}), sandboxName: () => "fixture" }).tick();
+      const claimed = (await claims.mock.results[0]!.value).find(row => row.id === w.id);
+      expect(claimed?.state).toBe("starting");
+      expect(compute.resume).toHaveBeenCalledExactlyOnceWith(sandboxId);
+      expect(compute.hostPort).toHaveBeenCalledExactlyOnceWith(sandboxId, { port: 41783, localhost: true, title: "Zeros worker" });
+      expect(sealPortToken).toHaveBeenCalledExactlyOnceWith("synthetic-port-token", w.id);
+      expect(routes).toHaveBeenCalledExactlyOnceWith(w.id, sandboxId, routeUrl, portToken);
+      expect(rotate).toHaveBeenCalledExactlyOnceWith(w.id, { state: "starting", sandboxId, stopGeneration: "0" });
+      expect(await rotate.mock.results[0]!.value === null).toBe(true);
+      // Only the same-runtime installer ran; no token-delivery command can restart this boot.
+      expect(compute.exec).toHaveBeenCalledTimes(1);
+      expect(vi.mocked(compute.exec).mock.calls[0]![1]).toContain(`/opt/zeros/runtime/${"a".repeat(64)}`);
+      expect(vi.mocked(compute.exec).mock.calls[0]![1]).not.toContain("/home/user/.config/zeros/worker-token.next");
+      expect(await store.workerRoute(w.id)).toMatchObject({ url: routeUrl, portToken, bootId: boot, workspace: { state: "starting" } });
+      expect(await store.workerSession(token, boot) !== null).toBe(true);
+      expect(await store.workerSession(token, oldBoot)).toBeNull();
+      expect(compute.create).not.toHaveBeenCalled();
+      expect(compute.stop).not.toHaveBeenCalled();
+    } finally { hello.release(); }
+    expect((await response).status).toBe(200);
+    expect((await store.get(w.id, creator)).state).toBe("running");
+  });
+
+  it("does not let stale token delivery replace a boot whose configuration is in flight", async () => {
+    const w = await create();
+    await store.defer(w.id, "creating", 0, { boatSandboxId: "bx_fixture" });
+    const token = await store.rotateWorkerToken(w.id), boot = randomUUID(), hello = heldHello(w);
+    const response = hello.request(token, boot);
+    await hello.configuring;
+    let replaced: string | null;
+    try {
+      replaced = await store.rotateWorkerToken(w.id, { state: "creating", sandboxId: "bx_fixture", stopGeneration: "0" });
+    } finally { hello.release(); }
+    expect((await response).status).toBe(200);
+    expect(replaced === null).toBe(true);
+    expect(await store.workerSession(token, boot) !== null).toBe(true);
+  });
+
+  it.each(["stop", "checkout failure"] as const)("never publishes ready after %s wins during configuration", async change => {
+    const w = await create();
+    await store.transition(w.id, ["creating"], "starting");
+    const token = await store.rotateWorkerToken(w.id), boot = randomUUID(), hello = heldHello(w);
+    const response = hello.request(token, boot);
+    await hello.configuring;
+    try {
+      if (change === "stop") await store.requestLifecycle(w.id, creator, "stop");
+      else expect(await store.failWorkerCheckout(token, boot)).toBe(true);
+    } finally { hello.release(); }
+    expect((await response).status).toBe(401);
+    expect((await store.get(w.id, creator)).state).toBe(change === "stop" ? "stopping" : "failed");
+  });
+
+  it("honors Stop while the first allocated boot is still configuring", async () => {
+    const w = await create();
+    await store.defer(w.id, "creating", 0, { boatSandboxId: "bx_fixture" });
+    const token = await store.rotateWorkerToken(w.id), boot = randomUUID(), hello = heldHello(w);
+    const response = hello.request(token, boot); await hello.configuring;
+    let stopped;
+    try { stopped = await store.requestLifecycle(w.id, creator, "stop"); }
+    finally { hello.release(); }
+    expect((await response).status).toBe(401);
+    expect(stopped).toMatchObject({ moved: true, workspace: { state: "stopping" } });
+  });
+
+  it.each(["allocation", "stop generation", "state"])("fences stale lifecycle token delivery after %s changes", async change => {
+    const w = await create();
+    await store.defer(w.id, "creating", 0, { boatSandboxId: "bx_fixture" });
+    const token = await store.rotateWorkerToken(w.id);
+    if (change === "allocation") await store.defer(w.id, "creating", 0, { boatSandboxId: "bx_successor" });
+    else if (change === "stop generation") await pool.query("UPDATE cloud_v2_workspaces SET stop_generation=stop_generation+1 WHERE id=$1", [w.id]);
+    else await store.transition(w.id, ["creating"], "running");
+    expect(await store.rotateWorkerToken(w.id, { state: "creating", sandboxId: "bx_fixture", stopGeneration: "0" }) === null).toBe(true);
+    expect(await store.beginWorkerHello(token, randomUUID()) !== null).toBe(true);
+  });
+
+  it.each(["boot", "access epoch", "login revision"])("refuses final readiness when the %s proof was superseded", async change => {
+    const w = await create(), token = await store.rotateWorkerToken(w.id), boot = randomUUID();
+    const pending = await store.beginWorkerHello(token, boot); expect(pending).not.toBeNull();
+    if (change === "boot") await store.beginWorkerHello(token, randomUUID());
+    else if (change === "access epoch") await pool.query("UPDATE cloud_v2_workspaces SET access_epoch=access_epoch+1 WHERE id=$1", [w.id]);
+    else await pool.query("UPDATE cloud_v2_workspaces SET login_revision=login_revision+1 WHERE id=$1", [w.id]);
+    expect(await store.acceptWorkerHello(token, boot, pending!)).toBeNull();
+    expect((await store.get(w.id, creator)).state).toBe("creating");
+  });
+
+  it.each(["creating", "starting"] as const)("keeps %s out of prompt dispatch, activity and idle-stop until configuration finishes", async state => {
+    const w = await create(), head = "c".repeat(40);
+    await store.setBaseCommit(w.id, head);
+    if (state === "starting") await store.transition(w.id, ["creating"], "starting");
+    const token = await store.rotateWorkerToken(w.id), boot = randomUUID(), hello = heldHello(w);
+    const response = hello.request(token, boot); await hello.configuring;
+    try {
+      const userMessageId = randomUUID();
+      const queued = await store.prompts.enqueue(w.id, creator, { chatId: "pending-chat", userMessageId, agentId: "codex",
+        model: "gpt-6-luna", effort: "low", prompt: [{ type: "text", text: "fixture" }], startedAt: 1 });
+      expect(queued.receipt.workspaceState).toBe(state);
+      const activity = (await store.get(w.id, creator)).activeAt;
+      await expect(store.prompts.pull(token, boot)).rejects.toMatchObject({ code: "worker_unauthorized" });
+      await expect(store.prompts.begin(token, boot, { userMessageId, deliveryId: randomUUID(), dispatchId: randomUUID() }))
+        .rejects.toMatchObject({ code: "worker_unauthorized" });
+      await store.prompts.wakePending(); await store.markActive(w.id);
+      const cutoff = new Date(Date.now() + 60_000);
+      expect(await store.idleSince(cutoff)).toEqual([]); await store.stopIdle(w.id, cutoff);
+      expect(await store.get(w.id, creator)).toMatchObject({ state, activeAt: activity });
+      expect(await store.workerRoute(w.id)).toMatchObject({ bootId: boot, workspace: { state } });
+      expect(await store.baseCommit(w.id)).toBe(head);
+    } finally { hello.release(); }
+    expect((await response).status).toBe(200);
+    expect((await store.prompts.pull(token, boot)).prompts).toHaveLength(1);
+    expect((await store.get(w.id, creator)).activeAt).not.toBeNull();
+  });
+
+  it("joins first connect and hello verification across replicas before publishing worker readiness", async () => {
+    const w = await create(), token = await store.rotateWorkerToken(w.id), boot = randomUUID();
+    let checking!: () => void, releaseCheck!: () => void, peerRead!: () => void;
+    const entered = new Promise<void>(resolve => { checking = resolve; });
+    const checked = new Promise<void>(resolve => { releaseCheck = resolve; });
+    const observedPeer = new Promise<void>(resolve => { peerRead = resolve; });
+    const fingerprint = "f".repeat(64);
+    const github = { fingerprintFor: vi.fn(async () => fingerprint), check: vi.fn(async () => { checking(); await checked; return fingerprint; }) };
+    const peerStore = new PostgresGithubVerificationStore(pool);
+    const read = peerStore.read.bind(peerStore);
+    vi.spyOn(peerStore, "read").mockImplementation(async scope => {
+      const value = await read(scope); if (value?.claimId) peerRead(); return value;
+    });
+    const authority = (verificationStore: PostgresGithubVerificationStore) => {
+      const source = new CloudV2SourceAuthority(pool, github, Date.now, undefined, verificationStore);
+      return () => source.targets(org, creator, [{ repository: w.repository, repositoryId: "42" }]);
+    };
+    const hello = heldHello(w, authority(new PostgresGithubVerificationStore(pool)));
+    const response = hello.request(token, boot); await entered;
+    await pool.query(`INSERT INTO user_identities (user_id,provider,provider_sub,email_at_link)
+      VALUES ($1::uuid,'workos',($1::uuid)::text,'fixture@example.test')`, [creator]);
+    const app = new Hono();
+    app.use("*", async (c, next) => { c.set("user", { id: creator, accountRevision: 1,
+      identity: { provider: "workos", subject: creator }, authentication: { sessionId: null, tokenExpiresAt: null } } as never); await next(); });
+    app.onError((error, c) => error instanceof HttpError ? c.json({ error: { code: error.code } }, error.status) : c.json({ error: "internal" }, 500));
+    app.route("/", createCloudV2Routes({ store, bridgeBaseUrl: "wss://api.example.test", authorizeSource: authority(peerStore) } as CloudV2RouteDeps));
+    const connect = app.request(`/v1/cloud-v2/workspaces/${w.id}/connect?wakePolicy=explicit`, {
+      method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ wake: true }),
+    });
+    try {
+      await observedPeer; expect(github.check).toHaveBeenCalledTimes(1); releaseCheck();
+      await hello.configuring;
+      expect((await connect).status).toBe(200);
+      expect((await store.get(w.id, creator)).state).toBe("creating");
+    } finally { releaseCheck(); hello.release(); }
+    expect((await response).status).toBe(200); expect(github.check).toHaveBeenCalledTimes(1);
+    expect((await store.get(w.id, creator)).state).toBe("running");
+  });
 
   it("records a checkout failure after hello and preserves the first failure on an HTTP retry", async () => {
     const w = await create(), token = await store.rotateWorkerToken(w.id), boot = randomUUID();
@@ -323,7 +535,7 @@ d("cloud v2 store", () => {
     await store.setBaseCommit(w.id, "d".repeat(40));
     expect(await store.baseCommit(w.id)).toBe(head);
     expect((await store.claimPending(4, 0)).find(row => row.id === w.id)?.baseCommit).toBe(head);
-    // The worker's hello makes it running before its configuration is built.
+    // Initial retries retain the pin until a checkpoint confirms the branch.
     await store.defer(w.id, "creating", 0, { boatSandboxId: "bx_base" });
     expect(await store.acceptWorkerHello(await store.rotateWorkerToken(w.id), randomUUID())).toMatchObject({ state: "running" });
     expect(await store.baseCommit(w.id)).toBe(head);

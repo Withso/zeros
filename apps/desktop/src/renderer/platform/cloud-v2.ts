@@ -164,9 +164,9 @@ export const CloudV2ConnectSchema = z.object({
 });
 /** Only an explicit open/input starts compute. The additive query keeps the
  * strict connect body readable by older control planes. */
-export async function connectCloudV2Workspace(target: CloudWorkspaceTarget, options: { wake: boolean }) {
+export async function connectCloudV2Workspace(target: CloudWorkspaceTarget, options: { wake: boolean; signal?: AbortSignal }) {
   return cloudAccountRequest(`/v1/cloud-v2/workspaces/${uuid.parse(target.workspaceId)}/connect?wakePolicy=explicit`, CloudV2ConnectSchema,
-    { body: { wake: options.wake }, idempotencyKey: key() });
+    { body: { wake: options.wake }, idempotencyKey: key() }, { signal: options.signal });
 }
 
 /** Chat history from the control plane's mirror, readable while the VM sleeps. */

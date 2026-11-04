@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { createServer, type Server, type Socket } from "node:net";
 import type { Stats } from "node:fs";
 import { chmod, link, lstat, mkdir, mkdtemp, rename, rmdir, unlink } from "node:fs/promises";
@@ -7,10 +7,13 @@ import type { CloudV2ControlFrame, CloudV2WorkerFrame } from "@zeros/protocol/cl
 import { GithubAuthenticationError, githubAuthenticationError, GITHUB_REQUEST_TIMEOUT_MS, GITHUB_SOCKET_TIMEOUT_MS } from "./github-failure";
 
 export interface GithubToken { token: string; expiresAt: number }
+export const githubTokenHash = (token: string): string => createHash("sha256").update(token).digest("hex");
+export interface GithubTokenRequest { purpose?: "git" | "gh"; failedTokenSha256?: string; timeoutMs?: number }
 const unavailable = () => githubAuthenticationError();
 interface Pending {
   id?: string; promise: Promise<GithubToken>; resolve: (token: GithubToken) => void; reject: (error: Error) => void;
   deadline: number; attempts: number; failure?: GithubAuthenticationError;
+  request: GithubTokenRequest;
   timer: ReturnType<typeof setTimeout>; retry?: ReturnType<typeof setTimeout>;
 }
 
@@ -40,14 +43,20 @@ export class GithubTokens {
     this.disposed = true; this.online = false; this.cached = undefined;
     if (this.pending) this.finish(this.pending, unavailable());
   }
-  get(): Promise<GithubToken> {
+  get(request: GithubTokenRequest = {}): Promise<GithubToken> {
     if (this.disposed) return Promise.reject(unavailable());
+    if (request.failedTokenSha256) {
+      if (this.cached && githubTokenHash(this.cached.token) === request.failedTokenSha256) this.cached = undefined;
+      if (this.pending && this.pending.request.failedTokenSha256 !== request.failedTokenSha256)
+        this.finish(this.pending, githubAuthenticationError("connection-changed"));
+    }
     if (this.online && this.cached && this.cached.expiresAt > this.now() + 10_000) return Promise.resolve(this.cached);
     if (this.pending) return this.pending.promise;
     let resolve!: Pending["resolve"], reject!: Pending["reject"];
     const promise = new Promise<GithubToken>((yes, no) => { resolve = yes; reject = no; });
-    const timeout = this.options.timeoutMs ?? GITHUB_REQUEST_TIMEOUT_MS;
-    const pending: Pending = { promise, resolve, reject, attempts: 0, deadline: this.now() + timeout,
+    const timeout = Math.min(request.timeoutMs ?? Infinity, this.options.timeoutMs ?? GITHUB_REQUEST_TIMEOUT_MS);
+    if (timeout <= 0) return Promise.reject(unavailable());
+    const pending: Pending = { promise, resolve, reject, request, attempts: 0, deadline: this.now() + timeout,
       timer: setTimeout(() => this.finish(pending, pending.failure ?? unavailable()), timeout) };
     pending.timer.unref?.(); this.pending = pending;
     this.dispatch(pending);
@@ -59,6 +68,7 @@ export class GithubTokens {
     if (this.now() >= pending.deadline) { this.finish(pending, pending.failure ?? unavailable()); return; }
     if (frame.t === "refusal") { this.failed(pending, githubAuthenticationError(frame.code)); return; }
     if (frame.expiresAt <= this.now() + 1000 || !frame.token || frame.token.length > 8192 || /[\0\r\n]/.test(frame.token)) { this.failed(pending, unavailable()); return; }
+    if (githubTokenHash(frame.token) === pending.request.failedTokenSha256) { this.finish(pending, githubAuthenticationError("connection-expired")); return; }
     this.finish(pending, { token: frame.token, expiresAt: frame.expiresAt });
   }
   private dispatch(pending: Pending): void {
@@ -67,7 +77,9 @@ export class GithubTokens {
     if (remaining <= 0 || pending.attempts >= 2) { this.finish(pending, pending.failure ?? unavailable()); return; }
     const id = randomUUID(); pending.id = id; pending.attempts++;
     const failed = () => { if (this.pending === pending && pending.id === id) this.failed(pending, unavailable()); };
-    void this.send({ t: "request", id, kind: "github-token", ...(this.options.purpose ? { purpose: this.options.purpose } : {}) }, remaining)
+    const purpose = pending.request.purpose ?? this.options.purpose;
+    void this.send({ t: "request", id, kind: "github-token", ...(purpose ? { purpose } : {}),
+      ...(pending.request.failedTokenSha256 ? { failedTokenSha256: pending.request.failedTokenSha256 } : {}) }, remaining)
       .then(sent => { if (!sent) failed(); }, failed);
   }
   private failed(pending: Pending, error: GithubAuthenticationError): void {
@@ -88,8 +100,9 @@ export class GithubTokens {
 
 export function githubEnvironment(socketPath: string, askpassPath: string): NodeJS.ProcessEnv {
   return { GH_ZEROS_BROKER_SOCKET: socketPath, GIT_ASKPASS: askpassPath, GIT_TERMINAL_PROMPT: "0",
-    // Clear persistent helpers; askpass is the only source of HTTPS credentials.
-    GIT_CONFIG_COUNT: "1", GIT_CONFIG_KEY_0: "credential.helper", GIT_CONFIG_VALUE_0: "" };
+    // Git reports a rejected password to erase; askpass alone cannot observe it.
+    GIT_CONFIG_COUNT: "2", GIT_CONFIG_KEY_0: "credential.helper", GIT_CONFIG_VALUE_0: "",
+    GIT_CONFIG_KEY_1: "credential.https://github.com.helper", GIT_CONFIG_VALUE_1: `!'${join(dirname(askpassPath), "git-credential").replaceAll("'", "'\\''")}'` };
 }
 
 /** Same-user VM broker. The socket is private to the worker's Unix account;
@@ -102,7 +115,7 @@ export class GithubBroker {
   private ownedSocket?: Stats;
   private ownedDirectory?: Stats;
   private readonly sockets = new Set<Socket>();
-  constructor(readonly socketPath: string, private readonly token: (purpose: "git" | "gh") => Promise<GithubToken>, private readonly changed: () => void = () => {}) {}
+  constructor(readonly socketPath: string, private readonly token: (purpose: "git" | "gh", failedTokenSha256?: string) => Promise<GithubToken>, private readonly changed: () => void = () => {}) {}
   start(): Promise<void> {
     if (this.disposed) return Promise.reject(new Error("The GitHub broker is disposed."));
     if (this.server) return Promise.resolve();
@@ -166,7 +179,7 @@ export class GithubBroker {
     socket.setEncoding("utf8");
     socket.on("data", (data: string) => {
       if (answered) return;
-      buffer += data; if (Buffer.byteLength(buffer) > 1024) { answered = true; socket.destroy(); return; }
+      buffer += data; if (Buffer.byteLength(buffer) > 16_384) { answered = true; socket.destroy(); return; }
       if (!buffer.includes("\n")) return;
       answered = true;
       const reply = async () => {
@@ -174,6 +187,16 @@ export class GithubBroker {
         if (!request || typeof request !== "object" || !("kind" in request)) throw unavailable();
         if (request.kind === "changed") { this.changed(); return { ok: true }; }
         if (request.kind === "token" || request.kind === "user-token") return this.token(request.kind === "user-token" ? "gh" : "git");
+        if (request.kind === "report-failure" && "purpose" in request && (request.purpose === "git" || request.purpose === "gh")) {
+          if ("rejectedToken" in request) {
+            if (typeof request.rejectedToken !== "string" || !request.rejectedToken || request.rejectedToken.length > 8192 || /[\0\r\n]/.test(request.rejectedToken) || "failedTokenSha256" in request) throw unavailable();
+            // The credential stays within this VM's private socket. Only its
+            // equality fingerprint crosses the control-plane boundary.
+            return this.token(request.purpose, githubTokenHash(request.rejectedToken));
+          }
+          if ("failedTokenSha256" in request && typeof request.failedTokenSha256 === "string" && request.failedTokenSha256.length === 64 && /^[a-f0-9]{64}$/.test(request.failedTokenSha256))
+            return this.token(request.purpose, request.failedTokenSha256);
+        }
         throw unavailable();
       };
       void reply().then(value => { if (!socket.destroyed) socket.end(JSON.stringify(value) + "\n"); }, error => {

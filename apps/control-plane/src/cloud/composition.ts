@@ -51,7 +51,7 @@ export async function cloudV2AgentConfig(logins: { codex?: Login; claude?: Login
 }
 
 /** Bridge history reads answered from the mirror while the VM is stopped. */
-export async function answerCloudV2Offline(store: Pick<CloudV2Store, "listChats" | "messageWindow">,
+export async function answerCloudV2Offline(store: Pick<CloudV2Store, "listChats" | "messageWindow" | "searchMessages">,
   workspace: CloudV2Workspace, frame: unknown): Promise<unknown | null> {
   const request = frame as { type?: unknown; id?: unknown; op?: unknown; params?: Record<string, unknown> } | null;
   if (request?.type !== "WORKSPACE_REQUEST" || typeof request.id !== "string" || typeof request.op !== "string") return null;
@@ -79,7 +79,7 @@ export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boo
   const signer = new CloudV2WorkerSigner(v2.workerSigningKey, v2.workerSigningKeyPrevious);
   const logins: CloudV2AgentLogins = keys ? createCloudV2AgentLogins(pool, keys) : async () => null;
   const github = createCloudGithubServices(pool, config.github, keys, store);
-  const githubToken = (workspace: CloudV2Workspace, purpose: "git" | "gh" = "git") => github.workspaceToken(workspace, "user", purpose);
+  const githubToken = (workspace: CloudV2Workspace, purpose: "git" | "gh" = "git", failedTokenSha256?: string) => github.workspaceToken(workspace, "user", purpose, failedTokenSha256);
   const proxyBase = `${v2.apiUrl}${CLOUD_V2_PROXY_PREFIX}`;
   const computers = new CloudV2Computers(pool, lockPool, github.resolveRepository);
   const source = github.source;
@@ -124,7 +124,10 @@ export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boo
     return {
       t: "config",
       gitIdentity,
+      codeReview: { userId: workspace.creatorUserId, ...(gitIdentity?.name ? { userName: gitIdentity.name } : {}) },
       githubPullRequests: 1,
+      githubUserTokens: 1,
+      agentInteractions: 1,
       ...(v2.promptOutbox ? { promptOutbox: 1 as const } : {}),
       loginRevision: await store.loginRevision(workspace.id) ?? "0",
       workspace: {
@@ -203,7 +206,7 @@ export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boo
   const builder = roles.lifecycle ? new CloudV2ComputerBuilder({
     computers, compute, channel: config.deploymentChannel, localOwner, runtime,
     cloneToken: async (organizationId, userId, target) => {
-      return (await github.token({ organizationId, userId }, target, "read", "git",
+      return (await github.token({ organizationId, userId }, target, "read", "computer",
         () => authorizeSourceTargets(organizationId, userId, [target]))).token;
     },
     ...(remoteHeads ? { remoteHead: (org: string, user: string, target: CloudSourceTarget, branch: string) =>

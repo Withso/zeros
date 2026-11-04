@@ -96,7 +96,8 @@ export class HybridTransport implements Transport {
     if (frame.t === "request") {
       // Do not await delivery into a configuring worker: checkout preparation
       // may already be waiting on this very credential request.
-      void this.request("github-token", frame.purpose ? { purpose: frame.purpose } : {}, undefined,
+      void this.request("github-token", { ...(frame.purpose ? { purpose: frame.purpose } : {}),
+        ...(frame.failedTokenSha256 ? { failedTokenSha256: frame.failedTokenSha256 } : {}) }, undefined,
         Math.min(GITHUB_HTTP_TIMEOUT_MS, options?.timeoutMs ?? GITHUB_HTTP_TIMEOUT_MS)).then(value => {
         const reply = CloudV2ControlFrameSchema.safeParse({ t: "reply", id: frame.id, ...value });
         return this.handlers!.frame(reply.success ? reply.data : { t: "refusal", id: frame.id, code: "github_token_unavailable" });
@@ -279,7 +280,7 @@ export class HybridTransport implements Transport {
         method: payload === undefined ? "GET" : "POST", headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json", "X-Zeros-Worker-Boot": this.bootId,
           // An HTTP header is ignored by older control planes; adding a JSON
           // field would break their strict hello schema before configuration.
-          "X-Zeros-Worker-Features": "prompt-outbox-v1,mcp-v1,workspace-setup-v1,checkout-v2,github-pr-v1,git-identity-v1" },
+          "X-Zeros-Worker-Features": "prompt-outbox-v1,mcp-v1,workspace-setup-v1,checkout-v2,agent-interactions-v1,github-pr-v1,git-identity-v1,github-user-token-v1,code-review-v1" },
         ...(payload === undefined ? {} : { body: payload }), redirect: "error", signal: controller.signal,
       });
       if (!response.ok) {

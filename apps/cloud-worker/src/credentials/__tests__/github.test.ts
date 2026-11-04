@@ -1,10 +1,11 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { mkdir, readdir, rm, stat } from "node:fs/promises";
 import { join } from "node:path";
+import { createServer } from "node:net";
 import { afterEach, expect, it, vi } from "vitest";
 import type { CloudV2WorkerFrame } from "@zeros/protocol/cloud-v2-relay";
-import { GithubTokens, GithubBroker } from "../github";
-import { askpass, brokerRequest, runGh } from "../client";
+import { GithubTokens, GithubBroker, githubTokenHash } from "../github";
+import { askpass, brokerRequest, gitCredential, runGh } from "../client";
 
 const cleanup: Array<() => Promise<void>> = [];
 afterEach(async () => { for (const dispose of cleanup.splice(0).reverse()) await dispose(); vi.useRealTimers(); });
@@ -29,6 +30,109 @@ it("coalesces token requests, expires cached credentials and rejects stale repli
   tokens.receive({ t: "reply", id: first.id, token: "fixture-stale", expiresAt: now + 120_000 });
   tokens.receive({ t: "reply", id: (frames[2] as typeof first).id, token: "fixture-github-two", expiresAt: now + 120_000 });
   expect(await d).toMatchObject({ token: "fixture-github-two" });
+});
+
+it("reports a rejected cached token by digest, joins its refresh and refuses the same token again", async () => {
+  const frames: CloudV2WorkerFrame[] = [];
+  const tokens = new GithubTokens(async frame => { frames.push(frame); return true; }, { purpose: "gh" });
+  cleanup.push(async () => tokens.dispose()); tokens.connect();
+  const initial = tokens.get();
+  const first = frames[0] as Extract<CloudV2WorkerFrame, { t: "request" }>;
+  tokens.receive({ t: "reply", id: first.id, token: "fixture-rejected-user", expiresAt: Date.now() + 120_000 });
+  await initial;
+  const failedTokenSha256 = createHash("sha256").update("fixture-rejected-user").digest("hex");
+  const request = { failedTokenSha256 };
+  const pending = tokens.get(request), duplicate = tokens.get(request);
+  const result = pending.then(value => ({ value }), error => ({ error }));
+  expect(duplicate).toBe(pending);
+  expect(frames).toHaveLength(2);
+  expect(frames[1]).toMatchObject({ kind: "github-token", purpose: "gh", failedTokenSha256 });
+  tokens.receive({ t: "reply", id: (frames[1] as typeof first).id, token: "fixture-rejected-user", expiresAt: Date.now() + 120_000 });
+  expect(await result).toMatchObject({ error: { reason: "connection-expired" } });
+});
+
+it("reports Git's rejected credential by digest and keeps helper output private", async () => {
+  const directory = await brokerDirectory(), requests: Array<{ purpose: string; hash?: string }> = [];
+  const broker = new GithubBroker(join(directory, "github.sock"), async (purpose, hash) => {
+    requests.push({ purpose, hash });
+    return { token: hash ? "fixture-replacement-user" : "fixture-original-user", expiresAt: Date.now() + 120_000 };
+  });
+  await broker.start(); cleanup.push(() => broker.dispose());
+  const input = "protocol=https\nhost=github.com\n\n";
+  expect(await gitCredential("get", input, broker.socketPath)).toBe("username=x-access-token\npassword=fixture-original-user\n\n");
+  expect(await gitCredential("erase", "protocol=https\nhost=github.com\npassword=fixture-original-user\n\n", broker.socketPath)).toBe("");
+  expect(requests).toEqual([{ purpose: "git", hash: undefined }, { purpose: "git", hash: githubTokenHash("fixture-original-user") }]);
+  expect(await gitCredential("store", input, broker.socketPath)).toBe("");
+  for (const host of ["github.com:443", "other.example", "github.com.evil.test"])
+    expect(await gitCredential("get", `protocol=https\nhost=${host}\n\n`, broker.socketPath)).toBe("");
+  expect(requests).toHaveLength(2);
+});
+
+it("leaves rejection fingerprinting to the private broker for both helpers", async () => {
+  const directory = await brokerDirectory(), path = join(directory, "github.sock"), requests: unknown[] = [];
+  const server = createServer(socket => {
+    socket.setEncoding("utf8");
+    let input = "";
+    socket.on("data", chunk => {
+      input += chunk;
+      if (!input.includes("\n")) return;
+      requests.push(JSON.parse(input));
+      socket.end(JSON.stringify({ token: "fixture-rejected-user", expiresAt: Date.now() + 120_000 }) + "\n");
+    });
+  });
+  await new Promise<void>(resolve => server.listen(path, resolve));
+  cleanup.push(() => new Promise<void>(resolve => server.close(() => resolve())));
+  expect(await gitCredential("erase", "protocol=https\nhost=github.com\npassword=fixture-rejected-user\n\n", path)).toBe("");
+  expect(await runGh(["api", "user"], { GH_ZEROS_BROKER_SOCKET: path }, async () => ({ code: 1, unauthorized: true }))).toBe(1);
+  expect(requests).toEqual([
+    { kind: "report-failure", purpose: "git", rejectedToken: "fixture-rejected-user" },
+    { kind: "user-token" },
+    { kind: "report-failure", purpose: "gh", rejectedToken: "fixture-rejected-user" },
+  ]);
+});
+
+it("fingerprints a maximum-size rejected token only inside the broker", async () => {
+  const directory = await brokerDirectory(), token = "x".repeat(8192);
+  const source = vi.fn(async () => ({ token: "fixture-refreshed", expiresAt: Date.now() + 120_000 }));
+  const broker = new GithubBroker(join(directory, "github.sock"), source);
+  await broker.start(); cleanup.push(() => broker.dispose());
+  await expect(brokerRequest(broker.socketPath, "report-failure", { purpose: "git", rejectedToken: token })).resolves.toMatchObject({ token: "fixture-refreshed" });
+  expect(source).toHaveBeenCalledExactlyOnceWith("git", githubTokenHash(token));
+});
+
+it.each([
+  { name: "absent", rejectedToken: undefined }, { name: "null", rejectedToken: null }, { name: "empty", rejectedToken: "" },
+  { name: "oversized", rejectedToken: "x".repeat(8193) }, { name: "NUL", rejectedToken: "fixture\0token" },
+  { name: "CR", rejectedToken: "fixture\rtoken" }, { name: "LF", rejectedToken: "fixture\ntoken" },
+])("refuses $name broker rejection before the token source", async ({ rejectedToken }) => {
+  const directory = await brokerDirectory(), source = vi.fn(async () => ({ token: "fixture-refreshed", expiresAt: Date.now() + 120_000 }));
+  const broker = new GithubBroker(join(directory, "github.sock"), source);
+  await broker.start(); cleanup.push(() => broker.dispose());
+  await expect(brokerRequest(broker.socketPath, "report-failure", { purpose: "git", rejectedToken } as never)).rejects.toThrow("GitHub authentication is unavailable");
+  expect(source).not.toHaveBeenCalled();
+});
+
+it("accepts Git's repeatable authentication and capability fields without accepting duplicate authorities", async () => {
+  const directory = await brokerDirectory(), token = vi.fn(async () => ({ token: "fixture-human", expiresAt: Date.now() + 120_000 }));
+  const broker = new GithubBroker(join(directory, "github.sock"), token);
+  await broker.start(); cleanup.push(() => broker.dispose());
+  const input = "protocol=https\nhost=github.com\ncapability[]=authtype\ncapability[]=state\nwwwauth[]=Basic realm=GitHub\nwwwauth[]=Bearer\n\n";
+  expect(await gitCredential("get", input, broker.socketPath)).toContain("password=fixture-human\n");
+  await expect(gitCredential("get", "protocol=https\nhost=github.com\nhost=other.example\n\n", broker.socketPath)).rejects.toThrow();
+  expect(token).toHaveBeenCalledOnce();
+});
+
+it.each([["pr", "create"], ["api", "user"], ["api", "repos/o/r/issues", "-X", "POST"]])("repairs a gh 401 for the next invocation without replaying %j", async (...args) => {
+  const directory = await brokerDirectory(), reports: string[] = [];
+  const broker = new GithubBroker(join(directory, "github.sock"), async (_purpose, hash) => {
+    if (hash) reports.push(hash);
+    return { token: hash ? "fixture-new" : "fixture-rejected", expiresAt: Date.now() + 120_000 };
+  });
+  await broker.start(); cleanup.push(() => broker.dispose());
+  const execute = vi.fn(async () => ({ code: 1, unauthorized: true }));
+  expect(await runGh(args, { GH_ZEROS_BROKER_SOCKET: broker.socketPath }, execute)).toBe(1);
+  expect(execute).toHaveBeenCalledOnce();
+  expect(reports).toEqual([githubTokenHash("fixture-rejected")]);
 });
 
 it("ends refused, offline and timed-out requests cleanly without retrying", async () => {
