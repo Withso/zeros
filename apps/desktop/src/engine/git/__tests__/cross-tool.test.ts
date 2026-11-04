@@ -4,7 +4,7 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { mkdtemp, mkdir, rm, writeFile, readFile } from "node:fs/promises";
+import { mkdtemp, mkdir, rm, writeFile, readFile, realpath } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { worktreeSeedPath } from "../../db/paths";
 import { tmpdir } from "node:os";
@@ -75,7 +75,7 @@ describe("cross-tool interop", () => {
       const branches = await listAllBranches({ repoSlug: "acme-example", repoRoot });
       expect(branches.find((branch) => branch.name === name)).toMatchObject({
         name, tipSha: tip.trim(), lastCommitDate: Number(date.trim()) * 1000,
-        isCheckedOut: true, worktreePath: repoRoot,
+        isCheckedOut: true, worktreePath: await realpath(repoRoot),
       });
     });
 
