@@ -15,7 +15,8 @@ import { Textarea } from "../textarea";
 
 function classes(markup: string, index = 0) {
   const all = [...markup.matchAll(/class="([^"]*)"/g)].map((match) => match[1]!);
-  return new Set(all[index]!.replaceAll("&amp;", "&").replaceAll("&#x27;", "'").split(/\s+/));
+  // Decode `&amp;` last, so a literal "&amp;#x27;" is not decoded twice.
+  return new Set(all[index]!.replaceAll("&#x27;", "'").replaceAll("&amp;", "&").split(/\s+/));
 }
 
 const KEYBOARD_RING = [

@@ -872,8 +872,8 @@ export function useChangesModel({
         refreshKey,
         async () => {
           const observation = beginChangeLineObservation();
-          let files: ChangedFile[] = [];
-          let kind: SectionKind = "changes";
+          let files: ChangedFile[];
+          let kind: SectionKind;
           if (
             scope.kind === "uncommitted" ||
             scope.kind === "staged" ||

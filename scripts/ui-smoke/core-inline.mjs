@@ -2020,7 +2020,6 @@ export async function runDiffFilesSmoke({
   // result routes to the viewer.
   const searchSidebarTrigger = page.getByTestId("search-sidebar-trigger");
   const searchSidebarResize = page.getByTestId("search-sidebar-resize");
-  const searchSidebarShell = page.getByTestId("search-sidebar-shell");
   const searchSidebar = page.getByTestId("files-search-sidebar");
   const searchSidebarInput = searchSidebar.getByRole("textbox", {
     name: "Search workspace files",
