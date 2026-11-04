@@ -1,5 +1,7 @@
 import { execFile } from "node:child_process";
+import fs from "node:fs/promises";
 import { mkdtemp, readFile, rm, stat, unlink, writeFile } from "node:fs/promises";
+import { syncBuiltinESMExports } from "node:module";
 import { createServer, Socket, type Server } from "node:net";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -11,7 +13,7 @@ import { GithubBroker } from "../github";
 const execute = promisify(execFile), cleanups: Array<() => Promise<void>> = [];
 afterEach(async () => {
   for (const cleanup of cleanups.splice(0).reverse()) await cleanup();
-  vi.restoreAllMocks(); vi.useRealTimers();
+  vi.restoreAllMocks(); syncBuiltinESMExports(); vi.useRealTimers();
 });
 async function fixture() {
   const directory = await mkdtemp(join(tmpdir(), "broker-lifecycle-"));
@@ -39,6 +41,62 @@ it("leaves a foreign replacement socket reachable when the original broker is di
   await broker.dispose();
   expect(await stat(path).then(value => value.ino, () => undefined)).toBe(inode);
   expect(await brokerRequest(path, "token")).toMatchObject({ token: "fixture-foreign" });
+});
+
+it.each([
+  { name: "preserves a replacement published after cleanup observes its own inode", republish: false },
+  { name: "preserves a newer publication while restoring a foreign cleanup capture", republish: true },
+])("$name", async ({ republish }) => {
+  const path = await fixture();
+  const broker = new GithubBroker(path, async () => ({ token: "fixture-own", expiresAt: Date.now() + 120_000 }));
+  cleanups.push(() => broker.dispose());
+  await broker.start();
+  const ownInode = (await stat(path)).ino, native = fs.lstat, nativeLink = fs.link;
+  let observed!: () => void, release!: () => void, restoring!: (path: string) => void, releaseRestore!: () => void, held = false;
+  const observation = new Promise<void>(resolve => { observed = resolve; });
+  const hold = new Promise<void>(resolve => { release = resolve; });
+  const restoration = new Promise<string>(resolve => { restoring = resolve; });
+  const restoreHold = new Promise<void>(resolve => { releaseRestore = resolve; });
+  vi.spyOn(fs, "lstat").mockImplementation(async (...args: Parameters<typeof fs.lstat>) => {
+    const info = await native(...args);
+    if (args[0] === path && !held) {
+      held = true; expect(info.ino).toBe(ownInode); observed(); await hold;
+    }
+    return info;
+  });
+  vi.spyOn(fs, "link").mockImplementation(async (source, destination) => {
+    if (republish && destination === path) { restoring(String(source)); await restoreHold; }
+    return nativeLink(source, destination);
+  });
+  syncBuiltinESMExports();
+  const disposing = broker.dispose();
+  cleanups.push(async () => { release(); releaseRestore(); await disposing; });
+  await observation;
+  await unlink(path);
+  const foreign = createServer(socket => socket.once("data", () => socket.end(JSON.stringify({ token: "fixture-foreign", expiresAt: Date.now() + 120_000 }) + "\n")));
+  cleanups.push(() => close(foreign));
+  await new Promise<void>(resolve => foreign.listen(path, resolve));
+  const inode = (await stat(path)).ino;
+  expect(inode).not.toBe(ownInode);
+  release();
+  let publishedInode = inode, publishedToken = "fixture-foreign", captured = "";
+  if (republish) {
+    const restoringPath = await Promise.race([restoration, disposing.then(() => undefined)]);
+    expect(restoringPath).toBeDefined(); captured = restoringPath!;
+    const newer = createServer(socket => socket.once("data", () => socket.end(JSON.stringify({ token: "fixture-newer", expiresAt: Date.now() + 120_000 }) + "\n")));
+    cleanups.push(() => close(newer));
+    await new Promise<void>(resolve => newer.listen(path, resolve));
+    publishedInode = (await stat(path)).ino; publishedToken = "fixture-newer";
+    expect(publishedInode).not.toBe(inode);
+    releaseRestore();
+  }
+  await disposing;
+  expect(await stat(path).then(value => value.ino, () => undefined)).toBe(publishedInode);
+  expect(await brokerRequest(path, "token")).toMatchObject({ token: publishedToken });
+  if (republish) {
+    expect((await stat(captured)).ino).toBe(inode);
+    expect(await brokerRequest(captured, "token")).toMatchObject({ token: "fixture-foreign" });
+  }
 });
 
 it("does not claim an existing socket just because its listener is unreachable", async () => {

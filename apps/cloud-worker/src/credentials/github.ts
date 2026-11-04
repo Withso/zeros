@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { createServer, type Server, type Socket } from "node:net";
 import type { Stats } from "node:fs";
-import { chmod, link, lstat, mkdir, mkdtemp, rmdir, unlink } from "node:fs/promises";
+import { chmod, link, lstat, mkdir, mkdtemp, rename, rmdir, unlink } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import type { CloudV2ControlFrame, CloudV2WorkerFrame } from "@zeros/protocol/cloud-v2-relay";
 import { GithubAuthenticationError, githubAuthenticationError, GITHUB_REQUEST_TIMEOUT_MS, GITHUB_SOCKET_TIMEOUT_MS } from "./github-failure";
@@ -192,5 +192,18 @@ function sameInode(current: Stats, owned?: Stats): boolean {
 async function unlinkOwnedSocket(path: string, owned?: Stats): Promise<void> {
   if (!owned) return;
   const current = await inspect(path);
-  if (current?.isSocket() && sameInode(current, owned)) await unlink(path).catch((error: NodeJS.ErrnoException) => { if (error.code !== "ENOENT") throw error; });
+  if (!current?.isSocket() || !sameInode(current, owned)) return;
+  const retirement = await mkdtemp(join(dirname(path), ".retire-")), captured = join(retirement, "socket");
+  try {
+    const moved = await rename(path, captured).then(() => true, (error: NodeJS.ErrnoException) => { if (error.code === "ENOENT") return false; throw error; });
+    if (!moved) return;
+    const entry = await lstat(captured);
+    // Inspect the captured name: another broker can replace the public name
+    // after its ownership read. Restore foreign captures without overwriting
+    // a newer publication, and retain their private alias instead of deleting it.
+    if (entry.isSocket() && sameInode(entry, owned)) await unlink(captured);
+    else await link(captured, path).catch((error: NodeJS.ErrnoException) => { if (error.code !== "EEXIST") throw error; });
+  } finally {
+    await rmdir(retirement).catch((error: NodeJS.ErrnoException) => { if (error.code !== "ENOENT" && error.code !== "ENOTEMPTY") throw error; });
+  }
 }

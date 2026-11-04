@@ -237,7 +237,10 @@ Each worker instance publishes its own Unix socket through
 `GH_ZEROS_BROKER_SOCKET`, in a private temporary directory outside checkpointed
 session state. The directory is mode `0700` and the socket is mode `0600`.
 Startup refuses an existing pathname, and disposal removes only the socket
-inode that instance created. The listener binds through a temporary name so
+inode that instance created. Cleanup captures the directory entry under a
+private name before rechecking ownership; a foreign capture is restored without
+overwriting any newer publication, and its private alias is retained.
+The listener binds through a temporary name so
 native close cannot unlink a replacement at the published path. Helpers retry
 a missing or refused socket connection once after 250 ms, only before sending
 the request; both dials and response reading share one 21-second deadline.

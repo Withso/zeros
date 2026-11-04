@@ -4,6 +4,6 @@
   "area": "cloud-worker",
   "fixedBy": "pr:822",
   "symptom": "Cloud Git and gh work once, then fail with ECONNREFUSED while the worker remains alive: the shared socket pathname points at a different inode. Native listener close also unlinks foreign replacements at its original bind path.",
-  "rule": "Use an instance-specific socket outside persisted state, publish it to every child, and remove only owned inodes, including native close behavior. Join concurrent starts and disposal; retry only a pre-delivery missing or refused connection within the original deadline. Principles 1, 6, 7, 10, 13 and 17.",
+  "rule": "Use an instance-specific socket outside persisted state, publish it to every child, and remove only captured owned inodes, including native close behavior. An ownership read cannot authorize a later unlink of a mutable public name. Join concurrent starts and disposal; retry only a pre-delivery missing or refused connection within the original deadline. Principles 1, 6, 7, 10, 13 and 17.",
   "check": "pnpm --dir apps/cloud-worker test src/credentials/__tests__/broker-lifecycle.test.ts src/__tests__/worker-github.test.ts src/__tests__/package.test.ts"
 }
