@@ -13,7 +13,7 @@ import {
   MoreHorizontal,
   Film,
 } from "lucide-react";
-import { IconButton, Input, Tooltip, DropdownMenu, DropdownMenuTrigger, DropdownMenuContent, DropdownMenuItem } from "@/renderer/shared/ui/primitives";
+import { IconButton, Input, Tooltip, DropdownMenu, DropdownMenuTrigger, DropdownMenuContent, DropdownMenuItem, Toolbar, ToolbarSeparator, ToolbarText } from "@/renderer/shared/ui/primitives";
 import { toast } from "@/renderer/shared/ui/primitives/elements";
 import { useDocumentActive } from "@/renderer/state/use-document-active";
 import { WorkbenchEmptyState } from "../tab-status";
@@ -270,61 +270,72 @@ export function FileMediaPreview({
             />
           ))}
       </div>
-      <div className="relative z-1 flex shrink-0 flex-wrap items-center gap-2 px-3 pb-3">
-        <div
-          role="group"
-          aria-label="Preview zoom"
-          className="border-border2 bg-bg2 text-fg2 flex shrink-0 items-center gap-1 rounded-lg border p-1 shadow-[var(--shadow-dropdown)]"
+      {/* One centred floating island: playback, a divider, then zoom. A
+          video's island narrows with the tab up to 480px; an image's fits
+          its four tools. */}
+      <div className="relative z-1 flex shrink-0 justify-center px-3 pb-3">
+        <Toolbar
+          aria-label="Media controls"
+          className={cn(
+            "max-w-full",
+            kind === "video" && media && "@container w-full max-w-120",
+          )}
         >
-          <Tooltip label="Zoom out">
-            <IconButton
-              ref={camera.zoomOut}
-              label="Zoom out"
-              size="compact"
-              disabled={!ready || !visible}
-              onClick={() => camera.actions.current.zoomOut()}
-            >
-              <Minus className="size-3.5" />
-            </IconButton>
-          </Tooltip>
-          <output
-            ref={camera.percentage}
-            aria-label="Zoom percentage"
-            aria-live="off"
-            className="w-10 text-center text-xs tabular-nums"
+          {kind === "video" && media && (
+            <>
+              <FileVideoControls
+                video={media as HTMLVideoElement}
+                active={visible}
+                ready={ready}
+                source={identity}
+              />
+              <ToolbarSeparator />
+            </>
+          )}
+          <div
+            role="group"
+            aria-label="Preview zoom"
+            className="flex shrink-0 items-center gap-0.5"
           >
-            100%
-          </output>
-          <Tooltip label="Zoom in">
-            <IconButton
-              ref={camera.zoomIn}
-              label="Zoom in"
-              size="compact"
-              disabled={!ready || !visible}
-              onClick={() => camera.actions.current.zoomIn()}
+            <Tooltip label="Zoom out">
+              <IconButton
+                ref={camera.zoomOut}
+                label="Zoom out"
+                disabled={!ready || !visible}
+                onClick={() => camera.actions.current.zoomOut()}
+              >
+                <Minus />
+              </IconButton>
+            </Tooltip>
+            <output
+              ref={camera.percentage}
+              aria-label="Zoom percentage"
+              aria-live="off"
+              className="w-10 text-center text-xs leading-4.5 tabular-nums"
             >
-              <Plus className="size-3.5" />
-            </IconButton>
-          </Tooltip>
-          <Tooltip label="Reset zoom and position (100%)">
-            <IconButton
-              label="Reset zoom and position"
-              size="compact"
-              disabled={!ready || !visible}
-              onClick={() => camera.actions.current.reset()}
-            >
-              <RotateCcw className="size-3.5" />
-            </IconButton>
-          </Tooltip>
-        </div>
-        {kind === "video" && media && (
-          <FileVideoControls
-            video={media as HTMLVideoElement}
-            active={visible}
-            ready={ready}
-            source={identity}
-          />
-        )}
+              100%
+            </output>
+            <Tooltip label="Zoom in">
+              <IconButton
+                ref={camera.zoomIn}
+                label="Zoom in"
+                disabled={!ready || !visible}
+                onClick={() => camera.actions.current.zoomIn()}
+              >
+                <Plus />
+              </IconButton>
+            </Tooltip>
+            <Tooltip label="Reset zoom and position (100%)">
+              <IconButton
+                label="Reset zoom and position"
+                disabled={!ready || !visible}
+                onClick={() => camera.actions.current.reset()}
+              >
+                <RotateCcw />
+              </IconButton>
+            </Tooltip>
+          </div>
+        </Toolbar>
       </div>
     </div>
   );
@@ -391,13 +402,11 @@ function FileVideoControls({
     <div
       role="group"
       aria-label="Video playback"
-      className="border-border2 bg-bg2 text-fg2 flex min-w-0 flex-1 basis-48 items-center gap-2 rounded-lg border p-1"
+      className="flex min-w-0 flex-1 items-center gap-0.5"
     >
       <Tooltip label={playingLabel}>
         <IconButton
           label={playingLabel}
-          size="compact"
-          className="shrink-0"
           disabled={!ready || !active}
           onClick={() => {
             if (!video.paused) video.pause();
@@ -410,11 +419,7 @@ function FileVideoControls({
             }
           }}
         >
-          {state.playing ? (
-            <Pause className="size-3.5" />
-          ) : (
-            <Play className="size-3.5" />
-          )}
+          {state.playing ? <Pause /> : <Play />}
         </IconButton>
       </Tooltip>
       <Input
@@ -435,24 +440,19 @@ function FileVideoControls({
           setState((current) => ({ ...current, time }));
         }}
       />
-      <span className="text-xxs shrink-0 tabular-nums">
+      {/* The seek bar takes the slack down to 48px; the time gives way first. */}
+      <ToolbarText className="shrink-0 tabular-nums @max-[400px]:hidden">
         {videoTime(state.time)} / {videoTime(duration)}
-      </span>
+      </ToolbarText>
       <Tooltip label={state.muted ? "Unmute video" : "Mute video"}>
         <IconButton
           label={state.muted ? "Unmute video" : "Mute video"}
-          size="compact"
-          className="shrink-0"
           disabled={!ready || !active}
           onClick={() => {
             video.muted = !video.muted;
           }}
         >
-          {state.muted ? (
-            <VolumeX className="size-3.5" />
-          ) : (
-            <Volume2 className="size-3.5" />
-          )}
+          {state.muted ? <VolumeX /> : <Volume2 />}
         </IconButton>
       </Tooltip>
     </div>

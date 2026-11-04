@@ -431,13 +431,16 @@ export async function runFileMediaSmoke({ page, check, screenshots }) {
     }, theme);
     await page.setViewportSize({ width: 520, height: 650 });
     await settle();
-    const geometry = await page
-      .getByRole("group", { name: "Preview zoom", exact: true })
-      .boundingBox();
+    const island = page.getByRole("toolbar", {
+      name: "Media controls",
+      exact: true,
+    });
+    const geometry = await island.boundingBox();
+    const row = await island.locator("..").boundingBox();
     check(
-      `Zoom island stays at bottom left in ${theme} narrow panes`,
-      geometry.x >= 8 &&
-        geometry.x < 24 &&
+      `Media island stays centred at the bottom in ${theme} narrow panes`,
+      Math.abs(geometry.x + geometry.width / 2 - (row.x + row.width / 2)) <= 1 &&
+        geometry.height === 36 &&
         geometry.y > 580 &&
         geometry.y + geometry.height <= 650,
     );

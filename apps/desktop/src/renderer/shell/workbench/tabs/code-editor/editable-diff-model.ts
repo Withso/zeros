@@ -46,6 +46,24 @@ export function withEditableContext(diff: FileDiffMetadata): FileDiffMetadata {
   };
 }
 
+/** Why a comparison can't become an editor. Only a partial read can come
+ *  back whole on a retry; the others need Diff view turned off. */
+export type EditableDiffUnavailableReason =
+  | "too-large"
+  | "binary"
+  | "deleted"
+  | "partial";
+
+export class EditableDiffUnavailable extends Error {
+  constructor(
+    readonly reason: EditableDiffUnavailableReason,
+    message: string,
+  ) {
+    super(message);
+    this.name = "EditableDiffUnavailable";
+  }
+}
+
 /** Only call with a fullContext Git response. Partial review patches are not
  * documents and must never become the writable side of an editor. The new
  * side always comes from the complete Files draft, never from a patch. */
@@ -57,11 +75,12 @@ export function editableDiffBase(
 ): FileContents | null {
   if (!patch) return isNewFile ? null : { name: path, contents: savedContent };
   if (patch.length > 8 * 1024 * 1024)
-    throw new Error(
+    throw new EditableDiffUnavailable(
+      "too-large",
       "This diff is too large to edit. Turn off Diff view to edit the source.",
     );
   if (/(?:^|\n)(?:GIT binary patch|Binary files .+ differ)(?:\n|$)/.test(patch))
-    throw new Error("Binary diffs cannot be edited.");
+    throw new EditableDiffUnavailable("binary", "Binary diffs cannot be edited.");
   // jsdiff decodes Git's quoted UTF-8/octal path headers. Pierre preserves
   // those spellings, which need not equal the literal workspace path.
   const headers = parsePatch(patch);
@@ -79,7 +98,10 @@ export function editableDiffBase(
   );
   const file = files[index];
   if (!file || file.type === "deleted")
-    throw new Error("No editable file in this comparison.");
+    throw new EditableDiffUnavailable(
+      "deleted",
+      "No editable file in this comparison.",
+    );
   if (file.type === "new") return null;
   // Pure rename and executable-bit changes have identical before/after text.
   if (file.hunks.length === 0)
@@ -89,7 +111,10 @@ export function editableDiffBase(
     file.hunks[0].deletionStart > 1 ||
     file.hunks[0].additionStart > 1
   )
-    throw new Error("Full file context is required to edit a diff.");
+    throw new EditableDiffUnavailable(
+      "partial",
+      "Full file context is required to edit a diff.",
+    );
   const oldName = headers[index]?.oldFileName;
   return {
     name:

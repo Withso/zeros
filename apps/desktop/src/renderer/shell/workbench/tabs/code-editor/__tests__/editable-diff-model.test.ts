@@ -1,6 +1,9 @@
 import { describe, expect, it } from "vitest";
 import { createTwoFilesPatch } from "diff";
-import { editableDiffBase } from "../editable-diff-model";
+import {
+  EditableDiffUnavailable,
+  editableDiffBase,
+} from "../editable-diff-model";
 
 describe("editable diff baseline", () => {
   it.each(["file.ts", "space name.ts", "日本語.ts"])(
@@ -67,6 +70,44 @@ describe("editable diff baseline", () => {
         "b\n",
       ),
     ).toThrow();
+  });
+  it("names why a comparison can't become an editor, so the body can say so", () => {
+    const reason = (run: () => unknown) => {
+      try {
+        run();
+      } catch (error) {
+        return error instanceof EditableDiffUnavailable ? error.reason : "untyped";
+      }
+      return "none";
+    };
+    expect(
+      reason(() => editableDiffBase(`diff --git a/a.ts b/a.ts\n${"+x\n".repeat(3_000_000)}`, "a.ts", "")),
+    ).toBe("too-large");
+    expect(
+      reason(() =>
+        editableDiffBase(
+          "diff --git a/a.png b/a.png\nBinary files a/a.png and b/a.png differ\n",
+          "a.png",
+          "",
+        ),
+      ),
+    ).toBe("binary");
+    expect(
+      reason(() =>
+        editableDiffBase(
+          "diff --git a/a.ts b/a.ts\ndeleted file mode 100644\n--- a/a.ts\n+++ /dev/null\n@@ -1 +0,0 @@\n-old\n",
+          "a.ts",
+          "",
+        ),
+      ),
+    ).toBe("deleted");
+    const before = Array.from({ length: 30 }, (_, i) => `line ${i}\n`).join("");
+    const after = before.replace("line 15", "changed 15");
+    expect(
+      reason(() =>
+        editableDiffBase(createTwoFilesPatch("a.ts", "a.ts", before, after), "a.ts", after),
+      ),
+    ).toBe("partial");
   });
   it("refuses a partial hunk instead of treating its prefix as a whole file", () => {
     const before = Array.from({ length: 30 }, (_, i) => `line ${i}\n`).join("");

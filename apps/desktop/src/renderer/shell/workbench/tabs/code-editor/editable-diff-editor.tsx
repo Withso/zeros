@@ -1,4 +1,11 @@
-import { useEffect, useId, useMemo, useRef, useState } from "react";
+import {
+  useEffect,
+  useId,
+  useMemo,
+  useRef,
+  useState,
+  type ElementType,
+} from "react";
 import {
   parseDiffFromFile,
   type CodeViewItem,
@@ -21,7 +28,28 @@ import {
   type WorkspaceFileDiffQuery,
 } from "../../../workspace-file-data-cache";
 import { hashString } from "../use-viewed-files";
-import { editableDiffBase, withEditableContext } from "./editable-diff-model";
+import {
+  EditableDiffUnavailable,
+  editableDiffBase,
+  withEditableContext,
+  type EditableDiffUnavailableReason,
+} from "./editable-diff-model";
+import { setFileEditorPreferences } from "./editor-preferences";
+import { FileDiff, FileMinus, FileXCorner } from "lucide-react";
+import { Button } from "@/renderer/shared/ui/primitives/button";
+import { EmptyState } from "@/renderer/shared/ui/layout/empty-state";
+
+/** A comparison that can't become an editor says so in the body, with the way
+ *  out; only a partial read offers Retry, the one case a reload can fix. */
+const UNAVAILABLE: Record<
+  EditableDiffUnavailableReason,
+  { icon: ElementType; message: string }
+> = {
+  "too-large": { icon: FileXCorner, message: "This diff is too large to edit here." },
+  binary: { icon: FileXCorner, message: "Binary files can’t be edited in Diff view." },
+  deleted: { icon: FileMinus, message: "This file is deleted in this comparison." },
+  partial: { icon: FileDiff, message: "Diff view needs the whole file to edit it." },
+};
 
 const createEditor: EditorFactory<undefined, undefined> = (
   type,
@@ -75,16 +103,45 @@ export function EditableDiffEditor(props: EditableDiffEditorProps) {
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps -- savedContent is fallback text only when a new complete comparison arrives
   }, [snapshot.data, snapshot.updatedAt, query.path, isNewFile]);
+  const unavailable =
+    baseline?.error instanceof EditableDiffUnavailable ? baseline.error : null;
+  const retry = () => loadWorkspaceFileDiff(completeQuery, { force: true });
   useWorkbenchStatusSource(
     {
       active,
-      error: baseline?.error ?? snapshot.error,
+      // The body owns a refusal; the banner keeps read failures.
+      error: unavailable ? null : (baseline?.error ?? snapshot.error),
       pending: snapshot.loading || snapshot.refreshing,
-      hasContent: !!baseline && !baseline.error,
-      retry: () => loadWorkspaceFileDiff(completeQuery, { force: true }),
+      hasContent: (!!baseline && !baseline.error) || !!unavailable,
+      retry,
     },
     workspaceFileDiffKey(completeQuery),
   );
+  if (unavailable) {
+    const { icon, message } = UNAVAILABLE[unavailable.reason];
+    return (
+      <EmptyState
+        icon={icon}
+        action={
+          <div className="flex items-center gap-2">
+            <Button
+              size="compact"
+              onClick={() => setFileEditorPreferences({ diffView: false })}
+            >
+              Turn off Diff view
+            </Button>
+            {unavailable.reason === "partial" ? (
+              <Button variant="ghost" size="compact" onClick={() => void retry()}>
+                Retry
+              </Button>
+            ) : null}
+          </div>
+        }
+      >
+        {message}
+      </EmptyState>
+    );
+  }
   if (!baseline || baseline.error)
     return <div className="h-full" aria-busy={snapshot.loading || undefined} />;
   return (
@@ -132,18 +189,22 @@ function EditableDiffSession({
   // Edit notifications go to the shared draft, not back into controlled items.
   // Replacing input per keystroke destroys native selection/IME/undo state.
   const items = useMemo(() => [{ ...item, edit: true }], [item]);
-  const options = useMemo(
-    () => ({
-      ...zerosCodeViewOptions({
-        diffStyle: "unified",
-        codeThemeId: theme,
-        disableFileHeader: true,
-        surface: "bg1",
-      }),
+  const options = useMemo(() => {
+    const base = zerosCodeViewOptions({
+      diffStyle: "unified",
+      codeThemeId: theme,
+      disableFileHeader: true,
+      surface: "bg1",
+    });
+    // Removed lines are no longer part of the file: a drag passes over them
+    // unpainted and Copy leaves them out.
+    return {
+      ...base,
+      unsafeCSS: `${base.unsafeCSS}
+  [data-line][data-line-type="change-deletion"] { -webkit-user-select: none; user-select: none; }`,
       expandUnchanged: true,
-    }),
-    [theme],
-  );
+    };
+  }, [theme]);
   useEffect(
     () => () => {
       EditStateManager.clear("file-diff", sessionKey);

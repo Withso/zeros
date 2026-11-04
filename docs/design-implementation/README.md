@@ -479,3 +479,20 @@ Each landed step appends one line: date, workstream, what landed, evidence.
   of chat prose. The standalone Changes smoke cannot load its fixture here
   (outside Vite's serving boundary on this branch too) and is not in the
   ui-smoke registry.
+- 2026-11-04 · 4, 5 · Files (Diff view, media, documents): workbench
+  diffs (Changes and the Files Diff view) read in the plain editor's type,
+  12px mono on a 1.6 line with numbers padded 12px, and the virtualizer
+  estimates rows at that height; selection is the editor's fg1 at 18%. Chat
+  edit cards and Review keep the 13/20 chat code style. In the Files Diff
+  view removed lines are no longer part of the file: a drag passes over
+  them and Copy leaves them out. A comparison that can't become an editor
+  (too large, binary, deleted, partial) says so in the body with the one
+  empty state and Turn off Diff view; only a partial read offers Retry, and
+  the banner keeps read failures. Media controls are one centred floating
+  Toolbar: playback, a divider, then zoom, at most 480px wide, the time
+  hiding under 400px; an image's island fits its four tools. The PDF and
+  Word island is the same Toolbar with the page stepper, a divider and zoom.
+  The PDF password prompt is the empty state with the field and Open PDF.
+  The save failure stays the floating toast, as the board shows. Follow-ups
+  inside the diff library's shadow DOM: a + or − in the gutter padding with
+  a 2px bar, no row wash for a new file, and the caret line's fg1 5% lift.

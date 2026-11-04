@@ -8,7 +8,7 @@ import {
 } from "react";
 import { createPortal } from "react-dom";
 import { useVirtualizer } from "@tanstack/react-virtual";
-import { Download, PanelLeft, RotateCw } from "lucide-react";
+import { Download, Lock, PanelLeft, RotateCw } from "lucide-react";
 import type {
   PDFDocumentLoadingTask,
   PDFDocumentProxy,
@@ -25,6 +25,7 @@ import {
 import { toast } from "@/renderer/shared/ui/primitives/elements";
 import { useDocumentActive } from "@/renderer/state/use-document-active";
 import { WorkbenchEmptyState } from "../tab-status";
+import { EmptyState } from "@/renderer/shared/ui/layout/empty-state";
 import { openWorkspaceMedia } from "@/renderer/platform/file-media";
 import { WORKBENCH_TITLE_ACTION_CLS } from "../tab-chrome";
 import type { PdfSource } from "./file-pdf-runtime";
@@ -196,8 +197,10 @@ export function FilePdfPreview({
           actionsContainer,
         )}
       {passwordRequired ? (
+        // The tab's one empty state, with the field and Open PDF as its action.
         <form
-          className="flex flex-1 flex-col items-center justify-center gap-3 p-4"
+          aria-label="Unlock PDF"
+          className="flex min-h-0 flex-1"
           onSubmit={(event) => {
             event.preventDefault();
             unlock.current?.(password);
@@ -205,21 +208,26 @@ export function FilePdfPreview({
             setPasswordRequired(false);
           }}
         >
-          <label htmlFor={passwordId} className="text-fg2 text-xs">
-            This PDF is password protected.
-          </label>
-          <Input
-            id={passwordId}
-            type="password"
-            aria-label="PDF password"
-            autoComplete="off"
-            value={password}
-            onChange={(event) => setPassword(event.target.value)}
-            className="max-w-64"
-          />
-          <Button type="submit" size="compact" disabled={!password}>
-            Open PDF
-          </Button>
+          <EmptyState
+            icon={Lock}
+            action={
+              <div className="flex w-64 max-w-full flex-col items-center gap-3">
+                <Input
+                  id={passwordId}
+                  type="password"
+                  aria-label="PDF password"
+                  autoComplete="off"
+                  value={password}
+                  onChange={(event) => setPassword(event.target.value)}
+                />
+                <Button type="submit" size="compact" disabled={!password}>
+                  Open PDF
+                </Button>
+              </div>
+            }
+          >
+            <label htmlFor={passwordId}>This PDF is password protected.</label>
+          </EmptyState>
         </form>
       ) : error ? (
         <WorkbenchEmptyState type="files" message={error} />
