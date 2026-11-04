@@ -9,26 +9,10 @@ import { Avatar, AvatarFallback } from "../avatar";
 import { ListRow } from "../list-row";
 import { Select, SelectTrigger } from "../select";
 
-// This is a fixture for a floating menu row, not a surface owned by this file.
-const floatingRowHover = ["hover:bg", "bg3-hover"].join("-");
-
 // Before strings were captured from these callers before the debt burn-down.
 // Alias normalization permits only the listed exact substitutions. The browser
 // proof separately compares their compiled styles in both themes and states.
 const cases = [
-  {
-    file: "features/agent/context-gauge.tsx",
-    site: 190,
-    component: "ClassAlias",
-    tag: "button",
-    original: `${floatingRowHover} text-fg2 hover:text-fg1 w-full cursor-pointer rounded-[6px] border-0 bg-transparent px-2 py-1 text-left text-xs font-medium transition-colors disabled:cursor-default disabled:opacity-50`,
-    className: `${floatingRowHover} text-fg2 hover:text-fg1 w-full cursor-pointer rounded-md border-0 bg-transparent px-2 py-1 text-left text-xs font-medium transition-colors disabled:cursor-default disabled:opacity-50`,
-    literal: `${floatingRowHover} text-fg2 hover:text-fg1 w-full cursor-pointer rounded-md border-0 bg-transparent px-2 py-1 text-left text-xs font-medium transition-colors disabled:cursor-default disabled:opacity-50`,
-    alias: {
-      before: "rounded-[6px]",
-      after: "rounded-md",
-    },
-  },
   {
     file: "features/agent/composer-attachments.tsx",
     site: 194,
@@ -104,22 +88,6 @@ const cases = [
     style: {
       width: 20,
       height: 20,
-    },
-  },
-  {
-    file: "features/agent/renderers/event-row.tsx",
-    site: 220,
-    component: "ClassAlias",
-    tag: "span",
-    original:
-      "bg-yellow-bg text-yellow-fg shrink-0 rounded-sm px-1.5 py-0.5 text-[10px] font-medium",
-    className:
-      "bg-yellow-bg text-yellow-fg shrink-0 rounded-sm px-1.5 py-0.5 text-xxs font-medium",
-    literal:
-      "bg-yellow-bg text-yellow-fg shrink-0 rounded-sm px-1.5 py-0.5 text-xxs font-medium",
-    alias: {
-      before: "text-[10px]",
-      after: "text-xxs",
     },
   },
   {

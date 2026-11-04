@@ -28,9 +28,6 @@
       "apps/desktop/src/renderer/features/agent/composer-shell.tsx": {
         "rounded-[18px]": 1
       },
-      "apps/desktop/src/renderer/features/agent/context-gauge.tsx": {
-        "text-[12.5px]": 2
-      },
       "apps/desktop/src/renderer/features/agent/question-card.tsx": {
         "rounded-[3px]": 1
       },
@@ -42,9 +39,6 @@
       },
       "apps/desktop/src/renderer/features/agent/renderers/markdown-code-block.tsx": {
         "leading-[1.6]": 1
-      },
-      "apps/desktop/src/renderer/features/agent/renderers/text-message.tsx": {
-        "py-[3px]": 1
       },
       "apps/desktop/src/renderer/features/browser/browser-agent-picture-in-picture.tsx": {
         "rounded-[2px]": 1,
@@ -277,9 +271,6 @@
       "apps/desktop/src/renderer/features/agent-extensions/customize-page.tsx": {
         "button": 1
       },
-      "apps/desktop/src/renderer/features/agent/agent-chat.tsx": {
-        "button": 1
-      },
       "apps/desktop/src/renderer/features/agent/agent-model-menu.tsx": {
         "button": 5
       },
@@ -302,7 +293,7 @@
         "button": 4
       },
       "apps/desktop/src/renderer/features/agent/context-gauge.tsx": {
-        "button": 2
+        "button": 1
       },
       "apps/desktop/src/renderer/features/agent/jump-pills.tsx": {
         "button": 2

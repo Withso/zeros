@@ -191,7 +191,7 @@ const TAB_LABEL_CLS = "min-w-0 truncate text-xs leading-4.5";
  *  fade in the tab's own fill, so the tab keeps its width and the title runs
  *  under it. */
 const TAB_HOVER_OVERLAY_CLS =
-  "pointer-events-none absolute inset-y-0 right-0 flex w-10 items-center justify-end bg-gradient-to-l from-(--tab-fill) from-50% to-transparent pr-1.5 pl-4 opacity-0 transition-none group-data-[hovered=true]/tab:opacity-100 focus-within:opacity-100";
+  "pointer-events-none absolute inset-y-0 right-0 flex w-10 items-center justify-end bg-gradient-to-l from-(--tab-fill) from-50% to-transparent pr-1 pl-4 opacity-0 transition-none group-data-[hovered=true]/tab:opacity-100 focus-within:opacity-100";
 // A drafted or awaiting tab already has a trailing slot. Cover its mark in
 // place, with the same 20px close target, without reserving another column or
 // fading text.
@@ -538,7 +538,9 @@ export function ChatTabs({
         </div>
       ) : null}
 
-      <div className={TAB_VIEWPORT_CLS}>
+      {/* Without a leading control the lane starts 8px in, like the header
+          icon and the workbench strip. */}
+      <div className={cn(TAB_VIEWPORT_CLS, !leading && "ml-1")}>
         <div
           ref={chatNavRef}
           className={TAB_NAV_CLS}

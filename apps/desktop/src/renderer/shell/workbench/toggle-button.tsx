@@ -29,10 +29,9 @@ import { IconButton } from "@/renderer/shared/ui/primitives/icon-button";
 import { PanelRight } from "lucide-react";
 import { Tooltip } from "@/renderer/shared/ui/primitives";
 
-// 2026-05-28 — chrome icon recipe: 24 × 24 container, 16 × 16 icon
-// glyph (16 px is the Button base via `[&_svg]:size-4`), 1 px stroke.
+// The 28px chrome tool, like Summary beside it, with a 1px-stroke glyph.
 const TOGGLE_BTN_CLS =
-  "size-6 shrink-0 text-fg2 hover:text-fg1 [&_svg]:stroke-[1]";
+  "shrink-0 text-fg2 hover:text-fg1 [&_svg]:stroke-[1]";
 
 interface WorkbenchToggleButtonProps {
   workbenchCollapsed: boolean;

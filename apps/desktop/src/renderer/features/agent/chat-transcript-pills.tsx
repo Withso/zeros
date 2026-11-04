@@ -26,7 +26,6 @@ import {
 } from "lucide-react";
 
 import {
-  Button,
   Command,
   CommandDialog,
   CommandEmpty,
@@ -39,6 +38,7 @@ import {
   HoverCardTrigger,
   Popover,
   PopoverContent,
+  Pill,
   PopoverTrigger,
   ZerosSpinner,
 } from "@/renderer/shared/ui/primitives";
@@ -115,19 +115,16 @@ function useDelayedPending(pending: boolean): boolean {
  *  has ~9.3px of cap height. Brand SVGs are full-bleed (ink == box), while
  *  ZerosSpinner keeps 25% padding, so a fixed 14px slot holds two glyph sizes
  *  that both land on ~10px of ink and the pill never resizes when the spinner
- *  swaps in. LOGO_CLASS, not LOGO_PX, moves the ink: Button's `[&_svg]:size-4`
- *  pins every descendant svg to 16px, and CSS beats AgentIcon's `width="1em"`
+ *  swaps in. LOGO_CLASS, not LOGO_PX, moves the ink: Pill's `[&_svg]:size-3.5`
+ *  pins every descendant svg to 14px, and CSS beats AgentIcon's `width="1em"`
  *  attribute. ZerosSpinner is exempt because it sizes its svg inline. */
 const LOGO_PX = 10; // full-bleed → 10px of ink
-const LOGO_CLASS = "[&_svg]:size-2.5"; // 10px — twMerge drops Button's size-4
+const LOGO_CLASS = "[&_svg]:size-2.5"; // 10px — twMerge drops Pill's size-3.5
 const SPINNER_PX = 14; // × 0.75, snapped → a 10px square of ink
 
-/** One chat = one pill.
- *
- *  `Button variant="secondary" size="sm"` already IS this shape — 24px tall,
- *  10px padding, 4px radius, 13px medium, transparent on border2, hover to
- *  bg2-hover/border3, 3px highlighted-bright focus ring. No className visual
- *  overrides; the pressed look is a documented shared variant. */
+/** One chat = one pill: the shared 24px control Pill (bg2 + border2, 6px
+ *  corners, 13/18), pressed while its transcript is attached. No className
+ *  visual overrides beyond the 10px logo. */
 function TranscriptPill({
   summary,
   attached,
@@ -204,11 +201,10 @@ function TranscriptPill({
   };
 
   const pill = (
-    <Button
+    <Pill
       ref={pillRef}
       type="button"
-      variant="secondary"
-      size="sm"
+      size="control"
       aria-pressed={attached}
       aria-haspopup="menu"
       aria-busy={pending || undefined}
@@ -225,7 +221,7 @@ function TranscriptPill({
       onFocus={warm}
       onClick={toggle}
       onKeyDown={openMenuFromKeyboard}
-      className={cn("max-w-[14.5rem] gap-1.5", LOGO_CLASS)}
+      className={cn("gap-1.5", LOGO_CLASS)}
     >
       <span className="flex size-3.5 shrink-0 items-center justify-center">
         {showSpinner || streaming ? (
@@ -258,11 +254,11 @@ function TranscriptPill({
           {summary.userMessageCount}
         </span>
       )}
-    </Button>
+    </Pill>
   );
 
   // Two triggers, one element: both roots render no DOM, so the two `asChild`
-  // triggers nest directly around the Button and Slot merges their handlers.
+  // triggers nest directly around the Pill and Slot merges their handlers.
   // Wrapping <HoverCard> in <ContextMenuTrigger asChild> would hand the ref and
   // onContextMenu to a context provider that drops them, silently killing
   // right-click, the only route to the full transcript.
@@ -444,7 +440,6 @@ export function TranscriptPickerDialog({
       shouldFilter={false}
       title="Attach chat transcript"
       description="Search this workspace's chats and attach one's transcript."
-      className="max-w-[32rem]"
     >
       <TranscriptPickerBody {...rest} />
     </CommandDialog>
@@ -519,16 +514,11 @@ export function ChatTranscriptPills({
         {overflow.length > 0 && (
           <Popover open={pickerOpen} onOpenChange={setPickerOpen}>
             <PopoverTrigger asChild>
-              <Button
-                type="button"
-                variant="secondary"
-                size="sm"
-                className="gap-1"
-              >
+              <Pill type="button" size="control">
                 {/* The count is the disclosure — never a silent cap. */}
                 <span>{overflow.length} more</span>
                 <ChevronDown className="size-3" aria-hidden="true" />
-              </Button>
+              </Pill>
             </PopoverTrigger>
             <PopoverContent side="top" align="start" className="w-[20rem] p-0">
               {/* The FULL list, not just the hidden tail: "N more" opens one

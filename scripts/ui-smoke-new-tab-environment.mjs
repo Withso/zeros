@@ -24,7 +24,7 @@ export async function runNewTabEnvironmentSmoke({ page, check }) {
   const state = () => page.evaluate(() => window.__zerosTerminalSmoke.state());
   await plus.click();
   await expect(menu).toHaveCSS("width", "280px");
-  await expect(menu).toHaveCSS("border-top-left-radius", "16px");
+  await expect(menu).toHaveCSS("border-top-left-radius", "12px");
   await expect(menu.locator('[data-slot="command-input-wrapper"]')).toHaveCSS(
     "height",
     "40px",
@@ -55,7 +55,7 @@ export async function runNewTabEnvironmentSmoke({ page, check }) {
   await environment.hover();
   await expect(submenu).toBeVisible();
   await expect(submenu).toHaveCSS("width", "280px");
-  await expect(submenu).toHaveCSS("border-top-left-radius", "16px");
+  await expect(submenu).toHaveCSS("border-top-left-radius", "12px");
   await expect(submenu).toHaveAttribute("data-side", "right");
   await page.mouse.down();
   try {

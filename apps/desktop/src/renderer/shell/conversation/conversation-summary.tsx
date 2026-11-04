@@ -199,7 +199,7 @@ export function ConversationSummaryTrigger() {
             aria-label="Workspace summary"
             align="end"
             side="bottom"
-            sideOffset={12}
+            sideOffset={6}
             collisionBoundary={state.boundary}
             collisionPadding={{ top: 8, right: 16, bottom: 8, left: 8 }}
             padding="none"

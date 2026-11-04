@@ -120,7 +120,7 @@ export const WorkflowActivity = memo(function WorkflowActivity({
         align="start"
         sideOffset={6}
         collisionPadding={8}
-        className="border-border2 bg-bg1 w-[min(520px,calc(100vw-24px))] overflow-hidden p-0"
+        className="w-[min(520px,calc(100vw-24px))] overflow-hidden p-0"
       >
         <WorkflowProgressPanel workflow={workflow} onStop={onStop} />
       </HoverCardContent>
@@ -137,8 +137,9 @@ export const WorkflowProgressPanel = memo(function WorkflowProgressPanel({
   const stoppable = workflowIsStoppable(workflow.status);
   return (
     <>
-      <div className="border-border1 flex h-8 min-w-0 items-center gap-2 border-b px-3">
-        <span className="text-fg1 min-w-0 flex-1 truncate text-sm font-medium">
+      {/* The panel header: 36px, 12 / 4, holding 28px actions. */}
+      <div className="border-border1 flex h-9 min-w-0 items-center gap-2 border-b pr-1 pl-3">
+        <span className="text-fg1 min-w-0 flex-1 truncate text-xs leading-4.5 font-medium">
           {workflow.name}
         </span>
         {/* The current Agent SDK exposes per-workflow Stop but no pause

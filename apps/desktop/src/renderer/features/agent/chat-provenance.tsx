@@ -244,7 +244,8 @@ export function ChatProvenance({
   return (
     // gap-3 = 12px between rows. At 14px text
     // the previous 8px packed the three lines into a single visual mass.
-    <div className="flex flex-col gap-3 p-3">
+    // 14px in, so the icons sit on the composer's text column.
+    <div className="flex flex-col gap-3 px-3.5 py-3">
       {/* Not rendered at all when a transcript row will take this block —
           unmounted rather than hidden, so SetupRow's bridge read never fires
           for a block nobody sees. */}

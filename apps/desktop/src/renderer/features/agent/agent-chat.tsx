@@ -109,6 +109,7 @@ import {
   COMPOSER_FILE_ACCEPT,
   COMPOSER_SURFACE_CLS,
   COMPOSER_SURFACE_RADIUS,
+  TRANSCRIPT_STATUS_ROW_CLS,
 } from "./composer-shell";
 import { ComposerAttachmentMenu } from "./composer-attachment-menu";
 import { ComposerDesignTag } from "./composer-design-tag";
@@ -4271,7 +4272,7 @@ function AgentChatBody({
             {/* Older history auto-pages in via the nearTop effect above, with
               no visible affordance: scrolling back should show everything. */}
             {transcriptLoadingVisible && (
-              <div className="text-muted-fg flex items-center gap-2 py-2 text-xs">
+              <div className={TRANSCRIPT_STATUS_ROW_CLS}>
                 <ZerosSpinner
                   size={14}
                   label="Loading conversation"
@@ -4280,15 +4281,19 @@ function AgentChatBody({
                 <span aria-hidden="true">Loading conversation…</span>
               </div>
             )}
+            {/* Waiting reads exactly like loading, so the hand-off never jumps. */}
             {transcriptHistoryStatus === "waiting" && (
-              <div role="status" aria-label="Waiting for conversation" className="text-fg3 py-2 text-xs">
+              <div role="status" aria-label="Waiting for conversation" className={TRANSCRIPT_STATUS_ROW_CLS}>
+                <span aria-hidden="true" className="inline-flex shrink-0">
+                  <ZerosSpinner size={14} label="Waiting" />
+                </span>
                 Loading conversation…
               </div>
             )}
             {transcriptHistoryStatus === "unavailable" && (
-              <div role="status" aria-label="Chat history unavailable" className="text-fg3 flex items-center gap-2 py-2 text-xs">
+              <div role="status" aria-label="Chat history unavailable" className={TRANSCRIPT_STATUS_ROW_CLS}>
                 <span>Chat history isn’t available yet.</span>
-                <Button variant="ghost" size="sm" onClick={() => { void session.hydrateChat().catch(() => {}); }}>
+                <Button variant="ghost" size="compact" onClick={() => { void session.hydrateChat().catch(() => {}); }}>
                   Retry
                 </Button>
               </div>
@@ -4298,7 +4303,7 @@ function AgentChatBody({
             {readOnly &&
               session.transcriptState === "resident" &&
               session.messages.length === 0 && (
-                <p className="text-fg2 text-sm">No chat history.</p>
+                <p className={TRANSCRIPT_STATUS_ROW_CLS}>No chat history.</p>
               )}
             {!readOnly &&
               emptyStateReady &&
@@ -4597,16 +4602,19 @@ function AgentChatBody({
                   QUEUED message (see startQueuedEdit). Cancel restores the
                   stashed draft; Enter / the tick below saves back onto the
                   queue entry. */}
+                  {/* A 32px row whose text sits on the editor's 14px column. */}
                   {editingQueuedId && (
-                    <div className="bg-bg2-hover/60 text-fg1 mb-1 flex items-center justify-between gap-2 rounded-md px-3 py-2 text-sm">
+                    <div className="bg-sidebar-bg-hover text-fg1 -mx-2 mb-1 flex min-h-8 items-center justify-between gap-2 rounded-lg pr-1 pl-2 text-xs leading-4.5">
                       <span>Editing queued message</span>
-                      <button
+                      <Button
                         type="button"
+                        variant="ghost"
+                        size="compact"
                         onClick={() => exitQueuedEdit()}
-                        className="text-fg2 hover:text-fg1 shrink-0 transition-colors"
+                        className="shrink-0"
                       >
                         Cancel
-                      </button>
+                      </Button>
                     </div>
                   )}
                   {/* `/add-dir` context pills — extra directories Claude can access

@@ -1,0 +1,9 @@
+{
+  "id": "class-template-join",
+  "kind": "replay",
+  "area": "renderer-ui",
+  "fixedBy": "71865bff50b273c9ff64ea7fe1f9c536205ccea9",
+  "symptom": "The edit composer's className template `relative${drag ? \"ring-2 …\" : \"\"}` rendered `relativering-…` while a file was dragged over it, so the card lost `relative` and its drag ring together; no test or check covered the joined string.",
+  "rule": "Compose conditional classes with cn(); ui/class-template-join (scripts/design-system/ui-policy.mjs) flags any className template whose text touches an interpolation.",
+  "check": "pnpm exec vitest run scripts/__tests__/design-system-policy.test.ts && pnpm check:ui"
+}

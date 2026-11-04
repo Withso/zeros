@@ -391,3 +391,33 @@ Each landed step appends one line: date, workstream, what landed, evidence.
   repeated a visible label (Copy, Reject, Approve) and the goal card's native
   `title` hints retire; every dialog Cancel is Ghost; Submit stays the 28px
   square primary from the board beside the round Send.
+- 2026-11-04 · 4, 5 · Agent chat (header, strip, transcript states, pills):
+  the first chat tab starts 8px in like the header and workbench strip; the
+  workspace name starts on one column for branch, folder and cloud
+  workspaces (one 28px placement box) and the workbench toggle is the 28px
+  tool beside Summary; the Summary island's rows are 28 with 6px corners
+  and its popover sits 6px off. Transcript loading, waiting, unavailable and
+  "No chat history" share one 32px status row in the chat column, waiting
+  reads like loading so the hand-off never jumps, Retry is a 24px Ghost,
+  and the read-only history error is a message row in the same column. The
+  read-only history bar is a dock card. Provenance icons sit on the
+  composer's 14px text column; transcript pills and "N more" are the 24px
+  control Pill; both attach dialogs take the shared 520px width; the
+  Command search field fills its row instead of overflowing it. Checkpoint
+  rows are 28px menu rows and the workflow panel is the floating surface
+  with a 36px header. In the composer, every inline reference (mentions,
+  attachments, chat links, older attachments) is the neutral 20px pill
+  (bg2 + border2, 12/16, 4px gap) on 20px text lines, so a line holding one
+  never grows; the queued-edit banner is a 32px row on the editor's column
+  with a 24px Ghost Cancel; the Plan frame's dashes sit on the border so the
+  edge no longer steps; the mode-name flash masks the pill it floats over;
+  the context gauge and Tools popovers use the 12px inset with one 6px row
+  edge, 28px tool rows on the group label's column, 14px status icons and
+  one scroller; native `title` hints in the Tools popover and tool rows move
+  to the shared Tooltip, and Truncated is a warning Badge. Fixed: the edit
+  composer's class joined `relative` to its drag ring (both dropped while
+  dragging a file); a new `ui/class-template-join` policy rule holds it.
+  Renderer suite passes; 19 chat ui-smoke runs pass against the harness.
+  Decisions: workspace links keep their blue pill and chat links take the
+  neutral one, as the board draws; the 230px model popover and the sent
+  prompt's absolute action row follow in the next step.

@@ -28,6 +28,12 @@ export const COMPOSER_SURFACE_RADIUS = "rounded-[18px]";
  *  drag or a mode outline restyles it. */
 export const COMPOSER_SURFACE_CLS = "border-border2 bg-sidebar-bg";
 
+/** One 32px row for the transcript's own states (loading, waiting,
+ *  unavailable, no history): 13/18 fg3 text after a 14px leading slot, with a
+ *  24px Ghost action when there is one. */
+export const TRANSCRIPT_STATUS_ROW_CLS =
+  "text-fg3 flex min-h-8 items-center gap-2 text-xs leading-4.5";
+
 /** A card docked above the composer (goal, queued messages, permission,
  *  question, plan review): the composer's surface with 12px corners and no
  *  shadow; the dock spaces them 8px apart. */

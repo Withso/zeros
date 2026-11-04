@@ -557,7 +557,7 @@ export const CheckpointRail = memo(function CheckpointRail({
         sideOffset={-RAIL_WIDTH_PX}
         alignOffset={0}
         collisionPadding={12}
-        className="flex max-h-[min(28rem,70vh)] w-72 flex-col gap-1 overflow-y-auto p-1.5"
+        className="flex max-h-[min(28rem,70vh)] w-72 flex-col gap-0.5 overflow-y-auto p-1"
       >
         {checkpoints.map((c, i) => (
           <button
@@ -567,7 +567,8 @@ export const CheckpointRail = memo(function CheckpointRail({
             onClick={() => scrollToCheckpoint(c.id)}
             // Only the selected row's text is fg1; hover changes the background only.
             className={cn(
-              "flex h-8 w-full flex-none cursor-pointer items-center gap-2.5 rounded-md px-2 text-left transition-colors",
+              // A 28px menu row inset 4px, like every floating list.
+              "flex h-7 w-full flex-none cursor-pointer items-center gap-2.5 rounded-md px-2 text-left transition-colors",
               // The hover card binds the floating surface's row hover; the
               // selected row keeps it.
               i === activeIndex

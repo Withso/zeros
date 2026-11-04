@@ -27,8 +27,8 @@ describe("chat provenance block styling", () => {
     );
   });
 
-  it("puts 12px between the rows", () => {
-    expect(provenance()).toMatch(/<div className="flex flex-col gap-3 p-3">/);
+  it("puts 12px between the rows and the icons on the composer's text column", () => {
+    expect(provenance()).toMatch(/<div className="flex flex-col gap-3 px-3\.5 py-3">/);
   });
 
   it("uses ONE font — no mono, and no <code> to sneak the UA's in", () => {

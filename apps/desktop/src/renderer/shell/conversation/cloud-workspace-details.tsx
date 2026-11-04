@@ -53,7 +53,7 @@ export function CloudWorkspaceDetails({ folder }: { folder: string }) {
     <Popover open={open && surfaceActive} onOpenChange={setOpen}>
       <Tooltip label="Workspace details" delayDuration={1500} disabled={open}>
         <PopoverTrigger asChild>
-          <IconButton type="button" size="standard" label="Cloud workspace details" className="text-fg2 size-7 shrink-0">
+          <IconButton type="button" size="standard" label="Cloud workspace details" className="text-fg2 -ml-1.5 shrink-0">
             <Cloud size={16} strokeWidth={1.5} />
           </IconButton>
         </PopoverTrigger>

@@ -42,7 +42,7 @@ describe("composer chrome", () => {
     );
     expect(code("../agent-chat.tsx")).toContain("COMPOSER_SURFACE_RADIUS");
     expect(code("../../../shell/dispatcher/dispatcher-composer.tsx")).toContain("COMPOSER_SURFACE_RADIUS");
-    expect(code("../composer-pills.tsx")).toContain('rx="17"');
+    expect(code("../composer-pills.tsx")).toContain('rx="17.5"');
     expect(code("../composer-shell.tsx")).toContain(
       'export const PROMPT_SURFACE_RADIUS = "rounded-[calc(var(--radius-lg)*1.5)]"',
     );

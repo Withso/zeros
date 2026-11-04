@@ -206,14 +206,15 @@ describe("Local link identity and presentation", () => {
       expect(html).toContain(`${agent} review`);
       expect(html).toContain(`data-local-link-agent="${agent}"`);
       expect(html).toContain("<svg");
-      expect(html).toContain("bg-bg1");
-      expect(html).toContain("border-border3");
+      // The neutral inline pill: bg2 + border2, 20px, 4px gap, 6px padding.
+      expect(html).toContain("bg-bg2");
+      expect(html).toContain("border-border2");
       expect(html).toContain("text-fg1");
-      expect(html).toContain("hover:bg-bg1-hover");
+      expect(html).toContain("hover:bg-bg2-highlight");
       expect(html).not.toContain("bg-agent-");
       expect(html).not.toContain("border-0");
       expect(html).toContain("h-5");
-      expect(html).toContain("gap-2");
+      expect(html).toContain("gap-1");
       expect(html).toContain("px-1.5");
       expect(html).not.toContain("hover:border-");
     },

@@ -53,7 +53,13 @@ function LocalHeader({ folder, ...props }: Parameters<typeof WorkspaceHeader>[0]
       <HardDrive aria-hidden="true" />
       Local
     </Badge>
-  ) : props.branch ? <GitBranch className="size-4" /> : <Folder className="size-4" />;
+  ) : (
+    // The 28px box the Cloud details button takes, so the name starts at one
+    // column for branch, folder and cloud workspaces.
+    <span className="-ml-1.5 inline-flex size-7 items-center justify-center">
+      {props.branch ? <GitBranch className="size-4" /> : <Folder className="size-4" />}
+    </span>
+  );
   return <WorkspaceHeaderView {...props} icon={icon} />;
 }
 

@@ -132,7 +132,9 @@ function CommandInput({
       <CommandPrimitive.Input
         data-slot="command-input"
         className={cn(
-          "placeholder:text-fg3 flex h-10 w-full rounded-sm bg-transparent py-3 text-xs outline-hidden disabled:cursor-not-allowed disabled:opacity-50",
+          // Fills the row its wrapper sets (36px, 44 in the dialog) instead
+          // of a fixed 40px that overflowed the 36px row.
+          "placeholder:text-fg3 flex h-full w-full min-w-0 rounded-sm bg-transparent py-0 text-xs outline-hidden disabled:cursor-not-allowed disabled:opacity-50",
           className,
         )}
         {...props}

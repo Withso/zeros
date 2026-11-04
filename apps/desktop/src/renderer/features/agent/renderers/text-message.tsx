@@ -55,7 +55,8 @@ import { openFilePill, warmFilePill } from "@/renderer/shell/workbench/file-pill
 import { useAttachmentPillFile } from "../attachment-pill-file";
 import { Button } from "@/renderer/shared/ui/primitives";
 import { FileTypeIcon } from "../composer-editor/file-type-icon";
-import { PILL_SHELL } from "../composer-editor/pill-views";
+import { COMPOSER_PILL_SPACING, PILL_SHELL } from "../composer-editor/pill-views";
+import { cn } from "@/renderer/shared/ui/cn";
 import { MarkdownCodeBlock } from "./markdown-code-block";
 import { useAttachmentImageSource } from "../attachment-image-source";
 import { useStreamingText, useStreamingTextEdge } from "./use-streaming-text";
@@ -182,7 +183,7 @@ export const TextMessage: Renderer<AgentTextMessage> = memo(
               // (right-anchored → clipped off the LEFT edge). `anywhere` counts
               // those break opportunities in min-content, so the bubble can
               // shrink to the lane and the text wraps at its edge instead.
-              <div className="leading-snug wrap-anywhere whitespace-pre-wrap">
+              <div className="leading-5 wrap-anywhere whitespace-pre-wrap">
                 {displaySegments.map((seg, i) => (
                   <MessageSegmentView
                     key={i}
@@ -261,7 +262,7 @@ export const TextMessage: Renderer<AgentTextMessage> = memo(
                   // wrap-anywhere: see the segments branch above — break-words
                   // doesn't shrink min-content, so unbroken pastes overflowed
                   // the w-fit user bubble past a narrow pane's left edge.
-                  <div className="leading-snug wrap-anywhere whitespace-pre-wrap">
+                  <div className="leading-5 wrap-anywhere whitespace-pre-wrap">
                     <LocalLinkText text={message.role === "user"
                       ? text.trimEnd()
                       : text} />
@@ -289,11 +290,10 @@ export const TextMessage: Renderer<AgentTextMessage> = memo(
 /** Shared pill geometry for the message-bubble chips. Same look as the
  *  composer's attachment chips so staging and history match. Image
  *  variant gets `cursor-pointer`; file variant is inert. */
-const MSG_CHIP_BASE =
-  "inline-flex max-w-[220px] items-center gap-1.5 rounded-sm border border-border1 bg-bg2-hover py-[3px] pl-1 pr-2 text-xs text-fg2 no-underline transition-colors duration-150 ease-out hover:border-highlighted-bright";
-const MSG_CHIP_THUMB = "h-[18px] w-[18px] shrink-0 rounded-sm object-cover";
+const MSG_CHIP_BASE = cn(PILL_SHELL, COMPOSER_PILL_SPACING, "no-underline");
+const MSG_CHIP_THUMB = "size-4 shrink-0 rounded-sm object-cover";
 const MSG_CHIP_ICON =
-  "inline-flex h-[18px] w-[18px] shrink-0 items-center justify-center rounded-sm text-fg2";
+  "inline-flex size-4 shrink-0 items-center justify-center rounded-sm text-fg2";
 const MSG_CHIP_LABEL = "overflow-hidden text-ellipsis whitespace-nowrap";
 
 /** One inline piece of a sent user message — plain text, a mention pill, or
@@ -313,7 +313,7 @@ function MessageSegmentView({
   if (seg.type === "attachment-group") {
     const available = !!attachmentCwd && attachmentImagesActive !== false && seg.files.every(file => !!file.diskPath);
     return <Tooltip label={`${seg.name} · ${seg.files.length} files`}><Button variant="ghost" data-attachment-pill="" data-attachment-group=""
-      className={`${PILL_SHELL} gap-2 px-1.5`} disabled={!available} aria-label={`Open ${seg.name}, ${seg.files.length} files`}
+      className={cn(PILL_SHELL, COMPOSER_PILL_SPACING)} disabled={!available} aria-label={`Open ${seg.name}, ${seg.files.length} files`}
       onClick={event => { event.stopPropagation(); if (available) openFileGroup(attachmentCwd, {
         id: seg.id, name: seg.name, files: seg.files.map(file => ({ name: file.name, path: file.diskPath!, attachmentId: file.attachmentId })),
       }); }}>
@@ -357,7 +357,7 @@ function MessageAttachmentPill({
     enabled: active !== false && seg.kind === "image",
   });
   if (saved.path && cwd) return <Tooltip label={seg.name}><Button variant="ghost" data-attachment-pill=""
-    disabled={active === false || saved.resolving} aria-label={`Open ${seg.name}`} className={`${PILL_SHELL} px-1.5`}
+    disabled={active === false || saved.resolving} aria-label={`Open ${seg.name}`} className={cn(PILL_SHELL, COMPOSER_PILL_SPACING)}
     onPointerEnter={() => warmFilePill(cwd, saved.path!)} onFocus={() => warmFilePill(cwd, saved.path!)}
     onClick={event => { event.stopPropagation(); openFilePill(cwd, saved.path!); }}>
     {seg.kind === "image" && source ? <img src={source} alt="" loading="lazy" decoding="async" className="size-4 shrink-0 rounded-sm object-cover" />

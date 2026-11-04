@@ -1,6 +1,8 @@
 import React, { useEffect, useState } from "react";
 import { Archive, FolderX } from "lucide-react";
 import { Button } from "../shared/ui/primitives";
+import { cn } from "../shared/ui/cn";
+import { DOCK_CARD_CLS } from "../features/agent/composer-shell";
 import {
   type Workspace,
   dialogPickFolder,
@@ -123,8 +125,10 @@ export function WorkspaceHistoryBar({
   const Icon = workspace.archivedAt == null ? FolderX : Archive;
   return (
     <div className="mx-auto w-full max-w-[856px] shrink-0 px-7 pt-2 pb-4">
+      {/* It takes the composer's place, so it is a dock card like the ones
+          above a live composer. */}
       <div
-        className="border-border1 bg-bg2 flex items-center gap-3 rounded-lg border px-4 py-3"
+        className={cn(DOCK_CARD_CLS, "flex items-center gap-3 px-3.5 py-3")}
         role="status"
       >
         <Icon className="text-fg2 size-4 shrink-0" />

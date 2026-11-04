@@ -219,7 +219,8 @@ function ToolsPopover({
       <PopoverContent
         side="top"
         align="end"
-        className="w-80 p-3"
+        // The one scroll owner: the old 320px list cap plus the header.
+        className="w-80 p-3 max-h-[min(24rem,var(--radix-popover-content-available-height))]"
         aria-labelledby={titleId}
         data-composer-tools=""
         onEscapeKeyDown={() => {
