@@ -655,9 +655,10 @@ function TurnPromptEditor({
         <div
           // The edit composer drops its own card chrome so the outer wrapper's shows
           // through.
-          className={`zeros-agent-turn-prompt-edit relative${
-            dragActive ? "ring-highlighted-bright/40 ring-2" : ""
-          }`}
+          className={cn(
+            "zeros-agent-turn-prompt-edit relative",
+            dragActive && "ring-highlighted-bright/40 ring-2",
+          )}
           {...(submitting ? {} : dragHandlers)}
         >
           <PromptInputBody className="items-stretch rounded-none border-0 bg-transparent p-0 shadow-none has-[[data-slot=input-group-control]:focus-visible]:border-0 has-[[data-slot=input-group-control]:focus-visible]:shadow-none has-[[data-slot=input-group-control]:focus-visible]:ring-0">

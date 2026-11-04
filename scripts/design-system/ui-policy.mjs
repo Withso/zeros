@@ -174,6 +174,7 @@ export const KNOWN_RULES = new Set([
   ...GROUP_RULES.map((rule) => rule.id),
   "raw-control",
   "icon-only-button",
+  "class-template-join",
   "ignore-directive",
 ]);
 
@@ -219,6 +220,43 @@ export function findIconOnlyButtons(file, source) {
     ) {
       const { line } = sourceFile.getLineAndCharacterOfPosition(node.getStart(sourceFile));
       findings.push({ key: "Button size=icon", line: line + 1 });
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(sourceFile);
+  return findings;
+}
+
+export const CLASS_TEMPLATE_JOIN_RULE = {
+  id: "class-template-join",
+  message: () =>
+    "A className template joins a class to an interpolation with no space, so both tokens break (`relative${drag ? \"ring-2\" : \"\"}` renders `relativering-2`). Compose classes with cn().",
+};
+
+/** `className={`a b${x}`}` or `${x}b`: text touching an interpolation. */
+export function findClassTemplateJoins(file, source) {
+  const sourceFile = ts.createSourceFile(file, source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+  const findings = [];
+  const visit = (node) => {
+    if (
+      ts.isJsxAttribute(node) &&
+      node.name.getText(sourceFile) === "className" &&
+      node.initializer &&
+      ts.isJsxExpression(node.initializer) &&
+      node.initializer.expression &&
+      ts.isTemplateExpression(node.initializer.expression)
+    ) {
+      const template = node.initializer.expression;
+      const texts = [template.head.text, ...template.templateSpans.map((span) => span.literal.text)];
+      // Text before an interpolation must end in whitespace (or be empty);
+      // text after one must start with whitespace (or be empty).
+      const joined = texts.some((text, index) =>
+        (index < texts.length - 1 && /\S$/.test(text)) || (index > 0 && /^\S/.test(text)),
+      );
+      if (joined) {
+        const { line } = sourceFile.getLineAndCharacterOfPosition(node.getStart(sourceFile));
+        findings.push({ key: "className", line: line + 1 });
+      }
     }
     ts.forEachChild(node, visit);
   };
@@ -330,8 +368,17 @@ export function collectFindings({ root, files, contexts }) {
   for (const file of scoped) {
     if (!file.endsWith(".tsx")) continue;
     const rel = toRel(root, file);
-    if (rel.startsWith("apps/desktop/src/renderer/shared/ui/")) continue;
     const source = readFileSync(file, "utf8");
+    for (const finding of findClassTemplateJoins(file, source)) {
+      findings.push({
+        rule: CLASS_TEMPLATE_JOIN_RULE.id,
+        file: rel,
+        key: finding.key,
+        line: finding.line,
+        message: CLASS_TEMPLATE_JOIN_RULE.message(),
+      });
+    }
+    if (rel.startsWith("apps/desktop/src/renderer/shared/ui/")) continue;
     for (const finding of findRawControls(file, source)) {
       findings.push({
         rule: RAW_CONTROL_RULE.id,

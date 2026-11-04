@@ -156,6 +156,24 @@ describe("class rules", () => {
     expect(primitive).toEqual([]);
   });
 
+  // Regression: `relative${drag ? "ring-2" : ""}` rendered "relativering-2",
+  // so the edit composer lost `relative` and its drag ring together.
+  it("flags a className template that joins a class to an interpolation", () => {
+    const feature = findingsFor(
+      "apps/desktop/src/renderer/features/joined.tsx",
+      `export const J = ({ drag, tone }: { drag: boolean; tone: string }) => (
+        <>
+          <div className={\`edit relative\${drag ? "ring-2" : ""}\`} />
+          <div className={\`edit \${tone}border\`} />
+          <div className={\`edit relative \${drag ? "ring-2" : ""}\`} />
+          <div className={\`\${tone} edit\`} />
+          <div className={cn("edit relative", drag && "ring-2")} />
+        </>
+      );`,
+    );
+    expect(keys(feature)).toEqual(["class-template-join:className", "class-template-join:className"]);
+  });
+
   it("skips harnesses and tests; an ignore directive hides its line but is itself counted", () => {
     expect(
       findingsFor(
