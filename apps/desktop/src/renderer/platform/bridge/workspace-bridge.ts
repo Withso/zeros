@@ -1,4 +1,5 @@
 import type { AttachmentTransferOptions } from "@zeros/protocol/attachment-policy";
+import { CloudV2HistoryStateSchema, type CloudV2HistoryState } from "@zeros/protocol/cloud-v2-relay";
 import type {
   ChangesHistory,
   TurnHistoryCursor,
@@ -800,6 +801,7 @@ export async function bridgeMessageWindow(
 export type MessageWindowSnapshot = {
   messages: PersistedMessageWire[];
   source: "local" | "unknown" | "worker" | "control-plane";
+  historyState?: CloudV2HistoryState;
   /** Renderer-derived: an unfiltered tail shorter than the requested window. */
   complete?: boolean;
   /** The opening prompt of the turn `messages[0]` belongs
@@ -807,7 +809,7 @@ export type MessageWindowSnapshot = {
   turnOpening?: PersistedMessageWire;
 };
 
-type MessageWindowResponse = { messages?: PersistedMessageWire[]; projection?: unknown; historyHeads?: unknown; turnOpening?: unknown } | undefined;
+type MessageWindowResponse = { messages?: PersistedMessageWire[]; projection?: unknown; historyHeads?: unknown; turnOpening?: unknown; historyState?: unknown } | undefined;
 
 function persistedMessageWire(value: unknown): PersistedMessageWire | undefined {
   const row = value as Partial<PersistedMessageWire> | null | undefined;
@@ -822,7 +824,8 @@ function messageWindowSnapshot(bridge: RuntimeClient, chatId: string, r: Message
   const target = parseCloudScopedId(chatId);
   const turnOpening = persistedMessageWire(r?.turnOpening);
   const source = target ? r && bridge instanceof WorkspaceRuntimeClient ? bridge.historySource(r) ?? "unknown" : "unknown" : "local";
-  return { messages: r?.messages ?? [], source, ...(turnOpening ? { turnOpening } : {}) };
+  const historyState = target && r?.historyState !== undefined ? CloudV2HistoryStateSchema.parse(r.historyState) : undefined;
+  return { messages: r?.messages ?? [], source, ...(historyState ? { historyState } : {}), ...(turnOpening ? { turnOpening } : {}) };
 }
 
 export async function bridgeMessageWindowSnapshot(

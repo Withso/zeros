@@ -61,3 +61,5 @@ export interface TurnInfo {
 /** Mirrored on the opening prompt; identities come from its owning chat/row. */
 export type TurnSummary = Omit<TurnInfo,
   "chatId" | "turnId" | "workspaceId" | "folder" | "preSnapshot" | "postSnapshot">;
+
+export { applyTurnReset, applyTurnSpanReset, undoTurnReset, type TurnResetHost, type ResetFileOutcome, type TurnResetResult, type TurnResetStep } from "./turn-reset";

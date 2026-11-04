@@ -64,6 +64,11 @@ export class Agents {
   private readonly models: CodexModelAvailability;
   private outboxDispatch?: (entry: InboxEntry) => Promise<boolean>;
   private outboxStop?: (chatId: string, throughEpoch: string) => Promise<string>;
+  private readonly chatMutations = new Map<string, Promise<unknown>>();
+  private readonly mutationEpochs = new Map<string, number>();
+  private readonly outboxOpenings = new Map<string, Promise<void>>();
+  private readonly waitingOpens = new Map<string, Set<{ cancelled: boolean }>>();
+  private disposed = false;
 
   constructor(
     private readonly store: SessionStore,
@@ -114,10 +119,76 @@ export class Agents {
     this.outboxDispatch = dispatch; this.outboxStop = stop;
   }
 
+  private async afterMutation(chatId: string): Promise<void> {
+    while (this.chatMutations.has(chatId)) await this.chatMutations.get(chatId)!.catch(() => {});
+    if (this.disposed) throw new WorkspaceError("WORKSPACE_UNAVAILABLE", "The workspace is stopping.");
+  }
+
+  private async waitToOpen(chatId: string): Promise<void> {
+    const waiting = this.waitingOpens.get(chatId) ?? new Set<{ cancelled: boolean }>();
+    const admission = { cancelled: false };
+    waiting.add(admission); this.waitingOpens.set(chatId, waiting);
+    try {
+      await this.afterMutation(chatId);
+      if (admission.cancelled) throw new WorkspaceError("session-expired", "This session was stopped before it could open.");
+    } finally {
+      waiting.delete(admission);
+      if (!waiting.size) this.waitingOpens.delete(chatId);
+    }
+  }
+
+  private cancelWaitingOpens(chatId: string): void {
+    for (const admission of this.waitingOpens.get(chatId) ?? []) admission.cancelled = true;
+  }
+
+  mutateChat<T>(chatId: string, _resetContext: boolean, action: () => Promise<T>): Promise<T> {
+    if (this.disposed || !this.store.metadata(chatId)?.chat)
+      return Promise.reject(new WorkspaceError("WORKSPACE_NOT_FOUND", "This conversation is unavailable."));
+    const previous = this.chatMutations.get(chatId), route = this.chats.get(chatId);
+    this.mutationEpochs.set(chatId, (this.mutationEpochs.get(chatId) ?? 0) + 1);
+    // Retire synchronously, before a held HTTP Stop or receipt can allow
+    // another provider action. New sends wait outside the entire mutation.
+    const retiring = route ? this.retire(route) : Promise.resolve();
+    void retiring.catch(() => {});
+    const operation = (async () => {
+      await previous?.catch(() => {});
+      try {
+        await this.store.stop(chatId);
+        if (this.outboxStop) {
+          const epoch = await this.outboxStop(chatId, this.store.deliveryEpoch(chatId));
+          await this.store.stopOutbox(chatId, epoch);
+        }
+      } finally {
+        await retiring;
+        if (this.chats.get(chatId) === route) this.chats.delete(chatId);
+      }
+      await this.store.update(chatId, draft => {
+        for (const entry of draft.inbox) if (!entry.outbox && entry.state === "queued") { entry.state = "cancelled"; entry.cancelRequested = true; }
+      });
+      if (this.disposed) throw new WorkspaceError("WORKSPACE_UNAVAILABLE", "The workspace is stopping.");
+      return action();
+    })();
+    this.chatMutations.set(chatId, operation);
+    void operation.finally(() => { if (this.chatMutations.get(chatId) === operation) this.chatMutations.delete(chatId); }).catch(() => {});
+    return operation;
+  }
+
   async receiveOutbox(item: CloudV2PromptDelivery): Promise<InboxEntry> {
     const { payload, receipt } = item;
     if (receipt.workspaceId !== this.scope.workspace.id || receipt.chatId !== payload.chatId || receipt.userMessageId !== payload.userMessageId)
       throw new WorkspaceError("WORKSPACE_NOT_FOUND", "This message belongs to another workspace.");
+    for (;;) {
+      await this.afterMutation(payload.chatId);
+      const epoch = this.mutationEpochs.get(payload.chatId) ?? 0;
+      try { return await this.admitOutbox(item); }
+      catch (error) {
+        if (epoch === (this.mutationEpochs.get(payload.chatId) ?? 0)) throw error;
+      }
+    }
+  }
+
+  private async admitOutbox(item: CloudV2PromptDelivery): Promise<InboxEntry> {
+    const { payload } = item;
     // Waking preserves the execution the app holds, as well as its native
     // conversation. Re-adopt only the current persisted execution (M069).
     const metadata = this.store.metadata(payload.chatId);
@@ -128,12 +199,25 @@ export class Agents {
     }), true);
     const route = this.chats.get(payload.chatId)!;
     route.admitting++;
-    try { await route.cancelling; this.assertCurrent(route); return await this.store.receiveOutbox(item); }
+    try { await route.cancelling; this.assertCurrent(route); return await this.store.receiveOutbox(item, () => this.assertCurrent(route)); }
     finally { route.admitting--; }
   }
 
   resumeOutbox(chatId: string): void {
+    if (this.disposed) return;
     const route = this.chats.get(chatId);
+    if ((!route || route.closed || this.chatMutations.has(chatId)) && !this.outboxOpenings.has(chatId) &&
+        this.store.outboxEntries(chatId).some(({ entry }) => entry.state === "queued" && entry.outbox?.acknowledged)) {
+      const opening = this.afterMutation(chatId).then(async () => {
+        const chat = this.store.metadata(chatId)?.chat;
+        if (!chat?.agentId) return;
+        await this.open({ id: "outbox", send: async () => {} }, createMessage({ type: "AGENT_NEW_SESSION", source: "browser",
+          chatId, agentId: chat.agentId, cwd: this.scope.root, workspaceId: this.scope.workspace.id }), true);
+      });
+      this.outboxOpenings.set(chatId, opening);
+      void opening.then(() => { this.outboxOpenings.delete(chatId); this.resumeOutbox(chatId); }, () => { this.outboxOpenings.delete(chatId); });
+      return;
+    }
     if (!route || route.closed || route.cancelling || route.stopInFlight || route.outboxSteering) return;
     const next = this.store.outboxEntries(chatId).find(({ entry }) => entry.state === "queued" && entry.outbox?.acknowledged)?.entry;
     const matchesActiveMode = () => next?.outbox?.permissionMode === undefined || next.outbox.permissionMode === route.activePermissionMode;
@@ -163,6 +247,7 @@ export class Agents {
   async stopOutbox(chatId: string, epoch: string): Promise<void> {
     const route = this.chats.get(chatId), active = route?.active;
     const freshEpoch = BigInt(this.store.deliveryEpoch(chatId)) < BigInt(epoch);
+    if (freshEpoch) this.cancelWaitingOpens(chatId);
     const interrupt = !!route && (active ? (active.outbox
       ? BigInt(active.outbox.epoch) < BigInt(epoch)
       : active.cancelRequested || freshEpoch) : this.hasBackground(route) && freshEpoch);
@@ -315,7 +400,10 @@ export class Agents {
           // Closing a view is not Stop in a shared headless workspace. The
           // explicit userStop flag also covers Stop before creation replied.
           if (route && message.userStop) await this.closeChat(route.chatId);
-          else if (!id && !route && message.chatId && message.userStop && this.store.metadata(message.chatId)?.chat?.agentId === message.agentId) await this.store.stop(message.chatId);
+          else if (!id && !route && message.chatId && message.userStop && this.store.metadata(message.chatId)?.chat?.agentId === message.agentId) {
+            this.cancelWaitingOpens(message.chatId);
+            await this.store.stop(message.chatId);
+          }
           await client.send(createMessage({ type: "AGENT_SESSION_CLOSED", source: "engine", requestId: message.id, agentId: message.agentId,
             ...(id ? { sessionId: id, executionId: id } : {}), ...(message.chatId ? { chatId: message.chatId } : {}) }));
           return;
@@ -335,6 +423,7 @@ export class Agents {
 
   /** Shutdown keeps each chat's execution for the next worker to re-adopt. */
   async closeChat(chatId: string, shutdown = false): Promise<void> {
+    this.cancelWaitingOpens(chatId);
     const route = this.chats.get(chatId);
     if (!route) return;
     const tools = this.retireWorkspaceTools(route);
@@ -372,13 +461,15 @@ export class Agents {
   }
 
   async flush(): Promise<void> {
+    await Promise.allSettled([...this.chatMutations.values(), ...this.outboxOpenings.values()]);
     await Promise.all([...this.routes.values()].map(async (route) => { await route.events; await route.settling; }));
   }
   async dispose(): Promise<void> {
-    this.models.dispose();
+    this.disposed = true; this.models.dispose();
     const tools = [...this.chats.values()].map(route => this.retireWorkspaceTools(route));
     await Promise.all([...this.chats.keys()].map(id => this.closeChat(id, true)));
     await Promise.all(tools);
+    await Promise.allSettled([...this.chatMutations.values(), ...this.outboxOpenings.values()]);
   }
 
   private agent(id: string): CloudV2Agent {
@@ -399,6 +490,7 @@ export class Agents {
    * chat's persisted execution comes back; replaced or closed ones stay fenced. */
   private readopt(id: string, agentId: string, requestedChat?: string): Runtime | undefined {
     const chatId = requestedChat ?? this.store.chatForExecution(id);
+    if (this.disposed || chatId && this.chatMutations.has(chatId)) return undefined;
     const metadata = chatId && !this.chats.has(chatId) ? this.store.metadata(chatId) : undefined;
     if (!chatId || !metadata?.chat || metadata.executionId !== id || metadata.chat.agentId !== agentId) return undefined;
     this.scope.folder(metadata.chat.folder);
@@ -410,6 +502,7 @@ export class Agents {
   }
 
   private assertCurrent(route: Runtime): void {
+    if (this.chatMutations.has(route.chatId)) throw new WorkspaceError("CONVERSATION_MUTATING", "This conversation is being reset. Retry after it completes.");
     if (route.closed || this.chats.get(route.chatId) !== route) throw new WorkspaceError("session-expired", "This execution has ended. Reopen the conversation to continue.");
   }
 
@@ -422,6 +515,8 @@ export class Agents {
     const found = requested ? this.routes.get(requested) ?? (message.type === "AGENT_LOAD_SESSION" && !message.adoptOnly ? this.readopt(requested, agentId, message.chatId) : undefined) : undefined;
     const chatId = message.chatId ?? found?.chatId;
     if (!chatId) throw new WorkspaceError("WORKSPACE_NOT_FOUND", "A conversation is required.");
+    if (this.chatMutations.has(chatId)) await this.waitToOpen(chatId);
+    if (this.disposed) throw new WorkspaceError("WORKSPACE_UNAVAILABLE", "The workspace is stopping.");
     const timing = agentTiming(agentId, chatId, "open", this.onTiming);
     if (found && found.chatId !== chatId) throw new WorkspaceError("session-expired", "The execution belongs to a different conversation.");
     let route = this.chats.get(chatId);
@@ -802,6 +897,7 @@ export class Agents {
   }
 
   private async stop(route: Runtime, reason = INPUT_CANCELLED): Promise<void> {
+    this.cancelWaitingOpens(route.chatId);
     route.stopping++; route.stopInFlight = (route.stopInFlight ?? 0) + 1;
     if (route.active) route.active.cancelRequested = true;
     const tools = this.retireWorkspaceTools(route);

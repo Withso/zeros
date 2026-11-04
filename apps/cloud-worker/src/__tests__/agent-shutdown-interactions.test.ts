@@ -14,7 +14,7 @@ import { CLIENT_A, FakeRelay, browserFrame, config } from "./worker-fixtures";
 afterEach(() => vi.restoreAllMocks());
 const gate = () => { let resolve!: () => void; const promise = new Promise<void>(done => { resolve = done; }); return { promise, resolve }; };
 
-it.each(["conversation Stop", "HTTP Stop", "workspace Stop", "worker disposal"])("does not release a held native approval after %s owns shutdown", async boundary => {
+it.each(["conversation Stop", "HTTP Stop", "workspace Stop", "worker disposal", "transcript reset"])("does not release a held native approval after %s owns shutdown", async boundary => {
   const directory = await mkdtemp(join(tmpdir(), "zeros-review-input-")), native = harness(), relay = new FakeRelay();
   const driver = new ClaudeDriver({ query: native.query });
   const worker = new CloudWorker({ directory, homeDirectory: directory, transport: relay, prepareCheckout: async () => {}, drivers: { claude: () => driver } });
@@ -22,7 +22,7 @@ it.each(["conversation Stop", "HTTP Stop", "workspace Stop", "worker disposal"])
   let answer: Promise<void> | undefined, shutdown: Promise<void> | undefined;
   worker.start();
   try {
-    await relay.receive({ ...config, agentInteractions: 1, agents: { claude: { oauthToken: "offline-review-placeholder" } } });
+    await relay.receive({ ...config, agentInteractions: 1, historyReplacement: 1, agents: { claude: { oauthToken: "offline-review-placeholder" } } });
     await relay.receive({ t: "open", clientId: CLIENT_A });
     const opening = browserFrame("AGENT_NEW_SESSION", { agentId: "claude", chatId: "chat", cwd: config.workspace.checkoutPath,
       env: { ZEROS_PERMISSION_MODE: "plan" } });
@@ -55,10 +55,13 @@ it.each(["conversation Stop", "HTTP Stop", "workspace Stop", "worker disposal"])
     });
     const interrupt = driver.interrupt.bind(driver);
     vi.spyOn(driver, "interrupt").mockImplementation(() => { stopping.resolve(); return interrupt(); });
+    const dispose = driver.dispose.bind(driver);
+    vi.spyOn(driver, "dispose").mockImplementation(() => { stopping.resolve(); return dispose(); });
     answer = relay.request(CLIENT_A, browserFrame("AGENT_PERMISSION_RESPONSE", { chatId: "chat", executionId,
       permissionId: request.permissionId, response: { outcome: { outcome: "selected", optionId: "allow_once" } } }));
     await entered.promise;
-    shutdown = boundary === "HTTP Stop" ? (worker as unknown as { agents: Agents }).agents.stopOutbox("chat", "1") : boundary === "conversation Stop" ? relay.request(CLIENT_A, browserFrame("AGENT_CANCEL", { agentId: "claude",
+    shutdown = boundary === "transcript reset" ? relay.request(CLIENT_A, browserFrame("WORKSPACE_REQUEST", { op: "messages.truncateFrom", params: { chatId: "chat", fromMsgId: "prompt" } }))
+      : boundary === "HTTP Stop" ? (worker as unknown as { agents: Agents }).agents.stopOutbox("chat", "1") : boundary === "conversation Stop" ? relay.request(CLIENT_A, browserFrame("AGENT_CANCEL", { agentId: "claude",
       chatId: "chat", sessionId: executionId, executionId })) : boundary === "workspace Stop"
       ? relay.receive({ t: "stop", id: randomUUID() }) : worker.dispose();
     await stopping.promise;

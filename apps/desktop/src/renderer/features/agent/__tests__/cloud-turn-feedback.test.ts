@@ -74,6 +74,11 @@ it("mounts the exact native terminal footer while the receipt remains accepted a
   expect(render()).toContain('aria-label="Turn usage, 20s"');
 });
 
+it("offers the existing sent-prompt edit control for a canonical cloud turn", () => {
+  terminal();
+  expect(render()).toContain('aria-label="Edit message"');
+});
+
 it("does not settle from final text or another turn's native terminal", () => {
   store().patchSession(chatId, { messages: [...store().sessions[chatId]!.messages,
     { id: "answer", kind: "text", role: "agent", phase: "final_answer", text: "Final text", createdAt: 29_000 }] });

@@ -637,6 +637,10 @@ export const useSessionsStore = create<SessionsStoreState>((set, get) => ({
         normalized = { ...normalized, executionId, sessionId: executionId };
       }
       const previous = state.sessions[chatId];
+      if (previous?.cwd === normalized.cwd && isCloudWorkspace(normalized.cwd)) {
+        if (!Object.hasOwn(slot, "transcriptHistoryState")) normalized = { ...normalized, transcriptHistoryState: previous?.transcriptHistoryState };
+        if (!Object.hasOwn(slot, "transcriptReplacementPending")) normalized = { ...normalized, transcriptReplacementPending: previous?.transcriptReplacementPending };
+      }
       if (normalized.transcriptSource === undefined && previous?.transcriptSource &&
           previous.cwd === normalized.cwd && previous.messages === normalized.messages)
         normalized = { ...normalized, transcriptSource: previous.transcriptSource };

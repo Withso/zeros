@@ -50,7 +50,7 @@ export function presentCachedLocalTranscript(
 }
 
 export function presentCachedTranscript(chatId: string, window: LocalTranscriptWindow): boolean {
-  if (window.messages.length === 0) return false;
+  if (window.messages.length === 0 && !window.historyState?.revision) return false;
   const store = useSessionsStore.getState();
   const slot = store.sessions[chatId];
   if (slot?.transcriptState === "resident" || !transcriptCacheFor(chatId, slot?.cwd)) return false;
@@ -64,14 +64,15 @@ export function presentCachedTranscript(chatId: string, window: LocalTranscriptW
     messages: queued.length > 0 ? [...window.messages, ...queued] : window.messages,
     leadingPrompt: window.leadingPrompt,
     transcriptState: "loading",
-    transcriptPresentation: { source: "cache" },
+    transcriptPresentation: { source: "cache", ...(window.messages.length === 0 ? { empty: true } : {}) },
     transcriptSource: window.source,
+    ...(window.historyState ? { transcriptHistoryState: window.historyState } : {}),
     transcriptContentSignatures: window.contentSignatures,
     ...(parseCloudScopedId(chatId) && !slot?.cwd ? { cwd: cloudWorkspaceKey(parseCloudScopedId(chatId)!) } : {}),
     // A live update may have marked this exact read stale; keep that so the
     // authoritative publish still re-windows once.
     transcriptDirty: slot?.transcriptDirty ?? false,
-    hasTranscript: true,
+    hasTranscript: window.messages.length > 0,
   };
   if (slot) store.patchSession(chatId, patch);
   else store.setSession(chatId, { ...BLANK, ...patch });
@@ -144,13 +145,17 @@ export function rememberTranscript(chatId: string, slot: AgentSessionState, fold
     messages: messages.length === slot.messages.length ? slot.messages : messages,
     leadingPrompt: slot.leadingPrompt ?? null,
     ...(slot.transcriptSource ? { source: slot.transcriptSource } : {}),
+    ...(cloud && slot.transcriptHistoryState ? { historyState: slot.transcriptHistoryState } : {}),
   });
 }
 
-/** Without a server revision cursor, a mirror must reach the known worker
- * tail before it can replace it. An identical ID with older content is still
- * lagging; a later native update stamp can prove an edit. No reads or wakes. */
+/** A newer cut replaces the lineage. Within one lineage, a mirror must
+ * still reach the worker tail before it can replace live content. */
 export function canReplaceCloudTranscript(slot: AgentSessionState, page: AgentMessageWindow): boolean {
+  const revision = slot.transcriptHistoryState?.revision ?? 0, incomingRevision = page.historyState?.revision ?? 0;
+  if (incomingRevision < revision) return false;
+  if (slot.transcriptReplacementPending && page.source !== "worker" && incomingRevision <= revision) return false;
+  if (incomingRevision > revision) return page.source === "worker" || page.source === "control-plane";
   if (slot.transcriptSource !== "worker" || page.source === "worker") return true;
   if (page.source !== "control-plane") return false;
   const current = slot.messages.filter(message => message.kind !== "text" || !message.queued);

@@ -1,16 +1,17 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { constants } from "node:fs";
 import { mkdtemp, open, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { authoredPathsFromMessages } from "@zeros/protocol/turn-attribution";
 import { changesHistorySchema, turnHistoryCursorSchema } from "@zeros/protocol/changes-history";
-import type { TurnInfo } from "@zeros/protocol/turns";
+import { applyTurnSpanReset, undoTurnReset, type TurnInfo } from "@zeros/protocol/turns";
 import type { AgentTextMessage } from "@zeros/protocol/agent-messages";
 import type { InboxEntry, SessionStore } from "../sessions/session-store";
 import { boundedInteger, commandRunner, type CommandOptions, type CommandRunner } from "./commands";
 import { parseNameStatus, parseNumstat, parseUnifiedDiff, type DiffFileSummary } from "./git-parsers";
 import { reqString, unsupported, WorkspaceError, type WorkspaceScope } from "./scope";
+import { turnResetHost } from "./turn-reset";
 
 const order = (a: TurnInfo, b: Pick<TurnInfo, "startedAt" | "chatId" | "turnId">) =>
   b.startedAt - a.startedAt || b.chatId.localeCompare(a.chatId) || b.turnId.localeCompare(a.turnId);
@@ -34,6 +35,10 @@ export class TurnService {
   }
 
   private async snapshot(chatId: string, turnId: string, phase: "pre" | "post"): Promise<string | null> {
+    return this.capture(phase === "pre" ? ref(chatId, turnId, phase) : undefined);
+  }
+
+  private async capture(reference?: string): Promise<string | null> {
     let directory: string | undefined;
     try {
       if ((await this.git(["rev-parse", "--show-toplevel"])).trim() !== this.scope.root) return null;
@@ -60,7 +65,7 @@ export class TurnService {
       }
       await git(["-c", "core.sparseCheckout=false", "add", "--sparse", "-A", "--", "."]);
       const tree = (await git(["write-tree"])).trim();
-      if (phase === "pre") await git(["update-ref", ref(chatId, turnId, phase), tree]);
+      if (reference) await git(["update-ref", "--no-deref", reference, tree]);
       return tree;
     } catch { return null; }
     finally { if (directory) await rm(directory, { recursive: true, force: true }); }
@@ -101,7 +106,7 @@ export class TurnService {
       try {
         const nextFiles = (await this.metadata(turn.preSnapshot, postSnapshot, paths)).map(({ path, oldPath, status, additions, deletions }) =>
           ({ path, oldPath, status: status as TurnInfo["files"][number]["status"], additions, deletions }));
-        await this.git(["update-ref", ref(chatId, turnId, "post"), postSnapshot]);
+        await this.git(["update-ref", "--no-deref", ref(chatId, turnId, "post"), postSnapshot]);
         files = nextFiles; confirmedPost = postSnapshot;
       }
       catch { /* A failed refresh retains the last confirmed comparison. */ }
@@ -113,9 +118,35 @@ export class TurnService {
   async deleteChatSnapshots(chatId: string): Promise<void> {
     // Runs after the durable tombstone. The chat prefix also permits cleanup
     // on a repeated delete after a crash between persistence and ref removal.
-    const names = (await this.git(["for-each-ref", "--format=%(refname)", refPrefix(chatId)]))
+    const names = (await this.git(["for-each-ref", "--format=%(refname)", refPrefix(chatId), `refs/zeros/resets/${hash(chatId)}/`]))
       .split("\n").filter(Boolean);
-    if (names.length) await this.git(["update-ref", "--stdin"], { input: names.map(name => `delete ${name}\n`).join("") });
+    if (names.length) await this.git(["update-ref", "--no-deref", "--stdin"], { input: names.map(name => `delete ${name}\n`).join("") });
+  }
+
+  async reset(chatId: string, turns: TurnInfo[]) {
+    const reset = `${Date.now()}-${randomUUID()}`;
+    return applyTurnSpanReset(turnResetHost(this.scope, phase => this.capture(`refs/zeros/resets/${hash(chatId)}/${reset}/${phase}`)),
+      turns.filter(turn => turn.files.length).map(turn => ({ paths: turn.files.map(file => file.path),
+        preSnapshot: turn.preSnapshot, postSnapshot: turn.postSnapshot })));
+  }
+
+  async undo(snapshot: string, paths: string[], mergeBase: string | null) {
+    if (!mergeBase) return paths.map(path => ({ path, result: "skipped" as const, reason: "no snapshot available" }));
+    return undoTurnReset(turnResetHost(this.scope, async () => null), snapshot, paths, mergeBase);
+  }
+
+  async prune(chatId: string): Promise<void> {
+    const session = this.store.snapshot(chatId);
+    const keep = new Set([
+      ...(session?.turns ?? []).flatMap(turn => [turn.preSnapshot, turn.postSnapshot]),
+      ...(session?.resets ?? []).flatMap(reset => [reset.snapshot, reset.postSnapshot,
+        ...reset.turns.flatMap(turn => [turn.preSnapshot, turn.postSnapshot])]),
+    ].filter(Boolean));
+    const refs = (await this.git(["for-each-ref", "--format=%(objectname) %(refname)", refPrefix(chatId), `refs/zeros/resets/${hash(chatId)}/`]))
+      .split("\n").filter(Boolean).map(line => line.split(" "));
+    const removed = refs.filter(([object, name]) => !keep.has(object) &&
+      /^refs\/zeros\/(?:turns\/[a-f0-9]{64}\/[a-f0-9]{64}|resets\/[a-f0-9]{64}\/[0-9]{1,16}-[a-f0-9-]{36})\/(?:pre|post)$/.test(name!));
+    if (removed.length) await this.git(["update-ref", "--no-deref", "--stdin"], { input: removed.map(([object, name]) => `delete ${name} ${object}\n`).join("") });
   }
 
   private async metadata(pre: string, post: string, paths: string[]): Promise<DiffFileSummary[]> {

@@ -550,7 +550,7 @@ describe("turn footer first paint after a reopen", () => {
     expect(renderFooter({ isLastTurn: false })).not.toContain("data-turn-changes");
   });
 
-  it.each(["claude", "codex", "cursor"])("paints mirrored %s cloud changes without native turn reads or reset actions", (agentId) => {
+  it.each(["claude", "codex", "cursor"])("offers explicit reset for mirrored %s cloud changes without passive native reads", (agentId) => {
     const summary = row({ agentId, status: "completed", stopReason: "end_turn", files: [{
       path: "src/cloud.ts", status: "modified", additions: 4, deletions: 2,
     }] });
@@ -561,7 +561,7 @@ describe("turn footer first paint after a reopen", () => {
     expect(html).toContain("1 File Changed");
     expect(html).toContain("cloud.ts");
     expect(html).toContain("Review");
-    expect(html).not.toContain("Turn actions");
+    expect(html).toContain("Turn actions");
     expect(useWorkspaceFileDiffSnapshot).not.toHaveBeenCalled();
   });
 

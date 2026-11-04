@@ -513,7 +513,37 @@ the recorded diff through `turns.diff`. Cloud hover/focus does not prefetch a
 diff or wake the VM. These reads require a worker runtime containing turn
 recording, installed on create or wake; older turns without snapshots do not
 gain a reconstructed comparison. Older workers may still refuse `turns.list`,
-which the renderer treats as unavailable history. Turn reset/undo remain Local-only.
+which the renderer treats as unavailable history.
+
+Reset uses the same authored-path inverse and conflict rules as Local. It can
+restore files, cut the transcript, or do both. It preserves unrelated edits and
+staging; overlapping edits and unavailable snapshots are reported without
+overwriting those files. Reset first retires the conversation's native execution
+and confirms its HTTP Stop epoch, then waits for receipts before applying the
+cut. New prompts wait outside the mutation. A transcript cut clears the saved
+provider continuation, so the next prompt starts with the retained history.
+Cloud Edit and send submits nothing if the cut is refused or its outcome is
+uncertain. Account, owner, peer and Stop changes cancel the pending action.
+
+Transcript changes require the negotiated `history-replace-v1` feature and
+`historyReplacement: 1` configuration. The worker sends an ordered replacement,
+including an empty cut, with `historyState { revision, beforeEpoch? }`. The control
+plane stores that state atomically with the replacement in the existing chat
+row and reads rows and state from one snapshot. Renderer caches keep the exact
+chat revision, reject older mirrors, and hide only receipt-only bubbles from
+before the cut's Stop epoch. Canonical rows restored by Undo and new-epoch
+prompts remain visible. Older peers retain their original history format and
+refuse transcript mutations; a worker with a persisted cut does not resume
+additive mirroring after a capability downgrade.
+
+The last five resets retain Undo records. Undo merges file restoration around
+later edits and restores the transcript only while its cut revision and
+continuation are unchanged. Turn trees and retained reset trees are pinned by
+private Git refs. Encrypted checkpoints carry those trees alongside worker
+session state, so recorded diffs and an eligible Undo survive replacement of
+the VM. Restoring private refs never follows a symbolic ref into a user branch.
+Local Personal and organization-local reset entry points, storage and permission
+behavior remain unchanged.
 
 ## Cloud GitHub connections and pull requests
 

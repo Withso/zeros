@@ -49,8 +49,11 @@ export class GitService {
     this.scope.assertId(params.workspaceId);
     for (const key of ["cwd", "folder", "repoRoot"]) if (params[key] !== undefined) this.scope.folder(params[key]);
     if (!isGitMutation(op, params)) return this.read(op, params);
+    return this.mutate(() => this.write(op, params));
+  }
+  mutate<T>(action: () => Promise<T>): Promise<T> {
     const pending = this.mutations.then(async () => {
-      try { return await this.write(op, params); }
+      try { return await action(); }
       finally { this.options.changed?.(); }
     });
     this.mutations = pending.then(() => {}, () => {});

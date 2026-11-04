@@ -9,9 +9,12 @@ import { cloudTurnEnding, withCloudTurnPresentation, type CloudTurnPresentation,
 export interface CloudPromptView {
   rows: AgentTextMessage[];
   states: Record<string, CloudV2PromptState | undefined>;
+  epochs?: Record<string, string>;
   activeId?: string;
   /** The one optimistic head; independent of provider acceptance. */
   pendingId?: string;
+  /** Pending receipts and whether each can own the optimistic head. */
+  pending?: Record<string, boolean>;
   presentations?: Record<string, CloudTurnPresentation>;
   waiting: boolean;
   stopId?: string;
@@ -24,6 +27,7 @@ const equal = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b
 
 export function cloudPromptView(record: PromptJournalRecord, workspaceStatus: string, previous?: CloudPromptView): CloudPromptView {
   const unavailable = !["ready", "busy"].includes(workspaceStatus), states: CloudPromptView["states"] = {};
+  const epochs: Record<string, string> = {}, pendingEntries: Record<string, boolean> = {};
   let activeId: string | undefined, pendingId: string | undefined, pendingCount = 0, stopping = false;
   const presentations: Record<string, CloudTurnPresentation> = {};
   const ordered = record.entries.filter(entry => entry.receipt).sort((a, b) => Number(BigInt(a.receipt!.sequence) - BigInt(b.receipt!.sequence)));
@@ -35,6 +39,7 @@ export function cloudPromptView(record: PromptJournalRecord, workspaceStatus: st
   const rows = ordered.map(entry => {
     const { payload, state } = entry, bubble = payload.bubble;
     states[payload.userMessageId] = state;
+    if (entry.receipt) epochs[payload.userMessageId] = entry.receipt.epoch;
     const active = state === "dispatching" || state === "accepted";
     const pending = entry.phase !== "refused" && !promptTerminal(state);
     const ending = promptTerminal(state) || entry.phase === "refused";
@@ -45,8 +50,11 @@ export function cloudPromptView(record: PromptJournalRecord, workspaceStatus: st
       stopReason: entry.presentation?.source === "native" ? entry.presentation.stopReason : state === "cancelled" ? "cancelled" : null,
     } : entry.presentation;
     if (presentation) presentations[payload.userMessageId] = presentation;
-    if (pending && presentation?.endedAt === undefined && !entry.cancelRequested && (!record.stop || entry.order >= record.stop.before) && (!unavailable || active))
-      pendingId ??= payload.userMessageId;
+    if (pending) {
+      const eligible = presentation?.endedAt === undefined && !entry.cancelRequested && (!record.stop || entry.order >= record.stop.before) && (!unavailable || active);
+      pendingEntries[payload.userMessageId] = eligible;
+      if (eligible) pendingId ??= payload.userMessageId;
+    }
     if (active) activeId ??= payload.userMessageId;
     if (pending) pendingCount++;
     if (pending && entry.cancelRequested) stopping = true;
@@ -69,7 +77,7 @@ export function cloudPromptView(record: PromptJournalRecord, workspaceStatus: st
       equal(old.recoveryFailure, row.recoveryFailure) && equal(old.attachments, row.attachments) && equal(old.segments, row.segments) ? old : row;
   });
   const cancelled = ordered.find(entry => entry.cancelRequested && !promptTerminal(entry.state));
-  const view: CloudPromptView = { rows, states, activeId, pendingId, presentations, pendingCount, waiting: rows.some(row => row.queued),
+  const view: CloudPromptView = { rows, states, ...(Object.keys(epochs).length ? { epochs } : {}), activeId, pendingId, pending: pendingEntries, presentations, pendingCount, waiting: rows.some(row => row.queued),
     stopId: record.stop?.id ?? (stopping ? cancelled?.presentation?.operationId ?? `outbox-stop:${record.epoch}` : undefined),
     stopTurnId: record.stop?.turnId ?? cancelled?.payload.userMessageId,
     stopState: record.stop?.state, stopRequestedAt: record.stop?.requestedAt ?? cancelled?.presentation?.endedAt };
@@ -77,7 +85,22 @@ export function cloudPromptView(record: PromptJournalRecord, workspaceStatus: st
     view.stopTurnId === previous.stopTurnId && view.stopState === previous.stopState && view.stopRequestedAt === previous.stopRequestedAt &&
     view.pendingCount === previous.pendingCount && view.waiting === previous.waiting &&
     view.stopId === previous.stopId && rows.length === previous.rows.length && rows.every((row, index) => row === previous.rows[index]) &&
-    equal(states, previous.states) ? previous : view;
+    equal(states, previous.states) && equal(view.epochs, previous.epochs) && equal(view.pending, previous.pending) ? previous : view;
+}
+
+function currentPromptView(slot: AgentSessionState, view: CloudPromptView): CloudPromptView {
+  const before = slot.transcriptHistoryState?.beforeEpoch;
+  if (!before || !view.epochs) return view;
+  const retired = (id: string) => view.epochs?.[id] !== undefined && BigInt(view.epochs[id]!) < BigInt(before);
+  if (!view.rows.some(row => retired(row.id))) return view;
+  const native = new Set([...slot.messages.map(row => row.id), ...(slot.leadingPrompt ? [slot.leadingPrompt.id] : [])]);
+  const rows = view.rows.filter(row => !retired(row.id) || native.has(row.id));
+  const current = rows.filter(row => !retired(row.id));
+  const activeId = current.find(row => view.states[row.id] === "dispatching" || view.states[row.id] === "accepted")?.id;
+  const pending = view.pending && Object.fromEntries(Object.entries(view.pending).filter(([id]) => !retired(id)));
+  const pendingId = pending ? current.find(row => pending[row.id])?.id : view.pendingId && !retired(view.pendingId) ? view.pendingId : undefined;
+  return { ...view, rows, activeId, pendingId, waiting: current.some(row => row.queued),
+    ...(pending ? { pending, pendingCount: Object.keys(pending).length } : {}) };
 }
 
 /** Saved bubbles are presentation state. Native reducers see only canonical
@@ -87,12 +110,15 @@ const projected = new WeakMap<AgentSessionState, AgentSessionState>();
 export function projectCloudPromptSession(slot: AgentSessionState): AgentSessionState {
   if (!isCloudWorkspace(slot.cwd) || !slot.cloudOutbox) return slot;
   const cached = projected.get(slot); if (cached) return cached;
+  const view = currentPromptView(slot, slot.cloudOutbox);
+  const original = slot;
+  if (view !== slot.cloudOutbox) slot = { ...slot, ...cloudPromptSessionPatch(slot, view) };
   const nativeIds = new Set(slot.messages.map(row => row.id));
   const windowStart = slot.messages.reduce((first, row) => Math.min(first, row.createdAt), Infinity);
-  const pending = new Map(slot.cloudOutbox.rows.filter(row => nativeIds.has(row.id) || slot.cloudOutbox!.states[row.id] !== "completed" ||
+  const pending = new Map(view.rows.filter(row => nativeIds.has(row.id) || view!.states[row.id] !== "completed" ||
     slot.transcriptState === "resident" && (windowStart === Infinity || row.createdAt >= windowStart)).map(row => [row.id,
       row.queued && cloudTurnEnding(slot, row.id) ? { ...row, queued: false, queuedDelivery: undefined, queuedEditable: undefined } : row]));
-  const position = new Map(slot.cloudOutbox.rows.map((row, index) => [row.id, index]));
+  const position = new Map(view.rows.map((row, index) => [row.id, index]));
   let cursor = 0;
   const messages: AgentMessage[] = [];
   for (const message of slot.messages) {
@@ -100,7 +126,7 @@ export function projectCloudPromptSession(slot: AgentSessionState): AgentSession
     if (!saved) { messages.push(message); continue; }
     const before = position.get(message.id)!;
     while (cursor < before) {
-      const row = slot.cloudOutbox.rows[cursor++]!;
+      const row = view.rows[cursor++]!;
       if (pending.has(row.id) && !nativeIds.has(row.id)) { messages.push(pending.get(row.id)!); pending.delete(row.id); }
     }
     pending.delete(message.id);
@@ -109,7 +135,7 @@ export function projectCloudPromptSession(slot: AgentSessionState): AgentSession
   }
   messages.push(...pending.values());
   const value = { ...slot, messages: messages.length === slot.messages.length && messages.every((row, index) => row === slot.messages[index]) ? slot.messages : messages };
-  projected.set(slot, value); return value;
+  projected.set(original, value); return value;
 }
 
 /** Capability rollout can overlap a turn sent by an older bridge path. Only
@@ -122,12 +148,15 @@ export function cloudPromptHasLegacyActivity(slot?: AgentSessionState, view = sl
 
 export function cloudPromptSessionPatch(slot: AgentSessionState, view: CloudPromptView): Partial<AgentSessionState> {
   if (!isCloudWorkspace(slot.cwd)) return {};
+  view = currentPromptView(slot, view);
+  if (slot.transcriptReplacementPending) return { cloudOutbox: view };
   if (!view.stopId && cloudPromptHasLegacyActivity(slot, view)) return { cloudOutbox: view };
   const foreground = slot.foregroundTurnId, state = foreground ? view.states[foreground] : undefined;
   let cloudTurnPresentations = slot.cloudTurnPresentations;
   for (const [id, presentation] of Object.entries(view.presentations ?? {}))
     cloudTurnPresentations = withCloudTurnPresentation(cloudTurnPresentations, id, presentation);
-  const terminal = promptTerminal(state) || !!(foreground && cloudTurnPresentations?.[foreground]?.endedAt !== undefined);
+  const terminal = promptTerminal(state) || !!(foreground && (cloudTurnPresentations?.[foreground]?.endedAt !== undefined ||
+    slot.transcriptHistoryState?.beforeEpoch && view.epochs?.[foreground] && BigInt(view.epochs[foreground]!) < BigInt(slot.transcriptHistoryState.beforeEpoch)));
   const active = view.activeId && cloudTurnPresentations?.[view.activeId]?.endedAt === undefined ? view.activeId : view.pendingId;
   const ownsActivity = !!foreground && Object.hasOwn(view.states, foreground);
   const row = view.rows.find(row => row.id === active);

@@ -32,6 +32,7 @@ import {
 } from "../platform/local-transcript-store";
 import { readPreferenceCache, writePreferenceCache } from "../platform/personal-preferences";
 import type { AgentMessage, AgentTextMessage } from "../features/agent/use-agent-session";
+import { CloudV2HistoryStateSchema, type CloudV2HistoryState } from "@zeros/protocol/cloud-v2-relay";
 import {
   capMessagesKeepingLeadingPrompt,
   isUserPromptRow,
@@ -78,6 +79,7 @@ export interface LocalTranscriptWindow {
   leadingPrompt: AgentTextMessage | null;
   /** Presentation provenance only, never runtime or completion authority. */
   source?: "worker" | "control-plane";
+  historyState?: CloudV2HistoryState;
   /** Original content for worker rows shortened only in the disk copy. */
   contentSignatures?: Record<string, string>;
 }
@@ -193,7 +195,7 @@ function encodeTranscriptWindow(
     kept.push(message);
   }
   kept.reverse();
-  if (kept.length === 0) return null;
+  if (kept.length === 0 && !(namespace === "cloud" && window.messages.length === 0 && window.historyState?.revision)) return null;
   // The byte cut may land later than the row cut: re-derive the opening.
   let leadingPrompt = leading as AgentTextMessage | null;
   if (kept.length < capped.messages.length) {
@@ -213,6 +215,7 @@ function encodeTranscriptWindow(
     const contentSignatures = Object.fromEntries([...signatures].filter(([id]) => ids.has(id)));
     return JSON.stringify({ version: RECORD_VERSION, messages: kept, leadingPrompt,
       ...(namespace === "cloud" && window.source ? { source: window.source } : {}),
+      ...(window.historyState ? { historyState: window.historyState } : {}),
       ...(Object.keys(contentSignatures).length ? { contentSignatures } : {}),
     });
   };
@@ -344,9 +347,13 @@ function decodeTranscriptWindow(json: string, namespace: "local" | "cloud"): Loc
       leadingPrompt?: unknown;
       source?: unknown;
       contentSignatures?: unknown;
+      historyState?: unknown;
     };
     if (parsed?.version !== RECORD_VERSION || !Array.isArray(parsed.messages)) return null;
-    if (parsed.messages.length === 0 || parsed.messages.length > LOCAL_TRANSCRIPT_CACHE_ROWS) return null;
+    const state = namespace === "cloud" && parsed.historyState !== undefined ? CloudV2HistoryStateSchema.safeParse(parsed.historyState) : undefined;
+    if (state && !state.success) return null;
+    const historyState = state?.success ? state.data : undefined;
+    if (parsed.messages.length === 0 && !historyState?.revision || parsed.messages.length > LOCAL_TRANSCRIPT_CACHE_ROWS) return null;
     if (!parsed.messages.every(validMessage)) return null;
     const ids = new Set(parsed.messages.map((message) => message.id));
     if (ids.size !== parsed.messages.length) return null;
@@ -362,6 +369,7 @@ function decodeTranscriptWindow(json: string, namespace: "local" | "cloud"): Loc
         !Object.entries(signatures).every(([id, signature]) => (ids.has(id) || leading?.id === id) &&
           isString(signature) && /^\d+:[a-z0-9]+$/.test(signature)))) return null;
     return { messages: parsed.messages, leadingPrompt: leading, ...(parsed.source ? { source: parsed.source } : {}),
+      ...(historyState ? { historyState } : {}),
       ...(signatures ? { contentSignatures: signatures as Record<string, string> } : {}),
     };
   } catch {
@@ -609,7 +617,7 @@ export class LocalTranscriptCache {
    * the disk copy is written later, once, if its content changed. */
   remember(chatId: string, folder: string | null | undefined, window: LocalTranscriptWindow): void {
     if (!this.eligible(chatId, folder) || !folder) return;
-    if (window.messages.length === 0) {
+    if (window.messages.length === 0 && !(this.namespace === "cloud" && window.historyState?.revision)) {
       // A confirmed empty transcript has nothing to paint; drop stale copies.
       this.forget(chatId);
       return;
@@ -624,6 +632,7 @@ export class LocalTranscriptCache {
       messages: capped.messages,
       leadingPrompt: capped.leadingPrompt,
       ...(this.namespace === "cloud" && window.source ? { source: window.source } : {}),
+      ...(this.namespace === "cloud" && window.historyState ? { historyState: window.historyState } : {}),
       ...(this.namespace === "cloud" && window.contentSignatures ? { contentSignatures: window.contentSignatures } : {}),
     };
     this.putMemory(chatId, folder, bounded);

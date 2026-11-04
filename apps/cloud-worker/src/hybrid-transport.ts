@@ -280,7 +280,7 @@ export class HybridTransport implements Transport {
         method: payload === undefined ? "GET" : "POST", headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json", "X-Zeros-Worker-Boot": this.bootId,
           // An HTTP header is ignored by older control planes; adding a JSON
           // field would break their strict hello schema before configuration.
-          "X-Zeros-Worker-Features": "prompt-outbox-v1,mcp-v1,workspace-setup-v1,checkout-v2,agent-interactions-v1,github-pr-v1,git-identity-v1,github-user-token-v1,code-review-v1" },
+          "X-Zeros-Worker-Features": "prompt-outbox-v1,mcp-v1,workspace-setup-v1,checkout-v2,agent-interactions-v1,github-pr-v1,git-identity-v1,github-user-token-v1,code-review-v1,history-replace-v1" },
         ...(payload === undefined ? {} : { body: payload }), redirect: "error", signal: controller.signal,
       });
       if (!response.ok) {

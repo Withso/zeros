@@ -20,13 +20,15 @@ import { SessionStore } from "../../../../../../cloud-worker/src/sessions/sessio
 import type { TurnInfo } from "@zeros/protocol/turns";
 import { groupMessagesIntoTurns } from "../turn-grouping";
 import { presentLeadingPrompt } from "../transcript-leading-prompt";
+import { bumpCancelGeneration, clearPrebindGoalSnapshotsForChat } from "../session-reload-lifecycle";
+import { chatChangeTargets } from "../../../state/chat-change-targets";
 
 const target = { organizationId: "11111111-1111-4111-8111-111111111111", workspaceId: "22222222-2222-4222-8222-222222222222" };
 const folder = cloudWorkspaceKey(target), id = cloudScopedId(target, "chat");
 const owner = JSON.stringify(["https://api.example.test", "account-a"]);
 const user = (id: string): AgentTextMessage => ({ id, kind: "text", role: "user", text: id, createdAt: 1 });
 const agent = (id: string, text = id): AgentMessage => ({ id, kind: "text", role: "agent", text, createdAt: 2 });
-type Page = { messages: AgentMessage[]; source: "worker" | "control-plane"; complete?: boolean; leadingPrompt?: AgentTextMessage };
+type Page = { messages: AgentMessage[]; source: "worker" | "control-plane"; complete?: boolean; leadingPrompt?: AgentTextMessage; historyState?: { revision: number; beforeEpoch?: string } };
 function deferred<T>() {
   let resolve!: (value: T) => void;
   const promise = new Promise<T>(done => { resolve = done; });
@@ -34,32 +36,44 @@ function deferred<T>() {
 }
 const ast = ts.createSourceFile("sessions-provider.tsx", readFileSync(new URL("../sessions-provider.tsx", import.meta.url), "utf8"), ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
 const callbacks: Record<string, string> = {};
-let subscription = "";
+let subscription = "", changedSubscription = "";
 (function collect(node: ts.Node) {
-  if (ts.isVariableDeclaration(node) && ["hydrateChat", "reconcileChatMessages"].includes(node.name.getText(ast)) && node.initializer && ts.isCallExpression(node.initializer))
+  if (ts.isVariableDeclaration(node) && ["hydrateChat", "reconcileChatMessages", "resetConversationContext"].includes(node.name.getText(ast)) && node.initializer && ts.isCallExpression(node.initializer))
     callbacks[node.name.getText(ast)] = node.initializer.arguments[0]!.getText(ast);
   if (ts.isCallExpression(node) && node.expression.getText(ast) === "useEffect" &&
       node.arguments[0]?.getText(ast).includes("rememberTranscript(")) subscription = node.arguments[0].getText(ast);
+  if (ts.isCallExpression(node) && node.expression.getText(ast) === "useEffect" &&
+      node.arguments[0]?.getText(ast).includes('bridge.on("DB_CHANGED"')) changedSubscription = node.arguments[0].getText(ast);
   ts.forEachChild(node, collect);
 })(ast);
-const code = ts.transpileModule(Object.entries({ ...callbacks, subscribe: subscription }).map(([name, source]) => `globalThis.${name} = ${source};`).join("\n"),
+const code = ts.transpileModule(Object.entries({ ...callbacks, subscribe: subscription, subscribeChanges: changedSubscription }).map(([name, source]) => `globalThis.${name} = ${source};`).join("\n"),
   { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText;
-function harness() {
+function harness(backgroundAllowed = true) {
   const page = deferred<Page>(), read = vi.fn(async () => page.promise);
+  let changed: (message: unknown) => void = () => {};
+  const flights = new Map<string, Promise<void>>();
+  const resetMaps = ["cancelGenerationsRef", "promptAbortRef", "sendingChatsRef", "ensureInFlightRef", "loadFlightKeysRef",
+    "loadFlightAdoptOnlyRef", "prebindDirtySessionsRef", "prebindGoalSnapshotsRef", "sendQueueRef", "queueHeldRef",
+    "flushBubbleRef", "authPromptsRef", "turnProducedOutputRef", "announcedDirsRef", "promptActivityRef"];
   const context: Record<string, unknown> = {
     console: { warn: vi.fn() }, BLANK, parseCloudScopedId, isCloudWorkspace, cloudComputerV2: true, HYDRATE_WINDOW: 200,
     reconcileHistoryMessages, messageSnapshotsEqual, retainMessageReferences, isCurrentTranscriptRequest, releaseTranscriptRequest,
-    canApplyTranscriptRead, invalidateTranscriptRequest, mergeWindowedTail, canBackgroundSyncCloudWorkspace: () => true,
+    canApplyTranscriptRead, invalidateTranscriptRequest, mergeWindowedTail, canBackgroundSyncCloudWorkspace: () => backgroundAllowed,
     reconcileInFlightRef: { current: new Map() }, hydrateInFlightRef: { current: new Map() }, pendingHydratesRef: { current: new Set() },
-    getStore: useSessionsStore.getState, useWorkspaceStore: { getState: () => ({ chats: [{ id, folder }] }) },
-    bridge: { status: "connecting", request: vi.fn(() => new Promise(() => {})) },
+    getStore: useSessionsStore.getState, useWorkspaceStore: { getState: () => ({ chats: [{ id, folder }], dispatch: vi.fn() }) },
+    bridge: { status: "connecting", request: vi.fn(() => new Promise(() => {})), on: (_type: string, fn: (message: unknown) => void) => { changed = fn; return () => {}; } },
     persistMessageWindow: read, reconcileChatMessages: vi.fn(async () => {}), reconcileChatMessagesRef: { current: vi.fn() },
     consumeFreshCloudChat, ...caches, ...presentation, useSessionsStore, window: { setTimeout, clearTimeout },
     forgetEmptyLocalChat: vi.fn(), rememberEmptyLocalChat: vi.fn(), forgetLocalChatPrompt: vi.fn(), noteLocalChatPrompt: vi.fn(),
+    ...Object.fromEntries(resetMaps.map(name => [name, { current: new Map() }])),
+    conversationResetFlightsRef: { current: flights }, bumpCancelGeneration, clearPrebindGoalSnapshotsForChat, chatChangeTargets,
+    prebindBackgroundTasksRef: { current: { clearChat: vi.fn() } }, cloudPrompts: { refresh: vi.fn() },
   };
   vm.runInNewContext(code, context);
   return { read, resolve: page.resolve, hydrate: context.hydrateChat as (id: string) => Promise<void>,
-    reconcile: context.reconcileChatMessages as (id: string) => Promise<void>, subscribe: context.subscribe as () => () => void };
+    reconcile: context.reconcileChatMessages as (id: string) => Promise<void>, subscribe: context.subscribe as () => () => void,
+    reset: context.resetConversationContext as (id: string) => void, flights,
+    subscribeChanges: context.subscribeChanges as () => () => void, changed: (value: unknown) => changed(value) };
 }
 const slot = () => useSessionsStore.getState().sessions[id];
 beforeEach(() => {
@@ -68,6 +82,62 @@ beforeEach(() => {
   caches.cloudTranscriptCache.resetForTesting();
 });
 afterEach(() => { caches.cloudTranscriptCache.resetForTesting(); vi.restoreAllMocks(); vi.useRealTimers(); });
+
+describe("cloud transcript replacement", () => {
+  it.each([[], [user("restored"), agent("restored-answer")]].map(messages => ({ messages })))("replaces the exact chat after a context notification, even without overlap: $messages", async ({ messages }) => {
+    const other = cloudScopedId({ ...target, workspaceId: "33333333-3333-4333-8333-333333333333" }, "chat");
+    useSessionsStore.getState().setSession(other, { ...BLANK, cwd: "/other", messages: [user("untouched")] });
+    const unrelated = useSessionsStore.getState().sessions[other];
+    useSessionsStore.getState().setSession(id, { ...BLANK, cwd: folder, messages: [user("deleted")], sessionId: "old-execution", transcriptSource: "worker" });
+    const h = harness(), stop = h.subscribeChanges();
+    h.changed({ type: "DB_CHANGED", kinds: ["messages", "conversationContext"], chatIds: [id], workspaceIds: [folder], cloudWorkspace: folder });
+    expect(slot()?.sessionId).toBeNull();
+    h.resolve({ messages, source: "worker", complete: false, historyState: { revision: 1, beforeEpoch: "2" } });
+    await h.flights.get(id);
+    expect(slot()?.messages).toEqual(messages);
+    expect(slot()?.transcriptHistoryState).toEqual({ revision: 1, beforeEpoch: "2" });
+    expect(useSessionsStore.getState().sessions[other]).toBe(unrelated);
+    stop();
+  });
+  it("refuses a lagging mirror during a known reset and never wakes a sleeping worker", async () => {
+    const before = [user("deleted")];
+    useSessionsStore.getState().setSession(id, { ...BLANK, cwd: folder, messages: before, transcriptSource: "worker" });
+    const passive = harness(false), stop = passive.subscribeChanges();
+    passive.changed({ type: "DB_CHANGED", kinds: ["messages", "conversationContext"], chatIds: [id], cloudWorkspace: folder });
+    expect(passive.read).not.toHaveBeenCalled(); stop();
+    const h = harness(); h.reset(id);
+    h.resolve({ messages: before, source: "control-plane", complete: true, historyState: { revision: 0 } });
+    await h.flights.get(id);
+    expect(slot()?.transcriptState).toBe("loading");
+    expect(slot()?.transcriptReplacementPending).toBe(true);
+    h.read.mockResolvedValueOnce({ messages: [], source: "worker", complete: true, historyState: { revision: 1 } });
+    await h.hydrate(id);
+    expect(slot()?.messages).toEqual([]);
+    expect(slot()?.transcriptReplacementPending).toBe(false);
+  });
+  it("retires a held pre-cut window without letting it overwrite the confirmed cut", async () => {
+    useSessionsStore.getState().setSession(id, { ...BLANK, cwd: folder, transcriptState: "cold" });
+    const h = harness(), old = deferred<Page>(); h.read.mockImplementationOnce(() => old.promise);
+    const stale = h.hydrate(id); h.reset(id);
+    h.resolve({ messages: [], source: "worker", complete: true, historyState: { revision: 1 } });
+    await h.flights.get(id);
+    old.resolve({ messages: [user("deleted")], source: "control-plane", complete: true, historyState: { revision: 0 } });
+    await stale;
+    expect(slot()?.messages).toEqual([]);
+    expect(slot()?.transcriptHistoryState?.revision).toBe(1);
+  });
+  it("accepts a newer mirror cut without overlap and refuses older revisions thereafter", async () => {
+    useSessionsStore.getState().setSession(id, { ...BLANK, cwd: folder, messages: [user("old")], transcriptSource: "worker", transcriptHistoryState: { revision: 1 } });
+    const h = harness(), pending = h.reconcile(id);
+    h.resolve({ messages: [user("after-undo")], source: "control-plane", complete: false, historyState: { revision: 3, beforeEpoch: "4" } });
+    await pending;
+    expect(slot()?.messages.map(message => message.id)).toEqual(["after-undo"]);
+    h.read.mockResolvedValueOnce({ messages: [user("stale")], source: "control-plane", complete: true, historyState: { revision: 2 } });
+    await h.reconcile(id);
+    expect(slot()?.messages.map(message => message.id)).toEqual(["after-undo"]);
+    expect(slot()?.transcriptHistoryState?.revision).toBe(3);
+  });
+});
 
 describe("cloud cached transcript hydration", () => {
   it.each([

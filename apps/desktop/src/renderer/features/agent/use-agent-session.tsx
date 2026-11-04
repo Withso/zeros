@@ -148,6 +148,9 @@ export interface AgentSessionState {
   transcriptPresentation: { source: "cache"; empty?: true } | null;
   /** Renderer-only provenance for mirror catch-up; never execution authority. */
   transcriptSource?: "worker" | "control-plane";
+  transcriptHistoryState?: import("@zeros/protocol/cloud-v2-relay").CloudV2HistoryState;
+  /** A reset notification needs a fresh window before old rows can authorize actions. */
+  transcriptReplacementPending?: boolean;
   /** Original content signatures for shortened provisional worker rows. */
   transcriptContentSignatures?: Record<string, string>;
   /** A durable transcript update arrived while the payload was cold/loading.
