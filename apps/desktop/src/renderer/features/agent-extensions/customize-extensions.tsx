@@ -10,6 +10,8 @@ import { Badge } from "../../shared/ui/primitives/badge";
 import { Field } from "../../shared/ui/primitives/field";
 import { IconButton } from "../../shared/ui/primitives/icon-button";
 import { MessageRow } from "../../shared/ui/primitives/message-row";
+import { Tooltip } from "../../shared/ui/primitives/tooltip";
+import { extensionEntryView } from "./extension-entry-view";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -42,14 +44,6 @@ const LABELS = {
   skills: "Skills",
   plugins: "Plugins",
   apps: "Apps and connectors",
-};
-const STATUS = {
-  available: "Available",
-  "needs-auth": "Sign-in required",
-  unavailable: "Unavailable in Zeros",
-  configured: "Configured",
-  disabled: "Disabled in native config",
-  found: "Found on disk",
 };
 
 function SkillForm({
@@ -177,6 +171,32 @@ function SkillForm({
 
 /** Mounted under an exact scope/category/provider key. A draft cannot move to
  * another repository when navigation changes or its owner is removed. */
+/** One skill, plugin or connector: its name, one line (the remedy when the
+ * status needs the person, else the description), the status badge with any
+ * further detail on hover, then the row's actions. */
+function ExtensionEntryRow({
+  entry,
+  children,
+}: {
+  entry: ExtensionEntry;
+  children?: React.ReactNode;
+}) {
+  const view = extensionEntryView(entry);
+  return (
+    <SettingsRow
+      label={<span className="block truncate">{entry.name}</span>}
+      hint={view.hint ? <span className="line-clamp-1">{view.hint}</span> : undefined}
+    >
+      {view.badge && (
+        <Tooltip label={view.detail}>
+          <Badge variant={view.badge.tone}>{view.badge.label}</Badge>
+        </Tooltip>
+      )}
+      {children}
+    </SettingsRow>
+  );
+}
+
 export function CustomizeExtensionsSection({
   query,
   surfaceActive,
@@ -364,17 +384,7 @@ export function CustomizeExtensionsSection({
               </Button>
             </SettingsRow>
           ) : (
-            <SettingsRow
-              key={entry.id}
-              label={<span className="block truncate">{entry.name}</span>}
-              hint={entry.description ? <span className="line-clamp-1">{entry.description}</span> : undefined}
-            >
-              {/* Status shows only when the skill needs the person. */}
-              {entry.status !== "available" && (
-                <Badge variant={entry.status === "needs-auth" ? "warning" : "neutral"}>
-                  {STATUS[entry.status]}
-                </Badge>
-              )}
+            <ExtensionEntryRow key={entry.id} entry={entry}>
               {editable && (
                 <DropdownMenu>
                   <DropdownMenuTrigger asChild>
@@ -390,7 +400,7 @@ export function CustomizeExtensionsSection({
                   </DropdownMenuContent>
                 </DropdownMenu>
               )}
-            </SettingsRow>
+            </ExtensionEntryRow>
           ),
         )}
         {read.data && !read.data.entries.length && (
