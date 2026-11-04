@@ -1,5 +1,5 @@
 import { claudePermissionMode as toSdkPermissionMode, claudeRequiresExplicitApproval } from "@zeros/protocol/agent-events";
-import { buildClaudeQuestionRequest, buildAskUserQuestionOutput, formatAnswerForClaude } from "@zeros/protocol/agent-events";
+import { buildClaudeQuestionRequest, buildAskUserQuestionOutput, claudeQuestionHookOutput, formatAnswerForClaude } from "@zeros/protocol/agent-events";
 import { TurnUsageLedger } from "../shared/turn-usage";
 import type { SteerOutcome } from "@zeros/protocol/messages";
 import { FallbackModelSelection } from "../shared/fallback-model-selection";
@@ -343,9 +343,7 @@ function resolveDefaultPermissionMode(cwd: string): ClaudeMode {
   return "default";
 }
 
-/** A blocking AskUserQuestion in flight. Either or both channel-resolvers may
- *  be attached (canUseTool → toolResolve; onUserDialog → dialogResolve); both
- *  are settled together when the user answers/dismisses/times out. */
+/** Native channels deduplicate by toolUseID and settle together. */
 interface PendingQuestion {
   questionId: string;
   toolUseID?: string;
@@ -354,6 +352,8 @@ interface PendingQuestion {
   request: QuestionRequest;
   toolResolve?: (r: PermissionResult) => void;
   dialogResolve?: (r: UserDialogResult) => void;
+  hookResponse?: Promise<QuestionResponse>;
+  hookResolve?: (r: QuestionResponse) => void;
   timer: ReturnType<typeof setTimeout>;
   detach: Array<() => void>;
 }
@@ -3508,19 +3508,32 @@ export class ClaudeSdkAdapter implements AgentAdapter {
     });
   }
 
-  // ── AskUserQuestion (blocking questions) ──────────────────
-  //
-  // Two channels can carry a Claude question and we can't know at build time
-  // which the installed CLI uses (opaque in the bundled binary), so BOTH are
-  // wired and deduped by toolUseID:
-  //   • canUseTool special-case (B) — the path that demonstrably fires today.
-  //     We deliver the answer SAME-TURN via a deny message (the model reads it
-  //     and continues); we cannot `allow` because the tool's native dialog has
-  //     no terminal to collect from headlessly.
-  //   • onUserDialog (A) — the SDK's real blocking-dialog channel. If the CLI
-  //     routes AskUserQuestion here, we `{behavior:'completed', result}` with a
-  //     reconstructed AskUserQuestionOutput; the tool is then `allow`ed so it
-  //     consumes that result.
+  private async handleAskUserQuestionHook(
+    state: SdkSession,
+    input: Record<string, unknown>,
+    toolUseID: string | undefined,
+    signal: AbortSignal,
+    ownsQuery: () => boolean,
+  ): Promise<ReturnType<typeof claudeQuestionHookOutput>> {
+    if (!ownsQuery() || signal.aborted) return claudeQuestionHookOutput(input);
+    let pending: PendingQuestion | undefined;
+    try {
+      const pq = this.raiseQuestion(state, toolUseID, input, question => {
+        pending = question;
+        if (question.hookResponse) return;
+        question.hookResponse = new Promise(resolve => { question.hookResolve = resolve; });
+        const abort = () => this.settleQuestion(state, question.questionId, { outcome: "dismissed" });
+        signal.addEventListener("abort", abort, { once: true });
+        question.detach.push(() => signal.removeEventListener("abort", abort));
+        if (signal.aborted) abort();
+      });
+      const response = await pq.hookResponse!;
+      return claudeQuestionHookOutput(pq.input, ownsQuery() && !signal.aborted ? response : undefined);
+    } catch {
+      if (pending) this.settleQuestion(state, pending.questionId, { outcome: "dismissed" });
+      return claudeQuestionHookOutput(input);
+    }
+  }
 
   /** canUseTool path (B): park the tool resolver on the question. */
   private handleAskUserQuestionTool(
@@ -3759,6 +3772,7 @@ export class ClaudeSdkAdapter implements AgentAdapter {
     state: SdkSession,
     toolUseID: string | undefined,
     input: Record<string, unknown>,
+    beforePublish?: (pending: PendingQuestion) => void,
   ): PendingQuestion {
     const existingId = toolUseID
       ? state.questionByToolUse.get(toolUseID)
@@ -3766,7 +3780,7 @@ export class ClaudeSdkAdapter implements AgentAdapter {
     const existing = existingId
       ? state.pendingQuestions.get(existingId)
       : undefined;
-    if (existing) return existing;
+    if (existing) { beforePublish?.(existing); return existing; }
 
     const questionId = randomUUID();
     const request = buildClaudeQuestionRequest(
@@ -3791,7 +3805,8 @@ export class ClaudeSdkAdapter implements AgentAdapter {
     state.pendingQuestions.set(questionId, pq);
     if (toolUseID) state.questionByToolUse.set(toolUseID, questionId);
     this.questionIndex.set(questionId, state);
-    this.ctx.emit.onQuestionRequest(this.agentId, questionId, request);
+    beforePublish?.(pq);
+    if (state.pendingQuestions.has(questionId)) this.ctx.emit.onQuestionRequest(this.agentId, questionId, request);
     return pq;
   }
 
@@ -3808,6 +3823,7 @@ export class ClaudeSdkAdapter implements AgentAdapter {
     this.questionIndex.delete(questionId);
     clearTimeout(pq.timer);
     for (const off of pq.detach) off();
+    pq.hookResolve?.({ outcome });
 
     if (outcome.outcome === "answered") {
       // Channel preference (2026-07-04): when the TOOL resolver is parked
@@ -3931,10 +3947,12 @@ export class ClaudeSdkAdapter implements AgentAdapter {
         outcome,
       );
     } catch (err) {
-      this.ctx.emit.onAgentStderr(
-        this.agentId,
-        `[zeros] question settle emit failed for ${questionId}: ${String(err)}`,
-      );
+      try {
+        this.ctx.emit.onAgentStderr(
+          this.agentId,
+          `[zeros] question settle emit failed for ${questionId}: ${String(err)}`,
+        );
+      } catch { /* Receipt diagnostics cannot strand a native question callback. */ }
     }
   }
 
@@ -4297,6 +4315,7 @@ export class ClaudeSdkAdapter implements AgentAdapter {
     const queryAbort = state.abort;
     const ownsActivity = () => !state.disposed && !state.cancelRequested &&
       !state.input.closed && state.abort === queryAbort && !queryAbort.signal.aborted;
+    const fullAccessQuestions = state.permissionMode === "bypass" && typeof this.ctx.emit.onQuestionRequest === "function";
     // A live setModel() override wins over the creation-time env model.
     const model = state.model ?? env?.ANTHROPIC_MODEL?.trim();
     if (exact !== null && model !== exact) {
@@ -4412,6 +4431,7 @@ export class ClaudeSdkAdapter implements AgentAdapter {
             CLAUDE_CODE_STARTUP_FAILURE_RESULTS: "1",
           }),
       permissionMode: toSdkPermissionMode(state.permissionMode),
+      ...(fullAccessQuestions ? { permissionPromptToolName: "stdio" } : {}),
       ...(state.executionBoundary
         ? {
             spawnClaudeCodeProcess: (spawnOptions) =>
@@ -4445,24 +4465,9 @@ export class ClaudeSdkAdapter implements AgentAdapter {
               this.oauthTokenProvider!({ forceRefresh: true, signal }),
           }
         : {}),
-      // `bypassPermissions` is INERT without this companion flag — the SDK
-      // "requires allowDangerouslySkipPermissions" and keeps calling canUseTool
-      // (so "Full Access" kept prompting per action). Scope it to
-      // bypass ONLY: in every other mode permissionMode remains the sole gate,
-      // so a wrong assumption here can never silently skip a non-bypass chat.
-      //
-      // canUseTool and bypass are MUTUALLY EXCLUSIVE by SDK contract. Building
-      // a query with BOTH `canUseTool` and `bypassPermissions` throws
-      // `CLAUDE_SDK_CAN_USE_TOOL_SHADOWED` ("canUseTool will not be invoked:
-      // permissionMode 'bypassPermissions' auto-approves every tool call … use a
-      // PreToolUse hook instead") inside `query()`, which rejects at ensureQuery
-      // → the prompt fails as a protocol-error and the user sees "AGENT RESPONSE
-      // FAILURE" on EVERY send while in Full Access. In bypass the SDK
-      // auto-approves and never
-      // consults canUseTool anyway, so omitting it loses NOTHING — AskUserQuestion
-      // still rides the onUserDialog channel below. A live mode switch that
-      // crosses the bypass boundary rebuilds the query (see setPermissionMode's
-      // pendingRestart), so gated modes get canUseTool back before the next turn.
+      // The SDK rejects canUseTool together with bypassPermissions. Full access
+      // needs the stdio channel to expose AskUserQuestion, whose anchored hook
+      // supplies human answers without adding a permission gate to other tools.
       ...(state.permissionMode === "bypass"
         ? { allowDangerouslySkipPermissions: true }
         : { canUseTool: this.canUseTool(
@@ -4494,6 +4499,15 @@ export class ClaudeSdkAdapter implements AgentAdapter {
       // remains untouched. A loop wake clears its now-fired timer before the
       // new turn starts.
       hooks: {
+        ...(fullAccessQuestions ? { PreToolUse: [{ matcher: "^AskUserQuestion$", timeout: PERMISSION_RESPONSE_TIMEOUT_MS / 1_000 + 5,
+          hooks: [async (input, toolUseID, options) => {
+            if (input.hook_event_name !== "PreToolUse" || input.tool_name !== "AskUserQuestion") return {};
+            const payload = input.tool_input;
+            if (!payload || typeof payload !== "object" || Array.isArray(payload)) return claudeQuestionHookOutput({});
+            return this.handleAskUserQuestionHook(state, payload as Record<string, unknown>, toolUseID ?? input.tool_use_id,
+              AbortSignal.any([queryAbort.signal, options.signal]), ownsActivity);
+          }],
+        }] } satisfies Partial<NonNullable<Options["hooks"]>> : {}),
         Stop: [
           {
             hooks: [

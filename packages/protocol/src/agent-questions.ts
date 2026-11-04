@@ -68,13 +68,41 @@ export function buildAskUserQuestionOutput(
   const rawQuestions = Array.isArray(input?.questions)
     ? (input.questions as Array<Record<string, unknown>>)
     : [];
-  const answerMap: Record<string, string> = {};
-  rawQuestions.forEach((q, qi) => {
+  const answerMap = Object.fromEntries(rawQuestions.map((q, qi) => {
     const a = answers.find((x) => x.questionId === `q${qi}`);
-    answerMap[typeof q?.question === "string" ? q.question : `q${qi}`] =
-      claudeAnswerLabels(q, a).join(", ");
-  });
+    return [typeof q?.question === "string" ? q.question : `q${qi}`, claudeAnswerLabels(q, a).join(", ")];
+  }));
   return { questions: rawQuestions, answers: answerMap };
+}
+
+/** A headless question may run only with the human's complete, validated answers. */
+export function claudeQuestionHookOutput(
+  input: Record<string, unknown>,
+  response?: QuestionResponse,
+): { hookSpecificOutput: { hookEventName: "PreToolUse" } & (
+  { permissionDecision: "allow"; updatedInput: Record<string, unknown> } |
+  { permissionDecision: "deny"; permissionDecisionReason: string }
+) } {
+  const denied = { hookSpecificOutput: { hookEventName: "PreToolUse" as const, permissionDecision: "deny" as const,
+    permissionDecisionReason: "The question was not answered." } };
+  const questions = input.questions;
+  if (!Array.isArray(questions) || !questions.length || response?.outcome?.outcome !== "answered") return denied;
+  if (!questions.every(q => q && typeof q === "object" && typeof q.question === "string" && q.question.length > 0)) return denied;
+  if (new Set(questions.map(q => q.question)).size !== questions.length) return denied;
+  const answers = response.outcome.answers;
+  if (!Array.isArray(answers) || answers.length !== questions.length || new Set(answers.map(a => a?.questionId)).size !== questions.length) return denied;
+  if (!answers.every(answer => {
+    if (!answer || !Array.isArray(answer.selectedOptionIds)) return false;
+    const index = questions.findIndex((_, i) => answer.questionId === `q${i}`), question = questions[index];
+    if (!question || (answer.freeText !== undefined && typeof answer.freeText !== "string")) return false;
+    const selected = answer.selectedOptionIds;
+    const options: Array<Record<string, unknown> | null> = Array.isArray(question.options) ? question.options : [];
+    return (question.multiSelect === true || selected.length <= 1) && new Set(selected).size === selected.length &&
+      selected.every(id => options.some((option, i) => id === `o${i}` && typeof option?.label === "string")) &&
+      (selected.length > 0 || !!answer.freeText);
+  })) return denied;
+  return { hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: "allow",
+    updatedInput: { ...input, answers: buildAskUserQuestionOutput(input, answers).answers } } };
 }
 
 /** Human-readable answer string for the canUseTool deny-message (B) path. */

@@ -1329,7 +1329,7 @@ export interface InitializeResponse {
   _meta?: AgentInitializeMetadata | null;
 }
 
-export { buildClaudeQuestionRequest, buildAskUserQuestionOutput, formatAnswerForClaude, mapCodexUserInputToQuestion, mapNativeQuestionAnswerToCodex } from "./agent-questions";
+export { buildClaudeQuestionRequest, buildAskUserQuestionOutput, claudeQuestionHookOutput, formatAnswerForClaude, mapCodexUserInputToQuestion, mapNativeQuestionAnswerToCodex } from "./agent-questions";
 
 export { cloudModeId, cloudPermissionMode, cloudSessionModes, claudePermissionMode, claudeRequiresExplicitApproval, codexModePolicy, codexQuestionFeatureArgs, cursorSdkMode, cursorAutoReview } from "./agent-modes";
 export type { CloudPermissionMode } from "./agent-modes";

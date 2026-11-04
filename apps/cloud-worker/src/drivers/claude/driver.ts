@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
 import { query, type Options, type Query, type Settings, type SDKUserMessage, type PermissionResult, type UserDialogRequest, type UserDialogResult } from "@anthropic-ai/claude-agent-sdk";
-import { buildClaudeQuestionRequest, buildAskUserQuestionOutput, formatAnswerForClaude, claudePermissionMode, claudeRequiresExplicitApproval, type QuestionResponse, type ContentBlock, type PromptResponse, type SessionNotification } from "@zeros/protocol/agent-events";
+import { buildClaudeQuestionRequest, buildAskUserQuestionOutput, claudeQuestionHookOutput, formatAnswerForClaude, claudePermissionMode, claudeRequiresExplicitApproval, type QuestionResponse, type ContentBlock, type PromptResponse, type SessionNotification } from "@zeros/protocol/agent-events";
 import type { SteerOutcome } from "@zeros/protocol/messages";
 import { providerBindingForResume } from "@zeros/protocol/identities";
 import { mapClaudeContextUsage } from "@zeros/protocol/context-usage";
@@ -204,6 +204,9 @@ export class ClaudeDriver implements Driver {
     }
     this.pendingRestart = false;
     const session = this.input!, input = new InputQueue<SDKUserMessage>();
+    // Headless Claude exposes questions only with a permission-prompt channel;
+    // bypass forbids canUseTool, so only AskUserQuestion receives a hook.
+    const fullAccessQuestions = this.modeId === "bypass" && !!session.onQuestion;
     let process: Process | undefined;
     const options: Options = {
       cwd: session.cwd, ...(this.model ? { model: this.model } : {}),
@@ -213,6 +216,7 @@ export class ClaudeDriver implements Driver {
       ...(this.resumed ? { resume: this.nativeSessionId } : { sessionId: this.nativeSessionId }),
       env: agentEnvironment(session.oauthToken ? { agent: "claude", oauthToken: session.oauthToken } : { agent: "claude", apiKey: session.apiKey! }, this.options.environment, this.options.gitEnvironment),
       permissionMode: claudePermissionMode(this.modeId),
+      ...(fullAccessQuestions ? { permissionPromptToolName: "stdio" } : {}),
       ...(this.modeId === "bypass" ? { allowDangerouslySkipPermissions: true } : {
         canUseTool: (name, input, options) => process && this.process === process
           ? this.canUseTool(process, name, input, options) : Promise.resolve({ behavior: "deny", message: "This turn ended." }),
@@ -227,6 +231,25 @@ export class ClaudeDriver implements Driver {
       },
       supportedDialogKinds: session.onQuestion ? ["ask_user_question"] : [],
       hooks: {
+        ...(fullAccessQuestions ? { PreToolUse: [{ matcher: "^AskUserQuestion$", timeout: CLOUD_INPUT_TIMEOUT_MS / 1_000 + 5,
+          hooks: [async (hook, toolUseID, options) => {
+            if (hook.hook_event_name !== "PreToolUse" || hook.tool_name !== "AskUserQuestion") return {};
+            const payload = record(hook.tool_input), denied = () => claudeQuestionHookOutput(payload);
+            if (!process || this.process !== process || this.disposed || process.abort.signal.aborted || options.signal.aborted) return denied();
+            const deadline = new AbortController();
+            const signal = AbortSignal.any([process.abort.signal, options.signal, deadline.signal]);
+            let timer: ReturnType<typeof setTimeout> | undefined;
+            try {
+              const pending = this.ask(process, payload, toolUseID ?? hook.tool_use_id, signal);
+              // Canonical expiry must Stop the turn before a callback backstop can dismiss it.
+              timer = setTimeout(() => deadline.abort(), CLOUD_INPUT_TIMEOUT_MS + 1_000);
+              timer.unref?.();
+              const response = await nativeInputResponse(() => pending.response, signal, { outcome: { outcome: "dismissed" } } as QuestionResponse);
+              return claudeQuestionHookOutput(payload, this.process === process && !this.disposed && !signal.aborted ? response : undefined);
+            } catch { return denied(); }
+            finally { clearTimeout(timer); }
+          }],
+        }] } satisfies Partial<NonNullable<Options["hooks"]>> : {}),
         UserPromptSubmit: [{ hooks: [async (hook) => {
           if (process && this.process === process && !this.disposed &&
               hook.hook_event_name === "UserPromptSubmit" && !hook.agent_id &&
@@ -255,7 +278,8 @@ export class ClaudeDriver implements Driver {
     const request = buildClaudeQuestionRequest(session.sessionId, randomUUID(), nativeId, payload, Date.now() + CLOUD_INPUT_TIMEOUT_MS);
     request.toolCallId = this.mapper!.emitBlockingQuestionToolCall(nativeId, "AskUserQuestion", payload);
     const combined = signal ? AbortSignal.any([signal, process.abort.signal]) : process.abort.signal;
-    const response = nativeInputResponse<QuestionResponse>(() => session.onQuestion?.(cleanInteraction(request, session), combined)
+    const response = nativeInputResponse<QuestionResponse>(() => (this.process === process && !this.disposed && !combined.aborted
+      ? session.onQuestion?.(cleanInteraction(request, session), combined) : undefined)
       ?? Promise.resolve({ outcome: { outcome: "dismissed" } }), combined, { outcome: { outcome: "dismissed" } } as QuestionResponse);
     const pending = { response, tool: false };
     process.questions.set(nativeId, pending);
