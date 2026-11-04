@@ -9,6 +9,7 @@ import { useVirtualizer } from "@tanstack/react-virtual";
 import { Archive, Folder, FolderX } from "lucide-react";
 import { cn } from "../../shared/ui/cn";
 import { Avatar, AvatarFallback } from "../../shared/ui/primitives/avatar";
+import { initialsOf } from "../../shared/lib/initials";
 import { Button } from "../../shared/ui/primitives/button";
 import { Tooltip } from "../../shared/ui/primitives/tooltip";
 import { StatusIcon } from "../../shared/ui/primitives/status-icon";
@@ -53,11 +54,6 @@ const TAG_LABEL_CLS = "min-w-0 truncate @max-[720px]/list:sr-only";
 const HIDE_UNDER_560_CLS = "@max-[560px]/list:hidden";
 const HIDE_UNDER_440_CLS = "@max-[440px]/list:hidden";
 
-/** First letters of the owner's first two words, like the profile avatar. */
-function ownerInitials(name: string): string {
-  const words = name.trim().split(/\s+/).filter(Boolean);
-  return ((words[0]?.[0] ?? "") + (words[1]?.[0] ?? "")).toUpperCase() || "·";
-}
 
 export function DashboardList({
   rows,
@@ -370,7 +366,7 @@ export const DashboardListRow = forwardRef<
           <span className={OPTION_CLS}>
             <Tooltip label={`Owner: ${ownerName}`}>
               <Avatar size="xs" aria-label={`Owner: ${ownerName}`} role="img">
-                <AvatarFallback aria-hidden="true">{ownerInitials(ownerName)}</AvatarFallback>
+                <AvatarFallback aria-hidden="true">{initialsOf(ownerName)}</AvatarFallback>
               </Avatar>
             </Tooltip>
           </span>

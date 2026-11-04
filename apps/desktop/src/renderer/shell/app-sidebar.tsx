@@ -161,6 +161,7 @@ import { warmWorkspaceFiles } from "./workspace-files-cache";
 import { resolveRepoWorkspaceDestination } from "./workspace-tabs";
 import { Surface } from "@/renderer/shared/ui/layout/surface";
 import { Avatar, AvatarFallback } from "@/renderer/shared/ui/primitives/avatar";
+import { initialsOf } from "@/renderer/shared/lib/initials";
 
 // --- CONSTANTS ---
 
@@ -245,16 +246,6 @@ function useNativeRuntimeNotice(): void {
   }, [nativeRuntime.status]);
 }
 
-/** Initials for the profile avatar — first letters of the first two words
- *  of the display name (falls back to the email's first letter). */
-function profileInitials(name: string | null, email: string | null): string {
-  const source = (name ?? "").trim() || (email ?? "").trim();
-  if (!source) return "·";
-  const words = source.split(/\s+/).filter(Boolean);
-  const first = words[0]?.[0] ?? "";
-  const second = words.length > 1 ? (words[1][0] ?? "") : "";
-  return (first + second).toUpperCase() || "·";
-}
 
 // --- ROOT COMPONENT ---
 
@@ -981,7 +972,7 @@ export function AppSidebar({ hidden = false }: { hidden?: boolean }) {
             A fixed 48px whether or not there is an email line. */}
         <div className="border-border1 mx-2 flex h-12 shrink-0 items-center gap-2 border-t px-1">
           <Avatar size="sm" aria-hidden="true">
-            <AvatarFallback>{profileInitials(displayName, email)}</AvatarFallback>
+            <AvatarFallback>{initialsOf(displayName?.trim() || email)}</AvatarFallback>
           </Avatar>
           <span className="flex min-w-0 flex-1 flex-col">
             <span className="text-fg1 truncate text-xs leading-4">

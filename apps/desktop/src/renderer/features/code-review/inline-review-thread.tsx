@@ -4,6 +4,7 @@ import { ArrowUpRight, ChevronDown, MessageSquare } from "lucide-react";
 import { shellOpenUrl } from "@/renderer/platform/app";
 import { Badge, Button, Tooltip } from "@/renderer/shared/ui/primitives";
 import { cn } from "@/renderer/shared/ui/cn";
+import { initialsOf } from "@/renderer/shared/lib/initials";
 import { renderMarkdown } from "@/renderer/features/agent/markdown";
 import { ReviewComposer } from "./review-composer";
 import type { ReviewDraftStore } from "./review-draft-store";
@@ -31,18 +32,13 @@ function actorKind(
 
 /** A round initials avatar beside each author. */
 function AuthorAvatar({ name }: { name: string }) {
-  const initials = name
-    .split(/\s+/)
-    .filter(Boolean)
-    .slice(0, 2)
-    .map((part) => part[0]!.toUpperCase())
-    .join("");
+  const initials = initialsOf(name);
   return (
     <span
       aria-hidden
       className="bg-bg2-hover text-fg2 inline-flex size-5 shrink-0 items-center justify-center rounded-full text-2xxs leading-4 font-medium"
     >
-      {initials || "?"}
+      {initials}
     </span>
   );
 }

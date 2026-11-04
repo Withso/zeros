@@ -3,6 +3,7 @@ import { Ellipsis } from "lucide-react";
 import { Button, Input } from "../../shared/ui";
 import { toast } from "../../shared/ui/primitives/elements";
 import { Avatar, AvatarFallback } from "../../shared/ui/primitives/avatar";
+import { initialsOf } from "../../shared/lib/initials";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -141,11 +142,6 @@ export function CloudProviderConnections({
   );
 }
 
-function initials(name: string): string {
-  const words = name.replace(/@.*$/, "").split(/[\s._-]+/).filter(Boolean);
-  const letters = (words.length > 1 ? words[0]![0]! + words[1]![0]! : (words[0] ?? "?").slice(0, 2));
-  return letters.toUpperCase();
-}
 
 function CloudProviderConnection({
   organizationId,
@@ -374,7 +370,7 @@ function CloudProviderConnection({
               key={credential.id}
               leading={
                 <Avatar aria-hidden>
-                  <AvatarFallback>{initials(credential.displayName)}</AvatarFallback>
+                  <AvatarFallback>{initialsOf(credential.displayName)}</AvatarFallback>
                 </Avatar>
               }
               label={<span className="block truncate">{credential.displayName}</span>}
