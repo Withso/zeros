@@ -22,8 +22,8 @@ const MAX_LOG_BYTES = 1024 * 1024;
 export const GIT_LFS_INSTALL_COMMAND = [
   "set -eu",
   "if ! command -v git-lfs >/dev/null 2>&1; then",
-  "  sudo -n env DEBIAN_FRONTEND=noninteractive apt-get update -qq",
-  "  sudo -n env DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends git-lfs",
+  "  sudo -n env DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=120 update -qq",
+  "  sudo -n env DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=120 install -y -qq --no-install-recommends git-lfs",
   "fi",
   "sudo -n git lfs install --system --skip-repo",
 ].join("\n");

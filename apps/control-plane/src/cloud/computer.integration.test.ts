@@ -182,7 +182,7 @@ d("cloud v2 Cloud Computer builds", () => {
     // installed after the runtime and before the shared snapshot is captured.
     const lfsCall = vi.mocked(boat.exec).mock.calls.findIndex(([, command]) => command.includes("git lfs install --system"));
     expect(lfsCall).toBeGreaterThan(0);
-    expect(vi.mocked(boat.exec).mock.calls[lfsCall]![1]).toContain("apt-get install");
+    expect(vi.mocked(boat.exec).mock.calls[lfsCall]![1]).toMatch(/apt-get .*install -y/);
     expect(vi.mocked(boat.exec).mock.invocationCallOrder[lfsCall]).toBeLessThan(vi.mocked(boat.saveSnapshot).mock.invocationCallOrder[0]!);
     expect(await computers.log(org, first.id)).toContain("[zeros] git-lfs installed");
     // A named snapshot is an independent copy: the builder goes as soon as it is ready.
