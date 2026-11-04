@@ -329,7 +329,8 @@ export function McpImportDialog({ open, onClose }: { open: boolean; onClose: () 
         <DialogHeader>
           <DialogTitle>Import MCP servers</DialogTitle>
           <DialogDescription>
-            Copy MCP servers from your other tools. Secrets move to your Keychain.
+            Copy MCP servers from your other tools. Keys move to your Keychain,
+            secret headers to the gateway’s vault.
           </DialogDescription>
         </DialogHeader>
         <DialogBody>
