@@ -2,7 +2,7 @@
   "id": "cloud-private-review-capability",
   "kind": "replay",
   "area": "renderer-state",
-  "fixedBy": "pending",
+  "fixedBy": "pr:834",
   "symptom": "A capable cloud worker could not serve the existing private diff-comment interface; cloud comment reads were always rejected before reaching the VM.",
   "rule": "Port Local behavior through a shared core, negotiate optional cloud support, and use only an already-connected exact owner for passive reads. Stopped or older peers must remain explicitly unavailable without waking or publishing an empty snapshot. See RULES.md sections 4 and 8 and docs/code-review.md.",
   "check": "pnpm vitest run apps/desktop/src/renderer/platform/bridge/__tests__/code-review-bridge.test.ts"
