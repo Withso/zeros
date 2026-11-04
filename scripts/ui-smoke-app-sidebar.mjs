@@ -80,8 +80,17 @@ export async function runAppSidebarSmoke({ page, check, harnessBase }) {
   });
   await moveAway();
   await expect(plus).toBeVisible();
-  await expect(settings).toBeHidden();
-  await expect(more).toBeHidden();
+  // Settings and ⋯ wait over the end of the name, unpainted and inert, so the
+  // name never re-truncates when they appear.
+  const resting = (button) =>
+    button.evaluate((node) => ({
+      opacity: getComputedStyle(node.parentElement).opacity,
+      pointerEvents: getComputedStyle(node).pointerEvents,
+    }));
+  for (const action of [settings, more])
+    await expect
+      .poll(() => resting(action))
+      .toEqual({ opacity: "0", pointerEvents: "none" });
   const chip = zeros.locator("span.rounded-sm").first();
   const chevron = zeros.locator("svg.lucide-chevron-down");
   await expect(chevron).toBeHidden();
@@ -240,7 +249,9 @@ export async function runAppSidebarSmoke({ page, check, harnessBase }) {
   await okitToggle.click();
   await expect(row("ws-paris-mumbai-city-docs")).toHaveCount(0);
   await moveAway();
-  await expect(settings).toBeHidden();
+  await expect
+    .poll(() => resting(settings))
+    .toEqual({ opacity: "0", pointerEvents: "none" });
   await page.reload({ waitUntil: "networkidle" });
   await expect(row("ws-atlanta")).toBeVisible();
   await expect(row("ws-boston")).toHaveCount(0);
@@ -387,9 +398,10 @@ export async function runAppSidebarSmoke({ page, check, harnessBase }) {
     };
   });
   expect(destinations.gaps).toEqual([2, 2]);
-  expect(new Set(destinations.padding)).toEqual(new Set(["4px"]));
+  // The switcher is a full-width row with the destinations' 8px sides.
+  expect(destinations.padding).toEqual(["0px", "8px", "0px", "8px"]);
   check(
-    "Repository and workspace rows are 32px tall and 2px apart; the organization pill has 4px padding",
+    "Repository and workspace rows are 32px tall and 2px apart; the organization switcher is a full-width row",
     true,
   );
 
@@ -415,7 +427,8 @@ export async function runAppSidebarSmoke({ page, check, harnessBase }) {
   check("Workspaces reveals only its ⋯ on hover, with no row highlight", true);
 
   // Collapse: the panel-left toggle hides the sidebar, then floats over the
-  // content's corner at the same position; Home pages start below it.
+  // content's corner at the same position; Home's title row sits beside it on
+  // the same 40px band.
   const sidebar = page.locator("[data-app-sidebar]");
   const hide = page.getByRole("button", { name: "Hide sidebar", exact: true });
   const show = page.getByRole("button", { name: "Show sidebar", exact: true });
@@ -425,10 +438,13 @@ export async function runAppSidebarSmoke({ page, check, harnessBase }) {
   await expect(sidebar).toBeHidden();
   await expect(show).toBeVisible();
   expect(await show.boundingBox()).toEqual(openBox);
-  const dashboardTop = await page
+  const dashboardTitle = await page
     .locator('[data-harness-page="dashboard"]')
-    .evaluate((node) => node.getBoundingClientRect().top);
-  expect(dashboardTop).toBeGreaterThanOrEqual(40);
+    .getByRole("heading", { name: "Dashboard", exact: true })
+    .boundingBox();
+  const showBox = await show.boundingBox();
+  expect(dashboardTitle.x).toBeGreaterThanOrEqual(showBox.x + showBox.width);
+  expect(dashboardTitle.y + dashboardTitle.height).toBeLessThanOrEqual(40);
   await page.reload({ waitUntil: "networkidle" });
   await expect(show).toBeVisible();
   await expect(sidebar).toBeHidden();

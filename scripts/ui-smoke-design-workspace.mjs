@@ -930,7 +930,9 @@ export async function runDesignWorkspaceCanvasSmoke({ page, waitFor, check }) {
       highResolutionMetrics.naturalHeight >=
         Math.floor(highResolutionMetrics.displayHeight * 1.8) &&
       // Capture scale includes the 2x backing pixels as well as the camera.
-      highResolutionMetrics.scale === 16 &&
+      // It is a quotient of screen pixels and zoom, so a fractional pan can
+      // leave it a rounding error away from 16.
+      Math.abs(highResolutionMetrics.scale - 16) < 1e-6 &&
       highResolutionMetrics.sourceVersion ===
         highResolutionMetrics.frameSourceVersion,
     JSON.stringify(highResolutionMetrics),
@@ -2657,21 +2659,21 @@ export async function runDesignWorkspaceCanvasSmoke({ page, waitFor, check }) {
   await expect(themeDialog.getByRole("button", { name: "Done", exact: true })).toHaveCount(0);
   await expect(themeDialog.locator('[data-design-theme-row]').first()).toHaveCSS("height", "36px");
   const themeClose = themeDialog.getByRole("button", { name: "Close theme editor", exact: true });
-  await expect(themeClose).toHaveCSS("width", "20px");
-  await expect(themeClose).toHaveCSS("height", "20px");
-  await expect(themeClose).toHaveCSS("border-radius", "999px");
+  // The shared Dialog close: the 24px compact IconButton.
+  await expect(themeClose).toHaveCSS("width", "24px");
+  await expect(themeClose).toHaveCSS("height", "24px");
+  await expect(themeClose).toHaveCSS("border-radius", "6px");
   await expect(themeClose.locator("svg")).toHaveCSS("width", "12px");
   await expect(themeClose.locator("svg")).toHaveCSS("height", "12px");
   check(
-    "theme editor places its close button at the right edge of the header",
+    "theme editor places its close button 6px from the right edge of its 40px window header",
     await themeDialog.evaluate((element) => {
       const close = element.querySelector('button[aria-label="Close theme editor"]');
       const closeBox = close.getBoundingClientRect();
       const header = close.closest('[data-design-theme-titlebar]');
       const headerBox = header.getBoundingClientRect();
-      const inset = parseFloat(getComputedStyle(header).paddingRight);
       const titleBox = element.querySelector("h2").getBoundingClientRect();
-      return titleBox.right < closeBox.left && Math.abs(closeBox.right + inset - headerBox.right) < 1;
+      return titleBox.right < closeBox.left && Math.abs(headerBox.right - closeBox.right - 6) < 1;
     }),
   );
   const themeDragHandle = themeDialog.getByRole("button", {
