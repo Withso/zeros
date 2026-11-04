@@ -28,11 +28,22 @@ describe("ListRow", () => {
       "hover:bg-bg1-hover",
       "min-h-7",
       "focus-visible:ring-[3px]",
-      "focus-visible:border-highlighted-bright",
+      "focus-visible:inset-ring-highlighted-bright",
     ]) {
       expect(set, cls).toContain(cls);
     }
     expect([...set].some((cls) => cls.includes("bg2-hover"))).toBe(false);
+  });
+
+  // Regression: a transparent 1px border for the focus edge moved the row's
+  // content 1px right of EventRow rows, so a subagent's disclosure slot no
+  // longer sat on its child rail. The edge is an inset ring instead.
+  it("draws its focus edge without taking layout space", () => {
+    const set = classes(render());
+    expect(set).toContain("focus-visible:inset-ring");
+    expect([...set].filter((cls) => /^border(-|$)/.test(cls))).toEqual([]);
+    expect(set).toContain("-ml-2");
+    expect(set).toContain("px-2");
   });
 
   it("adds no fill while expanded: only the caller's chevron turns", () => {

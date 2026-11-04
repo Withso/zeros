@@ -272,7 +272,7 @@ const cases = [
     tag: "button",
     // The Zeros Design ListRow: a bg1-hover hover, 28px, the keyboard ring.
     original:
-      "group/event-stripe hover:bg-bg1-hover focus-visible:border-highlighted-bright focus-visible:ring-highlighted-bright/50 -ml-1 flex min-h-7 w-fit max-w-full min-w-0 items-center gap-2 rounded-md border border-transparent px-1 py-1 text-left transition-colors duration-120 ease-out focus-visible:ring-[3px] focus-visible:outline-none",
+      "group/event-stripe hover:bg-bg1-hover focus-visible:inset-ring focus-visible:inset-ring-highlighted-bright focus-visible:ring-highlighted-bright/50 -ml-1 flex min-h-7 w-fit max-w-full min-w-0 items-center gap-2 rounded-md px-1 py-1 text-left transition-colors duration-120 ease-out focus-visible:ring-[3px] focus-visible:outline-none",
     className: "group/event-stripe -ml-1 min-w-0 px-1 transition-colors",
     literal: "group/event-stripe -ml-1 min-w-0 px-1 transition-colors",
   },
