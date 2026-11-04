@@ -1,6 +1,6 @@
 import path from "node:path";
-import { parse } from "parse5";
-import { compile } from "tailwindcss";
+import { parse, type DefaultTreeAdapterTypes } from "parse5";
+import { compile, Features, __unstable__loadDesignSystem } from "tailwindcss";
 import { DESIGN_TAILWIND_PLUGIN_VERSIONS, DESIGN_TAILWIND_STYLESHEETS, DESIGN_TAILWIND_VERSION } from "./generated/tailwind-stylesheets";
 import { elementRecords } from "./source";
 
@@ -63,6 +63,9 @@ export interface DesignTailwindSkippedImport {
 
 export interface DesignTailwindCompiler {
   build(candidates: readonly string[]): string;
+  /** Independent utility output; unlike build(), previous candidates do not
+   * become part of later results. */
+  candidatesToCss(candidates: readonly string[]): Promise<(string | null)[]>;
   /** Repository stylesheets the entry imported, sorted: Tailwind loads
    * imports concurrently, so load order is not stable. */
   imports: string[];
@@ -78,11 +81,11 @@ const BUNDLED_BASE = "\0tailwindcss";
 
 /** Classes and custom properties a frame uses. Custom properties count so
  * Tailwind emits a theme variable that frame CSS reads with var(). */
-export function designTailwindCandidates(html: string, stylesheetVariables: readonly string[] = []): string[] {
+export function designTailwindCandidates(html: string, stylesheetVariables: readonly string[] = [], document?: DefaultTreeAdapterTypes.Document): string[] {
   const candidates = new Set<string>(stylesheetVariables);
-  for (const { element } of elementRecords(parse(html))) {
+  for (const { element } of elementRecords(document ?? parse(html))) {
     const value = element.attrs.find((attribute) => attribute.name === "class")?.value;
-    if (value) for (const token of value.split(/\s+/)) if (token) candidates.add(token);
+    if (value) for (const token of value.split(/[\t\n\f\r ]+/)) if (token) candidates.add(token);
   }
   for (const variable of designTailwindVariables(html)) candidates.add(variable);
   return [...candidates].sort().slice(0, MAX_TAILWIND_CANDIDATES);
@@ -238,19 +241,16 @@ function bundled(id: string, base: string): { path: string; base: string; conten
   return content === undefined ? null : { path: `tailwindcss/${file}`, base: BUNDLED_BASE, content };
 }
 
-/** Compile one entry. `read` supplies every file, so a caller can replay a
- * compile from recorded contents without touching the disk; `diagnose` only
- * explains imports that could not be read. */
-export async function compileDesignTailwind(
+function designTailwindLoader(
   entry: { file: string; content: string },
   read: TailwindFileReader,
   diagnose?: TailwindFileDiagnosis,
-): Promise<DesignTailwindCompiler> {
+) {
   const imports: string[] = [];
   const skippedImports = new Map<string, DesignTailwindImportProblem>();
   const skippedModules: string[] = [];
   const bundledModules: string[] = [];
-  const compiler = await compile(entry.content, {
+  const options = {
     base: path.posix.dirname(entry.file),
     async loadStylesheet(id: string, base: string) {
       const own = bundled(id, base);
@@ -277,10 +277,46 @@ export async function compileDesignTailwind(
       // An empty plugin or config: the rest of the stylesheet still compiles.
       return { path: id, base, module: resourceHint === "config" ? {} : () => {} };
     },
-  });
+  };
+  return { options, imports, skippedImports, skippedModules, bundledModules };
+}
+
+/** The same stylesheet and module policy as rendering; repository JavaScript
+ * must never run just because lint needs to recognize a utility. */
+export function loadDesignTailwindClassSystem(
+  entry: { file: string; content: string },
+  read: TailwindFileReader,
+  diagnose?: TailwindFileDiagnosis,
+) {
+  return __unstable__loadDesignSystem(entry.content, designTailwindLoader(entry, read, diagnose).options);
+}
+
+/** Compile one entry. `read` supplies every file, so a caller can replay a
+ * compile from recorded contents without touching the disk; `diagnose` only
+ * explains imports that could not be read. */
+export async function compileDesignTailwind(
+  entry: { file: string; content: string },
+  read: TailwindFileReader,
+  diagnose?: TailwindFileDiagnosis,
+): Promise<DesignTailwindCompiler> {
+  const { options, imports, skippedImports, skippedModules, bundledModules } = designTailwindLoader(entry, read, diagnose);
+  const compiler = await compile(entry.content, options);
+  let classSystem: ReturnType<typeof loadDesignTailwindClassSystem> | undefined;
+  let classified = 0;
   const sorted = (values: string[]) => [...new Set(values)].sort();
   return {
     build: (candidates) => compiler.build([...candidates]),
+    async candidatesToCss(candidates) {
+      if (!(compiler.features & Features.Utilities)) return candidates.map(() => null);
+      // Tailwind retains parsed candidates internally. Bound that hidden state
+      // too; the shared style cache retains the independently classified results.
+      if (!classSystem || classified + candidates.length > MAX_TAILWIND_CANDIDATES) {
+        classSystem = loadDesignTailwindClassSystem(entry, read, diagnose);
+        classified = 0;
+      }
+      classified += candidates.length;
+      return (await classSystem).candidatesToCss([...candidates]);
+    },
     imports: sorted(imports),
     skippedImports: [...skippedImports]
       .map(([id, problem]) => ({ id, problem }))

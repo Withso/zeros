@@ -94,6 +94,33 @@ const HARNESS_STYLE_SOURCES: DesignWorkspaceSnapshotWire["styleSources"] = [
     bytes: 0,
     revision: null,
   },
+  // Stylesheets that declare no variables fold into the "Styles only" group.
+  {
+    id: "runtime",
+    title: "Runtime content",
+    kind: "css",
+    path: "styles/global/runtime-content.css",
+    status: "ready",
+    messages: [],
+    themes: [],
+    tokens: [],
+    rules: 74,
+    bytes: 9_000,
+    revision: "style-source-revision-2",
+  },
+  {
+    id: "motion",
+    title: "Animations",
+    kind: "css",
+    path: "styles/global/animations.css",
+    status: "warning",
+    messages: [{ level: "warning", text: 'Theme "dark": no rule uses the selector .dark.' }],
+    themes: [],
+    tokens: [],
+    rules: 13,
+    bytes: 2_000,
+    revision: "style-source-revision-3",
+  },
 ];
 
 function withDesignRuntime(source: string, sourceVersion: string): string {
@@ -151,7 +178,7 @@ const SHADOW_CONTENT_HOME_SOURCE = `<!doctype html><html><head><style>
   body { font-family: system-ui; background: white; }
   .card { cursor: pointer; user-select: none; --card-gap: 12px; padding: 16px; }
 </style></head><body><main data-oid="home-main" data-zeros-frame-root style="display:block;padding:40px">
-  <div data-oid="home-card" class="card" style="display:block;width:320px;background:white">
+  <div data-oid="home-card" class="card flex h-screen w-full min-w-0 flex-col overflow-hidden border-r border-border1 select-none" style="display:block;width:320px;background:white">
     <diffs-container data-oid="home-diff" style="display:block;width:300px;background:firebrick">
       <template shadowrootmode="open"><style>pre { margin: 0; padding: 12px; background: black; color: gainsboro; font: 12px ui-monospace; }</style><pre data-oid="home-diff-pre"><span data-oid="home-diff-line">const value = 1;</span></pre></template>
     </diffs-container>

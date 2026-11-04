@@ -515,3 +515,20 @@
   color: var(--fg2);
   font-size: 13px;
 }
+
+.zd-theme-empty-note {
+  max-width: 320px;
+  color: var(--fg3);
+  font-size: 12px;
+  text-align: center;
+}
+
+.zd-theme-source-group {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.zd-theme-source-group .zd-theme-filter {
+  padding-inline-start: 16px;
+}

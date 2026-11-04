@@ -1178,10 +1178,38 @@ records pass unknown fields through:
   source's tokens are the custom properties its own files declare, Tailwind
   `@theme` included; Tailwind's stock theme and package defaults are not the
   application's tokens and still warn (`document.ts`, `designKnownTokens`).
+- Lint's `unknown-class` warning reports each distinct class on the frame's
+  own elements that none of its available styles defines. Recognition is
+  case-sensitive, decodes CSS escapes, and includes selectors inside
+  functional pseudo-classes, the frame's and expanded components' `<style>`
+  elements, linked Design CSS, and the full unpruned imported sources that
+  frame selects. Tailwind utilities count only when its generation emits
+  CSS for the frame's candidates. Per-generation candidate results and
+  parsed class catalogs share the 64 MiB style cache; Tailwind's independent
+  `candidatesToCss` API avoids cumulative builds or one compile per frame.
+  Class attribute selectors count too: prefix, suffix, substring and dash
+  operators are approximated against each used class name on its own.
+  The sole marker allowlist is `group`, `peer`, `group/<name>`, `peer/<name>`,
+  `lucide` and `lucide-<name>` (`style-classes.ts`, `DESIGN_CLASS_MARKERS`).
+  An unreadable or unclassifiable stylesheet, failed source, missing build
+  output, unavailable Tailwind dependency or a frame whose Tailwind
+  candidates reach the 4,096 cap skips this check for that frame;
+  other lint rules still run. Findings point to the first `class` attribute
+  using each name, at most 50 per frame; past 50 classes, the 50th warning
+  counts the rest. They never change `design validate`'s exit status. No persisted keys
+  change; the wire rule ID remains a string, and cloud v2 has no Design path.
 - The workspace snapshot adds optional `styleSources` (status, messages,
-  themes and tokens, without CSS) and `styleSourceErrors`. The theme editor
-  lists Manual (`tokens.css`, editable) and each source with its status; an
-  imported source is read-only there. Older engines omit both fields.
+  themes, tokens and an optional `rules` count, without CSS) and
+  `styleSourceErrors`. The theme editor lists Manual (`tokens.css`, editable)
+  and each source with its status; an imported source is read-only there.
+  Sources whose imported CSS declares no variables fold into one collapsed
+  **Styles only** row that carries its members' worst status and lists them
+  with their rule counts (style rules, font faces and keyframes; Tailwind
+  reports none because its utilities depend on each frame). A failed source,
+  or one that imported nothing, stays in the main list: its content is
+  unknown, not empty. Choosing a source resets the type filter to All, and an
+  emptied active type stays visible so it can be undone. Older engines omit
+  `styleSources`, `styleSourceErrors` and `rules`.
 - `kind: "tailwind"` compiles the application's Tailwind v4 entry with the
   engine's own bundled Tailwind (`tailwindcss` is a production dependency; the
   stylesheets behind `@import "tailwindcss"` are generated into
@@ -1436,7 +1464,8 @@ or renderer owners.
   classified across every declaring rule even when the winner is ambiguous.
   The Style tab's Advanced section lists every other authored declaration that
   no dedicated control shows as an editable name/value row (value as written,
-  selector and source in its tooltip), shows the layer's classes, and adds any
+  selector and source in its tooltip), shows the layer's classes as a
+  read-only `class` row whose field scrolls to the full value, and adds any
   property the browser implements by name (`zIndex` is `z-index`); it omits
   an imported source's own custom properties such as Tailwind's `--tw-*`.
   Removal is offered only for inline winners.

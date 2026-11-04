@@ -3,7 +3,7 @@ import { Plus, X } from "lucide-react";
 
 import type { DesignRuntimeNodeDetails } from "@zeros/protocol/design-runtime";
 
-import { Input } from "../../shared/ui/primitives";
+import { Input, Label } from "../../shared/ui/primitives";
 import { cn } from "../../shared/ui/cn";
 import { designCssPropertySuggestions } from "./design-computed-css";
 import { InspectorIconButton, InspectorSection } from "./design-inspector-kit";
@@ -54,6 +54,7 @@ export function DesignAdvancedStyleSection({
   const [name, setName] = useState("");
   const [value, setValue] = useState("");
   const nameRef = useRef<HTMLInputElement | null>(null);
+  const classesId = useId();
   const suggestionsId = useId();
   const suggestions = useMemo(
     () => (adding ? designCssPropertySuggestions() : []),
@@ -95,15 +96,28 @@ export function DesignAdvancedStyleSection({
         </InspectorIconButton>
       }
     >
+      {/* The markup owns a layer's classes, so this row is read-only; its
+          field scrolls rather than truncating them. */}
       {details.classes ? (
-        <p
-          className="text-3xxs truncate text-fg3"
-          title={details.classes}
+        <div
+          className="zd-field zd-inspector-field relative overflow-hidden"
           data-design-advanced-classes=""
+          data-design-field-readonly=""
         >
-          <span className="text-muted-fg">class </span>
-          {details.classes}
-        </p>
+          <span className="zd-field-label pr-1.5 pl-2 whitespace-nowrap">
+            <Label htmlFor={classesId} className="text-inherit">
+              class
+            </Label>
+          </span>
+          <Input
+            id={classesId}
+            readOnly
+            value={details.classes}
+            spellCheck={false}
+            autoComplete="off"
+            className="h-full min-w-0 flex-1 rounded-none border-0 bg-transparent py-0 pr-2 pl-0 font-sans text-xs text-fg1 shadow-none focus-visible:border-transparent"
+          />
+        </div>
       ) : null}
       {rows.map((row) => (
         <div

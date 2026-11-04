@@ -166,6 +166,9 @@ export interface DesignStyleSourceWire {
   messages: { level: "info" | "warning" | "error"; text: string; action?: "update" | "agent" }[];
   themes: string[];
   tokens: { name: string; value: string; themeValues: Record<string, string> }[];
+  /** Style rules, font faces and keyframes; absent for Tailwind and from
+   * older engines. */
+  rules?: number;
   bytes: number;
   revision: string | null;
 }

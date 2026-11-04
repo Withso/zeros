@@ -22,6 +22,7 @@ const RULE_LABELS: Record<DesignLintViolationWire["ruleId"], string> = {
   "render-budget": "Render budget",
   "spacing-scale": "Spacing scale",
   "unknown-token": "Unknown tokens",
+  "unknown-class": "Unknown classes",
 };
 
 /** Runtime audits intentionally report one finding per affected layer. Group
