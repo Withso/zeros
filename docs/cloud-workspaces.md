@@ -135,7 +135,11 @@ link or credentials. The worker then freezes admission, flushes durable state,
 and authorizes a one-use switch bound to its token, VM, boot, configuration,
 source, access and Stop generations. A local permit races Stop's revocation
 immediately before activation. Foreground work arriving after commitment waits
-for the replacement. Only the worker service restarts; adoption never stops,
+for the replacement. Commitment fixes a 120-second total deadline: the first
+60 seconds cover activation, and the remaining time is reserved for restoring
+the previous runtime. A control-plane restart, slow provider reply or another
+rollback boot cannot renew that deadline. Hello and private readiness requests
+each have a 30-second budget, including credential reads. Only the worker service restarts; adoption never stops,
 resumes or checkpoints the VM. It emits no app notice or catalog state change.
 
 The replacement boot remains private until fresh environment and service
@@ -144,12 +148,26 @@ executions and provider conversations, and does not rerun setup. Failed
 activation restores the previous verified runtime privately; only server logs
 record the failure. Interrupted private boots cannot reuse a readiness proof.
 Rollback permits at most three fresh boots, and unresolved recovery keeps
-foreground admission fenced. A later natural boot retires obsolete handoffs.
+foreground admission fenced. Recovery must publish the restored boot within
+the original 120 seconds. If neither runtime can become ready within that
+bound, the desktop ends its connection wait rather than waiting indefinitely;
+no expired private boot gains authority. A later natural boot retires obsolete handoffs.
 The VM retains the current and previous runtime, plus at most one prepared
 candidate. Older workers update on natural wake. Deploy the migration and
 control-plane support in every serving role before publishing a runtime that
 negotiates in-place adoption. Local Personal and organization-local lifecycle
 and permissions are unchanged.
+
+The desktop's cloud handshake, readiness wait and unsent foreground reads share
+one 120-second allowance across transient reconnect attempts. During that wait
+the app retains its connecting state and existing content, with no new notice.
+Stopped, failed or deleted workspaces, access or source revocation, and
+definitive HTTP 4xx refusals end admission immediately. The outer workspace-open
+operation retains its three-minute total cap, including ticket acquisition and
+checkout confirmation; a dead worker cannot extend it with retries. Local
+Personal and organization-local handshake, readiness and reconnect deadlines
+are unchanged. The desktop change ships with the next Alpha feed; older
+desktops retain their shorter connection wait.
 
 Each organization has one Cloud Computer: a configured recipe and an active
 named snapshot. Admins edit the recipe (repositories, branch or tag, setup

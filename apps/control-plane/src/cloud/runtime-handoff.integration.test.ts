@@ -73,6 +73,80 @@ suite("private runtime handoff", () => {
     expect(await f.state()).toEqual(before);
   });
 
+  it("shares one two-minute foreground bound across commitment, activation and rollback", async () => {
+    const f = await fixture(); expect(await f.commit()).toBe(true);
+    const committed = (await f.updates.get(f.h.id))!;
+    expect(committed.expires_at.getTime() - committed.updated_at.getTime()).toBeLessThanOrEqual(120_000);
+    await f.updates.activate(f.token, f.h.id);
+    const activated = (await f.updates.get(f.h.id))!;
+    expect(activated.expires_at).toEqual(committed.expires_at);
+    const first = (await f.updates.rollback(f.h.id))!;
+    expect(first.expires_at).toEqual(committed.expires_at);
+    await f.updates.environment(f.token, f.h.id, first.rollback_boot_id, { versionId: f.saved!.versionId!, sequence: 1, state: "failed", errorCode: "cloud_environment_seed_uncertain" });
+    const second = (await f.updates.rollback(f.h.id))!;
+    expect(second.rollback_boot_id).not.toBe(first.rollback_boot_id);
+    expect(second.expires_at).toEqual(committed.expires_at);
+  });
+
+  it("cannot extend the recovery window after it expires", async () => {
+    const f = await fixture(false); expect(await f.commit()).toBe(true); await f.updates.activate(f.token, f.h.id);
+    await pool.query("UPDATE cloud_worker_runtime_handoffs SET expires_at=clock_timestamp()-interval '1 second' WHERE id=$1", [f.h.id]);
+    expect(await f.updates.rollback(f.h.id)).toBeNull();
+    expect(await f.updates.privateBoot(f.token, f.h.id, f.h.next_boot_id)).toBeNull();
+  });
+
+  it("keeps the rollback reserve when activation admission arrives late", async () => {
+    const f = await fixture(false); expect(await f.commit()).toBe(true);
+    await pool.query("UPDATE cloud_worker_runtime_handoffs SET expires_at=clock_timestamp()+interval '45 seconds' WHERE id=$1", [f.h.id]);
+    expect(await f.updates.activate(f.token, f.h.id)).toBeNull();
+    expect(await f.updates.cancel(f.token, f.h.id, f.boot)).toBe(true);
+    expect((await f.state()).state).toBe("running");
+  });
+
+  it("does not grant a new recovery window to a legacy activation that already exhausted the bound", async () => {
+    const f = await fixture(false); expect(await f.commit()).toBe(true); await f.updates.activate(f.token, f.h.id);
+    await pool.query("UPDATE cloud_worker_runtime_handoffs SET updated_at=clock_timestamp()-interval '3 minutes',expires_at=clock_timestamp()+interval '7 minutes' WHERE id=$1", [f.h.id]);
+    expect(await f.updates.rollback(f.h.id)).toBeNull();
+    expect(await f.updates.privateBoot(f.token, f.h.id, f.h.next_boot_id)).toBeNull();
+    expect(await f.store.workerSession(f.token, f.h.next_boot_id, { id: f.h.id, sha256: f.h.target_sha256 })).toBeNull();
+    expect(await f.updates.promote(f.token, f.h.id, f.h.next_boot_id)).toBe(false);
+  });
+
+  it("resumes the persisted activation deadline after a control-plane restart without resubmitting the candidate", async () => {
+    const f = await fixture(false); expect(await f.commit()).toBe(true); await f.updates.activate(f.token, f.h.id);
+    await pool.query("UPDATE cloud_worker_runtime_handoffs SET updated_at=clock_timestamp()-interval '45 seconds',expires_at=clock_timestamp()+interval '75 seconds' WHERE id=$1", [f.h.id]);
+    const persisted = (await f.updates.get(f.h.id))!;
+    let observed!: () => void, release!: () => void;
+    const waiting = new Promise<void>(resolve => { observed = resolve; }), held = new Promise<void>(resolve => { release = resolve; });
+    const compute = { execLong: vi.fn(async (_sandbox: string, command: string) => {
+      if (command.includes("systemctl restart zeros-worker.service")) {
+        const current = (await f.updates.get(f.h.id))!;
+        expect(current.state).toBe("rolling_back");
+        expect(await f.updates.promote(f.token, current.id, current.rollback_boot_id)).toBe(true);
+      }
+      return { exitCode: 0, stdout: "started", timedOut: false };
+    }) };
+    const make = (sleep: () => Promise<void>) => new RuntimeAdoption({ handoffs: new RuntimeHandoffStore(pool), store: new CloudV2Store(pool), compute,
+      authorizeSource: async () => {}, runtimeForWorkspace: async () => ({ sha256: f.h.target_sha256, url: async () => "https://example.test/runtime.tar.gz" }), sleep });
+    const prior = make(async () => { observed(); await held; });
+    let replacement: RuntimeAdoption | undefined;
+    try {
+      await prior.tick(); await waiting;
+      expect(compute.execLong).not.toHaveBeenCalled();
+      prior.close(); release();
+      const now = Date.now; vi.spyOn(Date, "now").mockImplementation(() => now() + 16_000);
+      replacement = make(async () => {}); await replacement.tick();
+      await expect.poll(async () => (await f.updates.get(f.h.id))?.state).toBe("rolled_back");
+      await expect.poll(async () => (await f.updates.get(f.h.id))?.completed_at).not.toBeNull();
+      const final = (await f.updates.get(f.h.id))!;
+      expect(final.expires_at).toEqual(persisted.expires_at); expect(Date.now()).toBeLessThan(final.expires_at.getTime());
+      expect(compute.execLong.mock.calls.filter(([, command]) => command.includes("systemctl restart zeros-worker.service"))).toHaveLength(1);
+      expect((await f.state()).state).toBe("running");
+      expect(await f.store.workerSession(f.token, f.boot)).toBeNull();
+      expect(await f.store.workerSession(f.token, final.rollback_boot_id)).not.toBeNull();
+    } finally { prior.close(); replacement?.close(); release(); vi.restoreAllMocks(); }
+  });
+
   it("serializes app admission and commit across independent store instances", async () => {
     const f = await fixture(false), peer = new RuntimeHandoffStore(pool), client = randomUUID();
     expect(await peer.admitClient(f.workspace.id, client)).toBe(true);
