@@ -55,7 +55,17 @@ export interface PopoverContentProps extends React.ComponentPropsWithoutRef<
   size?: "sm" | "md" | "lg" | "default" | "wide";
   /** Edge-to-edge feature surfaces use their own section primitives. */
   padding?: "default" | "none";
+  /** floating (the default) is the bg3 menu surface with the dropdown lift;
+   *  composer is for a picker docked on the composer, which takes the
+   *  composer's own surface like every card above it: sidebar-bg, border2 and
+   *  no lift. */
+  surface?: "floating" | "composer";
 }
+
+const POPOVER_SURFACE = {
+  floating: "bg-bg3 shadow-[var(--shadow-dropdown)]",
+  composer: "bg-sidebar-bg",
+} as const;
 
 const POPOVER_WIDTH = {
   sm: "w-60",
@@ -79,6 +89,7 @@ const PopoverContent = React.forwardRef<
       onKeyDown,
       size = "default",
       padding = "default",
+      surface = "floating",
       ...props
     },
     ref,
@@ -105,7 +116,8 @@ const PopoverContent = React.forwardRef<
           }}
           className={cn(
             ANCHORED_OVERLAY_MOTION,
-            "border-border2 bg-bg3 text-fg1 z-dropdown max-w-(--radix-popover-content-available-width) max-h-(--radix-popover-content-available-height) overflow-x-hidden overflow-y-auto overscroll-contain border shadow-[var(--shadow-dropdown)] outline-none",
+            "border-border2 text-fg1 z-dropdown max-w-(--radix-popover-content-available-width) max-h-(--radix-popover-content-available-height) overflow-x-hidden overflow-y-auto overscroll-contain border outline-none",
+            POPOVER_SURFACE[surface],
             MENU_SURFACE_RADIUS,
             POPOVER_WIDTH[size],
             padding === "default" ? "p-3" : "p-0",

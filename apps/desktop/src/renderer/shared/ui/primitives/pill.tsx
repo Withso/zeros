@@ -5,8 +5,9 @@ import { cn } from "@/renderer/shared/ui/cn";
 
 // Two sizes: inline (20px, 12/16, 4px corners) for text and rows, control
 // (24px, 13/18, 6px corners) around the composer. One neutral look for every
-// reference — bg2 + border2, hover border3 + bg2-highlight, on border4 +
-// bg2-highlight — and tints only where they mean something.
+// reference — bg2 + border2, hover border3 + bg2-highlight, on the selected
+// fill with the resting edge unchanged — and tints only where they mean
+// something.
 const pillVariants = cva(
   "inline-flex max-w-60 shrink-0 items-center whitespace-nowrap border transition-colors duration-120 ease-out focus-visible:border-highlighted-bright focus-visible:ring-[3px] focus-visible:ring-highlighted-bright/50 focus-visible:outline-none disabled:pointer-events-none disabled:opacity-50 [&_svg]:shrink-0 [&>span]:truncate",
   {
@@ -17,7 +18,7 @@ const pillVariants = cva(
       },
       tone: {
         neutral:
-          "border-border2 bg-bg2 text-fg1 hover:border-border3 hover:bg-bg2-highlight aria-pressed:border-border4 aria-pressed:bg-bg2-highlight data-[state=open]:border-border4 data-[state=open]:bg-bg2-highlight [&_svg:not([class*='text-'])]:text-fg2",
+          "border-border2 bg-bg2 text-fg1 hover:border-border3 hover:bg-bg2-highlight aria-pressed:bg-selected-bg aria-pressed:hover:bg-selected-bg data-[state=open]:border-border4 data-[state=open]:bg-bg2-highlight [&_svg:not([class*='text-'])]:text-fg2",
         // A tool target that failed.
         failed: "border-transparent bg-red-bg text-red-fg [&_svg]:text-red-fg",
         // The Design mode tag.

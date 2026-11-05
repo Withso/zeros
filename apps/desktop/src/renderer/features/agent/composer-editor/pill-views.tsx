@@ -24,6 +24,12 @@ export const PILL_METRICS =
   "inline-flex h-5 max-w-[calc(100%-3px)] mx-[1.5px] items-center rounded-sm align-middle text-3xxs leading-4 select-none";
 export const PILL_SHELL = `${PILL_METRICS} gap-1 border border-border2 bg-bg2 text-fg1`;
 export const COMPOSER_PILL_SPACING = "gap-1 px-1.5";
+/** An interactive pill's hover, on the whole pill (its inner buttons paint no
+ * fill of their own): bg2-highlight on border3, also while its menu is open. */
+export const PILL_HOVER =
+  "hover:border-border3 hover:bg-bg2-highlight has-[[data-state=open]]:border-border3 has-[[data-state=open]]:bg-bg2-highlight";
+/** The caret's node selection: a fill that holds under the pointer. */
+export const PILL_SELECTED = "bg-selected-bg hover:bg-selected-bg has-[[data-state=open]]:bg-selected-bg";
 
 export function MentionPillView({
   label,
@@ -79,7 +85,7 @@ export function AttachmentPillView({
         <button
           type="button"
           data-attachment-pill=""
-          className={cn(PILL_SHELL, "cursor-pointer px-1.5")}
+          className={cn(PILL_SHELL, PILL_HOVER, "cursor-pointer px-1.5")}
           onClick={(e) => {
             // Don't trigger the bubble's click-to-edit.
             e.stopPropagation();

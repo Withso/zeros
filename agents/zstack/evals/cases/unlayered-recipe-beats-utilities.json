@@ -1,0 +1,9 @@
+{
+  "id": "unlayered-recipe-beats-utilities",
+  "kind": "scenario",
+  "area": "renderer-ui",
+  "fixedBy": "pr:839",
+  "symptom": "An animated property's keyframe diamond never took the Motion accent: its Tailwind text-[…] class lost to the unlayered .zd-icon-button colour, as size-3 glyph classes lost to the recipe's 14px svg rule.",
+  "rule": "A recipe-styled element's variant lives in the recipe as a data attribute or class the CSS reads, and a smoke asserts the variant's computed value.",
+  "check": "pnpm test:ui-smoke --shard=3/3"
+}

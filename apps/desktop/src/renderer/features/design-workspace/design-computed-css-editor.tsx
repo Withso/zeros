@@ -33,6 +33,7 @@ import {
   EditorView,
   keymap,
   placeholder,
+  highlightActiveLine,
 } from "@codemirror/view";
 import { tags } from "@lezer/highlight";
 
@@ -99,12 +100,24 @@ function designCssEditorTheme(dark: boolean): Extension {
         fontFamily: "var(--font-mono)",
         lineHeight: "1.75",
       },
+      // As wide as the panel: a long declaration or its computed value ends
+      // in an ellipsis instead of running past the edge. Only the line being
+      // edited may run on, and the panel scrolls to its caret.
       ".cm-content": {
-        minWidth: "max-content",
+        flex: "1 1 0",
+        minWidth: "0",
         padding: "12px 0 24px",
         caretColor: "var(--fg1)",
       },
-      ".cm-line": { padding: "0 12px" },
+      ".cm-line": {
+        padding: "0 12px",
+        overflow: "hidden",
+        textOverflow: "ellipsis",
+      },
+      "&.cm-focused .cm-line.cm-activeLine": {
+        overflow: "visible",
+        textOverflow: "clip",
+      },
       ".cm-cursor, .cm-dropCursor": { borderLeftColor: "var(--fg1)" },
       ".cm-activeLine": {
         backgroundColor: "color-mix(in srgb, var(--fg1) 4%, transparent)",
@@ -206,6 +219,8 @@ function designCssCompletionSource(
 
 const baseExtensions: readonly Extension[] = [
   drawSelection(),
+  // The edited line is marked, so it alone may run past the panel edge.
+  highlightActiveLine(),
   EditorState.allowMultipleSelections.of(true),
   bracketMatching(),
   closeBrackets(),

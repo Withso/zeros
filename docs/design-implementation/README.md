@@ -62,9 +62,11 @@ any new surface, and the rules that can be checked move into
    signal.
 7. **Keyboard focus is opaque and only for the keyboard.** Tab shows
    `highlighted-bright` with the 3px halo; a click or typing shows the caret.
-8. **Hover belongs to the surface; selected is a step above it.** Rows use their
-   surface's hover; sidebar, tree and layer selection is `bg2-highlight` with
-   `fg1`.
+8. **Hover belongs to the surface; selected is a fill a step above it, never
+   an edge.** Rows use their surface's hover; sidebar, tree and layer selection
+   is `bg2-highlight` with `fg1`. A pressed toggle, the active tab or segment,
+   and a chosen chip or option fill with `selected-bg`; selection never adds a
+   border, ring, outline or shadow.
 9. **Two tab styles.** A segmented control switches a view; one strip tab serves
    chrome, workbench and chat. A closable tab shows ✕ on hover or focus over a
    fade in its own fill, so it never changes width.
@@ -147,14 +149,14 @@ migrated, then the retired names go in the same branch. The specs are in
 
 | Primitive | Change |
 | --- | --- |
-| Button | Flat Primary and Destructive; Ghost shows Open; `aria-pressed` on Secondary and Ghost; built-in `loading`; disabled keeps hover for its reason tooltip; `variant="primary"` replaces `default`, one size name per height; the legacy `shared/ui/button.tsx` wrapper and icon sizes retire into IconButton. |
-| IconButton | One hover (`bg2-highlight`) on every surface; inline 20 gets the ring and a fixed 12 glyph; neutral pressed; deprecated `hover` and `motion` options retire. |
+| Button | Flat Primary and Destructive; Ghost shows Open; `aria-pressed` on Secondary and Ghost presses to the `selected-bg` fill with no edge; built-in `loading`; disabled keeps hover for its reason tooltip; `variant="primary"` replaces `default`, one size name per height; the legacy `shared/ui/button.tsx` wrapper and icon sizes retire into IconButton. |
+| IconButton | One hover (`bg2-highlight`) on every surface; inline 20 gets the ring and a fixed 12 glyph; pressed is the `selected-bg` fill with no edge (the edgeless `fill` tone retires into it); deprecated `hover` and `motion` options retire. |
 | SplitButton, Toolbar | 28 halves, medium label, per-half focus, `muted-fg` chevron; one toolbar size (bar 36, buttons 28, icons 14), active tool in the selection blue. |
 | Input, Textarea, Select | 13/18 text, 8px side padding, hover `border4`, keyboard-only ring, red invalid, compact 24; Select check at the end; Textarea three-line minimum. |
 | Checkbox, RadioGroup, Switch, Slider | 16px boxes, 2px check, inverted fill when on, hover ring, 50% disabled; Switch thumb #0D0D0D in Dark; Slider track `border3`, range and thumb `fg1`. |
 | Menus, Command, Popover, HoverCard, Tooltip | The floating recipe; menu choice rules; Kbd shortcuts; popover widths 240 / 320 / 400; tooltips solid `bg3`. |
 | Dialog, Toast | 12px corners with `border2`; widths 400 / 520 / 640; one 16px inset; Ghost Cancel; toasts on the floating recipe at 360. |
-| Tabs | Segmented and strip; active `bg2` + `fg1` medium; ✕ over a fade; Dark selected segment `bg4` without an edge. |
+| Tabs | Segmented and strip; strip active `bg2` + `fg1` medium; ✕ over a fade; the selected segment fills `selected-bg` with no edge in both themes. |
 | PanelHeader, ListRow, SidebarRow | 28 actions; ListRow hover `bg1-hover` and no expanded fill; sidebar selected `bg2-highlight`. |
 | Badge, Pill, Kbd, Avatar, StatusIcon | Badge one 20px size with tinted tones; two pill sizes; Kbd 18px `border2` chip; avatar badge outside the clip; status labels `fg3`. |
 | ProgressBar, Card, Tile, Separator | `border3` 4px track; card `bg1-bright` + `border1` + 12; tile hover `bg2-highlight` + `border3`; scroll thumb `border2` → `border3`. |
@@ -610,3 +612,137 @@ Each landed step appends one line: date, workstream, what landed, evidence.
   in all. It caught two regressions, each fixed with a test and an eval
   case. The tab status letter and unsaved dot had lost their hover titles,
   and the Dialog close button sat 2px off the title line.
+- 2026-11-05 · 2, 3, 6 · Direction: selection is a fill, never an edge (the
+  user's correction on the Design inspector tabs, the Home view toggle and
+  filter chips, the sidebar toggle and the Design theme sources). A new
+  `selected-bg` token (Dark `#343434`, a step above hover; Light `bg5`, equal
+  to hover, since anything darker fails AA for status text) is the pressed,
+  active and chosen fill of Button (Secondary, Ghost), IconButton, Pill, Tabs
+  and the Design inspector's segments, icon buttons and tools. Their border4,
+  border2 and inset rings retire, with `--segment-active-*` and IconButton's
+  `fill` tone; the checked RadioGroup card keeps `border1`; the repository icon
+  dialog moves to the chrome tab strip. `ui/selection-edge` fails on any new
+  edge drawn on a selected, pressed, active or current state, in class names
+  and in the renderer's stylesheets.
+- 2026-11-05 · 5 · Agent chat: a tool row with a file or link target beside
+  its name (Read image, Edit, Write, linked commands and agent headers) hovers,
+  rings and toggles as one padded 28px row with 6px corners, like Bash; the
+  bare name painted its own unpadded fill before, and the row stood 36px tall,
+  so tool calls sat 36 or 44px apart. `ListRowGroup` owns the row, every row
+  is now 28px on one 36px pitch, and the tool-spacing smoke measures both
+  kinds. Everything docked above the
+  composer now shares its surface: the @, / and # pickers move from the
+  floating bg3 with a lift to sidebar-bg with border2 and no shadow, at the
+  composer's width and 8px above it, with 8px row corners, a medium fg3 head,
+  fg3 hints and ruled 24px tabs whose active tab is the selected fill. The
+  embedded terminal card takes the dock surface, a 40px head and a bg1 well.
+- 2026-11-05 · 5 · Design tab (plans.md §7): only the Style sections in use
+  show, and Add property reveals the rest and runs each one's own add (an
+  unstyled frame showed six empty headers). In-field labels are fg3, the
+  selected layer fills bg2-highlight, and long values end in an ellipsis in
+  fields and the CSS tab. A failed Git init is one red line under the text in
+  Design and in Changes, "Design needs Git" leads with a primary Initialize
+  Git, and the conflict pause lists its files in one quiet card that opens
+  each in Changes. Selection, creation and group sizes, rotation, spacing and
+  the agent's draft status share one 18px canvas chip with no edge. The
+  Design smokes reach hidden sections through Add property.
+- 2026-11-05 · 3, 6 · Selection edges a condition added: Settings' GitHub
+  method cards (local and cloud) turned border4 when chosen, and the
+  composer's pills and local links drew a 2px ring while the caret selected
+  them. Each now fills (`bg1-hover` on its `border2` card; `selected-bg` on a
+  pill, `blue-pill-hover` on a workspace link) and keeps its resting edge.
+  `ui/selection-edge` also reads classes a selection condition adds
+  (`selected && …`, `tab === activeTab ? … : …`); a border in the box's own
+  fill colour (a checked box), drop targets and focus stay exempt. The
+  composer-editor and cloud-github smokes measure the fill and the edge.
+  The canvas's pill hover reaches the code too: composer pills, sent
+  attachments and chat links fill bg2-highlight on border3 as one shape
+  (`PILL_HOVER`), where only the label's inner button filled before.
+- 2026-11-05 · 5 · Agent chat: a tool's description chip (a command, a
+  thinking summary, a search) is 20px, the height of the file tags beside it,
+  in the app (`py-0.5` on 12/16) and on every canvas board (`.ck-row-chip`);
+  it was 18px. Rows stay 28px on one pitch, and the tool-presentation smoke
+  measures the chip.
+- 2026-11-05 · 5 · Review (plans.md §1, steps 1 and 3–5): the sub-tabs are
+  Overview, Description, Activity, Checks and Commits (a restored `changes`
+  lands on Overview, `reviews` on Activity). The header reads in rows (state;
+  repo and number; title; author and branches with copy; age and size) with
+  only Open on GitHub and More. Overview holds Git status (the shared island's
+  `git-status` presentation: one line, its one action, the checklist behind
+  the chevron), PR status (the verdict, Merge with the remembered method as a
+  green split when it can run and an outline when it can't, only the
+  blockers with Add to chat, and what is done), Findings (agent comments,
+  review apps and code scanning, with Add all to chat) and the rail
+  (reviewers with their verdicts, assignees, labels, the linked issue, the
+  change counts and Open changes), which folds into Details below 768px. On
+  Review with a PR the shared status row no longer renders, so there is one
+  Merge. The engine and the control plane read the pull request's totals,
+  author avatar, requested reviewers, assignees and labels from the same
+  response. Decisions: the title is 18/28 (`text-lg`; the type scale has no
+  20) and the board's 26px state chip is 24px. Post to PR stays on the
+  published diff behind Open changes until the Changes tab learns its
+  comparison's head SHA (plans.md §1.2).
+- 2026-11-05 · 5 · Changes (plans.md §2): one card per file, 12px from the
+  pane's edges and from the next card, with a border1 edge and 8px corners;
+  a collapsed file is its header alone in its card, so collapsed files no
+  longer stack flush. The inset and edge are `!important` in Pierre's shadow
+  CSS because document rules (preflight's margin and border reset, the base
+  layer's outline colour) outrank `:host`, and `diffHeaderHeight` counts both
+  edges because Pierre sizes a collapsed file as its header region.
+  `ui-smoke-changes` loads again (its fixture moved under a serve root) and
+  measures the cards; two pins that went stale while it could not run follow
+  the merged design: 12px menu corners, and checkbox rows that lead with their
+  check. Evidence: the smoke passed three runs in a row, the codex-transcript
+  chain (118 checks, with turn changes and file-pill navigation) passed, and
+  79 Vitest files for the workbench tabs, theme and code review passed.
+- 2026-11-05 · 5 · Review sub-tabs (plans.md §1, step 6): Description,
+  Activity, Checks and Commits now sit in Overview's 20px inset under a
+  section header, as the boards show, instead of running edge to edge.
+  Description edits the body (the provider's optional `updateBody`, backed by
+  `gh.prUpdate` for Local and cloud; ⌘↵ saves). Activity filters All, People
+  and Bots once a GitHub App has taken part and folds an App's review to one
+  line until Show; commit lines carry the short SHA and cards use the Review
+  card surface. Checks opens on a summary card (counts per state, Add
+  failures to chat, a bar shared by count), neutral group headers and
+  deployment cards with their state and Open. Commits group by day with
+  co-authors, Copy, Open and the SHA chip. The merge menu labels itself and
+  says what each method does to this PR's commits. Decisions: Re-run failed,
+  Required badges and the Expected group wait for rerun and branch-protection
+  reads; the composer and Save carry their shortcut as a `ButtonShortcut`, so
+  the buttons keep their plain names. Evidence: review-comparison (15 checks,
+  five new), focus, workbench-status, review-retention and pr-actions smokes;
+  Vitest 291 files (3,086 tests) across workbench, PR, code review, state and
+  platform; both themes captured.
+- 2026-11-05 · 5 · Design tab: the component sheets. Every spec line on the
+  six Design-tab sheets (Property field, Property rows, Layer tree,
+  Inspector, Property popovers, Theme editor) was measured in the Design
+  harness and the app now follows it. Fields hover in bg2-highlight; editing
+  shows only the caret, and only keyboard focus rings, with a 3px halo as on
+  the shared Field. A field's fill lives in `--zd-field-fill`: the keyframe
+  diamond, a limit's remove and the W/H menu are 20px on a 36px fade from that
+  fill, and their wrapper keeps the field hovered while the pointer is on
+  them. Popovers raise the resting fill to bg3-hover through
+  `--zd-field-rest`, take the shared 240 or 320 widths, and label rows at 72.
+  Layers: owned rows on bg2, fg3 type icons and chevrons, hidden rows in fg3,
+  a 20px visibility action, the selection count as a Badge, Collapse all at
+  28, a fg3 loading line, fg2 "Couldn’t load layers." and "No layers on this
+  page.", and rename in the shared 24px inline field. Inspector: a 36px selection header, 12px glyphs on 24px section
+  actions, regular-weight empty sections, segmented 8/6 and 8px pads, and the
+  blocking reason on red-bg. Theme editor: the chosen rail row on
+  bg2-highlight, 12 fg3 labels and counts, mono 12 names, the edited theme as
+  a pressed selected-bg toggle, a 20px swatch and Reset. Decisions: the
+  selection header keeps its type label until the selection smokes stop
+  reading its text; variables keep no Detach and the theme rows no ⋯ until
+  the style and token APIs can detach, rename and delete; the Inspector
+  sheet's segmented spec now names selected-bg, as its drawing already did.
+  A correction: the visible W, H and X labels were already 24px; only
+  InspectorSelect's unused leading slot was 28px. RevEmpty follows the
+  decision that Create PR stays in the status row above.
+  Evidence: all 27 registered Design smoke scenarios pass; the canvas smoke
+  (303 checks), the five that exercise the last CSS edits and the floating
+  chrome smoke with layer rename ran again on the final head. Red first:
+  probes on the old CSS showed a sibling overlay dropping its field's hover
+  fill and a utility colour on a Design icon button staying fg2, and the
+  rename check failed on the old outlined field. The canvas smoke's
+  geometry check caught the theme editor's Close sitting flush once its
+  padding was trimmed, so the 12px padding stays.

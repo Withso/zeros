@@ -22,7 +22,7 @@ import { ToolIdentityIcon } from "./tool-identity-icon";
 import { nativeToolSurface, toolRecord } from "./native-tool-presentation";
 import { pendingChecksMessage } from "./tool-pending-checks";
 import { useTurnDisclosure } from "../turn-disclosures";
-import { Badge, ListRow, Tooltip } from "@/renderer/shared/ui/primitives";
+import { Badge, LIST_ROW_IN_GROUP, ListRow, ListRowGroup, Tooltip } from "@/renderer/shared/ui/primitives";
 import { ImageHoverCard, imagePreviewMimeType } from "../image-hover-card";
 import { filePillPath, openFilePill, warmFilePill } from "@/renderer/shell/workbench/file-pill-navigation";
 import { useLocalLinks } from "../local-links/context";
@@ -170,14 +170,20 @@ export const EventRow = memo(function EventRow({
   </>;
   const preview = meta.target && !open ? (
     <span data-tool-preview="" className={cn(
-      // An 18px chip: 12/16 on bg2, beside the 20px file tags.
-      "max-w-[440px] min-w-0 truncate rounded-sm px-1.5 py-px text-3xxs leading-4 font-medium",
+      // A 20px chip: 12/16 on bg2, the height of the file tags beside it.
+      "max-w-[440px] min-w-0 truncate rounded-sm px-1.5 py-0.5 text-3xxs leading-4 font-medium",
       localCli && sTone !== "fail" && "font-mono",
       sTone === "fail" ? "bg-red-bg text-red-primary" : "bg-bg2 text-fg2",
     )}>{meta.target}</span>
   ) : null;
+  const toggle = () => {
+    if (!expandable) return;
+    if (controlledOpen === undefined) setLocalOpen(!open);
+    onOpenChange?.(!open);
+  };
   const disclosure = (
     <ListRow
+      data-list-row-disclosure=""
       // Width hugs the content (`w-fit`) and never exceeds the lane
       // (`max-w-full`): the hover tint then wraps exactly the row's content
       // instead of painting the empty space out to the right edge.
@@ -186,15 +192,12 @@ export const EventRow = memo(function EventRow({
         "-ml-2 flex min-h-7 w-fit max-w-full min-w-0 items-center gap-2 rounded-md px-2 py-1 text-left transition-colors",
         !separateTargets && "group/event-row",
         expandable ? "hover:bg-bg1-hover cursor-pointer" : "cursor-default",
-        separateTargets && "m-0 min-w-0 shrink-0 gap-2 rounded-sm p-0",
+        // Beside its targets the button is only the icon and name; the
+        // ListRowGroup around them draws the row.
+        separateTargets && LIST_ROW_IN_GROUP,
         rowTint,
       )}
-      onClick={() => {
-        if (expandable) {
-          if (controlledOpen === undefined) setLocalOpen(!open);
-          onOpenChange?.(!open);
-        }
-      }}
+      onClick={toggle}
       aria-label={[meta.label, accessibleTarget, meta.trailing].filter(Boolean).join(" ")}
       aria-description={pendingChecks ?? (sTone === "fail" ? "Tool failed" : undefined)}
       aria-controls={expandable && open ? detailId : undefined}
@@ -266,13 +269,17 @@ export const EventRow = memo(function EventRow({
 
   return (
     <div className="flex flex-col">
-      {separateTargets ? <div className={cn("group/event-row -ml-2 flex w-fit max-w-full min-w-0 items-center gap-2 rounded-md px-2 py-1", !fileRow && "flex-wrap", rowTint)}>
+      {separateTargets ? <ListRowGroup
+        interactive={expandable}
+        onToggle={toggle}
+        className={cn("group/event-row", !fileRow && "flex-wrap", rowTint)}
+      >
         {disclosure}
         {filePill}
         {localTargets.map((target) => <LocalLinkPill key={target.href} href={target.href} fallback={target.fallback} />)}
         {!fileRow && preview}
         {trailing}
-      </div> : disclosure}
+      </ListRowGroup> : disclosure}
       {expandable && open && (
         <div id={detailId} className={cn("min-w-0 pr-2", isThinking ? "py-1" : "pt-1.5 pb-2")}>
           {isThinking ? (

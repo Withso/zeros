@@ -48,19 +48,19 @@ describe("IconButton states", () => {
     }
   });
 
-  it("presses as a neutral toggle unless it is a toolbar's active tool", () => {
+  it("presses as the selected fill with no edge, held under the pointer", () => {
     const toggle = classes(render({}));
-    expect(toggle).toContain("aria-pressed:bg-bg2-highlight");
-    expect(toggle).toContain("aria-pressed:border-border4");
+    expect(toggle).toContain("aria-pressed:bg-selected-bg");
+    expect(toggle).toContain("aria-pressed:hover:bg-selected-bg");
+    expect(toggle).toContain("aria-pressed:text-fg1");
+    expect([...toggle].some((cls) => /^aria-pressed:(?:hover:)?(?:border|ring|shadow|outline)/.test(cls))).toBe(false);
+  });
+
+  it("presses a toolbar's active tool in the selection blue", () => {
     const tool = classes(render({ pressedTone: "tool" }));
     expect(tool).toContain("aria-pressed:bg-(--design-selection-label-bg)");
     expect(tool).toContain("aria-pressed:text-(--design-selection-label-fg)");
-  });
-
-  it("fills an open side column's toggle without an edge", () => {
-    const fill = classes(render({ pressedTone: "fill" }));
-    expect(fill).toContain("aria-pressed:bg-bg2-highlight");
-    expect([...fill].some((cls) => cls.startsWith("aria-pressed:border"))).toBe(false);
+    expect(tool).not.toContain("aria-pressed:bg-selected-bg");
   });
 
   it("holds the hover look while its menu is open", () => {

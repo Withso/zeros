@@ -66,7 +66,7 @@ function RadioGroupItem({
           "group flex cursor-pointer items-center gap-2 text-left focus-visible:outline-none",
           "disabled:cursor-not-allowed disabled:opacity-50",
           variant === "card" &&
-            "border-border1 bg-bg1-highlight hover:bg-bg1-hover data-[state=checked]:border-border4 data-[state=checked]:bg-bg1-hover flex-row-reverse justify-between gap-4 rounded-lg border px-3.5 py-3",
+            "border-border1 bg-bg1-highlight hover:bg-bg1-hover data-[state=checked]:bg-bg1-hover flex-row-reverse justify-between gap-4 rounded-lg border px-3.5 py-3",
           className,
         )}
         {...props}

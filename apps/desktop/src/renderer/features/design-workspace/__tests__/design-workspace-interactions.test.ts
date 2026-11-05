@@ -685,6 +685,8 @@ describe("design workspace interaction wiring", () => {
     // stays unique to the canvas.
     expect(layerRules).toContain("var(--bg2-hover)");
     expect(layerRules).not.toContain("--design-selection");
+    // The selected row is the trees' one selection fill.
+    expect(layerRules).toMatch(/\.zd-design-layer-selected:hover \{[^}]*background-color: var\(--bg2-highlight\)/);
     // Selection moves in one commit. A colour transition left the outgoing
     // frame's block fading in place while the incoming one faded in above it.
     expect(layerRules).toContain("transition: none");

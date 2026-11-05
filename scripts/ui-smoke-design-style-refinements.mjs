@@ -1,4 +1,5 @@
 import { expect } from "@playwright/test";
+import { addDesignSection } from "./ui-smoke-design-helpers.mjs";
 import { runDesignStyleTokensSmoke } from "./ui-smoke-design-style-tokens.mjs";
 import { runDesignDeferredFocusSmoke, runDesignCloseFocusSmoke } from "./ui-smoke-design-focus.mjs";
 import { runDesignThemeSourcesSmoke } from "./ui-smoke-design-theme-sources.mjs";
@@ -245,7 +246,8 @@ export async function runDesignColorChannelRefreshSmoke({ page, check }) {
 
 export async function runDesignEffectKeyboardDraftSmoke({ page, check }) {
   await openStyleDesign(page);
-  await page.getByRole("button", { name: "Add effect", exact: true }).click();
+  // The heading has no effect yet, so Effects is added, with its first shadow.
+  await addDesignSection(page, "Effects");
   await expect.poll(() => styleWrites(page)).toBe(1);
   await page
     .getByRole("button", { name: "Edit drop shadow", exact: true })
@@ -283,7 +285,8 @@ export async function runDesignEffectScrubCancellationSmoke({
   holdOpeningAnimation = false,
 }) {
   await openStyleDesign(page);
-  await page.getByRole("button", { name: "Add effect", exact: true }).click();
+  // The heading has no effect yet, so Effects is added, with its first shadow.
+  await addDesignSection(page, "Effects");
   await expect.poll(() => styleWrites(page)).toBe(1);
   // Hold the entry transform through the first hover, then let it settle
   // before pressing. Coordinates from that earlier hover must not be reused.
@@ -373,9 +376,7 @@ export async function runDesignInspectorPreviewOwnerSmoke({ page, check }) {
       control = page.getByRole("slider", { name: "Fill opacity", exact: true });
     } else {
       property = "textShadow";
-      await page
-        .getByRole("button", { name: "Add effect", exact: true })
-        .click();
+      await addDesignSection(page, "Effects");
       await expect.poll(() => styleWrites(page)).toBe(1);
       await page
         .getByRole("button", { name: "Edit drop shadow", exact: true })

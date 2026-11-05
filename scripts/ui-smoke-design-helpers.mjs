@@ -96,3 +96,15 @@ export async function designCanvasSafeRect(page) {
     };
   });
 }
+
+/** Only the Style sections in use show: an empty optional section (Stroke,
+ * Effects, Typography, Transform, Transition, Motion, Advanced) is added from
+ * the inspector's Add property menu, which also runs the section's own add
+ * (Transform opens its editor, Effects adds a shadow). */
+export async function addDesignSection(page, title) {
+  await page
+    .locator("[data-design-add-property]")
+    .getByRole("button", { name: "Add property", exact: true })
+    .click();
+  await page.getByRole("menuitem", { name: title, exact: true }).click();
+}

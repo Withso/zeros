@@ -175,6 +175,7 @@ export function DesignStrokeSection({
     <InspectorSection
       title="Stroke"
       empty={strokes.length === 0}
+      addable={{ id: "stroke", onAdd: add }}
       data-design-stroke-section=""
       actions={
         <InspectorIconButton

@@ -4,11 +4,13 @@
 //
 // One chronological activity stream (composeTimeline): opened → commits →
 // reviews/comments → merged/closed, drawn on a connector rail with avatars.
-// Review + comment bodies render as sanitised markdown cards with "Add to
-// chat" (quoted context lands in the active composer — the user adds
-// instructions and sends). The composer at the bottom posts optimistically:
-// the comment appears instantly, reconciles against GitHub in the background,
-// and rolls back (keeping the draft) if the post fails.
+// All, People and Bots filter it once an App has taken part; an App's review
+// or comment folds to one line until Show. Review + comment bodies render as
+// sanitised markdown cards with "Add to chat" (quoted context lands in the
+// active composer — the user adds instructions and sends). The composer at
+// the bottom posts optimistically: the comment appears instantly, reconciles
+// against GitHub in the background, and rolls back (keeping the draft) if the
+// post fails.
 
 import React, { useMemo, useRef, useState } from "react";
 import {
@@ -16,30 +18,34 @@ import {
   GitMerge,
   GitPullRequestArrow,
   GitPullRequestClosed,
-  MessageSquarePlus,
+  Globe,
 } from "lucide-react";
 
 import type { PR, PrCommitSummary } from "../../../platform/git";
 import {
+  Badge,
   Button,
-  Kbd,
+  ButtonShortcut,
+  Tabs,
+  TabsList,
+  TabsTrigger,
   Textarea,
-  Tooltip,
 } from "@/renderer/shared/ui/primitives";
 import { cn } from "@/renderer/shared/ui/cn";
 import { renderMarkdown } from "@/renderer/features/agent/markdown";
 import { buildReviewCommentContext } from "../../pr/pr-action-prompts";
 import { humanGitError, type ReviewTimelineEntry } from "./review-data";
 import {
+  appDisplayName,
   composeTimeline,
+  filterTimelineEvents,
+  isBotLogin,
   relTime,
   type ReviewTimelineEvent,
+  type TimelineFilter,
 } from "./review-model";
-import {
-  AuthorAvatar,
-  Centered,
-  ErrorCallout,
-} from "./review-shared-components";
+import { AuthorAvatar, ErrorCallout } from "./review-shared-components";
+import { REVIEW_CARD, ReviewSection, SUBTAB_FRAME } from "./review-overview";
 import { ZerosSpinner } from "@/renderer/shared/ui/loading";
 import { useScrollMemoryRef } from "../../scroll-memory";
 import { captureDeferredFocus } from "@/renderer/shared/ui/deferred-focus";
@@ -52,6 +58,7 @@ export function ReviewTimelineSection({
   loading,
   error,
   scrollKey,
+  hostLabel,
   onAddToChat,
   onPostComment,
   onRetry,
@@ -64,6 +71,8 @@ export function ReviewTimelineSection({
   error: string | null;
   /** Exact workspace+PR owner for the nested timeline scroller. */
   scrollKey: string;
+  /** Where a comment posts ("GitHub"). */
+  hostLabel: string;
   onAddToChat: (text: string) => void;
   onPostComment: (body: string) => Promise<void>;
   onRetry: () => void;
@@ -83,23 +92,35 @@ export function ReviewTimelineSection({
       new Set((timeline ?? []).filter((t) => t.optimistic).map((t) => t.id)),
     [timeline],
   );
+  // The switch appears once an App has taken part; until then People is All.
+  const [filter, setFilter] = useState<TimelineFilter>("all");
+  const botCount = useMemo(
+    () => filterTimelineEvents(events, "bots").length,
+    [events],
+  );
+  const shown = useMemo(
+    () => filterTimelineEvents(events, botCount > 0 ? filter : "all"),
+    [events, filter, botCount],
+  );
 
   const body =
-    events.length === 0 ? (
+    shown.length === 0 ? (
       loading && !timeline ? (
         <div className="min-h-24" aria-busy="true" />
       ) : (
-        <Centered>
-          No activity yet. Reviews and comments land here live.
-        </Centered>
+        <p className="text-fg3 m-0 text-xs">
+          {events.length === 0
+            ? "No activity yet. Reviews and comments land here live."
+            : "Nothing here for this filter."}
+        </p>
       )
     ) : (
-      <ol className="m-0 flex list-none flex-col p-3 pl-4">
-        {events.map((e, i) => (
+      <ol className="m-0 flex list-none flex-col">
+        {shown.map((e, i) => (
           <TimelineRow
             key={eventKey(e, i)}
             event={e}
-            last={i === events.length - 1}
+            last={i === shown.length - 1}
             prNumber={prNumber}
             optimistic={
               (e.kind === "comment" || e.kind === "review") &&
@@ -111,17 +132,38 @@ export function ReviewTimelineSection({
       </ol>
     );
 
+  const filterSwitch =
+    botCount > 0 ? (
+      <Tabs
+        value={filter}
+        onValueChange={(next) => setFilter(next as TimelineFilter)}
+      >
+        <TabsList aria-label="Show activity from">
+          <TabsTrigger value="all">All</TabsTrigger>
+          <TabsTrigger value="people">People</TabsTrigger>
+          <TabsTrigger value="bots">
+            Bots
+            <span className="text-fg3 font-normal tabular-nums">{botCount}</span>
+          </TabsTrigger>
+        </TabsList>
+      </Tabs>
+    ) : null;
+
   return (
     <div className="flex h-full min-h-0 flex-col">
       <div ref={timelineScrollRef} className="min-h-0 flex-1 overflow-auto">
-        {error && (
-          <div className="p-3 pb-0">
-            <ErrorCallout text={error} onRetry={onRetry} />
-          </div>
-        )}
-        {body}
+        <div className={SUBTAB_FRAME}>
+          {error && <ErrorCallout text={error} onRetry={onRetry} />}
+          <ReviewSection
+            title="Activity"
+            count={timeline?.length}
+            action={filterSwitch}
+          >
+            {body}
+          </ReviewSection>
+        </div>
       </div>
-      <CommentComposer onPost={onPostComment} />
+      <CommentComposer onPost={onPostComment} hostLabel={hostLabel} />
     </div>
   );
 }
@@ -224,6 +266,9 @@ function EventBody({
             {event.commit.authorLogin ?? event.commit.authorName}
           </span>
           <span className="text-fg2 shrink-0">committed</span>
+          <span className="bg-bg2 text-fg2 text-3xxs shrink-0 rounded-sm px-1.5 font-mono leading-5">
+            {event.commit.abbreviatedSha}
+          </span>
           <span className="text-fg1 min-w-0 truncate">
             {event.commit.message.split("\n")[0]}
           </span>
@@ -240,7 +285,13 @@ function EventBody({
       );
     case "review":
     case "comment":
-      return (
+      return isBotLogin(event.item.author) ? (
+        <BotTimelineCard
+          item={event.item}
+          prNumber={prNumber}
+          onAddToChat={onAddToChat}
+        />
+      ) : (
         <TimelineCard
           item={event.item}
           prNumber={prNumber}
@@ -295,16 +346,66 @@ const VERDICT: Record<string, { label: string; cls: string }> = {
   DISMISSED: { label: "Dismissed", cls: "bg-bg2-hover text-fg2" },
 };
 
+/** An App's review or comment as one line until Show. */
+function BotTimelineCard({
+  item,
+  prNumber,
+  onAddToChat,
+}: {
+  item: ReviewTimelineEntry;
+  prNumber: number;
+  onAddToChat: (text: string) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  if (open)
+    return (
+      <TimelineCard
+        item={item}
+        prNumber={prNumber}
+        optimistic={false}
+        onAddToChat={onAddToChat}
+        onHide={() => setOpen(false)}
+      />
+    );
+  return (
+    <div
+      data-review-bot-event=""
+      className={cn(REVIEW_CARD, "flex min-h-10 items-center gap-2 py-1.5 pr-1.5 pl-3 text-xs")}
+    >
+      <span className="text-fg1 min-w-0 truncate font-medium">
+        {appDisplayName(item.author)}
+      </span>
+      <Badge variant="neutral">Bot</Badge>
+      <span className="text-fg2 min-w-0 flex-1 truncate">
+        {item.kind === "review" ? "left a review" : "commented"}
+      </span>
+      <span className="text-fg3 shrink-0">{relTime(item.createdAt)}</span>
+      <Button
+        variant="ghost"
+        size="compact"
+        className="text-fg2"
+        aria-expanded={false}
+        onClick={() => setOpen(true)}
+      >
+        Show
+      </Button>
+    </div>
+  );
+}
+
 function TimelineCard({
   item,
   prNumber,
   optimistic,
   onAddToChat,
+  onHide,
 }: {
   item: ReviewTimelineEntry;
   prNumber: number;
   optimistic: boolean;
   onAddToChat: (text: string) => void;
+  /** Folds an App's card back to its one line. */
+  onHide?: () => void;
 }) {
   const verdict =
     item.kind === "review" ? VERDICT[item.state.toUpperCase()] : undefined;
@@ -312,14 +413,16 @@ function TimelineCard({
   return (
     <div
       className={cn(
-        "border-border2 bg-bg2 rounded-lg border transition-opacity duration-120 ease-out",
+        REVIEW_CARD,
+        "transition-opacity duration-120 ease-out",
         optimistic && "opacity-70",
       )}
     >
-      <div className="flex items-center gap-2 px-3 pt-2.5 text-xs">
+      <div className="flex min-h-9 items-center gap-2 pt-1.5 pr-1.5 pl-3 text-xs">
         <span className="text-fg1 min-w-0 truncate font-medium">
-          @{item.author}
+          {appDisplayName(item.author)}
         </span>
+        {isBotLogin(item.author) && <Badge variant="neutral">Bot</Badge>}
         {verdict && (
           <span
             className={cn(
@@ -335,24 +438,34 @@ function TimelineCard({
         </span>
         <div className="flex-1" />
         {item.body && !optimistic && (
-          <Tooltip label="Quote">
-            <button
-              type="button"
-              onClick={() =>
-                onAddToChat(
-                  buildReviewCommentContext({
-                    prNumber,
-                    author: item.author,
-                    state: item.kind === "review" ? item.state : "",
-                    body: item.body,
-                  }),
-                )
-              }
-              className="text-2xxs text-fg2 hover:bg-bg2-hover hover:text-fg1 flex shrink-0 items-center gap-1 rounded-sm px-1.5 py-0.5 transition-colors duration-120 ease-out"
-            >
-              <MessageSquarePlus className="size-3" /> Add to chat
-            </button>
-          </Tooltip>
+          <Button
+            variant="ghost"
+            size="compact"
+            className="text-fg2"
+            onClick={() =>
+              onAddToChat(
+                buildReviewCommentContext({
+                  prNumber,
+                  author: item.author,
+                  state: item.kind === "review" ? item.state : "",
+                  body: item.body,
+                }),
+              )
+            }
+          >
+            Add to chat
+          </Button>
+        )}
+        {onHide && (
+          <Button
+            variant="ghost"
+            size="compact"
+            className="text-fg2"
+            aria-expanded
+            onClick={onHide}
+          >
+            Hide
+          </Button>
         )}
       </div>
       {item.body ? (
@@ -377,8 +490,10 @@ function TimelineCard({
 
 function CommentComposer({
   onPost,
+  hostLabel,
 }: {
   onPost: (body: string) => Promise<void>;
+  hostLabel: string;
 }) {
   const [value, setValue] = useState("");
   const [busy, setBusy] = useState(false);
@@ -406,7 +521,7 @@ function CommentComposer({
   };
 
   return (
-    <div className="border-border1 shrink-0 border-t p-3">
+    <div className="border-border1 shrink-0 border-t px-5 pt-3 pb-4">
       {error && (
         <div className="mb-2">
           <ErrorCallout text={error} />
@@ -427,18 +542,20 @@ function CommentComposer({
         }}
       />
       <div className="mt-2 flex items-center gap-2">
-        <span className="text-2xxs text-muted-fg flex items-center gap-1">
-          <Kbd>⌘↵</Kbd> to comment
+        <span className="text-fg3 text-3xxs flex items-center gap-1 leading-4">
+          <Globe aria-hidden className="size-3" /> Posts to {hostLabel}
         </span>
         <div className="flex-1" />
         <Button
-          size="sm"
+          size="compact"
           variant="secondary"
+          aria-keyshortcuts="Meta+Enter Control+Enter"
           disabled={busy || !value.trim()}
           onClick={() => void submit()}
         >
           {busy && <ZerosSpinner size={16} />}
           Comment
+          <ButtonShortcut keys="⌘↵" />
         </Button>
       </div>
     </div>

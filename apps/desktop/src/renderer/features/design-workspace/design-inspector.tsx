@@ -766,7 +766,7 @@ function InspectorEditField({
         {hint ? (
           <Tooltip label={hint}>
             <span
-              className="bg-highlighted-bright mr-2 size-1.5 shrink-0 rounded-full"
+              className="bg-fg3 mr-2 size-1.5 shrink-0 rounded-full"
               aria-label={hint}
               role="img"
             />
@@ -775,7 +775,7 @@ function InspectorEditField({
         {motion ? (
           <div
             className={cn(
-              "zd-field-motion absolute inset-y-0 right-0 flex items-center pr-0.5 pl-3",
+              "zd-field-motion absolute inset-y-0 right-0 flex items-center",
               motionPersistent && "zd-field-motion-active",
             )}
           >
@@ -2246,7 +2246,7 @@ export const DesignInspector = React.memo(function DesignInspector({
     <section className="border-border1 shrink-0 border-b">
       <div
         data-design-inspector-header=""
-        className="flex h-10 min-w-0 items-center gap-2 px-3"
+        className="flex h-9 min-w-0 items-center gap-2 pr-1.5 pl-3"
       >
         {selectionName === "Page" && workspaceId && pages?.length ? (
           <DesignPagePicker workspaceId={workspaceId} directoryId={previewDirectoryId} pages={pages}
@@ -2386,12 +2386,12 @@ export const DesignInspector = React.memo(function DesignInspector({
 
             {styleTargetNodeId && errors.length > 0 ? (
               <Tooltip label={`${firstBlockingReason}: ${errors[0]?.message}`}>
-                <PanelHeader as="section" size="panel" className="text-red-primary">
+                <section className="bg-red-bg text-red-fg flex min-h-9 shrink-0 items-center gap-2 px-3 py-1.5">
                   <AlertTriangle className="size-3.5 shrink-0" />
-                  <span className="text-3xxs min-w-0 flex-1 truncate">
+                  <span className="text-3xxs min-w-0 flex-1 truncate leading-4">
                     {firstBlockingReason}
                   </span>
-                </PanelHeader>
+                </section>
               </Tooltip>
             ) : null}
 

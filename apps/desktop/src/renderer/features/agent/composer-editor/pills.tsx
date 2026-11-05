@@ -29,7 +29,7 @@ import { cn } from "../../../shared/ui/cn";
 import { FileTypeIcon } from "./file-type-icon";
 import { useComposerEditorContext } from "./composer-editor-context";
 // Shared pill chrome; editable pills use their leading icon slot for removal.
-import { PILL_SHELL, COMPOSER_PILL_SPACING } from "./pill-views";
+import { PILL_HOVER, PILL_SELECTED, PILL_SHELL, COMPOSER_PILL_SPACING } from "./pill-views";
 import {
   HoverCard,
   HoverCardContent,
@@ -121,7 +121,7 @@ export function MentionPill(props: NodeViewProps) {
         className={cn(
           PILL_SHELL,
           "composer-pill", COMPOSER_PILL_SPACING,
-          props.selected && "ring-highlighted-bright/40 ring-2",
+          PILL_HOVER, props.selected && PILL_SELECTED,
         )}
         contentEditable={false}
       >
@@ -143,7 +143,7 @@ export function MentionPill(props: NodeViewProps) {
           onPointerEnter={() => { if (canOpen) warmFilePill(ctx.cwd, attrs.path); }}
           onFocus={() => { if (canOpen) warmFilePill(ctx.cwd, attrs.path); }}
           onClick={() => { if (canOpen) openFilePill(ctx.cwd, attrs.path); }}
-          className="m-0 min-w-0 border-0 bg-transparent p-0 text-inherit disabled:opacity-100">
+          className="m-0 min-w-0 border-0 bg-transparent p-0 text-inherit hover:bg-transparent disabled:opacity-100">
           <span className="max-w-[18rem] truncate">{attrs.label}</span>
         </Button>
       </NodeViewWrapper>
@@ -169,7 +169,7 @@ export function SkillPill(props: NodeViewProps) {
   const title = library?.path || file || `/${name}`;
   return <Tooltip label={title}>
     <NodeViewWrapper as="span" data-skill-pill="" contentEditable={false}
-      className={cn(PILL_SHELL, "composer-pill", COMPOSER_PILL_SPACING, props.selected && "ring-highlighted-bright/40 ring-2")}>
+      className={cn(PILL_SHELL, "composer-pill", COMPOSER_PILL_SPACING, PILL_HOVER, props.selected && PILL_SELECTED)}>
       <PillRemoveButton label={label} disabled={!ctx.editable} onRemove={() => removePill(props)}>
         <Book className="size-3" />
       </PillRemoveButton>
@@ -178,7 +178,7 @@ export function SkillPill(props: NodeViewProps) {
         onPointerEnter={() => { if (canOpen) { if (library) warmSkillPill(ctx.cwd, library); else if (file) warmFilePill(ctx.cwd, file); } }}
         onFocus={() => { if (canOpen) { if (library) warmSkillPill(ctx.cwd, library); else if (file) warmFilePill(ctx.cwd, file); } }}
         onClick={() => { if (canOpen) { if (library) openSkillPill(ctx.cwd, library); else if (file) openFilePill(ctx.cwd, file); } }}
-        className="m-0 min-w-0 border-0 bg-transparent p-0 text-inherit disabled:opacity-100">
+        className="m-0 min-w-0 border-0 bg-transparent p-0 text-inherit hover:bg-transparent disabled:opacity-100">
         <span className="max-w-[18rem] truncate">{label}</span>
       </Button>
     </NodeViewWrapper>
@@ -225,11 +225,11 @@ function AttachmentGroupPill(props: NodeViewProps) {
   const label = <><span className="max-w-[16rem] truncate">{name}</span><span className="text-muted-fg shrink-0 text-xxs">+{ids.length - 1}</span></>;
   return <Tooltip label={`${name} · ${ids.length} files${invalid ? ` · ${issues[0]}${issues.length > 1 ? ` (+${issues.length - 1} more)` : ""}` : saving ? " · Saving attachments" : ""}`}>
     <NodeViewWrapper as="span" contentEditable={false} data-attachment-pill="" data-attachment-group="" aria-busy={saving || undefined}
-      className={cn(PILL_SHELL, "composer-pill", COMPOSER_PILL_SPACING, props.selected && "ring-highlighted-bright/40 ring-2", invalid && "border-yellow-icon/40")}>
+      className={cn(PILL_SHELL, "composer-pill", COMPOSER_PILL_SPACING, PILL_HOVER, props.selected && PILL_SELECTED, invalid && "border-yellow-icon/40 hover:border-yellow-icon/40")}>
       <PillRemoveButton label={name} disabled={!ctx.editable} onRemove={() => removePill(props)}><Files size={13} /></PillRemoveButton>
       {ctx.onOpenAttachment ? <DropdownMenu>
         <DropdownMenuTrigger asChild><Button variant="ghost" aria-label={`Open ${name}, ${ids.length} files`} disabled={!ctx.attachmentImagesActive}
-          onMouseDown={event => event.preventDefault()} className="m-0 flex min-w-0 gap-2 border-0 bg-transparent p-0 text-inherit">{label}</Button></DropdownMenuTrigger>
+          onMouseDown={event => event.preventDefault()} className="m-0 flex min-w-0 gap-2 border-0 bg-transparent p-0 text-inherit hover:bg-transparent data-[state=open]:bg-transparent">{label}</Button></DropdownMenuTrigger>
         <DropdownMenuContent onCloseAutoFocus={event => {
           const fileId = previewAfterMenu.current;
           previewAfterMenu.current = null;
@@ -243,7 +243,7 @@ function AttachmentGroupPill(props: NodeViewProps) {
           ctx.onOpenAttachment?.(file);
         }}>{available.map(file => <DropdownMenuItem key={file.id} onSelect={() => { previewAfterMenu.current = file.id; }}>{file.name}</DropdownMenuItem>)}</DropdownMenuContent>
       </DropdownMenu> : <Button variant="ghost" aria-label={`Open ${name}, ${ids.length} files`} disabled={!ctx.attachmentImagesActive || !ctx.cwd || !available.length}
-        onMouseDown={event => event.preventDefault()} onClick={open} className="m-0 flex min-w-0 gap-2 border-0 bg-transparent p-0 text-inherit">{label}</Button>}
+        onMouseDown={event => event.preventDefault()} onClick={open} className="m-0 flex min-w-0 gap-2 border-0 bg-transparent p-0 text-inherit hover:bg-transparent data-[state=open]:bg-transparent">{label}</Button>}
     </NodeViewWrapper>
   </Tooltip>;
 }
@@ -333,9 +333,9 @@ function SingleAttachmentPill(props: NodeViewProps) {
       className={cn(
         PILL_SHELL,
         "composer-pill", COMPOSER_PILL_SPACING,
-        props.selected && "ring-highlighted-bright/40 ring-2",
+        PILL_HOVER, props.selected && PILL_SELECTED,
         invalid &&
-          "border-yellow-icon/40 text-fg2 opacity-85 [&_[data-composer-pill-icon]]:grayscale",
+          "border-yellow-icon/40 hover:border-yellow-icon/40 text-fg2 opacity-85 [&_[data-composer-pill-icon]]:grayscale",
       )}
       contentEditable={false}
     >
@@ -368,7 +368,7 @@ function SingleAttachmentPill(props: NodeViewProps) {
         disabled={!canOpenSource && !canOpen}
         aria-label={`Open ${attrs.name}`}
         data-file-path={diskPath}
-        className="m-0 inline-flex min-w-0 items-center gap-1 border-0 bg-transparent p-0 font-[inherit] text-inherit disabled:cursor-default disabled:opacity-100"
+        className="m-0 inline-flex min-w-0 items-center gap-1 border-0 bg-transparent p-0 font-[inherit] text-inherit hover:bg-transparent data-[state=open]:bg-transparent disabled:cursor-default disabled:opacity-100"
       >
         {/* Transfer status belongs in the tooltip: adding/removing inline
             text resizes this pill and rewraps every later file in a drop. */}

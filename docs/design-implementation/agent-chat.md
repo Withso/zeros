@@ -55,7 +55,7 @@ Code notes:
 Owner today: `shell/conversation/workspace-header.tsx · conversation-summary.tsx · shell/workbench/toggle-button.tsx`
 
 Changes:
-- Icon buttons: 6px corners (4 at 20) and a bg2-highlight hover; toggles add border4.
+- Icon buttons: 6px corners (4 at 20) and a bg2-highlight hover; a pressed toggle fills selected-bg with no edge.
 
 Code notes:
 - The leading slot is a 16px icon, a 24px Local badge or a 28px Cloud button, so the name starts at 28, 78 or 40px; trailing actions mix a 28px Summary with a 24px toggle. (`shell/conversation/workspace-header.tsx:52,56,79,83 · shell/conversation/cloud-workspace-details.tsx:55-56 · shell/conversation/conversation-summary.tsx:174-175`)
@@ -197,6 +197,10 @@ No change beyond the shared foundation and primitives.
 ## Composer · Context pills (`ChatComposerContext`)
 
 Owner today: `features/agent/added-directories.tsx · composer-editor/pills.tsx · composer-editor/pill-views.tsx · composer-editor/file-type-icon.tsx`
+
+Changes:
+- A pill the caret selects fills with selected-bg and keeps its border2 edge; the 2px highlighted-bright ring is gone. A workspace link steps up to blue-pill-hover.
+- A hovered pill fills bg2-highlight on border3 as one shape (`PILL_HOVER`), in the composer, on sent attachments and on chat links; before, only the label's inner button filled, inside the pill.
 
 Code notes:
 - Four chip geometries in the card: 20px inline pills, 28px /add-dir chips, a 28px Design frame chip with a camera button, and a 28px Design tag. (`features/agent/composer-editor/pill-views.tsx:23-25 · features/agent/added-directories.tsx:50-63 · features/agent/composer-design-frame.tsx:176-184`)
@@ -364,7 +368,8 @@ Code notes:
 
 Owner today: `features/agent/renderers/event-stripe.tsx · event-row.tsx · event-meta.ts · styles/global/runtime-content.css (.zeros-working-feed)`
 
-No change beyond the shared foundation and primitives.
+Changes:
+- Every tool description (a command, a thinking summary, a search) is one 20px chip, 12/16 on bg2 with 2px by 6px padding: the height of the file tags beside it, inside the 28px row.
 
 ## Tool calls · Bash (`ChatToolBash`)
 
@@ -372,6 +377,7 @@ Owner today: `features/agent/renderers/event-meta.ts (execute) · event-row.tsx 
 
 Changes:
 - Expanded tool calls open into a bg1 card with a border1 edge; the row keeps its look and failures stay red.
+- The command preview is the 20px description chip (it was 18px).
 
 Code notes:
 - Command previews are 22px chips on bg1-hover while file rows use a 20px tag with border3 and a 13px icon. (`features/agent/renderers/event-row.tsx:170-174,251 · features/agent/renderers/file-tag.tsx:41,45`)

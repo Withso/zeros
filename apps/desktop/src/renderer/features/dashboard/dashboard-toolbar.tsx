@@ -21,7 +21,6 @@ import {
   DropdownMenuRadioItem,
   DropdownMenuCheckboxItem,
 } from "../../shared/ui/primitives/dropdown-menu";
-import { cn } from "../../shared/ui/cn";
 import {
   updateDashboardPreferences,
   type DashboardPreferences,
@@ -54,8 +53,8 @@ const DISPLAY_OPTIONS: { value: keyof DashboardDisplay; label: string }[] = [
 export function DashboardViewToggle({ view }: { view: DashboardView }) {
   return (
     // The segmented control: a 28px bg2 track with 24px items; the chosen
-    // item takes the shared segment tokens (bg4 in Dark, bg1 + border2 in
-    // Light), the same pair Tabs uses.
+    // item is IconButton's pressed fill, the selected-bg Tabs uses, with no
+    // edge.
     <div
       role="group"
       aria-label="Dashboard view"
@@ -72,11 +71,7 @@ export function DashboardViewToggle({ view }: { view: DashboardView }) {
             size="compact"
             label={label}
             aria-pressed={view === value}
-            className={cn(
-              "hover:bg-transparent",
-              view === value &&
-                "border-(--segment-active-border) bg-(--segment-active-bg) text-fg1 hover:bg-(--segment-active-bg)",
-            )}
+            className="hover:bg-transparent"
             onClick={() => updateDashboardPreferences({ view: value })}
           >
             <Icon className="size-3.5" aria-hidden="true" />

@@ -102,43 +102,34 @@ export function AuthorAvatar({
 
 // ── collapsible group header ─────────────────────────────────
 
-/** "Failed 2 ⌄" — the Checks tab's group rows and the Changes tab's file
- *  headers share this affordance. */
+/** A collapsible group's header: chevron, neutral label and count. */
 export function GroupHeader({
   label,
   count,
   open,
   onToggle,
-  tone = "default",
 }: {
   label: string;
   count: number;
   open: boolean;
   onToggle: () => void;
-  tone?: "default" | "failure" | "pending" | "success";
 }) {
-  const toneCls =
-    tone === "failure"
-      ? "text-red-primary"
-      : tone === "pending"
-        ? "text-yellow-primary"
-        : tone === "success"
-          ? "text-green-primary"
-          : "text-fg1";
   return (
     <button
       type="button"
+      aria-expanded={open}
       onClick={onToggle}
-      className="hover:bg-bg1-hover flex h-8 w-full items-center gap-2 px-3 text-left transition-colors duration-120 ease-out"
+      className="text-fg2 hover:text-fg1 flex h-8 w-full items-center gap-1.5 rounded-md px-2.5 text-left text-xs transition-colors duration-120 ease-out"
     >
       <ChevronDown
+        aria-hidden
         className={cn(
-          "text-fg2 size-3.5 shrink-0 transition-transform duration-120 ease-out",
+          "text-fg3 size-3.5 shrink-0 transition-transform duration-120 ease-out",
           !open && "-rotate-90",
         )}
       />
-      <span className={cn("text-xs font-medium", toneCls)}>{label}</span>
-      <span className="text-muted-fg text-xs tabular-nums">{count}</span>
+      <span>{label}</span>
+      <span className="text-fg3 tabular-nums">{count}</span>
     </button>
   );
 }

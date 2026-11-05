@@ -10,7 +10,7 @@ Owner today: `shell/app-sidebar.tsx`
 
 Changes:
 - Rows are 32 with 6px corners; the selected row fills bg2-highlight, hover keeps the sidebar hover.
-- Icon buttons: 6px corners (4 at 20) and a bg2-highlight hover; toggles add border4.
+- Icon buttons: 6px corners (4 at 20) and a bg2-highlight hover; a pressed toggle fills selected-bg with no edge.
 - One 16px icon column: switcher, destinations, section labels and rows all start at 16px; trailing controls end 12px in.
 - The profile row is a fixed 48px with an 8px gap and a 12px fg3 email.
 

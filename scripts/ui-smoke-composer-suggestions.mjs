@@ -105,8 +105,30 @@ export async function runComposerSuggestionsSmoke({ page, check, harnessBase }) 
     await expect.poll(async () => {
       const card = await host.boundingBox();
       const popup = await menu.boundingBox();
-      return !!card && !!popup && Math.abs(popup.x - card.x) < 2 && Math.abs(popup.width - card.width) < 3 && Math.abs(popup.y + popup.height + 6 - card.y) < 3;
+      return !!card && !!popup && Math.abs(popup.x - card.x) < 1 && Math.abs(popup.width - card.width) < 1 && Math.abs(popup.y + popup.height + 8 - card.y) < 1;
     }).toBe(true);
+    // Docked above the composer, the picker is one more card on the
+    // composer's surface: sidebar-bg, a border2 edge and no lift.
+    for (const theme of ["dark", "light"]) {
+      await page.evaluate(next => { document.documentElement.dataset.theme = next; }, theme);
+      const surface = await menu.evaluate(node => {
+        const probe = document.createElement("span");
+        probe.style.backgroundColor = "var(--sidebar-bg)";
+        probe.style.borderTopColor = "var(--border2)";
+        document.body.append(probe);
+        const expected = getComputedStyle(probe);
+        const actual = getComputedStyle(node);
+        const result = {
+          background: actual.backgroundColor === expected.backgroundColor,
+          border: actual.borderTopColor === expected.borderTopColor,
+          shadow: actual.boxShadow,
+        };
+        probe.remove();
+        return result;
+      });
+      expect(surface, theme).toEqual({ background: true, border: true, shadow: "none" });
+    }
+    await page.evaluate(() => { document.documentElement.dataset.theme = "dark"; });
     // IME candidate confirmation must reach the input method, not accept a
     // suggestion or submit the draft underneath the menu.
     await editor.evaluate(element => {
@@ -121,7 +143,7 @@ export async function runComposerSuggestionsSmoke({ page, check, harnessBase }) 
     await expect(editor).toHaveText("Please run /init ");
     await expect(editor.locator("[data-slash-command]")).toHaveText("/init");
     expect(await page.evaluate(() => window.__composerActionCalls.includes("submit"))).toBe(false);
-    check(`${label}: mid-message slash menu opens above the composer at its width, accents commands, respects IME and consumes Enter`, true);
+    check(`${label}: mid-message slash menu opens 8px above the composer at its width on the composer's surface, accents commands, respects IME and consumes Enter`, true);
 
     await editor.fill("Read @App");
     const mentions = page.locator('[data-composer-suggestions="@"]');
@@ -129,7 +151,7 @@ export async function runComposerSuggestionsSmoke({ page, check, harnessBase }) 
     await expect(mentions).toHaveAttribute("data-side", "top");
     await expect.poll(async () => {
       const card = await host.boundingBox(), popup = await mentions.boundingBox();
-      return !!card && !!popup && Math.abs(popup.x - card.x) < 2 && Math.abs(popup.width - card.width) < 3 && Math.abs(popup.y + popup.height + 6 - card.y) < 3;
+      return !!card && !!popup && Math.abs(popup.x - card.x) < 1 && Math.abs(popup.width - card.width) < 1 && Math.abs(popup.y + popup.height + 8 - card.y) < 1;
     }).toBe(true);
     await editor.press("Escape");
     check(`${label}: file mentions share the above-composer placement`, true);

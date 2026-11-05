@@ -179,7 +179,7 @@
 .zd-motion-setting {
   display: grid;
   min-width: 0;
-  grid-template-columns: 56px minmax(0, 1fr);
+  grid-template-columns: 72px minmax(0, 1fr);
   align-items: center;
   gap: 8px;
 }

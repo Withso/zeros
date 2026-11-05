@@ -33,6 +33,7 @@ import {
 } from "./design-canvas-camera";
 import { DesignToolbarButton } from "./design-inspector-kit";
 import { useDesignSavedEditing } from "./design-saved-editing";
+import { DESIGN_CANVAS_CHIP_CLS } from "./design-canvas-chip";
 import {
   designAgentDraftPlacements,
   designAgentDraftsByFile,
@@ -158,7 +159,7 @@ function DesignAgentDraftBadge({ entry }: { entry: DesignAgentDraftEntry }) {
         transform: `translateY(${designCanvasScreenPixels(-8)}) scale(${DESIGN_CANVAS_INVERSE_ZOOM})`,
       }}
     >
-      <span className="border-border2 bg-bg1 text-fg2 text-2xxs inline-flex items-center gap-1 rounded-sm border px-1.5 leading-4 font-medium whitespace-nowrap">
+      <span className={cn("bg-bg1 text-fg2", DESIGN_CANVAS_CHIP_CLS)}>
         {saved ? (
           <Check aria-hidden className="size-3" />
         ) : (

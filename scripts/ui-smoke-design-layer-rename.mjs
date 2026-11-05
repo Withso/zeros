@@ -77,6 +77,31 @@ export async function runDesignLayerRenameSmoke({ page, waitFor, check }) {
         input.selectionEnd === input.value.length,
     ),
   );
+  const field = await nameInput.evaluate((input) => {
+    const probe = document.createElement("span");
+    probe.style.background = "var(--bg1)";
+    input.parentElement.append(probe);
+    const bg1 = getComputedStyle(probe).backgroundColor;
+    probe.remove();
+    const style = getComputedStyle(input);
+    return {
+      height: input.getBoundingClientRect().height,
+      edge: style.borderTopColor,
+      fill: style.backgroundColor,
+      bg1,
+      padding: style.paddingLeft,
+      radius: style.borderTopLeftRadius,
+    };
+  });
+  check(
+    "the rename field is the 24px inline field on bg1",
+    field.height === 24 &&
+      field.edge === "rgba(0, 0, 0, 0)" &&
+      field.fill === field.bg1 &&
+      field.padding === "6px" &&
+      field.radius === "4px",
+    JSON.stringify(field),
+  );
   const before = await operations("design.transaction.apply");
   await nameInput.fill('  Product "headline" & intro  ');
   await nameInput.press("Enter");

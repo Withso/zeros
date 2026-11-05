@@ -279,6 +279,7 @@ import {
   type DesignAgentRevealTarget,
 } from "./design-agent-drafts";
 import { errorMessage } from "./design-workspace-error";
+import { DESIGN_CANVAS_CHIP_CLS } from "./design-canvas-chip";
 import {
   DESIGN_RESIZE_HANDLES,
   DesignConstraintGuides,
@@ -7995,7 +7996,7 @@ export const DesignCanvas = React.memo(function DesignCanvas({
                   >
                     <span
                       data-design-group-size=""
-                      className="zd-design-selection-label text-2xxs absolute top-full left-1/2 rounded-sm px-1.5 py-0.5 leading-4 font-medium whitespace-nowrap tabular-nums"
+                      className={cn("zd-design-selection-label absolute top-full left-1/2", DESIGN_CANVAS_CHIP_CLS)}
                       style={{
                         marginTop: designCanvasScreenPixels(4),
                         transform: `translateX(-50%) scale(${DESIGN_CANVAS_INVERSE_ZOOM})`,
@@ -8252,7 +8253,7 @@ export const DesignCanvas = React.memo(function DesignCanvas({
                             <>
                               <span
                                 data-design-rotation-feedback=""
-                                className="bg-inverted-bg text-inverted-fg text-2xxs pointer-events-none absolute top-full right-full hidden rounded-sm px-1.5 py-0.5 leading-4 font-medium whitespace-nowrap tabular-nums"
+                                className={cn("bg-inverted-bg text-inverted-fg pointer-events-none absolute top-full right-full hidden", DESIGN_CANVAS_CHIP_CLS)}
                                 style={{
                                   marginTop: designCanvasScreenPixels(4),
                                   marginRight: designCanvasScreenPixels(4),
@@ -8400,7 +8401,7 @@ export const DesignCanvas = React.memo(function DesignCanvas({
                     data-design-size-modes={
                       designFrameSizeModes(frameLayoutOwnerDetails) ?? undefined
                     }
-                    className="zd-design-selection-label text-2xxs pointer-events-none absolute top-full left-1/2 z-[3] rounded-sm px-1.5 py-0.5 leading-4 font-medium whitespace-nowrap tabular-nums"
+                    className={cn("zd-design-selection-label pointer-events-none absolute top-full left-1/2 z-[3]", DESIGN_CANVAS_CHIP_CLS)}
                     style={{
                       marginTop: designCanvasScreenPixels(4),
                       transform: `translateX(-50%) scale(${DESIGN_CANVAS_INVERSE_ZOOM})`,
@@ -8467,7 +8468,7 @@ export const DesignCanvas = React.memo(function DesignCanvas({
           >
             <span
               data-design-creation-size=""
-              className="zd-design-selection-label text-2xxs absolute bottom-full left-0 origin-bottom-left rounded-sm px-1.5 py-0.5 leading-4 font-medium whitespace-nowrap tabular-nums"
+              className={cn("zd-design-selection-label absolute bottom-full left-0 origin-bottom-left", DESIGN_CANVAS_CHIP_CLS)}
             />
           </div>
           <div

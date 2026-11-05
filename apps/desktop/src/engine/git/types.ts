@@ -227,6 +227,27 @@ export interface PR {
    *  island's "Require branch to be up to date ( N commits behind )" label.
    *  Null/undefined = unknown. */
   behindBy?: number | null;
+  /** Pull-request totals (GitHub's pulls.get). Absent from list reads and on
+   *  older engines, where Review counts the published diff instead. */
+  additions?: number;
+  deletions?: number;
+  changedFiles?: number;
+  authorAvatarUrl?: string | null;
+  /** Review's rail. Absent on older engines; empty when there are none. */
+  requestedReviewers?: PrPerson[];
+  assignees?: PrPerson[];
+  labels?: PrLabel[];
+}
+
+export interface PrPerson {
+  login: string;
+  avatarUrl: string | null;
+}
+
+export interface PrLabel {
+  name: string;
+  /** Six-digit hex without the #, as GitHub stores it. */
+  color: string | null;
 }
 
 export interface CreateWorkspaceOptions {

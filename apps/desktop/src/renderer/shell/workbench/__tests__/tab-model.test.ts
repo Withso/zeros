@@ -806,6 +806,26 @@ describe("normalizeWorkbenchTabs", () => {
     );
   });
 
+  // Review's sub-tabs became Overview, Description, Activity, Checks and
+  // Commits; the Changes sub-tab's diff moved out (plans.md §1.1).
+  it("restores each retired Review sub-tab on its new tab", () => {
+    const restore = (reviewSubtab: string) =>
+      normalizeWorkbenchTabs([
+        {
+          id: "review",
+          type: "review",
+          title: "Review",
+          reviewSubtab,
+        } as unknown as WorkbenchTab,
+      ]).find((tab) => tab.id === "review")?.reviewSubtab;
+    expect(restore("changes")).toBe("overview");
+    expect(restore("reviews")).toBe("activity");
+    for (const kept of ["overview", "description", "activity", "checks", "commits"]) {
+      expect(restore(kept)).toBe(kept);
+    }
+    expect(restore("timeline")).toBe(undefined);
+  });
+
   it("restores literal file paths without trimming them into another filename", () => {
     const tabs = normalizeWorkbenchTabs([
       { id: "literal-file", type: "files", title: "notes.ts", filePath: " notes.ts " },

@@ -614,12 +614,10 @@ function FilterTab({
       aria-pressed={active}
       onClick={onClick}
       // A 28px pill; a repository icon pulls the label 4px from the edge. The
-      // selected pill keeps its bg2-hover under the pointer.
+      // selected pill is Ghost's pressed fill, with no edge.
       className={cn(
         "h-7 shrink-0 gap-1.5 rounded-full px-3 has-[[data-repository-pill]]:pl-1",
-        active
-          ? "bg-bg2-hover text-fg1 hover:bg-bg2-hover hover:text-fg1 font-medium"
-          : "text-fg2 hover:bg-bg1-hover hover:text-fg1 font-normal",
+        !active && "text-fg2 hover:bg-bg1-hover hover:text-fg1 font-normal",
       )}
     >
       {children}

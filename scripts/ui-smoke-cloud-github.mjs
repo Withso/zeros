@@ -229,6 +229,20 @@ export async function runCloudGithubSmoke({
   await expect(app.getByText("Finish signing in on GitHub.")).toHaveCount(0);
   await expect(pat.getByText("Signed in as token-person")).toBeVisible();
   check("cloud App OAuth completes without deleting the saved PAT", true);
+  // The chosen method fills; its edge stays the resting border2.
+  const cardShell = (card) =>
+    card.evaluate((element) => {
+      const style = getComputedStyle(element);
+      return { border: style.borderTopColor, background: style.backgroundColor };
+    });
+  const chosenCard = await cardShell(app);
+  const otherCard = await cardShell(pat);
+  check(
+    "the chosen cloud GitHub method fills and keeps its resting edge",
+    chosenCard.border === otherCard.border &&
+      chosenCard.background !== otherCard.background,
+    JSON.stringify({ chosenCard, otherCard }),
+  );
 
   if (screenshotDirectory) {
     for (const theme of ["dark", "light"]) {

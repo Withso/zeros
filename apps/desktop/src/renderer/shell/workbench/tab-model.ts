@@ -36,11 +36,15 @@ export type WorkbenchTabType =
   | "files"
   | "simulator";
 export type ReviewSubtab =
-  | "changes"
+  | "overview"
   | "description"
-  | "commits"
+  | "activity"
   | "checks"
-  | "reviews";
+  | "commits"
+  /** The published pull request diff, where Post to PR works. It has no
+   *  sub-tab: the Overview rail's Open changes reaches it until posting
+   *  moves to the Changes tab (docs/design-implementation/plans.md §1.2). */
+  | "changes";
 export type ChangesViewMode = "flat" | "tree";
 export type ViewerMode = "diff" | "preview" | "edit";
 
@@ -560,19 +564,27 @@ const CURRENT_TAB_TYPES = new Set<WorkbenchTabType>([
   "simulator",
 ]);
 const REVIEW_SUBTABS = new Set<ReviewSubtab>([
-  "changes",
+  "overview",
   "description",
-  "commits",
+  "activity",
   "checks",
-  "reviews",
+  "commits",
+  "changes",
 ]);
+/** Retired sub-tabs land on their successors: the Changes sub-tab became
+ *  Overview (its diff lives in the Changes tab) and Reviews became Activity. */
+const RETIRED_REVIEW_SUBTABS: Readonly<Record<string, ReviewSubtab>> = {
+  changes: "overview",
+  reviews: "activity",
+};
 const CHANGES_VIEW_MODES = new Set<ChangesViewMode>(["flat", "tree"]);
 const VIEWER_MODES = new Set<ViewerMode>(["diff", "preview", "edit"]);
 
 function validReviewSubtab(raw: unknown): ReviewSubtab | undefined {
-  return typeof raw === "string" && REVIEW_SUBTABS.has(raw as ReviewSubtab)
-    ? (raw as ReviewSubtab)
-    : undefined;
+  if (typeof raw !== "string") return undefined;
+  const retired = RETIRED_REVIEW_SUBTABS[raw];
+  if (retired) return retired;
+  return REVIEW_SUBTABS.has(raw as ReviewSubtab) ? (raw as ReviewSubtab) : undefined;
 }
 
 function validChangesView(raw: unknown): ChangesViewMode | undefined {

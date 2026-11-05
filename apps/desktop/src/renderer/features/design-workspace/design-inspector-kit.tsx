@@ -12,6 +12,10 @@ import { cn } from "../../shared/ui/cn";
 import { getLastInputModality } from "../../shared/ui/overlay-focus";
 import type { InspectorGlyphName } from "./design-layout-values";
 import {
+  useDesignSectionHidden,
+  type DesignAddableSection,
+} from "./design-addable-sections";
+import {
   PopoverAnchor,
   Select,
   SelectContent,
@@ -32,6 +36,9 @@ interface InspectorSectionProps extends Omit<
   actions?: React.ReactNode;
   /** A section with nothing authored renders as its header alone. */
   empty?: boolean;
+  /** An optional section: while empty it draws nothing and the Style tab's
+   * Add property menu lists it under `title`, running `onAdd` when chosen. */
+  addable?: DesignAddableSection;
   bodyClassName?: string;
 }
 
@@ -40,11 +47,18 @@ export function InspectorSection({
   title,
   actions,
   empty = false,
+  addable,
   className,
   bodyClassName,
   children,
   ...rest
 }: InspectorSectionProps) {
+  const hidden = useDesignSectionHidden(
+    addable,
+    empty,
+    typeof title === "string" ? title : (addable?.id ?? ""),
+  );
+  if (hidden) return null;
   const hasBody = !empty && React.Children.count(children) > 0;
   return (
     <section
@@ -73,12 +87,13 @@ interface InspectorIconButtonProps extends React.ButtonHTMLAttributes<HTMLButton
   /** Opt in for unfamiliar icons; routine add/remove actions stay quiet. */
   tooltip?: React.ReactNode;
   shortcut?: React.ReactNode;
-  /** 24px for headers and trailing row actions, 28px for a row control. */
-  size?: "header" | "row";
+  /** 24px for headers and trailing row actions, 28px for a row control, 20px
+   * inline over a field's end. */
+  size?: "header" | "row" | "inline";
   pressed?: boolean;
 }
 
-/** A quiet 24/28px glyph button with a name and optional hover help. It
+/** A quiet 20/24/28px glyph button with a name and optional hover help. It
  * forwards its ref so Popover/DropdownMenu triggers can wrap it. */
 export const InspectorIconButton = React.forwardRef<
   HTMLButtonElement,
@@ -110,7 +125,7 @@ export const InspectorIconButton = React.forwardRef<
         type="button"
         aria-label={label}
         aria-pressed={pressed}
-        data-size={size === "row" ? "row" : undefined}
+        data-size={size === "header" ? undefined : size}
         className={cn("zd-icon-button", className)}
         {...props}
       >
@@ -175,7 +190,7 @@ export function InspectorSelect<T extends string>({
         )}
       >
         {leading ? (
-          <span className="zd-field-label w-7" aria-hidden="true">
+          <span className="zd-field-label w-6" aria-hidden="true">
             {leading}
           </span>
         ) : null}

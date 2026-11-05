@@ -35,7 +35,7 @@ Changes:
 - Shortcut chips: 18 tall, bg2 + border2, 11/16 medium.
 - Tabs: 28 tall, 6px corners, hover bg1-hover, active bg2 in medium.
 - Headers: window 40 with 12 / 6 padding, panel 36 with 12 / 4.
-- Icon buttons: 6px corners (4 at 20) and a bg2-highlight hover; toggles add border4.
+- Icon buttons: 6px corners (4 at 20) and a bg2-highlight hover; a pressed toggle fills selected-bg with no edge.
 
 Code notes:
 - Screen states use a 20px LoaderCircle with 12px gaps (16px spinner elsewhere); controls pad 16px below against 12 for media. (`features/simulators/local-simulator-tab.tsx:99-111,399,429`)

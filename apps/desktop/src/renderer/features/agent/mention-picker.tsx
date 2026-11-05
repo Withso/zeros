@@ -7,7 +7,7 @@
 // the chosen item; parent handles text splicing.
 // ──────────────────────────────────────────────────────────
 
-import { PICKER_EMPTY_CLS, PICKER_HEADER_CLS, PICKER_LIST_CLS, PICKER_ROW_CLS, PICKER_WRAP_CLS } from "./picker-recipe";
+import { PICKER_EMPTY_CLS, PICKER_HEADER_CLS, PICKER_HINT_CLS, PICKER_KIND_CLS, PICKER_LIST_CLS, PICKER_NAME_CLS, PICKER_ROW_CLS, PICKER_WRAP_CLS } from "./picker-recipe";
 import React, { useEffect, useRef } from "react";
 import type { MentionItem, MentionKind } from "./mentions";
 import type { SuggestionStatus } from "./composer-editor/suggestion";
@@ -99,16 +99,10 @@ export function MentionPicker({
                 className="shrink-0"
               />
               <div className="flex min-w-0 flex-1 items-baseline gap-2">
-                <span className="text-fg1 max-w-[60%] shrink-0 truncate text-xs">{item.label}</span>
-                {item.hint && (
-                  <span className="text-fg2 min-w-0 flex-1 overflow-hidden text-xs text-ellipsis whitespace-nowrap">
-                    {item.hint}
-                  </span>
-                )}
+                <span className={PICKER_NAME_CLS}>{item.label}</span>
+                {item.hint && <span className={PICKER_HINT_CLS}>{item.hint}</span>}
               </div>
-              <span className="text-muted-fg shrink-0 text-xs">
-                {KIND_LABEL[item.kind]}
-              </span>
+              <span className={PICKER_KIND_CLS}>{KIND_LABEL[item.kind]}</span>
             </Button>
           );
         })}

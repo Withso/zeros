@@ -10,10 +10,10 @@ import ts from "typescript";
 export const CLASS_HELPERS = new Set(["cn", "clsx", "cx", "twMerge", "twJoin"]);
 
 // Slot class props follow the className / *ClassName convention.
-const CLASS_PROP_RE = /^(?:className|[a-z][A-Za-z0-9]*ClassName)$/;
+export const CLASS_PROP_RE = /^(?:className|[a-z][A-Za-z0-9]*ClassName)$/;
 
 // References from a class context also admit constants whose names lack CLASS.
-const CLASS_CONST_RE =
+export const CLASS_CONST_RE =
   /(?:^|_)CLASS(?:ES|NAME)?(?:_|$)|[a-z0-9](?:Class|Classes|ClassName)$/;
 
 /** Split a class string into tokens, never splitting inside [] or (). */

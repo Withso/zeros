@@ -294,11 +294,14 @@ export function WorkbenchPane({
   // an independent React snapshot; whichever tab refreshed last could disagree
   // with the other until its next request settled. Keeping one row above the
   // retained deck makes the status/action identity continuous across the hop.
+  // Review with a pull request draws Git status and PR status itself
+  // (Overview), so it has one Merge; without one it keeps the row's target
+  // branch and Create PR.
   const showSharedPrStatusRow =
     !!activeWorkspace &&
     !isLocalMainWorkspace(activeWorkspace) &&
     (activeWorkbenchTab?.type === "changes" ||
-      activeWorkbenchTab?.type === "review");
+      (activeWorkbenchTab?.type === "review" && activeWorkspace.prNumber == null));
   // Recent clean File views join the always-retained Browser/source surfaces;
   // this preserves tree/editor layout without mounting an unbounded tab set.
   const availableWorkbenchIds = useMemo(

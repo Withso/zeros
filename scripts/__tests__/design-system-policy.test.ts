@@ -7,6 +7,7 @@ import {
   baseUtility,
   collectFindings,
   compareToLedger,
+  findCssSelectionEdges,
   tally,
 } from "../design-system/ui-policy.mjs";
 
@@ -172,6 +173,85 @@ describe("class rules", () => {
       );`,
     );
     expect(keys(feature)).toEqual(["class-template-join:className", "class-template-join:className"]);
+  });
+
+  // Regression: pressed toggles, Ghost and Secondary buttons, Pills and the
+  // segmented Tabs drew border4 or border2 on their selected state.
+  it("flags an edge on a selected, pressed, active or current state, not focus or a checked box", () => {
+    const findings = findingsFor(
+      "apps/desktop/src/renderer/features/selected.tsx",
+      `export const S = () => (
+        <div className="aria-pressed:border-border4 data-[state=active]:border-(--segment-active-border) group-aria-pressed/row:ring-2 aria-[current=page]:border-b-fg1 data-[selected=true]:shadow-(--x) aria-selected:outline
+          aria-pressed:bg-selected-bg aria-pressed:border-transparent data-[state=active]:shadow-none aria-[current=page]:border-b-2 aria-pressed:focus-visible:ring-[3px] data-[state=checked]:border-inverted-bg hover:border-border4" />
+      );`,
+    );
+    expect(keys(findings)).toEqual(
+      [
+        "selection-edge:aria-[current=page]:border-b-fg1",
+        "selection-edge:aria-pressed:border-border4",
+        "selection-edge:aria-selected:outline",
+        "selection-edge:data-[selected=true]:shadow-(--x)",
+        "selection-edge:data-[state=active]:border-(--segment-active-border)",
+        "selection-edge:group-aria-pressed/row:ring-2",
+      ].sort(),
+    );
+  });
+
+  // Regression: the GitHub method cards drew border4 and the composer's pills
+  // a ring when chosen, through a condition the variant check never saw.
+  it("flags an edge a selection condition adds, not a fill-coloured box, a drop target or focus", () => {
+    const findings = findingsFor(
+      "apps/desktop/src/renderer/features/conditional.tsx",
+      `import { cn } from "@/renderer/shared/ui/cn";
+      const ROW_CLASS = (current: boolean) => (current ? "aria-hidden:bg-bg1 shadow-sm" : "");
+      export const C = ({ selected, isActive, tab, activeTab, dragActive, canConfigureActive, props, method }) => (
+        <>
+          <div className={cn("border", selected ? "border-border4 bg-bg1-hover" : "border-border2 hover:border-border3")} />
+          <span className={cn("pill", props.selected && "ring-highlighted-bright/40 ring-2")} />
+          <div className={cn(tab === activeTab && "inset-ring", method !== props.selectedMethod && "border-border4")} />
+          <i className={!isActive ? "bg-bg1" : "outline"} />
+          <b className={cn(selected ? "border-inverted-bg bg-inverted-bg" : "border-border4")} />
+          <u className={cn(dragActive && "ring-2", canConfigureActive && "border-border2 border-t", selected && "bg-selected-bg focus-visible:ring-2")} />
+          <Pill variant={selected ? "outline" : "ghost"} label={selected && "ring-2"} />
+        </>
+      );`,
+    );
+    expect(keys(findings)).toEqual([
+      "selection-edge:activeTab: inset-ring",
+      "selection-edge:current: shadow-sm",
+      "selection-edge:isActive: outline",
+      "selection-edge:selected: border-border4",
+      "selection-edge:selected: ring-2",
+      "selection-edge:selected: ring-highlighted-bright/40",
+    ]);
+  });
+
+  it("flags an edge a CSS selection rule declares on its own element", () => {
+    const css = [
+      '.seg[aria-pressed="true"] {',
+      "  background-color: var(--selected-bg);",
+      "  box-shadow: inset 0 0 0 1px var(--border3);",
+      "}",
+      '/* .old[aria-pressed="true"] { border-color: red; } */',
+      '.tool[aria-pressed="true"], .tool:hover { border-color: transparent; }',
+      '.tab[data-state="active"] .label { outline: 1px solid red; }',
+      '.tab[data-state="active"]:focus-visible { outline: 1px solid red; }',
+      '@media (x) { .nav[aria-current="page"] { border-bottom: 2px solid var(--fg1); } }',
+    ].join("\n");
+    expect(findCssSelectionEdges(css)).toEqual([
+      { line: 3, key: '.seg[aria-pressed="true"] { box-shadow }' },
+      { line: 9, key: '.nav[aria-current="page"] { border-bottom }' },
+    ]);
+    // The ratchet reads the renderer's stylesheets, not harness ones.
+    write("apps/desktop/src/renderer/features/seg.css", css);
+    write("apps/desktop/src/renderer/harnesses/seg.css", css);
+    const findings = collectFindings({ root, files: [] });
+    expect(findings.map((f) => `${f.file}:${f.line}:${f.key}`)).toEqual([
+      'apps/desktop/src/renderer/features/seg.css:3:.seg[aria-pressed="true"] { box-shadow }',
+      'apps/desktop/src/renderer/features/seg.css:9:.nav[aria-current="page"] { border-bottom }',
+    ]);
+    rmSync(join(root, "apps/desktop/src/renderer/features/seg.css"));
+    rmSync(join(root, "apps/desktop/src/renderer/harnesses/seg.css"));
   });
 
   it("skips harnesses and tests; an ignore directive hides its line but is itself counted", () => {

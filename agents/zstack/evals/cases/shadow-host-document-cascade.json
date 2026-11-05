@@ -1,0 +1,9 @@
+{
+  "id": "shadow-host-document-cascade",
+  "kind": "scenario",
+  "area": "renderer-ui",
+  "fixedBy": "pr:839",
+  "symptom": "Changes file cards had no inset or edge: a :host margin and outline in Pierre's shadow CSS lost to the document's preflight and base-layer rules, so collapsed files still stacked flush.",
+  "rule": "Host declarations for properties the document sets are !important in shadow CSS, a card's edge is a border counted in the virtualizer's estimates, and the smoke measures computed inset, gap, edge and corners.",
+  "check": "node scripts/ui-smoke-changes.mjs"
+}

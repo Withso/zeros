@@ -307,7 +307,7 @@ function MotionDiamond({
         active ? `Add ${label} keyframe at the playhead` : `Animate ${label}`
       }
       tooltip={active ? "Add keyframe" : "Animate"}
-      className={active ? "text-[var(--design-selection-stroke)]" : undefined}
+      data-motion-active={active ? "" : undefined}
       disabled={disabled}
       onClick={() => motion.onRequest(property, value)}
     >
@@ -382,6 +382,7 @@ export function DesignEffectsSection({
     <InspectorSection
       title="Effects"
       empty={empty}
+      addable={{ id: "effects", onAdd: add }}
       data-design-effects-section=""
       actions={
         <>
@@ -766,6 +767,7 @@ export function DesignTransformSection({
           <InspectorSection
             title="Transform"
             empty={empty}
+            addable={{ id: "transform", onAdd: () => setOpen(true) }}
             data-design-transform-section=""
             actions={
               empty ? (
@@ -800,7 +802,7 @@ export function DesignTransformSection({
                 className="zd-field w-full min-w-0 gap-2 px-2 text-left disabled:opacity-50"
                 onClick={() => setOpen(true)}
               >
-                <Box className="text-muted-fg size-3.5 shrink-0" />
+                <Box className="text-fg3 size-3.5 shrink-0" />
                 <span className="text-fg1 min-w-0 flex-1 truncate">
                   {transform}
                 </span>
@@ -936,7 +938,7 @@ function DesignTransformEditor({
       align="start"
       sideOffset={8}
       padding="none"
-      className="w-64"
+      size="sm"
       onInteractOutside={(event) => {
         // The section's own triggers reopen rather than toggle the editor.
         if (

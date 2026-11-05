@@ -62,7 +62,7 @@ import {
 } from "./state/design-workspace-cache";
 import { DesignLayerNameInput } from "./design-layer-name-input";
 import { DesignSavedEditingContext } from "./design-saved-editing";
-import { Button, ScrollArea, toast } from "../../shared/ui/primitives";
+import { Badge, Button, ScrollArea, toast } from "../../shared/ui/primitives";
 import { cn } from "../../shared/ui/cn";
 import {
   designLayerPanelRows,
@@ -221,7 +221,7 @@ function layerRowPadding(depth: number): number {
 
 /** The chevron glyph inside every disclosure, sized independently of the
  * 14px type icons beside it. */
-const DISCLOSURE_ICON = "size-3 text-muted-fg";
+const DISCLOSURE_ICON = "size-3 text-fg3";
 
 // --- RENDER ---
 
@@ -412,12 +412,12 @@ const DesignLayerNodeRow = React.memo(function DesignLayerNodeRow({
       </Button>
       <IconButton
         type="button"
-        size="standard"
+        size="inline"
         className={cn(
-          "absolute top-1/2 right-1 z-[2] size-6 -translate-y-1/2 [&_svg]:size-3.5",
+          "absolute top-1/2 right-1 z-[2] -translate-y-1/2",
           layer.node.visible
             ? "opacity-0 group-focus-within:opacity-100 group-hover:opacity-100 focus-visible:opacity-100"
-            : "text-muted-fg",
+            : "text-fg3",
         )}
         tabIndex={-1}
         label={`${layer.node.visible ? "Hide" : "Show"} ${displayName}`}
@@ -1349,15 +1349,13 @@ function OwnedDesignWorkspaceSidebarPanels({
           )}
         </h2>
         {selectedNodeIds.length > 1 ? (
-          <span className="zd-design-layer-selection-count rounded-sm px-1.5 text-xs tabular-nums">
-            {selectedNodeIds.length} selected
-          </span>
+          <Badge className="tabular-nums">{selectedNodeIds.length} selected</Badge>
         ) : null}
         {expanded ? (
           <IconButton
             type="button"
             size="standard"
-            className="ml-auto size-6"
+            className="ml-auto"
             label="Collapse all layers"
             // Anything open anywhere counts, including containers inside a
             // frame the user has since folded — one click closes the whole
@@ -1428,7 +1426,7 @@ function OwnedDesignWorkspaceSidebarPanels({
                       className="flex h-7 min-w-0 items-center"
                       style={{ paddingLeft: layerRowPadding(0) }}
                     >
-                      <span className="text-muted-fg truncate">
+                      <span className="text-fg3 truncate">
                         Loading {frameLabel.toLocaleLowerCase()}…
                       </span>
                     </div>
@@ -1483,11 +1481,11 @@ function OwnedDesignWorkspaceSidebarPanels({
             </div>
           </div>
           {!snapshot.data && !recovery.error ? (
-            <span className="text-muted-fg px-2 py-2">Loading layers…</span>
+            <span className="text-fg3 px-2 py-2">Loading layers…</span>
           ) : null}
           {!snapshot.data && recovery.error ? (
             <div className="flex flex-col items-start gap-2 px-2 py-2">
-              <span className="text-muted-fg">Couldn’t load layers</span>
+              <span className="text-fg2">Couldn’t load layers.</span>
               <Button
                 type="button"
                 variant="secondary"
@@ -1499,7 +1497,7 @@ function OwnedDesignWorkspaceSidebarPanels({
             </div>
           ) : null}
           {snapshot.data && frames.length === 0 ? (
-            <span className="text-muted-fg px-2 py-2">No layers</span>
+            <span className="text-fg2 px-2 py-2">No layers on this page.</span>
           ) : null}
         </div>
       </ScrollArea>

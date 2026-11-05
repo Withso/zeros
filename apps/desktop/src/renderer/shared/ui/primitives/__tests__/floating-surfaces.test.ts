@@ -167,4 +167,15 @@ describe("Popover", () => {
     expect(popover).toContain('lg: "w-100"');
     expect(popover).toContain('padding === "default" ? "p-3" : "p-0"');
   });
+
+  // Regression: the @, / and # pickers docked on the composer floated on bg3
+  // with a lift while every other card above the composer sat on its surface.
+  it("floats on bg3 with the lift, or docks on the composer's own surface", () => {
+    expect(popover).toMatch(/floating: "[^"]*shadow-\[var\(--shadow-dropdown\)\]"/);
+    expect(popover).toContain('composer: "bg-sidebar-bg"');
+    expect(popover).toContain('surface = "floating"');
+    const suggestions = source("../../features/agent/composer-editor/suggestion-popup.tsx");
+    expect(suggestions).toContain('surface={placement === "composer" ? "composer" : "floating"}');
+    expect(suggestions).toContain('<Surface kind={placement === "composer" ? "sidebar" : "floating"}>');
+  });
 });

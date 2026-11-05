@@ -241,7 +241,6 @@ const WorkspaceFilesTab = React.memo(function WorkspaceFilesTab({
       <IconButton
         size="standard"
         // The open column's toggle fills bg2-highlight, with no edge.
-        pressedTone="fill"
         className="text-fg2 shrink-0"
         label={
           sidebarMode === "tree" && layout.hasFile
@@ -261,7 +260,6 @@ const WorkspaceFilesTab = React.memo(function WorkspaceFilesTab({
       <IconButton
         size="standard"
         // The open column's toggle fills bg2-highlight, with no edge.
-        pressedTone="fill"
         className="text-fg2 shrink-0"
         label="Search files"
         aria-pressed={sidebarMode === "search"}
@@ -282,7 +280,6 @@ const WorkspaceFilesTab = React.memo(function WorkspaceFilesTab({
       <IconButton
         size="standard"
         // The open column's toggle fills bg2-highlight, with no edge.
-        pressedTone="fill"
         className="text-fg2 shrink-0"
         label="Choose working folders"
         aria-pressed={sidebarMode === "directories"}

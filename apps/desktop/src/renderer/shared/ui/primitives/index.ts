@@ -14,7 +14,7 @@ export {
   PanelHeaderTitle,
   type PanelHeaderProps,
 } from "./panel-header";
-export { ListRow, type ListRowProps } from "./list-row";
+export { LIST_ROW_IN_GROUP, ListRow, ListRowGroup, type ListRowGroupProps, type ListRowProps } from "./list-row";
 export { Pill, type PillProps } from "./pill";
 export { TruncateStart } from "./truncate-start";
 export {

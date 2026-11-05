@@ -208,9 +208,6 @@
       "apps/desktop/src/renderer/shell/workbench/tabs/files-tab.tsx": {
         "z-20": 1
       },
-      "apps/desktop/src/renderer/shell/workbench/tabs/review-commits.tsx": {
-        "z-10": 1
-      },
       "apps/desktop/src/renderer/shell/workbench/tabs/workspace-file-tree.tsx": {
         "z-10": 1
       }
@@ -429,17 +426,8 @@
       "apps/desktop/src/renderer/shell/workbench/tabs/review-changes.tsx": {
         "button": 1
       },
-      "apps/desktop/src/renderer/shell/workbench/tabs/review-checks.tsx": {
-        "button": 1
-      },
       "apps/desktop/src/renderer/shell/workbench/tabs/review-shared-components.tsx": {
         "button": 3
-      },
-      "apps/desktop/src/renderer/shell/workbench/tabs/review-tab.tsx": {
-        "button": 4
-      },
-      "apps/desktop/src/renderer/shell/workbench/tabs/review-timeline.tsx": {
-        "button": 1
       },
       "apps/desktop/src/renderer/shell/worktree-missing-panel.tsx": {
         "button": 1

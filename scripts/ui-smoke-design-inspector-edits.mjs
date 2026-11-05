@@ -1,4 +1,5 @@
 import { expect } from "@playwright/test";
+import { addDesignSection } from "./ui-smoke-design-helpers.mjs";
 
 async function openHeading(page) {
   await page.goto(
@@ -34,9 +35,9 @@ async function savedStyle(page, property) {
 
 export async function runDesignTransformCommitSmoke({ page, check }) {
   await openHeading(page);
-  await page
-    .getByRole("button", { name: "Edit transform", exact: true })
-    .click();
+  // The heading has no transform, so its section is added: that opens the
+  // editor the empty section's + used to open.
+  await addDesignSection(page, "Transform");
   const x = page.getByRole("textbox", { name: "Translate X", exact: true });
   await x.focus();
   await x.press("ArrowUp");

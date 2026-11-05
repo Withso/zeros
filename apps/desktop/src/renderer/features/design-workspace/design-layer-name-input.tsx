@@ -34,7 +34,11 @@ export function DesignLayerNameInput({
     <Input
       ref={inputRef}
       aria-label="Layer name"
-      className="bg-bg1 text-fg1 h-6 min-w-0 flex-1 px-1 py-0 text-xs"
+      size="compact"
+      appearance="inline"
+      // The field only shows while renaming, so it keeps the editing fill
+      // under the pointer too.
+      className="bg-bg1 hover:bg-bg1 -ml-0.5 min-w-0 flex-1"
       value={draft}
       maxLength={maxLength}
       onChange={(event) => setDraft(event.target.value)}

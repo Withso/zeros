@@ -15,7 +15,7 @@
 
 import { cn } from "../../shared/ui/cn";
 import { Badge } from "../../shared/ui/primitives/badge";
-import { PICKER_EMPTY_CLS, PICKER_LIST_CLS, PICKER_ROW_CLS, PICKER_TAB_CLS, PICKER_TABS_CLS, PICKER_WRAP_CLS } from "./picker-recipe";
+import { PICKER_EMPTY_CLS, PICKER_HINT_CLS, PICKER_KIND_CLS, PICKER_LIST_CLS, PICKER_NAME_CLS, PICKER_ROW_CLS, PICKER_TAB_CLS, PICKER_TABS_CLS, PICKER_WRAP_CLS } from "./picker-recipe";
 import React, { useEffect, useRef } from "react";
 import type { AvailableCommand } from "../../platform/bridge/agent-events";
 import { slashCommandKind } from "../../platform/bridge/agent-events";
@@ -97,6 +97,8 @@ export function SlashCommandPicker({
             type="button"
             variant="ghost"
             data-selected={active || undefined}
+            // The chosen tab is Ghost's pressed state: the selected fill.
+            aria-pressed={active}
             size="sm"
             // mousedown beats the textarea blur (same as the rows below).
             onMouseDown={(e) => {
@@ -104,10 +106,7 @@ export function SlashCommandPicker({
               onTab(t.id);
             }}
             // 24px tabs with 6px corners.
-            className={cn(
-              PICKER_TAB_CLS,
-              active ? "bg-(--surface-hover) text-fg1" : "text-fg2 hover:text-fg1",
-            )}
+            className={cn(PICKER_TAB_CLS, !active && "text-fg2 hover:text-fg1")}
           >
             <span>{t.label}</span>
             <span className="text-muted-fg">{counts[t.id]}</span>
@@ -161,18 +160,10 @@ export function SlashCommandPicker({
                 </span>
                 {/* One line: name then the description inline. */}
                 <div className="flex min-w-0 flex-1 items-baseline gap-2">
-                  <span className="max-w-[60%] shrink-0 truncate text-xs text-fg1">{cmd.name}</span>
-                  {description && (
-                    <span className="min-w-0 flex-1 overflow-hidden text-ellipsis whitespace-nowrap text-xs text-fg2">
-                      {description}
-                    </span>
-                  )}
+                  <span className={PICKER_NAME_CLS}>{cmd.name}</span>
+                  {description && <span className={PICKER_HINT_CLS}>{description}</span>}
                 </div>
-                {cmd.input && (
-                  <span className="shrink-0 text-xs text-muted-fg">
-                    takes input
-                  </span>
-                )}
+                {cmd.input && <span className={PICKER_KIND_CLS}>takes input</span>}
                 {/* Skill badge — bordered bg1 chip at the row's end so the user
                     can tell a skill from a command at a glance, mirroring the
                     "takes input" affordance. */}

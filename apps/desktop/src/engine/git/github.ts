@@ -42,7 +42,7 @@ import { refExists } from "./default-branch";
 import { resolveRepoGit } from "../settings/repo-git";
 import { githubRemoteIdentity, type GithubRemoteIdentity } from "../db/projects";
 import { push } from "./ops";
-import type { PR, PrState } from "./types";
+import type { PR, PrLabel, PrPerson, PrState } from "./types";
 import { setGitCredentialSource } from "./credential-broker";
 import {
   GITHUB_GIT_HOST,
@@ -1114,6 +1114,26 @@ export async function getRepositoryOwnerAvatar(
 
 // ── PR operations ────────────────────────────────────────
 
+type OctoPerson = { login: string; avatar_url?: string | null } | null;
+
+function prPeople(raw: readonly OctoPerson[] | null | undefined): PrPerson[] | undefined {
+  if (!raw) return undefined;
+  return raw.flatMap((person) =>
+    person?.login ? [{ login: person.login, avatarUrl: person.avatar_url ?? null }] : [],
+  );
+}
+
+function prLabels(
+  raw: readonly (string | { name?: string | null; color?: string | null })[] | null | undefined,
+): PrLabel[] | undefined {
+  if (!raw) return undefined;
+  return raw.flatMap((label) => {
+    const name = typeof label === "string" ? label : label.name;
+    const color = typeof label === "string" ? null : label.color ?? null;
+    return name ? [{ name, color: color && /^[0-9a-f]{6}$/i.test(color) ? color : null }] : [];
+  });
+}
+
 function octoPrToPr(p: {
   number: number;
   html_url: string;
@@ -1121,7 +1141,13 @@ function octoPrToPr(p: {
   draft?: boolean | null;
   title: string;
   body: string | null;
-  user: { login: string } | null;
+  user: { login: string; avatar_url?: string | null } | null;
+  additions?: number;
+  deletions?: number;
+  changed_files?: number;
+  requested_reviewers?: readonly OctoPerson[] | null;
+  assignees?: readonly OctoPerson[] | null;
+  labels?: readonly (string | { name?: string | null; color?: string | null })[] | null;
   base: { ref: string };
   head: { ref: string; sha: string; repo?: { full_name?: string | null } | null };
   mergeable?: boolean | null;
@@ -1153,6 +1179,13 @@ function octoPrToPr(p: {
     updatedAt: new Date(p.updated_at).getTime(),
     mergedAt: p.merged_at ? new Date(p.merged_at).getTime() : null,
     mergeCommitSha: p.merge_commit_sha ?? null,
+    ...(typeof p.additions === "number" ? { additions: p.additions } : {}),
+    ...(typeof p.deletions === "number" ? { deletions: p.deletions } : {}),
+    ...(typeof p.changed_files === "number" ? { changedFiles: p.changed_files } : {}),
+    authorAvatarUrl: p.user?.avatar_url ?? null,
+    ...(p.requested_reviewers ? { requestedReviewers: prPeople(p.requested_reviewers) } : {}),
+    ...(p.assignees ? { assignees: prPeople(p.assignees) } : {}),
+    ...(p.labels ? { labels: prLabels(p.labels) } : {}),
   };
 }
 

@@ -59,6 +59,30 @@ Boards: every `Rev*` board in `review-tab.md`.
 Verification: the review unit suites, `ui-smoke-code-review`, the PR action
 smokes and renders of every `Rev*` board in both themes, Local and cloud.
 
+Status (2026-11-05): steps 1, 3, 4 and 5 landed: the sub-tabs and their
+restore mapping, the header rows, Overview (Git status from the island's
+`git-status` presentation, PR status with the one Merge, Findings) and the
+rail, from the pull request's own totals, reviewers, assignees and labels
+(engine and control plane read them from the same pulls response). Step 2 is
+open: the Changes tab still cannot prove its Branch comparison is the
+published diff, because the renderer never learns the comparison's head SHA
+(the engine's diff and the worker's need to return it). Until then the
+published diff, where Post to PR works, stays one step from Overview's rail
+(Open changes, the `changes` destination). Step 6 landed after it:
+Description, Activity, Checks and Commits sit in Overview's inset under a
+section header; Description edits the body through the provider's
+`updateBody` (`gh.prUpdate`, Local and cloud); Activity filters All, People
+and Bots once an App has taken part and folds an App's review to one line
+until Show; Checks opens on a summary card (counts, Add failures to chat, one
+bar) and ends with deployment cards; Commits group by day with co-authors,
+Copy, Open and the short SHA; the merge menu says what each method does to
+the commits. Still open, each needing data the renderer doesn't have:
+Re-run failed, Required badges and the Expected group (rerun and
+branch-protection reads in the engine and control plane), a commit's check
+state and chat link, GitLab and Bitbucket (RevProviders), and RevEmpty's
+own Create pull request (it stays in the status row above) with step 7's
+narrow fold of the header.
+
 ## 2. Changes: one card per file
 
 Board: `ChgWindow`. The diff is one virtualized Pierre `CodeView`
@@ -70,6 +94,19 @@ painted cards (a mismatch leaves the last card outside the scroll extent).
 Run `scripts/ui-smoke-changes.mjs`; it needs its fixture served from inside
 Vite's allowed roots, so fix that first (it can't load here today, on this
 branch or before it).
+
+Status (2026-11-05): landed. `CHANGES_FILE_CARD_CSS` gives each item host
+the 12px inset, a 1px border1 edge and 8px corners that clip; the layout has
+a 12px top and gap, and a collapsed header drops its bottom rule. The inset
+and edge are `!important`: a `:host` declaration loses to any document rule
+for the same property, and preflight resets every element's margin and
+border (the base layer also sets `outline-color`, so an outline edge painted
+in the focus colour, under the code). `diffHeaderHeight` is 38, the 36px
+header plus both edges, with `paddingBottom` 0: Pierre sizes a collapsed
+file as its header region alone, so splitting the edges between the two
+would leave each collapsed file 1px short. The smoke loads again (its
+virtual fixture sits under a renderer serve root) and measures the cards
+where it pinned flush headers.
 
 ## 3. Changes: retire hunk review
 
@@ -113,25 +150,27 @@ model needs the avatar URL and the agent provider for each comment.
 
 ## 7. Design: inspector and layers
 
-Boards: `DsnWindow`, `DsnInspectorFrame`, `DsnInspectorText`,
-`DsnInspectorCss`, `DsnThemeEditor`, `DsnInitGit`, `DsnConflicts`.
-Inspector fields become filled 28px controls with no resting edge (labels
-12 medium fg3, computed values fg2); only the sections in use show, and Add
-property adds Stroke, Effects, Typography, Transform, Transition or Motion.
-Layer rows move to 28px with the bg2-highlight selection: the row height is
-part of `design-layer-layout.ts`, which the canvas tools measure, so change
-it there with the layer-panel tests and the Design smokes. Long computed
-and theme values end in an ellipsis inside their field. A failed Git init
-is one red line under the text, in Design (`design-git-setup.tsx`) and in
-the Changes tab's Initialize Git (`NotAGitRepo` in `changes-tab.tsx`), which
-still show a filled red box; change both together. The conflict pause lists
-its files in one quiet card that opens them in Changes. Canvas readouts
-(selection size, rotation, spacing, the agent on the canvas) become one
-canvas chip, 18px with 4px corners and no edge (the Badge and
-MotionTimeline boards): today each overlay draws its own
-`zd-design-selection-label` box, 20px with mixed padding, in
-`design-canvas.tsx` and `design-workspace-overlays.tsx`; run the Design
-smokes that measure them.
+Landed 2026-11-05; see the README's status log. Only the Style sections in use
+show, and one Add property menu reveals Stroke, Effects, Typography,
+Transform, Transition, Motion or Advanced and runs that section's own add
+(`design-addable-sections.tsx`, through `InspectorSection`'s `addable`). In-field
+labels and suffixes are fg3; the selected layer fills bg2-highlight (rows were
+already 28px in `design-workspace-sidebar-panels.tsx`); long values end in an
+ellipsis in fields and in the CSS tab. A failed Git init is one red line in
+Design and in the Changes tab's Initialize Git (`EmptyStateError`), the
+conflict pause is the empty-state recipe with its files in one quiet card that
+opens them in Changes, and every canvas readout is one 18px chip with 4px
+corners and no edge (`design-canvas-chip.ts`). The Design smokes reach hidden
+sections through `addDesignSection` (`ui-smoke-design-helpers.mjs`).
+
+The six component sheets' remaining spec lines landed after it (see the
+audit): field states and the overlays on a field's end, owned and hidden
+layer rows, the Layers messages and inline rename, the Inspector's header, section and segmented geometry, the
+popover sizes and fills, and the theme editor's rail, table and modes. A
+field's fill lives in `--zd-field-fill`, which its overlays read, and a
+property popover raises the resting fill through `--zd-field-rest`. Still
+open: the variable glyph and Detach variable in a bound field, the layer name
+in the selection header, and the theme editor's row actions.
 
 ## 8. Web app: the dashboard, account pages and Ops
 

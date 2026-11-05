@@ -1,6 +1,6 @@
 import { runDesignFloatingChromeSmoke } from "./ui-smoke-design-floating-chrome.mjs";
 import { runDesignFloatingChromeEdgesSmoke } from "./ui-smoke-design-floating-chrome-edges.mjs";
-import { designCanvasPoint, designFrameElementBox } from "./ui-smoke-design-helpers.mjs";
+import { addDesignSection, designCanvasPoint, designFrameElementBox } from "./ui-smoke-design-helpers.mjs";
 import { shiftClickDesignGroupMember } from "./ui-smoke-design-group-selection.mjs";
 import { expect } from "@playwright/test";
 import { runDesignWorkbenchSmoke } from "./ui-smoke-design-workbench.mjs";
@@ -1004,12 +1004,28 @@ export async function runDesignWorkspaceCanvasSmoke({ page, waitFor, check }) {
     .waitFor({ state: "visible", timeout: 10_000 });
   const inspector = page.locator("[data-design-inspector]");
   const inspectorHeader = inspector.locator("[data-design-inspector-header]");
-  const expandStyleSection = async (title) => {
-    const trigger = inspector.getByRole("button", {
-      name: `Expand ${title}`,
-      exact: true,
-    });
-    if ((await trigger.count()) > 0) await trigger.click();
+  // Only the sections in use show: an empty one is added from Add property.
+  // Adding Transform opens its editor, which closes again unless `keepOpen`.
+  // Returns whether the section had to be added.
+  const expandStyleSection = async (title, { keepOpen = false } = {}) => {
+    const heading = inspector.getByRole("heading", { name: title, exact: true });
+    if ((await heading.count()) > 0) return false;
+    await addDesignSection(page, title);
+    await heading.waitFor({ state: "visible" });
+    if (title === "Transform") {
+      const editor = page.getByLabel("Transform CSS value");
+      await editor.waitFor({ state: "visible" });
+      if (!keepOpen) {
+        // The field's own Escape cancels its draft; the next closes the
+        // editor. Press only while it is open, or Escape reaches the canvas.
+        for (let attempt = 0; attempt < 3 && (await editor.isVisible()); attempt += 1) {
+          await page.keyboard.press("Escape");
+          await page.waitForTimeout(150);
+        }
+        await editor.waitFor({ state: "hidden" });
+      }
+    }
+    return true;
   };
   const pageSelectionPoint = await designCanvasPoint(page, { empty: true });
   await page.mouse.click(pageSelectionPoint.x, pageSelectionPoint.y);
@@ -2636,6 +2652,107 @@ export async function runDesignWorkspaceCanvasSmoke({ page, waitFor, check }) {
         .count()) === 0,
   );
 
+  // Property fields (UI components · Property field): hover fills
+  // bg2-highlight, a click edits with only the caret, and keyboard focus rings.
+  {
+    const field = page.locator("[data-design-inspector] .zd-inspector-field").first();
+    const fieldLook = () =>
+      field.evaluate((element) => {
+        const probe = document.createElement("div");
+        probe.style.background = "var(--bg2-highlight)";
+        element.parentElement.append(probe);
+        const highlight = getComputedStyle(probe).backgroundColor;
+        probe.remove();
+        const style = getComputedStyle(element);
+        return { hovered: style.backgroundColor === highlight, ring: style.boxShadow };
+      });
+    await field.hover();
+    await expect.poll(async () => (await fieldLook()).hovered).toBe(true);
+    await field.locator("input").first().click();
+    await expect.poll(async () => (await fieldLook()).ring).toBe("none");
+    await page.keyboard.press("Tab");
+    await expect
+      .poll(() =>
+        page.evaluate(() => {
+          const focused = document.activeElement?.closest(".zd-inspector-field");
+          return focused ? getComputedStyle(focused).boxShadow : "";
+        }),
+      )
+      .toContain("0px 0px 0px 3px");
+    await page.evaluate(() => document.activeElement?.blur());
+    await page.mouse.move(1, 1);
+    check("property fields hover in bg2-highlight, edit without a ring and ring on keyboard focus", true);
+
+    // The W/H resizing menu sits over its field, outside it: the pointer on
+    // the menu keeps the field hovered, so the fill does not flicker back.
+    const sized = page
+      .locator("[data-design-inspector] .zd-size-control:has(.zd-size-trigger)")
+      .first();
+    await sized.locator(".zd-size-trigger").hover();
+    await expect
+      .poll(() =>
+        sized.evaluate((control) => {
+          const probe = document.createElement("div");
+          probe.style.background = "var(--bg2-highlight)";
+          control.append(probe);
+          const highlight = getComputedStyle(probe).backgroundColor;
+          probe.remove();
+          const field = control.querySelector(".zd-field");
+          return getComputedStyle(field).backgroundColor === highlight;
+        }),
+      )
+      .toBe(true);
+    await page.mouse.move(1, 1);
+    check("a field stays hovered while the pointer is on its trailing menu", true);
+
+    // The Design-tab sheets (Layer tree, Inspector, Property field): owned
+    // rows on bg2 with quiet fg3 type icons, a 36px selection header, 12px
+    // glyphs on 24px section actions, and a 20px in-field trigger.
+    const sheetLook = await page.evaluate(() => {
+      const layers = document.querySelector("[data-design-sidebar-panel]");
+      const resolve = (property, value) => {
+        const probe = document.createElement("div");
+        probe.style[property] = value;
+        layers.append(probe);
+        const resolved = getComputedStyle(probe)[property];
+        probe.remove();
+        return resolved;
+      };
+      const owned = document.createElement("div");
+      owned.className = "zd-design-layer-row zd-design-layer-in-selection";
+      owned.append(document.createElementNS("http://www.w3.org/2000/svg", "svg"));
+      layers.append(owned);
+      const ownedFill = getComputedStyle(owned).backgroundColor;
+      const iconColor = getComputedStyle(owned.firstChild).color;
+      owned.remove();
+      const inspector = document.querySelector("[data-design-inspector]");
+      return {
+        owned: ownedFill === resolve("backgroundColor", "var(--bg2)"),
+        icon: iconColor === resolve("color", "var(--fg3)"),
+        header: inspector.querySelector("[data-design-inspector-header]").getBoundingClientRect().height,
+        glyphs: [...inspector.querySelectorAll(".zd-section-header .zd-icon-button svg")].map(
+          (svg) => svg.getBoundingClientRect().width,
+        ),
+        trigger: inspector.querySelector(".zd-size-trigger")?.getBoundingClientRect().width ?? null,
+      };
+    });
+    check(
+      "layer, inspector and field details follow their sheets",
+      sheetLook.owned &&
+        sheetLook.icon &&
+        sheetLook.header === 36 &&
+        sheetLook.glyphs.length > 0 &&
+        sheetLook.glyphs.every((width) => width === 12) &&
+        sheetLook.trigger === 20,
+      JSON.stringify(sheetLook),
+    );
+    // A row's visibility action is the 20px inline IconButton.
+    const layerRow = page.locator("[data-design-sidebar-panel] [data-design-layer-row]").nth(1);
+    await layerRow.hover();
+    await expect(layerRow.getByRole("button", { name: /^(Hide|Show) / })).toHaveCSS("width", "20px");
+    await page.mouse.move(1, 1);
+  }
+
   const themeEditorTrigger = page.getByRole("button", {
     name: "Open theme editor",
   });
@@ -2658,6 +2775,35 @@ export async function runDesignWorkspaceCanvasSmoke({ page, waitFor, check }) {
   await expect(themeDialog.locator('[data-slot="dialog-footer"]')).toHaveCount(0);
   await expect(themeDialog.getByRole("button", { name: "Done", exact: true })).toHaveCount(0);
   await expect(themeDialog.locator('[data-design-theme-row]').first()).toHaveCSS("height", "36px");
+  // The chosen source and type fill bg2-highlight, as a selected layer does.
+  expect(
+    await themeDialog.evaluate((root) => {
+      const probe = document.createElement("div");
+      probe.style.background = "var(--bg2-highlight)";
+      root.append(probe);
+      const highlight = getComputedStyle(probe).backgroundColor;
+      probe.remove();
+      const pressed = [...root.querySelectorAll('.zd-theme-filter[aria-pressed="true"]')];
+      return pressed.length > 0 && pressed.every((row) => getComputedStyle(row).backgroundColor === highlight);
+    }),
+  ).toBe(true);
+  // Variable names read as code (mono 12), and the theme being edited is a
+  // pressed toggle on the shared selected fill.
+  expect(
+    await themeDialog.evaluate((root) => {
+      const probe = document.createElement("div");
+      probe.style.background = "var(--selected-bg)";
+      root.append(probe);
+      const selected = getComputedStyle(probe).backgroundColor;
+      probe.remove();
+      const name = getComputedStyle(root.querySelector(".zd-theme-token-name"));
+      const mode = root.querySelector('.zd-theme-mode[aria-pressed="true"]');
+      return {
+        mono: /mono/i.test(name.fontFamily) && name.fontSize === "12px",
+        mode: Boolean(mode) && getComputedStyle(mode).backgroundColor === selected,
+      };
+    }),
+  ).toEqual({ mono: true, mode: true });
   const themeClose = themeDialog.getByRole("button", { name: "Close theme editor", exact: true });
   // The shared Dialog close: the 24px compact IconButton.
   await expect(themeClose).toHaveCSS("width", "24px");
@@ -2800,8 +2946,9 @@ export async function runDesignWorkspaceCanvasSmoke({ page, waitFor, check }) {
   await themeAccentBase.press("Tab");
   await expect(themeOverride).toBeFocused();
   const themeReset = themeOverride.locator("..").getByRole("button", { name: "Reset to Base", exact: true });
-  await expect(themeReset).toHaveCSS("width", "24px");
-  await expect(themeReset).toHaveCSS("height", "24px");
+  // Reset is the 20px overlay on the value's end (Theme editor sheet).
+  await expect(themeReset).toHaveCSS("width", "20px");
+  await expect(themeReset).toHaveCSS("height", "20px");
   await expect(themeReset).toHaveCSS("opacity", "1");
   await expect(themeOverride).toHaveAttribute("aria-keyshortcuts", /Alt\+Enter/);
   await themeOverride.press("Shift+Tab");
@@ -3123,8 +3270,9 @@ export async function runDesignWorkspaceCanvasSmoke({ page, waitFor, check }) {
       "design-style-preview-escape",
     ),
   );
-  await expandStyleSection("Transform");
-  await page.getByRole("button", { name: "Edit transform" }).click();
+  if (!(await expandStyleSection("Transform", { keepOpen: true }))) {
+    await page.getByRole("button", { name: "Edit transform" }).click();
+  }
   const transformInput = page.getByLabel("Transform CSS value");
   await transformInput.press("ControlOrMeta+A");
   await transformInput.press("Backspace");
@@ -3809,6 +3957,25 @@ export async function runDesignWorkspaceCanvasSmoke({ page, waitFor, check }) {
   );
   await transformKeyframeValue.fill("translateY(64px)");
   await transformKeyframeValue.press("Enter");
+  // An animated property's diamond takes the Motion accent. A utility class
+  // cannot set it: the unlayered Design recipe outranks Tailwind's layer.
+  const activeDiamond = page.getByRole("button", {
+    name: "Add transform keyframe at the playhead",
+    exact: true,
+  });
+  await expect
+    .poll(() =>
+      activeDiamond.evaluate((button) => {
+        const probe = document.createElement("div");
+        probe.style.color = "var(--design-selection-stroke)";
+        button.parentElement.append(probe);
+        const accent = getComputedStyle(probe).color;
+        probe.remove();
+        return getComputedStyle(button).color === accent;
+      }),
+    )
+    .toBe(true);
+  check("an animated property's diamond takes the Motion accent", true);
   const motionPathPoints = page.locator("[data-design-motion-path-point]");
   check(
     "style-editor diamonds expose selectable canvas motion paths",

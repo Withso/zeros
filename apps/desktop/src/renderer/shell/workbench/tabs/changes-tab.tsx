@@ -26,7 +26,7 @@ import {
   SearchX,
   Undo2,
 } from "lucide-react";
-import { EmptyState as SharedEmptyState } from "@/renderer/shared/ui/layout/empty-state";
+import { EmptyState as SharedEmptyState, EmptyStateError } from "@/renderer/shared/ui/layout/empty-state";
 
 import {
   gitDiff,
@@ -440,11 +440,8 @@ export function NotAGitRepo({
       <div className="text-fg2 max-w-sm text-xs">
         Repository needs initializing
       </div>
-      {error && (
-        <div className="bg-red-bg text-red-fg mx-auto max-w-sm rounded-md px-3 py-2 text-xs">
-          {error}
-        </div>
-      )}
+      {/* The empty-state failure: one red line under the text. */}
+      {error && <EmptyStateError>{`Couldn’t initialize Git: ${error}`}</EmptyStateError>}
     </Stack>
   );
 }

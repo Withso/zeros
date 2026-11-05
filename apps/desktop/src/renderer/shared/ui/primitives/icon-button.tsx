@@ -23,10 +23,9 @@ export interface IconButtonProps extends Omit<
    * standard = 28px chrome and toolbar action (14px glyph). Defaults to
    * standard inside a Toolbar or PanelHeader and inline elsewhere. */
   size?: IconButtonSize;
-  /** What `aria-pressed` looks like: a neutral toggle (bg2-highlight +
-   * border4), a fill with no edge for the toggle of an open side column, or
-   * the active tool of a toolbar in the selection blue. */
-  pressedTone?: "toggle" | "fill" | "tool";
+  /** What `aria-pressed` looks like: the neutral selected fill with no edge,
+   * or the active tool of a toolbar in the selection blue. */
+  pressedTone?: "toggle" | "tool";
   asChild?: boolean;
 }
 
@@ -42,10 +41,10 @@ const SIZE_CLASSES = {
   standard: "size-7 rounded-md [&_svg]:size-3.5",
 } as const;
 
+// Selection is a fill a step above hover and never an edge.
 const PRESSED_CLASSES = {
   toggle:
-    "aria-pressed:border-border4 aria-pressed:bg-bg2-highlight aria-pressed:text-fg1",
-  fill: "aria-pressed:bg-bg2-highlight aria-pressed:text-fg1",
+    "aria-pressed:bg-selected-bg aria-pressed:text-fg1 aria-pressed:hover:bg-selected-bg aria-pressed:hover:text-fg1",
   tool: "aria-pressed:bg-(--design-selection-label-bg) aria-pressed:text-(--design-selection-label-fg) aria-pressed:hover:bg-(--design-selection-label-bg) aria-pressed:hover:text-(--design-selection-label-fg)",
 } as const;
 

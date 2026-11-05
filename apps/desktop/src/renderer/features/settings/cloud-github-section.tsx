@@ -188,10 +188,9 @@ export function CloudGithubSection({
               role="group"
               aria-label={label(method)}
               className={cn(
-                "flex flex-col gap-3 rounded-md border p-3.5",
-                selected
-                  ? "border-border4 bg-bg1-highlight"
-                  : "border-border2 bg-bg1",
+                "border-border2 flex flex-col gap-3 rounded-md border p-3.5",
+                // Chosen fills and keeps its resting edge.
+                selected ? "bg-bg1-hover" : "bg-bg1",
               )}
             >
               <div className="flex items-start justify-between gap-3">

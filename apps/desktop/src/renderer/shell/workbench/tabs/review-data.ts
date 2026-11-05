@@ -437,6 +437,8 @@ export interface ReviewLiveData {
   postComment: (body: string) => Promise<void>;
   merge: (method: ReviewMergeMethod) => Promise<void>;
   markReady: () => Promise<void>;
+  /** Absent when the provider can't write the description. */
+  updateBody: ((body: string) => Promise<void>) | null;
 }
 
 /** Warm or revalidate one exact PR snapshot from pointer/focus intent. Calls
@@ -684,5 +686,18 @@ export function useReviewLiveData(args: {
     [provider, key, refresh],
   );
 
-  return { snap, refresh, postComment, merge, markReady };
+  const writeBody = useCallback(
+    async (body: string) => {
+      const entry = entryFor(key);
+      if (!currentReviewEntry(provider, target, key, entry)) throw new Error("Your GitHub connection changed. Refresh before continuing.");
+      const pr = await provider.updateBody!(target, body);
+      if (!currentReviewEntry(provider, target, key, entry)) return;
+      if (livePr(pr)) patchAuthoritative(key, { pr });
+      void refresh();
+    },
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- target is derived from key
+    [provider, key, refresh],
+  );
+
+  return { snap, refresh, postComment, merge, markReady, updateBody: provider.updateBody ? writeBody : null };
 }

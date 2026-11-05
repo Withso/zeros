@@ -23,6 +23,8 @@ import {
   prefetchReviewLiveData,
 } from "../shell/workbench/tabs/review-data";
 import { ReviewView } from "../shell/workbench/tabs/review-tab";
+import type { ReviewSubtab } from "../shell/workbench/tab-model";
+import { GitStatusCard } from "../shell/pr/git-status-card";
 
 const workspaceId = "review-comparison-fixture";
 const cwd = "/fixture/review-comparison";
@@ -51,6 +53,15 @@ const metadataReady = fixtureParams.has("holdMetadata")
   : Promise.resolve();
 let currentPr = 42;
 let mount = 0;
+// `?sub=overview` opens another destination; `?rich` fills every sub-tab:
+// checks with a deployment, reviews (one from an App), commits, reviewers,
+// labels, merge methods and an editable description.
+let currentSub = (fixtureParams.get("sub") ?? "changes") as ReviewSubtab;
+const rich = fixtureParams.has("rich");
+const DAY = 86_400_000;
+/** Bodies the description editor saved, in order (read by the smoke). */
+const descriptionWrites: string[] = [];
+(window as unknown as { __descriptionWrites: string[] }).__descriptionWrites = descriptionWrites;
 
 function prFor(prNumber: number): PR {
   return {
@@ -65,9 +76,26 @@ function prFor(prNumber: number): PR {
     headSha: comparisonFor(prNumber).headSha,
     mergeableState: "clean",
     isMergeable: true,
-    createdAt: 1,
+    createdAt: rich ? Date.now() - 2 * DAY : 1,
     updatedAt: 1,
     mergedAt: null,
+    ...(rich
+      ? {
+          title: "Fix login redirect loop",
+          body: descriptionWrites.at(-1) ?? "Keeps `returnTo` through the OAuth state.\n\nFixes #31",
+          authorLogin: "alex-morgan",
+          headBranch: "alex/fix-login",
+          additions: 39,
+          deletions: 47,
+          changedFiles: 4,
+          requestedReviewers: [{ login: "priya-shah", avatarUrl: null }],
+          assignees: [{ login: "alex-morgan", avatarUrl: null }],
+          labels: [
+            { name: "bug", color: "d73a4a" },
+            { name: "auth", color: "0075ca" },
+          ],
+        }
+      : {}),
   };
 }
 
@@ -76,22 +104,57 @@ const provider: ReviewProvider = {
   hostOrigin: "github.com",
   cacheKey: "github:review-comparison-fixture",
   hostLabel: "GitHub",
-  capabilities: { reviewNoun: "pull request", mergeMethods: [] },
+  capabilities: {
+    reviewNoun: "pull request",
+    mergeMethods: rich
+      ? [
+          { id: "squash", label: "Squash and merge" },
+          { id: "merge", label: "Create a merge commit" },
+          { id: "rebase", label: "Rebase and merge" },
+        ]
+      : [],
+  },
   authStatus: async () => ({ authenticated: true, login: "fixture-reviewer" }),
   getPr: async ({ reviewRef }) => {
     if (fixtureParams.has("holdMetadata")) await metadataReady;
     return prFor(Number(reviewRef));
   },
-  getChecks: async () => ({
-    total: 0,
-    passed: 0,
-    pending: 0,
-    failed: 0,
-    checks: [],
-    deployments: [],
-  }),
-  getCommits: async () => [],
-  getTimeline: async () => [],
+  getChecks: async () =>
+    rich
+      ? {
+          total: 7,
+          passed: 5,
+          pending: 1,
+          failed: 1,
+          deployments: [
+            { environment: "Preview", state: "success", description: null, url: "https://fixture-pr-42.preview.example.test" },
+          ],
+          checks: [
+            { name: "test (ubuntu-latest)", status: "completed", conclusion: "failure", detailsUrl: "https://example.test/run/1", startedAt: Date.now() - 134_000, completedAt: Date.now() },
+            { name: "lint", status: "in_progress", conclusion: null, detailsUrl: null, startedAt: null, completedAt: null },
+            ...["build", "typecheck", "unit", "e2e", "codeql"].map((name) => ({
+              name, status: "completed", conclusion: "success", detailsUrl: null, startedAt: Date.now() - 38_000, completedAt: Date.now(),
+            })),
+          ],
+        }
+      : { total: 0, passed: 0, pending: 0, failed: 0, checks: [], deployments: [] },
+  getCommits: async () =>
+    rich
+      ? [
+          { sha: "a1b2c3d4e5f6a7b8c9d0a1b2c3d4e5f6a7b8c9d0", abbreviatedSha: "a1b2c3d", message: "Use timing-safe compare for session MACs", authorName: "Alex Morgan", authorLogin: "alex-morgan", authorAvatarUrl: null, date: Date.now() - 2 * 3_600_000, coAuthors: [{ name: "Claude", avatarUrl: null }], additions: 6, deletions: 4, changedFiles: 2 },
+          { sha: "e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3", abbreviatedSha: "e4f5a6b", message: "Shorten session lifetime to 12 hours", authorName: "Alex Morgan", authorLogin: "alex-morgan", authorAvatarUrl: null, date: Date.now() - 3 * 3_600_000, coAuthors: [], additions: 1, deletions: 1, changedFiles: 1 },
+          { sha: "0a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b", abbreviatedSha: "0a1b2c3", message: "Remove legacy cookie helper", authorName: "Priya Shah", authorLogin: "priya-shah", authorAvatarUrl: null, date: Date.now() - 26 * 3_600_000, coAuthors: [], additions: 0, deletions: 40, changedFiles: 1 },
+        ]
+      : [],
+  getTimeline: async () =>
+    rich
+      ? [
+          { kind: "review" as const, id: 4, author: "coderabbitai[bot]", authorAvatarUrl: null, state: "COMMENTED", body: "**Walkthrough**\n\nThe session helpers now compare MACs in constant time.", url: null, createdAt: Date.now() - DAY - 60_000 },
+          { kind: "review" as const, id: 1, author: "priya-shah", authorAvatarUrl: null, state: "CHANGES_REQUESTED", body: "Please add a test for the SSO path.", url: null, createdAt: Date.now() - DAY },
+          { kind: "review" as const, id: 2, author: "sam-lee", authorAvatarUrl: null, state: "APPROVED", body: "", url: null, createdAt: Date.now() - DAY / 2 },
+          { kind: "comment" as const, id: 3, author: "alex-morgan", authorAvatarUrl: null, state: "", body: "Addressed.", url: null, createdAt: Date.now() - DAY / 4 },
+        ]
+      : [],
   getDiff: async ({ reviewRef }) => {
     const prNumber = Number(reviewRef);
     const comparison = comparisonFor(prNumber);
@@ -120,6 +183,10 @@ const provider: ReviewProvider = {
   },
   markReady: async () => {
     throw new Error("Unexpected mark-ready write");
+  },
+  updateBody: async ({ reviewRef }, body) => {
+    descriptionWrites.push(body);
+    return prFor(Number(reviewRef));
   },
 };
 
@@ -157,7 +224,48 @@ setActiveBridge({
     } else if (op === "workspace.list") {
       result = { workspaces: [] };
     } else if (op === "codeReview.list") {
-      result = { workspaceId, threads: [], viewerActorId: "fixture-reviewer" };
+      result = {
+        workspaceId,
+        viewerActorId: "fixture-reviewer",
+        threads: rich
+          ? [
+              {
+                id: "finding-1",
+                workspaceId,
+                anchor: { path: "src/auth/login.ts", side: "new", startLine: 18, endLine: 18, revision: "fixture" },
+                comments: [
+                  {
+                    id: "finding-1-c",
+                    author: { id: "claude", name: "Claude", kind: "agent", provider: "claude" },
+                    body: "Protocol-relative URLs pass `safeRedirect`",
+                    createdAt: 1,
+                  },
+                ],
+                resolved: false,
+                version: 1,
+                createdAt: 1,
+                updatedAt: 1,
+              },
+              {
+                id: "finding-2",
+                workspaceId,
+                anchor: { path: "src/auth/session.test.ts", side: "new", startLine: 24, endLine: 24, revision: "fixture" },
+                comments: [
+                  {
+                    id: "finding-2-c",
+                    author: { id: "codex", name: "Codex", kind: "agent", provider: "codex" },
+                    body: "No test for the 12-hour expiry boundary",
+                    createdAt: 2,
+                  },
+                ],
+                resolved: false,
+                version: 1,
+                createdAt: 2,
+                updatedAt: 2,
+              },
+            ]
+          : [],
+      };
     } else {
       throw new Error(`Unexpected fixture operation: ${op}`);
     }
@@ -200,8 +308,21 @@ function render(): void {
           refreshKey={localRefresh}
           active
           agentWorking={false}
-          sub="changes"
-          onSubChange={() => {}}
+          sub={currentSub}
+          onSubChange={(next) => {
+            currentSub = next;
+            render();
+          }}
+          gitStatus={
+            rich ? (
+              <GitStatusCard
+                state={{ kind: "up-to-date", label: "Branch is up to date", tone: "success", actions: [] }}
+                checklist={{ uncommitted: 0, ahead: 0, behind: 0, conflicts: false, behindBase: 0, baseBranch: "main" }}
+                actionState={() => ({ running: false, disabled: false, reason: null })}
+                onAction={() => {}}
+              />
+            ) : undefined
+          }
         />
       </main>
     </TooltipProvider>,

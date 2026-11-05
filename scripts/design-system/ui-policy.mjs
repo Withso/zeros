@@ -4,8 +4,8 @@
 // Design-system policy for renderer class markup, enforced with a ratchet.
 //
 // Each rule inspects the class candidates extracted from the TypeScript AST
-// (class-candidates.mjs) or the JSX element tree, and names a finding by
-// (rule, file, key). Existing findings are recorded as DEBT in
+// (class-candidates.mjs), the JSX element tree or, for selection-edge, the
+// renderer's stylesheets, and names a finding by (rule, file, key). Existing findings are recorded as DEBT in
 // styles/policy/ui-debt.json; `pnpm check:ui` fails when:
 //   • a (rule, file, key) count rises above its recorded debt (new drift), or
 //   • a count falls below it (debt was paid — prune the ledger so the freed
@@ -22,11 +22,17 @@
 // Product UI only: harness pages and tests are out of scope. Rationale and
 // the replacement for each rule: docs/design-system.md.
 // ============================================================
-import { readFileSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 import { join, relative, sep } from "node:path";
 import ts from "typescript";
 
-import { extractClassContexts } from "./class-candidates.mjs";
+import {
+  CLASS_CONST_RE,
+  CLASS_HELPERS,
+  CLASS_PROP_RE,
+  extractClassContexts,
+  splitClassTokens,
+} from "./class-candidates.mjs";
 
 export const DEBT_FILE = "styles/policy/ui-debt.json";
 
@@ -57,6 +63,186 @@ const tokenValueIsDesignToken = (value) =>
   /^var\(--[\w-]+\)$/.test(value) ||
   // Derived values built from a token, e.g. calc(var(--radius-lg)*1.5).
   (/var\(--[\w-]+\)/.test(value) && !/#|rgba?\(|hsla?\(|oklch\(/.test(value));
+
+// What marks a chosen tab, segment, toggle, option or row. A checked form
+// control (data-[state=checked], aria-checked) is its own indicator, and
+// keyboard focus is the one ring, so neither counts as selection here.
+const SELECTION_VARIANT_RE =
+  /(?:^|:)(?:group-|peer-)?(?:aria-(?:pressed|selected|current)|aria-\[(?:pressed|selected|current)=[^\]]+\]|data-\[state=(?:active|on)\]|data-\[(?:selected|active|current)(?:=[^\]]+)?\]|data-(?:selected|active|current))(?:\/[\w-]+)?:/;
+
+/** The edge a utility draws, or null: border colours, rings, shadows and
+ * outlines. Utilities that remove an edge (border-transparent, ring-0,
+ * shadow-none, outline-none) and border widths or styles draw none. */
+export function edgeUtility(base) {
+  const border = base.match(/^border-[xytrblse]-(.+)$/) ?? base.match(/^border-(.+)$/);
+  if (border) {
+    const value = border[1];
+    if (/^(?:\d+(?:\.\d+)?|\[[\d.]+px\]|solid|dashed|dotted|double|hidden|none|transparent)$/.test(value)) {
+      return null;
+    }
+    return base;
+  }
+  const ring = base.match(/^(?:inset-)?ring(?:-(.+))?$/);
+  if (ring) return ring[1] === "0" ? null : base;
+  const shadow = base.match(/^(?:inset-)?shadow(?:-(.+))?$/);
+  if (shadow) return shadow[1] === "none" ? null : base;
+  const outline = base.match(/^outline(?:-(.+))?$/);
+  if (outline) return /^(?:none|hidden|0|offset-.+)$/.test(outline[1] ?? "") ? null : base;
+  return null;
+}
+
+const SELECTION_EDGE_MESSAGE = (key) =>
+  `"${key}" draws an edge on a selected, pressed, active or current state. Selection is a fill and never an edge: use the primitive's state (bg-selected-bg, var(--selected-bg)) and keep the resting edge unchanged (docs/design-system.md).`;
+
+// The CSS half of selection-edge: a rule whose element is selected, pressed,
+// active or current (not a child of one) must not draw an edge.
+const CSS_SELECTION_ATTR =
+  /\[(?:aria-(?:pressed|selected)="true"|aria-current(?:="[^"]*")?|data-state="(?:active|on)")\]/;
+const CSS_EDGE_PROPERTY =
+  /^\s*(border(?:-(?:top|right|bottom|left|block|inline)(?:-(?:start|end))?)?(?:-color)?|box-shadow|outline(?:-color)?)\s*:\s*([\s\S]+?)\s*$/;
+
+/** [{ line, key }] for every edge a CSS selection rule declares. */
+export function findCssSelectionEdges(source) {
+  // Blank comments out, keeping line breaks so line numbers hold.
+  const text = source.replace(/\/\*[\s\S]*?\*\//g, (comment) => comment.replace(/[^\n]/g, " "));
+  const findings = [];
+  const block = /([^{}]+)\{([^{}]*)\}/g;
+  let match;
+  while ((match = block.exec(text))) {
+    const [whole, selectorText, body] = match;
+    const selected = selectorText
+      .split(",")
+      .map((selector) => selector.trim())
+      .filter((selector) => {
+        const own = selector.split(/[\s>~+]+/).filter(Boolean).pop() ?? "";
+        return CSS_SELECTION_ATTR.test(own) && !/:focus/.test(own);
+      });
+    if (selected.length === 0) continue;
+    let offset = match.index + whole.indexOf("{") + 1;
+    for (const declaration of body.split(";")) {
+      const edge = declaration.match(CSS_EDGE_PROPERTY);
+      if (edge) {
+        const [, property, value] = edge;
+        const removes =
+          /^(?:none|0|transparent|hidden)$/.test(value) ||
+          (property.startsWith("border") && /\btransparent\b/.test(value));
+        if (!removes) {
+          const line = text.slice(0, offset + declaration.search(/\S/)).split("\n").length;
+          findings.push({ line, key: `${selected[0]} { ${property} }` });
+        }
+      }
+      offset += declaration.length + 1;
+    }
+  }
+  return findings;
+}
+
+// The conditional half of selection-edge: classes a selection condition adds,
+// as in `selected && "ring-2"` or `tab === activeTab ? "border-border4" : …`.
+// A flag names the state itself; a comparison names the chosen value.
+// dragActive (a drop target) and canConfigureActive are neither.
+const SELECTION_FLAG_RE = /^(?:is)?(?:[Ss]elected|[Aa]ctive|[Pp]ressed|[Cc]urrent|[Cc]hosen)$/;
+const SELECTION_VALUE_RE = /^(?:is)?(?:[Ss]elected|[Aa]ctive|[Cc]urrent|[Cc]hosen)(?:[A-Z_]\w*)?$/;
+
+function conditionName(node) {
+  if (ts.isIdentifier(node)) return node.text;
+  if (ts.isPropertyAccessExpression(node)) return node.name.text;
+  if (ts.isCallExpression(node)) return conditionName(node.expression);
+  return null;
+}
+
+/** `{ name, negated }` when the condition tests a selection, else null. */
+function selectionCondition(node) {
+  if (ts.isParenthesizedExpression(node)) return selectionCondition(node.expression);
+  if (ts.isPrefixUnaryExpression(node) && node.operator === ts.SyntaxKind.ExclamationToken) {
+    const inner = selectionCondition(node.operand);
+    return inner && { name: inner.name, negated: !inner.negated };
+  }
+  if (ts.isBinaryExpression(node)) {
+    const operator = node.operatorToken.kind;
+    if (operator === ts.SyntaxKind.AmpersandAmpersandToken) {
+      // `selected && !disabled` is still the selected state; a negated half
+      // leaves the other branch ambiguous.
+      const sides = [selectionCondition(node.left), selectionCondition(node.right)];
+      return sides.find((side) => side && !side.negated) ?? null;
+    }
+    const equal =
+      operator === ts.SyntaxKind.EqualsEqualsEqualsToken || operator === ts.SyntaxKind.EqualsEqualsToken;
+    const unequal =
+      operator === ts.SyntaxKind.ExclamationEqualsEqualsToken || operator === ts.SyntaxKind.ExclamationEqualsToken;
+    if (!equal && !unequal) return null;
+    const name = [node.left, node.right].map(conditionName).find((side) => side && SELECTION_VALUE_RE.test(side));
+    return name ? { name, negated: unequal } : null;
+  }
+  const name = conditionName(node);
+  return name && SELECTION_FLAG_RE.test(name) ? { name, negated: false } : null;
+}
+
+/** True when a literal reaches a class: a className prop, a class helper
+ * call or a class constant, as class-candidates.mjs reads them. */
+function inClassContext(node, sourceFile) {
+  for (let cursor = node.parent; cursor; cursor = cursor.parent) {
+    if (ts.isJsxAttribute(cursor)) return CLASS_PROP_RE.test(cursor.name.getText(sourceFile));
+    if (ts.isPropertyAssignment(cursor) && CLASS_PROP_RE.test(cursor.name.getText(sourceFile))) return true;
+    if (ts.isCallExpression(cursor)) {
+      const callee = cursor.expression.getText(sourceFile);
+      if (CLASS_HELPERS.has(callee) || callee === "cva") return true;
+    }
+    if (ts.isVariableDeclaration(cursor) && ts.isIdentifier(cursor.name)) {
+      return CLASS_CONST_RE.test(cursor.name.text);
+    }
+  }
+  return false;
+}
+
+function literalTexts(node, out = []) {
+  if (ts.isStringLiteral(node) || ts.isNoSubstitutionTemplateLiteral(node)) out.push(node);
+  else if (ts.isTemplateExpression(node)) {
+    out.push(node.head, ...node.templateSpans.map((span) => span.literal));
+    for (const span of node.templateSpans) literalTexts(span.expression, out);
+  } else ts.forEachChild(node, (child) => literalTexts(child, out));
+  return out;
+}
+
+/** [{ line, key }] for every edge a selection condition adds to a class. A
+ * border in the box's own fill colour (a checked box) and keyboard focus
+ * draw no selection edge. */
+export function findConditionalSelectionEdges(file, source) {
+  const kind = /\.[cm]?tsx$|\.jsx$/.test(file) ? ts.ScriptKind.TSX : ts.ScriptKind.TS;
+  const sourceFile = ts.createSourceFile(file, source, ts.ScriptTarget.Latest, true, kind);
+  const findings = [];
+  const visit = (node) => {
+    let condition = null;
+    let branch = null;
+    if (ts.isBinaryExpression(node) && node.operatorToken.kind === ts.SyntaxKind.AmpersandAmpersandToken) {
+      condition = selectionCondition(node.left);
+      if (condition && !condition.negated) branch = node.right;
+    } else if (ts.isConditionalExpression(node)) {
+      condition = selectionCondition(node.condition);
+      if (condition) branch = condition.negated ? node.whenFalse : node.whenTrue;
+    }
+    if (branch) {
+      for (const literal of literalTexts(branch)) {
+        if (!inClassContext(literal, sourceFile)) continue;
+        const tokens = splitClassTokens(literal.text).map(({ token }) => token);
+        const fills = new Set(
+          tokens.map(baseUtility).filter((base) => base.startsWith("bg-")).map((base) => base.slice(3)),
+        );
+        for (const token of tokens) {
+          const base = baseUtility(token);
+          if (/focus/.test(token.slice(0, token.length - base.length)) || !edgeUtility(base)) continue;
+          const border = base.match(/^border-(?:[xytrblse]-)?(.+)$/);
+          if (border && fills.has(border[1])) continue;
+          const { line } = sourceFile.getLineAndCharacterOfPosition(literal.getStart(sourceFile));
+          findings.push({ line: line + 1, key: `${condition.name}: ${token}` });
+        }
+      }
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(sourceFile);
+  return findings;
+}
 
 /** Class-token rules: return a finding key, or null when the token is fine. */
 export const CLASS_RULES = [
@@ -130,6 +316,15 @@ export const CLASS_RULES = [
       `"transition-all" animates layout properties. Name the properties: transition-colors, transition-opacity, transition-transform, or transition-[…].`,
     test(base) {
       return base === "transition-all" ? base : null;
+    },
+  },
+  {
+    id: "selection-edge",
+    message: (key) => SELECTION_EDGE_MESSAGE(key),
+    test(base, token) {
+      const variants = token.slice(0, token.length - base.length);
+      if (!SELECTION_VARIANT_RE.test(variants) || /focus/.test(variants)) return null;
+      return edgeUtility(base) ? token : null;
     },
   },
   {
@@ -321,10 +516,26 @@ function ignoredLines(source) {
   return ignored;
 }
 
+/** Stylesheets under a directory, for the CSS half of the rules. */
+function cssFilesUnder(dir) {
+  let entries;
+  try {
+    entries = readdirSync(dir, { withFileTypes: true });
+  } catch {
+    return [];
+  }
+  return entries.flatMap((entry) => {
+    const path = join(dir, entry.name);
+    if (entry.isDirectory()) return entry.name === "node_modules" ? [] : cssFilesUnder(path);
+    return entry.name.endsWith(".css") ? [path] : [];
+  });
+}
+
 /**
- * All policy findings: [{ rule, file, key, line, message }].
+ * All policy findings: [{ rule, file, key, line, message }]. `cssFiles`
+ * defaults to the renderer's stylesheets.
  */
-export function collectFindings({ root, files, contexts }) {
+export function collectFindings({ root, files, contexts, cssFiles }) {
   const scoped = files.filter((file) => isPolicyScoped(toRel(root, file)));
   // Reuse a caller's extraction (check:ui shares one AST pass); anything
   // outside the policy scope is filtered below.
@@ -340,6 +551,20 @@ export function collectFindings({ root, files, contexts }) {
       if (key) {
         findings.push({ rule: rule.id, file: rel, key, line: occurrence.line, message: rule.message(key) });
       }
+    }
+  }
+
+  for (const file of cssFiles ?? cssFilesUnder(join(root, "apps/desktop/src/renderer"))) {
+    const rel = toRel(root, file);
+    if (!isPolicyScoped(rel)) continue;
+    for (const finding of findCssSelectionEdges(readFileSync(file, "utf8"))) {
+      findings.push({
+        rule: "selection-edge",
+        file: rel,
+        key: finding.key,
+        line: finding.line,
+        message: SELECTION_EDGE_MESSAGE(finding.key),
+      });
     }
   }
 
@@ -366,9 +591,18 @@ export function collectFindings({ root, files, contexts }) {
   }
 
   for (const file of scoped) {
-    if (!file.endsWith(".tsx")) continue;
     const rel = toRel(root, file);
     const source = readFileSync(file, "utf8");
+    for (const finding of findConditionalSelectionEdges(file, source)) {
+      findings.push({
+        rule: "selection-edge",
+        file: rel,
+        key: finding.key,
+        line: finding.line,
+        message: SELECTION_EDGE_MESSAGE(finding.key),
+      });
+    }
+    if (!file.endsWith(".tsx")) continue;
     for (const finding of findClassTemplateJoins(file, source)) {
       findings.push({
         rule: CLASS_TEMPLATE_JOIN_RULE.id,

@@ -1,0 +1,9 @@
+{
+  "id": "selection-edge-conditional",
+  "kind": "replay",
+  "area": "renderer-ui",
+  "fixedBy": "pr:839",
+  "symptom": "After selection became a fill, Settings' GitHub method cards still turned border4 when chosen and composer pills drew a 2px ring while the caret selected them: the edge came from a condition (selected ? \"border-border4 …\"), which the variant-only check never read.",
+  "rule": "ui/selection-edge also reads classes a selection condition adds (selected && …, tab === activeTab ? … : …); a border in the box's own fill colour, drop targets and focus stay exempt (findConditionalSelectionEdges in scripts/design-system/ui-policy.mjs).",
+  "check": "pnpm exec vitest run scripts/__tests__/design-system-policy.test.ts"
+}

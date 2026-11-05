@@ -118,7 +118,7 @@ export function DesignFillEditor({
   const fillType = classifyDesignFill(image);
   const gradient = parseDesignGradient(image);
   const swatch = (
-    <span className="relative block size-4.5 shrink-0 overflow-hidden rounded-sm">
+    <span className="relative block size-4 shrink-0 overflow-hidden rounded-sm">
       <DesignColorSwatch value={color} className="size-full" />
       {fillType !== "solid" ? (
         <span
@@ -336,7 +336,7 @@ function DesignFillPopover({
           type="button"
           disabled={disabled}
           aria-label="Edit fill"
-          className="focus-visible:ring-highlighted-bright/50 flex size-6 shrink-0 items-center justify-center rounded-sm focus-visible:ring-[3px] focus-visible:outline-none disabled:opacity-50"
+          className="focus-visible:ring-highlighted-bright/50 flex size-5 shrink-0 items-center justify-center rounded-sm focus-visible:ring-[3px] focus-visible:outline-none disabled:opacity-50"
         >
           {trigger}
         </button>
@@ -349,7 +349,7 @@ function DesignFillPopover({
         align="start"
         sideOffset={8}
         padding="none"
-        className="w-64"
+        size="sm"
         onEscapeKeyDown={(event) => {
           if (keepDesignPopoverWhileEditing(event)) return;
           escapedRef.current = true;

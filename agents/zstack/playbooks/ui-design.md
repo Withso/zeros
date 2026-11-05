@@ -46,7 +46,8 @@ them.
    performance work runs `pnpm build:ui`; token or contrast changes run
    `pnpm design:docs`. A primitive change (a shared class constant is one)
    tests every call shape (asChild, loading, inside a Tooltip), sizes each
-   importer by its context, recomputes offsets made for an old size, and
+   importer by its context, recomputes offsets made for an old size, moves
+   the overlays that fade from a fill it changes, and
    updates in the same commit every smoke that pins it, found by its
    `data-slot` names and old values. A component named by a prop declares
    `aria-label?: never`; a glyph standing for a word keeps it as name and

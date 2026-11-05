@@ -260,11 +260,11 @@ export function DesignLayoutChildren({
         <div
           role="group"
           aria-label="Constraint pins"
-          className="zd-constraint-pad relative grid size-16 grid-cols-3 grid-rows-3 rounded-md"
+          className="zd-constraint-pad relative grid size-16 grid-cols-3 grid-rows-3 rounded-lg"
         >
           <span
             aria-hidden="true"
-            className="zd-constraint-box pointer-events-none absolute inset-[18px] rounded-sm"
+            className="zd-constraint-box pointer-events-none absolute inset-5 rounded-sm"
           />
           {(
             [

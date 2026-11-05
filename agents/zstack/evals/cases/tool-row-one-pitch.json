@@ -1,0 +1,9 @@
+{
+  "id": "tool-row-one-pitch",
+  "kind": "scenario",
+  "area": "renderer-agents",
+  "fixedBy": "pr:839",
+  "symptom": "Read, Write and Edit rows with file pills sat further apart than Bash rows: the inner disclosure kept its 28px minimum inside the padded group, so those rows stood 36px tall and calls sat 36 or 44px apart.",
+  "rule": "The disclosure inside a ListRowGroup drops its own minimum height (LIST_ROW_IN_GROUP has min-h-0), so every tool row is 28px on one 36px pitch; the smoke asserts the height of each kind.",
+  "check": "pnpm test:ui-smoke --shard=2/3"
+}

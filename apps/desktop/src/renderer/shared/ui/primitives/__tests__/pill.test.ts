@@ -27,9 +27,11 @@ describe("Pill", () => {
 
   it("has one neutral look, tints only where they mean something", () => {
     const neutral = classes(renderToStaticMarkup(createElement(Pill, null, "a.ts")));
-    for (const cls of ["border-border2", "bg-bg2", "hover:border-border3", "hover:bg-bg2-highlight", "aria-pressed:border-border4"]) {
+    for (const cls of ["border-border2", "bg-bg2", "hover:border-border3", "hover:bg-bg2-highlight", "aria-pressed:bg-selected-bg"]) {
       expect(neutral, cls).toContain(cls);
     }
+    // On is the selected fill; the resting edge stays as it is.
+    expect([...neutral].some((cls) => /^aria-pressed:(?:hover:)?(?:border|ring|shadow|outline)/.test(cls))).toBe(false);
     expect(classes(renderToStaticMarkup(createElement(Pill, { tone: "failed" }, "x")))).toContain("bg-red-bg");
     expect(classes(renderToStaticMarkup(createElement(Pill, { tone: "mode" }, "x")))).toContain("bg-brown-bg");
     expect(classes(renderToStaticMarkup(createElement(Pill, { tone: "gone" }, "x")))).toContain("border-dashed");

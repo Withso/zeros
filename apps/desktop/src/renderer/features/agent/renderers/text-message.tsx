@@ -55,7 +55,7 @@ import { openFilePill, warmFilePill } from "@/renderer/shell/workbench/file-pill
 import { useAttachmentPillFile } from "../attachment-pill-file";
 import { Button } from "@/renderer/shared/ui/primitives";
 import { FileTypeIcon } from "../composer-editor/file-type-icon";
-import { COMPOSER_PILL_SPACING, PILL_SHELL } from "../composer-editor/pill-views";
+import { COMPOSER_PILL_SPACING, PILL_HOVER, PILL_SHELL } from "../composer-editor/pill-views";
 import { cn } from "@/renderer/shared/ui/cn";
 import { MarkdownCodeBlock } from "./markdown-code-block";
 import { useAttachmentImageSource } from "../attachment-image-source";
@@ -313,7 +313,7 @@ function MessageSegmentView({
   if (seg.type === "attachment-group") {
     const available = !!attachmentCwd && attachmentImagesActive !== false && seg.files.every(file => !!file.diskPath);
     return <Tooltip label={`${seg.name} · ${seg.files.length} files`}><Button variant="ghost" data-attachment-pill="" data-attachment-group=""
-      className={cn(PILL_SHELL, COMPOSER_PILL_SPACING)} disabled={!available} aria-label={`Open ${seg.name}, ${seg.files.length} files`}
+      className={cn(PILL_SHELL, PILL_HOVER, COMPOSER_PILL_SPACING)} disabled={!available} aria-label={`Open ${seg.name}, ${seg.files.length} files`}
       onClick={event => { event.stopPropagation(); if (available) openFileGroup(attachmentCwd, {
         id: seg.id, name: seg.name, files: seg.files.map(file => ({ name: file.name, path: file.diskPath!, attachmentId: file.attachmentId })),
       }); }}>
@@ -357,7 +357,7 @@ function MessageAttachmentPill({
     enabled: active !== false && seg.kind === "image",
   });
   if (saved.path && cwd) return <Tooltip label={seg.name}><Button variant="ghost" data-attachment-pill=""
-    disabled={active === false || saved.resolving} aria-label={`Open ${seg.name}`} className={cn(PILL_SHELL, COMPOSER_PILL_SPACING)}
+    disabled={active === false || saved.resolving} aria-label={`Open ${seg.name}`} className={cn(PILL_SHELL, PILL_HOVER, COMPOSER_PILL_SPACING)}
     onPointerEnter={() => warmFilePill(cwd, saved.path!)} onFocus={() => warmFilePill(cwd, saved.path!)}
     onClick={event => { event.stopPropagation(); openFilePill(cwd, saved.path!); }}>
     {seg.kind === "image" && source ? <img src={source} alt="" loading="lazy" decoding="async" className="size-4 shrink-0 rounded-sm object-cover" />
@@ -408,7 +408,7 @@ function UserBubbleAttachment({
               onPreviewImage(source);
             }
           }}
-          className={`${MSG_CHIP_BASE} cursor-pointer`}
+          className={cn(MSG_CHIP_BASE, PILL_HOVER, "cursor-pointer")}
         >
           <img
             src={source}

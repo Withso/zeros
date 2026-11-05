@@ -2,23 +2,22 @@
 // ReviewView — the PR review surface (the Review tab's body)
 // ──────────────────────────────────────────────────────────
 //
-// Header (state · branches · merge CTA) + Changes / Description / Commits /
-// Checks / Reviews sub-tabs. All provider data flows through ONE live
-// snapshot store (review-data.ts — stale-while-revalidate, event-bus +
-// adaptive polling) behind the ReviewProvider seam (review-provider.ts), so
-// agent pushes, terminal `gh` writes, and github.com-side activity all land
-// here without a manual refresh. The Changes sub-tab reuses the local
-// base...HEAD diff (the branch is checked out); everything else reads the
-// provider. "Add to chat" (comments + failing checks) drops composed text
-// into the active chat's composer.
+// The header reads in rows (review-overview.tsx), then Overview / Description
+// / Activity / Checks / Commits. Overview holds Git status (the branch on this
+// machine, from the shared PR status island), PR status (the pull request on
+// the host, with the one Merge) and Findings, beside the rail. All provider
+// data flows through ONE live snapshot store (review-data.ts — stale-while-
+// revalidate, event-bus + adaptive polling) behind the ReviewProvider seam
+// (review-provider.ts). The published diff, where Post to PR works, stays one
+// step from Overview's rail until posting moves to the Changes tab
+// (docs/design-implementation/plans.md §1.2).
 //
 // Mounted ONLY for a workspace with a PR (ReviewSurface guards + renders the
-// empty state), so there is no "create a PR" empty state here; PR creation
-// lives in the shared PR status row (PrStatusRow) that tops both the Changes
-// and Review tabs.
+// empty state). "Add to chat" drops composed text into the active chat's
+// composer.
 
 import React, { useCallback, useEffect, useMemo, useState } from "react";
-import { ArrowRight, ChevronDown, ExternalLink } from "lucide-react";
+import { ArrowLeft, Pencil } from "lucide-react";
 
 import { gitDiff, type PR } from "../../../platform/git";
 import { useGithubReview } from "@/renderer/features/code-review/use-github-review";
@@ -27,24 +26,14 @@ import {
   useWorkspaceDispatch,
 } from "@/renderer/state/store";
 import { notifyWorkspacesChanged } from "@/renderer/state/use-projects";
-import {
-  Button,
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuRadioGroup,
-  DropdownMenuRadioItem,
-  DropdownMenuTrigger,
-  Tooltip,
-} from "@/renderer/shared/ui/primitives";
+import { Button, ButtonShortcut, Textarea } from "@/renderer/shared/ui/primitives";
 import { toast } from "@/renderer/shared/ui/primitives/elements";
-import { cn } from "@/renderer/shared/ui/cn";
 import { renderMarkdown } from "@/renderer/features/agent/markdown";
-import { ZerosSpinner } from "@/renderer/shared/ui/loading";
+import { useCodeReview } from "@/renderer/features/code-review/use-code-review";
 import { LatestGenerationFlight } from "@/renderer/shared/lib/latest-generation-flight";
 
 import { parseUnifiedDiffFiles, type ChangedFile } from "./changes-parse";
 import { useScrollMemoryRef } from "../../scroll-memory";
-import { AGENT_WORKING_REASON } from "../../pr/use-agent-working";
 import { usePrIslandKind } from "../../pr/pr-island-state-store";
 import { registerPrWorkspaceCacheForget } from "../../pr/pr-cache-forget";
 import {
@@ -57,12 +46,19 @@ import {
   useReviewLiveData,
 } from "./review-data";
 import { useReviewGithubFailure } from "../../pr/review-github-failure";
-import { reviewActionBlockReason, summarizeChecks } from "./review-model";
+import { derivePrStatusView, reviewFindings, summarizeChecks } from "./review-model";
+import { ErrorCallout } from "./review-shared-components";
 import {
-  Centered,
-  OutcomeGlyph,
-  PrStateBadge,
-} from "./review-shared-components";
+  FindingsSection,
+  PrStatusCard,
+  ReviewHeader,
+  ReviewOverviewLayout,
+  ReviewRail,
+  ReviewSection,
+  ReviewSubnav,
+  SUBTAB_FRAME,
+  type ReviewChangeCounts,
+} from "./review-overview";
 import { ReviewChangesSection } from "./review-changes";
 import {
   WorkbenchEmptyState,
@@ -166,37 +162,6 @@ function cacheReviewFiles(
 
 // ── merge-method memory ──────────────────────────────────────
 
-function mergeMethodKey(provider: ReviewProvider): string {
-  return `zeros.review.merge-method.${provider.cacheKey}`;
-}
-
-function loadMergeMethod(provider: ReviewProvider): ReviewMergeMethod {
-  const fallback = provider.capabilities.mergeMethods[0]?.id ?? "";
-  try {
-    const value = window.localStorage.getItem(mergeMethodKey(provider));
-    if (
-      value &&
-      provider.capabilities.mergeMethods.some((method) => method.id === value)
-    ) {
-      return value;
-    }
-  } catch {
-    /* storage unavailable — default below */
-  }
-  return fallback;
-}
-
-function saveMergeMethod(
-  provider: ReviewProvider,
-  method: ReviewMergeMethod,
-): void {
-  try {
-    window.localStorage.setItem(mergeMethodKey(provider), method);
-  } catch {
-    /* best-effort */
-  }
-}
-
 // ── main view ────────────────────────────────────────────────
 
 export function ReviewView({
@@ -213,6 +178,7 @@ export function ReviewView({
   agentWorking,
   sub,
   onSubChange,
+  gitStatus,
 }: {
   provider: ReviewProvider;
   workspaceId: string;
@@ -234,9 +200,12 @@ export function ReviewView({
   sub: ReviewSubtab;
   /** Commit an explicit inner destination to the owning tab. */
   onSubChange: (sub: ReviewSubtab) => void;
+  /** Overview's Git status card: the shared PR status island in its
+   *  git-status presentation, owned by the surface that knows the workspace. */
+  gitStatus?: React.ReactNode;
 }) {
   const filesKey = reviewFilesKey(provider.cacheKey, workspaceId, prNumber, baseBranch);
-  const { snap, refresh, postComment, merge, markReady } = useReviewLiveData({
+  const { snap, refresh, postComment, merge, markReady, updateBody } = useReviewLiveData({
     provider,
     workspaceId,
     prNumber,
@@ -304,7 +273,7 @@ export function ReviewView({
   const renamedPaths = useMemo(() => new Map(files.flatMap(file => file.oldPath ? [[file.oldPath, file.path] as const] : [])), [files]);
   const githubReview = useGithubReview({
     workspaceId: provider.family === "github" ? workspaceId : undefined,
-    prNumber, cwd, active: active && sub === "changes",
+    prNumber, cwd, active: active && (sub === "changes" || sub === "overview"),
     confirmedHeadSha: filesHeadSha, confirmedBaseSha: filesBaseSha, renamedPaths,
   });
   const reviewHeadSha = githubReview.snapshot?.headSha;
@@ -475,7 +444,7 @@ export function ReviewView({
             ? snap.commits !== null
             : sub === "checks"
               ? snap.checks !== null
-              : sub === "reviews"
+              : sub === "activity"
                 ? snap.timeline !== null
                 : true),
       retry: async () => {
@@ -500,6 +469,42 @@ export function ReviewView({
   );
   const checksSummary = summarizeChecks(snap.checks);
   const conversationCount = snap.timeline?.length ?? null;
+  // The pull request's own totals; an older engine falls back to the diff.
+  const changeCounts = useMemo<ReviewChangeCounts | null>(() => {
+    const live = snap.pr;
+    if (live && live.changedFiles != null && live.additions != null && live.deletions != null) {
+      return { files: live.changedFiles, additions: live.additions, deletions: live.deletions };
+    }
+    if (filesLoading) return null;
+    return files.reduce<ReviewChangeCounts>(
+      (sum, file) => ({
+        files: sum.files + 1,
+        additions: sum.additions + (file.additions ?? 0),
+        deletions: sum.deletions + (file.deletions ?? 0),
+      }),
+      { files: 0, additions: 0, deletions: 0 },
+    );
+  }, [snap.pr, files, filesLoading]);
+  const statusView = useMemo(
+    () =>
+      snap.pr
+        ? derivePrStatusView({ pr: snap.pr, branch, checks: snap.checks, timeline: snap.timeline })
+        : null,
+    [snap.pr, branch, snap.checks, snap.timeline],
+  );
+  // Findings: the agent's workspace comments joined with the host's review
+  // apps and code scanning (the GitHub review source).
+  const codeReview = useCodeReview({
+    cwd,
+    workspaceId,
+    active: active && sub === "overview",
+    refreshKey,
+    external: githubReview.source,
+  });
+  const findings = useMemo(
+    () => reviewFindings(codeReview.threads, prNumber),
+    [codeReview.threads, prNumber],
+  );
 
   const runMerge = useCallback(
     async (method: ReviewMergeMethod) => {
@@ -548,165 +553,119 @@ export function ReviewView({
         branch={branch}
         baseBranch={baseBranch}
         prNumber={prNumber}
-        prUrl={prUrl}
-        hostLabel={provider.hostLabel}
+        repoSlug={repoSlug}
         sub={sub}
         onSubChange={onSubChange}
       />
     );
   }
 
-  const subTabs: {
-    id: ReviewSubtab;
-    label: string;
-    count?: number | null;
-  }[] = [
-    {
-      id: "changes",
-      label: "Changes",
-      count: filesLoading ? null : files.length,
-    },
-    { id: "description", label: "Description" },
-    { id: "commits", label: "Commits", count: snap.commits?.length ?? null },
-    { id: "checks", label: "Checks" },
-    { id: "reviews", label: "Reviews", count: conversationCount },
-  ];
-
   return (
     <div className="flex h-full min-h-0 flex-col">
       <WorkbenchTabToolbar>
-        {/* ── PR header ── */}
-        <div className="border-border1 shrink-0 border-b px-3 pt-2.5 pb-2">
-          <div className="flex items-center gap-2">
-            <PrStateBadge state={pr.state} />
-            <span className="text-2xxs text-fg2 flex min-w-0 items-center gap-1 font-mono">
-              <span className="truncate">{pr.headBranch}</span>
-              <ArrowRight className="text-muted-fg size-3 shrink-0" />
-              <span className="shrink-0">{pr.baseBranch}</span>
-            </span>
-            <div className="flex-1" />
-            {(prUrl || pr.url) && (
-              <Tooltip label={`Open on ${provider.hostLabel}`}>
-                <a
-                  href={prUrl ?? pr.url}
-                  target="_blank"
-                  rel="noreferrer"
-                  className="text-fg2 hover:bg-bg2-hover hover:text-fg1 flex size-7 items-center justify-center rounded-sm transition-colors duration-120 ease-out"
-                >
-                  <ExternalLink className="size-3.5" />
-                </a>
-              </Tooltip>
-            )}
-            <MergeControls
-              provider={provider}
-              pr={pr}
-              islandKind={islandKind}
-              busy={busy}
-              agentWorking={agentWorking}
-              onMarkReady={() => void runMarkReady()}
-              onMerge={(m) => void runMerge(m)}
-            />
-          </div>
-          <div className="mt-1.5 flex min-w-0 items-baseline gap-1.5">
-            <Tooltip label={pr.title}>
-              <h2 className="text-fg1 m-0 min-w-0 truncate text-sm font-medium">
-                {pr.title}
-              </h2>
-            </Tooltip>
-            <span className="text-muted-fg shrink-0 text-xs tabular-nums">
-              #{pr.number}
-            </span>
-          </div>
-        </div>
-
-        {/* ── sub-nav ── */}
-        <div
-          role="tablist"
-          className="border-border1 flex shrink-0 items-center gap-1 overflow-x-auto border-b px-2 py-1.5 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
-        >
-          {subTabs.map((t) => (
-            <button
-              key={t.id}
-              type="button"
-              role="tab"
-              aria-selected={sub === t.id}
-              onClick={() => onSubChange(t.id)}
-              className={cn(
-                "flex h-6 shrink-0 items-center gap-1.5 rounded-md px-2.5 text-xs font-medium transition-colors duration-120 ease-out",
-                sub === t.id
-                  ? "bg-bg2-hover text-fg1"
-                  : "text-fg2 hover:bg-bg2-hover/50 hover:text-fg1",
-              )}
-            >
-              {t.id === "checks" && checksSummary.tone !== "none" && (
-                <OutcomeGlyph
-                  outcome={
-                    checksSummary.tone === "failure"
-                      ? "failed"
-                      : checksSummary.tone === "pending"
-                        ? "pending"
-                        : "passed"
-                  }
-                />
-              )}
-              {t.label}
-              {t.id === "checks"
-                ? checksSummary.fraction && (
-                    <span className="text-muted-fg tabular-nums">
-                      {checksSummary.fraction}
-                    </span>
-                  )
-                : t.count != null &&
-                  t.count > 0 && (
-                    <span className="text-muted-fg tabular-nums">
-                      {t.count}
-                    </span>
-                  )}
-            </button>
-          ))}
-        </div>
+        <ReviewHeader
+          pr={pr}
+          repoSlug={repoSlug}
+          hostLabel={provider.hostLabel}
+          prUrl={prUrl}
+          changes={changeCounts}
+          onRefresh={() => void refresh()}
+        />
+        <ReviewSubnav
+          sub={sub}
+          onSubChange={onSubChange}
+          activityCount={conversationCount}
+          commitsCount={snap.commits?.length ?? null}
+          checksCount={snap.checks?.total ?? null}
+          checks={checksSummary}
+        />
       </WorkbenchTabToolbar>
       {/* ── body ── */}
       <div ref={bodyScrollRef} className="min-h-0 flex-1 overflow-auto">
-        {sub === "changes" && (
-          <ReviewChangesSection
-            key={JSON.stringify([provider.cacheKey, workspaceId, prNumber])}
-            workspaceId={workspaceId}
-            cwd={cwd}
-            active={active && sub === "changes"}
-            refreshKey={refreshKey}
-            reviewExternal={githubReview.source}
-            files={files}
-            loading={filesLoading}
-            error={null}
-            baseBranch={baseBranch}
-            onRetry={() => {
-              reviewFilesMeta.delete(filesKey);
-              setFilesReloadNonce((n) => n + 1);
-            }}
+        {sub === "overview" && statusView && (
+          <ReviewOverviewLayout
+            gitStatus={gitStatus}
+            prStatus={
+              <PrStatusCard
+                view={statusView}
+                provider={provider}
+                islandKind={islandKind}
+                agentWorking={agentWorking}
+                busy={busy}
+                commitCount={snap.commits?.length ?? null}
+                baseBranch={pr.baseBranch}
+                onMerge={(method) => void runMerge(method)}
+                onMarkReady={() => void runMarkReady()}
+                onAddToChat={addToChat}
+              />
+            }
+            findings={<FindingsSection findings={findings} onAddToChat={addToChat} />}
+            rail={
+              <ReviewRail
+                pr={pr}
+                timeline={snap.timeline}
+                changes={changeCounts}
+                onOpenChanges={() => onSubChange("changes")}
+              />
+            }
           />
         )}
-        {sub === "description" && <DescriptionSection pr={pr} />}
+        {sub === "changes" && (
+          <>
+            <div className="border-border1 flex h-10 items-center border-b px-3">
+              <Button variant="ghost" size="compact" className="text-fg2" onClick={() => onSubChange("overview")}>
+                <ArrowLeft aria-hidden />
+                Overview
+              </Button>
+            </div>
+            <ReviewChangesSection
+              key={JSON.stringify([provider.cacheKey, workspaceId, prNumber])}
+              workspaceId={workspaceId}
+              cwd={cwd}
+              active={active && sub === "changes"}
+              refreshKey={refreshKey}
+              reviewExternal={githubReview.source}
+              files={files}
+              loading={filesLoading}
+              error={null}
+              baseBranch={baseBranch}
+              onRetry={() => {
+                reviewFilesMeta.delete(filesKey);
+                setFilesReloadNonce((n) => n + 1);
+              }}
+            />
+          </>
+        )}
+        {sub === "description" && (
+          <div className={SUBTAB_FRAME}>
+            <DescriptionSection key={pr.number} pr={pr} hostLabel={provider.hostLabel} onSave={updateBody} />
+          </div>
+        )}
         {sub === "commits" && (
-          <ReviewCommitsSection
-            commits={snap.commits}
-            loading={snap.refreshing}
-            error={null}
-            onRetry={() => void refresh()}
-          />
+          <div className={SUBTAB_FRAME}>
+            <ReviewCommitsSection
+              commits={snap.commits}
+              loading={snap.refreshing}
+              error={null}
+              prUrl={pr.url || prUrl}
+              onRetry={() => void refresh()}
+            />
+          </div>
         )}
         {sub === "checks" && (
-          <ReviewChecksSection
-            data={snap.checks}
-            loading={snap.refreshing}
-            error={null}
-            prNumber={pr.number}
-            branch={branch || pr.headBranch}
-            onAddToChat={addToChat}
-            onRetry={() => void refresh()}
-          />
+          <div className={SUBTAB_FRAME}>
+            <ReviewChecksSection
+              data={snap.checks}
+              loading={snap.refreshing}
+              error={null}
+              prNumber={pr.number}
+              branch={branch || pr.headBranch}
+              onAddToChat={addToChat}
+              onRetry={() => void refresh()}
+            />
+          </div>
         )}
-        {sub === "reviews" && (
+        {sub === "activity" && (
           <ReviewTimelineSection
             pr={pr}
             prNumber={pr.number}
@@ -719,6 +678,7 @@ export function ReviewView({
               workspaceId,
               pr.number,
             ])}
+            hostLabel={provider.hostLabel}
             onAddToChat={addToChat}
             onPostComment={postComment}
             onRetry={() => void refresh()}
@@ -729,87 +689,47 @@ export function ReviewView({
   );
 }
 
-/** Paint only workspace-owned PR identity during the first provider read. The
- * shell is immediately navigable, but it deliberately invents no provider
- * state, title, counts, or mergeability while live GitHub data is pending. */
+/** Paint only workspace-owned PR identity during the first provider read: the
+ * number and branches in their final rows, the sub-tabs, and skeletons where
+ * the title and cards will land, so nothing moves when the pull request
+ * arrives. It invents no provider state, title, counts or mergeability. */
 function ReviewPendingShell({
   branch,
   baseBranch,
   prNumber,
-  prUrl,
-  hostLabel,
+  repoSlug,
   sub,
   onSubChange,
 }: {
   branch: string;
   baseBranch: string;
   prNumber: number;
-  prUrl: string | null;
-  hostLabel: string;
+  repoSlug: string | null;
   sub: ReviewSubtab;
   onSubChange: (sub: ReviewSubtab) => void;
 }) {
-  const tabs: { id: ReviewSubtab; label: string }[] = [
-    { id: "changes", label: "Changes" },
-    { id: "description", label: "Description" },
-    { id: "commits", label: "Commits" },
-    { id: "checks", label: "Checks" },
-    { id: "reviews", label: "Reviews" },
-  ];
   return (
     <div className="flex h-full min-h-0 flex-col" aria-busy="true">
-      <div className="border-border1 shrink-0 border-b px-3 pt-2.5 pb-2">
-        <div className="flex items-center gap-2">
-          <span className="text-2xxs text-fg2 flex min-w-0 items-center gap-1 font-mono">
-            <span className="truncate">{branch}</span>
-            <ArrowRight className="text-muted-fg size-3 shrink-0" />
-            <span className="shrink-0">{baseBranch}</span>
-          </span>
-          <div className="flex-1" />
-          {prUrl && (
-            <Tooltip label={`Open on ${hostLabel}`}>
-              <a
-                href={prUrl}
-                target="_blank"
-                rel="noreferrer"
-                className="text-fg2 hover:bg-bg2-hover hover:text-fg1 flex size-7 items-center justify-center rounded-sm transition-colors duration-120 ease-out"
-              >
-                <ExternalLink className="size-3.5" />
-              </a>
-            </Tooltip>
-          )}
+      <header className="flex shrink-0 flex-col px-5 pt-4 pb-3.5">
+        <div className="flex min-h-7 items-center">
+          <span className="bg-bg2 h-6 w-16 rounded-full" />
         </div>
-        <div className="mt-1.5 flex min-w-0 items-baseline gap-1.5">
-          <h2 className="text-fg1 m-0 min-w-0 truncate text-sm font-medium">
-            Pull request
-          </h2>
-          <span className="text-muted-fg shrink-0 text-xs tabular-nums">
-            #{prNumber}
-          </span>
-        </div>
-      </div>
-      <div
-        role="tablist"
-        className="border-border1 flex shrink-0 items-center gap-1 overflow-x-auto border-b px-2 py-1.5 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
-      >
-        {tabs.map((tab) => (
-          <button
-            key={tab.id}
-            type="button"
-            role="tab"
-            aria-selected={sub === tab.id}
-            onClick={() => onSubChange(tab.id)}
-            className={cn(
-              "flex h-6 shrink-0 items-center rounded-md px-2.5 text-xs font-medium transition-colors duration-120 ease-out",
-              sub === tab.id
-                ? "bg-bg2-hover text-fg1"
-                : "text-fg2 hover:bg-bg2-hover/50 hover:text-fg1",
-            )}
-          >
-            {tab.label}
-          </button>
-        ))}
-      </div>
+        <p className="text-fg3 m-0 mt-3 text-xs tabular-nums">
+          {repoSlug ? `${repoSlug} · ` : ""}#{prNumber}
+        </p>
+        <span className="bg-bg2 mt-1.5 h-5 w-2/3 rounded-md" />
+        <p className="text-fg3 m-0 mt-4 truncate text-3xxs leading-4">
+          {baseBranch} ← {branch}
+        </p>
+      </header>
+      <ReviewSubnav
+        sub={sub}
+        onSubChange={onSubChange}
+        activityCount={null}
+        commitsCount={null}
+        checksCount={null}
+        checks={summarizeChecks(null)}
+      />
       <div className="min-h-0 flex-1" />
     </div>
   );
@@ -817,134 +737,94 @@ function ReviewPendingShell({
 
 // ── description ──────────────────────────────────────────────
 
-function DescriptionSection({ pr }: { pr: PR }) {
-  const html = useMemo(() => renderMarkdown(pr.body), [pr.body]);
-  if (!pr.body.trim())
-    return (
-      <Centered>No description yet. Edit it on the PR to add one.</Centered>
-    );
-  return (
-    <div className="zeros-agent-md p-3 [&_.zeros-md-prose>:first-child]:mt-0">
-      <div
-        className="zeros-md-prose text-sm"
-        dangerouslySetInnerHTML={{ __html: html }}
-      />
-    </div>
-  );
-}
-
-// ── merge controls ───────────────────────────────────────────
-
-/** The header CTA per PR state: draft → Mark as ready (primary); open → the
- *  split merge button (green fill, remembered method + a method picker);
- *  merged/closed → nothing (the state badge says it all). Both writes are
- *  parked while the agent has a turn in flight — merging could ship a
- *  half-pushed branch, and marking ready would invite review of one. */
-function MergeControls({
-  provider,
+/** The body as Markdown, with Edit when the provider can write it. Saving
+ * keeps the draft and says why if the write fails. */
+function DescriptionSection({
   pr,
-  islandKind,
-  busy,
-  agentWorking,
-  onMarkReady,
-  onMerge,
+  hostLabel,
+  onSave,
 }: {
-  provider: ReviewProvider;
   pr: PR;
-  /** Exact workspace+PR state rendered by the shared status island. */
-  islandKind: string | null;
-  busy: boolean;
-  agentWorking: boolean;
-  onMarkReady: () => void;
-  onMerge: (m: ReviewMergeMethod) => void;
+  hostLabel: string;
+  onSave: ((body: string) => Promise<void>) | null;
 }) {
-  const mergeMethods = provider.capabilities.mergeMethods;
-  const [method, setMethod] = useState<ReviewMergeMethod>(() =>
-    loadMergeMethod(provider),
-  );
-  const selectedMethod =
-    mergeMethods.find((candidate) => candidate.id === method) ??
-    mergeMethods[0];
-  if (pr.state === "merged" || pr.state === "closed") return null;
-  if (pr.state === "draft") {
-    const actionBlock = reviewActionBlockReason(islandKind, "ready");
-    const blockedReason =
-      actionBlock ?? (agentWorking ? AGENT_WORKING_REASON : null);
-    const ready = (
-      <Button
-        size="sm"
-        variant="primary"
-        disabled={busy || !!blockedReason}
-        onClick={onMarkReady}
-      >
-        {busy && <ZerosSpinner size={16} tone="inverted" />}
-        Mark as ready
-      </Button>
-    );
-    return blockedReason ? (
-      <Tooltip label={blockedReason}>
-        {/* span keeps the tooltip live over the disabled button */}
-        <span className="inline-flex">{ready}</span>
-      </Tooltip>
-    ) : (
-      ready
-    );
-  }
-  const actionBlock = reviewActionBlockReason(islandKind, "merge");
-  const blockedReason =
-    actionBlock ?? (agentWorking ? AGENT_WORKING_REASON : null);
-  const pick = (m: ReviewMergeMethod) => {
-    setMethod(m);
-    saveMergeMethod(provider, m);
+  const html = useMemo(() => renderMarkdown(pr.body), [pr.body]);
+  const [draft, setDraft] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const save = async () => {
+    if (!onSave || draft == null || saving) return;
+    setSaving(true);
+    setError(null);
+    try {
+      await onSave(draft);
+      setDraft(null);
+    } catch (e) {
+      setError(humanGitError(e));
+    } finally {
+      setSaving(false);
+    }
   };
-  if (!selectedMethod) return null;
-  const mergeButton = (
-    // The one green CTA on the surface — same fill treatment as the PR
-    // island's Merge action, so "merge" reads identically everywhere. The
-    // 1px gap lets the header's bg1 show through as the segment divider
-    // (no border token belongs on a colour fill).
-    <span className="inline-flex gap-px overflow-hidden rounded-sm">
-      <button
-        type="button"
-        disabled={busy || !!blockedReason}
-        onClick={() => onMerge(selectedMethod.id)}
-        className="bg-green-primary text-bg1 flex h-6 items-center gap-1.5 px-2.5 text-xs font-medium transition-opacity duration-120 ease-out hover:opacity-90 disabled:pointer-events-none disabled:opacity-50"
+  const edit =
+    onSave && draft == null ? (
+      <Button
+        variant="ghost"
+        size="compact"
+        className="text-fg2"
+        onClick={() => {
+          setError(null);
+          setDraft(pr.body);
+        }}
       >
-        {busy && <ZerosSpinner size={12} tone="inherit" />}
-        {selectedMethod.label}
-      </button>
-      <DropdownMenu>
-        <DropdownMenuTrigger asChild>
-          <button
-            type="button"
-            disabled={busy || !!blockedReason}
-            aria-label="Choose merge method"
-            className="bg-green-primary text-bg1 flex h-6 items-center px-1.5 transition-opacity duration-120 ease-out hover:opacity-90 disabled:pointer-events-none disabled:opacity-50"
-          >
-            <ChevronDown className="size-3" />
-          </button>
-        </DropdownMenuTrigger>
-        <DropdownMenuContent align="end">
-          <DropdownMenuRadioGroup
-            value={selectedMethod.id}
-            onValueChange={pick}
-          >
-            {mergeMethods.map((candidate) => (
-              <DropdownMenuRadioItem key={candidate.id} value={candidate.id}>
-                {candidate.label}
-              </DropdownMenuRadioItem>
-            ))}
-          </DropdownMenuRadioGroup>
-        </DropdownMenuContent>
-      </DropdownMenu>
-    </span>
-  );
-  return blockedReason ? (
-    <Tooltip label={blockedReason}>
-      {/* span keeps the tooltip live over the disabled buttons */}
-      <span className="inline-flex">{mergeButton}</span>
-    </Tooltip>
-  ) : (
-    mergeButton
+        <Pencil aria-hidden />
+        Edit
+      </Button>
+    ) : null;
+  return (
+    <ReviewSection title="Description" action={edit}>
+      {draft != null ? (
+        <div data-review-description-editor="" className="flex min-w-0 flex-col gap-2">
+          <Textarea
+            aria-label="Pull request description"
+            value={draft}
+            maxLength={60_000}
+            autoFocus
+            rows={12}
+            className="min-h-48 font-mono text-xs leading-5"
+            onChange={(e) => setDraft(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
+                e.preventDefault();
+                void save();
+              }
+            }}
+          />
+          {error ? <ErrorCallout text={error} /> : null}
+          <div className="flex items-center gap-2">
+            <span className="text-fg3 text-3xxs flex-1 leading-4">Saves to {hostLabel}</span>
+            <Button variant="ghost" size="compact" disabled={saving} onClick={() => setDraft(null)}>
+              Cancel
+            </Button>
+            <Button
+              variant="primary"
+              size="compact"
+              aria-keyshortcuts="Meta+Enter Control+Enter"
+              loading={saving}
+              disabled={draft === pr.body}
+              onClick={() => void save()}
+            >
+              Save
+              <ButtonShortcut keys="⌘↵" />
+            </Button>
+          </div>
+        </div>
+      ) : pr.body.trim() ? (
+        <div className="zeros-agent-md [&_.zeros-md-prose>:first-child]:mt-0 [&_.zeros-md-prose>:last-child]:mb-0">
+          <div className="zeros-md-prose text-sm" dangerouslySetInnerHTML={{ __html: html }} />
+        </div>
+      ) : (
+        <p className="text-fg3 m-0 text-xs">No description yet.</p>
+      )}
+    </ReviewSection>
   );
 }

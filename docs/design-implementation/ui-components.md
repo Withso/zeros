@@ -34,7 +34,7 @@ Changes:
 - One shape: 6px corners (4px for the 20px inline size).
 - One hover, bg2-highlight, visible on every surface (bg2-hover was 1.06:1 on raised surfaces).
 - Inline gets the focus ring and a fixed 12px glyph (callers used 12, 14 and 16).
-- Toggle on is neutral (bg2-highlight + border4); the active tool of a toolbar is the selection blue.
+- Toggle on is the neutral selected fill (selected-bg, no edge); the active tool of a toolbar is the selection blue.
 - The deprecated hover="subtle" and motion options are removed.
 - Design-tab icon buttons use these sizes: section actions compact 24, row toggles standard 28 with the pressed recipe (pressed looked like hover), layer visibility and field keyframes inline 20, and the panel toggle shows its pressed state (none today).
 
@@ -292,10 +292,10 @@ Owner today: `Pill primitive + 20 feature recipes`
 
 Changes:
 - Every pill the app ships has a row below: 22 kinds today, in eight heights from 17 to 28. Two sizes remain: 20 inline (12/16, 4 px corners) for text and rows, and 24 control (13/18, 6 px corners) around the composer.
-- One neutral look for references: bg2 with border2, hover border3 with bg2-highlight, “on” border4 with bg2-highlight.
+- One neutral look for references: bg2 with border2, hover border3 with bg2-highlight; “on” fills selected-bg and keeps its resting edge.
 - Tints only where they mean something: red for a failed tool target, brown for the Design mode tag, and a dashed outline for anything whose target is gone.
 - Chat and workspace links are neutral inline pills too, with no blue: the icon tells them apart. A chat shows its agent’s logo in the agent’s colour (Claude terracotta, Codex periwinkle, Cursor fg1); a workspace shows its glyph in its PR status colour, as in the sidebar (brown open, green ready, violet merged, red closed or conflicting, fg2 while an agent works, quiet with no PR).
-- Composer pills swap their icon for × on hover, so the width never changes. A selected pill gets the keyboard ring; a missing file gets a yellow outline and a grey icon.
+- Composer pills swap their icon for × on hover, so the width never changes. A pill the caret selects fills with selected-bg (a workspace link steps its blue up) and draws no ring; a missing file gets a yellow outline and a grey icon.
 - File paths an agent writes stay brown text links, not pills, so replies stay easy to read.
 - Four things leave the pill family: the Truncated tag becomes a Badge, Jump to latest becomes a button, the PR chip stays in its island, and the Fast pill is gone.
 
@@ -425,7 +425,7 @@ Changes:
 - One panel geometry: 40 tab header, 36 selection header, 36 section headers, 0 12 12 bodies with 8 gaps, border1 between sections.
 - Style and CSS are the standard tab (28, active bg2, keyboard ring); zoom is a Ghost button with tabular figures that opens the zoom menu.
 - The selection header is 36 like the Layers header, with the layer type in fg3 at the end.
-- Section actions are compact 24 IconButtons with 12 glyphs; row actions (wrap, settings, independent sides) are standard 28 toggles that use the pressed recipe, bg2-highlight and border4.
+- Section actions are compact 24 IconButtons with 12 glyphs; row actions (wrap, settings, independent sides) are standard 28 toggles that use the pressed recipe, the selected-bg fill with no edge.
 - Empty sections read as quiet rows: a regular fg2 title that turns fg1 on hover, with one add button each.
 - Rotate and flip keep their track but are plain buttons with a hover fill and no pressed state.
 - Segmented controls take the Tabs recipe: track radius 8, segments radius 6; the selected segment has no edge and sits lighter than its track (bg4 in Dark, bg1 in Light).
@@ -487,7 +487,7 @@ Owner today: `design-theme-editor.tsx · design-theme-sources.tsxdesign-theme-ed
 Changes:
 - The window joins the Dialog family it already resembles: bg1, border2, radius 12, a 40 title bar, and Close as a compact 24 IconButton (the 20 circle today).
 - The rail is one recipe for sources and types: 12 medium fg3 section labels, 28 rows, selected bg2-highlight with fg1, counts 12 fg3, status glyphs in the StatusIcon colours.
-- The active theme column is a neutral pressed toggle (bg2-highlight with border4); the selection blue stays on the canvas.
+- The active theme column is a neutral pressed toggle (the selected-bg fill, no edge); the selection blue stays on the canvas.
 - Token names are code, so they are mono 12; type glyphs are fg3; an override of an imported token shows the Layers glyph in fg3 with a Tooltip.
 - Value cells are filled fields; Reset is an inline 20 IconButton drawn over the field’s end on hover, the inspector’s overlay rule; inherited values show the inherited value in fg3 with an “Inherits Base” Tooltip.
 - Row actions (rename, delete) sit in a compact ⋯ at the row’s end on hover.
@@ -499,7 +499,7 @@ Owner today: `design-motion-timeline.tsx · design-motion-timeline.cssdesign-wor
 
 Changes:
 - The panel is the floating-window recipe (bg1, border2, radius 12, shadow) with the 40 header of the Theme editor; Close keeps the chevron because the timeline collapses rather than closes.
-- Play is a standard IconButton whose pressed state is neutral (bg2-highlight with border4); the selection blue stays for the playhead, keyframes, clip and the unsaved dot, which belong to the canvas.
+- Play is a standard IconButton whose pressed state is the neutral selected-bg fill with no edge; the selection blue stays for the playhead, keyframes, clip and the unsaved dot, which belong to the canvas.
 - Ruler marks, the time total and counts are 12 fg3 tabular (11 muted-fg); grid lines are border1.
 - Track hover actions are compact 24 IconButtons; a selected track keeps the soft blue row, an invalid one a red edge.
 - Keyframes keep their 10 diamond with a 16 target; keyboard focus is the standard highlighted-bright ring.

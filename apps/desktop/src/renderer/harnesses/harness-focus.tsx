@@ -91,7 +91,7 @@ function Surface({ owner }: { owner: string }) {
       <Button>After embedded document</Button>
       <div className="h-64">
         <ReviewTimelineSection pr={null} prNumber={1} commits={[]} timeline={[]} loading={false} error={null}
-          scrollKey={`focus:${owner}`} onAddToChat={() => {}} onRetry={() => {}}
+          scrollKey={`focus:${owner}`} hostLabel="GitHub" onAddToChat={() => {}} onRetry={() => {}}
           onPostComment={() => new Promise<void>((_resolve, reject) => { rejectComment.current = reject; })} />
       </div>
       <Button onClick={() => rejectComment.current?.(new Error("Comment failed"))}>Fail comment request</Button>

@@ -104,7 +104,7 @@ Owner today: `features/settings/github-section.tsx (GitHubSection, IdentityBadge
 
 Changes:
 - Cards and tiles round to 12; hover lifts to border3 + bg2-highlight.
-- A chosen radio fills inverted-bg with a 6px inverted-fg dot.
+- A chosen radio fills inverted-bg with a 6px inverted-fg dot; its card fills bg1-hover and keeps border2 (no border4).
 
 Code notes:
 - Method cards: 6px radius, 14px padding and a 66px minimum (off the grid); the card grows when a 24px badge replaces the 13px description. (`features/settings/github-section.tsx:172,667,698-713`)
@@ -143,6 +143,9 @@ Code notes:
 
 Owner today: `features/settings/cloud-github-section.tsx (CloudGithubSection) · cloud-github-health.ts`
 
+Changes:
+- The chosen method card fills bg1-hover and keeps border2, like the local card (no border4).
+
 Code notes:
 - Icon-only refresh buttons use the default size and render about 28 × 24. (`features/settings/cloud-github-section.tsx:155-165 · features/settings/cloud-repository-picker.tsx:117-123`)
 
@@ -155,7 +158,7 @@ Composite board: implemented through the boards it imports.
 Owner today: `features/settings/settings-page.tsx (ModelsPanel) · claude-provider-settings.tsx · features/agent/reliability-settings.ts`
 
 Changes:
-- Segmented: 28 track, 24 items; selected is bg1 + border2 in Light, bg4 with no edge in Dark.
+- Segmented: 28 track, 24 items; the selected item fills selected-bg with no edge.
 
 Code notes:
 - The agent and model selects share one trailing slot, so a long model name reflows the label column; Automatic is static text in a control slot. (`features/settings/settings-page.tsx:1166-1206,1212`)

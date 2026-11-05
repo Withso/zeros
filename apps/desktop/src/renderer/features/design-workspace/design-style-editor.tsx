@@ -1,8 +1,9 @@
 // ============================================
 // COMPONENT: DesignStyleEditor
 // PURPOSE: Figma-grade element styling over authored CSS: Layout,
-//          Appearance, Fill, Stroke, Effects, Typography, Transform,
-//          Transition, Motion and Advanced as always-visible sections
+//          Appearance and Fill, then Stroke, Effects, Typography,
+//          Transform, Transition, Motion and Advanced once they are in use;
+//          Add property adds one of those
 // USED IN: DesignInspector for the exact selected data-oid
 // ============================================
 
@@ -28,6 +29,10 @@ import {
   DesignTransformSection,
 } from "./design-effect-editor";
 import { DesignAdvancedStyleSection } from "./design-advanced-style-section";
+import {
+  DesignAddableSections,
+  DesignAddPropertyRow,
+} from "./design-addable-sections";
 import { DesignAutoLayoutControls } from "./design-auto-layout-controls";
 import { designFillIsEmpty, DesignFillEditor } from "./design-fill-editor";
 import {
@@ -275,7 +280,18 @@ export function DesignStyleEditor({
       .some((duration) => (Number.parseFloat(duration) || 0) > 0);
   const animationName = styleValue(details, "animation-name", "none");
 
+  const addTransition = () =>
+    commit(
+      {
+        "transition-property": "all",
+        "transition-duration": "200ms",
+        "transition-timing-function": "ease-out",
+      },
+      "transition",
+    );
+
   return (
+    <DesignAddableSections selectionKey={details.oid}>
     <div data-design-style-editor className="flex flex-col">
       <InspectorSection title="Layout" data-design-layout-section="">
         <DesignAutoLayoutControls
@@ -604,6 +620,7 @@ export function DesignStyleEditor({
       <InspectorSection
         title="Transition"
         empty={!transitionActive}
+        addable={{ id: "transition", onAdd: addTransition }}
         data-design-transition-section=""
         actions={
           transitionActive ? (
@@ -628,16 +645,7 @@ export function DesignStyleEditor({
             <InspectorIconButton
               label="Add transition"
               disabled={disabled}
-              onClick={() =>
-                commit(
-                  {
-                    "transition-property": "all",
-                    "transition-duration": "200ms",
-                    "transition-timing-function": "ease-out",
-                  },
-                  "transition",
-                )
-              }
+              onClick={addTransition}
             >
               <Plus />
             </InspectorIconButton>
@@ -671,6 +679,7 @@ export function DesignStyleEditor({
       <InspectorSection
         title="Motion"
         empty={animationName === "none"}
+        addable={{ id: "motion", onAdd: () => onOpenMotionTimeline() }}
         data-design-motion-section=""
         actions={
           <InspectorIconButton
@@ -710,6 +719,9 @@ export function DesignStyleEditor({
         onCommit={commit}
         disabled={disabled}
       />
+
+      <DesignAddPropertyRow disabled={disabled} />
     </div>
+    </DesignAddableSections>
   );
 }

@@ -1,16 +1,23 @@
 import { describe, it, expect } from "vitest";
 
 import {
+  appDisplayName,
   bucketChecks,
   checkOutcome,
   commitAuthorsLabel,
   composeTimeline,
+  derivePrStatusView,
+  filterTimelineEvents,
   formatDuration,
   groupCommitsByRecency,
   hasPendingChecks,
+  isBotLogin,
+  latestReviewsByAuthor,
+  mergeMethodDetail,
   recencyLabel,
   relTime,
   reviewActionBlockReason,
+  reviewFindings,
   summarizeChecks,
 } from "../review-model";
 import type {
@@ -314,5 +321,161 @@ describe("composeTimeline", () => {
       items: [timelineItem({ createdAt: t })],
     });
     expect(events.map((e) => e.kind)).toEqual(["opened", "commit", "comment"]);
+  });
+});
+
+function checks(list: PrCheck[]): PrChecksResult {
+  const failed = list.filter((c) => checkOutcome(c) === "failed").length;
+  const pending = list.filter((c) => checkOutcome(c) === "pending").length;
+  return { checks: list, deployments: [], total: list.length, passed: list.length - failed - pending, failed, pending };
+}
+
+const review = (author: string, state: string, at: number, body = "") =>
+  timelineItem({ kind: "review", id: at, author, state, body, createdAt: NOW - at });
+
+// Overview's PR status (plans.md §1.4): the verdict, the one action, only what
+// blocks it with Add to chat, and what is already done in one line.
+describe("latestReviewsByAuthor", () => {
+  it("keeps each reviewer's latest verdict; a later comment does not undo it", () => {
+    const latest = latestReviewsByAuthor([
+      review("priya", "APPROVED", 300),
+      review("priya", "CHANGES_REQUESTED", 200),
+      review("priya", "COMMENTED", 100),
+      review("sam", "COMMENTED", 50),
+      timelineItem({ author: "sam", body: "a plain comment" }),
+    ]);
+    // Newest first: sam's comment is the latest review.
+    expect(latest.map((r) => [r.author, r.state])).toEqual([
+      ["sam", "COMMENTED"],
+      ["priya", "CHANGES_REQUESTED"],
+    ]);
+  });
+});
+
+describe("derivePrStatusView", () => {
+  const branch = "zeros/x";
+  it("blocks Merge on a failing check and requested changes, each with Add to chat", () => {
+    const view = derivePrStatusView({
+      pr: pr(),
+      branch,
+      checks: checks([
+        check({ name: "test (ubuntu-latest)", conclusion: "failure", detailsUrl: "https://ci/1" }),
+        ...Array.from({ length: 5 }, (_, i) => check({ name: `ok-${i}` })),
+        check({ name: "lint", status: "in_progress", conclusion: null }),
+      ]),
+      timeline: [review("priya", "CHANGES_REQUESTED", 100, "Please add a test"), review("sam", "APPROVED", 50)],
+    });
+    expect([view.title, view.detail, view.tone, view.action]).toEqual([
+      "Merge blocked",
+      "1 failing check and requested changes",
+      "danger",
+      "merge",
+    ]);
+    expect(view.blockers.map((b) => b.title)).toEqual(["test (ubuntu-latest) failed", "priya requested changes"]);
+    expect(view.blockers[0].chatText).toContain("`test (ubuntu-latest)` is failing on PR #7");
+    expect(view.blockers[1].chatText).toContain("> Please add a test");
+    expect(view.done).toBe("5 checks passed · 1 running · Approved by sam");
+  });
+
+  it("reads ready, running, draft, conflicts and the terminal states", () => {
+    const ready = derivePrStatusView({ pr: pr(), branch, checks: checks([check()]), timeline: [] });
+    expect([ready.title, ready.tone, ready.action, ready.blockers, ready.done]).toEqual([
+      "Ready to merge", "success", "merge", [], "1 check passed",
+    ]);
+    const running = derivePrStatusView({ pr: pr(), branch, checks: checks([check({ status: "queued", conclusion: null })]), timeline: [] });
+    expect([running.title, running.detail]).toEqual(["Checks running", "1 of 1 checks running"]);
+    const draft = derivePrStatusView({ pr: pr({ state: "draft" }), branch, checks: null, timeline: [] });
+    expect([draft.title, draft.action]).toEqual(["Draft", "ready"]);
+    const dirty = derivePrStatusView({ pr: pr({ mergeableState: "dirty", isMergeable: false }), branch, checks: null, timeline: [] });
+    expect([dirty.title, dirty.detail, dirty.blockers.map((b) => [b.title, b.chatText])]).toEqual([
+      "Merge blocked", "conflicts with main", [["Conflicts with main", undefined]],
+    ]);
+    const merged = derivePrStatusView({ pr: pr({ state: "merged", mergedAt: NOW - 3_600_000 }), branch, checks: null, timeline: [], now: NOW });
+    expect([merged.title, merged.detail, merged.tone, merged.action]).toEqual(["Merged", "Merged 1h ago", "merged", null]);
+    const closed = derivePrStatusView({ pr: pr({ state: "closed" }), branch, checks: null, timeline: [] });
+    expect([closed.title, closed.tone, closed.action]).toEqual(["Closed", "closed", null]);
+  });
+});
+
+describe("reviewFindings", () => {
+  const thread = (id: string, source: "workspace" | "github" | "check", kind: "agent" | "integration" | "human", body: string, resolved = false) => ({
+    id,
+    source,
+    anchor: { path: "src/auth/login.ts", side: "new" as const, startLine: 18, endLine: id === "range" ? 21 : 18, revision: "r" },
+    comments: [{ id: `${id}-c`, author: { id: kind, name: kind === "agent" ? "Claude" : kind === "integration" ? "coderabbitai" : "Priya", kind, ...(kind === "agent" ? { provider: "claude" } : {}) }, body, createdAt: 1 }],
+    resolved,
+    version: 1,
+  });
+  it("keeps agents, review apps and code scanning; people stay in Activity", () => {
+    const findings = reviewFindings(
+      [
+        thread("done", "github", "integration", "Old note", true),
+        thread("person", "github", "human", "Looks good"),
+        thread("agent", "workspace", "agent", "**Protocol-relative URLs** pass `safeRedirect`"),
+        thread("range", "check", "integration", "Server-side URL redirect from user input"),
+        thread("local-person", "workspace", "human", "Note to self"),
+      ],
+      42,
+    );
+    expect(findings.map((f) => [f.author.kind, f.title, f.location, f.resolved])).toEqual([
+      ["agent", "Protocol-relative URLs pass `safeRedirect`", "login.ts:18", false],
+      ["check", "Server-side URL redirect from user input", "login.ts:18–21", false],
+      ["bot", "Old note", "login.ts:18", true],
+    ]);
+    expect(findings[0].author.provider).toBe("claude");
+    expect(findings[0].chatText).toBe(
+      "PR #42 — Claude on `src/auth/login.ts:18`:\n> **Protocol-relative URLs** pass `safeRedirect`\n\n",
+    );
+  });
+});
+
+describe("mergeMethodDetail", () => {
+  it("says what each GitHub method does to the commits", () => {
+    expect(mergeMethodDetail("squash", 3, "main")).toBe("The 3 commits land on main as one");
+    expect(mergeMethodDetail("merge", 3, "main")).toBe("All 3 commits join main with a merge commit");
+    expect(mergeMethodDetail("rebase", 3, "main")).toBe("The 3 commits replay onto main");
+  });
+
+  it("reads one commit and an unknown count naturally", () => {
+    expect(mergeMethodDetail("squash", 1, "main")).toBe("The commit lands on main");
+    expect(mergeMethodDetail("merge", 1, "main")).toBe("The commit joins main with a merge commit");
+    expect(mergeMethodDetail("rebase", null, "dev")).toBe("The commits replay onto dev");
+  });
+
+  it("has nothing to say about a method it doesn't know", () => {
+    expect(mergeMethodDetail("fast-forward", 2, "main")).toBeNull();
+  });
+});
+
+describe("timeline people and bots", () => {
+  const item = (id: number, author: string, kind: "review" | "comment" = "comment") => ({
+    kind, id, author, authorAvatarUrl: null, state: kind === "review" ? "COMMENTED" : "", body: "x", url: null, createdAt: id,
+  });
+  const commit = (sha: string, authorLogin: string): PrCommitSummary => ({
+    sha, abbreviatedSha: sha.slice(0, 7), message: "m", authorName: authorLogin, authorLogin, authorAvatarUrl: null,
+    coAuthors: [], date: 1, changedFiles: 1, additions: 1, deletions: 0,
+  } as PrCommitSummary);
+  const events = [
+    { kind: "opened" as const, at: 1, author: "alex" },
+    { kind: "commit" as const, at: 2, commit: commit("a1b2c3d4", "alex") },
+    { kind: "commit" as const, at: 3, commit: commit("e5f6a7b8", "dependabot[bot]") },
+    { kind: "review" as const, at: 4, item: item(4, "coderabbitai[bot]", "review") },
+    { kind: "comment" as const, at: 5, item: item(5, "sam") },
+    { kind: "merged" as const, at: 6 },
+  ];
+
+  it("tells a GitHub App's login from a person's", () => {
+    expect(isBotLogin("coderabbitai[bot]")).toBe(true);
+    expect(isBotLogin("github-actions[bot]")).toBe(true);
+    expect(isBotLogin("robot")).toBe(false);
+    expect(isBotLogin("bot-lover")).toBe(false);
+    expect(appDisplayName("coderabbitai[bot]")).toBe("coderabbitai");
+    expect(appDisplayName("sam-lee")).toBe("sam-lee");
+  });
+
+  it("filters by who acted, keeping authorless events with people", () => {
+    expect(filterTimelineEvents(events, "all")).toHaveLength(6);
+    expect(filterTimelineEvents(events, "people").map((e) => e.at)).toEqual([1, 2, 5, 6]);
+    expect(filterTimelineEvents(events, "bots").map((e) => e.at)).toEqual([3, 4]);
   });
 });

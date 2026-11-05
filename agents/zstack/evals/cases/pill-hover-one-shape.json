@@ -1,0 +1,9 @@
+{
+  "id": "pill-hover-one-shape",
+  "kind": "scenario",
+  "area": "renderer-agents",
+  "fixedBy": "pr:839",
+  "symptom": "Composer pills, sent attachments and chat links never took the Pills board's hover (bg2-highlight on border3): only the label's inner ghost button filled, a box inside the pill, and smokes pinned the resting edge.",
+  "rule": "An interactive pill hovers as one shape (PILL_HOVER on the pill, no fill on its inner buttons); verify a board's state columns by measuring the visible element's computed fill and edge, not by reading class names.",
+  "check": "pnpm test:ui-smoke --shard=2/3"
+}

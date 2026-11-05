@@ -170,12 +170,12 @@ describe("the added state is the Button's pressed state, not an override", () =>
     expect(pills()).toContain("aria-pressed={attached}");
   });
 
-  it("the pressed state lifts BOTH fill and border", () => {
-    // Three independent signals (fill, border, the brand glyph) so it survives
-    // the light theme and does not depend on colour alone.
+  it("the pressed state is the selected fill, never an edge", () => {
+    // Selection is a fill a step above hover; the brand glyph is the second
+    // signal, so the state does not depend on colour alone.
     const src = pill();
-    expect(src).toContain("aria-pressed:border-border4");
-    expect(src).toContain("aria-pressed:bg-bg2-highlight");
+    expect(src).toContain("aria-pressed:bg-selected-bg");
+    expect(src).not.toMatch(/aria-pressed:(?:hover:)?(?:border|ring|shadow|outline)/);
   });
 
   it("does not overload the focus ring token for the pressed state", () => {

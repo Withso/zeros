@@ -1,0 +1,9 @@
+{
+  "id": "field-fill-overlays",
+  "kind": "scenario",
+  "area": "renderer-ui",
+  "fixedBy": "pr:839",
+  "symptom": "Design fields moved their hover fill to bg2-highlight while the keyframe and limit overlays still faded into bg2-hover, and a sibling overlay (the W/H resizing menu, a limit's remove) dropped the field's hover fill under the pointer.",
+  "rule": "A control's fill lives in one custom property that its states set and its overlays read; a wrapper sets it for a sibling overlay; a smoke hovers the overlay with a real pointer.",
+  "check": "pnpm test:ui-smoke --shard=3/3"
+}

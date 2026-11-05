@@ -422,3 +422,33 @@ export function derivePrIslandState(
     actions: [],
   };
 }
+
+const LOCAL_KINDS = new Set(["merge-conflicts", "uncommitted", "diverged", "ahead", "behind"]);
+
+/** Review's Git status card: the branch on this machine. Local blockers win in
+ * the island's order, then the branch's place against its base (GitHub's
+ * `dirty` and `behind`); the pull request's own verdict belongs to PR status.
+ * A merged or closed pull request still reports the branch. */
+export function deriveGitStatus(input: PrStatusInputs): PrIslandState {
+  const local = derivePrIslandState({ ...input, prState: "ready", pr: null, checks: null });
+  if (LOCAL_KINDS.has(local.kind)) return local;
+  const mergeable = input.pr?.mergeableState?.toLowerCase() ?? null;
+  if (mergeable === "dirty") {
+    return {
+      kind: "merge-conflicts",
+      label: "Conflicts with the base branch",
+      tone: "warning",
+      actions: [resolveAction],
+    };
+  }
+  if (mergeable === "behind") {
+    const n = input.pr?.behindBy ?? null;
+    return {
+      kind: "behind-base",
+      label: n != null && n > 0 ? `${n} ${commits(n)} behind the base branch` : "Behind the base branch",
+      tone: "neutral",
+      actions: [updateFromBaseAction],
+    };
+  }
+  return { kind: "up-to-date", label: "Branch is up to date", tone: "success", actions: [] };
+}

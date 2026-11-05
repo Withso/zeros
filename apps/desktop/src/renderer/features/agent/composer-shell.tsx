@@ -35,8 +35,10 @@ export const TRANSCRIPT_STATUS_ROW_CLS =
   "text-fg3 flex min-h-8 items-center gap-2 text-xs leading-4.5";
 
 /** A card docked above the composer (goal, queued messages, permission,
- *  question, plan review): the composer's surface with 12px corners and no
- *  shadow; the dock spaces them 8px apart. */
+ *  question, plan review, terminal command): the composer's surface with
+ *  12px corners and no shadow; the dock spaces them 8px apart. The @, / and #
+ *  pickers docked on the composer take the same surface through
+ *  `PopoverContent surface="composer"`. */
 export const DOCK_CARD_CLS =
   "border-border2 bg-sidebar-bg rounded-[calc(var(--radius-lg)*1.5)] border";
 

@@ -23,7 +23,7 @@ import { toolCompletionUnreported } from "./raw-output";
 import { toolRecord } from "./native-tool-presentation";
 import { toolPresentationReady } from "./tool-readiness";
 import { ToolDetailSurface } from "./tool-detail-surface";
-import { ListRow } from "@/renderer/shared/ui/primitives/list-row";
+import { LIST_ROW_IN_GROUP, ListRow, ListRowGroup } from "@/renderer/shared/ui/primitives/list-row";
 
 const NO_CHILDREN: AgentMessage[] = [];
 
@@ -92,13 +92,15 @@ export const SubagentCard: Renderer<AgentToolMessage> = memo(
       : [], [links.enabled, links.scheme, headerText]);
     const linkedHeader = headerLinks.length > 0;
     if (!toolPresentationReady(tool)) return null;
-    return (
-      <div className="flex min-w-0 flex-col" data-agent-group="">
-        <div className={linkedHeader ? "flex min-w-0 flex-wrap items-center gap-2" : "contents"}>
+    const toggleOpen = () => setOpen((value) => !value);
+    const header = (
         <ListRow
           type="button"
-          className="group/subagent-row min-w-0 transition-colors"
-          onClick={() => setOpen((value) => !value)}
+          data-list-row-disclosure=""
+          // With links in its header, the ListRowGroup around the pills draws
+          // the row, so the header hovers and focuses like every feed row.
+          className={cn("min-w-0 transition-colors", linkedHeader ? LIST_ROW_IN_GROUP : "group/subagent-row")}
+          onClick={toggleOpen}
           aria-label={`Agent ${headerText}`}
           aria-description={[failed ? "Agent failed" : undefined, modelLabel, effortText].filter(Boolean).join(" · ") || undefined}
           aria-expanded={open}
@@ -113,7 +115,7 @@ export const SubagentCard: Renderer<AgentToolMessage> = memo(
               failed ? "text-red-primary" : "text-fg2",
             )}
           >
-            <span className="inline-flex group-hover/subagent-row:invisible group-focus-visible/subagent-row:invisible">
+            <span className="inline-flex group-hover/subagent-row:invisible group-focus-visible/subagent-row:invisible group-has-[[data-list-row-disclosure]:focus-visible]/subagent-row:invisible">
               {running ? (
                 <ZerosSpinner
                   size={14}
@@ -127,7 +129,7 @@ export const SubagentCard: Renderer<AgentToolMessage> = memo(
             </span>
             <Chevron
               aria-hidden="true"
-              className="absolute inset-0 hidden size-3 group-hover/subagent-row:block group-focus-visible/subagent-row:block"
+              className="absolute inset-0 hidden size-3 group-hover/subagent-row:block group-focus-visible/subagent-row:block group-has-[[data-list-row-disclosure]:focus-visible]/subagent-row:block"
             />
           </span>
           <span
@@ -150,9 +152,16 @@ export const SubagentCard: Renderer<AgentToolMessage> = memo(
             {headerText}
           </span>}
         </ListRow>
-        {headerLinks.map((href) => <LocalLinkPill key={href} href={href} />)}
-        {linkedHeader && <span data-tool-preview="" className={cn("min-w-0 truncate text-xs", failed ? "text-red-primary" : "text-fg2")}>{headerText}</span>}
-        </div>
+    );
+    return (
+      <div className="flex min-w-0 flex-col" data-agent-group="">
+        {linkedHeader ? (
+          <ListRowGroup className="group/subagent-row flex-wrap" onToggle={toggleOpen}>
+            {header}
+            {headerLinks.map((href) => <LocalLinkPill key={href} href={href} />)}
+            <span data-tool-preview="" className={cn("min-w-0 truncate text-xs", failed ? "text-red-primary" : "text-fg2")}>{headerText}</span>
+          </ListRowGroup>
+        ) : header}
         {open && (
           <div
             id={bodyId}
