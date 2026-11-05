@@ -9,15 +9,17 @@ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { SSEServerTransport } from "@modelcontextprotocol/sdk/server/sse.js";
-import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
+import { CallToolRequestSchema, ListToolsRequestSchema, CreateMessageRequestSchema, CreateMessageResultSchema, LoggingMessageNotificationSchema } from "@modelcontextprotocol/sdk/types.js";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { McpGateway } from "./gateway";
+import { RuntimeQuiescence } from "../runtime-quiescence";
 
 const cleanups: Array<() => Promise<unknown>> = [];
 afterEach(async () => { vi.useRealTimers(); for (const cleanup of cleanups.splice(0).reverse()) await cleanup(); });
 async function upstream() {
   const transports = new Set<StreamableHTTPServerTransport>();
   const requests: string[] = [];
+  const servers: Server[] = [];
   let required = "Bearer fixture-first";
   const server = createServer(async (req, res) => {
     requests.push(req.headers.authorization ?? "");
@@ -26,7 +28,8 @@ async function upstream() {
     const existing = [...transports].find(t => t.sessionId === session);
     if (existing) { await existing.handleRequest(req, res); return; }
     if (req.method !== "POST") { res.writeHead(400).end(); return; }
-    const mcp = new Server({ name: "fixture", version: "1" }, { capabilities: { tools: {} } });
+    const mcp = new Server({ name: "fixture", version: "1" }, { capabilities: { tools: {}, logging: {} } });
+    servers.push(mcp);
     mcp.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: ["allowed", "blocked"].map(name => ({ name, inputSchema: { type: "object" as const } })) }));
     mcp.setRequestHandler(CallToolRequestSchema, async request => ({ content: [{ type: "text", text: request.params.name }] }));
     const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: randomUUID });
@@ -34,10 +37,82 @@ async function upstream() {
   });
   await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
   cleanups.push(async () => { for (const t of transports) await t.close(); server.closeAllConnections(); await new Promise<void>(resolve => server.close(() => resolve())); });
-  return { url: `http://127.0.0.1:${(server.address() as { port: number }).port}/mcp`, requests, require: (value: string) => { required = value; } };
+  return { url: `http://127.0.0.1:${(server.address() as { port: number }).port}/mcp`, requests, servers, require: (value: string) => { required = value; } };
 }
 
 describe("worker MCP gateway", () => {
+  async function runtimeFixture() {
+    const remote = await upstream(); let now = 0;
+    const gateway: McpGateway = new McpGateway({ workspaceRoot: process.cwd(), admit: async () => gate.admit() });
+    const gate: RuntimeQuiescence = new RuntimeQuiescence(() => ({ clients: false, requests: false, agents: false, terminals: false, setup: false,
+      checkout: false, configuration: false, prompts: false, attachments: false, storage: false, tools: gateway.runtimeBusy }), () => now);
+    cleanups.push(() => gateway.dispose());
+    await gateway.configure([{ id: randomUUID(), name: "runtime-fixture", transport: "http", url: remote.url, headers: { Authorization: "Bearer fixture-first" } }]);
+    const [entry] = Object.values(await gateway.providers()), client = new Client({ name: "idle-native-session", version: "1" }, { capabilities: { sampling: {} } });
+    cleanups.push(() => client.close());
+    let established = false;
+    await client.connect(new StreamableHTTPClientTransport(new URL(entry.url), { requestInit: { headers: entry.headers }, fetch: async (input, init) => {
+      const response = await fetch(input, init);
+      if (new Request(input, init).method === "GET" && response.status === 200) established = true;
+      return response;
+    } }));
+    await expect.poll(() => established).toBe(true);
+    return { remote, gateway, gate, client, advance: () => { now += 30_000; } };
+  }
+
+  it("does not retain an established idle SSE connection as runtime work", async () => {
+    const f = await runtimeFixture();
+    await expect.poll(() => f.gateway.runtimeBusy).toBe(false);
+    expect(f.gate.ticket()).toBeNull(); f.advance();
+    expect(f.gate.ticket()).not.toBeNull();
+    expect((await f.client.listTools()).tools).toHaveLength(2);
+  });
+
+  it("keeps a real upstream POST tool active until the handler settles", async () => {
+    const f = await runtimeFixture(); let entered = false, release!: () => void;
+    const held = new Promise<void>(resolve => { release = resolve; });
+    f.remote.servers[0].setRequestHandler(CallToolRequestSchema, async () => { entered = true; await held; return { content: [] }; });
+    const call = f.client.callTool({ name: "allowed" });
+    try { await expect.poll(() => entered).toBe(true); expect(f.gateway.runtimeBusy).toBe(true); expect(f.gate.ticket()).toBeNull(); }
+    finally { release(); await call; }
+  });
+
+  it("counts a server request over the idle stream until the native reply settles", async () => {
+    const f = await runtimeFixture(); let entered = false, release!: () => void;
+    const held = new Promise<void>(resolve => { release = resolve; });
+    f.client.setRequestHandler(CreateMessageRequestSchema, async () => { entered = true; await held;
+      return { role: "assistant", content: { type: "text", text: "fixture" }, model: "fixture", stopReason: "endTurn" }; });
+    await expect.poll(() => f.gateway.runtimeBusy).toBe(false);
+    f.gate.ticket(); f.advance(); const ticket = f.gate.ticket(); expect(ticket).not.toBeNull();
+    const request = f.remote.servers[0].request({ method: "sampling/createMessage", params: {
+      messages: [{ role: "user", content: { type: "text", text: "fixture" } }], maxTokens: 1,
+    } }, CreateMessageResultSchema);
+    try {
+      await expect.poll(() => entered).toBe(true);
+      expect(f.gateway.runtimeBusy).toBe(true); expect(f.gate.valid(ticket!)).toBe(false); expect(f.gate.freeze(ticket!)).toBe(false);
+    } finally { release(); await request; }
+    await expect.poll(() => f.gateway.runtimeBusy).toBe(false);
+  });
+
+  it("fences a server notification received after a quiet ticket until delivery settles", async () => {
+    const f = await runtimeFixture(); let entered = false, release!: () => void, delivered = false;
+    const held = new Promise<void>(resolve => { release = resolve; });
+    f.client.setNotificationHandler(LoggingMessageNotificationSchema, async () => { delivered = true; });
+    const original = Server.prototype.notification;
+    const sending = vi.spyOn(Server.prototype, "notification").mockImplementation(async function (this: Server, ...args) {
+      if (this !== f.remote.servers[0] && args[0].method === "notifications/message") { entered = true; await held; }
+      return original.apply(this, args);
+    });
+    try {
+      await expect.poll(() => f.gateway.runtimeBusy).toBe(false);
+      f.gate.ticket(); f.advance(); const ticket = f.gate.ticket(); expect(ticket).not.toBeNull();
+      await f.remote.servers[0].notification({ method: "notifications/message", params: { level: "info", data: "fixture" } });
+      await expect.poll(() => entered).toBe(true);
+      expect(f.gateway.runtimeBusy).toBe(true); expect(f.gate.valid(ticket!)).toBe(false); expect(delivered).toBe(false);
+    } finally { release(); sending.mockRestore(); }
+    await expect.poll(() => delivered).toBe(true);
+  });
+
   it("lazily initializes real MCP, filters disabled tools and refreshes on request only", async () => {
     const remote = await upstream(), id = randomUUID();
     const authorization = vi.fn(async (_id: string, force?: boolean) => ({ headers: { Authorization: force ? "Bearer fixture-second" : "Bearer fixture-first" }, expiresAt: Date.now() + 300_000 }));
@@ -128,13 +203,15 @@ describe("worker MCP gateway", () => {
     cleanups.push(() => rm(root, { recursive: true, force: true }));
     const socket = createServer(); await new Promise<void>(resolve => socket.listen(0, "127.0.0.1", resolve));
     const port = (socket.address() as { port: number }).port;
-    await new Promise<void>(resolve => socket.close(() => resolve()));
+    cleanups.push(() => socket.listening ? new Promise<void>(resolve => socket.close(() => resolve())) : Promise.resolve());
     const args = [fileURLToPath(new URL("./__fixtures__/server.mjs", import.meta.url)), ...(mode === "http" ? ["http", String(port)] : []), "literal ; $(no-shell)"];
     const gateway = new McpGateway({ workspaceRoot: root }); cleanups.push(() => gateway.dispose());
     await gateway.configure([{ id: randomUUID(), name: "child", transport: "stdio", command: process.execPath, args, cwd: "nested", env: { MCP_TEST_VALUE: "fixture-process-secret" },
       ...(mode === "http" ? { listen_url: `http://127.0.0.1:${port}/mcp` } : {}) }]);
     const [entry] = Object.values(await gateway.providers()), client = new Client({ name: "test-agent", version: "1" });
     cleanups.push(() => client.close());
+    // Keep the child port reserved while the gateway chooses its own listener.
+    await new Promise<void>(resolve => socket.close(() => resolve()));
     await client.connect(new StreamableHTTPClientTransport(new URL(entry.url), { requestInit: { headers: entry.headers } }));
     expect((await client.listTools()).tools[0]?.description).toBe("[redacted]");
     const result = await client.callTool({ name: "inspect" }), content = result.content as Array<{ text: string }>;
