@@ -861,3 +861,10 @@ Each landed step appends one line: date, workstream, what landed, evidence.
   the Design workspace test folder (99 files) with the browser path set;
   typecheck, lint (one earlier warning), check:ui, check:secrets and
   check:protocol; plain local renders of every changed frame in both themes.
+  The full root suite (23,130 tests) failed 88: 87 fail the same way on main
+  in this container (Git signing, network, Git 2.43), and the token identity
+  test, which CI also caught, passes now that the palette reader parses
+  `hsl()` with an alpha. CI's composer smoke failed a File Edit check that
+  pinned CodeMirror's default 6px line padding; it now compares the indented
+  line with an unindented one, and still fails with the old
+  `padding-left: Nch` hack restored.

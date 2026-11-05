@@ -472,9 +472,11 @@ describe("repository token value identity", () => {
       ["scrim", "rgba(0, 0, 0, 0.5)"],
       ["overlay", "var(--scrim)"],
       ["color", "rgb(255, 128, 0)"],
+      ["tint", "hsl(0 0% 100% / 0.12)"],
     ]);
     expect(resolveRgb(theme, "overlay")).toEqual([0, 0, 0]);
     expect(resolveRgb(theme, "color")).toEqual([1, 128 / 255, 0]);
+    expect(resolveRgb(theme, "tint")).toEqual([1, 1, 1]);
   });
 
   it("keeps every source value, declaration order and generated region in sync", () => {
@@ -504,8 +506,9 @@ describe("repository token value identity", () => {
             : source.components;
           if (source.colorSpace === "hsl") {
             expect(resolveRgb(theme, cssName), `${name} ${cssName}`).toEqual(expected);
-            const triple = resolveValue(theme, cssName).match(/hsl\(\s*([\d.]+)\s+([\d.]+)%\s+([\d.]+)%\s*\)/);
-            expect(triple?.slice(1).map(Number)).toEqual(source.components);
+            const hsl = resolveValue(theme, cssName).match(/hsl\(\s*([\d.]+)\s+([\d.]+)%\s+([\d.]+)%\s*(?:\/\s*([\d.]+)\s*)?\)/);
+            expect(hsl?.slice(1, 4).map(Number)).toEqual(source.components);
+            expect(hsl?.[4] === undefined ? undefined : Number(hsl[4]), `${name} ${cssName} alpha`).toBe(source.alpha);
           } else {
             const rgba = resolveValue(theme, cssName).match(/rgba\(([^)]+)\)/)?.[1].split(",").map(Number);
             expect(rgba).toEqual([...expected.map((channel: number) => channel * 255), source.alpha]);
