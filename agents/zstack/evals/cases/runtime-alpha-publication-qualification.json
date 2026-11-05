@@ -2,7 +2,7 @@
   "id": "runtime-alpha-publication-qualification",
   "kind": "scenario",
   "area": "scripts-release",
-  "fixedBy": "pending",
+  "fixedBy": "pr:847",
   "symptom": "Runtime publication depended on a fixture canary even though Alpha is the rollout canary, and a later promotion did not require the digest to remain Alpha's current ready pin.",
   "rule": "Qualify new promotions only through the successful Alpha publish attempt's exact build/main/CI provenance and terminal pin receipt; recheck public Alpha readiness at qualification and before destination effects. Legacy and rollback-produced proofs never qualify a new promotion (zstack-review and zstack-verify).",
   "check": "pnpm exec vitest run --config scripts/release/vitest.config.ts scripts/release/runtime-alpha.test.ts scripts/release/runtime-controller.test.ts scripts/release/runtime-proof.test.ts scripts/release/runtime-provider.test.ts scripts/release/runtime-workflow.test.ts scripts/release/runtime-security-regression.test.ts"
