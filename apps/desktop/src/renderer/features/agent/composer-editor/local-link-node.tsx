@@ -12,10 +12,7 @@ import { localLinkSpans } from "../local-links/model";
 function LocalLinkNodeView({ node, selected }: NodeViewProps) {
   return (
     <NodeViewWrapper as="span" contentEditable={false} data-local-link-node="">
-      <LocalLinkPill
-        href={String(node.attrs.href ?? "")}
-        className={selected ? "ring-highlighted-bright ring-2" : undefined}
-      />
+      <LocalLinkPill href={String(node.attrs.href ?? "")} selected={selected} />
     </NodeViewWrapper>
   );
 }

@@ -144,7 +144,9 @@ exported page by page to [design-implementation/](design-implementation/README.m
    pointer. A control's resting edge stays as it is; selection never adds a
    border, ring, outline or shadow. Only keyboard focus rings, and objects on
    the Design canvas keep the selection stroke. `ui/selection-edge` enforces
-   it in class names and the renderer's stylesheets.
+   it in class variants, in classes a selection condition adds
+   (`selected && …`, `tab === activeTab ? … : …`) and in the renderer's
+   stylesheets.
 9. **Two tab styles.** A segmented control switches a view; one strip tab
    serves chrome, workbench and chat. A closable tab shows ✕ on hover or focus
    over a fade in its own fill, so it never changes width.
@@ -211,7 +213,7 @@ next agent inherits it instead of rediscovering it:
 | Spacing and type stay on their scales | `ui/off-scale-spacing`, `ui/off-scale-text` |
 | No `transition-all`; no `dark:` in components | `ui/transition-all`, `ui/dark-variant` |
 | `-fg` on `-bg` for tinted containers | `ui/status-pairing` |
-| Selected, pressed, active and current states draw no edge (border colour, ring, outline, shadow); keyboard focus and checked form controls are exempt | `ui/selection-edge` (class variants and the renderer's stylesheets) |
+| Selected, pressed, active and current states draw no edge (border colour, ring, outline, shadow); keyboard focus and checked form controls are exempt | `ui/selection-edge` (class variants, classes a selection condition adds, and the renderer's stylesheets) |
 | No raw `<button>` / `<input>` / `<select>` / `<textarea>` outside `shared/ui/` | `ui/raw-control` |
 | A quiet icon-only action is `IconButton` (a ghost `Button` at an icon size is not) | `ui/icon-only-button` |
 | `bg-bg3` only on floating panels | `check:ui` (`BG3_SURFACE_FILES`) |
@@ -250,7 +252,10 @@ imports, following property paths such as `chip.cls`). The ledger counts
   (`data-[state=active]`), on and chosen controls fill with `bg-selected-bg`
   and keep their resting edge. The primitives own it: Button (Secondary,
   Ghost), IconButton, Pill, Tabs and the Design inspector's segments and
-  tools; a checked RadioGroup card fills to `bg1-hover` and keeps `border1`.
+  tools; a checked RadioGroup card fills to `bg1-hover` and keeps `border1`,
+  and so do Settings' GitHub method cards (on `border2`). A composer pill the
+  caret selects fills with `bg-selected-bg`; a workspace link steps its blue
+  up to `blue-pill-hover`.
 - `bg-bg3` is never a fill, chip, or selected state: it equals `bg1` in Light and
   the sidebar fill in Dark, so it vanishes or inverts on other surfaces.
 - `--inverted-bg` always pairs with `--inverted-fg`.

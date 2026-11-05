@@ -21,13 +21,24 @@ const TINTS = {
   muted: "bg-bg2-hover text-fg3 hover:bg-bg2-highlight hover:text-fg3",
 } as const;
 
+/** The caret's selection in the composer: a fill, never a ring. The workspace
+ * pill keeps its blue, one step up. */
+const SELECTED = {
+  chat: "bg-selected-bg hover:bg-selected-bg",
+  workspace: "bg-blue-pill-hover",
+  muted: "bg-selected-bg hover:bg-selected-bg",
+} as const;
+
 export const LocalLinkPill = memo(function LocalLinkPill({
   href,
   fallback,
+  selected = false,
   className,
 }: {
   href: string;
   fallback?: Pick<LocalMessageChatRef, "title" | "agentId">;
+  /** The composer's node selection is on this pill. */
+  selected?: boolean;
   className?: string;
 }) {
   const context = useLocalLinks();
@@ -75,6 +86,7 @@ export const LocalLinkPill = memo(function LocalLinkPill({
           link.kind === "chat" ? COMPOSER_PILL_SPACING : "gap-1 px-1.5",
           "focus-visible:ring-highlighted-bright min-w-0 shrink-0 py-0 font-normal focus-visible:ring-2 [&_svg]:size-[13px]",
           TINTS[tone],
+          selected && SELECTED[tone],
           className,
         )}
       >

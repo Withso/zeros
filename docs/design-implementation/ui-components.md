@@ -292,10 +292,10 @@ Owner today: `Pill primitive + 20 feature recipes`
 
 Changes:
 - Every pill the app ships has a row below: 22 kinds today, in eight heights from 17 to 28. Two sizes remain: 20 inline (12/16, 4 px corners) for text and rows, and 24 control (13/18, 6 px corners) around the composer.
-- One neutral look for references: bg2 with border2, hover border3 with bg2-highlight, “on” border4 with bg2-highlight.
+- One neutral look for references: bg2 with border2, hover border3 with bg2-highlight; “on” fills selected-bg and keeps its resting edge.
 - Tints only where they mean something: red for a failed tool target, brown for the Design mode tag, and a dashed outline for anything whose target is gone.
 - Chat and workspace links are neutral inline pills too, with no blue: the icon tells them apart. A chat shows its agent’s logo in the agent’s colour (Claude terracotta, Codex periwinkle, Cursor fg1); a workspace shows its glyph in its PR status colour, as in the sidebar (brown open, green ready, violet merged, red closed or conflicting, fg2 while an agent works, quiet with no PR).
-- Composer pills swap their icon for × on hover, so the width never changes. A selected pill gets the keyboard ring; a missing file gets a yellow outline and a grey icon.
+- Composer pills swap their icon for × on hover, so the width never changes. A pill the caret selects fills with selected-bg (a workspace link steps its blue up) and draws no ring; a missing file gets a yellow outline and a grey icon.
 - File paths an agent writes stay brown text links, not pills, so replies stay easy to read.
 - Four things leave the pill family: the Truncated tag becomes a Badge, Jump to latest becomes a button, the PR chip stays in its island, and the Fast pill is gone.
 

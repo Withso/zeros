@@ -197,6 +197,35 @@ describe("class rules", () => {
     );
   });
 
+  // Regression: the GitHub method cards drew border4 and the composer's pills
+  // a ring when chosen, through a condition the variant check never saw.
+  it("flags an edge a selection condition adds, not a fill-coloured box, a drop target or focus", () => {
+    const findings = findingsFor(
+      "apps/desktop/src/renderer/features/conditional.tsx",
+      `import { cn } from "@/renderer/shared/ui/cn";
+      const ROW_CLASS = (current: boolean) => (current ? "aria-hidden:bg-bg1 shadow-sm" : "");
+      export const C = ({ selected, isActive, tab, activeTab, dragActive, canConfigureActive, props, method }) => (
+        <>
+          <div className={cn("border", selected ? "border-border4 bg-bg1-hover" : "border-border2 hover:border-border3")} />
+          <span className={cn("pill", props.selected && "ring-highlighted-bright/40 ring-2")} />
+          <div className={cn(tab === activeTab && "inset-ring", method !== props.selectedMethod && "border-border4")} />
+          <i className={!isActive ? "bg-bg1" : "outline"} />
+          <b className={cn(selected ? "border-inverted-bg bg-inverted-bg" : "border-border4")} />
+          <u className={cn(dragActive && "ring-2", canConfigureActive && "border-border2 border-t", selected && "bg-selected-bg focus-visible:ring-2")} />
+          <Pill variant={selected ? "outline" : "ghost"} label={selected && "ring-2"} />
+        </>
+      );`,
+    );
+    expect(keys(findings)).toEqual([
+      "selection-edge:activeTab: inset-ring",
+      "selection-edge:current: shadow-sm",
+      "selection-edge:isActive: outline",
+      "selection-edge:selected: border-border4",
+      "selection-edge:selected: ring-2",
+      "selection-edge:selected: ring-highlighted-bright/40",
+    ]);
+  });
+
   it("flags an edge a CSS selection rule declares on its own element", () => {
     const css = [
       '.seg[aria-pressed="true"] {',

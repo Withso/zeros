@@ -646,3 +646,12 @@ Each landed step appends one line: date, workstream, what landed, evidence.
   each in Changes. Selection, creation and group sizes, rotation, spacing and
   the agent's draft status share one 18px canvas chip with no edge. The
   Design smokes reach hidden sections through Add property.
+- 2026-11-05 · 3, 6 · Selection edges a condition added: Settings' GitHub
+  method cards (local and cloud) turned border4 when chosen, and the
+  composer's pills and local links drew a 2px ring while the caret selected
+  them. Each now fills (`bg1-hover` on its `border2` card; `selected-bg` on a
+  pill, `blue-pill-hover` on a workspace link) and keeps its resting edge.
+  `ui/selection-edge` also reads classes a selection condition adds
+  (`selected && …`, `tab === activeTab ? … : …`); a border in the box's own
+  fill colour (a checked box), drop targets and focus stay exempt. The
+  composer-editor and cloud-github smokes measure the fill and the edge.

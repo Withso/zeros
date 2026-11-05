@@ -26,7 +26,13 @@ import { readdirSync, readFileSync } from "node:fs";
 import { join, relative, sep } from "node:path";
 import ts from "typescript";
 
-import { extractClassContexts } from "./class-candidates.mjs";
+import {
+  CLASS_CONST_RE,
+  CLASS_HELPERS,
+  CLASS_PROP_RE,
+  extractClassContexts,
+  splitClassTokens,
+} from "./class-candidates.mjs";
 
 export const DEBT_FILE = "styles/policy/ui-debt.json";
 
@@ -128,6 +134,113 @@ export function findCssSelectionEdges(source) {
       offset += declaration.length + 1;
     }
   }
+  return findings;
+}
+
+// The conditional half of selection-edge: classes a selection condition adds,
+// as in `selected && "ring-2"` or `tab === activeTab ? "border-border4" : …`.
+// A flag names the state itself; a comparison names the chosen value.
+// dragActive (a drop target) and canConfigureActive are neither.
+const SELECTION_FLAG_RE = /^(?:is)?(?:[Ss]elected|[Aa]ctive|[Pp]ressed|[Cc]urrent|[Cc]hosen)$/;
+const SELECTION_VALUE_RE = /^(?:is)?(?:[Ss]elected|[Aa]ctive|[Cc]urrent|[Cc]hosen)(?:[A-Z_]\w*)?$/;
+
+function conditionName(node) {
+  if (ts.isIdentifier(node)) return node.text;
+  if (ts.isPropertyAccessExpression(node)) return node.name.text;
+  if (ts.isCallExpression(node)) return conditionName(node.expression);
+  return null;
+}
+
+/** `{ name, negated }` when the condition tests a selection, else null. */
+function selectionCondition(node) {
+  if (ts.isParenthesizedExpression(node)) return selectionCondition(node.expression);
+  if (ts.isPrefixUnaryExpression(node) && node.operator === ts.SyntaxKind.ExclamationToken) {
+    const inner = selectionCondition(node.operand);
+    return inner && { name: inner.name, negated: !inner.negated };
+  }
+  if (ts.isBinaryExpression(node)) {
+    const operator = node.operatorToken.kind;
+    if (operator === ts.SyntaxKind.AmpersandAmpersandToken) {
+      // `selected && !disabled` is still the selected state; a negated half
+      // leaves the other branch ambiguous.
+      const sides = [selectionCondition(node.left), selectionCondition(node.right)];
+      return sides.find((side) => side && !side.negated) ?? null;
+    }
+    const equal =
+      operator === ts.SyntaxKind.EqualsEqualsEqualsToken || operator === ts.SyntaxKind.EqualsEqualsToken;
+    const unequal =
+      operator === ts.SyntaxKind.ExclamationEqualsEqualsToken || operator === ts.SyntaxKind.ExclamationEqualsToken;
+    if (!equal && !unequal) return null;
+    const name = [node.left, node.right].map(conditionName).find((side) => side && SELECTION_VALUE_RE.test(side));
+    return name ? { name, negated: unequal } : null;
+  }
+  const name = conditionName(node);
+  return name && SELECTION_FLAG_RE.test(name) ? { name, negated: false } : null;
+}
+
+/** True when a literal reaches a class: a className prop, a class helper
+ * call or a class constant, as class-candidates.mjs reads them. */
+function inClassContext(node, sourceFile) {
+  for (let cursor = node.parent; cursor; cursor = cursor.parent) {
+    if (ts.isJsxAttribute(cursor)) return CLASS_PROP_RE.test(cursor.name.getText(sourceFile));
+    if (ts.isPropertyAssignment(cursor) && CLASS_PROP_RE.test(cursor.name.getText(sourceFile))) return true;
+    if (ts.isCallExpression(cursor)) {
+      const callee = cursor.expression.getText(sourceFile);
+      if (CLASS_HELPERS.has(callee) || callee === "cva") return true;
+    }
+    if (ts.isVariableDeclaration(cursor) && ts.isIdentifier(cursor.name)) {
+      return CLASS_CONST_RE.test(cursor.name.text);
+    }
+  }
+  return false;
+}
+
+function literalTexts(node, out = []) {
+  if (ts.isStringLiteral(node) || ts.isNoSubstitutionTemplateLiteral(node)) out.push(node);
+  else if (ts.isTemplateExpression(node)) {
+    out.push(node.head, ...node.templateSpans.map((span) => span.literal));
+    for (const span of node.templateSpans) literalTexts(span.expression, out);
+  } else ts.forEachChild(node, (child) => literalTexts(child, out));
+  return out;
+}
+
+/** [{ line, key }] for every edge a selection condition adds to a class. A
+ * border in the box's own fill colour (a checked box) and keyboard focus
+ * draw no selection edge. */
+export function findConditionalSelectionEdges(file, source) {
+  const kind = /\.[cm]?tsx$|\.jsx$/.test(file) ? ts.ScriptKind.TSX : ts.ScriptKind.TS;
+  const sourceFile = ts.createSourceFile(file, source, ts.ScriptTarget.Latest, true, kind);
+  const findings = [];
+  const visit = (node) => {
+    let condition = null;
+    let branch = null;
+    if (ts.isBinaryExpression(node) && node.operatorToken.kind === ts.SyntaxKind.AmpersandAmpersandToken) {
+      condition = selectionCondition(node.left);
+      if (condition && !condition.negated) branch = node.right;
+    } else if (ts.isConditionalExpression(node)) {
+      condition = selectionCondition(node.condition);
+      if (condition) branch = condition.negated ? node.whenFalse : node.whenTrue;
+    }
+    if (branch) {
+      for (const literal of literalTexts(branch)) {
+        if (!inClassContext(literal, sourceFile)) continue;
+        const tokens = splitClassTokens(literal.text).map(({ token }) => token);
+        const fills = new Set(
+          tokens.map(baseUtility).filter((base) => base.startsWith("bg-")).map((base) => base.slice(3)),
+        );
+        for (const token of tokens) {
+          const base = baseUtility(token);
+          if (/focus/.test(token.slice(0, token.length - base.length)) || !edgeUtility(base)) continue;
+          const border = base.match(/^border-(?:[xytrblse]-)?(.+)$/);
+          if (border && fills.has(border[1])) continue;
+          const { line } = sourceFile.getLineAndCharacterOfPosition(literal.getStart(sourceFile));
+          findings.push({ line: line + 1, key: `${condition.name}: ${token}` });
+        }
+      }
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(sourceFile);
   return findings;
 }
 
@@ -478,9 +591,18 @@ export function collectFindings({ root, files, contexts, cssFiles }) {
   }
 
   for (const file of scoped) {
-    if (!file.endsWith(".tsx")) continue;
     const rel = toRel(root, file);
     const source = readFileSync(file, "utf8");
+    for (const finding of findConditionalSelectionEdges(file, source)) {
+      findings.push({
+        rule: "selection-edge",
+        file: rel,
+        key: finding.key,
+        line: finding.line,
+        message: SELECTION_EDGE_MESSAGE(finding.key),
+      });
+    }
+    if (!file.endsWith(".tsx")) continue;
     for (const finding of findClassTemplateJoins(file, source)) {
       findings.push({
         rule: CLASS_TEMPLATE_JOIN_RULE.id,

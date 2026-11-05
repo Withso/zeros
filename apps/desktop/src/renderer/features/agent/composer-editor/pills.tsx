@@ -121,7 +121,7 @@ export function MentionPill(props: NodeViewProps) {
         className={cn(
           PILL_SHELL,
           "composer-pill", COMPOSER_PILL_SPACING,
-          props.selected && "ring-highlighted-bright/40 ring-2",
+          props.selected && "bg-selected-bg",
         )}
         contentEditable={false}
       >
@@ -169,7 +169,7 @@ export function SkillPill(props: NodeViewProps) {
   const title = library?.path || file || `/${name}`;
   return <Tooltip label={title}>
     <NodeViewWrapper as="span" data-skill-pill="" contentEditable={false}
-      className={cn(PILL_SHELL, "composer-pill", COMPOSER_PILL_SPACING, props.selected && "ring-highlighted-bright/40 ring-2")}>
+      className={cn(PILL_SHELL, "composer-pill", COMPOSER_PILL_SPACING, props.selected && "bg-selected-bg")}>
       <PillRemoveButton label={label} disabled={!ctx.editable} onRemove={() => removePill(props)}>
         <Book className="size-3" />
       </PillRemoveButton>
@@ -225,7 +225,7 @@ function AttachmentGroupPill(props: NodeViewProps) {
   const label = <><span className="max-w-[16rem] truncate">{name}</span><span className="text-muted-fg shrink-0 text-xxs">+{ids.length - 1}</span></>;
   return <Tooltip label={`${name} · ${ids.length} files${invalid ? ` · ${issues[0]}${issues.length > 1 ? ` (+${issues.length - 1} more)` : ""}` : saving ? " · Saving attachments" : ""}`}>
     <NodeViewWrapper as="span" contentEditable={false} data-attachment-pill="" data-attachment-group="" aria-busy={saving || undefined}
-      className={cn(PILL_SHELL, "composer-pill", COMPOSER_PILL_SPACING, props.selected && "ring-highlighted-bright/40 ring-2", invalid && "border-yellow-icon/40")}>
+      className={cn(PILL_SHELL, "composer-pill", COMPOSER_PILL_SPACING, props.selected && "bg-selected-bg", invalid && "border-yellow-icon/40")}>
       <PillRemoveButton label={name} disabled={!ctx.editable} onRemove={() => removePill(props)}><Files size={13} /></PillRemoveButton>
       {ctx.onOpenAttachment ? <DropdownMenu>
         <DropdownMenuTrigger asChild><Button variant="ghost" aria-label={`Open ${name}, ${ids.length} files`} disabled={!ctx.attachmentImagesActive}
@@ -333,7 +333,7 @@ function SingleAttachmentPill(props: NodeViewProps) {
       className={cn(
         PILL_SHELL,
         "composer-pill", COMPOSER_PILL_SPACING,
-        props.selected && "ring-highlighted-bright/40 ring-2",
+        props.selected && "bg-selected-bg",
         invalid &&
           "border-yellow-icon/40 text-fg2 opacity-85 [&_[data-composer-pill-icon]]:grayscale",
       )}

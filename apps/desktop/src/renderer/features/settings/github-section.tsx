@@ -646,12 +646,13 @@ export function GitHubSection({
               <div
                 key={method}
                 className={cn(
-                  // A selectable card: 12px corners, the RadioGroup card
-                  // fills (bg1-hover), border3 on hover and border4 chosen.
-                  "relative grid grid-cols-[20px_minmax(0,1fr)_auto] items-start gap-2.5 rounded-[calc(var(--radius-lg)*1.5)] border p-3.5 transition-colors duration-120 ease-out",
+                  // A selectable card: 12px corners and the RadioGroup card's
+                  // fill. Hover lifts the edge to border3; the chosen card
+                  // fills bg1-hover and keeps its resting edge.
+                  "border-border2 relative grid grid-cols-[20px_minmax(0,1fr)_auto] items-start gap-2.5 rounded-[calc(var(--radius-lg)*1.5)] border p-3.5 transition-colors duration-120 ease-out",
                   selected
-                    ? "border-border4 bg-bg1-hover"
-                    : "border-border2 bg-bg1 hover:border-border3 hover:bg-bg1-hover",
+                    ? "bg-bg1-hover"
+                    : "bg-bg1 hover:border-border3 hover:bg-bg1-hover",
                   githubHealthNeedsAttention(summary) &&
                     "border-yellow-icon/30",
                 )}

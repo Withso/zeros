@@ -371,6 +371,47 @@ export async function runComposerEditorSmoke({ page, check }) {
     );
   }
   await page.mouse.move(850, 500);
+  // The pill the caret selects (an arrow onto it) fills with selected-bg and
+  // keeps its resting edge: selection is a fill, never a ring.
+  const pillShell = () =>
+    mention.evaluate((element) => {
+      const probe = document.createElement("span");
+      probe.style.backgroundColor = "var(--selected-bg)";
+      document.body.append(probe);
+      const selectedBg = getComputedStyle(probe).backgroundColor;
+      probe.remove();
+      const style = getComputedStyle(element);
+      return {
+        background: style.backgroundColor,
+        border: style.borderTopColor,
+        shadow: style.boxShadow,
+        selectedBg,
+      };
+    });
+  const restingPill = await pillShell();
+  const caretBefore = await page.evaluate(() => {
+    const ed = window.__composerHarness.editor;
+    const from = ed.state.selection.from;
+    let at = -1;
+    ed.state.doc.descendants((node, pos) => {
+      if (node.type.name === "mention") at = pos;
+    });
+    ed.commands.setNodeSelection(at);
+    return from;
+  });
+  await expect
+    .poll(async () => (await pillShell()).background)
+    .not.toBe(restingPill.background)
+    .catch(() => {});
+  const selectedPill = await pillShell();
+  check(
+    "a caret-selected pill fills with selected-bg and keeps its resting edge",
+    selectedPill.background === selectedPill.selectedBg &&
+      selectedPill.border === restingPill.border &&
+      selectedPill.shadow === restingPill.shadow,
+    JSON.stringify({ restingPill, selectedPill }),
+  );
+  await page.evaluate((from) => window.__composerHarness.editor.commands.setTextSelection(from), caretBefore);
   const mentionRemove = mention.getByRole("button", { name: "Remove src" });
   await mentionRemove.focus();
   await page.keyboard.press("Enter");
