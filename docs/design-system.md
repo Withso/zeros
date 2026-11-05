@@ -121,7 +121,10 @@ exported page by page to [design-implementation/](design-implementation/README.m
 4. **One surface language.** Canvas `bg1`; raised `bg2` or `sidebar-bg`;
    floating menus, popovers, tooltips, hover cards and toasts share `bg3` with
    `border2`, 12px corners, the dropdown shadow, a 4px inset and 28px rows with
-   8px corners (`shared/ui/menu-surface.ts`, `Surface kind="floating"`).
+   8px corners (`shared/ui/menu-surface.ts`, `Surface kind="floating"`). The
+   chat composer, user messages and everything docked above the composer
+   (dock cards and the @, / and # pickers) share `sidebar-bg` with `border2`
+   and no shadow, 8px apart.
 5. **One height per row.** 28 standard, 24 compact, 20 inline; glyphs 14, 12
    and 12. Controls in one row share a height; toolbars are 36px bars of 28px
    tools.
@@ -229,7 +232,8 @@ imports, following property paths such as `chip.cls`). The ledger counts
 | --- | --- | --- | --- | --- |
 | Canvas, active chat, dialogs, sheets | `bg-bg1` | `bg-bg1-hover` | `border-border1` | Dialogs sit on `bg-scrim` |
 | Inactive chat pane | `bg-(--pane-bg)` (= `bg0`) | — | — | Dims the fill only; text keeps full contrast |
-| Raised: composer, tiles | `bg-bg2` | `bg-bg2-hover` | `border-border2` | `bg-bg1-bright` for cards and settings groups |
+| Raised: tiles | `bg-bg2` | `bg-bg2-hover` | `border-border2` | `bg-bg1-bright` for cards and settings groups |
+| Chat composer, user messages and what docks above the composer | `bg-sidebar-bg` | `bg-sidebar-bg-hover` | `border-border2` | No shadow; 18px composer corners, 12px elsewhere. Dock cards use `DOCK_CARD_CLS`; the docked pickers use `PopoverContent surface="composer"` |
 | Floating: menus, selects, command, popovers, tooltips, hover cards, toasts | `bg-bg3` | `bg-bg3-hover` | `border-border2` | 12px corners, 4px inset, lift = `shadow-[var(--shadow-dropdown)]`; feature panels take the fill from `FLOATING_SURFACE` |
 | Repository sidebar | `bg-sidebar-bg` | `bg-sidebar-bg-hover` | `border-border2` | Settings navigation uses the default surfaces |
 | Grouped content on canvas | `bg-bg1-highlight` | — | — | A wash, never the only boundary |

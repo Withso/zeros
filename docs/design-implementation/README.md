@@ -624,3 +624,13 @@ Each landed step appends one line: date, workstream, what landed, evidence.
   dialog moves to the chrome tab strip. `ui/selection-edge` fails on any new
   edge drawn on a selected, pressed, active or current state, in class names
   and in the renderer's stylesheets.
+- 2026-11-05 · 5 · Agent chat: a tool row with a file or link target beside
+  its name (Read image, Edit, Write, linked commands and agent headers) hovers,
+  rings and toggles as one padded 28px row with 6px corners, like Bash; the
+  bare name painted its own unpadded fill before. `ListRowGroup` owns the row,
+  and the tool-spacing smoke measures both kinds. Everything docked above the
+  composer now shares its surface: the @, / and # pickers move from the
+  floating bg3 with a lift to sidebar-bg with border2 and no shadow, at the
+  composer's width and 8px above it, with 8px row corners, a medium fg3 head,
+  fg3 hints and ruled 24px tabs whose active tab is the selected fill. The
+  embedded terminal card takes the dock surface, a 40px head and a bg1 well.

@@ -25,7 +25,8 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { Terminal, X } from "lucide-react";
 
 import { Button, cn } from "../../shared/ui";
-import { Tooltip } from "@/renderer/shared/ui/primitives";
+import { IconButton, Tooltip } from "@/renderer/shared/ui/primitives";
+import { DOCK_CARD_CLS } from "./composer-shell";
 import { ptyKill, resolveAgentBinary } from "../../platform/pty";
 import { TerminalSessionView } from "../../shell/terminal/terminal-session-view";
 import { ZerosSpinner } from "@/renderer/shared/ui/loading";
@@ -114,8 +115,9 @@ export function EmbeddedTerminalCommand({
   // ── Banner ──────────────────────────────────────────────
   if (!running) {
     return (
-      <div className="flex items-center gap-2 rounded-lg border border-border1 bg-bg1 px-3.5 py-2.5">
-        <span className="min-w-0 flex-1 truncate text-sm text-fg2">
+      // A dock bar like the goal card: the composer's surface, 44px tall.
+      <div className={cn(DOCK_CARD_CLS, "flex min-h-11 items-center gap-2 py-1.5 pr-2 pl-3.5")}>
+        <span className="text-fg2 min-w-0 flex-1 truncate text-xs leading-4.5">
           Run <span className="text-fg1">/{command}</span> in the embedded
           terminal
         </span>
@@ -148,15 +150,17 @@ export function EmbeddedTerminalCommand({
     // Terminal panel — header + the live xterm. No separate outer "done"
     // header: the panel header already carries the close (×) control, so a
     // second finish button above it was redundant (removed 2026-07-02).
-    <div className="flex flex-col overflow-hidden rounded-lg border border-border1 bg-bg1">
-      <div className="flex items-center gap-2 border-b border-border1 px-3.5 py-2">
+    // The composer's surface with a 40px head; the live terminal sits inset
+    // on its own bg1 with a border1 edge, the fill xterm paints.
+    <div className={cn(DOCK_CARD_CLS, "flex flex-col overflow-hidden")}>
+      <div className="flex min-h-10 items-center gap-2 py-1.5 pr-2 pl-3.5">
         <ZerosSpinner size={14} />
-        <span className="min-w-0 flex-1 truncate text-sm text-fg2">
+        <span className="text-fg2 min-w-0 flex-1 truncate text-xs leading-4.5">
           Running <span className="text-fg1">/{command}</span>.
         </span>
         <CloseButton onClick={dispose} label="Close terminal" />
       </div>
-      <div className="h-[300px] min-h-0 w-full">
+      <div className="border-border1 bg-bg1 mx-1.5 mb-1.5 h-[300px] min-h-0 overflow-hidden rounded-lg border px-2.5 py-2">
         <TerminalSessionView
           sessionId={running.sessionId}
           cwd={cwd}
@@ -179,18 +183,9 @@ function CloseButton({
 }) {
   return (
     <Tooltip label={label}>
-      <Button
-        type="button"
-        variant="ghost"
-        aria-label={label}
-        onClick={onClick}
-        className={cn(
-          "flex size-6 shrink-0 items-center justify-center rounded-sm border-0 bg-transparent p-0 text-fg2",
-          "hover:bg-bg1-hover hover:text-fg1",
-        )}
-      >
-        <X size={16} />
-      </Button>
+      <IconButton size="compact" label={label} onClick={onClick}>
+        <X />
+      </IconButton>
     </Tooltip>
   );
 }

@@ -44,12 +44,18 @@ export function ComposerSuggestionPopup({
   return (
     <Popover open onOpenChange={open => { if (!open) store.dismiss(); }}>
       {placement === "caret" ? <PopoverAnchor virtualRef={anchor} /> : (
-        <PopoverAnchor aria-hidden="true" className="pointer-events-none absolute inset-x-0 top-0 h-0" />
+        // On the composer's outer edge, past its 1px border, so the picker
+        // matches the composer's width and stands 8px above it like a dock card.
+        <PopoverAnchor aria-hidden="true" className="pointer-events-none absolute -inset-x-px -top-px h-0" />
       )}
       <PopoverContent
         data-composer-suggestions={state.trigger}
         aria-label={state.trigger === "@" ? "Mention files" : state.trigger === "#" ? "Pull requests" : "Commands and skills"}
-        side={placement === "caret" ? "bottom" : "top"} align="start" sideOffset={6} size="wide" padding="none"
+        side={placement === "caret" ? "bottom" : "top"} align="start" size="wide" padding="none"
+        // Docked on the composer, the picker is one more card above it: the
+        // composer's surface, 8px up. At the caret it floats over the page.
+        sideOffset={placement === "composer" ? 8 : 6}
+        surface={placement === "composer" ? "composer" : "floating"}
         className={placement === "composer" ? "w-(--radix-popover-trigger-width)" : undefined}
         updatePositionStrategy="always"
         onOpenAutoFocus={event => event.preventDefault()}
@@ -58,7 +64,7 @@ export function ComposerSuggestionPopup({
           if (event.target instanceof Node && state.anchor?.element.contains(event.target)) event.preventDefault();
         }}
       >
-      <Surface kind="floating">
+      <Surface kind={placement === "composer" ? "sidebar" : "floating"}>
       {state.trigger === "#" ? (
       <PrPicker items={state.items as PrPickerItem[]} status={state.status}
         highlightIndex={state.selectedIndex} onHover={onHover}
