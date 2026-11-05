@@ -1,5 +1,5 @@
 import { resolve } from "node:path";
-import { packageRuntime, runtimeSourceIdentity } from "../../apps/cloud-worker/scripts/package-runtime.mjs";
+import type { runtimeSourceIdentity as sourceIdentity } from "../../apps/cloud-worker/scripts/package-runtime.mjs";
 import { inspectRuntimeArchive } from "../../apps/control-plane/src/cloud/runtime-artifact";
 import { RuntimeBuildSchema, RuntimeManifest, type RuntimeBuild, type RuntimeReleaseConfig } from "./runtime-contracts";
 import { command, type Command } from "./io";
@@ -12,7 +12,7 @@ type Packager = (input: { output: string; repository: string; docker: boolean; e
   execute: Command }) => Promise<unknown>;
 
 export async function buildRuntime(config: RuntimeReleaseConfig, env: NodeJS.ProcessEnv, paths: { candidate: string; archive: string }, options: {
-  source?: () => Promise<void>; command?: Command; identity?: typeof runtimeSourceIdentity;
+  source?: () => Promise<void>; command?: Command; identity?: typeof sourceIdentity;
   build?: Packager; inspect?: typeof inspectRuntimeArchive;
 } = {}): Promise<RuntimeBuild> {
   requireCheck(config.channel === "alpha" && config.action === "publish" && config.sourceSha, "Runtime build requires an exact Alpha source");
@@ -22,6 +22,7 @@ export async function buildRuntime(config: RuntimeReleaseConfig, env: NodeJS.Pro
   const clean = async () => requireCheck((await execute("git", ["rev-parse", "HEAD"], { cwd: candidate })).trim() === config.sourceSha &&
     !(await execute("git", ["status", "--porcelain", "--untracked-files=normal"], { cwd: candidate })).trim(), "Runtime candidate checkout changed or is dirty");
   await clean();
+  const { packageRuntime, runtimeSourceIdentity } = await import("../../apps/cloud-worker/scripts/package-runtime.mjs");
   const before = await (options.identity ?? runtimeSourceIdentity)(candidate);
   requireCheck(before.commit === config.sourceSha && !before.dirty, "Runtime candidate source differs");
   const buildEnv = { PATH: env.PATH, HOME: env.HOME, TMPDIR: env.TMPDIR };
