@@ -2946,8 +2946,9 @@ export async function runDesignWorkspaceCanvasSmoke({ page, waitFor, check }) {
   await themeAccentBase.press("Tab");
   await expect(themeOverride).toBeFocused();
   const themeReset = themeOverride.locator("..").getByRole("button", { name: "Reset to Base", exact: true });
-  await expect(themeReset).toHaveCSS("width", "24px");
-  await expect(themeReset).toHaveCSS("height", "24px");
+  // Reset is the 20px overlay on the value's end (Theme editor sheet).
+  await expect(themeReset).toHaveCSS("width", "20px");
+  await expect(themeReset).toHaveCSS("height", "20px");
   await expect(themeReset).toHaveCSS("opacity", "1");
   await expect(themeOverride).toHaveAttribute("aria-keyshortcuts", /Alt\+Enter/);
   await themeOverride.press("Shift+Tab");

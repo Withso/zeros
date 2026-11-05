@@ -20,7 +20,7 @@
   height: 40px;
   align-items: center;
   gap: 8px;
-  padding-inline: 12px 6px;
+  padding-inline: 12px;
   border-bottom: 1px solid var(--border1);
 }
 
