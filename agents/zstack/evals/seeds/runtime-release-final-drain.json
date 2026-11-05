@@ -1,0 +1,5 @@
+{
+  "file": "scripts/release/runtime-provider.ts",
+  "before": "assertRuntimeDrainBudget(config, lease, drain, RUNTIME_STAGE_BUDGET_MS);\n      requireCheck(!options.signal?.aborted, \"Runtime staging was cancelled\");",
+  "after": "requireCheck(!options.signal?.aborted, \"Runtime staging was cancelled\");"
+}

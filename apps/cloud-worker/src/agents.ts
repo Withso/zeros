@@ -85,6 +85,7 @@ export class Agents {
     private readonly mcpProviders?: (executionId: string) => Promise<DriverMcpServers>,
     private readonly workspaceToolFactory?: WorkspaceToolFactory,
     private readonly application?: ApplicationEnvironment,
+    private readonly resumeIdleExecutions = false,
   ) { this.config = config; this.reviewConfig = config.codeReview; this.models = new CodexModelAvailability(modelDiscovery); this.models.configure(config); this.turns = new TurnService(store, scope); }
 
   fenceReviewConfiguration(review: WorkerConfig["codeReview"]): boolean {
@@ -118,6 +119,12 @@ export class Agents {
     return { ...initialized(agentId), _meta: this.models.metadata(agentId === "codex") };
   }
   get busy(): boolean { return [...this.routes.values()].some(route => (this.waitingForInput(route) ? this.hasIndependentWork(route) : !!route.active || this.hasBackground(route))); }
+  get runtimeBusy(): boolean {
+    return this.disposed || this.chatMutations.size > 0 || this.outboxOpenings.size > 0 || this.waitingOpens.size > 0 ||
+      [...this.chats.values()].some(route => Boolean(route.admitting || route.opening || route.preparing || route.retiring || route.active ||
+        route.nativeRunning || route.pumping || route.settling || route.cancelling || route.outboxSteering || route.steers.size ||
+        route.interactions?.runtimeBusy || this.hasBackground(route) || [...(route.tools?.values() ?? [])].some(tool => tool.active)));
+  }
 
   setOutboxDispatch(dispatch?: (entry: InboxEntry) => Promise<boolean>, stop?: (chatId: string, throughEpoch: string) => Promise<string>): void {
     this.outboxDispatch = dispatch; this.outboxStop = stop;
@@ -533,8 +540,12 @@ export class Agents {
     if (message.type === "AGENT_NEW_SESSION" && message.agentRole === "design") throw new WorkspaceError("CLOUD_V2_UNSUPPORTED", "Design is not available in cloud workspaces.");
     const agentId = this.agent(message.agentId);
     const requested = message.type === "AGENT_LOAD_SESSION" ? message.executionId ?? message.sessionId : undefined;
-    // An adoption probe never starts a native process for a restarted worker.
-    const found = requested ? this.routes.get(requested) ?? (message.type === "AGENT_LOAD_SESSION" && !message.adoptOnly ? this.readopt(requested, agentId, message.chatId) : undefined) : undefined;
+    // A quiet runtime handoff preserves exact persisted executions. Ordinary
+    // restart probes still require an explicit reopen after interrupted work.
+    const persisted = this.resumeIdleExecutions && message.chatId ? this.store.metadata(message.chatId)?.executionId : undefined;
+    const target = requested ?? persisted;
+    const found = target ? this.routes.get(target) ?? (message.type === "AGENT_LOAD_SESSION" && (!message.adoptOnly || this.resumeIdleExecutions)
+      ? this.readopt(target, agentId, message.chatId) : undefined) : undefined;
     const chatId = message.chatId ?? found?.chatId;
     if (!chatId) throw new WorkspaceError("WORKSPACE_NOT_FOUND", "A conversation is required.");
     if (this.chatMutations.has(chatId)) await this.waitToOpen(chatId, signal);

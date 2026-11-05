@@ -11,7 +11,7 @@ import { CLOUD_V2_MAX_FRAME_BYTES, CloudV2WorkerFrameSchema, type CloudV2Control
 import type { PostgresSecurityEventBroker } from "../security-events.js";
 import type { CloudV2Store, CloudV2Workspace } from "./store.js";
 import { isCloudV2Token } from "./tokens.js";
-import { dialWorker, workerSupportsCheckout, workerSupportsMcp, workerSupportsSetup, workerSupportsRepositorySetup, workerSupportsGithub, workerSupportsGitIdentity, workerSupportsGithubUserTokens, workerSupportsAgentInteractions, workerSupportsCodeReview, workerSupportsHistoryReplacement, workerSupportsEnvironment, type WorkerRoute } from "./worker-connection.js";
+import { dialWorker, workerSupportsCheckout, workerSupportsMcp, workerSupportsSetup, workerSupportsRepositorySetup, workerSupportsGithub, workerSupportsGitIdentity, workerSupportsGithubUserTokens, workerSupportsAgentInteractions, workerSupportsCodeReview, workerSupportsHistoryReplacement, workerSupportsEnvironment, workerSupportsRuntimeUpdate, type WorkerRoute } from "./worker-connection.js";
 import { emitCloudV2Timing, type CloudV2TimingRecord } from "./lifecycle.js";
 import { isGithubAccessRevoked } from "../github-availability.js";
 import { CLOUD_SOURCE_REFRESH_MS, type CloudSourceContinuation, type CloudSourceProof } from "./source-authority.js";
@@ -29,6 +29,11 @@ export type CloudV2RelayDeps = {
   store: Pick<CloudV2Store, "consumeConnectTicket" | "get" | "accessEpoch" | "appAccessSnapshot" | "loginRevision">;
   securityEvents?: Pick<PostgresSecurityEventBroker, "start" | "subscribe">;
   config(workspace: CloudV2Workspace, mode?: "admission" | "continuation"): Promise<ConfigFrame>;
+  runtimeAdmission?: {
+    admitClient(workspaceId: string, clientId: string): Promise<boolean>;
+    renewClient(workspaceId: string, clientId: string): Promise<boolean>;
+    releaseClient(workspaceId: string, clientId: string): Promise<void>;
+  };
   authorizeSource?(workspace: CloudV2Workspace): Promise<void>;
   continueSource?(workspace: CloudV2Workspace, proof?: CloudSourceProof): Promise<CloudSourceContinuation>;
   workerRoute(workspaceId: string): Promise<WorkerRoute | null>;
@@ -49,6 +54,7 @@ type Room = {
   configFlight?: ConfigFlight; dialing?: Promise<void>; idleTimer?: NodeJS.Timeout;
   authorityFlight?: Promise<Authority>; sourceCheckAt: number;
   clients: Map<string, { ws: WebSocket; sessionId: string | null }>; queued: Map<string, unknown[]>;
+  admitting: Map<string, WebSocket>;
   delivered: Map<string, Map<string, DeliveredPrompt>>;
   stops: Map<string, (ok: boolean) => void>; abort: AbortController; wakeRequested: boolean; wakeAllowed: boolean;
 };
@@ -136,7 +142,7 @@ export class CloudV2Relay {
     }
     if (!room) {
       room = { workspace, accessEpoch, revoked: false, worker: null, ready: false, loginRevision: null, configAt: 0, sourceCheckAt: 0,
-        clients: new Map(), queued: new Map(), delivered: new Map(), stops: new Map(), abort: new AbortController(), wakeRequested: false, wakeAllowed: false };
+        clients: new Map(), admitting: new Map(), queued: new Map(), delivered: new Map(), stops: new Map(), abort: new AbortController(), wakeRequested: false, wakeAllowed: false };
       this.rooms.set(workspace.id, room);
     }
     return room;
@@ -147,6 +153,7 @@ export class CloudV2Relay {
     room.worker?.close(code, reason); room.worker = null;
     for (const finish of room.stops.values()) finish(false);
     for (const { ws } of room.clients.values()) ws.close(code, reason);
+    for (const ws of room.admitting.values()) ws.close(code, reason);
     if (this.rooms.get(room.workspace.id) === room) this.rooms.delete(room.workspace.id);
   }
 
@@ -233,8 +240,11 @@ export class CloudV2Relay {
       if (!this.alive.has(socket)) { socket.terminate(); continue; }
       this.alive.delete(socket); socket.ping();
     }
+    if (this.deps.runtimeAdmission) for (const room of this.rooms.values()) for (const [id, { ws }] of room.clients) {
+      if (ws.readyState === WebSocket.OPEN) void this.deps.runtimeAdmission.renewClient(room.workspace.id, id).catch(() => {});
+    }
   }
-  private wanted(room: Room): boolean { return !room.revoked && !this.closed && (room.clients.size > 0 || room.stops.size > 0); }
+  private wanted(room: Room): boolean { return !room.revoked && !this.closed && (room.clients.size > 0 || room.admitting.size > 0 || room.stops.size > 0); }
   private idle(room: Room): void {
     if (this.wanted(room) || room.revoked || room.idleTimer) return;
     room.idleTimer = setTimeout(() => {
@@ -275,8 +285,9 @@ export class CloudV2Relay {
         else room.wakeRequested = false;
         // A stopped Boat route hangs instead of refusing; never dial it. A
         // bound boot becomes dialable only after hello configuration succeeds.
-        if (route.url && route.token && route.bootId && (route.workspace.state === "running" || (route.workspace.state === "stopping" && room.stops.size))) {
-          ws = await dialWorker(route, this.deps.mintWorkerToken(room.workspace.id, route.bootId));
+        const bootId = room.stops.size && route.stopBootIds?.length ? route.stopBootIds[attempt % route.stopBootIds.length] : route.bootId;
+        if (route.url && route.token && bootId && (route.workspace.state === "running" || (route.workspace.state === "stopping" && room.stops.size))) {
+          ws = await dialWorker(route, this.deps.mintWorkerToken(room.workspace.id, bootId));
           if (!this.wanted(room) || await this.authorized(room) !== "allowed") { ws.terminate(); return; }
           room.worker = ws; room.loginRevision = null; this.attachWorker(room, ws);
           const controlOnly = !room.clients.size && room.stops.size > 0;
@@ -405,7 +416,7 @@ export class CloudV2Relay {
       if (await this.authorized(room) !== "allowed" || room.worker !== ws) return false;
       if (revision !== await this.deps.store.loginRevision(room.workspace.id)) { flight.requested = true; flight.force = true; continue; }
       if (room.worker !== ws || room.revoked) return false;
-      const { mcpServers, githubPullRequests, githubUserTokens, gitIdentity, agentInteractions, codeReview, historyReplacement: _historyReplacement, environment, ...legacy } = config;
+      const { mcpServers, githubPullRequests, githubUserTokens, gitIdentity, agentInteractions, codeReview, historyReplacement: _historyReplacement, environment, runtimeUpdate, ...legacy } = config;
       if (environment && !workerSupportsEnvironment(ws)) throw new Error("Cloud environment runtime support is required.");
       const { setup, setupScript, baseCommit, github, ...workspaceConfig } = config.workspace;
       if (setupScript !== undefined && !workerSupportsRepositorySetup(ws)) throw new Error("Repository setup runtime support is required.");
@@ -418,6 +429,7 @@ export class CloudV2Relay {
         ...(workerSupportsMcp(ws) && mcpServers ? { mcpServers } : {}),
         ...(workerSupportsAgentInteractions(ws) && agentInteractions === 1 ? { agentInteractions } : {}),
         ...(environment ? { environment } : {}),
+        ...(workerSupportsRuntimeUpdate(ws) && runtimeUpdate === 1 ? { runtimeUpdate } : {}),
         ...(workerSupportsGitIdentity(ws) && gitIdentity !== undefined ? { gitIdentity } : {}),
         ...(workerSupportsCodeReview(ws) && codeReview ? { codeReview } : {}),
         ...(workerSupportsGithubUserTokens(ws) && githubUserTokens === 1 ? { githubUserTokens } : {}),
@@ -445,12 +457,24 @@ export class CloudV2Relay {
     const room = this.room(workspace, epoch);
     if (!room) { ws.close(4001, "access_revoked"); return; }
     const clientId = randomUUID(); this.watch(ws);
-    let inbound = this.authorized(room, sessionId, true).then(allowed => {
+    let inboundFrames = 0, inboundBytes = 0;
+    room.admitting.set(clientId, ws);
+    let inbound = this.authorized(room, sessionId, true).then(async allowed => {
       if (allowed !== "allowed" || ws.readyState !== WebSocket.OPEN) {
         ws.close(allowed === "unavailable" ? 1013 : 4001, allowed === "unavailable" ? "github_unavailable" : "access_revoked"); return;
       }
       if (ws.protocol === CLOUD_V2_EXPLICIT_WAKE_PROTOCOL && !acceptsWork(workspace)) {
         ws.close(4009, "workspace_not_running"); this.idle(room); return;
+      }
+      if (this.deps.runtimeAdmission) {
+        const deadline = Date.now() + 120_000;
+        while (!await this.deps.runtimeAdmission.admitClient(workspace.id, clientId)) {
+          if (room.revoked || this.closed || ws.readyState !== WebSocket.OPEN || Date.now() >= deadline) { ws.close(1013); return; }
+          await delay(250, undefined, { signal: room.abort.signal }).catch(() => {});
+        }
+        if (room.revoked || this.closed || ws.readyState !== WebSocket.OPEN || await this.authorized(room, sessionId, true) !== "allowed") {
+          await this.deps.runtimeAdmission.releaseClient(workspace.id, clientId); ws.close(4001); return;
+        }
       }
       clearTimeout(room.idleTimer); delete room.idleTimer;
       if (room.worker && workspace.state !== "running") { room.worker.terminate(); room.worker = null; room.ready = false; }
@@ -461,15 +485,22 @@ export class CloudV2Relay {
         if (wake && ws.protocol !== CLOUD_V2_EXPLICIT_WAKE_PROTOCOL) { room.wakeAllowed = true; this.wake(room); }
         this.ensureConnected(room);
       }
-    });
+    }).catch(() => ws.close(1013)).finally(() => { room.admitting.delete(clientId); this.idle(room); });
     ws.on("error", () => {});
     ws.on("message", (data, binary) => {
       if (binary) { ws.close(4003, "invalid_frame"); return; }
-      inbound = inbound.then(() => this.fromApp(room, clientId, ws, data)).catch(() => ws.close(1011, "relay_unavailable"));
+      if (ws.readyState !== WebSocket.OPEN) return;
+      const bytes = Array.isArray(data) ? data.reduce((sum, chunk) => sum + chunk.byteLength, 0) : data.byteLength;
+      if (inboundFrames >= MAX_QUEUED_FRAMES || inboundBytes + bytes > MAX_QUEUED_OUTPUT_BYTES) { ws.close(1013, "relay_backpressure"); return; }
+      inboundFrames++; inboundBytes += bytes;
+      inbound = inbound.then(() => ws.readyState === WebSocket.OPEN ? this.fromApp(room, clientId, ws, data) : undefined)
+        .catch(() => ws.close(1011, "relay_unavailable")).finally(() => { inboundFrames--; inboundBytes -= bytes; });
     });
     ws.on("close", () => { this.detachApp(room, clientId); });
   }
   private detachApp(room: Room, clientId: string): void {
+    room.admitting.delete(clientId);
+    void this.deps.runtimeAdmission?.releaseClient(room.workspace.id, clientId).catch(() => {});
     const attached = room.clients.delete(clientId); room.queued.delete(clientId); room.delivered.delete(clientId);
     if (attached && room.ready) send(room.worker, { t: "close", clientId });
     this.idle(room);

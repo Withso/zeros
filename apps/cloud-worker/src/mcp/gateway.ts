@@ -12,13 +12,14 @@ import { RuntimeMcpServerSchema, cloudFailureMessage, type CloudMcpFailure, type
 import { McpHttpLauncher, resolveMcpCwd } from "./launcher";
 import { limitMcpResponse, MAX_MCP_RESPONSE_BYTES } from "./response-limit";
 import { mcpFailure, mcpFailureError } from "./failure";
+import { McpRuntimeActivity } from "./runtime-activity";
 
 export interface McpAuthorization { headers: Record<string, string>; expiresAt?: number }
 export type McpAuthorizationRequest = (id: string, force?: boolean, signal?: AbortSignal) => Promise<McpAuthorization>;
 /** Native providers receive only a worker-local capability, never upstream
  * OAuth refresh tokens, API headers or environment secrets. */
 export type DriverMcpServers = Record<string, { type: "http"; url: string; headers: Record<string, string> }>;
-interface Options { workspaceRoot: string; authorization?: McpAuthorizationRequest; fetch?: FetchLike; onFailure?: (executionId: string, failure: CloudMcpFailure) => void }
+interface Options { workspaceRoot: string; authorization?: McpAuthorizationRequest; fetch?: FetchLike; onFailure?: (executionId: string, failure: CloudMcpFailure) => void; admit?: () => Promise<() => void> }
 interface Entry {
   config: RuntimeMcpServer; signature: string; credential: string; controller: AbortController;
   authorizationEpoch: number;
@@ -54,9 +55,16 @@ export class McpGateway {
   private listening?: Promise<void>;
   private authorizationRevision?: string;
   private disposed = false;
-  private readonly http = createServer((req, res) => { void this.handle(req, res).catch(() => { if (!res.headersSent) res.writeHead(502); res.end("MCP request failed."); }); });
+  private readonly activity: McpRuntimeActivity;
+  get runtimeBusy(): boolean { return this.activity.busy || this.pending.size > 0 || [...this.entries.values()].some(entry => !!entry.authorizing); }
+  private readonly http = createServer((req, res) => { void this.serve(req, res).catch(() => { if (!res.headersSent) res.writeHead(502); res.end("MCP request failed."); }); });
+
+  private async serve(req: IncomingMessage, res: ServerResponse): Promise<void> {
+    await this.activity.http(req, res, () => this.handle(req, res));
+  }
 
   constructor(private readonly options: Options) {
+    this.activity = new McpRuntimeActivity(options.admit);
     this.http.requestTimeout = 30_000; this.http.headersTimeout = 10_000;
     this.http.keepAliveTimeout = 5_000; this.http.maxRequestsPerSocket = 200;
   }
@@ -157,7 +165,7 @@ export class McpGateway {
       });
       session.server = server;
       const disabled = new Set(config.transport === "stdio" ? [] : config.disabled_tools ?? []);
-      server.fallbackRequestHandler = async (request, extra) => {
+      server.fallbackRequestHandler = (request, extra) => this.call(async () => {
         if (request.method === "tools/call" && disabled.has(String(request.params?.name))) throw new McpError(-32602, "This MCP tool is disabled.");
         try {
           const result = await session.client.request(request, ResultSchema, { signal: extra.signal, timeout: 120_000, maxTotalTimeout: 120_000 });
@@ -167,17 +175,18 @@ export class McpGateway {
           }
           return this.redact(entry, result);
         } catch (error) { throw this.failure(session, error); }
-      };
-      session.client.fallbackRequestHandler = async (request, extra) => {
+      });
+      session.client.fallbackRequestHandler = (request, extra) => this.call(async () => {
         try { return await server.request(request, ResultSchema, { signal: extra.signal, timeout: 120_000 }); }
         catch (error) { throw this.failure(session, error); }
-      };
-      server.fallbackNotificationHandler = notification => session.client.notification(notification).catch(() => {});
-      session.client.fallbackNotificationHandler = notification => server.notification(this.redact(entry, notification)).catch(() => {});
+      });
+      server.fallbackNotificationHandler = notification => this.call(() => session.client.notification(notification)).catch(() => {});
+      session.client.fallbackNotificationHandler = notification => this.call(() => server.notification(this.redact(entry, notification))).catch(() => {});
       const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: randomUUID,
         onsessioninitialized: sessionId => { this.pending.delete(session); this.sessions.set(sessionId, session); },
         onsessionclosed: () => { void this.closeSession(session); },
       });
+      this.activity.track(transport);
       session.transport = transport;
       session.client.onclose = () => { void this.closeSession(session); };
       // In particular, stop legacy EventSource's automatic reconnect loop.
@@ -193,6 +202,10 @@ export class McpGateway {
       const id = body && typeof body === "object" && "id" in body && (typeof body.id === "string" || typeof body.id === "number") ? body.id : null;
       res.end(JSON.stringify({ jsonrpc: "2.0", id, error: { code: failure.code, message: failure.message, data: failure.data } }));
     } finally { clearTimeout(deadline); res.off("close", abort); }
+  }
+
+  private async call<T>(action: () => Promise<T>): Promise<T> {
+    return this.activity.run(action);
   }
 
   private failure(session: Session, error: unknown): McpError {

@@ -72,6 +72,7 @@ export class Terminals {
   constructor(private readonly scope: WorkspaceScope, private readonly options: Options = {}) { this.files = new CheckedFiles(scope); }
 
   get busy(): boolean { return this.pending.size > 0 || [...this.sessions.values()].some(session => !session.exit && Date.now() - session.lastActivityAt < RECENT_ACTIVITY_MS); }
+  get runtimeBusy(): boolean { return this.pending.size > 0 || this.retiring.size > 0 || [...this.sessions.values()].some(session => !session.exit || session.pendingBytes > 0 || session.attachments > 0); }
 
   async handle(client: AppClient, frame: BridgeMessage): Promise<void> {
     if (this.disposed || this.retiredClients.has(client)) return;

@@ -53,7 +53,7 @@ const vmCommand = (f: { compute: CloudV2Compute }, marker: string) => vi.mocked(
 function setup(claimed: (CloudV2LifecycleWorkspace & { attempts: number })[], options: { snapshot?: string | null; idle?: CloudV2Workspace[]; stopIdle?: CloudV2LifecycleDeps["stopIdle"]; timing?: CloudV2LifecycleDeps["timing"]; now?: () => number;
   checkpoints?: ReturnType<typeof checkpointsFake>; remoteHead?: CloudV2LifecycleDeps["remoteHead"]; githubToken?: CloudV2LifecycleDeps["githubToken"]; uploadHorizon?: string;
   checkpointRetry?: boolean; retries?: RetryRow[]; prepareRepository?: CloudV2LifecycleDeps["prepareRepository"]; pruneEnvironments?: () => Promise<void>;
-  runtimeForWorkspace?: CloudV2LifecycleDeps["runtimeForWorkspace"]; bootEnv?: CloudV2LifecycleDeps["bootEnv"] } = {}) {
+  runtimeForWorkspace?: CloudV2LifecycleDeps["runtimeForWorkspace"]; bootEnv?: CloudV2LifecycleDeps["bootEnv"]; builds?: CloudV2LifecycleDeps["builds"] } = {}) {
   const retries = [...options.retries ?? []];
   const compute: CloudV2Compute = {
     create: vi.fn(async () => ({ sandboxId: "bx_new1" })),
@@ -124,6 +124,7 @@ function setup(claimed: (CloudV2LifecycleWorkspace & { attempts: number })[], op
     ...(options.prepareRepository ? { prepareRepository: options.prepareRepository } : {}),
     ...(options.githubToken ? { githubToken: options.githubToken } : {}),
     ...(options.pruneEnvironments ? { pruneEnvironments: options.pruneEnvironments } : {}),
+    ...(options.builds ? { builds: options.builds } : {}),
   });
   return { lifecycle, compute, store, stopWorker, logs };
 }
@@ -332,7 +333,8 @@ describe("cloud v2 lifecycle", () => {
     expect(checkpoints.storage.downloadUrl).toHaveBeenCalledWith(waking.id, SAVED.object);
     // Runtime first, then the checkpoint, then the worker's route and credential.
     const order = vi.mocked(f.compute.exec).mock.calls.map(([, command]) =>
-      command.includes("zeros-checkpoint-restored") ? "restore" : command.includes("/opt/zeros/runtime") ? "runtime" : "token");
+      command.includes("zeros-checkpoint-restored") ? "restore" : command.includes(Buffer.from(token).toString("base64")) ? "token"
+        : command.includes("/opt/zeros/runtime") ? "runtime" : "unknown");
     expect(order).toEqual(["runtime", "restore", "token"]);
     expect(f.store.finishRestore).toHaveBeenCalledWith(waking.id, "bx_new1");
     expect(f.store.finishRestore).toHaveBeenCalledBefore(vi.mocked(f.compute.hostPort));
@@ -673,6 +675,28 @@ describe("cloud v2 lifecycle", () => {
       await stopped;
       expect(f.compute.stop).toHaveBeenCalledTimes(1);
     } finally { release?.(true); await (stopped ?? stop()); vi.useRealTimers(); }
+  });
+
+  it("retires Computer admission before waiting for an admitted build during shutdown", async () => {
+    vi.useFakeTimers();
+    let release!: () => void;
+    const held = new Promise<void>(resolve => { release = resolve; });
+    const builds = { tick: vi.fn(() => held), close: vi.fn() };
+    const f = setup([], { builds });
+    const stop = f.lifecycle.start();
+    let stopped: Promise<void> | undefined;
+    try {
+      await vi.advanceTimersByTimeAsync(2_000);
+      expect(builds.tick).toHaveBeenCalledOnce();
+      let drained = false;
+      stopped = stop().then(() => { drained = true; });
+      expect(builds.close).toHaveBeenCalledOnce();
+      await vi.advanceTimersByTimeAsync(10_000);
+      expect(drained).toBe(false);
+      expect(builds.tick).toHaveBeenCalledOnce();
+      release(); await stopped;
+      expect(drained).toBe(true);
+    } finally { release(); await (stopped ?? stop()); vi.useRealTimers(); }
   });
 
   it("lets the pending-work-aware idle transition run without revoking the worker before its final flush", async () => {

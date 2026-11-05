@@ -212,6 +212,18 @@ jobs:
     needs: scope
     if: ${{ !cancelled() && (needs.scope.result != 'success' || needs.scope.outputs.job-quality == 'true') }}
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
     steps:
       - name: Verify scope result
         env:
@@ -239,6 +251,8 @@ jobs:
       - name: Install JS dependencies
         run: pnpm install --frozen-lockfile
       - name: Verify hosted release contracts
+        env:
+          TEST_DATABASE_URL: postgres://postgres:postgres@localhost:5432/postgres
         run: |
           pnpm --dir apps/control-plane install --frozen-lockfile
           pnpm exec tsc -p scripts/release/tsconfig.json

@@ -1,0 +1,9 @@
+{
+  "id": "runtime-interrupted-authority-cleanup",
+  "kind": "scenario",
+  "area": "scripts-release",
+  "fixedBy": "pr:846",
+  "symptom": "A lost begin acknowledgement or an interrupted qualification could leave a drain, canary and temporary database login without a cleanup path that survived the main process.",
+  "rule": "Retire only exact recorded authority in a same-job always cleanup step, reuse the acknowledged private login, never mint a replacement or missing lease, and keep unknown rollouts drained (zstack-review and zstack-verify, principles 13 and 18).",
+  "check": "pnpm exec vitest run --config scripts/release/vitest.config.ts scripts/release/runtime-cleanup.test.ts scripts/release/runtime-handoff.test.ts scripts/release/runtime-database.test.ts scripts/release/runtime-drain-db.test.ts scripts/release/runtime-workflow.test.ts"
+}

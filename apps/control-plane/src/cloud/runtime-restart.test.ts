@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { expect, it } from "vitest";
@@ -25,5 +25,6 @@ it.each([true, false])("only restarts a worker when the installed runtime change
     const restarts = readFileSync(log, "utf8").split("\n").filter(line => /(?:try-restart|restart|stop) zeros-worker/.test(line));
     expect(restarts).toEqual(same ? [] : ["try-restart zeros-worker.service"]);
     expect(output.includes("runtime-changed")).toBe(!same);
+    if (!same) expect(existsSync(old)).toBe(true);
   } finally { rmSync(root, { recursive: true, force: true }); }
 });

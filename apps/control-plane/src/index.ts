@@ -136,6 +136,7 @@ function shutdown(signal: string): void {
   shuttingDown = true;
   stopGithubCleanup();
   console.log(`[control-plane] ${signal}; draining`);
+  cloudV2?.runtimeUpdates.close();
   cloudV2?.connections?.close();
   cloudV2?.promptSignals.wakeAll();
   const backgroundStopped = Promise.allSettled([

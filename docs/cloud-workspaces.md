@@ -121,6 +121,36 @@ credential in `/home/user/.config/zeros/worker-token` (mode `0600`) and
 restarts the worker, which registers a new boot identity in `hello` before the
 control plane dials it. The worker rereads the credential on every request.
 
+Workers supporting `runtime-update-v1` can also adopt a changed pin while the
+VM remains running. Adoption waits for 30 continuous quiet seconds with no
+connected desktop, active or queued agent work, pending question or approval,
+live PTY, setup, environment seeding, attachment transfer, durable prompt or
+receipt, file/Git mutation, or outstanding tool work. Missing or uncertain
+activity evidence defers the update until a later quiet period or natural wake.
+The selected runtime comes from the same workspace resolver used at boot;
+an admitted Alpha canary retains its candidate pin.
+
+The control plane stages and verifies the archive without changing the active
+link or credentials. The worker then freezes admission, flushes durable state,
+and authorizes a one-use switch bound to its token, VM, boot, configuration,
+source, access and Stop generations. A local permit races Stop's revocation
+immediately before activation. Foreground work arriving after commitment waits
+for the replacement. Only the worker service restarts; adoption never stops,
+resumes or checkpoints the VM. It emits no app notice or catalog state change.
+
+The replacement boot remains private until fresh environment and service
+readiness are committed. It retains the app's instance identity, persisted
+executions and provider conversations, and does not rerun setup. Failed
+activation restores the previous verified runtime privately; only server logs
+record the failure. Interrupted private boots cannot reuse a readiness proof.
+Rollback permits at most three fresh boots, and unresolved recovery keeps
+foreground admission fenced. A later natural boot retires obsolete handoffs.
+The VM retains the current and previous runtime, plus at most one prepared
+candidate. Older workers update on natural wake. Deploy the migration and
+control-plane support in every serving role before publishing a runtime that
+negotiates in-place adoption. Local Personal and organization-local lifecycle
+and permissions are unchanged.
+
 Each organization has one Cloud Computer: a configured recipe and an active
 named snapshot. Admins edit the recipe (repositories, branch or tag, setup
 script) as an organization setting, saved at a revision so concurrent edits
@@ -173,8 +203,23 @@ queues another clean image and validates the recipe on its disposable builder,
 including Git and setup. A snapshot whose build recorded no runtime is
 refreshed the same way. A refresh installs the runtime it was queued for, even
 when a process still on the previous pin picks it up during a deploy.
-Failures are retried after six hours, at most three times per pin. Builds and
-their cleanup hold their locks on a separate two-connection pool, so the
+An interrupted automatic runtime or daily refresh retries at most three total
+attempts, with one-minute then five-minute delays. Each retry retains the
+original recipe, source IDs, runtime digest and active-build/configuration
+binding. The failed build and its log remain visible. A newer build or recipe,
+lost administrator/source access, or unresolved provider operation prevents a
+retry. Only a process using the recorded pin queues the retry; a queued retry
+keeps that digest when a process on another pin claims it during a deploy.
+Admission rechecks the binding after the drain wait and before provider intent.
+The ordinary refresh scan cannot bypass an exhausted interruption budget.
+
+Genuine automatic runtime failures retain their six-hour cooldown and limit of
+three failures per pin. Daily refresh retains its ordinary daily schedule.
+Failed manual builds and reactivations are never retried automatically. A
+system cancellation of superseded retry intent does not permanently prevent
+fresh automatic refreshes.
+
+Builds and their cleanup hold their locks on a separate two-connection pool, so the
 lifecycle's two database connections stay free. Once a day, an organization that used cloud workspaces in the last week is
 rebuilt at its live build's refs when GitHub reports a moved branch; unbuilt
 edits are left for an admin to build. An organization with no new commits is
@@ -185,6 +230,22 @@ meanwhile is never relabelled or rolled back, and a rebuilt older build is never
 refreshed this way. Scans run beside build admission, never ahead of it. Each
 lifecycle process runs one build at a time: a build holds a dedicated lock
 connection for its whole run.
+
+Control-plane shutdown closes build admission before waiting for work already
+admitted. A claim that has not started a provider operation returns to the
+queue; an admitted build continues with its heartbeat and cleanup. A stale
+heartbeat alone cannot interrupt a build whose process still holds its lock.
+After a process is lost, recovery resolves and cleans up its recorded provider
+effects before queuing an eligible retry.
+
+Runtime release controllers use the versioned database build drain described in
+[Runtime release qualification](deployment-environments.md#runtime-release-qualification).
+It blocks new claims, including older control-plane claim writers, and new
+runtime handoffs while existing builds and committed handoffs finish. A release
+may proceed only with an active, exact lease and zero live builds, unresolved
+provider effects and committed runtime adoptions. Expiry or a confirmed release
+restores admission. This drain never stops a user workspace or changes its
+catalog state.
 
 New workspaces fork the clean snapshot of the build they pinned at creation.
 After checking the creator's repository access, the control plane clones only
@@ -1309,9 +1370,24 @@ whether every running VM has adopted it. Runtime publication does not stop
 user workspaces or change their visible state. Local Personal and
 organization-local workspaces do not use this authority.
 
-The release controller and dispatch workflow ship separately from this app
-support. See [Runtime release qualification](deployment-environments.md#runtime-release-qualification)
-for key provisioning, the probe entry point and controller ordering.
+The dispatch-only **Cloud runtime release** workflow builds from exact main
+source, qualifies one Alpha canary, deletes it, drains admitted Computer builds
+and runtime handoffs, and changes the channel pin through one redeploy of the
+unchanged control-plane commit. Beta promotion and rollback require an explicit
+dispatch; Production also requires the existing `production-approval` gate.
+Promotions copy the same retained archive; rollback selects the channel's
+recorded previous digest. Neither path changes a recipe, stops a user workspace
+or affects Local Personal or organization-local workspaces. Silent adoption
+uses the existing quiet-workspace rules; a busy workspace waits for a safe
+opportunity or its next natural wake.
+
+The controller requires the live `runtimeBuildDrainVersion: 1` capability and
+an active lease with zero live builds, unresolved provider effects and committed
+adoptions. Missing or unknown support refuses pinning. Immutable release
+archives and receipts survive the ordinary publisher's pruning. See
+[Runtime release qualification](deployment-environments.md#runtime-release-qualification)
+for provisioning, exact dispatch inputs, previous-pin verification and recovery
+from an unconfirmed mutation.
 
 ### Source-authority rollout
 

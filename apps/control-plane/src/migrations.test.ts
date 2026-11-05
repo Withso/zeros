@@ -309,7 +309,8 @@ d("migration ladder", { timeout: 30_000 }, () => {
   };
 
   it("retains existing Computer logs and recipes without inventing source IDs during the provenance upgrade", async () => {
-    await applyThrough(LADDER.indexOf("0212_cloud_computer_source_provenance.sql"));
+    const boundary = LADDER.indexOf("0212_cloud_computer_source_provenance.sql");
+    await applyThrough(boundary);
     const user = randomUUID(), org = randomUUID(), build = randomUUID();
     const recipe = { repositories: [{ repository: "former/project", setup: "echo fixture", commit: "a".repeat(40) }] };
     await pool.query("INSERT INTO users(id,email) VALUES($1,'migration-provenance@example.test')", [user]);
@@ -319,7 +320,7 @@ d("migration ladder", { timeout: 30_000 }, () => {
     await pool.query("INSERT INTO cloud_v2_computers(org_id,active_build_id,snapshot_name,recipe,recipe_revision) VALUES($1,$2,'retained-snapshot',$3,7)", [org, build, JSON.stringify(recipe)]);
     const previousBuild = (await pool.query("SELECT * FROM cloud_v2_computer_builds WHERE id=$1", [build])).rows[0];
     const previousComputer = (await pool.query("SELECT * FROM cloud_v2_computers WHERE org_id=$1", [org])).rows[0];
-    await runMigrations(pool);
+    await applyAndRecord(LADDER[boundary]!);
     expect((await pool.query("SELECT * FROM cloud_v2_computer_builds WHERE id=$1", [build])).rows[0]).toEqual({ ...previousBuild, source_targets: null });
     expect((await pool.query("SELECT * FROM cloud_v2_computers WHERE org_id=$1", [org])).rows[0]).toEqual({ ...previousComputer, recipe_source_targets: null });
     await expect(pool.query("UPDATE cloud_v2_computer_builds SET source_targets=$2 WHERE id=$1", [build,

@@ -403,6 +403,29 @@ describe("cloud v2 relay", () => {
     }
   });
 
+  it.each(["", "runtime-update-v10", "runtime-update-v1"])("negotiates runtime adoption on the actual worker socket: %s", async features => {
+    workerServer.on("headers", headers => { headers.push(`X-Zeros-Worker-Features: ${features}`); });
+    const original = deps.config; deps.config = async workspace => ({ ...await original(workspace), runtimeUpdate: 1 });
+    const frames: any[] = [];
+    workerServer.on("connection", ws => ws.on("message", raw => frames.push(JSON.parse(String(raw)))));
+    await app(); await vi.waitFor(() => expect(frames.some(frame => frame.t === "config")).toBe(true));
+    const frame = frames.find(frame => frame.t === "config");
+    expect(frame.runtimeUpdate).toBe(features === "runtime-update-v1" ? 1 : undefined);
+  });
+
+  it("bounds inbound frames while runtime admission is waiting", async () => {
+    let finish!: (allowed: boolean) => void;
+    deps.runtimeAdmission = { admitClient: vi.fn(() => new Promise<boolean>(resolve => { finish = resolve; })),
+      renewClient: vi.fn(async () => true), releaseClient: vi.fn(async () => {}) };
+    const ws = await app(); await vi.waitFor(() => expect(finish).toBeTypeOf("function"));
+    const closed = new Promise<number>(resolve => ws.once("close", code => resolve(code)));
+    try {
+      for (let index = 0; index < 70; index++) ws.send(JSON.stringify({ type: "WORKSPACE_REQUEST", id: `${index}`, op: "workspace.list", params: {} }));
+      await expect(closed).resolves.toBe(1013);
+      expect(connectedWorkers).toHaveLength(0);
+    } finally { finish(true); }
+  }, 3000);
+
   it("settles only prompts forwarded to a lost worker and preserves prompts queued for its successor", async () => {
     const forwarded: any[][] = [];
     workerServer.on("connection", ws => { const frames: any[] = []; forwarded.push(frames); ws.on("message", raw => frames.push(JSON.parse(String(raw)))); });

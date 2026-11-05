@@ -7,6 +7,7 @@ import { withSystemTx } from "./db.js";
 import type { MigrationStatus } from "./migrate.js";
 import { isNewerExpandMigration } from "./migration-phase.js";
 import { runtimeReleaseIdentity } from "./cloud/runtime-release.js";
+import { runtimeBuildDrainVersion } from "./cloud/runtime-build-drain.js";
 
 type LedgerRow = { name: string; checksum: string | null; phase?: string | null };
 type Dependencies = {
@@ -60,6 +61,7 @@ export function createReleaseIdentityRoutes(config: Config, pool: pg.Pool, deps:
       state: config.cloudV2 ? ready ? "healthy" : "unready" : "disabled" };
     return { version: 1 as const, ready, sourceSha, channel: config.deploymentChannel,
       maintenance, migrations, cloud, ...runtimeReleaseIdentity(config.cloudV2?.runtime),
+      runtimeBuildDrainVersion: config.cloudV2 && ready ? runtimeBuildDrainVersion : null,
       runtimeCanaryAdmission: config.deploymentChannel === "alpha" && !!config.cloudV2?.runtimeCanary ? 1 : null };
   }
   app.get("/v1/release-identity", async c => {

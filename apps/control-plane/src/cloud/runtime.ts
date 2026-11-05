@@ -48,6 +48,7 @@ Type=simple
 User=user
 WorkingDirectory=/home/user
 EnvironmentFile=-/home/user/.config/zeros/worker.env
+EnvironmentFile=-/opt/zeros/worker-runtime.env
 Environment=PATH=${CURRENT}/bin:/usr/local/bin:/usr/bin:/bin
 ExecStart=/usr/bin/env node ${CURRENT}/worker.mjs
 Restart=always
@@ -65,26 +66,14 @@ const quote = (value: string) => `'${value.replace(/'/g, "'\\''")}'`;
  * and restarts a running worker onto it. Prints `runtime-changed` when it
  * switched versions. Root owns the runtime, so agents cannot modify it. */
 export function installRuntimeCommand(runtime: { sha256: string; url: string; publicKeys?: readonly string[] }): string {
-  if (!SHA256.test(runtime.sha256)) throw new Error("Invalid runtime sha256");
-  const url = new URL(runtime.url);
-  if (url.protocol !== "https:" || url.username || url.password) throw new Error("Invalid runtime URL");
-  const dir = `${RUNTIMES}/${runtime.sha256}`;
+  const prepare = runtimePreparation(runtime);
   const b64 = (value: string) => Buffer.from(value, "utf8").toString("base64");
   const keys = runtime.publicKeys;
   if (keys && (!keys.length || keys.length > 4 || keys.some(key => key.length > 4096 || createPublicKey(key).asymmetricKeyType !== "ed25519")))
     throw new Error("Invalid worker verification keys");
   const script = [
-    "set -eu",
-    `dir=${dir}`,
-    `if [ ! -f "$dir/.complete" ]; then`,
-    `  tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT`,
-    `  curl -fsS --retry 3 --retry-delay 2 --connect-timeout 10 --max-time 300 -o "$tmp/runtime.tar.gz" ${quote(url.href)}`,
-    `  printf '%s  %s\\n' ${runtime.sha256} "$tmp/runtime.tar.gz" | sha256sum -c --status`,
-    `  sudo -n rm -rf "$dir.partial" && sudo -n mkdir -p "$dir.partial"`,
-    `  sudo -n tar -xzf "$tmp/runtime.tar.gz" -C "$dir.partial" --no-same-owner`,
-    `  sudo -n chown -R root:root "$dir.partial" && sudo -n chmod -R a+rX,go-w "$dir.partial"`,
-    `  sudo -n touch "$dir.partial/.complete" && sudo -n rm -rf "$dir" && sudo -n mv "$dir.partial" "$dir"`,
-    "fi",
+    ...prepare,
+    "sudo -n rm -f /opt/zeros/worker-runtime.env",
     ...(keys ? [
       `printf %s ${quote(b64(JSON.stringify(keys)))} | base64 -d | sudo -n tee /opt/zeros/worker-auth.json.next >/dev/null`,
       "sudo -n chown root:root /opt/zeros/worker-auth.json.next && sudo -n chmod 0644 /opt/zeros/worker-auth.json.next && sudo -n mv -T /opt/zeros/worker-auth.json.next /opt/zeros/worker-auth.json",
@@ -95,13 +84,119 @@ export function installRuntimeCommand(runtime: { sha256: string; url: string; pu
     "  sudo -n systemctl daemon-reload && sudo -n systemctl enable zeros-worker.service >/dev/null 2>&1",
     "fi",
     `printf %s ${quote(b64(PROFILE))} | base64 -d | sudo -n tee /etc/profile.d/zeros-worker.sh >/dev/null`,
-    `if [ "$(readlink ${CURRENT} 2>/dev/null || true)" != "$dir" ]; then`,
+    `previous=$(readlink ${CURRENT} 2>/dev/null || true)`,
+    `if [ "$previous" != "$dir" ]; then`,
+    `  if [ -n "$previous" ]; then sudo -n ln -sfn "$previous" /opt/zeros/worker-previous; fi`,
     `  if [ -e ${CURRENT} ] && [ ! -L ${CURRENT} ]; then sudo -n rm -rf ${CURRENT}; fi`,
     `  sudo -n ln -sfn "$dir" ${CURRENT}.next && sudo -n mv -T ${CURRENT}.next ${CURRENT}`,
     "  sudo -n systemctl try-restart zeros-worker.service || true",
-    `  for old in ${RUNTIMES}/*; do [ "$old" = "$dir" ] || sudo -n rm -rf "$old"; done`,
+    `  for old in ${RUNTIMES}/*; do [ "$old" = "$dir" ] || [ "$old" = "$previous" ] || sudo -n rm -rf "$old"; done`,
     "  echo runtime-changed",
     "fi",
   ].join("\n");
   return `bash -c ${quote(script)}`;
+}
+
+/** Preparation cannot move the active link or touch the unit's credentials. */
+export function prepareRuntimeCommand(runtime: { sha256: string; url: string }): string {
+  return `bash -c ${quote(runtimePreparation(runtime).join("\n"))}`;
+}
+
+function runtimePreparation(runtime: { sha256: string; url: string }): string[] {
+  if (!SHA256.test(runtime.sha256)) throw new Error("Invalid runtime sha256");
+  const url = new URL(runtime.url);
+  if (url.protocol !== "https:" || url.username || url.password) throw new Error("Invalid runtime URL");
+  const dir = `${RUNTIMES}/${runtime.sha256}`;
+  return [
+    "set -eu",
+    `sudo -n mkdir -p ${RUNTIMES}`,
+    `sudo -n touch ${RUNTIMES}/.install.lock && sudo -n chmod 0644 ${RUNTIMES}/.install.lock`,
+    `exec 9<${RUNTIMES}/.install.lock; flock -x 9`,
+    `dir=${dir}`,
+    `if [ ! -f "$dir/.complete" ]; then`,
+    `  tmp=$(mktemp -d); trap 'rm -rf "$tmp"; sudo -n rm -rf "$dir.partial"' EXIT`,
+    `  curl -fsS --retry 3 --retry-delay 2 --connect-timeout 10 --max-time 300 -o "$tmp/runtime.tar.gz" ${quote(url.href)}`,
+    `  printf '%s  %s\\n' ${runtime.sha256} "$tmp/runtime.tar.gz" | sha256sum -c --status`,
+    `  sudo -n rm -rf "$dir.partial" && sudo -n mkdir -p "$dir.partial"`,
+    `  sudo -n tar -xzf "$tmp/runtime.tar.gz" -C "$dir.partial" --no-same-owner`,
+    `  sudo -n chown -R root:root "$dir.partial" && sudo -n chmod -R a+rX,go-w "$dir.partial"`,
+    `  sudo -n touch "$dir.partial/.complete" && sudo -n rm -rf "$dir" && sudo -n mv "$dir.partial" "$dir"`,
+    "fi",
+    `current=$(readlink ${CURRENT} 2>/dev/null || true); previous=$(readlink /opt/zeros/worker-previous 2>/dev/null || true)`,
+    `for old in ${RUNTIMES}/*; do [ "$old" = "$dir" ] || [ "$old" = "$current" ] || [ "$old" = "$previous" ] || sudo -n rm -rf "$old"; done`,
+  ];
+}
+
+export function activateRuntimeCommand(input: { sha256: string; previousSha256: string; id: string; bootId: string; instanceId: string;
+  tokenSha256: string; expectedBootIds: readonly string[]; rollback?: boolean }): string {
+  const uuid = /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/;
+  if (![input.sha256, input.previousSha256, input.tokenSha256].every(value => SHA256.test(value)) ||
+      ![input.id, input.bootId, input.instanceId, ...input.expectedBootIds].every(value => uuid.test(value)) ||
+      !input.expectedBootIds.length || input.expectedBootIds.length > 3) throw new Error("Invalid runtime handoff");
+  const environment = `CLOUD_V2_RUNTIME_SHA256=${input.sha256}\nZEROS_RUNTIME_HANDOFF=${input.id}\nZEROS_RUNTIME_BOOT=${input.bootId}\nZEROS_RUNTIME_INSTANCE=${input.instanceId}\n`;
+  const marker = `/opt/zeros/runtime-activation-${input.id}-${input.bootId}`;
+  const permits = "/home/user/.local/share/zeros/cloud-worker/runtime-handoffs";
+  return `bash -c ${quote([
+    "set -eu",
+    `exec 9<${RUNTIMES}/.install.lock; flock -x 9`,
+    `test -f ${RUNTIMES}/${input.sha256}/.complete`,
+    `current=$(readlink ${CURRENT})`,
+    `test "$current" = ${RUNTIMES}/${input.previousSha256} || test "$current" = ${RUNTIMES}/${input.sha256}`,
+    // The marker precedes restart. An uncertain provider reply may inspect it,
+    // but must not restart the same boot again and consume its one-use identity.
+    `if [ -f ${marker} ]; then echo activation-recorded; exit 0; fi`,
+    `printf %s ${quote(Buffer.from(environment).toString("base64"))} | base64 -d | sudo -n tee /opt/zeros/worker-runtime.env.next >/dev/null`,
+    "sudo -n chown root:root /opt/zeros/worker-runtime.env.next && sudo -n chmod 0644 /opt/zeros/worker-runtime.env.next",
+    `test "$(sha256sum /home/user/.config/zeros/worker-token | cut -d ' ' -f 1)" = ${input.tokenSha256}`,
+    `boot=$(cat /home/user/.local/share/zeros/cloud-worker/runtime-boot)`,
+    input.expectedBootIds.map(boot => `test "$boot" = ${boot}`).join(" || "),
+    ...(input.rollback ? [`test -f ${permits}/consumed-${input.id}`] : [
+      `mv -T ${permits}/permit-${input.id}-${input.expectedBootIds[0]} ${permits}/consumed-${input.id}`,
+    ]),
+    "sudo -n mv -T /opt/zeros/worker-runtime.env.next /opt/zeros/worker-runtime.env",
+    `sudo -n ln -sfn ${RUNTIMES}/${input.previousSha256} /opt/zeros/worker-previous`,
+    `sudo -n ln -sfn ${RUNTIMES}/${input.sha256} ${CURRENT}.next && sudo -n mv -T ${CURRENT}.next ${CURRENT}`,
+    `sudo -n touch ${marker}`,
+    `sync -f /opt/zeros; sync -f ${permits}`,
+    "sudo -n systemctl restart zeros-worker.service",
+    "echo activation-recorded",
+  ].join("\n"))}`;
+}
+
+export function pruneRuntimeCommand(current: string, previous: string): string {
+  if (![current, previous].every(value => SHA256.test(value))) throw new Error("Invalid runtime pins");
+  return `bash -c ${quote(["set -eu", `exec 9<${RUNTIMES}/.install.lock; flock -x 9`, `test "$(readlink ${CURRENT})" = ${RUNTIMES}/${current}`,
+    `for old in ${RUNTIMES}/*; do [ "$old" = ${RUNTIMES}/${current} ] || [ "$old" = ${RUNTIMES}/${previous} ] || sudo -n rm -rf "$old"; done`].join("\n"))}`;
+}
+
+export function completeRuntimeCommand(input: { id: string; bootId: string; instanceId: string; sha256: string; previousSha256: string; tokenSha256: string }): string {
+  const uuid = /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/;
+  if (![input.id, input.bootId, input.instanceId].every(value => uuid.test(value)) ||
+      ![input.sha256, input.previousSha256, input.tokenSha256].every(value => SHA256.test(value))) throw new Error("Invalid runtime completion.");
+  const root = "/home/user/.local/share/zeros/cloud-worker/runtime-handoffs";
+  const environment = `CLOUD_V2_RUNTIME_SHA256=${input.sha256}\nZEROS_RUNTIME_HANDOFF=${input.id}\nZEROS_RUNTIME_BOOT=${input.bootId}\nZEROS_RUNTIME_INSTANCE=${input.instanceId}`;
+  return `bash -c ${quote([
+    "set -eu", `exec 9<${RUNTIMES}/.install.lock; flock -x 9`,
+    `test "$(readlink ${CURRENT})" = ${RUNTIMES}/${input.sha256}`,
+    `test "$(sha256sum /home/user/.config/zeros/worker-token | cut -d ' ' -f 1)" = ${input.tokenSha256}`,
+    `override=$(cat /opt/zeros/worker-runtime.env 2>/dev/null || true)`,
+    `if [ "$override" = ${quote(environment)} ]; then`,
+    `  mkdir -p ${root}; touch ${root}/completed-${input.id}-${input.bootId}; sync -f ${root}`,
+    `  printf '%s\\n' CLOUD_V2_RUNTIME_SHA256=${input.sha256} | sudo -n tee /opt/zeros/worker-runtime.env.next >/dev/null`,
+    "  sudo -n chown root:root /opt/zeros/worker-runtime.env.next; sudo -n chmod 0644 /opt/zeros/worker-runtime.env.next",
+    "  sudo -n mv -T /opt/zeros/worker-runtime.env.next /opt/zeros/worker-runtime.env; sync -f /opt/zeros",
+    `else test -z "$override" || test "$override" = CLOUD_V2_RUNTIME_SHA256=${input.sha256}; fi`,
+    `for old in ${RUNTIMES}/*; do [ "$old" = ${RUNTIMES}/${input.sha256} ] || [ "$old" = ${RUNTIMES}/${input.previousSha256} ] || sudo -n rm -rf "$old"; done`,
+    `for old in ${root}/* /opt/zeros/runtime-activation-*; do case "$old" in *${input.id}*) ;; *) sudo -n rm -f "$old" ;; esac; done`,
+  ].join("\n"))}`;
+}
+
+/** Revocation shares activation's lock and consumes no runtime. An ambiguous
+ * provider reply can repeat this observation without another restart. */
+export function retireRuntimePermitCommand(id: string, bootId: string): string {
+  const uuid = /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/;
+  if (![id, bootId].every(value => uuid.test(value))) throw new Error("Invalid runtime handoff.");
+  const root = "/home/user/.local/share/zeros/cloud-worker/runtime-handoffs";
+  return `bash -c ${quote(["set -eu", `exec 9<${RUNTIMES}/.install.lock; flock -x 9`,
+    `if [ -f ${root}/consumed-${id} ]; then echo started; else rm -f ${root}/permit-${id}-${bootId}; echo not-started; fi`].join("\n"))}`;
 }

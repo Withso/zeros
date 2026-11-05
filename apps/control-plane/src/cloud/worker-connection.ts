@@ -3,7 +3,7 @@ import { CLOUD_V2_MAX_FRAME_BYTES, CLOUD_V2_WORKER_BRIDGE_PATH, CLOUD_V2_WORKER_
 import type { CloudV2Workspace } from "./store.js";
 
 /** Only the control plane can read this route's private port credential. */
-export type WorkerRoute = { workspace: CloudV2Workspace; accessEpoch: string; url: string | null; token: string | null; bootId: string | null };
+export type WorkerRoute = { workspace: CloudV2Workspace; accessEpoch: string; url: string | null; token: string | null; bootId: string | null; stopBootIds?: readonly string[] };
 const peerFeatures = new WeakMap<WebSocket, ReadonlySet<string>>();
 export const workerSupportsMcp = (socket: WebSocket): boolean => peerFeatures.get(socket)?.has("mcp-v1") ?? false;
 export const workerSupportsSetup = (socket: WebSocket): boolean => peerFeatures.get(socket)?.has("workspace-setup-v1") ?? false;
@@ -15,6 +15,7 @@ export const workerSupportsHistoryReplacement = (socket: WebSocket): boolean => 
 export const workerSupportsGitIdentity = (socket: WebSocket): boolean => peerFeatures.get(socket)?.has("git-identity-v1") ?? false;
 export const workerSupportsCodeReview = (socket: WebSocket): boolean => peerFeatures.get(socket)?.has("code-review-v1") ?? false;
 export const workerSupportsEnvironment = (socket: WebSocket): boolean => peerFeatures.get(socket)?.has("workspace-environment-v1") ?? false;
+export const workerSupportsRuntimeUpdate = (socket: WebSocket): boolean => peerFeatures.get(socket)?.has("runtime-update-v1") ?? false;
 
 export const workerSupportsAgentInteractions = (socket: WebSocket): boolean => peerFeatures.get(socket)?.has("agent-interactions-v1") ?? false;
 
