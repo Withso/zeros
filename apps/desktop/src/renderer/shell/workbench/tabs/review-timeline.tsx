@@ -36,6 +36,7 @@ import { renderMarkdown } from "@/renderer/features/agent/markdown";
 import { buildReviewCommentContext } from "../../pr/pr-action-prompts";
 import { humanGitError, type ReviewTimelineEntry } from "./review-data";
 import {
+  appDisplayName,
   composeTimeline,
   filterTimelineEvents,
   isBotLogin,
@@ -372,7 +373,7 @@ function BotTimelineCard({
       className={cn(REVIEW_CARD, "flex min-h-10 items-center gap-2 py-1.5 pr-1.5 pl-3 text-xs")}
     >
       <span className="text-fg1 min-w-0 truncate font-medium">
-        {item.author.replace(/\[bot\]$/i, "")}
+        {appDisplayName(item.author)}
       </span>
       <Badge variant="neutral">Bot</Badge>
       <span className="text-fg2 min-w-0 flex-1 truncate">
@@ -419,7 +420,7 @@ function TimelineCard({
     >
       <div className="flex min-h-9 items-center gap-2 pt-1.5 pr-1.5 pl-3 text-xs">
         <span className="text-fg1 min-w-0 truncate font-medium">
-          {item.author.replace(/\[bot\]$/i, "")}
+          {appDisplayName(item.author)}
         </span>
         {isBotLogin(item.author) && <Badge variant="neutral">Bot</Badge>}
         {verdict && (

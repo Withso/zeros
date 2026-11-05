@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 
 import {
+  appDisplayName,
   bucketChecks,
   checkOutcome,
   commitAuthorsLabel,
@@ -468,6 +469,8 @@ describe("timeline people and bots", () => {
     expect(isBotLogin("github-actions[bot]")).toBe(true);
     expect(isBotLogin("robot")).toBe(false);
     expect(isBotLogin("bot-lover")).toBe(false);
+    expect(appDisplayName("coderabbitai[bot]")).toBe("coderabbitai");
+    expect(appDisplayName("sam-lee")).toBe("sam-lee");
   });
 
   it("filters by who acted, keeping authorless events with people", () => {

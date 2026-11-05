@@ -31,6 +31,7 @@ import {
 
 import type { PR, PrLabel, PrPerson, PrTimelineItem } from "../../../platform/git";
 import {
+  Badge,
   Button,
   DropdownMenuContent,
   DropdownMenuLabel,
@@ -55,6 +56,8 @@ import { AGENT_WORKING_REASON } from "../../pr/use-agent-working";
 import type { ReviewSubtab } from "../tab-model";
 import { AuthorAvatar, OutcomeGlyph } from "./review-shared-components";
 import {
+  appDisplayName,
+  isBotLogin,
   latestReviewsByAuthor,
   mergeMethodDetail,
   relTime,
@@ -636,7 +639,10 @@ function PersonRow({ person, trailing }: { person: PrPerson; trailing?: React.Re
   return (
     <div className="text-fg1 flex min-h-6 min-w-0 items-center gap-2 text-xs">
       <AuthorAvatar login={person.login} avatarUrl={person.avatarUrl} />
-      <span className="min-w-0 flex-1 truncate">{person.login}</span>
+      <span className="flex min-w-0 flex-1 items-center gap-1.5">
+        <span className="min-w-0 truncate">{appDisplayName(person.login)}</span>
+        {isBotLogin(person.login) ? <Badge variant="neutral">Bot</Badge> : null}
+      </span>
       {trailing}
     </div>
   );

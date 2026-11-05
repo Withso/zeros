@@ -482,6 +482,11 @@ export function isBotLogin(login: string): boolean {
   return /\[bot\]$/i.test(login);
 }
 
+/** An App's name without its `[bot]` suffix; a Bot badge says the rest. */
+export function appDisplayName(login: string): string {
+  return login.replace(/\[bot\]$/i, "");
+}
+
 export type TimelineFilter = "all" | "people" | "bots";
 
 function eventActor(event: ReviewTimelineEvent): string | null {

@@ -384,6 +384,12 @@ export async function runReviewComparisonSmoke({
       true,
     );
 
+    // A review App sits among the reviewers by name, with a Bot badge.
+    const rail = page.locator("[data-review-rail]").filter({ visible: true });
+    await expect(rail.getByText("coderabbitai", { exact: true })).toBeVisible();
+    await expect(rail).not.toContainText("[bot]");
+    await expect(rail.getByText("Bot", { exact: true })).toBeVisible();
+
     // The merge menu says what each method does to this PR's commits.
     await prStatus.getByRole("button", { name: "Choose merge method" }).click();
     const methods = page.getByRole("menuitemradio");
