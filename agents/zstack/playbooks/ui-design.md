@@ -69,4 +69,7 @@ them.
    never coexist. An escaped mistake gets an eval case. Close a shipped round
    on the canvas: every board shows the UI as it ships, a logged decision
    updates its board, and an approved design not built yet keeps a Planned
-   line naming its `plans.md` section.
+   line naming its `plans.md` section. Take a badge off only beside a render
+   of the shipped page that matches everything the frame draws, loaders and
+   icons included, and copy a component the app already has from its source.
+   After removing frames or rows, refit the board with the canvas fonts loaded.
