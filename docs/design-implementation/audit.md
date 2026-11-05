@@ -1,6 +1,6 @@
 # Canvas audit: Zeros Design against the app
 
-Status 2026-11-05, Zeros Design canvas version 366.
+Status 2026-11-05, Zeros Design canvas version 367.
 
 ## How to read this
 
@@ -27,7 +27,7 @@ and in [`plans.md`](plans.md).
 | UI components | 47 | 3 | Three Design-tab details, listed below |
 | Foundations | 14 | 0 | — |
 | Branding | 4 | 0 | — |
-| Web app | 56 | 27 | §8: the dashboard rebuild (18), Ops (7), Open in Zeros on a cloud workspace (1), and the route map's own note (1) |
+| Web app | 57 | 2 | §8: Open in Zeros on a cloud workspace (1), and the route map's own note (1) |
 | Agent chat | 87 | 0 | — |
 | Sidebar | 25 | 0 | — |
 | Dashboard (Home) | 18 | 0 | — |
@@ -40,7 +40,7 @@ and in [`plans.md`](plans.md).
 | Simulators | 12 | 0 | — |
 | Customize | 25 | 0 | — |
 | Settings | 36 | 0 | — |
-| **Total** | **455** | **57** | |
+| **Total** | **456** | **32** | |
 
 ## Landed this round
 
@@ -84,6 +84,13 @@ and in [`plans.md`](plans.md).
     shared verbatim with the control plane's sign-in and GitHub pages.
   - Every centred app page has its frame's copy, and the account states are
     centred pages with one primary.
+- **Web dashboard and Ops.**
+  - The dashboard follows its 18 frames, with one set of markup builders
+    for the server's first paint and the browser's re-renders. It lists
+    cloud organizations only, and recoverable organizations by name.
+  - Ops follows its 7 frames: the centred states on the shared shell with
+    Ops beside the logo, and the console on the dashboard layout, each page
+    allowing its one inline block by nonce under the Ops policy.
 - **Canvas (versions 363 to 366).**
   - Eleven Planned badges came off frames that are now built.
   - The remaining notes name exactly what is left.
@@ -95,6 +102,10 @@ and in [`plans.md`](plans.md).
   - Version 366: 25 Web app frames lose their badge, and the four frames for
     code removed with Auth0 (the rollback sign-in and callback, `/launch` and
     the legacy handoff) are gone.
+  - Version 367: the dashboard (18) and Ops (7) frames lose their badge and
+    show what shipped: the switcher shows your role, Teams drops its member
+    count, the outage keeps Profile, owners see Force purge disabled, and a
+    new frame shows Ops' Identity recovery section.
 
 ## What is left
 
@@ -144,13 +155,10 @@ Agents get their mark, GitHub authors their photo, and review apps their logo
 with a Bot badge. The thread model needs each comment's avatar URL and its
 agent provider.
 
-### §8 Web app: 27 frames
+### §8 Web app: 2 frames
 
 See plans.md §8:
 
-- the dashboard's Settings anatomy (18 frames);
-- Ops: its four centred pages and its console on the dashboard shell (7);
-  the Ops host allows no inline style, so they need the stylesheet's hash;
 - Open in Zeros on a cloud workspace (1): it needs an app link that opens one;
 - the route map's own note (1).
 

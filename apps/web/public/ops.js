@@ -42,14 +42,33 @@ async function api(path, body) {
   return payload;
 }
 
+function when(value) {
+  const date = new Date(value);
+  return Number.isFinite(date.getTime())
+    ? date.toLocaleString("en-US", {
+        month: "short",
+        day: "numeric",
+        year: "numeric",
+        hour: "numeric",
+        minute: "2-digit",
+      })
+    : null;
+}
+
 function details(entries) {
   const list = document.getElementById("request-details");
   list.replaceChildren();
-  for (const [label, value] of entries) {
+  for (const [label, value, asCode = false] of entries) {
     const term = document.createElement("dt");
     term.textContent = label;
     const description = document.createElement("dd");
-    description.textContent = value ?? "Unavailable";
+    if (asCode && value) {
+      const code = document.createElement("code");
+      code.textContent = value;
+      description.append(code);
+    } else {
+      description.textContent = value ?? "Unavailable";
+    }
     list.append(term, description);
   }
 }
@@ -105,19 +124,25 @@ lookupForm?.addEventListener("submit", async (event) => {
       ownershipVerification: "confirmed_out_of_band",
     });
     current = { code, supportCaseReference, payload };
-    document.getElementById("request-title").textContent =
-      payload.target.kind === "account" ? "Account deletion" : "Organization deletion";
-    document.getElementById("request-summary").textContent =
-      payload.target.kind === "account"
-        ? payload.target.maskedEmail || "Purged account"
-        : payload.target.name || "Purged organization";
-    document.getElementById("request-state").textContent = payload.deletion.state;
+    const account = payload.target.kind === "account";
+    const name = account
+      ? payload.target.maskedEmail || "Purged account"
+      : payload.target.name || "Purged organization";
+    const members = payload.target.memberCount;
+    document.getElementById("request-summary").textContent = name;
+    document.getElementById("request-title").textContent = account
+      ? "Account deletion"
+      : `Organization deletion${Number.isSafeInteger(members) ? ` · ${members} ${members === 1 ? "member" : "members"}` : ""}`;
+    const avatar = document.getElementById("request-avatar");
+    if (avatar) avatar.textContent = name.trim().charAt(0).toUpperCase();
+    const state = document.getElementById("request-state");
+    const stateName = String(payload.deletion.state || "");
+    state.textContent = `${stateName.charAt(0).toUpperCase()}${stateName.slice(1).replaceAll("_", " ")}`;
+    state.className = `badge${stateName === "scheduled" ? " warning" : ""}`;
     details([
-      ["Recovery code", payload.deletion.recoveryCode],
-      ["Requested", new Date(payload.deletion.requestedAt).toLocaleString()],
-      ["Scheduled purge", new Date(payload.deletion.purgeAfter).toLocaleString()],
-      ["Target", payload.target.kind],
-      ["Members", payload.target.memberCount === undefined ? "—" : String(payload.target.memberCount)],
+      ["Recovery code", payload.deletion.recoveryCode, true],
+      ["Requested", when(payload.deletion.requestedAt)],
+      ["Scheduled purge", when(payload.deletion.purgeAfter)],
       ["Two-person recovery", payload.target.businessOrganization ? "Required" : "Not required"],
     ]);
     resetPurgeConfirmation();
@@ -145,7 +170,7 @@ grantForm?.addEventListener("submit", async (event) => {
       capability: value(grantForm, "capability"),
       expiresInMinutes: Number(value(grantForm, "expiresInMinutes")),
     });
-    grantResult.textContent = `Approval ${payload.grant.id} expires ${new Date(payload.grant.expiresAt).toLocaleString()}.`;
+    grantResult.textContent = `Approval ${payload.grant.id} expires ${when(payload.grant.expiresAt) ?? "soon"}.`;
   } catch (error) {
     grantResult.textContent = error instanceof Error ? error.message : "Approval failed";
   }

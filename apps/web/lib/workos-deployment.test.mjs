@@ -49,7 +49,7 @@ test("stable hosted UI assets cannot remain fresh across deployments", async () 
     );
   }
 
-  for (const sourceName of ["lib/dashboard.mjs", "lib/ops.ts"]) {
+  for (const sourceName of ["lib/dashboard.mjs", "lib/ops.ts", "lib/ops-pages.mjs"]) {
     const source = await readFile(new URL(sourceName, webRoot), "utf8");
     assert.doesNotMatch(
       source,

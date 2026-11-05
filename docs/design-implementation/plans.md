@@ -199,20 +199,36 @@ Boards: `web-app.md`. Landed on 2026-11-05:
   the legacy `?scheme=` handoff left the code with Auth0 (#800) and are gone
   from the canvas.
 
+- **Dashboard** (`public/dashboard.css`, `public/dashboard.js`,
+  `lib/dashboard.mjs`). One set of markup builders in `public/dashboard.js`
+  paints the server's first frame and every re-render, so the two cannot
+  drift. The web lists cloud organizations only: Personal is each device's
+  local space and never appears, and without a cloud organization Profile is
+  the only section, offering Create organization when the account may create
+  one. The switcher is the first nav row; its menu shows the role you hold,
+  because organizations carry no member count. Profile holds the sign-in
+  identity, Organizations (none yet, loading, or unreachable with a retry),
+  recoverable organizations by name (`GET /v1/deletions` now returns
+  `targetName`), Sessions with Sign out, and Delete account. General offers
+  Remove only when a logo is set. Members gives admins a role select and a
+  More actions menu (Remove from organization, Leave organization) and
+  members a Leave button on their own row; pending invitations show their
+  expiry and Revoke. Teams says "Everyone in <organization>", because teams
+  carry no count. Sections load as skeleton rows and fail with Try again;
+  dialogs follow the 400px recipe; toasts carry an icon and Dismiss, three at
+  most. The page follows the system appearance before first paint.
+- **Ops** (`lib/ops-pages.mjs`, `lib/ops.ts`, `public/ops.css`,
+  `public/ops.js`). Sign-in, reauthentication, access denied and unavailable
+  use the shared shell with Ops beside the logo. The console uses the
+  dashboard layout: Deletion recovery, plus Identity recovery as its own
+  section for platform owners (`?section=identity`, a new frame). The Ops
+  host allows no inline style or script, so each page sends that policy plus
+  one nonce, for the shell's stylesheet or the console's theme script, and the
+  Ops host now serves `dashboard.css` and its tokens. Owners see Force purge
+  disabled: developers run it with an owner's grant.
+
 Still to do:
 
-- **Dashboard** (`public/dashboard.css`, `public/dashboard.js`,
-  `lib/dashboard.mjs`): the mac Settings anatomy (256px sidebar, 32px rows
-  with 14px icons, 12px group labels, a 640px column, grouped cards with 12px
-  corners), cloud organizations only (Local is gone from the web), the
-  switcher as the first nav row, Sign out in Profile, Delete account as a
-  destructive-secondary in a normal group, the 400px dialog recipe, toasts
-  in the floating family.
-- **Ops** (`public/ops.css`, `lib/ops.ts`): sign-in, reauthentication, access
-  denied and unavailable on the shared shell with an Ops badge, and the
-  console on the dashboard shell. The Ops host's policy allows no inline
-  style, so these pages must send their own policy with the shell
-  stylesheet's hash, as the control plane's pages do.
 - **Open in Zeros on a cloud workspace.** The workspace page needs an app link
   that opens a cloud workspace; `zeros://workspace/<id>` is a Local link.
 

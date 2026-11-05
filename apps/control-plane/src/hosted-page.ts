@@ -98,6 +98,7 @@ export const SHELL_CSS = `
         font-weight: 450; letter-spacing: -0.01em;
       }
       .badge + .title { margin-top: 8px; }
+      .top .badge { margin-top: 0; }
       /* One line, up to 560px, wrapping only when it is longer. */
       .sub, .hero-sub { max-width: 560px; margin: 6px 0 0; color: var(--fg2); text-wrap: pretty; }
       .acts { display: flex; flex-wrap: wrap; align-items: center; justify-content: center; gap: 8px; margin-top: 24px; }
@@ -149,7 +150,7 @@ export const SHELL_CSS = `
 export function shellDocument(
   title: string,
   inner: string,
-  extra: { head?: string; styleAttributes?: string; badge?: string } = {},
+  extra: { head?: string; styleAttributes?: string; badge?: string; topBadge?: string } = {},
 ): string {
   return `<!doctype html>
 <html lang="en">
@@ -161,7 +162,7 @@ export function shellDocument(
     <style${extra.styleAttributes ?? ""}>${SHELL_CSS}    </style>
   </head>
   <body>
-    <header class="top"><a class="brand" href="/" aria-label="Zeros home">${zerosMark("brand-mark")}${WORDMARK}</a></header>
+    <header class="top"><a class="brand" href="/" aria-label="Zeros home">${zerosMark("brand-mark")}${WORDMARK}</a>${extra.topBadge ?? ""}</header>
     <main class="card">${zerosMark("hero-logo")}${extra.badge ?? ""}${inner}</main>
   </body>
 </html>`;

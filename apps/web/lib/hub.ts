@@ -100,8 +100,7 @@ async function dashboard(
     }
     me = body as DashboardMe;
   } catch {
-    loadError =
-      "Couldn't reach the organization service. Your account is still signed in.";
+    loadError = "Couldn’t reach Zeros. You’re still signed in.";
   }
   return dashboardPage({
     session: user,

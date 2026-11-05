@@ -26,7 +26,13 @@ import { DEPLOYMENT_MANIFEST_PATH } from "../lib/deployment-manifest.mjs";
  *  a bare static hit (observed as 308→/ for /changelog under wrangler pages
  *  dev). Anything NOT listed here gets the static 404.html. */
 const MARKETING_SPA_PATHS = new Set(["/changelog", "/privacy", "/terms"]);
-const OPS_STATIC_PATHS = new Set(["/ops.css", "/ops.js"]);
+// The Ops console styles itself with the dashboard's stylesheet and tokens.
+const OPS_STATIC_PATHS = new Set([
+  "/ops.css",
+  "/ops.js",
+  "/dashboard.css",
+  "/dashboard-tokens.css",
+]);
 
 function withHeaders(
   res: Response,

@@ -111,6 +111,7 @@ export const SHELL_CSS = `
         font-weight: 450; letter-spacing: -0.01em;
       }
       .badge + .title { margin-top: 8px; }
+      .top .badge { margin-top: 0; }
       /* One line, up to 560px, wrapping only when it is longer. */
       .sub, .hero-sub { max-width: 560px; margin: 6px 0 0; color: var(--fg2); text-wrap: pretty; }
       .acts { display: flex; flex-wrap: wrap; align-items: center; justify-content: center; gap: 8px; margin-top: 24px; }
@@ -162,7 +163,7 @@ export const SHELL_CSS = `
 export function shellDocument(
   title: string,
   inner: string,
-  extra: { head?: string; styleAttributes?: string; badge?: string } = {},
+  extra: { head?: string; styleAttributes?: string; badge?: string; topBadge?: string } = {},
 ): string {
   return `<!doctype html>
 <html lang="en">
@@ -174,12 +175,15 @@ export function shellDocument(
     <style${extra.styleAttributes ?? ""}>${SHELL_CSS}    </style>
   </head>
   <body>
-    <header class="top"><a class="brand" href="/" aria-label="Zeros home">${zerosMark("brand-mark")}${WORDMARK}</a></header>
+    <header class="top"><a class="brand" href="/" aria-label="Zeros home">${zerosMark("brand-mark")}${WORDMARK}</a>${extra.topBadge ?? ""}</header>
     <main class="card">${zerosMark("hero-logo")}${extra.badge ?? ""}${inner}</main>
   </body>
 </html>`;
 }
 // END shared hosted-page shell
+
+/** The logo for the dashboard's sidebar and mobile header. */
+export const BRAND_LOGO = `${zerosMark("brand-mark")}${WORDMARK}`;
 
 /** Provider logos for the sign-in buttons: Google in its colours, GitHub in the button's. */
 export const PROVIDER_LOGOS = {
@@ -190,8 +194,10 @@ export const PROVIDER_LOGOS = {
 export interface ShellOptions {
   /** A CSP nonce for the inline stylesheet, for pages with a nonce-only policy. */
   nonce?: string;
-  /** A neutral badge above the title, such as "Ops" or "404". */
+  /** A neutral badge above the title, such as "404". */
   badge?: string;
+  /** A neutral badge beside the logo, such as "Ops". */
+  headerBadge?: string;
   /** Extra head tags, such as a noscript style. */
   head?: string;
   /** Kept for callers: every centred page shares the one scale. */
@@ -203,5 +209,6 @@ export function shell(title: string, inner: string, options: ShellOptions = {}):
     ...(options.head ? { head: `\n    ${options.head}` } : {}),
     ...(options.nonce ? { styleAttributes: ` nonce="${esc(options.nonce)}"` } : {}),
     ...(options.badge ? { badge: `<span class="badge">${esc(options.badge)}</span>` } : {}),
+    ...(options.headerBadge ? { topBadge: `<span class="badge">${esc(options.headerBadge)}</span>` } : {}),
   });
 }

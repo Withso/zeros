@@ -61,7 +61,7 @@ test("dashboard intent survives sign-in without carrying unrelated query state",
   );
 });
 
-test("dashboard renders Personal first-class, organization sections, and no bearer tokens", () => {
+test("the dashboard lists cloud organizations only and renders no bearer tokens", () => {
   const page = dashboardPage({
     session,
     me: {
@@ -72,9 +72,17 @@ test("dashboard renders Personal first-class, organization sections, and no bear
     requestUrl: `https://app.zeros.build/?organization=${org.id}&section=members`,
     signOutHref: "/auth/logout",
   });
-  assert.match(page, /Create organization/);
-  assert.match(page, /data-section="members"/);
-  assert.match(page, /Local \+ cloud workspaces/);
+  assert.match(page, /data-action="create-organization"><svg[^>]*>[^]*?<\/svg>Create organization/);
+  assert.match(page, /data-section="members" aria-current="page"/);
+  assert.match(page, new RegExp(`data-org-id="${org.id}"`));
+  assert.match(page, /<span class="nav-name">Analytical &lt;script&gt;Engines&lt;\/script&gt;<\/span>/);
+  assert.match(page, /<p class="menu-label">ada@example\.com<\/p>/);
+  assert.match(page, /<span class="menu-meta">Owner<\/span>/);
+  // Personal is each device's local space; the web never lists it.
+  assert.doesNotMatch(page, new RegExp(personal.id));
+  assert.doesNotMatch(page, /Local workspaces only|Local \+ cloud workspaces/);
+  assert.match(page, /<h1>Members<\/h1><p>Members join the default team automatically\.<\/p>/);
+  assert.match(page, /aria-busy="true" aria-label="Loading members"/);
   assert.doesNotMatch(page, /<script>Engines/);
   assert.doesNotMatch(page, /secret-token-must-not-render/);
   assert.doesNotMatch(page, /refresh-secret-must-not-render/);
@@ -144,17 +152,46 @@ test("dashboard shell uses revisioned static assets", () => {
   );
 });
 
-test("Personal disables collaboration navigation and remains local-only", () => {
+test("an account with only Personal gets Profile, and Create organization when allowed", () => {
+  const render = (createOrganization) =>
+    dashboardPage({
+      session,
+      me: {
+        user: { id: "u1", email: session.email, displayName: session.name },
+        capabilities: { createOrganization },
+        organizations: [personal],
+      },
+      requestUrl: "https://app.zeros.build/?section=general",
+      signOutHref: "/auth/logout",
+    });
+  const page = render(true);
+  assert.match(page, /<h1>Profile<\/h1>/);
+  assert.match(page, /"section":"profile"/);
+  assert.match(page, /<button class="nav-row org-row" type="button" data-action="create-organization">/);
+  assert.match(page, /<h2 class="group-title">Organizations<\/h2><div class="card"><div class="empty"><svg[^>]*>[^]*?<\/svg><p>Create a cloud organization to share workspaces, members and settings\.<\/p><button class="button primary" type="button" data-action="create-organization">/);
+  for (const section of ["general", "members", "teams", "billing"]) {
+    assert.doesNotMatch(page, new RegExp(`data-section="${section}"`), section);
+  }
+  assert.doesNotMatch(page, /Organization<\/p>/);
+  assert.doesNotMatch(page, /data-org-id=/);
+
+  const ordinary = render(false);
+  assert.doesNotMatch(ordinary, /Organizations<\/h2>/);
+  assert.doesNotMatch(ordinary, /org-row/);
+});
+
+test("an unreachable organization service keeps Profile with a retry", () => {
   const page = dashboardPage({
     session,
-    me: { user: { id: "u1", email: session.email, displayName: session.name }, organizations: [personal] },
-    requestUrl: "https://app.zeros.build/?section=general",
+    me: null,
+    requestUrl: `https://app.zeros.build/?organization=${org.id}&section=general`,
     signOutHref: "/auth/logout",
+    loadError: "Couldn’t reach Zeros. You’re still signed in.",
   });
-  assert.match(page, /Local workspaces only/);
-  assert.match(page, /<strong>Ada Lovelace<\/strong><small>Local workspaces only/);
-  assert.match(page, /data-section="members"[\s\S]*?disabled/);
-  assert.match(page, /Personal cannot be removed/);
+  assert.match(page, /<h1>Profile<\/h1>/);
+  assert.match(page, /<p>Couldn’t reach Zeros\. You’re still signed in\.<\/p><button class="button secondary" type="button" data-action="retry-me">Try again<\/button>/);
+  assert.doesNotMatch(page, /org-row|data-section="general"/);
+  assert.match(page, /<span class="row-name">Ada Lovelace<\/span><span class="row-hint">ada@example\.com<\/span>/);
 });
 
 test("Personal organization-only deep links resolve to Profile on the first frame", () => {
@@ -185,8 +222,9 @@ test("server Profile uses the same control-plane identity as hydration", () => {
   });
   assert.match(
     page,
-    /avatar avatar-large">SN<\/span><div><strong>Stored Name<\/strong>/,
+    /<span class="avatar size-40" aria-hidden="true">SN<\/span><span class="row-text"><span class="row-name">Stored Name<\/span>/,
   );
+  assert.match(page, /<a class="button secondary" href="\/auth\/logout">Sign out<\/a>/);
   assert.match(page, /Delete account/);
   assert.match(page, /30 days/);
   assert.match(page, /id="delete-account-dialog"/);
@@ -217,13 +255,13 @@ test("mobile navigation exposes a controlled sidebar and dismissing scrim", () =
   const page = dashboardPage({
     session,
     me: { user: { id: "u1", email: session.email, displayName: session.name }, organizations: [personal, org] },
-    requestUrl: "https://app.zeros.build/",
+    requestUrl: "https://app.zeros.build/?section=profile",
     signOutHref: "/auth/logout",
   });
   assert.match(page, /id="dashboard-sidebar"/);
   assert.match(page, /aria-controls="dashboard-sidebar" aria-expanded="false"/);
   assert.match(page, /class="mobile-scrim"[^>]*data-action="close-mobile-nav"/);
-  assert.match(page, /avatar avatar-large/);
+  assert.match(page, /<header class="mobile-header"><a class="brand" href="\/" aria-label="Zeros home"><svg class="brand-mark"/);
   assert.match(page, /Sign-in profile/);
 });
 
@@ -243,9 +281,10 @@ test("server-rendered organization identity uses safe raster logos only", () => 
   assert.match(page, /class="avatar-image" src="data:image\/png;base64,AA=="/);
   assert.match(page, /data-organization-logo/);
   assert.match(page, /data-copy-organization-id/);
-  assert.match(page, /Delete organization/);
-  assert.match(page, /Capability metadata; cloud provisioning will still enforce plan and quota/);
-  assert.match(page, /deleted only after the grace period/);
+  assert.match(page, /data-action="delete-organization">Delete organization/);
+  assert.match(page, /Removes access now\. An owner can restore it for 30 days\./);
+  assert.match(page, /<span data-confirmation-label>Type Analytical &lt;script&gt;Engines&lt;\/script&gt; to confirm<\/span>/);
+  assert.doesNotMatch(page, /Workspace access|Capability metadata/);
 
   const unsafe = dashboardPage({
     session,
