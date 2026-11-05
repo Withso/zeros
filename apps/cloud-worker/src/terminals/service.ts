@@ -23,6 +23,7 @@ interface Options {
   mirror?: (cols: number, rows: number) => TerminalMirror;
   environment?: NodeJS.ProcessEnv;
   gitEnvironment?: NodeJS.ProcessEnv;
+  applicationEnvironment?: Readonly<Record<string, string>>;
   shellArgs?: string[];
   broadcast?: (frame: BridgeMessage) => void | Promise<void>;
   activity?: () => void;
@@ -191,7 +192,7 @@ export class Terminals {
         cwd: `/proc/${process.pid}/fd/${descriptor.fd}`, cols, rows,
         // bash keeps an inherited PWD that names its working directory, so the
         // prompt shows the checkout instead of the held descriptor's /proc path.
-        env: { ...workerChildEnvironment(this.options.environment, this.options.gitEnvironment), TERM: "xterm-256color", PWD: cwd,
+        env: { ...workerChildEnvironment(this.options.environment, this.options.gitEnvironment, this.options.applicationEnvironment), TERM: "xterm-256color", PWD: cwd,
           PROMPT_COMMAND: namePrompt(terminalName(this.scope.workspace.id, [this.scope.workspace.repository])) },
       });
       await this.files.assertDescriptor(descriptor);

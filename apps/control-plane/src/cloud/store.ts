@@ -11,6 +11,7 @@ import { memberOnHoldSql, organizationMemberOnHold } from "../organization-seats
 import { CloudV2PromptOutbox } from "./prompt-outbox.js";
 import { computerSourceReviewRequired, readComputerSourceTargets } from "./computer-provenance.js";
 import { CloudSourceTargetSchema } from "./source-authority.js";
+import { pinCloudEnvironment, releaseCloudEnvironment } from "./environment-store.js";
 
 import { mirrorMessageWindow, type MessageWindow, type WindowOptions } from "./history.js";
 import { mirrorMessageSearch, type SearchOptions } from "./history-search.js";
@@ -255,6 +256,7 @@ export class CloudV2Store {
       if (!CloudSourceTargetSchema.safeParse({ repository: input.repository, repositoryId: sourceRepositoryId }).success) throw new HttpError(422, "github_repository_invalid", "Invalid repository identity.");
       await tx.query("INSERT INTO cloud_v2_github_sources(workspace_id,source_repository,repository_id) VALUES($1,lower($2),$3)",
         [input.id, input.repository, sourceRepositoryId]);
+      await pinCloudEnvironment(tx, workspace(row), sourceRepositoryId);
     }
     return workspace(row);
   }
@@ -370,6 +372,7 @@ export class CloudV2Store {
         patch.expectedSandboxId !== undefined, patch.expectedSandboxId ?? null],
     );
     if (!rows[0]) return null;
+    if (to === "deleted") await releaseCloudEnvironment(tx, id);
     if (patch.revoke) {
       await tx.query(`UPDATE cloud_v2_workspaces SET worker_token_hash = NULL, worker_boot_id = NULL WHERE id = $1`, [id]);
       await tx.query(`DELETE FROM cloud_v2_tokens WHERE workspace_id = $1`, [id]);
@@ -447,22 +450,25 @@ export class CloudV2Store {
   async acceptWorkerHello(token: string, bootId: string, proof?: { accessEpoch: string; loginRevision: string }): Promise<CloudV2WorkerSession | null> {
     const { rows } = await withSystemTx(this.pool, tx => tx.query<Row & { access_epoch: string; login_revision: string; prior_state: "creating" | "starting" | "running"; hello_ms: number }>(
       `WITH prior AS MATERIALIZED (
-         SELECT id AS prior_id, state AS prior_state, updated_at AS prior_updated_at FROM cloud_v2_workspaces w
+         SELECT id AS prior_id, state AS prior_state, updated_at AS prior_updated_at,
+           NOT EXISTS (SELECT 1 FROM cloud_workspace_environment_pins p WHERE p.workspace_id=w.id
+             AND (p.ready_boot_id IS NULL OR p.ready_boot_id IS DISTINCT FROM $2::uuid)) AS environment_ready
+         FROM cloud_v2_workspaces w
          WHERE worker_token_hash=$1 AND state IN ('creating','starting','running') AND ${LIVE_ACCESS}
            AND ($3::bigint IS NULL OR (worker_boot_id=$2 AND access_epoch=$3 AND login_revision=$4::bigint)) FOR UPDATE)
        UPDATE cloud_v2_workspaces w SET
          worker_history_sequence=CASE WHEN worker_boot_id=$2 THEN worker_history_sequence ELSE 0 END,
          worker_history_digest=CASE WHEN worker_boot_id=$2 THEN worker_history_digest ELSE NULL END,
-         worker_boot_id=$2, state='running', attempts=0, next_attempt_at=NULL,
-         active_at=CASE WHEN state='running' THEN active_at ELSE clock_timestamp() END,
-         updated_at=CASE WHEN state='running' THEN updated_at ELSE clock_timestamp() END
+         worker_boot_id=$2, state=CASE WHEN prior.environment_ready THEN 'running' ELSE 'starting' END, attempts=0, next_attempt_at=NULL,
+         active_at=CASE WHEN state='running' OR NOT prior.environment_ready THEN active_at ELSE clock_timestamp() END,
+         updated_at=CASE WHEN state='running' OR (state='starting' AND NOT prior.environment_ready) THEN updated_at ELSE clock_timestamp() END
        FROM prior WHERE w.id=prior.prior_id
        RETURNING ${COLUMNS.replace(/\b(\w+)\b/g, "w.$1")}, access_epoch::text, login_revision::text, prior.prior_state,
          greatest(0, extract(epoch FROM (clock_timestamp()-prior.prior_updated_at))*1000)::float8 AS hello_ms`,
       [hashCloudV2Token(token), bootId, proof?.accessEpoch ?? null, proof?.loginRevision ?? null]));
     const row = rows[0];
     return row ? { ...workspace(row), accessEpoch: row.access_epoch, loginRevision: row.login_revision,
-      ...(row.prior_state === "running" ? {} : { helloTiming: { state: row.prior_state, durationMs: Math.round(row.hello_ms) } }) } : null;
+      ...(row.prior_state === "running" || row.state !== "running" ? {} : { helloTiming: { state: row.prior_state, durationMs: Math.round(row.hello_ms) } }) } : null;
   }
 
   async workerSession(token: string, bootId: string): Promise<CloudV2WorkerSession | null> {

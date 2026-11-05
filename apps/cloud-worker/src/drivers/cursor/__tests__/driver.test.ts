@@ -3,7 +3,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, afterEach, beforeAll, expect, it } from "vitest";
 import { applyUpdate, type AgentMessage } from "@zeros/protocol/agent-messages";
+import type { SessionNotification } from "@zeros/protocol/agent-events";
 import { CursorDriver } from "../driver";
+import { ApplicationEnvironment } from "../../../credentials/application-environment";
 import { fixtureHost, prompt, text } from "./fixture-host";
 
 let host: Awaited<ReturnType<typeof fixtureHost>>, directory: string;
@@ -20,6 +22,30 @@ async function setup(options: ConstructorParameters<typeof CursorDriver>[0] = {}
   const opened = await driver.open({ sessionId: "execution", cwd: directory, apiKey: "fixture-cursor", nativeSessionId: resume });
   return { driver, opened, rows: () => rows, last: () => rows.filter(row => row.kind === "text").at(-1)?.text };
 }
+
+it("delivers explicit app values only alongside the selected login to the native host", async () => {
+  const driver = new CursorDriver({ hostPath: host.path, environment: { PATH: process.env.PATH, HOME: directory, CLOUD_V2_WORKER_TOKEN: "synthetic-worker", ANTHROPIC_API_KEY: "synthetic-other" } });
+  drivers.push(driver);
+  let output = "";
+  driver.onEvent(({ update }) => { if (update.sessionUpdate === "agent_message_chunk" && update.content.type === "text") output += update.content.text; });
+  await driver.open({ sessionId: "execution", cwd: directory, apiKey: "fixture-cursor",
+    application: new ApplicationEnvironment({ variables: { APP_SECRET: "synthetic-app-native" }, files: [] }) });
+  await driver.prompt(prompt({ applicationEnvironment: true }));
+  expect(JSON.parse(output)).toEqual({ application: true, selected: true, worker: false, foreignLogin: false });
+});
+
+it.each(["text", "execution"])("redacts short app value %s without changing native event identity", async value => {
+  const driver = new CursorDriver({ hostPath: host.path, environment: { PATH: process.env.PATH, HOME: directory } });
+  drivers.push(driver);
+  const events: SessionNotification[] = [];
+  driver.onEvent(event => events.push(event));
+  await driver.open({ sessionId: "execution", cwd: directory, apiKey: "fixture-cursor",
+    application: new ApplicationEnvironment({ variables: { APP_VALUE: value }, files: [] }) });
+  await driver.prompt(prompt({ frames: [{ kind: "delta", value: { type: "text-delta", text: `before ${value} after` } }] }));
+  expect(events.find(event => event.update.sessionUpdate === "agent_message_chunk")).toMatchObject({
+    sessionId: "execution", update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "before [redacted] after" } },
+  });
+});
 
 it("runs the isolated host with only its own login, explicit models and image input", async () => {
   const f = await setup({}, "native-agent");

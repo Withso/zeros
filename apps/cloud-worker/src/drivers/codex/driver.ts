@@ -6,7 +6,7 @@ import { codexModePolicy, codexQuestionFeatureArgs, mapCodexUserInputToQuestion,
   type ContentBlock, type PromptResponse, type SessionNotification, type QuestionResponse, type RequestPermissionResponse } from "@zeros/protocol/agent-events";
 import type { SteerOutcome } from "@zeros/protocol/messages";
 import { codexModelUnavailableMessage } from "@zeros/protocol/model-rejection";
-import { redactDriverMessage, type Driver, type DriverOpen } from "../driver";
+import { redactDriverMessage, redactDriverValue, type Driver, type DriverOpen } from "../driver";
 import { normalizeProviderError } from "../shared/provider-error";
 import { retainProviderFailure } from "../../provider-failure";
 import { unsupportedInputNotice } from "../shared/unsupported-input";
@@ -90,7 +90,7 @@ export class CodexDriver implements Driver {
     }, sessionId: input.sessionId, resumed: !!input.nativeSessionId, emit: (event) => {
       // A configured proxy token must never escape through provider error text
       // or transcript metadata. Native stderr is not observed at all.
-      const clean = JSON.parse(this.redact(JSON.stringify(event))) as SessionNotification;
+      const clean = redactDriverValue(event, this.input);
       for (const emit of this.listeners) emit(clean);
     } });
     const command = this.options.command ?? process.execPath;
@@ -107,7 +107,7 @@ export class CodexDriver implements Driver {
       command, args: [...args, "app-server", ...(input.onQuestion ? codexQuestionFeatureArgs() : []),
         ...Object.entries(config).flatMap(([key, value]) => ["-c", `${key}=${JSON.stringify(value)}`])],
       cwd: input.cwd,
-      env: agentEnvironment({ agent: "codex", token: input.proxy.token }, this.options.environment, this.options.gitEnvironment),
+      env: agentEnvironment({ agent: "codex", token: input.proxy.token }, this.options.environment, this.options.gitEnvironment, input.application?.variables),
       requestTimeoutMs: this.options.requestTimeoutMs ?? 30_000,
       onNotification: (method, params) => this.notification(method, params),
       onRequest: (method, params, id) => this.nativeRequest(method, params, id),

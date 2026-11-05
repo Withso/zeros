@@ -16,7 +16,8 @@ export class HistoryMirror {
   private timer?: ReturnType<typeof setTimeout>;
   private unsubscribe: () => void;
 
-  constructor(private readonly store: SessionStore, private readonly transport: Transport, private readonly replacement = () => false) {
+  constructor(private readonly store: SessionStore, private readonly transport: Transport, private readonly replacement = () => false,
+    private readonly sanitize: <T>(value: T) => T = value => value) {
     this.unsubscribe = store.onChange((change) => this.change(change));
   }
 
@@ -83,11 +84,12 @@ export class HistoryMirror {
         const frames: CloudV2WorkerFrame[] = [];
         if (pending.deleted) frames.push({ t: "history", chatDeletions: [chatId] });
         else {
-          if (pending.chat) frames.push({ t: "history", chats: [{ ...pending.chat }] });
+          if (pending.chat) frames.push({ t: "history", chats: [{ ...this.sanitize(pending.chat) }] });
           let rows: CloudV2MessageRow[] = [], size = 1024;
           let replace = pending.replace;
           const batch = () => { frames.push({ t: "history", messages: { chatId, rows, ...(replace ? { replace, historyState: pending.historyState } : {}) } }); replace = undefined; };
-          for (const row of pending.rows.values()) {
+          for (const source of pending.rows.values()) {
+            const row = this.sanitize(source);
             const bytes = Buffer.byteLength(JSON.stringify(row)) + 1;
             if (rows.length && (rows.length === CLOUD_V2_MAX_HISTORY_ROWS || size + bytes > CLOUD_V2_MAX_FRAME_BYTES)) {
               batch(); rows = []; size = 1024;

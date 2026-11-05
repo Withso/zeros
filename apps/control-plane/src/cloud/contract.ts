@@ -1,6 +1,7 @@
 // Mirror of packages/protocol/src/cloud-v2-relay.ts for the standalone zod 3
 // control plane. Contract parity is tested without a runtime package import.
 import { z } from "zod";
+import { CloudWorkspaceEnvironmentSchema } from "./environment-contract.js";
 import { CloudV2PromptCounterSchema } from "./prompt-contract.js";
 
 export const CLOUD_V2_RELAY_PROTOCOL = 2;
@@ -114,6 +115,7 @@ export const CloudV2ControlFrameSchema = z.discriminatedUnion("t", [
    * owns proxy token refresh. */
   z.object({
     t: z.literal("config"),
+    environment: CloudWorkspaceEnvironmentSchema.optional(),
     promptOutbox: z.literal(1).optional(),
     agentInteractions: z.literal(1).optional(),
     codeReview: z.object({

@@ -108,6 +108,11 @@ input.on("line", async (line) => {
         complete();
         return;
       }
+      if (mode === "application-environment") {
+        text(JSON.stringify({ application: process.env.APP_SECRET === "synthetic-app-native", selected: process.env.ZEROS_CLOUD_PROXY_TOKEN === "offline-placeholder",
+          worker: "CLOUD_V2_WORKER_TOKEN" in process.env, foreignLogin: "ANTHROPIC_API_KEY" in process.env }));
+        complete(); return;
+      }
       if (mode === "mcp-configuration") {
         text(JSON.stringify({ config: threadConfig, secretInArgs: process.argv.some(arg => arg.includes("fixture-mcp-secret")) }));
         complete(); return;

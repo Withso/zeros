@@ -251,6 +251,75 @@ trust domain.
 runtime and desktop app together, with an isolated database and a named
 tunnel for Boat VMs. Agents run it headless and then gate0 with `--local`.
 
+## Application variables and environment files
+
+Settings → Environment has separate Local and Cloud scopes for an organization.
+The Local scope keeps the device's existing vault and file-copy policy. In Cloud,
+choose a GitHub repository, then add application variables or select `.env` files
+and their relative destination paths. Values are write-only: saved rows show
+names, paths and sizes, and replacing a value requires entering it again. Switching
+account, organization, repository or scope discards unsaved values and cancels
+pending uploads. No Local vault values are uploaded implicitly.
+
+Cloud defaults belong to the creator, organization and immutable GitHub repository
+ID. Workspace creation pins one complete encrypted version atomically; edits or
+clear-all affect future workspaces only. An existing workspace keeps its original
+pin through wake and restore. A repository renamed at GitHub retains its identity;
+a different repository at the old name cannot inherit its defaults. Concurrent
+Settings edits use revision checks, so a stale save cannot replace a newer one.
+Unreferenced versions are pruned after changes and workspace deletion; a bounded
+ten-minute lifecycle sweep also releases pins left by older writers. Clearing
+defaults retains a revision tombstone.
+
+The limits are 128 variables, 128 bytes per name and 16 KiB per value; 16 UTF-8
+files, 64 KiB per file; and 256 KiB for the complete selection including names and
+paths. There are at most 128 repository scopes per creator and organization.
+Values cannot contain NUL. Runtime, injection, Git, proxy and provider credential
+names are refused, including `PATH`, `HOME`, `SHELL`, `NODE_OPTIONS`, `GH_*`,
+`GIT_*`, `CLOUD_V2_*`, `ZEROS_*` and provider prefixes. A refusal never silently
+shadows the selected login or changes the worker's own environment. Use
+application-specific names for variables. Selected file contents are copied as
+bytes and are not sourced into the worker process.
+
+File destinations must be relative `.env` or `.env.*` paths, at most 512 bytes
+and 16 components deep. Every destination must be untracked **and ignored by Git**.
+Initial seeding refuses existing files, links, directories, private state and
+nested repositories. It uses private mode-0600 files and no-overwrite publication
+under the Git index lock; a durable journal records publication ownership without
+file contents. A refusal leaves the workspace unavailable with recovery guidance.
+Correct the defaults or repository ignore rules and create a new workspace.
+After successful seeding, edits and deletions are preserved: wake does not copy the
+original file over the current one. Encrypted checkpoints explicitly include the
+bounded selected paths, including files beneath ignored directories and deletion
+state. Restore retains edited bytes, file modes, reset/Undo refs and the seed journal.
+
+Only the creator's pin is delivered, after current membership and GitHub source
+authorization checks. Removing membership or disconnecting GitHub stops delivery
+at the next configuration. Agents, setup and terminals receive application
+variables as a separate child-process input; worker, broker, credential preflight
+and generic Git commands do not. The shared Cloud Computer builder receives no
+creator application environment. The VM remains the isolation boundary: agents
+and terminals can read delivered variables and files. Known values and their
+common escaped forms are redacted from worker diagnostics, setup logs and mirrored
+history; checkpoint manifests contain metadata only. Encrypted checkpoints carry
+the file bytes needed for recovery.
+
+Deploy expand-only migration `0218_cloud_workspace_environment.sql` and the control
+plane before publishing the worker runtime. The optional `environment` config is
+negotiated by `workspace-environment-v1`; an old worker is refused when a workspace
+has a required pin. Unpinned historical workspaces keep their prior behavior and
+never acquire defaults retroactively. The hello response can deliver configuration
+while a required-pin workspace is still starting. The worker durably seeds and
+constructs required services, then reports the matching boot/version/sequence as
+ready before publishing interactive services. A database guard prevents a rolled
+back control plane's hello writer from bypassing this proof. Identical lost-response
+report retries succeed, while stale boots and late failure reports cannot undo
+readiness. Keep old encryption key versions available for pinned workspaces.
+
+The optional repository-owned setup script is separate work. This environment
+support supplies the existing workspace setup path and does not begin executing
+new repository configuration files.
+
 ## Credentials and history
 
 Settings → Agents stores encrypted logins in the control plane. The creator's

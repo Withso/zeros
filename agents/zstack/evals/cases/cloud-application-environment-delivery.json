@@ -1,0 +1,9 @@
+{
+  "id": "cloud-application-environment-delivery",
+  "kind": "replay",
+  "area": "cloud-worker",
+  "fixedBy": "pr:837",
+  "symptom": "Cloud native agents, setup and terminals dropped application variables instead of receiving the creator's selected environment alongside their selected provider login.",
+  "rule": "Keep application values separate from worker, credential-preflight and generic Git environments. Verify every native provider and PTY with synthetic values, and retain selected credential precedence and Local's explicit-vault policy (zstack-verify, principle 16).",
+  "check": "pnpm --dir apps/cloud-worker exec vitest run src/drivers/shared/__tests__/application-environment.test.ts"
+}

@@ -157,6 +157,19 @@ function workosConfig(): Config {
 }
 
 describe("unexpected error privacy", () => {
+  it("keeps application values and escaped echoes out of cloud environment responses and logs", async () => {
+    const app = createApp(config(null), pool, emailConfig as never), canary = 'synthetic-app-"canary"\nnext';
+    const path = "/v1/cloud-v2/organizations/11111111-1111-4111-8111-111111111111/environment/123";
+    const context = new Context(new Request(`https://api.example.test${path}`, { method: "PATCH", body: JSON.stringify({ variables: { APP_SECRET: canary } }) }), { path });
+    const log = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      for (const error of [new HttpError(503, "cloud_environment_unreadable", canary, { value: canary }),
+        Object.assign(new Error(JSON.stringify(canary)), { query: canary, code: "23514" })]) {
+        const response = await app.errorHandler(error, context), output = JSON.stringify([await response.json(), log.mock.calls]);
+        expect([canary, JSON.stringify(canary).slice(1, -1), encodeURIComponent(canary)].some(value => output.includes(value))).toBe(false);
+      }
+    } finally { log.mockRestore(); }
+  });
   it("returns a closed retry response for capacity loss, including on customer cloud routes", async () => {
     for (const path of ["/v1/me", "/v1/cloud-v2/workspaces"]) {
       const app = createApp(config(null), pool, emailConfig as never);

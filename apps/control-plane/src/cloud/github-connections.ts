@@ -356,7 +356,7 @@ export class CloudGithubConnections {
     organizationId: string,
     userId: string,
     repository: string,
-  ): Promise<{ repositoryId: string; assertCurrent(tx: Tx): Promise<void> }> {
+  ): Promise<{ repositoryId: string; assertCurrent(tx: Tx): Promise<void>; assertReadable(): Promise<void> }> {
     const scope = { organizationId, userId },
       until = Date.now() + 30_000;
     const [owner, name, extra] = repository.split("/");
@@ -377,6 +377,10 @@ export class CloudGithubConnections {
     await access.assertCurrent();
     return {
       repositoryId: identity.repositoryId,
+      assertReadable: async () => {
+        await access.assertCurrent();
+        if (Date.now() >= until) throw new HttpError(409, "github_verification_expired", "Repository access needs to be checked again. Retry reading.");
+      },
       assertCurrent: async (tx) => {
         await this.store.lockCurrent(tx, scope, access.generation);
         if (Date.now() >= until)

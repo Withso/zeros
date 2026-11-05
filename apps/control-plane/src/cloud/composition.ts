@@ -31,6 +31,7 @@ import type { CloudV2WorkerRouteDeps } from "./worker-routes.js";
 import { cloudV2SandboxName } from "./resource-names.js";
 import { CloudV2PromptSignals } from "./prompt-signals.js";
 import { createMcpServices } from "../mcp/composition.js";
+import { CloudEnvironments } from "./environment-store.js";
 
 const PROXY_TOKEN_TTL_MS = 24 * 60 * 60_000;
 
@@ -79,6 +80,7 @@ export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boo
   const signer = new CloudV2WorkerSigner(v2.workerSigningKey, v2.workerSigningKeyPrevious);
   const logins: CloudV2AgentLogins = keys ? createCloudV2AgentLogins(pool, keys) : async () => null;
   const github = createCloudGithubServices(pool, config.github, keys, store);
+  const environments = new CloudEnvironments(pool, keys, github.connections.authorizeRepositoryConfiguration.bind(github.connections));
   const githubToken = (workspace: CloudV2Workspace, purpose: "git" | "gh" = "git", failedTokenSha256?: string) => github.workspaceToken(workspace, "user", purpose, failedTokenSha256);
   const proxyBase = `${v2.apiUrl}${CLOUD_V2_PROXY_PREFIX}`;
   const computers = new CloudV2Computers(pool, lockPool, github.resolveRepository);
@@ -109,7 +111,7 @@ export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boo
       const issued = await store.issueToken({ workspaceId: workspace.id, kind: "proxy", userId: null, ttlMs: PROXY_TOKEN_TTL_MS });
       return { token: issued.token, expiresAt: issued.expiresAt.getTime() };
     };
-    const [codex, claude, cursor, setup, baseCommit, repositoryBinding, gitIdentity] = await Promise.all([
+    const [codex, claude, cursor, setup, baseCommit, repositoryBinding, gitIdentity, environment] = await Promise.all([
       logins(workspace.creatorUserId, workspace.organizationId, "codex"),
       logins(workspace.creatorUserId, workspace.organizationId, "claude"),
       logins(workspace.creatorUserId, workspace.organizationId, "cursor"),
@@ -117,6 +119,7 @@ export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boo
       store.baseCommit(workspace.id),
       github.binding(workspace, mode),
       github.connections.gitIdentity({ organizationId: workspace.organizationId, userId: workspace.creatorUserId }),
+      environments.resolve(workspace),
     ]);
     const agents = await cloudV2AgentConfig({ codex, claude, cursor }, proxyBase, proxy);
     const mcpServers = mcp ? await mcp.store.resolve(workspace.organizationId, workspace.creatorUserId, workspace.repository, repositoryBinding) : undefined;
@@ -138,6 +141,7 @@ export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boo
         ...(baseCommit ? { baseCommit } : {}),
       },
       agents,
+      ...(environment ? { environment } : {}),
       ...(mcpServers ? { mcpServers } : {}),
     };
   };
@@ -150,6 +154,7 @@ export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boo
     remoteHead: (org, user, target, branch) => github.remoteHead(org, user, target.repository, branch, target.repositoryId),
     github: { service: github.service, documents: github.documents },
     githubConnections: github.connections,
+    environments,
     bridgeBaseUrl: v2.realtimeUrl,
     promptOutbox: v2.promptOutbox === true,
   };
@@ -169,6 +174,7 @@ export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boo
   const relay = roles.relay ? connections : null;
   const promptSignals = new CloudV2PromptSignals();
   const workers: CloudV2WorkerRouteDeps = { store, timing, logger: console, authorizeSource, continueSource, config: workerConfig, githubToken, runtimeSha256: v2.runtime.sha256,
+    environmentReport: (token, bootId, value) => environments.report(token, bootId, value),
     githubCheckout: (token,bootId,value) => github.metadata.checkout(token,bootId,value),
     ...(mcp ? { mcpAuthorization: async (workspace, id, force) =>
       mcp.oauth.authorizationForRepository(workspace.organizationId, workspace.creatorUserId, workspace.repository, id, force,
@@ -229,6 +235,7 @@ export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boo
       await authorizeSource(workspace);
     },
     prompts: store.prompts, stopIdle: (id, before) => store.stopIdle(id, before),
+    pruneEnvironments: () => environments.prune(),
     checkpointRetry: v2.checkpointRetry === true,
     publicKeys: signer.publicKeys, sealPortToken: (token, id) => sealPortToken(token, id, keys),
     stopWorker: workspace => connections!.stopWorkspace(workspace),

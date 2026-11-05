@@ -35,6 +35,8 @@ import { McpGateway } from "./mcp/gateway";
 import { WorkspaceToolsMcp } from "./mcp/workspace-tools";
 import { WorkerCodeReview } from "./workspace/code-review";
 import { measureStartup, recordStartupTiming, type StartupTimingObserver } from "./startup-timings";
+import { EnvironmentSeedError, seedEnvironment } from "./workspace/environment-seed";
+import { ApplicationEnvironment } from "./credentials/application-environment";
 
 interface WorkerOptions {
   directory: string;
@@ -88,6 +90,8 @@ export class CloudWorker {
   private acceptedConfigurationRevision?: bigint;
   private configurationRevision?: bigint;
   private configuredReviewAvailable = false;
+  private environmentVersion?: string;
+  private readonly environmentLifetime = new AbortController();
   private idle?: boolean;
   private activeMutations = 0;
   private lastMutationAt = -Infinity;
@@ -142,6 +146,7 @@ export class CloudWorker {
     this.disposed = true; clearInterval(this.heartbeat); this.tokens.dispose(); this.githubCredentials.invalidate();
     const workspaceTools = this.workspaceMcp.dispose();
     const agentsClosing = this.agents?.dispose();
+    this.environmentLifetime.abort();
     void agentsClosing?.catch(() => {});
     await this.configuring.catch(() => {});
     await this.stopCheckout();
@@ -266,6 +271,7 @@ export class CloudWorker {
     if (this.options.workspaceId && config.workspace.id !== this.options.workspaceId) throw new Error("Workspace identity changed.");
     const scope = new WorkspaceScope(config.workspace);
     if (this.scope && (this.scope.key !== scope.key || this.scope.root !== scope.root || this.scope.workspace.repository !== scope.workspace.repository)) throw new Error("Workspace identity changed.");
+    if (this.scope && this.environmentVersion !== config.environment?.versionId) throw new EnvironmentSeedError("cloud_environment_pin_changed");
     if (this.reviews && !this.stopping) this.reviews.validateConfiguration(config.codeReview);
     this.acceptedConfigurationRevision = revision;
     if (this.reviews && !this.stopping && this.agents!.fenceReviewConfiguration(config.codeReview)) {
@@ -322,6 +328,15 @@ export class CloudWorker {
       refresh = checkout?.refresh;
       this.initialSetupNeeded ||= checkout?.createdBranch === true;
       if (this.disposed || this.stopping) return false;
+      if (config.environment && !this.options.transport.reportEnvironment) throw new EnvironmentSeedError("cloud_environment_runtime_required");
+      try { await seedEnvironment(scope, this.options.directory, config.environment, this.environmentLifetime.signal); }
+      catch (error) {
+        if (error instanceof EnvironmentSeedError && config.environment && !this.environmentLifetime.signal.aborted)
+          await this.options.transport.reportEnvironment?.({ versionId: config.environment.versionId, sequence: 1, state: "failed", errorCode: error.code }, this.environmentLifetime.signal);
+        throw error;
+      }
+      if (this.disposed || this.stopping) return false;
+      const application = new ApplicationEnvironment(config.environment && { variables: config.environment.variables, files: config.environment.files });
       const restoreMarker = join(this.options.directory, "restored-from-checkpoint");
       const restored = await access(restoreMarker).then(() => true, (error: NodeJS.ErrnoException) => {
         if (error.code !== "ENOENT") throw error;
@@ -364,14 +379,15 @@ export class CloudWorker {
         cursor: () => new CursorDriver({ gitEnvironment: this.gitEnvironment }),
       }, config,
         (frame) => this.broadcast(frame), () => { void this.reportIdle(); }, this.options.onTiming, this.options.modelDiscovery, executionId => mcp!.providers(executionId),
-        async input => reviews!.enabled ? this.workspaceMcp.admit(input.executionId, reviews!.tools(input)) : undefined);
-      terminals = new Terminals(scope, { gitEnvironment: this.gitEnvironment, broadcast: frame => this.broadcast(frame), activity: () => { void this.reportIdle(); } });
+        async input => reviews!.enabled ? this.workspaceMcp.admit(input.executionId, reviews!.tools(input)) : undefined, application);
+      terminals = new Terminals(scope, { gitEnvironment: this.gitEnvironment, applicationEnvironment: application.variables,
+        broadcast: frame => this.broadcast(frame), activity: () => { void this.reportIdle(); } });
       const chats = new ChatService(store, scope, (chatId) => agents!.closeChat(chatId), agents.turns, {
         historyReplacement: () => this.historyReplacementEnabled,
         mutate: agents.mutateChat.bind(agents),
         files: action => workspace!.git.mutate(action),
       });
-      history = new HistoryMirror(store, this.options.transport, () => this.historyReplacementEnabled);
+      history = new HistoryMirror(store, this.options.transport, () => this.historyReplacementEnabled, value => application.value(value));
       unsubscribers.push(store.onChange((change) => {
         if (!change.chat && !change.deleted && !change.rows.length && !change.replace) return;
         void this.broadcast(createMessage({ type: "DB_CHANGED", source: "engine", kinds: [...(change.chat || change.deleted ? ["chats"] : []), ...(change.rows.length || change.replace ? ["messages"] : []), ...(change.replace ? ["conversationContext"] : []), ...(change.deleted ? ["workspaces"] : [])],
@@ -380,7 +396,7 @@ export class CloudWorker {
       }), store.onError((chatId) => {
         this.options.onError?.("storage"); void agents!.closeChat(chatId).catch(() => {});
       }));
-      setup = new WorkspaceSetup({ directory: this.options.directory, workspace: config.workspace, gitEnvironment: this.gitEnvironment,
+      setup = new WorkspaceSetup({ directory: this.options.directory, workspace: config.workspace, gitEnvironment: this.gitEnvironment, application,
         runner: this.options.setupRunner, activity: () => { void this.reportIdle(); }, onStorageError: () => this.options.onError?.("storage"),
         beforeRun: async () => {
           if (refresh?.mayFastForward) await refreshing;
@@ -388,6 +404,9 @@ export class CloudWorker {
         },
         onAdmitted: async () => { this.initialSetupNeeded = false; await rm(restoreMarker, { force: true }).catch(() => {}); },
       });
+      if (config.environment) await this.options.transport.reportEnvironment!({ versionId: config.environment.versionId, sequence: 1, state: "ready" }, this.environmentLifetime.signal);
+      if (this.disposed || this.stopping) return false;
+      this.environmentVersion = config.environment?.versionId;
       this.store = store; this.workspace = workspace; this.mcp = mcp; this.agents = agents; this.reviews = reviews;
       this.terminals = terminals; this.chats = chats; this.history = history; this.setup = setup; this.checkoutRefresh = refresh;
       this.unsubscribers.push(...unsubscribers); this.scope = scope; published = true;
@@ -431,6 +450,7 @@ export class CloudWorker {
     // A delivery waiting behind a mutation can hold inbox/configuration drain.
     // Retire native inputs before either wait permits a late approval.
     const agentsClosing = this.agents?.dispose();
+    this.environmentLifetime.abort();
     void agentsClosing?.catch(() => {});
     await this.configuring.catch(() => {});
     await this.stopCheckout();

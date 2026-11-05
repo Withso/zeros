@@ -1,4 +1,5 @@
 import { expect } from "@playwright/test";
+import { runCloudEnvironmentSmoke } from "./ui-smoke-cloud-environment.mjs";
 
 export async function runRepoSettingsSmoke({ page, check }) {
   await page.goto(
@@ -200,4 +201,5 @@ export async function runRepoSettingsSmoke({ page, check }) {
   await expect(internal).toHaveCount(0);
   await expect(resourceSummary).toHaveCount(0);
   check("Internal offers only Copy logs and default-on Resource summary, preserves the toggle and closes on staff revocation", true);
+  await runCloudEnvironmentSmoke({ page, check });
 }

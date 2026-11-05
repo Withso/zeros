@@ -123,6 +123,19 @@ it("checks native cwd and login exclusions and gives a terminal only runtime/bro
   expect(launches[0].env.PWD).toBe(await realpath(root));
 });
 
+it.skipIf(process.platform !== "linux")("the real PTY receives explicit app values without ambient worker or provider credentials", async () => {
+  const { scope, root } = await repositoryFixture();
+  const service = new Terminals(scope, { environment: { PATH: process.env.PATH, HOME: root, CLOUD_V2_WORKER_TOKEN: "synthetic-worker", ANTHROPIC_API_KEY: "synthetic-other" },
+    applicationEnvironment: { APP_SECRET: "synthetic-app-native" }, shellArgs: ["--norc", "--noprofile", "-i"] }); services.push(service);
+  const a = client("a");
+  await service.handle(a.client, frame("PTY_CREATE", { sessionId: "app", cwd: root }));
+  await service.handle(a.client, frame("PTY_WRITE", { sessionId: "app", data: "if test \"$APP_SECRET\" = synthetic-app-native && test -z \"$CLOUD_V2_WORKER_TOKEN$ANTHROPIC_API_KEY\"; then printf 'environment-%s\\n' confirmed; fi\r" }));
+  const output = () => a.frames.map(message => message.type === "PTY_DATA" ? message.data : "").join("");
+  await vi.waitFor(() => expect(output()).toContain("environment-confirmed\r\n"), { timeout: 10_000 });
+  await service.handle(a.client, frame("PTY_WRITE", { sessionId: "app", data: "exit 0\r" }));
+  await vi.waitFor(() => expect(a.frames.some(message => message.type === "PTY_EXIT" && message.sessionId === "app")).toBe(true), { timeout: 10_000 });
+});
+
 // node-pty replaces PWD with the spawn cwd, so only a real shell proves what
 // the prompt shows.
 it.skipIf(process.platform !== "linux")("starts a real shell in the held descriptor that reports the checkout path", async () => {

@@ -12,6 +12,7 @@ import { z } from "zod";
 import { openCredentialBytes, sealCredentialBytes, type CloudAgentCredentialKeys } from "../agent-credentials/agent-credential-envelope.js";
 import type { CloudV2RuntimeStore } from "./runtime.js";
 import { runtimeObjectMissing } from "./runtime-source.js";
+import { ENVIRONMENT_CHECKPOINT_SCRIPT } from "./checkpoint-environment.js";
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const OBJECT = /^cloud-v2\/checkpoints\/([0-9a-f-]{36})\/([0-9a-f-]{36})\.zck$/;
@@ -307,6 +308,7 @@ function archiveSteps(input: ArchiveInput, revision: string): string[] {
     ...prologue("checkpoint", [...paths(input), `base=${quote(input.baseBranch)}`]),
     `printf %s ${quote(dataKey(input.key))} > "$work/key"`,
     `printf %s ${quote(b64(DIGEST))} | base64 -d > "$work/digest.mjs"`,
+    `printf %s ${quote(b64(ENVIRONMENT_CHECKPOINT_SCRIPT))} | base64 -d > "$work/environment.mjs"`,
     "c=\"$work/c\"; mkdir \"$c\"; m=\"$c/manifest\"; printf 'zeros-checkpoint 1\\n' > \"$m\"",
     // Digests of the parts outside Git; a part that cannot be read disables reuse.
     "have_repo='' tree='' staged_tree='' base_commit='' digests=1; : > \"$work/parts\"",
@@ -427,6 +429,9 @@ function archiveSteps(input: ArchiveInput, revision: string): string[] {
     `      if [ "$size" -le ${IGNORED_FILE_BYTES} ] && [ $((total + size)) -le ${IGNORED_TOTAL_BYTES} ]; then total=$((total + size)); printf '%s\\0' "$path" >> "$work/ignored"; fi`,
     "    fi",
     "  done < <(git ls-files -z --others --ignored --exclude-standard --directory)",
+    "  step=environment",
+    `  node "$work/environment.mjs" capture "$repo" "$home/${CLOUD_V2_WORKER_STATE}/environment-seed/manifest.json" "$work/environment" || { status=$?; if [ "$status" = 3 ]; then fail checkpoint_too_large; else fail checkpoint_failed; fi; }`,
+    "  if [ -d \"$work/environment\" ]; then printf 'environment ' >> \"$work/parts\"; node \"$work/digest.mjs\" tree \"$work/environment\" -- . >> \"$work/parts\" || digests=''; fi",
     "  step=fingerprint",
     "  for part in attachments ignored; do",
     "    if [ -s \"$work/$part\" ]; then printf '%s ' \"$part\" >> \"$work/parts\"; node \"$work/digest.mjs\" files \"$repo\" \"$work/$part\" >> \"$work/parts\" || digests=''; fi",
@@ -460,6 +465,7 @@ function archiveSteps(input: ArchiveInput, revision: string): string[] {
     "  if [ -s \"$work/attachments\" ]; then tar --sparse --null --verbatim-files-from --no-recursion --hard-dereference -T \"$work/attachments\" -cf \"$c/attachments.tar\"; fi",
     "  step=ignored",
     "  if [ -s \"$work/ignored\" ]; then tar --null --verbatim-files-from --no-recursion -T \"$work/ignored\" -cf \"$c/ignored.tar\"; fi",
+    "  if [ -d \"$work/environment\" ]; then tar -cf \"$c/environment.tar\" -C \"$work/environment\" .; fi",
     "fi",
     "step=sessions",
     "cd \"$home\"",
@@ -584,6 +590,11 @@ export function checkpointRestoreSteps(input: RestoreInput, fetch: readonly stri
     "  else git read-tree --empty; fi",
     "  git update-index -q --refresh || true",
     "  if [ -f \"$c/ignored.tar\" ]; then tar -xf \"$c/ignored.tar\" -C \"$repo\" --no-same-owner; fi",
+    "  if [ -f \"$c/environment.tar\" ]; then",
+    "    mkdir \"$work/environment\"; tar -xf \"$c/environment.tar\" -C \"$work/environment\" --no-same-owner || fail checkpoint_corrupt",
+    `    printf %s ${quote(b64(ENVIRONMENT_CHECKPOINT_SCRIPT))} | base64 -d > "$work/environment.mjs"`,
+    "    node \"$work/environment.mjs\" restore \"$repo\" \"$work/environment\" || fail checkpoint_restore_failed",
+    "  fi",
     ...ATTACHMENT_HELPERS,
     "  step=attachments",
     "  if [ -f \"$c/attachments.tar\" ]; then",

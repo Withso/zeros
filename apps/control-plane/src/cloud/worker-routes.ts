@@ -10,6 +10,7 @@ import { CloudV2PromptAckSchema, CloudV2PromptBeginSchema, CloudV2PromptOutcomeS
 import { CloudGithubCheckoutSchema, type CloudGithubCheckout } from "./github-pr-contract.js";
 import type { CloudSourceContinuation, CloudSourceProof } from "./source-authority.js";
 import { cloudGithubFailure } from "./github-failure.js";
+import { CloudEnvironmentReportSchema, type CloudEnvironmentReport } from "./environment-contract.js";
 
 export const CLOUD_V2_WORKER_API = "/v2/cloud/worker";
 type ConfigFrame = Extract<CloudV2ControlFrame, { t: "config" }>;
@@ -25,6 +26,7 @@ export type CloudV2WorkerRouteDeps = {
   continueSource?(workspace: CloudV2Workspace, proof?: CloudSourceProof): Promise<CloudSourceContinuation>;
   githubToken(workspace: CloudV2Workspace, purpose?: "git" | "gh", failedTokenSha256?: string): Promise<{ token: string; expiresAt: number }>;
   githubCheckout?(token: string, bootId: string, value: CloudGithubCheckout): Promise<void>;
+  environmentReport?(token: string, bootId: string, value: CloudEnvironmentReport): Promise<void>;
   mcpAuthorization?(workspace: CloudV2Workspace, id: string, force: boolean): Promise<{ headers: Record<string, string>; expiresAt?: number }>;
 };
 const unauthorized = () => new HttpError(401, "worker_unauthorized", "Worker authorization is no longer current");
@@ -64,13 +66,16 @@ async function configuration(deps: CloudV2WorkerRouteDeps, workspace: CloudV2Wor
     const config = await deps.config(workspace, mode);
     if (!await deps.store.workerSession(token, bootId)) throw unauthorized();
     if (revision === await deps.store.loginRevision(workspace.id)) {
-      const { mcpServers, githubPullRequests, githubUserTokens, gitIdentity, agentInteractions, codeReview, historyReplacement: _historyReplacement, ...legacy } = config;
+      const { mcpServers, githubPullRequests, githubUserTokens, gitIdentity, agentInteractions, codeReview, historyReplacement: _historyReplacement, environment, ...legacy } = config;
+      if (environment && !features.has("workspace-environment-v1"))
+        throw new HttpError(409, "cloud_environment_runtime_required", "Update the cloud runtime before opening this workspace.");
       const { setup, baseCommit, github, ...workspaceConfig } = config.workspace;
       return { ...legacy, workspace: { ...workspaceConfig,
         ...(features.has("github-pr-v1") && github ? { github } : {}),
         ...(features.has("workspace-setup-v1") && setup !== undefined ? { setup } : {}),
         ...(features.has("checkout-v2") && baseCommit !== undefined ? { baseCommit } : {}) },
         ...(features.has("agent-interactions-v1") && agentInteractions === 1 ? { agentInteractions } : {}),
+        ...(environment ? { environment } : {}),
         loginRevision: revision, ...(features.has("history-replace-v1") ? { historyReplacement: 1 } : {}), ...(features.has("git-identity-v1") && gitIdentity !== undefined ? { gitIdentity } : {}),
         ...(features.has("code-review-v1") && codeReview ? { codeReview } : {}),
         ...(features.has("github-user-token-v1") && githubUserTokens === 1 ? { githubUserTokens } : {}),
@@ -123,6 +128,12 @@ export function createCloudV2WorkerRoutes(deps: CloudV2WorkerRouteDeps): Hono {
     await body(c, z.object({}).strict());
     if (!await deps.store.failWorkerCheckout(auth.token, auth.bootId)) throw unauthorized();
     return c.json({ ok: true });
+  });
+  app.post(`${CLOUD_V2_WORKER_API}/environment`, async c => {
+    const auth = await session(c, deps, false), report = await body(c, CloudEnvironmentReportSchema);
+    if (!deps.environmentReport) throw new HttpError(404, "not_found", "Environment status is unavailable.");
+    await deps.environmentReport(auth.token, auth.bootId, report);
+    return c.json({ sequence: report.sequence });
   });
   app.post(`${CLOUD_V2_WORKER_API}/history`, async c => {
     const auth = await session(c, deps), input = await body(c, CloudV2WorkerHistorySchema);
