@@ -1426,7 +1426,7 @@ function OwnedDesignWorkspaceSidebarPanels({
                       className="flex h-7 min-w-0 items-center"
                       style={{ paddingLeft: layerRowPadding(0) }}
                     >
-                      <span className="text-muted-fg truncate">
+                      <span className="text-fg3 truncate">
                         Loading {frameLabel.toLocaleLowerCase()}…
                       </span>
                     </div>
@@ -1481,11 +1481,11 @@ function OwnedDesignWorkspaceSidebarPanels({
             </div>
           </div>
           {!snapshot.data && !recovery.error ? (
-            <span className="text-muted-fg px-2 py-2">Loading layers…</span>
+            <span className="text-fg3 px-2 py-2">Loading layers…</span>
           ) : null}
           {!snapshot.data && recovery.error ? (
             <div className="flex flex-col items-start gap-2 px-2 py-2">
-              <span className="text-muted-fg">Couldn’t load layers</span>
+              <span className="text-fg2">Couldn’t load layers.</span>
               <Button
                 type="button"
                 variant="secondary"
@@ -1497,7 +1497,7 @@ function OwnedDesignWorkspaceSidebarPanels({
             </div>
           ) : null}
           {snapshot.data && frames.length === 0 ? (
-            <span className="text-muted-fg px-2 py-2">No layers</span>
+            <span className="text-fg2 px-2 py-2">No layers on this page.</span>
           ) : null}
         </div>
       </ScrollArea>

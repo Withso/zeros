@@ -165,7 +165,7 @@ sections through `addDesignSection` (`ui-smoke-design-helpers.mjs`).
 
 The six component sheets' remaining spec lines landed after it (see the
 audit): field states and the overlays on a field's end, owned and hidden
-layer rows, the Inspector's header, section and segmented geometry, the
+layer rows, the Layers messages and inline rename, the Inspector's header, section and segmented geometry, the
 popover sizes and fills, and the theme editor's rail, table and modes. A
 field's fill lives in `--zd-field-fill`, which its overlays read, and a
 property popover raises the resting fill through `--zd-field-rest`. Still

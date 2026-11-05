@@ -725,7 +725,8 @@ Each landed step appends one line: date, workstream, what landed, evidence.
   `--zd-field-rest`, take the shared 240 or 320 widths, and label rows at 72.
   Layers: owned rows on bg2, fg3 type icons and chevrons, hidden rows in fg3,
   a 20px visibility action, the selection count as a Badge, Collapse all at
-  28. Inspector: a 36px selection header, 12px glyphs on 24px section
+  28, a fg3 loading line, fg2 "Couldn’t load layers." and "No layers on this
+  page.", and rename in the shared 24px inline field. Inspector: a 36px selection header, 12px glyphs on 24px section
   actions, regular-weight empty sections, segmented 8/6 and 8px pads, and the
   blocking reason on red-bg. Theme editor: the chosen rail row on
   bg2-highlight, 12 fg3 labels and counts, mono 12 names, the edited theme as
@@ -737,3 +738,11 @@ Each landed step appends one line: date, workstream, what landed, evidence.
   A correction: the visible W, H and X labels were already 24px; only
   InspectorSelect's unused leading slot was 28px. RevEmpty follows the
   decision that Create PR stays in the status row above.
+  Evidence: all 27 registered Design smoke scenarios pass; the canvas smoke
+  (303 checks), the five that exercise the last CSS edits and the floating
+  chrome smoke with layer rename ran again on the final head. Red first:
+  probes on the old CSS showed a sibling overlay dropping its field's hover
+  fill and a utility colour on a Design icon button staying fg2, and the
+  rename check failed on the old outlined field. The canvas smoke's
+  geometry check caught the theme editor's Close sitting flush once its
+  padding was trimmed, so the 12px padding stays.

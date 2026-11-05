@@ -66,7 +66,9 @@ and in [`plans.md`](plans.md).
     focus rings with a 3px halo. A trigger or action on a field's end is
     20px, on a 36px fade from the field's own fill.
   - Layers: owned rows on bg2, fg3 type icons and chevrons, hidden rows in
-    fg3, a 20px visibility action, the count as a Badge, Collapse all at 28.
+    fg3, a 20px visibility action, the count as a Badge, Collapse all at 28,
+    a fg3 loading line, fg2 error and empty lines, and rename in the shared
+    24px inline field.
   - Inspector: a 36px selection header, 12px glyphs on 24px section
     actions, regular-weight empty sections, segmented 8/6, pads 8, and the
     blocking reason as an error row on red-bg.
