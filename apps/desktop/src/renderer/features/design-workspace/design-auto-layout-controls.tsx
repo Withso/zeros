@@ -372,14 +372,14 @@ export function DesignAutoLayoutControls({
       align="start"
       sideOffset={8}
       padding="none"
-      className="w-64"
+      size="sm"
       onEscapeKeyDown={keepDesignPopoverWhileEditing}
     >
       <div className="zd-popover">
         <div className="zd-popover-header">
           <span className="zd-popover-title">Layout settings</span>
         </div>
-        <div className="grid grid-cols-[76px_minmax(0,1fr)] items-center gap-2">
+        <div className="grid grid-cols-[72px_minmax(0,1fr)] items-center gap-2">
           <span className="zd-row-label">Align items</span>
           <InspectorSelect
             label="Alignment"
@@ -471,19 +471,21 @@ export function DesignAutoLayoutControls({
                   shortLabel: property.startsWith("min") ? "Min" : "Max",
                 },
               )}
-              <InspectorIconButton
-                label={`Remove ${property.replace("-", " ")}`}
-                className="zd-limit-remove"
-                disabled={disabled}
-                onClick={() => {
-                  setAddedLimits((current) =>
-                    current.filter((entry) => entry !== property),
-                  );
-                  onCommit({ [property]: null });
-                }}
-              >
-                <Minus />
-              </InspectorIconButton>
+              <span className="zd-limit-remove">
+                <InspectorIconButton
+                  label={`Remove ${property.replace("-", " ")}`}
+                  size="inline"
+                  disabled={disabled}
+                  onClick={() => {
+                    setAddedLimits((current) =>
+                      current.filter((entry) => entry !== property),
+                    );
+                    onCommit({ [property]: null });
+                  }}
+                >
+                  <Minus />
+                </InspectorIconButton>
+              </span>
             </div>
           ))}
         </div>
@@ -573,7 +575,7 @@ export function DesignAutoLayoutControls({
             <div
               role="group"
               aria-label="Align children"
-              className="zd-alignment-pad grid size-16 grid-cols-3 grid-rows-3 rounded-md p-1"
+              className="zd-alignment-pad grid size-16 grid-cols-3 grid-rows-3 rounded-lg p-1"
             >
               {[0, 1, 2].flatMap((y) =>
                 [0, 1, 2].map((x) => {

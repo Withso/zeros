@@ -163,6 +163,15 @@ opens them in Changes, and every canvas readout is one 18px chip with 4px
 corners and no edge (`design-canvas-chip.ts`). The Design smokes reach hidden
 sections through `addDesignSection` (`ui-smoke-design-helpers.mjs`).
 
+The six component sheets' remaining spec lines landed after it (see the
+audit): field states and the overlays on a field's end, owned and hidden
+layer rows, the Inspector's header, section and segmented geometry, the
+popover sizes and fills, and the theme editor's rail, table and modes. A
+field's fill lives in `--zd-field-fill`, which its overlays read, and a
+property popover raises the resting fill through `--zd-field-rest`. Still
+open: the variable glyph and Detach variable in a bound field, the layer name
+in the selection header, and the theme editor's row actions.
+
 ## 8. Web app: the dashboard, account pages and Ops
 
 Boards: `web-app.md`. The centred pages now share one shell

@@ -16,6 +16,20 @@ export async function runDesignInspectorRacesSmoke({ page, check }) {
     .click();
   const field = page.locator('[data-design-style-property="word-spacing"]');
   const input = field.locator("input");
+  // Type settings is the md popover (320px); its fields rest one step above
+  // the popover's bg3 surface (Property popovers sheet).
+  const typePopover = page.locator("[data-design-popover]").filter({ has: field });
+  await expect(typePopover).toHaveCSS("width", "320px");
+  expect(
+    await field.evaluate((element) => {
+      const probe = document.createElement("div");
+      probe.style.background = "var(--bg3-hover)";
+      element.parentElement.append(probe);
+      const rest = getComputedStyle(probe).backgroundColor;
+      probe.remove();
+      return getComputedStyle(element).backgroundColor === rest;
+    }),
+  ).toBe(true);
   const heading = page
     .frameLocator(
       '[data-design-frame="home.html"] iframe[data-design-document-buffer="displayed"][data-design-document-ready]',

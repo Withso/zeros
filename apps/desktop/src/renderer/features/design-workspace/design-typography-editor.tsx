@@ -413,7 +413,7 @@ export function DesignTypographySection({
           align="start"
           sideOffset={8}
           padding="none"
-          className="w-72"
+          size="md"
           onEscapeKeyDown={keepDesignPopoverWhileEditing}
         >
           <TypeSettings
@@ -436,7 +436,7 @@ function SettingRow({
   children: React.ReactNode;
 }) {
   return (
-    <div className="grid min-w-0 grid-cols-[76px_minmax(0,1fr)] items-center gap-2">
+    <div className="grid min-w-0 grid-cols-[72px_minmax(0,1fr)] items-center gap-2">
       <span className="zd-row-label">{label}</span>
       {children}
     </div>

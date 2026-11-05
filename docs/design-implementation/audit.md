@@ -13,7 +13,8 @@ Each canvas frame shows one of two things:
 Earlier rounds verified the unbadged frames against the code. They rendered
 every state in both themes, and the ui-smoke registry measures the looks the
 frames pin. This round re-checked the Review and Changes pages against their
-rebuilt code, and spot-checked the Design-tab component sheets.
+rebuilt code, and measured every spec line on the six Design-tab component
+sheets in the Design harness.
 
 Counts come from the canvas: `canvas.json` and each frame's plan line. The
 canvas's 91 notes are section titles. Implementation notes live in the frames
@@ -23,7 +24,7 @@ and in [`plans.md`](plans.md).
 
 | Page | Frames | Planned | What is left |
 |---|---:|---:|---|
-| UI components | 47 | 6 | The Design-tab component sheets; see the deltas below |
+| UI components | 47 | 3 | Three Design-tab details, listed below |
 | Foundations | 14 | 0 | — |
 | Branding | 4 | 0 | — |
 | Web app | 60 | 56 | §8. The shared page shell shipped. Still to do: one sign-in page (2), each page's copy (32), the dashboard rebuild (18), Ops on the dashboard shell (3), and the route map (1) |
@@ -39,7 +40,7 @@ and in [`plans.md`](plans.md).
 | Simulators | 12 | 0 | — |
 | Customize | 25 | 0 | — |
 | Settings | 36 | 0 | — |
-| **Total** | **459** | **89** | |
+| **Total** | **459** | **86** | |
 
 ## Landed this round
 
@@ -59,6 +60,20 @@ and in [`plans.md`](plans.md).
   - The merge menu says what each method does to the commits.
 - **Changes.** One card per file: a 12px inset and gap, a border1 edge and
   8px corners. Collapsed files no longer stack flush.
+- **Design-tab sheets.** Each spec line on the six sheets was measured in
+  the harness, and the app now follows them:
+  - Fields hover in bg2-highlight. Editing shows only the caret; keyboard
+    focus rings with a 3px halo. A trigger or action on a field's end is
+    20px, on a 36px fade from the field's own fill.
+  - Layers: owned rows on bg2, fg3 type icons and chevrons, hidden rows in
+    fg3, a 20px visibility action, the count as a Badge, Collapse all at 28.
+  - Inspector: a 36px selection header, 12px glyphs on 24px section
+    actions, regular-weight empty sections, segmented 8/6, pads 8, and the
+    blocking reason as an error row on red-bg.
+  - Popovers: 240 or 320 wide, 72px labels, controls on bg3-hover.
+  - Theme editor: the chosen rail row on bg2-highlight, 12 fg3 labels and
+    counts, mono 12 names, the edited theme as a pressed toggle on
+    selected-bg, a 20px swatch and Reset.
 - **Canvas (version 363).**
   - Eleven Planned badges came off frames that are now built.
   - The remaining notes name exactly what is left.
@@ -76,7 +91,7 @@ and in [`plans.md`](plans.md).
 | RevCommits | A commit's check state and its chat link | Per-commit check results, and commit-to-chat provenance |
 | RevTimeline | Commit chat links and check results in the stream | The same provenance, and check events in the timeline |
 | RevTimelinePosting | Your avatar beside the comment box | Renderer only: the snapshot already knows the signed-in login |
-| RevEmpty | Create pull request and the branch picker inside the empty state; the unsupported-host and load-failure copy | A decision. Today the status row above Review offers Create PR, so the empty state doesn't repeat it |
+| RevEmpty | The unsupported-host and load-failure states | Their copy and actions. Decided 2026-11-05: Create PR stays in the status row above, so the no-PR state shows no actions |
 | RevProviders | GitLab merge requests and Bitbucket pull requests | Provider adapters behind `ReviewProvider` |
 | States · Review surface | The states above | As above |
 
@@ -118,17 +133,14 @@ agent provider.
 See plans.md §8: the sign-in page, page copy, the dashboard's Settings
 anatomy, account pages and Ops.
 
-### UI components: the Design-tab sheets (6 frames)
+### UI components: the Design-tab sheets (3 frames)
 
-The spot check found these deltas against the code:
-
-| Sheet | Spec | Code |
+| Sheet | Left | Needs |
 |---|---|---|
-| PropertyField | Label 12 medium fg3, 24 wide | `zd-field-label w-7`, 28 wide |
-| ThemeEditor | Rail rows: selected bg2-highlight | A pressed row (`aria-pressed`) fills `--bg2-hover` |
-| Inspector | Panel 280, 220–640 | Matches (`design-workspace-width.ts`) |
-| ThemeEditor | Rail 168, rows 28, hover bg1-hover | Matches (`design-theme-editor.css`) |
+| PropertyField | A field bound to a variable shows the variable glyph and Detach variable | A detach operation in the style model |
+| Inspector | The selection header names the layer, with its type beside it | Selection smokes read the header's text as a state signal; move them to data attributes first |
+| ThemeEditor | The row actions (⋯) | Renaming and deleting a variable in the token API |
 
-Which fill a selected row uses also bears on the `selected-bg` direction. So
-the sheets stay Planned until that is decided and the remaining specs are
-measured.
+A correction to the previous round: this audit said in-field labels were 28px
+wide. The visible W, H and X labels were already 24px; only InspectorSelect's
+leading slot, which no caller passes, was 28px. It is now 24px too.

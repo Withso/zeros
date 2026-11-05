@@ -19,10 +19,17 @@
  * property popovers): 28px controls, 6px radii, 13px values, 12px in-field
  * labels, soft bg2 fills without resting borders, an inset focus ring. */
 
+/* Property popovers sit on bg3, so their fields, selects and tracks rest one
+ * step above it. */
+[data-design-popover],
+[data-design-motion-settings] {
+  --zd-field-rest: var(--bg3-hover);
+}
+
 /* --zd-field-fill is the field's current fill. Overlays on its trailing edge
  * fade from it, so they match whichever state the field is in. */
 .zd-field {
-  --zd-field-fill: var(--bg2);
+  --zd-field-fill: var(--zd-field-rest, var(--bg2));
   display: flex;
   min-width: 0;
   height: 28px;
@@ -45,14 +52,14 @@
 
 /* A read-only field has nothing to edit, so the pointer changes nothing. */
 .zd-field[data-design-field-readonly]:hover {
-  --zd-field-fill: var(--bg2);
+  --zd-field-fill: var(--zd-field-rest, var(--bg2));
 }
 
 /* Editing shows the caret and the selected value, and an open menu keeps the
  * hover fill. Only focus that keyboard navigation brought rings, as on the
  * shared Field (focus-navigation.ts marks it). */
 .zd-field:focus-within {
-  --zd-field-fill: var(--bg2);
+  --zd-field-fill: var(--zd-field-rest, var(--bg2));
   outline: 0;
 }
 
@@ -62,7 +69,7 @@
 
 .zd-field:focus-visible[data-zeros-keyboard-focus],
 .zd-field:has(:focus-visible[data-zeros-keyboard-focus]) {
-  --zd-field-fill: var(--bg2);
+  --zd-field-fill: var(--zd-field-rest, var(--bg2));
   box-shadow:
     inset 0 0 0 1px var(--highlighted-bright),
     0 0 0 3px color-mix(in srgb, var(--highlighted-bright) 50%, transparent);
@@ -133,7 +140,7 @@
   font-size: 12px;
 }
 
-/* Segmented control: a 28px bg2 track with 24px segments. */
+/* Segmented control: a 28px track with 24px segments, on the field fill. */
 .zd-segmented {
   display: grid;
   min-width: 0;
@@ -142,8 +149,8 @@
   grid-auto-flow: column;
   gap: 2px;
   padding: 2px;
-  border-radius: var(--radius-md);
-  background-color: var(--bg2);
+  border-radius: var(--radius-lg);
+  background-color: var(--zd-field-rest, var(--bg2));
 }
 
 .zd-segment {
@@ -155,7 +162,7 @@
   gap: 4px;
   padding-inline: 4px;
   border: 0;
-  border-radius: var(--radius-sm);
+  border-radius: var(--radius-md);
   background: transparent;
   color: var(--fg2);
   font-size: 13px;
@@ -211,9 +218,11 @@
     color 120ms ease-out;
 }
 
+/* The shared IconButton sizes: compact 24 and inline 20 carry a 12px glyph,
+ * a 28px row control 14px. */
 .zd-icon-button svg {
-  width: 14px;
-  height: 14px;
+  width: 12px;
+  height: 12px;
 }
 
 .zd-icon-button[data-size="row"] {
@@ -221,10 +230,21 @@
   height: 28px;
 }
 
+.zd-icon-button[data-size="row"] svg {
+  width: 14px;
+  height: 14px;
+}
+
+.zd-icon-button[data-size="inline"] {
+  width: 20px;
+  height: 20px;
+  border-radius: var(--radius-sm);
+}
+
 .zd-icon-button:hover:not(:disabled),
 .zd-icon-button[data-state="open"],
 .zd-icon-button[aria-expanded="true"] {
-  background-color: var(--bg2-hover);
+  background-color: var(--bg2-highlight);
   color: var(--fg1);
 }
 
@@ -234,6 +254,14 @@
 .zd-icon-button[aria-pressed="true"]:hover:not(:disabled) {
   background-color: var(--selected-bg);
   color: var(--fg1);
+}
+
+/* An animated property's diamond takes the Motion accent, under the pointer
+ * too. A utility class cannot set it: this file is unlayered and outranks
+ * Tailwind's utilities layer. */
+.zd-icon-button[data-motion-active],
+.zd-icon-button[data-motion-active]:hover:not(:disabled) {
+  color: var(--design-selection-stroke);
 }
 
 .zd-icon-button:focus-visible:where(:not([data-zeros-focus-visible="false"])) {
@@ -255,8 +283,8 @@
   height: 36px;
   min-width: 0;
   align-items: center;
-  gap: 4px;
-  padding-inline: 12px 8px;
+  gap: 2px;
+  padding-inline: 12px 6px;
 }
 
 .zd-section-title {
@@ -270,8 +298,14 @@
   white-space: nowrap;
 }
 
+/* An empty section is an offer, not a heading: regular weight until hovered. */
 .zd-section[data-empty="true"] .zd-section-title {
   color: var(--fg2);
+  font-weight: 400;
+}
+
+.zd-section[data-empty="true"]:hover .zd-section-title {
+  color: var(--fg1);
 }
 
 .zd-section-body {
@@ -299,12 +333,14 @@
   padding: 12px;
 }
 
+/* The header's actions sit in the popover's corner, past the 12px padding. */
 .zd-popover-header {
   display: flex;
   height: 28px;
   min-width: 0;
   align-items: center;
-  gap: 4px;
+  gap: 2px;
+  margin: -4px -6px 0 0;
 }
 
 .zd-popover-title {
@@ -367,22 +403,24 @@
 }
 
 .zd-size-control .zd-field-motion {
-  right: 24px;
+  right: 23px;
 }
 
+/* An in-field trigger is 20px, 3px from the field's end, and changes only its
+ * colour: the field's own fill already answers the pointer. */
 .zd-size-trigger {
   position: absolute;
-  top: 2px;
-  right: 2px;
+  top: 4px;
+  right: 3px;
   display: inline-flex;
-  width: 24px;
-  height: 24px;
+  width: 20px;
+  height: 20px;
   align-items: center;
   justify-content: center;
   border: 0;
   border-radius: var(--radius-sm);
   background: transparent;
-  color: var(--muted-fg);
+  color: var(--fg3);
 }
 
 .zd-size-trigger svg {
@@ -392,7 +430,6 @@
 
 .zd-size-trigger:hover:not(:disabled),
 .zd-size-trigger[data-state="open"] {
-  background-color: var(--bg2-hover);
   color: var(--fg1);
 }
 
@@ -407,7 +444,7 @@
  * the same fill. */
 .zd-limit-field,
 .zd-size-control {
-  --zd-field-fill: var(--bg2);
+  --zd-field-fill: var(--zd-field-rest, var(--bg2));
 }
 
 .zd-limit-field:hover,
@@ -418,7 +455,7 @@
 
 .zd-limit-field:focus-within,
 .zd-size-control:focus-within {
-  --zd-field-fill: var(--bg2);
+  --zd-field-fill: var(--zd-field-rest, var(--bg2));
 }
 
 .zd-limit-field .zd-field,
@@ -427,21 +464,35 @@
 }
 
 /* A sizing limit's remove action floats over its field's trailing edge on
- * intent, over a fill-coloured fade, without reserving space at rest. */
+ * intent: a 20px button on a 36px fade from the field's fill, reserving no
+ * space at rest. Only the button takes the pointer, so the fade's start still
+ * reaches the value. */
 .zd-limit-remove {
   position: absolute;
-  top: 2px;
-  right: 2px;
-  opacity: 0;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  display: flex;
+  width: 36px;
+  align-items: center;
+  justify-content: flex-end;
+  padding-right: 3px;
+  border-radius: 0 var(--radius-md) var(--radius-md) 0;
   background-image: linear-gradient(
-    to right,
-    transparent,
-    var(--zd-field-fill) 6px
+    to left,
+    var(--zd-field-fill) 55%,
+    transparent
   );
+  opacity: 0;
+  pointer-events: none;
+}
+
+.zd-limit-remove > .zd-icon-button {
+  pointer-events: auto;
 }
 
 .zd-limit-field:hover .zd-limit-remove,
-.zd-limit-remove:focus-visible:where(:not([data-zeros-focus-visible="false"])) {
+.zd-limit-remove:has(:focus-visible:where(:not([data-zeros-focus-visible="false"]))) {
   opacity: 1;
 }
 
@@ -472,7 +523,7 @@
 }
 
 .zd-alignment-point:hover:not(:disabled) {
-  background-color: var(--bg2-hover);
+  background-color: var(--bg2-highlight);
 }
 
 .zd-alignment-point:focus-visible:where(:not([data-zeros-focus-visible="false"])) {
@@ -501,7 +552,7 @@
   border: 0;
   border-radius: var(--radius-sm);
   background: transparent;
-  color: var(--muted-fg);
+  color: var(--fg3);
 }
 
 .zd-constraint-pin:hover:not(:disabled) {
@@ -577,7 +628,16 @@
   width: 3px;
   height: 3px;
   border-radius: var(--radius-full);
-  background-color: var(--muted-fg);
+  background-color: var(--fg3);
+}
+
+/* Hover previews the choice: the dot becomes the three bars, in fg2. */
+.zd-alignment-point:hover:not(:disabled) .zd-design-alignment-mark {
+  width: 12px;
+  background-color: var(--fg2);
+  box-shadow:
+    0 -4px var(--fg2),
+    0 4px var(--fg2);
 }
 
 .zd-design-alignment-mark-selected {
@@ -591,7 +651,7 @@
 
 /* A unit reads as a quiet suffix; it is still a menu on click. */
 .zd-design-unit-trigger {
-  color: var(--muted-fg);
+  color: var(--fg3);
   font-size: 12px;
 }
 
@@ -602,13 +662,17 @@
 }
 
 /* Motion mode puts a keyframe diamond at a field's trailing edge. It fades in
- * on intent over a fill-coloured fade, and stays for an animated property. */
+ * on intent, a 20px button on a 36px fade from the field's fill, and stays
+ * for an animated property. */
 .zd-field-motion {
+  width: 36px;
+  justify-content: flex-end;
+  padding-right: 3px;
   opacity: 0;
   background-image: linear-gradient(
-    to right,
-    transparent,
-    var(--zd-field-fill) 10px
+    to left,
+    var(--zd-field-fill) 55%,
+    transparent
   );
   transition: opacity 120ms ease-out;
 }
@@ -627,8 +691,8 @@
 
 .zd-field-keyframe {
   display: inline-flex;
-  width: 24px;
-  height: 24px;
+  width: 20px;
+  height: 20px;
   align-items: center;
   justify-content: center;
   border: 0;
@@ -1342,11 +1406,20 @@
 
 /* Rows owned by the current selection (a selected container's descendants). */
 .zd-design-layer-in-selection {
-  background-color: color-mix(in srgb, var(--bg2-hover) 55%, transparent);
+  background-color: var(--bg2);
 }
 
 .zd-design-layer-in-selection:hover {
-  background-color: color-mix(in srgb, var(--bg2-hover) 80%, transparent);
+  background-color: var(--bg2-hover);
+}
+
+/* The type icon stays quiet beside the name; the selected row lifts it. */
+.zd-design-layer-row > svg {
+  color: var(--fg3);
+}
+
+.zd-design-layer-selected > svg {
+  color: var(--fg2);
 }
 
 /* Canvas hover mirrors the row's own pointer hover exactly. */
@@ -1355,29 +1428,33 @@
   color: var(--fg1);
 }
 
-/* The disclosure is its own 12px target inside the row. */
+/* The disclosure is its own 16px target inside the row; the negative margin
+ * keeps the row's 12px rhythm, so names line up with leaf rows. */
 .zd-layer-disclosure {
   display: inline-flex;
-  width: 12px;
-  height: 12px;
+  width: 16px;
+  height: 16px;
   flex-shrink: 0;
   align-items: center;
   justify-content: center;
+  margin-left: -4px;
 }
 
 .zd-layer-disclosure:hover svg {
   color: var(--fg1);
 }
 
-/* Hidden layers (and everything they own) fade their own label and icons. The
- * fill stays untouched: fading it would cut visible gaps through the block a
- * selection paints across the rows it owns. */
-.zd-design-layer-dimmed {
-  color: color-mix(in srgb, var(--fg2) 45%, transparent);
+/* Hidden layers (and everything they own) quiet their own label and icons:
+ * the name drops to fg3 and the icon fades. The fill stays untouched: fading
+ * it would cut visible gaps through the block a selection paints across the
+ * rows it owns. */
+.zd-design-layer-dimmed,
+.zd-design-layer-dimmed:hover {
+  color: var(--fg3);
 }
 
-.zd-design-layer-dimmed:hover {
-  color: color-mix(in srgb, var(--fg2) 45%, transparent);
+.zd-design-layer-dimmed > svg {
+  opacity: 0.6;
 }
 
 /* The Layers title folds the tree down to its header row. */
@@ -1404,14 +1481,11 @@
   outline-offset: -1px;
 }
 
-.zd-design-layer-selection-count {
-  background-color: var(--bg2-hover);
-  color: var(--fg2);
-}
-
+/* The theme being edited is the shared selected fill, like any pressed
+ * toggle; the canvas keeps the design accent. */
 .zd-design-theme-mode-active {
-  background-color: var(--design-selection-soft);
-  color: var(--design-selection-stroke);
+  background-color: var(--selected-bg);
+  color: var(--fg1);
 }
 
 .zd-design-motion-inline-toolbar {

@@ -1,10 +1,9 @@
 import React, { useContext, useId, useMemo, useRef, useState } from "react";
-import { Plus, X } from "lucide-react";
+import { Minus, Plus } from "lucide-react";
 
 import type { DesignRuntimeNodeDetails } from "@zeros/protocol/design-runtime";
 
 import { Input, Label } from "../../shared/ui/primitives";
-import { cn } from "../../shared/ui/cn";
 import { designCssPropertySuggestions } from "./design-computed-css";
 import { InspectorIconButton, InspectorSection } from "./design-inspector-kit";
 import type { DesignLayoutFieldOptions } from "./design-layout-values";
@@ -115,17 +114,18 @@ export function DesignAdvancedStyleSection({
           <Input
             id={classesId}
             readOnly
+            mono
             value={details.classes}
             spellCheck={false}
             autoComplete="off"
-            className="h-full min-w-0 flex-1 rounded-none border-0 bg-transparent py-0 pr-2 pl-0 font-sans text-xs text-fg1 shadow-none focus-visible:border-transparent"
+            className="h-full min-w-0 flex-1 rounded-none border-0 bg-transparent py-0 pr-2 pl-0 shadow-none focus-visible:border-transparent"
           />
         </div>
       ) : null}
       {rows.map((row) => (
         <div
           key={row.property}
-          className="flex items-center gap-1"
+          className="flex items-center gap-0.5"
           data-design-advanced-property={row.property}
           title={provenanceTitle(row, originLabel)}
         >
@@ -137,18 +137,17 @@ export function DesignAdvancedStyleSection({
           {row.authored?.origin === "inline" ? (
             <InspectorIconButton
               label={`Remove ${row.property}`}
-              size="row"
               disabled={disabled}
               onClick={() => onCommit({ [row.property]: null }, row.property)}
             >
-              <X className="size-3" />
+              <Minus />
             </InspectorIconButton>
           ) : null}
         </div>
       ))}
       {adding ? (
         <form
-          className="flex items-center gap-1"
+          className="flex items-center gap-2"
           data-design-advanced-add=""
           onSubmit={(event) => {
             event.preventDefault();
@@ -161,39 +160,41 @@ export function DesignAdvancedStyleSection({
             reset();
           }}
         >
-          <Input
-            ref={nameRef}
-            aria-label="Property name"
-            placeholder="property"
-            list={suggestionsId}
-            value={name}
-            disabled={disabled}
-            spellCheck={false}
-            autoComplete="off"
-            className={cn(
-              "h-7 min-w-0 flex-1 px-2 text-xs",
-              name && !(property && support.name) && "border-red-primary",
-            )}
-            onChange={(event) => setName(event.target.value)}
-          />
+          {/* Filled inspector fields; an unsupported name or value draws the
+              field's red edge through aria-invalid. */}
+          <div className="zd-field min-w-0 flex-1">
+            <Input
+              ref={nameRef}
+              aria-label="Property name"
+              aria-invalid={Boolean(name) && !(property && support.name)}
+              placeholder="property"
+              list={suggestionsId}
+              value={name}
+              disabled={disabled}
+              spellCheck={false}
+              autoComplete="off"
+              className="h-full px-2"
+              onChange={(event) => setName(event.target.value)}
+            />
+          </div>
           <datalist id={suggestionsId}>
             {suggestions.map((suggestion) => (
               <option key={suggestion} value={suggestion} />
             ))}
           </datalist>
-          <Input
-            aria-label="Property value"
-            placeholder="value"
-            value={value}
-            disabled={disabled}
-            spellCheck={false}
-            autoComplete="off"
-            className={cn(
-              "h-7 min-w-0 flex-1 px-2 text-xs",
-              property && support.name && !support.value && "border-red-primary",
-            )}
-            onChange={(event) => setValue(event.target.value)}
-          />
+          <div className="zd-field min-w-0 flex-1">
+            <Input
+              aria-label="Property value"
+              aria-invalid={Boolean(property && support.name && !support.value)}
+              placeholder="value"
+              value={value}
+              disabled={disabled}
+              spellCheck={false}
+              autoComplete="off"
+              className="h-full px-2"
+              onChange={(event) => setValue(event.target.value)}
+            />
+          </div>
           <InspectorIconButton
             type="submit"
             label="Add declaration"

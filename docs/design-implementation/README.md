@@ -713,3 +713,27 @@ Each landed step appends one line: date, workstream, what landed, evidence.
   five new), focus, workbench-status, review-retention and pr-actions smokes;
   Vitest 291 files (3,086 tests) across workbench, PR, code review, state and
   platform; both themes captured.
+- 2026-11-05 · 5 · Design tab: the component sheets. Every spec line on the
+  six Design-tab sheets (Property field, Property rows, Layer tree,
+  Inspector, Property popovers, Theme editor) was measured in the Design
+  harness and the app now follows it. Fields hover in bg2-highlight; editing
+  shows only the caret, and only keyboard focus rings, with a 3px halo as on
+  the shared Field. A field's fill lives in `--zd-field-fill`: the keyframe
+  diamond, a limit's remove and the W/H menu are 20px on a 36px fade from that
+  fill, and their wrapper keeps the field hovered while the pointer is on
+  them. Popovers raise the resting fill to bg3-hover through
+  `--zd-field-rest`, take the shared 240 or 320 widths, and label rows at 72.
+  Layers: owned rows on bg2, fg3 type icons and chevrons, hidden rows in fg3,
+  a 20px visibility action, the selection count as a Badge, Collapse all at
+  28. Inspector: a 36px selection header, 12px glyphs on 24px section
+  actions, regular-weight empty sections, segmented 8/6 and 8px pads, and the
+  blocking reason on red-bg. Theme editor: the chosen rail row on
+  bg2-highlight, 12 fg3 labels and counts, mono 12 names, the edited theme as
+  a pressed selected-bg toggle, a 20px swatch and Reset. Decisions: the
+  selection header keeps its type label until the selection smokes stop
+  reading its text; variables keep no Detach and the theme rows no ⋯ until
+  the style and token APIs can detach, rename and delete; the Inspector
+  sheet's segmented spec now names selected-bg, as its drawing already did.
+  A correction: the visible W, H and X labels were already 24px; only
+  InspectorSelect's unused leading slot was 28px. RevEmpty follows the
+  decision that Create PR stays in the status row above.

@@ -2704,6 +2704,53 @@ export async function runDesignWorkspaceCanvasSmoke({ page, waitFor, check }) {
       .toBe(true);
     await page.mouse.move(1, 1);
     check("a field stays hovered while the pointer is on its trailing menu", true);
+
+    // The Design-tab sheets (Layer tree, Inspector, Property field): owned
+    // rows on bg2 with quiet fg3 type icons, a 36px selection header, 12px
+    // glyphs on 24px section actions, and a 20px in-field trigger.
+    const sheetLook = await page.evaluate(() => {
+      const layers = document.querySelector("[data-design-sidebar-panel]");
+      const resolve = (property, value) => {
+        const probe = document.createElement("div");
+        probe.style[property] = value;
+        layers.append(probe);
+        const resolved = getComputedStyle(probe)[property];
+        probe.remove();
+        return resolved;
+      };
+      const owned = document.createElement("div");
+      owned.className = "zd-design-layer-row zd-design-layer-in-selection";
+      owned.append(document.createElementNS("http://www.w3.org/2000/svg", "svg"));
+      layers.append(owned);
+      const ownedFill = getComputedStyle(owned).backgroundColor;
+      const iconColor = getComputedStyle(owned.firstChild).color;
+      owned.remove();
+      const inspector = document.querySelector("[data-design-inspector]");
+      return {
+        owned: ownedFill === resolve("backgroundColor", "var(--bg2)"),
+        icon: iconColor === resolve("color", "var(--fg3)"),
+        header: inspector.querySelector("[data-design-inspector-header]").getBoundingClientRect().height,
+        glyphs: [...inspector.querySelectorAll(".zd-section-header .zd-icon-button svg")].map(
+          (svg) => svg.getBoundingClientRect().width,
+        ),
+        trigger: inspector.querySelector(".zd-size-trigger")?.getBoundingClientRect().width ?? null,
+      };
+    });
+    check(
+      "layer, inspector and field details follow their sheets",
+      sheetLook.owned &&
+        sheetLook.icon &&
+        sheetLook.header === 36 &&
+        sheetLook.glyphs.length > 0 &&
+        sheetLook.glyphs.every((width) => width === 12) &&
+        sheetLook.trigger === 20,
+      JSON.stringify(sheetLook),
+    );
+    // A row's visibility action is the 20px inline IconButton.
+    const layerRow = page.locator("[data-design-sidebar-panel] [data-design-layer-row]").nth(1);
+    await layerRow.hover();
+    await expect(layerRow.getByRole("button", { name: /^(Hide|Show) / })).toHaveCSS("width", "20px");
+    await page.mouse.move(1, 1);
   }
 
   const themeEditorTrigger = page.getByRole("button", {
@@ -2740,6 +2787,23 @@ export async function runDesignWorkspaceCanvasSmoke({ page, waitFor, check }) {
       return pressed.length > 0 && pressed.every((row) => getComputedStyle(row).backgroundColor === highlight);
     }),
   ).toBe(true);
+  // Variable names read as code (mono 12), and the theme being edited is a
+  // pressed toggle on the shared selected fill.
+  expect(
+    await themeDialog.evaluate((root) => {
+      const probe = document.createElement("div");
+      probe.style.background = "var(--selected-bg)";
+      root.append(probe);
+      const selected = getComputedStyle(probe).backgroundColor;
+      probe.remove();
+      const name = getComputedStyle(root.querySelector(".zd-theme-token-name"));
+      const mode = root.querySelector('.zd-theme-mode[aria-pressed="true"]');
+      return {
+        mono: /mono/i.test(name.fontFamily) && name.fontSize === "12px",
+        mode: Boolean(mode) && getComputedStyle(mode).backgroundColor === selected,
+      };
+    }),
+  ).toEqual({ mono: true, mode: true });
   const themeClose = themeDialog.getByRole("button", { name: "Close theme editor", exact: true });
   // The shared Dialog close: the 24px compact IconButton.
   await expect(themeClose).toHaveCSS("width", "24px");
@@ -3892,6 +3956,25 @@ export async function runDesignWorkspaceCanvasSmoke({ page, waitFor, check }) {
   );
   await transformKeyframeValue.fill("translateY(64px)");
   await transformKeyframeValue.press("Enter");
+  // An animated property's diamond takes the Motion accent. A utility class
+  // cannot set it: the unlayered Design recipe outranks Tailwind's layer.
+  const activeDiamond = page.getByRole("button", {
+    name: "Add transform keyframe at the playhead",
+    exact: true,
+  });
+  await expect
+    .poll(() =>
+      activeDiamond.evaluate((button) => {
+        const probe = document.createElement("div");
+        probe.style.color = "var(--design-selection-stroke)";
+        button.parentElement.append(probe);
+        const accent = getComputedStyle(probe).color;
+        probe.remove();
+        return getComputedStyle(button).color === accent;
+      }),
+    )
+    .toBe(true);
+  check("an animated property's diamond takes the Motion accent", true);
   const motionPathPoints = page.locator("[data-design-motion-path-point]");
   check(
     "style-editor diamonds expose selectable canvas motion paths",

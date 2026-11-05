@@ -667,7 +667,7 @@ export function DesignColorPanel({
         </div>
       </div>
 
-      <div className="grid grid-cols-[64px_minmax(0,1fr)] gap-2">
+      <div className="grid grid-cols-[72px_minmax(0,1fr)] gap-2">
         <Select
           value={format}
           disabled={disabled}
@@ -1017,7 +1017,7 @@ export function DesignColorPicker({
         align={align}
         sideOffset={8}
         padding="none"
-        className="w-64"
+        size="sm"
         onEscapeKeyDown={(event) => {
           if (keepDesignPopoverWhileEditing(event)) return;
           escapedRef.current = true;

@@ -293,7 +293,7 @@ function ThemeValueField({
                 trigger={
                   <DesignColorSwatch
                     value={effectiveValue}
-                    className="size-3.5"
+                    className="size-4"
                   />
                 }
                 onCommit={async (next) => {
@@ -377,7 +377,7 @@ function ThemeValueField({
               onPointerDown={(event) => event.preventDefault()}
               onClick={() => void resetToBase()}
             >
-              <RotateCcw aria-hidden="true" className="size-3.5" />
+              <RotateCcw aria-hidden="true" className="size-3" />
             </button>
           </Tooltip>
         ) : null}
@@ -1498,7 +1498,7 @@ export const DesignThemeEditor = React.memo(function DesignThemeEditor({
                 </div>
                 {groupedTokens.length === 0 ? (
                   <div className="zd-theme-empty">
-                    <Palette aria-hidden="true" className="size-3.5" />
+                    <Palette aria-hidden="true" className="text-fg3 size-8" />
                     <span>No variables</span>
                     {stylesNote ? (
                       <span className="zd-theme-empty-note">{stylesNote}</span>

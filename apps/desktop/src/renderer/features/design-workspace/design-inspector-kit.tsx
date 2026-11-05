@@ -87,12 +87,13 @@ interface InspectorIconButtonProps extends React.ButtonHTMLAttributes<HTMLButton
   /** Opt in for unfamiliar icons; routine add/remove actions stay quiet. */
   tooltip?: React.ReactNode;
   shortcut?: React.ReactNode;
-  /** 24px for headers and trailing row actions, 28px for a row control. */
-  size?: "header" | "row";
+  /** 24px for headers and trailing row actions, 28px for a row control, 20px
+   * inline over a field's end. */
+  size?: "header" | "row" | "inline";
   pressed?: boolean;
 }
 
-/** A quiet 24/28px glyph button with a name and optional hover help. It
+/** A quiet 20/24/28px glyph button with a name and optional hover help. It
  * forwards its ref so Popover/DropdownMenu triggers can wrap it. */
 export const InspectorIconButton = React.forwardRef<
   HTMLButtonElement,
@@ -124,7 +125,7 @@ export const InspectorIconButton = React.forwardRef<
         type="button"
         aria-label={label}
         aria-pressed={pressed}
-        data-size={size === "row" ? "row" : undefined}
+        data-size={size === "header" ? undefined : size}
         className={cn("zd-icon-button", className)}
         {...props}
       >
