@@ -13,7 +13,9 @@ const root = fileURLToPath(new URL("../", import.meta.url)).replace(
 const require = createRequire(`${root}/package.json`);
 const { createServer } = await import(require.resolve("vite"));
 const { chromium, expect } = require("@playwright/test");
-const fixtureId = `${root}/changes-layout-preview.tsx`;
+// The fixture is virtual. Its ID sits under a renderer serve root so the
+// development file boundary (scripts/dev-server-policy.mjs) admits it.
+const fixtureId = `${root}/apps/desktop/src/renderer/harnesses/changes-layout-preview.tsx`;
 const fixture = `
 import '/styles/zeros-tokens.css';
 import '/styles/semantic-tokens.css';
@@ -237,15 +239,54 @@ try {
   await diffScroller.evaluate((node) => {
     node.scrollTop = 0;
   });
+  // One card per file (plans.md §2): 12px from the pane's edges and from the
+  // next card, a border1 edge with 8px corners, and no header rule while the
+  // file is collapsed. A box is null while Pierre re-renders, so poll past it.
   await expect
     .poll(async () => {
-      const headers = page.getByTestId("changes-diff-header");
-      const first = await headers.nth(0).boundingBox();
-      const second = await headers.nth(1).boundingBox();
-      return second.y - first.y - first.height;
+      const cards = page.locator("diffs-container");
+      const pane = await diffScroller.boundingBox();
+      const first = await cards.nth(0).boundingBox();
+      const second = await cards.nth(1).boundingBox();
+      if (!pane || !first || !second) return null;
+      return {
+        inset: Math.round(first.x - pane.x),
+        trailing: Math.round(pane.x + pane.width - first.x - first.width),
+        gap: Math.round(second.y - first.y - first.height),
+      };
     })
-    .toBe(0);
+    .toEqual({ inset: 12, trailing: 12, gap: 12 });
+  expect(
+    await page
+      .locator("diffs-container")
+      .first()
+      .evaluate((card) => {
+        // Resolve border1 beside the card, in its own theme scope.
+        const probe = document.createElement("div");
+        probe.style.border = "1px solid var(--border1)";
+        card.parentElement.append(probe);
+        const border1 = getComputedStyle(probe).borderTopColor;
+        probe.remove();
+        const style = getComputedStyle(card);
+        const header = card.querySelector('[data-testid="changes-diff-header"]');
+        return {
+          edge: `${style.borderTopWidth} ${style.borderTopStyle}`,
+          edgeIsBorder1: style.borderTopColor === border1,
+          radius: style.borderTopLeftRadius,
+          headerRule: getComputedStyle(header).borderBottomWidth,
+        };
+      }),
+  ).toEqual({
+    edge: "1px solid",
+    edgeIsBorder1: true,
+    radius: "8px",
+    headerRule: "0px",
+  });
   await page.getByRole("button", { name: "Expand all diffs" }).click();
+  await expect(page.getByTestId("changes-diff-header").first()).toHaveCSS(
+    "border-bottom-width",
+    "1px",
+  );
   await page.getByRole("button", { name: "Split diff" }).click();
   await expectFinalHeaderReachable();
   await page.getByRole("button", { name: "Unified diff" }).click();
@@ -486,7 +527,7 @@ try {
       .getByRole("menu")
       .first()
       .evaluate((el) => getComputedStyle(el).borderRadius),
-  ).toBe("16px");
+  ).toBe("12px");
   expect(
     await page
       .getByRole("menuitemcheckbox", { name: "Commit 0", exact: true })
@@ -540,14 +581,17 @@ try {
     from: { chatId: "chat", turnId: "turn-204" },
     to: { chatId: "chat", turnId: "turn-201" },
   });
+  // A checkbox row leads with its check, then the label; the stat ends it.
   const spacing = await last.evaluate((el) => {
     const spans = el.querySelectorAll(":scope > span");
     return {
-      box: spans[0].getBoundingClientRect().left,
+      box: spans[0].getBoundingClientRect().right,
+      label: spans[1].getBoundingClientRect().left,
       stat: spans[spans.length - 1].getBoundingClientRect().right,
     };
   });
-  expect(spacing.stat).toBeLessThan(spacing.box);
+  expect(spacing.box).toBeLessThanOrEqual(spacing.label);
+  expect(spacing.label).toBeLessThan(spacing.stat);
   await page.keyboard.press("Escape");
   await page.keyboard.press("Escape");
   await expect(

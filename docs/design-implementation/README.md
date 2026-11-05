@@ -682,3 +682,16 @@ Each landed step appends one line: date, workstream, what landed, evidence.
   20) and the board's 26px state chip is 24px. Post to PR stays on the
   published diff behind Open changes until the Changes tab learns its
   comparison's head SHA (plans.md §1.2).
+- 2026-11-05 · 5 · Changes (plans.md §2): one card per file, 12px from the
+  pane's edges and from the next card, with a border1 edge and 8px corners;
+  a collapsed file is its header alone in its card, so collapsed files no
+  longer stack flush. The inset and edge are `!important` in Pierre's shadow
+  CSS because document rules (preflight's margin and border reset, the base
+  layer's outline colour) outrank `:host`, and `diffHeaderHeight` counts both
+  edges because Pierre sizes a collapsed file as its header region.
+  `ui-smoke-changes` loads again (its fixture moved under a serve root) and
+  measures the cards; two pins that went stale while it could not run follow
+  the merged design: 12px menu corners, and checkbox rows that lead with their
+  check. Evidence: the smoke passed three runs in a row, the codex-transcript
+  chain (118 checks, with turn changes and file-pill navigation) passed, and
+  79 Vitest files for the workbench tabs, theme and code review passed.

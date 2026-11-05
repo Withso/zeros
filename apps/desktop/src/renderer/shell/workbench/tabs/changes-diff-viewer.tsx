@@ -781,7 +781,11 @@ function ChangesDiffHeader({
     <div
       data-testid="changes-diff-header"
       data-file-path={file.path}
-      className="group/diff-header bg-bg1 border-border1 text-fg2 flex h-9 min-w-0 items-center gap-2 border-b px-2 font-sans text-xs"
+      // A collapsed card is only its header, so the card's own edge closes it.
+      className={cn(
+        "group/diff-header bg-bg1 border-border1 text-fg2 flex h-9 min-w-0 items-center gap-2 px-2 font-sans text-xs",
+        !collapsed && "border-b",
+      )}
     >
       <Tooltip
         label={collapsed ? `Expand ${file.path}` : `Collapse ${file.path}`}

@@ -84,6 +84,19 @@ Run `scripts/ui-smoke-changes.mjs`; it needs its fixture served from inside
 Vite's allowed roots, so fix that first (it can't load here today, on this
 branch or before it).
 
+Status (2026-11-05): landed. `CHANGES_FILE_CARD_CSS` gives each item host
+the 12px inset, a 1px border1 edge and 8px corners that clip; the layout has
+a 12px top and gap, and a collapsed header drops its bottom rule. The inset
+and edge are `!important`: a `:host` declaration loses to any document rule
+for the same property, and preflight resets every element's margin and
+border (the base layer also sets `outline-color`, so an outline edge painted
+in the focus colour, under the code). `diffHeaderHeight` is 38, the 36px
+header plus both edges, with `paddingBottom` 0: Pierre sizes a collapsed
+file as its header region alone, so splitting the edges between the two
+would leave each collapsed file 1px short. The smoke loads again (its
+virtual fixture sits under a renderer serve root) and measures the cards
+where it pinned flush headers.
+
 ## 3. Changes: retire hunk review
 
 Board: `ChgWindow` ("Hunk review is gone"). Remove the Accept and Reject rows
