@@ -150,7 +150,8 @@ describe("GitHub connection page", () => {
   it("shows the 16px loader only until the page has named the outcome", () => {
     const page = githubCompletionPage("zeros-alpha://");
     assert.match(page, /<div class="sub" id="github-sub">[^<]*<\/div>\s*<div class="spin" id="github-spin"><span class="orb" aria-hidden="true"><\/span><\/div>/);
-    const script = /<script>([\s\S]*?)<\/script>/.exec(page)[1];
+    const open = page.indexOf("<script>") + "<script>".length;
+    const script = page.slice(open, page.indexOf("</script>", open));
     const nonce = "n".repeat(32);
     for (const hash of ["", `#scheme=zeros-alpha&nonce=${nonce}`, `#scheme=zeros-alpha&nonce=${nonce}&error=access_denied`]) {
       const elements = new Map(["github-title", "github-sub", "github-spin", "github-open", "github-msg"].map((id) => [
