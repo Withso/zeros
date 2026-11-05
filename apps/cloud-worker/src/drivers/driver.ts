@@ -2,6 +2,7 @@ import type { ContentBlock, PromptResponse, SessionNotification, QuestionRequest
 import type { SteerOutcome } from "@zeros/protocol/messages";
 import type { DriverTimingStage } from "../agent-timings";
 import type { DriverMcpServers } from "../mcp/gateway";
+import type { ApplicationEnvironment } from "../credentials/application-environment";
 
 interface DriverSession {
   sessionId: string;
@@ -11,6 +12,7 @@ interface DriverSession {
   effort?: string;
   fast?: boolean;
   nativeSessionId?: string;
+  application?: ApplicationEnvironment;
   onTiming?: (stage: DriverTimingStage) => void;
   mcpServers?: DriverMcpServers;
   modeId?: string;
@@ -24,12 +26,23 @@ export type DriverOpen = DriverSession & (
   | { oauthToken: string; proxy?: never; apiKey?: never }
 );
 
-export function redactDriverMessage(message: string, input?: DriverOpen): string {
+function redactCredentials(message: string, input?: DriverOpen): string {
   const secrets = [input?.proxy?.token, input?.oauthToken, input?.apiKey,
     ...Object.values(input?.mcpServers ?? {}).flatMap(server => Object.values(server.headers))]
     .filter((value): value is string => !!value).flatMap(value => /^Bearer /i.test(value) ? [value, value.slice(7)] : [value])
     .sort((a,b) => b.length - a.length);
   return secrets.reduce((text, secret) => text.split(secret).join("[redacted]").split(JSON.stringify(secret).slice(1,-1)).join("[redacted]"), message);
+}
+
+export function redactDriverMessage(message: string, input?: DriverOpen): string {
+  const redacted = redactCredentials(message, input);
+  return input?.application?.diagnostic(redacted) ?? redacted;
+}
+
+/** Canonical identities survive short app values; raw tool data has no such exemption. */
+export function redactDriverValue<T>(value: T, input?: DriverOpen): T {
+  const redacted = JSON.parse(redactCredentials(JSON.stringify(value), input)) as T;
+  return input?.application?.value(redacted) ?? redacted;
 }
 
 /** One driver owns one native conversation. Relay/inbox/history are worker-owned. */

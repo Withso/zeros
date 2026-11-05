@@ -13,6 +13,7 @@ export const workerSupportsGithubUserTokens = (socket: WebSocket): boolean => pe
 export const workerSupportsHistoryReplacement = (socket: WebSocket): boolean => peerFeatures.get(socket)?.has("history-replace-v1") ?? false;
 export const workerSupportsGitIdentity = (socket: WebSocket): boolean => peerFeatures.get(socket)?.has("git-identity-v1") ?? false;
 export const workerSupportsCodeReview = (socket: WebSocket): boolean => peerFeatures.get(socket)?.has("code-review-v1") ?? false;
+export const workerSupportsEnvironment = (socket: WebSocket): boolean => peerFeatures.get(socket)?.has("workspace-environment-v1") ?? false;
 
 export const workerSupportsAgentInteractions = (socket: WebSocket): boolean => peerFeatures.get(socket)?.has("agent-interactions-v1") ?? false;
 

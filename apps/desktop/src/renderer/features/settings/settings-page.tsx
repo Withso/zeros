@@ -1,6 +1,7 @@
 import { isSettingsSectionAvailable } from "./settings-section-availability";
 import { CloudComputerPanel, prefetchCloudComputer } from "./cloud-computer-panel";
 import { CloudGithubSection } from "./cloud-github-section";
+import { EnvironmentPanel } from "./environment-panel";
 import { KeepAwakeSetting } from "./keep-awake-setting";
 
 import React, {
@@ -106,7 +107,6 @@ import {
 } from "./agent-control-rollout";
 import type { AgentControlFeature } from "@zeros/protocol/agent-control-rollout";
 import {
-  UserEnvironmentPanel,
   isRepoSectionId,
   type RepoSectionId,
 } from "../repositories/repositories-panel";
@@ -261,7 +261,7 @@ const SECTIONS: SectionDef[] = [
     id: "environment",
     label: "Environment",
     icon: KeyRound,
-    Panel: UserEnvironmentPanel,
+    Panel: EnvironmentPanel,
   },
   {
     id: "git",

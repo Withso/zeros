@@ -6,6 +6,8 @@
 // capabilities the shared UI reads to hide tabs a cloud workspace does not offer.
 // The control plane mirrors these schemas (it deploys independently, on zod 3).
 import { z } from "zod";
+import { CloudWorkspaceEnvironmentSchema } from "./cloud-workspace-environment";
+export * from "./cloud-workspace-environment";
 import { MAX_BRIDGE_FRAME_BYTES } from "./schemas";
 import { CloudV2PromptCounterSchema } from "./cloud-v2-prompts";
 export { CloudFailureSchema, CloudProviderFailureSchema, CloudMcpFailureSchema, cloudFailureMessage } from "./cloud-failure";
@@ -122,6 +124,7 @@ export const CloudV2ControlFrameSchema = z.discriminatedUnion("t", [
    * owns proxy token refresh. */
   z.object({
     t: z.literal("config"),
+    environment: CloudWorkspaceEnvironmentSchema.optional(),
     promptOutbox: z.literal(1).optional(),
     agentInteractions: z.literal(1).optional(),
     codeReview: z.object({

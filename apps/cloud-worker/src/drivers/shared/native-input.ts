@@ -1,10 +1,10 @@
 import type { DriverOpen } from "../driver";
-import { redactDriverMessage } from "../driver";
+import { redactDriverValue } from "../driver";
 
 export const CLOUD_INPUT_TIMEOUT_MS = 15 * 60_000;
 
 export function cleanInteraction<T>(value: T, input: DriverOpen): T {
-  return JSON.parse(redactDriverMessage(JSON.stringify(value), input)) as T;
+  return redactDriverValue(value, input);
 }
 
 /** A provider abort must release its callback even if the UI is disconnected. */

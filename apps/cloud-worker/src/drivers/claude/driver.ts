@@ -6,7 +6,7 @@ import { buildClaudeQuestionRequest, buildAskUserQuestionOutput, claudeQuestionH
 import type { SteerOutcome } from "@zeros/protocol/messages";
 import { providerBindingForResume } from "@zeros/protocol/identities";
 import { mapClaudeContextUsage } from "@zeros/protocol/context-usage";
-import { redactDriverMessage, type Driver, type DriverOpen } from "../driver";
+import { redactDriverMessage, redactDriverValue, type Driver, type DriverOpen } from "../driver";
 import { driverTiming } from "../../agent-timings";
 import { agentEnvironment } from "../shared/agent-environment";
 import { InputQueue, createDeferred, type Deferred } from "./input-queue";
@@ -214,7 +214,7 @@ export class ClaudeDriver implements Driver {
       settings: claudeSettings(this.effort, this.fast),
       ...(this.effort?.trim() === "max" ? { effort: "max" as const } : {}),
       ...(this.resumed ? { resume: this.nativeSessionId } : { sessionId: this.nativeSessionId }),
-      env: agentEnvironment(session.oauthToken ? { agent: "claude", oauthToken: session.oauthToken } : { agent: "claude", apiKey: session.apiKey! }, this.options.environment, this.options.gitEnvironment),
+      env: agentEnvironment(session.oauthToken ? { agent: "claude", oauthToken: session.oauthToken } : { agent: "claude", apiKey: session.apiKey! }, this.options.environment, this.options.gitEnvironment, session.application?.variables),
       permissionMode: claudePermissionMode(this.modeId),
       ...(fullAccessQuestions ? { permissionPromptToolName: "stdio" } : {}),
       ...(this.modeId === "bypass" ? { allowDangerouslySkipPermissions: true } : {
@@ -472,7 +472,7 @@ export class ClaudeDriver implements Driver {
   private ready(): void { if (!this.input || this.disposed) throw new Error("Claude driver is not ready."); }
   private emit(event: SessionNotification): void {
     if (event.update.sessionUpdate === "background_tasks_update") this.running = !!event.update.activity && event.update.activity.state !== "idle";
-    const clean = JSON.parse(this.redact(JSON.stringify(event))) as SessionNotification;
+    const clean = redactDriverValue(event, this.input);
     for (const listener of this.listeners) listener(clean);
   }
   private continuation(code: string, message: string, recovered = false, failureKind?: string): void {

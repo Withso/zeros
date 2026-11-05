@@ -29,7 +29,7 @@ export class Agent {
       before?: Array<{ kind: string; value: unknown }>;
       frames?: Array<{ kind: string; value: unknown }>;
       result?: Record<string, unknown>; billed?: unknown;
-      inspect?: boolean; hang?: boolean; sendHang?: boolean; sendDelay?: number;
+      inspect?: boolean; applicationEnvironment?: boolean; hang?: boolean; sendHang?: boolean; sendDelay?: number;
       waitHang?: boolean; eof?: boolean; authError?: boolean; steer?: string; outputFailure?: boolean;
     };
     const id = `run-${++this.sends}`;
@@ -68,6 +68,8 @@ export class Agent {
             ownLogin: !!process.env.CURSOR_API_KEY && process.env.CURSOR_API_KEY === this.options.apiKey,
             forbidden: ["ZEROS_WORKER_TOKEN", "ANTHROPIC_AUTH_TOKEN", "ZEROS_CLOUD_PROXY_TOKEN", "NODE_OPTIONS", "GH_TOKEN"].some(key => !!process.env[key]),
           }) } : {}),
+          ...(fixture.applicationEnvironment ? { result: JSON.stringify({ application: process.env.APP_SECRET === "synthetic-app-native",
+            selected: process.env.CURSOR_API_KEY === this.options.apiKey, worker: "CLOUD_V2_WORKER_TOKEN" in process.env, foreignLogin: "ANTHROPIC_API_KEY" in process.env }) } : {}),
         };
       },
       cancel: async () => { stopped = true; release(); },

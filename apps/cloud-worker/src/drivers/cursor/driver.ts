@@ -3,7 +3,7 @@ import { fileURLToPath } from "node:url";
 import type { SDKUserMessage } from "@cursor/sdk";
 import type { ContentBlock, PromptResponse, SessionNotification, TurnUsage } from "@zeros/protocol/agent-events";
 import type { SteerOutcome } from "@zeros/protocol/messages";
-import { redactDriverMessage, type Driver, type DriverOpen } from "../driver";
+import { redactDriverMessage, redactDriverValue, type Driver, type DriverOpen } from "../driver";
 import { driverTiming } from "../../agent-timings";
 import { agentEnvironment } from "../shared/agent-environment";
 import { normalizeProviderError } from "../shared/provider-error";
@@ -134,7 +134,7 @@ export class CursorDriver implements Driver {
     this.ready();
     const input = this.input!;
     const host = new CursorProcess({ path: this.options.hostPath ?? fileURLToPath(new URL("./cursor-host.mjs", import.meta.url)),
-      cwd: input.cwd, env: agentEnvironment({ agent: "cursor", apiKey: input.apiKey! }, this.options.environment, this.options.gitEnvironment),
+      cwd: input.cwd, env: agentEnvironment({ agent: "cursor", apiKey: input.apiKey! }, this.options.environment, this.options.gitEnvironment, input.application?.variables),
       timeoutMs: this.options.requestTimeoutMs ?? 30_000, redact: message => this.redact(message),
       onEvent: event => { if (this.process === host) this.event(event); },
       onClose: error => {
@@ -255,7 +255,7 @@ export class CursorDriver implements Driver {
   }
   private redact(message: string): string { return redactDriverMessage(message, this.input); }
   private emit(event: SessionNotification): void {
-    const clean = JSON.parse(JSON.stringify(event, (_key, value) => typeof value === "string" ? this.redact(value) : value)) as SessionNotification;
+    const clean = redactDriverValue(event, this.input);
     for (const listener of this.listeners) listener(clean);
   }
 }

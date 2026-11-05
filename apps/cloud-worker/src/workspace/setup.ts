@@ -4,6 +4,7 @@ import { mkdir, open, type FileHandle } from "node:fs/promises";
 import { join } from "node:path";
 import { workerChildEnvironment } from "../drivers/shared/agent-environment";
 import type { WorkerConfig } from "./scope";
+import { ApplicationEnvironment } from "../credentials/application-environment";
 
 const MAX_LOG_BYTES = 256 * 1024;
 const SETUP_TIMEOUT_MS = 3_600_000;
@@ -37,6 +38,7 @@ type SetupStatus = {
 };
 interface SetupOptions {
   directory: string; workspace: WorkerConfig["workspace"]; gitEnvironment: NodeJS.ProcessEnv;
+  application?: ApplicationEnvironment;
   runner?: SetupRunner; activity(): void; onStorageError?(): void;
   beforeRun?(): Promise<void>;
   onAdmitted?(): Promise<void>;
@@ -97,7 +99,12 @@ export class WorkspaceSetup {
     const { workspace } = this.options;
     const directory = join(this.options.directory, "workspace-setup");
     let statusFile: FileHandle | undefined, log: FileHandle | undefined;
-    let writes = Promise.resolve(), bytes = 0;
+    let writes = Promise.resolve(), bytes = 0, received = 0, truncated = false;
+    const output = (this.options.application ?? new ApplicationEnvironment()).stream(text => {
+      if (bytes >= MAX_LOG_BYTES) return;
+      const bounded = Buffer.from(text).subarray(0, MAX_LOG_BYTES - bytes); bytes += bounded.length;
+      writes = writes.then(async () => { await log!.write(bounded); }).catch(() => { this.options.onStorageError?.(); });
+    });
     try {
       await mkdir(directory, { recursive: true, mode: 0o700 });
       try { statusFile = await open(join(directory, `${workspace.id}.json`), constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600); }
@@ -127,17 +134,18 @@ export class WorkspaceSetup {
         deadline.unref();
         try {
           code = await (this.options.runner ?? runSetup)("bash", ["-lc", this.script!], {
-            cwd: workspace.checkoutPath, env: workerChildEnvironment(undefined, this.options.gitEnvironment), signal: this.controller.signal,
+            cwd: workspace.checkoutPath, env: workerChildEnvironment(undefined, this.options.gitEnvironment, this.options.application?.variables), signal: this.controller.signal,
             output: chunk => {
-              if (bytes >= MAX_LOG_BYTES) return;
-              const bounded = Buffer.from(chunk.subarray(0, MAX_LOG_BYTES - bytes)); bytes += bounded.length;
-              writes = writes.then(async () => { await log!.write(bounded); }).catch(() => { this.options.onStorageError?.(); });
+              if (chunk.length > MAX_LOG_BYTES - received) truncated = true;
+              if (received >= MAX_LOG_BYTES) return;
+              const bounded = chunk.subarray(0, MAX_LOG_BYTES - received); received += bounded.length;
+              output.push(bounded);
             },
           });
         } catch { failed = true; }
         finally { clearTimeout(deadline); }
       }
-      await writes;
+      output.end(truncated); await writes;
       status.state = timedOut ? "failed" : this.controller.signal.aborted ? "interrupted" : !failed && code === 0 ? "succeeded" : "failed";
       status.finishedAt = new Date().toISOString(); status.exitCode = timedOut ? null : code;
       if (timedOut) status.reason = "timed_out";

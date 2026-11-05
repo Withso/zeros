@@ -87,6 +87,31 @@ it("delivers the trusted review identity only after exact feature negotiation on
     expect((await (await f.request(path, body, { "x-zeros-worker-features": "mcp-v1, code-review-v1" })).json()).config.codeReview).toEqual(codeReview);
   }
 });
+it("refuses required environment pins on old workers instead of stripping or releasing values", async () => {
+  const f = fixture(), original = await f.deps.config({} as CloudV2Workspace);
+  const environment = { versionId: randomUUID(), repositoryId: "42", variables: { APP_SECRET: "synthetic-environment-secret" }, files: [] };
+  vi.mocked(f.deps.config).mockResolvedValue({ ...original, environment });
+  for (const [path, input] of [["hello", { bootId: f.bootId, protocol: 2, runtimeSha256: "a".repeat(64) }], ["config", undefined]] as const) {
+    for (const features of ["", "workspace-environment-v10", "mcp-v1"]) {
+      const response = await f.request(path, input, { "x-zeros-worker-features": features });
+      expect(response.status).toBe(409);
+      expect(await response.json()).toEqual({ error: { code: "cloud_environment_runtime_required" } });
+    }
+    expect((await (await f.request(path, input, { "x-zeros-worker-features": "mcp-v1, workspace-environment-v1" })).json()).config.environment).toEqual(environment);
+  }
+  expect(f.deps.store.acceptWorkerHello).toHaveBeenCalledTimes(1);
+});
+it("acknowledges bounded environment status only for the current authenticated boot", async () => {
+  const f = fixture(), status = { versionId: randomUUID(), sequence: 1, state: "ready" };
+  f.deps.environmentReport = vi.fn(async () => {});
+  const response = await f.request("environment", status);
+  expect(response.status).toBe(200);
+  expect(await response.json()).toEqual({ sequence: 1 });
+  expect(f.deps.environmentReport).toHaveBeenCalledExactlyOnceWith(f.token, f.bootId, status);
+  expect((await f.request("environment", { ...status, message: "synthetic-value-must-not-echo" })).status).toBe(400);
+  expect((await f.request("environment", status, { "x-zeros-worker-boot": randomUUID() })).status).toBe(401);
+  expect(f.deps.environmentReport).toHaveBeenCalledTimes(1);
+});
 it("reports checkout failure using only worker identity even during a GitHub outage", async () => {
   const f = fixture();
   f.deps.authorizeSource = vi.fn(async () => { throw new HttpError(503, "github_unavailable", "Unavailable"); });

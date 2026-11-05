@@ -2,6 +2,7 @@ import { afterEach, expect, it, vi } from "vitest";
 import { access } from "node:fs/promises";
 import type { QuestionRequest, QuestionResponse, SessionNotification } from "@zeros/protocol/agent-events";
 import { ClaudeDriver } from "../driver";
+import { ApplicationEnvironment } from "../../../credentials/application-environment";
 import { harness, input, nativeId, result, text, tick } from "./fake-query";
 
 const drivers: ClaudeDriver[] = [];
@@ -13,6 +14,20 @@ function setup() {
     ANTHROPIC_BASE_URL: "https://example.invalid", ZEROS_CLOUD_PROXY_TOKEN: "fixture-ambient-proxy" }, gitEnvironment: { GIT_ASKPASS: "/fixture/askpass" } });
   drivers.push(driver); return { driver, ...h };
 }
+
+it("passes explicit app variables to the native query while retaining only the selected login and redacting echoes", async () => {
+  const { driver, queries } = setup(), events: SessionNotification[] = [], canary = 'synthetic-app-"query"';
+  driver.onEvent(event => events.push(event));
+  await driver.open({ ...input, application: new ApplicationEnvironment({ variables: { APP_SECRET: canary }, files: [] }) });
+  const turn = driver.prompt(text("hello")), query = queries[0], sent = await query.read();
+  expect(query.args.options.env?.APP_SECRET === canary).toBe(true);
+  expect(query.args.options.env?.CLAUDE_CODE_OAUTH_TOKEN).toBe(input.oauthToken);
+  expect(query.args.options.env).not.toHaveProperty("ANTHROPIC_API_KEY");
+  expect(query.args.options.env).not.toHaveProperty("ZEROS_WORKER_TOKEN");
+  query.push({ type: "assistant", message: { content: [{ type: "text", text: canary }] }, session_id: nativeId });
+  query.push(result(sent.uuid)); await turn;
+  expect(JSON.stringify(events).includes(canary) || JSON.stringify(events).includes(JSON.stringify(canary).slice(1, -1))).toBe(false);
+});
 
 it("delivers worker MCP to the native query and redacts its capability from events", async () => {
   const { driver, queries } = setup(), events: SessionNotification[] = [];

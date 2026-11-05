@@ -9,6 +9,7 @@ import { CloudGithubCheckoutSchema, type CloudGithubCheckout } from "@zeros/prot
 import { mcpFailure, mcpFailureError } from "./mcp/failure";
 import { CloudGithubUnavailableReasonSchema, type CloudGithubUnavailableReason } from "@zeros/protocol/cloud-github-connection";
 import { GITHUB_HTTP_TIMEOUT_MS } from "./credentials/github-failure";
+import { CloudEnvironmentReportSchema, type CloudEnvironmentReport } from "@zeros/protocol/cloud-v2-relay";
 
 type ConfigFrame = Extract<CloudV2ControlFrame, { t: "config" }>;
 export type HybridStatus = "connected" | "disconnected" | "credential-unavailable" | "unauthorized" | "stopped" | "protocol-error";
@@ -34,6 +35,8 @@ export class HybridTransport implements Transport {
   private recoverRequested = false;
   private bootstrapped = false;
   private checkoutFailed = false;
+  private pendingEnvironment?: CloudEnvironmentReport;
+  private environmentFailed = false;
   private initialControls = 0;
   private releaseInitial!: () => void;
   private readonly initial = new Promise<void>(resolve => { this.releaseInitial = resolve; });
@@ -127,6 +130,21 @@ export class HybridTransport implements Transport {
     const reply = await this.request("github-checkout", input);
     if (reply.sequence !== input.sequence) throw new Error("Invalid GitHub checkout acknowledgement.");
   }
+  async reportEnvironment(value: CloudEnvironmentReport, signal?: AbortSignal): Promise<void> {
+    const report = CloudEnvironmentReportSchema.parse(value);
+    if (this.pendingEnvironment && JSON.stringify(report) !== JSON.stringify(this.pendingEnvironment)) throw new Error("Environment status is unsettled.");
+    this.pendingEnvironment = report;
+    try {
+      const reply = await this.request("environment", report, signal);
+      if (reply.sequence !== report.sequence) throw new Error("Invalid environment acknowledgement.");
+      this.pendingEnvironment = undefined;
+      this.environmentFailed = report.state === "failed";
+      if (this.environmentFailed) this.options.onStatus?.("stopped");
+    } catch (error) {
+      if (signal?.aborted) this.pendingEnvironment = undefined;
+      throw error;
+    }
+  }
   async reportCheckoutFailure(): Promise<void> {
     this.checkoutFailed = true;
     try {
@@ -170,16 +188,17 @@ export class HybridTransport implements Transport {
     if (this.stopped) return;
     if (this.recovering) { this.recoverRequested = true; return; }
     this.recovering = (async () => {
+      if (this.pendingEnvironment) await this.reportEnvironment(this.pendingEnvironment);
+      if (this.environmentFailed) return;
       if (this.checkoutFailed) {
         await this.reportCheckoutFailure();
         if (this.checkoutFailed) return;
       }
       if (!this.listening) {
         await this.listener.start(async frame => {
-          // Hello marks the VM running before its HTTP response reaches us.
-          // Hold an early dial until credentials and checkout are initialized;
-          // GitHub replies still go directly to the configuring worker.
-          if (!this.bootstrapped) {
+          // Hold early viewers until local services are published. Stop must
+          // reach the owner that can cancel an in-flight configuration.
+          if (!this.bootstrapped && frame.t !== "stop") {
             if (this.initialControls >= 64) throw new Error("Worker is initializing.");
             this.initialControls++;
             try { await this.initial; } finally { this.initialControls--; }
@@ -221,6 +240,7 @@ export class HybridTransport implements Transport {
   }
   private async control(frame: CloudV2ControlFrame): Promise<void> {
     if (this.stopped) return;
+    if (frame.t === "stop") { await this.handlers!.frame(frame); return; }
     if (frame.t !== "config") { await this.applying; if (!this.stopped) await this.handlers!.frame(frame); return; }
     this.applying = this.applying.catch(() => {}).then(async () => {
       if (frame.workspace.id !== this.options.workspaceId) throw new Error("Invalid worker scope.");
@@ -280,7 +300,7 @@ export class HybridTransport implements Transport {
         method: payload === undefined ? "GET" : "POST", headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json", "X-Zeros-Worker-Boot": this.bootId,
           // An HTTP header is ignored by older control planes; adding a JSON
           // field would break their strict hello schema before configuration.
-          "X-Zeros-Worker-Features": "prompt-outbox-v1,mcp-v1,workspace-setup-v1,checkout-v2,agent-interactions-v1,github-pr-v1,git-identity-v1,github-user-token-v1,code-review-v1,history-replace-v1" },
+          "X-Zeros-Worker-Features": "prompt-outbox-v1,mcp-v1,workspace-setup-v1,checkout-v2,agent-interactions-v1,github-pr-v1,git-identity-v1,github-user-token-v1,code-review-v1,history-replace-v1,workspace-environment-v1" },
         ...(payload === undefined ? {} : { body: payload }), redirect: "error", signal: controller.signal,
       });
       if (!response.ok) {

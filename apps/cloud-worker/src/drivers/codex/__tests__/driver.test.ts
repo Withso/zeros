@@ -2,6 +2,7 @@ import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { QuestionRequest, QuestionResponse, RequestPermissionRequest, RequestPermissionResponse, SessionNotification } from "@zeros/protocol/agent-events";
 import { CodexDriver } from "../driver";
+import { ApplicationEnvironment } from "../../../credentials/application-environment";
 
 const drivers: CodexDriver[] = [];
 afterEach(async () => { await Promise.all(drivers.splice(0).map((driver) => driver.dispose())); });
@@ -26,6 +27,12 @@ const prose = (events: SessionNotification[]) => events.flatMap(({ update }) =>
   update.sessionUpdate === "agent_message_chunk" && update.content.type === "text" ? [update.content.text] : []).join("");
 
 describe("Codex driver with an offline app-server process", () => {
+  it("delivers explicit app variables and the selected proxy to the actual child", async () => {
+    const { driver, events } = setup({ environment: { CLOUD_V2_WORKER_TOKEN: "synthetic-worker", ANTHROPIC_API_KEY: "synthetic-other" } });
+    await driver.open({ ...openInput, application: new ApplicationEnvironment({ variables: { APP_SECRET: "synthetic-app-native" }, files: [] }) });
+    await driver.prompt(content("application-environment"));
+    expect(JSON.parse(prose(events))).toEqual({ application: true, selected: true, worker: false, foreignLogin: false });
+  });
   it("sends active settings over native JSON-RPC and keeps them on the next turn", async () => {
     const { driver, events } = setup();
     await driver.open({ ...openInput, effort: "low" });

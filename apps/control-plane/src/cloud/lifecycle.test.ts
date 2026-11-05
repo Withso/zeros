@@ -52,7 +52,7 @@ const vmCommand = (f: { compute: CloudV2Compute }, marker: string) => vi.mocked(
 
 function setup(claimed: (CloudV2LifecycleWorkspace & { attempts: number })[], options: { snapshot?: string | null; idle?: CloudV2Workspace[]; stopIdle?: CloudV2LifecycleDeps["stopIdle"]; timing?: CloudV2LifecycleDeps["timing"]; now?: () => number;
   checkpoints?: ReturnType<typeof checkpointsFake>; remoteHead?: CloudV2LifecycleDeps["remoteHead"]; githubToken?: CloudV2LifecycleDeps["githubToken"]; uploadHorizon?: string;
-  checkpointRetry?: boolean; retries?: RetryRow[]; prepareRepository?: CloudV2LifecycleDeps["prepareRepository"] } = {}) {
+  checkpointRetry?: boolean; retries?: RetryRow[]; prepareRepository?: CloudV2LifecycleDeps["prepareRepository"]; pruneEnvironments?: () => Promise<void> } = {}) {
   const retries = [...options.retries ?? []];
   const compute: CloudV2Compute = {
     create: vi.fn(async () => ({ sandboxId: "bx_new1" })),
@@ -121,6 +121,7 @@ function setup(claimed: (CloudV2LifecycleWorkspace & { attempts: number })[], op
     ...(options.remoteHead ? { remoteHead: options.remoteHead } : {}),
     ...(options.prepareRepository ? { prepareRepository: options.prepareRepository } : {}),
     ...(options.githubToken ? { githubToken: options.githubToken } : {}),
+    ...(options.pruneEnvironments ? { pruneEnvironments: options.pruneEnvironments } : {}),
   });
   return { lifecycle, compute, store, stopWorker, logs };
 }
@@ -147,6 +148,17 @@ function retryRow(extra: Partial<RetryRow> = {}, retry: Partial<CloudV2Checkpoin
 const REUSE = { fingerprint: "f".repeat(64), base: "a".repeat(40) };
 
 describe("cloud v2 lifecycle", () => {
+  it("runs environment cleanup on the bounded maintenance cadence without a workspace or settings edit", async () => {
+    let now = NOW;
+    const pruneEnvironments = vi.fn(async () => {}), f = setup([], { now: () => now, pruneEnvironments });
+    await f.lifecycle.tick(); await f.lifecycle.tick();
+    expect(pruneEnvironments).toHaveBeenCalledTimes(1);
+    now += 10 * 60_000 + 1;
+    await f.lifecycle.tick();
+    expect(pruneEnvironments).toHaveBeenCalledTimes(2);
+    expect(f.compute.create).not.toHaveBeenCalled();
+  });
+
   it("allocates from the workspace's pinned computer build", async () => {
     const w = workspace("creating", { computerBuildId: "pinned-build" }), f = setup([w]);
     await f.lifecycle.tick();

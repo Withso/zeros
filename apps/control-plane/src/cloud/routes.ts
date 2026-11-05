@@ -16,6 +16,8 @@ import { CloudGithubPrService } from "./github-pr-service.js";
 import type { CloudGithubConnections } from "./github-connections.js";
 import { createCloudGithubConnectionRoutes } from "./github-connection-routes.js";
 import type { CloudGithubUnavailableReason } from "./github-connection-contract.js";
+import type { CloudEnvironments } from "./environment-store.js";
+import { createCloudEnvironmentRoutes } from "./environment-routes.js";
 
 export type CloudGithubWorkspaceDocument = CloudV2Workspace & {
   checkoutPath?: string;
@@ -61,6 +63,7 @@ export type CloudV2RouteDeps = {
   branchPrefix?: string;
   github?: { service: Pick<CloudGithubPrService, "execute">; documents(workspaces: readonly CloudV2Workspace[]): Promise<CloudGithubWorkspaceDocument[]> };
   githubConnections?: CloudGithubConnections;
+  environments?: CloudEnvironments;
 };
 
 function workspaceDocument(workspace: CloudGithubWorkspaceDocument, promptOutbox: boolean) {
@@ -74,6 +77,7 @@ function slug(value: string): string {
 
 export function createCloudV2Routes(deps: CloudV2RouteDeps): Hono {
   const app = new Hono();
+  if (deps.environments) app.route("/", createCloudEnvironmentRoutes(deps.environments));
   if (deps.githubConnections) app.route("/",createCloudGithubConnectionRoutes(deps.githubConnections));
   const documents = async (workspaces: readonly CloudV2Workspace[]) =>
     (deps.github ? await deps.github.documents(workspaces) : workspaces).map(workspace => workspaceDocument(workspace, deps.promptOutbox === true));

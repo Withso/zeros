@@ -16,6 +16,7 @@ import type { WorkspaceToolFactory, WorkspaceToolGrant } from "./mcp/workspace-t
 import { TurnService } from "./workspace/turns";
 import type { AgentTextMessage } from "@zeros/protocol/agent-messages";
 import { providerAvailability, providerFailure } from "./provider-failure";
+import type { ApplicationEnvironment } from "./credentials/application-environment";
 
 export type DriverFactories = Partial<Record<CloudV2Agent, () => Driver>>;
 export interface AppClient { id: string; send(frame: BridgeMessage): Promise<void> }
@@ -83,6 +84,7 @@ export class Agents {
     modelDiscovery?: ModelDiscoveryOptions,
     private readonly mcpProviders?: (executionId: string) => Promise<DriverMcpServers>,
     private readonly workspaceToolFactory?: WorkspaceToolFactory,
+    private readonly application?: ApplicationEnvironment,
   ) { this.config = config; this.reviewConfig = config.codeReview; this.models = new CodexModelAvailability(modelDiscovery); this.models.configure(config); this.turns = new TurnService(store, scope); }
 
   fenceReviewConfiguration(review: WorkerConfig["codeReview"]): boolean {
@@ -660,7 +662,7 @@ export class Agents {
           active.outbox.accepted = true;
           void this.store.acceptOutbox(route.chatId, active.requestId).catch(() => this.stop(route));
         }
-        const notification = { ...event, sessionId: route.id };
+        const notification = { ...(this.application?.value(event) ?? event), sessionId: route.id };
         if (notification.update.sessionUpdate === "error_notice" && notification.update.severity === "error" && !notification.update.recoverable) {
           const update = notification.update;
           const failure = providerFailure(route.agentId, { code: update.code, message: update.message, cloud: update.cloud }, "prompt", update.turnFailure?.kind ?? update.failureKind);
@@ -721,6 +723,7 @@ export class Agents {
         this.assertCurrent(route);
         const interactions = route.interactions;
         const native = await driver.open({ sessionId: route.id, cwd: this.scope.root, model: route.model, effort: route.effort, fast: route.fast,
+          ...(this.application ? { application: this.application } : {}),
           ...(mcpServers || route.workspaceTools ? { mcpServers: { ...mcpServers, ...route.workspaceTools?.servers } } : {}),
           ...(this.config.agentInteractions === 1 ? { modeId: cloudModeId(route.agentId, route.permissionMode ?? "bypass"),
             onQuestion: (request, signal) => interactions!.question(request, signal),

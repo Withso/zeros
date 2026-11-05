@@ -82,6 +82,7 @@ export type CloudV2LifecycleDeps = {
     | "checkpointForkCreated" | "checkpointForkGone" | "checkpointRetryNext">;
   /** Optional for older compositions; the shipped store always provides it. */
   prompts?: CloudV2Store["prompts"];
+  pruneEnvironments?: () => Promise<void>;
   stopIdle?: (id: string, before: Date) => Promise<void>;
   compute: CloudV2Compute;
   /** The worker runtime every VM must run; installed on create and on wake. */
@@ -201,7 +202,9 @@ export class CloudV2Lifecycle {
     const now = this.deps.now?.() ?? Date.now();
     await this.deps.prompts?.wakePending();
     if (now - this.lastPromptPrune > 10 * 60_000) {
-      await this.deps.prompts?.prune(); this.lastPromptPrune = now;
+      await this.deps.prompts?.prune();
+      await this.deps.pruneEnvironments?.();
+      this.lastPromptPrune = now;
     }
     if (this.building && this.deps.builds?.cleanup && !this.cleaning)
       this.cleaning = this.deps.builds.cleanup().catch(() => {}).finally(() => { this.cleaning = null; });

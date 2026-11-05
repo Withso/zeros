@@ -35,6 +35,7 @@ it("wires workspace git, gh, legacy, hydration and restore credentials to the cr
       runtime: { sha256: "a".repeat(64), store: { endpoint: "https://store.example.test", bucket: "fixture", accessKeyId: "fixture", secretAccessKey: "fixture" } } },
   } as Config;
   const assembled = createCloudV2(config, { query: vi.fn() } as unknown as pg.Pool, { relay: false, lifecycle: true })!;
+  const environment = vi.spyOn(assembled.routes.environments!, "resolve").mockResolvedValue(undefined);
   const workspace = { id: randomUUID(), organizationId: randomUUID(), creatorUserId: randomUUID(), state: "running", repository: "owner/project", branch: "topic", baseBranch: "main", loginRevision: "0" } as CloudV2Workspace;
   const token = newCloudV2Token("worker").token, boot = randomUUID(), hash = "b".repeat(64);
   vi.spyOn(assembled.store, "workerSession").mockResolvedValue(workspace as Awaited<ReturnType<typeof assembled.store.workerSession>>);
@@ -57,6 +58,7 @@ it("wires workspace git, gh, legacy, hydration and restore credentials to the cr
   const target = { repository: workspace.repository, repositoryId: "42" };
   expect(await (builder as unknown as { deps: ConstructorParameters<typeof CloudV2ComputerBuilder>[0] }).deps.cloneToken(workspace.organizationId, workspace.creatorUserId, target)).toBe("synthetic-installation-token");
   expect(github.token).toHaveBeenCalledExactlyOnceWith({ organizationId: workspace.organizationId, userId: workspace.creatorUserId }, target, "read", "computer", expect.any(Function));
+  expect(environment).not.toHaveBeenCalled();
   vi.spyOn(assembled.store, "baseCommit").mockResolvedValue(null);
   vi.spyOn(assembled.store, "loginRevision").mockResolvedValue("0");
   for (const identity of [null, { name: "Verified GitHub reviewer", email: "123+fixture@users.noreply.github.com" }]) {
@@ -65,4 +67,14 @@ it("wires workspace git, gh, legacy, hydration and restore credentials to the cr
     expect(configuration.codeReview).toEqual({ userId: workspace.creatorUserId, ...(identity ? { userName: identity.name } : {}) });
     expect(github.connections.gitIdentity).toHaveBeenLastCalledWith({ organizationId: workspace.organizationId, userId: workspace.creatorUserId });
   }
+  const pinned = { versionId: randomUUID(), repositoryId: "42", variables: { APP_SECRET: "synthetic-app-value" }, files: [] };
+  environment.mockResolvedValue(pinned);
+  expect((await assembled.workers.config(workspace)).environment).toEqual(pinned);
+  let entered!: () => void, release!: () => void, revoked = false;
+  const waiting = new Promise<void>(done => { entered = done; }), held = new Promise<void>(done => { release = done; });
+  environment.mockImplementationOnce(async () => { entered(); await held; return pinned; });
+  github.authorizeSource.mockImplementation(async () => { if (revoked) throw new Error("Source revoked"); });
+  const configuring = assembled.workers.config(workspace), outcome = expect(configuring).rejects.toThrow("Source revoked");
+  try { await waiting; revoked = true; } finally { release(); }
+  await outcome;
 });
