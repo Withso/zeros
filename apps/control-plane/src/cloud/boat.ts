@@ -33,9 +33,9 @@ export interface CloudV2Compute {
   stop(sandboxId: string): Promise<void>;
   /** Succeeds when the sandbox is already gone. */
   delete(sandboxId: string): Promise<void>;
-  exec(sandboxId: string, command: string, timeoutSeconds: number): Promise<CloudV2CommandResult>;
+  exec(sandboxId: string, command: string, timeoutSeconds: number, signal?: AbortSignal): Promise<CloudV2CommandResult>;
   /** Runs past the per-command limit: starts a detached job, then polls it. */
-  execLong(sandboxId: string, command: string, timeoutSeconds: number, input?: string): Promise<CloudV2CommandResult>;
+  execLong(sandboxId: string, command: string, timeoutSeconds: number, input?: string, signal?: AbortSignal): Promise<CloudV2CommandResult>;
   /** Saves the sandbox's disk under a name and returns once it can deploy. */
   saveSnapshot(sandboxId: string, name: string): Promise<void>;
   deleteSnapshot(name: string): Promise<void>;
@@ -149,50 +149,53 @@ export class BoatCloudV2Compute implements CloudV2Compute {
     }
   }
 
-  async exec(sandboxId: string, command: string, timeoutSeconds: number): Promise<CloudV2CommandResult> {
+  async exec(sandboxId: string, command: string, timeoutSeconds: number, signal?: AbortSignal): Promise<CloudV2CommandResult> {
+    signal?.throwIfAborted();
     const reply = Command.parse(await this.client.request(`/sandboxes/${this.id(sandboxId)}/commands`, {
       method: "POST",
       body: { command, timeoutSeconds: Math.min(timeoutSeconds, BOAT_MAX_COMMAND_SECONDS) },
       timeoutMs: (Math.min(timeoutSeconds, BOAT_MAX_COMMAND_SECONDS) + 30) * 1000,
+      ...(signal ? { signal } : {}),
     }));
     return { exitCode: reply.exitCode ?? -1, stdout: reply.stdout ?? "", timedOut: reply.timedOut === true };
   }
 
-  async execLong(sandboxId: string, command: string, timeoutSeconds: number, input?: string): Promise<CloudV2CommandResult> {
+  async execLong(sandboxId: string, command: string, timeoutSeconds: number, input?: string, signal?: AbortSignal): Promise<CloudV2CommandResult> {
+    signal?.throwIfAborted();
     if (input !== undefined) {
       if (Buffer.byteLength(input) > 64 * 1024) throw new Error("Command input is too large");
       // Boat's command API has no stdin field. Its authenticated file endpoint
       // keeps input out of shell argv (including base64-encoded argv). The VM
       // is one trust domain; the private file is unlinked before code executes.
       const directory = `/tmp/zeros-command-input-${randomUUID()}`, file = `${directory}/stdin`;
-      const prepared = await this.exec(sandboxId, `umask 077; mkdir -m 700 -- '${directory}'`, 30);
+      const prepared = await this.exec(sandboxId, `umask 077; mkdir -m 700 -- '${directory}'`, 30, signal);
       if (prepared.exitCode !== 0 || prepared.timedOut) throw new Error("Command input could not be prepared");
       try {
         const written = await this.client.request(`/sandboxes/${this.id(sandboxId)}/files`, {
-          method: "PUT", body: { path: file, content: input, encoding: "utf8" },
+          method: "PUT", body: { path: file, content: input, encoding: "utf8" }, ...(signal ? { signal } : {}),
         });
         if (!z.object({ success: z.literal(true) }).safeParse(written).success) throw new Error("Command input could not be delivered");
-        return await this.execLong(sandboxId, `set -e; exec 3<'${file}'; rm -f -- '${file}'; ${command} <&3 3<&-`, timeoutSeconds);
+        return await this.execLong(sandboxId, `set -e; exec 3<'${file}'; rm -f -- '${file}'; ${command} <&3 3<&-`, timeoutSeconds, undefined, signal);
       } finally {
         await this.exec(sandboxId, `rm -f -- '${file}'; rmdir -- '${directory}'`, 30).catch(() => {});
       }
     }
-    if (timeoutSeconds <= BOAT_MAX_COMMAND_SECONDS - 30) return this.exec(sandboxId, command, timeoutSeconds);
+    if (timeoutSeconds <= BOAT_MAX_COMMAND_SECONDS - 30) return this.exec(sandboxId, command, timeoutSeconds, signal);
     const job = `/tmp/zeros-job-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
     // The detached script records its own exit status, so it survives the
     // launching command's session ending.
     const script = `(\n${command}\n)\necho $? > ${job}.exit\n`;
     const encoded = Buffer.from(script, "utf8").toString("base64");
     const started = await this.exec(sandboxId,
-      `printf %s '${encoded}' | base64 -d > ${job}.sh && { setsid nohup bash ${job}.sh > ${job}.log 2>&1 < /dev/null & } ; echo started`, 30);
+      `printf %s '${encoded}' | base64 -d > ${job}.sh && { setsid nohup bash ${job}.sh > ${job}.log 2>&1 < /dev/null & } ; echo started`, 30, signal);
     if (started.exitCode !== 0) return started;
     const deadline = Date.now() + timeoutSeconds * 1000;
     for (;;) {
       await this.sleep(5000);
-      const poll = await this.exec(sandboxId, `if [ -f ${job}.exit ]; then cat ${job}.exit; else echo running; fi`, 30);
+      const poll = await this.exec(sandboxId, `if [ -f ${job}.exit ]; then cat ${job}.exit; else echo running; fi`, 30, signal);
       const state = poll.stdout.trim();
       if (state !== "running") {
-        const output = await this.exec(sandboxId, `tail -c 262144 ${job}.log; rm -f ${job}.sh ${job}.exit ${job}.log`, 30);
+        const output = await this.exec(sandboxId, `tail -c 262144 ${job}.log; rm -f ${job}.sh ${job}.exit ${job}.log`, 30, signal);
         return { exitCode: /^\d+$/.test(state) ? Number(state) : -1, stdout: output.stdout, timedOut: false };
       }
       if (Date.now() >= deadline) {

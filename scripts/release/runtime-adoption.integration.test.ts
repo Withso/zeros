@@ -4,34 +4,33 @@ import { execFileSync } from "node:child_process";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { serve } from "@hono/node-server";
-import { Hono } from "hono";
-import pg from "pg";
 import WebSocket from "ws";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
-import { CloudWorker } from "../../../cloud-worker/src/worker.js";
-import { HybridTransport } from "../../../cloud-worker/src/hybrid-transport.js";
-import { InboundBridge } from "../../../cloud-worker/src/inbound-bridge.js";
-import { runtimePermit } from "../../../cloud-worker/src/runtime-permit.js";
-import { FakeDriver, browserFrame } from "../../../cloud-worker/src/__tests__/worker-fixtures.js";
-import { ClaudeDriver } from "../../../cloud-worker/src/drivers/claude/driver.js";
-import type { DriverOpen } from "../../../cloud-worker/src/drivers/driver.js";
-import { CodeReviewAgentToolsCore } from "../../../../packages/protocol/src/code-review.js";
-import { claudeNativeApi } from "../../../../packages/protocol/src/__tests__/fixtures/claude-native-api.js";
-import { HttpError } from "../authz.js";
-import { resetMigratedTestDatabase } from "../test-database.js";
-import { grantTestPro } from "../test-pro.js";
-import { CloudV2Store } from "./store.js";
-import { CloudEnvironments } from "./environment-store.js";
-import { RuntimeHandoffStore } from "./runtime-handoff-store.js";
-import { RuntimeAdoption } from "./runtime-adoption.js";
-import { createCloudV2WorkerRoutes } from "./worker-routes.js";
-import { CloudV2Relay } from "./relay.js";
-import { CloudV2WorkerSigner } from "./worker-auth.js";
+import { CloudWorker } from "../../apps/cloud-worker/src/worker.js";
+import { HybridTransport } from "../../apps/cloud-worker/src/hybrid-transport.js";
+import { InboundBridge } from "../../apps/cloud-worker/src/inbound-bridge.js";
+import { runtimePermit } from "../../apps/cloud-worker/src/runtime-permit.js";
+import { FakeDriver, browserFrame } from "../../apps/cloud-worker/src/__tests__/worker-fixtures.js";
+import { ClaudeDriver } from "../../apps/cloud-worker/src/drivers/claude/driver.js";
+import type { DriverOpen } from "../../apps/cloud-worker/src/drivers/driver.js";
+import { CodeReviewAgentToolsCore } from "../../packages/protocol/src/code-review.js";
+import { claudeNativeApi } from "../../packages/protocol/src/__tests__/fixtures/claude-native-api.js";
+import { HttpError } from "../../apps/control-plane/src/authz.js";
+import { resetMigratedTestDatabase } from "../../apps/control-plane/src/test-database.js";
+import { grantTestPro } from "../../apps/control-plane/src/test-pro.js";
+import { CloudV2Store } from "../../apps/control-plane/src/cloud/store.js";
+import { CloudEnvironments } from "../../apps/control-plane/src/cloud/environment-store.js";
+import { RuntimeHandoffStore } from "../../apps/control-plane/src/cloud/runtime-handoff-store.js";
+import { RuntimeAdoption } from "../../apps/control-plane/src/cloud/runtime-adoption.js";
+import { createCloudV2WorkerRoutes } from "../../apps/control-plane/src/cloud/worker-routes.js";
+import { CloudV2Relay } from "../../apps/control-plane/src/cloud/relay.js";
+import { CloudV2WorkerSigner } from "../../apps/control-plane/src/cloud/worker-auth.js";
+import { serve, Hono, pg } from "../../apps/control-plane/src/cloud/__fixtures__/runtime-adoption-dependencies.js";
+import { RuntimeClient } from "../../apps/desktop/src/renderer/platform/bridge/runtime-client.js";
 
 const suite = process.env.TEST_DATABASE_URL ? describe : describe.skip;
 suite("runtime adoption over worker HTTP and app WebSockets", () => {
-  let pool: pg.Pool;
+  let pool: Parameters<typeof resetMigratedTestDatabase>[0];
   const cleanup: Array<() => Promise<unknown> | void> = [];
   const settle: Array<() => Promise<void>> = [];
   beforeAll(() => { pool = new pg.Pool({ connectionString: process.env.TEST_DATABASE_URL, max: 8 }); });
@@ -52,7 +51,9 @@ suite("runtime adoption over worker HTTP and app WebSockets", () => {
     { fails: false, http: false, native: true, restart: true, blocker: "none" },
     { fails: false, http: false, native: true, restart: false, blocker: "turn" },
     { fails: false, http: false, native: true, restart: false, blocker: "terminal" },
-  ])("preserves existing chat, history and terminal (failure=$fails, HTTP=$http, native=$native, restart=$restart, blocker=$blocker)", async ({ fails, http, native, restart, blocker }) => {
+    { fails: false, http: true, native: false, restart: false, blocker: "none", slow: true },
+    { fails: true, http: true, native: false, restart: false, blocker: "none", slow: true },
+  ])("preserves existing chat, history and terminal (failure=$fails, HTTP=$http, native=$native, restart=$restart, blocker=$blocker, slow=$slow)", async ({ fails, http, native, restart, blocker, slow }) => {
     const directory = await mkdtemp(join(tmpdir(), "zeros-adoption-wire-"));
     cleanup.push(() => rm(directory, { recursive: true, force: true }));
     const root = join(directory, "checkout"), state = join(directory, "state"), tokenFile = join(directory, "worker-token");
@@ -62,6 +63,7 @@ suite("runtime adoption over worker HTTP and app WebSockets", () => {
     if (nativeFixture) cleanup.push(() => nativeFixture.close());
     if (blocker === "turn") execFileSync("mkfifo", [join(directory, "turn-gate")]);
     await mkdir(root); await mkdir(state);
+    await writeFile(join(root, "retained.txt"), "foreground read survived adoption\n");
     const git = (...args: string[]) => execFileSync("git", args, { cwd: root, stdio: "pipe" });
     git("init", "--initial-branch=main"); git("config", "user.name", "Fixture"); git("config", "user.email", "fixture@example.test");
     await writeFile(join(root, ".gitignore"), ".env\n"); git("add", "."); git("commit", "-m", "fixture"); git("switch", "-c", "workspace/fixture");
@@ -83,6 +85,15 @@ suite("runtime adoption over worker HTTP and app WebSockets", () => {
     let desired = "a".repeat(64), clock = 0, port = 0, candidateEntered!: () => void, releaseCandidate!: () => void;
     const entered = new Promise<void>(resolve => { candidateEntered = resolve; });
     const release = new Promise<void>(resolve => { releaseCandidate = resolve; });
+    const delayedInitial = !fails && !http && !native && !slow;
+    let initialHelloEntered!: () => void, releaseInitialHello!: () => void;
+    const initialHelloWaiting = new Promise<void>(resolve => { initialHelloEntered = resolve; });
+    const initialHelloHeld = new Promise<void>(resolve => { releaseInitialHello = resolve; });
+    let helloEntered!: () => void, releaseHello!: () => void, pollEntered!: () => void, releasePoll!: () => void, nextPoll!: () => void;
+    const helloWaiting = new Promise<void>(resolve => { helloEntered = resolve; }), helloHeld = new Promise<void>(resolve => { releaseHello = resolve; });
+    const pollWaiting = new Promise<void>(resolve => { pollEntered = resolve; }), pollHeld = new Promise<void>(resolve => { releasePoll = resolve; });
+    const polledAgain = new Promise<void>(resolve => { nextPoll = resolve; });
+    let polls = 0;
     let finishing = false;
     const starts: Array<{ worker: CloudWorker; transport: HybridTransport; drivers: FakeDriver[]; statuses: string[]; nativeOpens: DriverOpen[]; nativeBindings: string[] }> = [];
     const setup = vi.fn(async () => 0);
@@ -91,14 +102,18 @@ suite("runtime adoption over worker HTTP and app WebSockets", () => {
     vi.spyOn(InboundBridge.prototype, "start").mockImplementation(async function (this: InboundBridge, receiver) {
       const address = await originalStart.call(this, receiver); port = address.port; return address;
     });
-    const config = async () => ({ t: "config" as const, loginRevision: await store.loginRevision(workspace.id) ?? "0", runtimeUpdate: 1 as const,
+    const config = async () => {
+      if (delayedInitial && starts.length === 1) { initialHelloEntered(); await initialHelloHeld; }
+      if (slow && starts.length === 2) { helloEntered(); await helloHeld; }
+      return { t: "config" as const, loginRevision: await store.loginRevision(workspace.id) ?? "0", runtimeUpdate: 1 as const,
       ...(http ? { promptOutbox: 1 as const } : {}),
       workspace: { id: workspace.id, organizationId: org, repository: "fixture/repo", checkoutPath: root, branch: "workspace/fixture", baseBranch: "main", setup: "printf fixture" },
       codeReview: { userId: creator }, agentInteractions: 1 as const,
       agents: native ? { claude: { apiKey: "offline-native-fixture-key" } }
         : { codex: { baseUrl: "http://127.0.0.1:1/v1", token: "synthetic-model-token", expiresAt: Date.now() + 60_000 } },
       environment: (await environment.resolve(workspace))!,
-    });
+      };
+    };
     const start = (sha256: string, handoff?: { id: string; bootId: string; instanceId: string }) => {
       const statuses: string[] = [], drivers: FakeDriver[] = [], nativeOpens: DriverOpen[] = [], nativeBindings: string[] = [];
       const transport = new HybridTransport({ apiUrl, workspaceId: workspace.id, runtimeSha256: sha256, tokenFile, publicKeys: signer.publicKeys,
@@ -131,7 +146,7 @@ suite("runtime adoption over worker HTTP and app WebSockets", () => {
           }
           await starts.at(-1)!.worker.dispose();
           if (finishing) return;
-          if (fails && !rollback) {
+          if (fails && !rollback && !slow) {
             await handoffs.environment(token, h.id, h.next_boot_id, { versionId: (await environment.resolve(workspace))!.versionId,
               sequence: 1, state: "failed", errorCode: "cloud_environment_seed_uncertain" });
           } else start(rollback ? h.previous_sha256 : h.target_sha256, { id: h.id, bootId: rollback ? h.rollback_boot_id : h.next_boot_id, instanceId: h.instance_id });
@@ -143,6 +158,7 @@ suite("runtime adoption over worker HTTP and app WebSockets", () => {
     const controlPlanes: Array<{ adoption: RuntimeAdoption; server: ReturnType<typeof serve>; relay: CloudV2Relay }> = [];
     const serveControlPlane = async (listenPort = 0) => {
       const adoption = new RuntimeAdoption({ handoffs, store, compute, authorizeSource: async () => {},
+        ...(slow ? { sleep: async () => { if (++polls === 1) { pollEntered(); await pollHeld; } else { nextPoll(); await new Promise(resolve => setTimeout(resolve, 10)); } } } : {}),
         runtimeForWorkspace: async () => ({ sha256: desired, url: async () => "https://fixture.example.test/runtime.tar.gz" }) });
       cleanup.push(() => adoption.close());
       const app = new Hono(); app.onError((error, c) => c.json({ code: error instanceof HttpError ? error.code : "internal" }, error instanceof HttpError ? error.status : 500));
@@ -165,7 +181,8 @@ suite("runtime adoption over worker HTTP and app WebSockets", () => {
     const apiPort = (controlPlane.server.address() as { port: number }).port;
     const apiUrl = `http://127.0.0.1:${apiPort}`;
     settle.push(async () => {
-      finishing = true; for (const cp of controlPlanes) cp.adoption.close(); releaseCandidate();
+      finishing = true; for (const cp of controlPlanes) cp.adoption.close(); releaseCandidate(); releaseHello(); releasePoll(); releaseInitialHello();
+      if (delayedInitial && starts[0]) await expect.poll(() => starts[0]!.statuses, { timeout: 5000 }).toContain("connected");
       await Promise.allSettled(replacements);
     });
     const connect = async () => {
@@ -177,7 +194,15 @@ suite("runtime adoption over worker HTTP and app WebSockets", () => {
       const response = async (id: string) => { await expect.poll(() => frames.find(frame => frame.requestId === id), { timeout: native ? 10_000 : 5000 }).toBeDefined(); return frames.find(frame => frame.requestId === id); };
       return { socket, frames, send, response };
     };
-    const first = start(desired); await expect.poll(() => first.statuses).toContain("connected");
+    const first = start(desired);
+    if (delayedInitial) {
+      await initialHelloWaiting;
+      expect(first.statuses).toEqual([]);
+      // A valid first configuration can outlast Vitest's one-second default.
+      const initialHelloTimer = setTimeout(releaseInitialHello, 1500);
+      cleanup.push(() => clearTimeout(initialHelloTimer));
+    }
+    await expect.poll(() => first.statuses, { timeout: 5000 }).toContain("connected");
     const initial = await connect(); await expect.poll(() => initial.frames.some(frame => frame.type === "ENGINE_READY")).toBe(true);
     const instance = initial.frames.find(frame => frame.type === "ENGINE_READY").instanceId;
     const key = `cloud://${org}/${workspace.id}`, agentId = native ? "claude" : "codex";
@@ -231,6 +256,30 @@ suite("runtime adoption over worker HTTP and app WebSockets", () => {
       handoffTimer = setTimeout(() => reject(new Error("No runtime handoff after a completed native turn")), 5000); handoffTimer.unref();
     })]); } finally { clearTimeout(handoffTimer); }
     const successor = await connect();
+    // Durable HTTP completion does not acknowledge delivery on this socket.
+    if (http) successor.socket.pause();
+    const fileRead = successor.send("WORKSPACE_REQUEST", { op: "file.read", params: { path: "retained.txt" } });
+    let foreground: { client: RuntimeClient; connected: Promise<void>; reading: Promise<unknown>; failed: () => unknown } | undefined;
+    if (slow) {
+      const issued = await store.issueToken({ workspaceId: workspace.id, kind: "connect", userId: creator, ttlMs: 60_000, wake: false });
+      const client = new RuntimeClient({ kind: "cloud", channel: "v2-websocket", runtimeId: workspace.id, organizationId: org,
+        workspaceId: workspace.id, engineInstanceId: workspace.id, generation: 1, authorityEpoch: 1, connectionSequence: 1,
+        url: `${apiUrl.replace("http:", "ws:")}/v2/cloud/workspaces/${workspace.id}/bridge`,
+        protocols: ["zeros.cloud.v2", `ticket.${issued.token}`], expiresAt: Date.now() + 60_000,
+      }, { environment: { controlPlaneOrigin: apiUrl, allowHttpLoopback: true,
+        createWebSocket: (url, protocols) => new WebSocket(url, protocols) as unknown as globalThis.WebSocket,
+        resolveEnginePort: async () => { throw new Error("Unexpected Local connection"); },
+        resolveEngineToken: async () => { throw new Error("Unexpected Local connection"); },
+        invalidateEnginePort() {}, invalidateEngineToken() {}, getAuthAccessToken: () => null, logger: { warn() {}, error() {} },
+      } });
+      cleanup.push(() => client.dispose());
+      await client.connect();
+      let failed: unknown;
+      const connected = client.waitUntilReady().catch(error => { failed = error; });
+      const reading = client.request({ type: "WORKSPACE_REQUEST", op: "file.read", params: { path: "retained.txt" } }, 1000)
+        .catch(error => { failed = error; });
+      foreground = { client, connected, reading, failed: () => failed };
+    }
     const beforeResumeRequests = nativeFixture?.requests.length ?? 0;
     const beforeResumeListings = mcpListings.mock.calls.length;
     const afterMessage = randomUUID();
@@ -242,6 +291,28 @@ suite("runtime adoption over worker HTTP and app WebSockets", () => {
     }
     expect(successor.frames).toEqual([]); expect((await store.get(workspace.id, creator)).state).toBe("running");
     releaseCandidate();
+    if (slow) {
+      await helloWaiting; await pollWaiting;
+      const now = Date.now;
+      vi.spyOn(Date, "now").mockImplementation(() => now() + (fails ? 61_000 : 30_000));
+      const rolledBack = vi.spyOn(handoffs, "rollback");
+      releasePoll();
+      await Promise.race([polledAgain, new Promise<void>(resolve => {
+        const check = setInterval(() => { if (rolledBack.mock.calls.length) { clearInterval(check); resolve(); } }, 5);
+        cleanup.push(() => clearInterval(check));
+      })]);
+      if (fails) {
+        await expect.poll(() => rolledBack.mock.calls.length).toBe(1);
+        await expect.poll(async () => (await handoffs.inspect(token, (await pool.query("SELECT id FROM cloud_worker_runtime_handoffs WHERE workspace_id=$1", [workspace.id])).rows[0].id))?.state)
+          .toBe("rolled_back");
+      } else {
+        expect((await pool.query("SELECT state FROM cloud_worker_runtime_handoffs WHERE workspace_id=$1", [workspace.id])).rows[0]?.state).toBe("activating");
+        expect(rolledBack).not.toHaveBeenCalled(); expect(successor.frames).toEqual([]);
+        expect(foreground!.client.status).toBe("connecting");
+      }
+      expect(foreground!.failed()).toBeUndefined();
+      releaseHello();
+    }
     await expect.poll(async () => (await pool.query("SELECT state FROM cloud_worker_runtime_handoffs WHERE workspace_id=$1", [workspace.id])).rows[0]?.state,
       { timeout: 8000 }).toBe(fails ? "rolled_back" : "succeeded");
     const next = starts.at(-1)!;
@@ -261,7 +332,13 @@ suite("runtime adoption over worker HTTP and app WebSockets", () => {
       expect(nativeFixture!.requests.length).toBeGreaterThan(beforeResumeRequests);
       expect(mcpListings.mock.calls.length).toBeGreaterThan(beforeResumeListings);
     }
-    expect(successor.frames.find(frame => frame.type === "ENGINE_READY")).toMatchObject({ instanceId: instance });
+    if (http) {
+      expect(successor.frames).toEqual([]);
+      queueMicrotask(() => successor.socket.resume());
+    }
+    await expect.poll(() => successor.frames.find(frame => frame.type === "ENGINE_READY")).toMatchObject({ instanceId: instance });
+    const file = await successor.response(fileRead);
+    expect(file.type).toBe("WORKSPACE_RESPONSE"); expect(JSON.stringify(file)).toContain("foreground read survived adoption");
     const history = await successor.response(successor.send("WORKSPACE_REQUEST", { op: "messages.window", params: { chatId: "chat" } }));
     expect(history.type).toBe("WORKSPACE_RESPONSE"); expect(JSON.stringify(history)).toContain("after adoption");
     successor.send("PTY_CREATE", { sessionId: "after-update", workspaceId: workspace.id, cwd: root });
@@ -273,6 +350,16 @@ suite("runtime adoption over worker HTTP and app WebSockets", () => {
     if (native) expect(successor.frames.flatMap(frame => frame.type === "AGENT_SESSION_UPDATE" && frame.update?.sessionUpdate === "error_notice" ? [frame] : [])).toEqual([]);
     expect(next.statuses).not.toContain("unauthorized"); expect(setup).toHaveBeenCalledOnce();
     expect((await store.get(workspace.id, creator)).state).toBe(before.state);
+    if (foreground) {
+      await foreground.connected;
+      expect(foreground.client.status).toBe("connected");
+      const response = await foreground.reading;
+      expect(response).toMatchObject({ type: "WORKSPACE_RESPONSE", op: "file.read" });
+      expect(JSON.stringify(response)).toContain("foreground read survived adoption");
+      expect(foreground.failed()).toBeUndefined();
+      const h = (await pool.query("SELECT * FROM cloud_worker_runtime_handoffs WHERE workspace_id=$1", [workspace.id])).rows[0];
+      expect(Date.now()).toBeLessThan(h.expires_at.getTime());
+    }
     expect(await handoffs.runtime(token, next.transport.bootId)).toBe((fails ? "a" : "b").repeat(64));
     expect(await readFile(join(root, ".env"), "utf8")).toBe("APP_RUNTIME_FIXTURE=synthetic-file-value\n");
     await Promise.all(replacements);

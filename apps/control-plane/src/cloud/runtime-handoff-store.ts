@@ -27,6 +27,18 @@ const identity = `w.state='running' AND w.archived_at IS NULL AND w.boat_sandbox
   AND ${CLOUD_V2_LIVE_ACCESS}`;
 const proof = `${identity} AND w.access_epoch=h.access_epoch AND w.login_revision=h.login_revision`;
 const active = `('committed','activating','rolling_back')`;
+export const RUNTIME_HANDOFF_MS = 120_000;
+export const RUNTIME_ROLLBACK_MS = 60_000;
+const deadline = `least(h.expires_at,CASE WHEN h.state IN ('committed','activating')
+  THEN h.updated_at+${RUNTIME_HANDOFF_MS}*interval '1 millisecond' ELSE h.expires_at END)`;
+
+export const RUNTIME_HANDOFF_SESSION = `(
+  (w.worker_boot_id=$2 AND w.worker_runtime_boot_id=$2 AND w.worker_runtime_handoff_id=$3
+    AND ($4::text IS NULL OR w.worker_runtime_sha256=$4) AND w.state IN ('running','stopping'))
+  OR (w.worker_boot_id IS DISTINCT FROM $2 AND EXISTS (SELECT 1 FROM cloud_worker_runtime_handoffs h WHERE h.workspace_id=w.id AND h.id=$3
+    AND h.token_hash=$1 AND ${deadline}>clock_timestamp() AND ${proof}
+    AND ((h.state='activating' AND h.next_boot_id=$2 AND ($4::text IS NULL OR h.target_sha256=$4))
+      OR (h.state='rolling_back' AND h.rollback_boot_id=$2 AND ($4::text IS NULL OR h.previous_sha256=$4))))))`;
 
 /** The workspace row serializes handoff commitment, relay admission and durable
  * outbox claims. No provider or source lookup runs under that lock. */
@@ -110,7 +122,7 @@ export class RuntimeHandoffStore {
   }
   private async current(tx: Tx, id: string, token?: string): Promise<RuntimeHandoff | null> {
     return (await tx.query<RuntimeHandoff>(`SELECT h.* FROM cloud_worker_runtime_handoffs h JOIN cloud_v2_workspaces w ON w.id=h.workspace_id
-      WHERE h.id=$1 AND ($2::bytea IS NULL OR h.token_hash=$2) AND h.expires_at>clock_timestamp() AND ${proof}`,
+      WHERE h.id=$1 AND ($2::bytea IS NULL OR h.token_hash=$2) AND ${deadline}>clock_timestamp() AND ${proof}`,
     [id, token ? hashCloudV2Token(token) : null])).rows[0] ?? null;
   }
   async commit(token: string, bootId: string, id: string, revision: string, generation: number, target: string): Promise<boolean> {
@@ -124,7 +136,8 @@ export class RuntimeHandoffStore {
         UNION ALL SELECT 1 FROM cloud_v2_workspaces WHERE id=$1 AND worker_runtime_unknown_activity
         UNION ALL SELECT 1 FROM cloud_v2_prompt_outbox WHERE workspace_id=$1 AND state IN ('queued','inboxed','dispatching','accepted')
         UNION ALL SELECT 1 FROM cloud_v2_prompt_chats WHERE workspace_id=$1 AND stop_acked_epoch<epoch LIMIT 1`, [handoff.workspace_id])).rowCount) return false;
-      return Boolean((await tx.query("UPDATE cloud_worker_runtime_handoffs SET state='committed',updated_at=clock_timestamp() WHERE id=$1", [id])).rowCount);
+      return Boolean((await tx.query(`UPDATE cloud_worker_runtime_handoffs SET state='committed',updated_at=clock_timestamp(),
+        expires_at=least(expires_at,clock_timestamp()+$2*interval '1 millisecond') WHERE id=$1`, [id, RUNTIME_HANDOFF_MS])).rowCount);
     });
   }
 
@@ -134,7 +147,10 @@ export class RuntimeHandoffStore {
       const handoff = await this.current(tx, id, token);
       if (!handoff || !["committed", "activating"].includes(handoff.state)) return null;
       if (handoff.state === "activating") return null;
-      return (await tx.query<RuntimeHandoff>("UPDATE cloud_worker_runtime_handoffs SET state='activating',updated_at=clock_timestamp() WHERE id=$1 RETURNING *", [id])).rows[0]!;
+      return (await tx.query<RuntimeHandoff>(`UPDATE cloud_worker_runtime_handoffs SET state='activating',
+        expires_at=least(expires_at,updated_at+$2*interval '1 millisecond'),updated_at=clock_timestamp() WHERE id=$1
+        AND least(expires_at,updated_at+$2*interval '1 millisecond')>clock_timestamp()+$3*interval '1 millisecond' RETURNING *`,
+      [id, RUNTIME_HANDOFF_MS, RUNTIME_ROLLBACK_MS])).rows[0] ?? null;
     });
   }
 
@@ -222,18 +238,20 @@ export class RuntimeHandoffStore {
     return withSystemTx(this.pool, async tx => {
       await this.lock(tx, id);
       const handoff = (await tx.query<RuntimeHandoff>(`SELECT h.* FROM cloud_worker_runtime_handoffs h JOIN cloud_v2_workspaces w ON w.id=h.workspace_id
-        WHERE h.id=$1 AND ${identity} AND w.access_epoch=coalesce($2::bigint,h.access_epoch) AND w.login_revision=coalesce($3::bigint,h.login_revision)`,
+        WHERE h.id=$1 AND ${deadline}>clock_timestamp() AND ${identity}
+        AND w.access_epoch=coalesce($2::bigint,h.access_epoch) AND w.login_revision=coalesce($3::bigint,h.login_revision)`,
       [id, authority?.accessEpoch ?? null, authority?.loginRevision ?? null])).rows[0];
       if (!handoff || !["activating", "rolling_back"].includes(handoff.state) || handoff.rollback_attempt >= 3) return null;
       const retry = handoff.state === "rolling_back";
       if (retry && !(await tx.query(`SELECT 1 FROM cloud_worker_runtime_handoffs WHERE id=$1
-        AND (environment_report->>'state'='failed' OR updated_at<clock_timestamp()-interval '25 seconds')`, [id])).rowCount) return null;
+        AND (environment_report->>'state'='failed' OR updated_at<clock_timestamp()-$2*interval '1 millisecond')`, [id, RUNTIME_ROLLBACK_MS])).rowCount) return null;
       return (await tx.query<RuntimeHandoff>(`UPDATE cloud_worker_runtime_handoffs SET state='rolling_back',environment_boot_id=NULL,
         access_epoch=coalesce($2::bigint,access_epoch),login_revision=coalesce($3::bigint,login_revision),
         prior_rollback_boot_id=CASE WHEN $4::uuid IS NULL THEN NULL ELSE rollback_boot_id END,
         rollback_boot_id=coalesce($4::uuid,rollback_boot_id),rollback_attempt=rollback_attempt+1,
-        environment_report=NULL,expires_at=clock_timestamp()+interval '2 minutes',updated_at=clock_timestamp() WHERE id=$1 RETURNING *`,
-      [id, authority?.accessEpoch ?? null, authority?.loginRevision ?? null, retry ? randomUUID() : null])).rows[0]!;
+        environment_report=NULL,expires_at=least(expires_at,CASE WHEN state='activating' THEN updated_at+$5*interval '1 millisecond' ELSE expires_at END),
+        updated_at=clock_timestamp() WHERE id=$1 RETURNING *`,
+      [id, authority?.accessEpoch ?? null, authority?.loginRevision ?? null, retry ? randomUUID() : null, RUNTIME_HANDOFF_MS])).rows[0]!;
     });
   }
 

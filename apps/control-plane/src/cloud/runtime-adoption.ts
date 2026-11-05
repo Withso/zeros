@@ -2,7 +2,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import type { CloudV2Compute } from "./boat.js";
 import type { CloudV2Store, CloudV2WorkerSession, CloudV2Workspace } from "./store.js";
 import { activateRuntimeCommand, completeRuntimeCommand, prepareRuntimeCommand, retireRuntimePermitCommand, type CloudV2Runtime } from "./runtime.js";
-import { RuntimeHandoffStore, type RuntimeHandoff } from "./runtime-handoff-store.js";
+import { RuntimeHandoffStore, RUNTIME_ROLLBACK_MS, type RuntimeHandoff } from "./runtime-handoff-store.js";
 import type { CloudRuntimeUpdateReply, CloudRuntimeUpdateRequest } from "./runtime-update-contract.js";
 import type { CloudEnvironmentReport } from "./environment-contract.js";
 
@@ -14,7 +14,6 @@ interface Options {
   authorizeSource(workspace: CloudV2Workspace): Promise<void>;
   drainActive?(): Promise<boolean>;
   sleep?(ms: number): Promise<void>;
-  activationMs?: number;
   logger?: Pick<Console, "warn">;
 }
 
@@ -22,16 +21,12 @@ interface Options {
  * target; neither a client nor the worker can request an arbitrary archive. */
 export class RuntimeAdoption {
   private readonly flights = new Map<string, Promise<void>>();
+  private readonly stop = new AbortController();
   private closed = false;
   constructor(private readonly options: Options) {}
 
   async session(token: string, bootId: string, id: string, sha256?: string): Promise<CloudV2WorkerSession | null> {
-    const current = await this.options.store.workerSession(token, bootId);
-    if (current) {
-      return await this.options.handoffs.published(token, bootId, id, sha256) ? current : null;
-    }
-    const handoff = await this.options.handoffs.privateBoot(token, id, bootId, sha256);
-    return handoff ? this.options.store.workerSession(token, handoff.old_boot_id) : null;
+    return this.options.store.workerSession(token, bootId, { id, ...(sha256 ? { sha256 } : {}) });
   }
 
   async environment(token: string, bootId: string, id: string, report: CloudEnvironmentReport): Promise<boolean> {
@@ -133,7 +128,7 @@ export class RuntimeAdoption {
       this.track(h.id, () => this.observe(h));
     }
   }
-  close(): void { this.closed = true; }
+  close(): void { this.closed = true; this.stop.abort(); }
   private track(id: string, action: () => Promise<void>): void {
     if (this.flights.has(id)) return;
     const task = action().catch(() => this.options.logger?.warn("[cloud-v2] runtime adoption unsettled"))
@@ -141,14 +136,19 @@ export class RuntimeAdoption {
     this.flights.set(id, task);
   }
   private async activate(h: RuntimeHandoff): Promise<void> {
-    await this.options.compute.execLong(h.sandbox_id, activateRuntimeCommand({ sha256: h.target_sha256, previousSha256: h.previous_sha256,
-      id: h.id, bootId: h.next_boot_id, instanceId: h.instance_id, tokenSha256: h.token_hash.toString("hex"), expectedBootIds: [h.old_boot_id] }), 15).catch(() => {});
+    await this.command(h, activateRuntimeCommand({ sha256: h.target_sha256, previousSha256: h.previous_sha256,
+      id: h.id, bootId: h.next_boot_id, instanceId: h.instance_id, tokenSha256: h.token_hash.toString("hex"), expectedBootIds: [h.old_boot_id] })).catch(() => {});
     await this.observe(h);
   }
   private async observe(h: RuntimeHandoff): Promise<void> {
-    if (h.state === "rolling_back" && !this.closed) await this.restore(h);
-    const deadline = h.updated_at.getTime() + (this.options.activationMs ?? 25_000);
     let latest = await this.options.handoffs.get(h.id);
+    if (!latest) return;
+    // Commitment fixes the foreground deadline. Recovery spends its reserve;
+    // neither a CP restart nor a new rollback boot grants another window.
+    const deadline = latest.state === "activating"
+      ? Math.min(latest.updated_at.getTime() + RUNTIME_ROLLBACK_MS, latest.expires_at.getTime() - RUNTIME_ROLLBACK_MS)
+      : latest.expires_at.getTime();
+    if (latest.state === "rolling_back" && !this.closed && Date.now() < deadline) await this.restore(latest);
     while (!this.closed && latest && ["activating", "rolling_back"].includes(latest.state) && Date.now() < deadline) {
       if (latest.environment_report?.state === "failed") break;
       await (this.options.sleep?.(250) ?? delay(250));
@@ -165,8 +165,9 @@ export class RuntimeAdoption {
       return;
     }
     if (latest.state !== "activating" && latest.state !== "rolling_back") return;
+    if (Date.now() >= latest.expires_at.getTime()) return;
     if (latest.state === "activating") {
-      const retired = await this.options.compute.execLong(latest.sandbox_id, retireRuntimePermitCommand(latest.id, latest.old_boot_id), 15);
+      const retired = await this.command(latest, retireRuntimePermitCommand(latest.id, latest.old_boot_id));
       if (retired.exitCode !== 0 || retired.timedOut) return;
       if (retired.stdout.trim() === "not-started") { await this.options.handoffs.settleUnstarted(latest.id); return; }
       if (retired.stdout.trim() !== "started") return;
@@ -174,16 +175,24 @@ export class RuntimeAdoption {
     const workspace = await this.options.store.get(latest.workspace_id, latest.creator_user_id);
     await this.options.authorizeSource(workspace);
     const accessEpoch = await this.options.store.accessEpoch(workspace.id), loginRevision = await this.options.store.loginRevision(workspace.id);
-    if (this.closed || accessEpoch === null || loginRevision === null) return;
+    if (this.closed || Date.now() >= latest.expires_at.getTime() || accessEpoch === null || loginRevision === null) return;
     const rollback = await this.options.handoffs.rollback(latest.id, { accessEpoch, loginRevision });
     if (!rollback) return;
     await this.observe(rollback);
   }
   private async restore(rollback: RuntimeHandoff): Promise<void> {
-    await this.options.compute.execLong(rollback.sandbox_id, activateRuntimeCommand({ sha256: rollback.previous_sha256, previousSha256: rollback.target_sha256,
+    await this.command(rollback, activateRuntimeCommand({ sha256: rollback.previous_sha256, previousSha256: rollback.target_sha256,
       id: rollback.id, bootId: rollback.rollback_boot_id, instanceId: rollback.instance_id,
       rollback: true,
       tokenSha256: rollback.token_hash.toString("hex"), expectedBootIds: [rollback.old_boot_id, rollback.next_boot_id,
-        ...(rollback.prior_rollback_boot_id ? [rollback.prior_rollback_boot_id] : [])] }), 15).catch(() => {});
+        ...(rollback.prior_rollback_boot_id ? [rollback.prior_rollback_boot_id] : [])] })).catch(() => {});
+  }
+  private async command(h: RuntimeHandoff, command: string) {
+    const remaining = Math.min(15_000, h.expires_at.getTime() - Date.now());
+    if (this.closed || remaining <= 0) throw new Error("Runtime handoff expired");
+    // A timed-out provider reply leaves execution unknown. Only the existing
+    // permit/boot marker reconciliation may authorize a subsequent command.
+    return this.options.compute.execLong(h.sandbox_id, command, 15, undefined,
+      AbortSignal.any([this.stop.signal, AbortSignal.timeout(Math.ceil(remaining))]));
   }
 }

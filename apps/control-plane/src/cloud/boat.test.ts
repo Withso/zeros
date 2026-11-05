@@ -5,6 +5,29 @@ import { BoatApiClient } from "./boat-client.js";
 describe("cloud v2 Boat compute", () => {
   const client = () => ({ request: vi.fn() });
 
+  it("carries a runtime handoff cancellation through the actual command request without replay", async () => {
+    const stop = new AbortController();
+    let entered!: () => void, release!: () => void;
+    const waiting = new Promise<void>(resolve => { entered = resolve; });
+    const held = new Promise<void>(resolve => { release = resolve; });
+    const fetcher = vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
+      entered();
+      await new Promise<void>((resolve, reject) => {
+        init!.signal!.addEventListener("abort", () => reject(init!.signal!.reason), { once: true });
+        void held.then(resolve);
+      });
+      return Response.json({ exitCode: 0, stdout: "activation-recorded" });
+    });
+    const compute = new BoatCloudV2Compute(new BoatApiClient({ apiKey: "synthetic-unused-key", timeoutMs: 1000, fetch: fetcher }));
+    let settled = false;
+    const pending = compute.execLong("bx_abc12345", "true", 15, undefined, stop.signal).catch(() => { settled = true; });
+    try {
+      await waiting; stop.abort();
+      await vi.waitFor(() => expect(settled).toBe(true), { timeout: 100 });
+      expect(fetcher).toHaveBeenCalledOnce();
+    } finally { release(); await pending; }
+  });
+
   it("delivers bounded command input separately from every executable argument", async () => {
     const boat = client();
     boat.request.mockImplementation(async (route: string) => route.endsWith("/files")

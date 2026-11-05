@@ -1,0 +1,5 @@
+{
+  "file": "scripts/release/runtime-adoption.integration.test.ts",
+  "before": "    await expect.poll(() => first.statuses, { timeout: 5000 }).toContain(\"connected\");",
+  "after": "    await expect.poll(() => first.statuses).toContain(\"connected\");"
+}

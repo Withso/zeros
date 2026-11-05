@@ -218,7 +218,7 @@ export function createCloudGithubServices(
       }),
     );
   };
-  const binding = async (workspace: CloudV2Workspace, mode: "admission" | "continuation" = "admission") => {
+  const binding = async (workspace: CloudV2Workspace, mode: "admission" | "continuation" = "admission", pending?: ReturnType<CloudGithubConnections["access"]>) => {
     const target = await identities.primary(workspace);
     if (mode === "continuation") {
       // Configuration refresh must still apply provider removals during an
@@ -233,10 +233,10 @@ export function createCloudGithubServices(
       if (saved.repositoryId) return { repositoryId: saved.repositoryId, repository: saved.repository,
         previousRepositories: await metadata.aliases(workspace) };
     }
-    const grant = await connections.access({
+    const grant = await (pending ?? connections.access({
         organizationId: workspace.organizationId,
         userId: workspace.creatorUserId,
-      });
+      }));
     const identity = await grant.api.repository(target),
       previousRepositories = await metadata.aliases(workspace);
     await grant.assertCurrent();
@@ -250,6 +250,12 @@ export function createCloudGithubServices(
       repository: identity.repository,
       previousRepositories,
     };
+  };
+  const workerIdentity = async (workspace: CloudV2Workspace, mode: "admission" | "continuation") => {
+    const scope = { organizationId: workspace.organizationId, userId: workspace.creatorUserId };
+    const access = connections.access(scope);
+    const [repositoryBinding, gitIdentity] = await Promise.all([binding(workspace, mode, access), connections.gitIdentity(scope, access)]);
+    return { repositoryBinding, gitIdentity };
   };
   const workspaceToken = async (
     workspace: CloudV2Workspace,
@@ -305,6 +311,7 @@ export function createCloudGithubServices(
     authorizeSource,
     continueSource,
     binding,
+    workerIdentity,
     token,
     workspaceToken,
     resolveRepository,

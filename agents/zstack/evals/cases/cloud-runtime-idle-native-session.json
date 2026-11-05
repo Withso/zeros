@@ -5,5 +5,5 @@
   "fixedBy": "pr:845",
   "symptom": "A completed Claude turn left an idle MCP notification stream counted as active work, so a disconnected cloud workspace never adopted the next runtime, including after a control-plane restart.",
   "rule": "Distinguish an established notification stream from its handshake and actual RPC/message delivery. Verify quiescence, post-ticket requests and same-chat continuation through the pinned native provider and real worker/control-plane transport (zstack-verify, principles 9, 11, 13 and 18).",
-  "check": "pnpm --dir apps/cloud-worker exec vitest run src/mcp/gateway.test.ts src/mcp/workspace-tools.test.ts src/__tests__/runtime-native-idle.test.ts && pnpm --dir apps/control-plane exec vitest run src/cloud/runtime-adoption.integration.test.ts"
+  "check": "pnpm --dir apps/cloud-worker exec vitest run src/mcp/gateway.test.ts src/mcp/workspace-tools.test.ts src/__tests__/runtime-native-idle.test.ts && pnpm exec vitest run --config scripts/release/vitest.config.ts scripts/release/runtime-adoption.integration.test.ts"
 }
