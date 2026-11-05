@@ -1,6 +1,6 @@
 # Canvas audit: Zeros Design against the app
 
-Status 2026-11-05, Zeros Design canvas version 363.
+Status 2026-11-05, Zeros Design canvas version 364.
 
 ## How to read this
 
@@ -74,11 +74,14 @@ and in [`plans.md`](plans.md).
   - Theme editor: the chosen rail row on bg2-highlight, 12 fg3 labels and
     counts, mono 12 names, the edited theme as a pressed toggle on
     selected-bg, a 20px swatch and Reset.
-- **Canvas (version 363).**
+- **Canvas (versions 363 and 364).**
   - Eleven Planned badges came off frames that are now built.
   - The remaining notes name exactly what is left.
   - The Changes "All states" frame had been clipping its tallest state by
     280px; it now fits.
+  - Version 364: three Design-tab sheets lose their badge and three narrow
+    it, RevEmpty shows the no-PR state the app ships, and the colour picker
+    sheet draws its fields on bg3-hover like the other popovers.
 
 ## What is left
 
