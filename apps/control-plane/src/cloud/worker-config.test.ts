@@ -1,4 +1,4 @@
-import { generateKeyPairSync } from "node:crypto";
+import { generateKeyPairSync, randomUUID } from "node:crypto";
 import { expect, it } from "vitest";
 import { loadConfig } from "../config.js";
 import { workosTestEnv } from "../test-workos-env.js";
@@ -30,4 +30,18 @@ it("keeps checkpoint retries off until a deployment enables them, and refuses am
   expect(loadConfig({ ...base, CLOUD_V2_CHECKPOINT_RETRY_ENABLED: "true" }).cloudV2?.checkpointRetry).toBe(true);
   expect(loadConfig({ ...base, CLOUD_V2_CHECKPOINT_RETRY_ENABLED: " FALSE " }).cloudV2?.checkpointRetry).toBe(false);
   expect(() => loadConfig({ ...base, CLOUD_V2_CHECKPOINT_RETRY_ENABLED: "1" })).toThrow("CLOUD_V2_CHECKPOINT_RETRY_ENABLED");
+});
+
+it("uses only a dedicated public canary key on Alpha and never accepts the worker signing key for that authority", () => {
+  const worker = generateKeyPairSync("ed25519"), canary = generateKeyPairSync("ed25519"), previous = generateKeyPairSync("ed25519");
+  const key = worker.privateKey.export({ format: "der", type: "pkcs8" }).toString("base64");
+  const oldKey = previous.privateKey.export({ format: "der", type: "pkcs8" }).toString("base64");
+  const policy = (pair: typeof worker) => JSON.stringify({ keys: [{ id: "release", publicKey: pair.publicKey.export({ format: "der", type: "spki" }).toString("base64") }],
+    fixture: { creatorUserId: randomUUID(), organizationId: randomUUID(), repositoryId: "42" } });
+  const base = { ...env, CLOUD_V2_WORKER_SIGNING_KEY: key, CLOUD_V2_WORKER_SIGNING_KEY_PREVIOUS: oldKey };
+  expect(loadConfig({ ...base, CLOUD_V2_RUNTIME_CANARY_CONFIG: policy(canary) }).cloudV2?.runtimeCanary).toBeDefined();
+  for (const pair of [worker, previous]) expect(() => loadConfig({ ...base, CLOUD_V2_RUNTIME_CANARY_CONFIG: policy(pair) })).toThrow("dedicated");
+  expect(() => loadConfig({ ...base, CLOUD_V2_RUNTIME_CANARY_PRIVATE_KEY: "synthetic-private-key" })).toThrow("API must not receive");
+  for (const channel of ["beta", "production"]) expect(() => loadConfig({ ...base, RAILWAY_ENVIRONMENT_NAME: channel, CLOUD_V2_RUNTIME_CANARY_CONFIG: policy(canary) })).toThrow("Alpha-only");
+  expect(() => loadConfig({ ...base, RAILWAY_ENVIRONMENT_NAME: "development", CLOUD_V2_RUNTIME_CANARY_CONFIG: policy(canary) })).toThrow("Alpha-only");
 });

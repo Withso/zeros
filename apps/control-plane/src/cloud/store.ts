@@ -17,6 +17,8 @@ import { originalSetupBuild } from "./setup-selection.js";
 import { mirrorMessageWindow, type MessageWindow, type WindowOptions } from "./history.js";
 import { mirrorMessageSearch, type SearchOptions } from "./history-search.js";
 import { MESSAGE_SEARCH_DEADLINE_MS } from "./message-search.js";
+import { consumeRuntimeCanary } from "./runtime-canary-store.js";
+import type { RuntimeCanaryAdmission } from "./runtime-canary.js";
 
 export type CloudV2WorkspaceState =
   | "creating" | "running" | "stopping" | "stopped" | "starting" | "deleting" | "deleted" | "failed";
@@ -26,6 +28,7 @@ type CreateWorkspace = {
   id: string; organizationId: string; creatorUserId: string; name: string; repository: string; branch: string;
   baseBranch: string; computerBuildId: string | null;
   sourceRepositoryId?: string;
+  runtimeCanary?: RuntimeCanaryAdmission;
 };
 type CreateReceipt = { status: 201; response: Record<string, unknown> };
 type HistoryInput = {
@@ -224,7 +227,7 @@ export class CloudV2Store {
     return withSystemTx(this.pool, tx => this.insertWorkspace(tx, input));
   }
 
-  private async insertWorkspace(tx: Tx, input: CreateWorkspace): Promise<CloudV2Workspace> {
+  private async insertWorkspace(tx: Tx, input: CreateWorkspace, createKey?: string): Promise<CloudV2Workspace> {
     let sourceRepositoryId = input.sourceRepositoryId;
     const member = await tx.query<{ pro: boolean; held: boolean }>(
       `SELECT account_pro_active(m.user_id) AS pro, ${memberOnHoldSql("m.org_id", "m.user_id")} AS held
@@ -263,6 +266,7 @@ export class CloudV2Store {
         [input.id, input.repository, sourceRepositoryId]);
       await pinCloudEnvironment(tx, workspace(row), sourceRepositoryId);
     }
+    if (input.runtimeCanary) await consumeRuntimeCanary(tx, workspace(row), input.runtimeCanary, sourceRepositoryId, createKey);
     return workspace(row);
   }
 
@@ -284,7 +288,7 @@ export class CloudV2Store {
       await tx.query("/* lock_purpose='cloud-v2-workspace-create' */ SELECT pg_advisory_xact_lock(hashtextextended($1,0))", [`cloud-v2-create:${input.creatorUserId}:${key}`]);
       const previous = await this.createReceipt(tx, input.creatorUserId, key, hash);
       if (previous) return previous;
-      const workspace = await this.insertWorkspace(tx, input);
+      const workspace = await this.insertWorkspace(tx, input, key);
       const receipt = { status: 201 as const, response: response(workspace) };
       await tx.query(`INSERT INTO cloud_v2_create_requests(creator_user_id,request_key,request_hash,workspace_id,status,response)
         VALUES($1,$2,$3,$4,$5,$6)`, [input.creatorUserId, key, hash, workspace.id, receipt.status, JSON.stringify(receipt.response)]);
@@ -434,6 +438,15 @@ export class CloudV2Store {
       `UPDATE cloud_v2_workspaces SET worker_route_url=$3, worker_port_token=$4
        WHERE id=$1 AND boat_sandbox_id=$2 AND state IN ('creating','starting')`, [id, sandboxId, url, JSON.stringify(portToken)]));
     return Boolean(result.rowCount);
+  }
+
+  /** Refusing a runtime must not retire the workspace's current boot. */
+  async workerHelloIdentity(token: string): Promise<CloudV2WorkerSession | null> {
+    const { rows } = await withSystemTx(this.pool, tx => tx.query<Row & { access_epoch: string; login_revision: string }>(
+      `SELECT ${COLUMNS}, access_epoch::text, login_revision::text FROM cloud_v2_workspaces w
+       WHERE worker_token_hash=$1 AND state IN ('creating','starting','running') AND ${LIVE_ACCESS}`, [hashCloudV2Token(token)]));
+    const row = rows[0];
+    return row ? { ...workspace(row), accessEpoch: row.access_epoch, loginRevision: row.login_revision } : null;
   }
 
   /** Bind the boot before configuration I/O, without publishing readiness.

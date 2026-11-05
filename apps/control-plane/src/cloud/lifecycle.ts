@@ -85,13 +85,14 @@ export type CloudV2LifecycleDeps = {
   pruneEnvironments?: () => Promise<void>;
   stopIdle?: (id: string, before: Date) => Promise<void>;
   compute: CloudV2Compute;
-  /** The worker runtime every VM must run; installed on create and on wake. */
+  /** The channel runtime; an admitted canary resolves its own pin. */
   runtime: CloudV2Runtime;
+  runtimeForWorkspace?(workspace: CloudV2Workspace): Promise<CloudV2Runtime>;
   publicKeys: readonly string[];
   sealPortToken(token: string, workspaceId: string): unknown;
   stopWorker(workspace: CloudV2Workspace): Promise<boolean>;
   /** Non-secret boot settings, e.g. the relay URL and workspace id. */
-  bootEnv(workspace: CloudV2Workspace): Record<string, string>;
+  bootEnv(workspace: CloudV2Workspace, runtime?: CloudV2Runtime): Record<string, string> | Promise<Record<string, string>>;
   sandboxName(workspace: CloudV2Workspace): string;
   /** Checkpoints in object storage. Without them a stopped workspace has only
    * Boat's disk, which Boat deletes after 14 days. */
@@ -302,6 +303,7 @@ export class CloudV2Lifecycle {
           await store.transition(workspace.id, ["creating"], "failed", { errorCode: "worker_boot_timeout" });
           return;
         }
+        const boot = await this.boot(workspace);
         const baseCommit = workspace.baseCommit || !this.deps.remoteHead ? null : this.lookupBaseCommit(workspace);
         let sandboxId = workspace.boatSandboxId;
         if (!sandboxId) {
@@ -312,7 +314,7 @@ export class CloudV2Lifecycle {
           }
           const renewedAt = new Date(this.deps.now?.() ?? Date.now());
           ({ sandboxId } = await this.measure(workspace, "boat_create", () => compute.create({
-            key: workspace.id, from, name: this.deps.sandboxName(workspace), env: this.deps.bootEnv(workspace),
+            key: workspace.id, from, name: this.deps.sandboxName(workspace), env: boot.env,
           })));
           const recorded = await store.recordInitialSandbox(workspace.id, workspace.stopGeneration, sandboxId, renewedAt);
           if (!recorded || recorded.state !== "creating") {
@@ -320,7 +322,7 @@ export class CloudV2Lifecycle {
             return;
           }
         }
-        await this.measure(workspace, "runtime_install", () => this.ensureRuntime(sandboxId), runtimeChanged => ({ runtimeChanged }));
+        await this.measure(workspace, "runtime_install", () => this.ensureRuntime(sandboxId, boot.runtime), runtimeChanged => ({ runtimeChanged }));
         if (this.deps.prepareRepository) {
           await store.defer(workspace.id, "creating", 17 * 60_000);
           await this.deps.prepareRepository(workspace, sandboxId);
@@ -329,7 +331,7 @@ export class CloudV2Lifecycle {
         // The worker reads it with its configuration, after the token arrives.
         const commit = await baseCommit;
         if (commit) await store.setBaseCommit(workspace.id, commit);
-        await this.measure(workspace, "token_delivery", () => this.deliverToken(workspace, sandboxId));
+        await this.measure(workspace, "token_delivery", () => this.deliverToken(workspace, sandboxId, boot.env));
         await store.defer(workspace.id, "creating", HELLO_POLL_MS);
         return;
       }
@@ -341,12 +343,13 @@ export class CloudV2Lifecycle {
             { errorCode: deadline === RESTORE_DEADLINE_MS ? "checkpoint_restore_failed" : "worker_boot_timeout" });
           return;
         }
+        const boot = await this.boot(workspace);
         if (!sandboxId) {
           if (!restoring && !workspace.checkpoint) {
             await store.transition(workspace.id, ["starting"], "failed", { errorCode: "sandbox_missing" });
             return;
           }
-          sandboxId = await this.replacement(workspace, restoring ? undefined : null);
+          sandboxId = await this.replacement(workspace, restoring ? undefined : null, { bootEnv: boot.env });
           if (!sandboxId) return;
           restoring = true;
         } else {
@@ -360,19 +363,19 @@ export class CloudV2Lifecycle {
             // Boat deleted the disk of a VM stopped for 14 days: a new VM
             // from the Cloud Computer gets the last checkpoint.
             if (!sandboxLost(error) || !workspace.checkpoint) throw error;
-            sandboxId = await this.replacement(workspace, sandboxId);
+            sandboxId = await this.replacement(workspace, sandboxId, { bootEnv: boot.env });
             if (!sandboxId) return;
             restoring = true;
           }
         }
         // A runtime shipped while the VM slept is installed now.
-        await this.measure(workspace, "runtime_install", () => this.ensureRuntime(sandboxId), runtimeChanged => ({ runtimeChanged }));
+        await this.measure(workspace, "runtime_install", () => this.ensureRuntime(sandboxId, boot.runtime), runtimeChanged => ({ runtimeChanged }));
         if (restoring) {
           await this.measure(workspace, "checkpoint_restore", () => this.applyCheckpoint(workspace, sandboxId));
           if (!await store.finishRestore(workspace.id, sandboxId)) return;
         }
         if (!await this.measure(workspace, "protected_route", () => this.host(workspace, sandboxId))) return;
-        await this.measure(workspace, "token_delivery", () => this.deliverToken(workspace, sandboxId));
+        await this.measure(workspace, "token_delivery", () => this.deliverToken(workspace, sandboxId, boot.env));
         await store.defer(workspace.id, "starting", HELLO_POLL_MS);
         return;
       }
@@ -427,14 +430,15 @@ export class CloudV2Lifecycle {
    * its build is retiring. Each attempt names its VM uniquely, so once Boat
    * has forgotten the key the VM is found by name instead of made again. With
    * `find`, a stop or deletion only looks for it. */
-  private async replacement(workspace: CloudV2LifecycleWorkspace, lost: string | null | undefined, options: { find?: boolean } = {}): Promise<string | null> {
+  private async replacement(workspace: CloudV2LifecycleWorkspace, lost: string | null | undefined,
+    options: { find?: boolean; bootEnv?: Record<string, string> } = {}): Promise<string | null> {
     const { store, compute } = this.deps;
     if (!workspace.checkpoint) return null;
     let attempt = workspace.restoreAttempt, request = workspace.restoreCreate;
     if (lost !== undefined) {
       const next = randomUUID();
       const begun = await store.beginRestore(workspace.id, lost,
-        { attempt: next, name: `${this.deps.sandboxName(workspace)}-r${next.slice(0, 8)}`, env: this.deps.bootEnv(workspace) });
+        { attempt: next, name: `${this.deps.sandboxName(workspace)}-r${next.slice(0, 8)}`, env: options.bootEnv ?? (await this.boot(workspace)).env });
       if (begun === "no_computer") {
         await store.transition(workspace.id, ["starting"], "failed", { errorCode: "cloud_computer_build_required" });
         return null;
@@ -454,7 +458,7 @@ export class CloudV2Lifecycle {
       sandboxId = await compute.findSandbox(body.name, new Date(Date.parse(requestedAt) - 10 * 60_000));
       // Nothing was made under this attempt: a wake starts a new one; a stop
       // or deletion has nothing to clean.
-      if (!sandboxId) return options.find || workspace.state !== "starting" ? null : this.replacement(workspace, null);
+      if (!sandboxId) return options.find || workspace.state !== "starting" ? null : this.replacement(workspace, null, options);
     }
     // A stop or deletion that won the race finds this VM in the row.
     const state = await store.replaceSandbox(workspace.id, attempt, sandboxId, new Date(this.deps.now?.() ?? Date.now()));
@@ -672,11 +676,11 @@ export class CloudV2Lifecycle {
     } catch { return null; } finally { clearTimeout(timer); }
   }
 
-  private async deliverToken(workspace: CloudV2LifecycleWorkspace, sandboxId: string): Promise<void> {
+  private async deliverToken(workspace: CloudV2LifecycleWorkspace, sandboxId: string, bootEnv: Record<string, string>): Promise<void> {
     await this.deps.authorizeSource?.(workspace);
     const token = await this.deps.store.rotateWorkerToken(workspace.id, { state: workspace.state, sandboxId, stopGeneration: workspace.stopGeneration });
     if (!token) return;
-    const result = await this.execWhenReady(sandboxId, deliverWorkerTokenCommand(token, this.deps.bootEnv(workspace)), 30);
+    const result = await this.execWhenReady(sandboxId, deliverWorkerTokenCommand(token, bootEnv), 30);
     if (result.exitCode !== 0 || result.timedOut) throw Object.assign(new Error("token delivery failed"), { code: "worker_token_delivery_failed" });
   }
 
@@ -686,11 +690,15 @@ export class CloudV2Lifecycle {
   }
 
   /** Quick when the VM already has the runtime; otherwise downloads it. */
-  private async ensureRuntime(sandboxId: string): Promise<boolean> {
-    const { runtime } = this.deps;
+  private async ensureRuntime(sandboxId: string, runtime: CloudV2Runtime): Promise<boolean> {
     const result = await this.execWhenReady(sandboxId, installRuntimeCommand({ sha256: runtime.sha256, url: await runtime.url(), publicKeys: this.deps.publicKeys }), 300);
     if (result.exitCode !== 0 || result.timedOut) throw Object.assign(new Error("runtime install failed"), { code: "worker_runtime_install_failed" });
     return result.stdout.split(/\r?\n/).includes("runtime-changed");
+  }
+
+  private async boot(workspace: CloudV2Workspace) {
+    const runtime = this.deps.runtimeForWorkspace ? await this.deps.runtimeForWorkspace(workspace) : this.deps.runtime;
+    return { runtime, env: await this.deps.bootEnv(workspace, runtime) };
   }
 
   private async measure<T>(workspace: CloudV2Workspace, phase: LifecyclePhase, run: () => Promise<T>, detail?: (value: T) => TimingDetail): Promise<T> {

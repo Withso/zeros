@@ -15,8 +15,9 @@ import { CloudEnvironmentReportSchema, type CloudEnvironmentReport } from "./env
 export const CLOUD_V2_WORKER_API = "/v2/cloud/worker";
 type ConfigFrame = Extract<CloudV2ControlFrame, { t: "config" }>;
 export type CloudV2WorkerRouteDeps = {
-  store: Pick<CloudV2Store, "beginWorkerHello" | "acceptWorkerHello" | "workerSession" | "accessEpoch" | "loginRevision" | "markActive" | "writeWorkerHistory" | "failWorkerCheckout"> & Partial<Pick<CloudV2Store, "prompts">>;
+  store: Pick<CloudV2Store, "beginWorkerHello" | "acceptWorkerHello" | "workerSession" | "accessEpoch" | "loginRevision" | "markActive" | "writeWorkerHistory" | "failWorkerCheckout"> & Partial<Pick<CloudV2Store, "prompts" | "workerHelloIdentity">>;
   runtimeSha256: string;
+  runtimeSha256ForWorkspace?(workspace: CloudV2Workspace): Promise<string>;
   promptOutbox?: boolean;
   timing?: (record: CloudV2TimingRecord) => void;
   logger?: Pick<Console, "warn">;
@@ -100,10 +101,18 @@ export function createCloudV2WorkerRoutes(deps: CloudV2WorkerRouteDeps): Hono {
   app.use(`${CLOUD_V2_WORKER_API}/*`, async (c, next) => { bearer(c); c.header("Cache-Control", "no-store"); await next(); });
   app.post(`${CLOUD_V2_WORKER_API}/hello`, async c => {
     const input = await body(c, CloudV2WorkerHelloSchema);
-    if (input.runtimeSha256 !== deps.runtimeSha256) throw new HttpError(409, "worker_runtime_mismatch", "Worker runtime requires an update");
+    const token = bearer(c);
+    let runtimeSha256 = deps.runtimeSha256;
+    if (deps.runtimeSha256ForWorkspace) {
+      if (!deps.store.workerHelloIdentity) throw new HttpError(503, "worker_runtime_unavailable", "Worker runtime could not be verified");
+      const identity = await deps.store.workerHelloIdentity(token);
+      if (!identity) throw unauthorized();
+      runtimeSha256 = await deps.runtimeSha256ForWorkspace(identity);
+    }
+    if (input.runtimeSha256 !== runtimeSha256) throw new HttpError(409, "worker_runtime_mismatch", "Worker runtime requires an update");
     if (deps.promptOutbox && !(c.req.header("x-zeros-worker-features") ?? "").split(",").map(value => value.trim()).includes("prompt-outbox-v1"))
       throw new HttpError(409, "worker_runtime_mismatch", "Worker runtime requires an update");
-    const token = bearer(c), workspace = await deps.store.beginWorkerHello(token, input.bootId);
+    const workspace = await deps.store.beginWorkerHello(token, input.bootId);
     if (!workspace) throw unauthorized();
     const config = await configuration(deps, workspace, token, input.bootId, workerFeatures(c));
     const ready = await deps.store.acceptWorkerHello(token, input.bootId, {

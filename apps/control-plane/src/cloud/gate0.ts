@@ -2,11 +2,12 @@
 // one disposable workspace from an existing Computer, with one stop/wake.
 // No database access, Computer builds or model stand-ins. The operator's
 // transport probe only inspects this workspace's existing Boat VM.
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { setTimeout as sleep } from "node:timers/promises";
 import WebSocket from "ws";
 import { z } from "zod";
 import type { Gate0Timing, Gate0TransportWorkspace } from "./gate0-transport.js";
+import { RUNTIME_CANARY_HEADER, RuntimeCanaryClaimsSchema, RuntimeCanaryStatusSchema, type RuntimeCanaryClaims } from "./runtime-canary.js";
 
 export const GATE0_AGENTS = ["codex", "claude", "cursor"] as const;
 type Agent = typeof GATE0_AGENTS[number];
@@ -97,6 +98,7 @@ export type CloudV2Gate0Options = {
   organizationId: string;
   repository: string;
   runtimeSha?: string;
+  canary?: { token: string; claims: RuntimeCanaryClaims };
   transportProbe?(workspace: Gate0TransportWorkspace): Promise<void>;
   readTimings?(workspace: Gate0TransportWorkspace): Promise<Gate0Timing[]>;
   accessToken(): Promise<string>;
@@ -108,6 +110,16 @@ export type CloudV2Gate0Options = {
   timeoutMs?: number;
   pollMs?: number;
 };
+
+export function gate0CanaryStatus(value: unknown, canary: NonNullable<CloudV2Gate0Options["canary"]>, workspaceId?: string) {
+  const status = parse(RuntimeCanaryStatusSchema, value, "canary_identity"), c = canary.claims;
+  requireCheck(status.grantId === c.jti && status.creatorUserId === c.creatorUserId && status.organizationId === c.organizationId &&
+    status.repositoryId === c.repositoryId && status.runId === c.runId && status.runAttempt === c.runAttempt &&
+    status.runtimeSha256 === c.runtimeSha256 && status.sourceSha === c.sourceSha && (!workspaceId || status.workspaceId === workspaceId) &&
+    status.grantSha256 === createHash("sha256").update(canary.token).digest("hex") &&
+    status.createKeySha256 === createHash("sha256").update(c.createKey).digest("hex") && status.deleted === (status.state === "deleted"), "canary_identity");
+  return status;
+}
 
 function hasAnswer(rows: MessageRows, marker: string): boolean {
   return rows.some(row => {
@@ -125,6 +137,9 @@ function sameRows(left: MessageRows, right: MessageRows): boolean {
 
 export async function runCloudV2Gate0(options: CloudV2Gate0Options): Promise<{ workspaceId: string; agents: readonly Agent[]; deleted: boolean }> {
   const agents = options.agents ?? GATE0_AGENTS;
+  const canary = options.canary ? { token: options.canary.token, claims: parse(RuntimeCanaryClaimsSchema, options.canary.claims, "canary_configuration") } : undefined;
+  requireCheck(!canary || (!options.keep && agents.length === GATE0_AGENTS.length && options.runtimeSha === canary.claims.runtimeSha256 &&
+    options.organizationId.toLowerCase() === canary.claims.organizationId && canary.token.length > 0 && canary.token.length <= 4096), "canary_configuration");
   requireCheck(agents.length > 0 && agents.every(agent => GATE0_AGENTS.includes(agent)) && new Set(agents).size === agents.length, "agent_selection");
   const models = { ...GATE0_DEFAULT_MODELS, ...options.models };
   requireCheck(GATE0_AGENTS.every(agent => typeof models[agent] === "string" && /^[a-zA-Z0-9][a-zA-Z0-9._:/[\]-]{0,199}$/.test(models[agent])), "model_configuration");
@@ -132,12 +147,13 @@ export async function runCloudV2Gate0(options: CloudV2Gate0Options): Promise<{ w
   const timeoutMs = options.timeoutMs ?? 600_000, pollMs = options.pollMs ?? 1_000;
   const fetchImpl = options.fetch ?? fetch, log = options.log ?? (() => {});
   for (const agent of agents) log(`${agent} model=${models[agent]} effort=low${agent === "cursor" ? " (no native effort control)" : ""}`);
-  const runId = randomUUID(), name = `gate0-${runId}`;
+  const runId = canary?.claims.jti ?? randomUUID(), name = `gate0-${runId}`;
   const api = options.apiOrigin.replace(/\/+$/, ""), base = "/v1/cloud-v2/workspaces";
   const request = async (path: string, stage: string, method = "GET", body?: unknown, allowMissing = false): Promise<unknown> => {
     try {
       const response = await fetchImpl(`${api}${path}`, { method, redirect: "error", signal: AbortSignal.timeout(Math.min(timeoutMs, 30_000)),
-        headers: { authorization: `Bearer ${await options.accessToken()}`, "content-type": "application/json", ...(path === base && method === "POST" ? { "idempotency-key": runId } : {}) },
+        headers: { authorization: `Bearer ${await options.accessToken()}`, "content-type": "application/json", ...(path === base && method === "POST"
+          ? { "idempotency-key": canary?.claims.createKey ?? runId, ...(canary ? { [RUNTIME_CANARY_HEADER]: canary.token } : {}) } : {}) },
         ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
       if (response.status === 404 && allowMissing) { await response.body?.cancel(); return null; }
       if (!response.ok) { await response.body?.cancel(); throw new Gate0Failure(stage); }
@@ -150,6 +166,8 @@ export async function runCloudV2Gate0(options: CloudV2Gate0Options): Promise<{ w
 
   let workspace: z.infer<typeof WorkspaceSchema> | undefined, bridge: BridgeProbe | undefined;
   let createAttempted = false, failed: unknown, deleted = false;
+  const canaryStatus = async (workspaceId?: string) => gate0CanaryStatus(
+    await request(`/v1/cloud-v2/runtime-canaries/${canary!.claims.jti}`, "canary_identity"), canary!, workspaceId);
   const timedChats: Array<{ agent: Agent; chat: string }> = [];
   const current = async (stage: string) => parse(WorkspaceReply, await request(`${base}/${workspace!.id}`, stage), stage).workspace;
   const waitState = async (state: string) => until(state, timeoutMs, pollMs, async () => {
@@ -170,6 +188,7 @@ export async function runCloudV2Gate0(options: CloudV2Gate0Options): Promise<{ w
   try {
     createAttempted = true;
     workspace = parse(WorkspaceReply, await request(base, "create", "POST", { organizationId: options.organizationId, repository: options.repository, name }), "create").workspace;
+    if (canary) await canaryStatus(workspace.id);
     workspace = await waitState("running"); log("create passed");
     if (options.transportProbe) { await options.transportProbe(workspace); log("hybrid transport passed"); }
     bridge = await connect();
@@ -283,6 +302,14 @@ export async function runCloudV2Gate0(options: CloudV2Gate0Options): Promise<{ w
     await request(`${base}/${workspace.id}/start`, "wake", "POST"); workspace = await waitState("running");
     if (options.transportProbe) { await options.transportProbe(workspace); log("hybrid wake transport passed"); }
     bridge = await connect();
+    if (canary) {
+      const terminal = parse(z.object({ type: z.literal("PTY_CREATED"), sessionId: z.string() }),
+        await bridge.request("PTY_CREATE", { ...scope, sessionId: `gate0-wake-${runId}`, cols: 120, rows: 30 }, "wake_runtime"), "wake_runtime");
+      bridge.send("PTY_WRITE", { sessionId: terminal.sessionId, data: `test "$(readlink -f /opt/zeros/worker)" = '/opt/zeros/runtime/${options.runtimeSha}' && printf 'zeros-gate0-%s:%s\\n' '${runId}' "$(git branch --show-current)"\n` });
+      await until("wake_runtime", timeoutMs, pollMs, async () => bridge!.frames.filter(f => f.type === "PTY_DATA" && f.sessionId === terminal.sessionId)
+        .map(f => typeof f.data === "string" ? f.data : "").join("").includes(terminalMarker));
+      bridge.send("PTY_KILL", { sessionId: terminal.sessionId });
+    }
     for (const [chatId, rows] of transcripts) requireCheck(sameRows(rows, parse(Rows, await bridge.op("messages.window", { chatId }), "wake_history").messages), "wake_history");
     requireCheck(parse(z.object({ content: z.string() }), await bridge.op("file.read", { ...scope, path }), "wake_file").content === content, "wake_file");
     log("wake and persisted data passed");
@@ -291,17 +318,21 @@ export async function runCloudV2Gate0(options: CloudV2Gate0Options): Promise<{ w
     bridge?.close();
     if (!options.keep && createAttempted) {
       try {
-        // A lost POST response is ambiguous. Find only this run's unique name;
-        // never retry creation or delete another run's workspace.
-        if (!workspace) {
+        // A lost POST response is ambiguous; cleanup needs this run's grant
+        // identity (or its unique name for the ordinary operator probe).
+        let cleanupId = workspace?.id;
+        if (!cleanupId && canary) cleanupId = (await canaryStatus()).workspaceId;
+        if (!cleanupId) {
           const listed = parse(z.object({ workspaces: z.array(WorkspaceSchema) }), await request(`${base}?organizationId=${options.organizationId}`, "cleanup_lookup"), "cleanup_lookup");
           const matches = listed.workspaces.filter(row => row.name === name && row.repository.toLowerCase() === options.repository.toLowerCase());
           requireCheck(matches.length <= 1, "cleanup_identity"); workspace = matches[0];
+          cleanupId = workspace?.id;
         }
-        if (workspace) {
-          await request(`${base}/${workspace.id}`, "delete", "DELETE");
+        if (cleanupId) {
+          await request(`${base}/${cleanupId}`, "delete", "DELETE", undefined, !!canary);
           await until("delete", timeoutMs, pollMs, async () => {
-            const reply = await request(`${base}/${workspace!.id}`, "delete", "GET", undefined, true);
+            if (canary) return (await canaryStatus(cleanupId)).deleted;
+            const reply = await request(`${base}/${cleanupId}`, "delete", "GET", undefined, true);
             return reply === null || parse(WorkspaceReply, reply, "delete").workspace.state === "deleted";
           });
           deleted = true; log("delete passed");

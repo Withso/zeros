@@ -24,6 +24,7 @@ function fixture(prompts = false) {
     store: {
       prompts: { pull, outcome } as unknown as CloudV2Store["prompts"],
       beginWorkerHello: vi.fn(async value => allowed && value === token ? w : null),
+      workerHelloIdentity: vi.fn(async value => allowed && value === token ? w : null),
       acceptWorkerHello: vi.fn(async value => allowed && value === token ? w : null),
       workerSession: vi.fn(async (value, boot) => allowed && value === token && boot === bootId ? { ...w, loginRevision: revision } : null),
       accessEpoch: vi.fn(async () => allowed ? "0" : null),
@@ -53,6 +54,25 @@ it("accepts outbound hello and returns configuration, refusing stale runtimes", 
   expect(response.status).toBe(200);
   expect(await response.json()).toMatchObject({ config: { t: "config", loginRevision: "0" } });
   expect((await f.request("hello", { ...body, runtimeSha256: "b".repeat(64) })).status).toBe(409);
+});
+it("selects the authenticated workspace's runtime before mutating its boot or publishing config", async () => {
+  const f = fixture(), candidate = "b".repeat(64);
+  f.deps.runtimeSha256ForWorkspace = vi.fn(async () => candidate);
+  const body = { bootId: f.bootId, protocol: 2, runtimeSha256: candidate };
+  expect((await f.request("hello", { ...body, runtimeSha256: "a".repeat(64) })).status).toBe(409);
+  expect(f.deps.store.beginWorkerHello).not.toHaveBeenCalled();
+  expect(f.deps.config).not.toHaveBeenCalled();
+  expect((await f.request("hello", body)).status).toBe(200);
+  expect(f.deps.runtimeSha256ForWorkspace).toHaveBeenCalledWith(expect.objectContaining({ creatorUserId: expect.any(String) }));
+});
+it("does not fall back to the channel runtime when workspace runtime lookup fails", async () => {
+  const f = fixture();
+  f.deps.runtimeSha256ForWorkspace = vi.fn(async () => { throw new Error("synthetic-private-lookup-error"); });
+  const response = await f.request("hello", { bootId: f.bootId, protocol: 2, runtimeSha256: "a".repeat(64) });
+  expect(response.status).toBe(500);
+  expect(await response.text()).not.toContain("synthetic-private");
+  expect(f.deps.store.beginWorkerHello).not.toHaveBeenCalled();
+  expect(f.deps.store.acceptWorkerHello).not.toHaveBeenCalled();
 });
 it("carries a bounded rejected-token digest and purpose from the authenticated worker to the token source", async () => {
   const f = fixture(), failedTokenSha256 = "a".repeat(64);

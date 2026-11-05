@@ -1,0 +1,9 @@
+{
+  "id": "cloud-runtime-qualification-identity",
+  "kind": "replay",
+  "area": "control-plane-data",
+  "fixedBy": "pending",
+  "symptom": "The live release identity always reported worker:null, and the create endpoint ignored a candidate-runtime grant instead of refusing unsupported qualification authority.",
+  "rule": "Report the actual live runtime pin with matching qualification provenance, refuse unsupported canary admission, and require exact fixture-bound cleanup proof before pin authority (zstack-verify, principles 12, 16 and 18).",
+  "check": "pnpm --dir apps/control-plane exec vitest run src/release-identity.test.ts src/cloud/routes.test.ts"
+}

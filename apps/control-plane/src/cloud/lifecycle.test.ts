@@ -52,7 +52,8 @@ const vmCommand = (f: { compute: CloudV2Compute }, marker: string) => vi.mocked(
 
 function setup(claimed: (CloudV2LifecycleWorkspace & { attempts: number })[], options: { snapshot?: string | null; idle?: CloudV2Workspace[]; stopIdle?: CloudV2LifecycleDeps["stopIdle"]; timing?: CloudV2LifecycleDeps["timing"]; now?: () => number;
   checkpoints?: ReturnType<typeof checkpointsFake>; remoteHead?: CloudV2LifecycleDeps["remoteHead"]; githubToken?: CloudV2LifecycleDeps["githubToken"]; uploadHorizon?: string;
-  checkpointRetry?: boolean; retries?: RetryRow[]; prepareRepository?: CloudV2LifecycleDeps["prepareRepository"]; pruneEnvironments?: () => Promise<void> } = {}) {
+  checkpointRetry?: boolean; retries?: RetryRow[]; prepareRepository?: CloudV2LifecycleDeps["prepareRepository"]; pruneEnvironments?: () => Promise<void>;
+  runtimeForWorkspace?: CloudV2LifecycleDeps["runtimeForWorkspace"]; bootEnv?: CloudV2LifecycleDeps["bootEnv"] } = {}) {
   const retries = [...options.retries ?? []];
   const compute: CloudV2Compute = {
     create: vi.fn(async () => ({ sandboxId: "bx_new1" })),
@@ -115,7 +116,8 @@ function setup(claimed: (CloudV2LifecycleWorkspace & { attempts: number })[], op
     ...(options.stopIdle ? { stopIdle: options.stopIdle } : {}),
     publicKeys, sealPortToken: () => ({ encrypted: true }), stopWorker,
     runtime: { sha256: "b".repeat(64), url: async () => "https://r2.example.test/runtime.tar.gz?sig=1" },
-    bootEnv: ws => ({ CLOUD_V2_API_URL: "https://api.example.test", ZEROS_WORKSPACE_ID: ws.id }),
+    bootEnv: options.bootEnv ?? (ws => ({ CLOUD_V2_API_URL: "https://api.example.test", ZEROS_WORKSPACE_ID: ws.id })),
+    ...(options.runtimeForWorkspace ? { runtimeForWorkspace: options.runtimeForWorkspace } : {}),
     sandboxName: ws => `zeros-alpha-${ws.id.slice(0, 8)}`,
     ...(options.checkpoints ? { checkpoints: options.checkpoints } : {}),
     ...(options.remoteHead ? { remoteHead: options.remoteHead } : {}),
@@ -125,6 +127,32 @@ function setup(claimed: (CloudV2LifecycleWorkspace & { attempts: number })[], op
   });
   return { lifecycle, compute, store, stopWorker, logs };
 }
+
+it.each(["creating", "starting"] as const)("uses one captured workspace runtime for %s installation and token delivery", async state => {
+  const row = workspace(state, state === "starting" ? { boatSandboxId: "bx_existing" } : {});
+  const candidate = { sha256: "c".repeat(64), url: async () => "https://r2.example.test/candidate.tar.gz" };
+  const runtimeForWorkspace = vi.fn(async () => candidate);
+  const bootEnv = vi.fn(async (w: CloudV2Workspace, selected = candidate) => ({ CLOUD_V2_RUNTIME_SHA256: selected.sha256, ZEROS_WORKSPACE_ID: w.id }));
+  const f = setup([row], { runtimeForWorkspace, bootEnv });
+  await f.lifecycle.tick();
+  expect(runtimeForWorkspace).toHaveBeenCalledExactlyOnceWith(row);
+  expect(bootEnv).toHaveBeenCalledExactlyOnceWith(row, candidate);
+  const installation = vmCommand(f, "candidate.tar.gz");
+  expect(installation?.[1]).toContain(`/opt/zeros/runtime/${candidate.sha256}`);
+  const environment = Buffer.from(`CLOUD_V2_RUNTIME_SHA256=${candidate.sha256}\nZEROS_WORKSPACE_ID=${row.id}\n`).toString("base64");
+  expect(vmCommand(f, CLOUD_V2_WORKER_TOKEN_PATH)?.[1]).toContain(environment);
+});
+
+it.each(["creating", "starting"] as const)("refuses provider effects on a failed %s runtime lookup", async state => {
+  const runtimeForWorkspace = vi.fn(async () => { throw new Error("synthetic-private-lookup-error"); });
+  const f = setup([workspace(state, state === "starting" ? { boatSandboxId: "bx_existing" } : {})], { runtimeForWorkspace });
+  await f.lifecycle.tick();
+  expect(runtimeForWorkspace).toHaveBeenCalledOnce();
+  expect(f.compute.create).not.toHaveBeenCalled();
+  expect(f.compute.resume).not.toHaveBeenCalled();
+  expect(f.compute.exec).not.toHaveBeenCalled();
+  expect(f.store.rotateWorkerToken).not.toHaveBeenCalled();
+});
 
 it("ends a clone failure with its typed cause before worker hello instead of retrying into a boot timeout", async () => {
   const w = workspace("creating"), prepareRepository = vi.fn(async () => {

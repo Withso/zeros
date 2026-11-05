@@ -4,6 +4,7 @@ import { CloudAgentCredentialEnvSchema, loadCloudAgentCredentialConfig, type Clo
 // and both Application client IDs.
 
 import { isIP } from "node:net";
+import { createPublicKey } from "node:crypto";
 import path from "node:path";
 import { z } from "zod";
 
@@ -18,6 +19,8 @@ import { DEFAULT_SLOW_REQUEST_LOG_MS } from "./request-timing.js";
 import { loadWorkerPollIntervals, type WorkerPollIntervals } from "./worker-polling-config.js";
 import { validateReleaseLedgerUrl } from "./client-compatibility.js";
 import { CloudV2WorkerSigner } from "./cloud/worker-auth.js";
+import { loadRuntimeCanaryPolicy, type RuntimeCanaryPolicy } from "./cloud/runtime-canary.js";
+import { loadRuntimeRelease, type RuntimeRelease } from "./cloud/runtime-release.js";
 
 function containsAsciiControl(value: string): boolean {
   for (const character of value) {
@@ -241,11 +244,12 @@ export type CloudV2Config = {
   realtimeUrl: string;
   workerSigningKey: string;
   workerSigningKeyPrevious?: string;
-  /** The worker runtime every VM runs, by sha256, and where it is stored. */
-  runtime: { sha256: string; store: { endpoint: string; bucket: string; accessKeyId: string; secretAccessKey: string } };
+  /** The ordinary channel runtime pin and its storage. */
+  runtime: { sha256: string; release?: RuntimeRelease; store: { endpoint: string; bucket: string; accessKeyId: string; secretAccessKey: string } };
+  runtimeCanary?: RuntimeCanaryPolicy;
 };
 
-function loadCloudV2Config(env: NodeJS.ProcessEnv): CloudV2Config | null {
+function loadCloudV2Config(env: NodeJS.ProcessEnv, channel: string): CloudV2Config | null {
   const enabled = env.CLOUD_V2_ENABLED?.trim().toLowerCase();
   if (enabled !== "true") {
     if (enabled && enabled !== "false") throw new Error("Invalid environment: CLOUD_V2_ENABLED must be true or false");
@@ -278,7 +282,12 @@ function loadCloudV2Config(env: NodeJS.ProcessEnv): CloudV2Config | null {
   const endpoint = required("CLOUD_V2_RUNTIME_STORE_ENDPOINT");
   if (!endpoint.startsWith("https://")) throw new Error("Invalid environment: CLOUD_V2_RUNTIME_STORE_ENDPOINT must be https");
   const workerSigningKey = required("CLOUD_V2_WORKER_SIGNING_KEY"), previous = env.CLOUD_V2_WORKER_SIGNING_KEY_PREVIOUS?.trim();
-  new CloudV2WorkerSigner(workerSigningKey, previous);
+  const workerSigner = new CloudV2WorkerSigner(workerSigningKey, previous);
+  if (env.CLOUD_V2_RUNTIME_CANARY_PRIVATE_KEY) throw new Error("Invalid environment: the API must not receive a runtime canary signing key");
+  const runtimeCanary = loadRuntimeCanaryPolicy(env.CLOUD_V2_RUNTIME_CANARY_CONFIG, channel);
+  const workerPublicKeys = new Set(workerSigner.publicKeys.map(key => createPublicKey(key).export({ format: "der", type: "spki" }).toString("base64")));
+  if (runtimeCanary?.keys.some(key => workerPublicKeys.has(key.publicKey))) throw new Error("Invalid environment: runtime canaries require a dedicated signing key");
+  const release = loadRuntimeRelease(env.CLOUD_V2_RUNTIME_RELEASE_METADATA);
   return {
     boat: { apiKey, ...(billingOrg ? { billingOrg } : {}) },
     promptOutbox: promptOutbox === "true",
@@ -286,7 +295,8 @@ function loadCloudV2Config(env: NodeJS.ProcessEnv): CloudV2Config | null {
     workerSigningKey, ...(previous ? { workerSigningKeyPrevious: previous } : {}),
     apiUrl: origin("CLOUD_V2_API_URL", "https:"),
     realtimeUrl: origin("CLOUD_V2_REALTIME_URL", "wss:"),
-    runtime: { sha256, store: {
+    ...(runtimeCanary ? { runtimeCanary } : {}),
+    runtime: { sha256, ...(release ? { release } : {}), store: {
       endpoint, bucket: required("CLOUD_V2_RUNTIME_STORE_BUCKET"),
       accessKeyId: required("CLOUD_V2_RUNTIME_STORE_ACCESS_KEY_ID"), secretAccessKey: required("CLOUD_V2_RUNTIME_STORE_SECRET_ACCESS_KEY"),
     } },
@@ -973,6 +983,6 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env, diagnostics: Co
     feedback: loadFeedbackConfig(env, diagnostics),
     chatTitleApiKey: e.CHAT_TITLE_OPENAI_API_KEY || null,
     cloudAgentCredentials: cloudChannel ? loadCloudAgentCredentialConfig(env) : null,
-    cloudV2: cloudChannel ? loadCloudV2Config(env) : null,
+    cloudV2: cloudChannel ? loadCloudV2Config(env, deploymentChannel) : null,
   };
 }

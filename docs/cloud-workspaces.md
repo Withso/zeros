@@ -1217,6 +1217,8 @@ The control plane reads these names in
 | `CLOUD_V2_API_URL`, `CLOUD_V2_REALTIME_URL` | Public HTTPS API (also the worker's outbound origin) and the app's WSS bridge origin. |
 | `CLOUD_V2_WORKER_SIGNING_KEY`, optional `CLOUD_V2_WORKER_SIGNING_KEY_PREVIOUS` | Ed25519 PKCS#8 private key (base64 DER) that signs worker grants. VMs trust both public keys after their next create or wake, so a rotation keeps the previous key until every running VM has woken with the new trust file. |
 | `CLOUD_V2_RUNTIME_SHA256` | Published runtime archive digest. |
+| `CLOUD_V2_RUNTIME_RELEASE_METADATA` | Optional version-1 release provenance for the exact pin, including the Alpha qualification receipt hash and confirmed deletion. Missing or mismatched provenance stays unqualified. |
+| `CLOUD_V2_RUNTIME_CANARY_CONFIG` | Alpha-only public Ed25519 verification keys and the dedicated fixture user, organization and immutable repository ID. Never contains the release signing private key. |
 | `CLOUD_V2_RUNTIME_STORE_ENDPOINT`, `CLOUD_V2_RUNTIME_STORE_BUCKET` | Runtime and checkpoint object storage. |
 | `CLOUD_V2_RUNTIME_STORE_ACCESS_KEY_ID`, `CLOUD_V2_RUNTIME_STORE_SECRET_ACCESS_KEY` | Server-side storage credentials. They read runtimes, and read, write, list and delete under `cloud-v2/checkpoints/`. |
 
@@ -1247,6 +1249,49 @@ only when its live pin is known, and `--no-prune` skips this. A removed runtime
 can be published again from the commit its index records. Tests use fake worker connections and native provider streams;
 live verification must also cover the private route, stop, offline history, wake
 and deletion.
+
+### Runtime release canaries
+
+Runtime release support lets an Alpha release qualify a candidate without
+changing the ordinary channel pin. The existing create endpoint accepts
+`x-zeros-runtime-canary` only when Alpha has the public canary policy. The
+single-use grant expires within 15 minutes and binds its run/attempt, candidate
+digest, source commit, fixture creator, dedicated fixture organization,
+immutable repository ID and create idempotency key. The normal membership,
+source authorization and environment pinning checks still apply. The grant
+and workspace commit in one transaction; an exact create retry returns the
+same receipt, even after the admission grant expires.
+
+Only that admitted workspace resolves to the candidate on create and wake.
+An ungranted workspace, including one owned by the fixture user, uses the
+ordinary channel pin. A candidate's recorded source and fixture policy must
+remain verifiable; an unknown lookup refuses boot instead of falling back to
+the channel pin. HTTP hello resolves the authenticated workspace's pin before
+it changes the boot identity. The grant audit survives physical workspace
+deletion, so its nonce cannot allocate a second workspace.
+
+The fixture can read its exact grant at
+`GET /v1/cloud-v2/runtime-canaries/:grantId`. This returns only bounded
+identity, digest, run and lifecycle-state fields. It retains current creator
+membership checks and reports deletion only from a retained workspace row in
+the `deleted` state. An absent row or lost access is not cleanup proof.
+The Alpha probe requires this proof after all three providers, files, Git,
+terminal, Stop, offline history and wake succeed; it verifies the installed
+candidate digest both before and after wake. It rejects `--keep` and partial
+provider coverage. The existing Dev and Local gate0 target guards are unchanged.
+
+`/v1/release-identity` reports the control plane's current `worker.sha256`.
+Matching `CLOUD_V2_RUNTIME_RELEASE_METADATA` also supplies `sourceSha`,
+`sourceSha256` and the Alpha qualification reference, with
+`workerQualified: true`. Legacy pins remain visible with null provenance and
+`workerQualified: false`. This describes the live control-plane pin, not
+whether every running VM has adopted it. Runtime publication does not stop
+user workspaces or change their visible state. Local Personal and
+organization-local workspaces do not use this authority.
+
+The release controller and dispatch workflow ship separately from this app
+support. See [Runtime release qualification](deployment-environments.md#runtime-release-qualification)
+for key provisioning, the probe entry point and controller ordering.
 
 ### Source-authority rollout
 
