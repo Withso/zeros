@@ -2,18 +2,8 @@ import { z } from "zod";
 import {
   applyConflictChoices,
   parseMergeConflicts,
-  splitReviewHunks,
-  untrackedReviewPatch,
-  reverseReviewHunkContent,
-  reviewContentRevision,
-  reviewHunkKey,
-  reviewHunkInputSchema,
-  reviewHunksInputSchema,
   resolveConflictInputSchema,
-  type ReviewHunkInput,
-  type ReviewHunksInput,
   type ResolveConflictInput,
-  type HunkReviewResult,
   type ConflictResolutionResult,
   type GitReviewOperation,
 } from "@zeros/protocol/git-review-actions";
@@ -23,12 +13,9 @@ import {
   assertGuardedWorkspaceFilePath,
 } from "../files/file-content-guard";
 import { writeWorkspaceFile } from "../files/write-file";
-import { deleteWorkspaceFileIfUnchanged } from "../files/delete-file-if-unchanged";
-import { diff, status } from "./diff";
+import { status } from "./diff";
 import { resolveRepoForGitOp } from "./worktree";
-import { inspectApplyPatchPaths } from "./stage";
 import { withWorkspaceGitMutation } from "./mutation-lock";
-import { listStoredHunkReviews, storeHunkReview } from "./hunk-review-store";
 import { assertReviewSourceWriteAllowed } from "./review-source-guard";
 import { GitError } from "./errors";
 
@@ -44,13 +31,11 @@ export interface GitReviewContext {
 }
 const invalid = (message: string) =>
   new GitError({ code: "VALIDATION_FAILED", message });
-const stale = () =>
-  invalid("The selected hunk changed. Refresh the diff before reviewing it.");
 function parse<T>(schema: z.ZodType<T>, raw: unknown): T {
   const parsed = schema.safeParse(raw);
   if (!parsed.success)
     throw invalid(
-      "Invalid Git review action. Use one live workspace-relative text hunk and its original content snapshot.",
+      "Invalid conflict resolution. Use one workspace-relative text file and its original content snapshot.",
     );
   return parsed.data;
 }
@@ -78,144 +63,6 @@ async function authorizeWrite(
   authorizePath(context, path);
   await assertReviewSourceWriteAllowed(context.cwd, path, prospectiveContent);
   await context.assertSourceWrite?.([path], "reviewing");
-}
-
-export async function listHunkReviews(
-  raw: ReviewHunksInput,
-  suppliedContext?: GitReviewContext,
-) {
-  const input = parse(reviewHunksInputSchema, raw);
-  const context = await contextFor(input.workspaceId, suppliedContext);
-  authorizePath(context, input.path);
-  return listStoredHunkReviews(context.cwd, input.path);
-}
-
-export async function reviewHunk(
-  raw: ReviewHunkInput,
-  suppliedContext?: GitReviewContext,
-): Promise<HunkReviewResult> {
-  const input = parse(reviewHunkInputSchema, raw);
-  if (input.decision === "rejected" && input.confirm !== true)
-    throw invalid(
-      "Rejecting a hunk discards those changes. Confirm the rejection first.",
-    );
-  if (splitReviewHunks(input.patch).length !== 1)
-    throw invalid(
-      "Select exactly one text hunk; renames, binary files and mode changes are not hunk review targets.",
-    );
-  const context = await contextFor(input.workspaceId, suppliedContext);
-  return withWorkspaceGitMutation(context.cwd, async () => {
-    authorizePath(context, input.path);
-    if (input.decision === "rejected")
-      await authorizeWrite(context, input.path);
-    const originalGeneration = inspectExpectedWorkspaceContent(
-      context.cwd,
-      input.path,
-      input.expectedContent,
-    );
-    const paths = await inspectApplyPatchPaths({
-      workspaceId: input.workspaceId,
-      patch: input.patch,
-    });
-    if (paths.length !== 1 || paths[0] !== input.path)
-      throw invalid("The patch must target only the selected file.");
-    const fileStatus = await status(input.workspaceId, {
-      paths: [input.path],
-      includeTracking: false,
-    });
-    if (fileStatus.conflicted.length)
-      throw invalid(
-        "Resolve this file's merge conflicts before reviewing its hunks.",
-      );
-    const query = {
-      workspaceId: input.workspaceId,
-      filePath: input.path,
-      mode: input.comparison,
-      rawPatch: true,
-      ...(input.comparison === "worktree-vs-head" ? { base: "HEAD" } : {}),
-    } as const;
-    const live = await diff(query);
-    let matches = splitReviewHunks(live.patch ?? "").some(
-      (hunk) => hunk.patch === input.patch,
-    );
-    if (
-      !matches &&
-      fileStatus.untracked.includes(input.path) &&
-      input.expectedContent !== null
-    ) {
-      matches =
-        untrackedReviewPatch(input.path, input.expectedContent) === input.patch;
-    }
-    if (!matches && live.patch) {
-      const complete = await diff({ ...query, fullContext: true });
-      matches = splitReviewHunks(complete.patch ?? "").some(
-        (hunk) => hunk.patch === input.patch,
-      );
-    }
-    if (!matches) throw stale();
-    // The exact live patch above validates this header for the chosen
-    // comparison; HEAD and the index can carry different executable modes.
-    const deletedMode =
-      input.expectedContent === null
-        ? /^deleted file mode (100644|100755)$/m.exec(input.patch)?.[1]
-        : undefined;
-    const creationMode =
-      deletedMode === "100755"
-        ? 0o755
-        : deletedMode === "100644"
-          ? 0o644
-          : undefined;
-    const reversed = reverseReviewHunkContent(
-      input.expectedContent,
-      input.patch,
-    );
-    // Every async Git/Design read completes before the final synchronous byte
-    // check and guarded filesystem mutation. App-owned writers share this lane.
-    if (input.decision === "rejected")
-      await authorizeWrite(context, input.path, reversed);
-    else authorizePath(context, input.path);
-    if (
-      inspectExpectedWorkspaceContent(
-        context.cwd,
-        input.path,
-        input.expectedContent,
-      ) !== originalGeneration
-    )
-      throw stale();
-    if (input.decision === "rejected") {
-      const result =
-        reversed === null
-          ? deleteWorkspaceFileIfUnchanged(
-              context.cwd,
-              input.path,
-              input.expectedContent!,
-              context,
-            )
-          : writeWorkspaceFile(context.cwd, input.path, reversed, {
-              ...context,
-              expectedContent: input.expectedContent,
-              creationMode,
-            });
-      if (result.kind !== "success")
-        throw invalid(
-          result.error ?? "The selected hunk could not be safely rejected.",
-        );
-    }
-    const key = reviewHunkKey(
-      input.path,
-      input.comparison,
-      input.patch,
-      reviewContentRevision(input.expectedContent),
-    );
-    const decision = storeHunkReview(context.cwd, {
-      key,
-      path: input.path,
-      comparison: input.comparison,
-      decision: input.decision,
-      updatedAt: Date.now(),
-    });
-    return { decision, fileChanged: input.decision === "rejected" };
-  });
 }
 
 export async function resolveConflict(
@@ -280,10 +127,6 @@ export function handleGitReviewOperation(
   context: GitReviewContext,
 ): Promise<unknown> {
   switch (op) {
-    case "git.reviewHunks":
-      return listHunkReviews(parse(reviewHunksInputSchema, params), context);
-    case "git.reviewHunk":
-      return reviewHunk(parse(reviewHunkInputSchema, params), context);
     case "git.resolveConflict":
       return resolveConflict(
         parse(resolveConflictInputSchema, params),

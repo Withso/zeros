@@ -410,13 +410,10 @@ export async function runCodeReviewSmoke({
 
   await open();
   await page.getByTestId("review-mode-diff").click();
-  await page.getByTestId("review-toggle-hunks").click();
-  await page.getByRole("button", { name: "Accept", exact: true }).click();
-  await expect(last()).toHaveText("accepted hunk");
-  await expect(
-    page.getByRole("button", { name: "Accepted", exact: true }),
-  ).toBeVisible();
-  check("Hunk review controls are embedded in the live diff", true);
+  await expect(page.locator("[data-gutter]").first()).toBeVisible();
+  for (const name of ["Accept", "Reject", "Accepted", "Reject hunk"])
+    await expect(page.getByRole("button", { name, exact: true })).toHaveCount(0);
+  check("The live diff carries no hunk review controls", true);
 
   await page.getByTestId("review-mode-conflict").click();
   const conflictEditor = page.locator(".cm-content[contenteditable=true]");
@@ -509,10 +506,10 @@ async function checkReviewAvailability({ page, check, harnessBase }) {
     await expect(page.locator("[data-review-selection-toolbar]")).toHaveCount(0);
   }
   await page.getByTestId("review-mode-diff").click();
-  await page.getByTestId("review-toggle-hunks").click();
-  await page.getByRole("button", { name: "Accept", exact: true }).click();
-  await expect(page.getByTestId("review-last-action")).toHaveText("accepted hunk");
-  check("Cloud Files, editor and Changes expose no comment creation while Git hunk controls still work", true);
+  await expect(page.locator("[data-gutter]").first()).toBeVisible();
+  for (const name of ["Accept", "Reject"])
+    await expect(page.getByRole("button", { name, exact: true })).toHaveCount(0);
+  check("Cloud Files, editor and Changes expose no comment creation or hunk review", true);
   for (const theme of ["dark", "light"]) {
     await page.evaluate(async theme => {
       const { setPrefs } = await import("/apps/desktop/src/renderer/shared/theme/store.ts");

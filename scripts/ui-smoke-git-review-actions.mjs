@@ -15,109 +15,22 @@ export async function runGitReviewActionsSmoke({ page, check = () => {}, harness
         window.reviewActionsFixture.requests.filter((item) => item.op === op),
       op,
     );
-  const accept = () =>
-    page.getByRole("button", { name: "Accept", exact: true });
-  const reject = () =>
-    page.getByRole("button", { name: "Reject", exact: true });
   const dialog = () => page.getByRole("dialog");
   const save = () =>
     page.getByRole("button", { name: "Save resolution", exact: true });
   const conflict = (index) => page.locator("[data-conflict-id]").nth(index);
   const preview = () => page.locator("[data-resolution-preview]").textContent();
 
-  await open("twins=1");
-  await expect.poll(() => requests("list")).toHaveLength(1);
-  await accept()
-    .first()
-    .evaluate((element) => {
-      element.click();
-      element.click();
-    });
-  await expect(
-    page.getByRole("button", { name: "Accepted", exact: true }),
-  ).toHaveCount(2);
-  expect(await requests("review")).toHaveLength(1);
-  expect(await page.evaluate(() => window.reviewActionsFixture.disk())).toBe(
-    "before\nchanged\nend\n",
-  );
-  check(
-    "Accept keeps source and shares the confirmed decision across hunk rows",
-    true,
-  );
-
   await open();
-  await reject().click();
-  await expect(dialog()).toBeVisible();
   await expect(
-    dialog().getByRole("button", { name: "Cancel", exact: true }),
-  ).toBeFocused();
-  await page.keyboard.press("Escape");
-  await expect(dialog()).toBeHidden();
-  await expect(reject()).toBeFocused();
-  expect(await requests("review")).toHaveLength(0);
-  await reject().click();
-  await dialog().getByRole("button", { name: "Cancel", exact: true }).click();
-  expect(await requests("review")).toHaveLength(0);
-  check(
-    "Reject requires confirmation; Cancel and Escape preserve source and keyboard focus",
-    true,
-  );
-
-  await reject().click();
-  await page.evaluate(() =>
-    window.reviewActionsFixture.changeDisk("concurrent editor\n"),
-  );
-  await dialog()
-    .getByRole("button", { name: "Reject hunk", exact: true })
-    .click();
-  await expect(dialog().getByRole("alert")).toContainText("file changed");
-  expect(await page.evaluate(() => window.reviewActionsFixture.disk())).toBe(
-    "concurrent editor\n",
-  );
-  expect((await requests("review"))[0].input).toMatchObject({
-    decision: "rejected",
-    confirm: true,
-    expectedContent: "before\nchanged\nend\n",
-  });
-  check(
-    "A stale confirmed Reject keeps concurrent source and displays the failure",
-    true,
-  );
-
-  await open("hold=1");
-  await accept().click();
-  await expect.poll(() => requests("review")).toHaveLength(1);
-  await page.evaluate(() => window.reviewActionsFixture.setShown(false));
-  await expect(accept()).toHaveCount(0);
-  await page.evaluate(() => window.reviewActionsFixture.release());
-  await expect
-    .poll(() =>
-      page.evaluate(() => window.reviewActionsFixture.reviewed.length),
-    )
-    .toBe(0);
-  // A later explicit mount observes the confirmed persisted decision.
-  await page.evaluate(() => window.reviewActionsFixture.setShown(true));
-  await expect(
-    page.getByRole("button", { name: "Accepted", exact: true }),
+    page.getByRole("heading", { name: "Git review actions", exact: true }),
   ).toBeVisible();
+  for (const name of ["Accept", "Reject", "Accepted", "Reject hunk"])
+    await expect(page.getByRole("button", { name, exact: true })).toHaveCount(0);
   expect(
-    await page.evaluate(() => window.reviewActionsFixture.reviewed),
-  ).toHaveLength(0);
-  check(
-    "Completion after owner unmount cannot call a stale viewer callback",
-    true,
-  );
-
-  for (const gate of ["inactive", "readonly", "design", "historical"]) {
-    await open(`${gate}=1`);
-    await expect(accept()).toHaveCount(0);
-    await expect(reject()).toHaveCount(0);
-    expect(await requests("list")).toHaveLength(0);
-  }
-  check(
-    "Historical, Design and hidden hunk surfaces expose no mutation controls or reads",
-    true,
-  );
+    await page.evaluate(() => window.reviewActionsFixture.requests),
+  ).toEqual([]);
+  check("Hunk review is gone: no Accept or Reject and no decision reads", true);
 
   await open("conflicts=1");
   const initial = await preview();

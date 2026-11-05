@@ -23,7 +23,7 @@ const CODE_REVIEW_MUTATIONS = new Set([
   "codeReview.setResolved",
 ]);
 
-const GIT_REVIEW_MUTATIONS = new Set(["git.reviewHunk", "git.resolveConflict"]);
+const GIT_REVIEW_MUTATIONS = new Set(["git.resolveConflict"]);
 
 const PROJECT_MUTATIONS = new Set([
   "project.upsert",

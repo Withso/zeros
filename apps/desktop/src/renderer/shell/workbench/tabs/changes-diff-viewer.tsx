@@ -34,11 +34,7 @@ import { FileTypeIcon } from "@/renderer/features/agent/composer-editor/file-typ
 import { useCodeTheme } from "@/renderer/shared/theme/use-code-theme";
 import { finishDiffRender } from "@/renderer/shared/theme/diff-theme";
 import { savedScrollOffset, useScrollMemory } from "../../scroll-memory";
-import {
-  loadWorkspaceFileRead,
-  useWorkspaceFileReadSnapshot,
-  type WorkspaceFileDiffQuery,
-} from "../../workspace-file-data-cache";
+import type { WorkspaceFileDiffQuery } from "../../workspace-file-data-cache";
 import type { ChangedFile } from "./changes-parse";
 import { setDiffStyle, useDiffStyle } from "./diff-style-store";
 import {
@@ -74,11 +70,6 @@ import {
   REVIEW_GUTTER_CSS,
 } from "@/renderer/features/code-review/review-pierre-options";
 import type { CodeReviewExternalSource } from "@/renderer/features/code-review/review-thread-model";
-import {
-  liveReviewHunkSource,
-  reviewComparisonForScope,
-  type ReviewLiveHunkSource,
-} from "@/renderer/features/code-review/review-hunk-model";
 import { reviewContentRevision } from "@/renderer/features/code-review/review-anchors";
 import { useOpenFileInWorkbench } from "../use-open-file";
 
@@ -98,7 +89,6 @@ interface Props {
   reviewExternal?: CodeReviewExternalSource;
   /** Only a caller displaying a confirmed published PR-head diff supplies this. */
   reviewPrRevision?: string;
-  readOnly?: boolean;
 }
 
 const initialData = new WeakMap<ChangedFile, ChangesDiffData>();
@@ -109,23 +99,6 @@ function initial(file: ChangedFile) {
     initialData.set(file, data);
   }
   return data;
-}
-
-function liveHunkSignature(
-  cwd: string,
-  query: WorkspaceFileDiffQuery,
-  file: ChangedFile,
-  refreshKey: number,
-): string {
-  return JSON.stringify([
-    cwd,
-    query.workspaceId,
-    query.diffScope,
-    file.path,
-    file.hash ?? hashString(file.patch),
-    file.status,
-    refreshKey,
-  ]);
 }
 
 /** One Pierre virtualizer owns all visible files and lines. Switching to one
@@ -145,7 +118,6 @@ export function ChangesDiffViewer({
   toolbarContainer,
   reviewExternal,
   reviewPrRevision,
-  readOnly = false,
 }: Props) {
   const view = useRef<CodeViewHandle<ReviewAnnotationPayload, undefined>>(null);
   const shown = useMemo(
@@ -171,35 +143,6 @@ export function ChangesDiffViewer({
     [ownerKey],
   );
   const [scroller, setScroller] = useState<HTMLDivElement | null>(null);
-  const [hunkSources, setHunkSources] = useState(
-    new Map<
-      string,
-      { signature: string; source: ReviewLiveHunkSource | undefined }
-    >(),
-  );
-  const publishHunkSource = useCallback(
-    (
-      file: ChangedFile,
-      signature: string,
-      source: ReviewLiveHunkSource | undefined,
-    ) => {
-      setHunkSources((old) => {
-        const existing = old.get(file.path);
-        if (
-          existing?.signature === signature &&
-          existing.source?.contentRevision === source?.contentRevision &&
-          existing.source?.patch === source?.patch
-        )
-          return old;
-        const next = new Map(old);
-        next.delete(file.path);
-        next.set(file.path, { signature, source });
-        while (next.size > 96) next.delete(next.keys().next().value!);
-        return next;
-      });
-    },
-    [],
-  );
   const [folds, setFolds] = useState({
     all: false,
     exceptions: new Set<string>(),
@@ -306,24 +249,14 @@ export function ChangesDiffViewer({
             value?.patch ||
             JSON.stringify([fileDiff?.additionLines, fileDiff?.deletionLines]),
         );
-        const live = hunkSources.get(file.path);
-        const hunkSource =
-          live?.signature ===
-          liveHunkSignature(cwd, queryForFile(file), file, refreshKey)
-            ? live.source
-            : undefined;
         const annotations = fileDiff
-          ? annotationsForDiff(
-              file.path,
-              {
-                kind: "diff",
-                path: file.path,
-                revision,
-                fileDiff,
-                confirmedRevision: reviewPrRevision,
-              },
-              hunkSource,
-            )
+          ? annotationsForDiff(file.path, {
+              kind: "diff",
+              path: file.path,
+              revision,
+              fileDiff,
+              confirmedRevision: reviewPrRevision,
+            })
           : undefined;
         const common = {
           id: file.path,
@@ -357,8 +290,6 @@ export function ChangesDiffViewer({
       annotationsForDiff,
       reviewPrRevision,
       retainedReviewItems,
-      hunkSources,
-      cwd,
       active,
     ],
   );
@@ -462,9 +393,6 @@ export function ChangesDiffViewer({
           hydrateOnMount={initial(file).message === "Loading diff…"}
           notice={entry?.value.notice}
           viewed={isFileViewed(workspaceId, file.path)}
-          patch={file.patch || entry?.value.patch || ""}
-          readOnly={readOnly || !!reviewPrRevision}
-          onHunkSource={publishHunkSource}
         />
       );
       // Viewed is external state. Reconcile the existing header portals on updates.
@@ -481,9 +409,6 @@ export function ChangesDiffViewer({
       toggle,
       publish,
       viewedVersion,
-      readOnly,
-      reviewPrRevision,
-      publishHunkSource,
     ],
   );
 
@@ -643,9 +568,6 @@ function ChangesDiffHeader({
   hydrateOnMount,
   notice,
   viewed,
-  patch,
-  readOnly,
-  onHunkSource,
 }: {
   file: ChangedFile;
   query: WorkspaceFileDiffQuery;
@@ -659,13 +581,6 @@ function ChangesDiffHeader({
   hydrateOnMount: boolean;
   notice?: string;
   viewed: boolean;
-  patch: string;
-  readOnly: boolean;
-  onHunkSource: (
-    file: ChangedFile,
-    signature: string,
-    source: ReviewLiveHunkSource | undefined,
-  ) => void;
 }) {
   const key = changesDiffDataKey(query, file, refreshKey);
   const [failure, setFailure] = useState<{ key: string; error: string | null }>(
@@ -680,67 +595,17 @@ function ChangesDiffHeader({
   const pending = pendingKey === key;
   const [copied, setCopied] = useState(false);
   const openFile = useOpenFileInWorkbench();
-  const readQuery = useMemo(() => ({ cwd, path: file.path }), [cwd, file.path]);
-  const readSnapshot = useWorkspaceFileReadSnapshot(readQuery);
-  const supportsHunks =
-    !readOnly &&
-    !file.binary &&
-    file.status !== "conflicted" &&
-    !!reviewComparisonForScope(query.diffScope);
   const managed = useWorkbenchStatusSource(
     {
       active,
-      error: error ?? (supportsHunks ? readSnapshot.error : null),
-      pending:
-        pending ||
-        (supportsHunks &&
-          !collapsed &&
-          (readSnapshot.loading || readSnapshot.refreshing)),
+      error,
+      pending,
       retry: async () => {
-        await Promise.allSettled([
-          load(),
-          ...(supportsHunks
-            ? [loadWorkspaceFileRead(readQuery, { force: true })]
-            : []),
-        ]);
+        await load().catch(() => {});
       },
     },
     key,
   );
-  useEffect(() => {
-    if (active && !collapsed && supportsHunks)
-      void loadWorkspaceFileRead(readQuery, { maxAgeMs: 15_000 }).catch(
-        () => {},
-      );
-  }, [active, collapsed, supportsHunks, readQuery, refreshKey]);
-  const hunkSource = useMemo(
-    () =>
-      supportsHunks
-        ? liveReviewHunkSource({
-            cwd,
-            path: file.path,
-            patch,
-            scope: query.diffScope,
-            read: readSnapshot.data,
-            deleted: file.status === "deleted",
-            untracked: file.status === "untracked" || file.isNewFile,
-          })
-        : undefined,
-    [
-      supportsHunks,
-      cwd,
-      file.path,
-      file.status,
-      file.isNewFile,
-      patch,
-      query.diffScope,
-      readSnapshot.data,
-    ],
-  );
-  const hunkSignature = liveHunkSignature(cwd, query, file, refreshKey);
-  useEffect(() => {
-    onHunkSource(file, hunkSignature, hunkSource);
-  }, [onHunkSource, file, hunkSignature, hunkSource]);
   const latest = useRef({ file, query, cwd, onData });
   latest.current = { file, query, cwd, onData };
   const load = useCallback(async () => {

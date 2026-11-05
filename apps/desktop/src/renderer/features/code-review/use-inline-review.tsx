@@ -21,7 +21,6 @@ import {
 } from "./review-annotations";
 import { ReviewAnnotationView } from "./review-annotation-view";
 import type { CodeReviewController } from "./use-code-review";
-import type { ReviewLiveHunkSource } from "./review-hunk-model";
 import { EMPTY_REVIEW_THREADS } from "./review-thread-model";
 import {
   canPostReviewSelection,
@@ -146,14 +145,12 @@ export function useInlineReview(
     (
       itemId: string,
       snapshot: Extract<ReviewCodeSnapshot, { kind: "diff" }>,
-      hunkSource?: ReviewLiveHunkSource,
     ) => {
       if (visibleItems.has(itemId)) snapshots.set(itemId, snapshot);
       return cache.forDiff(
         snapshot,
         threads,
         selection?.itemId === itemId ? selection : undefined,
-        hunkSource,
         active,
       );
     },

@@ -511,7 +511,6 @@ const DESIGN_OWNER_REGISTRY_CHANGE_OPS = new Set<string>([
  * identity publication. Native Code and Git remain unrestricted; qualified
  * cloud Code additionally performs its immutable authority handoff. */
 const DESIGN_RECOGNITION_PATH_OPS = new Set<string>([
-  "git.reviewHunk",
   "git.resolveConflict",
   "file.write",
   "git.stage",
@@ -562,7 +561,6 @@ function workspaceOpCanChangeDesignRecognition(
   inspectedHunkPaths: readonly string[] = [],
 ): boolean {
   if (!DESIGN_RECOGNITION_PATH_OPS.has(op)) return false;
-  if (op === "git.reviewHunk" && params.decision !== "rejected") return false;
   // `git apply` accepts traditional/quoted/binary/rename patches that cannot
   // be classified safely with a `diff --git` regex. The caller asks Git's own
   // parser first, so ordinary source hunks keep the fast path while a settings

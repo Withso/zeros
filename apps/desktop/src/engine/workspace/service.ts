@@ -546,7 +546,6 @@ function assertRemoteRepoRootAllowed(repoRoot: string, remote: boolean): void {
 const WRITE_OPS = new Set<string>([
   "mcp.saveServer",
   "mcp.deleteServer",
-  "git.reviewHunk",
   "git.resolveConflict",
   "codeReview.create",
   "codeReview.reply",
@@ -641,7 +640,6 @@ const LIFECYCLE_GATED_WORKSPACE_OPS = new Set<string>([
   "design.page.rename",
   "design.page.delete",
   "design.themes.update",
-  "git.reviewHunk",
   "git.resolveConflict",
   "design.capture",
   // Starts a capture render like design.capture; archive drains it first.
@@ -734,7 +732,6 @@ const LIFECYCLE_GATED_WORKSPACE_OPS = new Set<string>([
  * on Git's own lock files, so callers must still surface a lock conflict rather
  * than retrying through another execution backend. */
 const SERIALIZED_GIT_MUTATION_OPS = new Set<string>([
-  "git.reviewHunk",
   "git.resolveConflict",
   "design.initialize",
   "design.stage",
@@ -1151,7 +1148,6 @@ async function assertNoDesignPathWrites(
  *     its own chat list freely, matching the existing WRITE_OPS exclusion). */
 const REMOTE_READABLE = new Set<string>([
   "design.page.select",
-  "git.reviewHunks",
   "codeReview.list",
   // Workspaces + projects (repository navigation / workspace picker)
   "workspace.list",

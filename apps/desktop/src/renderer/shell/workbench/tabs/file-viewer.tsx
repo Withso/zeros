@@ -48,10 +48,6 @@ import {
   type CodeReviewController,
 } from "@/renderer/features/code-review/use-code-review";
 import type { CodeReviewExternalSource } from "@/renderer/features/code-review/review-thread-model";
-import {
-  liveReviewHunkSource,
-  type ReviewLiveHunkSource,
-} from "@/renderer/features/code-review/review-hunk-model";
 import { useWorkspaceReviewStatus } from "@/renderer/features/code-review/use-workspace-review-status";
 import { MergeConflictActions } from "@/renderer/features/code-review/merge-conflict-actions";
 import { SourceEditor } from "./code-editor/source-editor";
@@ -670,31 +666,6 @@ export function FileViewer({
   // Design paths stay refused by the engine (assertNoDesignPathWrites).
   const designReadOnly = result?.designPath === true && isCloudWorkspace(cwd);
   const sourceReadOnly = readOnly || designReadOnly;
-  const hunkSource = useMemo(
-    () =>
-      liveReviewHunkSource({
-        cwd: cwd ?? "",
-        path,
-        patch: diffPatch,
-        scope: diffScope,
-        read: diskResult,
-        deleted: fileMissing,
-        untracked: isNewFile,
-        readOnly: sourceReadOnly,
-        conflicted: isGitConflict,
-      }),
-    [
-      cwd,
-      path,
-      diffPatch,
-      diffScope,
-      diskResult,
-      fileMissing,
-      isNewFile,
-      sourceReadOnly,
-      isGitConflict,
-    ],
-  );
 
   // Mode toggle: markdown → Preview/Edit (+ Diff when a diff is available); other
   // text → Edit (+ Diff). "Diff" stays available for notInCommit so the user can
@@ -890,7 +861,6 @@ export function FileViewer({
                   scrollKey={diffScrollKey}
                   review={review}
                   active={active}
-                  hunkSource={hunkSource}
                 />
               ))}
             {previewShown && previewHtml !== null && (
@@ -1003,7 +973,6 @@ function DiffView({
   scrollKey,
   review,
   active,
-  hunkSource,
 }: {
   path: string;
   patch: string;
@@ -1011,7 +980,6 @@ function DiffView({
   scrollKey?: string;
   review: CodeReviewController;
   active: boolean;
-  hunkSource?: ReviewLiveHunkSource;
 }) {
   const [scroller, setScroller] = useState<HTMLElement | null>(null);
   useScrollMemory(scroller, scrollKey ?? null);
@@ -1023,7 +991,6 @@ function DiffView({
       review={review}
       active={active}
       onScroller={setScroller}
-      hunkSource={hunkSource}
     />
   );
 }

@@ -30,7 +30,6 @@ import { ReviewFeedback } from "./review-feedback";
 import { labelReviewGutter, REVIEW_GUTTER_CSS } from "./review-pierre-options";
 import { useInlineReview } from "./use-inline-review";
 import type { CodeReviewController } from "./use-code-review";
-import type { ReviewLiveHunkSource } from "./review-hunk-model";
 
 function diffSnapshot(
   path: string,
@@ -58,7 +57,6 @@ export function ReviewDiffView({
   diffStyle,
   confirmedRevision,
   onScroller,
-  hunkSource,
 }: {
   path: string;
   patch: string;
@@ -67,7 +65,6 @@ export function ReviewDiffView({
   diffStyle: "unified" | "split";
   confirmedRevision?: string;
   onScroller?: (element: HTMLDivElement | null) => void;
-  hunkSource?: ReviewLiveHunkSource;
 }) {
   const snapshot = useMemo(
     () => diffSnapshot(path, patch, confirmedRevision),
@@ -82,7 +79,6 @@ export function ReviewDiffView({
       active={active}
       diffStyle={diffStyle}
       onScroller={onScroller}
-      hunkSource={hunkSource}
     />
   );
 }
@@ -126,14 +122,12 @@ function ReviewedCodeView({
   active,
   diffStyle,
   onScroller,
-  hunkSource,
 }: {
   snapshot: ReviewCodeSnapshot;
   review: CodeReviewController;
   active: boolean;
   diffStyle: "unified" | "split";
   onScroller?: (element: HTMLDivElement | null) => void;
-  hunkSource?: ReviewLiveHunkSource;
 }) {
   const view = useRef<CodeViewHandle<ReviewAnnotationPayload, undefined>>(null);
   const inline = useInlineReview(review, active, snapshot.path);
@@ -157,11 +151,7 @@ function ReviewedCodeView({
   );
   const items = useMemo<CodeViewItem<ReviewAnnotationPayload>[]>(() => {
     if (snapshot.kind === "diff") {
-      const annotations = annotationsForDiff(
-        snapshot.path,
-        snapshot,
-        hunkSource,
-      );
+      const annotations = annotationsForDiff(snapshot.path, snapshot);
       return [
         retainReviewCodeViewItem(retained, {
           id: snapshot.path,
@@ -194,7 +184,6 @@ function ReviewedCodeView({
     annotationsForDiff,
     annotationsForFile,
     retained,
-    hunkSource,
     active,
   ]);
   const options = useMemo(() => {

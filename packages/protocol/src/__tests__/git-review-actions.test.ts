@@ -1,6 +1,5 @@
 import { describe, expect, it } from "vitest";
 import { parseMergeConflicts, applyConflictChoices } from "../merge-conflicts";
-import { splitReviewHunks, reverseReviewHunkContent } from "../review-hunks";
 
 describe("merge conflict previews", () => {
   const source =
@@ -73,76 +72,6 @@ describe("merge conflict previews", () => {
   it("rejects choices from another content snapshot", () => {
     expect(() =>
       applyConflictChoices(source, { "unknown-block": "both" }),
-    ).toThrow();
-  });
-});
-
-describe("exact single-hunk reversal", () => {
-  const header =
-    "diff --git a/file.txt b/file.txt\nindex 1111111..2222222 100644\n--- a/file.txt\n+++ b/file.txt\n";
-  const first = "@@ -1,2 +1,2 @@\n-old\n+new\n anchor\n";
-  const second = "@@ -10 +10 @@\n-before\n+after\n";
-  it("splits complete per-hunk patches without joining another file", () => {
-    const hunks = splitReviewHunks(header + first + second);
-    expect(hunks.map((hunk) => hunk.patch)).toEqual([
-      header + first,
-      header + second,
-    ]);
-    expect(hunks[1]).toMatchObject({
-      oldStart: 10,
-      newStart: 10,
-      oldLines: 1,
-      newLines: 1,
-    });
-    expect(splitReviewHunks(header + first + header + second)).toEqual([]);
-  });
-  it("changes only the exact hunk and refuses shifted/fuzzy matches", () => {
-    expect(
-      reverseReviewHunkContent("new\nanchor\nunrelated\n", header + first),
-    ).toBe("old\nanchor\nunrelated\n");
-    expect(() =>
-      reverseReviewHunkContent("extra\nnew\nanchor\n", header + first),
-    ).toThrow();
-    expect(() =>
-      reverseReviewHunkContent("NEW\nanchor\n", header + first),
-    ).toThrow();
-  });
-  it("restores deletions at their exact zero-line position", () => {
-    const deletion = "@@ -2 +1,0 @@\n-removed\n";
-    expect(reverseReviewHunkContent("first\nlast\n", header + deletion)).toBe(
-      "first\nremoved\nlast\n",
-    );
-  });
-  it("preserves CRLF and Git's no-final-newline marker", () => {
-    const patch =
-      "@@ -1,2 +1,2 @@\n old\r\n-before\n\\ No newline at end of file\n+after\n\\ No newline at end of file\n";
-    expect(reverseReviewHunkContent("old\r\nafter", header + patch)).toBe(
-      "old\r\nbefore",
-    );
-  });
-  it("distinguishes file deletion from an empty existing file", () => {
-    const added =
-      "diff --git a/file.txt b/file.txt\nnew file mode 100644\n--- /dev/null\n+++ b/file.txt\n@@ -0,0 +1 @@\n+new\n";
-    const removed =
-      "diff --git a/file.txt b/file.txt\ndeleted file mode 100644\n--- a/file.txt\n+++ /dev/null\n@@ -1 +0,0 @@\n-old\n";
-    expect(reverseReviewHunkContent("new\n", added)).toBeNull();
-    expect(reverseReviewHunkContent(null, removed)).toBe("old\n");
-  });
-  it("refuses binary, rename, copy, mode-only and multi-hunk mutation targets", () => {
-    expect(
-      splitReviewHunks(
-        header.replace("index", "rename from old\nindex") + first,
-      ),
-    ).toEqual([]);
-    expect(
-      splitReviewHunks(
-        header.replace("index", "old mode 100644\nnew mode 100755\nindex") +
-          first,
-      ),
-    ).toEqual([]);
-    expect(splitReviewHunks("GIT binary patch\n" + header + first)).toEqual([]);
-    expect(() =>
-      reverseReviewHunkContent("new\nanchor\n", header + first + second),
     ).toThrow();
   });
 });

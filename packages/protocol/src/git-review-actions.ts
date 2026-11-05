@@ -11,12 +11,6 @@ export type {
   MergeConflictParseResult,
   ConflictChoice,
 } from "./merge-conflicts";
-export {
-  splitReviewHunks,
-  reverseReviewHunkContent,
-  untrackedReviewPatch,
-} from "./review-hunks";
-export type { ReviewHunk } from "./review-hunks";
 
 const utf8 = new TextEncoder();
 const text = z
@@ -31,31 +25,10 @@ const workspaceId = z
   .min(1)
   .max(4096)
   .refine((value) => !/[\u0000-\u001f\u007f]/.test(value));
-export const reviewComparisonSchema = z.enum([
-  "worktree-vs-head",
-  "worktree-vs-index",
-]);
-export type ReviewComparison = z.infer<typeof reviewComparisonSchema>;
-export const reviewHunksInputSchema = z
+const reviewFileInputSchema = z
   .object({ workspaceId, path: codeReviewPathSchema })
   .strict();
-export const reviewHunkInputSchema = reviewHunksInputSchema
-  .extend({
-    comparison: reviewComparisonSchema,
-    patch: z
-      .string()
-      .min(1)
-      .max(4_000_000)
-      .refine(
-        (value) =>
-          !value.includes("\0") && utf8.encode(value).length <= 4_000_000,
-      ),
-    expectedContent: text.nullable(),
-    decision: z.enum(["accepted", "rejected"]),
-    confirm: z.boolean().optional(),
-  })
-  .strict();
-export const resolveConflictInputSchema = reviewHunksInputSchema
+export const resolveConflictInputSchema = reviewFileInputSchema
   .extend({
     expectedContent: text,
     content: text,
@@ -65,52 +38,20 @@ export const resolveConflictInputSchema = reviewHunksInputSchema
     ),
   })
   .strict();
-export const hunkReviewDecisionSchema = z
-  .object({
-    key: z.string().regex(/^[a-f0-9]{64}$/),
-    path: codeReviewPathSchema,
-    comparison: reviewComparisonSchema,
-    decision: z.enum(["accepted", "rejected"]),
-    updatedAt: z.number().int().safe().nonnegative(),
-  })
-  .strict();
-export type HunkReviewDecision = z.infer<typeof hunkReviewDecisionSchema>;
-export type ReviewHunksInput = z.infer<typeof reviewHunksInputSchema>;
-export type ReviewHunkInput = z.infer<typeof reviewHunkInputSchema>;
 export type ResolveConflictInput = z.infer<typeof resolveConflictInputSchema>;
-export interface HunkReviewResult {
-  decision: HunkReviewDecision;
-  fileChanged: boolean;
-}
 export interface ConflictResolutionResult {
   kind: "success";
   path: string;
   bytes: number;
 }
-export const GIT_REVIEW_OPERATIONS = [
-  "git.reviewHunks",
-  "git.reviewHunk",
-  "git.resolveConflict",
-] as const;
+export const GIT_REVIEW_OPERATIONS = ["git.resolveConflict"] as const;
 export type GitReviewOperation = (typeof GIT_REVIEW_OPERATIONS)[number];
 export const isGitReviewOperation = (op: string): op is GitReviewOperation =>
   (GIT_REVIEW_OPERATIONS as readonly string[]).includes(op);
 
-/** Call once per file snapshot in the renderer, then reuse for all hunk keys. */
+/** One hash per file snapshot; code review anchors and thread keys reuse it. */
 export function reviewContentRevision(content: string | null): string {
   return bytesToHex(
     sha256(utf8.encode(content === null ? "absent" : `text\0${content}`)),
-  );
-}
-export function reviewHunkKey(
-  path: string,
-  comparison: ReviewComparison,
-  patch: string,
-  contentRevision: string,
-): string {
-  return bytesToHex(
-    sha256(
-      utf8.encode(JSON.stringify([path, comparison, contentRevision, patch])),
-    ),
   );
 }

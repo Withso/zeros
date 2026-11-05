@@ -11,10 +11,6 @@ import {
   type CodeReviewAnchor,
   type CodeReviewThread,
 } from "@zeros/protocol/code-review";
-import {
-  reviewContentRevision as gitReviewContentRevision,
-  reviewHunkKey,
-} from "@zeros/protocol/git-review-actions";
 import type { GitReviewActionsClient } from "@/renderer/platform/git-review-actions";
 import { codeReviewAvailable } from "@/renderer/platform/bridge/code-review-availability";
 import { Button, TooltipProvider } from "@/renderer/shared/ui/primitives";
@@ -30,7 +26,6 @@ import type {
 } from "@/renderer/features/code-review/review-thread-model";
 import type { CodeReviewController } from "@/renderer/features/code-review/use-code-review";
 import { SourceEditor } from "@/renderer/shell/workbench/tabs/code-editor/source-editor";
-import { liveReviewHunkSource } from "@/renderer/features/code-review/review-hunk-model";
 
 const PATH = "src/cache.ts";
 const REVISION = "github:fixture-workspace:pr-7:base-1:head-1";
@@ -291,7 +286,6 @@ function Harness() {
   const [failNext, setFailNext] = useState(false);
   const [pending, setPending] = useState(0);
   const [lastAction, setLastAction] = useState("Ready");
-  const [hunks, setHunks] = useState(false);
   const [collectionCursor, setCollectionCursor] = useState<string>();
   const [pagination, setPagination] = useState(false);
   const initialHistory = useMemo(historyFixture, []);
@@ -504,26 +498,6 @@ function Harness() {
   const actionClient = useMemo<GitReviewActionsClient>(
     () => ({
       identity: "fixture-actions",
-      list: async () => ({ workspaceId: "fixture-workspace", decisions: [] }),
-      review: async (_cwd, input) => {
-        await perform();
-        setLastAction(`${input.decision} hunk`);
-        return {
-          decision: {
-            key: reviewHunkKey(
-              input.path,
-              input.comparison,
-              input.patch,
-              gitReviewContentRevision(input.expectedContent),
-            ),
-            path: input.path,
-            comparison: input.comparison,
-            decision: input.decision,
-            updatedAt: STAMP,
-          },
-          fileChanged: input.decision === "rejected",
-        };
-      },
       resolveConflict: async (_cwd, input) => {
         await perform();
         setConflictDisk(input.content);
@@ -537,17 +511,6 @@ function Harness() {
     }),
     [perform],
   );
-  const hunkSource = useMemo(() => {
-    if (!hunks || confirmed) return;
-    const live = liveReviewHunkSource({
-      cwd: "/review-fixture",
-      path: PATH,
-      patch: PATCH,
-      scope: "uncommitted",
-      read: { path: PATH, kind: "text", bytes: SOURCE.length, content: SOURCE },
-    });
-    return live && { ...live, client: actionClient };
-  }, [hunks, confirmed, actionClient]);
 
   return (
     <TooltipProvider delayDuration={300}>
@@ -618,14 +581,6 @@ function Harness() {
             }
           >
             Change PR, keep head
-          </Button>
-          <Button
-            variant="ghost"
-            data-testid="review-toggle-hunks"
-            aria-pressed={hunks}
-            onClick={() => setHunks(!hunks)}
-          >
-            Hunk actions: {hunks ? "on" : "off"}
           </Button>
         </div>
         <div className="mb-2 flex flex-wrap items-center gap-1">
@@ -785,7 +740,6 @@ function Harness() {
                 active={!hidden}
                 diffStyle={style}
                 confirmedRevision={confirmed ? publishedRevision : undefined}
-                hunkSource={hunkSource}
               />
             )}
             {mode === "conflict" && (
