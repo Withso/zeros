@@ -19,14 +19,17 @@
  * property popovers): 28px controls, 6px radii, 13px values, 12px in-field
  * labels, soft bg2 fills without resting borders, an inset focus ring. */
 
+/* --zd-field-fill is the field's current fill. Overlays on its trailing edge
+ * fade from it, so they match whichever state the field is in. */
 .zd-field {
+  --zd-field-fill: var(--bg2);
   display: flex;
   min-width: 0;
   height: 28px;
   align-items: center;
   border: 0;
   border-radius: var(--radius-md);
-  background-color: var(--bg2);
+  background-color: var(--zd-field-fill);
   color: var(--fg1);
   box-shadow: none;
   font-size: 13px;
@@ -37,19 +40,32 @@
 }
 
 .zd-field:hover {
-  background-color: var(--bg2-hover);
+  --zd-field-fill: var(--bg2-highlight);
 }
 
 /* A read-only field has nothing to edit, so the pointer changes nothing. */
 .zd-field[data-design-field-readonly]:hover {
-  background-color: var(--bg2);
+  --zd-field-fill: var(--bg2);
 }
 
-.zd-field:focus-within,
-.zd-field:focus-visible:where(:not([data-zeros-focus-visible="false"])),
+/* Editing shows the caret and the selected value, and an open menu keeps the
+ * hover fill. Only focus that keyboard navigation brought rings, as on the
+ * shared Field (focus-navigation.ts marks it). */
+.zd-field:focus-within {
+  --zd-field-fill: var(--bg2);
+  outline: 0;
+}
+
 .zd-field[data-state="open"] {
-  background-color: var(--bg2);
-  box-shadow: inset 0 0 0 1px var(--highlighted-bright);
+  --zd-field-fill: var(--bg2-highlight);
+}
+
+.zd-field:focus-visible[data-zeros-keyboard-focus],
+.zd-field:has(:focus-visible[data-zeros-keyboard-focus]) {
+  --zd-field-fill: var(--bg2);
+  box-shadow:
+    inset 0 0 0 1px var(--highlighted-bright),
+    0 0 0 3px color-mix(in srgb, var(--highlighted-bright) 50%, transparent);
   outline: 0;
 }
 
@@ -385,6 +401,31 @@
   outline-offset: -1px;
 }
 
+/* A limit's remove action and the W/H resizing menu sit over their field but
+ * outside it, so their wrapper drives the field's fill: the field stays
+ * hovered while the pointer is on the overlay, and the overlay's fade reads
+ * the same fill. */
+.zd-limit-field,
+.zd-size-control {
+  --zd-field-fill: var(--bg2);
+}
+
+.zd-limit-field:hover,
+.zd-size-control:hover,
+.zd-size-control:has(.zd-size-trigger[data-state="open"]) {
+  --zd-field-fill: var(--bg2-highlight);
+}
+
+.zd-limit-field:focus-within,
+.zd-size-control:focus-within {
+  --zd-field-fill: var(--bg2);
+}
+
+.zd-limit-field .zd-field,
+.zd-size-control .zd-field {
+  --zd-field-fill: inherit;
+}
+
 /* A sizing limit's remove action floats over its field's trailing edge on
  * intent, over a fill-coloured fade, without reserving space at rest. */
 .zd-limit-remove {
@@ -395,7 +436,7 @@
   background-image: linear-gradient(
     to right,
     transparent,
-    var(--bg2-hover) 6px
+    var(--zd-field-fill) 6px
   );
 }
 
@@ -567,7 +608,7 @@
   background-image: linear-gradient(
     to right,
     transparent,
-    var(--bg2-hover) 10px
+    var(--zd-field-fill) 10px
   );
   transition: opacity 120ms ease-out;
 }

@@ -2652,6 +2652,60 @@ export async function runDesignWorkspaceCanvasSmoke({ page, waitFor, check }) {
         .count()) === 0,
   );
 
+  // Property fields (UI components · Property field): hover fills
+  // bg2-highlight, a click edits with only the caret, and keyboard focus rings.
+  {
+    const field = page.locator("[data-design-inspector] .zd-inspector-field").first();
+    const fieldLook = () =>
+      field.evaluate((element) => {
+        const probe = document.createElement("div");
+        probe.style.background = "var(--bg2-highlight)";
+        element.parentElement.append(probe);
+        const highlight = getComputedStyle(probe).backgroundColor;
+        probe.remove();
+        const style = getComputedStyle(element);
+        return { hovered: style.backgroundColor === highlight, ring: style.boxShadow };
+      });
+    await field.hover();
+    await expect.poll(async () => (await fieldLook()).hovered).toBe(true);
+    await field.locator("input").first().click();
+    await expect.poll(async () => (await fieldLook()).ring).toBe("none");
+    await page.keyboard.press("Tab");
+    await expect
+      .poll(() =>
+        page.evaluate(() => {
+          const focused = document.activeElement?.closest(".zd-inspector-field");
+          return focused ? getComputedStyle(focused).boxShadow : "";
+        }),
+      )
+      .toContain("0px 0px 0px 3px");
+    await page.evaluate(() => document.activeElement?.blur());
+    await page.mouse.move(1, 1);
+    check("property fields hover in bg2-highlight, edit without a ring and ring on keyboard focus", true);
+
+    // The W/H resizing menu sits over its field, outside it: the pointer on
+    // the menu keeps the field hovered, so the fill does not flicker back.
+    const sized = page
+      .locator("[data-design-inspector] .zd-size-control:has(.zd-size-trigger)")
+      .first();
+    await sized.locator(".zd-size-trigger").hover();
+    await expect
+      .poll(() =>
+        sized.evaluate((control) => {
+          const probe = document.createElement("div");
+          probe.style.background = "var(--bg2-highlight)";
+          control.append(probe);
+          const highlight = getComputedStyle(probe).backgroundColor;
+          probe.remove();
+          const field = control.querySelector(".zd-field");
+          return getComputedStyle(field).backgroundColor === highlight;
+        }),
+      )
+      .toBe(true);
+    await page.mouse.move(1, 1);
+    check("a field stays hovered while the pointer is on its trailing menu", true);
+  }
+
   const themeEditorTrigger = page.getByRole("button", {
     name: "Open theme editor",
   });
@@ -2674,6 +2728,18 @@ export async function runDesignWorkspaceCanvasSmoke({ page, waitFor, check }) {
   await expect(themeDialog.locator('[data-slot="dialog-footer"]')).toHaveCount(0);
   await expect(themeDialog.getByRole("button", { name: "Done", exact: true })).toHaveCount(0);
   await expect(themeDialog.locator('[data-design-theme-row]').first()).toHaveCSS("height", "36px");
+  // The chosen source and type fill bg2-highlight, as a selected layer does.
+  expect(
+    await themeDialog.evaluate((root) => {
+      const probe = document.createElement("div");
+      probe.style.background = "var(--bg2-highlight)";
+      root.append(probe);
+      const highlight = getComputedStyle(probe).backgroundColor;
+      probe.remove();
+      const pressed = [...root.querySelectorAll('.zd-theme-filter[aria-pressed="true"]')];
+      return pressed.length > 0 && pressed.every((row) => getComputedStyle(row).backgroundColor === highlight);
+    }),
+  ).toBe(true);
   const themeClose = themeDialog.getByRole("button", { name: "Close theme editor", exact: true });
   // The shared Dialog close: the 24px compact IconButton.
   await expect(themeClose).toHaveCSS("width", "24px");

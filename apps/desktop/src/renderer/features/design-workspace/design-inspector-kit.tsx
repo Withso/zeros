@@ -189,7 +189,7 @@ export function InspectorSelect<T extends string>({
         )}
       >
         {leading ? (
-          <span className="zd-field-label w-7" aria-hidden="true">
+          <span className="zd-field-label w-6" aria-hidden="true">
             {leading}
           </span>
         ) : null}

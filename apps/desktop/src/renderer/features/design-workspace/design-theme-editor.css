@@ -101,7 +101,7 @@
 }
 
 .zd-theme-filter[aria-pressed="true"] {
-  background: var(--bg2-hover);
+  background: var(--bg2-highlight);
   color: var(--fg1);
 }
 
