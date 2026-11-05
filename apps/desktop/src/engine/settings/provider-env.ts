@@ -31,6 +31,7 @@
 import { existsSync } from "node:fs";
 import path from "node:path";
 import { opSettingsResolve } from "./ops";
+import { CODEX_AUTH_ENV } from "../agents/adapters/shared/provider-connection";
 import {
   providerCredential,
   providerAccountProfile,
@@ -181,6 +182,12 @@ export function applyUserProviderConfig(
     }
   } else if (keyVar && !env[keyVar] && credential)
     env[keyVar] = credential.apiKey;
+  // Codex's app-server ignores OPENAI_API_KEY, so only this final projection
+  // may tell its boot to log the selected key in; no other layer can set it.
+  if (agentId === "codex") {
+    if (selection.auth === "api-key") env[CODEX_AUTH_ENV] = "api-key";
+    else delete env[CODEX_AUTH_ENV];
+  }
 
   // base_url → gateway env var (claude → ANTHROPIC_BASE_URL). Fallback only:
   // skip when the caller already couriered it (couriered value wins).

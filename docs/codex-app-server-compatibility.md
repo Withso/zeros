@@ -615,6 +615,16 @@ Ordinary Codex login remains Codex-managed. In particular, the external token
 callback must not reuse the unrelated Zeros application token. Response
 validation happens before credentials or attestation are returned to Codex.
 
+The app-server ignores `OPENAI_API_KEY` (and `CODEX_API_KEY`) in its
+environment and authenticates from the login saved in `CODEX_HOME`. A Local API
+connection is therefore marked by the trusted provider projection
+(`ZEROS_CODEX_AUTH=api-key`, never forwarded to Codex). Boot then starts Codex
+with `cli_auth_credentials_store="ephemeral"` and sends `account/login/start`
+with the selected key before any thread starts. The key stays in that process:
+the device login in `CODEX_HOME` is neither read nor replaced. An API selection
+without a key stays signed out rather than using that login. RPC tracing
+redacts login and token-refresh credentials.
+
 ## Dynamic tools and canonical events
 
 The generated `ThreadStartParams` already carries experimental `dynamicTools`.
