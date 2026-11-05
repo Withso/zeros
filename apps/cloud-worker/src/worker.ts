@@ -320,6 +320,13 @@ export class CloudWorker {
       if (!this.reviews!.enabled) this.workspaceMcp.revoke();
       this.agents!.configure(config);
     }
+    if (this.disposed) return;
+    if (this.stopping) {
+      // Stop can need refreshed credentials to finish its final mirror receipt.
+      this.history!.connect();
+      this.configurationRevision = revision;
+      return;
+    }
     await this.options.transport.readyRuntime?.();
     if (this.disposed || this.stopping) return;
     this.options.runtimeResume?.ready?.();
