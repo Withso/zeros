@@ -33,6 +33,7 @@ export class AgentInteractions {
   constructor(private readonly store: SessionStore, private readonly owner: Owner) {}
 
   get blocking(): boolean { return [...this.pending.values()].some(({ value }) => value.kind === "permission" || value.request.blocking); }
+  get runtimeBusy(): boolean { return this.pending.size > 0; }
   get toolIds(): Set<string> { return new Set([...this.pending.values()].flatMap(({ value }) => value.kind === "question"
     ? [value.request.toolCallId ?? value.id, value.request.nativeRequestId] : [value.request.toolCall.toolCallId, value.request.toolCall.nativeToolCallId ?? ""])); }
 

@@ -174,6 +174,8 @@ export class CloudV2PromptOutbox {
     return withSystemTx(this.pool, async tx => {
       const workspace = await this.worker(tx, token, bootId), id = workspace.id;
       if (workspace.state !== "running") return { prompts: [], stops: [] };
+      if ((await tx.query(`SELECT 1 FROM cloud_worker_runtime_handoffs WHERE workspace_id=$1 AND state IN ('committed','activating','rolling_back')`, [id])).rowCount)
+        return { prompts: [], stops: [] };
       // The old process might have passed a request to its provider. Only an
       // explicit new send can recover it: a new boot is never a replay permit.
       await tx.query(`UPDATE cloud_v2_prompt_outbox SET state=CASE WHEN cancel_requested THEN 'cancelled' ELSE 'interrupted' END,

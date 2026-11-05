@@ -11,6 +11,9 @@ import { CloudGithubCheckoutSchema, type CloudGithubCheckout } from "./github-pr
 import type { CloudSourceContinuation, CloudSourceProof } from "./source-authority.js";
 import { cloudGithubFailure } from "./github-failure.js";
 import { CloudEnvironmentReportSchema, type CloudEnvironmentReport } from "./environment-contract.js";
+import type { RuntimeAdoption } from "./runtime-adoption.js";
+import type { RuntimeHandoffStore } from "./runtime-handoff-store.js";
+import { CloudRuntimeUpdateRequestSchema } from "./runtime-update-contract.js";
 
 export const CLOUD_V2_WORKER_API = "/v2/cloud/worker";
 type ConfigFrame = Extract<CloudV2ControlFrame, { t: "config" }>;
@@ -18,6 +21,8 @@ export type CloudV2WorkerRouteDeps = {
   store: Pick<CloudV2Store, "beginWorkerHello" | "acceptWorkerHello" | "workerSession" | "accessEpoch" | "loginRevision" | "markActive" | "writeWorkerHistory" | "failWorkerCheckout"> & Partial<Pick<CloudV2Store, "prompts" | "workerHelloIdentity">>;
   runtimeSha256: string;
   runtimeSha256ForWorkspace?(workspace: CloudV2Workspace): Promise<string>;
+  runtimeUpdates?: RuntimeAdoption;
+  runtimeHandoffs?: RuntimeHandoffStore;
   promptOutbox?: boolean;
   timing?: (record: CloudV2TimingRecord) => void;
   logger?: Pick<Console, "warn">;
@@ -46,10 +51,17 @@ async function body<T>(c: Context, schema: z.ZodType<T>): Promise<T> {
   if (!parsed.success) throw new HttpError(400, "invalid_request", "Invalid worker request");
   return parsed.data;
 }
-async function session(c: Context, deps: CloudV2WorkerRouteDeps, source = true): Promise<{ token: string; bootId: string; workspace: CloudV2WorkerSession }> {
+async function currentSession(deps: CloudV2WorkerRouteDeps, token: string, bootId: string, handoff?: string): Promise<CloudV2WorkerSession | null> {
+  if (handoff) {
+    if (!z.string().uuid().safeParse(handoff).success || !deps.runtimeUpdates) return null;
+    return deps.runtimeUpdates.session(token, bootId, handoff);
+  }
+  return deps.store.workerSession(token, bootId);
+}
+async function session(c: Context, deps: CloudV2WorkerRouteDeps, source = true, privateBoot = false): Promise<{ token: string; bootId: string; workspace: CloudV2WorkerSession }> {
   const token = bearer(c), bootId = c.req.header("x-zeros-worker-boot");
   if (!bootId || !z.string().uuid().safeParse(bootId).success) throw unauthorized();
-  const workspace = await deps.store.workerSession(token, bootId);
+  const workspace = await currentSession(deps, token, bootId, privateBoot ? c.req.header("x-zeros-runtime-handoff") : undefined);
   if (!workspace) throw unauthorized();
   // Retain Stop's final history/ack path even when source authority is lost.
   if (source && workspace.state !== "stopping") {
@@ -58,16 +70,16 @@ async function session(c: Context, deps: CloudV2WorkerRouteDeps, source = true):
   }
   return { token, bootId, workspace };
 }
-async function configuration(deps: CloudV2WorkerRouteDeps, workspace: CloudV2WorkerSession, token: string, bootId: string, features: ReadonlySet<string>, mode: "admission" | "continuation" = "admission"): Promise<ConfigFrame> {
+async function configuration(deps: CloudV2WorkerRouteDeps, workspace: CloudV2WorkerSession, token: string, bootId: string, features: ReadonlySet<string>, mode: "admission" | "continuation" = "admission", handoff?: string): Promise<ConfigFrame> {
   if (mode === "continuation" && deps.continueSource) await deps.continueSource(workspace, workspace);
   else await deps.authorizeSource?.(workspace);
   for (let attempt = 0; attempt < 8; attempt++) {
     const revision = await deps.store.loginRevision(workspace.id);
-    if (revision === null || !await deps.store.workerSession(token, bootId)) throw unauthorized();
+    if (revision === null || !await currentSession(deps, token, bootId, handoff)) throw unauthorized();
     const config = await deps.config(workspace, mode);
-    if (!await deps.store.workerSession(token, bootId)) throw unauthorized();
+    if (!await currentSession(deps, token, bootId, handoff)) throw unauthorized();
     if (revision === await deps.store.loginRevision(workspace.id)) {
-      const { mcpServers, githubPullRequests, githubUserTokens, gitIdentity, agentInteractions, codeReview, historyReplacement: _historyReplacement, environment, ...legacy } = config;
+      const { mcpServers, githubPullRequests, githubUserTokens, gitIdentity, agentInteractions, codeReview, historyReplacement: _historyReplacement, environment, runtimeUpdate: _runtimeUpdate, ...legacy } = config;
       if (environment && !features.has("workspace-environment-v1"))
         throw new HttpError(409, "cloud_environment_runtime_required", "Update the cloud runtime before opening this workspace.");
       const { setup, setupScript, baseCommit, github, ...workspaceConfig } = config.workspace;
@@ -80,6 +92,7 @@ async function configuration(deps: CloudV2WorkerRouteDeps, workspace: CloudV2Wor
         ...(features.has("checkout-v2") && baseCommit !== undefined ? { baseCommit } : {}) },
         ...(features.has("agent-interactions-v1") && agentInteractions === 1 ? { agentInteractions } : {}),
         ...(environment ? { environment } : {}),
+        ...(features.has("runtime-update-v1") && deps.runtimeUpdates ? { runtimeUpdate: 1 } : {}),
         loginRevision: revision, ...(features.has("history-replace-v1") ? { historyReplacement: 1 } : {}), ...(features.has("git-identity-v1") && gitIdentity !== undefined ? { gitIdentity } : {}),
         ...(features.has("code-review-v1") && codeReview ? { codeReview } : {}),
         ...(features.has("github-user-token-v1") && githubUserTokens === 1 ? { githubUserTokens } : {}),
@@ -102,6 +115,13 @@ export function createCloudV2WorkerRoutes(deps: CloudV2WorkerRouteDeps): Hono {
   app.post(`${CLOUD_V2_WORKER_API}/hello`, async c => {
     const input = await body(c, CloudV2WorkerHelloSchema);
     const token = bearer(c);
+    const handoff = c.req.header("x-zeros-runtime-handoff");
+    if (handoff) {
+      if (!workerFeatures(c).has("runtime-update-v1") || !z.string().uuid().safeParse(handoff).success || !deps.runtimeUpdates) throw unauthorized();
+      const identity = await deps.runtimeUpdates.session(token, input.bootId, handoff, input.runtimeSha256);
+      if (!identity) throw unauthorized();
+      return c.json({ config: await configuration(deps, identity, token, input.bootId, workerFeatures(c), "admission", handoff) });
+    }
     let runtimeSha256 = deps.runtimeSha256;
     if (deps.runtimeSha256ForWorkspace) {
       if (!deps.store.workerHelloIdentity) throw new HttpError(503, "worker_runtime_unavailable", "Worker runtime could not be verified");
@@ -109,7 +129,9 @@ export function createCloudV2WorkerRoutes(deps: CloudV2WorkerRouteDeps): Hono {
       if (!identity) throw unauthorized();
       runtimeSha256 = await deps.runtimeSha256ForWorkspace(identity);
     }
-    if (input.runtimeSha256 !== runtimeSha256) throw new HttpError(409, "worker_runtime_mismatch", "Worker runtime requires an update");
+    if (input.runtimeSha256 !== runtimeSha256 && !(workerFeatures(c).has("runtime-update-v1") && deps.runtimeHandoffs &&
+        await deps.runtimeHandoffs.runtime(token, input.bootId) === input.runtimeSha256))
+      throw new HttpError(409, "worker_runtime_mismatch", "Worker runtime requires an update");
     if (deps.promptOutbox && !(c.req.header("x-zeros-worker-features") ?? "").split(",").map(value => value.trim()).includes("prompt-outbox-v1"))
       throw new HttpError(409, "worker_runtime_mismatch", "Worker runtime requires an update");
     const workspace = await deps.store.beginWorkerHello(token, input.bootId);
@@ -119,8 +141,15 @@ export function createCloudV2WorkerRoutes(deps: CloudV2WorkerRouteDeps): Hono {
       accessEpoch: workspace.accessEpoch, loginRevision: config.loginRevision ?? workspace.loginRevision,
     });
     if (!ready) throw unauthorized();
+    if (workerFeatures(c).has("runtime-update-v1")) await deps.runtimeHandoffs?.recordRuntime(token, input.bootId, input.runtimeSha256);
     if (ready.helloTiming) emitCloudV2Timing(deps.timing, { workspaceId: ready.id.slice(0, 8), phase: "worker_hello", ...ready.helloTiming });
     return c.json({ config });
+  });
+  app.post(`${CLOUD_V2_WORKER_API}/runtime`, async c => {
+    if (!workerFeatures(c).has("runtime-update-v1") || !deps.runtimeUpdates) throw new HttpError(404, "not_found", "Runtime update is unavailable.");
+    const token = bearer(c), bootId = c.req.header("x-zeros-worker-boot");
+    if (!bootId || !z.string().uuid().safeParse(bootId).success) throw unauthorized();
+    return c.json(await deps.runtimeUpdates.request(token, bootId, await body(c, CloudRuntimeUpdateRequestSchema)));
   });
   app.post(`${CLOUD_V2_WORKER_API}/timing`, async c => {
     const auth = await session(c, deps), record = await body(c, CloudV2WorkerTimingSchema);
@@ -142,7 +171,9 @@ export function createCloudV2WorkerRoutes(deps: CloudV2WorkerRouteDeps): Hono {
     return c.json({ ok: true });
   });
   app.post(`${CLOUD_V2_WORKER_API}/environment`, async c => {
-    const auth = await session(c, deps, false), report = await body(c, CloudEnvironmentReportSchema);
+    const auth = await session(c, deps, false, true), report = await body(c, CloudEnvironmentReportSchema);
+    const handoff = c.req.header("x-zeros-runtime-handoff");
+    if (handoff && await deps.runtimeUpdates?.environment(auth.token, auth.bootId, handoff, report)) return c.json({ sequence: report.sequence });
     if (!deps.environmentReport) throw new HttpError(404, "not_found", "Environment status is unavailable.");
     await deps.environmentReport(auth.token, auth.bootId, report);
     return c.json({ sequence: report.sequence });
@@ -165,8 +196,8 @@ export function createCloudV2WorkerRoutes(deps: CloudV2WorkerRouteDeps): Hono {
     return c.json({ loginRevision: auth.workspace.loginRevision, state: auth.workspace.state });
   });
   app.get(`${CLOUD_V2_WORKER_API}/config`, async c => {
-    const auth = await session(c, deps);
-    return c.json({ config: await configuration(deps, auth.workspace, auth.token, auth.bootId, workerFeatures(c), "continuation") });
+    const auth = await session(c, deps, true, true);
+    return c.json({ config: await configuration(deps, auth.workspace, auth.token, auth.bootId, workerFeatures(c), "continuation", c.req.header("x-zeros-runtime-handoff")) });
   });
   app.post(`${CLOUD_V2_WORKER_API}/mcp/:id/authorization`, async c => {
     const auth = await session(c, deps), input = await body(c, z.object({ force: z.boolean().optional() }).strict());

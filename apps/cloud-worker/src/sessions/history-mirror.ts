@@ -36,6 +36,7 @@ export class HistoryMirror {
     this.drain();
   }
 
+  get runtimeBusy(): boolean { return !this.online || this.pending.size > 0 || !!this.sending; }
   disconnect(): void { this.online = false; this.epoch++; this.pending.clear(); clearTimeout(this.timer); this.timer = undefined; }
   async flush(): Promise<boolean> {
     do {

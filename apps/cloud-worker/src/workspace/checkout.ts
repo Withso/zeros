@@ -5,6 +5,7 @@ import { measureStartup, recordStartupTiming, type StartupTimingObserver } from 
 
 export interface CheckoutRefresh {
   readonly mayFastForward: boolean;
+  readonly runtimeBusy?: boolean;
   start(): Promise<void>;
   /** Refuse future automatic moves; join one already admitted before work starts. */
   touch(): Promise<void>;
@@ -52,6 +53,8 @@ class BackgroundRefresh implements CheckoutRefresh {
   private operation?: Promise<void>;
   private updating?: Promise<void>;
   private touched = false;
+  private running = false;
+  get runtimeBusy(): boolean { return this.running; }
 
   constructor(readonly mayFastForward: boolean, private readonly run: Git,
     private readonly branch: string, private readonly baseBranch: string, private readonly startCommit: string | undefined,
@@ -59,7 +62,9 @@ class BackgroundRefresh implements CheckoutRefresh {
 
   start(): Promise<void> {
     // Refresh failure is never a workspace/configuration failure.
-    return this.operation ??= this.refresh().catch(() => {});
+    if (this.operation) return this.operation;
+    this.running = true;
+    return this.operation = this.refresh().catch(() => {}).finally(() => { this.running = false; });
   }
 
   touch(): Promise<void> {

@@ -10,11 +10,13 @@ import { mcpFailure, mcpFailureError } from "./mcp/failure";
 import { CloudGithubUnavailableReasonSchema, type CloudGithubUnavailableReason } from "@zeros/protocol/cloud-github-connection";
 import { GITHUB_HTTP_TIMEOUT_MS } from "./credentials/github-failure";
 import { CloudEnvironmentReportSchema, type CloudEnvironmentReport } from "@zeros/protocol/cloud-v2-relay";
+import { CloudRuntimeUpdateReplySchema, type CloudRuntimeUpdateRequest, type CloudRuntimeUpdateReply } from "@zeros/protocol/cloud-v2-relay";
 
 type ConfigFrame = Extract<CloudV2ControlFrame, { t: "config" }>;
 export type HybridStatus = "connected" | "disconnected" | "credential-unavailable" | "unauthorized" | "stopped" | "protocol-error";
 interface Options {
   apiUrl: string; workspaceId: string; runtimeSha256: string; tokenFile?: string;
+  runtimeHandoff?: { id: string; bootId: string };
   publicKeys?: readonly string[]; publicKeysFile?: string; port?: number; fetch?: typeof fetch;
   retryBaseMs?: number; retryMaxMs?: number; onStatus?: (status: HybridStatus) => void;
 }
@@ -25,7 +27,8 @@ class HttpFailure extends Error {
 /** Live frames use authenticated loopback sockets. Durable control traffic
  * uses HTTPS independently, so it survives the final app disconnect. */
 export class HybridTransport implements Transport {
-  readonly bootId = randomUUID();
+  readonly bootId: string;
+  private runtimeReady = false;
   private readonly listener: InboundBridge;
   private handlers?: TransportHandlers;
   private listening = false;
@@ -58,6 +61,7 @@ export class HybridTransport implements Transport {
   private readonly reportedTimings = new Set<CloudV2WorkerTiming["phase"]>();
 
   constructor(private readonly options: Options) {
+    this.bootId = options.runtimeHandoff?.bootId ?? randomUUID();
     let url: URL;
     try { url = new URL(options.apiUrl); } catch { throw new Error("Invalid worker API URL"); }
     if ((url.protocol !== "https:" && !(url.protocol === "http:" && url.hostname === "127.0.0.1")) ||
@@ -124,6 +128,15 @@ export class HybridTransport implements Transport {
   async promptRequest(operation: PromptOperation, body: unknown, signal?: AbortSignal): Promise<unknown> {
     try { return await this.request(`prompts/${operation}`, body, signal, operation === "pull" ? 35_000 : 10_000); }
     catch (error) { if (error instanceof HttpFailure && error.status === 401) this.failed(error); throw error; }
+  }
+  async runtimeUpdate(input: CloudRuntimeUpdateRequest, signal?: AbortSignal): Promise<CloudRuntimeUpdateReply> {
+    return CloudRuntimeUpdateReplySchema.parse(await this.request("runtime", input, signal, input.op === "prepare" ? 310_000 : 10_000));
+  }
+  async readyRuntime(): Promise<void> {
+    if (!this.options.runtimeHandoff || this.runtimeReady) return;
+    const reply = await this.runtimeUpdate({ op: "ready", id: this.options.runtimeHandoff.id });
+    if (reply.status !== "completed" || reply.id !== this.options.runtimeHandoff.id) throw new Error("Runtime readiness is unsettled.");
+    this.runtimeReady = true;
   }
   async reportGithubCheckout(value: CloudGithubCheckout): Promise<void> {
     const input = CloudGithubCheckoutSchema.parse(value);
@@ -300,7 +313,8 @@ export class HybridTransport implements Transport {
         method: payload === undefined ? "GET" : "POST", headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json", "X-Zeros-Worker-Boot": this.bootId,
           // An HTTP header is ignored by older control planes; adding a JSON
           // field would break their strict hello schema before configuration.
-          "X-Zeros-Worker-Features": "prompt-outbox-v1,mcp-v1,workspace-setup-v1,checkout-v2,agent-interactions-v1,github-pr-v1,git-identity-v1,github-user-token-v1,code-review-v1,history-replace-v1,workspace-environment-v1,repository-setup-v1" },
+          "X-Zeros-Worker-Features": "prompt-outbox-v1,mcp-v1,workspace-setup-v1,checkout-v2,agent-interactions-v1,github-pr-v1,git-identity-v1,github-user-token-v1,code-review-v1,history-replace-v1,workspace-environment-v1,repository-setup-v1,runtime-update-v1",
+          ...(this.options.runtimeHandoff ? { "X-Zeros-Runtime-Handoff": this.options.runtimeHandoff.id } : {}) },
         ...(payload === undefined ? {} : { body: payload }), redirect: "error", signal: controller.signal,
       });
       if (!response.ok) {

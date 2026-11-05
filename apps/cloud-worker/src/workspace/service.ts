@@ -25,6 +25,8 @@ export interface WorkspaceServiceOptions {
   reportGithubCheckout?: ReportGithubCheckout;
   nextCheckoutSequence?: () => number;
   codeReview?: WorkerCodeReview;
+  pollingAllowed?(): boolean;
+  activity?(): void;
 }
 
 /** Native wire contract from engine/workspace/service.ts and git/types.ts,
@@ -61,7 +63,7 @@ export class WorkspaceService {
       }
       throw new WorkspaceError("GIT_STATE_CHANGED", "The checkout changed while confirming its branch.");
     }, options.reportGithubCheckout, options.nextCheckoutSequence);
-    if (options.watch !== false) this.watcher = new CheckoutWatch(scope, this.run, content => this.poll(content));
+    if (options.watch !== false) this.watcher = new CheckoutWatch(scope, this.run, content => this.poll(content), options);
   }
 
   static async open(scope: WorkspaceScope, directory: string, options: WorkspaceServiceOptions = {}): Promise<WorkspaceService> {
@@ -121,7 +123,7 @@ export class WorkspaceService {
   }
 
   async poll(content = false, options: { waitForCheckoutReport?: boolean } = {}): Promise<void> {
-    if (this.disposed) return;
+    if (this.disposed || this.options.pollingAllowed?.() === false) return;
     const [branch, head, refs] = await Promise.all([this.git.branch(), this.git.head(),
       this.run("git", ["for-each-ref", "--format=%(refname)%00%(objectname)", "refs/heads/", "refs/remotes/"], { readOnly: true }).then(result => result.stdout, () => ""),
     ]);

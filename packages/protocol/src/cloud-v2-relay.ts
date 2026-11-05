@@ -8,6 +8,7 @@
 import { z } from "zod";
 import { CloudWorkspaceEnvironmentSchema } from "./cloud-workspace-environment";
 export * from "./cloud-workspace-environment";
+export * from "./cloud-runtime-update";
 import { MAX_BRIDGE_FRAME_BYTES } from "./schemas";
 import { CloudV2PromptCounterSchema } from "./cloud-v2-prompts";
 import { RepositorySetupPathSchema } from "./repository-setup";
@@ -128,6 +129,7 @@ export const CloudV2ControlFrameSchema = z.discriminatedUnion("t", [
     t: z.literal("config"),
     environment: CloudWorkspaceEnvironmentSchema.optional(),
     promptOutbox: z.literal(1).optional(),
+    runtimeUpdate: z.literal(1).optional(),
     agentInteractions: z.literal(1).optional(),
     codeReview: z.object({
       userId: z.uuid(),

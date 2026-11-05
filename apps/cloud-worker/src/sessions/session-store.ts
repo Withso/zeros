@@ -186,6 +186,12 @@ export class SessionStore {
 
   private constructor(private readonly directory: string, readonly workspaceKey: string) {}
 
+  get runtimeBusy(): boolean {
+    return this.pending.size > 0 || this.dirty.size > 0 || this.writeFailures.size > 0 || [...this.sessions.values()].some(session =>
+      session.inbox.some(entry => entry.state === "queued" || entry.state === "running") ||
+      session.steers.some(entry => entry.outcome === "pending") || !!session.pendingInteractions?.length);
+  }
+
   static async open(directory: string, workspaceKey: string): Promise<SessionStore> {
     await mkdir(directory, { recursive: true, mode: 0o700 });
     const store = new SessionStore(directory, workspaceKey);

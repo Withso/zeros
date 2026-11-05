@@ -22,6 +22,13 @@ export class PromptInbox {
   private hinted = true;
   private task?: Promise<void>;
   private unsubscribe?: () => void;
+  private receiving = false;
+  private calls = 0;
+
+  get runtimeBusy(): boolean {
+    return this.lifetime.signal.aborted || this.receiving || this.calls > 0 || this.held.size > 0 || this.store.outboxEntries().some(({ entry }) =>
+      !terminal(entry) || entry.outbox?.reported !== entry.state);
+  }
 
   constructor(private readonly store: SessionStore, private readonly agents: Agents, private readonly request: PromptRequest) {
     agents.setOutboxDispatch(entry => this.dispatch(entry), async (chatId, throughEpoch) => {
@@ -44,6 +51,11 @@ export class PromptInbox {
   }
 
   private async call(operation: PromptOperation, body: unknown): Promise<unknown> {
+    this.calls++;
+    try { return await this.callUntilSettled(operation, body); } finally { this.calls--; }
+  }
+
+  private async callUntilSettled(operation: PromptOperation, body: unknown): Promise<unknown> {
     let attempt = 0;
     while (!this.lifetime.signal.aborted) {
       try { return await this.request(operation, body, this.lifetime.signal); }
@@ -123,6 +135,7 @@ export class PromptInbox {
         try { batch = CloudV2PromptPullReplySchema.parse(await this.request("pull", { waitMs, held: [...this.held] }, signal)); }
         catch (error) { hintAbortedPoll = controller.signal.aborted; throw error; }
         finally { this.polling = undefined; }
+        this.receiving = batch.stops.length > 0 || batch.prompts.length > 0;
         await Promise.all(batch.stops.map(async stop => {
           await this.agents.stopOutbox(stop.chatId, stop.epoch);
           await this.call("stop-ack", stop);
@@ -138,7 +151,7 @@ export class PromptInbox {
         if (hintAbortedPoll && this.hinted) continue;
         try { await delay(Math.min(5_000, 250 * 2 ** Math.min(attempt++, 5)), undefined, { signal: this.lifetime.signal, ref: false }); }
         catch { break; }
-      }
+      } finally { this.receiving = false; }
     }
   }
 }
