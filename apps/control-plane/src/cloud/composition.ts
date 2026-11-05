@@ -35,6 +35,7 @@ import { CloudEnvironments } from "./environment-store.js";
 import { RuntimeCanaryAuthority } from "./runtime-canary.js";
 import { readRuntimeCanary, workspaceRuntimeResolver } from "./runtime-canary-store.js";
 import { RuntimeHandoffStore } from "./runtime-handoff-store.js";
+import { buildDrainActive } from "./runtime-build-drain.js";
 import { RuntimeAdoption } from "./runtime-adoption.js";
 
 const PROXY_TOKEN_TTL_MS = 24 * 60 * 60_000;
@@ -108,7 +109,8 @@ export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boo
   };
   const authorizeSource = github.authorizeSource;
   const runtimeHandoffs = new RuntimeHandoffStore(pool);
-  const runtimeUpdates = new RuntimeAdoption({ handoffs: runtimeHandoffs, store, compute, runtimeForWorkspace, authorizeSource, logger: console });
+  const runtimeUpdates = new RuntimeAdoption({ handoffs: runtimeHandoffs, store, compute, runtimeForWorkspace, authorizeSource,
+    drainActive: () => buildDrainActive(pool), logger: console });
   const continueSource = github.continueSource;
   const mcp = createMcpServices(pool, config, github.connections.authorizeRepositoryConfiguration.bind(github.connections));
   const timing = (record: CloudV2TimingRecord) => console.log(`[cloud-v2] timing ${JSON.stringify(record)}`);

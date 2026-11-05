@@ -17,6 +17,32 @@ function harness(overrides: Partial<Config> = {}, ledger: Array<{ name: string; 
 }
 describe("public release readiness", () => {
 
+  it.each(["alpha", "beta", "production"] as const)("advertises build-drain v1 for a ready configured cloud service (%s)", async deploymentChannel => {
+    const { app, readLedger } = harness({ deploymentChannel, cloudV2: { runtime: { sha256: "c".repeat(64) } } as NonNullable<Config["cloudV2"]> });
+    const responses = await Promise.all([app.request("/v1/release-identity"), app.request("/v1/release-identity")]);
+    for (const response of responses) {
+      expect(response.status).toBe(200);
+      expect(await response.json()).toMatchObject({ ready: true, runtimeBuildDrainVersion: 1 });
+    }
+    expect(readLedger).toHaveBeenCalledOnce();
+  });
+
+  it.each(["disabled", "maintenance", "invalid-source", "unknown-source", "pending-migrations", "unknown-migrations"] as const)(
+    "withholds build-drain capability when readiness is %s", async state => {
+      const readLedger = vi.fn(async () => state === "pending-migrations" ? []
+        : state === "unknown-migrations" ? [{ ...manifest[0]!, checksum: null }] : manifest);
+      const app = createReleaseIdentityRoutes({ ...config, databaseMaintenanceMode: state === "maintenance",
+        cloudV2: state === "disabled" ? null : { runtime: { sha256: "c".repeat(64) } } as NonNullable<Config["cloudV2"]> }, {} as pg.Pool, {
+        sourceSha: state === "invalid-source" ? "invalid" : state === "unknown-source" ? "" : sha,
+        readManifest: async () => manifest, readLedger,
+      });
+      const response = await app.request("/v1/release-identity");
+      expect(response.status).toBe(state === "disabled" ? 200 : 503);
+      expect(await response.json()).toMatchObject({ runtimeBuildDrainVersion: null });
+      expect(readLedger).toHaveBeenCalledOnce();
+    },
+  );
+
   it.each(["alpha", "beta", "production"] as const)("advertises canary support only on a configured Alpha (%s)", async deploymentChannel => {
     const { app } = harness({ deploymentChannel, cloudV2: { runtime: { sha256: "c".repeat(64) }, runtimeCanary: {} } as NonNullable<Config["cloudV2"]> });
     expect(await (await app.request("/v1/release-identity")).json()).toMatchObject({ runtimeCanaryAdmission: deploymentChannel === "alpha" ? 1 : null });

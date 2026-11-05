@@ -15,6 +15,7 @@ import { cloudV2SandboxName, cloudV2SnapshotName } from "./resource-names.js";
 import { CloudSourceTargetSchema, type CloudSourceTarget } from "./source-authority.js";
 import { computerSourceReviewRequired, readComputerSourceTargets, type CloudV2ComputerSourceResolver } from "./computer-provenance.js";
 import { RepositorySetupPathSchema } from "./repository-setup-contract.js";
+import { buildClaimAllowed } from "./runtime-build-drain.js";
 export { cloudV2SnapshotName } from "./resource-names.js";
 
 const MAX_LOG_BYTES = 1024 * 1024;
@@ -116,6 +117,10 @@ type Resources = Row & {
   snapshot_deleted_at: Date | null; operation_until: Date | null; active: boolean; pinned: boolean;
 };
 const COLUMNS = "id, org_id, version, recipe, state, builder_sandbox_id, snapshot_id, error_code, created_by, created_at, started_at, finished_at, reason, base_snapshot, runtime_sha256";
+const CURRENT_RETRY_INTENT = `(b.retry_of IS NULL OR (
+  EXISTS(SELECT 1 FROM cloud_v2_computers c WHERE c.org_id=b.org_id
+    AND c.active_build_id=b.automatic_base_build_id AND c.recipe_revision=b.automatic_recipe_revision)
+  AND NOT EXISTS(SELECT 1 FROM cloud_v2_computer_builds newer WHERE newer.org_id=b.org_id AND newer.version>b.version)))`;
 const build = (row: Row): CloudV2Build => ({
   id: row.id, organizationId: row.org_id, version: row.version, recipe: row.recipe, state: row.state,
   builderSandboxId: row.builder_sandbox_id, snapshotId: row.snapshot_id, errorCode: row.error_code, createdBy: row.created_by,
@@ -303,15 +308,18 @@ export class CloudV2Computers {
 
   private async insertLocked(tx: Tx, organizationId: string, userId: string, recipe: CloudV2Recipe, sources: readonly CloudSourceTarget[],
     computer: { snapshot_name: string | null; recipe_revision: string } | undefined,
-    options: { reason?: CloudV2BuildReason; configure?: boolean; runtimeSha256?: string; revision?: number }): Promise<CloudV2Build> {
+    options: { reason?: CloudV2BuildReason; configure?: boolean; runtimeSha256?: string; revision?: number;
+      automaticBaseBuildId?: string; retryOf?: string; retryAttempt?: number }): Promise<CloudV2Build> {
     const revision = Number(computer?.recipe_revision ?? 0);
     if (options.revision !== undefined && options.revision !== revision) throw recipeChanged();
     const { rows } = await tx.query<Row>(
-      `INSERT INTO cloud_v2_computer_builds (id, org_id, version, recipe, state, created_by, reason, base_snapshot, runtime_sha256, source_targets, source_policy_version)
-       VALUES ($1, $2, coalesce((SELECT max(version) FROM cloud_v2_computer_builds WHERE org_id = $2), 0) + 1, $3, 'queued', $4, $5, $6, $7, $8, 2)
+      `INSERT INTO cloud_v2_computer_builds (id, org_id, version, recipe, state, created_by, reason, base_snapshot, runtime_sha256, source_targets, source_policy_version,
+         automatic_base_build_id,automatic_recipe_revision,retry_of,retry_attempt)
+       VALUES ($1, $2, coalesce((SELECT max(version) FROM cloud_v2_computer_builds WHERE org_id = $2), 0) + 1, $3, 'queued', $4, $5, $6, $7, $8, 2, $9, $10, $11, $12)
        RETURNING ${COLUMNS}`,
       [randomUUID(), organizationId, JSON.stringify(recipe), userId, options.reason ?? "manual", computer?.snapshot_name ?? null, options.runtimeSha256 ?? null,
-        JSON.stringify(readComputerSourceTargets(recipe.repositories, sources))],
+        JSON.stringify(readComputerSourceTargets(recipe.repositories, sources)), options.automaticBaseBuildId ?? null,
+        options.automaticBaseBuildId ? revision : null, options.retryOf ?? null, options.retryAttempt ?? 1],
     );
     if (options.configure) await this.writeConfigured(tx, organizationId, userId, editableRepositories(recipe), revision + 1, sources);
     return build(rows[0]!);
@@ -367,12 +375,63 @@ export class CloudV2Computers {
         await this.requireAdminInTransaction(tx, organizationId, live.created_by);
         // A runtime refresh keeps the live commits; a daily one moves to the refs' tips.
         const recipe = CloudV2RecipeSchema.parse(reason === "runtime" ? live.recipe : unpinned(live.recipe));
-        return this.insertLocked(tx, organizationId, live.created_by, recipe, sources, live, { reason, ...(runtimeSha256 ? { runtimeSha256 } : {}) });
+        return this.insertLocked(tx, organizationId, live.created_by, recipe, sources, live,
+          { reason, automaticBaseBuildId: expectedActiveBuildId, ...(runtimeSha256 ? { runtimeSha256 } : {}) });
       });
     } catch (error) {
       if (error instanceof HttpError && ([403, 404].includes(error.status) || error.code === "cloud_source_review_required")) return null;
       throw error;
     }
+  }
+
+  async retryInterrupted(runtimeSha256: string): Promise<number> {
+    const candidates = await withSystemTx(this.pool, tx => tx.query<{ id: string; org_id: string }>(`SELECT b.id,b.org_id FROM cloud_v2_computer_builds b
+      JOIN cloud_v2_computers c ON c.org_id=b.org_id AND c.active_build_id=b.automatic_base_build_id AND c.recipe_revision=b.automatic_recipe_revision
+      JOIN organizations o ON o.id=b.org_id AND NOT o.is_personal AND o.cloud_workspaces_allowed AND o.deleted_at IS NULL AND o.lifecycle_status='active'
+      JOIN organization_members m ON m.org_id=b.org_id AND m.user_id=b.created_by AND m.role IN ('owner','admin')
+      JOIN users u ON u.id=m.user_id AND u.auth_status='active' AND u.deleted_at IS NULL
+      WHERE b.state='failed' AND b.error_code='computer_build_interrupted' AND b.reason IN ('runtime','refresh') AND b.retry_attempt<3
+        AND b.runtime_sha256=$1 AND b.cleanup_requested_at IS NULL AND b.source_policy_version=2 AND b.source_targets IS NOT NULL
+        AND NOT b.builder_create_pending AND (b.builder_sandbox_id IS NULL OR b.builder_deleted_at IS NOT NULL)
+        AND (b.snapshot_id IS NULL OR b.snapshot_deleted_at IS NOT NULL) AND b.operation_until IS NULL
+        AND b.finished_at<=clock_timestamp()-CASE WHEN b.retry_attempt=1 THEN interval '1 minute' ELSE interval '5 minutes' END
+        AND NOT EXISTS(SELECT 1 FROM cloud_v2_computer_builds newer WHERE newer.org_id=b.org_id AND newer.version>b.version)
+        AND NOT EXISTS(SELECT 1 FROM cloud_v2_computer_builds child WHERE child.retry_of=b.id)
+      ORDER BY b.finished_at,b.id LIMIT 25`, [runtimeSha256]));
+    let queued = 0;
+    for (const candidate of candidates.rows) {
+      try {
+        const retry = await withSystemTx(this.pool, async tx => {
+          await this.lockOrganization(tx, candidate.org_id);
+          const row = (await tx.query<Row & { source_targets: unknown; retry_attempt: number; automatic_base_build_id: string; recipe_revision: string }>(
+            `SELECT b.*,c.recipe_revision::text FROM cloud_v2_computer_builds b JOIN cloud_v2_computers c
+              ON c.org_id=b.org_id AND c.active_build_id=b.automatic_base_build_id AND c.recipe_revision=b.automatic_recipe_revision
+            WHERE b.id=$1 AND b.state='failed' AND b.error_code='computer_build_interrupted' AND b.reason IN ('runtime','refresh')
+              AND b.retry_attempt<3 AND b.runtime_sha256=$2 AND b.cleanup_requested_at IS NULL
+              AND b.finished_at<=clock_timestamp()-CASE WHEN b.retry_attempt=1 THEN interval '1 minute' ELSE interval '5 minutes' END
+              AND b.source_policy_version=2 AND b.source_targets IS NOT NULL AND b.created_by IS NOT NULL
+              AND NOT b.builder_create_pending AND (b.builder_sandbox_id IS NULL OR b.builder_deleted_at IS NOT NULL)
+              AND (b.snapshot_id IS NULL OR b.snapshot_deleted_at IS NOT NULL) AND b.operation_until IS NULL
+              AND NOT EXISTS(SELECT 1 FROM cloud_v2_computer_builds newer WHERE newer.org_id=b.org_id AND newer.version>b.version)
+              AND NOT EXISTS(SELECT 1 FROM cloud_v2_computer_builds child WHERE child.retry_of=b.id)
+            FOR UPDATE OF b,c`, [candidate.id, runtimeSha256])).rows[0];
+          if (!row?.created_by || !row.runtime_sha256) return false;
+          await this.requireAdminInTransaction(tx, row.org_id, row.created_by);
+          const recipe = CloudV2RecipeSchema.safeParse(row.recipe);
+          if (!recipe.success) return false;
+          const sources = readComputerSourceTargets(recipe.data.repositories, row.source_targets);
+          await this.insertLocked(tx, row.org_id, row.created_by, recipe.data, sources,
+            { snapshot_name: row.base_snapshot, recipe_revision: row.recipe_revision },
+            { reason: row.reason, runtimeSha256: row.runtime_sha256, automaticBaseBuildId: row.automatic_base_build_id,
+              retryOf: row.id, retryAttempt: row.retry_attempt + 1 });
+          return true;
+        });
+        if (retry) queued++;
+      } catch (error) {
+        if (!(error instanceof HttpError && ([403, 404].includes(error.status) || error.code === "cloud_source_review_required"))) throw error;
+      }
+    }
+    return queued;
   }
 
   /** Defers the daily refresh check: a day when nothing moved, an hour when
@@ -392,9 +451,11 @@ export class CloudV2Computers {
       `SELECT * FROM (SELECT c.org_id, c.active_build_id, b.created_by, b.recipe, b.finished_at, c.refresh_next_at,
          ((b.runtime_sha256 IS DISTINCT FROM $1 OR b.source_policy_version <> 2)
            AND NOT EXISTS (SELECT 1 FROM cloud_v2_computer_builds f WHERE f.org_id = c.org_id AND f.reason = 'runtime'
-             AND f.runtime_sha256 = $1 AND f.state IN ('failed','cancelled') AND f.created_at > clock_timestamp() - interval '6 hours')
+             AND f.runtime_sha256 = $1 AND f.state IN ('failed','cancelled') AND f.created_at > clock_timestamp() - interval '6 hours'
+             AND coalesce(f.error_code,'') NOT IN ('computer_build_interrupted','computer_refresh_superseded'))
            AND (SELECT count(*) FROM cloud_v2_computer_builds f WHERE f.org_id = c.org_id AND f.reason = 'runtime'
-             AND f.runtime_sha256 = $1 AND f.state IN ('failed','cancelled')) < 3) AS runtime_stale,
+             AND f.runtime_sha256 = $1 AND f.state IN ('failed','cancelled')
+             AND coalesce(f.error_code,'') NOT IN ('computer_build_interrupted','computer_refresh_superseded')) < 3) AS runtime_stale,
          (b.finished_at < clock_timestamp() - interval '24 hours'
            AND (b.recipe->>'rebuiltFrom') IS NULL
            AND coalesce(c.refresh_next_at, '-infinity') <= clock_timestamp()
@@ -407,6 +468,11 @@ export class CloudV2Computers {
          AND NOT o.is_personal AND o.cloud_workspaces_allowed
        WHERE c.snapshot_name IS NOT NULL AND b.created_by IS NOT NULL AND b.source_targets IS NOT NULL AND b.source_policy_version=2
          AND NOT EXISTS (SELECT 1 FROM cloud_v2_computer_builds q WHERE q.org_id = c.org_id AND q.state IN ('queued','building'))
+         AND NOT EXISTS (SELECT 1 FROM cloud_v2_computer_builds f WHERE f.org_id=c.org_id AND f.version>b.version
+           AND f.state IN ('failed','cancelled') AND (f.runtime_sha256=$1 OR f.runtime_sha256 IS NULL)
+           AND f.error_code IS DISTINCT FROM 'computer_refresh_superseded'
+           AND (f.reason IN ('manual','reactivate') OR (f.error_code='computer_build_interrupted'
+             AND NOT EXISTS(SELECT 1 FROM cloud_v2_computer_builds newer WHERE newer.org_id=f.org_id AND newer.version>f.version))))
        ) due WHERE runtime_stale OR refresh_due
        ORDER BY runtime_stale DESC, coalesce(refresh_next_at, finished_at) NULLS FIRST, org_id LIMIT $2`, [runtimeSha256, limit]));
     return rows.map(row => ({ organizationId: row.org_id, activeBuildId: row.active_build_id, createdBy: row.created_by, recipe: row.recipe,
@@ -493,17 +559,30 @@ export class CloudV2Computers {
     return rows[0].log;
   }
 
-  async claim(): Promise<CloudV2Build | null> {
-    const { rows } = await withSystemTx(this.pool, async tx => {
+  async claim(runtimeSha256?: string): Promise<CloudV2Build | null> {
+    // Old claimers lock build rows before the drain; cancellation must precede it.
+    await withSystemTx(this.pool, async tx => {
       await this.cancelUnauthorizedBuilds(tx);
+      await this.cancelSupersededRetries(tx);
+    });
+    const { rows } = await withSystemTx(this.pool, async tx => {
+      if (!await buildClaimAllowed(tx)) return { rows: [] };
       return tx.query<Row>(
-      `UPDATE cloud_v2_computer_builds SET state = 'building', started_at = clock_timestamp(), heartbeat_at = clock_timestamp()
+      `UPDATE cloud_v2_computer_builds SET state = 'building', started_at = clock_timestamp(), heartbeat_at = clock_timestamp(),
+         runtime_sha256=coalesce(runtime_sha256,$1)
        WHERE id = (SELECT b.id FROM cloud_v2_computer_builds b JOIN organizations o ON o.id=b.org_id
          WHERE b.state='queued' AND b.cleanup_requested_at IS NULL AND o.deleted_at IS NULL
+           AND ${CURRENT_RETRY_INTENT}
          ORDER BY b.created_at LIMIT 1 FOR UPDATE OF b SKIP LOCKED)
-       RETURNING ${COLUMNS}`);
+       RETURNING ${COLUMNS}`, [runtimeSha256 ?? null]);
     });
     return rows[0] ? build(rows[0]) : null;
+  }
+
+  async returnUnstarted(buildId: string): Promise<void> {
+    await withSystemTx(this.pool, tx => tx.query(`UPDATE cloud_v2_computer_builds SET state='queued',started_at=NULL,heartbeat_at=NULL
+      WHERE id=$1 AND state='building' AND cleanup_requested_at IS NULL AND NOT builder_create_pending
+        AND builder_sandbox_id IS NULL AND snapshot_id IS NULL AND operation_until IS NULL`, [buildId]));
   }
 
   async heartbeat(buildId: string): Promise<void> {
@@ -513,12 +592,23 @@ export class CloudV2Computers {
 
   /** Fails builds whose server stopped beating and returns their builders. */
   async failInterrupted(): Promise<string[]> {
-    const { rows } = await withSystemTx(this.pool, tx => tx.query<{ builder_sandbox_id: string | null }>(
-      `UPDATE cloud_v2_computer_builds SET state = 'failed', error_code = 'computer_build_interrupted', finished_at = clock_timestamp(),
-         log = right(log || E'\\n[zeros] build interrupted; start it again\\n', ${MAX_LOG_BYTES})
-       WHERE state = 'building' AND coalesce(heartbeat_at, started_at) < clock_timestamp() - interval '${INTERRUPTED_AFTER}'
-       RETURNING builder_sandbox_id`));
-    return rows.flatMap(row => row.builder_sandbox_id ? [row.builder_sandbox_id] : []);
+    const { rows } = await withSystemTx(this.pool, tx => tx.query<{ id: string }>(`SELECT id FROM cloud_v2_computer_builds
+      WHERE state='building' AND coalesce(heartbeat_at,started_at)<clock_timestamp()-interval '${INTERRUPTED_AFTER}'
+      ORDER BY started_at LIMIT 50`));
+    const builders: string[] = [];
+    for (const row of rows) await this.withBuildLock(row.id, async assertHeld => {
+      await withSystemTx(this.pool, async tx => {
+        assertHeld();
+        const result = await tx.query<{ builder_sandbox_id: string | null }>(`UPDATE cloud_v2_computer_builds
+          SET state='failed',error_code='computer_build_interrupted',finished_at=clock_timestamp(),
+            log=right(log || E'\\n[zeros] build interrupted; start it again\\n', ${MAX_LOG_BYTES})
+          WHERE id=$1 AND state='building' AND coalesce(heartbeat_at,started_at)<clock_timestamp()-interval '${INTERRUPTED_AFTER}'
+          RETURNING builder_sandbox_id`, [row.id]);
+        assertHeld();
+        if (result.rows[0]?.builder_sandbox_id) builders.push(result.rows[0].builder_sandbox_id);
+      });
+    });
+    return builders;
   }
 
   async append(buildId: string, text: string): Promise<void> {
@@ -547,6 +637,7 @@ export class CloudV2Computers {
         "SELECT org_id,created_by FROM cloud_v2_computer_builds WHERE id=$1", [buildId])).rows[0];
       if (!actor?.created_by) throw new HttpError(403, "forbidden", "Build creator is unavailable");
       await this.lockOrganization(tx, actor.org_id, actor.created_by);
+      await this.cancelSupersededRetries(tx, buildId);
       const { rows } = await tx.query<{ org_id: string }>(
         `UPDATE cloud_v2_computer_builds SET state = 'succeeded', snapshot_id = $2, source_policy_version=2, finished_at = clock_timestamp()
          WHERE id = $1 AND state = 'building' AND cleanup_requested_at IS NULL AND source_targets IS NOT NULL AND source_policy_version=2
@@ -606,6 +697,7 @@ export class CloudV2Computers {
   async running(id: string): Promise<boolean> {
     const { rowCount } = await withSystemTx(this.pool, async tx => {
       await this.cancelUnauthorizedBuilds(tx, id);
+      await this.cancelSupersededRetries(tx, id);
       return tx.query(`SELECT 1 FROM cloud_v2_computer_builds b
       JOIN organizations o ON o.id=b.org_id WHERE b.id=$1 AND b.state='building'
       AND b.cleanup_requested_at IS NULL AND o.deleted_at IS NULL`, [id]);
@@ -625,15 +717,25 @@ export class CloudV2Computers {
       )`, [id ?? null]);
   }
 
+  private async cancelSupersededRetries(tx: Tx, id?: string): Promise<void> {
+    await tx.query(`UPDATE cloud_v2_computer_builds b SET state='cancelled',error_code='computer_refresh_superseded',finished_at=clock_timestamp()
+      WHERE ($1::uuid IS NULL OR b.id=$1) AND b.retry_of IS NOT NULL AND b.state IN ('queued','building')
+        AND NOT ${CURRENT_RETRY_INTENT}`, [id ?? null]);
+  }
+
   /** Persist intent BEFORE a provider call. After a lost connection, cleanup
    * waits past its maximum request duration before resolving that intent. */
   async prepareResource(id: string, snapshotName?: string): Promise<boolean> {
-    const { rowCount } = await withSystemTx(this.pool, tx => tx.query(`UPDATE cloud_v2_computer_builds b SET
+    const { rowCount } = await withSystemTx(this.pool, async tx => {
+      await this.cancelSupersededRetries(tx, id);
+      return tx.query(`UPDATE cloud_v2_computer_builds b SET
       builder_create_pending=CASE WHEN $2::text IS NULL THEN true ELSE builder_create_pending END,
       snapshot_id=coalesce($2,snapshot_id),
       operation_until=clock_timestamp()+CASE WHEN $2::text IS NULL THEN interval '5 minutes' ELSE interval '35 minutes' END
       WHERE id=$1 AND state='building' AND cleanup_requested_at IS NULL
-        AND EXISTS (SELECT 1 FROM organizations o WHERE o.id=b.org_id AND o.deleted_at IS NULL)`, [id, snapshotName ?? null]));
+        AND ${CURRENT_RETRY_INTENT}
+        AND EXISTS (SELECT 1 FROM organizations o WHERE o.id=b.org_id AND o.deleted_at IS NULL)`, [id, snapshotName ?? null]);
+    });
     return !!rowCount;
   }
 
@@ -737,6 +839,7 @@ const REASON_LABEL: Record<CloudV2BuildReason, string> = {
 export class CloudV2ComputerBuilder {
   private lastRefreshScan = Number.NEGATIVE_INFINITY;
   private refreshing: Promise<void> | null = null;
+  private closed = false;
 
   constructor(private readonly deps: {
     computers: CloudV2Computers;
@@ -757,16 +860,22 @@ export class CloudV2ComputerBuilder {
   }) {}
 
   async tick(): Promise<void> {
+    if (this.closed) return;
     const { computers } = this.deps;
     await this.cleanup();
+    if (this.closed) return;
+    await computers.retryInterrupted(this.deps.runtime.sha256);
+    if (this.closed) return;
     // GitHub reads can be slow; a scan runs beside admission, never before it.
     this.refreshing ??= this.scheduleRefreshes()
       .catch(() => this.deps.logger?.warn("[cloud-v2] Computer refresh scan will retry"))
       .finally(() => { this.refreshing = null; });
     const jobs: CloudV2Build[] = [];
     for (let index = 0; index < BUILD_CONCURRENCY; index++) {
-      const job = await computers.claim();
+      if (this.closed) break;
+      const job = await computers.claim(this.deps.runtime.sha256);
       if (!job) break;
+      if (this.closed) { await computers.returnUnstarted(job.id); break; }
       jobs.push(job);
     }
     if (!jobs.length) return;
@@ -774,9 +883,12 @@ export class CloudV2ComputerBuilder {
     await this.cleanup();
   }
 
+  close(): void { this.closed = true; }
+
   private async runLocked(job: CloudV2Build): Promise<void> {
     const { computers } = this.deps;
     await computers.withBuildLock(job.id, async assertHeld => {
+      if (this.closed) { await computers.returnUnstarted(job.id); return; }
       const beat = setInterval(() => { void computers.heartbeat(job.id).catch(() => {}); }, HEARTBEAT_MS);
       beat.unref();
       try { await this.run(job, assertHeld); }
@@ -791,11 +903,13 @@ export class CloudV2ComputerBuilder {
   /** Queues the refreshes nobody asked for: a new runtime right away, and new
    * commits once a day while the organization uses cloud workspaces. */
   async scheduleRefreshes(): Promise<void> {
+    if (this.closed) return;
     const now = this.deps.now?.() ?? Date.now();
     if (now - this.lastRefreshScan < REFRESH_SCAN_MS) return;
     this.lastRefreshScan = now;
     const { computers, runtime } = this.deps;
     for (const candidate of await computers.refreshCandidates(runtime.sha256, this.deps.refreshPage)) {
+      if (this.closed) return;
       if (candidate.runtimeStale) {
         await computers.enqueueAutomatic(candidate.organizationId, candidate.activeBuildId, "runtime", runtime.sha256);
         continue;
@@ -803,8 +917,9 @@ export class CloudV2ComputerBuilder {
       // A build an admin activated again stays at its commits until they build.
       if (!candidate.refreshDue || candidate.recipe.rebuiltFrom !== undefined) continue;
       const moved = await this.repositoriesMoved(candidate);
+      if (this.closed) return;
       if (moved !== true) { await computers.deferRefresh(candidate.organizationId, candidate.activeBuildId, moved === null ? "unknown" : "unchanged"); continue; }
-      await computers.enqueueAutomatic(candidate.organizationId, candidate.activeBuildId, "refresh");
+      await computers.enqueueAutomatic(candidate.organizationId, candidate.activeBuildId, "refresh", runtime.sha256);
     }
   }
 
@@ -888,12 +1003,17 @@ export class CloudV2ComputerBuilder {
   private async run(job: CloudV2Build, assertHeld: () => void): Promise<void> {
     const { compute, computers } = this.deps;
     // Old queued work cannot become a new trusted build during a rolling deploy.
-    await computers.buildSourceTargets(job.organizationId, job.id);
+    if (!job.createdBy) throw Object.assign(new Error("no creator"), { code: "computer_build_creator_missing" });
+    await computers.resolveSourceTargets(job.organizationId, job.createdBy, await computers.buildSourceTargets(job.organizationId, job.id));
     const log = (text: string) => computers.append(job.id, text);
     await log(`[zeros] building Cloud Computer v${job.version}${REASON_LABEL[job.reason]}\n`);
     await log("[zeros] starting from Boat's stock image\n");
     assertHeld();
     if (!await computers.prepareResource(job.id)) return;
+    if (this.closed) {
+      assertHeld(); await computers.createRefused(job.id); await computers.returnUnstarted(job.id); return;
+    }
+    assertHeld();
     const { sandboxId } = await compute.create(this.builderInput(job));
     assertHeld();
     await computers.update(job.id, { builderSandboxId: sandboxId });

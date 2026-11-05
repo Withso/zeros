@@ -70,7 +70,7 @@ export class RuntimeAdoption {
       if (h.state === "succeeded" || h.state === "rolled_back") return { status: "completed", id: h.id };
       return { status: "activating", id: h.id };
     }
-    if (await this.options.drainActive?.()) return { status: "unavailable" };
+    if (input.op !== "activate" && await this.options.drainActive?.()) return { status: "unavailable" };
     let runtime: CloudV2Runtime;
     try { await this.options.authorizeSource(workspace); runtime = await this.options.runtimeForWorkspace(workspace); }
     catch {

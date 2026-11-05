@@ -582,14 +582,41 @@ VM starts. The Dev operator probe keeps its existing target restrictions.
 
 The controller must serialize the whole release under `release-<channel>`
 and `hosted-mutation-<channel>` without cancellation. Before staging variables,
-require W's versioned persisted build-drain begin/inspect/end operations via
-the existing channel migration/database authority, in scoped transactions.
-No new HTTP endpoint or CI staff login authorizes a drain. Bind the expiring
-lease to the run, live CP SHA and prior runtime digest, require zero live or
-unresolved claims, and release it on failure. Missing drain support refuses
-pinning. Recheck the live CP SHA and prior pin immediately before the one
-redeploy of the unchanged CP commit. Stage the digest and its matching
-`CLOUD_V2_RUNTIME_RELEASE_METADATA` with Railway `skipDeploys` first.
+require the live control plane's `runtimeBuildDrainVersion: 1` capability and
+exact expected source SHA. The capability is absent or null on unsupported,
+disabled or unready services. Migration `0221_cloud_computer_build_recovery.sql`
+provides the persisted drain; a migrated database alone does not qualify the
+live control plane.
+
+The versioned operations are exported from
+`apps/control-plane/src/cloud/runtime-build-drain.ts`. Call them with a migration
+pool created by `createMigrationPool`, using the existing channel migration
+credential. Do not wrap them in `withSystemTx`, which switches to the runtime
+role. There is no HTTP drain endpoint, CI staff login, fixture-membership or
+canary-key authority. The runtime role can read whether a drain is active but
+cannot write its lease or run receipts.
+
+- `beginBuildDrain(pool, { runId, liveCpSha, priorRuntimeSha256, ttlMs })` returns
+  version 1, the exact lease, its state, `liveCount`, `unresolvedCount`,
+  `runtimeAdoptionCount` and `ready`. The TTL is 1,000–900,000 milliseconds.
+- `inspectBuildDrain(pool, lease)` returns the same status shape. Readiness
+  requires an active lease and all three counts to be zero. Existing builds
+  and committed runtime adoptions finish; the shared database guard refuses
+  new claims and handoffs, including older claim writers.
+- `endBuildDrain(pool, lease)` confirms `{ version: 1, lease, released: true }`.
+  End the lease after success and on failure. An exception or lost reply is
+  unconfirmed, not permission to proceed or release a successor's lease.
+
+The lease binds its UUID, run, exact live CP SHA, prior digest and original
+expiry. Repeating a run with identical inputs returns its original receipt,
+including after expiry or release; it never renews the lease. Changed inputs,
+unknown versions, missing state, another active run or a stale lease refuse.
+Inspect the same lease after every wait and immediately before staging variables
+and redeploying. Recheck live CP identity and the prior pin, then stage the
+digest and matching `CLOUD_V2_RUNTIME_RELEASE_METADATA` with Railway
+`skipDeploys` before one explicit redeploy of the unchanged CP commit. A
+missing capability, expired lease, nonzero count or unknown result refuses
+pinning.
 
 Always close canary admission and clean up the exact workspace before pin
 authority. A failed/ambiguous create must not later allocate after cleanup:

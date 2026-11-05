@@ -124,8 +124,7 @@ export class RuntimeHandoffStore {
         UNION ALL SELECT 1 FROM cloud_v2_workspaces WHERE id=$1 AND worker_runtime_unknown_activity
         UNION ALL SELECT 1 FROM cloud_v2_prompt_outbox WHERE workspace_id=$1 AND state IN ('queued','inboxed','dispatching','accepted')
         UNION ALL SELECT 1 FROM cloud_v2_prompt_chats WHERE workspace_id=$1 AND stop_acked_epoch<epoch LIMIT 1`, [handoff.workspace_id])).rowCount) return false;
-      await tx.query("UPDATE cloud_worker_runtime_handoffs SET state='committed',updated_at=clock_timestamp() WHERE id=$1", [id]);
-      return true;
+      return Boolean((await tx.query("UPDATE cloud_worker_runtime_handoffs SET state='committed',updated_at=clock_timestamp() WHERE id=$1", [id])).rowCount);
     });
   }
 
