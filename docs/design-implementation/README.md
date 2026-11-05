@@ -786,8 +786,11 @@ Each landed step appends one line: date, workstream, what landed, evidence.
   Evidence: `node --test apps/web/lib/*.test.mjs` 160 tests, with a builder
   test per dashboard frame state and the Ops pages' policy, hooks and
   escaping; red first for `targetName` in the deletion integration suite;
-  the deletion lifecycle integration suite (14 tests) and the shell copy
-  test against a local Postgres; both typechecks, lint, `check:ui` and
-  `check:secrets`; local renders of the 18 dashboard and 8 Ops states in both
+  the full control-plane suite against a local Postgres, database files
+  included (198 files, 2,920 tests); both typechecks, lint, `check:ui` and
+  `check:secrets`. `pnpm test:git` caught `web-shell-tokens.test.ts`, which
+  round 1 broke and which now reads the exported tokens; its other failures
+  here come from this container (the Playwright browser build, injected
+  commit signing, the proxy and Git 2.43) and touch none of these files; local renders of the 18 dashboard and 8 Ops states in both
   themes beside their frames, served under each page's real policy, plus the
   member menu, switching, focus after navigation and the phone layout.
