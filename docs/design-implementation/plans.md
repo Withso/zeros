@@ -79,9 +79,17 @@ Copy, Open and the short SHA; the merge menu says what each method does to
 the commits. Still open, each needing data the renderer doesn't have:
 Re-run failed, Required badges and the Expected group (rerun and
 branch-protection reads in the engine and control plane), a commit's check
-state and chat link, GitLab and Bitbucket (RevProviders), and RevEmpty's
-own Create pull request (it stays in the status row above) with step 7's
-narrow fold of the header.
+state and chat link, and RevEmpty's own Create pull request (it stays in the
+status row above) with step 7's narrow fold of the header.
+
+RevProviders is a layout reference, not planned work (owner, 2026-11-05):
+GitLab merge requests and Bitbucket pull requests are not being built now.
+The Review tab already reads the host label and the merge methods from
+`ReviewProvider` (`shell/pr/review-provider.ts`), whose capabilities also
+name the review noun, and `ForgeFamily` lists GitLab and Bitbucket. An
+adapter resolved from the origin host would fill the same rows; its copy
+would then read the noun ("merge request") instead of the fixed "pull
+request" wording.
 
 ## 2. Changes: one card per file
 
@@ -120,6 +128,14 @@ to assert their absence and keep its other checks (its registry entry lives
 in `scripts/ui-smoke/`, a CI-definition path, so the scenario id and export
 stay).
 
+Status (2026-11-05): landed. Diffs carry comments only, in Changes and in a
+Files tab's diff. The Accept and Reject rows, the Reject dialog, the
+renderer's hunk model, cache and hook, `git.reviewHunks` and
+`git.reviewHunk` with their decision store, and the protocol's hunk schemas
+are gone; decisions under `git.hunk-review.v1:` are no longer read. Stage,
+unstage and discard keep their own hunk operations. The rest of
+`platform/git-review-actions.ts` went with §4.
+
 ## 4. Merge conflicts in place
 
 Boards: `ChgConflicts` and the Files conflict frames. Mark each conflict in
@@ -131,6 +147,22 @@ Resolve conflicts panel, its preview strip and Save resolution go.
 Unpaired markers and read-only views show one notice and no buttons. Diff
 view waits while conflicts remain.
 
+Status (2026-11-05): landed. The Files editor marks each block in its rows
+and gutter with the three accept buttons above it
+(`code-editor/merge-conflict-blocks.ts`); an accept is one ordinary
+transaction, so ⌘Z undoes it and autosave and ⌘S save it. A Changes card
+draws the same rows in Pierre (`merge-conflict-pierre.tsx`) and writes an
+accept through the ordinary file write, only over the text it shows; a file
+that changed since refreshes instead (`changes-conflict-accept.ts`). Both
+carry the navigator; a read-only view marks the blocks and points to the
+editable file. Diff view waits while Git lists the file as conflicted, not
+while markers remain, so the last accept never swaps editors and drops its
+undo history. The Resolve conflicts panel, `platform/git-review-actions.ts`
+and the `git.resolveConflict` operation are gone; `conflictReplacement` in
+`@zeros/protocol/merge-conflicts` keeps CRLF and a missing final newline
+exact. The conflict colours are tokens (`conflict-*`, and the solid
+`green`, `blue` and `neutral` `-secondary` fills).
+
 ## 5. Diff rows: signs, bar and new files
 
 Boards: `FilesDiffView`, `ChgDiffUnified`. Inside Pierre's shadow DOM: a 2px
@@ -141,12 +173,27 @@ visual line. These are CSS on `[data-column-number]` and the line rows plus
 a host attribute for new files; verify against both themes and the
 text-selection smoke.
 
+Status (2026-11-05): landed in Changes and the Files Diff view. The + or −
+sits in the number's right padding, on a wrapped row's first visual line,
+and a comment chip takes that corner on the row it shows on. The change bar
+is a solid 2px. A new or untracked file keeps its bars and + without the row
+or gutter wash (Changes keys on Pierre's `data-change-type="new"` header; the
+Files Diff view applies it when its base is empty). The caret line lifts by
+fg1 5% over any row colour, and turning Diff view on or off moves no text.
+
 ## 6. Comment authors
 
 Board: `ChgThread`. Agents get their mark (Claude, Codex, Cursor) on a
 rounded square with an Agent badge; GitHub authors show their avatar, review
 apps their logo with a Bot badge; initials until an image loads. The thread
 model needs the avatar URL and the agent provider for each comment.
+
+Status (2026-11-05): landed on Changes and Files diffs. People show a round
+photo or initials; agents their bundled mark with an Agent badge; review
+apps their logo with a Bot badge; the provider suffix and the Human label are
+gone. GitHub comments keep the avatar the engine and the control plane
+already sanitise (`gh.prInlineReview`), so Local and cloud threads both show
+photos; the wire actor schema is unchanged.
 
 ## 7. Design: inspector and layers
 
@@ -168,9 +215,20 @@ audit): field states and the overlays on a field's end, owned and hidden
 layer rows, the Layers messages and inline rename, the Inspector's header, section and segmented geometry, the
 popover sizes and fills, and the theme editor's rail, table and modes. A
 field's fill lives in `--zd-field-fill`, which its overlays read, and a
-property popover raises the resting fill through `--zd-field-rest`. Still
-open: the variable glyph and Detach variable in a bound field, the layer name
-in the selection header, and the theme editor's row actions.
+property popover raises the resting fill through `--zd-field-rest`.
+
+The last three landed after them. A field bound to a variable shows the
+variable glyph, and Detach variable writes the value it resolves to as a
+plain value (colour fields and number fields alike). The selection header
+names the layer or frame, with its type beside it only when the two differ;
+the selection smokes read `data-design-selection-type` instead of its text.
+Each theme row has a ⋯ with Rename… and Delete. Rename moves a variable's
+`:root` and theme declarations to the new name; it waits while anything
+reads the variable or an `@property` rule registers it, because no operation
+rewrites the `var()` references yet, and the menu says which; a taken or
+invalid name is refused with its reason. Delete removes the declarations,
+asking first, in a small dialog, when something reads the variable; the
+editor window itself stays non-modal.
 
 ## 8. Web app: the dashboard, account pages and Ops
 

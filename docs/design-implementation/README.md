@@ -838,3 +838,26 @@ Each landed step appends one line: date, workstream, what landed, evidence.
   `node --test apps/web/lib/*.test.mjs` 165 tests; the control plane's
   shell-copy test; renders of both loading states and the dashboard's beside
   their frames, in both themes.
+- 2026-11-05 · 5 · Changes, Files and Design (plans.md §3 to §7): hunk
+  review is gone, code included (`git.reviewHunks`, `git.reviewHunk`, their
+  decision store and schemas). Diff rows draw their + or − in the number's
+  padding with a solid 2px bar, a new file keeps its bars without the row
+  wash, and the caret line lifts by fg1 5%. Comment authors show a photo or
+  initials, an agent's mark with an Agent badge, or a review app's logo with
+  a Bot badge, in Local and cloud threads. Merge conflicts resolve in place:
+  three accept buttons above each block, one undoable edit per accept, a
+  navigator beside the file name, a Changes card that accepts only over the
+  exact text it shows, and Diff view waiting while Git lists the file as
+  conflicted; the Resolve panel and `git.resolveConflict` are gone. In
+  Design, a bound field shows the variable glyph and Detach variable, the
+  selection header names the layer, and each theme row has Rename… and
+  Delete with the reason when one waits. RevProviders is now a Reference:
+  GitLab and Bitbucket are not built now (owner). Canvas version 373: 22
+  Planned badges off, the frames corrected where the code differs, and
+  ThemeEditor's Row actions section; another writer's composer changes were
+  synced first and kept. Evidence: every registered Design smoke scenario
+  (27, 1,062 checks) and the style-refinements scenario again on the final
+  code; the conflict, editor-history, protocol and Changes-accept suites;
+  the Design workspace test folder (99 files) with the browser path set;
+  typecheck, lint (one earlier warning), check:ui, check:secrets and
+  check:protocol; plain local renders of every changed frame in both themes.
