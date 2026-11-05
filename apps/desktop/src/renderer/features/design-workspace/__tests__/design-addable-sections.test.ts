@@ -18,7 +18,7 @@ const section = (props: { empty: boolean; addable?: boolean }) =>
 
 const inProvider = (child: ReturnType<typeof section>) =>
   renderToStaticMarkup(
-    createElement(DesignAddableSections, { selectionKey: "home-heading" }, child),
+    createElement(DesignAddableSections, { selectionKey: "home-heading", children: child }),
   );
 
 // Regression: an unstyled frame showed six empty section headers (Stroke,
